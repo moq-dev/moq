@@ -3,12 +3,27 @@ import { Time } from "@moq/net";
 
 export type { BufferedRange, BufferedRanges, Frame } from "./types";
 
+import type { AudioConfig, VideoConfig } from "../catalog";
 import type { Format as ContainerFormat } from "./format";
 import type { Recorder as TimelineRecorder } from "./timeline";
 import type { Frame } from "./types";
 
 /** The legacy hang container: a microsecond timestamp varint followed by the raw codec payload. */
 export class Format implements ContainerFormat {
+	/** Configure the format for the track's media kind. */
+	readonly kind: "audio" | "video" | "data";
+
+	/** Configure the format from a catalog entry or an explicit media kind. */
+	constructor(config: AudioConfig | VideoConfig | "audio" | "video" | "data") {
+		this.kind = typeof config === "string" ? config : "sampleRate" in config ? "audio" : "video";
+	}
+
+	/** Write the final video frame's end timestamp before the group closes. */
+	finishGroup(group: Moq.Group.Producer, end?: Time.Micro) {
+		if (this.kind !== "video" || end === undefined) return;
+		group.writeFrame({ payload: encodeFrame(new Uint8Array(), end), timestamp: Time.Timestamp.fromMicros(end) });
+	}
+
 	/** Return the exclusive end of the previous frame for an empty codec payload. */
 	end(frame: Frame): Time.Micro | undefined {
 		return frame.payload.byteLength === 0 ? frame.timestamp : undefined;
@@ -57,6 +72,8 @@ export interface ProducerProps {
 /** Writes legacy-container frames into a MoQ track, starting a new group on each keyframe. */
 export class Producer {
 	#track: Moq.Track.Producer;
+	#format: Format;
+	#previous?: Time.Micro;
 	#group?: Moq.Group.Producer;
 	#timeline?: TimelineRecorder;
 	// The newest timestamp written, reported to the timeline when the track closes: the last
@@ -66,7 +83,8 @@ export class Producer {
 	#interval?: Time.Micro;
 
 	/** Wrap a track to publish legacy-container frames into it. */
-	constructor(track: Moq.Track.Producer, props: ProducerProps = {}) {
+	constructor(track: Moq.Track.Producer, format: Format, props: ProducerProps = {}) {
+		this.#format = format;
 		this.#track = track;
 		this.#timeline = props.timeline;
 	}
@@ -74,8 +92,7 @@ export class Producer {
 	/** Encode and append a frame; a keyframe starts a new group. Throws if the first frame is not a keyframe. */
 	encode(data: Uint8Array | Source, timestamp: Time.Micro, keyframe: boolean) {
 		if (keyframe) {
-			this.#writeDurationMarker(timestamp);
-			this.#group?.close();
+			this.cut(timestamp);
 			this.#group = this.#track.appendGroup();
 			// Report the group the moment it opens: its start is this keyframe's timestamp.
 			this.#timeline?.record(this.#group.sequence, timestamp, true);
@@ -88,29 +105,34 @@ export class Producer {
 			timestamp: Time.Timestamp.fromMicros(timestamp),
 		});
 
-		if (this.#end !== undefined && timestamp > this.#end) {
-			this.#interval = (timestamp - this.#end) as Time.Micro;
+		if (this.#previous !== undefined && timestamp > this.#previous) {
+			const delta = (timestamp - this.#previous) as Time.Micro;
+			this.#interval = this.#interval === undefined ? delta : (Math.min(this.#interval, delta) as Time.Micro);
 		}
+		this.#previous = timestamp;
 		if (this.#end === undefined || timestamp > this.#end) this.#end = timestamp;
 	}
 
-	#writeDurationMarker(timestamp: Time.Micro) {
+	/** Flush and close the current group at the supplied or estimated end timestamp. */
+	cut(end?: Time.Micro) {
 		if (!this.#group) return;
-		this.#group.writeFrame({
-			payload: encodeFrame(new Uint8Array(), timestamp),
-			timestamp: Time.Timestamp.fromMicros(timestamp),
-		});
-		this.#timeline?.end(timestamp);
+		end ??=
+			this.#end !== undefined && this.#interval !== undefined
+				? ((this.#end + this.#interval) as Time.Micro)
+				: undefined;
+		this.#format.finishGroup(this.#group, end);
+		const bound = end ?? this.#end;
+		if (bound !== undefined) this.#timeline?.end(bound);
+		this.#group.close();
+		this.#group = undefined;
+		this.#end = undefined;
+		this.#previous = undefined;
 	}
 
 	/** Close the track and current group, optionally with an error. */
 	close(err?: Error) {
-		if (this.#end !== undefined && this.#interval !== undefined) {
-			this.#writeDurationMarker((this.#end + this.#interval) as Time.Micro);
-		} else if (this.#end !== undefined) {
-			this.#timeline?.end(this.#end);
-		}
+		if (!err) this.cut();
+		this.#group?.close(err);
 		this.#track.close(err);
-		this.#group?.close();
 	}
 }

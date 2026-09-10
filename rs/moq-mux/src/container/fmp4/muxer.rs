@@ -62,7 +62,7 @@ pub struct Muxer {
 impl Muxer {
 	/// A muxer for a video rendition described by `config`.
 	pub fn video(config: &VideoConfig) -> crate::Result<Self> {
-		let container = (&config.container).try_into()?;
+		let container = config.try_into()?;
 		let framerate = super::usable_video_framerate(config).unwrap_or(30.0);
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 		let mut config = config.clone();
@@ -85,7 +85,7 @@ impl Muxer {
 
 	/// A muxer for an audio rendition described by `config`.
 	pub fn audio(config: &AudioConfig) -> crate::Result<Self> {
-		let container = (&config.container).try_into()?;
+		let container = config.try_into()?;
 		Ok(Self {
 			container,
 			transform: None,
@@ -146,8 +146,10 @@ impl Muxer {
 		while let Some(frames) = self.container.read(group).await? {
 			for frame in frames {
 				if let Some(bound) = self.container.end(&frame) {
-					if let Some(last) = out.last_mut() {
-						crate::container::close_duration(last, bound);
+					if let Some(last) = out.last_mut()
+						&& last.duration.is_none()
+					{
+						last.duration = super::export::timestamp_gap(last.timestamp, bound, self.timescale)?;
 					}
 					continue;
 				}
@@ -299,6 +301,10 @@ impl Muxer {
 			track_id: TRACK_ID,
 			timescale: self.timescale,
 			sequence_number: sequence,
+			kind: match self.kind {
+				Kind::Audio(_) => super::Kind::Audio,
+				Kind::Video(_) => super::Kind::Video,
+			},
 		}
 	}
 }
@@ -327,7 +333,7 @@ mod tests {
 			.create_track("v", None)
 			.unwrap();
 		let mut subscriber = track.subscribe(None).ordered();
-		let mut producer = crate::container::Producer::new(track, HangContainer::Legacy);
+		let mut producer = crate::container::Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 		producer.write(frame(10_000_000, true)).unwrap();
 		producer.write(frame(10_033_000, false)).unwrap();
 		producer.finish().unwrap();
@@ -348,7 +354,7 @@ mod tests {
 
 		// Decode it back: timestamps survive at the muxer's timescale (framerate * 1000).
 		let timescale = moq_net::Timescale::new(30_000).unwrap();
-		let decoded = super::super::decode(fragment, timescale).unwrap();
+		let decoded = super::super::decode(fragment, timescale, crate::container::fmp4::Kind::Video).unwrap();
 		assert_eq!(decoded.len(), 2);
 		assert_eq!(decoded[0].timestamp.as_micros(), 10_000_000);
 		assert!(decoded[0].keyframe);
@@ -364,7 +370,7 @@ mod tests {
 			.create_track("v", None)
 			.unwrap();
 		let mut subscriber = track.subscribe(None).ordered();
-		let mut producer = crate::container::Producer::new(track, HangContainer::Legacy).with_duration_marker();
+		let mut producer = crate::container::Producer::new(track, HangContainer::Legacy(crate::container::Kind::Video));
 		producer.write(frame(10_000_000, true)).unwrap();
 		producer.write(frame(10_033_000, false)).unwrap();
 		producer.cut(Some(Timestamp::from_micros(10_066_000).unwrap())).unwrap();
@@ -374,7 +380,7 @@ mod tests {
 		let mut muxer = video_muxer();
 		let frames = muxer.read(&mut group).await.unwrap();
 		assert_eq!(frames.len(), 2, "the marker is not a sample");
-		assert_eq!(frames[1].duration, Some(Timestamp::from_micros(33_000).unwrap()));
+		assert_eq!(frames[1].duration.unwrap().as_micros(), 33_000);
 
 		let fragment = muxer.fragment(0, &frames).unwrap();
 		assert_eq!(super::super::sample_durations(&fragment), vec![Some(990), Some(990)]);
@@ -387,7 +393,7 @@ mod tests {
 			.create_track("v", None)
 			.unwrap();
 		let mut subscriber = track.subscribe(None).ordered();
-		let mut producer = crate::container::Producer::new(track, HangContainer::Legacy);
+		let mut producer = crate::container::Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 		producer
 			.write(Frame {
 				timestamp: Timestamp::ZERO,
@@ -536,7 +542,12 @@ mod tests {
 			keyframe: true,
 			duration: None,
 		};
-		let decoded = super::super::decode(muxer.fragment(0, &[frame]).unwrap(), timescale).unwrap();
+		let decoded = super::super::decode(
+			muxer.fragment(0, &[frame]).unwrap(),
+			timescale,
+			crate::container::fmp4::Kind::Video,
+		)
+		.unwrap();
 		assert_eq!(decoded[0].duration.unwrap().as_scale(timescale), 3_000);
 	}
 
@@ -561,7 +572,12 @@ mod tests {
 			keyframe: true,
 			duration: Some(Timestamp::from_scale(3_000, 90_000).unwrap()),
 		};
-		let decoded = super::super::decode(muxer.fragment(0, &[frame]).unwrap(), timescale).unwrap();
+		let decoded = super::super::decode(
+			muxer.fragment(0, &[frame]).unwrap(),
+			timescale,
+			crate::container::fmp4::Kind::Video,
+		)
+		.unwrap();
 		assert_eq!(decoded[0].timestamp.as_micros(), 33_333);
 	}
 
@@ -576,7 +592,12 @@ mod tests {
 			duration: None,
 		};
 
-		let decoded = super::super::decode(muxer.fragment(0, &[frame]).unwrap(), timescale).unwrap();
+		let decoded = super::super::decode(
+			muxer.fragment(0, &[frame]).unwrap(),
+			timescale,
+			crate::container::fmp4::Kind::Video,
+		)
+		.unwrap();
 		assert_eq!(decoded[0].duration.unwrap().as_scale(timescale), 3_000);
 	}
 
@@ -659,7 +680,7 @@ mod tests {
 		let fragment = muxer.fragment(0, &frames).unwrap();
 
 		let timescale = moq_net::Timescale::new(48_000).unwrap();
-		let decoded = super::super::decode(fragment, timescale).unwrap();
+		let decoded = super::super::decode(fragment, timescale, crate::container::fmp4::Kind::Video).unwrap();
 		assert_eq!(decoded.len(), 4);
 		for f in &decoded {
 			assert_eq!(
@@ -693,7 +714,7 @@ mod tests {
 		let fragment = muxer.fragment(0, &frames).unwrap();
 
 		let timescale = moq_net::Timescale::new(48_000).unwrap();
-		let decoded = super::super::decode(fragment, timescale).unwrap();
+		let decoded = super::super::decode(fragment, timescale, crate::container::fmp4::Kind::Video).unwrap();
 		let first = decoded[0].duration.unwrap().as_micros();
 		assert_eq!(first, 20_000, "the pause is a discontinuity, not a 2405 second sample");
 	}

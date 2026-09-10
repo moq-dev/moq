@@ -302,7 +302,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// Build the media producer before publishing the rendition. It is fallible (its
 		// timeline track can collide), and a rendition published for a track we then fail
 		// to produce would be advertised to consumers but never served.
-		let wire = crate::catalog::hang::Container::try_from(&self.container)?;
+		let wire = crate::catalog::hang::Container::new(
+			&self.container,
+			match kind {
+				TrackKind::Video => crate::container::Kind::Video,
+				TrackKind::Audio => crate::container::Kind::Audio,
+			},
+		)?;
 		let media = self.catalog.media_producer(track, wire)?;
 
 		let mut catalog = self.catalog.clone();

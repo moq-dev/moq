@@ -962,7 +962,10 @@ fn register_verbatim<E: catalog::Catalog>(
 	// timeline track can collide), and the `VerbatimEntry` that removes this catalog
 	// entry on drop only exists once this function returns successfully, so an entry
 	// published first would be stranded.
-	let media = catalog.media_producer(track, crate::catalog::hang::Container::Legacy)?;
+	let media = catalog.media_producer(
+		track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	)?;
 
 	let mut guard = catalog.lock();
 	let Some(mpegts) = guard.mpegts_mut() else {
@@ -3066,7 +3069,7 @@ mod test {
 			.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
 			.await
 			.unwrap();
-		let mut reader = Consumer::new(track, Container::Legacy);
+		let mut reader = Consumer::new(track, Container::Legacy(crate::container::Kind::Data));
 		let frame = tokio::time::timeout(Duration::from_secs(1), reader.read())
 			.await
 			.expect("cue read timed out")
@@ -3468,7 +3471,10 @@ mod test {
 			.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
 			.await
 			.unwrap();
-		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
+		let mut reader = crate::container::Consumer::new(
+			track,
+			crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+		);
 		let mut frames = Vec::new();
 		while let Ok(Ok(Some(frame))) = tokio::time::timeout(Duration::from_millis(50), reader.read()).await {
 			frames.push(frame);
@@ -3550,7 +3556,10 @@ mod test {
 			.expect("a video track")
 			.clone();
 		let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
-		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
+		let mut reader = crate::container::Consumer::new(
+			track,
+			crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+		);
 		let mut frames = Vec::new();
 		while let Ok(Ok(Some(frame))) = tokio::time::timeout(Duration::from_millis(50), reader.read()).await {
 			frames.push(frame);
@@ -4329,7 +4338,10 @@ mod test {
 			.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
 			.await
 			.unwrap();
-		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
+		let mut reader = crate::container::Consumer::new(
+			track,
+			crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+		);
 		let published = tokio::time::timeout(Duration::from_millis(50), reader.read()).await;
 		assert!(
 			matches!(published, Ok(Ok(Some(_)))),
@@ -4589,7 +4601,7 @@ mod test {
 			.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
 			.await
 			.unwrap();
-		let mut reader = Consumer::new(track, Container::Legacy);
+		let mut reader = Consumer::new(track, Container::Legacy(crate::container::Kind::Data));
 		let frame = tokio::time::timeout(Duration::from_secs(1), reader.read())
 			.await
 			.expect("cue read timed out")
@@ -4763,7 +4775,7 @@ mod test {
 			.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
 			.await
 			.unwrap();
-		let mut reader = Consumer::new(track, Container::Legacy);
+		let mut reader = Consumer::new(track, Container::Legacy(crate::container::Kind::Data));
 		let frame = tokio::time::timeout(Duration::from_secs(1), reader.read())
 			.await
 			.expect("verbatim read timed out")
@@ -4813,7 +4825,10 @@ mod test {
 		// it has to reach back past a 30 s leap to the first frame.
 		let subscription = moq_net::track::Subscription::default().with_max_age(std::time::Duration::from_secs(3600));
 		let track = consumer.track(name).unwrap().subscribe(subscription).await.unwrap();
-		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
+		let mut reader = crate::container::Consumer::new(
+			track,
+			crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+		);
 		let mut frames = Vec::new();
 		while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await
 		{

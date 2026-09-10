@@ -822,7 +822,7 @@ mod tests {
 			config.container = hang::catalog::Container::Legacy;
 			guard.audio.renditions.insert(track.name().to_string(), config);
 		}
-		let mut producer = Producer::new(track, MuxContainer::Legacy);
+		let mut producer = Producer::new(track, MuxContainer::Legacy(moq_mux::container::Kind::Audio));
 
 		// 100ms audio frames in one-second groups.
 		let mut write = |count: u64, offset: u64| {

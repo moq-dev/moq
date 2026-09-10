@@ -247,7 +247,7 @@ mod tests {
 			duration: None,
 		};
 		<crate::catalog::hang::Container as crate::container::Container>::write(
-			&crate::catalog::hang::Container::Legacy,
+			&crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 			group,
 			&[frame],
 		)

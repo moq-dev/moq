@@ -5,6 +5,13 @@ use moq_net::Timestamp;
 
 use super::{Container, Frame};
 
+/// Media and clean group boundaries in delivery order.
+pub(crate) enum Event {
+	Frame(Frame),
+	FrameEnd(Timestamp),
+	GroupEnd,
+}
+
 /// Decode a moq-lite track into a stream of media [`Frame`]s in age-bounded
 /// presentation order.
 ///
@@ -190,6 +197,17 @@ impl<F: Container> Consumer<F> {
 	/// Uses a single waiter that gets registered on all relevant kio channels,
 	/// avoiding the need for `tokio::select!` or `FuturesUnordered`.
 	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Frame>, F::Error>> {
+		loop {
+			match ready!(self.poll_event(waiter))? {
+				Some(Event::Frame(frame)) => return Poll::Ready(Ok(Some(frame))),
+				Some(Event::GroupEnd | Event::FrameEnd(_)) => continue,
+				None => return Poll::Ready(Ok(None)),
+			}
+		}
+	}
+
+	/// Read media or a clean group boundary without waiting for a successor group.
+	pub(crate) fn poll_event(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Event>, F::Error>> {
 		// Grab any new groups from the track, recording whether the track is finished.
 		let finished = self.poll_read_finish(waiter)?.is_ready();
 
@@ -238,7 +256,7 @@ impl<F: Container> Consumer<F> {
 				&& group.sequence <= self.current
 			{
 				match group.poll_read(waiter, &self.format) {
-					Poll::Ready(Ok(Some(frame))) => {
+					Poll::Ready(Ok(Some(Event::Frame(frame)))) => {
 						// Track the live edge (the max timestamp and the group that carries it) so a
 						// later backwards jump is detectable and the old epoch's tail is anchored.
 						let seq = group.group.sequence;
@@ -246,8 +264,9 @@ impl<F: Container> Consumer<F> {
 						if self.rewind.live_edge.is_none_or(|(_, high)| ts > high) {
 							self.rewind.live_edge = Some((seq, ts));
 						}
-						return Poll::Ready(Ok(Some(frame)));
+						return Poll::Ready(Ok(Some(Event::Frame(frame))));
 					}
+					Poll::Ready(Ok(Some(event))) => return Poll::Ready(Ok(Some(event))),
 					// Still blocked on this group, don't skip it yet.
 					Poll::Pending => {}
 					Poll::Ready(Err(e)) => {
@@ -278,7 +297,7 @@ impl<F: Container> Consumer<F> {
 						if empty {
 							self.mark_discontinuities(1);
 						}
-						continue 'read;
+						return Poll::Ready(Ok(Some(Event::GroupEnd)));
 					}
 				}
 			}
@@ -584,6 +603,8 @@ struct GroupBuffer {
 
 	// Read frames that haven't been consumed yet.
 	buffered: VecDeque<Frame>,
+	markers: VecDeque<(usize, Timestamp)>,
+	delivered: usize,
 
 	// The minimum timestamp in the group.
 	min_timestamp: Option<Timestamp>,
@@ -604,6 +625,8 @@ impl GroupBuffer {
 			index: 0,
 			empty: true,
 			buffered: VecDeque::new(),
+			markers: VecDeque::new(),
+			delivered: 0,
 			max_timestamp: None,
 			min_timestamp: None,
 			max_end: None,
@@ -611,14 +634,19 @@ impl GroupBuffer {
 	}
 
 	/// Poll for the next frame from this group.
-	fn poll_read<F: Container>(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<Option<Frame>, F::Error>> {
-		if let Some(frame) = self.buffered.pop_front() {
-			return Poll::Ready(Ok(Some(frame)));
-		}
-
-		match ready!(self.buffer_one(waiter, format)?) {
-			true => Poll::Ready(Ok(Some(self.buffered.pop_front().unwrap()))),
-			false => Poll::Ready(Ok(None)),
+	fn poll_read<F: Container>(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<Option<Event>, F::Error>> {
+		loop {
+			if self.markers.front().is_some_and(|(index, _)| *index <= self.delivered) {
+				let (_, end) = self.markers.pop_front().unwrap();
+				return Poll::Ready(Ok(Some(Event::FrameEnd(end))));
+			}
+			if let Some(frame) = self.buffered.pop_front() {
+				self.delivered += 1;
+				return Poll::Ready(Ok(Some(Event::Frame(frame))));
+			}
+			if !ready!(self.buffer_once(waiter, format)?) {
+				return Poll::Ready(Ok(None));
+			}
 		}
 	}
 
@@ -633,13 +661,11 @@ impl GroupBuffer {
 
 		for mut frame in frames {
 			if let Some(bound) = format.end(&frame) {
-				// Exclusive end of the previous frame, not media and not the track ending.
 				self.note_end(bound);
-				if let Some(last) = self.buffered.back_mut() {
-					super::close_duration(last, bound);
-				}
+				self.markers.push_back((self.index, bound));
 				continue;
 			}
+
 			self.min_timestamp = Some(match self.min_timestamp {
 				Some(existing) => existing.min(frame.timestamp),
 				None => frame.timestamp,
@@ -843,7 +869,7 @@ mod tests {
 			.unwrap();
 	}
 
-	/// Write a finished group with explicit sequence and timestamps (Container::Legacy format).
+	/// Write a finished group with explicit sequence and timestamps (Container::Legacy(crate::container::Kind::Data) format).
 	fn write_group(track: &mut moq_net::track::Producer, sequence: u64, timestamps: &[Timestamp]) {
 		let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
 		for &timestamp in timestamps {
@@ -853,7 +879,9 @@ mod tests {
 				keyframe: false,
 				duration: None,
 			};
-			Container::Legacy.write(&mut group, &[frame]).unwrap();
+			Container::Legacy(crate::container::Kind::Data)
+				.write(&mut group, &[frame])
+				.unwrap();
 		}
 		group.finish().unwrap();
 	}
@@ -884,7 +912,7 @@ mod tests {
 	/// tests are the exception, since they are about the consumer's half of it.
 	fn container_max_age_only(track: moq_net::track::Subscriber, max_age: std::time::Duration) -> Consumer<Container> {
 		let control = track.control();
-		let mut consumer = Consumer::new(track, Container::Legacy);
+		let mut consumer = Consumer::new(track, Container::Legacy(crate::container::Kind::Data));
 		consumer.set_max_age(max_age);
 		control
 			.update(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(30)))
@@ -900,7 +928,7 @@ mod tests {
 		let max_age = Duration::from_millis(250);
 		let subscriber = track.subscribe(moq_net::track::Subscription::default().with_max_age(max_age));
 
-		let consumer = Consumer::new(subscriber, Container::Legacy);
+		let consumer = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
 
 		assert_eq!(consumer.max_age, max_age);
 		assert_eq!(consumer.track.subscription().max_age, max_age);
@@ -911,7 +939,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		write_group(&mut track, 0, &[ts(0)]);
 		track.finish().unwrap();
@@ -930,7 +958,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(2)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		write_group(&mut track, 0, &[ts(0)]);
 		track
@@ -952,7 +980,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(2)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 		// Keep transport filtering out of this test so it isolates the mux skip logic.
 		consumer.max_age = Duration::ZERO;
 
@@ -979,7 +1007,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		write_group(&mut track, 0, &[ts(0), ts(33_000), ts(66_000)]);
 		track.finish().unwrap();
@@ -998,7 +1026,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		// 5 groups, 20ms spacing. Total span = 80ms, well within the 500ms max age.
 		for i in 0..5u64 {
@@ -1018,12 +1046,12 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(100)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		// Group 0: 5 frames, NOT finished (blocks consumer)
 		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 		for f in 0..5u64 {
-			Container::Legacy
+			Container::Legacy(crate::container::Kind::Data)
 				.write(
 					&mut group0,
 					&[Frame {
@@ -1065,7 +1093,7 @@ mod tests {
 		// Group 0 at ts 0 keeps timestamps monotonic with sequence (groups 1-9 follow at
 		// g*50 ms), so the test exercises age skipping and not rewind detection.
 		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
-		Container::Legacy
+		Container::Legacy(crate::container::Kind::Data)
 			.write(
 				&mut group0,
 				&[Frame {
@@ -1102,7 +1130,7 @@ mod tests {
 		let mut consumer = container_max_age_only(consumer_track, Duration::from_millis(100));
 
 		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
-		Container::Legacy
+		Container::Legacy(crate::container::Kind::Data)
 			.write(
 				&mut group0,
 				&[Frame {
@@ -1169,7 +1197,7 @@ mod tests {
 				"cursor-rewind",
 				hang::container::track_info(hang::catalog::PRIORITY.video),
 			);
-			let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy);
+			let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Data));
 			write_group(&mut track, 0, &[ts(600_000_000)]);
 			assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(600_000_000));
 			if drained {
@@ -1196,7 +1224,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(10)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		// Old epoch, played forward until the live edge passes the rewind point.
 		write_group(&mut track, 0, &[ts(0)]);
@@ -1236,7 +1264,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(10)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		// Old timeline, played to a live edge of 200 ms.
 		write_group(&mut track, 0, &[ts(0)]);
@@ -1273,7 +1301,7 @@ mod tests {
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(10)));
 		// Large max age so the slow-group skip never fires; isolate the rewind path.
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		// Publisher runs ahead: groups 0-4 at 0, 100, 200, 300, 400 ms.
 		for i in 0..5u64 {
@@ -1299,7 +1327,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(10)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		write_group(&mut track, 0, &[ts(0)]);
 		write_group(&mut track, 1, &[ts(500_000)]);
@@ -1324,7 +1352,9 @@ mod tests {
 			keyframe: false,
 			duration: None,
 		};
-		Container::Legacy.write(group, &[frame]).unwrap();
+		Container::Legacy(crate::container::Kind::Data)
+			.write(group, &[frame])
+			.unwrap();
 	}
 
 	/// An empty payload carries no media, so it's skipped rather than surfaced as a
@@ -1335,7 +1365,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 		let media = |timestamp| Frame {
@@ -1344,9 +1374,13 @@ mod tests {
 			keyframe: false,
 			duration: None,
 		};
-		Container::Legacy.write(&mut group, &[media(ts(0))]).unwrap();
+		Container::Legacy(crate::container::Kind::Data)
+			.write(&mut group, &[media(ts(0))])
+			.unwrap();
 		write_marker(&mut group, ts(16_000)); // closes the first frame
-		Container::Legacy.write(&mut group, &[media(ts(33_000))]).unwrap();
+		Container::Legacy(crate::container::Kind::Data)
+			.write(&mut group, &[media(ts(33_000))])
+			.unwrap();
 		write_marker(&mut group, ts(50_000)); // the group's end
 		group.finish().unwrap();
 		track.finish().unwrap();
@@ -1362,11 +1396,11 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 		write_marker(&mut group, ts(20_000));
-		Container::Legacy
+		Container::Legacy(crate::container::Kind::Data)
 			.write(
 				&mut group,
 				&[Frame {
@@ -1393,10 +1427,10 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
-		Container::Legacy
+		Container::Legacy(crate::container::Kind::Data)
 			.write(
 				&mut group,
 				&[Frame {
@@ -1425,7 +1459,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Loc);
+		let mut consumer = Consumer::new(consumer_track, Container::Loc(crate::container::Kind::Data));
 
 		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 		let media = Frame {
@@ -1434,8 +1468,10 @@ mod tests {
 			keyframe: true,
 			duration: None,
 		};
-		Container::Loc.write(&mut group, &[media]).unwrap();
-		Container::Loc
+		Container::Loc(crate::container::Kind::Data)
+			.write(&mut group, &[media])
+			.unwrap();
+		Container::Loc(crate::container::Kind::Data)
 			.write(
 				&mut group,
 				&[Frame {
@@ -1462,10 +1498,10 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
-		Container::Legacy
+		Container::Legacy(crate::container::Kind::Data)
 			.write(
 				&mut group0,
 				&[Frame {
@@ -1499,7 +1535,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		write_group(&mut track, 0, &[ts(0)]);
 		write_group(&mut track, 1, &[ts(30_000)]);
@@ -1518,7 +1554,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		write_group(&mut track, 0, &[ts(0), ts(66_000), ts(33_000)]);
 		track.finish().unwrap();
@@ -1538,7 +1574,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		track.finish().unwrap();
 
@@ -1557,7 +1593,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		write_group(&mut track, 0, &[ts(0)]);
 		track.abort(moq_net::Error::Cancel).unwrap();
@@ -1581,7 +1617,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(100)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		write_group(&mut track, 0, &[ts(0), ts(20_000)]);
 		write_group(&mut track, 1, &[ts(40_000), ts(60_000)]);
@@ -1600,7 +1636,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(80)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		write_group(&mut track, 5, &[ts(0), ts(20_000)]);
 		write_group(&mut track, 7, &[ts(80_000), ts(100_000)]);
@@ -1624,11 +1660,11 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(100)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		// Group 0: a frame the consumer reads, positioning it there.
 		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
-		Container::Legacy
+		Container::Legacy(crate::container::Kind::Data)
 			.write(
 				&mut group0,
 				&[Frame {
@@ -1670,7 +1706,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(100)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		// Group 0, then group 2 -- sequence 1 is missing (evicted) and never arrives.
 		// The track is NOT finished (live), the case that used to hang. Group 3 pushes
@@ -1702,7 +1738,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		// Group 2's stream beats group 1's, which hasn't arrived at all yet.
 		write_group(&mut track, 0, &[ts(0)]);
@@ -1741,7 +1777,7 @@ mod tests {
 				.with_start(moq_net::track::Position::group(0))
 				.with_max_age(Duration::from_millis(500)),
 		);
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		// Group 1's stream wins the race, and the consumer polls before group 0 lands.
 		write_group(&mut track, 1, &[ts(100_000)]);
@@ -1769,7 +1805,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		// Group 0's stream opens first but carries no frames yet; group 1's frame wins.
 		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
@@ -1783,7 +1819,7 @@ mod tests {
 			"group 0's frames are within budget and must be waited for"
 		);
 
-		Container::Legacy
+		Container::Legacy(crate::container::Kind::Data)
 			.write(
 				&mut group0,
 				&[Frame {
@@ -1882,7 +1918,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		write_group(&mut track, 0, &[ts(0), ts(33_333), ts(66_666)]);
 		track.finish().unwrap();
@@ -1903,11 +1939,11 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		let payload_bytes = vec![0x01, 0x02, 0x03, 0x04, 0x05];
 		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
-		Container::Legacy
+		Container::Legacy(crate::container::Kind::Data)
 			.write(
 				&mut group,
 				&[Frame {
@@ -1942,10 +1978,10 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(10)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
-		Container::Legacy
+		Container::Legacy(crate::container::Kind::Data)
 			.write(
 				&mut group0,
 				&[Frame {
@@ -1989,7 +2025,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(3700)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		let one_hour = 3_600_000_000u64;
 		write_group(&mut track, 0, &[ts(one_hour)]);
@@ -2006,7 +2042,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(10)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		write_group(&mut track, 0, &[ts(0)]);
 		track.finish().unwrap();
@@ -2027,11 +2063,11 @@ mod tests {
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(110)));
 		// max age must exceed (group1_max - group0_min) = 100ms - 0ms = 100ms
 		// to avoid the age skip and test B-frame timestamp tracking.
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 		for &timestamp in &[ts(0), ts(66_000), ts(33_000)] {
-			Container::Legacy
+			Container::Legacy(crate::container::Kind::Data)
 				.write(
 					&mut group0,
 					&[Frame {
@@ -2078,13 +2114,13 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(100)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		write_group(&mut track, 3, &[ts(0)]);
 		write_group(&mut track, 5, &[ts(150_000)]);
 
 		let mut group7 = track.create_group(moq_net::group::Info { sequence: 7 }).unwrap();
-		Container::Legacy
+		Container::Legacy(crate::container::Kind::Data)
 			.write(
 				&mut group7,
 				&[Frame {
@@ -2098,7 +2134,7 @@ mod tests {
 
 		let finisher = tokio::spawn(async move {
 			tokio::time::sleep(Duration::from_millis(50)).await;
-			Container::Legacy
+			Container::Legacy(crate::container::Kind::Data)
 				.write(
 					&mut group7,
 					&[Frame {
@@ -2135,7 +2171,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		let _group5 = track.create_group(moq_net::group::Info { sequence: 5 }).unwrap();
 		write_group(&mut track, 7, &[ts(210_000)]);
@@ -2167,7 +2203,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		// Sequence 0 never arrives; sequence 1's stream opens but never carries a frame.
 		let group1 = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
@@ -2198,7 +2234,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		// Group 0's stream is open but its frames lose the race; the track boundary
 		// arrives before them.
@@ -2214,7 +2250,7 @@ mod tests {
 		);
 
 		// Its frames land moments later, well within the 500ms budget.
-		Container::Legacy
+		Container::Legacy(crate::container::Kind::Data)
 			.write(
 				&mut group0,
 				&[Frame {
@@ -2237,7 +2273,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		write_group(&mut track, 100, &[ts(3_000_000)]);
 		track.finish().unwrap();
@@ -2255,7 +2291,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		// The track is far along and stays live (never finished); only the current
 		// group is served, and nothing else arrives.
@@ -2275,10 +2311,10 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(50)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
-		Container::Legacy
+		Container::Legacy(crate::container::Kind::Data)
 			.write(
 				&mut group0,
 				&[Frame {
@@ -2312,10 +2348,10 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(100)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
-		Container::Legacy
+		Container::Legacy(crate::container::Kind::Data)
 			.write(
 				&mut group0,
 				&[Frame {
@@ -2354,7 +2390,7 @@ mod tests {
 
 		// Group 0: stalled at ts=0, NOT finished
 		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
-		Container::Legacy
+		Container::Legacy(crate::container::Kind::Data)
 			.write(
 				&mut group0,
 				&[Frame {
@@ -2405,7 +2441,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		let group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 		group0.abort(moq_net::Error::Cancel).unwrap();
@@ -2426,7 +2462,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 		for timestamp in [ts(0), ts(10_000)] {
@@ -2436,7 +2472,9 @@ mod tests {
 				keyframe: false,
 				duration: None,
 			};
-			Container::Legacy.write(&mut group0, &[frame]).unwrap();
+			Container::Legacy(crate::container::Kind::Data)
+				.write(&mut group0, &[frame])
+				.unwrap();
 		}
 		group0.finish().unwrap();
 		write_group(&mut track, 1, &[ts(30_000)]);
@@ -2462,7 +2500,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		// Head shedding only kicks in at the per-group byte budget, so the second frame
 		// has to be large enough to push the first out.
@@ -2477,7 +2515,9 @@ mod tests {
 				keyframe: false,
 				duration: None,
 			};
-			Container::Legacy.write(&mut group0, &[frame]).unwrap();
+			Container::Legacy(crate::container::Kind::Data)
+				.write(&mut group0, &[frame])
+				.unwrap();
 		}
 
 		write_group(&mut track, 1, &[ts(30_000)]);
@@ -2494,7 +2534,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		write_group(&mut track, 0, &[ts(0)]);
 
@@ -2524,7 +2564,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 		group0.finish().unwrap();
@@ -2545,9 +2585,9 @@ mod tests {
 		let mut track = track_producer("video", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
-		// Write frames using Container::Legacy encoding
+		// Write frames using Container::Legacy(crate::container::Kind::Data) encoding
 		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 		for i in 0..3u64 {
 			let frame = Frame {
@@ -2556,7 +2596,9 @@ mod tests {
 				keyframe: false,
 				duration: None,
 			};
-			Container::Legacy.write(&mut group, &[frame]).unwrap();
+			Container::Legacy(crate::container::Kind::Data)
+				.write(&mut group, &[frame])
+				.unwrap();
 		}
 		group.finish().unwrap();
 		track.finish().unwrap();
@@ -2666,5 +2708,31 @@ mod tests {
 		assert_eq!(frames[1].timestamp, ts(20_000));
 		assert_eq!(frames[2].timestamp, ts(33_000));
 		finisher.await.unwrap();
+	}
+	#[tokio::test]
+	async fn live_duration_marker_follows_an_immediately_delivered_frame() {
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Video));
+		let mut group = track.append_group().unwrap();
+		Container::Legacy(crate::container::Kind::Video)
+			.write(
+				&mut group,
+				&[Frame {
+					timestamp: ts(0),
+					payload: Bytes::from_static(b"video"),
+					keyframe: true,
+					duration: None,
+				}],
+			)
+			.unwrap();
+		let frame = tokio::time::timeout(Duration::from_secs(1), consumer.read())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		assert_eq!(frame.timestamp, ts(0));
+		write_marker(&mut group, ts(15_000));
+		let event = kio::wait(|waiter| consumer.poll_event(waiter)).await.unwrap();
+		assert!(matches!(event, Some(Event::FrameEnd(end)) if end == ts(15_000)));
 	}
 }

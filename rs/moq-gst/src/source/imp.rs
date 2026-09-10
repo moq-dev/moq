@@ -517,7 +517,13 @@ fn reconcile(
 	// renditions that didn't change. A parse failure (malformed init) skips just this rendition.
 	for name in plan.add {
 		let d = &desired[&name];
-		let container = match moq_mux::catalog::hang::Container::try_from(&d.shape.container) {
+		let container = match moq_mux::catalog::hang::Container::new(
+			&d.shape.container,
+			match d.kind {
+				TrackKind::Video => moq_mux::container::Kind::Video,
+				TrackKind::Audio => moq_mux::container::Kind::Audio,
+			},
+		) {
 			Ok(container) => container,
 			Err(err) => {
 				gst::warning!(CAT, "ignoring rendition {name}: {err:?}");

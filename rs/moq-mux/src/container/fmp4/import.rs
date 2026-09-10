@@ -4,7 +4,7 @@ use moq_net::Timestamp;
 use mp4_atom::{Any, Atom, DecodeMaybe, Encode, Mdat, Moof, Moov, Trak};
 use std::collections::{HashMap, HashSet};
 
-use super::Error;
+use super::{Error, Kind};
 use crate::Result;
 use crate::catalog::Estimator;
 
@@ -91,23 +91,6 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	segment_start: Option<Timestamp>,
 }
 
-#[derive(PartialEq, Debug)]
-enum TrackKind {
-	Video,
-	Audio,
-}
-
-impl TrackKind {
-	/// The publisher priority for this kind of media, so audio isn't stuck behind a
-	/// video backlog on a busy connection.
-	fn priority(&self) -> u8 {
-		match self {
-			Self::Video => hang::catalog::PRIORITY.video,
-			Self::Audio => hang::catalog::PRIORITY.audio,
-		}
-	}
-}
-
 /// The catalog entry for one imported track, whichever section it lives in.
 ///
 /// Both arms are the same [`Rendition`](crate::catalog::Rendition) guard, so publishing what the
@@ -127,7 +110,7 @@ impl<E: crate::catalog::hang::CatalogExt> Rendition<E> {
 }
 
 struct Fmp4Track<E: crate::catalog::hang::CatalogExt> {
-	kind: TrackKind,
+	kind: Kind,
 
 	/// The catalog entry, which owns the published bitrate and jitter and removes itself on drop.
 	rendition: Rendition<E>,
@@ -208,11 +191,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	/// Whether `kind` is selected for import (every role when unset).
-	fn selects(&self, kind: &TrackKind) -> bool {
+	fn selects(&self, kind: &Kind) -> bool {
 		match (&self.select, kind) {
 			(None, _) => true,
-			(Some(select), TrackKind::Video) => select.has_video(),
-			(Some(select), TrackKind::Audio) => select.has_audio(),
+			(Some(select), Kind::Video) => select.has_video(),
+			(Some(select), Kind::Audio) => select.has_audio(),
 		}
 	}
 
@@ -298,16 +281,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let handler = &trak.mdia.hdlr.handler;
 			let suffix = ".m4s";
 
-			let kind = match handler.as_ref() {
-				b"vide" => TrackKind::Video,
-				b"soun" => TrackKind::Audio,
-				b"sbtl" => return Err(Error::UnsupportedSubtitle.into()),
-				handler => {
-					let mut buf = [0u8; 4];
-					buf[..handler.len().min(4)].copy_from_slice(&handler[..handler.len().min(4)]);
-					return Err(Error::UnknownTrackHandler(buf).into());
-				}
-			};
+			let kind = Kind::from_handler(*handler)?;
 
 			// Drop tracks whose role isn't selected before minting or publishing them; their
 			// moof fragments are ignored in `extract`.
@@ -334,13 +308,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			// Whatever the descriptor declared (a bitrate) is authoritative; the rest is filled by
 			// `estimate` as fragments arrive.
 			let rendition = match kind {
-				TrackKind::Video => {
+				Kind::Video => {
 					let config = self.init_video(trak, &moov)?;
 					let mut rendition = reserved.video(track.name())?;
 					rendition.set(config)?;
 					Rendition::Video(rendition)
 				}
-				TrackKind::Audio => {
+				Kind::Audio => {
 					let config = self.init_audio(trak, &moov)?;
 					let mut rendition = reserved.audio(track.name())?;
 					rendition.set(config)?;
@@ -634,7 +608,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let moov = self.moov.as_ref().ok_or(Error::NoMoov)?;
 		Ok(moof.traf.iter().any(|traf| {
 			let track_id = traf.tfhd.track_id;
-			if self.tracks.get(&track_id).map(|t| &t.kind) != Some(&TrackKind::Video) {
+			if self.tracks.get(&track_id).map(|t| &t.kind) != Some(&Kind::Video) {
 				return false;
 			}
 			let trex_flags = moov
@@ -658,13 +632,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	fn video_rolled(&self) -> bool {
 		self.tracks
 			.values()
-			.filter(|track| track.kind == TrackKind::Video)
+			.filter(|track| track.kind == Kind::Video)
 			.all(|track| track.segment == Some(self.segment))
 	}
 
 	// Extract all frames out of an mdat atom using CMAF passthrough.
 	fn extract(&mut self, mdat: Mdat, mdat_raw: &[u8]) -> Result<()> {
-		let has_video = self.tracks.values().any(|t| t.kind == TrackKind::Video);
+		let has_video = self.tracks.values().any(|t| t.kind == Kind::Video);
 		let moof = self.moof.take().ok_or(Error::NoMoof)?;
 		let moof_size = self.moof_size;
 		let header_size = mdat_raw.len() - mdat.data.len();
@@ -806,8 +780,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					}
 
 					let keyframe = match track.kind {
-						TrackKind::Video => is_sync_sample(flags),
-						TrackKind::Audio => true,
+						Kind::Video => is_sync_sample(flags),
+						Kind::Audio => true,
 					};
 
 					contains_keyframe |= keyframe;

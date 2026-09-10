@@ -217,7 +217,7 @@ export class Renderer {
 		// (e.g. `cmaf`) would misread the cue payload, so skip it rather than render garbage.
 		let format: Container.Format;
 		if (config.container.kind === "legacy") {
-			format = new Container.Legacy.Format();
+			format = new Container.Legacy.Format("data");
 		} else if (config.container.kind === "loc") {
 			format = new Container.Loc.Format();
 		} else {

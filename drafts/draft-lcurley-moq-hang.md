@@ -523,7 +523,8 @@ Each frame starts with a timestamp, a QUIC variable-length integer (62-bit max) 
 The remainder of the payload is codec specific; see the WebCodecs specification for specifics.
 
 A frame with an empty codec payload is the exclusive end of the frame before it, not media.
-A video group ends with one; audio has none.
+A video publisher SHOULD end each group with one when the exclusive end is known; audio has none.
+A publisher MAY estimate an unknown final duration from the frame cadence, but MUST NOT use batching or reorder delay as that duration.
 A consumer MUST skip it and MUST NOT submit it to a decoder.
 It does not mean the track ended.
 
@@ -532,6 +533,8 @@ For a text track, the remainder is the cue in the track's declared `format` (for
 
 ## cmaf
 Each frame is a complete fragmented MP4 fragment (`moof`+`mdat`), carrying its own timestamps.
+Audio samples MUST be marked as sync samples, including samples inside a group.
+A sync sample does not declare an audio group boundary; the publisher chooses those boundaries.
 
 The `init` field is the initialization segment (`ftyp`+`moov`) for the track, base64-encoded ({{!RFC4648, Section 4}}).
 A consumer MUST feed `init` to the decoder before the first frame.
@@ -953,9 +956,11 @@ This document has no IANA actions.
 ## moq-hang-03
 {:numbered="false"}
 
+- Clarified that CMAF audio samples are sync samples independently of publisher group boundaries.
 - Clarified that container importers can estimate jitter from batch media spans without measuring input wait time.
 - Specified the `jitter` field's computation: the publisher's own structure rather than the network, rounded up to whole milliseconds, never `0` (a consumer treats `0` as absent), and never lowered once advertised. The 30 fps and 44.1 kHz AAC examples became 34 and 24.
-- An empty codec payload is the exclusive end of the frame before it. A video group ends with one; audio has none. A consumer skips it and does not submit it to a decoder. Removed the end-marker and terminal-packet rule.
+- An empty codec payload is the exclusive end of the frame before it. A video publisher SHOULD end each group with one when the exclusive end is known; audio has none.
+A publisher MAY estimate an unknown final duration from the frame cadence, but MUST NOT use batching or reorder delay as that duration. A consumer skips it and does not submit it to a decoder. Removed the end-marker and terminal-packet rule.
 
 # Acknowledgments
 {:numbered="false"}

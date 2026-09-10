@@ -259,7 +259,10 @@ async fn public_container_preserves_loc_for_mkv() {
 	assert_eq!(config.container, Container::Loc);
 
 	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
-	let mut media = crate::container::Consumer::new(track, crate::catalog::hang::Container::Loc);
+	let mut media = crate::container::Consumer::new(
+		track,
+		crate::catalog::hang::Container::Loc(crate::container::Kind::Data),
+	);
 	let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read())
 		.await
 		.unwrap()

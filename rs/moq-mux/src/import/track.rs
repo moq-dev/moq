@@ -900,7 +900,10 @@ mod tests {
 		let mut import = crate::codec::opus::Import::new(track, catalog.reserve(), config.into()).unwrap();
 		assert!(catalog.snapshot().audio.renditions.contains_key("audio"));
 
-		let mut media = crate::container::Consumer::new(subscriber, crate::catalog::hang::Container::Legacy);
+		let mut media = crate::container::Consumer::new(
+			subscriber,
+			crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+		);
 
 		let payload = b"opus payload".to_vec();
 		import
@@ -1191,7 +1194,10 @@ mod tests {
 		let mut import = Track::video(request, catalog.reserve(), VideoInit::new(VideoFormat::Hvc1, hvcc)).unwrap();
 
 		let track = consumer.track("video").unwrap().subscribe(None).await.unwrap();
-		let mut media = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
+		let mut media = crate::container::Consumer::new(
+			track,
+			crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+		);
 
 		let idr: &[u8] = &[0x26, 0x01, 0x80, 0xaa]; // IdrWRadl (19)
 		let mut au = Vec::new();

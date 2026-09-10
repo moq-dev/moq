@@ -464,7 +464,10 @@ impl Pad {
 		rendition.set(config)?;
 
 		Ok(Text {
-			producer: moq_mux::container::Producer::new(producer, moq_mux::catalog::hang::Container::Legacy),
+			producer: moq_mux::container::Producer::new(
+				producer,
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+			),
 			rendition,
 		})
 	}
@@ -1100,7 +1103,10 @@ mod tests {
 			.subscribe(None)
 			.await
 			.unwrap();
-		let mut media = moq_mux::container::Consumer::new(subscriber, moq_mux::catalog::hang::Container::Loc);
+		let mut media = moq_mux::container::Consumer::new(
+			subscriber,
+			moq_mux::catalog::hang::Container::Loc(moq_mux::container::Kind::Data),
+		);
 		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read())
 			.await
 			.expect("LOC media read timed out")

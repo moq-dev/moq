@@ -415,7 +415,7 @@ impl Consume {
 		// Consume with the container the catalog actually advertises (Legacy / Cmaf / Loc)
 		// instead of assuming Legacy, otherwise CMAF/fMP4 sources (e.g. ffmpeg moqenc,
 		// browser @moq/publish) are misread as raw frames.
-		let container = moq_mux::catalog::hang::Container::try_from(&config.container)?;
+		let container = moq_mux::catalog::hang::Container::try_from(config)?;
 		// The rendition may live in a sibling broadcast, so resolve its reference rather than
 		// assuming the catalog's own broadcast serves the track.
 		let reference = config.broadcast.clone();
@@ -473,7 +473,7 @@ impl Consume {
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
 		let name = name.clone();
-		let container = moq_mux::catalog::hang::Container::try_from(&config.container)?;
+		let container = moq_mux::catalog::hang::Container::try_from(config)?;
 		let reference = config.broadcast.clone();
 		let broadcast = consume.broadcast.clone();
 		let origin = consume.origin.clone();

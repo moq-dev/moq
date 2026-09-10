@@ -33,6 +33,17 @@ pub use group::GroupConsumer;
 pub use producer::Producer;
 pub(crate) use source::ExportSource;
 
+/// The media role that determines how a container represents frame durations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+	/// Audio packets carry codec-defined durations.
+	Audio,
+	/// Video frames can need a duration marker at group end.
+	Video,
+	/// Opaque data has no sample-duration semantics.
+	Data,
+}
+
 /// A decoded media frame: timestamp, payload bytes, keyframe flag.
 ///
 /// `payload` is the raw codec bitstream that gets handed to the decoder.
@@ -53,7 +64,8 @@ pub struct Frame {
 	/// Sample duration in the frame's own scale, when the container reports it.
 	///
 	/// CMAF carries a per-sample duration (trun sample-duration). Legacy and LOC
-	/// fill it from a duration marker, the empty frame that closes a video group.
+	/// can fill it from a duration marker when reading a fetched group. Streaming
+	/// muxers receive the later endpoint separately, so media stays immediately available.
 	/// The [`Consumer`] adds it to `timestamp` to learn how far a group has
 	/// presented, so it can advance to a newer group as soon as the gap is
 	/// covered instead of waiting out the max age budget.
@@ -62,13 +74,16 @@ pub struct Frame {
 	/// Encoded codec payload.
 	pub payload: Bytes,
 
-	/// Whether this frame is a keyframe.
+	/// Whether this frame opens a group, or is a video keyframe.
 	///
 	/// Containers that carry the bit on the wire (CMAF reads it from
-	/// trun sample-flags) should set it; containers that don't (Legacy,
+	/// trun sample-flags) set it for video; containers that don't (Legacy,
 	/// LOC) leave it `false`. The wrapping [`Consumer`] still asserts
 	/// "first frame in a group is a keyframe" as a fallback, so the
-	/// Legacy/LOC case lands correctly without anyone having to know.
+	/// Legacy/LOC case lands correctly without anyone having to know. For
+	/// audio, whose samples are all independently decodable, that fallback
+	/// is the only source: the bit marks the group boundary the publisher
+	/// drew, never a per-sample sync flag.
 	pub keyframe: bool,
 }
 
@@ -139,12 +154,18 @@ pub trait Container {
 		None
 	}
 
-	/// Whether a video producer writes a duration marker at [`Producer::cut`] / [`Producer::finish`].
-	///
-	/// Legacy does. LOC does not until consumers that skip an empty payload have shipped.
-	/// CMAF carries sample durations, so it never writes one.
-	fn duration_marker(&self) -> bool {
-		false
+	/// The media role, when this format represents an audio or video track.
+	fn kind(&self) -> Kind {
+		Kind::Data
+	}
+
+	/// Write any format-specific endpoint before the producer closes the group.
+	fn finish_group(
+		&self,
+		_group: &mut moq_net::group::Producer,
+		_end: Option<moq_net::Timestamp>,
+	) -> Result<(), Self::Error> {
+		Ok(())
 	}
 
 	/// Async wrapper around [`Self::poll_read`]. Carries the same contract: only

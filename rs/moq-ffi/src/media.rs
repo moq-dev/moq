@@ -136,7 +136,7 @@ pub struct MoqMediaFrame {
 	pub payload: Vec<u8>,
 	/// Presentation timestamp in microseconds.
 	pub timestamp_us: u64,
-	/// Whether this frame can be decoded without any earlier frame.
+	/// Whether this frame opens a group or is a video keyframe; audio is true only at a group start.
 	pub keyframe: bool,
 }
 

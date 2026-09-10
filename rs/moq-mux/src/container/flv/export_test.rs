@@ -531,7 +531,10 @@ fn build_multitrack_broadcast() -> (moq_net::broadcast::Consumer, Vec<Vec<u8>>, 
 		config.description = Some(Bytes::from(description.clone()));
 		catalog.lock().video.renditions.insert(track.name().to_string(), config);
 
-		let mut video = Producer::new(track, crate::catalog::hang::Container::Legacy);
+		let mut video = Producer::new(
+			track,
+			crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+		);
 		video
 			.write(crate::container::Frame {
 				timestamp: Timestamp::from_millis(0).unwrap(),
@@ -553,7 +556,10 @@ fn build_multitrack_broadcast() -> (moq_net::broadcast::Consumer, Vec<Vec<u8>>, 
 		.audio
 		.renditions
 		.insert(audio_track.name().to_string(), audio_config);
-	let mut audio = crate::container::Producer::new(audio_track, crate::catalog::hang::Container::Legacy);
+	let mut audio = crate::container::Producer::new(
+		audio_track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
 	audio
 		.write(crate::container::Frame {
 			timestamp: Timestamp::from_millis(0).unwrap(),
@@ -767,7 +773,10 @@ async fn export_authors_dts_and_composition_time_for_reordered_avc() {
 		.renditions
 		.insert(audio_track.name().to_string(), audio_config);
 
-	let mut video = crate::container::Producer::new(video_track, crate::catalog::hang::Container::Legacy);
+	let mut video = crate::container::Producer::new(
+		video_track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
 	let video_frame = |timestamp_ms: u64, payload: &'static [u8], keyframe| crate::container::Frame {
 		timestamp: Timestamp::from_millis(timestamp_ms).unwrap(),
 		duration: None,
@@ -780,7 +789,10 @@ async fn export_authors_dts_and_composition_time_for_reordered_avc() {
 	video.write(video_frame(120, &[0, 0, 0, 1, 0x41], false)).unwrap();
 	video.finish().unwrap();
 
-	let mut audio = crate::container::Producer::new(audio_track, crate::catalog::hang::Container::Legacy);
+	let mut audio = crate::container::Producer::new(
+		audio_track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
 	audio
 		.write(crate::container::Frame {
 			timestamp: Timestamp::from_millis(20).unwrap(),

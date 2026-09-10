@@ -789,7 +789,8 @@ pub struct Fragmented {
 	#[usage(flatten)]
 	pub container: Container,
 
-	/// Cap the output fragment/cluster duration (e.g. `2s`). Default: one GOP.
+	/// Cap the output fragment/cluster duration (e.g. `2s`).
+	/// Defaults to publisher groups for fMP4 and video GOPs for MKV.
 	#[usage(long)]
 	pub fragment_duration: Option<moq_tokio::Duration>,
 }

@@ -49,7 +49,7 @@ async function drain(consumer: Consumer): Promise<[number, number | undefined][]
 test("out-of-order groups are delivered rather than dropped", async () => {
 	const track = new Track.Producer("test").accept({ maxAge: 30_000 });
 	const consumer = new Consumer(track.subscribe({ maxAge: 5000 }), {
-		format: new LegacyFormat(),
+		format: new LegacyFormat("data"),
 		maxAge: 5000 as Time.Milli,
 	});
 
@@ -79,7 +79,7 @@ test("out-of-order groups are delivered rather than dropped", async () => {
 test("a below-cursor group still downloading is not truncated", async () => {
 	const track = new Track.Producer("test").accept({ maxAge: 30_000 });
 	const consumer = new Consumer(track.subscribe({ maxAge: 5000 }), {
-		format: new LegacyFormat(),
+		format: new LegacyFormat("data"),
 		maxAge: 5000 as Time.Milli,
 	});
 

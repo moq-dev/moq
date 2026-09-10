@@ -480,6 +480,7 @@ fn info(track_id: u32, timescale: moq_net::Timescale, sequence_number: u32) -> s
 		track_id,
 		timescale,
 		sequence_number,
+		kind: super::Kind::Video,
 	}
 }
 
@@ -498,7 +499,7 @@ fn sample(timestamp_us: u64, keyframe: bool, duration_us: Option<u64>) -> crate:
 fn decode_rejects_durationless_multisample() {
 	let frames = vec![sample(0, true, None), sample(33_000, false, None)];
 	let frag = super::encode_fragment(info(1, scale(), 0), &frames).unwrap();
-	let err = super::decode(frag, scale()).unwrap_err();
+	let err = super::decode(frag, scale(), crate::container::fmp4::Kind::Video).unwrap_err();
 	assert!(matches!(err, super::Error::MissingSampleDuration), "got {err:?}");
 }
 
@@ -506,7 +507,7 @@ fn decode_rejects_durationless_multisample() {
 #[test]
 fn decode_single_sample_no_duration_ok() {
 	let frag = super::encode_fragment(info(1, scale(), 0), &[sample(0, true, None)]).unwrap();
-	let out = super::decode(frag, scale()).unwrap();
+	let out = super::decode(frag, scale(), crate::container::fmp4::Kind::Video).unwrap();
 	assert_eq!(out.len(), 1);
 	assert_eq!(out[0].timestamp.as_micros(), 0);
 }
@@ -517,7 +518,7 @@ fn decode_single_sample_no_duration_ok() {
 fn decode_multisample_with_durations_roundtrips() {
 	let frames = vec![sample(0, true, Some(33_000)), sample(33_000, false, Some(33_000))];
 	let frag = super::encode_fragment(info(1, scale(), 0), &frames).unwrap();
-	let out = super::decode(frag, scale()).unwrap();
+	let out = super::decode(frag, scale(), crate::container::fmp4::Kind::Video).unwrap();
 	assert_eq!(out.len(), 2);
 	assert_eq!(out[0].timestamp.as_micros(), 0);
 	assert_eq!(out[1].timestamp.as_micros(), 33_000);

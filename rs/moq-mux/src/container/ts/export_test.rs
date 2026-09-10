@@ -120,7 +120,7 @@ async fn export_aac_roundtrip() {
 		cfg.container = Container::Legacy;
 		catalog.lock().audio.renditions.insert(name.clone(), cfg);
 	}
-	let mut producer = Producer::new(track, HangContainer::Legacy);
+	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 
 	// The last frame is > 184 bytes to force PES splitting across TS packets.
 	let frames: Vec<Bytes> = vec![
@@ -240,7 +240,7 @@ async fn export_lead_audio() -> BytesMut {
 		cfg.container = Container::Legacy;
 		catalog.lock().video.renditions.insert(vtrack.name().to_string(), cfg);
 	}
-	let mut video = Producer::new(vtrack, HangContainer::Legacy);
+	let mut video = Producer::new(vtrack, HangContainer::Legacy(crate::container::Kind::Data));
 
 	let atrack = broadcast
 		.create_track(
@@ -253,7 +253,7 @@ async fn export_lead_audio() -> BytesMut {
 		cfg.container = Container::Legacy;
 		catalog.lock().audio.renditions.insert(atrack.name().to_string(), cfg);
 	}
-	let mut audio = Producer::new(atrack, HangContainer::Legacy);
+	let mut audio = Producer::new(atrack, HangContainer::Legacy(crate::container::Kind::Data));
 
 	let audio_frame = |ms: u64| Frame {
 		timestamp: Timestamp::from_micros(ms * 1_000).unwrap(),
@@ -381,7 +381,7 @@ async fn export_avc3_in_band_reassembles() {
 		cfg.container = Container::Legacy;
 		catalog.lock().video.renditions.insert(name.clone(), cfg);
 	}
-	let mut producer = Producer::new(track, HangContainer::Legacy);
+	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 
 	// IDR slice (NAL type 5), padded past 184 bytes to span multiple TS packets.
 	let mut idr = vec![0x65u8];
@@ -432,7 +432,7 @@ async fn export_avc3_preserves_multiple_pps() {
 		cfg.container = Container::Legacy;
 		catalog.lock().video.renditions.insert(name.clone(), cfg);
 	}
-	let mut producer = Producer::new(track, HangContainer::Legacy);
+	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 
 	let mut idr = vec![0x65u8];
 	idr.extend(std::iter::repeat_n(0xAB, 300));
@@ -486,7 +486,7 @@ async fn export_avc1_out_of_band_reassembles() {
 		cfg.description = Some(avcc);
 		catalog.lock().video.renditions.insert(name.clone(), cfg);
 	}
-	let mut producer = Producer::new(track, HangContainer::Legacy);
+	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 
 	// IDR slice (NAL type 5), padded past 184 bytes to span multiple TS packets.
 	let mut idr = vec![0x65u8];
@@ -554,7 +554,7 @@ async fn export_import_h265_keeps_suffix_sei_on_its_picture() {
 		cfg.container = Container::Legacy;
 		catalog.lock().video.renditions.insert(name.clone(), cfg);
 	}
-	let mut producer = Producer::new(track, HangContainer::Legacy);
+	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 
 	for (i, nals) in units.iter().enumerate() {
 		producer
@@ -747,7 +747,7 @@ async fn export_pcr_wraps_below_the_reserve_at_start() {
 		cfg.container = Container::Legacy;
 		catalog.lock().audio.renditions.insert(track.name().to_string(), cfg);
 	}
-	let mut producer = Producer::new(track, HangContainer::Legacy);
+	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 	for i in 0..4u64 {
 		producer
 			.write(Frame {
@@ -837,7 +837,7 @@ async fn export_pcr_respects_every_renditions_reserve() {
 		cfg.description = Some(avcc.clone());
 		cfg.jitter = jitter;
 		catalog.lock().video.renditions.insert(name.to_string(), cfg);
-		Producer::new(track, HangContainer::Legacy)
+		Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data))
 	};
 	// "a" gets the lowest PID and so carries the PCR, with the tiny default
 	// reserve; "b" declares a 100 ms reorder depth.
@@ -913,7 +913,7 @@ async fn export_pcr_backfills_a_coarse_cadence() {
 		cfg.description = Some(avcc);
 		catalog.lock().video.renditions.insert(track.name().to_string(), cfg);
 	}
-	let mut producer = Producer::new(track, HangContainer::Legacy);
+	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 
 	let idr = [0x65u8; 32];
 	for i in 0..10u64 {
@@ -979,7 +979,7 @@ async fn export_scte35_roundtrip() {
 		};
 		catalog.lock().mpegts.tracks.insert(scte_name.clone(), track);
 	}
-	let mut scte_producer = Producer::new(scte, HangContainer::Legacy);
+	let mut scte_producer = Producer::new(scte, HangContainer::Legacy(crate::container::Kind::Data));
 	// bbb's first video keyframe is at 1.4 s; stamp the cue just after it so it survives
 	// the tune-in alignment (a cue before the first keyframe is dropped with the lead).
 	scte_producer
@@ -1051,7 +1051,7 @@ async fn export_scte35_roundtrip() {
 		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
-	let mut scte_reader = crate::container::Consumer::new(track, HangContainer::Legacy);
+	let mut scte_reader = crate::container::Consumer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 	let frame = scte_reader
 		.read()
 		.await
@@ -1096,7 +1096,7 @@ async fn export_pes_verbatim_roundtrip() {
 		track.verbatim = Some(verbatim);
 		catalog.lock().mpegts.tracks.insert(data_name.clone(), track);
 	}
-	let mut data_producer = Producer::new(data_track, HangContainer::Legacy);
+	let mut data_producer = Producer::new(data_track, HangContainer::Legacy(crate::container::Kind::Data));
 	// bbb's first video keyframe is at 1.4 s; stamp the PES just after it so it survives
 	// the tune-in alignment (content before the first keyframe is dropped with the lead).
 	data_producer
@@ -1153,7 +1153,7 @@ async fn export_pes_verbatim_roundtrip() {
 		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
-	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy);
+	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 	let frame = reader
 		.read()
 		.await
@@ -1189,7 +1189,7 @@ async fn scte35_without_video_export_is_rejected() {
 		};
 		catalog.lock().mpegts.tracks.insert(scte_name, track);
 	}
-	let mut producer = Producer::new(scte, HangContainer::Legacy);
+	let mut producer = Producer::new(scte, HangContainer::Legacy(crate::container::Kind::Data));
 	producer
 		.write(Frame {
 			timestamp: Timestamp::from_millis(0).unwrap(),
@@ -1226,7 +1226,7 @@ async fn read_frames(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec
 		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
-	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy);
+	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 	let mut frames = Vec::new();
 	while let Ok(res) = tokio::time::timeout(Duration::from_millis(50), reader.read()).await {
 		let Some(frame) = res.unwrap() else { break };
@@ -1547,7 +1547,7 @@ async fn read_cues(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<(
 		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
-	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy);
+	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 	let mut cues = Vec::new();
 	while let Ok(res) = tokio::time::timeout(Duration::from_millis(50), reader.read()).await {
 		let Some(frame) = res.unwrap() else { break };
@@ -2034,7 +2034,7 @@ async fn si_pids_are_re_emitted_on_their_own_interval() {
 	}
 
 	// One keyframe per second across 12s, so the PSI fires on every one of the 13.
-	let mut producer = Producer::new(track, HangContainer::Legacy);
+	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 	let mut idr = vec![0x65u8];
 	idr.extend(std::iter::repeat_n(0xAB, 300));
 	for sec in 0..=12u64 {
@@ -2165,7 +2165,7 @@ async fn rewind_re_emits_tables_and_resumes_the_clock() {
 		}
 	};
 
-	let mut producer = Producer::new(track, HangContainer::Legacy);
+	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 	let mut export = export_of(&consumer).await;
 
 	// A ten-minute offset exercises the long rewind from the controlled stimulus
@@ -2266,7 +2266,7 @@ async fn reordered_video_keeps_the_table_cadence() {
 	// is counted below is the interval cadence alone. 125 frames at 40ms displayed,
 	// emitted in decode order as IPBB quads, so every fourth timestamp jumps 120ms ahead
 	// and the next two step back behind it.
-	let mut producer = Producer::new(track, HangContainer::Legacy);
+	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 	let mut idr = vec![0x65u8];
 	idr.extend(std::iter::repeat_n(0xAB, 300));
 	let mut slice = vec![0x41u8];
@@ -2343,8 +2343,8 @@ async fn rewind_flags_the_break_once_across_tracks() {
 
 	let mut idr = vec![0x65u8];
 	idr.extend(std::iter::repeat_n(0xAB, 300));
-	let mut video = Producer::new(video_track, HangContainer::Legacy);
-	let mut audio = Producer::new(audio_track, HangContainer::Legacy);
+	let mut video = Producer::new(video_track, HangContainer::Legacy(crate::container::Kind::Data));
+	let mut audio = Producer::new(audio_track, HangContainer::Legacy(crate::container::Kind::Data));
 
 	// One keyframe-led second per group on video, 100ms audio frames alongside it.
 	let write = |video: &mut Producer<HangContainer>, audio: &mut Producer<HangContainer>, seconds: u64| {
@@ -2854,7 +2854,7 @@ async fn stale_si_entry_does_not_block_output() {
 		);
 	}
 
-	let mut producer = Producer::new(track, HangContainer::Legacy);
+	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 	let mut idr = vec![0x65u8];
 	idr.extend(std::iter::repeat_n(0xAB, 64));
 	producer
@@ -2942,7 +2942,7 @@ async fn export_opus_roundtrip() {
 		cfg.container = Container::Legacy;
 		catalog.lock().audio.renditions.insert(name.clone(), cfg);
 	}
-	let mut producer = Producer::new(track, HangContainer::Legacy);
+	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 
 	// The last packet is > 184 bytes to force PES splitting across TS packets.
 	let packets: Vec<Bytes> = vec![opus_packet(0x01, 4), opus_packet(0x10, 8), opus_packet(0x20, 200)];
@@ -3022,7 +3022,7 @@ async fn opus_export_import_roundtrip() {
 		cfg.container = Container::Legacy;
 		catalog.lock().audio.renditions.insert(name.clone(), cfg);
 	}
-	let mut producer = Producer::new(track, HangContainer::Legacy);
+	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 
 	let packets: Vec<Bytes> = (0..4).map(|i| opus_packet(0x40 + i as u8, 24)).collect();
 	for (i, payload) in packets.iter().enumerate() {
@@ -3112,7 +3112,7 @@ async fn export_twice(with_video: bool) -> (Vec<Frame>, Vec<Frame>) {
 		cfg.description =
 			Some(crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap());
 		catalog.lock().video.renditions.insert(track.name().to_string(), cfg);
-		Producer::new(track, HangContainer::Legacy)
+		Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data))
 	});
 
 	let mut audio = {
@@ -3125,7 +3125,7 @@ async fn export_twice(with_video: bool) -> (Vec<Frame>, Vec<Frame>) {
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
 		cfg.container = Container::Legacy;
 		catalog.lock().audio.renditions.insert(track.name().to_string(), cfg);
-		Producer::new(track, HangContainer::Legacy)
+		Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data))
 	};
 
 	let source = crate::source::announced(&consumer);
@@ -3342,7 +3342,7 @@ async fn repointed_si_entry_resubscribes() {
 		);
 	}
 
-	let mut producer = Producer::new(track, HangContainer::Legacy);
+	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 	let mut idr = vec![0x65u8];
 	idr.extend(std::iter::repeat_n(0xAB, 64));
 	let write_key = |producer: &mut Producer<HangContainer>, sec: u64| {
@@ -3461,7 +3461,7 @@ async fn si_revision_after_final_media_frame_is_flushed() {
 		);
 	}
 
-	let mut producer = Producer::new(track, HangContainer::Legacy);
+	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 	let mut idr = vec![0x65u8];
 	idr.extend(std::iter::repeat_n(0xAB, 64));
 	producer
@@ -3565,7 +3565,7 @@ async fn si_cadence_rig(pid: u16, table_id: u8, interval: Duration) -> SiCadence
 		);
 	}
 
-	let producer = Producer::new(track, HangContainer::Legacy);
+	let producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 	let exporter = Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
 		.await
 		.unwrap();
@@ -3922,7 +3922,7 @@ async fn export_cbr_video() -> Vec<Frame> {
 		cfg.container = Container::Legacy;
 		catalog.lock().video.renditions.insert(track.name().to_string(), cfg);
 	}
-	let mut video = Producer::new(track, HangContainer::Legacy);
+	let mut video = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 	for i in 0..100u64 {
 		let keyframe = i % 25 == 0;
 		let mut nal = vec![if keyframe { 0x65u8 } else { 0x41 }];

@@ -175,7 +175,10 @@ async fn import_emits_frames() {
 		.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1)))
 		.await
 		.unwrap();
-	let mut decoder = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
+	let mut decoder = crate::container::Consumer::new(
+		track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
 	let frame = decoder.read().await.unwrap().expect("a video frame");
 	assert!(frame.keyframe);
 	// The payload is the length-prefixed NALU, carried through verbatim.
@@ -198,7 +201,10 @@ async fn public_container_preserves_loc_for_flv() {
 	assert_eq!(config.container, hang::catalog::Container::Loc);
 
 	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
-	let mut media = crate::container::Consumer::new(track, crate::catalog::hang::Container::Loc);
+	let mut media = crate::container::Consumer::new(
+		track,
+		crate::catalog::hang::Container::Loc(crate::container::Kind::Data),
+	);
 	let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read())
 		.await
 		.unwrap()
@@ -491,7 +497,10 @@ async fn import_enhanced_av1() {
 		.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1)))
 		.await
 		.unwrap();
-	let mut decoder = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
+	let mut decoder = crate::container::Consumer::new(
+		track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
 	let frame = decoder.read().await.unwrap().expect("an AV1 frame");
 	assert!(frame.keyframe);
 	assert_eq!(frame.payload.as_ref(), payload);
@@ -598,7 +607,10 @@ async fn import_reports_negative_pts_and_can_resume() {
 		.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1)))
 		.await
 		.unwrap();
-	let mut decoder = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
+	let mut decoder = crate::container::Consumer::new(
+		track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
 	let frame = decoder.read().await.unwrap().expect("the good frame");
 	assert_eq!(frame.timestamp.as_millis(), 10);
 }
@@ -635,7 +647,10 @@ async fn import_enhanced_hvc1_applies_composition_time() {
 		.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1)))
 		.await
 		.unwrap();
-	let mut decoder = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
+	let mut decoder = crate::container::Consumer::new(
+		track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
 	let frame = decoder.read().await.unwrap().expect("a video frame");
 	assert_eq!(frame.timestamp.as_millis(), 17);
 }

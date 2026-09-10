@@ -69,7 +69,10 @@ async fn public_container_preserves_loc_for_ts() {
 	assert_eq!(config.container, hang::catalog::Container::Loc);
 
 	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
-	let mut media = crate::container::Consumer::new(track, crate::catalog::hang::Container::Loc);
+	let mut media = crate::container::Consumer::new(
+		track,
+		crate::catalog::hang::Container::Loc(crate::container::Kind::Data),
+	);
 	let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read())
 		.await
 		.unwrap()
@@ -182,7 +185,10 @@ async fn import_opus_frames() {
 		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
-	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
+	let mut reader = crate::container::Consumer::new(
+		track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
 	let mut frames = Vec::new();
 	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
 		let Some(frame) = res.unwrap() else { break };
@@ -382,7 +388,10 @@ async fn survives_midstream_join() {
 		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
-	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
+	let mut reader = crate::container::Consumer::new(
+		track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
 	let mut frames = Vec::new();
 	while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
 		frames.push(frame);
@@ -431,7 +440,10 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
-	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
+	let mut reader = crate::container::Consumer::new(
+		track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
 	let mut cues = Vec::new();
 	while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
 		cues.push((frame.payload.to_vec(), frame.timestamp));

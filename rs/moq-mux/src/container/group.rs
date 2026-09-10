@@ -49,7 +49,9 @@ impl<F: Container> GroupConsumer<F> {
 	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Frame>, F::Error>> {
 		// Hold the latest media frame until a marker or FIN times it. FETCH groups are
 		// already finished, so this look-ahead does not add latency there.
-		while self.pending.len() < 2 {
+		while self.pending.front().is_none_or(|frame| {
+			self.format.kind() == super::Kind::Video && frame.duration.is_none() && self.pending.len() < 2
+		}) {
 			match ready!(self.format.poll_read(&mut self.group, waiter)?) {
 				Some(frames) => {
 					for frame in frames {
@@ -99,13 +101,13 @@ mod tests {
 		let track = broadcast.create_track("media", None).unwrap();
 		let consumer = broadcast.consume();
 
-		let mut media = crate::container::Producer::new(track, Hang::Legacy);
+		let mut media = crate::container::Producer::new(track, Hang::Legacy(crate::container::Kind::Data));
 		media.write(frame(1_000_000, b"keyframe", true)).unwrap();
 		media.write(frame(1_020_000, b"delta", false)).unwrap();
 		media.finish().unwrap();
 
 		let group = consumer.track("media").unwrap().fetch_group(0, None).await.unwrap();
-		let mut group = GroupConsumer::new(group, Hang::Legacy);
+		let mut group = GroupConsumer::new(group, Hang::Legacy(crate::container::Kind::Data));
 		assert_eq!(group.sequence(), 0);
 
 		let first = group.read().await.unwrap().unwrap();
@@ -126,7 +128,7 @@ mod tests {
 		let track = broadcast.create_track("media", None).unwrap();
 		let consumer = broadcast.consume();
 
-		let mut media = crate::container::Producer::new(track, Hang::Legacy).with_duration_marker();
+		let mut media = crate::container::Producer::new(track, Hang::Legacy(crate::container::Kind::Video));
 		media.write(frame(1_000_000, b"keyframe", true)).unwrap();
 		media.write(frame(1_020_000, b"delta", false)).unwrap();
 		media
@@ -135,7 +137,7 @@ mod tests {
 		media.finish().unwrap();
 
 		let group = consumer.track("media").unwrap().fetch_group(0, None).await.unwrap();
-		let mut group = GroupConsumer::new(group, Hang::Legacy);
+		let mut group = GroupConsumer::new(group, Hang::Legacy(crate::container::Kind::Video));
 
 		let first = group.read().await.unwrap().unwrap();
 		assert_eq!(first.payload, b"keyframe".as_slice());
@@ -158,7 +160,7 @@ mod tests {
 		let init = muxer.init().unwrap().expect("VP8 init should be available");
 		let cmaf = hang::catalog::Container::Cmaf { init };
 		// The format is not Clone, so decode with a second instance built from the same init.
-		let format = Hang::try_from(&cmaf).unwrap();
+		let format = Hang::new(&cmaf, crate::container::Kind::Video).unwrap();
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast.create_track("video", None).unwrap();
@@ -182,7 +184,7 @@ mod tests {
 		media.finish().unwrap();
 
 		let group = consumer.track("video").unwrap().fetch_group(0, None).await.unwrap();
-		let mut group = GroupConsumer::new(group, Hang::try_from(&cmaf).unwrap());
+		let mut group = GroupConsumer::new(group, Hang::new(&cmaf, crate::container::Kind::Video).unwrap());
 
 		let first = group.read().await.unwrap().unwrap();
 		assert_eq!(first.payload, b"keyframe".as_slice());

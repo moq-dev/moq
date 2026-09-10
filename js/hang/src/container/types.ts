@@ -6,11 +6,11 @@ export interface Frame {
 	payload: Uint8Array;
 	/** Presentation timestamp in microseconds. */
 	timestamp: Time.Micro;
-	/** Whether this frame is a keyframe (can be decoded standalone). */
+	/** Whether this frame opens a group, or is a video keyframe. Audio carries it only on a group start. */
 	keyframe: boolean;
 
 	// How long this frame occupies the presentation timeline. CMAF carries a
-	// per-sample duration; Legacy and LOC fill it from a duration marker.
+	// per-sample duration; Legacy and LOC report later endpoints through Consumer.next().end.
 	// The consumer adds it to `timestamp` to learn how far a group has presented,
 	// so it can advance to a newer group as soon as the gap is covered instead of
 	// waiting out the max age budget.

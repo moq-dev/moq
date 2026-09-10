@@ -884,14 +884,17 @@ function createDOpsBox(channelCount: number, sampleRate: number, description?: s
 	return dOps;
 }
 
+/** A sample and its track metadata for a CMAF fragment. */
 export interface DataSegmentOptions {
+	/** Whether the track carries audio or video. */
+	kind: "audio" | "video";
 	/** Raw frame data */
 	data: Uint8Array;
 	/** Timestamp in timescale units */
 	timestamp: number;
 	/** Duration in timescale units */
 	duration: number;
-	/** Whether this is a keyframe */
+	/** Whether this opens a group or is a video keyframe; audio is always encoded as sync. */
 	keyframe: boolean;
 	/** Sequence number for this fragment */
 	sequence: number;
@@ -906,14 +909,14 @@ export interface DataSegmentOptions {
  * @returns The encoded moof+mdat segment
  */
 export function encodeDataSegment(opts: DataSegmentOptions): Uint8Array {
-	const { data, timestamp, duration, keyframe, sequence, trackId = 1 } = opts;
+	const { data, timestamp, duration, keyframe, kind, sequence, trackId = 1 } = opts;
 
 	// Sample flags:
 	// - sample_depends_on: bits 25-24 (2 = does not depend on others for IDR, 1 = depends on others)
 	// - sample_is_non_sync_sample: bit 16 (0 = sync/keyframe, 1 = non-sync)
-	// For keyframe: depends_on=2 (0x02000000), non_sync=0
-	// For non-keyframe: depends_on=1 (0x01000000), non_sync=1 (0x00010000)
-	const sampleFlags = keyframe ? 0x02000000 : 0x01010000;
+	// For audio or a video keyframe: depends_on=2 (0x02000000), non_sync=0
+	// For a video delta frame: depends_on=1 (0x01000000), non_sync=1 (0x00010000)
+	const sampleFlags = kind === "audio" || keyframe ? 0x02000000 : 0x01010000;
 
 	// mfhd - Movie Fragment Header
 	const mfhd: MovieFragmentHeaderBox = {

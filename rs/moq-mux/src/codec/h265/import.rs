@@ -55,11 +55,11 @@ impl<E: CatalogExt> Import<E> {
 		let rendition = reserved.video(track.name())?;
 		// The hint names the container; the writer is built from that same value so the wire
 		// cannot disagree with what the rendition advertises.
-		let wire = crate::catalog::hang::Container::try_from(&hint.container)?;
+		let wire = crate::catalog::hang::Container::try_from(&hint)?;
 		let catalog = crate::codec::video::Catalog::new(hint);
 		let mut import = Self {
 			hvc1: false,
-			track: reserved.producer().media_producer(track, wire)?.with_duration_marker(),
+			track: reserved.producer().media_producer(track, wire)?,
 			rendition,
 			catalog,
 			last_sps: None,

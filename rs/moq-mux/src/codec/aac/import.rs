@@ -31,7 +31,7 @@ impl<E: CatalogExt> Import<E> {
 		tracing::debug!(name = ?track.name(), ?config, "starting track");
 		// The caller's config names the container; the writer is built from that same value so the
 		// wire cannot disagree with what the rendition advertises.
-		let wire = crate::catalog::hang::Container::try_from(&config.container)?;
+		let wire = crate::catalog::hang::Container::try_from(&config)?;
 		let name = track.name().to_string();
 		// Build the writer before advertising the rendition: it is fallible (enrolling the track in
 		// the broadcast timeline can collide), and a rendition published for a track we then fail to

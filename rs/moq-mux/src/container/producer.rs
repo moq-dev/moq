@@ -1,3 +1,4 @@
+#[cfg(test)]
 use bytes::Bytes;
 
 use super::{Container, Frame};
@@ -67,9 +68,9 @@ pub struct Producer<C: Container> {
 	/// an exclusive presentation point from a max timestamp that still needs an estimate.
 	last_duration: Option<moq_net::Timestamp>,
 
-	/// Write an empty duration-marker frame at [`cut`](Self::cut) / [`finish`](Self::finish)
-	/// when the container uses them. Video tracks opt in; audio does not.
-	duration_marker: bool,
+	/// Previous timestamp within the group and cadence observed within this epoch.
+	previous_timestamp: Option<moq_net::Timestamp>,
+	cadence: Option<moq_net::Timestamp>,
 
 	/// Measures the jitter and bitrate of what gets written, for the catalog. Always on: it costs
 	/// two counters, and a caller who doesn't publish a rendition simply never reads it.
@@ -93,7 +94,8 @@ impl<C: Container> Producer<C> {
 			recorder: None,
 			end: None,
 			last_duration: None,
-			duration_marker: false,
+			previous_timestamp: None,
+			cadence: None,
 			estimator: crate::catalog::Estimator::new(),
 		}
 	}
@@ -151,17 +153,6 @@ impl<C: Container> Producer<C> {
 	/// [`media_producer`](crate::catalog::Producer::media_producer) wires it for you.
 	pub fn with_recorder(mut self, recorder: crate::timeline::Recorder) -> Self {
 		self.recorder = Some(recorder);
-		self
-	}
-
-	/// Close each video group with an empty frame at its exclusive end, so the last media
-	/// frame has a duration without peeking at the next group.
-	///
-	/// Audio leaves this off: its durations are codec-defined. The container must also
-	/// [`duration_marker`](super::Container::duration_marker); CMAF never writes one, and
-	/// LOC waits until skipping consumers have shipped.
-	pub fn with_duration_marker(mut self) -> Self {
-		self.duration_marker = true;
 		self
 	}
 
@@ -254,11 +245,7 @@ impl<C: Container> Producer<C> {
 		// into the next group anyway, so cutting often costs the catalog nothing.
 		self.estimator.cut(end);
 
-		let marker_at = if self.duration_marker && self.container.duration_marker() {
-			end.or_else(|| self.estimated_end())
-		} else {
-			None
-		};
+		let marker_at = end.or_else(|| self.estimated_end());
 
 		// Tell the timeline where this group's content stops: the duration marker when we
 		// write one, else the caller's bound, else the furthest point we wrote.
@@ -268,16 +255,29 @@ impl<C: Container> Producer<C> {
 			recorder.end(end);
 		}
 
-		self.flush(end)?;
-		self.write_duration_marker(marker_at)?;
+		self.flush(marker_at)?;
+		if let Some(group) = self.group.as_mut() {
+			self.container.finish_group(group, marker_at)?;
+		}
 		if let Some(mut group) = self.group.take() {
 			group.finish()?;
 		}
+		self.end = None;
+		self.last_duration = None;
+		self.previous_timestamp = None;
 		Ok(())
 	}
 
 	/// Raise the furthest presentation point written, for [`cut`](Self::cut) to report.
 	fn observe_end(&mut self, timestamp: moq_net::Timestamp, duration: Option<moq_net::Timestamp>) {
+		if let Some(previous) = self.previous_timestamp
+			&& let Ok(delta) = timestamp.checked_sub(previous)
+			&& !delta.is_zero()
+		{
+			self.cadence = Some(self.cadence.map_or(delta, |cadence| cadence.min(delta)));
+		}
+		self.previous_timestamp = Some(timestamp);
+
 		// Timestamp and duration can be at different scales, so add them in micros; the
 		// sub-microsecond rounding that costs is far below a segment boundary.
 		let micros = timestamp.as_micros() + duration.map(|d| d.as_micros()).unwrap_or(0);
@@ -291,39 +291,13 @@ impl<C: Container> Producer<C> {
 		}
 	}
 
-	/// Exclusive end of the last frame: its own duration, else last timestamp plus measured jitter.
+	/// Exclusive group end from a known duration or the observed sample cadence.
 	fn estimated_end(&self) -> Option<moq_net::Timestamp> {
 		let last = self.end?;
 		if self.last_duration.is_some() {
 			return Some(last);
 		}
-		let jitter = self.estimator.estimate().jitter?;
-		add_micros(last, moq_net::Timestamp::try_from(jitter).ok()?)
-	}
-
-	fn write_duration_marker(&mut self, bound: Option<moq_net::Timestamp>) -> Result<(), C::Error> {
-		if !self.duration_marker || !self.container.duration_marker() {
-			return Ok(());
-		}
-		let Some(timestamp) = bound else {
-			return Ok(());
-		};
-		let Some(group) = self.group.as_mut() else {
-			return Ok(());
-		};
-		self.container.write(
-			group,
-			&[Frame {
-				timestamp,
-				payload: Bytes::new(),
-				keyframe: false,
-				duration: None,
-			}],
-		)?;
-		if self.end.is_none_or(|prev| timestamp > prev) {
-			self.end = Some(timestamp);
-		}
-		Ok(())
+		add_micros(last, self.cadence?)
 	}
 
 	#[doc(hidden)]
@@ -370,6 +344,7 @@ impl<C: Container> Producer<C> {
 		// Nothing is measured across the break: the frames still open on this side have no end, and
 		// the gap to the far side is not a frame duration.
 		self.estimator.discontinuity();
+		self.cadence = None;
 		let mut group = match self.pending_sequence.take() {
 			Some(sequence) => self.inner.create_group(moq_net::group::Info { sequence })?,
 			None => self.inner.append_group()?,
@@ -504,7 +479,7 @@ mod tests {
 	#[tokio::test]
 	async fn writes_measure_the_catalog_estimate() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let mut producer = Producer::new(track, Container::Legacy);
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data));
 
 		// 25ms frames of 5 kB, a keyframe every 10, over more than the bitrate window.
 		for i in 0..80u64 {
@@ -523,7 +498,7 @@ mod tests {
 	#[tokio::test]
 	async fn per_frame_groups_still_measure_bitrate() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let mut producer = Producer::new(track, Container::Legacy);
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data));
 
 		// 40ms packets of 5 kB: 1 Mbps.
 		for i in 0..40u64 {
@@ -540,7 +515,7 @@ mod tests {
 	#[tokio::test]
 	async fn discontinuity_is_not_measured_across() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let mut producer = Producer::new(track, Container::Legacy);
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data));
 
 		producer.write(sized_frame(0, true, 5_000)).unwrap();
 		producer.discontinuity().unwrap();
@@ -598,7 +573,7 @@ mod tests {
 	#[tokio::test]
 	async fn reorder_raises_the_measured_jitter() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let mut producer = Producer::new(track, Container::Legacy);
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data));
 
 		producer.write(frame(0, true)).unwrap();
 		producer.write(frame(16_000, false)).unwrap();
@@ -635,7 +610,7 @@ mod tests {
 		let info = hang::container::track_info(hang::catalog::PRIORITY.video).with_max_age(discontinuity_max_age);
 		let track = track_producer("test", info);
 		let consumer = track.subscribe(moq_net::track::Subscription::default().with_max_age(discontinuity_max_age));
-		let mut producer = Producer::new(track, Container::Legacy);
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data));
 
 		producer.write(frame(0, true)).unwrap();
 		producer.write(frame(10_000, false)).unwrap();
@@ -654,7 +629,7 @@ mod tests {
 	#[tokio::test]
 	async fn discontinuity_moves_the_live_edge_off_stale_content() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let mut producer = Producer::new(track, Container::Legacy);
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data));
 
 		producer.write(frame(0, true)).unwrap();
 		let stale = producer.track().latest();
@@ -671,7 +646,7 @@ mod tests {
 	async fn keyframe_closes_group_immediately() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = track.subscribe(replay());
-		let mut producer = Producer::new(track, Container::Legacy);
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data));
 
 		producer.write(frame(0, true)).unwrap(); // first frame must be a keyframe
 		producer.write(frame(10_000, false)).unwrap();
@@ -690,7 +665,7 @@ mod tests {
 	async fn needs_keyframe_drives_audio_grouping() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = track.subscribe(replay());
-		let mut producer = Producer::new(track, Container::Legacy);
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data));
 
 		// Drive grouping off `needs_keyframe`, as the audio importers do: the first frame of each
 		// group is a keyframe, the rest are not, so they accumulate into ONE group...
@@ -728,7 +703,7 @@ mod tests {
 	async fn cut_writes_a_duration_marker_at_the_callers_bound() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = track.subscribe(replay());
-		let mut producer = Producer::new(track, Container::Legacy).with_duration_marker();
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
 
 		producer.write(frame(0, true)).unwrap();
 		producer.write(frame(10_000, false)).unwrap();
@@ -749,7 +724,7 @@ mod tests {
 	async fn audio_cut_writes_no_duration_marker() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let consumer = track.subscribe(replay());
-		let mut producer = Producer::new(track, Container::Legacy);
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
 
 		producer.write(frame(0, true)).unwrap();
 		producer.write(frame(20_000, false)).unwrap();
@@ -763,7 +738,7 @@ mod tests {
 	async fn loc_cut_writes_no_duration_marker() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = track.subscribe(replay());
-		let mut producer = Producer::new(track, Container::Loc).with_duration_marker();
+		let mut producer = Producer::new(track, Container::Loc(crate::container::Kind::Video));
 
 		producer.write(frame(0, true)).unwrap();
 		producer
@@ -788,7 +763,7 @@ mod tests {
 	async fn cut_closes_immediately() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = track.subscribe(replay());
-		let mut producer = Producer::new(track, Container::Legacy);
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data));
 
 		producer.write(frame(0, true)).unwrap();
 		producer.write(frame(10_000, false)).unwrap();
@@ -806,7 +781,7 @@ mod tests {
 	async fn deprecated_finish_group_still_closes() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = track.subscribe(replay());
-		let mut producer = Producer::new(track, Container::Legacy);
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data));
 
 		producer.write(frame(0, true)).unwrap();
 		producer.write(frame(10_000, false)).unwrap();
@@ -821,7 +796,7 @@ mod tests {
 	#[test]
 	fn first_frame_must_be_keyframe() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let mut producer = Producer::new(track, Container::Legacy);
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data));
 
 		let err = producer.write(frame(0, false)).unwrap_err();
 		assert!(matches!(err, crate::Error::MissingKeyframe(_)));
@@ -841,7 +816,7 @@ mod tests {
 	async fn seek_uses_explicit_sequence() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = track.subscribe(replay());
-		let mut producer = Producer::new(track, Container::Legacy);
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data));
 
 		producer.write(frame(0, true)).unwrap(); // seq 0
 		producer.seek(42).unwrap();
@@ -856,7 +831,7 @@ mod tests {
 	async fn seek_clears_pending_after_use() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = track.subscribe(replay());
-		let mut producer = Producer::new(track, Container::Legacy);
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data));
 
 		producer.seek(5).unwrap();
 		producer.write(frame(0, true)).unwrap(); // seq 5
@@ -908,5 +883,32 @@ mod tests {
 		assert_eq!(group0[0].duration, Some(Timestamp::from_micros(33_000).unwrap()));
 		// The last sample's duration is backfilled from the next keyframe: 66ms - 33ms.
 		assert_eq!(group0[1].duration, Some(Timestamp::from_micros(33_000).unwrap()));
+	}
+	#[tokio::test]
+	async fn duration_marker_uses_cadence_not_batching_delay() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
+		producer.burst(std::time::Duration::from_secs(1));
+		producer.write(frame(0, true)).unwrap();
+		producer.write(frame(20_000, false)).unwrap();
+		producer.write(frame(40_000, false)).unwrap();
+		producer.finish().unwrap();
+		assert_eq!(collect_payloads(consumer).await[0].last(), Some(&(60_000, 0)));
+	}
+
+	#[tokio::test]
+	async fn duration_marker_resets_after_discontinuity() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
+		producer.write(frame(1_000_000, true)).unwrap();
+		producer.write(frame(1_010_000, false)).unwrap();
+		producer.discontinuity().unwrap();
+		producer.write(frame(0, true)).unwrap();
+		producer.write(frame(20_000, false)).unwrap();
+		producer.finish().unwrap();
+		let groups = collect_payloads(consumer).await;
+		assert_eq!(groups.last().unwrap().last(), Some(&(40_000, 0)));
 	}
 }

@@ -578,7 +578,7 @@ mod tests {
 			.mpegts
 			.tracks
 			.insert(section.name().to_string(), section_track);
-		let mut section_producer = Producer::new(section, Container::Legacy);
+		let mut section_producer = Producer::new(section, Container::Legacy(moq_mux::container::Kind::Data));
 		// bbb's first video keyframe is at 1.4 s; stamp the ancillary streams just after
 		// it so they clear the export's keyframe alignment (anything before the first
 		// keyframe is dropped on tune-in).
@@ -603,7 +603,7 @@ mod tests {
 		let mut pes_track = tscat::Track::new(VERBATIM_PES_PID);
 		pes_track.verbatim = Some(verbatim);
 		catalog.lock().mpegts.tracks.insert(pes.name().to_string(), pes_track);
-		let mut pes_producer = Producer::new(pes, Container::Legacy);
+		let mut pes_producer = Producer::new(pes, Container::Legacy(moq_mux::container::Kind::Data));
 		pes_producer
 			.write(Frame {
 				timestamp: Timestamp::from_millis(1410).unwrap(),
@@ -727,7 +727,7 @@ mod tests {
 	/// Read the first frame of a verbatim track back as raw bytes.
 	async fn read_frame(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<u8> {
 		let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
-		let mut reader = Consumer::new(track, Container::Legacy);
+		let mut reader = Consumer::new(track, Container::Legacy(moq_mux::container::Kind::Data));
 		let frame = tokio::time::timeout(Duration::from_secs(1), reader.read())
 			.await
 			.expect("verbatim read timed out")

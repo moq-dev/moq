@@ -1048,7 +1048,10 @@ mod tests {
 
 			let net = broadcast.create_track("gps", None).unwrap();
 			let mut track = catalog
-				.media_producer(net, crate::catalog::hang::Container::Legacy)
+				.media_producer(
+					net,
+					crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+				)
 				.unwrap();
 
 			// 40ms records of 5 kB: 1 Mbps, over more than the bitrate window.
