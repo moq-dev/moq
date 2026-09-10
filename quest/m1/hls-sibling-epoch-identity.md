@@ -28,7 +28,3 @@ Add a deterministic regression with a held catalog and timeline, a bound
 sibling, and a replacement through a different first hop after timeline rows
 arrive. Also cover a replacement already present when the export starts: it is
 the sibling the request resolves to and serves normally.
-
-## Related
-
-- [HLS cache misses](/quest/m1/hls-cache-miss-codes.md) - classify a missing group once the bound publisher is known

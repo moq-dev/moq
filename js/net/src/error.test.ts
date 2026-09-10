@@ -15,6 +15,7 @@ import {
 	toStreamCode,
 	toTransport,
 } from "./error.ts";
+import { Version } from "./ietf/version.ts";
 import { TimeoutError } from "./util/timeout.ts";
 
 // Stand-in for the current WebTransportError constructor, which the test runtime may not define.
@@ -215,28 +216,32 @@ test("the code tables match the spec", () => {
 		expect(code).toBeLessThan(32);
 	}
 
-	// The stream table adds the reserved-range placeholders this implementation sends,
-	// plus the assigned 48-63 codes the draft publishes (NO_CAPACITY). 32-47 stays
-	// placeholders; 48-63 is moq-lite's own.
-	const placeholders: StreamCode[] = [
+	// The stream table adds moq-lite's own 48-63 assignments and the reserved 32-47
+	// placeholders this implementation still sends. 32-47 carries no meaning the draft
+	// publishes, so a code we put in it is an agreement with our own Rust implementation
+	// rather than a spec value.
+	const assignedLite: StreamCode[] = [
+		StreamCode.NoCapacity,
 		StreamCode.NotFound,
 		StreamCode.Old,
 		StreamCode.Evicted,
-		StreamCode.FrameTooLarge,
 	];
-	const assigned = [StreamCode.NoCapacity];
+	const placeholders: StreamCode[] = [StreamCode.FrameTooLarge];
 	for (const code of Object.values(StreamCode)) {
-		if (placeholders.includes(code) || assigned.includes(code)) {
-			expect(code).toBeGreaterThanOrEqual(32);
+		if (assignedLite.includes(code)) {
+			expect(code).toBeGreaterThanOrEqual(48);
 			expect(code).toBeLessThan(64);
+		} else if (placeholders.includes(code)) {
+			expect(code).toBeGreaterThanOrEqual(32);
+			expect(code).toBeLessThan(48);
 		} else {
 			expect(code).toBeLessThan(32);
 		}
 	}
 	// The values the Rust `StreamError` sends for the same conditions.
-	expect(Number(StreamCode.NotFound)).toBe(0x20);
-	expect(Number(StreamCode.Old)).toBe(0x22);
-	expect(Number(StreamCode.Evicted)).toBe(0x23);
+	expect(Number(StreamCode.NotFound)).toBe(0x33);
+	expect(Number(StreamCode.Old)).toBe(0x34);
+	expect(Number(StreamCode.Evicted)).toBe(0x35);
 	expect(Number(StreamCode.FrameTooLarge)).toBe(0x25);
 	expect(Number(StreamCode.NoCapacity)).toBe(0x30);
 
@@ -323,6 +328,10 @@ test("toStreamCode and fromTransport agree on what a code means", () => {
 		StreamCode.GoingAway,
 		StreamCode.TooFarBehind,
 		StreamCode.MalformedTrack,
+		StreamCode.NoCapacity,
+		StreamCode.NotFound,
+		StreamCode.Old,
+		StreamCode.Evicted,
 		StreamCode(70),
 	]) {
 		expect(toStreamCode(fromTransport(toTransport(code, "reset")))).toBe(code);
@@ -331,4 +340,10 @@ test("toStreamCode and fromTransport agree on what a code means", () => {
 	// A gap is one class whichever side it happened on, so a `catch` needs only one check.
 	expect(fromTransport(toTransport(StreamCode.TooFarBehind, "lagged"))).toBeInstanceOf(Lagged);
 	expect(new Lagged()).toBeInstanceOf(StreamError);
+});
+
+test("toStreamCode: lite-only cache-miss codes do not reach an IETF peer", () => {
+	for (const code of [StreamCode.NotFound, StreamCode.Old, StreamCode.Evicted]) {
+		expect(toStreamCode(new StreamError(code), { version: Version.DRAFT_20 })).toBe(StreamCode.Internal);
+	}
 });

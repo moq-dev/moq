@@ -319,4 +319,248 @@ mod tests {
 		assert!(parse_route("/project/private%2F/master.m3u8").is_none());
 		assert!(parse_route("/project%2Fprivate/master.m3u8").is_none());
 	}
+
+	const TIMEOUT: Duration = Duration::from_secs(10);
+
+	fn vp8_frame(micros: u64, keyframe: bool) -> moq_mux::container::Frame {
+		let payload = if keyframe {
+			&[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0xf0, 0x00][..]
+		} else {
+			&[0x31, 0x00, 0x00][..]
+		};
+		moq_mux::container::Frame {
+			timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
+			payload: bytes::Bytes::copy_from_slice(payload),
+			keyframe,
+			duration: None,
+		}
+	}
+
+	fn video_config() -> hang::catalog::VideoConfig {
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
+		config.framerate = Some(30.0);
+		config
+	}
+
+	/// A moq-lite publisher↔subscriber pair over loopback TCP, so a FETCH actually
+	/// crosses a session.
+	struct LitePair {
+		pub_origin: moq_net::origin::Producer,
+		sub_origin: moq_net::origin::Producer,
+		_connection: moq_tokio::Connection,
+		accept: tokio::task::JoinHandle<()>,
+	}
+
+	async fn lite_pair() -> LitePair {
+		lite_pair_pub(moq_net::Hop::random()).await
+	}
+
+	async fn lite_pair_pub(info: impl Into<moq_net::origin::Info>) -> LitePair {
+		use std::net::TcpListener;
+
+		let lite: moq_net::Version = "moq-lite-05".parse().expect("lite version");
+		let pub_origin = moq_tokio::origin::spawn(info);
+		let sub_origin = moq_tokio::origin::spawn(moq_net::Hop::random());
+
+		for _ in 0..20 {
+			let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
+			let port = probe.local_addr().expect("local addr").port();
+			drop(probe);
+
+			let mut listen = moq_tokio::listen::Config::default();
+			listen.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("addr"));
+			listen.version = vec![lite];
+			let Ok(server) = listen.init(Default::default()) else {
+				continue;
+			};
+			let Ok(mut server) = server.listen().await else {
+				continue;
+			};
+
+			let pub_for_accept = pub_origin.clone();
+			let accept = tokio::spawn(async move {
+				let request = server.accept().await.expect("accept");
+				let session = request
+					.with_publisher(&pub_for_accept)
+					.ok()
+					.await
+					.expect("publisher session");
+				let _ = session.closed().await;
+			});
+
+			let mut connect = moq_tokio::connect::Config::default();
+			connect.version = vec![lite];
+			let client = connect
+				.init(Default::default())
+				.expect("client")
+				.with_subscriber(sub_origin.clone())
+				.with_reconnect(false);
+			let url: url::Url = format!("tcp://127.0.0.1:{port}/").parse().expect("url");
+			let connection = tokio::time::timeout(TIMEOUT, client.connect(url).established())
+				.await
+				.expect("connect timed out")
+				.expect("connect");
+
+			return LitePair {
+				pub_origin,
+				sub_origin,
+				_connection: connection,
+				accept,
+			};
+		}
+		panic!("could not bind a free TCP port after 20 attempts");
+	}
+
+	async fn oneshot(app: axum::Router, uri: &str) -> axum::http::Response<axum::body::Body> {
+		use tower::ServiceExt;
+		app.oneshot(
+			axum::extract::Request::builder()
+				.uri(uri)
+				.body(axum::body::Body::empty())
+				.unwrap(),
+		)
+		.await
+		.unwrap()
+	}
+
+	async fn wait_listed(app: &axum::Router, playlist: &str, segment: &str) {
+		let deadline = tokio::time::Instant::now() + TIMEOUT;
+		loop {
+			let response = oneshot(app.clone(), playlist).await;
+			if response.status() == StatusCode::OK {
+				let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+				if String::from_utf8_lossy(&body).contains(segment) {
+					return;
+				}
+			}
+			assert!(
+				tokio::time::Instant::now() < deadline,
+				"{playlist} never listed {segment}"
+			);
+			tokio::time::sleep(Duration::from_millis(50)).await;
+		}
+	}
+
+	fn publish_video(
+		broadcast: &mut moq_net::broadcast::Producer,
+		config: hang::catalog::VideoConfig,
+		track: impl Into<Option<moq_net::track::Info>>,
+	) -> (
+		moq_mux::catalog::Producer,
+		moq_mux::catalog::VideoTrack,
+		moq_net::track::Producer,
+		moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
+	) {
+		let mut catalog = moq_mux::catalog::Producer::new(broadcast).unwrap();
+		let reserved = catalog.reserve();
+		let mut registration = reserved.video("video0").unwrap();
+		registration.set(config).unwrap();
+		drop(reserved);
+		let track = broadcast.create_track("video0", track).unwrap();
+		let media = catalog
+			.media_producer(track.clone(), moq_mux::catalog::hang::Container::Legacy)
+			.unwrap();
+		(catalog, registration, track, media)
+	}
+
+	fn write_three_gops(media: &mut moq_mux::container::Producer<moq_mux::catalog::hang::Container>) {
+		media.write(vp8_frame(0, true)).unwrap();
+		media.write(vp8_frame(1_000_000, false)).unwrap();
+		media.write(vp8_frame(2_000_000, true)).unwrap();
+		media.write(vp8_frame(3_000_000, false)).unwrap();
+		media.write(vp8_frame(4_000_000, true)).unwrap();
+	}
+
+	/// A miss that crossed a moq-lite session answers 404, not 500.
+	#[tokio::test]
+	async fn a_session_crossed_cache_miss_answers_404() {
+		let pool = moq_net::cache::Pool::new(moq_net::cache::Config::default().with_capacity(1));
+		let pair = lite_pair_pub(moq_net::origin::Info::new(moq_net::Hop::random()).with_pool(pool)).await;
+		let mut broadcast = pair.pub_origin.create_broadcast("live").expect("publish");
+		broadcast.announce(Default::default()).expect("announce");
+		let (_catalog, _registration, _track, mut media) = publish_video(&mut broadcast, video_config(), None);
+		write_three_gops(&mut media);
+
+		let app = Server::new(pair.sub_origin.consume(), crate::export::Config::default()).router();
+		wait_listed(&app, "/live/video/video0/media.m3u8", "seg/0.m4s").await;
+
+		let response = oneshot(app, "/live/video/video0/seg/0.m4s").await;
+		assert_eq!(response.status(), StatusCode::NOT_FOUND);
+		assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+
+		pair.accept.abort();
+	}
+
+	#[tokio::test]
+	async fn a_disconnected_publisher_on_the_catalog_broadcast_answers_404() {
+		let pair = lite_pair().await;
+		let mut broadcast = pair.pub_origin.create_broadcast("live").expect("publish");
+		broadcast.announce(Default::default()).expect("announce");
+		let (catalog, registration, track, mut media) = publish_video(&mut broadcast, video_config(), None);
+		write_three_gops(&mut media);
+
+		let app = Server::new(pair.sub_origin.consume(), crate::export::Config::default()).router();
+		wait_listed(&app, "/live/video/video0/media.m3u8", "seg/0.m4s").await;
+
+		let remote = tokio::time::timeout(TIMEOUT, pair.sub_origin.consume().request_broadcast("live"))
+			.await
+			.expect("remote resolve timed out")
+			.expect("remote broadcast");
+		drop((catalog, registration, track, media, broadcast));
+		tokio::time::timeout(TIMEOUT, remote.closed())
+			.await
+			.expect("publisher close timed out");
+
+		let response = oneshot(app, "/live/video/video0/seg/0.m4s").await;
+		assert_eq!(response.status(), StatusCode::NOT_FOUND);
+		assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+
+		pair.accept.abort();
+	}
+
+	#[tokio::test]
+	async fn a_disconnected_sibling_publisher_answers_404() {
+		let pair = lite_pair().await;
+		let mut catalog_broadcast = pair.pub_origin.create_broadcast("room/live").expect("catalog");
+		catalog_broadcast
+			.announce(Default::default())
+			.expect("announce catalog");
+		let mut media_broadcast = pair.pub_origin.create_broadcast("room/source").expect("media");
+		media_broadcast.announce(Default::default()).expect("announce media");
+
+		let mut catalog = moq_mux::catalog::Producer::new(&mut catalog_broadcast).unwrap();
+		let reserved = catalog.reserve();
+		let mut registration = reserved.video("video0").unwrap();
+		let mut config = video_config();
+		config.broadcast = Some(moq_net::PathRelative::new("../source").to_owned());
+		registration.set(config).unwrap();
+		drop(reserved);
+		let recorder = catalog.enroll("video0").unwrap();
+		let track = media_broadcast.create_track("video0", None).unwrap();
+		let mut media =
+			moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy).with_recorder(recorder);
+		write_three_gops(&mut media);
+
+		let app = Server::new(pair.sub_origin.consume(), crate::export::Config::default()).router();
+		wait_listed(&app, "/room/live/video/video0/media.m3u8", "seg/0.m4s").await;
+
+		let remote_media = tokio::time::timeout(TIMEOUT, pair.sub_origin.consume().request_broadcast("room/source"))
+			.await
+			.expect("sibling resolve timed out")
+			.expect("sibling broadcast");
+		drop(media);
+		drop(media_broadcast);
+		tokio::time::timeout(TIMEOUT, remote_media.closed())
+			.await
+			.expect("sibling close timed out");
+
+		let response = oneshot(app, "/room/live/video/video0/seg/0.m4s").await;
+		assert_eq!(response.status(), StatusCode::NOT_FOUND);
+		assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+
+		drop((catalog, registration, catalog_broadcast));
+		pair.accept.abort();
+	}
 }

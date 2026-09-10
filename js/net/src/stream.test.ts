@@ -575,7 +575,8 @@ test("open waits for a stream slot instead of rejecting once the peer's limit is
 
 // A moq-transport code has to be one the negotiated draft assigns the same meaning to, so
 // each row says what it costs on a draft that predates the registration. TOO_FAR_BEHIND
-// arrived in draft-17, and moq-lite's reserved 32-63 placeholders are in no draft at all.
+// arrived in draft-17, and moq-lite's 32-63 codes (reserved placeholders and its own
+// 48-63 assignments) are in no draft at all.
 for (const [version, tooFarBehind] of [
 	[undefined, StreamCode.TooFarBehind],
 	[Version.DRAFT_14, StreamCode.Internal],
