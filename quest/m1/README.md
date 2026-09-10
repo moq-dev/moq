@@ -45,7 +45,8 @@ with the dev tree.
 - [A/V clock](/quest/m1/plan-av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
 - [Config provenance](/quest/m1/config-provenance.md) - the merge records which source set a value, so an empty TOML list survives the environment and env outranks the file
 - [Cluster construction](/quest/m1/cluster-construction.md) - construct one stable origin after its cache settings are known, deleting the rebuilding builder
-- [#3046](/quest/m1/3046-fold-moq-token-into-moq-token-via-a-usage-executable-view.md) - retire the standalone moq-token binary after one deprecation release; `moq token` is the only spelling
+- [LAN discovery app id](/quest/m1/lan-app.md) - every advertisement names an application as a DNS-SD subtype bound into the proofs, so unrelated apps on one network never meet
+- [One LAN mesh](/quest/m1/lan-mesh.md) - moq-cli drives the relay's Cluster, LAN peers authenticate by mDNS credential, and the two binaries mesh with each other
 - [Native Go context](/quest/m1/go-native-context.md) - the Go generator emits context.Context itself, retiring the hand-rolled cancellation token
 - [#2152](/quest/m1/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - libmoq serves tracks on demand and accepts sessions, the two moq-ffi calls C still lacks
 - [Transport feature](/quest/m1/tokio-transport-feature.md) - moq-tokio has one `_transport` gate and its backend-less build passes `-D warnings`
