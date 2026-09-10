@@ -125,6 +125,31 @@ test("Legacy Producer writes a duration marker at the next keyframe", async () =
 	]);
 });
 
+test("Legacy Producer omits a reordered group's presentation endpoint marker", async () => {
+	const track = new Track.Producer("test");
+	const subscriber = track.subscribe({ maxAge: 30_000 });
+	const producer = new LegacyProducer(track, new LegacyFormat("video"));
+	for (const [index, timestamp] of [0, 120_000, 40_000, 80_000].entries()) {
+		producer.encode(new Uint8Array([1]), timestamp as Time.Micro, index === 0);
+	}
+	producer.encode(new Uint8Array([1]), 160_000 as Time.Micro, true);
+	producer.cut(200_000 as Time.Micro);
+	producer.close();
+	const group = await subscriber.recvGroup();
+	expect(group).toBeDefined();
+	let count = 0;
+	while (await group?.readFrame()) count++;
+	expect(count).toBe(4);
+	const next = await subscriber.recvGroup();
+	expect(next).toBeDefined();
+	await next?.readFrame();
+	const marker = await next?.readFrame();
+	expect(marker).toBeDefined();
+	const [timestamp, payload] = Varint.decode(marker!.payload);
+	expect(timestamp).toBe(200_000);
+	expect(payload.byteLength).toBe(0);
+});
+
 test("LegacyFormat throws on truncated input", () => {
 	const format = new LegacyFormat("data");
 	// A varint that indicates more bytes follow but is truncated

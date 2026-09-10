@@ -525,6 +525,7 @@ The remainder of the payload is codec specific; see the WebCodecs specification 
 A frame with an empty codec payload is the exclusive end of the frame before it, not media.
 A video publisher SHOULD end each group with one when the exclusive end is known; audio has none.
 A publisher MAY estimate an unknown final duration from the frame cadence, but MUST NOT use batching or reorder delay as that duration.
+For reordered video, the group presentation endpoint does not necessarily bound the preceding frame in decode order; the publisher omits the marker unless that frame's exclusive end is known.
 A consumer MUST skip it and MUST NOT submit it to a decoder.
 It does not mean the track ended.
 

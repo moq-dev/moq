@@ -74,6 +74,7 @@ export class Producer {
 	#track: Moq.Track.Producer;
 	#format: Format;
 	#previous?: Time.Micro;
+	#reordered = false;
 	#group?: Moq.Group.Producer;
 	#timeline?: TimelineRecorder;
 	// The newest timestamp written, reported to the timeline when the track closes: the last
@@ -105,6 +106,7 @@ export class Producer {
 			timestamp: Time.Timestamp.fromMicros(timestamp),
 		});
 
+		this.#reordered ||= this.#previous !== undefined && timestamp < this.#previous;
 		if (this.#previous !== undefined && timestamp > this.#previous) {
 			const delta = (timestamp - this.#previous) as Time.Micro;
 			this.#interval = this.#interval === undefined ? delta : (Math.min(this.#interval, delta) as Time.Micro);
@@ -120,13 +122,15 @@ export class Producer {
 			this.#end !== undefined && this.#interval !== undefined
 				? ((this.#end + this.#interval) as Time.Micro)
 				: undefined;
-		this.#format.finishGroup(this.#group, end);
+		// A presentation endpoint cannot bound the decode-order tail after reordering.
+		this.#format.finishGroup(this.#group, this.#reordered ? undefined : end);
 		const bound = end ?? this.#end;
 		if (bound !== undefined) this.#timeline?.end(bound);
 		this.#group.close();
 		this.#group = undefined;
 		this.#end = undefined;
 		this.#previous = undefined;
+		this.#reordered = false;
 	}
 
 	/** Close the track and current group, optionally with an error. */

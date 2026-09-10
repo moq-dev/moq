@@ -71,6 +71,8 @@ pub struct Producer<C: Container> {
 	/// Previous timestamp within the group and cadence observed within this epoch.
 	previous_timestamp: Option<moq_net::Timestamp>,
 	cadence: Option<moq_net::Timestamp>,
+	/// A presentation endpoint cannot bound the decode-order tail after reordering.
+	reordered: bool,
 
 	/// Measures the jitter and bitrate of what gets written, for the catalog. Always on: it costs
 	/// two counters, and a caller who doesn't publish a rendition simply never reads it.
@@ -96,6 +98,7 @@ impl<C: Container> Producer<C> {
 			last_duration: None,
 			previous_timestamp: None,
 			cadence: None,
+			reordered: false,
 			estimator: crate::catalog::Estimator::new(),
 		}
 	}
@@ -239,7 +242,9 @@ impl<C: Container> Producer<C> {
 	/// `end` bounds the final buffered frame when the publisher knows where the
 	/// group's content stops. A video track that writes duration markers appends an
 	/// empty frame at that bound, or at the last timestamp plus its estimated
-	/// duration. The next [`write`](Self::write) must be a keyframe.
+	/// duration. Reordered groups omit this marker because their presentation end
+	/// does not bound the last frame in decode order. The next [`write`](Self::write)
+	/// must be a keyframe.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> Result<(), C::Error> {
 		// Before the flush, which can fail: an unbounded cut leaves the measurement open to fold
 		// into the next group anyway, so cutting often costs the catalog nothing.
@@ -255,9 +260,10 @@ impl<C: Container> Producer<C> {
 			recorder.end(end);
 		}
 
-		self.flush(marker_at)?;
+		let tail_end = marker_at.filter(|_| !self.reordered);
+		self.flush(tail_end)?;
 		if let Some(group) = self.group.as_mut() {
-			self.container.finish_group(group, marker_at)?;
+			self.container.finish_group(group, tail_end)?;
 		}
 		if let Some(mut group) = self.group.take() {
 			group.finish()?;
@@ -265,11 +271,13 @@ impl<C: Container> Producer<C> {
 		self.end = None;
 		self.last_duration = None;
 		self.previous_timestamp = None;
+		self.reordered = false;
 		Ok(())
 	}
 
 	/// Raise the furthest presentation point written, for [`cut`](Self::cut) to report.
 	fn observe_end(&mut self, timestamp: moq_net::Timestamp, duration: Option<moq_net::Timestamp>) {
+		self.reordered |= self.previous_timestamp.is_some_and(|previous| timestamp < previous);
 		if let Some(previous) = self.previous_timestamp
 			&& let Ok(delta) = timestamp.checked_sub(previous)
 			&& !delta.is_zero()
@@ -895,6 +903,27 @@ mod tests {
 		producer.write(frame(40_000, false)).unwrap();
 		producer.finish().unwrap();
 		assert_eq!(collect_payloads(consumer).await[0].last(), Some(&(60_000, 0)));
+	}
+
+	#[tokio::test]
+	async fn reordered_group_does_not_mark_the_decode_tail_with_the_presentation_end() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
+		for (index, timestamp) in [0, 120_000, 40_000, 80_000].into_iter().enumerate() {
+			producer.write(frame(timestamp, index == 0)).unwrap();
+		}
+		producer.write(frame(160_000, true)).unwrap();
+		producer.write(frame(200_000, false)).unwrap();
+		producer.cut(Some(Timestamp::from_micros(240_000).unwrap())).unwrap();
+		producer.finish().unwrap();
+		let groups = collect_payloads(consumer).await;
+		assert_eq!(groups[0], vec![(0, 2), (120_000, 2), (40_000, 2), (80_000, 2)]);
+		assert_eq!(
+			groups[1].last(),
+			Some(&(240_000, 0)),
+			"the next group can mark its tail"
+		);
 	}
 
 	#[tokio::test]
