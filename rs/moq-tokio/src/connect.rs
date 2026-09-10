@@ -478,7 +478,7 @@ pub struct Config {
 	/// token. `http://` first fetches `/certificate.sha256` for the (insecure)
 	/// self-signed fingerprint; `https://` connects directly.
 	#[serde(alias = "connect", skip_serializing_if = "Option::is_none")]
-	#[usage(name = "connect", long = "connect", env = "MOQ_CONNECT")]
+	#[usage(name = "connect", long = "connect", env = "MOQ_CONNECT", setting = "connect.url")]
 	pub url: Option<Url>,
 
 	/// Send from this local UDP address. Defaults to an ephemeral dual-stack port.
@@ -486,12 +486,22 @@ pub struct Config {
 	/// Kept optional because the compatibility fold must distinguish an explicit
 	/// wildcard bind from an unset bind.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	#[usage(name = "connect-bind", long = "connect-bind", env = "MOQ_CONNECT_BIND")]
+	#[usage(
+		name = "connect-bind",
+		long = "connect-bind",
+		env = "MOQ_CONNECT_BIND",
+		setting = "connect.bind"
+	)]
 	pub bind: Option<net::SocketAddr>,
 
 	/// The QUIC backend to use.
 	/// Auto-detected from compiled features if not specified.
-	#[usage(name = "connect-backend", long = "connect-backend", env = "MOQ_CONNECT_BACKEND")]
+	#[usage(
+		name = "connect-backend",
+		long = "connect-backend",
+		env = "MOQ_CONNECT_BACKEND",
+		setting = "connect.backend"
+	)]
 	pub backend: Option<QuicBackend>,
 
 	/// Delay before also dialing the next resolved address (Happy Eyeballs).
@@ -508,7 +518,8 @@ pub struct Config {
 		name = "connect-race",
 		long = "connect-race",
 		env = "MOQ_CONNECT_RACE",
-		default = "250ms"
+		default = "250ms",
+		setting = "connect.race"
 	)]
 	pub race: crate::Duration,
 
@@ -523,7 +534,8 @@ pub struct Config {
 		name = "connect-resolution-delay",
 		long = "connect-resolution-delay",
 		env = "MOQ_CONNECT_RESOLUTION_DELAY",
-		default = "50ms"
+		default = "50ms",
+		setting = "connect.resolution_delay"
 	)]
 	pub resolution_delay: crate::Duration,
 
@@ -540,7 +552,8 @@ pub struct Config {
 		name = "connect-timeout",
 		long = "connect-timeout",
 		env = "MOQ_CONNECT_TIMEOUT",
-		default = "30s"
+		default = "30s",
+		setting = "connect.timeout"
 	)]
 	pub timeout: crate::Duration,
 
@@ -554,6 +567,7 @@ pub struct Config {
 		name = "connect-version",
 		long = "connect-version",
 		env = "MOQ_CONNECT_VERSION",
+		setting = "connect.version",
 		choices(
 			"moq-lite-01",
 			"moq-lite-02",
@@ -587,6 +601,7 @@ pub struct Config {
 		name = "connect-once",
 		long = "connect-once",
 		env = "MOQ_CONNECT_ONCE",
+		setting = "connect.once",
 		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
@@ -634,6 +649,16 @@ pub struct Config {
 	#[usage(skip)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub quic: Option<crate::quic::Config>,
+}
+
+impl Config {
+	/// Hidden CLI-only fields a TOML round-trip would drop.
+	pub fn keep_parse_only(&mut self, from: &Self) {
+		self.legacy = from.legacy.clone();
+		self.tls.keep_parse_only(&from.tls);
+		#[cfg(feature = "websocket")]
+		self.websocket.keep_parse_only(&from.websocket);
+	}
 }
 
 impl Default for Config {

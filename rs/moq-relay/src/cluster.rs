@@ -394,7 +394,12 @@ pub struct ClusterConfig {
 	/// (the wire varint limit); an out-of-range value errors at startup. Keep it
 	/// below 2^53 for compatibility with older `@moq/lite` JS clients, which
 	/// decode hop ids as a `u53` and reject anything larger.
-	#[usage(name = "cluster-id", long = "cluster-id", env = "MOQ_CLUSTER_ID")]
+	#[usage(
+		name = "cluster-id",
+		long = "cluster-id",
+		env = "MOQ_CLUSTER_ID",
+		setting = "cluster.id"
+	)]
 	pub id: Option<u64>,
 
 	/// Connect to one or more other cluster nodes. Each peer is a full URL, e.g.
@@ -413,7 +418,8 @@ pub struct ClusterConfig {
 		name = "cluster-connect",
 		long = "cluster-connect",
 		env = "MOQ_CLUSTER_CONNECT",
-		delimiter = ','
+		delimiter = ',',
+		setting = "cluster.connect"
 	)]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub connect: Vec<String>,
@@ -432,7 +438,8 @@ pub struct ClusterConfig {
 	#[usage(
 		name = "cluster-connect-api",
 		long = "cluster-connect-api",
-		env = "MOQ_CLUSTER_CONNECT_API"
+		env = "MOQ_CLUSTER_CONNECT_API",
+		setting = "cluster.connect_api"
 	)]
 	pub connect_api: Option<String>,
 
@@ -440,7 +447,12 @@ pub struct ClusterConfig {
 	/// [`Self::connect_api`] as a `?node=` query param so the endpoint can return
 	/// this node's peers, and advertised to other relays when [`Self::mesh`] gossip
 	/// is enabled. On its own it neither opens nor accepts a connection.
-	#[usage(name = "cluster-node", long = "cluster-node", env = "MOQ_CLUSTER_NODE")]
+	#[usage(
+		name = "cluster-node",
+		long = "cluster-node",
+		env = "MOQ_CLUSTER_NODE",
+		setting = "cluster.node"
+	)]
 	pub node: Option<String>,
 
 	/// Enable gossip discovery: advertise this relay's [`Self::node`] URL on the
@@ -456,6 +468,7 @@ pub struct ClusterConfig {
 		name = "cluster-mesh",
 		long = "cluster-mesh",
 		env = "MOQ_CLUSTER_MESH",
+		setting = "cluster.mesh",
 		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
@@ -474,12 +487,22 @@ pub struct ClusterConfig {
 	/// any peer whose URL has no inline token). An inline `?jwt=` can provide a
 	/// per-peer credential for static or `connect_api` peers. Gossip should use
 	/// this shared token or mTLS because the advertised node URL is public.
-	#[usage(name = "cluster-token", long = "cluster-token", env = "MOQ_CLUSTER_TOKEN")]
+	#[usage(
+		name = "cluster-token",
+		long = "cluster-token",
+		env = "MOQ_CLUSTER_TOKEN",
+		setting = "cluster.token"
+	)]
 	pub token: Option<PathBuf>,
 
 	/// Billing tier label that cluster-peer (relay-to-relay) traffic records
 	/// stats under. Defaults to the unprefixed tier.
-	#[usage(name = "cluster-tier", long = "cluster-tier", env = "MOQ_CLUSTER_TIER")]
+	#[usage(
+		name = "cluster-tier",
+		long = "cluster-tier",
+		env = "MOQ_CLUSTER_TIER",
+		setting = "cluster.tier"
+	)]
 	pub tier: Option<String>,
 	// Accepted so existing configs keep parsing (`deny_unknown_fields`), but
 	// ignored: a broadcast now closes as soon as its last publisher is lost.
@@ -489,6 +512,7 @@ pub struct ClusterConfig {
 		name = "cluster-linger",
 		long = "cluster-linger",
 		env = "MOQ_CLUSTER_LINGER",
+		setting = "cluster.linger",
 		hide = true
 	)]
 	pub linger: Option<moq_tokio::Duration>,
@@ -510,21 +534,14 @@ pub struct LanConfig {
 	/// Enable mDNS discovery. Requires [`ClusterConfig::node`], so there is an
 	/// address to advertise, and [`Self::secret`]. Boolean flag: pass
 	/// `--cluster-lan` (or `=true` / `=false`).
-	/// `Option` rather than a materialized default: Usage reads a standing `false`
-	/// as an empty boolean, so `update_from` would refill it from the environment
-	/// (or a declared default) over whatever the TOML file said. An `Option` is
-	/// empty only when nothing set it. A bare `Vec<T>` has the same hazard, since
-	/// an empty list also reads as absent; see moq-dev/moq#3051.
 	#[usage(
 		name = "cluster-lan",
 		long = "cluster-lan",
 		env = "MOQ_CLUSTER_LAN",
-		default_missing = "true",
-		num_args = 0..=1,
-		require_equals = true,
+		setting = "cluster.lan.enabled",
+		bool_value
 	)]
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub enabled: Option<bool>,
+	pub enabled: bool,
 
 	/// The shared key admitting a peer to the LAN mesh, as 64 hexadecimal
 	/// characters or a path to a file containing them. Required by
@@ -539,7 +556,8 @@ pub struct LanConfig {
 		name = "cluster-lan-secret",
 		long = "cluster-lan-secret",
 		env = "MOQ_CLUSTER_LAN_SECRET",
-		value_name = "HEX_OR_PATH"
+		value_name = "HEX_OR_PATH",
+		setting = "cluster.lan.secret"
 	)]
 	pub secret: Option<String>,
 }
@@ -801,7 +819,7 @@ impl Cluster {
 	/// Whether `--cluster-lan` asked this relay to discover peers over mDNS.
 	fn lan(&self) -> bool {
 		#[cfg(feature = "cluster-lan")]
-		return self.config.lan.enabled.unwrap_or(false);
+		return self.config.lan.enabled;
 		#[cfg(not(feature = "cluster-lan"))]
 		false
 	}
@@ -1637,7 +1655,7 @@ mod tests {
 	#[tokio::test]
 	async fn stats_publishing_outlives_the_producer_handle() {
 		let config = crate::StatsConfig {
-			enabled: Some(true),
+			enabled: true,
 			node: Some("test".to_string()),
 			..Default::default()
 		};
@@ -2400,7 +2418,7 @@ mod tests {
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = Config::parse_and_merge(args).expect("config load");
-		assert_eq!(config.cluster.lan.enabled, Some(true));
+		assert!(config.cluster.lan.enabled);
 		assert_eq!(config.cluster.lan.secret.as_deref(), Some("cluster.key"));
 		assert_eq!(config.cluster.node.as_deref(), Some("https://relay.example.com"));
 	}
@@ -2426,7 +2444,7 @@ mod tests {
 		];
 		let config = Config::parse_and_merge(args).expect("config load");
 		assert_eq!(config.cluster.lan.secret.as_deref(), Some("from-cli.key"));
-		assert_eq!(config.cluster.lan.enabled, Some(true), "the untouched key survives");
+		assert!(config.cluster.lan.enabled, "the untouched key survives");
 	}
 
 	/// The LAN needs an address to advertise, like gossip does.
@@ -2435,7 +2453,7 @@ mod tests {
 	async fn lan_without_node_errors() {
 		let config = ClusterConfig {
 			lan: LanConfig {
-				enabled: Some(true),
+				enabled: true,
 				..Default::default()
 			},
 			..Default::default()
@@ -2460,7 +2478,7 @@ mod tests {
 		let config = ClusterConfig {
 			node: Some("https://us-west.example.com".to_string()),
 			lan: LanConfig {
-				enabled: Some(true),
+				enabled: true,
 				..Default::default()
 			},
 			..Default::default()

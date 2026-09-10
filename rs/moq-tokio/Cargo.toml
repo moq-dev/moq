@@ -93,10 +93,11 @@ tikv-jemalloc-ctl = { version = "0.6", optional = true }
 tikv-jemallocator = { version = "0.6", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }
 time = "0.3"
 tokio = { workspace = true, features = ["full"] }
+toml = { workspace = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = { version = "2", features = ["serde"] }
-usage = { workspace = true }
+usage = { workspace = true, features = ["config"] }
 web-transport-iroh = { workspace = true, optional = true }
 web-transport-noq = { workspace = true, optional = true }
 web-transport-proto = { workspace = true, optional = true }

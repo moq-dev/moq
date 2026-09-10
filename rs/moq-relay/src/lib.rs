@@ -21,6 +21,7 @@ mod listener;
 mod nodes;
 mod relay;
 mod runtime;
+mod settings;
 mod shutdown;
 mod stats;
 #[cfg(test)]

@@ -22,7 +22,7 @@ pub struct Config {
 	/// `tcp`/`unix` listener is configured to run a stream-only server with no
 	/// QUIC.
 	#[serde(alias = "listen")]
-	#[usage(name = "listen", long = "listen", env = "MOQ_LISTEN")]
+	#[usage(name = "listen", long = "listen", env = "MOQ_LISTEN", setting = "listen.bind")]
 	pub bind: Option<String>,
 
 	/// Plaintext qmux TCP listener (`--listen-tcp-bind`, no TLS). Requires the
@@ -41,7 +41,12 @@ pub struct Config {
 
 	/// The QUIC backend to use.
 	/// Auto-detected from compiled features if not specified.
-	#[usage(name = "listen-backend", long = "listen-backend", env = "MOQ_LISTEN_BACKEND")]
+	#[usage(
+		name = "listen-backend",
+		long = "listen-backend",
+		env = "MOQ_LISTEN_BACKEND",
+		setting = "listen.backend"
+	)]
 	pub backend: Option<QuicBackend>,
 
 	/// Restrict the server to specific MoQ protocol version(s).
@@ -54,6 +59,7 @@ pub struct Config {
 		name = "listen-version",
 		long = "listen-version",
 		env = "MOQ_LISTEN_VERSION",
+		setting = "listen.version",
 		choices(
 			"moq-lite-01",
 			"moq-lite-02",
@@ -90,7 +96,8 @@ pub struct Config {
 	#[usage(
 		name = "listen-preferred-v4",
 		long = "listen-preferred-v4",
-		env = "MOQ_LISTEN_PREFERRED_V4"
+		env = "MOQ_LISTEN_PREFERRED_V4",
+		setting = "listen.preferred_v4"
 	)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub preferred_v4: Option<std::net::SocketAddrV4>,
@@ -99,7 +106,8 @@ pub struct Config {
 	#[usage(
 		name = "listen-preferred-v6",
 		long = "listen-preferred-v6",
-		env = "MOQ_LISTEN_PREFERRED_V6"
+		env = "MOQ_LISTEN_PREFERRED_V6",
+		setting = "listen.preferred_v6"
 	)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub preferred_v6: Option<std::net::SocketAddrV6>,
@@ -109,7 +117,8 @@ pub struct Config {
 	#[usage(
 		name = "listen-quic-lb-id",
 		long = "listen-quic-lb-id",
-		env = "MOQ_LISTEN_QUIC_LB_ID"
+		env = "MOQ_LISTEN_QUIC_LB_ID",
+		setting = "listen.lb_id"
 	)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub lb_id: Option<crate::quic::ServerId>,
@@ -119,7 +128,8 @@ pub struct Config {
 	#[usage(
 		name = "listen-quic-lb-nonce",
 		long = "listen-quic-lb-nonce",
-		env = "MOQ_LISTEN_QUIC_LB_NONCE"
+		env = "MOQ_LISTEN_QUIC_LB_NONCE",
+		setting = "listen.lb_nonce"
 	)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub lb_nonce: Option<usize>,
@@ -140,6 +150,18 @@ pub struct Config {
 	#[usage(skip)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub quic: Option<crate::quic::Config>,
+}
+
+impl Config {
+	/// Hidden CLI-only fields a TOML round-trip would drop.
+	pub fn keep_parse_only(&mut self, from: &Self) {
+		self.legacy = from.legacy.clone();
+		self.tls.keep_parse_only(&from.tls);
+		#[cfg(feature = "tcp")]
+		self.tcp.keep_parse_only(&from.tcp);
+		#[cfg(all(feature = "uds", unix))]
+		self.unix.keep_parse_only(&from.unix);
+	}
 }
 
 /// One server's claim on a slot in a `SO_REUSEPORT` group, and the slot it
@@ -319,6 +341,7 @@ mod tests {
 	/// [`crate::connect`]).
 	#[derive(usage::Cli)]
 	#[usage(unknown_flags = "error", args_override_self = false)]
+	#[usage(settings)]
 	struct Cli {
 		#[usage(flatten)]
 		config: Config,

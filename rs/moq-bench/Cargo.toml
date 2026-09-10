@@ -55,7 +55,7 @@ serde_json = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 toml = { workspace = true }
 tracing = { workspace = true }
-usage = { workspace = true, features = ["completions"] }
+usage = { workspace = true, features = ["completions", "config"] }
 
 # The host sampler reads /proc, so it is Linux-only (production relays are Linux).
 [target.'cfg(target_os = "linux")'.dependencies]

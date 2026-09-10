@@ -31,7 +31,7 @@ fn newest_lite_version() -> moq_net::Version {
 
 async fn build_web(port: u16, ws: bool) -> Web {
 	let mut config = WebConfig::default();
-	config.ws = Some(ws);
+	config.ws = ws;
 	config.http.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
 	build_web_with(config).await
 }
@@ -126,7 +126,7 @@ async fn spawn_versioned_relay(versions: Vec<moq_net::Version>) -> (u16, tokio::
 	config.listen.bind = Some("127.0.0.1:0".to_string());
 	config.listen.tls.generate = vec!["localhost".into()];
 	config.listen.version = versions;
-	config.web.ws = Some(true);
+	config.web.ws = true;
 	config.web.http.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
 
 	#[allow(deprecated)]
@@ -326,7 +326,7 @@ async fn relay_https_terminates_tls() {
 	std::fs::write(&key_path, key.serialize_pem()).expect("write key");
 
 	let mut config = WebConfig::default();
-	config.ws = Some(false);
+	config.ws = false;
 	config.https.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
 	config.https.cert = vec![cert_path];
 	config.https.key = vec![key_path];

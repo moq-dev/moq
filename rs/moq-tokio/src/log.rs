@@ -17,7 +17,13 @@ use url::Url;
 pub struct Log {
 	/// The level filter to use.
 	#[serde_as(as = "DisplayFromStr")]
-	#[usage(name = "log-level", long = "log-level", default = "info", env = "MOQ_LOG_LEVEL")]
+	#[usage(
+		name = "log-level",
+		long = "log-level",
+		default = "info",
+		env = "MOQ_LOG_LEVEL",
+		setting = "log.level"
+	)]
 	pub level: Level,
 }
 

@@ -43,7 +43,7 @@ use crate::subscribe::{CatalogFormatArg, SubscribeFormat};
 #[derive(usage::Cli, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(name = "moq", version = env!("VERSION"))]
-#[usage(completion)]
+#[usage(completion, settings)]
 #[usage(after_help = "Separate additional import/export stages with `--`; they share one \
                         connection and one Origin. Every `--` starts a stage, so it is not an \
                         end-of-options marker: write a path starting with `-` as `./-name`.")]
@@ -69,7 +69,7 @@ pub struct Cli {
 #[derive(usage::Cli, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(name = "moq")]
-#[usage(completion)]
+#[usage(completion, settings)]
 pub struct Stage {
 	/// The verb and endpoint.
 	#[usage(subcommand)]

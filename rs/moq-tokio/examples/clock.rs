@@ -19,6 +19,7 @@ use moq_net::*;
 #[derive(usage::Cli, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(name = "clock")]
+#[usage(settings)]
 struct Config {
 	/// The name of the broadcast to publish or subscribe to.
 	#[usage(long)]

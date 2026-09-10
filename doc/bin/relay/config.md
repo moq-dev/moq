@@ -7,6 +7,9 @@ description: TOML reference for moq-relay
 
 `moq-relay relay.toml`. Every key is also a CLI flag and environment variable
 (`--listen-backend`, `MOQ_LISTEN_BACKEND`), named by joining the section and key.
+Precedence is CLI > env > file > defaults: a flag or environment variable that
+was actually supplied overrides the file, and a file key that was actually
+written (an empty list, a `false` boolean) overrides the built-in default.
 
 ## \[listen]
 

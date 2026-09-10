@@ -92,7 +92,7 @@ tower-http = { workspace = true }
 tower-service = "0.3"
 tracing = { workspace = true }
 url = { workspace = true, features = ["serde"] }
-usage = { workspace = true, features = ["completions"] }
+usage = { workspace = true, features = ["completions", "config"] }
 web-transport-trait = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]

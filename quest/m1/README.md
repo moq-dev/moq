@@ -37,7 +37,6 @@ quest here and merged main into dev.
 - [HLS 404](/quest/m1/hls-cache-miss-codes.md) - a relay miss and a disconnected publisher answer 404 over moq-lite; IETF upstreams stay 500
 - [HLS sibling restart](/quest/m1/hls-sibling-epoch-identity.md) - a replaced sibling publisher restarts its rendition instead of serving stale rows
 - [A/V clock](/quest/m1/plan-av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
-- [Config provenance](/quest/m1/config-provenance.md) - the merge records which source set a value, so an empty TOML list survives the environment and env outranks the file
 - [Cluster construction](/quest/m1/cluster-construction.md) - construct one stable origin after its cache settings are known, deleting the rebuilding builder
 - [LAN discovery app id](/quest/m1/lan-app.md) - every advertisement names an application as a DNS-SD subtype bound into the proofs, so unrelated apps on one network never meet
 - [One LAN mesh](/quest/m1/lan-mesh.md) - moq-cli drives the relay's Cluster, LAN peers authenticate by mDNS credential, and the two binaries mesh with each other

@@ -89,15 +89,33 @@ pub struct Backoff {
 	/// Doubles as the bar a session must stay up to count as healthy, so it is
 	/// floored at 50ms: at zero every session would look healthy and the retry
 	/// pacing would collapse.
-	#[usage(name = "backoff-initial", long, env = "MOQ_BACKOFF_INITIAL", default = "1s")]
+	#[usage(
+		name = "backoff-initial",
+		long,
+		env = "MOQ_BACKOFF_INITIAL",
+		default = "1s",
+		setting = "connect.backoff.initial"
+	)]
 	pub initial: CliDuration,
 
 	/// Multiplier applied to delay after each failure. Defaults to 2.
-	#[usage(name = "backoff-multiplier", long, env = "MOQ_BACKOFF_MULTIPLIER", default = "2")]
+	#[usage(
+		name = "backoff-multiplier",
+		long,
+		env = "MOQ_BACKOFF_MULTIPLIER",
+		default = "2",
+		setting = "connect.backoff.multiplier"
+	)]
 	pub multiplier: u32,
 
 	/// Maximum delay between reconnect attempts. Defaults to 5s.
-	#[usage(name = "backoff-max", long, env = "MOQ_BACKOFF_MAX", default = "5s")]
+	#[usage(
+		name = "backoff-max",
+		long,
+		env = "MOQ_BACKOFF_MAX",
+		default = "5s",
+		setting = "connect.backoff.max"
+	)]
 	pub max: CliDuration,
 
 	/// Maximum time to spend retrying before giving up. Defaults to 10s.
@@ -105,7 +123,13 @@ pub struct Backoff {
 	/// Resets after a stable connection (one that outlives the initial backoff), so a flapping
 	/// session that reconnects then immediately drops still counts toward the timeout. Set to 0 for
 	/// unlimited retries.
-	#[usage(name = "backoff-timeout", long, env = "MOQ_BACKOFF_TIMEOUT", default = "10s")]
+	#[usage(
+		name = "backoff-timeout",
+		long,
+		env = "MOQ_BACKOFF_TIMEOUT",
+		default = "10s",
+		setting = "connect.backoff.timeout"
+	)]
 	pub timeout: CliDuration,
 }
 
@@ -308,7 +332,8 @@ pub struct GoawayConfig {
 		long,
 		env = "MOQ_GOAWAY_REDIRECT",
 		value_enum,
-		default = "same-host"
+		default = "same-host",
+		setting = "connect.goaway.redirect"
 	)]
 	pub redirect: Redirect,
 
@@ -316,7 +341,13 @@ pub struct GoawayConfig {
 	/// "10s" or "500ms". This is a cap: a GOAWAY naming a shorter deadline wins,
 	/// since the peer force-closes at its own deadline regardless, but a longer one
 	/// does not extend it. Defaults to 10 seconds.
-	#[usage(name = "goaway-handover", long, env = "MOQ_GOAWAY_HANDOVER", default = "10s")]
+	#[usage(
+		name = "goaway-handover",
+		long,
+		env = "MOQ_GOAWAY_HANDOVER",
+		default = "10s",
+		setting = "connect.goaway.handover"
+	)]
 	pub handover: CliDuration,
 }
 
@@ -1241,6 +1272,7 @@ mod tests {
 	fn cli_does_not_clobber_toml_backoff() {
 		#[derive(usage::Cli)]
 		#[usage(unknown_flags = "error", args_override_self = false)]
+		#[usage(settings)]
 		struct Wrapper {
 			#[usage(flatten)]
 			backoff: Backoff,
@@ -1278,6 +1310,7 @@ mod tests {
 	fn cli_does_not_clobber_toml_goaway() {
 		#[derive(usage::Cli)]
 		#[usage(unknown_flags = "error", args_override_self = false)]
+		#[usage(settings)]
 		struct Wrapper {
 			#[usage(flatten)]
 			goaway: GoawayConfig,

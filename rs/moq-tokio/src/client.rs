@@ -777,6 +777,7 @@ mod tests {
 	/// role configs are flattened together).
 	#[derive(usage::Cli)]
 	#[usage(unknown_flags = "error", args_override_self = false)]
+	#[usage(settings)]
 	struct Cli {
 		#[usage(flatten)]
 		config: crate::connect::Config,

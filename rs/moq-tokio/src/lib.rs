@@ -75,6 +75,8 @@ pub mod runtime;
 	feature = "tcp"
 ))]
 pub mod server;
+#[doc(hidden)]
+pub mod settings;
 #[cfg(feature = "tcp")]
 pub mod tcp;
 pub mod tls;

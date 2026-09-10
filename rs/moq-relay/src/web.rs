@@ -30,7 +30,7 @@ use tower_service::Service;
 use crate::{Auth, AuthParams, Cluster};
 
 /// Configuration for the HTTP/HTTPS web server.
-#[derive(usage::Args, Clone, Debug, serde::Deserialize, serde::Serialize, Default)]
+#[derive(usage::Args, Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -46,26 +46,30 @@ pub struct WebConfig {
 	pub https: HttpsConfig,
 
 	/// If true (default), expose a WebTransport compatible WebSocket polyfill.
-	///
-	/// `Option` with the default resolved by [`Self::resolved_ws`] rather than a
-	/// Usage `default`, which a config file could not override: Usage reads a
-	/// standing `false` as an empty boolean, so the re-parse over the CLI args
-	/// would refill it with the declared `true`.
 	#[usage(
 		long = "web-ws",
 		env = "MOQ_WEB_WS",
-		default_missing = "true",
-		num_args = 0..=1,
-		require_equals = true,
+		setting = "web.ws",
+		default = "true",
+		bool_value
 	)]
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub ws: Option<bool>,
+	pub ws: bool,
+}
+
+impl Default for WebConfig {
+	fn default() -> Self {
+		Self {
+			http: HttpConfig::default(),
+			https: HttpsConfig::default(),
+			ws: true,
+		}
+	}
 }
 
 impl WebConfig {
-	/// Whether the WebSocket polyfill is served, resolving the default.
+	/// Whether the WebSocket polyfill is served.
 	pub fn resolved_ws(&self) -> bool {
-		self.ws.unwrap_or(true)
+		self.ws
 	}
 }
 
@@ -76,7 +80,12 @@ impl WebConfig {
 #[non_exhaustive]
 pub struct HttpConfig {
 	/// Socket address to bind the HTTP listener to.
-	#[usage(long = "web-http-listen", name = "http-listen", env = "MOQ_WEB_HTTP_LISTEN")]
+	#[usage(
+		long = "web-http-listen",
+		name = "http-listen",
+		env = "MOQ_WEB_HTTP_LISTEN",
+		setting = "web.http.listen"
+	)]
 	pub listen: Option<net::SocketAddr>,
 }
 
@@ -92,6 +101,7 @@ pub struct HttpsConfig {
 		long = "web-https-listen",
 		name = "web-https-listen",
 		env = "MOQ_WEB_HTTPS_LISTEN",
+		setting = "web.https.listen",
 		requires("--web-https-cert", "--web-https-key")
 	)]
 	pub listen: Option<net::SocketAddr>,
@@ -103,7 +113,8 @@ pub struct HttpsConfig {
 		long = "web-https-cert",
 		name = "web-https-cert",
 		delimiter = ',',
-		env = "MOQ_WEB_HTTPS_CERT"
+		env = "MOQ_WEB_HTTPS_CERT",
+		setting = "web.https.cert"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
@@ -117,7 +128,8 @@ pub struct HttpsConfig {
 		long = "web-https-key",
 		name = "web-https-key",
 		delimiter = ',',
-		env = "MOQ_WEB_HTTPS_KEY"
+		env = "MOQ_WEB_HTTPS_KEY",
+		setting = "web.https.key"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
@@ -136,7 +148,8 @@ pub struct HttpsConfig {
 		long = "web-https-root",
 		name = "web-https-root",
 		delimiter = ',',
-		env = "MOQ_WEB_HTTPS_ROOT"
+		env = "MOQ_WEB_HTTPS_ROOT",
+		setting = "web.https.root"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]

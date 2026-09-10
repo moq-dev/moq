@@ -89,7 +89,12 @@ pub struct Config {
 	/// Maximum number of concurrent QUIC streams per connection (both bidi and uni).
 	/// Defaults to 1024. MoQ opens a stream per group, so busy endpoints want this high.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[usage(name = "quic-max-streams", long = "quic-max-streams", env = "MOQ_QUIC_MAX_STREAMS")]
+	#[usage(
+		name = "quic-max-streams",
+		long = "quic-max-streams",
+		env = "MOQ_QUIC_MAX_STREAMS",
+		setting = "quic.max_streams"
+	)]
 	pub max_streams: Option<u64>,
 
 	/// Enable UDP generic segmentation offload (GSO).
@@ -102,6 +107,7 @@ pub struct Config {
 		name = "quic-gso",
 		long = "quic-gso",
 		env = "MOQ_QUIC_GSO",
+		setting = "quic.gso",
 		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
@@ -113,7 +119,8 @@ pub struct Config {
 		name = "quic-idle-timeout",
 		long = "quic-idle-timeout",
 		env = "MOQ_QUIC_IDLE_TIMEOUT",
-		default = "30s"
+		default = "30s",
+		setting = "quic.idle_timeout"
 	)]
 	pub idle_timeout: CliDuration,
 
@@ -123,7 +130,8 @@ pub struct Config {
 		name = "quic-keep-alive",
 		long = "quic-keep-alive",
 		env = "MOQ_QUIC_KEEP_ALIVE",
-		default = "5s"
+		default = "5s",
+		setting = "quic.keep_alive"
 	)]
 	pub keep_alive: CliDuration,
 
@@ -133,6 +141,7 @@ pub struct Config {
 		name = "quic-mtu-discovery",
 		long = "quic-mtu-discovery",
 		env = "MOQ_QUIC_MTU_DISCOVERY",
+		setting = "quic.mtu_discovery",
 		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
@@ -146,7 +155,8 @@ pub struct Config {
 		name = "quic-congestion-control",
 		long = "quic-congestion-control",
 		env = "MOQ_QUIC_CONGESTION_CONTROL",
-		value_enum
+		value_enum,
+		setting = "quic.congestion_control"
 	)]
 	pub congestion_control: Option<CongestionControl>,
 
@@ -160,7 +170,8 @@ pub struct Config {
 	#[usage(
 		name = "quic-receive-window",
 		long = "quic-receive-window",
-		env = "MOQ_QUIC_RECEIVE_WINDOW"
+		env = "MOQ_QUIC_RECEIVE_WINDOW",
+		setting = "quic.receive_window"
 	)]
 	pub receive_window: Option<u64>,
 
@@ -172,7 +183,8 @@ pub struct Config {
 	#[usage(
 		name = "quic-stream-receive-window",
 		long = "quic-stream-receive-window",
-		env = "MOQ_QUIC_STREAM_RECEIVE_WINDOW"
+		env = "MOQ_QUIC_STREAM_RECEIVE_WINDOW",
+		setting = "quic.stream_receive_window"
 	)]
 	pub stream_receive_window: Option<u64>,
 
@@ -182,7 +194,12 @@ pub struct Config {
 	/// This bounds the transport send buffer. The quiche backend has no local send
 	/// cap and refuses this rather than dropping it.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[usage(name = "quic-send-window", long = "quic-send-window", env = "MOQ_QUIC_SEND_WINDOW")]
+	#[usage(
+		name = "quic-send-window",
+		long = "quic-send-window",
+		env = "MOQ_QUIC_SEND_WINDOW",
+		setting = "quic.send_window"
+	)]
 	pub send_window: Option<u64>,
 
 	/// Write qlog traces into this directory, which must already exist.
@@ -193,7 +210,7 @@ pub struct Config {
 	///
 	/// Requires the `qlog` feature; setting it errors at init otherwise.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	#[usage(name = "quic-qlog", long = "quic-qlog", env = "MOQ_QUIC_QLOG")]
+	#[usage(name = "quic-qlog", long = "quic-qlog", env = "MOQ_QUIC_QLOG", setting = "quic.qlog")]
 	#[usage(value_hint = usage::ValueHint::DirPath)]
 	pub qlog: Option<PathBuf>,
 
@@ -204,6 +221,13 @@ pub struct Config {
 	#[usage(flatten)]
 	#[serde(skip)]
 	pub(crate) legacy: Legacy,
+}
+
+impl Config {
+	/// Hidden CLI-only fields a TOML round-trip would drop.
+	pub fn keep_parse_only(&mut self, from: &Self) {
+		self.legacy = from.legacy.clone();
+	}
 }
 
 impl Default for Config {
@@ -606,6 +630,7 @@ mod tests {
 	/// role-prefixed spellings) in isolation.
 	#[derive(usage::Cli)]
 	#[usage(unknown_flags = "error", args_override_self = false)]
+	#[usage(settings)]
 	struct Cli {
 		#[usage(flatten)]
 		quic: Config,

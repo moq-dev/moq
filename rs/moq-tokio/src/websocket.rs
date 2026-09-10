@@ -114,15 +114,12 @@ static WEBSOCKET_WON: LazyLock<Mutex<HashSet<(String, u16)>>> = LazyLock::new(||
 pub struct Config {
 	/// Whether to enable the WebSocket fallback. Defaults to true.
 	///
-	/// `Option` with the default resolved by [`Self::resolved_enabled`] rather than
-	/// a Usage `default`, which a config file could not override: Usage reads a
-	/// standing `false` as an empty boolean, so the re-parse over the CLI args
-	/// would refill it with the declared `true`. An `Option` is empty only when
-	/// nothing set it.
+	/// `None` means the default (on). Distinct from `Some(false)`, which turns it off.
 	#[usage(
 		name = "connect-websocket-enabled",
 		long = "connect-websocket-enabled",
 		env = "MOQ_CONNECT_WEBSOCKET_ENABLED",
+		setting = "connect.websocket.enabled",
 		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
@@ -136,7 +133,8 @@ pub struct Config {
 		name = "connect-websocket-delay",
 		long = "connect-websocket-delay",
 		env = "MOQ_CONNECT_WEBSOCKET_DELAY",
-		default = "200ms"
+		default = "200ms",
+		setting = "connect.websocket.delay"
 	)]
 	pub delay: CliDuration,
 
@@ -190,6 +188,11 @@ pub(crate) struct Legacy {
 const DEFAULT_DELAY: time::Duration = time::Duration::from_millis(200);
 
 impl Config {
+	/// Hidden CLI-only fields a TOML round-trip would drop.
+	pub fn keep_parse_only(&mut self, from: &Self) {
+		self.legacy = from.legacy.clone();
+	}
+
 	/// The released spellings in use, each paired with what replaced it. Reached
 	/// through [`crate::connect::Config::deprecated`].
 	pub(crate) fn deprecated(&self) -> crate::Deprecated {
@@ -785,6 +788,7 @@ mod legacy_tests {
 	use super::*;
 	#[derive(usage::Cli)]
 	#[usage(unknown_flags = "error", args_override_self = false)]
+	#[usage(settings)]
 	struct Cli {
 		#[usage(flatten)]
 		websocket: Config,
