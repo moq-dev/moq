@@ -36,3 +36,4 @@ difference in totals alone proves nothing about the estimator.
 ## Required
 
 - [Browser](/quest/m2/audio-quality-harness/browser.md) - defines the metric schema, the budget file, and the extracted shaper
+- [Native jitter target](/quest/m0/audio-jitter-target/native.md) - the estimator this lane grades and compares against the browser; without it there is no target series and the budgets would be set against a playout path that holds nothing
