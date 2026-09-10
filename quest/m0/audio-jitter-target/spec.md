@@ -84,10 +84,22 @@ after 2 frames: spacing=14500ms  target=14.50s
 
 Two lessons for the document, both structural rather than a constant to retune:
 
-- **Frame duration is a codec property, not an observation.** Take it from the
-  rendition config. NetEq's packet-time units come from the codec for the same
-  reason. Deriving it from arbitrary timestamp arithmetic makes a tune-in
-  artifact indistinguishable from a real frame duration.
+- **Frame duration is a codec property, not an observation.** NetEq's
+  packet-time units come from the codec for the same reason. Deriving it from
+  arbitrary timestamp arithmetic makes a tune-in artifact indistinguishable
+  from a real frame duration.
+
+  Where it comes from is an open question this quest answers, because the
+  catalog does not carry it: `AudioConfig` has `sampleRate` and `bitrate`, and
+  its own comment concedes the frame duration "depends on the codec, sample
+  rate, etc." Opus makes this sharp, since the encoder picks 2.5, 5, 10, 20,
+  40, or 60 ms independently of both. Candidates, in order of how little they
+  cost: the Opus TOC byte, which self-describes the frame duration in band and
+  needs no schema change; the decoded frame's own sample count, exact but only
+  known below the container layer where the estimator currently sits; or a new
+  catalog field, which is the expensive option and would need the full
+  cross-package sync (`rs/hang`, `js/hang`, `doc/concept`, and the hang draft).
+  Pick one and say why; do not leave it to each implementation.
 - **The target needs a clamp and a bounded rise.** WebRTC clamps in
   `DelayConstraints` (`delay_constraints.{h,cc}`), applied by `DecisionLogic`
   rather than by the delay manager, with a hard ceiling at 75% of buffer

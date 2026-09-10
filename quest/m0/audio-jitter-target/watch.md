@@ -27,9 +27,10 @@ with `dev` first, since it currently does not merge.
   any replacement: two frames whose media timestamps are far apart, then paced
   audio with zero real jitter, asserting the target stays near the frame
   duration. On today's branch it reads 14.5 s and needs about fifteen minutes
-  of clean audio to unwind. Take the frame duration from the rendition config
-  rather than from observed timestamps, clamp the target, and bound how fast it
-  rises; [Spec](/quest/m0/audio-jitter-target/spec.md) has the detail.
+  of clean audio to unwind. Take the frame duration from the source the spec
+  settles on rather than from observed timestamps, clamp the target, and bound
+  how fast it rises; [Spec](/quest/m0/audio-jitter-target/spec.md) has the
+  detail and the candidates.
 - Check what the viewer's saved preset does on load. The element defaults
   `delay` to `"auto"` and nothing in `demo/` overrides it, yet a fresh session
   came up on the 100 ms chip, so something is restoring or overriding it. Pin

@@ -24,6 +24,10 @@ trade to get it running. This quest promotes them.
   bug this whole line exists to find, so it gets a name and a number rather
   than being absorbed into a neighbouring stage.
 
+## Required
+
+- [Audio quality harness](/quest/m2/audio-quality-harness/README.md) - defines the stage schema and lands the probes this promotes
+
 ## Related
 
 - [Audio quality harness](/quest/m2/audio-quality-harness/README.md) - defines the stages and is the first consumer
