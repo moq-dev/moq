@@ -34,18 +34,32 @@ and `packet_arrival_history.{h,cc}` under
    read as a hundred tiny observations, where this reads as a delay climbing to
    200 ms. Frame timestamps stand in for RTP timestamps and there are no
    sequence numbers to unwrap.
-2. **An empirical histogram with an exponential forget factor, read at a
+2. **Reordered arrivals are excluded, not measured.** When a newer group
+   arrives before an older one, `arrival(p) - arrival(ref)` is positive while
+   the timestamp difference is negative, so the media-time gap between them is
+   *added* to the measured delay. That is the same failure this questline
+   exists to fix, a media-time distance leaking into a delay measurement, and it
+   arrives through the front door: `Container.Consumer` takes groups off
+   `recvGroup()` in delivery order and sorts afterwards, so out-of-order
+   observation is ordinary input rather than an edge case. WebRTC pairs the
+   formula with exactly this guard, which the description above omitted:
+   `DelayManager::Update` carries a `reordered` flag, `PacketArrivalHistory`
+   keeps reordered packets out of its min and max deques, and only the
+   `ReorderOptimizer` sees them, costed as delay against loss. Say what counts
+   as reordered here, keep those arrivals out of the reference and the
+   histogram, and put a reordering case in the conformance corpus.
+3. **An empirical histogram with an exponential forget factor, read at a
    quantile.** 20 ms buckets, 100 of them. Seed the cold start with the
    decaying `0.5^(i+1)` prior. A quantile of an empirical distribution, not a
    mean plus k deviations: network delay is heavy-tailed and one-sided, so a
    Gaussian assumption sizes the tail wrong.
-3. **Max-over-interval resampling**, 500 ms. Easy to miss and behaviourally
+4. **Max-over-interval resampling**, 500 ms. Easy to miss and behaviourally
    significant: the histogram takes one observation per interval, the maximum
    in it. That decorrelates observations and turns the forget factor into a
    wall-clock time constant, which is the only form worth documenting.
-4. **A cold-start forget ramp**, WebRTC's `start_forget_weight`, so the first
+5. **A cold-start forget ramp**, WebRTC's `start_forget_weight`, so the first
    seconds converge instead of crawling.
-5. **Explicit delay-versus-loss cost minimisation** for the late tail. WebRTC's
+6. **Explicit delay-versus-loss cost minimisation** for the late tail. WebRTC's
    `ReorderOptimizer` and SpeexDSP's `compute_opt_delay` reached the same shape
    independently, which is decent evidence it is right. Defer it; ship the
    underrun estimator first.

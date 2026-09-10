@@ -11,7 +11,14 @@ from whichever platform a user happened to be on.
 
 - Drive the shipped binary, not a purpose-built harness: `moq play` against a
   local relay behind the same seeded shaper, on a cpal null or dummy backend so
-  CI needs no audio hardware. A real device callback is part of what is being
+  CI needs no audio hardware. The speaker is only half of it: `play::run` is the
+  winit event loop (`rs/moq-cli/src/play/mod.rs` re-exports `window::run`), and
+  `resumed` builds a `Display` with a real window and a presentable wgpu surface
+  even for an audio-only broadcast, so the lane dies on a headless runner before
+  it measures anything. Settle which way out: a virtual display and software
+  rendering in CI, or an audio-only mode in `moq play` that never opens a
+  window. The second is worth having on its own, and it is the smaller
+  dependency to keep working. A real device callback is part of what is being
   measured, so keep the real backend rather than substituting a fake clock, and
   accept that the timing noise it adds sets the floor for the native budgets.
   That floor is worth measuring on its own before the budgets are written.
