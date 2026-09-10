@@ -55,12 +55,48 @@ Current defaults on main, for reference and not for copying blind: quantile
 forget weight `2`, reorder forget factor `0.9993`, `ms_per_loss_percent` `20`.
 The widely repeated "0.97" is a transitional value, not head.
 
-**This probably explains #3517.** It used `FORGET = 0.9993`, which is NetEq's
-*reorder* forget factor, on the equivalent of the underrun histogram, where
-head uses `0.983`. Applied per arrival with no 500 ms resampling, that is a
-memory far longer than intended, so the target barely moves. Confirm or refute
-this before writing, because it decides how much of the rest was actually
-wrong.
+**What actually breaks #3517, reproduced.** A viewer on that branch reads a
+14.56 s jitter buffer in auto. The estimator cannot produce that from its
+histogram: the percentile is clamped to `BUCKETS * BUCKET`, one second. The
+unbounded term is the "plus one frame" on top of it.
+
+`Jitter` learns that frame duration as the running minimum of positive gaps
+between consecutive observed media timestamps, so the *first* gap sets it with
+nothing to validate against. A tune-in that observes a frame from a stale group
+and then the live edge sets it to the distance between them, seconds rather
+than milliseconds. `#publish` then raises the target instantly and
+unconditionally to `percentile() + step`, and lowers it by one *corrected*
+step per second afterwards. Inflation is immediate; deflation is 20 ms/s.
+`reanchor()` clears `#latest` but not the spacing, so the bad value outlives
+the discontinuity that caused it.
+
+Replaying two frames 14.5 s apart in media time, then twenty minutes of
+perfectly paced audio with zero real jitter:
+
+```
+after 2 frames: spacing=14500ms  target=14.50s
+  +   1s live, zero jitter: target=14.48s
+  +  60s live, zero jitter: target=13.30s
+  + 300s live, zero jitter: target=8.50s
+  + 600s live, zero jitter: target=2.50s
+  + 900s live, zero jitter: target=0.02s
+```
+
+Two lessons for the document, both structural rather than a constant to retune:
+
+- **Frame duration is a codec property, not an observation.** Take it from the
+  rendition config. NetEq's packet-time units come from the codec for the same
+  reason. Deriving it from arbitrary timestamp arithmetic makes a tune-in
+  artifact indistinguishable from a real frame duration.
+- **The target needs a clamp and a bounded rise.** WebRTC clamps in
+  `DelayConstraints` (`delay_constraints.{h,cc}`), applied by `DecisionLogic`
+  rather than by the delay manager, with a hard ceiling at 75% of buffer
+  capacity. #3517 ported neither the clamp nor a rise limit, so any single bad
+  observation is permanent on the timescale a viewer will wait.
+
+The forget factor is a separate and smaller divergence: `0.9993` is NetEq's
+*reorder* factor where the underrun path uses `0.983`, applied per arrival with
+no 500 ms resampling. Worth fixing, but it is not what produces 14.56 s.
 
 ### Licensing
 

@@ -27,11 +27,12 @@ PR #3517 stays open and is fixed in place by the watch quest rather than
 restarted. It already deleted the RTT term and plumbed a per-track arrival
 `spread` through `Container.Consumer`, measured at container frame arrival and
 before the age budget can skip a group, which is the right observation point.
-What it got wrong is the estimator on top, which tested broken in a real
-browser. The likely reason is in [Spec](/quest/m0/audio-jitter-target/spec.md):
-it decays its histogram with NetEq's *reorder* forget factor rather than the
-underrun one, and adds an observation per arrival instead of one per resampling
-interval, so its target barely moves.
+What it got wrong is the estimator on top. A viewer on that branch reads a
+14.56 s jitter buffer in auto, and the cause is reproduced in
+[Spec](/quest/m0/audio-jitter-target/spec.md): the "plus one frame" term is
+learned from the first gap between observed timestamps, so a tune-in across a
+stale group sets it to seconds, and nothing clamps the target or bounds how
+fast it rises.
 
 Native has no jitter buffer at all. `rs/moq-audio`'s decode `Config` carries
 only `latency_max`, an upper bound before skipping a stalled group, and its own

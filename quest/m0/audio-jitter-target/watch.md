@@ -20,10 +20,21 @@ Fix PR #3517 in place on `dev` rather than reopening it. It is a published
 carries the `delay`/`buffer` split it is expressed in. Resolve its conflicts
 with `dev` first, since it currently does not merge.
 
-- Replace the 95th-percentile-over-decaying-histogram estimator in
-  `js/hang/src/container/jitter.ts` with the spec's, and run the conformance
-  vector in `jitter.test.ts`. Keep the arrival plumbing, the `spread` getter,
-  and the measurement point: those were right.
+- Replace the estimator in `js/hang/src/container/jitter.ts` with the spec's,
+  and run the conformance corpus in `jitter.test.ts`. Keep the arrival
+  plumbing, the `spread` getter, and the measurement point: those were right.
+- The reproduced 14.56 s runaway is the regression test to write first, before
+  any replacement: two frames whose media timestamps are far apart, then paced
+  audio with zero real jitter, asserting the target stays near the frame
+  duration. On today's branch it reads 14.5 s and needs about fifteen minutes
+  of clean audio to unwind. Take the frame duration from the rendition config
+  rather than from observed timestamps, clamp the target, and bound how fast it
+  rises; [Spec](/quest/m0/audio-jitter-target/spec.md) has the detail.
+- Check what the viewer's saved preset does on load. The element defaults
+  `delay` to `"auto"` and nothing in `demo/` overrides it, yet a fresh session
+  came up on the 100 ms chip, so something is restoring or overriding it. Pin
+  that down: a stored preference silently winning over the default is its own
+  bug, and it also means auto gets far less real exposure than it looks like.
 - Keep the ring work as it stands: one chunk of slack above the target, landing
   back on the target when skipping, re-stalling on empty, and the underrun
   counter reaching the stats panel and the buffering indicator.
