@@ -23,9 +23,11 @@ export PATH="$fixture/bin:$PATH"
 export CLAUDE_PROJECT_DIR="$fixture/project"
 export CLAUDE_ENV_FILE="$fixture/session env"
 export SNAPSHOT='first value'
+export REMOVED_BY_DIRENV=present
 umask 022
 bash "$hook"
 [[ $(bash -c '. "$CLAUDE_ENV_FILE"; printf "%s" "$VALUE"') == "$SNAPSHOT" ]]
+bash -c '. "$CLAUDE_ENV_FILE"; [[ ${REMOVED_BY_DIRENV+x} != x ]]'
 mode=$(ls -l "$CLAUDE_ENV_FILE.direnv")
 [[ $mode == -rw-------* ]]
 cp "$CLAUDE_ENV_FILE" "$fixture/original"
