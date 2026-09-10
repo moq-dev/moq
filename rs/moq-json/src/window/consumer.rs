@@ -69,7 +69,12 @@ impl<T: DeserializeOwned> Consumer<T> {
 			};
 
 			match group.poll_read_frame(waiter) {
-				Poll::Ready(Err(moq_net::Error::Old | moq_net::Error::Lagged | moq_net::Error::Evicted)) => {
+				Poll::Ready(Err(
+					moq_net::Error::Old
+					| moq_net::Error::Lagged
+					| moq_net::Error::Evicted
+					| moq_net::Error::GroupTooLarge,
+				)) => {
 					// This group is no longer complete, but the next one starts with a checkpoint
 					// that can account for everything this reader missed.
 					self.group = None;

@@ -257,7 +257,9 @@ test("a lagging consumer is told what it missed", async () => {
 test("consumer resumes at a checkpoint after losing a group", async () => {
 	for (const error of [
 		new Group.Lagged(),
+		new Group.GroupTooLarge(),
 		new StreamError(StreamCode.TooFarBehind),
+		new StreamError(StreamCode.GroupTooLarge),
 		new StreamError(StreamCode.Old),
 		new StreamError(StreamCode.Evicted),
 	]) {

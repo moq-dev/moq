@@ -1393,24 +1393,20 @@ test("largest names the newest frame written", async () => {
 	producer.close();
 });
 
-// A subscriber that arrives after the frames were written reads mirrors, and a mirror only
-// replays what is still buffered. Once a group has evicted from its front, a replay-local
-// count would put the edge below the frames actually written.
-test("largest survives a mirror replay of an evicted group", async () => {
+// A subscriber that arrives after the frames were written reads mirrors. largest is the
+// last frame successfully written, even after an overflow aborts the group.
+test("largest survives a mirror replay of an aborted group", async () => {
 	const producer = new TrackProducer("test").accept();
 
-	// Overflow the group's frame cap so the front is evicted, which is the only case where
-	// the replayed frames and the frames ever written disagree.
-	const written = MAX_GROUP_FRAMES + 5;
 	const group = producer.appendGroup();
-	for (let i = 0; i < written; i++) {
+	for (let i = 0; i < MAX_GROUP_FRAMES; i++) {
 		group.writeFrame({ payload: enc.encode(`${i}`), timestamp: Timestamp.now() });
 	}
-	group.close();
+	expect(() => group.writeFrame({ payload: enc.encode("overflow"), timestamp: Timestamp.now() })).toThrow();
 
-	// Subscribing now replays the retained window into a fresh sink.
+	// Subscribing now replays into a fresh sink; the last legal frame is still the edge.
 	const late = producer.subscribe();
-	expect(late.largest()).toEqual({ group: 0, frame: written - 1 });
+	expect(late.largest()).toEqual({ group: 0, frame: MAX_GROUP_FRAMES - 1 });
 
 	producer.close();
 });

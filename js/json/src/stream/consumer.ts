@@ -96,12 +96,9 @@ export class Consumer<T> {
 	// that has already lost records.
 	async #readFrame(group: Moq.Group.Consumer): Promise<Moq.Group.Frame | undefined> {
 		// Drain what already arrived before consulting the track, so only a read that would really
-		// block depends on which of the two lands first. `skipped` is the evicted prefix that
-		// `readFrame` reports as lagged and `tryReadFrame` would hand back across the gap.
-		if (!group.skipped) {
-			const buffered = group.tryReadFrame();
-			if (buffered) return buffered;
-		}
+		// block depends on which of the two lands first.
+		const buffered = group.tryReadFrame();
+		if (buffered) return buffered;
 
 		const frame = group.readFrame();
 		const winner = await Promise.race([frame.then((frame) => ({ frame }) as const), this.#recvGroup()]);

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
 	FrameTooLarge,
+	GroupTooLarge,
 	Lagged,
 	NotFound,
 	ProtocolViolation,
@@ -588,6 +589,7 @@ for (const [version, tooFarBehind] of [
 			[new Lagged(), tooFarBehind],
 			[new Reset(5), tooFarBehind],
 			[new FrameTooLarge(), version === undefined ? StreamCode.FrameTooLarge : StreamCode.Internal],
+			[new GroupTooLarge(), version === undefined ? StreamCode.GroupTooLarge : StreamCode.Internal],
 			[new NotFound("broadcast"), version === undefined ? StreamCode.NotFound : StreamCode.Internal],
 			// Assigned by every draft, so these survive the translation intact.
 			[new TimeoutError("open"), StreamCode.DeliveryTimeout],

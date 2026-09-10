@@ -292,10 +292,10 @@ impl<T: Serialize> Encoder<T> {
 			None => Bytes::from(bytes),
 		};
 
-		// A delta is only readable while the group still holds the snapshot it applies to, and the
-		// group cache evicts from the front. Admitting a patch that pushes the group past that budget
-		// would drop frame 0, leaving a late subscriber with a base-less group (`Lagged`) instead of
-		// the current value. Roll a fresh snapshot instead, which is cheap next to losing the value.
+		// A delta is only readable while the group still holds the snapshot it applies to.
+		// Admitting a patch that pushes the group past that budget would abort it
+		// (`GroupTooLarge`), leaving a late subscriber with no value. Roll a fresh snapshot
+		// instead, which is cheap next to losing the value.
 		//
 		// Measured on the encoded payload rather than the plaintext: a sync-flushed DEFLATE frame can
 		// come out slightly larger than its input, so the plaintext is not an upper bound. Compressing

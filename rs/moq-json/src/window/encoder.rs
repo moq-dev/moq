@@ -12,8 +12,9 @@ use crate::{Error, Result};
 
 /// Frames (header included) in one group before a new group is forced, matching
 /// [`snapshot`](crate::snapshot)'s cap. Kept well below moq-net's per-group frame cap so a late
-/// joiner can always read the header at frame 0.
-pub(super) const MAX_GROUP_FRAMES: usize = 256;
+/// joiner can always read the header at frame 0, and so a roll always precedes
+/// [`moq_net::Error::GroupTooLarge`].
+pub(super) const MAX_GROUP_FRAMES: usize = 1024;
 
 /// Largest index represented exactly by both Rust and JavaScript implementations.
 pub(super) const MAX_INDEX: u64 = (1 << 53) - 1;

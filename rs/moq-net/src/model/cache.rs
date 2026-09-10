@@ -673,14 +673,6 @@ impl Charge {
 		self.touch(WRITE_BOOST)
 	}
 
-	/// Release `n` payload bytes (a frame evicted by the group's own cap).
-	pub(crate) fn sub(&mut self, n: u64) {
-		if let Some(track) = &self.track {
-			track.pool.sub(n);
-			self.bytes = self.bytes.saturating_sub(n);
-		}
-	}
-
 	/// The group's full cached footprint: payload bytes plus overhead.
 	pub(crate) fn size(&self) -> u64 {
 		self.bytes
@@ -857,8 +849,6 @@ mod test {
 
 		charge.add(100);
 		assert_eq!(pool.used(), ENTRY_OVERHEAD + 100);
-		charge.sub(40);
-		assert_eq!(pool.used(), ENTRY_OVERHEAD + 60);
 
 		charge.clear();
 		assert_eq!(pool.used(), 0);
@@ -872,7 +862,6 @@ mod test {
 	fn detached_charge_is_noop() {
 		let mut charge = Charge::default();
 		charge.add(123);
-		charge.sub(23);
 		charge.clear();
 	}
 
@@ -890,7 +879,6 @@ mod test {
 		let track = Track::new(bounded(1000), kio::Weak::new());
 		let mut c = track.charge();
 		c.add(100);
-		c.sub(40); // releases don't refund the gross counter
 		assert_eq!(track.take_written(), ENTRY_OVERHEAD + 100);
 		assert_eq!(track.take_written(), 0, "taking it drains the counter");
 	}

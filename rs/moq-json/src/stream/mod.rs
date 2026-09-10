@@ -16,12 +16,12 @@
 //! second group: a log missing a record is not lossless, and a gap dressed up as a complete log is
 //! worse than a visible failure. A publisher with more to say opens a new track.
 //!
-//! That single group is what bounds the log's history. moq-net caps a group's cached bytes, and a
-//! consumer always starts at frame 0, so once the log outgrows that budget and the earliest frames
-//! are evicted a new consumer fails with [`moq_net::Error::Lagged`] rather than reading a partial
-//! log. (With compression the retained suffix would be undecodable anyway, since its DEFLATE window
-//! depends on the evicted prefix.) The live stream is therefore bounded history by design; deep
-//! history is served from a recording.
+//! That single group is what bounds the log's history. moq-net caps a group's cached bytes and
+//! frame count, and a consumer always starts at frame 0, so a write that would outgrow the
+//! budget aborts the group with [`moq_net::Error::GroupTooLarge`] rather than dropping a prefix
+//! some readers missed. (With compression the retained suffix would be undecodable anyway,
+//! since its DEFLATE window depends on the dropped prefix.) The live stream is therefore
+//! bounded history by design; deep history is served from a recording.
 //!
 //! # Choosing a layer
 //!

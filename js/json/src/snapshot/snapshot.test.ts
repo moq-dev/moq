@@ -330,11 +330,10 @@ test("a rejected update leaves the previous value readable", async () => {
 	expect(await drain(track.subscribe())).toEqual([{ keep: true }]);
 });
 
-test("a delta that would evict the snapshot rolls a new one instead", async () => {
-	// A delta is only readable while its group still holds the snapshot it applies to, and the group
-	// cache evicts from the front. A patch that pushes the group past the cache would drop frame 0,
-	// leaving a late subscriber with a base-less group instead of the current value. Mirrors the
-	// cumulative check in the Rust encoder.
+test("a delta that would overflow the snapshot rolls a new one instead", async () => {
+	// A delta is only readable while its group still holds the snapshot it applies to. A patch
+	// that pushes the group past the cache would abort it, leaving a late subscriber with no
+	// value. Mirrors the cumulative check in the Rust encoder.
 	//
 	// The value is replaced rather than grown, so each snapshot fits the cache on its own while the
 	// snapshot plus the patch that rewrites it does not.

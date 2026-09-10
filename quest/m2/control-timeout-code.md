@@ -28,7 +28,7 @@ Decided:
 
 - **The code is 0x31 CONTROL_TIMEOUT**, in moq-lite's own 48-63 range
   (`drafts/draft-lcurley-moq-lite.md:268`; 0x30 NO_CAPACITY at `:311`, 0x32
-  goes to [group overflow](/quest/m1/group-overflow-abort.md)). It mirrors the
+  is GROUP_TOO_LARGE). It mirrors the
   session code 0x11 CONTROL_MESSAGE_TIMEOUT (`:287`, `SessionError::Timeout`
   at `rs/moq-net/src/error.rs:79`): one condition, two scopes. Add the row to
   the stream table and `StreamError::ControlTimeout` beside `DeliveryTimeout`.
@@ -54,4 +54,4 @@ on every IETF draft.
 
 ## Related
 
-- [Group overflow](/quest/m1/group-overflow-abort.md) - takes 0x32, the neighbouring code in the same range
+- GROUP_TOO_LARGE (0x32) - neighbouring code in the same range

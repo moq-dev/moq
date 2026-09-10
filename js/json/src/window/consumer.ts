@@ -5,7 +5,12 @@ import { type ConsumerConfig, Decoder, type Event, type Group } from "./decoder.
 // A group that ended early rather than failing: the next one restates the window, so a gap is
 // something to resync from. Old and Evicted are how the publisher says it dropped a group it was
 // still serving, which reads the same here.
-const GAPS: Moq.StreamCode[] = [Moq.StreamCode.TooFarBehind, Moq.StreamCode.Old, Moq.StreamCode.Evicted];
+const GAPS: Moq.StreamCode[] = [
+	Moq.StreamCode.TooFarBehind,
+	Moq.StreamCode.Old,
+	Moq.StreamCode.Evicted,
+	Moq.StreamCode.GroupTooLarge,
+];
 
 /**
  * Consumes a sliding window of JSON records from a track, yielding one event per change.

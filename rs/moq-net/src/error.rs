@@ -182,6 +182,10 @@ pub enum StreamError {
 	#[error("frame too large")]
 	FrameTooLarge,
 
+	/// A group grew past its cache budget and was aborted.
+	#[error("group too large")]
+	GroupTooLarge,
+
 	/// A frame's timestamp doesn't match its track's negotiated timescale.
 	#[error("frame timestamp doesn't match track timescale")]
 	TimestampMismatch,
@@ -208,8 +212,9 @@ impl StreamError {
 			Self::GoingAway => 0x4,
 			Self::TooFarBehind => 0x5,
 			Self::MalformedTrack => 0x12,
-			// 0x30 NO_CAPACITY, 0x31 CONTROL_TIMEOUT, 0x32 GROUP_TOO_LARGE: assigned
-			// by other work in this range. Do not reuse them.
+			// 0x30 NO_CAPACITY, 0x31 CONTROL_TIMEOUT: assigned by other work in this
+			// range. Do not reuse them.
+			Self::GroupTooLarge => 0x32,
 			Self::NotFound => 0x33,
 			Self::Old => 0x34,
 			Self::Evicted => 0x35,
@@ -242,6 +247,7 @@ impl StreamError {
 			0x4 => Self::GoingAway,
 			0x5 => Self::TooFarBehind,
 			0x12 => Self::MalformedTrack,
+			0x32 => Self::GroupTooLarge,
 			0x33 => Self::NotFound,
 			0x34 => Self::Old,
 			0x35 => Self::Evicted,
@@ -367,16 +373,23 @@ pub enum Error {
 	#[error("closed")]
 	Closed,
 
-	/// The reader fell behind the group's byte budget: the frame it wanted was dropped
-	/// to keep the group under its size limit. Named from the consumer's side (nothing is
-	/// "full"); distinct from [`Self::Evicted`], which drops a whole group under the
-	/// pool's memory pressure.
+	/// The reader asked for a frame the group never held: below
+	/// [`crate::group::Producer::start_at`], or skipped past a splice. Named from the
+	/// consumer's side; distinct from [`Self::GroupTooLarge`], which aborts the whole
+	/// group when a write exceeds the cache budget, and from [`Self::Evicted`], which
+	/// drops a whole group under the pool's memory pressure.
 	#[error("lagged")]
 	Lagged,
 
 	/// A frame declared a payload size larger than the receiver accepts.
 	#[error("frame too large")]
 	FrameTooLarge,
+
+	/// A write would grow the group past its cache budget (byte size or frame count).
+	/// The write is refused and the group is aborted, so every reader sees the same
+	/// failure rather than a prefix some of them missed.
+	#[error("group too large")]
+	GroupTooLarge,
 
 	/// A whole-frame write was refused because a frame is already open on the group.
 	///
@@ -453,6 +466,7 @@ impl Error {
 			Self::Closed => 25,
 			Self::Lagged => 26,
 			Self::FrameTooLarge => 27,
+			Self::GroupTooLarge => 34,
 			// 22 was unused in the 0-31 library range.
 			Self::FrameOpen => 22,
 			// 28 is reserved (was per-frame decompression, removed in draft-05).
@@ -525,6 +539,7 @@ impl From<StreamError> for Error {
 			StreamError::Evicted => Self::Evicted,
 			StreamError::WrongSize => Self::WrongSize,
 			StreamError::FrameTooLarge => Self::FrameTooLarge,
+			StreamError::GroupTooLarge => Self::GroupTooLarge,
 			StreamError::TimestampMismatch => Self::TimestampMismatch,
 			StreamError::App(app) => Self::App(app),
 			// Deliberately not `inner.into()`: that yields a session-space value, which the
@@ -591,6 +606,7 @@ impl From<&Error> for StreamError {
 			Error::Unroutable => Self::Unroutable,
 			Error::WrongSize => Self::WrongSize,
 			Error::FrameTooLarge => Self::FrameTooLarge,
+			Error::GroupTooLarge => Self::GroupTooLarge,
 			Error::TimestampMismatch => Self::TimestampMismatch,
 			Error::Timeout => Self::DeliveryTimeout,
 			Error::GoingAway => Self::GoingAway,
@@ -639,6 +655,7 @@ mod tests {
 		assert_eq!(Error::Version.to_code(), 9);
 		assert_eq!(Error::UnknownAlpn(String::new()).to_code(), 21);
 		assert_eq!(Error::Lagged.to_code(), 26);
+		assert_eq!(Error::GroupTooLarge.to_code(), 34);
 		assert_eq!(Error::Evicted.to_code(), 31);
 		assert_eq!(Error::GoingAway.to_code(), 32);
 		assert_eq!(Error::GoawayTimeout.to_code(), 33);
@@ -706,6 +723,7 @@ mod tests {
 			StreamError::GoingAway,
 			StreamError::TooFarBehind,
 			StreamError::MalformedTrack,
+			StreamError::GroupTooLarge,
 			StreamError::NotFound,
 			StreamError::Old,
 			StreamError::Evicted,
@@ -715,12 +733,19 @@ mod tests {
 			assert_eq!(StreamError::from_code(err.to_code()), err, "{err:?} did not round trip");
 		}
 
+		assert_eq!(StreamError::GroupTooLarge.to_code(), 0x32);
+
 		// moq-lite's own 48-63 range: assigned, so they round-trip, and they stay
-		// off 0x30-0x32 (NO_CAPACITY / CONTROL_TIMEOUT / GROUP_TOO_LARGE).
-		for err in [StreamError::NotFound, StreamError::Old, StreamError::Evicted] {
+		// off 0x30-0x31 (NO_CAPACITY / CONTROL_TIMEOUT).
+		for err in [
+			StreamError::GroupTooLarge,
+			StreamError::NotFound,
+			StreamError::Old,
+			StreamError::Evicted,
+		] {
 			let code = err.to_code();
 			assert!((0x30..0x40).contains(&code), "{err:?} left moq-lite's 48-63 range");
-			assert!(!matches!(code, 0x30..=0x32), "{err:?} collided with 0x30-0x32");
+			assert!(!matches!(code, 0x30 | 0x31), "{err:?} collided with 0x30-0x31");
 		}
 
 		// The rest encode into the reserved 32-47 range and decode back as Unknown, for
@@ -765,7 +790,7 @@ mod tests {
 		assert_eq!(relayed.to_code(), 0x3);
 
 		// Registered stream codes survive the hop unchanged.
-		for code in [0x0, 0x1, 0x2, 0x4, 0x5, 0x12, 0x33, 0x34, 0x35] {
+		for code in [0x0, 0x1, 0x2, 0x4, 0x5, 0x12, 0x32, 0x33, 0x34, 0x35] {
 			let relayed = StreamError::from(&Error::from(StreamError::from_code(code)));
 			assert_eq!(relayed.to_code(), code, "stream {code:#x} changed across a relay");
 		}
@@ -834,6 +859,7 @@ mod tests {
 		assert!(matches!(stream(0x1), Error::Cancel));
 		assert!(matches!(stream(0x0), Error::Remote(0)));
 		assert!(matches!(stream(0x5), Error::Lagged));
+		assert!(matches!(stream(0x32), Error::GroupTooLarge));
 
 		// Assigned lite codes round-trip to the named error. The old 32-47 placeholders
 		// stay opaque: the draft still forbids reading a meaning out of that range.

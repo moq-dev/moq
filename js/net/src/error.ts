@@ -95,6 +95,8 @@ export const StreamCode = Object.freeze(
 		FrameTooLarge: 0x25 as StreamCode,
 		/** The publisher could serve this request but has no capacity for it now. */
 		NoCapacity: 0x30 as StreamCode,
+		/** A group grew past its cache budget and was aborted. moq-lite's own range. */
+		GroupTooLarge: 0x32 as StreamCode,
 	} as const),
 );
 
@@ -149,7 +151,7 @@ export interface StreamErrorOptions {
  * This surfaces on every transport, so catch this type rather than feature-detecting
  * `WebTransportError`, which a non-browser runtime never defines and the WebSocket fallback
  * never throws. Local conditions with a code of their own subclass it ({@link Lagged},
- * {@link FrameTooLarge}, {@link NotFound}), so the same `code` check catches a condition
+ * {@link FrameTooLarge}, {@link GroupTooLarge}, {@link NotFound}), so the same `code` check catches a condition
  * whether it was raised here or reported by the peer.
  *
  * ```ts
@@ -179,8 +181,7 @@ export class StreamError extends Error {
 }
 
 /**
- * The reader fell behind a group's eviction window: frames it had not read were dropped to stay
- * under the cache cap, so the stream has a gap.
+ * The reader asked for a frame the group never held, so the stream has a gap.
  *
  * Raised locally by a frame read, and decoded from a moq-lite peer's `TOO_FAR_BEHIND` reset, since a gap
  * reads the same either way.
@@ -198,8 +199,7 @@ export class Lagged extends StreamError {
 }
 
 /**
- * A frame is larger than a group can cache, so appending it would evict it immediately and drop
- * the write.
+ * A frame is larger than a group can cache, so appending it would exceed the budget by itself.
  *
  * Mirrors the Rust `Error::FrameTooLarge`, which rejects the same frame before touching any state.
  *
@@ -212,6 +212,24 @@ export class FrameTooLarge extends StreamError {
 			message: "frame too large: larger than a group can cache",
 		});
 		this.name = "FrameTooLarge";
+	}
+}
+
+/**
+ * A write grew the group past its cache budget, so the group is aborted.
+ *
+ * Raised locally by a frame write, and decoded from a moq-lite peer's `GROUP_TOO_LARGE`
+ * reset. Mirrors the Rust `Error::GroupTooLarge`.
+ *
+ * @public
+ */
+export class GroupTooLarge extends StreamError {
+	constructor(options?: { cause?: unknown }) {
+		super(StreamCode.GroupTooLarge, {
+			...options,
+			message: "group too large: exceeded the cache budget",
+		});
+		this.name = "GroupTooLarge";
 	}
 }
 
@@ -322,6 +340,7 @@ export function fromTransport(err: unknown, options?: TransportErrorOptions): Er
 		return new StreamError(StreamCode.Internal, { cause: err, message: `remote error: ${code}` });
 	}
 	if (code === StreamCode.TooFarBehind) return new Lagged({ cause: err });
+	if (code === StreamCode.GroupTooLarge) return new GroupTooLarge({ cause: err });
 	return new StreamError(code, { cause: err });
 }
 

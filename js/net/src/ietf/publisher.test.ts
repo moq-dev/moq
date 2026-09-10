@@ -1015,20 +1015,20 @@ test("draft-20: a fill serves the current group's head on a fetch stream", async
 });
 
 /**
- * A group that outgrows its cache evicts its own front. A Next Object subscriber joins above
- * that evicted prefix, so it lost nothing it asked for: evicting objects the filter already
- * excludes must not forfeit the live tail it did request.
+ * A group that outgrows its cache is aborted. A Next Object subscriber joining that group
+ * sees the abort rather than a live tail served off a trimmed head.
  */
-test("draft-20: an open group that outgrew its cache still serves the live tail", async () => {
+test("draft-20: an open group that outgrew its cache aborts instead of serving a tail", async () => {
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video");
 
-	// Past the frame cap, so the oldest objects are gone before anyone subscribes.
 	const group = track.appendGroup();
-	const published = MAX_GROUP_FRAMES + 10;
-	for (let i = 0; i < published; i++) {
+	for (let i = 0; i < MAX_GROUP_FRAMES; i++) {
 		group.writeFrame({ payload: new TextEncoder().encode(`0.${i}`), timestamp: Timestamp.now() });
 	}
+	expect(() =>
+		group.writeFrame({ payload: new TextEncoder().encode("overflow"), timestamp: Timestamp.now() }),
+	).toThrow();
 
 	const { client, ok } = await runSubscribe(
 		fx,
@@ -1042,19 +1042,11 @@ test("draft-20: an open group that outgrew its cache still serves the live tail"
 	);
 
 	try {
-		expect(ok.largest).toEqual({ groupId: 0n, objectId: BigInt(published - 1) });
-
-		group.writeFrame({ payload: new TextEncoder().encode(`0.${published}`), timestamp: Timestamp.now() });
-		group.close();
+		expect(ok.largest).toEqual({ groupId: 0n, objectId: BigInt(MAX_GROUP_FRAMES - 1) });
 
 		const live = await nextUni(fx.uni);
-		if (!live) throw new Error("the subscription never served the live tail");
-		expect(await readGroup(live)).toEqual({
-			sequence: 0,
-			// The join is mid-group, so the stream does not start at the group's first object.
-			firstObject: false,
-			objects: [{ id: published, payload: `0.${published}` }],
-		});
+		if (!live) throw new Error("the subscription never opened a stream for the aborted group");
+		await expect(readGroup(live)).rejects.toBeDefined();
 	} finally {
 		fx.close();
 		client.close();

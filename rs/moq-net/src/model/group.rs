@@ -26,12 +26,18 @@ use std::task::{Poll, ready};
 
 use crate::{Error, IntoBytes, Result, Timestamp};
 
-/// Maximum total size of frames cached in a group before old frames are evicted.
+/// Maximum total size of frames in a group.
 ///
-/// Doubles as the per-frame size cap: a single frame can be at most this large (a
-/// larger declared size is refused before allocating), so one maximum-size frame can
-/// fill a group's cache.
+/// A write that would exceed this aborts the group with [`Error::GroupTooLarge`].
+/// Doubles as the per-frame size cap: a larger declared size is [`Error::FrameTooLarge`]
+/// before allocating, so one maximum-size frame can fill a group.
 pub const MAX_CACHE_BYTES: u64 = 32 * 1024 * 1024; // 32 MB
+
+/// Maximum number of frames in a group.
+///
+/// 8192 is the largest legal group; the 8193rd write returns [`Error::GroupTooLarge`]
+/// and aborts the group.
+pub const MAX_GROUP_FRAMES: usize = 8192;
 
 /// Slots `VecDeque` rounds a group's first frame up to.
 ///
@@ -116,16 +122,16 @@ pub(crate) struct Partial {
 /// while streaming a partial frame.
 #[derive(Default)]
 pub(crate) struct GroupState {
-	// Completed frames, each a contiguous payload. Evicted frames are popped from the
-	// front; `offset` tracks how many.
+	// Completed frames, each a contiguous payload. `offset` is the first frame this
+	// handle holds, raised by [`Producer::start_at`].
 	pub(crate) frames: VecDeque<Frame>,
 
 	// The single in-flight frame, if one is open.
 	pub(crate) partial: Option<Partial>,
 
-	// Index of the first frame this handle holds: frames evicted from the front, plus any
-	// the group deliberately started past (see [`Producer::start_at`]). Reading below it
-	// is [`Error::Lagged`] either way; the frames are not here.
+	// Index of the first frame this handle holds: any the group deliberately started
+	// past (see [`Producer::start_at`]). Reading below it is [`Error::Lagged`]; the
+	// frames are not here.
 	pub(crate) offset: usize,
 
 	// The index the next frame written will get. Tracked separately from `frames` so it
@@ -146,10 +152,10 @@ pub(crate) struct GroupState {
 	charge: cache::Charge,
 
 	// The first frame's timestamp, recorded once and never revised: the group's
-	// presentation start. Kept here rather than read off `frames` so it survives a
-	// front eviction, and so an abort doesn't erase where the group sat in time.
-	// `None` until the first frame is written, which is the only honest answer: an
-	// empty group has not presented anything yet.
+	// presentation start. Kept here rather than read off `frames` so an abort
+	// doesn't erase where the group sat in time. `None` until the first frame is
+	// written, which is the only honest answer: an empty group has not presented
+	// anything yet.
 	timestamp: Option<Timestamp>,
 
 	// The newest frame's timestamp: the group's presentation end so far. A reader
@@ -270,17 +276,10 @@ impl GroupState {
 		self.latest = Some(timestamp);
 	}
 
-	/// Evict completed frames from the front until within the byte budget.
-	fn evict(&mut self) {
-		while self.cache > MAX_CACHE_BYTES {
-			let Some(frame) = self.frames.pop_front() else {
-				break;
-			};
-			let size = frame.payload.len() as u64;
-			self.cache -= size;
-			self.charge.sub(size);
-			self.offset += 1;
-		}
+	/// Whether adding `extra_frames` totaling `extra_bytes` would exceed the group budget.
+	fn would_overflow(&self, extra_frames: usize, extra_bytes: u64) -> bool {
+		self.next_index.saturating_sub(self.offset).saturating_add(extra_frames) > MAX_GROUP_FRAMES
+			|| self.cache.saturating_add(extra_bytes) > MAX_CACHE_BYTES
 	}
 
 	/// Drop the cached frames (and any in-flight tail) and release their pool charge.
@@ -448,9 +447,9 @@ impl Producer {
 	/// A group can be short at its front or its back, never in the middle: this trims
 	/// the front, and simply stopping (then [`finish`](Self::finish)ing) trims the back.
 	/// The frames below `index` are not a gap this handle will ever fill, so a reader
-	/// positioned below it gets [`Error::Lagged`], the same as one that fell behind an
-	/// eviction. They belong to whoever produced the head of the group, typically
-	/// another route serving the same track (see [`crate::track::Subscriber`]).
+	/// positioned below it gets [`Error::Lagged`]. They belong to whoever produced the
+	/// head of the group, typically another route serving the same track (see
+	/// [`crate::track::Subscriber`]).
 	///
 	/// The counterpart of [`Consumer::start_at`], which positions a *reader* the same
 	/// way. Where the group begins is part of its shape, so this must come before the
@@ -463,7 +462,7 @@ impl Producer {
 
 		let mut state = modify(&self.state)?;
 		// Every write advances `next_index` past `offset`, so this is "nothing written
-		// yet" in a way a front eviction can't fake.
+		// yet".
 		if state.fin.is_some() || state.next_index != state.offset {
 			return Err(Error::Closed);
 		}
@@ -502,13 +501,15 @@ impl Producer {
 			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 		debug_assert!(state.partial.is_none(), "a frame is already open");
 		let size = payload.len() as u64;
+		if state.would_overflow(1, size) {
+			return Err(self.abort_too_large(state));
+		}
 		state.cache += size;
 		let now = state.charge.add(size);
 		state.frames.push_back(Frame { timestamp, payload });
 		state.next_index = next_index;
 		state.committed = state.next_index;
 		state.stamp(timestamp);
-		state.evict();
 		drop(state);
 
 		// With the group lock released (lock order is track then group), settle
@@ -543,6 +544,7 @@ impl Producer {
 		}
 
 		let count = frames.len();
+		let bytes: u64 = frames.filled().iter().map(|frame| frame.payload.len() as u64).sum();
 		let mut state = modify(&self.state)?;
 		if state.fin.is_some() {
 			return Err(Error::Closed);
@@ -554,8 +556,10 @@ impl Producer {
 			.next_index
 			.checked_add(count)
 			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+		if state.would_overflow(count, bytes) {
+			return Err(self.abort_too_large(state));
+		}
 
-		let mut bytes = 0;
 		// The last frame's tick, reused below so settling does not re-read the clock.
 		let mut now = None;
 		for mut frame in frames.drain() {
@@ -564,7 +568,6 @@ impl Producer {
 				.convert(self.track.timescale)
 				.expect("timestamp scale checked above");
 			let size = frame.payload.len() as u64;
-			bytes += size;
 			state.cache += size;
 			now = state.charge.add(size);
 			state.stamp(frame.timestamp);
@@ -572,7 +575,6 @@ impl Producer {
 		}
 		state.next_index = next_index;
 		state.committed = next_index;
-		state.evict();
 		drop(state);
 
 		self.cache.settle(now);
@@ -610,6 +612,9 @@ impl Producer {
 			.next_index
 			.checked_add(1)
 			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+		if state.would_overflow(1, frame.size) {
+			return Err(self.abort_too_large(state));
+		}
 		state.cache += frame.size;
 		let now = state.charge.add(frame.size);
 		state.partial = Some(Partial {
@@ -620,7 +625,6 @@ impl Producer {
 		// Opening the frame is enough: the header carries the timestamp, so the group's
 		// place in time is known before a single payload byte streams in.
 		state.stamp(timestamp);
-		state.evict();
 		drop(state);
 
 		// With the group lock released (lock order is track then group), settle
@@ -664,6 +668,9 @@ impl Producer {
 			.next_index
 			.checked_add(1)
 			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+		if state.would_overflow(1, frame.size) {
+			return Err(self.abort_too_large(state));
+		}
 		state.cache += frame.size;
 		let now = state.charge.add(frame.size);
 		state.partial = Some(Partial {
@@ -674,7 +681,6 @@ impl Producer {
 		// Opening the frame is enough: the header carries the timestamp, so the group's
 		// place in time is known before a single payload byte streams in.
 		state.stamp(timestamp);
-		state.evict();
 		drop(state);
 
 		// With the group lock released (lock order is track then group), settle
@@ -742,8 +748,8 @@ impl Producer {
 	/// One past the index of the last frame written (completed or in-flight), which is
 	/// also the index the next frame will get.
 	///
-	/// Counts any frames the group [started past](Self::start_at) or evicted, so it's the
-	/// group's logical length rather than the number of frames this handle holds.
+	/// Counts any frames the group [started past](Self::start_at), so it's the group's
+	/// logical length rather than the number of frames this handle holds.
 	pub fn frame_count(&self) -> usize {
 		self.state.read().next_index
 	}
@@ -775,6 +781,17 @@ impl Producer {
 		Ok(())
 	}
 
+	/// Abort a write that would grow the group past its budget, holding the lock already
+	/// taken for that write so nothing else lands in between.
+	fn abort_too_large(&self, mut state: kio::Mut<'_, GroupState>) -> Error {
+		let err = Error::GroupTooLarge;
+		state.abort = Some(err.clone());
+		self.alive.aborted.store(true, Ordering::Release);
+		state.release();
+		state.close();
+		err
+	}
+
 	/// Whether the group has been aborted (including pool eviction). The track's
 	/// read paths treat an aborted cached group as absent.
 	///
@@ -787,8 +804,8 @@ impl Producer {
 	}
 
 	/// The index of the first frame this group still holds, or `None` once it has been
-	/// aborted. Non-zero when the group started later (see [`Self::start_at`]) or its
-	/// head was evicted; a reader positioned below it is [`Error::Lagged`].
+	/// aborted. Non-zero when the group started later (see [`Self::start_at`]); a reader
+	/// positioned below it is [`Error::Lagged`].
 	///
 	/// One guard for both halves, deliberately. The track asks this to decide whether a
 	/// cached slot can still answer a request, and reading the abort and the offset
@@ -1339,9 +1356,9 @@ impl Consumer {
 	/// below it.
 	///
 	/// Clamped *up* to the group's first available frame: frames the group never held
-	/// (see [`Producer::start_at`]) or has since evicted can't be returned, so asking
-	/// for one just starts at the first that exists. Read [`Self::index`] back to learn
-	/// where the cursor actually landed.
+	/// (see [`Producer::start_at`]) can't be returned, so asking for one just starts at
+	/// the first that exists. Read [`Self::index`] back to learn where the cursor
+	/// actually landed.
 	/// Only moves forward; a lower `index` is ignored, since the frames behind the
 	/// cursor may already have been handed out.
 	pub fn start_at(&mut self, index: u64) {
@@ -1353,9 +1370,9 @@ impl Consumer {
 
 	/// Advance the read cursor to `index`, skipping every frame below it.
 	///
-	/// Unlike [`Self::start_at`], this does not clamp past an evicted requested
-	/// frame. An eviction confined below `index` is ignored, while an eviction at
-	/// or above it still surfaces as [`Error::Lagged`].
+	/// Unlike [`Self::start_at`], this does not clamp past a requested frame the group
+	/// never held. A [`Producer::start_at`] floor above `index` still surfaces as
+	/// [`Error::Lagged`].
 	pub fn skip_to(&mut self, index: u64) {
 		match &mut self.inner {
 			ConsumerKind::Plain(plain) => plain.skip_to(index),
@@ -1692,10 +1709,10 @@ impl Plain {
 			if index < state.offset {
 				return Poll::Ready(Err(Error::Lagged));
 			}
-			// `local` can run past the buffered count when frames were cleared or evicted out
-			// from under us (abort, unfinished drop, an eviction gap); clamp so `range` never
-			// panics on an out-of-bounds start. `fill` always resets the batch, so an empty
-			// range leaves `len == 0` and the terminal checks below resolve abort/fin/pending.
+			// `local` can run past the buffered count when frames were cleared out from
+			// under us (abort, unfinished drop); clamp so `range` never panics on an
+			// out-of-bounds start. `fill` always resets the batch, so an empty range
+			// leaves `len == 0` and the terminal checks below resolve abort/fin/pending.
 			let local = (index - state.offset).min(state.frames.len());
 			prefetch.fill(state.frames.range(local..).take(budget).cloned());
 			if prefetch.len > 0 {
@@ -2008,47 +2025,54 @@ mod test {
 	}
 
 	#[test]
-	fn eviction_drops_old_frames() {
+	fn overflow_aborts_the_group() {
 		let mut producer = Info { sequence: 0 }.produce();
-
-		// Write frames that total more than MAX_CACHE_BYTES.
-		let big = Bytes::from(vec![0u8; MAX_CACHE_BYTES as usize]);
-		producer.write_frame(Timestamp::ZERO, big.clone()).unwrap();
-		producer.write_frame(Timestamp::ZERO, big).unwrap();
-
-		// The first frame should have been evicted (tombstoned via offset).
-		let state = producer.state.read();
-		assert_eq!(state.offset, 1);
-		assert_eq!(state.frames.len(), 1);
-		assert_eq!(state.frames[0].payload.len(), MAX_CACHE_BYTES as usize);
-	}
-
-	#[test]
-	fn next_frame_returns_cache_full_on_tombstone() {
-		let mut producer = Info { sequence: 0 }.produce();
-
-		let big = Bytes::from(vec![0u8; MAX_CACHE_BYTES as usize]);
-		producer.write_frame(Timestamp::ZERO, big.clone()).unwrap();
-		producer.write_frame(Timestamp::ZERO, big).unwrap();
-
 		let mut consumer = producer.consume();
-		// First frame was evicted, next_frame should return Lagged.
+
+		let big = Bytes::from(vec![0u8; MAX_CACHE_BYTES as usize]);
+		producer.write_frame(Timestamp::ZERO, big.clone()).unwrap();
+		assert!(matches!(
+			producer.write_frame(Timestamp::ZERO, big),
+			Err(Error::GroupTooLarge)
+		));
+
+		{
+			let state = producer.state.read();
+			assert!(matches!(state.abort, Some(Error::GroupTooLarge)));
+			assert!(state.frames.is_empty());
+			assert_eq!(state.offset, 0);
+		}
+
 		let result = consumer.next_frame().now_or_never().unwrap();
-		assert!(matches!(result, Err(crate::Error::Lagged)));
+		assert!(matches!(result, Err(Error::GroupTooLarge)));
 	}
 
 	#[test]
-	fn no_eviction_under_budget() {
+	fn no_overflow_under_budget() {
 		let mut producer = Info { sequence: 0 }.produce();
-		// Many small frames stay cached: there is no frame-count cap, only a byte budget.
-		for _ in 0..100_000 {
+		// 8192 one-byte frames is the largest legal group; they all stay cached.
+		for _ in 0..MAX_GROUP_FRAMES {
 			producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"x")).unwrap();
 		}
 		producer.finish().unwrap();
 
 		let state = producer.state.read();
 		assert_eq!(state.offset, 0);
-		assert_eq!(state.frames.len(), 100_000);
+		assert_eq!(state.frames.len(), MAX_GROUP_FRAMES);
+		assert!(state.abort.is_none());
+	}
+
+	#[test]
+	fn writer_sees_group_too_large_on_the_8193rd_frame() {
+		let mut producer = Info { sequence: 0 }.produce();
+		for _ in 0..MAX_GROUP_FRAMES {
+			producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"x")).unwrap();
+		}
+		assert!(matches!(
+			producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"x")),
+			Err(Error::GroupTooLarge)
+		));
+		assert!(matches!(producer.state.read().abort, Some(Error::GroupTooLarge)));
 	}
 
 	#[test]
@@ -2182,21 +2206,23 @@ mod test {
 		assert_eq!(behind.frame_count(), 2);
 	}
 
-	/// A cursor whose next frame was evicted from the front of a live group can never reach
-	/// the end, so `finished` reports the gap instead of parking forever.
+	/// A cursor on a group aborted for overflowing its budget can never reach the end,
+	/// so `finished` reports that abort instead of parking forever.
 	#[test]
-	fn finished_reports_a_lagged_cursor() {
+	fn finished_reports_a_group_too_large() {
 		let mut producer = Info { sequence: 0 }.produce();
 		let mut consumer = producer.consume();
 
-		// Two frames at the cache budget, so the second write evicts the first.
 		let big = Bytes::from(vec![0u8; MAX_CACHE_BYTES as usize]);
 		producer.write_frame(Timestamp::ZERO, big.clone()).unwrap();
-		producer.write_frame(Timestamp::ZERO, big).unwrap();
+		assert!(matches!(
+			producer.write_frame(Timestamp::ZERO, big),
+			Err(Error::GroupTooLarge)
+		));
 
 		assert!(matches!(
 			consumer.finished().now_or_never().unwrap(),
-			Err(Error::Lagged)
+			Err(Error::GroupTooLarge)
 		));
 	}
 
@@ -2223,8 +2249,8 @@ mod test {
 		assert!(consumer.next_frame().now_or_never().unwrap().unwrap().is_none());
 	}
 
-	/// A `read_frame` whose index sits past the buffered frames (cleared by an abort, or an
-	/// eviction gap) must surface the error, not panic on an out-of-range `range(local..)`.
+	/// A `read_frame` whose index sits past the buffered frames (cleared by an abort)
+	/// must surface the error, not panic on an out-of-range `range(local..)`.
 	#[test]
 	fn read_frame_past_cleared_frames_does_not_panic() {
 		let mut producer = Info { sequence: 0 }.produce();
@@ -2341,8 +2367,8 @@ mod test {
 		let mut consumer = producer.consume();
 		assert_eq!(consumer.frame_count(), 4);
 
-		// A reader positioned at the start is missing the head, exactly like one that
-		// fell behind an eviction, and `finished` answers for that cursor.
+		// A reader positioned at the start is missing the head, and `finished` answers
+		// for that cursor.
 		assert!(matches!(
 			consumer.finished().now_or_never().unwrap(),
 			Err(Error::Lagged)

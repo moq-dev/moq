@@ -490,10 +490,8 @@ export class Publisher {
 					// outside the requested range, so stop without waiting for the group's end.
 					if (slice.until !== undefined && next >= slice.until) break;
 
-					// Reading from the filter's start drops the objects below it, including any the
-					// group's cache evicted: they are outside the requested range, so losing them is
-					// not the gap that would otherwise reset this stream and forfeit the rest of the
-					// group. An eviction at or above the start is a real gap and still throws.
+					// Reading from the filter's start drops the objects below it: they are outside
+					// the requested range, so skipping them is not a gap.
 					const read = await Promise.race([hooks.readGroupFrame(group, slice.skip), stream.closed]);
 					if (!read) break;
 					next = read.sequence + 1;
@@ -606,8 +604,7 @@ export class Publisher {
 			// subscription, so stop without waiting for the group's end.
 			if (fill.until !== undefined && next >= fill.until) break;
 
-			// Reading from the fill's start drops everything below it, evicted objects included;
-			// see the same read in #runGroup.
+			// Reading from the fill's start drops everything below it; see the same read in #runGroup.
 			const frame = await Promise.race([
 				group.readFrameSequence({ from: Number(fill.skip) }),
 				stream.closed,

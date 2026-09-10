@@ -412,7 +412,12 @@ mod test {
 
 	#[test]
 	fn consumer_resumes_at_a_checkpoint_after_losing_a_group() {
-		for err in [moq_net::Error::Old, moq_net::Error::Lagged, moq_net::Error::Evicted] {
+		for err in [
+			moq_net::Error::Old,
+			moq_net::Error::Lagged,
+			moq_net::Error::Evicted,
+			moq_net::Error::GroupTooLarge,
+		] {
 			let mut track = moq_net::broadcast::Info::new()
 				.produce()
 				.create_track("test", None)

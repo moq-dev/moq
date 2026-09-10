@@ -25,9 +25,10 @@ use moq_net::{Timestamp, broadcast, frame, group, track};
 /// overhead rather than payload allocation.
 const PAYLOAD: usize = 64;
 
-/// Frame counts to sweep. The top end intentionally reaches the raised
-/// `MAX_GROUP_FRAMES` so a full group of tiny frames is exercised.
-const COUNTS: [usize; 3] = [512, 8_192, 32_768];
+/// Frame counts to sweep. 8192 is the largest legal group (`MAX_GROUP_FRAMES`);
+/// the 8193rd write returns `GroupTooLarge`. The top end is that full group of
+/// tiny frames.
+const COUNTS: [usize; 3] = [512, 2_048, 8_192];
 
 /// Cached group counts to sweep for the track-level delivery benchmarks. A track
 /// publishing one group per frame at the default 5s retention sits in the hundreds,

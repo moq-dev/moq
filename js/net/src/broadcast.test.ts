@@ -1,6 +1,6 @@
 import { expect, setSystemTime, test } from "bun:test";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import { Producer as GroupProducer, Lagged, MAX_GROUP_FRAMES } from "./group.ts";
+import { Producer as GroupProducer, GroupTooLarge, MAX_GROUP_FRAMES } from "./group.ts";
 import { Timestamp } from "./time.ts";
 import type { Request as TrackRequest } from "./track.ts";
 import { Producer as TrackProducer } from "./track.ts";
@@ -254,25 +254,25 @@ test("a late subscriber replays the cached window", async () => {
 	expect(await late.readString()).toBe("later");
 });
 
-test("a read throws Lagged on a gap, then resyncs to the next group", async () => {
+test("a read throws GroupTooLarge on an overflow, then resyncs to the next group", async () => {
 	const broadcast = new BroadcastProducer();
 	const producer = broadcast.createTrack("video");
 	const sub = broadcast.track("video").subscribe({ maxAge: 5000 }).ordered();
 
-	// Group 0 overflows its frame cap without being read, evicting the front: a gap.
+	// Group 0 overflows its frame cap: the group is aborted.
 	const g0 = producer.appendGroup();
-	for (let i = 0; i < MAX_GROUP_FRAMES + 10; i++)
+	for (let i = 0; i < MAX_GROUP_FRAMES; i++)
 		g0.writeFrame({ payload: new Uint8Array([i & 0xff]), timestamp: Timestamp.now() });
-	g0.close();
+	expect(() => g0.writeFrame({ payload: new Uint8Array([0]), timestamp: Timestamp.now() })).toThrow(GroupTooLarge);
 
 	// Group 1 is clean.
 	const g1 = producer.appendGroup();
 	g1.writeFrame({ payload: new TextEncoder().encode("ok"), timestamp: Timestamp.now() });
 	g1.close();
 
-	// The reader hits the gap in group 0 (error, not a silent skip), then the next
+	// The reader hits the abort in group 0 (error, not a silent skip), then the next
 	// read resyncs from group 1.
-	expect(sub.readFrame()).rejects.toBeInstanceOf(Lagged);
+	expect(sub.readFrame()).rejects.toBeInstanceOf(GroupTooLarge);
 	expect(await sub.readString()).toBe("ok");
 });
 

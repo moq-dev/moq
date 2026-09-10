@@ -24,7 +24,6 @@ quest here and merged main into dev.
 - [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - every native binding, Dart included, creates unadvertised, announces from the broadcast, and takes a path Pattern in `dynamic(pattern, route)`
 - [Advertise](/quest/m1/wildcard-advertise.md) - moq-net encodes, forwards, and authorizes wildcard advertisements, so `dynamic(pattern, route)` takes a pattern before the announce API is published
 - [Anonymous rank](/quest/m1/anonymous-route-rank.md) - moq-net: a route through an anonymous hop ranks below every identified route at any cost, and hop 0 travels the chain to say so
-- [Group overflow](/quest/m1/group-overflow-abort.md) - an open group past its budget aborts for every reader with GROUP_TOO_LARGE, and head eviction is deleted
 - [#3187](/quest/m1/3187-preserve-structured-protocol-error-codes-across-ffi-and-c.md) - protocol error codes cross moq-ffi and C as a scope, code, and kind instead of a message string
 - [A/V clock](/quest/m1/plan-av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
 - [One LAN mesh](/quest/m1/lan-mesh.md) - moq-cli drives the relay's Cluster, LAN peers authenticate by mDNS credential, and the two binaries mesh with each other

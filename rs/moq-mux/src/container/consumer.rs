@@ -769,10 +769,10 @@ impl GroupBuffer {
 	}
 
 	/// True if the transport can no longer deliver the frame this group is stopped on:
-	/// the stream was reset (evicted, `Old`, cancelled, ...) or the frame was dropped
-	/// from the front of a live group. Lets the consumer tell a transport eviction from
-	/// a payload decode error: the former surfaces as an error from `poll_finished` at
-	/// the read cursor, the latter leaves the group readable or cleanly finished.
+	/// the stream was reset (evicted, `Old`, cancelled, oversized, ...). Lets the
+	/// consumer tell a transport abort from a payload decode error: the former surfaces
+	/// as an error from `poll_finished` at the read cursor, the latter leaves the group
+	/// readable or cleanly finished.
 	fn poll_aborted(&mut self, waiter: &kio::Waiter) -> bool {
 		matches!(self.group.poll_finished(waiter), Poll::Ready(Err(_)))
 	}
@@ -2509,32 +2509,41 @@ mod tests {
 		assert_eq!(rest[1].timestamp, ts(30_000));
 	}
 
-	/// The front of a live group can be shed to stay within the cache budget. A reader
-	/// whose next frame went with it skips forward too; the gap is not a decode error.
+	/// A live group that outgrows its cache budget is aborted. A reader whose current
+	/// group died that way skips forward; the gap is not a decode error.
 	#[tokio::test]
-	async fn lagged_group_skips_to_next() {
+	async fn oversized_group_skips_to_next() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
-		// Head shedding only kicks in at the per-group byte budget, so the second frame
-		// has to be large enough to push the first out.
 		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
-		for payload in [
-			Bytes::from(vec![0xDEu8; 1024]),
-			Bytes::from(vec![0u8; moq_net::group::MAX_CACHE_BYTES as usize - 16]),
-		] {
-			let frame = Frame {
-				timestamp: ts(0),
-				payload,
-				keyframe: false,
-				duration: None,
-			};
-			Container::Legacy(crate::container::Kind::Data)
-				.write(&mut group0, &[frame])
-				.unwrap();
-		}
+		let first = Frame {
+			timestamp: ts(0),
+			payload: Bytes::from(vec![0xDEu8; 1024]),
+			keyframe: false,
+			duration: None,
+		};
+		Container::Legacy(crate::container::Kind::Data)
+			.write(&mut group0, &[first])
+			.unwrap();
+		// Stay under the per-frame cap (hang prefixes a timestamp) so this is a group overflow,
+		// not FrameTooLarge.
+		let overflow = Frame {
+			timestamp: ts(0),
+			payload: Bytes::from(vec![0u8; (moq_net::group::MAX_CACHE_BYTES - 1024) as usize]),
+			keyframe: false,
+			duration: None,
+		};
+		let overflowed = Container::Legacy(crate::container::Kind::Data).write(&mut group0, &[overflow]);
+		assert!(
+			matches!(
+				overflowed,
+				Err(crate::Error::Hang(hang::Error::Moq(moq_net::Error::GroupTooLarge)))
+			),
+			"oversized group must abort as GroupTooLarge, got {overflowed:?}"
+		);
 
 		write_group(&mut track, 1, &[ts(30_000)]);
 		track.finish().unwrap();

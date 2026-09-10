@@ -4,6 +4,7 @@ import {
 	FrameTooLarge,
 	fromClose,
 	fromTransport,
+	GroupTooLarge,
 	Lagged,
 	NotFound,
 	ProtocolViolation,
@@ -220,7 +221,13 @@ test("the code tables match the spec", () => {
 	// placeholders this implementation still sends. 32-47 carries no meaning the draft
 	// publishes, so a code we put in it is an agreement with our own Rust implementation
 	// rather than a spec value.
-	const assignedLite: StreamCode[] = [StreamCode.NoCapacity, StreamCode.NotFound, StreamCode.Old, StreamCode.Evicted];
+	const assignedLite: StreamCode[] = [
+		StreamCode.NoCapacity,
+		StreamCode.GroupTooLarge,
+		StreamCode.NotFound,
+		StreamCode.Old,
+		StreamCode.Evicted,
+	];
 	const placeholders: StreamCode[] = [StreamCode.FrameTooLarge];
 	for (const code of Object.values(StreamCode)) {
 		if (assignedLite.includes(code)) {
@@ -239,6 +246,7 @@ test("the code tables match the spec", () => {
 	expect(Number(StreamCode.Evicted)).toBe(0x35);
 	expect(Number(StreamCode.FrameTooLarge)).toBe(0x25);
 	expect(Number(StreamCode.NoCapacity)).toBe(0x30);
+	expect(Number(StreamCode.GroupTooLarge)).toBe(0x32);
 
 	// The spaces are disjoint: 0 ends a session cleanly but fails a stream.
 	expect(Number(SessionCode.Cancel)).not.toBe(Number(StreamCode.Cancel));
@@ -297,6 +305,7 @@ test("toTransport: works with no WebTransportError global", () => {
 test("toStreamCode: a local condition maps to the code the peer can act on", () => {
 	expect(toStreamCode(new Lagged())).toBe(StreamCode.TooFarBehind);
 	expect(toStreamCode(new FrameTooLarge())).toBe(StreamCode.FrameTooLarge);
+	expect(toStreamCode(new GroupTooLarge())).toBe(StreamCode.GroupTooLarge);
 	expect(toStreamCode(new NotFound("broadcast x"))).toBe(StreamCode.NotFound);
 	expect(toStreamCode(new TimeoutError("too slow"))).toBe(StreamCode.DeliveryTimeout);
 	// Session-scoped: the peer learns which rule it broke from the session close.
@@ -324,6 +333,7 @@ test("toStreamCode and fromTransport agree on what a code means", () => {
 		StreamCode.TooFarBehind,
 		StreamCode.MalformedTrack,
 		StreamCode.NoCapacity,
+		StreamCode.GroupTooLarge,
 		StreamCode.NotFound,
 		StreamCode.Old,
 		StreamCode.Evicted,
@@ -335,10 +345,12 @@ test("toStreamCode and fromTransport agree on what a code means", () => {
 	// A gap is one class whichever side it happened on, so a `catch` needs only one check.
 	expect(fromTransport(toTransport(StreamCode.TooFarBehind, "lagged"))).toBeInstanceOf(Lagged);
 	expect(new Lagged()).toBeInstanceOf(StreamError);
+	expect(fromTransport(toTransport(StreamCode.GroupTooLarge, "overflow"))).toBeInstanceOf(GroupTooLarge);
+	expect(new GroupTooLarge()).toBeInstanceOf(StreamError);
 });
 
 test("toStreamCode: lite-only cache-miss codes do not reach an IETF peer", () => {
-	for (const code of [StreamCode.NotFound, StreamCode.Old, StreamCode.Evicted]) {
+	for (const code of [StreamCode.NotFound, StreamCode.Old, StreamCode.Evicted, StreamCode.GroupTooLarge]) {
 		expect(toStreamCode(new StreamError(code), { version: Version.DRAFT_20 })).toBe(StreamCode.Internal);
 	}
 });

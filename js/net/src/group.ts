@@ -4,15 +4,15 @@
  * @module
  */
 import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
-import { FrameTooLarge, Lagged } from "./error.ts";
+import { FrameTooLarge, GroupTooLarge, Lagged } from "./error.ts";
 import { hooks, type ReadGroupFrame } from "./internal.ts";
 import { Timestamp } from "./time.ts";
 
-/** Maximum bytes of frames cached in a group before old frames are evicted from the front. */
+/** Maximum bytes of frames in a group. A write that would exceed this aborts with {@link GroupTooLarge}. */
 export const MAX_GROUP_CACHE_BYTES = 32 * 1024 * 1024;
 
-/** Maximum number of frames cached in a group before old frames are evicted from the front. */
-export const MAX_GROUP_FRAMES = 1024;
+/** Maximum number of frames in a group. 8192 is the largest legal group; the 8193rd write is {@link GroupTooLarge}. */
+export const MAX_GROUP_FRAMES = 8192;
 
 /**
  * A frame buffered in a group: its presentation {@link Timestamp} and payload bytes.
@@ -35,9 +35,8 @@ export interface ReadOptions {
 	/**
 	 * The lowest sequence number the caller wants; defaults to the whole group.
 	 *
-	 * Frames below it are discarded instead of returned, and frames evicted below it are not
-	 * a gap: the read resumes at the next retained frame rather than throwing {@link Lagged}.
-	 * An eviction at or above it still throws, because the caller asked for that frame.
+	 * Frames below it are discarded instead of returned. The group still starts at frame 0,
+	 * so this is a reader filter, not a missing prefix.
 	 */
 	from?: number;
 }
@@ -49,13 +48,13 @@ export interface Info {
 }
 
 /**
- * Thrown by a frame read when the reader fell behind the group's eviction window, and by a frame
- * write when the frame is larger than a group can cache.
+ * Thrown by a frame read when the reader asked for a frame the group never held, and by a
+ * frame write when the frame or the group exceeds its cache budget.
  *
- * Both carry a moq-lite stream code. Registered peer resets decode to Lagged; reserved
- * codes such as FrameTooLarge remain opaque StreamError values.
+ * All three carry a moq-lite stream code. Registered peer resets decode to Lagged or
+ * GroupTooLarge; reserved codes such as FrameTooLarge remain opaque StreamError values.
  */
-export { FrameTooLarge, Lagged } from "./error.ts";
+export { FrameTooLarge, GroupTooLarge, Lagged } from "./error.ts";
 
 /** Reactive backing state shared by the group producer and one consumer. */
 class GroupState {
@@ -64,18 +63,12 @@ class GroupState {
 	closed = new Once<Error | null>();
 	total = new Signal<number>(0); // The total number of frames in the group thus far
 
-	// Absolute sequence of the frame at the front of `frames`, advanced by a read and by an
-	// eviction alike: the sequence the next read returns.
+	// Absolute sequence of the frame at the front of `frames`, advanced by a read: the
+	// sequence the next read returns.
 	start = 0;
 
-	// One past the newest frame the cache cap evicted before it could be read, or 0 when
-	// none was. A read that wanted a frame below it has a gap, so it throws Lagged rather
-	// than skipping silently; a read that starts above it never asked for the missing
-	// frames, so it proceeds.
-	evicted = 0;
-
 	cacheBytes = 0;
-	// The first frame's timestamp, retained after reads and front eviction.
+	// The first frame's timestamp, retained after reads.
 	timestamp?: Timestamp;
 	// The newest frame's timestamp: where a reader that has taken every frame sits.
 	latest?: Timestamp;
@@ -93,14 +86,6 @@ function appendFrame(state: GroupState, frame: Frame) {
 	state.cacheBytes += frame.payload.byteLength;
 	state.frames.mutate((frames) => {
 		frames.push(frame);
-
-		while (frames.length > MAX_GROUP_FRAMES || state.cacheBytes > MAX_GROUP_CACHE_BYTES) {
-			const evicted = frames.shift();
-			if (!evicted) break;
-			state.cacheBytes -= evicted.payload.byteLength;
-			state.start++;
-			state.evicted = state.start;
-		}
 	});
 
 	state.total.update((total) => total + 1);
@@ -168,7 +153,6 @@ export class Producer {
 		dst.latest = this.#state.latest;
 		for (const frame of this.#state.frames.peek()) appendFrame(dst, frame);
 		dst.start = this.#state.start;
-		dst.evicted = this.#state.evicted;
 		// The replay only covers what is still buffered, so the count has to come from the
 		// source: it is what names a frame's absolute sequence, and what a publisher reads
 		// to resolve the live edge.
@@ -222,10 +206,29 @@ export class Producer {
 
 	/** Writes a frame to the group. */
 	writeFrame(frame: Frame) {
-		// A frame past the cache cap would be evicted by the very append that added it, so accepting
-		// it would report success for a write nothing can ever read. Rust rejects it up front with
-		// `Error::FrameTooLarge`; do the same rather than silently dropping it.
+		// Closed first: a write after a clean close at the cap would otherwise take the
+		// overflow path, wipe committed frames, and leave readers with an empty success.
+		if (this.#state.closed.peek() !== undefined) throw new Error("group is closed");
+		// A frame past the cache cap would make the group exceed its budget by itself, so
+		// accepting it would report success for a write nothing can ever read. Rust rejects
+		// it up front with `Error::FrameTooLarge`; do the same rather than silently dropping it.
 		if (frame.payload.byteLength > MAX_GROUP_CACHE_BYTES) throw new FrameTooLarge();
+		if (
+			this.#state.total.peek() >= MAX_GROUP_FRAMES ||
+			this.#state.cacheBytes + frame.payload.byteLength > MAX_GROUP_CACHE_BYTES
+		) {
+			const err = new GroupTooLarge();
+			this.#state.frames.set([]);
+			this.#state.cacheBytes = 0;
+			if (this.#mirrors) {
+				for (const mirror of this.#mirrors) {
+					mirror.frames.set([]);
+					mirror.cacheBytes = 0;
+				}
+			}
+			this.close(err);
+			throw err;
+		}
 
 		this.#activity = performance.now();
 		appendFrame(this.#state, frame);
@@ -470,7 +473,6 @@ export class Consumer {
 		}
 		if (frames.length > 0) {
 			this.#state.start += frames.length;
-			this.#state.evicted = this.#state.start;
 		}
 		this.#state.cacheBytes = 0;
 		this.#state.frames.set([]);
@@ -489,7 +491,6 @@ export class Consumer {
 		const buffered = frames.shift();
 		if (!buffered) return undefined;
 
-		this.#state.cacheBytes -= buffered.payload.byteLength;
 		const sequence = this.#state.start++;
 		if (pending) this.#pendingFrames++;
 		let completed = false;
@@ -519,13 +520,8 @@ export class Consumer {
 		return this.#terminal !== undefined || this.#ended || this.#state.closed.peek() !== undefined;
 	}
 
-	/** True if frames were evicted from the front of this group before being read. */
-	get skipped(): boolean {
-		return this.#state.evicted > 0;
-	}
-
 	/**
-	 * How many frames the group has held, including any already read or evicted.
+	 * How many frames the group has held, including any already read.
 	 *
 	 * It is also the next frame's sequence number, so `frameCount - 1` names the newest
 	 * frame written so far. A publisher snapshots it to resolve the track's live edge.
@@ -583,7 +579,6 @@ export class Consumer {
 		for (;;) {
 			if (this.#terminal) throw this.#terminal;
 			if (this.#ended) return;
-			if (this.#state.evicted > from) throw new Lagged();
 
 			const read = this.#readBufferedFrame(pending);
 			if (read) {

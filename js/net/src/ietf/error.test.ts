@@ -151,7 +151,13 @@ test("stream reset codes are shared only where the draft agrees", () => {
 		// Lite-only: the assigned 48-63 cache-miss codes and the reserved 32-47
 		// placeholders are not in this registry at all, so no unassigned lite value
 		// ever reaches a moq-transport peer.
-		for (const code of [StreamCode.NotFound, StreamCode.Old, StreamCode.Evicted, StreamCode.FrameTooLarge]) {
+		for (const code of [
+			StreamCode.NotFound,
+			StreamCode.Old,
+			StreamCode.Evicted,
+			StreamCode.FrameTooLarge,
+			StreamCode.GroupTooLarge,
+		]) {
 			expect(sharedStreamCode(code, version)).toBe(false);
 		}
 	}

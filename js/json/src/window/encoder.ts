@@ -1,8 +1,8 @@
 import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "@moq/flate";
 import { Group } from "@moq/net";
 
-/** Frames (header included) in one group before a new group is forced, matching the Snapshot cap. */
-const MAX_GROUP_FRAMES = 256;
+/** Frames (header included) in one group before a new group is forced, matching the Snapshot cap. Kept well below the net per-group cap so a roll always precedes GroupTooLarge. */
+const MAX_GROUP_FRAMES = 1024;
 
 /** Op ratio used when {@link ProducerConfig.opRatio} is left unset. */
 export const DEFAULT_OP_RATIO = 8;
