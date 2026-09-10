@@ -24,3 +24,17 @@ Also handles TLS, certificate generation, logging setup, and reconnection logic,
 - [Publishing a chat track](examples/chat.rs)
 
 See the [API documentation](https://docs.rs/moq-tokio/) for details.
+
+## Fixed destinations
+
+`connect::Addr::resolved(url, addresses)` supplies fixed socket addresses while
+keeping the original URL for TLS verification and the request authority. Pass the
+result to `Client::connect`, or combine it with other destinations using `Addrs`.
+The client races the supplied addresses on its existing endpoint; WebSocket
+fallback uses the same fixed addresses without another DNS lookup.
+
+The constructor returns `None` for an empty list or an unsupported scheme. Fixed
+destinations support `https`, `wss`, `moqt`, and `moql`. Reconnects retain the fixed
+addresses, and accepted peer redirects terminate with `Error::PinnedRedirect`.
+To refresh DNS, resolve and apply your address policy again before creating a new
+connection. Address filtering belongs to the caller.

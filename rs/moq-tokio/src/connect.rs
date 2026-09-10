@@ -25,6 +25,52 @@ pub(crate) const DEFAULT_RACE: std::time::Duration = std::time::Duration::from_m
 /// Lives here for the same reason as [`DEFAULT_RACE`].
 pub(crate) const DEFAULT_RESOLUTION_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 
+/// A peer URL with optional fixed socket addresses for its transport dials.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Addr {
+	url: Url,
+	resolved: Option<Vec<net::SocketAddr>>,
+}
+
+impl Addr {
+	/// Resolve this URL normally when dialing it.
+	pub fn new(url: Url) -> Self {
+		Self { url, resolved: None }
+	}
+
+	/// Dial only these addresses, retaining the URL for TLS and request authority.
+	///
+	/// Returns `None` for an empty list or an unsupported scheme. Fixed addresses
+	/// survive reconnects; peer redirects are refused. Create a new connection to
+	/// refresh DNS and apply the caller's address policy again.
+	pub fn resolved(url: Url, addrs: impl IntoIterator<Item = net::SocketAddr>) -> Option<Self> {
+		if !matches!(url.scheme(), "https" | "wss" | "moqt" | "moql") || url.host().is_none() {
+			return None;
+		}
+		let addrs: Vec<_> = addrs.into_iter().collect();
+		(!addrs.is_empty()).then_some(Self {
+			url,
+			resolved: Some(addrs),
+		})
+	}
+
+	/// The original URL, including its request path and credentials.
+	pub fn url(&self) -> &Url {
+		&self.url
+	}
+
+	/// The fixed addresses, or `None` when dialing resolves the URL normally.
+	pub fn addresses(&self) -> Option<&[net::SocketAddr]> {
+		self.resolved.as_deref()
+	}
+}
+
+impl From<Url> for Addr {
+	fn from(url: Url) -> Self {
+		Self::new(url)
+	}
+}
+
 /// One or more addresses for the same peer, tried in order until one connects.
 ///
 /// Most callers have a single URL and never name this type:
@@ -37,18 +83,18 @@ pub(crate) const DEFAULT_RESOLUTION_DELAY: std::time::Duration = std::time::Dura
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Addrs(
 	/// Never empty: every constructor takes at least one URL.
-	Vec<Url>,
+	Vec<Addr>,
 );
 
 impl Addrs {
 	/// A peer reachable at one address.
-	pub fn new(url: Url) -> Self {
-		Self(vec![url])
+	pub fn new(addr: impl Into<Addr>) -> Self {
+		Self(vec![addr.into()])
 	}
 
 	/// Add a fallback, tried only when everything before it fails.
-	pub fn or(mut self, url: Url) -> Self {
-		self.0.push(url);
+	pub fn or(mut self, addr: impl Into<Addr>) -> Self {
+		self.0.push(addr.into());
 		self
 	}
 
@@ -57,13 +103,13 @@ impl Addrs {
 	/// The `None` is where an empty candidate list has to be dealt with: a peer
 	/// that advertised no reachable address is not something to dial and retry,
 	/// it's something to skip.
-	pub fn collect(urls: impl IntoIterator<Item = Url>) -> Option<Self> {
-		let urls: Vec<Url> = urls.into_iter().collect();
+	pub fn collect<A: Into<Addr>>(urls: impl IntoIterator<Item = A>) -> Option<Self> {
+		let urls: Vec<Addr> = urls.into_iter().map(Into::into).collect();
 		(!urls.is_empty()).then_some(Self(urls))
 	}
 
 	/// The addresses, in the order they are dialed. Never empty.
-	pub fn as_slice(&self) -> &[Url] {
+	pub fn as_slice(&self) -> &[Addr] {
 		&self.0
 	}
 }
@@ -226,6 +272,12 @@ impl Legacy {
 	}
 }
 
+impl From<Addr> for Addrs {
+	fn from(addr: Addr) -> Self {
+		Self::new(addr)
+	}
+}
+
 impl From<Url> for Addrs {
 	fn from(url: Url) -> Self {
 		Self::new(url)
@@ -324,14 +376,18 @@ mod tests {
 	#[test]
 	fn addrs_preserve_dial_order() {
 		let one = Addrs::from(url("moqt://a:4443"));
-		assert_eq!(one.as_slice(), [url("moqt://a:4443")]);
+		assert_eq!(one.as_slice(), [Addr::new(url("moqt://a:4443"))]);
 
 		let three = Addrs::new(url("moqt://a:4443"))
 			.or(url("moqt://b:4443"))
 			.or(url("moqt://c:4443"));
 		assert_eq!(
 			three.as_slice(),
-			[url("moqt://a:4443"), url("moqt://b:4443"), url("moqt://c:4443")]
+			[
+				Addr::new(url("moqt://a:4443")),
+				Addr::new(url("moqt://b:4443")),
+				Addr::new(url("moqt://c:4443"))
+			]
 		);
 	}
 
@@ -375,7 +431,7 @@ mod tests {
 	/// connection that retries an empty list forever.
 	#[test]
 	fn addrs_collect_rejects_an_empty_list() {
-		assert_eq!(Addrs::collect([]), None);
+		assert_eq!(Addrs::collect([] as [Url; 0]), None);
 		assert_eq!(
 			Addrs::collect([url("moqt://a:4443"), url("moqt://b:4443")]),
 			Some(Addrs::new(url("moqt://a:4443")).or(url("moqt://b:4443")))
@@ -645,5 +701,25 @@ impl Config {
 	/// together, resolving the default from the [`timeout`](Self::timeout) override.
 	pub fn resolved_timeout(&self) -> std::time::Duration {
 		self.timeout.into_std()
+	}
+}
+
+#[cfg(test)]
+mod addr_tests {
+	use super::*;
+
+	#[test]
+	fn fixed_addresses_require_a_supported_nonempty_target() {
+		let peer: net::SocketAddr = "127.0.0.1:443".parse().unwrap();
+		for scheme in ["http", "ws", "tcp", "unix", "iroh"] {
+			let url = format!("{scheme}://relay.example/path").parse().unwrap();
+			assert!(Addr::resolved(url, [peer]).is_none());
+		}
+		let url = Url::parse("https://relay.example/path?jwt=secret").unwrap();
+		assert!(Addr::resolved(url.clone(), []).is_none());
+		let target = Addr::resolved(url.clone(), [peer]).unwrap();
+		assert_eq!(target.url(), &url);
+		assert_eq!(target.addresses(), Some([peer].as_slice()));
+		assert_eq!(Addr::new(url).addresses(), None);
 	}
 }

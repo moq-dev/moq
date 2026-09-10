@@ -39,7 +39,13 @@ mod crypto;
 mod deprecated;
 mod duration;
 mod error;
-#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche", feature = "tcp"))]
+#[cfg(any(
+	feature = "quinn",
+	feature = "noq",
+	feature = "quiche",
+	feature = "tcp",
+	feature = "websocket"
+))]
 pub mod failover;
 #[cfg(feature = "jemalloc")]
 pub mod jemalloc;
@@ -51,7 +57,13 @@ pub mod origin;
 pub mod quic;
 #[cfg(feature = "quinn")]
 pub mod quinn;
-#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche", feature = "tcp"))]
+#[cfg(any(
+	feature = "quinn",
+	feature = "noq",
+	feature = "quiche",
+	feature = "tcp",
+	feature = "websocket"
+))]
 mod resolve;
 pub mod runtime;
 #[cfg(any(

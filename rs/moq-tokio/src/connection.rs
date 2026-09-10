@@ -695,6 +695,9 @@ impl Connection {
 						// only it. The peer named exactly one place to go, which retires
 						// whatever other addresses got us to this session.
 						let url = if let Some(target) = goaway.redirect().target(&msg.uri, &url) {
+							if addrs.as_slice().iter().any(|addr| addr.addresses().is_some()) {
+								return Err(Error::PinnedRedirect);
+							}
 							addrs = Addrs::new(target.clone());
 							target
 						} else {
@@ -847,7 +850,8 @@ impl Connection {
 		let candidates = addrs.as_slice();
 		let mut last = None;
 
-		for (index, url) in candidates.iter().enumerate() {
+		for (index, addr) in candidates.iter().enumerate() {
+			let url = addr.url();
 			// The retry window can run out mid-walk. Stop rather than starting an
 			// attempt with no time to finish; the caller reports the budget error.
 			if budget.is_some_and(|budget| tokio::time::Instant::now() >= budget) {
@@ -856,7 +860,7 @@ impl Connection {
 
 			tracing::info!(peer = %Endpoint(url), "connecting");
 
-			let mut dial = std::pin::pin!(client.dial(url.clone()));
+			let mut dial = std::pin::pin!(client.dial(addr.clone()));
 			let dialed = kio::wait(|waiter| {
 				if poll_draining(draining, waiter) {
 					shared.disconnected();

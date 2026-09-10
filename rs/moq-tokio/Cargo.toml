@@ -47,7 +47,7 @@ iroh = ["dep:web-transport-iroh", "dep:web-transport-proto", "dep:noq-proto"]
 # LAN peer discovery over mDNS (the `mdns` module).
 mdns = ["dep:mdns-sd", "dep:hmac", "dep:sha2", "dep:subtle"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
-websocket = ["dep:qmux", "watch"]
+websocket = ["dep:qmux", "watch", "dep:dns-lookup"]
 # Plain-TCP qmux transport (`tcp://`), no TLS. Server-side and client-side.
 tcp = ["dep:qmux", "dep:dns-lookup"]
 # Unix-domain-socket qmux transport (`unix://`), unix-only. Adds peer-credential

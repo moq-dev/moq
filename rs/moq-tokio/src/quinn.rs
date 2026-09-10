@@ -344,10 +344,10 @@ impl QuinnClient {
 	pub async fn connect(
 		&self,
 		tls: &rustls::ClientConfig,
-		url: Url,
+		addr: crate::connect::Addr,
 		versions: &moq_net::Versions,
 	) -> Result<web_transport_quinn::Session> {
-		let mut url = url;
+		let mut url = addr.url().clone();
 		let mut config = tls.clone();
 
 		let target = url.host().ok_or(Error::InvalidDnsName)?;
@@ -358,8 +358,11 @@ impl QuinnClient {
 		// answers Happy Eyeballs style as they land, so neither a broken family nor a
 		// lookup still waiting on its AAAA record can stall the connect.
 		let local = self.quic.local_addr().map_err(Error::LocalAddr)?;
-		let candidates =
-			crate::resolve::Candidates::resolve(target, port, self.resolution_delay).with_local(local, self.dual_stack);
+		let candidates = match addr.addresses() {
+			Some(addrs) => crate::resolve::Candidates::fixed(addrs.iter().copied()),
+			None => crate::resolve::Candidates::resolve(target, port, self.resolution_delay),
+		}
+		.with_local(local, self.dual_stack);
 
 		if url.scheme() == "http" {
 			// Insecure per-connection bootstrap: only honored when no stronger
@@ -930,7 +933,7 @@ mod tests {
 		// regression fails fast instead of stalling CI.
 		tokio::time::timeout(Duration::from_secs(5), async move {
 			let session = client
-				.connect(&tls, url, &moq_net::Versions::default())
+				.connect(&tls, url.into(), &moq_net::Versions::default())
 				.await
 				.expect("connect failed");
 
@@ -950,5 +953,69 @@ mod tests {
 		})
 		.await
 		.expect("test timed out");
+	}
+	#[tokio::test]
+	async fn fixed_addresses_verify_hostname_fail_over_and_share_endpoint() {
+		let rcgen::CertifiedKey { cert, signing_key } =
+			rcgen::generate_simple_self_signed(["relay.invalid".to_string()]).unwrap();
+		let cert = rustls::pki_types::CertificateDer::from(cert);
+		let key = rustls::pki_types::PrivatePkcs8KeyDer::from(signing_key.serialize_der());
+		let provider = crate::crypto::provider();
+		let mut server_tls = rustls::ServerConfig::builder_with_provider(provider.clone())
+			.with_safe_default_protocol_versions()
+			.unwrap()
+			.with_no_client_auth()
+			.with_single_cert(vec![cert.clone()], key.into())
+			.unwrap();
+		server_tls.alpn_protocols = moq_net::Versions::default()
+			.alpns()
+			.iter()
+			.map(|a| a.as_bytes().to_vec())
+			.collect();
+		let server = quinn::Endpoint::server(
+			quinn::ServerConfig::with_crypto(Arc::new(
+				quinn::crypto::rustls::QuicServerConfig::try_from(server_tls).unwrap(),
+			)),
+			"127.0.0.1:0".parse().unwrap(),
+		)
+		.unwrap();
+		let peer = server.local_addr().unwrap();
+		let accepted = tokio::spawn(async move {
+			let mut conns = Vec::new();
+			for _ in 0..2 {
+				let conn = server.accept().await.unwrap().await.unwrap();
+				let handshake = conn
+					.handshake_data()
+					.unwrap()
+					.downcast::<quinn::crypto::rustls::HandshakeData>()
+					.unwrap();
+				assert_eq!(handshake.server_name.as_deref(), Some("relay.invalid"));
+				conns.push(conn);
+			}
+			assert_eq!(conns[0].remote_address(), conns[1].remote_address());
+			(server, conns)
+		});
+		let mut roots = rustls::RootCertStore::empty();
+		roots.add(cert).unwrap();
+		let tls = rustls::ClientConfig::builder_with_provider(provider)
+			.with_safe_default_protocol_versions()
+			.unwrap()
+			.with_root_certificates(roots)
+			.with_no_client_auth();
+		let client = QuinnClient::new(&connect::Config::default(), &crate::quic::Config::default()).unwrap();
+		let url = format!("moqt://relay.invalid:{}", peer.port()).parse().unwrap();
+		let blocked = std::net::SocketAddr::new("127.0.0.2".parse().unwrap(), peer.port());
+		let addr = connect::Addr::resolved(url, [blocked, peer]).unwrap();
+		let first = client
+			.connect(&tls, addr.clone(), &moq_net::Versions::default())
+			.await
+			.unwrap();
+		let second = client
+			.clone()
+			.connect(&tls, addr, &moq_net::Versions::default())
+			.await
+			.unwrap();
+		let _accepted = accepted.await.unwrap();
+		drop((first, second));
 	}
 }

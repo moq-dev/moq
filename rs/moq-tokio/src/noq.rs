@@ -328,10 +328,10 @@ impl NoqClient {
 	pub async fn connect(
 		&self,
 		tls: &rustls::ClientConfig,
-		url: Url,
+		addr: crate::connect::Addr,
 		versions: &moq_net::Versions,
 	) -> Result<web_transport_noq::Session> {
-		let mut url = url;
+		let mut url = addr.url().clone();
 		let mut config = tls.clone();
 
 		let target = url.host().ok_or(Error::InvalidDnsName)?;
@@ -342,8 +342,11 @@ impl NoqClient {
 		// answers Happy Eyeballs style as they land, so neither a broken family nor a
 		// lookup still waiting on its AAAA record can stall the connect.
 		let local = self.quic.local_addr().map_err(Error::LocalAddr)?;
-		let candidates =
-			crate::resolve::Candidates::resolve(target, port, self.resolution_delay).with_local(local, self.dual_stack);
+		let candidates = match addr.addresses() {
+			Some(addrs) => crate::resolve::Candidates::fixed(addrs.iter().copied()),
+			None => crate::resolve::Candidates::resolve(target, port, self.resolution_delay),
+		}
+		.with_local(local, self.dual_stack);
 
 		if url.scheme() == "http" {
 			// Insecure per-connection bootstrap: only honored when no stronger
@@ -873,7 +876,7 @@ mod tests {
 		// regression fails fast instead of stalling CI.
 		tokio::time::timeout(Duration::from_secs(5), async move {
 			let session = client
-				.connect(&tls, url, &moq_net::Versions::default())
+				.connect(&tls, url.into(), &moq_net::Versions::default())
 				.await
 				.expect("connect failed");
 

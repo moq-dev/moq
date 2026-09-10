@@ -170,8 +170,8 @@ async fn follow_still_honors_a_cross_host_redirect() {
 async fn a_refused_redirect_preserves_configured_fallbacks() {
 	let (port_a, mut sessions_a, task_a) = spawn_server().await;
 	let (port_b, mut sessions_b, _task_b) = spawn_server().await;
-	let primary = format!("tcp://localhost:{port_a}/").parse().expect("primary URL");
-	let fallback = format!("tcp://127.0.0.1:{port_b}/").parse().expect("fallback URL");
+	let primary: url::Url = format!("tcp://localhost:{port_a}/").parse().expect("primary URL");
+	let fallback: url::Url = format!("tcp://127.0.0.1:{port_b}/").parse().expect("fallback URL");
 	let addrs = moq_tokio::connect::Addrs::new(primary).or(fallback);
 	let _connection = quick_client(Default::default()).connect(addrs);
 	let first = tokio::time::timeout(Duration::from_secs(10), sessions_a.recv())
