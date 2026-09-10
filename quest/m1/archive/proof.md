@@ -25,7 +25,9 @@ catalog PUT never exposes dependent media; later segments remain usable. Also
 cover a stalled pacing track forced to a gap, sparse group ranges, malformed
 table offsets, an unknown envelope or `.info` version treated as a missing
 segment, segment create collisions under the single-writer rule, a missing
-tail, and a clean end without a completion marker.
+tail, and a clean end without a completion marker. Accept equivalent `.info`
+JSON with reordered members or different whitespace without rewriting it;
+reject differing properties and malformed or unsupported metadata.
 
 Exercise group and segment IDs 0 and 2^53 - 1; reject 2^53 and the largest
 QUIC varint in keys and reconstructed group IDs. Cover consecutive zero

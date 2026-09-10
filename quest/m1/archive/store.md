@@ -42,15 +42,16 @@ assume that it avoids filesystem traversal. Optional `PaginatedListStore`
 seeking with `offset` and `max_keys` requires a backend with verified lexical
 ordering and offset support; that trait is not a requirement for local stores.
 
-Every PUT is a whole-object create. One writer owns a prefix, so a
+Every PUT is a whole-object create. One writer owns a prefix. For segments, a
 create collision is accepted only when the existing bytes equal the intended
 object; otherwise fail. Matching bounds alone do not establish identical
 groups or payloads, including after an interrupted write. Never rewrite it.
 Object attributes such as content type or cache policy are optional hints,
 never format metadata.
 
-For `.info`, likewise GET an existing object and require
-byte-equivalent contents. A priority or timescale mismatch is a hard enrollment
+For `.info`, GET and validate an existing object, then compare parsed
+`version`, `priority`, and `timescale` values, ignoring JSON whitespace and
+member order. Preserve the existing bytes. A priority or timescale mismatch is a hard enrollment
 error, never an idempotent retry.
 
 The store exposes the layout and codec helpers plus put, get, list, and delete

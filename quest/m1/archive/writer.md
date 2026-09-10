@@ -15,8 +15,8 @@ or know which tracks are media.
 
 Enrollment creates the track's `.info` before accepting any group. If that
 create fails, enrollment fails and no range for the track can enter the
-timeline. On `AlreadyExists`, read the immutable `.info` and accept only
-byte-equivalent metadata; a priority or timescale mismatch fails enrollment.
+timeline. On `AlreadyExists`, validate the immutable `.info` and accept only matching
+parsed `version`, `priority`, and `timescale` values; a priority or timescale mismatch fails enrollment.
 
 Feed the segmenter already on dev (`rs/moq-mux/src/timeline.rs`): take
 `Producer::deferred` (:917), enroll each registration through

@@ -812,6 +812,8 @@ A reader MUST preserve integer values exactly.
 The track object MUST be durable before its first segment object is stored, including for the timeline track.
 It is immutable for the lifetime of the recording.
 A reader MUST refuse an unknown version or invalid track properties.
+On an existing `.info`, a writer MUST validate and compare the parsed `version`, `priority`, and `timescale` values; JSON whitespace and member order do not affect equality.
+Different property values MUST fail enrollment, and the existing object MUST NOT be rewritten.
 
 ## Segment Objects {#recording-segments}
 A segment object holds one track's complete groups for one segment:
@@ -860,7 +862,7 @@ The timeline uses the same envelope and stores only complete Window groups ({{ti
 Its own groups are discovered by listing, not included in the record's `tracks`, avoiding a record that must index itself.
 A reader replays their checkpoints and operations in group order, preserving group boundaries and their independent DEFLATE windows.
 Neither timeline nor media objects are appended to or rewritten.
-One writer owns a recording prefix. An existing key MAY be reused only for identical object bytes; a conflicting create MUST fail.
+One writer owns a recording prefix. An existing segment object key MAY be reused only for identical object bytes; a conflicting create MUST fail.
 
 ## Writer Behavior {#recording-writer}
 A writer subscribes to the broadcast and buffers the in-progress segment independently of the publisher or relay cache.
@@ -972,6 +974,7 @@ This document has no IANA actions.
 - Addressed track objects by inclusive group bounds and timeline objects by consecutive segment IDs, with incremental discovery and per-track omission on storage failure.
 - Restricted retention updates to segment commits and removed completion markers.
 - Limited recorded group and segment IDs and frame timestamps to JSON-safe integers, including delta reconstruction.
+- Compared existing track properties by parsed values rather than JSON serialization.
 
 # Acknowledgments
 {:numbered="false"}
