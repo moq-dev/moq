@@ -27,10 +27,9 @@ class Moq internal constructor(
     private val client: MoqClient,
 ) : AutoCloseable {
     /**
-     * Create a live broadcast at [path] so subscribers can discover it.
+     * Create an unadvertised broadcast at [path].
      *
-     * The origin announces the path, becoming visible shortly after this returns.
-     * Toggle discoverability with `setAnnounce`; `finish()` unpublishes immediately.
+     * Advertise it with `announce` after populating tracks. `finish()` unpublishes immediately.
      */
     fun createBroadcast(path: String): BroadcastProducer = session.publisher().createBroadcast(path)
 

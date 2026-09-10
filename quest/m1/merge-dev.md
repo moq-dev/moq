@@ -40,7 +40,7 @@ broadcast that has been up for days must get a playlist promptly. The bounded
 run proves it.
 
 The breaking-change targeting rules in CONTRIBUTING.md govern the release
-that follows. Dart lands on that surface with #3190, so nothing waits on this
+that follows. Dart already has that surface, so nothing waits on this
 merge for it. The rest of the archive line, wildcard resolution, and every
 additive quest that builds on dev-only code start on main afterwards from
 [m2](/quest/m2/README.md).
@@ -48,9 +48,8 @@ additive quest that builds on dev-only code start on main afterwards from
 ## Required
 
 - [m0](/quest/m0/README.md) - every release blocker lands or is punted before the merge
-- [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - every native binding on the announce surface
 - [Monotonic timeline](/quest/m1/monotonic-timeline.md) - so a shed marker still jumps the playhead on a timestamp hole (#3291)
-- [Advertise](/quest/m1/wildcard-advertise.md) - so `dynamic(prefix, route)` takes a path pattern before the announce API is published
+- [Advertise](/quest/m1/wildcard-advertise.md) - so `dynamic(pattern, route)` can advertise non-prefix patterns before the announce API is published
 
 ## Closes
 

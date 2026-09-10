@@ -38,7 +38,7 @@ type (
 	FetchGroupOptions = ffi.MoqFetchGroupOptions
 	// OriginOptions configures a new origin, such as its maximum cache size in bytes.
 	OriginOptions = ffi.MoqOriginOptions
-	// Route is the hop chain a broadcast takes to reach an origin, its cost, and whether it's announced.
+	// Route is the hop chain a broadcast takes to reach an origin, and its cost.
 	Route = ffi.MoqRoute
 	// Subscription holds subscriber-side delivery preferences: priority, ordering, max age, and group range.
 	Subscription = ffi.MoqSubscription

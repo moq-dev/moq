@@ -125,7 +125,7 @@ class Client:
         self._session = None
 
     def create_broadcast(self, path: str) -> BroadcastProducer:
-        """Create a live broadcast at ``path`` so subscribers can discover it.
+        """Create an unadvertised broadcast at ``path``. Announce it after populating tracks.
 
         See :meth:`OriginProducer.create_broadcast`.
         """

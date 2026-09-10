@@ -24,6 +24,7 @@ async def publish(url: str, broadcast: str) -> None:
         # Hold the producer for the lifetime of the publish loop; finish() unpublishes.
         producer = client.create_broadcast(broadcast)
         media = producer.publish_video_stream(moq.VideoFormat.AVC3)
+        producer.announce()
         print(f"publishing {broadcast!r} (Annex-B H.264 from stdin) to {url}")
 
         loop = asyncio.get_running_loop()

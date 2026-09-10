@@ -182,6 +182,12 @@ impl From<serde_json::Error> for Error {
 	}
 }
 
+impl From<moq_net::InvalidPattern> for Error {
+	fn from(err: moq_net::InvalidPattern) -> Self {
+		Error::InvalidConfig(err.to_string())
+	}
+}
+
 impl From<url::ParseError> for Error {
 	fn from(err: url::ParseError) -> Self {
 		Error::Url(err.to_string())

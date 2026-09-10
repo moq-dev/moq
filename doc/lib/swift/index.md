@@ -49,6 +49,7 @@ let video = try broadcast.publishVideo(
     output: VideoEncoderOutput(codec: .h264, track: "camera", bitrate: nil, gop: nil, kind: .auto)
 )
 try video.write(VideoFrame(timestampUs: pts, data: rgba))
+try broadcast.announce()
 
 session.shutdown()
 ```
@@ -65,7 +66,7 @@ pacing; and `client.setQuicMaxStreams` raises the peer's inbound stream cap.
 `accept()` or `reject(code:)`. JSON tracks take `Codable` types
 (`publishJsonSnapshot(name:of:)`, `subscribeJsonStream(name:as:)`), and the
 rest of the [shared feature list](/lib/#what-every-binding-can-do) maps one
-to one: `fetchGroup`/`fetchMediaGroup`, `dynamic()`, `appendDatagram`/
+to one: `fetchGroup`/`fetchMediaGroup`, `dynamic()` for tracks and `dynamic(pattern:)` for broadcasts, `appendDatagram`/
 `datagrams`, `setCatalogSection`, `used()`/`unused()`. `session.bandwidth()`
 divides the connection's send estimate; pass it to `encodeVideo` /
 `encodeAudio` or `reserve` a share for an app-owned track. `MoqError.isAuth` and

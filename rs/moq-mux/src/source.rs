@@ -304,7 +304,7 @@ pub(crate) fn produce_origin() -> moq_net::origin::Producer {
 #[cfg(test)]
 pub(crate) fn announced(broadcast: &moq_net::broadcast::Consumer) -> Source {
 	let origin = produce_origin();
-	let dynamic = origin.dynamic("", Default::default()).unwrap();
+	let dynamic = origin.dynamic(moq_net::Pattern::all(), Default::default()).unwrap();
 	let served = broadcast.clone();
 	tokio::spawn(async move {
 		while let Ok(request) = dynamic.requested_broadcast().await {
@@ -333,7 +333,7 @@ mod tests {
 	#[tokio::test]
 	async fn binding_retains_a_pending_request_across_cancelled_and_repeated_reads() {
 		let origin = produce_origin();
-		let dynamic = origin.dynamic("", Default::default()).unwrap();
+		let dynamic = origin.dynamic(moq_net::Pattern::all(), Default::default()).unwrap();
 		let source = Source::new(origin.consume(), "live");
 		let binding = source.bind(None).unwrap();
 		let request = dynamic.requested_broadcast().await.unwrap();

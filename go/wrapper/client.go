@@ -258,7 +258,7 @@ func Dial(ctx context.Context, url string, opts ...ClientOption) (*Client, error
 	return c, nil
 }
 
-// CreateBroadcast creates a live broadcast at path so the remote can discover it.
+// CreateBroadcast creates an unadvertised broadcast at path. Announce it after populating tracks.
 //
 // See [OriginProducer.CreateBroadcast].
 func (c *Client) CreateBroadcast(path string) (*BroadcastProducer, error) {

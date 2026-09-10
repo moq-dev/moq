@@ -59,6 +59,8 @@ async def main():
         status = broadcast.publish_json_snapshot("status", compression=True)
         status.update({"state": "live", "viewers": 42})
 
+        broadcast.announce()
+
 asyncio.run(main())
 ```
 
@@ -71,7 +73,7 @@ raises the peer's inbound stream cap.
 Everything in the [shared feature list](/lib/#what-every-binding-can-do) is
 here: `moq.Server` with per-request accept/reject, `fetch_group` and
 `fetch_media_group`, `dynamic()` handlers for on-demand tracks and
-broadcasts, `append_datagram`/`recv_datagram`, `set_catalog_section`,
+`dynamic(pattern)` for broadcasts, `append_datagram`/`recv_datagram`, `set_catalog_section`,
 `route_updates()`, and `used()`/`unused()` so capture can idle when nobody is
 subscribed. `session.bandwidth()` divides the connection's send estimate;
 pass it to `encode_video` / `encode_audio` or `reserve` a share for an

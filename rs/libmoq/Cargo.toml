@@ -20,6 +20,7 @@ crate-type = ["staticlib"]
 anyhow = { workspace = true, features = ["backtrace"] }
 bytes = { workspace = true }
 hang = { workspace = true }
+kio = { workspace = true }
 # Codecs only: OBS and the other C consumers do their own device I/O.
 moq-audio = { workspace = true, features = ["aac"] }
 moq-json = { workspace = true }

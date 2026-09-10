@@ -148,13 +148,17 @@ public final class BroadcastProducer: Sendable {
         BroadcastDynamic(try ffi.dynamic())
     }
 
-    /// Set whether the broadcast's exact path is announced as a route.
+    /// Advertise this broadcast's exact path as a route.
     ///
-    /// The origin advertises the path only while announced; an unannounced
-    /// broadcast stays reachable by exact path for subscribes and fetches. This is
-    /// how a publisher goes on and off the air without tearing down the broadcast.
-    public func setAnnounce(_ announce: Bool) throws {
-        try ffi.setAnnounce(announce: announce)
+    /// Announcing again re-prices the route in place. An unannounced broadcast
+    /// stays reachable by exact path; announcing only makes the path discoverable.
+    public func announce(route: Route = Route()) throws {
+        try ffi.announce(route: route)
+    }
+
+    /// Retract this broadcast's exact-path advertisement, if any.
+    public func unannounce() throws {
+        try ffi.unannounce()
     }
 
     /// Replace the catalog properties shared by every video rendition.

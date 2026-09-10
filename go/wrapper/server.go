@@ -198,7 +198,7 @@ func (s *Server) CertFingerprints() ([]string, error) {
 	return s.inner.CertFingerprints()
 }
 
-// CreateBroadcast creates a live broadcast at path, served to incoming sessions.
+// CreateBroadcast creates an unadvertised broadcast at path. Announce it after populating tracks.
 //
 // See [OriginProducer.CreateBroadcast].
 func (s *Server) CreateBroadcast(path string) (*BroadcastProducer, error) {

@@ -33,6 +33,18 @@ pub struct Origin {
 
 	/// Pending consume-until-announced tasks. Close signals shutdown; the task delivers a final callback, then removes itself.
 	consume_task: NonZeroSlab<Option<TaskEntry>>,
+
+	/// Served routes from [Self::dynamic], retracted when the handle is closed.
+	dynamic: NonZeroSlab<Option<DynamicEntry>>,
+
+	/// Broadcast requests delivered to a dynamic handler, freed after accept/abort.
+	broadcast_request: NonZeroSlab<Option<moq_net::origin::Request>>,
+}
+
+struct DynamicEntry {
+	inner: Option<moq_net::origin::Dynamic>,
+	close: Option<oneshot::Sender<()>>,
+	callback: OnStatus,
 }
 
 impl Origin {
@@ -255,14 +267,117 @@ impl Origin {
 		Ok(())
 	}
 
-	/// Create a live broadcast at `path` on an origin, announcing the exact path.
+	/// Create an unadvertised broadcast at `path` on an origin.
 	///
 	/// Errors with [`Error::Moq`] if the path is outside the origin's scope.
-	pub fn publish<P: moq_net::AsPath>(&self, origin: Id, path: P) -> Result<moq_net::broadcast::Producer, Error> {
+	pub fn create_broadcast<P: moq_net::AsPath>(
+		&self,
+		origin: Id,
+		path: P,
+	) -> Result<moq_net::broadcast::Producer, Error> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
-		let broadcast = origin.create_broadcast(path)?;
-		broadcast.announce(Default::default())?;
-		Ok(broadcast)
+		Ok(origin.create_broadcast(path)?)
+	}
+
+	/// Advertise `pattern` and serve requests beneath it, delivering each as a
+	/// broadcast-request handle via `on_request`.
+	pub fn dynamic(
+		&mut self,
+		origin: Id,
+		pattern: moq_net::Pattern,
+		route: moq_net::origin::Route,
+		on_request: OnStatus,
+	) -> Result<Id, Error> {
+		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
+		let inner = origin.dynamic(pattern, route)?;
+		let channel = oneshot::channel();
+		let id = self.dynamic.insert(Some(DynamicEntry {
+			inner: Some(inner),
+			close: Some(channel.0),
+			callback: on_request,
+		}))?;
+
+		tokio::spawn(async move {
+			let res = Self::run_dynamic(id, channel.1).await;
+			let entry = State::lock().origin.dynamic.remove(id).flatten();
+			if let Some(entry) = entry {
+				entry.callback.call(res);
+			}
+		});
+
+		Ok(id)
+	}
+
+	async fn run_dynamic(id: Id, mut close: oneshot::Receiver<()>) -> Result<(), Error> {
+		loop {
+			let request = tokio::select! {
+				biased;
+				_ = &mut close => return Ok(()),
+				res = kio::wait(|waiter| {
+					let state = State::lock();
+					match state.origin.dynamic.get(id).and_then(|entry| entry.as_ref()).and_then(|entry| entry.inner.as_ref()) {
+						Some(dynamic) => dynamic.poll_requested_broadcast(waiter),
+						None => std::task::Poll::Ready(Err(moq_net::Error::Closed)),
+					}
+				}) => match res {
+					Ok(request) => request,
+					Err(moq_net::Error::Closed) => return Ok(()),
+					Err(err) => return Err(err.into()),
+				},
+			};
+
+			let request_id = State::lock().origin.broadcast_request.insert(Some(request))?;
+			let callback = State::lock()
+				.origin
+				.dynamic
+				.get(id)
+				.and_then(|entry| entry.as_ref())
+				.map(|entry| entry.callback);
+			let Some(callback) = callback else {
+				return Ok(());
+			};
+			callback.call(request_id);
+		}
+	}
+
+	pub fn dynamic_update(&self, dynamic: Id, route: moq_net::origin::Route) -> Result<(), Error> {
+		let dynamic = self
+			.dynamic
+			.get(dynamic)
+			.and_then(|entry| entry.as_ref())
+			.and_then(|entry| entry.inner.as_ref())
+			.ok_or(Error::NotFound)?;
+		Ok(dynamic.update(route)?)
+	}
+
+	pub fn dynamic_close(&mut self, dynamic: Id) -> Result<(), Error> {
+		let entry = self
+			.dynamic
+			.get_mut(dynamic)
+			.and_then(|entry| entry.as_mut())
+			.ok_or(Error::NotFound)?;
+		let inner = entry.inner.take();
+		entry.close.take();
+		drop(inner);
+		Ok(())
+	}
+
+	pub fn broadcast_request_path(&self, request: Id, dst: &mut crate::moq_string) -> Result<(), Error> {
+		let request = self
+			.broadcast_request
+			.get(request)
+			.and_then(|slot| slot.as_ref())
+			.ok_or(Error::NotFound)?;
+		let path = request.path();
+		*dst = crate::moq_string {
+			data: path.as_str().as_ptr().cast::<std::ffi::c_char>(),
+			len: path.as_str().len(),
+		};
+		Ok(())
+	}
+
+	pub fn broadcast_request_take(&mut self, request: Id) -> Result<moq_net::origin::Request, Error> {
+		self.broadcast_request.remove(request).flatten().ok_or(Error::NotFound)
 	}
 
 	pub fn close(&mut self, origin: Id) -> Result<(), Error> {

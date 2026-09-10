@@ -1231,7 +1231,8 @@ where
 			}
 			Entry::Vacant(entry) => {
 				// Propagates Error::Unauthorized if the namespace is out of scope.
-				let dynamic = self.origin.dynamic(&path, route.clone())?;
+				let pattern = crate::Pattern::subtree(path.as_str()).map_err(|_| Error::Unsupported)?;
+				let dynamic = self.origin.dynamic(pattern, route.clone())?;
 
 				entry.insert(BroadcastState {
 					route,

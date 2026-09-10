@@ -37,6 +37,7 @@ func TestErrorSentinels(t *testing.T) {
 		{"NotFound", ffi.NewMoqErrorNotFound(), moq.ErrNotFound},
 		{"Unsupported", ffi.NewMoqErrorUnsupported(), moq.ErrUnsupported},
 		{"InvalidRoute", ffi.NewMoqErrorInvalidRoute(), moq.ErrInvalidRoute},
+		{"InvalidPattern", ffi.NewMoqErrorInvalidPattern(), moq.ErrInvalidPattern},
 		{"UnresolvableBroadcast", ffi.NewMoqErrorUnresolvableBroadcast(), moq.ErrUnresolvableBroadcast},
 		{"AlreadyCommitted", ffi.NewMoqErrorAlreadyCommitted(), moq.ErrAlreadyCommitted},
 		{"Log", ffi.NewMoqErrorLog(), moq.ErrLog},

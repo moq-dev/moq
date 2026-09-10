@@ -45,6 +45,9 @@ func publish(ctx context.Context, url, broadcast string) error {
 	if err != nil {
 		return err
 	}
+	if err := producer.Announce(moq.Route{}); err != nil {
+		return err
+	}
 	fmt.Printf("publishing %q (Annex-B H.264 from stdin) to %s\n", broadcast, url)
 
 	// os.Stdin.Read returns as soon as any bytes are available, so ffmpeg's

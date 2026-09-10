@@ -38,6 +38,7 @@ final broadcast = await moq.requestBroadcast('live/camera');
 final mine = moq.createBroadcast('live/camera');
 final track = mine.publishTrack(name: 'video', info: null);
 track.appendGroup().writeFrame(frame: MoqFrame(payload: bytes));
+mine.announce(route: MoqRoute());
 
 moq.close();
 ```

@@ -62,6 +62,8 @@ async def main():
         audio.write_frame(payload, timestamp_us=20000)
         audio.cut()
 
+        broadcast.announce()
+
         # Clean up
         audio.finish()
         broadcast.finish()
@@ -81,6 +83,7 @@ async def main():
     async with moq.Server("127.0.0.1:4443", tls_generate=["localhost"]) as server:
         broadcast = server.create_broadcast("hello")
         track = broadcast.publish_track("events")
+        broadcast.announce()
         print(f"listening on https://{server.local_addr}")
 
         sessions = []
@@ -125,7 +128,7 @@ client = moq.Client(
 - **`Server(bind="[::]:443", *, tls_cert=(), tls_key=(), tls_generate=(), publish=None, subscribe=None)`**. Async context manager + async iterator of incoming `Request`s.
   - `.local_addr`. The bound address (useful when binding to port `0`).
   - `.cert_fingerprints()`. SHA-256 fingerprints of the configured TLS certificates, for `serverCertificateHashes` browser cert pinning.
-  - `.create_broadcast(path) → BroadcastProducer`. Create a live broadcast served to incoming sessions; `finish()` unpublishes it.
+  - `.create_broadcast(path) → BroadcastProducer`. Create an unadvertised broadcast; `announce()` makes it discoverable; `finish()` unpublishes it.
 - **`Request`**. An incoming session, yielded by `async for request in server`.
   - `.url`, `.path`, `.query`, `.transport`. The query-free path is uniform across transports; the root or missing path is `""`. The encoded query may contain credentials.
   - `.set_publish(origin)`, `.set_consume(origin)`. Per-request overrides.
@@ -184,7 +187,7 @@ All consumers (`CatalogConsumer`, `MediaConsumer`, `TrackConsumer`, `AudioConsum
 
 - **`OriginProducer(cache_capacity_bytes=None)`**. Manage broadcast announcements. Set `cache_capacity_bytes` to bound cached groups under this origin.
   - `.consume() → OriginConsumer`
-  - `.dynamic() → OriginDynamic`
+  - `.dynamic(pattern, route=Route()) → OriginDynamic`
   - `.create_broadcast(path) → BroadcastProducer`
 - **`OriginDynamic`**. Async source of broadcasts requested by consumers.
   - `await .requested_broadcast() → BroadcastRequest`. Call `.accept(broadcast)` to serve it, or `.abort(code)` to fail the requester.

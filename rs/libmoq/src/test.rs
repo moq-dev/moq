@@ -13,15 +13,18 @@ fn id(raw: i32) -> u32 {
 	raw as u32
 }
 
-/// Create a live broadcast at `path` on `origin` via `moq_origin_publish`.
+/// Create a broadcast at `path` on `origin` and announce it.
 fn publish_broadcast(origin: u32, path: &[u8]) -> u32 {
-	id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len()) })
+	let broadcast = id(unsafe { moq_origin_create_broadcast(origin, path.as_ptr() as *const c_char, path.len()) });
+	assert_eq!(unsafe { moq_publish_announce(broadcast, std::ptr::null()) }, 0);
+	broadcast
 }
 
 /// Request a published broadcast via `moq_origin_request` and return its handle.
 ///
-/// A broadcast created with `moq_origin_publish` becomes visible asynchronously, so an
-/// early request can race the attach and fail as unroutable; retry until the deadline.
+/// A broadcast created with `moq_origin_create_broadcast` becomes reachable
+/// asynchronously, so an early request can race the attach and fail as unroutable;
+/// retry until the deadline.
 fn request_broadcast(origin: u32, path: &[u8]) -> u32 {
 	let deadline = std::time::Instant::now() + TIMEOUT;
 	loop {
@@ -1883,7 +1886,7 @@ fn announced_deactivation() {
 
 	// Going non-live unannounces the broadcast without tearing it down: it stays
 	// reachable by exact path for subscribes and fetches.
-	assert_eq!(moq_publish_set_announce(broadcast, false), 0);
+	assert_eq!(moq_publish_unannounce(broadcast), 0);
 
 	let deactivated_id = id(cb.recv());
 	assert_eq!(unsafe { moq_origin_announced_info(deactivated_id, &mut info) }, 0);
@@ -1892,6 +1895,118 @@ fn announced_deactivation() {
 	assert_eq!(moq_origin_announced_close(announced_task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "announced close delivers terminal 0");
 	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn create_broadcast_does_not_announce() {
+	let origin = id(moq_origin_create());
+	let cb = Callback::new();
+	let announced_task = id(unsafe { moq_origin_announced(origin, Some(channel_callback), cb.ptr) });
+
+	let path = b"quiet";
+	let broadcast = id(unsafe { moq_origin_create_broadcast(origin, path.as_ptr() as *const c_char, path.len()) });
+	// Reachable by exact path without being announced.
+	let _ = request_broadcast(origin, path);
+
+	assert_eq!(unsafe { moq_publish_announce(broadcast, std::ptr::null()) }, 0);
+	let announced_id = id(cb.recv());
+	let mut info = moq_announced {
+		path: std::ptr::null(),
+		path_len: 0,
+		active: false,
+	};
+	assert_eq!(unsafe { moq_origin_announced_info(announced_id, &mut info) }, 0);
+	assert!(info.active);
+
+	assert_eq!(moq_origin_announced_close(announced_task), 0);
+	assert_eq!(cb.recv_terminal(), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn dynamic_serves_a_request_under_a_prefix() {
+	let origin = id(moq_origin_create());
+	let cb = Callback::new();
+	let pattern = b"live/**";
+	let dynamic = id(unsafe {
+		moq_origin_dynamic(
+			origin,
+			pattern.as_ptr() as *const c_char,
+			pattern.len(),
+			std::ptr::null(),
+			Some(channel_callback),
+			cb.ptr,
+		)
+	});
+
+	let path = b"live/cam";
+	let req_cb = Callback::new();
+	let _task = id(unsafe {
+		moq_origin_request(
+			origin,
+			path.as_ptr() as *const c_char,
+			path.len(),
+			Some(channel_callback),
+			req_cb.ptr,
+		)
+	});
+
+	let request = id(cb.recv());
+	let mut info = moq_string {
+		data: std::ptr::null(),
+		len: 0,
+	};
+	assert_eq!(unsafe { moq_broadcast_request_path(request, &mut info) }, 0);
+	let got = unsafe { std::str::from_utf8(std::slice::from_raw_parts(info.data.cast::<u8>(), info.len)).unwrap() };
+	assert_eq!(got, "live/cam");
+
+	let served = id(unsafe { moq_origin_create_broadcast(origin, b"unused".as_ptr() as *const c_char, 6) });
+	assert_eq!(moq_broadcast_request_accept(request, served), 0);
+	assert!(req_cb.recv() > 0);
+	req_cb.recv_terminal();
+
+	assert_eq!(moq_origin_dynamic_close(dynamic), 0);
+	assert_eq!(cb.recv_terminal(), 0);
+	assert_eq!(moq_publish_finish(served), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn dynamic_refuses_a_non_prefix_pattern() {
+	let origin = id(moq_origin_create());
+	let cb = Callback::new();
+	let pattern = b"live/*";
+	let code = unsafe {
+		moq_origin_dynamic(
+			origin,
+			pattern.as_ptr() as *const c_char,
+			pattern.len(),
+			std::ptr::null(),
+			Some(channel_callback),
+			cb.ptr,
+		)
+	};
+	assert!(code < 0, "a non-prefix pattern must be refused, got {code}");
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn dynamic_refuses_a_missing_callback() {
+	let origin = id(moq_origin_create());
+	let pattern = b"live/**";
+	let code = unsafe {
+		moq_origin_dynamic(
+			origin,
+			pattern.as_ptr() as *const c_char,
+			pattern.len(),
+			std::ptr::null(),
+			None,
+			std::ptr::null_mut(),
+		)
+	};
+	assert!(code < 0, "a missing on_request must be refused, got {code}");
 	assert_eq!(moq_origin_close(origin), 0);
 }
 

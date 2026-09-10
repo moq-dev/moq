@@ -36,6 +36,7 @@ from .types import (
     AudioEncoderOutput,
     AudioFrame,
     Frame,
+    Route,
     Subscription,
     TrackInfo,
     VideoEncoderInput,
@@ -554,14 +555,17 @@ class BroadcastProducer:
         """Accept subscriptions to tracks that are not published yet."""
         return BroadcastDynamic(self._inner.dynamic())
 
-    def set_announce(self, announce: bool) -> None:
-        """Set whether the broadcast's exact path is announced as a route.
+    def announce(self, route: Route | None = None) -> None:
+        """Advertise this broadcast's exact path as a route.
 
-        The origin advertises the path only while announced; an unannounced
-        broadcast stays reachable by exact path for subscribes and fetches. This is
-        how a publisher goes on and off the air without tearing down the broadcast.
+        Announcing again re-prices the route in place. An unannounced broadcast
+        stays reachable by exact path; announcing only makes the path discoverable.
         """
-        self._inner.set_announce(announce)
+        self._inner.announce(route if route is not None else Route())
+
+    def unannounce(self) -> None:
+        """Retract this broadcast's exact-path advertisement, if any."""
+        self._inner.unannounce()
 
     def set_video_properties(self, properties: VideoProperties) -> None:
         """Replace the catalog properties shared by every video rendition."""

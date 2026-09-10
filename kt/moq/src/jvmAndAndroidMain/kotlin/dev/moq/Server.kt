@@ -36,7 +36,7 @@ class Server internal constructor(
      * Create a live broadcast at [path], served to incoming sessions.
      *
      * The origin announces the path so subscribers can discover it, becoming visible
-     * shortly after this returns. Toggle discoverability with `setAnnounce`; `finish()`
+     * Advertise it with `announce` after populating tracks. `finish()`
      * unpublishes immediately.
      */
     fun createBroadcast(path: String): BroadcastProducer {

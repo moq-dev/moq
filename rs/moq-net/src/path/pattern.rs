@@ -290,6 +290,19 @@ impl Pattern {
 		self.head == self.text.len()
 	}
 
+	/// The covered prefix if this pattern is prefix-shaped: zero or more literals then `**`.
+	///
+	/// `**` covers every path (the empty prefix). `foo/**` covers `foo` and everything
+	/// beneath it. A literal, a `*`, or a `**` that is not last is `None`.
+	pub fn as_prefix(&self) -> Option<&str> {
+		match self.segments.split_last() {
+			Some((Segment::Globstar, head)) if head.iter().all(|s| matches!(s, Segment::Literal(_))) => {
+				Some(self.head())
+			}
+			_ => None,
+		}
+	}
+
 	/// Whether the pattern has a `**`, so it matches paths of more than one length.
 	pub fn has_globstar(&self) -> bool {
 		self.globstar.is_some()
@@ -685,6 +698,19 @@ mod tests {
 		assert_eq!(Pattern::subtree("/").unwrap(), Pattern::all());
 		assert_eq!(Pattern::literal("a/*"), Err(InvalidPattern::InvalidSegment("*".into())));
 		assert_eq!(Pattern::literal("**"), Err(InvalidPattern::InvalidSegment("**".into())));
+	}
+
+	#[test]
+	fn as_prefix_accepts_literals_then_globstar() {
+		assert_eq!(Pattern::all().as_prefix(), Some(""));
+		assert_eq!(pattern("foo/**").as_prefix(), Some("foo"));
+		assert_eq!(pattern("foo/bar/**").as_prefix(), Some("foo/bar"));
+		assert_eq!(pattern("foo").as_prefix(), None);
+		assert_eq!(Pattern::default().as_prefix(), None);
+		assert_eq!(pattern("foo/*").as_prefix(), None);
+		assert_eq!(pattern("*/foo/**").as_prefix(), None);
+		assert_eq!(pattern("foo/**/bar").as_prefix(), None);
+		assert_eq!(pattern("foo*/**").as_prefix(), None);
 	}
 
 	#[test]

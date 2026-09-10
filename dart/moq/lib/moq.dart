@@ -53,7 +53,10 @@ final class Moq {
     }
   }
 
-  /// Create and announce a broadcast at [path].
+  /// Create an unadvertised broadcast at [path].
+  ///
+  /// Advertise it with `announce` after populating tracks. Create, `dynamic`
+  /// if tracks are served on demand, populate, then announce.
   MoqBroadcastProducer createBroadcast(String path) =>
       session.publisher().createBroadcast(path: path);
 

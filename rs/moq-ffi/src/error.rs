@@ -94,6 +94,10 @@ pub enum MoqError {
 	#[error("invalid route: {0}")]
 	InvalidRoute(String),
 
+	/// A path pattern was empty, had a doubled slash, or used a reserved segment form.
+	#[error("invalid pattern: {0}")]
+	InvalidPattern(String),
+
 	/// A catalog rendition named another broadcast, but this consumer came from a standalone
 	/// broadcast rather than an origin, so there is nothing to resolve the reference against.
 	#[error("unresolvable broadcast reference: {0}")]
@@ -121,6 +125,7 @@ from_message! {
 	url::ParseError => Url,
 	tracing::metadata::ParseLevelError => LogLevel,
 	serde_json::Error => Json,
+	moq_net::InvalidPattern => InvalidPattern,
 }
 
 #[cfg(not(target_arch = "wasm32"))]

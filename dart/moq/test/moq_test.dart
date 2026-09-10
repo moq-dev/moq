@@ -32,6 +32,7 @@ void main() {
     final announcement = client.announcements().first;
     final broadcast = relay.createBroadcast(path: 'live');
     final track = broadcast.publishTrack(name: 'events', info: null);
+    broadcast.announce(route: MoqRoute());
     final announced = await announcement.timeout(timeout);
     expect(announced.path(), 'live');
 
@@ -58,5 +59,47 @@ void main() {
     client.close();
     serverSession.cancel(code: 0);
     server.cancel();
+  });
+
+  test('announce then unannounce is visible', () async {
+    final origin = MoqOriginProducer(options: MoqOriginOptions());
+    final broadcast = origin.createBroadcast(path: 'live');
+    broadcast.publishTrack(name: 'events', info: null);
+    broadcast.announce(route: MoqRoute());
+
+    final announced = origin.consume().announced(prefix: '');
+    final first = await announced.next().timeout(timeout);
+    expect(first?.path(), 'live');
+    expect(first?.active(), isTrue);
+
+    broadcast.unannounce();
+    final retracted = await announced.next().timeout(timeout);
+    expect(retracted?.path(), 'live');
+    expect(retracted?.active(), isFalse);
+    await origin.consume().requestBroadcast(path: 'live').timeout(timeout);
+    announced.cancel();
+    announced.dispose();
+  });
+
+  test('dynamic serves a request under a prefix', () async {
+    final origin = MoqOriginProducer(options: MoqOriginOptions());
+    final dynamic = origin.dynamic_(pattern: 'live/**', route: MoqRoute());
+    final pending = origin.consume().requestBroadcast(path: 'live/cam');
+    final request = await dynamic.requestedBroadcast().timeout(timeout);
+    expect(request.path(), 'live/cam');
+    final served = MoqBroadcastProducer();
+    request.accept(broadcast: served);
+    await pending.timeout(timeout);
+    dynamic.cancel();
+    dynamic.dispose();
+    served.dispose();
+  });
+
+  test('dynamic refuses a non-prefix pattern', () {
+    final origin = MoqOriginProducer(options: MoqOriginOptions());
+    expect(
+      () => origin.dynamic_(pattern: 'live/*', route: MoqRoute()),
+      throwsA(isA<Object>()),
+    );
   });
 }

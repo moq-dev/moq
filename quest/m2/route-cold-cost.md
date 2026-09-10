@@ -24,25 +24,20 @@ understated cold wins ties it should lose.
   production cost. `cost` stays the warm half under its current name. Both
   conversions become lossless: `From` fills both fields, `TryFrom` builds
   `Cost { warm: cost, cold: cold.unwrap_or(cost) }`.
-- Additive in every generated binding. `rs/libmoq` exposes no route over C, so
-  `moq.h` is untouched. The wrappers describe a route as hops and cost and
+- Additive in every generated binding. `rs/libmoq` now exposes `moq_route`
+  (hops plus one cost); add `cold` there too and regenerate `moq.h`. The
+  wrappers describe a route as hops and cost and
   gain the field there: py/moq-rs/moq/origin.py:51,72,258;
   go/wrapper/origin.go:72,189 and go/wrapper/types.go:41;
   swift/Sources/Moq/Origin.swift:60,208;
   kt/moq/src/jvmAndAndroidMain/kotlin/dev/moq/Aliases.kt:124. The
   `doc/lib/{py,swift,kt,go}/index.md` pages do not mention cost today, so the
-  field is added wherever each shows a route. `dart/` is on dev but has no
-  route surface yet; it gains the field with
-  [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md),
-  which brings dart onto the announce API.
+  field is added wherever each shows a route. Dart already has the announce
+  API, so the field lands there with the other wrappers.
 - Tests: a route observed through the announcement stream and announced again
   compares equal including cold; an omitted cold equals warm.
 
-Land with or after #3190, which rewrites the same records. Branch from dev.
-
-## Required
-
-- [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - the bindings surface these records ride on
+Branch from dev.
 
 ## Closes
 

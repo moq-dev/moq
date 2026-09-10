@@ -11,9 +11,7 @@ Following the draft, this goes in `rs/moq-net/src/lite/announce.rs` alongside
 `AnnounceBroadcast` (`:38`), gated on the lite-06 version check the route cost
 already uses so older peers neither send nor receive it.
 
-This starts after
-[#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md)
-makes `dynamic(pattern, route)` take a `moq_net::path::Pattern` in Rust and
+`dynamic(pattern, route)` already takes a `moq_net::path::Pattern` in Rust and
 the bindings, refusing anything that is not prefix-shaped. js/net already
 takes `Path.Pattern` the same way. This quest lifts the refusal on the Rust
 side; no signature changes.
@@ -100,10 +98,6 @@ refusal, root and descendant residuals from a `**` rebase, duplicates
 aggregated into one entry, and withdrawal firing only when the last advertiser
 leaves. Cover that a pattern and a literal prefix coexist in one route table
 and that a literal-only deployment behaves exactly as it does today.
-
-## Required
-
-- [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - the Pattern parameter this quest widens
 
 ## Related
 

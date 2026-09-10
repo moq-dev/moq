@@ -73,6 +73,8 @@ var (
 	ErrAlreadyCommitted = ffi.ErrMoqErrorAlreadyCommitted
 	// ErrInvalidRoute is returned when a route has an invalid hop ID or too many hops.
 	ErrInvalidRoute = ffi.ErrMoqErrorInvalidRoute
+	// ErrInvalidPattern is returned when a path pattern is empty, has a doubled slash, or uses a reserved segment form.
+	ErrInvalidPattern = ffi.ErrMoqErrorInvalidPattern
 	// ErrUnresolvableBroadcast is returned when a referenced sibling broadcast cannot be resolved without an origin.
 	ErrUnresolvableBroadcast = ffi.ErrMoqErrorUnresolvableBroadcast
 	// ErrLog is returned when installing or configuring the native log subscriber fails.

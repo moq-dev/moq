@@ -4407,6 +4407,7 @@ dependencies = [
  "bytes",
  "cbindgen",
  "hang",
+ "kio",
  "moq-audio",
  "moq-json",
  "moq-loc",

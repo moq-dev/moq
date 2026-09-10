@@ -323,7 +323,10 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// disjoint from our scope, so don't serve it. Reflections are already
 		// filtered above.
 		let route = self.announced_route(hops, cost, link_cost);
-		let Ok(dynamic) = self.origin.dynamic(&path, route.clone()) else {
+		let Ok(pattern) = crate::Pattern::subtree(path.as_str()) else {
+			return Ok(false);
+		};
+		let Ok(dynamic) = self.origin.dynamic(pattern, route.clone()) else {
 			return Ok(false);
 		};
 
@@ -403,7 +406,11 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			return Ok(true);
 		}
 
-		let Ok(dynamic) = self.origin.dynamic(&path, metadata.clone()) else {
+		let Ok(pattern) = crate::Pattern::subtree(path.as_str()) else {
+			announced.declined(path);
+			return Ok(false);
+		};
+		let Ok(dynamic) = self.origin.dynamic(pattern, metadata.clone()) else {
 			announced.declined(path);
 			return Ok(false);
 		};

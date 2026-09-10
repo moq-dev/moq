@@ -46,6 +46,7 @@ Moq.connect("https://relay.example.com").use { moq ->
         VideoEncoderOutput(codec = VideoCodec.H264, track = "camera", bitrate = null, gop = null, kind = autoEncoder),
     )
     video.write(VideoFrame(timestampUs = pts, data = rgba))
+    broadcast.announce(Route())
 }
 ```
 
@@ -59,7 +60,7 @@ inbound stream cap.
 `accept()`/`reject()`. JSON tracks take `@Serializable` types
 (`publishJsonSnapshot`, `publishJsonStream`, `valuesAs<T>()`), and the rest of
 the [shared feature list](/lib/#what-every-binding-can-do) maps one to one:
-`fetchGroup`/`fetchMediaGroup`, `dynamic()`, `appendDatagram`/`datagrams()`,
+`fetchGroup`/`fetchMediaGroup`, `dynamic()` for tracks and `dynamic(pattern)` for broadcasts, `appendDatagram`/`datagrams()`,
 `setCatalogSection`, `used()`/`unused()`. `session.bandwidth()` divides the
 connection's send estimate; pass it to `encodeVideo` / `encodeAudio` or
 `reserve` a share for an app-owned track. `MoqException.isAuth` and

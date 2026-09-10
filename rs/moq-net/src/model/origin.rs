@@ -16,7 +16,7 @@ use web_transport_trait::{MaybeSend, MaybeSync};
 
 use super::{Requests, WeakCache, WeakEntry};
 use crate::{
-	AsPath, Error, Path, PathOwned, PathPrefixes,
+	AsPath, Error, Path, PathOwned, PathPrefixes, Pattern,
 	coding::{BoundsExceeded, Decode, DecodeError, Encode, EncodeError},
 	runtime::{AnyTimers, Instant, Timers, TimersSlot},
 	util::{TaskSet, Tasks, TasksWeak},
@@ -530,7 +530,7 @@ impl std::fmt::Display for Prefix {
 /// The path a route took through the mesh and what using it costs.
 ///
 /// The metadata half of an advertisement: [`Producer::dynamic`] pairs it with
-/// the [`Prefix`] it covers, [`broadcast::Producer::announce`] with the
+/// the pattern it covers, [`broadcast::Producer::announce`] with the
 /// broadcast's exact path, and [`Consumer::announced`] yields both. A route
 /// claims capability, not inventory: it says paths under its prefix are
 /// servable, never that any specific broadcast exists. The common convention is
@@ -1348,9 +1348,13 @@ impl Producer {
 
 	/// Advertise a route and serve the requests beneath it.
 	///
+	/// `pattern` is in the [`Pattern`] dialect; a prefix is spelled `foo/**`.
+	/// Until wildcard advertisements land, anything but a prefix-shaped pattern
+	/// (literal segments then `**`) is [`Error::Unsupported`].
+	///
 	/// The advertisement is visible to [`Consumer::announced`] and forwarded by
 	/// sessions for as long as the returned [`Dynamic`] (and every clone) lives.
-	/// A consumer resolving a path under `prefix` that no local broadcast covers
+	/// A consumer resolving a path under the pattern that no local broadcast covers
 	/// is handed to the handler as a [`Request`] to materialize on demand. This is
 	/// how a service answers a whole subtree without publishing each path, and how
 	/// sessions land the routes a peer announces to them; a publisher that knows
@@ -1358,13 +1362,14 @@ impl Producer {
 	/// [`broadcast::Producer::announce`] instead, so subscribers can enumerate
 	/// them.
 	///
-	/// The prefix is clamped to the intersection with this producer's allowed
-	/// scope, so a broad route announced through a narrow token advertises exactly
-	/// what the token may serve. Fails with [`Error::Unauthorized`] when they are
-	/// disjoint, and [`Error::Closed`] once the origin's [`Driver`] has been
-	/// dropped.
-	pub fn dynamic(&self, prefix: impl Into<Prefix>, route: Route) -> Result<Dynamic, Error> {
-		let announcing = Announcing::new(self, prefix.into())?;
+	/// The covered prefix is clamped to the intersection with this producer's
+	/// allowed scope, so a broad route announced through a narrow token advertises
+	/// exactly what the token may serve. Fails with [`Error::Unauthorized`] when
+	/// they are disjoint, and [`Error::Closed`] once the origin's [`Driver`] has
+	/// been dropped.
+	pub fn dynamic(&self, pattern: Pattern, route: Route) -> Result<Dynamic, Error> {
+		let prefix = pattern.as_prefix().ok_or(Error::Unsupported)?;
+		let announcing = Announcing::new(self, Prefix::new(prefix))?;
 		let serve = kio::Shared::<ServeState>::default();
 		serve.lock().requests.add_handler();
 		let announcement = announcing.announce(route, Some(serve.clone()))?;
@@ -3072,7 +3077,7 @@ struct PendingBroadcast {
 	resolved: Option<Result<broadcast::Consumer, Error>>,
 }
 
-/// A served route, from [`Producer::dynamic`]: advertises a [`Prefix`] and
+/// A served route, from [`Producer::dynamic`]: advertises a path pattern and
 /// answers the [`Consumer::request_broadcast`] calls beneath it.
 ///
 /// The origin-level analogue of [`broadcast::Dynamic`]: where that serves tracks
@@ -4063,6 +4068,10 @@ mod tests {
 		list
 	}
 
+	fn subtree(prefix: &str) -> Pattern {
+		Pattern::subtree(prefix).unwrap()
+	}
+
 	/// Yield to the driver until `check` passes, bounded so a bug fails instead
 	/// of hanging.
 	async fn settle(mut check: impl FnMut() -> bool) {
@@ -4429,6 +4438,16 @@ mod tests {
 		assert!(matches!(err, Error::Unroutable));
 	}
 
+	#[test]
+	fn dynamic_refuses_a_non_prefix_pattern() {
+		let producer = origin(1).produce();
+		let err = producer
+			.dynamic("live/*".parse().unwrap(), Route::default())
+			.err()
+			.expect("a non-prefix pattern is refused");
+		assert!(matches!(err, Error::Unsupported));
+	}
+
 	#[tokio::test]
 	async fn local_broadcast_is_not_announced() {
 		let producer = origin(1).produce();
@@ -4442,7 +4461,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 
-		let server = producer.dynamic("room", Route::default()).unwrap();
+		let server = producer.dynamic(subtree("room"), Route::default()).unwrap();
 
 		let pending = consumer.request_broadcast("room/alice");
 		let request = queued(&server).await;
@@ -4468,7 +4487,7 @@ mod tests {
 	async fn served_requests_coalesce() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let server = producer.dynamic("room", Route::default()).unwrap();
+		let server = producer.dynamic(subtree("room"), Route::default()).unwrap();
 
 		let first = consumer.request_broadcast("room/alice");
 		let second = consumer.request_broadcast("room/alice");
@@ -4489,7 +4508,7 @@ mod tests {
 	async fn retract_rejects_pending_requests() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let server = producer.dynamic("room", Route::default()).unwrap();
+		let server = producer.dynamic(subtree("room"), Route::default()).unwrap();
 
 		let pending = consumer.request_broadcast("room/alice");
 		drop(server);
@@ -4514,9 +4533,9 @@ mod tests {
 
 		// Three identical routes, oldest first: the newest identical route wins
 		// requests, and swapping between them emits no announce update.
-		let standby_server = producer.dynamic("room", Route::default()).unwrap();
-		let second_server = producer.dynamic("room", Route::default()).unwrap();
-		let incumbent_server = producer.dynamic("room", Route::default()).unwrap();
+		let standby_server = producer.dynamic(subtree("room"), Route::default()).unwrap();
+		let second_server = producer.dynamic(subtree("room"), Route::default()).unwrap();
+		let incumbent_server = producer.dynamic(subtree("room"), Route::default()).unwrap();
 
 		let mut resolving = Box::pin(consumer.routed_broadcast("room/alice"));
 		assert!((&mut resolving).now_or_never().is_none());
@@ -4543,7 +4562,7 @@ mod tests {
 	async fn split_horizon_skips_routes_through_the_requester() {
 		let producer = origin(1).produce();
 		let _server = producer
-			.dynamic("room", Route::default().with_hops(hops(&[7])))
+			.dynamic(subtree("room"), Route::default().with_hops(hops(&[7])))
 			.unwrap();
 
 		// The requester's own bytes must not be served back to it.
@@ -4569,7 +4588,7 @@ mod tests {
 	async fn handler_rejection_is_final() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let server = producer.dynamic("room", Route::default()).unwrap();
+		let server = producer.dynamic(subtree("room"), Route::default()).unwrap();
 
 		let pending = consumer.request_broadcast("room/alice");
 		let request = queued(&server).await;
@@ -4596,7 +4615,7 @@ mod tests {
 	async fn routed_broadcast_waits_out_a_rejection() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let server = producer.dynamic("room", Route::default()).unwrap();
+		let server = producer.dynamic(subtree("room"), Route::default()).unwrap();
 
 		let mut resolving = Box::pin(consumer.routed_broadcast("room/alice"));
 		assert!((&mut resolving).now_or_never().is_none());
@@ -4625,7 +4644,7 @@ mod tests {
 	async fn routed_broadcast_wakes_for_a_local_broadcast() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let server = producer.dynamic("room", Route::default()).unwrap();
+		let server = producer.dynamic(subtree("room"), Route::default()).unwrap();
 
 		let mut resolving = Box::pin(consumer.routed_broadcast("room/alice"));
 		assert!((&mut resolving).now_or_never().is_none());
@@ -4648,7 +4667,7 @@ mod tests {
 	async fn late_track_on_a_served_front_replays() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let server = producer.dynamic("room", Route::default()).unwrap();
+		let server = producer.dynamic(subtree("room"), Route::default()).unwrap();
 
 		let mut source = broadcast::Info::new().produce();
 		for name in ["a", "b"] {
@@ -4687,7 +4706,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 
-		let broad_server = producer.dynamic("", Route::default()).unwrap();
+		let broad_server = producer.dynamic(Pattern::all(), Route::default()).unwrap();
 		// A narrow advertise-only claim: requests under it must NOT route to the
 		// broad server; they fall through to the (absent) fallback handler.
 		let _narrow = producer.announce(".dash", Route::default()).unwrap();
@@ -4711,7 +4730,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let mut announced = consumer.announced();
-		let dynamic = producer.dynamic("", Route::default()).unwrap();
+		let dynamic = producer.dynamic(Pattern::all(), Route::default()).unwrap();
 		// The root claim is advertised like any other prefix.
 		announced.assert_next_active("");
 
@@ -4779,7 +4798,7 @@ mod tests {
 		let mut announced = consumer.announced();
 		announced.assert_next_active("room");
 
-		let _server = producer.dynamic("served", Route::default()).unwrap();
+		let _server = producer.dynamic(subtree("served"), Route::default()).unwrap();
 		let pending = consumer.request_broadcast("served/path");
 
 		drop(driver);
@@ -4824,7 +4843,7 @@ mod tests {
 			let consumer = producer.consume();
 
 			let server = producer
-				.dynamic("room", Route::default().with_hops(hops(first)))
+				.dynamic(subtree("room"), Route::default().with_hops(hops(first)))
 				.unwrap();
 
 			let pending = consumer.request_broadcast("room/alice");
@@ -4867,7 +4886,7 @@ mod tests {
 		/// back its handle, ready to answer the front's re-request.
 		fn standby(&self, first: &[u64]) -> Dynamic {
 			self.producer
-				.dynamic("room", Route::default().with_hops(hops(first)))
+				.dynamic(subtree("room"), Route::default().with_hops(hops(first)))
 				.unwrap()
 		}
 	}

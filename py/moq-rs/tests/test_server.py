@@ -25,6 +25,7 @@ async def test_server_client_roundtrip():
         # Publish a broadcast on the server side.
         broadcast = server.create_broadcast("hello")
         media = broadcast.publish_audio(moq.AudioFormat.OPUS, opus_head())
+        broadcast.announce()
 
         # Auto-accept incoming sessions in the background so the handshake
         # completes from the server side. Hold references so the sessions
@@ -121,6 +122,7 @@ async def test_client_reconnects_and_resumes_announcements():
 
                 # A broadcast published only after the reconnect still arrives.
                 broadcast = server.create_broadcast("after-reconnect")
+                broadcast.announce()
                 async for announcement in client.announced():
                     assert announcement.path == "after-reconnect"
                     break
@@ -214,6 +216,7 @@ async def test_serve_helper_accepts_clients():
     """Server.serve() accepts incoming sessions and holds them automatically."""
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
         broadcast = server.create_broadcast("via-serve")
+        broadcast.announce()
 
         serve_task = asyncio.create_task(server.serve())
         try:
@@ -238,6 +241,7 @@ async def test_broadcast_route_over_wire():
     """A route received over the wire exposes its hop chain and cost."""
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
         broadcast = server.create_broadcast("with-route")
+        broadcast.announce()
 
         serve_task = asyncio.create_task(server.serve())
         try:
@@ -271,7 +275,7 @@ async def test_route_update_observes_restart():
     """
     origin = moq.OriginProducer()
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"], publish=origin) as server:
-        announce = origin.announce("routed", moq.Route(hops=[42]))
+        announce = origin.dynamic("routed/**", moq.Route(hops=[42]))
 
         serve_task = asyncio.create_task(server.serve())
         try:

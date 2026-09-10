@@ -228,15 +228,20 @@ bool MoQOutput::Start()
 
 	LOG_INFO("Publishing broadcast: %s", path.c_str());
 
-	// Create the broadcast on the origin we created; it starts live so the session
-	// announces it. Stop() finishes it, so each Start creates a fresh one.
-	broadcast = moq_origin_publish(origin, path.data(), path.size());
+	// Create the broadcast on the origin we created, then announce it so
+	// subscribers can discover it. Stop() finishes it, so each Start creates a fresh one.
+	broadcast = moq_origin_create_broadcast(origin, path.data(), path.size());
 	if (broadcast < 0) {
-		LOG_ERROR("Failed to publish broadcast to session: %d", broadcast);
+		LOG_ERROR("Failed to create broadcast: %d", broadcast);
 		broadcast = 0;
 		// The session connected above; close it so a retry on this same output
 		// doesn't reuse the stale handle. Its terminal callback releases the
 		// outstanding-session reference the destructor waits on.
+		Stop(false);
+		return false;
+	}
+	if (moq_publish_announce(broadcast, nullptr) < 0) {
+		LOG_ERROR("Failed to announce broadcast");
 		Stop(false);
 		return false;
 	}

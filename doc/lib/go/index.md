@@ -63,6 +63,7 @@ video, _ := broadcast.EncodeVideo(
     nil,
 )
 _ = video.Write(moq.VideoFrame{TimestampUs: pts, Data: rgba})
+_ = broadcast.Announce(moq.Route{})
 broadcast.Finish()   // keep the producer reachable while publishing, then finish explicitly
 ```
 

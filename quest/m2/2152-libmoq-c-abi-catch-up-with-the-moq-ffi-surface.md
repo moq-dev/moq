@@ -5,7 +5,7 @@
 A C embedder serves tracks on demand inside a broadcast it publishes, and
 accepts sessions itself through the same two-phase SETUP the FFI exposes.
 These are the two `moq-ffi` capabilities `rs/libmoq` still lacks that ride
-the request records #3190 reshapes.
+the request records the origin dynamic handle already exposes.
 
 ## Plan
 
@@ -21,7 +21,7 @@ frame timestamps (:2538-2541). Two gaps remain:
   Mirror it as a callback-delivered request handle with accept and reject,
   on the datagram task's handle and terminal-status contract. Broadcast
   requests are not in this quest: `requested_broadcast` reaches C through
-  #3190's dynamic handle, so do not add a separate path here.
+  the origin dynamic handle, so do not add a separate path here.
 - Server-side accept. moq-ffi's `MoqServer::accept` yields a `MoqRequest`
   whose own `accept()` completes SETUP (rs/moq-ffi/src/server.rs:54, :144,
   :186, :259); a C embedder cannot accept sessions at all.
@@ -30,12 +30,8 @@ Each addition regenerates `moq.h`, touches `cpp/obs/src` only if used, and
 updates `doc/lib/c/index.md`. That page's capability list (:39) already
 claims dynamic tracks for C; the request handle makes it true.
 
-Branch from `dev`, after #3190. Fetch and the video format knob are additive,
+Branch from `dev`. Fetch and the video format knob are additive,
 so they ship on main through the related quest.
-
-## Required
-
-- [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - the dynamic handle and request records these calls share
 
 ## Closes
 

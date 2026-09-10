@@ -235,20 +235,29 @@ impl MoqBroadcastProducer {
 		Ok(Arc::new(Self::from_inner(moq_net::broadcast::Info::new().produce())?))
 	}
 
-	/// Set whether the broadcast's exact path is announced as a route.
+	/// Advertise this broadcast's exact path as a route.
 	///
-	/// The origin advertises the path only while announced; an unannounced
-	/// broadcast stays reachable by exact path for subscribes and fetches. This is
-	/// how a publisher goes on and off the air without tearing down the broadcast.
-	/// Errors with `Closed` on a standalone broadcast (no origin to announce on).
-	pub fn set_announce(&self, announce: bool) -> Result<(), MoqError> {
+	/// Announcing again re-prices the route in place. An unannounced broadcast
+	/// stays reachable by exact path for subscribes and fetches; announcing only
+	/// makes the path discoverable. Errors with `Closed` on a standalone
+	/// broadcast (no origin to announce on).
+	pub fn announce(&self, route: crate::origin::MoqRoute) -> Result<(), MoqError> {
+		let _guard = crate::ffi::enter();
+		let route: moq_net::origin::Route = route.try_into()?;
+		self.with_state(|state| {
+			state.broadcast.announce(route)?;
+			Ok(())
+		})
+	}
+
+	/// Retract this broadcast's exact-path advertisement, if any.
+	///
+	/// The broadcast stays reachable by exact path. Errors with `Closed` on a
+	/// standalone broadcast (no origin to announce on).
+	pub fn unannounce(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
-			if announce {
-				state.broadcast.announce(moq_net::origin::Route::default())?;
-			} else {
-				state.broadcast.unannounce();
-			}
+			state.broadcast.unannounce();
 			Ok(())
 		})
 	}

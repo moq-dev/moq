@@ -80,13 +80,17 @@ func (b *BroadcastProducer) Dynamic() (*BroadcastDynamic, error) {
 	return &BroadcastDynamic{inner: inner}, nil
 }
 
-// SetAnnounce sets whether the broadcast's exact path is announced as a route.
+// Announce advertises this broadcast's exact path as a route.
 //
-// The origin announces the path only while the broadcast is announced; an unannounced
-// broadcast stays reachable by exact path for subscribes and fetches. This is
-// how a publisher goes on and off the air without tearing down the broadcast.
-func (b *BroadcastProducer) SetAnnounce(live bool) error {
-	return b.inner.SetAnnounce(live)
+// Announcing again re-prices the route in place. An unannounced broadcast
+// stays reachable by exact path; announcing only makes the path discoverable.
+func (b *BroadcastProducer) Announce(route Route) error {
+	return b.inner.Announce(route)
+}
+
+// Unannounce retracts this broadcast's exact-path advertisement, if any.
+func (b *BroadcastProducer) Unannounce() error {
+	return b.inner.Unannounce()
 }
 
 // SetVideoProperties replaces the catalog properties shared by every video rendition.

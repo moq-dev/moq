@@ -2998,13 +2998,19 @@ mod tests {
 		let mut echoed_hops = Hops::new();
 		echoed_hops.push(assigned).unwrap();
 		let _echoed = origin
-			.dynamic("echoed", crate::origin::Route::default().with_hops(echoed_hops))
+			.dynamic(
+				crate::Pattern::subtree("echoed").unwrap(),
+				crate::origin::Route::default().with_hops(echoed_hops),
+			)
 			.unwrap();
 
 		let mut local_hops = Hops::new();
 		local_hops.push(upstream).unwrap();
 		let _local = origin
-			.dynamic("local", crate::origin::Route::default().with_hops(local_hops))
+			.dynamic(
+				crate::Pattern::subtree("local").unwrap(),
+				crate::origin::Route::default().with_hops(local_hops),
+			)
 			.unwrap();
 
 		// A SETUP that declares no origin of its own, so only the assigned one applies.

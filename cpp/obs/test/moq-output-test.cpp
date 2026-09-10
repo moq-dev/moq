@@ -221,9 +221,14 @@ int32_t moq_origin_close(uint32_t)
 	return 0;
 }
 
-int32_t moq_origin_publish(uint32_t, const char *, size_t)
+int32_t moq_origin_create_broadcast(uint32_t, const char *, size_t)
 {
 	return 5;
+}
+
+int32_t moq_publish_announce(uint32_t, const moq_route *)
+{
+	return 0;
 }
 
 int32_t moq_publish_finish(uint32_t)

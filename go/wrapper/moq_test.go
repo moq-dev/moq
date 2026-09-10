@@ -32,7 +32,11 @@ func opusHead() []byte {
 func TestOriginLifecycle(t *testing.T) {
 	origin := moq.NewOriginProducer()
 	_ = origin.Consume()
-	origin.Dynamic().Cancel()
+	dynamic, err := origin.Dynamic("**", moq.Route{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dynamic.Cancel()
 }
 
 func TestDynamicBroadcastRequest(t *testing.T) {
@@ -40,7 +44,10 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 	defer cancel()
 
 	origin := moq.NewOriginProducer()
-	dynamic := origin.Dynamic()
+	dynamic, err := origin.Dynamic("**", moq.Route{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer dynamic.Cancel()
 
 	type result struct {
@@ -248,6 +255,9 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	}
 	media, err := broadcast.PublishAudio(moq.AudioFormatOpus, opusHead())
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broadcast.Announce(moq.Route{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -718,7 +728,10 @@ func TestConsumerCancelConcurrent(t *testing.T) {
 // that one request rather than the consumer it was made on.
 func TestRequestBroadcastCancelKeepsTheOrigin(t *testing.T) {
 	origin := moq.NewOriginProducer()
-	dynamic := origin.Dynamic()
+	dynamic, err := origin.Dynamic("**", moq.Route{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer dynamic.Cancel()
 	consumer := origin.Consume()
 
@@ -964,5 +977,90 @@ func TestCancelDoesNotLeakGoroutines(t *testing.T) {
 	runtime.KeepAlive(pending)
 	for _, request := range pending {
 		_ = request.Abort(0)
+	}
+}
+
+func TestAnnounceThenUnannounceIsVisible(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	origin := moq.NewOriginProducer()
+	broadcast, err := origin.CreateBroadcast("live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := broadcast.PublishTrack("events", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := broadcast.Announce(moq.Route{}); err != nil {
+		t.Fatal(err)
+	}
+
+	consumer := origin.Consume()
+	announced, err := consumer.Announced("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer announced.Cancel()
+
+	ann, err := announced.Next(ctx)
+	if err != nil || ann == nil || ann.Path() != "live" || !ann.Active() {
+		t.Fatalf("announce: ann=%+v err=%v", ann, err)
+	}
+
+	if err := broadcast.Unannounce(); err != nil {
+		t.Fatal(err)
+	}
+	ann, err = announced.Next(ctx)
+	if err != nil || ann == nil || ann.Path() != "live" || ann.Active() {
+		t.Fatalf("unannounce: ann=%+v err=%v", ann, err)
+	}
+	if _, err := consumer.RequestBroadcast(ctx, "live"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDynamicServesARequestUnderAPrefix(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	origin := moq.NewOriginProducer()
+	dynamic, err := origin.Dynamic("live/**", moq.Route{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dynamic.Cancel()
+
+	consumer := origin.Consume()
+	done := make(chan error, 1)
+	go func() {
+		_, err := consumer.RequestBroadcast(ctx, "live/cam")
+		done <- err
+	}()
+
+	request, err := dynamic.RequestedBroadcast(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := request.Path()
+	if err != nil || path != "live/cam" {
+		t.Fatalf("path = %q err=%v", path, err)
+	}
+	served, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := request.Accept(served); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDynamicRefusesANonPrefixPattern(t *testing.T) {
+	origin := moq.NewOriginProducer()
+	if _, err := origin.Dynamic("live/*", moq.Route{}); err == nil {
+		t.Fatal("expected error for a non-prefix pattern")
 	}
 }

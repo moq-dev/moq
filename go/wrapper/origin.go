@@ -30,53 +30,34 @@ func (o *OriginProducer) Consume() *OriginConsumer {
 	return &OriginConsumer{inner: o.inner.Consume()}
 }
 
-// Dynamic serves broadcasts on request: paths nothing publishes, under the root or under any prefix this origin announced.
-func (o *OriginProducer) Dynamic() *OriginDynamic {
-	return &OriginDynamic{inner: o.inner.Dynamic()}
+// Dynamic advertises pattern and serves the requests beneath it.
+//
+// pattern is in the path Pattern dialect; a prefix is spelled "foo/**".
+// Until wildcard advertisements land, anything but a prefix-shaped pattern
+// is refused. Create, Dynamic if tracks are served on demand, populate, then
+// [BroadcastProducer.Announce].
+func (o *OriginProducer) Dynamic(pattern string, route Route) (*OriginDynamic, error) {
+	inner, err := o.inner.Dynamic(pattern, route)
+	if err != nil {
+		return nil, err
+	}
+	return &OriginDynamic{inner: inner}, nil
 }
 
 // CreateBroadcast creates a broadcast at the given path, returning the producer
 // that feeds it.
 //
-// The broadcast starts announced: the origin advertises the exact path as a
-// route so subscribers can discover it, becoming visible shortly after this
-// returns. Toggle discoverability with [BroadcastProducer.SetAnnounce]; Finish
-// unpublishes immediately, while dropping the producer without finishing also
-// unpublishes but reads to subscribers as a failure rather than a deliberate end.
+// The broadcast starts unadvertised: reachable by exact path, but not visible
+// to announcement streams. Advertise it with [BroadcastProducer.Announce]
+// after populating tracks. Finish unpublishes immediately, while dropping the
+// producer without finishing also unpublishes but reads to subscribers as a
+// failure rather than a deliberate end.
 func (o *OriginProducer) CreateBroadcast(path string) (*BroadcastProducer, error) {
 	inner, err := o.inner.CreateBroadcast(path)
 	if err != nil {
 		return nil, err
 	}
 	return &BroadcastProducer{inner: inner}, nil
-}
-
-// Announce advertises a route: a claim that paths under route.Prefix can be
-// served. Hold the returned Announce for as long as the route should stay
-// advertised. Announcing is independent of CreateBroadcast: announce one short
-// prefix and serve requests beneath it with Dynamic.
-func (o *OriginProducer) Announce(prefix string, route Route) (*Announce, error) {
-	inner, err := o.inner.Announce(prefix, route)
-	if err != nil {
-		return nil, err
-	}
-	return &Announce{inner: inner}, nil
-}
-
-// Announce is a live route advertisement. The route stays advertised until
-// Cancel (or garbage collection releases the handle).
-type Announce struct {
-	inner *ffi.MoqAnnounce
-}
-
-// Update re-prices the route in place: replaces its hops and cost.
-func (a *Announce) Update(route Route) error {
-	return a.inner.Update(route)
-}
-
-// Cancel retracts the route.
-func (a *Announce) Cancel() {
-	a.inner.Cancel()
 }
 
 // OriginDynamic streams requests for paths with no existing exact-path broadcast.
@@ -100,7 +81,12 @@ func (d *OriginDynamic) Requests(ctx context.Context) iter.Seq2[*BroadcastReques
 	return streamSeq(ctx, d.RequestedBroadcast)
 }
 
-// Cancel stops serving requested broadcasts.
+// Update re-prices the route in place: replaces its hops and cost.
+func (d *OriginDynamic) Update(route Route) error {
+	return d.inner.Update(route)
+}
+
+// Cancel stops serving requested broadcasts and retracts the route.
 func (d *OriginDynamic) Cancel() {
 	d.inner.Cancel()
 }

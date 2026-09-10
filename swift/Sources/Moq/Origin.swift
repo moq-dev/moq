@@ -1,7 +1,7 @@
 import MoqFFI
 
-/// The publish side of an origin: create broadcasts so subscribers can
-/// discover them.
+/// The publish side of an origin: create broadcasts, serve them on demand,
+/// and announce them so subscribers can discover them.
 public final class OriginProducer: Sendable {
     let ffi: MoqOriginProducer
 
@@ -20,51 +20,26 @@ public final class OriginProducer: Sendable {
         OriginConsumer(ffi.consume())
     }
 
-    /// Serve broadcasts on request: paths nothing publishes, under the root or
-    /// under any prefix this origin announced.
-    public func dynamic() -> OriginDynamic {
-        OriginDynamic(ffi.dynamic())
+    /// Advertise `pattern` and serve the requests beneath it.
+    ///
+    /// `pattern` is in the path Pattern dialect; a prefix is spelled `foo/**`.
+    /// Until wildcard advertisements land, anything but a prefix-shaped pattern
+    /// is refused. Create, `dynamic` if tracks are served on demand, populate,
+    /// then `BroadcastProducer.announce`.
+    public func dynamic(pattern: String, route: Route = Route()) throws -> OriginDynamic {
+        OriginDynamic(try ffi.dynamic(pattern: pattern, route: route))
     }
 
     /// Create a broadcast at `path`, returning the producer that feeds it.
     ///
-    /// The broadcast starts announced: the origin advertises the exact path as a
-    /// route so subscribers can discover it, becoming visible shortly after this
-    /// returns. Toggle discoverability with `BroadcastProducer.setAnnounce(_:)`;
-    /// `finish()` unpublishes immediately, while releasing the producer without
-    /// finishing also unpublishes but reads to subscribers as a failure rather
-    /// than a deliberate end.
+    /// The broadcast starts unadvertised: reachable by exact path, but not
+    /// visible to announcement streams. Advertise it with
+    /// `BroadcastProducer.announce(route:)` after populating tracks. `finish()`
+    /// unpublishes immediately, while releasing the producer without finishing
+    /// also unpublishes but reads to subscribers as a failure rather than a
+    /// deliberate end.
     public func createBroadcast(path: String) throws -> BroadcastProducer {
         BroadcastProducer(try ffi.createBroadcast(path: path))
-    }
-
-    /// Advertise a route: a claim that paths under `prefix` can be served.
-    ///
-    /// Hold the returned `Announce` for as long as the route should stay
-    /// advertised. Announcing is independent of `createBroadcast(path:)`:
-    /// announce one short prefix and serve requests beneath it with `dynamic()`.
-    public func announce(prefix: String, route: Route = Route()) throws -> Announce {
-        Announce(try ffi.announce(prefix: prefix, route: route))
-    }
-}
-
-/// A live route advertisement. The route stays advertised until `cancel()`
-/// (or the handle is released).
-public final class Announce: Sendable {
-    let ffi: MoqAnnounce
-
-    init(_ ffi: MoqAnnounce) {
-        self.ffi = ffi
-    }
-
-    /// Re-price the route in place: replace its hops and cost.
-    public func update(route: Route) throws {
-        try ffi.update(route: route)
-    }
-
-    /// Retract the route.
-    public func cancel() {
-        ffi.cancel()
     }
 }
 
@@ -110,7 +85,13 @@ public final class OriginDynamic: AsyncSequence, Sendable {
         BroadcastRequest(try await ffi.requestedBroadcast())
     }
 
-    /// Cancel all current and future `requestedBroadcast()` calls.
+    /// Re-price the route in place: replace its hops and cost.
+    public func update(route: Route) throws {
+        try ffi.update(route: route)
+    }
+
+    /// Cancel all current and future `requestedBroadcast()` calls and retract
+    /// the route.
     public func cancel() {
         ffi.cancel()
     }
