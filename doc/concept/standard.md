@@ -26,6 +26,16 @@ maps everything else to "not supported" or a harmless equivalent. The
 [moq-lite page](/concept/moq-lite#what-moq-lite-leaves-out) lists the
 differences.
 
+On drafts 14–19, the Rust publisher serves relative joining `FETCH` requests
+with offset zero for `NextObject` subscriptions. The fetch delivers the saved
+current-group prefix, and the subscription delivers later objects. Standalone,
+absolute joining, and nonzero-offset fetches are refused. Draft-20 uses
+subscription fills instead. JavaScript publishing does not yet serve `FETCH`;
+Rust and JavaScript subscribers request unfiltered delivery on older drafts
+because they do not issue joining fetches. Other publishers may replay a cached
+backlog for that filter; selecting the next group instead would leave static
+tracks waiting for a group that never arrives.
+
 Several project drafts extend the IETF wire without breaking it, since `SETUP`
 ignores unknown parameters: [cluster](/draft/moq-cluster) routing hop lists,
 [solicit](/draft/moq-solicit) to make announcements opt-in, and

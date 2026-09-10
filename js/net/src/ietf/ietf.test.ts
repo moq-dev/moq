@@ -1105,6 +1105,18 @@ test("SubscribeOk v18: reads a multi-byte LARGEST_OBJECT group", async () => {
 	expect(decoded.largest).toEqual({ groupId: 427n, objectId: 0n });
 });
 
+test("SubscribeOk v14: advertises the largest content location", async () => {
+	const largest = { groupId: 9n, objectId: 3n };
+	const encoded = await encodeVersioned(
+		new Subscribe.SubscribeOk({ requestId: 7n, trackAlias: 42n, largest, properties: { groupOrder: 2 } }),
+		Version.DRAFT_14,
+	);
+	const expected = new Uint8Array([0, 8, 7, 42, 0, 2, 1, 9, 3, 0]);
+	expect(encoded).toEqual(expected);
+	const decoded = await decodeVersioned(expected, Subscribe.SubscribeOk.decode, Version.DRAFT_14);
+	expect(decoded.largest).toEqual(largest);
+});
+
 // LARGEST_OBJECT is required once the track has content, so every draft that defines it carries
 // it: length-prefixed through draft-16, two bare varints after.
 test("SubscribeOk: LARGEST_OBJECT rides every draft in that draft's form", async () => {

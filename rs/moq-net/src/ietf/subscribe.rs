@@ -227,7 +227,10 @@ impl Message for SubscribeOk {
 					.group_order
 					.unwrap_or(GroupOrder::Ascending)
 					.encode(w, version)?;
-				false.encode(w, version)?; // no content
+				self.largest.is_some().encode(w, version)?;
+				if let Some(largest) = self.largest {
+					largest.encode(w, version)?;
+				}
 				0u8.encode(w, version)?; // no parameters
 			}
 			_ => {
@@ -262,6 +265,7 @@ impl Message for SubscribeOk {
 		};
 		let track_alias = u64::decode(r, version)?;
 		let mut properties = Properties::default();
+		let mut largest = None;
 
 		match version {
 			Version::Draft14 => {
@@ -273,8 +277,7 @@ impl Message for SubscribeOk {
 				properties.group_order = Some(GroupOrder::decode(r, version)?.any_to_descending());
 
 				if bool::decode(r, version)? {
-					let _group = u64::decode(r, version)?;
-					let _object = u64::decode(r, version)?;
+					largest = Some(Location::decode(r, version)?);
 				}
 
 				let _params = Parameters::decode(r, version)?;
@@ -304,7 +307,7 @@ impl Message for SubscribeOk {
 		Ok(Self {
 			request_id,
 			track_alias,
-			largest: None,
+			largest,
 			properties,
 		})
 	}
@@ -738,12 +741,14 @@ mod tests {
 	}
 
 	/// LARGEST_OBJECT is required once the track has content, so every draft that defines
-	/// it carries it: length-prefixed through draft-16, two bare varints after.
+	/// it carries it: a content flag on draft-14, a length-prefixed parameter through
+	/// draft-16, and a bare Location parameter after.
 	#[test]
 	fn test_subscribe_ok_largest_object_wire_vectors() {
 		let largest = Some(Location { group: 9, object: 3 });
 
 		for (version, expected) in [
+			(Version::Draft14, &[7, 42, 0, 1, 1, 9, 3, 0][..]),
 			(Version::Draft16, &[7, 42, 1, 0x09, 0x02, 0x09, 0x03][..]),
 			(Version::Draft17, &[42, 1, 0x09, 0x09, 0x03][..]),
 			(Version::Draft18, &[42, 1, 0x09, 0x09, 0x03][..]),
@@ -751,7 +756,7 @@ mod tests {
 			(Version::Draft20, &[42, 1, 0x09, 0x09, 0x03][..]),
 		] {
 			let msg = SubscribeOk {
-				request_id: matches!(version, Version::Draft16).then_some(RequestId(7)),
+				request_id: matches!(version, Version::Draft14 | Version::Draft16).then_some(RequestId(7)),
 				track_alias: 42,
 				largest,
 				properties: Properties::default(),
