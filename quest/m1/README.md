@@ -35,7 +35,6 @@ quest here and merged main into dev.
 - [#2709](/quest/m1/2709-per-broadcast-bandwidth-estimates-and-reservation.md) - js/net mirrors the send-side bandwidth allocator so each publisher encodes against its own share
 - [Binding rate control](/quest/m1/binding-rate-control.md) - the bindings mirror the allocator and reservation, so a non-Rust publisher follows its bandwidth share
 - [#2859](/quest/m1/2859-passthrough-imports-reserve-no-bandwidth-so-a-co-resident.md) - passthrough imports claim their peak-hold catalog bitrate on the allocator so a co-resident encoder targets what is left
-- [#2815](/quest/m1/2815-lift-adaptive-stage-refusal.md) - moq-cli accepts several adaptive import stages on one connection now that the allocator divides the estimate
 - [HLS 404](/quest/m1/hls-cache-miss-codes.md) - a relay miss and a disconnected publisher answer 404 over moq-lite; IETF upstreams stay 500
 - [HLS sibling restart](/quest/m1/hls-sibling-epoch-identity.md) - a replaced sibling publisher restarts its rendition instead of serving stale rows
 - [A/V clock](/quest/m1/plan-av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles

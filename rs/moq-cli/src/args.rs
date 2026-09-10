@@ -259,28 +259,6 @@ impl Invocation {
 			);
 		}
 
-		// Rate control assumes it owns the uplink: the encoder targets a fraction of the
-		// connection's estimate, leaving room for its own audio and transport overhead but
-		// not for a second publisher. Anything else importing over the same connection
-		// spends what that encoder already claimed, so refuse rather than congest the link
-		// the estimate exists to protect. Exports only receive, so they don't count, and
-		// only an outbound client has an estimate at all.
-		let imports = self
-			.stages
-			.iter()
-			.filter(|stage| matches!(stage, Command::Import(_)))
-			.count();
-		let adaptive = self
-			.stages
-			.iter()
-			.any(|stage| matches!(stage, Command::Import(import) if import.source.uses_bandwidth()));
-		anyhow::ensure!(
-			self.moq.client.url.is_none() || !adaptive || imports == 1,
-			"a stage that encodes to fit the connection's bandwidth estimate assumes it's the only \
-			 publisher on that connection, but this runs {imports} import stages; run them as separate \
-			 processes, or publish over --listen, which has no estimate"
-		);
-
 		Ok(())
 	}
 }
@@ -681,18 +659,6 @@ impl ImportSource {
 			Self::Flv => PublishFormat::Flv,
 			_ => return None,
 		})
-	}
-	/// Whether this source encodes to fit the connection's bandwidth estimate.
-	///
-	/// Rate control is per-encoder while the estimate is per-connection, so each such
-	/// source assumes it's the only one on the uplink. Only the video encoder reads
-	/// the estimate, so an audio-only capture doesn't count.
-	pub fn uses_bandwidth(&self) -> bool {
-		match self {
-			#[cfg(feature = "capture")]
-			Self::Capture(capture) => !capture.no_video,
-			_ => false,
-		}
 	}
 }
 
@@ -1141,8 +1107,7 @@ mod tests {
 		assert_eq!(err.kind(), ParseErrorKind::UnknownArgument);
 	}
 
-	/// Stages that never read the estimate can share a connection freely, so the guard
-	/// must not reject them.
+	/// Passthrough imports share a connection; they never read the estimate.
 	#[test]
 	fn imports_without_rate_control_can_share_a_connection() {
 		let cli = Invocation::try_parse_from([
@@ -1168,48 +1133,11 @@ mod tests {
 		assert!(cli.validate().is_ok());
 	}
 
-	/// An encoder that follows the estimate targets most of it, so a second publisher
-	/// on the same connection spends what it already claimed. Exports only receive, and
-	/// a `--listen` publisher has no estimate to oversubscribe.
+	/// Two encoding stages share the connection's allocator, so they may run
+	/// together rather than each targeting the whole estimate.
 	#[cfg(feature = "capture")]
 	#[test]
-	fn an_adaptive_capture_must_be_the_only_import() {
-		let client: &[&str] = &["--connect", "http://relay"];
-		let server: &[&str] = &["--listen", "[::]:4443"];
-
-		let cases: [(&[&str], &[&str], bool); 3] = [
-			// Two video captures follow the same estimate.
-			(client, &["import", "capture"], false),
-			// A fixed-rate import spends the same uplink from outside the budget.
-			(client, &["import", "rtmp", "--listen", "127.0.0.1:1935"], false),
-			// No outbound client, so there's no estimate to oversubscribe.
-			(server, &["import", "capture"], true),
-		];
-
-		for (side, second, ok) in cases {
-			let argv = [&["moq"][..], side, &["import", "capture", "--"], second].concat();
-			let cli = Invocation::try_parse_from(argv.clone()).unwrap();
-			assert_eq!(cli.validate().is_ok(), ok, "{argv:?}");
-		}
-
-		// An audio-only capture never reads the estimate, so it may share the connection.
-		let cli = Invocation::try_parse_from([
-			"moq",
-			"--connect",
-			"http://relay",
-			"import",
-			"capture",
-			"--no-video",
-			"--",
-			"import",
-			"rtmp",
-			"--listen",
-			"127.0.0.1:1935",
-		])
-		.unwrap();
-		assert!(cli.validate().is_ok());
-
-		// Exports only receive, so they don't compete for the uplink.
+	fn two_encoding_stages_may_share_a_connection() {
 		let cli = Invocation::try_parse_from([
 			"moq",
 			"--connect",
@@ -1217,29 +1145,12 @@ mod tests {
 			"import",
 			"capture",
 			"--",
-			"export",
-			"--broadcast",
-			"other.hang",
-			"fmp4",
+			"import",
+			"capture",
 		])
 		.unwrap();
-		assert!(cli.validate().is_ok());
-	}
 
-	/// Only the video encoder reads the connection's bandwidth estimate, so an
-	/// audio-only capture doesn't compete for it and isn't counted against the
-	/// one-adaptive-stage limit.
-	#[cfg(feature = "capture")]
-	#[test]
-	fn audio_only_capture_is_not_bandwidth_adaptive() {
-		for (args, adaptive) in [(vec!["capture"], true), (vec!["capture", "--no-video"], false)] {
-			let argv = [vec!["moq", "--connect", "http://relay", "import"], args].concat();
-			let cli = Invocation::try_parse_from(argv).unwrap();
-			let Command::Import(import) = &cli.stages[0] else {
-				panic!("expected import")
-			};
-			assert_eq!(import.source.uses_bandwidth(), adaptive);
-		}
+		assert!(cli.validate().is_ok());
 	}
 
 	#[test]

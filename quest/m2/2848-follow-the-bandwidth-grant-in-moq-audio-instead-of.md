@@ -76,7 +76,6 @@ the dev merge.
 
 ## Related
 
-- [#2815](/quest/m1/2815-lift-adaptive-stage-refusal.md) - two capture stages sharing one allocator
 - [#2859](/quest/m1/2859-passthrough-imports-reserve-no-bandwidth-so-a-co-resident.md) - reserve-only usage for passthrough tracks
 - [Binding rate control](/quest/m1/binding-rate-control.md) - the bindings consume the same `moq_mux::rate::Control`
 - [#2709](/quest/m1/2709-per-broadcast-bandwidth-estimates-and-reservation.md) - the JS twin
