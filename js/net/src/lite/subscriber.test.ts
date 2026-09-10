@@ -190,12 +190,11 @@ test("a lite-05 duplicate announce follows the same restart rule", async () => {
 	subscriber.close();
 });
 
-// A responder that withholds its Hop ID sends the reserved 0, and an empty chain means it
-// originated the path itself, so the advertisement names nobody. Two such advertisements can
-// be unrelated publishers, so a restart must replace the broadcast rather than reroute it:
-// cached track info and in-flight subscriptions must not splice across them. Mirrors the Rust
-// `unknown_publisher_restart_replaces` regression.
-test("a restart from an unidentified publisher replaces rather than reroutes", async () => {
+// A responder that withholds its Hop ID sends the reserved 0. Assigned Identities
+// names that peer with a session-scoped hop, so an empty chain from this stream is
+// the same publisher twice: a restart splices rather than replacing. A later hop
+// that names someone else is a real takeover.
+test("a withheld AnnounceOk identity is assigned so a restart splices", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
 	const announced = subscriber.announced(Path.empty());
 	await settle();
@@ -206,8 +205,11 @@ test("a restart from an unidentified publisher replaces rather than reroutes", a
 	);
 	expect(await announced.next()).toEqual({ prefix: Path.from("room"), active: true });
 
-	// Nobody is named on either side, so this is not provably the same content.
+	// Same assigned identity, new route: nothing surfaces.
 	await send((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [] }, Version.DRAFT_06));
+
+	// A named publisher took the path: that is a replacement.
+	await send((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [PUBLISHER_B] }, Version.DRAFT_06));
 	expect(await announced.next()).toEqual({ prefix: Path.from("room"), active: false });
 	expect(await announced.next()).toEqual({ prefix: Path.from("room"), active: true });
 

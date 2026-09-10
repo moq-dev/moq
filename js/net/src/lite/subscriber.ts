@@ -5,7 +5,7 @@ import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
 import * as netGroup from "../group.ts";
-import { type Hop, UNKNOWN_HOP } from "../hop.ts";
+import { type Hop, randomHop, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
 import * as Time from "../time.ts";
@@ -122,6 +122,11 @@ export class Subscriber {
 	// own announcements on a per-call basis (see {@link AnnouncedOptions}).
 	readonly hop: Hop;
 
+	// Assigned identity for a peer that declared none (AnnounceOk 0, or a version
+	// with no hop ids). A chain names real hops only, so an empty received chain
+	// is attributed to this session. Mirrors Rust `Subscriber::session_origin`.
+	readonly #sessionOrigin: Hop = randomHop();
+
 	// Our subscribed tracks. `timescale` resolves once known (from TRACK_INFO on
 	// lite-05+, or implicit defaults on older drafts); group streams block on it
 	// before decoding any frame, since a group's QUIC stream can race ahead.
@@ -217,11 +222,10 @@ export class Subscriber {
 			let responderOrigin: Hop | undefined;
 			if (hasAnnounceOk(this.version)) {
 				const ok = await AnnounceOk.decode(stream.reader, this.version);
-				// A responder that withholds its identity sends the reserved 0. It names
-				// nobody, so folding it into a chain would stamp a placeholder that cannot
-				// close a loop or tell two publishers apart. Treat it as absent instead,
-				// which is the loop-blind route the draft describes.
-				responderOrigin = ok.hop === UNKNOWN_HOP ? undefined : ok.hop;
+				// A responder that withholds its identity sends the reserved 0. Assigned
+				// Identities fills that gap with a session-scoped id so a chain never names
+				// nobody and a restart from this peer still splices.
+				responderOrigin = ok.hop === UNKNOWN_HOP ? this.#sessionOrigin : ok.hop;
 			}
 
 			// Every advertisement the peer currently has live, keyed by suffix (at most one
@@ -368,22 +372,17 @@ export class Subscriber {
 
 				if (active) {
 					// The first hop identifies the original publisher; an empty chain means the
-					// peer itself originated it. See `restart_announce` in the Rust subscriber.
-					const publisher = hops?.[0] ?? responderOrigin;
-
-					// A publisher with no identity (an empty chain from a peer that withheld its
-					// own id) never proves continuity: two such advertisements can be unrelated
-					// publishers.
-					const identified = publisher !== undefined;
+					// peer itself originated it and is named by the assigned session identity.
+					// See `start_announce` in the Rust subscriber.
+					const publisher = hops?.[0] ?? responderOrigin ?? this.#sessionOrigin;
 
 					// A second advertisement for a path we already carry is a restart: either an
 					// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE.
 					const previous = advertised.get(suffix);
 					if (previous?.live) {
-						if (identified && previous.publisher === publisher) {
+						if (previous.publisher === publisher) {
 							// Same publisher, new route. In-flight subscriptions resume across it,
-							// so there is nothing for a consumer to react to. An unidentified
-							// publisher falls through to the replacement path below instead.
+							// so there is nothing for a consumer to react to.
 							console.debug(`announced: broadcast=${path} rerouted`);
 							continue;
 						}
