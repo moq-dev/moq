@@ -2,6 +2,7 @@ use std::fmt;
 
 /// An IETF protocol version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Version {
 	Draft14,
 	Draft15,

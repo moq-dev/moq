@@ -11,7 +11,7 @@ with it, while shipping a simpler profile you can use today.
 
 | Spec | Scope | Here |
 | --- | --- | --- |
-| [moq-transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) | The IETF pub/sub protocol | Drafts 14 through 20 negotiated by ALPN; [moq-lite](/concept/moq-lite) is a forward-compatible subset |
+| [moq-transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) | The IETF pub/sub protocol | Drafts 14 through 21 negotiated by ALPN; [moq-lite](/concept/moq-lite) is a forward-compatible subset |
 | [MSF](https://datatracker.ietf.org/doc/draft-ietf-moq-msf/) | The IETF catalog format | Read and written; broadcasts ending in `.msf` select it |
 | [LOC](https://datatracker.ietf.org/doc/draft-ietf-moq-loc/) | The IETF low-overhead container | Supported as a hang container kind |
 | [moq-lite](/draft/moq-lite), [hang](/draft/moq-hang), and friends | This project's own drafts | Normative for the implementation, published to the datatracker from [`drafts/`](https://github.com/moq-dev/moq/tree/main/drafts) |
