@@ -52,11 +52,11 @@ pub struct Frame {
 
 	/// Sample duration in the frame's own scale, when the container reports it.
 	///
-	/// CMAF carries a per-sample duration (trun sample-duration); containers
-	/// that don't (Legacy, LOC) leave this `None`. The [`Consumer`] adds it to
-	/// `timestamp` to learn how far a group has presented, so it can advance to
-	/// a newer group as soon as the gap is covered instead of waiting out the
-	/// max age budget.
+	/// CMAF carries a per-sample duration (trun sample-duration). Legacy and LOC
+	/// fill it from a duration marker, the empty frame that closes a video group.
+	/// The [`Consumer`] adds it to `timestamp` to learn how far a group has
+	/// presented, so it can advance to a newer group as soon as the gap is
+	/// covered instead of waiting out the max age budget.
 	pub duration: Option<moq_net::Timestamp>,
 
 	/// Encoded codec payload.
@@ -70,6 +70,25 @@ pub struct Frame {
 	/// "first frame in a group is a keyframe" as a fallback, so the
 	/// Legacy/LOC case lands correctly without anyone having to know.
 	pub keyframe: bool,
+}
+
+/// Stamp `frame` with the duration that ends at `bound`, unless it already has one.
+pub(crate) fn close_duration(frame: &mut Frame, bound: moq_net::Timestamp) {
+	if frame.duration.is_some() {
+		return;
+	}
+	let Some(delta) = bound.as_micros().checked_sub(frame.timestamp.as_micros()) else {
+		return;
+	};
+	if delta == 0 {
+		return;
+	}
+	let Ok(delta) = u64::try_from(delta) else {
+		return;
+	};
+	if let Ok(duration) = moq_net::Timestamp::from_micros(delta) {
+		frame.duration = Some(duration);
+	}
 }
 
 /// A non-keyframe frame arrived with no open group.
@@ -111,11 +130,21 @@ pub trait Container {
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>>;
 
-	/// Return the exclusive media endpoint when `frame` is a container marker.
+	/// Return the exclusive end of the previous frame when `frame` is a duration marker.
 	///
-	/// Formats without endpoint markers use the default implementation.
+	/// An empty codec payload on legacy and LOC. A consumer skips the marker, times the
+	/// previous frame with it, and never submits it to a decoder. It does not mean the
+	/// track ended. Formats without duration markers use the default.
 	fn end(&self, _frame: &Frame) -> Option<moq_net::Timestamp> {
 		None
+	}
+
+	/// Whether a video producer writes a duration marker at [`Producer::cut`] / [`Producer::finish`].
+	///
+	/// Legacy does. LOC does not until consumers that skip an empty payload have shipped.
+	/// CMAF carries sample durations, so it never writes one.
+	fn duration_marker(&self) -> bool {
+		false
 	}
 
 	/// Async wrapper around [`Self::poll_read`]. Carries the same contract: only

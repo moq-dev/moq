@@ -59,7 +59,7 @@ impl<E: CatalogExt> Import<E> {
 		let catalog = crate::codec::video::Catalog::new(hint);
 		let mut import = Self {
 			hvc1: false,
-			track: reserved.producer().media_producer(track, wire)?,
+			track: reserved.producer().media_producer(track, wire)?.with_duration_marker(),
 			rendition,
 			catalog,
 			last_sps: None,

@@ -50,8 +50,7 @@ half of #3161 needs nothing here.
   contiguous boundary can land a microsecond off (a 1024-sample AAC frame has
   no integer microsecond duration, and 48 kHz audio shows the same drift),
   while a missing group spans a group duration, orders of magnitude more; 1 ms
-  separates the two. Video knows its end from the
-  [duration marker](/quest/m1/duration-marker.md); audio from its
+  separates the two. Video knows its end from the duration marker; audio from its
   codec-defined frame durations. An empty group is permitted and carries no
   meaning. Group sequences stay free to be non-sequential.
   A contiguous boundary is what every ordinary group boundary already is:
@@ -95,10 +94,6 @@ half of #3161 needs nothing here.
   (`consumer.nonsequential.test.ts`) does not reset.
 
 Branch from dev, where `is_stale` and the current consumers live.
-
-## Required
-
-- [Duration marker](/quest/m1/duration-marker.md) - a video group has to know its own end before a boundary can prove continuity
 
 ## Closes
 

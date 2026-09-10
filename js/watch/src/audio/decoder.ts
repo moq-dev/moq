@@ -375,9 +375,6 @@ export class Decoder {
 					decoder.reset();
 					decoder.configure(decoderConfig);
 				}
-				if (next.end !== undefined) {
-					continue;
-				}
 
 				const { frame } = next;
 				if (!frame) continue;
@@ -597,9 +594,8 @@ export class Decoder {
 		this.#ring?.reset();
 	}
 
-	// Apply ordered container metadata before handling the result. An endpoint that also
-	// starts a new epoch must survive the reset so its following drain is trimmed.
-	#onNext(next: { discontinuity: number; end?: Time.Micro; frame?: { timestamp: Time.Micro } }): boolean {
+	// Apply ordered container metadata before handling the result.
+	#onNext(next: { discontinuity: number; frame?: { timestamp: Time.Micro } }): boolean {
 		if (!this.#terminal.update(next)) return false;
 		this.#ring?.reset();
 		this.sync.reset();

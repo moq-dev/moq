@@ -11,9 +11,9 @@ and the merge itself.
 ## Plan
 
 Branch a quest from `dev` when it breaks a published API or wire. A merge
-gate that lands on `main` (the duration marker, the additive Resolve and
-Demand halves of the wildcard line) branches from `main` and ranks here only
-because the merge waits on it. A quest stays here only if it breaks a
+gate that lands on `main` (the additive Resolve and Demand halves of the
+wildcard line) branches from `main` and ranks here only because the merge
+waits on it. A quest stays here only if it breaks a
 published API or wire, or gates the merge. Work that is identical on
 `main`, additive, or targets a `0.0.x` crate lives in
 [m2](/quest/m2/README.md) even when it builds on dev-only code; it starts on
@@ -23,7 +23,6 @@ with the dev tree.
 ## Quests
 
 - [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS; the whole line gates the dev merge
-- [Duration marker](/quest/m1/duration-marker.md) - every video group ends with an empty frame at its exclusive end; audio loses its end marker; lands on main but gates gap-discontinuity
 - [Gap discontinuity](/quest/m1/gap-discontinuity.md) - a hole in the delivered group sequence resets the decoder unless the boundary is contiguous within 1 ms; empty groups stop meaning anything
 - [Monotonic timeline](/quest/m1/monotonic-timeline.md) - producers refuse a group below the live edge and consumers drop rewind detection
 - [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - every native binding, Dart included, creates unadvertised, announces from the broadcast, and takes a path Pattern in `dynamic(pattern, route)`

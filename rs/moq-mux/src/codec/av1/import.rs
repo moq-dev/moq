@@ -50,7 +50,7 @@ impl<E: CatalogExt> Import<E> {
 		let wire = crate::catalog::hang::Container::try_from(&hint.container)?;
 		let catalog = crate::codec::video::Catalog::new(hint);
 		let mut import = Self {
-			track: reserved.producer().media_producer(track, wire)?,
+			track: reserved.producer().media_producer(track, wire)?.with_duration_marker(),
 			rendition,
 			catalog,
 			last_seq: None,

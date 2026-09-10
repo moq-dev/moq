@@ -218,22 +218,33 @@ export class Consumer {
 				const decoded = this.#format.decode(next.payload);
 
 				for (const sample of decoded) {
-					const marker = this.#format.end?.(sample) !== undefined;
+					const bound = this.#format.end?.(sample);
+					if (bound !== undefined) {
+						const last = group.frames.at(-1);
+						if (last && last.duration === undefined) {
+							last.duration = (bound - last.timestamp) as Time.Micro;
+						}
+						if (group.end === undefined || bound > group.end) {
+							group.end = bound;
+						}
+						continue;
+					}
+
 					const frame: Frame = {
 						payload: sample.payload,
 						timestamp: sample.timestamp,
 						// Protocol invariant: groups always start at a keyframe.
 						// For index 0, we enforce this regardless of what the format reports.
 						// For index > 0, we trust the format's keyframe detection.
-						keyframe: !marker && index === 0 ? true : sample.keyframe,
+						keyframe: index === 0 ? true : sample.keyframe,
 						// Carry the container's per-sample duration through so group.end is the real
 						// presentation end (ts + duration), not just the last frame's ts. This is what
 						// makes the PTS-contiguity check (next.firstPTS <= group.end) work; without it a
-						// contiguous next group looks one frame past the end. Undefined for Legacy (no duration).
+						// contiguous next group looks one frame past the end.
 						duration: sample.duration,
 					};
 
-					if (!marker) index++;
+					index++;
 
 					group.start ??= frame.timestamp;
 					group.frames.push(frame);
@@ -531,9 +542,8 @@ export class Consumer {
 
 	/**
 	 * Returns the next frame in order along with its group number and the current
-	 * {@link discontinuity} count, awaiting one if needed. A `frame` of undefined signals either
-	 * the end of that group or, when `end` is present, an exclusive media endpoint carried by a
-	 * legacy marker. The overall result is undefined once closed. When `discontinuity`
+	 * {@link discontinuity} count, awaiting one if needed. A `frame` of undefined signals
+	 * the end of that group. The overall result is undefined once closed. When `discontinuity`
 	 * jumps relative to the previous call, the publisher declared a break or rewound the
 	 * timeline: reset codec state and flush downstream render buffers before playing this frame.
 	 *
@@ -554,7 +564,6 @@ export class Consumer {
 				group: number;
 				discontinuity: number;
 				continuous: boolean;
-				end?: Time.Micro;
 		  }
 		| undefined
 	> {
@@ -592,17 +601,6 @@ export class Consumer {
 				if (frame) {
 					const seq = this.#groups[0].consumer.sequence;
 					const continuous = this.#continuesDelivery(seq);
-					const end = this.#format.end?.(frame);
-					if (end !== undefined) {
-						this.#updateBuffered();
-						return {
-							frame: undefined,
-							group: seq,
-							discontinuity: this.#rewind.discontinuity,
-							continuous,
-							end,
-						};
-					}
 					if (seq !== this.#deliveredGroup) this.#gap = false;
 					this.#deliveredGroup = seq;
 

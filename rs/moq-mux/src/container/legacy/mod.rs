@@ -19,6 +19,10 @@ impl Container for Wire {
 		frame.payload.is_empty().then_some(frame.timestamp)
 	}
 
+	fn duration_marker(&self) -> bool {
+		true
+	}
+
 	fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error> {
 		for frame in frames {
 			let hang_frame = hang::container::Frame {

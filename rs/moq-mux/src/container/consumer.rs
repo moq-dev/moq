@@ -70,9 +70,6 @@ pub struct Consumer<F: Container> {
 
 	// Timeline-discontinuity tracking: the live edge, rewind boundary, and event count.
 	rewind: Rewind,
-
-	// Exclusive endpoint from the most recently delivered legacy end marker.
-	end: Option<Timestamp>,
 }
 
 /// Live state for detecting timeline rewinds and classifying out-of-order groups.
@@ -162,7 +159,6 @@ impl<F: Container> Consumer<F> {
 			startup: start.is_none(),
 			max_age,
 			rewind: Rewind::default(),
-			end: None,
 		}
 	}
 
@@ -176,15 +172,6 @@ impl<F: Container> Consumer<F> {
 	/// the read that bumps it is the first of the new timeline.
 	pub fn discontinuity(&self) -> u64 {
 		self.rewind.discontinuity
-	}
-
-	/// The exclusive media endpoint from the most recently consumed legacy end marker.
-	///
-	/// The marker itself is not returned by [`read`](Self::read). Once this changes,
-	/// decoders should consume any following terminal codec packets but discard decoded
-	/// samples at or after this timestamp.
-	pub fn end(&self) -> Option<Timestamp> {
-		self.end
 	}
 
 	/// Read the next frame from the track.
@@ -247,15 +234,11 @@ impl<F: Container> Consumer<F> {
 
 			// Return the next frame from the current group if possible.
 			// If the current group is finished or errored, advance to the next group.
-			while let Some(group) = self.pending.front_mut()
+			if let Some(group) = self.pending.front_mut()
 				&& group.sequence <= self.current
 			{
 				match group.poll_read(waiter, &self.format) {
 					Poll::Ready(Ok(Some(frame))) => {
-						if let Some(end) = self.format.end(&frame) {
-							self.end = Some(end);
-							continue;
-						}
 						// Track the live edge (the max timestamp and the group that carries it) so a
 						// later backwards jump is detectable and the old epoch's tail is anchored.
 						let seq = group.group.sequence;
@@ -266,7 +249,7 @@ impl<F: Container> Consumer<F> {
 						return Poll::Ready(Ok(Some(frame)));
 					}
 					// Still blocked on this group, don't skip it yet.
-					Poll::Pending => break,
+					Poll::Pending => {}
 					Poll::Ready(Err(e)) => {
 						// Tell a relay group eviction/abort (skip) from a payload decode error
 						// (propagate). The moq_net group's own state at the read cursor is the
@@ -429,7 +412,6 @@ impl<F: Container> Consumer<F> {
 		self.rewind.discontinuity += count;
 		self.rewind.live_edge = None;
 		self.rewind.boundary = None;
-		self.end = None;
 	}
 
 	// Reads any new groups from the track until we're completely finished.
@@ -528,7 +510,6 @@ impl<F: Container> Consumer<F> {
 		});
 
 		self.rewind.discontinuity += 1;
-		self.end = None;
 		tracing::debug!(
 			prev_max = reset.prev_max,
 			group = reset.group,
@@ -651,7 +632,14 @@ impl GroupBuffer {
 		self.empty = false;
 
 		for mut frame in frames {
-			let marker = format.end(&frame).is_some();
+			if let Some(bound) = format.end(&frame) {
+				// Exclusive end of the previous frame, not media and not the track ending.
+				self.note_end(bound);
+				if let Some(last) = self.buffered.back_mut() {
+					super::close_duration(last, bound);
+				}
+				continue;
+			}
 			self.min_timestamp = Some(match self.min_timestamp {
 				Some(existing) => existing.min(frame.timestamp),
 				None => frame.timestamp,
@@ -665,19 +653,16 @@ impl GroupBuffer {
 			// Furthest presentation point, in wall-clock terms so timestamp and
 			// duration can be at different scales without extra conversions. A frame
 			// with no duration contributes only its timestamp.
-			let duration = frame.duration.map(std::time::Duration::from).unwrap_or_default();
-			let end = std::time::Duration::from(frame.timestamp) + duration;
-			self.max_end = Some(match self.max_end {
-				Some(existing) => existing.max(end),
-				None => end,
-			});
+			self.note_end(frame.timestamp);
+			if let Some(duration) = frame.duration {
+				let end = std::time::Duration::from(frame.timestamp) + std::time::Duration::from(duration);
+				self.max_end = Some(self.max_end.map_or(end, |existing| existing.max(end)));
+			}
 
 			// First frame of a group is always a keyframe by protocol invariant; trust
 			// the container's flag otherwise so CMAF mid-group keyframes survive.
-			if !marker {
-				frame.keyframe = frame.keyframe || self.index == 0;
-				self.index += 1;
-			}
+			frame.keyframe = frame.keyframe || self.index == 0;
+			self.index += 1;
 
 			self.buffered.push_back(frame);
 		}
@@ -748,6 +733,11 @@ impl GroupBuffer {
 	/// the read cursor, the latter leaves the group readable or cleanly finished.
 	fn poll_aborted(&mut self, waiter: &kio::Waiter) -> bool {
 		matches!(self.group.poll_finished(waiter), Poll::Ready(Err(_)))
+	}
+
+	fn note_end(&mut self, timestamp: Timestamp) {
+		let end = std::time::Duration::from(timestamp);
+		self.max_end = Some(self.max_end.map_or(end, |existing| existing.max(end)));
 	}
 
 	fn poll_empty(&mut self, waiter: &kio::Waiter) -> Poll<bool> {
@@ -1338,8 +1328,8 @@ mod tests {
 	}
 
 	/// An empty payload carries no media, so it's skipped rather than surfaced as a
-	/// frame or raised as an error. A marker can sit anywhere -- mid-group (a gap) or
-	/// last (a group's end) -- and a publisher emitting them must not break us.
+	/// frame or raised as an error. It times the previous frame and never means the
+	/// track ended.
 	#[tokio::test]
 	async fn empty_payload_is_skipped() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
@@ -1355,7 +1345,7 @@ mod tests {
 			duration: None,
 		};
 		Container::Legacy.write(&mut group, &[media(ts(0))]).unwrap();
-		write_marker(&mut group, ts(16_000)); // mid-group gap marker
+		write_marker(&mut group, ts(16_000)); // closes the first frame
 		Container::Legacy.write(&mut group, &[media(ts(33_000))]).unwrap();
 		write_marker(&mut group, ts(50_000)); // the group's end
 		group.finish().unwrap();
@@ -1365,7 +1355,6 @@ mod tests {
 		assert_eq!(frames.len(), 2, "markers are not surfaced as media");
 		assert_eq!(frames[0].timestamp, ts(0));
 		assert_eq!(frames[1].timestamp, ts(33_000));
-		assert_eq!(consumer.end(), Some(ts(50_000)), "the latest endpoint is exposed");
 	}
 
 	#[tokio::test]
@@ -1393,7 +1382,7 @@ mod tests {
 
 		let frame = consumer.read().await.unwrap().unwrap();
 		assert!(frame.keyframe, "the marker does not consume the first-media slot");
-		assert_eq!(consumer.end(), Some(ts(20_000)));
+		assert!(frame.duration.is_none(), "a leading marker has no previous frame");
 	}
 
 	/// Reading a marker consumes its frame, so a run of them makes progress and the
@@ -1428,6 +1417,41 @@ mod tests {
 		let frames = read_all(&mut consumer).await.unwrap();
 		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
 		assert_eq!(micros, vec![0, 100_000], "markers skipped, next group reached");
+	}
+
+	/// LOC consumers skip an empty payload so later producers can write the duration marker.
+	#[tokio::test]
+	async fn loc_empty_payload_is_skipped() {
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let consumer_track =
+			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_millis(500)));
+		let mut consumer = Consumer::new(consumer_track, Container::Loc);
+
+		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		let media = Frame {
+			timestamp: ts(0),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: true,
+			duration: None,
+		};
+		Container::Loc.write(&mut group, &[media]).unwrap();
+		Container::Loc
+			.write(
+				&mut group,
+				&[Frame {
+					timestamp: ts(33_000),
+					payload: Bytes::new(),
+					keyframe: false,
+					duration: None,
+				}],
+			)
+			.unwrap();
+		group.finish().unwrap();
+		track.finish().unwrap();
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		assert_eq!(frames.len(), 1, "the empty LOC payload is not submitted");
+		assert_eq!(frames[0].timestamp, ts(0));
 	}
 
 	// ---- Group Ordering ----

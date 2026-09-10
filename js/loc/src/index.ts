@@ -38,6 +38,11 @@ const DEFAULT_TIMESCALE = 1_000_000;
  * timescale property are interpreted as microseconds.
  */
 export class Format {
+	/** Return the exclusive end of the previous frame for an empty codec payload. */
+	end(frame: Frame): Time.Micro | undefined {
+		return frame.payload.byteLength === 0 ? frame.timestamp : undefined;
+	}
+
 	/** Decode one moq-net frame into its LOC frames. Throws on malformed input. */
 	decode(frame: Uint8Array): Frame[] {
 		const [propsLen, afterLen] = Moq.Varint.decode(frame);

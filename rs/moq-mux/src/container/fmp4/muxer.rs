@@ -145,6 +145,12 @@ impl Muxer {
 		let mut out: Vec<Frame> = Vec::new();
 		while let Some(frames) = self.container.read(group).await? {
 			for frame in frames {
+				if let Some(bound) = self.container.end(&frame) {
+					if let Some(last) = out.last_mut() {
+						crate::container::close_duration(last, bound);
+					}
+					continue;
+				}
 				let Some(transform) = self.transform.as_mut() else {
 					self.resolve_video_dimensions(&frame.payload)?;
 					out.push(frame);
@@ -347,6 +353,31 @@ mod tests {
 		assert_eq!(decoded[0].timestamp.as_micros(), 10_000_000);
 		assert!(decoded[0].keyframe);
 		assert_eq!(decoded[1].timestamp.as_micros(), 10_033_000);
+	}
+
+	/// A duration marker times the group's last sample through fmp4 (and HLS, which
+	/// uses the same [`Muxer::read`] / [`Muxer::fragment`] path).
+	#[tokio::test]
+	async fn a_duration_marker_times_the_trailing_sample() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("v", None)
+			.unwrap();
+		let mut subscriber = track.subscribe(None).ordered();
+		let mut producer = crate::container::Producer::new(track, HangContainer::Legacy).with_duration_marker();
+		producer.write(frame(10_000_000, true)).unwrap();
+		producer.write(frame(10_033_000, false)).unwrap();
+		producer.cut(Some(Timestamp::from_micros(10_066_000).unwrap())).unwrap();
+		producer.finish().unwrap();
+
+		let mut group = subscriber.next_group().await.unwrap().expect("a group");
+		let mut muxer = video_muxer();
+		let frames = muxer.read(&mut group).await.unwrap();
+		assert_eq!(frames.len(), 2, "the marker is not a sample");
+		assert_eq!(frames[1].duration, Some(Timestamp::from_micros(33_000).unwrap()));
+
+		let fragment = muxer.fragment(0, &frames).unwrap();
+		assert_eq!(super::super::sample_durations(&fragment), vec![Some(990), Some(990)]);
 	}
 
 	#[tokio::test]

@@ -72,4 +72,8 @@ impl Container for Wire {
 			duration: None,
 		}])))
 	}
+
+	fn end(&self, frame: &Frame) -> Option<moq_net::Timestamp> {
+		frame.payload.is_empty().then_some(frame.timestamp)
+	}
 }

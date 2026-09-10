@@ -57,6 +57,14 @@ impl ContainerTrait for Container {
 		}
 	}
 
+	fn duration_marker(&self) -> bool {
+		match self {
+			Self::Legacy => legacy::Wire.duration_marker(),
+			Self::Cmaf(cmaf) => cmaf.duration_marker(),
+			Self::Loc => loc::Wire.duration_marker(),
+		}
+	}
+
 	fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error> {
 		match self {
 			Self::Legacy => legacy::Wire.write(group, frames),

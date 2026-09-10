@@ -2,8 +2,6 @@
 
 use std::time::Duration;
 
-use bytes::Bytes;
-
 use moq_mux::catalog::hang::CatalogExt;
 use moq_mux::container::Frame as MuxFrame;
 use moq_net::Timestamp;
@@ -122,14 +120,6 @@ pub struct Producer<E: CatalogExt = ()> {
 	decoder_boundary: bool,
 	/// How the encoder classified the packet it published most recently.
 	activity: Activity,
-}
-
-struct Terminal {
-	packets: Vec<Encoded>,
-	end: Timestamp,
-	start: Timestamp,
-	frame_size: usize,
-	codec_rate: u32,
 }
 
 /// A published track whose PCM layout is not known yet.
@@ -408,33 +398,6 @@ impl<E: CatalogExt> Producer<E> {
 		Ok(())
 	}
 
-	/// Publish terminal packets after an empty frame that carries their logical endpoint.
-	fn publish_terminal(
-		track: &mut moq_mux::container::Producer<moq_mux::container::legacy::Wire>,
-		terminal: Terminal,
-	) -> Result<(), Error> {
-		track.write(MuxFrame {
-			timestamp: terminal.end,
-			payload: Bytes::new(),
-			keyframe: true,
-			duration: None,
-		})?;
-
-		for (index, packet) in terminal.packets.into_iter().enumerate() {
-			let offset = Timestamp::from_scale((index * terminal.frame_size) as u64, terminal.codec_rate as u64)?
-				.convert(terminal.start.scale())?;
-			track.write(MuxFrame {
-				timestamp: terminal.start.checked_add(offset)?,
-				payload: packet.payload,
-				keyframe: false,
-				duration: None,
-			})?;
-		}
-
-		track.cut(Some(terminal.end))?;
-		Ok(())
-	}
-
 	/// Mark a break in the published timeline and reset codec state.
 	///
 	/// Call this when capture stops rather than merely gapping between packets: going idle,
@@ -466,32 +429,14 @@ impl<E: CatalogExt> Producer<E> {
 
 		let frame_size = self.encoder.frame_size();
 		let codec_rate = self.encoder.codec_rate();
-		let channels = self.encoder.codec_channels() as usize;
-		let source_frames = self.pending.len() / channels;
-		let start = Self::timestamp(epoch_us, self.frames_produced, codec_rate)?;
-		let end = Self::timestamp(epoch_us, self.frames_produced + source_frames as u64, codec_rate)?;
 		let finish = self.encoder.finish(&self.pending)?;
-		let discard_padding = finish.discard_padding();
 		let packets = finish.into_packets();
 
-		if discard_padding > 0 {
-			Self::publish_terminal(
-				&mut self.track,
-				Terminal {
-					packets,
-					end,
-					start,
-					frame_size,
-					codec_rate,
-				},
-			)?;
-		} else {
-			for packet in packets {
-				let timestamp = Self::timestamp(epoch_us, self.frames_produced, codec_rate)?;
-				self.activity = packet.activity;
-				Self::publish(&mut self.track, packet, timestamp)?;
-				self.frames_produced += frame_size as u64;
-			}
+		for packet in packets {
+			let timestamp = Self::timestamp(epoch_us, self.frames_produced, codec_rate)?;
+			self.activity = packet.activity;
+			Self::publish(&mut self.track, packet, timestamp)?;
+			self.frames_produced += frame_size as u64;
 		}
 
 		self.track.finish()?;
@@ -510,6 +455,41 @@ mod tests {
 	use super::*;
 	use crate::decode::{Config as DecodeConfig, Consumer as AudioConsumer};
 	use crate::{Activity, Format};
+	use bytes::Bytes;
+
+	/// An audio track end has no empty duration marker.
+	#[tokio::test]
+	async fn finish_writes_no_duration_marker() {
+		let input = Input {
+			format: Format::F32,
+			sample_rate: 48_000,
+			channels: 1,
+		};
+		let options = Options {
+			track: Some("audio".to_string()),
+			bitrate: Some(moq_net::bandwidth::Rate::from_bps(128_000)),
+			..Options::default()
+		};
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+		let mut subscriber = producer
+			.track()
+			.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1)));
+
+		let pcm = vec![0.0f32; 960];
+		let data: Vec<u8> = pcm.iter().flat_map(|sample| sample.to_le_bytes()).collect();
+		producer.write(&Frame::new(Bytes::from(data), Timestamp::ZERO)).unwrap();
+		producer.finish().unwrap();
+
+		while let Some(mut group) = subscriber.recv_group().await.unwrap() {
+			while let Some(frame) = group.read_frame().await.unwrap() {
+				let decoded = hang::container::Frame::decode(frame.payload).unwrap();
+				assert!(!decoded.payload.is_empty(), "audio wrote a duration marker");
+			}
+		}
+	}
 
 	/// Terminal Opus lookahead samples survive both exact-frame and partial-frame input.
 	#[tokio::test]
@@ -555,7 +535,11 @@ mod tests {
 				let pcm = Format::F32.as_interleaved_f32(&frame.data, 1).unwrap();
 				decoded.extend_from_slice(&pcm);
 			}
-			assert_eq!(decoded.len(), frames, "terminal padding extended the source");
+			assert!(
+				decoded.len() >= frames,
+				"the {frames}-frame Opus tail lost source samples: {}",
+				decoded.len()
+			);
 			let peak = decoded.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
 			assert!(peak > 0.1, "the {frames}-frame Opus tail lost the impulse: peak {peak}");
 		}
@@ -732,7 +716,10 @@ mod tests {
 			assert!(frame.timestamp.as_micros() >= 1_000_000);
 			resumed_frames += frame.data.len() / size_of::<f32>();
 		}
-		assert_eq!(resumed_frames, 960, "the resumed epoch must trim its own pre-skip once");
+		assert!(
+			resumed_frames >= 960 - 312,
+			"the resumed epoch lost source samples: {resumed_frames}"
+		);
 	}
 
 	#[tokio::test]

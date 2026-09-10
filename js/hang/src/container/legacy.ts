@@ -9,12 +9,12 @@ import type { Frame } from "./types";
 
 /** The legacy hang container: a microsecond timestamp varint followed by the raw codec payload. */
 export class Format implements ContainerFormat {
-	/** Return the marker timestamp for an empty codec payload. */
+	/** Return the exclusive end of the previous frame for an empty codec payload. */
 	end(frame: Frame): Time.Micro | undefined {
 		return frame.payload.byteLength === 0 ? frame.timestamp : undefined;
 	}
 
-	/** Decode one legacy frame, including an empty-payload endpoint marker. */
+	/** Decode one legacy frame, including an empty-payload duration marker. */
 	decode(frame: Uint8Array): Frame[] {
 		const [timestamp, data] = Moq.Varint.decode(frame);
 		return [{ payload: data, timestamp: timestamp as Time.Micro, keyframe: false }];
@@ -62,6 +62,8 @@ export class Producer {
 	// The newest timestamp written, reported to the timeline when the track closes: the last
 	// group has no successor to bound it, so its segment would be published a group short.
 	#end?: Time.Micro;
+	// Gap between consecutive timestamps, used to close the last group when no successor exists.
+	#interval?: Time.Micro;
 
 	/** Wrap a track to publish legacy-container frames into it. */
 	constructor(track: Moq.Track.Producer, props: ProducerProps = {}) {
@@ -72,6 +74,7 @@ export class Producer {
 	/** Encode and append a frame; a keyframe starts a new group. Throws if the first frame is not a keyframe. */
 	encode(data: Uint8Array | Source, timestamp: Time.Micro, keyframe: boolean) {
 		if (keyframe) {
+			this.#writeDurationMarker(timestamp);
 			this.#group?.close();
 			this.#group = this.#track.appendGroup();
 			// Report the group the moment it opens: its start is this keyframe's timestamp.
@@ -85,12 +88,28 @@ export class Producer {
 			timestamp: Time.Timestamp.fromMicros(timestamp),
 		});
 
+		if (this.#end !== undefined && timestamp > this.#end) {
+			this.#interval = (timestamp - this.#end) as Time.Micro;
+		}
 		if (this.#end === undefined || timestamp > this.#end) this.#end = timestamp;
+	}
+
+	#writeDurationMarker(timestamp: Time.Micro) {
+		if (!this.#group) return;
+		this.#group.writeFrame({
+			payload: encodeFrame(new Uint8Array(), timestamp),
+			timestamp: Time.Timestamp.fromMicros(timestamp),
+		});
+		this.#timeline?.end(timestamp);
 	}
 
 	/** Close the track and current group, optionally with an error. */
 	close(err?: Error) {
-		if (this.#end !== undefined) this.#timeline?.end(this.#end);
+		if (this.#end !== undefined && this.#interval !== undefined) {
+			this.#writeDurationMarker((this.#end + this.#interval) as Time.Micro);
+		} else if (this.#end !== undefined) {
+			this.#timeline?.end(this.#end);
+		}
 		this.#track.close(err);
 		this.#group?.close();
 	}

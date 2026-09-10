@@ -10,10 +10,10 @@ export interface Frame {
 	keyframe: boolean;
 
 	// How long this frame occupies the presentation timeline. CMAF carries a
-	// per-sample duration; containers that don't (Legacy) leave it undefined,
-	// which the consumer treats as zero. The consumer adds it to `timestamp` to
-	// learn how far a group has presented, so it can advance to a newer group as
-	// soon as the gap is covered instead of waiting out the max age budget.
+	// per-sample duration; Legacy and LOC fill it from a duration marker.
+	// The consumer adds it to `timestamp` to learn how far a group has presented,
+	// so it can advance to a newer group as soon as the gap is covered instead of
+	// waiting out the max age budget.
 	duration?: Time.Micro;
 }
 

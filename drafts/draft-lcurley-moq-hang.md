@@ -522,10 +522,10 @@ The default, used when the `container` field is absent.
 Each frame starts with a timestamp, a QUIC variable-length integer (62-bit max) encoded in microseconds.
 The remainder of the payload is codec specific; see the WebCodecs specification for specifics.
 
-A frame with an empty codec payload is an end marker, not media.
-Its timestamp is the exclusive endpoint of the source media.
-When a codec must receive additional packets to emit buffered source samples, the marker MUST precede those terminal packets.
-A consumer MUST NOT submit the marker to the codec decoder, MUST decode the terminal packets, and MUST discard decoded samples at or after the endpoint.
+A frame with an empty codec payload is the exclusive end of the frame before it, not media.
+A video group ends with one; audio has none.
+A consumer MUST skip it and MUST NOT submit it to a decoder.
+It does not mean the track ended.
 
 For example, h.264 with no `description` field would be annex.b encoded, while h.264 with a `description` field would be AVCC encoded.
 For a text track, the remainder is the cue in the track's declared `format` (for example a `WEBVTT` segment).
@@ -538,6 +538,10 @@ A consumer MUST feed `init` to the decoder before the first frame.
 
 ## loc
 Each frame is a Low Overhead Container frame {{!I-D.ietf-moq-loc}}: a property block, carrying the timestamp among other properties, followed by the codec payload.
+
+A frame with an empty codec payload is the exclusive end of the frame before it, not media.
+A consumer MUST skip it and MUST NOT submit it to a decoder.
+It does not mean the track ended.
 
 
 # Compression {#compression}
@@ -944,10 +948,14 @@ This document has no IANA actions.
 --- back
 
 # Appendix A: Changelog
+{:numbered="false"}
 
 ## moq-hang-03
+{:numbered="false"}
+
 - Clarified that container importers can estimate jitter from batch media spans without measuring input wait time.
 - Specified the `jitter` field's computation: the publisher's own structure rather than the network, rounded up to whole milliseconds, never `0` (a consumer treats `0` as absent), and never lowered once advertised. The 30 fps and 44.1 kHz AAC examples became 34 and 24.
+- An empty codec payload is the exclusive end of the frame before it. A video group ends with one; audio has none. A consumer skips it and does not submit it to a decoder. Removed the end-marker and terminal-packet rule.
 
 # Acknowledgments
 {:numbered="false"}

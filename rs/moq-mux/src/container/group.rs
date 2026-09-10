@@ -20,7 +20,7 @@ pub struct GroupConsumer<F: Container> {
 	// Frames decoded from the last wire frame but not yet returned.
 	pending: VecDeque<Frame>,
 
-	// How many frames we have returned, so the first one can be marked a keyframe.
+	// How many media frames we have returned, so the first one can be marked a keyframe.
 	index: u64,
 }
 
@@ -47,21 +47,34 @@ impl<F: Container> GroupConsumer<F> {
 
 	/// Poll for the next frame, without blocking.
 	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Frame>, F::Error>> {
-		loop {
-			if let Some(mut frame) = self.pending.pop_front() {
-				// First frame of a group is always a keyframe by protocol invariant; trust
-				// the container's flag otherwise so CMAF mid-group keyframes survive.
-				frame.keyframe = frame.keyframe || self.index == 0;
-				self.index += 1;
-				return Poll::Ready(Ok(Some(frame)));
+		// Hold the latest media frame until a marker or FIN times it. FETCH groups are
+		// already finished, so this look-ahead does not add latency there.
+		while self.pending.len() < 2 {
+			match ready!(self.format.poll_read(&mut self.group, waiter)?) {
+				Some(frames) => {
+					for frame in frames {
+						if let Some(bound) = self.format.end(&frame) {
+							if let Some(last) = self.pending.back_mut() {
+								super::close_duration(last, bound);
+							}
+						} else {
+							self.pending.push_back(frame);
+						}
+					}
+				}
+				None => return Poll::Ready(Ok(self.pop_media())),
 			}
-
-			// An empty batch is not end-of-group, so keep looping until the format says None.
-			let Some(frames) = ready!(self.format.poll_read(&mut self.group, waiter))? else {
-				return Poll::Ready(Ok(None));
-			};
-			self.pending.extend(frames);
 		}
+		Poll::Ready(Ok(self.pop_media()))
+	}
+
+	fn pop_media(&mut self) -> Option<Frame> {
+		let mut frame = self.pending.pop_front()?;
+		// First frame of a group is always a keyframe by protocol invariant; trust
+		// the container's flag otherwise so CMAF mid-group keyframes survive.
+		frame.keyframe = frame.keyframe || self.index == 0;
+		self.index += 1;
+		Some(frame)
 	}
 }
 
@@ -102,6 +115,35 @@ mod tests {
 		let second = group.read().await.unwrap().unwrap();
 		assert_eq!(second.payload, b"delta".as_slice());
 		assert!(!second.keyframe);
+
+		assert!(group.read().await.unwrap().is_none());
+	}
+
+	/// An empty payload times the previous frame and is not returned as media.
+	#[tokio::test]
+	async fn a_duration_marker_times_the_last_frame() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast.create_track("media", None).unwrap();
+		let consumer = broadcast.consume();
+
+		let mut media = crate::container::Producer::new(track, Hang::Legacy).with_duration_marker();
+		media.write(frame(1_000_000, b"keyframe", true)).unwrap();
+		media.write(frame(1_020_000, b"delta", false)).unwrap();
+		media
+			.cut(Some(moq_net::Timestamp::from_micros(1_053_000).unwrap()))
+			.unwrap();
+		media.finish().unwrap();
+
+		let group = consumer.track("media").unwrap().fetch_group(0, None).await.unwrap();
+		let mut group = GroupConsumer::new(group, Hang::Legacy);
+
+		let first = group.read().await.unwrap().unwrap();
+		assert_eq!(first.payload, b"keyframe".as_slice());
+		assert_eq!(first.duration, None);
+
+		let second = group.read().await.unwrap().unwrap();
+		assert_eq!(second.payload, b"delta".as_slice());
+		assert_eq!(second.duration, Some(moq_net::Timestamp::from_micros(33_000).unwrap()));
 
 		assert!(group.read().await.unwrap().is_none());
 	}

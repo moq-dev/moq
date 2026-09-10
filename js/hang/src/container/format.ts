@@ -5,6 +5,6 @@ import type { Frame } from "./types";
 export interface Format {
 	/** Parse one MoQ frame (raw bytes) into decoded media frames. */
 	decode(frame: Uint8Array): Frame[];
-	/** Return the exclusive media endpoint when `frame` is a container marker. */
+	/** Return the exclusive end of the previous frame when `frame` is a duration marker. */
 	end?(frame: Frame): Time.Micro | undefined;
 }
