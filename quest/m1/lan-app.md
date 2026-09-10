@@ -20,8 +20,11 @@ HMAC proof verifies. Two applications with no secret therefore mesh with each
 other, and two with different secrets still resolve and log every foreign
 record.
 
-- `mdns::App`: a newtype over 1..=63 lowercase ASCII letters, digits, and
+- `mdns::App`: a newtype over 1..=62 lowercase ASCII letters, digits, and
   hyphens, with `FromStr` and `Display`, refusing anything else at parse time.
+  62, not 63: the subtype label is `_<app>`, and a DNS label holds 63 octets,
+  so the boundary test refuses a 63-character app rather than letting
+  registration fail later.
   `impl Default` returns `default`, the name both binaries advertise under.
   `Config::new(app, port)` replaces `Config::new(port)`; moq-tokio is
   unpublished, so no shim.

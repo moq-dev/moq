@@ -20,6 +20,12 @@ The same shape `moq token` already uses: `moq-token-cli` is lib+bin, its
   transport binds like `token` and `completion`, with `MoqSide::reject`
   covering it. The relay's own features (`iroh`, `cluster-lan`, backends,
   `websocket`) forward from the CLI's features of the same name.
+- `Config::load` parses argv, reads the TOML `file` names, and merges the
+  layers in one step (`rs/moq-relay/src/config.rs`, `parse_and_merge`), so a
+  nested `Config` would carry only the flags and ignore its TOML. Split the
+  file read and precedence merge into a step that takes an already-parsed
+  `Config`, used by both `Config::load` and the verb, and test the same TOML
+  invocation through both binaries.
 - Move the provider install out of both mains into `Relay::load`, so an
   embedder and the two binaries share one startup. jemalloc stays a
   binary-level global allocator.
