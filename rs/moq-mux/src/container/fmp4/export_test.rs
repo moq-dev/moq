@@ -835,6 +835,68 @@ async fn audio_fragments_roll_with_the_video_gop() {
 	);
 }
 
+/// An audio sample landing exactly on a keyframe belongs to the GOP that
+/// keyframe opens, not the one it closes.
+///
+/// A fragment covers up to the boundary and not including it. Draining the whole
+/// audio buffer put an equal-timestamped sample in the run before it, so that
+/// fragment overlapped the boundary and the next video fragment began with no
+/// audio beside it until the following packet. Which way it fell depended on the
+/// order the caller happened to write the two tracks in.
+#[tokio::test]
+async fn audio_on_the_keyframe_opens_the_next_gop() {
+	use hang::catalog::{AudioCodec, AudioConfig, Container};
+
+	let mut live = Live::avc3();
+	let mut audio = live.add_track(".opus", |catalog, name| {
+		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		config.container = Container::Legacy;
+		catalog.lock().audio.renditions.insert(name, config);
+	});
+
+	// 50 ms video frames with a keyframe every second one, so the keyframes land
+	// on 0 and 100 ms exactly.
+	for i in 0..6u64 {
+		live.track.write(video_frame(i * 50_000, i % 2 == 0)).unwrap();
+	}
+	// 20 ms Opus packets, so one lands on 100 ms exactly.
+	for i in 0..12u64 {
+		audio
+			.write(raw_frame(i * 20_000, &[0x08, 0xaa, 0xbb, 0xcc], true))
+			.unwrap();
+	}
+	live.track.finish().unwrap();
+	audio.finish().unwrap();
+
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	let init = fragment_now(&mut exporter).await;
+	assert!(init.init);
+	let (video_id, audio_id) = track_ids(&init.data);
+
+	let fragments = drain_now(&mut exporter).await;
+	let fragments: Vec<(u32, usize)> = fragments
+		.iter()
+		.map(|fragment| {
+			let trafs = traf_samples(&fragment.data);
+			assert_eq!(trafs.len(), 1, "expected one traf per fragment");
+			trafs[0]
+		})
+		.collect();
+
+	// The first audio run is 0, 20, 40, 60 and 80 ms. The packet at 100 ms opens
+	// the second, beside the keyframe it shares an instant with; six here would
+	// mean it had been swept into the run before.
+	let first_audio = fragments
+		.iter()
+		.find(|(id, _)| *id == audio_id)
+		.expect("an audio fragment");
+	assert_eq!(
+		first_audio.1, 5,
+		"the packet on the boundary belongs to the GOP it opens: {fragments:?}",
+	);
+	let _ = video_id;
+}
+
 /// A video track that ends while the audio plays on must not leave its last GOP
 /// behind the whole rest of the audio.
 ///

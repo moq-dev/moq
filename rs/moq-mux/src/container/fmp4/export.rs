@@ -455,16 +455,37 @@ impl<S: Stream> Export<S> {
 		}
 		rolled.sort();
 
+		// The instant the keyframe draws. A fragment covers up to it and not
+		// including it, so an audio sample landing exactly here opens the next
+		// run rather than closing this one. Whether such a sample had already
+		// been buffered depended on the order the caller wrote the two tracks
+		// in, which is not something the file should record.
+		let boundary = Duration::from(frame.timestamp);
+
 		for (_, audio, name) in rolled {
 			let track = self.tracks.get_mut(&name).unwrap();
 			// Whatever the track's next sample is bounds the duration of this
 			// run's last one: the keyframe for the video track that drew the
-			// boundary, the pending frame for an audio track.
+			// boundary, and for audio the first sample held back, or the pending
+			// frame when none was.
 			let (frames, successor) = if audio {
-				(std::mem::take(&mut track.buffer), track.pending.clone())
+				let split = track
+					.buffer
+					.iter()
+					.position(|buffered| Duration::from(buffered.timestamp) >= boundary)
+					.unwrap_or(track.buffer.len());
+				let held = track.buffer.split_off(split);
+				let frames = std::mem::replace(&mut track.buffer, held);
+				let successor = track.buffer.first().cloned().or_else(|| track.pending.clone());
+				(frames, successor)
 			} else {
 				(std::mem::take(&mut closed), Some(frame.clone()))
 			};
+			// Every sample sat at or past the boundary, so this run has nothing
+			// to write and the whole buffer belongs to the next one.
+			if frames.is_empty() {
+				continue;
+			}
 			let fragment = emit_fragment(track, &mut self.sequence_number, frames, successor.as_ref())?;
 			self.outgoing.push_back(fragment);
 		}
@@ -717,7 +738,7 @@ const MAX_AUDIO_SPAN: Duration = Duration::from_secs(5);
 /// Should we flush `track.buffer` before appending the incoming `frame`?
 /// Triggers on a video keyframe (one fragment per GOP), the duration cap, or
 /// [`MAX_AUDIO_SPAN`]. Audio has no keyframe of its own and is rolled by the
-/// video track instead, via [`Export::flush_audio`]. Per-frame modes never
+/// video track instead, in [`Export::roll_gop`]. Per-frame modes never
 /// buffer and are handled before this check.
 fn should_flush(track: &Fmp4Track, frame: &Frame, fragment_duration: Option<Duration>) -> bool {
 	if track.buffer.is_empty() {
