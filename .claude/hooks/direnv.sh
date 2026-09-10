@@ -10,7 +10,7 @@
 # $CLAUDE_ENV_FILE gets only a line sourcing it. macOS has no per-argument cap,
 # which is why inlining the whole environment appeared to work there.
 
-set -u
+set -eu
 
 MARKER='# moq dev shell'
 
@@ -25,10 +25,6 @@ command -v direnv >/dev/null 2>&1 || exit 0
 cd "$CLAUDE_PROJECT_DIR" || exit 0
 [ -f .envrc ] || exit 0
 
-# SessionStart fires again on resume and clear, and the env file outlives it, so
-# an unguarded append would stack another copy each time.
-grep -qF "$MARKER" "$CLAUDE_ENV_FILE" 2>/dev/null && exit 0
-
 # Clear any inherited direnv state so the dev shell is recomputed in full.
 # Without this, a stale DIRENV_DIFF from the parent process makes direnv assume
 # the env is already loaded and emit nothing.
@@ -37,36 +33,44 @@ unset DIRENV_DIR DIRENV_DIFF DIRENV_WATCHES DIRENV_FILE DIRENV_LAYOUT
 direnv allow . 2>/dev/null || exit 0
 
 raw=$(mktemp) || exit 1
-trap 'rm -f "$raw"' EXIT
+scratch=''
+trap 'rm -f "$raw"; [ -z "$scratch" ] || rm -f "$scratch"' EXIT
 
 # Read the environment with `env -0` rather than a shell builtin: nixpkgs builds
 # the non-interactive `bash` without programmable completion, so `compgen` does
 # not exist inside the very dev shell this hook is here to load.
 if ! direnv exec . env -0 >"$raw"; then
-	echo "direnv hook: could not load the dev shell, see the direnv output above." >&2
-	exit 1
+    echo "direnv hook: could not load the dev shell, see the direnv output above." >&2
+    exit 1
 fi
 
 sidecar=$CLAUDE_ENV_FILE.direnv
+# mktemp keeps credentials private and lets readers retain the old snapshot
+# until the replacement has been written successfully.
+scratch=$(mktemp "$sidecar.XXXXXX")
 
 while IFS= read -r -d '' entry; do
-	name=${entry%%=*}
+    name=${entry%%=*}
 
-	# Skip exported functions (BASH_FUNC_foo%%) and anything else that is not a
-	# plain identifier, since `export` cannot restore those.
-	[[ $name =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    # Skip exported functions (BASH_FUNC_foo%%) and anything else that is not a
+    # plain identifier, since `export` cannot restore those.
+    [[ $name =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
 
-	# direnv's bookkeeping, and the shell's own state, are not ours to restore.
-	case $name in
-	DIRENV_* | PWD | OLDPWD | SHLVL | _) continue ;;
-	esac
+    # direnv's bookkeeping, and the shell's own state, are not ours to restore.
+    case $name in
+        DIRENV_* | PWD | OLDPWD | SHLVL | _) continue ;;
+    esac
 
-	printf 'export %s=%q\n' "$name" "${entry#*=}"
-done <"$raw" >"$sidecar"
+    printf 'export %s=%q\n' "$name" "${entry#*=}"
+done <"$raw" >"$scratch"
 
-if [ ! -s "$sidecar" ]; then
-	echo "direnv hook: the dev shell exported nothing, so no tools would resolve." >&2
-	exit 1
+if [ ! -s "$scratch" ]; then
+    echo "direnv hook: the dev shell exported nothing, so no tools would resolve." >&2
+    exit 1
 fi
 
+mv -f "$scratch" "$sidecar"
+
+# Refresh on every SessionStart, but install the sourcing line only once.
+grep -qxF "$MARKER" "$CLAUDE_ENV_FILE" 2>/dev/null && exit 0
 printf '%s\n. %q\n' "$MARKER" "$sidecar" >>"$CLAUDE_ENV_FILE"

@@ -73,6 +73,9 @@ jobs:
       # Locally an absent formatter means less gets checked; here it would mean
       # a green run that checked nothing, which is the failure mode worth
       # spending a preflight on.
+      - name: Test direnv hook
+        run: bash .claude/hooks/direnv.test.sh
+
       - name: Check
         run: nix develop --command just check
         env:
