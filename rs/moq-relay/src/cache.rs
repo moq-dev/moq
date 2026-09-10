@@ -71,11 +71,11 @@ pub struct CacheConfig {
 /// The headroom governor, when configured, is owned by [`Self::pool`] rather than
 /// by this struct: it holds only a [`cache::PoolWeak`] and stops on its next tick
 /// once every [`cache::Pool`] clone has dropped. Handing this to
-/// [`Cluster::with_cache`](crate::Cluster::with_cache) therefore moves the
-/// governor's lifetime onto the cluster, and dropping this struct afterwards keeps
-/// it running. Conversely, holding a clone of [`Self::pool`] past the relay keeps
-/// the governor running too, deliberately: as long as anything can still cache into
-/// the budget, resizing it is still the right thing to do.
+/// [`Cluster::new`](crate::Cluster::new) therefore moves the governor's lifetime
+/// onto the cluster, and dropping this struct afterwards keeps it running.
+/// Conversely, holding a clone of [`Self::pool`] past the relay keeps the governor
+/// running too, deliberately: as long as anything can still cache into the budget,
+/// resizing it is still the right thing to do.
 pub struct Cache {
 	/// The shared pool every session's groups register with: the byte budget plus
 	/// the wall-clock LRU window that reclaims idle groups.
@@ -266,7 +266,7 @@ mod tests {
 	/// hand it to a cluster whose construction can still fail.
 	fn attach(cache: &CacheConfig, cluster: crate::ClusterConfig) -> anyhow::Result<crate::Cluster> {
 		let cache = cache.init()?;
-		Ok(crate::Cluster::new(cluster)?.with_cache(cache))
+		crate::Cluster::new(crate::ClusterOptions::new(cluster).with_cache(cache))
 	}
 
 	#[tokio::test(start_paused = true)]

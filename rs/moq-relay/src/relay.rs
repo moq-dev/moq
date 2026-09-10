@@ -17,14 +17,10 @@
 //! nothing errors, and the feature reports as configured while doing nothing.
 //! Calling `load` means a new step arrives with the update, and a reshaped API
 //! is a compile error.
-//!
-//! Ordering constraints live here for the same reason. [`Cluster::with_cache`]
-//! rebuilds the origin, so it runs before anything derives a handle from it (the
-//! stats producer, and every session after).
 
 use anyhow::Context;
 
-use crate::{Auth, Cluster, Config, Connection, Internal, Shutdown, ShutdownTrigger, Web};
+use crate::{Auth, Cluster, ClusterOptions, Config, Connection, Internal, Shutdown, ShutdownTrigger, Web};
 
 /// A fully assembled relay: the listeners and the shared cluster behind them.
 ///
@@ -210,11 +206,8 @@ impl Relay {
 			config.auth.init(&config.connect.tls).await?
 		};
 
-		// Before any origin handle is derived: `with_cache` rebuilds the origin, so a
-		// handle taken earlier would keep charging groups into the unbounded pool.
 		let cache = config.cache.init()?;
-		let cluster = Cluster::new(config.cluster)?
-			.with_cache(cache)
+		let cluster = Cluster::new(ClusterOptions::new(config.cluster).with_cache(cache))?
 			.with_client(client.clone())
 			.with_client_tls(config.connect.tls.build()?);
 		let stats = config.stats.build(cluster.origin.clone());

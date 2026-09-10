@@ -9,7 +9,7 @@
 
 use std::{net::TcpListener, time::Duration};
 
-use moq_relay::{AuthConfig, Cluster, ClusterConfig, Config, Connection, PublicConfig, Relay, Web, WebConfig};
+use moq_relay::{AuthConfig, Cluster, ClusterOptions, Config, Connection, PublicConfig, Relay, Web, WebConfig};
 use moq_tokio::moq_net::{self, Hop};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -54,7 +54,7 @@ async fn build_web_with(web_config: WebConfig) -> Web {
 		.await
 		.expect("auth init");
 
-	let cluster = Cluster::new(ClusterConfig::default()).expect("cluster init");
+	let cluster = Cluster::new(ClusterOptions::default()).expect("cluster init");
 
 	// moq_tokio::Server is needed for `certificates`, even though we never
 	// expose HTTPS or QUIC in this test. Binding QUIC to `[::]:0` picks an
@@ -538,7 +538,7 @@ async fn spawn_accept_relay(
 		.await
 		.expect("auth init");
 
-	let cluster = Cluster::new(ClusterConfig::default()).expect("cluster init");
+	let cluster = Cluster::new(ClusterOptions::default()).expect("cluster init");
 	let mut server = server.listen().await.expect("listen");
 
 	let handle = tokio::spawn(async move {

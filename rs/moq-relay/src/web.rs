@@ -1273,7 +1273,7 @@ mod tests {
 			..Default::default()
 		}));
 		let auth = Auth::new(auth_config).await.unwrap();
-		let cluster = Cluster::new(crate::ClusterConfig::default()).unwrap();
+		let cluster = Cluster::new(crate::ClusterOptions::default()).unwrap();
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
 
 		let web = Web::new(auth, cluster, certificates, config);
