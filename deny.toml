@@ -49,6 +49,8 @@ allow = [
     "ISC",
     "MIT",
     "MPL-2.0",
+    # libfuzzer-sys vendors LLVM's libFuzzer harness, which is NCSA licensed.
+    "NCSA",
     "Unicode-3.0",
     "Unlicense",
     "Zlib",
