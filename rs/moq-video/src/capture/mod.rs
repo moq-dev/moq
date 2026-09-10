@@ -157,6 +157,14 @@ pub struct Rate {
 }
 
 impl Rate {
+	#[cfg(target_os = "linux")]
+	/// Nearest whole rate for the integer stream API.
+	fn rounded(&self) -> u32 {
+		let frames = u64::from(self.frames.get());
+		let seconds = u64::from(self.seconds.get());
+		((frames + seconds / 2) / seconds).max(1) as u32
+	}
+
 	/// Number of frames in the interval.
 	pub fn frames(&self) -> NonZeroU32 {
 		self.frames

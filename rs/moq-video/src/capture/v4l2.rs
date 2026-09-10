@@ -323,7 +323,7 @@ impl Camera {
 		let width = config.width.unwrap_or(DEFAULT_WIDTH);
 		let height = config.height.unwrap_or(DEFAULT_HEIGHT);
 
-		let (format, source) = negotiate(
+		let (format, source, rate) = negotiate(
 			&device,
 			&name,
 			Request {
@@ -335,10 +335,7 @@ impl Camera {
 		let (width, height, stride) = (format.width, format.height, format.stride);
 		Size::new(width, height).validate("camera resolution")?;
 
-		let framerate = Capture::params(&device).ok().and_then(|p| {
-			// interval is seconds-per-frame (num/denom), so fps = denom/num.
-			(p.interval.numerator != 0).then(|| (p.interval.denominator / p.interval.numerator).max(1))
-		});
+		let framerate = rate.map(|rate| rate.rounded());
 
 		// The stream owns a clone of the device's `Arc<Handle>`, so the fd stays
 		// open after `device` drops here; the mmap'd buffers live with the stream.
@@ -440,7 +437,7 @@ struct Request {
 /// at small sizes and reach HD through MJPEG alone. Asking such a camera for
 /// YUYV at 1080p gets 640x480 back, which is a valid YUYV mode and nowhere near
 /// what the caller asked for.
-fn negotiate(device: &Device, name: &str, want: Request) -> Result<(Format, Source), Error> {
+fn negotiate(device: &Device, name: &str, want: Request) -> Result<(Format, Source, Option<Rate>), Error> {
 	let framerate = want.framerate;
 	negotiate_with(name, want, |format| {
 		let format = set_format(device, format)?;
@@ -467,7 +464,7 @@ fn negotiate_with(
 	name: &str,
 	want: Request,
 	mut apply: impl FnMut(Format) -> Result<(Format, Option<Rate>), Error>,
-) -> Result<(Format, Source), Error> {
+) -> Result<(Format, Source, Option<Rate>), Error> {
 	let mut replies = Vec::with_capacity(Source::ALL.len());
 	let mut offered = Vec::new();
 	let mut probe_error = None;
@@ -503,7 +500,7 @@ fn negotiate_with(
 	};
 
 	// A successful probe may have left the device on another candidate.
-	let (applied, _) = apply(Format::new(best.width, best.height, best.fourcc))?;
+	let (applied, rate) = apply(Format::new(best.width, best.height, best.fourcc))?;
 	if applied.fourcc != best.fourcc || applied.width != best.width || applied.height != best.height {
 		return Err(Error::Codec(anyhow::anyhow!(
 			"camera {name} would not re-apply the {}x{} {} mode it just negotiated",
@@ -512,7 +509,7 @@ fn negotiate_with(
 			best.fourcc
 		)));
 	}
-	Ok((applied, source))
+	Ok((applied, source, rate))
 }
 
 /// Prefer geometry, then the accepted rate nearest the request, then conversion cost.
@@ -611,9 +608,12 @@ mod tests {
 	fn rates_preserve_fractional_and_sub_one_fps_intervals() {
 		let ntsc = rate(v4l::Fraction::new(1001, 30000)).unwrap();
 		assert_eq!(ntsc.frames().get(), 30000);
+		assert_eq!(ntsc.rounded(), 30);
 		assert_eq!(ntsc.interval(), std::time::Duration::from_secs(1001));
 		let slow = rate(v4l::Fraction::new(2, 1)).unwrap();
 		assert_eq!(slow.frames().get(), 1);
+		assert_eq!(slow.rounded(), 1);
+		assert_eq!(rate(v4l::Fraction::new(1, u32::MAX)).unwrap().rounded(), u32::MAX);
 		assert_eq!(slow.interval(), std::time::Duration::from_secs(2));
 		assert!(slow < ntsc);
 		assert!(rate(v4l::Fraction::new(0, 30)).is_err());
@@ -651,13 +651,14 @@ mod tests {
 			size: Size::new(1280, 720),
 			framerate: Some(60),
 		};
-		let (_, source) = negotiate_with("camera", want, |format| {
+		let (_, source, accepted) = negotiate_with("camera", want, |format| {
 			formats.push(format.fourcc);
 			let fps = if format.fourcc == Source::Yuyv.fourcc() { 30 } else { 60 };
 			Ok((format, Some(rate(v4l::Fraction::new(1, fps)).unwrap())))
 		})
 		.unwrap();
 		assert_eq!(source, Source::Mjpeg);
+		assert_eq!(accepted.unwrap().rounded(), 60);
 		assert_eq!(
 			formats,
 			[Source::Yuyv.fourcc(), Source::Mjpeg.fourcc(), Source::Mjpeg.fourcc()]
@@ -759,7 +760,7 @@ mod tests {
 	#[test]
 	fn keeps_a_valid_mode_when_another_probe_fails() {
 		let mut calls = 0;
-		let (format, source) = negotiate_with("camera", request(640, 480), |requested| {
+		let (format, source, _) = negotiate_with("camera", request(640, 480), |requested| {
 			calls += 1;
 			match calls {
 				1 => Ok((Format::new(640, 480, Source::Yuyv.fourcc()), None)),

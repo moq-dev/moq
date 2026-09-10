@@ -37,6 +37,7 @@ are returned rather than treated as an empty list. Other platforms return
 `Error::Unsupported`.
 
 `capture::Config::framerate` remains a request in whole frames per second.
+The V4L2 stream reports the accepted rate rounded to the nearest whole frame per second, with a minimum of one.
 V4L2 chooses the closest geometry, then the format whose accepted rate is
 nearest the request, then the cheaper conversion when both match equally well.
 
