@@ -885,13 +885,15 @@ function createDOpsBox(channelCount: number, sampleRate: number, description?: s
 }
 
 export interface DataSegmentOptions {
+	/** The kind of media in this segment. */
+	kind: "audio" | "video";
 	/** Raw frame data */
 	data: Uint8Array;
 	/** Timestamp in timescale units */
 	timestamp: number;
 	/** Duration in timescale units */
 	duration: number;
-	/** Whether this is a keyframe */
+	/** Whether this is a video keyframe; audio samples are always sync samples. */
 	keyframe: boolean;
 	/** Sequence number for this fragment */
 	sequence: number;
@@ -913,7 +915,7 @@ export function encodeDataSegment(opts: DataSegmentOptions): Uint8Array {
 	// - sample_is_non_sync_sample: bit 16 (0 = sync/keyframe, 1 = non-sync)
 	// For keyframe: depends_on=2 (0x02000000), non_sync=0
 	// For non-keyframe: depends_on=1 (0x01000000), non_sync=1 (0x00010000)
-	const sampleFlags = keyframe ? 0x02000000 : 0x01010000;
+	const sampleFlags = opts.kind === "audio" || keyframe ? 0x02000000 : 0x01010000;
 
 	// mfhd - Movie Fragment Header
 	const mfhd: MovieFragmentHeaderBox = {

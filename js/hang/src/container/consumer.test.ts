@@ -29,7 +29,14 @@ function encodeLegacyFrame(timestamp: Time.Micro, payload: Uint8Array): Uint8Arr
 
 /** A one-byte CMAF sample at `timestamp` ticks, lasting one 3000-tick (33_333µs) frame. */
 function encodeCmafFrame(data: number, timestamp: number, sequence: number): Uint8Array {
-	return encodeDataSegment({ data: new Uint8Array([data]), timestamp, duration: 3000, keyframe: true, sequence });
+	return encodeDataSegment({
+		kind: "video",
+		data: new Uint8Array([data]),
+		timestamp,
+		duration: 3000,
+		keyframe: true,
+		sequence,
+	});
 }
 
 /** Yield long enough for the consumer's spawned group readers to drain what's been written. */
@@ -102,6 +109,7 @@ test("LegacyFormat throws on truncated input", () => {
 test("CmafFormat decodes a valid keyframe segment", () => {
 	const format = new CmafFormat(TEST_INIT);
 	const segment = encodeDataSegment({
+		kind: "video",
 		data: new Uint8Array([0xca, 0xfe]),
 		timestamp: 0,
 		duration: 3000,
@@ -131,6 +139,7 @@ test("CmafFormat never reports an audio keyframe", () => {
 
 	const format = new CmafFormat(init);
 	const segment = encodeDataSegment({
+		kind: "audio",
 		data: new Uint8Array([0xca, 0xfe]),
 		timestamp: 0,
 		duration: 20000,
@@ -146,6 +155,7 @@ test("CmafFormat never reports an audio keyframe", () => {
 test("CmafFormat decodes a delta frame segment", () => {
 	const format = new CmafFormat(TEST_INIT);
 	const segment = encodeDataSegment({
+		kind: "video",
 		data: new Uint8Array([0xbe, 0xef]),
 		timestamp: 3000,
 		duration: 3000,
@@ -163,6 +173,7 @@ test("CmafFormat converts timescale units to microseconds", () => {
 	const format = new CmafFormat(TEST_INIT);
 	// 90000 timescale units = 1 second = 1_000_000 microseconds
 	const segment = encodeDataSegment({
+		kind: "video",
 		data: new Uint8Array([0x01]),
 		timestamp: TIMESCALE,
 		duration: 3000,
@@ -759,6 +770,7 @@ test("Consumer with CmafFormat delivers correct timestamps", async () => {
 	const group = new Group.Producer(0);
 	group.writeFrame({
 		payload: encodeDataSegment({
+			kind: "video",
 			data: new Uint8Array([0xca, 0xfe]),
 			timestamp: 0,
 			duration: 3000,
@@ -769,6 +781,7 @@ test("Consumer with CmafFormat delivers correct timestamps", async () => {
 	});
 	group.writeFrame({
 		payload: encodeDataSegment({
+			kind: "video",
 			data: new Uint8Array([0xbe, 0xef]),
 			timestamp: 3000,
 			duration: 3000,
@@ -793,6 +806,7 @@ test("Consumer with CmafFormat delivers correct timestamps", async () => {
 test("CmafFormat decodes the per-sample duration", () => {
 	const format = new CmafFormat(TEST_INIT);
 	const segment = encodeDataSegment({
+		kind: "video",
 		data: new Uint8Array([0xca, 0xfe]),
 		timestamp: 0,
 		duration: 3000,
@@ -903,6 +917,7 @@ test("Consumer delivers a PTS-contiguous next group whose sequence jumped (CMAF)
 	const a = new Group.Producer(1_000_000);
 	a.writeFrame({
 		payload: encodeDataSegment({
+			kind: "video",
 			data: new Uint8Array([0x01]),
 			timestamp: 0,
 			duration: 3000,
@@ -928,6 +943,7 @@ test("Consumer delivers a PTS-contiguous next group whose sequence jumped (CMAF)
 	track.writeGroup(b);
 	b.writeFrame({
 		payload: encodeDataSegment({
+			kind: "video",
 			data: new Uint8Array([0x02]),
 			timestamp: 3045,
 			duration: 3000,
@@ -962,6 +978,7 @@ test("Consumer waits on a PTS gap instead of skipping to a later buffered group 
 	const a = new Group.Producer(1_000_000);
 	a.writeFrame({
 		payload: encodeDataSegment({
+			kind: "video",
 			data: new Uint8Array([0x01]),
 			timestamp: 0,
 			duration: 3000,
@@ -985,6 +1002,7 @@ test("Consumer waits on a PTS gap instead of skipping to a later buffered group 
 	track.writeGroup(c);
 	c.writeFrame({
 		payload: encodeDataSegment({
+			kind: "video",
 			data: new Uint8Array([0x03]),
 			timestamp: 90_000,
 			duration: 3000,
@@ -1006,6 +1024,7 @@ test("Consumer waits on a PTS gap instead of skipping to a later buffered group 
 	track.writeGroup(b);
 	b.writeFrame({
 		payload: encodeDataSegment({
+			kind: "video",
 			data: new Uint8Array([0x02]),
 			timestamp: 3000,
 			duration: 3000,

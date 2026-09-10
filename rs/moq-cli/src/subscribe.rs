@@ -139,7 +139,7 @@ pub struct SubscribeArgs {
 	/// How far playback may drift from the live edge before skipping groups.
 	pub max_age: Duration,
 
-	/// Cap the output fragment duration (default: one group). Applies to fmp4 / mkv.
+	/// Cap the output fragment duration (default: one group for fMP4, one GOP for MKV).
 	pub fragment_duration: Option<Duration>,
 
 	/// Catalog format for track discovery (default: detect from the broadcast suffix).

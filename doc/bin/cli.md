@@ -26,6 +26,10 @@ or Docker; see [Install](/setup/install).
 | `token` | | Generate, sign, and verify relay JWTs. |
 | `devices` | | List capture sources and their ids. |
 
+`moq export fmp4` writes one fragment per publisher group by default.
+`moq export mkv` defaults to one cluster per video GOP. Both accept
+`--fragment-duration 2s` to cap fragment or cluster duration.
+
 ## Grammar
 
 ```text
