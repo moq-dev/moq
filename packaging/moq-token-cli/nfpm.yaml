@@ -1,8 +1,8 @@
-# nfpm config for the moq-token-cli package.
+# The moq-token-cli crate ships as the moq-token system package.
 # Produces both .deb and .rpm from one definition.
 # Driven by env vars set in CI: VERSION, ARCH, BINARY_PATH.
 
-name: moq-token-cli
+name: moq-token
 arch: ${ARCH}
 platform: linux
 version: ${VERSION}
@@ -25,13 +25,21 @@ contents:
 
 overrides:
   deb:
+    replaces:
+      - moq-token-cli (<< ${VERSION})
     depends:
       - libc6 (>= 2.34)
   rpm:
+    provides:
+      - moq-token-cli = ${VERSION}
+    replaces:
+      - moq-token-cli < ${VERSION}
     depends:
       - glibc >= 2.34
 
 deb:
+  breaks:
+    - moq-token-cli (<< ${VERSION})
   fields:
     Bugs: https://github.com/moq-dev/moq/issues
 
