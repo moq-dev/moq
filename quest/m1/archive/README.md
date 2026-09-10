@@ -40,14 +40,15 @@ the percent encoding of track names is unimplemented.
 
 ### Format
 
-The format is the draft's Recording section as rewritten by
-[format](/quest/m1/archive/format.md). The application chooses the object
-prefix, selected tracks, retention, and credentials; `moq-archive` owns the
+The format is the draft's
+[Recording section](/drafts/draft-lcurley-moq-hang.md#recording).
+The application chooses the object prefix, selected tracks, retention, and credentials; `moq-archive` owns the
 portable layout and codecs:
 
 ```text
 <prefix>/<encoded-track>/.info
-<prefix>/<encoded-track>/<segment>
+<prefix>/<encoded-track>/groups/<largest>.<smallest>
+<prefix>/<encoded-timeline-track>/segments/<segment>
 ```
 
 `.info` is versioned JSON with the immutable priority and timescale. A segment
@@ -57,9 +58,12 @@ adjacent groups, while audio-only or low-rendition playback never downloads
 unrelated tracks.
 
 There is no `.head`, manifest, `.complete`, or `.timeline` object. The archive
-timeline is an ordinary track stored by the same `(track, segment)` rule and
-named by the catalog's `archive` entry. Object listing is the bootstrap and
-recovery mechanism.
+timeline uses the same envelope under `segments/<segment>`, with consecutive
+IDs for incremental GETs. Other tracks use `groups/<largest>.<smallest>` with
+19-digit zero-padded inclusive bounds, strictly increasing nonoverlapping
+ranges, and no segment number or secondary index file. The catalog names the
+timeline track; the catalog quest moves that identity into `archive`. Listing
+bootstraps recovery; following the next timeline key updates the cached ranges.
 
 ### Writer and reader
 
@@ -72,18 +76,19 @@ segment and finishes the timeline; there is no completion marker.
 
 The reader takes a `broadcast::Producer` and uses `track::Dynamic`
 (`rs/moq-net/src/model/track.rs:1652`) to answer FETCH for the tracks and
-groups the timeline advertises: map the request to `(track, segment)`, GET
+groups the timeline advertises: map the request to the track's group-range key, GET
 once, validate, cache, and replay the original timestamps. Any ingest that
 produces a broadcast (RTMP, SRT, WHIP) is archivable without its own
 implementation.
 
 ### Retention
 
-An unbounded archive only pushes records. A DVR pops records, stores the new
-timeline group, waits a short grace period, then deletes the expired
-`(track, segment)` objects, so the index stops advertising an object before it
-can disappear. HLS is a derived view of the archive, never a second stored
-copy.
+An unbounded archive only pushes records. During each new segment commit, a
+DVR pops expired records before closing and storing that segment's timeline
+groups, then waits the configured grace period before deleting expired objects. Timeline
+objects use `segments/<segment>` for the segment being committed. Retention stops after
+the final segment; no existing object is rewritten. HLS is a derived view of
+the archive, never a second stored copy.
 
 ### Managed boundary
 
@@ -95,7 +100,6 @@ protected broadcasts are out of scope.
 
 ## Quests
 
-- [Recording format](/quest/m1/archive/format.md) - the draft's Recording section becomes the `(track, segment)` layout with the timeline stored as an ordinary track
 - [Archive catalog](/quest/m1/archive/catalog.md) - one root `archive` entry subsumes `timeline` and names the timeline track, replay path, store URL, and format version
 - [Archive store](/quest/m1/archive/store.md) - `moq-archive` puts, gets, lists, and deletes the versioned objects over `object_store`
 - [Recording writer](/quest/m1/archive/writer.md) - feed the segmenter from a `broadcast::Consumer`, store each segment, then commit its record
@@ -104,9 +108,10 @@ protected broadcasts are out of scope.
 - [Offline archive HLS](/quest/m1/archive/hls.md) - render playlists from the archive timeline and fetch segment media lazily
 - [DVR rewind](/quest/m1/archive/dvr.md) - seek through a bounded archive and return to live playback
 - [Archive proof](/quest/m1/archive/proof.md) - prove persistence ordering, selective reads, exact FETCH replay, and timeline-only HLS generation
-- [Catalog version binding](/quest/m1/archive/catalog-version.md) - bind groups to the catalog version that describes them, after the first archive ships
 
 ## Related
+
+- [Catalog track identity](/quest/m2/catalog-tracks.md) - explore immutable definitions or explicit version binding independently of archives
 
 - [wildcard](/quest/m1/wildcard/README.md) - catch-all routing exposes an archive at its stable replay path
 - [e2ee](/quest/m2/e2ee/README.md) - protected broadcasts are excluded initially

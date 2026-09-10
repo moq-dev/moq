@@ -15,8 +15,8 @@ or know which tracks are media.
 
 Enrollment creates the track's `.info` before accepting any group. If that
 create fails, enrollment fails and no range for the track can enter the
-timeline. On `AlreadyExists`, read the immutable `.info` and accept only
-byte-equivalent metadata; a priority or timescale mismatch fails enrollment.
+timeline. On `AlreadyExists`, validate the immutable `.info` and accept only matching
+parsed `version`, `priority`, and `timescale` values; a priority or timescale mismatch fails enrollment.
 
 Feed the segmenter already on dev (`rs/moq-mux/src/timeline.rs`): take
 `Producer::deferred` (:917), enroll each registration through
@@ -28,32 +28,47 @@ track that stops without closing blocks segment completion on purpose; the
 application applies its own deadline and calls `cut(pts)` or removes the
 track. Storage does not invent a timeout.
 
+Accept new group IDs in strictly increasing order per track; refuse duplicate
+or decreasing arrivals. Already accepted groups may finish in any order, so
+buffer completion independently and encode in sequence order. Require
+nonoverlapping object ranges across segments, including forced cuts; never
+backfill a closed segment or move its stalled groups into an overlapping range.
+
 For each `Pending` record from `Deferred::next` (:658), encode and PUT one
-object per participating track, buffering groups independently of relay
-retention. After all PUTs settle, drop the ranges of every track whose PUT
+object per participating track at `groups/<largest>.<smallest>`, buffering
+groups independently of relay retention. The bounds come from the exact
+recorded ranges; tracks with no complete groups have no object. After all PUTs settle, drop the ranges of every track whose PUT
 failed and commit with `Producer::push` (:948). That needs a per-track
 omission on `Pending` beside `Pending::gap()` (:712-719), which clears every
-track; add it here, per [format](/quest/m1/archive/format.md). Never publish a
-range first and hope the relay still has it. A later segment continues
-normally after any omission.
+track; add it here. Never publish a range first and hope the relay still has
+it. A later segment continues normally after any omission.
 
-Commit prerequisites are new API: an application declares that one enrolled
-track's applicable group must be durable before other tracks' ranges in the
-same record are published. Store prerequisites first; if one fails, omit its
-dependents or fail the record according to application policy. HANG publishers
-use this to make the catalog snapshot durable before advertising media that
-needs it; the writer compares timestamps and durability but does not parse the
-catalog.
+Catalog update applicability and cross-track configuration dependencies belong
+to [Catalog track identity](/quest/m2/catalog-tracks.md). Recording a catalog
+as an ordinary track does not bind its updates to media groups; this writer
+does not introduce catalog-specific commit or retention prerequisites.
 
-The archive timeline is itself stored through the same track machinery. Cut
-its active group when the application requests a flush; storage never invents
-a maximum age or cuts a source group. On a clean source end, drain with
+The archive timeline uses the same object envelope but is not enrolled in its
+own records. After pushing segment N and applying retention pops, close the
+recording-owned Window group and store the complete groups under the timeline
+track's `segments/N` key (19-digit padded N). Commit IDs consecutively,
+including all-gap segments. Make it durable before committing N+1; a timeline PUT
+failure stops the recording at its preceding durable timeline object. Never
+cut a source group. On a clean source end, drain with
 `Deferred::finish` (:650), commit the final partial segment, and call
 `Producer::finish` (:1015). Do not write a completion marker.
 
-Retention is writer policy. For DVR, `Producer::pop` (:983) the expired
-records, make the new timeline group durable, wait the configured grace
-period, then delete the corresponding segment objects.
+Retention is writer policy. During the next segment commit, use
+`Producer::pop` (:983) for expired records before closing that segment's
+timeline group. Make it durable, wait the configured grace period, then delete
+the corresponding segment objects. No trimming occurs after the final segment
+is committed, and timeline objects are never rewritten.
+
+Before a DVR writer resumes input, recover its full retained timeline and
+reconcile a complete media-key listing under exclusive prefix ownership.
+Wait the deletion grace period from successful recovery, then delete unreferenced `groups/` objects
+left by interrupted expiration or uploads. Failed or incomplete recovery must
+prevent deletion. Preserve `.info` and timeline checkpoint objects.
 
 Keep archive policy out of protocol libraries. As the native application that
 owns its storage and track choices, `moq-cli` attaches the writer to every
@@ -62,7 +77,6 @@ import path and enrolls the resulting `broadcast::Consumer` tracks. Downstream
 
 ## Required
 
-- [Recording format](/quest/m1/archive/format.md)
 - [Archive catalog](/quest/m1/archive/catalog.md)
 - [Archive store](/quest/m1/archive/store.md)
 

@@ -16,7 +16,7 @@ index. It carries:
   (`track`, `timescale`, `durationMax`, `wall`)
 - the replay MoQ broadcast path the archive is served back from, if any
 - the object-store URL the objects live under, if the publisher exposes one
-- the format version from [format](/quest/m1/archive/format.md)
+- the format version from the [Recording section](/drafts/draft-lcurley-moq-hang.md#recording)
 
 A live publisher without a store advertises `archive` with the timeline
 fields alone, and the store-less HLS export
@@ -27,6 +27,11 @@ promises the ranges are durable. There is no alias, dual-write, or fallback
 `timeline` entry, and no epoch: a wildcard replay path names no generation,
 and a client that must tell recordings apart compares the entry's replay path
 and store URL.
+
+Update the Recording section's discovery references from `timeline` to
+`archive` in the same change; the format currently references the defined
+`timeline` field. Preserve sequential timeline keys and range-named media
+objects when changing discovery.
 
 The catalog supplies the timeline track's name and configuration; the
 timeline has no reserved physical identity. The latest catalog group still
@@ -46,10 +51,6 @@ Land it as one change across `rs/hang` (the catalog type, `moq-mux`
 draft's Timeline chapter (`drafts/draft-lcurley-moq-hang.md:560`) replacing
 `timeline`.
 
-## Required
-
-- [Recording format](/quest/m1/archive/format.md) - the version the entry advertises
-
 ## Related
 
-- [Catalog version binding](/quest/m1/archive/catalog-version.md) - explicit historic applicability is deliberately separate
+- [Catalog track identity](/quest/m2/catalog-tracks.md) - immutability and update applicability are separate from archive discovery
