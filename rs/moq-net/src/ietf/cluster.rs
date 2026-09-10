@@ -68,9 +68,9 @@ pub struct HopPath(Hops);
 impl HopPath {
 	/// Wrap a hop chain.
 	///
-	/// [`Hops`] already refuses a repeated non-zero entry, so the only wire rule
-	/// left to check is that the list is non-empty; [`Self::validate`] does that on
-	/// decode, where an empty parameter can arrive.
+	/// [`Hops`] already refuses a zero entry and a repeated entry, so the only wire
+	/// rule left to check is that the list is non-empty; [`Self::validate`] does that
+	/// on decode, where an empty parameter can arrive.
 	pub fn new(hops: Hops) -> Self {
 		Self(hops)
 	}
@@ -82,9 +82,9 @@ impl HopPath {
 
 	/// Reject a path that cannot have come from a conforming sender.
 	///
-	/// Only the empty list is left to catch: the other rule, that a non-zero Hop ID may
-	/// not appear twice, is enforced by [`Hops`] wherever a chain is built, so it
-	/// holds on the outbound path too rather than only where one was parsed.
+	/// Only the empty list is left to catch: the other rules, that no Hop ID is 0
+	/// and none appears twice, are enforced by [`Hops`] wherever a chain is built, so
+	/// they hold on the outbound path too rather than only where one was parsed.
 	fn validate(&self) -> Result<(), DecodeError> {
 		match self.0.is_empty() {
 			true => Err(DecodeError::InvalidValue),
@@ -158,8 +158,8 @@ impl Advert {
 	/// Whether this advertisement looped back through `self_hop`.
 	///
 	/// A receiver discards such an advertisement: forwarding it would extend the loop,
-	/// and subscribing through it would route the receiver back to itself. Hop ID 0
-	/// identifies nothing, so a receiver that withheld its own identity detects nothing.
+	/// and subscribing through it would route the receiver back to itself. A receiver
+	/// that withheld its own identity (Hop ID 0) detects nothing.
 	pub fn loops(&self, self_hop: Hop) -> bool {
 		self_hop != Hop::UNKNOWN && self.hops.hops().contains(&self_hop)
 	}
@@ -283,13 +283,7 @@ mod tests {
 	}
 
 	fn hop_path(ids: &[u64]) -> HopPath {
-		let hops = ids
-			.iter()
-			.map(|&id| match id {
-				0 => Hop::UNKNOWN,
-				id => hop(id),
-			})
-			.collect::<Vec<_>>();
+		let hops = ids.iter().map(|&id| hop(id)).collect::<Vec<_>>();
 		HopPath::new(Hops::try_from(hops).unwrap())
 	}
 
@@ -333,10 +327,23 @@ mod tests {
 	}
 
 	#[test]
-	fn hop_path_allows_repeated_zero() {
-		// 0 identifies nothing, so two unknown hops are not a loop.
-		let path = hop_path(&[0, 5, 0]);
-		assert_eq!(round_trip(&path).unwrap(), path);
+	fn hop_path_rejects_zero() {
+		// 0 names nobody, so a chain entry of 0 is a protocol violation. The bytes
+		// are forged rather than encoded from a `HopPath`, because `Hops` no longer
+		// lets one be built.
+		let mut value = Vec::new();
+		for id in [0u64, 5, 0] {
+			id.encode(&mut value, VERSION).unwrap();
+		}
+
+		let mut buf = BytesMut::new();
+		value.encode(&mut buf, VERSION).unwrap();
+
+		let mut bytes = buf.freeze();
+		assert!(matches!(
+			HopPath::param_decode(&mut bytes, VERSION),
+			Err(DecodeError::InvalidValue)
+		));
 	}
 
 	#[test]
@@ -429,7 +436,7 @@ mod tests {
 	#[test]
 	fn loops_ignores_unknown() {
 		let advert = Advert {
-			hops: hop_path(&[0, 5]),
+			hops: hop_path(&[1, 5]),
 			cost: 0,
 		};
 		// A receiver whose own id is 0 cannot detect loops through itself.

@@ -2804,10 +2804,6 @@ mod tests {
 
 	/// Declaring the reserved 0 turns the extension on while naming nobody, so the
 	/// identity we assigned stands in, exactly as for a peer that never negotiated.
-	/// Asserted on the resolution itself rather than through an advertisement: a
-	/// negotiated peer always sends its own HOP_PATH, so a route attributed to the
-	/// assigned identity is a state this peer class cannot reach; see
-	/// [`a_declared_zero_chain_is_still_advertised_back`] for what it gets instead.
 	#[tokio::test(start_paused = true)]
 	async fn withheld_peer_hop_falls_back_to_assigned() {
 		let assigned = crate::Hop::new(777).unwrap();
@@ -2831,13 +2827,10 @@ mod tests {
 		assert_eq!(publisher.exclude(&named), declared, "a declared identity wins");
 	}
 
-	/// A peer that negotiated the extension MUST send a HOP_PATH on every advertisement,
-	/// and one that declared 0 names itself 0 there. An arriving chain is not rewritten,
-	/// so the route carries 0, the assigned identity appears nowhere in it, and the
-	/// split-horizon filter has nothing to match: the peer is advertised its own route
-	/// back.
+	/// A peer that declared 0 cannot put 0 in a HOP_PATH, so the route we attributed
+	/// to it carries the identity we assigned, and the split-horizon filter matches.
 	#[tokio::test(start_paused = true)]
-	async fn a_declared_zero_chain_is_still_advertised_back() {
+	async fn a_declared_zero_peer_is_filtered_on_its_assigned_identity() {
 		let assigned = crate::Hop::new(777).unwrap();
 		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
@@ -2852,9 +2845,9 @@ mod tests {
 			Version::Draft16,
 		);
 
-		// The chain as ingress stores it: the peer named itself 0.
+		// The chain as ingress stores it: we named the unnamed upstream ourselves.
 		let mut hops = crate::Hops::new();
-		hops.push(crate::Hop::UNKNOWN).unwrap();
+		hops.push(assigned).unwrap();
 		let _echoed = origin
 			.announce("from/peer", crate::origin::Route::default().with_hops(hops))
 			.unwrap();
@@ -2863,14 +2856,8 @@ mod tests {
 			hop: Some(crate::Hop::UNKNOWN),
 			cost: None,
 		};
-		// The excluding cursor cannot match hop 0 (it names nobody), so the route
-		// still reaches this peer's stream.
 		let mut announced = consumer.excluding(publisher.exclude(&peer)).announced();
-		let echoed = announced.assert_next_active("from/peer");
-		assert!(
-			publisher.select(&echoed, &peer).wanted(),
-			"known gap: the assigned identity is not in the chain, so nothing filters it",
-		);
+		announced.assert_next_wait();
 	}
 
 	/// A same-path source can splice into (or detach from) an existing broadcast

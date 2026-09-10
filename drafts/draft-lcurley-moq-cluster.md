@@ -105,35 +105,24 @@ An endpoint MAY generate one randomly, since collisions across a 64-bit space ar
 
 Loop detection and origin identification compare Hop IDs for equality, so two endpoints sharing a Hop ID are indistinguishable.
 
-## The Reserved Hop ID 0 {#zero}
-**0 means "no identity"** and is reserved.
-It is used for an endpoint that did not negotiate this extension, and an endpoint MAY also declare 0 to withhold its identity.
-
-Because any number of endpoints can be 0, it identifies nothing, which constrains all three uses:
-
-- **Loop detection**: 0 in a HOP_PATH is never a loop. A receiver whose own Hop ID is 0 cannot detect loops through itself, and MUST NOT discard an advertisement merely because the path contains 0.
-- **Origin identity**: an advertisement whose first entry is 0 has an unknown origin. Updating one advertisement is not two ({{updating}}).
-- **Filtering**: a peer that declared 0 declared no identity, so there is nothing on the wire to filter that session on. A receiver MAY assign one ({{assigned}}), which covers what it attributes to that session itself but not an advertisement that arrived carrying its own HOP_PATH.
-
-Duplicate *non-zero* Hop IDs in one HOP_PATH are a loop; duplicate zeros are not.
-Declaring 0 therefore trades loop detection and failover for anonymity, except against a receiver that assigns an identity of its own.
+0 means "no identity" and is reserved for RELAY_HOPS and for an endpoint that did not negotiate this extension.
+A HOP_PATH never contains 0: a chain entry that names nobody is a PROTOCOL_VIOLATION.
 
 ## Assigned Identities {#assigned}
-A receiver MAY assign a Hop ID of its own to a peer that declared none, whether by declaring 0 or by not negotiating this extension at all.
+A receiver MUST assign a Hop ID of its own to a peer that declared none, whether by declaring 0 or by not negotiating this extension at all.
 It uses that ID wherever it would otherwise have nothing to name the peer with: as the entry it creates for an upstream that sent no HOP_PATH, and as what it filters that session on.
 
 The ID is the receiver's own, not the peer's.
-An advertisement that arrives carrying its own HOP_PATH names the sender there, as 0 if the sender withheld it, and this document does not define rewriting that entry.
-So an assigned ID governs the advertisements a receiver attributed itself, and a peer that both declares 0 and sends its own HOP_PATH keeps the consequences in {{zero}}.
+An advertisement that arrives carrying its own HOP_PATH names the sender there; a HOP_PATH never contains 0, so a peer that withheld its identity cannot appear in one it sends.
 
 An assigned ID MUST NOT be shared between peers not known to be the same endpoint.
 Sharing one suppresses each one's advertisements to the other, so two unrelated publishers would starve each other of routes.
 
 How an endpoint scopes the ID follows from what it can establish about the peer.
 One it authenticated, or one it dialed and therefore chose, SHOULD get a single stable ID; assigning per connection there would make one peer look like several.
-An endpoint accepting an anonymous session can establish nothing and cannot correlate it with any other, so it SHOULD assign a distinct ID per session: less than an identity, but enough to keep routes it attributed to that session from being advertised back to it, which is the loop 0 cannot prevent.
+An endpoint accepting an anonymous session can establish nothing and cannot correlate it with any other, so it SHOULD assign a distinct ID per session: less than an identity, but enough to keep routes it attributed to that session from being advertised back to it.
 
-An assigned ID is indistinguishable on the wire from a declared one, so it identifies the peer to everyone the receiver forwards to; a peer that declared 0 for anonymity did not ask for that.
+An assigned ID is indistinguishable on the wire from a declared one, so it identifies the peer to everyone the receiver forwards to.
 
 
 # Namespace Advertisements {#namespace}
@@ -172,8 +161,8 @@ HOP_PATH Parameter {
 }
 ~~~
 
-The list always has at least one entry, the original publisher, which is 0 if that publisher is unknown ({{zero}}).
-A receiver MUST close the session with a PROTOCOL_VIOLATION if the entries do not exactly fill `Length`, if the list is empty, or if a non-zero Hop ID appears twice.
+The list always has at least one entry, the original publisher.
+A receiver MUST close the session with a PROTOCOL_VIOLATION if the entries do not exactly fill `Length`, if the list is empty, if any Hop ID is 0, or if a Hop ID appears twice.
 
 ## ROUTE_COST Parameter
 ROUTE_COST is the marginal cost of subscribing via this advertisement: the price of the transfers a new subscription would actually cause.
@@ -197,7 +186,7 @@ Unknown, out-of-budget, and saturated routes are outside this guarantee; a recei
 
 # Relay Behavior
 When forwarding an advertisement downstream, a relay MUST append its own Hop ID to the HOP_PATH it received, so its own ID is always the last entry.
-An advertisement arriving from an upstream that did not negotiate the extension has no HOP_PATH; the relay creates one containing a single entry for that upstream, 0 ({{zero}}) or an ID it assigned ({{assigned}}), then appends its own.
+An advertisement arriving from an upstream that did not negotiate the extension has no HOP_PATH; the relay creates one containing a single entry for that upstream ({{assigned}}), then appends its own.
 
 On receipt, a relay MUST discard an advertisement whose HOP_PATH already contains its own non-zero Hop ID: forwarding it would extend a loop, and subscribing through it would route the relay back to itself.
 This receiver-side check catches loops of any length and is the only loop defense required.
@@ -214,7 +203,7 @@ When it stops carrying the namespace it SHOULD restore the accumulated value, op
 
 Two relays that independently begin carrying the same namespace would each see the other's 0 as cheaper than its own source, and both switching at once would leave the namespace with no source.
 Before re-parenting onto a 0-cost advertisement from another actively-carrying relay (one whose HOP_PATH has two or more entries), a relay SHOULD apply a deterministic tie-break, such as comparing a hash of the namespace and each Hop ID, so exactly one side moves.
-Equal Hop IDs (including two relays that both declared 0) cannot be ordered, and neither side SHOULD move.
+Equal Hop IDs cannot be ordered, and neither side SHOULD move.
 Cheaper advertisements from anything else carry no such hazard and SHOULD be adopted immediately.
 
 ## Updating an Advertisement {#updating}
@@ -237,10 +226,9 @@ Pattern support does not follow from negotiating Relay Hops; advertisements to a
 Within the tier, a receiver SHOULD prefer the lowest ROUTE_COST, breaking ties toward the shorter HOP_PATH and then toward the most recently received.
 Pattern advertisements tied at the lowest cost are a pool: a deterministic hash of the requested namespace against each advertiser distributes distinct namespaces across them.
 The hash is FNV-1a from the basis `0x420C0DECB00B`: encode each requested namespace field as its byte length in eight little-endian bytes followed by its bytes, then append the advertiser's first Hop ID in eight little-endian bytes. For each encoded byte, XOR the byte in and multiply by `0x100000001B3`, wrapping at 64 bits; the highest result wins.
-A first Hop ID of 0 makes the advertisement a pool member keyed by its incoming session: the receiver assigns each such session a distinct local 64-bit key, stable for that session's lifetime, and appends its eight little-endian bytes after the zero Hop ID when hashing. This key is local selection state, not an origin identity, and MUST NOT be forwarded as a Hop ID.
 This is advisory: a receiver MAY apply local policy such as measured RTT instead.
 
-NO_CAPACITY and its single re-resolution are defined by {{I-D.lcurley-moq-pattern}}. Excluding the refusing advertiser excludes every route with its non-zero first Hop ID, or its incoming session when that ID is 0.
+NO_CAPACITY and its single re-resolution are defined by {{I-D.lcurley-moq-pattern}}. Excluding the refusing advertiser excludes every route with its first Hop ID.
 
 An advertisement carries no content identity: nothing promises that two paths to one namespace serve interchangeable bytes.
 A receiver MUST NOT splice an active subscription across sessions; when the serving session's advertisement goes away, subscriptions through it end, and the receiver re-subscribes through the best remaining path.
@@ -256,8 +244,8 @@ Applying one rule to both advertisement and dispatch keeps advertised paths trut
 
 
 # Security Considerations
-A Hop ID reveals nothing beyond what its operator encodes in it, and a deployment that considers its identifiers sensitive can use random values or declare 0 ({{zero}}).
-Declaring 0 hides an identity from the mesh but not from the peer itself, which MAY assign one and forward it onward ({{assigned}}); an endpoint that needs to stay unlinkable past its first hop cannot get that from this extension.
+A Hop ID reveals nothing beyond what its operator encodes in it, and a deployment that considers its identifiers sensitive can use random values or declare 0 in RELAY_HOPS.
+Declaring 0 withholds an identity at SETUP, but a HOP_PATH never contains 0, so a peer that wants to advertise must be named, either by a Hop ID it declared or by one the receiver assigned ({{assigned}}).
 A HOP_PATH does expose how many hops an advertisement crossed, which hints at the size of a deployment; a relay MAY coalesce its internal hops into one entry, or strip HOP_PATH, before forwarding across a trust boundary.
 
 Because a relay only appends to HOP_PATH, it cannot make a competing path look shorter than it is; the worst it can do is under-report its own upstream portion to win an advisory tie-break.
@@ -292,6 +280,13 @@ All are carried in PUBLISH_NAMESPACE and in the extended NAMESPACE message ({{na
 | 0x40B58 | ROUTE_COST        | PUBLISH_NAMESPACE, NAMESPACE | This Document |
 
 The Key-Value-Pair parity is load-bearing: HOP_PATH and RELAY_HOPS are odd, so their values are length-prefixed byte strings, while ROUTE_COST and RELAY_COST are even, so their values are bare varints.
+
+
+# Appendix A: Changelog
+
+## 00
+- A HOP_PATH entry of 0 is a PROTOCOL_VIOLATION; duplicate zeros are no longer legal.
+- Assigned Identities is mandatory: a receiver MUST assign a Hop ID to a peer that declared none.
 
 
 --- back

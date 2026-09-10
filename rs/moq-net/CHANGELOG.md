@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A hop chain names real hops only: `Hops` refuses a zero entry, and `Hops::replace_first` is removed. Hop ID 0 remains the absence marker for AnnounceOk, RELAY_HOPS, and `exclude_hop`.
+
 ## [0.2.19](https://github.com/moq-dev/moq/compare/moq-net-v0.2.18...moq-net-v0.2.19) - 2026-09-09
 
 ### Added

@@ -29,8 +29,9 @@ use crate::{
 /// passes through, so a receiver can spot its own id and reject a loop.
 ///
 /// Local hops are built with [`Hop::new`] or [`Hop::random`], both of which guarantee a
-/// non-zero id so loop detection can work. Remote peers may still send `0`; it is legal
-/// on the wire but cannot be used for loop detection.
+/// non-zero id so loop detection can work. Remote peers may still send `0` in the fields
+/// that mean "no identity" (AnnounceOk.origin, RELAY_HOPS, `exclude_hop`); a chain
+/// entry of 0 is a protocol violation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Hop {
 	/// 62-bit identifier. Encoded as a QUIC varint on the wire.
@@ -38,15 +39,15 @@ pub struct Hop {
 }
 
 impl Hop {
-	/// Placeholder for hop entries whose actual id is not on the wire (Lite03).
-	/// Also used for remote peers that choose the legal but loop-blind id 0.
+	/// Absence marker: no identity in AnnounceOk.origin, RELAY_HOPS, or `exclude_hop`.
+	/// Never a chain entry.
 	pub(crate) const UNKNOWN: Self = Self { id: 0 };
 
 	/// Build a hop from a stable id.
 	///
 	/// The id must be non-zero and fit in the 62-bit QUIC varint range. Wire
-	/// decode accepts remote id 0, but a local hop should not use it because
-	/// downstream peers cannot exclude it for loop detection.
+	/// decode accepts 0 in the fields that mean "no identity", but a local hop
+	/// must not use it, and a chain must not contain it.
 	pub fn new(id: u64) -> Result<Self, InvalidHop> {
 		if id == 0 || id >= 1u64 << 62 {
 			return Err(InvalidHop::Range);
@@ -212,11 +213,11 @@ pub(crate) const MAX_HOPS: usize = 32;
 
 /// Bounded, loop-free list of [`Hop`] entries: the hop chain of a broadcast.
 ///
-/// Guarantees `len() <= MAX_HOPS` and that no non-zero [`Hop`] appears twice. Both
-/// are wire rules, and both hold wherever a list exists rather than only where one was
-/// parsed, so a chain that a conforming receiver would reject cannot be built and sent.
-/// Construct via [`Hops::new`] + [`Hops::push`], or fall back to the
-/// fallible [`TryFrom<Vec<Hop>>`].
+/// Guarantees `len() <= MAX_HOPS`, that no entry is 0, and that no
+/// [`Hop`] appears twice. Those are wire rules, and they hold wherever a list exists
+/// rather than only where one was parsed, so a chain that a conforming receiver would
+/// reject cannot be built and sent. Construct via [`Hops::new`] + [`Hops::push`], or
+/// fall back to the fallible [`TryFrom<Vec<Hop>>`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Hops(Vec<Hop>);
 
@@ -224,8 +225,8 @@ pub struct Hops(Vec<Hop>);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InvalidHop {
-	/// The id is zero or outside the 62-bit wire range, so it cannot identify a local
-	/// hop. Only [`Hop::new`] returns this; a chain never holds one.
+	/// The id is zero or outside the 62-bit wire range, so it cannot identify a hop.
+	/// [`Hop::new`] returns this for a local hop; a chain returns it for a zero entry.
 	Range,
 
 	/// The list is already at its hop-count cap, which a real path never reaches and a
@@ -233,15 +234,14 @@ pub enum InvalidHop {
 	TooMany,
 
 	/// The id is already in the list. A chain that revisits a hop looped, which every
-	/// receiver of it must reject, so it must not be built in the first place. The
-	/// reserved id 0 identifies nothing and may repeat.
+	/// receiver of it must reject, so it must not be built in the first place.
 	Duplicate,
 }
 
 impl fmt::Display for InvalidHop {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			Self::Range => write!(f, "local hop id must be non-zero and below 2^62"),
+			Self::Range => write!(f, "hop id must be non-zero and below 2^62"),
 			Self::TooMany => write!(f, "too many hops (max {MAX_HOPS})"),
 			Self::Duplicate => write!(f, "hop already in the chain"),
 		}
@@ -267,44 +267,21 @@ impl Hops {
 
 	/// Append an [`Hop`], rejecting anything a conforming receiver would.
 	///
-	/// Fails with [`InvalidHop::TooMany`] once the list is full, and with
-	/// [`InvalidHop::Duplicate`] for an id already in the chain, which is a loop. The
-	/// reserved id 0 identifies nothing, so it may repeat.
+	/// Fails with [`InvalidHop::Range`] for the reserved id 0, which names nobody;
+	/// with [`InvalidHop::TooMany`] once the list is full; and with
+	/// [`InvalidHop::Duplicate`] for an id already in the chain, which is a loop.
 	pub fn push(&mut self, hop: Hop) -> Result<(), InvalidHop> {
+		if hop == Hop::UNKNOWN {
+			return Err(InvalidHop::Range);
+		}
 		if self.0.len() >= MAX_HOPS {
 			return Err(InvalidHop::TooMany);
 		}
-		if hop != Hop::UNKNOWN && self.0.contains(&hop) {
+		if self.0.contains(&hop) {
 			return Err(InvalidHop::Duplicate);
 		}
 		self.0.push(hop);
 		Ok(())
-	}
-
-	/// Replace the first entry equal to `target` with `replacement`, returning
-	/// true if a match was found. The length is unchanged.
-	///
-	/// Fails with [`InvalidHop::Duplicate`] only when the rewrite would actually name
-	/// `replacement` twice, which is the loop [`Self::push`] refuses to build. A `target`
-	/// that is not present changes nothing and so cannot duplicate anything, and the slot
-	/// being overwritten is not a duplicate of itself.
-	pub fn replace_first(&mut self, target: Hop, replacement: Hop) -> Result<bool, InvalidHop> {
-		let Some(index) = self.0.iter().position(|entry| *entry == target) else {
-			return Ok(false);
-		};
-
-		if replacement != Hop::UNKNOWN
-			&& self
-				.0
-				.iter()
-				.enumerate()
-				.any(|(i, entry)| i != index && *entry == replacement)
-		{
-			return Err(InvalidHop::Duplicate);
-		}
-
-		self.0[index] = replacement;
-		Ok(true)
 	}
 
 	/// Returns true if any entry matches `hop`.
@@ -342,7 +319,10 @@ impl TryFrom<Vec<Hop>> for Hops {
 		}
 		// MAX_HOPS is 32, so the quadratic scan is cheaper than allocating a set.
 		for (i, hop) in v.iter().enumerate() {
-			if *hop != Hop::UNKNOWN && v[i + 1..].contains(hop) {
+			if *hop == Hop::UNKNOWN {
+				return Err(InvalidHop::Range);
+			}
+			if v[i + 1..].contains(hop) {
 				return Err(InvalidHop::Duplicate);
 			}
 		}
@@ -554,8 +534,8 @@ pub struct Route {
 impl Route {
 	/// Append a hop to the chain, oldest first.
 	///
-	/// Fails with [`crate::InvalidHop`] for a hop the wire would reject: one past the
-	/// chain's length cap, or one already in it, which is a loop.
+	/// Fails with [`crate::InvalidHop`] for a hop the wire would reject: the reserved
+	/// id 0, one past the chain's length cap, or one already in it, which is a loop.
 	pub fn with_hop(mut self, hop: Hop) -> Result<Self, InvalidHop> {
 		self.hops.push(hop)?;
 		Ok(self)
@@ -829,8 +809,8 @@ impl TableCursor {
 	/// Whether this cursor may observe `entry` at all (split horizon).
 	fn visible(&self, entry: &RouteEntry) -> bool {
 		match self.exclude {
-			Some(peer) if peer != Hop::UNKNOWN => !entry.hops.contains(&peer),
-			_ => true,
+			Some(peer) => !entry.hops.contains(&peer),
+			None => true,
 		}
 	}
 }
@@ -2498,10 +2478,9 @@ enum Identity {
 	/// No source has attached yet: the first request may resolve through any
 	/// covering route, and whoever serves it fixes the identity.
 	Undetermined,
-	/// The serving route's first hop was absent or [`Hop::UNKNOWN`], which
-	/// identifies nobody and never matches itself: the front cannot resume, so
-	/// its source ending ends it. Two anonymous publishers must never pass for
-	/// one reconnecting.
+	/// The serving route had no first hop, so it identifies nobody and never
+	/// matches itself: the front cannot resume, and its source ending ends it.
+	/// Two anonymous publishers must never pass for one reconnecting.
 	Anonymous,
 	/// The first hop of the serving route: the endpoint that originated it.
 	/// Routes sharing it are the same origin reached another way and safe to
@@ -2827,8 +2806,8 @@ impl FrontDriver {
 		self.serving = Some((id, route, source));
 		if self.identity == Identity::Undetermined {
 			self.identity = match first {
-				Some(hop) if hop != Hop::UNKNOWN => Identity::Publisher(hop),
-				_ => Identity::Anonymous,
+				Some(hop) => Identity::Publisher(hop),
+				None => Identity::Anonymous,
 			};
 		}
 		if let Some(request) = self.initial.take()
@@ -2999,8 +2978,7 @@ impl OriginState {
 	/// With `publisher` set, only routes originated by that first hop are
 	/// candidates: this is the identity a front resumes through, and a route from
 	/// anyone else is different content rather than an alternate path (see
-	/// [`run_remote_front`]). `Hop::UNKNOWN` identifies nobody, so callers never
-	/// pin it.
+	/// [`run_remote_front`]).
 	fn best_route(
 		&self,
 		path: &Path,
@@ -3013,8 +2991,8 @@ impl OriginState {
 			.iter()
 			.filter(|entry| path.has_prefix(&entry.prefix))
 			.filter(|entry| match exclude {
-				Some(peer) if peer != Hop::UNKNOWN => !entry.hops.contains(&peer),
-				_ => true,
+				Some(peer) => !entry.hops.contains(&peer),
+				None => true,
 			})
 			.filter(|entry| match publisher {
 				Some(first) => entry.hops.iter().next() == Some(&first),
@@ -4031,6 +4009,26 @@ mod tests {
 			list.push(origin(*id)).unwrap();
 		}
 		list
+	}
+
+	#[test]
+	fn hops_refuse_a_zero_entry() {
+		let mut list = Hops::new();
+		assert_eq!(list.push(Hop::UNKNOWN), Err(InvalidHop::Range));
+		assert!(list.is_empty());
+
+		assert_eq!(Hops::try_from(vec![Hop::UNKNOWN]), Err(InvalidHop::Range));
+		assert_eq!(Hops::try_from(vec![origin(1), Hop::UNKNOWN]), Err(InvalidHop::Range));
+	}
+
+	#[test]
+	fn hops_refuse_a_duplicate() {
+		let mut list = hops(&[1, 2]);
+		assert_eq!(list.push(origin(1)), Err(InvalidHop::Duplicate));
+		assert_eq!(
+			Hops::try_from(vec![origin(4), origin(8), origin(4)]),
+			Err(InvalidHop::Duplicate)
+		);
 	}
 
 	/// Yield to the driver until `check` passes, bounded so a bug fails instead

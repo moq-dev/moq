@@ -34,6 +34,7 @@ pub use time::*;
 
 /// Publishing broadcasts, announcing routes, and consuming both through an origin.
 pub mod origin {
+	pub(crate) use super::origin_impl::MAX_HOPS;
 	pub use super::origin_impl::{
 		Consumer, Cost, DRAIN_COST, Driver, Dynamic, Info, MAX_COST, Prefix, Producer, Request, Requesting, Route, Run,
 	};

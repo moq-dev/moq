@@ -372,10 +372,9 @@ export class Subscriber {
 					const publisher = hops?.[0] ?? responderOrigin;
 
 					// A publisher with no identity (an empty chain from a peer that withheld its
-					// own id, or a lite-03 UNKNOWN placeholder) never proves continuity: two such
-					// advertisements can be unrelated publishers. Mirrors the
-					// `publisher == Hop::UNKNOWN` arm of the Rust `restart_announce`.
-					const identified = publisher !== undefined && publisher !== UNKNOWN_HOP;
+					// own id) never proves continuity: two such advertisements can be unrelated
+					// publishers.
+					const identified = publisher !== undefined;
 
 					// A second advertisement for a path we already carry is a restart: either an
 					// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE.

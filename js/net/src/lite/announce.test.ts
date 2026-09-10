@@ -183,13 +183,24 @@ test("a hop chain that revisits a hop is refused in both directions", async () =
 		"appears twice",
 	);
 
-	// Repeated unknowns are not a loop: 0 identifies nothing, so any number of hops may
-	// be unknown. A lite-03 announcement is nothing but these.
+	// A chain entry of 0 names nobody, which is a protocol violation.
 	const unknown = HopSchema.parse(0n);
 	const anonymous: AnnounceBroadcast = {
 		status: "active",
 		suffix: Path.from("room"),
-		hops: [unknown, four, unknown],
+		hops: [unknown, four],
 	};
-	expect(await roundTrip(anonymous, Version.DRAFT_05)).toEqual(anonymous);
+	await expect(bytes((w) => encodeAnnounceBroadcast(w, anonymous, Version.DRAFT_05))).rejects.toThrow(
+		ProtocolViolation,
+	);
+});
+
+test("AnnounceBroadcast lite-03 count is the route cost", async () => {
+	const msg: AnnounceBroadcast = {
+		status: "active",
+		suffix: Path.from("room/cam"),
+		hops: [],
+		cost: { warm: 5n, cold: 5n },
+	};
+	expect(await roundTrip(msg, Version.DRAFT_03)).toEqual(msg);
 });

@@ -355,11 +355,8 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session, R: crate::runti
 	// (`Client::with_peer_hop`), which also makes the route recognizable across
 	// sessions dialing the same relay.
 	//
-	// Otherwise this is `Hop::UNKNOWN` (0), the reserved "no identity" value.
-	// Minting one here is not this layer's call: the peer never learns the id, so
-	// only the side that assigned it can exclude it for loop detection, and whether
-	// two sessions should look like one identity or two is the caller's policy. A
-	// server answers it per accepted session; a client only when it knows the peer.
+	// Otherwise a fresh id, because a chain cannot name nobody. The caller pins a
+	// stable one with `with_peer_hop` when two sessions are the same endpoint.
 	session_origin: crate::Hop,
 	// Our own Hop ID, which an advertisement must not already contain: one that does
 	// looped back through us.
@@ -434,7 +431,7 @@ where
 			session,
 			origin,
 			control,
-			session_origin: peer_hop.unwrap_or(crate::Hop::UNKNOWN),
+			session_origin: peer_hop.unwrap_or_else(crate::Hop::random),
 			self_origin,
 			peer_setup,
 			cost,
@@ -474,8 +471,7 @@ where
 	/// The route for an advertisement that carries no path of its own.
 	///
 	/// Base moq-transport has no hops on the wire, so the chain is a single entry
-	/// attributed to this session (`Hop::UNKNOWN` unless the peer or the caller
-	/// supplied an identity).
+	/// attributed to this session (the assigned identity, or a fresh one).
 	///
 	/// That entry doubles as the content identity, which is what makes an assigned
 	/// identity worth having: every session dialing the same relay produces the same
@@ -3856,12 +3852,11 @@ mod tests {
 		assert!(routed_now(&consumer, "room/host").is_none());
 	}
 
-	/// Regression: a publisher that declares no identity of its own contributes
-	/// `Hop::UNKNOWN` as the first hop, which identifies nothing. A repeat NAMESPACE
-	/// is still the same advertisement being repriced (the expected update, and how a
-	/// relay signals that it started carrying the namespace), so the source and every
-	/// live subscription on it must survive. Reading the repeat as a new publisher
-	/// detached the source milliseconds after SUBSCRIBE went out.
+	/// Regression: a repeat NAMESPACE is still the same advertisement being
+	/// repriced (the expected update, and how a relay signals that it started
+	/// carrying the namespace), so the source and every live subscription on it
+	/// must survive. Reading the repeat as a new publisher detached the source
+	/// milliseconds after SUBSCRIBE went out.
 	#[tokio::test(start_paused = true)]
 	async fn anonymous_publisher_survives_a_repricing_update() {
 		let (mut subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
@@ -3873,7 +3868,7 @@ mod tests {
 			cost: Some(0),
 		};
 		let hops = cluster::HopPath::new(
-			crate::Hops::try_from(vec![crate::Hop::UNKNOWN, crate::Hop::new(9).unwrap()]).unwrap(),
+			crate::Hops::try_from(vec![crate::Hop::new(7).unwrap(), crate::Hop::new(9).unwrap()]).unwrap(),
 		);
 
 		let advertised = subscriber
@@ -3921,7 +3916,7 @@ mod tests {
 			cost: None,
 		};
 		let hops = cluster::HopPath::new(
-			crate::Hops::try_from(vec![crate::Hop::UNKNOWN, crate::Hop::new(9).unwrap()]).unwrap(),
+			crate::Hops::try_from(vec![crate::Hop::new(7).unwrap(), crate::Hop::new(9).unwrap()]).unwrap(),
 		);
 		let advert = cluster::Advert { hops, cost: 0 };
 

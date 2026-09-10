@@ -200,8 +200,8 @@ export async function decodeParams(r: Reader, version: IetfVersion): Promise<Adv
  * Read an advertisement out of a decoded parameter block.
  *
  * Every way this fails is one the draft says to close the session over: a negotiated session
- * that omits HOP_PATH, entries that do not exactly fill the parameter, an empty list, or a
- * non-zero Hop ID appearing twice. So they all surface as one {@link ProtocolViolation},
+ * that omits HOP_PATH, entries that do not exactly fill the parameter, an empty list, a Hop
+ * ID of 0, or a Hop ID appearing twice. So they all surface as one {@link ProtocolViolation},
  * which the session dispatch acts on.
  *
  * @internal
@@ -233,8 +233,7 @@ export function fromParams(params: Parameters): Advert {
 
 /**
  * Reject a path that cannot have come from a conforming sender: an empty list, one longer
- * than we accept, or a non-zero Hop ID appearing twice (a loop). Duplicate zeros are legal,
- * since 0 identifies nothing.
+ * than we accept, a Hop ID of 0, or a Hop ID appearing twice (a loop).
  */
 function validate(hops: Hop[]) {
 	if (hops.length === 0) throw new Error("hop path is empty");
@@ -243,7 +242,7 @@ function validate(hops: Hop[]) {
 	// MAX_HOPS is 32, so the quadratic scan is cheaper than allocating a set.
 	for (let i = 0; i < hops.length; i++) {
 		const hop = hops[i];
-		if (hop === UNKNOWN_HOP) continue;
+		if (hop === UNKNOWN_HOP) throw new Error("hop 0 cannot appear in a hop path");
 		if (hops.indexOf(hop, i + 1) !== -1) throw new Error(`hop ${hop} appears twice in the hop path`);
 	}
 }

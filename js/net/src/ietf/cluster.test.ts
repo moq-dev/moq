@@ -92,11 +92,12 @@ test("Cluster: a zero route cost is absent from the wire", async () => {
 	expect(Cluster.fromParams(decoded).cost).toBe(0n);
 });
 
-test("Cluster: a repeated zero is not a loop", async () => {
-	const advert = { hops: hops(0n, 5n, 0n), cost: 0n };
-	const encoded = await encode(Cluster.intoParams(advert));
-	const decoded = await Parameters.decode(reader(encoded), VERSION);
-	expect(Cluster.fromParams(decoded)).toEqual(advert);
+test("Cluster: a zero hop is a protocol violation", () => {
+	expect(() => Cluster.intoParams({ hops: hops(0n, 5n), cost: 0n })).toThrow();
+
+	const params = new Parameters();
+	params.hopPath = new Uint8Array([0x00, 0x05]);
+	expect(() => Cluster.fromParams(params)).toThrow(ProtocolViolation);
 });
 
 test("Cluster: a malformed advertisement is a session-fatal violation", () => {
@@ -178,7 +179,7 @@ test("Cluster: we advertise our own id, and only once negotiated", () => {
 });
 
 test("Cluster: a loop is detected by any non-zero id", () => {
-	const advert = { hops: hops(0n, 5n), cost: 0n };
+	const advert = { hops: hops(1n, 5n), cost: 0n };
 
 	// A receiver whose own id is 0 cannot detect loops through itself.
 	expect(Cluster.loops(advert, UNKNOWN_HOP)).toBe(false);

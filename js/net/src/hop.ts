@@ -30,9 +30,8 @@ export type Hop = z.infer<typeof HopSchema>;
 /**
  * The reserved id 0, meaning "no identity".
  *
- * It stands in for an endpoint that never declared one, and any number of endpoints can
- * be 0, so it identifies nothing: it is never a loop, never a publisher two chains have
- * in common, and never excluded from an advertisement.
+ * Absence marker for AnnounceOk.origin, RELAY_HOPS, and excludeHop. A chain entry of 0
+ * is a protocol violation: a chain names real hops only.
  */
 export const UNKNOWN_HOP: Hop = HopSchema.parse(0n);
 

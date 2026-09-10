@@ -60,8 +60,8 @@ export type AnnounceBroadcast =
 
 // Both wire rules on a hop chain, applied to what we send and to what we receive: a
 // chain that revisits a hop looped, so neither forwarding it nor subscribing through it
-// is safe, and a receiver must end the session over one. `UNKNOWN_HOP` identifies
-// nothing, so any number of hops may be unknown.
+// is safe, and a receiver must end the session over one. A chain entry of 0 names
+// nobody, which is the same class of violation.
 //
 // `ProtocolViolation` so a receipt takes the session down rather than the one stream,
 // matching what `ietf/cluster.ts` throws for the identical rule.
@@ -73,22 +73,29 @@ function checkHops(hops: Hop[]) {
 	// MAX_HOPS is 32, so the quadratic scan is cheaper than allocating a set.
 	for (let i = 0; i < hops.length; i++) {
 		const hop = hops[i];
-		if (hop === UNKNOWN_HOP) continue;
+		if (hop === UNKNOWN_HOP) {
+			throw new ProtocolViolation("hop 0 cannot appear in a chain");
+		}
 		if (hops.indexOf(hop, i + 1) !== -1) {
 			throw new ProtocolViolation(`hop ${hop} appears twice in the chain`);
 		}
 	}
 }
 
-async function encodeHops(w: Writer, version: Version, hops: Hop[]) {
+async function encodeHops(w: Writer, version: Version, hops: Hop[], cost?: Cost) {
 	checkHops(hops);
 	switch (version) {
 		case Version.DRAFT_01:
 		case Version.DRAFT_02:
 			break;
-		case Version.DRAFT_03:
-			await w.u53(hops.length);
+		case Version.DRAFT_03: {
+			const count = Number(cost?.warm ?? 0n);
+			if (count > MAX_HOPS) {
+				throw new ProtocolViolation(`hop count ${count} exceeds maximum ${MAX_HOPS}`);
+			}
+			await w.u53(count);
 			break;
+		}
 		default:
 			// Lite04+: hop count + individual Hop varints.
 			await w.u53(hops.length);
@@ -99,17 +106,18 @@ async function encodeHops(w: Writer, version: Version, hops: Hop[]) {
 	}
 }
 
-async function decodeHops(r: Reader, version: Version): Promise<Hop[]> {
+async function decodeHops(r: Reader, version: Version): Promise<{ hops: Hop[]; cost?: Cost }> {
 	switch (version) {
 		case Version.DRAFT_01:
 		case Version.DRAFT_02:
-			return [];
+			return { hops: [], cost: { warm: 0n, cold: 0n } };
 		case Version.DRAFT_03: {
 			const count = await r.u53();
-			if (count > MAX_HOPS) throw new Error(`hop count ${count} exceeds maximum ${MAX_HOPS}`);
-			// Lite03 carries only a hop count, not individual ids, so every entry is
-			// the reserved "no identity" id.
-			return new Array<Hop>(count).fill(UNKNOWN_HOP);
+			if (count > MAX_HOPS) throw new ProtocolViolation(`hop count ${count} exceeds maximum ${MAX_HOPS}`);
+			// Lite03 sends only a hop count. That count is the route cost: the chain
+			// names real hops only, so the distance lives here instead.
+			const n = BigInt(count);
+			return { hops: [], cost: { warm: n, cold: n } };
 		}
 		default: {
 			// Lite04+: hop count + individual Hop varints.
@@ -120,7 +128,7 @@ async function decodeHops(r: Reader, version: Version): Promise<Hop[]> {
 				hops.push(HopSchema.parse(await r.u62()));
 			}
 			checkHops(hops);
-			return hops;
+			return { hops };
 		}
 	}
 }
@@ -143,7 +151,7 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 	switch (msg.status) {
 		case "active":
 			await w.string(Path.encode(msg.suffix));
-			await encodeHops(w, version, msg.hops);
+			await encodeHops(w, version, msg.hops, msg.cost);
 			await encodeRouteCost(w, version, msg.cost);
 			break;
 		case "endedId":
@@ -151,7 +159,7 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 			break;
 		case "restart":
 			await w.u62(msg.id);
-			await encodeHops(w, version, msg.hops);
+			await encodeHops(w, version, msg.hops, msg.cost);
 			await encodeRouteCost(w, version, msg.cost);
 			break;
 		case "ended":
@@ -178,14 +186,14 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 	switch (typ) {
 		case ANNOUNCE_START: {
 			const suffix = Path.decode(await r.string());
-			const hops = await decodeHops(r, version);
+			const { hops } = await decodeHops(r, version);
 			return { status: "active", suffix, hops, cost: await decodeRouteCost(r, version) };
 		}
 		case ANNOUNCE_END:
 			return { status: "endedId", id: await r.u62() };
 		case ANNOUNCE_RESTART: {
 			const id = await r.u62();
-			const hops = await decodeHops(r, version);
+			const { hops } = await decodeHops(r, version);
 			return { status: "restart", id, hops, cost: await decodeRouteCost(r, version) };
 		}
 		default:
@@ -199,7 +207,7 @@ async function encodeLegacyBody(w: Writer, msg: AnnounceBroadcast, version: Vers
 		case "active":
 			await w.u8(STATUS_ACTIVE);
 			await w.string(Path.encode(msg.suffix));
-			await encodeHops(w, version, msg.hops);
+			await encodeHops(w, version, msg.hops, msg.cost);
 			break;
 		case "ended":
 			await w.u8(STATUS_ENDED);
@@ -222,8 +230,9 @@ async function decodeLegacyBody(r: Reader, version: Version): Promise<AnnounceBr
 		throw new Error("invalid announce status");
 	}
 	const suffix = Path.decode(await r.string());
-	const hops = await decodeHops(r, version);
-	return active ? { status: "active", suffix, hops } : { status: "ended", suffix };
+	const { hops, cost } = await decodeHops(r, version);
+	if (!active) return { status: "ended", suffix };
+	return cost !== undefined ? { status: "active", suffix, hops, cost } : { status: "active", suffix, hops };
 }
 
 /** Encode one announcement, including its type discriminator (lite-06+) and length prefix. */

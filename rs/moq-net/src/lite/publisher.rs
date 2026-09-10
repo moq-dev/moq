@@ -615,18 +615,28 @@ impl AnnounceRun {
 		}
 
 		// Lite05+ moves the self-stamp to the receiver, which appends our id (reported
-		// once via AnnounceOk) on receipt. Older versions stamp it here, dropping if the
-		// chain is full.
-		if !self.version.has_announce_ok() && hops.push(self.self_origin).is_err() {
+		// once via AnnounceOk) on receipt. Lite-04 stamps it here. Lite-01/02/03 have
+		// no hop ids: the cost carries the distance, so stamping would only fail for
+		// an anonymous publisher (id 0 cannot enter a chain).
+		if self.version.has_hop_ids()
+			&& !self.version.has_announce_ok()
+			&& self.self_origin != Hop::UNKNOWN
+			&& hops.push(self.self_origin).is_err()
+		{
 			tracing::warn!(route = %absolute, "dropping announce; hop chain at MAX_HOPS (possible loop)");
 			return None;
 		}
 
-		// Pre-lite-06 wires carry no cost at all, leaving hop count as the
-		// effective metric exactly as before.
+		if !self.version.has_hop_ids() && route.cost.warm > crate::origin::MAX_HOPS as u64 {
+			tracing::warn!(route = %absolute, "dropping announce; lite-03 cost above MAX_HOPS (possible loop)");
+			return None;
+		}
+
+		// Pre-lite-06 wires carry no cost field; lite-03 still emits the accumulated
+		// cost as its hop count, so keep it. Lite-04/05 rank on hop count alone.
 		let cost = match self.version.has_route_cost() {
 			true => route.cost.clamped(),
-			false => crate::origin::Cost::UNKNOWN,
+			false => route.cost,
 		};
 		Some((hops, cost))
 	}

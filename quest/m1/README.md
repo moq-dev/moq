@@ -30,7 +30,6 @@ with the dev tree.
 - [JS announce](/quest/m1/js-announce.md) - js/net drops `publish()` and `RouteProvider` for `createBroadcast`, `announce(route)`, and a `dynamic(pattern, route)` handle
 - [Wildcard](/quest/m1/wildcard/README.md) - a service advertises a path pattern priced at its start-up cost; Advertise gates the merge, Resolve and Demand are additive
 - [Route cold cost](/quest/m1/route-cold-cost.md) - MoqRoute carries warm and cold, so an observed route re-announces intact
-- [#3060](/quest/m1/3060-moq-net-ban-hop-id-0-from-hop-chains.md) - a hop chain names real hops only; Hop ID 0 stays the absence marker
 - [Group overflow](/quest/m1/group-overflow-abort.md) - an open group past its budget aborts for every reader with GROUP_TOO_LARGE, and head eviction is deleted
 - [#2774](/quest/m1/2774-collapse-reload-and-shared-into-one-connection-class.md) - one cloneable refcounted `Connection` mirroring `moq_tokio::Connection`; close releases a handle
 - [Close classification](/quest/m1/js-close-classification.md) - a browser consumer tells a requested end from a fault, so the media harness fails on real errors during a transition

@@ -54,22 +54,13 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	// they never hit the wire, but this check is what makes it correct.
 	self_origin: crate::Hop,
 	// The origin stamped into the hop chain of broadcasts from versions that
-	// don't carry real hop ids on the wire (Lite01/02/03), and into the
-	// placeholder entries Lite03 sends in place of real ids.
+	// don't carry real hop ids on the wire (Lite01/02/03), and for a peer that
+	// declared none (AnnounceOk origin 0).
 	//
 	// This is the peer's assigned identity (`peer_hop`) when the caller gave
 	// it one, which also makes the route recognizable across sessions. Otherwise
-	// it is `Hop::UNKNOWN` (0), the reserved "no identity" value.
-	//
-	// Assigning one is the caller's call, not this layer's: a server gives every
-	// accepted session a fresh id so its routes are at least distinguishable from
-	// another session's, while a client only assigns one it knows out of band. Either
-	// way the peer never learns the id, so only we can exclude it for loop detection.
+	// a fresh id, because a chain cannot name nobody.
 	session_origin: crate::Hop,
-	// The identity assigned to the peer by the caller (`Client::with_peer_hop`,
-	// or the per-session default a server hands every request), standing in wherever
-	// the peer declines to declare one (an AnnounceOk reporting origin id 0).
-	peer_hop: Option<crate::Hop>,
 	subscribes: Lock<HashMap<u64, TrackEntry>>,
 	next_id: Arc<atomic::AtomicU64>,
 	version: Version,
@@ -103,8 +94,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			origin: config.origin,
 			recv_bandwidth: config.recv_bandwidth,
 			self_origin,
-			session_origin: config.peer_hop.unwrap_or(crate::Hop::UNKNOWN),
-			peer_hop: config.peer_hop,
+			session_origin: config.peer_hop.unwrap_or_else(crate::Hop::random),
 			subscribes: Default::default(),
 			next_id: Default::default(),
 			version: config.version,
@@ -140,6 +130,11 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// Older versions carry no cost on the wire, so nothing is charged and their
 		// routes rank on hop count alone. Returning early also avoids blocking on a
 		// SETUP that versions without a Setup Stream never send.
+		if !self.version.has_hop_ids() {
+			// Lite-01/02/03 have no hop ids, so the loop bound is the cost. A
+			// link priced 0 would stop that value growing; floor it at 1.
+			return Poll::Ready(self.cost.unwrap_or(0).max(1));
+		}
 		if !self.version.has_route_cost() {
 			return Poll::Ready(0);
 		}
@@ -263,12 +258,11 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// replacing this, or declines it and leaves it exactly as reserved.
 		announced.reserve(path.clone());
 
-		if let Some(responder) = responder_origin {
+		if let Some(responder) = responder_origin.filter(|hop| *hop != crate::Hop::UNKNOWN) {
 			// A chain already naming the sender came back through it: a reflection, and
-			// appending the sender again would name it twice. That is legal in a lite
-			// chain but a PROTOCOL_VIOLATION for an IETF peer we forward it to, so it
-			// must not enter the model at all. Zero names nobody, so it may repeat.
-			if responder != crate::Hop::UNKNOWN && hops.contains(&responder) {
+			// appending the sender again would name it twice, which is a PROTOCOL_VIOLATION
+			// for any peer we forward it to, so it must not enter the model at all.
+			if hops.contains(&responder) {
 				tracing::debug!(broadcast = %self.log_path(&path), "dropping announce reflected by its sender");
 				return Ok(false);
 			}
@@ -293,24 +287,9 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			return Ok(false);
 		}
 
-		// Lite03 carries its hop count as UNKNOWN placeholders rather than real
-		// ids. Rewrite the first placeholder with this connection's origin so
-		// the route is attributable to the upstream session, without changing
-		// the hop count (shortest-path selection and the MAX_HOPS limit stay
-		// accurate). Lite01/02 send no placeholders; they're covered below.
-		//
-		// The rewrite fails if the chain already names this session, which would put one
-		// id in it twice: a loop, and one a cluster receiver must close the session over.
-		if self.version_lacks_hops() && hops.replace_first(crate::Hop::UNKNOWN, self.session_origin).is_err() {
-			tracing::debug!(broadcast = %self.log_path(&path), "dropping announce reflected by its session");
-			return Ok(false);
-		}
-
 		// Guarantee at least one attributable hop for versions that did not provide
-		// one. Lite05 peers may legally advertise responder id 0; preserve it above
-		// rather than replacing it, even though that route stays loop-blind (the
-		// caller can assign an identity via `with_peer_hop`, substituted where
-		// the AnnounceOk is read).
+		// one. A peer that advertised responder id 0 is assigned `session_origin`
+		// where the AnnounceOk is read, so this chain names that identity.
 		if hops.is_empty() {
 			hops.push(self.session_origin)
 				.expect("an empty hop chain always has room for one entry, and repeats nothing");
@@ -353,12 +332,11 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 	/// Handle a RESTART (an explicit restart status, or a duplicate ANNOUNCE on lite-05).
 	///
 	/// The first hop of the chain identifies the original publisher. When it matches
-	/// the prior advertisement and is a real identity, the broadcast is the same
-	/// content on a new path: this session's route metadata updates in place,
-	/// in-flight tracks keep flowing, and the origin only hands over if the winner
-	/// changed. Consumers observe nothing. When the first hop differs, or is
-	/// [`Hop::UNKNOWN`](crate::Hop::UNKNOWN), the old route detaches gracefully
-	/// and a fresh one attaches, so downstream sees a real Ended + Active.
+	/// the prior advertisement, the broadcast is the same content on a new path: this
+	/// session's route metadata updates in place, in-flight tracks keep flowing, and
+	/// the origin only hands over if the winner changed. Consumers observe nothing.
+	/// When the first hop differs, or the chain is empty, the old route detaches
+	/// gracefully and a fresh one attaches, so downstream sees a real Ended + Active.
 	/// The advertisement is already live, so this can attach a route even when the
 	/// original advertisement was declined locally.
 	///
@@ -378,12 +356,10 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		announced: &mut Announced,
 	) -> Result<bool, Error> {
 		// Reflected loop (or a full chain): detach its route but keep the advertisement live.
-		let reflected = match responder_origin {
+		let reflected = match responder_origin.filter(|hop| *hop != crate::Hop::UNKNOWN) {
 			// A chain already naming the sender came back through it; see `start_announce`.
 			Some(responder) => {
-				(responder != crate::Hop::UNKNOWN && hops.contains(&responder))
-					|| hops.push(responder).is_err()
-					|| hops.contains(&self.self_origin)
+				hops.contains(&responder) || hops.push(responder).is_err() || hops.contains(&self.self_origin)
 			}
 			None => hops.contains(&self.self_origin),
 		};
@@ -447,12 +423,6 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 
 	fn log_path(&self, path: impl AsPath) -> Path<'_> {
 		self.origin.root().join(path)
-	}
-
-	/// True for versions that don't carry a real hop list on the wire, so the
-	/// received chain is empty (Lite01/02) or anonymous placeholders (Lite03).
-	fn version_lacks_hops(&self) -> bool {
-		matches!(self.version, Version::Lite01 | Version::Lite02 | Version::Lite03)
 	}
 }
 
@@ -1163,7 +1133,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					// A peer may legally report id 0 (no identity). When the caller assigned
 					// it one, stand that in so the route isn't loop-blind.
 					let origin = match ok.origin.id() {
-						0 => self.subscriber.peer_hop.unwrap_or(ok.origin),
+						0 => self.subscriber.session_origin,
 						_ => ok.origin,
 					};
 					let PrefixState::ReadOk { stream } = std::mem::replace(&mut self.state, PrefixState::Open) else {
@@ -1959,8 +1929,8 @@ mod tests {
 	///
 	/// The decline paths are a list one edit can fall off the end of, and a miss is silent:
 	/// the path reads as free, a later announce takes it, and the declined one's
-	/// `ANNOUNCE_END` retires that route instead. This walks the one that is hardest to
-	/// reach, where rewriting a placeholder hop would name this session twice.
+	/// `ANNOUNCE_END` retires that route instead. This walks a chain that already names
+	/// this session, which is declined as a reflection.
 	#[tokio::test]
 	async fn every_declined_announce_is_recorded() {
 		let assigned = crate::Hop::new(777).unwrap();
@@ -1969,8 +1939,6 @@ mod tests {
 			session: SinkSession::new(Default::default()),
 			origin,
 			recv_bandwidth: None,
-			// Lite03 sends placeholders rather than real ids, so this is the version whose
-			// chain gets rewritten on the way in.
 			version: Version::Lite03,
 			peer_setup: Default::default(),
 			cost: None,
@@ -1981,9 +1949,8 @@ mod tests {
 		let path = Path::new("room/host").to_owned();
 		let mut announced = Announced::default();
 
-		// A chain whose placeholder cannot be rewritten: this session's id is already in it,
-		// so writing it over the placeholder would name it twice.
-		let hops = crate::Hops::try_from(vec![crate::Hop::UNKNOWN, assigned]).unwrap();
+		// A chain that already names us: a reflection, declined.
+		let hops = crate::Hops::try_from(vec![crate::Hop::new(1).unwrap()]).unwrap();
 		assert!(
 			!subscriber
 				.start_announce(
@@ -1995,7 +1962,7 @@ mod tests {
 					&mut announced
 				)
 				.unwrap(),
-			"a chain that cannot take this session's id must be declined",
+			"a chain that already names this session must be declined",
 		);
 
 		// Declined, but still the peer's advertisement at that path.
@@ -2147,12 +2114,11 @@ mod tests {
 		assert_eq!(hops, vec![assigned]);
 	}
 
-	/// A peer with no assigned identity is attributed the reserved origin 0
-	/// (UNKNOWN). This layer never mints one of its own: whether an anonymous peer
-	/// gets an identity, and whether two of its sessions share it, is the caller's
-	/// policy, and a minted id here would be indistinguishable from a declared one.
+	/// A peer with no assigned identity still gets a real hop: a chain cannot name
+	/// nobody, so this layer mints one. Two sessions without `with_peer_hop` look
+	/// like different publishers; the caller pins a stable id when they are the same.
 	#[tokio::test]
-	async fn absent_peer_hop_stamps_unknown() {
+	async fn absent_peer_hop_stamps_a_real_hop() {
 		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()));
 
 		let mut announced = Announced::default();
@@ -2170,7 +2136,8 @@ mod tests {
 		let mut cursor = consumer.announced();
 		let route = cursor.assert_next_active("room/host");
 		let hops: Vec<_> = route.hops.iter().copied().collect();
-		assert_eq!(hops, vec![crate::Hop::UNKNOWN]);
+		assert_eq!(hops.len(), 1);
+		assert_ne!(hops[0], crate::Hop::UNKNOWN);
 	}
 
 	fn restart_subscriber(session: SinkSession) -> (Subscriber<SinkSession>, crate::origin::Consumer) {

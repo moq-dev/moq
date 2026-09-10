@@ -1,7 +1,7 @@
 use bytes::{Buf, BufMut};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::{Hop, Hops, Path, coding::*, origin::Cost};
+use crate::{Hop, Hops, Path, coding::*, origin::Cost, origin::MAX_HOPS};
 
 use super::{Message, Version, message::decode_size};
 
@@ -113,15 +113,15 @@ impl Encode<Version> for AnnounceBroadcast<'_> {
 		let mut body = Vec::new();
 		match self {
 			// The cost is a lite-06 addition, so it is simply not on the wire here.
-			Self::Active { suffix, hops, .. } => {
+			Self::Active { suffix, hops, cost } => {
 				AnnounceStatus::Active.encode(&mut body, version)?;
 				suffix.encode(&mut body, version)?;
-				encode_hops(&mut body, version, hops)?;
+				encode_hops(&mut body, version, hops, cost.warm)?;
 			}
 			Self::Ended { suffix, hops } => {
 				AnnounceStatus::Ended.encode(&mut body, version)?;
 				suffix.encode(&mut body, version)?;
-				encode_hops(&mut body, version, hops)?;
+				encode_hops(&mut body, version, hops, 0)?;
 			}
 			// The id-referencing forms only exist on lite-06+.
 			Self::EndedId { .. } | Self::Restart { .. } => return Err(EncodeError::Version),
@@ -184,47 +184,38 @@ impl AnnounceBroadcast<'_> {
 		let status = AnnounceStatus::decode(r, version)?;
 
 		let suffix = Path::decode(r, version)?;
-		let hops = match version {
-			Version::Lite01 | Version::Lite02 => Hops::new(),
+		let (hops, cost) = match version {
+			Version::Lite01 | Version::Lite02 => (Hops::new(), Cost::new(0)),
 			Version::Lite03 => {
-				// Lite03 sends only a hop count, not individual ids. Fill with UNKNOWN placeholders.
-				// push() enforces MAX_HOPS and `?` lifts the overflow to DecodeError::BoundsExceeded.
-				let count = u64::decode(r, version)? as usize;
-				let mut list = Hops::new();
-				for _ in 0..count {
-					list.push(Hop::UNKNOWN)?;
+				// Lite03 sends only a hop count. That count is the route cost: the
+				// chain names real hops only, so the distance lives here instead.
+				let count = u64::decode(r, version)?;
+				if count as usize > MAX_HOPS {
+					return Err(DecodeError::BoundsExceeded);
 				}
-				list
+				(Hops::new(), Cost::new(count))
 			}
-			_ => Hops::decode(r, version)?,
+			_ => (Hops::decode(r, version)?, Cost::UNKNOWN),
 		};
 
 		Ok(match status {
-			AnnounceStatus::Active => Self::Active {
-				suffix,
-				hops,
-				cost: Cost::UNKNOWN,
-			},
+			AnnounceStatus::Active => Self::Active { suffix, hops, cost },
 			AnnounceStatus::Ended => Self::Ended { suffix, hops },
 			// On lite-05 a restart travels as a duplicate ANNOUNCE (a second `Active`), so accept
 			// the draft's explicit `restart` status and treat it the same. Either way the
 			// subscriber retires an already-announced path before republishing it; for an unknown
 			// path it's a fresh announce. Older versions never defined this status, so it's an
 			// invalid value there.
-			AnnounceStatus::Restart if restart_supported(version) => Self::Active {
-				suffix,
-				hops,
-				cost: Cost::UNKNOWN,
-			},
+			AnnounceStatus::Restart if restart_supported(version) => Self::Active { suffix, hops, cost },
 			AnnounceStatus::Restart => return Err(DecodeError::InvalidValue),
 		})
 	}
 }
 
-fn encode_hops<W: bytes::BufMut>(w: &mut W, version: Version, hops: &Hops) -> Result<(), EncodeError> {
+fn encode_hops<W: bytes::BufMut>(w: &mut W, version: Version, hops: &Hops, cost: u64) -> Result<(), EncodeError> {
 	match version {
 		Version::Lite01 | Version::Lite02 => Ok(()),
-		Version::Lite03 => (hops.len() as u64).encode(w, version),
+		Version::Lite03 => cost.encode(w, version),
 		_ => hops.encode(w, version),
 	}
 }
@@ -471,6 +462,65 @@ mod tests {
 			AnnounceBroadcast::EndedId { id } => AnnounceBroadcast::EndedId { id },
 			AnnounceBroadcast::Restart { id, hops, cost } => AnnounceBroadcast::Restart { id, hops, cost },
 		}
+	}
+
+	#[test]
+	fn announce_broadcast_lite03_count_is_the_route_cost() {
+		let msg = AnnounceBroadcast::Active {
+			suffix: Path::new("room/cam"),
+			hops: Hops::new(),
+			cost: Cost::new(5),
+		};
+		assert_eq!(broadcast_round_trip(&msg, Version::Lite03), msg);
+	}
+
+	#[test]
+	fn announce_broadcast_lite03_rejects_a_count_above_max_hops() {
+		let mut buf = bytes::BytesMut::new();
+		AnnounceBroadcast::Active {
+			suffix: Path::new("room/cam"),
+			hops: Hops::new(),
+			cost: Cost::new(MAX_HOPS as u64),
+		}
+		.encode(&mut buf, Version::Lite03)
+		.unwrap();
+		// Layout: <size varint><status u8><path><count varint>. The count is the last byte.
+		let last = buf.len() - 1;
+		assert_eq!(buf[last], MAX_HOPS as u8);
+		buf[last] = (MAX_HOPS as u8) + 1;
+		let mut slice = &buf[..];
+		assert!(
+			matches!(
+				AnnounceBroadcast::decode(&mut slice, Version::Lite03),
+				Err(DecodeError::BoundsExceeded)
+			),
+			"a lite-03 hop count above MAX_HOPS must be rejected"
+		);
+	}
+
+	#[test]
+	fn announce_broadcast_rejects_a_zero_hop() {
+		let mut hops = Hops::new();
+		hops.push(Hop::new(7).unwrap()).unwrap();
+		let mut buf = bytes::BytesMut::new();
+		AnnounceBroadcast::Active {
+			suffix: Path::new("room/cam"),
+			hops,
+			cost: Cost::UNKNOWN,
+		}
+		.encode(&mut buf, Version::Lite05)
+		.unwrap();
+		// The hop id 7 is a one-byte varint; rewrite it to 0.
+		let seven = buf.iter().position(|&b| b == 7).expect("hop id 7 on the wire");
+		buf[seven] = 0;
+		let mut slice = &buf[..];
+		assert!(
+			matches!(
+				AnnounceBroadcast::decode(&mut slice, Version::Lite05),
+				Err(DecodeError::InvalidValue)
+			),
+			"a chain entry of 0 is a protocol violation"
+		);
 	}
 
 	#[test]

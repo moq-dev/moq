@@ -395,7 +395,7 @@ Each advertisement carries the path of Hop IDs it traversed and an accumulated W
 A receiver MUST discard an announcement whose reconstructed path contains its own Hop ID: it has looped back, so forwarding it would extend the loop and subscribing through it would route the receiver back to itself.
 This is the only loop defense moq-lite requires, and it catches loops of any length.
 A conforming sender never sends one (see below), so a receiver MAY instead close the session with a protocol violation; discarding is what keeps a mesh working when one member does not conform.
-A Hop ID of 0 means unknown and never matches anything; withholding an ID trades loop detection for privacy.
+A Hop ID of 0 in ANNOUNCE_OK or the SETUP Hop parameter means the sender declared no identity; the receiver MUST assign one and use it as the trailing path entry, because a Hop ID list never contains 0.
 
 A publisher MUST NOT advertise a path whose entries contain the Hop ID the subscriber declared in its SETUP (see [Hop Parameter](#hop-parameter)).
 The receiver can only discard it, and acting on it would form a loop, so sending one is never useful.
@@ -409,8 +409,8 @@ Applying one rule to both advertisement and dispatch keeps advertised paths trut
 When resolving a path covered by several routes (across any number of streams), the subscriber SHOULD prefer the most specific covering route (see [Resolution](#resolution)), then the lowest Warm Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), breaking ties toward the lowest Cold Route Cost, then toward the shortest path, and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
 
 A route's identity is its first hop: the endpoint that originated it (see [ANNOUNCE_START](#announce-start)).
-Two routes covering one path with the same non-zero first hop are the same origin reached different ways, and a relay MAY move a live subscription between them, resuming at a group boundary, so a route change the identity survives (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
-Across differing first hops, or where either is 0, the routes promise nothing about each other's content: a relay MUST NOT splice a live subscription across them, and when the serving session ends, in-flight subscriptions end with it (a reset) and the subscriber re-requests through the best remaining route.
+Two routes covering one path with the same first hop are the same origin reached different ways, and a relay MAY move a live subscription between them, resuming at a group boundary, so a route change the identity survives (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
+Across differing first hops the routes promise nothing about each other's content: a relay MUST NOT splice a live subscription across them, and when the serving session ends, in-flight subscriptions end with it (a reset) and the subscriber re-requests through the best remaining route.
 Equal first hops promise the same origin, not interchangeable bytes; what a resuming relay serves next is whatever that origin publishes next at the group boundary.
 
 #### Resolution {#resolution}
@@ -423,7 +423,7 @@ The winning tier is the whole answer: a refusal from it never falls through to a
 
 Within the tier, cost and the tie-breaks of [Routing](#routing) order the routes, except that pattern routes tied at the lowest cost are a pool: a deterministic hash of the requested path against each advertiser distributes distinct paths across them, so one path always resolves the same way and a member arriving or leaving moves only its own share.
 The hash is FNV-1a: start the accumulator at `0x420C0DECB00B`, then for each byte of the requested path (segments joined by `/`, no leading or trailing `/`) followed by the eight bytes of the advertiser's Hop ID in little-endian order, XOR the byte in and multiply by `0x100000001B3`, wrapping at 64 bits; the highest result wins.
-The advertiser is the route's first hop; a first hop of 0 identifies nothing, so such a route is a pool member of its own, keyed by the session it arrived on. The receiver assigns each such session a distinct local 64-bit key, stable for that session's lifetime, and appends its eight little-endian bytes after the zero Hop ID when hashing. This key is local selection state, not an origin identity, and MUST NOT be forwarded as a Hop ID.
+The advertiser is the route's first hop.
 
 A route resolved this way serves the request like any other, and the pattern is not consumed by it.
 A relay MUST NOT announce a path merely because it resolved it: the pattern stays the only advertisement until the advertiser announces the concrete path, which it SHOULD do once it is producing, so a later request finds the running broadcast by its exact path instead of resolving a second producer.
@@ -837,6 +837,7 @@ This is treated as the implicit trailing entry of every ANNOUNCE_START, ANNOUNCE
 The value 0 is reserved to mean "unknown": either no Hop ID was assigned (e.g. when bridging from an older protocol version) or the endpoint deliberately withholds it to obscure the underlying routing.
 A publisher that assigns a Hop ID MUST choose a non-zero value, and SHOULD assign itself one (a fresh random value per session suffices), so downstream receivers can detect loops through it.
 Receivers reconstruct the full path as `Hop IDs ++ [ANNOUNCE_OK.Hop ID]`.
+If that Hop ID is 0, the receiver MUST assign a Hop ID of its own to the peer and use it as the trailing entry, because a Hop ID list never contains 0.
 
 **Active Count**:
 The number of ANNOUNCE_START and ANNOUNCE_PATTERN messages that the publisher will send immediately as the initial set.
@@ -880,10 +881,8 @@ A unique identifier for each relay in the path from the origin publisher, ordere
 The responding publisher's own Hop ID is NOT included in this list; it is carried once in ANNOUNCE_OK, so the total path length is `Hop Count + 1`.
 When forwarding an announcement received from an upstream peer, a relay MUST append the upstream peer's ANNOUNCE_OK `Hop ID` to this list, since that ID is no longer implicit downstream.
 The first entry of the reconstructed path identifies the endpoint that originated the route.
-A Hop ID value of 0 means the hop is unknown: either it was never assigned or a relay deliberately withholds it (see [Routing](#routing)).
 
-A receiver MUST close the session with a PROTOCOL_VIOLATION if a non-zero Hop ID appears twice in this list.
-Duplicate values of 0 are not a violation, since 0 identifies nothing and any number of hops may be unknown.
+A receiver MUST close the session with a PROTOCOL_VIOLATION if any Hop ID is 0 or a Hop ID appears twice in this list.
 
 **Warm Route Cost** and **Cold Route Cost**:
 What subscribing to content under this route costs, in units chosen by the deployment.
@@ -1387,6 +1386,7 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-06
 
+- A Hop ID of 0 in an announcement's Hop ID list is a PROTOCOL_VIOLATION; duplicate zeros are no longer legal. A receiver that reads 0 in ANNOUNCE_OK MUST assign a Hop ID of its own and use it as the trailing path entry.
 - Require error-code translation when bridging protocols and draft versions.
 - Made a repeated non-zero Hop ID in one announcement's Hop ID list a PROTOCOL_VIOLATION, matching draft-lcurley-moq-cluster. Repeated 0 entries stay legal.
 - Moved the Qmux-over-WebSocket binding details to draft-lcurley-qmux-websocket; the binding itself is unchanged.
@@ -1552,7 +1552,7 @@ The `Increase` Probe level (see [Probe Parameter](#probe-parameter)) lets a subs
 GOAWAY carries an optional New Session URI that asks the peer to reconnect elsewhere. A malicious or compromised peer could use this to redirect a client to an attacker-controlled server. A recipient MUST validate the URI against local policy (scheme, authority, and port) before reconnecting, and MUST NOT reconnect if validation fails (see [GOAWAY](#goaway)). Migrated subscriptions carry no implicit trust from the prior session; the new session is authenticated independently.
 
 ## Routing Metadata and Privacy
-Hop IDs (see [ANNOUNCE_OK](#announce-ok) and [ANNOUNCE_START](#announce-start)) expose the relay path of a broadcast, which may reveal internal topology. A relay that does not wish to disclose its position MAY use the reserved value 0 ("unknown") instead of a stable identifier, at the cost of losing loop detection through itself (see [Routing](#routing)). The Hop ID announcement filter (see [Hop Parameter](#hop-parameter)) exists for loop avoidance, not access control: a subscriber cannot verify that a publisher honored it, so it MUST NOT be relied upon to hide a broadcast from a peer that declared its Hop ID.
+Hop IDs (see [ANNOUNCE_OK](#announce-ok) and [ANNOUNCE_START](#announce-start)) expose the relay path of a broadcast, which may reveal internal topology. A relay that does not wish to disclose its position MAY declare 0 in ANNOUNCE_OK or omit the SETUP Hop parameter; a Hop ID list never contains 0, so the receiver assigns an identity and the path is still named (see [Routing](#routing)). The Hop ID announcement filter (see [Hop Parameter](#hop-parameter)) exists for loop avoidance, not access control: a subscriber cannot verify that a publisher honored it, so it MUST NOT be relied upon to hide a broadcast from a peer that declared its Hop ID.
 
 ## Resource Exhaustion
 A peer can open many streams (subscriptions, announcements, fetches), request large announce prefixes, or advertise broad patterns. Implementations SHOULD bound the number of concurrent subscriptions, announce matches, and cached groups, and SHOULD rely on QUIC flow control and stream limits to backpressure a misbehaving peer (see [ANNOUNCE_REQUEST](#announce-request)). Expiration (see [Expiration](#expiration)) bounds how long stale groups consume memory and flow control. A pattern route invites a request for any matching path, each of which may start work: an advertiser SHOULD bound the work it starts and refuse beyond that with NO_CAPACITY, and a receiver re-resolves at most once per request, so a flood of requests costs the mesh one round trip each rather than a search (see [Resolution](#resolution)).

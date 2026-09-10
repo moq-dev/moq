@@ -1,6 +1,6 @@
 //! Regression for an external publisher whose protocol does not declare a Hop ID.
-//! The relay records that publisher as `Hop::UNKNOWN`; reflected cluster paths
-//! must not replace it while gossiping around a redundant mesh.
+//! The relay assigns that publisher an identity; reflected cluster paths must not
+//! replace it while gossiping around a redundant mesh.
 
 use std::{net::TcpListener, time::Duration};
 
@@ -122,8 +122,8 @@ async fn publish_version(port: u16, version: &str) -> Publisher {
 }
 
 async fn publish_unknown(port: u16) -> Publisher {
-	// Draft-14 has no Cluster extension, so the accepting relay must represent
-	// this external publisher with the wire-defined UNKNOWN Hop ID.
+	// Draft-14 has no Cluster extension, so the accepting relay assigns this
+	// external publisher an identity of its own.
 	publish_version(port, "moq-transport-14").await
 }
 
