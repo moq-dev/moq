@@ -71,6 +71,7 @@ can act on. Each still carries its own plan and regression test.
 - [AV1 metadata OBUs](/quest/m2/av1-metadata.md) - HDR10+, timecode and scalability OBUs become addressable
 - [FLV script tags](/quest/m2/flv-script.md) - onMetaData and AMF data messages survive RTMP and FLV import
 - [Mobile](/quest/m2/mobile/README.md) - MoQ runs natively on iOS and Android: an FFI video consumer, the ownership decision, capture, and the Dart device proof
+- [Compressed tracks](/quest/m2/flate/README.md) - any track compresses per group from every language, not only the JSON modes
 - [VAAPI encode and decode](/quest/m2/video-vaapi.md) - DMA-BUF encode, H.265 decode, and pre-generated bindings that remove the libclang build dependency, all gated on a moq-dev/vaapi release
 - [Dart leaks](/quest/m2/dart-leak.md) - the generated Dart bindings leak native memory on every call
 - [Dart publish](/quest/m2/dart-publish.md) - the packages are built and dry-run clean but exist nowhere consumers can install from
