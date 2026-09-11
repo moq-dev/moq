@@ -48,7 +48,6 @@ additive quest that builds on dev-only code start on main afterwards from
 ## Required
 
 - [m0](/quest/m0/README.md) - every release blocker lands or is punted before the merge
-- [Archive store](/quest/m1/archive-store.md) - the object layout the catalog names
 - [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - every native binding on the announce surface
 - [Monotonic timeline](/quest/m1/monotonic-timeline.md) - so a shed marker still jumps the playhead on a timestamp hole (#3291)
 - [Advertise](/quest/m1/wildcard-advertise.md) - so `dynamic(prefix, route)` takes a path pattern before the announce API is published

@@ -47,7 +47,3 @@ does not infer a terminal broadcast state: a caller such as a managed
 recordings API may supply finality out of band, and the reader then finishes
 the replayed timeline track. Otherwise an archive may be growing, crashed, or
 missing its tail, and remains readable.
-
-## Required
-
-- [Archive store](/quest/m1/archive-store.md)

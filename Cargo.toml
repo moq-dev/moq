@@ -3,6 +3,7 @@ members = [
     "rs/hang",
     "rs/kio",
     "rs/libmoq",
+    "rs/moq-archive",
     "rs/moq-audio",
     "rs/moq-bench",
     "rs/moq-binary",
@@ -39,6 +40,7 @@ default-members = [
     "rs/kio",
     "rs/hang",
     # "rs/libmoq",    # requires C toolchain
+    "rs/moq-archive",
     "rs/moq-boy",
     "rs/moq-audio",
     "rs/moq-bench",
@@ -171,6 +173,9 @@ objc2-av-foundation = "0.3.2"
 objc2-core-media = "0.3.2"
 objc2-foundation = "0.3.2"
 objc2-screen-capture-kit = "0.3.2"
+# Default features off so a consumer that only needs InMemory does not pull the
+# local-filesystem stack; `fs` (and cloud backends) are opted in by the caller.
+object_store = { version = "0.14", default-features = false }
 percent-encoding = "2"
 pollster = "1.0"
 pulldown-cmark = { version = "0.13", default-features = false }

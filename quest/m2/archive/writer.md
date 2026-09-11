@@ -75,10 +75,6 @@ owns its storage and track choices, `moq-cli` attaches the writer to every
 import path and enrolls the resulting `broadcast::Consumer` tracks. Downstream
 (moq.pro) gateways attach the same writer once it ships in a release.
 
-## Required
-
-- [Archive store](/quest/m1/archive-store.md)
-
 ## Closes
 
 - [#2281](https://github.com/moq-dev/moq/issues/2281) - close this issue when the quest finishes
