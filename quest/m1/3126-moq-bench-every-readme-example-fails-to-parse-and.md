@@ -7,6 +7,12 @@ within the issue's stated scope and boundaries.
 
 ## Plan
 
+The moq.pro distributed harness requires mergeable per-interval histogram
+buckets; percentiles alone do not satisfy it. Specify versioned bucket layout,
+units, window boundaries, sample counts, and empty/partial intervals. Test that
+aggregating two fixtures matches the combined sample distribution, then include
+moq-bench in the release's binary cache artifacts.
+
 Rescoped during the 2026-08 grooming: the README half is fixed on dev by the
 usage migration. What remains: per-interval latency percentiles or histograms
 so the startup ramp can be excluded from steady-state numbers.

@@ -9,6 +9,11 @@ printed. A passing run still cleans up.
 
 ## Plan
 
+Preserve the original exit status when capture or cleanup also fails. Bound
+retention and inspect generated configs/traces for credentials before upload;
+use the existing harness directory and CI artifact path rather than another
+reporting mechanism.
+
 The harness library already gives every run a private directory with each
 process's log, and `MOQ_TEST_KEEP=1` retains it; on failure it prints the
 rerun command but still deletes the directory unless the flag was set. The
@@ -30,4 +35,4 @@ run needs; if one of them earns its place later it is its own quest.
 
 ## Related
 
-- [Impaired path](/quest/m0/transport-impairment-profile.md) - records the profile and seed in the same directory
+- [Impaired path](/quest/m2/transport-impairment-profile.md) - records the profile and seed in the same directory

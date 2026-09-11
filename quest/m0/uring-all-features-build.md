@@ -7,6 +7,10 @@ nightly `just rs features` gate covers `moq-uring` instead of failing on it.
 
 ## Plan
 
+The affected renamed backend is on dev. Reproduce all-features/all-targets
+with the pinned Nix toolchain, fix the unqualified quinn_proto::Side at its
+owning import/type, and keep the nightly feature-matrix case discriminating.
+
 Enabling both `noq` and `quinn` puts two `quinn_proto` versions in scope, and
 `rs/moq-uring/src/quic/quinn/connection.rs`'s test module refers to
 `quinn_proto` unqualified, so the reference is ambiguous and the test target

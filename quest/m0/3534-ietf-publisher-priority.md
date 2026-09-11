@@ -18,6 +18,12 @@ The local send queue keeps ranking by each subscription's own priority.
 
 ## Plan
 
+Dev already stamps info.priority in the publisher. Scope the remaining work to
+property/default propagation and ingestion in both languages, including main's
+draft-21 support. Explicitly test absent/default priority and disagreement with
+subgroup priority against the negotiated draft; do not duplicate the completed
+publisher half or infer full completion from it.
+
 The model has the field: `track::Info::priority` (higher first) rides TRACK_INFO
 on moq-lite, and `rs/moq-net/src/ietf/priority.rs` converts to the wire's
 lower-first byte. The IETF side ignores it in both directions:
@@ -67,4 +73,4 @@ specifies the field.
 
 ## Related
 
-- [IETF error codes](/quest/m0/ietf-error-codes.md) - the sibling sweep of the moq-transport registries
+- [IETF error codes](/quest/m0/integration-proof.md) - the sibling sweep of the moq-transport registries

@@ -78,5 +78,5 @@ On main, additive.
 
 ## Related
 
-- [IETF error codes](/quest/m0/ietf-error-codes.md) - the registered codes
+- [IETF error codes](/quest/m0/integration-proof.md) - the registered codes
   AUTH_ERROR reuses

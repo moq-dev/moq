@@ -28,7 +28,7 @@ raw ndjson traces attached to release `rt-audio-traces-2026-09-06`. Upstream
 that rather than reinventing it.
 
 Jitter comes from the seeded userspace UDP shaper in [Impaired
-path](/quest/m0/transport-impairment-profile.md), not from a fake arrival clock,
+path](/quest/m2/transport-impairment-profile.md), not from a fake arrival clock,
 so the transport's own contribution is measured rather than assumed. That quest
 builds the shaper inside the relay drills' support code; it has to come out into
 something a JS harness process can also put in front of a relay. Extracting it
@@ -50,7 +50,7 @@ each of those dimensions moves the expected floor.
 
 ## Related
 
-- [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - the estimator this exists to keep honest
+- [Audio jitter target](/quest/m2/audio-jitter-target/README.md) - the estimator this exists to keep honest
 - [Latency ledger](/quest/m2/latency-ledger.md) - promotes this harness's probes into a public API
 - [Failure artifacts](/quest/m0/qa-failure-artifacts.md) - keeps the run directory and trace of a failing run
 - [Time stretch](/quest/m2/watch-audio-time-stretch.md) - graded by this harness once it lands

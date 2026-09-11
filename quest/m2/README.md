@@ -2,6 +2,9 @@
 
 ## Goal
 
+Post-merge archive features, adaptive playout, tooling, and scaling work.
+Deferred work remains planned but does not block the dev release.
+
 New capabilities on stable surfaces: wire and routing extensions, QoS,
 E2EE, sidecar metadata, gateways, bindings, and developer-facing packages.
 
@@ -18,8 +21,14 @@ can act on. Each still carries its own plan and regression test.
 
 ## Quests
 
+- [Timeline-indexed MoQ archives](/quest/m2/archive/README.md) - Timeline-indexed MoQ archives
+- [Audio jitter target](/quest/m2/audio-jitter-target/README.md) - The audio playout target is a measured estimate of arrival timing, ported from a known-good implementation, in the browser and natively alike
+- [play: an audio rendition switch costs a delay of silence](/quest/m2/play-audio-rendition-gap.md) - Swapping audio renditions in `moq play` is inaudible, rather than leaving a silence the size of `--delay`
+- [moq-mux: catalog jitter measures how far behind the media clock an encoder flushes](/quest/m2/jitter-flush-clock.md) - moq-mux: catalog jitter measures how far behind the media clock an encoder flushes
+- [The transport drills run over a seeded, impaired UDP path](/quest/m2/transport-impairment-profile.md) - The transport drills run over a seeded, impaired UDP path
+- [Tooling: thin justfiles and CI that calls them](/quest/m2/tooling/README.md) - Tooling: thin justfiles and CI that calls them
+- [Decide the relay listening kind field](/quest/m2/harness-drive-bys.md) - Decide the relay listening kind field
 - [Generation](/quest/m2/hls-generation.md) - init URLs follow the rendition config and segment URLs carry an embedder-supplied generation, so caching can be re-enabled
-- [Wildcard](/quest/m2/wildcard/README.md) - a service advertises a path pattern it could serve instead of enumerating broadcasts
 - [Path patterns](/quest/m2/path-patterns/README.md) - one versioned matcher for every predicate over broadcast paths: tokens, origins, interest
 - [In-band auth](/quest/m2/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish
 - [Auth API](/quest/m2/auth-api/README.md) - the relay's auth endpoint names mTLS peers, scopes them explicitly on v1, moves a tier in place, and says once when revalidation is off
@@ -48,7 +57,6 @@ can act on. Each still carries its own plan and regression test.
 - [SEI](/quest/m2/sei/README.md) - H.26x SEI moves into its own track, readable without subscribing to video
 - [Processor](/quest/m2/processor/README.md) - a customer-run worker publishes an on-demand contribution with scoped access
 - [Timeline wall](/quest/m2/timeline-wall.md) - every built-in publisher anchors its timeline to wall time; the anchor is data, never a sync source
-- [Duration marker](/quest/m2/duration-marker.md) - a video group ends with an empty frame that closes its last frame's duration; audio never writes one
 - [LOC duration marker](/quest/m2/loc-duration-marker.md) - LOC producers write the marker once released consumers skip it
 - [#2278](/quest/m2/2278-watch-absolute-wall-clock-latency-target-for-synchronized.md) - hang: a timeline consumer exposes the wall anchor, and the library never syncs playback on it
 - [Time stretch](/quest/m2/watch-audio-time-stretch.md) - js/watch: the audio ring converges by time-stretching instead of skipping or going silent
@@ -96,3 +104,5 @@ can act on. Each still carries its own plan and regression test.
 - [Capture ergonomics](/quest/m2/capture-ergonomics.md) - region capture, audio mixing, and validating format overrides
 - [X11 capture transport](/quest/m2/x11-capture-shm.md) - move X11 capture to shared memory and RandR events instead of a per-frame socket copy
 - [Capture frame buffers](/quest/m2/capture-frame-buffers.md) - stop rebuilding a full-frame buffer every tick in the X11 and Windows backends
+- [Catalog track identity](/quest/m2/catalog-tracks.md) - Choose how a catalog describes a track over its lifetime so live playback and recorded playback do not guess which configuration applies to a media group
+- [Expose WebSocket fallback policy through native bindings](/quest/m2/ffi-websocket-fallback.md) - A native binding consumer can explicitly select the supported WebSocket fallback policy without changing the transport connection race's error semantics

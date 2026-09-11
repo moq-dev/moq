@@ -2,17 +2,16 @@
 
 ## Goal
 
-Everything that lands on the dev branch or with its merge to main: the
-thread-per-core runtime (moq-uring, moq-tokio, quiche), the net model and
-allocator follow-ups, breaking bindings work, and the archive line that gates
-the merge itself, because moq.pro needs archive-backed recording on the release
-that `dev` produces before it can adopt it.
+The breaking API work and explicit gates for the dev release. The full archive
+feature follows in M2; bounded live timeline and existing playback remain
+release requirements. The merge quest names the actual prerequisites.
 
 ## Plan
 
-Branch these quests from dev, not main. Several were rescoped during the
-2026-08 grooming because dev already moved under them; reconcile each plan
-with the current dev tree before starting.
+Use the current dev design for renamed packages, announce bindings, wildcard
+advertisement, and monotonic timeline markers. Do not revive superseded main
+plans during integration. Target implementation branches according to their
+actual public API impact; planning placement alone does not dictate a base.
 
 ## Quests
 
@@ -29,18 +28,13 @@ with the current dev tree before starting.
 - [#2853](/quest/m1/2853-quiche-with-a-pinned-source-port-can-dial-only-a-broken.md) - quiche with a pinned source port can dial only a broken IPv4 address
 - [#2624](/quest/m1/2624-moq-native-goaway-redirect-guard-classifies-hosts-by-name.md) - moq-native: GOAWAY redirect guard classifies hosts by name, not by resolved address
 - [#3161](/quest/m1/3161-retention-should-reclaim-idle-open-groups-now-that-expiry.md) - Retention should reclaim idle open groups now that expiry is timestamp-only
-- [Gap discontinuity](/quest/m1/gap-discontinuity.md) - a hole in the delivered group sequence is the discontinuity unless the boundary proves continuity; no marker has to arrive
-- [Monotonic timeline](/quest/m1/monotonic-timeline.md) - a track's timestamps never fall below its live edge; publishers declare a discontinuity and continue forward, consumers stop detecting rewinds
+- [Timelines only move forward](/quest/m1/monotonic-timeline.md) - use the settled marker and playhead contract without relying on delivered reset packets
 - [Group overflow](/quest/m1/group-overflow-abort.md) - an oversized open group aborts for every reader instead of shedding its head
 - [#2895](/quest/m1/2895-add-an-atomic-readiness-gate-for-origin-broadcasts.md) - Add an atomic readiness gate for Origin broadcasts
 - [#2985](/quest/m1/2985-js-net-path-keyed-publisher-state-goes-stale-when-a.md) - js/net: path-keyed publisher state goes stale when a broadcast is replaced
 - [#2991](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - net: coalesce dynamic tracks and preserve sequences across replacements
-- [Announce handle](/quest/m1/announce-handle.md) - announce(prefix, route) advertises and serves requests; create_broadcast plus set_announce publishes
-- [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - every native binding exposes create_broadcast, set_announce, and announce with one meaning
-- [JS announce](/quest/m1/js-announce.md) - js/net gets createBroadcast, an announce flag, and the announce handle
-- [Dart announce](/quest/m1/dart-announce.md) - the Dart wrapper mirrors the same three operations once dev merges
-- [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS; gates the dev merge
-- [Playable](/quest/m1/hls-playable.md) - a 24/7 broadcast never becomes permanently unplayable over HLS
+- [Bindings: create_broadcast, announce, and dynamic mean the same thing in every binding](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - mirror unadvertised creation and broadcast-owned announce across native bindings
+- [js/net: createBroadcast, a broadcast-owned announcement, and the dynamic handle](/quest/m1/js-announce.md) - align JS createBroadcast, announce, and dynamic pattern handles
 - [#2815](/quest/m1/2815-lift-adaptive-stage-refusal.md) - moq-cli runs several adaptive import stages on one connection now that the allocator divides the estimate
 - [#2848](/quest/m1/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - Follow the bandwidth grant in moq-audio instead of holding a fixed reservation
 - [#2859](/quest/m1/2859-passthrough-imports-reserve-no-bandwidth-so-a-co-resident.md) - Passthrough imports reserve no bandwidth, so a co-resident encoder over-targets
@@ -73,3 +67,5 @@ with the current dev tree before starting.
 - [Anonymous rank](/quest/m1/anonymous-route-rank.md) - moq-net: a route through an anonymous hop ranks below every identified route at any cost, and hop 0 travels the chain to say so
 - [#2248](/quest/m1/2248-moq-mux-rebase-fmp4-export-timestamps-for-late-subscribers.md) - moq-mux: rebase fMP4 export timestamps for late subscribers
 - [Merge dev](/quest/m1/merge-dev.md) - dev lands on main with a closing keyword for every issue it fixed
+- [js/publish declares a discontinuity with a marker group](/quest/m1/js-publish-discontinuity.md) - emit the same discontinuity markers from JS publishers
+- [Wildcard advertisements](/quest/m1/wildcard/README.md) - settle pattern advertisement before publishing the announce API

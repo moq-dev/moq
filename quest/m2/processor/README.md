@@ -30,5 +30,4 @@ and custom transforms use the same worker lifecycle.
 - [Reference vision worker](/quest/m3/processor-vision.md) - a runnable worker
   publishes frame-correlated detections and proves demand, reconnect,
   failover, and teardown end to end
-- [Wildcard advertisements](/quest/m2/wildcard/README.md) - lets a dormant
-  processor advertise what it could serve without enumerating live sources
+- [Wildcard advertisements](/quest/m1/wildcard/README.md) - settle pattern advertisement before publishing the announce API

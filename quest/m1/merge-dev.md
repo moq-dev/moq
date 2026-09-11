@@ -1,29 +1,35 @@
-# [L] Merge dev into main
+# [XL] Merge dev into main
 
 ## Goal
 
 `main` carries everything on `dev`: the thread-per-core runtime, the net model
-and allocator work, the announce handle and its bindings, the archive line, and
+and allocator work, the announce handle and its bindings, and
 every fix that only dev has. The merge PR closes each issue dev fixed with a
 closing keyword, and the release that follows is the one moq.pro adopts.
 
 ## Plan
 
-As of 2026-09-05 dev is 243 commits ahead of main and main 16 ahead of dev.
-Merge main into dev first and resolve there, then open the merge PR from dev
-with the list below as closing keywords. Run `just check-all`, `just test all`,
-`just test smoke-full`, and `just bench origin/main` on the merged tree. The
-breaking-change targeting rules in CONTRIBUTING.md govern the release that
-follows, and [Dart announce](/quest/m1/dart-announce.md) unblocks when this
-lands.
+Merge readiness is established on the integrated tree, not dated branch counts. Merge main into
+dev first and resolve there, then open the merge PR from dev with the list
+below as closing keywords. Run `just check-all`, `just test all`,
+`just test smoke-full`, and `just bench origin/main` on the merged tree.
+
+Also soak HLS on the merged tree: a fresh viewer joining a `moq import ts`
+broadcast that has been up for days must get a playlist promptly. The bounded
+`moq_json::window` timeline (#3240) is what makes that hold, and only a long
+run proves it.
+
+The breaking-change targeting rules in CONTRIBUTING.md govern the release
+that follows. Dart lands on that surface with #3190, so nothing waits on this
+merge for it.
 
 ## Required
 
-- [Archive](/quest/m1/archive/README.md) - moq.pro needs archive-backed recording on the release dev produces
-- [Announce handle](/quest/m1/announce-handle.md) - the origin surface the merge ships
+- [M0 correctness and release proof](/quest/m0/README.md) - finish retained defects and verify the combined tree
 - [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - every native binding on that surface
 - [JS announce](/quest/m1/js-announce.md) - js/net on that surface
-- [Gap discontinuity](/quest/m1/gap-discontinuity.md) - so the lost-reset regression does not ship
+- [Monotonic timeline](/quest/m1/monotonic-timeline.md) - so a shed marker still jumps the playhead on a timestamp hole (#3291)
+- [Advertise](/quest/m1/wildcard/advertise.md) - so `dynamic(prefix, route)` takes a path pattern before the announce API is published
 
 ## Closes
 
@@ -52,11 +58,11 @@ lands.
 - [#2217](https://github.com/moq-dev/moq/issues/2217) - moq-ffi: the announce handle carries the lifecycle (announce-handle, #3190)
 - [#980](https://github.com/moq-dev/moq/issues/980) - dual-stack binding on main; happy eyeballs in `moq-tokio::resolve` (#2749)
 - [#2153](https://github.com/moq-dev/moq/issues/2153) - go: the wrapper caught up on main; hops landed on dev (#2168)
-- [#679](https://github.com/moq-dev/moq/issues/679) - QUIC receive is spread across thread-per-core workers, each on its own socket (#2875)
+- [#679](https://github.com/moq-dev/moq/issues/679) - QUIC receive is spread across thread-per-core workers, each on its own socket (#2921)
 - [#1073](https://github.com/moq-dev/moq/issues/1073) - the origin lifecycle is caller-driven: `origin::Driver` plus `moq_tokio::origin::spawn` (#2897, #2901)
-- [#2155](https://github.com/moq-dev/moq/issues/2155) - js/net: subscriptions take an options object with start and end groups and `update()`; ordering became a handle
+- [#2155](https://github.com/moq-dev/moq/issues/2155) - js/net: subscriptions take a `Subscription` options object with `startGroup`, `endGroup`, and `update()` (#2716); ordering became a handle (#3099)
 - [#3493](https://github.com/moq-dev/moq/issues/3493) - the timeline is a `moq_json::window` with a bounded checkpoint, so a 24/7 importer no longer retains every record (#3240)
 
 ## Related
 
-- [Dart announce](/quest/m1/dart-announce.md) - waits on this merge, so it cannot be required here
+- [Archive](/quest/m2/archive/README.md) - storage and replay follow this release

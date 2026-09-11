@@ -17,12 +17,8 @@ kind, at its priority rank.
 
 ## Quests
 
-- [m0: bug fixes](/quest/m0/README.md) - defects in what main ships today,
-  security first
-- [m1: the dev line](/quest/m1/README.md) - the thread-per-core runtime, net
-  model follow-ups, breaking bindings work, and the archive line that gates
-  the dev merge
-- [m2: features](/quest/m2/README.md) - new capabilities on stable surfaces,
-  from wire extensions to E2EE to developer packages
+- [m0: dev merge readiness](/quest/m0/README.md) - retained correctness fixes and finite release proof
+- [m1: the dev release](/quest/m1/README.md) - breaking API work and explicit merge prerequisites
+- [m2: post-merge work](/quest/m2/README.md) - deferred product capabilities, operations, tooling, and scale
 - [m3: prototypes](/quest/m3/README.md) - experiments, spikes, hardware
   validation, and measured go/no-go verdicts

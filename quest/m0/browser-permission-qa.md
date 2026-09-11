@@ -10,6 +10,12 @@ browser harness proves all of it.
 
 ## Plan
 
+Expose the denied capture state through the existing error/state mechanism and
+recover only on an explicit retry or source re-enable after permission changes;
+do not poll or silently retry a terminal denial. If that requires a new public
+API shape, settle it before implementation. Gesture-driven suspended AudioContext
+behavior belongs to publish-audio-unlock, so this test does not duplicate it.
+
 Today a denial is invisible. `js/publish/src/source/camera.ts` swallows the
 `getUserMedia` rejection (`.catch(() => undefined)`) and hands it to the
 retry loop; `microphone.ts` does the same, `device.ts` only warns. `Camera.out`

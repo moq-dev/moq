@@ -108,5 +108,4 @@ ALPN.
   prefixes to patterns along with ANNOUNCE_REQUEST
 - [Expiring media grants](/quest/m2/processor/grant-lease.md) - a worker's
   lease renewal is a new in-band token
-- [Connect auth race](/quest/m0/3532-connect-auth-race.md) - the connect-time
-  auth error this questline does not change
+- [A connect fails on auth only once every transport has](/quest/m0/3532-connect-auth-race.md) - keep a viable transport alive when its sibling fails authentication

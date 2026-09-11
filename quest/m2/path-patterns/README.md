@@ -78,7 +78,6 @@ represent `pid/*/chat`.
 
 ## Related
 
-- [Wildcard advertisements](/quest/m2/wildcard/README.md) - routing adopts the
-  matcher while retaining its own cost, pool, refusal, and resolution work
+- [Wildcard advertisements](/quest/m1/wildcard/README.md) - settle pattern advertisement before publishing the announce API
 - [mTLS explicit scope](/quest/m2/auth-api/mtls-scope.md) - an mTLS grant
   uses the same versioned publish and subscribe pattern sets

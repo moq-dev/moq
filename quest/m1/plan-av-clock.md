@@ -1,44 +1,41 @@
-# [S] Plan: the audio playhead drives video sync while audio plays
+# [M] The audio playhead drives Sync.reference while audio plays
 
 ## Goal
 
-A written decision, recorded in this file and then executed as its own quest,
-on how `js/watch` keeps audio and video in sync. Today the audio ring is
-depth-driven and free-running on the AudioContext clock while video paces
-against `Sync.reference`, a wall clock anchored at the earliest arrival.
-Nothing ties them; A/V sync is emergent from both targeting the same delay,
-so a ring that re-buffers or skips drifts against video until the next
-re-anchor. The outcome is an audio-master clock: `Sync.reference` derives
-from the audio playhead while audio plays and falls back to the wall clock
-when muted or video-only.
+`js/watch` keeps audio and video in sync from one clock. While audio plays,
+`Sync.reference` derives from the audio playhead; muted or video-only playback
+falls back to the wall clock. Today the ring is depth-driven and free-runs on
+the AudioContext clock while video paces against a wall clock anchored at the
+earliest arrival, so a ring that re-buffers or skips drifts against video until
+the next re-anchor.
 
 ## Plan
 
-Branch from dev; the `Sync` inputs are public `@moq/watch` API and #3517
-already reshaped them there.
+Settled: per-track handles. `sync.track("audio")` and `sync.track("video")`
+each report their advertised delay and measured spread, and one is nominated
+as the clock source. This quest owns that public API change; the closed
+prototype #3517 is not a prerequisite. `SyncInput`
+(`js/watch/src/sync.ts:21-46`, today `delay`, `buffer`, `probe`, `audio`,
+`video`) breaks once, and a third track joins without another pair of inputs.
 
-Two API shapes were on the table on 2026-09-07 and neither was chosen:
+Recommendations for the implementation:
 
-- Per-track handles: `sync.track("audio")` / `sync.track("video")`, each
-  reporting its own advertised delay and measured spread and one of them
-  nominated as the clock source. Recommended then, because it removes the
-  `audio`/`video`/`audioSpread`/`videoSpread` quartet of inputs and lets a
-  third track (text) join without another pair.
-- `delay` as a floor only: keep the flat inputs, drop `"auto"`, and let the
-  audio playhead be the reference whenever an audio track is active.
-
-Decide with the estimator in hand: what the audio decoder can expose as its
-playhead across the isolated and postMessage ring paths, how the video
-decoder's per-frame `sync.wait()` reads it without a cross-thread hop per
-frame, and what happens at the transitions (mute, audio track end, the ring
-re-stalling). Record the verdict here, re-title this file as the
-implementation quest, and re-estimate it.
-
-## Required
-
-- PR #3517 has merged to `dev`
+- Playhead source. On the SharedArrayBuffer path the worklet's sample counter
+  is the playhead (`js/watch/src/audio/shared-ring-buffer.ts`). On the
+  postMessage path (`js/watch/src/audio/ring-buffer.ts`) the worklet posts an
+  estimate and the main thread extrapolates between posts.
+- Video reads a locally extrapolated clock, re-synced once per audio quantum,
+  so the per-frame `sync.wait()` (`js/watch/src/video/decoder.ts:332`) never
+  crosses a thread.
+- Transitions. On mute or audio track end the reference falls back to the
+  wall clock at the last audio-derived value, so video does not jump. A ring
+  re-stall reads as the playhead pausing, and the reference pauses with it.
+- Reset coupling stays: `<moq-watch>` already flushes the ring alongside
+  `sync.reset()` (`js/watch/src/element.ts:301`, `:620-621`).
+- The text renderer is the third track: it reads `sync.now()`
+  (`js/watch/src/text/renderer.ts:261`) for the cues it drains at `:273-278`.
 
 ## Related
 
-- [Audio jitter target](/quest/m0/audio-jitter-target/README.md) - the estimator this sits on
+- [Auto latency](/quest/m2/audio-jitter-target/watch.md) - later measured-target integration; existing delay inputs suffice here
 - [Time stretch](/quest/m2/watch-audio-time-stretch.md) - stretching needs a clock to converge toward

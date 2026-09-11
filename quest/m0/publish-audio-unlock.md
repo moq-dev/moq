@@ -7,6 +7,12 @@ why it cannot. `<moq-publish>` never announces an audio track that silently carr
 
 ## Plan
 
+Reproduce capture with a suspended AudioContext before changing the fixture.
+Use the shared gesture helper and remove the fixture's withholding workaround
+only when real capture produces audio after a gesture. Keep denied permission
+and suspended context distinguishable and verify both isolated and postMessage
+paths in the existing browser harness.
+
 `@moq/publish`'s `Audio.Encoder` builds its own `AudioContext` the moment a source appears
 (`#runSource`) and never resumes it. `@moq/watch`'s decoder handles the same problem with
 `unlockOnGesture`; the publisher has no equivalent.
