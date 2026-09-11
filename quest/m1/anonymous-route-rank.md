@@ -32,10 +32,19 @@ Hop 0 in a chain is the mark, and it travels:
   This reverses the direction of #3060, whose quest is deleted with this one:
   an assigned identity is private selection state and forwarding it published
   a name for a peer that declined to give one.
-- `route_order` becomes `(anonymous, Cost, len, hash, id)`, where `anonymous`
-  is whether the chain holds a 0 anywhere. Lite-03 hop-count placeholders are
-  0 entries and count as anonymous, which is what they are. `Route` exposes
-  `is_anonymous()` for the bindings and the announcement stream.
+- `route_order` becomes `(anonymous, Cost, len, hash, Reverse(id))`, where
+  `anonymous` is whether the chain holds a 0 anywhere; the rest of the key is
+  dev's as it stands. Main's leading `!announce` term and its `attach_source`
+  takeover gate do not exist on dev: every route in the table is announced,
+  routes for one prefix coexist, and `best_route` is the whole decision, so
+  arrival order cannot let an anonymous route replace an identified one.
+  Lite-03 hop-count placeholders are 0 entries and count as anonymous, which
+  is what they are. `Route` exposes `is_anonymous()` for the bindings and the
+  announcement stream.
+- `js/net` keeps accepting 0 inside a received chain and exposes `anonymous`
+  on the announcement it yields; it ranks nothing today, and the browser hop
+  in [P2P](/quest/m3/p2p/README.md) forwards 0 like a relay when it lands.
+  `doc/concept/transport.md` states the selection rule beside route cost.
 - Loop detection is unchanged: a 0 entry matches nothing, and a relay's own
   id still appears in the chain wherever it forwarded the route.
 - Drafts: `drafts/draft-lcurley-moq-cluster.md` "Assigned Identities" says
