@@ -8,8 +8,11 @@ certificate: `mtls=<identity>` replaces `mtls=true`. In proxy mode the
 endpoint's grant, or its absence, decides what the peer may publish and
 subscribe; in token mode a certificate-authenticated peer with no grant stays
 unrestricted until [mTLS explicit scope](/quest/m2/auth-api/mtls-scope.md),
-so a deployment answering `{alias, tier}` today is unaffected. Replies cache
-per identity. On dev, where the mode lives.
+so an endpoint answering `{alias, tier}` today keeps that reply shape. The
+request side is a breaking change to the endpoint contract: an endpoint that
+compares `mtls` to the literal `true` must accept any non-empty value before
+its relays upgrade. Replies cache per identity. On dev, where the mode lives
+and where breaking changes go.
 
 ## Plan
 
@@ -28,9 +31,11 @@ scope, because the root is the path the client dialed.
   grows `name()` beside `expiry()` and `fingerprint()`, parsed with the
   `x509-parser` it already uses. The docs say the identity is a value the
   endpoint matches, never proof by itself; the CA that signed the chain is.
-  An endpoint that compared `mtls` to the literal `true` treats any non-empty
-  value as verified from now on; say so in the auth API section of
-  `doc/bin/relay/auth.md`.
+  This replaces the documented `mtls=true`, and an endpoint that compares
+  the literal breaks for every mTLS peer, cluster peers included, until it
+  accepts any non-empty value. The auth API section of `doc/bin/relay/auth.md`
+  states the new value, the migration (accept non-empty first, then upgrade
+  relays), and the release note carries it as breaking.
 - The identity has to reach `verify_mtls` on every transport: QUIC keeps a
   `PeerIdentity` on the request, but the HTTPS and WebSocket path reduces the
   verified chain to the unit `MtlsPeer` marker in `rs/moq-relay/src/web.rs`,

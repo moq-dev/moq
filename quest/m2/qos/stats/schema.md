@@ -17,6 +17,13 @@ what a subscriber received and played, per audio and video. The relay is
   as they do today. A frame is `BTreeMap<String, Stats<E>>`, where `Stats<E>`
   is `Traffic` with `E` flattened beside it; `TrafficFrame` becomes that
   alias for `()`.
+- An exact-path mode. `ProducerConfig` treats its path as a prefix and
+  advertises `<prefix>/node[/<node>]`, so a client asking for
+  `room/alice.stats` would publish `room/alice.stats/node`, which no longer
+  ends in `.stats`. `ProducerConfig::at(path)` publishes the broadcast at
+  exactly that path with no category segment, refusing a path that does not
+  end in `.stats`; the relay keeps the prefix layout. Test the advertised
+  path for both modes.
 - Per-broadcast tracks: `requested_track_shape` in
   `rs/moq-stats/src/produce.rs` accepts
   `[<tier>/]<path>/{publisher,subscriber}.json[.z]` by matching the
