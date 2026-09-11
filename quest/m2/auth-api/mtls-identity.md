@@ -31,6 +31,9 @@ scope, because the root is the path the client dialed.
   grows `name()` beside `expiry()` and `fingerprint()`, parsed with the
   `x509-parser` it already uses. The docs say the identity is a value the
   endpoint matches, never proof by itself; the CA that signed the chain is.
+  Several CA-valid certificates may carry one name, by renewal or by design,
+  so the name keys an entitlement, never a certificate, and a deployment that
+  needs one grant per certificate enforces name uniqueness at its CA.
   This replaces the documented `mtls=true`, and an endpoint that compares
   the literal breaks for every mTLS peer, cluster peers included, until it
   accepts any non-empty value. The auth API section of `doc/bin/relay/auth.md`
