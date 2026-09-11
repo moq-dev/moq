@@ -85,7 +85,7 @@ import * as Publish from "@moq/publish";
 
 // Shared with every other component pointed at the same relay; its origin holds
 // the broadcasts, so they survive a reconnect.
-const connection = new Moq.Connection.Shared({ url: new URL("https://relay.example.com/anon") });
+const connection = new Moq.Connection({ url: new URL("https://relay.example.com/anon") });
 
 const broadcast = new Publish.Broadcast({
     origin: connection.origin,

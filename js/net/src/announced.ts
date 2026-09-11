@@ -154,9 +154,9 @@ export type BroadcastProps = {
 } & (
 	| {
 			/**
-			 * The connection to watch on. Accepts a live {@link Established} session, or a
-			 * reactive one (a `Connection.Reload`'s `established`), which is how the handle
-			 * survives reconnects.
+			 * The connection to watch on. Accepts a live {@link Established} session from
+			 * `Connection.connect`, or a reactive one, which is how the handle survives
+			 * reconnects. Prefer an origin-backed handle on a reconnecting `Connection`.
 			 */
 			connection: GetterInit<Established | undefined>;
 			origin?: undefined;
@@ -190,8 +190,9 @@ export type BroadcastProps = {
  * subscription resumes across the new route, so `active` holds the same consumer throughout and
  * never goes offline. Only a change of publisher produces an offline/online transition.
  *
- * Built from a reconnecting `Connection.Reload`, the handle also spans reconnects: the broadcast
- * drops to `undefined` while disconnected and resolves again once the new connection announces it.
+ * Built from a reconnecting `Connection`'s origin, the handle also spans reconnects: the
+ * broadcast drops to `undefined` while disconnected and resolves again once the new connection
+ * announces it.
  *
  * Falls back to consuming blind (and warns once) on a relay without
  * {@link Established.discovery}, where there is no announcement to wait for. `active` then
@@ -202,9 +203,10 @@ export type BroadcastProps = {
  *
  * If discovery fails on a live session (the announcement stream is reset, or the relay
  * refuses it) a connection-backed handle goes offline and stays there: nothing reopens the
- * stream on that connection. Build it from a `Connection.Reload` if you need it to recover,
- * since a new connection starts a new stream. An origin-backed handle recovers on its own:
- * the session stops counting as discovering, so the handle falls back to a standing request.
+ * stream on that connection. Build it from a reconnecting `Connection`'s origin if you need
+ * it to recover, since a new session starts a new stream. An origin-backed handle recovers
+ * on its own: the session stops counting as discovering, so the handle falls back to a
+ * standing request.
  *
  * Close it to release the announcement stream and the current broadcast.
  *

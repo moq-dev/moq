@@ -88,10 +88,10 @@ export default class MoqPublish extends HTMLElement {
 
 	/**
 	 * The relay connection, shared with every other element on the page pointing at the
-	 * same URL; see `Moq.Connection.Shared`. The broadcast publishes into its `origin`, so
-	 * a `<moq-watch>` on the same page and URL resolves it locally with no round trip.
+	 * same URL. The broadcast publishes into its `origin`, so a `<moq-watch>` on the same
+	 * page and URL resolves it locally with no round trip.
 	 */
-	connection: Moq.Connection.Shared;
+	connection: Moq.Connection;
 	/** The video capture, shared by every video rendition. Also reachable as `video.capture`. */
 	capture: Video.Capture;
 	broadcast: Broadcast;
@@ -151,7 +151,7 @@ export default class MoqPublish extends HTMLElement {
 
 		cleanup.register(this, this.signals);
 
-		this.connection = new Moq.Connection.Shared({
+		this.connection = new Moq.Connection({
 			enabled: this.#enabled,
 		});
 		this.signals.cleanup(() => this.connection.close());

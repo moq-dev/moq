@@ -86,7 +86,7 @@ authorizes screen capture, or pass a live input that is false until that gesture
 ```typescript
 import * as Publish from "@moq/publish";
 
-const connection = new Publish.Net.Connection.Shared({
+const connection = new Publish.Net.Connection({
     url: new URL("https://relay.example.com/anon"),
     enabled: true,
 });

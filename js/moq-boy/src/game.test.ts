@@ -16,7 +16,7 @@ test("audio downloads only while the tile is active and audible", async () => {
 	const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
 	Object.defineProperty(globalThis, "document", { configurable: true, value: new EventTarget() });
 
-	const connection = new Moq.Connection.Reload({ enabled: false });
+	const connection = new Moq.Connection({ enabled: false });
 	const origin = new Moq.Origin.Producer();
 	const game = new Game({
 		sessionId: "test",

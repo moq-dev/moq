@@ -38,7 +38,7 @@ for (;;) {
 ```
 
 - **Origins** hold the broadcasts, not the connection: closing a session unannounces them but leaves them created for the next one. `origin.request(path)` prefers a local broadcast, so a page that watches what it publishes reads its own copy with no round trip. Create, attach `dynamic()` for tracks served on demand, populate, then `announce()`: an exact-path subscribe before the tracks exist is refused, and announcing only makes a path discoverable.
-- **Connections** race WebTransport against WebSocket and expose a `closed` promise. `Connection.Shared` pools one connection per relay URL and reconnects with backoff, which the elements use.
+- **Connections** race WebTransport against WebSocket and expose a `closed` promise. `new Connection({ url })` pools one connection per relay URL and reconnects with backoff, which the elements use.
 - **Discovery** by prefix (`origin.announced(prefix)`), and `origin.dynamic("live/**", route)` to advertise a subtree served on demand.
 - **Subscriptions** carry a priority and max age; groups arrive out of order and are read frame by frame, with `Lagged` when frames were evicted before you read them.
 - **Datagrams** on moq-lite 05+ and fetch-by-sequence for history.

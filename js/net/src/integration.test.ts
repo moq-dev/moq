@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import type { Getter } from "@moq/signals";
 import * as Announce from "./announced.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import { accept, connect, Reload } from "./connection/index.ts";
+import { accept, Connection, connect } from "./connection/index.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import * as Group from "./group.ts";
 import * as Ietf from "./ietf/index.ts";
@@ -1785,12 +1785,13 @@ test("origin: a request is re-answered by the next session", async () => {
 	globalThis.WebTransport = stub as unknown as typeof WebTransport;
 
 	const clientOrigin = new OriginProducer();
-	const reload = new Reload({
+	const reload = new Connection({
 		enabled: true,
 		url: reconnectUrl,
 		websocket: { enabled: false },
 		delay: { initial: 10, multiplier: 1, max: 10 },
 		subscribe: clientOrigin,
+		share: false,
 	});
 
 	const request = clientOrigin.request(Path.from("standing"));

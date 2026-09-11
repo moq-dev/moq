@@ -1,14 +1,18 @@
 /**
- * Connection helpers: connect to or accept a MoQ session, reconnect on failure, and share
- * one connection per relay URL.
+ * A reconnecting, shareable handle on a MoQ session, plus one-shot connect/accept.
  *
  * @module
  */
-export * from "./accept.ts";
+export { type AcceptProps, accept } from "./accept.ts";
 export { isWebTransportSupported } from "./browser.ts";
-export * from "./connect.ts";
-export * from "./established.ts";
-export { Shared, type SharedProps } from "./pool.ts";
-export * from "./reload.ts";
+export {
+	type CertificateHash,
+	type ConnectProps,
+	certificateHash,
+	connect,
+	type WebSocketOptions,
+	type WebTransportProps,
+} from "./connect.ts";
+export { Connection, type ConnectionProps, resetShared } from "./pool.ts";
 export type { Probe, Stats } from "./stats.ts";
 export type { Transport } from "./transport.ts";

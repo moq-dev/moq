@@ -81,7 +81,7 @@ export class Fixture {
 		const audioTrack = destination.stream.getAudioTracks()[0] as unknown as Publish.Audio.StreamTrack;
 		this.#signals.cleanup(() => audioTrack.stop());
 
-		const connection = new Moq.Connection.Shared({ url: new URL(url), enabled: true });
+		const connection = new Moq.Connection({ url: new URL(url), enabled: true });
 		this.#signals.cleanup(() => connection.close());
 
 		const capture = new Publish.Video.Capture({ source: videoTrack });

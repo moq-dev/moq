@@ -141,7 +141,7 @@ const NEVER_ABORTED = new AbortController().signal;
  *
  * @param url - The URL of the server to connect to
  * @param props - Connection options
- * @returns A promise that resolves to a Connection instance
+ * @returns A promise that resolves to an established session
  */
 export async function connect(url: URL, props?: ConnectProps): Promise<Established> {
 	const signal = props?.signal ?? NEVER_ABORTED;

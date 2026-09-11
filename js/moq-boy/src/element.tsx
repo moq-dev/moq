@@ -24,7 +24,7 @@ const cleanup = new FinalizationRegistry<Moq.Signals.Effect>((signals) => signal
 export default class MoqBoy extends HTMLElement {
 	static observedAttributes = OBSERVED;
 
-	readonly connection: Moq.Connection.Reload;
+	readonly connection: Moq.Connection;
 	/** The origin viewer broadcasts are published into, served across reconnects. */
 	readonly origin = new Moq.Origin.Producer();
 	readonly expanded = new Moq.Signals.Signal<string | undefined>(undefined);
@@ -46,10 +46,11 @@ export default class MoqBoy extends HTMLElement {
 
 		// One origin, both directions: viewer broadcasts are published into it and the
 		// relay's announced games arrive in it, with no risk of echoing either back.
-		this.connection = new Moq.Connection.Reload({
+		this.connection = new Moq.Connection({
 			enabled: this.#enabled,
 			publish: this.origin.consume(),
 			subscribe: this.origin,
+			share: false,
 		});
 		this.#signals.cleanup(() => this.connection.close());
 		this.#signals.cleanup(() => this.origin.close());

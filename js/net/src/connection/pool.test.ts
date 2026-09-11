@@ -2,9 +2,10 @@ import { afterEach, expect, test } from "bun:test";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
+import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { accept } from "./index.ts";
-import { resetShared, Shared } from "./pool.ts";
+import { Connection, resetShared } from "./pool.ts";
 
 function publish(origin: { createBroadcast(path: Path.Valid): BroadcastProducer }, path: Path.Valid) {
 	const broadcast = origin.createBroadcast(path);
@@ -60,8 +61,8 @@ function stubTransports(): { count: () => number } {
 test("two handles on one URL share a connection and an origin", async () => {
 	const dials = stubTransports();
 
-	const first = new Shared({ url, linger });
-	const second = new Shared({ url });
+	const first = new Connection({ url, linger });
+	const second = new Connection({ url });
 
 	await waitUntil(() => first.status.peek() === "connected");
 	await waitUntil(() => second.status.peek() === "connected");
@@ -79,7 +80,7 @@ test("two handles on one URL share a connection and an origin", async () => {
 test("the connection closes after the last handle and the linger window", async () => {
 	const dials = stubTransports();
 
-	const handle = new Shared({ url, linger });
+	const handle = new Connection({ url, linger });
 	await waitUntil(() => handle.status.peek() === "connected");
 	const origin = handle.origin.peek();
 
@@ -91,7 +92,7 @@ test("the connection closes after the last handle and the linger window", async 
 	expect(origin?.closed.peek()).not.toBeUndefined();
 
 	// The next handle dials fresh.
-	const next = new Shared({ url, linger });
+	const next = new Connection({ url, linger });
 	await waitUntil(() => next.status.peek() === "connected");
 	expect(dials.count()).toBe(2);
 	next.close();
@@ -100,12 +101,12 @@ test("the connection closes after the last handle and the linger window", async 
 test("a handle taken within the linger window reuses the warm connection", async () => {
 	const dials = stubTransports();
 
-	const first = new Shared({ url, linger: 10_000 });
+	const first = new Connection({ url, linger: 10_000 });
 	await waitUntil(() => first.status.peek() === "connected");
 	const origin = first.origin.peek();
 	first.close();
 
-	const second = new Shared({ url });
+	const second = new Connection({ url });
 	await waitUntil(() => second.origin.peek() !== undefined);
 	expect(dials.count()).toBe(1);
 	expect(second.origin.peek()).toBe(origin);
@@ -115,8 +116,8 @@ test("a handle taken within the linger window reuses the warm connection", async
 test("disabling a handle releases its share", async () => {
 	stubTransports();
 
-	const toggled = new Shared({ url, linger });
-	const steady = new Shared({ url });
+	const toggled = new Connection({ url, linger });
+	const steady = new Connection({ url });
 	await waitUntil(() => toggled.status.peek() === "connected");
 
 	toggled.enabled.set(false);
@@ -139,7 +140,7 @@ test("disabling a handle releases its share", async () => {
 test("switching URLs switches origins", async () => {
 	const dials = stubTransports();
 
-	const handle = new Shared({ url, linger });
+	const handle = new Connection({ url, linger });
 	await waitUntil(() => handle.origin.peek() !== undefined);
 	const before = handle.origin.peek();
 
@@ -169,7 +170,7 @@ test("a shared connection outlasts an outage longer than the default retry windo
 	performance.now = () => start + (real() - start) * 1000;
 
 	try {
-		const handle = new Shared({ url, linger });
+		const handle = new Connection({ url, linger });
 		await waitUntil(() => handle.status.peek() === "disconnected");
 
 		// Two backoff waits, which is many times over the default window on this clock.
@@ -188,8 +189,8 @@ test("a shared connection outlasts an outage longer than the default retry windo
 test("a publish through one handle resolves locally for another", async () => {
 	stubTransports();
 
-	const publisher = new Shared({ url, linger });
-	const watcher = new Shared({ url });
+	const publisher = new Connection({ url, linger });
+	const watcher = new Connection({ url });
 	await waitUntil(() => publisher.origin.peek() !== undefined);
 
 	const origin = publisher.origin.peek();
@@ -206,4 +207,37 @@ test("a publish through one handle resolves locally for another", async () => {
 	broadcast.close();
 	publisher.close();
 	watcher.close();
+});
+
+test("share: false keeps a private loop and origin", async () => {
+	const dials = stubTransports();
+
+	const shared = new Connection({ url, linger });
+	const privateLoop = new Connection({ url, linger, share: false });
+
+	await waitUntil(() => shared.status.peek() === "connected");
+	await waitUntil(() => privateLoop.status.peek() === "connected");
+	expect(dials.count()).toBe(2);
+	expect(privateLoop.origin.peek()).not.toBe(shared.origin.peek());
+
+	shared.close();
+	privateLoop.close();
+});
+
+test("caller-owned origins and pinned certificates refuse to share", () => {
+	const origin = new OriginProducer();
+	try {
+		expect(() => new Connection({ subscribe: origin })).toThrow(/share: false/);
+		expect(() => new Connection({ publish: origin.consume() })).toThrow(/share: false/);
+		expect(() => new Connection({ webtransport: { serverCertificate: "x" } })).toThrow(/share: false/);
+		expect(() => new Connection({ webtransport: { serverCertificateHashes: [{ value: "aa" }] } })).toThrow(
+			/share: false/,
+		);
+	} finally {
+		origin.close();
+	}
+});
+
+test("a supplied transport cannot enter the reconnect loop", () => {
+	expect(() => new Connection({ transport: {} as never })).toThrow(/Connection\.connect/);
 });

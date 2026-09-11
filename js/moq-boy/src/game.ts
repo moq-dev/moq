@@ -17,7 +17,7 @@ export interface GameConfig {
 	/** Unique session identifier (e.g. the ROM name). */
 	sessionId: string;
 	/** MoQ connection to the relay. */
-	connection: Moq.Connection.Reload;
+	connection: Moq.Connection;
 	/** The origin viewer broadcasts are published into; the connection serves it. */
 	origin: Moq.Origin.Producer;
 	/** Shared signal tracking which game is currently expanded. */
@@ -280,11 +280,10 @@ export class Game {
 		});
 	}
 
-	#runCommands(connection: Moq.Connection.Reload, origin: Moq.Origin.Producer, effect: Moq.Signals.Effect) {
+	#runCommands(connection: Moq.Connection, origin: Moq.Origin.Producer, effect: Moq.Signals.Effect) {
 		// Publishing goes through the origin, but gate on a live connection anyway: a command
 		// broadcast for a game nobody is connected to is feedback into the void.
-		const conn = effect.get(connection.established);
-		if (!conn) return;
+		if (effect.get(connection.status) !== "connected") return;
 
 		if (!effect.get(this.active)) {
 			// Clear feedback state when deactivating.

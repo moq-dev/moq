@@ -26,7 +26,6 @@ quest here and merged main into dev.
 - [Advertise](/quest/m1/wildcard-advertise.md) - moq-net encodes, forwards, and authorizes wildcard advertisements, so `dynamic(pattern, route)` takes a pattern before the announce API is published
 - [Anonymous rank](/quest/m1/anonymous-route-rank.md) - moq-net: a route through an anonymous hop ranks below every identified route at any cost, and hop 0 travels the chain to say so
 - [Group overflow](/quest/m1/group-overflow-abort.md) - an open group past its budget aborts for every reader with GROUP_TOO_LARGE, and head eviction is deleted
-- [#2774](/quest/m1/2774-collapse-reload-and-shared-into-one-connection-class.md) - one cloneable refcounted `Connection` mirroring `moq_tokio::Connection`; close releases a handle
 - [Close classification](/quest/m1/js-close-classification.md) - a browser consumer tells a requested end from a fault, so the media harness fails on real errors during a transition
 - [#3187](/quest/m1/3187-preserve-structured-protocol-error-codes-across-ffi-and-c.md) - protocol error codes cross moq-ffi and C as a scope, code, and kind instead of a message string
 - [#2709](/quest/m1/2709-per-broadcast-bandwidth-estimates-and-reservation.md) - js/net mirrors the send-side bandwidth allocator so each publisher encodes against its own share
