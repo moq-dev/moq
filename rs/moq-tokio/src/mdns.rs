@@ -1,11 +1,12 @@
 //! LAN peer discovery over mDNS (DNS-SD), so MoQ processes on the same network
 //! find each other with no relay, DNS, or certificate authority.
 //!
-//! [`Config::advertise`] registers this process as a `_moq._udp.local.` service
-//! and starts browsing for the others, yielding [`Event`]s. Discovery is all
-//! this does: what to do with a peer (dial it, list it, ignore it) stays with
-//! the caller. [`Discovery::should_dial`] offers the pair tiebreaker so both
-//! sides agree on who opens the connection.
+//! [`Config::advertise`] registers this process under a DNS-SD subtype of
+//! `_moq._udp.local.` named by [`App`], browses that subtype, and yields
+//! [`Event`]s. Two applications on one network never resolve each other.
+//! Discovery is all this does: what to do with a peer (dial it, list it, ignore
+//! it) stays with the caller. [`Discovery::should_dial`] offers the pair
+//! tiebreaker so both sides agree on who opens the connection.
 //!
 //! The advertisement carries the listener's port plus, optionally, its
 //! certificate fingerprint (so a peer with a generated certificate can be
@@ -16,9 +17,10 @@
 //! an attacker can publish its own address and certificate fingerprint and be
 //! discovered like any other peer. [`Config::with_secret`] closes that off. Each
 //! side proves possession of a shared [`Secret`] with an HMAC-SHA256 proof bound
-//! to its own nonce, fingerprint, and node identity, so a peer without the
-//! secret is never reported at all, and the [`Peer::credential`] a dialer then
-//! presents is bound to that one listener and replays nowhere else.
+//! to its own nonce, fingerprint, node identity, and [`App`], so a peer without
+//! the secret is never reported at all, a record cannot be replayed under another
+//! application's subtype, and the [`Peer::credential`] a dialer then presents is
+//! bound to that one listener and replays nowhere else.
 //!
 //! Without a secret this is discovery only: treat the peer list as a hint and
 //! authenticate the session by other means before trusting it with anything.
@@ -30,6 +32,7 @@ use std::str::FromStr;
 
 use hmac::{KeyInit, Mac};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use subtle::ConstantTimeEq;
 use url::Url;
 
@@ -79,6 +82,9 @@ enum ErrorKind {
 	#[error("secret must be 64 hexadecimal characters or a path to a file containing them, and {0} is neither")]
 	SecretFile(String, #[source] std::io::Error),
 
+	#[error("app must be 1 to 62 lowercase ASCII letters, digits, or hyphens")]
+	InvalidApp,
+
 	#[error(
 		"a secret needs a fingerprint or a node URL to bind its proof to, otherwise the whole record can be replayed from another address"
 	)]
@@ -98,6 +104,77 @@ impl From<mdns_sd::Error> for Error {
 }
 
 type Result<T> = std::result::Result<T, Error>;
+
+/// A DNS-SD application name: the subtype a process advertises and browses under.
+///
+/// Two processes only discover each other when they share this name. [`default`](Self::default)
+/// is `default`, which moq-cli and moq-relay share so they find each other with no
+/// configuration. An application built on the library picks its own.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct App(String);
+
+impl App {
+	/// The name both binaries advertise under when nothing else is configured.
+	pub const DEFAULT: &'static str = "default";
+
+	/// The name as advertised, without the DNS-SD `_` prefix.
+	pub fn as_str(&self) -> &str {
+		&self.0
+	}
+
+	/// The DNS-SD subtype this application registers and browses (RFC 6763 section 7.1).
+	fn ty_domain(&self) -> String {
+		format!("_{}._sub.{SERVICE_TYPE}", self.0)
+	}
+}
+
+impl Default for App {
+	fn default() -> Self {
+		Self(Self::DEFAULT.to_string())
+	}
+}
+
+impl fmt::Display for App {
+	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+		formatter.write_str(&self.0)
+	}
+}
+
+impl FromStr for App {
+	type Err = Error;
+
+	fn from_str(app: &str) -> Result<Self> {
+		// 62, not 63: the subtype label is `_<app>`, and a DNS label holds 63 octets.
+		let valid = (1..=62).contains(&app.len())
+			&& app
+				.bytes()
+				.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+		if !valid {
+			return Err(Error(ErrorKind::InvalidApp));
+		}
+		Ok(Self(app.to_string()))
+	}
+}
+
+impl Serialize for App {
+	fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+	where
+		S: Serializer,
+	{
+		serializer.serialize_str(&self.0)
+	}
+}
+
+impl<'de> Deserialize<'de> for App {
+	fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+	where
+		D: Deserializer<'de>,
+	{
+		String::deserialize(deserializer)?
+			.parse()
+			.map_err(serde::de::Error::custom)
+	}
+}
 
 /// A 32-byte pre-shared key proving membership of a discovery group.
 ///
@@ -161,6 +238,7 @@ impl fmt::Debug for Secret {
 /// as extra binding, never as the only binding, since a caller may advertise
 /// neither.
 struct Identity<'a> {
+	app: &'a str,
 	instance: &'a str,
 	port: u16,
 	nonce: &'a str,
@@ -175,6 +253,7 @@ fn proof(secret: &Secret, context: &str, id: &Identity<'_>) -> String {
 	let port = id.port.to_string();
 	for field in [
 		context,
+		id.app,
 		id.instance,
 		&port,
 		id.nonce,
@@ -213,7 +292,7 @@ struct Advert<'a> {
 /// while we require one, its proof doesn't verify, or it advertised one while we
 /// run without a secret. Those cases are mutually invisible on purpose, so two
 /// groups can share a network without half-connecting.
-fn verify(secret: Option<&Secret>, advert: Advert<'_>) -> std::result::Result<String, ()> {
+fn verify(secret: Option<&Secret>, app: &App, advert: Advert<'_>) -> std::result::Result<String, ()> {
 	let Some(secret) = secret else {
 		return match advert.proof {
 			Some(_) => Err(()),
@@ -223,6 +302,7 @@ fn verify(secret: Option<&Secret>, advert: Advert<'_>) -> std::result::Result<St
 
 	let (nonce, presented) = (advert.nonce.ok_or(())?, advert.proof.ok_or(())?);
 	let id = Identity {
+		app: app.as_str(),
 		instance: advert.instance,
 		port: advert.port,
 		nonce,
@@ -240,6 +320,7 @@ fn verify(secret: Option<&Secret>, advert: Advert<'_>) -> std::result::Result<St
 /// Build with [`new`](Self::new), then [`advertise`](Self::advertise).
 #[derive(Clone, Debug)]
 pub struct Config {
+	app: App,
 	port: u16,
 	fingerprint: Option<String>,
 	node: Option<Url>,
@@ -247,9 +328,10 @@ pub struct Config {
 }
 
 impl Config {
-	/// Advertise a MoQ listener on `port` of this host's addresses.
-	pub fn new(port: u16) -> Self {
+	/// Advertise a MoQ listener on `port` of this host's addresses, under `app`.
+	pub fn new(app: App, port: u16) -> Self {
 		Self {
+			app,
 			port,
 			fingerprint: None,
 			node: None,
@@ -392,6 +474,8 @@ pub enum Event {
 ///
 /// Dropping it stops advertising and browsing.
 pub struct Discovery {
+	/// The application this process advertised under, bound into the proofs.
+	app: App,
 	/// Our own service instance, to recognize and skip our own record.
 	instance: String,
 	/// Our identity for the [`should_dial`] tiebreaker: the node URL, or `instance`.
@@ -446,6 +530,7 @@ impl Discovery {
 			Some(secret) => {
 				let node = config.node.as_ref().map(Url::to_string);
 				let id = Identity {
+					app: config.app.as_str(),
 					instance: &instance,
 					port: config.port,
 					nonce: &nonce,
@@ -467,8 +552,12 @@ impl Discovery {
 		// after `register` would race the very event we are waiting for.
 		let monitor = daemon.monitor()?;
 
+		// Register and browse the application subtype so the daemon only resolves
+		// this application's records. The parent type stays `_moq._udp`, so a
+		// generic browser still lists every MoQ process on the network.
+		let ty_domain = config.app.ty_domain();
 		let service = ServiceInfo::new(
-			SERVICE_TYPE,
+			&ty_domain,
 			&instance,
 			&format!("{instance}.local."),
 			"",
@@ -477,11 +566,12 @@ impl Discovery {
 		)?
 		.enable_addr_auto();
 		daemon.register(service)?;
-		let events = daemon.browse(SERVICE_TYPE)?;
+		let events = daemon.browse(&ty_domain)?;
 
 		announced(&monitor).await?;
-		tracing::info!(%id, port = config.port, "advertising on the LAN");
+		tracing::info!(%id, app = %config.app, port = config.port, "advertising on the LAN");
 		Ok(Self {
+			app: config.app,
 			instance,
 			id,
 			secret: config.secret,
@@ -555,7 +645,7 @@ impl Discovery {
 						nonce: info.txt_properties.get_property_val_str(TXT_NONCE),
 						proof: info.txt_properties.get_property_val_str(TXT_PROOF),
 					};
-					let credential = match verify(self.secret.as_ref(), advert) {
+					let credential = match verify(self.secret.as_ref(), &self.app, advert) {
 						Ok(credential) => credential,
 						Err(()) => {
 							tracing::debug!(peer = %instance, "ignoring a peer that failed the membership check");
@@ -771,8 +861,24 @@ mod tests {
 		);
 	}
 
+	/// 62, not 63: the subtype label is `_<app>`, and a DNS label holds 63 octets.
+	#[test]
+	fn app_is_a_dns_sd_subtype_label() {
+		assert_eq!(App::default().as_str(), "default");
+		assert_eq!(format!("{}", App::default()), "default");
+		let max = "a".repeat(62);
+		for valid in ["default", "a", "a-b1", max.as_str()] {
+			assert_eq!(valid.parse::<App>().expect(valid).as_str(), valid);
+		}
+		let over = "a".repeat(63);
+		for invalid in ["", "Default", "has_underscore", "has.dot", "has space", over.as_str()] {
+			assert!(invalid.parse::<App>().is_err(), "{invalid:?} must not parse");
+		}
+	}
+
 	fn identity<'a>(instance: &'a str, port: u16, fingerprint: Option<&'a str>, node: Option<&'a str>) -> Identity<'a> {
 		Identity {
+			app: App::DEFAULT,
 			instance,
 			port,
 			nonce: "nonce",
@@ -821,7 +927,15 @@ mod tests {
 					..identity("inst", 443, Some("fp1"), Some("moqt://node-a"))
 				},
 			),
-			// A different listener, by any of the four fields that name one.
+			// A different listener, by any of the fields that name one.
+			proof(
+				&a,
+				CONTEXT_DIAL,
+				&Identity {
+					app: "other",
+					..identity("inst", 443, Some("fp1"), Some("moqt://node-a"))
+				},
+			),
 			proof(
 				&a,
 				CONTEXT_DIAL,
@@ -928,6 +1042,7 @@ mod tests {
 		fn new(secret: &Secret, instance: &str, fingerprint: Option<&str>, node: Option<&str>) -> Self {
 			let (nonce, port) = ("nonce".to_string(), 443);
 			let id = Identity {
+				app: App::DEFAULT,
 				instance,
 				port,
 				nonce: &nonce,
@@ -968,9 +1083,10 @@ mod tests {
 		let theirs = Secret::new(KEY_B).expect("valid secret");
 
 		// The holder is admitted, and gets the proof that peer will check.
+		let app = App::default();
 		let honest = Advertised::new(&ours, "honest", Some("fp"), None);
 		assert_eq!(
-			verify(Some(&ours), honest.advert()).expect("admitted"),
+			verify(Some(&ours), &app, honest.advert()).expect("admitted"),
 			proof(&ours, CONTEXT_DIAL, &identity("honest", 443, Some("fp"), None))
 		);
 
@@ -978,6 +1094,7 @@ mod tests {
 		assert!(
 			verify(
 				Some(&ours),
+				&app,
 				Advertised::new(&theirs, "honest", Some("fp"), None).advert()
 			)
 			.is_err()
@@ -986,10 +1103,10 @@ mod tests {
 		// So is one with no proof, or a proof with no nonce to bind it.
 		let mut stripped = honest.advert();
 		stripped.proof = None;
-		assert!(verify(Some(&ours), stripped).is_err(), "no proof");
+		assert!(verify(Some(&ours), &app, stripped).is_err(), "no proof");
 		let mut stripped = honest.advert();
 		stripped.nonce = None;
-		assert!(verify(Some(&ours), stripped).is_err(), "no nonce");
+		assert!(verify(Some(&ours), &app, stripped).is_err(), "no nonce");
 
 		// Without a secret, an unproven peer gets its public nonce as the dial
 		// marker. A proven one is not ours, so the two groups stay mutually
@@ -1002,8 +1119,8 @@ mod tests {
 			nonce: Some("public-marker"),
 			proof: None,
 		};
-		assert_eq!(verify(None, bare), Ok("public-marker".to_string()));
-		assert!(verify(None, honest.advert()).is_err());
+		assert_eq!(verify(None, &app, bare), Ok("public-marker".to_string()));
+		assert!(verify(None, &app, honest.advert()).is_err());
 	}
 
 	/// An eavesdropper cannot lift a member's nonce and proof into its own
@@ -1016,6 +1133,8 @@ mod tests {
 	#[test]
 	fn a_stolen_proof_does_not_transfer() {
 		let ours = Secret::new(KEY_A).expect("valid secret");
+		let app = App::default();
+		let other: App = "other".parse().expect("valid app");
 
 		for (fingerprint, node) in [
 			(None, None),
@@ -1024,14 +1143,17 @@ mod tests {
 			(Some("victim-fp"), Some("moqt://victim.example")),
 		] {
 			let victim = Advertised::new(&ours, "victim", fingerprint, node);
-			assert!(verify(Some(&ours), victim.advert()).is_ok(), "the victim is a member");
+			assert!(
+				verify(Some(&ours), &app, victim.advert()).is_ok(),
+				"the victim is a member"
+			);
 
 			// The attacker republishes the stolen nonce and proof under its own
 			// service instance, keeping everything else it can copy.
 			let mut thief = victim.clone();
 			thief.instance = "thief".to_string();
 			assert!(
-				verify(Some(&ours), thief.advert()).is_err(),
+				verify(Some(&ours), &app, thief.advert()).is_err(),
 				"a proof lifted onto another instance must not verify ({fingerprint:?}, {node:?})"
 			);
 
@@ -1040,17 +1162,28 @@ mod tests {
 			let mut thief = victim.clone();
 			thief.port = 4443;
 			assert!(
-				verify(Some(&ours), thief.advert()).is_err(),
+				verify(Some(&ours), &app, thief.advert()).is_err(),
 				"a proof lifted onto another port must not verify ({fingerprint:?}, {node:?})"
 			);
 
 			// And the two it could otherwise swap to redirect the dial.
 			let mut thief = victim.clone();
 			thief.fingerprint = Some("thief-fp".to_string());
-			assert!(verify(Some(&ours), thief.advert()).is_err(), "another fingerprint");
+			assert!(
+				verify(Some(&ours), &app, thief.advert()).is_err(),
+				"another fingerprint"
+			);
 			let mut thief = victim.clone();
 			thief.node = Some("moqt://thief.example".to_string());
-			assert!(verify(Some(&ours), thief.advert()).is_err(), "another node");
+			assert!(verify(Some(&ours), &app, thief.advert()).is_err(), "another node");
+
+			// The same record under another application's subtype: the proof is
+			// bound to the app, so a secret reused across two applications still
+			// yields two meshes.
+			assert!(
+				verify(Some(&ours), &other, victim.advert()).is_err(),
+				"a proof must not verify under another app ({fingerprint:?}, {node:?})"
+			);
 		}
 	}
 
@@ -1088,12 +1221,22 @@ mod tests {
 	}
 
 	/// Advertise on a port nothing listens on, purely to exercise the record.
-	async fn discovery(secret: Option<&str>, fingerprint: &str) -> Discovery {
-		let mut config = Config::new(4443).with_fingerprint(fingerprint);
+	async fn discovery(app: App, secret: Option<&str>, fingerprint: &str) -> Result<Discovery> {
+		let mut config = Config::new(app, 4443).with_fingerprint(fingerprint);
 		if let Some(secret) = secret {
 			config = config.with_secret(Secret::new(secret).expect("valid secret"));
 		}
-		config.advertise().await.expect("advertise")
+		config.advertise().await
+	}
+
+	fn no_multicast(err: &Error) -> bool {
+		matches!(err.0, ErrorKind::NoInterface(_) | ErrorKind::Interface(_))
+	}
+
+	fn unique_app() -> App {
+		format!("t{:016x}", rand::random::<u64>())
+			.parse()
+			.expect("hex is a valid app")
 	}
 
 	/// Wait for the peer advertising `fingerprint`, or give up.
@@ -1112,16 +1255,6 @@ mod tests {
 			.unwrap_or_else(|_| panic!("timed out discovering {fingerprint}"))
 	}
 
-	/// Two processes sharing a secret find each other over real mDNS, and each
-	/// ends up holding exactly the credential the other expects.
-	///
-	/// This covers the plumbing: that the nonce and proof survive the TXT record
-	/// and that both sides derive matching credentials from them. It deliberately
-	/// does not try to show the rejection half. Over multicast, "never reported"
-	/// is indistinguishable from "the record never arrived", so such a test would
-	/// pass whether or not the filter ran. [`verify_admits_only_the_secret_holder`]
-	/// and [`a_stolen_proof_does_not_transfer`] prove that half deterministically.
-	///
 	/// One working interface is enough, even when others failed first.
 	///
 	/// The daemon reports per-interface failures as it goes, and a host routinely
@@ -1170,28 +1303,65 @@ mod tests {
 		drop(tx);
 	}
 
+	/// Two processes under the same app and secret find each other over real mDNS;
+	/// two under different apps never do, even with the same secret.
+	///
+	/// The same-app pair is the positive control that multicast works. Once it
+	/// has resolved, a foreign-app record would already have arrived if the
+	/// subtype browse leaked, so a short wait is enough to assert isolation
+	/// without treating "the packet never came" as success.
+	///
 	/// Ignored because it multicasts on the host network, which CI runners may
-	/// block; run it by hand when touching discovery:
+	/// block even after announce succeeds; run it by hand when touching discovery:
 	/// `just rs test -p moq-tokio --features mdns --run-ignored ignored-only`.
+	/// The skip below is for that manual run when no interface can announce.
 	#[tokio::test]
 	#[ignore = "needs multicast on the host network; run manually"]
-	async fn a_shared_secret_carries_through_real_mdns() {
-		let mut ours = discovery(Some(KEY_A), "ours").await;
-		let mut theirs = discovery(Some(KEY_A), "theirs").await;
+	async fn apps_partition_discovery() {
+		let shared = unique_app();
+		let mut same_a = match discovery(shared.clone(), Some(KEY_A), "same-a").await {
+			Ok(discovery) => discovery,
+			Err(err) if no_multicast(&err) => {
+				eprintln!("skipping: {err}");
+				return;
+			}
+			Err(err) => panic!("advertise failed: {err}"),
+		};
+		let mut same_b = discovery(shared, Some(KEY_A), "same-b")
+			.await
+			.expect("a second advertiser on a working host");
+		let mut foreign = discovery(unique_app(), Some(KEY_A), "foreign")
+			.await
+			.expect("a foreign-app advertiser on a working host");
 
-		let (on_ours, on_theirs) = tokio::join!(find(&mut ours, "theirs"), find(&mut theirs, "ours"));
-
-		// Each side computed the credential the other will check, and neither the
-		// secret nor the credential ever crossed the network.
-		assert!(theirs.verify_credential(&on_ours.credential));
-		assert!(ours.verify_credential(&on_theirs.credential));
-		assert!(!ours.verify_credential(&on_ours.credential), "not its own");
-		assert!(!ours.verify_credential(""));
-
+		let (on_a, on_b) = tokio::join!(find(&mut same_a, "same-b"), find(&mut same_b, "same-a"));
+		assert!(same_b.verify_credential(&on_a.credential));
+		assert!(same_a.verify_credential(&on_b.credential));
+		assert!(!same_a.verify_credential(&on_a.credential), "not its own");
 		assert_ne!(
-			ours.should_dial(&on_ours.id),
-			theirs.should_dial(&on_theirs.id),
+			same_a.should_dial(&on_a.id),
+			same_b.should_dial(&on_b.id),
 			"exactly one side of the pair dials"
+		);
+
+		let leaked = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+			loop {
+				match foreign.recv().await {
+					Some(Event::Found(peer))
+						if peer.fingerprint.as_deref() == Some("same-a")
+							|| peer.fingerprint.as_deref() == Some("same-b") =>
+					{
+						return true;
+					}
+					Some(_) => continue,
+					None => return false,
+				}
+			}
+		})
+		.await;
+		assert!(
+			!matches!(leaked, Ok(true)),
+			"a different app must not resolve this application's records"
 		);
 	}
 }

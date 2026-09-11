@@ -104,6 +104,9 @@ struct ClusterLan {
 
 	#[usage(env = "MOQ_CLUSTER_LAN_SECRET", cli("--cluster-lan-secret"))]
 	secret: Option<String>,
+
+	#[usage(env = "MOQ_CLUSTER_LAN_APP", cli("--cluster-lan-app"))]
+	app: Option<String>,
 }
 
 #[derive(usage::Config)]

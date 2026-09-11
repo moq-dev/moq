@@ -56,10 +56,6 @@ One implementation: the relay's `Cluster`.
 
 Branch from `dev`.
 
-## Required
-
-- [LAN discovery app id](/quest/m1/lan-app.md) - the flag surface this consolidates includes `app`
-
 ## Related
 
 - [`moq relay`](/quest/m2/moq-relay-subcommand.md) - the second place the CLI hosts the relay library

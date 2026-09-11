@@ -91,14 +91,18 @@ node = "us-west.local:4443"
 [cluster.lan]
 enabled = true
 secret = "/etc/moq/cluster.key"       # 64 hex chars, or a file holding them.
+# app = "default"                     # DNS-SD subtype; moq-cli shares this name.
 ```
 
 mDNS only replaces how peers find each other; they are still dialed at their
 `node` URL and authenticate as usual. `secret` is required rather than optional
 and must match across peers: mDNS is an open channel, so without a proof of key
 possession an attacker could advertise a URL it controls and collect
-`cluster.token`. Startup waits for at least one interface to announce before
-the relay reports itself ready.
+`cluster.token`. `app` names the DNS-SD application this relay advertises under;
+peers using a different name never discover it. It defaults to `default`, which
+moq-cli shares so the two find each other with no configuration. An application
+built on the library picks its own name. Startup waits for at least one
+interface to announce before the relay reports itself ready.
 
 ## Dynamic peer lists
 

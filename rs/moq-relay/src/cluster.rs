@@ -560,6 +560,19 @@ pub struct LanConfig {
 		setting = "cluster.lan.secret"
 	)]
 	pub secret: Option<String>,
+
+	/// DNS-SD application this relay advertises under. Peers using a different
+	/// name never discover this one. Defaults to `default`, which moq-cli
+	/// shares so they find each other with no configuration. An application
+	/// built on the library picks its own name.
+	#[usage(
+		name = "cluster-lan-app",
+		long = "cluster-lan-app",
+		env = "MOQ_CLUSTER_LAN_APP",
+		value_name = "NAME",
+		setting = "cluster.lan.app"
+	)]
+	pub app: Option<moq_tokio::mdns::App>,
 }
 
 /// Construction settings for a [`Cluster`]: identity, discovery, and the origin cache.
@@ -928,7 +941,8 @@ impl Cluster {
 					.secret
 					.as_deref()
 					.expect("--cluster-lan requires --cluster-lan-secret");
-				Some(lan_discovery(node, secret).await?)
+				let app = self.config.lan.app.clone().unwrap_or_default();
+				Some(lan_discovery(node, secret, app).await?)
 			}
 			false => None,
 		};
@@ -1476,7 +1490,11 @@ impl Cluster {
 /// URL itself, which is what keeps the relay's normal name-and-certificate path
 /// intact. The key is what makes the advertised URL trustworthy enough to dial.
 #[cfg(feature = "cluster-lan")]
-async fn lan_discovery(node: &str, secret: &str) -> anyhow::Result<moq_tokio::mdns::Discovery> {
+async fn lan_discovery(
+	node: &str,
+	secret: &str,
+	app: moq_tokio::mdns::App,
+) -> anyhow::Result<moq_tokio::mdns::Discovery> {
 	let url = peer_url(node)?;
 	// The advertisement is multicast in the clear. The secret authenticates the
 	// record, it does not hide it, so anything in the query is handed to every
@@ -1499,7 +1517,7 @@ async fn lan_discovery(node: &str, secret: &str) -> anyhow::Result<moq_tokio::md
 	);
 	let port = url.port_or_known_default().unwrap_or(443);
 	let secret = moq_tokio::mdns::Secret::load(secret).context("invalid --cluster-lan-secret")?;
-	Ok(moq_tokio::mdns::Config::new(port)
+	Ok(moq_tokio::mdns::Config::new(app, port)
 		.with_node(url)
 		.with_secret(secret)
 		.advertise()
@@ -2505,9 +2523,10 @@ mod tests {
 	fn cluster_lan_survives_toml_merge() {
 		// Usage reads the environment while parsing, so serialize with the tests
 		// that mutate it.
-		let _env = crate::test_env::EnvGuard::clear(&["MOQ_CLUSTER_LAN", "MOQ_CLUSTER_LAN_SECRET"]);
+		let _env =
+			crate::test_env::EnvGuard::clear(&["MOQ_CLUSTER_LAN", "MOQ_CLUSTER_LAN_SECRET", "MOQ_CLUSTER_LAN_APP"]);
 
-		let toml = "[cluster]\nnode = \"https://relay.example.com\"\n\n[cluster.lan]\nenabled = true\nsecret = \"cluster.key\"\n";
+		let toml = "[cluster]\nnode = \"https://relay.example.com\"\n\n[cluster.lan]\nenabled = true\nsecret = \"cluster.key\"\napp = \"custom\"\n";
 		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
 		std::fs::create_dir_all(&dir).unwrap();
 		let path = dir.join("cluster-lan-toml.toml");
@@ -2517,6 +2536,10 @@ mod tests {
 		let config = Config::parse_and_merge(args).expect("config load");
 		assert!(config.cluster.lan.enabled);
 		assert_eq!(config.cluster.lan.secret.as_deref(), Some("cluster.key"));
+		assert_eq!(
+			config.cluster.lan.app.as_ref().map(ToString::to_string).as_deref(),
+			Some("custom")
+		);
 		assert_eq!(config.cluster.node.as_deref(), Some("https://relay.example.com"));
 	}
 
@@ -2525,9 +2548,10 @@ mod tests {
 	#[cfg(feature = "cluster-lan")]
 	#[test]
 	fn cli_overrides_toml_cluster_lan() {
-		let _env = crate::test_env::EnvGuard::clear(&["MOQ_CLUSTER_LAN", "MOQ_CLUSTER_LAN_SECRET"]);
+		let _env =
+			crate::test_env::EnvGuard::clear(&["MOQ_CLUSTER_LAN", "MOQ_CLUSTER_LAN_SECRET", "MOQ_CLUSTER_LAN_APP"]);
 
-		let toml = "[cluster.lan]\nenabled = true\nsecret = \"from-toml.key\"\n";
+		let toml = "[cluster.lan]\nenabled = true\nsecret = \"from-toml.key\"\napp = \"from-toml\"\n";
 		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
 		std::fs::create_dir_all(&dir).unwrap();
 		let path = dir.join("cluster-lan-override.toml");
@@ -2538,9 +2562,15 @@ mod tests {
 			std::ffi::OsString::from(&path),
 			std::ffi::OsString::from("--cluster-lan-secret"),
 			std::ffi::OsString::from("from-cli.key"),
+			std::ffi::OsString::from("--cluster-lan-app"),
+			std::ffi::OsString::from("from-cli"),
 		];
 		let config = Config::parse_and_merge(args).expect("config load");
 		assert_eq!(config.cluster.lan.secret.as_deref(), Some("from-cli.key"));
+		assert_eq!(
+			config.cluster.lan.app.as_ref().map(ToString::to_string).as_deref(),
+			Some("from-cli")
+		);
 		assert!(config.cluster.lan.enabled, "the untouched key survives");
 	}
 

@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - *(relay)* `ClusterOptions` so the origin is constructed with its cache settings
+- `[cluster.lan] app` / `--cluster-lan-app` names the DNS-SD application the LAN mesh advertises under
 
 ### Removed
 

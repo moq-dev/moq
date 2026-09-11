@@ -350,7 +350,7 @@ pub struct MoqSide {
 	#[usage(flatten)]
 	pub iroh: moq_tokio::iroh::EndpointConfig,
 
-	/// LAN clustering config (`--cluster-lan`, `--cluster-lan-secret`).
+	/// LAN clustering config (`--cluster-lan`, `--cluster-lan-secret`, `--cluster-lan-app`).
 	#[cfg(feature = "cluster-lan")]
 	#[usage(flatten)]
 	pub cluster: crate::cluster::Args,
@@ -469,6 +469,10 @@ impl MoqSide {
 		let cluster_secret = self.cluster.secret.is_some();
 		#[cfg(not(feature = "cluster-lan"))]
 		let cluster_secret = false;
+		#[cfg(feature = "cluster-lan")]
+		let cluster_app = self.cluster.app.is_some();
+		#[cfg(not(feature = "cluster-lan"))]
+		let cluster_app = false;
 
 		// A legacy `--client-connect` must be rejected here too; the fold has already
 		// landed it in `url`.
@@ -478,6 +482,7 @@ impl MoqSide {
 			("--listen-tcp-bind", self.server.tcp.bind.is_some()),
 			("--cluster-lan", self.lan()),
 			("--cluster-lan-secret", cluster_secret),
+			("--cluster-lan-app", cluster_app),
 			("--broadcast", self.broadcast.is_some()),
 			("--hop", self.hop.is_some()),
 		];
@@ -1251,6 +1256,18 @@ mod tests {
 			.unwrap();
 			let err = cli.moq.reject("token").unwrap_err().to_string();
 			assert!(err.contains("--cluster-lan-secret"), "{err}");
+
+			let cli = Invocation::try_parse_from([
+				"moq",
+				"--cluster-lan=false",
+				"--cluster-lan-app",
+				"custom",
+				"token",
+				"generate",
+			])
+			.unwrap();
+			let err = cli.moq.reject("token").unwrap_err().to_string();
+			assert!(err.contains("--cluster-lan-app"), "{err}");
 		}
 	}
 
@@ -1329,6 +1346,46 @@ mod tests {
 		.expect("parse");
 		assert!(cli.moq.validate().is_ok());
 		assert_eq!(cli.moq.cluster.secret.as_deref(), Some("cluster.key"));
+	}
+
+	/// The app is only read by the mesh, so configuring one without it is an
+	/// error rather than a silently ignored flag. The default is `default`.
+	#[cfg(feature = "cluster-lan")]
+	#[test]
+	fn cluster_lan_app_requires_the_mesh_and_defaults() {
+		let err = Invocation::try_parse_from(["moq", "--cluster-lan-app", "custom", "import", "ts"])
+			.err()
+			.expect("the app must require --cluster-lan")
+			.to_string();
+		assert!(err.contains("cluster-lan"), "{err}");
+
+		let cli = Invocation::try_parse_from([
+			"moq",
+			"--cluster-lan=false",
+			"--cluster-lan-app",
+			"custom",
+			"--connect",
+			"https://relay.example.com",
+			"import",
+			"ts",
+		])
+		.expect("parse");
+		let err = cli.moq.validate().unwrap_err().to_string();
+		assert!(err.contains("--cluster-lan=true"), "{err}");
+
+		let cli = Invocation::try_parse_from(["moq", "--cluster-lan", "import", "ts"]).expect("parse");
+		assert_eq!(cli.moq.cluster.app().as_str(), "default");
+
+		let cli = Invocation::try_parse_from(["moq", "--cluster-lan", "--cluster-lan-app", "custom", "import", "ts"])
+			.expect("parse");
+		assert!(cli.moq.validate().is_ok());
+		assert_eq!(cli.moq.cluster.app().as_str(), "custom");
+
+		let err = Invocation::try_parse_from(["moq", "--cluster-lan", "--cluster-lan-app", "Default", "import", "ts"])
+			.err()
+			.expect("uppercase must not parse")
+			.to_string();
+		assert!(err.contains("app") || err.contains("Default"), "{err}");
 	}
 
 	/// A mesh dial authenticates through its request path, which legacy moq-lite

@@ -96,7 +96,7 @@ impl Lan {
 			.context("--cluster-lan needs a QUIC listener")?
 			.port();
 
-		let mut config = mdns::Config::new(port);
+		let mut config = mdns::Config::new(args.app(), port);
 		// Peers pin this instead of validating against a certificate authority,
 		// which is what lets a generated certificate work with no setup at all.
 		if let Some(fingerprint) = server.certificates().fingerprints().into_iter().next() {
@@ -400,6 +400,20 @@ pub struct Args {
 		value_name = "HEX_OR_PATH"
 	)]
 	pub secret: Option<String>,
+
+	/// DNS-SD application this process advertises under. Peers using a different
+	/// name never discover this one. Defaults to `default`, which moq-relay
+	/// shares so they find each other with no configuration. An application
+	/// built on the library picks its own name.
+	#[usage(
+		name = "cluster-lan-app",
+		long = "cluster-lan-app",
+		env = "MOQ_CLUSTER_LAN_APP",
+		help_heading = "Cluster",
+		requires = "--cluster-lan",
+		value_name = "NAME"
+	)]
+	pub app: Option<mdns::App>,
 }
 
 impl Args {
@@ -408,11 +422,15 @@ impl Args {
 		self.enabled.unwrap_or(false)
 	}
 
-	/// Reject a secret configured without the mesh that would read it.
+	/// Reject a secret or app configured without the mesh that would read it.
 	pub fn validate(&self) -> anyhow::Result<()> {
 		anyhow::ensure!(
 			self.secret.is_none() || self.enabled(),
 			"--cluster-lan-secret requires --cluster-lan=true"
+		);
+		anyhow::ensure!(
+			self.app.is_none() || self.enabled(),
+			"--cluster-lan-app requires --cluster-lan=true"
 		);
 		Ok(())
 	}
@@ -424,6 +442,11 @@ impl Args {
 			.map(mdns::Secret::load)
 			.transpose()
 			.context("invalid --cluster-lan-secret")
+	}
+
+	/// The application this process advertises under, or the shared default.
+	pub fn app(&self) -> mdns::App {
+		self.app.clone().unwrap_or_default()
 	}
 }
 
@@ -537,6 +560,7 @@ mod tests {
 		let args = Args {
 			enabled: Some(true),
 			secret: Some(KEY.to_string()),
+			app: None,
 		};
 		assert!(args.secret().expect("valid hex").is_some());
 		assert!(args.validate().is_ok());
@@ -546,12 +570,14 @@ mod tests {
 		let args = Args {
 			enabled: Some(true),
 			secret: Some(file.path().to_str().expect("utf-8").to_string()),
+			app: None,
 		};
 		assert!(args.secret().expect("valid file").is_some());
 
 		let args = Args {
 			enabled: Some(true),
 			secret: Some("definitely-missing-key".to_string()),
+			app: None,
 		};
 		// The message has to cover both readings: a mistyped inline key looks
 		// exactly like a path that isn't there.
@@ -563,8 +589,26 @@ mod tests {
 		let args = Args {
 			enabled: Some(false),
 			secret: Some(KEY.to_string()),
+			app: None,
 		};
 		assert!(args.validate().unwrap_err().to_string().contains("--cluster-lan=true"));
+
+		let args = Args {
+			enabled: Some(false),
+			secret: None,
+			app: Some("custom".parse().expect("valid app")),
+		};
+		assert!(args.validate().unwrap_err().to_string().contains("--cluster-lan-app"));
+		assert_eq!(
+			Args {
+				enabled: Some(true),
+				secret: None,
+				app: None,
+			}
+			.app()
+			.as_str(),
+			"default"
+		);
 	}
 
 	/// Bind a listener the way `--cluster-lan` does, returning it plus the peer

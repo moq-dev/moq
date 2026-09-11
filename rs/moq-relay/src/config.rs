@@ -1280,4 +1280,26 @@ uid = [1001]
 			.into_detailed();
 		assert_eq!(subscribe.subscribe, vec!["from-env".to_string()]);
 	}
+
+	/// A TOML `[cluster.lan] app` survives when the CLI omits the flag.
+	#[cfg(feature = "cluster-lan")]
+	#[test]
+	fn cli_does_not_clobber_toml_cluster_lan_app() {
+		let _env = EnvGuard::clear(&["MOQ_CLUSTER_LAN", "MOQ_CLUSTER_LAN_SECRET", "MOQ_CLUSTER_LAN_APP"]);
+
+		let toml = "[cluster.lan]\nenabled = true\napp = \"custom\"\n";
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("cluster-lan-app-toml-wins.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+
+		assert_eq!(
+			config.cluster.lan.app.as_ref().map(ToString::to_string).as_deref(),
+			Some("custom"),
+			"TOML's cluster.lan.app must not be clobbered by the CLI re-parse"
+		);
+	}
 }

@@ -30,7 +30,6 @@ quest here and merged main into dev.
 - [Binding rate control](/quest/m1/binding-rate-control.md) - the bindings mirror the allocator and reservation, so a non-Rust publisher follows its bandwidth share
 - [#2859](/quest/m1/2859-passthrough-imports-reserve-no-bandwidth-so-a-co-resident.md) - passthrough imports claim their peak-hold catalog bitrate on the allocator so a co-resident encoder targets what is left
 - [A/V clock](/quest/m1/plan-av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
-- [LAN discovery app id](/quest/m1/lan-app.md) - every advertisement names an application as a DNS-SD subtype bound into the proofs, so unrelated apps on one network never meet
 - [One LAN mesh](/quest/m1/lan-mesh.md) - moq-cli drives the relay's Cluster, LAN peers authenticate by mDNS credential, and the two binaries mesh with each other
 - [Native Go context](/quest/m1/go-native-context.md) - the Go generator emits context.Context itself, retiring the hand-rolled cancellation token
 - [Merge dev](/quest/m1/merge-dev.md) - dev lands on main with a closing keyword for every issue it fixed

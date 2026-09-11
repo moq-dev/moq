@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `--cluster-lan-app` names the DNS-SD application the LAN mesh advertises under
+
 ## [0.11.0](https://github.com/moq-dev/moq/compare/moq-cli-v0.10.0...moq-cli-v0.11.0) - 2026-09-09
 
 ### Added
