@@ -47,7 +47,9 @@ and meters, so rebuilding a local handle would retag nothing.
   `no-store`, or a value the relay cannot parse) is the endpoint opting out,
   and stays so. The relay says it once: the first such reply from an endpoint
   logs at WARN that sessions admitted under it are never re-checked and end
-  only at their credential's `exp`. One line per relay, never per session.
+  only when their credential expires, `exp` for a JWT and `notAfter` for a
+  certificate, or never for an anonymous session, and the line says which.
+  One line per relay, never per session.
 - Docs: the revalidation section of `doc/bin/relay/auth.md` gains a per-field
   table: tier updates in place, alias closes, and scope narrowing closes today
   (`covered_by` failing maps to `Recheck::Revoked`) and resizes once

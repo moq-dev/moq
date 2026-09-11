@@ -17,8 +17,11 @@ prefix. Keyframe requests stay out.
   prefix, keeps one `moq_stats::Consumer<hang::Stats>` per `.stats` broadcast
   requesting `<own path>/subscriber.json`, and folds the reports into one
   signal, the share of viewers stalled over the last interval and their late
-  frame rate, weighted equally per viewer. Viewers that stop reporting age out
-  on the stats interval.
+  frame rate, weighted equally per viewer. The counters are cumulative, so
+  the handle keeps the previous snapshot per viewer and diffs it; a counter
+  that goes backwards is a restarted viewer and resets that baseline. Viewers
+  that stop reporting age out on the stats interval, so one stall long ago
+  never lowers the target forever.
 - `rate.rs` takes that signal beside the bandwidth estimate: a stalled share
   above a threshold steps the target down like a bandwidth drop, recovery
   follows the existing attack curve, and the estimate stays the ceiling.
