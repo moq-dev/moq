@@ -29,9 +29,9 @@ everyone.
   subscribe, a declared discontinuity, and a latency skip: `#checkLatency`
   records the skip through `#gap` and `next()` reports the next frame with
   `continuous: false`. Latency skip also bumps playhead generation (startup
-  delay) but does not flush the decoder, so leading pictures still decode, and
-  a viewer that skipped into a later GOP lacks its references just like a cold
-  join.
+  delay) but does not flush the decoder. Leading pictures after that
+  non-continuous transition are still skipped, as above; a viewer that skipped
+  into a later GOP lacks its references just like a cold join.
   Every continuous group is passed through untouched.
 - The same rule in the Rust decode path (`moq-video` decode consumers), with
   an equivalent non-continuous signal from `container::Consumer`, so native
