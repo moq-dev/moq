@@ -97,7 +97,20 @@ impl Nvenc {
 		cfg.gopLength = config.gop;
 		cfg.frameIntervalP = 1; // no B-frames
 		cfg.rcParams.rateControlMode = NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CBR;
-		cfg.rcParams.averageBitRate = config.resolved_bitrate().min(u32::MAX as u64) as u32;
+		let bitrate = config.resolved_bitrate().min(u32::MAX as u64) as u32;
+		cfg.rcParams.averageBitRate = bitrate;
+		// A single-frame VBV, NVIDIA's own low-latency recipe. The preset's default
+		// buffer is about a second of bitrate, and CBR spends it on every IDR: a
+		// 720p keyframe came out at 20+ frames' worth of bits (see
+		// `nvenc_h264_idr_burst_is_bounded`), which the wire, the decoder, and a
+		// one-frame jitter buffer all pay for once per GOP as a visible hitch. With
+		// the buffer sized to one frame the IDR is capped near
+		// `lowDelayKeyFrameScale` (2x) P-frame bits, and P-frames get the bits the
+		// keyframe no longer hoards. `reconfigure` keeps the buffer at one frame
+		// when the bitrate moves.
+		let vbv = bitrate / config.framerate.max(1);
+		cfg.rcParams.vbvBufferSize = vbv;
+		cfg.rcParams.vbvInitialDelay = vbv;
 
 		// Two codec-specific knobs the importer relies on, verified on hardware:
 		//   - repeatSPSPPS: emit the parameter sets in-band ahead of *every* IDR,
@@ -596,5 +609,80 @@ mod tests {
 		assert!(mae(decoded.y(), expected.y()) < 8, "Y plane corrupt (pitch?)");
 		assert!(mae(decoded.u(), expected.u()) < 8, "U plane corrupt (pitch?)");
 		assert!(mae(decoded.v(), expected.v()) < 8, "V plane corrupt (pitch?)");
+	}
+
+	/// A detailed pattern translated by `shift` pixels, so P-frames are cheap
+	/// (pure motion) while an I-frame has to code every texel from scratch: the
+	/// IDR-versus-P size ratio this produces is the one a real camera sees.
+	fn textured_rgba(width: u32, height: u32, shift: usize) -> Vec<u8> {
+		let (w, h) = (width as usize, height as usize);
+		let mut buf = vec![0u8; w * h * 4];
+		for y in 0..h {
+			for x in 0..w {
+				let (sx, i) = (x + shift, (y * w + x) * 4);
+				buf[i] = ((sx * 7) ^ (y * 13)) as u8;
+				buf[i + 1] = ((sx / 3) ^ (y * 5)) as u8;
+				buf[i + 2] = ((sx * 3 + y * 11) % 251) as u8;
+				buf[i + 3] = 255;
+			}
+		}
+		buf
+	}
+
+	/// Encode `frames` of scrolling texture at 720p30 / 4 Mbit/s with a 30-frame
+	/// GOP and return the periodic IDR sizes with the mean P-frame size, so a
+	/// rate-control change can be judged by the burst it puts on the wire.
+	fn idr_burst(frames: u64) -> Option<(Vec<usize>, usize)> {
+		if !driver_libs_present() {
+			return None;
+		}
+		let (w, h) = (1280u32, 720u32);
+		let mut config = crate::encode::Config::new(w, h, 30);
+		config.kind = crate::encode::Kind::Named(NAME.into());
+		config.bitrate = Some(4_000_000);
+		config.gop = 30;
+		let mut encoder = crate::encode::Encoder::new(&config).ok()?;
+
+		let mut idrs = Vec::new();
+		let (mut p_total, mut p_count) = (0usize, 0usize);
+		for i in 0..frames {
+			let rgba = textured_rgba(w, h, (i * 4) as usize);
+			let surface = crate::Surface::rgba(&rgba, crate::Size::new(w, h)).unwrap();
+			let frame = crate::Frame::new(surface, moq_net::Timestamp::from_micros(i * 33_333).unwrap());
+			for encoded in encoder.encode(&frame).unwrap() {
+				// Skip the first GOP: rate control is still converging there.
+				if i < 30 {
+					continue;
+				}
+				if h264_nal_types(&encoded.payload).contains(&5) {
+					idrs.push(encoded.payload.len());
+				} else {
+					p_total += encoded.payload.len();
+					p_count += 1;
+				}
+			}
+		}
+		Some((idrs, p_total / p_count.max(1)))
+	}
+
+	/// The single-frame VBV keeps a periodic IDR to a small multiple of a
+	/// P-frame. Without it the same stream produced 300+ KB keyframes against
+	/// 5 KB P-frames (a 60x burst); with it the ratio sits around 3-4x, so the
+	/// bounds here are loose enough not to flake on rate-control noise and still
+	/// an order of magnitude below the preset default. The absolute cap is what
+	/// a subscriber's one-frame jitter buffer has to absorb at the configured
+	/// 4 Mbit/s / 30 fps.
+	#[test]
+	fn nvenc_h264_idr_burst_is_bounded() {
+		let Some((idrs, p_mean)) = idr_burst(120) else { return };
+		assert_eq!(idrs.len(), 3, "expected one IDR per 30-frame GOP after the first");
+		let frame_budget = 4_000_000 / 8 / 30;
+		for idr in &idrs {
+			assert!(
+				*idr < 8 * p_mean,
+				"IDR {idr} bytes is more than 8x the mean P-frame ({p_mean})"
+			);
+			assert!(*idr < 5 * frame_budget, "IDR {idr} bytes exceeds 5 frames of bitrate");
+		}
 	}
 }

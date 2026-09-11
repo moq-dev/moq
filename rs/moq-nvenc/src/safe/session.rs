@@ -128,6 +128,14 @@ impl Session {
 			));
 		};
 
+		// Keep a caller-sized VBV proportional to the rate, so a buffer sized to
+		// one frame at open stays one frame: left alone it would loosen the
+		// keyframe cap as the bitrate falls, right when the link can least afford it.
+		if config.rcParams.vbvBufferSize != 0 && config.rcParams.averageBitRate != 0 {
+			let scale = |v: u32| (u64::from(v) * u64::from(bitrate) / u64::from(config.rcParams.averageBitRate)) as u32;
+			config.rcParams.vbvBufferSize = scale(config.rcParams.vbvBufferSize);
+			config.rcParams.vbvInitialDelay = scale(config.rcParams.vbvInitialDelay);
+		}
 		config.rcParams.averageBitRate = bitrate;
 		debug_assert_eq!(
 			self.init.encodeConfig,
