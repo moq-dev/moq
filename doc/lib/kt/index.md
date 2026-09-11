@@ -60,7 +60,9 @@ inbound stream cap.
 (`publishJsonSnapshot`, `publishJsonStream`, `valuesAs<T>()`), and the rest of
 the [shared feature list](/lib/#what-every-binding-can-do) maps one to one:
 `fetchGroup`/`fetchMediaGroup`, `dynamic()`, `appendDatagram`/`datagrams()`,
-`setCatalogSection`, `used()`/`unused()`. `MoqException.isAuth` and
+`setCatalogSection`, `used()`/`unused()`. `session.bandwidth()` divides the
+connection's send estimate; pass it to `encodeVideo` / `encodeAudio` or
+`reserve` a share for an app-owned track. `MoqException.isAuth` and
 `isShutdown` classify errors. Cancelling the collecting coroutine cancels the
 native side.
 

@@ -18,6 +18,7 @@
 
 mod api;
 mod audio;
+mod bandwidth;
 mod client;
 mod consume;
 mod error;
@@ -31,6 +32,7 @@ mod video;
 
 pub use api::*;
 pub use audio::*;
+pub use bandwidth::*;
 pub use error::*;
 pub use id::*;
 pub use video::*;

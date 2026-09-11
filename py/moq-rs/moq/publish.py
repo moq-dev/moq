@@ -46,6 +46,7 @@ from .types import (
 )
 
 if TYPE_CHECKING:
+    from .session import Bandwidth, Reservation
     from .subscribe import BroadcastConsumer, GroupConsumer, TrackConsumer
 
 
@@ -429,6 +430,15 @@ class AudioProducer:
         """Push one frame of PCM in the configured input format."""
         self._inner.write(frame)
 
+    def reservation(self) -> Reservation | None:
+        """This encoder's bandwidth reservation, if published against a session allocator."""
+        inner = self._inner.reservation()
+        if inner is None:
+            return None
+        from .session import Reservation as ReservationType
+
+        return ReservationType(inner)
+
     def finish(self) -> None:
         """Flush any pending samples and finalize the track."""
         self._inner.finish()
@@ -483,6 +493,15 @@ class VideoProducer:
         not fatal: the encoder keeps its current rate.
         """
         self._inner.set_bitrate(bitrate)
+
+    def reservation(self) -> Reservation | None:
+        """This encoder's bandwidth reservation, if published against a session allocator."""
+        inner = self._inner.reservation()
+        if inner is None:
+            return None
+        from .session import Reservation as ReservationType
+
+        return ReservationType(inner)
 
     def finish(self) -> None:
         """Flush any frames the codec is holding and finalize the track."""
@@ -626,14 +645,24 @@ class BroadcastProducer:
         name: str,
         input: AudioEncoderInput,
         output: AudioEncoderOutput,
+        *,
+        bandwidth: Bandwidth | None = None,
     ) -> AudioProducer:
-        """Publish a raw-audio track with an in-process Opus encoder."""
-        return AudioProducer(self._inner.encode_audio(name, input, output))
+        """Publish a raw-audio track with an in-process Opus encoder.
+
+        Pass ``bandwidth`` to reserve this track's bitrate against the session's
+        allocator so a co-resident video encoder sizes itself against what is left.
+        """
+        return AudioProducer(
+            self._inner.encode_audio(name, input, output, None if bandwidth is None else bandwidth._inner)
+        )
 
     def encode_video(
         self,
         input: VideoEncoderInput,
         output: VideoEncoderOutput,
+        *,
+        bandwidth: Bandwidth | None = None,
     ) -> VideoProducer:
         """Publish a raw-video track with an in-process H.264/H.265 encoder.
 
@@ -641,8 +670,11 @@ class BroadcastProducer:
         from the codec (``.avc3`` / ``.hev1``). The catalog rendition is
         published immediately so subscribers can discover it before the first
         frame exists.
+
+        Pass ``bandwidth`` to reserve this track's configured bitrate and follow
+        the grant.
         """
-        return VideoProducer(self._inner.encode_video(input, output))
+        return VideoProducer(self._inner.encode_video(input, output, None if bandwidth is None else bandwidth._inner))
 
     def publish_track(self, name: str, info: TrackInfo | None = None) -> TrackProducer:
         """Create a track. Send any bytes, no codec validation. ``info`` sets track

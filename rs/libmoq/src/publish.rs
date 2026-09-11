@@ -317,6 +317,11 @@ impl Publish {
 		Ok(())
 	}
 
+	/// A watch-only handle to a raw track's subscriber demand.
+	pub fn track_demand(&self, track: Id) -> Result<moq_net::track::Demand, Error> {
+		Ok(self.tracks.get(track).ok_or(Error::TrackNotFound)?.demand())
+	}
+
 	/// Create a raw track on a broadcast for arbitrary byte payloads.
 	///
 	/// No codec, container, or catalog framing. This is the moq-net primitive

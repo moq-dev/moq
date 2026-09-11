@@ -73,7 +73,9 @@ here: `moq.Server` with per-request accept/reject, `fetch_group` and
 `fetch_media_group`, `dynamic()` handlers for on-demand tracks and
 broadcasts, `append_datagram`/`recv_datagram`, `set_catalog_section`,
 `route_updates()`, and `used()`/`unused()` so capture can idle when nobody is
-subscribed. `moq.is_auth(err)` and `moq.is_shutdown(err)` classify errors.
+subscribed. `session.bandwidth()` divides the connection's send estimate;
+pass it to `encode_video` / `encode_audio` or `reserve` a share for an
+app-owned track. `moq.is_auth(err)` and `moq.is_shutdown(err)` classify errors.
 
 - API reference: [moq-rs.readthedocs.io](https://moq-rs.readthedocs.io)
 - Source and examples: [`py/moq-rs`](https://github.com/moq-dev/moq/tree/main/py/moq-rs)

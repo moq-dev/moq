@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use url::Url;
 
+use crate::bandwidth::MoqBandwidth;
 use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::origin::{MoqOriginConsumer, MoqOriginProducer};
@@ -640,6 +641,9 @@ pub struct MoqSession {
 	status: Task<Inner>,
 	publisher: Arc<MoqOriginProducer>,
 	consumer: Arc<MoqOriginConsumer>,
+	/// One allocator for the session. Every [`bandwidth`](Self::bandwidth) handle
+	/// clones it, so they share one reservation registry.
+	bandwidth: Arc<MoqBandwidth>,
 }
 
 impl MoqSession {
@@ -662,18 +666,33 @@ impl MoqSession {
 		Self::build(Inner::Session(session), publish, subscribe)
 	}
 
+	fn mint_allocator(inner: &Inner) -> moq_net::bandwidth::Allocator {
+		match inner {
+			// Persistent across reconnects: `None` while disconnected, then a grant
+			// again on the next connection. Reservations survive the gap.
+			#[cfg(not(target_arch = "wasm32"))]
+			Inner::Connection(connection) => moq_net::bandwidth::Allocator::new(connection.send_bandwidth()),
+			Inner::Session(session) => session
+				.send_bandwidth()
+				.map(moq_net::bandwidth::Allocator::new)
+				.unwrap_or_else(moq_net::bandwidth::Allocator::unlimited),
+		}
+	}
+
 	fn build(inner: Inner, publish: moq_net::origin::Producer, subscribe: moq_net::origin::Producer) -> Self {
 		// Eagerly wrap the wired origin sides so each publisher()/consumer()
 		// call hands back the same Arc. `publish` is published into; `subscribe`
 		// is where the remote's broadcasts land (read via its consumer view).
 		let publisher = Arc::new(MoqOriginProducer::from_inner(publish));
 		let consumer = Arc::new(MoqOriginConsumer::from_inner(subscribe.consume()));
+		let bandwidth = Arc::new(MoqBandwidth::new(Self::mint_allocator(&inner)));
 		Self {
 			inner: inner.clone(),
 			closed: Task::new(inner.clone()),
 			status: Task::new(inner),
 			publisher,
 			consumer,
+			bandwidth,
 		}
 	}
 
@@ -792,6 +811,18 @@ impl MoqSession {
 	/// neither was set.
 	pub fn consumer(&self) -> Arc<MoqOriginConsumer> {
 		self.consumer.clone()
+	}
+
+	/// The session's bandwidth allocator, used to divide the connection's send
+	/// estimate among tracks sharing it.
+	///
+	/// Every call returns a handle to the same registry, so reservations made
+	/// through one are visible to the others. A client handle survives
+	/// reconnects: the grant is `None` while disconnected and resumes on the
+	/// next connection. An accepted session with no congestion estimate mints
+	/// an unlimited allocator, which reports `None` for every reservation.
+	pub fn bandwidth(&self) -> Arc<MoqBandwidth> {
+		self.bandwidth.clone()
 	}
 
 	/// Snapshot the current connection statistics (RTT, bandwidth estimates,

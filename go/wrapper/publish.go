@@ -171,8 +171,15 @@ func (b *BroadcastProducer) PublishContainerStream(format ContainerFormat) (*Con
 }
 
 // EncodeAudio publishes a raw-audio track with an in-process Opus encoder.
-func (b *BroadcastProducer) EncodeAudio(name string, input AudioEncoderInput, output AudioEncoderOutput) (*AudioProducer, error) {
-	inner, err := b.inner.EncodeAudio(name, input, output)
+//
+// Pass bandwidth to reserve this track's bitrate against the session's
+// allocator so a co-resident video encoder sizes itself against what is left.
+func (b *BroadcastProducer) EncodeAudio(name string, input AudioEncoderInput, output AudioEncoderOutput, bandwidth *Bandwidth) (*AudioProducer, error) {
+	var innerBw *ffi.MoqBandwidth
+	if bandwidth != nil {
+		innerBw = bandwidth.inner
+	}
+	inner, err := b.inner.EncodeAudio(name, input, output, &innerBw)
 	if err != nil {
 		return nil, err
 	}
@@ -185,8 +192,14 @@ func (b *BroadcastProducer) EncodeAudio(name string, input AudioEncoderInput, ou
 // Set output.Track to choose the track name; otherwise one is derived from the
 // codec (.avc3 / .hev1). The catalog rendition is published immediately so
 // subscribers can discover it before the first frame exists.
-func (b *BroadcastProducer) EncodeVideo(input VideoEncoderInput, output VideoEncoderOutput) (*VideoProducer, error) {
-	inner, err := b.inner.EncodeVideo(input, output)
+//
+// Pass bandwidth to reserve this track's configured bitrate and follow the grant.
+func (b *BroadcastProducer) EncodeVideo(input VideoEncoderInput, output VideoEncoderOutput, bandwidth *Bandwidth) (*VideoProducer, error) {
+	var innerBw *ffi.MoqBandwidth
+	if bandwidth != nil {
+		innerBw = bandwidth.inner
+	}
+	inner, err := b.inner.EncodeVideo(input, output, &innerBw)
 	if err != nil {
 		return nil, err
 	}
@@ -602,6 +615,16 @@ func (a *AudioProducer) Write(frame AudioFrame) error {
 	return a.inner.Write(frame)
 }
 
+// Reservation returns this encoder's bandwidth reservation, or nil if it was
+// published without an allocator.
+func (a *AudioProducer) Reservation() *Reservation {
+	inner := a.inner.Reservation()
+	if inner == nil || *inner == nil {
+		return nil
+	}
+	return &Reservation{inner: *inner}
+}
+
 // Finish flushes pending samples and finalizes the track.
 func (a *AudioProducer) Finish() error {
 	return a.inner.Finish()
@@ -651,6 +674,16 @@ func (v *VideoProducer) Cut() error {
 // current rate.
 func (v *VideoProducer) SetBitrate(bitrate uint64) error {
 	return v.inner.SetBitrate(bitrate)
+}
+
+// Reservation returns this encoder's bandwidth reservation, or nil if it was
+// published without an allocator.
+func (v *VideoProducer) Reservation() *Reservation {
+	inner := v.inner.Reservation()
+	if inner == nil || *inner == nil {
+		return nil
+	}
+	return &Reservation{inner: *inner}
 }
 
 // Finish flushes any frames the codec is holding and finalizes the track.

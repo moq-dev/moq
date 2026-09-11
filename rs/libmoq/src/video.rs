@@ -13,7 +13,8 @@
 //! [`moq_video_codec`]).
 
 use std::ffi::{c_char, c_void};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
 
@@ -181,6 +182,54 @@ fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
 	pollster::block_on(future)
 }
 
+fn video_ceiling(
+	config: &moq_video::encode::Config,
+	rendition: &hang::catalog::VideoConfig,
+) -> moq_net::bandwidth::Rate {
+	config
+		.bitrate
+		.or_else(|| rendition.bitrate.map(moq_net::bandwidth::Rate::from_bps))
+		.unwrap_or_else(|| {
+			moq_net::bandwidth::Rate::from_bps(
+				((config.size().pixels() * config.framerate as u64) as f64 * 0.07) as u64,
+			)
+		})
+}
+
+async fn follow_reservation(
+	inner: Shared<VideoEncoder>,
+	mut consumer: moq_net::bandwidth::Consumer,
+	ceiling: moq_net::bandwidth::Rate,
+) {
+	use moq_video::encode::rate::{Control, Policy};
+
+	let mut control = Control::new(Policy::new(ceiling));
+	loop {
+		let estimate = match consumer.changed().await {
+			Ok(estimate) => estimate,
+			Err(_) => return,
+		};
+		let Some(bitrate) = control.update(estimate, Instant::now()) else {
+			continue;
+		};
+
+		let mut guard = inner.lock();
+		let Some(producer) = guard.as_mut() else {
+			return;
+		};
+		match block_on(producer.encoder.set_bitrate(bitrate)) {
+			Ok(()) => tracing::debug!(bitrate = bitrate.as_bps(), "adjusted encoder bitrate"),
+			Err(moq_video::Error::BitrateUnsupported(name)) => {
+				tracing::warn!(encoder = name, "encoder cannot follow the bandwidth estimate");
+				return;
+			}
+			Err(err) => {
+				tracing::warn!(error = %err, bitrate = bitrate.as_bps(), "failed to adjust encoder bitrate");
+			}
+		}
+	}
+}
+
 /// An encoder paired with the track publishing its output, plus the pixel format
 /// its caller feeds it (fixed at publish time, so a frame carries only pixels and
 /// a timestamp).
@@ -197,6 +246,8 @@ pub(crate) struct VideoEncoder {
 	/// The encoded resolution, from the publish config. Frames carry only pixels,
 	/// so this is what says how to read them.
 	size: moq_video::Size,
+	reservation: Option<Arc<moq_net::bandwidth::Reservation>>,
+	follow: Option<oneshot::Sender<()>>,
 }
 
 /// A delivered frame, flattened to CPU I420 at delivery time: the C ABI hands
@@ -302,7 +353,45 @@ impl Video {
 			producer,
 			format,
 			size: config.size(),
+			reservation: None,
+			follow: None,
 		}))
+	}
+
+	pub(crate) fn follow(
+		&self,
+		id: Id,
+		allocator: &moq_net::bandwidth::Allocator,
+		ceiling: moq_net::bandwidth::Rate,
+	) -> Result<(), Error> {
+		let shared = self.producer(id)?;
+		let reservation = {
+			let mut guard = shared.lock();
+			let encoder = guard.as_mut().ok_or(Error::MediaNotFound)?;
+			let reservation = Arc::new(allocator.reserve(&encoder.producer.demand(), ceiling));
+			encoder.reservation = Some(reservation.clone());
+			reservation
+		};
+		let (close, closed) = oneshot::channel();
+		shared.lock().as_mut().ok_or(Error::MediaNotFound)?.follow = Some(close);
+		let follower = shared.clone();
+		tokio::spawn(async move {
+			tokio::select! {
+				_ = closed => {}
+				_ = follow_reservation(follower, reservation.consumer(), ceiling) => {}
+			}
+		});
+		Ok(())
+	}
+
+	pub(crate) fn reservation(&self, id: Id) -> Result<Option<Arc<moq_net::bandwidth::Reservation>>, Error> {
+		Ok(self
+			.producer(id)?
+			.lock()
+			.as_ref()
+			.ok_or(Error::MediaNotFound)?
+			.reservation
+			.clone())
 	}
 
 	/// Resolve a producer handle, so the caller can encode with the global lock
@@ -474,11 +563,14 @@ unsafe fn encoder_kind(output: &moq_video_encoder_output) -> Result<moq_video::e
 /// - `input` / `output` must point to fully populated structs.
 /// - `output->encoder` must point to `output->encoder_len` bytes of UTF-8 when
 ///   `output->kind` is `MOQ_VIDEO_ENCODER_KIND_NAMED`.
+/// - `bandwidth` is a handle from [`crate::moq_session_bandwidth`], or 0 to hold the
+///   configured bitrate regardless of congestion.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_encode_video(
 	broadcast: u32,
 	input: *const moq_video_encoder_input,
 	output: *const moq_video_encoder_output,
+	bandwidth: u32,
 ) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
@@ -503,11 +595,40 @@ pub unsafe extern "C" fn moq_encode_video(
 		let rendition = block_on(config.probe())?;
 		let encoder = block_on(moq_video::encode::Sink::open(&config))?;
 
+		let bandwidth = ffi::parse_id_optional(bandwidth)?;
 		let mut state = State::lock();
+		let allocator = bandwidth.map(|id| state.bandwidth.allocator(id)).transpose()?;
 		let State { publish, video, .. } = &mut *state;
 		let (broadcast_producer, catalog) = publish.pair_mut(broadcast)?;
 
-		video.publish(broadcast_producer, catalog.clone(), format, &config, rendition, encoder)
+		let id = video.publish(
+			broadcast_producer,
+			catalog.clone(),
+			format,
+			&config,
+			rendition.clone(),
+			encoder,
+		)?;
+		if let Some(allocator) = allocator.as_ref() {
+			video.follow(id, allocator, video_ceiling(&config, &rendition))?;
+		}
+		Ok(id)
+	})
+}
+
+/// This encoder's bandwidth reservation, or 0 if it was published without one.
+///
+/// Closing the returned handle does not release the encoder's claim; that lasts
+/// until [moq_encode_video_finish].
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_encode_video_reservation(producer: u32) -> i32 {
+	ffi::enter(move || {
+		let producer = ffi::parse_id(producer)?;
+		let mut state = State::lock();
+		match state.video.reservation(producer)? {
+			Some(reservation) => Ok(i32::from(state.bandwidth.hold(reservation)?)),
+			None => Ok(0),
+		}
 	})
 }
 

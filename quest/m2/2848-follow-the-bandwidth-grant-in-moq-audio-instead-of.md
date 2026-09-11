@@ -71,7 +71,3 @@ the dev merge.
 ## Closes
 
 - [#2848](https://github.com/moq-dev/moq/issues/2848) - close this issue when the quest finishes
-
-## Related
-
-- [Binding rate control](/quest/m1/binding-rate-control.md) - the bindings consume the same `moq_mux::rate::Control`

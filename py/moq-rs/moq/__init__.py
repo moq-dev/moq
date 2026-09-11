@@ -36,7 +36,7 @@ from .publish import (
     VideoProducer,
 )
 from .server import Request, Server, Transport
-from .session import Session
+from .session import Bandwidth, Reservation, Session
 from .subscribe import (
     AudioConsumer,
     BroadcastConsumer,
@@ -106,6 +106,7 @@ __all__ = [
     "AudioFrame",
     "AudioProducer",
     "Backoff",
+    "Bandwidth",
     "BroadcastConsumer",
     "BroadcastDynamic",
     "BroadcastProducer",
@@ -137,6 +138,7 @@ __all__ = [
     "OriginDynamic",
     "OriginProducer",
     "Request",
+    "Reservation",
     "Route",
     "Server",
     "Session",

@@ -51,6 +51,48 @@ func (s *Session) Stats() ConnectionStats {
 	return s.inner.Stats()
 }
 
+// Bandwidth is the session's bandwidth allocator. Every call returns a handle
+// to the same registry, so reservations made through one are visible to the
+// others. A client handle survives reconnects: the grant is nil while
+// disconnected and resumes on the next connection.
+func (s *Session) Bandwidth() *Bandwidth {
+	return &Bandwidth{inner: s.inner.Bandwidth()}
+}
+
+// Bandwidth divides one connection's send estimate among the tracks sharing it.
+type Bandwidth struct {
+	inner *ffi.MoqBandwidth
+}
+
+// Reserve claims up to maxBps for track. maxBps is a ceiling, not a
+// measurement: reserve the most the track can ever send. Drop the reservation
+// to hand the room back.
+func (b *Bandwidth) Reserve(track *TrackProducer, maxBps uint64) (*Reservation, error) {
+	inner, err := b.inner.Reserve(track.inner, maxBps)
+	if err != nil {
+		return nil, err
+	}
+	return &Reservation{inner: inner}, nil
+}
+
+// Reservation is one track's standing claim on a Bandwidth.
+//
+// Grant is a snapshot: nil means no estimate or no demand, so hold the current
+// rate, and 0 is a real zero grant.
+type Reservation struct {
+	inner *ffi.MoqReservation
+}
+
+// Grant returns this reservation's slice right now, in bits per second.
+func (r *Reservation) Grant() *uint64 {
+	return r.inner.Grant()
+}
+
+// Update changes the ceiling, keeping the same claim.
+func (r *Reservation) Update(maxBps uint64) {
+	r.inner.Update(maxBps)
+}
+
 // Publisher returns the origin used to advertise local broadcasts to the remote.
 func (s *Session) Publisher() *OriginProducer {
 	return &OriginProducer{inner: s.inner.Publisher()}

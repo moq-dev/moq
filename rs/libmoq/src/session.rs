@@ -16,6 +16,9 @@ struct TaskEntry {
 	callback: ffi::OnStatus,
 	/// Reads live connection stats, reporting `None` while reconnecting.
 	stats: moq_tokio::ConnectionStatsReader,
+	/// One allocator for the session. Every `moq_session_bandwidth` handle clones
+	/// it, so they share one reservation registry.
+	bandwidth: moq_net::bandwidth::Allocator,
 }
 
 /// Everything needed to prepare a session without holding the global state lock.
@@ -82,12 +85,14 @@ impl Session {
 		// before moving it into the spawned task.
 		let reconnect = client.connect(url);
 		let stats = reconnect.stats();
+		let bandwidth = moq_net::bandwidth::Allocator::new(reconnect.send_bandwidth());
 
 		let closed = oneshot::channel();
 		let entry = TaskEntry {
 			close: Some(closed.0),
 			callback,
 			stats,
+			bandwidth,
 		};
 		let id = self.task.insert(Some(entry))?;
 
@@ -113,6 +118,17 @@ impl Session {
 		});
 
 		Ok(id)
+	}
+
+	/// The session's bandwidth allocator. Clones share one reservation registry.
+	pub fn bandwidth(&self, id: Id) -> Result<moq_net::bandwidth::Allocator, Error> {
+		Ok(self
+			.task
+			.get(id)
+			.and_then(|entry| entry.as_ref())
+			.ok_or(Error::SessionNotFound)?
+			.bandwidth
+			.clone())
 	}
 
 	/// Snapshot the current connection's stats.

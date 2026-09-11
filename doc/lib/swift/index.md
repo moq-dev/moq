@@ -66,7 +66,9 @@ pacing; and `client.setQuicMaxStreams` raises the peer's inbound stream cap.
 (`publishJsonSnapshot(name:of:)`, `subscribeJsonStream(name:as:)`), and the
 rest of the [shared feature list](/lib/#what-every-binding-can-do) maps one
 to one: `fetchGroup`/`fetchMediaGroup`, `dynamic()`, `appendDatagram`/
-`datagrams`, `setCatalogSection`, `used()`/`unused()`. `MoqError.isAuth` and
+`datagrams`, `setCatalogSection`, `used()`/`unused()`. `session.bandwidth()`
+divides the connection's send estimate; pass it to `encodeVideo` /
+`encodeAudio` or `reserve` a share for an app-owned track. `MoqError.isAuth` and
 `isShutdown` classify errors.
 
 - API reference: [Swift Package Index (DocC)](https://swiftpackageindex.com/moq-dev/moq-swift/documentation/moq)

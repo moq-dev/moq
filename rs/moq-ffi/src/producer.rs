@@ -646,6 +646,14 @@ pub struct MoqTrackProducer {
 	inner: std::sync::Mutex<Option<moq_net::track::Producer>>,
 }
 
+impl MoqTrackProducer {
+	pub(crate) fn demand(&self) -> Result<moq_net::track::Demand, MoqError> {
+		let guard = self.inner.lock().unwrap();
+		let track = guard.as_ref().ok_or(MoqError::Closed)?;
+		Ok(track.demand())
+	}
+}
+
 #[uniffi::export]
 impl MoqTrackProducer {
 	/// Return the name of this track.

@@ -211,6 +211,7 @@ async fn raw_audio_activity() {
 				bitrate: None,
 				frame_duration_us: FRAME_DURATION_US,
 			},
+			None,
 		)
 		.unwrap();
 	assert_eq!(audio.name().unwrap(), "microphone");
@@ -301,7 +302,9 @@ async fn raw_audio_frame_durations() {
 		frame_duration_us,
 	};
 
-	let audio = broadcast.encode_audio("fine".into(), input(), output(2_500)).unwrap();
+	let audio = broadcast
+		.encode_audio("fine".into(), input(), output(2_500), None)
+		.unwrap();
 	// 2.5 ms of silence at 48 kHz, mono f32: exactly one encoded frame.
 	audio
 		.write(MoqAudioFrame {
@@ -311,7 +314,7 @@ async fn raw_audio_frame_durations() {
 		.unwrap();
 	audio.finish().unwrap();
 
-	let coarse = broadcast.encode_audio("coarse".into(), input(), output(2_000));
+	let coarse = broadcast.encode_audio("coarse".into(), input(), output(2_000), None);
 	assert!(
 		matches!(coarse, Err(MoqError::Audio(moq_audio::Error::Unsupported(_)))),
 		"2 ms is not an opus frame duration"
@@ -1485,6 +1488,7 @@ async fn video_raw_publish_consume() {
 				// reach for a hardware backend that CI runners don't have.
 				kind: MoqVideoEncoderKind::Software,
 			},
+			None,
 		)
 		.unwrap();
 	assert_eq!(video.name().unwrap(), "camera");
@@ -1604,6 +1608,7 @@ async fn video_raw_publish_from_many_threads() {
 				gop: None,
 				kind: MoqVideoEncoderKind::Software,
 			},
+			None,
 		)
 		.unwrap();
 
@@ -1691,11 +1696,12 @@ async fn video_raw_publish_rejects_bad_frames() {
 					..input(320, 240)
 				},
 				output(),
+				None,
 			)
 			.is_err()
 	);
 
-	let video = broadcast.encode_video(input(320, 240), output()).unwrap();
+	let video = broadcast.encode_video(input(320, 240), output(), None).unwrap();
 
 	// A 640x480 buffer against a 320x240 encoder: the frame carries no dimensions
 	// of its own, so this is caught as a wrong-sized picture.
@@ -2950,4 +2956,69 @@ async fn cancelled_status_does_not_swallow_the_next_transition() {
 
 	cs.cancel(0);
 	server.cancel();
+}
+
+/// The built-in encoder's applied bitrate follows a shrinking grant.
+#[cfg(feature = "video")]
+#[tokio::test]
+async fn video_encoder_follows_a_shrinking_grant() {
+	use crate::bandwidth::MoqBandwidth;
+	use crate::video::*;
+
+	let estimate = moq_net::bandwidth::Producer::new();
+	let bandwidth = std::sync::Arc::new(MoqBandwidth::new(moq_net::bandwidth::Allocator::new(
+		estimate.consume(),
+	)));
+
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let video = broadcast
+		.encode_video(
+			MoqVideoEncoderInput {
+				format: MoqVideoPixelFormat::Rgba,
+				width: 320,
+				height: 240,
+				framerate: 30,
+			},
+			MoqVideoEncoderOutput {
+				codec: MoqVideoCodec::H264,
+				track: Some("camera".into()),
+				bitrate: Some(4_000_000),
+				gop: None,
+				kind: MoqVideoEncoderKind::Software,
+			},
+			Some(bandwidth),
+		)
+		.unwrap();
+
+	let reservation = video.reservation().expect("published against an allocator");
+	assert_eq!(reservation.grant(), None, "no demand yet");
+
+	let consumer = broadcast.consume().unwrap();
+	let _sub = consumer.subscribe_track("camera".into(), None, None).await.unwrap();
+
+	estimate
+		.set(Some(moq_net::bandwidth::Rate::from_bps(4_000_000)))
+		.unwrap();
+	assert_eq!(reservation.grant(), Some(4_000_000));
+
+	estimate
+		.set(Some(moq_net::bandwidth::Rate::from_bps(1_000_000)))
+		.unwrap();
+	assert_eq!(reservation.grant(), Some(1_000_000));
+
+	let deadline = std::time::Instant::now() + TIMEOUT;
+	loop {
+		if video.applied_bitrate() == 1_000_000 {
+			break;
+		}
+		assert!(
+			std::time::Instant::now() < deadline,
+			"encoder did not follow the shrinking grant, last applied {}",
+			video.applied_bitrate()
+		);
+		tokio::time::sleep(Duration::from_millis(10)).await;
+	}
+
+	video.finish().unwrap();
+	broadcast.finish().unwrap();
 }

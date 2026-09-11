@@ -163,4 +163,14 @@ public final class Session: Sendable {
     public func stats() -> ConnectionStats {
         ffi.stats()
     }
+
+    /// The session's bandwidth allocator.
+    ///
+    /// Every call returns a handle to the same registry, so reservations made
+    /// through one are visible to the others. A client handle survives
+    /// reconnects: the grant is `nil` while disconnected and resumes on the
+    /// next connection.
+    public func bandwidth() -> Bandwidth {
+        Bandwidth(ffi.bandwidth())
+    }
 }

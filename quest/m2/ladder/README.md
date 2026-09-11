@@ -84,4 +84,3 @@ encoders on every target change.
 ## Related
 
 - [#2848](/quest/m2/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - the other sender that reserves but never follows its grant
-- [#2857](/quest/m1/binding-rate-control.md) - non-Rust publishers cannot reach rate control regardless of what the ladder does

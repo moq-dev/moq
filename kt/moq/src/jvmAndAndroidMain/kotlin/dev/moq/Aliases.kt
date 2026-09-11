@@ -157,6 +157,10 @@ typealias VideoEncoderInput = uniffi.moq.MoqVideoEncoderInput
 typealias VideoEncoderOutput = uniffi.moq.MoqVideoEncoderOutput
 /** Which encoder implementation to use: automatic, hardware, software, or one named backend. */
 typealias VideoEncoderKind = uniffi.moq.MoqVideoEncoderKind
+/** Divides one connection's send estimate among the tracks sharing it. */
+typealias Bandwidth = uniffi.moq.MoqBandwidth
+/** One track's standing claim on a [Bandwidth]. */
+typealias Reservation = uniffi.moq.MoqReservation
 /** A snapshot of transport connection statistics. */
 typealias ConnectionStats = uniffi.moq.MoqConnectionStats
 /** A connection lifecycle transition reported by [Session.status]. */

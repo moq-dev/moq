@@ -2238,6 +2238,155 @@ class FfiConverterMoqConnectionStatus {
   }
 }
 
+abstract class MoqBandwidthInterface {
+  MoqReservation reserve({
+    required MoqTrackProducer track,
+    required int maxBps,
+  });
+}
+
+final _MoqBandwidthFinalizer = Finalizer<Pointer<Void>>((ptr) {
+  rustCall((status) => uniffi_moq_ffi_fn_free_moqbandwidth(ptr, status));
+});
+
+class MoqBandwidth implements MoqBandwidthInterface {
+  late final Pointer<Void> _ptr;
+  MoqBandwidth._(this._ptr) {
+    _MoqBandwidthFinalizer.attach(this, _ptr, detach: this);
+  }
+  factory MoqBandwidth.lift(Pointer<Void> ptr) {
+    return MoqBandwidth._(ptr);
+  }
+  Pointer<Void> uniffiClonePointer() {
+    return rustCall(
+      (status) => uniffi_moq_ffi_fn_clone_moqbandwidth(_ptr, status),
+    );
+  }
+
+  void dispose() {
+    _MoqBandwidthFinalizer.detach(this);
+    rustCall((status) => uniffi_moq_ffi_fn_free_moqbandwidth(_ptr, status));
+  }
+
+  MoqReservation reserve({
+    required MoqTrackProducer track,
+    required int maxBps,
+  }) {
+    return rustCallWithLifter(
+      (status) => uniffi_moq_ffi_fn_method_moqbandwidth_reserve(
+        uniffiClonePointer(),
+        FfiConverterMoqTrackProducer.lower(track),
+        FfiConverterUInt64.lower(maxBps),
+        status,
+      ),
+      FfiConverterMoqReservation.lift,
+      moqExceptionErrorHandler,
+    );
+  }
+}
+
+class FfiConverterMoqBandwidth {
+  static MoqBandwidth lift(Pointer<Void> ptr) {
+    return MoqBandwidth.lift(ptr);
+  }
+
+  static Pointer<Void> lower(MoqBandwidth value) {
+    return value.uniffiClonePointer();
+  }
+
+  static int allocationSize(MoqBandwidth value) {
+    return 8;
+  }
+
+  static LiftRetVal<MoqBandwidth> read(Uint8List buf) {
+    final handle = buf.buffer.asByteData(buf.offsetInBytes).getInt64(0);
+    final pointer = Pointer<Void>.fromAddress(handle);
+    return LiftRetVal(MoqBandwidth.lift(pointer), 8);
+  }
+
+  static int write(MoqBandwidth value, Uint8List buf) {
+    final handle = lower(value);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt64(0, handle.address);
+    return 8;
+  }
+}
+
+abstract class MoqReservationInterface {
+  int? grant();
+  void update({required int maxBps});
+}
+
+final _MoqReservationFinalizer = Finalizer<Pointer<Void>>((ptr) {
+  rustCall((status) => uniffi_moq_ffi_fn_free_moqreservation(ptr, status));
+});
+
+class MoqReservation implements MoqReservationInterface {
+  late final Pointer<Void> _ptr;
+  MoqReservation._(this._ptr) {
+    _MoqReservationFinalizer.attach(this, _ptr, detach: this);
+  }
+  factory MoqReservation.lift(Pointer<Void> ptr) {
+    return MoqReservation._(ptr);
+  }
+  Pointer<Void> uniffiClonePointer() {
+    return rustCall(
+      (status) => uniffi_moq_ffi_fn_clone_moqreservation(_ptr, status),
+    );
+  }
+
+  void dispose() {
+    _MoqReservationFinalizer.detach(this);
+    rustCall((status) => uniffi_moq_ffi_fn_free_moqreservation(_ptr, status));
+  }
+
+  int? grant() {
+    return rustCallWithLifter(
+      (status) => uniffi_moq_ffi_fn_method_moqreservation_grant(
+        uniffiClonePointer(),
+        status,
+      ),
+      FfiConverterOptionalUInt64.lift,
+      null,
+    );
+  }
+
+  void update({required int maxBps}) {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqreservation_update(
+        uniffiClonePointer(),
+        FfiConverterUInt64.lower(maxBps),
+        status,
+      );
+    }, null);
+  }
+}
+
+class FfiConverterMoqReservation {
+  static MoqReservation lift(Pointer<Void> ptr) {
+    return MoqReservation.lift(ptr);
+  }
+
+  static Pointer<Void> lower(MoqReservation value) {
+    return value.uniffiClonePointer();
+  }
+
+  static int allocationSize(MoqReservation value) {
+    return 8;
+  }
+
+  static LiftRetVal<MoqReservation> read(Uint8List buf) {
+    final handle = buf.buffer.asByteData(buf.offsetInBytes).getInt64(0);
+    final pointer = Pointer<Void>.fromAddress(handle);
+    return LiftRetVal(MoqReservation.lift(pointer), 8);
+  }
+
+  static int write(MoqReservation value, Uint8List buf) {
+    final handle = lower(value);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt64(0, handle.address);
+    return 8;
+  }
+}
+
 abstract class MoqCancelInterface {
   void cancel();
 }
@@ -5999,6 +6148,7 @@ class FfiConverterMoqClient {
 }
 
 abstract class MoqSessionInterface {
+  MoqBandwidth bandwidth();
   void cancel({required int code});
   Future<void> closed();
   MoqOriginConsumer consumer();
@@ -6030,6 +6180,17 @@ class MoqSession implements MoqSessionInterface {
   void dispose() {
     _MoqSessionFinalizer.detach(this);
     rustCall((status) => uniffi_moq_ffi_fn_free_moqsession(_ptr, status));
+  }
+
+  MoqBandwidth bandwidth() {
+    return rustCallWithLifter(
+      (status) => uniffi_moq_ffi_fn_method_moqsession_bandwidth(
+        uniffiClonePointer(),
+        status,
+      ),
+      FfiConverterMoqBandwidth.lift,
+      null,
+    );
   }
 
   void cancel({required int code}) {
@@ -7522,6 +7683,70 @@ void moqLogLevel({required String level}) {
     );
   }, moqExceptionErrorHandler);
 }
+
+@Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external Pointer<Void> uniffi_moq_ffi_fn_clone_moqbandwidth(
+  Pointer<Void> handle,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_free_moqbandwidth(
+  Pointer<Void> handle,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<
+  Pointer<Void> Function(
+    Pointer<Void>,
+    Pointer<Void>,
+    Uint64,
+    Pointer<RustCallStatus>,
+  )
+>(assetId: _uniffiAssetId)
+external Pointer<Void> uniffi_moq_ffi_fn_method_moqbandwidth_reserve(
+  Pointer<Void> ptr,
+  Pointer<Void> track,
+  int max_bps,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external Pointer<Void> uniffi_moq_ffi_fn_clone_moqreservation(
+  Pointer<Void> handle,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_free_moqreservation(
+  Pointer<Void> handle,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<RustBuffer Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external RustBuffer uniffi_moq_ffi_fn_method_moqreservation_grant(
+  Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Void Function(Pointer<Void>, Uint64, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_method_moqreservation_update(
+  Pointer<Void> ptr,
+  int max_bps,
+  Pointer<RustCallStatus> uniffiStatus,
+);
 
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
@@ -9399,6 +9624,14 @@ external void uniffi_moq_ffi_fn_free_moqsession(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external Pointer<Void> uniffi_moq_ffi_fn_method_moqsession_bandwidth(
+  Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<Void Function(Pointer<Void>, Uint32, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -9792,6 +10025,15 @@ external void ffi_moq_ffi_rust_future_complete_void(
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_func_moq_log_level();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqbandwidth_reserve();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqreservation_grant();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqreservation_update();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqcancel_cancel();
@@ -10265,6 +10507,9 @@ external int uniffi_moq_ffi_checksum_method_moqclient_set_tls_roots();
 external int uniffi_moq_ffi_checksum_method_moqclient_set_tls_system_roots();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqsession_bandwidth();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqsession_cancel();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -10318,6 +10563,15 @@ void _checkApiVersion() {
 
 void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_func_moq_log_level() != 24625) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqbandwidth_reserve() != 60458) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqreservation_grant() != 59401) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqreservation_update() != 9626) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqcancel_cancel() != 40805) {
@@ -10805,6 +11059,9 @@ void _checkApiChecksums() {
   }
   if (uniffi_moq_ffi_checksum_method_moqclient_set_tls_system_roots() !=
       24617) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqsession_bandwidth() != 8006) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqsession_cancel() != 39476) {

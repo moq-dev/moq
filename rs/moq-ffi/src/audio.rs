@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::bandwidth::{MoqBandwidth, MoqReservation};
 use crate::cancel::{self, MoqCancel};
 use crate::consumer::MoqBroadcastConsumer;
 use crate::error::MoqError;
@@ -157,6 +158,9 @@ impl TryFrom<MoqAudioFrame> for moq_audio::Frame {
 #[derive(uniffi::Object)]
 pub struct MoqAudioProducer {
 	inner: std::sync::Mutex<Option<moq_audio::encode::Producer<moq_mux::catalog::hang::Extra>>>,
+	reservation: std::sync::Mutex<Option<Arc<MoqReservation>>>,
+	/// Held so the reservation's registry outlives extra bandwidth handles.
+	_bandwidth: Option<Arc<MoqBandwidth>>,
 }
 
 impl MoqAudioProducer {
@@ -214,9 +218,17 @@ impl MoqAudioProducer {
 		Ok(())
 	}
 
+	/// This encoder's bandwidth reservation, if it was published against a
+	/// [`MoqBandwidth`]. Dropping the handle does not release the claim; the
+	/// producer holds it until [`finish`](Self::finish).
+	pub fn reservation(&self) -> Option<Arc<MoqReservation>> {
+		self.reservation.lock().unwrap().clone()
+	}
+
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
+		self.reservation.lock().unwrap().take();
 		producer.finish()?;
 		Ok(())
 	}
@@ -227,11 +239,18 @@ impl MoqBroadcastProducer {
 	/// Open an audio track on this broadcast. The catalog rendition is
 	/// registered immediately so subscribers can find the track even
 	/// before the first frame is written.
+	///
+	/// Pass `bandwidth` to reserve this track's bitrate against the session's
+	/// allocator. Following the grant waits on the Rust audio producer; this
+	/// call only claims the share so a co-resident video encoder sizes itself
+	/// against what is left.
+	#[uniffi::method(default(bandwidth = None))]
 	pub fn encode_audio(
 		&self,
 		name: String,
 		input: MoqAudioEncoderInput,
 		output: MoqAudioEncoderOutput,
+		bandwidth: Option<Arc<MoqBandwidth>>,
 	) -> Result<Arc<MoqAudioProducer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 
@@ -249,14 +268,26 @@ impl MoqBroadcastProducer {
 		options.channels = output.channels;
 		options.bitrate = output.bitrate.map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
 		options.frame_duration = Duration::from_micros(output.frame_duration_us.into());
+		if let Some(bandwidth) = &bandwidth {
+			options.bandwidth = bandwidth.allocator().clone();
+		}
 
 		let producer = self.with_state(|state| {
 			moq_audio::encode::Producer::new(&mut state.broadcast, state.catalog.clone(), input, &options)
 				.map_err(Into::into)
 		})?;
 
+		// Producer::new does not reserve today (only capture does), so the
+		// binding holds the claim itself. Passing the allocator into Options
+		// means the Rust producer will reserve and follow whenever it starts to.
+		let reservation = bandwidth
+			.as_ref()
+			.map(|bandwidth| bandwidth.reserve_demand(&producer.track().demand(), producer.bitrate().as_bps()));
+
 		Ok(Arc::new(MoqAudioProducer {
 			inner: std::sync::Mutex::new(Some(producer)),
+			reservation: std::sync::Mutex::new(reservation),
+			_bandwidth: bandwidth,
 		}))
 	}
 }

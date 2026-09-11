@@ -82,6 +82,11 @@ public final class VideoProducer: Sendable {
         try ffi.setBitrate(bitrate: bitrate)
     }
 
+    /// This encoder's bandwidth reservation, if published against a session allocator.
+    public func reservation() -> Reservation? {
+        ffi.reservation().map(Reservation.init)
+    }
+
     /// Flush any frames the codec is holding and finalize the track.
     public func finish() throws {
         try ffi.finish()

@@ -64,6 +64,11 @@ public final class AudioProducer: Sendable {
         try ffi.write(frame: frame)
     }
 
+    /// This encoder's bandwidth reservation, if published against a session allocator.
+    public func reservation() -> Reservation? {
+        ffi.reservation().map(Reservation.init)
+    }
+
     /// Finish the track and finalize encoding.
     public func finish() throws {
         try ffi.finish()

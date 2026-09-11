@@ -28,6 +28,12 @@ int32_t moq_log_level(const char *level, uintptr_t level_len);
 int32_t moq_session_connect(const char *url, uintptr_t url_len, const moq_client_config *config, uint32_t origin_publish, uint32_t origin_consume, void (*on_status)(void *user_data, int32_t code), void *user_data);
 moq_client_config moq_client_defaults(void);
 int32_t moq_session_close(uint32_t session);
+int32_t moq_session_bandwidth(uint32_t session);
+int32_t moq_bandwidth_reserve(uint32_t bandwidth, uint32_t track, uint64_t max_bps);
+int32_t moq_bandwidth_close(uint32_t bandwidth);
+int32_t moq_reservation_grant(uint32_t reservation, uint64_t *bps, bool *present);
+int32_t moq_reservation_update(uint32_t reservation, uint64_t max_bps);
+int32_t moq_reservation_close(uint32_t reservation);
 
 // Origin
 int32_t moq_origin_create(void);

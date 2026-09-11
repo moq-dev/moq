@@ -60,6 +60,7 @@ track := "camera"
 video, _ := broadcast.EncodeVideo(
     moq.VideoEncoderInput{Format: moq.VideoPixelFormatRgba, Width: 1280, Height: 720, Framerate: 30},
     moq.VideoEncoderOutput{Codec: moq.VideoCodecH264, Track: &track, Kind: moq.AutoEncoder()},
+    nil,
 )
 _ = video.Write(moq.VideoFrame{TimestampUs: pts, Data: rgba})
 broadcast.Finish()   // keep the producer reachable while publishing, then finish explicitly
@@ -85,6 +86,7 @@ peer's inbound stream cap for a subscriber to many tracks.
 take anything `encoding/json` handles and return `json.RawMessage`. The rest
 of the [shared feature list](/lib/#what-every-binding-can-do) maps one to
 one: `FetchGroup`/`FetchMediaGroup`, `Dynamic()` with `Requests(ctx)`,
+`Session.Bandwidth()` to divide the send estimate,
 `AppendDatagram`/`Datagrams(ctx)`, `SetCatalogSection`, `Used`/`Unused`,
 `Session().Stats()`. `moq.IsAuthError` and `moq.IsShutdown` classify errors.
 

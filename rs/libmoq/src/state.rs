@@ -1,5 +1,6 @@
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
+use crate::bandwidth::Bandwidth;
 use crate::{Consume, Origin, Publish, Session, audio::Audio, video::Video};
 
 pub struct State {
@@ -9,6 +10,7 @@ pub struct State {
 	pub consume: Consume,
 	pub audio: Audio,
 	pub video: Video,
+	pub bandwidth: Bandwidth,
 }
 
 impl State {
@@ -20,6 +22,7 @@ impl State {
 			consume: Consume::default(),
 			audio: Audio::default(),
 			video: Video::default(),
+			bandwidth: Bandwidth::default(),
 		}
 	}
 
