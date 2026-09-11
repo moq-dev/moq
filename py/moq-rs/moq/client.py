@@ -47,6 +47,7 @@ class Client:
         tls_cert: str | None = None,
         tls_key: str | None = None,
         bind: str | None = None,
+        max_streams: int | None = None,
         reconnect: bool = True,
         backoff: Backoff | None = None,
         publish: OriginProducer | None = None,
@@ -60,6 +61,7 @@ class Client:
         self._tls_cert = tls_cert
         self._tls_key = tls_key
         self._bind = bind
+        self._max_streams = max_streams
         self._reconnect = reconnect
         self._backoff = backoff
 
@@ -90,6 +92,8 @@ class Client:
             self._inner.set_tls_key(self._tls_key)
         if self._bind is not None:
             self._inner.set_bind(self._bind)
+        if self._max_streams is not None:
+            self._inner.set_quic_max_streams(self._max_streams)
         if not self._reconnect:
             self._inner.set_reconnect(False)
         if self._backoff is not None:
@@ -171,6 +175,7 @@ def connect(
     tls_cert: str | None = None,
     tls_key: str | None = None,
     bind: str | None = None,
+    max_streams: int | None = None,
     reconnect: bool = True,
     backoff: Backoff | None = None,
     publish: OriginProducer | None = None,
@@ -192,6 +197,7 @@ def connect(
         tls_cert=tls_cert,
         tls_key=tls_key,
         bind=bind,
+        max_streams=max_streams,
         reconnect=reconnect,
         backoff=backoff,
         publish=publish,

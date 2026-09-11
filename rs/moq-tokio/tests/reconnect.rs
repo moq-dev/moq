@@ -55,6 +55,35 @@ async fn a_transient_failure_retries_until_the_budget_runs_out() {
 	);
 }
 
+/// The epoch advances in the same write that reports `Connected`, so a caller
+/// pairing [`Connection::status`] with [`Connection::epoch`] never sees a stale
+/// count, however fast the redial.
+#[tokio::test]
+async fn the_epoch_advances_on_reconnect() {
+	let (port, mut sessions, _task) = spawn_server().await;
+	let url: url::Url = format!("tcp://localhost:{port}/").parse().expect("parse url");
+	let mut connection = quick_client(Default::default()).connect(url);
+
+	let status = tokio::time::timeout(Duration::from_secs(10), connection.status())
+		.await
+		.expect("status timed out")
+		.expect("status failed");
+	assert_eq!(status, moq_tokio::Status::Connected);
+	assert_eq!(connection.epoch(), 1, "the first connect is epoch 1");
+
+	// Dropping the server's handle closes the session, so the loop redials.
+	let session = sessions.recv().await.expect("server stopped accepting");
+	drop(session);
+
+	tokio::time::timeout(Duration::from_secs(10), async {
+		while connection.epoch() < 2 {
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("the epoch never advanced past the first connect");
+}
+
 /// A stream-only moq server on a free loopback TCP port.
 ///
 /// Returns the port, a receiver yielding every accepted session (so a test can

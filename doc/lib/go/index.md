@@ -74,6 +74,13 @@ usable, while a stream read (`Next`, `RecvGroup`, `ReadFrame`, and the
 `iter.Seq2` iterators over them) cancels the stream it reads, which is what a
 range loop over a cancelled context wants.
 
+Sessions reconnect with backoff when the transport drops and re-announce local
+broadcasts, so a worker rides out a relay restart. `Session().Epoch()` counts
+the connections, 1 on the first, pairing with `Session().Status(ctx)` to log
+each reconnect by number; `moq.WithBackoff` tunes the pacing, with
+`moq.RetryForever` as the timeout; and `moq.WithQUICMaxStreams` raises the
+peer's inbound stream cap for a subscriber to many tracks.
+
 `moq.Listen` accepts sessions with per-request `Accept`/`Reject`. JSON tracks
 take anything `encoding/json` handles and return `json.RawMessage`. The rest
 of the [shared feature list](/lib/#what-every-binding-can-do) maps one to

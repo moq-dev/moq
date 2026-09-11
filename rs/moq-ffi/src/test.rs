@@ -2701,6 +2701,7 @@ async fn client_reconnects_and_resumes_announcements() {
 		.expect("status timed out")
 		.expect("status errored");
 	assert_eq!(status, MoqConnectionStatus::Connected);
+	assert_eq!(cs.epoch(), 1);
 
 	// Kill the transport under the client, simulating a relay restart.
 	// Nothing accepts the redial until the gate opens.
@@ -2723,6 +2724,16 @@ async fn client_reconnects_and_resumes_announcements() {
 		.expect("reconnect status timed out")
 		.expect("reconnect status errored");
 	assert_eq!(status, MoqConnectionStatus::Connected);
+
+	// The reconnect advances the epoch. The watcher may land just after the status
+	// edge it watched, so poll rather than assume ordering.
+	tokio::time::timeout(TIMEOUT, async {
+		while cs.epoch() < 2 {
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("the epoch did not advance on reconnect");
 
 	let server_session = tokio::time::timeout(TIMEOUT, accept)
 		.await

@@ -42,6 +42,11 @@ track.appendGroup().writeFrame(frame: MoqFrame(payload: bytes));
 moq.close();
 ```
 
+Sessions reconnect with backoff when the transport drops and re-announce local
+broadcasts. `moq.epoch` counts the connections, 1 on the first, pairing with
+`session.status()` to log each reconnect; `maxStreams` raises the peer's
+inbound stream cap for a subscriber to many tracks.
+
 Cancelling a stream releases the native cursor. The package re-exports
 `moq_ffi`, so the full generated API is available without a second import.
 

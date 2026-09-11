@@ -36,6 +36,16 @@ func (s *Session) Status(ctx context.Context) (ConnectionStatus, error) {
 	return runCancellable(ctx, s.inner.Shutdown, s.inner.Status)
 }
 
+// Epoch is the connection epoch: 1 for the connect that built this session, one
+// more on each reconnect. A server-accepted session stays at 1.
+//
+// Pair it with Status to log each reconnect by number: a StatusConnected whose
+// Epoch grew is a reconnect. Like Status, it reports the current state, so a
+// drop that reconnects between reads is coalesced away.
+func (s *Session) Epoch() uint64 {
+	return s.inner.Epoch()
+}
+
 // Stats snapshots the current connection statistics.
 func (s *Session) Stats() ConnectionStats {
 	return s.inner.Stats()

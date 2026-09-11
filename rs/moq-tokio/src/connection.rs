@@ -435,6 +435,10 @@ impl GoawayConfig {
 struct State {
 	/// Current connection status, or `None` before the first connect.
 	status: Option<Status>,
+	/// How many sessions have been live on this handle, counting the current one.
+	/// Advanced by `Shared::connected` with the same write that publishes `status`,
+	/// so a reader can't see `Connected` without its epoch.
+	epoch: u64,
 	/// The negotiated MoQ version of the live session, or `None` when disconnected.
 	version: Option<Version>,
 	/// Set when the reconnect loop permanently gives up (reconnect timeout exceeded).
@@ -470,6 +474,7 @@ impl Shared {
 		}
 		if let Ok(mut state) = self.state.write() {
 			state.status = Some(Status::Connected);
+			state.epoch += 1;
 			state.version = Some(session.version());
 			state.session = Some(session.clone());
 		}
@@ -560,9 +565,9 @@ pub struct ConnectionSnapshot {
 /// and [`recv_bandwidth`](Self::recv_bandwidth) track the live session and reset while disconnected.
 /// The extra toggle a plain session doesn't have is the connection lifecycle: [`established`](Self::established)
 /// waits for the first session, [`connected`](Self::connected) reads the current state synchronously,
-/// and [`status`](Self::status) waits for the next change. [`closed`](Self::closed)
-/// waits for the loop to stop. Clones share the loop; it stops when the last
-/// clone drops (or on an explicit [`close`](Self::close)).
+/// [`epoch`](Self::epoch) counts the sessions so far, and [`status`](Self::status) waits for the
+/// next change. [`closed`](Self::closed) waits for the loop to stop. Clones share the loop; it
+/// stops when the last clone drops (or on an explicit [`close`](Self::close)).
 #[derive(Clone)]
 #[must_use = "dropping the Connection stops the dial; hold it for as long as you want the session"]
 pub struct Connection {
@@ -1006,6 +1011,16 @@ impl Connection {
 	/// state rather than the next change.
 	pub fn connected(&self) -> bool {
 		self.state.read().status == Some(Status::Connected)
+	}
+
+	/// How many sessions have been live on this handle: 1 after the first connect,
+	/// one more per reconnect (and per GOAWAY migration, which is a new session too).
+	///
+	/// Advanced in the same write that publishes [`Status::Connected`], so reading
+	/// after a `Connected` status never returns a stale count. Zero only if no
+	/// session has connected yet, which [`established`](Self::established) rules out.
+	pub fn epoch(&self) -> u64 {
+		self.state.read().epoch
 	}
 
 	/// The negotiated MoQ version of the live session, or `None` while disconnected.

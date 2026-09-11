@@ -56,6 +56,11 @@ session.shutdown()
 For a self-signed relay on your own test network, `client.setTlsVerify(false)`
 accepts any certificate; prefer `setTlsRoots` or a fingerprint anywhere else.
 
+Sessions reconnect with backoff when the transport drops and re-announce local
+broadcasts. `session.epoch()` counts the connections, 1 on the first, pairing
+with `session.status()` to log each reconnect; `client.setBackoff` tunes the
+pacing; and `client.setQuicMaxStreams` raises the peer's inbound stream cap.
+
 `Server` binds, generates or loads TLS, and hands you each request to
 `accept()` or `reject(code:)`. JSON tracks take `Codable` types
 (`publishJsonSnapshot(name:of:)`, `subscribeJsonStream(name:as:)`), and the
