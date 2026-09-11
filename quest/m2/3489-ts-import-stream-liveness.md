@@ -33,7 +33,7 @@ audio half is visible, late, through #3372's resync line.
   [SRT import stats](/quest/m2/srt-import-stats.md).
 - Name and shape the counters so the TR 101 290 quest adopts them as its
   `PID_error` check, and leave the catalog `stalled` bit alone; that is the
-  ladder and publisher-stats work.
+  ladder and client stats work.
 - Tests with the issue's stimulus shape: suppress one PID's PES while keeping
   its PCR and continuity legal, assert the row's count stops and the gap
   grows; audio and SCTE-35 arms.
@@ -46,4 +46,4 @@ audio half is visible, late, through #3372's resync line.
 
 - [SRT import stats](/quest/m2/srt-import-stats.md) - the same rows read from the SRT gateway
 - [#1838](/quest/m3/1838-tr-101-290-monitoring-requirements-broadcast-contribution.md) - the monitoring model that subsumes this as `PID_error`
-- [Publisher stats](/quest/m2/qos/publisher-stats.md) - where per-rendition liveness would ride the catalog
+- [Client stats](/quest/m2/qos/stats/schema.md) - where per-rendition liveness rides a publisher's stats broadcast

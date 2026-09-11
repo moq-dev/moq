@@ -1,4 +1,4 @@
-# [M] An auth re-check moves the tier and names an alias change
+# [M] An auth re-check moves the tier, names an alias change, and says when it is off
 
 ## Goal
 
@@ -8,8 +8,11 @@ under the old one, and the session stays up. A reply that changes `alias` still
 closes the session, but with its own expiry reason in the log and to the client
 instead of a generic revocation, so a benign rename is distinguishable from a
 refusal. Scope narrowing keeps the
-[relay auth](/quest/m2/path-patterns/relay-auth.md) contract, and
-`doc/bin/relay/auth.md` states the outcome per field.
+[relay auth](/quest/m2/path-patterns/relay-auth.md) contract. An endpoint
+reply that schedules no re-check is logged once, so a relay whose revalidation
+is off no longer looks like one whose endpoint has never revoked anything, and
+`doc/bin/relay/auth.md` states the outcome per field and the revocation window
+an operator can actually get.
 
 ## Plan
 
@@ -40,19 +43,30 @@ and meters, so rebuilding a local handle would retag nothing.
   meter through an already-cloned handle and leaves earlier bytes where they
   were; a re-check that changes the alias closes with `Expired::Alias`; a reply
   that changes both closes.
+- A reply that schedules no re-check (no `max-age`, `max-age=0`, `no-cache`,
+  `no-store`, or a value the relay cannot parse) is the endpoint opting out,
+  and stays so. The relay says it once: the first such reply from an endpoint
+  logs at WARN that sessions admitted under it are never re-checked and end
+  only at their credential's `exp`. One line per relay, never per session.
 - Docs: the revalidation section of `doc/bin/relay/auth.md` gains a per-field
   table: tier updates in place, alias closes, and scope narrowing closes today
   (`covered_by` failing maps to `Recheck::Revoked`) and resizes once
   [relay auth](/quest/m2/path-patterns/relay-auth.md) lands; say which is in
-  effect.
+  effect. The same section and the `--auth-api` flag help state the cadence
+  contract where an operator sizes a revocation SLA: `max-age` arms
+  re-checks, floored at one second; the values above disable them; and
+  because re-checks ride the admission cache, revocation takes up to twice
+  `max-age`. The `revalidate` doc comment in `rs/moq-relay/src/auth.rs` on
+  main repeats one paragraph and claims a 3x staleness window the code does
+  not have; dev already rewrote it, so take dev's wording.
 
 On main, additive.
 
 ## Closes
 
 - [#3058](https://github.com/moq-dev/moq/issues/3058) - close this issue when the quest finishes
+- [#3605](https://github.com/moq-dev/moq/issues/3605) - close this issue when the quest finishes
 
 ## Related
 
 - [Relay auth](/quest/m2/path-patterns/relay-auth.md) - the scope contract this inherits
-- [Auth verdict](/quest/m2/auth-verdict.md) - the proxy mode whose re-check this also governs

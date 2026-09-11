@@ -75,6 +75,6 @@ Additive.
 
 - [Relay auth](/quest/m2/path-patterns/relay-auth.md) - extends the re-scope
   to a shrinking union
-- [Revalidation updates](/quest/m2/revalidation-updates.md) - the tier and
+- [Revalidation updates](/quest/m2/auth-api/revalidation-updates.md) - the tier and
   alias outcomes a re-check has; a token that changes them follows the same
   rules
