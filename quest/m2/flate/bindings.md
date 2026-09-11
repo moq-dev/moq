@@ -16,15 +16,16 @@ moq-ffi, next to `json.rs` and named the same way:
 
 - `MoqBroadcastProducer::publish_flate(name, MoqFlateConfig) -> MoqFlateProducer`
   with `append_group() -> MoqFlateGroupProducer`, `finish()`, `abort(code)`.
-- `MoqFlateGroupProducer::write_frame(Vec<u8>)`, `finish()`, `abort(code)`.
+- `MoqFlateGroupProducer::write_frame(MoqFrame)`, `finish()`, `abort(code)`.
+  A failed write aborts the group and the handle refuses further writes.
 - `MoqBroadcastConsumer::subscribe_flate(name, MoqFlateConfig) -> MoqFlateConsumer`
   with `next_group() -> Option<MoqFlateGroupConsumer>`, `cancel()`.
-- `MoqFlateGroupConsumer::read_frame() -> Option<Vec<u8>>`, `cancel()`.
+- `MoqFlateGroupConsumer::read_frame() -> Option<MoqFrame>`, `cancel()`.
 - `MoqFlateConfig { level = 6, max_frame_size = 64 MiB }` as `#[uniffi(default)]`
   literals, with the same drift test `json.rs` keeps against the crate defaults.
 
-Payloads cross as bytes, not `MoqFrame`: the wrapper carries no timestamp.
-Explicit groups rather than a flat `append(bytes)` because the window resets
+Frames cross as `MoqFrame` so the transport timestamp survives, as on the raw
+track API; only the payload is compressed. Explicit groups rather than a flat `append(bytes)` because the window resets
 at the boundary and the caller chooses where that is; a helper that rolls
 groups on a size or count budget can follow if a consumer asks.
 
@@ -38,7 +39,8 @@ the consume side and regenerate `moq.h`.
 
 Wrappers per the Cross-Package Sync table: the uniffi bindings regenerate;
 `go/wrapper/moq/json.go`, `py/moq-rs/moq/{publish,subscribe}.py`,
-`swift/Sources/Moq/Json.swift`, and `dart/moq` each gain a hand-written
+`swift/Sources/Moq/Json.swift`, `kt/moq`'s `Json.kt` with its `Aliases.kt`
+re-exports and `Flows.kt` extensions, and `dart/moq` each gain a hand-written
 sibling. Document in `doc/lib/{c,py,swift,kt,go,dart}` beside the JSON entry.
 
 Tests: a moq-ffi round trip next to `json_snapshot_roundtrip`, a libmoq C

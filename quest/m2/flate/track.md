@@ -18,24 +18,30 @@ Shape, matching `moq-net` names so the wrapper reads like the track it wraps:
 
 - `track::Producer::new(track, Config)`, `append_group() -> group::Producer`,
   `create_group(sequence)`, `finish()`, `abort(code)`, `consume()`.
-- `group::Producer`: `write_frame(&[u8])`, `finish()`, `abort(code)`. Holds
-  the `Encoder`; dropping it without `finish` aborts, per the refcount idiom.
+- `group::Producer`: `write_frame(timestamp, &[u8])`, `finish()`,
+  `abort(code)`. Holds the `Encoder`; dropping it without `finish` aborts,
+  per the refcount idiom. A write that fails after the encoder advanced (an
+  oversized frame, a closed group) leaves the window ahead of the consumer,
+  so it is terminal: the group aborts and the handle refuses further writes.
 - `track::Consumer::new(subscriber, Config)`, `next_group() -> group::Consumer`
   (plus `recv_group` if the raw consumer distinguishes them), `update(...)`.
-- `group::Consumer`: `read_frame() -> Option<Bytes>`. Holds the `Decoder`.
+- `group::Consumer`: `read_frame() -> Option<frame::Frame>`, the transport
+  timestamp intact and the payload inflated. Holds the `Decoder`.
 - `Config { level, max_frame_size }` with the crate defaults; one struct shared
   by both sides, the consumer reading only `max_frame_size`. A frame past the
   cap is an error that aborts the group, never a truncated frame.
 
 No datagrams: a datagram has no window to share, so `append_datagram` is not
-on the wrapper. No timestamps: this is a byte wrapper, not a container; a
-caller wanting timed frames layers `hang` or its own header inside the payload.
+on the wrapper. Timestamps pass through untouched: `moq-net` frames carry one
+on both sides, and a timed opaque track (telemetry, captions) must round-trip
+as the same track. Only the payload is compressed.
 
 Decide whether `moq-json`'s `stream` and `window` modes should move onto the
 group wrapper. They already keep one encoder per group, so it is likely a
 deletion, but `stream::Error::Desync` exists because the codec layer can
-encode without writing; the wrapper makes that state unreachable. Take the
-deletion if it is clean, otherwise leave `moq-json` alone and note why.
+encode without writing; the wrapper closes that gap by making a failed write
+terminal instead. Take the deletion if it is clean, otherwise leave `moq-json`
+alone and note why.
 
 Verify with a shared test vector: a fixed frame sequence compressed by Rust,
 checked into both test suites, and decoded by the JS wrapper, with the reverse
