@@ -70,6 +70,6 @@ with the current dev tree before starting.
 - [#3208](/quest/m1/3208-make-2-5-ms-opus-frame-durations-work-across-bindings.md) - Make 2.5 ms Opus frame durations work across bindings
 - [#2152](/quest/m1/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - libmoq: C ABI catch-up with the moq-ffi surface
 - [Route cold cost](/quest/m1/route-cold-cost.md) - MoqRoute carries warm and cold, so an observed route re-announces intact
-- [#3060](/quest/m1/3060-moq-net-ban-hop-id-0-from-hop-chains.md) - moq-net: ban Hop ID 0 from hop chains
+- [Anonymous rank](/quest/m1/anonymous-route-rank.md) - moq-net: a route through an anonymous hop ranks below every identified route at any cost, and hop 0 travels the chain to say so
 - [#2248](/quest/m1/2248-moq-mux-rebase-fmp4-export-timestamps-for-late-subscribers.md) - moq-mux: rebase fMP4 export timestamps for late subscribers
 - [Merge dev](/quest/m1/merge-dev.md) - dev lands on main with a closing keyword for every issue it fixed
