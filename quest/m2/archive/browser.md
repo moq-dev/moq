@@ -38,6 +38,5 @@ remains downstream (moq.pro) work.
 
 ## Required
 
-- [Archive catalog](/quest/m1/archive-catalog.md)
 - [Archive store](/quest/m1/archive-store.md)
 - [Recording writer](/quest/m2/archive/writer.md)

@@ -4,8 +4,8 @@
 
 Everything that must land on `dev` before it merges to `main`: the breaking
 API and wire changes (the announce and wildcard surface, error codes, the
-allocator mirrors, the bindings), the merge gates (the archive catalog and
-store, the monotonic timeline, wildcard advertisements), and the merge
+allocator mirrors, the bindings), the merge gates (the archive store, the monotonic timeline, wildcard
+advertisements), and the merge
 itself.
 
 ## Plan
@@ -20,7 +20,6 @@ quest here and merged main into dev.
 
 ## Quests
 
-- [Archive catalog](/quest/m1/archive-catalog.md) - one root `archive` entry subsumes `timeline` and names the timeline track, replay path, store URL, and format version
 - [Archive store](/quest/m1/archive-store.md) - `moq-archive` puts, gets, lists, and deletes the versioned objects over `object_store`
 - [Monotonic timeline](/quest/m1/monotonic-timeline.md) - a marker group of one empty frame declares a break and moves the live edge; producers refuse a rewind; consumers jump the playhead on an unproven hole and drop rewind detection
 - [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - every native binding, Dart included, creates unadvertised, announces from the broadcast, and takes a path Pattern in `dynamic(pattern, route)`

@@ -115,7 +115,7 @@ pub struct Rendition {
 	pub codec: String,
 
 	config: Config,
-	/// The catalog's root timeline section: the timescale and wall anchor timings decode with.
+	/// The catalog's root archive timeline: the timescale and wall anchor timings decode with.
 	section: Timeline,
 	/// This rendition's window over the broadcast timeline, fed by the catalog watcher's
 	/// fan-out.

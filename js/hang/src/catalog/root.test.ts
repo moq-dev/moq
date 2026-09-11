@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import * as z from "@zod/mini";
+import { ARCHIVE_VERSION } from "./archive.ts";
 import { RootSchema } from "./root.ts";
 
 // The base catalog carries the media sections (`video`/`audio`) and the data track sections
@@ -91,4 +92,34 @@ test("legacy zero jitter is absent for audio and video", () => {
 	expect(parsed.audio?.renditions.audio?.jitter).toBeUndefined();
 	expect(parsed.video?.renditions.video?.jitter).toBeUndefined();
 	expect(JSON.stringify(parsed)).not.toContain('"jitter"');
+});
+
+test("archive round-trips at the root", () => {
+	const parsed = RootSchema.parse({
+		archive: {
+			track: "timeline.z",
+			durationMax: 2000,
+			replay: "./recordings/clip",
+			store: "https://objects.example/rec/",
+			version: ARCHIVE_VERSION,
+		},
+	});
+	expect(parsed.archive).toMatchObject({
+		track: "timeline.z",
+		timescale: 1000,
+		durationMax: 2000,
+		replay: "recordings/clip",
+		store: "https://objects.example/rec/",
+		version: 1,
+	});
+	expect(JSON.stringify(parsed)).not.toContain('"timeline":');
+});
+
+test("a legacy root timeline is not an archive", () => {
+	const parsed = RootSchema.parse({ timeline: { track: "timeline.z" } });
+	expect(parsed.archive).toBeUndefined();
+});
+
+test("an invalid store URL is refused", () => {
+	expect(() => RootSchema.parse({ archive: { track: "timeline.z", store: "not a url" } })).toThrow();
 });

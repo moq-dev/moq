@@ -841,7 +841,7 @@ mod tests {
 		let timeline = catalog.timeline();
 		assert_eq!(timeline.section().track, hang::timeline::DEFAULT_NAME);
 		assert_eq!(
-			catalog.snapshot().timeline,
+			catalog.snapshot().archive,
 			Some(timeline.section()),
 			"the one timeline is advertised at the catalog root"
 		);

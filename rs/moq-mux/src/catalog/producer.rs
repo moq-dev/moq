@@ -435,7 +435,7 @@ impl<E: CatalogExt> Producer<E> {
 	/// segments.
 	///
 	/// The broadcast's one timeline track is created (and advertised in the catalog's root
-	/// `timeline` section) on first use; see [`timeline`](crate::timeline) for the whole model.
+	/// `archive` entry) on first use; see [`timeline`](crate::timeline) for the whole model.
 	pub fn media_producer<C: crate::container::Container>(
 		&mut self,
 		track: moq_net::track::Producer,
@@ -456,8 +456,8 @@ impl<E: CatalogExt> Producer<E> {
 
 		let section = self.timeline.section();
 		let mut catalog = self.lock();
-		if catalog.timeline.is_none() {
-			catalog.timeline = Some(section);
+		if catalog.archive.is_none() {
+			catalog.archive = Some(section);
 		}
 
 		Ok(recorder)
@@ -465,8 +465,8 @@ impl<E: CatalogExt> Producer<E> {
 
 	/// The broadcast's [`timeline::Producer`](crate::timeline::Producer): its segment index.
 	///
-	/// The MoQ track behind it is created (and advertised in the catalog's root `timeline`
-	/// section) when the first media track enrolls, so reading this costs nothing on a
+	/// The MoQ track behind it is created (and advertised in the catalog's root `archive`
+	/// entry) when the first media track enrolls, so reading this costs nothing on a
 	/// broadcast that never segments. Use it to declare boundaries
 	/// ([`cut`](crate::timeline::Producer::cut)) or to hold publishing back while tracks
 	/// enroll ([`reserve`](crate::timeline::Producer::reserve), the timeline's counterpart to
@@ -931,14 +931,14 @@ mod test {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast).unwrap();
 
-		// A broadcast that never segments never advertises a timeline.
-		assert_eq!(catalog.snapshot().timeline, None);
+		// A broadcast that never segments never advertises an archive.
+		assert_eq!(catalog.snapshot().archive, None);
 
 		let _recorder = catalog.enroll("video0").unwrap();
 		assert_eq!(
-			catalog.snapshot().timeline,
+			catalog.snapshot().archive,
 			Some(catalog.timeline().section()),
-			"the root section should advertise the timeline track"
+			"the root archive should advertise the timeline track"
 		);
 	}
 

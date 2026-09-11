@@ -271,8 +271,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// rather than publishing a second snapshot for it.
 		{
 			let mut catalog = self.catalog.lock();
-			if catalog.timeline.is_none() && !moov.trak.is_empty() {
-				catalog.timeline = Some(timeline.section());
+			if catalog.archive.is_none() && !moov.trak.is_empty() {
+				catalog.archive = Some(timeline.section());
 			}
 		}
 
@@ -302,7 +302,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 			// Enroll every track in the broadcast's timeline: passthrough writes groups by hand
 			// (no `container::Producer`), so the recorder is fed directly at each group open.
-			// The root timeline section is advertised before any rendition releases its reservation.
+			// The root archive entry is advertised before any rendition releases its reservation.
 			let recorder = timeline.pacing_track(track.name())?;
 
 			// Whatever the descriptor declared (a bitrate) is authoritative; the rest is filled by

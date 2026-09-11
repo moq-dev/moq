@@ -443,7 +443,7 @@ async fn import_populates_the_broadcast_timeline() {
 	let audio_name = snapshot.audio.renditions.keys().next().unwrap().clone();
 
 	// The one timeline is advertised at the catalog root, named by convention.
-	let section = snapshot.timeline.clone().expect("the import advertises a timeline");
+	let section = snapshot.archive.clone().expect("the import advertises a timeline");
 	assert_eq!(section.track, hang::timeline::DEFAULT_NAME);
 
 	// Subscribe while the producer is alive, then finish so the timeline group closes and the
@@ -722,7 +722,7 @@ async fn segmented_source_indexes_one_group_range_per_track() {
 	let snapshot = catalog.snapshot();
 	let video_name = snapshot.video.renditions.keys().next().unwrap().clone();
 	let audio_name = snapshot.audio.renditions.keys().next().unwrap().clone();
-	let section = snapshot.timeline.clone().expect("the import advertises a timeline");
+	let section = snapshot.archive.clone().expect("the import advertises a timeline");
 
 	// Subscribe while the producer is alive so the reader terminates on finish rather than blocking.
 	let mut timeline = crate::timeline::Consumer::<()>::subscribe(&consumer, &section)
@@ -804,7 +804,7 @@ async fn segment_ranges_with_skew(
 	let snapshot = catalog.snapshot();
 	let video_name = snapshot.video.renditions.keys().next().unwrap().clone();
 	let audio_name = snapshot.audio.renditions.keys().next().unwrap().clone();
-	let section = snapshot.timeline.clone().unwrap();
+	let section = snapshot.archive.clone().unwrap();
 	let mut timeline = crate::timeline::Consumer::<()>::subscribe(&consumer, &section)
 		.await
 		.unwrap();

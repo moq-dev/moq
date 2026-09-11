@@ -50,5 +50,4 @@ missing its tail, and remains readable.
 
 ## Required
 
-- [Archive catalog](/quest/m1/archive-catalog.md)
 - [Archive store](/quest/m1/archive-store.md)

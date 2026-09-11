@@ -111,7 +111,7 @@ The root of the catalog is a JSON document with the following schema:
 type Catalog = {
   "audio": AudioSchema | undefined,
   "video": VideoSchema | undefined,
-  "timeline": TimelineSchema | undefined,
+  "archive": ArchiveSchema | undefined,
   "text": TextSchema | undefined,
   "json": JsonTracks | undefined,
   "binary": BinaryTracks | undefined,
@@ -126,7 +126,7 @@ For example, a chat entry should name a chat track, not carry individual chat me
 This way catalog updates are rare and a client MAY choose to not subscribe.
 The `json` and `binary` sections ({{data}}) are how a track like that is listed.
 
-This specification defines audio, video, and text media tracks, plus an optional timeline track ({{timeline}}) indexing their segments and the application data tracks in {{data}}.
+This specification defines audio, video, and text media tracks, plus an optional `archive` entry ({{archive-catalog}}) naming the timeline track ({{timeline}}) that indexes their segments, and the application data tracks in {{data}}.
 
 ## Video
 A video track contains the necessary information to decode a video stream.
@@ -423,7 +423,7 @@ A `snapshot` group covers a single value (plus any deltas), so its window spans 
 
 ### broadcast and timeline {#data-shared}
 The `broadcast` field carries the same meaning here as it does for a media rendition ({{field-broadcast}}).
-The `timeline` field advertises a companion timeline track indexing this track's groups, with the same schema as the catalog's root `timeline` field ({{timeline-catalog}}).
+The `timeline` field advertises a companion timeline track indexing this track's groups, with the same `track` / `timescale` / `durationMax` / `wall` fields as the catalog's root `archive` entry ({{archive-catalog}}).
 
 ## Binary Fields {#binary}
 A decoder config field carrying raw bytes, notably `description` (an `AllowSharedBufferSource` in WebCodecs), is carried in the catalog as a hex string ({{!RFC4648, Section 8}}).
@@ -581,8 +581,8 @@ The timeline is optional.
 There is one timeline per broadcast, because its purpose is that segments are aligned across the broadcast's tracks: segment N covers the same span of content time on every track, which is what HLS requires of switchable renditions.
 A broadcast that does not need aligned segments simply omits it.
 
-## Catalog Section {#timeline-catalog}
-The catalog's root `timeline` field advertises the track:
+## Catalog Section {#archive-catalog}
+The catalog's root `archive` field is the one name for the segment index, and for any durable recording of those ranges:
 
 ~~~
 type TimelineSchema = {
@@ -591,10 +591,23 @@ type TimelineSchema = {
   "durationMax": number | undefined,
   "wall": number | undefined,
 }
+
+type ArchiveSchema = {
+  "track": string,
+  "timescale": number | undefined,
+  "durationMax": number | undefined,
+  "wall": number | undefined,
+  "replay": string | undefined,
+  "store": string | undefined,
+  "version": number | undefined,
+}
 ~~~
 
 The `track` field names the MoQ track carrying the segment records.
 The name `timeline.z` is RECOMMENDED; a consumer MUST use the advertised name rather than assuming it.
+A live publisher without a store advertises `archive` with the timeline fields (`track`, `timescale`, `durationMax`, `wall`) alone.
+Every range the timeline advertises is FETCHable; with a store they are also durable.
+There is no sibling `timeline` entry and no generation: a client that must tell recordings apart compares `replay` and `store`.
 
 The `timescale` field is the units per second for the records' `pts` and `duration` values, and for `durationMax` and `wall`.
 If absent, it defaults to 1000 (milliseconds).
@@ -610,6 +623,19 @@ A consumer needing a bound then derives one from the records it has seen, raisin
 The `wall` field, if known, is the wall-clock time of `pts` 0: in `timescale` units, measured from the moq epoch, 2020-01-01T00:00:00Z.
 A consumer derives the wall-clock time of any segment as `wall + pts`, and Unix time by adding the epoch back (for HLS `EXT-X-PROGRAM-DATE-TIME` or DASH `availabilityStartTime`).
 The epoch is 2020 rather than 1970 so the value stays small, safely within a 53-bit integer even at fine timescales.
+
+The `replay` field, if present, is a relative MoQ broadcast path ({{field-broadcast}}) the archive is served back from.
+Absent, the timeline lives on the catalog's own broadcast.
+A wildcard replay path names no generation.
+
+The `store` field, if present, is the object-store URL the recording objects ({{recording}}) live under.
+Authorization for `replay` and `store` is external.
+
+The `version` field is the recording object format version ({{recording-track}}).
+It is 1 for this specification.
+A publisher that exposes a store MUST set it; a publisher that does not MUST omit it.
+
+A catalog that composes another broadcast's renditions MUST preserve that child's `archive` entry instead of synthesizing one.
 
 ## Track Framing {#timeline-framing}
 The timeline track is a sliding window of records.
@@ -797,7 +823,7 @@ For each track, object ranges MUST be nonoverlapping and strictly increasing in 
 A track with no stored groups for a segment has no object or range in that record.
 There are no empty index objects or duplicate copies addressed by segment number.
 
-This layout applies to every recorded track, including the catalog, except the recording-owned timeline track identified by the catalog's `timeline` field ({{timeline-catalog}}).
+This layout applies to every recorded track, including the catalog, except the recording-owned timeline track identified by the catalog's `archive` field ({{archive-catalog}}).
 The timeline uses `segments/<segment>` with the same binary envelope and at least one complete Window group per object.
 `<segment>` is the committed timeline segment ID, encoded as 19 zero-padded decimal digits within the recording ID range.
 After its first segment, the recording MUST commit consecutive segment IDs, including all-gap segments.
@@ -928,7 +954,7 @@ Timeline objects needed for checkpoint recovery and `.info` objects are not cand
 
 ## Bootstrap and Recovery {#recording-recovery}
 A reader or restarting writer lists the timeline track's `segments/` prefix and replays its objects in numeric segment order, including retention operations, from a retained checkpoint.
-The catalog supplies the timeline track's name ({{timeline-catalog}}).
+The catalog supplies the timeline track's name ({{archive-catalog}}).
 The recovered records determine the committed track object keys; a missing or malformed referenced object MUST NOT be served.
 Objects not referenced by the recovered timeline do not advertise content on their own.
 Listing is not an atomic snapshot across tracks; absence from an earlier listing MUST NOT override a successful GET of an object referenced by a later durable timeline record.
@@ -1000,6 +1026,7 @@ A publisher MAY estimate an unknown final duration from the frame cadence, but M
 - Limited recorded group and segment IDs and frame timestamps to JSON-safe integers, including delta reconstruction.
 - Compared existing track properties by parsed values rather than JSON serialization.
 - Required exclusive DVR restart recovery to remove unreferenced group objects left by interrupted expiration.
+- Replaced the catalog root `timeline` field with `archive`, carrying the timeline track plus optional `replay`, `store`, and recording `version`.
 
 # Acknowledgments
 {:numbered="false"}

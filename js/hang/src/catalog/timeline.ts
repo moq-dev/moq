@@ -15,9 +15,9 @@ export const MOQ_EPOCH_UNIX_MILLIS = 1_577_836_800_000;
  * mapping a span of content time to the group ranges that carry it on each media track, so a
  * consumer can seek (or build an HLS/DASH playlist) without downloading the media itself.
  *
- * Lives at the catalog root: there is one timeline per broadcast, because its whole point is
- * that segments are aligned across the broadcast's tracks. A publisher that doesn't segment
- * simply omits it.
+ * Lives inside the catalog's root {@link Archive} entry: there is one timeline per broadcast,
+ * because its whole point is that segments are aligned across the broadcast's tracks. A
+ * publisher that doesn't segment simply omits the archive entry.
  */
 export const TimelineSchema = z.object({
 	// The name of the MoQ track carrying the broadcast's segment records.

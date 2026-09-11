@@ -296,9 +296,10 @@ async fn watch_catalog(
 				renditions.sync(&upstream, &catalog);
 				// The broadcast has one timeline; subscribe once it's advertised and fan its
 				// records out to every rendition.
-				if !timeline_started && let Some(section) = catalog.timeline.clone() {
+				if !timeline_started && let Some(archive) = catalog.archive.clone() {
 					timeline_started = true;
-					let watcher = tokio::spawn(watch_timeline(broadcast.clone(), section, renditions.fanout()));
+					let watcher =
+						tokio::spawn(watch_timeline(broadcast.clone(), archive.timeline, renditions.fanout()));
 					*timeline_watcher.lock().unwrap() = Some(watcher);
 				}
 			}
@@ -427,7 +428,7 @@ mod tests {
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.broadcast = Some(moq_net::PathRelative::new("../../source").to_owned());
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
-		catalog.timeline = Some(hang::catalog::Timeline::new(hang::timeline::DEFAULT_NAME));
+		catalog.archive = Some(hang::catalog::Archive::new(hang::timeline::DEFAULT_NAME));
 		catalog.video.renditions.insert("video".to_string(), config);
 
 		let renditions = renditions::Producer::new(Config::default().window);
@@ -455,7 +456,7 @@ mod tests {
 		audio.bitrate = Some(96_000);
 
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
-		catalog.timeline = Some(hang::catalog::Timeline::new(hang::timeline::DEFAULT_NAME));
+		catalog.archive = Some(hang::catalog::Archive::new(hang::timeline::DEFAULT_NAME));
 		catalog.video.renditions.insert("video0".to_string(), video_config());
 		catalog.audio.renditions.insert("audio0".to_string(), audio);
 		catalog
@@ -1103,12 +1104,16 @@ mod tests {
 	) -> (Arc<Rendition>, tokio::task::JoinHandle<()>) {
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
 		catalog.video.renditions.insert("video0".to_string(), config.clone());
-		let section = hang::catalog::Timeline::new(hang::timeline::DEFAULT_NAME);
-		catalog.timeline = Some(section.clone());
+		let archive = hang::catalog::Archive::new(hang::timeline::DEFAULT_NAME);
+		catalog.archive = Some(archive.clone());
 
 		let renditions = renditions::Producer::new(Config::default().window);
 		renditions.sync(upstream, &catalog);
-		let watcher = tokio::spawn(watch_timeline(upstream.broadcast.clone(), section, renditions.fanout()));
+		let watcher = tokio::spawn(watch_timeline(
+			upstream.broadcast.clone(),
+			archive.timeline,
+			renditions.fanout(),
+		));
 		let rendition = renditions.get(Kind::Video, "video0").expect("rendition synced");
 		(rendition, watcher)
 	}
@@ -1345,7 +1350,7 @@ mod tests {
 		let media = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
 		catalog.video.renditions.insert("video".to_string(), media);
-		catalog.timeline = Some(hang::catalog::Timeline::new(hang::timeline::DEFAULT_NAME));
+		catalog.archive = Some(hang::catalog::Archive::new(hang::timeline::DEFAULT_NAME));
 		renditions.sync(&upstream, &catalog);
 
 		let rendition = renditions.get(Kind::Video, "video").expect("rendition synced");
@@ -1353,7 +1358,7 @@ mod tests {
 
 		// The catalog drops the rendition: its cursor must run dry rather than park.
 		let mut empty = moq_mux::catalog::hang::Catalog::default();
-		empty.timeline = Some(hang::catalog::Timeline::new(hang::timeline::DEFAULT_NAME));
+		empty.archive = Some(hang::catalog::Archive::new(hang::timeline::DEFAULT_NAME));
 		renditions.sync(&upstream, &empty);
 		let ended = tokio::time::timeout(Duration::from_secs(5), segments.next())
 			.await

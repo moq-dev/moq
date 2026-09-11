@@ -18,7 +18,7 @@
 //! for the span are known, so the record is self-contained and immediately servable.
 //!
 //! There is one timeline per broadcast, advertised by the catalog's root
-//! [`Timeline`](crate::catalog::Timeline) section (its `track` field names this track,
+//! [`Archive`](crate::catalog::Archive) entry (its `track` field names this track,
 //! [`DEFAULT_NAME`](crate::timeline::DEFAULT_NAME) by convention). A broadcast that doesn't need aligned segments simply
 //! doesn't publish one.
 //!
@@ -39,7 +39,7 @@ use crate::Result;
 /// DEFLATE-compressed stream, like the catalog's `.json.z` sibling).
 ///
 /// A publisher records the actual name in the catalog's root
-/// [`Timeline::track`](crate::catalog::Timeline::track) field; a consumer reads it from the
+/// [`Archive`](crate::catalog::Archive) entry (`timeline.track`); a consumer reads it from the
 /// catalog rather than assuming, so this is only a default.
 pub const DEFAULT_NAME: &str = "timeline.z";
 
@@ -95,7 +95,7 @@ impl Range {
 /// Records are self-contained: `pts` and `duration` bound the span (no peeking at the next
 /// record), and `tracks` names every participating media track's group ranges. A track absent
 /// from `tracks` has no content for the span (a gap; HLS `EXT-X-GAP`). `pts`/`duration` are in
-/// the timescale declared by the catalog's [`Timeline`](crate::catalog::Timeline) section
+/// the timescale declared by the catalog's [`Archive`](crate::catalog::Archive) entry
 /// (default milliseconds). Extend with a typed [`RecordExt`].
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(
