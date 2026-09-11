@@ -58,5 +58,4 @@ needs a bystander.
 
 ## Related
 
-- [Monotonic timeline](/quest/m1/monotonic-timeline.md) - deletes the inferred rewind that triggers the false boundary
-- [Gap discontinuity](/quest/m1/gap-discontinuity.md) - the declared-break model the exporter will read instead
+- [Monotonic timeline](/quest/m1/monotonic-timeline.md) - deletes the inferred rewind that triggers the false boundary, and is the declared-break model the exporter will read instead

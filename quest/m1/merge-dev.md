@@ -30,7 +30,7 @@ merge for it.
 - [Archive](/quest/m1/archive/README.md) - moq.pro needs archive-backed recording on the release dev produces
 - [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - every native binding on that surface
 - [JS announce](/quest/m1/js-announce.md) - js/net on that surface
-- [Gap discontinuity](/quest/m1/gap-discontinuity.md) - so the lost-reset regression does not ship
+- [Monotonic timeline](/quest/m1/monotonic-timeline.md) - so a shed marker still jumps the playhead on a timestamp hole (#3291)
 - [Advertise](/quest/m1/wildcard/advertise.md) - so `dynamic(prefix, route)` takes a path pattern before the announce API is published
 
 ## Closes

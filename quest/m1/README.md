@@ -23,8 +23,8 @@ with the dev tree.
 ## Quests
 
 - [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS; the whole line gates the dev merge
-- [Gap discontinuity](/quest/m1/gap-discontinuity.md) - a hole in the delivered group sequence resets the decoder unless the boundary is contiguous within 1 ms; empty groups stop meaning anything
-- [Monotonic timeline](/quest/m1/monotonic-timeline.md) - producers refuse a group below the live edge and consumers drop rewind detection
+- [Monotonic timeline](/quest/m1/monotonic-timeline.md) - a marker group of one empty frame declares a break and moves the live edge; producers refuse a rewind; consumers jump the playhead on an unproven hole and drop rewind detection
+- [js/publish discontinuity](/quest/m1/js-publish-discontinuity.md) - the JS container producer and js/publish emit the same marker group on encoder restart
 - [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - every native binding, Dart included, creates unadvertised, announces from the broadcast, and takes a path Pattern in `dynamic(pattern, route)`
 - [JS announce](/quest/m1/js-announce.md) - js/net drops `publish()` and `RouteProvider` for `createBroadcast`, `announce(route)`, and a `dynamic(pattern, route)` handle
 - [Wildcard](/quest/m1/wildcard/README.md) - a service advertises a path pattern priced at its start-up cost; Advertise gates the merge, Resolve and Demand are additive
