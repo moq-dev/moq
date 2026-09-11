@@ -157,6 +157,11 @@ trait Mergeable: serde::de::DeserializeOwned + Default + Copy + 'static {
 	/// counters intact must not look like new traffic. Gauges don't: a
 	/// departed node stops counting the moment it's gone.
 	const STICKY: bool;
+
+	/// Retire any outstanding live state in a kept contribution, returning
+	/// whether it changed. Cumulative totals are untouched; this is how a
+	/// departed node stops reporting open counters without losing its history.
+	fn retire(&mut self) -> bool;
 }
 
 impl Mergeable for Traffic {
@@ -165,6 +170,19 @@ impl Mergeable for Traffic {
 	fn merge(acc: &mut Self, other: Self) {
 		acc.add(other);
 	}
+
+	/// Close every open counter pair: a departed relay can no longer carry its
+	/// broadcasts or subscriptions, so the merged view must not keep counting
+	/// them as live. The cumulative counters, bytes included, stay.
+	fn retire(&mut self) -> bool {
+		let changed = self.announced_closed < self.announced
+			|| self.broadcasts_closed < self.broadcasts
+			|| self.subscriptions_closed < self.subscriptions;
+		self.announced_closed = self.announced_closed.max(self.announced);
+		self.broadcasts_closed = self.broadcasts_closed.max(self.broadcasts);
+		self.subscriptions_closed = self.subscriptions_closed.max(self.subscriptions);
+		changed
+	}
 }
 
 impl Mergeable for Presence {
@@ -172,6 +190,11 @@ impl Mergeable for Presence {
 
 	fn merge(acc: &mut Self, other: Self) {
 		acc.add(other);
+	}
+
+	/// Presence is not sticky, so it never reaches here; its entry is dropped.
+	fn retire(&mut self) -> bool {
+		false
 	}
 }
 
@@ -210,10 +233,21 @@ struct Node<V: Mergeable> {
 impl<V: Mergeable> Node<V> {
 	/// The node's broadcast went away (unannounced, replaced by one without
 	/// this track, or its subscription ended): stop reading, and keep the last
-	/// frame only when sticky. Returns whether the merged view changed.
+	/// frame only when sticky. A kept frame retires its live counters, so a
+	/// departed node stops reporting open state while its totals stay. Returns
+	/// whether the merged view changed.
 	fn depart(&mut self) -> bool {
 		self.reader = Reader::Ended;
-		if V::STICKY { false } else { self.last.take().is_some() }
+		if !V::STICKY {
+			return self.last.take().is_some();
+		}
+		let mut changed = false;
+		if let Some(last) = &mut self.last {
+			for value in last.values_mut() {
+				changed |= value.retire();
+			}
+		}
+		changed
 	}
 }
 
@@ -316,12 +350,12 @@ impl<V: Mergeable> Merged<V> {
 				}
 			}
 		} else if V::STICKY {
-			// Unannounce: keep the last contribution and stop reading. The entry
-			// stays so a reannounce re-arms it, holding the total meanwhile.
-			if let Some(node) = self.nodes.get_mut(&absolute) {
-				node.depart();
+			// Unannounce: keep the cumulative totals, retire the live gauges, and
+			// stop reading. The entry stays so a reannounce re-arms it.
+			match self.nodes.get_mut(&absolute) {
+				Some(node) => node.depart(),
+				None => false,
 			}
-			false
 		} else {
 			// A gauge drops its contribution, and its entry, so a departed node
 			// stops counting and its path is not retained.
@@ -710,9 +744,13 @@ mod tests {
 
 		// The restarted frame replaces A's contribution, so the total drops to
 		// 30 + 40, a genuine per-node regression downstream treats as a fresh
-		// segment.
-		let frame = traffic.next().await.expect("read").expect("frame");
-		assert_eq!(frame.get("acme/room").expect("entry").bytes, 70);
+		// segment. An earlier frame may retire A's live gauges first.
+		loop {
+			let frame = traffic.next().await.expect("read").expect("frame");
+			if frame.get("acme/room").map(|t| t.bytes) == Some(70) {
+				break;
+			}
+		}
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -741,6 +779,45 @@ mod tests {
 			Some(140),
 			"the failed node's contribution stays in the total",
 		);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn unannounce_retires_live_gauges() {
+		// A departed node's totals stay in the merged view, but its live gauges
+		// retire: the aggregate must not show phantom viewers or broadcasts for
+		// a node that is gone.
+		let origin = produce_origin();
+		let mut node_a = NodeBroadcast::new(&origin, "acme", "a");
+
+		let mut published = Traffic::default();
+		published.announced = 2;
+		published.announced_closed = 1;
+		published.broadcasts = 3;
+		published.broadcasts_closed = 1;
+		published.subscriptions = 4;
+		published.subscriptions_closed = 1;
+		published.bytes = 100;
+		node_a.frame.insert("acme/room".to_string(), published);
+		node_a.traffic.update(&node_a.frame).expect("publish");
+
+		let agg = Consumer::new(origin.consume(), Config::new().with_depth(1));
+		let mut traffic = agg.traffic(&Tier::default(), Role::Publisher);
+		let frame = read_until_bytes(&mut traffic, "acme/room", 100).await;
+		let snap = frame.get("acme/room").expect("entry");
+		assert!(snap.is_announced());
+		assert_eq!(snap.active_broadcasts(), 2);
+		assert_eq!(snap.active_subscriptions(), 3);
+
+		// The node departs with those sessions still open.
+		drop(node_a);
+
+		// The totals stay; the live gauges retire.
+		let frame = traffic.next().await.expect("read").expect("frame");
+		let snap = frame.get("acme/room").expect("entry");
+		assert_eq!(snap.bytes, 100, "cumulative totals stay");
+		assert!(!snap.is_announced(), "no phantom announcement");
+		assert_eq!(snap.active_broadcasts(), 0, "no phantom broadcasts");
+		assert_eq!(snap.active_subscriptions(), 0, "no phantom subscriptions");
 	}
 
 	#[tokio::test(start_paused = true)]
