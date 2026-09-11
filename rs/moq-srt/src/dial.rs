@@ -54,6 +54,10 @@ pub struct Config {
 	/// and the memory matters. [`pull`] only; [`publish`] reads a broadcast someone else
 	/// declared.
 	pub max_age: Option<Duration>,
+
+	/// Connection allocator each ingested track claims its peak-hold bitrate on.
+	/// [`pull`] only; [`publish`] reads a broadcast someone else declared.
+	pub bandwidth: moq_net::bandwidth::Allocator,
 }
 
 impl Config {
@@ -65,6 +69,7 @@ impl Config {
 			resource: resource.into(),
 			latency: DEFAULT_LATENCY,
 			max_age: None,
+			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 		}
 	}
 }
@@ -90,7 +95,10 @@ pub async fn publish(config: &Config, origin: &origin::Consumer, path: impl moq_
 pub async fn pull(config: &Config, origin: &origin::Producer, path: impl moq_net::AsPath) -> Result<()> {
 	let path = path.as_path();
 	let socket = call(config, Mode::Request).await?;
-	serve_publish(origin, path.as_str(), socket, config.max_age).await
+	let catalog = moq_mux::catalog::Config::default()
+		.with_max_age(config.max_age)
+		.with_bandwidth(config.bandwidth.clone());
+	serve_publish(origin, path.as_str(), socket, catalog).await
 }
 
 /// Dial as an SRT caller, sending the standard `#!::r=<resource>,m=<mode>` stream id

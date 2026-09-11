@@ -49,9 +49,7 @@ grant; `Options::bandwidth` documents that
   (`rs/moq-audio/src/pcm.rs:9`), `Config::bitrate` is refused for it
   (`encoder.rs:269-272`) and so is `set_bitrate` (`encoder.rs:412-414`). A PCM
   Producer reserves its fixed rate and runs no policy. That is the same
-  reserve-only usage passthrough imports need
-  ([#2859](/quest/m1/2859-passthrough-imports-reserve-no-bandwidth-so-a-co-resident.md)),
-  so nothing new is added for it.
+  reserve-only usage passthrough imports use, so nothing new is added for it.
 - Priority is unchanged: `PRIORITY` puts audio at 80 and video at 60
   (`rs/hang/src/catalog/priority.rs:21-26`), so the allocator fills audio's
   reservation before video sees a bit and audio is squeezed only once the link
@@ -76,5 +74,4 @@ the dev merge.
 
 ## Related
 
-- [#2859](/quest/m1/2859-passthrough-imports-reserve-no-bandwidth-so-a-co-resident.md) - reserve-only usage for passthrough tracks
 - [Binding rate control](/quest/m1/binding-rate-control.md) - the bindings consume the same `moq_mux::rate::Control`

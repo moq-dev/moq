@@ -28,6 +28,11 @@ pub struct Config {
 	/// [`publish`](Client::publish) reads a broadcast someone else declared, so it
 	/// ignores this.
 	pub max_age: Option<Duration>,
+
+	/// Connection allocator each ingested track claims its peak-hold bitrate on.
+	/// Ingest only ([`subscribe`](Client::subscribe) / WHEP); a WHIP
+	/// [`publish`](Client::publish) ignores this.
+	pub bandwidth: moq_net::bandwidth::Allocator,
 }
 
 /// Outbound WHIP/WHEP dialer.

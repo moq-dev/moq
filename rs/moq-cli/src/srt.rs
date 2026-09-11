@@ -33,7 +33,12 @@ pub struct Args {
 
 /// Accept incoming SRT publishes into the Origin as `target.name`; reject requests (import).
 pub async fn listen_import(target: ImportTarget, addr: SocketAddr, latency: Duration) -> anyhow::Result<()> {
-	let ImportTarget { origin, name, max_age } = target;
+	let ImportTarget {
+		origin,
+		name,
+		max_age,
+		bandwidth,
+	} = target;
 	let mut server = Server::bind(addr, latency).await?;
 	tracing::info!(%addr, %name, "SRT listening (import)");
 	notify_ready();
@@ -43,8 +48,14 @@ pub async fn listen_import(target: ImportTarget, addr: SocketAddr, latency: Dura
 			Request::Publish(publish) => {
 				let origin = origin.clone();
 				let name = name.clone();
+				let bandwidth = bandwidth.clone();
 				tokio::spawn(async move {
-					if let Err(err) = publish.with_max_age(max_age).accept(&origin, &name).await {
+					if let Err(err) = publish
+						.with_max_age(max_age)
+						.with_bandwidth(bandwidth)
+						.accept(&origin, &name)
+						.await
+					{
 						tracing::warn!(%name, %err, "SRT ingest ended with error");
 					}
 				});
@@ -105,6 +116,7 @@ pub async fn connect_import(target: ImportTarget, url: Url, latency: Duration) -
 	let mut config = moq_srt::dial::Config::new(addr, resource);
 	config.latency = latency;
 	config.max_age = target.max_age;
+	config.bandwidth = target.bandwidth;
 	Ok(moq_srt::dial::pull(&config, &target.origin, name).await?)
 }
 

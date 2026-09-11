@@ -276,8 +276,10 @@ impl Directions {
 /// publish is never announced back to us.
 ///
 /// Returns an allocator over the uplink's bandwidth estimate, for the sources that
-/// can encode to fit it. Only an outbound client has one: a `--listen`
-/// publisher's sessions are inbound and never surfaced here, so it gets an
+/// share it. Capture encoders follow their slice; passthrough imports reserve
+/// their peak-hold bitrate so the encoder sees what is left. Only an outbound
+/// client has an estimate: a `--listen` publisher's sessions are inbound and
+/// never surfaced here, so it gets an
 /// [`unlimited`](moq_net::bandwidth::Allocator::unlimited) allocator and those
 /// sources encode at their configured rate.
 ///
@@ -448,11 +450,6 @@ fn spawn_import(
 	bandwidth: moq_net::bandwidth::Allocator,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<Option<Publish>> {
-	// Capture is the only source that reserves against the estimate, so without that
-	// feature nothing does.
-	#[cfg(not(feature = "capture"))]
-	let _ = bandwidth;
-
 	if let ImportSource::Rtc(rtc) = &import.source
 		&& rtc.connect.is_some()
 	{
@@ -466,6 +463,7 @@ fn spawn_import(
 		origin: origin.clone(),
 		name,
 		max_age,
+		bandwidth: bandwidth.clone(),
 	};
 
 	let mut local = None;
@@ -473,15 +471,17 @@ fn spawn_import(
 	if let Some(format) = import.source.stdin_format() {
 		warn_if_missing_format(&name);
 		let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
-		let publish = Publish::new(broadcast, &format, max_age)?;
+		let config = moq_mux::catalog::Config::default()
+			.with_max_age(max_age)
+			.with_bandwidth(bandwidth.clone());
+		let publish = Publish::new(broadcast, &format, config)?;
 		publish.announce()?;
 		local = Some(publish);
 	} else {
 		match import.source {
 			ImportSource::Hls(hls) => {
 				warn_if_missing_format(&name);
-				let origin = origin.clone();
-				tasks.spawn(async move { hls::import(&origin, name, hls.playlist, max_age).await });
+				tasks.spawn(hls::import(target(name), hls.playlist));
 			}
 			ImportSource::Rtmp(rtmp) => {
 				if let Some(addr) = rtmp.listen {
@@ -519,7 +519,7 @@ fn spawn_import(
 			ImportSource::Capture(capture) => {
 				warn_if_missing_format(&name);
 				let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
-				let publish = Publish::capture(broadcast, &capture, bandwidth, max_age)?;
+				let publish = Publish::capture(broadcast, &capture, bandwidth.clone(), max_age)?;
 				publish.announce()?;
 				local = Some(publish);
 			}

@@ -77,6 +77,10 @@ pub struct Producer<C: Container> {
 	/// Measures the jitter and bitrate of what gets written, for the catalog. Always on: it costs
 	/// two counters, and a caller who doesn't publish a rendition simply never reads it.
 	estimator: crate::catalog::Estimator,
+
+	/// Peak-hold claim on the connection allocator, when one was supplied.
+	/// Named `bandwidth` so it is not confused with the catalog-gate [`Reserved`].
+	bandwidth: Option<crate::catalog::Claim>,
 }
 
 impl<C: Container> Producer<C> {
@@ -100,7 +104,13 @@ impl<C: Container> Producer<C> {
 			cadence: None,
 			reordered: false,
 			estimator: crate::catalog::Estimator::new(),
+			bandwidth: None,
 		}
+	}
+
+	#[cfg(test)]
+	fn bandwidth_ceiling(&self) -> Option<moq_net::bandwidth::Rate> {
+		self.bandwidth.as_ref().and_then(|claim| claim.ceiling())
 	}
 
 	/// The jitter and bitrate measured from the frames written so far.
@@ -157,6 +167,25 @@ impl<C: Container> Producer<C> {
 	pub fn with_recorder(mut self, recorder: crate::timeline::Recorder) -> Self {
 		self.recorder = Some(recorder);
 		self
+	}
+
+	/// Claim this track's peak-hold catalog bitrate on `allocator`.
+	///
+	/// A passthrough track has no configured ceiling, so it reserves the measured
+	/// maximum instead: nothing until the first 1 s window closes, then only
+	/// upward. A co-resident encoder targets what is left. The claim is named
+	/// `bandwidth` so it is not confused with the catalog-gate `Reserved`.
+	pub fn with_bandwidth(mut self, allocator: moq_net::bandwidth::Allocator) -> Self {
+		self.bandwidth = Some(crate::catalog::Claim::new(allocator));
+		self
+	}
+
+	/// Raise the standing claim when the catalog estimate has a new peak.
+	fn claim(&mut self) {
+		let Some(bandwidth) = self.bandwidth.as_mut() else {
+			return;
+		};
+		bandwidth.update(&self.inner.demand(), self.estimator.estimate().bitrate);
 	}
 
 	/// The underlying moq-lite track producer. Read-only; mutating it directly
@@ -264,6 +293,7 @@ impl<C: Container> Producer<C> {
 		// Before the flush, which can fail: an unbounded cut leaves the measurement open to fold
 		// into the next group anyway, so cutting often costs the catalog nothing.
 		self.estimator.cut(end);
+		self.claim();
 
 		let marker_at = end.or_else(|| self.estimated_end());
 
@@ -513,6 +543,90 @@ mod tests {
 		let estimate = producer.estimate();
 		assert_eq!(estimate.jitter, Some(std::time::Duration::from_millis(25)));
 		assert_eq!(estimate.bitrate, Some(1_600_000));
+	}
+
+	/// A passthrough producer claims nothing until the first window closes, then
+	/// reserves that peak, raises the ceiling on a louder later window, and holds
+	/// it when a quieter one follows.
+	#[tokio::test]
+	async fn a_passthrough_producer_ratchets_its_bandwidth_claim() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let _sub = track.consume();
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data))
+			.with_bandwidth(moq_net::bandwidth::Allocator::unlimited());
+
+		producer.write(sized_frame(0, true, 100_000)).unwrap();
+		producer.write(sized_frame(500_000, false, 100_000)).unwrap();
+		assert_eq!(producer.bandwidth_ceiling(), None, "the first window has not closed");
+
+		producer.cut(Some(Timestamp::from_micros(1_000_000).unwrap())).unwrap();
+		assert_eq!(
+			producer.bandwidth_ceiling(),
+			Some(moq_net::bandwidth::Rate::from_bps(1_600_000))
+		);
+
+		producer.write(sized_frame(1_000_000, true, 25_000)).unwrap();
+		producer.cut(Some(Timestamp::from_micros(2_000_000).unwrap())).unwrap();
+		assert_eq!(
+			producer.bandwidth_ceiling(),
+			Some(moq_net::bandwidth::Rate::from_bps(1_600_000)),
+			"a quieter window never hands the room away"
+		);
+
+		producer.write(sized_frame(2_000_000, true, 250_000)).unwrap();
+		producer.cut(Some(Timestamp::from_micros(3_000_000).unwrap())).unwrap();
+		assert_eq!(
+			producer.bandwidth_ceiling(),
+			Some(moq_net::bandwidth::Rate::from_bps(2_000_000))
+		);
+	}
+
+	/// A passthrough want at its peak lowers a co-resident encoder's grant by
+	/// exactly that amount, which is the whole reason the import claims at all.
+	#[tokio::test]
+	async fn a_passthrough_peak_lowers_a_coresident_encoder_grant() {
+		let estimate = moq_net::bandwidth::Producer::new();
+		let allocator = moq_net::bandwidth::Allocator::new(estimate.consume());
+		estimate
+			.set(Some(moq_net::bandwidth::Rate::from_bps(6_000_000)))
+			.unwrap();
+
+		fn video_track() -> (moq_net::broadcast::Producer, moq_net::track::Producer) {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let track = broadcast
+				.create_track("t", hang::container::track_info(hang::catalog::PRIORITY.video))
+				.unwrap();
+			(broadcast, track)
+		}
+
+		let (_encoder_broadcast, encoder_track) = video_track();
+		let _encoder_sub = encoder_track.consume();
+		let encoder = allocator.reserve(&encoder_track.demand(), moq_net::bandwidth::Rate::from_bps(8_000_000));
+		assert_eq!(
+			encoder.peek(),
+			Some(moq_net::bandwidth::Rate::from_bps(6_000_000)),
+			"alone, the encoder takes the whole estimate"
+		);
+
+		let (_passthrough_broadcast, passthrough) = video_track();
+		let _passthrough_sub = passthrough.consume();
+		let mut producer =
+			Producer::new(passthrough, Container::Legacy(crate::container::Kind::Data)).with_bandwidth(allocator);
+
+		producer.write(sized_frame(0, true, 100_000)).unwrap();
+		producer.write(sized_frame(500_000, false, 100_000)).unwrap();
+		assert_eq!(
+			encoder.peek(),
+			Some(moq_net::bandwidth::Rate::from_bps(6_000_000)),
+			"nothing claimed before the first window"
+		);
+
+		producer.cut(Some(Timestamp::from_micros(1_000_000).unwrap())).unwrap();
+		assert_eq!(
+			encoder.peek(),
+			Some(moq_net::bandwidth::Rate::from_bps(4_400_000)),
+			"the encoder's grant drops by the passthrough peak (1.6 Mbps)"
+		);
 	}
 
 	/// One group per frame (how the importer facade drives audio) closes each group with an

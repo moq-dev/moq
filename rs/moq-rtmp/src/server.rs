@@ -486,6 +486,9 @@ pub struct Publish<S = Conn> {
 	/// Retention declared on the media tracks this publish mints, or `None` for hang's
 	/// own default. Override with [`with_max_age`](Self::with_max_age).
 	max_age: Option<Duration>,
+	/// Connection allocator each passthrough track claims its peak-hold bitrate on.
+	/// Override with [`with_bandwidth`](Self::with_bandwidth).
+	bandwidth: moq_net::bandwidth::Allocator,
 }
 
 impl<S: Stream> Publish<S> {
@@ -520,6 +523,16 @@ impl<S: Stream> Publish<S> {
 		self
 	}
 
+	/// Claim each ingested track's peak-hold catalog bitrate on `bandwidth`.
+	///
+	/// A passthrough import has no configured ceiling, so it reserves the measured
+	/// maximum instead. A co-resident encoder then targets what is left of the
+	/// uplink. Unlimited (the default) claims nothing a sender can follow.
+	pub fn with_bandwidth(mut self, bandwidth: moq_net::bandwidth::Allocator) -> Self {
+		self.bandwidth = bandwidth;
+		self
+	}
+
 	/// Accept the publish: announce a broadcast at `path` in `origin` and pump the
 	/// RTMP media into it until the client disconnects.
 	///
@@ -532,7 +545,10 @@ impl<S: Stream> Publish<S> {
 		// Reserve the broadcast path before telling the client the publish succeeded:
 		// if the origin refuses `path`, reject cleanly instead of accepting and then
 		// dropping the connection a moment later.
-		let mut publisher = match Publisher::new(origin, path.as_str(), self.max_age) {
+		let config = moq_mux::catalog::Config::default()
+			.with_max_age(self.max_age)
+			.with_bandwidth(self.bandwidth);
+		let mut publisher = match Publisher::new(origin, path.as_str(), config) {
 			Ok(publisher) => publisher,
 			Err(err) => {
 				tracing::warn!(peer = %self.peer, %path, %err, "rejecting RTMP publish: broadcast unavailable");
@@ -941,6 +957,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							stream_key,
 							peer,
 							max_age: None,
+							bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 						})));
 					}
 					// The client wants to play: hand control back to the caller.
@@ -1249,10 +1266,9 @@ struct Publisher {
 impl Publisher {
 	/// Open a broadcast at `path` and prime the importer with the FLV file
 	/// header, so subsequent tags decode against an initialized demuxer.
-	fn new(origin: &origin::Producer, path: &str, max_age: Option<Duration>) -> anyhow::Result<Self> {
+	fn new(origin: &origin::Producer, path: &str, config: moq_mux::catalog::Config) -> anyhow::Result<Self> {
 		let mut broadcast = origin.create_broadcast(path)?;
 		broadcast.announce(moq_net::origin::Route::default())?;
-		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
 		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
 		let handle = broadcast.clone();
 		let mut importer = FlvImport::new(broadcast, catalog.reserve());
@@ -1588,7 +1604,12 @@ mod tests {
 		vseq.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
 
 		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
-		let mut publisher = Publisher::new(&origin, "live/cam0", Some(Duration::from_secs(3))).unwrap();
+		let mut publisher = Publisher::new(
+			&origin,
+			"live/cam0",
+			moq_mux::catalog::Config::default().with_max_age(Duration::from_secs(3)),
+		)
+		.unwrap();
 		publisher.push(flv::TAG_VIDEO, 0, &vseq).unwrap();
 
 		let consumer = origin.consume();

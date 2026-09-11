@@ -206,6 +206,7 @@ impl Server {
 				peer,
 				latency: self.latency,
 				max_age: None,
+				bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 			};
 
 			// `m=request` reads a broadcast out; everything else publishes one in.
@@ -235,6 +236,9 @@ struct Pending {
 	/// Retention declared on the media tracks an ingest mints, or `None` for hang's own
 	/// default. Override with [`Publish::with_max_age`].
 	max_age: Option<Duration>,
+	/// Connection allocator each ingested track claims its peak-hold bitrate on.
+	/// Override with [`Publish::with_bandwidth`].
+	bandwidth: moq_net::bandwidth::Allocator,
 }
 
 /// What an accepted SRT connection wants: to contribute media ([`Publish`]) or to
@@ -323,6 +327,16 @@ impl Publish {
 		self
 	}
 
+	/// Claim each ingested track's peak-hold catalog bitrate on `bandwidth`.
+	///
+	/// A passthrough import has no configured ceiling, so it reserves the measured
+	/// maximum instead. A co-resident encoder then targets what is left of the
+	/// uplink. Unlimited (the default) claims nothing a sender can follow.
+	pub fn with_bandwidth(mut self, bandwidth: moq_net::bandwidth::Allocator) -> Self {
+		self.0.bandwidth = bandwidth;
+		self
+	}
+
 	/// Accept the publish: announce a broadcast at `path` in `origin` and pump the
 	/// connection's MPEG-TS into it until the client disconnects.
 	///
@@ -334,7 +348,10 @@ impl Publish {
 		let path = path.as_path();
 		let socket = self.0.request.accept(None).await?;
 		tracing::info!(peer = %self.0.peer, %path, "SRT publish accepted");
-		serve_publish(origin, path.as_str(), socket, self.0.max_age).await
+		let config = moq_mux::catalog::Config::default()
+			.with_max_age(self.0.max_age)
+			.with_bandwidth(self.0.bandwidth);
+		serve_publish(origin, path.as_str(), socket, config).await
 	}
 
 	/// Reject the publish, sending the client a `Forbidden` rejection.
@@ -411,11 +428,11 @@ pub(crate) async fn serve_publish(
 	origin: &origin::Producer,
 	path: &str,
 	mut socket: SrtSocket,
-	max_age: Option<Duration>,
+	config: moq_mux::catalog::Config,
 ) -> Result<()> {
 	use futures::TryStreamExt;
 
-	let mut publisher = crate::ts::Publisher::new(origin, path, max_age)?;
+	let mut publisher = crate::ts::Publisher::new(origin, path, config)?;
 
 	// Run the read/feed loop so an error surfaces here instead of unwinding past
 	// the publisher, which would drop it (and its tracks) with a bare Error::Dropped.

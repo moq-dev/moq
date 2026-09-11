@@ -23,6 +23,7 @@
 pub mod hang;
 pub mod msf;
 
+mod claim;
 mod consumer;
 mod entry;
 mod estimate;
@@ -32,6 +33,7 @@ mod select;
 mod stream;
 mod tracks;
 
+pub(crate) use claim::Claim;
 pub use consumer::Consumer;
 pub use entry::Entry;
 pub use estimate::{Estimate, Estimator};

@@ -73,6 +73,8 @@ pub struct Client<S = TcpStream> {
 	/// Retention declared on the media tracks [`pull`](Self::pull) publishes, or `None`
 	/// for hang's own default.
 	import_max_age: Option<Duration>,
+	/// Connection allocator each ingested track claims its peak-hold bitrate on.
+	import_bandwidth: moq_net::bandwidth::Allocator,
 }
 
 impl Client<TcpStream> {
@@ -153,6 +155,7 @@ impl<S: Stream> Client<S> {
 			app: app.to_string(),
 			export_max_age: crate::DEFAULT_MAX_AGE,
 			import_max_age: None,
+			import_bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 		})
 	}
 
@@ -178,6 +181,19 @@ impl<S: Stream> Client<S> {
 	/// someone else declared, and takes [`with_export_max_age`](Self::with_export_max_age) instead.
 	pub fn with_import_max_age(mut self, max_age: impl Into<Option<Duration>>) -> Self {
 		self.import_max_age = max_age.into();
+		self
+	}
+
+	/// Claim each ingested track's peak-hold catalog bitrate on `bandwidth`.
+	///
+	/// A passthrough import has no configured ceiling, so it reserves the measured
+	/// maximum instead. A co-resident encoder then targets what is left of the
+	/// uplink. Unlimited (the default) claims nothing a sender can follow.
+	///
+	/// The pull (ingest) direction only; [`publish`](Self::publish) reads a
+	/// broadcast someone else declared.
+	pub fn with_import_bandwidth(mut self, bandwidth: moq_net::bandwidth::Allocator) -> Self {
+		self.import_bandwidth = bandwidth;
 		self
 	}
 
@@ -278,7 +294,10 @@ impl<S: Stream> Client<S> {
 		// app and broadcast path stand in for it.
 		tracing::info!(app = %self.app, %path, "rtmp play accepted by remote");
 
-		let mut publisher = Publisher::new(origin, path.as_str(), self.import_max_age)?;
+		let config = moq_mux::catalog::Config::default()
+			.with_max_age(self.import_max_age)
+			.with_bandwidth(self.import_bandwidth.clone());
+		let mut publisher = Publisher::new(origin, path.as_str(), config)?;
 
 		let result = self.pull_media(&mut publisher).await;
 		match &result {
@@ -475,14 +494,13 @@ struct Publisher {
 }
 
 impl Publisher {
-	fn new(origin: &origin::Producer, path: &str, max_age: Option<Duration>) -> anyhow::Result<Self> {
+	fn new(origin: &origin::Producer, path: &str, config: moq_mux::catalog::Config) -> anyhow::Result<Self> {
 		let mut broadcast = origin
 			.create_broadcast(path)
 			.map_err(|err| anyhow::anyhow!("broadcast '{path}' could not be published: {err}"))?;
 		broadcast
 			.announce(moq_net::origin::Route::default())
 			.map_err(|err| anyhow::anyhow!("broadcast '{path}' could not be announced: {err}"))?;
-		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
 		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
 		let handle = broadcast.clone();
 		let mut importer = FlvImport::new(broadcast, catalog.reserve());

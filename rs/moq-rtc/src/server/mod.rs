@@ -158,6 +158,10 @@ pub struct Config {
 	/// Ingest only (`server publish` / WHIP): WHEP egress reads a broadcast someone else
 	/// declared, so it ignores this.
 	pub max_age: Option<Duration>,
+
+	/// Connection allocator each ingested track claims its peak-hold bitrate on.
+	/// Ingest only (`server publish` / WHIP); WHEP egress ignores this.
+	pub bandwidth: moq_net::bandwidth::Allocator,
 }
 
 impl Default for Config {
@@ -166,6 +170,7 @@ impl Default for Config {
 			ice_candidates: Vec::new(),
 			udp_bind: SocketAddr::from(([0, 0, 0, 0], 0)),
 			max_age: None,
+			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 		}
 	}
 }

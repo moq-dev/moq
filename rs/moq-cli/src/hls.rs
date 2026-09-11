@@ -8,7 +8,7 @@ use axum::http::Method;
 use hang::moq_net;
 use hang::moq_net::AsPath;
 
-use crate::moq::notify_ready;
+use crate::moq::{ImportTarget, notify_ready};
 
 /// HLS import (pull a remote playlist) args.
 #[derive(usage::Args, Clone)]
@@ -41,18 +41,21 @@ pub struct ExportArgs {
 	pub cors: crate::web::Cors,
 }
 
-/// Pull a remote HLS/LL-HLS playlist (URL or file path) into the Origin under `name`.
-pub async fn import(
-	origin: &moq_net::origin::Producer,
-	name: String,
-	playlist: String,
-	max_age: Option<std::time::Duration>,
-) -> anyhow::Result<()> {
+/// Pull a remote HLS/LL-HLS playlist (URL or file path) into the Origin under `target.name`.
+pub async fn import(target: ImportTarget, playlist: String) -> anyhow::Result<()> {
+	let ImportTarget {
+		origin,
+		name,
+		max_age,
+		bandwidth,
+	} = target;
 	let mut producer = origin.create_broadcast(&name).context("failed to create broadcast")?;
 
 	// Create catalog tracks before announcing so a subscriber can consume the
 	// catalog as soon as it observes the announcement.
-	let config = moq_mux::catalog::Config::default().with_max_age(max_age);
+	let config = moq_mux::catalog::Config::default()
+		.with_max_age(max_age)
+		.with_bandwidth(bandwidth);
 	let catalog = moq_mux::catalog::Producer::with_config(&mut producer, config)?;
 	producer
 		.announce(Default::default())

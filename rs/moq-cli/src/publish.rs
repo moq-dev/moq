@@ -257,14 +257,12 @@ impl Publish {
 	pub fn new(
 		mut broadcast: moq_net::broadcast::Producer,
 		format: &PublishFormat,
-		max_age: Option<std::time::Duration>,
+		config: moq_mux::catalog::Config,
 	) -> anyhow::Result<Self> {
 		// TS carries undecoded elementary streams (SCTE-35, teletext, DVB AC-3, ...)
 		// verbatim, so it uses the `mpegts` catalog extension rather than the media-only
 		// `()`. The catalog producer owns the broadcast's catalog tracks, so each broadcast
 		// gets exactly one; TS builds its `Ext` catalog here instead of the shared `()` below.
-		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
-
 		if let PublishFormat::Ts = format {
 			let config = config.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
 			let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
@@ -654,7 +652,7 @@ mod tests {
 		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 		let broadcast = origin.create_broadcast("cli").unwrap();
 		settle().await;
-		let mut publish = Publish::new(broadcast, &PublishFormat::Ts, None).unwrap();
+		let mut publish = Publish::new(broadcast, &PublishFormat::Ts, Default::default()).unwrap();
 		#[allow(irrefutable_let_patterns)]
 		let Source::Stream(decoder) = &mut publish.source else {
 			panic!("expected a stream source");

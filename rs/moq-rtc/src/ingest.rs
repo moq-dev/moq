@@ -15,8 +15,7 @@ pub struct IngestSink {
 }
 
 impl IngestSink {
-	pub fn new(mut broadcast: moq_net::broadcast::Producer, max_age: Option<std::time::Duration>) -> Result<Self> {
-		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
+	pub fn new(mut broadcast: moq_net::broadcast::Producer, config: moq_mux::catalog::Config) -> Result<Self> {
 		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
 		Ok(Self {
 			broadcast,
@@ -90,7 +89,11 @@ mod tests {
 	#[tokio::test]
 	async fn tracks_inherit_the_configured_retention() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let mut sink = IngestSink::new(broadcast.clone(), Some(Duration::from_secs(3))).unwrap();
+		let mut sink = IngestSink::new(
+			broadcast.clone(),
+			moq_mux::catalog::Config::default().with_max_age(Duration::from_secs(3)),
+		)
+		.unwrap();
 
 		sink.on_track(
 			"0".into(),
