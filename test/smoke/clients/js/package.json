@@ -3,7 +3,8 @@
 	"private": true,
 	"type": "module",
 	"scripts": {
-		"check": "tsc --noEmit"
+		"check": "tsc --noEmit",
+		"test": "bun test --only-failures"
 	},
 	"dependencies": {
 		"@moq/net": "workspace:*",

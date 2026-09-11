@@ -40,7 +40,7 @@ import {
 	waitForState,
 	waitForWatch,
 } from "./harness";
-import { FAULTS, SAMPLE_MS, SAMPLE_RATE } from "./src/contract";
+import { FAULTS, leakedPlayerStarted, SAMPLE_MS, SAMPLE_RATE } from "./src/contract";
 import * as Pattern from "./src/pattern";
 
 /** Cases beyond the mandatory capability probe, publisher readiness, and cold start. */
@@ -485,8 +485,8 @@ try {
 			await waitForResources(player, playerErrors, {
 				deadline: Date.now() + SETTLE_MS,
 				assertion: "resource instrumentation",
-				description: `the deliberately leaked player to open another session beyond ${JSON.stringify(busy.resources)}`,
-				predicate: (r) => r.transports + r.sockets > busy.resources.transports + busy.resources.sockets,
+				description: `the deliberately leaked player to open another audio graph beyond ${JSON.stringify(busy.resources)}`,
+				predicate: (r) => leakedPlayerStarted(busy.resources, r),
 			});
 		}
 		await command(player, "detach");

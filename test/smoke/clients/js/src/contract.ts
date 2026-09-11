@@ -75,6 +75,16 @@ export type Resources = {
 	workers: number;
 };
 
+/**
+ * True once a leaked player has started, even when it reuses a pooled transport.
+ *
+ * Two `<moq-watch>` elements on one relay URL share a WebTransport, so a session
+ * count cannot move. Each player still builds its own audio graph.
+ */
+export function leakedPlayerStarted(before: Resources, now: Resources): boolean {
+	return now.audioContexts > before.audioContexts;
+}
+
 /** One measurement of both playback sinks, taken in a single tick. */
 export type Sample = {
 	/** Monotonic counter, so a driver can tell a fresh sample from a repeat of the last one. */
