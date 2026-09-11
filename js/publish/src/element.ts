@@ -14,9 +14,6 @@ import * as Source from "./source";
 import * as Video from "./video";
 
 const OBSERVED = ["url", "name", "muted", "invisible", "source", "preview", "announce"] as const;
-
-/** How often the encoder's bitrate cap resamples the transport's send estimate. */
-const BANDWIDTH_POLL = 100; // ms
 type Observed = (typeof OBSERVED)[number];
 
 /** The built-in capture sources selectable via the `source` attribute. */
@@ -121,9 +118,6 @@ export default class MoqPublish extends HTMLElement {
 	// Whether to flip the video horizontally on playback. No attribute yet.
 	#flip = new Signal(false);
 
-	// The estimated send bandwidth (bits/sec), the encoder's bitrate cap.
-	#bandwidth = new Signal<number | undefined>(undefined);
-
 	// The preview element, either a <video> (raw source via srcObject) or a <canvas> (rendered frames).
 	#preview = new Signal<HTMLVideoElement | HTMLCanvasElement | undefined>(undefined);
 
@@ -180,32 +174,6 @@ export default class MoqPublish extends HTMLElement {
 			this.#announcing.set(announce === "always" || (announce === "source" && hasMedia));
 		});
 
-		// Track the connection's send bandwidth estimate, the encoder's bitrate cap. The
-		// transport has no event for it, so sample on our own schedule and skip a tick
-		// while the previous snapshot is outstanding.
-		this.signals.run((effect) => {
-			effect.set(this.#bandwidth, undefined);
-			if (effect.get(this.connection.status) !== "connected") return;
-
-			let pending = false;
-			const sample = async () => {
-				if (pending) return;
-				pending = true;
-				try {
-					// A snapshot that lands after this run was torn down describes a
-					// connection we no longer have, so drop it rather than capping the
-					// encoder at a dead peer's estimate.
-					const stats = await Promise.race([effect.cancel, this.connection.stats()]);
-					if (stats) this.#bandwidth.set(stats.estimatedSendRate);
-				} finally {
-					pending = false;
-				}
-			};
-
-			void sample();
-			effect.interval(sample, BANDWIDTH_POLL);
-		});
-
 		this.capture = new Video.Capture({ source: this.#videoSource });
 		this.signals.cleanup(() => this.capture.close());
 
@@ -230,7 +198,7 @@ export default class MoqPublish extends HTMLElement {
 			broadcast: this.broadcast,
 			capture: this.capture,
 			enabled: this.#videoEnabled,
-			bandwidth: this.#bandwidth,
+			bandwidth: this.connection.bandwidth,
 		});
 		this.signals.cleanup(() => this.video.close());
 
@@ -238,6 +206,7 @@ export default class MoqPublish extends HTMLElement {
 			broadcast: this.broadcast,
 			enabled: this.#audioEnabled,
 			capture: audioCapture,
+			bandwidth: this.connection.bandwidth,
 		});
 		this.signals.cleanup(() => this.audio.close());
 

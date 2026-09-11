@@ -26,6 +26,13 @@ function mockMonotonicTime(initial: number) {
 	};
 }
 
+test("priority reads the committed info and is 0 before accept", () => {
+	const producer = new TrackProducer("video");
+	expect(producer.priority).toBe(0);
+	producer.accept({ priority: 60 });
+	expect(producer.priority).toBe(60);
+});
+
 test("used reflects subscriber demand and unused resolves when the last one leaves", async () => {
 	const producer = new TrackProducer("test");
 

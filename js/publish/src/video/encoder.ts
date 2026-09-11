@@ -73,9 +73,9 @@ export type EncoderInput = {
 	// The capture pipeline supplying frames and the source track.
 	capture: Getter<Capture | undefined>;
 
-	// Estimated send bandwidth cap in bits/sec. Caps the bitrate (with a safety margin) only when no
-	// explicit maxBitrate is set.
-	bandwidth: Getter<number | undefined>;
+	// The connection's bandwidth allocator. The encoder reserves its ceiling and
+	// follows the grant instead of the whole-session estimate.
+	bandwidth: Getter<Moq.Bandwidth.Handle | undefined>;
 };
 
 /** Constructor options: the wired inputs plus the live-editable {@link Config} tuning knobs. */
@@ -136,6 +136,12 @@ export class Encoder {
 	// The codec the browser will actually encode with, tagged with the inputs it was probed against.
 	#codec = new Signal<Detected | undefined>(undefined);
 
+	// Uncapped target bitrate (pixels, maxBitrate), the reservation's ceiling.
+	#ceiling = new Signal<number | undefined>(undefined);
+
+	// This rendition's claim on the connection, held while a track is live.
+	#reservation = new Signal<Moq.Bandwidth.Reservation | undefined>(undefined);
+
 	// Only the codec prefix the user asked for, narrowed out of `config` so tuning any other knob
 	// doesn't re-probe the hardware.
 	#codecFilter: Computed<string>;
@@ -188,6 +194,32 @@ export class Encoder {
 			}
 
 			this.#encode(track, effect);
+		});
+
+		// Reserve against the connection for as long as this track is live. Wait
+		// for a ceiling so we never claim 0 and starve siblings for a tick. The
+		// allocator ignores an idle track, and closing the reservation hands the
+		// room to siblings.
+		effect.run((effect) => {
+			const enabled = effect.get(this.in.enabled);
+			const track = effect.get(rendition.track);
+			const allocator = effect.get(this.in.bandwidth);
+			if (!enabled || !track || !allocator) return;
+
+			let reservation: Moq.Bandwidth.Reservation | undefined;
+			effect.subscribe(this.#ceiling, (ceiling) => {
+				if (ceiling === undefined) return;
+				if (!reservation) {
+					reservation = allocator.reserve(track, ceiling);
+					this.#reservation.set(reservation);
+				} else {
+					reservation.update(ceiling);
+				}
+			});
+			effect.cleanup(() => {
+				reservation?.close();
+				if (this.#reservation.peek() === reservation) this.#reservation.set(undefined);
+			});
 		});
 	}
 
@@ -439,14 +471,16 @@ export class Encoder {
 
 		bitrate = Math.round(Math.min(bitrate, user.maxBitrate || bitrate));
 
-		// If no explicit maxBitrate, cap to the estimated send bandwidth (with 90% safety margin).
-		if (!user.maxBitrate) {
-			const estimate = effect.get(this.in.bandwidth);
-			if (estimate != null) {
-				// Reserve ~10% for audio and protocol overhead.
-				const cap = Math.round(estimate * 0.9);
-				bitrate = Math.min(bitrate, cap);
-			}
+		// The reservation's ceiling is what we can ever send, not the grant: a
+		// grant that followed our own output would hand the room away on a still
+		// picture and not have it back when the picture moved.
+		effect.set(this.#ceiling, bitrate);
+
+		const reservation = effect.get(this.#reservation);
+		if (reservation) {
+			const grant = reservation.peek();
+			effect.get(reservation.grant);
+			if (grant != null) bitrate = Math.min(bitrate, grant);
 		}
 
 		const config: VideoEncoderConfig = {

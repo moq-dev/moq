@@ -28,7 +28,6 @@ quest here and merged main into dev.
 - [Group overflow](/quest/m1/group-overflow-abort.md) - an open group past its budget aborts for every reader with GROUP_TOO_LARGE, and head eviction is deleted
 - [Close classification](/quest/m1/js-close-classification.md) - a browser consumer tells a requested end from a fault, so the media harness fails on real errors during a transition
 - [#3187](/quest/m1/3187-preserve-structured-protocol-error-codes-across-ffi-and-c.md) - protocol error codes cross moq-ffi and C as a scope, code, and kind instead of a message string
-- [#2709](/quest/m1/2709-per-broadcast-bandwidth-estimates-and-reservation.md) - js/net mirrors the send-side bandwidth allocator so each publisher encodes against its own share
 - [Binding rate control](/quest/m1/binding-rate-control.md) - the bindings mirror the allocator and reservation, so a non-Rust publisher follows its bandwidth share
 - [#2859](/quest/m1/2859-passthrough-imports-reserve-no-bandwidth-so-a-co-resident.md) - passthrough imports claim their peak-hold catalog bitrate on the allocator so a co-resident encoder targets what is left
 - [A/V clock](/quest/m1/plan-av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles

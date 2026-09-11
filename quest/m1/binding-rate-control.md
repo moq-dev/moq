@@ -12,9 +12,8 @@ lands, and an application that owns its encoder reserves a share for its own
 track and reads the current grant. A Python, Swift, Kotlin, Go or C video
 publisher stops holding its configured bitrate through congestion.
 
-Boundaries: `rs/moq-net/src/model/bandwidth.rs` is the spec, as it is for
-[#2709](/quest/m1/2709-per-broadcast-bandwidth-estimates-and-reservation.md);
-the bindings add no policy. OBS adopting the surface is
+Boundaries: `rs/moq-net/src/model/bandwidth.rs` is the spec; the bindings add
+no policy. OBS adopting the surface is
 [OBS rate control](/quest/m2/obs-moq-video/rate-control.md).
 
 ## Plan
@@ -89,6 +88,5 @@ Branch from dev.
 
 ## Related
 
-- [#2709](/quest/m1/2709-per-broadcast-bandwidth-estimates-and-reservation.md) - the same allocator mirrored in js/net
 - [#2848](/quest/m2/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - audio following its grant in Rust, and the policy's move to moq-mux
 - [Ladder](/quest/m2/ladder/README.md) - the transcode consumer of the same estimate

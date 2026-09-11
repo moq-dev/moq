@@ -38,8 +38,10 @@ element. `<moq-publish-support>` shows what the browser can encode.
 
 ## Encoding
 
-The video encoder's bitrate cap follows the connection's bandwidth estimate,
-so a tightening uplink costs quality instead of stalling. Codec, resolution,
+The video encoder follows its share of the connection's send-rate estimate
+(via `Bandwidth.Allocator`), so several publishers on one connection do not
+each target the whole uplink. Audio reserves its configured bitrate so
+video's share is honest, and keeps encoding at that rate. Codec, resolution,
 framerate, and bitrate are tunable through `el.video.config`; the audio
 encoder exposes its codec and volume. For simulcast or several renditions,
 drop the element and register your own encoders on a `Publish.Broadcast`.

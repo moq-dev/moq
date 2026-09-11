@@ -75,6 +75,10 @@ export type EncoderInput = {
 	// The capture supplying PCM. Shared: one capture feeds any number of renditions, so build it
 	// yourself and pass the same instance to each.
 	capture: Getter<Capture | undefined>;
+
+	// The connection's bandwidth allocator. Audio reserves its configured bitrate so
+	// video's share is honest, and ignores the grant (Opus is a fixed rate today).
+	bandwidth: Getter<Moq.Bandwidth.Handle | undefined>;
 };
 
 /** Constructor options: the wired inputs plus the live-editable tuning knobs. */
@@ -173,6 +177,7 @@ export class Encoder {
 			enabled: getter(props?.enabled ?? true),
 			broadcast: getter(props?.broadcast),
 			capture: getter(props?.capture),
+			bandwidth: getter(props?.bandwidth),
 		};
 		this.muted = Signal.from(props?.muted ?? false);
 		this.volume = Signal.from(props?.volume ?? 1);
@@ -269,6 +274,25 @@ export class Encoder {
 			if (fatal) track?.close(fatal);
 
 			effect.set(this.#out.active, enabled && !!format && !!track && !fatal, false);
+		});
+
+		// Claim the configured bitrate so a co-resident video encoder's share is
+		// honest. Wait for a bitrate so we never claim 0. The grant is ignored:
+		// following it for Opus is out of scope.
+		effect.run((effect) => {
+			const enabled = effect.get(this.in.enabled);
+			const track = effect.get(rendition.track);
+			const allocator = effect.get(this.in.bandwidth);
+			if (!enabled || !track || !allocator) return;
+
+			let reservation: Moq.Bandwidth.Reservation | undefined;
+			effect.subscribe(this.#config, (config) => {
+				const bitrate = config?.catalog.bitrate;
+				if (bitrate === undefined) return;
+				if (!reservation) reservation = allocator.reserve(track, bitrate);
+				else reservation.update(bitrate);
+			});
+			effect.cleanup(() => reservation?.close());
 		});
 	}
 

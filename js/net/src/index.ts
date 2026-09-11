@@ -9,6 +9,8 @@
 export * as Signals from "@moq/signals";
 /** Broadcast announcement streams. */
 export * as Announce from "./announced.ts";
+/** Send-side bandwidth estimates split among the tracks sharing a connection. */
+export * as Bandwidth from "./bandwidth.ts";
 /** Broadcast role handles. */
 export * as Broadcast from "./broadcast.ts";
 /** A reconnecting, shareable handle on a MoQ session. */

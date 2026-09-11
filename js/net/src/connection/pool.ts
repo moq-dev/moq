@@ -5,6 +5,7 @@
  */
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
+import type { Handle } from "../bandwidth.ts";
 import * as Origin from "../origin.ts";
 import * as Path from "../path.ts";
 import { type AcceptProps as AcceptPropsType, accept } from "./accept.ts";
@@ -134,6 +135,16 @@ export class Connection {
 	readonly probe: Getter<ProbeType | undefined>;
 
 	/**
+	 * The send-side bandwidth allocator for the current URL, or undefined
+	 * while disabled or URL-less.
+	 *
+	 * Every handle on this URL shares the same instance, so publishers reserve
+	 * against one registry. Borrowed, not owned: the type has no close, since
+	 * closing it would starve every other handle.
+	 */
+	readonly bandwidth: Getter<Handle | undefined>;
+
+	/**
 	 * The origin for the current URL, or undefined while disabled or URL-less.
 	 *
 	 * Publish into it or consume from it; a shared handle's origin is the same one every
@@ -158,6 +169,7 @@ export class Connection {
 	readonly #established = new Signal<Established | undefined>(undefined);
 	readonly #probe = new Signal<ProbeType | undefined>(undefined);
 	readonly #origin = new Signal<Origin.Producer | undefined>(undefined);
+	readonly #bandwidth = new Signal<Handle | undefined>(undefined);
 	#signals = new Effect();
 
 	/**
@@ -176,6 +188,7 @@ export class Connection {
 		this.status = this.#status;
 		this.probe = this.#probe;
 		this.origin = this.#origin;
+		this.bandwidth = this.#bandwidth;
 		this.transport = this.#signals.computed((effect) => effect.get(this.#established)?.transport);
 
 		this.closed = new Promise((resolve, reject) => {
@@ -205,6 +218,7 @@ export class Connection {
 			effect.cleanup(lease.release);
 
 			effect.set(this.#origin, lease.origin, undefined);
+			effect.set(this.#bandwidth, lease.connection.bandwidth, undefined);
 
 			// Proxy the shared loop's outputs, so this handle reads like its own connection.
 			effect.run((nested) => nested.set(this.#status, nested.get(lease.connection.status), "disconnected"));
@@ -247,6 +261,7 @@ export class Connection {
 		this.#signals.run((effect) => {
 			if (!effect.get(this.enabled) || !effect.get(href)) return;
 			effect.set(this.#origin, origin, undefined);
+			effect.set(this.#bandwidth, loop.bandwidth, undefined);
 		});
 		this.#signals.run((effect) => effect.set(this.#status, effect.get(loop.status), "disconnected"));
 		this.#signals.run((effect) => effect.set(this.#established, effect.get(loop.established), undefined));

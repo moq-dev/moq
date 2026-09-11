@@ -424,6 +424,16 @@ export class Producer {
 	}
 
 	/**
+	 * Publisher priority from the committed {@link Info}, or 0 before {@link accept}.
+	 *
+	 * Higher is served first. Hang publishers set this from `Catalog.PRIORITY` so
+	 * audio outranks video on the wire and in the bandwidth allocator.
+	 */
+	get priority(): number {
+		return this.#state.info.peek()?.priority ?? 0;
+	}
+
+	/**
 	 * Settles once the track closes: `null` on a clean close, or the abort {@link Error}.
 	 * Peek it synchronously (`undefined` while open), observe it reactively, or `await` it.
 	 */
