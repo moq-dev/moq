@@ -2,40 +2,68 @@
 layout: home
 
 hero:
-  name: Media over QUIC
-  text: Live media without latency buildup
-  tagline: Real-time latency at CDN scale, for video, audio, and any live data.
   actions:
     - theme: brand
-      text: Quick start
+      text: Setup
       link: /setup/
     - theme: alt
-      text: Try the demo
-      link: https://moq.dev/
-    - theme: alt
-      text: How it works
+      text: Concepts
       link: /concept/
+    - theme: alt
+      text: Apps
+      link: /bin/
+    - theme: alt
+      text: Libraries
+      link: /lib/
+    - theme: alt
+      text: Demo
+      link: https://moq.dev/
 
 features:
   - icon:
       src: /emoji/rocket.svg
-    title: Low latency
-    details: Independent QUIC streams let congestion drop old media instead of delaying new media, while tiny single-frame groups can use datagrams.
+    title: Adaptive
+    details: MoQ supports the entire latency spectrum. Simultaneously support real-time, interactive, or lean-back experiences with a unified stack.
 
   - icon:
       src: /emoji/stonk.svg
     title: Scalable
-    details: Relays cache and fan out broadcasts without understanding the payload, and cluster across regions.
+    details: All content can be cached and fanned-out via a CDN. Serve millions of concurrent viewers across the globe, including via Cloudflare.
 
   - icon:
       src: /emoji/puzzle.svg
-    title: Composable
-    details: Generic pub/sub underneath, media on top. Add your own tracks for chat, input, telemetry, or AI output.
+    title: Extensible
+    details: Supports contribution, distribution, conferencing, and whatever you can dream up. Extend the protocol with custom tracks for any live content.
 
   - icon:
       src: /emoji/globe.svg
-    title: Everywhere
-    details: Browsers via WebTransport, native apps via Rust and language bindings, plus gateways to RTMP, SRT, HLS, and WebRTC.
+    title: Modern Web
+    details: Utilizes WebTransport, WebCodecs, and WebAudio APIs for modern browser support without hacks.
+
+  - icon:
+      src: /emoji/box.svg
+    title: Cross-Platform
+    details: Libraries for Rust (native) and TypeScript (web), plus FFI bindings for C, Python, Kotlin, Swift, Go, and Dart. Integrations with ffmpeg, OBS, GStreamer, and more to come.
+
+  - icon:
+      src: /emoji/battery.svg
+    title: Efficient
+    details: Save resources by only encoding or transmitting data when needed. Built on top of production-ready QUIC libraries.
+
+  - icon:
+      src: /emoji/lock.svg
+    title: Secure
+    details: Encrypted via TLS and authenticated via JWT. You can optionally self-host a private CDN or end-to-end encrypt your content.
+
+  - icon:
+      src: /emoji/back.svg
+    title: Backwards Compatible
+    details: Supports CMAF and HLS for legacy device support. Migrate legacy devices at your own pace.
+
+  - icon:
+      src: /emoji/link.svg
+    title: Decentralized
+    details: Host your own CDN, use a 3rd party service, and/or connect P2P via Iroh (native only). Broadcasts are automatically discovered and gossiped.
 ---
 
 ## What is MoQ?
