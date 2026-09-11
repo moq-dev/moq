@@ -43,7 +43,8 @@ Hop 0 in a chain is the mark, and it travels:
   announcement stream.
 - `js/net` keeps accepting 0 inside a received chain and exposes `anonymous`
   on the announcement it yields; it ranks nothing today, and the browser hop
-  in [P2P](/quest/m3/p2p/README.md) forwards 0 like a relay when it lands.
+  of the P2P questline, which lives on dev, forwards 0 like a relay when it
+  lands.
   `doc/concept/transport.md` states the selection rule beside route cost.
 - Loop detection is unchanged: a 0 entry matches nothing, and a relay's own
   id still appears in the chain wherever it forwarded the route.
