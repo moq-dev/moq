@@ -60,11 +60,20 @@ and does not.
 ### Playhead, not codec reset
 
 The mux discontinuity counter becomes a playhead generation: startup delay
-and skip, not `decoder.flush()` / `decoder.reset()`. Remove those flushes
-from `rs/moq-video/src/decode/consumer.rs:85-92` and
-`rs/moq-audio/src/decode/consumer.rs:283-302`. Audio still re-applies
-pre-skip in the play path. Watch's remaining in-flight-frame question is
-[#3056](/quest/m1/3056-watch-video-decoder-captures-the-rewind-generation-at.md).
+and skip; it does not by itself declare a new codec configuration. Do not
+unconditionally reset a decoder for every latency skip. However, do not remove
+existing flush/reset handling until every backend can abandon stale output
+without letting queued B-frames, audio, or resampler output cross the seam.
+
+Capture generation at input submission and filter output before presentation,
+or use an equivalent proven discard mechanism. Merely tagging output with the
+current generation or clearing the outer pending queue misses buffered codec
+output. Retain backend reset/discard operations where required for a real source
+or codec-configuration epoch, and preserve audio pre-skip. Prove both retained
+codec continuity on an ordinary skip and exclusion of abandoned output before
+removing any existing reset. The WebCodecs counterpart is
+[#3056](/quest/m1/3056-watch-video-decoder-captures-the-rewind-generation-at.md);
+native decoder and resampler coverage belongs to this quest.
 
 ### Publisher refuse rewind
 
@@ -112,8 +121,9 @@ In both languages: the producer refuses a group below the live edge; the
 consumer aborts on one; a group with reordered B-frames is accepted; an
 open-GOP group whose leading pictures sit below its keyframe but above the
 previous group passes; a marker group followed by a forward jump bumps
-playhead generation once and does not flush a decoder; a latency skip does
-the same; a non-sequential id jump with a contiguous boundary
+playhead generation once while abandoned buffered output never crosses the
+seam; an ordinary latency skip preserves valid codec state while dropping
+stale output; a non-sequential id jump with a contiguous boundary
 (`consumer.nonsequential.test.ts`) does not; a zero-budget idle resume whose
 timestamps jumped still jumps the playhead after the marker is shed (#3291).
 Rewrite `empty_group_declares_a_discontinuity`,
@@ -134,4 +144,4 @@ state and `is_stale` sheds empty groups.
 - [js/publish discontinuity](/quest/m1/js-publish-discontinuity.md) - the JS container producer and js/publish emit the same marker
 - [#3056](/quest/m1/3056-watch-video-decoder-captures-the-rewind-generation-at.md) - whether watch still resets VideoDecoder to drop in-flight chunks when playhead generation bumps
 - [#3115](/quest/m2/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink's generation model after EOS, the same publisher
-- [Open-GOP leading pictures](/quest/m2/open-gop-leading-pictures.md) - latency skip now bumps playhead generation but does not flush the decoder, so leading pictures still decode
+- [Open-GOP leading pictures](/quest/m2/open-gop-leading-pictures.md) - preserve valid codec references during a latency skip while excluding stale output

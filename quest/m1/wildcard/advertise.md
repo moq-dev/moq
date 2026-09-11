@@ -2,7 +2,8 @@
 
 ## Goal
 
-moq-net encodes, forwards, and authorizes wildcard advertisements, without yet
+Rust and JS moq-net encode, decode, model, and authorize wildcard
+advertisements; relays forward them without yet
 resolving one into a subscription.
 
 ## Plan
@@ -16,7 +17,8 @@ This starts after
 makes `dynamic(pattern, route)` take a `moq_net::path::Pattern` in Rust and
 the bindings, refusing anything that is not prefix-shaped;
 [js-announce](/quest/m1/js-announce.md) mirrors that in js/net. This quest
-lifts the refusal on the Rust side; no signature changes.
+lifts the refusal in both Rust and JS; no signature changes. The js/net wire
+codec and announced model land here, not in the later player Demand quest.
 
 The draft settled on a message of its own: ANNOUNCE_PATTERN (type 0x3 on the
 announce stream) carries the pattern as typed segments (kind 0 literal, 1
@@ -41,10 +43,12 @@ sub-version, and `AnnounceBroadcast::decode` rejects an unknown message type
 outright (`DecodeError::InvalidMessage`, `:159`), which kills the announce
 stream. A
 relay running an earlier Lite06 build therefore negotiates the same version and
-then drops the session when a newer peer sends a wildcard. Land the DECODE side
-so an unknown announce type is tolerated before any build emits one, and treat
+then drops the session when a newer peer sends a wildcard. Land the DECODE side in Rust and JS
+so receivers understand the pattern message before any build emits one, and treat
 emission as a separate rollout step: no service emits the message until
-deployed receivers tolerate it. Test a
+deployed receivers, including browser clients, tolerate it. Test Rust-to-JS
+and JS-to-Rust fixtures plus a browser subscriber against an emitting relay.
+Test a
 sender against the INTERMEDIATE receiver build, the one that recognizes
 wildcards but does not emit them: that is what a rollout actually deploys
 first. Testing against a receiver built before the message existed only
@@ -99,13 +103,15 @@ two hops, reflected-wildcard drop, per-subscriber exclusion, retraction, scope
 refusal, root and descendant residuals from a `**` rebase, duplicates
 aggregated into one entry, and withdrawal firing only when the last advertiser
 leaves. Cover that a pattern and a literal prefix coexist in one route table
-and that a literal-only deployment behaves exactly as it does today.
+and that a literal-only deployment behaves exactly as it does today. Include
+JS unknown typed-segment handling and withdrawal/update decoding so receiving
+a pattern cannot kill the browser announce stream.
 
 ## Required
 
 - [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - the Pattern parameter this quest widens
 
-## Related
-
 - [js-announce](/quest/m1/js-announce.md) - the js/net signature this quest widens
+
+## Related
 - [path-patterns/origin](/quest/m2/path-patterns/origin.md) - replaces the prefix scope the containment check runs against
