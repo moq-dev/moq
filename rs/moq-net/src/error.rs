@@ -447,7 +447,9 @@ pub enum Error {
 	#[error(transparent)]
 	Stream(StreamError),
 
-	/// A remote error received via a stream/session reset code.
+	/// An unrecognized request-rejection code (the IETF request registry).
+	///
+	/// Session and stream unknowns are [`Self::Session`] / [`Self::Stream`], not this.
 	#[error("remote error: code={0}")]
 	Remote(u32),
 }
@@ -495,6 +497,22 @@ impl Error {
 			Self::Session(err) => err.to_code(),
 			Self::Stream(err) => err.to_code(),
 			Self::Remote(code) => *code,
+		}
+	}
+
+	/// The session-scoped protocol error, if this was received as one.
+	pub fn session(&self) -> Option<&SessionError> {
+		match self {
+			Self::Session(err) => Some(err),
+			_ => None,
+		}
+	}
+
+	/// The stream-scoped protocol error, if this was received as one.
+	pub fn stream(&self) -> Option<&StreamError> {
+		match self {
+			Self::Stream(err) => Some(err),
+			_ => None,
 		}
 	}
 
@@ -841,10 +859,12 @@ mod tests {
 
 		// A MoQ-layer auth rejection is now classifiable, because the code is specified.
 		assert!(matches!(session(0x2), Error::Session(SessionError::Unauthorized)));
+		assert_eq!(session(0x2).session(), Some(&SessionError::Unauthorized));
 		assert!(matches!(session(0x0), Error::Session(SessionError::Cancel)));
 
 		// Same integer, different space: 0 ends a session cleanly but fails a stream.
 		assert!(matches!(stream(0x1), Error::Stream(StreamError::Cancel)));
+		assert_eq!(stream(0x1).stream(), Some(&StreamError::Cancel));
 		assert!(matches!(stream(0x0), Error::Stream(StreamError::Internal)));
 		assert!(matches!(stream(0x5), Error::Stream(StreamError::TooFarBehind)));
 		assert!(matches!(stream(0x32), Error::Stream(StreamError::GroupTooLarge)));

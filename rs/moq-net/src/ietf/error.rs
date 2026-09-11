@@ -99,7 +99,7 @@ pub fn to_stream_code(err: &StreamError, version: Version) -> u32 {
 /// Read a stream reset (or STOP_SENDING) code received on the negotiated draft.
 ///
 /// A code the draft does not assign stays [`StreamError::Unknown`], which surfaces as
-/// [`Error::Remote`](crate::Error::Remote): an error, but never one given a meaning it did
+/// [`Error::Stream`](crate::Error::Stream): an error, but never one given a meaning it did
 /// not carry. That includes the codes this crate has no local counterpart for
 /// (UNKNOWN_OBJECT_STATUS, EXPIRED_AUTH_TOKEN, EXCESSIVE_LOAD) and every value a later
 /// draft may add.

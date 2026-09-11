@@ -103,6 +103,25 @@ async def test_fetch_abort_is_a_stream_app_code():
     assert protocol.kind == moq.ProtocolKind.APP
 
 
+def test_protocol_error_helper_covers_known_app_and_unknown():
+    cases = [
+        (moq.ErrorScope.SESSION, 0x2, moq.ProtocolKind.UNAUTHORIZED, True),
+        (moq.ErrorScope.SESSION, 64 + 404, moq.ProtocolKind.APP, False),
+        (moq.ErrorScope.SESSION, 0x1F, moq.ProtocolKind.UNKNOWN, False),
+        (moq.ErrorScope.STREAM, 64 + 7, moq.ProtocolKind.APP, False),
+    ]
+    for scope, code, kind, auth in cases:
+        details = moq.ProtocolError(scope=scope, code=code, kind=kind, message="x")
+        err = moq.Error.Protocol(details)
+        protocol = moq.protocol_error(err)
+        assert protocol is not None
+        assert protocol.scope == scope
+        assert protocol.code == code
+        assert protocol.kind == kind
+        assert moq.is_auth(err) is auth
+    assert moq.protocol_error(RuntimeError("nope")) is None
+
+
 def test_publish_media_lifecycle():
     broadcast = moq.BroadcastProducer()
     media = broadcast.publish_audio(moq.AudioFormat.OPUS, opus_head())
