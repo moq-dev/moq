@@ -18,8 +18,7 @@ use std::task::{Context, Waker};
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use kio::{Park, Waiter, WaiterList};
 
-/// Live-waiter populations to sweep. The top end is the inline capacity, past which
-/// the list spills to the heap.
+/// Live-waiter populations spanning inline storage and heap spill.
 const SIZES: [usize; 4] = [1, 2, 8, 32];
 
 /// A list holding `n` live registrations, plus the waiters keeping them live.
@@ -35,8 +34,7 @@ fn populated(n: usize) -> (WaiterList, Vec<Waiter>) {
 	(list, waiters)
 }
 
-/// Register the first waiter on a newly constructed list, including lazy list
-/// initialization in the measured path.
+/// Register the first waiter on a newly constructed list.
 fn bench_register_first(c: &mut Criterion) {
 	c.bench_function("waiter_register_first", |b| {
 		b.iter_batched(
@@ -50,8 +48,8 @@ fn bench_register_first(c: &mut Criterion) {
 	});
 }
 
-/// Register a fresh waiter into a list of N live entries: the dedup scan misses,
-/// the dead-slot probe finds nothing, and the entry is appended.
+/// Register a fresh waiter into a list of N live entries: the dead-slot probe
+/// finds nothing, and the entry is appended.
 fn bench_register(c: &mut Criterion) {
 	let mut g = c.benchmark_group("waiter_register_live");
 	for &n in &SIZES {
@@ -72,23 +70,22 @@ fn bench_register(c: &mut Criterion) {
 	g.finish();
 }
 
-/// Re-register a waiter already in a list of N live entries: the record fast path,
-/// which is the steady-state cost of a poll that re-runs while still parked. Flat
-/// in N, since membership is settled by the waiter's own record, not a scan.
+/// Re-poll with a still-registered waiter, including retirement and slot reuse.
 fn bench_reregister(c: &mut Criterion) {
 	let mut g = c.benchmark_group("waiter_reregister");
 	for &n in &SIZES {
 		g.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
-			let (mut list, waiters) = populated(n);
-			let last = waiters.last().unwrap();
-			b.iter(|| last.register(&mut list));
+			let (mut list, _waiters) = populated(n);
+			let mut park = Park::default();
+			let cx = Context::from_waker(Waker::noop());
+			b.iter(|| park.hold(&cx).register(&mut list));
 		});
 	}
 	g.finish();
 }
 
-/// Register a fresh waiter into a list whose N entries are all dead: the dedup scan
-/// misses and the probe reclaims a slot in place.
+/// Register a fresh waiter into a list whose N entries are all dead: the probe
+/// reclaims a slot in place.
 fn bench_register_dead(c: &mut Criterion) {
 	let mut g = c.benchmark_group("waiter_register_dead");
 	for &n in &SIZES {
@@ -121,11 +118,10 @@ fn bench_cancel(c: &mut Criterion) {
 
 /// The cycle a poll function actually drives: hold the park, register with L lists,
 /// then one list wakes. The re-poll arrives with live registrations still parked on
-/// the other lists, which is exactly the case `Park` must not retire on.
+/// the other lists, requiring retirement before re-registration.
 fn bench_park_cycle(c: &mut Criterion) {
 	let mut g = c.benchmark_group("waiter_park_cycle");
-	// 16 lists overflow the waiter's record table, exercising eviction and the
-	// scan fallback rather than the pure record fast path.
+	// Include broad polls that remain parked on many quiet lists.
 	for &lists in &[1usize, 2, 4, 8, 16] {
 		g.bench_with_input(BenchmarkId::from_parameter(lists), &lists, |b, &n| {
 			let cx = Context::from_waker(Waker::noop());
@@ -169,9 +165,8 @@ fn bench_fanout_cycle(c: &mut Criterion) {
 }
 
 /// The fan-out cycle when every waiter is also parked on a second, never-woken list
-/// (a value list and a closed list under one lock, say). The live second
-/// registration is what forecloses the registered-nowhere fast path, so this is the
-/// worst case for rebuilding the drained list.
+/// (a value list and a closed list under one lock, say). Each partial wake requires
+/// a new waiter, so this includes allocation and reclamation at high fan-out.
 fn bench_fanout_cycle_parked(c: &mut Criterion) {
 	let mut g = c.benchmark_group("waiter_fanout_cycle_parked");
 	for &n in &FANOUT {
@@ -179,19 +174,14 @@ fn bench_fanout_cycle_parked(c: &mut Criterion) {
 		g.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
 			let mut list = WaiterList::new();
 			let mut parked = WaiterList::new();
-			let waiters: Vec<_> = (0..n)
-				.map(|_| {
-					let waiter = Waiter::new(Waker::noop().clone());
-					waiter.register(&mut parked);
-					waiter
-				})
-				.collect();
+			let mut parks: Vec<_> = (0..n).map(|_| Park::default()).collect();
+			let cx = Context::from_waker(Waker::noop());
 			b.iter(|| {
-				for waiter in &waiters {
+				for park in &mut parks {
+					let waiter = park.hold(&cx);
 					waiter.register(&mut list);
 					waiter.register(&mut parked);
 				}
-				// Drain the production way: snapshot under the lock, wake outside.
 				list.take().wake();
 			});
 		});
