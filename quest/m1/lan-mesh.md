@@ -25,9 +25,8 @@ One implementation: the relay's `Cluster`.
 - moq-cli depends on the moq-relay library; its `cluster-lan` feature becomes
   `moq-relay/cluster-lan`. `MoqSide.cluster` nests `moq_relay::ClusterConfig`,
   so the CLI's `--cluster-*` flags are the relay's, LAN and WAN alike, and the
-  stages publish and subscribe on the cluster's origin (the one
-  [cluster construction](/quest/m1/cluster-construction.md) builds once).
-  Delete `rs/moq-cli/src/cluster.rs`.
+  stages publish and subscribe on the cluster's origin (built once at
+  construction). Delete `rs/moq-cli/src/cluster.rs`.
 - Advertise: the listener's fingerprint whenever its certificate was
   generated, the node URL when one is configured, and at least one of them
   (the `UnboundSecret` rule). A relay without `--cluster-node` advertises its
@@ -63,5 +62,4 @@ Branch from `dev`.
 
 ## Related
 
-- [Cluster construction](/quest/m1/cluster-construction.md) - the origin the CLI's stages attach to
 - [`moq relay`](/quest/m2/moq-relay-subcommand.md) - the second place the CLI hosts the relay library
