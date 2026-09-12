@@ -1,0 +1,356 @@
+{
+	"profile": "moq-e2ee-01",
+	"constants": {
+		"salt": "6d6f712d653265652d3031",
+		"name_label": "6d6f712d653265652d3031206e616d65",
+		"key_label": "6d6f712d653265652d3031206b6579",
+		"domain_group": 0,
+		"domain_datagram": 1,
+		"tag_len": 16,
+		"key_len": 16,
+		"name_len": 16,
+		"max_u53": 9007199254740991,
+		"max_u32": 4294967295,
+		"max_invocations": 16777216,
+		"max_grouped_payload": 33554432,
+		"max_grouped_plaintext": 33554416,
+		"max_datagram_body": 1200
+	},
+	"credential": {
+		"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
+		"generation": 1,
+		"kid": 7,
+		"secret": "6d6f712d653265652d3031207465737420736563726574212121212121212121"
+	},
+	"derivation": [
+		{
+			"id": "group-video",
+			"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
+			"generation": 1,
+			"kid": 7,
+			"secret": "6d6f712d653265652d3031207465737420736563726574212121212121212121",
+			"semantic_name": "video",
+			"semantic_name_bytes": "766964656f",
+			"domain": 0,
+			"prk": "3bb5d32ba83721f7e31bb1000a43bf92ff3750f9e4a80217780253c9a88e148a",
+			"name_info": "6d6f712d653265652d3031206e616d6500176578616d706c652e636f6d2f6d656574696e672d313233000000000000000100000000000000070005766964656f",
+			"name_material": "be2d7e3b9de2c6b7f368462ae576cf66",
+			"physical_name": "vi1-O53ixrfzaEYq5XbPZg",
+			"key_info": "6d6f712d653265652d3031206b657900176578616d706c652e636f6d2f6d656574696e672d3132330000000000000001000000000000000700167669312d4f3533697872667a61455971355862505a6700",
+			"key": "c074c2b1647e82f9b22e355d9df840f5"
+		},
+		{
+			"id": "datagram-audio",
+			"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
+			"generation": 1,
+			"kid": 7,
+			"secret": "6d6f712d653265652d3031207465737420736563726574212121212121212121",
+			"semantic_name": "audio",
+			"semantic_name_bytes": "617564696f",
+			"domain": 1,
+			"prk": "3bb5d32ba83721f7e31bb1000a43bf92ff3750f9e4a80217780253c9a88e148a",
+			"name_info": "6d6f712d653265652d3031206e616d6500176578616d706c652e636f6d2f6d656574696e672d313233000000000000000100000000000000070005617564696f",
+			"name_material": "e9e18632bbfac88996d1b6c99c673860",
+			"physical_name": "6eGGMrv6yImW0bbJnGc4YA",
+			"key_info": "6d6f712d653265652d3031206b657900176578616d706c652e636f6d2f6d656574696e672d313233000000000000000100000000000000070016366547474d72763679496d573062624a6e476334594101",
+			"key": "8f28afbf9d3e44fcbc53c6ded0e096d0"
+		},
+		{
+			"id": "catalog-json",
+			"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
+			"generation": 1,
+			"kid": 7,
+			"secret": "6d6f712d653265652d3031207465737420736563726574212121212121212121",
+			"semantic_name": "catalog.json",
+			"semantic_name_bytes": "636174616c6f672e6a736f6e",
+			"domain": 0,
+			"prk": "3bb5d32ba83721f7e31bb1000a43bf92ff3750f9e4a80217780253c9a88e148a",
+			"name_info": "6d6f712d653265652d3031206e616d6500176578616d706c652e636f6d2f6d656574696e672d31323300000000000000010000000000000007000c636174616c6f672e6a736f6e",
+			"name_material": "d370159162006aee060b57ab444c49ec",
+			"physical_name": "03AVkWIAau4GC1erRExJ7A",
+			"key_info": "6d6f712d653265652d3031206b657900176578616d706c652e636f6d2f6d656574696e672d313233000000000000000100000000000000070016303341566b57494161753447433165725245784a374100",
+			"key": "63804bfc53fa33363dadb605e8572c35"
+		},
+		{
+			"id": "catalog-json-z",
+			"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
+			"generation": 1,
+			"kid": 7,
+			"secret": "6d6f712d653265652d3031207465737420736563726574212121212121212121",
+			"semantic_name": "catalog.json.z",
+			"semantic_name_bytes": "636174616c6f672e6a736f6e2e7a",
+			"domain": 0,
+			"prk": "3bb5d32ba83721f7e31bb1000a43bf92ff3750f9e4a80217780253c9a88e148a",
+			"name_info": "6d6f712d653265652d3031206e616d6500176578616d706c652e636f6d2f6d656574696e672d31323300000000000000010000000000000007000e636174616c6f672e6a736f6e2e7a",
+			"name_material": "a39b39f1a6b622e055acddb9c8e41b7a",
+			"physical_name": "o5s58aa2IuBVrN25yOQbeg",
+			"key_info": "6d6f712d653265652d3031206b657900176578616d706c652e636f6d2f6d656574696e672d3132330000000000000001000000000000000700166f3573353861613249754256724e3235794f5162656700",
+			"key": "eef16eb24d3c0031ace57a67125cdafb"
+		}
+	],
+	"naming": [
+		{
+			"id": "group-video",
+			"semantic_name": "video",
+			"physical_name": "vi1-O53ixrfzaEYq5XbPZg",
+			"name_material": "be2d7e3b9de2c6b7f368462ae576cf66"
+		},
+		{
+			"id": "datagram-audio",
+			"semantic_name": "audio",
+			"physical_name": "6eGGMrv6yImW0bbJnGc4YA",
+			"name_material": "e9e18632bbfac88996d1b6c99c673860"
+		},
+		{
+			"id": "catalog-json",
+			"semantic_name": "catalog.json",
+			"physical_name": "03AVkWIAau4GC1erRExJ7A",
+			"name_material": "d370159162006aee060b57ab444c49ec"
+		},
+		{
+			"id": "catalog-json-z",
+			"semantic_name": "catalog.json.z",
+			"physical_name": "o5s58aa2IuBVrN25yOQbeg",
+			"name_material": "a39b39f1a6b622e055acddb9c8e41b7a"
+		}
+	],
+	"groups": [
+		{
+			"id": "group-0",
+			"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
+			"generation": 1,
+			"kid": 7,
+			"secret": "6d6f712d653265652d3031207465737420736563726574212121212121212121",
+			"semantic_name": "video",
+			"physical_name": "vi1-O53ixrfzaEYq5XbPZg",
+			"domain": 0,
+			"group": 42,
+			"frame": 0,
+			"nonce": "000000000000002a00000000",
+			"plaintext": "6672616d652d7a65726f",
+			"payload": "edf01d46c5375055b83fe9c52b70751499d01fc9464d58a48112",
+			"payload_limit": 33554432,
+			"key": "c074c2b1647e82f9b22e355d9df840f5"
+		},
+		{
+			"id": "group-1",
+			"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
+			"generation": 1,
+			"kid": 7,
+			"secret": "6d6f712d653265652d3031207465737420736563726574212121212121212121",
+			"semantic_name": "video",
+			"physical_name": "vi1-O53ixrfzaEYq5XbPZg",
+			"domain": 0,
+			"group": 42,
+			"frame": 1,
+			"nonce": "000000000000002a00000001",
+			"plaintext": "6672616d652d6f6e65",
+			"payload": "ae123c52d8a66995bc348fb3d8c1a93dda437a475c8530c023",
+			"payload_limit": 33554432,
+			"key": "c074c2b1647e82f9b22e355d9df840f5"
+		},
+		{
+			"id": "group-next",
+			"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
+			"generation": 1,
+			"kid": 7,
+			"secret": "6d6f712d653265652d3031207465737420736563726574212121212121212121",
+			"semantic_name": "video",
+			"physical_name": "vi1-O53ixrfzaEYq5XbPZg",
+			"domain": 0,
+			"group": 43,
+			"frame": 0,
+			"nonce": "000000000000002b00000000",
+			"plaintext": "6e6578742d67726f7570",
+			"payload": "218a1732265a45e95424f482187b99eff687244a51fd8bbc4dcb",
+			"payload_limit": 33554432,
+			"key": "c074c2b1647e82f9b22e355d9df840f5"
+		},
+		{
+			"id": "empty",
+			"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
+			"generation": 1,
+			"kid": 7,
+			"secret": "6d6f712d653265652d3031207465737420736563726574212121212121212121",
+			"semantic_name": "video",
+			"physical_name": "vi1-O53ixrfzaEYq5XbPZg",
+			"domain": 0,
+			"group": 1,
+			"frame": 0,
+			"nonce": "000000000000000100000000",
+			"plaintext": "",
+			"payload": "d3477b964d819854a7fb78a55bfeee59",
+			"payload_limit": 33554432,
+			"key": "c074c2b1647e82f9b22e355d9df840f5"
+		}
+	],
+	"datagrams": [
+		{
+			"id": "datagram-0",
+			"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
+			"generation": 1,
+			"kid": 7,
+			"secret": "6d6f712d653265652d3031207465737420736563726574212121212121212121",
+			"semantic_name": "audio",
+			"physical_name": "6eGGMrv6yImW0bbJnGc4YA",
+			"domain": 1,
+			"group": 99,
+			"frame": 0,
+			"nonce": "000000000000006300000000",
+			"plaintext": "6f707573",
+			"payload": "e38045228f6e6ce7d31956015d9e7aabf402af43",
+			"payload_limit": 1200,
+			"key": "8f28afbf9d3e44fcbc53c6ded0e096d0"
+		}
+	],
+	"catalog": [
+		{
+			"id": "catalog-json",
+			"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
+			"generation": 1,
+			"kid": 7,
+			"secret": "6d6f712d653265652d3031207465737420736563726574212121212121212121",
+			"semantic_name": "catalog.json",
+			"physical_name": "03AVkWIAau4GC1erRExJ7A",
+			"domain": 0,
+			"group": 0,
+			"frame": 0,
+			"nonce": "000000000000000000000000",
+			"plaintext": "7b22766964656f223a7b2272656e646974696f6e73223a7b226864223a7b22636f646563223a2261766331227d7d7d7d",
+			"payload": "0fcc07289c0005c3f70bf28f5f0cba99282aae4a9f7788cb2b5479de402280e10048bc1b099ea66ade93f2043e6ddb18584973d926a598af694b6814afc90edd",
+			"payload_limit": 33554432,
+			"key": "63804bfc53fa33363dadb605e8572c35"
+		},
+		{
+			"id": "catalog-compressed",
+			"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
+			"generation": 1,
+			"kid": 7,
+			"secret": "6d6f712d653265652d3031207465737420736563726574212121212121212121",
+			"semantic_name": "catalog.json.z",
+			"physical_name": "o5s58aa2IuBVrN25yOQbeg",
+			"domain": 0,
+			"group": 0,
+			"frame": 0,
+			"nonce": "000000000000000000000000",
+			"plaintext": "789c4b2c4d2c492d2e51d04b4d2c49cc2a4e2d2a2e294a4d2c4e2d2a2e010000ffff",
+			"payload": "6f37413b11b2a4fa061a9360cbc3ef3152a0826336cd454b9eeadcee03079a6f4ccc594e833bf5885c839719873b7302ccbd",
+			"payload_limit": 33554432,
+			"key": "eef16eb24d3c0031ace57a67125cdafb"
+		}
+	],
+	"negative": [
+		{
+			"id": "tag-failure",
+			"error": "authentication",
+			"payload": "ecf01d46c5375055b83fe9c52b70751499d01fc9464d58a48112",
+			"group": 42,
+			"frame": 0,
+			"key": "c074c2b1647e82f9b22e355d9df840f5"
+		},
+		{
+			"id": "relocation-frame",
+			"error": "authentication",
+			"payload": "edf01d46c5375055b83fe9c52b70751499d01fc9464d58a48112",
+			"group": 42,
+			"frame": 1,
+			"key": "c074c2b1647e82f9b22e355d9df840f5"
+		},
+		{
+			"id": "relocation-track",
+			"error": "authentication",
+			"payload": "edf01d46c5375055b83fe9c52b70751499d01fc9464d58a48112",
+			"group": 42,
+			"frame": 0,
+			"key": "7785b4464f641d681225bcc5a0c35535"
+		},
+		{
+			"id": "relocation-domain",
+			"error": "authentication",
+			"payload": "edf01d46c5375055b83fe9c52b70751499d01fc9464d58a48112",
+			"group": 42,
+			"frame": 0,
+			"key": "cadc81d6ada29b13bfeafb400cb88bae"
+		},
+		{
+			"id": "profile-downgrade",
+			"error": "authentication",
+			"note": "HKDF salt moq-e2ee-00 yields a different name and key than profile 01",
+			"downgrade_name_material": "2b1f00458b73bc65e4234480118031de",
+			"profile_name_material": "be2d7e3b9de2c6b7f368462ae576cf66"
+		},
+		{
+			"id": "frame-exhausted",
+			"error": "identity",
+			"group": 0,
+			"frame": 4294967296
+		},
+		{
+			"id": "group-exhausted",
+			"error": "identity",
+			"group": 9007199254740992,
+			"frame": 0
+		},
+		{
+			"id": "invocation-limit",
+			"error": "exhausted",
+			"max_invocations": 16777216
+		},
+		{
+			"id": "grouped-oversize",
+			"error": "oversize",
+			"plaintext_len": 33554417,
+			"payload_limit": 33554432
+		},
+		{
+			"id": "datagram-oversize",
+			"error": "oversize",
+			"plaintext_len": 1185,
+			"payload_limit": 1200
+		},
+		{
+			"id": "reuse",
+			"error": "reuse",
+			"identity": {
+				"semantic_name": "video",
+				"domain": 0,
+				"group": 42,
+				"frame": 0
+			},
+			"first_plaintext": "6672616d652d7a65726f",
+			"second_plaintext": "6f746865722d6279746573"
+		},
+		{
+			"id": "restart-same-generation",
+			"error": "reuse",
+			"note": "A publisher restart that would reuse transport sequence numbers under the same generation is reuse",
+			"identity": {
+				"semantic_name": "video",
+				"domain": 0,
+				"group": 42,
+				"frame": 0
+			}
+		},
+		{
+			"id": "restart-new-generation",
+			"error": null,
+			"generation": 2,
+			"group": 42,
+			"frame": 0,
+			"plaintext": "726573746172746564",
+			"physical_name": "ifzEH3oU5lYCANgqKVkI_g",
+			"payload": "07e5fdfff6f8a7ea5b76bdbfb11b565dbcc3d9ab1e8bed93d5",
+			"key": "6c9523d83e2b46202fec471063de25ba"
+		},
+		{
+			"id": "short-payload",
+			"error": "oversize",
+			"payload": "00"
+		},
+		{
+			"id": "invalid-secret",
+			"error": "invalid_secret",
+			"secret_len": 16
+		}
+	]
+}

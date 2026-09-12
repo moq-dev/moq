@@ -35,6 +35,7 @@ function source(page: DraftPage): string {
 test("every draft produces a page", () => {
 	expect(pages.length).toBeGreaterThan(0);
 	expect(pages.map((p) => p.name)).toContain("draft-lcurley-moq-lite");
+	expect(pages.map((p) => p.name)).toContain("draft-lcurley-moq-e2ee");
 });
 
 describe("kramdown constructs are translated", () => {

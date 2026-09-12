@@ -10,7 +10,9 @@ track that describes the media tracks, and a container that gives each frame a
 timestamp. It is modeled on [WebCodecs](https://www.w3.org/TR/webcodecs/) so a
 browser can decode it directly. The spec is
 [draft-lcurley-moq-hang](/draft/moq-hang). Broadcast names end in `.hang` so
-a player knows which catalog to expect.
+a player knows which catalog to expect. End-to-end encrypted broadcasts wrap
+that as `foo.hang.e2ee`; the suffix is an untrusted discovery convention, and
+the payloads follow [moq-e2ee](/draft/moq-e2ee).
 
 ## Catalog
 

@@ -49,6 +49,7 @@ check:
             || { rm -f "${f%.md}.prepped.xml"; exit 1; }; \
         rm -f "${f%.md}.prepped.xml"; \
     done
+    bun moq-e2ee-01.ts
 
 # Remove generated files and the reference cache.
 clean:

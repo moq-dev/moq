@@ -30,13 +30,14 @@ Every application payload and semantic track name is confidential and authentica
 - A platform that forwards and meters protected bytes must never preview, record, archive, transmux, transcode, transcribe, compose, or inspect them, rejecting those paths before opening a processing session or writing product state. Applications needing those operations terminate E2EE outside the platform. The moq.pro (downstream) exclusion classifier and dashboard work build on that rule and stay downstream.
 - The first proof covers browser TypeScript and native Rust publication and playback in both directions, with grouped audio and video over both moq-lite and MoQ Transport. Shared vectors cover groups and moq-lite datagrams; MoQ Transport has no datagram delivery.
 
-The profile starts from IETF Secure Objects where its object model maps exactly, specifies the moq-lite and datagram bindings it does not cover, and records intentional differences from SFrame and the experimental `moq-secure` format linked from [#3023](https://github.com/moq-dev/moq/issues/3023).
+The contract is [draft-lcurley-moq-e2ee](/drafts/draft-lcurley-moq-e2ee.md) and
+`drafts/moq-e2ee-01.json`. It starts from IETF Secure Objects where its object
+model maps exactly, specifies the moq-lite and datagram bindings that draft
+does not cover, and records intentional differences from SFrame and the
+experimental `moq-secure` format linked from [#3023](https://github.com/moq-dev/moq/issues/3023).
 
 ## Quests
 
-- [Encryption profile](/quest/m2/e2ee/profile.md) - a versioned MoQ E2EE
-  profile: payload protection, identity binding, key derivation, failure
-  behavior, and shared vectors
 - [Explicit datagram insertion](/quest/m2/e2ee/datagram-insert.md) - name and
   shape the explicit-sequence datagram API as insertion in both languages,
   reserving append for automatic allocation

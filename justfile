@@ -440,6 +440,7 @@ _tools $FILES="":
 
     # `_check-common` runs on every invocation, so its tools are unconditional.
     tools=(actionlint bun jq nix nixfmt shellcheck shfmt taplo python3 nfpm dpkg-deb envsubst rpm)
+    scoped '^(drafts/|doc/\.vitepress/drafts\.ts$)' && tools+=(kramdown-rfc xml2rfc)
     scoped '^(bench/|quest/|rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)' && tools+=(cargo envsubst)
     scoped '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'     && tools+=(uv)
     scoped '^(kt/|rs/moq-ffi/)'                                && tools+=(gradle java)
@@ -514,6 +515,11 @@ check $BASE="":
         if echo "$files" | grep -q '^bench/'; then
             just --justfile bench/justfile check
         fi
+        # Draft sources render into the doc site and carry their own kramdown-rfc
+        # plus vector checks; a drafts-only diff would otherwise skip both.
+        if echo "$files" | grep -qE '^(drafts/|doc/\.vitepress/drafts\.ts$)'; then
+            just drafts check
+        fi
         # Quest documents form one graph, so validate the whole living tree when
         # either a quest or its validator changes.
         if echo "$files" | grep -qE '^(quest/|rs/quest/)'; then
@@ -558,6 +564,7 @@ check $BASE="":
 check-all *args:
     just _tools ALL
     just js check
+    just drafts check
     just rs check --workspace --exclude moq-net-fuzz {{ args }}
     just rs tokio-features
     just --justfile bench/justfile check

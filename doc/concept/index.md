@@ -36,5 +36,5 @@ watched at 100 ms by one viewer and 10 s by another.
 - [Transport](/concept/transport): why QUIC, and the WebTransport, WebSocket, raw QUIC, and iroh paths onto it.
 - [moq-lite](/concept/moq-lite): the pub/sub protocol, discovery, subscriptions, and congestion behavior.
 - [hang](/concept/hang): the media catalog, containers, and how to extend both.
-- [Standards](/concept/standard): how this relates to the IETF moq-transport, MSF, and LOC drafts.
+- [Standards](/concept/standard): how this relates to the IETF moq-transport, MSF, LOC, and this project's own drafts, including [e2ee](/draft/moq-e2ee).
 - [Use cases](/concept/use-case/): MoQ compared with HLS/DASH, RTMP/SRT, WebRTC, and used for AI.
