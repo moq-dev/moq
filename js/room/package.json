@@ -2,7 +2,7 @@
 	"name": "@moq/room",
 	"type": "module",
 	"version": "0.1.0",
-	"description": "Headless multi-participant rooms over MoQ: announce-derived roster, local publish, remote watch",
+	"description": "Headless multi-participant rooms over MoQ: announce-derived roster, local publish, remote watch, and a chat track",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
 	"sideEffects": false,

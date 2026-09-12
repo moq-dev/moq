@@ -14,7 +14,7 @@ Participants are discovered from the announce stream. Identity is the path befor
 - `{identity}/camera` — camera + microphone, hd/sd renditions
 - `{identity}/screen` — screenshare; its announce/unannounce is the share lifecycle
 
-This is the generic room layer extracted from [hang.live](https://hang.live) (and the announce-bus shape [iroh-live](https://github.com/n0-computer/iroh-live) is moving `iroh-rooms` onto). Memes, 3D layout, chat UI, and accounts stay in the app.
+This is the generic room layer extracted from [hang.live](https://hang.live) (roster, local/remote, `hang/*.json` metadata) and [iroh-live](https://github.com/n0-computer/iroh-live) (the ordered `chat` track `iroh-rooms` is moving onto the announce bus). Memes, 3D layout, chat UI, and accounts stay in the app. The native twin is [`moq-room`](../../rs/moq-room).
 
 ## Install
 
@@ -63,6 +63,16 @@ const room = new Room({ connection, identity });
 // Members; assign member.canvas and member.muted from the UI.
 ```
 
-hang.live should depend on this package for `Room`, `Local`, `Remote`, and the `hang/*.json` metadata tracks. Chat and location stay app-defined extensions of the same catalog `hang` section (`TRACK.chat`, `TRACK.location`); call `broadcast.catalog.mutate` to advertise extra tracks next to `user` and `preview`.
+hang.live should depend on this package for `Room`, `Local`, `Remote`, and the `hang/*.json` metadata tracks. Location stays an app-defined catalog extension (`TRACK.location`). hang.live's JSON chat (`TRACK.chat` = `hang/chat.json`) is also an extension; iroh-live's ordered UTF-8 track is `Chat.TRACK` (`"chat"`).
 
-A conferencing demo (no memes, no 3D) lives at [`demo/web/src/meet.html`](../../demo/web/src/meet.html).
+```ts
+import { Chat } from "@moq/room";
+
+const publisher = Chat.Publisher.create(broadcast);
+publisher.send("hello");
+
+const subscriber = Chat.Subscriber.subscribe(broadcast.consume());
+const msg = await subscriber.recv();
+```
+
+A conferencing demo (no memes, no 3D, no chat UI) lives at [`demo/web/src/meet.html`](../../demo/web/src/meet.html).

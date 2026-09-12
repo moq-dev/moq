@@ -5070,6 +5070,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-room"
+version = "0.1.0"
+dependencies = [
+ "kio",
+ "moq-net",
+ "moq-token",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "moq-rtc"
 version = "0.2.9"
 dependencies = [

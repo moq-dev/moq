@@ -17,6 +17,7 @@ export * as Publish from "@moq/publish";
 export * as Signals from "@moq/signals";
 export * as Watch from "@moq/watch";
 
+export * as Chat from "./chat.ts";
 export { Local, type LocalProps } from "./local.ts";
 export {
 	consume,

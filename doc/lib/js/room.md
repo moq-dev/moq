@@ -41,8 +41,12 @@ demo at [`demo/web`](https://github.com/moq-dev/moq/tree/main/demo/web) (`meet.h
 does that under `anon/meet/{room}`.
 
 hang.live should depend on this package for the roster, local publish, remote
-watch, and `hang/user.json` + `hang/preview.json`. Chat and location stay
-app-defined extensions of the same catalog `hang` section.
+watch, and `hang/user.json` + `hang/preview.json`. Location stays an app-defined
+catalog extension. The ordered UTF-8 chat track (`Chat`) matches iroh-live;
+hang.live's JSON chat (`hang/chat.json`) stays an extension of the same catalog
+`hang` section.
+
+The native twin is [`moq-room`](/lib/rs/moq-room).
 
 See the package [README](https://github.com/moq-dev/moq/blob/main/js/room/README.md)
 for the full API.

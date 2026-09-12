@@ -3,8 +3,10 @@
  * snapshot tracks on the same broadcast.
  *
  * Core carries `user.json` (id, name, avatar) and `preview.json` (presence
- * booleans). Chat and location ride the same catalog section as app-defined
- * extensions; this module does not serve or consume them.
+ * booleans). Location (and hang.live's JSON chat) ride the same catalog
+ * section as app-defined extensions; this module does not serve or consume
+ * them. The ordered UTF-8 `chat` track is `Chat.TRACK` (`"chat"`), not
+ * `hang/chat.json`.
  *
  * @module
  */
