@@ -12,6 +12,7 @@
 		"max_u53": 9007199254740991,
 		"max_u32": 4294967295,
 		"max_invocations": 16777216,
+		"max_plaintext_bytes": 68719476736,
 		"max_grouped_payload": 33554432,
 		"max_grouped_plaintext": 33554416,
 		"max_datagram_body": 1200

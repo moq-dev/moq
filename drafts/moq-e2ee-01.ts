@@ -27,6 +27,7 @@ export const HASH_LEN = 32;
 export const MAX_U53 = Number.MAX_SAFE_INTEGER;
 export const MAX_U32 = 2 ** 32 - 1;
 export const MAX_INVOCATIONS = 2 ** 24;
+export const MAX_PLAINTEXT_BYTES = 2 ** 36;
 export const MAX_GROUPED_PAYLOAD = 32 * 1024 * 1024;
 export const MAX_GROUPED_PLAINTEXT = MAX_GROUPED_PAYLOAD - TAG_LEN;
 export const MAX_DATAGRAM_BODY = 1200;
@@ -529,6 +530,7 @@ async function generate() {
 			max_u53: MAX_U53,
 			max_u32: MAX_U32,
 			max_invocations: MAX_INVOCATIONS,
+			max_plaintext_bytes: MAX_PLAINTEXT_BYTES,
 			max_grouped_payload: MAX_GROUPED_PAYLOAD,
 			max_grouped_plaintext: MAX_GROUPED_PLAINTEXT,
 			max_datagram_body: MAX_DATAGRAM_BODY,

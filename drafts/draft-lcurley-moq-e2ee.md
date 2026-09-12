@@ -241,12 +241,14 @@ Implementations MUST refuse non-integer identities (including NaN and infinities
 
 - `group` (grouped sequence or datagram sequence) and `generation` / `kid`: `0..=2^53-1`. Above that is `identity`.
 - `frame`: `0..=2^32-1`. `2^32` and above is `identity`.
-- AEAD operations with one key: at most `2^24`. The operation that would exceed that count is `exhausted`.
+- AEAD operations with one key: at most `2^24` invocations and at most `2^36` plaintext bytes (`2^32` 16-byte blocks). Exceeding either is `exhausted`.
 
 `2^53-1` is `Number.MAX_SAFE_INTEGER`.
 It is the strictest exact integer bound across current TypeScript and Rust implementations.
 The 32-bit frame width is the nonce field.
-The `2^24` invocation cap is the interoperable AES-GCM limit taken from {{aeadlimits}} / {{sframe}}; a single group of `2^32` frames is already above it, so the invocation cap is what a long-lived track hits first.
+The `2^24` invocation cap is the interoperable AES-GCM record limit from {{aeadlimits}}.
+GCM authenticity also depends on total processed blocks, so `2^24` frames at the 32 MiB transport ceiling would be about `2^45` blocks; the `2^36`-byte cap is the matching total-block bound.
+Small records hit the invocation cap first; large records hit the byte cap first.
 
 
 # Failure Behavior {#failure}
@@ -258,7 +260,7 @@ Typed failures:
 - `unsupported_profile`: credential names a profile other than `moq-e2ee-01`.
 - `invalid_secret`: secret is not 32 bytes.
 - `identity`: an integer is outside {{bounds}}, or `domain` is not `0x00`/`0x01`.
-- `exhausted`: the next AEAD operation would exceed `2^24` uses of that key.
+- `exhausted`: the next AEAD operation would exceed `2^24` uses of that key or `2^36` plaintext bytes under that key.
 - `reuse`: encrypting different bytes at an identity that already produced ciphertext.
 - `oversize`: plaintext plus tag exceeds the transport payload limit, or a ciphertext is shorter than `Nt` or larger than that limit.
 - `authentication`: AEAD open fails. Relocation across context, generation, kid, physical name, domain, group, or frame is this failure.
@@ -290,7 +292,7 @@ The file covers derivation, physical naming, grouped frames, datagrams with conc
 
 The shared verifier is stateless.
 It does not verify `reuse`, `exhausted`, `duplicate`, or `pinned_mismatch`, publisher restart ownership, or failure propagation.
-Each language core MUST test those lifecycle requirements, including restart under the same generation, retransmission without encryption, per-key invocation accounting, bounded duplicate suppression, and application pinning.
+Each language core MUST test those lifecycle requirements, including restart under the same generation, retransmission without encryption, per-key invocation and plaintext-byte accounting, bounded duplicate suppression, and application pinning.
 Passing the primitive vectors alone is not profile conformance.
 
 
@@ -303,7 +305,7 @@ A relay can still observe the outer broadcast path, opaque physical names, group
 Padding and metadata-flow confidentiality are out of scope.
 
 Nonce reuse under one key is catastrophic for AES-GCM.
-The profile prevents it by forbidding re-encryption at an identity, separating datagram and grouped domains, requiring a new generation whenever transport sequences can reset, and capping invocations per key.
+The profile prevents it by forbidding re-encryption at an identity, separating datagram and grouped domains, requiring a new generation whenever transport sequences can reset, and capping invocations and plaintext bytes per key.
 
 Empty AAD does not weaken the binding: every immutable end-to-end field is in the HKDF info or the nonce.
 Timestamps are excluded because relays rewrite them.
