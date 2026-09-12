@@ -3614,3 +3614,53 @@ fn bandwidth_handles_share_the_registry() {
 	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
+
+/// `moq_encode_video_bitrate` is the manual ceiling: a later grant cannot exceed it.
+#[test]
+fn encode_video_bitrate_caps_the_reservation() {
+	let (bandwidth, estimate) = test_allocator();
+	let origin = id(moq_origin_create());
+	let path = b"bitrate-cap";
+	let broadcast = publish_broadcast(origin, path);
+	let consume = request_broadcast(origin, path);
+
+	let input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 320,
+		height: 240,
+		framerate: 30,
+	};
+	let output = moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		bitrate: 4_000_000,
+		gop: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, bandwidth) });
+	let reservation = id(moq_encode_video_reservation(producer));
+	let (sub, cb) = subscribe_named_track(consume, b"0.avc3");
+
+	estimate
+		.set(Some(moq_net::bandwidth::Rate::from_bps(4_000_000)))
+		.unwrap();
+	assert_eq!(wait_grant(reservation), 4_000_000);
+
+	assert_eq!(moq_encode_video_bitrate(producer, 1_000_000), 0);
+	assert_eq!(grant(reservation), Some(1_000_000));
+
+	estimate
+		.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
+		.unwrap();
+	assert_eq!(grant(reservation), Some(1_000_000));
+
+	assert_eq!(moq_reservation_close(reservation), 0);
+	assert_eq!(moq_encode_video_finish(producer), 0);
+	assert_eq!(moq_bandwidth_close(bandwidth), 0);
+	assert_eq!(moq_consume_track_close(sub), 0);
+	let _ = cb.recv_terminal();
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}

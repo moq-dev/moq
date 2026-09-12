@@ -50,6 +50,10 @@ inbound stream cap for a subscriber to many tracks.
 Cancelling a stream releases the native cursor. The package re-exports
 `moq_ffi`, so the full generated API is available without a second import.
 
+`moq.bandwidth()` divides the connection's send estimate; `reserve` a share
+for an app-owned encoder so several publishers on one session split the
+uplink instead of each targeting the whole thing.
+
 Unlike the other bindings, the published Dart binaries carry **no codecs**:
 catalog and container types are there, so already-encoded frames flow through
 `MoqMediaProducer`/`MoqMediaConsumer`, but encoding is up to

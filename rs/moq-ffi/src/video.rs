@@ -14,6 +14,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use tokio::sync::oneshot;
+
 use crate::bandwidth::{MoqBandwidth, MoqReservation};
 use crate::cancel::{self, MoqCancel};
 use crate::consumer::MoqBroadcastConsumer;
@@ -181,13 +183,21 @@ struct VideoProducer {
 }
 
 /// Stops the follow thread when the producer is finished or dropped.
+///
+/// `close` participates in the follower's `select!`, so a stop wakes a thread
+/// parked in `consumer.changed()` instead of leaking it until the allocator dies.
 struct Follow {
-	abort: std::sync::Arc<std::sync::atomic::AtomicBool>,
+	close: Option<oneshot::Sender<()>>,
+	thread: Option<std::thread::JoinHandle<()>>,
+	ceiling: Arc<AtomicU64>,
 }
 
 impl Drop for Follow {
 	fn drop(&mut self) {
-		self.abort.store(true, Ordering::SeqCst);
+		drop(self.close.take());
+		if let Some(thread) = self.thread.take() {
+			let _ = thread.join();
+		}
 	}
 }
 
@@ -231,8 +241,7 @@ pub struct MoqVideoProducer {
 	inner: Arc<std::sync::Mutex<Option<VideoProducer>>>,
 	reservation: std::sync::Mutex<Option<Arc<MoqReservation>>>,
 	follow: std::sync::Mutex<Option<Follow>>,
-	/// Last bitrate the follow loop applied, for tests. Starts at the ceiling.
-	#[cfg_attr(not(test), expect(dead_code))]
+	/// Last bitrate applied by the follow loop or [`set_bitrate`](Self::set_bitrate).
 	applied: Arc<AtomicU64>,
 	/// Held so the reservation's registry outlives extra bandwidth handles.
 	_bandwidth: Option<Arc<MoqBandwidth>>,
@@ -318,18 +327,32 @@ impl MoqVideoProducer {
 	/// [`bitrate`](MoqVideoEncoderOutput::bitrate) to the highest you will ask for
 	/// and adapt downwards from there.
 	///
+	/// When this producer was published against a [`MoqBandwidth`], the reservation
+	/// and follower ceiling move with it, so a later grant cannot retune above this
+	/// value.
+	///
 	/// Errors if this backend cannot retune while running. That is not fatal: the
 	/// encoder keeps running at its current rate, so stop adapting rather than
 	/// stop publishing.
 	pub fn set_bitrate(&self, bitrate: u64) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let mut guard = self.inner.lock().unwrap();
-		let producer = guard.as_mut().ok_or(MoqError::Closed)?;
-		Ok(block_on(
-			producer
-				.encoder
-				.set_bitrate(moq_net::bandwidth::Rate::from_bps(bitrate)),
-		)?)
+		{
+			let mut guard = self.inner.lock().unwrap();
+			let producer = guard.as_mut().ok_or(MoqError::Closed)?;
+			block_on(
+				producer
+					.encoder
+					.set_bitrate(moq_net::bandwidth::Rate::from_bps(bitrate)),
+			)?;
+		}
+		if let Some(reservation) = self.reservation.lock().unwrap().as_ref() {
+			reservation.update(bitrate);
+		}
+		if let Some(follow) = self.follow.lock().unwrap().as_ref() {
+			follow.ceiling.store(bitrate, Ordering::SeqCst);
+		}
+		self.applied.store(bitrate, Ordering::SeqCst);
+		Ok(())
 	}
 
 	/// This encoder's bandwidth reservation, if it was published against a
@@ -364,8 +387,8 @@ impl MoqBroadcastProducer {
 	///
 	/// Pass `bandwidth` to reserve this track's configured bitrate against the
 	/// session's allocator and follow the grant with the same policy the Rust
-	/// capture encoder uses. [`set_bitrate`](MoqVideoProducer::set_bitrate) stays
-	/// as the manual ceiling.
+	/// capture encoder uses. [`set_bitrate`](MoqVideoProducer::set_bitrate) is
+	/// the manual ceiling: it retunes the encoder and moves the reservation.
 	#[uniffi::method(default(bandwidth = None))]
 	pub fn encode_video(
 		&self,
@@ -461,21 +484,32 @@ fn spawn_follow(
 	ceiling: moq_net::bandwidth::Rate,
 	applied: Arc<AtomicU64>,
 ) -> Follow {
-	let abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-	let running = abort.clone();
+	let ceiling = Arc::new(AtomicU64::new(ceiling.as_bps()));
+	let (close, closed) = oneshot::channel();
+	let shared_ceiling = ceiling.clone();
 	// A dedicated thread rather than the FFI current-thread runtime: this loop
 	// `pollster::block_on`s `set_bitrate`, which would stall that runtime.
-	std::thread::Builder::new()
+	let thread = std::thread::Builder::new()
 		.name("moq-ffi-rate".into())
 		.spawn(move || {
 			tokio::runtime::Builder::new_current_thread()
 				.enable_all()
 				.build()
 				.expect("rate-control runtime")
-				.block_on(follow_reservation(inner, consumer, ceiling, applied, running))
+				.block_on(async move {
+					tokio::select! {
+						biased;
+						_ = closed => {}
+						_ = follow_reservation(inner, consumer, shared_ceiling, applied) => {}
+					}
+				})
 		})
 		.expect("failed to spawn rate-control thread");
-	Follow { abort }
+	Follow {
+		close: Some(close),
+		thread: Some(thread),
+		ceiling,
+	}
 }
 
 /// Feed each grant through the same policy moq-video uses, and retune the live
@@ -483,23 +517,22 @@ fn spawn_follow(
 async fn follow_reservation(
 	inner: Arc<std::sync::Mutex<Option<VideoProducer>>>,
 	mut consumer: moq_net::bandwidth::Consumer,
-	ceiling: moq_net::bandwidth::Rate,
+	ceiling: Arc<AtomicU64>,
 	applied: Arc<AtomicU64>,
-	abort: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
 	use moq_video::encode::rate::{Control, Policy};
 
-	let mut control = Control::new(Policy::new(ceiling));
+	let mut max = moq_net::bandwidth::Rate::from_bps(ceiling.load(Ordering::SeqCst));
+	let mut control = Control::new(Policy::new(max));
 	loop {
-		if abort.load(Ordering::SeqCst) {
-			return;
-		}
 		let estimate = match consumer.changed().await {
 			Ok(estimate) => estimate,
 			Err(_) => return,
 		};
-		if abort.load(Ordering::SeqCst) {
-			return;
+		let next = moq_net::bandwidth::Rate::from_bps(ceiling.load(Ordering::SeqCst));
+		if next != max {
+			max = next;
+			control = Control::new(Policy::new(max));
 		}
 		let Some(bitrate) = control.update(estimate, Instant::now()) else {
 			continue;

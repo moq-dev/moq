@@ -3022,3 +3022,80 @@ async fn video_encoder_follows_a_shrinking_grant() {
 	video.finish().unwrap();
 	broadcast.finish().unwrap();
 }
+
+#[cfg(feature = "video")]
+fn software_camera(bitrate: u64) -> (crate::video::MoqVideoEncoderInput, crate::video::MoqVideoEncoderOutput) {
+	use crate::video::*;
+	(
+		MoqVideoEncoderInput {
+			format: MoqVideoPixelFormat::Rgba,
+			width: 320,
+			height: 240,
+			framerate: 30,
+		},
+		MoqVideoEncoderOutput {
+			codec: MoqVideoCodec::H264,
+			track: Some("camera".into()),
+			bitrate: Some(bitrate),
+			gop: None,
+			kind: MoqVideoEncoderKind::Software,
+		},
+	)
+}
+
+/// Dropping a producer parked in `changed()` must stop the follow thread, not
+/// leak it until the session allocator dies.
+#[cfg(feature = "video")]
+#[tokio::test]
+async fn dropping_a_video_producer_stops_the_rate_follower() {
+	use crate::bandwidth::MoqBandwidth;
+
+	let estimate = moq_net::bandwidth::Producer::new();
+	let bandwidth = std::sync::Arc::new(MoqBandwidth::new(moq_net::bandwidth::Allocator::new(
+		estimate.consume(),
+	)));
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let (input, output) = software_camera(4_000_000);
+	let video = broadcast.encode_video(input, output, Some(bandwidth)).unwrap();
+
+	tokio::time::timeout(TIMEOUT, tokio::task::spawn_blocking(move || drop(video)))
+		.await
+		.expect("rate follower did not stop")
+		.expect("drop panicked");
+}
+
+/// `set_bitrate` is the manual ceiling: a later grant cannot retune above it.
+#[cfg(feature = "video")]
+#[tokio::test]
+async fn set_bitrate_caps_a_later_bandwidth_grant() {
+	use crate::bandwidth::MoqBandwidth;
+
+	let estimate = moq_net::bandwidth::Producer::new();
+	let bandwidth = std::sync::Arc::new(MoqBandwidth::new(moq_net::bandwidth::Allocator::new(
+		estimate.consume(),
+	)));
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let (input, output) = software_camera(4_000_000);
+	let video = broadcast.encode_video(input, output, Some(bandwidth)).unwrap();
+	let reservation = video.reservation().expect("published against an allocator");
+
+	let consumer = broadcast.consume().unwrap();
+	let _sub = consumer.subscribe_track("camera".into(), None, None).await.unwrap();
+	estimate
+		.set(Some(moq_net::bandwidth::Rate::from_bps(4_000_000)))
+		.unwrap();
+	assert_eq!(reservation.grant(), Some(4_000_000));
+
+	video.set_bitrate(1_000_000).unwrap();
+	assert_eq!(reservation.grant(), Some(1_000_000));
+	assert_eq!(video.applied_bitrate(), 1_000_000);
+
+	estimate
+		.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
+		.unwrap();
+	assert_eq!(reservation.grant(), Some(1_000_000));
+	assert_eq!(video.applied_bitrate(), 1_000_000);
+
+	video.finish().unwrap();
+	broadcast.finish().unwrap();
+}

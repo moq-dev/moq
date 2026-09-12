@@ -70,6 +70,15 @@ class Moq internal constructor(
      */
     fun epoch(): ULong = session.epoch()
 
+    /**
+     * The session's bandwidth allocator.
+     *
+     * Every call returns a handle to the same registry. [Bandwidth.reserve] a
+     * share for an app-owned encoder, or pass the handle to `encodeVideo` /
+     * `encodeAudio`.
+     */
+    fun bandwidth(): Bandwidth = session.bandwidth()
+
     /** Gracefully shut down the session and cancel the client, releasing the native handles. */
     override fun close() {
         session.shutdown()

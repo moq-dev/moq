@@ -14,6 +14,7 @@
 
 use std::ffi::{c_char, c_void};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
@@ -199,16 +200,22 @@ fn video_ceiling(
 async fn follow_reservation(
 	inner: Shared<VideoEncoder>,
 	mut consumer: moq_net::bandwidth::Consumer,
-	ceiling: moq_net::bandwidth::Rate,
+	ceiling: Arc<AtomicU64>,
 ) {
 	use moq_video::encode::rate::{Control, Policy};
 
-	let mut control = Control::new(Policy::new(ceiling));
+	let mut max = moq_net::bandwidth::Rate::from_bps(ceiling.load(Ordering::SeqCst));
+	let mut control = Control::new(Policy::new(max));
 	loop {
 		let estimate = match consumer.changed().await {
 			Ok(estimate) => estimate,
 			Err(_) => return,
 		};
+		let next = moq_net::bandwidth::Rate::from_bps(ceiling.load(Ordering::SeqCst));
+		if next != max {
+			max = next;
+			control = Control::new(Policy::new(max));
+		}
 		let Some(bitrate) = control.update(estimate, Instant::now()) else {
 			continue;
 		};
@@ -248,6 +255,7 @@ pub(crate) struct VideoEncoder {
 	size: moq_video::Size,
 	reservation: Option<Arc<moq_net::bandwidth::Reservation>>,
 	follow: Option<oneshot::Sender<()>>,
+	ceiling: Option<Arc<AtomicU64>>,
 }
 
 /// A delivered frame, flattened to CPU I420 at delivery time: the C ABI hands
@@ -318,6 +326,12 @@ impl VideoEncoder {
 
 	fn publish_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
 		block_on(self.encoder.set_bitrate(moq_net::bandwidth::Rate::from_bps(bitrate)))?;
+		if let Some(reservation) = &self.reservation {
+			reservation.update(moq_net::bandwidth::Rate::from_bps(bitrate));
+		}
+		if let Some(ceiling) = &self.ceiling {
+			ceiling.store(bitrate, Ordering::SeqCst);
+		}
 		Ok(())
 	}
 
@@ -355,6 +369,7 @@ impl Video {
 			size: config.size(),
 			reservation: None,
 			follow: None,
+			ceiling: None,
 		}))
 	}
 
@@ -365,11 +380,14 @@ impl Video {
 		ceiling: moq_net::bandwidth::Rate,
 	) -> Result<(), Error> {
 		let shared = self.producer(id)?;
+		let max = ceiling;
+		let ceiling = Arc::new(AtomicU64::new(max.as_bps()));
 		let reservation = {
 			let mut guard = shared.lock();
 			let encoder = guard.as_mut().ok_or(Error::MediaNotFound)?;
-			let reservation = Arc::new(allocator.reserve(&encoder.producer.demand(), ceiling));
+			let reservation = Arc::new(allocator.reserve(&encoder.producer.demand(), max));
 			encoder.reservation = Some(reservation.clone());
+			encoder.ceiling = Some(ceiling.clone());
 			reservation
 		};
 		let (close, closed) = oneshot::channel();
@@ -377,6 +395,7 @@ impl Video {
 		let follower = shared.clone();
 		tokio::spawn(async move {
 			tokio::select! {
+				biased;
 				_ = closed => {}
 				_ = follow_reservation(follower, reservation.consumer(), ceiling) => {}
 			}
@@ -687,6 +706,10 @@ pub extern "C" fn moq_encode_video_cut(producer: u32) -> i32 {
 /// The configured bitrate is a ceiling on some backends (openh264 rejects a raise
 /// above the rate it opened at), so set `bitrate` to the highest you will ask
 /// for and adapt downwards from there.
+///
+/// When this encoder was published against a bandwidth allocator, the reservation
+/// and follower ceiling move with it, so a later grant cannot retune above this
+/// value.
 ///
 /// Returns a negative code if this backend cannot retune while running. That is
 /// not fatal: the encoder keeps running at its current rate, so stop adapting

@@ -27,6 +27,7 @@ void main() {
       bind: '127.0.0.1:0',
     ).timeout(timeout);
     final serverSession = await accepted;
+    expect(client.bandwidth(), isA<MoqBandwidth>());
 
     final announcement = client.announcements().first;
     final broadcast = relay.createBroadcast(path: 'live');

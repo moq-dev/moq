@@ -88,6 +88,13 @@ final class Moq {
   /// on each reconnect. A server-accepted session stays at 1.
   int get epoch => session.epoch();
 
+  /// The session's bandwidth allocator.
+  ///
+  /// Every call returns a handle to the same registry. [MoqBandwidth.reserve]
+  /// a share for an app-owned encoder; dropping the [MoqReservation] hands
+  /// the room back.
+  MoqBandwidth bandwidth() => session.bandwidth();
+
   /// Gracefully close the session and stop the client.
   void close() {
     session.shutdown();
