@@ -20,10 +20,11 @@
 // Android target is opt-in via `-Pandroid.enabled=true`. CI always sets it.
 // AGP is declared `apply false` here (rather than only added when enabled)
 // so its types are on this script's compile classpath. Without that, the
-// `extensions.configure<LibraryExtension>` call wouldn't compile even when
-// guarded behind `if (androidEnabled)`. The plugin marker resolves against
-// google() at sync regardless of the flag, so that repo needs to be
-// reachable; the actual `apply` only runs when the flag is set.
+// `extensions.configure<LibraryExtension>` call (the AGP 9 public DSL type)
+// wouldn't compile even when guarded behind `if (androidEnabled)`. The
+// plugin marker resolves against google() at sync regardless of the flag,
+// so that repo needs to be reachable; the actual `apply` only runs when
+// the flag is set.
 //
 // Publishing uses com.vanniktech.maven.publish; CI runs
 // `:moq-ffi:publishAndReleaseToMavenCentral`. Credentials come from env vars
@@ -31,8 +32,7 @@
 // (e.g. a local `:moq-ffi:assemble` without secrets), signAllPublications()
 // becomes a no-op so local builds still work.
 
-import com.android.build.gradle.LibraryExtension
-import com.vanniktech.maven.publish.SonatypeHost
+import com.android.build.api.dsl.LibraryExtension
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 // Plugin versions are pinned in the root build.gradle.kts (Kotlin, publish) and
@@ -60,49 +60,50 @@ kotlin {
         }
     }
 
-    @Suppress("UNUSED_VARIABLE")
     sourceSets {
-        val commonMain by getting {
+        // Gradle 9.6 deprecates the `by getting` / `by creating` delegates,
+        // and Kotlin DSL treats those as script compilation errors.
+        val commonMain = getByName("commonMain") {
             dependencies {
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
             }
         }
-        val commonTest by getting {
+        val commonTest = getByName("commonTest") {
             dependencies {
                 implementation(kotlin("test"))
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
             }
         }
 
-        val jvmAndAndroidMain by creating {
+        val jvmAndAndroidMain = create("jvmAndAndroidMain") {
             dependsOn(commonMain)
             dependencies {
                 // compileOnly: each platform's runtime adds its own JNA artifact.
                 compileOnly("net.java.dev.jna:jna:5.19.1")
             }
         }
-        val jvmAndAndroidTest by creating {
+        val jvmAndAndroidTest = create("jvmAndAndroidTest") {
             dependsOn(commonTest)
         }
 
-        val jvmMain by getting {
+        getByName("jvmMain") {
             dependsOn(jvmAndAndroidMain)
             dependencies {
                 implementation("net.java.dev.jna:jna:5.19.1")
             }
         }
-        val jvmTest by getting {
+        getByName("jvmTest") {
             dependsOn(jvmAndAndroidTest)
         }
 
         if (androidEnabled) {
-            val androidMain by getting {
+            getByName("androidMain") {
                 dependsOn(jvmAndAndroidMain)
                 dependencies {
                     implementation("net.java.dev.jna:jna:5.19.1@aar")
                 }
             }
-            val androidUnitTest by getting {
+            getByName("androidUnitTest") {
                 dependsOn(jvmAndAndroidTest)
             }
         }
@@ -130,12 +131,12 @@ if (androidEnabled) {
                 withSourcesJar()
             }
         }
-        sourceSets.getByName("main").jniLibs.srcDirs("src/androidMain/jniLibs")
+        sourceSets.getByName("main").jniLibs.directories.add("src/androidMain/jniLibs")
     }
 }
 
 mavenPublishing {
-    publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL, automaticRelease = true)
+    publishToMavenCentral(automaticRelease = true)
     signAllPublications()
     coordinates("dev.moq", "moq-ffi", version.toString())
 
