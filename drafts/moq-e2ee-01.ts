@@ -118,6 +118,7 @@ export function base64url(bytes: Uint8Array<ArrayBuffer>): string {
 export function checkCredential(credential: Credential): void {
 	if (credential.profile !== PROFILE) throw new ProfileError("unsupported_profile");
 	if (credential.secret.length !== 32) throw new ProfileError("invalid_secret");
+	if (credential.context.length > 0xffff) throw new ProfileError("identity", "context exceeds 65535 bytes");
 	checkU53(credential.generation, "generation");
 	checkU53(credential.kid, "kid");
 }
@@ -480,6 +481,20 @@ async function generate() {
 		negative.push({ id, operation: "credential", error, credential: credentialJson(credential) });
 	}
 	negative.push({
+		id: "context-too-long",
+		operation: "bytes",
+		error: "identity",
+		field: "context",
+		length: 0x10000,
+	});
+	negative.push({
+		id: "semantic-name-too-long",
+		operation: "bytes",
+		error: "identity",
+		field: "semantic_name",
+		length: 0x10000,
+	});
+	negative.push({
 		id: "grouped-oversize",
 		operation: "protect",
 		error: "oversize",
@@ -570,6 +585,7 @@ type NegativeVector = { id: string; error: string } & (
 	  }
 	| { operation: "identity"; group: string; frame: number | "NaN" | "Infinity" | "-Infinity" }
 	| { operation: "credential"; credential: ReturnType<typeof credentialJson> }
+	| { operation: "bytes"; field: "context" | "semantic_name"; length: number }
 );
 
 function parseCredential(row: ReturnType<typeof credentialJson>): Credential {
@@ -695,6 +711,15 @@ async function verify(doc: Awaited<ReturnType<typeof generate>>): Promise<void> 
 				case "credential":
 					checkCredential(parseCredential(row.credential));
 					break;
+				case "bytes": {
+					const oversized = new Uint8Array(row.length);
+					if (row.field === "context") {
+						checkCredential({ ...parseCredential(doc.credential), context: oversized });
+					} else {
+						await deriveName(parseCredential(doc.credential), oversized);
+					}
+					break;
+				}
 				default:
 					throw new Error(`unknown negative operation: ${JSON.stringify(row)}`);
 			}

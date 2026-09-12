@@ -115,7 +115,8 @@ Exactly 32 bytes from a cryptographically secure random generator.
 It MUST NOT be a password, passphrase, or other guessable input.
 
 `generation` and `kid` MUST be in `0..=2^53-1` inclusive, the largest integer TypeScript can represent exactly.
-An implementation MUST refuse a credential outside that range (`identity`) or whose secret is not 32 bytes (`invalid_secret`).
+`context` and every `semantic_name` MUST be at most 65535 bytes, the `bytes` encoding width.
+An implementation MUST refuse a credential outside those ranges (`identity`) or whose secret is not 32 bytes (`invalid_secret`).
 
 Applications distribute credentials over their own authenticated channel.
 MoQ announcements, catalogs, paths, and relay authorization MUST NOT carry the secret or authenticate it.
@@ -259,7 +260,7 @@ Typed failures:
 
 - `unsupported_profile`: credential names a profile other than `moq-e2ee-01`.
 - `invalid_secret`: secret is not 32 bytes.
-- `identity`: an integer is outside {{bounds}}, or `domain` is not `0x00`/`0x01`.
+- `identity`: an integer is outside {{bounds}}, a `bytes` field exceeds 65535, or `domain` is not `0x00`/`0x01`.
 - `exhausted`: the next AEAD operation would exceed `2^24` uses of that key or `2^36` plaintext bytes under that key.
 - `reuse`: encrypting different bytes at an identity that already produced ciphertext.
 - `oversize`: plaintext plus tag exceeds the transport payload limit, or a ciphertext is shorter than `Nt` or larger than that limit.

@@ -531,6 +531,20 @@
 			}
 		},
 		{
+			"id": "context-too-long",
+			"operation": "bytes",
+			"error": "identity",
+			"field": "context",
+			"length": 65536
+		},
+		{
+			"id": "semantic-name-too-long",
+			"operation": "bytes",
+			"error": "identity",
+			"field": "semantic_name",
+			"length": 65536
+		},
+		{
 			"id": "grouped-oversize",
 			"operation": "protect",
 			"error": "oversize",
