@@ -143,12 +143,12 @@ test("a restart from the same publisher is a route change, not a republish", asy
 	);
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), active: true });
 
-	// Same publisher over a new route. In-flight subscriptions resume across it, so the
-	// subscriber must not surface anything that would make a consumer re-subscribe.
+	// Same publisher over an identical route. In-flight subscriptions resume across it,
+	// and there is no metadata to forward, so the subscriber must not surface a restart.
 	await send((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [PUBLISHER_A] }, Version.DRAFT_06));
 
 	// A different publisher took the path: nothing carries over, so this one does surface,
-	// as an end before the start. Reaching it proves the reroute above emitted nothing.
+	// as an end before the start. Reaching it proves the identical reroute above emitted nothing.
 	await send((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [PUBLISHER_B] }, Version.DRAFT_06));
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), active: false });
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), active: true });
@@ -163,6 +163,42 @@ test("a restart from the same publisher is a route change, not a republish", asy
 	await send((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [PUBLISHER_C] }, Version.DRAFT_06));
 	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 0n }, Version.DRAFT_06));
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), active: false });
+
+	announced.close();
+	subscriber.close();
+});
+
+test("a restart that re-prices the same publisher emits the new route", async () => {
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
+	const announced = subscriber.announced(Path.empty());
+	await settle();
+
+	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
+	await send((w) =>
+		encodeAnnounceBroadcast(
+			w,
+			{ status: "active", suffix: Path.from("room"), hops: [PUBLISHER_A] },
+			Version.DRAFT_06,
+		),
+	);
+	expect(await announced.next()).toMatchObject({
+		prefix: Path.from("room"),
+		active: true,
+		route: { hops: [PUBLISHER_A, PEER], cost: { warm: 0n, cold: 0n } },
+	});
+
+	await send((w) =>
+		encodeAnnounceBroadcast(
+			w,
+			{ status: "restart", id: 0n, hops: [PUBLISHER_A], cost: { warm: 4n, cold: 4n } },
+			Version.DRAFT_06,
+		),
+	);
+	expect(await announced.next()).toMatchObject({
+		prefix: Path.from("room"),
+		active: true,
+		route: { hops: [PUBLISHER_A, PEER], cost: { warm: 4n, cold: 4n } },
+	});
 
 	announced.close();
 	subscriber.close();

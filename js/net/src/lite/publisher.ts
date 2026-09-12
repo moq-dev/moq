@@ -526,7 +526,13 @@ export class Publisher {
 	 * @internal
 	 */
 	async runSubscribe(msg: Subscribe, stream: Stream) {
-		const front = this.#broadcasts.peek()?.get(msg.broadcast) ?? (await this.#publish?.demand(msg.broadcast));
+		let front: broadcast.Consumer | undefined;
+		try {
+			front = this.#broadcasts.peek()?.get(msg.broadcast) ?? (await this.#publish?.demand(msg.broadcast));
+		} catch (err: unknown) {
+			stream.writer.reset(error(err));
+			return;
+		}
 		if (!front) {
 			console.debug(`publish unknown: broadcast=${msg.broadcast}`);
 			stream.writer.reset(new NotFound(`broadcast ${msg.broadcast}`));
@@ -632,7 +638,13 @@ export class Publisher {
 			return;
 		}
 
-		const front = this.#broadcasts.peek()?.get(msg.broadcast) ?? (await this.#publish?.demand(msg.broadcast));
+		let front: broadcast.Consumer | undefined;
+		try {
+			front = this.#broadcasts.peek()?.get(msg.broadcast) ?? (await this.#publish?.demand(msg.broadcast));
+		} catch (err: unknown) {
+			stream.writer.reset(error(err));
+			return;
+		}
 		if (!front) {
 			console.debug(`fetch unknown: broadcast=${msg.broadcast}`);
 			stream.writer.reset(new NotFound(`broadcast ${msg.broadcast}`));

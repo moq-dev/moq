@@ -640,6 +640,36 @@ test("an advertisement carries our hop id once the peer declared one", async () 
 	}
 });
 
+test("an advertisement carries the announced route and re-prices in place", async () => {
+	const self: Hop = HopSchema.parse(7n);
+	const peer: Hop = HopSchema.parse(9n);
+	const via: Hop = HopSchema.parse(3n);
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const { pub, origin } = publisher(pair.server, { cluster: { self, peer } });
+	const broadcast = origin.createBroadcast(Path.from("mine"));
+	broadcast.announce({ hops: [via], cost: 4n });
+	void pub.runPublishNamespaces();
+
+	const stream = await nextStream(pair.client);
+	if (!stream) throw new Error("no PUBLISH_NAMESPACE for the broadcast");
+	expect(await stream.reader.u53()).toBe(PublishNamespace.id);
+	const msg = await PublishNamespace.decode(stream.reader, VERSION, true);
+	expect(msg.trackNamespace).toBe(Path.from("mine"));
+	expect(msg.cluster).toEqual({ hops: [via, self], cost: 4n });
+	await acceptPublishNamespace(stream);
+
+	broadcast.announce({ hops: [via], cost: 8n });
+	const next = await nextStream(pair.client);
+	if (!next) throw new Error("no PUBLISH_NAMESPACE for the re-price");
+	expect(await next.reader.u53()).toBe(PublishNamespace.id);
+	const updated = await PublishNamespace.decode(next.reader, VERSION, true);
+	expect(updated.trackNamespace).toBe(Path.from("mine"));
+	expect(updated.cluster).toEqual({ hops: [via, self], cost: 8n });
+	await acceptPublishNamespace(next);
+
+	origin.close();
+});
+
 test("subscription completion sends PUBLISH_DONE on every supported draft", async () => {
 	const versions = [
 		Version.DRAFT_14,

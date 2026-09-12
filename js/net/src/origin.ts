@@ -56,17 +56,23 @@ interface RouteEntry {
 	readonly server?: ServeState;
 }
 
+function noCapacity(): StreamError {
+	return new StreamError(StreamCode.NoCapacity, { message: "no capacity" });
+}
+
 /** A served route from {@link Producer.dynamic}: the queue a handler drains. */
 class ServeState {
 	queue = new Signal<BroadcastRequest[]>([]);
 	pending = new Map<Path.Valid, BroadcastRequest>();
 	served = new Map<Path.Valid, broadcast.Consumer>();
+	rejected = new Map<Path.Valid, Error>();
 	closed = new Once<Error | null>();
 	settled = new Signal(0);
 	onChange: (path: Path.Valid) => void = () => {};
 
 	enqueue(path: Path.Valid): void {
 		if (this.closed.peek() !== undefined) return;
+		this.rejected.delete(path);
 		if (this.pending.has(path)) return;
 		const live = this.served.get(path);
 		if (live && live.closed.peek() === undefined) return;
@@ -92,22 +98,25 @@ class ServeState {
 		}
 		this.served.set(request.path, front);
 		void front.closed.then(() => {
-			if (this.served.get(request.path) === front) this.served.delete(request.path);
+			if (this.served.get(request.path) !== front) return;
+			this.served.delete(request.path);
+			this.onChange(request.path);
 		});
 		this.onChange(request.path);
 		this.settled.update((n) => n + 1);
 	}
 
-	reject(request: BroadcastRequest, _err: Error): void {
+	reject(request: BroadcastRequest, err: Error): void {
 		if (this.pending.get(request.path) !== request) return;
 		this.pending.delete(request.path);
+		this.rejected.set(request.path, err);
 		this.onChange(request.path);
 		this.settled.update((n) => n + 1);
 	}
 
 	close(abort?: Error): void {
 		if (this.closed.peek() !== undefined) return;
-		const err = abort ?? new StreamError(StreamCode.NoCapacity, { message: "no capacity" });
+		const err = abort ?? noCapacity();
 		this.closed.set(err);
 		const queued = [...this.pending.values()];
 		this.pending.clear();
@@ -269,8 +278,10 @@ class OriginState {
 
 		const entry = this.bestEntry(path);
 		const cached = this.materialized.get(path);
-		if (cached && cached.entry === entry) return cached.front;
-		if (cached) {
+		if (cached && cached.entry === entry) {
+			if (cached.front.closed.peek() === undefined) return cached.front;
+			this.materialized.delete(path);
+		} else if (cached) {
 			this.materialized.delete(path);
 			cached.front.close();
 		}
@@ -1037,9 +1048,17 @@ export class Consumer {
 		for (;;) {
 			const served = server.served.get(path);
 			if (served && served.closed.peek() === undefined) return served;
-			if (!server.pending.has(path)) return undefined;
+			const rejected = server.rejected.get(path);
+			if (rejected) {
+				server.rejected.delete(path);
+				throw rejected;
+			}
 			const closed = server.closed.peek();
-			if (closed !== undefined) return undefined;
+			if (closed !== undefined) {
+				if (closed) throw closed;
+				return undefined;
+			}
+			if (!server.pending.has(path)) return undefined;
 			await Signal.race(server.settled, server.closed);
 		}
 	}
@@ -1102,17 +1121,28 @@ export class Dynamic {
 	async *requested(): AsyncIterableIterator<BroadcastRequest> {
 		const server = this.#entry.server;
 		if (!server) return;
-		for (;;) {
-			const next = server.queue.peek()[0];
-			if (next) {
-				server.queue.mutate((queue) => {
-					queue.shift();
-				});
-				yield next;
-				continue;
+		let current: BroadcastRequest | undefined;
+		const drop = () => {
+			current?.reject(noCapacity());
+			current = undefined;
+		};
+		try {
+			for (;;) {
+				const next = server.queue.peek()[0];
+				if (next) {
+					drop();
+					server.queue.mutate((queue) => {
+						queue.shift();
+					});
+					current = next;
+					yield next;
+					continue;
+				}
+				if (server.closed.peek() !== undefined) return;
+				await Signal.race(server.queue, server.closed);
 			}
-			if (server.closed.peek() !== undefined) return;
-			await Signal.race(server.queue, server.closed);
+		} finally {
+			drop();
 		}
 	}
 }
@@ -1121,8 +1151,8 @@ export class Dynamic {
  * A pending request for a broadcast to be served on demand.
  *
  * Yielded by {@link Dynamic.requested}. {@link accept} resolves it with a live
- * broadcast; {@link reject} resolves it with an error. Dropping it without either
- * rejects it.
+ * broadcast; {@link reject} resolves it with an error. Advancing the iterator or
+ * closing it without either rejects the request.
  *
  * @public
  */

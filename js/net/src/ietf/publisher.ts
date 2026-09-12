@@ -1,7 +1,8 @@
 import { type Dispose, type Getter, Signal } from "@moq/signals";
 import type * as broadcast from "../broadcast.ts";
-import { error, reason } from "../error.ts";
+import { error, reason, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
+import { type Route, routesEqual } from "../hop.ts";
 import { hooks } from "../internal.ts";
 import type { Advertised, Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -36,6 +37,19 @@ const RETRY_BASE = 100;
 
 /** Ceiling on that wait. The loop retries for the life of the session, so it must not spin. */
 const RETRY_MAX = 5000;
+
+/** Cluster parameters for one snapshot: the advertised hops, then our own id last. */
+function clusterFor(base: Cluster.Advert | undefined, route: Route): Cluster.Advert | undefined {
+	if (!base) return undefined;
+	const self = base.hops.at(-1);
+	if (self === undefined) return undefined;
+	const hops = route.hops.at(-1) === self ? [...route.hops] : [...route.hops, self];
+	return { hops, cost: route.cost.warm };
+}
+
+function sameAdvert(a: Advertised | undefined, b: Advertised | undefined): boolean {
+	return a !== undefined && b !== undefined && a.identity === b.identity && routesEqual(a.route, b.route);
+}
 
 /** PUBLISH_DONE statuses this implementation emits. Stable across drafts 14 through 19. */
 const PUBLISH_DONE_STATUS = {
@@ -194,30 +208,45 @@ export class Publisher {
 	async runSubscribe(msg: Subscribe, stream: Stream) {
 		const version = this.#session.version;
 		const name = msg.trackNamespace;
-		const broadcast = this.#broadcasts.peek()?.get(name) ?? (await this.#publish?.demand(name));
+		let broadcast: broadcast.Consumer | undefined;
+		let refusal: { errorCode: number; reasonPhrase: string } | undefined;
+		try {
+			broadcast = this.#broadcasts.peek()?.get(name) ?? (await this.#publish?.demand(name));
+			if (!broadcast) {
+				refusal = {
+					errorCode: toRequestCode("does_not_exist", "subscribe", version),
+					reasonPhrase: "broadcast not found",
+				};
+			}
+		} catch (err: unknown) {
+			const e = error(err);
+			const condition =
+				e instanceof StreamError && e.code === StreamCode.NotFound ? "does_not_exist" : "internal";
+			refusal = { errorCode: toRequestCode(condition, "subscribe", version), reasonPhrase: reason(e) };
+		}
 
-		if (!broadcast) {
-			const errorCode = toRequestCode("does_not_exist", "subscribe", version);
+		if (refusal) {
 			if (version === Version.DRAFT_14) {
 				await stream.writer.u53(SubscribeError.id);
 				const err = new SubscribeError({
 					requestId: msg.requestId,
-					errorCode,
-					reasonPhrase: "broadcast not found",
+					errorCode: refusal.errorCode,
+					reasonPhrase: refusal.reasonPhrase,
 				});
 				await err.encode(stream.writer, version);
 			} else {
 				await stream.writer.u53(RequestError.id);
 				const err = new RequestError({
 					requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
-					errorCode,
-					reasonPhrase: "broadcast not found",
+					errorCode: refusal.errorCode,
+					reasonPhrase: refusal.reasonPhrase,
 				});
 				await err.encode(stream.writer, version);
 			}
 			stream.close();
 			return;
 		}
+		if (!broadcast) return;
 
 		const priority = fromWire(msg.subscriberPriority);
 		const track = broadcast.subscribe(msg.trackName, {
@@ -642,13 +671,14 @@ export class Publisher {
 
 			// Reports whether the peer now holds the namespace: an inline entry always
 			// lands, but a PUBLISH_NAMESPACE request can be declined.
-			const advertise = async (suffix: Path.Valid): Promise<boolean> => {
+			const advertise = async (suffix: Path.Valid, snap: Advertised): Promise<boolean> => {
+				const cluster = clusterFor(this.#advert, snap.route);
 				if (legacy) {
-					return await this.#advertise(Path.join(prefix, suffix), requests, refused);
+					return await this.#advertise(Path.join(prefix, suffix), requests, refused, cluster);
 				}
 
 				await stream.writer.u53(SubscribeNamespaceEntry.id);
-				await new SubscribeNamespaceEntry({ suffix, cluster: this.#advert }).encode(stream.writer, version);
+				await new SubscribeNamespaceEntry({ suffix, cluster }).encode(stream.writer, version);
 				return true;
 			};
 			const withdraw = async (suffix: Path.Valid) => {
@@ -709,17 +739,19 @@ export class Publisher {
 				// advertisement stays out of `held`, so the next turn retries it instead of
 				// believing the namespace is already up.
 				const held = new Map<Path.Valid, Advertised>(active);
-				// Withdraw first so a republish reads as withdraw-then-advertise (a restart).
+				// Withdraw first so a republish or re-price reads as withdraw-then-advertise
+				// (a restart). Identity change is a new broadcast; a route change is the
+				// same one at a new cost or hop chain.
 				for (const [removed, snap] of active) {
-					if (updated.get(removed)?.identity === snap.identity) continue;
+					if (sameAdvert(updated.get(removed), snap)) continue;
 					await withdraw(removed);
 					held.delete(removed);
 				}
 				for (const [added, snap] of updated) {
-					if (held.get(added)?.identity === snap.identity) continue;
+					if (sameAdvert(held.get(added), snap)) continue;
 					if (!this.#offerable(Path.join(prefix, added), refused)) continue;
 					offered.set(Path.join(prefix, added), snap.identity);
-					if (await advertise(added)) held.set(added, snap);
+					if (await advertise(added, snap)) held.set(added, snap);
 				}
 
 				active = held;
@@ -729,8 +761,7 @@ export class Publisher {
 				// starting to answer raises a signal this loop is watching.
 				const outstanding = [...updated].some(
 					([suffix, snap]) =>
-						active.get(suffix)?.identity !== snap.identity &&
-						this.#pending(Path.join(prefix, suffix), refused),
+						!sameAdvert(active.get(suffix), snap) && this.#pending(Path.join(prefix, suffix), refused),
 				);
 				retry = outstanding ? Math.min(retry ? retry * 2 : RETRY_BASE, RETRY_MAX) : 0;
 
@@ -827,18 +858,17 @@ export class Publisher {
 					}
 				}
 
-				// Withdraw first so a republish reads as withdraw-then-advertise (a restart)
-				// rather than nothing: the identity changed, so the peer is holding a broadcast
-				// that no longer exists.
+				// Withdraw first so a republish or re-price reads as withdraw-then-advertise
+				// (a restart) rather than nothing.
 				for (const [removed, snap] of active) {
-					if (updated.get(removed)?.identity === snap.identity) continue;
+					if (sameAdvert(updated.get(removed), snap)) continue;
 					await this.#withdraw(removed, requests);
 				}
 				for (const [added, snap] of updated) {
-					if (active.get(added)?.identity === snap.identity) continue;
+					if (sameAdvert(active.get(added), snap)) continue;
 					if (!this.#offerable(added, refused)) continue;
 					offered.set(added, snap.identity);
-					await this.#advertise(added, requests, refused);
+					await this.#advertise(added, requests, refused, clusterFor(this.#advert, snap.route));
 				}
 
 				// What the peer holds, not what we attempted: a declined PUBLISH_NAMESPACE
@@ -854,7 +884,7 @@ export class Publisher {
 				// transient failure clearing, or the peer starting to answer raises no
 				// signal of its own, so the only way back is to ask again on a timer.
 				const outstanding = [...updated].some(
-					([path, snap]) => active.get(path)?.identity !== snap.identity && this.#pending(path, refused),
+					([path, snap]) => !sameAdvert(active.get(path), snap) && this.#pending(path, refused),
 				);
 				retry = outstanding ? Math.min(retry ? retry * 2 : RETRY_BASE, RETRY_MAX) : 0;
 
@@ -914,6 +944,7 @@ export class Publisher {
 		path: Path.Valid,
 		requests: Map<Path.Valid, { path: Path.Valid; requestId: bigint; stream: Stream }>,
 		refused: Map<Path.Valid, Refused>,
+		cluster: Cluster.Advert | undefined = this.#advert,
 	): Promise<boolean> {
 		const requestId = await this.#session.nextRequestId();
 		if (requestId === undefined) return false;
@@ -934,7 +965,7 @@ export class Publisher {
 			await withTimeout(
 				(async () => {
 					await stream.writer.u53(PublishNamespace.id);
-					const msg = new PublishNamespace({ requestId, trackNamespace: path, cluster: this.#advert });
+					const msg = new PublishNamespace({ requestId, trackNamespace: path, cluster });
 					await msg.encode(stream.writer, this.#session.version);
 
 					// Read response (RequestOk and PublishNamespaceOk share 0x07)

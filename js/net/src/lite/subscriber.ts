@@ -5,7 +5,7 @@ import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
 import * as netGroup from "../group.ts";
-import { type Cost, DEFAULT_ROUTE, type Hop, type Route, UNKNOWN_HOP, ZERO_COST } from "../hop.ts";
+import { type Cost, DEFAULT_ROUTE, type Hop, type Route, routesEqual, UNKNOWN_HOP, ZERO_COST } from "../hop.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
 import * as Time from "../time.ts";
@@ -236,7 +236,7 @@ export class Subscriber {
 			// `publisher` is what lets a restart tell a route change (same publisher,
 			// subscriptions resume) from a replacement (a new generation took the path,
 			// nothing carries over).
-			type Advertisement = { publisher: Hop | undefined; live: boolean };
+			type Advertisement = { publisher: Hop | undefined; live: boolean; route?: Route };
 			const advertised = new Map<Path.Valid, Advertisement>();
 
 			switch (this.version) {
@@ -369,47 +369,52 @@ export class Subscriber {
 					}
 				}
 
-				if (active) {
-					// The first hop identifies the original publisher; an empty chain means the
-					// peer itself originated it. See `restart_announce` in the Rust subscriber.
-					const publisher = hops?.[0] ?? responderOrigin;
-
-					// A publisher with no identity (an empty chain from a peer that withheld its
-					// own id, or a lite-03 UNKNOWN placeholder) never proves continuity: two such
-					// advertisements can be unrelated publishers. Mirrors the
-					// `publisher == Hop::UNKNOWN` arm of the Rust `restart_announce`.
-					const identified = publisher !== undefined && publisher !== UNKNOWN_HOP;
-
-					// A second advertisement for a path we already carry is a restart: either an
-					// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE.
-					const previous = advertised.get(suffix);
-					if (previous?.live) {
-						if (identified && previous.publisher === publisher) {
-							// Same publisher, new route. In-flight subscriptions resume across it,
-							// so there is nothing for a consumer to react to. An unidentified
-							// publisher falls through to the replacement path below instead.
-							console.debug(`announced: broadcast=${path} rerouted`);
-							continue;
-						}
-
-						// A different publisher took the path, so cached track info and existing
-						// subscriptions must not carry over. Surface a real end before the start.
-						retract();
-					}
-
-					// After `retract()`, which clears the entry: the path is advertised again, by
-					// whoever just took it over. Recording it before would leave nothing behind, so
-					// the *next* takeover would read as a first announcement and skip its own end.
-					advertised.set(suffix, { publisher, live: true });
-				} else {
+				if (!active) {
 					retract();
 					continue;
 				}
 
-				console.debug(`announced: broadcast=${path} active=true`);
+				// The first hop identifies the original publisher; an empty chain means the
+				// peer itself originated it. See `restart_announce` in the Rust subscriber.
+				const publisher = hops?.[0] ?? responderOrigin;
+
+				// A publisher with no identity (an empty chain from a peer that withheld its
+				// own id, or a lite-03 UNKNOWN placeholder) never proves continuity: two such
+				// advertisements can be unrelated publishers. Mirrors the
+				// `publisher == Hop::UNKNOWN` arm of the Rust `restart_announce`.
+				const identified = publisher !== undefined && publisher !== UNKNOWN_HOP;
 				const fullHops =
 					hops !== undefined && responderOrigin !== undefined ? [...hops, responderOrigin] : (hops ?? []);
 				const route: Route = { hops: fullHops, cost: cost ?? ZERO_COST };
+
+				// A second advertisement for a path we already carry is a restart: either an
+				// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE.
+				const previous = advertised.get(suffix);
+				if (previous?.live) {
+					if (identified && previous.publisher === publisher) {
+						// Same publisher, new route. In-flight subscriptions resume across it.
+						// Emit the route so a forwarder can re-price without retracting.
+						if (!routesEqual(previous.route, route)) {
+							advertised.set(suffix, { publisher, live: true, route });
+							console.debug(`announced: broadcast=${path} rerouted`);
+							announced.append({ prefix: suffix, active: true, route });
+						} else {
+							console.debug(`announced: broadcast=${path} rerouted`);
+						}
+						continue;
+					}
+
+					// A different publisher took the path, so cached track info and existing
+					// subscriptions must not carry over. Surface a real end before the start.
+					retract();
+				}
+
+				// After `retract()`, which clears the entry: the path is advertised again, by
+				// whoever just took it over. Recording it before would leave nothing behind, so
+				// the *next* takeover would read as a first announcement and skip its own end.
+				advertised.set(suffix, { publisher, live: true, route });
+
+				console.debug(`announced: broadcast=${path} active=true`);
 				announced.append({ prefix: suffix, active: true, route });
 			}
 

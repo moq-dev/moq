@@ -914,6 +914,77 @@ test("a non-prefix pattern is refused", () => {
 	origin.close();
 });
 
+test("an accepted dynamic broadcast is retired when it closes", async () => {
+	const origin = new Producer();
+	const handle = origin.dynamic("live/**");
+	const path = Path.from("live/cam");
+	const request = origin.request(path);
+	const it = handle.requested();
+
+	const first = await it.next();
+	const produced = new BroadcastProducer();
+	produced.createTrack("video");
+	first.value?.accept(produced);
+	await settle();
+	expect(request.active.peek()?.subscribe("video")).toBeDefined();
+
+	produced.close();
+	await settle();
+	expect(request.active.peek()).toBeUndefined();
+
+	const second = await it.next();
+	expect(second.value?.path).toBe(path);
+	const replacement = new BroadcastProducer();
+	replacement.createTrack("video");
+	second.value?.accept(replacement);
+	await settle();
+	expect(request.active.peek()?.subscribe("video")).toBeDefined();
+
+	request.close();
+	handle.close();
+	replacement.close();
+	origin.close();
+});
+
+test("reject surfaces the error from demand", async () => {
+	const origin = new Producer();
+	const handle = origin.dynamic("live/**");
+	const consumer = origin.consume();
+	const it = handle.requested();
+	const pending = consumer.demand(Path.from("live/cam"));
+	const { value: req } = await it.next();
+	const err = new StreamError(StreamCode.NoCapacity, { message: "full" });
+	req?.reject(err);
+	await expect(pending).rejects.toBe(err);
+
+	handle.close();
+	origin.close();
+});
+
+test("advancing requested without settling rejects the previous request", async () => {
+	const origin = new Producer();
+	const handle = origin.dynamic("live/**");
+	const consumer = origin.consume();
+	const it = handle.requested();
+
+	const firstDemand = consumer.demand(Path.from("live/cam"));
+	const first = await it.next();
+	expect(first.value?.path).toBe(Path.from("live/cam"));
+
+	const secondDemand = consumer.demand(Path.from("live/other"));
+	const second = await it.next();
+	expect(second.value?.path).toBe(Path.from("live/other"));
+
+	await expect(firstDemand).rejects.toMatchObject({ code: StreamCode.NoCapacity });
+	const produced = new BroadcastProducer();
+	second.value?.accept(produced);
+	await expect(secondDemand).resolves.toBeDefined();
+
+	handle.close();
+	produced.close();
+	origin.close();
+});
+
 test("close rejects queued requests with NoCapacity", async () => {
 	const origin = new Producer();
 	const handle = origin.dynamic("live/**");
