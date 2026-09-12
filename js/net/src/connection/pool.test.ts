@@ -224,7 +224,7 @@ test("share: false keeps a private loop and origin", async () => {
 	privateLoop.close();
 });
 
-test("caller-owned origins and pinned certificates refuse to share", () => {
+test("caller-owned origins, transport options, and delay refuse to share", () => {
 	const origin = new OriginProducer();
 	try {
 		expect(() => new Connection({ subscribe: origin })).toThrow(/share: false/);
@@ -233,6 +233,10 @@ test("caller-owned origins and pinned certificates refuse to share", () => {
 		expect(() => new Connection({ webtransport: { serverCertificateHashes: [{ value: "aa" }] } })).toThrow(
 			/share: false/,
 		);
+		expect(() => new Connection({ webtransport: { congestionControl: "throughput" } })).toThrow(/share: false/);
+		expect(() => new Connection({ websocket: { enabled: false } })).toThrow(/share: false/);
+		expect(() => new Connection({ discovery: false })).toThrow(/share: false/);
+		expect(() => new Connection({ delay: { timeout: 0 } })).toThrow(/share: false/);
 	} finally {
 		origin.close();
 	}

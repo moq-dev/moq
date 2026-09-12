@@ -46,8 +46,9 @@ export interface ConnectionProps {
 	/**
 	 * Share a pooled transport keyed on the URL (default: true).
 	 *
-	 * Options the pool cannot honor (a pinned certificate, caller-owned origins) require
-	 * `share: false` and get a private reconnect loop with the same handle semantics.
+	 * Options the pool cannot honor (transport options, discovery, delay, a pinned
+	 * certificate, caller-owned origins) require `share: false` and get a private
+	 * reconnect loop with the same handle semantics.
 	 */
 	share?: boolean;
 
@@ -92,9 +93,10 @@ export interface ConnectionProps {
  * on its own. An auth rejection is the one failure it stops on, and it retires the shared
  * connection so the next handle dials fresh.
  *
- * Options the pool cannot honor (a pinned certificate, caller-owned origins) take
- * `share: false` and get a private loop. A supplied transport cannot reconnect at all;
- * pass it to {@link Connection.connect} instead.
+ * Options the pool cannot honor (transport options, discovery, delay, a pinned
+ * certificate, caller-owned origins) take `share: false` and get a private loop. A
+ * supplied transport cannot reconnect at all; pass it to {@link Connection.connect}
+ * instead.
  *
  * @public
  */
@@ -374,6 +376,18 @@ function refuse(props?: ConnectionProps): void {
 	const hashes = props.webtransport?.serverCertificateHashes?.length ?? 0;
 	if (props.webtransport?.serverCertificate !== undefined || hashes > 0) {
 		throw new Error("a pinned certificate cannot be shared; pass share: false");
+	}
+	if (props.webtransport !== undefined) {
+		throw new Error("webtransport options cannot be shared; pass share: false");
+	}
+	if (props.websocket !== undefined) {
+		throw new Error("websocket options cannot be shared; pass share: false");
+	}
+	if (props.discovery !== undefined) {
+		throw new Error("discovery cannot be shared; pass share: false");
+	}
+	if (props.delay !== undefined) {
+		throw new Error("delay cannot be shared; pass share: false");
 	}
 }
 
