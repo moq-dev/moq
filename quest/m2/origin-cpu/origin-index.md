@@ -15,8 +15,16 @@ lookup, source-update, and announcement paths before choosing an index.
 Add a registered Criterion target using public origin operations. Sweep
 broadcast count, sources per broadcast, cursor count, and update churn
 independently. Separate initial replay from incremental notification and
-exact-path lookup; replay must pay for every result it emits. Use
-`rs/moq-bench/config/announce.toml` to check that microbenchmark wins survive relay load.
+exact-path lookup; replay must pay for every result it emits.
+
+Validate alternate-source wins with a relay workload where the same content
+and publisher identity reaches each broadcast over multiple peer routes.
+Assert the observed source count, then exercise route changes, withdrawal,
+and failover while checking delivered output. Independent publishers reusing
+a path are not equivalent: content replacement must not masquerade as multiple
+routes to one publisher. Add this workload to the existing benchmark runner.
+Keep `rs/moq-bench/config/announce.toml` as a single-source regression control;
+its unique per-connection paths do not validate alternate-source scaling.
 
 Optimize only a measured bottleneck. Compare a retained linear scan at small
 source counts with any proposed cache or index, accounting for invalidation,
