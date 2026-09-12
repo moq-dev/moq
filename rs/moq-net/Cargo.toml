@@ -52,7 +52,7 @@ loom = { workspace = true }
 [target.'cfg(target_family = "wasm")'.dev-dependencies]
 getrandom = { workspace = true }
 # Keep this in lockstep with rs/moq-wasm's pinned wasm-bindgen CLI schema.
-wasm-bindgen-test = "=0.3.71"
+wasm-bindgen-test = "=0.3.77"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }

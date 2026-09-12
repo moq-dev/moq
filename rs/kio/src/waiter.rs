@@ -54,6 +54,8 @@ impl Waiter {
 	}
 
 	/// Register this waiter with a [`WaiterList`] for future notification.
+	///
+	/// Delegates to [`WaiterList::register`], which is not idempotent.
 	pub fn register(&self, list: &mut WaiterList) {
 		list.register(self);
 	}
@@ -113,10 +115,15 @@ impl WaiterList {
 
 	/// Register a waiter.
 	///
-	/// Performs a small, bounded amount of garbage collection: probes the
-	/// slot at the rotating cursor, replacing it in place if dead. The
-	/// cursor advances on each append so the probe window covers the
-	/// whole list over time.
+	/// Not idempotent: a waiter already in the list is appended again.
+	/// [`Park::hold`] retires any waiter that still has live registrations
+	/// before the next poll, so the in-tree poll path never stacks
+	/// duplicates. Callers that retain a waiter across polls must drop it
+	/// before registering again.
+	///
+	/// Each call probes at most two slots at the rotating cursor and reuses
+	/// a dead one in place. The cursor advances on each live probe so the
+	/// window covers the list over time.
 	pub fn register(&mut self, waiter: &Waiter) {
 		let new_weak = Arc::downgrade(waiter.shared());
 
@@ -787,6 +794,15 @@ mod tests {
 			Waiter::noop().register(&mut list);
 		}
 		assert!(list.entries.len() <= 2);
+	}
+
+	#[test]
+	fn register_appends_a_live_waiter() {
+		let mut list = WaiterList::new();
+		let waiter = Waiter::new(Waker::noop().clone());
+		waiter.register(&mut list);
+		waiter.register(&mut list);
+		assert_eq!(list.entries.len(), 2, "a live waiter must not dedup");
 	}
 
 	#[test]
