@@ -574,8 +574,8 @@ export class Consumer {
 		| undefined
 	> {
 		for (;;) {
+			const ended = this.#closed.peek();
 			if (this.#groups.length === 0) {
-				const ended = this.#closed.peek();
 				if (ended !== undefined) {
 					if (ended instanceof Error) throw ended;
 					return undefined;
@@ -595,13 +595,15 @@ export class Consumer {
 			// Otherwise a real gap sits before it and an in-transit group may still arrive, so wait.
 			// #checkMaxAge skips the gap once the buffered span exceeds the budget, and
 			// #tryDurationSkip once the duration covers it.
+			// After track termination no missing group can arrive, so drain across any remaining gap.
 			if (this.#active !== undefined && this.#groups.length > 0) {
 				const head = this.#groups[0];
+				const contiguous = ptsContiguous(this.#presentedEnd, head.frames.at(0)?.timestamp);
 				if (
 					head.consumer.sequence > this.#active &&
-					((head.empty && head.consumer.done) ||
-						ptsContiguous(this.#presentedEnd, head.frames.at(0)?.timestamp))
+					((head.empty && head.consumer.done) || contiguous || ended !== undefined)
 				) {
+					if (!contiguous) this.#gap = true;
 					this.#active = head.consumer.sequence;
 				}
 			}

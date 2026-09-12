@@ -1517,3 +1517,34 @@ test("a group reset does not hide a later container decode failure", async () =>
 		error.mockRestore();
 	}
 });
+
+for (const end of [null, new StreamError(StreamCode.Internal), new SessionError(SessionCode.ProtocolViolation)]) {
+	test(`Consumer drains a permanent buffered gap after track termination: ${end}`, async () => {
+		const track = new Track.Producer("test");
+		const consumer = new Consumer(replay(track), {
+			format: new LegacyFormat("data"),
+			maxAge: 10_000 as Time.Milli,
+		});
+		try {
+			writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro]);
+			expect((await consumer.next())?.group).toBe(0);
+			expect((await consumer.next())?.frame).toBeUndefined();
+			writeGroupWithLegacyFrames(track, 2, [1_000_000 as Time.Micro]);
+			await settle();
+			const pending = consumer.next();
+			track.close(end ?? undefined);
+			const resumed = await Promise.race([pending, settle(100).then(() => "stalled" as const)]);
+			expect(resumed).not.toBe("stalled");
+			if (resumed === "stalled") return;
+			expect(resumed?.group).toBe(2);
+			expect(resumed?.frame?.timestamp).toBe(1_000_000 as Time.Micro);
+			expect(resumed?.continuous).toBe(false);
+			expect((await consumer.next())?.frame).toBeUndefined();
+			if (end) await expect(consumer.next()).rejects.toBe(end);
+			else expect(await consumer.next()).toBeUndefined();
+		} finally {
+			consumer.close();
+			track.close();
+		}
+	});
+}
