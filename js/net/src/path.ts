@@ -9,8 +9,8 @@
  * All paths are RELATIVE; you cannot join with a leading slash to make an absolute path.
  *
  * {@link Pattern} and {@link Patterns} are re-exported from `@moq/pattern`, the owner of
- * the v1 grammar and algebra. New path construction and publication reserve `*`; a
- * decoder may still see a `*` segment on a legacy path during rollout.
+ * the v1 grammar and algebra. Literal path construction and wire decoding retain
+ * their existing behavior.
  *
  * @example
  * ```typescript

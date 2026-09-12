@@ -4,9 +4,8 @@
 //! Tokens specify which broadcast paths a client can publish to and consume from.
 //!
 //! See [`Claims`] for the JWT claims structure and [`Key`] for key management.
-//! Path grants use [`Pattern`] from [`moq-pattern`](moq_pattern): the same grammar
-//! `moq-net` re-exports. New minting should construct patterns rather than prefixes;
-//! missing `v` on persisted claims stays v0 prefix semantics.
+//! Pattern types from [`moq-pattern`](moq_pattern) are re-exported for standalone use.
+//! Token claims and authorization still use path prefixes.
 
 mod algorithm;
 mod claims;

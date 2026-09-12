@@ -2,9 +2,8 @@
  * Exact path patterns for Media over QUIC: grammar, matching, and set algebra.
  *
  * A {@link Pattern} describes a set of broadcast paths. {@link Patterns} is an unordered
- * union reduced by exact containment. Matching is linear. Construction, publication of
- * new literal paths, and {@link Pattern.literal} reserve `*`; a decoder may still see a
- * `*` segment on a legacy path during rollout.
+ * union reduced by exact containment. Matching is linear. {@link Pattern.literal}
+ * rejects `*` because it is reserved for pattern syntax.
  *
  * `@moq/net` and `@moq/token` re-export this package. The Rust twin is `moq-pattern`.
  *
@@ -48,9 +47,8 @@
  * ## Literal paths
  *
  * `@moq/net`'s `Path` stays a coordinate. Roots, joins, exact names, URL paths, and
- * object-store keys keep their own types. New path construction and publication reject
- * `*`; {@link Pattern.literal} does the same. A wire decoder may still accept a `*`
- * segment on a legacy protocol version.
+ * object-store keys keep their own types. {@link Pattern.literal} rejects `*`; literal
+ * path construction and wire decoding retain their existing behavior.
  *
  * @module
  */

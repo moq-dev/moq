@@ -9,8 +9,9 @@
 
 Exact path patterns for [Media over QUIC](https://moq.dev): grammar, matching, and set algebra.
 
-A pattern describes a set of broadcast paths. Tokens, origin scopes, announce interests,
-and wildcard advertisements all use this package so nothing resembles a second glob dialect.
+A pattern describes a set of broadcast paths. This package provides a shared grammar
+for tokens, origin scopes, announce interests, and wildcard advertisements. Integrating
+patterns into those consumers is separate work.
 Literal paths stay coordinates; `@moq/net`'s path module keeps construction, joins, and
 prefix operations.
 

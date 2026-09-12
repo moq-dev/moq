@@ -14,7 +14,7 @@ that wants the relay's path rules.
 
 - **Keys**: generate HS256/384/512, RS256/384/512, PS256/384/512, ES256/384, or EdDSA keys as JWKs, with a `kid` for rotation and an optional immutable scope that caps every token the key signs.
 - **Claims**: `root`, `put`, `get`, `exp`, `iat`. `Key::sign` and `Key::verify` handle the signature and expiry.
-- **Authorization**: `Claims::authorize(path)` scopes verified claims to the path a client dialed and returns the publish and subscribe prefixes, exactly as the relay does. v1 grants use [`Pattern`](https://docs.rs/moq-pattern) (re-exported here); missing `v` stays v0 prefix semantics.
+- **Authorization**: `Claims::authorize(path)` scopes verified claims to the path a client dialed and returns the publish and subscribe prefixes, exactly as the relay does. [`Pattern`](https://docs.rs/moq-pattern) is re-exported for standalone use; token claims still use path prefixes.
 
 ```bash
 cargo add moq-token

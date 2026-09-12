@@ -11,8 +11,8 @@ The TypeScript twin of [`moq-token`](/lib/rs/moq-token). Generate keys (HMAC,
 RSA, ECDSA, EdDSA, individually or as a JWK set), `sign` and `verify` tokens,
 and `authorize` a connection path against the claims exactly as
 [moq-relay](/bin/relay/auth) does. Tokens are interchangeable with the Rust
-side. v1 grants use [`Pattern`](https://www.npmjs.com/package/@moq/pattern)
-(re-exported here); missing `v` stays v0 prefix semantics.
+side. [`Pattern`](https://www.npmjs.com/package/@moq/pattern) is re-exported
+for standalone use; token claims and authorization still use path prefixes.
 
 ```bash
 bun add @moq/token

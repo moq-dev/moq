@@ -5,9 +5,8 @@
 //! wildcards, and [`Patterns`] is a union of them reduced by containment. The
 //! grammar and algebra live in [`moq-pattern`](moq_pattern); this module
 //! re-exports them beside [`Path`] so grants, origin scopes, announce interests,
-//! and wildcard advertisements share one dialect. New path construction and
-//! publication reserve `*`; a decoder may still see a `*` segment on a legacy
-//! path during rollout.
+//! and wildcard advertisements can share one dialect. Literal path construction
+//! and wire decoding retain their existing behavior.
 
 pub use moq_pattern::{InvalidPattern, Pattern, Patterns, Segment, Specificity};
 

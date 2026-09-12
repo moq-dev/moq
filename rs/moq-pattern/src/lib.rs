@@ -1,9 +1,8 @@
 //! Exact path patterns for Media over QUIC.
 //!
 //! A [`Pattern`] describes a set of broadcast paths. [`Patterns`] is an unordered union
-//! reduced by exact containment. Matching is linear. Construction, publication of new
-//! literal paths, and [`Pattern::literal`] reserve `*`; a decoder may still see a `*`
-//! segment on a legacy path during rollout.
+//! reduced by exact containment. Matching is linear. [`Pattern::literal`] rejects `*`
+//! because it is reserved for pattern syntax.
 //!
 //! `moq-net` and `moq-token` re-export this crate. The TypeScript twin is `@moq/pattern`.
 //!
@@ -58,8 +57,8 @@
 //!
 //! [`Path`](https://docs.rs/moq-net/latest/moq_net/struct.Path.html) stays a coordinate.
 //! Roots, joins, exact names, URL paths, and object-store keys keep their own types.
-//! New path construction and publication reject `*`; [`Pattern::literal`] does the same.
-//! A wire decoder may still accept a `*` segment on a legacy protocol version.
+//! [`Pattern::literal`] rejects `*`; literal `Path` construction and wire decoding
+//! retain their existing behavior.
 
 #![warn(missing_docs)]
 
