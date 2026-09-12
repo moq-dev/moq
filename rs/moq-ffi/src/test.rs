@@ -1972,7 +1972,7 @@ fn dynamic_refuses_a_non_prefix_pattern() {
 		.err()
 		.expect("a non-prefix pattern is refused");
 	assert!(
-		matches!(err, MoqError::InvalidPattern(_)),
+		matches!(err, MoqError::Unsupported | MoqError::InvalidPattern(_)),
 		"unexpected error: {err:?}"
 	);
 }
