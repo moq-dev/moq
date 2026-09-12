@@ -2178,7 +2178,7 @@ mod tests {
 		assert_eq!(origin.info().pool.expiry(), Some(duration));
 
 		let stats = crate::StatsConfig {
-			enabled: Some(true),
+			enabled: true,
 			node: Some("test".to_string()),
 			..Default::default()
 		}
