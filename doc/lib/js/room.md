@@ -9,9 +9,9 @@ description: Headless multi-participant rooms over MoQ
 
 A room is a path prefix. There is no service and no storage: joining is minting
 a moq-token rooted at that prefix and dialing the relay. Participants are
-discovered from the announce stream. Identity is the path before `camera` /
-`screen`. Each participant publishes `{identity}/camera` (camera + mic, hd/sd)
-and `{identity}/screen` (screenshare).
+discovered from the announce stream. Identity is the path before `camera.hang` /
+`screen.hang`. Each participant publishes `{identity}/camera.hang` (camera + mic, hd/sd)
+and `{identity}/screen.hang` (screenshare).
 
 ```ts
 import { Local, Room } from "@moq/room";
@@ -42,7 +42,7 @@ does that under `anon/meet/{room}`.
 
 hang.live should depend on this package for the roster, local publish, remote
 watch, and `hang/user.json` + `hang/preview.json`. Location stays an app-defined
-catalog extension. The ordered UTF-8 chat track (`Chat`) matches iroh-live;
+catalog extension. The JSON window chat track (`Chat`) uses `@moq/json` Window;
 hang.live's JSON chat (`hang/chat.json`) stays an extension of the same catalog
 `hang` section.
 

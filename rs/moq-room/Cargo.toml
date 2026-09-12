@@ -13,10 +13,11 @@ keywords = ["quic", "webtransport", "conferencing", "live"]
 categories = ["multimedia", "network-programming"]
 
 [dependencies]
-kio = { workspace = true }
+kio = { workspace = true, features = ["time"] }
+moq-json = { workspace = true }
 moq-net = { workspace = true }
 moq-token = { workspace = true }
-tracing = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }

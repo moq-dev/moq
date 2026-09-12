@@ -37,9 +37,13 @@ export interface RoomProps {
  * by identity.
  */
 export class Room {
+	/** Connection supplying room announcements. */
 	readonly connection: Moq.Connection.Reload;
+	/** Local identity excluded from the roster. */
 	readonly identity: Getter<Moq.Path.Valid | undefined>;
+	/** Whether room discovery is active. */
 	readonly enabled: Getter<boolean>;
+	/** Room prefix relative to the connection root. */
 	readonly prefix: Getter<Moq.Path.Valid | undefined>;
 
 	#remotes = new Signal(new Map<Moq.Path.Valid, Remote>());
@@ -54,6 +58,7 @@ export class Room {
 		this.#signals.run((effect) => {
 			if (!effect.get(this.enabled)) return;
 
+			effect.get(this.identity);
 			const prefix = effect.get(this.prefix) ?? Moq.Path.empty();
 			const announced = this.connection.announced(prefix);
 			effect.cleanup(() => announced.close());
@@ -83,7 +88,7 @@ export class Room {
 			if (local && parsed.identity === local) continue;
 
 			if (update.active) {
-				this.#add(parsed.identity, parsed.kind, update.path);
+				this.#add(parsed.identity, parsed.kind, Moq.Path.join(announced.prefix, update.path));
 			} else {
 				this.#remove(parsed.identity, parsed.kind);
 			}
@@ -110,6 +115,7 @@ export class Room {
 		}
 	}
 
+	/** Release this participant's subscriptions and media resources. */
 	close() {
 		this.#signals.close();
 	}

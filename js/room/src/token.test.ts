@@ -20,3 +20,9 @@ test("claims accepts a multi-segment identity", () => {
 		put: "guest/uuid/",
 	});
 });
+
+test("claims rejects empty normalized identities", () => {
+	for (const identity of ["", "/", "///"]) {
+		expect(() => claims("room", identity)).toThrow();
+	}
+});

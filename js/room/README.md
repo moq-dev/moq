@@ -9,12 +9,12 @@
 
 Headless multi-participant rooms over [Media over QUIC](https://moq.dev/). A room is a path prefix. There is no service and no storage: joining is minting a moq-token rooted at that prefix (the LiveKit AccessToken analogue) and dialing the relay.
 
-Participants are discovered from the announce stream. Identity is the path before `camera` / `screen`. Each participant publishes:
+Participants are discovered from the announce stream. Identity is the path before `camera.hang` / `screen.hang`. Each participant publishes:
 
-- `{identity}/camera` — camera + microphone, hd/sd renditions
-- `{identity}/screen` — screenshare; its announce/unannounce is the share lifecycle
+- `{identity}/camera.hang`: camera + microphone, hd/sd renditions
+- `{identity}/screen.hang`: screenshare; its announce/unannounce is the share lifecycle
 
-This is the generic room layer extracted from [hang.live](https://hang.live) (roster, local/remote, `hang/*.json` metadata) and [iroh-live](https://github.com/n0-computer/iroh-live) (the ordered `chat` track `iroh-rooms` is moving onto the announce bus). Memes, 3D layout, chat UI, and accounts stay in the app. The native twin is [`moq-room`](../../rs/moq-room).
+This is the generic room layer extracted from [hang.live](https://hang.live) (roster, local/remote, `hang/*.json` metadata) and [iroh-live](https://github.com/n0-computer/iroh-live) (the `chat` track `iroh-rooms` is moving onto the announce bus). Memes, 3D layout, chat UI, and accounts stay in the app. The native twin is [`moq-room`](../../rs/moq-room).
 
 ## Install
 
@@ -60,10 +60,10 @@ local.microphoneEnabled.set(true);
 const room = new Room({ connection, identity });
 
 // room.remotes is a Map<identity, Remote>. Each Remote has camera/screen
-// Members; assign member.canvas and member.muted from the UI.
+// Members; assign member.canvas and set member.muted to false to play audio.
 ```
 
-hang.live should depend on this package for `Room`, `Local`, `Remote`, and the `hang/*.json` metadata tracks. Location stays an app-defined catalog extension (`TRACK.location`). hang.live's JSON chat (`TRACK.chat` = `hang/chat.json`) is also an extension; iroh-live's ordered UTF-8 track is `Chat.TRACK` (`"chat"`).
+hang.live should depend on this package for `Room`, `Local`, `Remote`, and the `hang/*.json` metadata tracks. Location stays an app-defined catalog extension (`TRACK.location`). hang.live's JSON chat (`TRACK.chat` = `hang/chat.json`) is also an extension; the JSON window track is `Chat.TRACK` (`"chat"`).
 
 ```ts
 import { Chat } from "@moq/room";
@@ -72,7 +72,10 @@ const publisher = Chat.Publisher.create(broadcast);
 publisher.send("hello");
 
 const subscriber = Chat.Subscriber.subscribe(broadcast.consume());
-const msg = await subscriber.recv();
+const event = await subscriber.recv(); // push, pop, or skip
+// Call publisher.finish() and subscriber.close() when done.
 ```
 
 A conferencing demo (no memes, no 3D, no chat UI) lives at [`demo/web/src/meet.html`](../../demo/web/src/meet.html).
+
+Room members start muted; set `member.muted` to `false` to play audio. Chat uses uncompressed JSON strings, a retained ten-second window with push/pop/skip events; it is not compatible with the raw UTF-8 iroh-live track. Empty normalized identities are rejected by `claims`.

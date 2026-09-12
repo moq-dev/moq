@@ -34,7 +34,7 @@ test("kindFromSegment and isKind", () => {
 	expect(isKind("chat")).toBe(false);
 });
 
-test("broadcastPath joins identity and kind without a .hang suffix", () => {
-	expect(broadcastPath(p("alice"), KIND.camera)).toBe(p("alice/camera"));
-	expect(broadcastPath(p("guest/uuid"), KIND.screen)).toBe(p("guest/uuid/screen"));
+test("broadcastPath joins identity and kind with a .hang suffix", () => {
+	expect(broadcastPath(p("alice"), KIND.camera)).toBe(p("alice/camera.hang"));
+	expect(broadcastPath(p("guest/uuid"), KIND.screen)).toBe(p("guest/uuid/screen.hang"));
 });

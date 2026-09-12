@@ -1,103 +1,106 @@
 /**
- * Text chat over a MoQ track, matching iroh-live's `iroh-rooms` and `moq-room::chat`.
- *
- * A broadcast carries chat on one well-known track, {@link TRACK}. Each message
- * is a single group holding one frame of UTF-8 text. The sender's identity
- * comes from the broadcast that carries the track, not from the payload.
- *
- * This is not hang.live's `hang/chat.json` snapshot; that stays an app-defined
- * catalog extension (`TRACK.chat` in the metadata module). This track is an
- * ordered append-log.
- *
+ * Chat over an uncompressed JSON window on `chat`, retaining ten seconds of messages.
+ * Sender identity comes from the broadcast, not the payload.
  * @module
  */
 
+import * as Json from "@moq/json";
 import type { Broadcast, Track } from "@moq/net";
+import { Effect, Signal } from "@moq/signals";
 
-/** Name of the track that carries chat messages. */
+/** Name of the track carrying the chat window. */
 export const TRACK = "chat";
-
-/**
- * Publisher tie-break priority for the chat track.
- *
- * Lower than audio and video, which are the tracks a viewer notices first when
- * the link is congested.
- */
+/** Delivery priority, below audio and video. */
 export const PRIORITY = 10;
+/** Milliseconds a published message stays in the window. */
+export const HISTORY = 10_000;
+/** A message entering, leaving, or missed from the window. */
+export type Event = Json.Window.Event<string>;
 
-/** Track settings for the chat track: ordered, because chat is read oldest first. */
+/** Track settings for the latest chat window. */
 export function info(): Pick<Track.Info, "priority" | "ordered"> {
-	return { priority: PRIORITY, ordered: true };
+	return { priority: PRIORITY, ordered: false };
 }
 
-/** A received chat message, with the time it arrived. */
-export type Message = {
-	/** The message text. */
-	text: string;
-	/** When this message was received locally. */
-	receivedAt: Date;
-};
-
-/** Writer half of a chat track. */
+/** Publishes chat messages and retires them after ten seconds, including while idle. */
 export class Publisher {
-	#track: Track.Producer;
+	#producer: Json.Window.Producer<string>;
+	#expires = new Signal<number[]>([]);
+	#signals = new Effect();
 
-	/** Creates the chat track on `broadcast` and returns a publisher for it. */
+	/** Create the chat track on a broadcast. */
 	static create(broadcast: Broadcast.Producer): Publisher {
 		return new Publisher(broadcast.createTrack(TRACK, info()));
 	}
 
-	/** Creates a publisher over an existing track producer. */
+	/** Publish a chat window over an existing track. */
 	constructor(track: Track.Producer) {
-		this.#track = track;
+		// Every edit restates the retained window, so a late reader never replays expired records.
+		this.#producer = new Json.Window.Producer(track, { opRatio: 0 });
+		this.#signals.run((effect) => {
+			const next = effect.get(this.#expires)[0];
+			if (next === undefined) return;
+			effect.timer(() => this.expire(), Math.max(0, next - performance.now()));
+		});
 	}
 
-	/**
-	 * Sends a text message on the chat track.
-	 *
-	 * Empty messages are dropped rather than written, because a subscriber
-	 * cannot tell them apart from a group it failed to read.
-	 */
+	/** Append nonempty text, first retiring messages whose history has elapsed. */
 	send(text: string): void {
-		if (text === "") return;
-		this.#track.writeString(text);
+		if (!text) return;
+		this.expire();
+		this.#producer.push(text);
+		this.#expires.update((expires) => [...expires, performance.now() + HISTORY]);
 	}
 
-	/**
-	 * Ends the chat track so subscribers drain already-sent messages, then see close.
-	 *
-	 * Dropping a publisher without this first is an abrupt teardown.
-	 */
+	/** Retire elapsed messages now; the publisher also schedules this automatically. */
+	expire(): void {
+		const now = performance.now();
+		const expires = this.#expires.peek();
+		let count = 0;
+		while (count < expires.length && expires[count] <= now) count++;
+		if (!count) return;
+		this.#producer.pop(count);
+		this.#expires.set(expires.slice(count));
+	}
+
+	/** Finish the track and cancel expiry timers. */
 	finish(): void {
-		this.#track.close();
+		this.#signals.close();
+		this.#producer.finish();
 	}
 }
 
-/** Reader half of a chat track. */
+/** Reads changes to a participant's retained chat window. */
 export class Subscriber {
 	#track: Track.Subscriber;
+	#consumer: Json.Window.Consumer<unknown>;
 
-	/** Subscribes to the chat track of `broadcast`. */
+	/** Subscribe to the newest retained window on a broadcast. */
 	static subscribe(broadcast: Broadcast.Consumer): Subscriber {
-		return new Subscriber(broadcast.track(TRACK).subscribe({ ordered: true }));
+		return new Subscriber(broadcast.track(TRACK).subscribe({ ordered: false }));
 	}
 
-	/** Creates a subscriber over an existing track subscriber. */
+	/** Read window changes from an existing subscription. */
 	constructor(track: Track.Subscriber) {
+		const latest = track.latest();
+		if (latest !== undefined) track.startAt(latest);
 		this.#track = track;
+		this.#consumer = new Json.Window.Consumer(track);
 	}
 
-	/**
-	 * Waits for the next chat message.
-	 *
-	 * Returns `undefined` once the track ends.
-	 */
-	async recv(): Promise<Message | undefined> {
-		for (;;) {
-			const text = await this.#track.readString();
-			if (text === undefined) return undefined;
-			if (text === "") continue;
-			return { text, receivedAt: new Date() };
+	/** Return the next window change, or undefined on clean completion; failures throw. */
+	async recv(): Promise<Event | undefined> {
+		const event = await this.#consumer.next();
+		if (!event) return undefined;
+		if ("push" in event) {
+			if (typeof event.push.value !== "string") throw new Error("chat record must be a string");
+			return { push: { index: event.push.index, value: event.push.value } };
 		}
+		return event;
+	}
+
+	/** Cancel the subscription and release buffered records. */
+	close(): void {
+		this.#track.close();
 	}
 }

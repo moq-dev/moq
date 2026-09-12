@@ -14,7 +14,6 @@
 /.claude/cache/
 /.claude/tmp/
 /.claude/worktrees/
-/.worktrees/
 
 # IDE
 .idea

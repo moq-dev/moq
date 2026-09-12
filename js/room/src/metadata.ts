@@ -5,7 +5,7 @@
  * Core carries `user.json` (id, name, avatar) and `preview.json` (presence
  * booleans). Location (and hang.live's JSON chat) ride the same catalog
  * section as app-defined extensions; this module does not serve or consume
- * them. The ordered UTF-8 `chat` track is `Chat.TRACK` (`"chat"`), not
+ * them. The JSON window `chat` track is `Chat.TRACK` (`"chat"`), not
  * `hang/chat.json`.
  *
  * @module
@@ -155,7 +155,7 @@ function serveSnapshot<T>(
 		const track = net.createTrack(name, { latencyMax: 86_400_000, priority: PRIORITY });
 		effect.cleanup(() => track.close());
 
-		const producer = new Json.Snapshot.Producer<T>({ track, initial: value(effect) });
+		const producer = new Json.Snapshot.Producer<T>({ track });
 		effect.cleanup(() => producer.finish());
 
 		effect.run((effect) => {
@@ -190,6 +190,10 @@ export function consume(broadcast: Watch.Broadcast): Consumed {
 		const catalog = effect.get(broadcast.out.catalog) as ExtendedCatalog | undefined;
 		const hang = catalog?.hang;
 		const active = effect.get(broadcast.out.active);
+		effect.cleanup(() => {
+			for (const field of Object.values(user)) field.set(undefined);
+			preview.set({});
+		});
 		if (!active || !hang) return;
 
 		if (hang.user) {

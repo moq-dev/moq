@@ -32,7 +32,7 @@ impl std::fmt::Debug for Event {
 
 /// Runs the announce loop and yields remote participant broadcasts.
 ///
-/// Skips paths that are not `{identity}/camera` or `{identity}/screen`, and
+/// Skips paths that are not `{identity}/camera.hang` or `{identity}/screen.hang`, and
 /// skips the local identity so a publisher does not see itself as a remote.
 pub struct Room {
 	announced: announce::Consumer,

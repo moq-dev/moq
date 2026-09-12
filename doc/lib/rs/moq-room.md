@@ -11,10 +11,10 @@ description: Headless multi-participant rooms over MoQ
 The native twin of [`@moq/room`](/lib/js/room). A room is a path prefix. There
 is no service and no storage: joining is minting a moq-token rooted at that
 prefix and dialing the relay. Participants are discovered from the announce
-stream. Identity is the path before `camera` / `screen`.
+stream. Identity is the path before `camera.hang` / `screen.hang`.
 
-Each participant publishes `{identity}/camera` (camera + mic) and
-`{identity}/screen` (screenshare; its announce/unannounce is the share
+Each participant publishes `{identity}/camera.hang` (camera + mic) and
+`{identity}/screen.hang` (screenshare; its announce/unannounce is the share
 lifecycle). Capture and encode stay in [`moq-video`](/lib/rs/moq-video) and
 [`moq-audio`](/lib/rs/moq-audio).
 
@@ -26,7 +26,7 @@ cargo add moq-room
 use moq_net::{Origin, Path};
 use moq_room::{Kind, Room, claims};
 
-let token = key.sign(&claims("meet/demo", "alice"), None)?;
+let token = key.sign(&claims("meet/demo", "alice")?, None)?;
 let origin = Origin::random().produce();
 let mut room = Room::new(&origin.consume(), Some(Path::new("alice").to_owned()));
 while let Some(event) = room.next().await {
@@ -36,7 +36,7 @@ while let Some(event) = room.next().await {
 }
 ```
 
-The ordered UTF-8 `chat` track (from iroh-live's `iroh-rooms`) is
+The JSON window `chat` track (using `moq-json::window`) is
 `moq_room::chat`. That is not hang.live's `hang/chat.json` catalog extension.
 
 Gossip, tickets, and 1:1 Call stay in iroh-live. API:

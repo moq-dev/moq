@@ -7,6 +7,8 @@
  * @module
  */
 
+import { Path } from "@moq/net";
+
 /** Claims a room participant should present. Compatible with `@moq/token` `Claims`. */
 export type Claims = {
 	/** Room prefix. Broadcast paths are relative to this. */
@@ -22,13 +24,14 @@ export type Claims = {
  *
  * `root` is the room prefix, `get` is `""` (everything under the room), and
  * `put` is `"<identity>/"` so a participant cannot publish at anyone else's
- * paths. hang.live grants `put` on the whole room subtree today; this is the
- * narrower grant.
+ * paths. Empty identities are rejected after normalization.
  */
 export function claims(room: string, identity: string): Claims {
+	identity = Path.from(identity);
+	if (!identity) throw new Error("participant identity must not be empty");
 	return {
 		root: room,
 		get: "",
-		put: identity.endsWith("/") ? identity : `${identity}/`,
+		put: `${identity}/`,
 	};
 }

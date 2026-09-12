@@ -61,7 +61,7 @@ pub fn parse(path: impl AsPath) -> Option<Parsed> {
 
 /// The broadcast path a participant publishes for `kind`.
 pub fn broadcast_path(identity: impl AsPath, kind: Kind) -> PathOwned {
-	identity.as_path().join(kind.as_str())
+	identity.as_path().join(format!("{}.hang", kind.as_str()))
 }
 
 #[cfg(test)]
@@ -122,11 +122,11 @@ mod tests {
 	}
 
 	#[test]
-	fn broadcast_path_joins_without_hang_suffix() {
-		assert_eq!(broadcast_path(p("alice"), Kind::Camera).as_str(), "alice/camera");
+	fn broadcast_path_joins_with_hang_suffix() {
+		assert_eq!(broadcast_path(p("alice"), Kind::Camera).as_str(), "alice/camera.hang");
 		assert_eq!(
 			broadcast_path(p("guest/uuid"), Kind::Screen).as_str(),
-			"guest/uuid/screen"
+			"guest/uuid/screen.hang"
 		);
 	}
 }

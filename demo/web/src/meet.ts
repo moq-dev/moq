@@ -39,7 +39,7 @@ relayEl.value = RELAY_URL;
 
 const ui = new Signals.Effect();
 const joined = new Signals.Signal(false);
-const tiles = new Map<string, HTMLElement>();
+const tiles = new Map<string, { element: HTMLElement; label: HTMLElement }>();
 const tilesEl = $("tiles");
 const emptyEl = $("tiles-empty");
 
@@ -65,14 +65,14 @@ function tile(id: string, title: string, canvas: HTMLCanvasElement, you = false)
 	canvas.className = "w-full h-auto bg-black";
 	canvas.style.aspectRatio = "16 / 9";
 	el.append(label, canvas);
-	tiles.set(id, el);
+	tiles.set(id, { element: el, label });
 	tilesEl.append(el);
 	emptyEl.hidden = true;
 	return el;
 }
 
 function dropTile(id: string): void {
-	tiles.get(id)?.remove();
+	tiles.get(id)?.element.remove();
 	tiles.delete(id);
 	emptyEl.hidden = tiles.size > 0;
 }
@@ -168,15 +168,23 @@ function join(): void {
 				if (!member) continue;
 				const key = `${id}/${member.kind}`;
 				live.add(key);
-				if (members.has(key)) continue;
-				members.set(key, member);
-				const canvas = document.createElement("canvas");
 				const title =
 					member.kind === "screen"
 						? `${effect.get(remote.user.name) ?? id} screen`
 						: (effect.get(remote.user.name) ?? id);
+				const previous = members.get(key);
+				if (previous === member) {
+					const existing = tiles.get(key);
+					if (existing) existing.label.textContent = title;
+					continue;
+				}
+				previous?.canvas.set(undefined);
+				dropTile(key);
+				members.set(key, member);
+				const canvas = document.createElement("canvas");
 				tile(key, title, canvas);
 				member.canvas.set(canvas);
+				member.muted.set(false);
 			}
 		}
 

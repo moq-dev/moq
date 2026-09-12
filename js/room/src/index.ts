@@ -4,8 +4,8 @@
  * A room is a path prefix. The connection URL and token root already carry it;
  * this package has no service and no storage. Participants are discovered from
  * the announce stream, identity is the path before `camera`/`screen`, and each
- * participant publishes `{identity}/camera` (camera + mic, hd/sd) and
- * `{identity}/screen` (screenshare, whose announce/unannounce is the share
+ * participant publishes `{identity}/camera.hang` (camera + mic, hd/sd) and
+ * `{identity}/screen.hang` (screenshare, whose announce/unannounce is the share
  * lifecycle).
  *
  * @module

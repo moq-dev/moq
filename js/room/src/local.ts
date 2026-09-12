@@ -16,7 +16,7 @@ type Established = Moq.Connection.Established;
 export interface LocalProps {
 	/** Live session, usually a `Connection.Reload`'s `established`. */
 	connection: GetterInit<Established | undefined>;
-	/** Participant identity; broadcast names are `{identity}/camera` and `{identity}/screen`. */
+	/** Participant identity; broadcast names are `{identity}/camera.hang` and `{identity}/screen.hang`. */
 	identity: GetterInit<Moq.Path.Valid>;
 	/** When true, announce the camera broadcast (joining the room). Defaults to false. */
 	enabled?: boolean | Signal<boolean>;
@@ -33,7 +33,7 @@ export interface LocalProps {
 /**
  * Local camera and screen broadcasts for one participant.
  *
- * Enable {@link enabled} to join (announce `{identity}/camera`). Camera and
+ * Enable {@link enabled} to join (announce `{identity}/camera.hang`). Camera and
  * microphone capture are separate knobs; the screenshare broadcast is
  * announced only while a share is live.
  */
@@ -66,9 +66,9 @@ export class Local {
 	/** Screen capture source. */
 	readonly share: Publish.Source.Screen;
 
-	/** Camera+mic broadcast at `{identity}/camera`. */
+	/** Camera+mic broadcast at `{identity}/camera.hang`. */
 	readonly camera: Publish.Broadcast;
-	/** Screenshare broadcast at `{identity}/screen`. */
+	/** Screenshare broadcast at `{identity}/screen.hang`. */
 	readonly screen: Publish.Broadcast;
 
 	/** Shared capture feeding the camera renditions. */
@@ -229,8 +229,9 @@ export class Local {
 			this.#screenVideo.set(source?.video);
 			this.#screenAudioSource.set(source?.audio);
 			const live = !!source?.video || !!source?.audio;
+			const wasLive = this.#screenLive.peek();
 			this.#screenLive.set(live);
-			if (!live && effect.get(this.screenEnabled)) {
+			if (!live && wasLive) {
 				this.screenEnabled.set(false);
 			}
 		});
@@ -255,6 +256,7 @@ export class Local {
 		return this.#preview;
 	}
 
+	/** Release this participant's subscriptions and media resources. */
 	close() {
 		this.#signals.close();
 	}

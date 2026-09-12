@@ -61,5 +61,5 @@ export function parse(path: Path.Valid): Parsed | undefined {
 
 /** The broadcast path a participant publishes for `kind`. */
 export function broadcastPath(identity: Path.Valid, kind: Kind): Path.Valid {
-	return Path.join(identity, Path.from(kind));
+	return Path.join(identity, Path.from(`${kind}.hang`));
 }

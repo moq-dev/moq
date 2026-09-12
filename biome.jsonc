@@ -19,7 +19,7 @@
 		// indexes. Exclude two kinds it can't handle:
 		//   - MPEG transport-stream fixtures whose `.ts` extension collides with TypeScript.
 		//   - SVG assets, which Biome routes to its HTML parser and rejects.
-		"includes": ["**", "!rs/moq-mux/src/container/ts/test_data", "!**/*.svg", "!.worktrees", "!.claude/worktrees"]
+		"includes": ["**", "!rs/moq-mux/src/container/ts/test_data", "!**/*.svg"]
 	},
 	"linter": {
 		"rules": {

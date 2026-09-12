@@ -16,23 +16,30 @@ type Established = Moq.Connection.Established;
 export class Member {
 	/** `camera` or `screen`. */
 	readonly kind: Kind;
-	/** Broadcast path relative to the room prefix. */
+	/** Broadcast path relative to the connection root. */
 	readonly path: Moq.Path.Valid;
 
 	/** Canvas to paint into; assign from the app. */
 	readonly canvas = new Signal<HTMLCanvasElement | undefined>(undefined);
-	/** Mute this member's audio. */
-	readonly muted = new Signal(false);
+	/** Mute this member's audio; defaults to true. */
+	readonly muted = new Signal(true);
 	/** Playback volume, 0..1. */
 	readonly volume = new Signal(0.5);
 
+	/** Watched broadcast and catalog. */
 	readonly broadcast: Watch.Broadcast;
+	/** Video decoding pipeline. */
 	readonly video: Watch.Video.Decoder;
+	/** Audio decoding pipeline. */
 	readonly audio: Watch.Audio.Decoder;
+	/** Canvas video renderer. */
 	readonly renderer: Watch.Video.Renderer;
+	/** Speaker audio output. */
 	readonly emitter: Watch.Audio.Emitter;
 
+	/** Published participant identity and display fields. */
 	readonly user: Readonlys<UserInput>;
+	/** Published presence fields. */
 	readonly preview: Getter<Preview>;
 
 	#videoEnabled = new Signal(false);
@@ -82,7 +89,6 @@ export class Member {
 
 		this.renderer = new Watch.Video.Renderer(this.video, {
 			canvas: this.canvas,
-			visible: "always",
 		});
 		this.emitter = new Watch.Audio.Emitter(this.audio, {
 			volume: this.volume,
@@ -106,6 +112,7 @@ export class Member {
 		this.#signals.cleanup(() => this.#metadata.close());
 	}
 
+	/** Release this participant's subscriptions and media resources. */
 	close() {
 		this.#signals.close();
 	}
@@ -139,9 +146,13 @@ export class Remote {
 	};
 	readonly #preview = new Signal<Preview>({});
 
+	/** The live camera member, if announced. */
 	readonly camera: Getter<Member | undefined>;
+	/** The live screen member, if announced. */
 	readonly screen: Getter<Member | undefined>;
+	/** Published participant identity and display fields. */
 	readonly user: Readonlys<UserInput>;
+	/** Published presence fields. */
 	readonly preview: Getter<Preview>;
 
 	#connection: Getter<Established | undefined>;
@@ -192,6 +203,7 @@ export class Remote {
 		return !this.#camera.peek() && !this.#screen.peek();
 	}
 
+	/** Release this participant's subscriptions and media resources. */
 	close() {
 		this.#camera.peek()?.close();
 		this.#screen.peek()?.close();
