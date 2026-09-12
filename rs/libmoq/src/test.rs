@@ -3771,10 +3771,10 @@ fn encode_video_bitrate_caps_the_reservation() {
 	assert_eq!(grant(reservation), Some(1_000_000));
 
 	assert_eq!(moq_reservation_close(reservation), 0);
-	assert_eq!(moq_encode_video_finish(producer), 0);
-	assert_eq!(moq_bandwidth_close(bandwidth), 0);
 	assert_eq!(moq_consume_track_close(sub), 0);
 	let _ = cb.recv_terminal();
+	assert_eq!(moq_encode_video_finish(producer), 0);
+	assert_eq!(moq_bandwidth_close(bandwidth), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);

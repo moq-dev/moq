@@ -1267,7 +1267,8 @@ pub unsafe extern "C" fn moq_origin_create_broadcast(origin: u32, path: *const c
 ///
 /// `pattern` is in the path Pattern dialect; a prefix is spelled `foo/**`.
 /// Until wildcard advertisements land, anything but a prefix-shaped pattern
-/// is refused. `on_request` is invoked with a positive request handle for each
+/// is refused. `on_request` is required: a NULL callback is refused before the
+/// route is advertised. It is invoked with a positive request handle for each
 /// pending broadcast, then exactly once more with a terminal code: `0` (stopped
 /// cleanly, including after [moq_origin_dynamic_close]) or a negative error.
 /// After the terminal (`<= 0`) callback, `user_data` is never touched again.
@@ -1290,9 +1291,9 @@ pub unsafe extern "C" fn moq_origin_dynamic(
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
+		let on_request = on_request.ok_or(Error::InvalidPointer)?;
 		let pattern: moq_net::Pattern = unsafe { ffi::parse_str(pattern, pattern_len)? }.parse()?;
 		let route = unsafe { parse_route(route)? };
-		let on_request = on_request.ok_or(Error::InvalidPointer)?;
 		let on_request = unsafe { ffi::OnStatus::new(user_data, Some(on_request)) };
 		State::lock().origin.dynamic(origin, pattern, route, on_request)
 	})

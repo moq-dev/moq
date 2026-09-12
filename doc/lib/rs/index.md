@@ -63,7 +63,7 @@ let mut broadcast = origin.create_broadcast("my-stream.hang")?;
 // moq-mux (from a container) or moq-video / moq-audio (from a device) fill it.
 broadcast.announce(Default::default())?;
 // The route retracts on `unannounce()` or when the broadcast ends. To serve a whole
-// subtree on demand instead, `origin.dynamic("room/", Default::default())?` yields
+// subtree on demand instead, `origin.dynamic("room/**".parse()?, Default::default())?` yields
 // each requested path for the application to accept or reject.
 ```
 
