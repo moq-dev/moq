@@ -39,3 +39,6 @@ export function createSetter<T>(signal: Signal<T>): SolidSetter<T> {
 export function createPair<T>(signal: Signal<T>): SolidSignal<T> {
 	return [createAccessor(signal), createSetter(signal)];
 }
+
+/** @deprecated Use {@link createAccessor}. Default export kept for hang.live. */
+export default createAccessor;

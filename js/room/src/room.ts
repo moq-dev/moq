@@ -5,7 +5,7 @@
  * @module
  */
 
-import type * as Moq from "@moq/net";
+import * as Moq from "@moq/net";
 import { Effect, type Getter, type GetterInit, getter, Signal } from "@moq/signals";
 import { type Kind, parse } from "./path.ts";
 import { Remote } from "./remote.ts";
@@ -24,6 +24,12 @@ export interface RoomProps {
 	identity?: GetterInit<Moq.Path.Valid | undefined>;
 	/** When false, the announce loop is idle. Defaults to true. */
 	enabled?: GetterInit<boolean>;
+	/**
+	 * Announce prefix relative to the connection URL. Defaults to empty (the
+	 * whole root). A connection whose URL is broader than one room (a preview
+	 * of several rooms) passes the room name here.
+	 */
+	prefix?: GetterInit<Moq.Path.Valid | undefined>;
 }
 
 /**
@@ -34,6 +40,7 @@ export class Room {
 	readonly connection: Moq.Connection.Reload;
 	readonly identity: Getter<Moq.Path.Valid | undefined>;
 	readonly enabled: Getter<boolean>;
+	readonly prefix: Getter<Moq.Path.Valid | undefined>;
 
 	#remotes = new Signal(new Map<Moq.Path.Valid, Remote>());
 	#signals = new Effect();
@@ -42,11 +49,13 @@ export class Room {
 		this.connection = props.connection;
 		this.identity = getter(props.identity);
 		this.enabled = getter(props.enabled ?? true);
+		this.prefix = getter(props.prefix);
 
 		this.#signals.run((effect) => {
 			if (!effect.get(this.enabled)) return;
 
-			const announced = this.connection.announced();
+			const prefix = effect.get(this.prefix) ?? Moq.Path.empty();
+			const announced = this.connection.announced(prefix);
 			effect.cleanup(() => announced.close());
 
 			effect.spawn(this.#run.bind(this, announced, effect));

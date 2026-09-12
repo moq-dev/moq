@@ -20,6 +20,12 @@ export interface LocalProps {
 	identity: GetterInit<Moq.Path.Valid>;
 	/** When true, announce the camera broadcast (joining the room). Defaults to false. */
 	enabled?: boolean | Signal<boolean>;
+	/** Capture the camera. Pass a Signal to share it with the app (hang.live Settings). */
+	cameraEnabled?: boolean | Signal<boolean>;
+	/** Capture the microphone. Pass a Signal to share it with the app. */
+	microphoneEnabled?: boolean | Signal<boolean>;
+	/** Prompt for and capture a screen. Pass a Signal to share it with the app. */
+	screenEnabled?: boolean | Signal<boolean>;
 	/** Seed the published user.json fields. */
 	user?: UserProps;
 }
@@ -44,6 +50,11 @@ export class Local {
 	readonly microphoneEnabled: Signal<boolean>;
 	/** Prompt for and capture a screen. Unannounce when the share ends. */
 	readonly screenEnabled: Signal<boolean>;
+
+	/** True while the local participant is composing a chat message. */
+	readonly typing: Signal<boolean>;
+	/** True while a chat message is live. */
+	readonly chatting: Signal<boolean>;
 
 	/** Published user.json fields. */
 	readonly user: ReturnType<typeof userFields>;
@@ -89,9 +100,11 @@ export class Local {
 	constructor(props: LocalProps) {
 		this.identity = getter(props.identity);
 		this.enabled = Signal.from(props.enabled ?? false);
-		this.cameraEnabled = new Signal(false);
-		this.microphoneEnabled = new Signal(false);
-		this.screenEnabled = new Signal(false);
+		this.cameraEnabled = Signal.from(props.cameraEnabled ?? false);
+		this.microphoneEnabled = Signal.from(props.microphoneEnabled ?? false);
+		this.screenEnabled = Signal.from(props.screenEnabled ?? false);
+		this.typing = new Signal(false);
+		this.chatting = new Signal(false);
 		this.user = userFields(props.user);
 
 		const connection = getter(props.connection);
@@ -229,6 +242,8 @@ export class Local {
 				screen: effect.get(this.#screenLive),
 				name: effect.get(this.user.name),
 				avatar: effect.get(this.user.avatar),
+				chat: effect.get(this.chatting),
+				typing: effect.get(this.typing),
 			});
 		});
 
