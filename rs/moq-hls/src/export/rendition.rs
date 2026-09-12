@@ -103,29 +103,39 @@ impl Media {
 		!self.handle.lock().expect("media lock poisoned").waiting
 	}
 
-	fn binding(&self, window: &segments::Producer) -> Arc<moq_mux::Binding> {
-		self.sync(window);
-		self.handle.lock().expect("media lock poisoned").binding.clone()
-	}
-
-	fn sync(&self, window: &segments::Producer) {
+	/// Drop listed rows and rebind when a sibling publisher has been replaced; return the
+	/// binding those rows belong to. Fetch from this handle, not a later `sync`: a replacement
+	/// that lands between a range lookup and `track` would otherwise serve the old groups.
+	fn sync(&self, window: &segments::Producer) -> Arc<moq_mux::Binding> {
 		let Some((source, rel)) = &self.sibling else {
-			return;
+			return self.handle.lock().expect("media lock poisoned").binding.clone();
 		};
 		let mut handle = self.handle.lock().expect("media lock poisoned");
 		match handle.binding.poll_broadcast(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(broadcast)) if broadcast.is_closed() => {
 				// The bound sibling ended (a different first hop replaces the publisher with
-				// Dropped). Rows listed for it must not be served from the replacement.
+				// Dropped). Origin finish()es that spliced front, so is_finished() cannot
+				// tell a rival publisher from a clean VOD end. Rows listed for it must not
+				// be served from the replacement.
 				window.clear();
 				if let Ok(next) = source.bind(Some(rel)) {
-					handle.binding = Arc::new(next)
+					handle.binding = Arc::new(next);
 				}
 				handle.waiting = true;
 			}
 			Poll::Ready(Ok(_)) => handle.waiting = false,
-			Poll::Ready(Err(_)) | Poll::Pending => {}
+			Poll::Ready(Err(_)) => {
+				// Binding never retries a failed request. Re-issue so a publisher that
+				// appears after this Unroutable can still recover the rendition. Do not
+				// set waiting: an initial Unroutable (announce still in flight) must
+				// still list the catalog's rows.
+				if let Ok(next) = source.bind(Some(rel)) {
+					handle.binding = Arc::new(next);
+				}
+			}
+			Poll::Pending => {}
 		}
+		handle.binding.clone()
 	}
 }
 
@@ -510,15 +520,18 @@ impl Rendition {
 		})
 	}
 
-	/// The media track handle on the broadcast serving this rendition, with that bound
-	/// broadcast so a fetch can tell a gone publisher from a live failure.
+	/// The media track handle on `binding`, with that bound broadcast so a fetch can tell a
+	/// gone publisher from a live failure.
 	///
-	/// A sibling is bound when the rendition is created and rebound if that publisher is
-	/// replaced. Collecting the answer never looks the path up ad hoc: a same-path republish
-	/// installs a new broadcast whose group numbering restarts, and those bytes must not be
-	/// served under rows produced for the publisher it replaced.
-	async fn track(&self) -> Option<(moq_net::broadcast::Consumer, moq_net::track::Consumer)> {
-		let broadcast = self.media.binding(&self.live).broadcast().await.ok()?;
+	/// `binding` is the handle captured with the rows being served. Collecting the answer
+	/// never looks the path up ad hoc: a same-path republish installs a new broadcast whose
+	/// group numbering restarts, and those bytes must not be served under rows produced for
+	/// the publisher it replaced.
+	async fn track(
+		&self,
+		binding: &moq_mux::Binding,
+	) -> Option<(moq_net::broadcast::Consumer, moq_net::track::Consumer)> {
+		let broadcast = binding.broadcast().await.ok()?;
 		let track = broadcast.track(&self.name).ok()?;
 		Some((broadcast, track))
 	}
@@ -528,7 +541,7 @@ impl Rendition {
 	/// For inline-parameter-set codecs (no catalog `description`), the parameter sets are
 	/// resolved by fetching the newest keyframe group first.
 	pub async fn init(&self) -> Result<Option<Bytes>> {
-		self.media.sync(&self.live);
+		let binding = self.media.sync(&self.live);
 		let mut cache = self.init.lock().await;
 		if let Some(bytes) = cache.as_ref() {
 			return Ok(Some(bytes.clone()));
@@ -544,7 +557,7 @@ impl Rendition {
 				let Some(sequence) = self.live.latest_keyframe_group() else {
 					return Ok(None);
 				};
-				let Some((broadcast, track)) = self.track().await else {
+				let Some((broadcast, track)) = self.track(&binding).await else {
 					return Ok(None);
 				};
 				let Ok(mut group) = fetch(&track, sequence, &broadcast).await? else {
@@ -571,7 +584,7 @@ impl Rendition {
 	/// the playlist window, is a gap for this rendition, or its groups already left the relay
 	/// cache.
 	pub async fn segment(&self, segment: u64) -> Result<Option<Bytes>> {
-		self.media.sync(&self.live);
+		let binding = self.media.sync(&self.live);
 		let Some(ranges) = self.live.segment_ranges(segment) else {
 			return Ok(None);
 		};
@@ -595,7 +608,7 @@ impl Rendition {
 			return Ok(None);
 		}
 
-		let Some((broadcast, track)) = self.track().await else {
+		let Some((broadcast, track)) = self.track(&binding).await else {
 			return Ok(None);
 		};
 
