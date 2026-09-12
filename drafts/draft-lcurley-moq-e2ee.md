@@ -321,6 +321,15 @@ This document requests no registrations.
 
 --- back
 
+# Changelog
+{:numbered="false"}
+
+## draft-lcurley-moq-e2ee-00
+{:numbered="false"}
+
+- Initial `moq-e2ee-01` profile: out-of-band credential with profile, HKDF physical names and keys, AES-128-GCM payloads, identity bounds, typed failures, and shared primitive vectors.
+
+
 # Acknowledgments
 {:numbered="false"}
 
