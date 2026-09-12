@@ -689,23 +689,30 @@ fn is_unservable(err: &moq_net::Error, broadcast: &moq_net::broadcast::Consumer)
 /// True if a moq-net error means the group left (or hasn't reached) the relay cache: a 404, not
 /// a 500.
 ///
-/// Matches the named variants a moq-lite stream reset decodes to after
-/// [`StreamError::from_code`](moq_net::StreamError::from_code). IETF has no stream-reset
-/// value for a miss (`ietf::error::to_stream_code` sends INTERNAL_ERROR), so one still
-/// arrives as [`moq_net::Error::Remote`]`(0)` and answers 500.
+/// Matches the named local variants and the stream-scoped codes a moq-lite reset
+/// decodes to after [`StreamError::from_code`](moq_net::StreamError::from_code). IETF has
+/// no stream-reset value for a miss (`ietf::error::to_stream_code` sends INTERNAL_ERROR),
+/// so one arrives as `Error::Stream(StreamError::Internal)` and answers 500. Inspect the
+/// variant, not `Error::to_code`: session unauthorized and stream delivery-timeout are
+/// also 2 in their own registries.
 fn is_cache_miss(err: &moq_net::Error) -> bool {
 	matches!(
 		err,
-		moq_net::Error::NotFound | moq_net::Error::Old | moq_net::Error::Evicted
+		moq_net::Error::NotFound
+			| moq_net::Error::Old
+			| moq_net::Error::Evicted
+			| moq_net::Error::Stream(
+				moq_net::StreamError::NotFound | moq_net::StreamError::Old | moq_net::StreamError::Evicted
+			)
 	)
 }
 
 /// True if the bound publisher is gone, so a listed segment can never be served.
 ///
-/// A disconnect that crossed a session arrives as [`moq_net::Error::Remote`]`(0)` (or
-/// [`moq_net::Error::Cancel`] on main); locally it is [`moq_net::Error::Dropped`]. The
-/// bound broadcast being closed is the condition: matching `Remote(0)` alone would also
-/// 404 an IETF stream-reset miss, which is the same code while the publisher is still live.
+/// A disconnect that crossed a session arrives as `Error::Session(SessionError::Cancel)`;
+/// locally it is [`moq_net::Error::Dropped`]. The bound broadcast being closed is the
+/// condition: matching a session cancel alone would 404 a clean close while the publisher
+/// is still live.
 fn is_gone_publisher(err: &moq_net::Error, broadcast: &moq_net::broadcast::Consumer) -> bool {
 	broadcast.is_closed() || matches!(err, moq_net::Error::Dropped | moq_net::Error::Cancel)
 }
@@ -760,6 +767,8 @@ mod tests {
 			moq_net::Error::Unauthorized,
 			moq_net::Error::ProtocolViolation,
 			moq_net::Error::Timeout,
+			moq_net::Error::from(moq_net::SessionError::Unauthorized),
+			moq_net::Error::from(moq_net::StreamError::DeliveryTimeout),
 		] {
 			assert!(!is_cache_miss(&err), "{err:?} locally");
 			assert!(!is_cache_miss(&over_lite(&err)), "{err:?} over lite");

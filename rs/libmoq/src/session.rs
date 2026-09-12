@@ -194,6 +194,9 @@ impl Session {
 
 fn map_connect_error(err: moq_tokio::Error) -> Error {
 	match err {
+		// Local auth stays the dedicated C status. A scoped protocol close is `Error::Moq`
+		// so `moq_error_protocol` can recover the registry and code.
+		moq_tokio::Error::MoqNet(moq_net::Error::Unauthorized) => Error::Unauthorized,
 		moq_tokio::Error::MoqNet(err) => err.into(),
 		err => match err.connect_error() {
 			Some(moq_tokio::ConnectError::Unauthorized) => Error::Unauthorized,
@@ -220,7 +223,11 @@ mod tests {
 		));
 		assert!(matches!(
 			map_connect_error(moq_net::Error::Unauthorized.into()),
-			Error::Moq(moq_net::Error::Unauthorized)
+			Error::Unauthorized
+		));
+		assert!(matches!(
+			map_connect_error(moq_net::Error::from(moq_net::SessionError::Unauthorized).into()),
+			Error::Moq(moq_net::Error::Session(moq_net::SessionError::Unauthorized))
 		));
 		assert!(matches!(
 			map_connect_error(moq_tokio::Error::ConnectFailed),
@@ -228,6 +235,11 @@ mod tests {
 		));
 		assert_eq!(Error::Unauthorized.code(), -34);
 		assert_eq!(Error::Forbidden.code(), -35);
+		assert_eq!(map_connect_error(moq_net::Error::Unauthorized.into()).code(), -34);
+		assert_eq!(
+			map_connect_error(moq_net::Error::from(moq_net::SessionError::Unauthorized).into()).code(),
+			-2
+		);
 		assert_eq!(map_connect_error(moq_tokio::Error::ConnectFailed).code(), -5);
 	}
 }
