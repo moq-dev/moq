@@ -368,11 +368,12 @@ test("frame sources retain their dimensions and nominal frame rate", async () =>
 	}
 });
 
-test("a throttled encoder marks its rendition stalled", async () => {
+test.each(["encoder lag", "quiet startup"])("marks a rendition stalled for %s", async (reason) => {
+	const clock = spyOn(performance, "now").mockReturnValue(0);
 	class DelayedVideoEncoder {
 		static probes = 0;
 		state: CodecState = "unconfigured";
-		#output: EncodedVideoCallback;
+		#output: VideoEncoderInit["output"];
 
 		constructor(init: VideoEncoderInit) {
 			this.#output = init.output;
@@ -460,16 +461,22 @@ test("a throttled encoder marks its rendition stalled", async () => {
 		await settle();
 		expect(encoder.out.catalog.peek()?.stalled).toBeUndefined();
 
-		// Four frames at 30fps is more than three frame intervals of unaccepted capture.
-		for (let i = 0; i < 4; i++) {
-			controller.enqueue(new Frame(i * 33_333) as unknown as VideoFrame);
-			await new Promise((resolve) => setTimeout(resolve, 10));
+		if (reason === "encoder lag") {
+			// Five frames at 30fps exceed three frame intervals of unaccepted capture.
+			for (let i = 0; i < 5; i++) {
+				controller.enqueue(new Frame(i * 33_333) as unknown as VideoFrame);
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+		} else {
+			clock.mockReturnValue(200);
+			await new Promise((resolve) => setTimeout(resolve, 60));
 		}
 		await settle();
 		expect(encoder.out.catalog.peek()?.stalled).toBe(true);
 	} finally {
 		encoder.close();
 		fanout.close();
+		clock.mockRestore();
 		if (original) Object.defineProperty(globalThis, "VideoEncoder", original);
 		else Reflect.deleteProperty(globalThis, "VideoEncoder");
 	}

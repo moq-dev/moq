@@ -169,7 +169,7 @@ impl<E: CatalogExt> Producer<E> {
 		Ok(())
 	}
 
-	/// Record extra delay (a slow encode) so the catalog `stalled` flag can follow it.
+	/// Record the encode duration before publishing its frames so the catalog can report a stall.
 	pub fn observe_lag(&mut self, lag: std::time::Duration) -> Result<(), Error> {
 		match &mut self.codecs {
 			Codecs::H264 { import, .. } => import.observe_lag(lag)?,
@@ -437,6 +437,32 @@ fn capture_stopped<E: CatalogExt>(producer: &mut Producer<E>) -> Result<(), Erro
 	producer.discontinuity()
 }
 
+// Keep observing silence while source setup or an encode is pending. The work
+// future stays pinned across ticks, so a slow operation is never restarted.
+#[cfg(feature = "capture")]
+async fn wait_capture<E: CatalogExt, T>(
+	producer: &mut Producer<E>,
+	demand: &moq_net::track::Demand,
+	work: impl std::future::Future<Output = Result<T, Error>>,
+) -> Result<Option<T>, Error> {
+	let mut work = std::pin::pin!(work);
+	let mut timer = tokio::time::interval(hang::catalog::stalled::DEFAULT_INTERVAL);
+	loop {
+		tokio::select! {
+			biased;
+			res = demand.unused() => {
+				if let Err(err) = res {
+					log_track_ended(err);
+				}
+				producer.idle()?;
+				return Ok(None);
+			}
+			_ = timer.tick() => producer.tick()?,
+			res = &mut work => return res.map(Some),
+		}
+	}
+}
+
 /// Async capture/encode loop. Opens the camera while at least one viewer is
 /// watching and releases it when the last one leaves.
 ///
@@ -469,7 +495,9 @@ async fn capture_loop<E: CatalogExt>(
 		}
 
 		// Open the camera and an encoder sized to its negotiated mode.
-		let mut camera = capture::open(capture).await?;
+		let Some(mut camera) = wait_capture(producer, demand, capture::open(capture)).await? else {
+			continue;
+		};
 		// Prefer an explicit --fps, otherwise the camera's reported rate, falling
 		// back only if the backend doesn't expose one.
 		let framerate = capture
@@ -482,7 +510,9 @@ async fn capture_loop<E: CatalogExt>(
 		encoder_config.kind = encode.kind.clone();
 		encoder_config.color = camera.color();
 		// Off macOS this opens the encoder on a dedicated thread; see `sink`.
-		let mut encoder = Sink::open(&encoder_config).await?;
+		let Some(mut encoder) = wait_capture(producer, demand, Sink::open(&encoder_config)).await? else {
+			continue;
+		};
 		// Force an IDR on the first frame of each (re)open so a viewer subscribing
 		// after an idle gap can start decoding immediately.
 		let mut force_keyframe = true;
@@ -506,7 +536,7 @@ async fn capture_loop<E: CatalogExt>(
 			// Race the next frame against the last viewer leaving so we release the
 			// camera promptly when demand drops. `biased` checks demand first so an
 			// unwatched track stops before reading another frame.
-			let interval = hang::catalog::stalled_interval_from_fps(Some(framerate as f64));
+			let interval = hang::catalog::stalled::interval_from_fps(Some(framerate as f64));
 			let frame = tokio::select! {
 				biased;
 				res = demand.unused() => {
@@ -544,10 +574,12 @@ async fn capture_loop<E: CatalogExt>(
 				force_keyframe = false;
 			}
 			let started = Instant::now();
-			let encoded = encoder.encode(frame).await?;
+			let Some(encoded) = wait_capture(producer, demand, encoder.encode(frame)).await? else {
+				break;
+			};
 			let lag = started.elapsed();
-			producer.publish(&encoded)?;
 			producer.observe_lag(lag)?;
+			producer.publish(&encoded)?;
 		}
 
 		// Drop the camera (LED off) and encoder before waiting for the next viewer.

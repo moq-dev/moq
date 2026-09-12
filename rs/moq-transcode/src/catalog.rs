@@ -205,6 +205,13 @@ pub(crate) async fn rung_entry(
 	Ok(entry)
 }
 
+/// Rungs inherit the state of the rendition the pipeline actually decodes.
+pub(crate) fn inherit_stalled(rungs: &mut [Published], source: &VideoConfig) {
+	for published in rungs {
+		published.entry.stalled = source.stalled;
+	}
+}
+
 /// Fill the derivative catalog: rung entries plus, when `source_rel` is set,
 /// every source rendition referenced through it (so players fetch those tracks
 /// from the source broadcast directly). Called again on each source catalog
@@ -223,20 +230,8 @@ pub(crate) fn populate(
 	out.video.rotation = source.video.rotation;
 	out.video.flip = source.video.flip;
 
-	// A rung cannot be healthier than its input: inherit a stalled source onto
-	// every derived rendition so a viewer switches away from the whole ladder.
-	let inherited = source
-		.video
-		.renditions
-		.values()
-		.any(|config| config.broadcast.is_none() && config.stalled == Some(true));
-
 	for published in rungs {
-		let mut entry = published.entry.clone();
-		if inherited {
-			entry.stalled = Some(true);
-		}
-		out.video.insert(&published.rung.name, entry)?;
+		out.video.insert(&published.rung.name, published.entry.clone())?;
 	}
 
 	let Some(rel) = source_rel else {
@@ -298,7 +293,7 @@ mod tests {
 		src.stalled = Some(true);
 		source_catalog.video.insert("video", src).unwrap();
 
-		let published = [Published {
+		let mut published = [Published {
 			rung: Resolved {
 				name: "video/360p".into(),
 				height: 360,
@@ -309,12 +304,20 @@ mod tests {
 			entry: source(640, 360, Some(600_000)),
 		}];
 
+		inherit_stalled(&mut published, &source_catalog.video.renditions["video"]);
 		let mut out = moq_mux::catalog::hang::Catalog::default();
 		populate(&mut out, &source_catalog, &published, None).unwrap();
 		assert_eq!(
 			out.video.renditions.get("video/360p").and_then(|c| c.stalled),
 			Some(true)
 		);
+
+		// A different local rendition may stay stalled after the selected input recovers.
+		let healthy = source(1920, 1080, Some(5_000_000));
+		source_catalog.video.insert("healthy", healthy.clone()).unwrap();
+		inherit_stalled(&mut published, &healthy);
+		populate(&mut out, &source_catalog, &published, None).unwrap();
+		assert_eq!(out.video.renditions["video/360p"].stalled, None);
 	}
 
 	#[test]

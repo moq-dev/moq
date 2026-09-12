@@ -25,6 +25,8 @@ pub const DEFAULT_INTERVAL: Duration = Duration::from_millis(33);
 /// One observation of a rendition's source versus what the transport has accepted.
 #[derive(Clone, Copy, Debug)]
 pub struct Sample {
+	/// This observation completes a newly accepted frame.
+	pub frame: bool,
 	/// Newest captured/source timestamp minus newest timestamp handed to the transport.
 	pub media_lag: Duration,
 	/// Wall time since the source last delivered a frame for this rendition.
@@ -39,12 +41,12 @@ pub struct Sample {
 
 /// Hysteresis around the catalog `stalled` bit.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Stalled {
+pub struct Detector {
 	on: bool,
 	recover: u32,
 }
 
-impl Stalled {
+impl Detector {
 	/// A detector that starts unstalled.
 	pub fn new() -> Self {
 		Self::default()
@@ -85,6 +87,9 @@ impl Stalled {
 			return false;
 		}
 
+		if !sample.frame {
+			return false;
+		}
 		self.recover = self.recover.saturating_add(1);
 		if self.recover < CLEAR_FRAMES {
 			return false;
@@ -112,7 +117,10 @@ pub fn interval_from_fps(fps: Option<f64>) -> Duration {
 	let Some(fps) = fps.filter(|fps| fps.is_finite() && *fps > 0.0) else {
 		return DEFAULT_INTERVAL;
 	};
-	Duration::from_secs_f64(1.0 / fps)
+	Duration::try_from_secs_f64(1.0 / fps)
+		.ok()
+		.filter(|value| !value.is_zero())
+		.unwrap_or(DEFAULT_INTERVAL)
 }
 
 #[cfg(test)]
@@ -121,6 +129,7 @@ mod tests {
 
 	fn sample(lag: Duration) -> Sample {
 		Sample {
+			frame: true,
 			media_lag: lag,
 			quiet: Duration::ZERO,
 			interval: Duration::from_millis(33),
@@ -131,6 +140,7 @@ mod tests {
 
 	fn quiet(gap: Duration) -> Sample {
 		Sample {
+			frame: true,
 			media_lag: Duration::ZERO,
 			quiet: gap,
 			interval: Duration::from_millis(33),
@@ -141,8 +151,9 @@ mod tests {
 
 	#[test]
 	fn idle_is_never_stalled() {
-		let mut stalled = Stalled::new();
+		let mut stalled = Detector::new();
 		assert!(!stalled.observe(Sample {
+			frame: true,
 			idle: true,
 			demand: true,
 			media_lag: Duration::from_secs(10),
@@ -154,8 +165,9 @@ mod tests {
 
 	#[test]
 	fn no_demand_is_never_stalled() {
-		let mut stalled = Stalled::new();
+		let mut stalled = Detector::new();
 		assert!(!stalled.observe(Sample {
+			frame: true,
 			demand: false,
 			idle: false,
 			media_lag: Duration::from_secs(10),
@@ -167,7 +179,7 @@ mod tests {
 
 	#[test]
 	fn lag_past_the_threshold_sets_the_flag() {
-		let mut stalled = Stalled::new();
+		let mut stalled = Detector::new();
 		assert!(!stalled.observe(sample(Duration::from_millis(99))));
 		assert!(stalled.observe(sample(Duration::from_millis(100))));
 		assert_eq!(stalled.flag(), Some(true));
@@ -175,14 +187,14 @@ mod tests {
 
 	#[test]
 	fn a_quiet_source_sets_the_flag() {
-		let mut stalled = Stalled::new();
+		let mut stalled = Detector::new();
 		assert!(stalled.observe(quiet(Duration::from_millis(100))));
 		assert!(stalled.get());
 	}
 
 	#[test]
 	fn clearing_needs_a_run_of_on_time_frames() {
-		let mut stalled = Stalled::new();
+		let mut stalled = Detector::new();
 		assert!(stalled.observe(sample(Duration::from_millis(200))));
 
 		assert!(!stalled.observe(sample(Duration::from_millis(10))));
@@ -196,7 +208,7 @@ mod tests {
 
 	#[test]
 	fn a_late_frame_resets_recovery() {
-		let mut stalled = Stalled::new();
+		let mut stalled = Detector::new();
 		assert!(stalled.observe(sample(Duration::from_millis(200))));
 		assert!(!stalled.observe(sample(Duration::from_millis(10))));
 		assert!(!stalled.observe(sample(Duration::from_millis(10))));
@@ -210,9 +222,10 @@ mod tests {
 
 	#[test]
 	fn dropping_demand_clears_immediately() {
-		let mut stalled = Stalled::new();
+		let mut stalled = Detector::new();
 		assert!(stalled.observe(sample(Duration::from_millis(200))));
 		assert!(stalled.observe(Sample {
+			frame: true,
 			demand: false,
 			idle: false,
 			media_lag: Duration::from_millis(200),
@@ -224,9 +237,10 @@ mod tests {
 
 	#[test]
 	fn releasing_the_camera_clears_immediately() {
-		let mut stalled = Stalled::new();
+		let mut stalled = Detector::new();
 		assert!(stalled.observe(sample(Duration::from_millis(200))));
 		assert!(stalled.observe(Sample {
+			frame: true,
 			idle: true,
 			demand: true,
 			media_lag: Duration::from_millis(200),
@@ -238,7 +252,7 @@ mod tests {
 
 	#[test]
 	fn on_time_frames_do_not_flip_a_healthy_rendition() {
-		let mut stalled = Stalled::new();
+		let mut stalled = Detector::new();
 		for _ in 0..10 {
 			assert!(!stalled.observe(sample(Duration::from_millis(10))));
 		}
@@ -247,8 +261,9 @@ mod tests {
 
 	#[test]
 	fn a_zero_interval_uses_the_default() {
-		let mut stalled = Stalled::new();
+		let mut stalled = Detector::new();
 		assert!(stalled.observe(Sample {
+			frame: true,
 			media_lag: DEFAULT_INTERVAL.saturating_mul(SET_INTERVALS) + Duration::from_millis(1),
 			quiet: Duration::ZERO,
 			interval: Duration::ZERO,
@@ -259,7 +274,21 @@ mod tests {
 	}
 
 	#[test]
+	fn polls_do_not_count_as_recovery_frames() {
+		let mut stalled = Detector::new();
+		stalled.observe(sample(Duration::from_millis(200)));
+		let mut poll = sample(Duration::ZERO);
+		poll.frame = false;
+		for _ in 0..10 {
+			assert!(!stalled.observe(poll));
+		}
+		assert!(stalled.get());
+	}
+
+	#[test]
 	fn interval_from_fps_falls_back() {
+		assert_eq!(interval_from_fps(Some(f64::MAX)), DEFAULT_INTERVAL);
+		assert_eq!(interval_from_fps(Some(f64::MIN_POSITIVE)), DEFAULT_INTERVAL);
 		assert_eq!(interval_from_fps(None), DEFAULT_INTERVAL);
 		assert_eq!(interval_from_fps(Some(0.0)), DEFAULT_INTERVAL);
 		assert_eq!(interval_from_fps(Some(f64::NAN)), DEFAULT_INTERVAL);

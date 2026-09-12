@@ -217,14 +217,9 @@ impl<E: CatalogExt> Import<E> {
 
 			// A pre-keyframe delta has no group to anchor it: the producer returns
 			// MissingKeyframe, which the caller (e.g. a TS mid-stream join) skips.
-			let timestamp = frame.timestamp;
 			self.track.write(frame)?;
-			self.catalog.on_frame(
-				&mut self.rendition,
-				timestamp,
-				self.track.track().is_used(),
-				std::time::Duration::ZERO,
-			)?;
+			self.catalog
+				.on_frame(&mut self.rendition, self.track.track().is_used())?;
 		}
 
 		self.estimate()?;
@@ -241,7 +236,7 @@ impl<E: CatalogExt> Import<E> {
 		self.catalog.idle(&mut self.rendition)
 	}
 
-	/// Record extra delay (a slow encode) on top of the last accepted frame.
+	/// Record the encode duration before publishing its frames so the catalog can report a stall.
 	pub fn observe_lag(&mut self, lag: std::time::Duration) -> crate::Result<()> {
 		self.catalog
 			.observe_lag(&mut self.rendition, self.track.track().is_used(), lag)

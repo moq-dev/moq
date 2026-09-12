@@ -6,6 +6,7 @@ const FRAME = Time.Micro.fromMilli(33 as Time.Milli);
 
 function sample(lag: Time.Micro): Parameters<Detector["observe"]>[0] {
 	return {
+		frame: true,
 		mediaLag: lag,
 		quiet: 0 as Time.Micro,
 		interval: FRAME,
@@ -18,6 +19,7 @@ test("idle is never stalled", () => {
 	const stalled = new Detector();
 	expect(
 		stalled.observe({
+			frame: true,
 			idle: true,
 			demand: true,
 			mediaLag: Time.Micro.fromSecond(10 as Time.Second),
@@ -32,6 +34,7 @@ test("no demand is never stalled", () => {
 	const stalled = new Detector();
 	expect(
 		stalled.observe({
+			frame: true,
 			demand: false,
 			idle: false,
 			mediaLag: Time.Micro.fromSecond(10 as Time.Second),
@@ -53,6 +56,7 @@ test("a quiet source sets the flag", () => {
 	const stalled = new Detector();
 	expect(
 		stalled.observe({
+			frame: true,
 			mediaLag: 0 as Time.Micro,
 			quiet: (FRAME * SET_INTERVALS + 1) as Time.Micro,
 			interval: FRAME,
@@ -86,6 +90,7 @@ test("a zero interval uses the default", () => {
 	const stalled = new Detector();
 	expect(
 		stalled.observe({
+			frame: true,
 			mediaLag: (DEFAULT_INTERVAL * SET_INTERVALS + 1) as Time.Micro,
 			quiet: 0 as Time.Micro,
 			interval: 0 as Time.Micro,
@@ -100,4 +105,18 @@ test("intervalFromFps falls back", () => {
 	expect(intervalFromFps(0)).toBe(DEFAULT_INTERVAL);
 	expect(intervalFromFps(Number.NaN)).toBe(DEFAULT_INTERVAL);
 	expect(intervalFromFps(50)).toBe(Time.Micro.fromMilli(20 as Time.Milli));
+});
+
+test("polls do not count as recovery frames", () => {
+	const stalled = new Detector();
+	stalled.observe(sample((FRAME * 10) as Time.Micro));
+	for (let i = 0; i < 10; i++) {
+		expect(stalled.observe({ ...sample(0 as Time.Micro), frame: false })).toBe(false);
+	}
+	expect(stalled.stalled).toBe(true);
+});
+
+test("unrepresentable frame intervals use the default", () => {
+	expect(intervalFromFps(Number.MIN_VALUE)).toBe(DEFAULT_INTERVAL);
+	expect(intervalFromFps(Number.MAX_VALUE)).toBe(DEFAULT_INTERVAL);
 });

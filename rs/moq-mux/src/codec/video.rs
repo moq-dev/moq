@@ -3,13 +3,12 @@
 //! Every video importer resolves its [`VideoConfig`](hang::catalog::VideoConfig) lazily from the
 //! bitstream and re-publishes it whenever the stream reveals a change. [`Catalog`] owns the part of
 //! that which is identical across codecs: overlay the caller's [`VideoHint`], skip a publish
-//! that matches the last one, and drive the shared [`hang::catalog::Stalled`] detector so a
+//! that matches the last one, and drive the shared [`hang::catalog::stalled::Detector`] detector so a
 //! lagging rendition is marked in the catalog.
 
 use std::time::{Duration, Instant};
 
-use hang::catalog::{Stalled, StalledSample};
-use moq_net::Timestamp;
+use hang::catalog::stalled::{Detector, Sample};
 
 use crate::catalog::hang::CatalogExt;
 use crate::catalog::{VideoHint, VideoTrack};
@@ -24,10 +23,9 @@ pub(crate) struct Catalog {
 	hint: VideoHint,
 	/// The last config published, so an unchanged re-resolve doesn't re-mirror the rendition.
 	last: Option<hang::catalog::VideoConfig>,
-	stalled: Stalled,
+	stalled: Detector,
 	last_source: Option<Instant>,
-	last_captured: Option<Timestamp>,
-	last_accepted: Option<Timestamp>,
+	lag: Duration,
 }
 
 impl Catalog {
@@ -36,10 +34,9 @@ impl Catalog {
 		Self {
 			hint,
 			last: None,
-			stalled: Stalled::new(),
+			stalled: Detector::new(),
 			last_source: None,
-			last_captured: None,
-			last_accepted: None,
+			lag: Duration::ZERO,
 		}
 	}
 
@@ -75,21 +72,10 @@ impl Catalog {
 		Ok(())
 	}
 
-	/// A frame of this rendition was captured and handed to the transport.
-	///
-	/// `lag` is extra delay on top of the timestamps (a slow encode). Passthrough
-	/// imports pass [`Duration::ZERO`].
-	pub(crate) fn on_frame(
-		&mut self,
-		rendition: &mut VideoTrack<impl CatalogExt>,
-		timestamp: Timestamp,
-		demand: bool,
-		lag: Duration,
-	) -> crate::Result<()> {
-		self.last_captured = Some(max_ts(self.last_captured, timestamp));
-		self.last_accepted = Some(max_ts(self.last_accepted, timestamp));
+	/// A frame was handed to the transport, completing one recovery observation.
+	pub(crate) fn on_frame(&mut self, rendition: &mut VideoTrack<impl CatalogExt>, demand: bool) -> crate::Result<()> {
 		self.last_source = Some(Instant::now());
-		self.publish_stalled(rendition, demand, false, lag)
+		self.publish_stalled(rendition, demand, true, self.lag)
 	}
 
 	/// Re-evaluate stall from silence: the source has not delivered since the last frame.
@@ -104,36 +90,42 @@ impl Catalog {
 		demand: bool,
 		lag: Duration,
 	) -> crate::Result<()> {
+		self.lag = lag;
 		self.publish_stalled(rendition, demand, false, lag)
 	}
 
 	/// The source is gone (camera released). Never stalled.
 	pub(crate) fn idle(&mut self, rendition: &mut VideoTrack<impl CatalogExt>) -> crate::Result<()> {
 		self.last_source = None;
-		self.last_captured = None;
-		self.last_accepted = None;
-		self.publish_stalled(rendition, false, true, Duration::ZERO)
+		self.lag = Duration::ZERO;
+		self.publish_stalled(rendition, false, false, Duration::ZERO)
 	}
 
 	fn publish_stalled(
 		&mut self,
 		rendition: &mut VideoTrack<impl CatalogExt>,
 		demand: bool,
-		idle: bool,
+		frame: bool,
 		extra_lag: Duration,
 	) -> crate::Result<()> {
-		let media_lag = extra_lag.max(timestamp_lag(self.last_captured, self.last_accepted));
+		if demand {
+			self.last_source.get_or_insert_with(Instant::now);
+		} else {
+			self.last_source = None;
+		}
+		let media_lag = extra_lag;
 		let quiet = self
 			.last_source
 			.map(|at| Instant::now().saturating_duration_since(at))
 			.unwrap_or(Duration::ZERO);
-		let interval = hang::catalog::stalled_interval_from_fps(self.last.as_ref().and_then(|c| c.framerate));
-		if !self.stalled.observe(StalledSample {
+		let interval = hang::catalog::stalled::interval_from_fps(self.last.as_ref().and_then(|c| c.framerate));
+		if !self.stalled.observe(Sample {
+			frame,
 			media_lag,
 			quiet,
 			interval,
 			demand,
-			idle,
+			idle: !demand,
 		}) {
 			return Ok(());
 		}
@@ -145,19 +137,52 @@ impl Catalog {
 	}
 }
 
-fn max_ts(current: Option<Timestamp>, next: Timestamp) -> Timestamp {
-	match current {
-		Some(prev) if prev > next => prev,
-		_ => next,
-	}
-}
+#[cfg(test)]
+mod tests {
+	use super::*;
 
-fn timestamp_lag(captured: Option<Timestamp>, accepted: Option<Timestamp>) -> Duration {
-	match (captured, accepted) {
-		(Some(captured), Some(accepted)) if captured > accepted => captured
-			.checked_sub(accepted)
-			.map(Duration::from)
-			.unwrap_or(Duration::ZERO),
-		_ => Duration::ZERO,
+	#[test]
+	fn quiet_startup_tracks_demand() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let reserved = catalog.reserve();
+		let mut rendition = reserved.video("video").unwrap();
+		let mut state = Catalog::new(VideoHint::default());
+		state
+			.publish(
+				&mut rendition,
+				hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8),
+			)
+			.unwrap();
+
+		state.tick(&mut rendition, true).unwrap();
+		let start = state
+			.last_source
+			.expect("demand starts the quiet clock before the first frame");
+		state.last_source = Some(start - Duration::from_millis(200));
+		state.tick(&mut rendition, true).unwrap();
+		assert_eq!(catalog.snapshot().video.renditions["video"].stalled, Some(true));
+
+		state.tick(&mut rendition, false).unwrap();
+		assert!(state.last_source.is_none());
+		assert_eq!(catalog.snapshot().video.renditions["video"].stalled, None);
+		state.tick(&mut rendition, true).unwrap();
+		assert_eq!(catalog.snapshot().video.renditions["video"].stalled, None);
+
+		state
+			.observe_lag(&mut rendition, true, Duration::from_millis(200))
+			.unwrap();
+		state.on_frame(&mut rendition, true).unwrap();
+		assert_eq!(catalog.snapshot().video.renditions["video"].stalled, Some(true));
+		state.observe_lag(&mut rendition, true, Duration::ZERO).unwrap();
+		for _ in 0..2 {
+			state.on_frame(&mut rendition, true).unwrap();
+			for _ in 0..10 {
+				state.tick(&mut rendition, true).unwrap();
+			}
+			assert_eq!(catalog.snapshot().video.renditions["video"].stalled, Some(true));
+		}
+		state.on_frame(&mut rendition, true).unwrap();
+		assert_eq!(catalog.snapshot().video.renditions["video"].stalled, None);
 	}
 }

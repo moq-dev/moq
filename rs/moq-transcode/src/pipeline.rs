@@ -131,6 +131,7 @@ impl Pipeline {
 			};
 			published.push(Published { rung, entry });
 		}
+		catalog::inherit_stalled(&mut published, source);
 		Ok(published)
 	}
 
@@ -174,6 +175,7 @@ impl Pipeline {
 			}
 		};
 		if name == self.name && same_picture(&rendition, &self.rendition) {
+			catalog::inherit_stalled(&mut self.rungs, &rendition);
 			self.rendition = rendition;
 			return Ok(());
 		}

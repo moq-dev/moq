@@ -15,7 +15,6 @@ import {
 import type { Broadcast } from "../broadcast";
 import { hardwareReliable } from "../support/video";
 import type { Capture } from "./capture";
-import { Detector, intervalFromFps } from "./stalled";
 import { normalizeSource, type Source } from "./types";
 
 /** Cumulative encoder output totals, measured from the chunks the encoder produces. */
@@ -142,7 +141,7 @@ export class Encoder {
 	#codecFilter: Computed<string>;
 
 	#signals = new Effect();
-	#stalled = new Detector();
+	#stalled = new Catalog.Stalled.Detector();
 	#firstCaptured?: Time.Micro;
 	#lastCaptured?: Time.Micro;
 	#lastAccepted?: Time.Micro;
@@ -200,6 +199,9 @@ export class Encoder {
 			return;
 		}
 
+		this.#observe({ demand: false, idle: true });
+		this.#lastCaptureWall = performance.now();
+
 		const producer = new Container.Legacy.Producer(track, new Container.Legacy.Format("video"));
 		effect.cleanup(() => producer.close());
 
@@ -222,7 +224,7 @@ export class Encoder {
 
 					producer.encode(frame, frame.timestamp as Time.Micro, key);
 					this.#lastAccepted = frame.timestamp as Time.Micro;
-					this.#observe({ demand: true, idle: false });
+					this.#observe({ demand: true, idle: false, frame: true });
 				},
 				error: (err: Error) => {
 					producer.close(err);
@@ -298,7 +300,7 @@ export class Encoder {
 		effect.interval(() => this.#observe({ demand: true, idle: false }), 50);
 	}
 
-	#observe(state: { demand: boolean; idle: boolean }): void {
+	#observe(state: { demand: boolean; idle: boolean; frame?: boolean }): void {
 		if (state.idle) {
 			this.#firstCaptured = undefined;
 			this.#lastCaptured = undefined;
@@ -317,9 +319,10 @@ export class Encoder {
 				: Time.Micro.fromMilli((performance.now() - this.#lastCaptureWall) as Time.Milli);
 		if (
 			!this.#stalled.observe({
+				frame: state.frame ?? false,
 				mediaLag,
 				quiet,
-				interval: intervalFromFps(catalog?.framerate ?? this.out.resolved.peek()?.framerate),
+				interval: Catalog.Stalled.intervalFromFps(catalog?.framerate ?? this.out.resolved.peek()?.framerate),
 				demand: state.demand,
 				idle: state.idle,
 			})

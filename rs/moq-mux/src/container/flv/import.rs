@@ -87,7 +87,7 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 struct VideoStream {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	config: VideoConfig,
-	stalled: hang::catalog::Stalled,
+	stalled: hang::catalog::stalled::Detector,
 	last_source: Option<Instant>,
 }
 
@@ -488,7 +488,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 		};
 		if written {
-			self.publish_stalled(track_id, Duration::ZERO)?;
+			self.publish_stalled(track_id, true)?;
 		}
 		Ok(())
 	}
@@ -534,7 +534,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				// site (the producer reports MissingKeyframe), so a mid-GOP join works.
 				track: media,
 				config,
-				stalled: hang::catalog::Stalled::new(),
+				stalled: hang::catalog::stalled::Detector::new(),
 				last_source: None,
 			},
 		);
@@ -563,23 +563,29 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	fn tick_stalled(&mut self) -> anyhow::Result<()> {
 		let ids: Vec<u8> = self.video.keys().copied().collect();
 		for id in ids {
-			self.publish_stalled(id, Duration::ZERO)?;
+			self.publish_stalled(id, false)?;
 		}
 		Ok(())
 	}
 
-	fn publish_stalled(&mut self, track_id: u8, extra_lag: Duration) -> anyhow::Result<()> {
+	fn publish_stalled(&mut self, track_id: u8, frame: bool) -> anyhow::Result<()> {
 		let Some(stream) = self.video.get_mut(&track_id) else {
 			return Ok(());
 		};
 		let demand = stream.track.track().is_used();
+		if demand {
+			stream.last_source.get_or_insert_with(Instant::now);
+		} else {
+			stream.last_source = None;
+		}
 		let quiet = stream
 			.last_source
 			.map(|at| Instant::now().saturating_duration_since(at))
 			.unwrap_or(Duration::ZERO);
-		let interval = hang::catalog::stalled_interval_from_fps(stream.config.framerate);
-		if !stream.stalled.observe(hang::catalog::StalledSample {
-			media_lag: extra_lag,
+		let interval = hang::catalog::stalled::interval_from_fps(stream.config.framerate);
+		if !stream.stalled.observe(hang::catalog::stalled::Sample {
+			frame,
+			media_lag: Duration::ZERO,
 			quiet,
 			interval,
 			demand,
