@@ -59,4 +59,5 @@ lands.
 
 ## Related
 
+- [External API proof](/quest/m1/api-release-proof.md) - the pre-merge audit inventory, real consumer fixture, and explicit fix/deferral decisions
 - [Dart announce](/quest/m1/dart-announce.md) - waits on this merge, so it cannot be required here
