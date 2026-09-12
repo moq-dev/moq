@@ -5865,7 +5865,9 @@ api = "https://api.example.com/access"
 	/// session must outlive the bound it was admitted with.
 	#[tokio::test]
 	async fn proxy_revalidation_applies_an_extended_exp() -> anyhow::Result<()> {
-		let near = std::time::SystemTime::now() + Duration::from_secs(2);
+		// Long enough that mock setup plus the first re-check (max-age=1) finish
+		// before admission expires; short enough that the wait below outlives it.
+		let near = std::time::SystemTime::now() + Duration::from_secs(5);
 		let near = near.duration_since(std::time::UNIX_EPOCH)?.as_secs();
 		let far = std::time::SystemTime::now() + Duration::from_secs(3600);
 		let far = far.duration_since(std::time::UNIX_EPOCH)?.as_secs();
@@ -5898,8 +5900,8 @@ api = "https://api.example.com/access"
 			})
 			.await?;
 
-		// Well past the 2s the session was admitted with: the extension must hold.
-		let pending = tokio::time::timeout(Duration::from_millis(3500), auth.expired(&token)).await;
+		// Well past the 5s the session was admitted with: the extension must hold.
+		let pending = tokio::time::timeout(Duration::from_secs(8), auth.expired(&token)).await;
 		assert!(pending.is_err(), "an extended grant must outlive admission's exp");
 		Ok(())
 	}
