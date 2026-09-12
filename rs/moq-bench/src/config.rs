@@ -573,4 +573,52 @@ connect = "https://example.com"
 			None => unsafe { std::env::remove_var("MOQ_BENCH_NAME") },
 		}
 	}
+
+	/// `[client]` in the file is the serde name; the registry key is `connect.*`.
+	/// Provenance has to follow that alias, or `source("connect.url")` looks unset.
+	#[test]
+	fn file_client_table_records_connect_provenance() {
+		let dir = std::env::temp_dir().join("moq-bench-client-provenance");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("bench.toml");
+		std::fs::write(&path, "[client]\nurl = \"https://from-file.example\"\n").unwrap();
+
+		let config = Config::parse_and_merge([
+			std::ffi::OsString::from("moq-bench"),
+			std::ffi::OsString::from("--file"),
+			path.clone().into(),
+		])
+		.unwrap();
+		assert_eq!(
+			config.client.url.as_ref().unwrap().as_str(),
+			"https://from-file.example/"
+		);
+		let source = config
+			.source("connect.url")
+			.unwrap_or_else(|| panic!("missing file origin, got {:?}", config.source("connect.url")));
+		assert!(
+			source.contains("url") || source.contains("bench.toml"),
+			"origin {source:?} should name the file"
+		);
+
+		let config = Config::parse_and_merge([
+			std::ffi::OsString::from("moq-bench"),
+			std::ffi::OsString::from("--file"),
+			path.into(),
+			std::ffi::OsString::from("--connect"),
+			std::ffi::OsString::from("https://from-cli.example"),
+		])
+		.unwrap();
+		assert_eq!(
+			config.client.url.as_ref().unwrap().as_str(),
+			"https://from-cli.example/"
+		);
+		assert!(
+			config
+				.source("connect.url")
+				.is_some_and(|source| source.contains("--connect")),
+			"origin {:?}",
+			config.source("connect.url")
+		);
+	}
 }

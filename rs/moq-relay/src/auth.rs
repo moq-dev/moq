@@ -358,9 +358,12 @@ pub struct AuthTls {
 }
 
 impl AuthConfig {
-	/// Hidden parse-only fields a TOML round-trip would drop.
+	/// Fields a TOML round-trip would drop: injected TLS plus CLI-only public shorthands.
 	pub fn keep_parse_only(&mut self, from: &Self) {
 		self.client_tls = from.client_tls.clone();
+		self.public_subscribe = from.public_subscribe.clone();
+		self.public_publish = from.public_publish.clone();
+		self.public_api = from.public_api.clone();
 	}
 }
 

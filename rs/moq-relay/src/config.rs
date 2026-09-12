@@ -249,6 +249,7 @@ impl Config {
 			&env,
 			file,
 			|dst, src| {
+				// Legacy listen/connect/quic flags, and CLI-only auth public shorthands.
 				dst.listen.keep_parse_only(&src.listen);
 				dst.connect.keep_parse_only(&src.connect);
 				dst.quic.keep_parse_only(&src.quic);
@@ -1211,5 +1212,72 @@ uid = [1001]
 				case.source
 			);
 		}
+	}
+
+	/// CLI-only `#[serde(skip)]` public shorthands must survive the TOML round-trip.
+	/// Dropping them makes `AuthConfig::is_empty` true and the relay start with no
+	/// public access, as though the flags had never been passed.
+	#[test]
+	fn cli_public_shorthands_survive_merge() {
+		let _env = EnvGuard::clear(&[
+			"MOQ_AUTH_PUBLIC",
+			"MOQ_AUTH_PUBLIC_SUBSCRIBE",
+			"MOQ_AUTH_PUBLIC_PUBLISH",
+			"MOQ_AUTH_PUBLIC_API",
+			"MOQ_AUTH_KEY",
+			"MOQ_AUTH_KEY_DIR",
+			"MOQ_AUTH_API",
+		]);
+
+		let config = Config::parse_and_merge([
+			"moq-relay",
+			"--auth-public-subscribe",
+			"demo",
+			"--auth-public-publish",
+			"uploads",
+			"--auth-public-api",
+			"https://api.example.com/access",
+		])
+		.expect("config load");
+
+		assert!(
+			!config.auth.is_empty(),
+			"CLI-only public flags must keep auth non-empty"
+		);
+		let subscribe = config
+			.auth
+			.public_subscribe
+			.clone()
+			.expect("public_subscribe")
+			.into_detailed();
+		assert_eq!(subscribe.subscribe, vec!["demo".to_string()]);
+		let publish = config
+			.auth
+			.public_publish
+			.clone()
+			.expect("public_publish")
+			.into_detailed();
+		assert_eq!(publish.publish, vec!["uploads".to_string()]);
+		assert_eq!(
+			config.auth.public_api.as_deref(),
+			Some("https://api.example.com/access")
+		);
+		assert!(
+			config
+				.source("auth.public_subscribe")
+				.is_some_and(|source| source.contains("--auth-public-subscribe")),
+			"origin {:?}",
+			config.source("auth.public_subscribe")
+		);
+
+		unsafe { std::env::set_var("MOQ_AUTH_PUBLIC_SUBSCRIBE", "from-env") };
+		let config = Config::parse_and_merge(["moq-relay"]).expect("env load");
+		let subscribe = config
+			.auth
+			.public_subscribe
+			.clone()
+			.expect("env public_subscribe")
+			.into_detailed();
+		assert_eq!(subscribe.subscribe, vec!["from-env".to_string()]);
 	}
 }

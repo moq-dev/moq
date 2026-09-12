@@ -156,19 +156,32 @@ fn occupied_keys(registry: Registry, resolved: &Resolved) -> HashSet<String> {
 		})
 		.map(|meta| meta.key.to_string())
 		.collect();
-	// The dial group is `connect.*` in the registry and `client.*` on some serde
-	// structs (moq-bench). Occupying one occupies the other so a CLI flag still
-	// beats a file key written under the other name.
-	let aliases: Vec<String> = keys
-		.iter()
-		.filter_map(|key| {
-			key.strip_prefix("connect.")
-				.map(|rest| format!("client.{rest}"))
-				.or_else(|| key.strip_prefix("client.").map(|rest| format!("connect.{rest}")))
-		})
-		.collect();
+	// Occupying one name occupies the other so a CLI flag still beats a file key
+	// written under the serde alias.
+	let aliases: Vec<String> = keys.iter().filter_map(|key| dial_alias(key)).collect();
 	keys.extend(aliases);
 	keys
+}
+
+/// The dial group is `connect.*` in the registry and `client.*` on some serde
+/// structs (moq-bench). File keys and occupancy checks have to name both.
+fn dial_alias(key: &str) -> Option<String> {
+	key.strip_prefix("connect.")
+		.map(|rest| format!("client.{rest}"))
+		.or_else(|| key.strip_prefix("client.").map(|rest| format!("connect.{rest}")))
+}
+
+/// Registry key for a file path, mapping `client.*` onto `connect.*` when needed.
+fn registry_key(ctx: &LayerCtx, key: &str) -> String {
+	if ctx.registry().lookup(key).is_some() {
+		return key.to_string();
+	}
+	if let Some(aliased) = dial_alias(key)
+		&& ctx.registry().lookup(&aliased).is_some()
+	{
+		return aliased;
+	}
+	key.to_string()
 }
 
 fn overlay_unoccupied(base: &mut toml::Value, overlay: &toml::Value, path: &str, occupied: &HashSet<String>) {
@@ -216,7 +229,7 @@ impl Layer for TomlLayer<'_> {
 	fn load(&self, ctx: &LayerCtx) -> Result<LayerOutput, LayerError> {
 		let mut out = LayerOutput::new();
 		flatten_file(self.path, String::new(), self.value, ctx, &mut out, &|key| {
-			ctx.registry().names_file_value(key)
+			ctx.registry().names_file_value(&registry_key(ctx, key))
 		});
 		Ok(out)
 	}
@@ -247,7 +260,7 @@ fn flatten_file(
 		toml::Value::Array(_) => push_shaped(path, prefix, table_value(value), ctx, out),
 		scalar => {
 			let origin = Origin::file(format!("{}#{prefix}", path.display()), FileScope::Project);
-			match ctx.entry_for_key(&prefix, &scalar_text(scalar), origin) {
+			match ctx.entry_for_key(&registry_key(ctx, &prefix), &scalar_text(scalar), origin) {
 				Ok(entry) => out.push(entry),
 				Err(warning) => out.warn(warning),
 			}
@@ -257,7 +270,7 @@ fn flatten_file(
 
 fn push_shaped(path: &Path, key: String, value: Value, ctx: &LayerCtx, out: &mut LayerOutput) {
 	let origin = Origin::file(format!("{}#{key}", path.display()), FileScope::Project);
-	match ctx.entry_from_value(&key, value, origin) {
+	match ctx.entry_from_value(&registry_key(ctx, &key), value, origin) {
 		Ok(entry) => out.push(entry),
 		Err(warning) => out.warn(warning),
 	}

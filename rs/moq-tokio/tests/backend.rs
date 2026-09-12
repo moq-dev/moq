@@ -216,7 +216,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 /// Write a self-signed PEM cert + key for `name` to `dir`, prefixed by `stem`.
 ///
 /// Returns the two paths, in the order the `cert` and `key` lists want them.
-#[cfg(any(feature = "quinn", feature = "quiche", feature = "noq"))]
+#[cfg(any(feature = "quinn", feature = "quiche"))]
 fn write_self_signed(dir: &std::path::Path, stem: &str, name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
 	use std::io::Write;
 
@@ -244,7 +244,7 @@ fn write_self_signed(dir: &std::path::Path, stem: &str, name: &str) -> (std::pat
 /// when the server picked the certificate the SNI asked for. Without SNI
 /// selection every client would get the first configured certificate, so the
 /// `alt.localhost` pin below would never match.
-#[cfg(any(feature = "quinn", feature = "quiche", feature = "noq"))]
+#[cfg(any(feature = "quinn", feature = "quiche"))]
 async fn sni_test(backend: moq_tokio::QuicBackend) {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (first_cert, first_key) = write_self_signed(dir.path(), "first", "localhost");
@@ -303,7 +303,7 @@ async fn sni_test(backend: moq_tokio::QuicBackend) {
 }
 
 /// A generated certificate joins the file-backed ones rather than replacing them.
-#[cfg(any(feature = "quinn", feature = "quiche", feature = "noq"))]
+#[cfg(any(feature = "quinn", feature = "quiche"))]
 async fn cert_sources_test(backend: moq_tokio::QuicBackend) {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = write_self_signed(dir.path(), "server", "localhost");
@@ -329,7 +329,7 @@ async fn cert_sources_test(backend: moq_tokio::QuicBackend) {
 
 /// Rotate the certificate files under a running listener and assert the served
 /// set follows, without the listener being rebuilt.
-#[cfg(any(feature = "quinn", feature = "quiche", feature = "noq"))]
+#[cfg(any(feature = "quinn", feature = "quiche"))]
 async fn reload_test(backend: moq_tokio::QuicBackend) {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = write_self_signed(dir.path(), "server", "localhost");
