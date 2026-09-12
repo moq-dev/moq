@@ -1,5 +1,6 @@
+import type { Container } from "@moq/hang";
 import type * as Moq from "@moq/net";
-import type { Time } from "@moq/net";
+import { StreamError, type Time } from "@moq/net";
 import type { Effect, Getter } from "@moq/signals";
 
 /**
@@ -15,7 +16,8 @@ export function subscribeMedia(
 		priority: number;
 		maxAge: Getter<Time.Milli>;
 	},
-): Moq.Track.Subscriber {
+): Moq.Track.Subscriber | undefined {
+	if (effect.get(props.broadcast.closed) !== undefined) return;
 	const subscription = () => ({ priority: props.priority, maxAge: props.maxAge.peek() });
 	const subscriber = props.broadcast.track(props.track).subscribe(subscription());
 	effect.cleanup(() => subscriber.close());
@@ -25,4 +27,16 @@ export function subscribeMedia(
 	});
 
 	return subscriber;
+}
+
+/** Read the next media frame, ending playback when its subscription is reset. @internal */
+export async function nextMedia(consumer: Container.Consumer) {
+	try {
+		return await consumer.next();
+	} catch (err) {
+		if (!(err instanceof StreamError)) throw err;
+		// The subscription is over, even when other tracks on the session are still live.
+		console.debug("media subscription ended", err);
+		return undefined;
+	}
 }

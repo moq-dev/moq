@@ -2,7 +2,7 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import * as Msf from "@moq/msf";
 import type * as Moq from "@moq/net";
-import { Announce, Path } from "@moq/net";
+import { Announce, Path, StreamError } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
 import { toHang } from "./msf";
@@ -293,7 +293,8 @@ export class Broadcast {
 		}
 
 		const broadcast = effect.get(this.out.active);
-		if (!broadcast) return;
+		// A withdrawn handle can close before its removal propagates through the active signal.
+		if (!broadcast || effect.get(broadcast.closed) !== undefined) return;
 
 		this.#out.status.set("loading");
 
@@ -330,7 +331,8 @@ export class Broadcast {
 					this.#out.status.set("live");
 				}
 			} catch (err) {
-				console.error("error fetching catalog", this.in.name.peek(), err);
+				if (err instanceof StreamError) console.debug("catalog subscription ended", this.in.name.peek(), err);
+				else console.error("error fetching catalog", this.in.name.peek(), err);
 			} finally {
 				this.#raw.set(undefined);
 				this.#out.status.set("offline");

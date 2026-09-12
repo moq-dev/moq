@@ -14,7 +14,7 @@ import {
 	Signal,
 } from "@moq/signals";
 import { base64ToBytes } from "../base64";
-import { subscribeMedia } from "../media";
+import { nextMedia, subscribeMedia } from "../media";
 
 import type { Sync } from "../sync";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
@@ -303,6 +303,7 @@ export class Decoder {
 			priority: Catalog.PRIORITY.audio,
 			maxAge: this.sync.out.maxAge,
 		});
+		if (!sub) return;
 
 		if (config.container.kind === "cmaf") {
 			this.#runCmafDecoder(effect, sub, config);
@@ -370,7 +371,7 @@ export class Decoder {
 			decoder.configure(decoderConfig);
 
 			for (;;) {
-				const next = await consumer.next();
+				const next = await nextMedia(consumer);
 				if (!next) break;
 				if (this.#onNext(next)) {
 					decoder.reset();
@@ -461,7 +462,7 @@ export class Decoder {
 			decoder.configure(decoderConfig);
 
 			for (;;) {
-				const next = await consumer.next();
+				const next = await nextMedia(consumer);
 				if (!next) break;
 
 				// Reset and re-anchor before decoding the first frame of a new codec epoch.

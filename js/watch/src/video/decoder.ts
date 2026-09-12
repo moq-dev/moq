@@ -14,7 +14,7 @@ import {
 	Signal,
 } from "@moq/signals";
 import { base64ToBytes } from "../base64";
-import { subscribeMedia } from "../media";
+import { nextMedia, subscribeMedia } from "../media";
 
 import type { Sync } from "../sync";
 import {
@@ -303,6 +303,7 @@ class DecoderTrack {
 			priority: Catalog.PRIORITY.video,
 			maxAge: this.sync.out.maxAge,
 		});
+		if (!sub) return;
 
 		const decoder = new VideoDecoder({
 			output: async (frame: VideoFrame) => {
@@ -404,7 +405,7 @@ class DecoderTrack {
 
 		effect.spawn(async () => {
 			for (;;) {
-				const next = await consumer.next();
+				const next = await nextMedia(consumer);
 				if (!next) break;
 
 				// Publisher rewound: flush queued/in-flight video and re-anchor before decoding.
@@ -481,7 +482,7 @@ class DecoderTrack {
 
 		effect.spawn(async () => {
 			for (;;) {
-				const next = await consumer.next();
+				const next = await nextMedia(consumer);
 				if (!next) break;
 
 				// Publisher rewound: flush queued/in-flight video and re-anchor before decoding.
