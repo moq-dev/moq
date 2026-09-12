@@ -72,15 +72,11 @@ function visit(value: unknown, found: string[]) {
 	if (
 		value.type === "ImportDeclaration" ||
 		value.type === "ExportNamedDeclaration" ||
-		value.type === "ExportAllDeclaration"
+		value.type === "ExportAllDeclaration" ||
+		value.type === "ImportExpression" ||
+		value.type === "TSImportType"
 	) {
 		const source = literal(value.source);
-		if (source) found.push(source);
-	} else if (value.type === "ImportExpression") {
-		const source = literal(value.source);
-		if (source) found.push(source);
-	} else if (value.type === "TSImportType") {
-		const source = literal(value.argument);
 		if (source) found.push(source);
 	} else if (value.type === "TSExternalModuleReference") {
 		const source = literal(value.expression);
