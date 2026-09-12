@@ -28,6 +28,7 @@ export default defineConfig({
 				watch: resolve(__dirname, "src/watch.html"),
 				publish: resolve(__dirname, "src/publish.html"),
 				stats: resolve(__dirname, "src/stats.html"),
+				meet: resolve(__dirname, "src/meet.html"),
 			},
 		},
 	},

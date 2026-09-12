@@ -52,5 +52,5 @@ bespoke media fork for each service.
 - [SIP media stack](/quest/m3/sip-stack.md) - the telephone-network adapter
   this lab extends; the inbound-call product built on it is moq.pro
   (downstream) work
-- [Room SDK](/quest/m2/room-sdk.md) - conferencing may eventually reuse its
-  participant model, but is not required by this experiment
+- `@moq/room` - conferencing may eventually reuse its participant model, but is
+  not required by this experiment

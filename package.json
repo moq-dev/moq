@@ -38,6 +38,7 @@
 		"js/msf",
 		"js/watch",
 		"js/publish",
+		"js/room",
 		"js/signals",
 		"js/wasm",
 		"demo/boy",

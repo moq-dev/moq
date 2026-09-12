@@ -15,6 +15,7 @@
 		"@moq/hang": "workspace:^",
 		"@moq/json": "workspace:^",
 		"@moq/publish": "workspace:^",
+		"@moq/room": "workspace:^",
 		"@moq/watch": "workspace:^"
 	},
 	"//devDependencies": "These are only needed for local development with workspace packages. They are NOT needed when using the published npm packages.",

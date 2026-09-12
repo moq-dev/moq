@@ -43,6 +43,7 @@ For each finding:
 - If you disagree with the finding, reply and move on.
 
 # Follow-ups
+
 If you encounter issues, or findings that are out of scope, create follow-up quests.
 They should be unplanned and just a summary of the problem, maybe with a potential solution.
 The user will need to run `/plan-quests` to fully scope them.

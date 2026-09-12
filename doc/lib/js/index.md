@@ -16,6 +16,7 @@ and WebAudio. `@moq/net` also runs in Node, Bun, and Deno.
 | [@moq/hang](/lib/js/hang) | The media layer: catalog types and containers. |
 | [@moq/watch](/lib/js/watch) | Subscribe, decode, and render. `<moq-watch>` plus an optional UI overlay. |
 | [@moq/publish](/lib/js/publish) | Capture, encode, and publish. `<moq-publish>` plus an optional UI overlay. |
+| [@moq/room](/lib/js/room) | Headless rooms: announce-derived roster, local publish, remote watch. |
 | [@moq/token](/lib/js/token) | Mint and verify relay JWTs. |
 | [@moq/signals](/lib/js/signals) | The reactive primitives every package exposes its state through. |
 | [@moq/json](https://www.npmjs.com/package/@moq/json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
