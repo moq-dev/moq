@@ -3023,16 +3023,16 @@ mod serve_tests {
 		assert!(h.log.resets().is_empty());
 	}
 
-	/// The group cache no longer covers the promised prefix, so the fetch itself fails
-	/// and the refusal carries that error: refused before FETCH_OK, and never reset.
+	/// The group never held the promised prefix, so the fetch itself fails and the
+	/// refusal carries that error: refused before FETCH_OK, and never reset.
 	#[tokio::test]
-	async fn a_joining_fetch_refuses_an_evicted_prefix_before_fetch_ok() {
+	async fn a_joining_fetch_refuses_a_missing_prefix_before_fetch_ok() {
 		let version = Version::Draft17;
 		let mut h = serve(version);
 		let mut group = h.track.create_group(group::Info { sequence: 5 }).unwrap();
-		let big = bytes::Bytes::from(vec![0; group::MAX_CACHE_BYTES as usize]);
-		group.write_frame(timestamp(), big.clone()).unwrap();
-		group.write_frame(timestamp(), big).unwrap();
+		group.start_at(1).unwrap();
+		group.write_frame(timestamp(), b"frame".as_slice()).unwrap();
+		group.finish().unwrap();
 		settle().await;
 		let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
 		let mut serving = Box::pin(
