@@ -40,11 +40,14 @@ Work: two regression tests in the `origin.rs` test module, beside
   an unannounce. Session B attaches a source at the same path. The consumer
   resolves again and reads B's media; assert the front closed with A's last
   source and B's front is served immediately, with no stale front at the leaf.
-- Reflection: a peer that was advertised the path through
-  `consume().excluding(peer)` announces it back as a route whose hop chain
-  contains the relay's own hop. Assert the local front keeps serving, the
-  reflected route never wins `best_route` for the relay's own consumers, and
-  it is invisible to the peer that reflected it.
+- Reflection, in the lite session harness rather than the origin rig: the
+  origin asserts a looping chain never reaches it (`origin.rs:1506`), and the
+  drop happens one layer up, where `rs/moq-net/src/lite/subscriber.rs`
+  (lines 267 to 305) discards an announce whose chain already names this
+  session or its origin. Beside the `SinkSession` tests at `subscriber.rs:1333`,
+  a peer that was advertised the path announces it back with the relay's own
+  hop in the chain; assert the announce is dropped, the local front keeps
+  serving, and the peer's own subscription is still served from it.
 
 Then `just test smoke-full`: the nightly matrix
 (`.github/workflows/smoke.yml:11`, `test/smoke/README.md:71`) runs

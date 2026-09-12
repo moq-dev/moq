@@ -40,8 +40,11 @@ Recommendations for the implementation:
   (`js/watch/src/text/renderer.ts:261`) to drive the cue clock and prune cues
   at `:263-265`.
 
+## Required
+
+- [Watch](/quest/m2/audio-jitter-target/watch.md) - lands the per-track spread inputs this shape carries; it merges to `dev` before this starts
+
 ## Related
 
-- [Watch](/quest/m2/audio-jitter-target/watch.md) - the per-track spread estimator this shape carries
 - [Audio jitter target](/quest/m2/audio-jitter-target/README.md) - the estimator this sits on
 - [Time stretch](/quest/m2/watch-audio-time-stretch.md) - stretching needs a clock to converge toward
