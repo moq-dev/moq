@@ -72,6 +72,7 @@ pub struct Client {
 	/// The URL from [`connect.url`](crate::connect::Config::url), dialed by [`Client::publish`] / [`Client::consume`].
 	connect: Option<Url>,
 	/// Deadline for one [`Client::connect`], from [`crate::connect::Config::timeout`]. Zero waits forever.
+	#[cfg(feature = "_transport")]
 	timeout: std::time::Duration,
 	pub(crate) reconnect: bool,
 	pub(crate) backoff: Backoff,
@@ -107,15 +108,7 @@ impl Client {
 	/// Build a client from its config.
 	///
 	/// Errors if no transport feature is compiled in.
-	#[cfg(not(any(
-		feature = "noq",
-		feature = "quinn",
-		feature = "quiche",
-		feature = "iroh",
-		feature = "websocket",
-		feature = "tcp",
-		feature = "uds"
-	)))]
+	#[cfg(not(feature = "_transport"))]
 	pub fn new(_config: Config) -> crate::Result<Self> {
 		Err(Error::NoBackend(
 			"no backend compiled; enable noq, quinn, quiche, iroh, websocket, tcp, or uds feature",
@@ -123,15 +116,7 @@ impl Client {
 	}
 
 	/// Build a client from its config, binding the QUIC socket up front.
-	#[cfg(any(
-		feature = "noq",
-		feature = "quinn",
-		feature = "quiche",
-		feature = "iroh",
-		feature = "websocket",
-		feature = "tcp",
-		feature = "uds"
-	))]
+	#[cfg(feature = "_transport")]
 	pub fn new(config: Config) -> crate::Result<Self> {
 		let Config {
 			connect: config, quic, ..
@@ -337,7 +322,7 @@ impl Client {
 		feature = "tcp",
 		feature = "uds"
 	)))]
-	pub(crate) async fn dial(&self, _url: Url) -> crate::Result<moq_net::Session> {
+	pub(crate) async fn dial(&self, _addr: crate::connect::Addr) -> crate::Result<moq_net::Session> {
 		Err(Error::NoBackend(
 			"no backend compiled; enable noq, quinn, quiche, iroh, websocket, tcp, or uds feature",
 		))
@@ -358,10 +343,10 @@ impl Client {
 		feature = "tcp",
 		feature = "uds"
 	))]
-	pub(crate) async fn dial(&self, url: Url) -> crate::Result<moq_net::Session> {
+	pub(crate) async fn dial(&self, addr: crate::connect::Addr) -> crate::Result<moq_net::Session> {
 		// Each compiled backend adds state to this dispatch future. Keep it off the
 		// caller's stack so all-feature builds remain safe on standard 2 MiB threads.
-		let attempt = Box::pin(self.connect_inner(url));
+		let attempt = Box::pin(self.connect_inner(addr));
 
 		// The deadline covers the dial AND the handshake, for every transport: it is the
 		// only bound some of them have. Dropping `attempt` on expiry cancels whichever
@@ -404,7 +389,8 @@ impl Client {
 		feature = "tcp",
 		feature = "uds"
 	))]
-	async fn connect_inner(&self, url: Url) -> crate::Result<moq_net::Session> {
+	async fn connect_inner(&self, addr: crate::connect::Addr) -> crate::Result<moq_net::Session> {
+		let url = addr.url().clone();
 		// Transports with no request URI of their own advertise the request target in the
 		// SETUP instead; `setup_path` returns `None` for the ones that carry a URI, where
 		// sending it again is a protocol violation. An iroh-only build reads none of this:
@@ -456,9 +442,9 @@ impl Client {
 		#[cfg(feature = "noq")]
 		if let Some(noq) = self.noq.as_ref() {
 			let tls = self.tls.clone();
-			let quic_url = url.clone();
+			let quic_addr = addr.clone();
 			let quic_handle = async {
-				noq.connect(&tls, quic_url, &self.versions)
+				noq.connect(&tls, quic_addr, &self.versions)
 					.await
 					.map(crate::transport::Async::new)
 					.map_err(Error::from)
@@ -466,7 +452,7 @@ impl Client {
 
 			#[cfg(feature = "websocket")]
 			{
-				return self.race_moq_connect(&moq, url, quic_handle).await;
+				return self.race_moq_connect(&moq, addr, quic_handle).await;
 			}
 
 			#[cfg(not(feature = "websocket"))]
@@ -479,12 +465,17 @@ impl Client {
 		#[cfg(feature = "quinn")]
 		if let Some(quinn) = self.quinn.as_ref() {
 			let tls = self.tls.clone();
-			let quic_url = url.clone();
-			let quic_handle = async { quinn.connect(&tls, quic_url, &self.versions).await.map_err(Error::from) };
+			let quic_addr = addr.clone();
+			let quic_handle = async {
+				quinn
+					.connect(&tls, quic_addr, &self.versions)
+					.await
+					.map_err(Error::from)
+			};
 
 			#[cfg(feature = "websocket")]
 			{
-				return self.race_moq_connect(&moq, url, quic_handle).await;
+				return self.race_moq_connect(&moq, addr, quic_handle).await;
 			}
 
 			#[cfg(not(feature = "websocket"))]
@@ -496,12 +487,12 @@ impl Client {
 
 		#[cfg(feature = "quiche")]
 		if let Some(quiche) = self.quiche.as_ref() {
-			let quic_url = url.clone();
-			let quic_handle = async { quiche.connect(quic_url, &self.versions).await.map_err(Error::from) };
+			let quic_addr = addr.clone();
+			let quic_handle = async { quiche.connect(quic_addr, &self.versions).await.map_err(Error::from) };
 
 			#[cfg(feature = "websocket")]
 			{
-				return self.race_moq_connect(&moq, url, quic_handle).await;
+				return self.race_moq_connect(&moq, addr, quic_handle).await;
 			}
 
 			#[cfg(not(feature = "websocket"))]
@@ -515,7 +506,7 @@ impl Client {
 		{
 			let alpns = self.versions.alpns();
 			let session =
-				crate::websocket::connect(&self.websocket, &self.tls, self.tls_host_name.as_deref(), url, &alpns)
+				crate::websocket::connect(&self.websocket, &self.tls, self.tls_host_name.as_deref(), addr, &alpns)
 					.await?;
 			return Ok(moq
 				.connect(crate::runtime::Runtime::new(), crate::transport::Async::new(session))
@@ -535,7 +526,12 @@ impl Client {
 	/// Only compiled when there is a QUIC dial to race: a WebSocket-only build connects
 	/// over the fallback directly.
 	#[cfg(all(feature = "websocket", any(feature = "noq", feature = "quinn", feature = "quiche")))]
-	async fn race_moq_connect<Q, S>(&self, moq: &moq_net::Client, url: Url, quic: Q) -> crate::Result<moq_net::Session>
+	async fn race_moq_connect<Q, S>(
+		&self,
+		moq: &moq_net::Client,
+		addr: crate::connect::Addr,
+		quic: Q,
+	) -> crate::Result<moq_net::Session>
 	where
 		Q: Future<Output = crate::Result<S>>,
 		S: moq_net::transport::poll::Boxable,
@@ -545,7 +541,7 @@ impl Client {
 		let ws_tls = self.tls.clone();
 		let ws_tls_host_name = self.tls_host_name.clone();
 		let websocket = async move {
-			crate::websocket::race_handle(&ws_config, &ws_tls, ws_tls_host_name.as_deref(), url, &alpns)
+			crate::websocket::race_handle(&ws_config, &ws_tls, ws_tls_host_name.as_deref(), addr, &alpns)
 				.await
 				.map(|res| res.map_err(Error::from))
 		};
@@ -689,11 +685,84 @@ where
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	#[tokio::test]
+	async fn fixed_target_preserves_request_and_refuses_redirect() {
+		check_fixed_redirect(false, true).await;
+	}
+
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	#[tokio::test]
+	async fn one_shot_fixed_target_refuses_redirect() {
+		check_fixed_redirect(true, true).await;
+	}
+
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	#[tokio::test]
+	async fn unused_fixed_fallback_does_not_restrict_connected_target() {
+		check_fixed_redirect(true, false).await;
+	}
+
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	async fn check_fixed_redirect(once: bool, pinned: bool) {
+		let mut listen = crate::listen::Config {
+			bind: Some("127.0.0.1:0".into()),
+			..Default::default()
+		};
+		listen.tls.generate = vec!["relay.invalid".into()];
+		let server = listen.init(Default::default()).unwrap();
+		let mut server = server.listen().await.unwrap();
+		let peer = server.local_addr().unwrap();
+		let origin = crate::origin::spawn(moq_net::Hop::random());
+		let server_origin = origin.clone();
+		let accepted = tokio::spawn(async move {
+			let request = server.accept().await.unwrap();
+			assert_eq!(request.path(), "/room");
+			assert_eq!(request.query(), Some("jwt=secret"));
+			let session = request.with_publisher(&server_origin).ok().await.unwrap();
+			(server, session)
+		});
+		let mut config = crate::connect::Config::default();
+		config.tls.insecure = Some(true);
+		config.once = Some(once);
+		let client = config.init(Default::default()).unwrap().with_publisher(&origin);
+		let url: url::Url = format!("https://relay.invalid:{}/room?jwt=secret", peer.port())
+			.parse()
+			.unwrap();
+		let target = crate::connect::Addr::pinned(url.clone(), [peer]).unwrap();
+		let targets = if pinned {
+			crate::connect::Addrs::new(target)
+		} else {
+			let mut direct = url.clone();
+			direct.set_ip_host(peer.ip()).unwrap();
+			crate::connect::Addrs::new(direct).or(target)
+		};
+		let connection = client.connect(targets);
+		let connection = connection.established().await.unwrap();
+		let (_server, server_session) = accepted.await.unwrap();
+		let mut redirect = url;
+		if !pinned {
+			redirect.set_ip_host(peer.ip()).unwrap();
+		}
+		server_session
+			.drain()
+			.send(moq_net::goaway::Goaway::redirect(redirect.to_string()))
+			.unwrap();
+		let result = connection.closed().await;
+		if pinned {
+			assert!(matches!(result, Err(crate::Error::PinnedRedirect)));
+		} else {
+			assert!(result.is_ok());
+		}
+	}
+
 	/// A parser wrapping the config, since it derives `Args` (a flattened `Parser`
 	/// registers an implicit group named after the struct, which collides once two
 	/// role configs are flattened together).
 	#[derive(usage::Cli)]
 	#[usage(unknown_flags = "error", args_override_self = false)]
+	#[usage(settings)]
 	struct Cli {
 		#[usage(flatten)]
 		config: crate::connect::Config,
@@ -1234,7 +1303,7 @@ mod tests {
 
 		// `dial` rather than `connect`: this is about one attempt's deadline, and
 		// `connect` now hands back a reconnect loop that would redial past it.
-		let mut attempt = Box::pin(client.dial(url));
+		let mut attempt = Box::pin(client.dial(url.into()));
 		let _silent = tokio::select! {
 			res = &mut attempt => match res {
 				Err(err) => panic!("connect failed before the silent peer accepted it: {err}"),

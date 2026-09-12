@@ -54,6 +54,10 @@ pub enum Error {
 	#[error("missing keyframe: a group must open on a keyframe")]
 	MissingKeyframe(#[from] crate::container::MissingKeyframe),
 
+	/// An explicit video endpoint precedes its last frame.
+	#[error("{0}")]
+	InvalidEnd(#[from] crate::container::InvalidEnd),
+
 	#[error("timestamp overflow")]
 	TimestampOverflow(#[from] moq_net::TimeOverflow),
 
@@ -211,6 +215,32 @@ impl From<mp4_atom::Error> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// The media carried by a CMAF track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Kind {
+	Audio,
+	Video,
+}
+
+impl Kind {
+	fn from_handler(handler: mp4_atom::FourCC) -> Result<Self> {
+		match handler.as_ref() {
+			b"soun" => Ok(Self::Audio),
+			b"vide" => Ok(Self::Video),
+			b"sbtl" => Err(Error::UnsupportedSubtitle),
+			_ => Err(Error::UnknownTrackHandler(handler.into())),
+		}
+	}
+
+	/// The publisher priority for this kind of media.
+	fn priority(self) -> u8 {
+		match self {
+			Self::Video => hang::catalog::PRIORITY.video,
+			Self::Audio => hang::catalog::PRIORITY.audio,
+		}
+	}
+}
+
 /// CMAF container: encodes/decodes a single track's moof+mdat fragments.
 ///
 /// Build from a CMAF init segment with [`Wire::from_init`], or wrap a
@@ -249,15 +279,37 @@ impl Wire {
 	pub fn trak(&self) -> &mp4_atom::Trak {
 		&self.trak
 	}
+
+	/// The media kind declared by the track handler.
+	fn kind(&self) -> Result<Kind> {
+		Kind::from_handler(self.trak.mdia.hdlr.handler)
+	}
 }
 
 impl Container for Wire {
+	fn kind(&self) -> crate::container::Kind {
+		match self.trak.mdia.hdlr.handler.as_ref() {
+			b"soun" => crate::container::Kind::Audio,
+			b"vide" => crate::container::Kind::Video,
+			_ => crate::container::Kind::Data,
+		}
+	}
+
 	type Error = Error;
 
 	fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> std::result::Result<(), Self::Error> {
 		let timescale = moq_net::Timescale::new(self.trak.mdia.mdhd.timescale as u64)?;
 		let track_id = self.trak.tkhd.track_id;
-		encode(group, frames, timescale, track_id)
+		encode(
+			group,
+			frames,
+			FragmentInfo {
+				timescale,
+				track_id,
+				sequence_number: group.frame_count() as u32,
+				kind: self.kind()?,
+			},
+		)
 	}
 
 	fn poll_read(
@@ -272,11 +324,16 @@ impl Container for Wire {
 		};
 
 		let timescale = moq_net::Timescale::new(self.trak.mdia.mdhd.timescale as u64)?;
-		Poll::Ready(Ok(Some(decode(frame.payload, timescale)?)))
+		Poll::Ready(Ok(Some(decode(frame.payload, timescale, self.kind()?)?)))
 	}
 }
 
-pub(crate) fn decode(data: Bytes, timescale: moq_net::Timescale) -> Result<Vec<Frame>> {
+/// Decode one moof+mdat fragment into its samples.
+///
+/// `Kind::Audio` says the track's samples are all independently decodable. Packagers flag every
+/// audio sample a sync sample, which as a [`Frame::keyframe`] would open a group per sample,
+/// so an audio sample decodes with the bit clear and the consumer marks the group start.
+pub(crate) fn decode(data: Bytes, timescale: moq_net::Timescale, kind: Kind) -> Result<Vec<Frame>> {
 	use mp4_atom::DecodeMaybe;
 
 	let mut cursor = std::io::Cursor::new(&data);
@@ -330,7 +387,7 @@ pub(crate) fn decode(data: Bytes, timescale: moq_net::Timescale) -> Result<Vec<F
 			let payload = Bytes::copy_from_slice(&mdat_data[offset..end]);
 			let flags = entry.flags.unwrap_or(0);
 			// depends_on_no_other (bits 24-25 == 0x2) means keyframe
-			let keyframe = (flags >> 24) & 0x3 == 0x2;
+			let keyframe = kind == Kind::Video && (flags >> 24) & 0x3 == 0x2;
 
 			// Carry the sample-duration through at the track's scale when present, so
 			// the jitter buffer can use it and an exporter can write it back.
@@ -363,22 +420,11 @@ pub(crate) fn decode(data: Bytes, timescale: moq_net::Timescale) -> Result<Vec<F
 	Ok(frames)
 }
 
-pub(crate) fn encode(
-	group: &mut moq_net::group::Producer,
-	frames: &[Frame],
-	timescale: moq_net::Timescale,
-	track_id: u32,
-) -> Result<()> {
+fn encode(group: &mut moq_net::group::Producer, frames: &[Frame], info: FragmentInfo) -> Result<()> {
 	if frames.is_empty() {
 		return Ok(());
 	}
 
-	let sequence_number = group.frame_count() as u32;
-	let info = FragmentInfo {
-		track_id,
-		timescale,
-		sequence_number,
-	};
 	let bytes = encode_fragment(info, frames)?;
 	// The fragment may carry several samples; the net frame's timestamp is the
 	// fragment's earliest presentation time so a relay can order it.
@@ -404,6 +450,9 @@ pub(crate) struct FragmentInfo {
 	pub timescale: moq_net::Timescale,
 	/// The `mfhd` sequence number, informative only.
 	pub sequence_number: u32,
+	/// Audio tracks carry only sync samples: the [`Frame::keyframe`]
+	/// bit only marks the group start there, so it must not decide the sample flags.
+	pub kind: Kind,
 }
 
 /// Encode a single-traf moof+mdat fragment anchored at its own first frame.
@@ -458,6 +507,7 @@ fn encode_at(info: FragmentInfo, base_dts: u64, frames: &[Frame]) -> Result<Byte
 		track_id,
 		timescale,
 		sequence_number,
+		kind,
 	} = info;
 
 	use mp4_atom::Encode;
@@ -471,7 +521,11 @@ fn encode_at(info: FragmentInfo, base_dts: u64, frames: &[Frame]) -> Result<Byte
 	let entries: Vec<_> = frames
 		.iter()
 		.map(|f| {
-			let flags = if f.keyframe { 0x0200_0000 } else { 0x0001_0000 };
+			let flags = if kind == Kind::Audio || f.keyframe {
+				0x0200_0000
+			} else {
+				0x0001_0000
+			};
 			// Write the sample-duration back at the track's scale when we know it, so
 			// fMP4 -> fMP4 round-trips it. Frames without one stay byte-identical.
 			let duration = f.duration.map(|d| trun_duration(d, timescale)).transpose()?;
@@ -1040,6 +1094,7 @@ mod tests {
 			track_id,
 			timescale,
 			sequence_number,
+			kind: Kind::Video,
 		}
 	}
 
@@ -1227,7 +1282,7 @@ mod tests {
 		.encode(&mut buf)
 		.unwrap();
 
-		let frames = decode(Bytes::from(buf), timescale).unwrap();
+		let frames = decode(Bytes::from(buf), timescale, Kind::Video).unwrap();
 		assert_eq!(frames.len(), 2);
 		assert_eq!(frames[0].timestamp, ts(0));
 		assert_eq!(frames[0].duration, Some(ts(33_333)));
@@ -1247,7 +1302,7 @@ mod tests {
 		}];
 
 		let fragment = encode_fragment(info(1, timescale, 0), &input).unwrap();
-		let frames = decode(fragment, timescale).unwrap();
+		let frames = decode(fragment, timescale, Kind::Video).unwrap();
 
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].duration, Some(ts(33_333)));
@@ -1362,7 +1417,7 @@ mod tests {
 		];
 
 		let fragment = encode_fragment(info(1, timescale, 0), &input).unwrap();
-		let frames = decode(fragment, timescale).unwrap();
+		let frames = decode(fragment, timescale, Kind::Video).unwrap();
 
 		assert_eq!(frames.len(), input.len());
 		for (actual, expected) in frames.iter().zip(&input) {
@@ -1370,6 +1425,70 @@ mod tests {
 			assert_eq!(actual.duration, expected.duration);
 			assert_eq!(actual.payload, expected.payload);
 		}
+	}
+
+	/// Packagers flag every audio sample a sync sample. Decoded as keyframes, those would
+	/// each open a group, so audio decodes with the bit clear: the group start is the
+	/// consumer's to mark.
+	#[test]
+	fn audio_samples_decode_without_the_keyframe_bit() {
+		let timescale = moq_net::Timescale::new(48_000).unwrap();
+		let input: Vec<Frame> = (0..3)
+			.map(|i| Frame {
+				timestamp: Timestamp::new(i * 960, timescale).unwrap(),
+				payload: Bytes::from_static(&[0x00]),
+				keyframe: i == 0,
+				duration: Some(Timestamp::new(960, timescale).unwrap()),
+			})
+			.collect();
+		let fragment = encode_fragment(
+			FragmentInfo {
+				kind: Kind::Audio,
+				..info(1, timescale, 0)
+			},
+			&input,
+		)
+		.unwrap();
+
+		// On the wire every sample is a sync sample, whatever the keyframe bit said.
+		let flags: Vec<u32> = first_traf(&fragment).trun[0]
+			.entries
+			.iter()
+			.map(|entry| entry.flags.unwrap())
+			.collect();
+		assert_eq!(flags, vec![0x0200_0000; 3]);
+
+		let audio = decode(fragment.clone(), timescale, Kind::Audio).unwrap();
+		assert!(
+			audio.iter().all(|frame| !frame.keyframe),
+			"audio never decodes a keyframe"
+		);
+		let video = decode(fragment, timescale, Kind::Video).unwrap();
+		assert!(
+			video.iter().all(|frame| frame.keyframe),
+			"the sync flag is a video keyframe"
+		);
+	}
+
+	#[test]
+	fn unsupported_track_handler_is_rejected() {
+		assert!(matches!(
+			Kind::from_handler((*b"text").into()),
+			Err(Error::UnknownTrackHandler(_))
+		));
+	}
+
+	/// The wire container tells audio from video by the handler its init declares.
+	#[test]
+	fn wire_knows_an_audio_track_by_its_handler() {
+		let audio = Wire::new(synthesize_audio_trak(1, 44_100, &aac_config(None)).unwrap());
+		assert_eq!(audio.kind().unwrap(), Kind::Audio);
+
+		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
+		let video = Wire::new(synthesize_video_trak(1, 90_000, &config, None).unwrap());
+		assert_eq!(video.kind().unwrap(), Kind::Video);
 	}
 
 	#[test]
@@ -1385,7 +1504,7 @@ mod tests {
 		}];
 
 		let fragment = encode_fragment(info(1, timescale, 0), &frames).unwrap();
-		let frames = decode(fragment, timescale).unwrap();
+		let frames = decode(fragment, timescale, Kind::Video).unwrap();
 
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].duration, None);
@@ -1424,7 +1543,7 @@ mod tests {
 		moof.encode(&mut buf).unwrap();
 		mp4_atom::Mdat { data: vec![0xDE, 0xAD] }.encode(&mut buf).unwrap();
 
-		let frames = decode(Bytes::from(buf), timescale).unwrap();
+		let frames = decode(Bytes::from(buf), timescale, Kind::Video).unwrap();
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].timestamp.as_micros(), 83_333);
 		assert_eq!(frames[0].duration, None);

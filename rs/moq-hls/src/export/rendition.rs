@@ -1,7 +1,8 @@
 //! One rendition: playlists from its view of the broadcast timeline, segments fetched on
 //! demand.
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+use std::task::Poll;
 use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
@@ -70,6 +71,89 @@ enum Config {
 	Audio(AudioConfig),
 }
 
+/// The broadcast serving this rendition's media, rebound when a sibling publisher is replaced.
+struct Media {
+	handle: Mutex<Handle>,
+	/// When set, a Dropped sibling is rebound through this source rather than keeping the
+	/// replaced publisher's rows listed.
+	sibling: Option<(moq_mux::Source, moq_net::PathRelativeOwned)>,
+}
+
+struct Handle {
+	binding: Arc<moq_mux::Binding>,
+	/// Skip incoming timeline rows until the current bind resolves (set when a sibling is rebound).
+	waiting: bool,
+}
+
+impl Media {
+	fn bind(upstream: &Upstream, rel: Option<&moq_net::PathRelativeOwned>) -> moq_mux::Result<Self> {
+		Ok(Self {
+			handle: Mutex::new(Handle {
+				binding: Arc::new(upstream.bind(rel)?),
+				waiting: false,
+			}),
+			sibling: sibling(upstream, rel),
+		})
+	}
+
+	/// Drop listed rows and rebind when a sibling publisher has been replaced; return whether
+	/// incoming timeline rows should be listed.
+	fn admits(&self, window: &segments::Producer) -> bool {
+		self.sync(window);
+		!self.handle.lock().expect("media lock poisoned").waiting
+	}
+
+	/// Drop listed rows and rebind when a sibling publisher has been replaced; return the
+	/// binding those rows belong to. Fetch from this handle, not a later `sync`: a replacement
+	/// that lands between a range lookup and `track` would otherwise serve the old groups.
+	fn sync(&self, window: &segments::Producer) -> Arc<moq_mux::Binding> {
+		let Some((source, rel)) = &self.sibling else {
+			return self.handle.lock().expect("media lock poisoned").binding.clone();
+		};
+		let mut handle = self.handle.lock().expect("media lock poisoned");
+		match handle.binding.poll_broadcast(&kio::Waiter::noop()) {
+			Poll::Ready(Ok(broadcast)) if broadcast.is_closed() => {
+				// The bound sibling ended (a different first hop replaces the publisher with
+				// Dropped). Origin finish()es that spliced front, so is_finished() cannot
+				// tell a rival publisher from a clean VOD end. Rows listed for it must not
+				// be served from the replacement.
+				window.clear();
+				if let Ok(next) = source.bind(Some(rel)) {
+					handle.binding = Arc::new(next);
+				}
+				handle.waiting = true;
+			}
+			Poll::Ready(Ok(_)) => handle.waiting = false,
+			Poll::Ready(Err(_)) => {
+				// Binding never retries a failed request. Re-issue so a publisher that
+				// appears after this Unroutable can still recover the rendition. Do not
+				// set waiting: an initial Unroutable (announce still in flight) must
+				// still list the catalog's rows.
+				if let Ok(next) = source.bind(Some(rel)) {
+					handle.binding = Arc::new(next);
+				}
+			}
+			Poll::Pending => {}
+		}
+		handle.binding.clone()
+	}
+}
+
+/// A catalog `broadcast` reference that names a different path than the catalog itself.
+fn sibling(
+	upstream: &Upstream,
+	rel: Option<&moq_net::PathRelativeOwned>,
+) -> Option<(moq_mux::Source, moq_net::PathRelativeOwned)> {
+	let target = upstream.source.resolve_reference(rel)?;
+	if upstream.source.resolve_reference(None).as_ref() == Some(&target) {
+		return None;
+	}
+	Some((
+		upstream.source.clone(),
+		rel.cloned().unwrap_or_else(moq_net::PathRelative::empty),
+	))
+}
+
 /// Clear the video fields that don't change how the rendition decodes or is muxed, so a config
 /// the publisher only re-measured or re-labelled compares equal to the one already being served.
 ///
@@ -115,14 +199,14 @@ pub struct Rendition {
 	pub codec: String,
 
 	config: Config,
-	/// The catalog's root timeline section: the timescale and wall anchor timings decode with.
+	/// The catalog's root archive timeline: the timescale and wall anchor timings decode with.
 	section: Timeline,
 	/// This rendition's window over the broadcast timeline, fed by the catalog watcher's
 	/// fan-out.
 	live: Arc<segments::Producer>,
-	/// The broadcast serving this rendition's media, bound when the rendition was created (see
-	/// [`Upstream::bind`]).
-	media: moq_mux::Binding,
+	/// The broadcast serving this rendition's media. A sibling is bound when the rendition is
+	/// created and rebound if that publisher is replaced (see [`Upstream::bind`]).
+	media: Media,
 	/// The init segment, built on first request.
 	init: tokio::sync::Mutex<Option<Bytes>>,
 }
@@ -188,7 +272,7 @@ impl Rendition {
 			config: Config::Video(config.clone()),
 			section,
 			live: Arc::new(segments::Producer::new()),
-			media: upstream.bind(config.broadcast.as_ref())?,
+			media: Media::bind(upstream, config.broadcast.as_ref())?,
 			init: tokio::sync::Mutex::new(None),
 		})
 	}
@@ -211,7 +295,7 @@ impl Rendition {
 			config: Config::Audio(config.clone()),
 			section,
 			live: Arc::new(segments::Producer::new()),
-			media: upstream.bind(config.broadcast.as_ref())?,
+			media: Media::bind(upstream, config.broadcast.as_ref())?,
 			init: tokio::sync::Mutex::new(None),
 		})
 	}
@@ -219,6 +303,9 @@ impl Rendition {
 	/// Feed one timeline record into this rendition's window: its own ranges (empty when the
 	/// record carries none for it, a gap), timed by the record.
 	pub(crate) fn push(&self, index: u64, entry: &Entry, window: Duration) {
+		if !self.media.admits(&self.live) {
+			return;
+		}
 		let row = segments::Row {
 			index,
 			segment: entry.segment,
@@ -264,6 +351,7 @@ impl Rendition {
 	/// would return `Some`. Bounding the wait is the caller's policy (the serve path wraps this
 	/// in its own timeout).
 	pub async fn playable(&self) {
+		self.media.sync(&self.live);
 		kio::wait(|waiter| self.live.poll_playable(waiter)).await;
 	}
 
@@ -283,6 +371,7 @@ impl Rendition {
 
 	/// Render the media playlist from the current timeline window.
 	pub(crate) fn playlist(&self) -> Snapshot {
+		self.media.sync(&self.live);
 		let window = self.live.window();
 
 		// EXT-X-TARGETDURATION starts from the catalog's declared bound when the publisher
@@ -342,6 +431,7 @@ impl Rendition {
 	/// Whether the playlist has anything to serve yet (at least one segment, or the broadcast
 	/// already ended).
 	pub(crate) fn is_playable(&self) -> bool {
+		self.media.sync(&self.live);
 		self.live.is_playable()
 	}
 
@@ -349,6 +439,7 @@ impl Rendition {
 	/// shared timeline as `(t, d)` pairs in the timeline's own timescale (the record values
 	/// verbatim, so `$Time$` addressing resolves exactly).
 	pub(crate) fn representation(&self) -> mpd::Representation {
+		self.media.sync(&self.live);
 		let window = self.live.window();
 		let timescale = self.timescale();
 		let segments = window
@@ -392,6 +483,7 @@ impl Rendition {
 	/// by aligned number).
 	#[cfg_attr(not(feature = "server"), allow(dead_code))]
 	pub(crate) async fn segment_at(&self, time: u64) -> Result<Option<Bytes>> {
+		self.media.sync(&self.live);
 		let Some(segment) = self.live.segment_number_at(time, self.timescale()) else {
 			return Ok(None);
 		};
@@ -428,15 +520,20 @@ impl Rendition {
 		})
 	}
 
-	/// The media track handle on the broadcast serving this rendition.
+	/// The media track handle on `binding`, with that bound broadcast so a fetch can tell a
+	/// gone publisher from a live failure.
 	///
-	/// The broadcast was bound when the rendition was created, so this only collects an answer
-	/// rather than asking again. Asking again by path would not be idempotent: a same-path
-	/// republish installs a new broadcast at the leaf, whose group numbering restarts, and its
-	/// bytes would be served under the replaced broadcast's segment numbers.
-	async fn track(&self) -> Option<moq_net::track::Consumer> {
-		let broadcast = self.media.broadcast().await.ok()?;
-		broadcast.track(&self.name).ok()
+	/// `binding` is the handle captured with the rows being served. Collecting the answer
+	/// never looks the path up ad hoc: a same-path republish installs a new broadcast whose
+	/// group numbering restarts, and those bytes must not be served under rows produced for
+	/// the publisher it replaced.
+	async fn track(
+		&self,
+		binding: &moq_mux::Binding,
+	) -> Option<(moq_net::broadcast::Consumer, moq_net::track::Consumer)> {
+		let broadcast = binding.broadcast().await.ok()?;
+		let track = broadcast.track(&self.name).ok()?;
+		Some((broadcast, track))
 	}
 
 	/// The rendition's CMAF init segment, built on first request and cached.
@@ -444,6 +541,7 @@ impl Rendition {
 	/// For inline-parameter-set codecs (no catalog `description`), the parameter sets are
 	/// resolved by fetching the newest keyframe group first.
 	pub async fn init(&self) -> Result<Option<Bytes>> {
+		let binding = self.media.sync(&self.live);
 		let mut cache = self.init.lock().await;
 		if let Some(bytes) = cache.as_ref() {
 			return Ok(Some(bytes.clone()));
@@ -459,14 +557,14 @@ impl Rendition {
 				let Some(sequence) = self.live.latest_keyframe_group() else {
 					return Ok(None);
 				};
-				let Some(track) = self.track().await else {
+				let Some((broadcast, track)) = self.track(&binding).await else {
 					return Ok(None);
 				};
-				let Ok(mut group) = fetch(&track, sequence).await? else {
+				let Ok(mut group) = fetch(&track, sequence, &broadcast).await? else {
 					return Ok(None);
 				};
 				// A cache eviction mid-read leaves the init unbuildable for now, not an error.
-				if read_group(&mut muxer, &mut group).await?.is_err() {
+				if read_group(&mut muxer, &mut group, &broadcast).await?.is_err() {
 					return Ok(None);
 				}
 				let Some(bytes) = muxer.init()? else {
@@ -486,6 +584,7 @@ impl Rendition {
 	/// the playlist window, is a gap for this rendition, or its groups already left the relay
 	/// cache.
 	pub async fn segment(&self, segment: u64) -> Result<Option<Bytes>> {
+		let binding = self.media.sync(&self.live);
 		let Some(ranges) = self.live.segment_ranges(segment) else {
 			return Ok(None);
 		};
@@ -509,7 +608,7 @@ impl Rendition {
 			return Ok(None);
 		}
 
-		let Some(track) = self.track().await else {
+		let Some((broadcast, track)) = self.track(&binding).await else {
 			return Ok(None);
 		};
 
@@ -521,8 +620,8 @@ impl Rendition {
 		let mut frames = Vec::new();
 		for range in &ranges {
 			for sequence in range.start..=range.end {
-				let miss = match fetch(&track, sequence).await? {
-					Ok(mut group) => match read_group(&mut muxer, &mut group).await? {
+				let miss = match fetch(&track, sequence, &broadcast).await? {
+					Ok(mut group) => match read_group(&mut muxer, &mut group, &broadcast).await? {
 						Ok(mut group_frames) => {
 							frames.append(&mut group_frames);
 							continue;
@@ -553,10 +652,11 @@ impl Rendition {
 async fn fetch(
 	track: &moq_net::track::Consumer,
 	sequence: u64,
+	broadcast: &moq_net::broadcast::Consumer,
 ) -> Result<std::result::Result<moq_net::group::Consumer, moq_net::Error>> {
 	match track.fetch_group(sequence, None).await {
 		Ok(group) => Ok(Ok(group)),
-		Err(err) if is_cache_miss(&err) => Ok(Err(err)),
+		Err(err) if is_unservable(&err, broadcast) => Ok(Err(err)),
 		Err(err) => Err(err.into()),
 	}
 }
@@ -567,11 +667,12 @@ async fn fetch(
 async fn read_group(
 	muxer: &mut Muxer,
 	group: &mut moq_net::group::Consumer,
+	broadcast: &moq_net::broadcast::Consumer,
 ) -> Result<std::result::Result<Vec<moq_mux::container::Frame>, moq_net::Error>> {
 	match muxer.read(group).await {
 		Ok(frames) => Ok(Ok(frames)),
 		Err(err) => {
-			let miss = net_errors(&err).find(|err| is_cache_miss(err)).cloned();
+			let miss = net_errors(&err).find(|err| is_unservable(err, broadcast)).cloned();
 			match miss {
 				Some(miss) => Ok(Err(miss)),
 				None => Err(err.into()),
@@ -580,19 +681,33 @@ async fn read_group(
 	}
 }
 
+/// True if a FETCH failure means the segment can never be served: a 404, not a 500.
+fn is_unservable(err: &moq_net::Error, broadcast: &moq_net::broadcast::Consumer) -> bool {
+	is_cache_miss(err) || is_gone_publisher(err, broadcast)
+}
+
 /// True if a moq-net error means the group left (or hasn't reached) the relay cache: a 404, not
 /// a 500.
 ///
-/// Compares WIRE CODES rather than variants, because the same miss arrives in two shapes: a
-/// LOCAL cache answers with the named variant, while anything that crossed a session arrives as
-/// [`moq_net::Error::Remote`] carrying the raw code (`from_transport` decodes only code 0, back
-/// to `Cancel`). In a relay the publisher we FETCH from is always remote, so the remote shape is
-/// the common one and matching variants alone would classify it as a server error.
+/// Matches the named variants a moq-lite stream reset decodes to after
+/// [`StreamError::from_code`](moq_net::StreamError::from_code). IETF has no stream-reset
+/// value for a miss (`ietf::error::to_stream_code` sends INTERNAL_ERROR), so one still
+/// arrives as [`moq_net::Error::Remote`]`(0)` and answers 500.
 fn is_cache_miss(err: &moq_net::Error) -> bool {
-	let code = err.to_code();
-	code == moq_net::Error::NotFound.to_code()
-		|| code == moq_net::Error::Old.to_code()
-		|| code == moq_net::Error::Evicted.to_code()
+	matches!(
+		err,
+		moq_net::Error::NotFound | moq_net::Error::Old | moq_net::Error::Evicted
+	)
+}
+
+/// True if the bound publisher is gone, so a listed segment can never be served.
+///
+/// A disconnect that crossed a session arrives as [`moq_net::Error::Remote`]`(0)` (or
+/// [`moq_net::Error::Cancel`] on main); locally it is [`moq_net::Error::Dropped`]. The
+/// bound broadcast being closed is the condition: matching `Remote(0)` alone would also
+/// 404 an IETF stream-reset miss, which is the same code while the publisher is still live.
+fn is_gone_publisher(err: &moq_net::Error, broadcast: &moq_net::broadcast::Consumer) -> bool {
+	broadcast.is_closed() || matches!(err, moq_net::Error::Dropped | moq_net::Error::Cancel)
 }
 
 /// [`is_cache_miss`] for a group read, which reaches us wrapped in whichever container the track
@@ -610,48 +725,79 @@ fn net_errors(err: &moq_mux::Error) -> impl Iterator<Item = &moq_net::Error> {
 mod tests {
 	use super::*;
 
+	/// Decode the code `local` would send on a moq-lite stream reset.
+	fn over_lite(local: &moq_net::Error) -> moq_net::Error {
+		moq_net::Error::from(moq_net::StreamError::from_code(
+			moq_net::StreamError::from(local).to_code(),
+		))
+	}
+
+	/// Decode INTERNAL_ERROR, which is what `ietf::error::to_stream_code` sends for a miss.
+	fn over_ietf_miss() -> moq_net::Error {
+		moq_net::Error::from(moq_net::StreamError::from_code(0))
+	}
+
+	fn produce_origin() -> moq_net::origin::Producer {
+		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Hop::random().into());
+		std::mem::forget(driver);
+		producer
+	}
+
 	#[test]
 	fn a_cache_miss_that_crossed_a_session_is_still_a_cache_miss() {
-		// A miss must classify the same whichever shape it arrives in. The remote shape is the
-		// one a relay actually sees: it always FETCHes from a remote publisher, and moq-net
-		// surfaces every wire reset code as `Error::Remote(code)` (only code 0 maps back to a
-		// named variant, `Cancel`).
 		for local in [moq_net::Error::NotFound, moq_net::Error::Old, moq_net::Error::Evicted] {
 			assert!(is_cache_miss(&local), "{local:?} locally");
-			let remote = moq_net::Error::Remote(local.to_code());
-			assert!(is_cache_miss(&remote), "{local:?} over the wire ({remote:?})");
+			let lite = over_lite(&local);
+			assert!(is_cache_miss(&lite), "{local:?} over lite ({lite:?})");
+			// IETF has no stream-reset value for a miss, so one stays 500.
+			assert!(!is_cache_miss(&over_ietf_miss()), "{local:?} over ietf must not 404");
 		}
 	}
 
 	#[test]
 	fn a_real_failure_is_not_a_cache_miss() {
-		// The mapping must not swallow genuine errors into a 404, in either shape.
 		for err in [
 			moq_net::Error::Unauthorized,
 			moq_net::Error::ProtocolViolation,
 			moq_net::Error::Timeout,
 		] {
 			assert!(!is_cache_miss(&err), "{err:?} locally");
-			let remote = moq_net::Error::Remote(err.to_code());
-			assert!(!is_cache_miss(&remote), "{err:?} over the wire ({remote:?})");
+			assert!(!is_cache_miss(&over_lite(&err)), "{err:?} over lite");
 		}
 	}
 
 	#[test]
 	fn a_cache_miss_is_recognised_through_the_mux_error_layers() {
-		// A group read wraps the same miss differently per container, and every wrapping has to
-		// resolve to 404. `Hang` is the shape a real relay produces most, since it is what the
-		// legacy container (the JS and native encoders) surfaces.
-		let remote = moq_net::Error::Remote(moq_net::Error::NotFound.to_code());
-		assert!(net_errors(&moq_mux::Error::Moq(remote.clone())).any(is_cache_miss));
-		assert!(net_errors(&moq_mux::Error::Hang(hang::Error::Moq(remote.clone()))).any(is_cache_miss));
-		assert!(net_errors(&moq_mux::Error::Cmaf(moq_mux::container::fmp4::Error::Moq(remote))).any(is_cache_miss));
+		let lite = over_lite(&moq_net::Error::NotFound);
+		assert!(net_errors(&moq_mux::Error::Moq(lite.clone())).any(is_cache_miss));
+		assert!(net_errors(&moq_mux::Error::Hang(hang::Error::Moq(lite.clone()))).any(is_cache_miss));
+		assert!(net_errors(&moq_mux::Error::Cmaf(moq_mux::container::fmp4::Error::Moq(lite))).any(is_cache_miss));
 
-		// A genuine failure stays a failure through the same wrappings, and an error carrying no
-		// transport error at all is never a miss.
 		let denied = moq_net::Error::Unauthorized;
 		assert!(!net_errors(&moq_mux::Error::Moq(denied.clone())).any(is_cache_miss));
 		assert!(!net_errors(&moq_mux::Error::Hang(hang::Error::Moq(denied))).any(is_cache_miss));
 		assert!(!net_errors(&moq_mux::Error::UnknownFormat("nope".to_string())).any(is_cache_miss));
+	}
+
+	#[test]
+	fn a_gone_publisher_is_unservable_and_an_ietf_miss_is_not() {
+		let origin = produce_origin();
+		let producer = origin.create_broadcast("live").expect("publish allowed");
+		let live = producer.consume();
+		let ietf_miss = over_ietf_miss();
+		assert!(
+			!is_gone_publisher(&ietf_miss, &live),
+			"an IETF stream-reset miss on a live publisher must stay 500"
+		);
+		assert!(!is_unservable(&ietf_miss, &live));
+
+		drop(producer);
+		let gone = live;
+		assert!(is_gone_publisher(&ietf_miss, &gone));
+		assert!(is_unservable(&ietf_miss, &gone));
+		assert!(is_gone_publisher(&moq_net::Error::Dropped, &gone));
+		assert!(is_gone_publisher(&moq_net::Error::Cancel, &gone));
+		assert!(!is_cache_miss(&moq_net::Error::Dropped));
+		assert!(!is_cache_miss(&moq_net::Error::Remote(0)));
 	}
 }

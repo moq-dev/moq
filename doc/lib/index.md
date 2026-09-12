@@ -34,6 +34,7 @@ The wrapped bindings share one feature set, so the language pages only show
 how it looks in that language:
 
 - **Connect** to a relay with TLS options (system roots, custom CA, fingerprint pinning, mTLS) and a JWT in the URL, or **serve** sessions yourself and accept or reject each request by path.
+- **Reconnect** automatically with backoff when the transport drops, with `status`/`epoch` reporting each (re)connect and backoff tunable down to retrying forever. The peer's inbound QUIC stream limit is configurable for subscribe-heavy clients.
 - **Discover** broadcasts by prefix, wait for a specific one, or request an unannounced one.
 - **Publish and subscribe to media** with the hang catalog filled in from the bitstream, plus raw pixels or PCM in and out with the codec running inside the binding (VideoToolbox, Media Foundation, NVENC, openh264, Opus).
 - **Raw tracks** of arbitrary bytes with timestamps, sparse or replayed groups, per-subscriber priority and max age, and best-effort datagrams.

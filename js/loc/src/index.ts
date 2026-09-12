@@ -38,6 +38,19 @@ const DEFAULT_TIMESCALE = 1_000_000;
  * timescale property are interpreted as microseconds.
  */
 export class Format {
+	/** The kind of content carried by the track. */
+	readonly kind: "audio" | "video" | "data";
+
+	/** Configure endpoint metadata for audio or video; opaque data is the default. */
+	constructor(kind: "audio" | "video" | "data" = "data") {
+		this.kind = kind;
+	}
+
+	/** Return the video-frame or audio-source endpoint for an empty codec payload. */
+	end(frame: Frame): Time.Micro | undefined {
+		return this.kind !== "data" && frame.payload.byteLength === 0 ? frame.timestamp : undefined;
+	}
+
 	/** Decode one moq-net frame into its LOC frames. Throws on malformed input. */
 	decode(frame: Uint8Array): Frame[] {
 		const [propsLen, afterLen] = Moq.Varint.decode(frame);

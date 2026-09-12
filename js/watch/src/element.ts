@@ -116,9 +116,9 @@ export default class MoqWatch extends HTMLElement {
 	// The connection to the moq-relay server.
 	/**
 	 * The relay connection, shared with every other element on the page pointing at the
-	 * same URL; see `Moq.Connection.Shared`. Its `origin` is where the broadcasts live.
+	 * same URL. Its `origin` is where the broadcasts live.
 	 */
-	connection: Moq.Connection.Shared;
+	connection: Moq.Connection;
 
 	// The broadcast being watched.
 	broadcast: Broadcast;
@@ -201,7 +201,7 @@ export default class MoqWatch extends HTMLElement {
 
 		cleanup.register(this, this.signals);
 
-		this.connection = new Moq.Connection.Shared({
+		this.connection = new Moq.Connection({
 			enabled: this.#enabled,
 		});
 		this.signals.cleanup(() => this.connection.close());

@@ -107,6 +107,10 @@ pub(crate) enum Parts {
 	/// The QUIC listener only, as one member of a `SO_REUSEPORT` group. Folding
 	/// the member in here is what stops a group member and a stream-only server
 	/// from being asked for at once.
+	#[cfg_attr(
+		not(any(feature = "noq", feature = "quinn", feature = "quiche")),
+		expect(dead_code, reason = "no QUIC backend is compiled in")
+	)]
 	Member(crate::listen::Member),
 }
 
@@ -1386,6 +1390,7 @@ mod tests {
 	fn version_help_lists_every_parseable_name() {
 		#[derive(usage::Cli)]
 		#[usage(unknown_flags = "error", args_override_self = false)]
+		#[usage(settings)]
 		struct Cli {
 			#[usage(flatten)]
 			_listen: crate::listen::Config,

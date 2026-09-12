@@ -389,6 +389,8 @@ pub extern "C" fn moq_encode_audio_finish(producer: u32) -> i32 {
 /// `user_data` is never touched again, so release `user_data` there. The
 /// terminal callback fires even after [`moq_decode_audio_close`].
 ///
+/// Starts at the newest cached group so reopening live playback skips the backlog.
+///
 /// A packet the codec cannot decode is logged and skipped rather than ending
 /// the subscription, so a single bad frame costs that frame and not the stream.
 ///
@@ -408,6 +410,7 @@ pub unsafe extern "C" fn moq_decode_audio(
 		let raw = unsafe { output.as_ref() }.ok_or(Error::InvalidPointer)?;
 
 		let mut config = moq_audio::decode::Config::default();
+		config.start = moq_audio::decode::Start::Latest;
 		config.format = audio_format_from_u32(raw.format)?;
 		config.sample_rate = zeroable(raw.sample_rate);
 		config.channels = zeroable(raw.channels);

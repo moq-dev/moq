@@ -141,7 +141,7 @@ const NEVER_ABORTED = new AbortController().signal;
  *
  * @param url - The URL of the server to connect to
  * @param props - Connection options
- * @returns A promise that resolves to a Connection instance
+ * @returns A promise that resolves to an established session
  */
 export async function connect(url: URL, props?: ConnectProps): Promise<Established> {
 	const signal = props?.signal ?? NEVER_ABORTED;
@@ -268,15 +268,17 @@ async function negotiate(url: URL, session: WebTransport, wiring: SessionProps):
 	// Choose setup encoding based on negotiated WebTransport protocol (if any).
 	let setupVersion: Ietf.Version;
 	const modernVersion =
-		protocol === Ietf.ALPN.DRAFT_20
-			? Ietf.Version.DRAFT_20
-			: protocol === Ietf.ALPN.DRAFT_19
-				? Ietf.Version.DRAFT_19
-				: protocol === Ietf.ALPN.DRAFT_18
-					? Ietf.Version.DRAFT_18
-					: protocol === Ietf.ALPN.DRAFT_17
-						? Ietf.Version.DRAFT_17
-						: undefined;
+		protocol === Ietf.ALPN.DRAFT_21
+			? Ietf.Version.DRAFT_21
+			: protocol === Ietf.ALPN.DRAFT_20
+				? Ietf.Version.DRAFT_20
+				: protocol === Ietf.ALPN.DRAFT_19
+					? Ietf.Version.DRAFT_19
+					: protocol === Ietf.ALPN.DRAFT_18
+						? Ietf.Version.DRAFT_18
+						: protocol === Ietf.ALPN.DRAFT_17
+							? Ietf.Version.DRAFT_17
+							: undefined;
 	if (modernVersion !== undefined) {
 		return await handshakeAlpn(url, session, modernVersion, wiring);
 	} else if (protocol === Ietf.ALPN.DRAFT_16) {
@@ -441,6 +443,7 @@ async function connectWebTransport(
 			Lite.ALPN_04,
 			Lite.ALPN_03,
 			Lite.ALPN,
+			Ietf.ALPN.DRAFT_21,
 			Ietf.ALPN.DRAFT_20,
 			Ietf.ALPN.DRAFT_19,
 			Ietf.ALPN.DRAFT_18,
@@ -514,7 +517,7 @@ async function connectWebSocket(url: URL, delay: number, cancel: Promise<void>):
 	const active = await Promise.race([cancel, timer.then(() => true)]);
 	if (!active) return undefined;
 
-	// Only moq-transport-18 is pinned to qmux-01 today. Every other ALPN we
+	// moq-transport-18 and newer are pinned to qmux-01. Every other ALPN we
 	// support is currently negotiated as `qmux-00.{alpn}` on the wire, but we
 	// don't want to lock that in: set the value to `null` so the polyfill
 	// advertises every QMux draft it knows about and the server picks one.
@@ -525,7 +528,9 @@ async function connectWebSocket(url: URL, delay: number, cancel: Promise<void>):
 		[Lite.ALPN_04]: null,
 		[Lite.ALPN_03]: null,
 		[Lite.ALPN]: null,
+		[Ietf.ALPN.DRAFT_21]: "qmux-01",
 		[Ietf.ALPN.DRAFT_20]: "qmux-01",
+		[Ietf.ALPN.DRAFT_19]: "qmux-01",
 		[Ietf.ALPN.DRAFT_18]: "qmux-01",
 		[Ietf.ALPN.DRAFT_17]: null,
 		[Ietf.ALPN.DRAFT_16]: null,

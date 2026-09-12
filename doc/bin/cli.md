@@ -64,6 +64,12 @@ discarding the old mux buffer. The first new clock packet signals the break and
 stdout pacing re-anchors. Other renditions resume at their own discontinuity
 boundary, so old-timeline frames cannot advance the new clock.
 
+fMP4 export writes one fragment per publisher group on each track. Audio follows
+the publisher's cuts; video normally follows GOPs. Closing a group flushes it
+even when the live publisher pauses. `--fragment-duration 2s` caps
+the fragment span as frames arrive, including audio whose publisher never cuts.
+MKV uses the same flag to cap clusters, which otherwise follow video GOPs.
+
 ## Play
 
 ```bash
@@ -83,10 +89,12 @@ actually is. While video owns the clock, a frame arriving earlier than predicted
 pulls playback forward, so a late start catches up to live instead of staying
 behind it. Once the speaker owns the clock, video follows the speaker instead.
 
-Each role follows the catalog for as long as it lasts, so a publisher that
-retires the rendition being played ends that track and the role picks a
-replacement. Playback is behind the `play` feature, since it pulls in windowing
-and audio-device dependencies:
+Each role follows the catalog for as long as it lasts. Each decoder starts at
+the newest cached group, including when a rendition is reopened, so playback
+does not replay the retained backlog. A publisher that retires the rendition
+being played ends that track and the role picks a replacement. Playback is
+behind the `play` feature, since it pulls in windowing and audio-device
+dependencies:
 
 ```bash
 cargo install moq-cli --no-default-features --features "iroh,quinn,websocket,play"

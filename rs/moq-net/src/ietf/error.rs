@@ -57,7 +57,10 @@ const MALFORMED_TRACK: u32 = 0x12;
 /// Draft-16 and 17 assign it to UNKNOWN_OBJECT_STATUS, which draft-18 moved to 0x6 when it
 /// took 0x4 for this. Draft-14 and 15 assign it nothing.
 fn has_going_away(version: Version) -> bool {
-	matches!(version, Version::Draft18 | Version::Draft19 | Version::Draft20)
+	matches!(
+		version,
+		Version::Draft18 | Version::Draft19 | Version::Draft20 | Version::Draft21
+	)
 }
 
 /// Whether the draft assigns TOO_FAR_BEHIND. Added in draft-17.
@@ -291,7 +294,7 @@ pub(crate) mod request {
 	mod tests {
 		use super::*;
 
-		const ALL: [Version; 7] = [
+		const ALL: [Version; 8] = [
 			Version::Draft14,
 			Version::Draft15,
 			Version::Draft16,
@@ -299,6 +302,7 @@ pub(crate) mod request {
 			Version::Draft18,
 			Version::Draft19,
 			Version::Draft20,
+			Version::Draft21,
 		];
 
 		const KINDS: [Kind; 5] = [
@@ -376,7 +380,13 @@ pub(crate) mod request {
 					assert!(matches!(from_code(GOING_AWAY, kind, version), Error::Remote(0x6)));
 				}
 
-				for version in [Version::Draft17, Version::Draft18, Version::Draft19, Version::Draft20] {
+				for version in [
+					Version::Draft17,
+					Version::Draft18,
+					Version::Draft19,
+					Version::Draft20,
+					Version::Draft21,
+				] {
 					assert_eq!(to_code(&Error::GoingAway, kind, version), GOING_AWAY);
 					assert!(matches!(from_code(GOING_AWAY, kind, version), Error::GoingAway));
 				}
@@ -467,7 +477,7 @@ mod tests {
 	use super::*;
 	use crate::Error;
 
-	const ALL: [Version; 7] = [
+	const ALL: [Version; 8] = [
 		Version::Draft14,
 		Version::Draft15,
 		Version::Draft16,
@@ -475,6 +485,7 @@ mod tests {
 		Version::Draft18,
 		Version::Draft19,
 		Version::Draft20,
+		Version::Draft21,
 	];
 
 	/// A routine unsubscribe must not read as a fault on our side. moq-lite's own error
@@ -545,7 +556,7 @@ mod tests {
 			assert_eq!(from_stream_code(GOING_AWAY, version), StreamError::Unknown(GOING_AWAY));
 		}
 
-		for version in [Version::Draft18, Version::Draft19, Version::Draft20] {
+		for version in [Version::Draft18, Version::Draft19, Version::Draft20, Version::Draft21] {
 			assert_eq!(to_stream_code(&StreamError::GoingAway, version), GOING_AWAY);
 			assert_eq!(from_stream_code(GOING_AWAY, version), StreamError::GoingAway);
 		}
@@ -613,7 +624,7 @@ mod tests {
 
 		// And nothing decodes back into them: an unregistered code keeps its number and
 		// stays opaque instead of being read as a meaning the wire did not carry.
-		for code in [0x6, 0x7, 0x9, 0x20, 0x22, 64 + 7] {
+		for code in [0x6, 0x7, 0x9, 0x20, 0x22, 0x33, 0x34, 0x35, 64 + 7] {
 			assert_eq!(from_stream_code(code, Version::Draft20), StreamError::Unknown(code));
 			assert!(matches!(
 				Error::from(from_stream_code(code, Version::Draft20)),

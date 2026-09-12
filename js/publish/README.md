@@ -69,7 +69,7 @@ The simplest way to publish a stream:
 | `muted`     | boolean | false    | Mute audio capture              |
 | `invisible` | boolean | false    | Disable video capture           |
 | `preview`   | string  | `"source"` | What the preview renders: `"source"`, `"encoded"`, `"none"` |
-| `announce`  | string  | `"source"` | When to publish: `"always"`, `"never"`, `"source"` (once media is actually captured) |
+| `announce`  | string  | `"source"` | When to advertise: `"always"`, `"never"`, `"source"` (once media is actually captured). The broadcast is created while connected either way. |
 
 A nested `<video>` shows the raw capture; a `<canvas>` is drawn by the element.
 
@@ -86,7 +86,7 @@ authorizes screen capture, or pass a live input that is false until that gesture
 ```typescript
 import * as Publish from "@moq/publish";
 
-const connection = new Publish.Net.Connection.Shared({
+const connection = new Publish.Net.Connection({
     url: new URL("https://relay.example.com/anon"),
     enabled: true,
 });

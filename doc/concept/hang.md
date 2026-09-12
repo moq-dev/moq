@@ -50,7 +50,7 @@ A few things the catalog can express beyond decoder config:
 - **Renditions in another broadcast.** A rendition may point at a relative broadcast path, so a transcoder can publish a ladder that adds low rungs and references the source's original rendition without re-publishing its bytes. The path resolves against where the consumer found the catalog, so a reference that escapes above the root names nothing and the catalog is rejected.
 - **Jitter.** A rendition can say how long the publisher holds a frame before flushing it, in whole milliseconds rounded up: one frame for a track flushed immediately, the B-frame depth for a reordered one, the fragment for a segmented one. It describes the publisher, never the network, only grows over the life of a stream, and a player sizes its buffer to at least this much. A `0` is read as absent.
 - **Stalled renditions.** A publisher can flag a rendition as temporarily bad so players prefer another one without the track disappearing.
-- **Timelines.** A broadcast may publish a small timeline track logging each complete segment, aligned across renditions, which is what lets the [HLS gateway](/bin/hls) build playlists without subscribing to media.
+- **Archive.** A broadcast may advertise an `archive` entry naming its timeline track (a small index of each complete aligned segment) and, if recorded, the replay MoQ path, object-store URL, and format version. The timeline is what lets the [HLS gateway](/bin/hls) build playlists without subscribing to media.
 - **Extensions.** The root is a loose object. Applications add their own sections (`scte35`, for example) next to the ones hang defines, optionally naming a track that carries the data. Every library exposes a way to write your section without clobbering the built-in ones, and readers ignore what they don't know.
 
 ## Text
@@ -120,6 +120,17 @@ The `container.kind` on each rendition says how frames are framed:
 
 A consumer skips renditions with a kind it doesn't recognize and carries them
 through when republishing the catalog.
+
+A Legacy video publisher can close the last frame's duration with an empty
+codec payload whose timestamp is that frame's exclusive end. Consumers treat it
+as metadata and never pass it to a decoder. This lets a group close immediately
+without waiting for the next frame. Audio has codec-defined durations, and CMAF
+carries sample durations directly, so neither needs per-group duration markers.
+Audio retains its separate terminal marker before codec drain packets, allowing
+consumers to discard encoder padding beyond the source endpoint. LOC readers
+also skip empty payloads; LOC writers wait for the compatibility release before
+emitting markers. Empty payloads on data tracks remain data, including empty
+text cues.
 
 ## Groups and keyframes
 

@@ -34,7 +34,7 @@ impl<E: CatalogExt> Import<E> {
 		let rendition = reserved.video(track.name())?;
 		// The hint names the container; the writer is built from that same value so the wire
 		// cannot disagree with what the rendition advertises.
-		let wire = crate::catalog::hang::Container::try_from(&hint.container)?;
+		let wire = crate::catalog::hang::Container::try_from(&hint)?;
 		let catalog = crate::codec::video::Catalog::new(hint);
 		let mut import = Self {
 			track: reserved.producer().media_producer(track, wire)?,
@@ -207,7 +207,10 @@ mod tests {
 			.decode(&keyframe, Some(Timestamp::from_micros(0).unwrap()))
 			.unwrap();
 
-		let mut media = crate::container::Consumer::new(subscriber, crate::catalog::hang::Container::Loc);
+		let mut media = crate::container::Consumer::new(
+			subscriber,
+			crate::catalog::hang::Container::Loc(crate::container::Kind::Data),
+		);
 		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read())
 			.await
 			.unwrap()

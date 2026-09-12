@@ -508,7 +508,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// Build the wire producer before advertising the rendition. Both steps are fallible (an
 		// unsupported container, a colliding timeline track), and a rendition published for a track
 		// we then fail to produce would be advertised to consumers but never served.
-		let wire = crate::catalog::hang::Container::try_from(&self.container)?;
+		let wire = crate::catalog::hang::Container::try_from(&config)?;
 		let media = self.catalog.media_producer(net_track, wire)?;
 		self.catalog.lock().video.renditions.insert(name, config.clone());
 		self.video.insert(
@@ -535,7 +535,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// Build the wire producer before advertising the rendition. Both steps are fallible (an
 		// unsupported container, a colliding timeline track), and a rendition published for a track
 		// we then fail to produce would be advertised to consumers but never served.
-		let wire = crate::catalog::hang::Container::try_from(&self.container)?;
+		let wire = crate::catalog::hang::Container::try_from(&config)?;
 		let media = self.catalog.media_producer(net_track, wire)?;
 		self.catalog.lock().audio.renditions.insert(name, config.clone());
 		self.audio.insert(track_id, AudioStream { track: media, config });

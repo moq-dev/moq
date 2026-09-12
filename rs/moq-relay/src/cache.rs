@@ -31,7 +31,7 @@ pub struct CacheConfig {
 	/// A target that usage converges toward as tracks write, not a hard limit, and it
 	/// counts cached group bytes (payload plus a fixed cost per group), not process
 	/// RSS; leave some slack below physical memory or combine with `headroom`.
-	#[usage(long = "cache-capacity", env = "MOQ_CACHE_CAPACITY")]
+	#[usage(long = "cache-capacity", env = "MOQ_CACHE_CAPACITY", setting = "cache.capacity")]
 	pub capacity: Option<String>,
 
 	/// Keep at least this much system memory available, e.g. "2GiB" or "10%".
@@ -40,7 +40,7 @@ pub struct CacheConfig {
 	/// so the cache soaks up idle memory but is the first thing reclaimed when
 	/// the rest of the system needs it. Combine with `capacity` to also cap the
 	/// absolute size.
-	#[usage(long = "cache-headroom", env = "MOQ_CACHE_HEADROOM")]
+	#[usage(long = "cache-headroom", env = "MOQ_CACHE_HEADROOM", setting = "cache.headroom")]
 	pub headroom: Option<String>,
 
 	/// Maximum time a non-latest cached group is retained, e.g. "30s" or "500ms".
@@ -60,7 +60,7 @@ pub struct CacheConfig {
 	/// cadence. The `capacity` budget is the one that depends on writes: a
 	/// publisher that stops writing pays none of it down, so under memory pressure
 	/// it is repaid by the tracks that are still writing.
-	#[usage(long = "cache-duration", env = "MOQ_CACHE_DURATION")]
+	#[usage(long = "cache-duration", env = "MOQ_CACHE_DURATION", setting = "cache.duration")]
 	pub duration: Option<moq_tokio::Duration>,
 }
 
@@ -71,11 +71,11 @@ pub struct CacheConfig {
 /// The headroom governor, when configured, is owned by [`Self::pool`] rather than
 /// by this struct: it holds only a [`cache::PoolWeak`] and stops on its next tick
 /// once every [`cache::Pool`] clone has dropped. Handing this to
-/// [`Cluster::with_cache`](crate::Cluster::with_cache) therefore moves the
-/// governor's lifetime onto the cluster, and dropping this struct afterwards keeps
-/// it running. Conversely, holding a clone of [`Self::pool`] past the relay keeps
-/// the governor running too, deliberately: as long as anything can still cache into
-/// the budget, resizing it is still the right thing to do.
+/// [`Cluster::new`](crate::Cluster::new) therefore moves the governor's lifetime
+/// onto the cluster, and dropping this struct afterwards keeps it running.
+/// Conversely, holding a clone of [`Self::pool`] past the relay keeps the governor
+/// running too, deliberately: as long as anything can still cache into the budget,
+/// resizing it is still the right thing to do.
 pub struct Cache {
 	/// The shared pool every session's groups register with: the byte budget plus
 	/// the wall-clock LRU window that reclaims idle groups.
@@ -266,7 +266,7 @@ mod tests {
 	/// hand it to a cluster whose construction can still fail.
 	fn attach(cache: &CacheConfig, cluster: crate::ClusterConfig) -> anyhow::Result<crate::Cluster> {
 		let cache = cache.init()?;
-		Ok(crate::Cluster::new(cluster)?.with_cache(cache))
+		crate::Cluster::new(crate::ClusterOptions::new(cluster).with_cache(cache))
 	}
 
 	#[tokio::test(start_paused = true)]

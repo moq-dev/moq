@@ -13,6 +13,10 @@ futures and streams. A Native Assets hook supplies the Rust core for Android
 (API 24+), iOS (16+), Linux, macOS, and Windows. Flutter web is not supported,
 since it can't load a native library.
 
+Media frames use `keyframe` to mark a group start or a video keyframe. For audio,
+it is true only on the first frame of each group, even when every sample can be
+decoded independently.
+
 ```bash
 dart pub add moq        # or: flutter pub add moq
 ```
@@ -37,6 +41,11 @@ track.appendGroup().writeFrame(frame: MoqFrame(payload: bytes));
 
 moq.close();
 ```
+
+Sessions reconnect with backoff when the transport drops and re-announce local
+broadcasts. `moq.epoch` counts the connections, 1 on the first, pairing with
+`session.status()` to log each reconnect; `maxStreams` raises the peer's
+inbound stream cap for a subscriber to many tracks.
 
 Cancelling a stream releases the native cursor. The package re-exports
 `moq_ffi`, so the full generated API is available without a second import.

@@ -61,10 +61,11 @@ export type StreamCode = number & { readonly [STREAM_CODE]: true };
  * {@link StreamCode.Internal}, not a cancellation ({@link StreamCode.Cancel} is 1). Call
  * `StreamCode(code)` to construct an application code in the 64+ range.
  *
- * The draft reserves 32-63 rather than assigning it. The entries below in that range are
- * placeholders this implementation and the Rust one agree on, so a condition the shared
- * codes don't cover still says something. Send them, but don't read a peer's back through
- * them unless you know the peer is one of ours.
+ * 32 through 47 is reserved: the entries below in that range are placeholders this
+ * implementation and the Rust one agree on, so a condition the shared codes don't cover
+ * still says something. Send them, but don't read a peer's back through them unless you
+ * know the peer is one of ours. 48 through 63 is moq-lite's own assigned range and a
+ * received one is the named code.
  *
  * @public
  */
@@ -84,14 +85,16 @@ export const StreamCode = Object.freeze(
 		TooFarBehind: 0x5 as StreamCode,
 		/** The track's content could not be parsed. */
 		MalformedTrack: 0x12 as StreamCode,
-		/** The requested broadcast or track does not exist at the peer. Reserved range. */
-		NotFound: 0x20 as StreamCode,
-		/** The group was superseded by a newer one and dropped. Reserved range. */
-		Old: 0x22 as StreamCode,
-		/** The group was dropped under memory pressure, so it can be re-fetched. Reserved range. */
-		Evicted: 0x23 as StreamCode,
+		/** The requested broadcast or track does not exist at the peer. */
+		NotFound: 0x33 as StreamCode,
+		/** The group was superseded by a newer one and dropped. */
+		Old: 0x34 as StreamCode,
+		/** The group was dropped under memory pressure, so it can be re-fetched. */
+		Evicted: 0x35 as StreamCode,
 		/** A frame declared a payload larger than the receiver accepts. Reserved range. */
 		FrameTooLarge: 0x25 as StreamCode,
+		/** The publisher could serve this request but has no capacity for it now. */
+		NoCapacity: 0x30 as StreamCode,
 	} as const),
 );
 
@@ -153,7 +156,7 @@ export interface StreamErrorOptions {
  * try {
  *   frame = await group.readFrame();
  * } catch (err) {
- *   if (isCancel(err)) return;
+ *   if (err instanceof StreamError && err.code === StreamCode.Cancel) return;
  *   throw err;
  * }
  * ```
@@ -173,17 +176,6 @@ export class StreamError extends Error {
 		this.name = "StreamError";
 		this.code = code;
 	}
-}
-
-/**
- * True when `err` is a requested stream end ({@link StreamCode.Cancel}), not a fault.
- *
- * Finish is the other clean end: `closed` settling to `null`. This is the abort-with-Cancel
- * half, matching the Rust `Error::Cancel` versus `finish`. The test is the code, not the
- * message: a plain `Error("cancel")` is still a fault.
- */
-export function isCancel(err: unknown): err is StreamError {
-	return err instanceof StreamError && err.code === StreamCode.Cancel;
 }
 
 /**
@@ -311,7 +303,7 @@ function localStreamCode(err: unknown): StreamCode {
  * covers both, and works in a runtime with no `WebTransportError` at all.
  *
  * On moq-lite, a code with a local class decodes back into it, so a peer's condition is caught by
- * the same `instanceof` as one raised here. Only the registered codes do: the reserved 32-63
+ * the same `instanceof` as one raised here. Only the registered codes do: the reserved 32-47
  * placeholders carry no meaning the draft assigns, so they stay a plain {@link StreamError}.
  *
  * On an IETF stream a code keeps its value unless moq-lite claims that number for something

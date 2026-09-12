@@ -14,7 +14,6 @@ import {
 	Signal,
 } from "@moq/signals";
 import { base64ToBytes } from "../base64";
-import { isDecoderEnd } from "../error";
 import { subscribeMedia } from "../media";
 
 import type { Sync } from "../sync";
@@ -305,7 +304,6 @@ class DecoderTrack {
 			maxAge: this.sync.out.maxAge,
 		});
 
-		let consumer: Container.Consumer | undefined;
 		const decoder = new VideoDecoder({
 			output: async (frame: VideoFrame) => {
 				try {
@@ -355,10 +353,9 @@ class DecoderTrack {
 					frame.close();
 				}
 			},
+			// TODO bubble up error
 			error: (error) => {
-				if (!isDecoderEnd(consumer ?? { cancelled: false, closed: sub.closed }, effect.abort.aborted)) {
-					console.error("video decoder error", error);
-				}
+				console.error("video decoder error", error);
 				effect.close();
 			},
 		});
@@ -367,15 +364,18 @@ class DecoderTrack {
 		});
 
 		// Input processing - depends on container type
-		consumer =
-			this.config.container.kind === "cmaf"
-				? this.#runCmaf(effect, sub, decoder)
-				: this.#runLegacy(effect, sub, decoder);
+		if (this.config.container.kind === "cmaf") {
+			this.#runCmaf(effect, sub, decoder);
+		} else {
+			this.#runLegacy(effect, sub, decoder);
+		}
 	}
 
-	#runLegacy(effect: Effect, sub: Moq.Track.Subscriber, decoder: VideoDecoder): Container.Consumer {
+	#runLegacy(effect: Effect, sub: Moq.Track.Subscriber, decoder: VideoDecoder): void {
 		const format =
-			this.config.container.kind === "loc" ? new Container.Loc.Format() : new Container.Legacy.Format();
+			this.config.container.kind === "loc"
+				? new Container.Loc.Format("video")
+				: new Container.Legacy.Format(this.config);
 		// Create consumer that reorders groups/frames up to the provided latency.
 		const consumer = new Container.Consumer(sub, {
 			format,
@@ -443,11 +443,9 @@ class DecoderTrack {
 				decoder.decode(chunk);
 			}
 		});
-
-		return consumer;
 	}
 
-	#runCmaf(effect: Effect, sub: Moq.Track.Subscriber, decoder: VideoDecoder): Container.Consumer | undefined {
+	#runCmaf(effect: Effect, sub: Moq.Track.Subscriber, decoder: VideoDecoder): void {
 		const container = this.config.container;
 		if (container.kind !== "cmaf") return;
 
@@ -520,8 +518,6 @@ class DecoderTrack {
 				);
 			}
 		});
-
-		return consumer;
 	}
 
 	// React to the container consumer's discontinuity counter. On a change the publisher has

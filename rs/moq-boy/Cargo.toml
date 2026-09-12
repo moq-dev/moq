@@ -33,4 +33,4 @@ moq-video = { workspace = true, features = ["nvidia", "vaapi"] }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
-usage = { workspace = true, features = ["completions"] }
+usage = { workspace = true, features = ["completions", "config"] }

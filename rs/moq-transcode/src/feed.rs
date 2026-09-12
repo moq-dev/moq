@@ -164,7 +164,7 @@ async fn run(inner: Arc<Inner>, sender: broadcast::Sender<Item>) {
 /// Decodes at the stream's native size: the rungs share these frames, so
 /// per-rung sizing happens on their side (`Frame::resize`).
 async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), Error> {
-	let container = moq_mux::catalog::hang::Container::try_from(&inner.config.container)?;
+	let container = moq_mux::catalog::hang::Container::try_from(&inner.config)?;
 
 	let mut config = moq_video::decode::Config::new();
 	config.kind = inner.decoder.clone();

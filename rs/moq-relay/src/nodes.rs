@@ -123,11 +123,6 @@ impl Nodes {
 		}
 	}
 
-	pub(crate) fn with_origin(mut self, origin: origin::Producer) -> Self {
-		self.origin = origin;
-		self
-	}
-
 	/// Record a dial this relay initiated, keyed by the URL it dialed.
 	///
 	/// `id` is the session's `conn` id from

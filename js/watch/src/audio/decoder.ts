@@ -14,7 +14,6 @@ import {
 	Signal,
 } from "@moq/signals";
 import { base64ToBytes } from "../base64";
-import { isDecoderEnd } from "../error";
 import { subscribeMedia } from "../media";
 
 import type { Sync } from "../sync";
@@ -316,7 +315,8 @@ export class Decoder {
 		const preSkip =
 			config.codec === "opus" && config.description ? Util.Opus.preSkip(Util.Hex.toBytes(config.description)) : 0;
 		this.#terminal.clear(preSkip);
-		const format = config.container.kind === "loc" ? new Container.Loc.Format() : new Container.Legacy.Format();
+		const format =
+			config.container.kind === "loc" ? new Container.Loc.Format("audio") : new Container.Legacy.Format(config);
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
 		// TODO include JITTER_UNDERHEAD
 		const consumer = new Container.Consumer(sub, {
@@ -348,11 +348,7 @@ export class Decoder {
 					}
 					this.#emit(data, decoded);
 				},
-				error: (error) => {
-					if (!isDecoderEnd(consumer, effect.abort.aborted)) {
-						console.error("audio decoder error", error);
-					}
-				},
+				error: (error) => console.error("audio decoder error", error),
 			});
 			effect.cleanup(() => {
 				if (decoder.state !== "closed") decoder.close();
@@ -449,11 +445,7 @@ export class Decoder {
 
 			const decoder = new AudioDecoder({
 				output: (data) => this.#emit(data),
-				error: (error) => {
-					if (!isDecoderEnd(consumer, effect.abort.aborted)) {
-						console.error("audio decoder error", error);
-					}
-				},
+				error: (error) => console.error("audio decoder error", error),
 			});
 			effect.cleanup(() => {
 				if (decoder.state !== "closed") decoder.close();

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(moq-video)* `Surface::to_bgra` and `to_bgra_with`, the same conversion as
+  `to_rgba` with red and blue exchanged, for the toolkits that want that order
+- *(moq-video)* `Surface::to_rgba` and `to_rgba_with`, which borrow the surface
+  where `into_rgba` consumed it
+- *(moq-video)* `Surface::to_i420` is public, the borrowing counterpart to
+  `into_i420`
+
 ### Fixed
 
 - `encode::Producer` carries a rendition's `label` into the catalog. It copied the config into hints

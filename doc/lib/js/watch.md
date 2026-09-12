@@ -138,7 +138,7 @@ import * as Watch from "@moq/watch";
 
 // Shared with every other component pointed at the same relay; the broadcast
 // handle reads from its origin and spans reconnects.
-const connection = new Moq.Connection.Shared({ url: new URL("https://relay.example.com/anon") });
+const connection = new Moq.Connection({ url: new URL("https://relay.example.com/anon") });
 const broadcast = new Watch.Broadcast({ origin: connection.origin, name: Moq.Path.from("alice.hang") });
 ```
 

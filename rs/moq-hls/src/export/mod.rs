@@ -296,9 +296,10 @@ async fn watch_catalog(
 				renditions.sync(&upstream, &catalog);
 				// The broadcast has one timeline; subscribe once it's advertised and fan its
 				// records out to every rendition.
-				if !timeline_started && let Some(section) = catalog.timeline.clone() {
+				if !timeline_started && let Some(archive) = catalog.archive.clone() {
 					timeline_started = true;
-					let watcher = tokio::spawn(watch_timeline(broadcast.clone(), section, renditions.fanout()));
+					let watcher =
+						tokio::spawn(watch_timeline(broadcast.clone(), archive.timeline, renditions.fanout()));
 					*timeline_watcher.lock().unwrap() = Some(watcher);
 				}
 			}
@@ -427,7 +428,7 @@ mod tests {
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.broadcast = Some(moq_net::PathRelative::new("../../source").to_owned());
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
-		catalog.timeline = Some(hang::catalog::Timeline::new(hang::timeline::DEFAULT_NAME));
+		catalog.archive = Some(hang::catalog::Archive::new(hang::timeline::DEFAULT_NAME));
 		catalog.video.renditions.insert("video".to_string(), config);
 
 		let renditions = renditions::Producer::new(Config::default().window);
@@ -455,7 +456,7 @@ mod tests {
 		audio.bitrate = Some(96_000);
 
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
-		catalog.timeline = Some(hang::catalog::Timeline::new(hang::timeline::DEFAULT_NAME));
+		catalog.archive = Some(hang::catalog::Archive::new(hang::timeline::DEFAULT_NAME));
 		catalog.video.renditions.insert("video0".to_string(), video_config());
 		catalog.audio.renditions.insert("audio0".to_string(), audio);
 		catalog
@@ -652,7 +653,10 @@ mod tests {
 		// Three GOPs, 2s apart: groups 0 and 1 are complete, group 2 is the live edge.
 		let track = broadcast.create_track("video0", None).unwrap();
 		let mut media = catalog
-			.media_producer(track, moq_mux::catalog::hang::Container::Legacy)
+			.media_producer(
+				track,
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+			)
 			.unwrap();
 		media.write(vp8_frame(0, true)).unwrap();
 		media.write(vp8_frame(1_000_000, false)).unwrap();
@@ -706,6 +710,45 @@ mod tests {
 		drop((media, registration, broadcast));
 	}
 
+	/// A duration marker times the trailing sample of a fetched HLS segment.
+	#[tokio::test]
+	async fn a_duration_marker_times_the_hls_trailing_sample() {
+		let origin = produce_origin();
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		broadcast.announce(Default::default()).expect("publish allowed");
+		settle().await;
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+
+		let reserved = catalog.reserve();
+		let mut registration = reserved.video("video0").unwrap();
+		registration.set(video_config()).unwrap();
+		drop(reserved);
+
+		let track = broadcast.create_track("video0", None).unwrap();
+		let mut media = catalog
+			.media_producer(
+				track,
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+			)
+			.unwrap();
+		media.write(vp8_frame(0, true)).unwrap();
+		media.write(vp8_frame(1_000_000, false)).unwrap();
+		media.write(vp8_frame(2_000_000, true)).unwrap();
+		media.finish().unwrap();
+
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let rendition = broadcaster
+			.rendition(Kind::Video, "video0")
+			.expect("rendition discovered from the catalog");
+		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
+
+		let segment = rendition.segment(0).await.unwrap().expect("segment fetched on demand");
+		assert_eq!(&segment[4..8], b"moof");
+		drop((media, registration, broadcast));
+	}
+
 	// The DASH half of the fetch-on-demand path: the manifest renders from the same timeline
 	// windows as the HLS playlists (dynamic while live, aligned S entries across renditions),
 	// and $Time$ addressing resolves a segment's pts to the same bytes its number does.
@@ -727,11 +770,17 @@ mod tests {
 
 		let video_track = broadcast.create_track("video0", None).unwrap();
 		let mut video = catalog
-			.media_producer(video_track, moq_mux::catalog::hang::Container::Legacy)
+			.media_producer(
+				video_track,
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+			)
 			.unwrap();
 		let audio_track = broadcast.create_track("audio0", None).unwrap();
 		let mut audio = catalog
-			.media_producer(audio_track, moq_mux::catalog::hang::Container::Legacy)
+			.media_producer(
+				audio_track,
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+			)
 			.unwrap();
 
 		// Video keyframes every 2s cut the segments; audio contributes one group per cut.
@@ -804,7 +853,10 @@ mod tests {
 
 		let track = broadcast.create_track("video0", None).unwrap();
 		let mut media = catalog
-			.media_producer(track, moq_mux::catalog::hang::Container::Legacy)
+			.media_producer(
+				track,
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+			)
 			.unwrap();
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();
@@ -867,7 +919,10 @@ mod tests {
 		// 3s GOPs against the default 1s minimum: every segment is one whole GOP.
 		let track = broadcast.create_track("video0", None).unwrap();
 		let mut media = catalog
-			.media_producer(track, moq_mux::catalog::hang::Container::Legacy)
+			.media_producer(
+				track,
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+			)
 			.unwrap();
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(3_000_000, true)).unwrap();
@@ -905,11 +960,17 @@ mod tests {
 
 		let video_track = broadcast.create_track("video0", None).unwrap();
 		let mut video = catalog
-			.media_producer(video_track, moq_mux::catalog::hang::Container::Legacy)
+			.media_producer(
+				video_track,
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+			)
 			.unwrap();
 		let audio_track = broadcast.create_track("audio0", None).unwrap();
 		let mut audio = catalog
-			.media_producer(audio_track, moq_mux::catalog::hang::Container::Legacy)
+			.media_producer(
+				audio_track,
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+			)
 			.unwrap();
 
 		// Interleaved by pts, as a muxer would demux them: video keyframes every 2s open the
@@ -989,7 +1050,10 @@ mod tests {
 		// publisher finishes.
 		let track = broadcast.create_track("video0", None).unwrap();
 		let mut media = catalog
-			.media_producer(track, moq_mux::catalog::hang::Container::Legacy)
+			.media_producer(
+				track,
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+			)
 			.unwrap();
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();
@@ -1040,12 +1104,16 @@ mod tests {
 	) -> (Arc<Rendition>, tokio::task::JoinHandle<()>) {
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
 		catalog.video.renditions.insert("video0".to_string(), config.clone());
-		let section = hang::catalog::Timeline::new(hang::timeline::DEFAULT_NAME);
-		catalog.timeline = Some(section.clone());
+		let archive = hang::catalog::Archive::new(hang::timeline::DEFAULT_NAME);
+		catalog.archive = Some(archive.clone());
 
 		let renditions = renditions::Producer::new(Config::default().window);
 		renditions.sync(upstream, &catalog);
-		let watcher = tokio::spawn(watch_timeline(upstream.broadcast.clone(), section, renditions.fanout()));
+		let watcher = tokio::spawn(watch_timeline(
+			upstream.broadcast.clone(),
+			archive.timeline,
+			renditions.fanout(),
+		));
 		let rendition = renditions.get(Kind::Video, "video0").expect("rendition synced");
 		(rendition, watcher)
 	}
@@ -1079,7 +1147,10 @@ mod tests {
 
 			let track = broadcast.create_track("video0", None).unwrap();
 			let mut media = catalog
-				.media_producer(track, moq_mux::catalog::hang::Container::Legacy)
+				.media_producer(
+					track,
+					moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+				)
 				.unwrap();
 			media.write(payload_frame(0, true, payload)).unwrap();
 			media.write(payload_frame(2_000_000, true, payload)).unwrap();
@@ -1170,7 +1241,10 @@ mod tests {
 			broadcast.announce(Default::default()).expect("publish allowed");
 			let track = broadcast.create_track("video0", None).unwrap();
 
-			let mut media = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
+			let mut media = moq_mux::container::Producer::new(
+				track,
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+			);
 			if let Some(recorder) = recorder {
 				media = media.with_recorder(recorder);
 			}
@@ -1256,6 +1330,281 @@ mod tests {
 		drop((new_media, catalog, live));
 	}
 
+	fn hops(ids: &[u64]) -> moq_net::Hops {
+		let mut hops = moq_net::Hops::new();
+		for id in ids {
+			hops.push(moq_net::Hop::new(*id).unwrap()).unwrap();
+		}
+		hops
+	}
+
+	fn sibling_route(first: u64) -> moq_net::origin::Route {
+		moq_net::origin::Route::default().with_hops(hops(&[first]))
+	}
+
+	/// A standalone media publisher (not an origin leaf) so the sibling is served through a
+	/// routed front whose first hop can change.
+	fn write_routed_media(
+		broadcast: &mut moq_net::broadcast::Producer,
+		payload: &'static [u8],
+		recorder: moq_mux::timeline::Recorder,
+		start_micros: u64,
+	) -> moq_mux::container::Producer<moq_mux::catalog::hang::Container> {
+		let track = broadcast.create_track("video0", None).unwrap();
+		let mut media = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+		)
+		.with_recorder(recorder);
+		media.write(payload_frame(start_micros, true, payload)).unwrap();
+		media
+			.write(payload_frame(start_micros + 2_000_000, true, payload))
+			.unwrap();
+		media
+			.write(payload_frame(start_micros + 4_000_000, true, payload))
+			.unwrap();
+		media
+	}
+
+	async fn accept_sibling(server: &moq_net::origin::Dynamic, broadcast: &moq_net::broadcast::Producer) {
+		let request = tokio::time::timeout(Duration::from_secs(5), server.requested_broadcast())
+			.await
+			.expect("the sibling path is requested")
+			.expect("the handler is open");
+		request.accept(broadcast);
+	}
+
+	async fn until_empty(rendition: &Rendition) {
+		let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+		loop {
+			if rendition.playlist().segments.is_empty() {
+				return;
+			}
+			assert!(
+				tokio::time::Instant::now() < deadline,
+				"old sibling rows were not dropped after replacement"
+			);
+			tokio::task::yield_now().await;
+		}
+	}
+
+	// A bound sibling whose publisher is replaced through a different first hop ends with
+	// Dropped. The exporter must drop rows listed for the old publisher, re-bind, and list
+	// only rows that arrive after the new bind resolves: fetching an old row from the
+	// replacement would serve restarted groups under the previous publisher's segment numbers.
+	#[tokio::test]
+	async fn a_replaced_first_hop_sibling_drops_old_rows_and_rebinds() {
+		const OLD: &[u8] = b"OLDOLDOLDOLDOLDO";
+		const NEW: &[u8] = b"NEWNEWNEWNEWNEWN";
+
+		let origin = produce_origin();
+		let mut live = origin.create_broadcast("live").expect("publish allowed");
+		live.announce(Default::default()).expect("publish allowed");
+		let mut catalog = moq_mux::catalog::Producer::new(&mut live).unwrap();
+		let recorder = catalog.enroll("video0").unwrap();
+
+		let mut old_media = moq_net::broadcast::Info::new().produce();
+		let _old_track = write_routed_media(&mut old_media, OLD, recorder, 0);
+		let old_server = origin.dynamic("media", sibling_route(10)).unwrap();
+		settle().await;
+
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let upstream = Upstream {
+			broadcast: source.broadcast().await.unwrap(),
+			source,
+		};
+		let mut config = video_config();
+		config.broadcast = Some(moq_net::PathRelative::new("media").to_owned());
+
+		let (rendition, watcher) = export(&upstream, &config);
+		accept_sibling(&old_server, &old_media).await;
+		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
+			.await
+			.expect("the timeline reaches the rendition");
+		let served = rendition
+			.segment(0)
+			.await
+			.unwrap()
+			.expect("the original sibling is servable");
+		assert!(contains(&served, OLD), "the first hop serves the original publisher");
+		assert!(!rendition.playlist().segments.is_empty());
+
+		// The replacement is already announced before the incumbent is dropped, matching a
+		// rival publisher that appears while the current first hop is still serving.
+		let new_server = origin.dynamic("media", sibling_route(11)).unwrap();
+		drop((old_server, old_media, _old_track));
+		until_empty(&rendition).await;
+		assert!(
+			rendition.segment(0).await.unwrap().is_none(),
+			"a row listed for the old publisher answers 404 after replacement"
+		);
+
+		let mut new_media = moq_net::broadcast::Info::new().produce();
+		accept_sibling(&new_server, &new_media).await;
+		// The rendition skips timeline rows until this bind resolves. Joining the
+		// same front waits for attach, so writes below land after that.
+		tokio::time::timeout(Duration::from_secs(5), origin.consume().request_broadcast("media"))
+			.await
+			.expect("the rebound sibling resolves")
+			.expect("the replacement is routable");
+		let recorder = catalog.enroll("video0").unwrap();
+		let _new_track = write_routed_media(&mut new_media, NEW, recorder, 6_000_000);
+		let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+		loop {
+			if !rendition.playlist().segments.is_empty() {
+				break;
+			}
+			assert!(
+				tokio::time::Instant::now() < deadline,
+				"rows produced after the new bind were not listed"
+			);
+			tokio::task::yield_now().await;
+		}
+		let listed = rendition
+			.playlist()
+			.segments
+			.into_iter()
+			.find(|segment| !segment.gap)
+			.expect("a non-gap row after the new bind")
+			.segment;
+		let served = rendition
+			.segment(listed)
+			.await
+			.unwrap()
+			.expect("the rebound sibling is servable");
+		assert!(
+			contains(&served, NEW),
+			"rows after the new bind come from the replacement"
+		);
+		assert!(!contains(&served, OLD));
+		assert!(
+			rendition.segment(0).await.unwrap().is_none(),
+			"a row listed for the old publisher is not served from the replacement"
+		);
+		watcher.abort();
+		drop((new_media, _new_track, new_server, catalog, live));
+	}
+
+	// A replacement already present when the export starts is the sibling the request
+	// resolves to: it is served, not treated as a stale epoch.
+	#[tokio::test]
+	async fn a_sibling_present_at_export_start_is_served() {
+		const NEW: &[u8] = b"NEWNEWNEWNEWNEWN";
+
+		let origin = produce_origin();
+		let mut live = origin.create_broadcast("live").expect("publish allowed");
+		live.announce(Default::default()).expect("publish allowed");
+		let mut catalog = moq_mux::catalog::Producer::new(&mut live).unwrap();
+		let recorder = catalog.enroll("video0").unwrap();
+
+		let mut media = moq_net::broadcast::Info::new().produce();
+		let _track = write_routed_media(&mut media, NEW, recorder, 0);
+		let server = origin.dynamic("media", sibling_route(11)).unwrap();
+		settle().await;
+
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let upstream = Upstream {
+			broadcast: source.broadcast().await.unwrap(),
+			source,
+		};
+		let mut config = video_config();
+		config.broadcast = Some(moq_net::PathRelative::new("media").to_owned());
+
+		let (rendition, watcher) = export(&upstream, &config);
+		accept_sibling(&server, &media).await;
+		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
+			.await
+			.expect("the timeline reaches the rendition");
+		let served = rendition
+			.segment(0)
+			.await
+			.unwrap()
+			.expect("the sibling present at export start is servable");
+		assert!(contains(&served, NEW));
+		watcher.abort();
+		drop((media, _track, server, catalog, live));
+	}
+
+	// The replacement is often announced after the incumbent is already gone. The rebind
+	// then resolves Unroutable; Binding never retries, so the next poll must issue a new
+	// request or the rendition stays empty forever.
+	#[tokio::test]
+	async fn a_replaced_sibling_recovers_after_an_unroutable_gap() {
+		const OLD: &[u8] = b"OLDOLDOLDOLDOLDO";
+		const NEW: &[u8] = b"NEWNEWNEWNEWNEWN";
+
+		let origin = produce_origin();
+		let mut live = origin.create_broadcast("live").expect("publish allowed");
+		live.announce(Default::default()).expect("publish allowed");
+		let mut catalog = moq_mux::catalog::Producer::new(&mut live).unwrap();
+		let recorder = catalog.enroll("video0").unwrap();
+
+		let mut old_media = moq_net::broadcast::Info::new().produce();
+		let _old_track = write_routed_media(&mut old_media, OLD, recorder, 0);
+		let old_server = origin.dynamic("media", sibling_route(10)).unwrap();
+		settle().await;
+
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let upstream = Upstream {
+			broadcast: source.broadcast().await.unwrap(),
+			source,
+		};
+		let mut config = video_config();
+		config.broadcast = Some(moq_net::PathRelative::new("media").to_owned());
+
+		let (rendition, watcher) = export(&upstream, &config);
+		accept_sibling(&old_server, &old_media).await;
+		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
+			.await
+			.expect("the timeline reaches the rendition");
+		assert!(rendition.segment(0).await.unwrap().is_some());
+
+		drop((old_server, old_media, _old_track));
+		until_empty(&rendition).await;
+		for _ in 0..4 {
+			assert!(rendition.playlist().segments.is_empty());
+			assert!(rendition.segment(0).await.unwrap().is_none());
+		}
+
+		let new_server = origin.dynamic("media", sibling_route(11)).unwrap();
+		let mut new_media = moq_net::broadcast::Info::new().produce();
+		let _ = rendition.playlist();
+		accept_sibling(&new_server, &new_media).await;
+		tokio::time::timeout(Duration::from_secs(5), origin.consume().request_broadcast("media"))
+			.await
+			.expect("the rebound sibling resolves")
+			.expect("the replacement is routable");
+		let recorder = catalog.enroll("video0").unwrap();
+		let _new_track = write_routed_media(&mut new_media, NEW, recorder, 6_000_000);
+		let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+		loop {
+			if !rendition.playlist().segments.is_empty() {
+				break;
+			}
+			assert!(
+				tokio::time::Instant::now() < deadline,
+				"rows produced after the new bind were not listed"
+			);
+			tokio::task::yield_now().await;
+		}
+		let listed = rendition
+			.playlist()
+			.segments
+			.into_iter()
+			.find(|segment| !segment.gap)
+			.expect("a non-gap row after the new bind")
+			.segment;
+		let served = rendition
+			.segment(listed)
+			.await
+			.unwrap()
+			.expect("the rebound sibling is servable after an unroutable gap");
+		assert!(contains(&served, NEW));
+		assert!(rendition.segment(0).await.unwrap().is_none());
+		watcher.abort();
+		drop((new_media, _new_track, new_server, catalog, live));
+	}
+
 	// A rendition the catalog drops must end its segment cursors. The cursor holds an
 	// `Arc<Rendition>`, so without an explicit close the rendition (and its timeline
 	// subscription) would stay alive and the cursor would park at the live edge forever.
@@ -1276,7 +1625,7 @@ mod tests {
 		let media = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
 		catalog.video.renditions.insert("video".to_string(), media);
-		catalog.timeline = Some(hang::catalog::Timeline::new(hang::timeline::DEFAULT_NAME));
+		catalog.archive = Some(hang::catalog::Archive::new(hang::timeline::DEFAULT_NAME));
 		renditions.sync(&upstream, &catalog);
 
 		let rendition = renditions.get(Kind::Video, "video").expect("rendition synced");
@@ -1284,7 +1633,7 @@ mod tests {
 
 		// The catalog drops the rendition: its cursor must run dry rather than park.
 		let mut empty = moq_mux::catalog::hang::Catalog::default();
-		empty.timeline = Some(hang::catalog::Timeline::new(hang::timeline::DEFAULT_NAME));
+		empty.archive = Some(hang::catalog::Archive::new(hang::timeline::DEFAULT_NAME));
 		renditions.sync(&upstream, &empty);
 		let ended = tokio::time::timeout(Duration::from_secs(5), segments.next())
 			.await
@@ -1315,7 +1664,10 @@ mod tests {
 
 		let track = broadcast.create_track("video0", None).unwrap();
 		let mut media = catalog
-			.media_producer(track, moq_mux::catalog::hang::Container::Legacy)
+			.media_producer(
+				track,
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+			)
 			.unwrap();
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();
@@ -1372,7 +1724,10 @@ mod tests {
 		// Groups 0 and 1 are complete; group 2 is the live edge until the publisher drops.
 		let track = broadcast.create_track("video0", None).unwrap();
 		let mut media = catalog
-			.media_producer(track, moq_mux::catalog::hang::Container::Legacy)
+			.media_producer(
+				track,
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+			)
 			.unwrap();
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();

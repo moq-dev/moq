@@ -9,6 +9,12 @@ import * as Path from "../path.ts";
 import { accept } from "./index.ts";
 import { Reload, type ReloadProps } from "./reload.ts";
 
+function publish(origin: OriginProducer, path: Path.Valid) {
+	const broadcast = origin.createBroadcast(path);
+	broadcast.announce();
+	return broadcast;
+}
+
 async function settle() {
 	await new Promise((resolve) => setTimeout(resolve, 0));
 }
@@ -209,7 +215,7 @@ test("announcedBroadcast follows the reconnect loop", async () => {
 		const origin = new OriginProducer();
 		void accept(pair.server, url, { publish: origin.consume() }).then((server) => {
 			sessions.push(server);
-			published.push(origin.publish(Path.from("late")));
+			published.push(publish(origin, Path.from("late")));
 		});
 		return pair.client;
 	};
@@ -440,7 +446,7 @@ test("origins span reconnects: local re-announces, remote re-populates", async (
 	// What the client publishes (persistent) and what it discovers (per session).
 	const publishOrigin = new OriginProducer();
 	const subscribeOrigin = new OriginProducer();
-	publishOrigin.publish(Path.from("mine"));
+	publish(publishOrigin, Path.from("mine"));
 
 	// Each connect attempt gets a fresh server session that publishes "remote" and records
 	// what the client announced to it.
@@ -450,7 +456,7 @@ test("origins span reconnects: local re-announces, remote re-populates", async (
 		const saw = new OriginProducer();
 		const serverOrigin = new OriginProducer();
 		void accept(pair.server, url, { publish: serverOrigin.consume(), subscribe: saw }).then((session) => {
-			serverOrigin.publish(Path.from("remote"));
+			publish(serverOrigin, Path.from("remote"));
 			servers.push({ session, saw });
 		});
 		return pair.client;

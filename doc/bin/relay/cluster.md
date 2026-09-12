@@ -16,6 +16,13 @@ same way so the cluster converges instead of flapping. Both wire protocols
 carry it: natively on moq-lite, and via the [cluster extension](/draft/moq-cluster)
 on moq-transport 17+.
 
+Failover routes must carry copies of the same broadcast. For each track, the
+relay requires matching timescale, retention window, publisher priority, and
+group ordering. A source with different properties is refused before its groups
+are spliced in. If no compatible source remains, the track fails with
+`Unsupported`. New immutable properties require a new track name or broadcast
+identity.
+
 ## Topology
 
 List the peers each relay dials. That's the whole topology.

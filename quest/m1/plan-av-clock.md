@@ -11,11 +11,16 @@ the next re-anchor.
 
 ## Plan
 
-Settled: per-track handles. `sync.track("audio")` and `sync.track("video")`
-each report their advertised delay and measured spread, and one is nominated
-as the clock source. #3517 adopts that shape before it merges, so `SyncInput`
+Settled: per-track handles, and this quest lands them. `sync.track("audio")`
+and `sync.track("video")` each report their advertised delay and measured
+spread, and one is nominated as the clock source. `SyncInput`
 (`js/watch/src/sync.ts:21-46`, today `delay`, `buffer`, `probe`, `audio`,
 `video`) breaks once, and a third track joins without another pair of inputs.
+The measured spread per track comes from
+[Watch](/quest/m2/audio-jitter-target/watch.md); its branch carries flat
+`audioSpread` and `videoSpread` inputs in place of `probe`, which this quest
+folds into the handles. This is a published `@moq/watch` break, so it targets
+`dev`.
 
 Recommendations for the implementation:
 
@@ -32,13 +37,14 @@ Recommendations for the implementation:
 - Reset coupling stays: `<moq-watch>` already flushes the ring alongside
   `sync.reset()` (`js/watch/src/element.ts:301`, `:620-621`).
 - The text renderer is the third track: it reads `sync.now()`
-  (`js/watch/src/text/renderer.ts:261`) for the cues it drains at `:273-278`.
+  (`js/watch/src/text/renderer.ts:261`) to drive the cue clock and prune cues
+  at `:263-265`.
 
 ## Required
 
-- #3517 merges carrying the per-track shape
+- [Watch](/quest/m2/audio-jitter-target/watch.md) - lands the per-track spread inputs this shape carries; it merges to `dev` before this starts
 
 ## Related
 
-- [Auto latency](/quest/m0/3477-watch-auto-latency.md) - the estimator this sits on
+- [Audio jitter target](/quest/m2/audio-jitter-target/README.md) - the estimator this sits on
 - [Time stretch](/quest/m2/watch-audio-time-stretch.md) - stretching needs a clock to converge toward

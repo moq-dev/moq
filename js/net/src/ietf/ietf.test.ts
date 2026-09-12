@@ -101,7 +101,7 @@ test("Message Parameters: uint8 wire encoding changes in draft 17", async () => 
 		0xff, // QUIC varint 255
 	]);
 
-	for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20]) {
+	for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20, Version.DRAFT_21]) {
 		const expected = new Uint8Array([
 			0x01, // parameter count
 			0x20, // SUBSCRIBER_PRIORITY
@@ -133,7 +133,7 @@ test("Message Parameters: Location loses its length prefix at draft-17", async (
 		0x80, // QUIC varint 128
 	]);
 
-	for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20]) {
+	for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20, Version.DRAFT_21]) {
 		const expected = new Uint8Array([
 			0x01, // parameter count
 			0x09, // LARGEST_OBJECT
@@ -177,7 +177,7 @@ test("Message Parameters: Location preserves full uint64 values in draft 17", as
 
 	expect(params.largest).toEqual(largest);
 
-	for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20]) {
+	for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20, Version.DRAFT_21]) {
 		const encoded = await encodeVersioned(params, version);
 		const decoded = await decodeVersioned(encoded, Parameters.decode, version);
 		expect(decoded.largest).toEqual(largest);
@@ -1138,6 +1138,18 @@ test("SubscribeOk v18: reads a multi-byte LARGEST_OBJECT group", async () => {
 	expect(decoded.largest).toEqual({ groupId: 427n, objectId: 0n });
 });
 
+test("SubscribeOk v14: advertises the largest content location", async () => {
+	const largest = { groupId: 9n, objectId: 3n };
+	const encoded = await encodeVersioned(
+		new Subscribe.SubscribeOk({ requestId: 7n, trackAlias: 42n, largest, properties: { groupOrder: 2 } }),
+		Version.DRAFT_14,
+	);
+	const expected = new Uint8Array([0, 8, 7, 42, 0, 2, 1, 9, 3, 0]);
+	expect(encoded).toEqual(expected);
+	const decoded = await decodeVersioned(expected, Subscribe.SubscribeOk.decode, Version.DRAFT_14);
+	expect(decoded.largest).toEqual(largest);
+});
+
 // LARGEST_OBJECT is required once the track has content, so every draft that defines it carries
 // it: length-prefixed through draft-16, two bare varints after.
 test("SubscribeOk: LARGEST_OBJECT rides every draft in that draft's form", async () => {
@@ -1517,7 +1529,7 @@ test("group flags round-trip firstObject", async () => {
 			},
 		});
 
-	for (const version of [Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20, Version.DRAFT_21]) {
 		for (const firstObject of [true, false]) {
 			const encoded = await encodeVersioned(makeGroup(firstObject), version);
 			const decoded = await decodeVersioned(encoded, Group.decode, version);

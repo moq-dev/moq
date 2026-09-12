@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 
 use bytes::Bytes;
 
-use super::decoder::{Config, Decoder};
+use super::decoder::{Config, Decoder, Start};
 use crate::resample::{Resampler, remix, validate_channels};
 use crate::{Activity, Error, Frame};
 
@@ -82,19 +82,39 @@ impl Consumer {
 		};
 
 		let name = name.into();
-		let track = broadcast
-			.track(&name)?
+		let track = broadcast.track(&name)?;
+		let mut subscriber = track
 			.subscribe(
 				moq_net::track::Subscription::default()
 					.with_priority(hang::catalog::PRIORITY.audio)
 					.with_max_age(config.max_age),
 			)
 			.await?;
+		// A decoder often opens on a track that is already cached: a replacement
+		// decoder subscribes while its predecessor still holds groups, and a
+		// rendition switched away from and back to stays warm for
+		// `TRACK_IDLE_LINGER`. A caller that asked for `Start::Latest` wants
+		// none of that backlog, because a cursor starting at sequence zero
+		// replays every cached group at decode speed before reaching live
+		// media, which on a thirty-second retention is half a minute of sound raced
+		// through.
+		//
+		// This moves the local read cursor and deliberately not
+		// `Subscription::group_start`. That field is a request to the publisher,
+		// aggregated across every live subscriber, so naming a stale cached
+		// sequence there asks the publisher to rewind the track for everyone
+		// reading it. What a player wants is to skip what it already has.
+		if config.start == Start::Latest
+			&& let Some(live_edge) = track.latest()
+		{
+			subscriber.start_at(live_edge);
+		}
+		let track = subscriber;
 		let max_age = config.max_age.min(track.info().max_age);
 		// The catalog says how the track is framed, and it is not always the legacy
 		// wire: `moq import fmp4` publishes CMAF. Reading a moof+mdat fragment as a
 		// varint timestamp plus a payload decodes to garbage rather than failing.
-		let container = moq_mux::catalog::hang::Container::try_from(&catalog.container)?;
+		let container = moq_mux::catalog::hang::Container::try_from(catalog)?;
 		let track = moq_mux::container::Consumer::new(track, container);
 
 		Ok(Self {
@@ -520,7 +540,10 @@ mod tests {
 		let subscriber = broadcast.consume();
 
 		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 44_100, 1);
-		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
 
 		let mut consumer = Consumer::new(
 			&subscriber,
@@ -576,7 +599,10 @@ mod tests {
 		let subscriber = broadcast.consume();
 
 		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 44_100, 1);
-		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
 
 		let mut consumer = Consumer::new(
 			&subscriber,
@@ -646,7 +672,10 @@ mod tests {
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
 		let subscriber = broadcast.consume();
-		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
 		let mut consumer = Consumer::new(
 			&subscriber,
 			&catalog,
@@ -720,7 +749,10 @@ mod tests {
 		let subscriber = broadcast.consume();
 
 		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, rate, 1);
-		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
 		let mut consumer = Consumer::new(
 			&subscriber,
 			&catalog,
@@ -864,7 +896,10 @@ mod tests {
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
 		let subscriber = broadcast.consume();
-		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
 		let mut consumer = Consumer::new(
 			&subscriber,
 			&catalog,
@@ -960,7 +995,10 @@ mod tests {
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
 		let subscriber = broadcast.consume();
-		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
 		let mut consumer = Consumer::new(
 			&subscriber,
 			&catalog,
@@ -1055,7 +1093,10 @@ mod tests {
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
 		let subscriber = broadcast.consume();
-		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
 		let mut consumer = Consumer::new(
 			&subscriber,
 			&catalog,
@@ -1100,7 +1141,10 @@ mod tests {
 		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
 		catalog.container = hang::catalog::Container::Loc;
 
-		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Loc);
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Loc(moq_mux::container::Kind::Audio),
+		);
 		let max_age = std::time::Duration::from_millis(250);
 		let mut consumer = Consumer::new(
 			&subscriber,
@@ -1162,7 +1206,7 @@ mod tests {
 		let track = broadcast
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
-		let container = moq_mux::catalog::hang::Container::try_from(&catalog.container).unwrap();
+		let container = moq_mux::catalog::hang::Container::try_from(&catalog).unwrap();
 		let mut producer = moq_mux::container::Producer::new(track, container);
 
 		let mut consumer = Consumer::new(&subscriber, &catalog, "audio", Config::new())

@@ -275,7 +275,7 @@ describe("Effect", () => {
 		}
 	});
 
-	test("a spawn rejection after close is not a spawn error", async () => {
+	test("a spawn rejection after close still reports the failure", async () => {
 		const error = spyOn(console, "error").mockImplementation(() => {});
 		const effect = new Effect();
 		const gate = Promise.withResolvers<void>();
@@ -289,7 +289,7 @@ describe("Effect", () => {
 			gate.resolve();
 			await settle();
 
-			expect(error).not.toHaveBeenCalled();
+			expect(error).toHaveBeenCalledWith("spawn error", expect.any(Error));
 		} finally {
 			error.mockRestore();
 		}

@@ -310,7 +310,7 @@ impl Producer {
 	/// measured bitrate or jitter moves.
 	///
 	/// Renditions are only servable when the catalog advertises the broadcast's timeline (its
-	/// root `timeline` section): without one there is nothing to render playlists from, so the
+	/// root `archive` entry): without one there is nothing to render playlists from, so the
 	/// whole catalog is skipped with a warning.
 	///
 	/// `upstream` carries the broadcast the snapshot was read from, so each rendition serves media
@@ -318,12 +318,13 @@ impl Producer {
 	/// rendition whose `broadcast` reference escapes above the origin root names no broadcast at
 	/// all, so it is dropped with a warning rather than served.
 	pub fn sync(&self, upstream: &Upstream, catalog: &Catalog) {
-		let Some(section) = catalog.timeline.clone() else {
+		let Some(archive) = catalog.archive.clone() else {
 			if !catalog.video.renditions.is_empty() || !catalog.audio.renditions.is_empty() {
-				tracing::warn!("catalog advertises no timeline; its renditions can't be served as HLS");
+				tracing::warn!("catalog advertises no archive; its renditions can't be served as HLS");
 			}
 			return;
 		};
+		let section = archive.timeline;
 
 		let Ok(mut current) = self.state.write() else {
 			return;

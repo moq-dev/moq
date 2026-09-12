@@ -202,7 +202,7 @@ enum TrackConvert {
 impl Track {
 	/// Audio track for an Opus rendition, from a subscribed `track`.
 	pub fn opus(track: moq_net::track::Subscriber) -> Self {
-		let container = moq_mux::catalog::hang::Container::Legacy;
+		let container = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
 		let consumer = moq_mux::container::Consumer::new(track, container);
 		Self {
 			consumer,
@@ -214,7 +214,7 @@ impl Track {
 	/// `config.codec`; for H.264 / H.265 the bitstream shape (inline vs out-of-band
 	/// parameter sets) is inferred from `config.description` (avc1/hvc1 vs avc3/hev1).
 	pub fn video(track: moq_net::track::Subscriber, config: &VideoConfig) -> Result<Self> {
-		let container: moq_mux::catalog::hang::Container = (&config.container).try_into()?;
+		let container: moq_mux::catalog::hang::Container = config.try_into()?;
 		let consumer = moq_mux::container::Consumer::new(track, container);
 
 		let convert = match &config.codec {

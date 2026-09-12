@@ -660,7 +660,10 @@ async fn fetches_cached_media_group_and_decodes_container() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let track = broadcast.create_track("media", None).unwrap();
 	let consumer = MoqBroadcastConsumer::new(broadcast.consume());
-	let mut media = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
+	let mut media = moq_mux::container::Producer::new(
+		track,
+		moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+	);
 
 	media
 		.write(moq_mux::container::Frame {
@@ -730,7 +733,8 @@ async fn fetch_media_group_decodes_multiple_cmaf_samples() {
 	let muxer = moq_mux::container::fmp4::Muxer::video(&config).unwrap();
 	let init = muxer.init().unwrap().expect("VP8 init should be available");
 	let catalog_container = hang::catalog::Container::Cmaf { init: init.clone() };
-	let container = moq_mux::catalog::hang::Container::try_from(&catalog_container).unwrap();
+	let container =
+		moq_mux::catalog::hang::Container::new(&catalog_container, moq_mux::container::Kind::Video).unwrap();
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let track = broadcast.create_track("video", None).unwrap();
@@ -2697,6 +2701,7 @@ async fn client_reconnects_and_resumes_announcements() {
 		.expect("status timed out")
 		.expect("status errored");
 	assert_eq!(status, MoqConnectionStatus::Connected);
+	assert_eq!(cs.epoch(), 1);
 
 	// Kill the transport under the client, simulating a relay restart.
 	// Nothing accepts the redial until the gate opens.
@@ -2719,6 +2724,16 @@ async fn client_reconnects_and_resumes_announcements() {
 		.expect("reconnect status timed out")
 		.expect("reconnect status errored");
 	assert_eq!(status, MoqConnectionStatus::Connected);
+
+	// The reconnect advances the epoch. The watcher may land just after the status
+	// edge it watched, so poll rather than assume ordering.
+	tokio::time::timeout(TIMEOUT, async {
+		while cs.epoch() < 2 {
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("the epoch did not advance on reconnect");
 
 	let server_session = tokio::time::timeout(TIMEOUT, accept)
 		.await

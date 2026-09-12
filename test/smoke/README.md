@@ -135,6 +135,10 @@ names the assertion that has to catch it, and passes only by failing there:
 | tone table shifted 800ms ahead of the picture | `audio/video sync` |
 | the detached player's session never torn down | `resource baseline` |
 
+The leaked-session control waits for an extra `AudioContext` rather than an extra
+session: every player on one relay URL shares a transport, so a session count
+cannot move.
+
 Not covered yet: other browser engines (the capability probe is the groundwork),
 camera/microphone permission denial, asserting the gesture gate rather than only
 exercising it, and any claim about physical playback.

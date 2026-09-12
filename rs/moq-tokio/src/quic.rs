@@ -89,7 +89,12 @@ pub struct Config {
 	/// Maximum number of concurrent QUIC streams per connection (both bidi and uni).
 	/// Defaults to 1024. MoQ opens a stream per group, so busy endpoints want this high.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[usage(name = "quic-max-streams", long = "quic-max-streams", env = "MOQ_QUIC_MAX_STREAMS")]
+	#[usage(
+		name = "quic-max-streams",
+		long = "quic-max-streams",
+		env = "MOQ_QUIC_MAX_STREAMS",
+		setting = "quic.max_streams"
+	)]
 	pub max_streams: Option<u64>,
 
 	/// Enable UDP generic segmentation offload (GSO).
@@ -102,6 +107,7 @@ pub struct Config {
 		name = "quic-gso",
 		long = "quic-gso",
 		env = "MOQ_QUIC_GSO",
+		setting = "quic.gso",
 		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
@@ -113,7 +119,8 @@ pub struct Config {
 		name = "quic-idle-timeout",
 		long = "quic-idle-timeout",
 		env = "MOQ_QUIC_IDLE_TIMEOUT",
-		default = "30s"
+		default = "30s",
+		setting = "quic.idle_timeout"
 	)]
 	pub idle_timeout: CliDuration,
 
@@ -123,7 +130,8 @@ pub struct Config {
 		name = "quic-keep-alive",
 		long = "quic-keep-alive",
 		env = "MOQ_QUIC_KEEP_ALIVE",
-		default = "5s"
+		default = "5s",
+		setting = "quic.keep_alive"
 	)]
 	pub keep_alive: CliDuration,
 
@@ -133,6 +141,7 @@ pub struct Config {
 		name = "quic-mtu-discovery",
 		long = "quic-mtu-discovery",
 		env = "MOQ_QUIC_MTU_DISCOVERY",
+		setting = "quic.mtu_discovery",
 		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
@@ -146,7 +155,8 @@ pub struct Config {
 		name = "quic-congestion-control",
 		long = "quic-congestion-control",
 		env = "MOQ_QUIC_CONGESTION_CONTROL",
-		value_enum
+		value_enum,
+		setting = "quic.congestion_control"
 	)]
 	pub congestion_control: Option<CongestionControl>,
 
@@ -160,7 +170,8 @@ pub struct Config {
 	#[usage(
 		name = "quic-receive-window",
 		long = "quic-receive-window",
-		env = "MOQ_QUIC_RECEIVE_WINDOW"
+		env = "MOQ_QUIC_RECEIVE_WINDOW",
+		setting = "quic.receive_window"
 	)]
 	pub receive_window: Option<u64>,
 
@@ -172,7 +183,8 @@ pub struct Config {
 	#[usage(
 		name = "quic-stream-receive-window",
 		long = "quic-stream-receive-window",
-		env = "MOQ_QUIC_STREAM_RECEIVE_WINDOW"
+		env = "MOQ_QUIC_STREAM_RECEIVE_WINDOW",
+		setting = "quic.stream_receive_window"
 	)]
 	pub stream_receive_window: Option<u64>,
 
@@ -182,7 +194,12 @@ pub struct Config {
 	/// This bounds the transport send buffer. The quiche backend has no local send
 	/// cap and refuses this rather than dropping it.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[usage(name = "quic-send-window", long = "quic-send-window", env = "MOQ_QUIC_SEND_WINDOW")]
+	#[usage(
+		name = "quic-send-window",
+		long = "quic-send-window",
+		env = "MOQ_QUIC_SEND_WINDOW",
+		setting = "quic.send_window"
+	)]
 	pub send_window: Option<u64>,
 
 	/// Write qlog traces into this directory, which must already exist.
@@ -193,7 +210,7 @@ pub struct Config {
 	///
 	/// Requires the `qlog` feature; setting it errors at init otherwise.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	#[usage(name = "quic-qlog", long = "quic-qlog", env = "MOQ_QUIC_QLOG")]
+	#[usage(name = "quic-qlog", long = "quic-qlog", env = "MOQ_QUIC_QLOG", setting = "quic.qlog")]
 	#[usage(value_hint = usage::ValueHint::DirPath)]
 	pub qlog: Option<PathBuf>,
 
@@ -204,6 +221,13 @@ pub struct Config {
 	#[usage(flatten)]
 	#[serde(skip)]
 	pub(crate) legacy: Legacy,
+}
+
+impl Config {
+	/// Hidden CLI-only fields a TOML round-trip would drop.
+	pub fn keep_parse_only(&mut self, from: &Self) {
+		self.legacy = from.legacy.clone();
+	}
 }
 
 impl Default for Config {
@@ -447,6 +471,7 @@ impl Config {
 	}
 
 	/// Reject knobs this build can't honor. Called when the endpoint is built.
+	#[cfg(feature = "_transport")]
 	pub(crate) fn validate(&self) -> crate::Result<()> {
 		// Erroring beats silently ignoring the flag: the operator asked for traces and
 		// would otherwise go looking for files that were never going to appear.
@@ -485,12 +510,14 @@ impl Config {
 
 /// QUIC carries `max_idle_timeout` as a varint of milliseconds, so anything past this
 /// can't go on the wire.
+#[cfg(feature = "_transport")]
 const MAX_IDLE_TIMEOUT: Duration = Duration::from_millis((1 << 62) - 1);
 
 /// Reject an idle timeout no QUIC connection can express.
 ///
 /// Checked here rather than in each backend because the conversion the backends do is
 /// infallible-by-panic, and this config reaches them from a TOML file or a C caller.
+#[cfg(feature = "_transport")]
 fn validate_idle_timeout(idle_timeout: Option<Duration>) -> crate::Result<()> {
 	match idle_timeout {
 		Some(timeout) if timeout > MAX_IDLE_TIMEOUT => Err(crate::Error::IdleTimeoutRange),
@@ -500,6 +527,7 @@ fn validate_idle_timeout(idle_timeout: Option<Duration>) -> crate::Result<()> {
 
 /// The largest value a QUIC varint can carry, which bounds every flow-control
 /// limit that goes on the wire as a transport parameter.
+#[cfg(feature = "_transport")]
 const MAX_VARINT: u64 = (1 << 62) - 1;
 
 /// Reject a flow-control window no connection can honor.
@@ -508,6 +536,7 @@ const MAX_VARINT: u64 = (1 << 62) - 1;
 /// the connection rather than tighten it. The receive windows additionally have to
 /// fit a varint, since they are sent as transport parameters; the send window is
 /// local bookkeeping and only has to be non-zero.
+#[cfg(feature = "_transport")]
 fn validate_windows(quic: &Config) -> crate::Result<()> {
 	for (name, window, wire) in [
 		("receive_window", quic.receive_window, true),
@@ -606,6 +635,7 @@ mod tests {
 	/// role-prefixed spellings) in isolation.
 	#[derive(usage::Cli)]
 	#[usage(unknown_flags = "error", args_override_self = false)]
+	#[usage(settings)]
 	struct Cli {
 		#[usage(flatten)]
 		quic: Config,
@@ -756,6 +786,7 @@ mod tests {
 
 	/// A build that can't capture must reject the flag rather than ignore it, so an
 	/// operator isn't left waiting on trace files that will never appear.
+	#[cfg(feature = "_transport")]
 	#[test]
 	fn qlog_requires_the_feature() {
 		let unset = Config::default().validate();
@@ -775,6 +806,7 @@ mod tests {
 
 	/// The backends convert this duration with an infallible-by-panic `expect`, and the
 	/// value arrives from a TOML file or a C caller, so validation has to catch it here.
+	#[cfg(feature = "_transport")]
 	#[test]
 	fn idle_timeout_beyond_the_varint_is_rejected() {
 		let over = Config {
@@ -819,6 +851,7 @@ mod tests {
 
 	/// A zero window credits nothing, so it would wedge the connection rather than
 	/// tighten it. Reject it here, where the message can name the knob.
+	#[cfg(feature = "_transport")]
 	#[test]
 	fn zero_windows_are_rejected() {
 		for (name, config) in [
@@ -851,6 +884,7 @@ mod tests {
 
 	/// The receive windows go on the wire as transport parameters, so they have to fit
 	/// a varint. The send window is local bookkeeping and does not.
+	#[cfg(feature = "_transport")]
 	#[test]
 	fn receive_windows_must_fit_a_varint() {
 		let over = Config {

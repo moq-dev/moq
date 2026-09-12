@@ -163,7 +163,7 @@ impl<E: CatalogExt> Reserved<E> {
 			)?,
 		};
 		let name = track.name().to_string();
-		let track = catalog.media_producer(track, moq_mux::container::legacy::Wire)?;
+		let track = catalog.media_producer(track, moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio))?;
 		let rendition = catalog.rendition(&name)?;
 
 		Ok(Self { track, rendition })
@@ -589,7 +589,7 @@ mod tests {
 				.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1)))
 				.await
 				.unwrap(),
-			moq_mux::catalog::hang::Container::Legacy,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
 		);
 
 		// Chosen so the tail decides a whole packet: 8838 frames at 44.1 kHz is ~9620
@@ -635,7 +635,7 @@ mod tests {
 				.subscribe(moq_net::track::Subscription::default())
 				.await
 				.unwrap(),
-			moq_mux::catalog::hang::Container::Legacy,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
 		);
 
 		// Too little to publish a packet, so it all sits in the resampler.
@@ -678,7 +678,7 @@ mod tests {
 				.subscribe(moq_net::track::Subscription::default())
 				.await
 				.unwrap(),
-			moq_mux::catalog::hang::Container::Legacy,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
 		);
 
 		producer.write(&full_frame(1_000_000)).unwrap();
@@ -816,7 +816,8 @@ mod tests {
 		let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
 
 		let track = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
-		let mut reader = moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire);
+		let mut reader =
+			moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio));
 
 		let mut pts = Vec::new();
 		for (i, frame) in frames.iter().enumerate() {
@@ -870,7 +871,8 @@ mod tests {
 			.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(1)))
 			.await
 			.unwrap();
-		let mut reader = moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire);
+		let mut reader =
+			moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio));
 
 		// A second of audio, so the filter's delay is nowhere near the whole write.
 		producer.write(&pcm_frame(&vec![0.1; 44_100], 1_000_000)).unwrap();

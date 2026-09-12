@@ -572,10 +572,6 @@ export class Effect {
 		}
 
 		const promise = fn().catch((error) => {
-			// Closed: teardown cancelled the task. Its rejection is the end, not a failure,
-			// so it must not land in this catch-all (a `console.error` a caller has to
-			// pattern-match). A task that is still live logs as a fault.
-			if (this.#dispose === undefined) return;
 			console.error("spawn error", error);
 		});
 

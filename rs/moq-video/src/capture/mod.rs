@@ -10,7 +10,7 @@
 //!
 //! [`encode::publish_capture`](crate::encode::publish_capture) consumes [`Config`].
 
-use std::sync::Arc;
+use std::{num::NonZeroU32, sync::Arc, time::Duration};
 
 use crate::Error;
 use crate::frame::Surface;
@@ -143,6 +143,76 @@ impl Camera {
 	/// The [`Source`] that captures this camera.
 	pub fn source(&self) -> Source {
 		Source::Camera(Some(self.id.clone()))
+	}
+}
+
+/// An exact frame rate, expressed as a positive number of frames per interval.
+/// Equality and ordering compare the ratio, so 60 frames in 2 seconds equals 30 in 1.
+#[derive(Clone, Copy, Debug, Eq)]
+pub struct Rate {
+	frames: NonZeroU32,
+	// The driver reports a rational interval with a 32-bit numerator in seconds.
+	// Keep that exact representation private; callers receive a typed duration.
+	seconds: NonZeroU32,
+}
+
+impl Rate {
+	#[cfg(target_os = "linux")]
+	/// Nearest whole rate for the integer stream API.
+	fn rounded(&self) -> u32 {
+		let frames = u64::from(self.frames.get());
+		let seconds = u64::from(self.seconds.get());
+		((frames + seconds / 2) / seconds).max(1) as u32
+	}
+
+	/// Number of frames in the interval.
+	pub fn frames(&self) -> NonZeroU32 {
+		self.frames
+	}
+
+	/// Time taken by the reported number of frames.
+	pub fn interval(&self) -> Duration {
+		Duration::from_secs(u64::from(self.seconds.get()))
+	}
+}
+
+impl Ord for Rate {
+	fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+		(u64::from(self.frames.get()) * u64::from(other.seconds.get()))
+			.cmp(&(u64::from(other.frames.get()) * u64::from(self.seconds.get())))
+	}
+}
+
+impl PartialOrd for Rate {
+	fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+		Some(self.cmp(other))
+	}
+}
+
+impl PartialEq for Rate {
+	fn eq(&self, other: &Self) -> bool {
+		self.cmp(other).is_eq()
+	}
+}
+
+/// A capture mode a source reports: one frame size and its exact frame rates.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mode {
+	/// Frame width in pixels.
+	pub width: u32,
+	/// Frame height in pixels.
+	pub height: u32,
+	/// The exact frame rates offered at this size, highest first.
+	///
+	/// Empty when the driver describes a continuous range instead of listing
+	/// rates, or cannot enumerate intervals for this size.
+	pub framerates: Vec<Rate>,
+}
+
+impl Mode {
+	/// The highest rate this mode offers, or `None` when the driver listed none.
+	pub fn max_framerate(&self) -> Option<Rate> {
+		self.framerates.first().copied()
 	}
 }
 
@@ -437,6 +507,33 @@ pub async fn cameras() -> Result<Vec<Camera>, Error> {
 	#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 	{
 		Err(Error::Unsupported("listing cameras".to_string()))
+	}
+}
+
+/// List the modes a camera reports, largest size first.
+///
+/// `camera` selects the device exactly as [`Source::Camera`] does. Only the
+/// formats this crate can convert are enumerated, so the modes that come back
+/// are ones [`open`] could negotiate rather than everything the driver
+/// advertises.
+///
+/// Linux only; other backends return [`Error::Unsupported`].
+/// Rates are exact device reports; [`Config::framerate`] still requests whole
+/// frames per second. V4L2 prefers the closest geometry, then the accepted rate
+/// nearest that request, then the cheaper conversion format.
+///
+/// An empty list is not a failure: it means the driver enumerated nothing this
+/// crate can convert.
+pub async fn camera_modes(camera: Option<&str>) -> Result<Vec<Mode>, Error> {
+	let _ = camera;
+	#[cfg(target_os = "linux")]
+	{
+		let camera = camera.map(str::to_string);
+		blocking(move || v4l2::modes(camera.as_deref())).await
+	}
+	#[cfg(not(target_os = "linux"))]
+	{
+		Err(Error::Unsupported("listing camera modes".to_string()))
 	}
 }
 

@@ -53,5 +53,5 @@ excluded.
 
 - [Starvation](/quest/m2/qos/starvation.md) - the egress half, same
   histogram shape
-- [Publisher connection transport](/quest/m2/qos/publisher-transport.md) -
-  the publisher's own view of the same uplink
+- [Client stats](/quest/m2/qos/stats/schema.md) - the publisher's own view
+  of the same uplink, in the transport section of its stats broadcast

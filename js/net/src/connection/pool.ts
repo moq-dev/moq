@@ -1,5 +1,5 @@
 /**
- * Shared managed connections: one origin and one reconnect loop per relay URL.
+ * A reconnecting, shareable connection: one origin and one reconnect loop per relay URL.
  *
  * @module
  */
@@ -7,16 +7,26 @@ import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import * as Origin from "../origin.ts";
 import * as Path from "../path.ts";
+import { type AcceptProps as AcceptPropsType, accept } from "./accept.ts";
+import { isWebTransportSupported } from "./browser.ts";
+import {
+	type CertificateHash as CertificateHashType,
+	type ConnectProps as ConnectPropsType,
+	certificateHash,
+	connect,
+	type WebSocketOptions as WebSocketOptionsType,
+	type WebTransportProps as WebTransportPropsType,
+} from "./connect.ts";
 import type { Established } from "./established.ts";
-import { Reload, type ReloadStatus } from "./reload.ts";
-import type { Probe, Stats } from "./stats.ts";
-import type { Transport } from "./transport.ts";
+import { Reload, type ReloadDelay, type ReloadStatus } from "./reload.ts";
+import type { Probe as ProbeType, Stats as StatsType } from "./stats.ts";
+import type { Transport as TransportType } from "./transport.ts";
 
 /** How long an unreferenced shared connection lingers before it actually closes. */
 const LINGER_MS = 2000;
 
-/** Options for {@link Shared}. */
-export interface SharedProps {
+/** Options for {@link Connection}. */
+export interface ConnectionProps {
 	/** The relay to connect to; pass a `Signal` to switch relays live. */
 	url?: URL | Signal<URL | undefined>;
 
@@ -32,37 +42,84 @@ export interface SharedProps {
 	 * whoever dials first, so a later handle sharing the connection inherits it.
 	 */
 	linger?: DOMHighResTimeStamp;
+
+	/**
+	 * Share a pooled transport keyed on the URL (default: true).
+	 *
+	 * Options the pool cannot honor (transport options, discovery, delay, a pinned
+	 * certificate, caller-owned origins) require `share: false` and get a private
+	 * reconnect loop with the same handle semantics.
+	 */
+	share?: boolean;
+
+	/** WebTransport options applied to each connection attempt (not reactive). */
+	webtransport?: WebTransportPropsType;
+
+	/** WebSocket fallback options applied to each connection attempt (not reactive). */
+	websocket?: WebSocketOptionsType;
+
+	/** Whether the relay supports broadcast discovery. */
+	discovery?: boolean;
+
+	/** The origin whose broadcasts are served, spanning reconnects. Requires {@link ConnectionProps.share} `false`. */
+	publish?: Origin.Consumer;
+
+	/** The origin fed with the peer's announced broadcasts, spanning reconnects. Requires {@link ConnectionProps.share} `false`. */
+	subscribe?: Origin.Producer;
+
+	/** Backoff settings for the reconnect loop; an unset field uses its default. */
+	delay?: ReloadDelay;
+
+	/** A Connection owns the abort signal for each connection attempt. */
+	signal?: never;
+
+	/** A one-shot transport cannot be reused by the reconnect loop; call {@link Connection.connect} instead. */
+	transport?: never;
 }
 
 /**
- * A handle on a connection shared by relay URL: every `Shared` pointing at the same URL is
- * backed by one origin and one reconnect loop, so a page full of components dials once.
+ * A cloneable handle on a MoQ connection: `new Connection({ url })` reconnects and, by
+ * default, shares one origin and one reconnect loop with every other handle on that URL.
  *
  * The shared {@link origin} is wired to both directions. Everything the relay announces
  * lands in it, a publish into it is announced to the relay, and a page that publishes and
  * watches the same path resolves it locally with no round trip.
  *
  * {@link close} releases this handle; the connection survives its last handle by a short
- * linger window (see {@link SharedProps.linger}), so a component torn down and rebuilt
+ * linger window (see {@link ConnectionProps.linger}), so a component torn down and rebuilt
  * reuses the warm connection instead of redialing.
  *
  * The loop reconnects for as long as a handle holds it, so an outage of any length recovers
  * on its own. An auth rejection is the one failure it stops on, and it retires the shared
  * connection so the next handle dials fresh.
  *
- * For a connection with options sharing can't honor (a certificate pin, a supplied
- * transport, origins of your own), construct a {@link Reload} directly instead.
+ * Options the pool cannot honor (transport options, discovery, delay, a pinned
+ * certificate, caller-owned origins) take `share: false` and get a private loop. A
+ * supplied transport cannot reconnect at all; pass it to {@link Connection.connect}
+ * instead.
  *
  * @public
  */
-export class Shared {
+export class Connection {
+	/** Establish a one-shot session; a supplied transport belongs here, not in the reconnect loop. */
+	static readonly connect = connect;
+
+	/** Accept a one-shot session on an already-open transport. */
+	static readonly accept = accept;
+
+	/** SHA-256 of a certificate, for pinning via `webtransport.serverCertificateHashes`. */
+	static readonly certificateHash = certificateHash;
+
+	/** Whether this runtime can connect with WebTransport. */
+	static readonly isWebTransportSupported = isWebTransportSupported;
+
 	/** Relay URL to connect to; updating it switches to that URL's shared connection. */
 	url: Signal<URL | undefined>;
 
 	/** Whether to hold a connection at all; clearing it releases this handle's share. */
 	enabled: Signal<boolean>;
 
-	/** Current status of the shared connection. */
+	/** Current status of the connection. */
 	readonly status: Getter<ReloadStatus>;
 
 	/**
@@ -71,35 +128,49 @@ export class Shared {
 	 * The session itself is deliberately not exposed: it is shared, so no handle may close
 	 * or reconfigure it, and everything else it offers is reachable through {@link origin}.
 	 */
-	readonly transport: Getter<Transport | undefined>;
+	readonly transport: Getter<TransportType | undefined>;
 
 	/** The current connection's PROBE estimates, or undefined while disconnected. */
-	readonly probe: Getter<Probe | undefined>;
+	readonly probe: Getter<ProbeType | undefined>;
 
 	/**
-	 * The shared origin for the current URL, or undefined while disabled or URL-less.
+	 * The origin for the current URL, or undefined while disabled or URL-less.
 	 *
-	 * Publish into it or consume from it; it is the same origin every other handle on this
-	 * URL uses, and it spans the connection's reconnects. Borrowed, not owned: the type has
-	 * no close, since closing it would tear the origin down under every other handle.
+	 * Publish into it or consume from it; a shared handle's origin is the same one every
+	 * other handle on this URL uses, and it spans the connection's reconnects. Borrowed,
+	 * not owned: the type has no close, since closing it would tear the origin down under
+	 * every other handle.
 	 */
 	readonly origin: Getter<Origin.Table | undefined>;
 
+	/**
+	 * Resolves when this handle is released via {@link close}.
+	 *
+	 * Rejects when a private loop (`share: false`) gives up, carrying the failure that was
+	 * in flight when the retry window expired. A pooled loop retries for as long as any
+	 * handle holds it, so this only rejects on an auth rejection that stops that loop.
+	 */
+	closed: Promise<void>;
+	#closedResolve!: () => void;
+	#closedReject!: (err: Error) => void;
+
 	readonly #status = new Signal<ReloadStatus>("disconnected");
 	readonly #established = new Signal<Established | undefined>(undefined);
-	readonly #probe = new Signal<Probe | undefined>(undefined);
+	readonly #probe = new Signal<ProbeType | undefined>(undefined);
 	readonly #origin = new Signal<Origin.Producer | undefined>(undefined);
 	#signals = new Effect();
 
 	/**
-	 * Take a handle on the shared connection for {@link SharedProps.url}.
+	 * Take a handle on the connection for {@link ConnectionProps.url}.
 	 *
 	 * Dials immediately when a URL is given and `enabled` is not false; otherwise waits for
 	 * the signals to say go. The handle owns nothing but its own share: {@link close}
 	 * releases it, and the underlying connection and origin live for as long as any handle
 	 * (plus the linger window) wants them.
 	 */
-	constructor(props?: SharedProps) {
+	constructor(props?: ConnectionProps) {
+		refuse(props);
+
 		this.url = Signal.from(props?.url);
 		this.enabled = Signal.from(props?.enabled ?? true);
 		this.status = this.#status;
@@ -107,11 +178,23 @@ export class Shared {
 		this.origin = this.#origin;
 		this.transport = this.#signals.computed((effect) => effect.get(this.#established)?.transport);
 
+		this.closed = new Promise((resolve, reject) => {
+			this.#closedResolve = resolve;
+			this.#closedReject = reject;
+		});
+		// A caller is free to never await `closed`, and giving up rejects it unprompted.
+		this.closed.catch(() => {});
+
 		const linger = props?.linger;
 
 		// Key on the serialized URL: URL objects use identity equality, and an equivalent
 		// instance must not release and redial.
 		const href = this.#signals.computed((effect) => effect.get(this.url)?.href);
+
+		if (props?.share === false) {
+			this.#runPrivate(props, href);
+			return;
+		}
 
 		this.#signals.run((effect) => {
 			if (!effect.get(this.enabled)) return;
@@ -127,7 +210,47 @@ export class Shared {
 			effect.run((nested) => nested.set(this.#status, nested.get(lease.connection.status), "disconnected"));
 			effect.run((nested) => nested.set(this.#established, nested.get(lease.connection.established), undefined));
 			effect.run((nested) => nested.set(this.#probe, nested.get(lease.connection.probe), undefined));
+
+			effect.spawn(async () => {
+				try {
+					await Promise.race([effect.cancel, lease.connection.closed]);
+				} catch (err) {
+					this.#closedReject(err instanceof Error ? err : new Error(String(err)));
+				}
+			});
 		});
+	}
+
+	#runPrivate(props: ConnectionProps, href: Getter<string | undefined>): void {
+		const owned = props.subscribe === undefined;
+		const origin = props.subscribe ?? new Origin.Producer();
+		if (owned) this.#signals.cleanup(() => origin.close());
+
+		const loop = new Reload({
+			url: this.url,
+			enabled: this.enabled,
+			publish: props.publish ?? (owned ? origin.consume() : undefined),
+			subscribe: origin,
+			webtransport: props.webtransport,
+			websocket: props.websocket,
+			discovery: props.discovery,
+			// A handle nobody watches wants unlimited retries; an auth rejection is still terminal.
+			delay: props.delay ?? { timeout: 0 },
+		});
+		this.#signals.cleanup(() => loop.close());
+
+		void loop.closed.then(
+			() => this.#closedResolve(),
+			(err) => this.#closedReject(err),
+		);
+
+		this.#signals.run((effect) => {
+			if (!effect.get(this.enabled) || !effect.get(href)) return;
+			effect.set(this.#origin, origin, undefined);
+		});
+		this.#signals.run((effect) => effect.set(this.#status, effect.get(loop.status), "disconnected"));
+		this.#signals.run((effect) => effect.set(this.#established, effect.get(loop.established), undefined));
+		this.#signals.run((effect) => effect.set(this.#probe, effect.get(loop.probe), undefined));
 	}
 
 	/**
@@ -184,7 +307,7 @@ export class Shared {
 	}
 
 	/**
-	 * A reactive handle to one broadcast on the shared origin; see `Announce.Broadcast`.
+	 * A reactive handle to one broadcast on the connection's origin; see `Announce.Broadcast`.
 	 * Close the handle when done.
 	 */
 	announcedBroadcast(path: Path.Valid): Announce.Broadcast {
@@ -194,7 +317,7 @@ export class Shared {
 	}
 
 	/** Snapshot the live connection's transport counters, or undefined while disconnected. */
-	async stats(): Promise<Stats | undefined> {
+	async stats(): Promise<StatsType | undefined> {
 		return this.#established.peek()?.stats();
 	}
 
@@ -204,6 +327,67 @@ export class Shared {
 	 */
 	close(): void {
 		this.#signals.close();
+		this.#closedResolve();
+	}
+}
+
+/** Types on {@link Connection}: the handle is the class, these are its associated types. */
+export namespace Connection {
+	/** Options for {@link Connection}. */
+	export type Props = ConnectionProps;
+	/** Options for {@link Connection.connect}. */
+	export type ConnectProps = ConnectPropsType;
+	/** Options for {@link Connection.accept}. */
+	export type AcceptProps = AcceptPropsType;
+	/** Backoff settings for a private reconnect loop. */
+	export type Delay = ReloadDelay;
+	/** Current state of a {@link Connection}. */
+	export type Status = ReloadStatus;
+	/** The current connection's PROBE estimates. */
+	export type Probe = ProbeType;
+	/** A point-in-time snapshot of the transport's counters. */
+	export type Stats = StatsType;
+	/** The wire transport a session runs over. */
+	export type Transport = TransportType;
+	/** Tuning for the WebSocket fallback. */
+	export type WebSocketOptions = WebSocketOptionsType;
+	/** WebTransport options, including friendlier certificate pinning. */
+	export type WebTransportProps = WebTransportPropsType;
+	/** A server certificate hash used to pin a self-signed server. */
+	export type CertificateHash = CertificateHashType;
+}
+
+/** Throw if `props` cannot be honored, rather than silently dropping them. */
+function refuse(props?: ConnectionProps): void {
+	if (!props) return;
+
+	const extra = props as ConnectionProps & { transport?: unknown; signal?: unknown };
+	if (extra.transport) {
+		throw new Error("a supplied transport cannot reconnect; call Connection.connect() instead");
+	}
+	if (extra.signal) {
+		throw new Error("a Connection owns its abort signal; do not pass one");
+	}
+	if (props.share === false) return;
+
+	if (props.publish || props.subscribe) {
+		throw new Error("caller-owned origins cannot be shared; pass share: false");
+	}
+	const hashes = props.webtransport?.serverCertificateHashes?.length ?? 0;
+	if (props.webtransport?.serverCertificate !== undefined || hashes > 0) {
+		throw new Error("a pinned certificate cannot be shared; pass share: false");
+	}
+	if (props.webtransport !== undefined) {
+		throw new Error("webtransport options cannot be shared; pass share: false");
+	}
+	if (props.websocket !== undefined) {
+		throw new Error("websocket options cannot be shared; pass share: false");
+	}
+	if (props.discovery !== undefined) {
+		throw new Error("discovery cannot be shared; pass share: false");
+	}
+	if (props.delay !== undefined) {
+		throw new Error("delay cannot be shared; pass share: false");
 	}
 }
 
@@ -216,7 +400,7 @@ interface Entry {
 	timer?: ReturnType<typeof setTimeout>;
 }
 
-/** The process-wide pool backing {@link Shared}. */
+/** The process-wide pool backing {@link Connection}. */
 const pool = new Map<string, Entry>();
 
 /** Take a reference on the shared entry for `key`, creating it on first use. */

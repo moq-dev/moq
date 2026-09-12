@@ -140,7 +140,8 @@ async function withPublisher<T>(relay: RelayFixture, path: string, run: () => Pr
 	// The session serves an origin rather than individual broadcasts, so the path is
 	// published into the origin and the session announces the table.
 	const origin = new Moq.Origin.Producer();
-	const broadcast = origin.publish(Moq.Path.from(path));
+	const broadcast = origin.createBroadcast(Moq.Path.from(path));
+	broadcast.announce();
 	const connection = await Moq.Connection.connect(new URL(relay.url), { publish: origin.consume() });
 
 	let stopped = false;

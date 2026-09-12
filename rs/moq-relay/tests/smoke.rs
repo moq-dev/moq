@@ -9,7 +9,7 @@
 
 use std::{net::TcpListener, time::Duration};
 
-use moq_relay::{AuthConfig, Cluster, ClusterConfig, Config, Connection, PublicConfig, Relay, Web, WebConfig};
+use moq_relay::{AuthConfig, Cluster, ClusterOptions, Config, Connection, PublicConfig, Relay, Web, WebConfig};
 use moq_tokio::moq_net::{self, Hop};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -31,7 +31,7 @@ fn newest_lite_version() -> moq_net::Version {
 
 async fn build_web(port: u16, ws: bool) -> Web {
 	let mut config = WebConfig::default();
-	config.ws = Some(ws);
+	config.ws = ws;
 	config.http.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
 	build_web_with(config).await
 }
@@ -54,7 +54,7 @@ async fn build_web_with(web_config: WebConfig) -> Web {
 		.await
 		.expect("auth init");
 
-	let cluster = Cluster::new(ClusterConfig::default()).expect("cluster init");
+	let cluster = Cluster::new(ClusterOptions::default()).expect("cluster init");
 
 	// moq_tokio::Server is needed for `certificates`, even though we never
 	// expose HTTPS or QUIC in this test. Binding QUIC to `[::]:0` picks an
@@ -126,7 +126,7 @@ async fn spawn_versioned_relay(versions: Vec<moq_net::Version>) -> (u16, tokio::
 	config.listen.bind = Some("127.0.0.1:0".to_string());
 	config.listen.tls.generate = vec!["localhost".into()];
 	config.listen.version = versions;
-	config.web.ws = Some(true);
+	config.web.ws = true;
 	config.web.http.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
 
 	#[allow(deprecated)]
@@ -326,7 +326,7 @@ async fn relay_https_terminates_tls() {
 	std::fs::write(&key_path, key.serialize_pem()).expect("write key");
 
 	let mut config = WebConfig::default();
-	config.ws = Some(false);
+	config.ws = false;
 	config.https.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
 	config.https.cert = vec![cert_path];
 	config.https.key = vec![key_path];
@@ -538,7 +538,7 @@ async fn spawn_accept_relay(
 		.await
 		.expect("auth init");
 
-	let cluster = Cluster::new(ClusterConfig::default()).expect("cluster init");
+	let cluster = Cluster::new(ClusterOptions::default()).expect("cluster init");
 	let mut server = server.listen().await.expect("listen");
 
 	let handle = tokio::spawn(async move {

@@ -32,15 +32,15 @@ pub trait CatalogExt: Serialize + DeserializeOwned + Default + Clone + Send + Un
 impl CatalogExt for () {}
 
 /// The untyped catalog extension: arbitrary top-level JSON sections beyond the base
-/// `video`/`audio`/`text` media sections and shared `timeline`, captured and republished verbatim.
+/// `video`/`audio`/`text` media sections and shared `archive`, captured and republished verbatim.
 ///
 /// This is the extension a caller reaches for when the section names aren't known at
 /// compile time, e.g. across the FFI/C boundary where a typed [`CatalogExt`] struct can't
 /// cross. Publish/consume a [`Catalog<Extra>`] and use [`set`](Self::set)/[`get`](Self::get).
 /// The default extension stays `()` (unknown sections dropped); opt into `Extra` explicitly.
 ///
-/// `video`, `audio`, `text`, `timeline`, `json`, and `binary` are reserved for the base sections,
-/// so [`set`](Self::set) rejects them to keep the wire JSON free of duplicate keys.
+/// `video`, `audio`, `text`, `archive`, `json`, `binary`, and the retired `timeline` key are
+/// reserved, so [`set`](Self::set) rejects them to keep the wire JSON free of duplicate keys.
 #[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
 #[serde(transparent)]
 pub struct Extra(serde_json::Map<String, serde_json::Value>);
@@ -69,12 +69,13 @@ impl Extra {
 	}
 
 	/// Set (or replace) a section. Errors if `name` collides with a reserved base
-	/// section (`video`/`audio`/`text`/`timeline`/`json`/`binary`).
+	/// section (`video`/`audio`/`text`/`archive`/`json`/`binary`) or the retired
+	/// `timeline` key, which the wire format forbids beside `archive`.
 	pub fn set(&mut self, name: impl Into<String>, value: serde_json::Value) -> crate::Result<()> {
 		let name = name.into();
 		if matches!(
 			name.as_str(),
-			"video" | "audio" | "text" | "timeline" | "json" | "binary"
+			"video" | "audio" | "text" | "archive" | "json" | "binary" | "timeline"
 		) {
 			return Err(crate::Error::ReservedSection(name));
 		}
@@ -89,7 +90,7 @@ impl Extra {
 }
 
 /// The base sections plus an application extension `E` (defaulting to `()` for none), serialized
-/// as a flat union: the `video`/`audio`/`text` media sections, the shared `timeline`, the
+/// as a flat union: the `video`/`audio`/`text` media sections, the shared `archive`, the
 /// `json`/`binary` data sections, and the extension's sections share one JSON object on the wire.
 ///
 /// The data sections (`json`/`binary`) carry application tracks that aren't media. Every base
@@ -110,9 +111,9 @@ pub struct Catalog<E: CatalogExt = ()> {
 	#[serde(default)]
 	pub audio: hang::catalog::Audio,
 
-	/// The broadcast's timeline track (its aligned segment index), if the publisher offers one.
+	/// The broadcast's segment index and any durable archive, if the publisher offers one.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub timeline: Option<hang::catalog::Timeline>,
+	pub archive: Option<hang::catalog::Archive>,
 
 	/// Caption/subtitle renditions. Omitted from the wire when empty, so a broadcast without
 	/// captions stays byte-identical to before this section existed.
@@ -200,7 +201,7 @@ impl<E: CatalogExt> Catalog<E> {
 		let mut catalog = hang::Catalog::default();
 		catalog.video = self.video.clone();
 		catalog.audio = self.audio.clone();
-		catalog.timeline = self.timeline.clone();
+		catalog.archive = self.archive.clone();
 		catalog.text = self.text.clone();
 		catalog
 	}
@@ -313,6 +314,10 @@ mod test {
 		// Reserved media keys can't be smuggled in as application sections.
 		assert!(matches!(
 			producer.lock().set_section("video", serde_json::json!({})),
+			Err(crate::Error::ReservedSection(_))
+		));
+		assert!(matches!(
+			producer.lock().set_section("timeline", serde_json::json!({})),
 			Err(crate::Error::ReservedSection(_))
 		));
 

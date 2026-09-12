@@ -1,6 +1,6 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
-import { isCancel, Time } from "@moq/net";
+import { StreamError, Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys } from "@moq/signals";
 import { CaptionsRenderer, parseText, VTTCue, type VTTRegion } from "media-captions";
 // media-captions positions and styles cues purely through these stylesheets (via `[part]`
@@ -217,7 +217,7 @@ export class Renderer {
 		// (e.g. `cmaf`) would misread the cue payload, so skip it rather than render garbage.
 		let format: Container.Format;
 		if (config.container.kind === "legacy") {
-			format = new Container.Legacy.Format();
+			format = new Container.Legacy.Format("data");
 		} else if (config.container.kind === "loc") {
 			format = new Container.Loc.Format();
 		} else {
@@ -271,31 +271,27 @@ export class Renderer {
 		// Accept groups and read each in its own task, like `Container.Consumer` does for media. A
 		// group whose stream stalls then delays only its own cue instead of every later one.
 		effect.spawn(async () => {
-			try {
-				for (;;) {
-					const group = await sub.recvGroup();
-					if (!group) break;
+			for (;;) {
+				const group = await sub.recvGroup();
+				if (!group) break;
 
-					effect.spawn(async () => {
-						try {
-							for (;;) {
-								const frame = await group.readFrame();
-								if (!frame) break;
-								for (const sample of format.decode(frame.payload)) {
-									await this.#ingest(config.format, sample, store);
-								}
+				effect.spawn(async () => {
+					try {
+						for (;;) {
+							const frame = await group.readFrame();
+							if (!frame) break;
+							for (const sample of format.decode(frame.payload)) {
+								await this.#ingest(config.format, sample, store);
 							}
-						} catch (err) {
-							if (!isCancel(err)) console.warn("captions: group read error", err);
-						} finally {
-							group.close();
 						}
+					} catch (err) {
+						if (!(err instanceof StreamError)) throw err;
+					} finally {
+						group.close();
+					}
 
-						commit();
-					});
-				}
-			} catch (err) {
-				if (!isCancel(err)) throw err;
+					commit();
+				});
 			}
 		});
 	}

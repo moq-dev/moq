@@ -611,6 +611,8 @@ pub extern "C" fn moq_encode_video_finish(producer: u32) -> i32 {
 /// `user_data` is never touched again, so release `user_data` there. The terminal
 /// callback fires even after [`moq_decode_video_close`].
 ///
+/// Starts at the newest cached group so reopening live playback skips the backlog.
+///
 /// # Safety
 /// - `output` must point to a valid [`moq_video_decoder_output`].
 /// - `user_data` must stay valid until the terminal (`<= 0`) `on_frame` callback.
@@ -627,6 +629,7 @@ pub unsafe extern "C" fn moq_decode_video(
 		let raw = unsafe { output.as_ref() }.ok_or(Error::InvalidPointer)?;
 
 		let mut config = moq_video::decode::Config::new();
+		config.start = moq_video::decode::Start::Latest;
 		config.max_age = Duration::from_millis(raw.max_age_ms);
 		let on_frame = unsafe { OnStatus::new(user_data, on_frame) };
 

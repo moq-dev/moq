@@ -177,6 +177,12 @@ async fn version_moq_transport_20() {
 	connect_with_version("moq-transport-20").await;
 }
 
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn version_moq_transport_21() {
+	connect_with_version("moq-transport-21").await;
+}
+
 // ── WebTransport: sub-protocol negotiation ──────────────────────────
 // Browser clients use WebTransport (h3 ALPN) and negotiate the MoQ
 // protocol version via sub-protocols in the HTTP CONNECT request.
@@ -245,4 +251,10 @@ async fn webtransport_moq_transport_19() {
 #[tokio::test]
 async fn webtransport_moq_transport_20() {
 	connect_with_webtransport(Some("moq-transport-20")).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn webtransport_moq_transport_21() {
+	connect_with_webtransport(Some("moq-transport-21")).await;
 }

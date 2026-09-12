@@ -40,11 +40,11 @@
 //! is what owns the broadcast's shape) and wires all of this up:
 //! [`media_producer`](crate::catalog::Producer::media_producer) enrolls the track, which
 //! creates the timeline track on first use and advertises it in the catalog's root
-//! [`hang::catalog::Timeline`] section. A broadcast that never enrolls a track publishes no
+//! [`hang::catalog::Archive`] entry. A broadcast that never enrolls a track publishes no
 //! timeline at all: segmentation is opt-in per broadcast, never per track.
 //!
 //! On the read side, [`Consumer::subscribe`] reads the timeline straight from the catalog's
-//! [`hang::catalog::Timeline`] section (so the track name and timescale can't be mismatched)
+//! [`hang::catalog::Archive`] entry (so the track name and timescale can't be mismatched)
 //! and yields decoded [`Event`]s. On the wire the track is a DEFLATE-compressed
 //! [`moq_json::window`], so a DVR can trim old records while an unbounded timeline simply never
 //! pops them (see [`hang::timeline`] for the record schema).
@@ -55,7 +55,7 @@ use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::{Duration, SystemTime};
 
-use hang::catalog::Timeline;
+use hang::catalog::{Archive, Timeline};
 use hang::timeline::{DEFAULT_NAME, Range, Record, RecordExt};
 
 use moq_net::{Timescale, Timestamp};
@@ -641,9 +641,9 @@ impl Deferred {
 		self.segmenter.reserve()
 	}
 
-	/// The catalog section describing records built by this segmenter.
-	pub fn section(&self) -> Timeline {
-		self.segmenter.section()
+	/// The catalog's root `archive` entry describing records built by this segmenter.
+	pub fn section(&self) -> Archive {
+		self.segmenter.section().into()
 	}
 
 	/// Flush the final open segment and return a handle that can only drain pending records.
@@ -903,9 +903,9 @@ impl Producer {
 		}
 	}
 
-	/// The catalog's root section advertising this timeline.
-	pub fn section(&self) -> Timeline {
-		self.segmenter.section()
+	/// The catalog's root `archive` entry advertising this timeline.
+	pub fn section(&self) -> Archive {
+		self.segmenter.section().into()
 	}
 
 	/// Create a handle that closes segments without publishing them automatically.
@@ -1191,7 +1191,7 @@ pub struct Consumer<E: RecordExt = ()> {
 }
 
 impl<E: RecordExt> Consumer<E> {
-	/// Subscribe to the timeline advertised by the catalog's [`Timeline`] section.
+	/// Subscribe to the timeline advertised by the catalog's [`Archive`] entry.
 	///
 	/// The section supplies both the track name and the timescale, so a reader can't pair the
 	/// wrong scale with the track. Errors if the section declares a timescale that isn't

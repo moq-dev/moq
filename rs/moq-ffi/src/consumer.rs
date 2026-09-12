@@ -36,8 +36,8 @@ fn media_frame(mut frame: moq_mux::container::Frame) -> Result<MoqMediaFrame, Mo
 
 fn media_container(container: MoqContainer) -> Result<moq_mux::catalog::hang::Container, MoqError> {
 	let container: hang::catalog::Container = container.into();
-	(&container)
-		.try_into()
+	// This byte-oriented API has no media-kind configuration.
+	moq_mux::catalog::hang::Container::new(&container, moq_mux::container::Kind::Data)
 		.map_err(|e| MoqError::Codec(format!("invalid container: {e}")))
 }
 

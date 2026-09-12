@@ -12,7 +12,7 @@ The [hang media format](/concept/hang) on top of `moq-net`: a live catalog
 describing renditions with WebCodecs-style decoder configs, and containers
 that carry a timestamp with every frame.
 
-- **Catalog producer and consumer.** Typed `VideoConfig`, `AudioConfig` and text renditions, the `json` and `binary` data track sections, shared video properties (display size, rotation, flip), stalled hints, cross-broadcast rendition references, and the broadcast timeline. Extend it with your own sections through a lock or `#[serde(flatten)]`, or read unknown sections as raw JSON.
+- **Catalog producer and consumer.** Typed `VideoConfig`, `AudioConfig` and text renditions, the `json` and `binary` data track sections, shared video properties (display size, rotation, flip), stalled hints, cross-broadcast rendition references, and the `archive` entry (timeline track, optional replay path, store URL, and format version). Extend it with your own sections through a lock or `#[serde(flatten)]`, or read unknown sections as raw JSON.
 - **Containers.** `legacy`, `cmaf`, and `loc`, decoded for you; unknown kinds pass through untouched.
 - **`Ordered`** reads a media track as timestamped frames, reorders groups, and skips ones that fall past your max age.
 - **Codecs described**: H.264, H.265, VP8, VP9, AV1, AAC, Opus, PCM.

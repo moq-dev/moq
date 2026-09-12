@@ -40,6 +40,32 @@ pub enum Kind {
 	Named(String),
 }
 
+/// Where a decoder starts on a track that already holds groups.
+///
+/// A track keeps its groups for a while after they are read, so a decoder does
+/// not always open on an empty one: a player rebuilding its decoder subscribes
+/// while its predecessor still holds groups, and a rendition switched away from
+/// and back to stays warm for the track's idle linger. What to do with that
+/// backlog depends on the consumer, and the two answers are opposites, so it is
+/// asked rather than guessed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Start {
+	/// The oldest group the track still holds, decoding everything cached.
+	///
+	/// What a recorder, an export, or anything reading a complete track wants,
+	/// and the default because dropping media a caller has not asked to drop is
+	/// the worse mistake.
+	#[default]
+	Oldest,
+	/// The newest group, skipping whatever is already cached.
+	///
+	/// What a live player wants. Without it a rebuilt decoder walks the whole
+	/// backlog at decode speed before reaching live media, which a viewer sees
+	/// as playback jumping backwards and then sprinting to catch up.
+	Latest,
+}
+
 /// Decoder configuration.
 ///
 /// `#[non_exhaustive]`: build via [`Config::new`] (or `default()`) and set the
@@ -55,6 +81,8 @@ pub struct Config {
 	/// playout buffer for a softer skip. Applied to the initial transport
 	/// subscription and inherited by [`moq_mux::container::Consumer`].
 	pub max_age: std::time::Duration,
+	/// Where to start on a track that already holds groups.
+	pub start: Start,
 	/// Ask the decoder to emit frames at this size (both dimensions even) instead
 	/// of the stream's native one. Best effort: a hardware decoder with a
 	/// built-in scaler (NVDEC) honors it for free, other backends ignore it.

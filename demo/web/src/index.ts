@@ -79,7 +79,7 @@ const metaSignal = new Signals.Signal<unknown>(undefined);
 const relayUrl = new Signals.Signal<URL | undefined>(new URL(RELAY_URL));
 
 // Discovery connection (the tiles each open their own connection internally).
-const connection = new Net.Connection.Shared({ url: relayUrl });
+const connection = new Net.Connection({ url: relayUrl });
 
 // ---------------------------------------------------------------------------
 // Per-broadcast tile (a <moq-watch-ui> in the left column)
@@ -177,7 +177,7 @@ function createTile(name: string): WatchTile {
 //
 // Subscribe to announcements under the prefix and keep a live set of active broadcasts.
 // `announced.next()` drains the update stream, so we track membership ourselves: active=true adds the
-// path, active=false removes it. `Reload.announced()` spans reconnects (it retracts everything on
+// path, active=false removes it. `Connection.announced()` spans reconnects (it retracts everything on
 // disconnect and re-announces on reconnect), so the set self-heals without any extra wiring here.
 const discovery = new Signals.Effect();
 discovery.run((effect) => {

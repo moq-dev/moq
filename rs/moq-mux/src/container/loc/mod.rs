@@ -9,15 +9,17 @@ use std::task::Poll;
 
 use moq_net::{Timescale, Timestamp};
 
-use crate::container::{Container, Frame};
+use crate::container::{Container, Frame, Kind};
 
 /// LOC's catalog convention: timestamps are in microseconds when no per-frame
 /// 0x08 timescale property is present.
 const DEFAULT_TIMESCALE: Timescale = Timescale::MICRO;
 
-/// LOC wire format. Each moq frame holds one LOC frame.
-#[derive(Default)]
-pub struct Wire;
+/// LOC wire format configured for the track's media role.
+pub struct Wire(
+	/// The kind of content carried by the track.
+	pub Kind,
+);
 
 impl Container for Wire {
 	type Error = crate::Error;
@@ -71,5 +73,13 @@ impl Container for Wire {
 			// LOC carries no per-frame duration.
 			duration: None,
 		}])))
+	}
+
+	fn kind(&self) -> Kind {
+		self.0
+	}
+
+	fn end(&self, frame: &Frame) -> Option<moq_net::Timestamp> {
+		(self.0 != Kind::Data && frame.payload.is_empty()).then_some(frame.timestamp)
 	}
 }

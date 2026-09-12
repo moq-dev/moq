@@ -1563,8 +1563,8 @@ class MoqBackoff {
   MoqBackoff({
     this.initialMs = 1000,
     this.multiplier = 2,
-    this.maxMs = 30000,
-    this.timeoutMs = 300000,
+    this.maxMs = 5000,
+    this.timeoutMs = 10000,
   });
 }
 
@@ -5791,6 +5791,7 @@ abstract class MoqClientInterface {
   void setBind({required String addr});
   void setConsume({required MoqOriginProducer? origin});
   void setPublish({required MoqOriginProducer? origin});
+  void setQuicMaxStreams({required int maxStreams});
   void setReconnect({required bool enabled});
   void setTlsCert({required String? path});
   void setTlsDisableVerify({required bool disable});
@@ -5885,6 +5886,16 @@ class MoqClient implements MoqClientInterface {
       uniffi_moq_ffi_fn_method_moqclient_set_publish(
         uniffiClonePointer(),
         FfiConverterOptionalMoqOriginProducer.lower(origin),
+        status,
+      );
+    }, null);
+  }
+
+  void setQuicMaxStreams({required int maxStreams}) {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqclient_set_quic_max_streams(
+        uniffiClonePointer(),
+        FfiConverterUInt64.lower(maxStreams),
         status,
       );
     }, null);
@@ -5991,6 +6002,7 @@ abstract class MoqSessionInterface {
   void cancel({required int code});
   Future<void> closed();
   MoqOriginConsumer consumer();
+  int epoch();
   MoqOriginProducer publisher();
   void shutdown();
   MoqConnectionStats stats();
@@ -6048,6 +6060,17 @@ class MoqSession implements MoqSessionInterface {
         status,
       ),
       FfiConverterMoqOriginConsumer.lift,
+      null,
+    );
+  }
+
+  int epoch() {
+    return rustCallWithLifter(
+      (status) => uniffi_moq_ffi_fn_method_moqsession_epoch(
+        uniffiClonePointer(),
+        status,
+      ),
+      FfiConverterUInt64.lift,
       null,
     );
   }
@@ -9288,6 +9311,15 @@ external void uniffi_moq_ffi_fn_method_moqclient_set_publish(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<Void Function(Pointer<Void>, Uint64, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_method_moqclient_set_quic_max_streams(
+  Pointer<Void> ptr,
+  int max_streams,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<Void Function(Pointer<Void>, Int8, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -9385,6 +9417,14 @@ external Pointer<Void> uniffi_moq_ffi_fn_method_moqsession_closed(
   assetId: _uniffiAssetId,
 )
 external Pointer<Void> uniffi_moq_ffi_fn_method_moqsession_consumer(
+  Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Uint64 Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external int uniffi_moq_ffi_fn_method_moqsession_epoch(
   Pointer<Void> ptr,
   Pointer<RustCallStatus> uniffiStatus,
 );
@@ -10201,6 +10241,9 @@ external int uniffi_moq_ffi_checksum_method_moqclient_set_consume();
 external int uniffi_moq_ffi_checksum_method_moqclient_set_publish();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqclient_set_quic_max_streams();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqclient_set_reconnect();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -10229,6 +10272,9 @@ external int uniffi_moq_ffi_checksum_method_moqsession_closed();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqsession_consumer();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqsession_epoch();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqsession_publisher();
@@ -10718,7 +10764,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqclient_cancel() != 29949) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqclient_connect() != 52298) {
+  if (uniffi_moq_ffi_checksum_method_moqclient_connect() != 65409) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqclient_set_backoff() != 28024) {
@@ -10731,6 +10777,10 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqclient_set_publish() != 29680) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqclient_set_quic_max_streams() !=
+      21959) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqclient_set_reconnect() != 24915) {
@@ -10764,6 +10814,9 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqsession_consumer() != 62364) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqsession_epoch() != 32695) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqsession_publisher() != 55435) {

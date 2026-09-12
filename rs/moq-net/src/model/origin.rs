@@ -1916,6 +1916,9 @@ struct FrontState {
 	/// tie toward the newest source.
 	next_source: u64,
 	sources: Vec<FrontSource>,
+	/// Immutable track metadata, retained across idle release and aborted attempts.
+	/// Every source of this broadcast must serve the same content.
+	track_info: HashMap<Arc<str>, track::Info>,
 	/// The source tracks are dispatched to: the newest attached. Backups park
 	/// until promoted.
 	active: Option<u64>,
@@ -1925,6 +1928,26 @@ struct FrontState {
 }
 
 impl FrontState {
+	/// Admit only copies with the broadcast's established track properties.
+	fn accept_track_info(&mut self, name: &Arc<str>, info: track::Info) -> Result<(), Error> {
+		if self.closed {
+			return Err(Error::Closed);
+		}
+		if let Some(expected) = self.track_info.get(name) {
+			let track::Info {
+				timescale,
+				max_age,
+				priority,
+			} = info;
+			if timescale != expected.timescale || max_age != expected.max_age || priority != expected.priority {
+				return Err(Error::Unsupported);
+			}
+		} else {
+			self.track_info.insert(name.clone(), info);
+		}
+		Ok(())
+	}
+
 	/// The newest attached source: the one new work dispatches to. Local sources
 	/// carry no route metadata, so recency is the whole order: a publisher
 	/// re-creating a path over a fresh handle wins the moment it attaches instead
@@ -2103,6 +2126,7 @@ fn attach_source(
 			id: 0,
 			source: source.clone(),
 		}],
+		track_info: HashMap::new(),
 		active: Some(0),
 		closed: false,
 	});
@@ -2185,9 +2209,9 @@ async fn run_front(
 
 /// Serves one spliced logical track: splices in the best source's copy of the
 /// track, re-splicing on handover or failure, until the track completes or the
-/// front closes. A refusal (a source rejecting the track, or its copy dying
-/// before delivering anything) is authoritative and never retried: the refuser
-/// is skipped for this track so a joining standby cannot kill a subscription
+/// front closes. A refusal (a source rejecting the track, returning incompatible
+/// metadata, or dying before delivering anything) is authoritative and never
+/// retried: the refuser is skipped for this track so a joining standby cannot kill a subscription
 /// the incumbent is serving, and once every attached source has refused, the
 /// track aborts with the last refusal's error. The verdict belongs to this
 /// request; a later consumer request asks afresh (see `track_inner`). Failures
@@ -2433,9 +2457,14 @@ async fn serve_track(
 							None => continue,
 							// A copy that is already aborted can't be spliced;
 							// its error is the source's answer for the track.
-							Some(Ok(_)) => match track.poll_complete(&kio::Waiter::noop()) {
+							// One that claims the same content with different
+							// metadata is refused rather than reinterpreted.
+							Some(Ok(info)) => match track.poll_complete(&kio::Waiter::noop()) {
 								Poll::Ready(Err(err)) => Err(err),
-								_ => Ok(track),
+								_ => match state.write() {
+									Ok(mut state) => state.accept_track_info(&name, info).map(|()| track),
+									Err(_) => Err(Error::Dropped),
+								},
 							},
 							Some(Err(err)) => Err(err),
 						}
@@ -3735,6 +3764,7 @@ impl Consumer {
 		let front_state = kio::Producer::new(FrontState {
 			next_source: 0,
 			sources: Vec::new(),
+			track_info: HashMap::new(),
 			active: None,
 			closed: false,
 		});
@@ -4898,6 +4928,43 @@ mod tests {
 		assert_resumes(&mut rig, &standby_server).await;
 	}
 
+	/// A source claiming the same content cannot change immutable track metadata:
+	/// the successor is refused instead of the subscriber's samples being read on
+	/// a different grid, and the verdict outlives the aborted logical track.
+	#[tokio::test]
+	async fn incompatible_successor_is_refused() {
+		for replacement in [
+			track::Info::default().with_timescale(crate::Timescale::MICRO),
+			track::Info::default().with_priority(7),
+			track::Info::default().with_max_age(Duration::from_secs(7)),
+		] {
+			let (mut rig, incumbent, source) = ResumeRig::new(&[10]).await;
+			let standby_server = rig.standby(&[10, 20]);
+			drop(incumbent);
+			drop(source);
+
+			// The standby shares the first hop, so the front re-requests through it,
+			// but its copy of the track is on another grid.
+			let request = queued(&standby_server).await;
+			let mut successor = broadcast::Info::new().produce();
+			let mut track = successor.create_track("video", replacement).unwrap();
+			let mut group = track.append_group().unwrap();
+			group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
+			group.finish().unwrap();
+			request.accept(&successor);
+
+			assert!(
+				matches!(rig.subscription.recv_group().await, Err(Error::Unsupported)),
+				"the subscription must abort rather than resume onto incompatible metadata"
+			);
+
+			// Reopening the aborted logical track must not forget the broadcast's metadata.
+			let reopened = rig.resolved.track("video").unwrap();
+			assert!(matches!(reopened.info().await, Err(Error::Unsupported)));
+			assert!(matches!(reopened.subscribe(None).await, Err(Error::Unsupported)));
+		}
+	}
+
 	#[tokio::test]
 	async fn different_first_hop_ends_the_subscription() {
 		let (mut rig, incumbent, source) = ResumeRig::new(&[10]).await;
@@ -5014,6 +5081,55 @@ mod tests {
 		// The path is free again for a fresh broadcast.
 		let _third = producer.create_broadcast("room/alice").unwrap();
 		assert!(consumer.get_broadcast("room/alice").is_some());
+	}
+
+	/// A newer local source wins dispatch the moment it attaches, but one whose copy
+	/// of the track carries different metadata is refused: the incumbent keeps
+	/// serving, and the refusal is never retried once the incumbent leaves.
+	#[tokio::test]
+	async fn incompatible_local_source_keeps_the_incumbent() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+
+		let mut first = producer.create_broadcast("room/alice").unwrap();
+		let mut track = first.create_track("video", None).unwrap();
+		let resolved = consumer
+			.request_broadcast("room/alice")
+			.now_or_never()
+			.expect("resolves")
+			.expect("resolves");
+		let mut subscription = resolved
+			.track("video")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.expect("subscribe");
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
+		group.finish().unwrap();
+		let mut group = subscription.recv_group().await.unwrap().unwrap();
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
+
+		// The newest source is dispatched the track, and refused for its metadata.
+		let mut second = producer.create_broadcast("room/alice").unwrap();
+		let _incompatible = second
+			.create_track("video", track::Info::default().with_timescale(crate::Timescale::MICRO))
+			.unwrap();
+		for _ in 0..10 {
+			tokio::task::yield_now().await;
+		}
+
+		// Still spliced to the incumbent, still delivering.
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"still".as_ref()).unwrap();
+		group.finish().unwrap();
+		let mut group = subscription.recv_group().await.unwrap().unwrap();
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"still");
+
+		// The incumbent leaving exhausts the table: the refusal is never retried.
+		drop(track);
+		first.finish();
+		assert!(matches!(subscription.recv_group().await, Err(Error::Unsupported)));
 	}
 
 	#[tokio::test]

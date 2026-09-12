@@ -50,6 +50,7 @@ const IETF_VERSIONS: &[ietf::Version] = &[
 	ietf::Version::Draft18,
 	ietf::Version::Draft19,
 	ietf::Version::Draft20,
+	ietf::Version::Draft21,
 ];
 
 /// How many types [`lite_wire`] dispatches over.

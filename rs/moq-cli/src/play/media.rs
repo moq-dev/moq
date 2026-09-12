@@ -143,6 +143,7 @@ impl Media {
 						}
 					};
 					let mut decode = moq_video::decode::Config::new();
+					decode.start = moq_video::decode::Start::Latest;
 					// Nothing older than the playhead is worth presenting, so the delay
 					// doubles as the staleness budget on the wire.
 					decode.max_age = self.args.delay.into_std();
@@ -187,6 +188,7 @@ impl Media {
 					// the hole fill below to a playhead that does not exist.
 					let depth = self.args.delay.into_std().max(AUDIO_BUFFER_MIN);
 					let mut decode = moq_audio::decode::Config::new();
+					decode.start = moq_audio::decode::Start::Latest;
 					decode.max_age = depth;
 					// The sink and the frame-duration math below both assume f32,
 					// so ask for it rather than inheriting the decoder default.

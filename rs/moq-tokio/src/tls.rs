@@ -392,6 +392,7 @@ impl Peers {
 	}
 
 	/// Whether a raw digest is allowed, for the verifier's hot path.
+	#[cfg(feature = "_certs")]
 	fn contains_raw(&self, fingerprint: &[u8]) -> bool {
 		match <[u8; 32]>::try_from(fingerprint) {
 			Ok(fingerprint) => self.read().contains(&fingerprint),
@@ -429,7 +430,12 @@ pub struct Connect {
 	/// Files are hot reloaded for new connections, retaining the last valid roots
 	/// if a rotation is temporarily missing or malformed.
 	#[serde(skip_serializing_if = "Vec::is_empty")]
-	#[usage(name = "connect-tls-root", long = "connect-tls-root", env = "MOQ_CONNECT_TLS_ROOT")]
+	#[usage(
+		name = "connect-tls-root",
+		long = "connect-tls-root",
+		env = "MOQ_CONNECT_TLS_ROOT",
+		setting = "connect.tls.root"
+	)]
 	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
@@ -445,6 +451,7 @@ pub struct Connect {
 		name = "connect-tls-system-roots",
 		long = "connect-tls-system-roots",
 		env = "MOQ_CONNECT_TLS_SYSTEM_ROOTS",
+		setting = "connect.tls.system_roots",
 		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
@@ -465,7 +472,8 @@ pub struct Connect {
 	#[usage(
 		name = "connect-tls-fingerprint",
 		long = "connect-tls-fingerprint",
-		env = "MOQ_CONNECT_TLS_FINGERPRINT"
+		env = "MOQ_CONNECT_TLS_FINGERPRINT",
+		setting = "connect.tls.fingerprint"
 	)]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub fingerprint: Vec<String>,
@@ -486,7 +494,12 @@ pub struct Connect {
 	/// Only certificates are extracted; any private keys in the file are ignored.
 	/// Must be paired with `--connect-tls-key`.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[usage(name = "connect-tls-cert", long = "connect-tls-cert", env = "MOQ_CONNECT_TLS_CERT")]
+	#[usage(
+		name = "connect-tls-cert",
+		long = "connect-tls-cert",
+		env = "MOQ_CONNECT_TLS_CERT",
+		setting = "connect.tls.cert"
+	)]
 	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
 	pub cert: Option<PathBuf>,
 
@@ -495,7 +508,12 @@ pub struct Connect {
 	/// Only the private key is extracted; any certificates in the file are ignored.
 	/// Must be paired with `--connect-tls-cert`.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[usage(name = "connect-tls-key", long = "connect-tls-key", env = "MOQ_CONNECT_TLS_KEY")]
+	#[usage(
+		name = "connect-tls-key",
+		long = "connect-tls-key",
+		env = "MOQ_CONNECT_TLS_KEY",
+		setting = "connect.tls.key"
+	)]
 	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "key"))]
 	pub key: Option<PathBuf>,
 
@@ -507,6 +525,7 @@ pub struct Connect {
 		name = "connect-tls-insecure",
 		long = "connect-tls-insecure",
 		env = "MOQ_CONNECT_TLS_INSECURE",
+		setting = "connect.tls.insecure",
 		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
@@ -521,7 +540,8 @@ pub struct Connect {
 	#[usage(
 		name = "connect-tls-host-name",
 		long = "connect-tls-host-name",
-		env = "MOQ_CONNECT_TLS_HOST_NAME"
+		env = "MOQ_CONNECT_TLS_HOST_NAME",
+		setting = "connect.tls.host_name"
 	)]
 	pub host_name: Option<String>,
 
@@ -654,6 +674,7 @@ impl CustomRoots {
 		})
 	}
 
+	#[cfg(any(feature = "watch", feature = "quiche"))]
 	fn load(&self) -> Result<Vec<CertificateDer<'static>>> {
 		read_roots(&self.paths)
 	}
@@ -800,6 +821,15 @@ pub(crate) enum Verification {
 }
 
 impl Connect {
+	/// Hidden CLI-only fields a TOML round-trip would drop.
+	pub fn keep_parse_only(&mut self, from: &Self) {
+		self.deprecated = from.deprecated.clone();
+		#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+		{
+			self.identity = from.identity.clone();
+		}
+	}
+
 	/// The released spellings in use, each paired with what replaced it.
 	///
 	/// Two generations of them: the bare `--tls-*` flags, which split by role, and
@@ -1204,14 +1234,24 @@ pub fn init_android(env: &mut jni::Env, context: jni::objects::JObject) -> Resul
 #[non_exhaustive]
 pub struct Listen {
 	/// Load the given certificate from disk.
-	#[usage(long = "listen-tls-cert", name = "listen-tls-cert", env = "MOQ_LISTEN_TLS_CERT")]
+	#[usage(
+		long = "listen-tls-cert",
+		name = "listen-tls-cert",
+		env = "MOQ_LISTEN_TLS_CERT",
+		setting = "listen.tls.cert"
+	)]
 	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub cert: Vec<PathBuf>,
 
 	/// Load the given key from disk.
-	#[usage(long = "listen-tls-key", name = "listen-tls-key", env = "MOQ_LISTEN_TLS_KEY")]
+	#[usage(
+		long = "listen-tls-key",
+		name = "listen-tls-key",
+		env = "MOQ_LISTEN_TLS_KEY",
+		setting = "listen.tls.key"
+	)]
 	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "key"))]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
@@ -1223,7 +1263,8 @@ pub struct Listen {
 		long = "listen-tls-generate",
 		name = "listen-tls-generate",
 		delimiter = ',',
-		env = "MOQ_LISTEN_TLS_GENERATE"
+		env = "MOQ_LISTEN_TLS_GENERATE",
+		setting = "listen.tls.generate"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
@@ -1269,7 +1310,8 @@ pub struct Listen {
 		long = "listen-tls-root",
 		name = "listen-tls-root",
 		delimiter = ',',
-		env = "MOQ_LISTEN_TLS_ROOT"
+		env = "MOQ_LISTEN_TLS_ROOT",
+		setting = "listen.tls.root"
 	)]
 	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1331,6 +1373,16 @@ pub(crate) struct ListenDeprecated {
 }
 
 impl Listen {
+	/// Hidden CLI-only fields a TOML round-trip would drop.
+	pub fn keep_parse_only(&mut self, from: &Self) {
+		self.deprecated = from.deprecated.clone();
+		#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+		{
+			self.identity = from.identity.clone();
+		}
+		self.peers = from.peers.clone();
+	}
+
 	/// The released spellings in use, each paired with what replaced it.
 	///
 	/// Public for the same reason as [`Connect::deprecated`]: this type is flattened
@@ -1599,6 +1651,7 @@ impl Certificates {
 	}
 
 	/// An empty set, used when no TLS-bearing backend is configured.
+	#[cfg(feature = "_transport")]
 	pub(crate) fn empty() -> Self {
 		Self {
 			info: Arc::new(RwLock::new(Info::default())),
@@ -3012,6 +3065,7 @@ mod legacy_tests {
 	/// A parser wrapping the sections, which derive `Args` rather than `Parser`.
 	#[derive(usage::Cli)]
 	#[usage(unknown_flags = "error", args_override_self = false)]
+	#[usage(settings)]
 	struct Cli {
 		#[usage(flatten)]
 		connect: Connect,

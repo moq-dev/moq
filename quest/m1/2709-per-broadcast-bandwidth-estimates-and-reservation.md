@@ -62,4 +62,3 @@ Branch from `dev`, where the shared connection and `forward.ts` live.
 - [#2848](/quest/m2/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - audio following its grant, the Rust half
 - [#2859](/quest/m1/2859-passthrough-imports-reserve-no-bandwidth-so-a-co-resident.md) - passthrough imports reserving nothing
 - [#2857](/quest/m1/binding-rate-control.md) - the same gap for the native bindings
-- [#2774](/quest/m1/2774-collapse-reload-and-shared-into-one-connection-class.md) - the unified Connection owns the sampler and allocator; both touch `connection/{reload,pool,established}.ts`

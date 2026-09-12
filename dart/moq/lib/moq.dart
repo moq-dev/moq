@@ -24,6 +24,7 @@ final class Moq {
     String? tlsCert,
     String? tlsKey,
     String? bind,
+    int? maxStreams,
     MoqOriginProducer? publish,
     MoqOriginProducer? subscribe,
   }) async {
@@ -40,6 +41,7 @@ final class Moq {
       if (tlsCert != null) client.setTlsCert(path: tlsCert);
       if (tlsKey != null) client.setTlsKey(path: tlsKey);
       if (bind != null) client.setBind(addr: bind);
+      if (maxStreams != null) client.setQuicMaxStreams(maxStreams: maxStreams);
       if (publish != null) client.setPublish(origin: publish);
       if (subscribe != null) client.setConsume(origin: subscribe);
 
@@ -81,6 +83,10 @@ final class Moq {
   /// Resolve an existing broadcast at [path].
   Future<MoqBroadcastConsumer> requestBroadcast(String path) =>
       session.consumer().requestBroadcast(path: path);
+
+  /// The connection epoch: 1 for the connect that built this session, one more
+  /// on each reconnect. A server-accepted session stays at 1.
+  int get epoch => session.epoch();
 
   /// Gracefully close the session and stop the client.
   void close() {

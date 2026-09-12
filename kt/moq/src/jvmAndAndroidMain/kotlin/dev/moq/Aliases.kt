@@ -97,7 +97,7 @@ typealias Catalog = uniffi.moq.MoqCatalog
 typealias Datagram = uniffi.moq.MoqDatagram
 /** A payload plus the timestamp it should be presented at. */
 typealias Frame = uniffi.moq.MoqFrame
-/** A [Frame] plus the codec metadata a media track carries. */
+/** A media [Frame] whose keyframe flag marks group starts or video keyframes; audio flags only group starts. */
 typealias MediaFrame = uniffi.moq.MoqMediaFrame
 /** The catalog description of a video track, including whether the publisher recommends temporarily avoiding it. */
 typealias Video = uniffi.moq.MoqVideo

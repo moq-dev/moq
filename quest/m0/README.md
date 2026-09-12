@@ -1,34 +1,21 @@
-# m0: bug fixes
+# m0: release blockers
 
 ## Goal
 
-Defects in what main or dev ships today: crashes, races, protocol violations,
-wrong output, security gaps, regressions an unreleased change introduced, and
-the missing tests that let them through.
+What must land before dev merges into main and the release that follows is
+cut: user-visible breakage on a released surface, and the proof that a
+regression the merge fixes cannot return. Everything else that is a defect
+sits in [m2](/quest/m2/README.md) beside the feature it shares code with.
 
 ## Plan
 
-Fix where the defect is, which is usually main; a quest says so when it is dev.
-Security and credential exposure lead; user-visible breakage
-next; hardening, tooling, and test debt close the list. Each fix lands with a
-regression test per Root Cause First.
+Fix where the defect is; each quest says which branch. Every fix lands with a
+regression test per Root Cause First. [Merge dev](/quest/m1/merge-dev.md)
+requires this questline, so a quest that stops being a blocker moves to m2
+rather than holding the merge.
 
 ## Quests
 
-- [Play tune-in backpressure](/quest/m0/play-tunein-backpressure.md) - moq play: a tune-in burst larger than the video queue parks the decoder, so the clock never reaches live at a wide `--delay`
-- [Play audio rendition gap](/quest/m0/play-audio-rendition-gap.md) - moq play: a retired audio rendition drains its sink before the replacement fills one, so the switch costs a `--delay` of silence
-- [Auto latency](/quest/m0/3477-watch-auto-latency.md) - js/watch: the measured auto latency (#3517 on dev) is proven clean in a browser and against the public relay
 - [WebKit gate](/quest/m0/webkit-webtransport-gate.md) - js/net: every WebKit engine takes the WebSocket path, not just the Safari brand, so iOS Chrome and Firefox stop freezing after two minutes
-- [FETCH_OK](/quest/m0/3559-ietf-fetch-ok.md) - moq-net: a FETCH is answered with FETCH_OK and a legal End Location, not REQUEST_OK and group 0
-- [Publisher priority](/quest/m0/3534-ietf-publisher-priority.md) - moq-net: a track's publisher priority survives a moq-transport hop instead of being flattened to 0
-- [TRACK_STATUS refusal](/quest/m0/3492-ietf-track-status-refusal.md) - moq-net: TRACK_STATUS gets a NOT_SUPPORTED refusal instead of a silent drop
-- [Connect auth race](/quest/m0/3532-connect-auth-race.md) - moq-native: a 403 on the WebSocket arm no longer fails a connect whose QUIC arm is still in flight; moq-ffi can disable the fallback
-- [Jitter clock](/quest/m0/jitter-flush-clock.md) - moq-mux: catalog jitter measures how far behind the media clock an encoder flushes, fed by encoders only
-- [Resume info](/quest/m0/resume-info-newest.md) - moq-net: resume reports segment zero's track info, so a replaced broadcast rescales timestamps on the predecessor's timescale
-- [TS restart stall](/quest/m0/3533-ts-export-restart-stall.md) - moq export ts: a content restart on a continuous timeline no longer fences video and primary audio for good
-- [Failure artifacts](/quest/m0/qa-failure-artifacts.md) - a failing harness run keeps its run directory and a Playwright trace, and CI uploads them
-- [Harness drive-bys](/quest/m0/harness-drive-bys.md) - decide whether the relay listening kind field that came with #3509 stays
-- [Capture denial](/quest/m0/browser-permission-qa.md) - moq-publish swallows a refused camera or microphone and retries forever; it surfaces the denial and recovers on grant
-- [Publisher audio unlock](/quest/m0/publish-audio-unlock.md) - the publisher's capture AudioContext stays suspended when the page had no gesture, so no audio is ever encoded
-- [Impaired path](/quest/m0/transport-impairment-profile.md) - the transport drills run over a seeded, impaired UDP path on any host
-- [Tooling](/quest/m0/tooling/README.md) - justfiles become a one-line menu over `sh/`, one impact map scopes CI, and every workflow step runs a recipe
+- [Connect auth race](/quest/m0/3532-connect-auth-race.md) - moq-tokio: a 403 on the WebSocket arm no longer fails a connect whose QUIC arm is still in flight
+- [Anonymous handoff](/quest/m0/3588-anonymous-handoff.md) - moq-net: the source model's takeover by the next anonymous publisher is pinned by regression tests, so the parking regression the merge removes cannot return

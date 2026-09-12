@@ -22,7 +22,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_with = { workspace = true, features = ["base64"] }
 thiserror = { workspace = true }
-url = { workspace = true }
+url = { workspace = true, features = ["serde"] }
 
 [dependencies.derive_more]
 version = "2"

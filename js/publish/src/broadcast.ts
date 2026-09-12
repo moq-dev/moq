@@ -12,8 +12,12 @@ export type BroadcastInput = {
 	// origin announce the broadcast, and it survives their reconnects.
 	origin: Getter<Moq.Origin.Table | undefined>;
 
-	// Whether to publish the broadcast. Defaults to true.
+	// Whether to create the broadcast. Defaults to true.
 	enabled: Getter<boolean>;
+
+	// Whether to advertise the broadcast. Defaults to true. The flip rather than a gate on
+	// creating it: tracks can be populated while this is false, then announced once ready.
+	announce: Getter<boolean>;
 
 	// The broadcast name.
 	name: Getter<Moq.Path.Valid>;
@@ -80,6 +84,7 @@ export class Broadcast {
 		this.in = {
 			origin: getter(props?.origin),
 			enabled: getter(props?.enabled ?? true),
+			announce: getter(props?.announce ?? true),
 			name: getter(props?.name ?? Moq.Path.empty()),
 			display: getter(props?.display),
 			flip: getter(props?.flip ?? false),
@@ -207,10 +212,15 @@ export class Broadcast {
 			);
 		}
 
-		// Publishing into the origin outlives any single session: a reconnect re-announces the
+		// Creating into the origin outlives any single session: a reconnect re-announces the
 		// broadcast and new subscriptions land on the same producer.
-		const broadcast = origin.publish(name);
+		const broadcast = origin.createBroadcast(name);
 		effect.cleanup(() => broadcast.close());
+
+		effect.run((inner) => {
+			if (inner.get(this.in.announce)) broadcast.announce();
+			else broadcast.unannounce();
+		});
 
 		// Close every active rendition track when the broadcast tears down (disable/rename), so an
 		// encoder stops encoding into a dead producer. The Rendition handles themselves stay registered.

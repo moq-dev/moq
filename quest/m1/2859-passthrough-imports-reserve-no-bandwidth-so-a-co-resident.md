@@ -98,6 +98,5 @@ Branch from dev.
 
 ## Related
 
-- [#2815](/quest/m1/2815-lift-adaptive-stage-refusal.md) - two capture stages sharing one allocator
 - [#2709](/quest/m1/2709-per-broadcast-bandwidth-estimates-and-reservation.md) - the same allocator mirrored in js/net
 - [Ladder](/quest/m2/ladder/README.md) - a transcode ladder dividing the same estimate

@@ -1,6 +1,6 @@
+import type { Time } from "@moq/net";
 import * as Moq from "@moq/net";
-import { isCancel, type Time } from "@moq/net";
-import { Effect, type GetPromise, type Getter, type GetterInit, getter, Once, Signal } from "@moq/signals";
+import { Effect, type Getter, type GetterInit, getter, Once, Signal } from "@moq/signals";
 
 import type { Format } from "./format";
 import type { BufferedRanges, Frame } from "./types";
@@ -28,6 +28,7 @@ interface Group {
 	latest?: Time.Micro; // The timestamp of the latest known frame
 	end?: Time.Micro; // The furthest presentation point so far, i.e. max(timestamp + duration)
 	done?: boolean; // Set when #runGroup finishes reading all frames
+	truncated?: boolean; // The missing tail becomes a gap after the buffered frames are delivered.
 }
 
 /**
@@ -146,26 +147,6 @@ export class Consumer {
 
 	#signals = new Effect();
 	#closed = new Once<Error | null>();
-	#cancelled = false;
-
-	/**
-	 * Settles once the track ends: `null` on a clean finish, or the abort {@link Error}.
-	 * `StreamCode.Cancel` is a requested end, not a fault; see {@link cancelled}.
-	 */
-	get closed(): GetPromise<Error | null> {
-		return this.#closed;
-	}
-
-	/**
-	 * True after a group or the track was reset with `StreamCode.Cancel`.
-	 *
-	 * Set before {@link closed} when a truncated group arrives while the track is still
-	 * open, so a decoder can classify the `DOMException` that follows from the stream's
-	 * end rather than the exception.
-	 */
-	get cancelled(): boolean {
-		return this.#cancelled;
-	}
 
 	/** Start consuming the given track, decoding frames with `props.format`. */
 	constructor(track: Moq.Track.Subscriber, props: ConsumerProps) {
@@ -184,7 +165,6 @@ export class Consumer {
 	}
 
 	#finish(end: Error | null): void {
-		if (isCancel(end)) this.#cancelled = true;
 		if (this.#closed.peek() === undefined) this.#closed.set(end);
 		this.#notify?.();
 		this.#notify = undefined;
@@ -235,10 +215,7 @@ export class Consumer {
 			}
 			this.#finish(null);
 		} catch (err) {
-			const e = err instanceof Error ? err : new Error(String(err));
-			this.#finish(e);
-			if (isCancel(e)) return;
-			throw e;
+			this.#finish(err instanceof Error ? err : new Error(String(err)));
 		}
 	}
 
@@ -324,8 +301,8 @@ export class Consumer {
 			// A decode error or stream RESET truncates the tail of the GoP;
 			// frames decoded before the error are still valid and playable.
 			// The tail is gone though, so the next group does not continue this one.
-			if (isCancel(err)) this.#cancelled = true;
-			this.#gap = true;
+			group.truncated = true;
+			if (!(err instanceof Moq.StreamError)) throw err;
 		} finally {
 			group.done = true;
 
@@ -584,6 +561,7 @@ export class Consumer {
 	 * It reports what this consumer dropped plus empty-group discontinuities the publisher declared.
 	 * An unmarked forward timestamp jump still reads as continuous because nothing on the wire says
 	 * the missing span will never arrive.
+	 * After buffered groups drain, a finished track returns undefined and an aborted track throws.
 	 */
 	async next(): Promise<
 		| {
@@ -599,7 +577,7 @@ export class Consumer {
 			if (this.#groups.length === 0) {
 				const ended = this.#closed.peek();
 				if (ended !== undefined) {
-					if (ended instanceof Error && !isCancel(ended)) throw ended;
+					if (ended instanceof Error) throw ended;
 					return undefined;
 				}
 			}
@@ -681,6 +659,7 @@ export class Consumer {
 					const group = this.#groups.shift();
 					if (group) {
 						const seq = group.consumer.sequence;
+						if (group.truncated) this.#gap = true;
 						if (group.empty) this.#markDiscontinuity();
 						this.#updateBuffered();
 						return {

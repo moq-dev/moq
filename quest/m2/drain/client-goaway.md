@@ -16,12 +16,8 @@ drained node is already out of DNS when GOAWAY fires, so a re-resolve is what
 lands clients on a healthy relay.
 
 Everything below describes `dev`, which is where this quest lands: `main`
-still has `moq-native`'s close-only `Reconnect` and no `Connection.Shared`.
-It lands after [#2774](/quest/m1/2774-collapse-reload-and-shared-into-one-connection-class.md)
-collapses `Reload` and `Shared` into one `Connection`, so the drain loop is
-written once into that class and consumers migrate their call sites once;
-where the text below says `Reload` or `Connection.Shared`, read the single
-class and its pool.
+still has `moq-native`'s close-only `Reconnect`. The drain loop is written
+once into `Connection` and its pool.
 
 ### Rust is done except the proof
 
@@ -45,16 +41,16 @@ and the old session closes within the handover cap.
 On `dev`, `js/net` logs the lite GOAWAY URI and keeps that session open,
 logs the IETF draft-17+ URI and then closes the session when its control
 loop ends, and on the draft-14 to -16 shared control stream reads the message
-body but returns without decoding it. Nothing migrates: `Reload` reconnects
-only after `closed` fires, through its backoff, tears the old connection
-down in its effect cleanup, and `Connection.Shared`
-(`js/net/src/connection/pool.ts`) pools by URL href.
+body but returns without decoding it. Nothing migrates: `Connection`
+reconnects only after `closed` fires, through its backoff, tears the old
+connection down in its effect cleanup, and the pool
+(`js/net/src/connection/pool.ts`) keys by URL href.
 
-- Surface the peer's GOAWAY on `Established` as a drain signal carrying the
+- Surface the peer's GOAWAY on the live session as a drain signal carrying the
   resolved URI and the timeout, decoded on every wire the client speaks,
   including the draft-14 to -16 adapter route that currently returns without
   decoding the body it has already read.
-- `Reload` mirrors `Draining`: on GOAWAY it dials the target immediately,
+- `Connection` mirrors `Draining`: on GOAWAY it dials the target immediately,
   swaps the origin wiring (`forwardAnnounced`, `publish`, `subscribe`) once
   the replacement is established, and leaves the old session to close on its
   own or at a handover cap: the configured cap, lowered to the peer's timeout
@@ -68,7 +64,7 @@ down in its effect cleanup, and `Connection.Shared`
   redirect replaces the list. A redirect with a certificate pin (`serverCertificateHashes`)
   is refused unless the host is unchanged, since the pin cannot verify another
   relay; the pool already refuses to share pinned connections.
-- `Connection.Shared` re-keys its entry to the redirect target, so a later
+- The pool re-keys its entry to the redirect target, so a later
   caller configured with that URL shares the migrated connection. The app's
   handle and shared origin are unchanged; only the pool key moves, and a
   caller still asking for the original URL gets a fresh entry. When the
@@ -85,7 +81,3 @@ down in its effect cleanup, and `Connection.Shared`
   pooled key keeps existing handles on both entries but makes a new caller for
   the original URL dial fresh, each guard refusal closes rather than
   reconnects, and the draft-14 to -16 route decodes the URI.
-
-## Required
-
-- [#2774](/quest/m1/2774-collapse-reload-and-shared-into-one-connection-class.md) - one Connection class first, so GOAWAY is built into it rather than into two

@@ -15,7 +15,7 @@ For each quest, interactively prompt the user if:
 
 1. /start-quest
 2. /plan-quests
-3. deprioritize it
+3. skip it
 4. delete it
 
 Include a recommended option.

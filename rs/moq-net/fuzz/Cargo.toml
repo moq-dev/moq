@@ -12,6 +12,7 @@
 [package]
 name = "moq-net-fuzz"
 version = "0.0.0"
+license = "MIT OR Apache-2.0"
 publish = false
 edition = "2024"
 autobins = false

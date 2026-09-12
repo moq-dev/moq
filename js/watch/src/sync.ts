@@ -34,7 +34,7 @@ export type SyncInput = {
 
 	/**
 	 * The connection's PROBE estimates, whose RTT drives "auto" jitter. Usually wired
-	 * from a `Connection.Shared`'s or `Reload`'s `probe`.
+	 * from a `Connection`'s `probe`.
 	 */
 	probe: Getter<Moq.Connection.Probe | undefined>;
 

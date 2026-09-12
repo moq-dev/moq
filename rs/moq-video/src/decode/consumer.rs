@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 
 use hang::catalog::VideoConfig;
 
-use super::decoder::Config;
+use super::decoder::{Config, Start};
 use super::sink::Sink;
 use crate::Error;
 use crate::Frame;
@@ -42,18 +42,38 @@ impl Consumer {
 		let decoder = Sink::open(catalog, &config).await?;
 
 		let name = name.into();
-		let track = broadcast
-			.track(&name)?
+		let track = broadcast.track(&name)?;
+		let mut subscriber = track
 			.subscribe(
 				moq_net::track::Subscription::default()
 					.with_priority(hang::catalog::PRIORITY.video)
 					.with_max_age(config.max_age),
 			)
 			.await?;
+		// A decoder often opens on a track that is already cached: a replacement
+		// decoder subscribes while its predecessor still holds groups, and a
+		// rendition switched away from and back to stays warm for
+		// `TRACK_IDLE_LINGER`. A caller that asked for `Start::Latest` wants
+		// none of that backlog, because a cursor starting at sequence zero
+		// replays every cached group at decode speed before reaching live
+		// media, which on a thirty-second retention is half a minute of pictures raced
+		// through.
+		//
+		// This moves the local read cursor and deliberately not
+		// `Subscription::group_start`. That field is a request to the publisher,
+		// aggregated across every live subscriber, so naming a stale cached
+		// sequence there asks the publisher to rewind the track for everyone
+		// reading it. What a player wants is to skip what it already has.
+		if config.start == Start::Latest
+			&& let Some(live_edge) = track.latest()
+		{
+			subscriber.start_at(live_edge);
+		}
+		let track = subscriber;
 		// The catalog says how the track is framed, and it is not always the legacy
 		// wire: `moq import fmp4` publishes CMAF. Reading a moof+mdat fragment as a
 		// varint timestamp plus a payload decodes to garbage rather than failing.
-		let container = moq_mux::catalog::hang::Container::try_from(&catalog.container)?;
+		let container = moq_mux::catalog::hang::Container::try_from(catalog)?;
 		let track = moq_mux::container::Consumer::new(track, container);
 
 		Ok(Self {
@@ -92,9 +112,19 @@ impl Consumer {
 			}
 
 			let Some(mux_frame) = mux_frame else {
-				let tail = self.decoder.flush().await?;
-				self.pending.extend(tail);
+				// The flag goes up only once the tail is in hand, so a read
+				// dropped before the drain ran retries it rather than reporting
+				// an end the stream has not reached. Flushing twice is safe: the
+				// second hands back nothing.
+				let tail = self.decoder.flush().await;
+				// Set before the error is returned, not after. A flush that
+				// failed once fails the same way every time, and the track has
+				// ended either way, so leaving the flag down turns one bad
+				// drain into a caller that reads, fails, and reads again with
+				// nothing in between to wait on. A caller that treats a codec
+				// error as one lost picture and carries on then spins.
 				self.drained = true;
+				self.pending.extend(tail?);
 				continue;
 			};
 
@@ -196,6 +226,155 @@ mod tests {
 		assert_eq!(frame.size(), crate::Size::new(320, 240));
 	}
 
+	/// A decoder opened on a track that already holds groups starts at the
+	/// newest one, not at the oldest still cached.
+	///
+	/// A player rebuilding its decoder (a backend change, a rendition pin) opens
+	/// a second consumer while the first still holds the groups it has not
+	/// released. Starting those at sequence zero replays the whole retention at
+	/// decode speed before the picture reaches live media.
+	#[tokio::test]
+	async fn a_second_consumer_starts_at_the_live_edge() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		// Kept so the aggregated subscription can be read back below.
+		let published = track.clone();
+		let subscriber = broadcast.consume();
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+		);
+		// A keyframe opens a group, so this is three groups a second apart.
+		for index in 0..3u64 {
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::from_micros(index * 1_000_000).unwrap(),
+					duration: None,
+					payload: Bytes::from_static(b"access unit"),
+					keyframe: true,
+				})
+				.unwrap();
+		}
+		producer.finish().unwrap();
+
+		let catalog = VideoConfig::new(hang::catalog::H264 {
+			inline: true,
+			profile: 0x42,
+			constraints: 0,
+			level: 30,
+		});
+		let mut consumer = Consumer::new(
+			&subscriber,
+			&catalog,
+			"video",
+			Config {
+				kind: Kind::Named(probe::BUFFERED_NAME.into()),
+				start: Start::Latest,
+				// Wide enough to keep every group fresh: the age budget on its own
+				// delivers only the live edge, which would pass this test without
+				// `Start::Latest` doing anything.
+				max_age: std::time::Duration::from_secs(10),
+				..Config::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		// The buffered probe stamps each picture with the access unit's own
+		// timestamp, so this says which group the read started from. It is the
+		// backend to use here rather than the plain probe, whose event log is
+		// process-wide and belongs to the thread-affinity test.
+		let frame = consumer.read().await.unwrap().expect("a decoded frame");
+		assert_eq!(
+			frame.timestamp,
+			Timestamp::from_micros(2_000_000).unwrap(),
+			"a fresh consumer replayed the groups an earlier reader still holds",
+		);
+
+		// The skip is the local read cursor and nothing else. Asking for it
+		// through `Subscription::start` would look equivalent and is not: the
+		// floor is aggregated across every live subscriber and tells the
+		// publisher what to send, so naming a cached sequence there rewinds the
+		// track for everyone reading it. A rendition switched away from and back
+		// to is the case that bites, because its cached sequence is stale by
+		// then and the publisher resends the broadcast from it.
+		assert_eq!(
+			published.subscription().and_then(|sub| sub.start),
+			None,
+			"the publisher was asked to rewind the track",
+		);
+	}
+
+	/// The default reads everything the track holds.
+	///
+	/// `Start::Latest` is a player's policy and not the API's: a recorder, an
+	/// export, or a test decoding a track that was written before it subscribed
+	/// wants every group, and dropping media nobody asked to drop is the worse
+	/// of the two mistakes. This is the half that a live-edge default breaks,
+	/// so it is pinned beside the other one.
+	#[tokio::test]
+	async fn the_default_reads_every_cached_group() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let subscriber = broadcast.consume();
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+		);
+		for index in 0..3u64 {
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::from_micros(index * 1_000_000).unwrap(),
+					duration: None,
+					payload: Bytes::from_static(b"access unit"),
+					keyframe: true,
+				})
+				.unwrap();
+		}
+		producer.finish().unwrap();
+
+		let catalog = VideoConfig::new(hang::catalog::H264 {
+			inline: true,
+			profile: 0x42,
+			constraints: 0,
+			level: 30,
+		});
+		let mut consumer = Consumer::new(
+			&subscriber,
+			&catalog,
+			"video",
+			Config {
+				// The buffered probe rather than the plain one: the plain probe's
+				// event log is process-wide and belongs to the thread-affinity test.
+				kind: Kind::Named(probe::BUFFERED_NAME.into()),
+				// A budget that keeps every group fresh, so the start policy is the
+				// only thing deciding what is read.
+				max_age: std::time::Duration::from_secs(10),
+				..Config::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		let mut seen = Vec::new();
+		while let Some(frame) = consumer.read().await.unwrap() {
+			seen.push(frame.timestamp);
+		}
+		assert_eq!(
+			seen,
+			vec![
+				Timestamp::from_micros(0).unwrap(),
+				Timestamp::from_micros(1_000_000).unwrap(),
+				Timestamp::from_micros(2_000_000).unwrap(),
+			],
+			"the default dropped groups the caller never asked to drop",
+		);
+	}
+
 	/// A track ends before a decoder that reorders pictures does. The consumer
 	/// drains the backend once and returns its tail before reporting the end.
 	#[tokio::test]
@@ -205,7 +384,10 @@ mod tests {
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
 		let subscriber = broadcast.consume();
-		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+		);
 		for index in 0..2u64 {
 			producer
 				.write(moq_mux::container::Frame {
@@ -257,7 +439,10 @@ mod tests {
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
 		let subscriber = broadcast.consume();
-		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+		);
 		producer
 			.write(moq_mux::container::Frame {
 				timestamp: Timestamp::from_micros(100_000).unwrap(),
@@ -314,7 +499,10 @@ mod tests {
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
 		let subscriber = broadcast.consume();
-		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+		);
 		producer.finish().unwrap();
 
 		let catalog = VideoConfig::new(hang::catalog::H264 {
@@ -359,6 +547,8 @@ mod tests {
 			Ok(_) => panic!("cancelled flush must poison the sink"),
 		};
 		assert!(err.to_string().contains("cancelled call"), "unexpected error: {err}");
+		assert!(matches!(err, crate::Error::CodecGone(_)));
+		assert!(consumer.read().await.unwrap().is_none());
 	}
 
 	/// VAAPI returns its buffered tail before the consumer reports track end.
@@ -377,7 +567,10 @@ mod tests {
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
 		let subscriber = broadcast.consume();
-		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+		);
 
 		let mut encoder = Encoder::new(&config).unwrap();
 		let rgba = vec![0x80u8; 320 * 240 * 4];

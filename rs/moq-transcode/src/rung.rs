@@ -88,7 +88,7 @@ impl Rung {
 	}
 
 	fn container(&self) -> Result<moq_mux::catalog::hang::Container, Error> {
-		Ok(moq_mux::catalog::hang::Container::try_from(&self.config.container)?)
+		Ok(moq_mux::catalog::hang::Container::try_from(&self.config)?)
 	}
 
 	/// An encoder producing this rung's rendition.

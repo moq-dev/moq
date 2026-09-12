@@ -55,6 +55,35 @@ async fn a_transient_failure_retries_until_the_budget_runs_out() {
 	);
 }
 
+/// The epoch advances in the same write that reports `Connected`, so a caller
+/// pairing [`Connection::status`] with [`Connection::epoch`] never sees a stale
+/// count, however fast the redial.
+#[tokio::test]
+async fn the_epoch_advances_on_reconnect() {
+	let (port, mut sessions, _task) = spawn_server().await;
+	let url: url::Url = format!("tcp://localhost:{port}/").parse().expect("parse url");
+	let mut connection = quick_client(Default::default()).connect(url);
+
+	let status = tokio::time::timeout(Duration::from_secs(10), connection.status())
+		.await
+		.expect("status timed out")
+		.expect("status failed");
+	assert_eq!(status, moq_tokio::Status::Connected);
+	assert_eq!(connection.epoch(), 1, "the first connect is epoch 1");
+
+	// Dropping the server's handle closes the session, so the loop redials.
+	let session = sessions.recv().await.expect("server stopped accepting");
+	drop(session);
+
+	tokio::time::timeout(Duration::from_secs(10), async {
+		while connection.epoch() < 2 {
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("the epoch never advanced past the first connect");
+}
+
 /// A stream-only moq server on a free loopback TCP port.
 ///
 /// Returns the port, a receiver yielding every accepted session (so a test can
@@ -170,8 +199,8 @@ async fn follow_still_honors_a_cross_host_redirect() {
 async fn a_refused_redirect_preserves_configured_fallbacks() {
 	let (port_a, mut sessions_a, task_a) = spawn_server().await;
 	let (port_b, mut sessions_b, _task_b) = spawn_server().await;
-	let primary = format!("tcp://localhost:{port_a}/").parse().expect("primary URL");
-	let fallback = format!("tcp://127.0.0.1:{port_b}/").parse().expect("fallback URL");
+	let primary: url::Url = format!("tcp://localhost:{port_a}/").parse().expect("primary URL");
+	let fallback: url::Url = format!("tcp://127.0.0.1:{port_b}/").parse().expect("fallback URL");
 	let addrs = moq_tokio::connect::Addrs::new(primary).or(fallback);
 	let _connection = quick_client(Default::default()).connect(addrs);
 	let first = tokio::time::timeout(Duration::from_secs(10), sessions_a.recv())

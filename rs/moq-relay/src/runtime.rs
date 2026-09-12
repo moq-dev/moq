@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
-#[derive(Default)]
 pub struct RuntimeConfig {
 	/// Serve QUIC from this many single-threaded workers instead of the shared
 	/// runtime, each pinned to a core with its own socket on the listen address.
@@ -21,7 +20,7 @@ pub struct RuntimeConfig {
 	/// Linux-only, and mutually exclusive with `--listen-tls-generate`, since
 	/// each worker would otherwise generate and serve a certificate of its own.
 	/// Unset (the default) keeps QUIC on the shared runtime.
-	#[usage(long = "runtime-workers", env = "MOQ_RUNTIME_WORKERS")]
+	#[usage(long = "runtime-workers", env = "MOQ_RUNTIME_WORKERS", setting = "runtime.workers")]
 	pub workers: Option<u16>,
 
 	/// Pin each worker to a CPU core, defaulting to on.
@@ -32,18 +31,14 @@ pub struct RuntimeConfig {
 	/// scheduler migrating a busy worker, which should matter on a multi-socket
 	/// or NUMA machine, and costs nothing elsewhere. Turn it off when sharing
 	/// the machine with something that manages CPU placement itself.
-	///
-	/// `Option` rather than a Usage `default`, which a config file could not
-	/// override: Usage reads a standing `false` as an empty boolean, so the
-	/// re-parse over the CLI args would refill it with the declared `true`.
 	#[usage(
 		long = "runtime-pin",
 		env = "MOQ_RUNTIME_PIN",
-		default_missing = "true",
-		num_args = 0..=1,
-		require_equals = true,
+		setting = "runtime.pin",
+		default = "true",
+		bool_value
 	)]
-	pub pin: Option<bool>,
+	pub pin: bool,
 
 	/// Drive the QUIC workers with io_uring instead of tokio.
 	///
@@ -56,11 +51,10 @@ pub struct RuntimeConfig {
 	#[usage(
 		long = "runtime-io-uring",
 		env = "MOQ_RUNTIME_IO_URING",
-		default_missing = "true",
-		num_args = 0..=1,
-		require_equals = true,
+		setting = "runtime.io_uring",
+		bool_value
 	)]
-	pub io_uring: Option<bool>,
+	pub io_uring: bool,
 }
 
 impl RuntimeConfig {
@@ -71,11 +65,21 @@ impl RuntimeConfig {
 	/// to switch the mode off from a config file that already has the section.
 	pub fn workers(&self) -> Option<moq_tokio::worker::Config> {
 		let count = self.workers.filter(|count| *count > 0)?;
-		Some(moq_tokio::worker::Config::new(count).with_pin(self.pin.unwrap_or(true)))
+		Some(moq_tokio::worker::Config::new(count).with_pin(self.pin))
 	}
 
 	/// Whether the workers should run on io_uring instead of tokio.
 	pub fn io_uring(&self) -> bool {
-		self.io_uring.unwrap_or(false)
+		self.io_uring
+	}
+}
+
+impl Default for RuntimeConfig {
+	fn default() -> Self {
+		Self {
+			workers: None,
+			pin: true,
+			io_uring: false,
+		}
 	}
 }

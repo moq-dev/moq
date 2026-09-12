@@ -443,7 +443,7 @@ async fn import_populates_the_broadcast_timeline() {
 	let audio_name = snapshot.audio.renditions.keys().next().unwrap().clone();
 
 	// The one timeline is advertised at the catalog root, named by convention.
-	let section = snapshot.timeline.clone().expect("the import advertises a timeline");
+	let section = snapshot.archive.clone().expect("the import advertises a timeline");
 	assert_eq!(section.track, hang::timeline::DEFAULT_NAME);
 
 	// Subscribe while the producer is alive, then finish so the timeline group closes and the
@@ -480,6 +480,7 @@ fn info(track_id: u32, timescale: moq_net::Timescale, sequence_number: u32) -> s
 		track_id,
 		timescale,
 		sequence_number,
+		kind: super::Kind::Video,
 	}
 }
 
@@ -498,7 +499,7 @@ fn sample(timestamp_us: u64, keyframe: bool, duration_us: Option<u64>) -> crate:
 fn decode_rejects_durationless_multisample() {
 	let frames = vec![sample(0, true, None), sample(33_000, false, None)];
 	let frag = super::encode_fragment(info(1, scale(), 0), &frames).unwrap();
-	let err = super::decode(frag, scale()).unwrap_err();
+	let err = super::decode(frag, scale(), crate::container::fmp4::Kind::Video).unwrap_err();
 	assert!(matches!(err, super::Error::MissingSampleDuration), "got {err:?}");
 }
 
@@ -506,7 +507,7 @@ fn decode_rejects_durationless_multisample() {
 #[test]
 fn decode_single_sample_no_duration_ok() {
 	let frag = super::encode_fragment(info(1, scale(), 0), &[sample(0, true, None)]).unwrap();
-	let out = super::decode(frag, scale()).unwrap();
+	let out = super::decode(frag, scale(), crate::container::fmp4::Kind::Video).unwrap();
 	assert_eq!(out.len(), 1);
 	assert_eq!(out[0].timestamp.as_micros(), 0);
 }
@@ -517,7 +518,7 @@ fn decode_single_sample_no_duration_ok() {
 fn decode_multisample_with_durations_roundtrips() {
 	let frames = vec![sample(0, true, Some(33_000)), sample(33_000, false, Some(33_000))];
 	let frag = super::encode_fragment(info(1, scale(), 0), &frames).unwrap();
-	let out = super::decode(frag, scale()).unwrap();
+	let out = super::decode(frag, scale(), crate::container::fmp4::Kind::Video).unwrap();
 	assert_eq!(out.len(), 2);
 	assert_eq!(out[0].timestamp.as_micros(), 0);
 	assert_eq!(out[1].timestamp.as_micros(), 33_000);
@@ -721,7 +722,7 @@ async fn segmented_source_indexes_one_group_range_per_track() {
 	let snapshot = catalog.snapshot();
 	let video_name = snapshot.video.renditions.keys().next().unwrap().clone();
 	let audio_name = snapshot.audio.renditions.keys().next().unwrap().clone();
-	let section = snapshot.timeline.clone().expect("the import advertises a timeline");
+	let section = snapshot.archive.clone().expect("the import advertises a timeline");
 
 	// Subscribe while the producer is alive so the reader terminates on finish rather than blocking.
 	let mut timeline = crate::timeline::Consumer::<()>::subscribe(&consumer, &section)
@@ -803,7 +804,7 @@ async fn segment_ranges_with_skew(
 	let snapshot = catalog.snapshot();
 	let video_name = snapshot.video.renditions.keys().next().unwrap().clone();
 	let audio_name = snapshot.audio.renditions.keys().next().unwrap().clone();
-	let section = snapshot.timeline.clone().unwrap();
+	let section = snapshot.archive.clone().unwrap();
 	let mut timeline = crate::timeline::Consumer::<()>::subscribe(&consumer, &section)
 		.await
 		.unwrap();

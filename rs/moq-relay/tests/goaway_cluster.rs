@@ -11,7 +11,7 @@ use std::net::TcpListener;
 use std::time::Duration;
 
 use moq_net::Hop;
-use moq_relay::{AuthConfig, Cluster, ClusterConfig, Connection, PublicConfig};
+use moq_relay::{AuthConfig, Cluster, ClusterConfig, ClusterOptions, Connection, PublicConfig};
 use url::Url;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -203,7 +203,9 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 
 		let mut cluster_config = ClusterConfig::default();
 		cluster_config.connect = vec![format!("tcp://127.0.0.1:{port_a}/")];
-		let cluster = Cluster::new(cluster_config).expect("cluster init").with_client(client);
+		let cluster = Cluster::new(ClusterOptions::new(cluster_config))
+			.expect("cluster init")
+			.with_client(client);
 
 		let started = cluster.clone().start().await.expect("cluster start");
 		let cluster_run = tokio::spawn(started.run());
@@ -325,7 +327,9 @@ async fn spawn_relay_with_upstream(
 	client_config.goaway.handover = Duration::from_secs(2).into();
 	let client = client_config.init(Default::default()).expect("client init");
 
-	let cluster = Cluster::new(cluster_config).expect("cluster init").with_client(client);
+	let cluster = Cluster::new(ClusterOptions::new(cluster_config))
+		.expect("cluster init")
+		.with_client(client);
 
 	let started = cluster.clone().start().await.expect("cluster start");
 	let handle = tokio::spawn(async move {
@@ -668,7 +672,9 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 
 	let mut cluster_config = ClusterConfig::default();
 	cluster_config.connect = vec![format!("tcp://127.0.0.1:{port}/")];
-	let cluster = Cluster::new(cluster_config).expect("cluster init").with_client(client);
+	let cluster = Cluster::new(ClusterOptions::new(cluster_config))
+		.expect("cluster init")
+		.with_client(client);
 	let started = cluster.clone().start().await.expect("cluster start");
 	let cluster_run = tokio::spawn(started.run());
 

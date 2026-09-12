@@ -188,7 +188,7 @@ export class Encoder {
 		const capture = effect.get(this.in.capture);
 		if (!capture) return;
 
-		const producer = new Container.Legacy.Producer(track);
+		const producer = new Container.Legacy.Producer(track, new Container.Legacy.Format("video"));
 		effect.cleanup(() => producer.close());
 
 		let lastKeyframe: Time.Micro | undefined;

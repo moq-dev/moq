@@ -81,7 +81,7 @@ export class Fixture {
 		const audioTrack = destination.stream.getAudioTracks()[0] as unknown as Publish.Audio.StreamTrack;
 		this.#signals.cleanup(() => audioTrack.stop());
 
-		const connection = new Moq.Connection.Shared({ url: new URL(url), enabled: true });
+		const connection = new Moq.Connection({ url: new URL(url), enabled: true });
 		this.#signals.cleanup(() => connection.close());
 
 		const capture = new Publish.Video.Capture({ source: videoTrack });
@@ -106,7 +106,7 @@ export class Fixture {
 		// Handed to the capture only once this page has user activation. The capture builds its own
 		// AudioContext the moment a source appears and never resumes it, so one built before the
 		// first gesture stays suspended and no audio is ever captured. See
-		// /quest/m0/publish-audio-unlock.md; until that lands, giving it the source late is what keeps
+		// /quest/m2/publish-audio-unlock.md; until that lands, giving it the source late is what keeps
 		// this fixture measuring the player rather than that gap.
 		const audioSource = new Signal<Publish.Audio.Source | undefined>(undefined);
 

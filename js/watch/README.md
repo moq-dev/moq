@@ -99,7 +99,7 @@ activation follows application lifecycle state.
 ```typescript
 import * as Watch from "@moq/watch";
 
-const connection = new Watch.Net.Connection.Shared({
+const connection = new Watch.Net.Connection({
     url: new URL("https://relay.example.com/anon"),
     enabled: true,
 });

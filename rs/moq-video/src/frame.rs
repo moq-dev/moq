@@ -561,13 +561,44 @@ impl Surface {
 	/// Always available, whichever variant you hold. Native GPU surfaces are
 	/// downloaded first; CPU I420 is converted directly. The conversion honors
 	/// [`color`](Self::color) and otherwise falls back to [`Color::infer`].
-	pub fn into_rgba(self) -> Result<crate::convert::Rgba, Error> {
-		self.into_rgba_with(&crate::convert::Config::default())
+	pub fn to_rgba(&self) -> Result<crate::convert::Rgba, Error> {
+		self.to_rgba_with(&crate::convert::Config::default())
 	}
 
 	/// Convert to owned RGBA8 pixels with explicit CPU conversion options.
-	pub fn into_rgba_with(self, config: &crate::convert::Config) -> Result<crate::convert::Rgba, Error> {
+	pub fn to_rgba_with(&self, config: &crate::convert::Config) -> Result<crate::convert::Rgba, Error> {
 		crate::convert::rgba(self, config)
+	}
+
+	/// Convert to owned, tightly packed BGRA8 pixels on the CPU.
+	///
+	/// The same conversion as [`to_rgba`](Self::to_rgba) with red and blue
+	/// exchanged. Reach for it when the destination wants that order, which is
+	/// most of them: GPUI's `RenderImage`, Direct2D, and Win32 generally. Doing
+	/// it here is one pass over the frame; converting to RGBA and swapping the
+	/// channels afterwards is two.
+	pub fn to_bgra(&self) -> Result<crate::convert::Bgra, Error> {
+		self.to_bgra_with(&crate::convert::Config::default())
+	}
+
+	/// Convert to owned BGRA8 pixels with explicit CPU conversion options.
+	pub fn to_bgra_with(&self, config: &crate::convert::Config) -> Result<crate::convert::Bgra, Error> {
+		crate::convert::bgra(self, config)
+	}
+
+	/// Convert to owned RGBA8 pixels, consuming the surface.
+	///
+	/// Equivalent to [`to_rgba`](Self::to_rgba); kept because it is the older
+	/// spelling. Prefer the borrowing form, which also works on a surface held
+	/// behind an `Arc`.
+	pub fn into_rgba(self) -> Result<crate::convert::Rgba, Error> {
+		self.to_rgba()
+	}
+
+	/// Convert to owned RGBA8 pixels with explicit options, consuming the
+	/// surface. See [`into_rgba`](Self::into_rgba).
+	pub fn into_rgba_with(self, config: &crate::convert::Config) -> Result<crate::convert::Rgba, Error> {
+		self.to_rgba_with(config)
 	}
 
 	/// The pixels as a CoreVideo pixel buffer, the mirror of
@@ -619,7 +650,13 @@ impl Surface {
 	}
 
 	/// A CPU I420 view, downloading a GPU frame only if necessary.
-	pub(crate) fn to_i420(&self) -> Result<Cow<'_, I420>, Error> {
+	///
+	/// Borrowed for `Surface::I420`, owned for anything that had to come off the
+	/// GPU. The borrowing counterpart to [`into_i420`](Self::into_i420), for a
+	/// caller that cannot give up the surface: a publisher's preview frame is
+	/// shared with every rendition's encoder, so its `Arc` never has a refcount
+	/// of one and no consuming exit is reachable from it.
+	pub fn to_i420(&self) -> Result<Cow<'_, I420>, Error> {
 		match self {
 			#[cfg(target_os = "macos")]
 			Surface::PixelBuffer(s) => Ok(Cow::Owned(s.download_i420()?)),

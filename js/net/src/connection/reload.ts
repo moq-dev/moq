@@ -9,10 +9,12 @@ import type { Established } from "./established.ts";
 import type { Probe, Stats } from "./stats.ts";
 
 /**
- * Exponential backoff settings for {@link Reload}'s reconnect loop.
+ * Exponential backoff settings for the reconnect loop.
  *
  * The delays carry jitter, so a fleet of tabs knocked offline together doesn't reconnect in
  * lockstep. Every failure is retried; {@link ReloadDelay.timeout} is what stops the loop.
+ *
+ * @internal
  */
 export type ReloadDelay = {
 	/** The delay in milliseconds before reconnecting (default: 1000). */
@@ -37,6 +39,8 @@ export type ReloadDelay = {
  * {@link ConnectProps.transport} is excluded: a supplied session is good for exactly one
  * connection, so the reconnect loop has nothing to reuse once that session drops. Call
  * {@link connect} directly when you have a session to hand over.
+ *
+ * @internal
  */
 export type ReloadProps = Omit<ConnectProps, "signal" | "transport"> & {
 	/** A reload owns the abort signal for each connection attempt. */
@@ -69,10 +73,18 @@ const DEFAULT_DELAY: Required<ReloadDelay> = {
 	timeout: 10000,
 };
 
-/** Current state of a {@link Reload} connection. */
+/** Current state of a reconnecting connection.
+ *
+ * @internal
+ */
 export type ReloadStatus = "connecting" | "connected" | "disconnected";
 
-/** Maintains a MoQ connection, reconnecting with exponential backoff when it drops. */
+/**
+ * The reconnect loop behind a Connection handle: connects, waits for the session to end, then
+ * redials with exponential backoff.
+ *
+ * @internal
+ */
 export class Reload {
 	/** Relay URL to connect to; updating it triggers a reconnect. */
 	url: Signal<URL | undefined>;

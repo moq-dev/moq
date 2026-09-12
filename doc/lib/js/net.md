@@ -21,11 +21,12 @@ const url = new URL("https://cdn.moq.dev/anon?jwt=...");
 const origin = new Moq.Origin.Producer();
 const connection = await Moq.Connection.connect(url, { publish: origin.consume() });
 
-const broadcast = origin.publish(Moq.Path.from("chat.room"));
+const broadcast = origin.createBroadcast(Moq.Path.from("chat.room"));
 const track = broadcast.createTrack("messages");
 const group = track.appendGroup();
 group.writeString("hello");           // or writeFrame({ payload, timestamp })
 group.close();
+broadcast.announce();
 
 // Subscribe
 const consumer = connection.consume(Moq.Path.from("chat.room")).track("messages").subscribe({ priority: 0 });
@@ -36,9 +37,9 @@ for (;;) {
 }
 ```
 
-- **Origins** hold the broadcasts, not the connection: closing a session unannounces them but leaves them published for the next one. `origin.request(path)` prefers a local publish, so a page that watches what it publishes reads its own copy with no round trip.
-- **Connections** race WebTransport against WebSocket and expose a `closed` promise. `Connection.Shared` pools one connection per relay URL and reconnects with backoff, which the elements use.
-- **Discovery** by prefix (`origin.announced(prefix)`), and `origin.announce(prefix, provider)` to advertise a whole subtree served on demand.
+- **Origins** hold the broadcasts, not the connection: closing a session unannounces them but leaves them created for the next one. `origin.request(path)` prefers a local broadcast, so a page that watches what it publishes reads its own copy with no round trip. Create, attach `dynamic()` for tracks served on demand, populate, then `announce()`: an exact-path subscribe before the tracks exist is refused, and announcing only makes a path discoverable.
+- **Connections** race WebTransport against WebSocket and expose a `closed` promise. `new Connection({ url })` pools one connection per relay URL and reconnects with backoff, which the elements use.
+- **Discovery** by prefix (`origin.announced(prefix)`), and `origin.dynamic("live/**", route)` to advertise a subtree served on demand.
 - **Subscriptions** carry a priority and max age; groups arrive out of order and are read frame by frame, with `Lagged` when frames were evicted before you read them.
 - **Datagrams** on moq-lite 05+ and fetch-by-sequence for history.
 - **Errors** split by scope: a stream reset throws `StreamError` with a `StreamCode`, a session close gives `SessionError` with a `SessionCode`. The registries are disjoint, so the same number means different things in each, and 64+ is yours. Same on either transport. Named conditions like `Lagged` subclass `StreamError`, so one `code` check catches a gap whether it happened here or at the peer, and resetting a moq-lite stream with one sends that code rather than a bare internal error. IETF streams use their own mapping: cancellation sends CANCELLED, other local failures send INTERNAL\_ERROR, and received codes remain opaque.

@@ -27,8 +27,8 @@ The rest of #2318 landed: SETUP role (`js/net/src/lite/setup.ts:19-93`), typed
 `SessionError` and `StreamError` with code registries
 (`js/net/src/error.ts:15-236`), `startAt` and `endAt` (`track.ts:1034`,
 `:1043`), `latest()` (`:979`), `payload` on every frame type, and the dead
-`SubscribeOptions` export is gone. A producer-side prefix announce is
-[JS announce](/quest/m1/js-announce.md).
+`SubscribeOptions` export is gone. The producer-side prefix announce
+(`createBroadcast`, `announce(route)`, `dynamic(pattern, route)`) landed.
 
 ## Required
 

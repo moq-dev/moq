@@ -266,7 +266,7 @@ mod tests {
 		};
 
 		let track = broadcast.track(name.as_str()).unwrap().subscribe(None).await.unwrap();
-		let mut reader = moq_mux::container::Consumer::new(track, Container::Legacy);
+		let mut reader = moq_mux::container::Consumer::new(track, Container::Legacy(moq_mux::container::Kind::Data));
 		let cue = timeout(Duration::from_secs(5), reader.read())
 			.await
 			.expect("cue read timed out")
@@ -314,7 +314,7 @@ mod tests {
 			})
 			.expect("SRT egress preserves the SCTE-35 track");
 		let track = roundtrip_consumer.track(name).unwrap().subscribe(None).await.unwrap();
-		let mut reader = moq_mux::container::Consumer::new(track, Container::Legacy);
+		let mut reader = moq_mux::container::Consumer::new(track, Container::Legacy(moq_mux::container::Kind::Data));
 		let cue = timeout(Duration::from_secs(5), reader.read())
 			.await
 			.expect("round-trip cue read timed out")

@@ -70,9 +70,9 @@ The framing is where the guarantee lives, not the subscription flags:
 - The two delivery classes, as `moq-json`'s snapshot and stream modes with
   the group structure and `Info::latency_max` each one needs.
 - Per-stage timestamp instrumentation, generalised from moq-boy's `status`
-  track. Check it against the publisher-reported stats track
-  ([publisher-stats](/quest/m2/qos/publisher-stats.md), moq#2734) before adding
-  a second stats surface. Capability only: publishing a competitive benchmark
+  track. Check it against the publisher-reported stats broadcast
+  ([client stats](/quest/m2/qos/stats/schema.md), moq#2734) before adding a
+  second stats surface. Capability only: publishing a competitive benchmark
   is out of scope, because Transitive's breakdown puts camera plus USB at
   roughly 100 ms of a 130 ms glass-to-glass total, so we would mostly be
   measuring somebody's webcam.

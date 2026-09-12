@@ -23,13 +23,32 @@ targeting a `0.0.x` crate.
 
 ## Quests
 
+- [Audio jitter target](/quest/m2/audio-jitter-target/README.md) - the audio playout target is a measured estimate of arrival timing in both languages, not a round-trip guess
+- [Jitter clock](/quest/m2/jitter-flush-clock.md) - moq-mux: catalog jitter measures how far behind the media clock an encoder flushes, fed by encoders only, and never decreases
+- [Capture denial](/quest/m2/browser-permission-qa.md) - moq-publish surfaces a refused camera or microphone instead of retrying forever, and recovers on grant
+- [Publisher audio unlock](/quest/m2/publish-audio-unlock.md) - the publisher's capture AudioContext is resumed on a gesture or the source is refused, so no silent audio track is announced
+- [IETF leftovers](/quest/m2/ietf-leftovers.md) - moq-net: the 0x21 priority property, a NOT_SUPPORTED reply to TRACK_STATUS, and the two FETCH refusal codes come from the registry
+- [FFI WebSocket fallback](/quest/m2/ffi-websocket-fallback.md) - moq-ffi and every wrapper can disable or delay the WebSocket fallback
+- [Play tune-in backpressure](/quest/m2/play-tunein-backpressure.md) - moq play: a tune-in burst larger than the video queue parks the decoder, so the clock never reaches live at a wide `--delay`
+- [Play audio rendition gap](/quest/m2/play-audio-rendition-gap.md) - moq play: a retired audio rendition drains its sink before the replacement fills one, so the switch costs a `--delay` of silence
+- [Archive](/quest/m2/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS, on the catalog and store the release ships
+- [Wildcard](/quest/m2/wildcard/README.md) - a relay resolves subscriptions against advertised patterns and the browser player treats a covering pattern as availability
+- [#2152](/quest/m2/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - libmoq serves tracks on demand and accepts sessions, the two moq-ffi calls C still lacks
+- [Route cold cost](/quest/m2/route-cold-cost.md) - MoqRoute carries warm and cold, so an observed route re-announces intact
+- [js/publish discontinuity](/quest/m2/js-publish-discontinuity.md) - the JS container producer and js/publish emit the same marker group on encoder restart
+- [Failure artifacts](/quest/m2/qa-failure-artifacts.md) - a failing harness run keeps its run directory and a Playwright trace, and CI uploads them
+- [Listening kind field](/quest/m2/harness-drive-bys.md) - revert the relay's `kind` field on the listening log lines; nothing reads it
+- [Impaired path](/quest/m2/transport-impairment-profile.md) - the transport drills run over a seeded, impaired UDP path on any host
+- [Tooling](/quest/m2/tooling/README.md) - justfiles become a one-line menu over `sh/`, one impact map scopes CI, and every workflow step runs a recipe
 - [Generation](/quest/m2/hls-generation.md) - init URLs follow the rendition config and segment URLs carry an embedder-supplied generation, so caching can be re-enabled
+- [Catalog track identity](/quest/m2/catalog-tracks.md) - explore immutable track definitions versus explicit catalog-to-group version binding for live and recorded playback
 - [Path patterns](/quest/m2/path-patterns/README.md) - one versioned matcher for every predicate over broadcast paths: tokens, origins, interest
 - [In-band auth](/quest/m2/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish
+- [Auth API](/quest/m2/auth-api/README.md) - the relay's auth endpoint names mTLS peers, scopes them explicitly on v1, moves a tier in place, and says once when revalidation is off
 - [OBS native codecs](/quest/m2/obs-moq-video/README.md) - remove FFmpeg decoding dependencies, deliver GPU frames, and use native audio/video encoders
 - [Audio codecs](/quest/m2/audio-codecs/README.md) - a broadcast that plays in the browser plays natively: platform decoders and encoders behind a backend seam, HE-AAC, and channel layouts up to 7.1
 - [Keyframe trigger](/quest/m2/keyframe-trigger.md) - an application can ask the built-in capture encoder for a keyframe
-- [QoS](/quest/m2/qos/README.md) - broadcast health from the relay: viewer starvation and publisher timeliness histograms, publisher stats, viewer feedback
+- [QoS](/quest/m2/qos/README.md) - broadcast health: relay starvation and timeliness histograms, and client stats broadcasts from publishers and viewers
 - [Drain](/quest/m2/drain/README.md) - relay restarts drain sessions over GOAWAY instead of hard-dropping them
 - [Custom QUIC](/quest/m2/quic/README.md) - noq as the upstream for per-stream
   ACK progress, reliable reset, hierarchical scheduling, and qmux
@@ -41,6 +60,8 @@ targeting a `0.0.x` crate.
 - [Bandwidth estimate release](/quest/m2/web-transport-bandwidth-estimate.md) - web-transport-quinn reports quinn's BBR bandwidth estimate and ships a release carrying it
 - [#2847](/quest/m2/2847-the-quinn-backends-send-bandwidth-estimate-is-cwnd-rtt.md) - quinn backend: bump to the releases that report the controller bandwidth estimate instead of cwnd/rtt
 - [Safari WebTransport](/quest/m2/safari-webtransport.md) - WebKit browsers return to WebTransport once WebKit 319818 ships fixed
+- [Audio quality harness](/quest/m2/audio-quality-harness/README.md) - a playout latency regression fails a run instead of arriving as a bug report
+- [Latency ledger](/quest/m2/latency-ledger.md) - a session reports where its end-to-end audio delay went, stage by stage
 - [Benchmark comparisons](/quest/m2/performance-comparisons.md) - retained evidence, repeated paired runs, and uncertainty for performance claims
 - [#3126](/quest/m2/3126-moq-bench-every-readme-example-fails-to-parse-and.md) - moq-bench reports per-interval latency percentiles so the ramp leaves the steady state
 - [Relay profiling](/quest/m2/performance-profiles.md) - reproducible CPU and allocation captures under the existing workloads
@@ -90,6 +111,7 @@ targeting a `0.0.x` crate.
 - [AV1 metadata OBUs](/quest/m2/av1-metadata.md) - HDR10+, timecode and scalability OBUs become addressable
 - [FLV script tags](/quest/m2/flv-script.md) - onMetaData and AMF data messages survive RTMP and FLV import
 - [Mobile](/quest/m2/mobile/README.md) - MoQ runs natively on iOS and Android: an FFI video consumer, the ownership decision, capture, and the Dart device proof
+- [Compressed tracks](/quest/m2/flate/README.md) - any track compresses per group from every language, not only the JSON modes
 - [VAAPI encode and decode](/quest/m2/video-vaapi.md) - DMA-BUF encode, H.265 decode, and pre-generated bindings that remove the libclang build dependency, all gated on a moq-dev/vaapi release
 - [Dart leaks](/quest/m2/dart-leak.md) - the generated Dart bindings leak native memory on every call
 - [Dart publish](/quest/m2/dart-publish.md) - the packages are built and dry-run clean but exist nowhere consumers can install from
@@ -100,7 +122,8 @@ targeting a `0.0.x` crate.
 - [#2907](/quest/m2/2907-bind-the-browser-through-moq-ffi-uniffi-instead-of-a.md) - Bind the browser through moq-ffi/UniFFI instead of a second hand-written wasm API
 - [#2850](/quest/m2/2850-js-net-give-reader-a-synchronous-decode-so-the-publisher.md) - js/net: decode messages synchronously from buffered bytes and delete the publisher read-ahead queue (dev)
 - [Cluster flags](/quest/m2/cluster-flags.md) - a discovery mechanism carries its own prerequisites, so an incomplete cluster config cannot be expressed
-- [Revalidation updates](/quest/m2/revalidation-updates.md) - an auth re-check moves the tier in place and names an alias change when it closes the session
+- [`moq relay`](/quest/m2/moq-relay-subcommand.md) - the relay runs under a `moq` verb with its own flags and TOML, while `moq-relay` stays a minimal binary
+- [`moq` serves like a relay](/quest/m2/cli-serve.md) - a `moq --listen` session is authenticated, scoped, counted, and drained like a relay's; the relay is `moq` listening by default
 - [#3137](/quest/m2/3137-moqsrc-bound-the-pending-rendition-subscriptions-a.md) - moqsrc: bound the pending rendition subscriptions a catalog can open
 - [#3115](/quest/m2/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink: a flushing restart after EOS opens a new publication generation
 - [#709](/quest/m2/709-automatic-letsencrypt-support.md) - the relay provisions and renews its own ACME certificate over HTTP-01, persisted on disk
@@ -108,7 +131,6 @@ targeting a `0.0.x` crate.
 - [Runtime QA hosts](/quest/m2/runtime-qa-hosts.md) - run exact source snapshots on accessible Linux and device hosts with retrievable debug evidence
 - [Media QA on other engines](/quest/m2/browser-media-qa-engines.md) - the media harness measures a Firefox or WebKit player over the fallback and names what each engine lacks
 - [LiveKit shim](/quest/m2/livekit-shim.md) - a drop-in livekit-client-compatible package running rooms over MoQ
-- [#3087](/quest/m2/3087-relay-mtls-peers-bypass-auth-api-mode-so-proxy-grants.md) - relay: mTLS peers bypass the auth API mode, so a proxy grant cannot refuse or scope them
 - [#1310](/quest/m2/1310-why-use-the-worklet-plugin.md) - why use the worklet plugin?
 - [Ship capture and playback](/quest/m2/cli-packaging.md) - a released moq binary can capture and play, which no distribution currently enables
 - [Windows capture parity](/quest/m2/capture-windows.md) - window, app, system-audio and cursor capture on Windows

@@ -2,7 +2,7 @@
  * Publishing the broadcast's timeline: a single track carrying one record per aligned
  * segment, mapping a span of content time to the group ranges that carry it on each media
  * track. A consumer can seek (or build an HLS/DASH playlist) without downloading the media.
- * See the catalog's root {@link Catalog.Timeline} section that advertises it.
+ * See the catalog's root {@link Catalog.Archive} entry that advertises it.
  *
  * Facts flow up and policy flows down, meeting in the shared {@link Producer}: each continuous
  * media track enrolls with {@link Producer.pacingTrack} and reports every group open through its
@@ -63,7 +63,7 @@ const CHECKPOINT_RECORDS = 256;
 /**
  * The conventional name for a broadcast's timeline track (the `.z` marks the
  * DEFLATE-compressed window, like the catalog's `.json.z` sibling). The actual name is read
- * from the catalog's root `timeline` section, so this is only a default.
+ * from the catalog's root `archive` entry, so this is only a default.
  */
 export const DEFAULT_NAME = "timeline.z";
 
@@ -128,7 +128,7 @@ interface TrackState {
  * One per broadcast. Tracks enroll with {@link track}; continuous media explicitly opts into
  * segmentation through {@link pacingTrack}. Both report group opens through the returned
  * {@link Recorder}. An application with its own boundaries overrides pacing with {@link cut}.
- * Advertise it in the catalog's root `timeline` section via {@link section}.
+ * Advertise it in the catalog's root `archive` entry via {@link section}.
  */
 export class Producer {
 	#window: Json.Window.Producer<Record>;
@@ -251,8 +251,8 @@ export class Producer {
 		};
 	}
 
-	/** The catalog's root section advertising this timeline. */
-	section(): Catalog.Timeline {
+	/** The catalog's root `archive` entry advertising this timeline. */
+	section(): Catalog.Archive {
 		const durationMax =
 			this.#durationMaxUs === undefined
 				? undefined

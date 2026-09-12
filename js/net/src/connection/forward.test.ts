@@ -80,6 +80,7 @@ test("a discovery failure under a live session downgrades the origin", async () 
 	// A watcher gated on the announcement is live on that route.
 	const watched = new Announce.Broadcast({ origin, path });
 	await settle();
+	await settle();
 	expect(watched.active.peek()).toBeDefined();
 
 	// The relay resets the announce stream but keeps the session: a subscriber is allowed to

@@ -28,7 +28,12 @@ const WIRE_VERSION: qmux::Version = qmux::Version::QMux01;
 #[non_exhaustive]
 pub struct Config {
 	/// Bind a plaintext qmux TCP listener on this address.
-	#[usage(long = "listen-tcp-bind", name = "listen-tcp-bind", env = "MOQ_LISTEN_TCP_BIND")]
+	#[usage(
+		long = "listen-tcp-bind",
+		name = "listen-tcp-bind",
+		env = "MOQ_LISTEN_TCP_BIND",
+		setting = "listen.tcp.bind"
+	)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub bind: Option<net::SocketAddr>,
 
@@ -56,6 +61,11 @@ pub(crate) struct Legacy {
 }
 
 impl Config {
+	/// Hidden CLI-only fields a TOML round-trip would drop.
+	pub fn keep_parse_only(&mut self, from: &Self) {
+		self.legacy = from.legacy.clone();
+	}
+
 	/// The released spelling, if in use, paired with what replaced it. Reached
 	/// through [`crate::listen::Config::deprecated`].
 	pub(crate) fn deprecated(&self) -> crate::Deprecated {
@@ -302,6 +312,7 @@ mod legacy_tests {
 	use super::*;
 	#[derive(usage::Cli)]
 	#[usage(unknown_flags = "error", args_override_self = false)]
+	#[usage(settings)]
 	struct Cli {
 		#[usage(flatten)]
 		tcp: Config,

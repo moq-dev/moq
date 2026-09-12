@@ -4,7 +4,6 @@ import {
 	FrameTooLarge,
 	fromClose,
 	fromTransport,
-	isCancel,
 	Lagged,
 	NotFound,
 	ProtocolViolation,
@@ -16,6 +15,7 @@ import {
 	toStreamCode,
 	toTransport,
 } from "./error.ts";
+import { Version } from "./ietf/version.ts";
 import { TimeoutError } from "./util/timeout.ts";
 
 // Stand-in for the current WebTransportError constructor, which the test runtime may not define.
@@ -201,15 +201,6 @@ test("fromClose: a clean close is null, a coded close keeps its code", () => {
 
 // The two registries are wire contracts (draft-lcurley-moq-lite, Error Codes) and must match
 // the Rust tables, since the two implementations talk to each other.
-test("isCancel is the code, not the message", () => {
-	expect(isCancel(new StreamError(StreamCode.Cancel))).toBe(true);
-	expect(isCancel(new StreamError(StreamCode.Cancel, { message: "unsubscribed" }))).toBe(true);
-	expect(isCancel(new Error("cancel"))).toBe(false);
-	expect(isCancel(new StreamError(StreamCode.Internal, { message: "cancel" }))).toBe(false);
-	expect(isCancel(new SessionError(SessionCode.Cancel))).toBe(false);
-	expect(isCancel(null)).toBe(false);
-});
-
 test("the code tables match the spec", () => {
 	// moq-transport's, reused unchanged.
 	expect(Number(SessionCode.Cancel)).toBe(0x0);
@@ -225,28 +216,29 @@ test("the code tables match the spec", () => {
 		expect(code).toBeLessThan(32);
 	}
 
-	// The stream table adds the reserved-range placeholders this implementation sends, and
-	// nothing else lands there: 32-63 carries no meaning the draft publishes, so a code we
-	// put in it is an agreement with our own Rust implementation rather than a spec value.
-	const placeholders: StreamCode[] = [
-		StreamCode.NotFound,
-		StreamCode.Old,
-		StreamCode.Evicted,
-		StreamCode.FrameTooLarge,
-	];
+	// The stream table adds moq-lite's own 48-63 assignments and the reserved 32-47
+	// placeholders this implementation still sends. 32-47 carries no meaning the draft
+	// publishes, so a code we put in it is an agreement with our own Rust implementation
+	// rather than a spec value.
+	const assignedLite: StreamCode[] = [StreamCode.NoCapacity, StreamCode.NotFound, StreamCode.Old, StreamCode.Evicted];
+	const placeholders: StreamCode[] = [StreamCode.FrameTooLarge];
 	for (const code of Object.values(StreamCode)) {
-		if (placeholders.includes(code)) {
-			expect(code).toBeGreaterThanOrEqual(32);
+		if (assignedLite.includes(code)) {
+			expect(code).toBeGreaterThanOrEqual(48);
 			expect(code).toBeLessThan(64);
+		} else if (placeholders.includes(code)) {
+			expect(code).toBeGreaterThanOrEqual(32);
+			expect(code).toBeLessThan(48);
 		} else {
 			expect(code).toBeLessThan(32);
 		}
 	}
 	// The values the Rust `StreamError` sends for the same conditions.
-	expect(Number(StreamCode.NotFound)).toBe(0x20);
-	expect(Number(StreamCode.Old)).toBe(0x22);
-	expect(Number(StreamCode.Evicted)).toBe(0x23);
+	expect(Number(StreamCode.NotFound)).toBe(0x33);
+	expect(Number(StreamCode.Old)).toBe(0x34);
+	expect(Number(StreamCode.Evicted)).toBe(0x35);
 	expect(Number(StreamCode.FrameTooLarge)).toBe(0x25);
+	expect(Number(StreamCode.NoCapacity)).toBe(0x30);
 
 	// The spaces are disjoint: 0 ends a session cleanly but fails a stream.
 	expect(Number(SessionCode.Cancel)).not.toBe(Number(StreamCode.Cancel));
@@ -331,6 +323,10 @@ test("toStreamCode and fromTransport agree on what a code means", () => {
 		StreamCode.GoingAway,
 		StreamCode.TooFarBehind,
 		StreamCode.MalformedTrack,
+		StreamCode.NoCapacity,
+		StreamCode.NotFound,
+		StreamCode.Old,
+		StreamCode.Evicted,
 		StreamCode(70),
 	]) {
 		expect(toStreamCode(fromTransport(toTransport(code, "reset")))).toBe(code);
@@ -339,4 +335,10 @@ test("toStreamCode and fromTransport agree on what a code means", () => {
 	// A gap is one class whichever side it happened on, so a `catch` needs only one check.
 	expect(fromTransport(toTransport(StreamCode.TooFarBehind, "lagged"))).toBeInstanceOf(Lagged);
 	expect(new Lagged()).toBeInstanceOf(StreamError);
+});
+
+test("toStreamCode: lite-only cache-miss codes do not reach an IETF peer", () => {
+	for (const code of [StreamCode.NotFound, StreamCode.Old, StreamCode.Evicted]) {
+		expect(toStreamCode(new StreamError(code), { version: Version.DRAFT_20 })).toBe(StreamCode.Internal);
+	}
 });

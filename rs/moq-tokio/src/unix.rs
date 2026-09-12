@@ -27,7 +27,12 @@ const WIRE_VERSION: qmux::Version = qmux::Version::QMux01;
 #[non_exhaustive]
 pub struct Config {
 	/// Bind a plaintext qmux Unix-socket listener at this path.
-	#[usage(long = "listen-unix-bind", name = "listen-unix-bind", env = "MOQ_LISTEN_UNIX_BIND")]
+	#[usage(
+		long = "listen-unix-bind",
+		name = "listen-unix-bind",
+		env = "MOQ_LISTEN_UNIX_BIND",
+		setting = "listen.unix.bind"
+	)]
 	#[usage(value_hint = usage::ValueHint::AnyPath)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub bind: Option<PathBuf>,
@@ -89,6 +94,11 @@ pub(crate) struct Legacy {
 }
 
 impl Config {
+	/// Hidden CLI-only fields a TOML round-trip would drop.
+	pub fn keep_parse_only(&mut self, from: &Self) {
+		self.legacy = from.legacy.clone();
+	}
+
 	/// The released spellings in use, each paired with what replaced it. Reached
 	/// through [`crate::listen::Config::deprecated`].
 	pub(crate) fn deprecated(&self) -> crate::Deprecated {
@@ -144,7 +154,8 @@ pub struct Allow {
 		long = "listen-unix-allow-uid",
 		name = "listen-unix-allow-uid",
 		env = "MOQ_LISTEN_UNIX_ALLOW_UID",
-		delimiter = ','
+		delimiter = ',',
+		setting = "listen.unix.allow.uid"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub uid: Vec<u32>,
@@ -154,7 +165,8 @@ pub struct Allow {
 		long = "listen-unix-allow-gid",
 		name = "listen-unix-allow-gid",
 		env = "MOQ_LISTEN_UNIX_ALLOW_GID",
-		delimiter = ','
+		delimiter = ',',
+		setting = "listen.unix.allow.gid"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub gid: Vec<u32>,
@@ -165,7 +177,8 @@ pub struct Allow {
 		long = "listen-unix-allow-pid",
 		name = "listen-unix-allow-pid",
 		env = "MOQ_LISTEN_UNIX_ALLOW_PID",
-		delimiter = ','
+		delimiter = ',',
+		setting = "listen.unix.allow.pid"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub pid: Vec<i32>,
@@ -387,6 +400,7 @@ mod legacy_tests {
 	use super::*;
 	#[derive(usage::Cli)]
 	#[usage(unknown_flags = "error", args_override_self = false)]
+	#[usage(settings)]
 	struct Cli {
 		#[usage(flatten)]
 		unix: Config,

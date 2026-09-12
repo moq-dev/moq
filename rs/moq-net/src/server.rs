@@ -1,7 +1,7 @@
 use crate::origin;
 use crate::{
-	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_20, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05,
-	ALPN_LITE_06_WIP, Consume, Error, NEGOTIATED, Role, Session, SessionError, Version, Versions,
+	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_20, ALPN_21, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04,
+	ALPN_LITE_05, ALPN_LITE_06_WIP, Consume, Error, NEGOTIATED, Role, Session, SessionError, Version, Versions,
 	coding::{Decode, Encode, Stream},
 	ietf, lite, setup, stats,
 };
@@ -266,29 +266,17 @@ impl Server {
 		R::Timer: MaybeSend,
 	{
 		let (encoding, supported) = match session.protocol() {
-			Some(ALPN_20) => {
-				self.versions
-					.select(Version::Ietf(ietf::Version::Draft20))
-					.ok_or(Error::Version)?;
-				return self.accept_ietf_modern(runtime, session, ietf::Version::Draft20).await;
-			}
-			Some(ALPN_19) => {
-				self.versions
-					.select(Version::Ietf(ietf::Version::Draft19))
-					.ok_or(Error::Version)?;
-				return self.accept_ietf_modern(runtime, session, ietf::Version::Draft19).await;
-			}
-			Some(ALPN_18) => {
-				self.versions
-					.select(Version::Ietf(ietf::Version::Draft18))
-					.ok_or(Error::Version)?;
-				return self.accept_ietf_modern(runtime, session, ietf::Version::Draft18).await;
-			}
-			Some(ALPN_17) => {
-				self.versions
-					.select(Version::Ietf(ietf::Version::Draft17))
-					.ok_or(Error::Version)?;
-				return self.accept_ietf_modern(runtime, session, ietf::Version::Draft17).await;
+			Some(alpn @ (ALPN_21 | ALPN_20 | ALPN_19 | ALPN_18 | ALPN_17)) => {
+				let draft = match alpn {
+					ALPN_21 => ietf::Version::Draft21,
+					ALPN_20 => ietf::Version::Draft20,
+					ALPN_19 => ietf::Version::Draft19,
+					ALPN_18 => ietf::Version::Draft18,
+					_ => ietf::Version::Draft17,
+				};
+
+				self.versions.select(Version::Ietf(draft)).ok_or(Error::Version)?;
+				return self.accept_ietf_modern(runtime, session, draft).await;
 			}
 			Some(ALPN_16) => {
 				let v = self

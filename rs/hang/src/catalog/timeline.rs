@@ -14,9 +14,10 @@ pub const MOQ_EPOCH_UNIX_MILLIS: u64 = 1_577_836_800_000;
 /// [`timeline`](crate::timeline) module for the record format). A consumer can seek, or build
 /// an HLS/DASH playlist, without downloading the media itself.
 ///
-/// The section lives at the catalog root ([`Catalog::timeline`](crate::Catalog)): there is one
-/// timeline per broadcast, because its whole point is that segments are aligned across the
-/// broadcast's tracks. A publisher that doesn't segment simply omits it.
+/// The section lives inside the catalog's root [`Archive`](crate::catalog::Archive) (flattened
+/// on the wire): there is one timeline per broadcast, because its whole point is that
+/// segments are aligned across the broadcast's tracks. A publisher that doesn't segment
+/// simply omits the archive entry.
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
