@@ -12,7 +12,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { constants, inflateRawSync } from "node:zlib";
+import { constants, deflateRawSync, inflateRawSync } from "node:zlib";
 
 export const PROFILE = "moq-e2ee-01";
 export const SALT = utf8("moq-e2ee-01");
@@ -329,13 +329,26 @@ async function payloadVector(
 	};
 }
 
+function deflateCatalog(json: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
+	const deflated = new Uint8Array(deflateRawSync(json, { finishFlush: constants.Z_SYNC_FLUSH }));
+	if (
+		deflated.length < 4 ||
+		deflated[deflated.length - 4] !== 0 ||
+		deflated[deflated.length - 3] !== 0 ||
+		deflated[deflated.length - 2] !== 255 ||
+		deflated[deflated.length - 1] !== 255
+	) {
+		throw new Error("missing DEFLATE sync-flush marker");
+	}
+	return deflated.subarray(0, deflated.length - 4);
+}
+
 async function generate() {
 	const base = cred();
-	const catalogJson = utf8('{"video":{"renditions":{"hd":{"codec":"avc1"}}}}');
-	// Raw DEFLATE of catalogJson with the trailing sync-flush marker omitted.
-	const catalogCompressed = unhex(
-		"aa562acb4c49cd57b2aa562a4acd4bc92cc9cccf2b06f132524064727e4a6ab29295526259b2a1522d100000",
-	);
+	const video = await deriveName(base, utf8("video"));
+	// Hang rendition-map keys are track names; a protected catalog advertises physical names.
+	const catalogJson = utf8(`{"video":{"renditions":{"${video.physicalName}":{"codec":"avc1"}}}}`);
+	const catalogCompressed = deflateCatalog(catalogJson);
 
 	const derivation = [
 		await derivationVector("group-video", base, "video", DOMAIN_GROUP),
@@ -399,7 +412,6 @@ async function generate() {
 		),
 	];
 
-	const video = await deriveName(base, utf8("video"));
 	const videoKey = await deriveKey(base, video.physicalName, DOMAIN_GROUP, video.prk);
 	const good = groups[0];
 	const flipped = unhex(String(good.payload));
@@ -640,6 +652,16 @@ async function verify(doc: Awaited<ReturnType<typeof generate>>): Promise<void> 
 		finishFlush: constants.Z_SYNC_FLUSH,
 	});
 	assertEqual("catalog decompression", hex(inflated), String(plain.plaintext));
+	const catalogObj = JSON.parse(new TextDecoder().decode(unhex(String(plain.plaintext)))) as {
+		video?: { renditions?: Record<string, unknown> };
+	};
+	const videoPhysical = doc.naming.find((row) => row.semantic_name === "video")?.physical_name;
+	const renditionKeys = Object.keys(catalogObj.video?.renditions ?? {});
+	if (videoPhysical === undefined || renditionKeys.length !== 1 || renditionKeys[0] !== videoPhysical) {
+		throw new Error(
+			`catalog rendition key ${JSON.stringify(renditionKeys)} != video physical name ${videoPhysical}`,
+		);
+	}
 
 	for (const row of doc.negative) {
 		await expectError(row.error, async () => {

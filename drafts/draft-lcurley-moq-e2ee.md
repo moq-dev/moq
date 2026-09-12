@@ -225,6 +225,7 @@ moq-lite datagram bodies MUST remain at most 1200 bytes including Subscribe ID, 
 ## Catalogs
 Every catalog representation is encrypted under this profile.
 Hang {{hang}} `catalog.json` and `catalog.json.z`, and MSF's `catalog` track, are semantic names; authorized clients derive those physical names from the credential, then learn the remaining opaque names from the decrypted catalog.
+A Hang rendition-map key in that catalog is the physical name of the track.
 
 If a representation is compressed, compression is applied to the catalog bytes before AEAD and reversed after decryption.
 Encrypting then compressing is forbidden: ciphertext does not compress, and the `.z` sibling would leak the uncompressed size ratio.
