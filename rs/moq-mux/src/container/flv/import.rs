@@ -21,6 +21,7 @@
 //! enhanced audio, and any other codec, are logged and dropped.
 
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
@@ -86,6 +87,8 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 struct VideoStream {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	config: VideoConfig,
+	stalled: hang::catalog::Stalled,
+	last_source: Option<Instant>,
 }
 
 /// The demuxed audio track plus its current catalog config.
@@ -178,6 +181,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 		}
 
+		self.tick_stalled()?;
 		Ok(())
 	}
 
@@ -450,13 +454,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		composition_time: i32,
 		keyframe: bool,
 	) -> anyhow::Result<()> {
-		let Some(stream) = self.video.get_mut(&track_id) else {
-			tracing::debug!("video frame before sequence header, dropping");
-			return Ok(());
-		};
-		// A media frame means every sequence header has arrived (FLV sends config before data), so
-		// the track set is declared; release the reservation to publish.
-		self.initial_reservation = None;
 		// FLV stores DTS in the tag; PTS is DTS plus the composition offset.
 		let pts_ms = (dts as i64) + (composition_time as i64);
 		if pts_ms < 0 {
@@ -466,15 +463,34 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 			.into());
 		}
-		match stream.track.write(Frame {
-			timestamp: Timestamp::from_millis(pts_ms as u64)?,
-			duration: None,
-			payload: Bytes::copy_from_slice(data),
-			keyframe,
-		}) {
-			Ok(()) | Err(crate::Error::MissingKeyframe(_)) => Ok(()),
-			Err(e) => Err(e.into()),
+		if !self.video.contains_key(&track_id) {
+			tracing::debug!("video frame before sequence header, dropping");
+			return Ok(());
 		}
+		// A media frame means every sequence header has arrived (FLV sends config before data), so
+		// the track set is declared; release the reservation to publish.
+		self.initial_reservation = None;
+		let timestamp = Timestamp::from_millis(pts_ms as u64)?;
+		let written = {
+			let stream = self.video.get_mut(&track_id).expect("checked above");
+			match stream.track.write(Frame {
+				timestamp,
+				duration: None,
+				payload: Bytes::copy_from_slice(data),
+				keyframe,
+			}) {
+				Ok(()) => {
+					stream.last_source = Some(Instant::now());
+					true
+				}
+				Err(crate::Error::MissingKeyframe(_)) => false,
+				Err(e) => return Err(e.into()),
+			}
+		};
+		if written {
+			self.publish_stalled(track_id, Duration::ZERO)?;
+		}
+		Ok(())
 	}
 
 	/// Write one audio frame as its own group, so the relay can forward it immediately.
@@ -518,6 +534,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				// site (the producer reports MissingKeyframe), so a mid-GOP join works.
 				track: media,
 				config,
+				stalled: hang::catalog::Stalled::new(),
+				last_source: None,
 			},
 		);
 		Ok(())
@@ -539,6 +557,42 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let media = self.catalog.media_producer(net_track, wire)?;
 		self.catalog.lock().audio.renditions.insert(name, config.clone());
 		self.audio.insert(track_id, AudioStream { track: media, config });
+		Ok(())
+	}
+
+	fn tick_stalled(&mut self) -> anyhow::Result<()> {
+		let ids: Vec<u8> = self.video.keys().copied().collect();
+		for id in ids {
+			self.publish_stalled(id, Duration::ZERO)?;
+		}
+		Ok(())
+	}
+
+	fn publish_stalled(&mut self, track_id: u8, extra_lag: Duration) -> anyhow::Result<()> {
+		let Some(stream) = self.video.get_mut(&track_id) else {
+			return Ok(());
+		};
+		let demand = stream.track.track().is_used();
+		let quiet = stream
+			.last_source
+			.map(|at| Instant::now().saturating_duration_since(at))
+			.unwrap_or(Duration::ZERO);
+		let interval = hang::catalog::stalled_interval_from_fps(stream.config.framerate);
+		if !stream.stalled.observe(hang::catalog::StalledSample {
+			media_lag: extra_lag,
+			quiet,
+			interval,
+			demand,
+			idle: false,
+		}) {
+			return Ok(());
+		}
+		let flag = stream.stalled.flag();
+		let name = stream.track.name().to_string();
+		let mut guard = self.catalog.lock();
+		if let Some(config) = guard.video.renditions.get_mut(&name) {
+			config.stalled = flag;
+		}
 		Ok(())
 	}
 

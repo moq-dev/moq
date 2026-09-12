@@ -169,6 +169,33 @@ impl<E: CatalogExt> Producer<E> {
 		Ok(())
 	}
 
+	/// Record extra delay (a slow encode) so the catalog `stalled` flag can follow it.
+	pub fn observe_lag(&mut self, lag: std::time::Duration) -> Result<(), Error> {
+		match &mut self.codecs {
+			Codecs::H264 { import, .. } => import.observe_lag(lag)?,
+			Codecs::H265 { import, .. } => import.observe_lag(lag)?,
+		}
+		Ok(())
+	}
+
+	/// Re-evaluate stall from source silence while waiting for the next frame.
+	pub fn tick(&mut self) -> Result<(), Error> {
+		match &mut self.codecs {
+			Codecs::H264 { import, .. } => import.tick()?,
+			Codecs::H265 { import, .. } => import.tick()?,
+		}
+		Ok(())
+	}
+
+	/// The camera is released; this rendition is never stalled while idle.
+	pub fn idle(&mut self) -> Result<(), Error> {
+		match &mut self.codecs {
+			Codecs::H264 { import, .. } => import.idle()?,
+			Codecs::H265 { import, .. } => import.idle()?,
+		}
+		Ok(())
+	}
+
 	/// Mark a break in the published timeline: whatever is published next does not continue
 	/// what came before.
 	///
@@ -479,6 +506,7 @@ async fn capture_loop<E: CatalogExt>(
 			// Race the next frame against the last viewer leaving so we release the
 			// camera promptly when demand drops. `biased` checks demand first so an
 			// unwatched track stops before reading another frame.
+			let interval = hang::catalog::stalled_interval_from_fps(Some(framerate as f64));
 			let frame = tokio::select! {
 				biased;
 				res = demand.unused() => {
@@ -496,7 +524,14 @@ async fn capture_loop<E: CatalogExt>(
 				}
 				// A read error is terminal for this selection (the source is gone
 				// or was refused); `None` just ends the stream, so reopen below.
-				frame = camera.read() => frame?,
+				// Timing out is a quiet camera: mark the rendition stalled and wait again.
+				frame = tokio::time::timeout(interval, camera.read()) => match frame {
+					Ok(frame) => frame?,
+					Err(_) => {
+						producer.tick()?;
+						continue;
+					}
+				},
 			};
 
 			let Some(surface) = frame else { break };
@@ -508,12 +543,17 @@ async fn capture_loop<E: CatalogExt>(
 				encoder.keyframe();
 				force_keyframe = false;
 			}
-			producer.publish(&encoder.encode(frame).await?)?;
+			let started = Instant::now();
+			let encoded = encoder.encode(frame).await?;
+			let lag = started.elapsed();
+			producer.publish(&encoded)?;
+			producer.observe_lag(lag)?;
 		}
 
 		// Drop the camera (LED off) and encoder before waiting for the next viewer.
 		drop(camera);
 		drop(encoder);
+		producer.idle()?;
 		capture_stopped(producer)?;
 		tracing::info!("capture stopped; released source");
 	}

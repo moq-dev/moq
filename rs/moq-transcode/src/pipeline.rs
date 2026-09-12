@@ -18,6 +18,15 @@ use std::collections::HashMap;
 
 use hang::catalog::{Video, VideoConfig};
 
+/// Picture identity for ladder follow: a stall bit flipping is not a source change.
+fn same_picture(a: &VideoConfig, b: &VideoConfig) -> bool {
+	let mut a = a.clone();
+	let mut b = b.clone();
+	a.stalled = None;
+	b.stalled = None;
+	a == b
+}
+
 use crate::catalog::{self, Names, Published};
 use crate::feed::Feed;
 use crate::{Config, Error, active, rung};
@@ -164,7 +173,8 @@ impl Pipeline {
 				return Ok(());
 			}
 		};
-		if name == self.name && rendition == self.rendition {
+		if name == self.name && same_picture(&rendition, &self.rendition) {
+			self.rendition = rendition;
 			return Ok(());
 		}
 

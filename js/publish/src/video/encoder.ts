@@ -15,6 +15,7 @@ import {
 import type { Broadcast } from "../broadcast";
 import { hardwareReliable } from "../support/video";
 import type { Capture } from "./capture";
+import { Detector, intervalFromFps } from "./stalled";
 import { normalizeSource, type Source } from "./types";
 
 /** Cumulative encoder output totals, measured from the chunks the encoder produces. */
@@ -141,6 +142,11 @@ export class Encoder {
 	#codecFilter: Computed<string>;
 
 	#signals = new Effect();
+	#stalled = new Detector();
+	#firstCaptured?: Time.Micro;
+	#lastCaptured?: Time.Micro;
+	#lastAccepted?: Time.Micro;
+	#lastCaptureWall?: number;
 
 	constructor(name: string, props?: EncoderProps) {
 		this.name = name;
@@ -177,7 +183,10 @@ export class Encoder {
 			const enabled = effect.get(this.in.enabled);
 			const track = effect.get(rendition.track);
 			effect.set(this.#out.active, enabled && !!track, false);
-			if (!enabled || !track) return;
+			if (!enabled || !track) {
+				this.#observe({ demand: false, idle: true });
+				return;
+			}
 
 			this.#encode(track, effect);
 		});
@@ -186,7 +195,10 @@ export class Encoder {
 	// Encode captured frames into the track producer, reconfiguring when the resolved config changes.
 	#encode(track: Moq.Track.Producer, effect: Effect): void {
 		const capture = effect.get(this.in.capture);
-		if (!capture) return;
+		if (!capture) {
+			this.#observe({ demand: true, idle: true });
+			return;
+		}
 
 		const producer = new Container.Legacy.Producer(track, new Container.Legacy.Format("video"));
 		effect.cleanup(() => producer.close());
@@ -209,6 +221,8 @@ export class Encoder {
 					}));
 
 					producer.encode(frame, frame.timestamp as Time.Micro, key);
+					this.#lastAccepted = frame.timestamp as Time.Micro;
+					this.#observe({ demand: true, idle: false });
 				},
 				error: (err: Error) => {
 					producer.close(err);
@@ -257,6 +271,11 @@ export class Encoder {
 								if (frame.timestamp - lastEncoded < minGap - minGap / 2) continue;
 							}
 							lastEncoded = frame.timestamp as Time.Micro;
+							const captured = frame.timestamp as Time.Micro;
+							this.#firstCaptured ??= captured;
+							this.#lastCaptured = captured;
+							this.#lastCaptureWall = performance.now();
+							this.#observe({ demand: true, idle: false });
 
 							const interval = config?.keyframeInterval ?? Time.Milli.fromSecond(2 as Time.Second);
 
@@ -275,6 +294,40 @@ export class Encoder {
 				});
 			});
 		});
+
+		effect.interval(() => this.#observe({ demand: true, idle: false }), 50);
+	}
+
+	#observe(state: { demand: boolean; idle: boolean }): void {
+		if (state.idle) {
+			this.#firstCaptured = undefined;
+			this.#lastCaptured = undefined;
+			this.#lastAccepted = undefined;
+			this.#lastCaptureWall = undefined;
+		}
+		const catalog = this.#out.catalog.peek();
+		const mediaLag = ((): Time.Micro => {
+			if (this.#lastCaptured === undefined || this.#firstCaptured === undefined) return 0 as Time.Micro;
+			const accepted = this.#lastAccepted ?? this.#firstCaptured;
+			return Math.max(0, this.#lastCaptured - accepted) as Time.Micro;
+		})();
+		const quiet =
+			this.#lastCaptureWall === undefined
+				? (0 as Time.Micro)
+				: Time.Micro.fromMilli((performance.now() - this.#lastCaptureWall) as Time.Milli);
+		if (
+			!this.#stalled.observe({
+				mediaLag,
+				quiet,
+				interval: intervalFromFps(catalog?.framerate ?? this.out.resolved.peek()?.framerate),
+				demand: state.demand,
+				idle: state.idle,
+			})
+		) {
+			return;
+		}
+		if (!catalog) return;
+		this.#out.catalog.set({ ...catalog, stalled: this.#stalled.flag() });
 	}
 
 	// Returns the catalog for the configured settings, or undefined while disabled / unresolved.
@@ -296,6 +349,7 @@ export class Encoder {
 			container: { kind: "legacy" } as const,
 			// Each frame is flushed immediately, so the jitter is one frame duration.
 			jitter: config.framerate ? Catalog.u53(Math.ceil(1000 / config.framerate)) : undefined,
+			stalled: this.#stalled.flag(),
 		};
 
 		effect.set(this.#out.catalog, catalog);

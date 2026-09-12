@@ -217,7 +217,14 @@ impl<E: CatalogExt> Import<E> {
 				}
 			}
 
+			let timestamp = frame.timestamp;
 			self.track.write(frame)?;
+			self.catalog.on_frame(
+				&mut self.rendition,
+				timestamp,
+				self.track.track().is_used(),
+				std::time::Duration::ZERO,
+			)?;
 		}
 
 		self.estimate()?;
@@ -228,6 +235,22 @@ impl<E: CatalogExt> Import<E> {
 	/// inline SPS and refining the catalog jitter as it goes.
 	pub fn decode(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		self.write_frames(frames)
+	}
+
+	/// Re-evaluate stall from source silence.
+	pub fn tick(&mut self) -> crate::Result<()> {
+		self.catalog.tick(&mut self.rendition, self.track.track().is_used())
+	}
+
+	/// The source is gone; this rendition is never stalled while idle.
+	pub fn idle(&mut self) -> crate::Result<()> {
+		self.catalog.idle(&mut self.rendition)
+	}
+
+	/// Record extra delay (a slow encode) on top of the last accepted frame.
+	pub fn observe_lag(&mut self, lag: std::time::Duration) -> crate::Result<()> {
+		self.catalog
+			.observe_lag(&mut self.rendition, self.track.track().is_used(), lag)
 	}
 }
 
@@ -466,6 +489,50 @@ mod tests {
 		assert!(
 			catalog.snapshot().video.renditions.is_empty(),
 			"no config yet, so no catalog"
+		);
+	}
+
+	/// Encode lag past a few frame intervals marks the rendition stalled, and
+	/// releasing the source clears it. Demand is required; an idle import is not stalled.
+	#[tokio::test(start_paused = true)]
+	async fn encode_lag_marks_the_rendition_stalled() {
+		let sps: &[u8] = &[
+			0x67, 0x42, 0xc0, 0x1f, 0xda, 0x01, 0x40, 0x16, 0xe9, 0xb8, 0x08, 0x08, 0x0a, 0x00, 0x00, 0x07, 0xd0, 0x00,
+			0x01, 0xd4, 0xc0, 0x80,
+		];
+		let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
+		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+		let mut annexb = BytesMut::new();
+		for nal in [sps, pps, idr] {
+			annexb.extend_from_slice(&[0, 0, 0, 1]);
+			annexb.extend_from_slice(nal);
+		}
+
+		let mut split = Split::new();
+		let (track, catalog) = setup("video");
+		let _demand = track.subscribe(None);
+		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+		let pts = moq_net::Timestamp::from_micros(0).unwrap();
+		let mut frames = split.decode(&annexb, pts).expect("split keyframe");
+		frames.extend(split.flush(pts).expect("flush keyframe"));
+		import.decode(frames).expect("decode keyframe");
+		assert_eq!(
+			catalog.snapshot().video.renditions.get("video").and_then(|c| c.stalled),
+			None
+		);
+
+		import
+			.observe_lag(std::time::Duration::from_millis(200))
+			.expect("observe lag");
+		assert_eq!(
+			catalog.snapshot().video.renditions.get("video").and_then(|c| c.stalled),
+			Some(true)
+		);
+
+		import.idle().expect("idle");
+		assert_eq!(
+			catalog.snapshot().video.renditions.get("video").and_then(|c| c.stalled),
+			None
 		);
 	}
 }

@@ -217,11 +217,34 @@ impl<E: CatalogExt> Import<E> {
 
 			// A pre-keyframe delta has no group to anchor it: the producer returns
 			// MissingKeyframe, which the caller (e.g. a TS mid-stream join) skips.
+			let timestamp = frame.timestamp;
 			self.track.write(frame)?;
+			self.catalog.on_frame(
+				&mut self.rendition,
+				timestamp,
+				self.track.track().is_used(),
+				std::time::Duration::ZERO,
+			)?;
 		}
 
 		self.estimate()?;
 		Ok(())
+	}
+
+	/// Re-evaluate stall from source silence.
+	pub fn tick(&mut self) -> crate::Result<()> {
+		self.catalog.tick(&mut self.rendition, self.track.track().is_used())
+	}
+
+	/// The source is gone; this rendition is never stalled while idle.
+	pub fn idle(&mut self) -> crate::Result<()> {
+		self.catalog.idle(&mut self.rendition)
+	}
+
+	/// Record extra delay (a slow encode) on top of the last accepted frame.
+	pub fn observe_lag(&mut self, lag: std::time::Duration) -> crate::Result<()> {
+		self.catalog
+			.observe_lag(&mut self.rendition, self.track.track().is_used(), lag)
 	}
 
 	/// Publish split frames, resolving the config from the first keyframe's inline

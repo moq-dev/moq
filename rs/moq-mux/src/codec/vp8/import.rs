@@ -95,9 +95,31 @@ impl<E: CatalogExt> Import<E> {
 			keyframe: header.keyframe,
 			duration: None,
 		})?;
+		self.catalog.on_frame(
+			&mut self.rendition,
+			pts,
+			self.track.track().is_used(),
+			std::time::Duration::ZERO,
+		)?;
 		self.estimate()?;
 
 		Ok(())
+	}
+
+	/// Re-evaluate stall from source silence.
+	pub fn tick(&mut self) -> crate::Result<()> {
+		self.catalog.tick(&mut self.rendition, self.track.track().is_used())
+	}
+
+	/// The source is gone; this rendition is never stalled while idle.
+	pub fn idle(&mut self) -> crate::Result<()> {
+		self.catalog.idle(&mut self.rendition)
+	}
+
+	/// Record extra delay (a slow encode) on top of the last accepted frame.
+	pub fn observe_lag(&mut self, lag: std::time::Duration) -> crate::Result<()> {
+		self.catalog
+			.observe_lag(&mut self.rendition, self.track.track().is_used(), lag)
 	}
 
 	/// A watch-only handle to this track's subscriber demand.

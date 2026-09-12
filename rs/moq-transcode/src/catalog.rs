@@ -223,8 +223,20 @@ pub(crate) fn populate(
 	out.video.rotation = source.video.rotation;
 	out.video.flip = source.video.flip;
 
+	// A rung cannot be healthier than its input: inherit a stalled source onto
+	// every derived rendition so a viewer switches away from the whole ladder.
+	let inherited = source
+		.video
+		.renditions
+		.values()
+		.any(|config| config.broadcast.is_none() && config.stalled == Some(true));
+
 	for published in rungs {
-		out.video.insert(&published.rung.name, published.entry.clone())?;
+		let mut entry = published.entry.clone();
+		if inherited {
+			entry.stalled = Some(true);
+		}
+		out.video.insert(&published.rung.name, entry)?;
 	}
 
 	let Some(rel) = source_rel else {
@@ -277,6 +289,32 @@ mod tests {
 		config.bitrate = bitrate;
 		config.framerate = Some(30.0);
 		config
+	}
+
+	#[test]
+	fn rungs_inherit_a_stalled_source() {
+		let mut source_catalog = moq_mux::catalog::hang::Catalog::default();
+		let mut src = source(1280, 720, Some(2_500_000));
+		src.stalled = Some(true);
+		source_catalog.video.insert("video", src).unwrap();
+
+		let published = [Published {
+			rung: Resolved {
+				name: "video/360p".into(),
+				height: 360,
+				size: moq_video::Size::new(640, 360),
+				bitrate: moq_net::bandwidth::Rate::from_bps(600_000),
+				framerate: 30,
+			},
+			entry: source(640, 360, Some(600_000)),
+		}];
+
+		let mut out = moq_mux::catalog::hang::Catalog::default();
+		populate(&mut out, &source_catalog, &published, None).unwrap();
+		assert_eq!(
+			out.video.renditions.get("video/360p").and_then(|c| c.stalled),
+			Some(true)
+		);
 	}
 
 	#[test]

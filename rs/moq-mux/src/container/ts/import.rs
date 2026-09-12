@@ -338,6 +338,10 @@ impl<E: catalog::Catalog> Import<E> {
 		// decode call (plus the store's own host-clock debounce) coalesces a junction's
 		// burst of sub-table commits into few groups instead of one per commit.
 		self.si.flush(self.last_pts.unwrap_or(Timestamp::ZERO), false)?;
+		// Video PIDs that went quiet while the mux kept flowing mark themselves stalled.
+		for stream in self.streams.values_mut() {
+			stream.tick()?;
+		}
 		Ok(())
 	}
 
@@ -1493,6 +1497,20 @@ impl<E: catalog::Catalog> Stream<E> {
 	/// the cut are whole and correct on their own. False where it carries exactly one: half
 	/// an access unit is a picture with missing slices, and half a keyframe stays wrong for
 	/// every picture that references it. Verbatim payloads are all-or-nothing the same way.
+	fn tick(&mut self) -> anyhow::Result<()> {
+		match self {
+			Stream::H264 { import, .. } => import.tick()?,
+			Stream::H265 { import, .. } => import.tick()?,
+			Stream::Aac(_)
+			| Stream::Opus(_)
+			| Stream::Legacy(_)
+			| Stream::Verbatim(_)
+			| Stream::Clock
+			| Stream::Ignored => {}
+		}
+		Ok(())
+	}
+
 	fn salvages_partial_pes(&self) -> bool {
 		match self {
 			Stream::Aac(_) | Stream::Legacy(_) => true,

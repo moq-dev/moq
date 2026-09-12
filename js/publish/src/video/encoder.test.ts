@@ -367,3 +367,110 @@ test("frame sources retain their dimensions and nominal frame rate", async () =>
 		await frames.cancel();
 	}
 });
+
+test("a throttled encoder marks its rendition stalled", async () => {
+	class DelayedVideoEncoder {
+		static probes = 0;
+		state: CodecState = "unconfigured";
+		#output: EncodedVideoCallback;
+
+		constructor(init: VideoEncoderInit) {
+			this.#output = init.output;
+		}
+
+		static async isConfigSupported(config: VideoEncoderConfig): Promise<{ supported: boolean }> {
+			DelayedVideoEncoder.probes++;
+			return { supported: config.codec.startsWith("avc1") };
+		}
+
+		configure(): void {
+			this.state = "configured";
+		}
+
+		encode(): void {
+			// Hold the output: a throttled encoder never hands frames to the session.
+		}
+
+		close(): void {
+			this.state = "closed";
+			void this.#output;
+		}
+	}
+
+	const original = Object.getOwnPropertyDescriptor(globalThis, "VideoEncoder");
+	Object.defineProperty(globalThis, "VideoEncoder", {
+		configurable: true,
+		value: DelayedVideoEncoder,
+		writable: true,
+	});
+
+	class Frame {
+		codedWidth = 640;
+		codedHeight = 480;
+		timestamp: number;
+		closed = false;
+		constructor(timestamp: number) {
+			this.timestamp = timestamp;
+		}
+		clone(): Frame {
+			return new Frame(this.timestamp);
+		}
+		close(): void {
+			this.closed = true;
+		}
+	}
+
+	const { Fanout } = await import("../fanout");
+	let controller!: ReadableStreamDefaultController<VideoFrame>;
+	const stream = new ReadableStream<VideoFrame>({
+		start: (c) => {
+			controller = c;
+		},
+	});
+	const fanout = new Fanout(stream, {
+		clone: (frame) => frame.clone(),
+		release: (frame) => frame.close(),
+	});
+
+	const track = new Moq.Track.Producer("video/hd").accept();
+	const rendition = {
+		config: new Signal(undefined),
+		track: new Signal<Moq.Track.Producer | undefined>(track),
+		close: () => track.close(),
+	};
+	const capture = {
+		in: {
+			source: new Signal({
+				getSettings: () => ({ frameRate: 30 }),
+				getConstraints: () => ({}),
+			} as never),
+		},
+		out: {
+			display: new Signal({ width: 640, height: 480 }),
+			frames: new Signal(fanout),
+		},
+	};
+	const encoder = new Encoder("video/hd", {
+		enabled: true,
+		broadcast: { video: () => rendition } as never,
+		capture: capture as never,
+	});
+
+	try {
+		await settle();
+		expect(encoder.out.catalog.peek()?.stalled).toBeUndefined();
+
+		// Four frames at 30fps is more than three frame intervals of unaccepted capture.
+		for (let i = 0; i < 4; i++) {
+			controller.enqueue(new Frame(i * 33_333) as unknown as VideoFrame);
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		await settle();
+		expect(encoder.out.catalog.peek()?.stalled).toBe(true);
+	} finally {
+		encoder.close();
+		fanout.close();
+		if (original) Object.defineProperty(globalThis, "VideoEncoder", original);
+		else Reflect.deleteProperty(globalThis, "VideoEncoder");
+	}
+});

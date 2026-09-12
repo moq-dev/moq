@@ -73,6 +73,11 @@ pub trait MediaSink: Send {
 	/// loop has already converted the timestamp to microseconds.
 	fn on_frame(&mut self, mid: str0m::media::Mid, frame: codec::Frame) -> Result<()>;
 
+	/// Re-evaluate stall from source silence on every ingest track.
+	fn tick(&mut self) -> Result<()> {
+		Ok(())
+	}
+
 	/// Called once when the session ends with a genuine failure, so the sink can
 	/// abort its tracks with the real cause instead of a bare `Error::Dropped`.
 	fn abort(&mut self, err: moq_net::Error);
@@ -227,7 +232,12 @@ impl Session {
 			}
 
 			let timeout = match self.rtc.poll_output().map_err(Error::rtc)? {
-				Output::Timeout(t) => t,
+				Output::Timeout(t) => {
+					if let MediaRole::Ingest(sink) = &mut self.role {
+						sink.tick()?;
+					}
+					t
+				}
 				Output::Transmit(t) => {
 					let dst = crate::net::to_family(t.destination, socket_v6);
 					if let Err(err) = self.socket.send_to(&t.contents, dst).await {
@@ -578,6 +588,13 @@ impl Bridges {
 	pub fn push(&mut self, mid: str0m::media::Mid, frame: codec::Frame) -> Result<()> {
 		if let Some(bridge) = self.inner.get_mut(&mid) {
 			bridge.push(frame)?;
+		}
+		Ok(())
+	}
+
+	pub fn tick(&mut self) -> Result<()> {
+		for bridge in self.inner.values_mut() {
+			bridge.tick()?;
 		}
 		Ok(())
 	}
