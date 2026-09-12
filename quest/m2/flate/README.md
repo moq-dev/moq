@@ -32,4 +32,4 @@ a compressed track is announced, routed, and cached like any other.
 
 ## Related
 
-- [#2152](/quest/m1/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - the libmoq catch-up this line adds one more symbol family to
+- [#2152](/quest/m2/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - the libmoq catch-up this line adds one more symbol family to

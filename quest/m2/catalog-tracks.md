@@ -40,4 +40,4 @@ as a substitute for deciding track identity.
 
 ## Related
 
-- [Archive](/quest/m1/archive/README.md) - storage and replay consume the eventual identity contract
+- [Archive](/quest/m2/archive/README.md) - storage and replay consume the eventual identity contract

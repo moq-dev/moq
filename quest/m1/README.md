@@ -4,31 +4,28 @@
 
 Everything that must land on `dev` before it merges to `main`: the breaking
 API and wire changes (the announce and wildcard surface, error codes, the
-allocator mirrors, the bindings), the merge gates (the archive line, because
-moq.pro needs archive-backed recording on the release that `dev` produces),
-and the merge itself.
+allocator mirrors, the bindings), the merge gates (the archive catalog and
+store, the monotonic timeline, wildcard advertisements), and the merge
+itself.
 
 ## Plan
 
-Branch a quest from `dev` when it breaks a published API or wire. A merge
-gate that lands on `main` (the additive Resolve and Demand halves of the
-wildcard line) branches from `main` and ranks here only because the merge
-waits on it. A quest stays here only if it breaks a
-published API or wire, or gates the merge. Work that is identical on
-`main`, additive, or targets a `0.0.x` crate lives in
+Branch a quest from `dev` when it breaks a published API or wire. A quest
+stays here only if it breaks a published API or wire, or gates the merge;
+[Merge dev](/quest/m1/merge-dev.md) names the gates. Work that is identical
+on `main`, additive, or targets a `0.0.x` crate lives in
 [m2](/quest/m2/README.md) even when it builds on dev-only code; it starts on
-`main` after the merge. The 2026-09-09 grooming reconciled every quest here
-with the dev tree.
+`main` after the merge. The 2026-09-12 grooming applied that rule to every
+quest here and merged main into dev.
 
 ## Quests
 
-- [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS; the whole line gates the dev merge
+- [Archive catalog](/quest/m1/archive-catalog.md) - one root `archive` entry subsumes `timeline` and names the timeline track, replay path, store URL, and format version
+- [Archive store](/quest/m1/archive-store.md) - `moq-archive` puts, gets, lists, and deletes the versioned objects over `object_store`
 - [Monotonic timeline](/quest/m1/monotonic-timeline.md) - a marker group of one empty frame declares a break and moves the live edge; producers refuse a rewind; consumers jump the playhead on an unproven hole and drop rewind detection
-- [js/publish discontinuity](/quest/m1/js-publish-discontinuity.md) - the JS container producer and js/publish emit the same marker group on encoder restart
 - [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - every native binding, Dart included, creates unadvertised, announces from the broadcast, and takes a path Pattern in `dynamic(pattern, route)`
 - [JS announce](/quest/m1/js-announce.md) - js/net drops `publish()` and `RouteProvider` for `createBroadcast`, `announce(route)`, and a `dynamic(pattern, route)` handle
-- [Wildcard](/quest/m1/wildcard/README.md) - a service advertises a path pattern priced at its start-up cost; Advertise gates the merge, Resolve and Demand are additive
-- [Route cold cost](/quest/m1/route-cold-cost.md) - MoqRoute carries warm and cold, so an observed route re-announces intact
+- [Advertise](/quest/m1/wildcard-advertise.md) - moq-net encodes, forwards, and authorizes wildcard advertisements, so `dynamic(pattern, route)` takes a pattern before the announce API is published
 - [Anonymous rank](/quest/m1/anonymous-route-rank.md) - moq-net: a route through an anonymous hop ranks below every identified route at any cost, and hop 0 travels the chain to say so
 - [Group overflow](/quest/m1/group-overflow-abort.md) - an open group past its budget aborts for every reader with GROUP_TOO_LARGE, and head eviction is deleted
 - [#2774](/quest/m1/2774-collapse-reload-and-shared-into-one-connection-class.md) - one cloneable refcounted `Connection` mirroring `moq_tokio::Connection`; close releases a handle
@@ -47,6 +44,5 @@ with the dev tree.
 - [LAN discovery app id](/quest/m1/lan-app.md) - every advertisement names an application as a DNS-SD subtype bound into the proofs, so unrelated apps on one network never meet
 - [One LAN mesh](/quest/m1/lan-mesh.md) - moq-cli drives the relay's Cluster, LAN peers authenticate by mDNS credential, and the two binaries mesh with each other
 - [Native Go context](/quest/m1/go-native-context.md) - the Go generator emits context.Context itself, retiring the hand-rolled cancellation token
-- [#2152](/quest/m1/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - libmoq serves tracks on demand and accepts sessions, the two moq-ffi calls C still lacks
 - [Transport feature](/quest/m1/tokio-transport-feature.md) - moq-tokio has one `_transport` gate and its backend-less build passes `-D warnings`
 - [Merge dev](/quest/m1/merge-dev.md) - dev lands on main with a closing keyword for every issue it fixed

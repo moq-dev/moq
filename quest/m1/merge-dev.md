@@ -3,18 +3,36 @@
 ## Goal
 
 `main` carries everything on `dev`: the thread-per-core runtime, the net model
-and allocator work, the announce handle and its bindings, the archive line, and
-every fix that only dev has. The merge PR closes each issue dev fixed with a
-closing keyword, and the release that follows is the one moq.pro adopts.
+and allocator work, the announce handle and its bindings, the archive catalog
+and store, and every fix that only dev has. The merge PR closes each issue dev
+fixed with a closing keyword, and the release that follows is the one moq.pro
+adopts.
 
 ## Plan
 
-As of 2026-09-09 dev is 285 commits ahead of main and main 6 ahead of dev. The
-six are a docs pass (#3557), a quest plan (#3560), and CI repairs (#3553,
-#3554, #3555, #3556), so the main-into-dev merge is trivial. Merge main into
-dev first and resolve there, then open the merge PR from dev with the list
-below as closing keywords. Run `just check-all`, `just test all`,
-`just test smoke-full`, and `just bench origin/main` on the merged tree.
+main is merged into dev as of 2026-09-12, so the merge PR opens from dev with
+the list below as closing keywords once the gates clear. Run `just check-all`,
+`just test all`, `just test smoke-full`, and `just bench origin/main` on the
+merged tree, and record the revision the proof ran on.
+
+Resolve by behavior, never by side. The traps the last main-into-dev merge
+hit, so the merge PR re-checks each on the combined tree:
+
+- main's joining FETCH keeps its saved object prefix (#3562) and answers with
+  FETCH_OK; dev's registry maps its two refusal codes to DOES_NOT_EXIST until
+  [IETF leftovers](/quest/m2/ietf-leftovers.md) adds them.
+- main's refusal of an incompatible copy during failover (#3521) lives on
+  dev's source table (`FrontState::track_info`, `accept_track_info`) and is
+  checked on `Step::Splice`; a successor with a different timescale never
+  rescales samples a subscriber already holds.
+- dev's structural flush-span jitter (#3513), registered request codes
+  (#3531), bounded `moq_json::window` timeline (#3240), and duration marker
+  (#3575) keep their regressions; main's draft-21 (#3574) is in every
+  per-version list, including the stream and request registries.
+- The hop-0 ban is abandoned (#3623); anonymous routes rank last instead
+  ([Anonymous rank](/quest/m1/anonymous-route-rank.md)).
+- Auto-merged files hide breakage: `just check` and `just test` run before
+  the merge commit, not after.
 
 Also soak HLS on the merged tree: a fresh viewer joining a `moq import ts`
 broadcast that has been up for days must get a playlist promptly. The bounded
@@ -23,15 +41,19 @@ run proves it.
 
 The breaking-change targeting rules in CONTRIBUTING.md govern the release
 that follows. Dart lands on that surface with #3190, so nothing waits on this
-merge for it.
+merge for it. The rest of the archive line, wildcard resolution, and every
+additive quest that builds on dev-only code start on main afterwards from
+[m2](/quest/m2/README.md).
 
 ## Required
 
-- [Archive](/quest/m1/archive/README.md) - moq.pro needs archive-backed recording on the release dev produces
-- [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - every native binding on that surface
+- [m0](/quest/m0/README.md) - every release blocker lands or is punted before the merge
+- [Archive catalog](/quest/m1/archive-catalog.md) - the breaking catalog shape the release ships
+- [Archive store](/quest/m1/archive-store.md) - the object layout the catalog names
+- [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - every native binding on the announce surface
 - [JS announce](/quest/m1/js-announce.md) - js/net on that surface
 - [Monotonic timeline](/quest/m1/monotonic-timeline.md) - so a shed marker still jumps the playhead on a timestamp hole (#3291)
-- [Advertise](/quest/m1/wildcard/advertise.md) - so `dynamic(prefix, route)` takes a path pattern before the announce API is published
+- [Advertise](/quest/m1/wildcard-advertise.md) - so `dynamic(prefix, route)` takes a path pattern before the announce API is published
 
 ## Closes
 
@@ -63,4 +85,8 @@ merge for it.
 - [#679](https://github.com/moq-dev/moq/issues/679) - QUIC receive is spread across thread-per-core workers, each on its own socket (#2921)
 - [#1073](https://github.com/moq-dev/moq/issues/1073) - the origin lifecycle is caller-driven: `origin::Driver` plus `moq_tokio::origin::spawn` (#2897, #2901)
 - [#2155](https://github.com/moq-dev/moq/issues/2155) - js/net: subscriptions take a `Subscription` options object with `startGroup`, `endGroup`, and `update()` (#2716); ordering became a handle (#3099)
-- [#3493](https://github.com/moq-dev/moq/issues/3493) - the timeline is a `moq_json::window` with a bounded checkpoint, so a 24/7 importer no longer retains every record (#3240)
+
+## Related
+
+- [Archive](/quest/m2/archive/README.md) - the writer, reader, HLS, DVR, browser, and proof follow the release
+- [Wildcard](/quest/m2/wildcard/README.md) - Resolve and Demand are additive and follow the release

@@ -29,4 +29,4 @@ claims group fetch for C; the fetch symbol makes it true.
 
 ## Related
 
-- [#2152](/quest/m1/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - the dev half: dynamic track serving and server-side accept
+- [#2152](/quest/m2/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - the dev half: dynamic track serving and server-side accept

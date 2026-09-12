@@ -35,7 +35,7 @@ Nothing here is a second estimator. Compare the two runtimes at the estimator
 first: the target series each produces from the same arrival trace, which is
 the conformance corpus's own comparison and carries no device timing in it. A
 disagreement there is a finding against [Audio jitter
-target](/quest/m0/audio-jitter-target/README.md) and never a reason to widen a
+target](/quest/m2/audio-jitter-target/README.md) and never a reason to widen a
 budget. Only then compare end-to-end totals, with the backend-dependent stages
 isolated: this lane deliberately accepts real device callback noise, so a
 difference in totals alone proves nothing about the estimator.
@@ -43,4 +43,4 @@ difference in totals alone proves nothing about the estimator.
 ## Required
 
 - [Browser](/quest/m2/audio-quality-harness/browser.md) - defines the metric schema, the budget file, and the extracted shaper
-- [Native jitter target](/quest/m0/audio-jitter-target/native.md) - the estimator this lane grades and compares against the browser; without it there is no target series and the budgets would be set against a playout path that holds nothing
+- [Native jitter target](/quest/m2/audio-jitter-target/native.md) - the estimator this lane grades and compares against the browser; without it there is no target series and the budgets would be set against a playout path that holds nothing

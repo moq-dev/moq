@@ -52,4 +52,4 @@ abort the case asked for. The blanket drain is `WaitProps.tolerateErrors` in
 
 - [#2318](/quest/m2/2318-js-net-remaining-capability-gaps-vs-rs-moq-net-setup-role.md) - the other js/net gaps against the Rust model
 - [Media QA on other engines](/quest/m2/browser-media-qa-engines.md) - the same harness, another axis
-- [Failure artifacts](/quest/m0/qa-failure-artifacts.md) - shared trace and sample output
+- [Failure artifacts](/quest/m2/qa-failure-artifacts.md) - shared trace and sample output

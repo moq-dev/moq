@@ -33,7 +33,7 @@ queue that one of them owns; that is what the rename must not paper over.
 The Rust model's `origin::Producer::dynamic(prefix: impl Into<Prefix>, route)`
 (`rs/moq-net/src/model/origin.rs:1366`) changes to take a
 `moq_net::path::Pattern` (`rs/moq-net/src/path/pattern.rs:172`), so the
-announce API breaks once. Until [Advertise](/quest/m1/wildcard/advertise.md)
+announce API breaks once. Until [Advertise](/quest/m1/wildcard-advertise.md)
 lands, anything but a prefix-shaped pattern (literal segments then `**`) is
 refused; the bindings take the pattern as a string and inherit that refusal.
 
@@ -86,6 +86,6 @@ Branch from `dev`: every rename is breaking.
 
 ## Related
 
-- [#2152](/quest/m1/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - the rest of the C ABI catch-up
+- [#2152](/quest/m2/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - the rest of the C ABI catch-up
 - [JS announce](/quest/m1/js-announce.md) - the same alignment for js/net
-- [Advertise](/quest/m1/wildcard/advertise.md) - lifts the prefix-only refusal so `dynamic()` accepts any pattern
+- [Advertise](/quest/m1/wildcard-advertise.md) - lifts the prefix-only refusal so `dynamic()` accepts any pattern

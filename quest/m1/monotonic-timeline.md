@@ -27,6 +27,13 @@ generation.
 Consumers stop detecting and re-anchoring on undeclared rewinds. A group that
 breaks the forward-only rule is a malformed track, not a timeline event.
 
+This also retires the inferred rewind behind #3533: `moq export ts` stalls
+video and primary audio for good at the first content join of a source whose
+transport timeline is continuous, because the legacy audio importer's
+sub-frame backwards step at a PES resync is read as a rewind and the
+exporter's backward fence never opens for the bystander tracks. With no
+inferred rewinds there is no fence.
+
 js/publish does not emit the marker yet.
 
 ## Plan
@@ -47,7 +54,7 @@ object in the hole.
 
 Callers stay: h264/h265/opus/aac/legacy importers, TS import, moq-video idle
 capture, moq-audio, moq-boy. js/publish is
-[its own quest](/quest/m1/js-publish-discontinuity.md).
+[its own quest](/quest/m2/js-publish-discontinuity.md).
 
 If the marker arrives, walk now and bump the playhead generation. If it is
 shed, N→N+2 is a sequence hole: wait until `max_age` trips or the track
@@ -77,6 +84,22 @@ on a flush and rejects a rewinding base; check the CLI importers, the capture
 publishers, and `js/publish` do the same on a source restart, and re-anchor
 rather than refuse where the source is trusted.
 
+The legacy MPEG audio importer in `rs/moq-mux/src/container/ts/import.rs` is
+one such trusted source and must re-anchor forward. `LegacyStream::write`
+takes the PES PTS for the first frame that begins in a PES and then
+extrapolates every following frame by its own duration
+(`advance_pts`, `:2436`), carrying the extrapolated value across a PES
+boundary as `tail_pts` (`:2447`). When frame sync is lost it abandons the
+tail and re-anchors on the PES PTS (`pts = pes_base`, `:2377` and `:2395`).
+At a content join on a continuous transport timeline that PES PTS sits a few
+milliseconds below the extrapolated high-water mark, which is the backwards
+step #3533 measured (one MPEG-1 audio resync at the join, `audio frame sync
+lost pid=121 resyncs=2`). Once the producer refuses rewinds that sub-frame
+step becomes a refused frame and an aborted import rather than a stall, so
+the resync must clamp its re-anchor to the track's live edge (or skip the
+frame that would land below it) and only then continue from the PES PTS.
+A stale tail after a loop wrap, wrong by hours, still re-anchors on the PES.
+
 ### Consumer abort rewind
 
 Delete the rewind boundary and its classification in both languages (`Rewind`
@@ -102,9 +125,12 @@ restarts the program clock on a source discontinuity, clearing `last_pcr`,
 generation (`:696`). The `backwards` flag (decided at `:581` and `:1145`, and
 what fences peers across a backward boundary at `:948`) disappears with
 backward rewinds, so the reset takes no argument and its docs lose the
-backward case; keep `pcr_discontinuity`, the `discontinuity_indicator` on
-the PCR packet, since a PCR jump over 100 ms without it is a TR 101 290
-error whichever direction the jump goes.
+backward case. `Track::admit` (`:178`) then admits any frame in the current
+generation and no track is ever left behind in an old one, which is the #3533
+fix: the fence that discarded video and primary audio for 40 minutes no
+longer exists. Keep `pcr_discontinuity`, the `discontinuity_indicator` on the
+PCR packet, since a PCR jump over 100 ms without it is a TR 101 290 error
+whichever direction the jump goes.
 
 ### Tests
 
@@ -122,16 +148,31 @@ Rewrite `empty_group_declares_a_discontinuity`,
 `discontinuity_moves_the_live_edge_off_stale_content` for the marker group
 (one empty frame, not zero objects).
 
+TS import: a legacy audio resync whose PES PTS sits below the extrapolated
+high-water mark publishes forward from the live edge and does not abort.
+
+TS export, the #3533 regression in `export_test.rs`: two tracks on a
+continuous transport timeline whose content restarts, the audio track alone
+stepping back by less than one frame at the join; video and audio keep
+emitting across it, and the join costs at most one PCR discontinuity and one
+PSI re-emission. `rewind_re_emits_tables_and_resumes_the_clock`
+(`export_test.rs:2129`) and `rewind_flags_the_break_once_across_tracks`
+(`:2307`) are rewritten for the no-backwards world: the break is a declared
+marker group, the clock and tables reset once per program break, and no
+track is fenced.
+
 Branch from `dev`, where the container consumers carry the current `Rewind`
 state and `is_stale` sheds empty groups.
 
 ## Closes
 
 - [#3291](https://github.com/moq-dev/moq/issues/3291) - close this issue when the quest finishes
+- [#3533](https://github.com/moq-dev/moq/issues/3533) - close this issue when the quest finishes
 
 ## Related
 
-- [js/publish discontinuity](/quest/m1/js-publish-discontinuity.md) - the JS container producer and js/publish emit the same marker
+- [js/publish discontinuity](/quest/m2/js-publish-discontinuity.md) - the JS container producer and js/publish emit the same marker
 - [#3056](/quest/m2/3056-watch-video-decoder-captures-the-rewind-generation-at.md) - whether watch still resets VideoDecoder to drop in-flight chunks when playhead generation bumps
 - [#3115](/quest/m2/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink's generation model after EOS, the same publisher
 - [Open-GOP leading pictures](/quest/m2/open-gop-leading-pictures.md) - latency skip now bumps playhead generation but does not flush the decoder, so leading pictures still decode
+- [TS import stream liveness](/quest/m2/3489-ts-import-stream-liveness.md) - the per-stream access-unit reporting that would have shown the #3533 stall at the importer

@@ -48,7 +48,7 @@ budget, or a schedule.
     identity is unimplementable if two stages can claim the same milliseconds,
     and an unaccounted remainder is the finding, so give it a name too.
 - Extract the seeded shaper from [Impaired
-  path](/quest/m0/transport-impairment-profile.md) into something that runs as
+  path](/quest/m2/transport-impairment-profile.md) into something that runs as
   its own process in front of a relay, so this harness and the drills share one
   impairment implementation. Assert the shaper actually treated traffic: a
   profile that silently did nothing turns an impaired run into an unimpaired
@@ -73,4 +73,4 @@ budget, or a schedule.
 
 ## Required
 
-- [Impaired path](/quest/m0/transport-impairment-profile.md) - the seeded shaper this puts in front of the relay
+- [Impaired path](/quest/m2/transport-impairment-profile.md) - the seeded shaper this puts in front of the relay

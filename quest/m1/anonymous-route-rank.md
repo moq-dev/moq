@@ -65,7 +65,7 @@ Hop 0 in a chain is the mark, and it travels:
 
 - [Rank](/quest/m2/pop-skipping/rank.md) - warm-copy adoption, which also
   refuses to treat two anonymous relays as one
-- [Route cold cost](/quest/m1/route-cold-cost.md) - the cost pair the bindings
+- [Route cold cost](/quest/m2/route-cold-cost.md) - the cost pair the bindings
   carry, which `is_anonymous()` joins
 - [#3060](https://github.com/moq-dev/moq/issues/3060) - the ban on hop 0 in
   chains this quest decides against

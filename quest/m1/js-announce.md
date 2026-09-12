@@ -31,7 +31,7 @@ decisions and the second is callback-shaped.
   requests with `accept(broadcast)` and `reject(error)`. The pattern is parsed
   by `Path.Pattern` (`js/net/src/path.ts:526`), the same dialect the Rust
   model takes, so the API breaks once; until
-  [Advertise](/quest/m1/wildcard/advertise.md) lands, anything but a
+  [Advertise](/quest/m1/wildcard-advertise.md) lands, anything but a
   prefix-shaped pattern is refused. `RouteProvider` is removed;
   `connection/forward.ts` and the session code drive the handle instead.
 - `StreamCode` (`js/net/src/error.ts:71-95`) gains `NoCapacity: 0x30`, the
@@ -59,5 +59,5 @@ Branch from `dev`, where the origin table lives; the rename is breaking.
 
 - [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - the native bindings half, and the Rust `dynamic(pattern, route)` signature
 - [#2774](/quest/m1/2774-collapse-reload-and-shared-into-one-connection-class.md) - rewrites `connection/reload.ts` and `pool.ts`, which this touches; land one before the other
-- [Advertise](/quest/m1/wildcard/advertise.md) - lifts the prefix-only refusal so `dynamic()` accepts any pattern
+- [Advertise](/quest/m1/wildcard-advertise.md) - lifts the prefix-only refusal so `dynamic()` accepts any pattern
 - [#2318](/quest/m2/2318-js-net-remaining-capability-gaps-vs-rs-moq-net-setup-role.md) - other js/net gaps vs rs/moq-net

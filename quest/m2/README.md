@@ -23,6 +23,23 @@ targeting a `0.0.x` crate.
 
 ## Quests
 
+- [Audio jitter target](/quest/m2/audio-jitter-target/README.md) - the audio playout target is a measured estimate of arrival timing in both languages, not a round-trip guess
+- [Jitter clock](/quest/m2/jitter-flush-clock.md) - moq-mux: catalog jitter measures how far behind the media clock an encoder flushes, fed by encoders only, and never decreases
+- [Capture denial](/quest/m2/browser-permission-qa.md) - moq-publish surfaces a refused camera or microphone instead of retrying forever, and recovers on grant
+- [Publisher audio unlock](/quest/m2/publish-audio-unlock.md) - the publisher's capture AudioContext is resumed on a gesture or the source is refused, so no silent audio track is announced
+- [IETF leftovers](/quest/m2/ietf-leftovers.md) - moq-net: the 0x21 priority property, a NOT_SUPPORTED reply to TRACK_STATUS, and the two FETCH refusal codes come from the registry
+- [FFI WebSocket fallback](/quest/m2/ffi-websocket-fallback.md) - moq-ffi and every wrapper can disable or delay the WebSocket fallback
+- [Play tune-in backpressure](/quest/m2/play-tunein-backpressure.md) - moq play: a tune-in burst larger than the video queue parks the decoder, so the clock never reaches live at a wide `--delay`
+- [Play audio rendition gap](/quest/m2/play-audio-rendition-gap.md) - moq play: a retired audio rendition drains its sink before the replacement fills one, so the switch costs a `--delay` of silence
+- [Archive](/quest/m2/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS, on the catalog and store the release ships
+- [Wildcard](/quest/m2/wildcard/README.md) - a relay resolves subscriptions against advertised patterns and the browser player treats a covering pattern as availability
+- [#2152](/quest/m2/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - libmoq serves tracks on demand and accepts sessions, the two moq-ffi calls C still lacks
+- [Route cold cost](/quest/m2/route-cold-cost.md) - MoqRoute carries warm and cold, so an observed route re-announces intact
+- [js/publish discontinuity](/quest/m2/js-publish-discontinuity.md) - the JS container producer and js/publish emit the same marker group on encoder restart
+- [Failure artifacts](/quest/m2/qa-failure-artifacts.md) - a failing harness run keeps its run directory and a Playwright trace, and CI uploads them
+- [Listening kind field](/quest/m2/harness-drive-bys.md) - revert the relay's `kind` field on the listening log lines; nothing reads it
+- [Impaired path](/quest/m2/transport-impairment-profile.md) - the transport drills run over a seeded, impaired UDP path on any host
+- [Tooling](/quest/m2/tooling/README.md) - justfiles become a one-line menu over `sh/`, one impact map scopes CI, and every workflow step runs a recipe
 - [Generation](/quest/m2/hls-generation.md) - init URLs follow the rendition config and segment URLs carry an embedder-supplied generation, so caching can be re-enabled
 - [Catalog track identity](/quest/m2/catalog-tracks.md) - explore immutable track definitions versus explicit catalog-to-group version binding for live and recorded playback
 - [Path patterns](/quest/m2/path-patterns/README.md) - one versioned matcher for every predicate over broadcast paths: tokens, origins, interest

@@ -26,8 +26,9 @@ record.
   so the boundary test refuses a 63-character app rather than letting
   registration fail later.
   `impl Default` returns `default`, the name both binaries advertise under.
-  `Config::new(app, port)` replaces `Config::new(port)`; moq-tokio is
-  unpublished, so no shim.
+  `Config::new(app, port)` replaces `Config::new(port)`: moq-tokio is
+  published (`rs/moq-tokio/Cargo.toml:8`, 0.19.x), so that is a breaking
+  change and belongs on `dev` for that reason, with no shim.
 - Partition: register the service under the DNS-SD subtype
   `_<app>._sub._moq._udp.local.` (RFC 6763 section 7.1) and browse that
   subtype, so the daemon only ever resolves this application's records.
