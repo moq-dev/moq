@@ -3714,8 +3714,8 @@ fn bandwidth_handles_share_the_registry() {
 	let reserved = id(moq_bandwidth_reserve(first, first_track, 4_000_000));
 	assert_eq!(wait_grant(reserved), 3_000_000);
 	let other = id(moq_bandwidth_reserve(second, second_track, 4_000_000));
-	assert_eq!(wait_grant(reserved), 1_500_000);
 	assert_eq!(wait_grant(other), 1_500_000);
+	assert_eq!(grant(reserved), Some(1_500_000));
 
 	assert_eq!(moq_reservation_close(reserved), 0);
 	assert_eq!(moq_reservation_close(other), 0);
