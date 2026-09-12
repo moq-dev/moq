@@ -40,3 +40,4 @@ their share of end-to-end playback cost is not yet measured.
 
 - [Browser benchmarks](/quest/m2/browser-benchmarks.md) - container and playback measurement
 - [Reader buffering](/quest/m2/stream-buffering.md) - upstream payload assembly costs
+- [Mux and gateway copy budgets](/quest/m2/mux-copies/README.md) - the Rust container copies

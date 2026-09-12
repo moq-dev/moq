@@ -36,4 +36,5 @@ an identified browser version on a real WebTransport connection.
 
 - [Reader buffering](/quest/m2/stream-buffering.md) - fragmented receive workloads
 - [CMAF copies](/quest/m2/cmaf-copy-budget.md) - container workload and ownership checks
+- [JS publish and watch hot paths](/quest/m2/js-hotpath/README.md) - first optimization consumers of this harness
 - [Benchmark comparisons](/quest/m2/performance-comparisons.md) - reporting conventions

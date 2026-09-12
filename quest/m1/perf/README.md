@@ -41,6 +41,8 @@ backend we ship today.
 
 - [Frame send](/quest/m1/perf/frame-send.md) - a frame reaches quiche as zero-copy appends instead of two copying stream_send calls
 - [Ingest batch](/quest/m1/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per chunk burst instead of per chunk
+- [Stamp egress keep-alive once per fill](/quest/m1/perf/egress-keepalive.md) - fanout send does not clock every batched frame
+- [Decode without a second copy](/quest/m1/perf/coding-decode.md) - varint-length paths and byte strings copy payload once
 - [#3122](/quest/m1/perf/3122-moq-uring-2-5-of-relay-cpu-is-vdso-clock-reads-the-drive.md) - moq-uring: ~2.5% of relay CPU is vdso clock reads; the drive loop and its callers each re-read Instant::now()
 - [Cache shard](/quest/m1/perf/cache-shard.md) - stop hammering one process-global cache line and one clock read per frame from every worker
 - [Slot flags](/quest/m1/perf/slot-flags.md) - track delivery stops taking nested group locks under the track lock
@@ -63,3 +65,4 @@ backend we ship today.
 - [Worker metrics](/quest/m1/uring-metrics.md) - the counters these quests are judged by
 - [noq parity gate](/quest/m2/quic/noq-parity.md) - the benchmark that
   decides whether quiche can go, run on these worker primitives
+- [Origin lookup CPU](/quest/m2/origin-cpu/README.md) - announce/subscribe table, not uring
