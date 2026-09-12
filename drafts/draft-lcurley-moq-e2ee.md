@@ -85,12 +85,17 @@ The application supplies an immutable credential:
 
 ~~~
 Credential {
+  profile (text)
   context (b)
   generation (u64)
   kid (u64)
   secret (32)
 }
 ~~~
+
+**profile**:
+The string `moq-e2ee-01`, supplied out of band with the credential and checked before derivation.
+It is not carried in protected payloads.
 
 **context**:
 Opaque bytes chosen by the application as the broadcast's end-to-end identity.
@@ -176,7 +181,10 @@ A protected object is the tuple `(credential, physical_name, domain, group, fram
 
 ## Grouped Frames
 A grouped frame uses `domain = 0x00`, the group's sequence as `group`, and the frame index within that group as `frame`.
-moq-lite numbers frames from 0 in write order ({{moql}}); MoQ Transport object IDs that fit in 32 bits map to `frame` the same way.
+moq-lite numbers frames from 0 in write order ({{moql}}).
+On MoQ Transport, `frame` is the explicit Object ID, never its arrival ordinal.
+Publishers supporting both transports MUST assign contiguous Object IDs from zero so that each matches its moq-lite write-order index; relays MUST NOT renumber protected objects.
+An Object ID above `2^32-1` MUST be refused as `identity` before encryption or decryption.
 
 ## Datagrams
 A datagram uses `domain = 0x01`, its 64-bit sequence as `group`, and `frame = 0`.
@@ -228,7 +236,7 @@ It is not a key identifier and MUST NOT be treated as a cryptographic assertion.
 
 
 # Bounds {#bounds}
-Implementations MUST refuse an identity before it is used:
+Implementations MUST refuse non-integer identities (including NaN and infinities) and identities outside these bounds before encoding or AEAD:
 
 - `group` (grouped sequence or datagram sequence) and `generation` / `kid`: `0..=2^53-1`. Above that is `identity`.
 - `frame`: `0..=2^32-1`. `2^32` and above is `identity`.
@@ -272,9 +280,17 @@ A receiver MUST NOT require group 0 or any prior identity before opening a later
 # Test Vectors {#vectors}
 Known-answer and negative vectors live in `moq-e2ee-01.json` beside this draft.
 Hex strings are octet sequences.
-The JSON is authoritative for interop; an implementation of this profile MUST pass every vector.
+The JSON is authoritative for primitive interop; an implementation of this profile MUST pass every vector.
+Each negative row specifies an `operation`, its inputs, and its expected typed error.
+Non-finite frame inputs use the strings `NaN`, `Infinity`, and `-Infinity`; group inputs in identity tests are decimal strings.
+Implementations whose types cannot represent an invalid input MUST reject it at their input boundary.
 
-The file covers derivation, physical naming, grouped frames, datagrams, catalog payloads (JSON and a pre-compressed representation), relocation across every identity dimension, profile downgrade via a different HKDF salt, tag failure, counter exhaustion, oversize plaintext, identity reuse, and a restart that reuses a transport sequence under a new generation.
+The file covers derivation, physical naming, grouped frames, datagrams with concrete header budgets, catalog JSON and raw-DEFLATE payloads, relocation across every identity dimension, unsupported credentials, tag failure, identity bounds, oversize plaintext, and a new generation reusing a transport sequence.
+
+The shared verifier is stateless.
+It does not verify `reuse`, `exhausted`, `duplicate`, or `pinned_mismatch`, publisher restart ownership, or failure propagation.
+Each language core MUST test those lifecycle requirements, including restart under the same generation, retransmission without encryption, per-key invocation accounting, bounded duplicate suppression, and application pinning.
+Passing the primitive vectors alone is not profile conformance.
 
 
 # Security Considerations

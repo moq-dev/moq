@@ -12,6 +12,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { constants, inflateRawSync } from "node:zlib";
 
 export const PROFILE = "moq-e2ee-01";
 export const SALT = utf8("moq-e2ee-01");
@@ -29,14 +30,18 @@ export const MAX_INVOCATIONS = 2 ** 24;
 export const MAX_GROUPED_PAYLOAD = 32 * 1024 * 1024;
 export const MAX_GROUPED_PLAINTEXT = MAX_GROUPED_PAYLOAD - TAG_LEN;
 export const MAX_DATAGRAM_BODY = 1200;
+// Subscribe ID 1, Group Sequence 99, Timestamp 0 encoded as QUIC varints.
+const DATAGRAM_HEADER = "01406300";
+const DATAGRAM_PAYLOAD_LIMIT = MAX_DATAGRAM_BODY - DATAGRAM_HEADER.length / 2;
 
 export type Domain = typeof DOMAIN_GROUP | typeof DOMAIN_DATAGRAM;
 
 export type Credential = {
-	context: Uint8Array;
+	profile: string;
+	context: Uint8Array<ArrayBuffer>;
 	generation: bigint;
 	kid: bigint;
-	secret: Uint8Array;
+	secret: Uint8Array<ArrayBuffer>;
 };
 
 export class ProfileError extends Error {
@@ -47,15 +52,15 @@ export class ProfileError extends Error {
 	}
 }
 
-export function utf8(value: string): Uint8Array {
+export function utf8(value: string): Uint8Array<ArrayBuffer> {
 	return new TextEncoder().encode(value);
 }
 
-export function hex(bytes: Uint8Array): string {
+export function hex(bytes: Uint8Array<ArrayBuffer>): string {
 	return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-export function unhex(value: string): Uint8Array {
+export function unhex(value: string): Uint8Array<ArrayBuffer> {
 	if (value.length % 2 !== 0) throw new Error(`odd hex length: ${value.length}`);
 	const out = new Uint8Array(value.length / 2);
 	for (let i = 0; i < out.length; i++) {
@@ -64,7 +69,7 @@ export function unhex(value: string): Uint8Array {
 	return out;
 }
 
-export function concat(...parts: Uint8Array[]): Uint8Array {
+export function concat(...parts: Uint8Array<ArrayBuffer>[]): Uint8Array<ArrayBuffer> {
 	const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
 	let offset = 0;
 	for (const part of parts) {
@@ -74,19 +79,21 @@ export function concat(...parts: Uint8Array[]): Uint8Array {
 	return out;
 }
 
-export function encodeU16(value: number): Uint8Array {
-	if (value < 0 || value > 0xffff) throw new ProfileError("identity", `u16 out of range: ${value}`);
+export function encodeU16(value: number): Uint8Array<ArrayBuffer> {
+	if (!Number.isInteger(value) || value < 0 || value > 0xffff)
+		throw new ProfileError("identity", `u16 out of range: ${value}`);
 	return new Uint8Array([(value >> 8) & 0xff, value & 0xff]);
 }
 
-export function encodeU32(value: number): Uint8Array {
-	if (value < 0 || value > MAX_U32) throw new ProfileError("identity", `u32 out of range: ${value}`);
+export function encodeU32(value: number): Uint8Array<ArrayBuffer> {
+	if (!Number.isInteger(value) || value < 0 || value > MAX_U32)
+		throw new ProfileError("identity", `u32 out of range: ${value}`);
 	const out = new Uint8Array(4);
 	new DataView(out.buffer).setUint32(0, value);
 	return out;
 }
 
-export function encodeU64(value: bigint): Uint8Array {
+export function encodeU64(value: bigint): Uint8Array<ArrayBuffer> {
 	if (value < 0n || value > 0xffffffffffffffffn) {
 		throw new ProfileError("identity", `u64 out of range: ${value}`);
 	}
@@ -95,12 +102,12 @@ export function encodeU64(value: bigint): Uint8Array {
 	return out;
 }
 
-export function encodeBytes(value: Uint8Array): Uint8Array {
+export function encodeBytes(value: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
 	if (value.length > 0xffff) throw new ProfileError("identity", `bytes too long: ${value.length}`);
 	return concat(encodeU16(value.length), value);
 }
 
-export function base64url(bytes: Uint8Array): string {
+export function base64url(bytes: Uint8Array<ArrayBuffer>): string {
 	return btoa(String.fromCharCode(...bytes))
 		.replaceAll("+", "-")
 		.replaceAll("/", "_")
@@ -108,6 +115,7 @@ export function base64url(bytes: Uint8Array): string {
 }
 
 export function checkCredential(credential: Credential): void {
+	if (credential.profile !== PROFILE) throw new ProfileError("unsupported_profile");
 	if (credential.secret.length !== 32) throw new ProfileError("invalid_secret");
 	checkU53(credential.generation, "generation");
 	checkU53(credential.kid, "kid");
@@ -121,25 +129,33 @@ function checkU53(value: bigint, label: string): void {
 
 export function checkIdentity(group: bigint, frame: number): void {
 	checkU53(group, "group");
-	if (frame < 0 || frame > MAX_U32) throw new ProfileError("identity", "frame exceeds 32 bits");
+	if (!Number.isInteger(frame) || frame < 0 || frame > MAX_U32)
+		throw new ProfileError("identity", "frame exceeds 32 bits");
 }
 
-export function nonce(group: bigint, frame: number): Uint8Array {
+export function nonce(group: bigint, frame: number): Uint8Array<ArrayBuffer> {
 	checkIdentity(group, frame);
 	return concat(encodeU64(group), encodeU32(frame));
 }
 
-async function hmacSha256(key: Uint8Array, data: Uint8Array): Promise<Uint8Array> {
+async function hmacSha256(
+	key: Uint8Array<ArrayBuffer>,
+	data: Uint8Array<ArrayBuffer>,
+): Promise<Uint8Array<ArrayBuffer>> {
 	const cryptoKey = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
 	return new Uint8Array(await crypto.subtle.sign("HMAC", cryptoKey, data));
 }
 
-export async function extract(credential: Credential, salt = SALT): Promise<Uint8Array> {
+export async function extract(credential: Credential, salt = SALT): Promise<Uint8Array<ArrayBuffer>> {
 	checkCredential(credential);
 	return hmacSha256(salt, credential.secret);
 }
 
-async function hkdfExpand(prk: Uint8Array, info: Uint8Array, length: number): Promise<Uint8Array> {
+async function hkdfExpand(
+	prk: Uint8Array<ArrayBuffer>,
+	info: Uint8Array<ArrayBuffer>,
+	length: number,
+): Promise<Uint8Array<ArrayBuffer>> {
 	const n = Math.ceil(length / HASH_LEN);
 	if (n > 255) throw new Error("HKDF expand too long");
 	const out = new Uint8Array(n * HASH_LEN);
@@ -151,7 +167,7 @@ async function hkdfExpand(prk: Uint8Array, info: Uint8Array, length: number): Pr
 	return out.slice(0, length);
 }
 
-export function nameInfo(credential: Credential, semanticName: Uint8Array): Uint8Array {
+export function nameInfo(credential: Credential, semanticName: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
 	return concat(
 		NAME_LABEL,
 		encodeBytes(credential.context),
@@ -161,7 +177,7 @@ export function nameInfo(credential: Credential, semanticName: Uint8Array): Uint
 	);
 }
 
-export function keyInfo(credential: Credential, physicalName: string, domain: Domain): Uint8Array {
+export function keyInfo(credential: Credential, physicalName: string, domain: Domain): Uint8Array<ArrayBuffer> {
 	return concat(
 		KEY_LABEL,
 		encodeBytes(credential.context),
@@ -174,9 +190,14 @@ export function keyInfo(credential: Credential, physicalName: string, domain: Do
 
 export async function deriveName(
 	credential: Credential,
-	semanticName: Uint8Array,
-	prk?: Uint8Array,
-): Promise<{ prk: Uint8Array; info: Uint8Array; material: Uint8Array; physicalName: string }> {
+	semanticName: Uint8Array<ArrayBuffer>,
+	prk?: Uint8Array<ArrayBuffer>,
+): Promise<{
+	prk: Uint8Array<ArrayBuffer>;
+	info: Uint8Array<ArrayBuffer>;
+	material: Uint8Array<ArrayBuffer>;
+	physicalName: string;
+}> {
 	checkCredential(credential);
 	const extracted = prk ?? (await extract(credential));
 	const info = nameInfo(credential, semanticName);
@@ -188,8 +209,8 @@ export async function deriveKey(
 	credential: Credential,
 	physicalName: string,
 	domain: Domain,
-	prk?: Uint8Array,
-): Promise<{ prk: Uint8Array; info: Uint8Array; key: Uint8Array }> {
+	prk?: Uint8Array<ArrayBuffer>,
+): Promise<{ prk: Uint8Array<ArrayBuffer>; info: Uint8Array<ArrayBuffer>; key: Uint8Array<ArrayBuffer> }> {
 	checkCredential(credential);
 	if (domain !== DOMAIN_GROUP && domain !== DOMAIN_DATAGRAM) {
 		throw new ProfileError("identity", `unknown domain ${domain}`);
@@ -201,12 +222,12 @@ export async function deriveKey(
 }
 
 export async function protect(
-	key: Uint8Array,
+	key: Uint8Array<ArrayBuffer>,
 	group: bigint,
 	frame: number,
-	plaintext: Uint8Array,
+	plaintext: Uint8Array<ArrayBuffer>,
 	payloadLimit: number,
-): Promise<Uint8Array> {
+): Promise<Uint8Array<ArrayBuffer>> {
 	checkIdentity(group, frame);
 	if (plaintext.length + TAG_LEN > payloadLimit) throw new ProfileError("oversize");
 	const cryptoKey = await crypto.subtle.importKey("raw", key, "AES-GCM", false, ["encrypt"]);
@@ -219,12 +240,12 @@ export async function protect(
 }
 
 export async function unprotect(
-	key: Uint8Array,
+	key: Uint8Array<ArrayBuffer>,
 	group: bigint,
 	frame: number,
-	payload: Uint8Array,
+	payload: Uint8Array<ArrayBuffer>,
 	payloadLimit: number,
-): Promise<Uint8Array> {
+): Promise<Uint8Array<ArrayBuffer>> {
 	checkIdentity(group, frame);
 	if (payload.length < TAG_LEN || payload.length > payloadLimit) throw new ProfileError("oversize");
 	try {
@@ -240,10 +261,9 @@ export async function unprotect(
 	}
 }
 
-type HexMap = Record<string, string | number | boolean>;
-
 function cred(secret = utf8("moq-e2ee-01 test secret!!!!!!!!!")): Credential {
 	return {
+		profile: PROFILE,
 		context: utf8("example.com/meeting-123"),
 		generation: 1n,
 		kid: 7n,
@@ -253,6 +273,7 @@ function cred(secret = utf8("moq-e2ee-01 test secret!!!!!!!!!")): Credential {
 
 function credentialJson(credential: Credential) {
 	return {
+		profile: credential.profile,
 		context: hex(credential.context),
 		generation: Number(credential.generation),
 		kid: Number(credential.kid),
@@ -260,12 +281,7 @@ function credentialJson(credential: Credential) {
 	};
 }
 
-async function derivationVector(
-	id: string,
-	credential: Credential,
-	semanticName: string,
-	domain: Domain,
-): Promise<HexMap> {
+async function derivationVector(id: string, credential: Credential, semanticName: string, domain: Domain) {
 	const named = await deriveName(credential, utf8(semanticName));
 	const keyed = await deriveKey(credential, named.physicalName, domain, named.prk);
 	return {
@@ -290,9 +306,9 @@ async function payloadVector(
 	domain: Domain,
 	group: bigint,
 	frame: number,
-	plaintext: Uint8Array,
+	plaintext: Uint8Array<ArrayBuffer>,
 	payloadLimit: number,
-): Promise<HexMap> {
+) {
 	const named = await deriveName(credential, utf8(semanticName));
 	const keyed = await deriveKey(credential, named.physicalName, domain, named.prk);
 	const iv = nonce(group, frame);
@@ -316,7 +332,10 @@ async function payloadVector(
 async function generate() {
 	const base = cred();
 	const catalogJson = utf8('{"video":{"renditions":{"hd":{"codec":"avc1"}}}}');
-	const catalogCompressed = unhex("789c4b2c4d2c492d2e51d04b4d2c49cc2a4e2d2a2e294a4d2c4e2d2a2e010000ffff");
+	// Raw DEFLATE of catalogJson with the trailing sync-flush marker omitted.
+	const catalogCompressed = unhex(
+		"aa562acb4c49cd57b2aa562a4acd4bc92cc9cccf2b06f132524064727e4a6ab29295526259b2a1522d100000",
+	);
 
 	const derivation = [
 		await derivationVector("group-video", base, "video", DOMAIN_GROUP),
@@ -340,7 +359,21 @@ async function generate() {
 	];
 
 	const datagrams = [
-		await payloadVector("datagram-0", base, "audio", DOMAIN_DATAGRAM, 99n, 0, utf8("opus"), MAX_DATAGRAM_BODY),
+		{
+			...(await payloadVector(
+				"datagram-0",
+				base,
+				"audio",
+				DOMAIN_DATAGRAM,
+				99n,
+				0,
+				utf8("opus"),
+				DATAGRAM_PAYLOAD_LIMIT,
+			)),
+			subscribe_id: 1,
+			timestamp: 0,
+			header: DATAGRAM_HEADER,
+		},
 	];
 
 	const catalog = [
@@ -372,132 +405,103 @@ async function generate() {
 	const flipped = unhex(String(good.payload));
 	flipped[0] ^= 0x01;
 
-	const relocated = await unprotectCatch(videoKey.key, 42n, 1, unhex(String(good.payload)), MAX_GROUPED_PAYLOAD);
-	const wrongTrack = await deriveName(base, utf8("audio"));
-	const wrongKey = await deriveKey(base, wrongTrack.physicalName, DOMAIN_GROUP, wrongTrack.prk);
-	const relocatedTrack = await unprotectCatch(wrongKey.key, 42n, 0, unhex(String(good.payload)), MAX_GROUPED_PAYLOAD);
-	const datagramKey = await deriveKey(base, video.physicalName, DOMAIN_DATAGRAM, video.prk);
-	const relocatedDomain = await unprotectCatch(
-		datagramKey.key,
-		42n,
-		0,
-		unhex(String(good.payload)),
-		MAX_GROUPED_PAYLOAD,
+	groups.push(
+		await payloadVector(
+			"restart-new-generation",
+			{ ...base, generation: 2n },
+			"video",
+			DOMAIN_GROUP,
+			42n,
+			0,
+			utf8("restarted"),
+			MAX_GROUPED_PAYLOAD,
+		),
 	);
 
-	const otherGen = { ...base, generation: 2n };
-	const otherGenName = await deriveName(otherGen, utf8("video"));
-	const otherGenKey = await deriveKey(otherGen, otherGenName.physicalName, DOMAIN_GROUP, otherGenName.prk);
-	const restartOk = await protect(otherGenKey.key, 42n, 0, utf8("restarted"), MAX_GROUPED_PAYLOAD);
-
-	const downgradePrk = await extract(base, utf8("moq-e2ee-00"));
-	const downgradeInfo = nameInfo(base, utf8("video"));
-	const downgradeMaterial = await hkdfExpand(downgradePrk, downgradeInfo, NAME_LEN);
-
-	const negative = [
-		{
-			id: "tag-failure",
+	const negative: NegativeVector[] = [];
+	for (const [id, credential, name, domain, group, frame] of [
+		["tag-failure", base, "video", DOMAIN_GROUP, 42, 0],
+		["relocation-context", { ...base, context: utf8("other-broadcast") }, "video", DOMAIN_GROUP, 42, 0],
+		["relocation-generation", { ...base, generation: 2n }, "video", DOMAIN_GROUP, 42, 0],
+		["relocation-kid", { ...base, kid: 8n }, "video", DOMAIN_GROUP, 42, 0],
+		["relocation-track", base, "audio", DOMAIN_GROUP, 42, 0],
+		["relocation-domain", base, "video", DOMAIN_DATAGRAM, 42, 0],
+		["relocation-group", base, "video", DOMAIN_GROUP, 43, 0],
+		["relocation-frame", base, "video", DOMAIN_GROUP, 42, 1],
+	] as const) {
+		// Hold the physical name fixed while relocating each credential field.
+		const named = await deriveName(base, utf8(name));
+		const keyed = await deriveKey(credential, named.physicalName, domain);
+		negative.push({
+			id,
+			operation: "open",
 			error: "authentication",
-			payload: hex(flipped),
-			group: 42,
-			frame: 0,
-			key: hex(videoKey.key),
-		},
-		{
-			id: "relocation-frame",
-			error: relocated,
-			payload: good.payload,
-			group: 42,
-			frame: 1,
-			key: hex(videoKey.key),
-		},
-		{
-			id: "relocation-track",
-			error: relocatedTrack,
-			payload: good.payload,
-			group: 42,
-			frame: 0,
-			key: hex(wrongKey.key),
-		},
-		{
-			id: "relocation-domain",
-			error: relocatedDomain,
-			payload: good.payload,
-			group: 42,
-			frame: 0,
-			key: hex(datagramKey.key),
-		},
-		{
-			id: "profile-downgrade",
-			error: "authentication",
-			note: "HKDF salt moq-e2ee-00 yields a different name and key than profile 01",
-			downgrade_name_material: hex(downgradeMaterial),
-			profile_name_material: hex(video.material),
-		},
-		{
-			id: "frame-exhausted",
-			error: "identity",
-			group: 0,
-			frame: MAX_U32 + 1,
-		},
-		{
-			id: "group-exhausted",
-			error: "identity",
-			group: MAX_U53 + 1,
-			frame: 0,
-		},
-		{
-			id: "invocation-limit",
-			error: "exhausted",
-			max_invocations: MAX_INVOCATIONS,
-		},
-		{
-			id: "grouped-oversize",
-			error: "oversize",
-			plaintext_len: MAX_GROUPED_PLAINTEXT + 1,
+			credential: credentialJson(credential),
+			physical_name: named.physicalName,
+			domain,
+			group,
+			frame,
+			key: hex(keyed.key),
+			payload: id === "tag-failure" ? hex(flipped) : good.payload,
 			payload_limit: MAX_GROUPED_PAYLOAD,
-		},
-		{
-			id: "datagram-oversize",
-			error: "oversize",
-			plaintext_len: MAX_DATAGRAM_BODY - TAG_LEN + 1,
-			payload_limit: MAX_DATAGRAM_BODY,
-		},
-		{
-			id: "reuse",
-			error: "reuse",
-			identity: { semantic_name: "video", domain: DOMAIN_GROUP, group: 42, frame: 0 },
-			first_plaintext: hex(utf8("frame-zero")),
-			second_plaintext: hex(utf8("other-bytes")),
-		},
-		{
-			id: "restart-same-generation",
-			error: "reuse",
-			note: "A publisher restart that would reuse transport sequence numbers under the same generation is reuse",
-			identity: { semantic_name: "video", domain: DOMAIN_GROUP, group: 42, frame: 0 },
-		},
-		{
-			id: "restart-new-generation",
-			error: null,
-			generation: 2,
-			group: 42,
-			frame: 0,
-			plaintext: hex(utf8("restarted")),
-			physical_name: otherGenName.physicalName,
-			payload: hex(restartOk),
-			key: hex(otherGenKey.key),
-		},
-		{
-			id: "short-payload",
-			error: "oversize",
-			payload: "00",
-		},
-		{
-			id: "invalid-secret",
-			error: "invalid_secret",
-			secret_len: 16,
-		},
-	];
+		});
+	}
+	for (const [id, group, frame] of [
+		["frame-exhausted", "0", MAX_U32 + 1],
+		["group-exhausted", String(BigInt(MAX_U53) + 1n), 0],
+		["negative-group", "-1", 0],
+		["negative-frame", "0", -1],
+		["fractional-frame", "0", 1.5],
+		["nan-frame", "0", "NaN"],
+		["infinite-frame", "0", "Infinity"],
+		["negative-infinite-frame", "0", "-Infinity"],
+	] as const) {
+		negative.push({ id, operation: "identity", error: "identity", group, frame });
+	}
+	for (const [id, credential, error] of [
+		["profile-downgrade", { ...base, profile: "moq-e2ee-00" }, "unsupported_profile"],
+		["invalid-secret", { ...base, secret: new Uint8Array(16) }, "invalid_secret"],
+		["generation-exhausted", { ...base, generation: BigInt(MAX_U53) + 1n }, "identity"],
+		["kid-exhausted", { ...base, kid: BigInt(MAX_U53) + 1n }, "identity"],
+	] as const) {
+		negative.push({ id, operation: "credential", error, credential: credentialJson(credential) });
+	}
+	negative.push({
+		id: "grouped-oversize",
+		operation: "protect",
+		error: "oversize",
+		key: hex(videoKey.key),
+		group: 0,
+		frame: 0,
+		plaintext_len: MAX_GROUPED_PLAINTEXT + 1,
+		payload_limit: MAX_GROUPED_PAYLOAD,
+	});
+	negative.push({
+		id: "datagram-oversize",
+		operation: "protect",
+		error: "oversize",
+		key: datagrams[0].key,
+		group: 99,
+		frame: 0,
+		plaintext_len: DATAGRAM_PAYLOAD_LIMIT - TAG_LEN + 1,
+		payload_limit: DATAGRAM_PAYLOAD_LIMIT,
+		header: DATAGRAM_HEADER,
+		subscribe_id: 1,
+		timestamp: 0,
+	});
+	negative.push({
+		id: "short-payload",
+		operation: "open",
+		error: "oversize",
+		credential: credentialJson(base),
+		physical_name: video.physicalName,
+		domain: DOMAIN_GROUP,
+		group: 0,
+		frame: 0,
+		key: hex(videoKey.key),
+		payload: "00",
+		payload_limit: MAX_GROUPED_PAYLOAD,
+	});
 
 	return {
 		profile: PROFILE,
@@ -527,19 +531,41 @@ async function generate() {
 	};
 }
 
-async function unprotectCatch(
-	key: Uint8Array,
-	group: bigint,
-	frame: number,
-	payload: Uint8Array,
-	limit: number,
-): Promise<string> {
-	try {
-		await unprotect(key, group, frame, payload, limit);
-		return "unexpected-success";
-	} catch (error) {
-		return error instanceof ProfileError ? error.code : "error";
-	}
+type NegativeVector = { id: string; error: string } & (
+	| {
+			operation: "open";
+			credential: ReturnType<typeof credentialJson>;
+			physical_name: string;
+			domain: Domain;
+			group: number;
+			frame: number;
+			key: string;
+			payload: string;
+			payload_limit: number;
+	  }
+	| {
+			operation: "protect";
+			key: string;
+			group: number;
+			frame: number;
+			plaintext_len: number;
+			payload_limit: number;
+			header?: string;
+			subscribe_id?: number;
+			timestamp?: number;
+	  }
+	| { operation: "identity"; group: string; frame: number | "NaN" | "Infinity" | "-Infinity" }
+	| { operation: "credential"; credential: ReturnType<typeof credentialJson> }
+);
+
+function parseCredential(row: ReturnType<typeof credentialJson>): Credential {
+	return {
+		profile: row.profile,
+		context: unhex(row.context),
+		generation: BigInt(row.generation),
+		kid: BigInt(row.kid),
+		secret: unhex(row.secret),
+	};
 }
 
 function pathFor(file: string): string {
@@ -550,12 +576,7 @@ async function verify(doc: Awaited<ReturnType<typeof generate>>): Promise<void> 
 	if (doc.profile !== PROFILE) throw new Error(`profile ${doc.profile}`);
 
 	for (const row of doc.derivation) {
-		const credential: Credential = {
-			context: unhex(String(row.context)),
-			generation: BigInt(row.generation),
-			kid: BigInt(row.kid),
-			secret: unhex(String(row.secret)),
-		};
+		const credential = parseCredential(row);
 		const named = await deriveName(credential, utf8(String(row.semantic_name)));
 		const keyed = await deriveKey(credential, named.physicalName, Number(row.domain) as Domain, named.prk);
 		assertEqual("prk", hex(named.prk), String(row.prk));
@@ -566,15 +587,19 @@ async function verify(doc: Awaited<ReturnType<typeof generate>>): Promise<void> 
 		assertEqual("key", hex(keyed.key), String(row.key));
 	}
 
+	for (const row of doc.naming) {
+		const named = await deriveName(parseCredential(doc.credential), utf8(row.semantic_name));
+		assertEqual(`${row.id} naming`, named.physicalName, row.physical_name);
+		assertEqual(`${row.id} name material`, hex(named.material), row.name_material);
+	}
+
 	for (const row of [...doc.groups, ...doc.datagrams, ...doc.catalog]) {
-		const credential: Credential = {
-			context: unhex(String(row.context)),
-			generation: BigInt(row.generation),
-			kid: BigInt(row.kid),
-			secret: unhex(String(row.secret)),
-		};
+		const credential = parseCredential(row);
 		const named = await deriveName(credential, utf8(String(row.semantic_name)));
 		const keyed = await deriveKey(credential, named.physicalName, Number(row.domain) as Domain, named.prk);
+		assertEqual(`${row.id} name`, named.physicalName, row.physical_name);
+		assertEqual(`${row.id} key`, hex(keyed.key), row.key);
+		assertEqual(`${row.id} nonce`, hex(nonce(BigInt(row.group), row.frame)), row.nonce);
 		const group = BigInt(row.group);
 		const frame = Number(row.frame);
 		const limit = Number(row.payload_limit);
@@ -584,31 +609,73 @@ async function verify(doc: Awaited<ReturnType<typeof generate>>): Promise<void> 
 		assertEqual(`${row.id} round-trip`, hex(opened), String(row.plaintext));
 	}
 
-	const video = doc.groups[0];
-	const key = unhex(String(video.key));
-	await expectError("authentication", () =>
-		unprotect(key, 42n, 0, unhex(String(doc.negative[0].payload)), MAX_GROUPED_PAYLOAD),
-	);
-	await expectError("authentication", () =>
-		unprotect(key, 42n, 1, unhex(String(video.payload)), MAX_GROUPED_PAYLOAD),
-	);
-	await expectError("identity", () => nonce(0n, MAX_U32 + 1));
-	await expectError("identity", () => nonce(BigInt(MAX_U53) + 1n, 0));
-	await expectError("oversize", () =>
-		protect(key, 0n, 0, new Uint8Array(MAX_GROUPED_PLAINTEXT + 1), MAX_GROUPED_PAYLOAD),
-	);
-	await expectError("oversize", () =>
-		protect(key, 0n, 0, new Uint8Array(MAX_DATAGRAM_BODY - TAG_LEN + 1), MAX_DATAGRAM_BODY),
-	);
-	await expectError("oversize", () => unprotect(key, 0n, 0, new Uint8Array([0]), MAX_GROUPED_PAYLOAD));
-	await expectError("invalid_secret", () => checkCredential({ ...cred(), secret: new Uint8Array(16) }));
-
-	const restart = doc.negative.find((row) => row.id === "restart-new-generation");
-	if (!restart || typeof restart.payload !== "string" || typeof restart.key !== "string") {
-		throw new Error("missing restart-new-generation vector");
+	for (const row of doc.datagrams) {
+		assertEqual(
+			"datagram payload budget",
+			String(row.payload_limit),
+			String(MAX_DATAGRAM_BODY - unhex(row.header).length),
+		);
+		const key = unhex(String(row.key));
+		await protect(
+			key,
+			BigInt(row.group),
+			0,
+			new Uint8Array(Number(row.payload_limit) - TAG_LEN),
+			Number(row.payload_limit),
+		);
+		await expectError("oversize", () =>
+			protect(
+				key,
+				BigInt(row.group),
+				0,
+				new Uint8Array(Number(row.payload_limit) - TAG_LEN + 1),
+				Number(row.payload_limit),
+			),
+		);
 	}
-	const opened = await unprotect(unhex(restart.key), 42n, 0, unhex(restart.payload), MAX_GROUPED_PAYLOAD);
-	assertEqual("restart plaintext", hex(opened), String(restart.plaintext));
+	const compressed = doc.catalog.find((row) => row.id === "catalog-compressed");
+	const plain = doc.catalog.find((row) => row.id === "catalog-json");
+	if (!compressed || !plain) throw new Error("missing catalog vectors");
+	const inflated = inflateRawSync(concat(unhex(String(compressed.plaintext)), new Uint8Array([0, 0, 255, 255])), {
+		finishFlush: constants.Z_SYNC_FLUSH,
+	});
+	assertEqual("catalog decompression", hex(inflated), String(plain.plaintext));
+
+	for (const row of doc.negative) {
+		await expectError(row.error, async () => {
+			switch (row.operation) {
+				case "open": {
+					const keyed = await deriveKey(parseCredential(row.credential), row.physical_name, row.domain);
+					assertEqual(`${row.id} key`, hex(keyed.key), row.key);
+					await unprotect(keyed.key, BigInt(row.group), row.frame, unhex(row.payload), row.payload_limit);
+					break;
+				}
+				case "protect":
+					if (row.header !== undefined)
+						assertEqual(
+							`${row.id} budget`,
+							String(row.payload_limit),
+							String(MAX_DATAGRAM_BODY - unhex(row.header).length),
+						);
+					await protect(
+						unhex(row.key),
+						BigInt(row.group),
+						row.frame,
+						new Uint8Array(row.plaintext_len),
+						row.payload_limit,
+					);
+					break;
+				case "identity":
+					nonce(BigInt(row.group), Number(row.frame));
+					break;
+				case "credential":
+					checkCredential(parseCredential(row.credential));
+					break;
+				default:
+					throw new Error(`unknown negative operation: ${JSON.stringify(row)}`);
+			}
+		});
+	}
 }
 
 function assertEqual(label: string, actual: string, expected: string): void {
