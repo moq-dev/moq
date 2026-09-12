@@ -16,6 +16,18 @@ with the current dev tree before starting.
 
 ## Quests
 
+- [FFI read lanes](/quest/m1/api-ffi-read-lanes.md) - pending group and datagram reads progress independently on one subscription
+- [Connection recovery](/quest/m1/api-connection-recovery.md) - refreshed URLs recover shared/private handles under one terminal-state contract
+- [Relay embedding](/quest/m1/api-relay-embedding.md) - custom routes retain the owner of listeners, workers, and shutdown
+- [Numeric API invariants](/quest/m1/api-numeric-invariants.md) - accepted timescales and delivery properties are wire-encodable without truncation
+- [FFI frame cursor](/quest/m1/api-ffi-frame-cursor.md) - empty groups and cancelled reads do not become false EOF or lost frames
+- [JS wrapper lifetime](/quest/m1/api-js-wrapper-lifecycle.md) - closing or leaving JSON/binary readers releases their owned demand
+- [FFI configuration](/quest/m1/api-ffi-configuration.md) - configuration applies or fails explicitly rather than depending on lock timing
+- [Subscription bounds](/quest/m1/api-subscription-bounds.md) - local and requested ranges use consistent exclusive ends
+- [Readable input contract](/quest/m1/api-getter-contract.md) - accepted Getter types match runtime behavior
+- [JSON edit transaction](/quest/m1/api-json-edit-commit.md) - failed publication cannot disappear into a guard-drop warning
+- [JS wrapper configuration](/quest/m1/api-js-wrapper-config.md) - constructor shapes agree and consumer options exclude ignored producer knobs
+- [Publisher finish ownership](/quest/m1/api-producer-finish.md) - terminal Rust methods consume their handles while group cuts remain reusable
 - [Worker metrics](/quest/m1/uring-metrics.md) - per-worker io_uring counters at `/metrics`, so the runtime's own health is visible
 - [Stream sessions](/quest/m1/uring-tcp/README.md) - serve WebSocket and HTTP from the io_uring workers, where io_uring pays off most
 - [qlog](/quest/m1/uring-qlog.md) - io_uring workers write qlog traces instead of refusing the setting
@@ -72,4 +84,5 @@ with the current dev tree before starting.
 - [Route cold cost](/quest/m1/route-cold-cost.md) - MoqRoute carries warm and cold, so an observed route re-announces intact
 - [Anonymous rank](/quest/m1/anonymous-route-rank.md) - moq-net: a route through an anonymous hop ranks below every identified route at any cost, and hop 0 travels the chain to say so
 - [#2248](/quest/m1/2248-moq-mux-rebase-fmp4-export-timestamps-for-late-subscribers.md) - moq-mux: rebase fMP4 export timestamps for late subscribers
+- [External API proof](/quest/m1/api-release-proof.md) - packaged callers exercise real moq.pro use cases and record each audit finding's disposition
 - [Merge dev](/quest/m1/merge-dev.md) - dev lands on main with a closing keyword for every issue it fixed

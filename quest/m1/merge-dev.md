@@ -19,6 +19,7 @@ lands.
 
 ## Required
 
+- [External API proof](/quest/m1/api-release-proof.md) - the packaged consumer fixture and explicit fix/deferral decisions must be recorded before merge
 - [Archive](/quest/m1/archive/README.md) - moq.pro needs archive-backed recording on the release dev produces
 - [Announce handle](/quest/m1/announce-handle.md) - the origin surface the merge ships
 - [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - every native binding on that surface
