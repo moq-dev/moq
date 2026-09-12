@@ -220,12 +220,7 @@ test("the code tables match the spec", () => {
 	// placeholders this implementation still sends. 32-47 carries no meaning the draft
 	// publishes, so a code we put in it is an agreement with our own Rust implementation
 	// rather than a spec value.
-	const assignedLite: StreamCode[] = [
-		StreamCode.NoCapacity,
-		StreamCode.NotFound,
-		StreamCode.Old,
-		StreamCode.Evicted,
-	];
+	const assignedLite: StreamCode[] = [StreamCode.NoCapacity, StreamCode.NotFound, StreamCode.Old, StreamCode.Evicted];
 	const placeholders: StreamCode[] = [StreamCode.FrameTooLarge];
 	for (const code of Object.values(StreamCode)) {
 		if (assignedLite.includes(code)) {
