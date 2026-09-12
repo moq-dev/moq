@@ -17,6 +17,7 @@ above ([hang](/lib/rs/hang)); relays and CDNs implement only this.
 
 - **Origins** scope what a session can see, and merge duplicate subscriptions so a broadcast is pulled upstream once no matter how many local readers.
 - **Broadcasts** are announced as prefix routes and discovered by prefix, or served on demand from a dynamic handler when a path nobody announced is requested.
+- **Patterns** (`Pattern`, `Patterns`) are re-exported from [`moq-pattern`](https://docs.rs/moq-pattern). Literal `Path` stays a coordinate.
 - **Tracks** carry groups with a priority, an ordering preference, a retention window, and a timescale. Subscribers set their own priority and max age and can change them live.
 - **Groups** are written frame by frame and delivered on independent streams. Old groups are cached for fetch-by-sequence; stale groups are skipped per the subscriber's budget.
 - **Datagrams** send a single small frame unreliably on moq-lite 05+.

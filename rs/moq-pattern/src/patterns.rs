@@ -80,12 +80,14 @@ impl Patterns {
 	}
 }
 
+#[cfg(feature = "serde")]
 impl serde::Serialize for Patterns {
 	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
 		serializer.collect_seq(self.iter())
 	}
 }
 
+#[cfg(feature = "serde")]
 impl<'de> serde::Deserialize<'de> for Patterns {
 	/// Reads a list and reduces it, so a persisted union is canonical after a round trip.
 	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -197,6 +199,7 @@ mod tests {
 		assert!(!Patterns::new().matches(""));
 	}
 
+	#[cfg(feature = "serde")]
 	#[test]
 	fn serde_round_trips_reduced() {
 		let set: Patterns = serde_json::from_str(r#"["a/b", "a/*", "**/c"]"#).unwrap();

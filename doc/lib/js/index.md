@@ -13,6 +13,7 @@ and WebAudio. `@moq/net` also runs in Node, Bun, and Deno.
 | Package | Does |
 | --- | --- |
 | [@moq/net](/lib/js/net) | The pub/sub layer: connections, broadcasts, tracks, groups, frames, discovery. |
+| [@moq/pattern](https://www.npmjs.com/package/@moq/pattern) | Exact path patterns: grammar, matching, and set algebra. Re-exported by `@moq/net` and `@moq/token`. |
 | [@moq/hang](/lib/js/hang) | The media layer: catalog types and containers. |
 | [@moq/watch](/lib/js/watch) | Subscribe, decode, and render. `<moq-watch>` plus an optional UI overlay. |
 | [@moq/publish](/lib/js/publish) | Capture, encode, and publish. `<moq-publish>` plus an optional UI overlay. |

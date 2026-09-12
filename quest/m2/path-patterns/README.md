@@ -51,14 +51,13 @@ the same tier.
 
 ### Ownership and compatibility
 
-`moq_net::path` and `@moq/net`'s `Path` module own the grammar and algebra
-beside the literal `Path`; `moq-token` and `@moq/token` take a dependency on
-them when [Claims](/quest/m2/path-patterns/claims.md) needs patterns. Golden
-cross-language vectors (`rs/moq-net/tests/pattern.json`), exhaustive small
-cases, randomized round trips, and the moq-net fuzz harness's `pattern` target
-prevent semantic drift at the authorization boundary. Matching is
-linear and inherits `Path::MAX_PARTS` (32), which also bounds residual
-expansion.
+`moq-pattern` and `@moq/pattern` own the grammar and algebra; `moq-net`,
+`moq-token`, `@moq/net`, and `@moq/token` re-export them. Literal `Path` types
+stay in `moq-net` / `@moq/net`. Golden cross-language vectors
+(`rs/moq-pattern/tests/pattern.json`), exhaustive small cases, randomized round
+trips, and the moq-net fuzz harness's `pattern` target prevent semantic drift at
+the authorization boundary. Matching is linear and inherits `Path::MAX_PARTS`
+(32), which also bounds residual expansion.
 
 Every persisted or wire policy carries a version. Missing `v` is v0 prefix
 semantics forever. V1 uses exact patterns and rejects legacy and v1 grant

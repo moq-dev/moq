@@ -1,11 +1,11 @@
 /**
  * Segment-aware path matching, mirroring `@moq/net`'s path module.
  *
- * @moq/token is deliberately free of other @moq/* dependencies so a token minting
- * service doesn't pull in the networking stack, so the handful of prefix operations
- * {@link authorize} needs live here instead. The normalization and boundary rules
- * must stay identical to the Rust `moq-token` crate's `path` module, which mints and
- * checks the same tokens.
+ * v0 prefix grants still use these helpers. v1 path patterns live in `@moq/pattern`
+ * and are re-exported from this package, so a token minting service does not pull
+ * in the networking stack. The normalization and boundary rules must stay identical
+ * to the Rust `moq-token` crate's `path` module, which mints and checks the same
+ * tokens.
  *
  * Every function below assumes its arguments are already {@link normalize}d.
  *

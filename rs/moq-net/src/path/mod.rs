@@ -2,15 +2,14 @@
 //!
 //! [`Path`] is a literal coordinate: `/`-separated segments, normalized, with
 //! segment-aware prefix operations. [`Pattern`] describes a set of paths with
-//! wildcards, and [`Patterns`] is a union of them reduced by containment. Grants,
-//! origin scopes, announce interests, and wildcard advertisements all use the
-//! one pattern grammar, so nothing resembles a second glob dialect.
+//! wildcards, and [`Patterns`] is a union of them reduced by containment. The
+//! grammar and algebra live in [`moq-pattern`](moq_pattern); this module
+//! re-exports them beside [`Path`] so grants, origin scopes, announce interests,
+//! and wildcard advertisements share one dialect. New path construction and
+//! publication reserve `*`; a decoder may still see a `*` segment on a legacy
+//! path during rollout.
 
-mod pattern;
-mod patterns;
-
-pub use pattern::{InvalidPattern, Pattern, Segment, Specificity};
-pub use patterns::Patterns;
+pub use moq_pattern::{InvalidPattern, Pattern, Patterns, Segment, Specificity};
 
 use std::borrow::Cow;
 use std::fmt::{self, Display};

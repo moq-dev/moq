@@ -4978,6 +4978,7 @@ dependencies = [
  "kio",
  "loom",
  "moq-net",
+ "moq-pattern",
  "num_enum",
  "rand 0.10.2",
  "serde",
@@ -5006,6 +5007,15 @@ dependencies = [
  "cudarc",
  "lazy_static",
  "libloading 0.9.0",
+]
+
+[[package]]
+name = "moq-pattern"
+version = "0.1.0"
+dependencies = [
+ "moq-pattern",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -5154,6 +5164,7 @@ dependencies = [
  "aws-lc-rs",
  "base64 0.23.1",
  "jsonwebtoken",
+ "moq-pattern",
  "p256",
  "p384",
  "reqwest",

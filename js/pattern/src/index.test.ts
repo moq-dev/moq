@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { compareSpecificity, type ErrorCode, Pattern, PatternError, Patterns, type Segment } from "./path.ts";
+import { compareSpecificity, type ErrorCode, Pattern, PatternError, Patterns, type Segment } from "./index.ts";
 
 // The golden vectors live with the Rust crate, so both implementations replay one file.
 interface Vectors {
@@ -18,7 +18,7 @@ interface Vectors {
 	unionContains: { union: string[]; pattern: string; expect: boolean }[];
 }
 const vectors = JSON.parse(
-	await Bun.file(join(import.meta.dir, "../../../rs/moq-net/tests/pattern.json")).text(),
+	await Bun.file(join(import.meta.dir, "../../../rs/moq-pattern/tests/pattern.json")).text(),
 ) as Vectors;
 
 function errorCode(fn: () => unknown): ErrorCode | "ok" {

@@ -1,10 +1,9 @@
 //! Segment-aware path matching, mirroring `moq_net::Path`.
 //!
-//! moq-token is deliberately free of moq-* dependencies so a token minting service
-//! doesn't pull in the wire stack, so the handful of prefix operations
-//! [`Claims::authorize`](crate::Claims::authorize) needs live here instead. The
-//! normalization and boundary rules must stay identical to `moq_net::Path`, which
-//! the relay applies to the same strings.
+//! v0 prefix grants still use these helpers. v1 path patterns live in `moq-pattern`
+//! and are re-exported from this crate, so a token minting service does not pull in
+//! the wire stack. The normalization and boundary rules must stay identical to
+//! `moq_net::Path`, which the relay applies to the same strings.
 //!
 //! Every function below assumes its arguments are already [`normalize`]d.
 

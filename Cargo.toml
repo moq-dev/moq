@@ -21,6 +21,7 @@ members = [
     "rs/moq-net",
     "rs/moq-net/fuzz",
     "rs/moq-nvenc",
+    "rs/moq-pattern",
     "rs/moq-relay",
     "rs/moq-rtc",
     "rs/moq-rtmp",
@@ -57,6 +58,7 @@ default-members = [
     "rs/moq-mux",
     "rs/moq-native",
     "rs/moq-nvenc",
+    "rs/moq-pattern",
     "rs/moq-relay",
     "rs/moq-rtc",
     "rs/moq-rtmp",
@@ -137,6 +139,7 @@ moq-net = { version = "0.2.20", path = "rs/moq-net" }
 # driver at runtime. Compiles on any platform (macOS included) but only actually
 # used by moq-video on Linux.
 moq-nvenc = { version = "0.0.4", path = "rs/moq-nvenc" }
+moq-pattern = { version = "0.1.0", path = "rs/moq-pattern" }
 moq-rtc = { version = "0.2.9", path = "rs/moq-rtc" }
 moq-rtmp = { version = "0.2.9", path = "rs/moq-rtmp" }
 moq-sock = { version = "0.0.1", path = "rs/moq-sock" }

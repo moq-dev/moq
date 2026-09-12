@@ -576,12 +576,14 @@ impl Ord for Pattern {
 	}
 }
 
+#[cfg(feature = "serde")]
 impl serde::Serialize for Pattern {
 	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
 		serializer.serialize_str(self.as_str())
 	}
 }
 
+#[cfg(feature = "serde")]
 impl<'de> serde::Deserialize<'de> for Pattern {
 	/// Reads the canonical text, so a persisted pattern is validated on the way in.
 	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -919,6 +921,7 @@ mod tests {
 		assert!(!pattern("a/*").has_globstar());
 	}
 
+	#[cfg(feature = "serde")]
 	#[test]
 	fn serde_round_trips_as_text() {
 		let p = pattern("a/*/**");

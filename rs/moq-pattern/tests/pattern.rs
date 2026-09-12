@@ -1,6 +1,6 @@
-//! Replays the golden vectors shared with `js/net`, so the two implementations agree.
+//! Replays the golden vectors shared with `@moq/pattern`, so the two implementations agree.
 
-use moq_net::path::{InvalidPattern, Pattern, Patterns, Segment};
+use moq_pattern::{InvalidPattern, Pattern, Patterns, Segment};
 use serde_json::Value;
 
 fn vectors() -> Value {

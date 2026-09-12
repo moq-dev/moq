@@ -1,0 +1,25 @@
+[package]
+name = "moq-pattern"
+description = "Exact path patterns for Media over QUIC: grammar, matching, and set algebra."
+authors = ["Luke Curley"]
+repository = "https://github.com/moq-dev/moq"
+license = "MIT OR Apache-2.0"
+
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+
+keywords = ["moq", "path", "pattern", "glob", "wildcard"]
+categories = ["parsing"]
+
+[features]
+# Persist and transmit patterns as their canonical text.
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Enable serde so the crate's own tests cover the optional impls in the merge gate.
+moq-pattern = { path = ".", features = ["serde"] }
+serde_json = { workspace = true }

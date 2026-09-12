@@ -7,7 +7,7 @@
 //! interplay needs three-segment patterns and six-segment paths for every witness to
 //! fit), the other exercises partial segments against multi-byte parts.
 
-use moq_net::path::{Pattern, Patterns, Segment};
+use moq_pattern::{Pattern, Patterns, Segment};
 
 struct Alphabet {
 	segments: Vec<Segment>,

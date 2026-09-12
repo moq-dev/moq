@@ -30,6 +30,7 @@
 		"doc",
 		"js/net",
 		"js/clock",
+		"js/pattern",
 		"js/token",
 		"js/flate",
 		"js/binary",

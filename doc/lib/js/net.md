@@ -44,7 +44,7 @@ for (;;) {
 - **Subscriptions** carry a priority and max age; groups arrive out of order and are read frame by frame, with `Lagged` when a reader asks for a frame the group never held and `GroupTooLarge` when a write exceeds the cache budget and aborts the group.
 - **Datagrams** on moq-lite 05+ and fetch-by-sequence for history.
 - **Errors** split by scope: a stream reset throws `StreamError` with a `StreamCode`, a session close gives `SessionError` with a `SessionCode`. The registries are disjoint, so the same number means different things in each, and 64+ is yours. Same on either transport. Named conditions like `Lagged` subclass `StreamError`, so one `code` check catches a gap whether it happened here or at the peer, and resetting a moq-lite stream with one sends that code rather than a bare internal error. IETF streams use their own mapping: cancellation sends CANCELLED, other local failures send INTERNAL\_ERROR, and received codes remain opaque.
-- **Paths** with `Path.relative` for the cross-broadcast catalog references hang uses.
+- **Paths** with `Path.relative` for the cross-broadcast catalog references hang uses. Path patterns (`Path.Pattern`, `Path.Patterns`) are re-exported from [`@moq/pattern`](https://www.npmjs.com/package/@moq/pattern).
 
 Examples in
 [`js/net/examples/`](https://github.com/moq-dev/moq/tree/main/js/net/examples).

@@ -28,7 +28,7 @@ export {
 export * as Group from "./group.ts";
 /** Broadcast routing tables, independent of any connection. */
 export * as Origin from "./origin.ts";
-/** Broadcast path utilities with delimiter-aware prefix matching. */
+/** Broadcast path utilities with delimiter-aware prefix matching. Path patterns are re-exported from `@moq/pattern`. */
 export * as Path from "./path.ts";
 /** Branded time types (nanoseconds, microseconds, milliseconds, seconds) with conversions. */
 export * as Time from "./time.ts";
