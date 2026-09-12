@@ -460,7 +460,10 @@ mod tests {
 		drop(reserved);
 		let track = broadcast.create_track("video0", track).unwrap();
 		let media = catalog
-			.media_producer(track.clone(), moq_mux::catalog::hang::Container::Legacy)
+			.media_producer(
+				track.clone(),
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+			)
 			.unwrap();
 		(catalog, registration, track, media)
 	}
@@ -539,8 +542,11 @@ mod tests {
 		drop(reserved);
 		let recorder = catalog.enroll("video0").unwrap();
 		let track = media_broadcast.create_track("video0", None).unwrap();
-		let mut media =
-			moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy).with_recorder(recorder);
+		let mut media = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+		)
+		.with_recorder(recorder);
 		write_three_gops(&mut media);
 
 		let app = Server::new(pair.sub_origin.consume(), crate::export::Config::default()).router();
