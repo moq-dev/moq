@@ -326,11 +326,13 @@ impl VideoEncoder {
 
 	fn publish_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
 		block_on(self.encoder.set_bitrate(moq_net::bandwidth::Rate::from_bps(bitrate)))?;
-		if let Some(reservation) = &self.reservation {
-			reservation.update(moq_net::bandwidth::Rate::from_bps(bitrate));
-		}
+		// Ceiling first: `update` wakes the follower, which must not read the old
+		// floor and retune above this cap before parking on an unchanged grant.
 		if let Some(ceiling) = &self.ceiling {
 			ceiling.store(bitrate, Ordering::SeqCst);
+		}
+		if let Some(reservation) = &self.reservation {
+			reservation.update(moq_net::bandwidth::Rate::from_bps(bitrate));
 		}
 		Ok(())
 	}

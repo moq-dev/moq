@@ -345,11 +345,13 @@ impl MoqVideoProducer {
 					.set_bitrate(moq_net::bandwidth::Rate::from_bps(bitrate)),
 			)?;
 		}
-		if let Some(reservation) = self.reservation.lock().unwrap().as_ref() {
-			reservation.update(bitrate);
-		}
+		// Ceiling first: `update` wakes the follower, which must not read the old
+		// floor and retune above this cap before parking on an unchanged grant.
 		if let Some(follow) = self.follow.lock().unwrap().as_ref() {
 			follow.ceiling.store(bitrate, Ordering::SeqCst);
+		}
+		if let Some(reservation) = self.reservation.lock().unwrap().as_ref() {
+			reservation.update(bitrate);
 		}
 		self.applied.store(bitrate, Ordering::SeqCst);
 		Ok(())
