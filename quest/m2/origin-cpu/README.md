@@ -2,14 +2,20 @@
 
 ## Goal
 
-Announce, subscribe, and exact-path resolve stay cheap as the live
-advertisement set grows. Chat (`moq-bench/config/announce.toml`) and a
-cluster mesh (one cursor per peer) are the shapes this must not explode on.
+Measure and reduce origin lookup and update CPU under many broadcasts,
+alternative sources, and announcement consumers. Separate path traversal,
+route selection, and output-sized replay costs before changing structures.
 
-[Relay memory](/quest/m2/relay-memory.md) is bytes per announcement. This
-line is lookup CPU.
+Each quest is independently shippable and retains paired measurements and
+CI correctness coverage. Share registered benchmark fixtures when available;
+a useful finding that no optimization is warranted also completes a quest.
 
 ## Quests
 
-- [Index the origin route table](/quest/m2/origin-cpu/origin-index.md) - `best_route` and cursor sync stop scanning every live advertisement
-- [Origin local tree](/quest/m2/origin-cpu/origin-tree.md) - exact-path resolve does not lock and hash every path segment
+- [Route-selection CPU](/quest/m2/origin-cpu/origin-index.md) - measure and optimize per-broadcast source selection
+- [Origin local tree](/quest/m2/origin-cpu/origin-tree.md) - measure and optimize path traversal under churn
+
+## Related
+
+- [Relay memory](/quest/m2/relay-memory.md) - memory rather than lookup CPU
+- [Path patterns](/quest/m2/path-patterns/README.md) - matching and authorization contracts

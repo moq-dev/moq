@@ -1,39 +1,37 @@
-# [L] Index the origin route table
+# [M] Measure and reduce origin route-selection CPU
 
 ## Goal
 
-`best_route`, announce cursor replay, and `request_broadcast` are logarithmic
-(or otherwise sublinear) in the number of live advertisements. Hop/cost/
-split-horizon ranking does not change.
+Reduce demonstrated route-selection overhead while preserving source
+identity, ranking, exclusion, failover, and announcement behavior.
 
 ## Plan
 
-`OriginState::routes` is a `Vec<RouteEntry>` with the comment "Scans are
-linear: the table holds one entry per live advertisement."
-`best_route` collects every covering entry into a `Vec` then takes longest
-prefix plus `route_order`. Every announce runs `sync_route` across all
-cursors, and `sync_cursor` re-filters the entire list.
+The current `rs/moq-net/src/model/origin.rs` stores alternative sources in
+`FrontState::routes` per broadcast. `FrontState::best_route` selects from
+that set; it does not scan a global advertisement table. Trace current
+lookup, source-update, and announcement paths before choosing an index.
 
-Keep one source of truth, but index by path prefix (radix / segment tree /
-`BTreeMap` of prefixes with a covering-chain walk). `best_route` walks the
-path's prefix chain. `sync_route` recomputes only cursors whose scopes
-intersect the changed prefix. Keep `route_order` (cost, hop length, FNV,
-newest id). Do not shard the origin across workers (out of scope in
-[perf](/quest/m1/perf/README.md)).
+Add a registered Criterion target using public origin operations. Sweep
+broadcast count, sources per broadcast, cursor count, and update churn
+independently. Separate initial replay from incremental notification and
+exact-path lookup; replay must pay for every result it emits. Use
+`rs/moq-bench/config/announce.toml` to check that microbenchmark wins survive relay load.
 
-Fold the empty `HashSet::new()` on the miss path (`request_broadcast`) into
-the same signature change: `best_route` takes `Option<&HashSet<u64>>` or a
-static empty set.
+Optimize only a measured bottleneck. Compare a retained linear scan at small
+source counts with any proposed cache or index, accounting for invalidation,
+extra memory, and update cost. Preserve the complete current `route_order`
+and exclusion rules. No replacement matcher, route semantics, public API,
+or wire change belongs here.
 
-Acceptance: new Criterion target `rs/moq-net/benches/origin.rs`: announce N
-prefixes, then `best_route` / `request_broadcast` / cursor replay; sweep
-N = 1k/10k/100k, cursors = 1/8/64. Plus `just bench` with
-`rs/moq-bench/config/announce.toml`. Lookup and announce CPU flat in N (or
-log N). Hop/cost/split-horizon tests in `origin.rs` still pass. Zero alloc
-on the common "no refused ids" lookup.
+Acceptance includes paired CPU/allocation results and CI regressions for
+source replacement and removal, route changes, exclusion changes, failover, and scoped
+announcement delivery. A measured no-win closes the quest with retained
+evidence. Do not claim sublinear replay when the result set grows linearly.
 
 ## Related
 
-- [Relay memory](/quest/m2/relay-memory.md) - bytes per announcement, not this CPU
-- [Route gauge](/quest/m2/route-gauge.md) - operator visibility
-- [Origin local tree](/quest/m2/origin-cpu/origin-tree.md) - the other origin structure
+- [Relay memory](/quest/m2/relay-memory.md) - memory measurements
+- [Origin local tree](/quest/m2/origin-cpu/origin-tree.md) - path traversal costs
+- [Path patterns](/quest/m2/path-patterns/README.md) - owns future matching semantics
+- [Wildcard advertisements](/quest/m2/wildcard/README.md) - owns future route resolution

@@ -1,25 +1,39 @@
-# [M] Cut MPEG-TS ingest copies
+# [M] Measure and reduce MPEG-TS packet copies
 
 ## Goal
 
-TS import is linear in input size without extra 188-byte copies or
-`scratch.drain` shifts. Tracks, PTS, and SCTE-35 match today.
+Reduce measured packet-buffer and reader-adapter work during TS import while
+preserving tracks, timing, metadata, input recovery, and published media. Keep
+public APIs and wire formats unchanged.
 
 ## Plan
 
-SRT `feed` → `scratch.extend_from_slice` → copy 188-byte `pkt` →
-`Feed.data.extend_from_slice` → `Read::read` copies into mpeg2ts.
-`scratch.drain(..off)` shifts the tail. Then H.264 Split copies NALs
-again.
+`Import::decode` copies caller input into scratch, makes a 188-byte packet copy,
+and copies that packet through the shared Feed adapter into mpeg2ts. Its
+`scratch.drain(..off)` runs once per decode after whole packets have been
+consumed, usually shifting less than 188 trailing bytes; this is not evidence
+of quadratic behavior. Measure copy costs with varied caller chunk sizes.
 
-Cursor over scratch (no drain). Feed mpeg2ts from `&pkt` without the mutex
-`Feed` bounce, or parse PES without the `Read` adapter. Keep Split changes
-in [annexb](/quest/m2/mux-copies/annexb.md).
+Investigate reducing packet and Feed copies while preserving the persistent
+reader's PAT/PMT state and routing. Keep resynchronization, continuity and
+discontinuity handling, partial packets, PES assembly, EOF behavior, and
+SCTE-35/private sections intact. Do not replace the parser or bypass its
+validation merely to meet an assumed copy budget. Annex-B assembly is separate.
 
-Acceptance: Criterion `ts.import` on `bbb.ts` / `kyrion_mpeg2av_ac3.ts`;
-SRT ingest of the same bytes. Compare CPU vs `ffmpeg -c copy` to null.
+Add Criterion cases using
+`rs/moq-mux/src/container/ts/test_data/bbb.ts` and
+`rs/moq-mux/src/container/ts/test_data/kyrion_mpeg2av_ac3.ts`, including small,
+packet-aligned, and large chunks. Wire published-media/timestamp/metadata
+comparisons and damaged/fragmented-input regressions into existing mux CI tests.
+Exercise SRT integration if its code changes. Compare identical before/after
+workloads; ffmpeg numbers are contextual, not a correctness or speedup gate.
+Follow the measurement and no-win completion rules in the
+[questline](/quest/m2/mux-copies/README.md).
+
+Include a long-running feed that bounds retained scratch storage after consumed
+packets are reclaimed; cursor-based parsing must not retain the whole stream.
 
 ## Related
 
-- [#3489](/quest/m2/3489-ts-import-stream-liveness.md) - liveness, not copies
-- [Annex-B split](/quest/m2/mux-copies/annexb.md) - NAL copies after PES
+- [TS stream liveness](/quest/m2/3489-ts-import-stream-liveness.md) - independent observability work
+- [Annex-B assembly](/quest/m2/mux-copies/annexb.md) - codec work after PES reassembly

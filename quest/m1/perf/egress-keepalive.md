@@ -1,32 +1,35 @@
-# [S] Stamp egress keep-alive once per prefetch fill
+# [S] Measure and reduce egress cache-refresh overhead
 
 ## Goal
 
-Fanout send stamps cache expiry once per Prefetch/Buffer fill (or per
-`refresh_interval`), not once per batched frame. Group expiry tests still
-pass.
+Reduce measured cache-refresh overhead during batched delivery without
+expiring a group while a slow subscriber or FETCH reader is draining it.
+Retain the current behavior if the improvement is within measurement noise.
 
 ## Plan
 
-Prefetch fill already stamps once per 8 frames. `refresh_if_stale` only
-re-stamps after `refresh_interval`. The wire publishers then call
-`group.keep_alive()` per batched frame (`lite/publisher.rs`,
-`ietf/publisher.rs`), which always does `state.read().charge.refresh()` →
-`pool.stamp()` → `Instant::now()`. That undoes both amortizations on the
-fanout send path.
+`group::Consumer::keep_alive` takes a state read guard and calls
+`Charge::refresh`. Both lite and IETF publishers call it between completed
+frame writes. This protects a drain that spans longer than `latency_max`;
+a stamp only at batch fill is insufficient. `Charge::touch` already skips
+population accounting when the coarse timestamp has not advanced.
 
-Reuse `refresh_if_stale` (or stamp once per `poll_read_frames` fill) on
-both serve loops. Keep `slow_prefetch_reader_survives_expiry`.
+Measure read-guard, clock, and atomic costs separately for fast fanout and
+flow-controlled readers, including SUBSCRIBE and FETCH. Preserve per-frame
+liveness refresh unless an alternative proves the same retention behavior.
+Do not introduce another clock or pool-accounting mechanism: those belong to
+[Cache shard](/quest/m1/perf/cache-shard.md). Recheck its implementation
+before optimizing the remaining publisher overhead.
 
-This is model egress stamping, not ingest-batch (ingest lock/clock) and
-not uring #3122 (drive loop clock).
-
-Acceptance: existing `group_read_frames` / `track_fanout_group` plus a
-lite session drain. Clock reads / `charge.refresh` per delivered frame drop
-to ~1 per fill. No expiry regression.
+Extend the existing group and track Criterion targets and add a bounded
+session regression to normal CI. Keep
+`slow_batch_reader_survives_expiry_with_keep_alive`, and cover expiry scans
+while a batch drains, cancellation, and eventual expiry after reads stop.
+Report delivered bytes, refresh cost, CPU, and throughput for paired runs;
+fewer refresh calls alone are not evidence of a win.
 
 ## Related
 
-- [Ingest batch](/quest/m1/perf/ingest-batch.md) - ingest, not egress
-- [#3122](/quest/m1/perf/3122-moq-uring-2-5-of-relay-cpu-is-vdso-clock-reads-the-drive.md) - uring drive loop
-- [kio wake](/quest/m1/perf/kio-wake.md) - park/wake locks, not cache stamps
+- [Cache shard](/quest/m1/perf/cache-shard.md) - owns shared accounting and clock costs
+- [Ingest batch](/quest/m1/perf/ingest-batch.md) - ingest batching
+- [#3122](/quest/m1/perf/3122-moq-uring-2-5-of-relay-cpu-is-vdso-clock-reads-the-drive.md) - runtime clock costs

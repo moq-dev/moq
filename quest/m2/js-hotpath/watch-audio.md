@@ -1,30 +1,41 @@
-# [S] Copy decoded audio into the ring and idle the worklet when muted
+# [M] Reduce decoded audio copies into the playback ring
 
 ## Goal
 
-The SAB playback path allocates 0 PCM arrays per packet and copies at most
-once (twice on wrap). A muted or paused watch does not run
-`AudioWorkletProcessor.process`. Unmute stays under 50 ms.
+Reduce measured PCM allocation and copying on SAB playback without changing
+ring timing, channel behavior, or the postMessage fallback.
 
 ## Plan
 
-`#emit` in `js/watch/src/audio/decoder.ts` does `new Float32Array(frames)`
-per channel, `AudioData.copyTo`, then a JS loop into the SAB. Two full PCM
-copies plus allocs at packet rate.
+The decoder copies each AudioData plane into a temporary Float32Array before
+inserting it into the shared ring. Measure that cost separately from decode
+and worklet processing at representative channel counts and sample rates.
 
-`copyTo` into a wrap-aware SAB view. Keep the alloc path for the
-postMessage transport (it transfers those buffers).
+Design a ring-owned write operation rather than exposing its storage.
+Preserve trimming, gaps, late-packet handling, channel fill, and wrap logic.
+Map each planar channel explicitly through planeIndex, source frameOffset,
+frameCount, and the destination ring offset, including both wrap segments.
+Use distinct left/right samples to detect channel swaps in the wrap test.
+Publish the atomic write position only after all channel planes are complete;
+failed writes must not expose partially initialized audio. Verify whether
+AudioData.copyTo accepts the intended shared destination in supported browsers
+before choosing direct copies or a reusable staging buffer.
 
-`#runWorklet` always builds `AudioContext` + worklet. Mute sets `enabled`
-false (stops download) but the worklet stays connected. Disconnect the
-worklet or suspend the context when `enabled` is false; keep the module
-registered so unmute stays instant. The file already notes this.
+Keep the transferring postMessage path working when cross-origin isolation
+is unavailable. Cover wrap, partial capacity, discontinuities, missing
+channels, and concurrent worklet reads with correctness tests in CI. Use
+browser measurements for allocation volume, copied bytes, glitches, and
+latency; retain the existing path if no useful improvement is measured.
 
-Acceptance: browser stereo 48 kHz: allocation volume and copy bytes/s on
-the SAB path. Playwright, tab audible vs muted 10 s:
-`AudioWorkletProcessor.process` count ~0 when muted; unmute <50 ms.
+Mute/pause already disconnects the gain node from the destination in
+`audio/emitter.ts`. Additional suspension or graph teardown is not part of
+this copy optimization; require a reproduced residual CPU problem before
+planning that separately.
+
+## Required
+
+- [Browser benchmarks](/quest/m2/browser-benchmarks.md) - shared measurement and browser CI harness
 
 ## Related
 
-- [Time stretch](/quest/m2/watch-audio-time-stretch.md) - WSOLA in the worklet, not ingest copies
-- [Browser benchmarks](/quest/m2/browser-benchmarks.md) - harness
+- [Time stretch](/quest/m2/watch-audio-time-stretch.md) - playback processing

@@ -1,24 +1,33 @@
-# [S] Consume JSON snapshot patches instead of cloning them
+# [S] Consume owned JSON snapshot patches
 
 ## Goal
 
-A snapshot consumer/encoder step on catalog-sized documents does not clone
-patch nodes into the baseline. Reconstructed `Value` is identical.
+Reduce measured patch-application allocations in snapshot encoding and
+decoding while preserving reconstructed values, emitted bytes, and errors.
 
 ## Plan
 
-After each delta, `moq-json` `snapshot/encoder.rs` calls
-`json_patch::merge(&Value)`, which clones patch nodes into `last`. The
-existing `rs/moq-json/benches/codec.rs` already compares `merge_owned` vs
-`json_patch::merge`. Production still uses the cloning merge.
+Both `snapshot/encoder.rs` and `snapshot/decoder.rs` in `moq-json` own a
+patch before passing it by reference to `json_patch::merge`. The encoder
+has already serialized that patch; the decoder has just parsed it.
+`rs/moq-json/benches/codec.rs` contains a consuming `merge_owned` comparison.
 
-Switch production merge to the consuming `merge_owned` already in the bench
-(or equivalent) only if `decode_patch` shows a real gap on catalog-sized
-fixtures. Do not change wire bytes.
+Measure complete encoder and decoder steps on catalog-sized documents,
+including ownership acquisition, serialization, compression, and parsing.
+Compare the existing `decode_patch`, consumer, and baseline cases. Keep
+fixture setup outside the timed interval, but do not exclude an ownership
+copy that production would need.
 
-Acceptance: existing `codec.rs` `decode_patch` / `consumer` / `baseline`.
-Consumer step down on `big_static` / hang-catalog-sized docs. Identical
-reconstructed `Value`. A measured no-win abandons the quest.
+Move a consuming merge into private production code only if end-to-end
+measurements justify it. Match merge-patch semantics for object deletion,
+nested objects, arrays, scalar replacement, null, and empty patches.
+Share the production helper with the benchmark rather than maintaining a
+second algorithm there. Preserve encoder grouping and compression state.
+
+Add equivalence regressions to normal CI, including compressed and plain
+multi-delta roundtrips. Retain paired allocations and throughput results;
+a measured no-win completes the quest without a production change.
+No public API or wire change is needed.
 
 ## Related
 

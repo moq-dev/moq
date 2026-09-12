@@ -1,33 +1,32 @@
-# [S] Decode paths and byte strings without a second copy
+# [S] Reduce owned path and byte-string decode copies
 
 ## Goal
 
-Varint-length `Vec<u8>` / `String` / `Path` decode copies payload once.
-Fuzz and regression tests still pass.
+Reduce measured allocation and payload-copy costs for owned byte strings,
+strings, and paths without changing decoded values, errors, or wire bytes.
 
 ## Plan
 
-`coding/decode.rs` for `Vec<u8>`:
+`rs/moq-net/src/coding/decode.rs` decodes `Vec<u8>` through
+`Buf::copy_to_bytes` followed by `to_vec`; `String` consumes that vector.
+The first operation can return a shared view for a contiguous `Bytes` input,
+but may allocate and copy for another `Buf`. Do not count every call as a
+payload copy or assume a twofold improvement on production readers.
 
-```
-let bytes = buf.copy_to_bytes(size);  // Bytes alloc
-Ok(bytes.to_vec())                    // second copy
-```
+Benchmark the actual reader input types, contiguous and chained buffers,
+lengths 8 B through 1 KiB, and representative announcement messages. Compare
+safe copying into an initialized vector with the current implementation.
+Preserve bounds checks before allocation and UTF-8 validation. Keep owned
+return types; borrowed decoding and new public APIs are outside this quest.
 
-`String` then `from_utf8`s that vec; `Path` and `Cow<str>` go through
-`String`. `Bytes` decode already does a single `copy_to_bytes`. The TODO
-"Support borrowed strings" is only valid where the buffer outlives the
-message (the reader's `BytesMut` is not that).
-
-Decode `Vec<u8>` with `Buf::copy_to_slice` into `Vec::with_capacity`, or
-decode `Path`/`String` from `Bytes` plus a UTF-8 check without the extra
-copy.
-
-Acceptance: new `rs/moq-net/benches/coding.rs`: varint + path + string
-roundtrip, sizes 8 B–1 KiB, plus announce-message encode/decode. About 2×
-fewer payload copies on decode. `just rs fuzz path` (or the existing net
-fuzz targets) still pass.
+Register a Criterion target in `moq-net` for discovery by `just bench`.
+Report allocations, copied bytes, and throughput with paired base/current
+runs. Retain the current implementation if no useful win is measured.
+Add normal-CI regressions for fragmented input, truncated lengths/payloads,
+invalid UTF-8, empty values, and path normalization; run the existing net
+fuzz targets with `just rs fuzz path` and commit any regression inputs.
 
 ## Related
 
-- [Reader buffering](/quest/m2/stream-buffering.md) - JS `Reader.#fill`, not this
+- [Reader buffering](/quest/m2/stream-buffering.md) - JS receive assembly
+- [Benchmark comparisons](/quest/m2/performance-comparisons.md) - measurement conventions

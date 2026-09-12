@@ -1,26 +1,35 @@
-# [S] Encode IETF object timestamps without a WritableStream
+# [S] Encode IETF object properties without a temporary stream
 
 ## Goal
 
-IETF object header encode allocates nothing beyond the payload. Wire bytes
-do not change.
+Reduce object-property encode allocations while emitting identical bytes
+for every supported IETF version and preserving the public Writer API.
 
 ## Plan
 
-`encodeObjectExtensions` in `js/net/src/ietf/object.ts` builds a `Writer`
-over a `WritableStream` for every object with a timestamp, pushes ~10-byte
-varints as chunks, concatenates, then writes length+bytes. Lite already
-writes timestamp varints straight onto the group stream.
+`encodeObjectExtensions` in `js/net/src/ietf/object.ts` creates a temporary
+Writer and WritableStream, copies their emitted chunks, and concatenates
+those chunks for timestamp-bearing objects. Replace that internal staging
+with bounded byte encoding after measuring it.
 
-Encode properties into `Writer`'s 9-byte scratch (or a 16-byte buffer) the
-way `Writer.u62` already does. No stream, no concat.
+Derive storage size from the actual fields and negotiated varint encoding;
+do not assume a fixed scratch size covers every supported version. Preserve
+absolute versus delta property IDs, timestamp conversion, absent timestamps,
+and numeric bounds. A reused buffer must remain owned until the outer write
+has completed; overlapping writes must not overwrite its bytes.
 
-Acceptance: Bun microbench, `Frame.encode` × 10k at 1 KiB and 100 KiB
-payloads. Header encode allocs drop to ~0 beyond the payload. Optional
-browser IETF publish vs lite for GC. No wire-byte change.
+Add version-matrix byte-equivalence tests to normal JS CI, including varint
+boundaries, maximum supported timestamps, missing properties, and write
+failures. Register a repeatable JS microbenchmark using the repository's
+benchmark conventions, with small audio and large video payloads and with
+and without timestamps. Measure property allocations separately from payload
+storage. Retain a measured no-win without replacing the implementation.
+Browser claims require a real WebTransport run in an identified browser.
+
+## Required
+
+- [Browser benchmarks](/quest/m2/browser-benchmarks.md) - shared measurement and browser CI harness
 
 ## Related
 
-- [CMAF copies](/quest/m2/cmaf-copy-budget.md) - container samples
-- [Reader buffering](/quest/m2/stream-buffering.md) - `Reader.#fill`
-- [Coalesce stream writes](/quest/m2/js-hotpath/write-coalesce.md) - the write syscall, not this header
+- [Coalesce stream writes](/quest/m2/js-hotpath/write-coalesce.md) - outer transport writes

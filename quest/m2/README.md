@@ -38,12 +38,12 @@ can act on. Each still carries its own plan and regression test.
 - [Benchmark comparisons](/quest/m2/performance-comparisons.md) - retained evidence, repeated paired runs, and uncertainty for performance claims
 - [Relay profiling](/quest/m2/performance-profiles.md) - reproducible CPU and allocation captures under the existing workloads
 - [Browser benchmarks](/quest/m2/browser-benchmarks.md) - measure JS transport, container, decode, and render costs in an identified browser
-- [JS publish and watch hot paths](/quest/m2/js-hotpath/README.md) - bound decode queues, drop extra copies, and stop one-stream-per-Opus-frame
+- [JS publish and watch hot paths](/quest/m2/js-hotpath/README.md) - measure decode retention, copies, header writes, and bounded audio groups
 - [Reader buffering](/quest/m2/stream-buffering.md) - measure and bound repeated prefix copying under fragmented input
 - [Traffic counter contention](/quest/m2/stats-contention.md) - quantify shared atomic accounting costs across fanout workers
 - [CMAF copies](/quest/m2/cmaf-copy-budget.md) - establish and reduce the browser container copy budget without changing ownership
-- [Mux and gateway copy budgets](/quest/m2/mux-copies/README.md) - import, export, and live HLS transmux copy coded bytes once
-- [Consume JSON snapshot patches](/quest/m2/json-merge.md) - catalog-sized deltas do not clone patch nodes into the baseline
+- [Mux and gateway copy budgets](/quest/m2/mux-copies/README.md) - measure and reduce payload copies in import, export, and live HLS
+- [Consume JSON snapshot patches](/quest/m2/json-merge.md) - measure consuming patches in snapshot encoding and decoding
 - [Relay memory](/quest/m2/relay-memory.md) - remeasure what an announcement costs after prefix routes
 - [Origin lookup CPU](/quest/m2/origin-cpu/README.md) - announce and subscribe stay cheap as the live advertisement set grows
 - [Route gauge](/quest/m2/route-gauge.md) - an operator sees how many routes a relay holds for a path

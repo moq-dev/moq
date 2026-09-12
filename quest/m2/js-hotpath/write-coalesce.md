@@ -1,27 +1,40 @@
-# [M] Coalesce per-frame WebTransport writes
+# [M] Coalesce frame headers without copying payloads
 
 ## Goal
 
-The data path does one `WritableStreamDefaultWriter.write` per object or
-frame. Payload is not copied except a small header prefix. Already-buffered
-single-chunk writes do not regress.
+Reduce measured WebTransport write overhead by combining frame header fields
+while preserving payload ownership, public APIs, wire bytes, and backpressure.
 
 ## Plan
 
-Each media frame is 2–4 `await writer.write()` calls (timestamp, length,
-payload, sometimes extensions) in lite `#runGroup` and IETF `Frame.encode`.
-Scratch is reused only because writes are awaited, so headers cannot
-pipeline.
+Lite and IETF encode a frame through multiple awaited writes. Count writes
+for each negotiated version and frame shape rather than assuming one fixed
+count. Writer accepts a single Uint8Array, and payloads have no guaranteed
+prefix headroom, so a single contiguous header-plus-payload write generally
+requires copying the payload.
 
-`Writer.writeFrame(headerFields, payload)` that copies the ~1–20 header
-bytes in front of the payload, or a 2-chunk write if the platform supports
-it without copy. Keep the primitive `u53` API for control messages.
+Scope the optimization to internal header encoding: assemble header fields
+into an owned bounded buffer, write that header, then write the existing
+payload. Derive the bound from supported versions and fields. Retain scratch
+until its write settles; preserve ordering, typed transport errors, reset,
+and cancellation. Do not add an exported Writer method or change producer
+buffer ownership. Payload concatenation and headroom redesign are outside
+this quest.
 
-Acceptance: real WebTransport, not Bun: audio 20 ms + video 30 fps. Count
-`write` calls and CPU. One write per object on the data path.
+Compare write calls, header allocations, copied bytes, CPU, and latency on
+real WebTransport with small audio and large video payloads, including empty
+payloads and slow readers. Expect fewer header writes, not a universal single
+write per frame. Keep the current path if savings are not repeatable.
+
+Add CI byte-equivalence tests across supported versions and delayed/rejected
+write tests that catch scratch reuse, reordered bytes, and lost errors.
+Keep already-buffered writes and control-message behavior unchanged.
+
+## Required
+
+- [Browser benchmarks](/quest/m2/browser-benchmarks.md) - shared measurement and browser CI harness
 
 ## Related
 
-- [Reader buffering](/quest/m2/stream-buffering.md) - the read side
-- [IETF object header encode](/quest/m2/js-hotpath/ietf-object-encode.md) - header construction
-- [Browser benchmarks](/quest/m2/browser-benchmarks.md) - harness
+- [Reader buffering](/quest/m2/stream-buffering.md) - receive assembly
+- [IETF object properties](/quest/m2/js-hotpath/ietf-object-encode.md) - property construction

@@ -1,25 +1,29 @@
-# [S] One copy from FLV/RTMP tag body to hang payload
+# [S] Measure and reduce FLV tag-body copies
 
 ## Goal
 
-FLV import and whole-message RTMP chunks copy coded bytes once, from the
-tag/chunk buffer to the hang payload.
+Reduce measured FLV tag-body and media-payload copying without changing codecs,
+metadata, timestamps, published media, public APIs, or wire formats.
 
 ## Plan
 
-FLV `Bytes::copy_from_slice` of the tag body, then `write_video` copies
-`data` again. RTMP chunks `extend_from_slice` into `current_payload_data`
-(needed for split chunks); default chunk size makes this a second copy of
-every AVC NALU.
+FLV import copies a tag body from its input buffer and then copies the selected
+media payload again. Samples are already in their length-prefixed codec shape;
+there is no Annex-B splitter to remove on this path.
 
-`split_to` the tag from `BytesMut` and slice AVC payload without a second
-copy. For whole-message RTMP chunks, freeze the chunk bytes instead of
-copying into a new `BytesMut`.
+Investigate detaching a complete tag and sharing its media range through private
+parsing helpers. Preserve legacy and enhanced tags, multitrack routing,
+configuration records, timestamp offsets, partial-input behavior, and existing
+validation/errors. Measure retained backing-buffer memory when small samples
+share a large input allocation.
 
-Acceptance: Criterion `flv.import` plus RTMP chunk deserializer on a 1080p
-FLV/AVC recording.
+Add Criterion import cases for representative legacy AVC/AAC and enhanced tags
+with varied input chunk sizes. Wire payload/catalog/timing equivalence and
+fragmented/malformed-tag fixtures into existing mux CI tests. Follow the
+measurement and no-win completion rules in the
+[questline](/quest/m2/mux-copies/README.md).
 
 ## Related
 
-- [FLV script tags](/quest/m2/flv-script.md) - metadata, not media copies
-- [Annex-B split](/quest/m2/mux-copies/annexb.md) - NAL copies after the tag
+- [FLV script tags](/quest/m2/flv-script.md) - independent metadata work
+- [RTMP chunk assembly](/quest/m2/mux-copies/rtmp.md) - independently shippable transport work

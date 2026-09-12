@@ -1,30 +1,39 @@
-# [L] Splice CMAF hang groups into HLS segments
+# [L] Measure and reduce CMAF remux work in HLS
 
 ## Goal
 
-CMAF→CMAF HLS export does not demux+remux samples. CPU is at least 2×
-lower and coded bytes are copied at most once. Sample payload and `tfdt`
-match the remux path.
+Reduce measured CMAF-to-CMAF HLS export work by preserving existing fragments
+where their semantics match the requested segment. Keep public APIs, wire
+formats, supported input, and HLS behavior unchanged.
 
 ## Plan
 
-`moq-hls` `Rendition::segment` FETCHes every group, `Muxer::read` parses
-each moof+mdat into samples (`Bytes::copy_from_slice` per sample), then
-`encode_fragment` concatenates payloads and encodes the moof twice. fMP4
-ingest already published complete per-track fragments as hang frames.
+fMP4 import already publishes per-track CMAF fragments. `Muxer::init` preserves
+the catalog init with track-id normalization, but `Muxer::read` decodes fetched
+groups into media samples and HLS subsequently encodes fragments again. Measure
+that remaining work before choosing an internal passthrough path.
 
-For `Container::Cmaf`, splice/rewrite existing fragments (track id /
-`mfhd` / `tfdt` only). Keep the sample path for Legacy/LOC.
+Determine which valid fragment layouts can preserve payload ranges while
+normalizing the output's track identity and sequence. Account for data offsets
+and all affected boxes rather than assuming only `tfdt`, `mfhd`, and track id
+need attention. Preserve native timescale, decode and presentation timestamps,
+sample durations and flags, composition offsets, multiple fragments per group,
+and HLS segment boundaries and duration reporting. Keep the existing sample
+path for Legacy/LOC and valid inputs outside the optimization's eligibility.
+Malformed or unsupported data must retain existing errors; never recover from
+validation errors by switching paths or silently dropping data.
 
-Edge fan-out (N viewers × N transmux) is the downstream
-moq.pro `quest/m2/perf/live-hls-singleflight` quest. This is the remux
-inside one call.
+Compare equivalent HLS workloads before and after on audio/video segments using
+`rs/moq-mux/src/container/fmp4/test_data/bbb.mp4` and generated boundary cases.
+Wire semantic sample/timing equivalence, init consistency, multi-fragment groups,
+and malformed-input checks into existing mux/HLS CI tests. Container bytes need
+not be identical to ffmpeg output. Follow the measurement and no-win completion
+rules in the [questline](/quest/m2/mux-copies/README.md).
 
-Acceptance: Criterion `muxer.cmaf_passthrough` vs `muxer.sample_remux` on
-`bbb.mp4` segments (1 s / 6 s, 1080p + audio). Hang roundtrip: import fMP4
-→ HLS segment bytes vs `ffmpeg -c copy`. Byte-identical samples and `tfdt`.
+Request deduplication and downstream moq.pro fan-out are outside this quest.
 
 ## Related
 
-- [fMP4 import and fragment encode](/quest/m2/mux-copies/fmp4.md) - the remux path this skips
-- [CMAF copies](/quest/m2/cmaf-copy-budget.md) - JS
+- [Fragment encoding](/quest/m2/mux-copies/fmp4-encode.md) - the remux path this may bypass
+- [fMP4 import](/quest/m2/mux-copies/fmp4.md) - source-fragment ownership
+- [CMAF copies](/quest/m2/cmaf-copy-budget.md) - browser implementation
