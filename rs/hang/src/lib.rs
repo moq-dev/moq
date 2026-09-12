@@ -6,8 +6,8 @@
 //!
 //! - **Catalog**: A JSON track containing codec info and track metadata, updated live as tracks change.
 //! - **Tracks**: Audio or video, supporting one or more renditions.
-//! - **Timeline**: A JSON track indexing a media track's aligned segments (one or more groups each), so a
-//!   consumer can seek (or build indexes/playlists) without downloading media.
+//! - **Timeline**: A JSON track indexing the broadcast's aligned segments (one or more groups each), so a
+//!   consumer can seek (or build indexes/playlists) without downloading media. Advertised by the catalog's `archive` entry.
 //!
 //! Each track specifies a container format:
 //! - **Legacy**: A timestamp followed by the codec payload.

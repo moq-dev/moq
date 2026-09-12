@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
 ///
-/// The base catalog carries the media sections (`video`, `audio`, `text`), the optional shared
-/// `timeline`, and the data sections (`json`, `binary`) for application tracks that aren't media.
+/// The base catalog carries the media sections (`video`, `audio`, `text`), the optional
+/// `archive` (the segment index and any durable recording), and the data sections
+/// (`json`, `binary`) for application tracks that aren't media.
 /// Applications extend it with their own root sections (e.g. `scte35`) by flattening
 /// this struct into their own with `#[serde(flatten)]`. The catalog does not deny unknown fields,
 /// so a base consumer ignores the extra sections and an extended catalog stays wire-compatible.
@@ -36,10 +37,9 @@ pub struct Catalog {
 	#[serde(default)]
 	pub audio: Audio,
 
-	/// The broadcast's timeline track (its aligned segment index), if the publisher offers
-	/// one. See [`Timeline`](crate::catalog::Timeline) and the [`timeline`](crate::timeline)
-	/// module.
-	pub timeline: Option<crate::catalog::Timeline>,
+	/// The broadcast's segment index and any durable archive, if the publisher offers one.
+	/// See [`Archive`](crate::catalog::Archive) and the [`timeline`](crate::timeline) module.
+	pub archive: Option<crate::catalog::Archive>,
 
 	/// Text (caption/subtitle) track information with multiple renditions.
 	///
@@ -551,6 +551,38 @@ mod test {
 		// or every existing publisher's bytes change.
 		let output = Catalog::default().to_json().expect("failed to encode");
 		assert_eq!(output, r#"{"video":{"renditions":{}},"audio":{"renditions":{}}}"#);
+	}
+
+	#[test]
+	fn archive_roundtrips_at_the_root() {
+		let mut archive = crate::catalog::Archive::new("timeline.z");
+		archive.duration_max = Some(2000);
+		archive.replay = Some(moq_net::PathRelativeOwned::new("recordings/clip"));
+		archive.version = Some(crate::catalog::Archive::VERSION);
+
+		let catalog = Catalog {
+			archive: Some(archive.clone()),
+			..Default::default()
+		};
+
+		let json = catalog.to_json().expect("failed to encode");
+		assert!(json.contains(r#""archive":{"track":"timeline.z""#), "{json}");
+		assert!(
+			!json.contains(r#""timeline":"#),
+			"the old root key must not appear: {json}"
+		);
+		assert_eq!(
+			Catalog::from_str(&json).expect("failed to decode").archive,
+			Some(archive)
+		);
+	}
+
+	#[test]
+	fn a_legacy_root_timeline_is_not_an_archive() {
+		// No alias or fallback: a catalog that still names `timeline` at the root has no archive.
+		let catalog =
+			Catalog::from_str(r#"{"timeline":{"track":"timeline.z"}}"#).expect("legacy timeline broke decode");
+		assert_eq!(catalog.archive, None);
 	}
 
 	#[test]

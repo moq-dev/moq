@@ -67,7 +67,7 @@ impl<E: CatalogExt> Stream for Consumer<E> {
 				Poll::Ready(Ok(media.map(|m| Catalog::<E> {
 					video: m.video,
 					audio: m.audio,
-					timeline: m.timeline,
+					archive: m.archive,
 					text: m.text,
 					json: hang::catalog::Json::default(),
 					binary: hang::catalog::Binary::default(),

@@ -258,8 +258,8 @@ test("consumer resumes at a checkpoint after losing a group", async () => {
 	for (const error of [
 		new Group.Lagged(),
 		new StreamError(StreamCode.TooFarBehind),
-		new StreamError(0x22 as StreamCode),
-		new StreamError(0x23 as StreamCode),
+		new StreamError(StreamCode.Old),
+		new StreamError(StreamCode.Evicted),
 	]) {
 		const track = new Track.Producer("test");
 		const consumer = new Consumer<Rec>(track.subscribe());

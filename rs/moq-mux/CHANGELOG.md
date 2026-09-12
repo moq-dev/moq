@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- [**breaking**] Advertise the broadcast timeline through `catalog.archive`
+  (`hang::catalog::Archive`). `timeline::Producer::section` returns `Archive`.
 - `import::ContainerStream::new` takes a bare `ContainerFormat` instead of a `ContainerInit`. It
   only ever read the format, so the init's leading bytes were accepted and dropped. A stream
   recovers its own framing, so push everything through `decode` instead.

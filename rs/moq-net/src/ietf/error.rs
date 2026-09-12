@@ -624,7 +624,7 @@ mod tests {
 
 		// And nothing decodes back into them: an unregistered code keeps its number and
 		// stays opaque instead of being read as a meaning the wire did not carry.
-		for code in [0x6, 0x7, 0x9, 0x20, 0x22, 64 + 7] {
+		for code in [0x6, 0x7, 0x9, 0x20, 0x22, 0x33, 0x34, 0x35, 64 + 7] {
 			assert_eq!(from_stream_code(code, Version::Draft20), StreamError::Unknown(code));
 			assert!(matches!(
 				Error::from(from_stream_code(code, Version::Draft20)),

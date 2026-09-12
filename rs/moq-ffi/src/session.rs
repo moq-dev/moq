@@ -10,6 +10,8 @@ use crate::origin::{MoqOriginConsumer, MoqOriginProducer};
 #[cfg(not(target_arch = "wasm32"))]
 struct Client {
 	config: moq_tokio::connect::Config,
+	/// QUIC transport tuning the dial applies, e.g. `quic_max_streams`.
+	quic: moq_tokio::quic::Config,
 	publish: Option<Arc<MoqOriginProducer>>,
 	consume: Option<Arc<MoqOriginProducer>>,
 }
@@ -17,11 +19,7 @@ struct Client {
 #[cfg(not(target_arch = "wasm32"))]
 impl Client {
 	async fn connect(&self, url: Url) -> Result<Arc<MoqSession>, MoqError> {
-		let client = self
-			.config
-			.clone()
-			.init(Default::default())
-			.map_err(map_connect_error)?;
+		let client = self.config.clone().init(self.quic.clone()).map_err(map_connect_error)?;
 
 		// Materialize both origin sides so the session can publish/subscribe and the FFI can
 		// always hand back a publisher/consumer.
@@ -203,6 +201,15 @@ mod tests {
 		assert_eq!(state.config.tls.cert, None);
 		assert_eq!(state.config.tls.key, None);
 	}
+
+	#[test]
+	fn sets_the_quic_stream_cap() {
+		let client = MoqClient::new();
+		assert_eq!(client.task.lock().unwrap().quic.max_streams, None);
+
+		client.set_quic_max_streams(4096);
+		assert_eq!(client.task.lock().unwrap().quic.max_streams, Some(4096));
+	}
 }
 
 /// Retry pacing for the automatic reconnect (see [`MoqClient::set_backoff`]).
@@ -210,7 +217,8 @@ mod tests {
 /// The delay starts at `initial_ms`, multiplies by `multiplier` after each failed
 /// attempt, and caps at `max_ms`. After `timeout_ms` of consecutive failures the
 /// connection gives up for good (0 retries forever); the window resets whenever a
-/// session stays up past `initial_ms`.
+/// session stays up past `initial_ms`. The defaults mirror the native
+/// [`moq_tokio::Backoff`]: 1s, x2, 5s, and a 10s window.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct MoqBackoff {
@@ -221,10 +229,10 @@ pub struct MoqBackoff {
 	#[uniffi(default = 2)]
 	pub multiplier: u32,
 	/// Maximum delay between reconnect attempts, in milliseconds.
-	#[uniffi(default = 30000)]
+	#[uniffi(default = 5000)]
 	pub max_ms: u64,
 	/// Time spent retrying before giving up, in milliseconds. 0 retries forever.
-	#[uniffi(default = 300000)]
+	#[uniffi(default = 10000)]
 	pub timeout_ms: u64,
 }
 
@@ -379,6 +387,7 @@ impl MoqClient {
 		Arc::new(Self {
 			task: Task::new(Client {
 				config: moq_tokio::connect::Config::default(),
+				quic: moq_tokio::quic::Config::default(),
 				publish: None,
 				consume: None,
 			}),
@@ -460,6 +469,19 @@ impl MoqClient {
 		Ok(())
 	}
 
+	/// Cap the concurrent QUIC streams the peer may open toward this connection.
+	/// Defaults to 1024.
+	///
+	/// MoQ opens a stream per group, and for a subscriber those arrive from the relay,
+	/// so a client subscribing to many tracks wants this raised. A publisher's own
+	/// streams are bounded by the peer's advertised limit, not this one. Ignored by
+	/// the WebSocket fallback.
+	pub fn set_quic_max_streams(&self, max_streams: u64) {
+		if let Some(mut state) = self.task.lock() {
+			state.quic.max_streams = Some(max_streams);
+		}
+	}
+
 	/// Enable or disable automatic reconnecting. Enabled by default.
 	///
 	/// When enabled, the session returned by [`connect`](Self::connect) redials with
@@ -503,8 +525,8 @@ impl MoqClient {
 	/// The returned session automatically reconnects with backoff when the transport
 	/// drops (unless disabled via [`set_reconnect`](Self::set_reconnect)), and broadcasts
 	/// consumed through it ride out the gap. Watch [`MoqSession::status`] for the
-	/// connect/disconnect transitions and [`MoqSession::closed`] for the connection
-	/// giving up for good.
+	/// connect/disconnect transitions, [`MoqSession::epoch`] for the reconnect count,
+	/// and [`MoqSession::closed`] for the connection giving up for good.
 	///
 	/// Both origin sides are always accessible via [`MoqSession::publisher`] and
 	/// [`MoqSession::consumer`], without the caller constructing a [`MoqOriginProducer`]
@@ -722,6 +744,20 @@ impl MoqSession {
 				}
 			})
 			.await
+	}
+
+	/// The connection epoch: 1 for the connect this session was built from, one more
+	/// on each reconnect. A server-accepted session is a single transport, so it stays 1.
+	///
+	/// The count pairs with [`status`](Self::status): a `Connected` transition whose
+	/// epoch grew is a reconnect, so a worker can log each one by number. Migrations
+	/// count too, since the replacement is a new session.
+	pub fn epoch(&self) -> u64 {
+		match &self.inner {
+			#[cfg(not(target_arch = "wasm32"))]
+			Inner::Connection(connection) => connection.epoch(),
+			Inner::Session(_) => 1,
+		}
 	}
 
 	/// Close the session with the given error code, stopping any reconnect loop.

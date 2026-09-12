@@ -1,11 +1,12 @@
 /**
  * JSON catalog schema and types describing a broadcast's tracks: audio/video decoder configs for
- * WebCodecs, container format, and rendition layout, plus the `json` and `binary` sections listing
- * application data tracks that aren't media.
+ * WebCodecs, container format, and rendition layout, the `archive` entry, plus the `json` and
+ * `binary` sections listing application data tracks that aren't media.
  *
  * @module
  */
 
+export * from "./archive";
 export * from "./audio";
 export * from "./binary";
 export * from "./compression";

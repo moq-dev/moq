@@ -77,7 +77,6 @@ import path and enrolls the resulting `broadcast::Consumer` tracks. Downstream
 
 ## Required
 
-- [Archive catalog](/quest/m1/archive-catalog.md)
 - [Archive store](/quest/m1/archive-store.md)
 
 ## Closes

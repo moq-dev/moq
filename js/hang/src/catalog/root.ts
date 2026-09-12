@@ -1,19 +1,19 @@
 import * as z from "@zod/mini";
 
+import { ArchiveSchema } from "./archive";
 import { AudioSchema } from "./audio";
 import { BinarySchema } from "./binary";
 import { JsonSchema } from "./json";
 import { section } from "./section";
 import { TextSchema } from "./text";
-import { TimelineSchema } from "./timeline";
 import { VideoSchema } from "./video";
 
 /**
  * The root catalog: the base sections every hang broadcast carries.
  *
- * The media sections are `video`, `audio`, and `text`, alongside the broadcast's `timeline`;
- * `json` and `binary` list application data tracks that aren't media. A section is omitted when
- * it holds no tracks.
+ * The media sections are `video`, `audio`, and `text`, alongside the broadcast's `archive`
+ * (the segment index and any durable recording); `json` and `binary` list application data
+ * tracks that aren't media. A section is omitted when it holds no tracks.
  *
  * This is a *loose* object: unknown root sections pass through validation untouched, so an
  * application can add its own sections (e.g. `scte35`) without modifying hang. A base consumer
@@ -23,8 +23,8 @@ import { VideoSchema } from "./video";
 export const RootSchema = z.looseObject({
 	video: z.optional(VideoSchema),
 	audio: z.optional(AudioSchema),
-	// The broadcast's timeline track (its aligned segment index), if the publisher offers one.
-	timeline: z.optional(TimelineSchema),
+	// The broadcast's segment index and any durable archive, if the publisher offers one.
+	archive: z.optional(ArchiveSchema),
 	// `text` is now a reserved media section, but a catalog that carried an unrelated `text` key
 	// before this existed must not fail to parse: fall back to `undefined` (dropping the section)
 	// rather than rejecting the whole catalog, so video/audio still play.
@@ -38,5 +38,5 @@ export const RootSchema = z.looseObject({
 	binary: section(BinarySchema, "tracks"),
 });
 
-/** The root catalog object: the media and timeline sections, the data track sections, plus any app extensions. */
+/** The root catalog object: the media and archive sections, the data track sections, plus any app extensions. */
 export type Root = z.infer<typeof RootSchema>;

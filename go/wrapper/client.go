@@ -22,6 +22,7 @@ type clientConfig struct {
 	tlsCert            *string
 	tlsKey             *string
 	bind               *string
+	quicMaxStreams     *uint64
 	reconnect          *bool
 	backoff            *Backoff
 	publish            *OriginProducer
@@ -38,8 +39,8 @@ type clientConfig struct {
 type Backoff struct {
 	Initial    time.Duration // delay before the first retry (default 1s)
 	Multiplier uint32        // applied to the delay after each failure (default 2)
-	Max        time.Duration // ceiling on the delay (default 30s)
-	Timeout    time.Duration // give up after this long (default 5m)
+	Max        time.Duration // ceiling on the delay (default 5s)
+	Timeout    time.Duration // give up after this long (default 10s)
 }
 
 // RetryForever, passed as Backoff.Timeout, keeps a reconnecting session retrying
@@ -49,8 +50,8 @@ const RetryForever time.Duration = -1
 const (
 	defaultBackoffInitial    = time.Second
 	defaultBackoffMultiplier = 2
-	defaultBackoffMax        = 30 * time.Second
-	defaultBackoffTimeout    = 5 * time.Minute
+	defaultBackoffMax        = 5 * time.Second
+	defaultBackoffTimeout    = 10 * time.Second
 )
 
 // ffi resolves the unset fields, which is load-bearing rather than cosmetic:
@@ -141,6 +142,15 @@ func WithBind(addr string) ClientOption {
 	return func(c *clientConfig) { c.bind = &addr }
 }
 
+// WithQUICMaxStreams caps the concurrent QUIC streams the peer may open toward
+// this connection (default 1024). MoQ opens a stream per group, and for a
+// subscriber those arrive from the relay, so a client subscribing to many tracks
+// wants this raised. A publisher's own streams are bounded by the relay's
+// advertised limit, not this one. Ignored by the WebSocket fallback.
+func WithQUICMaxStreams(maxStreams uint64) ClientOption {
+	return func(c *clientConfig) { c.quicMaxStreams = &maxStreams }
+}
+
 // WithReconnect toggles automatic reconnecting. It is on by default: the
 // session redials with backoff whenever the transport drops, and broadcasts
 // consumed through it ride out the gap. Pass false for a one-shot dial whose
@@ -213,6 +223,9 @@ func Dial(ctx context.Context, url string, opts ...ClientOption) (*Client, error
 			inner.Cancel()
 			return nil, err
 		}
+	}
+	if cfg.quicMaxStreams != nil {
+		inner.SetQuicMaxStreams(*cfg.quicMaxStreams)
 	}
 	if cfg.reconnect != nil {
 		inner.SetReconnect(*cfg.reconnect)

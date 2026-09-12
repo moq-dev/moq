@@ -62,6 +62,14 @@ class Moq internal constructor(
      */
     suspend fun requestBroadcast(path: String): MoqBroadcastConsumer = session.consumer().requestBroadcast(path)
 
+    /**
+     * The connection epoch: 1 for the connect that built this session, one more on
+     * each reconnect. A server-accepted session stays at 1.
+     *
+     * Pair it with [MoqSession.status] to log each reconnect by number.
+     */
+    fun epoch(): ULong = session.epoch()
+
     /** Gracefully shut down the session and cancel the client, releasing the native handles. */
     override fun close() {
         session.shutdown()
@@ -79,6 +87,9 @@ class Moq internal constructor(
          * @param tlsCert path to a PEM certificate chain to present for mTLS.
          * @param tlsKey path to a PEM private key to present for mTLS.
          * @param bind local socket address to bind, e.g. "0.0.0.0:0".
+         * @param maxStreams cap on the concurrent QUIC streams the peer may open toward
+         *   this connection; MoQ opens one stream per group, and for a subscriber those
+         *   arrive from the relay, so subscribing to many tracks may want this raised.
          * @param reconnect set false for a one-shot dial. By default the session redials
          *   with backoff whenever the transport drops; watch [MoqSession.status] for the
          *   transitions.
@@ -103,6 +114,7 @@ class Moq internal constructor(
             backoff: Backoff? = null,
             publish: MoqOriginProducer? = null,
             subscribe: MoqOriginProducer? = null,
+            maxStreams: ULong? = null,
         ): Moq {
             val client = MoqClient()
             try {
@@ -113,6 +125,7 @@ class Moq internal constructor(
                 if (tlsCert != null) client.setTlsCert(tlsCert)
                 if (tlsKey != null) client.setTlsKey(tlsKey)
                 if (bind != null) client.setBind(bind)
+                if (maxStreams != null) client.setQuicMaxStreams(maxStreams)
                 if (reconnect != null) client.setReconnect(reconnect)
                 if (backoff != null) client.setBackoff(backoff)
                 if (publish != null) client.setPublish(publish)

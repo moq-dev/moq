@@ -10,7 +10,7 @@ description: The media layer in TypeScript
 The [hang media format](/concept/hang) as TypeScript types and codecs, shared
 by [`@moq/watch`](/lib/js/watch) and [`@moq/publish`](/lib/js/publish).
 
-- **Catalog**: zod schemas for the root, video, audio and text renditions, the JSON and binary data track sections, containers, and the timeline. The root is a loose object, so `z.extend(Catalog.RootSchema, { yourSection })` adds your own.
+- **Catalog**: zod schemas for the root, video, audio and text renditions, the JSON and binary data track sections, containers, and the `archive` entry (timeline track plus optional replay, store, and version). The root is a loose object, so `z.extend(Catalog.RootSchema, { yourSection })` adds your own.
 - **Containers**: `Container.Legacy` producer/consumer and `Container.Cmaf` init and data segment helpers.
 - **Utilities**: hex, priority and latency math, an Opus polyfill for browsers without a native decoder, and the browser quirks the media packages work around.
 

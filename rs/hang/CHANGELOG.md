@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- [**breaking**] Replace the catalog root `timeline` entry with `archive`. The
+  flattened timeline fields (`track`, `timescale`, `durationMax`, `wall`) stay;
+  optional `replay`, `store`, and `version` advertise a durable recording.
+
 ### Added
 
 - Human-readable labels for audio and video renditions.
