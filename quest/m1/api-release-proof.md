@@ -34,7 +34,7 @@ New findings and recommendations, ordered by consequence:
 | Local inclusive ends cannot express the empty exclusive range | Existing C adapter documents the mismatch | [Bounds](/quest/m1/api-subscription-bounds.md) |
 | Typed Getter input can be rejected solely for lacking an internal brand | Fixed: getter() reuses any conforming Getter | Fixed |
 | JSON edit guard logs failed implicit publication | Source-traced error suppression | [Edit transaction](/quest/m1/api-json-edit-commit.md) |
-| Terminal publisher methods inconsistently retain the caller's handle | Abandoned: finish must be `&mut` so abort can follow | deferred |
+| Terminal publisher methods inconsistently retain the caller's handle | Signature comparison; finish must borrow so abort can follow | [Finish borrows](/quest/m1/api-finish-borrow.md) |
 
 Recommend resolving behavioral failures and published contract choices before
 merge. Cosmetic consistency can be deferred explicitly if the maintainer
