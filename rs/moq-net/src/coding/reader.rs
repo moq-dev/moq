@@ -460,6 +460,8 @@ mod tests {
 		type Error = crate::lite::test_transport::SinkError;
 
 		fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+			// Like an executor poll, retire the previous turn's registrations first.
+			self.waiter = kio::Waiter::new(self.waiter.waker().clone());
 			while self.payload.poll_read_chunk(&self.waiter).is_ready() {}
 			self.chunks.poll_read(cx, dst)
 		}
