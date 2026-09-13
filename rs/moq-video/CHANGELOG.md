@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.24](https://github.com/moq-dev/moq/compare/moq-video-v0.0.23...moq-video-v0.0.24) - 2026-09-13
+
+### Added
+
+- *(moq-video)* convert a surface by reference, and to BGRA ([#3593](https://github.com/moq-dev/moq/pull/3593))
+- *(moq-video)* list the modes a V4L2 camera reports ([#3569](https://github.com/moq-dev/moq/pull/3569))
+
+### Fixed
+
+- *(moq-video)* cap NVENC keyframes with a single-frame VBV ([#3609](https://github.com/moq-dev/moq/pull/3609))
+- *(moq-video)* report backend selection, and name every backend publicly ([#3567](https://github.com/moq-dev/moq/pull/3567))
+- *(moq-video)* stop a dead codec session and a failed flush from spinning a reader ([#3568](https://github.com/moq-dev/moq/pull/3568))
+- *(moq-video,moq-audio)* open a decoder at the live edge ([#3565](https://github.com/moq-dev/moq/pull/3565))
+
+### Other
+
+- *(moq-video)* decode H.264 bitstreams this crate did not produce ([#3570](https://github.com/moq-dev/moq/pull/3570))
+
 ### Added
 
 - *(moq-video)* `Surface::to_bgra` and `to_bgra_with`, the same conversion as
