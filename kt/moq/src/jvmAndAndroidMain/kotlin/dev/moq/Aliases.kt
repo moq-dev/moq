@@ -128,7 +128,7 @@ typealias FetchGroupOptions = uniffi.moq.MoqFetchGroupOptions
 typealias TrackInfo = uniffi.moq.MoqTrackInfo
 /** One audio frame: PCM payload bytes plus a presentation timestamp. */
 typealias AudioFrame = uniffi.moq.MoqAudioFrame
-/** An audio codec identifier. */
+/** Selects the audio encoder codec. Build one with `AudioCodec.opus()`. */
 typealias AudioCodec = uniffi.moq.MoqAudioCodec
 /** A raw PCM sample format, mirroring WebCodecs `AudioData.format`. */
 typealias AudioSampleFormat = uniffi.moq.MoqAudioSampleFormat
@@ -179,4 +179,5 @@ typealias JsonStreamConfig = uniffi.moq.MoqJsonStreamConfig
 // `MoqException` (sealed) need subtype access (`MoqContainer.Loc`,
 // `MoqException.Closed`), which Kotlin 2.0.21 can't resolve through a typealias.
 // Reference those as `uniffi.moq.MoqContainer` / `uniffi.moq.MoqException`. Enums
-// (AudioCodec/AudioFormat) are fine: entry access through the alias works.
+// (AudioFormat) are fine: entry access through the alias works. Objects
+// (AudioCodec) expose constructors through the alias (`AudioCodec.opus()`).

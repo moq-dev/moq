@@ -264,4 +264,33 @@ class SmokeTest {
             track.finish()
         }
     }
+
+    @Test
+    fun `encode audio with opus object`() {
+        val input = AudioEncoderInput(format = AudioSampleFormat.F32, sampleRate = 48_000u, channels = 1u)
+        val silence = AudioFrame(timestampUs = 0uL, data = ByteArray(960 * 4))
+
+        // The producer retains the codec, so releasing the codec and the
+        // config in either order must still encode.
+        for (codecFirst in listOf(true, false)) {
+            BroadcastProducer().use { broadcast ->
+                val codec = AudioCodec.opus()
+                val output = AudioEncoderOutput(codec = codec)
+                val producer = broadcast.encodeAudio("mic", input, output)
+                if (codecFirst) {
+                    codec.close()
+                } else {
+                    output.destroy()
+                }
+                producer.write(silence)
+                if (codecFirst) {
+                    output.destroy()
+                } else {
+                    codec.close()
+                }
+                assertEquals("mic", producer.name())
+                producer.finish()
+            }
+        }
+    }
 }

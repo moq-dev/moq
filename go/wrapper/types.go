@@ -2,13 +2,14 @@ package moq
 
 import ffi "moq.dev/moq-ffi/moq"
 
-// Record and enum types re-exported from the ffi layer without the Moq prefix.
+// Record, enum, and small object types re-exported from the ffi layer without the Moq prefix.
 // These are plain data, so type aliases are exact: a moq.AudioFrame is an
 // ffi.MoqAudioFrame, constructible and comparable across the boundary.
 type (
 	// Audio describes one audio rendition in a broadcast catalog: codec, sample rate, channel count, and container.
 	Audio = ffi.MoqAudio
-	// AudioCodec identifies an audio track's codec; Opus is currently the only value.
+	// AudioCodec selects the audio encoder codec. Build one with OpusAudioCodec;
+	// adding a codec later adds a constructor, not a breaking enum change.
 	AudioCodec = ffi.MoqAudioCodec
 	// AudioDecoderOutput configures the PCM format, sample rate, and channels DecodeAudio delivers.
 	AudioDecoderOutput = ffi.MoqAudioDecoderOutput
@@ -178,8 +179,10 @@ const (
 	AudioSampleFormatF32Planar = ffi.MoqAudioSampleFormatF32Planar
 )
 
-// AudioCodecOpus is the only codec currently supported for raw audio tracks.
-const AudioCodecOpus = ffi.MoqAudioCodecOpus
+// OpusAudioCodec selects Opus (RFC 6716) for EncodeAudio.
+func OpusAudioCodec() *AudioCodec {
+	return ffi.MoqAudioCodecOpus()
+}
 
 // VideoPixelFormat values: the raw pixel layout fed to the in-process encoder.
 const (

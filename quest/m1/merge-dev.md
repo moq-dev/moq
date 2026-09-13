@@ -49,7 +49,6 @@ additive quest that builds on dev-only code start on main afterwards from
 
 - [Route cold cost](/quest/m1/route-cold-cost.md) - preserve both costs through the published binding record and C layout before release
 
-- [Audio codec object](/quest/m1/api-audio-codec.md) - typed Opus selection allows future codecs without another binding enum break
 - [Worker ownership](/quest/m1/api-worker-ownership.md) - consuming split ownership retains sockets and joins the group before release
 - [Origin scope API](/quest/m1/api-origin-pattern-scopes.md) - typed scope grants preserve current prefixes and refuse unsupported patterns
 - [Token claims API](/quest/m1/api-token-claims.md) - working versioned claim types precede the v1 default rollout

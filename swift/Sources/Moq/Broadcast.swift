@@ -259,7 +259,8 @@ public final class BroadcastProducer: Sendable {
     }
 
     /// Open a raw-audio track. PCM written via `AudioProducer.write` is encoded
-    /// (e.g. to Opus) inside the FFI boundary per `input`/`output`.
+    /// inside the FFI boundary per `input`/`output`. Select the codec with
+    /// `AudioCodec.opus()` (currently the only constructor), placed in `output`.
     ///
     /// Pass `bandwidth` to reserve this track's bitrate against the session's
     /// allocator so a co-resident video encoder sizes itself against what is left.

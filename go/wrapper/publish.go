@@ -174,16 +174,17 @@ func (b *BroadcastProducer) PublishContainerStream(format ContainerFormat) (*Con
 	return &ContainerStreamProducer{inner: inner}, nil
 }
 
-// EncodeAudio publishes a raw-audio track with an in-process Opus encoder.
+// EncodeAudio publishes a raw-audio track with an in-process encoder.
 //
+// Select the codec with OpusAudioCodec (currently the only constructor).
 // Pass bandwidth to reserve this track's bitrate against the session's
 // allocator so a co-resident video encoder sizes itself against what is left.
 func (b *BroadcastProducer) EncodeAudio(name string, input AudioEncoderInput, output AudioEncoderOutput, bandwidth *Bandwidth) (*AudioProducer, error) {
-	var innerBw *ffi.MoqBandwidth
+	var innerBw **ffi.MoqBandwidth
 	if bandwidth != nil {
-		innerBw = bandwidth.inner
+		innerBw = &bandwidth.inner
 	}
-	inner, err := b.inner.EncodeAudio(name, input, output, &innerBw)
+	inner, err := b.inner.EncodeAudio(name, input, output, innerBw)
 	if err != nil {
 		return nil, err
 	}
@@ -199,11 +200,11 @@ func (b *BroadcastProducer) EncodeAudio(name string, input AudioEncoderInput, ou
 //
 // Pass bandwidth to reserve this track's configured bitrate and follow the grant.
 func (b *BroadcastProducer) EncodeVideo(input VideoEncoderInput, output VideoEncoderOutput, bandwidth *Bandwidth) (*VideoProducer, error) {
-	var innerBw *ffi.MoqBandwidth
+	var innerBw **ffi.MoqBandwidth
 	if bandwidth != nil {
-		innerBw = bandwidth.inner
+		innerBw = &bandwidth.inner
 	}
-	inner, err := b.inner.EncodeVideo(input, output, &innerBw)
+	inner, err := b.inner.EncodeVideo(input, output, innerBw)
 	if err != nil {
 		return nil, err
 	}

@@ -45,17 +45,29 @@ impl From<MoqAudioSampleFormat> for moq_audio::Format {
 	}
 }
 
-/// Audio codec identifier.
-#[derive(Clone, Copy, uniffi::Enum)]
-pub enum MoqAudioCodec {
-	Opus,
+/// Audio codec selection for the encoder.
+///
+/// An immutable object so adding a codec later does not break callers
+/// switching over a closed enum. Currently only Opus is available.
+#[derive(uniffi::Object)]
+pub struct MoqAudioCodec {
+	inner: moq_audio::encode::Codec,
 }
 
-impl From<MoqAudioCodec> for moq_audio::encode::Codec {
-	fn from(c: MoqAudioCodec) -> Self {
-		match c {
-			MoqAudioCodec::Opus => Self::Opus,
-		}
+#[uniffi::export]
+impl MoqAudioCodec {
+	/// Opus (RFC 6716).
+	#[uniffi::constructor]
+	pub fn opus() -> Arc<Self> {
+		Arc::new(Self {
+			inner: moq_audio::encode::Codec::Opus,
+		})
+	}
+}
+
+impl MoqAudioCodec {
+	pub(crate) fn codec(&self) -> moq_audio::encode::Codec {
+		self.inner
 	}
 }
 
@@ -72,7 +84,7 @@ pub struct MoqAudioEncoderInput {
 /// value if necessary)".
 #[derive(uniffi::Record)]
 pub struct MoqAudioEncoderOutput {
-	pub codec: MoqAudioCodec,
+	pub codec: Arc<MoqAudioCodec>,
 	#[uniffi(default = None)]
 	pub sample_rate: Option<u32>,
 	#[uniffi(default = None)]
@@ -263,7 +275,7 @@ impl MoqBroadcastProducer {
 		// than letting the codec derive one.
 		let mut options = moq_audio::encode::Options::default();
 		options.track = Some(name);
-		options.codec = output.codec.into();
+		options.codec = output.codec.codec();
 		options.sample_rate = output.sample_rate;
 		options.channels = output.channels;
 		options.bitrate = output.bitrate.map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));

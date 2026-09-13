@@ -225,4 +225,39 @@ final class SmokeTests: XCTestCase {
         try track.finish()
         try broadcast.finish()
     }
+
+    func testEncodeAudioWithOpusObject() throws {
+        // The config retains the codec, so releasing either first must still encode.
+        let input = AudioEncoderInput(format: .f32, sampleRate: 48_000, channels: 1)
+        let silence = AudioFrame(timestampUs: 0, data: Data(count: 960 * 4))
+
+        // Release the codec before encoding: `output` retains it.
+        do {
+            let broadcast = try BroadcastProducer()
+            var output: AudioEncoderOutput!
+            do {
+                let codec = AudioCodec.opus()
+                output = AudioEncoderOutput(codec: codec)
+            }
+            let producer = try broadcast.encodeAudio(name: "mic", input: input, output: output)
+            try producer.write(silence)
+            XCTAssertEqual(try producer.name, "mic")
+            try producer.finish()
+            try broadcast.finish()
+        }
+
+        // Release the config before finishing: the producer retains what it needs.
+        do {
+            let broadcast = try BroadcastProducer()
+            let producer: AudioProducer
+            do {
+                let codec = AudioCodec.opus()
+                let output = AudioEncoderOutput(codec: codec)
+                producer = try broadcast.encodeAudio(name: "mic", input: input, output: output)
+            }
+            try producer.write(silence)
+            try producer.finish()
+            try broadcast.finish()
+        }
+    }
 }

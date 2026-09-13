@@ -140,6 +140,51 @@ func TestPublishAudioLifecycle(t *testing.T) {
 	}
 }
 
+func TestEncodeAudioWithOpusObject(t *testing.T) {
+	// The producer retains the codec, so releasing the codec and the
+	// config in either order must still encode.
+	for _, codecFirst := range []bool{true, false} {
+		broadcast, err := moq.NewBroadcastProducer()
+		if err != nil {
+			t.Fatal(err)
+		}
+		codec := moq.OpusAudioCodec()
+		output := moq.AudioEncoderOutput{Codec: codec, FrameDurationUs: 20000}
+		producer, err := broadcast.EncodeAudio("mic", moq.AudioEncoderInput{
+			Format:     moq.AudioSampleFormatF32,
+			SampleRate: 48000,
+			Channels:   1,
+		}, output, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if codecFirst {
+			codec.Destroy()
+		} else {
+			// Dropping the config first must not invalidate the producer.
+			output.Destroy()
+		}
+		// One 20 ms Opus frame of silence at 48 kHz mono.
+		if err := producer.Write(moq.AudioFrame{TimestampUs: 0, Data: make([]byte, 960*4)}); err != nil {
+			t.Fatal(err)
+		}
+		if codecFirst {
+			output.Destroy()
+		} else {
+			codec.Destroy()
+		}
+		if name, err := producer.Name(); err != nil || name != "mic" {
+			t.Fatalf("name = %q err=%v, want mic", name, err)
+		}
+		if err := producer.Finish(); err != nil {
+			t.Fatal(err)
+		}
+		if err := broadcast.Finish(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestVideoPropertiesUseDefaultedFields(t *testing.T) {
 	broadcast, err := moq.NewBroadcastProducer()
 	if err != nil {

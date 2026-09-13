@@ -3,8 +3,8 @@
 //
 // It wraps the raw UniFFI bindings in moq.dev/moq-ffi with
 // idiomatic Go: context.Context cancellation, Go error returns, and Go 1.23
-// range-over-func iterators (iter.Seq2) for live streams. The raw record and
-// enum types are re-exported here without the Moq prefix (see types.go), so
+// range-over-func iterators (iter.Seq2) for live streams. The raw record,
+// enum, and small object types are re-exported here without the Moq prefix (see types.go), so
 // most programs never need to import the ffi package directly.
 //
 // A typical full-duplex client wires a single origin as both publish source

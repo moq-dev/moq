@@ -283,7 +283,7 @@ async fn raw_audio_activity() {
 				channels: 1,
 			},
 			MoqAudioEncoderOutput {
-				codec: MoqAudioCodec::Opus,
+				codec: MoqAudioCodec::opus(),
 				sample_rate: None,
 				channels: None,
 				bitrate: None,
@@ -373,7 +373,7 @@ async fn raw_audio_frame_durations() {
 		channels: 1,
 	};
 	let output = |frame_duration_us| MoqAudioEncoderOutput {
-		codec: MoqAudioCodec::Opus,
+		codec: MoqAudioCodec::opus(),
 		sample_rate: None,
 		channels: None,
 		bitrate: None,

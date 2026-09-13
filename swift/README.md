@@ -55,7 +55,7 @@ let broadcast = try session.publisher.createBroadcast(path: "my-stream")
 
 Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer. `session.shutdown()` is an alias for `cancel(code: 0)` (code 0 means "no error").
 
-A note on enum casing: `MoqError` keeps Rust's PascalCase variants, each carrying `message: String` (e.g. `MoqError.Closed(message: "...")`); plain enums round-trip to lowerCamelCase (`AudioFormat.s16`, `AudioCodec.opus`).
+A note on enum casing: `MoqError` keeps Rust's PascalCase variants, each carrying `message: String` (e.g. `MoqError.Closed(message: "...")`); plain enums round-trip to lowerCamelCase (`AudioFormat.s16`). Audio codecs are objects with constructors (`AudioCodec.opus()`).
 
 ## API shape
 

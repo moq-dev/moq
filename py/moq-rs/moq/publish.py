@@ -652,7 +652,10 @@ class BroadcastProducer:
         *,
         bandwidth: Bandwidth | None = None,
     ) -> AudioProducer:
-        """Publish a raw-audio track with an in-process Opus encoder.
+        """Publish a raw-audio track with an in-process encoder.
+
+        Select the codec with ``moq.AudioCodec.opus()`` (currently the only
+        constructor), placed in ``output``.
 
         Pass ``bandwidth`` to reserve this track's bitrate against the session's
         allocator so a co-resident video encoder sizes itself against what is left.

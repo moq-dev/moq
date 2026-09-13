@@ -1,6 +1,7 @@
 import MoqFFI
 
-// Plain data types (records + enums) are re-exported under de-prefixed names.
+// Plain data types (records + enums) and small objects (e.g. `AudioCodec`)
+// are re-exported under de-prefixed names.
 // These carry no behavior, so a typealias keeps them in lockstep with the
 // `moq-ffi` crate automatically. The stateful handle types are fully wrapped
 // instead (see Client.swift, Broadcast.swift, etc.), so MoqFFI's `Moq`-prefixed
@@ -49,7 +50,7 @@ public typealias VideoDecodedFrame = MoqVideoDecodedFrame
 public typealias AudioDecoderOutput = MoqFFI.MoqAudioDecoderOutput
 /// A raw PCM sample format, mirroring WebCodecs `AudioData.format`.
 public typealias AudioSampleFormat = MoqFFI.MoqAudioSampleFormat
-/// An audio codec identifier (e.g. Opus).
+/// Selects the audio encoder codec. Build one with `AudioCodec.opus()`.
 public typealias AudioCodec = MoqFFI.MoqAudioCodec
 /// One raw video frame: pixels in the configured layout plus a presentation
 /// timestamp.

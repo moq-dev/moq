@@ -932,20 +932,44 @@ def test_optional_binding_records_use_none_defaults():
     assert hint.framerate is None
     assert hint.optimize_for_latency is None
 
-    encoder = moq.AudioEncoderOutput(codec=moq.AudioCodec.OPUS)
+    encoder = moq.AudioEncoderOutput(codec=moq.AudioCodec.opus())
     assert encoder.sample_rate is None
     assert encoder.channels is None
     assert encoder.bitrate is None
     assert encoder.frame_duration_us == 20_000
 
     # Microseconds, so Opus' 2.5 ms frame is expressible at all.
-    fine = moq.AudioEncoderOutput(codec=moq.AudioCodec.OPUS, frame_duration_us=2_500)
+    fine = moq.AudioEncoderOutput(codec=moq.AudioCodec.opus(), frame_duration_us=2_500)
     assert fine.frame_duration_us == 2_500
 
     decoder = moq.AudioDecoderOutput(format=moq.AudioSampleFormat.F32)
     assert decoder.sample_rate is None
     assert decoder.channels is None
     assert decoder.max_age_ms is None
+
+
+def test_encode_audio_with_opus_object():
+    """Construct the Opus selection, encode actual audio, release in either order."""
+    for codec_first in (True, False):
+        broadcast = moq.BroadcastProducer()
+        codec = moq.AudioCodec.opus()
+        output = moq.AudioEncoderOutput(codec=codec)
+        producer = broadcast.encode_audio(
+            "mic",
+            moq.AudioEncoderInput(format=moq.AudioSampleFormat.F32, sample_rate=48_000, channels=1),
+            output,
+        )
+        if codec_first:
+            del codec
+            del output
+        else:
+            del output
+            del codec
+        # One 20 ms Opus frame of silence at 48 kHz mono.
+        producer.write(moq.AudioFrame(timestamp_us=0, data=bytes(960 * 4)))
+        assert producer.name == "mic"
+        producer.finish()
+        broadcast.finish()
 
 
 async def test_announce_then_unannounce_is_visible():
