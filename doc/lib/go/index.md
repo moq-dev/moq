@@ -67,6 +67,15 @@ _ = broadcast.Announce(moq.Route{})
 broadcast.Finish()   // keep the producer reachable while publishing, then finish explicitly
 ```
 
+The three advertising operations: `client.CreateBroadcast(path)` (or
+`origin.CreateBroadcast`) returns an unadvertised producer;
+`broadcast.Announce(route)` / `broadcast.Unannounce()` own that exact-path
+advertisement; `origin.Dynamic(pattern, route)` claims every matching path
+(`foo/**` for a prefix). Hold the returned `OriginDynamic` while the claim
+should stay advertised. A wildcard is a capability, not an inventory;
+`ann.Path()` is the covered prefix for a prefix-shaped claim and the pattern
+text otherwise.
+
 Every call that can block takes a `context.Context` first. Cancelling it
 returns `ctx.Err()` promptly and tears the in-flight native work down, so a
 per-call deadline bounds resource use rather than just your wait. What it tears

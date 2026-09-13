@@ -55,9 +55,11 @@ after which it can never sign a broader token.
 ### Path matching
 
 Grants are `root/suffix`, matched on path boundaries (`foo` covers `foo/bar`
-but not `foobar`). The connection path may equal the root, extend it (which
-narrows the grant), or be a parent of it (the grant still applies at the
-root). An unrelated path is rejected.
+but not `foobar`). Token scope stays prefix-based until origin grants become
+a pattern set: `live/*` is not a grant, and a wildcard advertisement still
+has to sit inside one of these prefixes. The connection path may equal the
+root, extend it (which narrows the grant), or be a parent of it (the grant
+still applies at the root). An unrelated path is rejected.
 
 | root | put | get | Publish | Subscribe |
 | --- | --- | --- | --- | --- |

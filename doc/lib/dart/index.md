@@ -43,6 +43,16 @@ mine.announce(route: MoqRoute());
 moq.close();
 ```
 
+The three advertising operations: `moq.createBroadcast(path)` (or
+`origin.createBroadcast`) returns an unadvertised producer;
+`broadcast.announce(route:)` / `broadcast.unannounce()` own that exact-path
+advertisement; `origin.dynamic_(pattern:, route:)` claims every matching
+path (`foo/**` for a prefix; Dart spells the origin method `dynamic_`
+because `dynamic` is reserved). Hold the returned handle while the claim
+should stay advertised. A wildcard is a capability, not an inventory;
+`announcement.path()` is the covered prefix for a prefix-shaped claim and
+the pattern text otherwise.
+
 Sessions reconnect with backoff when the transport drops and re-announce local
 broadcasts. `moq.epoch` counts the connections, 1 on the first, pairing with
 `session.status()` to log each reconnect; `maxStreams` raises the peer's

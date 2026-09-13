@@ -53,14 +53,9 @@ authorized; resolving one into a subscription is not implemented yet.
 ## Path patterns
 
 Rust's `moq_net::Pattern` and TypeScript's `Path.Pattern` from `@moq/net`
-describe sets of literal paths. `origin.dynamic(pattern, route)` advertises any
-pattern in that dialect; a prefix is still spelled `foo/**`. Token scope stays
-prefix-based until origin grants become a pattern set: an advertisement must
-be contained by one of the producer's `prefix/**` scopes, and an over-wide
-claim is refused rather than clamped.
-
-Patterns match the whole path. `room` matches only `room`, while `room/**`
-matches `room` and every descendant. Segments are separated by `/`:
+describe sets of literal paths. Patterns match the whole path. `room` matches
+only `room`, while `room/**` matches `room` and every descendant. Segments are
+separated by `/`:
 
 | Segment | Matches |
 | --- | --- |
@@ -75,6 +70,34 @@ or repeated separators are invalid pattern syntax. The empty pattern matches
 the empty path. There is no escape syntax for a literal `*`.
 Construction normalizes adjacent `*` and `**`: `*/**` prints as `**/*`,
 so equivalent wildcard placements have the same identity.
+
+`origin.dynamic(pattern, route)` advertises any pattern in that dialect; a
+prefix is still spelled `foo/**`. The call claims that matching paths *can* be
+served, not that any exist. A wildcard is a capability, not an inventory: a
+subscriber must not treat the pattern as a concrete broadcast name. Use
+`create_broadcast(path)` and `announce(route)` when the path is known; use
+`dynamic` when the set of paths is not.
+
+A subscriber watching under a prefix sees the advertisement rebased to that
+scope. `**/a` advertised cluster-wide and consumed at `a` arrives as both the
+empty pattern (exactly `a`) and `**/a` (deeper paths ending in `a`). A pattern
+that cannot match under the prefix is not sent. Announce events carry the
+matcher: Rust `announce::Update.pattern` and TypeScript `Announce.Event.pattern`
+are a `Pattern`. Use `as_prefix()` / `asPrefix()` when a consumer specifically
+needs a prefix-shaped claim.
+
+When a subscriber asks for a matching path the advertiser will not serve, the
+advertiser refuses that request rather than stretching the claim. The same
+rule applies on the way in: an advertisement must be contained by one of the
+producer's `prefix/**` scopes, and an over-wide claim is refused rather than
+clamped. Token scope stays prefix-based until origin grants become a pattern
+set.
+
+Resolving a non-prefix pattern into a subscription is not implemented yet;
+only prefix-shaped claims currently serve `request_broadcast`. The
+advertisement is still forwarded and costed. The wire is
+[ANNOUNCE\_PATTERN in moq-lite](/draft/moq-lite) (lite-06+) and the
+[pattern extension](/draft/moq-pattern) on moq-transport.
 
 ```typescript
 import { Path } from "@moq/net";

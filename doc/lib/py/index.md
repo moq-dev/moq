@@ -64,6 +64,15 @@ async def main():
 asyncio.run(main())
 ```
 
+The three advertising operations, as the other bindings spell them:
+`client.create_broadcast(path)` (or `OriginProducer.create_broadcast`) returns
+an unadvertised producer; `broadcast.announce(route)` /
+`broadcast.unannounce()` own that exact-path advertisement;
+`origin.dynamic(pattern, route)` claims every matching path (`foo/**` for a
+prefix). Hold the returned handle while the claim should stay advertised. A
+wildcard is a capability, not an inventory; announcement `.path` is the
+covered prefix for a prefix-shaped claim and the pattern text otherwise.
+
 Sessions reconnect with backoff when the transport drops and re-announce local
 broadcasts. `session.epoch()` counts the connections, 1 on the first, pairing
 with `session.status()` to log each reconnect; `moq.Backoff` tunes the pacing
