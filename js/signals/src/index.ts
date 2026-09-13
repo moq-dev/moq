@@ -316,8 +316,9 @@ export function readonlys<T extends SignalMap>(signals: T): Readonlys<T> {
  * from this package (including another copy's branded `Signal`), a {@link readonlys}
  * output, or a foreign adapter with the same three methods. {@link getter} reuses those
  * as-is and wraps any other value in a fresh `Signal`. Shape is the discriminator, not a
- * brand: an object whose `peek`, `subscribe`, and `changed` are functions is a readable;
- * a plain object with a `peek` data field is not.
+ * brand: an object whose `peek`, `subscribe`, and `changed` are functions is a readable,
+ * including data that happens to carry those three functions. A plain object with a
+ * `peek` data field is not.
  */
 export type GetterInit<T> = T | Getter<T>;
 
@@ -327,7 +328,10 @@ export type GetterInit<T> = T | Getter<T>;
  *
  * Does not wrap a readable or subscribe to it. Wrapping would freeze it into a constant;
  * a subscription here would leak because nothing owns it. Older copies of this package
- * brand `Signal` but not the readable; those still pass through.
+ * brand `Signal` but not the readable; those still pass through. Runtime reuse is by
+ * duck type: an object whose `peek`, `subscribe`, and `changed` are functions is treated
+ * as a {@link Getter}, even if it is data that happens to carry those names. There is no
+ * extra heuristic.
  *
  * ```ts
  * getter(1);
@@ -348,7 +352,8 @@ export function getter<T>(value: GetterInit<T>): Getter<T> {
 }
 
 // Shape, not brand: a foreign adapter and an older unbranded readable both match.
-// Wrapping either would freeze it into a constant.
+// Wrapping either would freeze it into a constant. Data that happens to carry
+// peek/subscribe/changed functions matches too; we do not try to tell it from a Getter.
 function getterShaped(value: unknown): boolean {
 	if (typeof value !== "object" || value === null) return false;
 	const maybe = value as Partial<Getter<unknown>>;

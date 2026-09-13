@@ -95,7 +95,7 @@ test("a Computed wired into an in stays live under an effect", async () => {
 	await computed.changed();
 	await Promise.resolve();
 
-	expect(seen).toContain(8);
+	expect(seen).toEqual([2, 8]);
 
 	effect.close();
 	computed.close();
@@ -169,7 +169,7 @@ test("a foreign readable wired into an in stays live under an effect", async () 
 	source.set(4);
 	await settle();
 
-	expect(seen).toContain(4);
+	expect(seen).toEqual([1, 4]);
 
 	effect.close();
 });
