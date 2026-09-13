@@ -47,4 +47,6 @@ the existing subscription closes and no further objects arrive.
 
 ## Required
 
+- [Merge dev](/quest/m1/merge-dev.md) - the required M1 APIs must be available on main before this implementation starts
+
 - [Origin scope pattern API](/quest/m1/api-origin-pattern-scopes.md) - the published shape and functional prefix behavior land before the release

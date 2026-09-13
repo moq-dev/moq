@@ -43,6 +43,8 @@ change.
 
 ## Required
 
+- [Merge dev](/quest/m1/merge-dev.md) - the required M1 APIs must be available on main before this implementation starts
+
 - [C decoder output](/quest/m1/api-c-decoder-output.md) - settle the C output layout before adding frame accessors
 
 ## Related

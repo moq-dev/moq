@@ -146,6 +146,10 @@ cross-language harness.
 
 On main, additive.
 
+## Required
+
+- [Merge dev](/quest/m1/merge-dev.md) - release the origin scope and connection surfaces used by AUTH
+
 ## Related
 
 - [Pattern interest](/quest/m2/path-patterns/interest.md) - moves the prefix

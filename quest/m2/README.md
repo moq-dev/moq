@@ -30,7 +30,9 @@ rewritten implementation quests; it does not authorize speculative production
 code. Audio jitter specification, metadata association, capture ergonomics,
 and WebTransport open-contract work are planning dispatches.
 
-Land M1 public contracts first, then dispatch their implementation dependents.
+Land M1 public contracts and merge dev into main before dispatching their
+M2 implementation dependents. Those implementations require the merge quest
+explicitly, so completing an API quest on dev cannot release them early.
 Within the ready set, give one agent ownership of each shared code area at a
 time: origin/auth, JS Reader, audio playback, media container/archive, bindings,
 worker transport, and benchmark tooling. Separate worktrees isolate commits,

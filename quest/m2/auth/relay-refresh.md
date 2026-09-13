@@ -51,7 +51,7 @@ expiry, scope loss cancels only the work it no longer authorizes, and
   stores every token added through it, presents them on each new session as
   it attaches, unions the live session's grant, and its `add` resolves against
   the session that is up at the time; a token the app drops is withdrawn from
-  the live session and forgotten. Branch from dev, or from main once
+  the live session and forgotten. Branch from main once
   [merge-dev](/quest/m1/merge-dev.md) lands.
 - Docs: `doc/bin/relay/auth.md` gains an "in-band tokens" section beside
   revalidation stating that grants union, that a token needs the admitted
@@ -71,6 +71,8 @@ expiry, scope loss cancels only the work it no longer authorizes, and
 Additive.
 
 ## Required
+
+- [Merge dev](/quest/m1/merge-dev.md) - release the origin scope and connection surfaces used by AUTH
 
 - [Pattern interest](/quest/m2/path-patterns/interest.md) - AUTH can represent the complete grants relay revalidation returns
 

@@ -28,6 +28,8 @@ publish grant.
 
 ## Required
 
+- [Merge dev](/quest/m1/merge-dev.md) - the required M1 APIs must be available on main before this implementation starts
+
 - [Advertise](/quest/m1/wildcard-advertise.md) - supplies the wildcard message
   and authorization point this capability separates
 - [Token SDKs](/quest/m2/path-patterns/token-sdk.md) - supplies the published

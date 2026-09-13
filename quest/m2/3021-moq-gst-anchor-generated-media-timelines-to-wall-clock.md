@@ -34,6 +34,8 @@ correction is introduced here. Run the GStreamer CI and smoke-full lanes.
 
 ## Required
 
+- [Merge dev](/quest/m1/merge-dev.md) - the required M1 APIs must be available on main before this implementation starts
+
 - [Continuous broadcast clock](/quest/m1/broadcast-clock.md) - fixes the shared epoch and catalog exposure before this adapter supplies clock observations
 
 ## Closes

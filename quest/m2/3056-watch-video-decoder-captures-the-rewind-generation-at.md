@@ -35,6 +35,8 @@ same on main, so the fix lands there once the timeline quest has settled.
 
 ## Required
 
+- [Merge dev](/quest/m1/merge-dev.md) - the required M1 APIs must be available on main before this implementation starts
+
 - [Monotonic timeline](/quest/m1/monotonic-timeline.md) - settles playhead generation before watch's reaction to it is pinned
 
 ## Closes

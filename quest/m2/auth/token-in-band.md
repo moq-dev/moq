@@ -57,10 +57,12 @@ AUTH-capable.
   nothing is refused at the deadline; the cross-language harness runs with
   tokens configured.
 
-Branch from dev, or from main once [merge-dev](/quest/m1/merge-dev.md) lands.
+Branch from main once [merge-dev](/quest/m1/merge-dev.md) lands.
 Additive.
 
 ## Required
+
+- [Merge dev](/quest/m1/merge-dev.md) - release the origin scope and connection surfaces used by AUTH
 
 - [Relay tokens](/quest/m2/auth/relay-refresh.md) - supplies the verify and
   widen path the configured tokens reuse

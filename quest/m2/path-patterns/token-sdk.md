@@ -22,6 +22,8 @@ Land as breaking package releases.
 
 ## Required
 
+- [Merge dev](/quest/m1/merge-dev.md) - the required M1 APIs must be available on main before this implementation starts
+
 - [Relay auth](/quest/m2/path-patterns/relay-auth.md) - the in-tree reader accepts v1 before issuers default to it
 
 - [Claims](/quest/m1/api-token-claims.md)

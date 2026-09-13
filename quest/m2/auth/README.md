@@ -71,8 +71,7 @@ Decisions settled while planning, recorded so review does not relitigate them:
   scoped trust between relays is a later quest.
 - **Client API is dev's.** Tokens live on `moq_tokio::connect::Config`, the
   dial-side config already on dev, and `Connection` exposes the live
-  session's auth handle. Quests touching that surface branch from dev, or
-  from main once [merge-dev](/quest/m1/merge-dev.md) lands.
+  session's auth handle. Quests touching that surface branch from main once [merge-dev](/quest/m1/merge-dev.md) lands.
 - **Spec home.** The AUTH stream is lite-06 core in
   `drafts/draft-lcurley-moq-lite.md`, the way routing is. moq-transport gets
   `drafts/draft-lcurley-moq-auth.md`, a setup-option-negotiated extension with

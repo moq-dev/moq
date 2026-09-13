@@ -38,6 +38,8 @@ quests follow.
 
 ## Required
 
+- [Merge dev](/quest/m1/merge-dev.md) - the required M1 APIs must be available on main before this implementation starts
+
 - [Audio codec object](/quest/m1/api-audio-codec.md) - extensible binding selection before release
 
 - [Decode seam](/quest/m2/audio-codecs/decode-backend.md) - the naming and shape this mirrors

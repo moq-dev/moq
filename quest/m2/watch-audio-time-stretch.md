@@ -29,6 +29,8 @@ Branch from dev.
 
 ## Required
 
+- [Merge dev](/quest/m1/merge-dev.md) - the required M1 APIs must be available on main before this implementation starts
+
 - [Plan: A/V clock](/quest/m1/plan-av-clock.md) - stretching against a free-running ring only moves the drift
 
 - [Watch](/quest/m2/audio-jitter-target/watch.md) - the recorded traces this replays, and the JS target it converges toward

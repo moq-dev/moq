@@ -17,4 +17,6 @@ restart in js/publish to it. Data tracks skip a sequence with no marker.
 
 ## Required
 
+- [Merge dev](/quest/m1/merge-dev.md) - the required M1 APIs must be available on main before this implementation starts
+
 - [Monotonic timeline](/quest/m1/monotonic-timeline.md) - settles the marker-group contract this producer must emit
