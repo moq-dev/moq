@@ -919,13 +919,14 @@ impl OriginNodes {
 		}
 	}
 
-	// Returns nested roots that match the prefixes.
+	// Returns nested roots that match the patterns.
 	// PathPrefixes guarantees no duplicates or overlapping prefixes.
-	pub fn select(&self, prefixes: &PathPrefixes) -> Option<Self> {
+	pub fn select(&self, patterns: &Patterns) -> Option<Self> {
+		let prefixes = PathPrefixes::from_patterns(patterns)?;
 		let mut roots = Vec::new();
 
 		for (root, absolute) in &self.nodes {
-			for prefix in prefixes {
+			for prefix in &prefixes {
 				if root.has_prefix(prefix) {
 					// Keep the existing subtree if we're allowed to access it.
 					roots.push((root.to_owned(), absolute.clone()));
@@ -1369,16 +1370,16 @@ impl Producer {
 		Ok(prefixes)
 	}
 
-	/// Returns a new Producer restricted to publishing under one of `prefixes`.
+	/// Returns a new Producer restricted to publishing under one of `patterns`.
 	///
-	/// Returns None if there are no legal prefixes (the requested prefixes are
-	/// disjoint from this producer's current scope).
-	// TODO accept PathPrefixes instead of &[Path]
-	pub fn scope(&self, prefixes: &[Path]) -> Option<Producer> {
-		let prefixes = PathPrefixes::new(prefixes);
+	/// Each member must be prefix-shaped (`foo/**` for the old `foo` prefix, `**` for
+	/// the old empty prefix). Returns None when any member cannot be represented yet
+	/// (an exact `foo`, the empty pattern, a suffix, or any segment wildcard), or when
+	/// the requested patterns are disjoint from this producer's current scope.
+	pub fn scope(&self, patterns: &Patterns) -> Option<Producer> {
 		Some(Producer {
 			info: self.info,
-			nodes: self.nodes.select(&prefixes)?,
+			nodes: self.nodes.select(patterns)?,
 			root: self.root.clone(),
 			shared: self.shared.clone(),
 			pool: self.pool.clone(),
@@ -1426,10 +1427,14 @@ impl Producer {
 		&self.root
 	}
 
-	/// Iterate over the path prefixes this handle is permitted to publish or subscribe under.
-	// TODO return PathPrefixes
-	pub fn allowed(&self) -> impl Iterator<Item = &Path<'_>> {
-		self.nodes.nodes.iter().map(|(root, _)| root)
+	/// The granted scopes as prefix-shaped patterns: `foo/**` for the old `foo`
+	/// prefix, `**` for the old empty prefix.
+	pub fn allowed(&self) -> Patterns {
+		self.nodes
+			.nodes
+			.iter()
+			.map(|(root, _)| Pattern::subtree(root.as_str()).expect("scope roots are literal paths"))
+			.collect()
 	}
 
 	/// Converts a relative path to an absolute path.
@@ -3590,14 +3595,15 @@ impl Consumer {
 	pub async fn routed(&self, path: impl AsPath) -> Option<Route> {
 		let path = path.as_path();
 
-		// Scope a fresh consumer down to this path: any covering route then clamps
-		// to exactly the path, so we only wake for relevant announcements.
-		let consumer = self.scope(std::slice::from_ref(&path))?;
+		// Scope a fresh consumer down to this path's subtree: any covering route then
+		// clamps to exactly the path, so we only wake for relevant announcements.
+		let subtree = Pattern::subtree(path.as_str()).ok()?;
+		let consumer = self.scope(&Patterns::from(subtree))?;
 
 		// `scope` keeps narrower permissions intact: if we ask for `foo` on a
 		// consumer limited to `foo/specific`, no route can ever clamp to exactly
 		// `foo`. Bail rather than loop forever.
-		if !consumer.allowed().any(|allowed| path.has_prefix(allowed)) {
+		if !consumer.allowed().matches(path.as_str()) {
 			return None;
 		}
 
@@ -3628,8 +3634,11 @@ impl Consumer {
 
 		// `scope` keeps narrower permissions intact: if the whole path is not
 		// reachable, no route can ever cover it, so bail rather than loop forever.
-		let scoped = self.scope(std::slice::from_ref(&path)).ok_or(Error::Unauthorized)?;
-		if !scoped.allowed().any(|allowed| path.has_prefix(allowed)) {
+		let subtree = Pattern::subtree(path.as_str())
+			.map(Patterns::from)
+			.map_err(|_| Error::Unauthorized)?;
+		let scoped = self.scope(&subtree).ok_or(Error::Unauthorized)?;
+		if !scoped.allowed().matches(path.as_str()) {
 			return Err(Error::Unauthorized);
 		}
 		loop {
@@ -3667,15 +3676,15 @@ impl Consumer {
 		}
 	}
 
-	/// Returns a new Consumer restricted to broadcasts under one of `prefixes`.
+	/// Returns a new Consumer restricted to broadcasts under one of `patterns`.
 	///
-	/// Returns None if there are no legal prefixes (the requested prefixes are
-	/// disjoint from this consumer's current scope, so it would always return None).
-	// TODO accept PathPrefixes instead of &[Path]
-	pub fn scope(&self, prefixes: &[Path]) -> Option<Consumer> {
-		let prefixes = PathPrefixes::new(prefixes);
+	/// Each member must be prefix-shaped (`foo/**` for the old `foo` prefix, `**` for
+	/// the old empty prefix). Returns None when any member cannot be represented yet
+	/// (an exact `foo`, the empty pattern, a suffix, or any segment wildcard), or when
+	/// the requested patterns are disjoint from this consumer's current scope.
+	pub fn scope(&self, patterns: &Patterns) -> Option<Consumer> {
 		Some(Consumer {
-			nodes: self.nodes.select(&prefixes)?,
+			nodes: self.nodes.select(patterns)?,
 			..self.clone()
 		})
 	}
@@ -3817,10 +3826,14 @@ impl Consumer {
 		&self.root
 	}
 
-	/// Iterate over the path prefixes this handle is permitted to publish or subscribe under.
-	// TODO return PathPrefixes
-	pub fn allowed(&self) -> impl Iterator<Item = &Path<'_>> {
-		self.nodes.nodes.iter().map(|(root, _)| root)
+	/// The granted scopes as prefix-shaped patterns: `foo/**` for the old `foo`
+	/// prefix, `**` for the old empty prefix.
+	pub fn allowed(&self) -> Patterns {
+		self.nodes
+			.nodes
+			.iter()
+			.map(|(root, _)| Pattern::subtree(root.as_str()).expect("scope roots are literal paths"))
+			.collect()
 	}
 
 	/// Converts a relative path to an absolute path.
@@ -4088,6 +4101,11 @@ mod tests {
 		Pattern::subtree(prefix).unwrap()
 	}
 
+	/// The scope granting these prefixes: each spelled as its subtree pattern.
+	fn scopes(prefixes: &[&str]) -> Patterns {
+		prefixes.iter().map(|prefix| subtree(prefix)).collect()
+	}
+
 	/// Yield to the driver until `check` passes, bounded so a bug fails instead
 	/// of hanging.
 	async fn settle(mut check: impl FnMut() -> bool) {
@@ -4226,10 +4244,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let bare = producer.node_count();
 
-		let scoped = producer
-			.consume()
-			.scope(&[Path::new("room/a"), Path::new("room/b")])
-			.unwrap();
+		let scoped = producer.consume().scope(&scopes(&["room/a", "room/b"])).unwrap();
 		assert_eq!(producer.node_count(), bare, "scoping should not create nodes");
 		assert!(producer.consume().with_root("room/c").is_some());
 		assert_eq!(producer.node_count(), bare, "rooting should not create nodes");
@@ -4247,8 +4262,8 @@ mod tests {
 	#[tokio::test]
 	async fn scoped_handles_survive_a_prune() {
 		let producer = origin(1).produce();
-		let scoped = producer.scope(&[Path::new("channel")]).unwrap();
-		let consumer = producer.consume().scope(&[Path::new("channel")]).unwrap();
+		let scoped = producer.scope(&scopes(&["channel"])).unwrap();
+		let consumer = producer.consume().scope(&scopes(&["channel"])).unwrap();
 
 		// Create the scoped subtree and prune it straight back out.
 		let mut first = scoped.create_broadcast("channel/chat").unwrap();
@@ -4266,7 +4281,7 @@ mod tests {
 	#[tokio::test]
 	async fn announce_clamps_to_producer_scope() {
 		let producer = origin(1).produce();
-		let scoped = producer.scope(&[Path::new("room")]).unwrap();
+		let scoped = producer.scope(&scopes(&["room"])).unwrap();
 
 		// A broad claim through a narrow scope advertises only the intersection.
 		let _a = scoped.announce("", Route::default()).unwrap();
@@ -4285,7 +4300,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let _a = producer.announce("", Route::default()).unwrap();
 
-		let consumer = producer.consume().scope(&[Path::new("room")]).unwrap();
+		let consumer = producer.consume().scope(&scopes(&["room"])).unwrap();
 		let mut announced = consumer.announced();
 		announced.assert_next_active("room");
 	}
@@ -4563,7 +4578,7 @@ mod tests {
 	#[test]
 	fn wildcard_scope_is_refused_not_clamped() {
 		let producer = origin(1).produce();
-		let scoped = producer.scope(&[Path::new("room")]).unwrap();
+		let scoped = producer.scope(&scopes(&["room"])).unwrap();
 		let err = scoped
 			.dynamic("**".parse().unwrap(), Route::default())
 			.err()
@@ -4929,7 +4944,7 @@ mod tests {
 	async fn out_of_scope_request_never_reaches_the_dynamic_handler() {
 		let producer = origin(1).produce();
 		let dynamic = producer.dynamic(Pattern::all(), Route::default()).unwrap();
-		let scoped = producer.consume().scope(&[Path::new("tenant-a")]).unwrap();
+		let scoped = producer.consume().scope(&scopes(&["tenant-a"])).unwrap();
 
 		// `tenant-a-other` shares a character prefix but not a segment, so this
 		// also pins that the check is segment-aware rather than textual.
@@ -5449,14 +5464,113 @@ mod tests {
 		let producer = origin(1).produce();
 		let _a = producer.announce("", Route::default()).unwrap();
 
-		let consumer = producer
-			.consume()
-			.scope(&[Path::new("alpha"), Path::new("beta")])
-			.unwrap();
+		let consumer = producer.consume().scope(&scopes(&["alpha", "beta"])).unwrap();
 		let mut announced = consumer.announced();
 		announced.assert_next_active("alpha");
 		announced.assert_next_active("beta");
 		announced.assert_next_wait();
+	}
+
+	#[test]
+	fn scope_reports_prefix_shaped_grants() {
+		let producer = origin(1).produce();
+
+		// The root grant is `**`, the old empty prefix.
+		let root = producer.scope(&Patterns::from(Pattern::all())).unwrap();
+		assert_eq!(root.allowed(), Patterns::from(Pattern::all()));
+
+		// `foo/**` keeps the old `foo` prefix meaning.
+		let scoped = producer.scope(&scopes(&["room"])).unwrap();
+		assert_eq!(scoped.allowed(), scopes(&["room"]));
+
+		// Multiple prefixes round-trip, with overlap collapsed.
+		let multi = producer.scope(&scopes(&["room", "room/chat", "anon"])).unwrap();
+		assert_eq!(multi.allowed(), scopes(&["room", "anon"]));
+
+		// The consumer side reports the same way.
+		let consumer = producer.consume().scope(&scopes(&["room"])).unwrap();
+		assert_eq!(consumer.allowed(), scopes(&["room"]));
+	}
+
+	#[test]
+	fn scope_empty_union_grants_nothing() {
+		let producer = origin(1).produce();
+
+		// An empty union grants nothing: scoping is refused, like a disjoint prefix.
+		assert!(producer.scope(&Patterns::new()).is_none());
+		assert!(producer.consume().scope(&Patterns::new()).is_none());
+	}
+
+	#[test]
+	fn scope_nests_and_rebases_roots() {
+		let producer = origin(1).produce();
+
+		// Narrowing twice intersects; the grant stays in the new vocabulary.
+		let scoped = producer.scope(&scopes(&["room"])).unwrap();
+		let nested = scoped.scope(&scopes(&["room/chat"])).unwrap();
+		assert_eq!(nested.allowed(), scopes(&["room/chat"]));
+
+		// A disjoint nesting is refused, not widened.
+		assert!(scoped.scope(&scopes(&["other"])).is_none());
+
+		// A literal root rebases the grant without changing its meaning.
+		let rooted = nested.with_root("room/chat").unwrap();
+		assert_eq!(rooted.allowed(), scopes(&[""]));
+
+		// Publishing through the nested view lands where the root says.
+		let mut broadcast = nested.create_broadcast("room/chat/live").unwrap();
+		assert!(producer.consume().get_broadcast("room/chat/live").is_some());
+		broadcast.finish();
+	}
+
+	#[test]
+	fn scope_refuses_non_prefix_grants() {
+		let producer = origin(1).produce();
+		let refused = |text: &str| {
+			let pattern: Pattern = text.parse().unwrap();
+			let union = Patterns::from(pattern);
+			assert!(
+				producer.scope(&union).is_none(),
+				"{text} is not a prefix grant and must be refused"
+			);
+			assert!(
+				producer.consume().scope(&union).is_none(),
+				"{text} is not a prefix grant and must be refused"
+			);
+		};
+
+		// An exact path is not a grant over its subtree.
+		refused("room");
+		// The empty pattern names only the root, not everything beneath it.
+		refused("");
+		// Suffixes and segment wildcards name sets a prefix cannot cover.
+		refused("*room");
+		refused("room/*");
+		refused("*");
+		// A `**` anywhere but the end is not a subtree.
+		refused("**/room");
+		refused("room/**/chat");
+	}
+
+	#[test]
+	fn scope_validates_the_whole_union() {
+		let producer = origin(1).produce();
+
+		// A supported member cannot conceal an unsupported one: neither member
+		// contains the other, so both survive reduction and the union is refused.
+		let mixed: Patterns = ["room/**".parse().unwrap(), "other".parse().unwrap()]
+			.into_iter()
+			.collect();
+		assert_eq!(mixed.len(), 2);
+		assert!(producer.scope(&mixed).is_none());
+		assert!(producer.consume().scope(&mixed).is_none());
+
+		let mixed: Patterns = ["room/**".parse().unwrap(), "other/*.jpg".parse().unwrap()]
+			.into_iter()
+			.collect();
+		assert_eq!(mixed.len(), 2);
+		assert!(producer.scope(&mixed).is_none());
+		assert!(producer.consume().scope(&mixed).is_none());
 	}
 
 	/// Charging a link accumulates onto both halves, saturating rather than wrapping

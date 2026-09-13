@@ -2665,7 +2665,7 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 
 	let publish = pub_origin
 		.consume()
-		.scope(&["allowed".into()])
+		.scope(&moq_net::Patterns::from(moq_net::Pattern::subtree("allowed").unwrap()))
 		.expect("failed to scope publish origin");
 
 	let (mut server, addr) = test_server().await;
@@ -2674,7 +2674,12 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 	// "denied" is disjoint from the publisher's scope, so its announce stream is FINed.
 	let sub_origin = moq_tokio::origin::spawn(Hop::random());
 	let consume = sub_origin
-		.scope(&["allowed".into(), "denied".into()])
+		.scope(
+			&["allowed", "denied"]
+				.into_iter()
+				.map(|prefix| moq_net::Pattern::subtree(prefix).unwrap())
+				.collect::<moq_net::Patterns>(),
+		)
 		.expect("failed to scope consume origin");
 	let sub_consumer = consume.consume();
 	let mut announcements = sub_consumer.announced();
@@ -2732,7 +2737,12 @@ async fn publish_only_client_to_subscribe_only_server() {
 	// ── subscriber (server): interested in both "allowed" and "denied" ──
 	let sub_origin = moq_tokio::origin::spawn(Hop::random());
 	let consume = sub_origin
-		.scope(&["allowed".into(), "denied".into()])
+		.scope(
+			&["allowed", "denied"]
+				.into_iter()
+				.map(|prefix| moq_net::Pattern::subtree(prefix).unwrap())
+				.collect::<moq_net::Patterns>(),
+		)
 		.expect("failed to scope consume origin");
 	let sub_consumer = consume.consume();
 	let mut announcements = sub_consumer.announced();
@@ -2808,7 +2818,7 @@ async fn publish_only_client_to_subscribe_only_server() {
 
 	let publish = pub_origin
 		.consume()
-		.scope(&["allowed".into()])
+		.scope(&moq_net::Patterns::from(moq_net::Pattern::subtree("allowed").unwrap()))
 		.expect("failed to scope publish origin");
 
 	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(test_client().with_publisher(publish), url))

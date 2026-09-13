@@ -48,6 +48,11 @@ async function routed(consumer: Consumer, path: Path.Valid): Promise<BroadcastCo
 	return front;
 }
 
+/** The scope granting these prefixes: each spelled as its subtree pattern. */
+function scope(...prefixes: Path.Valid[]): Path.Patterns {
+	return new Path.Patterns(prefixes.map((prefix) => Path.Pattern.subtree(prefix)));
+}
+
 /** A stand-in for a session announcing a route: serves any path from `producer`. */
 function provider(producer: BroadcastProducer) {
 	return () => producer.consume();
@@ -194,7 +199,7 @@ test("announced streams the table with prefix-relative paths", async () => {
 
 	const a = publish(origin, Path.from("room/a"));
 
-	const announced = consumer.announced(Path.from("room"));
+	const announced = consumer.announced(scope(Path.from("room")));
 
 	// The initial state arrives first.
 	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("a")), active: true });
@@ -250,7 +255,7 @@ test("announced reports a broader covering route at the root", async () => {
 
 	// A route above the requested prefix covers everything under it, so it
 	// presents at the root, matching what request() resolves there.
-	const announced = consumer.announced(Path.from("room/alice"));
+	const announced = consumer.announced(scope(Path.from("room/alice")));
 	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.empty()), active: true });
 
 	dispose();
@@ -1023,5 +1028,75 @@ test("literal and subtree claims keep distinct pattern identities", async () => 
 	expect(ended?.active).toBe(false);
 	subtree.close();
 	announced.close();
+	origin.close();
+});
+
+test("announced accepts prefix-shaped unions and reports them in the new vocabulary", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+
+	// The root grant is `**`, the old empty prefix.
+	const root = consumer.announced(new Path.Patterns([Path.Pattern.all()]));
+	expect(root.scope.equals(new Path.Patterns([Path.Pattern.all()]))).toBe(true);
+
+	// `foo/**` keeps the old `foo` prefix meaning.
+	const scoped = consumer.announced(scope(Path.from("room")));
+	expect(scoped.scope.equals(scope(Path.from("room")))).toBe(true);
+
+	// Multiple prefixes fan out: a route under each presents under its own member.
+	const a = publish(origin, Path.from("alpha/x"));
+	const b = publish(origin, Path.from("beta/y"));
+	publish(origin, Path.from("other/z"));
+	const multi = consumer.announced(scope(Path.from("alpha"), Path.from("beta")));
+	expect(await multi.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("x")), active: true });
+	expect(await multi.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("y")), active: true });
+
+	root.close();
+	scoped.close();
+	multi.close();
+	a.close();
+	b.close();
+	origin.close();
+});
+
+test("announced with an empty union grants nothing and stays silent", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+
+	publish(origin, Path.from("room/a"));
+	const announced = consumer.announced(new Path.Patterns());
+	const raced = await Promise.race([announced.next().then(() => "event"), settle().then(() => "silent")]);
+	expect(raced).toBe("silent");
+
+	announced.close();
+	origin.close();
+});
+
+test("announced refuses non-prefix grants without narrowing or widening", () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+
+	const refused = (text: string) => {
+		const union = new Path.Patterns([Path.Pattern.parse(text)]);
+		expect(() => consumer.announced(union)).toThrow();
+	};
+
+	// An exact path is not a grant over its subtree.
+	refused("room");
+	// The empty pattern names only the root, not everything beneath it.
+	refused("");
+	// Suffixes and segment wildcards name sets a prefix cannot cover.
+	refused("*room");
+	refused("room/*");
+	refused("*");
+	// A `**` anywhere but the end is not a subtree.
+	refused("**/room");
+	refused("room/**/chat");
+
+	// A supported member cannot conceal an unsupported one.
+	const mixed = new Path.Patterns([Path.Pattern.parse("room/**"), Path.Pattern.parse("other")]);
+	expect(mixed.size).toBe(2);
+	expect(() => consumer.announced(mixed)).toThrow();
+
 	origin.close();
 });

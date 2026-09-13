@@ -637,7 +637,11 @@ where
 	/// advertise answers with an empty set, which costs one stream, while waiting to find
 	/// out costs a round trip on every session.
 	pub fn subscribe_prefixes(&self) -> Vec<PathOwned> {
-		self.origin.allowed().map(|p| p.to_owned()).collect()
+		self.origin
+			.allowed()
+			.iter()
+			.map(|pattern| Path::new(pattern.as_prefix().expect("allowed patterns are prefix-shaped")).to_owned())
+			.collect()
 	}
 
 	/// Send SUBSCRIBE_NAMESPACE for one prefix on a bidi stream.
@@ -2826,9 +2830,10 @@ mod tests {
 	#[tokio::test]
 	async fn a_rooted_subscriber_asks_for_its_scope_not_its_root() {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let scope = crate::Patterns::from(crate::Pattern::subtree("cam").unwrap());
 		let scoped = origin
 			.with_root("rootns")
-			.and_then(|rooted| rooted.scope(&[crate::Path::new("cam")]))
+			.and_then(|rooted| rooted.scope(&scope))
 			.expect("scope the origin");
 
 		let gate = kio::Producer::new(true);
@@ -2898,9 +2903,10 @@ mod tests {
 
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
+		let scope = crate::Patterns::from(crate::Pattern::subtree("cam").unwrap());
 		let scoped = origin
 			.with_root("rootns")
-			.and_then(|rooted| rooted.scope(&[crate::Path::new("cam")]))
+			.and_then(|rooted| rooted.scope(&scope))
 			.expect("scope the origin");
 
 		let session = crate::lite::test_transport::ScriptedSession::new(namespace_response(VERSION, "x.hang").await);

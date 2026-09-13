@@ -130,7 +130,8 @@ export default class MoqBoy extends HTMLElement {
 
 		// The origin's stream spans reconnects: entries retract when the session dies and
 		// return when the next one re-announces them, so this loop never needs to restart.
-		const announced = this.origin.consume().announced(prefix);
+		// The origin speaks scopes; the intended prefix converts explicitly to its subtree.
+		const announced = this.origin.consume().announced(new Moq.Path.Patterns([Moq.Path.Pattern.subtree(prefix)]));
 		effect.cleanup(() => announced.close());
 
 		effect.spawn(async () => {

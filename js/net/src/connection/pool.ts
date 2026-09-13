@@ -267,7 +267,9 @@ export class Connection {
 	 * new one's arrivals stream in.
 	 */
 	announced(prefix: Path.Valid = Path.empty()): Announce.Consumer {
-		const producer = new Announce.Producer(prefix);
+		// The origin speaks scopes; the intended prefix converts explicitly to its subtree.
+		const scope = new Path.Patterns([Path.Pattern.subtree(prefix)]);
+		const producer = new Announce.Producer(scope);
 		const consumer = producer.consume();
 
 		// Closing the consumer closes the shared state, so stop appending after that.
@@ -284,7 +286,7 @@ export class Connection {
 			const origin = effect.get(this.#origin);
 			if (!origin) return;
 
-			const upstream = origin.announced(prefix);
+			const upstream = origin.announced(scope);
 			effect.cleanup(() => upstream.close());
 
 			// Track what this origin announced so a URL switch retracts it.

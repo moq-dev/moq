@@ -10,7 +10,7 @@ use std::{
 use web_transport_trait::Stats;
 
 use crate::{
-	AsPath, Error, Hop, Hops,
+	Error, Hop, Hops,
 	coding::{Encode, Stream, Writer},
 	lite::{
 		self,
@@ -200,7 +200,7 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> Publisher<S
 		stream: &mut Stream<S, Version>,
 		origin: &origin::Consumer,
 		announced: &mut announce::Consumer,
-		prefix: impl AsPath,
+		prefix: impl crate::AsPath,
 		self_origin: Hop,
 		version: Version,
 	) -> Result<(), Error> {
@@ -542,10 +542,15 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 		// that doesn't grant it), we simply have nothing to announce. Respond with an
 		// empty set and keep the stream open (the subscriber treats a FIN here as a
 		// fatal stream close), rather than erroring, which would reset the stream.
+		// The wire prefix decodes as a literal path; convert it explicitly to its
+		// subtree grant, refusing anything that cannot be a subtree.
+		let scope = crate::Pattern::subtree(prefix.as_str())
+			.map(crate::Patterns::from)
+			.unwrap_or_default();
 		let origin = self
 			.shared
 			.origin
-			.scope(&[prefix.as_path()])
+			.scope(&scope)
 			.unwrap_or_else(|| self.shared.origin.empty());
 		// Register the split-horizon peer on the announce cursor too. The origin
 		// model uses this exposure to park a reflected copy before it can replace

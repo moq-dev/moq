@@ -159,7 +159,9 @@ export class Subscriber {
 	 * versions stay consistent with that.
 	 */
 	announced(prefix = Path.empty()): announce.Consumer {
-		const announced = new announce.Producer(prefix);
+		// The announce stream presents scopes; the wire interest prefix converts
+		// explicitly to its subtree.
+		const announced = new announce.Producer(new Path.Patterns([Path.Pattern.subtree(prefix)]));
 		void this.#runAnnounced(announced, prefix);
 		return announced.consume();
 	}

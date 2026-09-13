@@ -117,7 +117,8 @@ discovery.run((effect) => {
 	if (!origin) return;
 
 	const prefix = Net.Path.from(STATS_PREFIX);
-	const announced = origin.announced(prefix);
+	// The origin speaks scopes; the intended prefix converts explicitly to its subtree.
+	const announced = origin.announced(new Net.Path.Patterns([Net.Path.Pattern.subtree(prefix)]));
 	effect.cleanup(() => announced.close());
 
 	// One sub-effect per node so we can tear a node's subscriptions down when it

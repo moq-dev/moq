@@ -448,11 +448,13 @@ export class Reload {
 	 * Stays empty while the relay lacks {@link Established.discovery}.
 	 */
 	announced(prefix: Path.Valid = emptyPath()): Announce.Consumer {
+		// The origin speaks scopes; the intended prefix converts explicitly to its subtree.
+		const scope = new Path.Patterns([Path.Pattern.subtree(prefix)]);
 		// With a consume origin the table already spans reconnects (the forwarder retracts
 		// a dead session's entries), so its stream is the same thing with less machinery.
-		if (this.consume) return this.consume.announced(prefix);
+		if (this.consume) return this.consume.announced(scope);
 
-		const producer = new Announce.Producer(prefix);
+		const producer = new Announce.Producer(scope);
 		const consumer = producer.consume();
 
 		const pump = new Effect();

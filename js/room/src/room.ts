@@ -62,10 +62,11 @@ export class Room {
 			const origin = effect.get(this.connection.origin);
 			if (!origin) return;
 			const prefix = effect.get(this.prefix) ?? Moq.Path.empty();
-			const announced = origin.announced(prefix);
+			// The origin speaks scopes; the intended prefix converts explicitly to its subtree.
+			const announced = origin.announced(new Moq.Path.Patterns([Moq.Path.Pattern.subtree(prefix)]));
 			effect.cleanup(() => announced.close());
 
-			effect.spawn(this.#run.bind(this, announced, effect));
+			effect.spawn(this.#run.bind(this, announced, prefix, effect));
 			effect.cleanup(() => {
 				for (const remote of this.#remotes.peek().values()) remote.close();
 				this.#remotes.set(new Map());
@@ -78,7 +79,7 @@ export class Room {
 		return this.#remotes;
 	}
 
-	async #run(announced: Moq.Announce.Consumer, effect: Effect): Promise<void> {
+	async #run(announced: Moq.Announce.Consumer, prefix: Moq.Path.Valid, effect: Effect): Promise<void> {
 		for (;;) {
 			const update = await Promise.race([effect.cancel, announced.next()]);
 			if (!update) break;
@@ -93,7 +94,7 @@ export class Room {
 			if (local && parsed.identity === local) continue;
 
 			if (update.active) {
-				this.#add(parsed.identity, parsed.kind, Moq.Path.join(announced.prefix, suffix));
+				this.#add(parsed.identity, parsed.kind, Moq.Path.join(prefix, suffix));
 			} else {
 				this.#remove(parsed.identity, parsed.kind);
 			}

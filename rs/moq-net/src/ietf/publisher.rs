@@ -1617,10 +1617,12 @@ where
 		// A prefix outside our scope (empty origin, or a token that doesn't grant it)
 		// just means we have nothing to announce; respond with an empty set rather than
 		// erroring, which would look fatal to the peer.
-		let origin = self
-			.origin
-			.scope(&[prefix.as_path()])
-			.unwrap_or_else(|| self.origin.empty());
+		// The wire prefix decodes as a literal path; convert it explicitly to its
+		// subtree grant, refusing anything that cannot be a subtree.
+		let scope = crate::Pattern::subtree(prefix.as_str())
+			.map(crate::Patterns::from)
+			.unwrap_or_default();
+		let origin = self.origin.scope(&scope).unwrap_or_else(|| self.origin.empty());
 
 		// Send OK response
 		match self.version {

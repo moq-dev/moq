@@ -104,8 +104,9 @@ export class Subscriber {
 	// to end from retracting what the other still holds.
 	#announced = new Map<Path.Valid, number>();
 
-	// Any consumers that want each new announcement.
-	#announcedConsumers = new Set<announce.Producer>();
+	// Any consumers that want each new announcement, keyed by the wire interest
+	// prefix their stream filters on.
+	#announcedConsumers = new Map<announce.Producer, Path.Valid>();
 
 	/**
 	 * Creates a new Subscriber instance.
@@ -145,13 +146,15 @@ export class Subscriber {
 	 * that only answers are both discovered.
 	 */
 	announced(prefix = Path.empty()): announce.Consumer {
-		const announced = new announce.Producer(prefix);
+		// The announce stream presents scopes; the wire interest prefix converts
+		// explicitly to its subtree.
+		const announced = new announce.Producer(new Path.Patterns([Path.Pattern.subtree(prefix)]));
 		for (const active of this.#announced.keys()) {
 			const suffix = Path.stripPrefix(prefix, active);
 			if (suffix === null) continue;
 			announced.append({ pattern: Path.Pattern.subtree(suffix), active: true });
 		}
-		this.#announcedConsumers.add(announced);
+		this.#announcedConsumers.set(announced, prefix);
 
 		void this.#runAnnounced(announced, prefix).finally(() => {
 			this.#announcedConsumers.delete(announced);
@@ -171,8 +174,8 @@ export class Subscriber {
 		if (count > 0) return;
 
 		console.debug(`announced: broadcast=${path} active=true`);
-		for (const consumer of this.#announcedConsumers) {
-			const suffix = Path.stripPrefix(consumer.prefix, path);
+		for (const [consumer, prefix] of this.#announcedConsumers) {
+			const suffix = Path.stripPrefix(prefix, path);
 			if (suffix === null) continue;
 			consumer.append({ pattern: Path.Pattern.subtree(suffix), active: true });
 		}
@@ -196,8 +199,8 @@ export class Subscriber {
 		this.#consumes.evict(path);
 		console.debug(`announced: broadcast=${path} active=false`);
 
-		for (const consumer of this.#announcedConsumers) {
-			const suffix = Path.stripPrefix(consumer.prefix, path);
+		for (const [consumer, prefix] of this.#announcedConsumers) {
+			const suffix = Path.stripPrefix(prefix, path);
 			if (suffix === null) continue;
 			try {
 				consumer.append({ pattern: Path.Pattern.subtree(suffix), active: false });

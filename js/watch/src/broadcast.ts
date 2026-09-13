@@ -182,7 +182,7 @@ export class Broadcast {
 		const origin = effect.get(this.in.origin);
 		if (!origin) return;
 
-		const announced = origin.announced(Path.empty());
+		const announced = origin.announced();
 		effect.cleanup(() => announced.close());
 		this.#announced.set(new Set());
 

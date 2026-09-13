@@ -7,7 +7,7 @@ use std::sync::Arc;
 use axum::http;
 use moq_auth::{Counters, Grant, Request, lease};
 use moq_auth::{Pattern, Patterns};
-use moq_net::{Path, PathOwned, PathPrefixes, stats::Tier};
+use moq_net::{Path, PathOwned, stats::Tier};
 use serde::{Deserialize, Serialize};
 use serde_with::{OneOrMany, serde_as};
 use url::Url;
@@ -170,10 +170,10 @@ pub struct AuthToken {
 	pub(crate) path: String,
 	/// The root the session is scoped to: the grant's `root` alias, else the dialed path.
 	pub root: PathOwned,
-	/// Prefixes the holder may subscribe to, relative to `root`.
-	pub subscribe: PathPrefixes,
-	/// Prefixes the holder may publish to, relative to `root`.
-	pub publish: PathPrefixes,
+	/// The subtree grants the holder may subscribe to, relative to `root`.
+	pub subscribe: Patterns,
+	/// The subtree grants the holder may publish to, relative to `root`.
+	pub publish: Patterns,
 	/// The tier this session's stats record under.
 	pub tier: Tier,
 }
@@ -181,28 +181,24 @@ pub struct AuthToken {
 impl AuthToken {
 	/// Reduce `grant` for a session that dialed `path`.
 	///
-	/// The origin scopes by prefix until pattern scopes land, so only `foo/**` and
-	/// `**` have an exact prefix. Anything else is refused naming the pattern,
-	/// including a literal `foo`: reading it as the prefix `foo` would widen one
-	/// broadcast into a subtree.
+	/// The origin scopes by prefix, so only `foo/**` and `**` have an exact prefix.
+	/// Anything else is refused naming the pattern, including a literal `foo`:
+	/// reading it as the prefix `foo` would widen one broadcast into a subtree.
+	/// The token keeps the Patterns the grant already yields rather than converting
+	/// them to prefixes.
 	pub fn new(path: &str, grant: &Grant) -> Result<Self, AuthError> {
-		let prefixes = |patterns: &Patterns| -> Result<PathPrefixes, AuthError> {
-			patterns
-				.iter()
-				.map(|pattern| {
-					pattern
-						.as_prefix()
-						.map(|prefix| Path::new(prefix).to_owned())
-						.ok_or_else(|| AuthError::UnsupportedPattern(pattern.to_string()))
-				})
-				.collect()
+		let supported = |patterns: &Patterns| -> Result<Patterns, AuthError> {
+			match patterns.iter().find(|pattern| pattern.as_prefix().is_none()) {
+				Some(pattern) => Err(AuthError::UnsupportedPattern(pattern.to_string())),
+				None => Ok(patterns.clone()),
+			}
 		};
 		let root = grant.root.as_deref().unwrap_or(path);
 		Ok(Self {
 			path: path.to_string(),
 			root: Path::new(root).to_owned(),
-			subscribe: prefixes(&grant.subscribe)?,
-			publish: prefixes(&grant.publish)?,
+			subscribe: supported(&grant.subscribe)?,
+			publish: supported(&grant.publish)?,
 			tier: crate::configured_tier(grant.tier.clone()),
 		})
 	}
@@ -214,13 +210,10 @@ impl AuthToken {
 	}
 
 	/// Whether `other` still covers everything this token scopes: the same root and
-	/// every prefix still granted. A narrower re-check closes the session until
+	/// every grant still held. A narrower re-check closes the session until
 	/// pattern scopes can resize it in place.
 	pub(crate) fn covered_by(&self, other: &Self) -> bool {
-		let covers = |granted: &PathPrefixes, held: &PathPrefixes| {
-			held.iter().all(|prefix| granted.iter().any(|g| prefix.has_prefix(g)))
-		};
-		self.root == other.root && covers(&other.subscribe, &self.subscribe) && covers(&other.publish, &self.publish)
+		self.root == other.root && other.subscribe.covers(&self.subscribe) && other.publish.covers(&self.publish)
 	}
 }
 
@@ -418,10 +411,7 @@ mod tests {
 		let request = auth.request(moq_auth::Transport::Quic, "/anon/room");
 		let admitted = futures::executor::block_on(auth.admit(request, Counters::default())).unwrap();
 		assert_eq!(admitted.token.root, Path::new("anon/room").to_owned());
-		assert_eq!(
-			admitted.token.subscribe,
-			PathPrefixes::from(vec![Path::new("anon").to_owned()])
-		);
+		assert_eq!(admitted.token.subscribe, patterns(&["anon/**"]));
 		assert_eq!(admitted.token.tier, Tier::default());
 	}
 
@@ -432,8 +422,8 @@ mod tests {
 		grant.tier = Some("gold".into());
 		let token = AuthToken::new("/vanity/room", &grant).unwrap();
 		assert_eq!(token.root, Path::new("pid/room").to_owned());
-		assert_eq!(token.publish, PathPrefixes::from(vec![Path::new("alice").to_owned()]));
-		assert_eq!(token.subscribe, PathPrefixes::from(vec![Path::new("").to_owned()]));
+		assert_eq!(token.publish, patterns(&["alice/**"]));
+		assert_eq!(token.subscribe, patterns(&["**"]));
 		assert_eq!(token.tier, Tier::new("gold"));
 
 		for pattern in ["*/chat", "alice", ""] {

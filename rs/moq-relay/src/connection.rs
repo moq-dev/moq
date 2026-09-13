@@ -203,13 +203,13 @@ pub(crate) fn authorize(
 
 	match (&publish, &subscribe) {
 		(Some(publish), Some(subscribe)) => {
-			tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, publish = %publish.allowed().map(moq_net::Path::as_str).collect::<Vec<_>>().join(","), subscribe = %subscribe.allowed().map(moq_net::Path::as_str).collect::<Vec<_>>().join(","), "session accepted");
+			tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, publish = %publish.allowed().iter().map(|pattern| pattern.as_str()).collect::<Vec<_>>().join(","), subscribe = %subscribe.allowed().iter().map(|pattern| pattern.as_str()).collect::<Vec<_>>().join(","), "session accepted");
 		}
 		(Some(publish), None) => {
-			tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, publish = %publish.allowed().map(moq_net::Path::as_str).collect::<Vec<_>>().join(","), "publisher accepted");
+			tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, publish = %publish.allowed().iter().map(|pattern| pattern.as_str()).collect::<Vec<_>>().join(","), "publisher accepted");
 		}
 		(None, Some(subscribe)) => {
-			tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, subscribe = %subscribe.allowed().map(moq_net::Path::as_str).collect::<Vec<_>>().join(","), "subscriber accepted");
+			tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, subscribe = %subscribe.allowed().iter().map(|pattern| pattern.as_str()).collect::<Vec<_>>().join(","), "subscriber accepted");
 		}
 		_ => unreachable!("authorized above guarantees at least one origin"),
 	}

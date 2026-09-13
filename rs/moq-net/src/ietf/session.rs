@@ -982,9 +982,13 @@ mod tests {
 	#[tokio::test]
 	async fn every_permitted_prefix_gets_its_own_subscribe_namespace() {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let scope: crate::Patterns = ["cam", "mic"]
+			.into_iter()
+			.map(|prefix| crate::Pattern::subtree(prefix).unwrap())
+			.collect();
 		let scoped = origin
 			.with_root("rootns")
-			.and_then(|rooted| rooted.scope(&[crate::Path::new("cam"), crate::Path::new("mic")]))
+			.and_then(|rooted| rooted.scope(&scope))
 			.expect("scope the origin to two prefixes");
 
 		let gate = kio::Producer::new(true);
