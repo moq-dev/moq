@@ -11,10 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - *(relay)* `ClusterOptions` so the origin is constructed with its cache settings
 - `[cluster.lan] app` / `--cluster-lan-app` names the DNS-SD application the LAN mesh advertises under
+- *(relay)* `Relay::with_web` / `Relay::with_internal` and borrowed handles (`cluster`, `auth`, `client`, `stats`, `shutdown`, `web`, `internal`, `addr`) so an embedder mounts routes without taking the sockets
+
+### Changed
+
+- *(relay)* [**breaking**] `Relay` owns listeners, workers, and shutdown joins. Fields are private; destructuring and driving `serve` yourself can no longer drop a newly added socket owner. Call `run` after cloning handles and mounting routes.
 
 ### Removed
 
 - *(relay)* `Cluster::with_cache`; pass the cache to `Cluster::new` via `ClusterOptions`
+- *(relay)* [**breaking**] public `Relay` fields (`server`, `workers`, `uring`, and the rest). Use the accessors and `run`.
 
 ## [0.14.16](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.15...moq-relay-v0.14.16) - 2026-09-09
 

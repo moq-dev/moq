@@ -5,10 +5,10 @@
 //! or any other stream. Clustering, JWT authentication, WebSocket
 //! fallback, and an HTTP API are all included.
 //!
-//! [`Relay::load`] assembles every piece from a [`Config`]; [`Relay::run`] drives
-//! the stock loop, and embedders with their own workers or routes destructure a
-//! `Relay` instead of reproducing the sequence. `main.rs` is a thin wrapper over
-//! the two.
+//! [`Relay::load`] assembles every piece from a [`Config`]. Embedders clone the
+//! application handles they need, mount extra routes, and call [`Relay::run`],
+//! which keeps the listeners, workers, and shutdown joins. `main.rs` is a thin
+//! wrapper over the two.
 
 mod auth;
 mod cache;

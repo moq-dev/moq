@@ -124,7 +124,7 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 
 	let relay = Relay::load(uring_config(&cert, &key, port)).await.expect("load relay");
 	let expected: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-	assert_eq!(relay.addr, Some(expected), "workers bound a different address");
+	assert_eq!(relay.addr(), Some(expected), "workers bound a different address");
 
 	// The stock loop serves everything: the uring workers own QUIC, the shared
 	// runtime owns auth and supervision.
@@ -240,7 +240,7 @@ async fn uring_workers_publish_their_certificate_fingerprint() {
 	// handler reads the same certificate handle either way.
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
 	let addr = listener.local_addr().expect("local addr");
-	let routes = relay.web.routes();
+	let routes = relay.web().routes();
 	let serving = tokio::spawn(async move { axum::serve(listener, routes).await });
 
 	let served = http_get(addr, "/certificate.sha256").await;

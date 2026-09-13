@@ -1681,10 +1681,10 @@ mod tests {
 
 	/// The publish task holds only a `Weak` to its producer, so it stops when the
 	/// last `moq_stats::Producer` clone drops. Attaching one must therefore hand
-	/// its lifetime to the cluster: an embedder driving its own loop takes the
-	/// pieces it needs off a `Relay` and drops the rest, and a relay that keeps
-	/// serving while silently publishing nothing is exactly the class of failure
-	/// this API exists to rule out. Moving the ONLY handle in must keep it alive.
+	/// its lifetime to the cluster: an embedder clones handles off a `Relay` and
+	/// does not have to keep the producer, and a relay that keeps serving while
+	/// silently publishing nothing is exactly the class of failure this API
+	/// exists to rule out. Moving the ONLY handle in must keep it alive.
 	///
 	/// Asserts the broadcast is still live AFTER a few publish intervals, not
 	/// merely that one appeared: the task publishes once before it can notice its

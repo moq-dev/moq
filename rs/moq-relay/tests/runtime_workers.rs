@@ -3,7 +3,7 @@
 //! Linux-only, because the mode is: every worker binds the listen address with
 //! `SO_REUSEPORT`, and no other platform load-balances a unicast UDP port
 //! across the group. There is also nothing to serve without a QUIC backend, so
-//! `Relay::workers` is absent from such a build.
+//! a build without one refuses `runtime.workers` at load.
 #![cfg(all(target_os = "linux", feature = "_quic"))]
 
 use std::net::{SocketAddr, UdpSocket};
@@ -90,21 +90,10 @@ async fn workers_serve_quic_and_share_one_origin() {
 
 	let relay = Relay::load(config).await.expect("load relay");
 	let expected: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-	assert_eq!(relay.addr, Some(expected), "workers bound a different address");
+	assert_eq!(relay.addr(), Some(expected), "workers bound a different address");
 
-	let cluster = relay.cluster.clone();
-	let auth = relay.auth.clone();
-	let shutdown = relay.shutdown.clone();
-	// The group has to outlive the accept loops it owns, so it stays on this
-	// stack: stopping it is what stops the workers.
-	let mut workers = relay.workers.expect("workers configured");
-	let mut tasks = Vec::new();
-	for (server, spawner) in workers.split() {
-		let cluster = cluster.clone();
-		let auth = auth.clone();
-		let shutdown = shutdown.clone();
-		tasks.push(spawner.run(move || moq_relay::serve(server, cluster, auth, shutdown)));
-	}
+	// The owner keeps the worker group; aborting this task is what joins them.
+	let running = tokio::spawn(relay.run());
 
 	let url: url::Url = format!("https://127.0.0.1:{port}/workers").parse().expect("parse url");
 
@@ -162,14 +151,12 @@ async fn workers_serve_quic_and_share_one_origin() {
 		assert_eq!(&frame.payload[..], b"hello");
 	}
 
-	assert!(
-		tasks.iter().all(|task| !task.is_finished()),
-		"a QUIC worker stopped while serving"
-	);
+	assert!(!running.is_finished(), "a QUIC worker stopped while serving");
 
 	drop(track);
 	drop(broadcast);
 	drop(publisher);
 	drop(subscribers);
-	workers.shutdown().await;
+	running.abort();
+	let _ = running.await;
 }

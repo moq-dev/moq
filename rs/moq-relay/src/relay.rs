@@ -8,8 +8,10 @@
 //!
 //! An embedder wanting the relay PLUS its own workers - extra routes on the web
 //! server, an in-process recorder against [`Cluster::origin`], another listener
-//! in its own `select!` - takes the assembled pieces from [`Relay::load`] and
-//! drives them, instead of reproducing the sequence.
+//! in its own `select!` - loads a [`Relay`], clones the handles it needs, mounts
+//! routes, and calls [`Relay::run`]. The owner keeps the listeners, worker
+//! threads, error propagation, and shutdown joins, so a new socket added here
+//! cannot be dropped by a `..` pattern that still compiles.
 //!
 //! That distinction matters because this crate is consumed as a git dependency.
 //! A caller who copies the sequence gets a step added here as a library update
@@ -19,71 +21,51 @@
 //! is a compile error.
 
 use anyhow::Context;
+use axum::Router;
 
 use crate::{Auth, Cluster, ClusterOptions, Config, Connection, Internal, Shutdown, ShutdownTrigger, Web};
 
-/// A fully assembled relay: the listeners and the shared cluster behind them.
+/// A fully assembled relay: the owner of every listener, worker group, and
+/// shutdown join.
 ///
-/// Fields are public so an embedder can take the pieces it needs and drive its
-/// own event loop (mount extra routes on [`Self::web`], spawn workers against
-/// [`Cluster::origin`], add listeners to its own `select!`). Use [`Self::run`]
-/// when the stock behavior is what you want.
+/// Clone the application handles ([`Self::cluster`], [`Self::auth`],
+/// [`Self::client`], [`Self::stats`], [`Self::shutdown`]) and mount extra
+/// routes with [`Self::with_web`] / [`Self::with_internal`]. [`Self::run`]
+/// is the serving loop; dropping it (or letting it return) releases the
+/// sockets and joins the workers.
 ///
-/// `#[non_exhaustive]`, so destructure with a trailing `..` (a pattern naming
-/// every field does not compile outside this crate) or move out the fields you
-/// need one at a time. Dropping a field you do not name is safe for all but
-/// [`Self::workers`]: the rest of what must outlive setup is owned by
-/// [`Self::cluster`], while the workers own their threads and bound sockets, so
-/// dropping them releases the QUIC port.
-#[non_exhaustive]
+/// ```ignore
+/// let relay = Relay::load(config).await?;
+/// let origin = relay.cluster().origin.clone();
+/// let web = relay.web().routes().route("/hello", axum::routing::get(hello));
+/// relay.with_web(web).run().await?;
+/// ```
 pub struct Relay {
-	/// The QUIC/WebTransport server, already bound. Feed it to [`serve`].
-	pub server: moq_tokio::Server,
-
-	/// The client used to dial cluster peers. Already handed to [`Self::cluster`];
-	/// clone it for your own outbound dials so they share the connection config.
-	pub client: moq_tokio::Client,
-
-	/// The resolved auth policy (JWT/public sources, or mTLS-only).
-	pub auth: Auth,
-
-	/// The shared cluster: the origin every session and peer publishes into.
-	pub cluster: Cluster,
-
-	/// The stats producer, exposed for embedders that publish their own counters
-	/// through it. [`Self::cluster`] holds a clone, so the publish task lives as
-	/// long as the cluster whether or not this handle is kept.
-	pub stats: moq_stats::Producer,
-
-	/// The internal (ops) listener: `/metrics`, `/health`, `/nodes`. Inert
-	/// unless `internal.listen` is configured.
-	pub internal: Internal,
-
-	/// The customer-facing web server. [`Web::routes`] + [`Web::serve`] to mount
-	/// your own routes onto it; [`Web::run`] serves just the relay's own.
-	pub web: Web,
-
-	/// The QUIC bind address, or `None` for a stream-only server (no QUIC).
-	pub addr: Option<std::net::SocketAddr>,
-
-	/// Graceful-shutdown signal shared by every accepted session and web handler.
-	pub shutdown: Shutdown,
-
-	/// Starts graceful shutdown for [`Self::shutdown`].
-	pub shutdown_trigger: ShutdownTrigger,
-
+	server: moq_tokio::Server,
+	client: moq_tokio::Client,
+	auth: Auth,
+	cluster: Cluster,
+	stats: moq_stats::Producer,
+	internal: Internal,
+	web: Web,
+	addr: Option<std::net::SocketAddr>,
+	shutdown: Shutdown,
+	shutdown_trigger: ShutdownTrigger,
+	/// Replacement for the default public router. `None` serves [`Web::routes`].
+	web_routes: Option<Router>,
+	/// Replacement for the default ops router. `None` serves [`Internal::routes`].
+	internal_routes: Option<Router>,
 	/// The thread-per-core QUIC workers, already bound and waiting to be split
 	/// and run. `None` unless `runtime.workers` is configured, in which case
-	/// [`Self::server`] carries no QUIC listener of its own.
+	/// `server` carries no QUIC listener of its own.
 	#[cfg(feature = "_quic")]
-	pub workers: Option<moq_tokio::worker::Workers>,
-
+	workers: Option<moq_tokio::worker::Workers>,
 	/// The io_uring QUIC workers, already bound and waiting for
 	/// [`serve`](crate::uring::Workers::serve). `None` unless both
 	/// `runtime.workers` and `runtime.io_uring` are configured, in which case
-	/// they own the QUIC listen address instead of [`Self::workers`].
+	/// they own the QUIC listen address instead of `workers`.
 	#[cfg(all(target_os = "linux", feature = "_uring"))]
-	pub uring: Option<crate::uring::Workers>,
+	uring: Option<crate::uring::Workers>,
 }
 
 impl Relay {
@@ -92,8 +74,8 @@ impl Relay {
 	///
 	/// This performs the side effects of starting up (binding sockets, reading
 	/// key material, spawning the cache governor), so a returned `Relay` is
-	/// ready to serve; nothing accepts a connection until [`Self::run`] (or
-	/// [`serve`]) drives it.
+	/// ready to serve; nothing accepts a connection until [`Self::run`] drives
+	/// it.
 	pub async fn load(mut config: Config) -> anyhow::Result<Self> {
 		config.resolve()?;
 
@@ -271,6 +253,8 @@ impl Relay {
 			addr,
 			shutdown,
 			shutdown_trigger,
+			web_routes: None,
+			internal_routes: None,
 			#[cfg(feature = "_quic")]
 			workers,
 			#[cfg(all(target_os = "linux", feature = "_uring"))]
@@ -278,11 +262,83 @@ impl Relay {
 		})
 	}
 
+	/// The QUIC bind address, or `None` for a stream-only server (no QUIC).
+	pub fn addr(&self) -> Option<std::net::SocketAddr> {
+		self.addr
+	}
+
+	/// The client used to dial cluster peers. Already handed to [`Self::cluster`];
+	/// clone it for your own outbound dials so they share the connection config.
+	pub fn client(&self) -> &moq_tokio::Client {
+		&self.client
+	}
+
+	/// The resolved auth policy (JWT/public sources, or mTLS-only).
+	pub fn auth(&self) -> &Auth {
+		&self.auth
+	}
+
+	/// The shared cluster: the origin every session and peer publishes into.
+	pub fn cluster(&self) -> &Cluster {
+		&self.cluster
+	}
+
+	/// The stats producer, for publishing extra counters through the same
+	/// registry. [`Self::cluster`] holds a clone, so the publish task lives as
+	/// long as the cluster whether or not this handle is kept.
+	pub fn stats(&self) -> &moq_stats::Producer {
+		&self.stats
+	}
+
+	/// Graceful-shutdown signal shared by every accepted session and web handler.
+	pub fn shutdown(&self) -> &Shutdown {
+		&self.shutdown
+	}
+
+	/// Starts graceful shutdown for [`Self::shutdown`].
+	pub fn shutdown_trigger(&self) -> &ShutdownTrigger {
+		&self.shutdown_trigger
+	}
+
+	/// The customer-facing web surface. Call [`Web::routes`] and hand the
+	/// result of merging your own routes to [`Self::with_web`].
+	pub fn web(&self) -> &Web {
+		&self.web
+	}
+
+	/// The internal (ops) surface: `/metrics`, `/health`, `/nodes`. Call
+	/// [`Internal::routes`] and hand extras to [`Self::with_internal`].
+	pub fn internal(&self) -> &Internal {
+		&self.internal
+	}
+
+	/// Serve `routes` on the public HTTP/HTTPS listeners instead of the
+	/// relay's default router.
+	///
+	/// Build `routes` from [`Web::routes`](Web::routes) plus whatever the
+	/// application nests or merges. [`Self::run`] still owns the listeners.
+	#[must_use = "the relay with the extra routes is returned"]
+	pub fn with_web(mut self, routes: Router) -> Self {
+		self.web_routes = Some(routes);
+		self
+	}
+
+	/// Serve `routes` on the internal (ops) listener instead of the relay's
+	/// default ops router.
+	///
+	/// Build `routes` from [`Internal::routes`](Internal::routes) plus extras.
+	/// [`Self::run`] still owns the listener.
+	#[must_use = "the relay with the extra routes is returned"]
+	pub fn with_internal(mut self, routes: Router) -> Self {
+		self.internal_routes = Some(routes);
+		self
+	}
+
 	/// Serve until something fails: accept sessions, run the cluster, and serve
 	/// both HTTP surfaces. Notifies systemd once everything is up.
 	///
-	/// Drive the pieces yourself instead when you have your own workers or
-	/// routes to add; this is the stock loop.
+	/// This is also the embedding loop. Extra routes go on via [`Self::with_web`]
+	/// / [`Self::with_internal`] before calling this; cloned handles outlive it.
 	pub async fn run(self) -> anyhow::Result<()> {
 		let Relay {
 			server,
@@ -292,12 +348,17 @@ impl Relay {
 			web,
 			shutdown,
 			shutdown_trigger,
+			web_routes,
+			internal_routes,
 			#[cfg(feature = "_quic")]
 			workers,
 			#[cfg(all(target_os = "linux", feature = "_uring"))]
 			uring,
 			..
 		} = self;
+
+		let web_routes = web_routes.unwrap_or_else(|| web.routes());
+		let internal_routes = internal_routes.unwrap_or_else(|| internal.routes());
 
 		// Validate the cluster and bind its LAN advertisement before claiming to be
 		// ready: the `cluster.run()` below is first polled after the notify, so a bad
@@ -420,8 +481,8 @@ impl Relay {
 
 		let result = tokio::select! {
 			Err(err) = started.run() => Err(err).context("cluster failed"),
-			Err(err) = web.run() => Err(err).context("web server failed"),
-			Err(err) = internal.run() => Err(err).context("internal server failed"),
+			Err(err) = web.serve(web_routes) => Err(err).context("web server failed"),
+			Err(err) = internal.serve(internal_routes) => Err(err).context("internal server failed"),
 			Err(err) = serve_shared => Err(err).context("server failed"),
 			Err(err) = quic_workers => Err(err).context("QUIC workers failed"),
 			err = uring_failed => Err(err).context("io_uring QUIC workers failed"),
@@ -491,9 +552,9 @@ async fn shutdown_signal() -> anyhow::Result<()> {
 /// Accept sessions off `server` until it stops, spawning a [`Connection`] task
 /// for each.
 ///
-/// Public because an embedder running its own `select!` still needs the accept
-/// loop, and reimplementing it means re-deriving details like where a `conn` id
-/// comes from.
+/// The accept loop for a single [`moq_tokio::Server`]. Embedders driving a
+/// [`Relay`] call [`Relay::run`] instead, which owns worker selection and
+/// shutdown; this stays public for a server the caller bound itself.
 pub async fn serve(server: moq_tokio::Server, cluster: Cluster, auth: Auth, shutdown: Shutdown) -> anyhow::Result<()> {
 	// Binds whatever is still unbound (the `tcp`/`unix` listeners), so a bind
 	// failure is reported here rather than as an immediate stop.
