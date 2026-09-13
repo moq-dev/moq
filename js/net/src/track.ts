@@ -993,6 +993,7 @@ export class Subscriber {
 		hooks.exemptFetch = (subscriber) => {
 			subscriber.#enforceLatency = false;
 		};
+		hooks.replaceGroups = (subscriber, groups) => subscriber.#replaceGroups(groups);
 		// The sequence cursor lives here (it shares the buffer and the drift anchor with
 		// the arrival cursor); `Ordered` is the handle that reaches it.
 		ordered_ = {
@@ -1102,6 +1103,16 @@ export class Subscriber {
 	setGroups(groups: Groups): void {
 		const { start, end } = groupBounds(groups);
 		this.#cursor.update((cursor) => ({ start: Math.max(cursor.start, start), end }));
+	}
+
+	// Serving counterpart of setGroups: a named start replaces the floor, matching
+	// Rust `start_at`. Local readers stay monotonic; only the wire publisher lowers.
+	#replaceGroups(groups: Groups): void {
+		const { start, end } = groupBounds(groups);
+		this.#cursor.update((cursor) => ({
+			start: groups.start === undefined ? cursor.start : start,
+			end,
+		}));
 	}
 
 	/** Close the track (optionally with an error), closing any pending groups. Idempotent. */

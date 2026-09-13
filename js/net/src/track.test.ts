@@ -1465,6 +1465,22 @@ test("group ranges preserve progress and spell out inclusion", async () => {
 	track.close();
 });
 
+test("serving replaceGroups can lower the floor that setGroups keeps", () => {
+	const producer = new TrackProducer("test");
+	const kept = producer.subscribe({ maxAge: 5000, startGroup: 10 });
+	const lowered = producer.subscribe({ maxAge: 5000, startGroup: 10 });
+	for (const sequence of [5, 6, 10]) producer.writeGroup(new GroupProducer(sequence));
+
+	kept.setGroups({ start: { included: 5 } });
+	expect(kept.tryRecvGroup()?.sequence).toBe(10);
+
+	hooks.replaceGroups(lowered, { start: { included: 5 } });
+	expect(lowered.tryRecvGroup()?.sequence).toBe(5);
+	expect(lowered.tryRecvGroup()?.sequence).toBe(6);
+	kept.close();
+	lowered.close();
+});
+
 test("malformed group bounds do not partially advance the cursor", () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe({ maxAge: 5000 });

@@ -9,7 +9,7 @@ import type { Dispose, Getter } from "@moq/signals";
 import type { Announcer, Producer as BroadcastProducer } from "./broadcast.ts";
 import type { Frame, Consumer as GroupConsumer } from "./group.ts";
 import type { Timestamp } from "./time.ts";
-import type { Producer, Request, Subscriber } from "./track.ts";
+import type { Groups, Producer, Request, Subscriber } from "./track.ts";
 
 /**
  * What a non-blocking group read found, which is everything the caller needs to decide what
@@ -76,6 +76,12 @@ export const hooks: {
 	 * a live subscription resolves to.
 	 */
 	exemptFetch: (subscriber: Subscriber) => void;
+	/**
+	 * Replace a serving cursor. An omitted start keeps the current floor; a provided start
+	 * can lower it. Wire publishers apply SUBSCRIBE_UPDATE here rather than through
+	 * `setGroups`, which never rewinds.
+	 */
+	replaceGroups: (subscriber: Subscriber, groups: Groups) => void;
 	/** Return a group's first timestamp, retained even after its first frame is read. */
 	groupTimestamp: (group: GroupConsumer) => Timestamp | undefined;
 	groupLatest: (group: GroupConsumer) => Timestamp | undefined;
@@ -103,6 +109,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	exemptFetch: () => {
+		throw new Error("track.ts not loaded");
+	},
+	replaceGroups: () => {
 		throw new Error("track.ts not loaded");
 	},
 	groupTimestamp: () => {

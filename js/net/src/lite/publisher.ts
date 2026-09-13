@@ -114,7 +114,7 @@ type FrameBounds = {
  * The frames of `sequence` a subscription asked for, as a start index and an inclusive end.
  *
  * The frame bounds qualify the start and end group only; every other group is served whole.
- * Which groups are served at all is the subscriber's read cursor (`setGroups`),
+ * Which groups are served at all is the subscriber's read cursor (`replaceGroups`),
  * applied when a group is popped rather than re-checked here.
  *
  * The serving loop calls this synchronously after the pop, before any SUBSCRIBE_UPDATE can
@@ -311,7 +311,7 @@ function positionCursor(track: track.Subscriber, version: Version, startGroup: n
 	if (resolvesStart(version) || startGroup !== undefined) return;
 
 	const latest = track.latest();
-	if (latest !== undefined) track.setGroups({ start: { included: latest } });
+	if (latest !== undefined) hooks.replaceGroups(track, { start: { included: latest } });
 }
 
 /**
@@ -572,7 +572,7 @@ export class Publisher {
 			endGroup,
 		});
 		positionCursor(track, this.version, msg.startGroup);
-		track.setGroups({ end: endGroup === undefined ? undefined : { excluded: endGroup } });
+		hooks.replaceGroups(track, { end: endGroup === undefined ? undefined : { excluded: endGroup } });
 
 		// The best-effort datagram loop, started once serving begins. It parks when the
 		// track finishes (recvDatagram returns undefined), so #runTrack alone ends the
@@ -776,7 +776,7 @@ export class Publisher {
 						case "update": {
 							const update = control.update;
 							console.debug(`subscribe update: broadcast=${broadcast} track=${track.name}`);
-							track.setGroups({
+							hooks.replaceGroups(track, {
 								start: update.startGroup === undefined ? undefined : { included: update.startGroup },
 								end: update.endGroup === undefined ? undefined : { included: update.endGroup },
 							});
@@ -825,7 +825,7 @@ export class Publisher {
 					// SUBSCRIBE_START promises nothing below this sequence will be delivered.
 					// Arrival-order serving could later surface a straggler below the first
 					// group, so pin the floor to what was announced.
-					track.setGroups({
+					hooks.replaceGroups(track, {
 						start: { included: group.sequence },
 						end: bounds.endGroup === undefined ? undefined : { included: bounds.endGroup },
 					});
