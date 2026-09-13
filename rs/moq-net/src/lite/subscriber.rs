@@ -2185,6 +2185,89 @@ mod tests {
 		assert!(!accepted, "a reflected wildcard must not become a route");
 	}
 
+	/// A peer that was advertised a local path and announces it back with this
+	/// origin's hop in the chain is a reflection, not a new path. The announce
+	/// is dropped, the local front keeps serving, and the peer's own
+	/// subscription (split-horizon excluded) still reads from it.
+	#[tokio::test]
+	async fn a_reflected_announce_does_not_displace_the_local_front() {
+		let relay = crate::Hop::new(1).unwrap();
+		let origin = origin::Info::new(relay).produce();
+		let assigned = crate::Hop::new(777).unwrap();
+
+		let mut local = origin.create_broadcast("room/host").unwrap();
+		let mut track = local.create_track("video", None).unwrap();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"local".as_ref()).unwrap();
+		group.finish().unwrap();
+
+		// The peer's own subscription, excluding the hop the server minted for
+		// it, is served from the local front before anything is announced back.
+		let peer = origin.consume().excluding(assigned);
+		let resolved = peer
+			.request_broadcast("room/host")
+			.now_or_never()
+			.expect("local lookup is synchronous")
+			.expect("resolves");
+		let mut sub = resolved
+			.track("video")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.expect("subscribe");
+		let mut group = sub.recv_group().await.expect("recv group").expect("track ended early");
+		assert_eq!(
+			&group.read_frame().await.expect("read frame").expect("frame").payload[..],
+			b"local"
+		);
+
+		let mut subscriber = Subscriber::new(SubscriberConfig {
+			session: SinkSession::new(Default::default()),
+			origin: origin.clone(),
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: Default::default(),
+			cost: None,
+			peer_hop: Some(assigned),
+			going_away: Default::default(),
+		});
+
+		// The path as advertised to the peer: our hop is already in the chain.
+		let mut hops = crate::Hops::new();
+		hops.push(relay).unwrap();
+		let mut announced = Announced::default();
+		let accepted = subscriber
+			.start_announce(
+				subtree(Path::new("room/host")),
+				hops,
+				crate::origin::Cost::default(),
+				0,
+				Some(assigned),
+				&mut announced,
+			)
+			.unwrap();
+		assert!(!accepted, "an announce that already names this origin must be dropped");
+
+		// The local front is still the one at the path, and still serving.
+		let still = origin
+			.consume()
+			.get_broadcast("room/host")
+			.expect("the local front keeps serving");
+		assert!(
+			still.is_clone(&resolved),
+			"the reflected announce must not replace the local front"
+		);
+
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"still".as_ref()).unwrap();
+		group.finish().unwrap();
+		let mut group = sub.recv_group().await.expect("recv group").expect("track ended early");
+		assert_eq!(
+			&group.read_frame().await.expect("read frame").expect("frame").payload[..],
+			b"still"
+		);
+	}
+
 	/// A peer that declares no identity gets attributed the origin the caller
 	/// assigned it (`Client::with_peer_hop`), so every session dialing the same
 	/// relay yields one recognizable hop instead of a random id per connection.

@@ -18,4 +18,3 @@ rather than holding the merge.
 
 - [WebKit gate](/quest/m0/webkit-webtransport-gate.md) - js/net: every WebKit engine takes the WebSocket path, not just the Safari brand, so iOS Chrome and Firefox stop freezing after two minutes
 - [Connect auth race](/quest/m0/3532-connect-auth-race.md) - moq-tokio: a 403 on the WebSocket arm no longer fails a connect whose QUIC arm is still in flight
-- [Anonymous handoff](/quest/m0/3588-anonymous-handoff.md) - moq-net: the source model's takeover by the next anonymous publisher is pinned by regression tests, so the parking regression the merge removes cannot return

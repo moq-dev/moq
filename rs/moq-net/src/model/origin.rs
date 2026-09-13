@@ -5220,6 +5220,111 @@ mod tests {
 		assert!(matches!(err, Error::Dropped), "unexpected end: {err}");
 	}
 
+	/// An anonymous publisher that dies without unannouncing is replaced by the
+	/// next anonymous session at the same path: a subscriber on a third session
+	/// gets the newcomer's media immediately, not a lingering dead front.
+	///
+	/// On main the dead front lingered, was advertised to the newcomer before it
+	/// announced, and the newcomer's own announce was then read as a reflection
+	/// (404 `dropped` until the linger expired). The source model closes the
+	/// front with its last source, so B attaches a fresh one and C resolves it
+	/// without parking.
+	#[tokio::test]
+	async fn anonymous_handoff_serves_the_newcomer_immediately() {
+		let producer = origin(1).produce();
+
+		// Session A: an assigned anonymous hop serving the path.
+		let server_a = producer
+			.dynamic(subtree("room"), Route::default().with_hops(hops(&[10])))
+			.unwrap();
+
+		// Session C: a third anonymous session, excluding the hop the server
+		// minted for it, the same split-horizon a live session applies.
+		let consumer = producer.consume().excluding(origin(30));
+		let pending = consumer.request_broadcast("room/alice");
+		let request = queued(&server_a).await;
+		let mut source_a = broadcast::Info::new().produce();
+		let mut track_a = source_a.create_track("video", None).unwrap();
+		let mut group = track_a.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"from-a".as_ref()).unwrap();
+		group.finish().unwrap();
+		request.accept(&source_a);
+
+		let resolved_a = pending.await.expect("resolves");
+		let mut sub_a = resolved_a
+			.track("video")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.expect("subscribe");
+		let mut group = sub_a
+			.recv_group()
+			.await
+			.expect("recv group")
+			.expect("track ended early");
+		assert_eq!(
+			&group.read_frame().await.expect("read frame").expect("frame").payload[..],
+			b"from-a"
+		);
+
+		// A dies without an unannounce: the source and its route drop together,
+		// the way a lost session retracts rather than sending ANNOUNCE_END.
+		drop(track_a);
+		drop(source_a);
+		drop(server_a);
+
+		// The front closed with A's last source.
+		let err = sub_a.recv_group().await.err().expect("front closed");
+		assert!(matches!(err, Error::Dropped), "unexpected end: {err}");
+
+		// No stale front at the leaf, and a repeat request does not join the
+		// corpse: nothing covers the path, so it is Unroutable rather than
+		// parked on a linger or 404 `dropped` from the dead front.
+		settle(|| consumer.get_broadcast("room/alice").is_none()).await;
+		settle(|| {
+			matches!(
+				consumer.request_broadcast("room/alice").now_or_never(),
+				Some(Err(Error::Unroutable))
+			)
+		})
+		.await;
+
+		// Session B attaches at the same path. Its front is served immediately.
+		let server_b = producer
+			.dynamic(subtree("room"), Route::default().with_hops(hops(&[20])))
+			.unwrap();
+		let pending = consumer.request_broadcast("room/alice");
+		let request = queued(&server_b).await;
+		let mut source_b = broadcast::Info::new().produce();
+		let mut track_b = source_b.create_track("video", None).unwrap();
+		let mut group = track_b.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"from-b".as_ref()).unwrap();
+		group.finish().unwrap();
+		request.accept(&source_b);
+
+		let resolved_b = pending.await.expect("B's front is served immediately");
+		assert!(
+			!resolved_b.is_clone(&resolved_a),
+			"B must not splice into A's closed front"
+		);
+
+		let mut sub_b = resolved_b
+			.track("video")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.expect("subscribe");
+		let mut group = sub_b
+			.recv_group()
+			.await
+			.expect("recv group")
+			.expect("track ended early");
+		assert_eq!(
+			&group.read_frame().await.expect("read frame").expect("frame").payload[..],
+			b"from-b"
+		);
+	}
+
 	#[tokio::test]
 	async fn reprice_is_invisible_to_the_subscription() {
 		let (rig, incumbent, mut source) = ResumeRig::new(&[10]).await;
