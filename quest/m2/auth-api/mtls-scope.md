@@ -7,7 +7,8 @@ that peer's publish and subscribe scope in every mode, and an absent or empty
 grant refuses it. `AuthToken::unrestricted` is minted only for an unversioned
 reply, kept for endpoints that predate v1, and the docs say the door is open
 there. A cluster peer dialing `/` is scoped like anyone else: its endpoint
-grants everything explicitly. On dev.
+grants everything explicitly. This implementation starts on main after the
+dev merge.
 
 ## Plan
 
@@ -30,6 +31,8 @@ This quest rides that v1 rather than inventing a version for mTLS.
   `doc/bin/relay/auth.md` states the outcome per version.
 
 ## Required
+
+- [Merge dev](/quest/m1/merge-dev.md) - the dev-only API must be released on main before this implementation starts
 
 - [mTLS identity](/quest/m2/auth-api/mtls-identity.md) - the request the
   grant answers

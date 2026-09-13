@@ -4,7 +4,7 @@
 
 The lite publisher applies every buffered control before it pops a group,
 with no read-ahead queue: bounded memory and exact control-first ordering at
-once. Fixes on dev, where the queue lives.
+once. Start on main after the dev merge brings over the queue.
 
 ## Plan
 
@@ -38,6 +38,10 @@ already buffered. All 23 `static async decode` message decoders under
   pop; a partial update with a group already ready waits for the second fill
   and pops the group under the new range, so incomplete is never read as "no
   control pending"; the flood case stays bounded.
+
+## Required
+
+- [Merge dev](/quest/m1/merge-dev.md) - the dev-only API must be released on main before this implementation starts
 
 ## Closes
 

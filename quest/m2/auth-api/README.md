@@ -30,7 +30,8 @@ The caching model every quest here keeps:
   not a doc comment.
 
 `--auth-api-mode proxy` landed on dev in #3044, and the quest that planned it
-is deleted. Everything here branches from dev unless a quest says main.
+is deleted. Implementations here start on main after the dev merge; their
+Required sections enforce availability of that API.
 
 ## Quests
 

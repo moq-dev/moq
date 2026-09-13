@@ -11,8 +11,8 @@ unrestricted until [mTLS explicit scope](/quest/m2/auth-api/mtls-scope.md),
 so an endpoint answering `{alias, tier}` today keeps that reply shape. The
 request side is a breaking change to the endpoint contract: an endpoint that
 compares `mtls` to the literal `true` must accept any non-empty value before
-its relays upgrade. Replies cache per identity. On dev, where the mode lives
-and where breaking changes go.
+its relays upgrade. Replies cache per identity. Start on main after the dev merge; the endpoint
+contract migration is not a Rust package API break.
 
 ## Plan
 
@@ -61,6 +61,10 @@ scope, because the root is the path the client dialed.
   fingerprint for a nameless one, over both QUIC and WebSocket; two sessions
   from one identity produce one endpoint request. Update the mTLS and auth
   API sections of `doc/bin/relay/auth.md`.
+
+## Required
+
+- [Merge dev](/quest/m1/merge-dev.md) - the dev-only API must be released on main before this implementation starts
 
 ## Closes
 

@@ -30,8 +30,13 @@ Each addition regenerates `moq.h`, touches `cpp/obs/src` only if used, and
 updates `doc/lib/c/index.md`. That page's capability list (:39) already
 claims dynamic tracks for C; the request handle makes it true.
 
-Branch from `dev`. Fetch and the video format knob are additive,
-so they ship on main through the related quest.
+Branch from main after the dev merge. These new request entry points and
+group fetch are additive. The C output-configuration layout change is owned
+by its separate M1 quest.
+
+## Required
+
+- [Merge dev](/quest/m1/merge-dev.md) - the dev-only API must be released on main before this implementation starts
 
 ## Closes
 
@@ -39,4 +44,4 @@ so they ship on main through the related quest.
 
 ## Related
 
-- [libmoq fetch](/quest/m2/libmoq-fetch.md) - fetch_group and the video format knob, on main
+- [libmoq fetch](/quest/m2/libmoq-fetch.md) - additive group fetch, on main

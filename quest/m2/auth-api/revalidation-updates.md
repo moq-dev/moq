@@ -64,6 +64,10 @@ and meters, so rebuilding a local handle would retag nothing.
 
 On main, additive.
 
+## Required
+
+- [Merge dev](/quest/m1/merge-dev.md) - the dev-only API must be released on main before this implementation starts
+
 ## Closes
 
 - [#3058](https://github.com/moq-dev/moq/issues/3058) - close this issue when the quest finishes

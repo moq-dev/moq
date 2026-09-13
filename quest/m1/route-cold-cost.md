@@ -24,7 +24,8 @@ understated cold wins ties it should lose.
   production cost. `cost` stays the warm half under its current name. Both
   conversions become lossless: `From` fills both fields, `TryFrom` builds
   `Cost { warm: cost, cold: cold.unwrap_or(cost) }`.
-- Additive in every generated binding. `rs/libmoq` now exposes `moq_route`
+- A default may preserve generated constructor calls, but adding a record
+  field changes the Rust API and the C layout. `rs/libmoq` exposes `moq_route`
   (hops plus one cost); add `cold` there too and regenerate `moq.h`. The
   wrappers describe a route as hops and cost and
   gain the field there: py/moq-rs/moq/origin.py:51,72,258;

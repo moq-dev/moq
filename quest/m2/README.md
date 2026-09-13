@@ -57,7 +57,6 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 - [Archive](/quest/m2/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS, on the catalog and store the release ships
 - [Wildcard](/quest/m2/wildcard/README.md) - a relay resolves subscriptions against advertised patterns and the browser player treats a covering pattern as availability
 - [#2152](/quest/m2/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - libmoq serves tracks on demand and accepts sessions, the two moq-ffi calls C still lacks
-- [Route cold cost](/quest/m2/route-cold-cost.md) - MoqRoute carries warm and cold, so an observed route re-announces intact
 - [js/publish discontinuity](/quest/m2/js-publish-discontinuity.md) - the JS container producer and js/publish emit the same marker group on encoder restart
 - [Failure artifacts](/quest/m2/qa-failure-artifacts.md) - a failing harness run keeps its run directory and a Playwright trace, and CI uploads them
 - [Listening kind field](/quest/m2/harness-drive-bys.md) - revert the relay's `kind` field on the listening log lines; nothing reads it
@@ -118,7 +117,7 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 - [#2278](/quest/m2/2278-watch-absolute-wall-clock-latency-target-for-synchronized.md) - hang: a timeline consumer exposes the wall anchor, and the library never syncs playback on it
 - [Time stretch](/quest/m2/watch-audio-time-stretch.md) - js/watch: the audio ring converges by time-stretching instead of skipping or going silent
 - [Metadata association](/quest/m2/metadata-association.md) - settle timing and grouping for ID3, SCTE-35, emsg, and FLV independently of SEI separation
-- [#2279](/quest/m2/2279-hang-typed-scte-35-ad-cue-signaling-carried-opaquely.md) - hang: SCTE-35 cues ride a per-rendition sidecar a player can act on
+- [#2279](/quest/m2/2279-hang-typed-scte-35-ad-cue-signaling-carried-opaquely.md) - hang: SCTE-35 cues arrive immediately on an independent metadata track, optionally associated with a rendition
 - [Caption import](/quest/m2/captions-import.md) - fMP4 and MKV subtitle tracks import as text renditions instead of erroring or being dropped
 - [MSF caption roles](/quest/m2/captions-msf.md) - an MSF caption, subtitle, or sign-language track survives conversion to a hang catalog
 - [CEA-608/708](/quest/m2/captions-cea.md) - captions carried inside video SEI become a real text rendition at import
