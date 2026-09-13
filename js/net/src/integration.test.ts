@@ -536,6 +536,39 @@ test("integration: lite draft-05 missing datagram writer does not close streams"
 	server.close();
 });
 
+test("integration: ietf does not deliver datagrams", async () => {
+	const enc = new TextEncoder();
+	const pair = createMockTransportPair(Ietf.ALPN.DRAFT_19);
+	const origin = new OriginProducer();
+
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, { publish: origin.consume() }),
+	]);
+
+	const broadcast = publish(origin, Path.from("test"));
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+
+	const remote = client.consume(Path.from("test"));
+	const track = remote.track("video").subscribe().ordered();
+	const datagrams = remote.track("video").subscribe();
+
+	producer.insertDatagram(7, Timestamp.fromMillis(0), enc.encode("dgram"));
+	producer.writeString("group");
+
+	expect(await track.readString()).toBe("group");
+
+	const datagram = datagrams.recvDatagram();
+	datagram.catch(() => {});
+	const outcome = await Promise.race([datagram, sleep(50).then(() => "timeout" as const)]);
+	expect(outcome).toBe("timeout");
+
+	broadcast.close();
+	remote.close();
+	client.close();
+	server.close();
+});
+
 test("integration: lite draft-05 missing datagram reader does not close streams", async () => {
 	const enc = new TextEncoder();
 	const pair = createMockTransportPair(Lite.ALPN_05, { datagramReadable: false });

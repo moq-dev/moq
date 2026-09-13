@@ -3,7 +3,7 @@
 //! Unlike a group (an ordered stream of frames over a QUIC stream), a datagram is one self-contained
 //! payload carried in a single QUIC datagram: best-effort, unordered, and never retransmitted. It
 //! shares the track's monotonic sequence-number namespace with groups but is otherwise independent,
-//! produced via [`super::track::Producer::append_datagram`] / [`super::track::Producer::write_datagram`]
+//! produced via [`super::track::Producer::append_datagram`] / [`super::track::Producer::insert_datagram`]
 //! and consumed via [`super::track::Subscriber::recv_datagram`].
 //!
 //! Delivery is best-effort per hop: a session drops (with a debug log) any datagram whose encoded
@@ -28,7 +28,7 @@ pub(crate) const MAX_DATAGRAM_PAYLOAD: usize = u16::MAX as usize;
 /// A single unreliable payload on a track: a sequence number, a presentation timestamp, and the bytes.
 ///
 /// The sequence number is drawn from the same namespace as the track's groups, so a relay can forward
-/// a datagram while preserving the origin's numbering (see [`super::track::Producer::write_datagram`]).
+/// a datagram while preserving the origin's numbering (see [`super::track::Producer::insert_datagram`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Datagram {
 	/// Per-track sequence number, shared with the group namespace.

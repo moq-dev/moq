@@ -119,12 +119,12 @@ test("appendDatagram delivers to a subscriber", async () => {
 	expect(got && dec.decode(got.payload)).toBe("hello");
 });
 
-test("writeDatagram preserves an explicit sequence", async () => {
+test("insertDatagram preserves an explicit sequence", async () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe();
 
 	// A relay forwarding an upstream datagram keeps its sequence number.
-	producer.writeDatagram({ sequence: 100, timestamp: Timestamp.fromMillis(5), payload: enc.encode("x") });
+	producer.insertDatagram(100, Timestamp.fromMillis(5), enc.encode("x"));
 	expect((await track.recvDatagram())?.sequence).toBe(100);
 
 	// The shared counter advanced past it, so the next appended group continues from 101.
@@ -138,7 +138,7 @@ test("recvDatagram leaves the ordered group cursor alone", async () => {
 	const datagrams = producer.subscribe();
 	const track = producer.subscribe({ maxAge: 5000 }).ordered();
 
-	producer.writeDatagram({ sequence: 5, timestamp: Timestamp.fromMillis(5), payload: enc.encode("x") });
+	producer.insertDatagram(5, Timestamp.fromMillis(5), enc.encode("x"));
 	expect((await datagrams.recvDatagram())?.sequence).toBe(5);
 
 	producer.writeGroup(new GroupProducer(3));
@@ -147,9 +147,64 @@ test("recvDatagram leaves the ordered group cursor alone", async () => {
 	expect((await track.nextGroup())?.sequence).toBe(6);
 });
 
+test("insertDatagram leaves a gap and does not rewind out of order", async () => {
+	const producer = new TrackProducer("test");
+	const track = producer.subscribe();
+	const ts = Timestamp.fromMillis(0);
+
+	producer.insertDatagram(10, ts, enc.encode("high"));
+	producer.insertDatagram(5, ts, enc.encode("low"));
+	expect((await track.recvDatagram())?.sequence).toBe(10);
+	expect((await track.recvDatagram())?.sequence).toBe(5);
+	expect(producer.appendDatagram(ts, enc.encode("next"))).toBe(11);
+	expect(producer.appendGroup().sequence).toBe(12);
+});
+
+test("insertDatagram duplicate is best-effort", async () => {
+	const producer = new TrackProducer("test");
+	const track = producer.subscribe();
+	const ts = Timestamp.fromMillis(0);
+
+	producer.insertDatagram(3, ts, enc.encode("first"));
+	producer.insertDatagram(3, ts, enc.encode("again"));
+	expect(dec.decode((await track.recvDatagram())?.payload ?? new Uint8Array())).toBe("first");
+	expect(dec.decode((await track.recvDatagram())?.payload ?? new Uint8Array())).toBe("again");
+	expect(producer.appendDatagram(ts, enc.encode("next"))).toBe(4);
+});
+
+test("insertDatagram stale does not rewind after append", async () => {
+	const producer = new TrackProducer("test");
+	const track = producer.subscribe();
+	const ts = Timestamp.fromMillis(0);
+
+	expect(producer.appendDatagram(ts, enc.encode("0"))).toBe(0);
+	expect(producer.appendDatagram(ts, enc.encode("1"))).toBe(1);
+	producer.insertDatagram(0, ts, enc.encode("stale"));
+	expect((await track.recvDatagram())?.sequence).toBe(0);
+	expect((await track.recvDatagram())?.sequence).toBe(1);
+	expect((await track.recvDatagram())?.sequence).toBe(0);
+	expect(producer.appendDatagram(ts, enc.encode("2"))).toBe(2);
+	expect(producer.appendGroup().sequence).toBe(3);
+});
+
+test("insertDatagram after close is refused", () => {
+	const producer = new TrackProducer("test");
+	const ts = Timestamp.fromMillis(0);
+	producer.close();
+	expect(() => producer.insertDatagram(0, ts, enc.encode("x"))).toThrow("track is closed");
+	expect(() => producer.appendDatagram(ts, enc.encode("x"))).toThrow("track is closed");
+});
+
+test("insertDatagram after abort is refused", () => {
+	const producer = new TrackProducer("test");
+	producer.close(new Error("cancel"));
+	expect(() => producer.insertDatagram(0, Timestamp.fromMillis(0), enc.encode("x"))).toThrow("track is closed");
+});
+
 test("appendDatagram rejects a payload over the QUIC datagram frame ceiling", () => {
 	const producer = new TrackProducer("test");
 	expect(() => producer.appendDatagram(Timestamp.fromMillis(0), new Uint8Array(65536))).toThrow();
+	expect(() => producer.insertDatagram(0, Timestamp.fromMillis(0), new Uint8Array(65536))).toThrow();
 });
 
 test("subscriber options and updates are forwarded to the producer's aggregate", async () => {
@@ -330,7 +385,7 @@ test("the ordered handle carries datagrams", async () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe({ maxAge: 5000 }).ordered();
 
-	producer.writeDatagram({ sequence: 5, timestamp: Timestamp.fromMillis(5), payload: enc.encode("x") });
+	producer.insertDatagram(5, Timestamp.fromMillis(5), enc.encode("x"));
 	producer.writeGroup(new GroupProducer(3));
 
 	expect((await track.recvDatagram())?.sequence).toBe(5);
@@ -1304,7 +1359,7 @@ test("recvDatagram does not commit the group cursor", async () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe({ maxAge: 5000 });
 
-	producer.writeDatagram({ sequence: 0, timestamp: Timestamp.fromMillis(0), payload: enc.encode("x") });
+	producer.insertDatagram(0, Timestamp.fromMillis(0), enc.encode("x"));
 	expect((await track.recvDatagram())?.sequence).toBe(0);
 
 	// Still uncommitted: the subscription can go sequence-ordered.

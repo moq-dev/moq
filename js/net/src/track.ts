@@ -772,7 +772,7 @@ export class Producer {
 	 * keep datagram payloads small (e.g. a single audio frame). Datagrams are never delivered
 	 * over IETF moq-transport or stream-only transports (the WebSocket fallback). A payload over
 	 * 65535 bytes (the QUIC datagram frame ceiling) throws. An origin publisher uses this; a
-	 * relay preserving upstream numbering uses {@link writeDatagram}.
+	 * relay preserving upstream numbering uses {@link insertDatagram}.
 	 */
 	appendDatagram(timestamp: Timestamp, payload: Uint8Array): number {
 		if (this.#state.closed.peek() !== undefined) throw new Error("track is closed");
@@ -786,21 +786,21 @@ export class Producer {
 	}
 
 	/**
-	 * Write a datagram with an explicit sequence number.
+	 * Insert a datagram with an explicit sequence number.
 	 *
 	 * Preserves the supplied sequence (advancing the shared counter if needed) so a relay can
 	 * forward a datagram without renumbering it. The size limits of {@link appendDatagram}
 	 * apply. Most origin publishers want {@link appendDatagram} instead.
 	 */
-	writeDatagram(datagram: Datagram) {
+	insertDatagram(sequence: number, timestamp: Timestamp, payload: Uint8Array) {
 		if (this.#state.closed.peek() !== undefined) throw new Error("track is closed");
-		if (datagram.payload.byteLength > MAX_DATAGRAM_BYTES) throw new Error("datagram payload too large");
+		if (payload.byteLength > MAX_DATAGRAM_BYTES) throw new Error("datagram payload too large");
 
-		const sequence = this.#sequence;
-		if (datagram.sequence >= sequence.next) {
-			sequence.next = datagram.sequence + 1;
+		const counter = this.#sequence;
+		if (sequence >= counter.next) {
+			counter.next = sequence + 1;
 		}
-		this.#publishDatagram(datagram);
+		this.#publishDatagram({ sequence, timestamp, payload });
 	}
 
 	/** Close the track and every subscriber, mirroring the abort to their groups. Idempotent. */

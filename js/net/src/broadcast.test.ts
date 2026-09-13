@@ -51,6 +51,8 @@ test("consumer dedupes repeat subscriptions onto one upstream request", async ()
 	expect((await pendingRequest(consumer))?.name).toBe("video");
 });
 
+// Shared sequence namespace across producer replacements: the TypeScript equivalent of
+// cloned Rust producers, so insertDatagram advances the next append for the replacement.
 test("dynamic track sequences continue across producer replacements", async () => {
 	const broadcast = new BroadcastProducer();
 
@@ -61,7 +63,7 @@ test("dynamic track sequences continue across producer replacements", async () =
 	expect(firstProducer.appendGroup().sequence).toBe(0);
 	expect(firstProducer.appendDatagram(Timestamp.fromMillis(0), new Uint8Array())).toBe(1);
 	firstProducer.writeGroup(new GroupProducer(8));
-	firstProducer.writeDatagram({ sequence: 12, timestamp: Timestamp.fromMillis(0), payload: new Uint8Array() });
+	firstProducer.insertDatagram(12, Timestamp.fromMillis(0), new Uint8Array());
 	firstSubscriber.close();
 	firstProducer.close();
 

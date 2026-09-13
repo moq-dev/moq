@@ -993,7 +993,7 @@ export class Subscriber {
 		if (!scale) return;
 
 		const timestamp = new Time.Timestamp(dg.timestamp, Time.Timescale(scale));
-		entry.track.writeDatagram({ sequence: dg.sequence, timestamp, payload: dg.payload });
+		entry.track.insertDatagram(dg.sequence, timestamp, dg.payload);
 	}
 
 	/**

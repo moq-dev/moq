@@ -1220,7 +1220,7 @@ impl Producer {
 	/// moq-transport, moq-lite before 05, or stream-only transports like WebSocket) never
 	/// deliver them. Keep payloads well under the 1200-byte minimum path MTU. An origin
 	/// publisher uses this; a relay preserving upstream numbering uses
-	/// [`Self::write_datagram`].
+	/// [`Self::insert_datagram`].
 	pub fn append_datagram<B: crate::IntoBytes>(&mut self, timestamp: Timestamp, payload: B) -> Result<u64> {
 		let payload = payload.into_bytes();
 		if payload.len() > super::datagram::MAX_DATAGRAM_PAYLOAD {
@@ -1254,13 +1254,19 @@ impl Producer {
 		Ok(sequence)
 	}
 
-	/// Write a datagram with an explicit sequence number.
+	/// Insert a datagram with an explicit sequence number.
 	///
 	/// Preserves the supplied sequence (bumping the shared `max_sequence` if needed), so a
 	/// relay can forward a datagram without renumbering it. Most origin publishers want
 	/// [`Self::append_datagram`] instead.
-	pub fn write_datagram(&mut self, mut datagram: Datagram) -> Result<()> {
-		if datagram.payload.len() > super::datagram::MAX_DATAGRAM_PAYLOAD {
+	pub fn insert_datagram<B: crate::IntoBytes>(
+		&mut self,
+		sequence: u64,
+		timestamp: Timestamp,
+		payload: B,
+	) -> Result<()> {
+		let payload = payload.into_bytes();
+		if payload.len() > super::datagram::MAX_DATAGRAM_PAYLOAD {
 			return Err(Error::FrameTooLarge);
 		}
 		// Resolved before the state guard borrows `self`.
@@ -1268,18 +1274,19 @@ impl Producer {
 		let mut state = self.modify()?;
 		// Normalize into the track's timescale, like frames (see `group::Producer::create_frame`).
 		let timescale = state.info.as_ref().unwrap().timescale;
-		datagram.timestamp = datagram
-			.timestamp
-			.convert(timescale)
-			.map_err(|_| Error::TimestampMismatch)?;
+		let timestamp = timestamp.convert(timescale).map_err(|_| Error::TimestampMismatch)?;
 		if let Some(fin) = state.final_sequence
-			&& datagram.sequence >= fin
+			&& sequence >= fin
 		{
 			return Err(Error::Closed);
 		}
-		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(datagram.sequence));
-		meter.datagram(datagram.payload.len() as u64);
-		state.push_datagram(datagram);
+		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(sequence));
+		meter.datagram(payload.len() as u64);
+		state.push_datagram(Datagram {
+			sequence,
+			timestamp,
+			payload,
+		});
 		let cache = state.cache.clone();
 		drop(state);
 		cache.settle(None);
@@ -4100,23 +4107,143 @@ mod test {
 	}
 
 	#[tokio::test]
-	async fn write_datagram_preserves_sequence() {
+	async fn insert_datagram_preserves_sequence() {
 		let mut producer = track_producer("test", None);
 		let mut dg = producer.subscribe(None);
 
 		let ts = Timestamp::from_millis(5).unwrap();
 		// A relay forwarding an upstream datagram keeps its sequence number.
 		producer
-			.write_datagram(Datagram {
-				sequence: 100,
-				timestamp: ts,
-				payload: bytes::Bytes::from_static(b"x"),
-			})
+			.insert_datagram(100, ts, bytes::Bytes::from_static(b"x"))
 			.unwrap();
 
 		assert_eq!(recv_datagram(&mut dg).sequence, 100);
 		// max_sequence advanced, so the next appended group/datagram continues past it.
 		assert_eq!(producer.append_group().unwrap().sequence, 101);
+	}
+
+	#[tokio::test]
+	async fn insert_datagram_leaves_a_gap() {
+		let mut producer = track_producer("test", None);
+		let mut dg = producer.subscribe(None);
+		let ts = Timestamp::from_millis(0).unwrap();
+
+		producer
+			.insert_datagram(10, ts, bytes::Bytes::from_static(b"gap"))
+			.unwrap();
+		assert_eq!(recv_datagram(&mut dg).sequence, 10);
+		assert_eq!(producer.append_datagram(ts, &b"next"[..]).unwrap(), 11);
+		assert_eq!(producer.append_group().unwrap().sequence, 12);
+	}
+
+	#[tokio::test]
+	async fn insert_datagram_out_of_order_does_not_rewind() {
+		let mut producer = track_producer("test", None);
+		let mut dg = producer.subscribe(None);
+		let ts = Timestamp::from_millis(0).unwrap();
+
+		producer
+			.insert_datagram(10, ts, bytes::Bytes::from_static(b"high"))
+			.unwrap();
+		producer
+			.insert_datagram(5, ts, bytes::Bytes::from_static(b"low"))
+			.unwrap();
+
+		assert_eq!(recv_datagram(&mut dg).sequence, 10);
+		assert_eq!(recv_datagram(&mut dg).sequence, 5);
+		assert_eq!(producer.append_datagram(ts, &b"next"[..]).unwrap(), 11);
+	}
+
+	#[tokio::test]
+	async fn insert_datagram_duplicate_is_best_effort() {
+		let mut producer = track_producer("test", None);
+		let mut dg = producer.subscribe(None);
+		let ts = Timestamp::from_millis(0).unwrap();
+
+		producer
+			.insert_datagram(3, ts, bytes::Bytes::from_static(b"first"))
+			.unwrap();
+		producer
+			.insert_datagram(3, ts, bytes::Bytes::from_static(b"again"))
+			.unwrap();
+
+		assert_eq!(&recv_datagram(&mut dg).payload[..], b"first");
+		assert_eq!(&recv_datagram(&mut dg).payload[..], b"again");
+		assert_eq!(producer.append_datagram(ts, &b"next"[..]).unwrap(), 4);
+	}
+
+	#[tokio::test]
+	async fn insert_datagram_stale_does_not_rewind_after_append() {
+		let mut producer = track_producer("test", None);
+		let mut dg = producer.subscribe(None);
+		let ts = Timestamp::from_millis(0).unwrap();
+
+		assert_eq!(producer.append_datagram(ts, &b"0"[..]).unwrap(), 0);
+		assert_eq!(producer.append_datagram(ts, &b"1"[..]).unwrap(), 1);
+		producer
+			.insert_datagram(0, ts, bytes::Bytes::from_static(b"stale"))
+			.unwrap();
+
+		assert_eq!(recv_datagram(&mut dg).sequence, 0);
+		assert_eq!(recv_datagram(&mut dg).sequence, 1);
+		assert_eq!(recv_datagram(&mut dg).sequence, 0);
+		assert_eq!(producer.append_datagram(ts, &b"2"[..]).unwrap(), 2);
+		assert_eq!(producer.append_group().unwrap().sequence, 3);
+	}
+
+	#[tokio::test]
+	async fn insert_datagram_cloned_producers_share_counter() {
+		let mut producer = track_producer("test", None);
+		let mut other = producer.clone();
+		let mut dg = producer.subscribe(None);
+		let ts = Timestamp::from_millis(0).unwrap();
+
+		producer
+			.insert_datagram(4, ts, bytes::Bytes::from_static(b"a"))
+			.unwrap();
+		assert_eq!(other.append_datagram(ts, &b"b"[..]).unwrap(), 5);
+		other.insert_datagram(8, ts, bytes::Bytes::from_static(b"c")).unwrap();
+		assert_eq!(producer.append_group().unwrap().sequence, 9);
+
+		assert_eq!(recv_datagram(&mut dg).sequence, 4);
+		assert_eq!(recv_datagram(&mut dg).sequence, 5);
+		assert_eq!(recv_datagram(&mut dg).sequence, 8);
+	}
+
+	#[test]
+	fn insert_datagram_after_finish_is_closed() {
+		let mut producer = track_producer("test", None);
+		let ts = Timestamp::from_millis(0).unwrap();
+		producer.finish().unwrap();
+		assert!(matches!(
+			producer.insert_datagram(0, ts, bytes::Bytes::from_static(b"x")),
+			Err(Error::Closed)
+		));
+		assert!(matches!(producer.append_datagram(ts, &b"x"[..]), Err(Error::Closed)));
+	}
+
+	#[test]
+	fn insert_datagram_after_abort_fails() {
+		let producer = track_producer("test", None);
+		let mut other = producer.clone();
+		let ts = Timestamp::from_millis(0).unwrap();
+		producer.abort(Error::Cancel).unwrap();
+		assert!(other.insert_datagram(0, ts, bytes::Bytes::from_static(b"x")).is_err());
+	}
+
+	#[test]
+	fn insert_datagram_respects_finish_at() {
+		let mut producer = track_producer("test", None);
+		let ts = Timestamp::from_millis(0).unwrap();
+		producer.finish_at(10).unwrap();
+		producer
+			.insert_datagram(5, ts, bytes::Bytes::from_static(b"ok"))
+			.unwrap();
+		assert!(matches!(
+			producer.insert_datagram(10, ts, bytes::Bytes::from_static(b"late")),
+			Err(Error::Closed)
+		));
+		assert_eq!(producer.append_group().unwrap().sequence, 6);
 	}
 
 	/// Datagram sequence advances do not move a route takeover past an open group.
@@ -4125,11 +4252,7 @@ mod test {
 		let mut datagram_only = track_producer("datagram-only", None);
 		let datagram_only_consumer = datagram_only.consume();
 		datagram_only
-			.write_datagram(Datagram {
-				sequence: 8,
-				timestamp: Timestamp::ZERO,
-				payload: bytes::Bytes::from_static(b"x"),
-			})
+			.insert_datagram(8, Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
 			.unwrap();
 		assert_eq!(
 			datagram_only_consumer.resume_position(),
@@ -4144,11 +4267,7 @@ mod test {
 			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
 			.unwrap();
 		producer
-			.write_datagram(Datagram {
-				sequence: 8,
-				timestamp: Timestamp::ZERO,
-				payload: bytes::Bytes::from_static(b"x"),
-			})
+			.insert_datagram(8, Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
 			.unwrap();
 
 		assert_eq!(
@@ -4169,11 +4288,7 @@ mod test {
 		let ts = Timestamp::from_millis(5).unwrap();
 
 		producer
-			.write_datagram(Datagram {
-				sequence: 5,
-				timestamp: ts,
-				payload: bytes::Bytes::from_static(b"x"),
-			})
+			.insert_datagram(5, ts, bytes::Bytes::from_static(b"x"))
 			.unwrap();
 		assert_eq!(recv_datagram(&mut datagrams).sequence, 5);
 
@@ -4218,11 +4333,7 @@ mod test {
 			Err(Error::FrameTooLarge)
 		));
 		assert!(matches!(
-			producer.write_datagram(Datagram {
-				sequence: 0,
-				timestamp: ts,
-				payload: big,
-			}),
+			producer.insert_datagram(0, ts, big),
 			Err(Error::FrameTooLarge)
 		));
 	}
@@ -4311,11 +4422,11 @@ mod test {
 		let mut downstream = track_producer("test", None);
 		let mut downstream_dg = downstream.subscribe(None);
 		downstream
-			.write_datagram(Datagram {
-				sequence: wire.sequence,
-				timestamp: Timestamp::new(wire.timestamp, Timescale::MILLI).unwrap(),
-				payload: wire.payload,
-			})
+			.insert_datagram(
+				wire.sequence,
+				Timestamp::new(wire.timestamp, Timescale::MILLI).unwrap(),
+				wire.payload,
+			)
 			.unwrap();
 
 		let got = recv_datagram(&mut downstream_dg);
@@ -4777,11 +4888,7 @@ mod test {
 
 		crate::model::clock::advance(Duration::from_secs(2));
 		producer
-			.write_datagram(Datagram {
-				sequence: 2,
-				timestamp: Timestamp::ZERO,
-				payload: bytes::Bytes::from_static(b"x"),
-			})
+			.insert_datagram(2, Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
 			.unwrap();
 
 		let expired = !producer.state.read().lookup.contains_key(&0);
@@ -5568,11 +5675,7 @@ mod test {
 		let mut sub = producer.subscribe(None).ordered();
 
 		producer
-			.write_datagram(Datagram {
-				sequence: 5,
-				timestamp: Timestamp::from_millis(5).unwrap(),
-				payload: bytes::Bytes::from_static(b"x"),
-			})
+			.insert_datagram(5, Timestamp::from_millis(5).unwrap(), bytes::Bytes::from_static(b"x"))
 			.unwrap();
 		producer.create_group(group::Info { sequence: 3 }).unwrap();
 
