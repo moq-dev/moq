@@ -64,7 +64,7 @@ covers connecting, publishing, subscribing, and discovery.
 | --- | --- |
 | Chrome, Edge 97+ | WebTransport |
 | Firefox 153+ | WebTransport. Earlier Firefox ships it but allows too few incoming streams, so the client falls back to WebSocket there. |
-| Safari | WebSocket fallback. Safari 26.4 ships WebTransport, but WebKit bugs stall long sessions, so the client doesn't use it yet. |
+| WebKit (Safari, Chrome, Firefox, and Edge on iOS) | WebSocket fallback. Safari 26.4 ships WebTransport, but WebKit bugs stall long sessions, so the client doesn't use it yet. |
 | Anything else | Automatic WebSocket fallback, with TCP's head-of-line blocking |
 
 WebCodecs support varies per codec and browser; `<moq-watch-support>` and
