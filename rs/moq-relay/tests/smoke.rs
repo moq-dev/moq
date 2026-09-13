@@ -134,10 +134,9 @@ async fn spawn_versioned_relay(versions: Vec<moq_net::Version>) -> (u16, tokio::
 	config.auth.public = Some(public);
 
 	let relay = Relay::load(config).await.expect("load relay");
-	let web = relay.web;
 	let (server_result_tx, mut server_result_rx) = tokio::sync::oneshot::channel();
 	let handle = tokio::spawn(async move {
-		let _ = server_result_tx.send(web.run().await);
+		let _ = server_result_tx.send(relay.run().await);
 	});
 
 	wait_for_http(port, &mut server_result_rx).await;

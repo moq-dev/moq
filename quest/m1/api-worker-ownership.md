@@ -45,4 +45,3 @@ dev-merge gate blocks this API change.
 ## Related
 
 - [Worker group integration](/quest/m2/2964-quic-workers-dropping-one-split-server-resizes-the.md) - adopts the hardened socket-group primitive without another public ownership change
-- [Relay embedding](/quest/m1/api-relay-embedding.md) - retains this worker owner inside the relay owner

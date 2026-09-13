@@ -175,7 +175,8 @@ impl Internal {
 
 	/// Build the ops router (`/metrics`, `/health`, and `/nodes`), returning a
 	/// state-erased [`Router`] an embedder can extend (`merge`/`nest` its own ops
-	/// routes) before handing it back to [`serve`](Self::serve).
+	/// routes) before handing it to [`crate::Relay::with_internal`] or
+	/// [`serve`](Self::serve).
 	///
 	/// Anything merged in inherits this listener's "unauthenticated,
 	/// trusted-plane-only" contract; see the module docs.

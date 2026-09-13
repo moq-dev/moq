@@ -14,5 +14,7 @@ async fn main() -> anyhow::Result<()> {
 
 	// The whole startup sequence lives in `Relay::load` rather than here, so an
 	// embedder gets it by calling one function instead of copying this file.
+	// Extra routes and cloned handles go on the returned `Relay`; `run` keeps
+	// the listeners and workers.
 	Relay::load(Config::load()?).await?.run().await
 }

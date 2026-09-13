@@ -89,7 +89,9 @@ first worker binds it and the rest join that port. Use an explicit port unless
 something reads the bound address at startup. `workers` needs the `noq`
 (default) or `quinn` backend and real certificate files rather than
 `tls.generate`. A build without a QUIC backend rejects `workers` instead of
-ignoring it. `io_uring` additionally needs Linux 6.12+, the `io-uring` cargo
+ignoring it. An embedding process leaves this group inside `Relay::run`;
+taking the sockets out and driving them yourself is how a later library
+update can drop QUIC while still compiling. `io_uring` additionally needs Linux 6.12+, the `io-uring` cargo
 feature, and exactly one certificate read at startup; it serves moq-lite only,
 and refuses to start anywhere it cannot deliver. `[quic]` applies either way,
 except that `mtu_discovery` (its datagram path sends a fixed payload) and the

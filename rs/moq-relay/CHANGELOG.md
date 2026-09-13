@@ -13,11 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `[cluster.lan] app` / `--cluster-lan-app` names the DNS-SD application the LAN mesh advertises under
 - *(relay)* `Cluster::with_advertise` / `Cluster::with_connect` so a LAN mesh can advertise a generated certificate and pin it when dialing
 - *(relay)* `/.cluster/<credential>` authenticates a LAN peer without `cluster.token`
+- *(relay)* `Relay::with_web` / `Relay::with_internal` and borrowed handles (`cluster`, `auth`, `client`, `stats`, `shutdown`, `shutdown_trigger`, `web`, `internal`, `addr`) so an embedder mounts routes without taking the sockets
+- *(relay)* `ShutdownTrigger` is `Clone`, so an embedder can stop `Relay::run` from another task
 
 ### Changed
 
 - `[cluster.lan] secret` is optional; without it the LAN mesh is open to anyone who can reach the listener
 - `--cluster-lan` no longer requires `--cluster-node`; a generated certificate's fingerprint is advertised instead
+- *(relay)* [**breaking**] `Relay` owns listeners, workers, and shutdown joins. Fields are private; destructuring and driving `serve` yourself can no longer drop a newly added socket owner. Clone the handles you need, mount routes, then call `run`.
 
 ### Fixed
 
@@ -27,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 
 - *(relay)* `Cluster::with_cache`; pass the cache to `Cluster::new` via `ClusterOptions`
+- *(relay)* [**breaking**] public `Relay` fields (`server`, `workers`, `uring`, and the rest). Use the accessors and `run`.
 
 ## [0.14.16](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.15...moq-relay-v0.14.16) - 2026-09-09
 

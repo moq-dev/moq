@@ -72,7 +72,7 @@ impl RelayHost {
 		runtime.spawn(async move {
 			match Relay::load(config).await {
 				Ok(relay) => {
-					let _ = ready.send(Ok(relay.addr));
+					let _ = ready.send(Ok(relay.addr()));
 					let _ = relay.run().await;
 				}
 				Err(err) => {
