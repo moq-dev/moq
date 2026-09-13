@@ -2287,6 +2287,23 @@ async fn raw_track_pending_datagram_does_not_block_read_frame() {
 }
 
 #[tokio::test]
+async fn raw_track_pending_group_read_holds_the_lane() {
+	let (_broadcast, _track, consumer) = raw_track();
+
+	let group_read = {
+		let consumer = consumer.clone();
+		spawn_parked(async move { consumer.next_group().await }).await
+	};
+	assert!(!group_read.is_finished(), "group read should still be pending");
+	assert!(
+		consumer.group_lane_busy(),
+		"a parked group read should hold the lane guard"
+	);
+
+	group_read.abort();
+}
+
+#[tokio::test]
 async fn raw_track_update_during_pending_group_still_reads_datagram() {
 	let (_broadcast, track, consumer) = raw_track();
 
