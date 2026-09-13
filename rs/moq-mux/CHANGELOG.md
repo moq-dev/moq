@@ -31,6 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `catalog::Producer::error` reports a failed implicit (guard-drop) publication so a catalog edit
+  cannot appear successful while the only indication is a log warning. `Guard::commit` still
+  returns the same failure immediately.
 - Propagate rendition labels through single-track media imports.
 - `From<hang::catalog::VideoConfig> for catalog::VideoHint`, a total conversion for a caller that
   already has a whole rendition. Replaces the per-field copy in `moq-video`, which dropped the label.

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `snapshot::Producer::error` reports a failed implicit (guard-drop) publication so an edit cannot
+  appear successful while the only indication is a log warning. `Guard::commit` still returns the
+  same failure immediately. A panic while a guard is held discards the in-flight edit.
+
 ## [0.3.10](https://github.com/moq-dev/moq/compare/moq-json-v0.3.9...moq-json-v0.3.10) - 2026-09-09
 
 ### Other

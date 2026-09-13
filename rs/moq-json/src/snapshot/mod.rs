@@ -361,6 +361,97 @@ mod test {
 	}
 
 	#[test]
+	fn a_dropped_edit_publishes_a_snapshot_then_a_delta() {
+		let (mut producer, track) = producer(cfg(100));
+
+		{
+			let mut guard = producer.lock();
+			*guard = json!({ "a": 1, "b": 1 });
+		}
+		assert!(producer.error().is_none());
+
+		{
+			let mut guard = producer.lock();
+			*guard = json!({ "a": 1, "b": 2 });
+		}
+		assert!(producer.error().is_none());
+		producer.finish().unwrap();
+
+		// The ratio keeps both edits in one group: a snapshot plus a merge-patch delta.
+		assert_eq!(track.latest(), Some(0));
+		assert_eq!(drain(track).last().unwrap(), &json!({ "a": 1, "b": 2 }));
+	}
+
+	#[test]
+	fn a_dropped_failed_edit_is_observable() {
+		let (mut producer, track) = producer(cfg(0));
+		producer.update(&json!({ "a": 1 })).unwrap();
+		producer.finish().unwrap();
+
+		{
+			let mut guard = producer.lock();
+			*guard = json!({ "a": 2 });
+		}
+
+		assert!(matches!(producer.error(), Some(crate::Error::Net(_))));
+		assert_eq!(drain(track), vec![json!({ "a": 1 })]);
+	}
+
+	#[test]
+	fn a_failed_commit_is_not_stored() {
+		let (mut producer, _track) = producer(cfg(0));
+		producer.finish().unwrap();
+
+		let mut guard = producer.lock();
+		*guard = json!({ "a": 1 });
+		assert!(matches!(guard.commit(), Err(crate::Error::Net(_))));
+		assert!(
+			producer.error().is_none(),
+			"an explicit commit already reported the error"
+		);
+	}
+
+	#[test]
+	fn a_successful_edit_clears_a_stored_error() {
+		let (mut producer, track) = producer(cfg(0));
+		producer.update(&json!({ "keep": true })).unwrap();
+
+		{
+			let mut guard = producer.lock();
+			*guard = json!({ "big": "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1) });
+		}
+		assert!(matches!(producer.error(), Some(crate::Error::Net(_))));
+
+		{
+			let mut guard = producer.lock();
+			*guard = json!({ "keep": false });
+		}
+		assert!(producer.error().is_none());
+		producer.finish().unwrap();
+		assert_eq!(drain(track).last().unwrap(), &json!({ "keep": false }));
+	}
+
+	#[test]
+	fn a_panicking_edit_does_not_publish() {
+		let (mut producer, track) = producer(cfg(0));
+		producer.update(&json!({ "a": 1 })).unwrap();
+
+		let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+			let mut guard = producer.lock();
+			*guard = json!({ "a": 2 });
+			panic!("torn edit");
+		}));
+		assert!(panicked.is_err());
+
+		assert!(
+			producer.error().is_none(),
+			"a discarded panic must not look like a publish failure"
+		);
+		producer.finish().unwrap();
+		assert_eq!(drain(track), vec![json!({ "a": 1 })]);
+	}
+
+	#[test]
 	fn commit_reports_a_publish_failure() {
 		#[derive(serde::Serialize, serde::Deserialize, Default, PartialEq, Debug)]
 		struct Doc {

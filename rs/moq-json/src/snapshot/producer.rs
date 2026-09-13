@@ -8,7 +8,16 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::{Encoded, Encoder, ProducerConfig};
-use crate::Result;
+use crate::{Error, Result};
+
+/// Take the shared publishing state, recovering if a prior guard panicked while holding it.
+///
+/// A panic under this lock is an in-flight edit being unwound. That edit is discarded (see
+/// [`Guard`]'s `Drop`) and the last value that reached the wire is still consistent, so poisoning
+/// would only turn the next `lock`/`update` into a panic during cleanup.
+fn take<T>(inner: &Mutex<Inner<T>>) -> MutexGuard<'_, Inner<T>> {
+	inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Publishes a JSON value over a track, choosing snapshots and deltas automatically.
 ///
@@ -35,7 +44,7 @@ impl<T> Clone for Producer<T> {
 impl<T> Producer<T> {
 	/// Create a subscriber for the underlying track.
 	pub fn consume(&self) -> moq_net::track::Subscriber {
-		self.inner.lock().unwrap().track.inner.subscribe(None)
+		take(&self.inner).track.inner.subscribe(None)
 	}
 
 	/// Whether any consumer for the underlying track currently exists.
@@ -44,7 +53,24 @@ impl<T> Producer<T> {
 	/// cached state nobody is watching, safe to drop and recreate on the next
 	/// request.
 	pub fn is_used(&self) -> bool {
-		self.inner.lock().unwrap().track.inner.is_used()
+		take(&self.inner).track.inner.is_used()
+	}
+
+	/// The error from the most recent implicit publication, if one failed.
+	///
+	/// A dirty [`Guard`] publishes on drop, which cannot return an error. That failure is stored
+	/// here so a caller who skipped [`Guard::commit`] can still observe it. [`Guard::commit`]
+	/// reports the same class of error to its caller and does not store it.
+	///
+	/// A later successful [`update`](Self::update) or publication, explicit or implicit, clears it.
+	/// A panic while a guard is held discards the in-flight edit and does not set this: the
+	/// producer keeps the last value that reached the wire.
+	///
+	/// Closing the track (a [`finish`](Self::finish), or the peer going away) makes the next dirty
+	/// drop store a [`Error::Net`] here; the in-memory value is not published, and the next
+	/// [`lock`](Self::lock) still seeds from the last value that actually reached the wire.
+	pub fn error(&self) -> Option<Error> {
+		take(&self.inner).error.clone()
 	}
 }
 
@@ -59,6 +85,7 @@ impl<T: Serialize> Producer<T> {
 					deltas: config.delta_ratio != 0,
 				},
 				encoder: Encoder::new(config),
+				error: None,
 			})),
 			_marker: PhantomData,
 		}
@@ -68,7 +95,7 @@ impl<T: Serialize> Producer<T> {
 	///
 	/// Does nothing if the value is unchanged from the previous publish.
 	pub fn update(&mut self, value: &T) -> Result<()> {
-		self.inner.lock().unwrap().update(value)
+		take(&self.inner).update(value)
 	}
 
 	/// Lock the current value for in-place editing, publishing on drop.
@@ -89,13 +116,15 @@ impl<T: Serialize> Producer<T> {
 	/// the latest value and their changes compose instead of clobbering. Don't hold a guard across
 	/// an `.await`, since that keeps the lock held while suspended.
 	///
-	/// Publishing on drop can fail (a closed track, a value that won't serialize) and only logs a
-	/// warning. Call [`Guard::commit`] instead to handle the error.
+	/// Publishing on drop can fail (a closed track, a value that won't serialize). The failure is
+	/// stored on the producer as [`error`](Self::error) and logged; call [`Guard::commit`] instead
+	/// to handle it immediately. A panic while the guard is held discards the in-flight edit
+	/// rather than publishing a torn value.
 	pub fn lock(&mut self) -> Guard<'_, T>
 	where
 		T: Default + DeserializeOwned,
 	{
-		let inner = self.inner.lock().unwrap();
+		let inner = take(&self.inner);
 		let value = inner
 			.encoder
 			.value()
@@ -119,12 +148,12 @@ impl<T: Serialize> Producer<T> {
 	/// schedule without tracking what has been published since the last one. Inert when deltas are
 	/// disabled, where every frame already gets its own group.
 	pub fn cut(&mut self) -> Result<()> {
-		self.inner.lock().unwrap().cut()
+		take(&self.inner).cut()
 	}
 
 	/// Finish the track, closing any open group.
 	pub fn finish(&mut self) -> Result<()> {
-		self.inner.lock().unwrap().finish()
+		take(&self.inner).finish()
 	}
 }
 
@@ -133,8 +162,10 @@ impl<T: Serialize> Producer<T> {
 /// Holds the producer's lock for its lifetime and derefs to the current value. Mutating it through
 /// [`DerefMut`] marks it dirty, and dropping a dirty guard publishes the edited value.
 ///
-/// Publishing on drop swallows any error into a warning, so prefer [`commit`](Self::commit) when the
-/// caller can act on a failure.
+/// Publishing on drop cannot return an error. A failure is stored on the [`Producer`] as
+/// [`error`](Producer::error) and logged. Prefer [`commit`](Self::commit) when the caller can act
+/// on a failure immediately. A panic while the guard is held skips publication, so a torn edit
+/// is discarded instead of reaching the wire.
 pub struct Guard<'a, T: Serialize> {
 	inner: MutexGuard<'a, Inner<T>>,
 	value: T,
@@ -179,8 +210,13 @@ impl<T: Serialize> DerefMut for Guard<'_, T> {
 
 impl<T: Serialize> Drop for Guard<'_, T> {
 	fn drop(&mut self) {
+		if std::thread::panicking() {
+			// The in-flight copy may be torn; keep the last value that reached the wire.
+			return;
+		}
 		if let Err(err) = self.publish() {
 			tracing::warn!(%err, "failed to publish JSON value on guard drop");
+			self.inner.error = Some(err);
 		}
 	}
 }
@@ -193,6 +229,8 @@ impl<T: Serialize> Drop for Guard<'_, T> {
 struct Inner<T> {
 	track: Track,
 	encoder: Encoder<T>,
+	/// Failure from the last implicit (guard-drop) publication, if one failed.
+	error: Option<Error>,
 }
 
 impl<T> Inner<T> {
@@ -212,7 +250,7 @@ impl<T> Inner<T> {
 impl<T: Serialize> Inner<T> {
 	fn update(&mut self, value: &T) -> Result<()> {
 		// Split the borrow so `frame` can hold the encoder while `track` is written through.
-		let Inner { track, encoder } = self;
+		let Inner { track, encoder, error } = self;
 
 		let Some(frame) = encoder.update(value)? else {
 			return Ok(());
@@ -223,6 +261,7 @@ impl<T: Serialize> Inner<T> {
 		// frame (too large) doesn't, and a delta against a snapshot no consumer ever saw is unreadable.
 		track.write(&frame)?;
 		frame.commit();
+		*error = None;
 
 		Ok(())
 	}

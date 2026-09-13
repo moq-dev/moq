@@ -23,6 +23,9 @@ struct State<E: CatalogExt> {
 	/// Gates the initial catalog publish until all reservations resolve (see
 	/// [`reserve`](Producer::reserve)).
 	reservations: Reservations,
+
+	/// Failure from the last implicit (guard-drop) publication, if one failed.
+	error: Option<crate::Error>,
 }
 
 /// Take the shared state, ignoring a poisoned lock.
@@ -303,6 +306,7 @@ impl<E: CatalogExt> Producer<E> {
 				catalog: config.catalog,
 				owned: BTreeSet::new(),
 				reservations: Reservations::default(),
+				error: None,
 			})),
 			clock: crate::Clock::new(),
 			timeline,
@@ -339,14 +343,29 @@ impl<E: CatalogExt> Producer<E> {
 
 	/// Get mutable access to the catalog, publishing it after any changes.
 	///
-	/// The publish happens when the returned [`Guard`] drops and only warns on failure; call
-	/// [`Guard::commit`] instead to handle the error.
+	/// The publish happens when the returned [`Guard`] drops. A failure is stored as
+	/// [`error`](Self::error) and logged; call [`Guard::commit`] instead to handle it immediately.
+	/// The in-memory catalog is already mutated, so a panic while the guard is held still
+	/// publishes: skipping would leave `snapshot` ahead of the wire with no dirty flag to catch up.
 	pub fn lock(&mut self) -> Guard<'_, E> {
 		Guard {
 			state: take(&self.current),
 			outputs: &mut self.outputs,
 			updated: false,
 		}
+	}
+
+	/// The error from the most recent implicit publication, if one failed.
+	///
+	/// A dirty [`Guard`] publishes on drop, which cannot return an error. That failure is stored
+	/// here so a caller who skipped [`Guard::commit`] can still observe it. [`Guard::commit`]
+	/// reports the same class of error to its caller and does not store it.
+	///
+	/// A later successful publication, explicit or implicit, clears it. Closing the catalog tracks
+	/// (a [`finish`](Self::finish)) makes the next dirty drop store a transport error here; the
+	/// in-memory catalog keeps the edit, and the next [`lock`](Self::lock) still starts from it.
+	pub fn error(&self) -> Option<crate::Error> {
+		take(&self.current).error.clone()
 	}
 
 	/// Get a snapshot of the current catalog.
@@ -483,9 +502,12 @@ impl<E: CatalogExt> Producer<E> {
 		let recorder = self.timeline.pacing_track(track)?;
 
 		let section = self.timeline.section();
-		let mut catalog = self.lock();
-		if catalog.archive.is_none() {
-			catalog.archive = Some(section);
+		{
+			let mut catalog = self.lock();
+			if catalog.archive.is_none() {
+				catalog.archive = Some(section);
+			}
+			catalog.commit()?;
 		}
 
 		Ok(recorder)
@@ -593,8 +615,9 @@ impl<E: CatalogExt> Producer<E> {
 /// and (through the catalog's own deref) the extension sections are editable directly.
 ///
 /// On drop, the hang, compressed-hang, and MSF catalog tracks are updated if the catalog was
-/// mutated. That publish can fail (a closed track, or an extension that won't serialize) and only
-/// logs a warning; call [`commit`](Self::commit) instead to handle the error.
+/// mutated. That publish can fail (a closed track, or an extension that won't serialize). The
+/// failure is stored on the [`Producer`] as [`error`](Producer::error) and logged; call
+/// [`commit`](Self::commit) instead to handle it immediately.
 pub struct Guard<'a, E: CatalogExt = ()> {
 	state: MutexGuard<'a, State<E>>,
 	outputs: &'a mut Outputs<E>,
@@ -629,7 +652,9 @@ impl<E: CatalogExt> Guard<'_, E> {
 			r.published = true;
 		}
 
-		self.outputs.emit(&self.state.catalog)
+		self.outputs.emit(&self.state.catalog)?;
+		self.state.error = None;
+		Ok(())
 	}
 
 	/// Release a name taken by [`Producer::acquire`], along with the entry it owns.
@@ -691,7 +716,10 @@ impl Guard<'_, Extra> {
 impl<E: CatalogExt> Drop for Guard<'_, E> {
 	fn drop(&mut self) {
 		if let Err(err) = self.publish() {
-			tracing::warn!(%err, "failed to publish the catalog on guard drop");
+			if !std::thread::panicking() {
+				tracing::warn!(%err, "failed to publish the catalog on guard drop");
+			}
+			self.state.error = Some(err);
 		}
 	}
 }
@@ -908,6 +936,31 @@ mod test {
 
 		assert_eq!(got_plain, expected);
 		assert_eq!(got_compressed, expected);
+	}
+
+	#[test]
+	fn a_dropped_failed_edit_is_observable() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast).unwrap();
+
+		catalog
+			.lock()
+			.audio
+			.renditions
+			.insert("audio0".to_string(), AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+		assert!(catalog.error().is_none());
+		catalog.finish().unwrap();
+
+		catalog
+			.lock()
+			.audio
+			.renditions
+			.insert("audio1".to_string(), AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+		assert!(catalog.error().is_some(), "a dropped failed publish must be observable");
+		assert!(
+			catalog.snapshot().audio.renditions.contains_key("audio1"),
+			"the in-memory catalog keeps the edit after a failed publish"
+		);
 	}
 
 	#[test]

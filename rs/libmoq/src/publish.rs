@@ -307,7 +307,9 @@ impl Publish {
 	/// The catalog is republished automatically.
 	pub fn catalog_section_set(&mut self, broadcast: Id, name: &str, value: serde_json::Value) -> Result<(), Error> {
 		let catalog = self.catalog(broadcast)?;
-		catalog.lock().set_section(name.to_string(), value)?;
+		let mut guard = catalog.lock();
+		guard.set_section(name.to_string(), value)?;
+		guard.commit()?;
 		Ok(())
 	}
 
@@ -316,7 +318,9 @@ impl Publish {
 	/// A no-op if no section with that name exists. Republishes the catalog if it did.
 	pub fn catalog_section_remove(&mut self, broadcast: Id, name: &str) -> Result<(), Error> {
 		let catalog = self.catalog(broadcast)?;
-		catalog.lock().remove_section(name);
+		let mut guard = catalog.lock();
+		guard.remove_section(name);
+		guard.commit()?;
 		Ok(())
 	}
 
