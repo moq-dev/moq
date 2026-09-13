@@ -41,15 +41,17 @@ a full mesh trades that for one fewer hop. Mix shapes as your traffic demands.
 Add `?cost=N` to a peer URL to route by price instead of hop count. An unpriced
 link costs 1, which reproduces plain hop counting. Each relay adds the price of
 the link an announcement arrived on before forwarding it, so a route's cost is
-the sum of what it crossed. Wildcard advertisements are forwarded and costed
-the same way as an exact-path route: each hop appends its identity, adds the
-link price, and passes the claim on. An advertisement must be contained by
-one of the publisher's granted prefixes (`grant/**`); an over-wide pattern is
-refused rather than clamped. Routing prefers the most specific announced
-prefix, then the lowest cost, then the shortest hop list, breaking any
-remaining tie toward the newest announcement so a reconnecting publisher isn't
-outranked by the session it replaced. Resolving a non-prefix pattern into a
-subscription is not implemented yet.
+the sum of what it crossed.
+
+Wildcard advertisements are forwarded and costed the same way as an exact-path
+route: each hop appends its identity, adds the link price, and passes the
+claim on. An advertisement must be contained by one of the publisher's granted
+prefixes (`grant/**`); an over-wide pattern is refused rather than clamped.
+
+Routing prefers the most specific pattern, then the lowest cost, then the
+shortest hop list, breaking any remaining tie toward the newest announcement
+so a reconnecting publisher isn't outranked by the session it replaced.
+Resolving a non-prefix pattern into a subscription is not implemented yet.
 
 ```toml
 [cluster]
