@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::task::{Poll, ready};
 
 use bytes::Buf;
 
@@ -411,50 +412,98 @@ impl TrackInner {
 		}
 	}
 
-	async fn recv_group(&mut self) -> Result<Option<moq_net::group::Consumer>, MoqError> {
-		Ok(self.arrival()?.recv_group().await?)
+	fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::group::Consumer>, MoqError>> {
+		match self.arrival() {
+			Ok(track) => track.poll_recv_group(waiter).map(|r| r.map_err(Into::into)),
+			Err(e) => Poll::Ready(Err(e)),
+		}
 	}
 
-	async fn next_group(&mut self) -> Result<Option<moq_net::group::Consumer>, MoqError> {
-		Ok(self.ordered()?.next_group().await?)
+	fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::group::Consumer>, MoqError>> {
+		match self.ordered() {
+			Ok(track) => track.poll_next_group(waiter).map(|r| r.map_err(Into::into)),
+			Err(e) => Poll::Ready(Err(e)),
+		}
 	}
 
-	async fn read_frame(&mut self) -> Result<Option<MoqFrame>, MoqError> {
-		let Some(mut group) = self.ordered()?.next_group().await? else {
+	fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<MoqDatagram>, MoqError>> {
+		// Datagrams are unordered on either handle; reading them never commits the
+		// group cursor.
+		let poll = match &mut self.track {
+			Cursor::Uncommitted(track) | Cursor::Arrival(track) => track.poll_recv_datagram(waiter),
+			Cursor::Ordered(track) => track.poll_recv_datagram(waiter),
+			// Poisoned mid-conversion; see `arrival`. Datagrams never commit a cursor,
+			// so this is the only way they can fail on a live handle.
+			Cursor::Converting => return Poll::Ready(Err(MoqError::Closed)),
+		};
+		let datagram = match ready!(poll) {
+			Ok(Some(datagram)) => datagram,
+			Ok(None) => return Poll::Ready(Ok(None)),
+			Err(err) => return Poll::Ready(Err(err.into())),
+		};
+		let timestamp_us = match datagram.timestamp.as_micros().try_into() {
+			Ok(timestamp_us) => timestamp_us,
+			Err(_) => return Poll::Ready(Err(MoqError::Codec("timestamp overflow".into()))),
+		};
+		Poll::Ready(Ok(Some(MoqDatagram {
+			sequence: datagram.sequence,
+			timestamp_us,
+			payload: datagram.payload.to_vec(),
+		})))
+	}
+}
+
+/// Shared subscriber state for both read lanes.
+///
+/// The mutex is held only across a poll, not the wait: moq-net can serve a
+/// datagram while a group read is parked, and vice versa, as long as we do not
+/// keep exclusive access for the duration of one `recv`.
+struct TrackShared {
+	inner: Mutex<Option<TrackInner>>,
+}
+
+impl TrackShared {
+	fn close(&self) {
+		let _ = self.inner.lock().expect("track reader").take();
+	}
+
+	fn poll<R>(&self, f: impl FnOnce(&mut TrackInner) -> Poll<Result<R, MoqError>>) -> Poll<Result<R, MoqError>> {
+		match self.inner.lock().expect("track reader").as_mut() {
+			Some(inner) => f(inner),
+			None => Poll::Ready(Err(MoqError::Cancelled)),
+		}
+	}
+
+	async fn recv_group(&self) -> Result<Option<moq_net::group::Consumer>, MoqError> {
+		kio::wait(|waiter| self.poll(|inner| inner.poll_recv_group(waiter))).await
+	}
+
+	async fn next_group(&self) -> Result<Option<moq_net::group::Consumer>, MoqError> {
+		kio::wait(|waiter| self.poll(|inner| inner.poll_next_group(waiter))).await
+	}
+
+	async fn recv_datagram(&self) -> Result<Option<MoqDatagram>, MoqError> {
+		kio::wait(|waiter| self.poll(|inner| inner.poll_recv_datagram(waiter))).await
+	}
+
+	async fn read_frame(&self) -> Result<Option<MoqFrame>, MoqError> {
+		let Some(mut group) = self.next_group().await? else {
 			return Ok(None);
 		};
 		group.read_frame().await?.map(raw_frame).transpose()
 	}
-
-	async fn recv_datagram(&mut self) -> Result<Option<MoqDatagram>, MoqError> {
-		// Datagrams are unordered on either handle; reading them never commits the
-		// group cursor.
-		let datagram = match &mut self.track {
-			Cursor::Uncommitted(track) | Cursor::Arrival(track) => track.recv_datagram().await?,
-			Cursor::Ordered(track) => track.recv_datagram().await?,
-			// Poisoned mid-conversion; see `arrival`. Datagrams never commit a cursor,
-			// so this is the only way they can fail on a live handle.
-			Cursor::Converting => return Err(MoqError::Closed),
-		};
-		let Some(datagram) = datagram else {
-			return Ok(None);
-		};
-		let timestamp_us = datagram
-			.timestamp
-			.as_micros()
-			.try_into()
-			.map_err(|_| MoqError::Codec("timestamp overflow".into()))?;
-		Ok(Some(MoqDatagram {
-			sequence: datagram.sequence,
-			timestamp_us,
-			payload: datagram.payload.to_vec(),
-		}))
-	}
 }
+
+/// Serializes one track read lane so two `next_group` calls cannot race the cursor.
+struct ReadLane;
 
 #[derive(uniffi::Object)]
 pub struct MoqTrackConsumer {
-	task: Task<TrackInner>,
+	shared: Arc<TrackShared>,
+	/// Group reads (`recv_group`, `next_group`, `read_frame`). Independent of [`Self::datagrams`].
+	groups: Task<ReadLane>,
+	/// Datagram reads. Independent of [`Self::groups`].
+	datagrams: Task<ReadLane>,
 	control: moq_net::track::SubscriberControl,
 	info: moq_net::track::Info,
 }
@@ -464,12 +513,28 @@ impl MoqTrackConsumer {
 		let control = track.control();
 		let info = track.info().clone();
 		Self {
-			task: Task::new(TrackInner {
-				track: Cursor::Uncommitted(track),
+			shared: Arc::new(TrackShared {
+				inner: Mutex::new(Some(TrackInner {
+					track: Cursor::Uncommitted(track),
+				})),
 			}),
+			groups: Task::new(ReadLane),
+			datagrams: Task::new(ReadLane),
 			control,
 			info,
 		}
+	}
+
+	fn cancel_lanes(&self) {
+		self.shared.close();
+		self.groups.cancel();
+		self.datagrams.cancel();
+	}
+}
+
+impl Drop for MoqTrackConsumer {
+	fn drop(&mut self) {
+		self.shared.close();
 	}
 }
 
@@ -484,9 +549,10 @@ impl MoqTrackConsumer {
 	/// ([`Self::next_group`], [`Self::read_frame`]) fail with
 	/// [`MoqError::AlreadyCommitted`] afterwards.
 	pub async fn recv_group(&self) -> Result<Option<Arc<MoqGroupConsumer>>, MoqError> {
-		self.task
-			.run(|mut state| async move {
-				Ok(state.recv_group().await?.map(|group| {
+		let shared = self.shared.clone();
+		self.groups
+			.run(move |_lane| async move {
+				Ok(shared.recv_group().await?.map(|group| {
 					Arc::new(MoqGroupConsumer {
 						sequence: group.sequence,
 						task: Task::new(GroupInner { group }),
@@ -502,9 +568,10 @@ impl MoqTrackConsumer {
 	/// The first call commits this track to sequence order: arrival-order reads
 	/// ([`Self::recv_group`]) fail with [`MoqError::AlreadyCommitted`] afterwards.
 	pub async fn next_group(&self) -> Result<Option<Arc<MoqGroupConsumer>>, MoqError> {
-		self.task
-			.run(|mut state| async move {
-				Ok(state.next_group().await?.map(|group| {
+		let shared = self.shared.clone();
+		self.groups
+			.run(move |_lane| async move {
+				Ok(shared.next_group().await?.map(|group| {
 					Arc::new(MoqGroupConsumer {
 						sequence: group.sequence,
 						task: Task::new(GroupInner { group }),
@@ -520,7 +587,10 @@ impl MoqTrackConsumer {
 	/// status/command tracks). Returns `None` when the track ends. Reads in
 	/// sequence order, committing the track like [`Self::next_group`].
 	pub async fn read_frame(&self) -> Result<Option<MoqFrame>, MoqError> {
-		self.task.run(|mut state| async move { state.read_frame().await }).await
+		let shared = self.shared.clone();
+		self.groups
+			.run(move |_lane| async move { shared.read_frame().await })
+			.await
 	}
 
 	/// Receive the next best-effort datagram in arrival order.
@@ -528,10 +598,12 @@ impl MoqTrackConsumer {
 	/// Returns `None` when the track ends. Datagram delivery is unavailable over
 	/// IETF moq-transport, pre-lite-05 moq-lite, and stream-only transports.
 	/// Datagrams are a separate cursor from groups, so this works alongside either
-	/// group order and never commits the track to one.
+	/// group order, never commits the track to one, and progresses while a group
+	/// read is pending.
 	pub async fn recv_datagram(&self) -> Result<Option<MoqDatagram>, MoqError> {
-		self.task
-			.run(|mut state| async move { state.recv_datagram().await })
+		let shared = self.shared.clone();
+		self.datagrams
+			.run(move |_lane| async move { shared.recv_datagram().await })
 			.await
 	}
 
@@ -552,7 +624,7 @@ impl MoqTrackConsumer {
 	///
 	/// Terminal: the subscription is released here, not when the handle is.
 	pub fn cancel(&self) {
-		self.task.cancel();
+		self.cancel_lanes();
 	}
 }
 
