@@ -1593,7 +1593,7 @@ fn raw_track_subscription_options_and_update() {
 		max_age_ms: 25,
 		group_start: 1,
 		group_start_present: true,
-		group_end: 1,
+		group_end: 2,
 		group_end_present: true,
 	};
 	let consumer = id(unsafe {
@@ -1621,7 +1621,7 @@ fn raw_track_subscription_options_and_update() {
 	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 
 	let update = moq_subscription {
-		group_end: 2,
+		group_end: 3,
 		..subscription
 	};
 	assert_eq!(unsafe { moq_consume_track_update(consumer, &update) }, 0);

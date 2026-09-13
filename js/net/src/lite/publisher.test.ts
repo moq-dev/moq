@@ -641,7 +641,7 @@ test("lite draft-05: a group popped before a cap update is still served", async 
 		sub.release();
 		expect(await sub.servedSequence()).toBe(1);
 		while (ranges.mock.calls.length === 0) await flush();
-		expect(ranges).toHaveBeenLastCalledWith(0);
+		expect(ranges).toHaveBeenLastCalledWith(1);
 	} finally {
 		ranges.mockRestore();
 		sub.release();
@@ -796,7 +796,7 @@ test("lite draft-06: a burst of updates coalesces before the next group pop", as
 			// Group 1 is popped under the latest state, with no application of the older one.
 			expect(await sub.servedGroup()).toEqual({ sequence: 1, frameStart: 0, payloads: ["a"] });
 			expect(ranges).toHaveBeenCalledTimes(1);
-			expect(ranges).toHaveBeenLastCalledWith(1);
+			expect(ranges).toHaveBeenLastCalledWith(2);
 		} finally {
 			ranges.mockRestore();
 		}
@@ -863,14 +863,14 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 			priority: 9,
 			maxAge: DEFAULT_MAX_AGE_MS,
 			startGroup: undefined,
-			endGroup: 5,
+			endGroup: 6,
 		});
 		expect(ranges).not.toHaveBeenCalled();
 
 		sub.release();
 		expect(await sub.servedSequence()).toBe(0);
 		while (ranges.mock.calls.length === 0) await flush();
-		expect(ranges).toHaveBeenLastCalledWith(5);
+		expect(ranges).toHaveBeenLastCalledWith(6);
 	} finally {
 		ranges.mockRestore();
 		sub.release();

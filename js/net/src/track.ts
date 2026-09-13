@@ -121,7 +121,10 @@ export interface Subscription {
 	 * off).
 	 */
 	startGroup?: number;
-	/** Last group the publisher should deliver (inclusive), or omit for no end. */
+	/**
+	 * First group the publisher should not deliver (exclusive), or omit for no end.
+	 * `0` is the empty range.
+	 */
 	endGroup?: number;
 }
 
@@ -840,7 +843,7 @@ export class Subscriber {
 		const { end } = this.#cursor.peek();
 		let presentation: { sequence: number; timestamp: Timestamp } | undefined;
 		for (const { group } of this.#state.timeline.values()) {
-			if (end !== undefined && group.sequence > end) continue;
+			if (end !== undefined && group.sequence >= end) continue;
 			if (group.closed.peek() instanceof Error) continue;
 			// The edge wants the newest content that exists, so it takes the newest
 			// stamped group's latest frame.
@@ -875,7 +878,7 @@ export class Subscriber {
 		let successor: GroupConsumer | undefined;
 		for (const { group } of this.#state.timeline.values()) {
 			if (group.sequence <= sequence) continue;
-			if (end !== undefined && group.sequence > end) continue;
+			if (end !== undefined && group.sequence >= end) continue;
 			if (group.closed.peek() instanceof Error) continue;
 			if (!successor || group.sequence < successor.sequence) successor = group;
 		}
@@ -1052,9 +1055,9 @@ export class Subscriber {
 	}
 
 	/**
-	 * Cap {@link recvGroup} at `sequence` inclusively, or omit it to remove the cap. Groups
-	 * above the cap remain buffered and become readable if the cap is raised. This local
-	 * cursor does not change the subscription's wire request.
+	 * Cap {@link recvGroup} at `sequence` exclusively, or omit it to remove the cap. `0` is
+	 * the empty range. Groups at or past the cap remain buffered and become readable if
+	 * the cap is raised. This local cursor does not change the subscription's wire request.
 	 */
 	endAt(sequence?: number): void {
 		this.#cursor.update((cursor) => ({ ...cursor, end: sequence }));
@@ -1125,7 +1128,7 @@ export class Subscriber {
 			// The buffer is sequence-sorted, so an in-range group that arrives behind a
 			// beyond-cap one sorts in front of it and is never blocked by it.
 			const group = groups[0];
-			if (!group || (end !== undefined && group.sequence > end)) break;
+			if (!group || (end !== undefined && group.sequence >= end)) break;
 			groups.shift();
 			if (this.#isStale(group, drift)) {
 				group.close();
@@ -1219,7 +1222,7 @@ export class Subscriber {
 
 			for (;;) {
 				const group = groups[0];
-				if (!group || (cursor.end !== undefined && group.sequence > cursor.end)) break;
+				if (!group || (cursor.end !== undefined && group.sequence >= cursor.end)) break;
 				groups.shift();
 				this.#nextSequence = group.sequence + 1;
 				// Every frame this group could still hold is past the budget, so keep
@@ -1416,8 +1419,9 @@ export class Ordered {
 	}
 
 	/**
-	 * Cap this cursor at `sequence` inclusively, or omit it to remove the cap. Groups above
-	 * the cap remain buffered and become readable if the cap is raised.
+	 * Cap this cursor at `sequence` exclusively, or omit it to remove the cap. `0` is the
+	 * empty range. Groups at or past the cap remain buffered and become readable if the
+	 * cap is raised.
 	 */
 	endAt(sequence?: number): void {
 		this.#subscriber.endAt(sequence);

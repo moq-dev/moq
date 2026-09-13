@@ -1007,10 +1007,30 @@ test("an aborted live-edge anchor does not make older content stale", async () =
 	track.close();
 });
 
+test("endAt(0) is the empty range and does not ride another subscriber's demand", async () => {
+	const producer = new TrackProducer("test");
+	const everything = producer.subscribe({ maxAge: 5000 });
+	const empty = producer.subscribe({ maxAge: 5000, endGroup: 0 });
+	empty.endAt(0);
+
+	for (let sequence = 0; sequence < 3; sequence++) producer.writeGroup(new GroupProducer(sequence));
+
+	expect((await everything.recvGroup())?.sequence).toBe(0);
+	const pending = empty.recvGroup();
+	expect(await Promise.race([pending, Promise.resolve("pending")])).toBe("pending");
+
+	empty.endAt(2);
+	expect((await pending)?.sequence).toBe(0);
+	expect((await empty.recvGroup())?.sequence).toBe(1);
+
+	empty.endAt();
+	expect((await empty.recvGroup())?.sequence).toBe(2);
+});
+
 test("endAt caps the live edge used by the latency budget", async () => {
 	const producer = new TrackProducer("test").accept({ maxAge: 5000 });
 	const track = producer.subscribe();
-	track.endAt(1);
+	track.endAt(2);
 
 	for (const timestamp of [0, 1000, 2000]) {
 		producer.writeFrame({ payload: enc.encode(`${timestamp}`), timestamp: Timestamp.fromMillis(timestamp) });
@@ -1026,7 +1046,7 @@ test("endAt caps the live edge used by the latency budget", async () => {
 test("endAt caps frame-level reads like the group cursor", async () => {
 	const producer = new TrackProducer("test").accept({ maxAge: 5000 });
 	const track = producer.subscribe({ maxAge: 5000 }).ordered();
-	track.endAt(0);
+	track.endAt(1);
 
 	producer.writeFrame({ payload: enc.encode("zero"), timestamp: Timestamp.fromMillis(0) });
 	producer.writeFrame({ payload: enc.encode("one"), timestamp: Timestamp.fromMillis(1) });
@@ -1040,7 +1060,7 @@ test("endAt caps frame-level reads like the group cursor", async () => {
 	expect(await Promise.race([parked, timeout])).toBe("pending");
 
 	// Raising the cap releases the parked group, frames intact.
-	track.endAt(1);
+	track.endAt(2);
 	expect((await parked)?.group).toBe(1);
 	expect(await track.readFrameSequence()).toBeUndefined();
 });
@@ -1053,7 +1073,7 @@ test("local cursor bounds can skip, pause, and release buffered groups", async (
 
 	expect(track.latest()).toBe(4);
 	track.startAt(1);
-	track.endAt(2);
+	track.endAt(3);
 	expect((await track.nextGroup())?.sequence).toBe(1);
 	expect((await track.nextGroup())?.sequence).toBe(2);
 
@@ -1061,7 +1081,7 @@ test("local cursor bounds can skip, pause, and release buffered groups", async (
 	expect(await Promise.race([pending, Promise.resolve("pending")])).toBe("pending");
 
 	track.startAt(4);
-	track.endAt(4);
+	track.endAt(5);
 	expect((await pending)?.sequence).toBe(4);
 });
 
@@ -1093,7 +1113,7 @@ test("endAt parks recvGroup beyond the cap and a raised cap re-offers", async ()
 
 	for (let sequence = 0; sequence < 3; sequence++) producer.writeGroup(new GroupProducer(sequence));
 
-	track.endAt(1);
+	track.endAt(2);
 	expect((await track.recvGroup())?.sequence).toBe(0);
 	expect((await track.recvGroup())?.sequence).toBe(1);
 
@@ -1117,7 +1137,7 @@ test("recvGroup serves in-range groups that arrive behind a capped one", async (
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe({ maxAge: 5000 });
 
-	track.endAt(1);
+	track.endAt(2);
 
 	// Reordered burst: the beyond-cap group arrives first.
 	producer.writeGroup(new GroupProducer(2));
@@ -1130,7 +1150,7 @@ test("recvGroup serves in-range groups that arrive behind a capped one", async (
 	const pending = track.recvGroup();
 	expect(await Promise.race([pending, Promise.resolve("pending")])).toBe("pending");
 
-	track.endAt(2);
+	track.endAt(3);
 	expect((await pending)?.sequence).toBe(2);
 });
 
@@ -1140,7 +1160,7 @@ test("startAt drops groups recvGroup parked at the cap", async () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe();
 
-	track.endAt(0);
+	track.endAt(1);
 	producer.writeGroup(new GroupProducer(1));
 	const pending = track.recvGroup();
 	expect(await Promise.race([pending, Promise.resolve("pending")])).toBe("pending");
@@ -1191,7 +1211,7 @@ test("closing the subscriber releases a recvGroup parked after a clean close", a
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe();
 
-	track.endAt(0);
+	track.endAt(1);
 	producer.writeGroup(new GroupProducer(1));
 
 	const pending = track.recvGroup();
@@ -1208,7 +1228,7 @@ test("closing the subscriber releases a recvGroup parked while the producer is l
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe();
 
-	track.endAt(0);
+	track.endAt(1);
 	producer.writeGroup(new GroupProducer(1));
 
 	const pending = track.recvGroup();
@@ -1294,7 +1314,7 @@ test("a closed track still delivers a group parked above the cap once the cap is
 		producer.writeGroup(group);
 	}
 
-	track.endAt(1);
+	track.endAt(2);
 	expect((await track.nextGroup())?.sequence).toBe(0);
 	expect((await track.nextGroup())?.sequence).toBe(1);
 
@@ -1305,7 +1325,7 @@ test("a closed track still delivers a group parked above the cap once the cap is
 	expect(await Promise.race([parked, timeout])).toBe("pending");
 
 	// Raising the cap after close releases the buffered group, frames intact.
-	track.endAt(2);
+	track.endAt(3);
 	const released = await parked;
 	expect(released?.sequence).toBe(2);
 	expect(await released?.readString()).toBe("frame-2");

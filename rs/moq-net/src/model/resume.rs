@@ -80,9 +80,9 @@ impl Segment {
 	/// segment, so the search is capped at `end` and anything below `start` reads as a
 	/// miss (there is nothing in range, or the caller would have found it).
 	fn peek_below(&self, before: Option<u64>) -> Option<group::Consumer> {
-		// The segment end is exclusive; convert it to the exclusive group limit
-		// expected by `peek_before`.
-		let limit = min_some(before, last_group(self.end).map(|end| end.saturating_add(1)));
+		// The segment end is exclusive, matching the exclusive group limit `peek_before`
+		// expects.
+		let limit = min_some(before, last_group(self.end));
 		let group = match limit {
 			Some(limit) => self.track.peek_before(limit)?,
 			None => self.track.peek_latest()?,
@@ -715,9 +715,9 @@ fn frames(start: Option<Position>, end: Option<Position>, sequence: u64) -> Opti
 	Some((start, end))
 }
 
-/// The last group a half-open segment can serve, or no bound for the newest segment.
+/// The exclusive group cap a half-open segment can serve, or no bound for the newest segment.
 fn last_group(end: Option<Position>) -> Option<u64> {
-	end?.before().map(|position| position.group)
+	end.and_then(Position::exclusive_group)
 }
 
 /// A group assembled from several routes' copies, joined at frame boundaries.
@@ -743,7 +743,7 @@ pub(crate) struct Group {
 	/// The index of the next frame to return.
 	index: u64,
 
-	/// Inclusive cap from [`Self::end_at`].
+	/// Exclusive cap from [`Self::end_at`].
 	end: Option<u64>,
 
 	/// The route being read: its segment, the exclusive frame bound the segment puts on
@@ -852,8 +852,7 @@ impl Group {
 	/// misnumber its frames. The reader re-resolves instead, and the peek path's
 	/// own check buries the copy as lagged.
 	fn latched(mut self, segment: u64, cap: Option<u64>, bound: Option<u64>, mut group: group::Consumer) -> Self {
-		// The segment bound is exclusive; a group consumer's cap is inclusive.
-		group.end_at(cap.map(|cap| cap.saturating_sub(1)));
+		group.end_at(cap);
 		group.start_at(self.index);
 		group.set_stale_meter(self.stale_stats.clone());
 		if group.index() == self.index {
@@ -1013,8 +1012,7 @@ impl Group {
 				continue;
 			}
 
-			// The segment bound is exclusive; a group consumer's cap is inclusive.
-			group.end_at(cap.map(|cap| cap.saturating_sub(1)));
+			group.end_at(cap);
 			self.current = Some(Current {
 				segment,
 				cap,
@@ -1072,7 +1070,7 @@ impl Group {
 
 	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
 		loop {
-			if self.end.is_some_and(|end| self.index > end) {
+			if self.end.is_some_and(|end| self.index >= end) {
 				return Poll::Ready(Ok(None));
 			}
 			if !ready!(self.poll_current(waiter))? {
@@ -1101,7 +1099,7 @@ impl Group {
 
 	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
 		loop {
-			if self.end.is_some_and(|end| self.index > end) {
+			if self.end.is_some_and(|end| self.index >= end) {
 				return Poll::Ready(Ok(None));
 			}
 			if !ready!(self.poll_current(waiter))? {
@@ -1216,7 +1214,7 @@ impl SegmentSub {
 		self.start.map_or(0, |start| start.group)
 	}
 
-	/// The last group this segment can serve (inclusive), for the underlying read
+	/// The exclusive group cap this segment can serve, for the underlying read
 	/// cursor. `None` while it is the newest segment.
 	fn last_group(&self) -> Option<u64> {
 		// An empty segment would serve nothing, and no switch produces one: every
@@ -1288,7 +1286,7 @@ pub struct Subscriber {
 	next_sequence: u64,
 	/// Minimum sequence to surface, set by [`Self::start_at`].
 	min_sequence: u64,
-	/// Inclusive cap for [`Self::next_group`], set by [`Self::end_at`].
+	/// Exclusive cap for [`Self::next_group`], set by [`Self::end_at`].
 	end_sequence: Option<u64>,
 	/// A cap imposed by a reader wrapping this subscriber (a nested splice segment),
 	/// folded into every drift anchor pushed onto the segments. Never bounds delivery:
@@ -1557,7 +1555,7 @@ impl Subscriber {
 	pub(crate) fn poll_stale(&mut self, group: &group::Consumer, waiter: &kio::Waiter) -> Poll<Result<bool>> {
 		for seg in &mut self.segments {
 			if seg.first_group() <= group.sequence
-				&& seg.last_group().is_none_or(|last| group.sequence <= last)
+				&& super::subscription::before_end(group.sequence, seg.last_group())
 				&& let Some(sub) = seg.stale_sub_mut()
 			{
 				return sub.poll_stale(group, waiter);
@@ -1623,9 +1621,7 @@ impl Subscriber {
 					Ok(Some(group)) => {
 						// `start_at` already floors the cursor; enforce the cap here since
 						// arrival-order reads don't honor `end_at`.
-						if let Some(end) = seg.last_group()
-							&& group.sequence > end
-						{
+						if !super::subscription::before_end(group.sequence, seg.last_group()) {
 							continue;
 						}
 						return Poll::Ready(Some(group));
@@ -1652,7 +1648,7 @@ impl Subscriber {
 	}
 
 	/// Seek this subscriber's lowest servable group at or above `floor` (bounded by
-	/// `end`, inclusive), without advancing any cursor. The shared engine behind
+	/// `end`, exclusive), without advancing any cursor. The shared engine behind
 	/// [`Self::poll_next_group`] and [`Self::poll_seek_group`].
 	///
 	/// Each segment's own cursor applies the drift budget as it seeks, so a group the
@@ -1711,7 +1707,7 @@ impl Subscriber {
 				// skip, deliberately: the floor can come back down (a lowered
 				// `start_at` with nothing delivered yet), so the segment must not be
 				// completed or otherwise committed past its cache.
-				if seg.last_group().is_some_and(|last| last < floor) {
+				if seg.last_group().is_some_and(|last| last <= floor) {
 					continue;
 				}
 
@@ -1794,7 +1790,7 @@ impl Subscriber {
 		let end_sequence = self.end_sequence;
 		let anchor = self.anchor_end();
 		let min_sequence = self.min_sequence;
-		let beyond_cap = |sequence: u64| end_sequence.is_some_and(|end| sequence > end);
+		let beyond_cap = |sequence: u64| !super::subscription::before_end(sequence, end_sequence);
 
 		let mut all_done = true;
 
@@ -2074,7 +2070,7 @@ impl Subscriber {
 		}
 	}
 
-	/// Cap the subscriber at the specified sequence (inclusive), or remove the cap.
+	/// Cap the subscriber at the specified sequence (exclusive), or remove the cap.
 	///
 	/// Enforced on this subscriber's reads (see [`Self::poll_recv_group`]), never
 	/// on the inner segment cursors, so a capped group parks here and a rising cap
@@ -2389,7 +2385,7 @@ mod test {
 		let mut producer = Producer::new();
 		producer.takeover(&consumer_a).unwrap();
 		let mut sub = producer.consume().subscribe(None);
-		sub.end_at(0);
+		sub.end_at(1);
 
 		write_group_at(&mut track_a, 0, "a0", std::time::Duration::ZERO);
 		write_group_at(&mut track_a, 1, "a1", std::time::Duration::from_secs(30));
@@ -2409,7 +2405,7 @@ mod test {
 		let mut producer = Producer::new();
 		producer.takeover(&consumer_a).unwrap();
 		let mut sub = producer.consume().subscribe(None);
-		sub.end_at(0);
+		sub.end_at(1);
 
 		write_group_at(&mut track_a, 0, "a0", std::time::Duration::ZERO);
 		assert_eq!(recv(&mut sub), 0);
@@ -2435,7 +2431,7 @@ mod test {
 		let mut producer = Producer::new();
 		producer.takeover(&consumer_a).unwrap();
 		let mut sub = producer.consume().subscribe(None);
-		sub.end_at(0);
+		sub.end_at(1);
 
 		write_group_at(&mut track_a, 0, "a0", std::time::Duration::ZERO);
 		assert_eq!(recv(&mut sub), 0);
@@ -2658,12 +2654,12 @@ mod test {
 		write_group(&mut track_a, 1, "a1");
 
 		// The cap parks the subscriber; the group beyond it is held, not dropped.
-		sub.end_at(0);
+		sub.end_at(1);
 		assert_eq!(recv(&mut sub), 0);
 		recv_pending(&mut sub);
 
 		// Raising the cap re-offers the parked group.
-		sub.end_at(1);
+		sub.end_at(2);
 		assert_eq!(recv(&mut sub), 1);
 	}
 
@@ -2677,7 +2673,7 @@ mod test {
 		producer.switch(&consumer_a, None).unwrap();
 		let mut sub = producer.consume().subscribe(replay());
 
-		sub.end_at(1);
+		sub.end_at(2);
 
 		// Reordered burst: the beyond-cap group arrives first.
 		write_group(&mut track_a, 2, "a2");
@@ -2690,7 +2686,7 @@ mod test {
 		recv_pending(&mut sub);
 
 		// Raising the cap re-offers the parked group.
-		sub.end_at(2);
+		sub.end_at(3);
 		assert_eq!(recv(&mut sub), 2);
 	}
 
@@ -2704,7 +2700,7 @@ mod test {
 		producer.switch(&consumer_a, None).unwrap();
 		let mut sub = producer.consume().subscribe(None);
 
-		sub.end_at(0);
+		sub.end_at(1);
 		write_group(&mut track_a, 0, "a0");
 		assert_eq!(recv(&mut sub), 0);
 
@@ -2773,7 +2769,7 @@ mod test {
 			);
 		};
 
-		sub.end_at(1);
+		sub.end_at(2);
 
 		// The beyond-cap group arrives first and is polled: it must hold, not advance
 		// the cursor past the in-range groups still on their way.
@@ -2787,7 +2783,7 @@ mod test {
 		next_pending(&mut sub);
 
 		// Raising the cap admits the held group.
-		sub.end_at(2);
+		sub.end_at(3);
 		assert_eq!(next(&mut sub), 2);
 	}
 
@@ -2825,7 +2821,7 @@ mod test {
 
 		// Cap below the group the cursor could already see. It must hold, not have
 		// committed the segment past the still-missing group 1.
-		sub.end_at(1);
+		sub.end_at(2);
 		next_pending(&mut sub);
 
 		write_group(&mut track_b, 1, "b1");
@@ -3193,7 +3189,7 @@ mod test {
 		// Capped at group 0: group 0 is the whole window (and so its own live edge),
 		// while groups 1 and 2 park above the cap.
 		let mut sub = outer.consume().subscribe(None);
-		sub.end_at(0);
+		sub.end_at(1);
 		let recv = |sub: &mut Subscriber| {
 			kio::wait(|waiter| sub.poll_recv_group(waiter))
 				.now_or_never()
@@ -3978,7 +3974,7 @@ mod test {
 	async fn capped_subscriber_bounds_parked_segments() {
 		let mut producer = Producer::new();
 		let mut sub = producer.consume().subscribe(None);
-		sub.end_at(0);
+		sub.end_at(1);
 
 		// Every round parks one group beyond the cap, then fails over to a live
 		// replacement route.
@@ -4550,7 +4546,7 @@ mod test {
 		producer.switch(&consumer_a, None).unwrap();
 		let mut sub = producer.consume().subscribe(None);
 
-		sub.end_at(0);
+		sub.end_at(1);
 		write_group(&mut track_a, 0, "a0");
 		let straggler = track_a.create_group(group::Info { sequence: 1 }).unwrap();
 		assert_eq!(recv(&mut sub), 0);
@@ -4590,7 +4586,7 @@ mod test {
 		producer.switch(&consumer_a, None).unwrap();
 		let mut sub = producer.consume().subscribe(None);
 
-		sub.end_at(0);
+		sub.end_at(1);
 		write_group(&mut track_a, 0, "a0");
 		assert_eq!(recv(&mut sub), 0);
 
@@ -4696,7 +4692,7 @@ mod test {
 		producer.switch(&consumer_a, None).unwrap();
 		let mut sub = producer.consume().subscribe(None);
 
-		sub.end_at(0);
+		sub.end_at(1);
 		write_group(&mut track_a, 0, "a0");
 		write_group(&mut track_a, 1, "a1");
 		write_group(&mut track_a, 2, "a2");

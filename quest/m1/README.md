@@ -27,7 +27,6 @@ quest here and merged main into dev.
 - [FFI frame cursor](/quest/m1/api-ffi-frame-cursor.md) - empty groups and cancelled reads do not become false EOF or lost frames
 - [JS wrapper lifetime](/quest/m1/api-js-wrapper-lifecycle.md) - closing or leaving JSON/binary readers releases their owned demand
 - [FFI configuration](/quest/m1/api-ffi-configuration.md) - configuration applies or fails explicitly rather than depending on lock timing
-- [Subscription bounds](/quest/m1/api-subscription-bounds.md) - local and requested ranges use consistent exclusive ends
 - [Readable input contract](/quest/m1/api-getter-contract.md) - accepted Getter types match runtime behavior
 - [JSON edit transaction](/quest/m1/api-json-edit-commit.md) - failed publication cannot disappear into a guard-drop warning
 - [JS wrapper configuration](/quest/m1/api-js-wrapper-config.md) - constructor shapes agree and consumer options exclude ignored producer knobs

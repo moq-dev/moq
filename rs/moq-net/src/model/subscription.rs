@@ -78,7 +78,8 @@ pub struct Subscription {
 	///
 	/// A request, aggregated across every live subscriber (any unbounded subscriber makes
 	/// the aggregate unbounded). [`crate::track::Subscriber::end_at`] is the local read
-	/// cursor; setting one does not imply the other.
+	/// cursor and is exclusive too; [`Position::exclusive_group`] translates this field
+	/// without an off-by-one. Setting one does not imply the other.
 	pub end: Option<Position>,
 }
 
@@ -201,9 +202,7 @@ impl Position {
 		Some(Self::group(group.checked_add(1)?))
 	}
 
-	/// The last position strictly below this one, turning an exclusive bound such as
-	/// [`Subscription::end`] into the inclusive one an API like
-	/// [`crate::track::Subscriber::end_at`] wants.
+	/// The last position strictly below this one.
 	///
 	/// `None` for the very first position, which is the empty range: nothing sorts below
 	/// it, so there is no inclusive bound to convert to. Saturating instead would return
@@ -221,6 +220,24 @@ impl Position {
 			frame: u64::MAX,
 		})
 	}
+
+	/// The exclusive group sequence a local [`crate::track::Subscriber::end_at`] cap uses.
+	///
+	/// A head-of-group end excludes this group. A mid-group end includes it so a frame
+	/// cap can apply on that group. Overflow of a mid-group end past the last group is
+	/// `None` (unbounded).
+	pub fn exclusive_group(self) -> Option<u64> {
+		if self.frame == 0 {
+			Some(self.group)
+		} else {
+			self.group.checked_add(1)
+		}
+	}
+}
+
+/// Whether `sequence` is strictly below an exclusive cap. `None` is unbounded.
+pub(super) fn before_end(sequence: u64, end: Option<u64>) -> bool {
+	end.is_none_or(|end| sequence < end)
 }
 
 // Combining two optional bounds comes in two families, and they disagree on what `None`
@@ -297,6 +314,11 @@ mod tests {
 			Subscription::default().with_end(Position::after_group(u64::MAX)).end,
 			None
 		);
+
+		// A head-of-group end excludes that group; a mid-group end includes it.
+		assert_eq!(Position::group(0).exclusive_group(), Some(0));
+		assert_eq!(Position::after_group(5).unwrap().exclusive_group(), Some(6));
+		assert_eq!(Position::after(5, 2).unwrap().exclusive_group(), Some(6));
 
 		// Nothing sorts below the first position, so there is no inclusive bound for the
 		// empty range. Saturating would return one *above* the input.

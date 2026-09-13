@@ -232,8 +232,9 @@ test("integration: lite carries a fractional maxAge as a whole millisecond", asy
 test("integration: lite applies initial and updated group bounds", async () => {
 	const GROUP_COUNT = 6;
 	const INITIAL_START_GROUP = 1;
-	const INITIAL_END_GROUP = 2;
+	const INITIAL_END_GROUP = 3; // exclusive: groups 1 and 2
 	const UPDATED_GROUP = 4;
+	const UPDATED_END_GROUP = 5; // exclusive: group 4
 	const REPLAY_LATENCY_MS = 5000;
 	const PENDING_ASSERT_MS = 20;
 	const UPDATE_TIMEOUT_MS = 1000;
@@ -260,7 +261,7 @@ test("integration: lite applies initial and updated group bounds", async () => {
 		.ordered();
 	try {
 		expect((await subscriber.nextGroup())?.sequence).toBe(INITIAL_START_GROUP);
-		expect((await subscriber.nextGroup())?.sequence).toBe(INITIAL_END_GROUP);
+		expect((await subscriber.nextGroup())?.sequence).toBe(INITIAL_END_GROUP - 1);
 
 		const pending = subscriber.nextGroup();
 		expect(await Promise.race([pending, sleep(PENDING_ASSERT_MS).then(() => "pending")])).toBe("pending");
@@ -268,7 +269,7 @@ test("integration: lite applies initial and updated group bounds", async () => {
 		subscriber.update({
 			maxAge: REPLAY_LATENCY_MS,
 			startGroup: UPDATED_GROUP,
-			endGroup: UPDATED_GROUP,
+			endGroup: UPDATED_END_GROUP,
 		});
 		expect((await withTimeout(pending, UPDATE_TIMEOUT_MS, "updated group bound timed out"))?.sequence).toBe(
 			UPDATED_GROUP,

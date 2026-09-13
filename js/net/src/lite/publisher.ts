@@ -18,6 +18,7 @@ import { Priority, sendOrder } from "./priority.ts";
 import { Probe } from "./probe.ts";
 import {
 	encodeSubscribeResponse,
+	exclusiveGroupEnd,
 	type Subscribe,
 	SubscribeEnd,
 	SubscribeOk,
@@ -539,14 +540,15 @@ export class Publisher {
 			return;
 		}
 
+		const endGroup = exclusiveGroupEnd(msg.endGroup);
 		const track = front.subscribe(msg.track, {
 			priority: msg.priority,
 			maxAge: servingMaxAge(this.version, msg.maxAge),
 			startGroup: msg.startGroup,
-			endGroup: msg.endGroup,
+			endGroup,
 		});
 		positionCursor(track, this.version, msg.startGroup);
-		track.endAt(msg.endGroup);
+		track.endAt(endGroup);
 
 		// The best-effort datagram loop, started once serving begins. It parks when the
 		// track finishes (recvDatagram returns undefined), so #runTrack alone ends the
@@ -597,7 +599,7 @@ export class Publisher {
 						priority: update.priority,
 						maxAge: servingMaxAge(this.version, update.maxAge),
 						startGroup: update.startGroup,
-						endGroup: update.endGroup,
+						endGroup: exclusiveGroupEnd(update.endGroup),
 					});
 				},
 			});
@@ -751,7 +753,7 @@ export class Publisher {
 							const update = control.update;
 							console.debug(`subscribe update: broadcast=${broadcast} track=${track.name}`);
 							if (update.startGroup !== undefined) track.startAt(update.startGroup);
-							track.endAt(update.endGroup);
+							track.endAt(exclusiveGroupEnd(update.endGroup));
 							bounds.startGroup = update.startGroup;
 							bounds.startFrame = update.startFrame;
 							bounds.endGroup = update.endGroup;

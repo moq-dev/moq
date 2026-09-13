@@ -60,7 +60,8 @@ pub struct MoqSubscription {
 	/// budget of 0).
 	#[uniffi(default = None)]
 	pub group_start: Option<u64>,
-	/// Last group to deliver (inclusive), or null for no end.
+	/// First group not to deliver (exclusive), or null for no end. `Some(0)` is the
+	/// empty range.
 	#[uniffi(default = None)]
 	pub group_end: Option<u64>,
 }
@@ -85,7 +86,7 @@ impl From<MoqSubscription> for moq_net::track::Subscription {
 			.with_priority(s.priority)
 			.with_max_age(std::time::Duration::from_millis(s.max_age_ms))
 			.with_start(s.group_start.map(moq_net::track::Position::group))
-			.with_end(s.group_end.and_then(moq_net::track::Position::after_group))
+			.with_end(s.group_end.map(moq_net::track::Position::group))
 	}
 }
 

@@ -536,7 +536,8 @@ pub struct moq_subscription {
 	/// Whether `group_start` is present. When false, there is no floor.
 	pub group_start_present: bool,
 
-	/// Last group to deliver, inclusive.
+	/// First group not to deliver (exclusive), or ignored when `group_end_present` is
+	/// false. `0` is the empty range.
 	pub group_end: u64,
 	/// Whether `group_end` is present. When false, there is no end cap.
 	pub group_end_present: bool,
@@ -551,7 +552,7 @@ impl From<&moq_subscription> for moq_net::track::Subscription {
 			out = out.with_start(moq_net::track::Position::group(subscription.group_start));
 		}
 		if subscription.group_end_present {
-			out = out.with_end(moq_net::track::Position::after_group(subscription.group_end));
+			out = out.with_end(moq_net::track::Position::group(subscription.group_end));
 		}
 		out
 	}

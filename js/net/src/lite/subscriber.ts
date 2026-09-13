@@ -20,7 +20,14 @@ import { sendOrder } from "./priority.ts";
 import { Probe } from "./probe.ts";
 import { ProbeLevel, type Setup } from "./setup.ts";
 import { StreamId } from "./stream.ts";
-import { decodeSubscribeResponse, decodeSubscribeResponseMaybe, Subscribe, SubscribeUpdate } from "./subscribe.ts";
+import {
+	decodeSubscribeResponse,
+	decodeSubscribeResponseMaybe,
+	exclusiveGroupEnd,
+	inclusiveGroupEnd,
+	Subscribe,
+	SubscribeUpdate,
+} from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
 import {
 	hasAnnounceId,
@@ -470,6 +477,10 @@ export class Subscriber {
 	async #runSubscribe(broadcast: Path.Valid, request: track.Request) {
 		const id = this.#subscribeNext++;
 		const subscription = request.subscription;
+		if (subscription.endGroup !== undefined && (subscription.startGroup ?? 0) >= subscription.endGroup) {
+			request.reject(new Error("empty subscription range cannot be encoded"));
+			return;
+		}
 
 		// `timescale` stays undefined until TRACK_INFO (or, on older drafts,
 		// implicit defaults) resolves it; runGroup blocks on it before decoding.
@@ -484,7 +495,7 @@ export class Subscriber {
 			priority: subscription.priority ?? 0,
 			maxAge: subscription.maxAge,
 			startGroup: subscription.startGroup,
-			endGroup: subscription.endGroup,
+			endGroup: inclusiveGroupEnd(subscription.endGroup),
 		});
 
 		// Open the stream under a timeout. The stream handle flows back via `state`
@@ -790,7 +801,7 @@ export class Subscriber {
 			priority: msg.priority,
 			maxAge: msg.maxAge,
 			startGroup: msg.startGroup,
-			endGroup: msg.endGroup,
+			endGroup: exclusiveGroupEnd(msg.endGroup),
 		};
 
 		for (;;) {
@@ -808,7 +819,7 @@ export class Subscriber {
 				priority: current.priority ?? 0,
 				maxAge: current.maxAge,
 				startGroup: current.startGroup,
-				endGroup: current.endGroup,
+				endGroup: inclusiveGroupEnd(current.endGroup),
 			});
 			await update.encode(stream.writer, this.version);
 			lastSent = { ...current };

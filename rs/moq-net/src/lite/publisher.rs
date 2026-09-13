@@ -1336,7 +1336,7 @@ impl<S: crate::transport::poll::Session> FetchServe<S> {
 					// The end is a serving cap only: the cached group runs to the end of
 					// the group so it stays usable for anyone else (see
 					// `group::Fetch::frame_start`).
-					group.end_at(msg.end_frame);
+					group.end_at(msg.end_frame.and_then(|frame| frame.checked_add(1)));
 
 					// FETCH is gated to lite-05+, which learned the track timescale via
 					// TRACK_INFO.
@@ -2020,7 +2020,7 @@ fn position_group(group: &mut group::Consumer, start: Option<(u64, u64)>, end: O
 	if let Some((sequence, frame)) = end
 		&& sequence == group.sequence
 	{
-		group.end_at(frame);
+		group.end_at(frame.checked_add(1));
 	}
 
 	true
@@ -2214,7 +2214,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 
 		// Apply the initial cap from the original Subscribe. Subsequent updates
 		// flow through the SUBSCRIBE_UPDATE arm below.
-		track.end_at(bounds.end_group);
+		track.end_at(bounds.end_group.and_then(|group| group.checked_add(1)));
 
 		let emit_range = ctx.version.has_track_stream();
 		let datagrams = ctx.version.has_datagrams() && ctx.session.max_datagram_size() > 0;
@@ -2233,10 +2233,10 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		}
 	}
 
-	/// `end_group` is a serving cap, not a subscription terminator: groups with
-	/// sequence > cap are held in the producer's cache until the subscriber raises
-	/// the cap (or unsets it) via SUBSCRIBE_UPDATE, then served in order. Only a
-	/// peer FIN actually ends the subscription. This is what lets relays pause an
+	/// `end_group` is a serving cap, not a subscription terminator: groups at or
+	/// past the exclusive cap are held in the producer's cache until the subscriber
+	/// raises the cap (or unsets it) via SUBSCRIBE_UPDATE, then served in order. Only
+	/// a peer FIN actually ends the subscription. This is what lets relays pause an
 	/// upstream subscription across consumer churn without tearing it down.
 	fn poll(&mut self, stream: &mut Stream<S, Version>, waiter: &kio::Waiter) -> Poll<Result<TrackEnd, Error>> {
 		let mut cx = Context::from_waker(waiter.waker());
@@ -2269,7 +2269,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 				if let Some(start_group) = upd.start_group {
 					self.track.start_at(start_group);
 				}
-				self.track.end_at(upd.end_group);
+				self.track.end_at(upd.end_group.and_then(|group| group.checked_add(1)));
 				self.start_frame = bounds.start_frame();
 				self.end_frame = bounds.end_frame();
 				continue;
