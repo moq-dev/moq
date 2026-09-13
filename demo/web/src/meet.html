@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en" class="dark">
+
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>MoQ Demo (Meet)</title>
+
+	<link rel="stylesheet" href="index.css">
+	<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+</head>
+
+<body class="p-4 max-w-6xl mx-auto">
+	<moq-watch-support show="warning"></moq-watch-support>
+	<moq-publish-support show="warning"></moq-publish-support>
+
+	<h1 class="text-2xl font-bold mb-1">MoQ Meet</h1>
+	<p class="text-neutral-400 text-sm mb-4 max-w-3xl">
+		A multi-participant room over MoQ. Open this page in two tabs (or two browsers) with the same
+		room name. There is no chat, no 3D, no memes: camera, microphone, screenshare, and a roster
+		from the announce stream.
+	</p>
+
+	<div class="grid grid-cols-1 lg:grid-cols-[2fr_1fr] gap-4 items-start">
+		<section>
+			<div id="tiles" class="grid grid-cols-1 sm:grid-cols-2 gap-4"></div>
+			<div id="tiles-empty" class="text-neutral-500 text-sm border border-dashed border-neutral-800 rounded-lg p-8 text-center">
+				Join to publish, then open this URL in another tab.
+			</div>
+		</section>
+
+		<aside>
+			<div class="flex gap-2 mb-3">
+				<span id="conn-status" class="inline-flex items-center gap-1.5 px-2 py-1 rounded text-xs bg-neutral-900 border border-neutral-700">
+					<span class="dot w-2 h-2 rounded-full bg-neutral-500"></span>
+					<b id="conn-text">Disconnected</b>
+				</span>
+			</div>
+
+			<section class="rounded-lg border border-neutral-700 bg-neutral-900 p-3 mb-3">
+				<h3 class="text-sm font-semibold text-neutral-300 mb-2">Room</h3>
+				<label class="block text-xs text-neutral-400 mb-2">
+					Relay URL
+					<input id="relay-url" type="text"
+						class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm font-mono">
+				</label>
+				<label class="block text-xs text-neutral-400 mb-2">
+					Room
+					<input id="room" type="text"
+						class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm font-mono"
+						placeholder="demo">
+				</label>
+				<label class="block text-xs text-neutral-400 mb-2">
+					Name
+					<input id="name" type="text"
+						class="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-white text-sm"
+						placeholder="alice">
+				</label>
+				<button id="join" type="button"
+					class="mt-1 w-full rounded bg-emerald-700 hover:bg-emerald-600 px-3 py-1.5 text-sm font-medium">
+					Join
+				</button>
+			</section>
+
+			<section id="controls" class="rounded-lg border border-neutral-700 bg-neutral-900 p-3 mb-3" hidden>
+				<h3 class="text-sm font-semibold text-neutral-300 mb-2">Media</h3>
+				<div class="flex flex-wrap gap-2">
+					<button id="toggle-camera" type="button"
+						class="rounded bg-neutral-800 hover:bg-neutral-700 px-3 py-1.5 text-sm">Camera</button>
+					<button id="toggle-mic" type="button"
+						class="rounded bg-neutral-800 hover:bg-neutral-700 px-3 py-1.5 text-sm">Mic</button>
+					<button id="toggle-screen" type="button"
+						class="rounded bg-neutral-800 hover:bg-neutral-700 px-3 py-1.5 text-sm">Screen</button>
+				</div>
+			</section>
+		</aside>
+	</div>
+
+	<script type="module" src="./meet.ts"></script>
+</body>
+
+</html>

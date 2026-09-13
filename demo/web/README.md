@@ -19,6 +19,7 @@ Run `just web` (or `bun --bun vite` from this directory) and open the pages:
 
 - `watch.html` - Watch inspector: one tile per live broadcast discovered under a prefix, click to make a tile active (audio + a live stats panel for video/audio/network and a custom `meta.json` metadata track).
 - `publish.html` - Publish from a camera/screen/file, plus an editor for the custom `meta.json` metadata track.
+- `meet.html` - Conferencing: a room is a path prefix, participants publish `{identity}/camera` and `{identity}/screen`, discovered from the announce stream. Open the same room in two tabs.
 - `stats.html` - Relay stats dashboard: auto-discovers every node publishing `.stats` and aggregates external vs. cluster traffic. Needs `[stats] enabled = true` on the relay (the demo configs already set it).
 
 # License

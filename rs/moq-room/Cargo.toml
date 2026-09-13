@@ -1,0 +1,23 @@
+[package]
+name = "moq-room"
+description = "Headless multi-participant rooms over MoQ: announce-derived roster, token claims, and a chat track."
+authors = ["Luke Curley <kixelated@gmail.com>"]
+repository = "https://github.com/moq-dev/moq"
+license = "MIT OR Apache-2.0"
+
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+
+keywords = ["quic", "webtransport", "conferencing", "live"]
+categories = ["multimedia", "network-programming"]
+
+[dependencies]
+kio = { workspace = true, features = ["time"] }
+moq-json = { workspace = true }
+moq-net = { workspace = true }
+moq-token = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }

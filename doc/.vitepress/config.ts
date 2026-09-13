@@ -165,6 +165,7 @@ export default defineConfig({
 								{ text: "moq-video", link: "/lib/rs/moq-video" },
 								{ text: "moq-audio", link: "/lib/rs/moq-audio" },
 								{ text: "moq-token", link: "/lib/rs/moq-token" },
+								{ text: "moq-room", link: "/lib/rs/moq-room" },
 							],
 						},
 						{
@@ -175,6 +176,7 @@ export default defineConfig({
 								{ text: "@moq/hang", link: "/lib/js/hang" },
 								{ text: "@moq/watch", link: "/lib/js/watch" },
 								{ text: "@moq/publish", link: "/lib/js/publish" },
+								{ text: "@moq/room", link: "/lib/js/room" },
 								{ text: "@moq/token", link: "/lib/js/token" },
 								{ text: "@moq/signals", link: "/lib/js/signals" },
 							],

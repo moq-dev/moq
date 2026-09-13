@@ -174,3 +174,32 @@ test("announcedBroadcast follows the reconnect loop", async () => {
 		globalThis.WebTransport = original;
 	}
 });
+
+test("closing an announce consumer during upstream teardown does not append retractions", async () => {
+	const { Producer } = await import("../announced.ts");
+	const { Signal } = await import("@moq/signals");
+	const { spyOn } = await import("bun:test");
+	const upstream = new Producer();
+	const reload = new Reload({ enabled: false });
+	reload.established.set({
+		probe: new Signal(undefined),
+		discovery: true,
+		announced: () => upstream.consume(),
+	} as unknown as import("./established.ts").Established);
+	const consumer = reload.announced();
+	const errors = spyOn(console, "error").mockImplementation(() => {});
+	try {
+		upstream.append({ path: Path.from("alice/camera.hang"), active: true });
+		await consumer.next();
+		upstream.close();
+		// Let the upstream read settle, but close before the pump's finally callback runs.
+		await Promise.resolve();
+		consumer.close();
+		await settle();
+		expect(errors.mock.calls).toEqual([]);
+	} finally {
+		consumer.close();
+		reload.close();
+		errors.mockRestore();
+	}
+});
