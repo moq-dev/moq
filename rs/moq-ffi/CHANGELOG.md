@@ -7,7 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `MoqError::Busy` when a configuration setter races an in-flight connect, listen, or accept.
+
 ### Changed
+
+- Client, server, and pending-request configuration setters now return `Result` and
+  apply or fail. They error with `Busy` while connect/listen/accept owns the handle
+  and `Cancelled` after `cancel()`. Server bind/TLS is captured at `listen()` and
+  those setters fail afterwards; request origin overrides fail with `AlreadyResponded`
+  after accept/reject. `cert_fingerprints()` uses `Busy` instead of `Bind` when the
+  server is in an accept/listen call.
 
 - `MoqError` is no longer a flat error. `Protocol` carries a `MoqProtocolError` record
   (session or stream scope, the verbatim wire code, a known kind, and a message). Transport

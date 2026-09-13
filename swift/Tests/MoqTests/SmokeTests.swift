@@ -26,11 +26,11 @@ final class SmokeTests: XCTestCase {
     /// exercise the cancel path.
     func testClientConstructsAndCancels() async throws {
         let client = Client()
-        client.setTlsRoots([])
-        client.setTlsSystemRoots(true)
-        client.setTlsFingerprints([])
-        client.setTlsCert(nil)
-        client.setTlsKey(nil)
+        try client.setTlsRoots([])
+        try client.setTlsSystemRoots(true)
+        try client.setTlsFingerprints([])
+        try client.setTlsCert(nil)
+        try client.setTlsKey(nil)
         client.cancel()
         do {
             _ = try await client.connect(to: "https://localhost:0/test")

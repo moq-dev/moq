@@ -1,6 +1,10 @@
 import MoqFFI
 
 /// A MoQ client. Configure the optional knobs, then `connect(to:)`.
+///
+/// Setters write the configuration `connect` snapshots. They throw `.Busy` while
+/// a connect is in flight and `.Cancelled` after `cancel()`. A finished connect
+/// does not freeze the handle: later setters apply to the next dial until cancel.
 public final class Client: Sendable {
     let ffi: MoqClient
 
@@ -11,40 +15,40 @@ public final class Client: Sendable {
 
     /// Toggle TLS certificate verification. Defaults to on; pass `false` only
     /// against a relay with a self-signed certificate during development.
-    public func setTlsVerify(_ verify: Bool) {
-        ffi.setTlsDisableVerify(disable: !verify)
+    public func setTlsVerify(_ verify: Bool) throws {
+        try ffi.setTlsDisableVerify(disable: !verify)
     }
 
     /// Trust these PEM root certificate file path(s) instead of the system roots.
-    public func setTlsRoots(_ paths: [String]) {
-        ffi.setTlsRoots(paths: paths)
+    public func setTlsRoots(_ paths: [String]) throws {
+        try ffi.setTlsRoots(paths: paths)
     }
 
     /// Configure whether platform roots are trusted in addition to custom roots.
-    public func setTlsSystemRoots(_ enabled: Bool) {
-        ffi.setTlsSystemRoots(systemRoots: enabled)
+    public func setTlsSystemRoots(_ enabled: Bool) throws {
+        try ffi.setTlsSystemRoots(systemRoots: enabled)
     }
 
     /// Pin the peer certificate to these hex SHA-256 fingerprints, the native
     /// equivalent of `serverCertificateHashes`. Accepts the values a server
     /// reports via `Server.certFingerprints`, so a self-signed certificate can be
     /// trusted without disabling verification.
-    public func setTlsFingerprints(_ fingerprints: [String]) {
-        ffi.setTlsFingerprints(fingerprints: fingerprints)
+    public func setTlsFingerprints(_ fingerprints: [String]) throws {
+        try ffi.setTlsFingerprints(fingerprints: fingerprints)
     }
 
     /// Set the path to a PEM certificate chain to present when the relay requires mTLS.
-    public func setTlsCert(_ path: String?) {
-        ffi.setTlsCert(path: path)
+    public func setTlsCert(_ path: String?) throws {
+        try ffi.setTlsCert(path: path)
     }
 
     /// Set the path to a PEM private key to present when the relay requires mTLS.
-    public func setTlsKey(_ path: String?) {
-        ffi.setTlsKey(path: path)
+    public func setTlsKey(_ path: String?) throws {
+        try ffi.setTlsKey(path: path)
     }
 
     /// Set the local UDP socket bind address (defaults to `[::]:0`). Throws if
-    /// the address cannot be parsed.
+    /// the address cannot be parsed, if a connect is in flight, or after cancel.
     public func bind(_ addr: String) throws {
         try ffi.setBind(addr: addr)
     }
@@ -53,33 +57,33 @@ public final class Client: Sendable {
     /// (defaults to 1024). MoQ opens a stream per group, and for a subscriber
     /// those arrive from the relay, so subscribing to many tracks may want this
     /// raised. Ignored by the WebSocket fallback.
-    public func setQuicMaxStreams(_ maxStreams: UInt64) {
-        ffi.setQuicMaxStreams(maxStreams: maxStreams)
+    public func setQuicMaxStreams(_ maxStreams: UInt64) throws {
+        try ffi.setQuicMaxStreams(maxStreams: maxStreams)
     }
 
     /// Wire the origin whose local broadcasts get advertised to the remote. If
     /// left unset, `connect` auto-creates one, reachable via `Session.publisher`.
-    public func setPublish(_ origin: OriginProducer?) {
-        ffi.setPublish(origin: origin?.ffi)
+    public func setPublish(_ origin: OriginProducer?) throws {
+        try ffi.setPublish(origin: origin?.ffi)
     }
 
     /// Wire the origin used to receive the remote's announcements. If left
     /// unset, `connect` auto-creates one, reachable via `Session.consumer`.
-    public func setConsume(_ origin: OriginProducer?) {
-        ffi.setConsume(origin: origin?.ffi)
+    public func setConsume(_ origin: OriginProducer?) throws {
+        try ffi.setConsume(origin: origin?.ffi)
     }
 
     /// Enable or disable automatic reconnecting (on by default). When enabled, the
     /// session redials with backoff whenever the transport drops, and broadcasts
     /// consumed through it ride out the gap. Disable for a one-shot dial whose
     /// transport close ends the session.
-    public func setReconnect(_ enabled: Bool) {
-        ffi.setReconnect(enabled: enabled)
+    public func setReconnect(_ enabled: Bool) throws {
+        try ffi.setReconnect(enabled: enabled)
     }
 
     /// Configure retry pacing for the automatic reconnect.
-    public func setBackoff(_ backoff: Backoff) {
-        ffi.setBackoff(backoff: backoff)
+    public func setBackoff(_ backoff: Backoff) throws {
+        try ffi.setBackoff(backoff: backoff)
     }
 
     /// Connect and wait for the session to be established. Cancellable via `cancel()`.

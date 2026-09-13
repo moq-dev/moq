@@ -170,6 +170,17 @@ async def test_server_request_close():
                 pass
 
 
+async def test_client_setters_fail_after_cancel():
+    """A cancelled client refuses further configuration rather than ignoring it."""
+    client = moq_ffi.MoqClient()
+    client.set_tls_disable_verify(True)
+    client.cancel()
+    with pytest.raises(moq_ffi.MoqError.Cancelled):  # type: ignore[misc]
+        client.set_tls_disable_verify(False)
+    with pytest.raises(moq_ffi.MoqError.Cancelled):  # type: ignore[misc]
+        client.set_bind("127.0.0.1:0")
+
+
 async def test_cert_fingerprints_after_listen():
     """cert_fingerprints() returns hex SHA-256 once the server has bound."""
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:

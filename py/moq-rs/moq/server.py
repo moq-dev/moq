@@ -51,12 +51,18 @@ class Request:
 
     def set_publish(self, origin: OriginProducer | None) -> None:
         """Override the publish origin for this session. Falls back to the
-        server's configured publish origin if unset."""
+        server's configured publish origin if unset. Captured at ``accept()``.
+
+        Raises if the request is currently accepting, already answered, or cancelled.
+        """
         self._inner.set_publish(origin._inner if origin is not None else None)
 
     def set_consume(self, origin: OriginProducer | None) -> None:
         """Override the consume origin for this session. Falls back to the
-        server's configured consume origin if unset."""
+        server's configured consume origin if unset. Captured at ``accept()``.
+
+        Raises if the request is currently accepting, already answered, or cancelled.
+        """
         self._inner.set_consume(origin._inner if origin is not None else None)
 
     async def accept(self) -> Session:
