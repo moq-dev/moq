@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.18](https://github.com/moq-dev/moq/compare/moq-native-v0.19.17...moq-native-v0.19.18) - 2026-09-13
+
+### Added
+
+- *(moq-native)* expose the dialed authority on Request, including raw QUIC ([#3618](https://github.com/moq-dev/moq/pull/3618))
+- *(moq-net)* add moq-transport draft-21 (moqt-21) ([#3574](https://github.com/moq-dev/moq/pull/3574))
+
 ## [0.19.17](https://github.com/moq-dev/moq/compare/moq-native-v0.19.16...moq-native-v0.19.17) - 2026-09-09
 
 ### Added

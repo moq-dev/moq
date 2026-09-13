@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.15](https://github.com/moq-dev/moq/compare/libmoq-v0.5.14...libmoq-v0.5.15) - 2026-09-13
+
+### Added
+
+- *(moq-net)* add moq-transport draft-21 (moqt-21) ([#3574](https://github.com/moq-dev/moq/pull/3574))
+
+### Fixed
+
+- *(moq-video,moq-audio)* open a decoder at the live edge ([#3565](https://github.com/moq-dev/moq/pull/3565))
+
+### Other
+
+- reach Cargo through mbx's shim and delete RUST_CARGO ([#3553](https://github.com/moq-dev/moq/pull/3553))
+
 ## [0.5.14](https://github.com/moq-dev/moq/compare/libmoq-v0.5.13...libmoq-v0.5.14) - 2026-09-09
 
 ### Added

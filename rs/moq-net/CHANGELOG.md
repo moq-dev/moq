@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.21](https://github.com/moq-dev/moq/compare/moq-net-v0.2.20...moq-net-v0.2.21) - 2026-09-13
+
+### Fixed
+
+- *(kio)* bound waiter registration work ([#3635](https://github.com/moq-dev/moq/pull/3635))
+- *(moq-net)* scope-check the dynamic fallback in request_broadcast ([#3624](https://github.com/moq-dev/moq/pull/3624))
+- *(net)* never reuse generated track names ([#3594](https://github.com/moq-dev/moq/pull/3594))
+- satisfy the nightly license audit ([#3592](https://github.com/moq-dev/moq/pull/3592))
+- *(moq-net)* reject incompatible copies during failover ([#3521](https://github.com/moq-dev/moq/pull/3521))
+
 ## [0.2.19](https://github.com/moq-dev/moq/compare/moq-net-v0.2.18...moq-net-v0.2.19) - 2026-09-09
 
 ### Added

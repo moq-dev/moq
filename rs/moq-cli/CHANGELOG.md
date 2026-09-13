@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1](https://github.com/moq-dev/moq/compare/moq-cli-v0.11.0...moq-cli-v0.11.1) - 2026-09-13
+
+### Fixed
+
+- *(moq-video,moq-audio)* open a decoder at the live edge ([#3565](https://github.com/moq-dev/moq/pull/3565))
+
 ## [0.11.0](https://github.com/moq-dev/moq/compare/moq-cli-v0.10.0...moq-cli-v0.11.0) - 2026-09-09
 
 ### Added
