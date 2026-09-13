@@ -51,6 +51,7 @@ func TestErrorSentinels(t *testing.T) {
 		{"Json", ffi.NewMoqErrorJson(""), moq.ErrJSON},
 		{"Cancelled", ffi.NewMoqErrorCancelled(), moq.ErrCancelled},
 		{"Closed", ffi.NewMoqErrorClosed(), moq.ErrClosed},
+		{"Busy", ffi.NewMoqErrorBusy(), moq.ErrBusy},
 		{"Connect", ffi.NewMoqErrorConnect(""), moq.ErrConnect},
 		{"Bind", ffi.NewMoqErrorBind(""), moq.ErrBind},
 		{"Reject", ffi.NewMoqErrorReject(""), moq.ErrReject},

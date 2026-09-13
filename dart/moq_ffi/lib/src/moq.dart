@@ -1998,84 +1998,90 @@ class FfiConverterMoqException {
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 14:
-        final lifted = ConnectMoqException.read(subview);
+        final lifted = BusyMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 15:
-        final lifted = BindMoqException.read(subview);
+        final lifted = ConnectMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 16:
-        final lifted = RejectMoqException.read(subview);
+        final lifted = BindMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 17:
-        final lifted = AlreadyRespondedMoqException.read(subview);
+        final lifted = RejectMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 18:
-        final lifted = CodecMoqException.read(subview);
+        final lifted = AlreadyRespondedMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 19:
-        final lifted = UnauthorizedMoqException.read(subview);
+        final lifted = CodecMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 20:
-        final lifted = ForbiddenMoqException.read(subview);
+        final lifted = UnauthorizedMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 21:
-        final lifted = NotFoundMoqException.read(subview);
+        final lifted = ForbiddenMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 22:
-        final lifted = UnsupportedMoqException.read(subview);
+        final lifted = NotFoundMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 23:
-        final lifted = AlreadyCommittedMoqException.read(subview);
+        final lifted = UnsupportedMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 24:
-        final lifted = InvalidRouteMoqException.read(subview);
+        final lifted = AlreadyCommittedMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 25:
-        final lifted = InvalidPatternMoqException.read(subview);
+        final lifted = InvalidRouteMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 26:
-        final lifted = UnresolvableBroadcastMoqException.read(subview);
+        final lifted = InvalidPatternMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 27:
+        final lifted = UnresolvableBroadcastMoqException.read(subview);
+        return LiftRetVal<MoqException>(
+          lifted.value,
+          lifted.bytesRead - subview.offsetInBytes + 4,
+        );
+      case 28:
         final lifted = LogMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
@@ -2631,6 +2637,39 @@ class ClosedMoqException extends MoqException {
   }
 }
 
+class BusyMoqException extends MoqException {
+  BusyMoqException();
+  BusyMoqException._();
+  static LiftRetVal<BusyMoqException> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    return LiftRetVal(BusyMoqException._(), new_offset);
+  }
+
+  @override
+  RustBuffer lower() {
+    final buf = Uint8List(allocationSize());
+    write(buf);
+    return toRustBuffer(buf);
+  }
+
+  @override
+  int allocationSize() {
+    return 4;
+  }
+
+  @override
+  int write(Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 14);
+    int new_offset = buf.offsetInBytes + 4;
+    return new_offset;
+  }
+
+  @override
+  String toString() {
+    return "BusyMoqException";
+  }
+}
+
 class ConnectMoqException extends MoqException {
   final String v0;
   ConnectMoqException(String this.v0);
@@ -2659,7 +2698,7 @@ class ConnectMoqException extends MoqException {
 
   @override
   int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 14);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 15);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
       v0,
@@ -2702,7 +2741,7 @@ class BindMoqException extends MoqException {
 
   @override
   int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 15);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 16);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
       v0,
@@ -2745,7 +2784,7 @@ class RejectMoqException extends MoqException {
 
   @override
   int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 16);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 17);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
       v0,
@@ -2782,7 +2821,7 @@ class AlreadyRespondedMoqException extends MoqException {
 
   @override
   int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 17);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 18);
     int new_offset = buf.offsetInBytes + 4;
     return new_offset;
   }
@@ -2821,7 +2860,7 @@ class CodecMoqException extends MoqException {
 
   @override
   int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 18);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 19);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
       v0,
@@ -2858,7 +2897,7 @@ class UnauthorizedMoqException extends MoqException {
 
   @override
   int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 19);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 20);
     int new_offset = buf.offsetInBytes + 4;
     return new_offset;
   }
@@ -2891,7 +2930,7 @@ class ForbiddenMoqException extends MoqException {
 
   @override
   int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 20);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 21);
     int new_offset = buf.offsetInBytes + 4;
     return new_offset;
   }
@@ -2924,7 +2963,7 @@ class NotFoundMoqException extends MoqException {
 
   @override
   int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 21);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 22);
     int new_offset = buf.offsetInBytes + 4;
     return new_offset;
   }
@@ -2957,7 +2996,7 @@ class UnsupportedMoqException extends MoqException {
 
   @override
   int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 22);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 23);
     int new_offset = buf.offsetInBytes + 4;
     return new_offset;
   }
@@ -2990,7 +3029,7 @@ class AlreadyCommittedMoqException extends MoqException {
 
   @override
   int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 23);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 24);
     int new_offset = buf.offsetInBytes + 4;
     return new_offset;
   }
@@ -3029,7 +3068,7 @@ class InvalidRouteMoqException extends MoqException {
 
   @override
   int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 24);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 25);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
       v0,
@@ -3072,7 +3111,7 @@ class InvalidPatternMoqException extends MoqException {
 
   @override
   int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 25);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 26);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
       v0,
@@ -3115,7 +3154,7 @@ class UnresolvableBroadcastMoqException extends MoqException {
 
   @override
   int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 26);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 27);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
       v0,
@@ -3158,7 +3197,7 @@ class LogMoqException extends MoqException {
 
   @override
   int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 27);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 28);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
       v0,
@@ -7043,7 +7082,7 @@ class MoqRequest implements MoqRequestInterface {
         FfiConverterOptionalMoqOriginProducer.lower(origin),
         status,
       );
-    }, null);
+    }, moqExceptionErrorHandler);
   }
 
   void setPublish({required MoqOriginProducer? origin}) {
@@ -7053,7 +7092,7 @@ class MoqRequest implements MoqRequestInterface {
         FfiConverterOptionalMoqOriginProducer.lower(origin),
         status,
       );
-    }, null);
+    }, moqExceptionErrorHandler);
   }
 
   String transport() {
@@ -7205,7 +7244,7 @@ class MoqServer implements MoqServerInterface {
         FfiConverterOptionalMoqOriginProducer.lower(origin),
         status,
       );
-    }, null);
+    }, moqExceptionErrorHandler);
   }
 
   void setPublish({required MoqOriginProducer? origin}) {
@@ -7215,7 +7254,7 @@ class MoqServer implements MoqServerInterface {
         FfiConverterOptionalMoqOriginProducer.lower(origin),
         status,
       );
-    }, null);
+    }, moqExceptionErrorHandler);
   }
 
   void setTlsCert({required List<String> paths}) {
@@ -7225,7 +7264,7 @@ class MoqServer implements MoqServerInterface {
         FfiConverterSequenceString.lower(paths),
         status,
       );
-    }, null);
+    }, moqExceptionErrorHandler);
   }
 
   void setTlsGenerate({required List<String> hostnames}) {
@@ -7235,7 +7274,7 @@ class MoqServer implements MoqServerInterface {
         FfiConverterSequenceString.lower(hostnames),
         status,
       );
-    }, null);
+    }, moqExceptionErrorHandler);
   }
 
   void setTlsKey({required List<String> paths}) {
@@ -7245,7 +7284,7 @@ class MoqServer implements MoqServerInterface {
         FfiConverterSequenceString.lower(paths),
         status,
       );
-    }, null);
+    }, moqExceptionErrorHandler);
   }
 }
 
@@ -7349,7 +7388,7 @@ class MoqClient implements MoqClientInterface {
         FfiConverterMoqBackoff.lower(backoff),
         status,
       );
-    }, null);
+    }, moqExceptionErrorHandler);
   }
 
   void setBind({required String addr}) {
@@ -7369,7 +7408,7 @@ class MoqClient implements MoqClientInterface {
         FfiConverterOptionalMoqOriginProducer.lower(origin),
         status,
       );
-    }, null);
+    }, moqExceptionErrorHandler);
   }
 
   void setPublish({required MoqOriginProducer? origin}) {
@@ -7379,7 +7418,7 @@ class MoqClient implements MoqClientInterface {
         FfiConverterOptionalMoqOriginProducer.lower(origin),
         status,
       );
-    }, null);
+    }, moqExceptionErrorHandler);
   }
 
   void setQuicMaxStreams({required int maxStreams}) {
@@ -7389,7 +7428,7 @@ class MoqClient implements MoqClientInterface {
         FfiConverterUInt64.lower(maxStreams),
         status,
       );
-    }, null);
+    }, moqExceptionErrorHandler);
   }
 
   void setReconnect({required bool enabled}) {
@@ -7399,7 +7438,7 @@ class MoqClient implements MoqClientInterface {
         FfiConverterBool.lower(enabled),
         status,
       );
-    }, null);
+    }, moqExceptionErrorHandler);
   }
 
   void setTlsCert({required String? path}) {
@@ -7409,7 +7448,7 @@ class MoqClient implements MoqClientInterface {
         FfiConverterOptionalString.lower(path),
         status,
       );
-    }, null);
+    }, moqExceptionErrorHandler);
   }
 
   void setTlsDisableVerify({required bool disable}) {
@@ -7419,7 +7458,7 @@ class MoqClient implements MoqClientInterface {
         FfiConverterBool.lower(disable),
         status,
       );
-    }, null);
+    }, moqExceptionErrorHandler);
   }
 
   void setTlsFingerprints({required List<String> fingerprints}) {
@@ -7429,7 +7468,7 @@ class MoqClient implements MoqClientInterface {
         FfiConverterSequenceString.lower(fingerprints),
         status,
       );
-    }, null);
+    }, moqExceptionErrorHandler);
   }
 
   void setTlsKey({required String? path}) {
@@ -7439,7 +7478,7 @@ class MoqClient implements MoqClientInterface {
         FfiConverterOptionalString.lower(path),
         status,
       );
-    }, null);
+    }, moqExceptionErrorHandler);
   }
 
   void setTlsRoots({required List<String> paths}) {
@@ -7449,7 +7488,7 @@ class MoqClient implements MoqClientInterface {
         FfiConverterSequenceString.lower(paths),
         status,
       );
-    }, null);
+    }, moqExceptionErrorHandler);
   }
 
   void setTlsSystemRoots({required bool systemRoots}) {
@@ -7459,7 +7498,7 @@ class MoqClient implements MoqClientInterface {
         FfiConverterBool.lower(systemRoots),
         status,
       );
-    }, null);
+    }, moqExceptionErrorHandler);
   }
 }
 
@@ -12285,10 +12324,10 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqrequest_reject() != 57471) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqrequest_set_consume() != 10143) {
+  if (uniffi_moq_ffi_checksum_method_moqrequest_set_consume() != 45399) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqrequest_set_publish() != 48930) {
+  if (uniffi_moq_ffi_checksum_method_moqrequest_set_publish() != 10746) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqrequest_transport() != 5942) {
@@ -12309,22 +12348,22 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqserver_listen() != 9040) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqserver_set_bind() != 60575) {
+  if (uniffi_moq_ffi_checksum_method_moqserver_set_bind() != 55505) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqserver_set_consume() != 29005) {
+  if (uniffi_moq_ffi_checksum_method_moqserver_set_consume() != 13635) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqserver_set_publish() != 54637) {
+  if (uniffi_moq_ffi_checksum_method_moqserver_set_publish() != 48695) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqserver_set_tls_cert() != 6344) {
+  if (uniffi_moq_ffi_checksum_method_moqserver_set_tls_cert() != 33276) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqserver_set_tls_generate() != 51810) {
+  if (uniffi_moq_ffi_checksum_method_moqserver_set_tls_generate() != 148) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqserver_set_tls_key() != 61191) {
+  if (uniffi_moq_ffi_checksum_method_moqserver_set_tls_key() != 56395) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqclient_cancel() != 29949) {
@@ -12333,44 +12372,44 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqclient_connect() != 65409) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqclient_set_backoff() != 28024) {
+  if (uniffi_moq_ffi_checksum_method_moqclient_set_backoff() != 63523) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqclient_set_bind() != 7248) {
+  if (uniffi_moq_ffi_checksum_method_moqclient_set_bind() != 56346) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqclient_set_consume() != 64342) {
+  if (uniffi_moq_ffi_checksum_method_moqclient_set_consume() != 4978) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqclient_set_publish() != 29680) {
+  if (uniffi_moq_ffi_checksum_method_moqclient_set_publish() != 64932) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqclient_set_quic_max_streams() !=
-      21959) {
+      17062) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqclient_set_reconnect() != 24915) {
+  if (uniffi_moq_ffi_checksum_method_moqclient_set_reconnect() != 53736) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqclient_set_tls_cert() != 24223) {
+  if (uniffi_moq_ffi_checksum_method_moqclient_set_tls_cert() != 12773) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqclient_set_tls_disable_verify() !=
-      58510) {
+      2912) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqclient_set_tls_fingerprints() !=
-      48211) {
+      50038) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqclient_set_tls_key() != 499) {
+  if (uniffi_moq_ffi_checksum_method_moqclient_set_tls_key() != 19390) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqclient_set_tls_roots() != 46542) {
+  if (uniffi_moq_ffi_checksum_method_moqclient_set_tls_roots() != 5399) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqclient_set_tls_system_roots() !=
-      24617) {
+      10239) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqsession_bandwidth() != 8006) {

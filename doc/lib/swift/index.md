@@ -54,8 +54,9 @@ try broadcast.announce()
 session.shutdown()
 ```
 
-For a self-signed relay on your own test network, `client.setTlsVerify(false)`
+For a self-signed relay on your own test network, `try client.setTlsVerify(false)`
 accepts any certificate; prefer `setTlsRoots` or a fingerprint anywhere else.
+Setters throw if a connect is in flight or after `cancel()`.
 
 Sessions reconnect with backoff when the transport drops and re-announce local
 broadcasts. `session.epoch()` counts the connections, 1 on the first, pairing

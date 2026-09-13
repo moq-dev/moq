@@ -139,11 +139,22 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 
 	/// Whether [Self::cancel] has run, which [Self::lock] folds into the same `None` as a busy
 	/// state. The state may still be a moment away from being dropped.
-	///
-	/// Only the QUIC server distinguishes the two, and it is native-only.
-	#[cfg(not(target_arch = "wasm32"))]
 	pub fn is_cancelled(&self) -> bool {
 		*self.cancel.borrow()
+	}
+
+	/// Lock for a synchronous configuration write.
+	///
+	/// [Self::lock] folds a running task and a cancelled handle into one `None`.
+	/// Configuration must apply or fail, so this splits them: [`MoqError::Busy`]
+	/// while a [`Self::run`] owns the state, [`MoqError::Cancelled`] after
+	/// [`Self::cancel`].
+	pub fn configure(&self) -> Result<Guard<T>, MoqError> {
+		match self.lock() {
+			Some(guard) => Ok(guard),
+			None if self.is_cancelled() => Err(MoqError::Cancelled),
+			None => Err(MoqError::Busy),
+		}
 	}
 
 	/// Spawn an async closure on the runtime.
@@ -352,5 +363,41 @@ mod tests {
 		task.cancel();
 		task.cancel();
 		soon(dropped).await.expect("state should be dropped");
+	}
+
+	#[tokio::test]
+	async fn configure_is_busy_while_a_run_holds_the_lock() {
+		let task = Task::new(());
+		let (started, running) = tokio::sync::oneshot::channel();
+		let run = task.run(move |state| async move {
+			let _state = state;
+			started.send(()).expect("test should still be waiting");
+			std::future::pending::<Result<(), MoqError>>().await
+		});
+		tokio::pin!(run);
+
+		soon(async {
+			tokio::select! {
+				_ = &mut run => panic!("a pending run should not resolve"),
+				started = running => started.expect("the run should start"),
+			}
+		})
+		.await;
+
+		assert!(matches!(task.configure(), Err(MoqError::Busy)));
+		task.cancel();
+		assert!(matches!(task.configure(), Err(MoqError::Cancelled)));
+
+		let err = soon(&mut run).await.expect_err("the in-flight run should be cancelled");
+		assert!(matches!(err, MoqError::Cancelled));
+	}
+
+	#[test]
+	fn configure_is_cancelled_from_the_moment_cancel_returns() {
+		let task = Task::new(());
+		assert!(task.configure().is_ok());
+
+		task.cancel();
+		assert!(matches!(task.configure(), Err(MoqError::Cancelled)));
 	}
 }
