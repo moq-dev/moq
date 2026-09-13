@@ -52,7 +52,7 @@ authorized; resolving one into a subscription is not implemented yet.
 
 ## Path patterns
 
-Rust's `moq_net::path::Pattern` and TypeScript's `Path.Pattern` from `@moq/net`
+Rust's `moq_net::Pattern` and TypeScript's `Path.Pattern` from `@moq/net`
 describe sets of literal paths. `origin.dynamic(pattern, route)` advertises any
 pattern in that dialect; a prefix is still spelled `foo/**`. Token scope stays
 prefix-based until origin grants become a pattern set: an advertisement must
@@ -170,3 +170,9 @@ JavaScript exposes `SessionError` and `StreamError`. Match the registry before
 interpreting the number. Native bindings expose scope, code, kind, and a diagnostic
 message; unknown and application codes retain their numeric value. Transport
 failures without a protocol code remain separate.
+
+Route announcements expose the matcher directly: Rust `announce::Update.pattern`
+and TypeScript `Announce.Event.pattern` carry a `Pattern`. A subtree claim is
+`room/**`, while `room/*` covers one child segment. Use `as_prefix()` in Rust or
+`asPrefix()` in TypeScript when a consumer specifically needs a prefix-shaped
+claim; an arbitrary pattern is not a concrete broadcast name.

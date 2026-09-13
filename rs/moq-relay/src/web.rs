@@ -750,8 +750,10 @@ async fn serve_announced(
 	let mut broadcasts = Vec::new();
 
 	while let Some(update) = announced.try_next() {
-		if update.active {
-			broadcasts.push(update.prefix);
+		if update.active
+			&& let Some(prefix) = update.pattern.as_prefix()
+		{
+			broadcasts.push(prefix.to_owned());
 		}
 	}
 

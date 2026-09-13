@@ -443,7 +443,7 @@ async fn goaway_drains_routes(version: Version) {
 		loop {
 			let update = announced.next().await.expect("update");
 			if update.active
-				&& update.prefix.as_path().as_str() == "test"
+				&& update.pattern.as_prefix().expect("prefix announcement") == "test"
 				&& update.route.cost == moq_net::origin::Cost::DRAIN
 			{
 				break;

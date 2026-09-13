@@ -714,7 +714,9 @@ export class Publisher {
 
 				const updated = new Map<Path.Valid, Advertised>();
 				for (const [name, snap] of advertised) {
-					const suffix = Path.stripPrefix(prefix, name);
+					const claim = Path.Pattern.parse(name).asPrefix();
+					if (claim === undefined) continue;
+					const suffix = Path.stripPrefix(prefix, Path.from(claim));
 					if (suffix === null) continue;
 					updated.set(suffix, snap);
 				}
@@ -842,7 +844,11 @@ export class Publisher {
 					break;
 				}
 
-				const updated = new Map<Path.Valid, Advertised>(advertised);
+				const updated = new Map<Path.Valid, Advertised>();
+				for (const [name, snap] of advertised) {
+					const claim = Path.Pattern.parse(name).asPrefix();
+					if (claim !== undefined) updated.set(Path.from(claim), snap);
+				}
 
 				// A namespace that is gone, or that a republish replaced, takes its refusal with
 				// it: the peer refused a broadcast, not a path forever, so a different one at

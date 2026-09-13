@@ -865,7 +865,12 @@ mod tests {
 		// egress bytes out of the default-tier broadcast.
 		let update = announced.next().await.unwrap();
 		assert!(update.active);
-		let bc = egress.request_broadcast(update.prefix.as_path()).await.unwrap();
+		let bc = egress
+			.request_broadcast(moq_net::Path::new(
+				update.pattern.as_prefix().expect("prefix announcement"),
+			))
+			.await
+			.unwrap();
 		let mut egress_sub = bc.track("video").unwrap().subscribe(None).await.unwrap();
 		{
 			let mut group = pub_track.append_group().unwrap();

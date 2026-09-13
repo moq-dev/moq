@@ -185,7 +185,9 @@ mod tests {
 		assert!(update.active);
 		origin
 			.consume()
-			.request_broadcast(update.prefix.as_path())
+			.request_broadcast(moq_net::Path::new(
+				update.pattern.as_prefix().expect("prefix announcement"),
+			))
 			.await
 			.expect("resolve")
 	}

@@ -598,13 +598,9 @@ impl AnnounceRun {
 
 	/// The presented pattern an update travels under on this stream, relative
 	/// to the requested prefix.
-	fn presented(&self, prefix: &crate::origin::Prefix) -> crate::Pattern {
-		let residuals = prefix.as_pattern().rebase(self.prefix.as_str());
-		residuals
-			.iter()
-			.next()
-			.cloned()
-			.unwrap_or_else(|| prefix.as_pattern().clone())
+	fn presented(&self, pattern: &crate::Pattern) -> crate::Pattern {
+		let residuals = pattern.rebase(self.prefix.as_str());
+		residuals.iter().next().cloned().unwrap_or_else(|| pattern.clone())
 	}
 
 	/// Encode one advertisement: ANNOUNCE_START for a prefix-shaped residual,
@@ -631,7 +627,7 @@ impl AnnounceRun {
 
 	/// The chain and cost to put on the wire for `route`, or `None` when it must
 	/// not be forwarded.
-	fn outgoing(&self, route: &crate::origin::Route, absolute: &crate::Path) -> Option<(Hops, crate::origin::Cost)> {
+	fn outgoing(&self, route: &crate::origin::Route, absolute: &crate::Pattern) -> Option<(Hops, crate::origin::Cost)> {
 		let mut hops = route.hops.clone();
 
 		// A route that already passed through us is a reflection. The origin
@@ -673,7 +669,7 @@ impl AnnounceRun {
 		&mut self,
 		stream: &mut Stream<S, Version>,
 		pattern: crate::Pattern,
-		absolute: &crate::Path,
+		absolute: &crate::Pattern,
 	) -> Result<(), Error> {
 		let Some(id) = self.live.remove(&pattern) else {
 			// Filtered on the way out; the peer never saw it.
@@ -706,15 +702,18 @@ impl AnnounceRun {
 				// Send ANNOUNCE_INIT as the first message with all currently active routes.
 				// We use `try_next()` to synchronously get the initial updates.
 				while let Some(update) = announced.try_next() {
-					let pattern = self.presented(&update.prefix);
+					let pattern = self.presented(&update.pattern);
 					let Some(suffix) = pattern.as_prefix() else {
 						continue;
 					};
 					let suffix = crate::Path::new(suffix).to_owned();
-					let absolute = origin.absolute(update.prefix.as_path()).to_owned();
+					let absolute = update
+						.pattern
+						.rooted(origin.root().as_str())
+						.map_err(|_| crate::coding::BoundsExceeded)?;
 
 					if update.active {
-						if self.outgoing(&update.route, &absolute.as_path()).is_none() {
+						if self.outgoing(&update.route, &absolute).is_none() {
 							continue;
 						}
 						tracing::debug!(route = %absolute, "announce");
@@ -738,14 +737,17 @@ impl AnnounceRun {
 				// forward the stored chain as-is (no self push here).
 				let mut initial: Vec<(crate::Pattern, Hops, crate::origin::Cost)> = Vec::new();
 				while let Some(update) = announced.try_next() {
-					let pattern = self.presented(&update.prefix);
+					let pattern = self.presented(&update.pattern);
 					if !self.version.has_announce_id() && pattern.as_prefix().is_none() {
 						continue;
 					}
-					let absolute = origin.absolute(update.prefix.as_path()).to_owned();
+					let absolute = update
+						.pattern
+						.rooted(origin.root().as_str())
+						.map_err(|_| crate::coding::BoundsExceeded)?;
 
 					if update.active {
-						let Some((hops, cost)) = self.outgoing(&update.route, &absolute.as_path()) else {
+						let Some((hops, cost)) = self.outgoing(&update.route, &absolute) else {
 							continue;
 						};
 						tracing::debug!(route = %absolute, "announce");
@@ -818,18 +820,21 @@ impl AnnounceRun {
 				continue;
 			};
 
-			let pattern = self.presented(&update.prefix);
+			let pattern = self.presented(&update.pattern);
 			if !self.version.has_announce_id() && pattern.as_prefix().is_none() {
 				continue;
 			}
-			let absolute = origin.absolute(update.prefix.as_path()).to_owned();
+			let absolute = update
+				.pattern
+				.rooted(origin.root().as_str())
+				.map_err(|_| crate::coding::BoundsExceeded)?;
 
 			if !update.active {
-				self.retract(stream, pattern, &absolute.as_path())?;
+				self.retract(stream, pattern, &absolute)?;
 				continue;
 			}
 
-			match self.outgoing(&update.route, &absolute.as_path()) {
+			match self.outgoing(&update.route, &absolute) {
 				Some((hops, cost)) => match self.live.get(&pattern) {
 					// A metadata update on a live advertisement: restart it in
 					// place (lite-05 restarts via a duplicate ANNOUNCE).
@@ -854,7 +859,7 @@ impl AnnounceRun {
 				},
 				// The chain must not be forwarded (reflected, or full): retract
 				// whatever the peer holds.
-				None => self.retract(stream, pattern, &absolute.as_path())?,
+				None => self.retract(stream, pattern, &absolute)?,
 			}
 		}
 	}
