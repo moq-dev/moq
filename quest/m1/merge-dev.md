@@ -50,7 +50,6 @@ additive quest that builds on dev-only code start on main afterwards from
 - [m0](/quest/m0/README.md) - every release blocker lands or is punted before the merge
 - [External API proof](/quest/m1/api-release-proof.md) - the packaged consumer fixture and explicit fix/deferral decisions must be recorded before merge
 - [Monotonic timeline](/quest/m1/monotonic-timeline.md) - so a shed marker still jumps the playhead on a timestamp hole (#3291)
-- [Advertise](/quest/m1/wildcard-advertise.md) - so `dynamic(pattern, route)` can advertise non-prefix patterns before the announce API is published
 
 ## Closes
 

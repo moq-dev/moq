@@ -95,6 +95,4 @@ Tests, at the process level with real sessions rather than an in-process stand-i
 - A wildcard retracted mid-serve does not disturb the subscription already
   running.
 
-## Required
 
-- [Advertise](/quest/m1/wildcard-advertise.md)

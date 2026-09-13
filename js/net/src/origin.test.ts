@@ -906,11 +906,14 @@ test("a handle serves a request under live/**", async () => {
 	origin.close();
 });
 
-test("a non-prefix pattern is refused", () => {
+test("a non-prefix pattern is advertised", async () => {
 	const origin = new Producer();
-	expect(() => origin.dynamic("live/*")).toThrow(/not a prefix/);
-	expect(() => origin.dynamic("live")).toThrow(/not a prefix/);
-	expect(() => origin.dynamic("**/x")).toThrow(/not a prefix/);
+	const handle = origin.dynamic("live/*");
+	expect(await origin.consume().announced().next()).toMatchObject({
+		prefix: Path.from("live/*"),
+		active: true,
+	});
+	handle.close();
 	origin.close();
 });
 

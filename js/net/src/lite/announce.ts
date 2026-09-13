@@ -1,7 +1,7 @@
 import { ProtocolViolation } from "../error.ts";
 import { type Cost, type Hop, HopSchema, MAX_HOPS, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
-import type { Reader, Writer } from "../stream.ts";
+import { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import { hasAnnounceId, hasAnnounceOk, hasExcludeHop, hasRouteCost, Version } from "./version.ts";
 
@@ -16,6 +16,12 @@ const STATUS_RESTART = 2;
 const ANNOUNCE_START = 0;
 const ANNOUNCE_END = 1;
 const ANNOUNCE_RESTART = 2;
+const ANNOUNCE_PATTERN = 3;
+
+const SEGMENT_LITERAL = 0;
+const SEGMENT_WILDCARD = 1;
+const SEGMENT_GLOBSTAR = 2;
+const SEGMENT_PARTIAL = 3;
 
 export type { Cost };
 
@@ -41,7 +47,15 @@ export type AnnounceBroadcast =
 	| { status: "endedId"; id: bigint }
 	/** Lite06+: atomically replace the announcement with this id (e.g. a new hop
 	 * chain after a relay failover, or a route whose cost moved). The id stays live. */
-	| { status: "restart"; id: bigint; hops: Hop[]; cost?: Cost };
+	| { status: "restart"; id: bigint; hops: Hop[]; cost?: Cost }
+	/** Lite06+: a route over a path pattern, relative to the requested prefix.
+	 * Assigns the next announce id like `active`. The cost is a single value. */
+	| { status: "pattern"; pattern: Path.Pattern; hops: Hop[]; cost: bigint }
+	/** Lite06+: ANNOUNCE_PATTERN whose segments included an unknown kind. Track
+	 * the id; do not select or forward. */
+	| { status: "ignored"; hops: Hop[]; cost: bigint }
+	/** An unknown lite-06+ announce type, skipped by length. Does not assign an id. */
+	| { status: "skipped" };
 
 // Both wire rules on a hop chain, applied to what we send and to what we receive: a
 // chain that revisits a hop looped, so neither forwarding it nor subscribing through it
@@ -139,9 +153,17 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 			await encodeHops(w, version, msg.hops);
 			await encodeRouteCost(w, version, msg.cost);
 			break;
+		case "pattern":
+			await encodePattern(w, msg.pattern);
+			await encodeHops(w, version, msg.hops);
+			await w.u62(msg.cost);
+			break;
 		case "ended":
 			// The pre-lite-06 path-form retraction has no place on lite-06.
 			throw new Error("ended-by-path not supported for this version");
+		case "ignored":
+		case "skipped":
+			throw new Error("decode-only announce type cannot be encoded");
 	}
 }
 
@@ -154,8 +176,13 @@ function announce06Type(msg: AnnounceBroadcast): number {
 			return ANNOUNCE_END;
 		case "restart":
 			return ANNOUNCE_RESTART;
+		case "pattern":
+			return ANNOUNCE_PATTERN;
 		case "ended":
 			throw new Error("ended-by-path not supported for this version");
+		case "ignored":
+		case "skipped":
+			throw new Error("decode-only announce type cannot be encoded");
 	}
 }
 
@@ -173,8 +200,118 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 			const hops = await decodeHops(r, version);
 			return { status: "restart", id, hops, cost: await decodeRouteCost(r, version) };
 		}
+		case ANNOUNCE_PATTERN: {
+			const pattern = await decodePattern(r);
+			const hops = await decodeHops(r, version);
+			const cost = await r.u62();
+			if (!pattern) return { status: "ignored", hops, cost };
+			return { status: "pattern", pattern, hops, cost };
+		}
 		default:
-			throw new Error(`unknown announce message type: ${typ}`);
+			// Skip the length-prefixed body so an earlier Lite06 build negotiating
+			// the same ALPN does not kill the announce stream.
+			await r.readAll();
+			return { status: "skipped" };
+	}
+}
+
+async function encodePattern(w: Writer, pattern: Path.Pattern) {
+	await w.u53(pattern.segments.length);
+	for (const segment of pattern.segments) {
+		await encodeSegment(w, segment);
+	}
+}
+
+async function encodeSegment(w: Writer, segment: Path.Segment) {
+	let kind: number;
+	let value: Uint8Array;
+	switch (segment.kind) {
+		case "literal":
+			kind = SEGMENT_LITERAL;
+			value = new TextEncoder().encode(segment.value);
+			break;
+		case "wildcard":
+			kind = SEGMENT_WILDCARD;
+			value = new Uint8Array();
+			break;
+		case "globstar":
+			kind = SEGMENT_GLOBSTAR;
+			value = new Uint8Array();
+			break;
+		case "partial": {
+			kind = SEGMENT_PARTIAL;
+			const prefix = new TextEncoder().encode(segment.prefix);
+			const suffix = new TextEncoder().encode(segment.suffix);
+			const scratch: Uint8Array[] = [];
+			const writer = new Writer(
+				new WritableStream<Uint8Array>({ write: (chunk) => void scratch.push(new Uint8Array(chunk)) }),
+			);
+			await writer.u53(prefix.byteLength);
+			if (prefix.byteLength > 0) await writer.write(prefix);
+			if (suffix.byteLength > 0) await writer.write(suffix);
+			writer.close();
+			await writer.closed;
+			const total = scratch.reduce((sum, c) => sum + c.byteLength, 0);
+			value = new Uint8Array(total);
+			let offset = 0;
+			for (const chunk of scratch) {
+				value.set(chunk, offset);
+				offset += chunk.byteLength;
+			}
+			break;
+		}
+	}
+	await w.u53(kind);
+	await w.u53(value.byteLength);
+	if (value.byteLength > 0) await w.write(value);
+}
+
+async function decodePattern(r: Reader): Promise<Path.Pattern | undefined> {
+	const count = await r.u53();
+	if (count > Path.MAX_PARTS) throw new Error("pattern exceeds path limit");
+	const segments: Path.Segment[] = [];
+	let ignored = false;
+	for (let i = 0; i < count; i++) {
+		const segment = await decodeSegment(r);
+		if (!segment) ignored = true;
+		else if (!ignored) segments.push(segment);
+	}
+	if (ignored) return undefined;
+	return Path.Pattern.from(segments);
+}
+
+async function decodeSegment(r: Reader): Promise<Path.Segment | undefined> {
+	const kind = await r.u53();
+	const size = await r.u53();
+	const value = size > 0 ? await r.read(size) : new Uint8Array();
+	switch (kind) {
+		case SEGMENT_LITERAL: {
+			const literal = new TextDecoder().decode(value);
+			if (!literal || literal.includes("/") || literal.includes("*")) {
+				throw new Error("invalid literal segment");
+			}
+			return { kind: "literal", value: literal };
+		}
+		case SEGMENT_WILDCARD:
+			if (value.byteLength > 0) throw new Error("wildcard value must be empty");
+			return { kind: "wildcard" };
+		case SEGMENT_GLOBSTAR:
+			if (value.byteLength > 0) throw new Error("globstar value must be empty");
+			return { kind: "globstar" };
+		case SEGMENT_PARTIAL: {
+			const inner = new Reader(undefined, value);
+			const prefixLen = await inner.u53();
+			const prefixBytes = prefixLen > 0 ? await inner.read(prefixLen) : new Uint8Array();
+			const suffixBytes = await inner.readAll();
+			const prefix = new TextDecoder().decode(prefixBytes);
+			const suffix = new TextDecoder().decode(suffixBytes);
+			if ((!prefix && !suffix) || /[*/]/.test(prefix) || /[*/]/.test(suffix)) {
+				throw new Error("invalid partial segment");
+			}
+			return { kind: "partial", prefix, suffix };
+		}
+		default:
+			return undefined;
 	}
 }
 
@@ -193,7 +330,10 @@ async function encodeLegacyBody(w: Writer, msg: AnnounceBroadcast, version: Vers
 			break;
 		case "endedId":
 		case "restart":
-			// The id-referencing forms only exist on lite-06+.
+		case "pattern":
+		case "ignored":
+		case "skipped":
+			// The id-referencing and pattern forms only exist on lite-06+.
 			throw new Error("announce ids not supported for this version");
 	}
 }

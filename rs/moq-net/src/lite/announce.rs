@@ -1,7 +1,7 @@
 use bytes::{Buf, BufMut};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::{Hop, Hops, Path, coding::*, origin::Cost};
+use crate::{Hop, Hops, Path, Pattern, coding::*, origin::Cost, path::Segment};
 
 use super::{Message, Version, message::decode_size};
 
@@ -11,6 +11,12 @@ use super::{Message, Version, message::decode_size};
 const ANNOUNCE_START: u64 = 0;
 const ANNOUNCE_END: u64 = 1;
 const ANNOUNCE_RESTART: u64 = 2;
+const ANNOUNCE_PATTERN: u64 = 3;
+
+const SEGMENT_LITERAL: u64 = 0;
+const SEGMENT_WILDCARD: u64 = 1;
+const SEGMENT_GLOBSTAR: u64 = 2;
+const SEGMENT_PARTIAL: u64 = 3;
 
 /// Whether the negotiated version carries restart (REANNOUNCE) semantics. On lite-05 a restart
 /// travels as a duplicate ANNOUNCE (a second `active` for an already-announced path); on lite-06+
@@ -27,13 +33,14 @@ pub fn restart_supported(version: Version) -> bool {
 
 /// An announcement on the Announce Stream, advertising or retracting a broadcast.
 ///
-/// On lite-06+ these are three independently-typed messages (`ANNOUNCE_START`,
-/// `ANNOUNCE_END`, `ANNOUNCE_RESTART`), each framed as `Type | Length | Body` like
-/// the subscribe stream's responses. Each `Active` (ANNOUNCE_START) implicitly assigns
-/// the next announce id (a per-stream ordinal starting at 0); `EndedId` (ANNOUNCE_END)
-/// and `Restart` (ANNOUNCE_RESTART) reference that id instead of repeating the path.
-/// Older versions send a single `ANNOUNCE_BROADCAST` message that retracts by path
-/// (`Ended`).
+/// On lite-06+ these are independently-typed messages (`ANNOUNCE_START`,
+/// `ANNOUNCE_END`, `ANNOUNCE_RESTART`, `ANNOUNCE_PATTERN`), each framed as
+/// `Type | Length | Body` like the subscribe stream's responses. Each `Active`
+/// (ANNOUNCE_START) or `Pattern` (ANNOUNCE_PATTERN) implicitly assigns the next
+/// announce id (a per-stream ordinal starting at 0); `EndedId` (ANNOUNCE_END)
+/// and `Restart` (ANNOUNCE_RESTART) reference that id instead of repeating the
+/// path or pattern. Older versions send a single `ANNOUNCE_BROADCAST` message
+/// that retracts by path (`Ended`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AnnounceBroadcast<'a> {
 	/// ANNOUNCE_START (lite-06) / active (older): a broadcast is now available.
@@ -51,6 +58,17 @@ pub enum AnnounceBroadcast<'a> {
 	///
 	/// Only ever received: we advertise a replacement as an `EndedId` + `Active` pair.
 	Restart { id: u64, hops: Hops, cost: Cost },
+	/// ANNOUNCE_PATTERN (lite-06+): a route over a path pattern, relative to the
+	/// requested prefix. Assigns the next announce id like [`Self::Active`]. The
+	/// cost is a single value: a pattern is never warm.
+	Pattern { pattern: Pattern, hops: Hops, cost: u64 },
+	/// ANNOUNCE_PATTERN whose segments included an unknown kind. The advertisement
+	/// is not selected or forwarded, but it still assigned an announce id so a
+	/// later END or UPDATE is not a violation.
+	Ignored { hops: Hops, cost: u64 },
+	/// An unknown lite-06+ announce type. The length-prefixed body was skipped so
+	/// the stream stays up; it does not assign an announce id.
+	Skipped,
 }
 
 impl Encode<Version> for Cost {
@@ -99,8 +117,16 @@ impl Encode<Version> for AnnounceBroadcast<'_> {
 					cost.encode(&mut body, version)?;
 					ANNOUNCE_RESTART
 				}
+				Self::Pattern { pattern, hops, cost } => {
+					encode_pattern(&mut body, version, pattern)?;
+					hops.encode(&mut body, version)?;
+					cost.encode(&mut body, version)?;
+					ANNOUNCE_PATTERN
+				}
 				// The pre-lite-06 path-form retraction has no place on lite-06.
 				Self::Ended { .. } => return Err(EncodeError::Version),
+				// Decode-only: an unknown type or unknown segment kind is never sent.
+				Self::Ignored { .. } | Self::Skipped => return Err(EncodeError::Unsupported),
 			};
 			typ.encode(w, version)?;
 			(body.len() as u64).encode(w, version)?;
@@ -123,8 +149,14 @@ impl Encode<Version> for AnnounceBroadcast<'_> {
 				suffix.encode(&mut body, version)?;
 				encode_hops(&mut body, version, hops)?;
 			}
-			// The id-referencing forms only exist on lite-06+.
-			Self::EndedId { .. } | Self::Restart { .. } => return Err(EncodeError::Version),
+			// The id-referencing and pattern forms only exist on lite-06+.
+			Self::EndedId { .. }
+			| Self::Restart { .. }
+			| Self::Pattern { .. }
+			| Self::Ignored { .. }
+			| Self::Skipped => {
+				return Err(EncodeError::Version);
+			}
 		}
 		(body.len() as u64).encode(w, version)?;
 		w.put_slice(&body);
@@ -156,7 +188,22 @@ impl Decode<Version> for AnnounceBroadcast<'_> {
 					hops: Hops::decode(&mut body, version)?,
 					cost: Cost::decode(&mut body, version)?,
 				},
-				_ => return Err(DecodeError::InvalidMessage(typ)),
+				ANNOUNCE_PATTERN => {
+					let pattern = decode_pattern(&mut body, version)?;
+					let hops = Hops::decode(&mut body, version)?;
+					let cost = u64::decode(&mut body, version)?;
+					match pattern {
+						Some(pattern) => Self::Pattern { pattern, hops, cost },
+						None => Self::Ignored { hops, cost },
+					}
+				}
+				// Unknown types are skipped by length so an earlier Lite06 build
+				// negotiating the same ALPN does not kill the announce stream.
+				_ => {
+					let remaining = body.remaining();
+					bytes::Buf::advance(&mut body, remaining);
+					Self::Skipped
+				}
 			};
 			if body.remaining() > 0 {
 				return Err(DecodeError::Long);
@@ -219,6 +266,116 @@ impl AnnounceBroadcast<'_> {
 			AnnounceStatus::Restart => return Err(DecodeError::InvalidValue),
 		})
 	}
+}
+
+fn encode_pattern<W: BufMut>(w: &mut W, version: Version, pattern: &Pattern) -> Result<(), EncodeError> {
+	(pattern.segments().len() as u64).encode(w, version)?;
+	for segment in pattern.segments() {
+		encode_segment(w, version, segment)?;
+	}
+	Ok(())
+}
+
+fn encode_segment<W: BufMut>(w: &mut W, version: Version, segment: &Segment) -> Result<(), EncodeError> {
+	let (kind, value) = match segment {
+		Segment::Literal(literal) => (SEGMENT_LITERAL, literal.as_bytes().to_vec()),
+		Segment::Wildcard => (SEGMENT_WILDCARD, Vec::new()),
+		Segment::Globstar => (SEGMENT_GLOBSTAR, Vec::new()),
+		Segment::Partial { prefix, suffix } => {
+			let mut value = Vec::new();
+			(prefix.len() as u64).encode(&mut value, version)?;
+			value.extend_from_slice(prefix.as_bytes());
+			value.extend_from_slice(suffix.as_bytes());
+			(SEGMENT_PARTIAL, value)
+		}
+		_ => return Err(EncodeError::Unsupported),
+	};
+	kind.encode(w, version)?;
+	(value.len() as u64).encode(w, version)?;
+	w.put_slice(&value);
+	Ok(())
+}
+
+/// Decode the typed segments of an ANNOUNCE_PATTERN. `None` means an unknown
+/// kind was skipped by length and the advertisement must be ignored.
+fn decode_pattern<R: Buf>(r: &mut R, version: Version) -> Result<Option<Pattern>, DecodeError> {
+	let count = u64::decode(r, version)?;
+	if count > Path::MAX_PARTS as u64 {
+		return Err(DecodeError::BoundsExceeded);
+	}
+	let mut segments = Vec::with_capacity(count as usize);
+	let mut ignored = false;
+	for _ in 0..count {
+		match decode_segment(r, version)? {
+			Some(segment) => {
+				if !ignored {
+					segments.push(segment);
+				}
+			}
+			None => ignored = true,
+		}
+	}
+	if ignored {
+		return Ok(None);
+	}
+	Pattern::new(segments).map(Some).map_err(|_| DecodeError::InvalidValue)
+}
+
+fn decode_segment<R: Buf>(r: &mut R, version: Version) -> Result<Option<Segment>, DecodeError> {
+	let kind = u64::decode(r, version)?;
+	let size = decode_size(r, version)?;
+	if r.remaining() < size {
+		return Err(DecodeError::Short);
+	}
+	let mut value = r.take(size);
+	let segment = match kind {
+		SEGMENT_LITERAL => {
+			let bytes = value.copy_to_bytes(value.remaining());
+			let literal = std::str::from_utf8(&bytes).map_err(|_| DecodeError::InvalidValue)?;
+			if literal.is_empty() || literal.contains(['/', '*']) {
+				return Err(DecodeError::InvalidValue);
+			}
+			Some(Segment::Literal(literal.to_string()))
+		}
+		SEGMENT_WILDCARD => {
+			if value.remaining() > 0 {
+				return Err(DecodeError::InvalidValue);
+			}
+			Some(Segment::Wildcard)
+		}
+		SEGMENT_GLOBSTAR => {
+			if value.remaining() > 0 {
+				return Err(DecodeError::InvalidValue);
+			}
+			Some(Segment::Globstar)
+		}
+		SEGMENT_PARTIAL => {
+			let prefix_len = usize::decode(&mut value, version)?;
+			if value.remaining() < prefix_len {
+				return Err(DecodeError::InvalidValue);
+			}
+			let prefix_bytes = value.copy_to_bytes(prefix_len);
+			let suffix_bytes = value.copy_to_bytes(value.remaining());
+			let prefix = std::str::from_utf8(&prefix_bytes).map_err(|_| DecodeError::InvalidValue)?;
+			let suffix = std::str::from_utf8(&suffix_bytes).map_err(|_| DecodeError::InvalidValue)?;
+			if (prefix.is_empty() && suffix.is_empty()) || prefix.contains(['/', '*']) || suffix.contains(['/', '*']) {
+				return Err(DecodeError::InvalidValue);
+			}
+			Some(Segment::Partial {
+				prefix: prefix.to_string(),
+				suffix: suffix.to_string(),
+			})
+		}
+		_ => {
+			let remaining = value.remaining();
+			bytes::Buf::advance(&mut value, remaining);
+			None
+		}
+	};
+	if value.remaining() > 0 {
+		return Err(DecodeError::Long);
+	}
+	Ok(segment)
 }
 
 fn encode_hops<W: bytes::BufMut>(w: &mut W, version: Version, hops: &Hops) -> Result<(), EncodeError> {
@@ -470,6 +627,9 @@ mod tests {
 			},
 			AnnounceBroadcast::EndedId { id } => AnnounceBroadcast::EndedId { id },
 			AnnounceBroadcast::Restart { id, hops, cost } => AnnounceBroadcast::Restart { id, hops, cost },
+			AnnounceBroadcast::Pattern { pattern, hops, cost } => AnnounceBroadcast::Pattern { pattern, hops, cost },
+			AnnounceBroadcast::Ignored { hops, cost } => AnnounceBroadcast::Ignored { hops, cost },
+			AnnounceBroadcast::Skipped => AnnounceBroadcast::Skipped,
 		}
 	}
 
@@ -572,6 +732,107 @@ mod tests {
 			.charged(1)
 			.encode(&mut buf, Version::Lite06Wip)
 			.expect("a charged cost must stay encodable");
+	}
+
+	#[test]
+	fn announce_pattern_round_trip_on_lite06() {
+		let mut hops = Hops::new();
+		hops.push(Hop::new(7).unwrap()).unwrap();
+
+		for text in ["live/*", "**/a", "foo*/**", "*.hang", ""] {
+			let msg = AnnounceBroadcast::Pattern {
+				pattern: text.parse().unwrap(),
+				hops: hops.clone(),
+				cost: 9,
+			};
+			assert_eq!(broadcast_round_trip(&msg, Version::Lite06Wip), msg, "{text}");
+		}
+	}
+
+	#[test]
+	fn announce_pattern_is_gated_to_lite06() {
+		let msg = AnnounceBroadcast::Pattern {
+			pattern: "live/*".parse().unwrap(),
+			hops: Hops::new(),
+			cost: 1,
+		};
+		let mut buf = bytes::BytesMut::new();
+		assert!(matches!(
+			msg.encode(&mut buf, Version::Lite05),
+			Err(EncodeError::Version)
+		));
+	}
+
+	#[test]
+	fn unknown_announce_type_is_skipped() {
+		let mut body = Vec::new();
+		Path::new("room/cam").encode(&mut body, Version::Lite06Wip).unwrap();
+		Hops::new().encode(&mut body, Version::Lite06Wip).unwrap();
+		Cost::default().encode(&mut body, Version::Lite06Wip).unwrap();
+
+		let mut buf = bytes::BytesMut::new();
+		4u64.encode(&mut buf, Version::Lite06Wip).unwrap();
+		(body.len() as u64).encode(&mut buf, Version::Lite06Wip).unwrap();
+		buf.extend_from_slice(&body);
+
+		let mut slice = &buf[..];
+		let got =
+			AnnounceBroadcast::decode(&mut slice, Version::Lite06Wip).expect("unknown type must not kill the stream");
+		assert!(slice.is_empty());
+		assert_eq!(got, AnnounceBroadcast::Skipped);
+	}
+
+	#[test]
+	fn unknown_segment_kind_is_ignored() {
+		let value = b"extra";
+		let mut segments = Vec::new();
+		1u64.encode(&mut segments, Version::Lite06Wip).unwrap();
+		99u64.encode(&mut segments, Version::Lite06Wip).unwrap();
+		(value.len() as u64).encode(&mut segments, Version::Lite06Wip).unwrap();
+		segments.extend_from_slice(value);
+
+		let mut body = segments;
+		Hops::new().encode(&mut body, Version::Lite06Wip).unwrap();
+		1u64.encode(&mut body, Version::Lite06Wip).unwrap();
+
+		let mut buf = bytes::BytesMut::new();
+		ANNOUNCE_PATTERN.encode(&mut buf, Version::Lite06Wip).unwrap();
+		(body.len() as u64).encode(&mut buf, Version::Lite06Wip).unwrap();
+		buf.extend_from_slice(&body);
+
+		let mut slice = &buf[..];
+		let got = AnnounceBroadcast::decode(&mut slice, Version::Lite06Wip).expect("unknown kind is not a violation");
+		assert!(slice.is_empty());
+		assert_eq!(
+			got,
+			AnnounceBroadcast::Ignored {
+				hops: Hops::new(),
+				cost: 1
+			}
+		);
+	}
+
+	#[test]
+	fn empty_literal_segment_is_a_violation() {
+		let mut segments = Vec::new();
+		1u64.encode(&mut segments, Version::Lite06Wip).unwrap();
+		SEGMENT_LITERAL.encode(&mut segments, Version::Lite06Wip).unwrap();
+		0u64.encode(&mut segments, Version::Lite06Wip).unwrap();
+
+		let mut body = segments;
+		Hops::new().encode(&mut body, Version::Lite06Wip).unwrap();
+		0u64.encode(&mut body, Version::Lite06Wip).unwrap();
+
+		let mut buf = bytes::BytesMut::new();
+		ANNOUNCE_PATTERN.encode(&mut buf, Version::Lite06Wip).unwrap();
+		(body.len() as u64).encode(&mut buf, Version::Lite06Wip).unwrap();
+		buf.extend_from_slice(&body);
+
+		let mut slice = &buf[..];
+		assert!(matches!(
+			AnnounceBroadcast::decode(&mut slice, Version::Lite06Wip),
+			Err(DecodeError::InvalidValue)
+		));
 	}
 
 	// An ANNOUNCE_END message on lite-06 is tiny: type byte, size prefix, id varint.

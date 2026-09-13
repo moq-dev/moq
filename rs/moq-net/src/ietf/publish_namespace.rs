@@ -21,6 +21,8 @@ pub struct PublishNamespace<'a> {
 	/// negotiated the extension and `None` on one that did not, which is what decides
 	/// whether they appear on the wire at all.
 	pub cluster: Option<cluster::Advert>,
+	/// A non-prefix pattern, present only when NAMESPACE_PATTERNS was negotiated.
+	pub pattern: Option<crate::Pattern>,
 }
 
 impl PublishNamespace<'_> {
@@ -30,18 +32,24 @@ impl PublishNamespace<'_> {
 	/// The negotiation is session state rather than anything in the message, so the
 	/// caller supplies it. A negotiated session that omits HOP_PATH is a protocol
 	/// violation, which surfaces here as [`DecodeError::InvalidValue`].
-	pub fn decode_body<R: bytes::Buf>(r: &mut R, version: Version, negotiated: bool) -> Result<Self, DecodeError> {
+	pub fn decode_body<R: bytes::Buf>(
+		r: &mut R,
+		version: Version,
+		cluster: bool,
+		patterns: bool,
+	) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
 		if version == Version::Draft17 {
 			let _required_request_id_delta = u64::decode(r, version)?;
 		}
 		let track_namespace = decode_namespace(r, version)?;
-		let cluster = decode_cluster_params(r, version, negotiated)?;
+		let (cluster, pattern) = decode_advert_params(r, version, cluster, patterns, &track_namespace)?;
 
 		Ok(Self {
 			request_id,
 			track_namespace,
 			cluster,
+			pattern,
 		})
 	}
 }
@@ -55,58 +63,98 @@ impl Message for PublishNamespace<'_> {
 			0u64.encode(w, version)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
 		}
 		encode_namespace(w, &self.track_namespace, version)?;
-		encode_cluster_params(w, version, self.cluster.as_ref())
+		encode_advert_params(w, version, self.cluster.as_ref(), self.pattern.as_ref())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		Self::decode_body(r, version, false)
+		Self::decode_body(r, version, false, false)
 	}
 }
 
 /// Write the Parameters field of an advertisement.
 ///
-/// On a session that negotiated the MoQ Cluster extension every advertisement carries
-/// HOP_PATH; ROUTE_COST is optional and absent means 0, so a free path sends nothing.
-pub(super) fn encode_cluster_params<W: bytes::BufMut>(
+/// Present when clustering or patterns were negotiated. HOP_PATH is required on a
+/// clustered session; NAMESPACE_PATTERN is present only for a non-prefix pattern.
+pub(super) fn encode_advert_params<W: bytes::BufMut>(
 	w: &mut W,
 	version: Version,
 	advert: Option<&cluster::Advert>,
+	pattern: Option<&crate::Pattern>,
 ) -> Result<(), EncodeError> {
-	match advert {
-		Some(advert) => {
-			let cost = (advert.cost != 0).then_some(advert.cost);
-			encode_params!(w, version,
-				cluster::HOP_PATH => advert.hops,
-				cluster::ROUTE_COST => cost,
-			);
+	let hops = advert.map(|advert| advert.hops.clone());
+	let cost = advert.and_then(|advert| (advert.cost != 0).then_some(advert.cost));
+	let kinds = match pattern {
+		Some(pattern) if pattern.as_prefix().is_none() => {
+			Some(super::pattern::Kinds(super::pattern::encode_kinds(pattern, version)?))
 		}
-		None => encode_params!(w, version,),
-	}
+		_ => None,
+	};
+	encode_params!(w, version,
+		cluster::HOP_PATH => hops,
+		cluster::ROUTE_COST => cost,
+		super::pattern::NAMESPACE_PATTERN => kinds,
+	);
 	Ok(())
 }
 
-/// Read the Parameters field of an advertisement. See [`encode_cluster_params`].
-pub(super) fn decode_cluster_params<R: bytes::Buf>(
+/// Read the Parameters field of an advertisement. See [`encode_advert_params`].
+pub(super) fn decode_advert_params<R: bytes::Buf>(
 	r: &mut R,
 	version: Version,
-	negotiated: bool,
-) -> Result<Option<cluster::Advert>, DecodeError> {
-	if !negotiated {
-		// An endpoint must not append these on a session that did not negotiate the
-		// extension, and we know no other parameter here, so any is a violation.
+	cluster: bool,
+	patterns: bool,
+	namespace: &Path<'_>,
+) -> Result<(Option<cluster::Advert>, Option<crate::Pattern>), DecodeError> {
+	if !cluster && !patterns {
 		decode_params!(r, version,);
-		return Ok(None);
+		return Ok((None, None));
 	}
 
 	decode_params!(r, version,
 		cluster::HOP_PATH => hops: Option<cluster::HopPath>,
 		cluster::ROUTE_COST => cost: Option<u64>,
+		super::pattern::NAMESPACE_PATTERN => kinds: Option<super::pattern::Kinds>,
 	);
 
-	Ok(Some(cluster::Advert {
-		hops: hops.ok_or(DecodeError::InvalidValue)?,
-		cost: cost.unwrap_or(0),
-	}))
+	let advert = match cluster {
+		true => Some(cluster::Advert {
+			hops: hops.ok_or(DecodeError::InvalidValue)?,
+			cost: cost.unwrap_or(0),
+		}),
+		false => None,
+	};
+	let pattern = match kinds {
+		Some(kinds) if patterns => {
+			let fields: Vec<String> = if namespace.as_str().is_empty() {
+				Vec::new()
+			} else {
+				namespace.as_str().split('/').map(str::to_string).collect()
+			};
+			super::pattern::decode_pattern(&kinds.0, &fields, version)?
+		}
+		Some(_) => return Err(DecodeError::InvalidValue),
+		None => None,
+	};
+	Ok((advert, pattern))
+}
+
+/// Compatibility wrapper for call sites that only care about clustering.
+pub(super) fn encode_cluster_params<W: bytes::BufMut>(
+	w: &mut W,
+	version: Version,
+	advert: Option<&cluster::Advert>,
+) -> Result<(), EncodeError> {
+	encode_advert_params(w, version, advert, None)
+}
+
+/// Compatibility wrapper for call sites that only care about clustering.
+pub(super) fn decode_cluster_params<R: bytes::Buf>(
+	r: &mut R,
+	version: Version,
+	negotiated: bool,
+) -> Result<Option<cluster::Advert>, DecodeError> {
+	let (advert, _) = decode_advert_params(r, version, negotiated, false, &Path::new(""))?;
+	Ok(advert)
 }
 
 /// PublishNamespaceOk message (0x07)
@@ -286,6 +334,8 @@ mod tests {
 			request_id: RequestId(1),
 			track_namespace: Path::new("test/broadcast"),
 			cluster: None,
+
+			pattern: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -375,6 +425,8 @@ mod tests {
 			request_id: RequestId(5),
 			track_namespace: Path::new("v17/broadcast"),
 			cluster: None,
+
+			pattern: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -390,6 +442,8 @@ mod tests {
 			request_id: RequestId(5),
 			track_namespace: Path::new("v18/broadcast"),
 			cluster: None,
+
+			pattern: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);

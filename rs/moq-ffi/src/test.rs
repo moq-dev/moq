@@ -1965,16 +1965,11 @@ async fn dynamic_serves_a_request_under_a_prefix() {
 }
 
 #[test]
-fn dynamic_refuses_a_non_prefix_pattern() {
+fn dynamic_accepts_a_non_prefix_pattern() {
 	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
-	let err = origin
+	origin
 		.dynamic("live/*".into(), MoqRoute::default())
-		.err()
-		.expect("a non-prefix pattern is refused");
-	assert!(
-		matches!(err, MoqError::Unsupported | MoqError::InvalidPattern(_)),
-		"unexpected error: {err:?}"
-	);
+		.expect("a non-prefix pattern is advertised");
 }
 
 /// Tearing the origin down ends every handler with `Closed`. A parked request
