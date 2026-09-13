@@ -72,5 +72,3 @@ previous list. Update `doc/bin/relay/cluster.md` and
 ## Required
 
 - [Merge dev](/quest/m1/merge-dev.md) - the required M1 APIs must be available on main before this implementation starts
-
-- [Typed cluster peer configuration](/quest/m1/api-cluster-peer-config.md) - supplies the public type and functional symmetric policy

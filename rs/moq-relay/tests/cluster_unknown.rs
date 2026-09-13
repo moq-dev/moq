@@ -5,7 +5,7 @@
 use std::{net::TcpListener, time::Duration};
 
 use moq_net::Hop;
-use moq_relay::{Config, PublicConfig, Relay};
+use moq_relay::{Config, Peer, PublicConfig, Relay};
 use url::Url;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -21,7 +21,7 @@ fn free_tcp_port() -> u16 {
 
 async fn spawn_relay(
 	id: u64,
-	connect: Vec<String>,
+	connect: Vec<Peer>,
 	cluster_version: Option<moq_net::Version>,
 ) -> (u16, tokio::task::JoinHandle<()>) {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -202,14 +202,27 @@ async fn watch_announces(port: u16, window: Duration) -> Vec<(String, bool)> {
 
 async fn assert_unknown_publisher_stays_announced(cluster_version: Option<moq_net::Version>, expect_frame: bool) {
 	let (a_port, a) = spawn_relay(11, vec![], cluster_version).await;
-	let (b_port, b) = spawn_relay(12, vec![format!("tcp://127.0.0.1:{a_port}")], cluster_version).await;
-	let (c_port, c) = spawn_relay(
-		13,
-		vec![format!("tcp://127.0.0.1:{a_port}"), format!("tcp://127.0.0.1:{b_port}")],
+	let (b_port, b) = spawn_relay(
+		12,
+		vec![Peer::new(format!("tcp://127.0.0.1:{a_port}"))],
 		cluster_version,
 	)
 	.await;
-	let (d_port, d) = spawn_relay(14, vec![format!("tcp://127.0.0.1:{c_port}")], cluster_version).await;
+	let (c_port, c) = spawn_relay(
+		13,
+		vec![
+			Peer::new(format!("tcp://127.0.0.1:{a_port}")),
+			Peer::new(format!("tcp://127.0.0.1:{b_port}")),
+		],
+		cluster_version,
+	)
+	.await;
+	let (d_port, d) = spawn_relay(
+		14,
+		vec![Peer::new(format!("tcp://127.0.0.1:{c_port}"))],
+		cluster_version,
+	)
+	.await;
 
 	tokio::time::sleep(Duration::from_millis(500)).await;
 	let watcher = tokio::spawn(watch_announces(d_port, Duration::from_secs(8)));
@@ -263,14 +276,17 @@ async fn every_ingest_version_crosses_a_redundant_mesh() {
 		"moq-transport-17",
 	] {
 		let (a_port, a) = spawn_relay(11, vec![], None).await;
-		let (b_port, b) = spawn_relay(12, vec![format!("tcp://127.0.0.1:{a_port}")], None).await;
+		let (b_port, b) = spawn_relay(12, vec![Peer::new(format!("tcp://127.0.0.1:{a_port}"))], None).await;
 		let (c_port, c) = spawn_relay(
 			13,
-			vec![format!("tcp://127.0.0.1:{a_port}"), format!("tcp://127.0.0.1:{b_port}")],
+			vec![
+				Peer::new(format!("tcp://127.0.0.1:{a_port}")),
+				Peer::new(format!("tcp://127.0.0.1:{b_port}")),
+			],
 			None,
 		)
 		.await;
-		let (d_port, d) = spawn_relay(14, vec![format!("tcp://127.0.0.1:{c_port}")], None).await;
+		let (d_port, d) = spawn_relay(14, vec![Peer::new(format!("tcp://127.0.0.1:{c_port}"))], None).await;
 		tokio::time::sleep(Duration::from_millis(500)).await;
 
 		let _publisher = publish_version(a_port, version).await;
@@ -296,14 +312,17 @@ async fn every_ingest_version_crosses_a_redundant_mesh() {
 #[tokio::test]
 async fn unknown_publisher_republish_stays_routable() {
 	let (a_port, a) = spawn_relay(11, vec![], None).await;
-	let (b_port, b) = spawn_relay(12, vec![format!("tcp://127.0.0.1:{a_port}")], None).await;
+	let (b_port, b) = spawn_relay(12, vec![Peer::new(format!("tcp://127.0.0.1:{a_port}"))], None).await;
 	let (c_port, c) = spawn_relay(
 		13,
-		vec![format!("tcp://127.0.0.1:{a_port}"), format!("tcp://127.0.0.1:{b_port}")],
+		vec![
+			Peer::new(format!("tcp://127.0.0.1:{a_port}")),
+			Peer::new(format!("tcp://127.0.0.1:{b_port}")),
+		],
 		None,
 	)
 	.await;
-	let (d_port, d) = spawn_relay(14, vec![format!("tcp://127.0.0.1:{c_port}")], None).await;
+	let (d_port, d) = spawn_relay(14, vec![Peer::new(format!("tcp://127.0.0.1:{c_port}"))], None).await;
 	tokio::time::sleep(Duration::from_millis(500)).await;
 
 	for round in 0..3 {
@@ -351,14 +370,17 @@ async fn unknown_publisher_does_not_flap_across_an_ietf_cluster_triangle() {
 async fn unknown_publisher_frames_over_an_ietf_cluster() {
 	let version: moq_net::Version = "moq-transport-19".parse().expect("parse version");
 	let (a_port, a) = spawn_relay(11, vec![], Some(version)).await;
-	let (b_port, b) = spawn_relay(12, vec![format!("tcp://127.0.0.1:{a_port}")], Some(version)).await;
+	let (b_port, b) = spawn_relay(12, vec![Peer::new(format!("tcp://127.0.0.1:{a_port}"))], Some(version)).await;
 	let (c_port, c) = spawn_relay(
 		13,
-		vec![format!("tcp://127.0.0.1:{a_port}"), format!("tcp://127.0.0.1:{b_port}")],
+		vec![
+			Peer::new(format!("tcp://127.0.0.1:{a_port}")),
+			Peer::new(format!("tcp://127.0.0.1:{b_port}")),
+		],
 		Some(version),
 	)
 	.await;
-	let (d_port, d) = spawn_relay(14, vec![format!("tcp://127.0.0.1:{c_port}")], Some(version)).await;
+	let (d_port, d) = spawn_relay(14, vec![Peer::new(format!("tcp://127.0.0.1:{c_port}"))], Some(version)).await;
 	tokio::time::sleep(Duration::from_millis(500)).await;
 
 	let _publisher = publish_unknown(a_port).await;

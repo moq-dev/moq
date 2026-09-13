@@ -11,7 +11,7 @@ use std::net::TcpListener;
 use std::time::Duration;
 
 use moq_net::Hop;
-use moq_relay::{AuthConfig, Cluster, ClusterConfig, ClusterOptions, Connection, PublicConfig};
+use moq_relay::{AuthConfig, Cluster, ClusterConfig, ClusterOptions, Connection, Peer, PublicConfig};
 use url::Url;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -202,7 +202,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		let client = client_config.init(Default::default()).expect("client init");
 
 		let mut cluster_config = ClusterConfig::default();
-		cluster_config.connect = vec![format!("tcp://127.0.0.1:{port_a}/")];
+		cluster_config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{port_a}/"))];
 		let cluster = Cluster::new(ClusterOptions::new(cluster_config))
 			.expect("cluster init")
 			.with_client(client);
@@ -318,7 +318,7 @@ async fn spawn_relay_with_upstream(
 		.expect("auth init");
 
 	let mut cluster_config = ClusterConfig::default();
-	cluster_config.connect = vec![upstream_url.to_string()];
+	cluster_config.connect = vec![Peer::new(upstream_url)];
 	// Short drain so the test observes teardown quickly.
 
 	let mut client_config = moq_tokio::connect::Config::default();
@@ -671,7 +671,7 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 	let client = client_config.init(Default::default()).expect("client init");
 
 	let mut cluster_config = ClusterConfig::default();
-	cluster_config.connect = vec![format!("tcp://127.0.0.1:{port}/")];
+	cluster_config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{port}/"))];
 	let cluster = Cluster::new(ClusterOptions::new(cluster_config))
 		.expect("cluster init")
 		.with_client(client);

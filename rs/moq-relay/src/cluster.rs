@@ -48,9 +48,167 @@ fn should_dial(self_url: &str, peer: &str) -> bool {
 	peer > self_url
 }
 
+/// One cluster peer to dial, as listed in [`ClusterConfig::connect`] or returned
+/// by a `connect_api` endpoint.
+///
+/// Accepts a bare URL string (the legacy form) or an object with `url` plus
+/// policy: `cost` prices the link, `egress` declares this relay's own price to
+/// the peer, and `token` carries the peer's credential. `egress` defaults to
+/// `cost`; a different effective value is rejected until asymmetric routing
+/// lands. An object `token` behaves exactly like an inline `?jwt=` and is
+/// redacted the same way. Unknown object fields are rejected, as is an object
+/// that sets policy while its `url` still carries `?cost=` or `?jwt=`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Peer {
+	url: String,
+	cost: Option<u64>,
+	egress: Option<u64>,
+	token: Option<String>,
+}
+
+impl Peer {
+	/// Dial this URL, with no policy. Accepts a full URL or a bare host.
+	pub fn new(url: impl Into<String>) -> Self {
+		Self {
+			url: url.into(),
+			cost: None,
+			egress: None,
+			token: None,
+		}
+	}
+
+	/// The peer address, as configured. May carry `?cost=` / `?jwt=` in the
+	/// legacy string form.
+	pub fn url(&self) -> &str {
+		&self.url
+	}
+
+	/// What this relay charges to pull from the peer. None prices the link at 1.
+	pub fn cost(&self) -> Option<u64> {
+		self.cost
+	}
+
+	/// What this relay declares in SETUP as its own price toward the peer.
+	/// Defaults to [`Self::cost`]; anything else is rejected until m2.
+	pub fn egress(&self) -> Option<u64> {
+		self.egress
+	}
+
+	/// The peer's credential, replacing an inline `?jwt=`.
+	pub fn token(&self) -> Option<&str> {
+		self.token.as_deref()
+	}
+
+	/// Price the link this peer is dialed on.
+	pub fn with_cost(mut self, cost: u64) -> Self {
+		self.cost = Some(cost);
+		self
+	}
+
+	/// Declare this relay's own price toward the peer. Must match the cost.
+	pub fn with_egress(mut self, egress: u64) -> Self {
+		self.egress = Some(egress);
+		self
+	}
+
+	/// Present this credential instead of an inline `?jwt=`.
+	pub fn with_token(mut self, token: impl Into<String>) -> Self {
+		self.token = Some(token.into());
+		self
+	}
+}
+
+impl std::str::FromStr for Peer {
+	type Err = anyhow::Error;
+
+	/// Parse a bare peer URL, preserving CLI input. Fails on an invalid URL
+	/// without echoing any inline credential.
+	fn from_str(s: &str) -> Result<Self, Self::Err> {
+		peer_url(s)?;
+		Ok(Self::new(s))
+	}
+}
+
+impl std::fmt::Display for Peer {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str(&self.url)
+	}
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PeerObject {
+	url: String,
+	#[serde(default)]
+	cost: Option<u64>,
+	#[serde(default)]
+	egress: Option<u64>,
+	#[serde(default)]
+	token: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum PeerDe {
+	Url(String),
+	Object(PeerObject),
+}
+
+impl<'de> serde::Deserialize<'de> for Peer {
+	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+	where
+		D: serde::Deserializer<'de>,
+	{
+		match PeerDe::deserialize(deserializer)? {
+			PeerDe::Url(url) => Ok(Self::new(url)),
+			PeerDe::Object(object) => Ok(Self {
+				url: object.url,
+				cost: object.cost,
+				egress: object.egress,
+				token: object.token,
+			}),
+		}
+	}
+}
+
+impl serde::Serialize for Peer {
+	fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+	where
+		S: serde::Serializer,
+	{
+		if self.cost.is_none() && self.egress.is_none() && self.token.is_none() {
+			return serializer.serialize_str(&self.url);
+		}
+		use serde::ser::SerializeStruct as _;
+		let mut len = 1;
+		if self.cost.is_some() {
+			len += 1;
+		}
+		if self.egress.is_some() {
+			len += 1;
+		}
+		if self.token.is_some() {
+			len += 1;
+		}
+		let mut state = serializer.serialize_struct("Peer", len)?;
+		state.serialize_field("url", &self.url)?;
+		if let Some(cost) = &self.cost {
+			state.serialize_field("cost", cost)?;
+		}
+		if let Some(egress) = &self.egress {
+			state.serialize_field("egress", egress)?;
+		}
+		if let Some(token) = &self.token {
+			state.serialize_field("token", token)?;
+		}
+		state.end()
+	}
+}
+
 /// One peer's stable identity and the dial-affecting configuration currently
 /// supplied by a discovery source.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct DialTarget {
 	key: String,
 	url: Url,
@@ -74,6 +232,54 @@ impl DialTarget {
 			identity.into()
 		};
 		let cost = take_cost(&mut url)?;
+		Ok(Self {
+			key,
+			url,
+			urls: Vec::new(),
+			cost,
+			fingerprint: None,
+			lan: false,
+		})
+	}
+
+	/// Normalize a configured [`Peer`] into dial state. A bare URL keeps its
+	/// inline `?cost=` / `?jwt=`; an object carries policy in its fields instead.
+	/// Mixing the two (object policy plus URL params) is rejected rather than
+	/// given a precedence a migration could silently get wrong. `egress`
+	/// defaults to `cost`; anything else is rejected, never ignored.
+	fn from_peer(peer: &Peer) -> anyhow::Result<Self> {
+		let mut url = peer_url(&peer.url)?;
+		let has_cost = url.query_pairs().any(|(key, _)| key == "cost");
+		let has_jwt = url.query_pairs().any(|(key, value)| key == "jwt" && !value.is_empty());
+		if peer.cost.is_some() || peer.egress.is_some() {
+			anyhow::ensure!(
+				!has_cost,
+				"cluster peer sets cost/egress alongside a URL ?cost=; use one or the other"
+			);
+		}
+		if peer.token.as_ref().is_some_and(|token| !token.is_empty()) {
+			anyhow::ensure!(
+				!has_jwt,
+				"cluster peer sets token alongside a URL ?jwt=; use one or the other"
+			);
+		}
+		let mut cost = take_cost(&mut url)?;
+		if let Some(configured) = peer.cost {
+			cost = Some(configured);
+		}
+		let egress = peer.egress.or(cost);
+		anyhow::ensure!(
+			egress == cost,
+			"cluster peer sets egress different from cost; asymmetric costs are not supported yet"
+		);
+		if let Some(token) = peer.token.as_ref().filter(|token| !token.is_empty()) {
+			url.query_pairs_mut().append_pair("jwt", token);
+		}
+		let key = {
+			let mut identity = url.clone();
+			identity.set_query(None);
+			identity.into()
+		};
 		Ok(Self {
 			key,
 			url,
@@ -168,11 +374,11 @@ impl GossipTargets {
 /// Parse a complete dynamic peer list before mutating the live dial set. A bad
 /// entry or conflicting duplicate rejects the whole update, preserving the
 /// last-known-good topology.
-fn parse_peer_list(list: Vec<String>, node: Option<&str>) -> anyhow::Result<HashMap<String, DialTarget>> {
+fn parse_peer_list(list: Vec<Peer>, node: Option<&str>) -> anyhow::Result<HashMap<String, DialTarget>> {
 	let self_key = node.map(canonicalize_peer_key);
 	let mut desired = HashMap::new();
 	for (index, peer) in list.into_iter().enumerate() {
-		let target = DialTarget::parse(&peer).with_context(|| format!("invalid peer at index {index}"))?;
+		let target = DialTarget::from_peer(&peer).with_context(|| format!("invalid peer at index {index}"))?;
 		if Some(&target.key) == self_key.as_ref() {
 			continue;
 		}
@@ -455,17 +661,20 @@ pub struct ClusterConfig {
 	)]
 	pub id: Option<u64>,
 
-	/// Connect to one or more other cluster nodes. Each peer is a full URL, e.g.
-	/// `https://host/?jwt=TOKEN`; a bare host or `host:port` is deprecated but
+	/// Connect to one or more other cluster nodes. Each entry is a bare URL, e.g.
+	/// `https://host/?jwt=TOKEN`, or an object with `url`, `cost`, `egress`,
+	/// and `token`; see [`Peer`]. A bare host or `host:port` is deprecated but
 	/// still accepted (wrapped in `https://.../`). Accepts a comma-separated list
-	/// on the CLI or repeat the flag; in config files use a TOML array.
+	/// on the CLI or repeat the flag; in config files use a TOML array of URLs
+	/// and/or objects.
 	///
-	/// A `?cost=N` query param prices the link (moq-lite-06+): every
-	/// announcement crossing it adds `N` to its route cost, so routing prefers
-	/// cheap paths over short ones. Use `0` for a same-datacenter sibling and
-	/// something large for a metered backbone; an unpriced link costs 1, which
-	/// reproduces plain hop counting. The param is consumed by this relay, not
-	/// sent to the peer.
+	/// A `?cost=N` query param (or object `cost`) prices the link (moq-lite-06+):
+	/// every announcement crossing it adds `N` to its route cost, so routing
+	/// prefers cheap paths over short ones. Use `0` for a same-datacenter sibling
+	/// and something large for a metered backbone; an unpriced link costs 1,
+	/// which reproduces plain hop counting. The param is consumed by this relay,
+	/// not sent to the peer. Object `egress` defaults to `cost`; anything else is
+	/// rejected until asymmetric routing lands.
 	#[serde(alias = "connect")]
 	#[usage(
 		name = "cluster-connect",
@@ -475,12 +684,14 @@ pub struct ClusterConfig {
 		setting = "cluster.connect"
 	)]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
-	pub connect: Vec<String>,
+	pub connect: Vec<Peer>,
 
 	/// Fetch the list of peers to dial from an HTTP(S) URL or a local file,
 	/// reloading at runtime without a restart. The source returns a JSON array
-	/// of peer URLs: `["https://a.pop.example/?cost=1", "b.pop.example"]`. An http(s) URL is
-	/// re-checked on a fixed cadence, with caching, conditional revalidation
+	/// of peers: bare URL strings and/or objects with `url`, `cost`, `egress`,
+	/// and `token`, exactly as [`Self::connect`] accepts, e.g.
+	/// `["https://a.pop.example/?cost=1", {"url": "https://b.pop.example/", "cost": 2}]`.
+	/// An http(s) URL is re-checked on a fixed cadence, with caching, conditional revalidation
 	/// (`ETag` / `Last-Modified`), and stale-if-error handled by the shared HTTP
 	/// cache client, so the response's `Cache-Control` controls how often a real
 	/// fetch hits the endpoint; a local path is watched via OS filesystem
@@ -537,8 +748,9 @@ pub struct ClusterConfig {
 
 	/// JWT presented on outbound cluster dials, read from this file. Applied to
 	/// any static, API, or gossip peer whose URL doesn't already carry a
-	/// `?jwt=`. An inline `?jwt=` can provide a per-peer credential for static
-	/// or `connect_api` peers. Gossip should use this shared token or mTLS
+	/// `?jwt=` and whose object entry sets no `token`. An inline `?jwt=` or
+	/// object `token` provides a per-peer credential for static or `connect_api`
+	/// peers. Gossip should use this shared token or mTLS
 	/// because the advertised node URL is public. LAN peers never receive it;
 	/// they authenticate with their mDNS credential.
 	#[usage(
@@ -1215,13 +1427,13 @@ impl Cluster {
 		let mut supervised: tokio::task::JoinSet<anyhow::Result<()>> = tokio::task::JoinSet::new();
 
 		for peer in &self.config.connect {
-			let target = DialTarget::parse(peer).context("invalid --cluster-connect peer URL")?;
+			let target = DialTarget::from_peer(peer).context("invalid --cluster-connect peer URL")?;
 			if dialed.contains(&target.key) {
 				continue;
 			}
-			if is_legacy_peer(peer) {
+			if is_legacy_peer(peer.url()) {
 				tracing::warn!(
-					%peer,
+					peer = %peer.url(),
 					"DEPRECATED: pass --cluster-connect as a full URL like \"https://<host>/?jwt=TOKEN\"; \
 					 a bare host or \"host:port\" is deprecated and will be removed in a future release"
 				);
@@ -1436,7 +1648,7 @@ impl Cluster {
 
 	/// Drive `--cluster-connect-api`: an http(s) URL is polled, a local path (or
 	/// `file://` URL) is watched for changes. Either way the source yields a JSON
-	/// array of peer URLs that's reconciled into the shared dial map.
+	/// array of peers that's reconciled into the shared dial map.
 	async fn run_connect_api(self, source: String, node: Option<String>, token: String, dialed: DialMap) {
 		match Url::parse(&source) {
 			Ok(url) if matches!(url.scheme(), "http" | "https") => {
@@ -1527,10 +1739,10 @@ impl Cluster {
 	/// loop.
 	fn reload_connect_api_file(&self, path: &std::path::Path, node: &Option<String>, token: &str, dialed: &DialMap) {
 		match std::fs::read_to_string(path) {
-			Ok(body) => match serde_json::from_str::<Vec<String>>(&body) {
+			Ok(body) => match serde_json::from_str::<Vec<Peer>>(&body) {
 				Ok(list) => self.apply_peer_list(list, node, token, dialed),
 				Err(err) => {
-					tracing::warn!(%err, ?path, "cluster.connect_api file is not a JSON array; keeping current peers")
+					tracing::warn!(%err, ?path, "cluster.connect_api file is not a JSON array of peers; keeping current peers")
 				}
 			},
 			Err(err) => tracing::warn!(%err, ?path, "failed to read cluster.connect_api file; keeping current peers"),
@@ -1540,7 +1752,7 @@ impl Cluster {
 	/// Fetch and parse the peer list. Caching, conditional revalidation, and
 	/// stale-if-error are handled by the HTTP cache middleware on `http`, so this
 	/// just issues the request and parses the (possibly cache-served) body.
-	async fn fetch_peer_list(http: &ClientWithMiddleware, url: Url) -> anyhow::Result<Vec<String>> {
+	async fn fetch_peer_list(http: &ClientWithMiddleware, url: Url) -> anyhow::Result<Vec<Peer>> {
 		let body = http
 			.get(url)
 			.send()
@@ -1552,13 +1764,13 @@ impl Cluster {
 			.await
 			.context("failed to read cluster.connect_api body")?;
 
-		serde_json::from_str(&body).context("cluster.connect_api response is not a JSON array of peer URLs")
+		serde_json::from_str(&body).context("cluster.connect_api response is not a JSON array of peers")
 	}
 
 	/// Reconcile a freshly fetched peer list into the dial map: dial peers that
 	/// are new and drop API peers that disappeared. The relay's own [`node`] URL
 	/// is filtered out so it never dials itself.
-	fn apply_peer_list(&self, list: Vec<String>, node: &Option<String>, token: &str, dialed: &DialMap) {
+	fn apply_peer_list(&self, list: Vec<Peer>, node: &Option<String>, token: &str, dialed: &DialMap) {
 		// Dedupe against the shared dial map (and filter out self) on stable identity,
 		// while retaining the full dial configuration so a cost or credential update
 		// replaces the existing session.
@@ -1589,8 +1801,8 @@ impl Cluster {
 		let mut urls = target.addrs();
 		let cost = target.cost;
 		// Apply the shared cluster token unless the URL already carries its own
-		// non-empty `?jwt=` (a per-peer inline token wins; the shared token still
-		// covers peers that have none). An empty
+		// non-empty `?jwt=` (a per-peer inline token or object `token` wins; the
+		// shared token still covers peers that have none). An empty
 		// `?jwt=` counts as absent, matching `AuthParams::from_url`.
 		// LAN dials never get the token: they authenticate with the mDNS credential.
 		if !target.lan && !token.is_empty() {
@@ -2386,7 +2598,7 @@ mod tests {
 		dialed.insert(current.clone(), task.abort_handle(), DialSource::Api);
 
 		cluster.apply_peer_list(
-			vec!["https://peer.example/?cost=invalid".to_string()],
+			vec![Peer::new("https://peer.example/?cost=invalid")],
 			&None,
 			"",
 			&dialed,
@@ -2405,8 +2617,8 @@ mod tests {
 	fn peer_list_rejects_conflicting_duplicate() {
 		let Err(err) = parse_peer_list(
 			vec![
-				"https://peer.example/?cost=1".to_string(),
-				"https://peer.example/?cost=2".to_string(),
+				Peer::new("https://peer.example/?cost=1"),
+				Peer::new("https://peer.example/?cost=2"),
 			],
 			None,
 		) else {
@@ -2415,15 +2627,137 @@ mod tests {
 		assert!(format!("{err:#}").contains("conflicting configurations"));
 	}
 
-	/// The peer-list wire format is a JSON array of URL strings.
+	/// The peer-list wire format is a JSON array of bare URL strings and/or
+	/// objects, parsed by the same type static config uses.
 	#[test]
 	fn peer_list_parses_as_string_array() {
 		let body = r#"["a.pop.example", "b.pop.example:4443"]"#;
-		let list: Vec<String> = serde_json::from_str(body).expect("parse peer list");
-		assert_eq!(
-			list,
-			vec!["a.pop.example".to_string(), "b.pop.example:4443".to_string()]
+		let list: Vec<Peer> = serde_json::from_str(body).expect("parse peer list");
+		assert_eq!(list, vec![Peer::new("a.pop.example"), Peer::new("b.pop.example:4443")]);
+	}
+
+	/// A bare URL keeps working, and an equivalent object normalizes to the same
+	/// dial target, so the two forms dedupe instead of conflicting.
+	#[test]
+	fn peer_object_form_matches_bare_url() {
+		let from_url = DialTarget::from_peer(&Peer::new("https://peer.example/?cost=2")).unwrap();
+		let object: Peer =
+			serde_json::from_str(r#"{"url": "https://peer.example/", "cost": 2}"#).expect("parse object peer");
+		let from_object = DialTarget::from_peer(&object).unwrap();
+		assert_eq!(from_url, from_object);
+
+		let desired = parse_peer_list(vec![Peer::new("https://peer.example/?cost=2"), object], None)
+			.expect("equivalent forms dedupe");
+		assert_eq!(desired.len(), 1);
+		assert_eq!(desired.values().next().expect("one peer"), &from_url);
+	}
+
+	/// An object `token` rides the same inline credential path: the dial URL
+	/// carries `?jwt=`, the identity drops it, and the shared token does not
+	/// override it.
+	#[test]
+	fn peer_object_token_matches_inline_credential() {
+		let inline = DialTarget::from_peer(&Peer::new("https://peer.example/?jwt=secret")).unwrap();
+		let object: Peer =
+			serde_json::from_str(r#"{"url": "https://peer.example/", "token": "secret"}"#).expect("parse object peer");
+		let from_object = DialTarget::from_peer(&object).unwrap();
+		assert_eq!(inline, from_object);
+		assert_eq!(inline.key, "https://peer.example/");
+		assert!(
+			inline
+				.url
+				.query_pairs()
+				.any(|(key, value)| key == "jwt" && value == "secret"),
+			"the credential must reach the dial URL: {}",
+			inline.url
 		);
+	}
+
+	/// `egress` defaults to `cost`, so a matching value is accepted and prices
+	/// the link exactly like the bare URL form.
+	#[test]
+	fn peer_symmetric_egress_is_supported() {
+		let cost_only = DialTarget::from_peer(&Peer::new("https://peer.example/?cost=2")).unwrap();
+		let symmetric: Peer = serde_json::from_str(r#"{"url": "https://peer.example/", "cost": 2, "egress": 2}"#)
+			.expect("parse symmetric peer");
+		assert_eq!(DialTarget::from_peer(&symmetric).unwrap(), cost_only);
+	}
+
+	/// An `egress` that differs from the effective cost is refused, never
+	/// silently ignored. That includes an egress with no cost at all.
+	#[test]
+	fn peer_asymmetric_egress_is_rejected() {
+		for peer in [
+			Peer::new("https://peer.example/").with_cost(1).with_egress(2),
+			Peer::new("https://peer.example/").with_egress(2),
+		] {
+			let err = DialTarget::from_peer(&peer).expect_err("asymmetric egress must fail");
+			assert!(
+				format!("{err:#}").contains("not supported"),
+				"egress refusal must say so: {err:#}"
+			);
+		}
+
+		let Err(err) = parse_peer_list(
+			vec![Peer::new("https://peer.example/").with_cost(1).with_egress(2)],
+			None,
+		) else {
+			panic!("asymmetric egress must reject the list");
+		};
+		assert!(format!("{err:#}").contains("not supported"));
+	}
+
+	/// Object policy and URL params each get one home. Setting both is rejected
+	/// rather than given a precedence a migration could silently get wrong.
+	#[test]
+	fn peer_mixed_policy_is_rejected() {
+		let cost_mix: Peer =
+			serde_json::from_str(r#"{"url": "https://peer.example/?cost=1", "cost": 1}"#).expect("parse mixed peer");
+		assert!(DialTarget::from_peer(&cost_mix).is_err());
+
+		let token_mix: Peer = serde_json::from_str(r#"{"url": "https://peer.example/?jwt=secret", "token": "secret"}"#)
+			.expect("parse mixed peer");
+		assert!(DialTarget::from_peer(&token_mix).is_err());
+	}
+
+	/// Unknown object fields reject the entry, so a typo keeps the last-good
+	/// topology instead of dialing with a silently dropped policy.
+	#[test]
+	fn peer_unknown_field_is_rejected() {
+		serde_json::from_str::<Vec<Peer>>(r#"[{"url": "https://peer.example/", "cosst": 1}]"#)
+			.expect_err("unknown field must fail");
+	}
+
+	/// Equivalent URL and object forms of one peer dedupe, while differing
+	/// policies for one identity conflict, whatever their forms.
+	#[test]
+	fn peer_list_mixed_forms_conflict_on_policy() {
+		let object: Peer =
+			serde_json::from_str(r#"{"url": "https://peer.example/", "cost": 3}"#).expect("parse object peer");
+		let Err(err) = parse_peer_list(vec![Peer::new("https://peer.example/?cost=1"), object], None) else {
+			panic!("differing policies must conflict");
+		};
+		assert!(format!("{err:#}").contains("conflicting configurations"));
+	}
+
+	/// A malformed object entry keeps the last-good dials, exactly like a
+	/// malformed URL does.
+	#[tokio::test]
+	async fn malformed_object_peer_list_preserves_current_dial() {
+		let cluster = new_cluster(ClusterConfig::default()).expect("cluster");
+		let dialed = DialMap::default();
+		let current = DialTarget::from_peer(&Peer::new("https://peer.example/?cost=1")).unwrap();
+		let task = tokio::spawn(std::future::pending::<()>());
+		dialed.insert(current.clone(), task.abort_handle(), DialSource::Api);
+
+		let asymmetric = Peer::new("https://peer.example/").with_cost(1).with_egress(2);
+		cluster.apply_peer_list(vec![asymmetric], &None, "", &dialed);
+
+		assert!(!task.is_finished(), "last-known-good dial must stay active");
+		let map = dialed.inner.lock().expect("dial map");
+		let entry = map.get(&current.key).expect("current dial");
+		assert!(entry.sources.get(entry.active) == Some(&current));
+		task.abort();
 	}
 
 	/// The mesh tiebreaker only dials peers that sort after us, so exactly one
@@ -2619,7 +2953,38 @@ mod tests {
 		assert_eq!(config.cluster.node.as_deref(), Some("us-east.example.com:4443"));
 		// A TOML boolean deserializes into the string form.
 		assert_eq!(config.cluster.mesh.as_deref(), Some("true"));
-		assert_eq!(config.cluster.connect, vec!["root.example.com:4443".to_string()]);
+		assert_eq!(config.cluster.connect, vec![Peer::new("root.example.com:4443")]);
+	}
+
+	/// Static config accepts the object form beside bare URLs, through the same
+	/// type the connect API parses.
+	#[test]
+	fn cluster_connect_object_form_round_trip() {
+		// Usage reads the environment while parsing, so serialize with the tests
+		// that mutate it.
+		let _env = crate::test_env::EnvGuard::lock();
+
+		let toml = "[cluster]\nconnect = [\"https://a.example/?cost=1\", { url = \"https://b.example/\", cost = 2, egress = 2, token = \"secret\" }]\n";
+		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("cluster-connect-object-toml.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+		assert_eq!(
+			config.cluster.connect,
+			vec![
+				Peer::new("https://a.example/?cost=1"),
+				Peer::new("https://b.example/")
+					.with_cost(2)
+					.with_egress(2)
+					.with_token("secret"),
+			]
+		);
+		// The object normalizes exactly like its URL spellings.
+		let desired = parse_peer_list(config.cluster.connect, None).expect("static peers parse");
+		assert_eq!(desired.len(), 2);
 	}
 
 	/// The legacy `--cluster-mesh <url>` form (now a boolean) is honored for
