@@ -29,7 +29,6 @@ quest here and merged main into dev.
 - [Readable input contract](/quest/m1/api-getter-contract.md) - accepted Getter types match runtime behavior
 - [JSON edit transaction](/quest/m1/api-json-edit-commit.md) - failed publication cannot disappear into a guard-drop warning
 - [JS wrapper configuration](/quest/m1/api-js-wrapper-config.md) - constructor shapes agree and consumer options exclude ignored producer knobs
-- [Publisher finish ownership](/quest/m1/api-producer-finish.md) - terminal Rust methods consume their handles while group cuts remain reusable
 - [External API proof](/quest/m1/api-release-proof.md) - packaged callers exercise real moq.pro use cases and record each audit finding's disposition
 - [Monotonic timeline](/quest/m1/monotonic-timeline.md) - a marker group of one empty frame declares a break and moves the live edge; producers refuse a rewind; consumers jump the playhead on an unproven hole and drop rewind detection
 - [Advertise](/quest/m1/wildcard-advertise.md) - moq-net encodes, forwards, and authorizes wildcard advertisements, lifting the prefix-only refusal on `dynamic(pattern, route)`
