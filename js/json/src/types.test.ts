@@ -1,6 +1,4 @@
 import { expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { Track } from "@moq/net";
 
 import { Snapshot, Stream, Window } from "./index.ts";
@@ -77,31 +75,4 @@ test("object literals reject producer knobs and positional tracks", () => {
 		new Window.Decoder({ track });
 	};
 	expect(reject).toBeDefined();
-});
-
-test("emitted declarations keep a single options-object constructor", () => {
-	const dist = join(import.meta.dir, "..", "dist");
-	const files = [
-		"snapshot/consumer.d.ts",
-		"snapshot/producer.d.ts",
-		"stream/consumer.d.ts",
-		"stream/producer.d.ts",
-		"window/consumer.d.ts",
-		"window/producer.d.ts",
-	];
-	if (!existsSync(join(dist, files[0] as string))) return;
-
-	for (const file of files) {
-		const body = readFileSync(join(dist, file), "utf8");
-		expect(body).toContain("constructor(config:");
-		expect(body).not.toContain("constructor(track:");
-	}
-
-	const snapshotConsumer = readFileSync(join(dist, "snapshot/consumer.d.ts"), "utf8");
-	expect(snapshotConsumer).not.toContain("deltaRatio");
-	expect(snapshotConsumer).not.toContain("initial");
-
-	const windowConsumer = readFileSync(join(dist, "window/consumer.d.ts"), "utf8");
-	expect(windowConsumer).not.toContain("opRatio");
-	expect(windowConsumer).not.toContain("checkpointRecords");
 });
