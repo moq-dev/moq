@@ -4,9 +4,9 @@
 
 An application built on a binding whose artifacts carry codecs subscribes to
 a video rendition and receives decoded frames, the counterpart of the
-existing raw video producer and of the audio consumer. Dart participates when its shipped artifacts enable codecs; check
-[Dart codec parity](/quest/m2/dart-codecs.md) at implementation time. Every other
-binding is done here. `moq-ffi` has `MoqVideoProducer`,
+existing raw video producer and of the audio consumer. Dart integration is
+owned by the dependent [Dart codec parity](/quest/m2/dart-codecs.md) quest;
+every other binding is done here. `moq-ffi` has `MoqVideoProducer`,
 `MoqAudioProducer`, and `MoqAudioConsumer`; `moq-video::decode` exists with
 VideoToolbox and openh264 backends; nothing joins them.
 
@@ -24,14 +24,14 @@ owns mobile capture; native mobile surface views remain deferred.
   is complete; do not create another decoder or surface abstraction.
 - Walk the Cross-Package Sync table: `rs/libmoq` and `moq.h`, the `py`,
   `swift`, `kt`, and `dart` wrappers, the Go wrapper, and `doc/lib` for each.
-  If Dart artifacts still lack codecs, document the temporary omission rather
-  than stubbing a consumer that cannot decode.
+  Keep generated Dart declarations consistent with the shared API, but leave
+  its usable wrapper, codec-enabled artifacts, and decode proof to Dart codec
+  parity. Document the temporary omission rather than shipping a stub.
 - Verify on an iOS simulator and an Android emulator with the smoke media,
   and on macOS through libmoq so `just test smoke-full` covers it.
 
-The later-finishing quest, this one or Dart codec parity, must expose and test
-the video consumer in Dart. Neither may finish by assuming the other will
-perform an untracked follow-up.
+Dart codec parity requires this quest and owns the remaining Dart integration.
+This quest must not require Dart artifact enablement, which would create a cycle.
 
 ## Required
 
