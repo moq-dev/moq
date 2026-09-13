@@ -211,6 +211,23 @@ final class SmokeTests: XCTestCase {
         try broadcast.finish()
     }
 
+    func testReadFrameSkipsEmptyThenPopulatedGroups() async throws {
+        let broadcast = try BroadcastProducer()
+        let track = try broadcast.publishTrack(name: "status")
+        let consumer = try track.consume()
+
+        try track.appendGroup().finish()
+        try track.appendGroup().finish()
+        try track.writeFrame(Data("populated".utf8), timestampUs: 2_000)
+
+        let frame = try await consumer.readFrame()
+        XCTAssertEqual(frame?.payload, Data("populated".utf8))
+        XCTAssertEqual(frame?.timestampUs, 2_000)
+
+        try track.finish()
+        try broadcast.finish()
+    }
+
     func testSparseGroupsAndKnownEnd() throws {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "sparse")

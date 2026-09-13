@@ -922,6 +922,66 @@ async def test_read_frame_returns_none_when_track_finished():
     assert await consumer.read_frame() is None
 
 
+async def test_read_frame_skips_empty_group_on_open_track():
+    """An empty completed group is not track EOF while the track is still open."""
+    broadcast = moq.BroadcastProducer()
+    track = broadcast.publish_track("status")
+    consumer = track.consume()
+
+    track.append_group().finish()
+
+    read = asyncio.create_task(consumer.read_frame())
+    await asyncio.sleep(0.05)
+    assert not read.done(), "empty group must not end an open track"
+
+    track.write_frame(b"after-empty", 1_000)
+    frame = await asyncio.wait_for(read, timeout=5.0)
+    assert frame is not None
+    assert frame.payload == b"after-empty"
+    assert frame.timestamp_us == 1_000
+
+
+async def test_read_frame_skips_empty_then_populated_groups():
+    """read_frame() walks past completed empty groups to the next first frame."""
+    broadcast = moq.BroadcastProducer()
+    track = broadcast.publish_track("status")
+    consumer = track.consume()
+
+    track.append_group().finish()
+    track.append_group().finish()
+    track.write_frame(b"populated", 2_000)
+
+    frame = await asyncio.wait_for(consumer.read_frame(), timeout=5.0)
+    assert frame is not None
+    assert frame.payload == b"populated"
+    assert frame.timestamp_us == 2_000
+
+
+async def test_read_frame_keeps_group_across_cancelled_call():
+    """Cancelling one read_frame() must not drop the group it already acquired."""
+    broadcast = moq.BroadcastProducer()
+    track = broadcast.publish_track("status")
+    consumer = track.consume()
+
+    group = track.append_group()
+    read = asyncio.create_task(consumer.read_frame())
+    await asyncio.sleep(0.05)
+    assert not read.done()
+    read.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await read
+
+    group.write_frame(b"kept", 3_000)
+    group.finish()
+    track.finish()
+
+    frame = await asyncio.wait_for(consumer.read_frame(), timeout=5.0)
+    assert frame is not None
+    assert frame.payload == b"kept"
+    assert frame.timestamp_us == 3_000
+    assert await asyncio.wait_for(consumer.read_frame(), timeout=5.0) is None
+
+
 def test_optional_binding_records_use_none_defaults():
     """Optional UniFFI record fields are optional in generated constructors."""
     hint = moq.VideoHint()

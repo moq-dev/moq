@@ -129,6 +129,20 @@ class SmokeTest {
         }
     }
 
+    @Test
+    fun `readFrame skips empty then populated groups`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val track = broadcast.publishTrack("status", null)
+            val consumer = track.consume(null)
+            track.appendGroup().finish()
+            track.appendGroup().finish()
+            track.writeFrame(Frame(payload = "populated".encodeToByteArray(), timestampUs = 2_000uL))
+            val frame = consumer.readFrame()
+            assertEquals("populated", frame?.payload?.decodeToString())
+            assertEquals(2_000uL, frame?.timestampUs)
+        }
+    }
+
     /** A fetched media group streams its decoded frames and then completes. */
     @Test
     fun `media group helper streams fetched frames`() = runTest {

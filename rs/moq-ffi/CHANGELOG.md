@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `TrackConsumer.read_frame` skips completed empty groups instead of returning
+  EOF, and keeps a group across a cancelled read so its first frame is not lost.
+
 ### Changed
 
 - `MoqError` is no longer a flat error. `Protocol` carries a `MoqProtocolError` record

@@ -390,6 +390,44 @@ func TestTrackPublishConsume(t *testing.T) {
 	}
 }
 
+func TestReadFrameSkipsEmptyThenPopulatedGroups(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	track, err := broadcast.PublishTrack("status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := track.Consume(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer consumer.Cancel()
+
+	empty, err := track.AppendGroup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := empty.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	if err := track.WriteFrame(moq.Frame{Payload: []byte("populated"), TimestampUs: 2_000}); err != nil {
+		t.Fatal(err)
+	}
+
+	frame, err := consumer.ReadFrame(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame == nil || string(frame.Payload) != "populated" || frame.TimestampUs != 2_000 {
+		t.Fatalf("frame = %+v, want payload=populated ts=2000", frame)
+	}
+}
+
 func TestTrackSparseGroupsAndKnownEnd(t *testing.T) {
 	broadcast, err := moq.NewBroadcastProducer()
 	if err != nil {

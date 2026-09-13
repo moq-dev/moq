@@ -364,9 +364,19 @@ enum Cursor {
 	/// Committed to arrival order by the first `recv_group`.
 	Arrival(moq_net::track::Subscriber),
 	/// Committed to sequence order by the first `next_group` or `read_frame`.
-	Ordered(moq_net::track::Ordered),
+	Ordered(Box<OrderedCursor>),
 	/// Transient, while the subscriber is moved out to be converted.
 	Converting,
+}
+
+/// Sequence-order handle plus the group `read_frame` is in the middle of.
+///
+/// `pending` stays with this cursor so a cancelled `read_frame` does not drop
+/// the group, and so `next_group` takes it rather than skipping ahead.
+struct OrderedCursor {
+	track: moq_net::track::Ordered,
+	/// Group whose first frame `read_frame` has not returned yet.
+	pending: Option<moq_net::group::Consumer>,
 }
 
 struct TrackInner {
@@ -394,17 +404,20 @@ impl TrackInner {
 
 	/// The sequence cursor, committing this track to it, or [`MoqError::AlreadyCommitted`]
 	/// once it committed to arrival order.
-	fn ordered(&mut self) -> Result<&mut moq_net::track::Ordered, MoqError> {
+	fn ordered(&mut self) -> Result<&mut OrderedCursor, MoqError> {
 		// Only move the subscriber out when there is one to convert: `ordered()` consumes
 		// it, and swapping unconditionally would drop an already-converted handle.
 		if let Cursor::Uncommitted(_) = &self.track {
 			let Cursor::Uncommitted(track) = std::mem::replace(&mut self.track, Cursor::Converting) else {
 				unreachable!("just matched Uncommitted");
 			};
-			self.track = Cursor::Ordered(track.ordered());
+			self.track = Cursor::Ordered(Box::new(OrderedCursor {
+				track: track.ordered(),
+				pending: None,
+			}));
 		}
 		match &mut self.track {
-			Cursor::Ordered(track) => Ok(track),
+			Cursor::Ordered(track) => Ok(track.as_mut()),
 			Cursor::Arrival(_) => Err(MoqError::AlreadyCommitted),
 			// See `arrival`: unreachable unless the handle was left mid-conversion.
 			Cursor::Uncommitted(_) | Cursor::Converting => Err(MoqError::Closed),
@@ -416,14 +429,30 @@ impl TrackInner {
 	}
 
 	async fn next_group(&mut self) -> Result<Option<moq_net::group::Consumer>, MoqError> {
-		Ok(self.ordered()?.next_group().await?)
+		let ordered = self.ordered()?;
+		if let Some(group) = ordered.pending.take() {
+			return Ok(Some(group));
+		}
+		Ok(ordered.track.next_group().await?)
 	}
 
 	async fn read_frame(&mut self) -> Result<Option<MoqFrame>, MoqError> {
-		let Some(mut group) = self.ordered()?.next_group().await? else {
-			return Ok(None);
-		};
-		group.read_frame().await?.map(raw_frame).transpose()
+		loop {
+			let ordered = self.ordered()?;
+			if ordered.pending.is_none() {
+				match ordered.track.next_group().await? {
+					Some(group) => ordered.pending = Some(group),
+					None => return Ok(None),
+				}
+			}
+			match ordered.pending.as_mut().expect("pending group").read_frame().await? {
+				Some(frame) => {
+					ordered.pending = None;
+					return Ok(Some(raw_frame(frame)?));
+				}
+				None => ordered.pending = None,
+			}
+		}
 	}
 
 	async fn recv_datagram(&mut self) -> Result<Option<MoqDatagram>, MoqError> {
@@ -431,7 +460,7 @@ impl TrackInner {
 		// group cursor.
 		let datagram = match &mut self.track {
 			Cursor::Uncommitted(track) | Cursor::Arrival(track) => track.recv_datagram().await?,
-			Cursor::Ordered(track) => track.recv_datagram().await?,
+			Cursor::Ordered(ordered) => ordered.track.recv_datagram().await?,
 			// Poisoned mid-conversion; see `arrival`. Datagrams never commit a cursor,
 			// so this is the only way they can fail on a live handle.
 			Cursor::Converting => return Err(MoqError::Closed),
@@ -485,40 +514,34 @@ impl MoqTrackConsumer {
 	/// [`MoqError::AlreadyCommitted`] afterwards.
 	pub async fn recv_group(&self) -> Result<Option<Arc<MoqGroupConsumer>>, MoqError> {
 		self.task
-			.run(|mut state| async move {
-				Ok(state.recv_group().await?.map(|group| {
-					Arc::new(MoqGroupConsumer {
-						sequence: group.sequence,
-						task: Task::new(GroupInner { group }),
-					})
-				}))
-			})
+			.run(|mut state| async move { Ok(state.recv_group().await?.map(MoqGroupConsumer::new).map(Arc::new)) })
 			.await
 	}
 
 	/// Return the next group with a higher sequence number than any previously
 	/// returned, skipping late arrivals. Returns `None` when the track ends.
 	///
+	/// Shares the sequence cursor with [`Self::read_frame`]: a group one method
+	/// has already taken is not returned by the other. A `read_frame` cancelled
+	/// after acquiring a group leaves that group here.
+	///
 	/// The first call commits this track to sequence order: arrival-order reads
 	/// ([`Self::recv_group`]) fail with [`MoqError::AlreadyCommitted`] afterwards.
 	pub async fn next_group(&self) -> Result<Option<Arc<MoqGroupConsumer>>, MoqError> {
 		self.task
-			.run(|mut state| async move {
-				Ok(state.next_group().await?.map(|group| {
-					Arc::new(MoqGroupConsumer {
-						sequence: group.sequence,
-						task: Task::new(GroupInner { group }),
-					})
-				}))
-			})
+			.run(|mut state| async move { Ok(state.next_group().await?.map(MoqGroupConsumer::new).map(Arc::new)) })
 			.await
 	}
 
 	/// Read the first frame of the next group, including its timestamp.
 	///
 	/// Convenience for tracks using one-frame-per-group (like moq-boy's
-	/// status/command tracks). Returns `None` when the track ends. Reads in
-	/// sequence order, committing the track like [`Self::next_group`].
+	/// status/command tracks). Completed empty groups are skipped. Returns `None`
+	/// only when the track ends. Cancelling one call keeps the current group so a
+	/// later `read_frame` or [`Self::next_group`] still sees it.
+	///
+	/// Shares the sequence cursor with [`Self::next_group`], committing the track
+	/// the same way.
 	pub async fn read_frame(&self) -> Result<Option<MoqFrame>, MoqError> {
 		self.task.run(|mut state| async move { state.read_frame().await }).await
 	}

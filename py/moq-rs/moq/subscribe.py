@@ -195,8 +195,10 @@ class TrackConsumer:
     async def next_group(self) -> GroupConsumer | None:
         """Return the next group in sequence order, skipping forward if behind.
 
-        Returns `None` when the track ends. This is what the default iteration
-        yields; use `recv_group` when latency matters more than order.
+        Returns `None` when the track ends. Shares the sequence cursor with
+        :meth:`read_frame`: a group one method has already taken is not
+        returned by the other. This is what the default iteration yields; use
+        `recv_group` when latency matters more than order.
         """
         group = await self._inner.next_group()
         if group is None:
@@ -207,7 +209,9 @@ class TrackConsumer:
         """Read the first timestamped frame of the next group.
 
         Convenience for tracks using one-frame-per-group (like moq-boy's
-        status/command tracks). Returns `None` when the track ends.
+        status/command tracks). Completed empty groups are skipped. Returns
+        `None` only when the track ends. Cancelling one call keeps the current
+        group so a later :meth:`read_frame` or :meth:`next_group` still sees it.
         """
         return await self._inner.read_frame()
 

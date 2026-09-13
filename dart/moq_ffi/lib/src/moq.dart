@@ -11960,10 +11960,10 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqtrackconsumer_info() != 46426) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqtrackconsumer_next_group() != 42933) {
+  if (uniffi_moq_ffi_checksum_method_moqtrackconsumer_next_group() != 5449) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqtrackconsumer_read_frame() != 15170) {
+  if (uniffi_moq_ffi_checksum_method_moqtrackconsumer_read_frame() != 42799) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqtrackconsumer_recv_datagram() !=
