@@ -454,12 +454,6 @@ export class Reload {
 		const producer = new Announce.Producer(prefix);
 		const consumer = producer.consume();
 
-		// Closing the consumer closes the shared state, so stop appending after that.
-		let closed = false;
-		void consumer.closed.then(() => {
-			closed = true;
-		});
-
 		const pump = new Effect();
 		pump.run((effect) => {
 			const conn = effect.get(this.established);
@@ -489,7 +483,7 @@ export class Reload {
 				} finally {
 					// Retract everything from the connection that just went away, so a per-broadcast
 					// watcher tears down instead of clinging to the dead route.
-					if (!closed) {
+					if (consumer.closed.peek() === undefined) {
 						for (const prefix of active) {
 							producer.append({ pattern: Path.Pattern.parse(prefix), active: false });
 						}

@@ -48,7 +48,7 @@ static ALLOCATOR: Counting = Counting;
 fn cycle_allocs(waiters: &[Waiter], cycles: usize) -> usize {
 	let mut list = WaiterList::new();
 
-	// Reach the steady state first: identities allocated, records seeded, and the
+	// Reach the steady state first: identities allocated, and the
 	// list grown to whatever it settles at.
 	for _ in 0..4 {
 		for waiter in waiters {
