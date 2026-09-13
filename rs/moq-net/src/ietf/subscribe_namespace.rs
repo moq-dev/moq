@@ -395,12 +395,13 @@ mod tests {
 				hops: hop_path(&[7]),
 				cost: 0,
 			}),
+			pattern: None,
 		};
 
 		let mut buf = BytesMut::new();
 		msg.encode_msg(&mut buf, version).unwrap();
 		let mut bytes = buf.freeze();
-		assert!(super::super::PublishNamespace::decode_body(&mut bytes, version, false).is_err());
+		assert!(super::super::PublishNamespace::decode_body(&mut bytes, version, false, false).is_err());
 	}
 
 	#[test]

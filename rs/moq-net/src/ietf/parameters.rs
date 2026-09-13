@@ -24,6 +24,8 @@ pub enum ParameterVarInt {
 	RelayCost = super::cluster::RELAY_COST,
 	/// SOLICIT, from the MoQ Solicit extension.
 	Solicit = super::solicit::SOLICIT,
+	/// NAMESPACE_PATTERNS, from the MoQ Pattern extension.
+	NamespacePatterns = super::pattern::NAMESPACE_PATTERNS,
 	#[num_enum(catch_all)]
 	Unknown(u64),
 }
@@ -37,6 +39,8 @@ pub enum ParameterBytes {
 	Implementation = 7,
 	/// RELAY_HOPS, from the MoQ Cluster extension.
 	RelayHops = super::cluster::RELAY_HOPS,
+	/// NAMESPACE_PATTERN, from the MoQ Pattern extension.
+	NamespacePattern = super::pattern::NAMESPACE_PATTERN,
 	#[num_enum(catch_all)]
 	Unknown(u64),
 }

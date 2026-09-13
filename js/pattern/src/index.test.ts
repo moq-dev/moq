@@ -447,3 +447,11 @@ test("the pattern segment limit is immutable at runtime", () => {
 		Reflect.set(Pattern, "MAX_SEGMENTS", original);
 	}
 });
+
+test("asPrefix only extracts subtree claims", () => {
+	expect(Pattern.parse("**").asPrefix()).toBe("");
+	expect(Pattern.parse("room/**").asPrefix()).toBe("room");
+	for (const text of ["", "room", "room/*", "**/room"]) {
+		expect(Pattern.parse(text).asPrefix()).toBeUndefined();
+	}
+});

@@ -3,7 +3,7 @@ import * as Announce from "../announced.ts";
 import { Allocator } from "../bandwidth.ts";
 import { error, SessionCode, SessionError } from "../error.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
-import type * as Path from "../path.ts";
+import * as Path from "../path.ts";
 import { empty as emptyPath } from "../path.ts";
 import { type ConnectProps, connect, type WebSocketOptions, type WebTransportProps } from "./connect.ts";
 import type { Established } from "./established.ts";
@@ -473,15 +473,15 @@ export class Reload {
 			effect.cleanup(() => upstream.close());
 
 			// Track what this connection announced so we can retract it if the connection drops.
-			const active = new Set<Path.Valid>();
+			const active = new Set<string>();
 
 			effect.spawn(async () => {
 				try {
 					for (;;) {
 						const entry = await Promise.race([effect.cancel, upstream.next()]);
 						if (!entry) break;
-						if (entry.active) active.add(entry.prefix);
-						else active.delete(entry.prefix);
+						if (entry.active) active.add(entry.pattern.text);
+						else active.delete(entry.pattern.text);
 						producer.append(entry);
 					}
 				} catch {
@@ -491,7 +491,7 @@ export class Reload {
 					// watcher tears down instead of clinging to the dead route.
 					if (!closed) {
 						for (const prefix of active) {
-							producer.append({ prefix, active: false });
+							producer.append({ pattern: Path.Pattern.parse(prefix), active: false });
 						}
 					}
 				}

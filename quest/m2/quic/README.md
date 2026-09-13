@@ -38,6 +38,8 @@ transport API change, not a MoQ wire change.
 
 ## Quests
 
+- [Deliver the application close before io_uring teardown](/quest/m2/quic/uring-close.md) -
+  the peer receives the final close when the client immediately stops its worker
 - [Establish the noq relationship](/quest/m2/quic/parent.md) - who reviews
   MoQ's proposals, how releases and advisories reach this repo, when a fork is
   warranted

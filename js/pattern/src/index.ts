@@ -417,6 +417,14 @@ export class Pattern {
 		return this.#head === this.text.length;
 	}
 
+	/** The covered prefix for literals followed by `**`, or undefined for other patterns. */
+	asPrefix(): string | undefined {
+		const last = this.segments[this.segments.length - 1];
+		if (last?.kind !== "globstar") return undefined;
+		if (this.segments.slice(0, -1).some((segment) => segment.kind !== "literal")) return undefined;
+		return this.head;
+	}
+
 	/** Whether the pattern has a `**`, so it matches paths of more than one length. */
 	get hasGlobstar(): boolean {
 		return this.#globstar !== undefined;

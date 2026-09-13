@@ -1294,8 +1294,8 @@ pub unsafe extern "C" fn moq_origin_create_broadcast(origin: u32, path: *const c
 /// Advertise `pattern` and serve the requests beneath it.
 ///
 /// `pattern` is in the path Pattern dialect; a prefix is spelled `foo/**`.
-/// Until wildcard advertisements land, anything but a prefix-shaped pattern
-/// is refused. `on_request` is required: a NULL callback is refused before the
+/// A non-prefix pattern is advertised as a covering claim; resolving one into
+/// a subscription is not implemented yet. `on_request` is required: a NULL callback is refused before the
 /// route is advertised. It is invoked with a positive request handle for each
 /// pending broadcast, then exactly once more with a terminal code: `0` (stopped
 /// cleanly, including after [moq_origin_dynamic_close]) or a negative error.

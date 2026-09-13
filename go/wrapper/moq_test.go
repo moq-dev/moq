@@ -1058,9 +1058,9 @@ func TestDynamicServesARequestUnderAPrefix(t *testing.T) {
 	}
 }
 
-func TestDynamicRefusesANonPrefixPattern(t *testing.T) {
+func TestDynamicAcceptsANonPrefixPattern(t *testing.T) {
 	origin := moq.NewOriginProducer()
-	if _, err := origin.Dynamic("live/*", moq.Route{}); err == nil {
-		t.Fatal("expected error for a non-prefix pattern")
+	if _, err := origin.Dynamic("live/*", moq.Route{}); err != nil {
+		t.Fatal(err)
 	}
 }

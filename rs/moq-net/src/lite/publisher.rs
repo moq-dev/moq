@@ -570,9 +570,9 @@ struct AnnounceRun {
 	// path. Only announces that actually hit the wire get an id (filtered ones
 	// were never seen by the peer).
 	next_announce_id: u64,
-	// The routes the peer currently holds, keyed by suffix. The value is the
-	// announce id on versions that assign them.
-	live: HashMap<crate::PathOwned, Option<u64>>,
+	// The routes the peer currently holds, keyed by the presented pattern. The
+	// value is the announce id on versions that assign them.
+	live: HashMap<crate::Pattern, Option<u64>>,
 	phase: AnnouncePhase,
 }
 
@@ -596,18 +596,38 @@ impl AnnounceRun {
 		}
 	}
 
-	/// The suffix an update travels under on this stream.
-	fn suffix(&self, prefix: &crate::origin::Prefix) -> crate::PathOwned {
-		prefix
-			.as_path()
-			.strip_prefix(&self.prefix)
-			.expect("origin returned invalid prefix")
-			.to_owned()
+	/// The presented pattern an update travels under on this stream, relative
+	/// to the requested prefix.
+	fn presented(&self, pattern: &crate::Pattern) -> crate::Pattern {
+		let residuals = pattern.rebase(self.prefix.as_str());
+		residuals.iter().next().cloned().unwrap_or_else(|| pattern.clone())
+	}
+
+	/// Encode one advertisement: ANNOUNCE_START for a prefix-shaped residual,
+	/// ANNOUNCE_PATTERN otherwise. Prefix-shaped routes keep today's wire so a
+	/// literal-only deployment never emits the new message.
+	fn encode_active(
+		pattern: &crate::Pattern,
+		hops: Hops,
+		cost: crate::origin::Cost,
+	) -> lite::AnnounceBroadcast<'static> {
+		match pattern.as_prefix() {
+			Some(suffix) => lite::AnnounceBroadcast::Active {
+				suffix: crate::Path::new(suffix).to_owned(),
+				hops,
+				cost,
+			},
+			None => lite::AnnounceBroadcast::Pattern {
+				pattern: pattern.clone(),
+				hops,
+				cost: cost.warm,
+			},
+		}
 	}
 
 	/// The chain and cost to put on the wire for `route`, or `None` when it must
 	/// not be forwarded.
-	fn outgoing(&self, route: &crate::origin::Route, absolute: &crate::Path) -> Option<(Hops, crate::origin::Cost)> {
+	fn outgoing(&self, route: &crate::origin::Route, absolute: &crate::Pattern) -> Option<(Hops, crate::origin::Cost)> {
 		let mut hops = route.hops.clone();
 
 		// A route that already passed through us is a reflection. The origin
@@ -644,14 +664,14 @@ impl AnnounceRun {
 		Some(id)
 	}
 
-	/// Retract the peer's advertisement for `suffix`, if it holds one.
+	/// Retract the peer's advertisement for `pattern`, if it holds one.
 	fn retract<S: crate::transport::poll::Session>(
 		&mut self,
 		stream: &mut Stream<S, Version>,
-		suffix: crate::PathOwned,
-		absolute: &crate::Path,
+		pattern: crate::Pattern,
+		absolute: &crate::Pattern,
 	) -> Result<(), Error> {
-		let Some(id) = self.live.remove(&suffix) else {
+		let Some(id) = self.live.remove(&pattern) else {
 			// Filtered on the way out; the peer never saw it.
 			return Ok(());
 		};
@@ -660,7 +680,7 @@ impl AnnounceRun {
 			Some(id) => stream.writer.buffer(&lite::AnnounceBroadcast::EndedId { id })?,
 			// An ended announce doesn't need hops; the receiver matches on path only.
 			None => stream.writer.buffer(&lite::AnnounceBroadcast::Ended {
-				suffix: suffix.as_path(),
+				suffix: crate::Path::new(pattern.as_prefix().unwrap_or_else(|| pattern.as_str())).to_owned(),
 				hops: Hops::new(),
 			})?,
 		}
@@ -682,11 +702,18 @@ impl AnnounceRun {
 				// Send ANNOUNCE_INIT as the first message with all currently active routes.
 				// We use `try_next()` to synchronously get the initial updates.
 				while let Some(update) = announced.try_next() {
-					let suffix = self.suffix(&update.prefix);
-					let absolute = origin.absolute(update.prefix.as_path()).to_owned();
+					let pattern = self.presented(&update.pattern);
+					let Some(suffix) = pattern.as_prefix() else {
+						continue;
+					};
+					let suffix = crate::Path::new(suffix).to_owned();
+					let absolute = update
+						.pattern
+						.rooted(origin.root().as_str())
+						.map_err(|_| crate::coding::BoundsExceeded)?;
 
 					if update.active {
-						if self.outgoing(&update.route, &absolute.as_path()).is_none() {
+						if self.outgoing(&update.route, &absolute).is_none() {
 							continue;
 						}
 						tracing::debug!(route = %absolute, "announce");
@@ -708,22 +735,28 @@ impl AnnounceRun {
 				// stashing suffix+hops so we can both COUNT them for AnnounceOk and re-send
 				// them afterward. The receiver stamps our origin onto each hop chain, so we
 				// forward the stored chain as-is (no self push here).
-				let mut initial: Vec<(crate::PathOwned, Hops, crate::origin::Cost)> = Vec::new();
+				let mut initial: Vec<(crate::Pattern, Hops, crate::origin::Cost)> = Vec::new();
 				while let Some(update) = announced.try_next() {
-					let suffix = self.suffix(&update.prefix);
-					let absolute = origin.absolute(update.prefix.as_path()).to_owned();
+					let pattern = self.presented(&update.pattern);
+					if !self.version.has_announce_id() && pattern.as_prefix().is_none() {
+						continue;
+					}
+					let absolute = update
+						.pattern
+						.rooted(origin.root().as_str())
+						.map_err(|_| crate::coding::BoundsExceeded)?;
 
 					if update.active {
-						let Some((hops, cost)) = self.outgoing(&update.route, &absolute.as_path()) else {
+						let Some((hops, cost)) = self.outgoing(&update.route, &absolute) else {
 							continue;
 						};
 						tracing::debug!(route = %absolute, "announce");
-						initial.retain(|(s, ..)| s != &suffix);
-						initial.push((suffix, hops, cost));
+						initial.retain(|(s, ..)| s != &pattern);
+						initial.push((pattern, hops, cost));
 					} else {
 						// A potential race: a just-announced route already retracted.
 						tracing::debug!(route = %absolute, "unannounce");
-						initial.retain(|(s, ..)| s != &suffix);
+						initial.retain(|(s, ..)| s != &pattern);
 					}
 				}
 
@@ -734,14 +767,10 @@ impl AnnounceRun {
 					active: initial.len() as u64,
 				};
 				stream.writer.buffer(&ok)?;
-				for (suffix, hops, cost) in initial {
+				for (pattern, hops, cost) in initial {
 					let id = self.assign_id();
-					self.live.insert(suffix.clone(), id);
-					stream.writer.buffer(&lite::AnnounceBroadcast::Active {
-						suffix: suffix.as_path(),
-						hops,
-						cost,
-					})?;
+					self.live.insert(pattern.clone(), id);
+					stream.writer.buffer(&Self::encode_active(&pattern, hops, cost))?;
 				}
 			}
 			_ => {
@@ -791,16 +820,22 @@ impl AnnounceRun {
 				continue;
 			};
 
-			let suffix = self.suffix(&update.prefix);
-			let absolute = origin.absolute(update.prefix.as_path()).to_owned();
+			let pattern = self.presented(&update.pattern);
+			if !self.version.has_announce_id() && pattern.as_prefix().is_none() {
+				continue;
+			}
+			let absolute = update
+				.pattern
+				.rooted(origin.root().as_str())
+				.map_err(|_| crate::coding::BoundsExceeded)?;
 
 			if !update.active {
-				self.retract(stream, suffix, &absolute.as_path())?;
+				self.retract(stream, pattern, &absolute)?;
 				continue;
 			}
 
-			match self.outgoing(&update.route, &absolute.as_path()) {
-				Some((hops, cost)) => match self.live.get(&suffix) {
+			match self.outgoing(&update.route, &absolute) {
+				Some((hops, cost)) => match self.live.get(&pattern) {
 					// A metadata update on a live advertisement: restart it in
 					// place (lite-05 restarts via a duplicate ANNOUNCE).
 					Some(&id) if lite::restart_supported(self.version) => {
@@ -809,11 +844,7 @@ impl AnnounceRun {
 							Some(id) => stream
 								.writer
 								.buffer(&lite::AnnounceBroadcast::Restart { id, hops, cost })?,
-							None => stream.writer.buffer(&lite::AnnounceBroadcast::Active {
-								suffix: suffix.as_path(),
-								hops,
-								cost,
-							})?,
+							None => stream.writer.buffer(&Self::encode_active(&pattern, hops, cost))?,
 						}
 					}
 					// Pre-restart versions have no way to update a live
@@ -822,17 +853,13 @@ impl AnnounceRun {
 					None => {
 						tracing::debug!(route = %absolute, "announce");
 						let id = self.assign_id();
-						self.live.insert(suffix.clone(), id);
-						stream.writer.buffer(&lite::AnnounceBroadcast::Active {
-							suffix: suffix.as_path(),
-							hops,
-							cost,
-						})?;
+						self.live.insert(pattern.clone(), id);
+						stream.writer.buffer(&Self::encode_active(&pattern, hops, cost))?;
 					}
 				},
 				// The chain must not be forwarded (reflected, or full): retract
 				// whatever the peer holds.
-				None => self.retract(stream, suffix, &absolute.as_path())?,
+				None => self.retract(stream, pattern, &absolute)?,
 			}
 		}
 	}
@@ -1706,6 +1733,11 @@ mod announce_test {
 			},
 			lite::AnnounceBroadcast::EndedId { id } => lite::AnnounceBroadcast::EndedId { id },
 			lite::AnnounceBroadcast::Restart { id, hops, cost } => lite::AnnounceBroadcast::Restart { id, hops, cost },
+			lite::AnnounceBroadcast::Pattern { pattern, hops, cost } => {
+				lite::AnnounceBroadcast::Pattern { pattern, hops, cost }
+			}
+			lite::AnnounceBroadcast::Ignored { hops, cost } => lite::AnnounceBroadcast::Ignored { hops, cost },
+			lite::AnnounceBroadcast::Skipped => lite::AnnounceBroadcast::Skipped,
 		}
 	}
 
@@ -1868,6 +1900,61 @@ mod announce_test {
 			other => panic!("expected the clean announce, got {other:?}"),
 		}
 		task.abort();
+	}
+
+	/// A non-prefix pattern is advertised as ANNOUNCE_PATTERN, not as a path suffix.
+	#[tokio::test(start_paused = true)]
+	async fn wildcard_emits_announce_pattern() {
+		let origin = Hop::new(1).unwrap().produce();
+		let _server = origin
+			.dynamic(
+				"live/*".parse().unwrap(),
+				crate::origin::Route::default().with_hops(pub_hops()).with_cost(4),
+			)
+			.unwrap();
+
+		let log = Log::default();
+		let writes = log.writes.clone();
+		let consumer = origin.consume();
+		let mut stream = Stream::<SinkSession, Version> {
+			writer: Writer::new(SinkSend::new(log), VERSION),
+			reader: Reader::new(PendingRecv, VERSION),
+		};
+		let task = tokio::spawn(async move {
+			let mut announced = consumer.announced();
+			let self_origin = *consumer;
+			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, "", self_origin, VERSION).await
+		});
+		settle().await;
+
+		let mut wire = Wire { writes, cursor: 0 };
+		assert_eq!(wire.take_ok().active, 1);
+		match wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::Pattern { pattern, hops, cost }] => {
+				assert_eq!(pattern.as_str(), "live/*");
+				assert_eq!(hops, &pub_hops());
+				assert_eq!(*cost, 4);
+			}
+			other => panic!("expected ANNOUNCE_PATTERN, got {other:?}"),
+		}
+		task.abort();
+	}
+
+	/// A prefix-shaped route still uses ANNOUNCE_START, so a literal-only
+	/// deployment never emits the new message.
+	#[tokio::test(start_paused = true)]
+	async fn prefix_shaped_does_not_emit_pattern() {
+		let mut h = harness().await;
+		let _late = h
+			.origin
+			.announce("mic", crate::origin::Route::default().with_hops(pub_hops()))
+			.unwrap();
+		settle().await;
+		match h.wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::Active { suffix, .. }] => assert_eq!(suffix.as_str(), "mic"),
+			other => panic!("prefix-shaped must stay ANNOUNCE_START, got {other:?}"),
+		}
+		h.assert_idle();
 	}
 
 	/// A cost past the wire ceiling is clamped rather than rejected.

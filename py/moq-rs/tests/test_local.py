@@ -985,7 +985,6 @@ async def test_dynamic_serves_a_request_under_a_prefix():
     served.finish()
 
 
-def test_dynamic_refuses_a_non_prefix_pattern():
+def test_dynamic_accepts_a_non_prefix_pattern():
     origin = moq.OriginProducer()
-    with pytest.raises(Exception):
-        origin.dynamic("live/*")
+    origin.dynamic("live/*")

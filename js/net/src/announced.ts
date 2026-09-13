@@ -13,7 +13,7 @@ import * as Path from "./path.js";
 /**
  * A route announcement or retraction.
  *
- * A route claims that paths under {@link prefix} can be served; it carries no
+ * A route claims that paths under {@link pattern} can be served; it carries no
  * broadcast. By convention a publisher announces each broadcast's exact path,
  * so enumerating routes enumerates broadcasts; resolve one with the origin's
  * `request(path)`.
@@ -22,7 +22,7 @@ import * as Path from "./path.js";
  */
 export interface Event {
 	/** What the route covers, relative to the prefix passed to `announced()`. */
-	prefix: Path.Valid;
+	pattern: Path.Pattern;
 	/** True while the route is advertised, false when it was retracted. */
 	active: boolean;
 	/** Hops and cost of an active advertisement; omitted on a retraction. */
@@ -297,7 +297,7 @@ export class Broadcast {
 						if (!event) break;
 
 						// Scoped to `path`, so the exact broadcast arrives with an empty suffix; ignore children.
-						if (event.prefix !== Path.empty()) continue;
+						if (event.pattern.asPrefix() !== "") continue;
 
 						if (event.active) {
 							// A live subscription survives a redundant (re-)announce; only replace a dead one.
@@ -367,7 +367,7 @@ export class Broadcast {
 				if (!event) break;
 
 				// Scoped to `path`, so the exact broadcast arrives with an empty suffix; ignore children.
-				if (event.prefix !== Path.empty()) continue;
+				if (event.pattern.asPrefix() !== "") continue;
 				live.set(event.active);
 			}
 

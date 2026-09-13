@@ -16,11 +16,11 @@ test("next streams every appended event in order", async () => {
 	const producer = new Announce.Producer();
 	const consumer = producer.consume();
 
-	producer.append({ prefix: p("a"), active: true });
-	producer.append({ prefix: p("a"), active: false });
+	producer.append({ pattern: Path.Pattern.subtree(p("a")), active: true });
+	producer.append({ pattern: Path.Pattern.subtree(p("a")), active: false });
 
-	expect(await consumer.next()).toEqual({ prefix: p("a"), active: true });
-	expect(await consumer.next()).toEqual({ prefix: p("a"), active: false });
+	expect(await consumer.next()).toEqual({ pattern: Path.Pattern.subtree(p("a")), active: true });
+	expect(await consumer.next()).toEqual({ pattern: Path.Pattern.subtree(p("a")), active: false });
 });
 
 test("a same-name re-announce is a distinct update", async () => {
@@ -30,11 +30,11 @@ test("a same-name re-announce is a distinct update", async () => {
 	// The stream is a log, not a set: it carries a redundant active:true as its own update rather
 	// than collapsing it. Deciding what a repeat means belongs to the session layer, which resolves
 	// a restart into either nothing (a route change) or an end + start (a new publisher).
-	producer.append({ prefix: p("a"), active: true });
-	producer.append({ prefix: p("a"), active: true });
+	producer.append({ pattern: Path.Pattern.subtree(p("a")), active: true });
+	producer.append({ pattern: Path.Pattern.subtree(p("a")), active: true });
 
-	expect(await consumer.next()).toEqual({ prefix: p("a"), active: true });
-	expect(await consumer.next()).toEqual({ prefix: p("a"), active: true });
+	expect(await consumer.next()).toEqual({ pattern: Path.Pattern.subtree(p("a")), active: true });
+	expect(await consumer.next()).toEqual({ pattern: Path.Pattern.subtree(p("a")), active: true });
 });
 
 test("closing resolves next with undefined", async () => {
