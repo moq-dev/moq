@@ -21,7 +21,7 @@ import * as Path from "./path.js";
  * @public
  */
 export interface Event {
-	/** What the route covers, relative to the prefix passed to `announced()`. */
+	/** What the route covers, relative to the scope passed to `announced()`. */
 	pattern: Path.Pattern;
 	/** True while the route is advertised, false when it was retracted. */
 	active: boolean;
@@ -50,13 +50,13 @@ function closeState(state: AnnounceState, abort?: Error) {
  * @public
  */
 export class Producer {
-	/** Path prefix this stream is scoped to. */
-	prefix: Path.Valid;
+	/** The scopes this stream presents, as prefix-shaped patterns (`foo/**`, `**`). */
+	scope: Path.Patterns;
 
 	#state = new AnnounceState();
 
-	constructor(prefix = Path.empty()) {
-		this.prefix = prefix;
+	constructor(scope: Path.Patterns = new Path.Patterns([Path.Pattern.all()])) {
+		this.scope = scope;
 	}
 
 	/**
@@ -69,7 +69,7 @@ export class Producer {
 
 	/** A read handle for this announcement stream. */
 	consume(): Consumer {
-		return makeConsumer(this.prefix, this.#state);
+		return makeConsumer(this.scope, this.#state);
 	}
 
 	/** Writes an announcement to the queue. */
@@ -88,7 +88,7 @@ export class Producer {
 
 // Constructs a Consumer from within this module without exposing a public constructor
 // that would leak the unexported AnnounceState. Assigned in the class's static block.
-let makeConsumer: (prefix: Path.Valid, state: AnnounceState) => Consumer;
+let makeConsumer: (scope: Path.Patterns, state: AnnounceState) => Consumer;
 
 /**
  * The read side of an announcement stream.
@@ -99,13 +99,13 @@ let makeConsumer: (prefix: Path.Valid, state: AnnounceState) => Consumer;
  * @public
  */
 export class Consumer {
-	/** Path prefix this stream is scoped to. */
-	prefix: Path.Valid;
+	/** The scopes this stream presents, as prefix-shaped patterns (`foo/**`, `**`). */
+	scope: Path.Patterns;
 
 	#state: AnnounceState;
 
-	private constructor(prefix: Path.Valid, state: AnnounceState) {
-		this.prefix = prefix;
+	private constructor(scope: Path.Patterns, state: AnnounceState) {
+		this.scope = scope;
 		this.#state = state;
 	}
 
@@ -115,7 +115,7 @@ export class Consumer {
 	}
 
 	static {
-		makeConsumer = (prefix, state) => new Consumer(prefix, state);
+		makeConsumer = (scope, state) => new Consumer(scope, state);
 	}
 
 	/** Returns the next announcement. */
@@ -342,7 +342,8 @@ export class Broadcast {
 		// Follow the table regardless of sessions: a local publish resolves with no
 		// connection at all (and keeps resolving while one reconnects), and the
 		// identity-diffed announcements swap the handle on a republish.
-		const announced = origin.announced(this.path);
+		// The scope is the path's subtree: the exact path plus everything beneath it.
+		const announced = origin.announced(new Path.Patterns([Path.Pattern.subtree(this.path)]));
 		effect.cleanup(() => announced.close());
 
 		// Held open while the path is announced. A request resolves to the table's route when

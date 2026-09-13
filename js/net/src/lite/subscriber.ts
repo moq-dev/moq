@@ -185,7 +185,9 @@ export class Subscriber {
 	 * this connection's {@link origin}.
 	 */
 	announced(prefix = Path.empty(), options: AnnouncedOptions = {}): announce.Consumer {
-		const announced = new announce.Producer(prefix);
+		// The announce stream presents scopes; the wire interest prefix converts
+		// explicitly to its subtree.
+		const announced = new announce.Producer(new Path.Patterns([Path.Pattern.subtree(prefix)]));
 		void this.#runAnnounced(announced, prefix, options);
 		return announced.consume();
 	}
