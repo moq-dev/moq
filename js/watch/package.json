@@ -33,7 +33,7 @@
 	},
 	"devDependencies": {
 		"@types/audioworklet": "^0.0.100",
-		"@types/bun": "^1.4.0",
+		"@types/bun": "^1.4.1",
 		"@typescript/lib-dom": "npm:@types/web@^0.0.350",
 		"esbuild": "^0.28.2",
 		"rimraf": "^6.1.3",

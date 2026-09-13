@@ -27,7 +27,7 @@
 		"zod": "^4.5.0"
 	},
 	"devDependencies": {
-		"@types/bun": "^1.4.0",
+		"@types/bun": "^1.4.1",
 		"@types/node": "^26.4.1",
 		"@typescript/lib-dom": "npm:@types/web@^0.0.350",
 		"rimraf": "^6.1.3",
