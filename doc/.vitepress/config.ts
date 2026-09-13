@@ -192,9 +192,12 @@ export default defineConfig({
 			],
 		},
 
+		// GitHub and Discord are rendered by theme/Community.vue instead, with
+		// live counts and the hand-drawn icons from moq.dev.
 		socialLinks: [
-			{ icon: "github", link: "https://github.com/moq-dev/moq" },
-			{ icon: "discord", link: "https://discord.gg/FCYF3p99mr" },
+			{ icon: "x", link: "https://x.com/kixelated" },
+			{ icon: "bluesky", link: "https://bsky.app/profile/kixel.me" },
+			{ icon: "linkedin", link: "https://www.linkedin.com/in/luke-curley-635a457/" },
 		],
 
 		editLink: {
