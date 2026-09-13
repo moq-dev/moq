@@ -943,6 +943,11 @@ impl Producer {
 		self.state.poll_closed(waiter).map(|()| self.abort_reason())
 	}
 
+	/// Block until there is at least one active consumer.
+	pub async fn used(&self) -> Result<()> {
+		self.state.used().await.map_err(|_| self.abort_reason())
+	}
+
 	/// Block until there are no active consumers.
 	pub async fn unused(&self) -> Result<()> {
 		self.state.unused().await.map_err(|_| self.abort_reason())

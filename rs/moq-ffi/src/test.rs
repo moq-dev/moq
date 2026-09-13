@@ -76,22 +76,29 @@ async fn wait_for_config_error(
 	.expect("timed out waiting for the expected configuration error")
 }
 
-/// Run `read_frame` until the FFI runtime has taken `group`, proving it did not
-/// treat the current group as EOF, then abort that call. The group stays in the
-/// reader. `group` must already be published so the parked wait is for its first
-/// frame, not `next_group`.
-async fn cancel_parked_read_frame(consumer: &Arc<MoqTrackConsumer>) {
+/// Wait until `read_frame` has taken `group` off the ordered cursor.
+async fn wait_group_acquired(group: &MoqGroupProducer) {
+	tokio::time::timeout(TIMEOUT, group.used())
+		.await
+		.expect("timed out waiting for the group to be acquired")
+		.unwrap();
+}
+
+/// Run `read_frame` until it has taken `group`, proving it did not treat the
+/// current group as EOF, then abort that call. The group stays in the reader.
+async fn cancel_parked_read_frame(consumer: &Arc<MoqTrackConsumer>, group: &MoqGroupProducer) {
 	let mut read = {
 		let consumer = consumer.clone();
 		spawn_parked(async move { consumer.read_frame().await }).await
 	};
-	if read.is_finished() {
-		match read.await {
+	tokio::select! {
+		result = &mut read => match result {
 			Ok(Ok(Some(_))) => panic!("read_frame returned a frame before one was written"),
 			Ok(Ok(None)) => panic!("read_frame returned EOF before a frame was written"),
 			Ok(Err(err)) => panic!("read_frame errored before a frame was written: {err:?}"),
 			Err(err) => panic!("read task failed: {err:?}"),
-		}
+		},
+		_ = wait_group_acquired(group) => {}
 	}
 	read.abort();
 	match read.await {
@@ -2492,7 +2499,7 @@ async fn raw_read_frame_skips_empty_group_on_open_track() {
 	let empty = track.append_group().unwrap();
 	empty.finish().unwrap();
 
-	let mut read = {
+	let read = {
 		let consumer = consumer.clone();
 		spawn_parked(async move { consumer.read_frame().await }).await
 	};
@@ -2560,7 +2567,7 @@ async fn raw_read_frame_keeps_group_across_cancelled_call() {
 	let consumer = track.consume(None).unwrap();
 
 	let group = track.append_group().unwrap();
-	cancel_parked_read_frame(&consumer).await;
+	cancel_parked_read_frame(&consumer, &group).await;
 
 	let payload = b"kept".to_vec();
 	group
@@ -2589,6 +2596,53 @@ async fn raw_read_frame_keeps_group_across_cancelled_call() {
 	);
 }
 
+/// An error on a pending group's first frame is terminal for that group: the
+/// next `read_frame` moves on rather than retrying the dead group.
+#[tokio::test]
+async fn raw_read_frame_drops_aborted_pending_group() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("status".into(), None).unwrap();
+	let consumer = track.consume(None).unwrap();
+
+	let first = track.append_group().unwrap();
+	let read = {
+		let consumer = consumer.clone();
+		tokio::spawn(async move { consumer.read_frame().await })
+	};
+	wait_group_acquired(&first).await;
+	first.abort(409).unwrap();
+
+	let err = tokio::time::timeout(TIMEOUT, read)
+		.await
+		.expect("timed out waiting for the aborted group")
+		.expect("read task panicked");
+	match err {
+		Err(MoqError::Protocol { details: protocol }) => {
+			assert_eq!(protocol.scope, crate::error::MoqErrorScope::Stream);
+			assert_eq!(protocol.code, 64 + 409);
+			assert_eq!(protocol.kind, crate::error::MoqProtocolKind::App);
+		}
+		Err(other) => panic!("expected Protocol App(409), got {other:?}"),
+		Ok(Some(_)) => panic!("aborted group returned a frame"),
+		Ok(None) => panic!("aborted group returned EOF"),
+	}
+
+	let payload = b"next".to_vec();
+	track
+		.write_frame(MoqFrame {
+			payload: payload.clone(),
+			timestamp_us: 4_000,
+		})
+		.unwrap();
+	let frame = tokio::time::timeout(TIMEOUT, consumer.read_frame())
+		.await
+		.expect("timed out reading the group after an aborted pending group")
+		.unwrap()
+		.expect("an aborted pending group must not block later groups");
+	assert_eq!(frame.payload, payload);
+	assert_eq!(frame.timestamp_us, 4_000);
+}
+
 /// `next_group` and `read_frame` share one ordered cursor. A cancelled
 /// `read_frame` leaves its group for `next_group`; a group `next_group` has
 /// already returned is not also read as a first frame.
@@ -2599,7 +2653,7 @@ async fn raw_read_frame_and_next_group_share_the_cursor() {
 	let consumer = track.consume(None).unwrap();
 
 	let first = track.append_group().unwrap();
-	cancel_parked_read_frame(&consumer).await;
+	cancel_parked_read_frame(&consumer, &first).await;
 	first
 		.write_frame(MoqFrame {
 			payload: b"first".to_vec(),
@@ -2646,11 +2700,12 @@ async fn raw_read_frame_terminal_cancel_releases_demand() {
 		.expect("timed out waiting for the subscriber")
 		.unwrap();
 
-	let _open = track.append_group().unwrap();
+	let open = track.append_group().unwrap();
 	let read = {
 		let consumer = consumer.clone();
 		spawn_parked(async move { consumer.read_frame().await }).await
 	};
+	wait_group_acquired(&open).await;
 
 	consumer.cancel();
 	let err = tokio::time::timeout(TIMEOUT, read)

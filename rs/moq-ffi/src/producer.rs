@@ -863,6 +863,15 @@ impl MoqGroupProducer {
 	}
 }
 
+#[cfg(test)]
+impl MoqGroupProducer {
+	/// Wait until a consumer has this group.
+	pub(crate) async fn used(&self) -> Result<(), MoqError> {
+		let producer = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.clone();
+		Ok(producer.used().await?)
+	}
+}
+
 // ---- Media Producer ----
 
 impl MoqMediaProducer {

@@ -544,9 +544,8 @@ impl TrackShared {
 			if !acquired {
 				return Ok(None);
 			}
-			match kio::wait(|waiter| self.poll(|inner| inner.poll_pending_frame(waiter))).await? {
-				Some(frame) => return Ok(Some(raw_frame(frame)?)),
-				None => {}
+			if let Some(frame) = kio::wait(|waiter| self.poll(|inner| inner.poll_pending_frame(waiter))).await? {
+				return Ok(Some(raw_frame(frame)?));
 			}
 		}
 	}

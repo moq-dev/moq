@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `TrackConsumer.read_frame` skips completed empty groups instead of returning
-  EOF, and keeps a group across a cancelled read so its first frame is not lost.
+  EOF, keeps a group across a cancelled read so its first frame is not lost,
+  and drops a group that errors so a later read can move on.
 
 ### Changed
 

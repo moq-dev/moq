@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `group::Producer::used` waits until the group has a consumer, matching `unused`.
+
 ### Changed
 
 - `track::Producer::write_datagram(Datagram)` is now `insert_datagram(sequence, timestamp, payload)`, matching TypeScript `insertDatagram`. The supplied sequence is preserved; `append_datagram` remains the next-sequence convenience.
