@@ -628,10 +628,11 @@ test("lite draft-05: a straggler below the announced start group is not served",
 // to the next pop rather than reaching backward into this one.
 test("lite draft-05: a group popped before a cap update is still served", async () => {
 	const sub = await servedSubscription({ startGroup: 1, gated: true });
-	const ranges = spyOn(TrackSubscriber.prototype, "endAt");
+	const ranges = spyOn(TrackSubscriber.prototype, "setGroups");
 	try {
 		sub.serve(1);
 		await sub.parked;
+		ranges.mockClear();
 
 		await replayUpdate({ priority: 0, endGroup: 0 }).encode(sub.client.writer, Version.DRAFT_05);
 		await flush();
@@ -641,7 +642,7 @@ test("lite draft-05: a group popped before a cap update is still served", async 
 		sub.release();
 		expect(await sub.servedSequence()).toBe(1);
 		while (ranges.mock.calls.length === 0) await flush();
-		expect(ranges).toHaveBeenLastCalledWith(1);
+		expect(ranges).toHaveBeenLastCalledWith({ start: undefined, end: { included: 0 } });
 	} finally {
 		ranges.mockRestore();
 		sub.release();
@@ -654,7 +655,7 @@ test("lite draft-05: a group popped before a cap update is still served", async 
 // poll order.
 test("lite draft-06: a queued floor update applies before the next group pop", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0, gated: true });
-	const ranges = spyOn(TrackSubscriber.prototype, "startAt");
+	const ranges = spyOn(TrackSubscriber.prototype, "setGroups");
 	try {
 		sub.serve(0);
 		await sub.parked;
@@ -664,13 +665,13 @@ test("lite draft-06: a queued floor update applies before the next group pop", a
 		sub.serve(2);
 		await flush();
 		expect(ranges).toHaveBeenCalledTimes(1);
-		expect(ranges).toHaveBeenLastCalledWith(0);
+		expect(ranges).toHaveBeenLastCalledWith({ start: { included: 0 }, end: undefined });
 
 		sub.release();
 
 		expect(await sub.servedSequence()).toBe(0);
 		expect(await sub.servedSequence()).toBe(2);
-		expect(ranges).toHaveBeenLastCalledWith(2);
+		expect(ranges).toHaveBeenLastCalledWith({ start: { included: 2 }, end: undefined });
 	} finally {
 		ranges.mockRestore();
 		sub.release();
@@ -687,7 +688,7 @@ test("lite draft-06: a queued frame floor applies before the next group pop", as
 		frames: ["a", "b", "c"],
 		gated: true,
 	});
-	const ranges = spyOn(TrackSubscriber.prototype, "startAt");
+	const ranges = spyOn(TrackSubscriber.prototype, "setGroups");
 	try {
 		sub.serve(0);
 		await sub.parked;
@@ -696,13 +697,13 @@ test("lite draft-06: a queued frame floor applies before the next group pop", as
 		await replayUpdate({ priority: 0, startGroup: 1, startFrame: 2 }).encode(sub.client.writer, Version.DRAFT_06);
 		await flush();
 		expect(ranges).toHaveBeenCalledTimes(1);
-		expect(ranges).toHaveBeenLastCalledWith(0);
+		expect(ranges).toHaveBeenLastCalledWith({ start: { included: 0 }, end: undefined });
 
 		sub.release();
 
 		expect(await sub.servedGroup()).toEqual({ sequence: 0, frameStart: 0, payloads: ["a", "b", "c"] });
 		expect(await sub.servedGroup()).toEqual({ sequence: 1, frameStart: 2, payloads: ["c"] });
-		expect(ranges).toHaveBeenLastCalledWith(1);
+		expect(ranges).toHaveBeenLastCalledWith({ start: { included: 1 }, end: undefined });
 	} finally {
 		ranges.mockRestore();
 		sub.release();
@@ -777,7 +778,7 @@ test("lite draft-06: a burst of updates coalesces before the next group pop", as
 		sub.serve(0);
 		await sub.parked;
 		sub.serve(1);
-		const ranges = spyOn(TrackSubscriber.prototype, "endAt");
+		const ranges = spyOn(TrackSubscriber.prototype, "setGroups");
 
 		try {
 			// Two updates land back to back, the second superseding the first.
@@ -796,7 +797,7 @@ test("lite draft-06: a burst of updates coalesces before the next group pop", as
 			// Group 1 is popped under the latest state, with no application of the older one.
 			expect(await sub.servedGroup()).toEqual({ sequence: 1, frameStart: 0, payloads: ["a"] });
 			expect(ranges).toHaveBeenCalledTimes(1);
-			expect(ranges).toHaveBeenLastCalledWith(2);
+			expect(ranges).toHaveBeenLastCalledWith({ start: undefined, end: { included: 1 } });
 		} finally {
 			ranges.mockRestore();
 		}
@@ -814,19 +815,21 @@ test("lite draft-06: a newer update wins before a buffered group backlog drains"
 		gated: true,
 	});
 	let second!: Promise<void>;
-	const endAt = TrackSubscriber.prototype.endAt;
-	const ranges = spyOn(TrackSubscriber.prototype, "endAt").mockImplementation(function (
+	const setGroups = TrackSubscriber.prototype.setGroups;
+	const ranges = spyOn(TrackSubscriber.prototype, "setGroups").mockImplementation(function (
 		this: TrackSubscriber,
-		endGroup,
+		groups,
 	) {
-		second ??= replayUpdate({ priority: 0, endGroup: 1 }).encode(sub.client.writer, Version.DRAFT_06);
-		return endAt.call(this, endGroup);
+		if (groups.start === undefined)
+			second ??= replayUpdate({ priority: 0, endGroup: 1 }).encode(sub.client.writer, Version.DRAFT_06);
+		return setGroups.call(this, groups);
 	});
 
 	try {
 		// Group 0 parks the loop. Groups 1 and 2 are both readable when it wakes.
 		sub.serve(0);
 		await sub.parked;
+		ranges.mockClear();
 		sub.serve(1);
 		sub.serve(2);
 
@@ -851,10 +854,11 @@ test("lite draft-06: a newer update wins before a buffered group backlog drains"
 // The full update remains atomic to observers, while the local range cursor stays serialized.
 test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0, gated: true });
-	const ranges = spyOn(TrackSubscriber.prototype, "endAt");
+	const ranges = spyOn(TrackSubscriber.prototype, "setGroups");
 	try {
 		sub.serve(0);
 		await sub.parked;
+		ranges.mockClear();
 
 		await replayUpdate({ priority: 9, endGroup: 5 }).encode(sub.client.writer, Version.DRAFT_06);
 		await flush();
@@ -870,7 +874,7 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 		sub.release();
 		expect(await sub.servedSequence()).toBe(0);
 		while (ranges.mock.calls.length === 0) await flush();
-		expect(ranges).toHaveBeenLastCalledWith(6);
+		expect(ranges).toHaveBeenLastCalledWith({ start: undefined, end: { included: 5 } });
 	} finally {
 		ranges.mockRestore();
 		sub.release();

@@ -10,8 +10,7 @@
 //! Frames are numbered from 0 in write order. A group can be short at its front or its
 //! back but never in the middle: [Producer::start_at] starts it later, so a handle can
 //! carry the tail of a group whose leading frames came from somewhere else, and
-//! [Producer::finish] ends it wherever writing stopped. [Consumer::start_at] /
-//! [Consumer::end_at] bound a reader to a sub-range the same way [`track::Subscriber`]
+//! [Producer::finish] ends it wherever writing stopped. [Consumer::set_frames] bound a reader to a sub-range the same way [`track::Subscriber`]
 //! bounds group sequences.
 //!
 //! The stream is closed with [Error] when all writers or readers are dropped.
@@ -20,6 +19,7 @@ use crate::frame::{self, Frame, FrameBuf};
 use crate::{Cap, Timescale, stats, track};
 use std::collections::VecDeque;
 use std::mem::MaybeUninit;
+use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Poll, ready};
@@ -451,7 +451,7 @@ impl Producer {
 	/// head of the group, typically another route serving the same track (see
 	/// [`crate::track::Subscriber`]).
 	///
-	/// The counterpart of [`Consumer::start_at`], which positions a *reader* the same
+	/// The counterpart of [`Consumer::set_frames`], which positions a *reader* the same
 	/// way. Where the group begins is part of its shape, so this must come before the
 	/// first frame; afterwards it returns [`Error::Closed`].
 	pub fn start_at(&mut self, index: u64) -> Result<()> {
@@ -1098,7 +1098,7 @@ struct Plain {
 	// NOTE: Cloned readers inherit this offset, but then run in parallel.
 	index: usize,
 
-	// Exclusive cap on `index`, set by [`Consumer::end_at`]. Reads end cleanly at it.
+	// Exclusive cap on `index`, set by [`Consumer::set_frames`]. Reads end cleanly at it.
 	end: Option<usize>,
 
 	// A batch of completed frames drained ahead under one lock (whole-frame reads only).
@@ -1343,13 +1343,30 @@ impl Consumer {
 
 	/// The index of the next frame this consumer will return.
 	///
-	/// Starts at 0, or at the group's first available frame once [`Self::start_at`] has
+	/// Starts at 0, or at the group's first available frame once [`Self::set_frames`] has
 	/// clamped it, and advances by one per frame read.
 	pub fn index(&self) -> u64 {
 		match &self.inner {
 			ConsumerKind::Plain(plain) => plain.index as u64,
 			ConsumerKind::Spliced(spliced) => spliced.index(),
 		}
+	}
+
+	/// Limit subsequent reads to these frame indices, returning the reader for chaining.
+	pub fn with_frames(mut self, frames: impl RangeBounds<u64>) -> Self {
+		self.set_frames(frames);
+		self
+	}
+
+	/// Limit subsequent reads to these frame indices without rewinding read progress.
+	///
+	/// `2..=5` includes frames 2 through 5; `2..5` excludes frame 5. An omitted
+	/// start preserves read progress, and an omitted end removes the cap.
+	/// Raising the cap makes unread cached frames available again.
+	pub fn set_frames(&mut self, frames: impl RangeBounds<u64>) {
+		let (start, end) = super::subscription::sequence_bounds(frames);
+		self.start_at(start);
+		self.end_at(end.map_or(Bound::Unbounded, Bound::Excluded));
 	}
 
 	/// Skip ahead so the next frame returned is `index`, discarding anything buffered
@@ -1361,7 +1378,7 @@ impl Consumer {
 	/// actually landed.
 	/// Only moves forward; a lower `index` is ignored, since the frames behind the
 	/// cursor may already have been handed out.
-	pub fn start_at(&mut self, index: u64) {
+	pub(crate) fn start_at(&mut self, index: u64) {
 		match &mut self.inner {
 			ConsumerKind::Plain(plain) => plain.start_at(index),
 			ConsumerKind::Spliced(spliced) => spliced.start_at(index),
@@ -1370,7 +1387,7 @@ impl Consumer {
 
 	/// Advance the read cursor to `index`, skipping every frame below it.
 	///
-	/// Unlike [`Self::start_at`], this does not clamp past a requested frame the group
+	/// Unlike [`Self::set_frames`], this does not clamp past a requested frame the group
 	/// never held. A [`Producer::start_at`] floor above `index` still surfaces as
 	/// [`Error::Lagged`].
 	pub fn skip_to(&mut self, index: u64) {
@@ -1384,9 +1401,9 @@ impl Consumer {
 	///
 	/// `..=2` reads through frame 2, `..2` stops before it, and `..0` is the empty range:
 	/// no frame is delivered. Reads past the cap end cleanly (`None`), as if the group
-	/// finished there. Unlike [`Self::start_at`] this can move in either direction:
-	/// raising it re-offers frames that are still cached.
-	pub fn end_at(&mut self, end: impl Into<Cap>) {
+	/// finished there. The cap can move in either direction: raising it re-offers
+	/// frames that are still cached.
+	pub(crate) fn end_at(&mut self, end: impl Into<Cap>) {
 		let end = end.into().exclusive();
 		match &mut self.inner {
 			ConsumerKind::Plain(plain) => {
@@ -1416,7 +1433,7 @@ impl Consumer {
 	/// Poll for the next frame, without blocking.
 	///
 	/// Returns None if the group is finished and the index is out of range, or the cursor
-	/// passed the [`Self::end_at`] cap.
+	/// passed the [`Self::set_frames`] cap.
 	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
 		if self.ended {
 			return Poll::Ready(Ok(None));
@@ -1762,7 +1779,7 @@ pub struct Fetch {
 	/// cached locally and only the tail is missing.
 	///
 	/// There is no matching end: a fetch always runs to the end of the group, and a
-	/// caller wanting less caps the returned consumer with [`Consumer::end_at`]. Stopping
+	/// caller wanting less caps the returned consumer with [`Consumer::set_frames`]. Stopping
 	/// the *fetch* short would put a group in the cache that is indistinguishable from a
 	/// complete one, so a later fetch of the whole group would resolve from it and come
 	/// up short.
@@ -2409,7 +2426,7 @@ mod test {
 		producer.finish().unwrap();
 
 		let mut consumer = producer.consume();
-		consumer.end_at(..2);
+		consumer.set_frames(..2);
 		assert_eq!(
 			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
 			0
@@ -2423,10 +2440,36 @@ mod test {
 			"capped reads end cleanly"
 		);
 
-		consumer.end_at(..);
+		consumer.set_frames(..);
 		assert_eq!(
 			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
 			2
+		);
+	}
+
+	#[test]
+	fn frame_ranges_preserve_progress_and_make_inclusion_explicit() {
+		let mut producer = Info { sequence: 0 }.produce();
+		for i in 0..4u8 {
+			producer.write_frame(Timestamp::ZERO, Bytes::from(vec![i])).unwrap();
+		}
+		producer.finish().unwrap();
+		let mut consumer = producer.consume().with_frames(1..=1);
+		assert_eq!(
+			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
+			1
+		);
+		assert!(consumer.read_frame().now_or_never().unwrap().unwrap().is_none());
+		consumer.set_frames(..3);
+		assert_eq!(
+			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
+			2
+		);
+		assert!(consumer.read_frame().now_or_never().unwrap().unwrap().is_none());
+		consumer.set_frames(0..=3);
+		assert_eq!(
+			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
+			3
 		);
 	}
 
@@ -2439,13 +2482,13 @@ mod test {
 		producer.finish().unwrap();
 
 		let mut consumer = producer.consume();
-		consumer.end_at(..0);
+		consumer.set_frames(..0);
 		assert!(
 			consumer.read_frame().now_or_never().unwrap().unwrap().is_none(),
 			"empty cap delivers nothing"
 		);
 
-		consumer.end_at(..1);
+		consumer.set_frames(..1);
 		assert_eq!(
 			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload,
 			Bytes::from_static(b"x")

@@ -240,7 +240,7 @@ test("a lagging consumer is told what it missed", async () => {
 		producer.push({ n });
 		producer.pop(1);
 	}
-	subscriber.startAt(subscriber.latest() as number);
+	subscriber.setGroups({ start: { included: subscriber.latest() as number } });
 	const events = await live.finish();
 
 	const skipped = events.flatMap((e) => ("skip" in e ? span(e.skip) : []));
@@ -293,7 +293,7 @@ test("a fresh consumer adopts the current offset", async () => {
 	producer.pop(3);
 
 	const subscriber = track.subscribe();
-	subscriber.startAt(subscriber.latest() as number);
+	subscriber.setGroups({ start: { included: subscriber.latest() as number } });
 	const consumer = new Consumer<Rec>(subscriber);
 	producer.finish();
 	const events: Event<Rec>[] = [];

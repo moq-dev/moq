@@ -65,7 +65,7 @@ pub struct Subscription {
 	///
 	/// Aggregated across every live subscriber (the loosest floor wins, and any subscriber
 	/// without one clears it), so it says what the publisher sends, not what any one
-	/// subscriber sees. [`crate::track::Subscriber::start_at`] is the local read cursor;
+	/// subscriber sees. [`crate::track::Subscriber::set_groups`] is the local read cursor;
 	/// setting one does not imply the other. See [Local cursor vs wire
 	/// preference](crate::track::Subscriber#local-cursor-vs-wire-preference).
 	pub start: Option<Position>,
@@ -81,7 +81,7 @@ pub struct Subscription {
 	/// The wire agrees: `Group End` and `Frame End` are both encoded as `absolute + 1`.
 	///
 	/// A request, aggregated across every live subscriber (any unbounded subscriber makes
-	/// the aggregate unbounded). [`crate::track::Subscriber::end_at`] is the local read
+	/// the aggregate unbounded). [`crate::track::Subscriber::set_groups`] is the local read
 	/// cursor; [`Position::group_end`] translates this field into its bound. Setting one
 	/// does not imply the other.
 	pub end: Option<Position>,
@@ -139,18 +139,10 @@ impl Subscription {
 	/// clear both bounds. An inclusive end past the last group is unbounded, as
 	/// [`Position::after_group`] spells it.
 	pub fn with_groups(mut self, groups: impl RangeBounds<u64>) -> Self {
-		self.start = match groups.start_bound() {
-			Bound::Included(&group) => Some(Position::group(group)),
-			Bound::Excluded(&group) => Some(Position::group(
-				group.checked_add(1).expect("group range starts past the last group"),
-			)),
-			Bound::Unbounded => None,
-		};
-		self.end = match groups.end_bound() {
-			Bound::Included(&group) => Position::after_group(group),
-			Bound::Excluded(&group) => Some(Position::group(group)),
-			Bound::Unbounded => None,
-		};
+		let unbounded_start = matches!(groups.start_bound(), Bound::Unbounded);
+		let (start, end) = sequence_bounds(groups);
+		self.start = (!unbounded_start).then(|| Position::group(start));
+		self.end = end.map(Position::group);
 		self
 	}
 
@@ -229,7 +221,7 @@ impl Position {
 	}
 
 	/// The bound this exclusive end puts on a group cursor, for
-	/// [`crate::track::Subscriber::end_at`].
+	/// [`crate::track::Subscriber::set_groups`].
 	///
 	/// A head-of-group end excludes its group. A mid-group end includes it, so a frame
 	/// cap can apply within that group.
@@ -248,7 +240,7 @@ impl Position {
 /// before 5, `..=5` reads through it, and `..` removes the cap. A [`Bound`] converts
 /// too, for callers holding one (a decoded wire field, or [`Position::group_end`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Cap(Option<u64>);
+pub(crate) struct Cap(Option<u64>);
 
 impl Cap {
 	/// The first index withheld, or `None` for no cap. Cursors store this form and
@@ -285,6 +277,19 @@ impl From<RangeFull> for Cap {
 	fn from(_: RangeFull) -> Self {
 		Self(None)
 	}
+}
+
+// Normalize discrete ranges once, including the empty range above the last index.
+pub(super) fn sequence_bounds(range: impl RangeBounds<u64>) -> (u64, Option<u64>) {
+	let start = match range.start_bound() {
+		Bound::Included(&start) => start,
+		Bound::Excluded(&start) => match start.checked_add(1) {
+			Some(start) => start,
+			None => return (u64::MAX, Some(u64::MAX)),
+		},
+		Bound::Unbounded => 0,
+	};
+	(start, Cap::from(range.end_bound().cloned()).exclusive())
 }
 
 /// Whether `sequence` is strictly below an exclusive cap. `None` is unbounded.

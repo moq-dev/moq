@@ -165,3 +165,17 @@ JavaScript exposes `SessionError` and `StreamError`. Match the registry before
 interpreting the number. Native bindings expose scope, code, kind, and a diagnostic
 message; unknown and application codes retain their numeric value. Transport
 failures without a protocol code remain separate.
+
+## Local read limits
+
+Group ranges name which groups a reader may deliver. In Rust,
+`with_groups(2..=5)` includes group 5, while `with_groups(2..5)` excludes it.
+An existing reader uses `set_groups(...)`. TypeScript spells the endpoints
+explicitly: `reader.withGroups({ start: { included: 2 }, end: { included: 5 } })`
+or `reader.setGroups(...)`.
+
+Changing these local limits preserves read progress. Raising the start skips
+lower groups; lowering it never rewinds the reader. Raising or removing the
+end cap makes unread buffered groups available again. These local limits do
+not change upstream demand; subscription preferences control that separately.
+The wire encoding is unchanged.

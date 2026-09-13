@@ -628,16 +628,13 @@ impl Consume {
 
 	fn apply_raw_subscription(track: &mut moq_net::track::Ordered, subscription: Option<moq_net::track::Subscription>) {
 		let subscription = subscription.unwrap_or_default();
-		if let Some(start) = subscription.start.map(|start| start.group).or_else(|| track.latest()) {
-			track.start_at(start);
-		}
-		// The local cap mirrors the requested end, so an empty request parks even
-		// while another subscriber keeps demand alive.
-		track.end_at(
+		let start = subscription.start.map(|start| start.group).or_else(|| track.latest());
+		track.set_groups((
+			start.map_or(Bound::Unbounded, Bound::Included),
 			subscription
 				.end
 				.map_or(Bound::Unbounded, moq_net::track::Position::group_end),
-		);
+		));
 		// A closed track makes the update meaningless; the reader already sees the close.
 		let _ = track.update(subscription);
 	}

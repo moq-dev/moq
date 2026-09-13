@@ -107,7 +107,7 @@ impl Consumer {
 		if config.start == Start::Latest
 			&& let Some(live_edge) = track.latest()
 		{
-			subscriber.start_at(live_edge);
+			subscriber.set_groups(live_edge..);
 		}
 		let track = subscriber;
 		let max_age = config.max_age.min(track.info().max_age);

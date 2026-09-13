@@ -35,3 +35,19 @@ cargo add moq-net moq-tokio
 See the [Rust quick start](/lib/rs/#quick-start) and
 [docs.rs/moq-net](https://docs.rs/moq-net). The TypeScript twin is
 [`@moq/net`](/lib/js/net).
+
+## Limiting reads
+
+Use `Subscription::default().with_groups(2..=5)` to request only groups 2
+through 5. `2..5` excludes group 5, and `..` leaves both ends unbounded.
+The range limits the data eligible under the subscription's max-age budget;
+it does not fetch historical data by itself.
+
+A reader's `with_groups(2..=5)` applies a local limit. Use `set_groups(...)`
+to update an existing reader. Both preserve read progress: a lower start does
+not rewind the reader, and an omitted start keeps its current floor. An
+omitted end removes the cap, making unread buffered groups available again.
+Local limits do not update the subscription's upstream request.
+
+Inside a group, `with_frames(...)` and `set_frames(...)` apply the same range
+syntax to frame indices.

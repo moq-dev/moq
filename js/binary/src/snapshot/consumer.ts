@@ -43,7 +43,7 @@ export class Consumer {
 	async next(): Promise<Uint8Array | undefined> {
 		for (;;) {
 			const latest = this.#track.latest();
-			if (latest !== undefined) this.#track.startAt(latest);
+			if (latest !== undefined) this.#track.setGroups({ start: { included: latest } });
 
 			let next: Awaited<ReturnType<Moq.Track.Ordered["readFrameSequence"]>>;
 			try {

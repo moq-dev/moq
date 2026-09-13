@@ -99,6 +99,33 @@ export function infoDefaults(info: Partial<Info> = {}): Info {
 	};
 }
 
+/** An explicitly included or excluded group sequence. */
+export type Bound = { included: number; excluded?: never } | { excluded: number; included?: never };
+
+/** Group limits; an omitted endpoint is unbounded. */
+export interface Groups {
+	/** The first group boundary. */
+	start?: Bound;
+	/** The last group boundary. */
+	end?: Bound;
+}
+
+// Validate before changing a cursor so a malformed end cannot partly advance it.
+function groupBounds(groups: Groups): { start: number; end?: number } {
+	const bound = (value: Bound | undefined, start: boolean): number | undefined => {
+		if (value === undefined) return undefined;
+		if ((value.included === undefined) === (value.excluded === undefined)) {
+			throw new Error("a group bound must be either included or excluded");
+		}
+		const sequence = value.included ?? value.excluded;
+		if (sequence === undefined || !Number.isSafeInteger(sequence) || sequence < 0) {
+			throw new Error("a group bound must be a non-negative safe integer");
+		}
+		return sequence + (start ? Number(value.excluded !== undefined) : Number(value.included !== undefined));
+	};
+	return { start: bound(groups.start, true) ?? 0, end: bound(groups.end, false) };
+}
+
 /**
  * Per-subscription options, requested when a subscription opens and adjustable later via
  * {@link Subscriber.update}. Mirrors the Rust `Subscription`.
@@ -1049,24 +1076,26 @@ export class Subscriber {
 		return producer.subscribe(options);
 	}
 
-	/** Start this subscriber's local read cursor at `sequence`, without changing its wire request. */
-	startAt(sequence: number): void {
-		this.#cursor.update((cursor) => ({ ...cursor, start: sequence }));
+	/** Limit subsequent reads to these groups and return this reader for chaining. */
+	withGroups(groups: Groups): this {
+		this.setGroups(groups);
+		return this;
 	}
 
 	/**
-	 * Cap {@link recvGroup} at `sequence` exclusively, or omit it to remove the cap. `0` is
-	 * the empty range. Groups at or past the cap remain buffered and become readable if
-	 * the cap is raised. This local cursor does not change the subscription's wire request.
+	 * Limit subsequent reads without rewinding read progress or changing the wire request.
+	 * An omitted start preserves the current floor; an omitted end removes the cap.
+	 * Raising the end makes unread buffered groups available again.
 	 */
-	endAt(sequence?: number): void {
-		this.#cursor.update((cursor) => ({ ...cursor, end: sequence }));
+	setGroups(groups: Groups): void {
+		const { start, end } = groupBounds(groups);
+		this.#cursor.update((cursor) => ({ start: Math.max(cursor.start, start), end }));
 	}
 
 	/** Close the track (optionally with an error), closing any pending groups. Idempotent. */
 	close(abort?: Error) {
 		// Settle if we're first (the producer may already have); either way drop anything
-		// still buffered. Groups parked at the endAt cap deliberately outlive a clean
+		// still buffered. Groups parked at the setGroups cap deliberately outlive a clean
 		// producer close, so the subscriber leaving is what must release them: closing
 		// and clearing wakes a pending read to observe the end instead of hanging.
 		closeTrackState(this.#state, abort);
@@ -1087,7 +1116,7 @@ export class Subscriber {
 	 * is still delivered. When several groups are buffered, the lowest sequence is
 	 * returned first.
 	 *
-	 * Honors the floor set by {@link startAt} and the cap set by {@link endAt}: a group
+	 * Honors the range set by {@link setGroups}: a group
 	 * beyond the cap stays buffered (not dropped) and is offered once the cap rises, even
 	 * after a clean close, without blocking in-range groups that arrive behind it.
 	 * A group whose presentation time is further behind the live edge than this
@@ -1161,7 +1190,7 @@ export class Subscriber {
 	 *
 	 * Returns `undefined` when nothing is deliverable right now, which is not by itself the
 	 * end of the track: a group may still arrive, or one may be parked beyond the
-	 * {@link endAt} cap. Use it to drain what the retained window already holds, where
+	 * {@link setGroups} cap. Use it to drain what the retained window already holds, where
 	 * waiting for a sequence nothing will republish would park forever.
 	 */
 	tryRecvGroup(): GroupConsumer | undefined {
@@ -1413,18 +1442,15 @@ export class Ordered {
 		return this.#subscriber.final();
 	}
 
-	/** Start this cursor at `sequence`, without changing the subscription's wire request. */
-	startAt(sequence: number): void {
-		this.#subscriber.startAt(sequence);
+	/** Limit subsequent reads to these groups and return this reader for chaining. */
+	withGroups(groups: Groups): this {
+		this.setGroups(groups);
+		return this;
 	}
 
-	/**
-	 * Cap this cursor at `sequence` exclusively, or omit it to remove the cap. `0` is the
-	 * empty range. Groups at or past the cap remain buffered and become readable if the
-	 * cap is raised.
-	 */
-	endAt(sequence?: number): void {
-		this.#subscriber.endAt(sequence);
+	/** Limit subsequent reads to these groups; see {@link Subscriber.setGroups}. */
+	setGroups(groups: Groups): void {
+		this.#subscriber.setGroups(groups);
 	}
 
 	/** Update this subscription's options; see {@link Subscriber.update}. */
@@ -1443,7 +1469,7 @@ export class Ordered {
 	 * Late arrivals (sequence at or below the last returned) are silently skipped, as is a
 	 * group whose every frame is further behind the live edge than `maxAge` (the default of
 	 * zero keeps only what nothing newer has superseded). Honors the bounds set by
-	 * {@link startAt} and {@link endAt}.
+	 * {@link setGroups}.
 	 */
 	nextGroup(): Promise<GroupConsumer | undefined> {
 		return ordered_.nextGroup(this.#subscriber);

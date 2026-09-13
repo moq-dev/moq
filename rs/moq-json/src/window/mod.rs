@@ -322,7 +322,7 @@ mod test {
 		}
 		producer.pop(3).unwrap();
 		let mut subscriber = producer.consume();
-		subscriber.start_at(subscriber.latest().unwrap());
+		subscriber.set_groups(subscriber.latest().unwrap()..);
 		let mut fresh = consumer(subscriber, false);
 		producer.finish().unwrap();
 

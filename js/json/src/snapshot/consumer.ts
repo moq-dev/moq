@@ -50,7 +50,7 @@ export class Consumer<T> {
 				// Collapse the retained backlog: older groups only hold superseded state, so
 				// jump the cursor to the newest buffered group instead of replaying each one.
 				const latest = this.#track.latest();
-				if (latest !== undefined) this.#track.startAt(latest);
+				if (latest !== undefined) this.#track.setGroups({ start: { included: latest } });
 				// Advance to the next group with a higher sequence number (skipping late arrivals).
 				this.#group = await this.#track.nextGroup();
 				if (!this.#group) return undefined;
