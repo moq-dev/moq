@@ -28,9 +28,9 @@ language to expose every platform surface.
 
 Define and implement the shared binding contract here. OBS owns graphics
 imports and presentation; the FFI video consumer owns rendition subscription
-and portable delivery. Output-format controls reuse this contract. Preserve
-existing C ABI layout unless a breaking change is explicitly planned on dev;
-adding fields to a published C struct is not automatically additive.
+and portable delivery. The M1 C decoder quest owns the output-configuration layout; consume its
+landed format and size controls without another struct layout change. Adding
+fields to a published C struct is not automatically additive.
 
 Test handle release, conversion failures, cancellation, delayed consumption,
 and retained ownership through the existing libmoq/FFI test lanes. Platform
@@ -40,6 +40,10 @@ and C/binding documentation; run `just test smoke-full` in CI.
 Public API: owned frame access and conversion at the binding boundary. Wire:
 none. Keep the existing moq-video core API unless a concrete consumer needs a
 change.
+
+## Required
+
+- [C decoder output](/quest/m1/api-c-decoder-output.md) - settle the C output layout before adding frame accessors
 
 ## Related
 

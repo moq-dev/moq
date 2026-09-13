@@ -15,7 +15,7 @@ and hardware validation. Priority is separate from branch targeting:
 published API breaks still target dev under the repository rules. An issue
 already fixed on dev stays open until dev merges.
 
-The 2026-09 audit keeps ring-TCP in m2 and defers catalog identity, mobile
+The 2026-09 audit keeps uring-TCP in m2 and defers catalog identity, mobile
 ownership and dependent capture, Linux OBS GPU feasibility, the LiveKit
 shim, and experimental QUIC probing. Independently useful binding, codec,
 room, and transport work stays in m2.

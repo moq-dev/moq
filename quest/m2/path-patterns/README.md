@@ -79,7 +79,6 @@ CAT cannot represent `pid/*/chat`.
 
 - [Origin scopes](/quest/m2/path-patterns/origin.md) - literal origin roots
   carry arbitrary pattern unions without widening authorization
-  preserve v0 and enforce exact v1 grants
 - [Token SDKs](/quest/m2/path-patterns/token-sdk.md) - published libraries and
   CLIs default new minting to v1
 - [Relay auth](/quest/m2/path-patterns/relay-auth.md) - relay token, public,
@@ -88,6 +87,8 @@ CAT cannot represent `pid/*/chat`.
   a full pattern in ANNOUNCE_REQUEST
 
 ## Related
+
+- [Versioned token claims API](/quest/m1/api-token-claims.md) - owns the working v0/v1 library contract before release
 
 - [Wildcard advertisements](/quest/m2/wildcard/README.md) - routing adopts the
   matcher while retaining its own cost, pool, refusal, and resolution work

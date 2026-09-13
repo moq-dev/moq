@@ -43,6 +43,8 @@ be in it the day it ships. Cross-package sync: `rs/hang`, `js/hang`,
 
 ## Required
 
+- [Broadcast clock](/quest/m1/broadcast-clock.md) - event times use the landed shared clock contract
+
 - [Metadata association contract](/quest/m2/metadata-association.md) - settles the shared framing and missing-data semantics before this section adopts them
 
 ## Closes

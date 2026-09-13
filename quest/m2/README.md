@@ -76,7 +76,7 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 - [Stream sessions](/quest/m2/uring-tcp/README.md) - serve WebSocket and HTTP from the io_uring workers, where io_uring pays off most
 - [Perf](/quest/m2/perf/README.md) - eliminate measured hot-path costs across moq-uring, kio, and the moq-net model
 - [#2924](/quest/m2/2924-moq-relay-tls-rotation-is-not-atomic-across-thread-per.md) - every QUIC worker shares one reloadable served identity, so rotation is atomic and generate works with workers
-- [#2964](/quest/m2/2964-quic-workers-dropping-one-split-server-resizes-the.md) - `split(self)` returns a group handle that owns every socket and stops when any member finishes
+- [#2964](/quest/m2/2964-quic-workers-dropping-one-split-server-resizes-the.md) - integrate the M1 worker owner with hardened socket-group formation
 - [Reuseport group](/quest/m2/reuseport-group.md) - `moq_sock::shard::Group` exposes no socket before the filter is attached and retains all of them
 - [Bandwidth estimate release](/quest/m2/web-transport-bandwidth-estimate.md) - web-transport-quinn reports quinn's BBR bandwidth estimate and ships a release carrying it
 - [#2847](/quest/m2/2847-the-quinn-backends-send-bandwidth-estimate-is-cwnd-rtt.md) - quinn backend: bump to the releases that report the controller bandwidth estimate instead of cwnd/rtt

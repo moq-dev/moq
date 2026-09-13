@@ -7,6 +7,11 @@ matching wildcard.
 
 ## Plan
 
+Specificity before cost is an explicit routing policy: a catch-all must not
+silently take over a path still claimed by a concrete service, even when that
+service refuses the request. Keep the draft and regressions aligned with it.
+
+
 [moq#3225](https://github.com/moq-dev/moq/pull/3225) built the table this quest
 needs. `Consumer::request_broadcast` resolves a local broadcast first, then
 `best_server`, which filters routes to those covering the path, drops any whose

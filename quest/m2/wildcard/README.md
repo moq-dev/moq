@@ -4,9 +4,11 @@
 
 A service can advertise a path pattern it could
 serve rather than enumerating every broadcast matching it. A wildcard is priced
-at what starting the work would cost, so a running publisher wins on the metric
-routing already minimizes, and retracting the wildcard stops new work without
-shedding what is already running.
+at what starting the work would cost. Specificity wins first: a concrete
+claim shadows a wildcard regardless of cost, and prices compete within the
+same specificity tier. A terminal concrete refusal does not fall through to
+a catch-all; its claim must be withdrawn. Retracting a wildcard stops new
+work without shedding what is already running.
 
 Three workloads need this, and they are the three pattern shapes. A transcode
 worker today announces a standby derivative for every matching live broadcast,

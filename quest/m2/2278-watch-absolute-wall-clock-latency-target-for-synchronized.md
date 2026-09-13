@@ -1,4 +1,4 @@
-# [S] hang: a timeline consumer exposes the wall anchor
+# [S] hang: expose the broadcast wall clock
 
 ## Goal
 
@@ -25,12 +25,13 @@ producer or create per-record clock epochs. Keep `js/watch` arrival-based Sync
 unchanged. Document PTS-to-wall conversion and the requirement that an
 application knows whether remote clocks are synchronized.
 
-Nothing populates `wall` from the built-in publishers today, so this waits on
-[Publishers anchor the timeline](/quest/m1/broadcast-clock.md).
+Verify application access using the built-in publisher integration, including
+a live-only broadcast with no archive timeline.
 
 ## Required
 
-- [Publishers anchor the timeline](/quest/m1/broadcast-clock.md) - there is no anchor to expose until publishers set one
+- [Broadcast clock](/quest/m1/broadcast-clock.md) - the catalog shape and shared clock owner
+- [Publisher clocks](/quest/m2/publisher-clock.md) - built-in publishers populate the mapping applications read
 
 ## Closes
 
