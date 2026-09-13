@@ -34,6 +34,8 @@ version for mTLS.
 
 ## Required
 
+- [Plan](/quest/m1/auth-api/plan.md) - the open contract decision lands
+  before implementation starts
 - [mTLS identity](/quest/m1/auth-api/mtls-identity.md) - the request the
   grant answers
 - [Relay auth](/quest/m2/path-patterns/relay-auth.md) - the versioned grant

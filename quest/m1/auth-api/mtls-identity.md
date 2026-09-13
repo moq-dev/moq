@@ -63,6 +63,11 @@ scope, because the root is the path the client dialed.
   from one identity produce one endpoint request. Update the mTLS and auth
   API sections of `doc/bin/relay/auth.md`.
 
+## Required
+
+- [Plan](/quest/m1/auth-api/plan.md) - the open contract decision lands
+  before implementation starts
+
 ## Closes
 
 - [#3087](https://github.com/moq-dev/moq/issues/3087) - close this issue when the quest finishes

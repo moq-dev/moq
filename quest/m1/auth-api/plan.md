@@ -28,10 +28,11 @@ Settled on 2026-09-13, so the interview starts past them:
 - A re-check whose grant is narrower resizes the live session in place;
   the path-patterns relay-auth quest owns the resize and this line inherits it.
 - mTLS peers are re-checked on the same `max-age` and `stale-if-error`
-  semantics as tokens. The questline README's "never revalidated" and the
-  identity quest's `revalidate` stays `None` are superseded; the plan
-  records what a refusing endpoint does to a mesh and whether a relay-side
-  floor is wanted.
+  semantics as tokens: a refusing endpoint drops the peer within two
+  cadences, an outage rides the stale window. The questline README's "never
+  revalidated" and the identity quest's `revalidate` stays `None` are
+  superseded. Still open here: whether the relay floors the staleness window
+  for mesh peers, which was the reason the old rule pinned `None`.
 - Every request carries `root`, `transport`, and `host` in every mode, with
   `transport` required rather than optional; `mtls` when present.
 - A `404` refuses at admission as it does on re-check; `401`/`403` refuse
@@ -46,8 +47,10 @@ relay cannot today serve a JWT project on per-`kid` caching and a verdict
 project at once. Candidates: an `auto` mode where a credential that parses as
 a JWT with a `kid` takes the token path and anything else takes the proxy
 path; a proxy-mode fleet whose endpoint verifies JWTs itself; or a separate
-listener for verdict projects. The priority above favors whichever keeps
-per-`kid` caching for JWTs. Decide it, then size and order the quests here,
+listener for verdict projects. Only `auto` adds relay complexity; the other
+two are operator layout, so weigh it in the interview rather than assuming
+it. The priority above favors whichever keeps per-`kid` caching for JWTs.
+Decide it, then size and order the quests here,
 including a docs quest: the reference in `doc/bin/relay/auth.md` has no single
 table for the whole reply, `config.md` never shows `api_mode`, and the
 admission-time status mapping is written nowhere.

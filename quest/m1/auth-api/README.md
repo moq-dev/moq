@@ -11,10 +11,14 @@ and an endpoint that names no `max-age` turns revalidation off without a
 trace. This line closes those gaps on the HTTP contract; the wire side is
 [In-band auth](/quest/m2/auth/README.md).
 
-It sits in m1 because `mtls=<identity>` and the `"v": 1` reply break the
-endpoint contract, and because moq.pro needs the cacheable token path settled
-before it adopts the release. [Plan](/quest/m1/auth-api/plan.md) carries the
-decisions settled on 2026-09-13 and the one still open; run it first.
+It sits in m1 because `mtls=<identity>` and the now-required request fields
+break the endpoint contract, and ranks first because moq.pro adopts the
+release only once that contract is settled. The `"v": 1` reply shape belongs
+to [Relay auth](/quest/m2/path-patterns/relay-auth.md), which stays in m2, so
+[mTLS explicit scope](/quest/m1/auth-api/mtls-scope.md) finishes after the
+merge unless the planning pass pulls relay auth forward. Everything here
+branches from `dev`. [Plan](/quest/m1/auth-api/plan.md) carries the decisions
+settled on 2026-09-13 and the one still open; run it first.
 
 ## Plan
 
@@ -28,15 +32,17 @@ The caching model every quest here keeps:
 - mTLS: the request carries the peer's identity and the reply is cached per
   (root, identity, transport). Not unrestricted by default once the endpoint
   speaks v1. Re-checked on the same `max-age` and `stale-if-error` semantics
-  as tokens (decided 2026-09-13), so an endpoint outage is tolerated for the
-  stale window and a refusal drops the peer within two cadences.
+  as tokens (decided 2026-09-13): an endpoint outage is tolerated for the
+  stale window and a refusal drops the peer within two cadences. Whether the
+  relay floors that window for mesh peers is open, in
+  [Plan](/quest/m1/auth-api/plan.md).
 - Revalidation rides the admission cache, so a re-check can be answered from
   an entry up to one `max-age` old and the revocation window is up to twice
   `max-age`, floored at one second. That belongs in operator documentation,
   not a doc comment.
 
 `--auth-api-mode proxy` landed on dev in #3044, and the quest that planned it
-is deleted. Everything here branches from dev unless a quest says main.
+is deleted.
 
 ## Quests
 

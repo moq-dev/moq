@@ -62,7 +62,12 @@ and meters, so rebuilding a local handle would retag nothing.
   main repeats one paragraph and claims a 3x staleness window the code does
   not have; dev already rewrote it, so take dev's wording.
 
-On main, additive.
+On dev, additive; it lands with the merge as part of this line.
+
+## Required
+
+- [Plan](/quest/m1/auth-api/plan.md) - the open contract decision lands
+  before implementation starts
 
 ## Closes
 

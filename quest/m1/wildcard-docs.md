@@ -23,10 +23,12 @@ section; the library pages, the relay pages, and the binding docs do not.
   the wire.
 - `doc/lib/rs/moq-net.md` and `doc/lib/js/net.md`: `Pattern` and `Patterns`
   with `contains`, `overlaps`, `rooted`, `rebase`; the announce events that
-  now carry a pattern; `create_broadcast` plus `set_announce` against
-  `announce(prefix, route)` and `dynamic`. Ownership mirrors the code:
-  match the names #3577 settled, and cover the FFI-generated bindings in
-  their own pages where one exists.
+  now carry a pattern; and the three operations as #3577 aligned them:
+  `origin.create_broadcast(path)` returning a producer whose
+  `announce(route)` and `unannounce()` own the advertisement, against
+  `origin.dynamic(pattern, route)` for a claim over a pattern. Take the
+  names from the code at the time of writing, not from this quest, and cover
+  the FFI-generated bindings in their own pages where one exists.
 - `doc/bin/relay/cluster.md`: wildcard advertisements are forwarded and
   costed like any route; state the containment rule against the publisher's
   grant.
