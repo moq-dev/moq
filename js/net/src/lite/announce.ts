@@ -268,7 +268,7 @@ async function encodeSegment(w: Writer, segment: Path.Segment) {
 
 async function decodePattern(r: Reader): Promise<Path.Pattern | undefined> {
 	const count = await r.u53();
-	if (count > Path.MAX_PARTS) throw new Error("pattern exceeds path limit");
+	if (count > Path.MAX_PARTS) throw new ProtocolViolation("pattern exceeds path limit");
 	const segments: Path.Segment[] = [];
 	let ignored = false;
 	for (let i = 0; i < count; i++) {
@@ -288,15 +288,15 @@ async function decodeSegment(r: Reader): Promise<Path.Segment | undefined> {
 		case SEGMENT_LITERAL: {
 			const literal = new TextDecoder().decode(value);
 			if (!literal || literal.includes("/") || literal.includes("*")) {
-				throw new Error("invalid literal segment");
+				throw new ProtocolViolation("invalid literal segment");
 			}
 			return { kind: "literal", value: literal };
 		}
 		case SEGMENT_WILDCARD:
-			if (value.byteLength > 0) throw new Error("wildcard value must be empty");
+			if (value.byteLength > 0) throw new ProtocolViolation("wildcard value must be empty");
 			return { kind: "wildcard" };
 		case SEGMENT_GLOBSTAR:
-			if (value.byteLength > 0) throw new Error("globstar value must be empty");
+			if (value.byteLength > 0) throw new ProtocolViolation("globstar value must be empty");
 			return { kind: "globstar" };
 		case SEGMENT_PARTIAL: {
 			const inner = new Reader(undefined, value);
@@ -306,7 +306,7 @@ async function decodeSegment(r: Reader): Promise<Path.Segment | undefined> {
 			const prefix = new TextDecoder().decode(prefixBytes);
 			const suffix = new TextDecoder().decode(suffixBytes);
 			if ((!prefix && !suffix) || /[*/]/.test(prefix) || /[*/]/.test(suffix)) {
-				throw new Error("invalid partial segment");
+				throw new ProtocolViolation("invalid partial segment");
 			}
 			return { kind: "partial", prefix, suffix };
 		}

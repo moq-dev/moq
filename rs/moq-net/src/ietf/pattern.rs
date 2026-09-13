@@ -47,12 +47,11 @@ pub fn peer_from_setup(params: &Parameters, version: Version) -> Result<Peer, De
 }
 
 /// Write our Setup Option into a SETUP parameter block.
-pub fn peer_into_setup(params: &mut Parameters, version: Version) {
-	if !supported(version) {
-		return;
-	}
-	params.set_varint(super::ParameterVarInt::NamespacePatterns, 1);
-}
+///
+/// Decode-first: do not advertise NAMESPACE_PATTERNS until we emit
+/// NAMESPACE_PATTERN and apply received patterns on PUBLISH_NAMESPACE.
+/// Still decode the option if the peer sends it (`peer_from_setup`).
+pub fn peer_into_setup(_params: &mut Parameters, _version: Version) {}
 
 /// Encode a pattern's segment kinds as the NAMESPACE_PATTERN parameter value.
 pub fn encode_kinds(pattern: &Pattern, version: Version) -> Result<Vec<u8>, EncodeError> {
@@ -198,10 +197,15 @@ mod tests {
 	}
 
 	#[test]
-	fn setup_option_is_off_until_both_send_one() {
+	fn setup_option_is_not_advertised() {
 		let mut params = super::Parameters::default();
 		assert!(!peer_from_setup(&params, Version::Draft19).unwrap().negotiated);
 		peer_into_setup(&mut params, Version::Draft19);
+		assert!(
+			!peer_from_setup(&params, Version::Draft19).unwrap().negotiated,
+			"decode-first: do not request NAMESPACE_PATTERNS"
+		);
+		params.set_varint(super::ParameterVarInt::NamespacePatterns, 1);
 		assert!(peer_from_setup(&params, Version::Draft19).unwrap().negotiated);
 		assert!(!peer_from_setup(&params, Version::Draft16).unwrap().negotiated);
 	}
