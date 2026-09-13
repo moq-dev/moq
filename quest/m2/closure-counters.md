@@ -2,9 +2,10 @@
 
 ## Goal
 
-`moq_stats::aggregate` states and tests one invariant for what happens to a
-departed node's live gauges and their `*_closed` closure counters when the node
-returns: a consumer never reads a closure counter below a value it already saw.
+`moq_stats::aggregate` has one stated, tested rule for what a consumer reads
+when a departed node returns: a same-lifetime rejoin never regresses a closure
+counter, and a genuine restart is either floored to the last value or an
+explicit fresh segment. The rule is documented as a consumer-facing contract.
 
 ## Plan
 
