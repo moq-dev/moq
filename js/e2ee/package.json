@@ -1,0 +1,27 @@
+{
+	"name": "@moq/e2ee",
+	"type": "module",
+	"version": "0.1.0",
+	"description": "End-to-end encryption for MoQ tracks: opaque names, AES-128-GCM groups and datagrams, encrypted catalogs.",
+	"license": "(MIT OR Apache-2.0)",
+	"repository": "github:moq-dev/moq",
+	"sideEffects": false,
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"scripts": {
+		"build": "rimraf dist && tsc -b tsconfig.build.json && bun ../common/package.ts",
+		"check": "tsc --noEmit",
+		"test": "bun test --only-failures",
+		"release": "bun ../common/release.ts"
+	},
+	"dependencies": {
+		"@moq/net": "workspace:^",
+		"@moq/signals": "workspace:^"
+	},
+	"devDependencies": {
+		"@types/bun": "^1.4.1",
+		"rimraf": "^6.1.3",
+		"typescript": "7.0.2"
+	}
+}

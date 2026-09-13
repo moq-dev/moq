@@ -33,6 +33,7 @@
 		"js/pattern",
 		"js/token",
 		"js/flate",
+		"js/e2ee",
 		"js/binary",
 		"js/json",
 		"js/hang",

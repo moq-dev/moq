@@ -22,6 +22,7 @@ and WebAudio. `@moq/net` also runs in Node, Bun, and Deno.
 | [@moq/signals](/lib/js/signals) | The reactive primitives every package exposes its state through. |
 | [@moq/json](https://www.npmjs.com/package/@moq/json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
 | [@moq/flate](https://www.npmjs.com/package/@moq/flate) | Group-scoped DEFLATE for any track. |
+| [@moq/e2ee](https://github.com/moq-dev/moq/tree/dev/js/e2ee) | End-to-end encryption of tracks, catalogs, and opaque names (`moq-e2ee-01`). |
 | [@moq/loc](https://www.npmjs.com/package/@moq/loc), [@moq/msf](https://www.npmjs.com/package/@moq/msf) | The IETF LOC container and MSF catalog. |
 | [@moq/boy](https://www.npmjs.com/package/@moq/boy) | The [MoQ Boy](/bin/demo) player element. |
 
