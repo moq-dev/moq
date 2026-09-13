@@ -312,34 +312,43 @@ export function readonlys<T extends SignalMap>(signals: T): Readonlys<T> {
  * A value or an existing readable for it: the argument form accepted by {@link getter}
  * and, per-field, by {@link Inputs}. Mirrors the `T | Signal<T>` shape of {@link Signal.from}.
  *
- * The readable must be a `Signal`, `Computed`, or `Once`; {@link getter} throws on any other
- * implementation of {@link Getter} because it can't subscribe to one without leaking.
+ * A readable is any {@link Getter}: a `Signal`, `Computed`, `Once`, or {@link Derived}
+ * from this package (including another copy's branded `Signal`), a {@link readonlys}
+ * output, or a foreign adapter with the same three methods. {@link getter} reuses those
+ * as-is and wraps any other value in a fresh `Signal`. Shape is the discriminator, not a
+ * brand: an object whose `peek`, `subscribe`, and `changed` are functions is a readable;
+ * a plain object with a `peek` data field is not.
  */
 export type GetterInit<T> = T | Getter<T>;
 
 /**
- * Builds a read-only {@link Getter} from a value or an existing readable. The read-only
- * counterpart to {@link Signal.from}: a `Signal`, `Computed`, or `Once` (including the result
- * of {@link readonlys}) is reused as-is, so one component's `out` can be wired straight into
- * another's `in`; any other value is wrapped in a fresh `Signal`.
+ * Builds a read-only {@link Getter} from a {@link GetterInit}: any existing {@link Getter}
+ * is reused as-is, and any other value is wrapped in a fresh `Signal`.
  *
- * Throws on a readable this package didn't create, since wrapping it would silently
- * freeze it into a constant.
+ * Does not wrap a readable or subscribe to it. Wrapping would freeze it into a constant;
+ * a subscription here would leak because nothing owns it. Older copies of this package
+ * brand `Signal` but not the readable; those still pass through.
+ *
+ * ```ts
+ * getter(1);
+ * getter(new Signal(1));
+ * getter(new Computed((e) => e.get(source)));
+ * getter(new Once<string>());
+ * getter(new Derived([source], (v) => v > 0));
+ * getter(produced.out.count);
+ * getter(adapter); // any object with peek, subscribe, and changed
+ * ```
  */
 export function getter<T>(value: GetterInit<T>): Getter<T> {
-	if (branded(value, GETTER_BRAND) || branded(value, SIGNAL_BRAND)) {
+	if (branded(value, GETTER_BRAND) || branded(value, SIGNAL_BRAND) || getterShaped(value)) {
 		return value as Getter<T>;
-	}
-
-	if (getterShaped(value)) {
-		throw new Error("getter() requires a Signal, Computed, or Once; a foreign readable would become a constant");
 	}
 
 	return new Signal(value as T);
 }
 
-// A readable we didn't make: it would be wrapped as a value and never update, so callers get an
-// error instead of a component that silently never sees a change.
+// Shape, not brand: a foreign adapter and an older unbranded readable both match.
+// Wrapping either would freeze it into a constant.
 function getterShaped(value: unknown): boolean {
 	if (typeof value !== "object" || value === null) return false;
 	const maybe = value as Partial<Getter<unknown>>;
@@ -350,8 +359,19 @@ function getterShaped(value: unknown): boolean {
 
 /**
  * Derives a component's constructor argument from its `in` map: every entry becomes
- * optional and accepts a raw value, a Signal, or another component's `out` Getter
- * (the {@link getter} contract). Removes the hand-written, drift-prone argument interface.
+ * optional and accepts a {@link GetterInit} of that field's value (the {@link getter}
+ * contract). Removes the hand-written, drift-prone argument interface.
+ *
+ * ```ts
+ * type In = { count: Getter<number> };
+ * constructor(props?: Inputs<In>) {
+ *   this.in = { count: getter(props?.count ?? 0) };
+ * }
+ * new C({ count: 1 });
+ * new C({ count: new Signal(1) });
+ * new C({ count: other.out.count });
+ * new C({ count: adapter });
+ * ```
  */
 export type Inputs<I extends SignalMap> = { [K in keyof I]?: GetterInit<GetterType<I[K]>> };
 
@@ -988,9 +1008,9 @@ export type GetterValues<S extends readonly Getter<unknown>[]> = { [K in keyof S
  * tracked automatically, and `fn` must be cheap and pure since it runs per read.
  *
  * Reach for it when a class wants to publish a small mapped view of its own state as part of
- * its public surface. A hand-written object with the same three methods would work until a
- * consumer passed it to {@link getter} or an {@link Inputs} field, which reject a readable
- * this package did not create.
+ * its public surface. A hand-written object with the same three methods also satisfies
+ * {@link Getter} and is accepted by {@link getter}; this class is the packaged form of that
+ * view, with sources named up front.
  *
  * It relays its sources rather than filtering them: every source notification becomes one
  * here, even when the mapped value is unchanged. Deduplicating instead would have to compare

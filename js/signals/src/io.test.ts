@@ -1,8 +1,28 @@
 import { expect, test } from "bun:test";
-import { Computed, Derived, Effect, type Getter, getter, Once, readonlys, Signal } from "./index.ts";
+import {
+	Computed,
+	Derived,
+	Effect,
+	type Getter,
+	type GetterInit,
+	getter,
+	type Inputs,
+	Once,
+	readonlys,
+	Signal,
+} from "./index.ts";
 
 // Lets the microtask flush and any timer-based follow-up run.
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+// A conforming Getter this package did not create: no brand, just the three methods.
+function adapter<T>(source: Getter<T>): Getter<T> {
+	return {
+		peek: () => source.peek(),
+		subscribe: (fn) => source.subscribe(fn),
+		changed: ((fn?: (value: T) => void) => (fn ? source.changed(fn) : source.changed())) as Getter<T>["changed"],
+	};
+}
 
 test("getter wraps a raw value in a fresh Signal", () => {
 	const g = getter(5);
@@ -94,15 +114,126 @@ test("getter passes through a Signal from an older package version", () => {
 	expect(getter(old as unknown as Getter<number>)).toBe(old);
 });
 
-test("getter throws on a foreign readable instead of freezing it", () => {
-	// Quacks like a Getter but carries no brand: wrapping it would silently never update.
+test("getter reuses a foreign readable instead of freezing it", async () => {
+	const source = new Signal(0);
+	const foreign = adapter(source);
+
+	const input = getter(foreign);
+	expect(input).toBe(foreign);
+
+	const other = source.subscribe(() => {}); // so set() has subscribers and queues a flush
+	source.set(1);
+
+	const raw: number[] = [];
+	const adapted: number[] = [];
+	const cancelRaw = source.changed((value) => raw.push(value));
+	const cancelAdapted = input.changed((value) => adapted.push(value));
+
+	await settle();
+	expect(adapted).toEqual(raw);
+	expect(adapted).toEqual([1]);
+	cancelRaw();
+	cancelAdapted();
+	other();
+});
+
+test("a foreign readable wired as an input notifies until unsubscribed", async () => {
+	const source = new Signal(0);
+	const input = getter(adapter(source));
+
+	const seen: number[] = [];
+	const dispose = input.subscribe((value) => seen.push(value));
+
+	source.set(1);
+	await settle();
+	source.set(2);
+	await settle();
+	expect(seen).toEqual([1, 2]);
+
+	dispose();
+	source.set(3);
+	await settle();
+	expect(seen).toEqual([1, 2]);
+});
+
+test("a foreign readable wired into an in stays live under an effect", async () => {
+	const source = new Signal(1);
+	const input = getter(adapter(source));
+
+	const seen: number[] = [];
+	const effect = new Effect((e) => {
+		seen.push(e.get(input));
+	});
+
+	await Promise.resolve();
+	source.set(4);
+	await settle();
+
+	expect(seen).toContain(4);
+
+	effect.close();
+});
+
+test("getter does not subscribe to a readable it reuses", () => {
+	let subscribed = 0;
 	const foreign: Getter<number> = {
 		peek: () => 1,
 		changed: (() => {}) as Getter<number>["changed"],
-		subscribe: () => () => {},
+		subscribe: () => {
+			subscribed++;
+			return () => {};
+		},
 	};
 
-	expect(() => getter(foreign)).toThrow();
+	expect(getter(foreign)).toBe(foreign);
+	expect(subscribed).toBe(0);
+});
+
+test("GetterInit and Inputs accept every conforming readable and reject the rest", () => {
+	const source = new Signal(1);
+	const computed = new Computed((effect) => effect.get(source) * 2);
+	const once = new Once<number>();
+	const derived = new Derived([source], (value) => value);
+	const output = readonlys({ count: source }).count;
+	const foreign = adapter(source);
+
+	function read(value: GetterInit<number>): Getter<number> {
+		return getter(value);
+	}
+	function readMaybe(value: GetterInit<number | undefined>): Getter<number | undefined> {
+		return getter(value);
+	}
+	function construct(props: Inputs<{ count: Getter<number> }>): Getter<number> {
+		return getter(props.count ?? 0);
+	}
+
+	expect(read(1).peek()).toBe(1);
+	expect(read(source)).toBe(source);
+	expect(read(derived)).toBe(derived);
+	expect(read(output)).toBe(source);
+	expect(read(foreign)).toBe(foreign);
+	expect(readMaybe(computed)).toBe(computed);
+	expect(readMaybe(once)).toBe(once);
+
+	expect(construct({}).peek()).toBe(0);
+	expect(construct({ count: 2 }).peek()).toBe(2);
+	expect(construct({ count: source })).toBe(source);
+	expect(construct({ count: output })).toBe(source);
+	expect(construct({ count: derived })).toBe(derived);
+	expect(construct({ count: foreign })).toBe(foreign);
+
+	// @ts-expect-error a string is not a number or Getter<number>
+	read("nope");
+	// @ts-expect-error a data object is not a number or Getter<number>
+	read({ peek: 1 });
+	// @ts-expect-error an incomplete readable is not a Getter
+	read({ peek: () => 1 });
+	// @ts-expect-error a Getter of the wrong value type
+	read(new Signal("nope"));
+	// @ts-expect-error a string is not a number or Getter<number>
+	construct({ count: "nope" });
+
+	computed.close();
 });
 
 test("getter still wraps plain objects that are not readables", () => {
@@ -115,7 +246,6 @@ test("getter accepts a Derived, so a mapped view can be wired as an input", () =
 	const source = new Signal({ total: 0 });
 	const view = new Derived([source], ({ total }) => total > 0);
 
-	// The point of the class over a hand-written object: getter() would reject that as foreign.
 	expect(getter(view)).toBe(view);
 });
 
