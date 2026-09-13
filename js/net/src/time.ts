@@ -103,6 +103,12 @@ export const Timescale = Object.assign(
 	},
 );
 
+function assertTimestampValue(value: number): void {
+	if (!Number.isFinite(value) || value < 0 || value > Number.MAX_SAFE_INTEGER) {
+		throw new RangeError(`invalid timestamp: ${value}`);
+	}
+}
+
 /**
  * A presentation timestamp: a raw value in a given {@link Timescale}.
  *
@@ -112,7 +118,9 @@ export const Timescale = Object.assign(
  * The value must be finite and in `[0, Number.MAX_SAFE_INTEGER]`. Fractions are allowed
  * (`performance.now()`, scale conversion). Encoding rounds to the nearest integer at the
  * track timescale. Integer timestamps are exact through `2^53 - 1` units; this package
- * does not use BigInt for timestamps.
+ * does not use BigInt for timestamps. {@link Timestamp.as} also refuses a converted
+ * value that leaves that range, so a legal source timestamp cannot become an unencodable
+ * wire timestamp after a scale change.
  */
 export class Timestamp {
 	/** The raw value, in `scale` units. */
@@ -122,9 +130,7 @@ export class Timestamp {
 
 	/** Build a timestamp of `value` units at `scale`. */
 	constructor(value: number, scale: Timescale) {
-		if (!Number.isFinite(value) || value < 0 || value > Number.MAX_SAFE_INTEGER) {
-			throw new RangeError(`invalid timestamp: ${value}`);
-		}
+		assertTimestampValue(value);
 		this.value = value;
 		this.scale = Timescale(scale);
 	}
@@ -144,9 +150,12 @@ export class Timestamp {
 		return new Timestamp(us, Timescale.MICRO);
 	}
 
-	/** This timestamp's value re-expressed at `scale` (a raw number, not a new Timestamp). */
+	/** This timestamp's value re-expressed at `scale`; throws if the result is not in the safe range. */
 	as(scale: Timescale): number {
-		return scale === this.scale ? this.value : (this.value * scale) / this.scale;
+		const dest = Timescale(scale);
+		const converted = dest === this.scale ? this.value : (this.value * dest) / this.scale;
+		assertTimestampValue(converted);
+		return converted;
 	}
 
 	/** The value in milliseconds. */

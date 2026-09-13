@@ -43,3 +43,14 @@ test("Timestamp rejects values past the safe integer range", () => {
 	expect(() => new Timestamp(Number.MAX_SAFE_INTEGER + 1, Timescale.MILLI)).toThrow(RangeError);
 	expect(() => new Timestamp(2 ** 62, Timescale.MILLI)).toThrow(RangeError);
 });
+
+test("Timestamp.as converts within the safe range", () => {
+	expect(Timestamp.fromMillis(2000).as(Timescale.MICRO)).toBe(2_000_000);
+	expect(Timestamp.fromMillis(2000).as(Timescale.MILLI)).toBe(2000);
+	expect(Timestamp.fromMicros(2_000_000).as(Timescale.MILLI)).toBe(2000);
+});
+
+test("Timestamp.as rejects conversions past the safe integer range", () => {
+	// Source value and destination scale are each legal; the converted wire value is not.
+	expect(() => Timestamp.fromMillis(2000).as(Timescale(Number.MAX_SAFE_INTEGER))).toThrow(RangeError);
+});
