@@ -11,7 +11,7 @@ burst sizes.
 Boundaries: no packet loss concealment; an underrun still renders a ramped
 gap. The target estimator and the ring's slack and re-stall are #3517 on
 dev; the clock the stretch converges toward is
-[Plan: A/V clock](/quest/m1/plan-av-clock.md).
+[Plan: A/V clock](/quest/m2/plan-av-clock.md).
 
 ## Plan
 
@@ -29,6 +29,6 @@ Branch from dev.
 
 ## Required
 
-- [Plan: A/V clock](/quest/m1/plan-av-clock.md) - stretching against a free-running ring only moves the drift
+- [Plan: A/V clock](/quest/m2/plan-av-clock.md) - stretching against a free-running ring only moves the drift
 
 - [Watch](/quest/m2/audio-jitter-target/watch.md) - the recorded traces this replays, and the JS target it converges toward

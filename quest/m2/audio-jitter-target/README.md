@@ -15,7 +15,7 @@ Boundaries: convergence still uses skip-ahead and silence, so playing slightly
 faster or slower to converge stays [Time
 stretch](/quest/m2/watch-audio-time-stretch.md). No packet loss concealment.
 Video keeps its own target; making the audio playhead the clock is [Plan: A/V
-clock](/quest/m1/plan-av-clock.md).
+clock](/quest/m2/plan-av-clock.md).
 
 ## Plan
 
@@ -69,4 +69,4 @@ buffer against uneven arrivals.
 - [Jitter clock](/quest/m2/jitter-flush-clock.md) - the advertised jitter (#3513 landed the flush span), whose relationship to the measured target the spec settles
 - [Audio quality harness](/quest/m2/audio-quality-harness/README.md) - the automated proof, built on its own schedule
 - [Time stretch](/quest/m2/watch-audio-time-stretch.md) - inaudible convergence, on top of this
-- [Plan: A/V clock](/quest/m1/plan-av-clock.md) - the clock this target eventually feeds
+- [Plan: A/V clock](/quest/m2/plan-av-clock.md) - the clock this target eventually feeds
