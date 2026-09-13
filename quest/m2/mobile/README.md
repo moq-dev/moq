@@ -19,11 +19,9 @@ and decoded-frame ownership.
 - [FFI video consumer](/quest/m2/mobile/ffi-video-consumer.md) - an app decodes a subscribed video rendition through moq-ffi on every binding that ships codecs
 - [Dart on iOS](/quest/m2/mobile/dart-ios.md) - prove the shipped iOS native asset actually loads on a device, which no CI can
 
-## Closes
-
-- [#700](https://github.com/moq-dev/moq/issues/700) - close this issue when the questline finishes
-
 ## Related
+
+- [Mobile completion](/quest/m3/mobile-completion.md) - owns #700 closure after the deferred mobile phases are delivered
 
 - [Mobile ownership](/quest/m3/mobile-ownership.md) - the deferred capture, codec, and rendering decision
 - [iOS capture](/quest/m3/mobile-capture-ios.md) - deferred platform capture

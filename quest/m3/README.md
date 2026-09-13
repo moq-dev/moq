@@ -22,6 +22,7 @@ worth settling now. Deferral does not by itself abandon a feature.
 - [Mobile ownership](/quest/m3/mobile-ownership.md) - decide whether Rust or platform code owns mobile capture, codecs, and rendering
 - [iOS capture](/quest/m3/mobile-capture-ios.md) - camera and screen capture if the mobile ownership decision selects Rust
 - [Android capture](/quest/m3/mobile-capture-android.md) - NDK/JNI capture and codec backends if the mobile ownership decision selects Rust
+- [Mobile completion](/quest/m3/mobile-completion.md) - verify the selected native/mobile path before closing #700
 - [Linux OBS GPU input](/quest/m3/obs-linux-gpu.md) - prove allocation export before implementing a hardware encoder import path
 - [LiveKit client shim](/quest/m3/livekit-shim.md) - a media compatibility facade over the room SDK
 - [QUIC capacity probing](/quest/m3/quic-probe.md) - compare useful early retransmissions with padding and no probing

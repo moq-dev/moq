@@ -21,7 +21,9 @@ capture quests in this questline start only once this is settled.
 - Record the verdict here and in `rs/moq-ffi/CLAUDE.md`, and re-estimate
   [Android capture](/quest/m3/mobile-capture-android.md) and
   [iOS capture](/quest/m3/mobile-capture-ios.md) against it; both target
-  `moq-video`, so abandon both if the answer is option 1.
+  `moq-video`, so replace them with the required platform-owned implementation
+  quests if the answer is option 1. Update [mobile completion](/quest/m3/mobile-completion.md)
+  to require those replacements before abandoning the Rust capture quests.
 
 ## Related
 
