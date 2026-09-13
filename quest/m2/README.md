@@ -94,6 +94,7 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 - [JS publish and watch hot paths](/quest/m2/js-hotpath/README.md) - measure decode retention, copies, header writes, and bounded audio groups
 - [Reader buffering](/quest/m2/stream-buffering.md) - measure and bound repeated prefix copying under fragmented input
 - [Traffic counter contention](/quest/m2/stats-contention.md) - quantify shared atomic accounting costs across fanout workers
+- [Closure counters](/quest/m2/closure-counters.md) - a departed node's return never regresses the closure counters a consumer already saw
 - [CMAF copies](/quest/m2/cmaf-copy-budget.md) - establish and reduce the browser container copy budget without changing ownership
 - [RTMP interleaving](/quest/m2/rtmp-interleaving.md) - isolate partial messages before optimizing assembly copies
 - [Mux and gateway copy budgets](/quest/m2/mux-copies/README.md) - measure and reduce payload copies in import, export, and live HLS
