@@ -389,9 +389,9 @@ fn signal_workers(workers: &mut [Worker]) -> Vec<(u16, std::thread::JoinHandle<(
 fn join(threads: Vec<(u16, std::thread::JoinHandle<()>)>) {
 	let current = std::thread::current().id();
 	for (index, thread) in threads {
-		// The worker records its own id at startup; a handle for the calling
-		// thread means this drop runs on a worker, so detach it.
-		if thread_id(&thread) == Some(current) {
+		// A handle for the calling thread means this runs on a worker, so
+		// detach it instead of deadlocking on a self-join.
+		if thread.thread().id() == current {
 			tracing::warn!(index, "QUIC worker group dropped on its own thread; detaching it");
 			std::mem::forget(thread);
 			continue;
@@ -402,20 +402,11 @@ fn join(threads: Vec<(u16, std::thread::JoinHandle<()>)>) {
 	}
 }
 
-/// The id of the thread a handle will join, when it has reported one.
-fn thread_id(thread: &std::thread::JoinHandle<()>) -> Option<std::thread::ThreadId> {
-	// `JoinHandle::as_thread` gives the handle without joining; its id is the
-	// worker's. There is no way to ask before the thread starts, so a worker
-	// that never got that far has no id to compare.
-	Some(thread.thread().id())
-}
-
 /// What the workers share: the shutdown signal and the retained sockets.
 ///
 /// One per group, held by the group and borrowed by every spawner. Cancelling
 /// it stops every worker thread; the retainers keep every socket in the
-/// reuseport group until the group (and every server handed out from it) is
-/// gone.
+/// reuseport group until the group is gone.
 #[derive(Debug, Default)]
 struct Shared {
 	shutdown: AtomicBool,
