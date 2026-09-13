@@ -20,8 +20,8 @@ class Live {
 
 	constructor(config: { opRatio?: number; compression?: boolean; checkpointRecords?: number } = {}) {
 		const track = new Track.Producer("test");
-		this.producer = new Producer<Rec>(track, config);
-		this.consumer = new Consumer<Rec>(track.subscribe(), { compression: config.compression });
+		this.producer = new Producer<Rec>({ track, ...config });
+		this.consumer = new Consumer<Rec>({ track: track.subscribe(), compression: config.compression });
 	}
 
 	async push(n: number): Promise<void> {
@@ -77,7 +77,7 @@ test("push and pop round-trip", async () => {
 
 test("concurrent consumer reads are rejected", async () => {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer<Rec>(track.subscribe());
+	const consumer = new Consumer<Rec>({ track: track.subscribe() });
 	const first = consumer.next();
 
 	expect(() => consumer.next()).toThrow("multiple calls to next not supported");
@@ -87,7 +87,7 @@ test("concurrent consumer reads are rejected", async () => {
 
 test("writes after finish are rejected before encoding", () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<number>(track);
+	const producer = new Producer<number>({ track });
 	producer.push(1);
 	producer.finish();
 
@@ -189,7 +189,7 @@ test("compressed round-trip across rolls", async () => {
 
 test("the window slides", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Rec>(track);
+	const producer = new Producer<Rec>({ track });
 	for (let n = 0; n < 5; n++) {
 		producer.push({ n });
 		if (n >= 2) producer.pop(1);
@@ -214,7 +214,7 @@ test("a pop is clamped to the window", async () => {
 
 test("an empty pop writes nothing", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Rec>(track);
+	const producer = new Producer<Rec>({ track });
 	producer.pop(5);
 	producer.finish();
 
@@ -225,11 +225,11 @@ test("an empty pop writes nothing", async () => {
 test("a lagging consumer is told what it missed", async () => {
 	// Ops disabled, so every edit rolls: a reader that stops polling really does lose groups.
 	const track = new Track.Producer("test");
-	const producer = new Producer<Rec>(track, { opRatio: 0 });
+	const producer = new Producer<Rec>({ track, opRatio: 0 });
 	const live = new Live();
 	live.producer = producer;
 	const subscriber = track.subscribe();
-	live.consumer = new Consumer<Rec>(subscriber);
+	live.consumer = new Consumer<Rec>({ track: subscriber });
 
 	await live.push(0);
 	await live.push(1);
@@ -264,7 +264,7 @@ test("consumer resumes at a checkpoint after losing a group", async () => {
 		new StreamError(StreamCode.Evicted),
 	]) {
 		const track = new Track.Producer("test");
-		const consumer = new Consumer<Rec>(track.subscribe());
+		const consumer = new Consumer<Rec>({ track: track.subscribe() });
 		const encoder = new Encoder<Rec>({ opRatio: 0 });
 
 		let frame = encoder.push({ n: 0 });
@@ -288,13 +288,13 @@ test("consumer resumes at a checkpoint after losing a group", async () => {
 
 test("a fresh consumer adopts the current offset", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Rec>(track, { opRatio: 0 });
+	const producer = new Producer<Rec>({ track, opRatio: 0 });
 	for (let n = 0; n < 5; n++) producer.push({ n });
 	producer.pop(3);
 
 	const subscriber = track.subscribe();
 	subscriber.startAt(subscriber.latest() as number);
-	const consumer = new Consumer<Rec>(subscriber);
+	const consumer = new Consumer<Rec>({ track: subscriber });
 	producer.finish();
 	const events: Event<Rec>[] = [];
 	for await (const event of consumer) events.push(event);

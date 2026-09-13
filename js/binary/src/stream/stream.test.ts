@@ -11,7 +11,7 @@ const payloads = (count: number) => Array.from({ length: count }, (_, n) => new 
 
 // Drain every payload currently available from a fresh consumer over the (finished) track.
 async function drain(track: Track.Subscriber, compression: boolean): Promise<Uint8Array[]> {
-	const consumer = new Consumer(track, { compression });
+	const consumer = new Consumer({ track, compression });
 	const out: Uint8Array[] = [];
 	for (;;) {
 		const value = await consumer.next();
@@ -23,7 +23,7 @@ async function drain(track: Track.Subscriber, compression: boolean): Promise<Uin
 
 test("every payload survives in order", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer(track);
+	const producer = new Producer({ track });
 	const expected = payloads(5);
 	for (const payload of expected) producer.append(payload);
 	producer.finish();
@@ -33,7 +33,7 @@ test("every payload survives in order", async () => {
 
 test("compressed roundtrip in order", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer(track, { compression: true });
+	const producer = new Producer({ track, compression: true });
 	const expected = payloads(20);
 	for (const payload of expected) producer.append(payload);
 	producer.finish();
@@ -43,7 +43,7 @@ test("compressed roundtrip in order", async () => {
 
 test("the whole log rides one group, never rolled", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer(track, { compression: true });
+	const producer = new Producer({ track, compression: true });
 	for (const payload of payloads(50)) producer.append(payload);
 	producer.finish();
 
@@ -54,7 +54,7 @@ test("the whole log rides one group, never rolled", async () => {
 
 test("the shared window shrinks repetitive payloads", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer(track, { compression: true });
+	const producer = new Producer({ track, compression: true });
 	const payload = new TextEncoder().encode("the quick brown fox".repeat(16));
 	for (let n = 0; n < 8; n++) producer.append(payload);
 	producer.finish();
@@ -83,7 +83,7 @@ test("a second group is a rolled log, not a continuation", async () => {
 	}
 	track.close();
 
-	const consumer = new Consumer(track.subscribe({ maxAge: REPLAY_LATENCY }));
+	const consumer = new Consumer({ track: track.subscribe({ maxAge: REPLAY_LATENCY }) });
 	expect(await consumer.next()).toBeDefined();
 	expect(await consumer.next()).toBeDefined();
 	await expect(consumer.next()).rejects.toThrow(Rolled);
@@ -93,11 +93,11 @@ test("a second concurrent read is refused rather than served the first one's gro
 	// Both calls would await the same in-flight `recvGroup`, and the loser would take the winner's
 	// group for a second one and fail a perfectly good log. Rust gets this from `&mut self`.
 	const track = new Track.Producer("test");
-	const producer = new Producer(track);
+	const producer = new Producer({ track });
 	producer.append(payloads(1)[0]);
 	producer.finish();
 
-	const consumer = new Consumer(track.subscribe());
+	const consumer = new Consumer({ track: track.subscribe() });
 	const first = consumer.next();
 	expect(() => consumer.next()).toThrow("multiple calls to next not supported");
 	expect(await first).toEqual(payloads(1)[0]);
@@ -115,7 +115,7 @@ test("a second group is reported while the first is still open", async () => {
 	const second = track.appendGroup();
 	second.writeFrame({ payload: payloads(2)[1], timestamp: Time.Timestamp.now() });
 
-	const consumer = new Consumer(track.subscribe({ maxAge: REPLAY_LATENCY }));
+	const consumer = new Consumer({ track: track.subscribe({ maxAge: REPLAY_LATENCY }) });
 	expect(await consumer.next()).toEqual(payloads(1)[0]);
 	await expect(consumer.next()).rejects.toThrow(Rolled);
 
@@ -134,10 +134,10 @@ test("an undecodable payload ends the log for a reader already inside the group"
 	// append may already have opened the group. A reader that pulled that group has to see the
 	// failure rather than park on a group nothing will ever finish.
 	const track = new Track.Producer("test");
-	const producer = new Producer(track, { compression: true });
+	const producer = new Producer({ track, compression: true });
 	producer.append(payloads(1)[0]);
 
-	const consumer = new Consumer(track.subscribe(), { compression: true });
+	const consumer = new Consumer({ track: track.subscribe(), compression: true });
 	expect(await consumer.next()).toBeDefined();
 
 	const oversized = new Uint8Array(DEFAULT_MAX_FRAME_SIZE + 1);

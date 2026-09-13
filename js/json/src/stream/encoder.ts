@@ -1,7 +1,7 @@
 import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "@moq/flate";
 
-/** Options shared by an {@link Encoder} and the {@link Producer} that wraps one. */
-export interface ProducerConfig {
+/** Options for an {@link Encoder}. */
+export interface Config {
 	/**
 	 * Compress the group as one sync-flushed `deflate-raw` stream, so each record reuses the earlier
 	 * ones as context and shrinks sharply. A {@link Decoder} reading the frames must set the same
@@ -59,7 +59,7 @@ export class Encoder<T> {
 	// tell that it is acknowledging a record that is no longer the outstanding one.
 	#generation = 0;
 
-	constructor(config: ProducerConfig = {}) {
+	constructor(config: Config = {}) {
 		this.#compress = config.compression ?? false;
 		this.#flate = this.#compress ? new Flate() : undefined;
 	}

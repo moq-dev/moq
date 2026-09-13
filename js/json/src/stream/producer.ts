@@ -1,7 +1,10 @@
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 
-import { Encoder, type Pending, type ProducerConfig } from "./encoder.ts";
+import { type Config, Encoder, type Pending } from "./encoder.ts";
+
+/** Stream producer options, including the destination track. */
+export type ProducerConfig = Config & { track: Moq.Track.Producer };
 
 /**
  * Publishes an ordered log of JSON records to a track, one record per frame in a single group.
@@ -17,8 +20,8 @@ export class Producer<T> {
 	#group?: Moq.Group.Producer;
 
 	/** Wrap a track to publish a record log into it. */
-	constructor(track: Moq.Track.Producer, config: ProducerConfig = {}) {
-		this.#track = track;
+	constructor(config: ProducerConfig) {
+		this.#track = config.track;
 		this.#encoder = new Encoder(config);
 	}
 

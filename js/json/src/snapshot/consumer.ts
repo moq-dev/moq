@@ -1,7 +1,9 @@
 import type * as Moq from "@moq/net";
 
-import { Decoder } from "./decoder.ts";
-import type { Config } from "./encoder.ts";
+import { type ConsumerConfig as CodecConfig, Decoder } from "./decoder.ts";
+
+/** Snapshot consumer options, including the source track. */
+export type ConsumerConfig<T> = CodecConfig<T> & { track: Moq.Track.Subscriber };
 
 /**
  * Consumes a JSON value from a track, reconstructing it from snapshots and deltas.
@@ -19,8 +21,8 @@ export class Consumer<T> {
 	#group?: Moq.Group.Consumer;
 	#framesRead = 0;
 
-	constructor(track: Moq.Track.Subscriber, config: Config<T> = {}) {
-		this.#track = track.ordered();
+	constructor(config: ConsumerConfig<T>) {
+		this.#track = config.track.ordered();
 		this.#decoder = new Decoder(config);
 	}
 

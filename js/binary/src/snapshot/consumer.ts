@@ -1,8 +1,11 @@
 import { Decoder as Flate } from "@moq/flate";
 import * as Moq from "@moq/net";
 
-/** Options for a {@link Consumer}. */
+/** Snapshot consumer options, including the source track. */
 export interface ConsumerConfig {
+	/** Track to read values from. */
+	track: Moq.Track.Subscriber;
+
 	/** Whether the frames are `deflate-raw` compressed. Must match the producer. Defaults to `false`. */
 	compression?: boolean;
 }
@@ -24,8 +27,8 @@ export class Consumer {
 	// normally one frame, but the window is per group either way.
 	#flate?: Flate;
 
-	constructor(track: Moq.Track.Subscriber, config: ConsumerConfig = {}) {
-		this.#track = track.ordered();
+	constructor(config: ConsumerConfig) {
+		this.#track = config.track.ordered();
 		this.#decompress = config.compression ?? false;
 	}
 

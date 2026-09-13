@@ -34,7 +34,6 @@ New findings and recommendations, ordered by consequence:
 | Local inclusive ends cannot express the empty exclusive range | Existing C adapter documents the mismatch | [Bounds](/quest/m1/api-subscription-bounds.md) |
 | Typed Getter input can be rejected solely for lacking an internal brand | Fixed: getter() reuses any conforming Getter | Fixed |
 | JSON edit guard logs failed implicit publication | Source-traced error suppression | [Edit transaction](/quest/m1/api-json-edit-commit.md) |
-| Wrapper constructors diverge and consumers accept ignored producer knobs | Signature/implementation comparison | [Wrapper config](/quest/m1/api-js-wrapper-config.md) |
 | Terminal publisher methods inconsistently retain the caller's handle | Abandoned: finish must be `&mut` so abort can follow | deferred |
 
 Recommend resolving behavioral failures and published contract choices before

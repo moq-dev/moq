@@ -1,6 +1,9 @@
 import type * as Moq from "@moq/net";
 
-import { type ConsumerConfig, Decoder } from "./decoder.ts";
+import { type ConsumerConfig as CodecConfig, Decoder } from "./decoder.ts";
+
+/** Stream consumer options, including the source track. */
+export type ConsumerConfig = CodecConfig & { track: Moq.Track.Subscriber };
 
 /**
  * Thrown by a stream read when the track carried a second group, which a lossless log cannot do.
@@ -47,8 +50,8 @@ export class Consumer<T> {
 	// carries is taken, so a second group stays resolved here and every later read fails on it again.
 	#pending?: Promise<{ group: Moq.Group.Consumer | undefined }>;
 
-	constructor(track: Moq.Track.Subscriber, config: ConsumerConfig = {}) {
-		this.#track = track;
+	constructor(config: ConsumerConfig) {
+		this.#track = config.track;
 		this.#decoder = new Decoder(config);
 	}
 

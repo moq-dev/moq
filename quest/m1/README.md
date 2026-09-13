@@ -27,7 +27,6 @@ quest here and merged main into dev.
 - [FFI configuration](/quest/m1/api-ffi-configuration.md) - configuration applies or fails explicitly rather than depending on lock timing
 - [Subscription bounds](/quest/m1/api-subscription-bounds.md) - local and requested ranges use consistent exclusive ends
 - [JSON edit transaction](/quest/m1/api-json-edit-commit.md) - failed publication cannot disappear into a guard-drop warning
-- [JS wrapper configuration](/quest/m1/api-js-wrapper-config.md) - constructor shapes agree and consumer options exclude ignored producer knobs
 - [External API proof](/quest/m1/api-release-proof.md) - packaged callers exercise real moq.pro use cases and record each audit finding's disposition
 - [Monotonic timeline](/quest/m1/monotonic-timeline.md) - a marker group of one empty frame declares a break and moves the live edge; producers refuse a rewind; consumers jump the playhead on an unproven hole and drop rewind detection
 - [Advertise](/quest/m1/wildcard-advertise.md) - moq-net encodes, forwards, and authorizes wildcard advertisements, lifting the prefix-only refusal on `dynamic(pattern, route)`
