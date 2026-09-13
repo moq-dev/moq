@@ -3127,7 +3127,7 @@ mod tests {
 				.await
 				.expect("timed out waiting for from-fingerprint")
 				.expect("origin closed");
-			if update.prefix.as_path().as_str() == "from-fingerprint" {
+			if update.pattern.as_prefix().expect("prefix announcement") == "from-fingerprint" {
 				break;
 			}
 		}

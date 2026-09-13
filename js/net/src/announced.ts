@@ -296,7 +296,8 @@ export class Broadcast {
 						const event = await Promise.race([effect.cancel, announced.next()]);
 						if (!event) break;
 
-						// Scoped to `path`, so the exact broadcast arrives with an empty suffix; ignore children.
+						// Prefix-shaped claims covering this path (`asPrefix() === ""`). A literal
+						// PATTERN ad at the same path has `asPrefix() === undefined` and is skipped.
 						if (event.pattern.asPrefix() !== "") continue;
 
 						if (event.active) {
@@ -366,7 +367,8 @@ export class Broadcast {
 				const event = await Promise.race([effect.cancel, announced.next()]);
 				if (!event) break;
 
-				// Scoped to `path`, so the exact broadcast arrives with an empty suffix; ignore children.
+				// Prefix-shaped claims covering this path (`asPrefix() === ""`). A literal
+				// PATTERN ad at the same path has `asPrefix() === undefined` and is skipped.
 				if (event.pattern.asPrefix() !== "") continue;
 				live.set(event.active);
 			}

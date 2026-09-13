@@ -596,11 +596,11 @@ impl AnnounceRun {
 		}
 	}
 
-	/// The presented pattern an update travels under on this stream, relative
-	/// to the requested prefix.
-	fn presented(&self, pattern: &crate::Pattern) -> crate::Pattern {
-		let residuals = pattern.rebase(self.prefix.as_str());
-		residuals.iter().next().cloned().unwrap_or_else(|| pattern.clone())
+	/// The presented patterns an update travels under on this stream, relative
+	/// to the requested prefix. Set-valued: `**/a` under interest `a` is both
+	/// the empty residual and `**/a`. Empty when nothing under the prefix matches.
+	fn presented(&self, pattern: &crate::Pattern) -> Vec<crate::Pattern> {
+		pattern.rebase(self.prefix.as_str()).iter().cloned().collect()
 	}
 
 	/// Encode one advertisement: ANNOUNCE_START for a prefix-shaped residual,
@@ -702,28 +702,29 @@ impl AnnounceRun {
 				// Send ANNOUNCE_INIT as the first message with all currently active routes.
 				// We use `try_next()` to synchronously get the initial updates.
 				while let Some(update) = announced.try_next() {
-					let pattern = self.presented(&update.pattern);
-					let Some(suffix) = pattern.as_prefix() else {
-						continue;
-					};
-					let suffix = crate::Path::new(suffix).to_owned();
 					let absolute = update
 						.pattern
 						.rooted(origin.root().as_str())
 						.map_err(|_| crate::coding::BoundsExceeded)?;
-
-					if update.active {
-						if self.outgoing(&update.route, &absolute).is_none() {
+					for pattern in self.presented(&update.pattern) {
+						let Some(suffix) = pattern.as_prefix() else {
 							continue;
+						};
+						let suffix = crate::Path::new(suffix).to_owned();
+
+						if update.active {
+							if self.outgoing(&update.route, &absolute).is_none() {
+								continue;
+							}
+							tracing::debug!(route = %absolute, "announce");
+							if !init.contains(&suffix) {
+								init.push(suffix);
+							}
+						} else {
+							// A potential race: a just-announced route already retracted.
+							tracing::debug!(route = %absolute, "unannounce");
+							init.retain(|p| p != &suffix);
 						}
-						tracing::debug!(route = %absolute, "announce");
-						if !init.contains(&suffix) {
-							init.push(suffix);
-						}
-					} else {
-						// A potential race: a just-announced route already retracted.
-						tracing::debug!(route = %absolute, "unannounce");
-						init.retain(|p| p != &suffix);
 					}
 				}
 
@@ -737,26 +738,27 @@ impl AnnounceRun {
 				// forward the stored chain as-is (no self push here).
 				let mut initial: Vec<(crate::Pattern, Hops, crate::origin::Cost)> = Vec::new();
 				while let Some(update) = announced.try_next() {
-					let pattern = self.presented(&update.pattern);
-					if !self.version.has_announce_id() && pattern.as_prefix().is_none() {
-						continue;
-					}
 					let absolute = update
 						.pattern
 						.rooted(origin.root().as_str())
 						.map_err(|_| crate::coding::BoundsExceeded)?;
-
-					if update.active {
-						let Some((hops, cost)) = self.outgoing(&update.route, &absolute) else {
+					for pattern in self.presented(&update.pattern) {
+						if !self.version.has_announce_id() && pattern.as_prefix().is_none() {
 							continue;
-						};
-						tracing::debug!(route = %absolute, "announce");
-						initial.retain(|(s, ..)| s != &pattern);
-						initial.push((pattern, hops, cost));
-					} else {
-						// A potential race: a just-announced route already retracted.
-						tracing::debug!(route = %absolute, "unannounce");
-						initial.retain(|(s, ..)| s != &pattern);
+						}
+
+						if update.active {
+							let Some((hops, cost)) = self.outgoing(&update.route, &absolute) else {
+								continue;
+							};
+							tracing::debug!(route = %absolute, "announce");
+							initial.retain(|(s, ..)| s != &pattern);
+							initial.push((pattern, hops, cost));
+						} else {
+							// A potential race: a just-announced route already retracted.
+							tracing::debug!(route = %absolute, "unannounce");
+							initial.retain(|(s, ..)| s != &pattern);
+						}
 					}
 				}
 
@@ -820,46 +822,49 @@ impl AnnounceRun {
 				continue;
 			};
 
-			let pattern = self.presented(&update.pattern);
-			if !self.version.has_announce_id() && pattern.as_prefix().is_none() {
-				continue;
-			}
 			let absolute = update
 				.pattern
 				.rooted(origin.root().as_str())
 				.map_err(|_| crate::coding::BoundsExceeded)?;
+			for pattern in self.presented(&update.pattern) {
+				if !self.version.has_announce_id() && pattern.as_prefix().is_none() {
+					continue;
+				}
 
-			if !update.active {
-				self.retract(stream, pattern, &absolute)?;
-				continue;
-			}
+				if !update.active {
+					self.retract(stream, pattern, &absolute)?;
+					continue;
+				}
 
-			match self.outgoing(&update.route, &absolute) {
-				Some((hops, cost)) => match self.live.get(&pattern) {
-					// A metadata update on a live advertisement: restart it in
-					// place (lite-05 restarts via a duplicate ANNOUNCE).
-					Some(&id) if lite::restart_supported(self.version) => {
-						tracing::debug!(route = %absolute, "reannounce");
-						match id {
-							Some(id) => stream
-								.writer
-								.buffer(&lite::AnnounceBroadcast::Restart { id, hops, cost })?,
-							None => stream.writer.buffer(&Self::encode_active(&pattern, hops, cost))?,
+				match self.outgoing(&update.route, &absolute) {
+					Some((hops, cost)) => match self.live.get(&pattern) {
+						// A metadata update on a live advertisement: restart it in
+						// place (lite-05 restarts via a duplicate ANNOUNCE).
+						Some(&id) if lite::restart_supported(self.version) => {
+							tracing::debug!(route = %absolute, "reannounce");
+							match id {
+								Some(id) => {
+									stream
+										.writer
+										.buffer(&lite::AnnounceBroadcast::Restart { id, hops, cost })?
+								}
+								None => stream.writer.buffer(&Self::encode_active(&pattern, hops, cost))?,
+							}
 						}
-					}
-					// Pre-restart versions have no way to update a live
-					// advertisement; the peer keeps the original chain.
-					Some(_) => {}
-					None => {
-						tracing::debug!(route = %absolute, "announce");
-						let id = self.assign_id();
-						self.live.insert(pattern.clone(), id);
-						stream.writer.buffer(&Self::encode_active(&pattern, hops, cost))?;
-					}
-				},
-				// The chain must not be forwarded (reflected, or full): retract
-				// whatever the peer holds.
-				None => self.retract(stream, pattern, &absolute)?,
+						// Pre-restart versions have no way to update a live
+						// advertisement; the peer keeps the original chain.
+						Some(_) => {}
+						None => {
+							tracing::debug!(route = %absolute, "announce");
+							let id = self.assign_id();
+							self.live.insert(pattern.clone(), id);
+							stream.writer.buffer(&Self::encode_active(&pattern, hops, cost))?;
+						}
+					},
+					// The chain must not be forwarded (reflected, or full): retract
+					// whatever the peer holds.
+					None => self.retract(stream, pattern, &absolute)?,
+				}
 			}
 		}
 	}
@@ -1937,6 +1942,54 @@ mod announce_test {
 			}
 			other => panic!("expected ANNOUNCE_PATTERN, got {other:?}"),
 		}
+		task.abort();
+	}
+
+	/// `**/a` under interest `a` is two residuals: the prefix itself and `**/a`.
+	/// Taking only the first would send one identity twice and drop the other.
+	#[tokio::test(start_paused = true)]
+	async fn globstar_suffix_under_matching_interest_emits_both_residuals() {
+		let origin = Hop::new(1).unwrap().produce();
+		let _server = origin
+			.dynamic(
+				"**/a".parse().unwrap(),
+				crate::origin::Route::default().with_hops(pub_hops()).with_cost(4),
+			)
+			.unwrap();
+
+		let log = Log::default();
+		let writes = log.writes.clone();
+		let consumer = origin.consume();
+		let mut stream = Stream::<SinkSession, Version> {
+			writer: Writer::new(SinkSend::new(log), VERSION),
+			reader: Reader::new(PendingRecv, VERSION),
+		};
+		let task = tokio::spawn(async move {
+			let mut announced = consumer.announced();
+			let self_origin = *consumer;
+			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, "a", self_origin, VERSION).await
+		});
+		settle().await;
+
+		let mut wire = Wire { writes, cursor: 0 };
+		assert_eq!(wire.take_ok().active, 2, "empty residual and **/a");
+		let msgs = wire.take_announces();
+		let mut saw_empty = false;
+		let mut saw_globstar = false;
+		for msg in &msgs {
+			match msg {
+				// Empty residual is a literal at this scope, so PATTERN not START.
+				lite::AnnounceBroadcast::Pattern { pattern, .. } if pattern.as_str().is_empty() => {
+					saw_empty = true;
+				}
+				lite::AnnounceBroadcast::Pattern { pattern, .. } if pattern.as_str() == "**/a" => {
+					saw_globstar = true;
+				}
+				other => panic!("unexpected announce {other:?}"),
+			}
+		}
+		assert!(saw_empty, "missing empty residual, got {msgs:?}");
+		assert!(saw_globstar, "missing **/a residual, got {msgs:?}");
 		task.abort();
 	}
 

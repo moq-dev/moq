@@ -58,7 +58,7 @@ pub fn peer_into_setup(params: &mut Parameters, version: Version) {
 pub fn encode_kinds(pattern: &Pattern, version: Version) -> Result<Vec<u8>, EncodeError> {
 	let mut buf = Vec::new();
 	for segment in pattern.segments() {
-		kind_of(segment).encode(&mut buf, version)?;
+		kind_of(segment)?.encode(&mut buf, version)?;
 	}
 	Ok(buf)
 }
@@ -110,13 +110,13 @@ pub fn encode_field<W: BufMut>(w: &mut W, version: Version, segment: &Segment) -
 	}
 }
 
-fn kind_of(segment: &Segment) -> u64 {
+fn kind_of(segment: &Segment) -> Result<u64, EncodeError> {
 	match segment {
-		Segment::Literal(_) => KIND_LITERAL,
-		Segment::Wildcard => KIND_WILDCARD,
-		Segment::Globstar => KIND_GLOBSTAR,
-		Segment::Partial { .. } => KIND_PARTIAL,
-		_ => KIND_LITERAL,
+		Segment::Literal(_) => Ok(KIND_LITERAL),
+		Segment::Wildcard => Ok(KIND_WILDCARD),
+		Segment::Globstar => Ok(KIND_GLOBSTAR),
+		Segment::Partial { .. } => Ok(KIND_PARTIAL),
+		_ => Err(EncodeError::Unsupported),
 	}
 }
 
