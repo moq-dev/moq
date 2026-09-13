@@ -140,6 +140,7 @@ moq-net = { version = "0.2.20", path = "rs/moq-net" }
 # used by moq-video on Linux.
 moq-nvenc = { version = "0.0.4", path = "rs/moq-nvenc" }
 moq-pattern = { version = "0.1.0", path = "rs/moq-pattern" }
+moq-relay = { version = "0.14.16", path = "rs/moq-relay", default-features = false }
 moq-rtc = { version = "0.2.9", path = "rs/moq-rtc" }
 moq-rtmp = { version = "0.2.9", path = "rs/moq-rtmp" }
 moq-sock = { version = "0.0.1", path = "rs/moq-sock" }

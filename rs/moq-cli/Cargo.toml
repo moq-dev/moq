@@ -26,7 +26,7 @@ doc = false
 default = ["iroh", "cluster-lan", "noq", "websocket", "nvidia"]
 iroh = ["moq-tokio/iroh"]
 # LAN discovery and meshing (`--cluster-lan`).
-cluster-lan = ["moq-tokio/mdns"]
+cluster-lan = ["moq-relay/cluster-lan"]
 jemalloc = ["moq-tokio/jemalloc"]
 noq = ["moq-tokio/noq"]
 quinn = ["moq-tokio/quinn"]
@@ -95,6 +95,9 @@ moq-audio = { workspace = true, optional = true, features = ["aac"] }
 # `server` enables the HTTP egress server for `moq export hls`; the importer is always available.
 moq-hls = { workspace = true, features = ["server"] }
 moq-mux = { workspace = true }
+# Cluster, LAN mesh, and inbound `/.cluster` auth. default-features off so the
+# CLI's own feature set (iroh, backends, cluster-lan) is what selects them.
+moq-relay = { workspace = true }
 moq-rtc = { workspace = true }
 moq-rtmp = { workspace = true }
 moq-srt = { workspace = true }
@@ -120,7 +123,6 @@ sd-notify = { workspace = true }
 # the wrong catalog track apart from one reading the right one: `moq-mux`'s producer
 # publishes hang and MSF from the same source, so both answer for an ordinary broadcast.
 moq-msf = { workspace = true }
-tempfile = { workspace = true }
 # `test-util` enables `tokio::time::pause` so the TS round-trip test simulates the
 # exporter drain timeouts instantly instead of waiting on the wall clock.
 tokio = { workspace = true, features = ["test-util"] }

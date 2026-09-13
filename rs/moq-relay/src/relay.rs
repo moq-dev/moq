@@ -207,19 +207,6 @@ impl Relay {
 		};
 
 		let cache = config.cache.init()?;
-		let cluster = Cluster::new(ClusterOptions::new(config.cluster).with_cache(cache))?
-			.with_client(client.clone())
-			.with_client_tls(config.connect.tls.build()?);
-		let stats = config.stats.build(cluster.origin.clone());
-		// The cluster takes over keeping the publish task alive, so an embedder that
-		// drops the producer keeps publishing for as long as it serves.
-		let cluster = cluster.with_stats(stats.clone());
-
-		// Graceful shutdown: the first signal drains every accepted session with a
-		// GOAWAY; a second signal (or the drain window elapsing) exits.
-		let drain_timeout = config.drain_timeout.into_std();
-		let (shutdown_trigger, shutdown) = Shutdown::new(drain_timeout);
-		// Create a web server too. mTLS for HTTPS is opt-in via `--web-https-root`.
 		// Whichever worker group owns QUIC holds the certificates; the shared
 		// server then has none of its own.
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
@@ -231,6 +218,26 @@ impl Relay {
 			(None, Some(certificates)) => certificates,
 			(None, None) => server.certificates(),
 		};
+		let mut advertise = crate::LanAdvertise::new(addr.map(|a| a.port()).unwrap_or(0));
+		if !config.listen.tls.generate.is_empty()
+			&& let Some(fingerprint) = certificates.fingerprints().into_iter().next()
+		{
+			advertise = advertise.with_fingerprint(fingerprint);
+		}
+		let cluster = Cluster::new(ClusterOptions::new(config.cluster).with_cache(cache))?
+			.with_client(client.clone())
+			.with_client_tls(config.connect.tls.build()?)
+			.with_connect(config.connect.clone(), config.quic.clone())
+			.with_advertise(advertise);
+		let stats = config.stats.build(cluster.origin.clone());
+		// The cluster takes over keeping the publish task alive, so an embedder that
+		// drops the producer keeps publishing for as long as it serves.
+		let cluster = cluster.with_stats(stats.clone());
+
+		// Graceful shutdown: the first signal drains every accepted session with a
+		// GOAWAY; a second signal (or the drain window elapsing) exits.
+		let drain_timeout = config.drain_timeout.into_std();
+		let (shutdown_trigger, shutdown) = Shutdown::new(drain_timeout);
 		let web = Web::new(auth.clone(), cluster.clone(), certificates, config.web)
 			.with_shutdown(shutdown.clone())
 			.with_versions(server_versions);

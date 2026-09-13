@@ -144,7 +144,7 @@ id = 12345                                            # Stable Hop ID across res
 
 [cluster.lan]                                         # Find peers on the LAN over mDNS.
 enabled = true
-secret = "/etc/moq/cluster.key"                       # Required: 64 hex chars, or a file holding them.
+# secret = "/etc/moq/cluster.key"                     # Optional: 64 hex chars, or a file holding them.
 # app = "default"                                     # DNS-SD subtype; moq-cli shares this name.
 ```
 

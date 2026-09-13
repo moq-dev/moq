@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `--cluster-lan-app` names the DNS-SD application the LAN mesh advertises under
+- `--cluster-connect`, `--cluster-connect-api`, `--cluster-node`, `--cluster-mesh`, `--cluster-token`, `--cluster-id`, and `--cluster-tier` match `moq-relay`
+
+### Changed
+
+- `--cluster-lan` uses the relay's Cluster; a CLI process and a relay on the same LAN mesh with each other
 
 ## [0.11.0](https://github.com/moq-dev/moq/compare/moq-cli-v0.10.0...moq-cli-v0.11.0) - 2026-09-09
 

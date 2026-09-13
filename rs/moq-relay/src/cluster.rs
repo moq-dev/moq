@@ -18,6 +18,10 @@ use url::Url;
 
 use crate::{AuthToken, nodes::MESH_PREFIX};
 
+/// The request path prefix a LAN mesh dial presents, marking it as a peer rather
+/// than an ordinary publisher or viewer on the same listener.
+pub(crate) const CLUSTER_PATH: &str = "/.cluster";
+
 /// How often the discovery loop scans for stale entries.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -50,7 +54,15 @@ fn should_dial(self_url: &str, peer: &str) -> bool {
 struct DialTarget {
 	key: String,
 	url: Url,
+	/// Extra candidates after [`Self::url`], in dial order. Empty for a
+	/// static, gossip, or API peer, which has one address.
+	urls: Vec<Url>,
 	cost: Option<u64>,
+	/// Advertised certificate fingerprint to pin. LAN only.
+	fingerprint: Option<String>,
+	/// Present the mDNS credential on `/.cluster/<credential>` and skip
+	/// [`ClusterConfig::token`]. LAN only.
+	lan: bool,
 }
 
 impl DialTarget {
@@ -62,7 +74,48 @@ impl DialTarget {
 			identity.into()
 		};
 		let cost = take_cost(&mut url)?;
-		Ok(Self { key, url, cost })
+		Ok(Self {
+			key,
+			url,
+			urls: Vec::new(),
+			cost,
+			fingerprint: None,
+			lan: false,
+		})
+	}
+
+	/// Every address to try, [`Self::url`] first.
+	fn addrs(&self) -> Vec<Url> {
+		if self.urls.is_empty() {
+			vec![self.url.clone()]
+		} else {
+			self.urls.clone()
+		}
+	}
+
+	/// A LAN peer's advertised addresses, each carrying that peer's credential.
+	#[cfg(feature = "cluster-lan")]
+	fn from_lan_peer(peer: &moq_tokio::mdns::Peer) -> anyhow::Result<Self> {
+		let mut urls = peer.urls();
+		anyhow::ensure!(!urls.is_empty(), "peer advertised no reachable address");
+		let mut cost = None;
+		for url in &mut urls {
+			if cost.is_none() {
+				cost = take_cost(url)?;
+			} else {
+				let _ = take_cost(url)?;
+			}
+			strip_jwt(url);
+			url.set_path(&format!("{CLUSTER_PATH}/{}", peer.credential));
+		}
+		Ok(Self {
+			key: canonicalize_peer_key(&peer.id),
+			url: urls[0].clone(),
+			urls,
+			cost,
+			fingerprint: peer.fingerprint.clone(),
+			lan: true,
+		})
 	}
 }
 
@@ -483,10 +536,11 @@ pub struct ClusterConfig {
 	pub lan: LanConfig,
 
 	/// JWT presented on outbound cluster dials, read from this file. Applied to
-	/// any peer whose URL doesn't already carry a `?jwt=` (so it authenticates
-	/// any peer whose URL has no inline token). An inline `?jwt=` can provide a
-	/// per-peer credential for static or `connect_api` peers. Gossip should use
-	/// this shared token or mTLS because the advertised node URL is public.
+	/// any static, API, or gossip peer whose URL doesn't already carry a
+	/// `?jwt=`. An inline `?jwt=` can provide a per-peer credential for static
+	/// or `connect_api` peers. Gossip should use this shared token or mTLS
+	/// because the advertised node URL is public. LAN peers never receive it;
+	/// they authenticate with their mDNS credential.
 	#[usage(
 		name = "cluster-token",
 		long = "cluster-token",
@@ -520,10 +574,10 @@ pub struct ClusterConfig {
 
 /// LAN discovery configuration (`[cluster.lan]`).
 ///
-/// Advertises [`ClusterConfig::node`] over mDNS and dials the node URLs other
-/// relays advertise, so a rack or a home lab meshes with no seed list and no
-/// shared rendezvous. mDNS only replaces *how* peers are found: they are dialed
-/// and authenticated exactly like any other cluster peer.
+/// Advertises this process over mDNS and dials the peers that advertise back,
+/// so a rack or a home lab meshes with no seed list and no shared rendezvous.
+/// A LAN peer authenticates with its mDNS credential on `/.cluster/<credential>`
+/// and is never handed [`ClusterConfig::token`].
 #[derive(usage::Args, Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde_with::skip_serializing_none]
@@ -531,9 +585,10 @@ pub struct ClusterConfig {
 #[non_exhaustive]
 #[cfg(feature = "cluster-lan")]
 pub struct LanConfig {
-	/// Enable mDNS discovery. Requires [`ClusterConfig::node`], so there is an
-	/// address to advertise, and [`Self::secret`]. Boolean flag: pass
-	/// `--cluster-lan` (or `=true` / `=false`).
+	/// Enable mDNS discovery. Boolean flag: pass `--cluster-lan` (or `=true` /
+	/// `=false`). Advertises the listener fingerprint when the certificate was
+	/// generated, the [`ClusterConfig::node`] URL when one is configured, and
+	/// needs at least one of them.
 	#[usage(
 		name = "cluster-lan",
 		long = "cluster-lan",
@@ -544,14 +599,11 @@ pub struct LanConfig {
 	pub enabled: bool,
 
 	/// The shared key admitting a peer to the LAN mesh, as 64 hexadecimal
-	/// characters or a path to a file containing them. Required by
-	/// [`Self::enabled`].
+	/// characters or a path to a file containing them.
 	///
-	/// mDNS is an open channel: anyone can advertise, including an attacker
-	/// naming a URL it controls. Without a proof that the advertiser holds this
-	/// key, this relay would dial that URL and hand it
-	/// [`ClusterConfig::token`]. So the key is mandatory rather than optional,
-	/// and only peers that prove they hold it are ever dialed.
+	/// Optional. Without it, anyone who can reach the listener joins, so leave
+	/// it unset only on networks you trust. With it, only peers that prove they
+	/// hold the same key are discovered or accepted.
 	#[usage(
 		name = "cluster-lan-secret",
 		long = "cluster-lan-secret",
@@ -573,6 +625,60 @@ pub struct LanConfig {
 		setting = "cluster.lan.app"
 	)]
 	pub app: Option<moq_tokio::mdns::App>,
+}
+
+#[cfg(feature = "cluster-lan")]
+impl LanConfig {
+	/// Reject a secret or app configured without the mesh that would read it.
+	pub fn validate(&self) -> anyhow::Result<()> {
+		anyhow::ensure!(
+			self.secret.is_none() || self.enabled,
+			"--cluster-lan-secret requires --cluster-lan=true"
+		);
+		anyhow::ensure!(
+			self.app.is_none() || self.enabled,
+			"--cluster-lan-app requires --cluster-lan=true"
+		);
+		Ok(())
+	}
+}
+
+/// What a LAN advertisement publishes besides the listen port.
+///
+/// Pass to [`Cluster::with_advertise`] after the QUIC listener is bound. The
+/// fingerprint is the generated certificate's, when there is one; a loaded
+/// certificate is dialed by name via [`ClusterConfig::node`] instead.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct LanAdvertise {
+	/// The bound QUIC listen port, advertised as the DNS-SD SRV port.
+	pub port: u16,
+	/// Hex SHA-256 fingerprint of a generated certificate, to pin when dialing.
+	pub fingerprint: Option<String>,
+}
+
+impl LanAdvertise {
+	/// Advertise this listen port, with no fingerprint.
+	pub fn new(port: u16) -> Self {
+		Self {
+			port,
+			fingerprint: None,
+		}
+	}
+
+	/// Pin this generated-certificate fingerprint when peers dial.
+	pub fn with_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
+		self.fingerprint = Some(fingerprint.into());
+		self
+	}
+}
+
+/// The per-advertisement credential [`Connection::authenticate`] checks on
+/// `/.cluster/<credential>`. Shared via `Arc` so clones taken before
+/// [`Cluster::start`] still see it.
+#[cfg(feature = "cluster-lan")]
+struct LanAuth {
+	credential: String,
 }
 
 /// Construction settings for a [`Cluster`]: identity, discovery, and the origin cache.
@@ -627,6 +733,11 @@ pub struct Started {
 }
 
 impl Started {
+	/// True when nothing is configured, so [`run`](Self::run) returns immediately.
+	pub fn standalone(&self) -> bool {
+		self.work.is_none()
+	}
+
 	/// Run the cluster until it stops.
 	///
 	/// Returns immediately when nothing is configured (standalone).
@@ -674,6 +785,16 @@ struct Work {
 pub struct Cluster {
 	config: ClusterConfig,
 	client: Option<moq_tokio::Client>,
+	/// Dial template for LAN peers that pin a fingerprint; static and gossip
+	/// dials keep [`Self::client`].
+	connect: Option<moq_tokio::connect::Config>,
+	quic: Option<moq_tokio::quic::Config>,
+	/// Bound listen port and optional generated-certificate fingerprint.
+	advertise: Option<LanAdvertise>,
+	/// Set by [`Self::start`] when LAN discovery is on, so inbound
+	/// `/.cluster/<credential>` can be verified on every clone.
+	#[cfg(feature = "cluster-lan")]
+	lan_auth: Arc<std::sync::OnceLock<LanAuth>>,
 	pub(crate) nodes: crate::nodes::Nodes,
 
 	/// Hands out the `conn` id every session logs under, inbound and outbound
@@ -746,6 +867,11 @@ impl Cluster {
 		Ok(Cluster {
 			config,
 			client: None,
+			connect: None,
+			quic: None,
+			advertise: None,
+			#[cfg(feature = "cluster-lan")]
+			lan_auth: Arc::new(std::sync::OnceLock::new()),
 			nodes,
 			connection_ids: Arc::default(),
 			client_tls: None,
@@ -761,6 +887,27 @@ impl Cluster {
 	/// an error otherwise.
 	pub fn with_client(mut self, client: moq_tokio::Client) -> Self {
 		self.client = Some(client);
+		self
+	}
+
+	/// Attach the dial template used to build a per-peer client for LAN mesh
+	/// dials (fingerprint pinning, request-path versions, ephemeral bind).
+	///
+	/// Required when `--cluster-lan` is on; [`start`](Self::start) returns an
+	/// error otherwise.
+	pub fn with_connect(mut self, connect: moq_tokio::connect::Config, quic: moq_tokio::quic::Config) -> Self {
+		self.connect = Some(connect);
+		self.quic = Some(quic);
+		self
+	}
+
+	/// Advertise this bound listener on the LAN.
+	///
+	/// Required when `--cluster-lan` is on; [`start`](Self::start) returns an
+	/// error otherwise. The fingerprint is set when the certificate was
+	/// generated, so peers can pin it.
+	pub fn with_advertise(mut self, advertise: LanAdvertise) -> Self {
+		self.advertise = Some(advertise);
 		self
 	}
 
@@ -853,6 +1000,71 @@ impl Cluster {
 		false
 	}
 
+	/// The credential a LAN path carries, if `path` is `/.cluster/<credential>`.
+	///
+	/// `/.cluster` and `/.cluster/` with no credential, and a path that merely
+	/// starts with those letters (`/.clusterish`), yield `None`.
+	pub(crate) fn lan_credential(path: &str) -> Option<&str> {
+		let rest = path.strip_prefix(CLUSTER_PATH)?;
+		match rest.strip_prefix('/') {
+			Some(credential) if !credential.is_empty() => Some(credential),
+			_ => None,
+		}
+	}
+
+	/// Whether `path` is the LAN mesh marker, with or without a credential.
+	pub fn is_lan_path(path: &str) -> bool {
+		path == CLUSTER_PATH || path.starts_with(concat!("/.cluster", "/"))
+	}
+
+	/// Verify a presented `/.cluster/<credential>` against the live advertisement.
+	///
+	/// `None` means this cluster has no LAN discovery, so the path must be
+	/// refused rather than routed through JWT or public prefixes.
+	#[cfg(feature = "cluster-lan")]
+	pub(crate) fn verify_lan_credential(&self, presented: &str) -> Option<bool> {
+		self.lan_auth
+			.get()
+			.map(|auth| moq_tokio::mdns::ct_eq(&auth.credential, presented))
+	}
+
+	/// Verify a presented `/.cluster/<credential>` against the live advertisement.
+	///
+	/// Without the `cluster-lan` feature there is no discovery to consult.
+	#[cfg(not(feature = "cluster-lan"))]
+	pub(crate) fn verify_lan_credential(&self, _presented: &str) -> Option<bool> {
+		None
+	}
+
+	/// Grant the cluster-peer scope a `cluster.token` would: unscoped publish
+	/// and subscribe, billed under `--cluster-tier`.
+	pub(crate) fn lan_peer_token(&self) -> AuthToken {
+		let mut token = AuthToken::unrestricted(Path::new("").to_owned());
+		token.tier = self.cluster_tier();
+		token
+	}
+
+	/// Whether a protocol version carries the request path used to mark a mesh dial.
+	pub(crate) fn carries_request_path(version: &moq_net::Version) -> bool {
+		!version.is_lite() || version.code() >= 0xff0dad05
+	}
+
+	/// Reject version restrictions that leave a LAN dial with no request path.
+	pub fn validate_lan_versions(
+		client: &moq_tokio::connect::Config,
+		server: &moq_tokio::listen::Config,
+	) -> anyhow::Result<()> {
+		let client = client.versions();
+		let server = server.versions();
+		anyhow::ensure!(
+			client
+				.iter()
+				.any(|version| Self::carries_request_path(version) && server.contains(version)),
+			"--cluster-lan needs --connect-version and --listen-version to share a version that carries a request path (moq-lite-05 or any moq-transport version)"
+		);
+		Ok(())
+	}
+
 	/// Validate the cluster config and bind anything that can fail, returning a
 	/// [`Started`] to run.
 	///
@@ -873,20 +1085,30 @@ impl Cluster {
 		);
 
 		let lan = self.lan();
-		anyhow::ensure!(
-			!lan || node.is_some(),
-			"`--cluster-lan` requires `--cluster-node <self-url>` so there's an address to advertise. \
-			 See https://doc.moq.dev/bin/relay/cluster."
-		);
-		// Without this, an attacker advertising a URL it controls would be dialed
-		// like any other peer and handed `--cluster-token`.
 		#[cfg(feature = "cluster-lan")]
-		anyhow::ensure!(
-			!lan || self.config.lan.secret.is_some(),
-			"`--cluster-lan` requires `--cluster-lan-secret <hex-or-path>`, shared by every peer. \
-			 mDNS is unauthenticated, so without it any advertiser on the network would be dialed. \
-			 See https://doc.moq.dev/bin/relay/cluster."
-		);
+		self.config.lan.validate()?;
+		#[cfg(feature = "cluster-lan")]
+		if lan {
+			let advertise = self.advertise.as_ref();
+			anyhow::ensure!(
+				advertise.is_some(),
+				"`--cluster-lan` needs a QUIC listener (call Cluster::with_advertise). \
+				 See https://doc.moq.dev/bin/relay/cluster."
+			);
+			anyhow::ensure!(
+				advertise.is_some_and(|a| a.fingerprint.is_some()) || node.is_some(),
+				"`--cluster-lan` needs `--cluster-node <self-url>` or a generated certificate to advertise. \
+				 See https://doc.moq.dev/bin/relay/cluster."
+			);
+			if let Some(connect) = &self.connect {
+				anyhow::ensure!(
+					connect.versions().iter().any(Self::carries_request_path),
+					"--cluster-lan needs --connect-version to include a version that carries a request path (moq-lite-05 or any moq-transport version)"
+				);
+			} else {
+				anyhow::bail!("`--cluster-lan` needs a dial template (call Cluster::with_connect)");
+			}
+		}
 
 		let has_outbound = !self.config.connect.is_empty() || self.config.connect_api.is_some();
 		// Every mechanism that opens a dial, so gossip discovery runs whenever
@@ -932,17 +1154,18 @@ impl Cluster {
 		// that a relay which cannot join the mesh is misconfigured, not degraded.
 		#[cfg(feature = "cluster-lan")]
 		let discovery = match lan {
-			// Checked above: the LAN mesh advertises `node` and requires a key.
 			true => {
-				let node = node.as_deref().expect("--cluster-lan requires --cluster-node");
-				let secret = self
-					.config
-					.lan
-					.secret
-					.as_deref()
-					.expect("--cluster-lan requires --cluster-lan-secret");
+				let advertise = self
+					.advertise
+					.as_ref()
+					.expect("--cluster-lan needs Cluster::with_advertise");
+				let secret = self.config.lan.secret.as_deref();
 				let app = self.config.lan.app.clone().unwrap_or_default();
-				Some(lan_discovery(node, secret, app).await?)
+				let discovery = lan_discovery(advertise, node.as_deref(), secret, app).await?;
+				let _ = self.lan_auth.set(LanAuth {
+					credential: discovery.credential().to_string(),
+				});
+				Some(discovery)
 			}
 			false => None,
 		};
@@ -1023,17 +1246,10 @@ impl Cluster {
 		#[cfg(feature = "cluster-lan")]
 		if let Some(discovery) = discovery {
 			let this = self.clone();
-			let token = token.clone();
 			let dialed = dialed.clone();
-			// The identity discovery actually advertises, not the configured URL it
-			// came from. `with_node` strips userinfo before publishing, so comparing
-			// the raw `--cluster-node` here would tiebreak against a spelling no peer
-			// ever sees: both sides could decide the other should dial, and neither
-			// would.
-			let self_url = canonicalize_peer_key(discovery.id());
 			// Supervised rather than fire-and-forget: a dial task ending is ordinary
 			// (that peer went away), but discovery ending is the relay going blind.
-			supervised.spawn(async move { this.run_mdns(self_url, token, dialed, discovery).await });
+			supervised.spawn(async move { this.run_mdns(dialed, discovery).await });
 		}
 
 		// Held in scope so the registration stays announced until `run` exits.
@@ -1172,55 +1388,37 @@ impl Cluster {
 		}
 	}
 
-	/// Dial every relay that advertises itself on the LAN, the same way gossip
-	/// dials every relay that advertises itself on the cluster origin.
+	/// Dial every process that advertises itself on the LAN.
 	///
-	/// mDNS only supplies the peer URL; everything downstream (the tiebreaker, the
-	/// shared dial map, `?jwt=`, `?cost=`, stats, the node view) is the ordinary
-	/// cluster path. A peer that advertises no node URL is skipped: this relay
-	/// dials by name, not by discovered socket.
-	///
-	/// Discovery only reports a peer whose advertisement proved possession of the
-	/// shared key, which is what makes the URL safe to dial with `--cluster-token`
-	/// attached. An unauthenticated record never reaches this loop.
+	/// Each candidate is [`Peer::urls`](moq_tokio::mdns::Peer::urls) in order
+	/// (node first) on `/.cluster/<credential>`, with the advertised fingerprint
+	/// pinned. The lower discovery id dials; the other waits inbound. A LAN dial
+	/// never carries `?jwt=` — [`ClusterConfig::token`] is for static and gossip
+	/// peers only.
 	#[cfg(feature = "cluster-lan")]
-	async fn run_mdns(
-		self,
-		self_url: String,
-		token: String,
-		dialed: DialMap,
-		mut discovery: moq_tokio::mdns::Discovery,
-	) -> anyhow::Result<()> {
+	async fn run_mdns(self, dialed: DialMap, mut discovery: moq_tokio::mdns::Discovery) -> anyhow::Result<()> {
 		use moq_tokio::mdns::Event;
 
 		// Logged by key, never by the target's URL, so an inline query stays out of
-		// the logs.
+		// the logs. Empty token: LAN authenticates with the mDNS credential.
 		let mut spawn = |target: DialTarget| {
 			tracing::info!(peer = %target.key, "dialing LAN cluster peer");
-			tokio::spawn(self.clone().supervise_remote(target, token.clone())).abort_handle()
+			tokio::spawn(self.clone().supervise_remote(target, String::new())).abort_handle()
 		};
 
 		while let Some(event) = discovery.recv().await {
 			match event {
 				Event::Found(peer) => {
-					let Some(node) = peer.node.as_ref() else {
-						tracing::debug!(peer = %peer.id, "LAN peer advertised no --cluster-node URL; skipping");
+					if !discovery.should_dial(&peer.id) {
 						continue;
-					};
-					// The address to dial keeps its query, since `run_remote` reads
-					// `?cost=` off it. The key is only its identity, exactly as on the
-					// gossip path.
-					let target = match DialTarget::parse(node.as_ref()) {
+					}
+					let target = match DialTarget::from_lan_peer(&peer) {
 						Ok(target) => target,
 						Err(err) => {
-							tracing::warn!(%err, peer = %peer.id, "LAN peer advertised an invalid --cluster-node URL; skipping");
+							tracing::warn!(%err, peer = %peer.id, "LAN peer advertised nothing reachable; skipping");
 							continue;
 						}
 					};
-					// Skip any peer we lose the tiebreaker to; that side dials us.
-					if !should_dial(&self_url, &target.key) {
-						continue;
-					}
 					dialed.upsert(target, DialSource::Mdns, &mut spawn);
 				}
 				Event::Lost(id) => dialed.release(&canonicalize_peer_key(&id), DialSource::Mdns, &mut spawn),
@@ -1387,15 +1585,22 @@ impl Cluster {
 
 	#[tracing::instrument("remote", skip_all, err, fields(remote = %target.key))]
 	async fn run_remote(self, target: &DialTarget, token: String) -> anyhow::Result<()> {
-		let mut url = target.url.clone();
+		let mut urls = target.addrs();
 		let cost = target.cost;
 		// Apply the shared cluster token unless the URL already carries its own
 		// non-empty `?jwt=` (a per-peer inline token wins; the shared token still
 		// covers peers that have none). An empty
 		// `?jwt=` counts as absent, matching `AuthParams::from_url`.
-		if !token.is_empty() && !url.query_pairs().any(|(key, value)| key == "jwt" && !value.is_empty()) {
-			url.query_pairs_mut().append_pair("jwt", &token);
+		// LAN dials never get the token: they authenticate with the mDNS credential.
+		if !target.lan && !token.is_empty() {
+			for url in &mut urls {
+				if !url.query_pairs().any(|(key, value)| key == "jwt" && !value.is_empty()) {
+					url.query_pairs_mut().append_pair("jwt", &token);
+				}
+			}
 		}
+
+		let addrs = moq_tokio::Addrs::collect(urls).context("peer advertised no reachable address")?;
 
 		let base_backoff = tokio::time::Duration::from_secs(1);
 		let max_backoff = tokio::time::Duration::from_secs(300);
@@ -1408,7 +1613,9 @@ impl Cluster {
 
 		loop {
 			let started = tokio::time::Instant::now();
-			let result = self.run_remote_once(&url, cost).await;
+			let result = self
+				.run_remote_once(&addrs, cost, target.lan, target.fingerprint.as_deref())
+				.await;
 			let elapsed = started.elapsed();
 
 			match result {
@@ -1427,26 +1634,42 @@ impl Cluster {
 		}
 	}
 
-	async fn run_remote_once(&self, url: &Url, cost: Option<u64>) -> anyhow::Result<()> {
+	async fn run_remote_once(
+		&self,
+		addrs: &moq_tokio::Addrs,
+		cost: Option<u64>,
+		lan: bool,
+		fingerprint: Option<&str>,
+	) -> anyhow::Result<()> {
 		// Each attempt is its own session, so it gets its own id. Matches the span an
 		// accepted connection runs under, so both directions log the same way.
 		let id = self.next_connection_id();
-		self.run_remote_session(id, url, cost)
+		self.run_remote_session(id, addrs, cost, lan, fingerprint)
 			.instrument(tracing::info_span!("conn", id))
 			.await
 	}
 
-	async fn run_remote_session(&self, id: u64, url: &Url, cost: Option<u64>) -> anyhow::Result<()> {
-		// The peer URL carries the cluster JWT in its query, so neither the log line
-		// nor the node label below may show the raw URL.
-		let redacted = moq_tokio::RedactedUrl::new(url);
+	async fn run_remote_session(
+		&self,
+		id: u64,
+		addrs: &moq_tokio::Addrs,
+		cost: Option<u64>,
+		lan: bool,
+		fingerprint: Option<&str>,
+	) -> anyhow::Result<()> {
+		// The peer URL may carry the cluster JWT in its query, so neither the log
+		// line nor the node label below may show the raw URL.
+		let first = addrs.as_slice().first().expect("Addrs is non-empty").url();
+		let redacted = moq_tokio::RedactedUrl::new(first);
 		tracing::info!(url = %redacted, "dialing cluster peer");
 
-		// Checked at the start of `run`; per-peer tasks inherit that guarantee.
-		let client = self
-			.client
-			.clone()
-			.context("internal: cluster peer dial without an attached QUIC client")?;
+		let client = if lan {
+			self.lan_client(fingerprint)?
+		} else {
+			self.client
+				.clone()
+				.context("internal: cluster peer dial without an attached QUIC client")?
+		};
 
 		// Cluster dials use their configured stats tier. Cluster peers carry no auth
 		// root, so presence is keyed under the empty root within the cluster tier.
@@ -1469,7 +1692,7 @@ impl Cluster {
 		// relay's own upstream dial, and a cluster peer link that stopped following
 		// GOAWAY would break rolling handoff, redialing the drained URL after the
 		// old session finally closed instead of migrating to the replacement.
-		let mut reconnect = client.with_reconnect(true).connect(url.clone());
+		let mut reconnect = client.with_reconnect(true).connect(addrs.clone());
 		let mut connection = None;
 		loop {
 			match reconnect.status().await? {
@@ -1482,46 +1705,98 @@ impl Cluster {
 			}
 		}
 	}
+
+	/// A client for one LAN dial: request-path versions, ephemeral bind, and
+	/// the advertised fingerprint pinned on a clean TLS config so the relay's
+	/// CA roots cannot combine with it.
+	fn lan_client(&self, fingerprint: Option<&str>) -> anyhow::Result<moq_tokio::Client> {
+		let mut connect = self
+			.connect
+			.clone()
+			.context("internal: LAN dial without Cluster::with_connect")?;
+		connect.backoff.timeout = std::time::Duration::ZERO.into();
+		connect.once = Some(false);
+		let mut bind = connect.resolved_bind();
+		bind.set_port(0);
+		connect.bind = Some(bind);
+		connect.version = connect
+			.versions()
+			.iter()
+			.filter(|version| Self::carries_request_path(version))
+			.copied()
+			.collect();
+		if let Some(fingerprint) = fingerprint {
+			connect.tls = moq_tokio::tls::Connect::default();
+			connect.tls.fingerprint = vec![fingerprint.to_string()];
+		}
+		let quic = self.quic.clone().unwrap_or_default();
+		Ok(connect.init(quic)?)
+	}
+
+	/// Start a reconnecting LAN session from discovered details. Tests wire this
+	/// without multicast.
+	#[cfg(all(test, feature = "cluster-lan"))]
+	fn dial_lan_target(&self, target: &DialTarget) -> anyhow::Result<moq_tokio::Connection> {
+		let addrs = moq_tokio::Addrs::collect(target.addrs()).context("peer advertised no reachable address")?;
+		let mut client = self
+			.lan_client(target.fingerprint.as_deref())?
+			.with_publisher(&self.origin)
+			.with_subscriber(self.origin.clone());
+		if let Some(cost) = target.cost {
+			client = client.with_cost(cost);
+		}
+		Ok(client.connect(addrs))
+	}
+
+	#[cfg(all(test, feature = "cluster-lan"))]
+	fn set_lan_credential(&self, credential: impl Into<String>) {
+		let _ = self.lan_auth.set(LanAuth {
+			credential: credential.into(),
+		});
+	}
 }
 
-/// Advertise this relay's node URL on the LAN, gated on the shared key.
-///
-/// The DNS-SD record needs a port, so it carries the node URL's; peers dial the
-/// URL itself, which is what keeps the relay's normal name-and-certificate path
-/// intact. The key is what makes the advertised URL trustworthy enough to dial.
+/// Advertise this listener on the LAN: fingerprint when the certificate was
+/// generated, node URL when configured, secret when shared.
 #[cfg(feature = "cluster-lan")]
 async fn lan_discovery(
-	node: &str,
-	secret: &str,
+	advertise: &LanAdvertise,
+	node: Option<&str>,
+	secret: Option<&str>,
 	app: moq_tokio::mdns::App,
 ) -> anyhow::Result<moq_tokio::mdns::Discovery> {
-	let url = peer_url(node)?;
-	// The advertisement is multicast in the clear. The secret authenticates the
-	// record, it does not hide it, so anything in the query is handed to every
-	// listener on the network.
-	//
-	// An allowlist rather than a `jwt` denylist: `cost` is the only query param a
-	// peer needs off the advertised URL, and listing what may go out means the
-	// next credential-bearing param is refused the day it is added instead of
-	// leaking until someone remembers to ban it.
-	let published: Vec<String> = url
-		.query_pairs()
-		.map(|(key, _)| key.into_owned())
-		.filter(|key| key != "cost")
-		.collect();
-	anyhow::ensure!(
-		published.is_empty(),
-		"`--cluster-node` carries query parameters that `--cluster-lan` would broadcast in the clear ({}). \
-		 Only `?cost=` may be advertised; pass credentials with `--cluster-token` instead.",
-		published.join(", ")
-	);
-	let port = url.port_or_known_default().unwrap_or(443);
-	let secret = moq_tokio::mdns::Secret::load(secret).context("invalid --cluster-lan-secret")?;
-	Ok(moq_tokio::mdns::Config::new(app, port)
-		.with_node(url)
-		.with_secret(secret)
-		.advertise()
-		.await?)
+	let mut config = moq_tokio::mdns::Config::new(app, advertise.port);
+	if let Some(fingerprint) = &advertise.fingerprint {
+		config = config.with_fingerprint(fingerprint.clone());
+	}
+	if let Some(node) = node {
+		let url = peer_url(node)?;
+		// The advertisement is multicast in the clear. The secret authenticates the
+		// record, it does not hide it, so anything in the query is handed to every
+		// listener on the network.
+		//
+		// An allowlist rather than a `jwt` denylist: `cost` is the only query param a
+		// peer needs off the advertised URL, and listing what may go out means the
+		// next credential-bearing param is refused the day it is added instead of
+		// leaking until someone remembers to ban it.
+		let published: Vec<String> = url
+			.query_pairs()
+			.map(|(key, _)| key.into_owned())
+			.filter(|key| key != "cost")
+			.collect();
+		anyhow::ensure!(
+			published.is_empty(),
+			"`--cluster-node` carries query parameters that `--cluster-lan` would broadcast in the clear ({}). \
+			 Only `?cost=` may be advertised; pass credentials with `--cluster-token` instead.",
+			published.join(", ")
+		);
+		config = config.with_node(url);
+	}
+	if let Some(secret) = secret {
+		let secret = moq_tokio::mdns::Secret::load(secret).context("invalid --cluster-lan-secret")?;
+		config = config.with_secret(secret);
+	}
+	Ok(config.advertise().await?)
 }
 
 /// Extract and remove the `cost` query param from a peer URL.
@@ -1555,6 +1830,23 @@ fn take_cost(url: &mut Url) -> anyhow::Result<Option<u64>> {
 	}
 
 	Ok(Some(cost))
+}
+
+/// Drop `?jwt=` so a LAN dial never presents [`ClusterConfig::token`].
+#[cfg(feature = "cluster-lan")]
+fn strip_jwt(url: &mut Url) {
+	let remaining: Vec<(String, String)> = url
+		.query_pairs()
+		.filter(|(key, _)| key != "jwt")
+		.map(|(key, value)| (key.into_owned(), value.into_owned()))
+		.collect();
+	url.set_query(None);
+	if !remaining.is_empty() {
+		let mut pairs = url.query_pairs_mut();
+		for (key, value) in &remaining {
+			pairs.append_pair(key, value);
+		}
+	}
 }
 
 /// Whether a `--cluster-connect-api` source is an http(s) URL (otherwise it's
@@ -1767,7 +2059,10 @@ mod tests {
 		DialTarget {
 			key: key.to_string(),
 			url: Url::parse(&format!("https://{key}/")).expect("test URL"),
+			urls: Vec::new(),
 			cost: None,
+			fingerprint: None,
+			lan: false,
 		}
 	}
 
@@ -2574,10 +2869,11 @@ mod tests {
 		assert!(config.cluster.lan.enabled, "the untouched key survives");
 	}
 
-	/// The LAN needs an address to advertise, like gossip does.
+	/// A LAN mesh without a node URL still starts when the listener has a
+	/// generated certificate to advertise.
 	#[cfg(feature = "cluster-lan")]
 	#[tokio::test]
-	async fn lan_without_node_errors() {
+	async fn lan_without_node_needs_a_fingerprint() {
 		let config = ClusterConfig {
 			lan: LanConfig {
 				enabled: true,
@@ -2585,38 +2881,107 @@ mod tests {
 			},
 			..Default::default()
 		};
-		let err = new_cluster(config)
+		let err = new_cluster(config.clone())
 			.unwrap()
 			.start()
 			.await
-			.expect_err("--cluster-lan without --cluster-node must fail");
+			.expect_err("--cluster-lan without advertise must fail");
 		let msg = format!("{err}");
-		assert!(msg.contains("--cluster-node"), "missing --cluster-node in: {msg}");
-		assert!(msg.contains("--cluster-lan"), "missing --cluster-lan in: {msg}");
+		assert!(msg.contains("with_advertise") || msg.contains("--cluster-lan"), "{msg}");
+
+		let err = new_cluster(config)
+			.unwrap()
+			.with_advertise(LanAdvertise::new(4443))
+			.with_connect(Default::default(), Default::default())
+			.start()
+			.await
+			.expect_err("neither node nor fingerprint");
+		let msg = format!("{err}");
+		assert!(msg.contains("--cluster-node") || msg.contains("generated"), "{msg}");
 	}
 
-	/// mDNS is unauthenticated, so a discovered URL is only safe to dial with
-	/// `--cluster-token` attached once its advertiser proved it holds the shared
-	/// key. Starting without one would leak the token to any advertiser, so it is
-	/// refused rather than defaulted to an open mesh.
+	/// The secret is optional: without one the mesh is open, and start-up does
+	/// not refuse it. Binding mDNS is skipped here by not attaching a client;
+	/// the missing-fingerprint/node check still runs first.
 	#[cfg(feature = "cluster-lan")]
 	#[tokio::test]
-	async fn lan_without_a_secret_errors() {
+	async fn lan_without_a_secret_is_open() {
 		let config = ClusterConfig {
 			node: Some("https://us-west.example.com".to_string()),
 			lan: LanConfig {
 				enabled: true,
+				secret: None,
 				..Default::default()
 			},
 			..Default::default()
 		};
 		let err = new_cluster(config)
 			.unwrap()
+			.with_advertise(LanAdvertise::new(4443))
 			.start()
 			.await
-			.expect_err("--cluster-lan without --cluster-lan-secret must fail");
+			.expect_err("open LAN still needs with_connect");
 		let msg = format!("{err}");
-		assert!(msg.contains("--cluster-lan-secret"), "missing the secret in: {msg}");
+		assert!(msg.contains("with_connect"), "{msg}");
+		assert!(
+			!msg.contains("--cluster-lan-secret"),
+			"an open mesh must not demand a secret: {msg}"
+		);
+	}
+
+	/// A secret or app without the mesh is an error, not a silently ignored flag.
+	#[cfg(feature = "cluster-lan")]
+	#[test]
+	fn lan_secret_and_app_require_the_mesh() {
+		assert!(
+			LanConfig {
+				enabled: false,
+				secret: Some("cluster.key".into()),
+				..Default::default()
+			}
+			.validate()
+			.unwrap_err()
+			.to_string()
+			.contains("--cluster-lan=true")
+		);
+		assert!(
+			LanConfig {
+				enabled: false,
+				app: Some("custom".parse().expect("valid app")),
+				..Default::default()
+			}
+			.validate()
+			.unwrap_err()
+			.to_string()
+			.contains("--cluster-lan-app")
+		);
+	}
+
+	/// A LAN dial presents the peer's credential on the mesh path and drops
+	/// `?jwt=` even when the advertised node URL carried one.
+	#[cfg(feature = "cluster-lan")]
+	#[test]
+	fn lan_dial_urls_carry_the_credential_not_the_token() {
+		let mut url = Url::parse("https://relay.example.com/anon?jwt=secret&cost=2").expect("url");
+		let cost = take_cost(&mut url).expect("cost");
+		strip_jwt(&mut url);
+		url.set_path(&format!("{CLUSTER_PATH}/theirs"));
+		assert_eq!(cost, Some(2));
+		assert_eq!(url.path(), "/.cluster/theirs");
+		assert!(!url.query().unwrap_or("").contains("jwt"));
+	}
+
+	#[test]
+	fn lan_credential_is_the_path_segment_after_the_marker() {
+		assert_eq!(Cluster::lan_credential("/.cluster/abc"), Some("abc"));
+		assert_eq!(Cluster::lan_credential("/.cluster"), None);
+		assert_eq!(Cluster::lan_credential("/.cluster/"), None);
+		assert_eq!(Cluster::lan_credential("/.clusterish/abc"), None);
+		assert_eq!(Cluster::lan_credential("/room"), None);
+		assert!(Cluster::is_lan_path("/.cluster"));
+		assert!(Cluster::is_lan_path("/.cluster/abc"));
+		assert!(!Cluster::is_lan_path("/.clusterish/abc"));
+		assert!(!Cluster::is_lan_path("/room"));
 	}
 
 	/// mDNS is just another wanter: a peer also reached by a static seed keeps
@@ -2658,6 +3023,97 @@ mod tests {
 		assert_eq!(
 			config.cluster.connect_api.as_deref(),
 			Some("https://api.example.com/cluster/connect")
+		);
+	}
+
+	/// A node-advertising cluster and a fingerprint-advertising cluster share
+	/// broadcasts in both directions over one LAN session. Wires accept to dial
+	/// directly, so the test needs no multicast and stays CI-safe.
+	#[cfg(feature = "cluster-lan")]
+	#[tokio::test]
+	async fn lan_meshes_node_and_fingerprint_clusters() {
+		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+		let node = new_cluster(ClusterConfig::default()).expect("node cluster");
+		let fingerprint = new_cluster(ClusterConfig::default()).expect("fingerprint cluster");
+
+		let _from_node = node.origin.create_broadcast("from-node").expect("create");
+		_from_node.announce(Default::default()).expect("announce");
+
+		let mut listen = moq_tokio::listen::Config::default();
+		listen.bind = Some("127.0.0.1:0".to_string());
+		listen.tls.generate = vec!["moq-cluster-lan".to_string()];
+		let server = listen.init(Default::default()).expect("bind");
+		let port = server.local_addr().expect("local addr").port();
+		let fp = server
+			.certificates()
+			.fingerprints()
+			.into_iter()
+			.next()
+			.expect("generated fingerprint");
+		let listener = server.listen().await.expect("listen");
+
+		node.set_lan_credential("listener-proof");
+		let accept = node.clone();
+		tokio::spawn(async move {
+			let mut listener = listener;
+			while let Some(request) = listener.accept().await {
+				let conn = crate::Connection::new(request, accept.clone(), crate::Auth::default());
+				tokio::spawn(async move {
+					let _ = conn.run().await;
+				});
+			}
+		});
+
+		let mut connect = moq_tokio::connect::Config::default();
+		connect.once = Some(true);
+		let fingerprint = fingerprint
+			.with_connect(connect, Default::default())
+			.with_advertise(LanAdvertise::new(port).with_fingerprint(fp.clone()));
+		let url: Url = format!("moqt://127.0.0.1:{port}{CLUSTER_PATH}/listener-proof")
+			.parse()
+			.expect("url");
+		let target = DialTarget {
+			key: format!("moqt://127.0.0.1:{port}/"),
+			url: url.clone(),
+			urls: vec![url],
+			cost: None,
+			fingerprint: Some(fp),
+			lan: true,
+		};
+		let _dial = fingerprint.dial_lan_target(&target).expect("dial");
+
+		let mut announced = fingerprint.origin.consume().announced();
+		let update = tokio::time::timeout(TIMEOUT, announced.next())
+			.await
+			.expect("timed out waiting for from-node")
+			.expect("origin closed");
+		assert_eq!(update.prefix.as_path().as_str(), "from-node");
+
+		let _from_fp = fingerprint.origin.create_broadcast("from-fingerprint").expect("create");
+		_from_fp.announce(Default::default()).expect("announce");
+		let mut announced = node.origin.consume().announced();
+		loop {
+			let update = tokio::time::timeout(TIMEOUT, announced.next())
+				.await
+				.expect("timed out waiting for from-fingerprint")
+				.expect("origin closed");
+			if update.prefix.as_path().as_str() == "from-fingerprint" {
+				break;
+			}
+		}
+	}
+
+	/// A `/.cluster` request on a cluster without LAN discovery is refused.
+	#[cfg(feature = "cluster-lan")]
+	#[tokio::test]
+	async fn lan_path_without_discovery_is_refused() {
+		assert_eq!(
+			new_cluster(ClusterConfig::default())
+				.expect("cluster")
+				.verify_lan_credential("anything"),
+			None
 		);
 	}
 }
