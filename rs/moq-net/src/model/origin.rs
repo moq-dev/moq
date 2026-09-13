@@ -5224,11 +5224,8 @@ mod tests {
 	/// next anonymous session at the same path: a subscriber on a third session
 	/// gets the newcomer's media immediately, not a lingering dead front.
 	///
-	/// On main the dead front lingered, was advertised to the newcomer before it
-	/// announced, and the newcomer's own announce was then read as a reflection
-	/// (404 `dropped` until the linger expired). The source model closes the
-	/// front with its last source, so B attaches a fresh one and C resolves it
-	/// without parking.
+	/// The front closes with its last source, so the newcomer attaches a fresh
+	/// one and the subscriber resolves it without parking.
 	#[tokio::test]
 	async fn anonymous_handoff_serves_the_newcomer_immediately() {
 		let producer = origin(1).produce();
