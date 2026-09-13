@@ -163,11 +163,17 @@ boundary. They must produce identical tracks with aligned groups. Everywhere
 else leave `--hop` unset: a fresh id per run is what makes a restarted
 encoder take over cleanly instead of splicing mid-stream.
 
-## LAN mesh
+## Cluster
+
+The CLI reads the same `--cluster-*` flags as `moq-relay`, LAN and WAN alike,
+and publishes on the cluster origin. A `moq --cluster-lan` process and a
+`moq-relay` with `[cluster.lan]` on the same network mesh with each other.
 
 `--cluster-lan` advertises this process on the LAN over mDNS and meshes with
-every other participating MoQ process, no relay required. It reuses `--listen`,
-filling in an ephemeral port and a generated certificate when those are unset.
+every other participating MoQ process. It reuses `--listen`, filling in an
+ephemeral port and a generated certificate when those are unset. A LAN peer
+authenticates with its mDNS credential; `cluster.token` is for static and
+gossip peers only.
 
 ```bash
 moq --cluster-lan import capture
@@ -176,12 +182,19 @@ moq --cluster-lan --cluster-lan-secret /etc/moq/cluster.key import capture
 
 `--cluster-lan-secret` restricts the mesh to peers holding the same key.
 Without it, anyone who can reach the listener joins, so leave it unset only
-on networks you trust.
+on networks you trust. mDNS is still an open channel: the secret
+authenticates the record, it does not hide the credential or the node URL.
 
 `--cluster-lan-app` names the DNS-SD application this process advertises
 under. Peers using a different name never discover this one. It defaults to
 `default`, which moq-relay shares, so the two find each other with no
 configuration. An application built on the library picks its own name.
+
+The WAN flags (`--cluster-connect`, `--cluster-connect-api`, `--cluster-node`,
+`--cluster-mesh`, `--cluster-token`, `--cluster-id`, `--cluster-tier`) match
+the relay. `--cluster-connect` and `--cluster-connect-api` are a MoQ side on
+their own, so `moq --cluster-connect https://relay.example import ts` needs
+no `--connect`. See [Clustering](/bin/relay/cluster).
 
 ## Tokens
 

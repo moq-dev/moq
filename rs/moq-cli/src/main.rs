@@ -5,8 +5,6 @@
 //! plus every stage's endpoint.
 
 mod args;
-#[cfg(feature = "cluster-lan")]
-mod cluster;
 mod complete;
 #[cfg(feature = "capture")]
 mod devices;
@@ -71,54 +69,47 @@ impl Net {
 /// Bind the MoQ listener and spawn everything that serves on it: ordinary
 /// clients, the LAN mesh when `--cluster-lan` is on, and the certificate
 /// endpoint for an explicit `--listen`. A no-op with no listener configured.
-///
 async fn spawn_server(
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 	moq: &MoqSide,
-	origin: &moq_net::origin::Producer,
+	cluster: &moq_relay::Cluster,
 	net: &Net,
 	directions: Directions,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<moq_relay::Started> {
 	if !moq.serves() {
-		return Ok(());
+		return cluster.clone().start().await.context("cluster failed to start");
 	}
 
 	let server = net.server(moq.server_config())?;
 	let certificates = server.certificates();
+	let cluster = attach_lan(cluster.clone(), moq, &server)?;
+	// Advertise before accepting, so a `/.cluster` dial is verified against a
+	// live credential rather than refused as "LAN discovery is not enabled".
+	let started = cluster.clone().start().await.context("cluster failed to start")?;
 
-	#[cfg(feature = "cluster-lan")]
-	let lan = match moq.lan() {
-		true => Some(cluster::Lan::start(&moq.cluster, origin.clone(), &server, moq.client.clone()).await?),
-		false => None,
+	let origin = &cluster.origin;
+	let server = if moq.lan() {
+		server
+	} else {
+		route_server(server, origin, directions)
 	};
-	#[cfg(feature = "cluster-lan")]
-	let server = match lan {
-		Some(_) => server,
-		None => route_server(server, origin, directions),
-	};
-	#[cfg(not(feature = "cluster-lan"))]
-	let server = route_server(server, origin, directions);
 
 	// Stream sockets bind asynchronously in `listen`, so this must finish before
 	// `spawn_moq` reports readiness. The serve task only owns an already-bound
 	// listener and cannot discover a late bind failure.
 	let listener = server.listen().await.context("failed to bind listeners")?;
-	#[cfg(feature = "cluster-lan")]
-	match lan {
-		Some((lan, discovery)) => {
-			tasks.spawn(cluster::serve(
-				listener,
-				lan.clone(),
-				origin.clone(),
-				directions,
-				moq.server.bind.is_some(),
-			));
-			tasks.spawn(lan.run(discovery));
-		}
-		None => spawn_serve(tasks, listener),
+	if moq.lan() {
+		spawn_cluster_serve(
+			tasks,
+			listener,
+			cluster.clone(),
+			origin.clone(),
+			directions,
+			moq.server.bind.is_some(),
+		);
+	} else {
+		spawn_serve(tasks, listener);
 	}
-	#[cfg(not(feature = "cluster-lan"))]
-	spawn_serve(tasks, listener);
 
 	// The certificate endpoint is for clients dialing a URL, so it follows the
 	// explicit listener rather than the mesh's ephemeral one.
@@ -126,7 +117,90 @@ async fn spawn_server(
 		tasks.spawn(async move { web::run_web(&web_bind, certificates).await });
 	}
 
-	Ok(())
+	Ok(started)
+}
+
+/// Advertise the bound listener on the LAN when `--cluster-lan` is on.
+fn attach_lan(
+	cluster: moq_relay::Cluster,
+	moq: &MoqSide,
+	server: &moq_tokio::Server,
+) -> anyhow::Result<moq_relay::Cluster> {
+	if !moq.lan() {
+		return Ok(cluster);
+	}
+	let port = server
+		.local_addr()
+		.context("--cluster-lan needs a QUIC listener")?
+		.port();
+	let mut advertise = moq_relay::LanAdvertise::new(port);
+	if !moq.server_config().tls.generate.is_empty()
+		&& let Some(fingerprint) = server.certificates().fingerprints().into_iter().next()
+	{
+		advertise = advertise.with_fingerprint(fingerprint);
+	}
+	Ok(cluster.with_advertise(advertise))
+}
+
+/// Accept inbound sessions, splitting LAN mesh peers off from ordinary clients.
+///
+/// Both share one listener; only the request path tells them apart. A listener
+/// `--cluster-lan` invented is for the mesh, not for viewers.
+fn spawn_cluster_serve(
+	tasks: &mut JoinSet<anyhow::Result<()>>,
+	mut listener: moq_tokio::Listener,
+	cluster: moq_relay::Cluster,
+	origin: moq_net::origin::Producer,
+	directions: Directions,
+	public_quic: bool,
+) {
+	if let Ok(addr) = listener.local_addr() {
+		tracing::info!(%addr, "listening");
+	}
+	tasks.spawn(async move {
+		let mut sessions = tokio::task::JoinSet::new();
+		while let Some(request) = listener.accept().await {
+			while sessions.try_join_next().is_some() {}
+			if moq_relay::Cluster::is_lan_path(request.path()) {
+				let conn = moq_relay::Connection::new(request, cluster.clone(), moq_relay::Auth::default())
+					.with_id(cluster.next_connection_id());
+				sessions.spawn(async move {
+					if let Err(err) = conn.run().await {
+						tracing::warn!(%err, "LAN peer session ended");
+					}
+				});
+				continue;
+			}
+			if !is_public_transport(request.transport(), public_quic) {
+				tracing::debug!(path = %request.path(), "refusing a non-peer request on the LAN mesh listener");
+				request.close(404).await.ok();
+				continue;
+			}
+			let mut request = request;
+			if directions.publish {
+				request = request.with_publisher(origin.consume());
+			}
+			if directions.consume {
+				request = request.with_subscriber(origin.clone());
+			}
+			sessions.spawn(async move {
+				let err = match request.ok().await {
+					Ok(session) => session.closed().await.into(),
+					Err(err) => err,
+				};
+				tracing::warn!(%err, "session ended with error");
+			});
+		}
+		anyhow::bail!("the MoQ listener stopped accepting")
+	});
+}
+
+/// Whether ordinary clients may use this transport on the shared LAN server.
+fn is_public_transport(transport: moq_tokio::Transport, public_quic: bool) -> bool {
+	match transport {
+		moq_tokio::Transport::Tcp | moq_tokio::Transport::Unix => true,
+		_ => public_quic,
+	}
 }
 
 /// Attach the requested directions before stream accept loops capture the server.
@@ -290,14 +364,20 @@ impl Directions {
 async fn spawn_moq(
 	moq: &MoqSide,
 	net: &Net,
-	origin: &moq_net::origin::Producer,
+	cluster: moq_relay::Cluster,
 	directions: Directions,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
-) -> anyhow::Result<moq_net::bandwidth::Allocator> {
+) -> anyhow::Result<(moq_net::bandwidth::Allocator, moq_net::origin::Producer)> {
 	let mut bandwidth = moq_net::bandwidth::Allocator::unlimited();
+	let client = net.client(moq.client.clone())?;
+	let cluster = cluster
+		.with_client(client.clone())
+		.with_client_tls(moq.client.tls.build()?)
+		.with_connect(moq.client.clone(), moq.quic.clone());
+	let origin = cluster.origin.clone();
 
 	if let Some(url) = moq.client.url.clone() {
-		let mut client = net.client(moq.client.clone())?;
+		let mut client = client;
 		if directions.publish {
 			client = client.with_publisher(origin.consume());
 		}
@@ -315,19 +395,24 @@ async fn spawn_moq(
 		bandwidth = moq_net::bandwidth::Allocator::new(reconnect.send_bandwidth());
 		tasks.spawn(async move { Ok(reconnect.closed().await?) });
 	}
-	notify_when_initialized(spawn_server(tasks, moq, origin, net, directions), moq::notify_ready).await?;
 
-	Ok(bandwidth)
+	let started =
+		notify_when_initialized(spawn_server(tasks, moq, &cluster, net, directions), moq::notify_ready).await?;
+	if !started.standalone() {
+		tasks.spawn(async move { started.run().await });
+	}
+
+	Ok((bandwidth, origin))
 }
 
 /// Report readiness only after every configured MoQ attachment initializes.
-async fn notify_when_initialized(
-	initialization: impl std::future::Future<Output = anyhow::Result<()>>,
+async fn notify_when_initialized<T>(
+	initialization: impl std::future::Future<Output = anyhow::Result<T>>,
 	notify_ready: impl FnOnce(),
-) -> anyhow::Result<()> {
-	initialization.await?;
+) -> anyhow::Result<T> {
+	let value = initialization.await?;
 	notify_ready();
-	Ok(())
+	Ok(value)
 }
 
 /// Fill the shared Origin from MoQ, then play one broadcast locally.
@@ -340,7 +425,7 @@ async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()
 	// Before anything dials: a codec we can't decode is a blank window otherwise.
 	args.validate()?;
 
-	let origin = moq.origin()?;
+	let cluster = moq.cluster()?;
 	let name = moq.broadcast.clone().unwrap_or_default();
 	let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
 
@@ -348,7 +433,7 @@ async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()
 		consume: true,
 		..Default::default()
 	};
-	spawn_moq(&moq, &net, &origin, directions, &mut tasks).await?;
+	let (_, origin) = spawn_moq(&moq, &net, cluster, directions, &mut tasks).await?;
 
 	play::run(origin.consume(), name, args, tasks)
 }
@@ -358,7 +443,7 @@ async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()
 /// Stages are independent: each names its own broadcast and owns its own endpoint,
 /// and the first to finish (stdin EOF, Ctrl-C, or an error) ends the process.
 async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Result<()> {
-	let origin = moq.origin()?;
+	let cluster = moq.cluster()?;
 	let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
 	// The stdin/capture pipelines run on this thread instead of the JoinSet: the
 	// platform capture stream is not Send, so their futures cannot be spawned.
@@ -366,7 +451,7 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 
 	// The stage combinations were refused up front by `Invocation::validate`, before
 	// anything bound a port or dialed out.
-	let bandwidth = spawn_moq(&moq, &net, &origin, Directions::of(&stages), &mut tasks).await?;
+	let (bandwidth, origin) = spawn_moq(&moq, &net, cluster, Directions::of(&stages), &mut tasks).await?;
 
 	// stdin and stdout are one resource each, so two stages can't share them.
 	let mut stdin = None;
@@ -712,7 +797,7 @@ mod tests {
 		let addr = occupied.local_addr().expect("occupied address").to_string();
 		let invocation = Invocation::try_parse_from(["moq", "--listen-tcp-bind", &addr, "import", "ts"])
 			.expect("parse stream-only invocation");
-		let origin = invocation.moq.origin().expect("create origin");
+		let cluster = invocation.moq.cluster().expect("create cluster");
 		let net = Net {
 			quic: invocation.moq.quic.clone(),
 			#[cfg(feature = "iroh")]
@@ -721,11 +806,11 @@ mod tests {
 		let mut tasks = JoinSet::new();
 		let ready = Cell::new(false);
 
-		let err = notify_when_initialized(
+		let err = match notify_when_initialized(
 			spawn_server(
 				&mut tasks,
 				&invocation.moq,
-				&origin,
+				&cluster,
 				&net,
 				Directions {
 					publish: true,
@@ -735,7 +820,10 @@ mod tests {
 			|| ready.set(true),
 		)
 		.await
-		.expect_err("the occupied port must fail initialization");
+		{
+			Ok(_) => panic!("the occupied port must fail initialization"),
+			Err(err) => err,
+		};
 
 		assert!(err.to_string().contains("failed to bind listeners"), "{err:#}");
 		assert!(!ready.get(), "readiness must be withheld after a bind failure");
@@ -747,7 +835,7 @@ mod tests {
 	async fn tcp_only_moq_side_starts_a_server() {
 		let invocation = Invocation::try_parse_from(["moq", "--listen-tcp-bind", "127.0.0.1:0", "import", "ts"])
 			.expect("parse TCP-only invocation");
-		let origin = invocation.moq.origin().expect("create origin");
+		let cluster = invocation.moq.cluster().expect("create cluster");
 		let net = Net {
 			quic: invocation.moq.quic.clone(),
 			#[cfg(feature = "iroh")]
@@ -755,10 +843,10 @@ mod tests {
 		};
 		let mut tasks = JoinSet::new();
 
-		spawn_server(
+		if let Err(err) = spawn_server(
 			&mut tasks,
 			&invocation.moq,
-			&origin,
+			&cluster,
 			&net,
 			Directions {
 				publish: true,
@@ -766,7 +854,9 @@ mod tests {
 			},
 		)
 		.await
-		.expect("start TCP-only server");
+		{
+			panic!("start TCP-only server: {err:#}");
+		}
 
 		assert!(
 			tokio::time::timeout(std::time::Duration::from_millis(50), tasks.join_next())
@@ -775,5 +865,54 @@ mod tests {
 			"the server task should still be accepting connections"
 		);
 		tasks.abort_all();
+	}
+
+	/// An HTTP `--cluster-connect-api` is a MoQ side, so start-up must attach
+	/// client TLS the way the relay does rather than refuse after validate.
+	#[tokio::test]
+	async fn cluster_connect_api_http_attaches_client_tls() {
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let invocation = Invocation::try_parse_from([
+			"moq",
+			"--cluster-connect-api",
+			"https://api.example/peers",
+			"import",
+			"ts",
+		])
+		.expect("parse");
+		assert!(invocation.moq.validate().is_ok());
+		let net = Net {
+			quic: invocation.moq.quic.clone(),
+			#[cfg(feature = "iroh")]
+			iroh: None,
+		};
+		let client = net.client(invocation.moq.client.clone()).expect("client");
+		let cluster = invocation
+			.moq
+			.cluster()
+			.expect("cluster")
+			.with_client(client)
+			.with_connect(invocation.moq.client.clone(), invocation.moq.quic.clone());
+		let err = cluster
+			.clone()
+			.start()
+			.await
+			.expect_err("http API without TLS")
+			.to_string();
+		assert!(err.contains("client TLS"), "{err}");
+
+		cluster
+			.with_client_tls(invocation.moq.client.tls.build().expect("tls"))
+			.start()
+			.await
+			.expect("http API with TLS");
+	}
+
+	#[test]
+	fn explicit_stream_listeners_are_public_without_exposing_mesh_quic() {
+		assert!(is_public_transport(moq_tokio::Transport::Tcp, false));
+		assert!(is_public_transport(moq_tokio::Transport::Unix, false));
+		assert!(!is_public_transport(moq_tokio::Transport::Quic, false));
+		assert!(is_public_transport(moq_tokio::Transport::Quic, true));
 	}
 }

@@ -15,8 +15,8 @@ Today `spawn_server`, `route_server`, and `spawn_serve`
 the process's single origin in whichever directions the stages use, and never
 look at a path or token. The relay's `serve` and `Connection::run`
 (`rs/moq-relay/src/relay.rs`, `connection.rs`) do everything listed in the
-goal. Once [one LAN mesh](/quest/m1/lan-mesh.md) lands the CLI's origin is the
-cluster's, so the relay's `serve` can take over the listener directly.
+goal. The CLI's origin is the cluster's, so the relay's `serve` can take over
+the listener directly.
 
 - Replace the CLI's three server helpers with `moq_relay::serve` over the
   cluster, the auth, and the shutdown handle. `MoqSide` nests
@@ -42,5 +42,4 @@ cluster's, so the relay's `serve` can take over the listener directly.
 
 ## Required
 
-- [One LAN mesh](/quest/m1/lan-mesh.md) - the CLI's origin becomes the cluster's
 - [`moq relay`](/quest/m2/moq-relay-subcommand.md) - the CLI hosts the whole relay library
