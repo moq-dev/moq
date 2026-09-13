@@ -292,7 +292,12 @@ impl MoqBroadcastProducer {
 	pub fn set_catalog_section(&self, name: String, json: String) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let value: serde_json::Value = serde_json::from_str(&json)?;
-		self.with_state(|state| Ok(state.catalog.lock().set_section(name, value)?))
+		self.with_state(|state| {
+			let mut guard = state.catalog.lock();
+			guard.set_section(name, value)?;
+			guard.commit()?;
+			Ok(())
+		})
 	}
 
 	/// Remove a top-level application catalog section by name.
@@ -301,7 +306,9 @@ impl MoqBroadcastProducer {
 	pub fn remove_catalog_section(&self, name: String) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
-			state.catalog.lock().remove_section(&name);
+			let mut guard = state.catalog.lock();
+			guard.remove_section(&name);
+			guard.commit()?;
 			Ok(())
 		})
 	}
