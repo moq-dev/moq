@@ -664,20 +664,7 @@ impl Consume {
 				})
 				.await?
 				{
-					RawStep::Item(mut group) => {
-						let sub = track.subscription();
-						if let Some(start) = sub.start
-							&& start.group == group.sequence
-						{
-							group.start_at(start.frame);
-						}
-						if let Some(end) = sub.end
-							&& end.group == group.sequence
-						{
-							group.end_at(end.frame);
-						}
-						group
-					}
+					RawStep::Item(group) => group,
 					// Track finished or the consumer was closed: nothing left to deliver.
 					RawStep::End | RawStep::Stop => return Ok(()),
 				};

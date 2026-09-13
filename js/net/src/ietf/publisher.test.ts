@@ -928,6 +928,10 @@ test("draft-20: an absolute filter trims the range it serves", async () => {
 	);
 
 	try {
+		// The request forwarded upstream carries the model's exclusive end, one past the
+		// filter's inclusive last group.
+		expect(track.subscription.peek()).toMatchObject({ startGroup: 1, endGroup: 3 });
+
 		const first = await nextUni(fx.uni);
 		if (!first) throw new Error("the filter's start group was never served");
 		expect(await readGroup(first)).toEqual({

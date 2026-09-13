@@ -281,12 +281,13 @@ export class Publisher {
 			// The wire request tells an upstream what we need; the cursor is what actually
 			// trims this subscriber, since the producer fans every cached group out to every
 			// sink regardless. An absent start joins at the latest group, which is what
-			// moq-lite means by joining a live track.
+			// moq-lite means by joining a live track. The range's end is the inclusive last
+			// group; the model's `endGroup` is exclusive.
 			track.update({
 				priority,
 				maxAge: Varint.MAX_U53,
 				startGroup: range.start && Number(range.start.group),
-				endGroup: range.end && Number(range.end.group),
+				endGroup: range.end && Number(range.end.group) + 1,
 			});
 			const startGroup = range.start ? Number(range.start.group) : track.latest();
 			if (startGroup !== undefined) track.startAt(startGroup);

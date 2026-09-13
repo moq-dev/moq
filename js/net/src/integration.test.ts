@@ -286,6 +286,48 @@ test("integration: lite applies initial and updated group bounds", async () => {
 	}
 });
 
+test("integration: lite refuses an empty requested range on open and on update", async () => {
+	const GROUP_COUNT = 4;
+	const REPLAY_LATENCY_MS = 5000;
+	const TIMEOUT_MS = 1000;
+
+	const pair = createMockTransportPair(Lite.ALPN_05);
+	const origin = new OriginProducer();
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, { publish: origin.consume() }),
+	]);
+
+	const broadcast = publish(origin, Path.from("test"));
+	const producer = broadcast.createTrack("video");
+	for (let sequence = 0; sequence < GROUP_COUNT; sequence++) producer.appendGroup().close();
+
+	const remote = client.consume(Path.from("test"));
+	const video = remote.track("video");
+	try {
+		// Bounds that meet cannot go on the wire: the nearest encoding inverts the range.
+		const empty = video.subscribe({ maxAge: REPLAY_LATENCY_MS, startGroup: 2, endGroup: 2 });
+		await expect(withTimeout(empty.recvGroup(), TIMEOUT_MS, "empty open never settled")).rejects.toThrow(
+			"empty subscription range cannot be encoded",
+		);
+		empty.close();
+
+		// A live subscription whose demand later collapses to nothing fails the same way.
+		const live = video.subscribe({ maxAge: REPLAY_LATENCY_MS, startGroup: 1, endGroup: 2 }).ordered();
+		expect((await live.nextGroup())?.sequence).toBe(1);
+		live.update({ maxAge: REPLAY_LATENCY_MS, startGroup: 3, endGroup: 3 });
+		await expect(withTimeout(live.nextGroup(), TIMEOUT_MS, "empty update never settled")).rejects.toThrow(
+			"empty subscription range cannot be encoded",
+		);
+		live.close();
+	} finally {
+		remote.close();
+		broadcast.close();
+		client.close();
+		server.close();
+	}
+});
+
 test("integration: lite draft-06", async () => {
 	// Exercises announce ids: every active assigns an ordinal on the wire.
 	await runPublishSubscribeFlow(Lite.ALPN_06_WIP);

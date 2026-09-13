@@ -23,6 +23,8 @@ import { StreamId } from "./stream.ts";
 import {
 	decodeSubscribeResponse,
 	decodeSubscribeResponseMaybe,
+	EMPTY_RANGE,
+	emptyRange,
 	exclusiveGroupEnd,
 	inclusiveGroupEnd,
 	Subscribe,
@@ -477,8 +479,8 @@ export class Subscriber {
 	async #runSubscribe(broadcast: Path.Valid, request: track.Request) {
 		const id = this.#subscribeNext++;
 		const subscription = request.subscription;
-		if (subscription.endGroup !== undefined && (subscription.startGroup ?? 0) >= subscription.endGroup) {
-			request.reject(new Error("empty subscription range cannot be encoded"));
+		if (emptyRange(subscription)) {
+			request.reject(new Error(EMPTY_RANGE));
 			return;
 		}
 
@@ -812,6 +814,10 @@ export class Subscriber {
 				if (next === null) return;
 				continue;
 			}
+
+			// Demand collapsing to nothing is refused the same way an initial empty
+			// request is: the error closes the track, so every local subscriber sees it.
+			if (emptyRange(current)) throw new Error(EMPTY_RANGE);
 
 			// Round-trip the other Subscribe parameters so the publisher doesn't
 			// interpret SUBSCRIBE_UPDATE as a reset of ordered/maxAge/etc.
