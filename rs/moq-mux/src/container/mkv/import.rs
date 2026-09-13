@@ -312,7 +312,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let media = self.catalog.media_producer(track, wire)?;
 
 		let mut catalog = self.catalog.clone();
-		let mut catalog = catalog.lock();
+		let mut catalog = catalog.modify()?;
 
 		match kind {
 			TrackKind::Video => {
@@ -456,7 +456,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Drop every rendition this importer registered from the catalog.
 	fn unregister(&mut self) {
-		let mut catalog = self.catalog.lock();
+		// A closed catalog has nothing left to unregister from.
+		let Ok(mut catalog) = self.catalog.modify() else {
+			return;
+		};
 		for track in self.tracks.values() {
 			match track.kind {
 				TrackKind::Video => {

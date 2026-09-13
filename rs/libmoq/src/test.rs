@@ -710,7 +710,8 @@ fn publish_catalog_roundtrip() {
 		let mut state = State::lock();
 		let (_, catalog) = state.publish.pair_mut(Id::try_from(broadcast).unwrap()).unwrap();
 		catalog
-			.lock()
+			.modify()
+			.unwrap()
 			.video
 			.renditions
 			.get_mut(stalled_video_name)
@@ -2289,7 +2290,7 @@ fn consume_audio_follows_a_sibling_broadcast_reference() {
 	let name = {
 		let mut state = State::lock();
 		let (_, catalog) = state.publish.pair_mut(Id::try_from(source).unwrap()).unwrap();
-		let catalog = catalog.lock();
+		let catalog = catalog.modify().unwrap();
 		catalog
 			.audio
 			.renditions
@@ -2320,8 +2321,14 @@ fn consume_audio_follows_a_sibling_broadcast_reference() {
 	{
 		let mut state = State::lock();
 		let (_, catalog) = state.publish.pair_mut(Id::try_from(broadcast).unwrap()).unwrap();
-		catalog.lock().audio.renditions.get_mut(&name).unwrap().broadcast =
-			Some(moq_net::PathRelative::new("./source").into_owned());
+		catalog
+			.modify()
+			.unwrap()
+			.audio
+			.renditions
+			.get_mut(&name)
+			.unwrap()
+			.broadcast = Some(moq_net::PathRelative::new("./source").into_owned());
 	}
 
 	let consume = request_broadcast(origin, b"a/pub");

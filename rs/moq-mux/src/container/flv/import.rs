@@ -526,7 +526,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// we then fail to produce would be advertised to consumers but never served.
 		let wire = crate::catalog::hang::Container::try_from(&config)?;
 		let media = self.catalog.media_producer(net_track, wire)?;
-		self.catalog.lock().video.renditions.insert(name, config.clone());
+		self.catalog.modify()?.video.renditions.insert(name, config.clone());
 		self.video.insert(
 			track_id,
 			VideoStream {
@@ -555,7 +555,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// we then fail to produce would be advertised to consumers but never served.
 		let wire = crate::catalog::hang::Container::try_from(&config)?;
 		let media = self.catalog.media_producer(net_track, wire)?;
-		self.catalog.lock().audio.renditions.insert(name, config.clone());
+		self.catalog.modify()?.audio.renditions.insert(name, config.clone());
 		self.audio.insert(track_id, AudioStream { track: media, config });
 		Ok(())
 	}
@@ -595,7 +595,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 		let flag = stream.stalled.flag();
 		let name = stream.track.name().to_string();
-		let mut guard = self.catalog.lock();
+		let mut guard = self.catalog.modify()?;
 		if let Some(config) = guard.video.renditions.get_mut(&name) {
 			config.stalled = flag;
 		}
@@ -607,7 +607,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	fn replace_video(&mut self, track_id: u8) -> anyhow::Result<moq_net::track::Producer> {
 		if let Some(mut old) = self.video.remove(&track_id) {
 			old.track.finish()?;
-			self.catalog.lock().video.renditions.remove(old.track.name());
+			self.catalog.modify()?.video.renditions.remove(old.track.name());
 		}
 		Ok(self
 			.broadcast
@@ -619,7 +619,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	fn replace_audio(&mut self, track_id: u8) -> anyhow::Result<moq_net::track::Producer> {
 		if let Some(mut old) = self.audio.remove(&track_id) {
 			old.track.finish()?;
-			self.catalog.lock().audio.renditions.remove(old.track.name());
+			self.catalog.modify()?.audio.renditions.remove(old.track.name());
 		}
 		Ok(self
 			.broadcast
@@ -664,7 +664,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Drop every rendition this importer registered from the catalog.
 	fn unregister(&mut self) {
-		let mut catalog = self.catalog.lock();
+		// A closed catalog has nothing left to unregister from.
+		let Ok(mut catalog) = self.catalog.modify() else {
+			return;
+		};
 		for stream in self.video.values() {
 			catalog.video.renditions.remove(stream.track.name());
 		}

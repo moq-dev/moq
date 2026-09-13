@@ -24,8 +24,9 @@ struct State<E: CatalogExt> {
 	/// [`reserve`](Producer::reserve)).
 	reservations: Reservations,
 
-	/// Failure from the last implicit (guard-drop) publication, if one failed.
-	error: Option<crate::Error>,
+	/// Why the catalog tracks are closed, so [`Producer::modify`] refuses further edits with the
+	/// cause: [`Producer::finish`], or a drop-time publish that failed and aborted them.
+	closed: Option<crate::Error>,
 }
 
 /// Take the shared state, ignoring a poisoned lock.
@@ -120,6 +121,24 @@ impl<E: CatalogExt> Outputs<E> {
 
 		Ok(())
 	}
+
+	/// Abort every catalog track after a publish nobody could return the error for.
+	///
+	/// The three tracks carry one catalog, so a failure part way through `emit` must not leave some
+	/// of them serving a newer catalog than the others. Consumers see the error instead.
+	fn abort(&mut self, err: &crate::Error) {
+		// Only a transport error has a wire code; anything else (an extension that won't serialize)
+		// reaches consumers as a generic failure while the cause stays on the producer.
+		let reason = match err {
+			crate::Error::Moq(err) => err.clone(),
+			crate::Error::Json(moq_json::Error::Net(err)) => err.clone(),
+			_ => moq_net::StreamError::Internal.into(),
+		};
+		// Idempotent: a track that is already closed keeps its first reason.
+		let _ = self.hang.clone().abort(reason.clone());
+		let _ = self.hangz.clone().abort(reason.clone());
+		let _ = self.msf_track.clone().abort(reason);
+	}
 }
 
 /// Produces both a hang and MSF catalog track for a broadcast.
@@ -131,7 +150,7 @@ impl<E: CatalogExt> Outputs<E> {
 /// media sections, regardless of any extension.
 ///
 /// The JSON catalog is updated when tracks are added/removed but is *not* automatically published.
-/// You'll have to call [`lock`](Self::lock) to update and publish the catalog.
+/// You'll have to call [`modify`](Self::modify) to update and publish the catalog.
 /// Both the hang (`catalog.json`) and MSF (`catalog`) tracks are published on drop of the guard.
 ///
 /// The hang track is published through [`moq_json`], which currently emits one snapshot per
@@ -202,7 +221,7 @@ impl Default for Config<()> {
 impl<E: CatalogExt> Config<E> {
 	/// Start from an extended catalog rather than the media-only one, e.g. the untyped
 	/// [`Extra`] for the by-name / FFI path. Set application sections through
-	/// [`Producer::lock`](Producer::lock) afterwards.
+	/// [`Producer::modify`](Producer::modify) afterwards.
 	pub fn with_catalog<F: CatalogExt>(self, catalog: Catalog<F>) -> Config<F> {
 		Config {
 			catalog,
@@ -306,7 +325,7 @@ impl<E: CatalogExt> Producer<E> {
 				catalog: config.catalog,
 				owned: BTreeSet::new(),
 				reservations: Reservations::default(),
-				error: None,
+				closed: None,
 			})),
 			clock: crate::Clock::new(),
 			timeline,
@@ -343,29 +362,26 @@ impl<E: CatalogExt> Producer<E> {
 
 	/// Get mutable access to the catalog, publishing it after any changes.
 	///
-	/// The publish happens when the returned [`Guard`] drops. A failure is stored as
-	/// [`error`](Self::error) and logged; call [`Guard::commit`] instead to handle it immediately.
+	/// The publish happens when the returned [`Guard`] drops. Fails once the catalog tracks are
+	/// closed, the one publication failure that happens in normal operation, so nothing is left to
+	/// check after the guard drops. Anything else that stops the drop from publishing (an extension
+	/// that won't serialize, a catalog too large for a frame) aborts the catalog tracks with that
+	/// error: consumers see it instead of a stale catalog, and the next `modify` returns it here.
+	/// Call [`Guard::commit`] to get the error back immediately instead.
+	///
 	/// The in-memory catalog is already mutated, so a panic while the guard is held still
 	/// publishes: skipping would leave `snapshot` ahead of the wire with no dirty flag to catch up.
-	pub fn lock(&mut self) -> Guard<'_, E> {
-		Guard {
-			state: take(&self.current),
+	pub fn modify(&mut self) -> crate::Result<Guard<'_, E>> {
+		let state = take(&self.current);
+		if let Some(err) = &state.closed {
+			return Err(err.clone());
+		}
+
+		Ok(Guard {
+			state,
 			outputs: &mut self.outputs,
 			updated: false,
-		}
-	}
-
-	/// The error from the most recent implicit publication, if one failed.
-	///
-	/// A dirty [`Guard`] publishes on drop, which cannot return an error. That failure is stored
-	/// here so a caller who skipped [`Guard::commit`] can still observe it. [`Guard::commit`]
-	/// reports the same class of error to its caller and does not store it.
-	///
-	/// A later successful publication, explicit or implicit, clears it. Closing the catalog tracks
-	/// (a [`finish`](Self::finish)) makes the next dirty drop store a transport error here; the
-	/// in-memory catalog keeps the edit, and the next [`lock`](Self::lock) still starts from it.
-	pub fn error(&self) -> Option<crate::Error> {
-		take(&self.current).error.clone()
+		})
 	}
 
 	/// Get a snapshot of the current catalog.
@@ -465,7 +481,9 @@ impl<E: CatalogExt> Producer<E> {
 			state.catalog.clone()
 		};
 		if let Err(err) = self.outputs.emit(&catalog) {
-			tracing::warn!(%err, "failed to publish the catalog");
+			tracing::error!(%err, "failed to publish the catalog, aborting its tracks");
+			self.outputs.abort(&err);
+			take(&self.current).closed = Some(err);
 		}
 	}
 
@@ -502,13 +520,11 @@ impl<E: CatalogExt> Producer<E> {
 		let recorder = self.timeline.pacing_track(track)?;
 
 		let section = self.timeline.section();
-		{
-			let mut catalog = self.lock();
-			if catalog.archive.is_none() {
-				catalog.archive = Some(section);
-			}
-			catalog.commit()?;
+		let mut catalog = self.modify()?;
+		if catalog.archive.is_none() {
+			catalog.archive = Some(section);
 		}
+		catalog.commit()?;
 
 		Ok(recorder)
 	}
@@ -601,6 +617,7 @@ impl<E: CatalogExt> Producer<E> {
 
 	/// Finish publishing to this catalog.
 	pub fn finish(&mut self) -> crate::Result<()> {
+		take(&self.current).closed = Some(moq_net::Error::Closed.into());
 		self.outputs.hang.finish()?;
 		self.outputs.hangz.finish()?;
 		self.outputs.msf_track.finish()?;
@@ -611,13 +628,14 @@ impl<E: CatalogExt> Producer<E> {
 
 /// RAII guard for modifying a catalog with automatic publishing on drop.
 ///
-/// Obtained via [`Producer::lock`]. Derefs to the [`Catalog<E>`](super::hang::Catalog), so `video`/`audio`
+/// Obtained via [`Producer::modify`]. Derefs to the [`Catalog<E>`](super::hang::Catalog), so `video`/`audio`
 /// and (through the catalog's own deref) the extension sections are editable directly.
 ///
 /// On drop, the hang, compressed-hang, and MSF catalog tracks are updated if the catalog was
-/// mutated. That publish can fail (a closed track, or an extension that won't serialize). The
-/// failure is stored on the [`Producer`] as [`error`](Producer::error) and logged; call
-/// [`commit`](Self::commit) instead to handle it immediately.
+/// mutated. That publish cannot return an error, so a failure (an extension that won't serialize,
+/// a catalog too large for a frame) aborts the catalog tracks instead: consumers see the error and
+/// the next [`Producer::modify`] returns it. Call [`commit`](Self::commit) when the caller can act
+/// on the failure itself.
 pub struct Guard<'a, E: CatalogExt = ()> {
 	state: MutexGuard<'a, State<E>>,
 	outputs: &'a mut Outputs<E>,
@@ -629,6 +647,8 @@ impl<E: CatalogExt> Guard<'_, E> {
 	///
 	/// Consumes the guard, so the subsequent drop publishes nothing. A no-op if the catalog was never
 	/// mutated, and still withheld while a [`Reserved`](super::Reserved) gates the initial snapshot.
+	/// Unlike a drop, a failure here leaves the tracks open: the caller has the error and decides
+	/// what to do with it.
 	pub fn commit(mut self) -> crate::Result<()> {
 		self.publish()
 	}
@@ -652,9 +672,7 @@ impl<E: CatalogExt> Guard<'_, E> {
 			r.published = true;
 		}
 
-		self.outputs.emit(&self.state.catalog)?;
-		self.state.error = None;
-		Ok(())
+		self.outputs.emit(&self.state.catalog)
 	}
 
 	/// Release a name taken by [`Producer::acquire`], along with the entry it owns.
@@ -717,9 +735,10 @@ impl<E: CatalogExt> Drop for Guard<'_, E> {
 	fn drop(&mut self) {
 		if let Err(err) = self.publish() {
 			if !std::thread::panicking() {
-				tracing::warn!(%err, "failed to publish the catalog on guard drop");
+				tracing::error!(%err, "failed to publish the catalog on guard drop, aborting its tracks");
 			}
-			self.state.error = Some(err);
+			self.outputs.abort(&err);
+			self.state.closed = Some(err);
 		}
 	}
 }
@@ -916,7 +935,7 @@ mod test {
 		let mut compressed = Consumer::compressed(catalog.outputs.hangz.consume());
 
 		{
-			let mut guard = catalog.lock();
+			let mut guard = catalog.modify().unwrap();
 			guard
 				.audio
 				.renditions
@@ -939,44 +958,79 @@ mod test {
 	}
 
 	#[test]
-	fn a_dropped_failed_edit_is_observable() {
+	fn modify_refuses_a_finished_catalog() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast).unwrap();
 
 		catalog
-			.lock()
+			.modify()
+			.unwrap()
 			.audio
 			.renditions
 			.insert("audio0".to_string(), AudioConfig::new(AudioCodec::Opus, 48_000, 2));
-		assert!(catalog.error().is_none());
 		catalog.finish().unwrap();
 
+		assert!(matches!(
+			catalog.modify(),
+			Err(crate::Error::Moq(moq_net::Error::Closed))
+		));
+		assert!(matches!(
+			catalog.enroll("audio0"),
+			Err(crate::Error::Moq(moq_net::Error::Closed))
+		));
+	}
+
+	#[test]
+	fn a_dropped_failed_edit_aborts_every_catalog_track() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::<Extra>::with_catalog(&mut broadcast, Catalog::default()).unwrap();
+		let mut hang = catalog.outputs.hang.consume().ordered();
+		let mut msf = catalog.outputs.msf_track.subscribe(None).ordered();
+
+		// Something the hang track rejects, so the publish fails before the MSF track is reached.
 		catalog
-			.lock()
-			.audio
-			.renditions
-			.insert("audio1".to_string(), AudioConfig::new(AudioCodec::Opus, 48_000, 2));
-		assert!(catalog.error().is_some(), "a dropped failed publish must be observable");
+			.modify()
+			.unwrap()
+			.set_section("big", "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1).into())
+			.unwrap();
+
+		assert!(matches!(
+			catalog.modify(),
+			Err(crate::Error::Json(moq_json::Error::Net(moq_net::Error::FrameTooLarge)))
+		));
+		let waiter = kio::Waiter::noop();
+		assert!(matches!(
+			hang.poll_next_group(&waiter),
+			Poll::Ready(Err(moq_net::Error::FrameTooLarge))
+		));
 		assert!(
-			catalog.snapshot().audio.renditions.contains_key("audio1"),
-			"the in-memory catalog keeps the edit after a failed publish"
+			matches!(
+				msf.poll_next_group(&waiter),
+				Poll::Ready(Err(moq_net::Error::FrameTooLarge))
+			),
+			"a track the publish never reached must not outlive the others"
 		);
 	}
 
 	#[test]
-	fn commit_reports_a_publish_failure() {
+	fn a_failed_commit_leaves_the_catalog_open() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let mut catalog = Producer::new(&mut broadcast).unwrap();
+		let mut catalog = Producer::<Extra>::with_catalog(&mut broadcast, Catalog::default()).unwrap();
+		let track = catalog.outputs.hang.consume();
 
-		// Finished tracks can't take another group, so the publish behind the guard fails.
-		catalog.finish().unwrap();
-
-		let mut guard = catalog.lock();
+		let mut guard = catalog.modify().unwrap();
 		guard
-			.audio
-			.renditions
-			.insert("audio0".to_string(), AudioConfig::new(AudioCodec::Opus, 48_000, 2));
-		assert!(guard.commit().is_err());
+			.set_section("big", "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1).into())
+			.unwrap();
+		assert!(matches!(
+			guard.commit(),
+			Err(crate::Error::Json(moq_json::Error::Net(moq_net::Error::FrameTooLarge)))
+		));
+
+		// The caller got the error, so the tracks stay usable once the catalog fits again.
+		catalog.modify().unwrap().remove_section("big").unwrap();
+		catalog.finish().unwrap();
+		assert_eq!(track.latest(), Some(0));
 	}
 
 	#[test]
@@ -985,7 +1039,7 @@ mod test {
 		let mut catalog = Producer::new(&mut broadcast).unwrap();
 		let track = catalog.outputs.hang.consume();
 
-		let mut guard = catalog.lock();
+		let mut guard = catalog.modify().unwrap();
 		guard
 			.audio
 			.renditions

@@ -14,7 +14,7 @@ use crate::{Error, Result};
 ///
 /// A panic under this lock is an in-flight edit being unwound. That edit is discarded (see
 /// [`Guard`]'s `Drop`) and the last value that reached the wire is still consistent, so poisoning
-/// would only turn the next `lock`/`update` into a panic during cleanup.
+/// would only turn the next `modify`/`update` into a panic during cleanup.
 fn take<T>(inner: &Mutex<Inner<T>>) -> MutexGuard<'_, Inner<T>> {
 	inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -55,23 +55,6 @@ impl<T> Producer<T> {
 	pub fn is_used(&self) -> bool {
 		take(&self.inner).track.inner.is_used()
 	}
-
-	/// The error from the most recent implicit publication, if one failed.
-	///
-	/// A dirty [`Guard`] publishes on drop, which cannot return an error. That failure is stored
-	/// here so a caller who skipped [`Guard::commit`] can still observe it. [`Guard::commit`]
-	/// reports the same class of error to its caller and does not store it.
-	///
-	/// A later successful [`update`](Self::update) or publication, explicit or implicit, clears it.
-	/// A panic while a guard is held discards the in-flight edit and does not set this: the
-	/// producer keeps the last value that reached the wire.
-	///
-	/// Closing the track (a [`finish`](Self::finish), or the peer going away) makes the next dirty
-	/// drop store a [`Error::Net`] here; the in-memory value is not published, and the next
-	/// [`lock`](Self::lock) still seeds from the last value that actually reached the wire.
-	pub fn error(&self) -> Option<Error> {
-		take(&self.inner).error.clone()
-	}
 }
 
 impl<T: Serialize> Producer<T> {
@@ -85,7 +68,7 @@ impl<T: Serialize> Producer<T> {
 					deltas: config.delta_ratio != 0,
 				},
 				encoder: Encoder::new(config),
-				error: None,
+				aborted: None,
 			})),
 			_marker: PhantomData,
 		}
@@ -116,26 +99,31 @@ impl<T: Serialize> Producer<T> {
 	/// the latest value and their changes compose instead of clobbering. Don't hold a guard across
 	/// an `.await`, since that keeps the lock held while suspended.
 	///
-	/// Publishing on drop can fail (a closed track, a value that won't serialize). The failure is
-	/// stored on the producer as [`error`](Self::error) and logged; call [`Guard::commit`] instead
-	/// to handle it immediately. A panic while the guard is held discards the in-flight edit
-	/// rather than publishing a torn value.
-	pub fn lock(&mut self) -> Guard<'_, T>
+	/// Fails if the track is closed. That is the one publication failure that happens in normal
+	/// operation, and the guard holds the lock that [`finish`](Self::finish) needs, so nothing is
+	/// left to check after the guard drops. Anything else that stops the drop from publishing (a
+	/// value that won't serialize, or one too large for a frame) aborts the track with that error:
+	/// consumers see it instead of a stale value, and the next `modify` returns it here. Call
+	/// [`Guard::commit`] to get the error back immediately instead. A panic while the guard is held
+	/// discards the in-flight edit rather than publishing a torn value.
+	pub fn modify(&mut self) -> Result<Guard<'_, T>>
 	where
 		T: Default + DeserializeOwned,
 	{
 		let inner = take(&self.inner);
+		inner.open()?;
+
 		let value = inner
 			.encoder
 			.value()
 			.and_then(|last| serde_json::from_value(last.clone()).ok())
 			.unwrap_or_default();
 
-		Guard {
+		Ok(Guard {
 			inner,
 			value,
 			dirty: false,
-		}
+		})
 	}
 
 	/// Finish the open group, so the deltas already written stop being provisional.
@@ -155,17 +143,27 @@ impl<T: Serialize> Producer<T> {
 	pub fn finish(&mut self) -> Result<()> {
 		take(&self.inner).finish()
 	}
+
+	/// Abort the track with the given error, which consumers see in place of any further value.
+	///
+	/// Consumes the handle, since nothing can be published afterwards. Clones sharing the track see
+	/// it closed: their next [`modify`](Self::modify) or [`update`](Self::update) fails.
+	pub fn abort(self, err: moq_net::Error) -> Result<()> {
+		let mut inner = take(&self.inner);
+		inner.abort(err.into());
+		Ok(())
+	}
 }
 
-/// An RAII editing guard returned by [`Producer::lock`].
+/// An RAII editing guard returned by [`Producer::modify`].
 ///
 /// Holds the producer's lock for its lifetime and derefs to the current value. Mutating it through
 /// [`DerefMut`] marks it dirty, and dropping a dirty guard publishes the edited value.
 ///
-/// Publishing on drop cannot return an error. A failure is stored on the [`Producer`] as
-/// [`error`](Producer::error) and logged. Prefer [`commit`](Self::commit) when the caller can act
-/// on a failure immediately. A panic while the guard is held skips publication, so a torn edit
-/// is discarded instead of reaching the wire.
+/// Publishing on drop cannot return an error, so a failure aborts the track instead: consumers see
+/// the error and the next [`Producer::modify`] returns it. Call [`commit`](Self::commit) when the
+/// caller can act on the failure itself. A panic while the guard is held skips publication, so a
+/// torn edit is discarded instead of reaching the wire.
 pub struct Guard<'a, T: Serialize> {
 	inner: MutexGuard<'a, Inner<T>>,
 	value: T,
@@ -176,7 +174,8 @@ impl<T: Serialize> Guard<'_, T> {
 	/// Publish the edited value, returning any error.
 	///
 	/// Consumes the guard, so the subsequent drop publishes nothing. A no-op if the value was never
-	/// mutated.
+	/// mutated. Unlike a drop, a failure here leaves the track open: the caller has the error and
+	/// decides what to do with it.
 	pub fn commit(mut self) -> Result<()> {
 		self.publish()
 	}
@@ -215,8 +214,8 @@ impl<T: Serialize> Drop for Guard<'_, T> {
 			return;
 		}
 		if let Err(err) = self.publish() {
-			tracing::warn!(%err, "failed to publish JSON value on guard drop");
-			self.inner.error = Some(err);
+			tracing::error!(%err, "failed to publish JSON value on guard drop, aborting the track");
+			self.inner.abort(err);
 		}
 	}
 }
@@ -229,11 +228,44 @@ impl<T: Serialize> Drop for Guard<'_, T> {
 struct Inner<T> {
 	track: Track,
 	encoder: Encoder<T>,
-	/// Failure from the last implicit (guard-drop) publication, if one failed.
-	error: Option<Error>,
+
+	/// Why this producer aborted the track, so [`Producer::modify`] can report the cause rather than
+	/// the closed track it left behind.
+	aborted: Option<Error>,
 }
 
 impl<T> Inner<T> {
+	/// Refuse further edits once the track can't take another group.
+	fn open(&self) -> Result<()> {
+		if let Some(err) = &self.aborted {
+			return Err(err.clone());
+		}
+
+		// The same test `append_group` applies: a boundary declared ahead of the live edge still
+		// admits the groups below it.
+		let track = &self.track.inner;
+		let next = track.latest().map_or(0, |latest| latest.saturating_add(1));
+		if track.is_closed() || track.final_sequence().is_some_and(|fin| next >= fin) {
+			return Err(moq_net::Error::Closed.into());
+		}
+		Ok(())
+	}
+
+	/// Abort the track with a publication failure nobody could return.
+	fn abort(&mut self, err: Error) {
+		// The track carries a moq-net error; anything else (a value that won't serialize) has no
+		// wire code, so consumers get a generic failure while the exact cause stays here.
+		let reason = match &err {
+			Error::Net(err) => err.clone(),
+			_ => moq_net::StreamError::Internal.into(),
+		};
+		self.encoder.reset();
+		self.track.group = None;
+		// Idempotent: a track that is already closed keeps its first reason.
+		let _ = self.track.inner.clone().abort(reason);
+		self.aborted = Some(err);
+	}
+
 	/// Finish the open group, leaving the next update to open a replacement with a full snapshot.
 	fn cut(&mut self) -> Result<()> {
 		if self.track.group.is_none() {
@@ -250,7 +282,7 @@ impl<T> Inner<T> {
 impl<T: Serialize> Inner<T> {
 	fn update(&mut self, value: &T) -> Result<()> {
 		// Split the borrow so `frame` can hold the encoder while `track` is written through.
-		let Inner { track, encoder, error } = self;
+		let Inner { track, encoder, .. } = self;
 
 		let Some(frame) = encoder.update(value)? else {
 			return Ok(());
@@ -261,7 +293,6 @@ impl<T: Serialize> Inner<T> {
 		// frame (too large) doesn't, and a delta against a snapshot no consumer ever saw is unreadable.
 		track.write(&frame)?;
 		frame.commit();
-		*error = None;
 
 		Ok(())
 	}

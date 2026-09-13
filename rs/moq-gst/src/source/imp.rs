@@ -1048,7 +1048,7 @@ mod session_tests {
 
 		// First update announces audio only, and no producer ever answers for it.
 		{
-			let mut guard = catalog.lock();
+			let mut guard = catalog.modify().unwrap();
 			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
 		}
 
@@ -1067,7 +1067,7 @@ mod session_tests {
 		// Second update adds video, backed by a real track so its subscription resolves.
 		let _video = broadcast.create_track("video", None).unwrap();
 		{
-			let mut guard = catalog.lock();
+			let mut guard = catalog.modify().unwrap();
 			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
 		}
 
@@ -1095,7 +1095,7 @@ mod session_tests {
 		// the session still has to end cleanly.
 		let _video = broadcast.create_track("video", None).unwrap();
 		{
-			let mut guard = catalog.lock();
+			let mut guard = catalog.modify().unwrap();
 			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
 			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
 		}
@@ -1124,7 +1124,7 @@ mod session_tests {
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
 		{
-			let mut guard = catalog.lock();
+			let mut guard = catalog.modify().unwrap();
 			guard.video.renditions = BTreeMap::from([("stalled".to_string(), video_rendition())]);
 		}
 
@@ -1137,7 +1137,7 @@ mod session_tests {
 		// is cancelled while it is still waiting.
 		let request = await_request(&mut dynamic);
 		{
-			let mut guard = catalog.lock();
+			let mut guard = catalog.modify().unwrap();
 			guard.video.renditions.clear();
 		}
 
@@ -1166,7 +1166,7 @@ mod session_tests {
 
 		let _video = broadcast.create_track("video", None).unwrap();
 		{
-			let mut guard = catalog.lock();
+			let mut guard = catalog.modify().unwrap();
 			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
 		}
 		catalog.finish().unwrap();
@@ -1200,7 +1200,7 @@ mod session_tests {
 			.unwrap();
 		let _reserved = broadcast.reserve_track("audio").unwrap();
 		{
-			let mut guard = catalog.lock();
+			let mut guard = catalog.modify().unwrap();
 			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
 			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
 		}
@@ -1255,7 +1255,7 @@ mod session_tests {
 		// separate one and the stalled rendition had its chance to claim an id first.
 		let _audio = broadcast.create_track("audio", None).unwrap();
 		{
-			let mut guard = catalog.lock();
+			let mut guard = catalog.modify().unwrap();
 			guard.video.renditions = BTreeMap::from([("stalled".to_string(), video_rendition())]);
 			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
 		}
@@ -1270,7 +1270,7 @@ mod session_tests {
 
 		let _video = broadcast.create_track("video", None).unwrap();
 		{
-			let mut guard = catalog.lock();
+			let mut guard = catalog.modify().unwrap();
 			guard.video.renditions.insert("video".to_string(), video_rendition());
 		}
 

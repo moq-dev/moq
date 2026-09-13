@@ -118,7 +118,7 @@ async fn export_aac_roundtrip() {
 	{
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
 		cfg.container = Container::Legacy;
-		catalog.lock().audio.renditions.insert(name.clone(), cfg);
+		catalog.modify().unwrap().audio.renditions.insert(name.clone(), cfg);
 	}
 	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 
@@ -238,7 +238,12 @@ async fn export_lead_audio() -> BytesMut {
 			inline: true,
 		});
 		cfg.container = Container::Legacy;
-		catalog.lock().video.renditions.insert(vtrack.name().to_string(), cfg);
+		catalog
+			.modify()
+			.unwrap()
+			.video
+			.renditions
+			.insert(vtrack.name().to_string(), cfg);
 	}
 	let mut video = Producer::new(vtrack, HangContainer::Legacy(crate::container::Kind::Data));
 
@@ -251,7 +256,12 @@ async fn export_lead_audio() -> BytesMut {
 	{
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
 		cfg.container = Container::Legacy;
-		catalog.lock().audio.renditions.insert(atrack.name().to_string(), cfg);
+		catalog
+			.modify()
+			.unwrap()
+			.audio
+			.renditions
+			.insert(atrack.name().to_string(), cfg);
 	}
 	let mut audio = Producer::new(atrack, HangContainer::Legacy(crate::container::Kind::Data));
 
@@ -379,7 +389,7 @@ async fn export_avc3_in_band_reassembles() {
 			inline: true,
 		});
 		cfg.container = Container::Legacy;
-		catalog.lock().video.renditions.insert(name.clone(), cfg);
+		catalog.modify().unwrap().video.renditions.insert(name.clone(), cfg);
 	}
 	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 
@@ -430,7 +440,7 @@ async fn export_avc3_preserves_multiple_pps() {
 			inline: true,
 		});
 		cfg.container = Container::Legacy;
-		catalog.lock().video.renditions.insert(name.clone(), cfg);
+		catalog.modify().unwrap().video.renditions.insert(name.clone(), cfg);
 	}
 	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 
@@ -484,7 +494,7 @@ async fn export_avc1_out_of_band_reassembles() {
 		});
 		cfg.container = Container::Legacy;
 		cfg.description = Some(avcc);
-		catalog.lock().video.renditions.insert(name.clone(), cfg);
+		catalog.modify().unwrap().video.renditions.insert(name.clone(), cfg);
 	}
 	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 
@@ -552,7 +562,7 @@ async fn export_import_h265_keeps_suffix_sei_on_its_picture() {
 		// hev1: the config comes from the SPS the keyframe carries inline.
 		let mut cfg = crate::codec::h265::config(&annexb(&units[0])).unwrap();
 		cfg.container = Container::Legacy;
-		catalog.lock().video.renditions.insert(name.clone(), cfg);
+		catalog.modify().unwrap().video.renditions.insert(name.clone(), cfg);
 	}
 	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 
@@ -745,7 +755,12 @@ async fn export_pcr_wraps_below_the_reserve_at_start() {
 	{
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
 		cfg.container = Container::Legacy;
-		catalog.lock().audio.renditions.insert(track.name().to_string(), cfg);
+		catalog
+			.modify()
+			.unwrap()
+			.audio
+			.renditions
+			.insert(track.name().to_string(), cfg);
 	}
 	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 	for i in 0..4u64 {
@@ -836,7 +851,7 @@ async fn export_pcr_respects_every_renditions_reserve() {
 		cfg.container = Container::Legacy;
 		cfg.description = Some(avcc.clone());
 		cfg.jitter = jitter;
-		catalog.lock().video.renditions.insert(name.to_string(), cfg);
+		catalog.modify().unwrap().video.renditions.insert(name.to_string(), cfg);
 		Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data))
 	};
 	// "a" gets the lowest PID and so carries the PCR, with the tiny default
@@ -911,7 +926,12 @@ async fn export_pcr_backfills_a_coarse_cadence() {
 		});
 		cfg.container = Container::Legacy;
 		cfg.description = Some(avcc);
-		catalog.lock().video.renditions.insert(track.name().to_string(), cfg);
+		catalog
+			.modify()
+			.unwrap()
+			.video
+			.renditions
+			.insert(track.name().to_string(), cfg);
 	}
 	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 
@@ -977,7 +997,7 @@ async fn export_scte35_roundtrip() {
 			descriptors: Vec::new(),
 			verbatim: Some(tscat::Verbatim::new(0x86, tscat::Framing::Section)),
 		};
-		catalog.lock().mpegts.tracks.insert(scte_name.clone(), track);
+		catalog.modify().unwrap().mpegts.tracks.insert(scte_name.clone(), track);
 	}
 	let mut scte_producer = Producer::new(scte, HangContainer::Legacy(crate::container::Kind::Data));
 	// bbb's first video keyframe is at 1.4 s; stamp the cue just after it so it survives
@@ -1094,7 +1114,7 @@ async fn export_pes_verbatim_roundtrip() {
 		verbatim.stream_id = Some(STREAM_ID);
 		let mut track = tscat::Track::new(DATA_PID);
 		track.verbatim = Some(verbatim);
-		catalog.lock().mpegts.tracks.insert(data_name.clone(), track);
+		catalog.modify().unwrap().mpegts.tracks.insert(data_name.clone(), track);
 	}
 	let mut data_producer = Producer::new(data_track, HangContainer::Legacy(crate::container::Kind::Data));
 	// bbb's first video keyframe is at 1.4 s; stamp the PES just after it so it survives
@@ -1187,7 +1207,7 @@ async fn scte35_without_video_export_is_rejected() {
 			descriptors: Vec::new(),
 			verbatim: Some(tscat::Verbatim::new(0x86, tscat::Framing::Section)),
 		};
-		catalog.lock().mpegts.tracks.insert(scte_name, track);
+		catalog.modify().unwrap().mpegts.tracks.insert(scte_name, track);
 	}
 	let mut producer = Producer::new(scte, HangContainer::Legacy(crate::container::Kind::Data));
 	producer
@@ -2003,7 +2023,7 @@ async fn si_pids_are_re_emitted_on_their_own_interval() {
 		.unwrap();
 
 	{
-		let mut guard = catalog.lock();
+		let mut guard = catalog.modify().unwrap();
 		let mut cfg = VideoConfig::new(H264 {
 			profile: 0x64,
 			constraints: 0,
@@ -2110,7 +2130,7 @@ fn publish_sdt(
 			Bytes::from(make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 8])),
 		)
 		.unwrap();
-	catalog.lock().mpegts.si.entry(0x0011).or_default().insert(
+	catalog.modify().unwrap().mpegts.si.entry(0x0011).or_default().insert(
 		0x42,
 		tscat::SiEntry {
 			track: track.name().to_string(),
@@ -2141,7 +2161,7 @@ async fn rewind_re_emits_tables_and_resumes_the_clock() {
 		.unwrap();
 	let name = track.name().to_string();
 	{
-		let mut guard = catalog.lock();
+		let mut guard = catalog.modify().unwrap();
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
 		cfg.container = Container::Legacy;
 		guard.audio.renditions.insert(name, cfg);
@@ -2249,7 +2269,7 @@ async fn reordered_video_keeps_the_table_cadence() {
 		.unwrap();
 	let name = track.name().to_string();
 	{
-		let mut guard = catalog.lock();
+		let mut guard = catalog.modify().unwrap();
 		let mut cfg = VideoConfig::new(H264 {
 			profile: 0x64,
 			constraints: 0,
@@ -2325,7 +2345,7 @@ async fn rewind_flags_the_break_once_across_tracks() {
 		)
 		.unwrap();
 	{
-		let mut guard = catalog.lock();
+		let mut guard = catalog.modify().unwrap();
 		let mut video = VideoConfig::new(H264 {
 			profile: 0x64,
 			constraints: 0,
@@ -2834,7 +2854,7 @@ async fn stale_si_entry_does_not_block_output() {
 		.unwrap();
 	let name = track.name().to_string();
 	{
-		let mut guard = catalog.lock();
+		let mut guard = catalog.modify().unwrap();
 		let mut cfg = VideoConfig::new(H264 {
 			profile: 0x64,
 			constraints: 0,
@@ -2940,7 +2960,7 @@ async fn export_opus_roundtrip() {
 	{
 		let mut cfg = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
 		cfg.container = Container::Legacy;
-		catalog.lock().audio.renditions.insert(name.clone(), cfg);
+		catalog.modify().unwrap().audio.renditions.insert(name.clone(), cfg);
 	}
 	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 
@@ -3020,7 +3040,7 @@ async fn opus_export_import_roundtrip() {
 	{
 		let mut cfg = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
 		cfg.container = Container::Legacy;
-		catalog.lock().audio.renditions.insert(name.clone(), cfg);
+		catalog.modify().unwrap().audio.renditions.insert(name.clone(), cfg);
 	}
 	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 
@@ -3111,7 +3131,12 @@ async fn export_twice(with_video: bool) -> (Vec<Frame>, Vec<Frame>) {
 		cfg.container = Container::Legacy;
 		cfg.description =
 			Some(crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap());
-		catalog.lock().video.renditions.insert(track.name().to_string(), cfg);
+		catalog
+			.modify()
+			.unwrap()
+			.video
+			.renditions
+			.insert(track.name().to_string(), cfg);
 		Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data))
 	});
 
@@ -3124,7 +3149,12 @@ async fn export_twice(with_video: bool) -> (Vec<Frame>, Vec<Frame>) {
 			.unwrap();
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
 		cfg.container = Container::Legacy;
-		catalog.lock().audio.renditions.insert(track.name().to_string(), cfg);
+		catalog
+			.modify()
+			.unwrap()
+			.audio
+			.renditions
+			.insert(track.name().to_string(), cfg);
 		Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data))
 	};
 
@@ -3322,7 +3352,7 @@ async fn repointed_si_entry_resubscribes() {
 		.unwrap();
 	let name = track.name().to_string();
 	{
-		let mut guard = catalog.lock();
+		let mut guard = catalog.modify().unwrap();
 		let mut cfg = VideoConfig::new(H264 {
 			profile: 0x64,
 			constraints: 0,
@@ -3371,7 +3401,7 @@ async fn repointed_si_entry_resubscribes() {
 	}
 
 	// Repoint the entry at the replacement track.
-	catalog.lock().mpegts.si.get_mut(&0x0011).unwrap().insert(
+	catalog.modify().unwrap().mpegts.si.get_mut(&0x0011).unwrap().insert(
 		0x42,
 		tscat::SiEntry {
 			track: "b.si".to_string(),
@@ -3441,7 +3471,7 @@ async fn si_revision_after_final_media_frame_is_flushed() {
 		.unwrap();
 	let name = track.name().to_string();
 	{
-		let mut guard = catalog.lock();
+		let mut guard = catalog.modify().unwrap();
 		let mut cfg = VideoConfig::new(H264 {
 			profile: 0x64,
 			constraints: 0,
@@ -3545,7 +3575,7 @@ async fn si_cadence_rig(pid: u16, table_id: u8, interval: Duration) -> SiCadence
 		.unwrap();
 	let name = track.name().to_string();
 	{
-		let mut guard = catalog.lock();
+		let mut guard = catalog.modify().unwrap();
 		let mut cfg = VideoConfig::new(H264 {
 			profile: 0x64,
 			constraints: 0,
@@ -3732,7 +3762,8 @@ async fn si_anchor_survives_a_zero_interval_reorder() {
 	// The catalog raises the interval to 1s. The floor must measure from the 2.5s
 	// anchor, not the reordered 2.4s emission.
 	rig.catalog
-		.lock()
+		.modify()
+		.unwrap()
 		.mpegts
 		.si
 		.get_mut(&0x0011)
@@ -3920,7 +3951,12 @@ async fn export_cbr_video() -> Vec<Frame> {
 			inline: true,
 		});
 		cfg.container = Container::Legacy;
-		catalog.lock().video.renditions.insert(track.name().to_string(), cfg);
+		catalog
+			.modify()
+			.unwrap()
+			.video
+			.renditions
+			.insert(track.name().to_string(), cfg);
 	}
 	let mut video = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 	for i in 0..100u64 {

@@ -26,7 +26,7 @@ impl Live {
 			)
 			.unwrap();
 		insert(&mut catalog, track.name().to_string());
-		let kind = if catalog.lock().video.renditions.contains_key(track.name()) {
+		let kind = if catalog.modify().unwrap().video.renditions.contains_key(track.name()) {
 			crate::container::Kind::Video
 		} else {
 			crate::container::Kind::Audio
@@ -72,7 +72,7 @@ impl Live {
 			config.coded_height = Some(240);
 			config.framerate = Some(30.0);
 			config.container = Container::Legacy;
-			catalog.lock().video.renditions.insert(name, config);
+			catalog.modify().unwrap().video.renditions.insert(name, config);
 		})
 	}
 
@@ -80,7 +80,7 @@ impl Live {
 	pub(crate) fn audio(mut config: AudioConfig) -> Self {
 		config.container = Container::Legacy;
 		Self::new(".audio", |catalog, name| {
-			catalog.lock().audio.renditions.insert(name, config);
+			catalog.modify().unwrap().audio.renditions.insert(name, config);
 		})
 	}
 

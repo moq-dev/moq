@@ -276,7 +276,7 @@ impl MoqBroadcastProducer {
 		value.flip = properties.flip;
 
 		self.with_state(|state| {
-			let mut catalog = state.catalog.lock();
+			let mut catalog = state.catalog.modify()?;
 			catalog.video.set_properties(value)?;
 			catalog.commit()?;
 			Ok(())
@@ -293,7 +293,7 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::enter();
 		let value: serde_json::Value = serde_json::from_str(&json)?;
 		self.with_state(|state| {
-			let mut guard = state.catalog.lock();
+			let mut guard = state.catalog.modify()?;
 			guard.set_section(name, value)?;
 			guard.commit()?;
 			Ok(())
@@ -306,7 +306,7 @@ impl MoqBroadcastProducer {
 	pub fn remove_catalog_section(&self, name: String) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
-			let mut guard = state.catalog.lock();
+			let mut guard = state.catalog.modify()?;
 			guard.remove_section(&name);
 			guard.commit()?;
 			Ok(())

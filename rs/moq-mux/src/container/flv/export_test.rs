@@ -529,7 +529,12 @@ fn build_multitrack_broadcast() -> (moq_net::broadcast::Consumer, Vec<Vec<u8>>, 
 		});
 		config.container = Container::Legacy;
 		config.description = Some(Bytes::from(description.clone()));
-		catalog.lock().video.renditions.insert(track.name().to_string(), config);
+		catalog
+			.modify()
+			.unwrap()
+			.video
+			.renditions
+			.insert(track.name().to_string(), config);
 
 		let mut video = Producer::new(
 			track,
@@ -552,7 +557,8 @@ fn build_multitrack_broadcast() -> (moq_net::broadcast::Consumer, Vec<Vec<u8>>, 
 	audio_config.container = Container::Legacy;
 	audio_config.description = Some(Bytes::from_static(&ASC));
 	catalog
-		.lock()
+		.modify()
+		.unwrap()
 		.audio
 		.renditions
 		.insert(audio_track.name().to_string(), audio_config);
@@ -759,7 +765,8 @@ async fn export_authors_dts_and_composition_time_for_reordered_avc() {
 	video_config.description = Some(Bytes::from(avcc()));
 	video_config.jitter = Some(Duration::from_millis(80));
 	catalog
-		.lock()
+		.modify()
+		.unwrap()
 		.video
 		.renditions
 		.insert(video_track.name().to_string(), video_config);
@@ -768,7 +775,8 @@ async fn export_authors_dts_and_composition_time_for_reordered_avc() {
 	audio_config.container = Container::Legacy;
 	audio_config.description = Some(Bytes::from_static(&ASC));
 	catalog
-		.lock()
+		.modify()
+		.unwrap()
 		.audio
 		.renditions
 		.insert(audio_track.name().to_string(), audio_config);

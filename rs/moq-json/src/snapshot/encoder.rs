@@ -186,7 +186,7 @@ pub struct Encoder<T> {
 
 	/// Whether the next frame has to be a full snapshot, because a frame was lost or the caller cut
 	/// the group. Kept separate from [`last`](Self::last) so a resync doesn't erase the value: that
-	/// field is also what [`Producer::lock`](super::Producer::lock) seeds an edit from, and dropping
+	/// field is also what [`Producer::modify`](super::Producer::modify) seeds an edit from, and dropping
 	/// it there would publish a document with every other field missing.
 	resync: bool,
 
