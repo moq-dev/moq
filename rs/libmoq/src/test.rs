@@ -2078,7 +2078,7 @@ fn dynamic_serves_a_request_under_a_prefix() {
 }
 
 #[test]
-fn dynamic_refuses_a_non_prefix_pattern() {
+fn dynamic_accepts_a_non_prefix_pattern() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
 	let pattern = b"live/*";
@@ -2092,7 +2092,9 @@ fn dynamic_refuses_a_non_prefix_pattern() {
 			cb.ptr,
 		)
 	};
-	assert!(code < 0, "a non-prefix pattern must be refused, got {code}");
+	assert!(code > 0, "a non-prefix pattern must be advertised, got {code}");
+	assert_eq!(moq_origin_dynamic_close(id(code)), 0);
+	assert_eq!(cb.recv_terminal(), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 

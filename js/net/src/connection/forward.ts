@@ -25,6 +25,14 @@ import type { Established } from "./established.ts";
  *
  * @internal
  */
+function coveringPattern(prefix: Path.Valid): Path.Pattern {
+	try {
+		return Path.Pattern.subtree(prefix);
+	} catch {
+		return Path.Pattern.parse(prefix);
+	}
+}
+
 export function forwardAnnounced(conn: Established, origin: OriginProducer): void {
 	// Reassigned if discovery dies under a live session, so the origin stops counting this
 	// one as a discovering session. Called through a closure so the session's death always
@@ -64,7 +72,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 					if (existing) {
 						existing.update(route);
 					} else {
-						const handle = origin.receive(Path.Pattern.subtree(event.prefix), route);
+						const handle = origin.receive(coveringPattern(event.prefix), route);
 						inserted.set(event.prefix, handle);
 						void drive(handle, conn);
 					}

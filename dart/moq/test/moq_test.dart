@@ -95,11 +95,8 @@ void main() {
     served.dispose();
   });
 
-  test('dynamic refuses a non-prefix pattern', () {
+  test('dynamic accepts a non-prefix pattern', () {
     final origin = MoqOriginProducer(options: MoqOriginOptions());
-    expect(
-      () => origin.dynamic_(pattern: 'live/*', route: MoqRoute()),
-      throwsA(isA<Object>()),
-    );
+    origin.dynamic_(pattern: 'live/*', route: MoqRoute());
   });
 }

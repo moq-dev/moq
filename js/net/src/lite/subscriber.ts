@@ -321,6 +321,20 @@ export class Subscriber {
 						cost = announce.cost;
 						break;
 					}
+					case "pattern": {
+						suffix = Path.from(announce.pattern.text);
+						active = true;
+						hops = announce.hops;
+						cost = { warm: announce.cost, cold: announce.cost };
+						announcedById.set(nextAnnounceId++, suffix);
+						break;
+					}
+					case "ignored": {
+						announcedById.set(nextAnnounceId++, Path.from(`\0ignored:${nextAnnounceId}`));
+						continue;
+					}
+					case "skipped":
+						continue;
 				}
 
 				const path = Path.join(prefix, suffix);

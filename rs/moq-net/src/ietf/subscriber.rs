@@ -778,6 +778,7 @@ where
 		stream: Stream<S, Version>,
 		peer: cluster::Peer,
 		declared: Option<bool>,
+		patterns: bool,
 	) -> Result<MaybeSendBox<'static, ()>, Error> {
 		let mut this = self.clone();
 		let task = match id {
@@ -797,13 +798,16 @@ where
 			ietf::PublishNamespace::ID => {
 				// A negotiated session that omits HOP_PATH fails the decode here, which
 				// the dispatcher turns into the protocol violation the draft requires.
-				let msg = ietf::PublishNamespace::decode_body(&mut data, this.version, peer.negotiated())?;
+				let msg = ietf::PublishNamespace::decode_body(&mut data, this.version, peer.negotiated(), patterns)?;
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
 				}
 				tracing::debug!(message = ?msg, "received publish_namespace");
 				async move {
-					if let Err(err) = this.run_publish_namespace_stream(stream, msg, peer, declared).await {
+					if let Err(err) = this
+						.run_publish_namespace_stream(stream, msg, peer, declared, patterns)
+						.await
+					{
 						// An advertisement update is decoded here rather than in the
 						// dispatcher, so nothing else would surface a malformed one. The
 						// cluster draft requires closing the session on those; a stream
@@ -834,6 +838,11 @@ where
 		self.peer_setup.get().await.solicit
 	}
 
+	/// Whether the peer negotiated NAMESPACE_PATTERNS.
+	pub(super) async fn patterns(&self) -> bool {
+		self.peer_setup.get().await.patterns
+	}
+
 	/// Whether an incoming PUBLISH_NAMESPACE means the peer ignored our SETUP.
 	///
 	/// We always declare that advertisements to us must be solicited (MoQ Solicit), and a
@@ -859,6 +868,7 @@ where
 		msg: ietf::PublishNamespace<'_>,
 		peer: cluster::Peer,
 		declared: Option<bool>,
+		patterns: bool,
 	) -> Result<(), Error> {
 		let request_id = msg.request_id;
 		let path = msg.track_namespace.to_owned();
@@ -907,7 +917,7 @@ where
 		// update) is not released twice here.
 		let mut attached = true;
 		let res = self
-			.run_publish_namespace_updates(&mut stream, &path, request_id, peer, &mut attached)
+			.run_publish_namespace_updates(&mut stream, &path, request_id, peer, patterns, &mut attached)
 			.await;
 
 		if attached {
@@ -949,6 +959,7 @@ where
 		path: &PathOwned,
 		request_id: RequestId,
 		peer: cluster::Peer,
+		patterns: bool,
 		attached: &mut bool,
 	) -> Result<(), Error> {
 		loop {
@@ -974,7 +985,7 @@ where
 				return Ok(());
 			}
 
-			let msg = ietf::PublishNamespace::decode_body(&mut data, self.version, peer.negotiated())?;
+			let msg = ietf::PublishNamespace::decode_body(&mut data, self.version, peer.negotiated(), patterns)?;
 			// Junk inside the declared size would otherwise be applied silently, which
 			// is the one decode path that skipped the check the others make.
 			if !data.is_empty() {
@@ -3687,9 +3698,11 @@ mod tests {
 			request_id: RequestId(0),
 			track_namespace: path.borrow(),
 			cluster: None,
+
+			pattern: None,
 		};
 		subscriber
-			.run_publish_namespace_stream(stream, msg, cluster::Peer::default(), None)
+			.run_publish_namespace_stream(stream, msg, cluster::Peer::default(), None, false)
 			.await
 			.expect("a withdrawal is not a protocol violation");
 		settle().await;
@@ -3743,9 +3756,11 @@ mod tests {
 			request_id: RequestId(0),
 			track_namespace: path.borrow(),
 			cluster: None,
+
+			pattern: None,
 		};
 		subscriber
-			.run_publish_namespace_stream(stream, msg, cluster::Peer::default(), None)
+			.run_publish_namespace_stream(stream, msg, cluster::Peer::default(), None, false)
 			.await
 			.expect_err("an unexpected message ends the stream");
 		settle().await;
@@ -4028,6 +4043,8 @@ mod tests {
 					request_id,
 					track_namespace: crate::Path::new(path),
 					cluster: cluster.clone(),
+
+					pattern: None,
 				})
 				.await
 				.unwrap();
@@ -4127,6 +4144,7 @@ mod tests {
 				&path,
 				request_id,
 				peer,
+				false,
 				&mut attached,
 			));
 
@@ -4175,6 +4193,7 @@ mod tests {
 				&path,
 				request_id,
 				peer,
+				false,
 				&mut attached,
 			));
 
