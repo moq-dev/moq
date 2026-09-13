@@ -70,10 +70,10 @@ export interface Info {
 	 * the publisher evicts it. Reported in TRACK_INFO (Lite05+) so relays re-serve with the
 	 * same bound. The publisher-side half of the budget a subscriber sets for itself.
 	 * Rounded up to a whole millisecond by {@link infoDefaults}, which refuses a negative
-	 * or non-finite value.
+	 * or non-finite value and a result past `Number.MAX_SAFE_INTEGER`.
 	 */
 	maxAge: number;
-	/** Tie-break priority between subscriptions of equal subscriber priority. */
+	/** Tie-break priority between subscriptions of equal subscriber priority (`0..=255`). */
 	priority: number;
 }
 
@@ -87,15 +87,26 @@ function maxAgeMillis(value: number): number {
 	if (!Number.isFinite(value) || value < 0) {
 		throw new RangeError(`maxAge must be a non-negative number of milliseconds: ${value}`);
 	}
-	return Math.ceil(value);
+	const millis = Math.ceil(value);
+	if (!Number.isSafeInteger(millis)) {
+		throw new RangeError(`maxAge exceeds the safe integer millisecond range: ${value}`);
+	}
+	return millis;
+}
+
+function priorityByte(value: number): number {
+	if (!Number.isInteger(value) || value < 0 || value > 255) {
+		throw new RangeError(`priority must be an integer in 0..=255: ${value}`);
+	}
+	return value;
 }
 
 /** Fill in any unset {@link Info} fields with their defaults. */
 export function infoDefaults(info: Partial<Info> = {}): Info {
 	return {
-		timescale: info.timescale ?? Timescale.MILLI,
+		timescale: Timescale(info.timescale ?? Timescale.MILLI),
 		maxAge: maxAgeMillis(info.maxAge ?? DEFAULT_MAX_AGE_MS),
-		priority: info.priority ?? 0,
+		priority: priorityByte(info.priority ?? 0),
 	};
 }
 
@@ -104,12 +115,13 @@ export function infoDefaults(info: Partial<Info> = {}): Info {
  * {@link Subscriber.update}. Mirrors the Rust `Subscription`.
  */
 export interface Subscription {
-	/** Delivery priority relative to this session's other subscriptions. Defaults to `0`. */
+	/** Delivery priority relative to this session's other subscriptions (`0..=255`). Defaults to `0`. */
 	priority?: number;
 	/**
 	 * Maximum age (milliseconds) of a non-latest group before it is skipped. Defaults to `0`.
 	 * Rounded up to a whole millisecond, so a value derived from a measurement is never
-	 * shortened. A negative or non-finite value is refused.
+	 * shortened. A negative or non-finite value, or one past `Number.MAX_SAFE_INTEGER`
+	 * after rounding, is refused.
 	 */
 	maxAge?: number;
 	/**
@@ -129,7 +141,7 @@ export interface Subscription {
 // subscription rather than interpreting an omitted field differently.
 function subscriptionDefaults(subscription: Subscription = {}): Subscription {
 	return {
-		priority: subscription.priority ?? 0,
+		priority: priorityByte(subscription.priority ?? 0),
 		maxAge: maxAgeMillis(subscription.maxAge ?? 0),
 		startGroup: subscription.startGroup,
 		endGroup: subscription.endGroup,

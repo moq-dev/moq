@@ -143,6 +143,42 @@ mod test {
 	}
 
 	#[test]
+	fn track_info_roundtrips_varint_and_priority_bounds() {
+		let info = TrackInfo {
+			priority: 255,
+			max_age: Duration::from_millis((1u64 << 62) - 1),
+			timescale: Timescale::new((1u64 << 62) - 1).unwrap(),
+		};
+		let got = info_roundtrip(Version::Lite05, &info);
+		assert_eq!(got.priority, 255);
+		assert_eq!(got.max_age, info.max_age);
+		assert_eq!(got.timescale, info.timescale);
+	}
+
+	#[test]
+	fn track_info_encodes_sub_millisecond_max_age_as_zero() {
+		let info = TrackInfo {
+			priority: 0,
+			max_age: Duration::from_nanos(999_999),
+			timescale: Timescale::MILLI,
+		};
+		let got = info_roundtrip(Version::Lite05, &info);
+		assert_eq!(got.max_age, Duration::ZERO);
+	}
+
+	#[test]
+	fn track_info_encode_rejects_max_age_past_varint_without_writing() {
+		let info = TrackInfo {
+			priority: 7,
+			max_age: Duration::from_millis(1u64 << 62),
+			timescale: Timescale::MILLI,
+		};
+		let mut buf = Vec::new();
+		assert!(info.encode(&mut buf, Version::Lite05).is_err());
+		assert!(buf.is_empty());
+	}
+
+	#[test]
 	fn track_request_roundtrips_on_lite05() {
 		let msg = Track {
 			broadcast: Path::new("room").to_owned(),

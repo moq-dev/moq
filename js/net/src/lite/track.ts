@@ -1,5 +1,6 @@
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
+import { Timescale } from "../time.ts";
 import * as Message from "./message.ts";
 import { hasGroupOrder, Version } from "./version.ts";
 
@@ -74,15 +75,21 @@ export class TrackInfo {
 	constructor({
 		priority = 0,
 		maxAge = 0,
-		timescale = 0,
+		timescale = Timescale.MILLI,
 	}: {
 		priority?: number;
 		maxAge?: number;
 		timescale?: number;
 	}) {
+		if (!Number.isInteger(priority) || priority < 0 || priority > 255) {
+			throw new RangeError(`priority must be an integer in 0..=255: ${priority}`);
+		}
+		if (!Number.isSafeInteger(maxAge) || maxAge < 0) {
+			throw new RangeError(`maxAge must be a safe non-negative integer: ${maxAge}`);
+		}
 		this.priority = priority;
 		this.maxAge = maxAge;
-		this.timescale = timescale;
+		this.timescale = Timescale(timescale);
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -98,17 +105,20 @@ export class TrackInfo {
 		if (hasGroupOrder(version)) await r.bool();
 		const maxAge = await r.u53();
 		const timescale = await r.u53();
-		// Mandatory on Lite05: a zero scale is invalid (mirrors Rust's Timescale::new rejection),
-		// and would otherwise throw later when wrapped in Timescale().
-		if (timescale === 0) throw new Error("track timescale must be non-zero");
 		return new TrackInfo({ priority, maxAge, timescale });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
 		guardTrack(version);
-		// Reject a zero timescale on encode too, so an invalid TrackInfo fails fast on
-		// the sender rather than only at the peer's decoder.
-		if (this.timescale === 0) throw new Error("track timescale must be non-zero");
+		// Re-check after construction: fields are public, and a mutated value must not
+		// reach the length-prefixed writer.
+		if (!Number.isInteger(this.priority) || this.priority < 0 || this.priority > 255) {
+			throw new RangeError(`priority must be an integer in 0..=255: ${this.priority}`);
+		}
+		if (!Number.isSafeInteger(this.maxAge) || this.maxAge < 0) {
+			throw new RangeError(`maxAge must be a safe non-negative integer: ${this.maxAge}`);
+		}
+		Timescale(this.timescale);
 		return Message.encode(w, (w) => this.#encode(w, version));
 	}
 

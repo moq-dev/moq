@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `Timescale` no longer implements `From<NonZero<u64>>`. Use `Timescale::new` or `TryFrom` so values above the QUIC varint range are refused at construction.
 - Register moq-lite stream codes NOT_FOUND 0x33, OLD 0x34, and EVICTED 0x35 so a cache miss round-trips as the named variant instead of an opaque reserved-range placeholder.
 - Every received protocol code is `Error::Session` / `Error::Stream`, preserving
   its registry and numeric value, including cancellation and internal-error codes.
