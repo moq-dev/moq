@@ -97,13 +97,13 @@ async fn workers_serve_quic_and_share_one_origin() {
 	let shutdown = relay.shutdown.clone();
 	// The group has to outlive the accept loops it owns, so it stays on this
 	// stack: stopping it is what stops the workers.
-	let mut workers = relay.workers.expect("workers configured");
+	let mut workers = relay.workers.expect("workers configured").split();
 	let mut tasks = Vec::new();
-	for (server, spawner) in workers.split() {
+	for (server, spawner) in workers.members() {
 		let cluster = cluster.clone();
 		let auth = auth.clone();
 		let shutdown = shutdown.clone();
-		tasks.push(spawner.run(move || moq_relay::serve(server, cluster, auth, shutdown)));
+		tasks.push(spawner.serve(server, move |server| moq_relay::serve(server, cluster, auth, shutdown)));
 	}
 
 	let url: url::Url = format!("https://127.0.0.1:{port}/workers").parse().expect("parse url");
