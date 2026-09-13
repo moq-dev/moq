@@ -205,7 +205,7 @@ mod tests {
 			!peer_from_setup(&params, Version::Draft19).unwrap().negotiated,
 			"decode-first: do not request NAMESPACE_PATTERNS"
 		);
-		params.set_varint(super::ParameterVarInt::NamespacePatterns, 1);
+		params.set_varint(super::super::ParameterVarInt::NamespacePatterns, 1);
 		assert!(peer_from_setup(&params, Version::Draft19).unwrap().negotiated);
 		assert!(!peer_from_setup(&params, Version::Draft16).unwrap().negotiated);
 	}
