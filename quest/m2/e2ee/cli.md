@@ -15,5 +15,4 @@ Existing plaintext commands remain the default; an explicit application credenti
 
 ## Required
 
-- [Rust E2EE core](/quest/m2/e2ee/rust.md) - provides native encryption, decryption, naming, and failure behavior
 - [Rust protected publisher seams](/quest/m2/e2ee/rust-publish.md) - prevents native convenience publishers from leaking semantic names or catalogs

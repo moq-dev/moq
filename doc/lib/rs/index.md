@@ -23,6 +23,7 @@ The reference implementation. Every crate is on
 | [moq-token](/lib/rs/moq-token) | JWT keys, signing, verification, path authorization. |
 | [moq-room](/lib/rs/moq-room) | Headless rooms: announce-derived roster, token claims, and a chat track. |
 | [moq-json](https://docs.rs/moq-json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
+| [moq-e2ee](https://docs.rs/moq-e2ee) | End-to-end encryption of groups, datagrams, catalogs, and track names. |
 | [moq-flate](https://docs.rs/moq-flate) | Group-scoped DEFLATE for any track. |
 | [moq-loc](https://docs.rs/moq-loc), [moq-msf](https://docs.rs/moq-msf) | The IETF LOC container and MSF catalog. |
 | [moq-stats](https://docs.rs/moq-stats) | Publish and consume relay traffic counters as tracks. |

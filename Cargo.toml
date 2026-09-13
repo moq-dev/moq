@@ -9,6 +9,7 @@ members = [
     "rs/moq-binary",
     "rs/moq-boy",
     "rs/moq-cli",
+    "rs/moq-e2ee",
     "rs/moq-ffi",
     "rs/moq-flate",
     "rs/moq-gst",
@@ -48,6 +49,7 @@ default-members = [
     "rs/moq-bench",
     "rs/moq-binary",
     "rs/moq-cli",
+    "rs/moq-e2ee",
     # "rs/moq-ffi",   # requires Python/maturin
     # "rs/moq-gst",   # requires GStreamer
     "rs/moq-flate",
@@ -222,6 +224,7 @@ web-transport-quinn = { version = "0.12", default-features = false }
 web-transport-trait = "0.4"
 web-transport-wasm = "0.6"
 x11rb = { version = "0.14.0", features = ["randr", "xfixes"] }
+zeroize = { version = "1", features = ["derive"] }
 
 [patch.crates-io]
 # web-transport-quinn and web-transport-iroh depend on kio from crates.io. Without

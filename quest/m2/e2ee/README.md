@@ -41,8 +41,6 @@ experimental `moq-secure` format linked from [#3023](https://github.com/moq-dev/
 - [TypeScript E2EE core](/quest/m2/e2ee/typescript.md) - a reusable TypeScript
   layer protecting groups, datagrams, catalogs, and track identities, without
   putting keys in `@moq/net`
-- [Rust E2EE core](/quest/m2/e2ee/rust.md) - the Rust twin of that layer,
-  giving native peers the same context-aware contract
 - [Rust protected publisher seams](/quest/m2/e2ee/rust-publish.md) - Rust media
   and catalog publishers accept opaque physical names and emit no plaintext
   semantic catalog in E2EE mode

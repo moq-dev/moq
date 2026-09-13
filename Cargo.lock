@@ -4818,6 +4818,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-e2ee"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "base64 0.23.1",
+ "bytes",
+ "criterion",
+ "hex",
+ "kio",
+ "moq-flate",
+ "moq-net",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "web-transport-trait",
+ "zeroize",
+]
+
+[[package]]
 name = "moq-ffi"
 version = "0.3.17"
 dependencies = [
