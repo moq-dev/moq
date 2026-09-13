@@ -4,8 +4,9 @@
 
 One QUIC connection expresses the MoQ scheduling hierarchy without packing it
 into a scalar: higher-priority subscriptions preempt lower-priority ones,
-backlogged subscriptions at the same priority receive equal bandwidth, and
-each subscription serves its own group streams newest-first.
+backlogged subscriptions at the same priority receive equal bandwidth within
+their scheduling domain, and each subscription serves its own group streams
+newest-first.
 
 This completes [#699](https://github.com/moq-dev/moq/issues/699). In the
 reported Alice and Bob case, two priority-4 subscriptions continue to make
@@ -41,9 +42,14 @@ Give every MoQ subscription one send group. A SUBSCRIBE_UPDATE changes the
 group priority atomically. Group streams use their position within the
 subscription, never another subscription's sequence. Remove the session-wide
 `lite::PriorityQueue` once every enabled backend has an honest implementation
-or fallback. This quest owns the mechanism; the priority semantics it realizes,
-including how a shared session's scheduling domains are weighted, are
-[Scope track priority](/quest/m2/track-priority-scope.md)'s.
+or fallback.
+
+Add the scheduling-domain tier above subscriptions: on a shared session,
+fairness is one deficit-round-robin bucket per domain, and a domain's
+subscriptions share that bucket by their own priorities, so a tenant opening
+more subscriptions never buys more bandwidth. The domain key and its scope are
+[Scope track priority](/quest/m2/track-priority-scope.md)'s; this quest owns
+the tier and the weighting.
 
 ### Prototype and compare the hierarchy
 
