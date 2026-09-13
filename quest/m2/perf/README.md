@@ -8,13 +8,14 @@ hot-path costs: redundant copies, locks, atomics, clock reads, allocations,
 and syscalls. Not io_uring specific: anything on dev's hot path qualifies,
 including the shared moq-net model layer and kio.
 
-Every quest lands with a measured before/after (`just bench BASE` on Linux,
+Every implementation quest lands with a measured before/after (`just bench BASE` on Linux,
 plus the targeted micro-benches it names). A measured no-win is a valid
 outcome that abandons the quest.
 
 ## Plan
 
-This line starts after the dev merge, on main. Facts from the 2026-09
+Implementations start after the dev merge, on main; planning quests can settle
+their contracts independently. Facts from the 2026-09
 hot-path survey, so quests don't re-litigate them:
 
 - The default `moq-uring` backend is noq, compiled through the `quinn/`

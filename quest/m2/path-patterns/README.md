@@ -84,7 +84,7 @@ CAT cannot represent `pid/*/chat`.
 - [Relay auth](/quest/m2/path-patterns/relay-auth.md) - relay token, public,
   static, and revalidation paths enforce patterns
 - [Pattern interest](/quest/m2/path-patterns/interest.md) - moq-lite-06 carries
-  a full pattern in ANNOUNCE_REQUEST
+  pattern grants in AUTH and full-pattern interest in ANNOUNCE_REQUEST
 
 ## Related
 

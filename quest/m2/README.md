@@ -68,7 +68,7 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 - [Auth API](/quest/m2/auth-api/README.md) - the relay's auth endpoint names mTLS peers, scopes them explicitly on v1, moves a tier in place, and says once when revalidation is off
 - [Decoded frame ownership](/quest/m2/decoded-frames.md) - retain moq-video Frames across bindings, with native views or CPU conversion as needed
 - [OBS native codecs](/quest/m2/obs-moq-video/README.md) - remove FFmpeg decoding dependencies, deliver GPU frames, and use native audio/video encoders
-- [Audio codecs](/quest/m2/audio-codecs/README.md) - a broadcast that plays in the browser plays natively: platform decoders and encoders behind a backend seam, HE-AAC, and channel layouts up to 7.1
+- [Audio codecs](/quest/m2/audio-codecs/README.md) - platform audio codecs, explicit unsupported cases, and channel layouts up to 7.1
 - [Keyframe trigger](/quest/m2/keyframe-trigger.md) - an application can ask the built-in capture encoder for a keyframe
 - [QoS](/quest/m2/qos/README.md) - broadcast health: relay starvation and timeliness histograms, and client stats broadcasts from publishers and viewers
 - [Drain](/quest/m2/drain/README.md) - relay restarts drain sessions over GOAWAY instead of hard-dropping them
@@ -114,7 +114,7 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 - [#2848](/quest/m2/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - the Opus producer follows its bandwidth grant through `moq_mux::rate::Control`, moved out of moq-video
 - [Ladder](/quest/m2/ladder/README.md) - a transcode ladder adapts to the uplink it publishes over, instead of encoding every live rung at its ceiling
 - [LOC duration marker](/quest/m2/loc-duration-marker.md) - LOC producers write the marker once released consumers skip it
-- [#2278](/quest/m2/2278-watch-absolute-wall-clock-latency-target-for-synchronized.md) - hang: a timeline consumer exposes the wall anchor, and the library never syncs playback on it
+- [#2278](/quest/m2/2278-watch-absolute-wall-clock-latency-target-for-synchronized.md) - hang: expose the fixed catalog-root broadcast clock without synchronizing library playback to wall time
 - [Time stretch](/quest/m2/watch-audio-time-stretch.md) - js/watch: the audio ring converges by time-stretching instead of skipping or going silent
 - [Metadata association](/quest/m2/metadata-association.md) - settle timing and grouping for ID3, SCTE-35, emsg, and FLV independently of SEI separation
 - [#2279](/quest/m2/2279-hang-typed-scte-35-ad-cue-signaling-carried-opaquely.md) - hang: SCTE-35 cues arrive immediately on an independent metadata track, optionally associated with a rendition
@@ -125,7 +125,7 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 - [#2067](/quest/m2/2067-test-open-gop-h-264-tune-in-end-to-end-leading-picture.md) - Open-GOP H.264: a regression fixture and a measured cold tune-in
 - [Open-GOP leading pictures](/quest/m2/open-gop-leading-pictures.md) - a viewer joining at a recovery point drops the leading pictures it cannot decode; continuous viewers keep them
 - [Gradual recovery](/quest/m2/open-gop-gradual-recovery.md) - tune-in at a recovery point with `recovery_frame_cnt > 0` trims through the recovery picture
-- [#3021](/quest/m2/3021-moq-gst-anchor-generated-media-timelines-to-wall-clock.md) - moq-gst: anchor generated media timelines to wall clock
+- [#3021](/quest/m2/3021-moq-gst-anchor-generated-media-timelines-to-wall-clock.md) - GStreamer maps every pad onto one continuous broadcast clock across source restarts
 - [#2779](/quest/m2/2779-moq-export-ts-continuity-counters-are-numbered-from.md) - moq export ts: continuity counters are numbered from process state, so two exporters of the same broadcast emit streams that can never be compared
 - [#2829](/quest/m2/2829-moq-export-ts-the-audio-video-interleave-is-decided-by.md) - moq export ts: the audio/video interleave is decided by arrival timing, so two exporters of one broadcast render the same media in different orders
 - [#3489](/quest/m2/3489-ts-import-stream-liveness.md) - moq import ts: every elementary stream reports its access units and how long it has been quiet
@@ -156,9 +156,9 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 - [Media QA on other engines](/quest/m2/browser-media-qa-engines.md) - the media harness measures a Firefox or WebKit player over the fallback and names what each engine lacks
 - [#1310](/quest/m2/1310-why-use-the-worklet-plugin.md) - why use the worklet plugin?
 - [Ship capture and playback](/quest/m2/cli-packaging.md) - a released moq binary can capture and play, which no distribution currently enables
-- [Windows capture parity](/quest/m2/capture-windows.md) - window, app, system-audio and cursor capture on Windows
-- [Linux capture parity](/quest/m2/capture-linux.md) - window capture, system audio, and a chosen display through the portal
-- [Capture ergonomics](/quest/m2/capture-ergonomics.md) - region capture, audio mixing, and validating format overrides
+- [Windows capture parity](/quest/m2/capture-windows.md) - system audio and screen cursor capture with a settled app-capture policy
+- [Linux capture parity](/quest/m2/capture-linux.md) - Wayland window/system-audio capture with explicit display-selection and app-capture limits
+- [Plan capture ergonomics](/quest/m2/capture-ergonomics.md) - scope independent crop, audio mixing, and format-validation quests
 - [X11 capture transport](/quest/m2/x11-capture-shm.md) - move X11 capture to shared memory and RandR events instead of a per-frame socket copy
 - [io_uring flow control](/quest/m2/uring-flow-control-windows.md) - the relay's io_uring workers honor the QUIC flow-control windows instead of refusing them
 - [Capture frame buffers](/quest/m2/capture-frame-buffers.md) - stop rebuilding a full-frame buffer every tick in the X11 and Windows backends

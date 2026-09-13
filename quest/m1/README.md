@@ -2,7 +2,8 @@
 
 ## Goal
 
-Everything that must land on `dev` before it merges to `main`: the breaking
+Work intended to land on `dev` before it merges to `main`, or be explicitly
+deferred by the maintainer: the breaking
 API and wire changes (the announce and wildcard surface, error codes, the
 allocator mirrors, the bindings), the merge gates (the monotonic timeline),
 and the merge itself.

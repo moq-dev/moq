@@ -40,15 +40,14 @@ Decisions settled while planning, recorded so review does not relitigate them:
   [Relay auth](/quest/m2/path-patterns/relay-auth.md) owns the common resize
   operation; relay token handling requires it rather than shipping a temporary
   close-on-shrink policy.
-- **A grant is publish prefixes, subscribe prefixes, and an expiry**, in the
-  presenter's own root; the presenter never sees the relay-side root, and
-  every token in a union shares the connection's root. The prefix encoding is
-  whatever lite-06 ANNOUNCE_REQUEST carries, so
-  [Pattern interest](/quest/m2/path-patterns/interest.md) upgrades both to
-  patterns in one change. `origin::Producer::allowed()` on an unscoped handle
-  yields the single empty prefix, and `scope(&[])` is `None`, so the wire
-  keeps that spelling: a list holding `""` is everything, an empty list is
-  nothing.
+- **A public grant contains publish patterns, subscribe patterns, and an
+  expiry**, in the presenter's own root; the presenter never sees the relay-side
+  root, and every token in a union shares the connection's root. Unscoped
+  permission is `**`; an empty union grants nothing. Legacy AUTH wire codecs
+  explicitly convert representable prefix unions, where `[""]` means all,
+  and refuse patterns they cannot represent. [Pattern interest](/quest/m2/path-patterns/interest.md)
+  upgrades AUTH and ANNOUNCE_REQUEST wire fields together without changing
+  the public pattern-valued grant type.
 - **Fail loud by aborting the session.** A publisher whose origin announces a
   broadcast outside the union aborts the session with `Unauthorized`, naming
   the path. The check runs against the grants in hand once the tokens the
@@ -67,8 +66,10 @@ Decisions settled while planning, recorded so review does not relitigate them:
   AUTH-capable; extra tokens go in band and are simply absent on an old peer.
   Nothing is refused and nothing is silent.
 - **Cluster peers keep mTLS.** A relay opens AUTH toward its peer with an empty
-  token like any client; both directions learn the unrestricted grant. Mutual
-  scoped trust between relays is a later quest.
+  token like any client; AUTH reports the grant actually admitted in each
+  direction. The M2 mTLS scope quest can restrict or refuse it. A v1 endpoint
+  must explicitly grant `**` for unrestricted access; AUTH does not widen a
+  scoped grant because the caller is another relay.
 - **Client API is dev's.** Tokens live on `moq_tokio::connect::Config`, the
   dial-side config already on dev, and `Connection` exposes the live
   session's auth handle. Quests touching that surface branch from main once [merge-dev](/quest/m1/merge-dev.md) lands.
@@ -104,8 +105,7 @@ ALPN.
 
 - [Relay auth](/quest/m2/path-patterns/relay-auth.md) - resizes a live session
   when the union shrinks, for revalidation and token expiry alike
-- [Pattern interest](/quest/m2/path-patterns/interest.md) - moves the grant's
-  prefixes to patterns along with ANNOUNCE_REQUEST
+- [Pattern interest](/quest/m2/path-patterns/interest.md) - moves AUTH's legacy wire prefixes to patterns along with ANNOUNCE_REQUEST
 - [Expiring media grants](/quest/m2/processor/grant-lease.md) - a worker's
   lease renewal is a new in-band token
 - [Connect auth race](/quest/m0/3532-connect-auth-race.md) - the connect-time
