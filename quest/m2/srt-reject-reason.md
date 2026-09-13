@@ -17,7 +17,8 @@ which one applies. `moq_srt` cannot say any of them: `Publish::reject` and
 Give `reject` the reason instead of adding an argument-less shim or a
 `reject_with` sibling, so the library stays HTTP-unaware and the caller maps
 its own verdict explicitly. Update the in-repo callers
-(`rs/moq-srt/src/listen.rs`, `rs/moq-cli/src/srt.rs`) to pass what they mean.
+(`rs/moq-srt/src/listen.rs`, `rs/moq-cli/src/srt.rs`) and the embedder example
+in `rs/moq-srt/README.md` to pass what they mean.
 
 Prove it over the wire for both a rejected publish and a rejected subscribe
 with a non-default reason, alongside the existing coverage that a rejected

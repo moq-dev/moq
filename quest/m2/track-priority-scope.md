@@ -2,11 +2,10 @@
 
 ## Goal
 
-Priority decides send order only where a single party owns both ends of the
-session, the first mile from publisher to ingest relay and the last mile from
-edge relay to viewer, and only among the streams of one subscription. A
-tenant's priority never orders another tenant's streams on a shared
-relay-to-relay session.
+Priority orders streams only within one scheduling domain: the streams a single
+party owns both ends of, the first mile from publisher to ingest relay and the
+last mile from edge relay to viewer. A tenant's priority never orders another
+tenant's streams on a shared relay-to-relay session.
 
 ## Plan
 
@@ -16,42 +15,43 @@ Where the model stands today, all in `rs/moq-net`:
   global sort over every in-flight group on the connection: a subscription at
   priority 200 pre-empts one at 100 indefinitely, and only the top 255 groups
   get a distinct rank.
+- `Priority` already ranks a group by its track priority, then its subscription
+  id, then newest group first within that subscription (`lite/priority.rs`). JS
+  packs track priority and the group's position within its own subscription
+  into one send order (`js/net/src/lite/priority.ts`), so two tracks at equal
+  priority interleave rather than one draining first.
+- The draft fixes group order within a track: newest first, with no wire field
+  to invert it (`drafts/draft-lcurley-moq-lite.md`, Prioritization).
 - A relay forwards the max of its downstream subscriber priorities upstream
   (`model/subscription.rs`, `lite/subscriber.rs`), never the publisher's track
   priority, so one viewer asking for 255 raises that track above every other
   tenant's on the cluster link (`rs/moq-relay/src/cluster.rs`: one
   bidirectional session per peer pair carries every broadcast). The draft
-  already says the upstream leg SHOULD use the publisher priority
-  (`drafts/draft-lcurley-moq-lite.md`, Prioritization).
-- Ties break on the absolute group sequence across subscriptions, so a
-  longer-running or clock-numbered track starves a newer one at equal priority
-  (`lite/priority.rs` TODO). JS already ranks by position within the
-  subscription (`js/net/src/lite/priority.ts`) and honours `ordered`; Rust
-  ignores `ordered` in ranking.
-- Rust control and announce streams sit at the transport default, tied with
-  overflow groups and below every ranked group; JS puts protocol streams above
-  all group data.
+  already says the upstream leg SHOULD use the publisher priority.
 
 Direction to settle in the draft first, then the code:
 
-- Subscriber priority orders streams within one subscription; across
-  subscriptions on a last-mile session the viewer still owns both ends, so a
-  viewer-scoped order remains legitimate there. State which scope the wire
-  field means.
-- On a relay-to-relay session, ordering across subscriptions is per-tenant
-  fair (round-robin or weighted by subscription), publisher priority breaks
-  ties within a broadcast, and downstream subscriber priorities are not
-  forwarded.
-- Rank by position within the subscription, honour `ordered`, and keep
-  protocol streams above group data, as JS does.
-- A per-session cap on distinct ranks is a scheduling detail; whatever
-  replaces the 255-entry sort must stay O(log n) per group under chat-shaped
-  churn.
+- Name the scheduling domain the priority field orders. On the last mile the
+  viewer owns the whole session, so its audio and video subscriptions share one
+  domain. On a relay-to-relay session one bidirectional connection carries
+  every tenant's subscriptions, and the wire carries no tenant identity, so the
+  relay must supply a generic scheduling-domain key (from auth or the origin)
+  or fall back to per-subscription fairness. Do not infer a domain from
+  subscription count: opening more subscriptions must not buy more bandwidth.
+- On a relay-to-relay session, ordering across domains is fair (round-robin or
+  weighted by domain), publisher priority breaks ties within a broadcast, and
+  downstream subscriber priorities are not forwarded.
+- Keep the current ranking: track priority, then subscription, then newest
+  group; do not reintroduce a group-order direction knob.
+- A per-session cap on distinct ranks is a scheduling detail; whatever replaces
+  the 255-entry sort must stay O(log n) per group under chat-shaped churn.
 
-Prove with the existing lite publisher tests extended to two tenants on one
-session: neither starves, and a downstream 255 does not change the upstream
-order. Public API impact: the meaning of `Subscribe.priority` on a cluster
-session; report it with the draft change.
+Prove with the existing lite publisher tests extended to two scheduling domains
+on one session: neither starves, and a downstream 255 does not change the
+upstream order. Update `doc/concept/moq-lite.md`, whose priority table still
+describes a direction knob the wire does not carry. Public API impact: the
+meaning of `Subscribe.priority` on a cluster session; report it with the draft
+change.
 
 ## Related
 
