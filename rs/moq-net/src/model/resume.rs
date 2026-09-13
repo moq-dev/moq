@@ -28,7 +28,7 @@ use std::task::{Poll, ready};
 
 use crate::{Datagram, Error, Result, frame, group, track};
 
-use super::subscription::{Position, Subscription, exclusive, max_some, min_some};
+use super::subscription::{Cap, Position, Subscription, max_some, min_some};
 
 /// One spliced source: a track bounded to a half-open range of positions.
 #[derive(Clone)]
@@ -718,7 +718,7 @@ fn frames(start: Option<Position>, end: Option<Position>, sequence: u64) -> Opti
 
 /// The exclusive group cap a half-open segment can serve, or no bound for the newest segment.
 fn last_group(end: Option<Position>) -> Option<u64> {
-	end.and_then(|end| exclusive(end.group_end()))
+	end.and_then(|end| Cap::from(end.group_end()).exclusive())
 }
 
 /// A group assembled from several routes' copies, joined at frame boundaries.
@@ -889,7 +889,7 @@ impl Group {
 		}
 	}
 
-	/// Cap the reader at `index` (exclusive), the form [`exclusive`] produces.
+	/// Cap the reader at `index` (exclusive), the form [`Cap::exclusive`] produces.
 	pub fn end_at(&mut self, index: Option<u64>) {
 		self.end = index;
 	}
@@ -2072,13 +2072,13 @@ impl Subscriber {
 		}
 	}
 
-	/// Cap the subscriber at `end`, or remove the cap with [`Bound::Unbounded`].
+	/// Cap the subscriber at `end`, or remove the cap with `..`.
 	///
 	/// Enforced on this subscriber's reads (see [`Self::poll_recv_group`]), never
 	/// on the inner segment cursors, so a capped group parks here and a rising cap
 	/// re-offers it.
-	pub fn end_at(&mut self, end: Bound<u64>) {
-		self.end_sequence = exclusive(end);
+	pub fn end_at(&mut self, end: impl Into<Cap>) {
+		self.end_sequence = end.into().exclusive();
 		self.update_drift_cap();
 		// The cap bounds each segment's drift anchor as well as this reader's own
 		// delivery: a segment must not measure against groups this cap hides.
@@ -2387,7 +2387,7 @@ mod test {
 		let mut producer = Producer::new();
 		producer.takeover(&consumer_a).unwrap();
 		let mut sub = producer.consume().subscribe(None);
-		sub.end_at(Bound::Excluded(1));
+		sub.end_at(..1);
 
 		write_group_at(&mut track_a, 0, "a0", std::time::Duration::ZERO);
 		write_group_at(&mut track_a, 1, "a1", std::time::Duration::from_secs(30));
@@ -2407,7 +2407,7 @@ mod test {
 		let mut producer = Producer::new();
 		producer.takeover(&consumer_a).unwrap();
 		let mut sub = producer.consume().subscribe(None);
-		sub.end_at(Bound::Excluded(1));
+		sub.end_at(..1);
 
 		write_group_at(&mut track_a, 0, "a0", std::time::Duration::ZERO);
 		assert_eq!(recv(&mut sub), 0);
@@ -2418,7 +2418,7 @@ mod test {
 		write_group_at(&mut track_a, 2, "a2", std::time::Duration::from_secs(30));
 
 		// Raising the cap owes the reader group 1 again, but by now it is a backlog.
-		sub.end_at(Bound::Unbounded);
+		sub.end_at(..);
 		assert_eq!(recv(&mut sub), 2);
 		recv_pending(&mut sub);
 	}
@@ -2433,7 +2433,7 @@ mod test {
 		let mut producer = Producer::new();
 		producer.takeover(&consumer_a).unwrap();
 		let mut sub = producer.consume().subscribe(None);
-		sub.end_at(Bound::Excluded(1));
+		sub.end_at(..1);
 
 		write_group_at(&mut track_a, 0, "a0", std::time::Duration::ZERO);
 		assert_eq!(recv(&mut sub), 0);
@@ -2445,7 +2445,7 @@ mod test {
 		// parked above the cap.
 		recv_pending(&mut sub);
 
-		sub.end_at(Bound::Unbounded);
+		sub.end_at(..);
 		assert_eq!(recv(&mut sub), 2, "the stale parked group is skipped after finish");
 		recv_pending(&mut sub);
 	}
@@ -2656,12 +2656,12 @@ mod test {
 		write_group(&mut track_a, 1, "a1");
 
 		// The cap parks the subscriber; the group beyond it is held, not dropped.
-		sub.end_at(Bound::Excluded(1));
+		sub.end_at(..1);
 		assert_eq!(recv(&mut sub), 0);
 		recv_pending(&mut sub);
 
 		// Raising the cap re-offers the parked group.
-		sub.end_at(Bound::Excluded(2));
+		sub.end_at(..2);
 		assert_eq!(recv(&mut sub), 1);
 	}
 
@@ -2675,7 +2675,7 @@ mod test {
 		producer.switch(&consumer_a, None).unwrap();
 		let mut sub = producer.consume().subscribe(replay());
 
-		sub.end_at(Bound::Excluded(2));
+		sub.end_at(..2);
 
 		// Reordered burst: the beyond-cap group arrives first.
 		write_group(&mut track_a, 2, "a2");
@@ -2688,7 +2688,7 @@ mod test {
 		recv_pending(&mut sub);
 
 		// Raising the cap re-offers the parked group.
-		sub.end_at(Bound::Excluded(3));
+		sub.end_at(..3);
 		assert_eq!(recv(&mut sub), 2);
 	}
 
@@ -2702,7 +2702,7 @@ mod test {
 		producer.switch(&consumer_a, None).unwrap();
 		let mut sub = producer.consume().subscribe(None);
 
-		sub.end_at(Bound::Excluded(1));
+		sub.end_at(..1);
 		write_group(&mut track_a, 0, "a0");
 		assert_eq!(recv(&mut sub), 0);
 
@@ -2710,7 +2710,7 @@ mod test {
 		recv_pending(&mut sub);
 		straggler.abort(Error::Old).unwrap();
 
-		sub.end_at(Bound::Unbounded);
+		sub.end_at(..);
 		write_group(&mut track_a, 2, "a2");
 		assert_eq!(recv(&mut sub), 2, "the evicted parked group is dropped, not re-offered");
 	}
@@ -2771,7 +2771,7 @@ mod test {
 			);
 		};
 
-		sub.end_at(Bound::Excluded(2));
+		sub.end_at(..2);
 
 		// The beyond-cap group arrives first and is polled: it must hold, not advance
 		// the cursor past the in-range groups still on their way.
@@ -2785,7 +2785,7 @@ mod test {
 		next_pending(&mut sub);
 
 		// Raising the cap admits the held group.
-		sub.end_at(Bound::Excluded(3));
+		sub.end_at(..3);
 		assert_eq!(next(&mut sub), 2);
 	}
 
@@ -2823,14 +2823,14 @@ mod test {
 
 		// Cap below the group the cursor could already see. It must hold, not have
 		// committed the segment past the still-missing group 1.
-		sub.end_at(Bound::Excluded(2));
+		sub.end_at(..2);
 		next_pending(&mut sub);
 
 		write_group(&mut track_b, 1, "b1");
 		assert_eq!(next(&mut sub), 1);
 		next_pending(&mut sub);
 
-		sub.end_at(Bound::Unbounded);
+		sub.end_at(..);
 		assert_eq!(next(&mut sub), 2);
 	}
 
@@ -3191,7 +3191,7 @@ mod test {
 		// Capped at group 0: group 0 is the whole window (and so its own live edge),
 		// while groups 1 and 2 park above the cap.
 		let mut sub = outer.consume().subscribe(None);
-		sub.end_at(Bound::Excluded(1));
+		sub.end_at(..1);
 		let recv = |sub: &mut Subscriber| {
 			kio::wait(|waiter| sub.poll_recv_group(waiter))
 				.now_or_never()
@@ -3207,7 +3207,7 @@ mod test {
 
 		// Raising the cap re-offers the parked groups, but it also widened the live
 		// edge to group 2, so group 1 is stale now and must be skipped, not served.
-		sub.end_at(Bound::Unbounded);
+		sub.end_at(..);
 		assert_eq!(recv(&mut sub), Some(2), "the re-offered backlog is re-checked");
 		assert_eq!(sub.take_stale().groups, 1, "the skipped park is counted once");
 	}
@@ -3976,7 +3976,7 @@ mod test {
 	async fn capped_subscriber_bounds_parked_segments() {
 		let mut producer = Producer::new();
 		let mut sub = producer.consume().subscribe(None);
-		sub.end_at(Bound::Excluded(1));
+		sub.end_at(..1);
 
 		// Every round parks one group beyond the cap, then fails over to a live
 		// replacement route.
@@ -4001,7 +4001,7 @@ mod test {
 		// Raising the cap re-offers every retained parked group: the pruned ones
 		// within the bound deliver through their latched copies, and only the cut
 		// ranges are lost.
-		sub.end_at(Bound::Unbounded);
+		sub.end_at(..);
 		for sequence in (rounds - 2 * MAX_SEGMENTS as u64 + 1)..=rounds {
 			assert_eq!(recv(&mut sub), sequence);
 		}
@@ -4548,7 +4548,7 @@ mod test {
 		producer.switch(&consumer_a, None).unwrap();
 		let mut sub = producer.consume().subscribe(None);
 
-		sub.end_at(Bound::Excluded(1));
+		sub.end_at(..1);
 		write_group(&mut track_a, 0, "a0");
 		let straggler = track_a.create_group(group::Info { sequence: 1 }).unwrap();
 		assert_eq!(recv(&mut sub), 0);
@@ -4588,7 +4588,7 @@ mod test {
 		producer.switch(&consumer_a, None).unwrap();
 		let mut sub = producer.consume().subscribe(None);
 
-		sub.end_at(Bound::Excluded(1));
+		sub.end_at(..1);
 		write_group(&mut track_a, 0, "a0");
 		assert_eq!(recv(&mut sub), 0);
 
@@ -4694,7 +4694,7 @@ mod test {
 		producer.switch(&consumer_a, None).unwrap();
 		let mut sub = producer.consume().subscribe(None);
 
-		sub.end_at(Bound::Excluded(1));
+		sub.end_at(..1);
 		write_group(&mut track_a, 0, "a0");
 		write_group(&mut track_a, 1, "a1");
 		write_group(&mut track_a, 2, "a2");
@@ -4704,7 +4704,7 @@ mod test {
 		// The reader skips ahead: the parked range below the floor is dropped,
 		// while the parked group at the floor is still re-offered.
 		sub.start_at(2);
-		sub.end_at(Bound::Unbounded);
+		sub.end_at(..);
 		assert_eq!(recv(&mut sub), 2, "group 1 was overtaken by start_at");
 		recv_pending(&mut sub);
 	}

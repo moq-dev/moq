@@ -18,11 +18,11 @@ use crate::{broadcast, cache, group, stats};
 
 use super::{Datagram, Requests};
 
+use super::Cap;
 pub use super::subscription::{Position, Subscription};
 
 use std::{
 	collections::{BTreeMap, VecDeque},
-	ops::Bound,
 	sync::Arc,
 	sync::OnceLock,
 	sync::atomic::{AtomicBool, Ordering},
@@ -2970,7 +2970,7 @@ struct PlainSubscriber {
 	/// Used only by that method to skip late arrivals; does not affect `recv_group`.
 	next_sequence: u64,
 	/// Exclusive upper sequence bound for `next_group` and `recv_group`, in the form
-	/// [`super::subscription::exclusive`] produces. `None` means no cap. Set by `end_at`;
+	/// [`Cap::exclusive`] produces. `None` means no cap. Set by `end_at`;
 	/// can be raised, lowered, or unset at any time. Groups at or past the cap stay in
 	/// the producer's cache and become eligible again when the cap rises (or is removed).
 	/// `Some(0)` is the empty range.
@@ -3570,13 +3570,11 @@ impl Subscriber {
 		}
 	}
 
-	/// Cap this subscriber's read cursor at `end`, or remove the cap with
-	/// [`Bound::Unbounded`].
+	/// Cap this subscriber's read cursor at `end`, or remove the cap with `..`.
 	///
-	/// The bound says whether its sequence is delivered: `Bound::Included(5)` serves
-	/// through group 5, `Bound::Excluded(5)` stops before it. `Bound::Excluded(0)` is the
-	/// empty range: no group is delivered. [`Position::group_end`] translates a
-	/// [`Subscription::end`].
+	/// The range says whether its sequence is delivered: `..=5` serves through group 5,
+	/// `..5` stops before it. `..0` is the empty range: no group is delivered.
+	/// [`Position::group_end`] translates a [`Subscription::end`].
 	///
 	/// A local filter, not a request; [`Subscription::end`] is the wire-level
 	/// counterpart. See [Local cursor vs wire preference](Self#local-cursor-vs-wire-preference).
@@ -3585,10 +3583,11 @@ impl Subscriber {
 	/// [`Self::end_at`] with a higher bound (or unbounded) makes them available again.
 	/// Lowering the cap below the consumer's current cursor parks the consumer until the
 	/// cap is raised.
-	pub fn end_at(&mut self, end: Bound<u64>) {
+	pub fn end_at(&mut self, end: impl Into<Cap>) {
+		let end = end.into();
 		match &mut self.inner {
 			SubscriberKind::Plain(plain) => {
-				plain.end_sequence = super::subscription::exclusive(end);
+				plain.end_sequence = end.exclusive();
 				plain.update_drift_cap();
 			}
 			SubscriberKind::Spliced(spliced) => spliced.end_at(end),
@@ -3721,13 +3720,13 @@ impl Ordered {
 		self.inner.start_at(sequence);
 	}
 
-	/// Cap this cursor at `end`, or remove the cap with [`Bound::Unbounded`].
+	/// Cap this cursor at `end`, or remove the cap with `..`.
 	///
-	/// `Bound::Included(5)` serves through group 5, `Bound::Excluded(5)` stops before
-	/// it, and `Bound::Excluded(0)` is the empty range. A local filter, not a request;
-	/// [`Subscription::end`] is the wire-level counterpart. Groups beyond the cap are held
-	/// rather than skipped, so raising it later makes them available again.
-	pub fn end_at(&mut self, end: Bound<u64>) {
+	/// `..=5` serves through group 5, `..5` stops before it, and `..0` is the empty
+	/// range. A local filter, not a request; [`Subscription::end`] is the wire-level
+	/// counterpart. Groups beyond the cap are held rather than skipped, so raising it
+	/// later makes them available again.
+	pub fn end_at(&mut self, end: impl Into<Cap>) {
 		self.inner.end_at(end);
 	}
 
@@ -4532,7 +4531,7 @@ mod test {
 	async fn parked_reoffer_restarts_the_expiry_clock() {
 		let mut producer = track_producer("test", None);
 		let mut subscriber = producer.subscribe(None);
-		subscriber.end_at(Bound::Excluded(1));
+		subscriber.end_at(..1);
 
 		for seq in 0..2u64 {
 			let mut group = producer.create_group(seq.into()).unwrap();
@@ -4546,7 +4545,7 @@ mod test {
 
 		// Just inside the window, the cap rises and the re-offer stamps group 1.
 		crate::model::clock::advance(cache::DEFAULT_EXPIRY - Duration::from_secs(1));
-		subscriber.end_at(Bound::Excluded(2));
+		subscriber.end_at(..2);
 		let mut reading = subscriber.assert_group();
 		assert_eq!(reading.sequence, 1);
 
@@ -5776,12 +5775,12 @@ mod test {
 		// keeps a spliced segment from dropping the groups either side of a takeover
 		// boundary.
 		let mut subscriber = producer.subscribe(Subscription::default().with_end(Position::after_group(0)));
-		subscriber.end_at(Bound::Excluded(1));
+		subscriber.end_at(..1);
 		assert_eq!(drain(&mut subscriber), vec![0]);
 
 		// Raising the cap re-offers the parked group, now measured against the wider
 		// edge it just admitted.
-		subscriber.end_at(Bound::Unbounded);
+		subscriber.end_at(..);
 		assert_eq!(drain(&mut subscriber), vec![1]);
 	}
 
@@ -6255,7 +6254,7 @@ mod test {
 			producer.create_group(group::Info { sequence: s }).unwrap();
 		}
 
-		consumer.end_at(Bound::Excluded(3));
+		consumer.end_at(..3);
 
 		// Groups 0, 1, 2 are within the cap.
 		assert_eq!(
@@ -6287,7 +6286,7 @@ mod test {
 			producer.create_group(group::Info { sequence: s }).unwrap();
 		}
 
-		consumer.end_at(Bound::Excluded(2));
+		consumer.end_at(..2);
 		assert_eq!(
 			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
 			0
@@ -6299,7 +6298,7 @@ mod test {
 		assert!(consumer.next_group().now_or_never().is_none(), "capped at 2");
 
 		// Raise the cap; previously-blocked cached groups become available again.
-		consumer.end_at(Bound::Excluded(5));
+		consumer.end_at(..5);
 		assert_eq!(
 			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
 			2
@@ -6315,7 +6314,7 @@ mod test {
 		assert!(consumer.next_group().now_or_never().is_none(), "capped at 5");
 
 		// Remove the cap; everything remaining flows.
-		consumer.end_at(Bound::Unbounded);
+		consumer.end_at(..);
 		assert_eq!(
 			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
 			5
@@ -6347,7 +6346,7 @@ mod test {
 		);
 
 		// Lower the cap below the cursor. New groups beyond the cap are blocked.
-		consumer.end_at(Bound::Excluded(2));
+		consumer.end_at(..2);
 		producer.create_group(group::Info { sequence: 3 }).unwrap();
 		producer.create_group(group::Info { sequence: 4 }).unwrap();
 		assert!(
@@ -6356,7 +6355,7 @@ mod test {
 		);
 
 		// Restoring the cap to no-limit (or any value >= cursor) releases them.
-		consumer.end_at(Bound::Unbounded);
+		consumer.end_at(..);
 		assert_eq!(
 			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
 			3
@@ -6372,7 +6371,7 @@ mod test {
 		let mut producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(replay()).ordered();
 
-		consumer.end_at(Bound::Excluded(6));
+		consumer.end_at(..6);
 
 		// Out-of-order arrivals all within the cap.
 		producer.create_group(group::Info { sequence: 2 }).unwrap();
@@ -6403,7 +6402,7 @@ mod test {
 		assert!(consumer.next_group().now_or_never().is_none());
 
 		// Raise the cap; cached seq 8 is finally served.
-		consumer.end_at(Bound::Excluded(11));
+		consumer.end_at(..11);
 		assert_eq!(
 			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
 			8
@@ -6422,7 +6421,7 @@ mod test {
 			producer.create_group(group::Info { sequence: s }).unwrap();
 		}
 
-		consumer.end_at(Bound::Excluded(2));
+		consumer.end_at(..2);
 		assert_eq!(
 			consumer.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence,
 			0
@@ -6440,7 +6439,7 @@ mod test {
 			"still parked after finish"
 		);
 
-		consumer.end_at(Bound::Unbounded);
+		consumer.end_at(..);
 		assert_eq!(
 			consumer.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence,
 			2
@@ -6458,7 +6457,7 @@ mod test {
 		let mut producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(replay());
 
-		consumer.end_at(Bound::Excluded(2));
+		consumer.end_at(..2);
 
 		// Reordered burst: the beyond-cap group arrives first.
 		producer.create_group(group::Info { sequence: 2 }).unwrap();
@@ -6475,7 +6474,7 @@ mod test {
 		);
 		assert!(consumer.recv_group().now_or_never().is_none(), "capped at 2");
 
-		consumer.end_at(Bound::Excluded(3));
+		consumer.end_at(..3);
 		assert_eq!(
 			consumer.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence,
 			2
@@ -6489,7 +6488,7 @@ mod test {
 		let mut producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(None);
 
-		consumer.end_at(Bound::Excluded(1));
+		consumer.end_at(..1);
 		producer.create_group(group::Info { sequence: 1 }).unwrap();
 		assert!(
 			consumer.recv_group().now_or_never().is_none(),
@@ -6497,7 +6496,7 @@ mod test {
 		);
 
 		consumer.start_at(2);
-		consumer.end_at(Bound::Unbounded);
+		consumer.end_at(..);
 		producer.create_group(group::Info { sequence: 2 }).unwrap();
 		assert_eq!(
 			consumer.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence,
@@ -6520,7 +6519,7 @@ mod test {
 			0
 		);
 
-		consumer.end_at(Bound::Excluded(1));
+		consumer.end_at(..1);
 		let straggler = producer.create_group(group::Info { sequence: 1 }).unwrap();
 		assert!(
 			consumer.recv_group().now_or_never().is_none(),
@@ -6531,7 +6530,7 @@ mod test {
 		straggler.abort(Error::Old).unwrap();
 		producer.finish().unwrap();
 
-		consumer.end_at(Bound::Unbounded);
+		consumer.end_at(..);
 		assert!(
 			matches!(consumer.recv_group().now_or_never(), Some(Ok(None))),
 			"a dead parked group must not be delivered or hold the stream open"
@@ -6564,7 +6563,7 @@ mod test {
 			0
 		);
 
-		consumer.end_at(Bound::Excluded(1));
+		consumer.end_at(..1);
 		let straggler = producer.create_group(group::Info { sequence: 1 }).unwrap();
 		assert!(consumer.recv_group().now_or_never().is_none(), "parked at the cap");
 		producer.finish().unwrap();
@@ -6591,13 +6590,13 @@ mod test {
 		producer.create_group(group::Info { sequence: 0 }).unwrap();
 		producer.create_group(group::Info { sequence: 1 }).unwrap();
 
-		consumer.end_at(Bound::Excluded(0));
+		consumer.end_at(..0);
 		assert!(
 			consumer.recv_group().now_or_never().is_none(),
 			"empty cap delivers nothing"
 		);
 
-		consumer.end_at(Bound::Excluded(1));
+		consumer.end_at(..1);
 		assert_eq!(
 			consumer.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence,
 			0
@@ -6633,12 +6632,12 @@ mod test {
 			"local empty cap must not ride the unbounded aggregate"
 		);
 
-		empty.end_at(Bound::Excluded(2));
+		empty.end_at(..2);
 		assert_eq!(empty.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence, 0);
 		assert_eq!(empty.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence, 1);
 		assert!(empty.recv_group().now_or_never().is_none(), "still capped at 2");
 
-		empty.end_at(Bound::Unbounded);
+		empty.end_at(..);
 		assert_eq!(empty.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence, 2);
 	}
 
@@ -6664,7 +6663,7 @@ mod test {
 		);
 		let mut last = consumer.next_group().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(last.sequence, 1);
-		last.end_at(Bound::Excluded(end.frame));
+		last.end_at(..end.frame);
 		assert_eq!(
 			last.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
 			0
@@ -6688,7 +6687,7 @@ mod test {
 	async fn end_at_maximum_group_is_unbounded() {
 		let mut producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(replay()).ordered();
-		consumer.end_at(Bound::Included(u64::MAX));
+		consumer.end_at(..=u64::MAX);
 
 		producer.create_group(group::Info { sequence: 0 }).unwrap();
 		producer.create_group(group::Info { sequence: u64::MAX }).unwrap();

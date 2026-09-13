@@ -1,5 +1,5 @@
 use std::{
-	ops::{Bound, RangeBounds},
+	ops::{Bound, RangeBounds, RangeFull, RangeTo, RangeToInclusive},
 	task::Poll,
 	time::Duration,
 };
@@ -242,15 +242,48 @@ impl Position {
 	}
 }
 
-/// The first index a cursor cap leaves undelivered, or `None` for no cap.
+/// Where a read cursor stops: a group sequence or frame index it will not deliver.
 ///
-/// Cursors store their cap this way and compare with [`before_end`]. An inclusive bound
-/// at `u64::MAX` has nothing above it, so it is no cap at all.
-pub(crate) fn exclusive(bound: Bound<u64>) -> Option<u64> {
-	match bound {
-		Bound::Included(index) => index.checked_add(1),
-		Bound::Excluded(index) => Some(index),
-		Bound::Unbounded => None,
+/// Built from a range so the call site says whether its bound is delivered: `..5` stops
+/// before 5, `..=5` reads through it, and `..` removes the cap. A [`Bound`] converts
+/// too, for callers holding one (a decoded wire field, or [`Position::group_end`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cap(Option<u64>);
+
+impl Cap {
+	/// The first index withheld, or `None` for no cap. Cursors store this form and
+	/// compare with [`before_end`]. An inclusive bound at `u64::MAX` has nothing above
+	/// it, so it is no cap at all.
+	pub(crate) fn exclusive(self) -> Option<u64> {
+		self.0
+	}
+}
+
+impl From<Bound<u64>> for Cap {
+	fn from(bound: Bound<u64>) -> Self {
+		Self(match bound {
+			Bound::Included(index) => index.checked_add(1),
+			Bound::Excluded(index) => Some(index),
+			Bound::Unbounded => None,
+		})
+	}
+}
+
+impl From<RangeTo<u64>> for Cap {
+	fn from(range: RangeTo<u64>) -> Self {
+		Self(Some(range.end))
+	}
+}
+
+impl From<RangeToInclusive<u64>> for Cap {
+	fn from(range: RangeToInclusive<u64>) -> Self {
+		Bound::Included(range.end).into()
+	}
+}
+
+impl From<RangeFull> for Cap {
+	fn from(_: RangeFull) -> Self {
+		Self(None)
 	}
 }
 
@@ -367,10 +400,12 @@ mod tests {
 
 		// A cursor cap is the first index it withholds; an inclusive bound at the last
 		// index withholds nothing.
-		assert_eq!(exclusive(Bound::Excluded(0)), Some(0));
-		assert_eq!(exclusive(Bound::Included(5)), Some(6));
-		assert_eq!(exclusive(Bound::Included(u64::MAX)), None);
-		assert_eq!(exclusive(Bound::Unbounded), None);
+		assert_eq!(Cap::from(..0).exclusive(), Some(0));
+		assert_eq!(Cap::from(..=5).exclusive(), Some(6));
+		assert_eq!(Cap::from(..=u64::MAX).exclusive(), None);
+		assert_eq!(Cap::from(..).exclusive(), None);
+		assert_eq!(Cap::from(Bound::Included(5)), Cap::from(..6));
+		assert_eq!(Cap::from(Bound::Unbounded), Cap::from(..));
 	}
 
 	#[test]

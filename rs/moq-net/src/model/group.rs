@@ -17,10 +17,9 @@
 //! The stream is closed with [Error] when all writers or readers are dropped.
 use crate::cache;
 use crate::frame::{self, Frame, FrameBuf};
-use crate::{Timescale, stats, track};
+use crate::{Cap, Timescale, stats, track};
 use std::collections::VecDeque;
 use std::mem::MaybeUninit;
-use std::ops::Bound;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Poll, ready};
@@ -1381,15 +1380,14 @@ impl Consumer {
 		}
 	}
 
-	/// Stop reading at `end`, or remove the cap with [`Bound::Unbounded`].
+	/// Stop reading at `end`, or remove the cap with `..`.
 	///
-	/// `Bound::Included(2)` reads through frame 2, `Bound::Excluded(2)` stops before it,
-	/// and `Bound::Excluded(0)` is the empty range: no frame is delivered. Reads past the
-	/// cap end cleanly (`None`), as if the group finished there. Unlike
-	/// [`Self::start_at`] this can move in either direction: raising it re-offers frames
-	/// that are still cached.
-	pub fn end_at(&mut self, end: Bound<u64>) {
-		let end = super::subscription::exclusive(end);
+	/// `..=2` reads through frame 2, `..2` stops before it, and `..0` is the empty range:
+	/// no frame is delivered. Reads past the cap end cleanly (`None`), as if the group
+	/// finished there. Unlike [`Self::start_at`] this can move in either direction:
+	/// raising it re-offers frames that are still cached.
+	pub fn end_at(&mut self, end: impl Into<Cap>) {
+		let end = end.into().exclusive();
 		match &mut self.inner {
 			ConsumerKind::Plain(plain) => {
 				plain.end = end.map(|end| usize::try_from(end).unwrap_or(usize::MAX));
@@ -2411,7 +2409,7 @@ mod test {
 		producer.finish().unwrap();
 
 		let mut consumer = producer.consume();
-		consumer.end_at(Bound::Excluded(2));
+		consumer.end_at(..2);
 		assert_eq!(
 			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
 			0
@@ -2425,7 +2423,7 @@ mod test {
 			"capped reads end cleanly"
 		);
 
-		consumer.end_at(Bound::Unbounded);
+		consumer.end_at(..);
 		assert_eq!(
 			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
 			2
@@ -2441,13 +2439,13 @@ mod test {
 		producer.finish().unwrap();
 
 		let mut consumer = producer.consume();
-		consumer.end_at(Bound::Excluded(0));
+		consumer.end_at(..0);
 		assert!(
 			consumer.read_frame().now_or_never().unwrap().unwrap().is_none(),
 			"empty cap delivers nothing"
 		);
 
-		consumer.end_at(Bound::Excluded(1));
+		consumer.end_at(..1);
 		assert_eq!(
 			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload,
 			Bytes::from_static(b"x")
