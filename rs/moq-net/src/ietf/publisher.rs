@@ -1823,7 +1823,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 				}
 			}
 		}
-		track.end_at(range.end.map(|end| end.group));
+		track.end_at(range.end.and_then(|end| end.group.checked_add(1)));
 
 		Self {
 			session,
@@ -1961,7 +1961,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		slice: GroupSlice,
 	) -> Self {
 		group.skip_to(slice.skip);
-		group.end_at(slice.until.and_then(|until| until.checked_sub(1)));
+		group.end_at(slice.until);
 		let object_delta = group.index();
 		Self {
 			session,

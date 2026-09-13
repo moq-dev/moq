@@ -4,6 +4,8 @@ import { Reader, Writer } from "../stream.ts";
 import {
 	decodeSubscribeResponse,
 	encodeSubscribeResponse,
+	exclusiveGroupEnd,
+	inclusiveGroupEnd,
 	Subscribe,
 	SubscribeDrop,
 	SubscribeEnd,
@@ -187,4 +189,14 @@ test("frame bounds without their group bounds are rejected before encoding", asy
 	await expect(encodeSubscribe(new Subscribe({ ...base, endFrame: 7 }))).rejects.toThrow(
 		"frame bound without a group bound",
 	);
+});
+
+test("model and wire group ends convert without an off-by-one", () => {
+	expect(exclusiveGroupEnd(undefined)).toBeUndefined();
+	expect(exclusiveGroupEnd(0)).toBe(1);
+	expect(exclusiveGroupEnd(9)).toBe(10);
+	expect(inclusiveGroupEnd(undefined)).toBeUndefined();
+	expect(inclusiveGroupEnd(1)).toBe(0);
+	expect(inclusiveGroupEnd(10)).toBe(9);
+	expect(() => inclusiveGroupEnd(0)).toThrow("empty subscription range cannot be encoded");
 });

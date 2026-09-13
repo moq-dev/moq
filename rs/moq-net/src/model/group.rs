@@ -12,7 +12,7 @@
 //! carry the tail of a group whose leading frames came from somewhere else, and
 //! [Producer::finish] ends it wherever writing stopped. [Consumer::start_at] /
 //! [Consumer::end_at] bound a reader to a sub-range the same way [`track::Subscriber`]
-//! bounds group sequences.
+//! bounds group sequences; `end_at` is exclusive.
 //!
 //! The stream is closed with [Error] when all writers or readers are dropped.
 use crate::cache;
@@ -1098,7 +1098,7 @@ struct Plain {
 	// NOTE: Cloned readers inherit this offset, but then run in parallel.
 	index: usize,
 
-	// Inclusive cap on `index`, set by [`Consumer::end_at`]. Reads end cleanly past it.
+	// Exclusive cap on `index`, set by [`Consumer::end_at`]. Reads end cleanly at it.
 	end: Option<usize>,
 
 	// A batch of completed frames drained ahead under one lock (whole-frame reads only).
@@ -1380,11 +1380,12 @@ impl Consumer {
 		}
 	}
 
-	/// Stop after frame `index` (inclusive), or remove the cap.
+	/// Stop at frame `index` (exclusive), or remove the cap.
 	///
-	/// Reads past the cap end cleanly (`None`), as if the group finished there. Unlike
-	/// [`Self::start_at`] this can move in either direction: raising it re-offers frames
-	/// that are still cached.
+	/// Reads at or past the cap end cleanly (`None`), as if the group finished there.
+	/// `Some(0)` is the empty range: no frame is delivered. Unlike [`Self::start_at`]
+	/// this can move in either direction: raising it re-offers frames that are still
+	/// cached.
 	pub fn end_at(&mut self, index: impl Into<Option<u64>>) {
 		let index = index.into();
 		match &mut self.inner {
@@ -1587,7 +1588,7 @@ impl Plain {
 	fn unread_content(&self) -> stats::Content {
 		let prefetched = self.prefetch.buffered().0 as usize;
 		let start = self.index.saturating_add(prefetched);
-		let end = self.end.map_or(usize::MAX, |end| end.saturating_add(1));
+		let end = self.end.unwrap_or(usize::MAX);
 		self.state.read().content_range(start, end)
 	}
 
@@ -1617,7 +1618,7 @@ impl Plain {
 
 	/// Whether the cursor has passed the `end_at` cap.
 	fn capped(&self) -> bool {
-		self.end.is_some_and(|end| self.index > end)
+		self.end.is_some_and(|end| self.index >= end)
 	}
 
 	fn start_at(&mut self, index: u64) {
@@ -1649,7 +1650,7 @@ impl Plain {
 		if self.capped() {
 			return Poll::Ready(Ok(None));
 		}
-		let end = self.end.map_or(usize::MAX, |end| end.saturating_add(1));
+		let end = self.end.unwrap_or(usize::MAX);
 
 		// Hand out any frames a prior read_frame prefetched before touching the tail.
 		// Their bytes were already counted at the batch fill, so the frame::Consumer
@@ -1703,7 +1704,7 @@ impl Plain {
 		let index = self.index;
 		// Never buffer past the cap: `end_at` can be raised later, and those frames must
 		// come from the shared state then, not from a batch drained under the old cap.
-		let budget = self.end.map_or(usize::MAX, |end| (end - index).saturating_add(1));
+		let budget = self.end.map_or(usize::MAX, |end| end.saturating_sub(index));
 		let prefetch = &mut self.prefetch;
 		let res = self.state.poll(waiter, |state| {
 			if index < state.offset {
@@ -2408,7 +2409,7 @@ mod test {
 		producer.finish().unwrap();
 
 		let mut consumer = producer.consume();
-		consumer.end_at(1);
+		consumer.end_at(2);
 		assert_eq!(
 			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
 			0
@@ -2426,6 +2427,28 @@ mod test {
 		assert_eq!(
 			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
 			2
+		);
+	}
+
+	/// An exclusive cap at 0 is the empty range: no frame is delivered, and raising
+	/// it re-offers the held frames.
+	#[test]
+	fn end_at_zero_is_empty() {
+		let mut producer = Info { sequence: 0 }.produce();
+		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"x")).unwrap();
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		consumer.end_at(0);
+		assert!(
+			consumer.read_frame().now_or_never().unwrap().unwrap().is_none(),
+			"empty cap delivers nothing"
+		);
+
+		consumer.end_at(1);
+		assert_eq!(
+			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload,
+			Bytes::from_static(b"x")
 		);
 	}
 

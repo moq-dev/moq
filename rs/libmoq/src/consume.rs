@@ -630,11 +630,10 @@ impl Consume {
 		if let Some(start) = subscription.start.map(|start| start.group).or_else(|| track.latest()) {
 			track.start_at(start);
 		}
-		// The read cursor is a group sequence, and its cap is inclusive. An end at the
-		// very first position is the empty range, which no inclusive group can express;
-		// leaving it uncapped would serve everything, so cap at the first group and let
-		// the empty demand stop delivery upstream.
-		track.end_at(subscription.end.map(|end| end.before().map_or(0, |end| end.group)));
+		// Local and requested ends are both exclusive, so the group cap is the
+		// position's group (or one past it when the end is mid-group). `Some(0)` is
+		// the empty range and parks even while another subscriber keeps demand alive.
+		track.end_at(subscription.end.and_then(moq_net::track::Position::exclusive_group));
 		// A closed track makes the update meaningless; the reader already sees the close.
 		let _ = track.update(subscription);
 	}
@@ -665,7 +664,20 @@ impl Consume {
 				})
 				.await?
 				{
-					RawStep::Item(group) => group,
+					RawStep::Item(mut group) => {
+						let sub = track.subscription();
+						if let Some(start) = sub.start
+							&& start.group == group.sequence
+						{
+							group.start_at(start.frame);
+						}
+						if let Some(end) = sub.end
+							&& end.group == group.sequence
+						{
+							group.end_at(end.frame);
+						}
+						group
+					}
 					// Track finished or the consumer was closed: nothing left to deliver.
 					RawStep::End | RawStep::Stop => return Ok(()),
 				};
