@@ -20,17 +20,13 @@ quest here and merged main into dev.
 ## Quests
 
 - [FFI read lanes](/quest/m1/api-ffi-read-lanes.md) - pending group and datagram reads progress independently on one subscription
-- [Connection recovery](/quest/m1/api-connection-recovery.md) - refreshed URLs recover shared/private handles under one terminal-state contract
 - [Relay embedding](/quest/m1/api-relay-embedding.md) - custom routes retain the owner of listeners, workers, and shutdown
 - [Numeric API invariants](/quest/m1/api-numeric-invariants.md) - accepted timescales and delivery properties are wire-encodable without truncation
 - [FFI frame cursor](/quest/m1/api-ffi-frame-cursor.md) - empty groups and cancelled reads do not become false EOF or lost frames
-- [JS wrapper lifetime](/quest/m1/api-js-wrapper-lifecycle.md) - closing or leaving JSON/binary readers releases their owned demand
 - [FFI configuration](/quest/m1/api-ffi-configuration.md) - configuration applies or fails explicitly rather than depending on lock timing
 - [Subscription bounds](/quest/m1/api-subscription-bounds.md) - local and requested ranges use consistent exclusive ends
-- [Readable input contract](/quest/m1/api-getter-contract.md) - accepted Getter types match runtime behavior
 - [JSON edit transaction](/quest/m1/api-json-edit-commit.md) - failed publication cannot disappear into a guard-drop warning
 - [JS wrapper configuration](/quest/m1/api-js-wrapper-config.md) - constructor shapes agree and consumer options exclude ignored producer knobs
-- [Publisher finish ownership](/quest/m1/api-producer-finish.md) - terminal Rust methods consume their handles while group cuts remain reusable
 - [External API proof](/quest/m1/api-release-proof.md) - packaged callers exercise real moq.pro use cases and record each audit finding's disposition
 - [Monotonic timeline](/quest/m1/monotonic-timeline.md) - a marker group of one empty frame declares a break and moves the live edge; producers refuse a rewind; consumers jump the playhead on an unproven hole and drop rewind detection
 - [Anonymous rank](/quest/m1/anonymous-route-rank.md) - moq-net: a route through an anonymous hop ranks below every identified route at any cost, and hop 0 travels the chain to say so

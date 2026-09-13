@@ -25,17 +25,17 @@ New findings and recommendations, ordered by consequence:
 | Finding | Evidence status | Quest |
 |---|---|---|
 | FFI pending reads serialize independent datagram/group lanes | Source-traced starvation | [Read lanes](/quest/m1/api-ffi-read-lanes.md) |
-| Shared/private connections disagree on credential-refresh recovery and terminal state | Source-traced; real JWT-refresh caller | [Connection](/quest/m1/api-connection-recovery.md) |
+| Shared/private connections disagree on credential-refresh recovery and terminal state | Reproduced; fixed: one URL-recovery contract, `closed` is handle disposal | completed |
 | Relay embedding can discard newly added socket owners without a compile error | Source-traced; real edge embedding pattern | [Embedding](/quest/m1/api-relay-embedding.md) |
 | Accepted numeric properties can truncate or fail only at encoding/receiving | JS unsafe timescales reproduced; remaining paths source-traced | [Numeric invariants](/quest/m1/api-numeric-invariants.md) |
 | FFI first-frame convenience treats empty groups as EOF and loses an acquired group on cancellation | Source-traced | [Frame cursor](/quest/m1/api-ffi-frame-cursor.md) |
-| JSON/binary readers hide the subscription cleanup handle | Source-traced retention | [Wrapper lifetime](/quest/m1/api-js-wrapper-lifecycle.md) |
+| JSON/binary readers hide the subscription cleanup handle | Abandoned: finish must be `&mut` so abort can follow | deferred |
 | FFI configuration setters silently succeed without applying a value | Source-traced busy/closed branch | [Configuration](/quest/m1/api-ffi-configuration.md) |
 | Local inclusive ends cannot express the empty exclusive range | Existing C adapter documents the mismatch | [Bounds](/quest/m1/api-subscription-bounds.md) |
-| Typed Getter input can be rejected solely for lacking an internal brand | Existing 17-test signals suite executed, including rejection test | [Readable contract](/quest/m1/api-getter-contract.md) |
+| Typed Getter input can be rejected solely for lacking an internal brand | Fixed: getter() reuses any conforming Getter | Fixed |
 | JSON edit guard logs failed implicit publication | Source-traced error suppression | [Edit transaction](/quest/m1/api-json-edit-commit.md) |
 | Wrapper constructors diverge and consumers accept ignored producer knobs | Signature/implementation comparison | [Wrapper config](/quest/m1/api-js-wrapper-config.md) |
-| Terminal publisher methods inconsistently retain the caller's handle | Signature comparison; maintainability recommendation | [Finish ownership](/quest/m1/api-producer-finish.md) |
+| Terminal publisher methods inconsistently retain the caller's handle | Abandoned: finish must be `&mut` so abort can follow | deferred |
 
 Recommend resolving behavioral failures and published contract choices before
 merge. Cosmetic consistency can be deferred explicitly if the maintainer
