@@ -34,8 +34,8 @@ async function main() {
 		});
 	});
 
-	// Run until interrupted. `closed` rejects if the reconnect loop gives up, so release
-	// everything on the way out either way.
+	// Run until the handle is released. Attempt failures land on `error` instead of
+	// settling `closed`, so a JWT refresh can recover the same handle.
 	try {
 		await connection.closed;
 	} finally {

@@ -1,4 +1,4 @@
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import { Allocator } from "../bandwidth.ts";
 import { error, SessionCode, SessionError } from "../error.ts";
@@ -13,7 +13,8 @@ import type { Probe, Stats } from "./stats.ts";
  * Exponential backoff settings for the reconnect loop.
  *
  * The delays carry jitter, so a fleet of tabs knocked offline together doesn't reconnect in
- * lockstep. Every failure is retried; {@link ReloadDelay.timeout} is what stops the loop.
+ * lockstep. Every failure is retried; {@link ReloadDelay.timeout} is what stops the current
+ * URL. A new URL or a disable/re-enable starts another sequence.
  *
  * @internal
  */
@@ -28,8 +29,9 @@ export type ReloadDelay = {
 	max?: DOMHighResTimeStamp;
 
 	/**
-	 * Maximum total time in milliseconds to spend retrying before giving up (default:
-	 * 10000). Resets after each successful connection. Set to 0 for unlimited retries.
+	 * Maximum total time in milliseconds to spend retrying the current URL before giving up
+	 * (default: 10000). Resets after each successful connection, a URL change, or a
+	 * disable/re-enable. Set to 0 for unlimited retries.
 	 */
 	timeout?: DOMHighResTimeStamp;
 };
@@ -64,8 +66,10 @@ export type ReloadProps = Omit<ConnectProps, "signal" | "transport"> & {
  * The backoff applied to whichever {@link ReloadDelay} fields a caller leaves out.
  *
  * The timeout is short on purpose: a failure that clears within it was transient, and one that
- * doesn't should surface as an error rather than leave the page silently reconnecting for
- * minutes. A loop nobody watches wants `timeout: 0` instead, since there is no one to react.
+ * doesn't should surface on {@link Reload.error} rather than leave the page silently
+ * reconnecting for minutes. A loop nobody watches wants `timeout: 0` instead, since there is
+ * no one to react. Giving up does not dispose the loop: a new URL or a disable/re-enable
+ * starts another sequence.
  */
 const DEFAULT_DELAY: Required<ReloadDelay> = {
 	initial: 1000,
@@ -98,6 +102,15 @@ export class Reload {
 
 	/** Current connection status. */
 	status = new Signal<ReloadStatus>("disconnected");
+
+	/**
+	 * The failure that stopped retrying the current URL, or undefined while the loop is live.
+	 *
+	 * Set on an auth rejection or when the retry window expires. Cleared when a new URL or a
+	 * disable/re-enable starts another sequence. Transient drops that are still being retried
+	 * leave this empty.
+	 */
+	readonly error: Getter<Error | undefined>;
 
 	/** The currently established session, or undefined while disconnected. */
 	established = new Signal<Established | undefined>(undefined);
@@ -160,19 +173,25 @@ export class Reload {
 	#estimate = new Signal<number | undefined>(undefined);
 
 	/**
-	 * Resolves when the reconnect loop stops via {@link Reload.close}.
-	 *
-	 * Rejects when the loop gives up instead, carrying the failure that was in flight when the
-	 * retry window expired.
+	 * Settles once this loop is disposed via {@link Reload.close}: `null` on a clean close,
+	 * or the abort {@link Error}. Peek it synchronously (`undefined` while open), observe it
+	 * reactively, or `await` it. Attempt failures live on {@link Reload.error} instead.
 	 */
-	closed: Promise<void>;
-	#closedResolve!: () => void;
-	#closedReject!: (err: Error) => void;
+	get closed(): GetPromise<Error | null> {
+		return this.#closed;
+	}
+
+	#closed = new Once<Error | null>();
+	#error = new Signal<Error | undefined>(undefined);
 
 	// The current wait between attempts, doubling per failure, and when the retry window expires.
 	// Both are undefined between sequences, so a later edit to `delay` applies to the next one.
 	#delay: DOMHighResTimeStamp | undefined;
 	#deadline: DOMHighResTimeStamp | undefined;
+
+	// The URL the current retry sequence is for. Cleared when disabled, URL-less, or given
+	// up, so the next attempt starts a fresh backoff window.
+	#sequenceHref: string | undefined;
 
 	// Increased by 1 each time to trigger a reload.
 	#tick = new Signal(0);
@@ -195,22 +214,14 @@ export class Reload {
 
 		// Requests on the subscribe origin stay pending across a reconnect, and before the
 		// first session establishes, rather than reading as unroutable the moment no session
-		// is attached. Released once nothing is coming any more, which is either a close or a
-		// terminal failure: a reconnect loop that has given up must stop claiming it will
-		// answer, or every request on the origin waits forever on a connection that is done.
+		// is attached. Released only when this loop is disposed: giving up the current URL
+		// is recoverable (a new URL or a disable/re-enable starts another sequence), so a
+		// request must keep waiting rather than go unroutable in the gap.
 		if (this.subscribe) {
 			this.#signals.cleanup(this.subscribe.expect());
 		}
 
-		this.closed = new Promise((resolve, reject) => {
-			this.#closedResolve = resolve;
-			this.#closedReject = reject;
-		});
-
-		// A caller is free to never await `closed`, and giving up rejects it unprompted. Marking the
-		// rejection handled here keeps that from surfacing as an `unhandledrejection`; a consumer
-		// awaiting the same promise still receives it.
-		this.closed.catch(() => {});
+		this.error = this.#error;
 
 		if (typeof window !== "undefined" && typeof document !== "undefined") {
 			this.#signals.event(window, "pagehide", () => this.#suspended.set(true));
@@ -263,11 +274,23 @@ export class Reload {
 
 		const suspended = effect.get(this.#suspended);
 		const enabled = effect.get(this.enabled);
-		if (!enabled || suspended) return;
+		if (!enabled || suspended) {
+			this.#resetSequence();
+			return;
+		}
 
 		const href = effect.get(this.#url);
-		if (!href) return;
+		if (!href) {
+			this.#resetSequence();
+			return;
+		}
 		const url = new URL(href);
+
+		if (this.#sequenceHref !== href) {
+			this.#resetSequence();
+			this.#sequenceHref = href;
+			this.#error.set(undefined);
+		}
 
 		effect.set(this.status, "connecting", "disconnected");
 
@@ -347,17 +370,18 @@ export class Reload {
 			this.#deadline = undefined;
 		}
 
-		// An auth rejection is terminal however long the session lived. UNAUTHORIZED is a
+		// An auth rejection stops this URL however long the session lived. UNAUTHORIZED is a
 		// specified code rather than one we guessed at, so this is the peer saying these
 		// credentials will never work; retrying them just burns the window. Matches
-		// moq-tokio's reconnect loop, which stops on the same close.
+		// moq-tokio's reconnect loop, which stops on the same close. A new URL or a
+		// disable/re-enable starts another sequence; the handle itself is not disposed.
 		//
 		// Only a session close says that. The stream registry gives 2 to DELIVERY_TIMEOUT,
 		// so a stream reset during the SETUP exchange would otherwise suppress reconnect
 		// for good.
 		if (cause instanceof SessionError && cause.code === SessionCode.Unauthorized) {
 			console.warn("session rejected as unauthorized, not retrying");
-			this.#terminate(cause);
+			this.#giveUp(cause);
 			return;
 		}
 
@@ -368,7 +392,7 @@ export class Reload {
 		if (now >= this.#deadline) {
 			console.warn("reconnect timed out");
 			// A graceful close has no error, so report the timeout itself.
-			this.#terminate(cause === undefined ? new Error("reconnect timed out") : error(cause));
+			this.#giveUp(cause === undefined ? new Error("reconnect timed out") : error(cause));
 			return;
 		}
 
@@ -381,9 +405,15 @@ export class Reload {
 		effect.timer(() => this.#tick.update((prev) => Math.max(prev, tick)), wait);
 	}
 
-	#terminate(cause: Error): void {
-		this.#signals.close();
-		this.#closedReject(cause);
+	#giveUp(cause: Error): void {
+		this.#error.set(cause);
+		this.#sequenceHref = undefined;
+	}
+
+	#resetSequence(): void {
+		this.#delay = undefined;
+		this.#deadline = undefined;
+		this.#sequenceHref = undefined;
 	}
 
 	/**
@@ -478,9 +508,9 @@ export class Reload {
 		return this.established.peek()?.stats();
 	}
 
-	/** Stop reconnecting, close the current connection, and resolve {@link Reload.closed}. */
-	close() {
+	/** Stop reconnecting, close the current connection, and settle {@link Reload.closed}. Idempotent. */
+	close(abort?: Error) {
 		this.#signals.close();
-		this.#closedResolve();
+		if (this.#closed.peek() === undefined) this.#closed.set(abort ?? null);
 	}
 }
