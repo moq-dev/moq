@@ -171,7 +171,10 @@ impl Nodes {
 				continue;
 			}
 
-			let key = canonical_announced_node(update.prefix.as_path().as_str());
+			let Some(prefix) = update.pattern.as_prefix() else {
+				continue;
+			};
+			let key = canonical_announced_node(prefix);
 			let route = update.route;
 			let hop_ids = route.hops.iter().map(|origin| origin.id()).collect::<Vec<_>>();
 			// An advertisement with no hops never crossed a link, so it is our own.
@@ -382,7 +385,7 @@ mod tests {
 		// bare unannounce ahead of relay-b's still-pending announce.
 		let first_update = announced.try_next().expect("replayed announce");
 		assert_eq!(
-			canonical_announced_node(first_update.prefix.as_path().as_str()),
+			canonical_announced_node(first_update.pattern.as_prefix().expect("prefix announcement")),
 			"https://relay-a.example/"
 		);
 		drop(first);

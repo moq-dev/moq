@@ -22,6 +22,10 @@ curl http://localhost:4443/announced/demo
 curl http://localhost:4443/fetch/demo/bbb.hang/catalog.json
 ```
 
+The announcement listing includes prefix-shaped claims, using each covered prefix
+as the broadcast name. It omits arbitrary patterns such as `room/*`, which do
+not identify a concrete broadcast.
+
 A relay configured with more than one certificate has no single fingerprint to
 publish, and this endpoint answers for the first. On the quinn and noq backends
 the others are reachable over `https://`, which selects by SNI at handshake. The

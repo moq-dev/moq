@@ -1119,7 +1119,8 @@ impl Cluster {
 			tokio::select! {
 				ann = announced.next() => {
 					let Some(update) = ann else { return; };
-					let relative = update.prefix.as_path();
+					let Some(prefix) = update.pattern.as_prefix() else { continue; };
+					let relative = moq_net::Path::new(prefix);
 					// The address to dial, which keeps its query: `run_remote` reads
 					// `?cost=` and `?jwt=` off it. The key is only its identity.
 					let peer = advertised_node_url(relative.as_str());
@@ -2286,7 +2287,7 @@ mod tests {
 		// The self-registration route must be visible on the origin.
 		let update = watcher.try_next().expect("self-registration must be published");
 		assert_eq!(
-			update.prefix.as_path().as_str(),
+			update.pattern.as_prefix().expect("prefix announcement"),
 			".internal/origins/rendezvous.example.com:4443"
 		);
 		assert!(update.active);

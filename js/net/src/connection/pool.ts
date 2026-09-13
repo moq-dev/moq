@@ -295,21 +295,21 @@ export class Connection {
 			effect.cleanup(() => upstream.close());
 
 			// Track what this origin announced so a URL switch retracts it.
-			const active = new Set<Path.Valid>();
+			const active = new Set<string>();
 
 			effect.spawn(async () => {
 				try {
 					for (;;) {
 						const entry = await Promise.race([effect.cancel, upstream.next()]);
 						if (!entry) break;
-						if (entry.active) active.add(entry.prefix);
-						else active.delete(entry.prefix);
+						if (entry.active) active.add(entry.pattern.text);
+						else active.delete(entry.pattern.text);
 						producer.append(entry);
 					}
 				} finally {
 					if (!closed) {
 						for (const path of active) {
-							producer.append({ prefix: path, active: false });
+							producer.append({ pattern: Path.Pattern.parse(path), active: false });
 						}
 					}
 				}

@@ -339,7 +339,8 @@ async fn subscribe(
 				if !update.active {
 					continue;
 				}
-				let path = update.prefix.as_path().as_str().to_string();
+				let Some(prefix) = update.pattern.as_prefix() else { continue; };
+		let path = prefix.to_owned();
 				if own.contains(&path) || !seen.insert(path.clone()) {
 					continue;
 				}
@@ -366,7 +367,10 @@ async fn subscribe(
 		if !update.active {
 			continue;
 		}
-		let path = update.prefix.as_path().as_str().to_string();
+		let Some(prefix) = update.pattern.as_prefix() else {
+			continue;
+		};
+		let path = prefix.to_owned();
 		if own.contains(&path) || !seen.insert(path.clone()) {
 			continue;
 		}

@@ -487,70 +487,6 @@ impl From<u64> for Cost {
 	}
 }
 
-/// What a route covers: a path prefix or a richer [`Pattern`].
-///
-/// `room/` covers `room/alice` (and `room/` itself), but a prefix is never half a
-/// segment. Constructed from a path it is prefix-shaped (`room/**`); constructed
-/// from a [`Pattern`] it uses that dialect's matching. Opaque so coverage can
-/// grow without a breaking change: construct one and ask it questions.
-/// Anything path-like converts into one, so `announce("room/", route)` reads
-/// naturally.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Prefix(Pattern);
-
-impl Prefix {
-	/// A prefix covering `path` and every path beneath it.
-	pub fn new(prefix: impl AsPath) -> Self {
-		let path = prefix.as_path();
-		Self(Pattern::subtree(path.as_str()).expect("a path prefix cannot contain '*'"))
-	}
-
-	/// A covering claim in the [`Pattern`] dialect, prefix-shaped or not.
-	pub fn from_pattern(pattern: Pattern) -> Self {
-		Self(pattern)
-	}
-
-	/// Whether this prefix covers `path`: it is a segment-wise prefix of it,
-	/// including the exact path itself, or the path matches the pattern.
-	pub fn covers(&self, path: impl AsPath) -> bool {
-		self.0.matches(path.as_path().as_str())
-	}
-
-	/// The prefix as a path when prefix-shaped, otherwise the pattern's text.
-	pub fn as_path(&self) -> Path<'_> {
-		Path::new(self.0.as_prefix().unwrap_or_else(|| self.0.as_str()))
-	}
-
-	/// The pattern this covering claim is.
-	pub fn as_pattern(&self) -> &Pattern {
-		&self.0
-	}
-}
-
-impl Default for Prefix {
-	fn default() -> Self {
-		Self(Pattern::all())
-	}
-}
-
-impl From<Pattern> for Prefix {
-	fn from(pattern: Pattern) -> Self {
-		Self::from_pattern(pattern)
-	}
-}
-
-impl<T: AsPath> From<T> for Prefix {
-	fn from(prefix: T) -> Self {
-		Self::new(prefix)
-	}
-}
-
-impl std::fmt::Display for Prefix {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		self.as_path().fmt(f)
-	}
-}
-
 /// The path a route took through the mesh and what using it costs.
 ///
 /// The metadata half of an advertisement: [`Producer::dynamic`] pairs it with
@@ -747,7 +683,7 @@ impl OriginConsumerState {
 			}
 		};
 		Some(AnnounceUpdate {
-			prefix: Prefix(pattern),
+			pattern,
 			route: Route {
 				hops: meta.0,
 				cost: meta.1,
@@ -1077,8 +1013,8 @@ impl Default for OriginNodes {
 
 /// A route announcement or retraction, delivered by [`AnnounceConsumer`].
 ///
-/// An announcement carries no broadcast: it advertises that content under
-/// [`prefix`](Self::prefix) is servable. Resolve a specific path with
+/// An announcement carries no broadcast: it advertises that paths matching
+/// [`pattern`](Self::pattern) are servable. Resolve a specific path with
 /// [`Consumer::request_broadcast`]; the application decides which paths name
 /// broadcasts.
 #[derive(Clone, Debug)]
@@ -1086,12 +1022,12 @@ pub struct AnnounceUpdate {
 	/// What the route covers, relative to the consuming cursor's root. A route
 	/// announced above the cursor's scope is clamped to that scope, which is the
 	/// exact set of covered paths the cursor may see.
-	pub prefix: Prefix,
-	/// The route serving the prefix. On a retraction this carries its last
+	pub pattern: Pattern,
+	/// The route serving the pattern. On a retraction this carries its last
 	/// advertised metadata.
 	pub route: Route,
 	/// `false` when the route was retracted. A repeated `true` for the same
-	/// prefix is a metadata update (new hops or cost), delivered in place.
+	/// pattern is a metadata update (new hops or cost), delivered in place.
 	pub active: bool,
 }
 
@@ -1264,7 +1200,8 @@ impl Producer {
 	/// Fails with [`Error::Unauthorized`] if `path` is outside the prefixes this
 	/// producer may publish under (after [`scope`](Self::scope) /
 	/// [`with_root`](Self::with_root)), [`Error::BoundsExceeded`] if the full
-	/// rooted path exceeds [`Path::MAX_PARTS`], or [`Error::Closed`] once the
+	/// rooted subtree claim exceeds [`Pattern::MAX_SEGMENTS`],
+	/// [`Error::Unsupported`] if the path contains wildcard syntax, or [`Error::Closed`] once the
 	/// origin's [`Driver`] has been dropped.
 	pub fn create_broadcast(&self, path: impl AsPath) -> Result<broadcast::Producer, Error> {
 		let path = path.as_path();
@@ -1301,7 +1238,10 @@ impl Producer {
 				hop: self.info,
 				shared: self.shared.clone(),
 				requested: full.clone(),
-				patterns: vec![Pattern::subtree(full.as_str()).expect("a broadcast path cannot contain '*'")],
+				patterns: vec![Pattern::subtree(full.as_str()).map_err(|err| match err {
+					crate::InvalidPattern::TooManySegments => Error::from(BoundsExceeded),
+					_ => Error::Unsupported,
+				})?],
 				stats: self.stats.clone(),
 			},
 			current: None,
@@ -1376,8 +1316,8 @@ impl Producer {
 	/// advertises through a broadcast ([`broadcast::Producer::announce`]) or a
 	/// [`Dynamic`] handler, which serve what they claim.
 	#[cfg(test)]
-	pub(crate) fn announce(&self, prefix: impl Into<Prefix>, route: Route) -> Result<AnnounceProducer, Error> {
-		Announcing::new(self, prefix.into())?.announce(route, None)
+	pub(crate) fn announce(&self, prefix: impl AsPath, route: Route) -> Result<AnnounceProducer, Error> {
+		Announcing::new(self, prefix)?.announce(route, None)
 	}
 
 	/// Advertise a route and serve the requests beneath it.
@@ -1530,7 +1470,7 @@ struct Announcing {
 
 impl Announcing {
 	#[cfg(test)]
-	fn new(producer: &Producer, prefix: Prefix) -> Result<Self, Error> {
+	fn new(producer: &Producer, prefix: impl AsPath) -> Result<Self, Error> {
 		let requested = producer.root.join(prefix.as_path()).to_owned();
 		let prefixes = producer.clamp_prefix(&requested)?;
 		let patterns = prefixes
@@ -1641,7 +1581,7 @@ impl Announcer {
 }
 
 /// The write half of an advertisement: a live claim that paths under a
-/// [`Prefix`] can be served.
+/// [`Pattern`] can be served.
 ///
 /// Held by a [`Dynamic`] and by a broadcast's [`Announcer`]; dropping it
 /// retracts the route, which [`AnnounceConsumer`]s observe and sessions withdraw
@@ -3675,7 +3615,7 @@ impl Consumer {
 		let mut announced = consumer.untagged().announced();
 		loop {
 			let update = announced.next().await?;
-			if update.active && update.prefix.as_path() == path {
+			if update.active && update.pattern.as_prefix() == Some(path.as_str()) {
 				return Some(update.route);
 			}
 		}
@@ -3918,7 +3858,7 @@ pub struct AnnounceConsumer {
 	// Live egress announce guards, keyed by absolute prefix. An announce
 	// opens one (bumping `announced` + `announced_bytes`); the matching retraction
 	// drops it (bumping `announced_closed` + `announced_bytes`).
-	guards: HashMap<PathOwned, stats::Announce>,
+	guards: HashMap<Pattern, stats::Announce>,
 }
 
 impl AnnounceConsumer {
@@ -3965,12 +3905,19 @@ impl AnnounceConsumer {
 
 	/// Drive the egress announce guards for one update.
 	fn hand_out(&mut self, update: AnnounceUpdate) -> AnnounceUpdate {
-		let absolute = self.root.join(update.prefix.as_path()).to_owned();
+		let absolute = self
+			.root
+			.join(Path::new(
+				update.pattern.as_prefix().unwrap_or_else(|| update.pattern.as_str()),
+			))
+			.to_owned();
 		if update.active {
 			let scope = self.stats.egress(&absolute);
-			self.guards.entry(absolute).or_insert_with(|| scope.announce());
+			self.guards
+				.entry(update.pattern.clone())
+				.or_insert_with(|| scope.announce());
 		} else {
-			self.guards.remove(&absolute);
+			self.guards.remove(&update.pattern);
 		}
 		update
 	}
@@ -4058,7 +4005,11 @@ impl AnnounceConsumer {
 	pub fn assert_next_active(&mut self, expected: impl AsPath) -> Route {
 		let expected = expected.as_path();
 		let update = self.next().now_or_never().expect("next blocked").expect("no next");
-		assert_eq!(update.prefix.as_path(), expected, "wrong prefix");
+		assert_eq!(
+			crate::Path::new(update.pattern.as_prefix().expect("prefix announcement")),
+			expected,
+			"wrong prefix"
+		);
 		assert!(update.active, "should be an active route");
 		update.route
 	}
@@ -4067,7 +4018,11 @@ impl AnnounceConsumer {
 	pub fn assert_try_next_active(&mut self, expected: impl AsPath) -> Route {
 		let expected = expected.as_path();
 		let update = self.try_next().expect("no next");
-		assert_eq!(update.prefix.as_path(), expected, "wrong prefix");
+		assert_eq!(
+			crate::Path::new(update.pattern.as_prefix().expect("prefix announcement")),
+			expected,
+			"wrong prefix"
+		);
 		assert!(update.active, "should be an active route");
 		update.route
 	}
@@ -4076,13 +4031,17 @@ impl AnnounceConsumer {
 	pub fn assert_next_ended(&mut self, expected: impl AsPath) {
 		let expected = expected.as_path();
 		let update = self.next().now_or_never().expect("next blocked").expect("no next");
-		assert_eq!(update.prefix.as_path(), expected, "wrong prefix");
+		assert_eq!(
+			crate::Path::new(update.pattern.as_prefix().expect("prefix announcement")),
+			expected,
+			"wrong prefix"
+		);
 		assert!(!update.active, "should be a retraction");
 	}
 
 	pub fn assert_next_wait(&mut self) {
 		if let Some(res) = self.next().now_or_never() {
-			panic!("next should block: got {:?}", res.map(|u| u.prefix));
+			panic!("next should block: got {:?}", res.map(|u| u.pattern));
 		}
 	}
 }
@@ -4512,6 +4471,38 @@ mod tests {
 			.expect("a non-prefix pattern is advertised");
 	}
 
+	#[test]
+	fn create_broadcast_refuses_unrepresentable_subtree_claims() {
+		let producer = origin(1).produce();
+		let path = vec!["a"; Pattern::MAX_SEGMENTS].join("/");
+		assert!(matches!(
+			producer.create_broadcast(path.as_str()),
+			Err(Error::BoundsExceeded(_))
+		));
+		assert!(matches!(producer.create_broadcast("room/*"), Err(Error::Unsupported)));
+	}
+
+	#[tokio::test]
+	async fn literal_and_subtree_claims_are_distinct() {
+		let producer = origin(1).produce();
+		let literal = producer.dynamic("room".parse().unwrap(), Route::default()).unwrap();
+		let _subtree = producer.dynamic("room/**".parse().unwrap(), Route::default()).unwrap();
+		let mut announced = producer.consume().announced();
+		let first = announced.try_next().unwrap();
+		let second = announced.try_next().unwrap();
+		let patterns: HashSet<_> = [first.pattern, second.pattern].into_iter().collect();
+		assert_eq!(
+			patterns,
+			HashSet::from(["room".parse().unwrap(), "room/**".parse().unwrap()])
+		);
+		drop(literal);
+		let ended = announced.try_next().unwrap();
+		assert_eq!(ended.pattern.as_str(), "room");
+		assert!(!ended.active);
+		assert_eq!(announced.guards.len(), 1);
+		announced.assert_next_wait();
+	}
+
 	#[tokio::test]
 	async fn wildcard_and_prefix_coexist() {
 		let producer = origin(1).produce();
@@ -4525,7 +4516,7 @@ mod tests {
 		let second = announced.next().now_or_never().expect("next blocked").expect("no next");
 		let texts: std::collections::HashSet<_> = [first, second]
 			.into_iter()
-			.map(|u| u.prefix.as_pattern().as_str().to_string())
+			.map(|u| u.pattern.as_str().to_string())
 			.collect();
 		assert!(texts.contains("live/**"), "prefix-shaped live: {texts:?}");
 		assert!(texts.contains("live/*"), "wildcard live/*: {texts:?}");
@@ -4544,20 +4535,20 @@ mod tests {
 
 		let mut announced = producer.consume().announced();
 		let route = announced.next().now_or_never().expect("next").expect("no next");
-		assert_eq!(route.prefix.as_pattern().as_str(), "live/*");
+		assert_eq!(route.pattern.as_str(), "live/*");
 		assert!(route.active);
 		assert_eq!(route.route.cost, Cost::new(1));
 		announced.assert_next_wait();
 
 		drop(second);
 		let route = announced.next().now_or_never().expect("next").expect("no next");
-		assert_eq!(route.prefix.as_pattern().as_str(), "live/*");
+		assert_eq!(route.pattern.as_str(), "live/*");
 		assert!(route.active);
 		assert_eq!(route.route.cost, Cost::new(3));
 
 		drop(first);
 		let ended = announced.next().now_or_never().expect("next").expect("no next");
-		assert_eq!(ended.prefix.as_pattern().as_str(), "live/*");
+		assert_eq!(ended.pattern.as_str(), "live/*");
 		assert!(!ended.active);
 		announced.assert_next_wait();
 	}
@@ -4572,7 +4563,7 @@ mod tests {
 		let mut texts = Vec::new();
 		while let Some(update) = announced.next().now_or_never().flatten() {
 			assert!(update.active);
-			texts.push(update.prefix.as_pattern().as_str().to_string());
+			texts.push(update.pattern.as_str().to_string());
 		}
 		texts.sort();
 		assert_eq!(texts, ["", "**/a"]);
@@ -4605,7 +4596,7 @@ mod tests {
 
 		let mut clean = producer.consume().excluding(origin(8)).announced();
 		let update = clean.next().now_or_never().expect("next").expect("no next");
-		assert_eq!(update.prefix.as_pattern().as_str(), "live/*");
+		assert_eq!(update.pattern.as_str(), "live/*");
 		assert!(update.active);
 	}
 
@@ -4615,12 +4606,12 @@ mod tests {
 		let server = producer.dynamic("live/*".parse().unwrap(), Route::default()).unwrap();
 		let mut announced = producer.consume().announced();
 		let update = announced.next().now_or_never().expect("next").expect("no next");
-		assert_eq!(update.prefix.as_pattern().as_str(), "live/*");
+		assert_eq!(update.pattern.as_str(), "live/*");
 		assert!(update.active);
 
 		drop(server);
 		let ended = announced.next().now_or_never().expect("next").expect("no next");
-		assert_eq!(ended.prefix.as_pattern().as_str(), "live/*");
+		assert_eq!(ended.pattern.as_str(), "live/*");
 		assert!(!ended.active);
 	}
 

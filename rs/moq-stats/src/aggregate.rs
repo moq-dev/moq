@@ -314,7 +314,10 @@ impl<V: Mergeable> Merged<V> {
 	/// changed (only a non-sticky contribution leaving does; a sticky one is
 	/// kept).
 	fn apply_announce(&mut self, update: moq_net::announce::Update) -> bool {
-		let path = update.prefix.as_path().to_owned();
+		let Some(prefix) = update.pattern.as_prefix() else {
+			return false;
+		};
+		let path = moq_net::Path::new(prefix).to_owned();
 		let absolute = self.announce.absolute(&path).to_owned();
 
 		// Only fold node-category routes; skip sibling categories a producer

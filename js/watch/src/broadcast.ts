@@ -192,8 +192,10 @@ export class Broadcast {
 				if (!entry) break;
 				this.#announced.mutate((active) => {
 					if (!active) return;
-					if (entry.active) active.add(entry.prefix);
-					else active.delete(entry.prefix);
+					const prefix = entry.pattern.asPrefix();
+					if (prefix === undefined) return;
+					if (entry.active) active.add(Path.from(prefix));
+					else active.delete(Path.from(prefix));
 				});
 			}
 		});

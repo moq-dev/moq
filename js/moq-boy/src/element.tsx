@@ -139,7 +139,7 @@ export default class MoqBoy extends HTMLElement {
 				if (!entry) break;
 
 				// Skip nested paths (e.g. "viewer/..." sub-broadcasts).
-				const suffix = entry.prefix;
+				const suffix = entry.pattern.asPrefix();
 				if (!suffix || suffix.includes("/")) continue;
 
 				const id = suffix;

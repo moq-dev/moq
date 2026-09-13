@@ -1759,12 +1759,12 @@ where
 					return stream.writer.closed().await;
 				}
 				NamespaceEvent::Update(Some(update)) => {
-					if update.prefix.as_pattern().as_prefix().is_none() {
+					let Some(path) = update.pattern.as_prefix() else {
 						// Decode-first: do not emit NAMESPACE_PATTERN until receivers
 						// that negotiated it also land it, and never as a literal prefix.
 						continue;
-					}
-					let path = update.prefix.as_path().to_owned();
+					};
+					let path = crate::Path::new(path).to_owned();
 					let suffix = path
 						.strip_prefix(&prefix)
 						.expect("origin returned invalid prefix")

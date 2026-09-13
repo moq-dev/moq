@@ -109,9 +109,9 @@ discovery.run((effect) => {
 		for (;;) {
 			const entry = await Promise.race([effect.cancel, announced.next()]);
 			if (!entry) break;
-			const node = entry.prefix as string;
+			const node = entry.pattern.asPrefix();
 			if (!node) continue;
-			const path = Net.Path.join(prefix, entry.prefix);
+			const path = Net.Path.join(prefix, Net.Path.from(node));
 
 			if (entry.active) {
 				if (subs.has(node)) continue;

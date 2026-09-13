@@ -149,7 +149,7 @@ export class Subscriber {
 		for (const active of this.#announced.keys()) {
 			const suffix = Path.stripPrefix(prefix, active);
 			if (suffix === null) continue;
-			announced.append({ prefix: suffix, active: true });
+			announced.append({ pattern: Path.Pattern.subtree(suffix), active: true });
 		}
 		this.#announcedConsumers.add(announced);
 
@@ -174,7 +174,7 @@ export class Subscriber {
 		for (const consumer of this.#announcedConsumers) {
 			const suffix = Path.stripPrefix(consumer.prefix, path);
 			if (suffix === null) continue;
-			consumer.append({ prefix: suffix, active: true });
+			consumer.append({ pattern: Path.Pattern.subtree(suffix), active: true });
 		}
 	}
 
@@ -200,7 +200,7 @@ export class Subscriber {
 			const suffix = Path.stripPrefix(consumer.prefix, path);
 			if (suffix === null) continue;
 			try {
-				consumer.append({ prefix: suffix, active: false });
+				consumer.append({ pattern: Path.Pattern.subtree(suffix), active: false });
 			} catch {
 				// Consumer already closed, will be cleaned up
 			}

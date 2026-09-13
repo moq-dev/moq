@@ -677,7 +677,7 @@ mod tests {
 			.await
 			.expect("timed out waiting for announcement")
 			.expect("origin closed");
-		assert_eq!(update.prefix.as_path().as_str(), "from-a");
+		assert_eq!(update.pattern.as_prefix().expect("prefix announcement"), "from-a");
 
 		// And the reverse direction over the same session. This stream replays a's
 		// own "from-a" first, so read until the remote broadcast shows up.
@@ -691,7 +691,7 @@ mod tests {
 				.await
 				.expect("timed out waiting for announcement")
 				.expect("origin closed");
-			if update.prefix.as_path().as_str() == "from-b" {
+			if update.pattern.as_prefix().expect("prefix announcement") == "from-b" {
 				break;
 			}
 		}

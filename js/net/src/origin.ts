@@ -205,7 +205,7 @@ class OriginState {
 	 */
 	refreshPrefix(prefix: Path.Valid): void {
 		const parsed = Path.Pattern.parse(prefix);
-		const shaped = asPrefix(parsed);
+		const shaped = parsed.asPrefix();
 		const covers = (path: Path.Valid) =>
 			shaped !== undefined ? Path.hasPrefix(Path.from(shaped), path) : parsed.matches(path);
 		for (const [path, cached] of [...this.materialized]) {
@@ -232,7 +232,7 @@ class OriginState {
 		const next = new Map<Path.Valid, Advertised>();
 		for (const [path, route] of advertised ?? []) {
 			const front = local?.get(path);
-			if (front) next.set(path, { identity: front, route });
+			if (front) next.set(Path.from(Path.Pattern.subtree(path).text), { identity: front, route });
 		}
 		for (const [prefix, entries] of routes ?? []) {
 			const mine = entries.find((entry) => entry.originated);
@@ -260,7 +260,7 @@ class OriginState {
 		for (const [key, entries] of this.routes.peek() ?? []) {
 			if (!entries[0]) continue;
 			const parsed = Path.Pattern.parse(key);
-			const prefix = asPrefix(parsed);
+			const prefix = parsed.asPrefix();
 			if (prefix === undefined) continue;
 			if (!Path.hasPrefix(Path.from(prefix), path)) continue;
 			if (bestPrefix === undefined || prefix.length > bestPrefix.length) {
@@ -690,14 +690,6 @@ let makeDynamic: (
 let makeBroadcastRequest: (path: Path.Valid, server: ServeState) => BroadcastRequest;
 let finishBroadcastRequest: (request: BroadcastRequest, err: Error) => void;
 
-function asPrefix(pattern: Path.Pattern): string | undefined {
-	const segments = pattern.segments;
-	const last = segments[segments.length - 1];
-	if (last?.kind !== "globstar") return undefined;
-	if (segments.slice(0, -1).some((segment) => segment.kind !== "literal")) return undefined;
-	return pattern.head;
-}
-
 function prefixPattern(pattern: Path.Pattern | string): { parsed: Path.Pattern; prefix: Path.Valid } {
 	const parsed = typeof pattern === "string" ? Path.Pattern.parse(pattern) : pattern;
 	return { parsed, prefix: Path.from(parsed.text) };
@@ -950,7 +942,7 @@ export class Consumer {
 		// Keyed by suffix, valued by identity plus route. Diffing identity rather than
 		// mere presence means a republish emits a retraction then a fresh announcement;
 		// a re-price of the same identity emits another active (a restart).
-		let active = new Map<Path.Valid, Advertised>();
+		let active = new Map<string, Advertised>();
 
 		try {
 			for (;;) {
@@ -959,7 +951,7 @@ export class Consumer {
 				const routes = this.#state.routes.peek();
 				if (local === undefined && advertisedLocal === undefined && routes === undefined) break;
 
-				const next = new Map<Path.Valid, Advertised>();
+				const next = new Map<string, Advertised>();
 				// Routes first, so an advertised local at the same path overwrites it: the
 				// announcement points at whatever request() would resolve.
 				// The most specific route covering `prefix` itself wins the root slot,
@@ -971,9 +963,8 @@ export class Consumer {
 					const snap: Advertised = { identity: entry.identity, route: entry.route.peek() };
 					const advertised = Path.Pattern.parse(key);
 					for (const residual of advertised.rebase(prefix)) {
-						const presented = asPrefix(residual) ?? residual.text;
-						const presentedPath = Path.from(presented);
-						if (presentedPath === Path.empty()) {
+						const presentedPath = residual.text;
+						if (residual.asPrefix() === "") {
 							const spec = advertised.segments.length;
 							if (spec < rootLen) continue;
 							rootLen = spec;
@@ -985,17 +976,18 @@ export class Consumer {
 					const route = advertisedLocal?.get(path);
 					if (!route) continue;
 					const suffix = Path.stripPrefix(prefix, path);
-					if (suffix !== null) next.set(suffix, { identity: front, route });
+					if (suffix !== null) next.set(Path.Pattern.subtree(suffix).text, { identity: front, route });
 				}
 
 				for (const [path, snap] of active) {
 					const cur = next.get(path);
-					if (!cur || cur.identity !== snap.identity) producer.append({ prefix: path, active: false });
+					if (!cur || cur.identity !== snap.identity)
+						producer.append({ pattern: Path.Pattern.parse(path), active: false });
 				}
 				for (const [path, snap] of next) {
 					const prev = active.get(path);
 					if (!prev || prev.identity !== snap.identity || !routesEqual(prev.route, snap.route)) {
-						producer.append({ prefix: path, active: true, route: snap.route });
+						producer.append({ pattern: Path.Pattern.parse(path), active: true, route: snap.route });
 					}
 				}
 				active = next;

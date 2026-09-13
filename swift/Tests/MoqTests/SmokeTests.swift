@@ -87,9 +87,10 @@ final class SmokeTests: XCTestCase {
         dynamic.cancel()
     }
 
-    func testDynamicRefusesANonPrefixPattern() {
+    func testDynamicAcceptsANonPrefixPattern() throws {
         let origin = OriginProducer()
-        XCTAssertThrowsError(try origin.dynamic(pattern: "live/*"))
+        let dynamic = try origin.dynamic(pattern: "live/*")
+        dynamic.cancel()
     }
 
     func testBroadcastProducerOpensTracks() throws {
