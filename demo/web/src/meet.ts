@@ -140,7 +140,7 @@ function join(): void {
 	tile("local", name, localCanvas, true);
 	localPreview = new Publish.Preview.Renderer({
 		canvas: localCanvas,
-		frame: local.cameraCapture.out.frame,
+		frames: local.cameraCapture.out.frames,
 		display: local.cameraCapture.out.display,
 		flip: true,
 	});
