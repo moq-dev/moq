@@ -76,6 +76,7 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 - [Drain](/quest/m2/drain/README.md) - relay restarts drain sessions over GOAWAY instead of hard-dropping them
 - [Custom QUIC](/quest/m2/quic/README.md) - noq as the upstream for per-stream
   ACK progress, reliable reset, hierarchical scheduling, and qmux
+- [Scope track priority](/quest/m2/track-priority-scope.md) - priority orders streams within one subscription and per-tenant fair on a cluster session, never one tenant above another
 - [Stream sessions](/quest/m2/uring-tcp/README.md) - serve WebSocket and HTTP from the io_uring workers, where io_uring pays off most
 - [IETF on the ring](/quest/m2/uring-ietf.md) - the io_uring workers serve moq-transport sessions too, so a uring relay drops no client protocol
 - [Perf](/quest/m2/perf/README.md) - eliminate measured hot-path costs across moq-uring, kio, and the moq-net model
@@ -136,6 +137,7 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 - [SRT import stats](/quest/m2/srt-import-stats.md) - the SRT gateway reports the same per-stream counters instead of nothing
 - [Text availability](/quest/m2/text-schema.md) - a text track publishes its own coverage index instead of copying the media timeline
 - [SRT metadata parity](/quest/m2/srt-metadata.md) - the SRT publisher preserves MPEG-TS metadata byte-faithfully like the CLI importer
+- [SRT rejection reason](/quest/m2/srt-reject-reason.md) - a refused SRT client learns the reason on the wire instead of one generic forbidden
 - [ID3 catalog section](/quest/m2/id3.md) - timed ID3 as a first-class container-neutral catalog section
 - [fMP4 emsg](/quest/m2/emsg.md) - event messages survive fMP4 import instead of being silently discarded
 - [FLV script tags](/quest/m2/flv-script.md) - onMetaData and AMF data messages survive RTMP and FLV import
