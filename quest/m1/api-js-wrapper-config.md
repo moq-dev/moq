@@ -26,7 +26,3 @@ Schema validation for stream/window is a separate capability decision; do not
 silently expand this quest into changing their data model.
 
 Public API: breaking constructor/config types. Wire: none. Run JS check/test.
-
-## Related
-
-- [Wrapper lifecycle](/quest/m1/api-js-wrapper-lifecycle.md) - independent ownership behavior on the same wrapper family
