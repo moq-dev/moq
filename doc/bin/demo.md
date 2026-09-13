@@ -19,6 +19,7 @@ that uses the [`<moq-watch>`](/lib/js/watch) and
 
 - **Watching** a live broadcast with an adjustable latency budget and a stats overlay.
 - **Publishing** your camera, microphone, screen, or a file from the browser with WebCodecs.
+- **Meeting**: a multi-participant room (`meet.html`) using `@moq/room`. Open the same room in two tabs.
 - **Discovery**: broadcasts appear as they're announced under the prefix.
 
 `just web serve https://cdn.moq.dev/anon` points it at the public relay

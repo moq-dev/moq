@@ -12,7 +12,7 @@
 		"deploy": "vitepress build && wrangler deploy"
 	},
 	"devDependencies": {
-		"@types/bun": "^1.4.0",
+		"@types/bun": "^1.4.1",
 		"@types/node": "^26.4.1",
 		"typescript": "7.0.2",
 		"vitepress": "^1.6.4",

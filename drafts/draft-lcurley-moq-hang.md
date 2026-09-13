@@ -989,6 +989,28 @@ An HLS segment URI can carry the track and both group bounds, allowing the handl
 HLS sequence numbers remain timeline metadata and need not occur in object names.
 
 
+# Rooms
+
+A room is a broadcast path prefix. A participant publishes camera and microphone
+at `{identity}/camera.hang` and a screen share at `{identity}/screen.hang`, relative
+to that prefix. Identity MUST contain at least one nonempty path segment.
+Consumers MAY also recognize the unsuffixed `camera` and `screen` forms.
+
+A participant MAY publish a `chat` track containing a JSON window of messages
+from the last ten seconds. Each edit opens a new group containing one
+uncompressed UTF-8 JSON header of the form `{"offset": N, "records": ["text", ...]}`.
+The records are the complete retained window, oldest first. The offset is the
+absolute index of its first record and advances as records expire. Offsets MUST
+be nonnegative safe JSON integers (at most 2^53 - 1).
+
+Publishers MUST retire records after ten seconds, including while idle. Consumers
+start at the latest group and report records entering or leaving the window;
+missing index ranges indicate messages that expired before being received.
+Consumers MUST report malformed JSON, non-string records, and transport failures
+as errors, distinct from the clean end of the track. Sender identity comes from
+the broadcast path, not the payload. This track is distinct from an application's
+`hang/chat.json` snapshot extension.
+
 # Security Considerations
 A rendition's `broadcast` reference ({{field-broadcast}}) resolves against the consumer's root, which is the subtree it is authorized for.
 Clamping a reference that escapes above that root would silently redirect the subscription to an unrelated broadcast, so a consumer rejects the catalog instead.

@@ -32,7 +32,7 @@
 	},
 	"devDependencies": {
 		"@types/audioworklet": "^0.0.100",
-		"@types/bun": "^1.4.0",
+		"@types/bun": "^1.4.1",
 		"@typescript/lib-dom": "npm:@types/web@^0.0.350",
 		"fast-glob": "^3.3.3",
 		"rimraf": "^6.1.3",

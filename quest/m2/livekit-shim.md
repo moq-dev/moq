@@ -13,8 +13,7 @@ and the connect URL/token changed.
 
 ## Plan
 
-- The shim is a LiveKit-API facade over the
-  [room SDK](/quest/m2/room-sdk.md), which carries hang.live's convention: the room is a path prefix in the connection URL and token root,
+- The shim is a LiveKit-API facade over `@moq/room`, which carries hang.live's convention: the room is a path prefix in the connection URL and token root,
   participants are discovered from the bare announce stream, identity is the
   next path segment, and each participant publishes `<identity>/camera`
   (camera + mic, hd/sd renditions) and `<identity>/screen` (screenshare,
@@ -31,10 +30,6 @@ and the connect URL/token changed.
 - Recommend tokens scoped to `put: <identity>/` so participants cannot
   publish at each other's paths (hang.live grants `put` on the whole room
   subtree today).
-
-## Required
-
-- [Room SDK](/quest/m2/room-sdk.md)
 
 ## Related
 

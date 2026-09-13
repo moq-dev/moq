@@ -1,0 +1,9 @@
+{
+	"extends": "../tsconfig.json",
+	"compilerOptions": {
+		"outDir": "dist",
+		"rootDir": "./src",
+		"types": ["audioworklet", "bun"]
+	},
+	"include": ["src", "../common/worklet.d.ts"]
+}
