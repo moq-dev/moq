@@ -10,7 +10,7 @@ const REPLAY_LATENCY = 30_000;
 
 // Drain every value currently available from a fresh consumer over the (finished) track.
 async function drain(track: Track.Subscriber, compression: boolean): Promise<Uint8Array[]> {
-	const consumer = new Consumer(track, { compression });
+	const consumer = new Consumer({ track, compression });
 	const out: Uint8Array[] = [];
 	for (;;) {
 		const value = await consumer.next();
@@ -22,7 +22,7 @@ async function drain(track: Track.Subscriber, compression: boolean): Promise<Uin
 
 test("one single-frame group per update", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer(track);
+	const producer = new Producer({ track });
 	producer.update(bytes(1));
 	producer.update(bytes(2));
 	producer.finish();
@@ -45,8 +45,8 @@ test("one single-frame group per update", async () => {
 
 test("a live consumer sees each update", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer(track);
-	const consumer = new Consumer(track.subscribe());
+	const producer = new Producer({ track });
+	const consumer = new Consumer({ track: track.subscribe() });
 
 	for (let n = 0; n < 3; n++) {
 		producer.update(bytes(n));
@@ -57,7 +57,7 @@ test("a live consumer sees each update", async () => {
 
 test("compressed roundtrip", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer(track, { compression: true });
+	const producer = new Producer({ track, compression: true });
 	const payload = new TextEncoder().encode("the quick brown fox".repeat(64));
 	producer.update(payload);
 	producer.finish();
@@ -69,7 +69,7 @@ test("compression shrinks the frame on the wire", async () => {
 	// A consumer that ignored the catalog's compression flag would read this raw and get garbage,
 	// which is why the flag has to be carried rather than guessed.
 	const track = new Track.Producer("test");
-	const producer = new Producer(track, { compression: true });
+	const producer = new Producer({ track, compression: true });
 	const payload = new TextEncoder().encode("the quick brown fox".repeat(64));
 	producer.update(payload);
 	producer.finish();
@@ -81,11 +81,11 @@ test("compression shrinks the frame on the wire", async () => {
 
 test("a finished track ends the consumer", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer(track);
+	const producer = new Producer({ track });
 	producer.update(bytes(7));
 	producer.finish();
 
-	const consumer = new Consumer(track.subscribe());
+	const consumer = new Consumer({ track: track.subscribe() });
 	expect(await consumer.next()).toEqual(bytes(7));
 	expect(await consumer.next()).toBeUndefined();
 });
@@ -94,8 +94,8 @@ test("a backlog collapses to the newest value", async () => {
 	// A consumer that fell behind (or joined late) must not replay every superseded value: its
 	// latency would grow with the backlog, and each older group is already superseded by design.
 	const track = new Track.Producer("test");
-	const producer = new Producer(track);
-	const consumer = new Consumer(track.subscribe());
+	const producer = new Producer({ track });
+	const consumer = new Consumer({ track: track.subscribe() });
 
 	for (let n = 0; n < 10; n++) producer.update(bytes(n));
 	producer.finish();
@@ -109,7 +109,7 @@ test("a newer group preempts an open one", async () => {
 	// Snapshot mode exists to deliver the current value, not to wait out a stale group's FIN, and
 	// groups ride independent QUIC streams so a newer one can land first.
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe());
+	const consumer = new Consumer({ track: track.subscribe() });
 
 	const stale = track.appendGroup();
 	stale.writeFrame({ payload: bytes(1), timestamp: Time.Timestamp.now() });
@@ -131,7 +131,7 @@ test("an aborted track surfaces its error instead of spinning", async () => {
 	// recoverable Lagged would loop forever on a rejected promise rather than telling the caller
 	// the subscription died.
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe());
+	const consumer = new Consumer({ track: track.subscribe() });
 
 	const boom = new Error("subscription aborted");
 	track.close(boom);

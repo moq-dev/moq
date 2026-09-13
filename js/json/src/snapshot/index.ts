@@ -17,8 +17,8 @@
  * with a full snapshot, so the deltas already written stop being provisional without publishing an
  * empty group.
  *
- * {@link Producer} and {@link Consumer} own a track: hand one a track and it manages the groups for
- * you. {@link Encoder} and {@link Decoder} are the same logic without the track. The encoder turns
+ * {@link Producer} and {@link Consumer} own a track: pass `{ track, ... }` and they manage the groups
+ * for you. {@link Encoder} and {@link Decoder} are the same logic without the track. The encoder turns
  * values into {@link Encoded} frame payloads and says where the group boundaries fall; the decoder
  * reconstructs a value from those payloads. Reach for them when something else is already in charge
  * of the track.
@@ -31,7 +31,7 @@
  * @module
  */
 
-export { Consumer } from "./consumer.ts";
+export { Consumer, type ConsumerConfig } from "./consumer.ts";
 export { Decoder } from "./decoder.ts";
 export { type Config, type Encoded, Encoder, type Pending } from "./encoder.ts";
 export { Producer, type ProducerConfig } from "./producer.ts";

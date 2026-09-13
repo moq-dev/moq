@@ -2,8 +2,11 @@ import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "@moq/flate";
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 
-/** Options for a {@link Producer}. */
+/** Stream producer options, including the destination track. */
 export interface ProducerConfig {
+	/** Track that receives the payload log. */
+	track: Moq.Track.Producer;
+
 	/**
 	 * Compress the group as one sync-flushed `deflate-raw` stream, so each payload reuses the
 	 * earlier ones as context. A {@link Consumer} reading the frames must set the same flag.
@@ -25,8 +28,8 @@ export class Producer {
 	#group?: Moq.Group.Producer;
 
 	/** Wrap a track to publish a payload log into it. */
-	constructor(track: Moq.Track.Producer, config: ProducerConfig = {}) {
-		this.#track = track;
+	constructor(config: ProducerConfig) {
+		this.#track = config.track;
 		this.#compress = config.compression ?? false;
 		this.#flate = this.#compress ? new Flate() : undefined;
 	}

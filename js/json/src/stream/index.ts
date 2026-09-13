@@ -10,14 +10,15 @@
  * bound the record rate throttles at the source. Interoperable on the wire with the Rust
  * `moq_json::stream`.
  *
- * {@link Producer} and {@link Consumer} own a track. {@link Encoder} and {@link Decoder} are the
- * same logic without it, for when something else is already in charge of the track; they carry the
- * shared DEFLATE window and nothing else, since a log has no group boundaries to report.
+ * {@link Producer} and {@link Consumer} own a track: pass `{ track, ... }`. {@link Encoder} and
+ * {@link Decoder} are the same logic without it, for when something else is already in charge of the
+ * track; they carry the shared DEFLATE window and nothing else, since a log has no group boundaries
+ * to report.
  *
  * @module
  */
 
-export { Consumer, Rolled } from "./consumer.ts";
-export { type ConsumerConfig, Decoder } from "./decoder.ts";
-export { Encoder, type Pending, type ProducerConfig } from "./encoder.ts";
-export { Producer } from "./producer.ts";
+export { Consumer, type ConsumerConfig, Rolled } from "./consumer.ts";
+export { Decoder } from "./decoder.ts";
+export { type Config, Encoder, type Pending } from "./encoder.ts";
+export { Producer, type ProducerConfig } from "./producer.ts";

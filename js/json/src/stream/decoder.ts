@@ -1,6 +1,6 @@
 import { Decoder as Flate } from "@moq/flate";
 
-/** Options shared by a {@link Decoder} and the {@link Consumer} that wraps one. */
+/** Options for a {@link Decoder}. */
 export interface ConsumerConfig {
 	/** Whether the frames are `deflate-raw` compressed. Must match the encoder. Defaults to `false`. */
 	compression?: boolean;

@@ -162,7 +162,8 @@ export class Producer {
 			const unixMillis = Math.max(props.wall.getTime(), MOQ_EPOCH_UNIX_MILLIS);
 			this.#wall = Math.floor(((unixMillis - MOQ_EPOCH_UNIX_MILLIS) * DEFAULT_TIMESCALE) / 1000);
 		}
-		this.#window = new Json.Window.Producer<Record>(track, {
+		this.#window = new Json.Window.Producer<Record>({
+			track,
 			compression: true,
 			checkpointRecords: CHECKPOINT_RECORDS,
 		});

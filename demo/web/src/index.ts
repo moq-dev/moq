@@ -433,7 +433,7 @@ ui.run((effect) => {
 
 	const track = broadcast.track(trackName).subscribe({ priority: Hang.Catalog.PRIORITY.catalog });
 	effect.cleanup(() => track.close());
-	const consumer = new Json.Snapshot.Consumer<unknown>(track);
+	const consumer = new Json.Snapshot.Consumer<unknown>({ track });
 
 	effect.spawn(async () => {
 		try {

@@ -16,7 +16,7 @@ test("catalog producer seeds subscribers and fans out edits", async () => {
 	const effect = new Effect();
 	const track = new Track.Producer("catalog.json");
 	catalog.serve(track, effect);
-	const consumer = new Json.Snapshot.Consumer<Catalog.Root>(track.subscribe());
+	const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track: track.subscribe() });
 
 	// A new subscriber is seeded with the current catalog.
 	expect((await consumer.next())?.video).toEqual({ renditions: {} });
@@ -76,7 +76,7 @@ test("a reconnecting subscriber is seeded with the full current catalog", async 
 	const effect = new Effect();
 	const track = new Track.Producer("catalog.json");
 	catalog.serve(track, effect);
-	const seeded = await new Json.Snapshot.Consumer<Catalog.Root>(track.subscribe()).next();
+	const seeded = await new Json.Snapshot.Consumer<Catalog.Root>({ track: track.subscribe() }).next();
 	expect(seeded?.video).toEqual({ renditions: {} });
 	expect(seeded?.scte35).toEqual({ splices: [] });
 

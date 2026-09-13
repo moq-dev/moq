@@ -104,7 +104,7 @@ test("a record JSON cannot represent is rejected", () => {
 test("a rejected record ends the track without opening a group", async () => {
 	const track = new Track.Producer("test");
 	const subscriber = track.subscribe().ordered();
-	const producer = new Producer<unknown>(track);
+	const producer = new Producer<unknown>({ track });
 
 	expect(() => producer.append(undefined)).toThrow("not representable as JSON");
 
@@ -153,7 +153,7 @@ test("a commit from before a reset does not acknowledge a newer record", () => {
 // `a_rejected_record_leaves_the_encoder_able_to_retry`.)
 test("a rejected record leaves the producer able to retry", () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Rec>(track, { compression: true });
+	const producer = new Producer<Rec>({ track, compression: true });
 
 	// Closing the track makes every write fail, standing in for any post-appendGroup rejection.
 	track.close();
@@ -170,7 +170,7 @@ test("a failed write on the very first record still ends the track", async () =>
 	// missing record as a complete log, and leave a consumer waiting in the empty group 0.
 	const track = new Track.Producer("test");
 	const subscriber = track.subscribe().ordered();
-	const producer = new Producer<string>(track);
+	const producer = new Producer<string>({ track });
 
 	// Serializes past the group cache limit, so `appendGroup` succeeds and `writeFrame` rejects it.
 	const oversized = "x".repeat(Group.MAX_GROUP_CACHE_BYTES + 1);

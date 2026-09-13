@@ -13,7 +13,7 @@ function capture(props?: ConstructorParameters<typeof Producer>[1]): {
 	records: () => Promise<Record[]>;
 } {
 	const track = new Track.Producer("timeline.z");
-	const consumer = new Json.Window.Consumer<Record>(track.subscribe(), { compression: true });
+	const consumer = new Json.Window.Consumer<Record>({ track: track.subscribe(), compression: true });
 	const timeline = new Producer(track, props);
 
 	const records = async () => {

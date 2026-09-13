@@ -260,7 +260,7 @@ export class Game {
 		effect.cleanup(() => statusTrack.close());
 
 		// Reconstruct each status from snapshots and deltas, validated against the schema.
-		const consumer = new Json.Snapshot.Consumer(statusTrack, { schema: GameStatusSchema });
+		const consumer = new Json.Snapshot.Consumer({ track: statusTrack, schema: GameStatusSchema });
 
 		// Closing the track on cleanup unblocks a pending next() (it returns undefined), so the loop
 		// ends without racing effect.cancel.

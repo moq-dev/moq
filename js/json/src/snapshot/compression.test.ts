@@ -13,7 +13,7 @@ const REPLAY_LATENCY = 30_000;
 // Reconstruct every value a compressed consumer yields, in order.
 async function drainCompressed(track: Track.Subscriber): Promise<Value[]> {
 	const out: Value[] = [];
-	for await (const value of new Consumer<Value>(track, { compression: true })) out.push(value);
+	for await (const value of new Consumer<Value>({ track, compression: true })) out.push(value);
 	return out;
 }
 
@@ -53,7 +53,7 @@ test("compressed live consumer sees each update in order", async () => {
 	// A live consumer reconstructs each update in order from the shared per-group stream.
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, deltaRatio: 100, compression: true });
-	const consumer = new Consumer<Value>(track.subscribe(), { compression: true });
+	const consumer = new Consumer<Value>({ track: track.subscribe(), compression: true });
 
 	for (let n = 1; n <= 5; n++) {
 		producer.update({ a: n });
