@@ -1,8 +1,8 @@
 import { expect, setSystemTime, test } from "bun:test";
 import { Producer as GroupProducer, Lagged, MAX_GROUP_FRAMES } from "./group.ts";
 import { hooks } from "./internal.ts";
-import { Timestamp } from "./time.ts";
-import { Producer as TrackProducer } from "./track.ts";
+import { Timescale, Timestamp } from "./time.ts";
+import { infoDefaults, Producer as TrackProducer } from "./track.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -198,6 +198,26 @@ test("a maxAge that is not a duration is refused, not rounded into one", () => {
 	expect(() => producer.subscribe({ maxAge: Number.NaN })).toThrow(RangeError);
 	expect(() => producer.subscribe({ maxAge: Number.POSITIVE_INFINITY })).toThrow(RangeError);
 	expect(() => producer.accept({ maxAge: -0.5 })).toThrow(RangeError);
+	expect(() => producer.accept({ maxAge: Number.MAX_SAFE_INTEGER + 1 })).toThrow(RangeError);
+	expect(() => producer.subscribe({ maxAge: Number.MAX_SAFE_INTEGER + 1 })).toThrow(RangeError);
+});
+
+test("priority 255 is accepted and 256 is refused", () => {
+	const producer = new TrackProducer("video");
+	producer.accept({ priority: 255 });
+	expect(producer.priority).toBe(255);
+	expect(() => producer.accept({ priority: 256 })).toThrow(RangeError);
+	expect(() => producer.accept({ priority: -1 })).toThrow(RangeError);
+	expect(() => producer.accept({ priority: 1.5 })).toThrow(RangeError);
+	expect(() => producer.subscribe({ priority: 256 })).toThrow(RangeError);
+});
+
+test("infoDefaults re-validates timescale and the safe maxAge bound", () => {
+	expect(infoDefaults({ timescale: Timescale.MICRO }).timescale).toBe(Timescale.MICRO);
+	expect(infoDefaults({ maxAge: Number.MAX_SAFE_INTEGER }).maxAge).toBe(Number.MAX_SAFE_INTEGER);
+	expect(() => infoDefaults({ timescale: 0 as Timescale })).toThrow(RangeError);
+	expect(() => infoDefaults({ timescale: (Number.MAX_SAFE_INTEGER + 1) as Timescale })).toThrow(RangeError);
+	expect(() => infoDefaults({ maxAge: Number.MAX_SAFE_INTEGER + 1 })).toThrow(RangeError);
 });
 
 test("multiple subscriber options aggregate like Rust", async () => {

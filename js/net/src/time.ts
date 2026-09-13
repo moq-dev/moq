@@ -77,11 +77,17 @@ export const Milli = Object.assign((value: number): Milli => value as Milli, {
 /** Units per second for a {@link Timestamp}'s value, e.g. `1000` for milliseconds. */
 export type Timescale = number & { readonly _brand: "timescale" };
 
-/** Named timescales and a checked constructor (rejects non-positive / non-integer values). */
+/**
+ * Named timescales and a checked constructor.
+ *
+ * Units per second must be a safe integer ≥ 1. JavaScript numbers are exact only
+ * through `Number.MAX_SAFE_INTEGER` (`2^53 - 1`); the wire varint range goes
+ * to `2^62 - 1`, which Rust accepts and this constructor refuses.
+ */
 export const Timescale = Object.assign(
 	(unitsPerSecond: number): Timescale => {
-		if (!Number.isInteger(unitsPerSecond) || unitsPerSecond <= 0) {
-			throw new Error(`invalid timescale: ${unitsPerSecond}`);
+		if (!Number.isSafeInteger(unitsPerSecond) || unitsPerSecond <= 0) {
+			throw new RangeError(`invalid timescale: ${unitsPerSecond}`);
 		}
 		return unitsPerSecond as Timescale;
 	},
@@ -102,6 +108,11 @@ export const Timescale = Object.assign(
  *
  * Mirrors the Rust `Timestamp`. Unlike the bare `Milli`/`Micro` aliases it carries its
  * own scale, so a track can pick its units and conversions can't silently mix them up.
+ *
+ * The value must be finite and in `[0, Number.MAX_SAFE_INTEGER]`. Fractions are allowed
+ * (`performance.now()`, scale conversion). Encoding rounds to the nearest integer at the
+ * track timescale. Integer timestamps are exact through `2^53 - 1` units; this package
+ * does not use BigInt for timestamps.
  */
 export class Timestamp {
 	/** The raw value, in `scale` units. */
@@ -111,11 +122,11 @@ export class Timestamp {
 
 	/** Build a timestamp of `value` units at `scale`. */
 	constructor(value: number, scale: Timescale) {
-		if (!Number.isFinite(value) || value < 0) {
-			throw new Error(`invalid timestamp: ${value}`);
+		if (!Number.isFinite(value) || value < 0 || value > Number.MAX_SAFE_INTEGER) {
+			throw new RangeError(`invalid timestamp: ${value}`);
 		}
 		this.value = value;
-		this.scale = scale;
+		this.scale = Timescale(scale);
 	}
 
 	/** Monotonic now (`performance.now()`, milliseconds since page load), not wall-clock time. */

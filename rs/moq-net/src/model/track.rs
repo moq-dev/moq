@@ -96,6 +96,10 @@ pub struct Info {
 	///
 	/// This is the `Publisher Max Age` on the wire, the publisher-side half of the
 	/// budget [`Subscription::max_age`] sets for a subscriber.
+	///
+	/// Encoded as milliseconds in a QUIC varint, so a duration of `2^62` milliseconds
+	/// or more cannot be put on the wire. Sub-millisecond precision is truncated
+	/// (`Duration::as_millis`) at encode time.
 	pub max_age: Duration,
 	/// The publisher's priority for this track, used only to break ties between
 	/// subscriptions of equal subscriber priority. Reported in TRACK_INFO (Lite05+).

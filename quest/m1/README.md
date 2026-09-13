@@ -22,7 +22,6 @@ quest here and merged main into dev.
 
 - [FFI read lanes](/quest/m1/api-ffi-read-lanes.md) - pending group and datagram reads progress independently on one subscription
 - [Relay embedding](/quest/m1/api-relay-embedding.md) - custom routes retain the owner of listeners, workers, and shutdown
-- [Numeric API invariants](/quest/m1/api-numeric-invariants.md) - accepted timescales and delivery properties are wire-encodable without truncation
 - [FFI frame cursor](/quest/m1/api-ffi-frame-cursor.md) - empty groups and cancelled reads do not become false EOF or lost frames
 - [FFI configuration](/quest/m1/api-ffi-configuration.md) - configuration applies or fails explicitly rather than depending on lock timing
 - [Subscription bounds](/quest/m1/api-subscription-bounds.md) - local and requested ranges use consistent exclusive ends

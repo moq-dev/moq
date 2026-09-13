@@ -19,9 +19,10 @@ pub struct Subscription {
 	/// already that far ahead.
 	///
 	/// This is the `Subscriber Max Age` on the wire, and it is stored here verbatim so
-	/// what was asked for stays readable. Clamped to the publisher's
-	/// [`Info::max_age`](crate::track::Info::max_age), since waiting for a group longer
-	/// than it is kept around cannot produce it.
+	/// what was asked for stays readable. Encoded as milliseconds in a QUIC varint, so
+	/// a duration of `2^62` milliseconds or more cannot be put on the wire. Clamped to
+	/// the publisher's [`Info::max_age`](crate::track::Info::max_age), since waiting for
+	/// a group longer than it is kept around cannot produce it.
 	///
 	/// # Where it is enforced
 	///
