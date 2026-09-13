@@ -10,10 +10,53 @@ use crate::json::{MoqJsonSnapshotConfig, MoqJsonStreamConfig};
 use crate::media::{MoqAudio, MoqAudioFormat, MoqAudioInit, MoqContainer, MoqFrame, MoqVideoFormat, MoqVideoInit};
 use crate::session::{MoqBackoff, MoqConnectionStatus};
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Wait until the FFI runtime has polled work spawned ahead of this call.
+async fn ffi_caught_up() {
+	let (tx, rx) = tokio::sync::oneshot::channel();
+	crate::ffi::spawn(async move {
+		let _ = tx.send(());
+	});
+	rx.await.expect("ffi runtime dropped the catch-up task");
+}
+
+/// Spawn `fut` and wait until the FFI runtime has driven its inner `Task::run`.
+async fn spawn_parked<F, T>(fut: F) -> tokio::task::JoinHandle<T>
+where
+	F: Future<Output = T> + Send + 'static,
+	T: Send + 'static,
+{
+	let (started, started_rx) = tokio::sync::oneshot::channel();
+	let handle = tokio::spawn(async move {
+		tokio::pin!(fut);
+		let mut started = Some(started);
+		let first = std::future::poll_fn(|cx| {
+			let poll = fut.as_mut().poll(cx);
+			if let Some(started) = started.take() {
+				let _ = started.send(());
+			}
+			std::task::Poll::Ready(poll)
+		})
+		.await;
+		match first {
+			std::task::Poll::Ready(value) => value,
+			std::task::Poll::Pending => fut.await,
+		}
+	});
+	tokio::time::timeout(TIMEOUT, started_rx)
+		.await
+		.expect("timed out waiting for the read to start")
+		.expect("the read task dropped before polling");
+	tokio::time::timeout(TIMEOUT, ffi_caught_up())
+		.await
+		.expect("timed out waiting for the FFI runtime to poll the read");
+	handle
+}
 
 fn assert_protocol(err: &MoqError, scope: crate::error::MoqErrorScope, kind: crate::error::MoqProtocolKind) {
 	match err {
@@ -2120,6 +2163,266 @@ async fn raw_track_group_order_commits_on_first_read() {
 		.expect("expected a datagram");
 	assert_eq!(datagram.sequence, sequence);
 	assert_eq!(datagram.payload, b"beep".to_vec());
+}
+
+fn raw_track() -> (
+	Arc<MoqBroadcastProducer>,
+	Arc<crate::producer::MoqTrackProducer>,
+	Arc<crate::consumer::MoqTrackConsumer>,
+) {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let consumer = track.consume(None).unwrap();
+	(broadcast, track, consumer)
+}
+
+fn datagram_frame(payload: &[u8]) -> MoqFrame {
+	MoqFrame {
+		payload: payload.to_vec(),
+		timestamp_us: 1,
+	}
+}
+
+fn group_frame(payload: &[u8]) -> MoqFrame {
+	MoqFrame {
+		payload: payload.to_vec(),
+		timestamp_us: 0,
+	}
+}
+
+/// A pending group-lane read must not stall `recv_datagram` on the same subscription.
+async fn pending_group_does_not_block_datagram<F, Fut, T>(start_group: F)
+where
+	F: FnOnce(Arc<crate::consumer::MoqTrackConsumer>) -> Fut,
+	Fut: Future<Output = Result<T, MoqError>> + Send + 'static,
+	T: Send + 'static,
+{
+	let (_broadcast, track, consumer) = raw_track();
+
+	let group_read = {
+		let consumer = consumer.clone();
+		spawn_parked(start_group(consumer)).await
+	};
+	assert!(!group_read.is_finished(), "group read should still be pending");
+
+	let sequence = track.append_datagram(datagram_frame(b"beep")).unwrap();
+	let datagram = tokio::time::timeout(TIMEOUT, consumer.recv_datagram())
+		.await
+		.expect("timed out waiting for datagram behind a pending group read")
+		.unwrap()
+		.expect("expected a datagram");
+	assert_eq!(datagram.sequence, sequence);
+	assert_eq!(datagram.payload, b"beep".to_vec());
+	assert!(!group_read.is_finished(), "group read should stay pending");
+
+	track.write_frame(group_frame(b"group")).unwrap();
+	tokio::time::timeout(TIMEOUT, group_read)
+		.await
+		.expect("timed out waiting for the parked group")
+		.expect("group read panicked")
+		.unwrap();
+}
+
+/// A pending datagram read must not stall a group-lane read on the same subscription.
+async fn pending_datagram_does_not_block_group<F, Fut, T>(start_group: F)
+where
+	F: FnOnce(Arc<crate::consumer::MoqTrackConsumer>) -> Fut,
+	Fut: Future<Output = Result<T, MoqError>> + Send + 'static,
+	T: Send + 'static,
+{
+	let (_broadcast, track, consumer) = raw_track();
+
+	let datagram_read = {
+		let consumer = consumer.clone();
+		spawn_parked(async move { consumer.recv_datagram().await }).await
+	};
+	assert!(!datagram_read.is_finished(), "datagram read should still be pending");
+
+	track.write_frame(group_frame(b"group")).unwrap();
+	tokio::time::timeout(TIMEOUT, start_group(consumer.clone()))
+		.await
+		.expect("timed out waiting for a group behind a pending datagram read")
+		.unwrap();
+	assert!(!datagram_read.is_finished(), "datagram read should stay pending");
+
+	let sequence = track.append_datagram(datagram_frame(b"beep")).unwrap();
+	let datagram = tokio::time::timeout(TIMEOUT, datagram_read)
+		.await
+		.expect("timed out waiting for the parked datagram")
+		.expect("datagram read panicked")
+		.unwrap()
+		.expect("expected a datagram");
+	assert_eq!(datagram.sequence, sequence);
+	assert_eq!(datagram.payload, b"beep".to_vec());
+}
+
+#[tokio::test]
+async fn raw_track_pending_next_group_does_not_block_datagram() {
+	pending_group_does_not_block_datagram(|consumer| async move { consumer.next_group().await }).await;
+}
+
+#[tokio::test]
+async fn raw_track_pending_recv_group_does_not_block_datagram() {
+	pending_group_does_not_block_datagram(|consumer| async move { consumer.recv_group().await }).await;
+}
+
+#[tokio::test]
+async fn raw_track_pending_read_frame_does_not_block_datagram() {
+	pending_group_does_not_block_datagram(|consumer| async move { consumer.read_frame().await }).await;
+}
+
+#[tokio::test]
+async fn raw_track_pending_datagram_does_not_block_next_group() {
+	pending_datagram_does_not_block_group(|consumer| async move { consumer.next_group().await }).await;
+}
+
+#[tokio::test]
+async fn raw_track_pending_datagram_does_not_block_recv_group() {
+	pending_datagram_does_not_block_group(|consumer| async move { consumer.recv_group().await }).await;
+}
+
+#[tokio::test]
+async fn raw_track_pending_datagram_does_not_block_read_frame() {
+	pending_datagram_does_not_block_group(|consumer| async move { consumer.read_frame().await }).await;
+}
+
+#[tokio::test]
+async fn raw_track_update_during_pending_group_still_reads_datagram() {
+	let (_broadcast, track, consumer) = raw_track();
+
+	let group_read = {
+		let consumer = consumer.clone();
+		spawn_parked(async move { consumer.next_group().await }).await
+	};
+
+	consumer.update(MoqSubscription {
+		priority: 10,
+		max_age_ms: 25,
+		group_start: Some(0),
+		group_end: None,
+	});
+
+	let sequence = track.append_datagram(datagram_frame(b"after-update")).unwrap();
+	let datagram = tokio::time::timeout(TIMEOUT, consumer.recv_datagram())
+		.await
+		.expect("timed out waiting for datagram after update")
+		.unwrap()
+		.expect("expected a datagram");
+	assert_eq!(datagram.sequence, sequence);
+	assert_eq!(datagram.payload, b"after-update".to_vec());
+
+	track.write_frame(group_frame(b"group")).unwrap();
+	tokio::time::timeout(TIMEOUT, group_read)
+		.await
+		.expect("timed out waiting for the parked group")
+		.expect("group read panicked")
+		.unwrap()
+		.expect("expected a group");
+}
+
+#[tokio::test]
+async fn raw_track_dropping_a_pending_group_read_does_not_cancel_datagrams() {
+	let (_broadcast, track, consumer) = raw_track();
+
+	let group_read = {
+		let consumer = consumer.clone();
+		spawn_parked(async move { consumer.next_group().await }).await
+	};
+	group_read.abort();
+	match group_read.await {
+		Err(err) if err.is_cancelled() => {}
+		Err(err) => panic!("aborted group read should join as cancelled, got {err}"),
+		Ok(_) => panic!("aborting the call should cancel only that future"),
+	}
+
+	let sequence = track.append_datagram(datagram_frame(b"still-open")).unwrap();
+	let datagram = tokio::time::timeout(TIMEOUT, consumer.recv_datagram())
+		.await
+		.expect("timed out waiting for datagram after a cancelled group read")
+		.unwrap()
+		.expect("expected a datagram");
+	assert_eq!(datagram.sequence, sequence);
+
+	track.write_frame(group_frame(b"group")).unwrap();
+	let group = tokio::time::timeout(TIMEOUT, consumer.next_group())
+		.await
+		.expect("timed out waiting for a group after the cancelled read")
+		.unwrap()
+		.expect("expected a group");
+	let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+		.await
+		.expect("timed out waiting for the group's frame")
+		.unwrap()
+		.expect("expected a frame");
+	assert_eq!(frame.payload, b"group".to_vec());
+}
+
+#[tokio::test]
+async fn raw_track_dropping_a_pending_datagram_read_does_not_cancel_groups() {
+	let (_broadcast, track, consumer) = raw_track();
+
+	let datagram_read = {
+		let consumer = consumer.clone();
+		spawn_parked(async move { consumer.recv_datagram().await }).await
+	};
+	datagram_read.abort();
+	match datagram_read.await {
+		Err(err) if err.is_cancelled() => {}
+		Err(err) => panic!("aborted datagram read should join as cancelled, got {err}"),
+		Ok(_) => panic!("aborting the call should cancel only that future"),
+	}
+
+	track.write_frame(group_frame(b"group")).unwrap();
+	let group = tokio::time::timeout(TIMEOUT, consumer.next_group())
+		.await
+		.expect("timed out waiting for a group after a cancelled datagram read")
+		.unwrap()
+		.expect("expected a group");
+	assert_eq!(group.sequence(), 0);
+
+	let sequence = track.append_datagram(datagram_frame(b"later")).unwrap();
+	let datagram = tokio::time::timeout(TIMEOUT, consumer.recv_datagram())
+		.await
+		.expect("timed out waiting for a datagram after the cancelled read")
+		.unwrap()
+		.expect("expected a datagram");
+	assert_eq!(datagram.sequence, sequence);
+}
+
+#[tokio::test]
+async fn raw_track_handle_cancel_aborts_both_pending_lanes() {
+	let (_broadcast, _track, consumer) = raw_track();
+
+	let group_read = {
+		let consumer = consumer.clone();
+		spawn_parked(async move { consumer.next_group().await }).await
+	};
+	let datagram_read = {
+		let consumer = consumer.clone();
+		spawn_parked(async move { consumer.recv_datagram().await }).await
+	};
+
+	consumer.cancel();
+
+	match tokio::time::timeout(TIMEOUT, group_read)
+		.await
+		.expect("timed out waiting for cancelled group read")
+		.expect("group read panicked")
+	{
+		Err(MoqError::Cancelled) => {}
+		Err(err) => panic!("handle cancel should fail the group read, got {err:?}"),
+		Ok(_) => panic!("handle cancel should fail the group read"),
+	}
+
+	match tokio::time::timeout(TIMEOUT, datagram_read)
+		.await
+		.expect("timed out waiting for cancelled datagram read")
+		.expect("datagram read panicked")
+	{
+		Err(MoqError::Cancelled) => {}
+		Err(err) => panic!("handle cancel should fail the datagram read, got {err:?}"),
+		Ok(_) => panic!("handle cancel should fail the datagram read"),
+	}
 }
 
 #[tokio::test]

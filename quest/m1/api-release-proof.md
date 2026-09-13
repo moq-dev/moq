@@ -24,7 +24,7 @@ New findings and recommendations, ordered by consequence:
 
 | Finding | Evidence status | Quest |
 |---|---|---|
-| FFI pending reads serialize independent datagram/group lanes | Source-traced starvation | [Read lanes](/quest/m1/api-ffi-read-lanes.md) |
+| FFI pending reads serialize independent datagram/group lanes | Reproduced; fixed: independent group and datagram lanes | completed |
 | Shared/private connections disagree on credential-refresh recovery and terminal state | Reproduced; fixed: one URL-recovery contract, `closed` is handle disposal | completed |
 | Relay embedding can discard newly added socket owners without a compile error | Source-traced; real edge embedding pattern | [Embedding](/quest/m1/api-relay-embedding.md) |
 | Accepted numeric properties can truncate or fail only at encoding/receiving | JS unsafe timescales reproduced; remaining paths source-traced | [Numeric invariants](/quest/m1/api-numeric-invariants.md) |
