@@ -20,7 +20,8 @@ use crate::window::{DatagramWindow, GroupWindow};
 ///
 /// Owns grouped-frame and datagram key domains and the shared sequence namespace.
 /// Not `Clone`. Sequences are allocated monotonically; reuse and exhaustion are
-/// refused before encryption. Ciphertext is retained for retransmission.
+/// refused before encryption. Datagram ciphertext is retained for retransmission,
+/// bounded to the last [`crate::DATAGRAM_DUPLICATE_WINDOW`] sequences.
 pub struct Producer {
 	inner: moq_net::track::Producer,
 	group_key: Arc<Mutex<TrackKey>>,
@@ -132,6 +133,10 @@ impl Producer {
 				payload: payload.clone(),
 			},
 		);
+		// Bound retention to the duplicate window so a long-lived datagram track
+		// does not retain every ciphertext for the life of the Producer.
+		let cutoff = self.next.saturating_sub(crate::DATAGRAM_DUPLICATE_WINDOW as u64);
+		self.datagrams.retain(|&seq, _| seq >= cutoff);
 		datagram::insert_ciphertext(&mut self.inner, sequence, timestamp, payload)?;
 		Ok(())
 	}
@@ -140,7 +145,8 @@ impl Producer {
 	///
 	/// # Errors
 	///
-	/// [`Error::Reuse`] if that identity was never produced, or a net write error.
+	/// [`Error::Reuse`] if that identity was never produced or was evicted outside
+	/// the retention window, or a net write error.
 	pub fn retransmit_datagram(&mut self, sequence: u64) -> Result<()> {
 		let retained = self.datagrams.get(&sequence).ok_or(Error::Reuse)?;
 		datagram::insert_ciphertext(&mut self.inner, sequence, retained.timestamp, retained.payload.clone())?;
@@ -280,7 +286,7 @@ impl Consumer {
 			return Poll::Ready(Ok(None));
 		};
 		let sequence = datagram.sequence;
-		if let Err(Error::Duplicate) = self.datagrams.check(sequence) {
+		if self.datagrams.is_duplicate(sequence) {
 			return Poll::Ready(Ok(Some(Event::Duplicate { sequence })));
 		}
 		let limit = MAX_DATAGRAM_BODY.saturating_sub(MIN_DATAGRAM_HEADER);
@@ -293,11 +299,16 @@ impl Consumer {
 			.expect("datagram key")
 			.open(sequence, 0, &datagram.payload, limit)
 		{
-			Ok(plaintext) => Poll::Ready(Ok(Some(Event::Datagram(datagram::Datagram {
-				sequence,
-				timestamp: datagram.timestamp,
-				plaintext,
-			})))),
+			Ok(plaintext) => {
+				// Mark only after a successful open so a forged datagram that fails
+				// AEAD does not burn the identity; the real retransmission still opens.
+				self.datagrams.mark(sequence);
+				Poll::Ready(Ok(Some(Event::Datagram(datagram::Datagram {
+					sequence,
+					timestamp: datagram.timestamp,
+					plaintext,
+				}))))
+			}
 			Err(Error::Authentication) => Poll::Ready(Ok(Some(Event::Authentication { sequence }))),
 			Err(err) => Poll::Ready(Err(err)),
 		}

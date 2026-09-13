@@ -277,6 +277,10 @@ impl Credential {
 
 	/// Start exclusive publication of this generation.
 	///
+	/// Claims `(context, generation, kid)` in a process-global set that is never
+	/// evicted, so restarting publication under the same generation in this process
+	/// is refused even after the [`crate::Publication`] is dropped.
+	///
 	/// # Errors
 	///
 	/// [`Error::Reuse`] if this `(context, generation, kid)` has already been published

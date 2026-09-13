@@ -57,6 +57,11 @@ impl Producer {
 
 	/// Encrypt `plaintext` at the next frame index and write the ciphertext.
 	///
+	/// The frame identity is committed before the net write: a failed net write
+	/// still consumes the nonce so it is never reused with different bytes.
+	/// Timestamp conversion is validated before encryption so a predictable
+	/// failure does not burn an identity.
+	///
 	/// # Errors
 	///
 	/// [`Error::Identity`] if the next frame exceeds 32 bits, [`Error::Exhausted`],
@@ -64,14 +69,23 @@ impl Producer {
 	pub fn write_frame(&mut self, timestamp: moq_net::Timestamp, plaintext: impl AsRef<[u8]>) -> Result<()> {
 		let frame = u32::try_from(self.ciphertexts.len()).map_err(|_| Error::Identity)?;
 		let group = self.inner.sequence;
+		// Validate timestamp conversion before AEAD so a predictable net failure
+		// does not consume a nonce or desync from the transport index.
+		timestamp
+			.convert(self.inner.timescale())
+			.map_err(|_| Error::Net(moq_net::Error::TimestampMismatch))?;
 		let plaintext = plaintext.as_ref();
 		let payload =
 			self.key
 				.lock()
 				.expect("track key")
 				.protect(group, u64::from(frame), plaintext, MAX_GROUPED_PAYLOAD)?;
-		self.inner.write_frame(timestamp, payload.clone())?;
-		self.ciphertexts.push(payload);
+		// Commit the identity before the fallible net write; on failure the nonce
+		// stays consumed and the group is expected to be dropped.
+		self.ciphertexts.push(payload.clone());
+		if let Err(err) = self.inner.write_frame(timestamp, payload) {
+			return Err(err.into());
+		}
 		Ok(())
 	}
 
@@ -83,6 +97,11 @@ impl Producer {
 	pub fn finish(mut self) -> Result<()> {
 		self.inner.finish()?;
 		Ok(())
+	}
+
+	#[cfg(test)]
+	pub(crate) fn invocations(&self) -> u64 {
+		self.key.lock().expect("track key").invocations()
 	}
 
 	/// Abort the group with a cancel, consuming the handle.
@@ -123,12 +142,15 @@ impl Consumer {
 		window: Arc<Mutex<GroupWindow>>,
 		auth_failed: Arc<AtomicBool>,
 	) -> Self {
+		// Start at the transport's cursor, not 0: a ranged or resumed group may
+		// first serve a nonzero object index.
+		let next_frame = u32::try_from(inner.index()).unwrap_or(u32::MAX);
 		Self {
 			inner,
 			key,
 			window,
 			auth_failed,
-			next_frame: 0,
+			next_frame,
 		}
 	}
 
@@ -151,7 +173,16 @@ impl Consumer {
 			return Poll::Ready(Ok(None));
 		};
 		let group = self.inner.sequence;
-		let index = self.next_frame;
+		// The transport index already advanced past the frame just read; use it
+		// for the nonce so resumed groups starting above 0 still authenticate.
+		let consumed = self.inner.index().checked_sub(1).ok_or(Error::Identity)?;
+		let index = match u32::try_from(consumed) {
+			Ok(index) => index,
+			Err(_) => {
+				self.fail_auth();
+				return Poll::Ready(Err(Error::Identity));
+			}
+		};
 		if let Err(err) = self.window.lock().expect("group window").check(group, index) {
 			if matches!(err, Error::Authentication) {
 				self.fail_auth();
@@ -172,9 +203,9 @@ impl Consumer {
 				}
 				Err(err) => return Poll::Ready(Err(err)),
 			};
-		self.next_frame = match self.next_frame.checked_add(1) {
-			Some(next) => next,
-			None => {
+		self.next_frame = match u32::try_from(self.inner.index()) {
+			Ok(next) => next,
+			Err(_) => {
 				self.fail_auth();
 				return Poll::Ready(Err(Error::Identity));
 			}

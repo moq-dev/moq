@@ -41,16 +41,20 @@ pub(crate) struct DatagramWindow {
 }
 
 impl DatagramWindow {
-	pub fn check(&mut self, sequence: u64) -> Result<()> {
+	pub fn is_duplicate(&self, sequence: u64) -> bool {
 		if let Some(highest) = self.highest {
 			if highest >= DATAGRAM_DUPLICATE_WINDOW as u64 && sequence <= highest - DATAGRAM_DUPLICATE_WINDOW as u64 {
 				// Outside the retained window: operational gap, not a cryptographic event.
-				return Ok(());
+				return false;
 			}
 			if self.seen.contains(&sequence) {
-				return Err(Error::Duplicate);
+				return true;
 			}
 		}
+		false
+	}
+
+	pub fn mark(&mut self, sequence: u64) {
 		self.seen.insert(sequence);
 		self.highest = Some(self.highest.map_or(sequence, |h| h.max(sequence)));
 		if let Some(highest) = self.highest
@@ -59,6 +63,14 @@ impl DatagramWindow {
 			let floor = highest - DATAGRAM_DUPLICATE_WINDOW as u64;
 			self.seen.retain(|&s| s > floor);
 		}
+	}
+
+	#[cfg(test)]
+	pub fn check(&mut self, sequence: u64) -> Result<()> {
+		if self.is_duplicate(sequence) {
+			return Err(Error::Duplicate);
+		}
+		self.mark(sequence);
 		Ok(())
 	}
 }

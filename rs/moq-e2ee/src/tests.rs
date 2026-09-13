@@ -589,3 +589,134 @@ fn wrong_track_name_is_identity() {
 		"identity"
 	);
 }
+
+#[test]
+fn forged_datagram_does_not_burn_identity() {
+	let cred = test_credential();
+	let publication = cred.publish().unwrap();
+	let physical = cred.physical_name("audio").unwrap();
+	let mut net = moq_net::broadcast::Info::new()
+		.produce()
+		.create_track(physical.as_str(), None)
+		.unwrap();
+	let subscriber = net.subscribe(subscribe_all());
+	let mut producer = publication.track(net.clone(), "audio").unwrap();
+	let mut consumer = crate::track::Consumer::new(&cred, subscriber, None).unwrap();
+
+	producer
+		.append_datagram(moq_net::Timestamp::from_millis(1).unwrap(), b"one")
+		.unwrap();
+	// Forged seq 1 first: flips a bit so AEAD fails.
+	let mut forged = {
+		let key = cred.key_bytes(&physical, Domain::Datagram).unwrap();
+		protect(&key, 1, 0, b"two", 1196).unwrap().to_vec()
+	};
+	forged[0] ^= 1;
+	net.write_datagram(moq_net::Datagram {
+		sequence: 1,
+		timestamp: moq_net::Timestamp::from_millis(2).unwrap(),
+		payload: bytes::Bytes::from(forged),
+	})
+	.unwrap();
+	// Real seq 1 after the forgery.
+	producer
+		.insert_datagram(1, moq_net::Timestamp::from_millis(2).unwrap(), b"two")
+		.unwrap();
+
+	let waiter = kio::Waiter::noop();
+	assert!(matches!(
+		consumer.poll_recv_datagram(&waiter),
+		Poll::Ready(Ok(Some(crate::DatagramEvent::Datagram(_))))
+	));
+	assert!(matches!(
+		consumer.poll_recv_datagram(&waiter),
+		Poll::Ready(Ok(Some(crate::DatagramEvent::Authentication { sequence: 1 })))
+	));
+	match consumer.poll_recv_datagram(&waiter) {
+		Poll::Ready(Ok(Some(crate::DatagramEvent::Datagram(d)))) => {
+			assert_eq!(d.sequence, 1);
+			assert_eq!(&d.plaintext[..], b"two");
+		}
+		other => panic!("forged must not burn the identity, got {other:?}"),
+	}
+}
+
+#[test]
+fn datagram_retention_evicts_outside_window() {
+	let (_pub, mut producer, _consumer) = pair("audio");
+	let window = crate::DATAGRAM_DUPLICATE_WINDOW as u64;
+	for seq in 0..=window {
+		producer
+			.append_datagram(moq_net::Timestamp::from_millis(seq).unwrap(), b"x")
+			.unwrap();
+	}
+	assert!(producer.datagram_ciphertext(0).is_none());
+	assert!(producer.datagram_ciphertext(window).is_some());
+	assert_eq!(producer.retransmit_datagram(0).map(|_| ()).unwrap_err().code(), "reuse");
+	producer.retransmit_datagram(window).unwrap();
+}
+
+#[test]
+fn failed_group_write_does_not_burn_nonce() {
+	let (_pub, mut producer, mut consumer) = pair("video");
+	let mut group = producer.append_group().unwrap();
+	// (2^62-1) seconds overflows conversion to the milli-scale track.
+	let huge = moq_net::Timestamp::from_secs((1 << 62) - 1).unwrap();
+	assert!(group.write_frame(huge, b"bad").is_err());
+	assert_eq!(group.invocations(), 0);
+	group
+		.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), b"ok")
+		.unwrap();
+	assert_eq!(group.invocations(), 1);
+	assert_eq!(group.next_frame(), 1);
+	group.finish().unwrap();
+
+	let waiter = kio::Waiter::noop();
+	let mut group = match consumer.poll_recv_group(&waiter) {
+		Poll::Ready(Ok(Some(group))) => group,
+		other => panic!("{other:?}"),
+	};
+	assert_eq!(drain_frame(&mut group).plaintext, &b"ok"[..]);
+}
+
+#[test]
+fn resumed_group_opens_at_transport_index() {
+	use std::sync::{Arc, Mutex, atomic::AtomicBool};
+
+	let cred = test_credential();
+	let publication = cred.publish().unwrap();
+	let physical = cred.physical_name("video").unwrap();
+	let net = moq_net::broadcast::Info::new()
+		.produce()
+		.create_track(physical.as_str(), None)
+		.unwrap();
+	let mut subscriber = net.subscribe(subscribe_all());
+	let mut producer = publication.track(net, "video").unwrap();
+
+	let mut group = producer.append_group().unwrap();
+	group
+		.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), b"zero")
+		.unwrap();
+	group
+		.write_frame(moq_net::Timestamp::from_millis(2).unwrap(), b"one")
+		.unwrap();
+	group.finish().unwrap();
+
+	// Simulate a resume at object 1: skip frame 0 on the net cursor before wrapping.
+	let waiter = kio::Waiter::noop();
+	let mut net_group = match subscriber.poll_recv_group(&waiter) {
+		Poll::Ready(Ok(Some(group))) => group,
+		Poll::Ready(Ok(None)) => panic!("net group ended"),
+		Poll::Ready(Err(_)) => panic!("net group error"),
+		Poll::Pending => panic!("net group pending"),
+	};
+	net_group.start_at(1);
+	let key = Arc::new(Mutex::new(TrackKey::derive(&cred, &physical, Domain::Group).unwrap()));
+	let window = Arc::new(Mutex::new(crate::window::GroupWindow::default()));
+	// GroupWindow is pub(crate); construct via a fresh track consumer window is not
+	// accessible, so use the track consumer path instead by skipping through e2ee.
+	// Fall back to direct construction: window starts empty, which is fine for one frame.
+	let auth_failed = Arc::new(AtomicBool::new(false));
+	let mut group = crate::group::Consumer::new(net_group, key, window, auth_failed);
+	assert_eq!(drain_frame(&mut group).plaintext, &b"one"[..]);
+}

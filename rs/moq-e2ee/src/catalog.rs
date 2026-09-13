@@ -22,6 +22,10 @@ pub const MSF: &str = "catalog";
 ///
 /// Compression, if any, must already have been applied.
 ///
+/// Single-shot per `(credential, semantic)`: protecting the same semantic name
+/// twice reuses the `(group 0, frame 0)` nonce with the same key. Publish live
+/// catalog updates through [`crate::track::Producer`] instead.
+///
 /// # Errors
 ///
 /// Profile protect errors.
@@ -32,6 +36,9 @@ pub fn protect(credential: &Credential, semantic: &str, plaintext: &[u8]) -> Res
 }
 
 /// Decrypt a catalog payload as grouped frame 0 of group 0.
+///
+/// Only opens the single-shot snapshot from [`protect`]; later catalog groups
+/// on a live track must be opened through [`crate::track::Consumer`].
 ///
 /// # Errors
 ///

@@ -9,6 +9,10 @@ use crate::error::{Error, Result};
 ///
 /// Not `Clone`. Dropping it does not free the generation: a later [`Credential::publish`]
 /// with the same pin is [`Error::Reuse`], because a restart can reset transport sequences.
+///
+/// The claimed set is process-global and never evicted: every embedder in the
+/// process shares it, and the context bytes are retained for the life of the process.
+/// Tests must mint a unique context per publication.
 pub struct Publication {
 	credential: Credential,
 	tracks: Mutex<HashSet<PhysicalName>>,
