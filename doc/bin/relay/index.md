@@ -47,6 +47,30 @@ Every option is also a `--flag` or `MOQ_*` environment variable, and
 [`demo/relay/`](https://github.com/moq-dev/moq/tree/main/demo/relay) has
 working configs for development, production, and a cluster.
 
+## Embed
+
+`moq-relay` is also a library. An application that wants extra HTTP routes
+or in-process workers against the cluster origin loads a `Relay` and calls
+`run`. The owner keeps the listeners, QUIC workers, and shutdown joins, so a
+new socket added in a library update cannot be dropped by a `..` pattern that
+still compiles.
+
+```rust
+use axum::routing::get;
+use moq_relay::{Config, Relay};
+
+let relay = Relay::load(config).await?;
+let origin = relay.cluster().origin.clone();
+let web = relay.web().routes().route("/hello", get(|| async { "hello" }));
+relay.with_web(web).run().await?;
+```
+
+Clone `cluster`, `auth`, `client`, `stats`, and `shutdown` for application
+tasks. Extra listeners (RTMP, SRT, ...) sit beside `run` in the application's
+`select!`. `runtime.workers` and `runtime.io_uring` stay inside the owner;
+do not split the worker group yourself. See
+[`rs/moq-relay/examples/embed.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-relay/examples/embed.rs).
+
 ## Operate
 
 | Task | Guide |

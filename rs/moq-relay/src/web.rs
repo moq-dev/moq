@@ -239,7 +239,8 @@ impl Web {
 
 	/// Build the default web router with `state` applied, returning a
 	/// state-erased [`Router`] an embedder can extend (`merge`/`nest` extra
-	/// routes) before handing it to [`serve`](Self::serve).
+	/// routes) before handing it to [`crate::Relay::with_web`] or
+	/// [`serve`](Self::serve).
 	///
 	/// This is the public-facing router (customer media routes plus a liveness
 	/// probe). `/metrics` is deliberately NOT here: node traffic counters ride
@@ -285,7 +286,8 @@ impl Web {
 	/// informational page rather than a bare 404) and owns the listener +
 	/// TLS machinery: optional mTLS client-cert extraction and hot cert
 	/// reload. The caller builds `app` from [`routes`](Self::routes) plus any
-	/// extra routes it merged in.
+	/// extra routes it merged in. An embedder driving a [`crate::Relay`]
+	/// passes that router to [`crate::Relay::with_web`] instead of calling this.
 	pub async fn serve(self, app: Router) -> anyhow::Result<()> {
 		let config = self.config;
 		let app = app.fallback(serve_landing).into_make_service();

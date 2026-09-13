@@ -26,7 +26,7 @@ New findings and recommendations, ordered by consequence:
 |---|---|---|
 | FFI pending reads serialize independent datagram/group lanes | Source-traced starvation | [Read lanes](/quest/m1/api-ffi-read-lanes.md) |
 | Shared/private connections disagree on credential-refresh recovery and terminal state | Source-traced; real JWT-refresh caller | [Connection](/quest/m1/api-connection-recovery.md) |
-| Relay embedding can discard newly added socket owners without a compile error | Source-traced; real edge embedding pattern | [Embedding](/quest/m1/api-relay-embedding.md) |
+| Relay embedding can discard newly added socket owners without a compile error | Fixed: `Relay` owns listeners and workers; embedders clone handles and mount routes | done |
 | Accepted numeric properties can truncate or fail only at encoding/receiving | JS unsafe timescales reproduced; remaining paths source-traced | [Numeric invariants](/quest/m1/api-numeric-invariants.md) |
 | FFI first-frame convenience treats empty groups as EOF and loses an acquired group on cancellation | Source-traced | [Frame cursor](/quest/m1/api-ffi-frame-cursor.md) |
 | JSON/binary readers hide the subscription cleanup handle | Source-traced retention | [Wrapper lifetime](/quest/m1/api-js-wrapper-lifecycle.md) |

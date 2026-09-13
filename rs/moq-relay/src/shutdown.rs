@@ -7,6 +7,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 
 /// Fires the relay-wide shutdown broadcast. Held by `main`.
+#[derive(Clone)]
 pub struct ShutdownTrigger {
 	tx: watch::Sender<bool>,
 }
