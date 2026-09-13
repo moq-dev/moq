@@ -83,6 +83,6 @@ Additive.
 
 ## Related
 
-- [Revalidation updates](/quest/m2/auth-api/revalidation-updates.md) - the tier and
+- [Revalidation updates](/quest/m1/auth-api/revalidation-updates.md) - the tier and
   alias outcomes a re-check has; a token that changes them follows the same
   rules

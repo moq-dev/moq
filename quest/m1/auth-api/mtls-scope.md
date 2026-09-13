@@ -7,14 +7,15 @@ that peer's publish and subscribe scope in every mode, and an absent or empty
 grant refuses it. `AuthToken::unrestricted` is minted only for an unversioned
 reply, kept for endpoints that predate v1, and the docs say the door is open
 there. A cluster peer dialing `/` is scoped like anyone else: its endpoint
-grants everything explicitly. This implementation starts on main after the
-dev merge.
+grants everything explicitly. On dev.
 
 ## Plan
 
 [Relay auth](/quest/m2/path-patterns/relay-auth.md) versions the auth API
-grant shape: unversioned replies are v0 prefixes, v1 carries pattern grants.
-This quest rides that v1 rather than inventing a version for mTLS.
+grant shape: a reply without `v` is v0 prefixes, a top-level `"v": 1` carries
+pattern grants, and an unknown `v` or mixed fields refuse the connection
+(decided 2026-09-13). This quest rides that v1 rather than inventing a
+version for mTLS.
 
 - `authorize` scores an mTLS reply by version: v1 requires a grant and maps
   it onto the token's publish and subscribe patterns in both modes; v0 keeps
@@ -24,7 +25,8 @@ This quest rides that v1 rather than inventing a version for mTLS.
   the relay's own identity `["**"]` for both; document that in
   `doc/bin/relay/cluster.md` beside the mTLS recommendation, and make the
   smoke cluster fixture's stub endpoint answer v1.
-- `revalidate` stays `None` for mTLS peers, as the identity quest settles.
+- mTLS peers revalidate like tokens, as the identity quest now settles; a
+  narrowed v1 grant resizes the session in place through relay auth.
 - Tests: a v1 empty grant refuses a peer in token mode; a v1 narrow grant
   scopes it; a v0 reply still admits it unrestricted with the one-line log;
   a cluster peer granted everything syncs. The mTLS section of
@@ -32,9 +34,9 @@ This quest rides that v1 rather than inventing a version for mTLS.
 
 ## Required
 
-- [Merge dev](/quest/m1/merge-dev.md) - the dev-only API must be released on main before this implementation starts
-
-- [mTLS identity](/quest/m2/auth-api/mtls-identity.md) - the request the
+- [Plan](/quest/m1/auth-api/plan.md) - the open contract decision lands
+  before implementation starts
+- [mTLS identity](/quest/m1/auth-api/mtls-identity.md) - the request the
   grant answers
 - [Relay auth](/quest/m2/path-patterns/relay-auth.md) - the versioned grant
   shape

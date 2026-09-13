@@ -23,6 +23,7 @@ Don't block on it, ask the rest of the frontier now.
 The *decisions* are the user's: put each to them and wait.
 
 Search other quests and questlines to keep the larger plan consistent.
+When the work changes what a user sees (a wire, an API, a flag, a dashboard), ask whether it needs documentation the feature quest cannot carry inline (a new page or guide), and recommend a quest for that; docs a change makes stale stay in that change.
 When the frontier disagrees with a settled quest/plan, challenge the user and resolve the conflict.
 
 Begin the interview by scoping the goal: the observable outcome, why it matters, and its important boundaries and non-goals.

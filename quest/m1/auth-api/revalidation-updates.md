@@ -62,16 +62,21 @@ and meters, so rebuilding a local handle would retag nothing.
   main repeats one paragraph and claims a 3x staleness window the code does
   not have; dev already rewrote it, so take dev's wording.
 
-On main, additive.
+On dev, additive; it lands with the merge as part of this line.
 
 ## Required
 
-- [Merge dev](/quest/m1/merge-dev.md) - the dev-only API must be released on main before this implementation starts
+- [Plan](/quest/m1/auth-api/plan.md) - the open contract decision lands
+  before implementation starts
 
 ## Closes
 
 - [#3058](https://github.com/moq-dev/moq/issues/3058) - close this issue when the quest finishes
 - [#3605](https://github.com/moq-dev/moq/issues/3605) - close this issue when the quest finishes
+
+## Related
+
+- [Relay auth](/quest/m2/path-patterns/relay-auth.md) - the scope contract this inherits
 
 ## Related
 

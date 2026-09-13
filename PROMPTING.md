@@ -15,6 +15,7 @@ These base prompts are meant to keep agents from constantly drifting in the wron
 There needs to be a history of misuse to justify a change to `CLAUDE.md` and friends.
 If you think a slight tweak to the base prompt would help, propose it.
 A limit is a number, not a judgment call: "one fix round, then stop" holds, "abort if not making progress" does not.
+That rule bounds agent loops. A plan's go/no-go weighs complexity against measured benefit once both are known, and does not need a threshold up front.
 
 Check the official Claude/Codex guidance when making any changes:
 
