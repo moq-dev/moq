@@ -83,7 +83,8 @@ Three operations, on an origin:
 
 A wildcard is a capability, not an inventory. `origin.announced(prefix)`
 yields `Announce.Event` values: `pattern` is the claim relative to `prefix`,
-`active` is false on a retraction, and `route` carries hops and cost. Use
+`active` is false on a retraction, and `route` carries hops and cost while
+advertised (omitted on a retraction). Use
 `pattern.asPrefix()` when you need a prefix-shaped claim; an arbitrary
 pattern is not a broadcast name. Resolving a non-prefix pattern into a
 subscription is not implemented yet. Token grants stay prefixes.
