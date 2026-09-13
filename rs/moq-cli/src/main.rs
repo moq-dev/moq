@@ -372,6 +372,7 @@ async fn spawn_moq(
 	let client = net.client(moq.client.clone())?;
 	let cluster = cluster
 		.with_client(client.clone())
+		.with_client_tls(moq.client.tls.build()?)
 		.with_connect(moq.client.clone(), moq.quic.clone());
 	let origin = cluster.origin.clone();
 
@@ -864,6 +865,47 @@ mod tests {
 			"the server task should still be accepting connections"
 		);
 		tasks.abort_all();
+	}
+
+	/// An HTTP `--cluster-connect-api` is a MoQ side, so start-up must attach
+	/// client TLS the way the relay does rather than refuse after validate.
+	#[tokio::test]
+	async fn cluster_connect_api_http_attaches_client_tls() {
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let invocation = Invocation::try_parse_from([
+			"moq",
+			"--cluster-connect-api",
+			"https://api.example/peers",
+			"import",
+			"ts",
+		])
+		.expect("parse");
+		assert!(invocation.moq.validate().is_ok());
+		let net = Net {
+			quic: invocation.moq.quic.clone(),
+			#[cfg(feature = "iroh")]
+			iroh: None,
+		};
+		let client = net.client(invocation.moq.client.clone()).expect("client");
+		let cluster = invocation
+			.moq
+			.cluster()
+			.expect("cluster")
+			.with_client(client)
+			.with_connect(invocation.moq.client.clone(), invocation.moq.quic.clone());
+		let err = cluster
+			.clone()
+			.start()
+			.await
+			.expect_err("http API without TLS")
+			.to_string();
+		assert!(err.contains("client TLS"), "{err}");
+
+		cluster
+			.with_client_tls(invocation.moq.client.tls.build().expect("tls"))
+			.start()
+			.await
+			.expect("http API with TLS");
 	}
 
 	#[test]
