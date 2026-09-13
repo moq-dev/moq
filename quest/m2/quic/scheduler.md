@@ -5,8 +5,7 @@
 One QUIC connection expresses the MoQ scheduling hierarchy without packing it
 into a scalar: higher-priority subscriptions preempt lower-priority ones,
 backlogged subscriptions at the same priority receive equal bandwidth, and
-each subscription chooses newest-first or oldest-first service among its own
-group streams.
+each subscription serves its own group streams newest-first.
 
 This completes [#699](https://github.com/moq-dev/moq/issues/699). In the
 reported Alice and Bob case, two priority-4 subscriptions continue to make
@@ -27,10 +26,10 @@ integer.
 Use byte-accounted deficit round robin, or an equivalent bounded-quantum
 algorithm, between backlogged groups at equal priority. Round robin by stream
 count is insufficient because audio, video, and data streams have different
-sizes. Within the chosen group, order streams strictly by the MoQ group order:
-newest first by default, oldest first for an ordered subscription. A blocked
-stream must not consume the group's turn, and opening newer groups must not
-reset its accumulated fair-share credit.
+sizes. Within the chosen group, order streams by the MoQ group order: newest
+first, fixed by the draft and never inverted. A blocked stream must not consume
+the group's turn, and opening newer groups must not reset its accumulated
+fair-share credit.
 
 Map conventions only at adapters. MoQ's model remains higher value first, the
 IETF wire remains lower value first, and browser `sendOrder` remains local to
@@ -39,10 +38,12 @@ a browser that cannot prioritize send groups gets the lower two levels without
 pretending to provide strict subscription priority.
 
 Give every MoQ subscription one send group. A SUBSCRIBE_UPDATE changes the
-group priority atomically. Group streams use their sequence position and the
-subscription's `ordered` setting, never another subscription's sequence.
-Remove the session-wide `lite::PriorityQueue` once every enabled backend has
-an honest implementation or fallback.
+group priority atomically. Group streams use their position within the
+subscription, never another subscription's sequence. Remove the session-wide
+`lite::PriorityQueue` once every enabled backend has an honest implementation
+or fallback. This quest owns the mechanism; the priority semantics it realizes,
+including how a shared session's scheduling domains are weighted, are
+[Scope track priority](/quest/m2/track-priority-scope.md)'s.
 
 ### Prototype and compare the hierarchy
 
@@ -77,9 +78,9 @@ release policy.
 
 Tests saturate the sender with differently sized audio and video groups and
 prove byte fairness over a bounded window, strict preemption by a higher
-priority, newest-first backlog shedding, ordered oldest-first delivery,
-dynamic priority updates, blocked-stream handling, sequence wrap and sparse
-sequence values, and cleanup on reset. This quest owns native QUIC proof and
+priority, newest-first backlog shedding, dynamic priority updates,
+blocked-stream handling, sequence wrap and sparse sequence values, and cleanup
+on reset. This quest owns native QUIC proof and
 reusable scheduling fixtures. [qmux](/quest/m2/quic/qmux.md) owns running those
 fixtures through its record writer after adopting the scheduler; native
 scheduler completion must not wait for that dependent integration. Preserve
@@ -104,3 +105,6 @@ where the new implementation makes it redundant.
   provide this fairness level
 - [Ladder controller](/quest/m2/ladder/controller.md) - rendition priority is
   a policy consumer of the same hierarchy
+- [Scope track priority](/quest/m2/track-priority-scope.md) - owns the
+  priority semantics this mechanism realizes, including the scheduling-domain
+  scope

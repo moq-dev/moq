@@ -34,10 +34,11 @@ Direction to settle in the draft first, then the code:
 - Name the scheduling domain the priority field orders. On the last mile the
   viewer owns the whole session, so its audio and video subscriptions share one
   domain. On a relay-to-relay session one bidirectional connection carries
-  every tenant's subscriptions, and the wire carries no tenant identity, so the
-  relay must supply a generic scheduling-domain key (from auth or the origin)
-  or fall back to per-subscription fairness. Do not infer a domain from
-  subscription count: opening more subscriptions must not buy more bandwidth.
+  every tenant's subscriptions and the wire carries no tenant identity, so the
+  relay derives a domain key from its authorization state (the project the
+  grant names) and ranks across domains only by fairness. Opening more
+  subscriptions must never buy more bandwidth, so there is no per-subscription
+  fallback.
 - On a relay-to-relay session, ordering across domains is fair (round-robin or
   weighted by domain), publisher priority breaks ties within a broadcast, and
   downstream subscriber priorities are not forwarded.
