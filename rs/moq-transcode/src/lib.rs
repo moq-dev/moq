@@ -139,10 +139,12 @@ impl Transcoder {
 			pipeline::Pipeline::new(source.clone(), config.clone(), active, source_name, source_config).await?;
 
 		// Publish the derivative catalog before any encoder exists, so subscribers
-		// can pick a rung immediately.
+		// can pick a rung immediately. Commit so a catalog that cannot be published fails
+		// here rather than serving rungs nobody can discover.
 		{
 			let mut guard = derived.modify()?;
 			catalog::populate(&mut guard, &snapshot, ladder.rungs(), config.source.as_ref())?;
+			guard.commit()?;
 		}
 
 		// Serve rung requests and follow source catalog updates until the source ends.
@@ -162,6 +164,7 @@ impl Transcoder {
 						ladder.follow(&snapshot.video).await?;
 						let mut guard = derived.modify()?;
 						catalog::populate(&mut guard, &snapshot, ladder.rungs(), config.source.as_ref())?;
+						guard.commit()?;
 					}
 					// The source ended (or its catalog track died): wind down.
 					Ok(None) => break,
