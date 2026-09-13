@@ -44,7 +44,7 @@ track; add it here. Never publish a range first and hope the relay still has
 it. A later segment continues normally after any omission.
 
 Catalog update applicability and cross-track configuration dependencies belong
-to [Catalog track identity](/quest/m2/catalog-tracks.md). Recording a catalog
+to [Catalog track identity](/quest/m3/catalog-tracks.md). Recording a catalog
 as an ordinary track does not bind its updates to media groups; this writer
 does not introduce catalog-specific commit or retention prerequisites.
 

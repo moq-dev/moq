@@ -34,4 +34,4 @@ the same property that makes an MCAP recording valuable.
 ## Required
 
 - [Robot teleoperation primitive](/quest/m3/teleop/robot.md)
-- [Publishers anchor the timeline](/quest/m2/timeline-wall.md) - the anchor every track needs before it can be joined
+- [Publishers anchor the timeline](/quest/m1/broadcast-clock.md) - the anchor every track needs before it can be joined

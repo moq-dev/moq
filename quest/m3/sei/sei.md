@@ -9,22 +9,15 @@ subscribes to the sidecar alone.
 
 ## Plan
 
-This section defines the sidecar rule every timed-metadata section follows
-(ID3, SCTE-35, emsg, FLV script tags, AV1 metadata OBUs each keep their own
-section but share the shape): a metadata track belongs to exactly one
+The framing below is provisional pending the split-policy and association
+decision. Do not treat per-access-unit coverage as settled.
+
+This is a candidate codec-sidecar contract, not the prerequisite for unrelated
+ID3, SCTE-35, emsg, or FLV metadata carriage: a metadata track belongs to exactly one
 rendition, uses that rendition's group sequence, stamps each frame with the
 wire timestamp of the media it accompanies, and carries raw bytes. A 1080p and
 a 360p rendition carry different SEI, so there is one sidecar per video
 rendition, and group 7 of the sidecar holds the SEI for group 7 of its video.
-
-Metadata that precedes the first media unit (an `emsg` before the first
-`moof`, an FLV script tag before the first media tag) rides the rendition's
-first group, stamped with its own presentation time when it has one and
-otherwise with the first media frame's. A timestamp cannot order it before
-that frame, since a tag at timestamp zero and the first frame share one, so
-the sidecar frame's placement field, the same one that records prefix versus
-suffix SEI, carries an explicit before-first-media value, and an exporter
-emits those frames before the first media unit.
 
 Within a group the frame's wire timestamp is the key, so an application
 syncing to presentation time reads it directly instead of joining against the
@@ -54,3 +47,8 @@ Version the schema so a later semantic view can be added without rewriting the
 raw contract. Include fixtures for H.264 and H.265 prefix and suffix SEI,
 multiple NAL units on one access unit, frames with no SEI, several access units
 sharing one timestamp, and group boundaries.
+
+## Required
+
+- [SEI evidence](/quest/m3/sei/evidence.md) - positive evidence is needed before committing the format
+- Maintainer approval of a positive split verdict, eligible payloads, and the association and latency policy.

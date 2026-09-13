@@ -60,8 +60,6 @@ transport API change, not a MoQ wire change.
 - [noq parity gate](/quest/m2/quic/noq-parity.md) - benchmark noq against
   quiche on the relay workloads, record the browser gaps, retire the quiche
   fork
-- [Probe by early retransmission](/quest/m2/quic/probe.md) - measure capacity
-  with useful retransmissions instead of padding
 - [#2296](/quest/m2/quic/2296-moq-native-bring-the-quiche-backend-to-quinn-noq-feature.md) -
   the quiche backend honors every listen/connect setting quinn and noq do, or
   refuses it by name, and can serve a worker group
@@ -70,6 +68,8 @@ transport API change, not a MoQ wire change.
   before taking its one candidate
 
 ## Related
+
+- [Capacity probing](/quest/m3/quic-probe.md) - deferred early-retransmission experiment
 
 - [Starvation](/quest/m2/qos/starvation.md) - the first consumer of ACK
   progress: how far behind viewers are, from the relay's point of view

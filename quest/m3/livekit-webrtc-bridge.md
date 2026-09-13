@@ -24,4 +24,4 @@ The verdict decides whether this becomes a maintained gateway.
 
 ## Related
 
-- [LiveKit client shim](/quest/m2/livekit-shim.md)
+- [LiveKit client shim](/quest/m3/livekit-shim.md)

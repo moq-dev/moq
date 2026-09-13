@@ -19,23 +19,20 @@ Persist one range-named object per track per segment after its groups complete,
 then publish the archive timeline record. Match the 19-digit group-bound keys,
 ascending delta-encoded IDs, and sequential timeline discovery used by Rust. A typical audio segment contains many
 one-group-per-frame audio groups. Match the Rust binary envelope bytes and `.info` property values, per the [Recording section](/drafts/draft-lcurley-moq-hang.md#recording), without inferring catalog-to-group applicability.
-[Catalog track identity](/quest/m2/catalog-tracks.md) addresses that separately.
+[Catalog track identity](/quest/m3/catalog-tracks.md) addresses that separately.
 
-The missing piece in `js/net` is a `track::Dynamic` equivalent: a consumer can
-`fetchGroup` (`js/net/src/track.ts:272`), but nothing in `js/net/src` lets a
-producer serve that miss on demand. Add it so the publisher can answer FETCH
-misses from memory or OPFS after relay eviction. Keep the bounded bytes in an
-LRU and use the same timeline-before-delete ordering for DVR retention.
-
-Implement the currently unsupported IETF FETCH request dispatch and codecs in
-`js/net`. Cover relative joining requests with subscription lifetime bookkeeping,
-draft-specific FETCH_OK encoding, a legal End Location, and clean stream finish.
-Test browser publishers against native subscribers across supported drafts;
-PR #3562 fixes the existing Rust response path but does not add JS FETCH support.
+Use [JavaScript FETCH](/quest/m2/js-fetch.md)'s on-demand group requests to
+answer cache misses from memory or OPFS after relay eviction. This quest owns
+storage lookup, the bounded segment LRU, and timeline-before-delete DVR
+retention; the generic request lifecycle and IETF wire support land in the
+prerequisite. Verify browser archive replay against native subscribers across
+the supported drafts without duplicating transport dispatch or codecs here.
 
 Ship the contract in the `@moq/*` packages. A dashboard browser-to-HLS proof
 remains downstream (moq.pro) work.
 
 ## Required
+
+- [JavaScript FETCH](/quest/m2/js-fetch.md) - generic on-demand group serving and IETF FETCH support
 
 - [Recording writer](/quest/m2/archive/writer.md)

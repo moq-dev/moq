@@ -38,6 +38,10 @@ Tool references: [samply](https://github.com/mstange/samply) and the existing
 [jemalloc controls](https://jemalloc.net/jemalloc.3.html) are starting points;
 verify current supported versions and pin any newly installed tools.
 
+## Required
+
+- [Benchmark comparisons](/quest/m2/performance-comparisons.md) - reuse its workload lifecycle and artifact metadata
+
 ## Related
 
 - [Benchmark comparisons](/quest/m2/performance-comparisons.md) - repeatable results and artifact metadata

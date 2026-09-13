@@ -20,7 +20,7 @@ This quest rides that v1 rather than inventing a version for mTLS.
   today's alias and tier lookup and mints `unrestricted`, logging once per
   relay that mTLS peers are unrestricted because the endpoint is unversioned.
 - The cluster keeps working on a v1 endpoint only when that endpoint grants
-  the relay's own identity `[""]` for both; document that in
+  the relay's own identity `["**"]` for both; document that in
   `doc/bin/relay/cluster.md` beside the mTLS recommendation, and make the
   smoke cluster fixture's stub endpoint answer v1.
 - `revalidate` stays `None` for mTLS peers, as the identity quest settles.

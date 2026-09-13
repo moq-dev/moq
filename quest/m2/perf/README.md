@@ -49,6 +49,8 @@ default backend.
 
 ## Quests
 
+- [Open contract](/quest/m2/perf/uring-open-contract.md) - plan concurrent WebTransport opening and cancellation
+
 - [Ingest batch](/quest/m2/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per chunk burst instead of per chunk
 - [Egress cache refresh](/quest/m2/perf/egress-keepalive.md) - measure refresh costs while preserving slow-reader retention
 - [Owned decoding copies](/quest/m2/perf/coding-decode.md) - measure and reduce owned decode allocations and copies
@@ -61,7 +63,6 @@ default backend.
 - [#3201](/quest/m2/perf/3201-moq-uring-use-sendmsg-zc-for-large-udp-gso-trains.md) - moq-uring: use SENDMSG_ZC for large UDP GSO trains
 - [#3202](/quest/m2/perf/3202-moq-uring-use-fixed-file-slots-for-worker-udp-sockets.md) - moq-uring: use fixed-file slots for worker UDP sockets
 - [#3204](/quest/m2/perf/3204-moq-uring-register-tx-pool-buffers-for-zero-copy-sends.md) - moq-uring: register TX-pool buffers for zero-copy sends
-- [Send order width](/quest/m2/perf/send-order-width.md) - a wider transport send order lets a group rank itself instead of taking the queue lock
 - [Priority set_track wakes](/quest/m2/perf/priority-set-track-wakes.md) - a track priority change stops waking groups that end up where they started
 - [#3203](/quest/m2/perf/3203-moq-uring-add-opt-in-napi-busy-polling.md) - moq-uring: add opt-in NAPI busy polling
 - [#3205](/quest/m2/perf/3205-moq-uring-register-reusable-io-uring-enter-wait-arguments.md) - moq-uring: register reusable io_uring_enter wait arguments

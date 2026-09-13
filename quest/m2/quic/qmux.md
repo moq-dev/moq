@@ -29,7 +29,10 @@ instead of retaining the prototype's local parsing and transitions.
 Carry the hierarchical send groups from the scheduler quest into qmux's
 record writer. Qmux over TCP, TLS, WebSocket, Unix sockets, and in-memory
 duplex transports must produce the same subscription fairness and intra-group
-ordering as raw QUIC.
+ordering as raw QUIC. This quest owns qmux integration of the scheduler's
+reusable acceptance fixtures, including byte fairness, strict priority,
+newest/oldest group ordering, cancellation, and blocked-stream behavior.
+The native scheduler does not wait for this dependent proof.
 
 Add the missing wire evidence before release: golden draft-02 vectors,
 bidirectional interoperability against the published `qmux` 0.5.x crate, and

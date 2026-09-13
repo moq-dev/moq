@@ -12,8 +12,9 @@ Add typed catalog bindings for the section and a subscriber that yields raw SEI
 samples keyed by the video group sequence and frame ordinal they came from, the
 exact identity the section defines, with the frame timestamp carried as data
 for presentation-time sync. Keep it independent
-of the decode path: nothing here feeds a `VideoDecoder`, because stripped video
-decodes unchanged and WebCodecs does not surface SEI regardless.
+of the decode path: this quest exposes raw sidecar samples. The section
+contract must separately establish which payloads can be moved without
+requiring restoration before decoding or display.
 
 Applications parse the NAL payloads themselves with whatever vocabulary they
 need, so a new payload type requires no change here.
@@ -24,5 +25,5 @@ tab consuming only the sidecar draws no video bandwidth.
 
 ## Required
 
-- [SEI section](/quest/m2/sei/sei.md) - defines the catalog and correlation
+- [SEI section](/quest/m3/sei/sei.md) - defines the catalog and correlation
   contract

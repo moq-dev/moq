@@ -1,4 +1,4 @@
-# [L] Claims
+# [L] Versioned token claims API before release
 
 ## Goal
 
@@ -10,6 +10,12 @@ exact v1 wire shape:
 ```
 
 ## Plan
+
+Land the working v0/v1 library contract on dev before release. This changes
+published claim, scope, and authorization result types. Keep existing issuer
+and CLI defaults on v0 until the M2 reader-first rollout; v1 library operations
+must already sign, verify, and authorize correctly here, not be placeholders.
+
 
 - Decode claims as a discriminated v0/v1 union. Missing `v` reads legacy
   `put`/`get`; v1 reads `publish`/`subscribe`; unknown versions or mixed fields

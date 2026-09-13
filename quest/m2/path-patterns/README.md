@@ -79,7 +79,6 @@ CAT cannot represent `pid/*/chat`.
 
 - [Origin scopes](/quest/m2/path-patterns/origin.md) - literal origin roots
   carry arbitrary pattern unions without widening authorization
-- [Claims](/quest/m2/path-patterns/claims.md) - versioned token and JWK scopes
   preserve v0 and enforce exact v1 grants
 - [Token SDKs](/quest/m2/path-patterns/token-sdk.md) - published libraries and
   CLIs default new minting to v1

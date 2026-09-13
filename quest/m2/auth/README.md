@@ -32,14 +32,14 @@ Decisions settled while planning, recorded so review does not relitigate them:
   [moq-wg #1854](https://github.com/moq-wg/moq-transport/issues/1854): the
   grant names the peer's role in transport.
 - **Tokens union.** A client with two tokens opens two streams and the
-  session's scope is the union of both grants. A refresh is a new stream
-  carrying the new token; nothing replaces or narrows anything. Closing a
-  stream withdraws that token. When a token expires or is revoked and the
-  union would shrink, the session closes `Unauthorized` exactly as expiry does
-  today; when the union is unchanged the session continues and only that
-  stream ends. Resizing a live session in place belongs to
-  [Relay auth](/quest/m2/path-patterns/relay-auth.md), which serves
-  revalidation and token expiry from one path.
+  session's scope is the union of both grants. Refresh adds a new token;
+  closing a stream withdraws it. Expiry, revocation, or withdrawal recomputes
+  the union and cancels publications and subscriptions that lose authorization.
+  Other authorized work continues on the same session. An empty union leaves
+  the session connected with no access, so it can accept a fresh token.
+  [Relay auth](/quest/m2/path-patterns/relay-auth.md) owns the common resize
+  operation; relay token handling requires it rather than shipping a temporary
+  close-on-shrink policy.
 - **A grant is publish prefixes, subscribe prefixes, and an expiry**, in the
   presenter's own root; the presenter never sees the relay-side root, and
   every token in a union shares the connection's root. The prefix encoding is
@@ -55,8 +55,10 @@ Decisions settled while planning, recorded so review does not relitigate them:
   library itself presented at setup are answered; a token the app adds later
   is the app's to await before publishing what it unlocks. The origin is
   untouched, so a broadcast shared across sessions (P2P hops, a cluster) is
-  refused only where it is refused. Apps that want to decide themselves read
-  the grant instead.
+  refused only where it is refused. Grant shrinkage cancels previously
+  authorized work on this session without aborting it or deleting the shared
+  origin; this is distinct from attempting a new unauthorized publication.
+  Apps that want to decide themselves read the grant instead.
 - **Older peers keep the URL.** WebTransport negotiates the moq version as a
   subprotocol of the same CONNECT request that carries the URL, so a client
   cannot learn whether the peer speaks AUTH before the token has to be sent.
@@ -90,8 +92,7 @@ ALPN.
   exchange grants over AUTH streams, exposed as `Session::auth()`, and an
   out-of-scope announce aborts the session
 - [Relay tokens](/quest/m2/auth/relay-refresh.md) - the relay verifies tokens
-  sent in band, unions their grants, and closes only when an expiry shrinks
-  the union
+  sent in band, unions their grants, and cancels only work that loses access
 - [moq-transport](/quest/m2/auth/moq-transport.md) - the same exchange as a
   setup-option extension on draft-17+, specified in a new draft
 - [Bindings](/quest/m2/auth/bindings.md) - grants and tokens reach every

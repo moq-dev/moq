@@ -8,9 +8,10 @@ beneath them.
 
 ## Plan
 
-- Replace `PathPrefixes` and prefix-only `Producer::scope`, `Consumer::scope`,
-  and `allowed` with pattern unions. A root remains a literal coordinate
-  transform; never join or mount at a wildcard.
+- Extend the pattern-valued scope API from m1 to every supported pattern union,
+  removing its explicit refusal of non-prefix grants without changing its public
+  signatures. A root remains a literal coordinate transform; never join or
+  mount at a wildcard.
 - Watch origin-tree nodes at each pattern's literal head, then reapply the full
   matcher on broadcast creation, lookup, and announce fan-out. Patterns sharing
   a head share the node without sharing permission.
@@ -43,3 +44,7 @@ the existing subscription closes and no further objects arrive.
 ## Closes
 
 - [#2714](https://github.com/moq-dev/moq/issues/2714) - close this issue when the quest finishes
+
+## Required
+
+- [Origin scope pattern API](/quest/m1/api-origin-pattern-scopes.md) - the published shape and functional prefix behavior land before the release

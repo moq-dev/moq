@@ -24,9 +24,9 @@ so the mechanism exists.
 
 ## Required
 
-- [Ownership boundary](/quest/m2/mobile/ownership-boundary.md) - decides whether an NDK/JNI backend family is worth building
+- [Ownership boundary](/quest/m3/mobile-ownership.md) - decides whether an NDK/JNI backend family is worth building
 
 ## Related
 
-- [iOS capture](/quest/m2/mobile/video-ios.md) - the other half of mobile, which
+- [iOS capture](/quest/m3/mobile-capture-ios.md) - the other half of mobile, which
   reuses an existing backend rather than adding one

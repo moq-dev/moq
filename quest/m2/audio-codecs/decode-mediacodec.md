@@ -29,4 +29,4 @@ behind the existing `mediacodec` feature and the decode seam, on `target_os
 
 ## Related
 
-- [Android capture](/quest/m2/mobile/video-android.md) - the video MediaCodec family this sits beside
+- [Android capture](/quest/m3/mobile-capture-android.md) - the video MediaCodec family this sits beside

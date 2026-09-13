@@ -10,6 +10,12 @@ and an identical render stays a no-op.
 
 ## Plan
 
+The typed public configuration, URL/object normalization, credentials, and
+symmetric policy are supplied by m1. This quest removes the explicit refusal
+of asymmetric costs and wires their distinct meanings without another change
+to the peer configuration type. Preserve the compatibility and validation
+rules below rather than implementing a second parser.
+
 [moq#2874](https://github.com/moq-dev/moq/pull/2874) landed the URL half:
 `?cost=` and an inline `?jwt=` are dial configuration, the query-less URL is
 the identity, and a changed render replaces the session while preserving
@@ -62,3 +68,7 @@ deduplicate while differing policies for one identity conflict; an unknown
 field, or an object whose `url` carries `?cost=` or `?jwt=`, keeps the
 previous list. Update `doc/bin/relay/cluster.md` and
 `doc/bin/relay/config.md` with the object form.
+
+## Required
+
+- [Typed cluster peer configuration](/quest/m1/api-cluster-peer-config.md) - supplies the public type and functional symmetric policy

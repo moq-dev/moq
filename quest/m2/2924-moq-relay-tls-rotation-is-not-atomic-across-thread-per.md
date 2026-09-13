@@ -2,10 +2,10 @@
 
 ## Goal
 
-Every tokio QUIC worker serves the same certificate at the same moment, a
-rotation applies to the whole group at once, `/certificate.sha256` is
-authoritative for every worker, and `--listen-tls-generate` works with
-`runtime.workers`.
+Every QUIC worker resolves new handshakes through the same served-identity
+snapshot. A successful rotation replaces that snapshot once for the group,
+`/certificate.sha256` reads the same state, and `--listen-tls-generate` works
+with `runtime.workers`.
 
 ## Plan
 
@@ -46,7 +46,7 @@ them.
 
 ### What exists
 
-`tls::Listen::identity: Option<Identity>` (rs/moq-tokio/src/tls.rs:1240) is
+`tls::Listen::identity: Option<Identity>` (rs/moq-tokio/src/tls.rs:1281) is
 the in-memory served identity, but it is not the handle this needs:
 
 - Its only constructor is `Identity::generate` (:294). Nothing builds one
@@ -54,9 +54,9 @@ the in-memory served identity, but it is not the handle this needs:
   listeners.
 - It is static. An `Identity` has no reload; the watcher only follows
   `cert`/`key` paths.
-- It is additive. `ServeCerts::load_certs` (tls.rs:2805) pushes it onto
+- It is additive. `ServeCerts::load_certs` (tls.rs:2867) pushes it onto
   the same list as the `cert`/`key` files and the `generate` hostnames
-  (:2832-2834), so it is served *alongside* disk material, not instead of it.
+  (:2896-2899), so it is served *alongside* disk material, not instead of it.
 
 The io_uring path is the prior art: `uring::Workers::bind` reads exactly one
 certificate/key pair once, on the shared runtime, and hands every worker the
@@ -69,13 +69,30 @@ Give `moq-tokio` one served-identity handle that is loadable from PEM or
 generated, hot-reloadable, and shared by reference: the relay loads and
 watches once on the shared runtime and every listener (tokio workers and
 io_uring workers alike) resolves certificates through the same handle.
-Rotations then apply to the group at once, a watcher failure is one failure,
+Rotations replace the shared snapshot once, a watcher failure is one failure,
 and `--listen-tls-generate` with workers is "generate once, share it". The
 mTLS roots ride the same handle.
 
-Sized XL because it reshapes `tls::Listen` (a published `moq-tokio` API used
-by every binary), touches both worker runtimes, and needs a rotation test
-that proves every worker flips in one step.
+Prefer an additive ownership boundary: `tls::Listen` is non-exhaustive and
+`ServeCerts` is private, so shared initialized listener state does not by
+itself require replacing `Listen::identity` or changing `Connect::identity`.
+Preserve the existing static identity and combined certificate-source
+semantics. Any new accepted configuration must be implemented in this quest,
+not reserved as an ignored option for later wiring. If implementation shows
+an existing published signature or field must change, identify that exact
+break and split its functional groundwork into M1 before proceeding.
+
+Sized XL because this shares certificate and inbound trust state across both
+worker runtimes, removes per-worker watchers, and needs runtime rotation
+proof. Define atomicity at the shared snapshot boundary: handshakes already
+using the previous snapshot may finish with it; a new resolution after a
+successful replacement sees the new snapshot. Backend limitations must be
+implemented or refused explicitly rather than claiming identical reload
+support without evidence.
+
+Public API: preserve existing published callers through additive integration
+unless an exact necessary break is separately approved. Wire: no MoQ format
+change.
 
 ## Required
 

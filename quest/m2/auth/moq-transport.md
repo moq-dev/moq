@@ -50,7 +50,9 @@ request stream to the shared `auth::Handle` from
 stream after SETUP when negotiated and answers the peer's from the origin
 handles exactly as lite does, and `add` opens further ones. The fail-loud
 check moves into the shared handle so the IETF subscriber half consults it
-before writing PUBLISH_NAMESPACE, aborting with `Unauthorized` and the path.
+before a new PUBLISH_NAMESPACE, aborting with `Unauthorized` and the path.
+A shrinking grant instead withdraws previously authorized publications and
+cancels only affected subscriptions, preserving the session as lite does.
 
 `js/net/src/ietf/auth.ts` mirrors it, wired through `handshake.ts` like
 `Ietf.Cluster.intoSetup` and `fromSetup`, and `ietf/connection.ts` dispatches
@@ -64,7 +66,8 @@ at `Unsupported`.
 Setup option round trip on every supported draft and absence on 14 to 16;
 negotiation requires both sides; grants from scoped origins over an IETF
 session in Rust, JS, and across; two tokens union and closing one shrinks the
-union; an out-of-scope path aborts before any PUBLISH_NAMESPACE is written; a
+union without disconnecting, cancelling only work that loses authorization;
+an out-of-scope new publication aborts before any PUBLISH_NAMESPACE is written; a
 peer without the option (the relay built without it, and the interop runner's
 reference relay) sees no AUTH stream and keeps working. Run
 `just test smoke-full`.

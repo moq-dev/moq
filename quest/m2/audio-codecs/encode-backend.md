@@ -18,9 +18,9 @@ quests follow.
 
 - `encode::Codec` gains `Aac`, meaning `mp4a.40.2`, and `as_str` / `FromStr`
   accept `"aac"`, which is what libmoq's codec string carries. moq-ffi's
-  `MoqAudioCodec` is a closed UniFFI enum, so it gains an `Aac` variant and
-  conversion, and the generated bindings, hand-written wrappers, and docs
-  follow the Cross-Package Sync table.
+  immutable codec object gains an `aac()` constructor and conversion; do not
+  reintroduce a closed binding enum. The generated bindings, hand-written
+  wrappers, and docs follow the Cross-Package Sync table.
 - Catalog emission: `AudioCodec::AAC` with profile 2, `Container::Legacy`,
   and the encoder's reported delay folded into timestamps like Opus pre-skip
   is today. `Producer` registers the rendition before the first frame is
@@ -37,6 +37,8 @@ quests follow.
   a host with no backend; the Opus and PCM paths unchanged.
 
 ## Required
+
+- [Audio codec object](/quest/m1/api-audio-codec.md) - extensible binding selection before release
 
 - [Decode seam](/quest/m2/audio-codecs/decode-backend.md) - the naming and shape this mirrors
 

@@ -25,28 +25,16 @@ already that far ahead.
   consumer before the age budget can skip a group, so both languages estimate
   from the same observation.
 - Add the knob to `decode::Config`, additive on the `#[non_exhaustive]` struct,
-  so it targets `main`. Its name is a decision this quest makes. Recommended:
-  `delay`, mirroring the browser's `delay`/`buffer` split, where `delay` is how
-  far playback trails the live edge and `max_age` stays the budget above it.
-  Alternatives: `min_age`, symmetric with `max_age` but "age" describes the
-  skip budget rather than a cushion; `jitter`, which collides with the
-  catalog's publisher-declared field and invites the confusion the spec warns
-  about.
-- Its contract is also a decision to record, because "floor" and "fixed
-  target" behave differently under an adaptive estimator:
-
-  1. **Floor.** `Some(d)` is a lower bound and the estimator may still raise
-     the target above it. Recommended: it matches how the browser treats a
-     rendition's advertised delay, and a viewer asking for more buffer rarely
-     means "and never more than that".
-  2. **Exact target.** `Some(d)` pins the target and disables adaptation,
-     mirroring a fixed browser preset exactly. Choose this if preserving a
-     fixed-latency preset byte for byte matters more than the parallel above.
-
-  Either way, state the precedence against the estimator and against
-  `max_age`, and what happens when the requested floor exceeds the effective
-  `max_age` that `Consumer` already clamps to publisher retention. Refusing
-  that combination loudly beats silently clamping it.
+  so it targets `main`. The spec quest settles the final name and shape before
+  this implementation starts; `delay` is the recommendation, matching the
+  browser while `max_age` remains the live-edge skip budget. Do not reopen or
+  independently choose the public spelling in this implementation.
+- An explicit `Some(d)` fixes the receiver's jitter target and disables
+  adaptation, matching the browser's numeric delay setting. `None` selects
+  the shared automatic estimator. Publisher-declared buffering remains a
+  separate contribution, with the same composition in both implementations.
+  The spec must define precedence against `max_age` and retention; refuse an
+  impossible explicit target rather than silently changing it.
 - The estimator itself is internal. Only the config field and whatever the
   playback path needs to report its current target become public, and each one
   is argued for rather than exposed by default.

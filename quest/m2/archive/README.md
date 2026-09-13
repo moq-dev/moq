@@ -96,8 +96,11 @@ the archive, never a second stored copy.
 Per-project sealing, retention prefixes, recording keying, election, billing,
 and platform discovery are downstream (moq.pro) concerns. The archive entry is
 portable while the source catalog exists; a managed recordings API keeps
-completed recordings discoverable after source teardown. IETF FETCH and
-protected broadcasts are out of scope.
+completed recordings discoverable after source teardown. Protected broadcasts
+are out of scope. Archive storage and replay use the transport's generic FETCH
+surface; [JavaScript FETCH](/quest/m2/js-fetch.md) supplies the missing browser
+IETF support before browser archive implementation. Transport codecs are
+owned by that prerequisite, not duplicated in archive storage.
 
 ## Quests
 
@@ -110,7 +113,7 @@ protected broadcasts are out of scope.
 
 ## Related
 
-- [Catalog track identity](/quest/m2/catalog-tracks.md) - explore immutable definitions or explicit version binding independently of archives
+- [Catalog track identity](/quest/m3/catalog-tracks.md) - explore immutable definitions or explicit version binding independently of archives
 
 - [wildcard](/quest/m2/wildcard/README.md) - catch-all routing exposes an archive at its stable replay path
 - [e2ee](/quest/m2/e2ee/README.md) - protected broadcasts are excluded initially

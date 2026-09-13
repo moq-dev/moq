@@ -32,6 +32,10 @@ normal or nightly CI. Update relay docs in the same change.
 Public API: breaking embedding ownership. Wire: no format change. Run relevant
 relay checks/tests and `just test smoke-full` if gateway paths change.
 
+## Required
+
+- [Worker ownership](/quest/m1/api-worker-ownership.md) - settle the worker owner before integrating it into the relay runner
+
 ## Related
 
 - [Worker lifetime](/quest/m2/2964-quic-workers-dropping-one-split-server-resizes-the.md) - correctness inside a split worker group

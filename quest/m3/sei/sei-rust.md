@@ -10,8 +10,9 @@ any supported container reproduces the original bitstream.
 
 Implement one codec-aware split and reinsert primitive in `moq-mux` and reuse it
 from every container gateway rather than creating gateway-local copies.
-Stripping is the default, not an opt-in: the bytes end up in the sidecar or in
-the video, never both.
+Apply the split policy selected by the section quest. Preserve inline
+payloads that it excludes from splitting, and do not assume arbitrary SEI
+can be removed without affecting receiver behavior.
 
 The exporter joins by group sequence and frame ordinal and restores prefix and
 suffix placement and ordering. Placement is exact or it is a loss; there is no
@@ -32,5 +33,5 @@ bounded cleanup of sidecar samples whose video frame never arrives.
 
 ## Required
 
-- [SEI section](/quest/m2/sei/sei.md) - defines the catalog and correlation
+- [SEI section](/quest/m3/sei/sei.md) - defines the catalog and correlation
   contract

@@ -19,10 +19,11 @@ capture quests in this questline start only once this is settled.
   Rust-native audience, and the copy cost of byte-array frames measured on a
   device.
 - Record the verdict here and in `rs/moq-ffi/CLAUDE.md`, and re-estimate
-  [Android capture](/quest/m2/mobile/video-android.md) and
-  [iOS capture](/quest/m2/mobile/video-ios.md) against it; both target
+  [Android capture](/quest/m3/mobile-capture-android.md) and
+  [iOS capture](/quest/m3/mobile-capture-ios.md) against it; both target
   `moq-video`, so abandon both if the answer is option 1.
 
 ## Related
 
-- [FFI video consumer](/quest/m2/mobile/ffi-video-consumer.md) - the first quest that ships a frame across the boundary, so it waits on this
+- [Decoded frame ownership](/quest/m2/decoded-frames.md) - established shared frame lifetime; reuse it for any later native mobile views
+- [FFI video consumer](/quest/m2/mobile/ffi-video-consumer.md) - independently supplies portable pixels from Rust decoding

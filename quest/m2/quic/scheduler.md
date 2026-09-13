@@ -1,4 +1,4 @@
-# [L] Add hierarchical QUIC stream scheduling
+# [XL] Add hierarchical QUIC stream scheduling
 
 ## Goal
 
@@ -44,50 +44,51 @@ subscription's `ordered` setting, never another subscription's sequence.
 Remove the session-wide `lite::PriorityQueue` once every enabled backend has
 an honest implementation or fallback.
 
-### Prototype first, as a quinn patch
+### Prototype and compare the hierarchy
 
-Nothing available offers all three levels, but quinn already has two of them
-and the counter the third needs: `PendingStream` is ordered
-`(priority, recency, id)` in a max-heap, where `recency` is a monotonically
-decreasing counter that requeues a stream behind its equal-priority peers once
-it writes, and `TransportConfig::send_fairness` defaults to true. quiche's
-`urgency` plus `incremental` is the same pair, and W3C `sendGroup` is the other
-pair (fair between groups, strict `sendOrder` within one, no priority between
-groups). MoQ sees none of quinn's fairness today because it hands every stream
-a distinct priority, so no two streams are ever equal.
+The delivered API is hierarchical send groups. Do not require a separately
+published scalar-widening API or drop fairness as an intermediate release.
+Prototype the byte-accounted scheduler in the upstream transport path and use
+the result as evidence for the noq proposal. An existing Quinn prototype can
+supply a workload baseline, but a recency field alone does not prove byte
+fairness: differently sized writes must spend the group's byte credit, and
+requeueing or adding streams must not reset that credit.
 
-The missing piece is one field: the ordering key becomes
-`(priority, bucket_recency, order, id)`, with `priority` strict for the track,
-buckets round-robin against each other on the existing recency counter, and
-`order` strict within a bucket for group sequence. That field lives in the
-QUIC stack, and moq-uring does not change that: its quinn path hands stream
-selection to `poll_transmit`, so what moq-uring owns is the UDP path, not the
-key. Carry it as a quinn patch rather than a fork (one field in one struct
-plus a `SendStream` setter), run it under moq-uring's quinn backend where the
-relay workload is, and treat a working prototype as the evidence for the noq
-proposal above. quiche stays out of scope: reproducing it there is a second
-fork's worth of work and its top two levels already match.
+Compare the hierarchy with the existing MoQ queue and two private benchmark
+baselines: a scalar `[priority][group sequence]`, and a scalar containing only
+priority. The first removes queue coordination but lets unrelated sequence
+numbers compete across subscriptions; the second exposes per-stream fairness
+but loses newest-first ordering within a subscription. Neither is the public
+API this quest ships.
 
-Measure against the two configurations reachable without any of this, both
-real options: a scalar send order of `[track][group]`, which buys strict
-priority and newest-first while giving up fairness (see
-[Send order width](/quest/m2/perf/send-order-width.md)), and a scalar of
-`track` alone, which lets quinn's fairness through and gives up newest-first.
-A congested session carrying two equal-priority tracks of different group
-cadence, audio against video, must keep both progressing rather than draining
-one, while a higher-priority track still preempts both and newest-first still
-sheds backlog within a track. Compare all three on the same shape.
-It describes the same scheduler outcome, not a second implementation.
+Keep limitations explicit in the scalar benchmark. A 32-bit key leaves only
+24 bits after track priority, so wraparound and sparse sequence values can
+invert group order. Browser numeric precision and narrow backend urgency
+fields impose different limits. Include these cases and compare audio/video
+subscriptions with different group cadences; do not treat scalar ordering as
+an exact equivalent of the hierarchy.
+
+Record queue/lock work, CPU, throughput, latency, and byte fairness on the
+same congested workloads. Both equal-priority subscriptions must progress
+while a higher-priority subscription preempts them and each subscription
+sheds its own old backlog. Measure the full scope of trait and adapter changes
+before publishing the API; any published break targets dev under the normal
+release policy.
 
 Tests saturate the sender with differently sized audio and video groups and
 prove byte fairness over a bounded window, strict preemption by a higher
 priority, newest-first backlog shedding, ordered oldest-first delivery,
-dynamic priority updates, blocked-stream handling, and cleanup on reset. Run
-the same scenarios through raw QUIC and qmux.
+dynamic priority updates, blocked-stream handling, sequence wrap and sparse
+sequence values, and cleanup on reset. This quest owns native QUIC proof and
+reusable scheduling fixtures. [qmux](/quest/m2/quic/qmux.md) owns running those
+fixtures through its record writer after adopting the scheduler; native
+scheduler completion must not wait for that dependent integration. Preserve
+working behavior on backends not yet migrated, and remove queue code only
+where the new implementation makes it redundant.
 
 ## Required
 
-- [Send order width](/quest/m2/perf/send-order-width.md) - the scalar lands first; the prototype is measured against it
+- [Merge dev](/quest/m1/merge-dev.md) - supplies the native transport code this implementation builds on
 - [Establish the noq relationship](/quest/m2/quic/parent.md) - the scheduler
   is proposed to noq first
 

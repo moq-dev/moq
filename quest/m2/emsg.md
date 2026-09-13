@@ -8,6 +8,9 @@ messages reach a MoQ consumer.
 
 ## Plan
 
+The shared metadata contract owns timestamp encoding and placement. Adopt it
+before implementation; deferred SEI extraction is not a prerequisite.
+
 `rs/moq-mux/src/container/fmp4/` does not mention `emsg` anywhere, so every
 event message in a fragmented MP4 is dropped without a log line. That is the
 one metadata path a DASH or CMAF ingest is most likely to use.
@@ -17,22 +20,26 @@ time, duration, id, and the opaque message payload, for both version 0 and
 version 1 timing. Do not parse the payload into a vocabulary; an application
 decodes it with its own library, and a new scheme stays forward-compatible.
 
-Carry them on a sidecar of the video rendition (the audio rendition when there
-is none) following the rule in [SEI section](/quest/m2/sei/sei.md): the
-rendition's group sequence, each box stamped with the wire timestamp of its
-presentation time, raw bytes; a box before the first `moof` takes the
-pre-media placement that rule defines. Export rebuilds the box in the
-fragment whose media time contains it, and the pre-media ones before the first
-fragment.
+Publish each box when received on independently sequenced metadata groups,
+using [Metadata association](/quest/m2/metadata-association.md). Keep event
+presentation time separate from the containing fragment or pre-media
+placement. A future event is delivered before its presentation time, and a
+box before the first moof does not wait for a media group to exist. Preserve
+source placement for exact export rather than selecting a fragment solely
+from the event's presentation timestamp.
 
 Test version 0 and version 1 boxes, an emsg before the first moof, several on
 one fragment, an unknown scheme, a zero duration, and a round trip that is
 byte-identical.
 
+## Required
+
+- [Metadata association contract](/quest/m2/metadata-association.md) - settles the shared framing and missing-data semantics before this section adopts them
+
 ## Related
 
 - [ID3 catalog section](/quest/m2/id3.md) - gives one payload type carried here a
   typed contract
-- [AV1 metadata OBUs](/quest/m2/av1-metadata.md) - the same silent drop in a
+- [AV1 metadata OBUs](/quest/m3/av1-metadata.md) - the same silent drop in a
   different layer
 - [FLV script tags](/quest/m2/flv-script.md) - likewise

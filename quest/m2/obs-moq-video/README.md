@@ -28,10 +28,11 @@ The quests separate portable decoding, platform GPU delivery, audio, and publish
 - [Rate control](/quest/m2/obs-moq-video/rate-control.md) - the plugin reserves its bitrate and retunes the OBS encoder to the grant
 - [macOS GPU input](/quest/m2/obs-moq-video/macos.md) - feed the encoder from the OBS compositor without CPU readback
 - [Windows GPU input](/quest/m2/obs-moq-video/windows.md) - import or blit OBS D3D11 textures with explicit synchronization
-- [Linux GPU input](/quest/m2/obs-moq-video/linux.md) - export OBS allocations and connect a real hardware encoder import path
 - [VP8/VP9 decoding](/quest/m2/obs-moq-video/vpx.md) - restore those playback codecs without an FFmpeg ABI dependency
 
 ## Related
+
+- [Linux GPU input](/quest/m3/obs-linux-gpu.md) - allocation-export feasibility and its dependent implementation are deferred
 
 - [VAAPI encode and decode](/quest/m2/video-vaapi.md) - owns Linux backend decode/import capabilities; reconcile its older dependency assumptions against current code
 - [Video hardware validation](/quest/m3/video-hardware.md) - physical hardware evidence is required for each claimed GPU path

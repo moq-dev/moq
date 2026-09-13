@@ -1,16 +1,30 @@
-# m3: prototypes
+# m3: later work
 
 ## Goal
 
-Experiments, spikes, hardware validation, and measured go/no-go verdicts.
-A written-down abandonment is a valid outcome for everything here.
+Deferred features, design studies, experiments, and hardware validation.
+Exploratory quests may end with a measured no-go verdict; implementation
+quests retain their stated completion criteria.
 
 ## Plan
 
-Nothing in this milestone blocks a release. Promote a quest into m2 when
-its verdict lands and the follow-on work becomes concrete.
+Nothing in this milestone blocks a release. Promote work into m2 when it
+joins the next agent wave, including planning work when its decisions are
+worth settling now. Deferral does not by itself abandon a feature.
 
 ## Quests
+
+- [AV1 metadata separation](/quest/m3/av1-metadata.md) - retain metadata OBUs inline while evaluating separate delivery
+
+- [SEI separation](/quest/m3/sei/README.md) - retain inline SEI until measured savings or a metadata-only consumer justify a split
+
+- [Catalog track identity](/quest/m3/catalog-tracks.md) - compare immutable track definitions with explicit catalog-to-group binding
+- [Mobile ownership](/quest/m3/mobile-ownership.md) - decide whether Rust or platform code owns mobile capture, codecs, and rendering
+- [iOS capture](/quest/m3/mobile-capture-ios.md) - camera and screen capture if the mobile ownership decision selects Rust
+- [Android capture](/quest/m3/mobile-capture-android.md) - NDK/JNI capture and codec backends if the mobile ownership decision selects Rust
+- [Linux OBS GPU input](/quest/m3/obs-linux-gpu.md) - prove allocation export before implementing a hardware encoder import path
+- [LiveKit client shim](/quest/m3/livekit-shim.md) - a media compatibility facade over the room SDK
+- [QUIC capacity probing](/quest/m3/quic-probe.md) - compare useful early retransmissions with padding and no probing
 
 - [Embedded video](/quest/m3/video-embedded.md) - EGL import in the renderer, so moq-video presents on a Pi
 - [Decoder drain](/quest/m3/decode-drain.md) - flush and finish for pipelined decoders, so no picture is lost at a track end or crosses a group boundary

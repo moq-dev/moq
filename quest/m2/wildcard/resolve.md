@@ -32,9 +32,9 @@ every transcode path, matched or refused. Selection within the tier is lowest
 accumulated cost first, then a hash of the REQUESTED path against each
 advertiser's origin id. Keying on the request rather than the pattern is the
 whole point: hashing the pattern would hand one advertiser every path matching
-it. A wildcard covering a path competes on that same cost against a concrete
-announcement of it; nothing special-cases the two, so a standby seed below the
-topology-cost floor is a real routing bug rather than a tuning preference.
+it. A concrete announcement is maximally specific and shadows every wildcard
+regardless of cost. A terminal refusal from that concrete claim never falls
+through to a wildcard; it shadows until the claim is withdrawn.
 
 Both lookup kinds route through this table: subscribe via `recv_subscribe`'s
 existing fallback, and FETCH the same way, since the archive's whole use case
@@ -45,9 +45,11 @@ route.
 A served path is not announced downstream, so a wildcard never manufactures
 announcements. But a resolved upstream SUBSCRIPTION must be installed as a
 ROUTE on the path's origin node, seeded with the wildcard's accumulated cost,
-not parked in the request-level `served` cache alone: a concrete announcement
-arriving later lands on that same node, competes on cost at one front, and the
-front's ordinary route change moves consumers at a group boundary. A
+not parked in the request-level `served` cache alone. Preserve the route's
+wildcard provenance and specificity: installing an exact-path node must not
+promote it into a concrete announcement. A concrete announcement arriving
+later lands on the same node and wins by specificity, and the front's
+ordinary route change moves consumers at a group boundary. A
 cache-only answer would strand every bound consumer on the wildcard
 subscription with nothing able to migrate or stop it. When the concrete claim
 is a DIFFERENT publisher, its consumers end and resubscribe rather than
@@ -79,6 +81,9 @@ Tests, at the process level with real sessions rather than an in-process stand-i
   route at a group boundary, without announcement churn; a concrete claim from a
   DIFFERENT publisher ends the wildcard-served subscription instead of splicing
   into it.
+- A high-cost concrete claim shadows a cheaper wildcard, including after
+  that wildcard has served the path; a terminal concrete refusal does not
+  fall through while the concrete claim remains advertised.
 - A FETCH for an unannounced archived path resolves through the catch-all the
   same way a subscribe does.
 - A capacity refusal re-resolves onto another advertiser exactly once, and a

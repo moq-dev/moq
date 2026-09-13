@@ -38,6 +38,10 @@ not a measured browser bottleneck yet.
 
 Reference: [WebTransport receive streams and BYOB](https://www.w3.org/TR/webtransport/).
 
+## Required
+
+- [Synchronous decode](/quest/m2/2850-js-net-give-reader-a-synchronous-decode-so-the-publisher.md) - settle Reader ownership before replacing its buffering
+
 ## Related
 
 - [Synchronous decode](/quest/m2/2850-js-net-give-reader-a-synchronous-decode-so-the-publisher.md) - owns decoder and control ordering changes

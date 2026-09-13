@@ -32,7 +32,7 @@ without such a caller stays a reloadable playlist.
 Use the catalog supplied to the exporter. This quest does not establish which
 catalog update applies to a historic group; timestamps do not provide an
 explicit binding. Track immutability and update correlation belong to
-[Catalog track identity](/quest/m2/catalog-tracks.md), independently of DVR.
+[Catalog track identity](/quest/m3/catalog-tracks.md), independently of DVR.
 
 Prove aligned audio/video switching, missing track segments, discontinuities,
 caller-supplied finality, and bounded LRU reads.

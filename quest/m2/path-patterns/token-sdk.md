@@ -22,4 +22,6 @@ Land as breaking package releases.
 
 ## Required
 
-- [Claims](/quest/m2/path-patterns/claims.md)
+- [Relay auth](/quest/m2/path-patterns/relay-auth.md) - the in-tree reader accepts v1 before issuers default to it
+
+- [Claims](/quest/m1/api-token-claims.md)

@@ -34,6 +34,6 @@ exists to prevent, so cover the ordering with a test rather than a comment.
 
 ## Related
 
-- [SEI](/quest/m2/sei/README.md) - carries SEI byte-faithfully as a sidecar; if
+- [SEI](/quest/m3/sei/README.md) - carries SEI byte-faithfully as a sidecar; if
   that line lands, this parser is a candidate to move onto it rather than
   walking the access unit itself

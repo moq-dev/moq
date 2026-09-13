@@ -47,5 +47,5 @@ demo, and `<moq-meet>` is not coming back as an element.
 
 ## Related
 
-- [LiveKit client shim](/quest/m2/livekit-shim.md) - builds its
+- [LiveKit client shim](/quest/m3/livekit-shim.md) - builds its
   Room/Participant facade on this

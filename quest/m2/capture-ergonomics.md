@@ -1,9 +1,17 @@
-# [M] Capture ergonomics
+# [S] Plan capture ergonomics
 
 ## Goal
 
 Three papercuts in the capture surface, none blocking but each visible the
 first time someone hits it.
+
+This is a planning dispatch. Verify each current limitation against source,
+then replace this quest with independently completable crop, audio mixing,
+and format-validation quests. Each needs a chosen public API, ownership
+boundary, supported/refused cases, and CI acceptance tests. Ask the maintainer
+about unsettled crop coordinates and audio clock/mixing policy before coding.
+Identify any published API break for M1; do not hold independent validation
+work behind crop or mixing design.
 
 ## Plan
 

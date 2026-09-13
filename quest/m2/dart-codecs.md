@@ -27,3 +27,8 @@ against the Kotlin and Swift artifacts that already pay it, and update
 
 Deployment floors stay as they are (Android API 24, iOS 16); a codec addition
 that raises either is a separate decision.
+
+The later-finishing quest, this one or [FFI video consumer](/quest/m2/mobile/ffi-video-consumer.md),
+exposes and tests that consumer in Dart once the API and codec-enabled artifacts
+both exist. Check the actual landed surface rather than assuming Dart remains
+out of scope in the sibling quest.

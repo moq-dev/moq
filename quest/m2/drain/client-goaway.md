@@ -19,7 +19,7 @@ Everything below describes `dev`, which is where this quest lands: `main`
 still has `moq-native`'s close-only `Reconnect`. The drain loop is written
 once into `Connection` and its pool.
 
-### Rust is done except the proof
+### Rust policy and proof
 
 On `dev`, `moq_tokio::Connection` already handles GOAWAY: the session loop returns the
 message, `Redirect::resolve` guards the URI (scheme tier never drops, the host
@@ -59,9 +59,13 @@ connection down in its effect cleanup, and the pool
   the cap and never a zero-length handover. Groups in flight finish. A GOAWAY does not go through the backoff delay; a failed
   replacement dial does.
 - Port the guard: same-host by default, refuse a scheme-tier drop or a
-  widening to a local host, and offer the follow mode. Empty, ignored, malformed, or refused URIs preserve the
-  current address list, including caller-selected fallbacks. Only an accepted
-  redirect replaces the list. A redirect with a certificate pin (`serverCertificateHashes`)
+  widening to a local host, and offer the follow mode. An empty URI preserves
+  the current address list, including caller-selected fallbacks, and starts
+  normal migration. A malformed or policy-refused explicit redirect ends the
+  connection with a typed terminal error; it must not trigger a retry against
+  the original address or another configured fallback. Only an accepted
+  redirect replaces the list. Apply and test this policy in Rust as well as JS;
+  do not assume the existing Rust behavior already satisfies it. A redirect with a certificate pin (`serverCertificateHashes`)
   is refused unless the host is unchanged, since the pin cannot verify another
   relay; the pool already refuses to share pinned connections.
 - The pool re-keys its entry to the redirect target, so a later

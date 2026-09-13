@@ -17,6 +17,17 @@ either may send a correction back here.
 The survey is done; it is recorded here so the implementations do not repeat
 it. What remains is the writing and the corpus.
 
+### Settled receiver policy
+
+An explicit delay fixes the receiver jitter target and disables adaptation;
+auto uses the estimator. Keep publisher buffering and backend render slack
+separate from that target. Define their composition and retention limits once
+for native and browser playback, including refusal of impossible fixed targets.
+Settle the native config spelling with the maintainer (`delay` is the
+recommendation) and document its mapping to the browser. Before completing
+this planning quest, update both implementation quests and
+include fixed-versus-auto cases in the shared conformance corpus.
+
 ### What to implement against
 
 WebRTC's NetEq, but not the file the name suggests. `delay_manager.cc` on

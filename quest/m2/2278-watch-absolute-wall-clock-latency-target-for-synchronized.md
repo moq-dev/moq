@@ -2,8 +2,8 @@
 
 ## Goal
 
-A browser application can read a rendition's `Timeline.wall` and its records
-through a `Timeline.Consumer` in `js/hang`, so an application that knows its
+A browser application can read the broadcast's fixed PTS-to-wall mapping
+through `js/hang`, alongside archive timeline records when present, so an application that knows its
 viewers share a clock can compute the delay that renders one frame at one
 instant everywhere, and a DVR view can map presentation time to wall time.
 
@@ -17,20 +17,20 @@ sync exchange over a track.
 
 ## Plan
 
-`js/hang` has a timeline producer (`setWall(pts, wall)`) and no consumer;
-`js/watch/src/sync.ts` anchors on first-frame arrival against
-`performance.now()`. Add the consumer beside the producer, mirroring the Rust
-timeline consumer's records and exposing `wall` as a signal, and keep `Sync`
-untouched. Document in `doc/concept` how an application derives a `delay`
-from `wall + pts` against its own clock, and what it gives up when the clocks
-are not synced.
+Expose the catalog contract selected by the continuous broadcast clock quest,
+using one mapping across tracks and source restarts. The current timeline is
+a broadcast-wide segment index, not a per-rendition track. Reuse the existing
+consumer and signal machinery where present; do not assume the old `setWall`
+producer or create per-record clock epochs. Keep `js/watch` arrival-based Sync
+unchanged. Document PTS-to-wall conversion and the requirement that an
+application knows whether remote clocks are synchronized.
 
 Nothing populates `wall` from the built-in publishers today, so this waits on
-[Publishers anchor the timeline](/quest/m2/timeline-wall.md).
+[Publishers anchor the timeline](/quest/m1/broadcast-clock.md).
 
 ## Required
 
-- [Publishers anchor the timeline](/quest/m2/timeline-wall.md) - there is no anchor to expose until publishers set one
+- [Publishers anchor the timeline](/quest/m1/broadcast-clock.md) - there is no anchor to expose until publishers set one
 
 ## Closes
 

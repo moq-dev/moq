@@ -10,13 +10,14 @@ stream.
 
 ## Plan
 
-Define the catalog section and frame contract for complete ID3 tags,
-following the sidecar rule in [SEI section](/quest/m2/sei/sei.md): the ID3
-track belongs to the program's video rendition (its audio rendition when there
-is no video), uses that rendition's group sequence, and stamps each frame with
-the wire timestamp of the tag's presentation time. An ID3-only program has no
-rendition to follow, so its track stands alone: one group per tag, stamped from
-the tag's own PTS, with the section saying it accompanies no rendition. Carry original tag bytes,
+The shared metadata contract owns timestamp encoding and placement. Adopt it
+before implementation; deferred SEI extraction is not a prerequisite.
+
+Define the catalog section and frame contract for complete ID3 tags using
+[Metadata association](/quest/m2/metadata-association.md). Publish tags when
+received on independently sequenced groups, with their presentation time on
+the broadcast clock and an optional association to the program's rendition.
+ID3-only programs need no artificial media owner. Carry original tag bytes,
 and in the section the raw stream-level PMT descriptor loop plus any
 application or program registration metadata the exporter needs to reproduce
 the input. Do not parse the tag into a fixed
@@ -37,9 +38,13 @@ large tags spanning PES packets, timestamp wrap, discontinuity, and an ID3-only
 program. Include non-ID3 and malformed stream type `0x15` fixtures that remain
 generic.
 
+## Required
+
+- [Metadata association contract](/quest/m2/metadata-association.md) - settles the shared framing and missing-data semantics before this section adopts them
+
 ## Related
 
 - [SRT metadata parity](/quest/m2/srt-metadata.md) - independently preserves
   generic MPEG-TS metadata through the SRT gateway
-- [SEI sidecars](/quest/m2/sei/README.md) - the separate codec metadata
+- [SEI sidecars](/quest/m3/sei/README.md) - the separate codec metadata
   contract

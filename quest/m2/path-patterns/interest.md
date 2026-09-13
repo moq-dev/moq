@@ -2,12 +2,15 @@
 
 ## Goal
 
-An ANNOUNCE_REQUEST on moq-lite-06 carries the full shared pattern instead of a
-prefix, without changing older protocol versions.
+AUTH grants and ANNOUNCE_REQUEST interest on moq-lite-06 carry the shared
+pattern semantics together, without changing older protocol versions.
 
 ## Plan
 
-Replace the lite-06 request prefix with a pattern in Rust and JavaScript.
+Replace lite-06 AUTH grant prefixes and the ANNOUNCE_REQUEST prefix with
+patterns in Rust and JavaScript in the same change. Update the lite draft and
+version-gated fixtures together; a peer must not interpret one field as a
+pattern and the other as a prefix.
 Authorize it by exact containment in the subscriber's v1 grant, derive its
 literal head for traversal, and filter announcements with the shared matcher.
 Preserve exact set-valued rebasing through rooted views.
@@ -26,5 +29,7 @@ root matches after rebasing, containment refusal, old-version behavior, and the
 IETF over-request plus local-filter fallback.
 
 ## Required
+
+- [Lite auth](/quest/m2/auth/lite.md) - establish the AUTH exchange before upgrading its grants to patterns
 
 - [Origin scopes](/quest/m2/path-patterns/origin.md)

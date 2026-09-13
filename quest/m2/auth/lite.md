@@ -13,6 +13,13 @@ it.
 
 ## Plan
 
+Use pattern unions in public grants from their first introduction, matching
+M1 origin scopes. Legacy AUTH wire codecs convert only representable prefix
+unions explicitly and refuse every unrepresentable grant. Never widen an
+exact or suffix pattern into a prefix. The pattern-interest quest changes wire
+encoding without another public grant-type migration.
+
+
 ### Wire
 
 Add stream type `0x7` AUTH, creator either, to the bidirectional stream table
@@ -46,7 +53,7 @@ rather than a refusal. Record it in the lite-06 changelog. Run
 
 New module `rs/moq-net/src/auth.rs`, public as `moq_net::auth`:
 
-- `auth::Grant { publish: PathPrefixes, subscribe: PathPrefixes, expires:
+- `auth::Grant { publish: Patterns, subscribe: Patterns, expires:
   Option<Instant> }`, a plain value in the presenter's root.
 - `auth::Handle`, cloneable, returned by `Session::auth()`. `grant()` is a
   watchable union of every open token's grant (`None` until the first
@@ -92,8 +99,12 @@ token, on error aborting only that stream.
 
 Fail loud: the publisher half already scopes its origin per solicited prefix;
 add a check that every path its origin announces is covered by the union's
-publish prefixes, run when a grant arrives or changes and when a broadcast is
-announced. It waits only for the tokens the session presented itself at setup
+publish prefixes at initial admission and when a new publication is
+attempted. A later grant shrink withdraws previously authorized publications
+and cancels subscriptions that lose access on this session, without aborting
+the session or mutating the shared origin. Process this resize before
+checking new attempts, so a revocation is not mistaken for a new unauthorized
+publication. It waits only for the tokens the session presented itself at setup
 (the empty one, and the configured ones once
 [Token in band](/quest/m2/auth/token-in-band.md) lands), so a peer that never
 answers an app-added token cannot suspend enforcement; an app awaits `add`
@@ -124,7 +135,10 @@ and the version gate; both sides receive a grant from scoped origins,
 including the empty-prefix and empty-list spellings; a publish-only session
 grants no subscribe; an out-of-scope announce aborts with `Unauthorized` and
 names the path in the reason, while an in-scope one does not; two tokens union
-and closing one stream shrinks the union on both sides; an update AUTH_OK
+and closing one stream shrinks the union on both sides without disconnecting
+or aborting work still covered; revoked publications are withdrawn even if
+they remain in the shared origin; an empty union can later be authorized
+again; an update AUTH_OK
 replaces one token's grant without touching the other; an unanswered
 app-added token does not suspend the check; a reset AUTH stream reports
 `Unsupported`; Rust to JS and JS to Rust interop in the existing

@@ -24,9 +24,9 @@ same everywhere.
 
 ## Required
 
-- [Ownership boundary](/quest/m2/mobile/ownership-boundary.md) - decides whether Rust owns capture on mobile at all
+- [Ownership boundary](/quest/m3/mobile-ownership.md) - decides whether Rust owns capture on mobile at all
 
 ## Related
 
-- [Android capture and encode](/quest/m2/mobile/video-android.md) - the other half of
+- [Android capture and encode](/quest/m3/mobile-capture-android.md) - the other half of
   mobile, and a much larger one

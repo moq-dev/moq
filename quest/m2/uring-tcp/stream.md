@@ -32,4 +32,6 @@ existing suite does.
 
 ## Required
 
+- [Ring TCP ablation](/quest/m2/uring-tcp/ablation.md) - a positive verdict selects the mechanisms before the worker implementation starts
+
 - [Merge dev](/quest/m1/merge-dev.md) - builds on dev-only code that reaches `main` with the merge

@@ -43,4 +43,4 @@ handle woke. No regression on the `priority_queue_insert_front` benches.
 
 ## Related
 
-- [Send order width](/quest/m2/perf/send-order-width.md) - makes this moot if the queue goes away
+- [Hierarchical scheduling](/quest/m2/quic/scheduler.md) - removes this queue where the new scheduler replaces it
