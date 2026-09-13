@@ -283,7 +283,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// The tracks below enroll in the timeline, so advertise it in the same catalog update
 		// rather than publishing a second snapshot for it.
 		{
-			let mut catalog = self.catalog.lock();
+			let mut catalog = self.catalog.modify()?;
 			if catalog.archive.is_none() && !moov.trak.is_empty() {
 				catalog.archive = Some(timeline.section());
 			}

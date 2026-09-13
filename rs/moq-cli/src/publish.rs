@@ -572,7 +572,8 @@ mod tests {
 		let mut section_track = tscat::Track::new(SECTION_PID);
 		section_track.verbatim = Some(tscat::Verbatim::new(0x86, tscat::Framing::Section));
 		catalog
-			.lock()
+			.modify()
+			.unwrap()
 			.mpegts
 			.tracks
 			.insert(section.name().to_string(), section_track);
@@ -600,7 +601,12 @@ mod tests {
 		verbatim.stream_id = Some(VERBATIM_PES_STREAM_ID);
 		let mut pes_track = tscat::Track::new(VERBATIM_PES_PID);
 		pes_track.verbatim = Some(verbatim);
-		catalog.lock().mpegts.tracks.insert(pes.name().to_string(), pes_track);
+		catalog
+			.modify()
+			.unwrap()
+			.mpegts
+			.tracks
+			.insert(pes.name().to_string(), pes_track);
 		let mut pes_producer = Producer::new(pes, Container::Legacy(moq_mux::container::Kind::Data));
 		pes_producer
 			.write(Frame {

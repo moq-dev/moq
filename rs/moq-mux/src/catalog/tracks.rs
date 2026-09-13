@@ -446,7 +446,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		let resolved = Self::resolved(&supplied, &self.detected);
 		config.set_estimate(resolved.clone());
 		{
-			let mut guard = self.catalog.lock();
+			let mut guard = self.catalog.modify()?;
 			let mut next = (*guard).clone();
 			config.insert(&mut next, &self.name);
 			// Serialization must succeed before the reserved snapshot retains the edit.
@@ -498,7 +498,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		if !self.present {
 			return Ok(());
 		}
-		let mut guard = self.catalog.lock();
+		let mut guard = self.catalog.modify()?;
 		let mut next = (*guard).clone();
 		if let Some(config) = C::get_mut(&mut next, &self.name) {
 			f(config);
@@ -524,8 +524,10 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Drop for Rendition<E, C> {
 	fn drop(&mut self) {
 		// The entry and the name it holds are released together under one lock. Removing mutates the
 		// catalog, so the guard publishes it (immediately if live, else it accumulates until the gate
-		// opens).
-		self.catalog.lock().release::<C>(&self.name, self.present);
+		// opens). A closed catalog has nothing left to release from.
+		if let Ok(mut catalog) = self.catalog.modify() {
+			catalog.release::<C>(&self.name, self.present);
+		}
 		// Our reservation (`gate`) drops here. If still held (never set), its release flushes any
 		// staged change; if already released by `set`, this is a no-op.
 	}
@@ -825,7 +827,7 @@ mod tests {
 	fn an_existing_entry_owns_its_name() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = super::super::Producer::new(&mut broadcast).unwrap();
-		catalog.lock().video.insert("v", config(None, None)).unwrap();
+		catalog.modify().unwrap().video.insert("v", config(None, None)).unwrap();
 
 		assert!(catalog.reserve().video("v").is_err(), "the catalog already carries it");
 	}

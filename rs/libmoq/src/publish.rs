@@ -295,7 +295,7 @@ impl Publish {
 	/// Replace the properties shared by every video rendition as one catalog update.
 	pub fn video_properties(&mut self, broadcast: Id, properties: hang::catalog::VideoProperties) -> Result<(), Error> {
 		let catalog = self.catalog(broadcast)?;
-		let mut catalog = catalog.lock();
+		let mut catalog = catalog.modify()?;
 		catalog.video.set_properties(properties)?;
 		catalog.commit()?;
 		Ok(())
@@ -307,7 +307,9 @@ impl Publish {
 	/// The catalog is republished automatically.
 	pub fn catalog_section_set(&mut self, broadcast: Id, name: &str, value: serde_json::Value) -> Result<(), Error> {
 		let catalog = self.catalog(broadcast)?;
-		catalog.lock().set_section(name.to_string(), value)?;
+		let mut guard = catalog.modify()?;
+		guard.set_section(name.to_string(), value)?;
+		guard.commit()?;
 		Ok(())
 	}
 
@@ -316,7 +318,9 @@ impl Publish {
 	/// A no-op if no section with that name exists. Republishes the catalog if it did.
 	pub fn catalog_section_remove(&mut self, broadcast: Id, name: &str) -> Result<(), Error> {
 		let catalog = self.catalog(broadcast)?;
-		catalog.lock().remove_section(name);
+		let mut guard = catalog.modify()?;
+		guard.remove_section(name);
+		guard.commit()?;
 		Ok(())
 	}
 

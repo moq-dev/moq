@@ -901,7 +901,7 @@ mod tests {
 			let mut broadcast = origin.create_broadcast(path).expect("broadcast");
 			broadcast.announce(Default::default()).expect("broadcast");
 			let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).expect("catalog");
-			let mut edit = catalog.lock();
+			let mut edit = catalog.modify().unwrap();
 			edit.video.renditions.insert(
 				video.to_string(),
 				VideoConfig::new(H264 {

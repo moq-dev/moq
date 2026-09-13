@@ -385,7 +385,7 @@ impl<E: catalog::Catalog> Capture<E> {
 		}
 
 		if self.entries.values().any(|e| !e.advertised && e.last_cut.is_some()) {
-			let mut guard = self.catalog.lock();
+			let mut guard = self.catalog.modify()?;
 			let Some(mpegts) = guard.mpegts_mut() else {
 				anyhow::bail!("catalog extension no longer carries an mpegts section");
 			};
@@ -432,7 +432,10 @@ impl<E: catalog::Catalog> Capture<E> {
 		if !self.entries.values().any(|e| e.advertised) {
 			return;
 		}
-		let mut guard = self.catalog.lock();
+		// A closed catalog has nothing left to unadvertise from.
+		let Ok(mut guard) = self.catalog.modify() else {
+			return;
+		};
 		let Some(mpegts) = guard.mpegts_mut() else {
 			return;
 		};

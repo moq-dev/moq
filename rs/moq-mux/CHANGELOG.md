@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- [**breaking**] `catalog::Producer::lock` is now `modify` and returns a `Result`, refusing a
+  finished catalog. A guard that fails to publish on drop aborts the catalog tracks with the error
+  instead of logging a warning, so consumers and the next `modify` both see it. `Guard::commit` is
+  unchanged and leaves the tracks open on failure.
 - [**breaking**] Advertise the broadcast timeline through `catalog.archive`
   (`hang::catalog::Archive`). `timeline::Producer::section` returns `Archive`.
 - `import::ContainerStream::new` takes a bare `ContainerFormat` instead of a `ContainerInit`. It
