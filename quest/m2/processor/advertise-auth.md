@@ -28,8 +28,6 @@ publish grant.
 
 ## Required
 
-- [Advertise](/quest/m1/wildcard-advertise.md) - supplies the wildcard message
-  and authorization point this capability separates
 - [Token SDKs](/quest/m2/path-patterns/token-sdk.md) - supplies the published
   v1 claim writers this extension changes
 - [Relay auth](/quest/m2/path-patterns/relay-auth.md) - supplies the v1 origin

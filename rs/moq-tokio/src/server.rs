@@ -1583,7 +1583,7 @@ mod tests {
 			.await
 			.expect("announce timeout")
 			.expect("origin closed");
-		assert_eq!(update.prefix.as_path().as_str(), "test");
+		assert_eq!(update.pattern.as_prefix().expect("prefix announcement"), "test");
 		assert!(update.active);
 		let broadcast = consumer.request_broadcast("test").await.expect("resolve");
 

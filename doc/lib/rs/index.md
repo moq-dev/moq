@@ -49,7 +49,8 @@ let consumer = origin.consume();
 let mut announced = consumer.announced();
 while let Some(update) = announced.next().await {
     if !update.active { continue }
-    let broadcast = consumer.request_broadcast(update.prefix.as_path()).await?;
+    let Some(prefix) = update.pattern.as_prefix() else { continue };
+    let broadcast = consumer.request_broadcast(prefix).await?;
     let catalog = broadcast
         .track(hang::Catalog::DEFAULT_NAME)?
         .subscribe(hang::Catalog::default_subscription())

@@ -33,7 +33,7 @@ mod tests {
 		broadcast.announce(Default::default()).expect("create broadcast");
 
 		let update = announced.next().await.expect("announce");
-		assert_eq!(update.prefix.as_path().as_str(), "cam");
+		assert_eq!(update.pattern.as_prefix().expect("prefix announcement"), "cam");
 		assert!(update.active);
 
 		broadcast.finish();

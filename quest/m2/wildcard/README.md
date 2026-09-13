@@ -27,11 +27,9 @@ across the fleet in resident memory.
 
 ## Plan
 
-[Advertise](/quest/m1/wildcard-advertise.md) sits in m1 so the announce API
-breaks once: `dynamic(pattern, route)` already takes a path Pattern in
-the native bindings and js/net, with a prefix spelled `foo/**`
-and anything else refused until Advertise lands. Advertise alone gates the
-merge; Resolve and Demand here are additive and land on main after it.
+`dynamic(pattern, route)` advertises any path Pattern, prefix-shaped or not.
+A prefix is spelled `foo/**`. Resolve and Demand here are additive and land
+on main after the merge.
 
 ### What already exists, and what does not
 
@@ -46,11 +44,10 @@ same exact containment check. `Cost { warm, cold }`
 [#2925](https://github.com/moq-dev/moq/pull/2925).
 
 [moq#3225](https://github.com/moq-dev/moq/pull/3225) moved a long way toward
-this. An announcement is now a route over a path *prefix*, `origin::Prefix` is
-an opaque newtype built explicitly as the extension point a pattern type slots
-into, and matching is segment-wise intersection in one place. So the wire, the
-model, and every binding already speak in covering claims rather than in
-per-broadcast announcements.
+this. An announcement carries a `Pattern` covering a set of paths. Rust
+`announce::Update.pattern` and TypeScript `Announce.Event.pattern` use the
+matcher directly, so callers explicitly select prefix-shaped claims when
+they need a concrete broadcast path.
 
 The routing table exists too. `Consumer::request_broadcast` resolves a local
 broadcast first, then `best_server`: the longest covering prefix, filtered by
@@ -60,13 +57,11 @@ announced it and cached per prefix in `ServeState.served` (`:764`). That is the 
 lookup the old `origin::Dynamic` could not provide, and it is what
 [Resolve](/quest/m2/wildcard/resolve.md) now extends rather than replaces.
 
-Route matching, by contrast, is prefix-only (`origin::Prefix`,
-`rs/moq-net/src/model/origin.rs:498`). The pattern matcher itself exists:
-`moq_net::path::{Pattern, Patterns, Segment}` (`rs/moq-net/src/path/pattern.rs:172`,
-`patterns.rs:14`, `pattern.rs:39`) and `Path.Pattern` / `Path.Patterns` in
-`js/net/src/path.ts` (`:526`, `:846`) own the shared matching, containment,
-specificity, and rebasing that [Advertise](/quest/m1/wildcard-advertise.md)
-builds on.
+Request resolution, by contrast, is still prefix-only (`best_server` in
+`rs/moq-net/src/model/origin.rs`). The pattern matcher itself exists:
+`moq_net::{Pattern, Patterns, Segment}` and `Path.Pattern` /
+`Path.Patterns` in `js/net/src/path.ts` own the shared matching, containment,
+specificity, and rebasing advertisements reuse.
 
 What is genuinely missing, beyond patterns themselves, is content identity.
 Announcement `Epoch` was specified into lite-06 by
@@ -270,8 +265,6 @@ than announce state.
 
 ## Related
 
-- [Advertise](/quest/m1/wildcard-advertise.md) - the wire and model half
-  that gates the merge; Resolve requires it
 - [path-patterns](/quest/m2/path-patterns/README.md) - owns the pattern dialect
   and the shared matcher advertisements reuse
 - [archive](/quest/m2/archive/README.md) - an archive advertises the catch-all

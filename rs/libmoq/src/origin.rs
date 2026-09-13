@@ -100,10 +100,14 @@ impl Origin {
 			};
 
 			// Hold the lock only to buffer the announcement; release it before the callback.
-			let announced_id = State::lock()
-				.origin
-				.announced
-				.insert((update.prefix.to_string(), update.active))?;
+			let announced_id = State::lock().origin.announced.insert((
+				update
+					.pattern
+					.as_prefix()
+					.unwrap_or_else(|| update.pattern.as_str())
+					.to_owned(),
+				update.active,
+			))?;
 			callback.call(announced_id);
 		}
 	}

@@ -192,7 +192,10 @@ async fn watch_announces(port: u16, window: Duration) -> Vec<(String, bool)> {
 	let mut updates = Vec::new();
 	let deadline = tokio::time::Instant::now() + window;
 	while let Ok(Some(update)) = tokio::time::timeout_at(deadline, announced.next()).await {
-		updates.push((update.prefix.as_path().as_str().to_string(), update.active));
+		updates.push((
+			update.pattern.as_prefix().expect("prefix announcement").to_string(),
+			update.active,
+		));
 	}
 	updates
 }

@@ -110,7 +110,8 @@ async fn main() -> anyhow::Result<()> {
 				tokio::select! {
 					Some(update) = announced.next() => match update.active {
 						true => {
-							let path = update.prefix.as_path().to_owned();
+							let Some(prefix) = update.pattern.as_prefix() else { continue; };
+							let path = moq_net::Path::new(prefix).to_owned();
 							tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
 							let broadcast = consumer.request_broadcast(&path).await?;
 							let track = broadcast
@@ -118,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
 							clock = Some(Subscriber::new(track));
 						}
 						false => {
-							tracing::warn!(broadcast = %update.prefix, "broadcast is offline, waiting...");
+							tracing::warn!(broadcast = %update.pattern, "broadcast is offline, waiting...");
 						}
 					},
 					res = reconnect.closed() => return Ok(res?),
