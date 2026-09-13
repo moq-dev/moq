@@ -3554,35 +3554,37 @@ async fn request_origin_setters_apply_or_error() {
 	request.set_publish(None).unwrap();
 	request.set_consume(None).unwrap();
 
-	let spinning = request.clone();
-	let (tx, rx) = std::sync::mpsc::channel();
-	std::thread::spawn(move || {
-		let started = std::time::Instant::now();
-		loop {
-			match spinning.set_publish(None) {
-				Err(err) => {
-					let _ = tx.send(err);
-					return;
-				}
-				Ok(()) if started.elapsed() > TIMEOUT => {
-					let _ = tx.send(MoqError::Internal("never observed a setter error".into()));
-					return;
-				}
-				Ok(()) => {}
-			}
-		}
+	let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+	let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+	let holding = request.clone();
+	let hold = holding.hold_lock(|| async move {
+		let _ = held_tx.send(());
+		let _ = release_rx.await;
 	});
+	tokio::pin!(hold);
+	tokio::select! {
+		biased;
+		result = &mut hold => panic!("lock holder returned before release: {result:?}"),
+		held = held_rx => held.expect("lock holder dropped"),
+	}
+
+	assert!(matches!(
+		wait_for_config_error(|| request.set_publish(None), |err| matches!(err, MoqError::Busy)).await,
+		MoqError::Busy
+	));
+	assert!(matches!(request.set_consume(None), Err(MoqError::Busy)));
+
+	release_tx.send(()).expect("lock holder should still be waiting");
+	tokio::time::timeout(TIMEOUT, hold)
+		.await
+		.expect("lock holder timed out")
+		.expect("lock holder failed");
 
 	let session = tokio::time::timeout(TIMEOUT, request.accept())
 		.await
 		.expect("handshake timed out")
 		.expect("handshake failed");
 
-	let observed = rx.recv_timeout(TIMEOUT).expect("spinner should observe an error");
-	assert!(
-		matches!(observed, MoqError::Busy),
-		"expected Busy during accept, got {observed:?}"
-	);
 	assert!(matches!(request.set_publish(None), Err(MoqError::AlreadyResponded)));
 	assert!(matches!(request.set_consume(None), Err(MoqError::AlreadyResponded)));
 

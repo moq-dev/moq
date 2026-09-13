@@ -248,6 +248,27 @@ impl MoqRequest {
 	}
 }
 
+#[cfg(test)]
+impl MoqRequest {
+	/// Hold the request lock until `held` finishes.
+	///
+	/// `accept`/`reject` use the same `Task::run` path; a live handshake can
+	/// finish before a waiter samples `Busy`.
+	pub(crate) async fn hold_lock<F, Fut>(&self, held: F) -> Result<(), MoqError>
+	where
+		F: FnOnce() -> Fut + Send + 'static,
+		Fut: std::future::Future<Output = ()> + Send + 'static,
+	{
+		self.task
+			.run(move |state| async move {
+				let _state = state;
+				held().await;
+				Ok(())
+			})
+			.await
+	}
+}
+
 #[uniffi::export]
 impl MoqRequest {
 	/// The URL provided by the client, if any.
