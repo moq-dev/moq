@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - `--cluster-lan` uses the relay's Cluster; a CLI process and a relay on the same LAN mesh with each other
+- MSRV is 1.95, matching `moq-relay` (sysinfo 0.39)
 
 ### Fixed
 

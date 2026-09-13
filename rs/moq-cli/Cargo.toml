@@ -7,7 +7,10 @@ license = "MIT OR Apache-2.0"
 
 version = "0.11.0"
 edition = "2024"
-rust-version.workspace = true
+# Depends on moq-relay, whose sysinfo 0.39 needs 1.95, above the 1.91 workspace
+# floor. This binary is an application, so the bump stays here rather than
+# raising the libraries others build on.
+rust-version = "1.95"
 
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
