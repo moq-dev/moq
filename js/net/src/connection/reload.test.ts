@@ -297,6 +297,57 @@ test("a reload that gives up keeps requests pending until it is disposed", async
 	}
 });
 
+test("a page hide after give-up does not retry the refused URL", async () => {
+	const original = globalThis.WebTransport;
+	const previousWindow = globalThis.window;
+	const previousDocument = globalThis.document;
+	const win = new EventTarget();
+	const doc = Object.assign(new EventTarget(), { hidden: false });
+	Object.assign(globalThis, { window: win, document: doc });
+
+	const url = new URL("https://example.com/");
+	let attempts = 0;
+	const stub = function StubWebTransport() {
+		attempts++;
+		const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+		void accept(pair.server, url).then(() => {
+			pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
+		});
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	const reload = new Reload({
+		enabled: true,
+		url,
+		websocket: { enabled: false },
+		delay: { initial: 1, multiplier: 1, max: 1, timeout: 0 },
+	});
+
+	try {
+		await waitUntil(() => reload.error.peek() !== undefined);
+		const givenUp = attempts;
+		const err = reload.error.peek();
+
+		// Suspension shares sequence reset with give-up; resume must not look like a new
+		// sequence or it would clear `error` and redial the JWT the peer already refused.
+		win.dispatchEvent(new Event("pagehide"));
+		await settle();
+		win.dispatchEvent(new Event("pageshow"));
+		for (let i = 0; i < 20; i++) await settle();
+		expect(attempts).toBe(givenUp);
+		expect(reload.error.peek()).toBe(err);
+		expect(reload.closed.peek()).toBeUndefined();
+
+		reload.url.set(new URL("https://example.com/changed"));
+		await waitUntil(() => attempts > givenUp);
+	} finally {
+		reload.close();
+		globalThis.WebTransport = original;
+		Object.assign(globalThis, { window: previousWindow, document: previousDocument });
+	}
+});
+
 test("a session rejected as unauthorized surfaces the code and stops retrying", async () => {
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");

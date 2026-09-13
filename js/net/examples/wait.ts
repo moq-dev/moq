@@ -34,8 +34,16 @@ async function main() {
 		});
 	});
 
-	// Run until the handle is released. Attempt failures land on `error` instead of
-	// settling `closed`, so a JWT refresh can recover the same handle.
+	// Attempt failures land on `error` instead of settling `closed`, so a JWT refresh
+	// can recover the same handle. This example logs and closes; replace `url` instead
+	// if the credentials can be renewed.
+	effect.run((effect) => {
+		const err = effect.get(connection.error);
+		if (!err) return;
+		console.error("connection failed:", err);
+		connection.close(err);
+	});
+
 	try {
 		await connection.closed;
 	} finally {

@@ -128,7 +128,7 @@ export class Connection {
 	 * The failure that stopped retrying the current URL, or undefined while the loop is live.
 	 *
 	 * Set on an auth rejection or when a private retry window expires. Cleared when a new URL
-	 * or a disable/re-enable starts another sequence.
+	 * or a disable/re-enable starts another sequence, not on a page hide/show.
 	 */
 	readonly error: Getter<Error | undefined>;
 

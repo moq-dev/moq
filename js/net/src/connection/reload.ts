@@ -107,8 +107,8 @@ export class Reload {
 	 * The failure that stopped retrying the current URL, or undefined while the loop is live.
 	 *
 	 * Set on an auth rejection or when the retry window expires. Cleared when a new URL or a
-	 * disable/re-enable starts another sequence. Transient drops that are still being retried
-	 * leave this empty.
+	 * disable/re-enable starts another sequence, not on a page hide/show. Transient drops
+	 * that are still being retried leave this empty.
 	 */
 	readonly error: Getter<Error | undefined>;
 
@@ -193,6 +193,11 @@ export class Reload {
 	// up, so the next attempt starts a fresh backoff window.
 	#sequenceHref: string | undefined;
 
+	// The href that exhausted its retry sequence. Survives a page hide/show so resume does
+	// not redial credentials the peer already refused. Cleared when the URL changes or the
+	// loop is disabled.
+	#givenUpHref: string | undefined;
+
 	// Increased by 1 each time to trigger a reload.
 	#tick = new Signal(0);
 
@@ -223,12 +228,14 @@ export class Reload {
 
 		this.error = this.#error;
 
-		if (typeof window !== "undefined" && typeof document !== "undefined") {
-			this.#signals.event(window, "pagehide", () => this.#suspended.set(true));
-			this.#signals.event(window, "pageshow", () => this.#suspended.set(false));
-			this.#signals.event(window, "unload", () => this.#suspended.set(true));
-			this.#signals.event(document, "visibilitychange", () => {
-				if (!document.hidden) this.#suspended.set(false);
+		const win = globalThis.window;
+		const doc = globalThis.document;
+		if (typeof win !== "undefined" && typeof doc !== "undefined") {
+			this.#signals.event(win, "pagehide", () => this.#suspended.set(true));
+			this.#signals.event(win, "pageshow", () => this.#suspended.set(false));
+			this.#signals.event(win, "unload", () => this.#suspended.set(true));
+			this.#signals.event(doc, "visibilitychange", () => {
+				if (!doc.hidden) this.#suspended.set(false);
 			});
 		}
 
@@ -272,24 +279,37 @@ export class Reload {
 		// Will retry when the tick changes.
 		effect.get(this.#tick);
 
-		const suspended = effect.get(this.#suspended);
 		const enabled = effect.get(this.enabled);
-		if (!enabled || suspended) {
+		if (!enabled) {
+			this.#givenUpHref = undefined;
+			this.#resetSequence();
+			return;
+		}
+
+		// Hide/freeze pauses an in-flight sequence without recovering from give-up.
+		const suspended = effect.get(this.#suspended);
+		if (suspended) {
 			this.#resetSequence();
 			return;
 		}
 
 		const href = effect.get(this.#url);
 		if (!href) {
+			this.#givenUpHref = undefined;
 			this.#resetSequence();
 			return;
 		}
 		const url = new URL(href);
 
+		if (this.#givenUpHref === href) {
+			return;
+		}
+
 		if (this.#sequenceHref !== href) {
 			this.#resetSequence();
 			this.#sequenceHref = href;
 			this.#error.set(undefined);
+			this.#givenUpHref = undefined;
 		}
 
 		effect.set(this.status, "connecting", "disconnected");
@@ -407,7 +427,8 @@ export class Reload {
 
 	#giveUp(cause: Error): void {
 		this.#error.set(cause);
-		this.#sequenceHref = undefined;
+		this.#givenUpHref = this.#sequenceHref;
+		this.#resetSequence();
 	}
 
 	#resetSequence(): void {
