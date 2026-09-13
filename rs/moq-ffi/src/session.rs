@@ -190,13 +190,13 @@ mod tests {
 	fn sets_tls_system_roots() {
 		let client = MoqClient::new();
 
-		client.set_tls_system_roots(true);
+		client.set_tls_system_roots(true).unwrap();
 		{
 			let state = client.task.lock().expect("client state should be available");
 			assert_eq!(state.config.tls.system_roots, Some(true));
 		}
 
-		client.set_tls_system_roots(false);
+		client.set_tls_system_roots(false).unwrap();
 		let state = client.task.lock().expect("client state should be available");
 		assert_eq!(state.config.tls.system_roots, Some(false));
 	}
@@ -205,16 +205,16 @@ mod tests {
 	fn sets_tls_client_cert_and_key() {
 		let client = MoqClient::new();
 
-		client.set_tls_cert(Some("cert.pem".into()));
-		client.set_tls_key(Some("key.pem".into()));
+		client.set_tls_cert(Some("cert.pem".into())).unwrap();
+		client.set_tls_key(Some("key.pem".into())).unwrap();
 		{
 			let state = client.task.lock().expect("client state should be available");
 			assert_eq!(state.config.tls.cert.as_deref(), Some(std::path::Path::new("cert.pem")));
 			assert_eq!(state.config.tls.key.as_deref(), Some(std::path::Path::new("key.pem")));
 		}
 
-		client.set_tls_cert(None);
-		client.set_tls_key(None);
+		client.set_tls_cert(None).unwrap();
+		client.set_tls_key(None).unwrap();
 		let state = client.task.lock().expect("client state should be available");
 		assert_eq!(state.config.tls.cert, None);
 		assert_eq!(state.config.tls.key, None);
@@ -225,8 +225,22 @@ mod tests {
 		let client = MoqClient::new();
 		assert_eq!(client.task.lock().unwrap().quic.max_streams, None);
 
-		client.set_quic_max_streams(4096);
+		client.set_quic_max_streams(4096).unwrap();
 		assert_eq!(client.task.lock().unwrap().quic.max_streams, Some(4096));
+	}
+
+	#[test]
+	fn setters_fail_after_cancel() {
+		let client = MoqClient::new();
+		client.set_tls_disable_verify(true).unwrap();
+		client.cancel();
+		assert!(matches!(client.set_tls_disable_verify(false), Err(MoqError::Cancelled)));
+		assert!(matches!(
+			client.set_bind("127.0.0.1:0".into()),
+			Err(MoqError::Cancelled)
+		));
+		assert!(matches!(client.set_publish(None), Err(MoqError::Cancelled)));
+		assert!(matches!(client.set_consume(None), Err(MoqError::Cancelled)));
 	}
 }
 
@@ -332,9 +346,20 @@ fn decode_hex(hex: &str) -> Result<Vec<u8>, MoqError> {
 /// The configuration differs by target, because the transport does. Native builds expose
 /// the QUIC socket and TLS trust store; the browser owns both, so a wasm build exposes
 /// only the certificate hashes WebTransport accepts.
+///
+/// Setters write the configuration [`connect`](Self::connect) will snapshot. They fail
+/// with [`MoqError::Busy`] while a connect is in flight and [`MoqError::Cancelled`]
+/// after [`cancel`](Self::cancel). A finished connect does not freeze the handle: later
+/// setters apply to the next dial until cancel.
 #[derive(uniffi::Object)]
 pub struct MoqClient {
 	task: Task<Client>,
+}
+
+impl MoqClient {
+	fn configure<R>(&self, f: impl FnOnce(&mut Client) -> R) -> Result<R, MoqError> {
+		Ok(f(&mut *self.task.configure()?))
+	}
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -361,24 +386,23 @@ impl MoqClient {
 			.iter()
 			.map(|hex| decode_hex(hex))
 			.collect::<Result<Vec<_>, _>>()?;
-		if let Some(mut state) = self.task.lock() {
+		self.configure(|state| {
 			state.fingerprints = parsed;
-		}
-		Ok(())
+		})
 	}
 
 	/// Set the origin to publish local broadcasts to the remote.
-	pub fn set_publish(&self, origin: Option<Arc<MoqOriginProducer>>) {
-		if let Some(mut state) = self.task.lock() {
+	pub fn set_publish(&self, origin: Option<Arc<MoqOriginProducer>>) -> Result<(), MoqError> {
+		self.configure(|state| {
 			state.publish = origin;
-		}
+		})
 	}
 
 	/// Set the origin to consume remote broadcasts from the remote.
-	pub fn set_consume(&self, origin: Option<Arc<MoqOriginProducer>>) {
-		if let Some(mut state) = self.task.lock() {
+	pub fn set_consume(&self, origin: Option<Arc<MoqOriginProducer>>) -> Result<(), MoqError> {
+		self.configure(|state| {
 			state.consume = origin;
-		}
+		})
 	}
 
 	/// Connect to a MoQ server and wait for the session to be established.
@@ -413,20 +437,20 @@ impl MoqClient {
 	}
 
 	/// Disable TLS certificate verification (for development only).
-	pub fn set_tls_disable_verify(&self, disable: bool) {
-		if let Some(mut state) = self.task.lock() {
+	pub fn set_tls_disable_verify(&self, disable: bool) -> Result<(), MoqError> {
+		self.configure(|state| {
 			state.config.tls.insecure = Some(disable);
-		}
+		})
 	}
 
 	/// Trust these PEM root certificate file(s) instead of the system roots.
 	///
 	/// Pass the paths to PEM-encoded CA certificates. An empty list restores the
 	/// default behavior of using the platform's native root store.
-	pub fn set_tls_roots(&self, paths: Vec<String>) {
-		if let Some(mut state) = self.task.lock() {
+	pub fn set_tls_roots(&self, paths: Vec<String>) -> Result<(), MoqError> {
+		self.configure(|state| {
 			state.config.tls.root = paths.into_iter().map(Into::into).collect();
-		}
+		})
 	}
 
 	/// Configure whether to also trust the platform's native root certificates.
@@ -434,10 +458,10 @@ impl MoqClient {
 	/// By default, system roots are trusted only when no custom roots are configured.
 	/// Set this to `true` to trust system roots in addition to roots from
 	/// `set_tls_roots`, or `false` to trust only custom roots.
-	pub fn set_tls_system_roots(&self, system_roots: bool) {
-		if let Some(mut state) = self.task.lock() {
+	pub fn set_tls_system_roots(&self, system_roots: bool) -> Result<(), MoqError> {
+		self.configure(|state| {
 			state.config.tls.system_roots = Some(system_roots);
-		}
+		})
 	}
 
 	/// Pin the peer to a certificate with one of these SHA-256 fingerprints, encoded as hex.
@@ -446,10 +470,10 @@ impl MoqClient {
 	/// and accepts the same values a server reports (see `MoqServer.cert_fingerprints`). Use it
 	/// to trust a self-signed certificate without disabling verification. An empty list clears
 	/// any pinned fingerprints.
-	pub fn set_tls_fingerprints(&self, fingerprints: Vec<String>) {
-		if let Some(mut state) = self.task.lock() {
+	pub fn set_tls_fingerprints(&self, fingerprints: Vec<String>) -> Result<(), MoqError> {
+		self.configure(|state| {
 			state.config.tls.fingerprint = fingerprints;
-		}
+		})
 	}
 
 	/// Present this PEM certificate chain when the relay requires mTLS.
@@ -457,10 +481,10 @@ impl MoqClient {
 	/// Only certificates are read from the file; any private keys are ignored. Must be
 	/// paired with `set_tls_key`, otherwise `connect` fails with an incomplete-auth error.
 	/// Pass `None` to clear a previously set path.
-	pub fn set_tls_cert(&self, path: Option<String>) {
-		if let Some(mut state) = self.task.lock() {
+	pub fn set_tls_cert(&self, path: Option<String>) -> Result<(), MoqError> {
+		self.configure(|state| {
 			state.config.tls.cert = path.map(Into::into);
-		}
+		})
 	}
 
 	/// Present this PEM private key when the relay requires mTLS.
@@ -468,23 +492,23 @@ impl MoqClient {
 	/// Only the private key is read from the file; any certificates are ignored. Must be
 	/// paired with `set_tls_cert`, otherwise `connect` fails with an incomplete-auth error.
 	/// Pass `None` to clear a previously set path.
-	pub fn set_tls_key(&self, path: Option<String>) {
-		if let Some(mut state) = self.task.lock() {
+	pub fn set_tls_key(&self, path: Option<String>) -> Result<(), MoqError> {
+		self.configure(|state| {
 			state.config.tls.key = path.map(Into::into);
-		}
+		})
 	}
 
 	/// Set the local UDP socket bind address. Defaults to `[::]:0`.
 	///
-	/// Returns an error if the address cannot be parsed.
+	/// Returns an error if the address cannot be parsed, if a connect is in flight,
+	/// or after [`cancel`](Self::cancel).
 	pub fn set_bind(&self, addr: String) -> Result<(), MoqError> {
 		let parsed: std::net::SocketAddr = addr
 			.parse()
 			.map_err(|err| MoqError::Bind(format!("invalid bind address: {err}")))?;
-		if let Some(mut state) = self.task.lock() {
+		self.configure(|state| {
 			state.config.bind = Some(parsed);
-		}
-		Ok(())
+		})
 	}
 
 	/// Cap the concurrent QUIC streams the peer may open toward this connection.
@@ -494,10 +518,10 @@ impl MoqClient {
 	/// so a client subscribing to many tracks wants this raised. A publisher's own
 	/// streams are bounded by the peer's advertised limit, not this one. Ignored by
 	/// the WebSocket fallback.
-	pub fn set_quic_max_streams(&self, max_streams: u64) {
-		if let Some(mut state) = self.task.lock() {
+	pub fn set_quic_max_streams(&self, max_streams: u64) -> Result<(), MoqError> {
+		self.configure(|state| {
 			state.quic.max_streams = Some(max_streams);
-		}
+		})
 	}
 
 	/// Enable or disable automatic reconnecting. Enabled by default.
@@ -506,36 +530,36 @@ impl MoqClient {
 	/// backoff whenever the transport drops, and broadcasts consumed through it survive
 	/// the gap. Disable for a one-shot dial: the transport's close then ends the session
 	/// (surfaced via [`MoqSession::closed`]).
-	pub fn set_reconnect(&self, enabled: bool) {
-		if let Some(mut state) = self.task.lock() {
+	pub fn set_reconnect(&self, enabled: bool) -> Result<(), MoqError> {
+		self.configure(|state| {
 			state.config.once = Some(!enabled);
-		}
+		})
 	}
 
 	/// Configure retry pacing for the automatic reconnect (see [`MoqBackoff`]).
-	pub fn set_backoff(&self, backoff: MoqBackoff) {
-		if let Some(mut state) = self.task.lock() {
+	pub fn set_backoff(&self, backoff: MoqBackoff) -> Result<(), MoqError> {
+		self.configure(|state| {
 			let mut out = moq_tokio::Backoff::default();
 			out.initial = std::time::Duration::from_millis(backoff.initial_ms).into();
 			out.multiplier = backoff.multiplier;
 			out.max = std::time::Duration::from_millis(backoff.max_ms).into();
 			out.timeout = std::time::Duration::from_millis(backoff.timeout_ms).into();
 			state.config.backoff = out;
-		}
+		})
 	}
 
 	/// Set the origin to publish local broadcasts to the remote.
-	pub fn set_publish(&self, origin: Option<Arc<MoqOriginProducer>>) {
-		if let Some(mut state) = self.task.lock() {
+	pub fn set_publish(&self, origin: Option<Arc<MoqOriginProducer>>) -> Result<(), MoqError> {
+		self.configure(|state| {
 			state.publish = origin;
-		}
+		})
 	}
 
 	/// Set the origin to consume remote broadcasts from the remote.
-	pub fn set_consume(&self, origin: Option<Arc<MoqOriginProducer>>) {
-		if let Some(mut state) = self.task.lock() {
+	pub fn set_consume(&self, origin: Option<Arc<MoqOriginProducer>>) -> Result<(), MoqError> {
+		self.configure(|state| {
 			state.consume = origin;
-		}
+		})
 	}
 
 	/// Connect to a MoQ server and wait for the session to be established.

@@ -146,15 +146,19 @@ test("a peer that severs immediately keeps escalating the backoff", async () => 
 		delay: { initial: 1000, multiplier: 2, max: 1000, timeout: 1 },
 	});
 	try {
-		await expect(reload.closed).rejects.toThrow();
+		await waitUntil(() => reload.error.peek() !== undefined);
+		expect(reload.closed.peek()).toBeUndefined();
 
-		// A terminal loop ignores later reactive edits instead of opening another session.
-		const terminalAttempts = attempts;
+		// Giving up this URL does not dispose the loop: a disable/re-enable starts another sequence.
+		const givenUp = attempts;
+		await settle();
+		expect(attempts).toBe(givenUp);
+
 		reload.enabled.set(false);
 		await settle();
 		reload.enabled.set(true);
 		await settle();
-		expect(attempts).toBe(terminalAttempts);
+		expect(attempts).toBeGreaterThan(givenUp);
 	} finally {
 		reload.close();
 		globalThis.WebTransport = original;
@@ -249,7 +253,7 @@ test("announcedBroadcast follows the reconnect loop", async () => {
 	}
 });
 
-test("a reload that gives up stops claiming it will answer requests", async () => {
+test("a reload that gives up keeps requests pending until it is disposed", async () => {
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 	const stub = function StubWebTransport() {
@@ -276,12 +280,13 @@ test("a reload that gives up stops claiming it will answer requests", async () =
 	expect(request.unroutable.peek()).toBe(false);
 
 	try {
-		// Terminal: these credentials will never work, so nothing is coming after all and a
-		// request must stop waiting on it rather than hanging on a connection that is done.
-		await reload.closed.then(
-			() => undefined,
-			() => undefined,
-		);
+		// These credentials will never work, but a new URL can recover the same loop, so a
+		// request stays pending through the gap rather than going unroutable.
+		await waitUntil(() => reload.error.peek() !== undefined);
+		expect(reload.closed.peek()).toBeUndefined();
+		expect(request.unroutable.peek()).toBe(false);
+
+		reload.close();
 		await waitUntil(() => request.unroutable.peek() === true);
 		expect(request.unroutable.peek()).toBe(true);
 	} finally {
@@ -289,6 +294,57 @@ test("a reload that gives up stops claiming it will answer requests", async () =
 		reload.close();
 		origin.close();
 		globalThis.WebTransport = original;
+	}
+});
+
+test("a page hide after give-up does not retry the refused URL", async () => {
+	const original = globalThis.WebTransport;
+	const previousWindow = globalThis.window;
+	const previousDocument = globalThis.document;
+	const win = new EventTarget();
+	const doc = Object.assign(new EventTarget(), { hidden: false });
+	Object.assign(globalThis, { window: win, document: doc });
+
+	const url = new URL("https://example.com/");
+	let attempts = 0;
+	const stub = function StubWebTransport() {
+		attempts++;
+		const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+		void accept(pair.server, url).then(() => {
+			pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
+		});
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	const reload = new Reload({
+		enabled: true,
+		url,
+		websocket: { enabled: false },
+		delay: { initial: 1, multiplier: 1, max: 1, timeout: 0 },
+	});
+
+	try {
+		await waitUntil(() => reload.error.peek() !== undefined);
+		const givenUp = attempts;
+		const err = reload.error.peek();
+
+		// Suspension shares sequence reset with give-up; resume must not look like a new
+		// sequence or it would clear `error` and redial the JWT the peer already refused.
+		win.dispatchEvent(new Event("pagehide"));
+		await settle();
+		win.dispatchEvent(new Event("pageshow"));
+		for (let i = 0; i < 20; i++) await settle();
+		expect(attempts).toBe(givenUp);
+		expect(reload.error.peek()).toBe(err);
+		expect(reload.closed.peek()).toBeUndefined();
+
+		reload.url.set(new URL("https://example.com/changed"));
+		await waitUntil(() => attempts > givenUp);
+	} finally {
+		reload.close();
+		globalThis.WebTransport = original;
+		Object.assign(globalThis, { window: previousWindow, document: previousDocument });
 	}
 });
 
@@ -325,15 +381,14 @@ test("a session rejected as unauthorized surfaces the code and stops retrying", 
 
 	try {
 		// The code reaches the app rather than being flattened away, and because
-		// UNAUTHORIZED is specified rather than guessed at, the loop treats it as terminal
+		// UNAUTHORIZED is specified rather than guessed at, the loop stops this URL
 		// instead of retrying credentials that cannot work. `timeout: 0` means unlimited
-		// retries, so `closed` settling at all is what proves it stopped on the rejection.
-		const err = await reload.closed.then(
-			() => undefined,
-			(err: unknown) => err,
-		);
+		// retries, so `error` settling at all is what proves it stopped on the rejection.
+		await waitUntil(() => reload.error.peek() !== undefined);
+		const err = reload.error.peek();
 		expect(err).toBeInstanceOf(SessionError);
 		expect((err as SessionError).code).toBe(SessionCode.Unauthorized);
+		expect(reload.closed.peek()).toBeUndefined();
 
 		// It still surfaced through the established session before the loop gave up.
 		expect(closes.find((e) => e instanceof SessionError)).toBeInstanceOf(SessionError);
@@ -348,10 +403,8 @@ test("an unauthorized session close during setup stops retrying", async () => {
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 	let attempts = 0;
-	const retried = Promise.withResolvers<Error>();
 	const stub = function StubWebTransport() {
 		attempts++;
-		if (attempts > 1) retried.resolve(new Error("retried a terminal session close"));
 		const pair = createMockTransportPair("");
 		void (async () => {
 			const incoming = pair.server.incomingBidirectionalStreams.getReader();
@@ -378,21 +431,17 @@ test("an unauthorized session close during setup stops retrying", async () => {
 	});
 
 	try {
-		const err = await Promise.race([
-			reload.closed.then(
-				() => undefined,
-				(err: unknown) => err,
-			),
-			retried.promise,
-		]);
+		await waitUntil(() => reload.error.peek() !== undefined);
+		const err = reload.error.peek();
 		expect(err).toBeInstanceOf(SessionError);
 		expect((err as SessionError).code).toBe(SessionCode.Unauthorized);
 		expect(attempts).toBe(1);
+		expect(reload.closed.peek()).toBeUndefined();
 
-		// The terminal authorization result survives a URL edit that would normally reconnect.
+		// A new URL starts another sequence on the same loop.
 		reload.url.set(new URL("https://example.com/changed"));
-		await settle();
-		expect(attempts).toBe(1);
+		await waitUntil(() => attempts >= 2);
+		expect(attempts).toBeGreaterThanOrEqual(2);
 	} finally {
 		reload.close();
 		globalThis.WebTransport = original;

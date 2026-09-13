@@ -124,6 +124,14 @@ impl Connection {
 	///   for its path exactly like a tokenless QUIC client (`--auth-public`).
 	///   Unix peer-credential gating happens earlier, in the listener.
 	async fn authenticate(&self) -> Result<AuthToken, StatusError> {
+		// A LAN mesh dial is marked by its path, not a JWT or client certificate.
+		// Checked first so a `/.cluster` request is never routed through public
+		// prefixes, and a relay without LAN discovery refuses it instead of
+		// treating the path as a broadcast root.
+		if Cluster::is_lan_path(self.request.path()) {
+			return self.authenticate_lan();
+		}
+
 		// Forwarded to the auth API so it can bucket by connection type (e.g. tier
 		// the internal Unix-socket gateways separately). "quic"/"websocket"/"tcp"/
 		// "unix"/"iroh".
@@ -152,6 +160,30 @@ impl Connection {
 		params.transport = Some(transport);
 
 		Ok(self.auth.verify(&params).await?)
+	}
+
+	/// Authorize a `/.cluster/<credential>` dial against the live LAN advertisement.
+	fn authenticate_lan(&self) -> Result<AuthToken, StatusError> {
+		let Some(presented) = Cluster::lan_credential(self.request.path()) else {
+			return Err(StatusError {
+				status: http::StatusCode::FORBIDDEN,
+				source: anyhow::anyhow!("LAN peer did not present a membership proof"),
+			});
+		};
+		match self.cluster.verify_lan_credential(presented) {
+			Some(true) => {
+				tracing::info!("accepted LAN peer");
+				Ok(self.cluster.lan_peer_token())
+			}
+			Some(false) => Err(StatusError {
+				status: http::StatusCode::FORBIDDEN,
+				source: anyhow::anyhow!("LAN peer did not present this listener's membership proof"),
+			}),
+			None => Err(StatusError {
+				status: http::StatusCode::FORBIDDEN,
+				source: anyhow::anyhow!("/.cluster request refused: LAN discovery is not enabled"),
+			}),
+		}
 	}
 }
 

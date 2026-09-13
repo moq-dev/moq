@@ -49,23 +49,21 @@ func (r *Request) Transport() Transport {
 }
 
 // SetPublish overrides the publish origin for this session. Pass nil to fall
-// back to the server's configured publish origin.
-func (r *Request) SetPublish(o *OriginProducer) {
+// back to the server's configured publish origin. Captured at Accept.
+func (r *Request) SetPublish(o *OriginProducer) error {
 	if o == nil {
-		r.inner.SetPublish(nil)
-		return
+		return r.inner.SetPublish(nil)
 	}
-	r.inner.SetPublish(&o.inner)
+	return r.inner.SetPublish(&o.inner)
 }
 
 // SetConsume overrides the consume origin for this session. Pass nil to fall
-// back to the server's configured consume origin.
-func (r *Request) SetConsume(o *OriginProducer) {
+// back to the server's configured consume origin. Captured at Accept.
+func (r *Request) SetConsume(o *OriginProducer) error {
 	if o == nil {
-		r.inner.SetConsume(nil)
-		return
+		return r.inner.SetConsume(nil)
 	}
-	r.inner.SetConsume(&o.inner)
+	return r.inner.SetConsume(&o.inner)
 }
 
 // Accept completes the handshake and returns the established session. Hold the
@@ -156,24 +154,25 @@ func Listen(ctx context.Context, bind string, opts ...ServerOption) (*Server, er
 	}
 
 	inner := ffi.NewMoqServer()
-	if err := inner.SetBind(bind); err != nil {
+	err := inner.SetBind(bind)
+	if err == nil && len(cfg.tlsCert) > 0 {
+		err = inner.SetTlsCert(cfg.tlsCert)
+	}
+	if err == nil && len(cfg.tlsKey) > 0 {
+		err = inner.SetTlsKey(cfg.tlsKey)
+	}
+	if err == nil && len(cfg.tlsGenerate) > 0 {
+		err = inner.SetTlsGenerate(cfg.tlsGenerate)
+	}
+	if err == nil && s.publishOrigin != nil {
+		err = inner.SetPublish(&s.publishOrigin.inner)
+	}
+	if err == nil && s.consumeOrigin != nil {
+		err = inner.SetConsume(&s.consumeOrigin.inner)
+	}
+	if err != nil {
 		inner.Cancel()
 		return nil, err
-	}
-	if len(cfg.tlsCert) > 0 {
-		inner.SetTlsCert(cfg.tlsCert)
-	}
-	if len(cfg.tlsKey) > 0 {
-		inner.SetTlsKey(cfg.tlsKey)
-	}
-	if len(cfg.tlsGenerate) > 0 {
-		inner.SetTlsGenerate(cfg.tlsGenerate)
-	}
-	if s.publishOrigin != nil {
-		inner.SetPublish(&s.publishOrigin.inner)
-	}
-	if s.consumeOrigin != nil {
-		inner.SetConsume(&s.consumeOrigin.inner)
 	}
 	s.inner = inner
 

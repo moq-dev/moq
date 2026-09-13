@@ -77,11 +77,17 @@ export const Milli = Object.assign((value: number): Milli => value as Milli, {
 /** Units per second for a {@link Timestamp}'s value, e.g. `1000` for milliseconds. */
 export type Timescale = number & { readonly _brand: "timescale" };
 
-/** Named timescales and a checked constructor (rejects non-positive / non-integer values). */
+/**
+ * Named timescales and a checked constructor.
+ *
+ * Units per second must be a safe integer ≥ 1. JavaScript numbers are exact only
+ * through `Number.MAX_SAFE_INTEGER` (`2^53 - 1`); the wire varint range goes
+ * to `2^62 - 1`, which Rust accepts and this constructor refuses.
+ */
 export const Timescale = Object.assign(
 	(unitsPerSecond: number): Timescale => {
-		if (!Number.isInteger(unitsPerSecond) || unitsPerSecond <= 0) {
-			throw new Error(`invalid timescale: ${unitsPerSecond}`);
+		if (!Number.isSafeInteger(unitsPerSecond) || unitsPerSecond <= 0) {
+			throw new RangeError(`invalid timescale: ${unitsPerSecond}`);
 		}
 		return unitsPerSecond as Timescale;
 	},
@@ -97,11 +103,24 @@ export const Timescale = Object.assign(
 	},
 );
 
+function assertTimestampValue(value: number): void {
+	if (!Number.isFinite(value) || value < 0 || value > Number.MAX_SAFE_INTEGER) {
+		throw new RangeError(`invalid timestamp: ${value}`);
+	}
+}
+
 /**
  * A presentation timestamp: a raw value in a given {@link Timescale}.
  *
  * Mirrors the Rust `Timestamp`. Unlike the bare `Milli`/`Micro` aliases it carries its
  * own scale, so a track can pick its units and conversions can't silently mix them up.
+ *
+ * The value must be finite and in `[0, Number.MAX_SAFE_INTEGER]`. Fractions are allowed
+ * (`performance.now()`, scale conversion). Encoding rounds to the nearest integer at the
+ * track timescale. Integer timestamps are exact through `2^53 - 1` units; this package
+ * does not use BigInt for timestamps. {@link Timestamp.as} also refuses a converted
+ * value that leaves that range, so a legal source timestamp cannot become an unencodable
+ * wire timestamp after a scale change.
  */
 export class Timestamp {
 	/** The raw value, in `scale` units. */
@@ -111,11 +130,9 @@ export class Timestamp {
 
 	/** Build a timestamp of `value` units at `scale`. */
 	constructor(value: number, scale: Timescale) {
-		if (!Number.isFinite(value) || value < 0) {
-			throw new Error(`invalid timestamp: ${value}`);
-		}
+		assertTimestampValue(value);
 		this.value = value;
-		this.scale = scale;
+		this.scale = Timescale(scale);
 	}
 
 	/** Monotonic now (`performance.now()`, milliseconds since page load), not wall-clock time. */
@@ -133,9 +150,12 @@ export class Timestamp {
 		return new Timestamp(us, Timescale.MICRO);
 	}
 
-	/** This timestamp's value re-expressed at `scale` (a raw number, not a new Timestamp). */
+	/** This timestamp's value re-expressed at `scale`; throws if the result is not in the safe range. */
 	as(scale: Timescale): number {
-		return scale === this.scale ? this.value : (this.value * scale) / this.scale;
+		const dest = Timescale(scale);
+		const converted = dest === this.scale ? this.value : (this.value * dest) / this.scale;
+		assertTimestampValue(converted);
+		return converted;
 	}
 
 	/** The value in milliseconds. */

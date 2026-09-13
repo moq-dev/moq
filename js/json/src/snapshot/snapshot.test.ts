@@ -12,7 +12,7 @@ const REPLAY_LATENCY = 30_000;
 // Reconstruct every value a consumer yields, in order.
 async function drain(track: Track.Subscriber): Promise<Value[]> {
 	const out: Value[] = [];
-	for await (const value of new Consumer<Value>(track)) out.push(value);
+	for await (const value of new Consumer<Value>({ track })) out.push(value);
 	return out;
 }
 
@@ -135,7 +135,7 @@ test("a held group is abandoned when a newer snapshot group rolls", async () => 
 	const track = new Track.Producer("test");
 	// A tiny ratio forces the update after any delta to roll a fresh snapshot group.
 	const producer = new Producer<Value>({ track, deltaRatio: 0.001 });
-	const consumer = new Consumer<Value>(track.subscribe({ maxAge: REPLAY_LATENCY }));
+	const consumer = new Consumer<Value>({ track: track.subscribe({ maxAge: REPLAY_LATENCY }) });
 
 	producer.update({ a: 1 });
 	expect(await consumer.next()).toEqual({ a: 1 });
@@ -151,7 +151,7 @@ test("a held group is abandoned when a newer snapshot group rolls", async () => 
 test("live consumer sees each update", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track });
-	const consumer = new Consumer<Value>(track.subscribe());
+	const consumer = new Consumer<Value>({ track: track.subscribe() });
 
 	for (let n = 1; n <= 3; n++) {
 		producer.update({ a: n });
@@ -198,7 +198,7 @@ test("deltas reconstruct to the final value", async () => {
 test("mutate composes independent owners", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, initial: {} });
-	const consumer = new Consumer<Value>(track.subscribe());
+	const consumer = new Consumer<Value>({ track: track.subscribe() });
 
 	producer.mutate((v) => {
 		v.video = "v1";
@@ -215,7 +215,7 @@ test("mutate composes independent owners", async () => {
 test("mutate starts from the configured initial value", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, initial: {} });
-	const consumer = new Consumer<Value>(track.subscribe());
+	const consumer = new Consumer<Value>({ track: track.subscribe() });
 
 	producer.mutate((v) => {
 		v.a = 1;
@@ -233,7 +233,7 @@ test("mutate without a prior value or initial throws", () => {
 test("mutate removes a section", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, deltaRatio: 100, initial: {} });
-	const consumer = new Consumer<Value>(track.subscribe());
+	const consumer = new Consumer<Value>({ track: track.subscribe() });
 
 	producer.mutate((v) => {
 		v.a = 1;
@@ -383,7 +383,10 @@ test("a compressed delta is gated on its encoded size, not its plaintext", async
 		expect(bytes).toBeLessThanOrEqual(Group.MAX_GROUP_CACHE_BYTES);
 	}
 
-	const consumer = new Consumer<Value>(track.subscribe({ maxAge: REPLAY_LATENCY }), { compression: true });
+	const consumer = new Consumer<Value>({
+		track: track.subscribe({ maxAge: REPLAY_LATENCY }),
+		compression: true,
+	});
 	const values: Value[] = [];
 	for await (const value of consumer) values.push(value);
 	expect(values[values.length - 1]).toEqual({ v: "x".repeat(Group.MAX_GROUP_CACHE_BYTES), q: "a" });

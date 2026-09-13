@@ -606,6 +606,7 @@ def test_public_api_exports():
     # Flat-error variants are accessible as attributes for selective catching.
     assert hasattr(moq.Error, "AlreadyResponded")
     assert hasattr(moq.Error, "Cancelled")
+    assert hasattr(moq.Error, "Busy")
     assert callable(moq.log_level)
     assert isinstance(moq.connect("https://example.com"), moq.Client)
     client = moq.connect(

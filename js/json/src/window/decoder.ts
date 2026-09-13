@@ -14,9 +14,9 @@ function index(value: unknown, label: string): number {
 	return value;
 }
 
-/** Options for a {@link Decoder}, and so for the {@link Consumer} wrapping one. */
+/** Options for a {@link Decoder}. */
 export interface ConsumerConfig {
-	/** Read frames written with `ProducerConfig.compression` on. Defaults to `false`. */
+	/** Read frames written with `Config.compression` on. Defaults to `false`. */
 	compression?: boolean;
 }
 

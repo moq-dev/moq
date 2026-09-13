@@ -83,7 +83,10 @@ each reconnect by number; `moq.WithBackoff` tunes the pacing, with
 `moq.RetryForever` as the timeout; and `moq.WithQUICMaxStreams` raises the
 peer's inbound stream cap for a subscriber to many tracks.
 
-`moq.Listen` accepts sessions with per-request `Accept`/`Reject`. JSON tracks
+`moq.Listen` accepts sessions with per-request `Accept`/`Reject`.
+`Request.SetPublish`/`SetConsume` return an error if the request is already
+answered, cancelled, or currently accepting; `ErrBusy` is the race with an
+in-flight Accept. JSON tracks
 take anything `encoding/json` handles and return `json.RawMessage`. The rest
 of the [shared feature list](/lib/#what-every-binding-can-do) maps one to
 one: `FetchGroup`/`FetchMediaGroup`, `Dynamic()` with `Requests(ctx)`,

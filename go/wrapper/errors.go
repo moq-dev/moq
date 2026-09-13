@@ -55,6 +55,8 @@ var (
 	ErrCancelled = ffi.ErrMoqErrorCancelled
 	// ErrClosed is returned when the session or stream has closed; IsShutdown treats it as a graceful stop.
 	ErrClosed = ffi.ErrMoqErrorClosed
+	// ErrBusy is returned when a configuration setter races an in-flight connect, listen, or accept.
+	ErrBusy = ffi.ErrMoqErrorBusy
 	// ErrConnect is returned when establishing a client session fails.
 	ErrConnect = ffi.ErrMoqErrorConnect
 	// ErrBind is returned when the server fails to bind its listening address.

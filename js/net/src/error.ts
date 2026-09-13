@@ -115,10 +115,11 @@ function applicationCode(code: number): number {
  * never throws.
  *
  * ```ts
- * const err = await connection.closed;
- * if (err instanceof SessionError && err.code === SessionCode.Unauthorized) {
- *   console.warn("server rejected the session");
- * }
+ * connection.error.subscribe((err) => {
+ *   if (err instanceof SessionError && err.code === SessionCode.Unauthorized) {
+ *     console.warn("server rejected the session");
+ *   }
+ * });
  * ```
  *
  * @public

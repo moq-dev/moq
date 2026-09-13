@@ -29,7 +29,3 @@ Check the Python, Swift, Kotlin, and Go conveniences against that behavior.
 
 Public API: behavioral correction without a signature change. Wire: none.
 Run `just check`, `just test`, and `just test smoke-full`.
-
-## Related
-
-- [FFI read lanes](/quest/m1/api-ffi-read-lanes.md) - changes the same reader state; coordinate ownership without making either fix depend on the other

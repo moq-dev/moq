@@ -1,8 +1,11 @@
 import { Decoder as Flate } from "@moq/flate";
 import type * as Moq from "@moq/net";
 
-/** Options for a {@link Consumer}. */
+/** Stream consumer options, including the source track. */
 export interface ConsumerConfig {
+	/** Track to read payloads from. */
+	track: Moq.Track.Subscriber;
+
 	/** Whether the frames are `deflate-raw` compressed. Must match the producer. Defaults to `false`. */
 	compression?: boolean;
 }
@@ -52,8 +55,8 @@ export class Consumer {
 	// The DEFLATE window for the group, present while decompressing.
 	#flate?: Flate;
 
-	constructor(track: Moq.Track.Subscriber, config: ConsumerConfig = {}) {
-		this.#track = track;
+	constructor(config: ConsumerConfig) {
+		this.#track = config.track;
 		this.#decompress = config.compression ?? false;
 	}
 

@@ -52,6 +52,17 @@ test("Writer u8", async () => {
 	expect(written[1]).toEqual(new Uint8Array([255]));
 });
 
+test("Writer u8 refuses out of range values before emitting bytes", async () => {
+	for (const value of [-1, 1.5, 256, Number.NaN, Number.POSITIVE_INFINITY]) {
+		const { stream, written } = createTestWritableStream();
+		const writer = new Writer(stream);
+		await expect(writer.u8(value)).rejects.toThrow(RangeError);
+		writer.close();
+		await writer.closed;
+		expect(written).toEqual([]);
+	}
+});
+
 test("Writer i32", async () => {
 	const { stream, written } = createTestWritableStream();
 	const writer = new Writer(stream);
@@ -82,6 +93,7 @@ test("Writer u53", async () => {
 	await writer.u53(64); // MIN for 2-byte varint
 	await writer.u53(16383); // MAX_U14
 	await writer.u53(16384); // MIN for 4-byte varint
+	await writer.u53(Number.MAX_SAFE_INTEGER);
 
 	writer.close();
 	await writer.closed;
@@ -92,6 +104,26 @@ test("Writer u53", async () => {
 	expect(written[2].byteLength).toBe(2); // 64 needs 2 bytes
 	expect(written[3].byteLength).toBe(2); // 16383 fits in 2 bytes
 	expect(written[4].byteLength).toBe(4); // 16384 needs 4 bytes
+	expect(written[5].byteLength).toBe(8); // MAX_SAFE_INTEGER needs 8 bytes
+});
+
+test("Writer u53 refuses unsafe values before emitting bytes", async () => {
+	for (const value of [
+		-1,
+		1.5,
+		Number.NaN,
+		Number.POSITIVE_INFINITY,
+		Number.MAX_SAFE_INTEGER + 1,
+		2 ** 62,
+		2 ** 62 + 1,
+	]) {
+		const { stream, written } = createTestWritableStream();
+		const writer = new Writer(stream);
+		await expect(writer.u53(value)).rejects.toThrow(RangeError);
+		writer.close();
+		await writer.closed;
+		expect(written).toEqual([]);
+	}
 });
 
 test("Writer string", async () => {

@@ -651,57 +651,84 @@ async fn serve_connection(
 	// The path + `?jwt=` ride the URL for WebTransport and the SETUP for raw
 	// QUIC; either way the verdict comes from the shared runtime, which owns
 	// the auth API's HTTP client.
-	let mut params = match &url {
-		Some(url) => serve.auth.params_from_url(url),
+	let path = match &url {
+		Some(url) => url.path().to_string(),
 		None => {
 			let setup = request.path();
-			let (path, query) = match setup.split_once('?') {
-				Some((path, query)) => (path, Some(query)),
-				None => (setup, None),
-			};
-			AuthParams::from_path_query(path, query)
+			setup.split_once('?').map(|(path, _)| path).unwrap_or(setup).to_string()
 		}
 	};
-	params.transport = Some(moq_tokio::Transport::Quic);
-
-	// An mTLS peer's certificate is its credential, granting full access within
-	// the path's canonical root; everyone else brings a JWT (or is anonymous).
-	// Either verdict comes from the shared runtime.
-	let auth = serve.auth.clone();
-	let mtls = identity.is_some();
-	let token = match serve
-		.tokio
-		.spawn(async move {
-			match mtls {
-				true => auth.verify_mtls(&params.path, params.transport).await,
-				false => auth.verify(&params).await,
-			}
-		})
-		.await
-		.context("auth task failed")?
-	{
-		Ok(mut token) => {
-			if let Some(identity) = &identity {
-				tracing::debug!(id, "mTLS peer authenticated");
-				// Close the session when the client certificate expires,
-				// mirroring the JWT `exp` handling.
-				token.expires = identity.expiry();
-			}
-			token
-		}
-		Err(err) => {
-			// The status is what separates "your credential is bad" from "the
-			// auth API is down". Collapsing both into Unauthorized tells a
-			// client to stop reconnecting through an outage it could have
-			// waited out.
-			let status = axum::http::StatusCode::from(&err);
-			request.close(match status {
-				axum::http::StatusCode::UNAUTHORIZED | axum::http::StatusCode::FORBIDDEN => {
-					moq_net::Error::Unauthorized
+	let token = if Cluster::is_lan_path(&path) {
+		match Cluster::lan_credential(&path) {
+			Some(presented) => match serve.cluster.verify_lan_credential(presented) {
+				Some(true) => serve.cluster.lan_peer_token(),
+				Some(false) => {
+					request.close(moq_net::Error::Unauthorized);
+					anyhow::bail!("LAN peer did not present this listener's membership proof");
 				}
-				other => moq_net::Error::App(other.as_u16()),
-			});
-			return Err(anyhow::Error::new(err).context("authentication failed"));
+				None => {
+					request.close(moq_net::Error::Unauthorized);
+					anyhow::bail!("/.cluster request refused: LAN discovery is not enabled");
+				}
+			},
+			None => {
+				request.close(moq_net::Error::Unauthorized);
+				anyhow::bail!("LAN peer did not present a membership proof");
+			}
+		}
+	} else {
+		let mut params = match &url {
+			Some(url) => serve.auth.params_from_url(url),
+			None => {
+				let setup = request.path();
+				let (path, query) = match setup.split_once('?') {
+					Some((path, query)) => (path, Some(query)),
+					None => (setup, None),
+				};
+				AuthParams::from_path_query(path, query)
+			}
+		};
+		params.transport = Some(moq_tokio::Transport::Quic);
+
+		// An mTLS peer's certificate is its credential, granting full access within
+		// the path's canonical root; everyone else brings a JWT (or is anonymous).
+		// Either verdict comes from the shared runtime.
+		let auth = serve.auth.clone();
+		let mtls = identity.is_some();
+		match serve
+			.tokio
+			.spawn(async move {
+				match mtls {
+					true => auth.verify_mtls(&params.path, params.transport).await,
+					false => auth.verify(&params).await,
+				}
+			})
+			.await
+			.context("auth task failed")?
+		{
+			Ok(mut token) => {
+				if let Some(identity) = &identity {
+					tracing::debug!(id, "mTLS peer authenticated");
+					// Close the session when the client certificate expires,
+					// mirroring the JWT `exp` handling.
+					token.expires = identity.expiry();
+				}
+				token
+			}
+			Err(err) => {
+				// The status is what separates "your credential is bad" from "the
+				// auth API is down". Collapsing both into Unauthorized tells a
+				// client to stop reconnecting through an outage it could have
+				// waited out.
+				let status = axum::http::StatusCode::from(&err);
+				request.close(match status {
+					axum::http::StatusCode::UNAUTHORIZED | axum::http::StatusCode::FORBIDDEN => {
+						moq_net::Error::Unauthorized
+					}
+					other => moq_net::Error::App(other.as_u16()),
+				});
+				return Err(anyhow::Error::new(err).context("authentication failed"));
+			}
 		}
 	};
 

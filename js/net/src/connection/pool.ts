@@ -3,7 +3,7 @@
  *
  * @module
  */
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import type { Handle } from "../bandwidth.ts";
 import * as Origin from "../origin.ts";
@@ -91,8 +91,9 @@ export interface ConnectionProps {
  * reuses the warm connection instead of redialing.
  *
  * The loop reconnects for as long as a handle holds it, so an outage of any length recovers
- * on its own. An auth rejection is the one failure it stops on, and it retires the shared
- * connection so the next handle dials fresh.
+ * on its own. An auth rejection stops retrying those credentials and retires the shared
+ * connection so the next handle dials fresh; a new URL on this handle starts another
+ * sequence. {@link closed} settles only when this handle is released.
  *
  * Options the pool cannot honor (transport options, discovery, delay, a pinned
  * certificate, caller-owned origins) take `share: false` and get a private loop. A
@@ -114,7 +115,7 @@ export class Connection {
 	/** Whether this runtime can connect with WebTransport. */
 	static readonly isWebTransportSupported = isWebTransportSupported;
 
-	/** Relay URL to connect to; updating it switches to that URL's shared connection. */
+	/** Relay URL to connect to; updating it reconnects to that URL. */
 	url: Signal<URL | undefined>;
 
 	/** Whether to hold a connection at all; clearing it releases this handle's share. */
@@ -122,6 +123,14 @@ export class Connection {
 
 	/** Current status of the connection. */
 	readonly status: Getter<ReloadStatus>;
+
+	/**
+	 * The failure that stopped retrying the current URL, or undefined while the loop is live.
+	 *
+	 * Set on an auth rejection or when a private retry window expires. Cleared when a new URL
+	 * or a disable/re-enable starts another sequence, not on a page hide/show.
+	 */
+	readonly error: Getter<Error | undefined>;
 
 	/**
 	 * The wire transport the current session runs over, or undefined while disconnected.
@@ -155,21 +164,21 @@ export class Connection {
 	readonly origin: Getter<Origin.Table | undefined>;
 
 	/**
-	 * Resolves when this handle is released via {@link close}.
-	 *
-	 * Rejects when a private loop (`share: false`) gives up, carrying the failure that was
-	 * in flight when the retry window expired. A pooled loop retries for as long as any
-	 * handle holds it, so this only rejects on an auth rejection that stops that loop.
+	 * Settles once this handle is released via {@link close}: `null` on a clean close, or
+	 * the abort {@link Error}. Peek it synchronously (`undefined` while open), observe it
+	 * reactively, or `await` it. Attempt failures live on {@link error} instead.
 	 */
-	closed: Promise<void>;
-	#closedResolve!: () => void;
-	#closedReject!: (err: Error) => void;
+	get closed(): GetPromise<Error | null> {
+		return this.#closed;
+	}
 
+	#closed = new Once<Error | null>();
 	readonly #status = new Signal<ReloadStatus>("disconnected");
 	readonly #established = new Signal<Established | undefined>(undefined);
 	readonly #probe = new Signal<ProbeType | undefined>(undefined);
 	readonly #origin = new Signal<Origin.Producer | undefined>(undefined);
 	readonly #bandwidth = new Signal<Handle | undefined>(undefined);
+	readonly #error = new Signal<Error | undefined>(undefined);
 	#signals = new Effect();
 
 	/**
@@ -186,17 +195,11 @@ export class Connection {
 		this.url = Signal.from(props?.url);
 		this.enabled = Signal.from(props?.enabled ?? true);
 		this.status = this.#status;
+		this.error = this.#error;
 		this.probe = this.#probe;
 		this.origin = this.#origin;
 		this.bandwidth = this.#bandwidth;
 		this.transport = this.#signals.computed((effect) => effect.get(this.#established)?.transport);
-
-		this.closed = new Promise((resolve, reject) => {
-			this.#closedResolve = resolve;
-			this.#closedReject = reject;
-		});
-		// A caller is free to never await `closed`, and giving up rejects it unprompted.
-		this.closed.catch(() => {});
 
 		const linger = props?.linger;
 
@@ -224,14 +227,7 @@ export class Connection {
 			effect.run((nested) => nested.set(this.#status, nested.get(lease.connection.status), "disconnected"));
 			effect.run((nested) => nested.set(this.#established, nested.get(lease.connection.established), undefined));
 			effect.run((nested) => nested.set(this.#probe, nested.get(lease.connection.probe), undefined));
-
-			effect.spawn(async () => {
-				try {
-					await Promise.race([effect.cancel, lease.connection.closed]);
-				} catch (err) {
-					this.#closedReject(err instanceof Error ? err : new Error(String(err)));
-				}
-			});
+			effect.run((nested) => nested.set(this.#error, nested.get(lease.connection.error), undefined));
 		});
 	}
 
@@ -248,15 +244,11 @@ export class Connection {
 			webtransport: props.webtransport,
 			websocket: props.websocket,
 			discovery: props.discovery,
-			// A handle nobody watches wants unlimited retries; an auth rejection is still terminal.
+			// A handle nobody watches wants unlimited retries; an auth rejection still
+			// stops this URL, and a new one starts another sequence.
 			delay: props.delay ?? { timeout: 0 },
 		});
 		this.#signals.cleanup(() => loop.close());
-
-		void loop.closed.then(
-			() => this.#closedResolve(),
-			(err) => this.#closedReject(err),
-		);
 
 		this.#signals.run((effect) => {
 			if (!effect.get(this.enabled) || !effect.get(href)) return;
@@ -266,6 +258,7 @@ export class Connection {
 		this.#signals.run((effect) => effect.set(this.#status, effect.get(loop.status), "disconnected"));
 		this.#signals.run((effect) => effect.set(this.#established, effect.get(loop.established), undefined));
 		this.#signals.run((effect) => effect.set(this.#probe, effect.get(loop.probe), undefined));
+		this.#signals.run((effect) => effect.set(this.#error, effect.get(loop.error), undefined));
 	}
 
 	/**
@@ -340,9 +333,9 @@ export class Connection {
 	 * Release this handle. The shared connection closes once its last handle is gone and
 	 * the linger window passes; other handles on the URL are unaffected. Idempotent.
 	 */
-	close(): void {
+	close(abort?: Error): void {
 		this.#signals.close();
-		this.#closedResolve();
+		if (this.#closed.peek() === undefined) this.#closed.set(abort ?? null);
 	}
 }
 
@@ -430,7 +423,7 @@ function acquire(key: string, linger?: DOMHighResTimeStamp): Entry & { release: 
 			subscribe: origin,
 			// Nobody observes a shared loop's `closed`, so giving up would strand every handle
 			// on this URL offline until the page reloads. Retry for as long as the entry lives
-			// instead; an auth rejection is still terminal, and evicts below.
+			// instead; an auth rejection still stops this URL, and evicts below.
 			delay: { timeout: 0 },
 		});
 
@@ -440,8 +433,8 @@ function acquire(key: string, linger?: DOMHighResTimeStamp): Entry & { release: 
 		// entry so a later handle dials fresh rather than joining a loop that has stopped;
 		// handles already on it keep it until they release, since a redial would be refused
 		// the same way.
-		void connection.closed.catch(() => {
-			if (pool.get(key) === created) pool.delete(key);
+		connection.error.subscribe((err) => {
+			if (err !== undefined && pool.get(key) === created) pool.delete(key);
 		});
 
 		entry = created;

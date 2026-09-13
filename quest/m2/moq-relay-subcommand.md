@@ -45,5 +45,4 @@ Starts on `main` after the merge: the CLI's verbs live on `usage`, which only
 
 ## Related
 
-- [One LAN mesh](/quest/m1/lan-mesh.md) - the CLI already hosts the relay library for its cluster
 - [`moq` serves like a relay](/quest/m2/cli-serve.md) - the end state where the relay is `moq` with listening on by default

@@ -4,10 +4,11 @@
 //! `<import|export> <endpoint> [endpoint opts]`, plus `moq <MoQ side> play` for
 //! native playback.
 //!
-//! - The MoQ side (`--connect`, the `--listen*` transport binds, and
-//!   `--cluster-lan`; all optional, at least one) attaches the shared Origin to
-//!   the MoQ network, and comes before the first stage. They compose: dial a
-//!   relay, accept incoming sessions, and mesh with the LAN all at once.
+//! - The MoQ side (`--connect`, the `--listen*` transport binds, `--cluster-lan`,
+//!   and `--cluster-connect` / `--cluster-connect-api`; all optional, at least
+//!   one) attaches the shared Origin to the MoQ network, and comes before the
+//!   first stage. They compose: dial a relay, accept incoming sessions, mesh
+//!   with the LAN, and join a cluster all at once.
 //! - `import` routes media INTO MoQ from one source; `export` routes it OUT to
 //!   one sink. The verb fixes the data direction (and thus, for the
 //!   bidirectional gateways, whether `--connect`/`--listen` push or pull).
@@ -30,8 +31,6 @@
 
 use std::ffi::{OsStr, OsString};
 use std::time::Duration;
-
-use hang::moq_net;
 
 use crate::publish::PublishFormat;
 use crate::subscribe::{CatalogFormatArg, SubscribeFormat};
@@ -350,10 +349,11 @@ pub struct MoqSide {
 	#[usage(flatten)]
 	pub iroh: moq_tokio::iroh::EndpointConfig,
 
-	/// LAN clustering config (`--cluster-lan`, `--cluster-lan-secret`, `--cluster-lan-app`).
-	#[cfg(feature = "cluster-lan")]
+	/// Clustering config (`--cluster-*`, including LAN). The same flags as
+	/// `moq-relay`, so a CLI process and a relay on the same network mesh
+	/// through one implementation.
 	#[usage(flatten)]
-	pub cluster: crate::cluster::Args,
+	pub cluster: moq_relay::ClusterConfig,
 }
 
 impl MoqSide {
@@ -368,20 +368,25 @@ impl MoqSide {
 		found
 	}
 
-	/// Mint the origin all broadcasts route through, identified by the pinned
-	/// `--hop` id when set and a fresh random one otherwise.
-	pub fn origin(&self) -> anyhow::Result<moq_net::origin::Producer> {
-		use anyhow::Context;
-		Ok(moq_tokio::origin::spawn(match self.hop {
-			Some(id) => moq_net::Hop::new(id).with_context(|| format!("invalid --hop {id}"))?,
-			None => moq_net::Hop::random(),
-		}))
+	/// The cluster this process publishes and subscribes on. Built once; the
+	/// origin is its origin. `--hop` fills `--cluster-id` when the latter is
+	/// unset; they must agree when both are set.
+	pub fn cluster(&self) -> anyhow::Result<moq_relay::Cluster> {
+		let mut config = self.cluster.clone();
+		match (config.id, self.hop) {
+			(None, Some(hop)) => config.id = Some(hop),
+			(Some(id), Some(hop)) if id != hop => {
+				anyhow::bail!("--hop {hop} and --cluster-id {id} must agree")
+			}
+			_ => {}
+		}
+		moq_relay::Cluster::new(moq_relay::ClusterOptions::new(config))
 	}
 
 	/// Whether `--cluster-lan` asked this process to mesh over the LAN.
 	pub fn lan(&self) -> bool {
 		#[cfg(feature = "cluster-lan")]
-		return self.cluster.enabled();
+		return self.cluster.lan.enabled;
 		#[cfg(not(feature = "cluster-lan"))]
 		false
 	}
@@ -408,19 +413,25 @@ impl MoqSide {
 		self.server.has_explicit_bind() || self.lan()
 	}
 
+	/// Whether a WAN cluster dial is configured (`--cluster-connect` or
+	/// `--cluster-connect-api`).
+	fn cluster_dials(&self) -> bool {
+		!self.cluster.connect.is_empty() || self.cluster.connect_api.is_some()
+	}
+
 	/// Reject a verb that needs the MoQ network but was given no way to reach it.
 	/// Stands in for the Usage `required` the `moq` group can't carry, since
 	/// `devices` is exempt.
 	pub fn validate(&self) -> anyhow::Result<()> {
 		anyhow::ensure!(
-			self.client.url.is_some() || self.serves(),
-			"a MoQ side is required: pass --connect <url> to dial a relay, a --listen option to self-host, or --cluster-lan to mesh over the LAN"
+			self.client.url.is_some() || self.serves() || self.cluster_dials(),
+			"a MoQ side is required: pass --connect <url> to dial a relay, a --listen option to self-host, --cluster-lan to mesh over the LAN, or --cluster-connect to join a cluster"
 		);
 		#[cfg(feature = "cluster-lan")]
 		{
-			self.cluster.validate()?;
+			self.cluster.lan.validate()?;
 			if self.lan() {
-				crate::cluster::validate_versions(&self.client, &self.server_config())?;
+				moq_relay::Cluster::validate_lan_versions(&self.client, &self.server_config())?;
 			}
 		}
 		Ok(())
@@ -466,11 +477,11 @@ impl MoqSide {
 	/// reaches here, so a typed one can be refused like the rest.
 	fn reject(&self, command: &str) -> anyhow::Result<()> {
 		#[cfg(feature = "cluster-lan")]
-		let cluster_secret = self.cluster.secret.is_some();
+		let cluster_secret = self.cluster.lan.secret.is_some();
 		#[cfg(not(feature = "cluster-lan"))]
 		let cluster_secret = false;
 		#[cfg(feature = "cluster-lan")]
-		let cluster_app = self.cluster.app.is_some();
+		let cluster_app = self.cluster.lan.app.is_some();
 		#[cfg(not(feature = "cluster-lan"))]
 		let cluster_app = false;
 
@@ -483,6 +494,13 @@ impl MoqSide {
 			("--cluster-lan", self.lan()),
 			("--cluster-lan-secret", cluster_secret),
 			("--cluster-lan-app", cluster_app),
+			("--cluster-connect", !self.cluster.connect.is_empty()),
+			("--cluster-connect-api", self.cluster.connect_api.is_some()),
+			("--cluster-node", self.cluster.node.is_some()),
+			("--cluster-mesh", self.cluster.mesh.is_some()),
+			("--cluster-token", self.cluster.token.is_some()),
+			("--cluster-id", self.cluster.id.is_some()),
+			("--cluster-tier", self.cluster.tier.is_some()),
 			("--broadcast", self.broadcast.is_some()),
 			("--hop", self.hop.is_some()),
 		];
@@ -1216,11 +1234,25 @@ mod tests {
 			("--connect", "https://relay.example.com", "--connect"),
 			("--listen-tcp-bind", "127.0.0.1:0", "--listen-tcp-bind"),
 			("--broadcast", "room", "--broadcast"),
+			("--cluster-connect", "https://relay.example", "--cluster-connect"),
+			(
+				"--cluster-connect-api",
+				"https://api.example/peers",
+				"--cluster-connect-api",
+			),
+			("--cluster-node", "https://self.example", "--cluster-node"),
+			("--cluster-token", "cluster.jwt", "--cluster-token"),
+			("--cluster-id", "1", "--cluster-id"),
+			("--cluster-tier", "internal", "--cluster-tier"),
 		] {
 			let cli = Invocation::try_parse_from(["moq", flag, value, "token", "generate"]).unwrap();
 			let err = cli.moq.reject("token").unwrap_err().to_string();
 			assert!(err.contains(reported), "{err}");
 		}
+
+		let cli = Invocation::try_parse_from(["moq", "--cluster-mesh", "token", "generate"]).unwrap();
+		let err = cli.moq.reject("token").unwrap_err().to_string();
+		assert!(err.contains("--cluster-mesh"), "{err}");
 
 		#[cfg(unix)]
 		{
@@ -1271,6 +1303,31 @@ mod tests {
 		}
 	}
 
+	/// `--cluster-connect` / `--cluster-connect-api` attach the process as a
+	/// cluster peer, so they are a MoQ side on their own. `--cluster-node` is
+	/// identity, not an attachment.
+	#[test]
+	fn cluster_connect_is_a_moq_side() {
+		let cli = Invocation::try_parse_from(["moq", "--cluster-connect", "https://relay.example", "import", "ts"])
+			.expect("parse");
+		assert!(cli.moq.validate().is_ok(), "a cluster dial is a MoQ side on its own");
+
+		let cli = Invocation::try_parse_from([
+			"moq",
+			"--cluster-connect-api",
+			"https://api.example/peers",
+			"import",
+			"ts",
+		])
+		.expect("parse");
+		assert!(cli.moq.validate().is_ok(), "a cluster API is a MoQ side on its own");
+
+		let cli = Invocation::try_parse_from(["moq", "--cluster-node", "https://self.example", "import", "ts"])
+			.expect("parse");
+		let err = cli.moq.validate().unwrap_err().to_string();
+		assert!(err.contains("MoQ side"), "{err}");
+	}
+
 	/// `--cluster-lan` is a MoQ side on its own, and it supplies the listener the
 	/// user would otherwise have to spell out.
 	#[cfg(feature = "cluster-lan")]
@@ -1313,27 +1370,23 @@ mod tests {
 	#[cfg(feature = "cluster-lan")]
 	#[test]
 	fn cluster_lan_secret_requires_the_mesh() {
-		let err = Invocation::try_parse_from(["moq", "--cluster-lan-secret", "cluster.key", "import", "ts"])
-			.err()
-			.expect("the secret must require --cluster-lan")
-			.to_string();
-		assert!(err.contains("cluster-lan"), "{err}");
-
-		// `--cluster-lan=false` satisfies Usage's `requires` (the flag is present),
-		// so the real check lives in `validate`.
-		let cli = Invocation::try_parse_from([
-			"moq",
-			"--cluster-lan=false",
-			"--cluster-lan-secret",
-			"cluster.key",
-			"--connect",
-			"https://relay.example.com",
-			"import",
-			"ts",
-		])
-		.expect("parse");
-		let err = cli.moq.validate().unwrap_err().to_string();
-		assert!(err.contains("--cluster-lan=true"), "{err}");
+		for lan in [None, Some("--cluster-lan=false")] {
+			let mut argv = vec!["moq"];
+			if let Some(lan) = lan {
+				argv.push(lan);
+			}
+			argv.extend([
+				"--cluster-lan-secret",
+				"cluster.key",
+				"--connect",
+				"https://relay.example.com",
+				"import",
+				"ts",
+			]);
+			let cli = Invocation::try_parse_from(argv).expect("parse");
+			let err = cli.moq.validate().unwrap_err().to_string();
+			assert!(err.contains("--cluster-lan=true"), "{err}");
+		}
 
 		let cli = Invocation::try_parse_from([
 			"moq",
@@ -1345,7 +1398,7 @@ mod tests {
 		])
 		.expect("parse");
 		assert!(cli.moq.validate().is_ok());
-		assert_eq!(cli.moq.cluster.secret.as_deref(), Some("cluster.key"));
+		assert_eq!(cli.moq.cluster.lan.secret.as_deref(), Some("cluster.key"));
 	}
 
 	/// The app is only read by the mesh, so configuring one without it is an
@@ -1353,33 +1406,34 @@ mod tests {
 	#[cfg(feature = "cluster-lan")]
 	#[test]
 	fn cluster_lan_app_requires_the_mesh_and_defaults() {
-		let err = Invocation::try_parse_from(["moq", "--cluster-lan-app", "custom", "import", "ts"])
-			.err()
-			.expect("the app must require --cluster-lan")
-			.to_string();
-		assert!(err.contains("cluster-lan"), "{err}");
-
-		let cli = Invocation::try_parse_from([
-			"moq",
-			"--cluster-lan=false",
-			"--cluster-lan-app",
-			"custom",
-			"--connect",
-			"https://relay.example.com",
-			"import",
-			"ts",
-		])
-		.expect("parse");
-		let err = cli.moq.validate().unwrap_err().to_string();
-		assert!(err.contains("--cluster-lan=true"), "{err}");
+		for lan in [None, Some("--cluster-lan=false")] {
+			let mut argv = vec!["moq"];
+			if let Some(lan) = lan {
+				argv.push(lan);
+			}
+			argv.extend([
+				"--cluster-lan-app",
+				"custom",
+				"--connect",
+				"https://relay.example.com",
+				"import",
+				"ts",
+			]);
+			let cli = Invocation::try_parse_from(argv).expect("parse");
+			let err = cli.moq.validate().unwrap_err().to_string();
+			assert!(err.contains("--cluster-lan=true"), "{err}");
+		}
 
 		let cli = Invocation::try_parse_from(["moq", "--cluster-lan", "import", "ts"]).expect("parse");
-		assert_eq!(cli.moq.cluster.app().as_str(), "default");
+		assert_eq!(cli.moq.cluster.lan.app.clone().unwrap_or_default().as_str(), "default");
 
 		let cli = Invocation::try_parse_from(["moq", "--cluster-lan", "--cluster-lan-app", "custom", "import", "ts"])
 			.expect("parse");
 		assert!(cli.moq.validate().is_ok());
-		assert_eq!(cli.moq.cluster.app().as_str(), "custom");
+		assert_eq!(
+			cli.moq.cluster.lan.app.as_ref().map(ToString::to_string).as_deref(),
+			Some("custom")
+		);
 
 		let err = Invocation::try_parse_from(["moq", "--cluster-lan", "--cluster-lan-app", "Default", "import", "ts"])
 			.err()
@@ -1571,7 +1625,7 @@ mod tests {
 
 		// As a set: `names()` is preference-ordered (newest first) while a choice
 		// list reads ascending, and that ordering is a presentation call.
-		let mut expected: Vec<&str> = moq_net::Version::names().collect();
+		let mut expected: Vec<&str> = hang::moq_net::Version::names().collect();
 		expected.sort_unstable();
 		let mut found = Vec::new();
 		walk(Cli::spec().root, &mut found);

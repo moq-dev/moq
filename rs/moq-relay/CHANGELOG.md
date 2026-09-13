@@ -11,6 +11,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - *(relay)* `ClusterOptions` so the origin is constructed with its cache settings
 - `[cluster.lan] app` / `--cluster-lan-app` names the DNS-SD application the LAN mesh advertises under
+- *(relay)* `Cluster::with_advertise` / `Cluster::with_connect` so a LAN mesh can advertise a generated certificate and pin it when dialing
+- *(relay)* `/.cluster/<credential>` authenticates a LAN peer without `cluster.token`
+
+### Changed
+
+- `[cluster.lan] secret` is optional; without it the LAN mesh is open to anyone who can reach the listener
+- `--cluster-lan` no longer requires `--cluster-node`; a generated certificate's fingerprint is advertised instead
+
+### Fixed
+
+- LAN mesh advertises an in-memory listener identity's fingerprint
+- LAN mesh refuses a client/listener version set with no shared path-capable version
 
 ### Removed
 

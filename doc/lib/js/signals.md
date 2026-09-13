@@ -43,7 +43,8 @@ The rules that differ from other signal libraries:
 
 Components follow one shape: `in` (wired inputs), `out` (read-only derived
 state), and public writable knobs. `getter()` and `Inputs<T>` accept a raw
-value, a signal, or another component's output interchangeably.
+value, a signal, another component's output, or any other `Getter`
+interchangeably.
 
 Adapters: `@moq/signals/react` (`useValue`, `useSignal`), `@moq/signals/solid`
 (`createAccessor`, `createPair`), and `@moq/signals/dom` for building reactive

@@ -15,16 +15,12 @@ it cannot work without:
 
 - `--cluster-mesh` bails without `--cluster-node`, because gossip has no
   address to advertise.
-- `--cluster-lan` bails without `--cluster-node` for the same reason.
-- `--cluster-lan` bails without `--cluster-lan-secret`, because mDNS is
-  unauthenticated and any advertiser on the network would otherwise be dialed
-  and handed `--cluster-token`.
 
-[One LAN mesh](/quest/m1/lan-mesh.md) deletes the last two: a LAN peer
-advertises its listener and fingerprint when it has no node URL, and is dialed
-with its mDNS credential rather than the token, so neither flag is a
-prerequisite any more and the secret is optional. What remains is the mesh
-rule, plus the LAN fields (`secret`, `app`) that belong to the LAN mechanism.
+A LAN peer advertises its listener and fingerprint when it has no node URL,
+and is dialed with its mDNS credential rather than the token, so neither
+`--cluster-node` nor `--cluster-lan-secret` is a prerequisite and the secret
+is optional. What remains is the mesh rule, plus the LAN fields (`secret`,
+`app`) that belong to the LAN mechanism.
 
 Each is a real rule with a good error message, and each exists because the
 flag shape allows a state that has no meaning. Make the mechanism's value
@@ -41,13 +37,11 @@ so they belong where they are.
 Every rename is user-facing, so old spellings stay as hidden aliases per the
 deprecation rules: no `--help` entry, no "deprecated, use X" note, and `/doc`
 examples updated to the new names only. The flags are TOML keys too, so this
-is a config-file migration as well as a CLI one, and once moq-cli nests
-`ClusterConfig` the same flags are read by both binaries. Grep both binary
+is a config-file migration as well as a CLI one, and moq-cli already nests
+`ClusterConfig` so the same flags are read by both binaries. Grep both binary
 names repo-wide and reconcile every sample invocation under `doc/bin/`,
 `doc/setup/`, and `demo/` against `--help`.
 
 Leave `--cluster-linger` alone: it is already a hidden no-op.
 
-## Required
 
-- [One LAN mesh](/quest/m1/lan-mesh.md) - settles which LAN checks survive and moves the flags into moq-cli too

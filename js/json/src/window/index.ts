@@ -28,13 +28,14 @@
  * pops; one that falls a group behind learns from the header's offset which records it will never
  * get rather than silently missing them.
  *
- * {@link Producer} and {@link Consumer} own a track. {@link Encoder} and {@link Decoder} are the
- * same logic without it, for when something else is already in charge of the track.
+ * {@link Producer} and {@link Consumer} own a track: pass `{ track, ... }`. {@link Encoder} and
+ * {@link Decoder} are the same logic without it, for when something else is already in charge of the
+ * track.
  *
  * @module
  */
 
-export { Consumer } from "./consumer.ts";
-export { type ConsumerConfig, Decoder, type Event, type Group, type Span } from "./decoder.ts";
-export { type Encoded, Encoder, type Pending, type ProducerConfig } from "./encoder.ts";
-export { Producer } from "./producer.ts";
+export { Consumer, type ConsumerConfig } from "./consumer.ts";
+export { Decoder, type Event, type Group, type Span } from "./decoder.ts";
+export { type Config, type Encoded, Encoder, type Pending } from "./encoder.ts";
+export { Producer, type ProducerConfig } from "./producer.ts";

@@ -17,7 +17,7 @@ async function readCatalog(broadcast: Broadcast): Promise<Catalog.Root | undefin
 	const effect = new Effect();
 	const track = new Track.Producer("catalog.json");
 	broadcast.catalog.serve(track, effect);
-	const catalog = await new Json.Snapshot.Consumer<Catalog.Root>(track.subscribe()).next();
+	const catalog = await new Json.Snapshot.Consumer<Catalog.Root>({ track: track.subscribe() }).next();
 	effect.close();
 	return catalog;
 }
@@ -138,7 +138,7 @@ test("serves the catalog through the request loop and releases the scope when th
 
 	// Subscribing to the catalog track drives the per-subscription serving scope.
 	const subscriber = net.subscribe(Broadcast.CATALOG_TRACK);
-	const catalog = await new Json.Snapshot.Consumer<Catalog.Root>(subscriber).next();
+	const catalog = await new Json.Snapshot.Consumer<Catalog.Root>({ track: subscriber }).next();
 	expect(catalog?.video?.renditions.video?.codec).toBe("avc1.640028");
 
 	// Dropping the subscriber closes the served track; the broadcast keeps running for the next viewer.

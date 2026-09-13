@@ -571,8 +571,7 @@ test("the exposed getters are wirable as component inputs", () => {
 	const origin = new Producer();
 	const path = Path.from("wired");
 
-	// getter() rejects a readable it did not create, so a hand-rolled object here would
-	// throw the moment a consumer wired discovery or a request into a component.
+	// Derived and other package Getters are wirable as component inputs.
 	expect(() => getter(origin.discovery)).not.toThrow();
 
 	const request = origin.request(path);

@@ -104,7 +104,7 @@ const dispose = el.signals.run((effect) => {
     const track = active.track(name).subscribe({ priority: Hang.Catalog.PRIORITY.catalog });
     effect.cleanup(() => track.close());
 
-    const consumer = new Json.Snapshot.Consumer<unknown>(track);
+    const consumer = new Json.Snapshot.Consumer<unknown>({ track });
     effect.spawn(async () => {
         for (;;) {
             const value = await Promise.race([effect.cancel, consumer.next()]);

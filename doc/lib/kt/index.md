@@ -57,7 +57,9 @@ pacing (`timeoutMs = 0` retries forever); and `maxStreams` raises the peer's
 inbound stream cap.
 
 `Server.listen(bind, tlsGenerate = ...)` accepts sessions with per-request
-`accept()`/`reject()`. JSON tracks take `@Serializable` types
+`accept()`/`reject()`. Generated configuration setters, including
+`MoqRequest.setPublish`/`setConsume`, throw if a connect, listen, or accept is
+in flight, or after cancel. JSON tracks take `@Serializable` types
 (`publishJsonSnapshot`, `publishJsonStream`, `valuesAs<T>()`), and the rest of
 the [shared feature list](/lib/#what-every-binding-can-do) maps one to one:
 `fetchGroup`/`fetchMediaGroup`, `dynamic()` for tracks and `dynamic(pattern)` for broadcasts, `appendDatagram`/`datagrams()`,

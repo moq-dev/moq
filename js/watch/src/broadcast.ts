@@ -306,7 +306,8 @@ export class Broadcast {
 		// "hangz" decompressing the `.z` track; MSF stays on its own one-blob-per-group fetch.
 		let fetchNext: () => Promise<Catalog.Root | undefined>;
 		if (format === "hang" || format === "hangz") {
-			const consumer = new Json.Snapshot.Consumer<Catalog.Root>(track, {
+			const consumer = new Json.Snapshot.Consumer<Catalog.Root>({
+				track,
 				schema: Catalog.RootSchema,
 				compression: format === "hangz",
 			});

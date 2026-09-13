@@ -215,6 +215,13 @@ pub enum MoqError {
 	#[error("closed")]
 	Closed,
 
+	/// A configuration call lost the race with an in-flight async operation.
+	///
+	/// The handle is still live: wait for the operation, then try again. A
+	/// cancelled handle is [`Self::Cancelled`] instead.
+	#[error("busy")]
+	Busy,
+
 	#[error("connect: {0}")]
 	Connect(String),
 

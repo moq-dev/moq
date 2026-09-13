@@ -4,13 +4,13 @@ import { Group } from "@moq/net";
 /** Frames (header included) in one group before a new group is forced, matching the Snapshot cap. Kept well below the net per-group cap so a roll always precedes GroupTooLarge. */
 const MAX_GROUP_FRAMES = 1024;
 
-/** Op ratio used when {@link ProducerConfig.opRatio} is left unset. */
+/** Op ratio used when {@link Config.opRatio} is left unset. */
 export const DEFAULT_OP_RATIO = 8;
 
 type Edit = { push: string } | { pop: number };
 
-/** Options shared by an {@link Encoder} and the {@link Producer} that wraps one. */
-export interface ProducerConfig {
+/** Options for an {@link Encoder}. */
+export interface Config {
 	/**
 	 * How much the ops in a group may cost before a fresh group is emitted.
 	 *
@@ -99,7 +99,7 @@ export class Encoder<T> {
 	// flag belonging to a newer frame.
 	#generation = 0;
 
-	constructor(config: ProducerConfig = {}) {
+	constructor(config: Config = {}) {
 		this.#opRatio = config.opRatio ?? DEFAULT_OP_RATIO;
 		if (!Number.isSafeInteger(this.#opRatio) || this.#opRatio < 0 || this.#opRatio > 0xffffffff) {
 			throw new Error("opRatio must be an unsigned 32-bit integer");

@@ -50,9 +50,28 @@ impl ServerState {
 }
 
 /// A MoQ server that accepts incoming QUIC/WebTransport sessions.
+///
+/// Bind and TLS are captured at [`listen`](Self::listen); those setters fail
+/// afterwards. Origins are captured at each [`accept`](Self::accept). Every setter
+/// fails with [`MoqError::Busy`] while listen/accept is in flight and
+/// [`MoqError::Cancelled`] after [`cancel`](Self::cancel).
 #[derive(uniffi::Object)]
 pub struct MoqServer {
 	task: Task<ServerState>,
+}
+
+impl MoqServer {
+	fn configure<R>(&self, f: impl FnOnce(&mut ServerState) -> R) -> Result<R, MoqError> {
+		Ok(f(&mut *self.task.configure()?))
+	}
+
+	fn configure_listen<R>(&self, f: impl FnOnce(&mut ServerState) -> R) -> Result<R, MoqError> {
+		let mut state = self.task.configure()?;
+		if state.server.is_some() {
+			return Err(MoqError::Bind("already listening".into()));
+		}
+		Ok(f(&mut state))
+	}
 }
 
 #[uniffi::export]
@@ -74,7 +93,7 @@ impl MoqServer {
 	/// Set the address to bind, e.g. `127.0.0.1:4443`, `[::]:443`, or `localhost:0`.
 	///
 	/// Validated syntactically up-front. DNS hostnames are accepted and resolved
-	/// at `listen()` time.
+	/// at `listen()` time. Captured at [`listen`](Self::listen); fails afterwards.
 	pub fn set_bind(&self, addr: String) -> Result<(), MoqError> {
 		// Mirrors `MoqClient::set_bind` by surfacing parse errors here rather
 		// than at listen() time. The server takes a String (not SocketAddr) so
@@ -87,47 +106,55 @@ impl MoqServer {
 				return Err(MoqError::Bind(format!("invalid bind address: {addr}")));
 			}
 		}
-		if let Some(mut state) = self.task.lock() {
+		self.configure_listen(|state| {
 			state.config.bind = Some(addr);
-		}
-		Ok(())
+		})
 	}
 
 	/// Load TLS certificate chains from PEM files on disk.
-	pub fn set_tls_cert(&self, paths: Vec<String>) {
-		if let Some(mut state) = self.task.lock() {
+	///
+	/// Captured at [`listen`](Self::listen); fails afterwards.
+	pub fn set_tls_cert(&self, paths: Vec<String>) -> Result<(), MoqError> {
+		self.configure_listen(|state| {
 			state.config.tls.cert = paths.into_iter().map(PathBuf::from).collect();
-		}
+		})
 	}
 
 	/// Load TLS private keys from PEM files on disk.
-	pub fn set_tls_key(&self, paths: Vec<String>) {
-		if let Some(mut state) = self.task.lock() {
+	///
+	/// Captured at [`listen`](Self::listen); fails afterwards.
+	pub fn set_tls_key(&self, paths: Vec<String>) -> Result<(), MoqError> {
+		self.configure_listen(|state| {
 			state.config.tls.key = paths.into_iter().map(PathBuf::from).collect();
-		}
+		})
 	}
 
 	/// Generate self-signed TLS certificates for the given hostnames.
 	///
 	/// Clients must either pin the certificate fingerprint or disable verification.
-	pub fn set_tls_generate(&self, hostnames: Vec<String>) {
-		if let Some(mut state) = self.task.lock() {
+	/// Captured at [`listen`](Self::listen); fails afterwards.
+	pub fn set_tls_generate(&self, hostnames: Vec<String>) -> Result<(), MoqError> {
+		self.configure_listen(|state| {
 			state.config.tls.generate = hostnames;
-		}
+		})
 	}
 
 	/// Set the origin to publish broadcasts to incoming sessions.
-	pub fn set_publish(&self, origin: Option<Arc<MoqOriginProducer>>) {
-		if let Some(mut state) = self.task.lock() {
+	///
+	/// Captured at each [`accept`](Self::accept).
+	pub fn set_publish(&self, origin: Option<Arc<MoqOriginProducer>>) -> Result<(), MoqError> {
+		self.configure(|state| {
 			state.publish = origin;
-		}
+		})
 	}
 
 	/// Set the origin to consume broadcasts from incoming sessions.
-	pub fn set_consume(&self, origin: Option<Arc<MoqOriginProducer>>) {
-		if let Some(mut state) = self.task.lock() {
+	///
+	/// Captured at each [`accept`](Self::accept).
+	pub fn set_consume(&self, origin: Option<Arc<MoqOriginProducer>>) -> Result<(), MoqError> {
+		self.configure(|state| {
 			state.consume = origin;
-		}
+		})
 	}
 
 	/// Bind the listening socket. Returns the bound local address as a string,
@@ -151,14 +178,7 @@ impl MoqServer {
 	/// WebTransport's `serverCertificateHashes`. Returns an error if called
 	/// before `listen()`.
 	pub fn cert_fingerprints(&self) -> Result<Vec<String>, MoqError> {
-		// `lock` folds "busy" and "cancelled" into one `None`, so ask which. A cancelled server
-		// is a shutdown, and the wrappers' `is_shutdown` helpers only recognize it by variant.
-		let Some(state) = self.task.lock() else {
-			return Err(match self.task.is_cancelled() {
-				true => MoqError::Cancelled,
-				false => MoqError::Bind("server is busy".into()),
-			});
-		};
+		let state = self.task.configure()?;
 		let server = state
 			.server
 			.as_ref()
@@ -182,6 +202,10 @@ struct RequestState {
 }
 
 /// An incoming MoQ session that can be accepted or rejected.
+///
+/// Origin overrides are captured at [`accept`](Self::accept). Setters fail with
+/// [`MoqError::Busy`] while accept/reject is in flight, [`MoqError::AlreadyResponded`]
+/// after a response, and [`MoqError::Cancelled`] after [`cancel`](Self::cancel).
 #[derive(uniffi::Object)]
 pub struct MoqRequest {
 	task: Task<RequestState>,
@@ -213,6 +237,36 @@ impl MoqRequest {
 			query,
 		})
 	}
+
+	fn configure_origin(&self, f: impl FnOnce(&mut RequestState)) -> Result<(), MoqError> {
+		let mut state = self.task.configure()?;
+		if state.request.is_none() {
+			return Err(MoqError::AlreadyResponded);
+		}
+		f(&mut state);
+		Ok(())
+	}
+}
+
+#[cfg(test)]
+impl MoqRequest {
+	/// Hold the request lock until `held` finishes.
+	///
+	/// `accept`/`reject` use the same `Task::run` path; a live handshake can
+	/// finish before a waiter samples `Busy`.
+	pub(crate) async fn hold_lock<F, Fut>(&self, held: F) -> Result<(), MoqError>
+	where
+		F: FnOnce() -> Fut + Send + 'static,
+		Fut: std::future::Future<Output = ()> + Send + 'static,
+	{
+		self.task
+			.run(move |state| async move {
+				let _state = state;
+				held().await;
+				Ok(())
+			})
+			.await
+	}
 }
 
 #[uniffi::export]
@@ -238,19 +292,19 @@ impl MoqRequest {
 	}
 
 	/// Override the publish origin for this session. Falls back to the server's
-	/// configured publish origin if unset.
-	pub fn set_publish(&self, origin: Option<Arc<MoqOriginProducer>>) {
-		if let Some(mut state) = self.task.lock() {
+	/// configured publish origin if unset. Captured at [`accept`](Self::accept).
+	pub fn set_publish(&self, origin: Option<Arc<MoqOriginProducer>>) -> Result<(), MoqError> {
+		self.configure_origin(|state| {
 			state.publish = origin;
-		}
+		})
 	}
 
 	/// Override the consume origin for this session. Falls back to the server's
-	/// configured consume origin if unset.
-	pub fn set_consume(&self, origin: Option<Arc<MoqOriginProducer>>) {
-		if let Some(mut state) = self.task.lock() {
+	/// configured consume origin if unset. Captured at [`accept`](Self::accept).
+	pub fn set_consume(&self, origin: Option<Arc<MoqOriginProducer>>) -> Result<(), MoqError> {
+		self.configure_origin(|state| {
 			state.consume = origin;
-		}
+		})
 	}
 
 	/// Complete the MoQ handshake and return the established session.

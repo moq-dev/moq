@@ -428,6 +428,9 @@ export class Writer {
 	}
 
 	async u8(v: number) {
+		if (!Number.isInteger(v) || v < 0 || v > 255) {
+			throw new RangeError(`invalid u8: ${v}`);
+		}
 		await this.write(setUint8(this.#scratch, v));
 	}
 
@@ -446,12 +449,8 @@ export class Writer {
 	}
 
 	async u53(v: number) {
-		if (v > Varint.MAX_U53) {
-			// Number values above 2^53-1 have already lost precision before reaching
-			// the wire, but downgrade overflow to warn so an upstream miscount
-			// doesn't tear down the whole stream. The encoded varint will reflect
-			// the truncated Number value.
-			console.warn(`value larger than 53-bits; use u62 instead (precision lost): ${v.toString()}`);
+		if (!Number.isSafeInteger(v) || v < 0) {
+			throw new RangeError(`invalid u53: ${v}`);
 		}
 		if (isLeadingOnes(this.version)) {
 			await this.write(Varint.encodeLeadingOnesTo(this.#scratch, v));

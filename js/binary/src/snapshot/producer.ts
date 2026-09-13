@@ -2,8 +2,11 @@ import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "@moq/flate";
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 
-/** Options for a {@link Producer}. */
+/** Snapshot producer options, including the destination track. */
 export interface ProducerConfig {
+	/** Track that receives each value as its own group. */
+	track: Moq.Track.Producer;
+
 	/**
 	 * Compress each value as its own raw DEFLATE stream.
 	 *
@@ -26,8 +29,8 @@ export class Producer {
 	#compress: boolean;
 
 	/** Wrap a track to publish a binary value into it. */
-	constructor(track: Moq.Track.Producer, config: ProducerConfig = {}) {
-		this.#track = track;
+	constructor(config: ProducerConfig) {
+		this.#track = config.track;
 		this.#compress = config.compression ?? false;
 	}
 

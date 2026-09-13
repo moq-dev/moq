@@ -187,6 +187,9 @@ impl<V: Copy> Encode<V> for std::time::Duration
 where
 	super::VarInt: Encode<V>,
 {
+	/// Milliseconds as a QUIC varint. Sub-millisecond precision is truncated
+	/// (`Duration::as_millis`). Fails with [`EncodeError::BoundsExceeded`] if the
+	/// millisecond count exceeds `2^62 - 1`.
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
 		let ms = super::VarInt::try_from(self.as_millis())?;
 		ms.encode(w, version)

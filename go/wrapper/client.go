@@ -200,44 +200,46 @@ func Dial(ctx context.Context, url string, opts ...ClientOption) (*Client, error
 
 	c := &Client{}
 	inner := ffi.NewMoqClient()
+	var err error
 	if !cfg.tlsVerify {
-		inner.SetTlsDisableVerify(true)
+		err = inner.SetTlsDisableVerify(true)
 	}
-	if cfg.tlsRootsSet {
-		inner.SetTlsRoots(cfg.tlsRoots)
+	if err == nil && cfg.tlsRootsSet {
+		err = inner.SetTlsRoots(cfg.tlsRoots)
 	}
-	if cfg.tlsSystemRootsSet {
-		inner.SetTlsSystemRoots(cfg.tlsSystemRoots)
+	if err == nil && cfg.tlsSystemRootsSet {
+		err = inner.SetTlsSystemRoots(cfg.tlsSystemRoots)
 	}
-	if cfg.tlsFingerprintsSet {
-		inner.SetTlsFingerprints(cfg.tlsFingerprints)
+	if err == nil && cfg.tlsFingerprintsSet {
+		err = inner.SetTlsFingerprints(cfg.tlsFingerprints)
 	}
-	if cfg.tlsCert != nil {
-		inner.SetTlsCert(cfg.tlsCert)
+	if err == nil && cfg.tlsCert != nil {
+		err = inner.SetTlsCert(cfg.tlsCert)
 	}
-	if cfg.tlsKey != nil {
-		inner.SetTlsKey(cfg.tlsKey)
+	if err == nil && cfg.tlsKey != nil {
+		err = inner.SetTlsKey(cfg.tlsKey)
 	}
-	if cfg.bind != nil {
-		if err := inner.SetBind(*cfg.bind); err != nil {
-			inner.Cancel()
-			return nil, err
-		}
+	if err == nil && cfg.bind != nil {
+		err = inner.SetBind(*cfg.bind)
 	}
-	if cfg.quicMaxStreams != nil {
-		inner.SetQuicMaxStreams(*cfg.quicMaxStreams)
+	if err == nil && cfg.quicMaxStreams != nil {
+		err = inner.SetQuicMaxStreams(*cfg.quicMaxStreams)
 	}
-	if cfg.reconnect != nil {
-		inner.SetReconnect(*cfg.reconnect)
+	if err == nil && cfg.reconnect != nil {
+		err = inner.SetReconnect(*cfg.reconnect)
 	}
-	if cfg.backoff != nil {
-		inner.SetBackoff(cfg.backoff.ffi())
+	if err == nil && cfg.backoff != nil {
+		err = inner.SetBackoff(cfg.backoff.ffi())
 	}
-	if cfg.publish != nil {
-		inner.SetPublish(&cfg.publish.inner)
+	if err == nil && cfg.publish != nil {
+		err = inner.SetPublish(&cfg.publish.inner)
 	}
-	if cfg.subscribe != nil {
-		inner.SetConsume(&cfg.subscribe.inner)
+	if err == nil && cfg.subscribe != nil {
+		err = inner.SetConsume(&cfg.subscribe.inner)
+	}
+	if err != nil {
+		inner.Cancel()
+		return nil, err
 	}
 	c.inner = inner
 

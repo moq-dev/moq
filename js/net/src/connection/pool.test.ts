@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
+import { SessionCode, SessionError } from "../error.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -244,4 +245,135 @@ test("caller-owned origins, transport options, and delay refuse to share", () =>
 
 test("a supplied transport cannot enter the reconnect loop", () => {
 	expect(() => new Connection({ transport: {} as never })).toThrow(/Connection\.connect/);
+});
+
+/** Reject the given URL as unauthorized; any other URL is accepted. */
+function stubUnauthorized(stale: URL): { count: () => number } {
+	let count = 0;
+	const stub = function StubWebTransport(url: string | URL) {
+		count++;
+		const target = new URL(String(url));
+		const pair = createMockTransportPair(Lite.ALPN_05);
+		void accept(pair.server, target).then(() => {
+			if (target.href === stale.href) {
+				pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
+			}
+		});
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+	return { count: () => count };
+}
+
+for (const share of [true, false] as const) {
+	const opts = share ? { linger } : { linger, share: false as const, websocket: { enabled: false } };
+
+	test(`auth failure then a new URL recovers a ${share ? "shared" : "private"} handle`, async () => {
+		const stale = new URL("https://example.com/pool?jwt=stale");
+		const fresh = new URL("https://example.com/pool?jwt=fresh");
+		const dials = stubUnauthorized(stale);
+
+		const handle = new Connection({ url: stale, ...opts });
+		try {
+			await waitUntil(() => handle.error.peek() !== undefined);
+			expect(handle.error.peek()).toBeInstanceOf(SessionError);
+			expect((handle.error.peek() as SessionError).code).toBe(SessionCode.Unauthorized);
+			expect(handle.closed.peek()).toBeUndefined();
+
+			handle.url.set(fresh);
+			await waitUntil(() => handle.status.peek() === "connected");
+			expect(handle.error.peek()).toBeUndefined();
+			expect(handle.closed.peek()).toBeUndefined();
+			expect(dials.count()).toBeGreaterThanOrEqual(2);
+		} finally {
+			handle.close();
+			expect(handle.closed.peek()).toBeNull();
+		}
+	});
+
+	test(`disable/re-enable after auth retries a ${share ? "shared" : "private"} handle`, async () => {
+		const stale = new URL(`https://example.com/pool?jwt=stale-${share}`);
+		const dials = stubUnauthorized(stale);
+
+		const handle = new Connection({ url: stale, ...opts });
+		try {
+			await waitUntil(() => handle.error.peek() !== undefined);
+			const givenUp = dials.count();
+			expect(handle.closed.peek()).toBeUndefined();
+
+			handle.enabled.set(false);
+			await waitUntil(() => handle.origin.peek() === undefined);
+			handle.enabled.set(true);
+			await waitUntil(() => dials.count() > givenUp);
+			expect(handle.closed.peek()).toBeUndefined();
+		} finally {
+			handle.close();
+		}
+	});
+}
+
+test("exhausted retries then a new URL recovers a private handle", async () => {
+	let attempts = 0;
+	const stub = function StubWebTransport() {
+		attempts++;
+		throw new Error("relay is down");
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	const handle = new Connection({
+		url,
+		share: false,
+		websocket: { enabled: false },
+		delay: { initial: 1, multiplier: 1, max: 1, timeout: 1 },
+	});
+	try {
+		await waitUntil(() => handle.error.peek() !== undefined);
+		expect(handle.closed.peek()).toBeUndefined();
+		const givenUp = attempts;
+
+		handle.url.set(new URL("https://example.com/other"));
+		await waitUntil(() => attempts > givenUp);
+		expect(handle.closed.peek()).toBeUndefined();
+	} finally {
+		handle.close();
+	}
+});
+
+test("a closed handle cannot reconnect", async () => {
+	const dials = stubTransports();
+
+	const handle = new Connection({ url, linger });
+	await waitUntil(() => handle.status.peek() === "connected");
+	const abort = new Error("done");
+	handle.close(abort);
+	expect(handle.closed.peek()).toBe(abort);
+
+	const before = dials.count();
+	handle.url.set(new URL("https://example.com/other"));
+	handle.enabled.set(false);
+	handle.enabled.set(true);
+	await settle();
+	expect(dials.count()).toBe(before);
+});
+
+test("auth eviction lets a later handle dial fresh and the old lease still cleans up", async () => {
+	const stale = new URL("https://example.com/pool?jwt=evict");
+	const dials = stubUnauthorized(stale);
+
+	const first = new Connection({ url: stale, linger });
+	await waitUntil(() => first.error.peek() !== undefined);
+	const origin = first.origin.peek();
+	expect(origin).toBeDefined();
+	expect(first.closed.peek()).toBeUndefined();
+
+	const second = new Connection({ url: stale, linger });
+	await waitUntil(() => dials.count() >= 2);
+	expect(second.origin.peek()).not.toBe(origin);
+
+	first.close();
+	await expired();
+	expect(origin?.closed.peek()).not.toBeUndefined();
+	expect(second.closed.peek()).toBeUndefined();
+
+	second.close();
 });

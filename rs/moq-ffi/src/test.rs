@@ -10,10 +10,70 @@ use crate::json::{MoqJsonSnapshotConfig, MoqJsonStreamConfig};
 use crate::media::{MoqAudio, MoqAudioFormat, MoqAudioInit, MoqContainer, MoqFrame, MoqVideoFormat, MoqVideoInit};
 use crate::session::{MoqBackoff, MoqConnectionStatus};
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Wait until the FFI runtime has polled work spawned ahead of this call.
+async fn ffi_caught_up() {
+	let (tx, rx) = tokio::sync::oneshot::channel();
+	crate::ffi::spawn(async move {
+		let _ = tx.send(());
+	});
+	rx.await.expect("ffi runtime dropped the catch-up task");
+}
+
+/// Spawn `fut` and wait until the FFI runtime has driven its inner `Task::run`.
+async fn spawn_parked<F, T>(fut: F) -> tokio::task::JoinHandle<T>
+where
+	F: Future<Output = T> + Send + 'static,
+	T: Send + 'static,
+{
+	let (started, started_rx) = tokio::sync::oneshot::channel();
+	let handle = tokio::spawn(async move {
+		tokio::pin!(fut);
+		let mut started = Some(started);
+		let first = std::future::poll_fn(|cx| {
+			let poll = fut.as_mut().poll(cx);
+			if let Some(started) = started.take() {
+				let _ = started.send(());
+			}
+			std::task::Poll::Ready(poll)
+		})
+		.await;
+		match first {
+			std::task::Poll::Ready(value) => value,
+			std::task::Poll::Pending => fut.await,
+		}
+	});
+	tokio::time::timeout(TIMEOUT, started_rx)
+		.await
+		.expect("timed out waiting for the read to start")
+		.expect("the read task dropped before polling");
+	tokio::time::timeout(TIMEOUT, ffi_caught_up())
+		.await
+		.expect("timed out waiting for the FFI runtime to poll the read");
+	handle
+}
+
+async fn wait_for_config_error(
+	mut op: impl FnMut() -> Result<(), MoqError>,
+	want: impl Fn(&MoqError) -> bool,
+) -> MoqError {
+	tokio::time::timeout(TIMEOUT, async {
+		loop {
+			match op() {
+				Err(err) if want(&err) => return err,
+				Ok(()) => tokio::task::yield_now().await,
+				Err(err) => panic!("unexpected configuration error while waiting: {err:?}"),
+			}
+		}
+	})
+	.await
+	.expect("timed out waiting for the expected configuration error")
+}
 
 fn assert_protocol(err: &MoqError, scope: crate::error::MoqErrorScope, kind: crate::error::MoqProtocolKind) {
 	match err {
@@ -2122,6 +2182,283 @@ async fn raw_track_group_order_commits_on_first_read() {
 	assert_eq!(datagram.payload, b"beep".to_vec());
 }
 
+fn raw_track() -> (
+	Arc<MoqBroadcastProducer>,
+	Arc<crate::producer::MoqTrackProducer>,
+	Arc<crate::consumer::MoqTrackConsumer>,
+) {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let consumer = track.consume(None).unwrap();
+	(broadcast, track, consumer)
+}
+
+fn datagram_frame(payload: &[u8]) -> MoqFrame {
+	MoqFrame {
+		payload: payload.to_vec(),
+		timestamp_us: 1,
+	}
+}
+
+fn group_frame(payload: &[u8]) -> MoqFrame {
+	MoqFrame {
+		payload: payload.to_vec(),
+		timestamp_us: 0,
+	}
+}
+
+/// A pending group-lane read must not stall `recv_datagram` on the same subscription.
+async fn pending_group_does_not_block_datagram<F, Fut, T>(start_group: F)
+where
+	F: FnOnce(Arc<crate::consumer::MoqTrackConsumer>) -> Fut,
+	Fut: Future<Output = Result<T, MoqError>> + Send + 'static,
+	T: Send + 'static,
+{
+	let (_broadcast, track, consumer) = raw_track();
+
+	let group_read = {
+		let consumer = consumer.clone();
+		spawn_parked(start_group(consumer)).await
+	};
+	assert!(!group_read.is_finished(), "group read should still be pending");
+
+	let sequence = track.append_datagram(datagram_frame(b"beep")).unwrap();
+	let datagram = tokio::time::timeout(TIMEOUT, consumer.recv_datagram())
+		.await
+		.expect("timed out waiting for datagram behind a pending group read")
+		.unwrap()
+		.expect("expected a datagram");
+	assert_eq!(datagram.sequence, sequence);
+	assert_eq!(datagram.payload, b"beep".to_vec());
+	assert!(!group_read.is_finished(), "group read should stay pending");
+
+	track.write_frame(group_frame(b"group")).unwrap();
+	tokio::time::timeout(TIMEOUT, group_read)
+		.await
+		.expect("timed out waiting for the parked group")
+		.expect("group read panicked")
+		.unwrap();
+}
+
+/// A pending datagram read must not stall a group-lane read on the same subscription.
+async fn pending_datagram_does_not_block_group<F, Fut, T>(start_group: F)
+where
+	F: FnOnce(Arc<crate::consumer::MoqTrackConsumer>) -> Fut,
+	Fut: Future<Output = Result<T, MoqError>> + Send + 'static,
+	T: Send + 'static,
+{
+	let (_broadcast, track, consumer) = raw_track();
+
+	let datagram_read = {
+		let consumer = consumer.clone();
+		spawn_parked(async move { consumer.recv_datagram().await }).await
+	};
+	assert!(!datagram_read.is_finished(), "datagram read should still be pending");
+
+	track.write_frame(group_frame(b"group")).unwrap();
+	tokio::time::timeout(TIMEOUT, start_group(consumer.clone()))
+		.await
+		.expect("timed out waiting for a group behind a pending datagram read")
+		.unwrap();
+	assert!(!datagram_read.is_finished(), "datagram read should stay pending");
+
+	let sequence = track.append_datagram(datagram_frame(b"beep")).unwrap();
+	let datagram = tokio::time::timeout(TIMEOUT, datagram_read)
+		.await
+		.expect("timed out waiting for the parked datagram")
+		.expect("datagram read panicked")
+		.unwrap()
+		.expect("expected a datagram");
+	assert_eq!(datagram.sequence, sequence);
+	assert_eq!(datagram.payload, b"beep".to_vec());
+}
+
+#[tokio::test]
+async fn raw_track_pending_next_group_does_not_block_datagram() {
+	pending_group_does_not_block_datagram(|consumer| async move { consumer.next_group().await }).await;
+}
+
+#[tokio::test]
+async fn raw_track_pending_recv_group_does_not_block_datagram() {
+	pending_group_does_not_block_datagram(|consumer| async move { consumer.recv_group().await }).await;
+}
+
+#[tokio::test]
+async fn raw_track_pending_read_frame_does_not_block_datagram() {
+	pending_group_does_not_block_datagram(|consumer| async move { consumer.read_frame().await }).await;
+}
+
+#[tokio::test]
+async fn raw_track_pending_datagram_does_not_block_next_group() {
+	pending_datagram_does_not_block_group(|consumer| async move { consumer.next_group().await }).await;
+}
+
+#[tokio::test]
+async fn raw_track_pending_datagram_does_not_block_recv_group() {
+	pending_datagram_does_not_block_group(|consumer| async move { consumer.recv_group().await }).await;
+}
+
+#[tokio::test]
+async fn raw_track_pending_datagram_does_not_block_read_frame() {
+	pending_datagram_does_not_block_group(|consumer| async move { consumer.read_frame().await }).await;
+}
+
+#[tokio::test]
+async fn raw_track_pending_group_read_holds_the_lane() {
+	let (_broadcast, _track, consumer) = raw_track();
+
+	let group_read = {
+		let consumer = consumer.clone();
+		spawn_parked(async move { consumer.next_group().await }).await
+	};
+	assert!(!group_read.is_finished(), "group read should still be pending");
+	assert!(
+		consumer.group_lane_busy(),
+		"a parked group read should hold the lane guard"
+	);
+
+	group_read.abort();
+}
+
+#[tokio::test]
+async fn raw_track_update_during_pending_group_still_reads_datagram() {
+	let (_broadcast, track, consumer) = raw_track();
+
+	let group_read = {
+		let consumer = consumer.clone();
+		spawn_parked(async move { consumer.next_group().await }).await
+	};
+
+	consumer.update(MoqSubscription {
+		priority: 10,
+		max_age_ms: 25,
+		group_start: Some(0),
+		group_end: None,
+	});
+
+	let sequence = track.append_datagram(datagram_frame(b"after-update")).unwrap();
+	let datagram = tokio::time::timeout(TIMEOUT, consumer.recv_datagram())
+		.await
+		.expect("timed out waiting for datagram after update")
+		.unwrap()
+		.expect("expected a datagram");
+	assert_eq!(datagram.sequence, sequence);
+	assert_eq!(datagram.payload, b"after-update".to_vec());
+
+	track.write_frame(group_frame(b"group")).unwrap();
+	tokio::time::timeout(TIMEOUT, group_read)
+		.await
+		.expect("timed out waiting for the parked group")
+		.expect("group read panicked")
+		.unwrap()
+		.expect("expected a group");
+}
+
+#[tokio::test]
+async fn raw_track_dropping_a_pending_group_read_does_not_cancel_datagrams() {
+	let (_broadcast, track, consumer) = raw_track();
+
+	let group_read = {
+		let consumer = consumer.clone();
+		spawn_parked(async move { consumer.next_group().await }).await
+	};
+	group_read.abort();
+	match group_read.await {
+		Err(err) if err.is_cancelled() => {}
+		Err(err) => panic!("aborted group read should join as cancelled, got {err}"),
+		Ok(_) => panic!("aborting the call should cancel only that future"),
+	}
+
+	let sequence = track.append_datagram(datagram_frame(b"still-open")).unwrap();
+	let datagram = tokio::time::timeout(TIMEOUT, consumer.recv_datagram())
+		.await
+		.expect("timed out waiting for datagram after a cancelled group read")
+		.unwrap()
+		.expect("expected a datagram");
+	assert_eq!(datagram.sequence, sequence);
+
+	track.write_frame(group_frame(b"group")).unwrap();
+	let group = tokio::time::timeout(TIMEOUT, consumer.next_group())
+		.await
+		.expect("timed out waiting for a group after the cancelled read")
+		.unwrap()
+		.expect("expected a group");
+	let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+		.await
+		.expect("timed out waiting for the group's frame")
+		.unwrap()
+		.expect("expected a frame");
+	assert_eq!(frame.payload, b"group".to_vec());
+}
+
+#[tokio::test]
+async fn raw_track_dropping_a_pending_datagram_read_does_not_cancel_groups() {
+	let (_broadcast, track, consumer) = raw_track();
+
+	let datagram_read = {
+		let consumer = consumer.clone();
+		spawn_parked(async move { consumer.recv_datagram().await }).await
+	};
+	datagram_read.abort();
+	match datagram_read.await {
+		Err(err) if err.is_cancelled() => {}
+		Err(err) => panic!("aborted datagram read should join as cancelled, got {err}"),
+		Ok(_) => panic!("aborting the call should cancel only that future"),
+	}
+
+	track.write_frame(group_frame(b"group")).unwrap();
+	let group = tokio::time::timeout(TIMEOUT, consumer.next_group())
+		.await
+		.expect("timed out waiting for a group after a cancelled datagram read")
+		.unwrap()
+		.expect("expected a group");
+	assert_eq!(group.sequence(), 0);
+
+	let sequence = track.append_datagram(datagram_frame(b"later")).unwrap();
+	let datagram = tokio::time::timeout(TIMEOUT, consumer.recv_datagram())
+		.await
+		.expect("timed out waiting for a datagram after the cancelled read")
+		.unwrap()
+		.expect("expected a datagram");
+	assert_eq!(datagram.sequence, sequence);
+}
+
+#[tokio::test]
+async fn raw_track_handle_cancel_aborts_both_pending_lanes() {
+	let (_broadcast, _track, consumer) = raw_track();
+
+	let group_read = {
+		let consumer = consumer.clone();
+		spawn_parked(async move { consumer.next_group().await }).await
+	};
+	let datagram_read = {
+		let consumer = consumer.clone();
+		spawn_parked(async move { consumer.recv_datagram().await }).await
+	};
+
+	consumer.cancel();
+
+	match tokio::time::timeout(TIMEOUT, group_read)
+		.await
+		.expect("timed out waiting for cancelled group read")
+		.expect("group read panicked")
+	{
+		Err(MoqError::Cancelled) => {}
+		Err(err) => panic!("handle cancel should fail the group read, got {err:?}"),
+		Ok(_) => panic!("handle cancel should fail the group read"),
+	}
+
+	match tokio::time::timeout(TIMEOUT, datagram_read)
+		.await
+		.expect("timed out waiting for cancelled datagram read")
+		.expect("datagram read panicked")
+	{
+		Err(MoqError::Cancelled) => {}
+		Err(err) => panic!("handle cancel should fail the datagram read, got {err:?}"),
+		Ok(_) => panic!("handle cancel should fail the datagram read"),
+	}
+}
+
 #[tokio::test]
 async fn dynamic_broadcast_request_can_reject() {
 	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
@@ -2194,8 +2531,8 @@ fn without_runtime() {
 		let _bc = pollster::block_on(consumer.request_broadcast("test".into(), None)).unwrap();
 
 		let client = MoqClient::new();
-		client.set_tls_disable_verify(true);
-		client.set_consume(Some(origin));
+		client.set_tls_disable_verify(true).unwrap();
+		client.set_consume(Some(origin)).unwrap();
 
 		announced.cancel();
 		client.cancel();
@@ -2216,8 +2553,8 @@ async fn server_client_roundtrip() {
 	let server_origin = MoqOriginProducer::new(MoqOriginOptions::default());
 	let server = MoqServer::new();
 	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]);
-	server.set_publish(Some(server_origin.clone()));
+	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	server.set_publish(Some(server_origin.clone())).unwrap();
 
 	let addr = tokio::time::timeout(TIMEOUT, server.listen())
 		.await
@@ -2240,9 +2577,9 @@ async fn server_client_roundtrip() {
 	// Client side: connect, subscribe via a consume origin.
 	let client_origin = MoqOriginProducer::new(MoqOriginOptions::default());
 	let client = MoqClient::new();
-	client.set_tls_disable_verify(true);
+	client.set_tls_disable_verify(true).unwrap();
 	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client.set_consume(Some(client_origin.clone()));
+	client.set_consume(Some(client_origin.clone())).unwrap();
 	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("connect timed out")
@@ -2315,8 +2652,8 @@ async fn server_client_roundtrip_auto_origin() {
 	let server_origin = MoqOriginProducer::new(MoqOriginOptions::default());
 	let server = MoqServer::new();
 	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]);
-	server.set_publish(Some(server_origin.clone()));
+	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	server.set_publish(Some(server_origin.clone())).unwrap();
 
 	let addr = tokio::time::timeout(TIMEOUT, server.listen())
 		.await
@@ -2336,7 +2673,7 @@ async fn server_client_roundtrip_auto_origin() {
 
 	// No set_publish / set_consume, so this uses the auto-origin path.
 	let client = MoqClient::new();
-	client.set_tls_disable_verify(true);
+	client.set_tls_disable_verify(true).unwrap();
 	client.set_bind("127.0.0.1:0".into()).unwrap();
 	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
@@ -2398,7 +2735,7 @@ async fn server_set_bind_validates() {
 async fn server_cert_fingerprints_available_after_listen() {
 	let server = MoqServer::new();
 	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]);
+	server.set_tls_generate(vec!["localhost".into()]).unwrap();
 
 	// Not available before listen().
 	assert!(matches!(
@@ -2422,7 +2759,7 @@ async fn server_cert_fingerprints_available_after_listen() {
 async fn server_cert_fingerprints_rejected_after_cancel() {
 	let server = MoqServer::new();
 	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]);
+	server.set_tls_generate(vec!["localhost".into()]).unwrap();
 
 	tokio::time::timeout(TIMEOUT, server.listen())
 		.await
@@ -2446,7 +2783,7 @@ async fn request_double_respond_returns_already_responded() {
 
 	let server = MoqServer::new();
 	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]);
+	server.set_tls_generate(vec!["localhost".into()]).unwrap();
 	let addr = server.listen().await.expect("listen failed");
 
 	let url = format!("https://{addr}");
@@ -2474,7 +2811,7 @@ async fn request_double_respond_returns_already_responded() {
 	});
 
 	let client = MoqClient::new();
-	client.set_tls_disable_verify(true);
+	client.set_tls_disable_verify(true).unwrap();
 	client.set_bind("127.0.0.1:0".into()).unwrap();
 	let _session = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
@@ -2495,7 +2832,7 @@ async fn request_per_session_publish_override() {
 	// The server's publish origin is empty; a per-request override is used instead.
 	let server = MoqServer::new();
 	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]);
+	server.set_tls_generate(vec!["localhost".into()]).unwrap();
 
 	let addr = server.listen().await.expect("listen failed");
 	let url = format!("https://{addr}");
@@ -2511,15 +2848,15 @@ async fn request_per_session_publish_override() {
 			.expect("accept errored")
 			.expect("accept returned None");
 		// Override publish on a per-request basis.
-		request.set_publish(Some(override_for_task));
+		request.set_publish(Some(override_for_task)).unwrap();
 		request.accept().await.expect("ok succeeds")
 	});
 
 	let client_origin = MoqOriginProducer::new(MoqOriginOptions::default());
 	let client = MoqClient::new();
-	client.set_tls_disable_verify(true);
+	client.set_tls_disable_verify(true).unwrap();
 	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client.set_consume(Some(client_origin.clone()));
+	client.set_consume(Some(client_origin.clone())).unwrap();
 	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("connect timed out")
@@ -2557,8 +2894,8 @@ async fn client_reconnects_and_resumes_announcements() {
 	let server_origin = MoqOriginProducer::new(MoqOriginOptions::default());
 	let server = MoqServer::new();
 	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]);
-	server.set_publish(Some(server_origin.clone()));
+	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	server.set_publish(Some(server_origin.clone())).unwrap();
 
 	let addr = tokio::time::timeout(TIMEOUT, server.listen())
 		.await
@@ -2595,16 +2932,18 @@ async fn client_reconnects_and_resumes_announcements() {
 
 	let client_origin = MoqOriginProducer::new(MoqOriginOptions::default());
 	let client = MoqClient::new();
-	client.set_tls_disable_verify(true);
+	client.set_tls_disable_verify(true).unwrap();
 	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client.set_consume(Some(client_origin.clone()));
+	client.set_consume(Some(client_origin.clone())).unwrap();
 	// Fast retries so the test doesn't wait out the default 1s backoff.
-	client.set_backoff(MoqBackoff {
-		initial_ms: 50,
-		multiplier: 2,
-		max_ms: 200,
-		timeout_ms: 0,
-	});
+	client
+		.set_backoff(MoqBackoff {
+			initial_ms: 50,
+			multiplier: 2,
+			max_ms: 200,
+			timeout_ms: 0,
+		})
+		.unwrap();
 
 	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
@@ -2680,7 +3019,7 @@ async fn client_reconnects_and_resumes_announcements() {
 async fn one_shot_client_close_surfaces_through_closed() {
 	let server = MoqServer::new();
 	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]);
+	server.set_tls_generate(vec!["localhost".into()]).unwrap();
 
 	let addr = tokio::time::timeout(TIMEOUT, server.listen())
 		.await
@@ -2699,9 +3038,9 @@ async fn one_shot_client_close_surfaces_through_closed() {
 	});
 
 	let client = MoqClient::new();
-	client.set_tls_disable_verify(true);
+	client.set_tls_disable_verify(true).unwrap();
 	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client.set_reconnect(false);
+	client.set_reconnect(false).unwrap();
 
 	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
@@ -2730,7 +3069,7 @@ async fn one_shot_client_close_surfaces_through_closed() {
 async fn rejected_session_surfaces_through_closed() {
 	let server = MoqServer::new();
 	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]);
+	server.set_tls_generate(vec!["localhost".into()]).unwrap();
 
 	let addr = tokio::time::timeout(TIMEOUT, server.listen())
 		.await
@@ -2749,9 +3088,9 @@ async fn rejected_session_surfaces_through_closed() {
 	});
 
 	let client = MoqClient::new();
-	client.set_tls_disable_verify(true);
+	client.set_tls_disable_verify(true).unwrap();
 	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client.set_reconnect(false);
+	client.set_reconnect(false).unwrap();
 
 	// Either the dial fails outright, or the optimistic connect resolves and the
 	// rejection lands as the session's terminal close. Both must surface within
@@ -2775,7 +3114,7 @@ async fn rejected_session_surfaces_through_closed() {
 #[tokio::test]
 async fn cancel_before_connect_fails_fast() {
 	let client = MoqClient::new();
-	client.set_tls_disable_verify(true);
+	client.set_tls_disable_verify(true).unwrap();
 	client.cancel();
 	let result = tokio::time::timeout(
 		Duration::from_secs(5),
@@ -2799,7 +3138,7 @@ async fn cancel_before_connect_fails_fast() {
 async fn cancelled_status_does_not_swallow_the_next_transition() {
 	let server = MoqServer::new();
 	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]);
+	server.set_tls_generate(vec!["localhost".into()]).unwrap();
 
 	let addr = tokio::time::timeout(TIMEOUT, server.listen())
 		.await
@@ -2820,14 +3159,16 @@ async fn cancelled_status_does_not_swallow_the_next_transition() {
 	});
 
 	let client = MoqClient::new();
-	client.set_tls_disable_verify(true);
+	client.set_tls_disable_verify(true).unwrap();
 	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client.set_backoff(MoqBackoff {
-		initial_ms: 50,
-		multiplier: 2,
-		max_ms: 200,
-		timeout_ms: 0,
-	});
+	client
+		.set_backoff(MoqBackoff {
+			initial_ms: 50,
+			multiplier: 2,
+			max_ms: 200,
+			timeout_ms: 0,
+		})
+		.unwrap();
 
 	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
@@ -3013,7 +3354,7 @@ async fn set_bitrate_caps_a_later_bandwidth_grant() {
 async fn one_shot_peers() -> (Arc<MoqSession>, Arc<MoqSession>, Arc<MoqServer>) {
 	let server = MoqServer::new();
 	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]);
+	server.set_tls_generate(vec!["localhost".into()]).unwrap();
 	let addr = tokio::time::timeout(TIMEOUT, server.listen())
 		.await
 		.expect("listen timed out")
@@ -3031,9 +3372,9 @@ async fn one_shot_peers() -> (Arc<MoqSession>, Arc<MoqSession>, Arc<MoqServer>) 
 	});
 
 	let client = MoqClient::new();
-	client.set_tls_disable_verify(true);
+	client.set_tls_disable_verify(true).unwrap();
 	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client.set_reconnect(false);
+	client.set_reconnect(false).unwrap();
 	let client_session = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("connect timed out")
@@ -3077,4 +3418,229 @@ async fn session_protocol_codes_cross_the_ffi() {
 		assert_eq!(protocol.kind, kind, "code {code:#x}");
 		server.cancel();
 	}
+}
+
+#[tokio::test]
+async fn client_setters_busy_during_connect_and_cancelled_after() {
+	let server = MoqServer::new();
+	server.set_bind("127.0.0.1:0".into()).unwrap();
+	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let addr = server.listen().await.expect("listen failed");
+
+	let client = MoqClient::new();
+	client.set_tls_disable_verify(true).unwrap();
+	client.set_bind("127.0.0.1:0".into()).unwrap();
+	client.set_reconnect(false).unwrap();
+
+	// The server never accepts, so connect holds the client lock in established().
+	let connecting = client.clone();
+	let connect = tokio::spawn(async move { connecting.connect(format!("https://{addr}")).await });
+
+	assert!(matches!(
+		wait_for_config_error(
+			|| client.set_tls_disable_verify(true),
+			|err| matches!(err, MoqError::Busy)
+		)
+		.await,
+		MoqError::Busy
+	));
+	assert!(matches!(client.set_publish(None), Err(MoqError::Busy)));
+	assert!(matches!(client.set_bind("127.0.0.1:0".into()), Err(MoqError::Busy)));
+
+	client.cancel();
+	assert!(matches!(client.set_tls_disable_verify(false), Err(MoqError::Cancelled)));
+	assert!(matches!(client.set_publish(None), Err(MoqError::Cancelled)));
+
+	let connect_err = tokio::time::timeout(TIMEOUT, connect)
+		.await
+		.expect("connect task timed out")
+		.expect("connect task panicked");
+	assert!(matches!(connect_err, Err(MoqError::Cancelled)));
+	server.cancel();
+}
+
+#[tokio::test]
+async fn client_setters_apply_after_connect_returns() {
+	let server = MoqServer::new();
+	server.set_bind("127.0.0.1:0".into()).unwrap();
+	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let addr = server.listen().await.expect("listen failed");
+
+	let accept_server = server.clone();
+	let accept = tokio::spawn(async move {
+		let request = accept_server
+			.accept(None)
+			.await
+			.expect("accept errored")
+			.expect("accept returned None");
+		request.accept().await.expect("handshake failed")
+	});
+
+	let client = MoqClient::new();
+	client.set_tls_disable_verify(true).unwrap();
+	client.set_bind("127.0.0.1:0".into()).unwrap();
+	let session = tokio::time::timeout(TIMEOUT, client.connect(format!("https://{addr}")))
+		.await
+		.expect("connect timed out")
+		.expect("connect failed");
+
+	// A finished connect releases the lock; later setters apply to the next dial.
+	client.set_quic_max_streams(2048).unwrap();
+	client.set_reconnect(false).unwrap();
+
+	let server_session = tokio::time::timeout(TIMEOUT, accept)
+		.await
+		.expect("accept timed out")
+		.expect("accept task panicked");
+	session.shutdown();
+	server_session.cancel(0);
+	server.cancel();
+}
+
+#[tokio::test]
+async fn server_setters_busy_during_accept_cancelled_after_and_frozen_after_listen() {
+	let server = MoqServer::new();
+	server.set_bind("127.0.0.1:0".into()).unwrap();
+	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	server.listen().await.expect("listen failed");
+
+	assert!(matches!(server.set_bind("127.0.0.1:1".into()), Err(MoqError::Bind(_))));
+	assert!(matches!(
+		server.set_tls_generate(vec!["other".into()]),
+		Err(MoqError::Bind(_))
+	));
+	assert!(matches!(
+		server.set_tls_cert(vec!["cert.pem".into()]),
+		Err(MoqError::Bind(_))
+	));
+	assert!(matches!(
+		server.set_tls_key(vec!["key.pem".into()]),
+		Err(MoqError::Bind(_))
+	));
+
+	// Origins are captured at accept, so they still apply between accepts.
+	server.set_publish(None).unwrap();
+	server.set_consume(None).unwrap();
+
+	let accepting = server.clone();
+	let accept = tokio::spawn(async move { accepting.accept(None).await });
+
+	assert!(matches!(
+		wait_for_config_error(|| server.set_publish(None), |err| matches!(err, MoqError::Busy)).await,
+		MoqError::Busy
+	));
+	assert!(matches!(server.set_consume(None), Err(MoqError::Busy)));
+	assert!(matches!(server.cert_fingerprints(), Err(MoqError::Busy)));
+
+	server.cancel();
+	assert!(matches!(server.set_publish(None), Err(MoqError::Cancelled)));
+	assert!(matches!(
+		server.set_bind("127.0.0.1:0".into()),
+		Err(MoqError::Cancelled)
+	));
+	assert!(matches!(server.cert_fingerprints(), Err(MoqError::Cancelled)));
+
+	let accept_err = tokio::time::timeout(TIMEOUT, accept)
+		.await
+		.expect("accept task timed out")
+		.expect("accept task panicked");
+	assert!(matches!(accept_err, Err(MoqError::Cancelled)));
+}
+
+#[tokio::test]
+async fn request_origin_setters_apply_or_error() {
+	let server = MoqServer::new();
+	server.set_bind("127.0.0.1:0".into()).unwrap();
+	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let addr = server.listen().await.expect("listen failed");
+
+	let client = MoqClient::new();
+	client.set_tls_disable_verify(true).unwrap();
+	client.set_bind("127.0.0.1:0".into()).unwrap();
+	client.set_reconnect(false).unwrap();
+
+	let connecting = client.clone();
+	let connect = tokio::spawn(async move { connecting.connect(format!("https://{addr}")).await });
+
+	let request = tokio::time::timeout(TIMEOUT, server.accept(None))
+		.await
+		.expect("accept timed out")
+		.expect("accept errored")
+		.expect("accept returned None");
+
+	request.set_publish(None).unwrap();
+	request.set_consume(None).unwrap();
+
+	let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+	let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+	let holding = request.clone();
+	let hold = holding.hold_lock(|| async move {
+		let _ = held_tx.send(());
+		let _ = release_rx.await;
+	});
+	tokio::pin!(hold);
+	tokio::select! {
+		biased;
+		result = &mut hold => panic!("lock holder returned before release: {result:?}"),
+		held = held_rx => held.expect("lock holder dropped"),
+	}
+
+	assert!(matches!(
+		wait_for_config_error(|| request.set_publish(None), |err| matches!(err, MoqError::Busy)).await,
+		MoqError::Busy
+	));
+	assert!(matches!(request.set_consume(None), Err(MoqError::Busy)));
+
+	release_tx.send(()).expect("lock holder should still be waiting");
+	tokio::time::timeout(TIMEOUT, hold)
+		.await
+		.expect("lock holder timed out")
+		.expect("lock holder failed");
+
+	let session = tokio::time::timeout(TIMEOUT, request.accept())
+		.await
+		.expect("handshake timed out")
+		.expect("handshake failed");
+
+	assert!(matches!(request.set_publish(None), Err(MoqError::AlreadyResponded)));
+	assert!(matches!(request.set_consume(None), Err(MoqError::AlreadyResponded)));
+
+	let _cs = tokio::time::timeout(TIMEOUT, connect)
+		.await
+		.expect("connect timed out")
+		.expect("connect task panicked")
+		.expect("connect failed");
+	session.cancel(0);
+	server.cancel();
+}
+
+#[tokio::test]
+async fn request_origin_setters_cancelled_after_cancel() {
+	let server = MoqServer::new();
+	server.set_bind("127.0.0.1:0".into()).unwrap();
+	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let addr = server.listen().await.expect("listen failed");
+
+	let client = MoqClient::new();
+	client.set_tls_disable_verify(true).unwrap();
+	client.set_bind("127.0.0.1:0".into()).unwrap();
+	client.set_reconnect(false).unwrap();
+
+	let connecting = client.clone();
+	let connect = tokio::spawn(async move { connecting.connect(format!("https://{addr}")).await });
+
+	let request = tokio::time::timeout(TIMEOUT, server.accept(None))
+		.await
+		.expect("accept timed out")
+		.expect("accept errored")
+		.expect("accept returned None");
+
+	request.set_publish(None).unwrap();
+	request.cancel();
+	assert!(matches!(request.set_publish(None), Err(MoqError::Cancelled)));
+	assert!(matches!(request.set_consume(None), Err(MoqError::Cancelled)));
+
+	client.cancel();
+	let _ = tokio::time::timeout(TIMEOUT, connect).await;
+	server.cancel();
 }
