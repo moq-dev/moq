@@ -9,7 +9,7 @@ preserve connection-ID steering through partial startup and member teardown.
 ## Plan
 
 The published `Workers::split` ownership change and functional group shutdown
-land in [Worker ownership](/quest/m1/api-worker-ownership.md). Do not repeat
+have landed. Do not repeat
 that API redesign here. This follow-up replaces the worker's private lifetime
 bookkeeping with the hardened socket-group primitive after dev merges.
 
@@ -32,7 +32,6 @@ both the M1 ownership proof and this integration are complete.
 
 ## Required
 
-- [Worker ownership](/quest/m1/api-worker-ownership.md) - the functional published owner this integration preserves
 - [Reuseport group formation](/quest/m2/reuseport-group.md) - complete formation and retained sockets in the shared primitive
 - [Merge dev](/quest/m1/merge-dev.md) - the released ownership surface is available on main
 

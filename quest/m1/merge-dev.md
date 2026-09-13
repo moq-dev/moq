@@ -54,7 +54,6 @@ additive quest that builds on dev-only code start on main afterwards from
 - [JSON config names](/quest/m1/api-json-binary-config-names.md) - the json and binary packages agree on Config
 - [FFI units](/quest/m1/api-ffi-units-verbs.md) - the binding records release with one duration unit
 - [Deprecated sweep](/quest/m1/deprecated-sweep.md) - the breaking release removes what it deprecates
-- [Worker ownership](/quest/m1/api-worker-ownership.md) - consuming split ownership retains sockets and joins the group before release
 - [Origin scope API](/quest/m1/api-origin-pattern-scopes.md) - typed scope grants preserve current prefixes and refuse unsupported patterns
 - [Cluster peer API](/quest/m1/api-cluster-peer-config.md) - typed peer configuration supports current symmetric policy
 - [Broadcast clock](/quest/m1/broadcast-clock.md) - the root clock replaces the published archive wall field on dev before release

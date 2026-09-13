@@ -26,7 +26,6 @@ does not require it.
 ## Quests
 
 - [Reserved codes](/quest/m1/lite-reserved-codes.md) - the four stream codes sent from the reserved range are registered in the draft's own range and round-trip in both languages
-- [Worker ownership](/quest/m1/api-worker-ownership.md) - consuming split ownership retains sockets and joins the group before release
 - [Origin scope API](/quest/m1/api-origin-pattern-scopes.md) - typed scope grants preserve current prefixes and refuse unsupported patterns
 - [Cluster peer API](/quest/m1/api-cluster-peer-config.md) - typed peer configuration supports current symmetric policy
 - [Broadcast clock](/quest/m1/broadcast-clock.md) - replace archive wall with one fixed catalog-root clock shared by every track

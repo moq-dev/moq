@@ -417,11 +417,11 @@ impl Relay {
 		let uring_failed = std::future::pending::<anyhow::Error>();
 
 		// Each worker serves from its own thread, so the future built here only
-		// reports the outcome. The group is what owns those threads, so it has to
-		// outlive the loop below: the borrow ends here, and the group is torn down
-		// after it.
+		// reports the outcome. The group owns those threads and ends serving
+		// when the first member finishes, so it has to outlive the loop below
+		// and is torn down after it.
 		#[cfg(feature = "_quic")]
-		let mut workers = workers;
+		let mut workers = workers.map(|workers| workers.split());
 
 		// Pends forever with no workers, so it composes into the `select!` either
 		// way. A worker only stops on error or on shutdown, so the first one to
@@ -430,12 +430,12 @@ impl Relay {
 		let quic_workers = {
 			let mut running = futures::stream::FuturesUnordered::new();
 			if let Some(workers) = workers.as_mut() {
-				for (server, spawner) in workers.split() {
+				for (server, spawner) in workers.members() {
 					let index = spawner.index();
 					let cluster = cluster.clone();
 					let auth = auth.clone();
 					let worker_shutdown = shutdown.clone();
-					let task = spawner.run(move || serve(server, cluster, auth, worker_shutdown));
+					let task = spawner.serve(server, move |server| serve(server, cluster, auth, worker_shutdown));
 					running.push(async move {
 						match task.await {
 							Ok(res) => res.with_context(|| format!("QUIC worker {index} failed")),
