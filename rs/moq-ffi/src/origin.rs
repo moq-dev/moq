@@ -250,7 +250,8 @@ impl MoqOriginProducer {
 
 	/// Advertise `pattern` and serve the requests beneath it.
 	///
-	/// `pattern` uses the `moq_net::Pattern` dialect; a prefix is `foo/**`.
+	/// `pattern` uses the `moq_net::Pattern` dialect; a prefix is literal
+	/// segments followed by a globstar (`foo` then `**`).
 	/// Wildcards are advertised, but only prefix-shaped patterns serve requests. Hold
 	/// the returned handle while the route should stay advertised and missing
 	/// broadcasts should be served. Create, attach this for tracks served on
