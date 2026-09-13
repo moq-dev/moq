@@ -126,9 +126,14 @@ pub struct moq_video_encoder_frame {
 
 /// Decode-side configuration the caller passes to [`moq_decode_video`].
 ///
-/// Output is always tightly-packed I420 (see [`moq_video_frame`]); there is no
-/// format/resolution knob yet. The struct exists so future options (a pixel
-/// format, a target size) stay additive.
+/// `format` selects the CPU pixel layout of each [`moq_video_frame`] (`I420`
+/// is `width * height * 3 / 2` bytes, `RGBA` is `width * height * 4` bytes),
+/// and `width`/`height` select its size: zero both for the stream's native
+/// size, otherwise both must be even and non-zero.
+///
+/// This struct is versioned by recompilation, not by reserved fields: adding a
+/// field changes its layout, so rebuild callers against the `moq.h` that ships
+/// with the `libmoq.a` they link.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_video_decoder_output {
@@ -137,15 +142,25 @@ pub struct moq_video_decoder_output {
 	/// `moq_consume_video`'s `max_age_ms`. 0 = skip aggressively
 	/// (the moq-mux default); set to your playout buffer for a softer skip.
 	pub max_age_ms: u64,
+	/// `moq_video_pixel_format` discriminant. Unknown values fail
+	/// [`moq_decode_video`] rather than decoding into an assumed layout.
+	pub format: u32,
+	/// Target width in pixels. 0 with `height` 0 means the native size.
+	pub width: u32,
+	/// Target height in pixels. 0 with `width` 0 means the native size.
+	pub height: u32,
 }
 
-/// One decoded video frame from [`moq_decode_video`]: packed I420 plus a
+/// One decoded video frame from [`moq_decode_video`]: pixels plus a
 /// presentation timestamp.
 ///
-/// `data` is the Y plane (`width * height`), then U, then V (`width/2 *
-/// height/2` each), no row padding, BT.601 limited range, with `width` and
-/// `height` even. It's owned by the consume slab and stays valid until the same
-/// id is released with [`moq_decode_video_frame_free`].
+/// The pixel layout is what [`moq_video_decoder_output`]'s `format` asked
+/// for: I420 is the Y plane (`width * height`), then U, then V (`width/2 *
+/// height/2` each), no row padding, BT.601 limited range; RGBA is tightly
+/// packed `width * height * 4` bytes, no row padding.
+///
+/// `data` is owned by the consume slab and stays valid until the same id is
+/// released with [`moq_decode_video_frame_free`].
 ///
 /// The publish side has its own [`moq_video_encoder_frame`], which carries no
 /// dimensions because the encoder already fixed them.
@@ -258,14 +273,22 @@ pub(crate) struct VideoEncoder {
 	ceiling: Option<Arc<AtomicU64>>,
 }
 
-/// A delivered frame, flattened to CPU I420 at delivery time: the C ABI hands
-/// out a stable byte pointer, so a GPU-decoded frame (e.g. NVDEC) is downloaded
-/// exactly once here.
+/// A delivered frame, flattened to CPU bytes at delivery time in the layout
+/// [`moq_decode_video`] was asked for: the C ABI hands out a stable byte
+/// pointer, so a GPU-decoded frame (e.g. NVDEC) is downloaded exactly once here.
 struct VideoFrame {
 	timestamp_us: u64,
 	width: u32,
 	height: u32,
 	data: bytes::Bytes,
+}
+
+/// What [`moq_decode_video`] delivers per frame: the requested CPU pixel format
+/// and target size, validated up front so the delivery loop never second-guesses.
+#[derive(Clone, Copy)]
+pub struct DecoderOutput {
+	format: moq_video_pixel_format,
+	size: Option<moq_video::Size>,
 }
 
 /// End a video track, given the result of draining its encoder into it.
@@ -436,6 +459,7 @@ impl Video {
 		catalog: &hang::catalog::VideoConfig,
 		name: &str,
 		config: moq_video::decode::Config,
+		output: DecoderOutput,
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let broadcast = broadcast.clone();
@@ -454,7 +478,7 @@ impl Video {
 		tokio::spawn(async move {
 			let res = async move {
 				let consumer = moq_video::decode::Consumer::new(&broadcast, &catalog, name, config).await?;
-				Self::run(on_frame, consumer, channel.1).await
+				Self::run(on_frame, consumer, channel.1, output).await
 			}
 			.await;
 
@@ -473,6 +497,7 @@ impl Video {
 		callback: OnStatus,
 		mut consumer: moq_video::decode::Consumer,
 		mut close: oneshot::Receiver<()>,
+		output: DecoderOutput,
 	) -> Result<(), Error> {
 		loop {
 			// `biased` so a pending close always wins over a ready frame.
@@ -485,16 +510,31 @@ impl Video {
 				},
 			};
 
-			// Flatten to CPU bytes outside the lock (a GPU frame downloads here),
-			// then hold the lock only to buffer it; release before the callback.
+			// The backend resize hint is best effort: a backend without a
+			// scaler ignores it, so enforce the requested size here rather
+			// than trusting it. Convert outside the lock (a GPU frame
+			// downloads here), then hold the lock only to buffer it; release
+			// before the callback.
+			let mut frame = frame;
+			if let Some(size) = output.size
+				&& frame.size() != size
+			{
+				frame = frame.resize(size)?;
+			}
 			let size = frame.size();
+			let data = match output.format {
+				moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 => frame.surface.into_i420()?,
+				moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA => {
+					bytes::Bytes::from(frame.surface.to_rgba()?.into_data())
+				}
+			};
 			let frame = VideoFrame {
 				// The C ABI carries microseconds; the decoded frame's Timestamp is
 				// constrained to a QUIC VarInt, so the microsecond value fits a u64.
 				timestamp_us: frame.timestamp.as_micros() as u64,
 				width: size.width,
 				height: size.height,
-				data: frame.surface.into_i420()?,
+				data,
 			};
 			let frame_id = State::lock().video.frames.insert(frame)?;
 			callback.call(Ok(frame_id));
@@ -543,6 +583,31 @@ fn pixel_format_from_u32(value: u32) -> Result<moq_video_pixel_format, Error> {
 		}
 		_ => return Err(Error::InvalidCode),
 	})
+}
+
+/// Parse [`moq_video_decoder_output`]'s `width`/`height` into the target size:
+/// 0x0 is the stream's native size, anything else must be even and non-zero
+/// (I420 chroma is subsampled 2x2) and small enough for the packed byte math.
+fn decoder_size(width: u32, height: u32) -> Result<Option<moq_video::Size>, Error> {
+	if width == 0 && height == 0 {
+		return Ok(None);
+	}
+	if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+		return Err(Error::InvalidConfig(format!(
+			"decode size {width}x{height}: use 0x0 for the native size or even non-zero dimensions"
+		)));
+	}
+	let size = moq_video::Size::new(width, height);
+	if size
+		.pixels()
+		.checked_mul(4)
+		.is_none_or(|bytes| usize::try_from(bytes).is_err())
+	{
+		return Err(Error::InvalidConfig(format!(
+			"decode size {width}x{height}: dimensions too large to represent"
+		)));
+	}
+	Ok(Some(size))
 }
 
 fn codec_from_u32(value: u32) -> Result<moq_video::encode::Codec, Error> {
@@ -743,11 +808,16 @@ pub extern "C" fn moq_encode_video_finish(producer: u32) -> i32 {
 	})
 }
 
-/// Subscribe to a video track and decode it into raw I420 frames.
+/// Subscribe to a video track and decode it into raw frames in the requested
+/// CPU pixel format and size (see [`moq_video_decoder_output`]).
 ///
 /// The catalog `index` selects which video rendition to subscribe to, matching
 /// the existing `moq_consume_video` selection model. Only H.264 is
 /// supported; a non-H.264 rendition fails on the terminal callback.
+///
+/// An unknown `output->format` or an invalid `output->width`/`height` fails
+/// here, before subscribing: an accepted request always produces the requested
+/// layout or fails on the terminal callback instead of delivering it silently.
 ///
 /// Returns a non-zero handle on success or a negative error code.
 ///
@@ -771,19 +841,29 @@ pub unsafe extern "C" fn moq_decode_video(
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
-		let catalog = ffi::parse_id(catalog)?;
 		let raw = unsafe { output.as_ref() }.ok_or(Error::InvalidPointer)?;
+
+		// Validate the request before resolving anything: a C caller can probe
+		// support without a live track, and a bad request never opens a
+		// subscription it would immediately drop.
+		let format = pixel_format_from_u32(raw.format)?;
+		let size = decoder_size(raw.width, raw.height)?;
+		let catalog = ffi::parse_id(catalog)?;
 
 		let mut config = moq_video::decode::Config::new();
 		config.start = moq_video::decode::Start::Latest;
 		config.max_age = Duration::from_millis(raw.max_age_ms);
+		// A backend with a hardware scaler (NVDEC) honors this for free; the
+		// delivery loop still enforces it, since other backends ignore it.
+		config.resize = size;
+		let output = DecoderOutput { format, size };
 		let on_frame = unsafe { OnStatus::new(user_data, on_frame) };
 
 		let mut state = State::lock();
 		let (broadcast, video_cfg, name) = state.consume.video_rendition(catalog, index as usize)?;
 
 		let State { video, .. } = &mut *state;
-		video.consume(&broadcast, &video_cfg, &name, config, on_frame)
+		video.consume(&broadcast, &video_cfg, &name, config, output, on_frame)
 	})
 }
 

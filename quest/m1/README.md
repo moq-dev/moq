@@ -31,7 +31,6 @@ does not require it.
 - [Origin scope API](/quest/m1/api-origin-pattern-scopes.md) - typed scope grants preserve current prefixes and refuse unsupported patterns
 - [Token claims API](/quest/m1/api-token-claims.md) - working versioned claim types precede the v1 default rollout
 - [Cluster peer API](/quest/m1/api-cluster-peer-config.md) - typed peer configuration supports current symmetric policy
-- [C decoder output](/quest/m1/api-c-decoder-output.md) - settle the C output layout with working CPU conversion and resize before release
 - [Broadcast clock](/quest/m1/broadcast-clock.md) - replace archive wall with one fixed catalog-root clock shared by every track
 - [Relay embedding](/quest/m1/api-relay-embedding.md) - custom routes retain the owner of listeners, workers, and shutdown
 - [FFI frame cursor](/quest/m1/api-ffi-frame-cursor.md) - empty groups and cancelled reads do not become false EOF or lost frames

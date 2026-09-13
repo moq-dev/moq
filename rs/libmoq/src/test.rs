@@ -114,6 +114,98 @@ extern "C" fn channel_callback(user_data: *mut c_void, code: i32) {
 	let _ = tx.send(code);
 }
 
+/// Compile and run the C decoder-output fixture (`c-tests/decode-output.c`)
+/// against this build's generated `moq.h` and `libmoq.a`.
+///
+/// The fixture pins the `moq_video_decoder_output` layout at compile time and
+/// exercises it at runtime: refusal of bad formats/sizes without a session,
+/// plus an in-process publish/decodes round trip for the I420 default, native
+/// RGBA, and a resized I420.
+///
+/// Unix-only: linking `libmoq.a` from outside cargo needs platform link flags
+/// (`-l` vs MSVC `.lib` names) this driver does not model for Windows.
+#[test]
+#[cfg(unix)]
+fn video_decoder_output_c_fixture() {
+	let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+	let fixture = manifest.join("c-tests").join("decode-output.c");
+	assert!(fixture.is_file(), "missing C fixture: {}", fixture.display());
+
+	// The test binary lives in `<target>/<profile>/deps`; the staticlib in
+	// `<target>/<profile>` and the generated header in `<target>/include`.
+	let deps = std::env::current_exe().expect("current test executable");
+	let profile = deps.parent().and_then(|deps| deps.parent()).expect("profile dir");
+	let target = profile.parent().expect("target dir");
+	let header = target.join("include").join("moq.h");
+	let archive = profile.join("libmoq.a");
+
+	// `cargo test` does not emit the staticlib, so build it (incremental and
+	// offline: everything the test build compiled is reused). Trying to link
+	// against a stale or missing archive would test nothing.
+	let workspace = manifest.parent().and_then(|rs| rs.parent()).expect("workspace root");
+	let built = std::process::Command::new("cargo")
+		.arg("build")
+		.arg("--locked")
+		.arg("--offline")
+		.arg("-p")
+		.arg("libmoq")
+		.current_dir(workspace)
+		.output()
+		.unwrap_or_else(|err| panic!("failed to run cargo build -p libmoq: {err}"));
+	assert!(
+		built.status.success(),
+		"cargo build -p libmoq failed:\n{}",
+		String::from_utf8_lossy(&built.stderr)
+	);
+	assert!(header.is_file(), "missing generated header: {}", header.display());
+	assert!(archive.is_file(), "missing staticlib: {}", archive.display());
+
+	// cargo can't inject libmoq.a's native deps into an external link, so read
+	// them from the same list build.rs and CMake use (mirrors smoke.sh).
+	let platform = if cfg!(target_os = "macos") { "apple" } else { "linux" };
+	let libs = std::fs::read_to_string(manifest.join("native-libs").join(format!("{platform}.txt")))
+		.expect("native-libs list");
+	let mut link_args: Vec<String> = Vec::new();
+	for entry in libs.lines().map(str::trim) {
+		if entry.is_empty() || entry.starts_with('#') {
+			continue;
+		}
+		match entry.strip_prefix("framework:") {
+			Some(framework) => link_args.extend(["-framework".to_string(), framework.to_string()]),
+			None => link_args.push(format!("-l{entry}")),
+		}
+	}
+
+	let out = std::env::temp_dir().join(format!("moq-c-decode-output-{}", std::process::id()));
+	let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+	let status = std::process::Command::new(&cc)
+		.arg(&fixture)
+		.arg(format!("-I{}", target.join("include").display()))
+		.arg("-O1")
+		.arg("-o")
+		.arg(&out)
+		.arg(format!("-L{}", profile.display()))
+		.arg("-lmoq")
+		.args(&link_args)
+		.output()
+		.unwrap_or_else(|err| panic!("failed to run {cc}: {err}"));
+	assert!(
+		status.status.success(),
+		"C fixture failed to compile:\n{}",
+		String::from_utf8_lossy(&status.stderr)
+	);
+
+	let run = std::process::Command::new(&out)
+		.output()
+		.expect("failed to run the C fixture");
+	let _ = std::fs::remove_file(&out);
+	assert!(
+		run.status.success(),
+		"C fixture failed:\n{}",
+		String::from_utf8_lossy(&run.stderr)
+	);
+}
+
 /// Build a valid OpusHead init buffer (RFC 7845 §5.1).
 fn opus_head() -> Vec<u8> {
 	let mut head = Vec::with_capacity(19);
@@ -2662,7 +2754,12 @@ fn video_raw_publish_consume() {
 	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
 	let catalog_id = id(catalog_cb.recv());
 
-	let decoder = moq_video_decoder_output { max_age_ms: 10_000 };
+	let decoder = moq_video_decoder_output {
+		max_age_ms: 10_000,
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
+		width: 0,
+		height: 0,
+	};
 	let frame_cb = Callback::new();
 	let consumer = id(unsafe { moq_decode_video(catalog_id, 0, &decoder, Some(channel_callback), frame_cb.ptr) });
 
@@ -2704,6 +2801,170 @@ fn video_raw_publish_consume() {
 	assert_eq!(moq_encode_video_finish(producer), 0);
 	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A request the decoder cannot honor fails before anything is subscribed, so
+/// no session is needed: an unknown pixel format, a half-set or odd size, and
+/// a size whose packed bytes don't fit are all refused, as is a null output.
+/// A valid request against a bogus catalog gets past validation and fails on
+/// the lookup instead.
+#[test]
+fn video_raw_decode_output_rejected() {
+	use crate::ffi::ReturnCode;
+
+	let bad_format = moq_video_decoder_output {
+		max_age_ms: 0,
+		format: 999,
+		width: 0,
+		height: 0,
+	};
+	assert_eq!(
+		unsafe { moq_decode_video(1, 0, &bad_format, None, std::ptr::null_mut()) },
+		Error::InvalidCode.code()
+	);
+
+	for (width, height) in [(320, 0), (0, 240), (321, 240), (320, 241), (u32::MAX - 1, u32::MAX - 1)] {
+		let bad_size = moq_video_decoder_output {
+			max_age_ms: 0,
+			format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
+			width,
+			height,
+		};
+		assert_eq!(
+			unsafe { moq_decode_video(1, 0, &bad_size, None, std::ptr::null_mut()) },
+			Error::InvalidConfig(String::new()).code(),
+			"size {width}x{height} must be refused"
+		);
+	}
+
+	assert_eq!(
+		unsafe { moq_decode_video(1, 0, std::ptr::null(), None, std::ptr::null_mut()) },
+		Error::InvalidPointer.code()
+	);
+
+	let valid = moq_video_decoder_output {
+		max_age_ms: 0,
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 160,
+		height: 120,
+	};
+	assert_eq!(
+		unsafe { moq_decode_video(u32::MAX / 2, 0, &valid, None, std::ptr::null_mut()) },
+		Error::CatalogNotFound.code(),
+		"a valid request fails on the catalog lookup, not on validation"
+	);
+}
+
+/// Publish a gray 320x240 software-H.264 stream, decode it with `output`, and
+/// return the first frame's dimensions and byte size.
+///
+/// Mirrors [`video_raw_publish_consume`]: the rendition only exists once a
+/// keyframe has been encoded, so publish before subscribing, then keep feeding
+/// the encoder so the subscriber has frames whatever boundary it landed on.
+fn decode_first_frame(output: &moq_video_decoder_output) -> (u32, u32, usize) {
+	let origin = id(moq_origin_create());
+	let path = b"video-raw-output-test";
+	let broadcast = publish_broadcast(origin, path);
+
+	let input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 320,
+		height: 240,
+		framerate: 30,
+	};
+	let encode_output = moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		bitrate: 0,
+		gop: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+	let producer = id(unsafe { moq_encode_video(broadcast, &input, &encode_output, 0) });
+
+	let rgba = gray_rgba(320, 240);
+	let publish = |index: u64| {
+		let frame = moq_video_encoder_frame {
+			timestamp_us: index * 33_333,
+			data: rgba.as_ptr(),
+			data_size: rgba.len(),
+		};
+		assert_eq!(unsafe { moq_encode_video_frame(producer, &frame) }, 0);
+	};
+
+	assert_eq!(moq_encode_video_cut(producer), 0);
+	for i in 0..5u64 {
+		publish(i);
+	}
+
+	let consume = request_broadcast(origin, path);
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_id = id(catalog_cb.recv());
+
+	let frame_cb = Callback::new();
+	let consumer = id(unsafe { moq_decode_video(catalog_id, 0, output, Some(channel_callback), frame_cb.ptr) });
+
+	for i in 5..20u64 {
+		publish(i);
+	}
+
+	let frame_id = id(frame_cb.recv());
+	let mut frame = moq_video_frame {
+		timestamp_us: 0,
+		width: 0,
+		height: 0,
+		data: std::ptr::null(),
+		data_size: 0,
+	};
+	assert_eq!(unsafe { moq_decode_video_frame(frame_id, &mut frame) }, 0);
+	let result = (frame.width, frame.height, frame.data_size);
+
+	assert_eq!(moq_decode_video_frame_free(frame_id), 0);
+	assert_eq!(moq_decode_video_close(consumer), 0);
+	loop {
+		let code = frame_cb.recv();
+		if code > 0 {
+			assert_eq!(moq_decode_video_frame_free(id(code)), 0);
+		} else {
+			assert_eq!(code, 0, "raw video close delivers terminal 0");
+			break;
+		}
+	}
+
+	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
+	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_catalog_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_encode_video_finish(producer), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+	result
+}
+
+/// A requested RGBA frame decodes to tightly-packed RGBA at the native size.
+#[test]
+fn video_raw_decode_rgba() {
+	let output = moq_video_decoder_output {
+		max_age_ms: 10_000,
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 0,
+		height: 0,
+	};
+	assert_eq!(decode_first_frame(&output), (320, 240, 320 * 240 * 4));
+}
+
+/// A requested size decodes to exactly that size, even though the software
+/// backend has no scaler and ignores the hint.
+#[test]
+fn video_raw_decode_resize() {
+	let output = moq_video_decoder_output {
+		max_age_ms: 10_000,
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
+		width: 160,
+		height: 120,
+	};
+	assert_eq!(decode_first_frame(&output), (160, 120, 160 * 120 * 3 / 2));
 }
 
 /// Regression: a producer handle is just an integer, so a C caller may drive it
@@ -3025,7 +3286,12 @@ fn video_raw_decode() {
 	let catalog_id = id(catalog_cb.recv());
 
 	// Subscribe + decode before publishing frames so the keyframe group is delivered.
-	let output = moq_video_decoder_output { max_age_ms: 10_000 };
+	let output = moq_video_decoder_output {
+		max_age_ms: 10_000,
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
+		width: 0,
+		height: 0,
+	};
 	let frame_cb = Callback::new();
 	let consumer = id(unsafe { moq_decode_video(catalog_id, 0, &output, Some(channel_callback), frame_cb.ptr) });
 

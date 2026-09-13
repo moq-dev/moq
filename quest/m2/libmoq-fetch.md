@@ -13,9 +13,8 @@ Specify ownership, cancellation, cache misses, and terminal delivery using the
 existing consume contracts. Test a hit, miss, and cancelled fetch from a C caller.
 
 Regenerate `moq.h` and update `doc/lib/c/index.md`, whose capability list already
-claims group fetch. Keep decoder output configuration in its separate M1 quest.
+claims group fetch. Decoder output configuration landed separately on the M1 line.
 
 ## Related
 
-- [Decoder output](/quest/m1/api-c-decoder-output.md) - the separate breaking C configuration change
 - [#2152](/quest/m2/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - dynamic track serving and server-side accept

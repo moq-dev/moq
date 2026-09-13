@@ -54,7 +54,6 @@ additive quest that builds on dev-only code start on main afterwards from
 - [Origin scope API](/quest/m1/api-origin-pattern-scopes.md) - typed scope grants preserve current prefixes and refuse unsupported patterns
 - [Token claims API](/quest/m1/api-token-claims.md) - working versioned claim types precede the v1 default rollout
 - [Cluster peer API](/quest/m1/api-cluster-peer-config.md) - typed peer configuration supports current symmetric policy
-- [C decoder output](/quest/m1/api-c-decoder-output.md) - finalize the published C configuration layout before release
 - [Broadcast clock](/quest/m1/broadcast-clock.md) - the root clock replaces the published archive wall field on dev before release
 - [m0](/quest/m0/README.md) - every release blocker lands or is punted before the merge
 - [External API proof](/quest/m1/api-release-proof.md) - the packaged consumer fixture and explicit fix/deferral decisions must be recorded before merge
