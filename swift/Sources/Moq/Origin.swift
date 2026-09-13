@@ -85,7 +85,7 @@ public final class OriginDynamic: AsyncSequence, Sendable {
         BroadcastRequest(try await ffi.requestedBroadcast())
     }
 
-    /// Re-price the route in place: replace its hops and cost.
+    /// Re-price the route in place: replace its hops and costs.
     public func update(route: Route) throws {
         try ffi.update(route: route)
     }
@@ -186,7 +186,7 @@ public final class Announcement: Sendable {
         ffi.active()
     }
 
-    /// The announced route: its prefix, relay hops, and cost.
+    /// The announced route: its prefix, relay hops, and costs.
     public var route: Route {
         ffi.route()
     }

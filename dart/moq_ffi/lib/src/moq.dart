@@ -8,7 +8,9 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
+
 import "package:ffi/ffi.dart";
+
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -1513,7 +1515,8 @@ class FfiConverterMoqOriginOptions {
 class MoqRoute {
   final List<int> hops;
   final int cost;
-  MoqRoute({this.hops = const [], this.cost = 0});
+  final int? cold;
+  MoqRoute({this.hops = const [], this.cost = 0, this.cold = null});
 }
 
 class FfiConverterMoqRoute {
@@ -1533,8 +1536,13 @@ class FfiConverterMoqRoute {
     );
     final cost = cost_lifted.value;
     new_offset += cost_lifted.bytesRead;
+    final cold_lifted = FfiConverterOptionalUInt64.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final cold = cold_lifted.value;
+    new_offset += cold_lifted.bytesRead;
     return LiftRetVal(
-      MoqRoute(hops: hops, cost: cost),
+      MoqRoute(hops: hops, cost: cost, cold: cold),
       new_offset - buf.offsetInBytes,
     );
   }
@@ -1543,6 +1551,7 @@ class FfiConverterMoqRoute {
     final total_length =
         FfiConverterSequenceUInt64.allocationSize(value.hops) +
         FfiConverterUInt64.allocationSize(value.cost) +
+        FfiConverterOptionalUInt64.allocationSize(value.cold) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -1559,12 +1568,17 @@ class FfiConverterMoqRoute {
       value.cost,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterOptionalUInt64.write(
+      value.cold,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     return new_offset - buf.offsetInBytes;
   }
 
   static int allocationSize(MoqRoute value) {
     return FfiConverterSequenceUInt64.allocationSize(value.hops) +
         FfiConverterUInt64.allocationSize(value.cost) +
+        FfiConverterOptionalUInt64.allocationSize(value.cold) +
         0;
   }
 }
@@ -12061,7 +12075,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqannouncement_path() != 57757) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqannouncement_route() != 55351) {
+  if (uniffi_moq_ffi_checksum_method_moqannouncement_route() != 47201) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastrequest_abort() != 42319) {
@@ -12091,7 +12105,7 @@ void _checkApiChecksums() {
       11981) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqorigindynamic_update() != 171) {
+  if (uniffi_moq_ffi_checksum_method_moqorigindynamic_update() != 52212) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqoriginproducer_consume() != 52357) {

@@ -73,7 +73,8 @@ public typealias Container = MoqFFI.MoqContainer
 /// A best-effort raw-track datagram as received: sequence, timestamp, and payload.
 public typealias Datagram = MoqFFI.MoqDatagram
 /// A path-prefix route: the prefix it covers, relay hop ids (oldest first),
-/// and the advertised cost (lower wins).
+/// and the advertised costs: warm `cost`, lower wins, plus undiscounted `cold`
+/// (`nil` means the same as `cost`).
 public typealias Route = MoqFFI.MoqRoute
 /// Per-subscription delivery preferences: priority, group ordering, latency
 /// budget, and group range.

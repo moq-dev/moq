@@ -81,7 +81,7 @@ func (d *OriginDynamic) Requests(ctx context.Context) iter.Seq2[*BroadcastReques
 	return streamSeq(ctx, d.RequestedBroadcast)
 }
 
-// Update re-prices the route in place: replaces its hops and cost.
+// Update re-prices the route in place: replaces its hops and costs.
 func (d *OriginDynamic) Update(route Route) error {
 	return d.inner.Update(route)
 }
@@ -172,7 +172,7 @@ func (a *Announcement) Active() bool {
 	return a.inner.Active()
 }
 
-// Route is the route serving the prefix: its relay hops and cost.
+// Route is the route serving the prefix: its relay hops and costs (warm Cost, undiscounted Cold).
 func (a *Announcement) Route() Route {
 	return a.inner.Route()
 }

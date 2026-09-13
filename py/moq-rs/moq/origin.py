@@ -47,7 +47,7 @@ class Announcement:
 
     @property
     def route(self) -> Route:
-        """The route serving the prefix: its relay hops and cost."""
+        """The route serving the prefix: its relay hops and costs (warm `cost`, undiscounted `cold`)."""
         return self._inner.route()
 
 
@@ -146,7 +146,7 @@ class OriginDynamic:
         return BroadcastRequest(await self._inner.requested_broadcast())
 
     def update(self, route: Route) -> None:
-        """Re-price the route in place: replace its hops and cost."""
+        """Re-price the route in place: replace its hops and costs."""
         self._inner.update(route)
 
     def cancel(self) -> None:

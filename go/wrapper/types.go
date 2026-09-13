@@ -43,7 +43,7 @@ type (
 	ProtocolKind = ffi.MoqProtocolKind
 	// OriginOptions configures a new origin, such as its maximum cache size in bytes.
 	OriginOptions = ffi.MoqOriginOptions
-	// Route is the hop chain a broadcast takes to reach an origin, and its cost.
+	// Route is the hop chain a broadcast takes to reach an origin, and its costs: warm Cost plus undiscounted Cold (nil Cold means Cost).
 	Route = ffi.MoqRoute
 	// Subscription holds subscriber-side delivery preferences: priority, ordering, max age, and group range.
 	Subscription = ffi.MoqSubscription

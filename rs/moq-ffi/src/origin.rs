@@ -14,7 +14,7 @@ pub struct MoqOriginOptions {
 	pub cache_capacity_bytes: Option<u64>,
 }
 
-/// A path-prefix route: hops and cost for an advertisement.
+/// A path-prefix route: hops and costs for an advertisement.
 ///
 /// Pair one with `MoqBroadcastProducer::announce` for an exact path, or with
 /// `MoqOriginProducer::dynamic` for a pattern. Observe them with
@@ -22,7 +22,7 @@ pub struct MoqOriginOptions {
 /// convention a publisher announces each broadcast's exact path, so subscribers
 /// can enumerate broadcasts, while a service advertises a pattern and answers
 /// whatever is requested beneath it.
-#[derive(Clone, Default, uniffi::Record)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
 pub struct MoqRoute {
 	/// Hop ids of the relay hops the route traversed, oldest first.
 	#[uniffi(default = [])]
@@ -32,15 +32,19 @@ pub struct MoqRoute {
 	/// larger for content it would have to start producing on demand.
 	#[uniffi(default = 0)]
 	pub cost: u64,
+	/// The same path with every warm discount removed: what pulling the content
+	/// would cost if no relay along it were carrying anything. `None` means the
+	/// same as `cost`, which is right for a publisher seeding a production cost.
+	#[uniffi(default = None)]
+	pub cold: Option<u64>,
 }
 
 impl From<moq_net::origin::Route> for MoqRoute {
 	fn from(route: moq_net::origin::Route) -> Self {
 		Self {
 			hops: route.hops.iter().map(|origin| origin.id()).collect(),
-			// The relay mesh prices a route twice (see `origin::Cost`); an
-			// application only ever wants what pulling it costs today.
 			cost: route.cost.warm,
+			cold: Some(route.cost.cold),
 		}
 	}
 }
@@ -49,7 +53,8 @@ impl TryFrom<MoqRoute> for moq_net::origin::Route {
 	type Error = MoqError;
 
 	fn try_from(route: MoqRoute) -> Result<Self, MoqError> {
-		let mut out = moq_net::origin::Route::default().with_cost(route.cost);
+		let cold = route.cold.unwrap_or(route.cost);
+		let mut out = moq_net::origin::Route::default().with_cost((route.cost, cold));
 		for id in route.hops {
 			let origin = moq_net::Hop::new(id).map_err(|e| MoqError::InvalidRoute(e.to_string()))?;
 			out = out
@@ -365,7 +370,7 @@ impl MoqOriginDynamic {
 			.await
 	}
 
-	/// Re-price the route in place: replace its hops and cost. The pattern cannot
+	/// Re-price the route in place: replace its hops and costs. The pattern cannot
 	/// change; call `dynamic` again instead.
 	pub fn update(&self, route: MoqRoute) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
@@ -453,7 +458,7 @@ impl MoqAnnouncement {
 		self.prefix.clone()
 	}
 
-	/// The route serving the prefix: its hops and cost.
+	/// The route serving the prefix: its hops and costs.
 	pub fn route(&self) -> MoqRoute {
 		self.route.clone()
 	}

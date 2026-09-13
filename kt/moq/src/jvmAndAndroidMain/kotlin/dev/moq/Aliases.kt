@@ -118,7 +118,7 @@ typealias ContainerInit = uniffi.moq.MoqContainerInit
 typealias Audio = uniffi.moq.MoqAudio
 /** A width and height pair, in pixels. */
 typealias Dimensions = uniffi.moq.MoqDimensions
-/** A path-prefix route: the prefix it covers, relay hop ids (oldest first), and advertised cost (lower wins). */
+/** A path-prefix route: the prefix it covers, relay hop ids (oldest first), and advertised costs (warm cost, lower wins, plus undiscounted cold defaulting to cost). */
 typealias Route = uniffi.moq.MoqRoute
 /** Tunes how a track subscription is delivered: priority, group ordering, and range. */
 typealias Subscription = uniffi.moq.MoqSubscription

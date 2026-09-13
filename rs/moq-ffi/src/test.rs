@@ -226,6 +226,68 @@ fn origin_options_set_cache_capacity() {
 }
 
 #[test]
+fn route_cold_cost_conversions_are_lossless() {
+	// An explicit cold half survives the round trip in both directions.
+	let route = moq_net::origin::Route::default().with_cost((0u64, 9u64));
+	let ffi = MoqRoute::from(route.clone());
+	assert_eq!(ffi.cost, 0);
+	assert_eq!(ffi.cold, Some(9));
+	let back = moq_net::origin::Route::try_from(ffi).unwrap();
+	assert_eq!(back.cost, route.cost);
+
+	// An omitted cold means the same as the warm cost: a publisher seeding
+	// only its production cost sets one number.
+	let seeded = moq_net::origin::Route::try_from(MoqRoute {
+		hops: vec![],
+		cost: 5,
+		cold: None,
+	})
+	.unwrap();
+	assert_eq!(seeded.cost, moq_net::origin::Cost::from((5u64, 5u64)));
+}
+
+#[tokio::test]
+async fn announced_route_keeps_cold_cost_on_reannounce() {
+	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let consumer = origin.consume();
+	let broadcast = origin.create_broadcast("cold-route".into()).unwrap();
+	broadcast
+		.announce(MoqRoute {
+			hops: vec![],
+			cost: 0,
+			cold: Some(9),
+		})
+		.unwrap();
+
+	// The route observed through the announcement stream carries both halves:
+	// a truthful `{warm: 0, cold: 9}` is never rewritten to the publisher's
+	// own `{warm: 0, cold: 0}`.
+	let announced = consumer.announced("".into()).unwrap();
+	let route = loop {
+		let announcement = tokio::time::timeout(TIMEOUT, announced.next())
+			.await
+			.expect("timed out waiting for an announce update")
+			.unwrap()
+			.expect("origin ended while waiting for an announce update");
+		if announcement.path() == "cold-route" && announcement.active() {
+			break announcement.route();
+		}
+	};
+	assert_eq!(route.cost, 0);
+	assert_eq!(route.cold, Some(9));
+
+	// Announcing the observed route again reproduces it exactly, cold half
+	// included. (An identical re-announce is not redelivered, so this checks
+	// the conversion rather than waiting for a second update.)
+	broadcast.announce(route.clone()).unwrap();
+	let back = moq_net::origin::Route::try_from(route.clone()).unwrap();
+	assert_eq!(back.cost, moq_net::origin::Cost::from((0u64, 9u64)));
+	assert_eq!(MoqRoute::from(back), route);
+
+	broadcast.finish().unwrap();
+}
+
+#[test]
 fn publish_media_lifecycle() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = opus_head();

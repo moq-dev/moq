@@ -592,11 +592,17 @@ pub struct moq_section {
 	pub json_len: usize,
 }
 
-/// A route advertisement: hops and cost.
+/// A route advertisement: hops and costs.
 ///
 /// Pair with [moq_publish_announce] or [moq_origin_dynamic]. Zeroed (NULL hops,
 /// hops_len 0, cost 0) is the default route. `hops` is borrowed for the duration
 /// of the call that reads it.
+///
+/// `cost` is the warm price: what pulling via this route costs today, lower
+/// wins. `cold` is the same path undiscounted; when `has_cold` is false it
+/// defaults to `cost`, which is what a publisher seeding its production cost
+/// wants. New fields always append, so a zeroed struct keeps meaning the
+/// defaults.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
@@ -606,6 +612,10 @@ pub struct moq_route {
 	pub hops_len: usize,
 	/// Preference among routes covering the same prefix: lower wins.
 	pub cost: u64,
+	/// The same path with every warm discount removed. Ignored unless `has_cold`.
+	pub cold: u64,
+	/// Whether `cold` applies. When false, `cold` defaults to `cost`.
+	pub has_cold: bool,
 }
 
 impl Default for moq_route {
@@ -614,11 +624,16 @@ impl Default for moq_route {
 			hops: std::ptr::null(),
 			hops_len: 0,
 			cost: 0,
+			cold: 0,
+			has_cold: false,
 		}
 	}
 }
 
 /// Parse a [moq_route], treating NULL as the default.
+///
+/// An omitted `cold` (`has_cold` false) prices the route undiscounted, like a
+/// publisher seeding its production cost.
 ///
 /// # Safety
 /// `route` may be NULL, or must point at a readable [moq_route] whose `hops`
@@ -627,7 +642,8 @@ unsafe fn parse_route(route: *const moq_route) -> Result<moq_net::origin::Route,
 	let Some(route) = (unsafe { route.as_ref() }) else {
 		return Ok(moq_net::origin::Route::default());
 	};
-	let mut out = moq_net::origin::Route::default().with_cost(route.cost);
+	let cold = if route.has_cold { route.cold } else { route.cost };
+	let mut out = moq_net::origin::Route::default().with_cost((route.cost, cold));
 	if route.hops_len > 0 {
 		if route.hops.is_null() {
 			return Err(Error::InvalidPointer);
