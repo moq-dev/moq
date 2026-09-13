@@ -43,7 +43,11 @@ Direction to settle in the draft first, then the code:
   scheduler's domain tier.
 - On a relay-to-relay session, ordering across domains is fair (round-robin or
   weighted by domain), publisher priority breaks ties within a broadcast, and
-  downstream subscriber priorities are not forwarded.
+  downstream subscriber priorities are not forwarded. Attribute FETCH streams
+  to a domain the same way: cache-miss and history fetches carry Subscriber
+  Priority outside any subscription, so leaving them outside every bucket
+  bypasses tenant isolation; settle their carrier beside the subscription one,
+  or narrow the goal to subscription delivery.
 - Keep the current ranking: track priority, then subscription, then newest
   group; do not reintroduce a group-order direction knob.
 - A per-session cap on distinct ranks is a scheduling detail; whatever replaces
@@ -56,9 +60,12 @@ describes a direction knob the wire does not carry. Public API impact: the
 meaning of `Subscribe.priority` on a cluster session; report it with the draft
 change.
 
+## Required
+
+- [Hierarchical stream scheduling](/quest/m2/quic/scheduler.md) - the domain
+  tier this scoping's fairness buckets ride on
+
 ## Related
 
-- [Hierarchical stream scheduling](/quest/m2/quic/scheduler.md) - the
-  noq-side hierarchy this scoping rides on
 - [Starvation](/quest/m2/qos/starvation.md) - the relay-side signal that
   shows a starved subscription

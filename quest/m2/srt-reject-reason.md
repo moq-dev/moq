@@ -24,9 +24,10 @@ in `rs/moq-srt/README.md` to pass what they mean.
 is part of the decision. Re-export it from `moq_srt` (`pub use
 srt_tokio::access::ServerRejectReason;`) and take it in `reject`, rather than
 making every embedder depend on `srt_tokio` directly or duplicating the SRT
-reason list in a new enum. The re-export is the smallest stable surface and
-lets the backend change without an API migration; a dedicated `moq_srt` enum
-is only worth it if an embedder needs a reason SRT cannot express.
+reason list in a new enum. The re-export is the smallest surface, but it
+ties the public type identity to `srt_tokio`, so a backend swap still needs an
+API migration; a dedicated `moq_srt` enum is only worth it if an embedder
+needs backend independence or a reason SRT cannot express.
 
 Prove it over the wire for both a rejected publish and a rejected subscribe
 with a non-default reason, alongside the existing coverage that a rejected
