@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.24](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.23...moq-audio-v0.0.24) - 2026-09-13
+
+### Fixed
+
+- *(moq-video,moq-audio)* open a decoder at the live edge ([#3565](https://github.com/moq-dev/moq/pull/3565))
+
 ## [0.0.23](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.22...moq-audio-v0.0.23) - 2026-09-09
 
 ### Added

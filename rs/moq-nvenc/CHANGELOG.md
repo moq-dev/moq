@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/moq-dev/moq/compare/moq-nvenc-v0.0.4...moq-nvenc-v0.0.5) - 2026-09-13
+
+### Fixed
+
+- *(moq-video)* cap NVENC keyframes with a single-frame VBV ([#3609](https://github.com/moq-dev/moq/pull/3609))
+
 ## [0.0.4](https://github.com/moq-dev/moq/compare/moq-nvenc-v0.0.3...moq-nvenc-v0.0.4) - 2026-09-01
 
 ### Other
