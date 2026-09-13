@@ -474,12 +474,8 @@ fn bad_datagram_is_event() {
 	};
 	payload[0] ^= 1;
 	let payload = bytes::Bytes::from(payload);
-	net.write_datagram(moq_net::Datagram {
-		sequence: 1,
-		timestamp: moq_net::Timestamp::from_millis(2).unwrap(),
-		payload,
-	})
-	.unwrap();
+	net.insert_datagram(1, moq_net::Timestamp::from_millis(2).unwrap(), payload)
+		.unwrap();
 	producer
 		.insert_datagram(2, moq_net::Timestamp::from_millis(3).unwrap(), b"three")
 		.unwrap();
@@ -612,11 +608,11 @@ fn forged_datagram_does_not_burn_identity() {
 		protect(&key, 1, 0, b"two", 1196).unwrap().to_vec()
 	};
 	forged[0] ^= 1;
-	net.write_datagram(moq_net::Datagram {
-		sequence: 1,
-		timestamp: moq_net::Timestamp::from_millis(2).unwrap(),
-		payload: bytes::Bytes::from(forged),
-	})
+	net.insert_datagram(
+		1,
+		moq_net::Timestamp::from_millis(2).unwrap(),
+		bytes::Bytes::from(forged),
+	)
 	.unwrap();
 	// Real seq 1 after the forgery.
 	producer
@@ -710,7 +706,7 @@ fn resumed_group_opens_at_transport_index() {
 		Poll::Ready(Err(_)) => panic!("net group error"),
 		Poll::Pending => panic!("net group pending"),
 	};
-	net_group.start_at(1);
+	net_group.skip_to(1);
 	let key = Arc::new(Mutex::new(TrackKey::derive(&cred, &physical, Domain::Group).unwrap()));
 	let window = Arc::new(Mutex::new(crate::window::GroupWindow::default()));
 	// GroupWindow is pub(crate); construct via a fresh track consumer window is not

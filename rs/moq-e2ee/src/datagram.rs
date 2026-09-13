@@ -34,20 +34,13 @@ pub enum Event {
 }
 
 /// Insert ciphertext at an explicit sequence on the net track.
-///
-/// Uses [`moq_net::track::Producer::insert_datagram`] when that API exists, otherwise
-/// [`moq_net::track::Producer::write_datagram`].
 pub(crate) fn insert_ciphertext(
 	track: &mut moq_net::track::Producer,
 	sequence: u64,
 	timestamp: moq_net::Timestamp,
 	payload: Bytes,
 ) -> moq_net::Result<()> {
-	track.write_datagram(moq_net::Datagram {
-		sequence,
-		timestamp,
-		payload,
-	})
+	track.insert_datagram(sequence, timestamp, payload)
 }
 
 /// Ciphertext budget for a datagram that will encode these fields.
