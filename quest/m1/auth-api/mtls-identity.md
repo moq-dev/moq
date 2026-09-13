@@ -7,7 +7,7 @@ auth API request as every other connection, and the endpoint learns which
 certificate: `mtls=<identity>` replaces `mtls=true`. In proxy mode the
 endpoint's grant, or its absence, decides what the peer may publish and
 subscribe; in token mode a certificate-authenticated peer with no grant stays
-unrestricted until [mTLS explicit scope](/quest/m2/auth-api/mtls-scope.md),
+unrestricted until [mTLS explicit scope](/quest/m1/auth-api/mtls-scope.md),
 so an endpoint answering `{alias, tier}` today keeps that reply shape. The
 request side is a breaking change to the endpoint contract: an endpoint that
 compares `mtls` to the literal `true` must accept any non-empty value before
@@ -23,8 +23,10 @@ hints, and mints `AuthToken::unrestricted`. The party being scoped picks the
 scope, because the root is the path the client dialed.
 
 - Delete `resolve_mtls`. Build the request through `api_request` and resolve
-  through `authorize`, so a grant is read one way for every credential, with
-  `host` in proxy mode as the mode already sends it.
+  through `authorize`, so a grant is read one way for every credential.
+  Every request carries `root`, `host`, and `transport` in every mode
+  (decided 2026-09-13); `transport` becomes required rather than optional so
+  no embedder can omit it.
 - `mtls=<identity>` names the peer: the leaf certificate's first SAN DNS
   name, the CN when it has none, and the leaf's SHA-256 fingerprint when it
   has neither, so the value is never empty. `moq_tokio::tls::PeerIdentity`
@@ -45,13 +47,12 @@ scope, because the root is the path the client dialed.
   so that marker carries the identity too.
 - Caching: the identity is in the query, so the shared HTTP cache and the
   in-flight coalescing already key on it: one request per (root, identity,
-  transport), however many sessions that peer opens. `revalidate` stays
-  `None` for mTLS peers, which the "mTLS peers must never revalidate" test
-  pins: a deployed endpoint sending a blanket `Cache-Control: max-age` would
-  otherwise arm revalidation across a relay mesh the moment this ships. Mesh
-  revalidation is its own change, an explicit opt-in per identity plus a
-  relay-side floor on the staleness window; `stale-if-error` alone is not
-  enough, since an endpoint that answers "no" still partitions the mesh.
+  transport), however many sessions that peer opens. mTLS peers revalidate
+  on the reply's `Cache-Control` exactly as tokens do (decided 2026-09-13,
+  superseding the "mTLS peers must never revalidate" test): a deployed
+  endpoint's `max-age` arms re-checks across the mesh the moment this ships,
+  so the release note says so, and [Plan](/quest/m1/auth-api/plan.md) decides
+  whether a relay-side floor on the staleness window is wanted.
 - Token mode: `mtls` satisfies "has a credential" without a JWT or a `key`;
   no grant means unrestricted, as today. Proxy mode: the endpoint returns a
   grant like anyone else, and no grant is a refusal.
@@ -68,5 +69,5 @@ scope, because the root is the path the client dialed.
 
 ## Related
 
-- [mTLS explicit scope](/quest/m2/auth-api/mtls-scope.md) - removes the
+- [mTLS explicit scope](/quest/m1/auth-api/mtls-scope.md) - removes the
   unrestricted default once the endpoint speaks v1

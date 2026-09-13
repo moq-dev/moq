@@ -15,10 +15,13 @@ stays here only if it breaks a published API or wire, or gates the merge;
 on `main`, additive, or targets a `0.0.x` crate lives in
 [m2](/quest/m2/README.md) even when it builds on dev-only code; it starts on
 `main` after the merge. The 2026-09-12 grooming applied that rule to every
-quest here and merged main into dev.
+quest here and merged main into dev. The auth API line is the one exception
+ranked above the merge: its contract change is breaking, and moq.pro adopts
+the release only once the cacheable token path is settled.
 
 ## Quests
 
+- [Auth API](/quest/m1/auth-api/README.md) - the endpoint contract moq.pro adopts: versioned grants, named mTLS peers, re-checks that move a tier and resize a scope, one open question planned first
 - [Relay embedding](/quest/m1/api-relay-embedding.md) - custom routes retain the owner of listeners, workers, and shutdown
 - [FFI frame cursor](/quest/m1/api-ffi-frame-cursor.md) - empty groups and cancelled reads do not become false EOF or lost frames
 - [Subscription bounds](/quest/m1/api-subscription-bounds.md) - local and requested ranges use consistent exclusive ends
@@ -28,4 +31,5 @@ quest here and merged main into dev.
 - [Anonymous rank](/quest/m1/anonymous-route-rank.md) - moq-net: a route through an anonymous hop ranks below every identified route at any cost, and hop 0 travels the chain to say so
 - [A/V clock](/quest/m1/plan-av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
 - [Native Go context](/quest/m1/go-native-context.md) - the Go generator emits context.Context itself, retiring the hand-rolled cancellation token
+- [Wildcard docs](/quest/m1/wildcard-docs.md) - path patterns and wildcard advertisements are documented on every surface the dev PRs touched before the release ships them
 - [Merge dev](/quest/m1/merge-dev.md) - dev lands on main with a closing keyword for every issue it fixed

@@ -11,6 +11,11 @@ and an endpoint that names no `max-age` turns revalidation off without a
 trace. This line closes those gaps on the HTTP contract; the wire side is
 [In-band auth](/quest/m2/auth/README.md).
 
+It sits in m1 because `mtls=<identity>` and the `"v": 1` reply break the
+endpoint contract, and because moq.pro needs the cacheable token path settled
+before it adopts the release. [Plan](/quest/m1/auth-api/plan.md) carries the
+decisions settled on 2026-09-13 and the one still open; run it first.
+
 ## Plan
 
 The caching model every quest here keeps:
@@ -22,8 +27,9 @@ The caching model every quest here keeps:
   per credential, so auth cost tracks distinct credentials, not viewers.
 - mTLS: the request carries the peer's identity and the reply is cached per
   (root, identity, transport). Not unrestricted by default once the endpoint
-  speaks v1; never revalidated, so an endpoint outage cannot partition the
-  mesh.
+  speaks v1. Re-checked on the same `max-age` and `stale-if-error` semantics
+  as tokens (decided 2026-09-13), so an endpoint outage is tolerated for the
+  stale window and a refusal drops the peer within two cadences.
 - Revalidation rides the admission cache, so a re-check can be answered from
   an entry up to one `max-age` old and the revocation window is up to twice
   `max-age`, floored at one second. That belongs in operator documentation,
@@ -34,13 +40,15 @@ is deleted. Everything here branches from dev unless a quest says main.
 
 ## Quests
 
-- [mTLS identity](/quest/m2/auth-api/mtls-identity.md) - an mTLS peer is
+- [Plan](/quest/m1/auth-api/plan.md) - settle the one open question and
+  size the line, starting from the decisions already recorded
+- [mTLS identity](/quest/m1/auth-api/mtls-identity.md) - an mTLS peer is
   authorized through the auth API like any other connection, named by its
   certificate, and a proxy grant can scope or refuse it
-- [mTLS explicit scope](/quest/m2/auth-api/mtls-scope.md) - a v1 reply must
+- [mTLS explicit scope](/quest/m1/auth-api/mtls-scope.md) - a v1 reply must
   grant an mTLS peer its scope; unrestricted survives only for unversioned
   endpoints
-- [Revalidation updates](/quest/m2/auth-api/revalidation-updates.md) - a
+- [Revalidation updates](/quest/m1/auth-api/revalidation-updates.md) - a
   re-check moves the tier in place, names an alias change, and a reply that
   disables revalidation says so once
 
