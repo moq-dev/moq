@@ -441,13 +441,9 @@ impl TrackInner {
 			Ok(None) => return Poll::Ready(Ok(None)),
 			Err(err) => return Poll::Ready(Err(err.into())),
 		};
-		let timestamp_us = match datagram.timestamp.as_micros().try_into() {
-			Ok(timestamp_us) => timestamp_us,
-			Err(_) => return Poll::Ready(Err(MoqError::Codec("timestamp overflow".into()))),
-		};
 		Poll::Ready(Ok(Some(MoqDatagram {
 			sequence: datagram.sequence,
-			timestamp_us,
+			timestamp_us: timestamp_us(datagram.timestamp)?,
 			payload: datagram.payload.to_vec(),
 		})))
 	}
