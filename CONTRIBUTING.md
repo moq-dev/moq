@@ -10,9 +10,9 @@ PRs are squash-merged, so the PR title becomes the commit subject and the PR des
 
 Keep the body short and structured, not narrated.
 
-- **Summary**: a few bullets on what changed and why. For a bug fix, state the root cause.
-- **Public API**: every new/renamed/removed/updated exported item, with breaking ones called out.
-- **Wire**: any change to the on-the-wire format, and the draft under `drafts/` updated with it.
+- **Problem**: a summary of the problem and why this PR is needed.
+- **Approach**: a summary of the approach taken to solve the problem. Detail every public API/wire change made.
+- **Alternatives**: any alternative approaches considered.
 
 When pushing additional commits to an existing PR, update the title and description if needed.
 When taking over someone else's PR, push commits on top of theirs so they keep credit.
