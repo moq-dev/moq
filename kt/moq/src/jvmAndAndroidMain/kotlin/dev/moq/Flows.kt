@@ -137,7 +137,11 @@ fun MoqTrackConsumer.groupsAsArrived(): Flow<MoqGroupConsumer> = flow {
     if (cause is CancellationException) cancel()
 }
 
-/** Stream of timestamped raw frames from one-frame-per-group tracks. */
+/**
+ * Stream of timestamped raw frames from one-frame-per-group tracks.
+ *
+ * Completed empty groups are skipped. The flow ends when the track ends.
+ */
 fun MoqTrackConsumer.frames(): Flow<MoqFrame> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()

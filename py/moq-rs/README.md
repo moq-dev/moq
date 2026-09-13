@@ -174,7 +174,7 @@ client = moq.Client(
   - `await .next_group() → GroupConsumer | None`. Sequence order; what the default iteration yields.
   - `await .recv_group() → GroupConsumer | None`. Arrival order, which may be out of sequence. Prefer it when latency matters more than order.
   - `.groups_as_arrived()`. Async iterator over `recv_group()`.
-  - `.read_frame() -> Frame | None` returns a timestamped raw frame.
+  - `.read_frame() -> Frame | None` returns the first timestamped frame of the next group. Empty groups are skipped; `None` is track EOF.
   - `await .recv_datagram() -> Datagram | None` for best-effort raw track datagrams.
   - `.info() → TrackInfo`
   - `.update(subscription)`. Change delivery priority, staleness, or group range after subscribing.

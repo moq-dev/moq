@@ -262,7 +262,8 @@ func (t *TrackConsumer) RecvGroup(ctx context.Context) (*GroupConsumer, error) {
 
 // NextGroup returns the next group in sequence order, skipping forward if
 // behind, or (nil, nil) when the track ends. Prefer this when order matters
-// more than latency.
+// more than latency. Shares the sequence cursor with ReadFrame: a group one
+// method has already taken is not returned by the other.
 func (t *TrackConsumer) NextGroup(ctx context.Context) (*GroupConsumer, error) {
 	res, err := runHandle(ctx, t.inner.Cancel, func() (*ffi.MoqGroupConsumer, error) {
 		res, err := t.inner.NextGroup()
@@ -278,7 +279,10 @@ func (t *TrackConsumer) NextGroup(ctx context.Context) (*GroupConsumer, error) {
 }
 
 // ReadFrame reads the first timestamped frame of the next group, or (nil, nil)
-// when the track ends. Convenient for one-frame-per-group tracks.
+// when the track ends. Convenient for one-frame-per-group tracks. Completed
+// empty groups are skipped; a nil frame is track EOF, not an empty group.
+// Cancelling the context cancels this consumer, not just this call: see
+// package docs.
 func (t *TrackConsumer) ReadFrame(ctx context.Context) (*Frame, error) {
 	return runCancellable(ctx, t.inner.Cancel, t.inner.ReadFrame)
 }
