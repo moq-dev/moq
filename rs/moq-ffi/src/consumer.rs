@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, ready};
 
@@ -5,7 +6,7 @@ use bytes::Buf;
 
 use crate::cancel::{self, MoqCancel};
 use crate::error::MoqError;
-use crate::ffi::Task;
+use crate::ffi::{Guard, Task};
 use crate::media::*;
 use crate::producer::MoqTrackInfo;
 
@@ -493,6 +494,12 @@ impl TrackShared {
 /// Serializes one track read lane so two `next_group` calls cannot race the cursor.
 struct ReadLane;
 
+/// Hold the lane guard until `fut` finishes. `Task::run` only serializes while the
+/// guard lives; an unused `_lane` in the closure would drop it before the wait.
+async fn with_lane<R>(_lane: Guard<ReadLane>, fut: impl Future<Output = Result<R, MoqError>>) -> Result<R, MoqError> {
+	fut.await
+}
+
 #[derive(uniffi::Object)]
 pub struct MoqTrackConsumer {
 	shared: Arc<TrackShared>,
@@ -526,6 +533,12 @@ impl MoqTrackConsumer {
 		self.groups.cancel();
 		self.datagrams.cancel();
 	}
+
+	/// True while a group-lane `Task::run` still holds its guard.
+	#[cfg(test)]
+	pub(crate) fn group_lane_busy(&self) -> bool {
+		self.groups.lock().is_none()
+	}
 }
 
 impl Drop for MoqTrackConsumer {
@@ -547,13 +560,15 @@ impl MoqTrackConsumer {
 	pub async fn recv_group(&self) -> Result<Option<Arc<MoqGroupConsumer>>, MoqError> {
 		let shared = self.shared.clone();
 		self.groups
-			.run(move |_lane| async move {
-				Ok(shared.recv_group().await?.map(|group| {
-					Arc::new(MoqGroupConsumer {
-						sequence: group.sequence,
-						task: Task::new(GroupInner { group }),
-					})
-				}))
+			.run(move |lane| {
+				with_lane(lane, async move {
+					Ok(shared.recv_group().await?.map(|group| {
+						Arc::new(MoqGroupConsumer {
+							sequence: group.sequence,
+							task: Task::new(GroupInner { group }),
+						})
+					}))
+				})
 			})
 			.await
 	}
@@ -566,13 +581,15 @@ impl MoqTrackConsumer {
 	pub async fn next_group(&self) -> Result<Option<Arc<MoqGroupConsumer>>, MoqError> {
 		let shared = self.shared.clone();
 		self.groups
-			.run(move |_lane| async move {
-				Ok(shared.next_group().await?.map(|group| {
-					Arc::new(MoqGroupConsumer {
-						sequence: group.sequence,
-						task: Task::new(GroupInner { group }),
-					})
-				}))
+			.run(move |lane| {
+				with_lane(lane, async move {
+					Ok(shared.next_group().await?.map(|group| {
+						Arc::new(MoqGroupConsumer {
+							sequence: group.sequence,
+							task: Task::new(GroupInner { group }),
+						})
+					}))
+				})
 			})
 			.await
 	}
@@ -585,7 +602,7 @@ impl MoqTrackConsumer {
 	pub async fn read_frame(&self) -> Result<Option<MoqFrame>, MoqError> {
 		let shared = self.shared.clone();
 		self.groups
-			.run(move |_lane| async move { shared.read_frame().await })
+			.run(move |lane| with_lane(lane, async move { shared.read_frame().await }))
 			.await
 	}
 
@@ -599,7 +616,7 @@ impl MoqTrackConsumer {
 	pub async fn recv_datagram(&self) -> Result<Option<MoqDatagram>, MoqError> {
 		let shared = self.shared.clone();
 		self.datagrams
-			.run(move |_lane| async move { shared.recv_datagram().await })
+			.run(move |lane| with_lane(lane, async move { shared.recv_datagram().await }))
 			.await
 	}
 
