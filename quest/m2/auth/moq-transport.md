@@ -3,8 +3,10 @@
 ## Goal
 
 The grant exchange works on a moq-transport session between two moq-net
-peers, so `Session::auth()` behaves the same over either wire and an IETF
-publisher fails loud on an out-of-scope PUBLISH_NAMESPACE before sending it. A
+peers, with the same grant lifecycle through `Session::auth()`. This initial
+IETF encoding supports prefix-representable grants and explicitly refuses
+other pattern unions. An IETF publisher fails loud on an out-of-scope
+PUBLISH_NAMESPACE before sending it. A
 new `drafts/draft-lcurley-moq-auth.md` specifies it as an extension a
 conforming peer can ignore.
 
@@ -31,13 +33,31 @@ tables. It declares:
   that receives one without negotiating closes with PROTOCOL_VIOLATION, which
   is what moq-net already does for an unknown request stream.
 - Which existing codes AUTH_ERROR reuses: `UNAUTHORIZED`, `EXPIRED_AUTH_TOKEN`,
-  `MALFORMED_AUTH_TOKEN` from the request error registry.
+  `MALFORMED_AUTH_TOKEN`, and `NOT_SUPPORTED` from the request error registry.
+  An unrepresentable pattern grant returns `NOT_SUPPORTED`, surfaced by the
+  public handle as `Unsupported`, rather than widening it into a namespace
+  prefix. The shared request error mapping already supports that code.
 - A note relating it to the AUTHORIZATION TOKEN setup option: a token
   presented there is the connection credential an empty AUTH refers to.
 
 Cite [moq-wg #1854](https://github.com/moq-wg/moq-transport/issues/1854) in
 the introduction: the grant answers which role a peer will play. Run
 `just drafts check`; `doc/.vitepress/drafts.ts` discovers the file by name.
+
+### Grant conversion
+
+Keep the public grant pattern-valued. Convert only unions that can be expressed
+exactly as namespace-prefix tuples; a subtree and the all-path grant are
+representable, while exact-path, suffix, and segment-wildcard grants are not.
+Validate the whole publish/subscribe union before emitting AUTH_OK. Never
+silently drop a member, broaden it to a literal head, or leave the request
+waiting indefinitely. An unsupported initial grant refuses that token; an
+unsupported update revokes its previous grant with AUTH_ERROR and closes the
+stream. Other tokens and work still covered by them remain on the session.
+
+Full-pattern IETF encoding would require a separately negotiated extension
+revision and is outside this initial prefix-tuple contract. Document this
+capability limit in the draft and token-in-band guidance.
 
 ### Code
 
@@ -62,6 +82,12 @@ Version-gate on draft-17+; earlier drafts leave `grant()` at `None` and `add`
 at `Unsupported`.
 
 ### Tests
+
+Cross-language fixtures cover prefix unions and the root grant, refusal of
+exact/suffix/segment-wildcard and mixed unions, plus an update from a supported
+grant to an unsupported one that revokes the old permission without changing
+other tokens. Assert `Unsupported` completes promptly and no unauthorized
+PUBLISH_NAMESPACE is sent.
 
 Setup option round trip on every supported draft and absence on 14 to 16;
 negotiation requires both sides; grants from scoped origins over an IETF

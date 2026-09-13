@@ -14,6 +14,12 @@ AUTH-capable.
 
 ## Plan
 
+IETF AUTH initially carries only prefix-representable grants. Propagate its
+`Unsupported` result for an unrepresentable pattern union; do not retry the
+token through the URL, widen it, or leave token admission pending. Lite pattern
+AUTH can carry the full grant once the pattern-interest prerequisite lands.
+
+
 - Client configuration separates the credential from the address on dev's
   API: `moq_tokio::connect::Config` gains `tokens`, repeatable as
   `--connect-token` and `MOQ_CONNECT_TOKEN`, the default set for every dial

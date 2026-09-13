@@ -22,7 +22,9 @@ can act on. Each still carries its own plan and regression test.
 Work that builds on dev-only code but breaks nothing and gates nothing (the
 io_uring stream sessions, the perf line, the QUIC worker and quiche quests)
 also sits here and starts on `main` after the dev merge, as does anything
-targeting a `0.0.x` crate.
+targeting a `0.0.x` crate. The token SDK default switch explicitly targets a
+subsequent breaking dev cycle after v1 readers exist; it is not additive M2
+work for main.
 
 Fleet dispatch uses `quest ready` after checking whether a branch or PR already
 claims the quest. A ready planning quest produces decisions, fixtures, and

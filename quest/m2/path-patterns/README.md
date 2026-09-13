@@ -80,7 +80,7 @@ CAT cannot represent `pid/*/chat`.
 - [Origin scopes](/quest/m2/path-patterns/origin.md) - literal origin roots
   carry arbitrary pattern unions without widening authorization
 - [Token SDKs](/quest/m2/path-patterns/token-sdk.md) - published libraries and
-  CLIs default new minting to v1
+  CLIs default new minting to v1 in a subsequent breaking dev cycle
 - [Relay auth](/quest/m2/path-patterns/relay-auth.md) - relay token, public,
   static, and revalidation paths enforce patterns
 - [Pattern interest](/quest/m2/path-patterns/interest.md) - moq-lite-06 carries
