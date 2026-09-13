@@ -1,4 +1,8 @@
-use std::{task::Poll, time::Duration};
+use std::{
+	ops::{Bound, RangeBounds},
+	task::Poll,
+	time::Duration,
+};
 
 /// Subscriber-side preferences for receiving a track.
 ///
@@ -78,8 +82,8 @@ pub struct Subscription {
 	///
 	/// A request, aggregated across every live subscriber (any unbounded subscriber makes
 	/// the aggregate unbounded). [`crate::track::Subscriber::end_at`] is the local read
-	/// cursor and is exclusive too; [`Position::exclusive_group`] translates this field
-	/// without an off-by-one. Setting one does not imply the other.
+	/// cursor; [`Position::group_end`] translates this field into its bound. Setting one
+	/// does not imply the other.
 	pub end: Option<Position>,
 }
 
@@ -125,6 +129,28 @@ impl Subscription {
 	/// call site has to write the `+ 1` itself.
 	pub fn with_end(mut self, end: impl Into<Option<Position>>) -> Self {
 		self.end = end.into();
+		self
+	}
+
+	/// Request the whole groups in `groups`, replacing both [`Self::start`] and
+	/// [`Self::end`]. Returns `self` for chaining.
+	///
+	/// Any range of group sequences works: `2..=5`, `2..6`, `..6`, `2..`, or `..` to
+	/// clear both bounds. An inclusive end past the last group is unbounded, as
+	/// [`Position::after_group`] spells it.
+	pub fn with_groups(mut self, groups: impl RangeBounds<u64>) -> Self {
+		self.start = match groups.start_bound() {
+			Bound::Included(&group) => Some(Position::group(group)),
+			Bound::Excluded(&group) => Some(Position::group(
+				group.checked_add(1).expect("group range starts past the last group"),
+			)),
+			Bound::Unbounded => None,
+		};
+		self.end = match groups.end_bound() {
+			Bound::Included(&group) => Position::after_group(group),
+			Bound::Excluded(&group) => Some(Position::group(group)),
+			Bound::Unbounded => None,
+		};
 		self
 	}
 
@@ -202,36 +228,29 @@ impl Position {
 		Some(Self::group(group.checked_add(1)?))
 	}
 
-	/// The last position strictly below this one.
+	/// The bound this exclusive end puts on a group cursor, for
+	/// [`crate::track::Subscriber::end_at`].
 	///
-	/// `None` for the very first position, which is the empty range: nothing sorts below
-	/// it, so there is no inclusive bound to convert to. Saturating instead would return
-	/// a position *above* the input and quietly include the group it excludes.
-	pub fn before(self) -> Option<Self> {
-		if let Some(frame) = self.frame.checked_sub(1) {
-			return Some(Self {
-				group: self.group,
-				frame,
-			});
-		}
-
-		Some(Self {
-			group: self.group.checked_sub(1)?,
-			frame: u64::MAX,
-		})
-	}
-
-	/// The exclusive group sequence a local [`crate::track::Subscriber::end_at`] cap uses.
-	///
-	/// A head-of-group end excludes this group. A mid-group end includes it so a frame
-	/// cap can apply on that group. Overflow of a mid-group end past the last group is
-	/// `None` (unbounded).
-	pub fn exclusive_group(self) -> Option<u64> {
+	/// A head-of-group end excludes its group. A mid-group end includes it, so a frame
+	/// cap can apply within that group.
+	pub fn group_end(self) -> Bound<u64> {
 		if self.frame == 0 {
-			Some(self.group)
+			Bound::Excluded(self.group)
 		} else {
-			self.group.checked_add(1)
+			Bound::Included(self.group)
 		}
+	}
+}
+
+/// The first index a cursor cap leaves undelivered, or `None` for no cap.
+///
+/// Cursors store their cap this way and compare with [`before_end`]. An inclusive bound
+/// at `u64::MAX` has nothing above it, so it is no cap at all.
+pub(crate) fn exclusive(bound: Bound<u64>) -> Option<u64> {
+	match bound {
+		Bound::Included(index) => index.checked_add(1),
+		Bound::Excluded(index) => Some(index),
+		Bound::Unbounded => None,
 	}
 }
 
@@ -300,6 +319,32 @@ mod tests {
 
 	/// The exclusive representation runs out at both extremes, and `Option` says so
 	/// rather than saturating into a bound that contradicts the request.
+	/// A group range spells both positions at once, in whichever form the caller has.
+	#[test]
+	fn group_ranges_build_whole_group_positions() {
+		let sub = Subscription::default().with_groups(2..=5);
+		assert_eq!(sub.start, Some(Position::group(2)));
+		assert_eq!(sub.end, Some(Position::group(6)));
+
+		let sub = Subscription::default().with_groups(2..6);
+		assert_eq!(sub.end, Some(Position::group(6)));
+
+		let sub = Subscription::default().with_groups(..6);
+		assert_eq!(sub.start, None);
+		assert_eq!(sub.end, Some(Position::group(6)));
+
+		let sub = Subscription::default().with_groups(2..);
+		assert_eq!(sub.start, Some(Position::group(2)));
+		assert_eq!(sub.end, None);
+
+		// Through the last group is unbounded, as `after_group` spells it.
+		let sub = Subscription::default().with_groups(..=u64::MAX);
+		assert_eq!(sub.end, None);
+
+		let sub = Subscription::default().with_groups(2..=5).with_groups(..);
+		assert_eq!((sub.start, sub.end), (None, None));
+	}
+
 	#[test]
 	fn positions_are_total_at_the_extremes() {
 		// Past the last frame of a group is the head of the next one, not a wider frame
@@ -316,24 +361,16 @@ mod tests {
 		);
 
 		// A head-of-group end excludes that group; a mid-group end includes it.
-		assert_eq!(Position::group(0).exclusive_group(), Some(0));
-		assert_eq!(Position::after_group(5).unwrap().exclusive_group(), Some(6));
-		assert_eq!(Position::after(5, 2).unwrap().exclusive_group(), Some(6));
+		assert_eq!(Position::group(0).group_end(), Bound::Excluded(0));
+		assert_eq!(Position::after_group(5).unwrap().group_end(), Bound::Excluded(6));
+		assert_eq!(Position::after(5, 2).unwrap().group_end(), Bound::Included(5));
 
-		// Nothing sorts below the first position, so there is no inclusive bound for the
-		// empty range. Saturating would return one *above* the input.
-		assert_eq!(Position::group(0).before(), None);
-		assert_eq!(
-			Position::group(1).before(),
-			Some(Position {
-				group: 0,
-				frame: u64::MAX
-			})
-		);
-		assert_eq!(
-			Position::after(4, 7).unwrap().before(),
-			Some(Position { group: 4, frame: 7 })
-		);
+		// A cursor cap is the first index it withholds; an inclusive bound at the last
+		// index withholds nothing.
+		assert_eq!(exclusive(Bound::Excluded(0)), Some(0));
+		assert_eq!(exclusive(Bound::Included(5)), Some(6));
+		assert_eq!(exclusive(Bound::Included(u64::MAX)), None);
+		assert_eq!(exclusive(Bound::Unbounded), None);
 	}
 
 	#[test]

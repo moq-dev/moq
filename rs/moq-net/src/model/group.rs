@@ -12,7 +12,7 @@
 //! carry the tail of a group whose leading frames came from somewhere else, and
 //! [Producer::finish] ends it wherever writing stopped. [Consumer::start_at] /
 //! [Consumer::end_at] bound a reader to a sub-range the same way [`track::Subscriber`]
-//! bounds group sequences; `end_at` is exclusive.
+//! bounds group sequences.
 //!
 //! The stream is closed with [Error] when all writers or readers are dropped.
 use crate::cache;
@@ -20,6 +20,7 @@ use crate::frame::{self, Frame, FrameBuf};
 use crate::{Timescale, stats, track};
 use std::collections::VecDeque;
 use std::mem::MaybeUninit;
+use std::ops::Bound;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Poll, ready};
@@ -1380,19 +1381,20 @@ impl Consumer {
 		}
 	}
 
-	/// Stop at frame `index` (exclusive), or remove the cap.
+	/// Stop reading at `end`, or remove the cap with [`Bound::Unbounded`].
 	///
-	/// Reads at or past the cap end cleanly (`None`), as if the group finished there.
-	/// `Some(0)` is the empty range: no frame is delivered. Unlike [`Self::start_at`]
-	/// this can move in either direction: raising it re-offers frames that are still
-	/// cached.
-	pub fn end_at(&mut self, index: impl Into<Option<u64>>) {
-		let index = index.into();
+	/// `Bound::Included(2)` reads through frame 2, `Bound::Excluded(2)` stops before it,
+	/// and `Bound::Excluded(0)` is the empty range: no frame is delivered. Reads past the
+	/// cap end cleanly (`None`), as if the group finished there. Unlike
+	/// [`Self::start_at`] this can move in either direction: raising it re-offers frames
+	/// that are still cached.
+	pub fn end_at(&mut self, end: Bound<u64>) {
+		let end = super::subscription::exclusive(end);
 		match &mut self.inner {
 			ConsumerKind::Plain(plain) => {
-				plain.end = index.map(|index| usize::try_from(index).unwrap_or(usize::MAX));
+				plain.end = end.map(|end| usize::try_from(end).unwrap_or(usize::MAX));
 			}
-			ConsumerKind::Spliced(spliced) => spliced.end_at(index),
+			ConsumerKind::Spliced(spliced) => spliced.end_at(end),
 		}
 	}
 
@@ -2409,7 +2411,7 @@ mod test {
 		producer.finish().unwrap();
 
 		let mut consumer = producer.consume();
-		consumer.end_at(2);
+		consumer.end_at(Bound::Excluded(2));
 		assert_eq!(
 			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
 			0
@@ -2423,7 +2425,7 @@ mod test {
 			"capped reads end cleanly"
 		);
 
-		consumer.end_at(None);
+		consumer.end_at(Bound::Unbounded);
 		assert_eq!(
 			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
 			2
@@ -2439,13 +2441,13 @@ mod test {
 		producer.finish().unwrap();
 
 		let mut consumer = producer.consume();
-		consumer.end_at(0);
+		consumer.end_at(Bound::Excluded(0));
 		assert!(
 			consumer.read_frame().now_or_never().unwrap().unwrap().is_none(),
 			"empty cap delivers nothing"
 		);
 
-		consumer.end_at(1);
+		consumer.end_at(Bound::Excluded(1));
 		assert_eq!(
 			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload,
 			Bytes::from_static(b"x")

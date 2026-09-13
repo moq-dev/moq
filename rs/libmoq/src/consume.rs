@@ -1,6 +1,7 @@
 use std::{
 	ffi::c_char,
 	future::Future,
+	ops::Bound,
 	pin::Pin,
 	task::{Poll, ready},
 };
@@ -630,10 +631,13 @@ impl Consume {
 		if let Some(start) = subscription.start.map(|start| start.group).or_else(|| track.latest()) {
 			track.start_at(start);
 		}
-		// Local and requested ends are both exclusive, so the group cap is the
-		// position's group (or one past it when the end is mid-group). `Some(0)` is
-		// the empty range and parks even while another subscriber keeps demand alive.
-		track.end_at(subscription.end.and_then(moq_net::track::Position::exclusive_group));
+		// The local cap mirrors the requested end, so an empty request parks even
+		// while another subscriber keeps demand alive.
+		track.end_at(
+			subscription
+				.end
+				.map_or(Bound::Unbounded, moq_net::track::Position::group_end),
+		);
 		// A closed track makes the update meaningless; the reader already sees the close.
 		let _ = track.update(subscription);
 	}
