@@ -182,7 +182,8 @@ moq --cluster-lan --cluster-lan-secret /etc/moq/cluster.key import capture
 
 `--cluster-lan-secret` restricts the mesh to peers holding the same key.
 Without it, anyone who can reach the listener joins, so leave it unset only
-on networks you trust.
+on networks you trust. mDNS is still an open channel: the secret
+authenticates the record, it does not hide the credential or the node URL.
 
 `--cluster-lan-app` names the DNS-SD application this process advertises
 under. Peers using a different name never discover this one. It defaults to
@@ -191,7 +192,9 @@ configuration. An application built on the library picks its own name.
 
 The WAN flags (`--cluster-connect`, `--cluster-connect-api`, `--cluster-node`,
 `--cluster-mesh`, `--cluster-token`, `--cluster-id`, `--cluster-tier`) match
-the relay. See [Clustering](/bin/relay/cluster).
+the relay. `--cluster-connect` and `--cluster-connect-api` are a MoQ side on
+their own, so `moq --cluster-connect https://relay.example import ts` needs
+no `--connect`. See [Clustering](/bin/relay/cluster).
 
 ## Tokens
 

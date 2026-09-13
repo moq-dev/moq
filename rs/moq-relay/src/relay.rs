@@ -97,6 +97,11 @@ impl Relay {
 	pub async fn load(mut config: Config) -> anyhow::Result<Self> {
 		config.resolve()?;
 
+		#[cfg(feature = "cluster-lan")]
+		if config.cluster.lan.enabled {
+			Cluster::validate_lan_versions(&config.connect, &config.listen)?;
+		}
+
 		let mtls_enabled = !config.listen.tls.root.is_empty();
 		let server_versions = config.listen.versions();
 
@@ -219,9 +224,8 @@ impl Relay {
 			(None, None) => server.certificates(),
 		};
 		let mut advertise = crate::LanAdvertise::new(addr.map(|a| a.port()).unwrap_or(0));
-		if !config.listen.tls.generate.is_empty()
-			&& let Some(fingerprint) = certificates.fingerprints().into_iter().next()
-		{
+		let generated = !config.listen.tls.generate.is_empty() || config.listen.tls.identity.is_some();
+		if generated && let Some(fingerprint) = certificates.fingerprints().into_iter().next() {
 			advertise = advertise.with_fingerprint(fingerprint);
 		}
 		let cluster = Cluster::new(ClusterOptions::new(config.cluster).with_cache(cache))?

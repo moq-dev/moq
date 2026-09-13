@@ -1,8 +1,9 @@
 //! Process recipe: a `moq --cluster-lan` importer beside a `moq-relay` with
 //! `[cluster.lan]`.
 //!
-//! The in-process mesh (node-advertising cluster vs fingerprint-advertising
-//! cluster, broadcasts both ways) lives in `cluster::tests::lan_meshes_node_and_fingerprint_clusters`.
+//! The in-process mesh (two origins, broadcasts both ways over a
+//! fingerprint-pinned `/.cluster` session) lives in
+//! `cluster::tests::lan_cluster_path_carries_broadcasts_both_ways`.
 //! This file is the live-mDNS recipe, ignored because CI runners often block
 //! multicast even after announce succeeds.
 //!

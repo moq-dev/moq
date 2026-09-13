@@ -100,15 +100,17 @@ enabled = true
 A LAN peer authenticates with its mDNS credential on `/.cluster/<credential>`
 and is never handed `cluster.token`; that token is for static and gossip peers
 only. The advertisement carries the listener fingerprint when the certificate
-was generated, the `node` URL when one is configured, and at least one of them.
-`secret` is optional. Without it, anyone who can reach the listener joins, so
-leave it unset only on networks you trust. With it, only peers that prove they
-hold the same key are discovered or accepted. `app` names the DNS-SD
-application this relay advertises under; peers using a different name never
-discover it. It defaults to `default`, which moq-cli shares so the two find
-each other with no configuration. An application built on the library picks
-its own name. Startup waits for at least one interface to announce before the
-relay reports itself ready.
+was generated or supplied in-memory, the `node` URL when one is configured,
+and at least one of them. `secret` is optional. Without it, anyone who can
+reach the listener joins, so leave it unset only on networks you trust. With
+it, only peers that prove they hold the same key are discovered or accepted.
+mDNS is still an open channel: the secret authenticates the record, it does
+not hide the credential or the node URL. `app` names the DNS-SD application
+this relay advertises under; peers using a different name never discover it.
+It defaults to `default`, which moq-cli shares so the two find each other
+with no configuration. An application built on the library picks its own
+name. Startup waits for at least one interface to announce before the relay
+reports itself ready.
 
 ## Dynamic peer lists
 

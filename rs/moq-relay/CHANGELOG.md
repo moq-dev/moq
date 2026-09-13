@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `[cluster.lan] secret` is optional; without it the LAN mesh is open to anyone who can reach the listener
 - `--cluster-lan` no longer requires `--cluster-node`; a generated certificate's fingerprint is advertised instead
 
+### Fixed
+
+- LAN mesh advertises an in-memory listener identity's fingerprint
+- LAN mesh refuses a client/listener version set with no shared path-capable version
+
 ### Removed
 
 - *(relay)* `Cluster::with_cache`; pass the cache to `Cluster::new` via `ClusterOptions`

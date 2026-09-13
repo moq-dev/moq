@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `--cluster-lan` uses the relay's Cluster; a CLI process and a relay on the same LAN mesh with each other
 
+### Fixed
+
+- `--cluster-connect` and `--cluster-connect-api` count as a MoQ side
+- local verbs refuse the WAN `--cluster-*` flags
+
 ## [0.11.0](https://github.com/moq-dev/moq/compare/moq-cli-v0.10.0...moq-cli-v0.11.0) - 2026-09-09
 
 ### Added

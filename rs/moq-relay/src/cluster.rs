@@ -587,8 +587,8 @@ pub struct ClusterConfig {
 pub struct LanConfig {
 	/// Enable mDNS discovery. Boolean flag: pass `--cluster-lan` (or `=true` /
 	/// `=false`). Advertises the listener fingerprint when the certificate was
-	/// generated, the [`ClusterConfig::node`] URL when one is configured, and
-	/// needs at least one of them.
+	/// generated or supplied in-memory, the [`ClusterConfig::node`] URL when one
+	/// is configured, and needs at least one of them.
 	#[usage(
 		name = "cluster-lan",
 		long = "cluster-lan",
@@ -646,14 +646,14 @@ impl LanConfig {
 /// What a LAN advertisement publishes besides the listen port.
 ///
 /// Pass to [`Cluster::with_advertise`] after the QUIC listener is bound. The
-/// fingerprint is the generated certificate's, when there is one; a loaded
-/// certificate is dialed by name via [`ClusterConfig::node`] instead.
+/// fingerprint is the generated or in-memory certificate's, when there is one;
+/// a loaded certificate is dialed by name via [`ClusterConfig::node`] instead.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct LanAdvertise {
 	/// The bound QUIC listen port, advertised as the DNS-SD SRV port.
 	pub port: u16,
-	/// Hex SHA-256 fingerprint of a generated certificate, to pin when dialing.
+	/// Hex SHA-256 fingerprint of a generated or in-memory certificate, to pin when dialing.
 	pub fingerprint: Option<String>,
 }
 
@@ -666,7 +666,7 @@ impl LanAdvertise {
 		}
 	}
 
-	/// Pin this generated-certificate fingerprint when peers dial.
+	/// Pin this generated or in-memory certificate fingerprint when peers dial.
 	pub fn with_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
 		self.fingerprint = Some(fingerprint.into());
 		self
@@ -905,7 +905,7 @@ impl Cluster {
 	///
 	/// Required when `--cluster-lan` is on; [`start`](Self::start) returns an
 	/// error otherwise. The fingerprint is set when the certificate was
-	/// generated, so peers can pin it.
+	/// generated or supplied in-memory, so peers can pin it.
 	pub fn with_advertise(mut self, advertise: LanAdvertise) -> Self {
 		self.advertise = Some(advertise);
 		self
@@ -2869,6 +2869,30 @@ mod tests {
 		assert!(config.cluster.lan.enabled, "the untouched key survives");
 	}
 
+	/// A path-capable client version that the listener does not offer cannot
+	/// negotiate, so start-up must refuse it rather than retry forever.
+	#[cfg(feature = "cluster-lan")]
+	#[test]
+	fn lan_versions_must_overlap_on_a_path_capable_version() {
+		let lite04: moq_net::Version = "moq-lite-04".parse().unwrap();
+		let lite05: moq_net::Version = "moq-lite-05".parse().unwrap();
+
+		let mut client = moq_tokio::connect::Config::default();
+		client.version = vec![lite04, lite05];
+		let mut server = moq_tokio::listen::Config::default();
+		server.version = vec![lite04];
+		let err = Cluster::validate_lan_versions(&client, &server)
+			.expect_err("lite-05 client vs lite-04 listener")
+			.to_string();
+		assert!(
+			err.contains("--connect-version") || err.contains("--listen-version"),
+			"{err}"
+		);
+
+		server.version = vec![lite05];
+		Cluster::validate_lan_versions(&client, &server).expect("shared lite-05");
+	}
+
 	/// A LAN mesh without a node URL still starts when the listener has a
 	/// generated certificate to advertise.
 	#[cfg(feature = "cluster-lan")]
@@ -3026,12 +3050,15 @@ mod tests {
 		);
 	}
 
-	/// A node-advertising cluster and a fingerprint-advertising cluster share
-	/// broadcasts in both directions over one LAN session. Wires accept to dial
-	/// directly, so the test needs no multicast and stays CI-safe.
+	/// Two in-process origins share broadcasts both ways over one
+	/// fingerprint-pinned `/.cluster/<credential>` session. Wires accept to dial
+	/// directly, so the test needs no multicast and stays CI-safe. It does not
+	/// exercise `run_mdns`, `Peer::urls()` order, or `discovery.should_dial`;
+	/// the names "node" and "fingerprint" are the two origins, not two
+	/// advertising modes.
 	#[cfg(feature = "cluster-lan")]
 	#[tokio::test]
-	async fn lan_meshes_node_and_fingerprint_clusters() {
+	async fn lan_cluster_path_carries_broadcasts_both_ways() {
 		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 

@@ -4,10 +4,11 @@
 //! `<import|export> <endpoint> [endpoint opts]`, plus `moq <MoQ side> play` for
 //! native playback.
 //!
-//! - The MoQ side (`--connect`, the `--listen*` transport binds, and
-//!   `--cluster-lan`; all optional, at least one) attaches the shared Origin to
-//!   the MoQ network, and comes before the first stage. They compose: dial a
-//!   relay, accept incoming sessions, and mesh with the LAN all at once.
+//! - The MoQ side (`--connect`, the `--listen*` transport binds, `--cluster-lan`,
+//!   and `--cluster-connect` / `--cluster-connect-api`; all optional, at least
+//!   one) attaches the shared Origin to the MoQ network, and comes before the
+//!   first stage. They compose: dial a relay, accept incoming sessions, mesh
+//!   with the LAN, and join a cluster all at once.
 //! - `import` routes media INTO MoQ from one source; `export` routes it OUT to
 //!   one sink. The verb fixes the data direction (and thus, for the
 //!   bidirectional gateways, whether `--connect`/`--listen` push or pull).
@@ -412,13 +413,19 @@ impl MoqSide {
 		self.server.has_explicit_bind() || self.lan()
 	}
 
+	/// Whether a WAN cluster dial is configured (`--cluster-connect` or
+	/// `--cluster-connect-api`).
+	fn cluster_dials(&self) -> bool {
+		!self.cluster.connect.is_empty() || self.cluster.connect_api.is_some()
+	}
+
 	/// Reject a verb that needs the MoQ network but was given no way to reach it.
 	/// Stands in for the Usage `required` the `moq` group can't carry, since
 	/// `devices` is exempt.
 	pub fn validate(&self) -> anyhow::Result<()> {
 		anyhow::ensure!(
-			self.client.url.is_some() || self.serves(),
-			"a MoQ side is required: pass --connect <url> to dial a relay, a --listen option to self-host, or --cluster-lan to mesh over the LAN"
+			self.client.url.is_some() || self.serves() || self.cluster_dials(),
+			"a MoQ side is required: pass --connect <url> to dial a relay, a --listen option to self-host, --cluster-lan to mesh over the LAN, or --cluster-connect to join a cluster"
 		);
 		#[cfg(feature = "cluster-lan")]
 		{
@@ -487,6 +494,13 @@ impl MoqSide {
 			("--cluster-lan", self.lan()),
 			("--cluster-lan-secret", cluster_secret),
 			("--cluster-lan-app", cluster_app),
+			("--cluster-connect", !self.cluster.connect.is_empty()),
+			("--cluster-connect-api", self.cluster.connect_api.is_some()),
+			("--cluster-node", self.cluster.node.is_some()),
+			("--cluster-mesh", self.cluster.mesh.is_some()),
+			("--cluster-token", self.cluster.token.is_some()),
+			("--cluster-id", self.cluster.id.is_some()),
+			("--cluster-tier", self.cluster.tier.is_some()),
 			("--broadcast", self.broadcast.is_some()),
 			("--hop", self.hop.is_some()),
 		];
@@ -1220,11 +1234,25 @@ mod tests {
 			("--connect", "https://relay.example.com", "--connect"),
 			("--listen-tcp-bind", "127.0.0.1:0", "--listen-tcp-bind"),
 			("--broadcast", "room", "--broadcast"),
+			("--cluster-connect", "https://relay.example", "--cluster-connect"),
+			(
+				"--cluster-connect-api",
+				"https://api.example/peers",
+				"--cluster-connect-api",
+			),
+			("--cluster-node", "https://self.example", "--cluster-node"),
+			("--cluster-token", "cluster.jwt", "--cluster-token"),
+			("--cluster-id", "1", "--cluster-id"),
+			("--cluster-tier", "internal", "--cluster-tier"),
 		] {
 			let cli = Invocation::try_parse_from(["moq", flag, value, "token", "generate"]).unwrap();
 			let err = cli.moq.reject("token").unwrap_err().to_string();
 			assert!(err.contains(reported), "{err}");
 		}
+
+		let cli = Invocation::try_parse_from(["moq", "--cluster-mesh", "token", "generate"]).unwrap();
+		let err = cli.moq.reject("token").unwrap_err().to_string();
+		assert!(err.contains("--cluster-mesh"), "{err}");
 
 		#[cfg(unix)]
 		{
@@ -1273,6 +1301,31 @@ mod tests {
 			let err = cli.moq.reject("token").unwrap_err().to_string();
 			assert!(err.contains("--cluster-lan-app"), "{err}");
 		}
+	}
+
+	/// `--cluster-connect` / `--cluster-connect-api` attach the process as a
+	/// cluster peer, so they are a MoQ side on their own. `--cluster-node` is
+	/// identity, not an attachment.
+	#[test]
+	fn cluster_connect_is_a_moq_side() {
+		let cli = Invocation::try_parse_from(["moq", "--cluster-connect", "https://relay.example", "import", "ts"])
+			.expect("parse");
+		assert!(cli.moq.validate().is_ok(), "a cluster dial is a MoQ side on its own");
+
+		let cli = Invocation::try_parse_from([
+			"moq",
+			"--cluster-connect-api",
+			"https://api.example/peers",
+			"import",
+			"ts",
+		])
+		.expect("parse");
+		assert!(cli.moq.validate().is_ok(), "a cluster API is a MoQ side on its own");
+
+		let cli = Invocation::try_parse_from(["moq", "--cluster-node", "https://self.example", "import", "ts"])
+			.expect("parse");
+		let err = cli.moq.validate().unwrap_err().to_string();
+		assert!(err.contains("MoQ side"), "{err}");
 	}
 
 	/// `--cluster-lan` is a MoQ side on its own, and it supplies the listener the
