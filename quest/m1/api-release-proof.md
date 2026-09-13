@@ -27,7 +27,7 @@ New findings and recommendations, ordered by consequence:
 | FFI pending reads serialize independent datagram/group lanes | Reproduced; fixed: independent group and datagram lanes | completed |
 | Shared/private connections disagree on credential-refresh recovery and terminal state | Reproduced; fixed: one URL-recovery contract, `closed` is handle disposal | completed |
 | Relay embedding can discard newly added socket owners without a compile error | Fixed: `Relay` owns listeners and workers; embedders clone handles and mount routes | completed |
-| FFI first-frame convenience treats empty groups as EOF and loses an acquired group on cancellation | Source-traced | [Frame cursor](/quest/m1/api-ffi-frame-cursor.md) |
+| FFI first-frame convenience treats empty groups as EOF and loses an acquired group on cancellation | Fixed: the pending group lives on the ordered cursor; empty groups are skipped and a cancelled read keeps its group | completed |
 | JSON/binary readers hide the subscription cleanup handle | Abandoned: finish must be `&mut` so abort can follow | deferred |
 | Typed Getter input can be rejected solely for lacking an internal brand | Fixed: getter() reuses any conforming Getter | Fixed |
 | JSON edit guard logs failed implicit publication | Fixed: `modify` refuses a closed track, a failed drop aborts it | completed |

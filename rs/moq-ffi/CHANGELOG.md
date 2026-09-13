@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `MoqError::Busy` when a configuration setter races an in-flight connect, listen, or accept.
 
+### Fixed
+
+- `TrackConsumer.read_frame` skips completed empty groups instead of returning
+  EOF, and keeps a group across a cancelled read so its first frame is not lost.
+
 ### Changed
 
 - Client, server, and pending-request configuration setters now return `Result` and
