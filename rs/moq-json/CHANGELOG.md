@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- [**breaking**] `snapshot::Producer::lock` is now `modify` and returns a `Result`, refusing a closed
+  track. A guard that fails to publish on drop aborts the track with the error instead of logging a
+  warning, so consumers and the next `modify` both see it. `Guard::commit` is unchanged and leaves
+  the track open on failure. A panic while a guard is held discards the in-flight edit.
+
+### Added
+
+- `snapshot::Producer::abort` closes the track with an error, like `moq_net::track::Producer::abort`.
+
 ## [0.3.10](https://github.com/moq-dev/moq/compare/moq-json-v0.3.9...moq-json-v0.3.10) - 2026-09-09
 
 ### Other

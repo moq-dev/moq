@@ -65,6 +65,27 @@ test("AnnounceBroadcast round-trips on draft-06", async () => {
 
 	const gotRestart = await roundTrip({ status: "restart", id: 3n, hops, cost }, Version.DRAFT_06);
 	expect(gotRestart).toEqual({ status: "restart", id: 3n, hops, cost });
+
+	const gotPattern = await roundTrip(
+		{ status: "pattern", pattern: Path.Pattern.parse("live/*"), hops, cost: 9n },
+		Version.DRAFT_06,
+	);
+	expect(gotPattern).toEqual({
+		status: "pattern",
+		pattern: Path.Pattern.parse("live/*"),
+		hops,
+		cost: 9n,
+	});
+});
+
+test("AnnounceBroadcast skips an unknown type on draft-06", async () => {
+	const encoded = await bytes(async (w) => {
+		await w.u53(4);
+		await w.u53(1);
+		await w.u8(0);
+	});
+	const reader = new Reader(undefined, encoded);
+	expect(await decodeAnnounceBroadcast(reader, Version.DRAFT_06)).toEqual({ status: "skipped" });
 });
 
 test("AnnounceBroadcast drops the route cost before draft-06", async () => {

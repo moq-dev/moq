@@ -317,7 +317,7 @@ mod test {
 	}
 
 	#[test]
-	fn lock_composes_independent_owners() {
+	fn modify_composes_independent_owners() {
 		// Mirrors the catalog use case: separate owners each edit their own field through the guard.
 		#[derive(serde::Serialize, serde::Deserialize, Default, PartialEq, Debug)]
 		struct Doc {
@@ -335,13 +335,13 @@ mod test {
 		let mut producer = Producer::<Doc>::new(track, ProducerConfig::default());
 
 		// First owner sets its field.
-		producer.lock().video = Some("v1".to_string());
+		producer.modify().unwrap().video = Some("v1".to_string());
 
 		// Second owner starts from the latest value and adds its own field without clobbering.
-		producer.lock().scte35 = Some(42);
+		producer.modify().unwrap().scte35 = Some(42);
 
 		// Locking without mutating publishes nothing (the guard stays clean).
-		let _ = producer.lock();
+		let _ = producer.modify().unwrap();
 
 		producer.finish().unwrap();
 
@@ -361,30 +361,91 @@ mod test {
 	}
 
 	#[test]
-	fn commit_reports_a_publish_failure() {
-		#[derive(serde::Serialize, serde::Deserialize, Default, PartialEq, Debug)]
-		struct Doc {
-			a: u32,
-		}
+	fn a_dropped_edit_publishes_a_snapshot_then_a_delta() {
+		let (mut producer, track) = producer(cfg(100));
 
-		let track = moq_net::broadcast::Info::new()
-			.produce()
-			.create_track("test", None)
-			.unwrap();
-		let mut producer = Producer::<Doc>::new(track, ProducerConfig::default());
-
-		// A finished track can't take another group, so the publish behind the guard fails.
+		*producer.modify().unwrap() = json!({ "a": 1, "b": 1 });
+		*producer.modify().unwrap() = json!({ "a": 1, "b": 2 });
 		producer.finish().unwrap();
 
-		let mut guard = producer.lock();
-		guard.a = 1;
-		assert!(matches!(guard.commit(), Err(crate::Error::Net(_))));
+		// The ratio keeps both edits in one group: a snapshot plus a merge-patch delta.
+		assert_eq!(track.latest(), Some(0));
+		assert_eq!(drain(track).last().unwrap(), &json!({ "a": 1, "b": 2 }));
 	}
 
-	/// A rejected frame must not erase the last-published value: `lock` seeds its editing guard from
+	#[test]
+	fn modify_refuses_a_finished_track() {
+		let (mut producer, track) = producer(cfg(0));
+		producer.update(&json!({ "a": 1 })).unwrap();
+		producer.finish().unwrap();
+
+		assert!(matches!(
+			producer.modify(),
+			Err(crate::Error::Net(moq_net::Error::Closed))
+		));
+		assert_eq!(drain(track), vec![json!({ "a": 1 })]);
+	}
+
+	#[test]
+	fn a_dropped_failed_edit_aborts_the_track() {
+		let (mut producer, track) = producer(cfg(0));
+		producer.update(&json!({ "keep": true })).unwrap();
+		let mut subscriber = track.ordered();
+
+		*producer.modify().unwrap() = json!({ "big": "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1) });
+
+		// The publisher learns the cause at its next edit, the consumer from the aborted track.
+		assert!(matches!(
+			producer.modify(),
+			Err(crate::Error::Net(moq_net::Error::FrameTooLarge))
+		));
+		assert!(matches!(
+			subscriber.poll_next_group(&kio::Waiter::noop()),
+			Poll::Ready(Err(moq_net::Error::FrameTooLarge))
+		));
+	}
+
+	#[test]
+	fn a_failed_commit_leaves_the_track_open() {
+		let (mut producer, track) = producer(cfg(0));
+		producer.update(&json!({ "keep": true })).unwrap();
+
+		let mut guard = producer.modify().unwrap();
+		*guard = json!({ "big": "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1) });
+		assert!(matches!(
+			guard.commit(),
+			Err(crate::Error::Net(moq_net::Error::FrameTooLarge))
+		));
+
+		// The caller got the error, so the track stays usable for a smaller value.
+		*producer.modify().unwrap() = json!({ "keep": false });
+		producer.finish().unwrap();
+		assert_eq!(drain(track).last().unwrap(), &json!({ "keep": false }));
+	}
+
+	#[test]
+	fn a_panicking_edit_does_not_publish() {
+		let (mut producer, track) = producer(cfg(0));
+		producer.update(&json!({ "a": 1 })).unwrap();
+
+		let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+			let mut guard = producer.modify().unwrap();
+			*guard = json!({ "a": 2 });
+			panic!("torn edit");
+		}));
+		assert!(panicked.is_err());
+
+		// A discarded edit is not a publish failure, so the track is still open for the next one.
+		*producer.modify().unwrap() = json!({ "a": 3 });
+		producer.finish().unwrap();
+		assert_eq!(track.latest(), Some(1), "the torn edit took a group");
+		assert_eq!(drain(track).last().unwrap(), &json!({ "a": 3 }));
+	}
+
+	/// A rejected frame must not erase the last-published value: `modify` seeds its editing guard from
 	/// it, so losing it makes the next edit publish a document with every other field dropped.
 	#[test]
-	fn a_failed_publish_keeps_the_value_for_lock() {
+	fn a_failed_publish_keeps_the_value_for_modify() {
 		#[derive(serde::Serialize, serde::Deserialize, Default, PartialEq, Debug)]
 		struct Doc {
 			#[serde(skip_serializing_if = "Option::is_none")]
@@ -393,22 +454,19 @@ mod test {
 			scte35: Option<u32>,
 		}
 
-		let track = moq_net::broadcast::Info::new()
-			.produce()
-			.create_track("test", None)
-			.unwrap();
-		let mut producer = Producer::<Doc>::new(track, ProducerConfig::default());
+		// Every frame is rejected, so each publish fails and the encoder resynchronizes.
+		let mut producer = Producer::<Doc>::new(rejecting_track(), ProducerConfig::default());
 
-		producer.lock().video = Some("v1".to_string());
+		let mut guard = producer.modify().unwrap();
+		guard.video = Some("v1".to_string());
+		assert!(guard.commit().is_err());
 
-		// The track is finished, so the next publish is rejected and the encoder resynchronizes.
-		producer.finish().unwrap();
-		let mut guard = producer.lock();
+		let mut guard = producer.modify().unwrap();
 		guard.scte35 = Some(42);
 		assert!(guard.commit().is_err());
 
-		// The editing baseline still carries what was actually published.
-		let guard = producer.lock();
+		// The editing baseline still carries the composed value.
+		let guard = producer.modify().unwrap();
 		assert_eq!(
 			guard.video,
 			Some("v1".to_string()),
@@ -478,7 +536,7 @@ mod test {
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::<Doc>::new(track, cfg(0));
 
-		let mut guard = producer.lock();
+		let mut guard = producer.modify().unwrap();
 		guard.a = 1;
 		guard.commit().unwrap();
 

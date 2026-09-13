@@ -105,8 +105,7 @@ Tests, at the process level with real sessions rather than an in-process stand-i
 - A wildcard retracted mid-serve does not disturb the subscription already
   running.
 
+
 ## Required
 
 - [Merge dev](/quest/m1/merge-dev.md) - the required M1 APIs must be available on main before this implementation starts
-
-- [Advertise](/quest/m1/wildcard-advertise.md)

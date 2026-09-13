@@ -18,7 +18,7 @@ a pattern, since it tests with `Path.hasPrefix` (`:223`).
 
 So the remaining work is narrow: teach the JS client the wildcard
 advertisement (`js/net/src/announced.ts` and `js/net/src/lite/announce.ts`,
-mirroring what [advertise](/quest/m1/wildcard-advertise.md) does in moq-net)
+mirroring the moq-net wildcard advertisement)
 and make the covering test use `Path.Pattern` (`js/net/src/path.ts:526`)
 rather than prefix containment.
 Withdrawal of the last covering wildcard hides the rendition again, the same

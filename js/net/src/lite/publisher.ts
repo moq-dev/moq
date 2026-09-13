@@ -27,6 +27,22 @@ import {
 import { TrackInfo as TrackInfoMessage, type Track as TrackMessage } from "./track.ts";
 import { hasAnnounceId, hasAnnounceOk, hasDatagrams, hasProbeRtt, resolvesStart, Version } from "./version.ts";
 
+function presented(
+	prefix: Path.Valid,
+	table: ReadonlyMap<Path.Valid, Advertised>,
+	version: Version,
+): Map<Path.Valid, Advertised> {
+	const out = new Map<Path.Valid, Advertised>();
+	for (const [name, snap] of table) {
+		const advertised = Path.Pattern.parse(name);
+		for (const residual of advertised.rebase(prefix)) {
+			if (!hasAnnounceId(version) && residual.asPrefix() === undefined) continue;
+			out.set(Path.from(residual.text), snap);
+		}
+	}
+	return out;
+}
+
 const PROBE_INTERVAL = 100; // ms
 const PROBE_MAX_AGE = 10_000; // ms
 const PROBE_MAX_DELTA = 0.25;
@@ -388,13 +404,19 @@ export class Publisher {
 		};
 
 		const announce = async (suffix: Path.Valid, route: Route) => {
+			const pattern = Path.Pattern.parse(suffix);
+			const prefix = pattern.asPrefix();
+			const hops = wireHops(route);
+			let msg: Parameters<typeof encodeAnnounceBroadcast>[1];
+			if (prefix !== undefined) {
+				msg = { status: "active", suffix: Path.from(prefix), hops, cost: route.cost };
+			} else {
+				if (!hasAnnounceId(this.version)) return;
+				msg = { status: "pattern", pattern, hops, cost: route.cost.warm };
+			}
 			console.debug(`announce: broadcast=${suffix} active=true`);
 			if (hasAnnounceId(this.version)) announceIds.set(suffix, nextAnnounceId++);
-			await encodeAnnounceBroadcast(
-				stream.writer,
-				{ status: "active", suffix, hops: wireHops(route), cost: route.cost },
-				this.version,
-			);
+			await encodeAnnounceBroadcast(stream.writer, msg, this.version);
 		};
 
 		const restart = async (suffix: Path.Valid, route: Route) => {
@@ -421,7 +443,11 @@ export class Publisher {
 		const retract = async (suffix: Path.Valid) => {
 			console.debug(`announce: broadcast=${suffix} active=false`);
 			if (!hasAnnounceId(this.version)) {
-				await encodeAnnounceBroadcast(stream.writer, { status: "ended", suffix }, this.version);
+				await encodeAnnounceBroadcast(
+					stream.writer,
+					{ status: "ended", suffix: Path.from(Path.Pattern.parse(suffix).asPrefix()!) },
+					this.version,
+				);
 				return;
 			}
 
@@ -445,10 +471,8 @@ export class Publisher {
 			const initial = this.#advertised.peek();
 			if (!initial) return; // closed
 
-			for (const [name, snap] of initial) {
-				const suffix = Path.stripPrefix(msg.prefix, name);
-				if (suffix === null) continue;
-				active.set(suffix, snap);
+			for (const [name, snap] of presented(msg.prefix, initial, this.version)) {
+				active.set(name, snap);
 			}
 
 			switch (this.version) {
@@ -457,7 +481,9 @@ export class Publisher {
 					for (const suffix of active.keys()) {
 						console.debug(`announce: broadcast=${suffix} active=true`);
 					}
-					const init = new AnnounceInit([...active.keys()]);
+					const init = new AnnounceInit(
+						[...active.keys()].map((key) => Path.from(Path.Pattern.parse(key).asPrefix()!)),
+					);
 					await init.encode(stream.writer, this.version);
 					break;
 				}
@@ -492,10 +518,8 @@ export class Publisher {
 				if (!latest) break;
 
 				const updated = new Map<Path.Valid, Advertised>();
-				for (const [name, snap] of latest) {
-					const suffix = Path.stripPrefix(msg.prefix, name);
-					if (suffix === null) continue;
-					updated.set(suffix, snap);
+				for (const [name, snap] of presented(msg.prefix, latest, this.version)) {
+					updated.set(name, snap);
 				}
 
 				for (const [suffix, snap] of active) {

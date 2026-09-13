@@ -324,7 +324,7 @@ async fn export_derives_video_geometry_before_header() {
 	let mut live = Live::new(".vp8", |catalog, name| {
 		let mut config = VideoConfig::new(VideoCodec::VP8);
 		config.container = Container::Legacy;
-		catalog.lock().video.renditions.insert(name, config);
+		catalog.modify().unwrap().video.renditions.insert(name, config);
 	});
 	// Geometry-less startup frames must not park the source before the keyframe.
 	live.track.write(raw_frame(0, &[0x31, 0x00, 0x00], true)).unwrap();
@@ -450,7 +450,7 @@ async fn export_rejects_cmaf_track() {
 		config.container = Container::Cmaf {
 			init: Bytes::from(vec![0u8; 32]),
 		};
-		catalog.lock().video.renditions.insert(name, config);
+		catalog.modify().unwrap().video.renditions.insert(name, config);
 	});
 
 	let mut exporter = crate::container::mkv::Export::new(live.source(), live.catalog_stream().await);

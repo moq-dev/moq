@@ -23,8 +23,8 @@ public final class OriginProducer: Sendable {
     /// Advertise `pattern` and serve the requests beneath it.
     ///
     /// `pattern` is in the path Pattern dialect; a prefix is spelled `foo/**`.
-    /// Until wildcard advertisements land, anything but a prefix-shaped pattern
-    /// is refused. Create, `dynamic` if tracks are served on demand, populate,
+    /// Wildcards are advertised, but only prefix-shaped patterns serve requests.
+    /// Create, `dynamic` if tracks are served on demand, populate,
     /// then `BroadcastProducer.announce`.
     public func dynamic(pattern: String, route: Route = Route()) throws -> OriginDynamic {
         OriginDynamic(try ffi.dynamic(pattern: pattern, route: route))

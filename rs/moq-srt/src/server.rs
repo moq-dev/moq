@@ -834,7 +834,7 @@ mod tests {
 			)
 			.unwrap();
 		{
-			let mut guard = catalog.lock();
+			let mut guard = catalog.modify().unwrap();
 			let mut config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 48_000, 2);
 			config.container = hang::catalog::Container::Legacy;
 			guard.audio.renditions.insert(track.name().to_string(), config);

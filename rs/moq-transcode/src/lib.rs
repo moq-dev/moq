@@ -139,10 +139,12 @@ impl Transcoder {
 			pipeline::Pipeline::new(source.clone(), config.clone(), active, source_name, source_config).await?;
 
 		// Publish the derivative catalog before any encoder exists, so subscribers
-		// can pick a rung immediately.
+		// can pick a rung immediately. Commit so a catalog that cannot be published fails
+		// here rather than serving rungs nobody can discover.
 		{
-			let mut guard = derived.lock();
+			let mut guard = derived.modify()?;
 			catalog::populate(&mut guard, &snapshot, ladder.rungs(), config.source.as_ref())?;
+			guard.commit()?;
 		}
 
 		// Serve rung requests and follow source catalog updates until the source ends.
@@ -160,8 +162,9 @@ impl Transcoder {
 				update = catalogs.next() => match update {
 					Ok(Some(snapshot)) => {
 						ladder.follow(&snapshot.video).await?;
-						let mut guard = derived.lock();
+						let mut guard = derived.modify()?;
 						catalog::populate(&mut guard, &snapshot, ladder.rungs(), config.source.as_ref())?;
+						guard.commit()?;
 					}
 					// The source ended (or its catalog track died): wind down.
 					Ok(None) => break,
@@ -237,7 +240,7 @@ mod tests {
 			video.description = description;
 			self.size = (width, height);
 
-			let mut guard = self.catalog.lock();
+			let mut guard = self.catalog.modify().unwrap();
 			guard.video = hang::catalog::Video::default();
 			guard.video.insert("video", video).unwrap();
 		}
@@ -347,7 +350,7 @@ mod tests {
 		video.coded_height = Some(240);
 		video.bitrate = Some(1_000_000);
 		video.framerate = Some(30.0);
-		catalog.lock().video.insert("video", video).unwrap();
+		catalog.modify().unwrap().video.insert("video", video).unwrap();
 
 		let info = hang::container::track_info(hang::catalog::PRIORITY.video);
 		let mut track = broadcast.create_track("video", info).unwrap();
@@ -404,7 +407,7 @@ mod tests {
 		video.coded_height = Some(240);
 		video.bitrate = Some(1_000_000);
 		video.framerate = Some(30.0);
-		catalog.lock().video.insert("video", video).unwrap();
+		catalog.modify().unwrap().video.insert("video", video).unwrap();
 
 		let info = hang::container::track_info(hang::catalog::PRIORITY.video);
 		let mut track = broadcast.create_track("video", info).unwrap();

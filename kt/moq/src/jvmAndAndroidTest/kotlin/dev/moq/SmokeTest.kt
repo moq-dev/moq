@@ -247,9 +247,9 @@ class SmokeTest {
     }
 
     @Test
-    fun `dynamic refuses a non-prefix pattern`() {
+    fun `dynamic accepts a non-prefix pattern`() {
         OriginProducer(OriginOptions()).use { origin ->
-            assertFailsWith<MoqException> { origin.dynamic("live/*", Route()) }
+            origin.dynamic("live/*", Route()).close()
         }
     }
 

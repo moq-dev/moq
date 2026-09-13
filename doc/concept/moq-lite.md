@@ -40,19 +40,24 @@ how a conference room learns who joined, how a player learns a stream came
 online without polling, and how [relay clusters](/bin/relay/cluster) discover
 each other.
 
-An announcement is a **route**: a claim that broadcasts under a prefix can be
-served. By convention a publisher announces each broadcast's exact path, so
-subscribers enumerate broadcasts by listing routes, but a route can also cover
-a whole subtree, letting a server announce one prefix and serve whatever is
-requested beneath it. Each route carries the chain of relay identities it
-passed through, which is how forwarding loops are caught, and a cost, which is
-how a subscriber picks the cheapest of several routes to the same broadcast.
+An announcement is a **route**: a claim that matching broadcasts can be served.
+By convention a publisher announces each broadcast's exact path, so subscribers
+enumerate broadcasts by listing routes, but a route can also cover a subtree
+(`foo/**`) or a richer path pattern (`live/*`, `**/a`), letting a server
+advertise capability without enumerating inventory. Each route carries the
+chain of relay identities it passed through, which is how forwarding loops are
+caught, and a cost, which is how a subscriber picks the cheapest of several
+routes to the same broadcast. Wildcard advertisements are forwarded and
+authorized; resolving one into a subscription is not implemented yet.
 
 ## Path patterns
 
-Rust's `moq_net::path::Pattern` and TypeScript's `Path.Pattern` from `@moq/net`
-describe sets of literal paths. These APIs provide matching and scope algebra;
-using one does not enable wildcard announcements or change token permissions.
+Rust's `moq_net::Pattern` and TypeScript's `Path.Pattern` from `@moq/net`
+describe sets of literal paths. `origin.dynamic(pattern, route)` advertises any
+pattern in that dialect; a prefix is still spelled `foo/**`. Token scope stays
+prefix-based until origin grants become a pattern set: an advertisement must
+be contained by one of the producer's `prefix/**` scopes, and an over-wide
+claim is refused rather than clamped.
 
 Patterns match the whole path. `room` matches only `room`, while `room/**`
 matches `room` and every descendant. Segments are separated by `/`:
@@ -165,3 +170,9 @@ JavaScript exposes `SessionError` and `StreamError`. Match the registry before
 interpreting the number. Native bindings expose scope, code, kind, and a diagnostic
 message; unknown and application codes retain their numeric value. Transport
 failures without a protocol code remain separate.
+
+Route announcements expose the matcher directly: Rust `announce::Update.pattern`
+and TypeScript `Announce.Event.pattern` carry a `Pattern`. A subtree claim is
+`room/**`, while `room/*` covers one child segment. Use `as_prefix()` in Rust or
+`asPrefix()` in TypeScript when a consumer specifically needs a prefix-shaped
+claim; an arbitrary pattern is not a concrete broadcast name.

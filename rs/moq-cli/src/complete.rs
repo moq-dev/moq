@@ -486,7 +486,10 @@ fn broadcasts(_ctx: CompleteCtx<'_>) -> CompletionFuture<'static> {
 		let mut until = deadline;
 		while let Ok(Some(update)) = timeout_at(until, announced.next()).await {
 			until = deadline.min(Instant::now() + SETTLE);
-			let path = update.prefix.to_string();
+			let Some(prefix) = update.pattern.as_prefix() else {
+				continue;
+			};
+			let path = prefix.to_owned();
 			// The root broadcast is the connection path itself, which an unset
 			// `--broadcast` already names; there is no word to insert for it.
 			if path.is_empty() {
@@ -901,7 +904,7 @@ mod tests {
 			let mut broadcast = origin.create_broadcast(path).expect("broadcast");
 			broadcast.announce(Default::default()).expect("broadcast");
 			let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).expect("catalog");
-			let mut edit = catalog.lock();
+			let mut edit = catalog.modify().unwrap();
 			edit.video.renditions.insert(
 				video.to_string(),
 				VideoConfig::new(H264 {

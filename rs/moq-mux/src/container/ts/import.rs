@@ -366,7 +366,7 @@ impl<E: catalog::Catalog> Import<E> {
 				// export re-emits them verbatim, including the original CUEI.
 				if self.supports_mpegts && !self.program_recorded && !pmt.program_info.is_empty() {
 					let program = to_descriptors(&pmt.program_info);
-					if let Some(mpegts) = self.catalog.lock().mpegts_mut() {
+					if let Some(mpegts) = self.catalog.modify()?.mpegts_mut() {
 						mpegts.program_descriptors = program;
 					}
 					self.program_recorded = true;
@@ -401,7 +401,7 @@ impl<E: catalog::Catalog> Import<E> {
 			Some(TsPayload::Pat(pat)) => {
 				self.pmt_pids
 					.extend(pat.table.iter().map(|entry| entry.program_map_pid));
-				self.record_program_identity(&pat);
+				self.record_program_identity(&pat)?;
 			}
 			_ => {}
 		}
@@ -673,8 +673,7 @@ impl<E: catalog::Catalog> Import<E> {
 
 		// Record the decoded media track's PID + PMT descriptors (language, ...) once
 		// its lazily created track exists, so export can preserve them.
-		self.record_media_track(pid);
-		Ok(())
+		self.record_media_track(pid)
 	}
 
 	/// The packet chain on `pid` was cut: salvage the truncated PES only where its bytes
@@ -728,20 +727,20 @@ impl<E: catalog::Catalog> Import<E> {
 	/// Record a decoded media stream's PID and ES descriptors into `mpegts.tracks`,
 	/// once per track. No-op without the `mpegts` section, before the track exists,
 	/// or for verbatim streams (which self-register).
-	fn record_media_track(&mut self, pid: Pid) {
+	fn record_media_track(&mut self, pid: Pid) -> anyhow::Result<()> {
 		if !self.supports_mpegts || self.recorded_media.contains(&pid) {
-			return;
+			return Ok(());
 		}
 		let (name, descriptors) = {
 			let Some(name) = self.streams.get(&pid).and_then(|s| s.media_track_name()) else {
-				return;
+				return Ok(());
 			};
 			(
 				name,
 				self.es_descriptors.get(&pid.as_u16()).cloned().unwrap_or_default(),
 			)
 		};
-		if let Some(mpegts) = self.catalog.lock().mpegts_mut() {
+		if let Some(mpegts) = self.catalog.modify()?.mpegts_mut() {
 			let entry = mpegts
 				.tracks
 				.entry(name)
@@ -750,25 +749,27 @@ impl<E: catalog::Catalog> Import<E> {
 			entry.descriptors = descriptors;
 		}
 		self.recorded_media.insert(pid);
+		Ok(())
 	}
 
 	/// Capture the transport/service identity (TSID, service number, PMT PID) from the
 	/// PAT into the catalog service record, once. No-op without `mpegts` support.
-	fn record_program_identity(&mut self, pat: &mpeg2ts::ts::payload::Pat) {
+	fn record_program_identity(&mut self, pat: &mpeg2ts::ts::payload::Pat) -> anyhow::Result<()> {
 		if !self.supports_mpegts || self.identity_recorded {
-			return;
+			return Ok(());
 		}
 		// program_number 0 is the network PID association, not a service; skip it.
 		let Some(entry) = pat.table.iter().find(|entry| entry.program_num != 0) else {
-			return;
+			return Ok(());
 		};
-		if let Some(mpegts) = self.catalog.lock().mpegts_mut() {
+		if let Some(mpegts) = self.catalog.modify()?.mpegts_mut() {
 			let program = mpegts.program.get_or_insert_with(Default::default);
 			program.transport_stream_id = pat.transport_stream_id;
 			program.program_number = entry.program_num;
 			program.pmt_pid = entry.program_map_pid.as_u16();
 		}
 		self.identity_recorded = true;
+		Ok(())
 	}
 
 	/// Feed one TS packet on a standalone SI PID to its reassembler, folding each
@@ -971,7 +972,7 @@ fn register_verbatim<E: catalog::Catalog>(
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	)?;
 
-	let mut guard = catalog.lock();
+	let mut guard = catalog.modify()?;
 	let Some(mpegts) = guard.mpegts_mut() else {
 		// supports_mpegts was true when sampled at construction; None here means the
 		// catalog dropped the section since.
@@ -992,7 +993,11 @@ fn register_verbatim<E: catalog::Catalog>(
 
 /// Remove a verbatim track's entry from the `mpegts` catalog section on drop.
 fn unregister_verbatim<E: catalog::Catalog>(catalog: &mut crate::catalog::Producer<E>, name: &str) {
-	if let Some(mpegts) = catalog.lock().mpegts_mut() {
+	// A closed catalog has nothing left to unregister from.
+	let Ok(mut catalog) = catalog.modify() else {
+		return;
+	};
+	if let Some(mpegts) = catalog.mpegts_mut() {
 		mpegts.tracks.remove(name);
 	}
 }
@@ -1149,7 +1154,7 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 		// re-emits the stream under its real id (e.g. 0xBD for teletext/DVB AC-3).
 		if !self.stream_id_recorded {
 			let name = self.track.name().to_string();
-			if let Some(mpegts) = self.entry.catalog.lock().mpegts_mut()
+			if let Some(mpegts) = self.entry.catalog.modify()?.mpegts_mut()
 				&& let Some(verbatim) = mpegts.tracks.get_mut(&name).and_then(|t| t.verbatim.as_mut())
 			{
 				verbatim.stream_id = Some(pending.stream_id);

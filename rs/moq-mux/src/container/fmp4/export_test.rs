@@ -144,7 +144,7 @@ async fn vp8_source_to_cmaf_export_synthesizes_vp08() {
 	let mut live = Live::new(".vp8", |catalog, name| {
 		let mut config = VideoConfig::new(VideoCodec::VP8);
 		config.container = Container::Legacy;
-		catalog.lock().video.renditions.insert(name, config);
+		catalog.modify().unwrap().video.renditions.insert(name, config);
 	});
 	// Geometry-less startup frames must not park the source before the keyframe.
 	live.track.write(raw_frame(0, &[0x31, 0x00, 0x00], true)).unwrap();
@@ -198,7 +198,7 @@ async fn dimensionless_video_waits_for_catalog_geometry() {
 	let mut live = Live::new(".vp8", |catalog, name| {
 		let mut config = VideoConfig::new(VideoCodec::VP8);
 		config.container = Container::Legacy;
-		catalog.lock().video.renditions.insert(name, config);
+		catalog.modify().unwrap().video.renditions.insert(name, config);
 	});
 	let name = live.track.name().to_string();
 	// A VP8 interframe carries no geometry. Mark it as the group boundary only
@@ -213,7 +213,7 @@ async fn dimensionless_video_waits_for_catalog_geometry() {
 	);
 
 	{
-		let mut catalog = live.catalog.lock();
+		let mut catalog = live.catalog.modify().unwrap();
 		let config = catalog.video.renditions.get_mut(&name).unwrap();
 		config.coded_width = Some(320);
 		config.coded_height = Some(240);
@@ -252,7 +252,7 @@ async fn dimensionless_video_rejects_a_malformed_description() {
 		});
 		config.description = Some(bytes::Bytes::from_static(&[1]));
 		config.container = Container::Legacy;
-		catalog.lock().video.renditions.insert(name, config);
+		catalog.modify().unwrap().video.renditions.insert(name, config);
 	});
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
@@ -284,7 +284,7 @@ async fn vp9_source_to_cmaf_export_synthesizes_vp09() {
 		config.coded_width = Some(320);
 		config.coded_height = Some(240);
 		config.container = Container::Legacy;
-		catalog.lock().video.renditions.insert(name, config);
+		catalog.modify().unwrap().video.renditions.insert(name, config);
 	});
 	live.track.write(raw_frame(0, &[0x82, 0x49, 0x83, 0x42], true)).unwrap();
 	live.track.finish().unwrap();
@@ -349,7 +349,7 @@ async fn av1_source_to_cmaf_export_synthesizes_av01() {
 		config.coded_width = Some(320);
 		config.coded_height = Some(240);
 		config.container = Container::Legacy;
-		catalog.lock().video.renditions.insert(name, config);
+		catalog.modify().unwrap().video.renditions.insert(name, config);
 	});
 	live.track.write(raw_frame(0, &[0x12, 0x00, 0x0a, 0x0b], true)).unwrap();
 	live.track.finish().unwrap();
@@ -646,7 +646,7 @@ async fn ntsc_tail_uses_a_representable_catalog_cadence() {
 		config.coded_height = Some(240);
 		config.framerate = Some(30_000.0 / 1001.0);
 		config.container = Container::Legacy;
-		catalog.lock().video.renditions.insert(name, config);
+		catalog.modify().unwrap().video.renditions.insert(name, config);
 	});
 	live.track.write(video_frame(0, true)).unwrap();
 	live.track.finish().unwrap();
@@ -670,7 +670,7 @@ async fn unusable_framerate_uses_the_standard_fallback_rate() {
 		config.coded_height = Some(240);
 		config.framerate = Some(0.0005);
 		config.container = Container::Legacy;
-		catalog.lock().video.renditions.insert(name, config);
+		catalog.modify().unwrap().video.renditions.insert(name, config);
 	});
 	live.track.write(raw_frame(0, &[0x82, 0x00], true)).unwrap();
 	live.track.finish().unwrap();
@@ -984,7 +984,7 @@ fn live_av() -> (Live, crate::container::Producer<crate::catalog::hang::Containe
 	let audio = live.add_track(".opus", |catalog, name| {
 		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
 		config.container = Container::Legacy;
-		catalog.lock().audio.renditions.insert(name, config);
+		catalog.modify().unwrap().audio.renditions.insert(name, config);
 	});
 	(live, audio)
 }

@@ -212,8 +212,8 @@ class OriginProducer:
         """Advertise ``pattern`` and serve the requests beneath it.
 
         ``pattern`` is in the path Pattern dialect; a prefix is spelled ``foo/**``.
-        Until wildcard advertisements land, anything but a prefix-shaped pattern
-        is refused. Hold the returned handle while the route should stay advertised.
+        Wildcards are advertised, but only prefix-shaped patterns serve requests.
+        Hold the returned handle while the route should stay advertised.
         """
         return OriginDynamic(self._inner.dynamic(pattern, route if route is not None else Route()))
 

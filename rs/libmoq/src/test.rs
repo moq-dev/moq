@@ -710,7 +710,8 @@ fn publish_catalog_roundtrip() {
 		let mut state = State::lock();
 		let (_, catalog) = state.publish.pair_mut(Id::try_from(broadcast).unwrap()).unwrap();
 		catalog
-			.lock()
+			.modify()
+			.unwrap()
 			.video
 			.renditions
 			.get_mut(stalled_video_name)
@@ -2078,7 +2079,7 @@ fn dynamic_serves_a_request_under_a_prefix() {
 }
 
 #[test]
-fn dynamic_refuses_a_non_prefix_pattern() {
+fn dynamic_accepts_a_non_prefix_pattern() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
 	let pattern = b"live/*";
@@ -2092,7 +2093,9 @@ fn dynamic_refuses_a_non_prefix_pattern() {
 			cb.ptr,
 		)
 	};
-	assert!(code < 0, "a non-prefix pattern must be refused, got {code}");
+	assert!(code > 0, "a non-prefix pattern must be advertised, got {code}");
+	assert_eq!(moq_origin_dynamic_close(id(code)), 0);
+	assert_eq!(cb.recv_terminal(), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -2289,7 +2292,7 @@ fn consume_audio_follows_a_sibling_broadcast_reference() {
 	let name = {
 		let mut state = State::lock();
 		let (_, catalog) = state.publish.pair_mut(Id::try_from(source).unwrap()).unwrap();
-		let catalog = catalog.lock();
+		let catalog = catalog.modify().unwrap();
 		catalog
 			.audio
 			.renditions
@@ -2320,8 +2323,14 @@ fn consume_audio_follows_a_sibling_broadcast_reference() {
 	{
 		let mut state = State::lock();
 		let (_, catalog) = state.publish.pair_mut(Id::try_from(broadcast).unwrap()).unwrap();
-		catalog.lock().audio.renditions.get_mut(&name).unwrap().broadcast =
-			Some(moq_net::PathRelative::new("./source").into_owned());
+		catalog
+			.modify()
+			.unwrap()
+			.audio
+			.renditions
+			.get_mut(&name)
+			.unwrap()
+			.broadcast = Some(moq_net::PathRelative::new("./source").into_owned());
 	}
 
 	let consume = request_broadcast(origin, b"a/pub");
