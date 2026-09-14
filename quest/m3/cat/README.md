@@ -8,9 +8,11 @@ in the SETUP `AUTHORIZATION TOKEN` option and the relay admits it with the
 scope the token's `moqt` claim names, through the same
 [auth server](/quest/m1/auth/README.md) contract every other credential
 uses. Our own clients can present one; `moq auth serve` verifies one; the
-relay stays crypto-free and forwards the bytes. Nothing changes on the
-moq-lite wire or in the URL: a CAT rides the SETUP option only, and the JWT
-stays the URL credential.
+relay stays crypto-free and forwards the bytes. This is moq-transport only:
+a CAT scopes itself by moq-transport message (`SUBSCRIBE`, `FETCH`,
+`PUBLISH_NAMESPACE`, ...), which moq-lite has no equivalent for, so it rides
+the SETUP option and nothing else. Nothing changes on the moq-lite wire or in
+the URL, and the JWT stays the URL credential.
 
 Boundaries decided while planning:
 
