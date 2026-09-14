@@ -9,8 +9,9 @@ within the issue's stated scope and boundaries.
 
 Rescoped during the 2026-08 grooming: subscription options, track info, abort
 codes, and client TLS roots landed in dev's rs/libmoq. Remaining gaps:
-fetch_group, dynamic track serving within a broadcast, server-side accept, and
-datagrams, tracked against the dev FFI surface. Broadcast serving is not in
+fetch_group, server-side accept, and datagrams, tracked against the dev FFI
+surface. Dynamic track serving and demand split into the track demand quest
+linked below. Broadcast serving is not in
 this quest: the announce handle that advertises a prefix and yields its
 requests reaches C through the bindings quest linked below, so do not add a
 separate `requested_broadcast` path here.
@@ -42,4 +43,5 @@ feature over `moq-video` (NVIDIA and VAAPI on), but `libmoq`'s
 
 ## Related
 
+- [Track demand](/quest/m1/libmoq-track-demand.md) - track requests and used/unused on the C ABI
 - [#3190](/quest/m1/3190-align-origin-broadcast-creation-naming-across-language.md) - brings the announce handle and broadcast request serving to C
