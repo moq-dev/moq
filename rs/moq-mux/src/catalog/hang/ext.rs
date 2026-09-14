@@ -90,8 +90,8 @@ impl Extra {
 }
 
 /// The base sections plus an application extension `E` (defaulting to `()` for none), serialized
-/// as a flat union: the `video`/`audio`/`text` media sections, the shared `archive`, the
-/// `json`/`binary` data sections, and the extension's sections share one JSON object on the wire.
+/// as a flat union: the `video`/`audio`/`text` media sections, the shared `archive` and `clock`,
+/// the `json`/`binary` data sections, and the extension's sections share one JSON object on the wire.
 ///
 /// The data sections (`json`/`binary`) carry application tracks that aren't media. Every base
 /// section is a direct field (`catalog.video`), and the catalog derefs to the extension so its
@@ -114,6 +114,13 @@ pub struct Catalog<E: CatalogExt = ()> {
 	/// The broadcast's segment index and any durable archive, if the publisher offers one.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub archive: Option<hang::catalog::Archive>,
+
+	/// The broadcast's one continuous clock, if the publisher exposes one.
+	///
+	/// Independent of [`archive`](Self::archive): a live-only publisher exposes its mapping
+	/// without creating a segment index. See [`hang::catalog::Clock`].
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub clock: Option<hang::catalog::Clock>,
 
 	/// Caption/subtitle renditions. Omitted from the wire when empty, so a broadcast without
 	/// captions stays byte-identical to before this section existed.

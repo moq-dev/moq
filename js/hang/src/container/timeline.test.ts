@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import * as Json from "@moq/json";
 import type { Time } from "@moq/net";
 import { Track } from "@moq/net";
-import { MOQ_EPOCH_UNIX_MILLIS, u53 } from "../catalog";
+import { u53 } from "../catalog";
 import { Producer, type Record } from "./timeline.ts";
 
 const us = (ms: number): Time.Micro => (ms * 1000) as Time.Micro;
@@ -379,16 +379,12 @@ test("a non-keyframe range start is flagged", async () => {
 	expect(out[1]?.tracks?.video0[0].keyframe).toBe(false);
 });
 
-test("the wall-clock anchor is advertised from the config", () => {
-	expect(capture().timeline.section().wall).toBeUndefined();
-
-	// The wire counts from the moq epoch, so pts 0 at exactly the epoch advertises 0.
-	const epoch = new Date(MOQ_EPOCH_UNIX_MILLIS);
-	expect(capture({ wall: epoch }).timeline.section().wall).toBe(u53(0));
-	expect(capture({ wall: new Date(MOQ_EPOCH_UNIX_MILLIS + 1000) }).timeline.section().wall).toBe(u53(1000));
-
-	// A time before the epoch isn't representable, so it clamps rather than going negative.
-	expect(capture({ wall: new Date(0) }).timeline.section().wall).toBe(u53(0));
+test("the timeline section carries no wall anchor", () => {
+	// Wall mapping moved to the catalog root clock: the timeline section carries the track,
+	// timescale, and duration bound, and nothing else time-anchoring.
+	const section = capture().timeline.section();
+	expect(section).toEqual({ track: "timeline.z", timescale: u53(1000), durationMax: undefined });
+	expect("wall" in section).toBe(false);
 });
 
 // Reservations nest like the catalog's, so the first batch to finish doesn't publish records

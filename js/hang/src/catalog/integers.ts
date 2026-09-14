@@ -18,6 +18,11 @@ export const u53Schema = z.number().check(z.int(), z.nonnegative(), z.lte(Number
 export type U53 = z.infer<typeof u53Schema>;
 
 /**
+ * Branded type for nonzero 53-bit unsigned integers: a timescale, which zero cannot express.
+ */
+export const nonzeroU53Schema = z.number().check(z.int(), z.positive(), z.lte(Number.MAX_SAFE_INTEGER)).brand("u53");
+
+/**
  * Convenience function to create a u8 value
  */
 export function u8(value: number): U8 {

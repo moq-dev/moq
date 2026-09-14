@@ -6,7 +6,7 @@ use std::task::Poll;
 use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
-use hang::catalog::{AudioConfig, MOQ_EPOCH_UNIX_MILLIS, Timeline, VideoConfig};
+use hang::catalog::{AudioConfig, Clock, Timeline, VideoConfig};
 use moq_mux::container::fmp4::Muxer;
 use moq_mux::timeline::Entry;
 
@@ -199,8 +199,11 @@ pub struct Rendition {
 	pub codec: String,
 
 	config: Config,
-	/// The catalog's root archive timeline: the timescale and wall anchor timings decode with.
+	/// The catalog's root archive timeline: the timescale timings decode with.
 	section: Timeline,
+	/// The catalog's root broadcast clock: the wall anchor timings map through, after
+	/// timescale conversion. Absent when the publisher exposes none.
+	clock: Option<Clock>,
 	/// This rendition's window over the broadcast timeline, fed by the catalog watcher's
 	/// fan-out.
 	live: Arc<segments::Producer>,
@@ -252,7 +255,8 @@ impl Rendition {
 		*self.bitrate.read().expect("bitrate lock poisoned")
 	}
 
-	/// Build a video rendition over the broadcast's timeline `section`.
+	/// Build a video rendition over the broadcast's timeline `section`, timed by the
+	/// catalog root `clock`.
 	///
 	/// Fails when the config's `broadcast` reference escapes above the origin root: it names no
 	/// broadcast, so there would be no media to serve.
@@ -261,6 +265,7 @@ impl Rendition {
 		config: &VideoConfig,
 		upstream: &Upstream,
 		section: Timeline,
+		clock: Option<Clock>,
 	) -> moq_mux::Result<Self> {
 		Ok(Self {
 			name,
@@ -271,19 +276,21 @@ impl Rendition {
 			codec: config.codec.to_string(),
 			config: Config::Video(config.clone()),
 			section,
+			clock,
 			live: Arc::new(segments::Producer::new()),
 			media: Media::bind(upstream, config.broadcast.as_ref())?,
 			init: tokio::sync::Mutex::new(None),
 		})
 	}
 
-	/// Build an audio rendition over the broadcast's timeline `section`, failing like
-	/// [`video`](Self::video).
+	/// Build an audio rendition over the broadcast's timeline `section`, timed by the catalog
+	/// root `clock`, failing like [`video`](Self::video).
 	pub(crate) fn audio(
 		name: String,
 		config: &AudioConfig,
 		upstream: &Upstream,
 		section: Timeline,
+		clock: Option<Clock>,
 	) -> moq_mux::Result<Self> {
 		Ok(Self {
 			name,
@@ -294,6 +301,7 @@ impl Rendition {
 			codec: config.codec.to_string(),
 			config: Config::Audio(config.clone()),
 			section,
+			clock,
 			live: Arc::new(segments::Producer::new()),
 			media: Media::bind(upstream, config.broadcast.as_ref())?,
 			init: tokio::sync::Mutex::new(None),
@@ -495,13 +503,13 @@ impl Rendition {
 		moq_net::Timescale::new((self.section.timescale as u64).max(1)).expect("clamped nonzero timescale")
 	}
 
-	/// The wall-clock time of a media timestamp, when the timeline advertises an anchor.
+	/// The wall-clock time of a media timestamp, when the catalog advertises its broadcast
+	/// clock. Converts the timeline-timescale timestamp into the clock's timescale and applies
+	/// the root mapping; an unrepresentable result maps to no time rather than a truncated one.
 	pub(crate) fn wall_clock(&self, pts: moq_net::Timestamp) -> Option<SystemTime> {
-		let wall = self.section.wall?;
-		let timescale = moq_net::Timescale::new(u64::from(self.section.timescale)).ok()?;
-		let units = u128::from(wall) + pts.as_scale(timescale);
-		let unix_ms = u128::from(MOQ_EPOCH_UNIX_MILLIS) + units * 1000 / u128::from(timescale.as_u64());
-		Some(SystemTime::UNIX_EPOCH + Duration::from_millis(u64::try_from(unix_ms).ok()?))
+		let clock = self.clock.as_ref()?;
+		let scale = u32::try_from(pts.scale().as_u64()).ok()?;
+		clock.wall_clock(pts.value(), scale).ok()
 	}
 
 	fn muxer(&self) -> Result<Muxer> {

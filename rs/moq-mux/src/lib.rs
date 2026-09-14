@@ -37,7 +37,7 @@ pub mod select;
 mod source;
 pub mod timeline;
 
-pub use clock::Clock;
+pub use clock::{Clock, SourceMap};
 pub use error::*;
 pub use pace::Pacer;
 pub use source::{Binding, Source};

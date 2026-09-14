@@ -3,6 +3,7 @@ import * as z from "@zod/mini";
 import { ArchiveSchema } from "./archive";
 import { AudioSchema } from "./audio";
 import { BinarySchema } from "./binary";
+import { ClockSchema } from "./clock";
 import { JsonSchema } from "./json";
 import { section } from "./section";
 import { TextSchema } from "./text";
@@ -12,8 +13,9 @@ import { VideoSchema } from "./video";
  * The root catalog: the base sections every hang broadcast carries.
  *
  * The media sections are `video`, `audio`, and `text`, alongside the broadcast's `archive`
- * (the segment index and any durable recording); `json` and `binary` list application data
- * tracks that aren't media. A section is omitted when it holds no tracks.
+ * (the segment index and any durable recording) and its `clock` (the one wall-clock mapping);
+ * `json` and `binary` list application data tracks that aren't media. A section is omitted
+ * when it holds no tracks.
  *
  * This is a *loose* object: unknown root sections pass through validation untouched, so an
  * application can add its own sections (e.g. `scte35`) without modifying hang. A base consumer
@@ -25,6 +27,9 @@ export const RootSchema = z.looseObject({
 	audio: z.optional(AudioSchema),
 	// The broadcast's segment index and any durable archive, if the publisher offers one.
 	archive: z.optional(ArchiveSchema),
+	// The broadcast's one continuous clock, if the publisher exposes one. Independent of
+	// `archive`: a live-only publisher exposes its mapping without creating a segment index.
+	clock: z.optional(ClockSchema),
 	// `text` is now a reserved media section, but a catalog that carried an unrelated `text` key
 	// before this existed must not fail to parse: fall back to `undefined` (dropping the section)
 	// rather than rejecting the whole catalog, so video/audio still play.

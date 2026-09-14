@@ -187,7 +187,7 @@ impl Broadcaster {
 		let mut audio = Vec::new();
 		let mut availability_start = None;
 		for rendition in self.renditions.snapshot() {
-			// Every rendition shares the catalog's one timeline section, so any of them can
+			// Every rendition shares the catalog's one root clock, so any of them can
 			// supply the declared wall anchor.
 			if availability_start.is_none() {
 				availability_start = rendition.wall_clock(moq_net::Timestamp::ZERO);
@@ -809,7 +809,7 @@ mod tests {
 		assert!(manifest.contains(" type=\"dynamic\""), "live broadcast is dynamic");
 		assert!(
 			manifest.contains(" availabilityStartTime=\""),
-			"pts 0 is anchored even without a catalog wall clock"
+			"pts 0 is anchored by the catalog root clock"
 		);
 		assert!(manifest.contains("id=\"video/video0\""));
 		assert!(manifest.contains("id=\"audio/audio0\""));
@@ -835,6 +835,116 @@ mod tests {
 		assert!(video_rendition.segment_at(999).await.unwrap().is_none());
 
 		drop((video, audio, video_registration, audio_registration, broadcast));
+	}
+
+	// The clock migration end to end: the catalog root clock (not the archive section) times
+	// EXT-X-PROGRAM-DATE-TIME and the DASH availabilityStartTime, converting the timeline
+	// timescale into the clock's.
+	#[tokio::test]
+	async fn root_clock_times_playlists_and_manifest() {
+		use std::time::{SystemTime, UNIX_EPOCH};
+
+		let origin = produce_origin();
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		broadcast.announce(Default::default()).expect("publish allowed");
+		settle().await;
+
+		// PTS zero at exactly the moq epoch, so every timestamp maps to a fixed string.
+		let wall = UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS);
+		let config = moq_mux::catalog::Config::default()
+			.with_clock(moq_mux::Clock::with_wall(wall).expect("a representable wall"));
+		let mut catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config).unwrap();
+
+		let reserved = catalog.reserve();
+		let mut registration = reserved.video("video0").unwrap();
+		registration.set(video_config()).unwrap();
+		drop(reserved);
+
+		let track = broadcast.create_track("video0", None).unwrap();
+		let mut media = catalog
+			.media_producer(
+				track,
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+			)
+			.unwrap();
+		media.write(frame(0, true)).unwrap();
+		media.write(frame(2_000_000, true)).unwrap();
+		media.write(frame(4_000_000, true)).unwrap(); // live edge
+
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("video discovered");
+		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
+
+		// The timeline section carries no wall field anymore; the root clock names the epoch.
+		let snapshot = rendition.playlist();
+		assert_eq!(
+			snapshot.program_date_time,
+			Some(SystemTime::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS))
+		);
+		let playlist = rendition.media_playlist(None).expect("playlist renders");
+		assert!(
+			playlist.contains("#EXT-X-PROGRAM-DATE-TIME:2020-01-01T00:00:00.000Z\n"),
+			"pts 0 maps through the root clock: {playlist}"
+		);
+
+		let manifest = broadcaster.manifest(None).expect("manifest renders once playable");
+		assert!(
+			manifest.contains(" availabilityStartTime=\"2020-01-01T00:00:00.000Z\""),
+			"the manifest anchors at the root clock: {manifest}"
+		);
+
+		drop((media, registration, broadcast));
+	}
+
+	// Without a catalog clock the DASH manifest still anchors, estimating pts 0 from the first
+	// record's arrival, and playlists simply omit EXT-X-PROGRAM-DATE-TIME.
+	#[tokio::test]
+	async fn manifest_falls_back_to_arrival_anchor_without_a_clock() {
+		let origin = produce_origin();
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		broadcast.announce(Default::default()).expect("publish allowed");
+		settle().await;
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+
+		let reserved = catalog.reserve();
+		// Stage the clock's removal before the first snapshot publishes, so no consumer ever
+		// sees a clock on this broadcast.
+		catalog.modify().unwrap().clock = None;
+		let mut registration = reserved.video("video0").unwrap();
+		registration.set(video_config()).unwrap();
+		drop(reserved);
+		assert_eq!(catalog.snapshot().clock, None);
+
+		let track = broadcast.create_track("video0", None).unwrap();
+		let mut media = catalog
+			.media_producer(
+				track,
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+			)
+			.unwrap();
+		media.write(frame(0, true)).unwrap();
+		media.write(frame(2_000_000, true)).unwrap();
+		media.write(frame(4_000_000, true)).unwrap(); // live edge
+
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("video discovered");
+		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
+
+		assert_eq!(rendition.playlist().program_date_time, None);
+		let playlist = rendition.media_playlist(None).expect("playlist renders");
+		assert!(!playlist.contains("PROGRAM-DATE-TIME"), "{playlist}");
+
+		let manifest = broadcaster.manifest(None).expect("manifest renders once playable");
+		assert!(
+			manifest.contains(" availabilityStartTime=\""),
+			"pts 0 is anchored even without a catalog clock"
+		);
+
+		drop((media, registration, broadcast));
 	}
 
 	// A finished broadcast renders a static presentation, offset to its first listed segment.
