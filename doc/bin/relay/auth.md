@@ -180,6 +180,76 @@ share entries for the same URL.
 mTLS peers still use the alias and tier lookup; proxy grants do not restrict
 or revalidate them.
 
+## Auth server
+
+`moq auth serve` is the reference auth server: the policy above, moved out of
+the relay and answered over one JSON `POST /` per session event. The relay
+quest in the [Auth server](https://github.com/moq-dev/moq/tree/dev/quest/m1/auth)
+line points `--auth-url` at it and deletes the relay-side flags; until then
+the two can run side by side.
+
+```bash
+moq auth serve --listen 127.0.0.1:4440 \
+  --key-dir /etc/moq/keys \
+  --public-subscribe 'anon/**' --public-publish 'anon/**' \
+  --mtls-publish '**' --mtls-subscribe '**' \
+  --tier edge --revalidate 1m --limit-remote 64
+```
+
+Policy runs in this order and stops at the first that applies:
+
+1. A `jwt` in the query is verified against `--key <file>` or \`--key-dir
+   <dir>` (by `kid`, read per request so rotation needs no restart). Its
+   claims are the grant and its `root` must equal the dialed path. A
+   malformed, expired, or unknown-key token is refused; it never falls
+   through to the anonymous rules.
+2. A verified client certificate gets `--mtls-publish` and
+   `--mtls-subscribe`, and nothing when they are empty. Cluster peers are
+   admitted this way; a mesh needs `'**'` for both.
+3. Anything else gets `--public-publish` and `--public-subscribe`, and is
+   refused when they are empty.
+
+Every grant carries `--tier`, a `revalidate` cadence (`--revalidate`, default
+one minute), and an `expires`: the token's `exp`, the certificate's notAfter,
+or `--expires` (default one day) when neither has one.
+
+`--limit-token <n>` and `--limit-remote <n>` cap live sessions per token and
+per remote address (port dropped, IPv4-mapped IPv6 folded), counted from
+`connect` and `end` by session id. The cap is a nuisance limit, not a security
+boundary: a relay that dies without an `end` holds its slots until they miss
+two cadences, a restart empties the table until the fleet's next cadence
+refills it, and one session can slip over the cap for one cadence. A refusal
+names the rule in the 403 body.
+
+`--listen unix:/run/moq-auth.sock` serves a socket. Binding anything but a
+loopback address needs `--listen-public`: the server has no authentication of
+its own.
+
+### Migrating from the relay flags
+
+| Relay flag | `moq auth serve` |
+| --- | --- |
+| `--auth-key <file>` | `--key <file>` |
+| `--auth-key-dir <dir>` | `--key-dir <dir>` |
+| `--auth-public <prefix>` | `--public-publish '<prefix>/**' --public-subscribe '<prefix>/**'` |
+| `--auth-public-publish` / `--auth-public-subscribe` | `--public-publish` / `--public-subscribe`, as patterns |
+| `--auth-public-api <url>` | your own server answering the contract |
+| `--auth-mtls-tier <label>` | `--tier <label>` (one tier per server) |
+| `listen.tls.root` alone admitting a peer unscoped | `--mtls-publish '**' --mtls-subscribe '**'` |
+| `--auth-api` (token or proxy mode), `Cache-Control` | `--auth-url` pointed at any server answering the contract; `revalidate` and `expires` in the grant |
+| `--auth-domain` | your server reads `server_name` and decides |
+
+Running both on one host during the transition:
+
+```bash
+# The server holds the policy...
+moq auth serve --listen 127.0.0.1:4440 --key-dir /etc/moq/keys --public-subscribe 'anon/**'
+
+# ...and the relay keeps its flags until its auth quest lands, when this
+# becomes `moq-relay --auth-url http://127.0.0.1:4440/`.
+moq-relay --auth-key-dir /etc/moq/keys --auth-public-subscribe anon
+```
+
 ## Stream listeners
 
 The plaintext TCP and Unix-socket listeners authenticate exactly like QUIC:

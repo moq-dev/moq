@@ -72,11 +72,6 @@ Public API: breaking on every relay auth flag and on the embedding surface
 (`Relay` takes a lease per session; `moq-tokio` request accessors are
 additive). Wire: none.
 
-## Required
-
-- [Serve](/quest/m1/auth/serve.md) - the server the tests and the smoke
-  cluster run against
-
 ## Closes
 
 - [#3087](https://github.com/moq-dev/moq/issues/3087) - close this issue when the quest finishes

@@ -8,6 +8,8 @@
 //! - [`lease::Producer`] / [`lease::Consumer`]: the handle a session holds for its
 //!   grant, so whoever runs the accept loop decides how, in process or over HTTP.
 //! - [`Client`]: the HTTP implementation that drives a lease against `--auth-url`.
+//! - [`serve::Server`]: the reference server behind `moq auth serve`, holding the
+//!   policy a relay used to: keys, public rules, an mTLS grant, tiers, and limits.
 //! - [`Claims`], [`Key`], and [`KeySet`]: the JWT a client presents in its query, with
 //!   the keys that sign and verify it. `moq auth generate|sign|verify` is the CLI.
 //!
@@ -27,6 +29,8 @@ mod request;
 mod set;
 
 pub mod lease;
+#[cfg(feature = "serve")]
+pub mod serve;
 
 #[cfg(feature = "client")]
 mod client;

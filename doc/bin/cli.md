@@ -207,6 +207,14 @@ moq auth verify --key public.jwk --in alice.jwt
 `--publish` and `--subscribe` take patterns: `alice` is one broadcast,
 `alice/**` is a subtree, `**` is everything under `--root`.
 
+`moq auth serve` answers a relay's auth requests with the same keys, public
+rules, an explicit mTLS grant, tiers, and session limits; see
+[Auth server](/bin/relay/auth#auth-server).
+
+```bash
+moq auth serve --listen 127.0.0.1:4440 --key-dir keys/ --public-subscribe 'anon/**'
+```
+
 See [Authentication](/bin/relay/auth).
 
 ## Retention and latency
