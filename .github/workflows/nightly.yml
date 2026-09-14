@@ -15,10 +15,11 @@ name: Nightly
 # `#[cfg(target_os = ...)]` code that no Linux job compiles at all, and those
 # runners are throttled too hard to gate every PR on.
 #
-# `nix` is diff-independent because the flake packages are only ever built on a
-# release tag, so a change that compiles under plain cargo can still break every
-# release artifact (crane vendors and stubs sources in ways cargo never does) and
-# nothing notices until the tag is pushed.
+# The `release-*` jobs are diff-independent because the release workflows only
+# ever run on a tag: a change that compiles under plain cargo can still break a
+# release artifact (crane vendors and stubs sources in ways cargo never does,
+# the wheel builds in a manylinux container, the Kotlin/Swift/Go/Dart packages
+# link the FFI on every platform) and nothing notices until the tag is pushed.
 #
 # A failure here lands on main rather than being caught in review, which is the
 # accepted trade. Anything that must block a merge belongs in check.yml.
@@ -126,34 +127,87 @@ jobs:
           NEXTEST_PROFILE: ci
           MOQ_STRICT: 1
 
-  # The release workflows build these flake attributes from a tag. crane splits a
-  # build into a dependency-only stage over stubbed workspace sources and the real
-  # one, so a `[patch.crates-io]` entry or a source filter can break here while
-  # plain cargo stays green. Two packages cover both install phases (staticlib and
-  # binary) and the whole dependency tree between them; the rest share the stages
-  # that actually break.
-  nix:
-    name: Nix (${{ matrix.package }})
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        package: [libmoq, moq-relay]
-    steps:
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # main
-        with:
-          tool-cache: false
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        with:
-          determinate: false
-      - name: Build
-        run: nix build ".#${{ matrix.package }}" --print-build-logs
+  # Every tag-driven release workflow, run against main with publishing skipped:
+  # the workflows gate their publish jobs on `github.ref_type == 'tag'`, and no
+  # secrets are passed, so a dry-run cannot publish even by accident.
+  #
+  # A caller has to grant every permission a nested job declares, skipped or
+  # not, so these carry the release-time grants. Nothing that runs here uses
+  # them.
+  release-py-ffi:
+    name: Release Py FFI
+    uses: ./.github/workflows/release-py-ffi.yml
+    permissions:
+      contents: read
+      id-token: write
+
+  release-kt-ffi:
+    name: Release Kotlin FFI
+    uses: ./.github/workflows/release-kt-ffi.yml
+    permissions:
+      contents: read
+
+  release-swift-ffi:
+    name: Release Swift FFI
+    uses: ./.github/workflows/release-swift-ffi.yml
+    permissions:
+      contents: write
+
+  release-go-ffi:
+    name: Release Go FFI
+    uses: ./.github/workflows/release-go-ffi.yml
+    permissions:
+      contents: read
+
+  release-dart-ffi:
+    name: Release Dart FFI
+    uses: ./.github/workflows/release-dart-ffi.yml
+    permissions:
+      contents: write
+      id-token: write
+
+  release-libmoq:
+    name: libmoq
+    uses: ./.github/workflows/libmoq.yml
+    permissions:
+      contents: write
+
+  release-moq-relay:
+    name: moq-relay
+    uses: ./.github/workflows/moq-relay.yml
+    permissions:
+      contents: write
+      actions: write
+
+  release-moq-cli:
+    name: moq-cli
+    uses: ./.github/workflows/moq-cli.yml
+    permissions:
+      contents: write
+      actions: write
+
+  release-moq-token-cli:
+    name: moq-token-cli
+    uses: ./.github/workflows/moq-token-cli.yml
+    permissions:
+      contents: write
+      actions: write
+
+  release-moq-gst:
+    name: moq-gst
+    uses: ./.github/workflows/moq-gst.yml
+    permissions:
+      contents: write
+      actions: write
+
+  # The three Docker images share one Dockerfile, so one package covers it.
+  release-docker:
+    name: Docker
+    uses: ./.github/workflows/docker.yml
+    with:
+      package: moq-relay
+    permissions:
+      contents: read
 
   fuzz:
     name: Fuzz (${{ matrix.target }})

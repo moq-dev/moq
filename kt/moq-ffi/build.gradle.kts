@@ -28,9 +28,9 @@
 //
 // Publishing uses com.vanniktech.maven.publish; CI runs
 // `:moq-ffi:publishAndReleaseToMavenCentral`. Credentials come from env vars
-// set by release-kt-ffi.yml (ORG_GRADLE_PROJECT_*). If the signing key isn't set
-// (e.g. a local `:moq-ffi:assemble` without secrets), signAllPublications()
-// becomes a no-op so local builds still work.
+// set by release-kt-ffi.yml (ORG_GRADLE_PROJECT_*). Signing is only wired up
+// when a key is present (see mavenPublishing below), so keyless local builds
+// and dry-runs work.
 
 import com.android.build.api.dsl.LibraryExtension
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
@@ -137,7 +137,12 @@ if (androidEnabled) {
 
 mavenPublishing {
     publishToMavenCentral(automaticRelease = true)
-    signAllPublications()
+    // Only sign when a key is actually configured. signAllPublications() registers a
+    // *required* sign task, so calling it unconditionally makes publishToMavenLocal
+    // fail ("no configured signatory") on dry-runs, which run without secrets.
+    if (!providers.gradleProperty("signingInMemoryKey").orNull.isNullOrBlank()) {
+        signAllPublications()
+    }
     coordinates("dev.moq", "moq-ffi", version.toString())
 
     pom {

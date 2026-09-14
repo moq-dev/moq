@@ -6,6 +6,22 @@ on:
       - 'moq-relay-v*'
       - 'moq-cli-v*'
       - 'moq-token-cli-v*'
+  # Dry-run: build the image, push nothing. Nightly calls this so a broken
+  # Dockerfile surfaces before the tag is cut. Off a tag there is no package to
+  # derive, so the caller names one.
+  workflow_call:
+    inputs:
+      package:
+        description: "Flake package to build (moq-relay, moq-cli, moq-token-cli)"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "Flake package to build (moq-relay, moq-cli, moq-token-cli)"
+        required: true
+        type: string
+        default: moq-relay
 
 env:
   REGISTRY: docker.io/moqdev
@@ -14,21 +30,31 @@ jobs:
   parse:
     name: Parse tag
     runs-on: ubuntu-latest
-    permissions: {}
+    permissions:
+      contents: read
     outputs:
       target: ${{ steps.parse.outputs.target }}
       version: ${{ steps.parse.outputs.version }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - id: parse
+        env:
+          PACKAGE: ${{ inputs.package }}
         run: |
           ref=${GITHUB_REF#refs/tags/}
-          if [[ "$ref" =~ ^([a-z-]+)-v([0-9.]+)$ ]]; then
-            echo "target=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
-            echo "version=${BASH_REMATCH[2]}" >> "$GITHUB_OUTPUT"
+          if [[ -n "$PACKAGE" ]]; then
+            target="$PACKAGE"
+          elif [[ "$ref" =~ ^([a-z-]+)-v[0-9.]+$ ]]; then
+            target="${BASH_REMATCH[1]}"
           else
             echo "Tag format not recognized." >&2
             exit 1
           fi
+          echo "target=${target}" >> "$GITHUB_OUTPUT"
+          .github/scripts/release.sh parse-version "$target"
 
   build:
     name: Build ${{ matrix.platform }}
@@ -52,6 +78,7 @@ jobs:
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        if: github.ref_type == 'tag'
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
@@ -64,15 +91,17 @@ jobs:
           platforms: ${{ matrix.platform }}
           build-args: |
             package=${{ needs.parse.outputs.target }}
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ needs.parse.outputs.target }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ needs.parse.outputs.target }},push-by-digest=true,name-canonical=true,push=${{ github.ref_type == 'tag' }}
 
       - name: Export digest
+        if: github.ref_type == 'tag'
         run: |
           mkdir -p /tmp/digests
           digest="${{ steps.build.outputs.digest }}"
           touch "/tmp/digests/${digest#sha256:}"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: github.ref_type == 'tag'
         with:
           name: digests-${{ strategy.job-index }}
           path: /tmp/digests/*
@@ -82,6 +111,7 @@ jobs:
   merge:
     name: Publish manifest
     needs: [parse, build]
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions: {}
     steps:

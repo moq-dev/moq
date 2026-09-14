@@ -10,6 +10,10 @@ on:
   push:
     tags:
       - "moq-ffi-v*"
+  # Dry-run: build everything, publish nothing. Nightly calls every release
+  # workflow this way so a broken build surfaces before the tag is cut.
+  workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -39,6 +43,7 @@ jobs:
       # hand without bumping Cargo.toml first, the wheel would ship with
       # the previous version and PyPI would reject the duplicate upload.
       - name: Verify Cargo.toml matches tag
+        if: github.ref_type == 'tag'
         env:
           TAG_VERSION: ${{ steps.parse.outputs.version }}
         run: |
@@ -130,6 +135,7 @@ jobs:
   publish:
     name: Publish to PyPI
     needs: [build, sdist]
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     environment:
       name: pypi

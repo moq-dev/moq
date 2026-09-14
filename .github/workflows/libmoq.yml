@@ -4,6 +4,10 @@ on:
   push:
     tags:
       - "libmoq-v*"
+  # Dry-run: build everything, publish nothing. Nightly calls every release
+  # workflow this way so a broken build surfaces before the tag is cut.
+  workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -70,6 +74,7 @@ jobs:
   release:
     name: Release
     needs: build
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write

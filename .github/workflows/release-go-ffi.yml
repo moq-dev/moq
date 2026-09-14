@@ -9,6 +9,10 @@ on:
   push:
     tags:
       - "moq-ffi-v*"
+  # Dry-run: build everything, publish nothing. Nightly calls every release
+  # workflow this way so a broken build surfaces before the tag is cut.
+  workflow_call:
+  workflow_dispatch:
   pull_request:
     paths:
       - ".github/workflows/release-go-ffi.yml"
@@ -45,16 +49,7 @@ jobs:
 
       - name: Parse version
         id: parse
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            CARGO_VERSION=$(grep '^version' rs/moq-ffi/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-            echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
-            echo "Using version from Cargo.toml (PR dry-run): $CARGO_VERSION"
-          else
-            .github/scripts/release.sh parse-version moq-ffi
-          fi
+        run: .github/scripts/release.sh parse-version moq-ffi
 
   build:
     name: Build moq-ffi (${{ matrix.target }})
@@ -226,7 +221,7 @@ jobs:
     name: Publish to Go module mirror
     needs: [package, parse-version]
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
+    if: github.ref_type == 'tag'
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -263,7 +258,7 @@ jobs:
     name: Publish dry-run
     needs: [package, parse-version]
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.ref_type != 'tag'
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6

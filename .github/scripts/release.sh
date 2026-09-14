@@ -23,18 +23,30 @@ set -euo pipefail
 
 # Parse a SemVer version from GITHUB_REF given a tag prefix.
 # Writes version=<ver> to $GITHUB_OUTPUT.
+#
+# Off a tag (the nightly and manual dry-runs of a release workflow), the
+# version is whatever the crate is at: rs/<prefix>/Cargo.toml.
 parse_version() {
     local prefix="$1"
     local ref="${GITHUB_REF#refs/tags/}"
+    local version
 
-    if [[ "$ref" =~ ^${prefix}-v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?)$ ]]; then
-        local version="${BASH_REMATCH[1]}"
-        echo "version=${version}" >>"$GITHUB_OUTPUT"
+    if [[ "$GITHUB_REF" != refs/tags/* ]]; then
+        local manifest="rs/${prefix}/Cargo.toml"
+        version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$manifest" | head -n1)
+        if [[ -z "$version" ]]; then
+            echo "Could not read version from $manifest" >&2
+            exit 1
+        fi
+        echo "Using version from $manifest (dry-run): ${version}"
+    elif [[ "$ref" =~ ^${prefix}-v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?)$ ]]; then
+        version="${BASH_REMATCH[1]}"
         echo "Parsed version: ${version}"
     else
         echo "Tag format not recognized: $ref (expected ${prefix}-v<semver>)" >&2
         exit 1
     fi
+    echo "version=${version}" >>"$GITHUB_OUTPUT"
 }
 
 # Find the tag immediately before the current one (by version sort order).

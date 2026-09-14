@@ -4,9 +4,13 @@ on:
   push:
     tags:
       - "moq-relay-v*"
+  # Dry-run: build everything, publish nothing. Nightly calls every release
+  # workflow this way so a broken build surfaces before the tag is cut.
+  workflow_call:
+  workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: moq-relay-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
@@ -185,6 +189,7 @@ jobs:
   release:
     name: Release
     needs: [build, build-tarball-macos, build-windows]
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
