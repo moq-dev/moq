@@ -198,8 +198,8 @@ moq auth serve --listen 127.0.0.1:4440 \
 
 Policy runs in this order and stops at the first that applies:
 
-1. A `jwt` in the query is verified against `--key <file>` or \`--key-dir
-   <dir>` (by `kid`, read per request so rotation needs no restart). Its
+1. A `jwt` in the query is verified against `--key FILE` or `--key-dir DIR`
+   (by `kid`, read per request so rotation needs no restart). Its
    claims are the grant and its `root` must equal the dialed path. A
    malformed, expired, or unknown-key token is refused; it never falls
    through to the anonymous rules.
@@ -213,7 +213,7 @@ Every grant carries `--tier`, a `revalidate` cadence (`--revalidate`, default
 one minute), and an `expires`: the token's `exp`, the certificate's notAfter,
 or `--expires` (default one day) when neither has one.
 
-`--limit-token <n>` and `--limit-remote <n>` cap live sessions per token and
+`--limit-token N` and `--limit-remote N` cap live sessions per token and
 per remote address (port dropped, IPv4-mapped IPv6 folded), counted from
 `connect` and `end` by session id. The cap is a nuisance limit, not a security
 boundary: a relay that dies without an `end` holds its slots until they miss
@@ -229,12 +229,12 @@ its own.
 
 | Relay flag | `moq auth serve` |
 | --- | --- |
-| `--auth-key <file>` | `--key <file>` |
-| `--auth-key-dir <dir>` | `--key-dir <dir>` |
-| `--auth-public <prefix>` | `--public-publish '<prefix>/**' --public-subscribe '<prefix>/**'` |
+| `--auth-key FILE` | `--key FILE` |
+| `--auth-key-dir DIR` | `--key-dir DIR` |
+| `--auth-public PREFIX` | `--public-publish 'PREFIX/**' --public-subscribe 'PREFIX/**'` |
 | `--auth-public-publish` / `--auth-public-subscribe` | `--public-publish` / `--public-subscribe`, as patterns |
-| `--auth-public-api <url>` | your own server answering the contract |
-| `--auth-mtls-tier <label>` | `--tier <label>` (one tier per server) |
+| `--auth-public-api URL` | your own server answering the contract |
+| `--auth-mtls-tier LABEL` | `--tier LABEL` (one tier per server) |
 | `listen.tls.root` alone admitting a peer unscoped | `--mtls-publish '**' --mtls-subscribe '**'` |
 | `--auth-api` (token or proxy mode), `Cache-Control` | `--auth-url` pointed at any server answering the contract; `revalidate` and `expires` in the grant |
 | `--auth-domain` | your server reads `server_name` and decides |
