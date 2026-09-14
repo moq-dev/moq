@@ -4,43 +4,51 @@
 
 TypeScript and Rust publishers and subscribers interoperate over encrypted MoQ broadcasts while every relay, cache, and control plane remains unable to recover content.
 
-Every application payload and semantic track name is confidential and authenticated. MoQ still exposes the outer broadcast path, opaque physical track names, group and frame structure, timestamps, sizes, and traffic patterns; padding and metadata-flow confidentiality are out of scope.
+Every application payload and semantic track name is confidential and authenticated. MoQ still exposes the outer broadcast path including the epoch, opaque physical track names, group and frame structure, timestamps, sizes, and traffic patterns; padding and metadata-flow confidentiality are out of scope.
 
 ## Plan
 
+The contract is [draft-lcurley-moq-e2ee](/drafts/draft-lcurley-moq-e2ee.md), profile `moq-e2ee-00`, with `drafts/moq-e2ee-00.json` as the shared primitive vectors. It starts from IETF Secure Objects where the object model maps exactly, specifies the moq-lite and datagram bindings that draft does not cover, and records intentional differences from SFrame and the experimental `moq-secure` format linked from [#3023](https://github.com/moq-dev/moq/issues/3023).
+
 ### Security boundary
 
-- The CDN, relay, cache, recorder, and any platform control plane are actively untrusted for content. Authorized publisher and subscriber endpoints are trusted; sender authenticity against another endpoint holding the broadcast secret is not a first-version goal.
-- Applications distribute credentials over their own authenticated channel. MoQ announcements, catalogs, paths, relay authorization, and platform APIs never distribute or authenticate content keys.
+- The CDN, relay, cache, recorder, and any platform control plane are actively untrusted for content. Authorized publisher and subscriber endpoints are trusted; sender authenticity against another endpoint holding the broadcast secret is not a goal.
+- Applications distribute `(context, kid, secret)` credentials over their own authenticated channel. MoQ announcements, catalogs, paths, relay authorization, and platform APIs never distribute or authenticate content keys.
 - E2EE is an explicit per-broadcast mode with no plaintext fallback. Authentication failure ends a grouped track with a typed error; a bad datagram is dropped with a typed event.
-- Receivers keep a bounded at-most-once window as operational duplicate suppression. The AEAD identity and generation rules provide the security boundary; relays may still delay, reorder, suppress, or replay ciphertext outside a receiver's retained window.
+- Datagram receivers keep a bounded sliding window as operational duplicate suppression. Grouped frames need none: the transport delivers each frame of a group once at its index. The AEAD identity and epoch rules are the security boundary; relays may still delay, reorder, suppress, or replay ciphertext outside that window.
 
-### Keys and object identity
+### Epoch and identity
 
-- The application supplies an immutable `(profile, broadcast context, generation, KID, broadcast secret)` credential. The secret is 32 bytes from a cryptographically secure random generator, never a password or other guessable input. One secret authorizes the whole broadcast; HKDF-SHA-256 derives separate AES-128-GCM keys for each physical track and for grouped-frame versus datagram domains.
-- Rotation starts a new broadcast generation. A generation and KID never change in place, and every publisher restart or replacement that can reset transport sequence numbers requires a new generation. The application pins the authorized generation, so a relay-replayed catalog or announcement is never a freshness authority.
-- A grouped frame uses the 96-bit nonce `uint64_be(group ID) || uint32_be(frame ID)`. A datagram uses its 64-bit sequence with frame ID zero under the separate datagram key domain. AES-GCM's internal block counter is not the frame ID; implementations use the standard AEAD API and fail at the strictest interoperable identity bound. Current TypeScript rejects before an ID exceeds `Number.MAX_SAFE_INTEGER`, and every implementation rejects before the 32-bit frame ID, AEAD invocation limit, or per-key plaintext-byte limit is exhausted.
-- Retransmission and cache replay reuse the original ciphertext. Re-encrypting different bytes at an existing `(credential, track, domain, group, frame)` identity is forbidden. No random per-group salt or per-frame KID header is carried.
-- The profile authenticates its version and every immutable property that has one canonical end-to-end value in both moq-lite and MoQ Transport. The broadcast context, generation, KID, full physical track name, domain, group, and frame are bound through derivation or the nonce; rewritten timestamps and mutable routing properties are excluded.
+- Every publisher instance mints an epoch, a UUIDv7 in lowercase text, and publishes at `<name>.e2ee/<epoch>`. The epoch is an input to every HKDF derivation, so a restart, takeover, or explicit group sequence cannot repeat a nonce under a key: nothing is persisted across instances and no generation counter is redistributed. Subscribers discover instances under the `<name>.e2ee/` prefix and take the greatest epoch, which sorts newest; a known full path carries its epoch in the last segment.
+- The epoch is untrusted and unauthenticated. A wrong epoch fails authentication and a withheld one denies service; neither can make a nonce repeat, because only the publisher instance chooses what it encrypts under. This is the same trust a cache needs to serve the right instance, and it is deliberately e2ee-only: plaintext hang keeps its current paths.
+- A protected path never ends in `.hang`. The plaintext format sits inside the name, as in `meeting.hang.e2ee/<epoch>`, so `**/*.hang` matchers, HLS and DASH export, and any plaintext player never touch ciphertext; everything under a `.e2ee` node is protected.
+- One 32-byte secret authorizes the whole broadcast; HKDF-SHA-256 derives separate AES-128-GCM keys for each physical track and for grouped-frame versus datagram domains. A grouped frame uses the 96-bit nonce `uint64_be(group) || uint32_be(frame)`; a datagram uses its sequence with frame zero under the datagram domain. Empty AAD: every immutable end-to-end field is in the HKDF info or the nonce.
+- Within an instance, group and datagram sequences are allocated monotonically and frames are numbered in write order, which is the whole reuse rule. There is no ciphertext retention or retransmission API: relays forward bytes unchanged, and an application that needs to resend encrypts nothing twice because it never gets the same identity twice.
+- Per-key limits are `2^24` AEAD invocations (failed opens included) and `2^36` plaintext bytes. Datagram plaintext is capped at `1200 - 24 - 16` bytes against the widest moq-lite header; a publisher cannot see the Subscribe ID each hop encodes, so the library does not pretend to budget it.
+
+### Library shape
+
+The Rust and TypeScript cores expose the same surface, and nothing else:
+
+- `Credential { context, kid, secret }` is what the application distributes. It is cheap to clone, never serializes the secret, and redacts it from `Debug`.
+- `credential.generation(epoch)` binds a discovered or minted epoch. `Generation` owns `name(semantic)` for opaque names (any string, tracks or path segments alike), `produce(track)` and `consume(track)` for protected `moq-net` tracks, and a `mint()` helper that returns a fresh UUIDv7.
+- `track::Producer` appends groups and datagrams and allocates identities; `track::Consumer` yields groups and datagram events. `group::Producer` and `group::Consumer` wrap the whole group lifecycle so every AEAD call has the canonical physical name and transport identity.
+- Errors are the draft's typed codes plus the transport's. Nothing catalog-, hang-, or MSF-shaped lives here: a catalog is a track under a derived name, and compression is the catalog owner's job.
+- Stateless `seal`/`open` primitives with caller-chosen identities, HKDF labels and info builders, raw key bytes, and process-global claims are not public. The vectors are tested inside each core.
 
 ### Application and platform shape
 
 - Deterministic secret-derived physical names hide catalog, codec, role, quality, timeline, and custom-track semantics. Authorized clients derive the encrypted catalog track name, then learn the remaining opaque names from its decrypted contents. Every catalog representation is encrypted; Rust publishers must not emit a plaintext MSF catalog.
-- Protected broadcasts use an outer `.e2ee` suffix such as `foo.hang.e2ee`, deliberately not `.hang`. The suffix is an untrusted application convention for exclusion and discovery, not a key identifier or cryptographic assertion.
-- A platform that forwards and meters protected bytes must never preview, record, archive, transmux, transcode, transcribe, compose, or inspect them, rejecting those paths before opening a processing session or writing product state. Applications needing those operations terminate E2EE outside the platform. The moq.pro (downstream) exclusion classifier and dashboard work build on that rule and stay downstream.
+- A platform that forwards and meters protected bytes must never preview, record, archive, transmux, transcode, transcribe, compose, or inspect them, rejecting those paths before opening a processing session or writing product state. Applications needing those operations terminate E2EE outside the platform. The moq.pro (downstream) exclusion classifier and dashboard work build on the `.e2ee` rule and stay downstream.
 - The first proof covers browser TypeScript and native Rust publication and playback in both directions, with grouped audio and video over both moq-lite and MoQ Transport. Shared vectors cover groups and moq-lite datagrams; MoQ Transport has no datagram delivery.
-
-The contract is [draft-lcurley-moq-e2ee](/drafts/draft-lcurley-moq-e2ee.md) and
-`drafts/moq-e2ee-01.json`. It starts from IETF Secure Objects where its object
-model maps exactly, specifies the moq-lite and datagram bindings that draft
-does not cover, and records intentional differences from SFrame and the
-experimental `moq-secure` format linked from [#3023](https://github.com/moq-dev/moq/issues/3023).
 
 ## Quests
 
-- [TypeScript E2EE core](/quest/m2/e2ee/typescript.md) - a reusable TypeScript
-  layer protecting groups, datagrams, catalogs, and track identities, without
-  putting keys in `@moq/net`
+- [Rust E2EE core on moq-e2ee-00](/quest/m2/e2ee/rust.md) - reshape the merged
+  `moq-e2ee` crate to the epoch profile and the shared library surface, and retire
+  the `moq-e2ee-01` vectors
+- [TypeScript E2EE core](/quest/m2/e2ee/typescript.md) - the `@moq/e2ee` package
+  mirroring the Rust surface, with WebCrypto in a serial pump
 - [Rust protected publisher seams](/quest/m2/e2ee/rust-publish.md) - Rust media
   and catalog publishers accept opaque physical names and emit no plaintext
   semantic catalog in E2EE mode

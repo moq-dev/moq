@@ -2,16 +2,19 @@
 
 ## Goal
 
-A reusable TypeScript E2EE layer protects MoQ groups, datagrams, catalogs, and opaque track identities with the shared profile.
-
-It runs in browser and server JavaScript without putting keys or crypto policy in `@moq/net`.
+`@moq/e2ee` implements profile `moq-e2ee-00` in browser and server JavaScript
+with the library shape in the [questline](/quest/m2/e2ee/README.md), mirroring
+the Rust crate name for name, without putting keys or crypto policy in `@moq/net`.
 
 ## Plan
 
-- Add a package above `@moq/net` that owns the credential, name derivation, track/domain keys, group frame ordinals, datagram sequences, duplicate window, and typed authentication outcomes. Its public API accepts raw secret bytes or a suitable nonextractable WebCrypto key without serializing secrets.
-- Use WebCrypto AES-GCM and HKDF in a bounded ordered asynchronous pump. Propagate backpressure, cancellation, encoder failure, and authentication failure explicitly; never reorder media, grow an unbounded promise queue, or fall back to plaintext.
-- Measure 20 ms Opus overhead, browser encryption latency, and queue depth to choose and document the bounded pump defaults without changing the wire profile.
-- Wrap whole group and datagram lifecycles so the transform always has the canonical physical track and final transport identity. Do not add a context-free payload callback to `@moq/net`.
-- Expose deterministic opaque-name and encrypted-catalog primitives that publish every application catalog representation under protected names. Suppress semantic names outside ciphertext.
-- Pass every vector in `drafts/moq-e2ee-01.json` against [draft-lcurley-moq-e2ee](/drafts/draft-lcurley-moq-e2ee.md), then cover asynchronous ordering, queue saturation, protected payload ceilings, group replacement, retransmission, bad-group termination, and bad-datagram events. Exercise grouped tracks on both transports and datagrams on moq-lite.
-- Test lifecycle requirements beyond the stateless vectors: same-generation restart refusal, ciphertext-only retransmission, per-key invocation exhaustion, bounded duplicate suppression, and application profile/generation/KID pinning. Passing the primitive vectors alone is not profile conformance.
+- Add the package above `@moq/net`. `Credential` accepts a 32-byte secret or a nonextractable HKDF `CryptoKey` with `deriveBits` usage, rejects extractable keys, and never serializes the secret. `credential.generation(epoch)` returns a `Generation` with `name()`, `produce()`, `consume()`, and a `mint()` that returns a lowercase UUIDv7 from `Date.now()` plus `crypto.getRandomValues`.
+- Mirror the Rust modules: `Track.Producer`, `Track.Consumer`, `Group.Producer`, `Group.Consumer`, `Datagram.Event`, and a `Failure` whose `code` is the draft's typed set. No catalog helpers, no exported constants beyond the profile limits an application sizes payloads with, no stateless `protect`/`open` with caller-chosen identities, and no test-only methods on public classes.
+- WebCrypto AES-GCM is async, so each producer and consumer runs a serial pump: one AEAD call in flight, completions in submit order, a bounded waiter queue that throws when full. Depth one keeps frame ordinals equal to the inner `@moq/net` write order without reservation sets; raise it only when a measured capture burst needs it. Propagate backpressure, cancellation, and authentication failure explicitly; never reorder media or fall back to plaintext.
+- Identity state is two counters per key (invocations, plaintext bytes) and one monotonic sequence per track. Check payload size before taking a frame ordinal so a rejected write never burns an identity. Datagram receivers keep a 1024-bit sliding bitmask marked only after a successful open; failed opens count against the key; a grouped authentication failure closes the ordered track.
+- Pass every vector in `drafts/moq-e2ee-00.json` against [draft-lcurley-moq-e2ee](/drafts/draft-lcurley-moq-e2ee.md), then cover pump ordering, saturation, and cancellation, protected payload ceilings, monotonic allocation, per-key exhaustion, bounded datagram suppression, bad-group termination, bad-datagram events, and a new epoch authenticating while the old keys do not. Exercise grouped tracks on both transports and datagrams on moq-lite via `insertDatagram`.
+- Add the package to `doc/lib/js/index.md` and the workspace; leave it unpublished until the browser components consume it.
+
+## Required
+
+- [Rust E2EE core on moq-e2ee-00](/quest/m2/e2ee/rust.md) - settles the surface this package mirrors and retires the `-01` vectors
