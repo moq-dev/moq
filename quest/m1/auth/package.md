@@ -78,10 +78,6 @@ Public API: new `moq-auth` and `@moq/auth`; `moq-token`, `moq-token-cli`,
 and `@moq/token` deleted; `moq token` becomes `moq auth`; claims change
 shape. Wire: none.
 
-## Closes
-
-- [#3046](https://github.com/moq-dev/moq/issues/3046) - close this issue when the quest finishes
-
 ## Related
 
 - [Matcher](/quest/m2/path-patterns/matcher.md) - the pattern crate the

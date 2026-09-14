@@ -82,7 +82,6 @@ additive). Wire: none.
 - [#3087](https://github.com/moq-dev/moq/issues/3087) - close this issue when the quest finishes
 - [#3603](https://github.com/moq-dev/moq/issues/3603) - close this issue when the quest finishes
 - [#3058](https://github.com/moq-dev/moq/issues/3058) - close this issue when the quest finishes
-- [#3605](https://github.com/moq-dev/moq/issues/3605) - close this issue when the quest finishes
 
 ## Related
 

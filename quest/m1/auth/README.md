@@ -105,7 +105,8 @@ Decisions settled while planning, recorded so review does not relitigate them.
   secret the relay minted for itself, not a peer identity a server knows.
 - **moq-token retires into moq-auth.** Claims become pattern unions; keys,
   signing, and verification move over; `moq auth generate|sign|verify`
-  replaces `moq token` and the standalone binary, closing #3046.
+  replaces `moq token` and the standalone binary, the end state #3046
+  (closed as not planned) weighed.
 
 ### Downstream
 
