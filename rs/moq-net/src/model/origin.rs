@@ -1531,6 +1531,18 @@ impl FrontState {
 		route.hops.iter().any(|hop| self.excluded.contains_key(hop))
 	}
 
+	/// Whether the front is a broadcast published in this process and still
+	/// announced. Only a remote source calls this (a local one shares the empty
+	/// chain and splices instead), and it can never win: the process publishing a
+	/// path is that path's origin, so a remote copy is our own content reflected by
+	/// a peer that carries no hop ids, which `excluded` cannot recognize when the
+	/// peer is anonymous, or an unrelated publisher that must not reach our
+	/// subscribers in place of what we are producing. An unannounced local source
+	/// (cached content reachable by exact path) is not a claim on the path.
+	fn holds_local_publisher(&self) -> bool {
+		self.publisher.is_none() && self.routes.iter().any(|r| r.route.announce)
+	}
+
 	/// Narrow `candidates` to the routes clean for every peer currently reading the
 	/// shared front, unless that would leave nothing.
 	///
@@ -1950,7 +1962,10 @@ fn same_publisher(a: Option<Origin>, b: Option<Origin>) -> bool {
 /// chain that does not lead back through a peer this front is already exposed to
 /// (see [`FrontState::taints_a_reader`]): such a source is our own broadcast
 /// reflected by a peer that cannot detect the loop itself, and letting it evict the
-/// front is how a publish direction ends up withdrawing its own announce.
+/// front is how a publish direction ends up withdrawing its own announce. A front
+/// held by a local publisher is never taken over at all (see
+/// [`FrontState::holds_local_publisher`]): the exposure check needs the reflecting
+/// peer to have an identity, and an anonymous peer's echo has none.
 ///
 /// `may_take_over` is the caller's third gate: [`run_source`] clears it once this
 /// source has been displaced, so a route that already lost the path stands by
@@ -1984,7 +1999,7 @@ fn attach_source(
 				});
 				s.reselect(carrying);
 				joined = Some(id);
-			} else if !may_take_over || !route.announce || s.taints_a_reader(&route) {
+			} else if !may_take_over || !route.announce || s.taints_a_reader(&route) || s.holds_local_publisher() {
 				return Attach::Parked(existing.state.clone());
 			} else {
 				// New content at a live path: the newest publisher wins it. Closing
@@ -5476,6 +5491,59 @@ mod tests {
 
 		source_a1.finish();
 		source_a2.finish();
+	}
+
+	/// A locally published broadcast holds its path against any remote source. A
+	/// client that shares one origin between its publish and subscribe halves sees
+	/// its own announce echoed back by a relay that does no loop detection, and an
+	/// anonymous relay's echo carries an UNKNOWN first hop, so the exposure-based
+	/// reflection check (`excluded`) cannot recognize it. Without this rule the echo
+	/// evicts the local publisher and the client ends up subscribing to the relay
+	/// for its own broadcast.
+	#[tokio::test]
+	async fn test_remote_source_cannot_displace_a_local_publisher() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+
+		// Published in this process: no hop chain.
+		let mut local = origin.create_broadcast("test", announce()).unwrap();
+		settle().await;
+		let face = announced.assert_next_some("test");
+
+		// The echo, as an anonymous relay reflects it.
+		let echo = OriginList::try_from(vec![Origin::UNKNOWN]).unwrap();
+		let mut remote = origin.create_broadcast("test", announce().with_hops(echo)).unwrap();
+		settle().await;
+		settle().await;
+		announced.assert_next_wait();
+		assert!(
+			consumer.get_broadcast("test").unwrap().is_clone(&face),
+			"the local publisher must keep the path"
+		);
+		assert!(consumer.get_broadcast("test").unwrap().route().hops.is_empty());
+
+		// The parked remote leaving changes nothing.
+		remote.finish();
+		settle().await;
+		settle().await;
+		announced.assert_next_wait();
+
+		// Once the local publisher ends, the path is free for a remote source again.
+		local.finish();
+		settle().await;
+		settle().await;
+		announced.assert_next_none("test");
+		let echo = OriginList::try_from(vec![Origin::UNKNOWN]).unwrap();
+		let _remote = origin
+			.create_broadcast("test", announce().with_hops(echo.clone()))
+			.unwrap();
+		settle().await;
+		settle().await;
+		announced.assert_next_some("test");
+		assert_eq!(consumer.get_broadcast("test").unwrap().route().hops, echo);
 	}
 
 	/// A repricing is not new content: a standby source must not use a cost-only
