@@ -67,7 +67,8 @@ gain flags. Wire: none.
 
 ## Required
 
-- [Layout](/quest/m3/cat/layout.md) - `cat` sits beside `jwt`
+- [Package](/quest/m1/auth/package.md) - supplies `moq_auth::jwt`, which
+  `cat` sits beside
 - [Setup token](/quest/m3/cat/setup-token.md) - the token reaches the
   server's request
 - [Serve](/quest/m1/auth/serve.md) - the server this extends

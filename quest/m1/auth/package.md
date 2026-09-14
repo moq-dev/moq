@@ -45,12 +45,15 @@ lands the types and the move, and keeps the relay compiling until
   meter passes `Counters::default()`. `http://` is refused for a
   non-loopback host at construction, `https://` presents the given client
   identity, and `unix://` speaks HTTP over the socket.
-- Move `rs/moq-token` in: `Claims { root, publish: Patterns, subscribe:
-  Patterns, expires, issued }` serialized as `root`, `publish`, `subscribe`,
-  `exp`, `iat`; the old `put` and `get` names are unknown fields and fail
-  verification. `Key`, `Jwk`, `KeyId`, `Algorithm`, the key set, and
-  `authorize` come over with their names, returning pattern residuals through
-  `moq_pattern`. `js/token` becomes `js/auth` with the same zod shapes plus
+- Move `rs/moq-token` in under `moq_auth::jwt`, so a second token format
+  (a [Common Access Token](/quest/m3/cat/README.md)) gets a sibling module
+  instead of prefixed names while the contract types stay at the root:
+  `jwt::Claims { root, publish: Patterns, subscribe: Patterns, expires,
+  issued }` serialized as `root`, `publish`, `subscribe`, `exp`, `iat`; the
+  old `put` and `get` names are unknown fields and fail verification.
+  `Key`, `Jwk`, `KeyId`, `Algorithm`, the key set, and `authorize` come over
+  with their names under `jwt`, returning pattern residuals through
+  `moq_pattern`. `@moq/auth` stays flat; nothing else lands in JS. `js/token` becomes `js/auth` with the same zod shapes plus
   the request and grant schemas, so a Worker or a Node server validates a
   request and builds a grant with one import. The cross-language vectors
   in `js/token/src/interop.test.ts` move and gain a request and a grant.

@@ -40,15 +40,13 @@ Boundaries decided while planning:
 
 ## Plan
 
-Order: the module split first so `cat` has a home beside `jwt`; the wire
-next so a token reaches the auth server; verification; then our clients
-present one. Everything requires the m1 auth line, which owns the `Request`
-this rides and the server that answers it.
+Order: the wire first so a token reaches the auth server; verification;
+then our clients present one. Everything requires the m1 auth line, which
+owns the `Request` this rides, the server that answers it, and the
+`moq_auth::jwt` module `cat` sits beside.
 
 ## Quests
 
-- [Layout](/quest/m3/cat/layout.md) - the JWT moves under `moq_auth::jwt`
-  so each token format is one module
 - [Setup token](/quest/m3/cat/setup-token.md) - the SETUP `AUTHORIZATION
   TOKEN` option is decoded on both IETF stacks, reaches `moq_auth::Request`
   as `token`, and is refused on every other message
