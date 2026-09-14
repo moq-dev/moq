@@ -28,7 +28,7 @@ export const PeerSchema = z.object({
 	/** SHA-256 of the leaf certificate, hex. */
 	fingerprint: z.string(),
 	/** The certificate's notAfter, as unix seconds. */
-	expires: z.optional(z.number()),
+	expires: z.optional(z.int()),
 	/** The issuer's distinguished name. */
 	issuer: z.string(),
 });
@@ -37,9 +37,9 @@ export type Peer = z.infer<typeof PeerSchema>;
 /** Byte totals for a session, both directions from the relay's point of view. */
 export const BytesSchema = z.object({
 	/** Bytes the relay sent to the peer. */
-	sent: z.number(),
+	sent: z.int().check(z.nonnegative()),
 	/** Bytes the relay received from the peer. */
-	received: z.number(),
+	received: z.int().check(z.nonnegative()),
 });
 export type Bytes = z.infer<typeof BytesSchema>;
 
@@ -112,10 +112,10 @@ export const GrantSchema = z
 		subscribe: z.optional(PatternListSchema),
 		/** The path the patterns are relative to, replacing the dialed one. Absent means the dialed path. */
 		root: z.optional(z.string()),
-		/** When the session closes, as unix seconds. */
-		expires: z.optional(z.number()),
-		/** How long until the relay asks again, in seconds. Zero would be a tight loop. */
-		revalidate: z.optional(z.number().check(z.positive())),
+		/** When the session closes, as whole unix seconds. */
+		expires: z.optional(z.int()),
+		/** How long until the relay asks again, in whole seconds. Zero would be a tight loop. */
+		revalidate: z.optional(z.int().check(z.positive())),
 		/** An opaque label handed to stats, so traffic can be bucketed. */
 		tier: z.optional(z.string()),
 	})

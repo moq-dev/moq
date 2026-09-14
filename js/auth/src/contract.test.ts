@@ -60,5 +60,8 @@ test("a grant round trips and is validated", () => {
 	expect(() => GrantSchema.parse({})).toThrow(/name something/);
 	expect(() => GrantSchema.parse({ publish: ["**"], revalidate: 60 })).toThrow(/must expire/);
 	expect(() => GrantSchema.parse({ publish: ["**"], expires: 4102444800, revalidate: 0 })).toThrow();
+	// The Rust side reads whole seconds; a fraction would be refused there.
+	expect(() => GrantSchema.parse({ publish: ["**"], expires: 4102444800, revalidate: 0.5 })).toThrow();
+	expect(() => GrantSchema.parse({ publish: ["**"], expires: 4102444800.5 })).toThrow();
 	expect(() => GrantSchema.parse({ publish: ["a/**/b/**"] })).toThrow();
 });
