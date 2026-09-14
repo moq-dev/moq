@@ -30,7 +30,7 @@ publish grant.
 
 - [Advertise](/quest/m2/wildcard/advertise.md) - supplies the wildcard message
   and authorization point this capability separates
-- [Token SDKs](/quest/m2/path-patterns/token-sdk.md) - supplies the published
-  v1 claim writers this extension changes
-- [Relay auth](/quest/m2/path-patterns/relay-auth.md) - supplies the v1 origin
-  scope and authorization readers this extension changes
+- [Package](/quest/m1/auth/package.md) - supplies the pattern claim writers
+  this extension changes
+- [Origin scopes](/quest/m2/path-patterns/origin.md) - supplies the
+  pattern-scoped origin handles the advertise scope extends

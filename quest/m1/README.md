@@ -16,6 +16,7 @@ with the current dev tree before starting.
 
 ## Quests
 
+- [Auth server](/quest/m1/auth/README.md) - one JSON request per connection through `moq-auth`, `--auth-url` or `--auth-public` as the whole relay configuration, `moq auth serve` carrying the old policy, mTLS a fact and never a grant, moq-token retired
 - [FFI read lanes](/quest/m1/api-ffi-read-lanes.md) - pending group and datagram reads progress independently on one subscription
 - [Connection recovery](/quest/m1/api-connection-recovery.md) - refreshed URLs recover shared/private handles under one terminal-state contract
 - [Relay embedding](/quest/m1/api-relay-embedding.md) - custom routes retain the owner of listeners, workers, and shutdown
@@ -74,7 +75,6 @@ with the current dev tree before starting.
 - [Config provenance](/quest/m1/config-provenance.md) - the merge records which source set a value, so TOML survives CLI defaults and empty lists, and env outranks the file
 - [Cluster construction](/quest/m1/cluster-construction.md) - construct one stable origin after its cache settings are known, deleting the rebuilding builder
 - [Abort on drop](/quest/m1/abort-on-drop.md) - one abort-on-drop task guard per crate, replacing five copies of the same Drop
-- [#3046](/quest/m1/3046-fold-moq-token-into-moq-token-via-a-usage-executable-view.md) - Fold moq-token into moq token via a Usage executable view
 - [#3126](/quest/m1/3126-moq-bench-every-readme-example-fails-to-parse-and.md) - moq-bench: every README example fails to parse, and cumulative latency percentiles cannot be windowed to steady state
 - [#816](/quest/m1/816-expose-transportconfig.md) - QUIC flow-control windows on quic::Client and quic::Server, applied or refused per backend
 - [#3188](/quest/m1/3188-make-every-blocking-go-operation-cancellable-with-context.md) - Make every blocking Go operation cancellable with context.Context

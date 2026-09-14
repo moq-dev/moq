@@ -2,7 +2,7 @@
 
 ## Goal
 
-Every predicate over a MoQ broadcast path uses one versioned matcher. Tokens,
+Every predicate over a MoQ broadcast path uses one matcher. Tokens,
 origin scopes, announce interests, public access rules, and wildcard
 advertisements can express `pid/*/chat` and `**/*.hang` without maintaining
 competing glob dialects.
@@ -40,18 +40,18 @@ tuple everywhere rules overlap; equal patterns form the same tier.
 ### Ownership and compatibility
 
 One dependency-free Rust crate and one TypeScript package own the grammar and
-algebra; `moq-net`, `moq-token`, and their JS consumers re-export them. Golden
+algebra; `moq-net`, `moq-auth`, and their JS consumers re-export them. Golden
 cross-language vectors, exhaustive small cases, and fuzzing prevent semantic
 drift at the authorization boundary. Matching stays linear and inherits
 `Path::MAX_PARTS` (32), which also bounds residual expansion.
 
-Every persisted or wire policy carries a version. Missing `v` is v0 prefix
-semantics forever. V1 uses exact patterns and rejects legacy and v1 grant
-fields mixed in one object. Existing state migrates without changing access:
-`foo` becomes `foo/**` and an empty prefix becomes `**`. New SDKs, CLIs, and
-APIs default to v1 in a breaking major release; legacy minting is explicit.
-The moq.pro (downstream) token minting, public-access migration, scoped-key,
-and rule-editor work consume these versioned shapes downstream.
+Grants and claims carry no version. The [Auth server](/quest/m1/auth/README.md)
+line makes `moq-auth` read patterns only: `foo` means exactly `foo`, a
+subtree is `foo/**`, and an unversioned prefix credential fails verification.
+Translating the prefix credentials a deployment already issued is that
+deployment's job at its own edge for a deprecation window, which is what
+moq.pro (downstream) does. A wire message that carried prefixes keeps them on
+the protocol versions that defined them; only new versions carry patterns.
 
 The syntax follows Ant-style path patterns without `?`, classes, or braces.
 NATS subjects motivate segment wildcards and reserved wildcard bytes; Vault
@@ -67,12 +67,6 @@ represent `pid/*/chat`.
   implements the grammar and exact algebra
 - [Origin scopes](/quest/m2/path-patterns/origin.md) - literal origin roots
   carry arbitrary pattern unions without widening authorization
-- [Claims](/quest/m2/path-patterns/claims.md) - versioned token and JWK scopes
-  preserve v0 and enforce exact v1 grants
-- [Token SDKs](/quest/m2/path-patterns/token-sdk.md) - published libraries and
-  CLIs default new minting to v1
-- [Relay auth](/quest/m2/path-patterns/relay-auth.md) - relay token, public,
-  static, and revalidation paths enforce patterns
 - [Pattern interest](/quest/m2/path-patterns/interest.md) - moq-lite-06 carries
   a full pattern in ANNOUNCE_REQUEST
 
@@ -80,5 +74,5 @@ represent `pid/*/chat`.
 
 - [Wildcard advertisements](/quest/m2/wildcard/README.md) - routing adopts the
   matcher while retaining its own cost, pool, refusal, and resolution work
-- [mTLS explicit scope](/quest/m2/auth-api/mtls-scope.md) - an mTLS grant
-  uses the same versioned publish and subscribe pattern sets
+- [Auth server](/quest/m1/auth/README.md) - pattern claims and grants at
+  the authorization boundary, prefix-shaped until Origin scopes lands

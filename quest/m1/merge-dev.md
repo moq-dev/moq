@@ -19,6 +19,7 @@ lands.
 
 ## Required
 
+- [Auth server](/quest/m1/auth/README.md) - the breaking auth contract, flags, claims, and package names the release moq.pro adopts must carry
 - [External API proof](/quest/m1/api-release-proof.md) - the packaged consumer fixture and explicit fix/deferral decisions must be recorded before merge
 - [Archive](/quest/m1/archive/README.md) - moq.pro needs archive-backed recording on the release dev produces
 - [Announce handle](/quest/m1/announce-handle.md) - the origin surface the merge ships

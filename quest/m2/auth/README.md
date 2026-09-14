@@ -38,7 +38,7 @@ Decisions settled while planning, recorded so review does not relitigate them:
   union would shrink, the session closes `Unauthorized` exactly as expiry does
   today; when the union is unchanged the session continues and only that
   stream ends. Resizing a live session in place belongs to
-  [Relay auth](/quest/m2/path-patterns/relay-auth.md), which serves
+  [Origin scopes](/quest/m2/path-patterns/origin.md), which serves
   revalidation and token expiry from one path.
 - **A grant is publish prefixes, subscribe prefixes, and an expiry**, in the
   presenter's own root; the presenter never sees the relay-side root, and
@@ -102,8 +102,10 @@ ALPN.
 
 ## Related
 
-- [Relay auth](/quest/m2/path-patterns/relay-auth.md) - resizes a live session
+- [Origin scopes](/quest/m2/path-patterns/origin.md) - resizes a live session
   when the union shrinks, for revalidation and token expiry alike
+- [Auth server](/quest/m1/auth/README.md) - the request and grant a token
+  presented in band goes through
 - [Pattern interest](/quest/m2/path-patterns/interest.md) - moves the grant's
   prefixes to patterns along with ANNOUNCE_REQUEST
 - [Expiring media grants](/quest/m2/processor/grant-lease.md) - a worker's

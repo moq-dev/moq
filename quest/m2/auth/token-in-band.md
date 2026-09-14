@@ -40,7 +40,7 @@ AUTH-capable.
   public grant is held for a short deadline after SETUP for its first
   accepted AUTH before being refused, so an AUTH-capable client with tokens
   only in band gets in and a client that never presents anything is still
-  refused. `AuthParams::from_url` and `from_path_query` stay as the URL path.
+  refused. The URL query stays the connect-time credential in the `moq_auth::Request`.
 - The WebSocket 403 in [Connect auth race](/quest/m0/3532-connect-auth-race.md)
   keeps its meaning: a URL credential is still refused at connect on either
   arm, and an in-band refusal is an AUTH_ERROR after connect.
