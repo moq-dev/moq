@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
 ///
 /// The base catalog carries the media sections (`video`, `audio`, `text`), the optional
-/// `archive` (the segment index and any durable recording), and the data sections
+/// `archive` (the segment index and any durable recording), the optional `clock` (the
+/// broadcast's one wall-clock mapping), and the data sections
 /// (`json`, `binary`) for application tracks that aren't media.
 /// Applications extend it with their own root sections (e.g. `scte35`) by flattening
 /// this struct into their own with `#[serde(flatten)]`. The catalog does not deny unknown fields,
@@ -40,6 +41,16 @@ pub struct Catalog {
 	/// The broadcast's segment index and any durable archive, if the publisher offers one.
 	/// See [`Archive`](crate::catalog::Archive) and the [`timeline`](crate::timeline) module.
 	pub archive: Option<crate::catalog::Archive>,
+
+	/// The broadcast's one continuous clock, if the publisher exposes one.
+	///
+	/// `wall` is the wall-clock time of PTS zero in `timescale` units since the moq epoch
+	/// (2020-01-01); every media track and the archive index refer to this mapping after
+	/// timescale conversion. Independent of [`archive`](Self::archive): a live-only publisher
+	/// exposes its clock without creating a segment index. See
+	/// [`Clock`](crate::catalog::Clock).
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub clock: Option<crate::catalog::Clock>,
 
 	/// Text (caption/subtitle) track information with multiple renditions.
 	///
@@ -551,6 +562,46 @@ mod test {
 		// or every existing publisher's bytes change.
 		let output = Catalog::default().to_json().expect("failed to encode");
 		assert_eq!(output, r#"{"video":{"renditions":{}},"audio":{"renditions":{}}}"#);
+	}
+
+	#[test]
+	fn clock_roundtrips_at_the_root() {
+		let clock = crate::catalog::Clock::new(1_751_846_400_000_000).unwrap();
+		let catalog = Catalog {
+			clock: Some(clock),
+			..Default::default()
+		};
+
+		let json = catalog.to_json().expect("failed to encode");
+		assert!(json.contains(r#""clock":{"wall":1751846400000000"#), "{json}");
+		assert_eq!(Catalog::from_str(&json).expect("failed to decode").clock, Some(clock));
+	}
+
+	#[test]
+	fn clock_stays_off_the_wire_when_absent() {
+		// A catalog without a clock serializes exactly as before the section existed.
+		let output = Catalog::default().to_json().expect("failed to encode");
+		assert_eq!(output, r#"{"video":{"renditions":{}},"audio":{"renditions":{}}}"#);
+	}
+
+	#[test]
+	fn packaged_clock_fixture_decodes() {
+		// The canonical new shape: the root clock plus an archive without a wall field.
+		// A reader maps archive timestamps through the root clock after timescale conversion.
+		let json = include_str!("../../fixtures/catalog-clock.json");
+		let catalog = Catalog::from_str(json).expect("the packaged fixture must decode");
+
+		let clock = catalog.clock.expect("the fixture carries a root clock");
+		assert_eq!(clock.timescale, 1_000_000);
+
+		let archive = catalog.archive.expect("the fixture carries an archive");
+		assert_eq!(archive.track, "timeline.z");
+		assert_eq!(archive.timescale, 1000);
+
+		// Archive PTS 2000 (ms) lands 2s after the wall epoch, whatever the track timescale.
+		let expected = std::time::UNIX_EPOCH
+			+ std::time::Duration::from_millis(crate::catalog::MOQ_EPOCH_UNIX_MILLIS + 1_751_846_402_000);
+		assert_eq!(clock.wall_clock(2000, archive.timescale).unwrap(), expected);
 	}
 
 	#[test]

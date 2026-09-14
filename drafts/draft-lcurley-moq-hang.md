@@ -112,6 +112,7 @@ type Catalog = {
   "audio": AudioSchema | undefined,
   "video": VideoSchema | undefined,
   "archive": ArchiveSchema | undefined,
+  "clock": ClockSchema | undefined,
   "text": TextSchema | undefined,
   "json": JsonTracks | undefined,
   "binary": BinaryTracks | undefined,
@@ -126,7 +127,27 @@ For example, a chat entry should name a chat track, not carry individual chat me
 This way catalog updates are rare and a client MAY choose to not subscribe.
 The `json` and `binary` sections ({{data}}) are how a track like that is listed.
 
-This specification defines audio, video, and text media tracks, plus an optional `archive` entry ({{archive-catalog}}) naming the timeline track ({{timeline}}) that indexes their segments, and the application data tracks in {{data}}.
+This specification defines audio, video, and text media tracks, plus an optional `archive` entry ({{archive-catalog}}) naming the timeline track ({{timeline}}) that indexes their segments, an optional root `clock` entry ({{clock}}) mapping content time to wall time, and the application data tracks in {{data}}.
+
+## Clock {#clock}
+The catalog's root `clock` field is the broadcast's one continuous clock:
+
+~~~
+type ClockSchema = {
+  "wall": number,
+  "timescale": number | undefined,
+}
+~~~
+
+The `wall` field is the wall-clock time of PTS zero, in `timescale` units since the moq epoch, 2020-01-01T00:00:00Z.
+A consumer derives the wall-clock time of any media timestamp as `wall + pts` after converting that timestamp into this timescale, and Unix time by adding the epoch back (for HLS `EXT-X-PROGRAM-DATE-TIME` or DASH `availabilityStartTime`).
+Every media track and the archive index refer to this one mapping after timescale conversion; there are no competing wall epochs.
+
+The `timescale` field is the units per second for `wall`, defaulting to 1000000 (microseconds) when absent.
+A zero `timescale` is invalid, as is a `wall` outside the JSON-safe integer range; both are refused rather than truncated.
+
+The mapping is fixed for the broadcast and independent of `archive`: a live-only publisher exposes its clock without creating a segment index.
+A discontinuity marker is a delivery event, not a new epoch, and a system-clock adjustment never retimes the mapping.
 
 ## Video
 A video track contains the necessary information to decode a video stream.
@@ -423,7 +444,7 @@ A `snapshot` group covers a single value (plus any deltas), so its window spans 
 
 ### broadcast and timeline {#data-shared}
 The `broadcast` field carries the same meaning here as it does for a media rendition ({{field-broadcast}}).
-The `timeline` field advertises a companion timeline track indexing this track's groups, with the same `track` / `timescale` / `durationMax` / `wall` fields as the catalog's root `archive` entry ({{archive-catalog}}).
+The `timeline` field advertises a companion timeline track indexing this track's groups, with the same `track` / `timescale` / `durationMax` fields as the catalog's root `archive` entry ({{archive-catalog}}).
 
 ## Binary Fields {#binary}
 A decoder config field carrying raw bytes, notably `description` (an `AllowSharedBufferSource` in WebCodecs), is carried in the catalog as a hex string ({{!RFC4648, Section 8}}).
@@ -593,14 +614,12 @@ type TimelineSchema = {
   "track": string,
   "timescale": number | undefined,
   "durationMax": number | undefined,
-  "wall": number | undefined,
 }
 
 type ArchiveSchema = {
   "track": string,
   "timescale": number | undefined,
   "durationMax": number | undefined,
-  "wall": number | undefined,
   "replay": string | undefined,
   "store": string | undefined,
   "version": number | undefined,
@@ -609,12 +628,13 @@ type ArchiveSchema = {
 
 The `track` field names the MoQ track carrying the segment records.
 The name `timeline.z` is RECOMMENDED; a consumer MUST use the advertised name rather than assuming it.
-A live publisher without a store advertises `archive` with the timeline fields (`track`, `timescale`, `durationMax`, `wall`) alone.
+A live publisher without a store advertises `archive` with the timeline fields (`track`, `timescale`, `durationMax`) alone.
 Every range the timeline advertises is FETCHable; with a store they are also durable.
 There is no sibling `timeline` entry and no generation: a client that must tell recordings apart compares `replay` and `store`.
 
-The `timescale` field is the units per second for the records' `pts` and `duration` values, and for `durationMax` and `wall`.
+The `timescale` field is the units per second for the records' `pts` and `duration` values, and for `durationMax`.
 If absent, it defaults to 1000 (milliseconds).
+A zero `timescale` is invalid and MUST be refused.
 
 The `durationMax` field, if present, is the declared upper bound on a segment's `duration`, in `timescale` units.
 A publisher that controls its encoder knows its keyframe cadence up front, so a consumer can size buffers or write an HLS `EXT-X-TARGETDURATION` from the catalog alone, before observing a single segment.
@@ -624,9 +644,7 @@ A publisher that cannot honor that MUST omit the field rather than emit a record
 The field is absent when the media decides the segmentation instead, which is the common case: a real-time encoder places keyframes on demand and a single GOP may be minutes long, and a publisher importing a source it does not control cannot promise anything about that source.
 A consumer needing a bound then derives one from the records it has seen, raising it as longer segments arrive.
 
-The `wall` field, if known, is the wall-clock time of `pts` 0: in `timescale` units, measured from the moq epoch, 2020-01-01T00:00:00Z.
-A consumer derives the wall-clock time of any segment as `wall + pts`, and Unix time by adding the epoch back (for HLS `EXT-X-PROGRAM-DATE-TIME` or DASH `availabilityStartTime`).
-The epoch is 2020 rather than 1970 so the value stays small, safely within a 53-bit integer even at fine timescales.
+Wall-clock mapping is the catalog root `clock` ({{clock}}), not this section: a consumer derives the wall-clock time of any segment as `clock.wall + pts` after converting `pts` into the clock's timescale.
 
 The `replay` field, if present, is a relative MoQ broadcast path ({{field-broadcast}}) the archive is served back from.
 Absent, the timeline lives on the catalog's own broadcast.
@@ -1054,6 +1072,7 @@ A publisher MAY estimate an unknown final duration from the frame cadence, but M
 - Required exclusive DVR restart recovery to remove unreferenced group objects left by interrupted expiration.
 - Replaced the catalog root `timeline` field with `archive`, carrying the timeline track plus optional `replay`, `store`, and recording `version`.
 - A marker group of one empty frame declares a discontinuity. Empty groups mean nothing. Timestamps only move forward; a group below the live edge is malformed. A delivered sequence hole is a playhead event unless contiguous within 1 ms.
+- Replaced the archive timeline `wall` field with a root `clock` section (`wall` plus `timescale`): one fixed broadcast mapping every track and the archive index convert into, independent of any archive. Zero timescales and walls past the JSON-safe integer range are refused.
 
 # Acknowledgments
 {:numbered="false"}

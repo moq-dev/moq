@@ -8,6 +8,7 @@
 mod archive;
 mod audio;
 mod binary;
+mod clock;
 mod compression;
 mod container;
 mod hex;
@@ -24,6 +25,7 @@ mod video;
 pub use archive::*;
 pub use audio::*;
 pub use binary::*;
+pub use clock::*;
 pub use compression::*;
 pub use container::*;
 pub use json::*;

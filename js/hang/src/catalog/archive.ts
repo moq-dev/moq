@@ -12,10 +12,10 @@ export const ARCHIVE_VERSION = 1;
  * Discovers the broadcast's segment index and any durable archive.
  *
  * This is the catalog's one name for the segment index: a live publisher sets the
- * timeline fields (`track`, `timescale`, `durationMax`, `wall`) alone, and a recording
+ * timeline fields (`track`, `timescale`, `durationMax`) alone, and a recording
  * also names the replay broadcast and object store those ranges live under. Every
  * advertised range is FETCHable; with a store they are durable. There is no sibling
- * `timeline` entry.
+ * `timeline` entry. Wall-clock mapping lives at the catalog root (`clock`), not here.
  */
 export const ArchiveSchema = z.extend(TimelineSchema, {
 	// The MoQ broadcast the archive is served back from, relative to this catalog, if any.

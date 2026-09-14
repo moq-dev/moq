@@ -55,7 +55,7 @@ struct Feed {
 	closed: bool,
 	/// The estimated wall-clock time of timeline `pts` 0, anchored when the first record
 	/// arrived (assuming its segment had just ended). The DASH manifest's
-	/// `availabilityStartTime` falls back to this when the catalog declares no `wall`; set
+	/// `availabilityStartTime` falls back to this when the catalog declares no `clock`; set
 	/// once so reloads see a stable presentation, and reset with the window when the
 	/// timeline restarts.
 	anchor: Option<SystemTime>,
@@ -325,6 +325,7 @@ impl Producer {
 			return;
 		};
 		let section = archive.timeline;
+		let clock = catalog.clock;
 
 		let Ok(mut current) = self.state.write() else {
 			return;
@@ -363,7 +364,7 @@ impl Producer {
 				rendition.refresh(video.bitrate);
 				continue;
 			}
-			let rendition = match Rendition::video(name.clone(), video, upstream, section.clone()) {
+			let rendition = match Rendition::video(name.clone(), video, upstream, section.clone(), clock) {
 				Ok(rendition) => Arc::new(rendition),
 				Err(err) => {
 					tracing::warn!(rendition = name, %err, "ignoring unservable video rendition");
@@ -379,7 +380,7 @@ impl Producer {
 				rendition.refresh(audio.bitrate);
 				continue;
 			}
-			let rendition = match Rendition::audio(name.clone(), audio, upstream, section.clone()) {
+			let rendition = match Rendition::audio(name.clone(), audio, upstream, section.clone(), clock) {
 				Ok(rendition) => Arc::new(rendition),
 				Err(err) => {
 					tracing::warn!(rendition = name, %err, "ignoring unservable audio rendition");

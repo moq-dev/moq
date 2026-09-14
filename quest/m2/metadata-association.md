@@ -47,5 +47,4 @@ Any eventual wire-format change belongs in the matching Hang draft.
 
 ## Related
 
-- [Broadcast clock](/quest/m1/broadcast-clock.md) - one continuous clock, independent of archives
 - [SEI evaluation](/quest/m3/sei/README.md) - a separate decision about extracting codec metadata

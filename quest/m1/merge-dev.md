@@ -55,7 +55,6 @@ additive quest that builds on dev-only code start on main afterwards from
 - [Deprecated sweep](/quest/m1/deprecated-sweep.md) - the breaking release removes what it deprecates
 - [Origin scope API](/quest/m1/api-origin-pattern-scopes.md) - typed scope grants preserve current prefixes and refuse unsupported patterns
 - [Cluster peer API](/quest/m1/api-cluster-peer-config.md) - typed peer configuration supports current symmetric policy
-- [Broadcast clock](/quest/m1/broadcast-clock.md) - the root clock replaces the published archive wall field on dev before release
 - [m0](/quest/m0/README.md) - every release blocker lands or is punted before the merge
 
 ## Closes
