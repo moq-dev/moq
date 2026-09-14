@@ -41,14 +41,23 @@ expiry, an expiry that leaves the union intact ends only that token, and
   `tokio::select!` arm. Select on one lease per token in the set instead, and on any firing recompute the union without it: unchanged
   means `AUTH_ERROR { Expired }` on that token's stream and the session
   continues, shrunk means `session.abort(Unauthorized)` as today. A token
-  withdrawn by the client (its stream closed) follows the same rule. Each
-  lease revalidates on its own cadence, and a re-check that lowers a token's
-  `expires` writes an update AUTH_OK on its stream so the client can present
-  a replacement in time.
-- Refusals from the auth server map as connect-time ones do: a `403` or an
-  empty grant is `AUTH_ERROR { Unauthorized }`; an outage on a new token is
-  `AUTH_ERROR { Timeout }`, and an outage during re-check keeps the token
-  until its `expires`, never a close on its own.
+  withdrawn by the client (its stream closed or reset) recomputes the union
+  the same way with nothing written back, since the stream is gone: unchanged
+  means the session continues, shrunk means abort. Each lease revalidates on
+  its own cadence, and every re-check that changes the grant, a lower
+  `expires` or a different `publish` or `subscribe`, writes the complete
+  replacement grant as an update AUTH_OK on that token's stream and
+  recomputes the union from the latest grant of every token, so the client
+  can present a replacement in time and a narrowed token never keeps its old
+  scope; a shrunk union aborts as above until Origin scopes resizes.
+- Refusals map as connect-time ones do and never expose a status: every
+  refusal `Client::attach` returns for a new token, a `403`, an empty or
+  invalid grant, an unparseable body, or a `5xx`, is
+  `AUTH_ERROR { Unauthorized }`, and a timeout is `AUTH_ERROR { Timeout }`.
+  On re-check a refusal closes that token's stream with
+  `AUTH_ERROR { Unauthorized }` and recomputes the union, while a failed
+  re-check (timeout or `5xx`) keeps the token until its `expires`, never a
+  close on its own.
 - The client side names dev's API: `moq_tokio::Connection` gains `auth()`
   returning a handle the connection owns, not the current session's. It
   stores every token added through it, presents them on each new session as

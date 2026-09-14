@@ -58,7 +58,8 @@ lands the types and the move, and keeps the relay compiling until
 - Consumers: `rs/moq-room` (`claims.rs`), `js/room` (`token.ts`), and
   `rs/moq-rtmp`'s references. `rs/moq-relay` keeps its flags and `auth.rs`
   in this quest and only reads pattern claims: a claim whose every pattern is
-  prefix-shaped (a literal or `literal/**`) maps onto its `PathPrefixes`,
+  prefix-shaped (a literal, `literal/**`, or bare `**`) maps onto its
+  `PathPrefixes`,
   any other pattern is refused naming it. That adapter is deleted with the
   rest of `auth.rs` in the relay quest.
 - Docs: `doc/lib/rs/moq-token.md` becomes `moq-auth.md` covering the

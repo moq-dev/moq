@@ -69,8 +69,8 @@ Decisions settled while planning, recorded so review does not relitigate them.
   `stale-while-revalidate` anywhere.
 - **Patterns only.** Grants and JWT claims use `moq-pattern` from day one.
   There is no prefix mode and no `v` field. The relay enforces prefix-shaped
-  patterns first (a literal or `literal/**`) and refuses any other pattern at
-  connect, naming it; Origin scopes lifts that restriction with no contract
+  patterns first (a literal, `literal/**`, or bare `**`, which is the empty
+  prefix) and refuses any other pattern at connect, naming it; Origin scopes lifts that restriction with no contract
   change.
 
 ### Composition

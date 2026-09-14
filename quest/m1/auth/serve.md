@@ -36,10 +36,16 @@ address. The default answer to anything else is a refusal. On dev.
   anonymous viewer reconnects daily at most.
 - Session limits: `--limit-token <n>` caps live sessions presenting the same
   token and `--limit-remote <n>` caps live sessions from one remote address,
-  counted from `connect` and `end` events by session `id` and aged out when a
-  session misses two revalidation cadences, so a relay that died without
-  sending `end` does not pin a slot forever. Default unlimited. A connect over
-  the cap is refused with the reason in the body.
+  counted from `connect` and `end` events by session `id`, with a
+  `connect` for a known id refreshing rather than double-counting. A slot
+  ages out when its session misses two revalidation cadences, so a relay
+  that died without sending `end` does not pin a slot forever; the server
+  cannot tell that from its own unreachability, so the next `revalidate`
+  from a surviving relay re-registers the id, and the worst case is one
+  session admitted over the cap for one cadence. The docs say so: the cap
+  is a nuisance limit, not a security boundary, and a restart empties the
+  table until the fleet's next cadence refills it. Default unlimited. A
+  connect over the cap is refused with the reason in the body.
 - The migration table in `doc/bin/relay/auth.md`: each deleted relay flag and
   the `moq auth serve` flag that replaces it, and a worked example running
   both on one host. `doc/bin/cli.md` documents the command.
