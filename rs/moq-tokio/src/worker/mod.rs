@@ -24,7 +24,7 @@
 mod group;
 
 #[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
-pub use group::{Spawner, Workers};
+pub use group::{Group, Spawner, Workers};
 
 /// How many QUIC workers to run, and whether to pin them.
 #[derive(Clone, Copy, Debug)]
