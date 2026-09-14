@@ -42,10 +42,13 @@ tokens. Every claim we do not evaluate refuses the token naming the claim.
   and `ServerSetup` add nothing. The namespace fields become one `moq_pattern::Pattern` segment
   each, the mapping `rs/moq-pattern` documents under "CAT / C4M", relative
   to the dialed path exactly as `jwt::Claims::root` is: `Exact(f)` is the
-  literal segment, `Prefix(f)` is `f*`, `Suffix(f)` is `*f`, an absent
-  namespace is `**`, and a scope without `exact_depth` appends `/**`. A
-  field value containing `/` or `*` cannot be a segment and refuses the token
-  naming the scope. A scope with a track match is refused naming the scope.
+  literal segment, `Prefix(f)` is `f*`, `Suffix(f)` is `*f`, a named
+  namespace without `exact_depth` appends `/**`, and an absent namespace is
+  bare `**` with nothing appended. A field value containing `/` or `*`
+  cannot be a segment and refuses the token naming the scope. `f*` and `*f`
+  are patterns the relay only admits once [Origin
+  scopes](/quest/m2/path-patterns/origin.md) lifts its prefix-shaped
+  adapter, which is why that quest is required here. A scope with a track match is refused naming the scope.
   `exp` is `expires`, `moqt-reval` is
   `revalidate`, and `Grant::validate` keeps refusing a cadence without an
   expiry, so the serve default `--expires` applies to a token without `exp`
@@ -79,6 +82,8 @@ gain flags. Wire: none.
 
 - [Package](/quest/m1/auth/package.md) - supplies `moq_auth::jwt`, which
   `cat` sits beside
+- [Origin scopes](/quest/m2/path-patterns/origin.md) - the relay admits
+  `f*` and `*f` grants only after it
 - [Setup token](/quest/m3/cat/setup-token.md) - the token reaches the
   server's request
 - [Serve](/quest/m1/auth/serve.md) - the server this extends

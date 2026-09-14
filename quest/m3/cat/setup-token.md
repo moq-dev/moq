@@ -32,6 +32,9 @@ decode as an unknown key.
   message whose decoder reads parameters decodes and is refused with the
   request's error path (`Unsupported`, mapped through `to_code` for the
   draft) naming the parameter, so the session survives and the log says why.
+  Both decoder families change: the strict `decode_params!` path on newer
+  drafts, which rejects the key today, and the generic KVP path the legacy
+  drafts use, which keeps an odd key and lets the caller ignore it.
 - `moq_net::Request::token() -> Option<&setup::Token>` on the accepted
   request, carried through the `Legacy` (draft-14 to 16) and `PeerSetup`
   (draft-17+) paths; `moq_tokio::server::Request` forwards it; lite sessions
@@ -52,7 +55,7 @@ decode as an unknown key.
 - Tests: decode and encode round trips for every alias type on every draft
   in Rust and JS; `DELETE`/`USE_ALIAS` in SETUP close the session;
   `REGISTER` is accepted as a value; a token on SUBSCRIBE is refused and the
-  session continues; the relay forwards the bytes to a wiremock auth server
+  session continues, on one legacy draft and one strict draft; the relay forwards the bytes to a wiremock auth server
   byte for byte; a lite session reports none.
 
 Public API: additive on `moq-net`, `moq-tokio`, `moq-auth`, and `js/net`.
