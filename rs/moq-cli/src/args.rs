@@ -466,7 +466,7 @@ impl MoqSide {
 
 	/// Reject the MoQ flags on a verb that never touches the network, rather than
 	/// silently ignoring them. `--broadcast` counts: a local verb has no content, and
-	/// next to `token generate` it reads like it scopes the key, which `--root` does.
+	/// next to `auth generate` it reads like it scopes the key, which `--root` does.
 	///
 	/// Private, and reached only through [`Invocation::reject`], so it cannot be asked
 	/// of the resolved side: every one of these flags has a `MOQ_*` variable, and a
