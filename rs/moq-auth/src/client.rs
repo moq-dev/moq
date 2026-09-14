@@ -87,9 +87,7 @@ impl Client {
 			},
 			#[cfg(unix)]
 			"unix" => {
-				let path = url
-					.to_file_path()
-					.map_err(|()| Error::InvalidUrl(url.to_string()))?;
+				let path = url.to_file_path().map_err(|()| Error::InvalidUrl(url.to_string()))?;
 				// The socket is the transport; the request target is the server's root.
 				let target = Url::parse("http://localhost/").expect("a constant URL parses");
 				(builder.unix_socket(path), target)
@@ -168,7 +166,10 @@ impl Driver {
 
 	/// Re-check until the lease ends, returning why it did.
 	async fn drive(&mut self, mut grant: Grant) -> Reason {
-		let producer = self.producer.take().expect("the driver owns the producer until it ends");
+		let producer = self
+			.producer
+			.take()
+			.expect("the driver owns the producer until it ends");
 		let mut failures = 0u32;
 		let mut next = grant.revalidate.map(|cadence| Instant::now() + cadence);
 
@@ -314,7 +315,10 @@ mod tests {
 	#[tokio::test]
 	async fn connect_admits_and_end_follows_the_close() {
 		let log = Log::default();
-		let server = server(log.clone(), |_| ResponseTemplate::new(200).set_body_json(grant(None, None))).await;
+		let server = server(log.clone(), |_| {
+			ResponseTemplate::new(200).set_body_json(grant(None, None))
+		})
+		.await;
 
 		let bytes = Counters::default();
 		let consumer = client(&server).connect(request(), bytes.clone()).await.unwrap();
@@ -340,7 +344,10 @@ mod tests {
 	#[tokio::test]
 	async fn a_bare_drop_ends_as_dropped() {
 		let log = Log::default();
-		let server = server(log.clone(), |_| ResponseTemplate::new(200).set_body_json(grant(None, None))).await;
+		let server = server(log.clone(), |_| {
+			ResponseTemplate::new(200).set_body_json(grant(None, None))
+		})
+		.await;
 
 		let consumer = client(&server).connect(request(), Counters::default()).await.unwrap();
 		drop(consumer);
@@ -359,7 +366,10 @@ mod tests {
 	async fn refusals_and_outages_refuse_at_connect() {
 		for status in [403, 404, 500, 503] {
 			let server = server(Log::default(), move |_| ResponseTemplate::new(status)).await;
-			let err = client(&server).connect(request(), Counters::default()).await.unwrap_err();
+			let err = client(&server)
+				.connect(request(), Counters::default())
+				.await
+				.unwrap_err();
 			match status {
 				403 => assert!(matches!(err, Error::Refused), "{status}: {err}"),
 				_ => assert!(matches!(err, Error::Unavailable(_)), "{status}: {err}"),
@@ -367,11 +377,20 @@ mod tests {
 		}
 
 		let garbage = server(Log::default(), |_| ResponseTemplate::new(200).set_body_string("nope")).await;
-		let err = client(&garbage).connect(request(), Counters::default()).await.unwrap_err();
+		let err = client(&garbage)
+			.connect(request(), Counters::default())
+			.await
+			.unwrap_err();
 		assert!(matches!(err, Error::Unavailable(_)), "{err}");
 
-		let nothing = server(Log::default(), |_| ResponseTemplate::new(200).set_body_json(Grant::default())).await;
-		let err = client(&nothing).connect(request(), Counters::default()).await.unwrap_err();
+		let nothing = server(Log::default(), |_| {
+			ResponseTemplate::new(200).set_body_json(Grant::default())
+		})
+		.await;
+		let err = client(&nothing)
+			.connect(request(), Counters::default())
+			.await
+			.unwrap_err();
 		assert!(matches!(err, Error::UselessGrant), "{err}");
 	}
 
@@ -428,7 +447,11 @@ mod tests {
 			log.events().iter().filter(|e| **e == Event::Revalidate).count() >= 1,
 			"re-checks happened"
 		);
-		assert_eq!(consumer.grant().publish, patterns(&["**"]), "the grant stands through the outage");
+		assert_eq!(
+			consumer.grant().publish,
+			patterns(&["**"]),
+			"the grant stands through the outage"
+		);
 
 		let reason = tokio::time::timeout(Duration::from_secs(2), consumer.closed())
 			.await
@@ -466,7 +489,10 @@ mod tests {
 	fn backoff_grows_and_stays_bounded() {
 		let cadence = Duration::from_secs(30);
 		let first = backoff(1, cadence);
-		assert!(first >= Duration::from_millis(750) && first <= Duration::from_millis(1250), "{first:?}");
+		assert!(
+			first >= Duration::from_millis(750) && first <= Duration::from_millis(1250),
+			"{first:?}"
+		);
 		let later = backoff(10, cadence);
 		assert!(later <= cadence.mul_f64(1.25), "{later:?}");
 		assert!(backoff(40, Duration::from_secs(3600)) <= BACKOFF_MAX.mul_f64(1.25));

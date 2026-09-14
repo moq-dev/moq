@@ -811,10 +811,7 @@ mod tests {
 
 		let typed =
 			crate::args::Invocation::try_parse_from(["moq", "--connect", &url, "auth", "generate"]).expect("parse");
-		assert!(
-			typed.reject("auth").is_err(),
-			"a typed --connect stopped being refused"
-		);
+		assert!(typed.reject("auth").is_err(), "a typed --connect stopped being refused");
 	}
 
 	/// A completer that needs the network answers nothing when the line names no relay.

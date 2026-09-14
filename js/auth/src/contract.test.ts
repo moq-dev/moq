@@ -40,10 +40,10 @@ test("an end request carries its facts beside the rest", () => {
 });
 
 test("a connect must not carry end facts, and an unknown transport is refused", () => {
+	expect(() => RequestSchema.parse({ id: "1", event: "end", node: "n", transport: "quic", path: "/" })).toThrow();
 	expect(() =>
-		RequestSchema.parse({ id: "1", event: "end", node: "n", transport: "quic", path: "/" }),
+		RequestSchema.parse({ id: "1", event: "connect", node: "n", transport: "carrier-pigeon", path: "/" }),
 	).toThrow();
-	expect(() => RequestSchema.parse({ id: "1", event: "connect", node: "n", transport: "carrier-pigeon", path: "/" })).toThrow();
 });
 
 test("a grant round trips and is validated", () => {

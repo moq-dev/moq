@@ -101,10 +101,7 @@ impl Producer {
 			epoch: 0,
 			closed: None,
 		});
-		(
-			Self { state: state.clone() },
-			Consumer { state, seen: 0 },
-		)
+		(Self { state: state.clone() }, Consumer { state, seen: 0 })
 	}
 
 	/// Replace the grant, waking the consumer. A no-op once the lease ended.

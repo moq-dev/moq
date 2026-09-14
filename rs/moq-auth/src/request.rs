@@ -216,10 +216,7 @@ mod tests {
 		request.event = Event::End {
 			reason: Reason::Session("disconnected".into()),
 			duration: Duration::from_millis(1500),
-			bytes: Bytes {
-				sent: 10,
-				received: 20,
-			},
+			bytes: Bytes { sent: 10, received: 20 },
 		};
 		let json = serde_json::to_value(&request).unwrap();
 		assert_eq!(json["event"], "end");

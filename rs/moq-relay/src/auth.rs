@@ -1,10 +1,10 @@
 use anyhow::Context;
 use axum::http;
 use futures::FutureExt;
+use moq_auth::{Key, KeyId};
 #[cfg(test)]
 use moq_net::AsPath;
 use moq_net::{Path, PathOwned, PathPrefixes, stats::Tier};
-use moq_auth::{Key, KeyId};
 use moq_tokio::Transport;
 use rand::RngExt;
 use reqwest_middleware::ClientWithMiddleware;
@@ -2451,7 +2451,10 @@ mod tests {
 				})
 				.await
 				.unwrap_err();
-			assert!(matches!(&err, AuthError::UnsupportedPattern(p) if p == pattern), "{pattern}: {err}");
+			assert!(
+				matches!(&err, AuthError::UnsupportedPattern(p) if p == pattern),
+				"{pattern}: {err}"
+			);
 			assert!(err.is_refusal());
 		}
 
@@ -2582,7 +2585,9 @@ mod tests {
 		})
 		.await?;
 
-		let claims = moq_auth::Claims::default().with_root("room/123").with_subscribe(["**".parse().unwrap()]);
+		let claims = moq_auth::Claims::default()
+			.with_root("room/123")
+			.with_subscribe(["**".parse().unwrap()]);
 		let token = key.sign(&claims)?;
 
 		let token = auth
@@ -2609,7 +2614,9 @@ mod tests {
 		})
 		.await?;
 
-		let claims = moq_auth::Claims::default().with_root("room/123").with_publish(["bob/**".parse().unwrap()]);
+		let claims = moq_auth::Claims::default()
+			.with_root("room/123")
+			.with_publish(["bob/**".parse().unwrap()]);
 		let token = key.sign(&claims)?;
 
 		let token = auth
@@ -2865,7 +2872,9 @@ mod tests {
 		.await?;
 
 		let key = create_test_key_with_kid("nonexistent");
-		let claims = moq_auth::Claims::default().with_root("test").with_subscribe(["**".parse().unwrap()]);
+		let claims = moq_auth::Claims::default()
+			.with_root("test")
+			.with_subscribe(["**".parse().unwrap()]);
 		let token = key.sign(&claims)?;
 
 		let result = auth
@@ -2926,7 +2935,9 @@ mod tests {
 		.await?;
 
 		// Sign with key-1
-		let claims = moq_auth::Claims::default().with_root("room/1").with_subscribe(["**".parse().unwrap()]);
+		let claims = moq_auth::Claims::default()
+			.with_root("room/1")
+			.with_subscribe(["**".parse().unwrap()]);
 		let token1 = key1.sign(&claims)?;
 
 		let verified = auth
@@ -2939,7 +2950,9 @@ mod tests {
 		assert_eq!(verified.root, "room/1".as_path());
 
 		// Sign with key-2
-		let claims = moq_auth::Claims::default().with_root("room/2").with_subscribe(["**".parse().unwrap()]);
+		let claims = moq_auth::Claims::default()
+			.with_root("room/2")
+			.with_subscribe(["**".parse().unwrap()]);
 		let token2 = key2.sign(&claims)?;
 
 		let verified = auth
@@ -2991,7 +3004,9 @@ mod tests {
 		})
 		.await?;
 
-		let claims = moq_auth::Claims::default().with_root("test").with_subscribe(["**".parse().unwrap()]);
+		let claims = moq_auth::Claims::default()
+			.with_root("test")
+			.with_subscribe(["**".parse().unwrap()]);
 		let token = key.sign(&claims)?;
 
 		let result = auth
@@ -3186,7 +3201,9 @@ mod tests {
 		.await?;
 
 		// Token with root="", subscribe=["demo"] — only demo/ is accessible
-		let claims = moq_auth::Claims::default().with_root("").with_subscribe(["demo/**".parse().unwrap()]);
+		let claims = moq_auth::Claims::default()
+			.with_root("")
+			.with_subscribe(["demo/**".parse().unwrap()]);
 		let token = key.sign(&claims)?;
 
 		// Connecting to /other should fail — no permissions remain after filtering
@@ -3434,7 +3451,9 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_url_key_dir(&server).await;
 
-		let claims = moq_auth::Claims::default().with_root("room/1").with_subscribe(["**".parse().unwrap()]);
+		let claims = moq_auth::Claims::default()
+			.with_root("room/1")
+			.with_subscribe(["**".parse().unwrap()]);
 		let token = key.sign(&claims)?;
 
 		let verified = auth
@@ -3460,7 +3479,9 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_url_key_dir(&server).await;
 
-		let claims = moq_auth::Claims::default().with_root("room/1").with_subscribe(["**".parse().unwrap()]);
+		let claims = moq_auth::Claims::default()
+			.with_root("room/1")
+			.with_subscribe(["**".parse().unwrap()]);
 		let token = key.sign(&claims)?;
 		let result = auth
 			.verify(&AuthParams {
@@ -3485,7 +3506,9 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_url_key_dir(&server).await;
 
-		let claims = moq_auth::Claims::default().with_root("room/1").with_subscribe(["**".parse().unwrap()]);
+		let claims = moq_auth::Claims::default()
+			.with_root("room/1")
+			.with_subscribe(["**".parse().unwrap()]);
 		let token = key.sign(&claims)?;
 		let result = auth
 			.verify(&AuthParams {
@@ -3508,7 +3531,9 @@ api = "https://api.example.com/access"
 		.await?;
 
 		let key = create_test_key_with_kid("test-key");
-		let claims = moq_auth::Claims::default().with_root("room/1").with_subscribe(["**".parse().unwrap()]);
+		let claims = moq_auth::Claims::default()
+			.with_root("room/1")
+			.with_subscribe(["**".parse().unwrap()]);
 		let token = key.sign(&claims)?;
 		let result = auth
 			.verify(&AuthParams {
@@ -3534,7 +3559,9 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_url_key_dir(&server).await;
 
-		let claims = moq_auth::Claims::default().with_root("room/1").with_subscribe(["**".parse().unwrap()]);
+		let claims = moq_auth::Claims::default()
+			.with_root("room/1")
+			.with_subscribe(["**".parse().unwrap()]);
 		let token = key.sign(&claims)?;
 		let result = auth
 			.verify(&AuthParams {
@@ -3566,7 +3593,9 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_url_key_dir(&server).await;
 
-		let claims = moq_auth::Claims::default().with_root("room/1").with_subscribe(["**".parse().unwrap()]);
+		let claims = moq_auth::Claims::default()
+			.with_root("room/1")
+			.with_subscribe(["**".parse().unwrap()]);
 		let token = key.sign(&claims)?;
 
 		for _ in 0..2 {
@@ -3843,7 +3872,9 @@ api = "https://api.example.com/access"
 		})
 		.await?;
 
-		let claims = moq_auth::Claims::default().with_root("room/1").with_subscribe(["**".parse().unwrap()]);
+		let claims = moq_auth::Claims::default()
+			.with_root("room/1")
+			.with_subscribe(["**".parse().unwrap()]);
 		let token = fx.key.sign(&claims)?;
 		let verified = auth_with_identity
 			.verify(&AuthParams {
@@ -4095,7 +4126,9 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_api(&server).await;
 
-		let claims = moq_auth::Claims::default().with_root("demo/room").with_subscribe(["**".parse().unwrap()]);
+		let claims = moq_auth::Claims::default()
+			.with_root("demo/room")
+			.with_subscribe(["**".parse().unwrap()]);
 		let token = key.sign(&claims)?;
 
 		let verified = auth
@@ -4129,7 +4162,9 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		let claims = moq_auth::Claims::default().with_root("demo").with_subscribe(["**".parse().unwrap()]);
+		let claims = moq_auth::Claims::default()
+			.with_root("demo")
+			.with_subscribe(["**".parse().unwrap()]);
 		let token = key.sign(&claims)?;
 
 		let verified = auth
@@ -4299,7 +4334,9 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		let claims = moq_auth::Claims::default().with_root("unknown").with_subscribe(["**".parse().unwrap()]);
+		let claims = moq_auth::Claims::default()
+			.with_root("unknown")
+			.with_subscribe(["**".parse().unwrap()]);
 		let token = key.sign(&claims)?;
 		let verified = auth
 			.verify(&AuthParams {
@@ -4325,7 +4362,11 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		let token = key.sign(&moq_auth::Claims::default().with_root("x7k2qp").with_subscribe(["**".parse().unwrap()]))?;
+		let token = key.sign(
+			&moq_auth::Claims::default()
+				.with_root("x7k2qp")
+				.with_subscribe(["**".parse().unwrap()]),
+		)?;
 		let result = auth
 			.verify(&AuthParams {
 				path: "/demo".into(),
@@ -4639,7 +4680,11 @@ api = "https://api.example.com/access"
 		.await;
 
 		let auth = auth_with_api(&server).await;
-		let jwt = key.sign(&moq_auth::Claims::default().with_root("demo").with_subscribe(["**".parse().unwrap()]))?;
+		let jwt = key.sign(
+			&moq_auth::Claims::default()
+				.with_root("demo")
+				.with_subscribe(["**".parse().unwrap()]),
+		)?;
 
 		let verified = auth
 			.verify(&AuthParams {
@@ -4852,7 +4897,11 @@ api = "https://api.example.com/access"
 
 		// A token signed by the ORIGINAL key, still presenting the same kid.
 		let original = create_test_key_with_kid("test-key");
-		let jwt = original.sign(&moq_auth::Claims::default().with_root("demo").with_subscribe(["**".parse().unwrap()]))?;
+		let jwt = original.sign(
+			&moq_auth::Claims::default()
+				.with_root("demo")
+				.with_subscribe(["**".parse().unwrap()]),
+		)?;
 
 		let auth = auth_with_api(&server).await;
 		let grant = test_grant(&auth, Some(jwt), Duration::from_millis(200));
@@ -5051,7 +5100,9 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_api(&server).await;
 		let key = create_test_key_with_kid("shared");
-		let claims = moq_auth::Claims::default().with_root("demo").with_subscribe(["**".parse().unwrap()]);
+		let claims = moq_auth::Claims::default()
+			.with_root("demo")
+			.with_subscribe(["**".parse().unwrap()]);
 		// Two different tokens, same signing key, so the same kid.
 		let a = test_grant(&auth, Some(key.sign(&claims)?), Duration::from_millis(100));
 		let b = test_grant(
@@ -5495,7 +5546,11 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		let jwt = key.sign(&moq_auth::Claims::default().with_root("demo").with_subscribe(["**".parse().unwrap()]))?;
+		let jwt = key.sign(
+			&moq_auth::Claims::default()
+				.with_root("demo")
+				.with_subscribe(["**".parse().unwrap()]),
+		)?;
 		auth.verify(&AuthParams {
 			path: "demo".into(),
 			host: Some("live.example.com".into()),

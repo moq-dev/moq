@@ -70,9 +70,9 @@ hex = { workspace = true }
 http-body = "1"
 http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "reqwest-middleware", "url-standard"], default-features = false }
 jsonwebtoken = { workspace = true }
+moq-auth = { workspace = true, features = ["tokio"] }
 moq-net = { workspace = true }
 moq-stats = { workspace = true }
-moq-auth = { workspace = true, features = ["tokio"] }
 moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "watch", "tcp"] }
 qmux = { workspace = true, features = ["ws"], optional = true }
 rand = { workspace = true }

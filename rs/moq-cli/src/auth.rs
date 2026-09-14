@@ -254,8 +254,8 @@ mod tests {
 	/// Drive the same Usage grammar the binary exposes, rather than building
 	/// `Command` directly, so the flags stay part of what's under test.
 	fn run(args: &[&str]) -> anyhow::Result<()> {
-		let mut cli = crate::args::Invocation::try_parse_from(args.iter().copied())
-			.map_err(|err| anyhow::anyhow!("{err}"))?;
+		let mut cli =
+			crate::args::Invocation::try_parse_from(args.iter().copied()).map_err(|err| anyhow::anyhow!("{err}"))?;
 		match cli.stages.remove(0) {
 			crate::args::Command::Auth(auth) => auth.run(),
 			other => anyhow::bail!("parsed something other than `moq auth`: {}", other.name()),
@@ -306,7 +306,11 @@ mod tests {
 		// token itself comes from the library.
 		let token = moq_auth::Key::from_file(&private)
 			.unwrap()
-			.sign(&moq_auth::Claims::default().with_root("demo").with_publish(["alice/**".parse().unwrap()]))
+			.sign(
+				&moq_auth::Claims::default()
+					.with_root("demo")
+					.with_publish(["alice/**".parse().unwrap()]),
+			)
 			.unwrap();
 		let path = dir.path().join("alice.jwt");
 		std::fs::write(&path, &token).unwrap();

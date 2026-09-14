@@ -7,8 +7,8 @@
 
 use std::{net::TcpListener, time::Duration};
 
-use moq_relay::{AuthConfig, Cluster, ClusterOptions, Connection, Web, WebConfig};
 use moq_auth::{Algorithm, Key, KeyId};
+use moq_relay::{AuthConfig, Cluster, ClusterOptions, Connection, Web, WebConfig};
 use moq_tokio::moq_net::{self, Hop};
 use wiremock::matchers::{method, path as path_matcher, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};

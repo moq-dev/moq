@@ -14,9 +14,9 @@ categories = ["multimedia", "network-programming"]
 
 [dependencies]
 kio = { workspace = true }
+moq-auth = { workspace = true }
 moq-json = { workspace = true }
 moq-net = { workspace = true }
-moq-auth = { workspace = true }
 thiserror = { workspace = true }
 web-async = { workspace = true }
 

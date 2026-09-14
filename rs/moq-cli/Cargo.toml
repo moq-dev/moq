@@ -94,8 +94,8 @@ axum = { workspace = true }
 axum-server = { workspace = true }
 bytes = { workspace = true }
 hang = { workspace = true }
-moq-auth = { workspace = true }
 moq-audio = { workspace = true, optional = true, features = ["aac"] }
+moq-auth = { workspace = true }
 # `server` enables the HTTP egress server for `moq export hls`; the importer is always available.
 moq-hls = { workspace = true, features = ["server"] }
 moq-mux = { workspace = true }
