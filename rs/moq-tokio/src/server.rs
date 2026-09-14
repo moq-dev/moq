@@ -538,6 +538,7 @@ impl Server {
 	async fn accept_next(&mut self) -> Option<Request> {
 		loop {
 			// The QUIC endpoint address, reported as a QUIC session's local side.
+			#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 			let local = self.local_addr().ok();
 
 			// tokio::select! does not support cfg directives on arms, so we need to create the futures here.
