@@ -28,13 +28,16 @@ key = "/var/lib/moq-relay/key.pem"
 # [web.http]
 # listen = "[::]:80"
 
-# JWT authentication. Generate a key with `moq auth generate`.
-# See https://moq.dev/docs/auth for the full reference.
+# Who is admitted. The relay asks an auth server once per session event; the
+# policy (keys, public patterns, the grant for mTLS peers) lives there:
+#
+#   moq auth serve --listen 127.0.0.1:4440 --key /var/lib/moq-relay/root.jwk \
+#     --public-subscribe 'anon/**' --public-subscribe 'demo/**' \
+#     --public-publish 'anon/**' --public-publish 'demo/viewer/**'
+#
+# Generate the key with `moq auth generate`. See https://moq.dev/docs/auth.
 [auth]
-key = "/var/lib/moq-relay/root.jwk"
+url = "http://127.0.0.1:4440/"
 
-# Allow anonymous subscribe under anon/** and demo/**.
-# Allow anonymous publish under anon/** and demo/viewer.
-[auth.public]
-subscribe = ["anon", "demo"]
-publish = ["anon", "demo/viewer"]
+# Or, with no server, a static anonymous grant:
+# public = "anon/**"

@@ -118,10 +118,18 @@ struct Auth {
 	#[usage(env = "MOQ_AUTH_PUBLIC", cli("--auth-public"), parse = "list_by_comma")]
 	public: Option<Vec<String>>,
 
-	#[usage(env = "MOQ_AUTH_PUBLIC_SUBSCRIBE", cli("--auth-public-subscribe"), parse = "list_by_comma")]
+	#[usage(
+		env = "MOQ_AUTH_PUBLIC_SUBSCRIBE",
+		cli("--auth-public-subscribe"),
+		parse = "list_by_comma"
+	)]
 	public_subscribe: Option<Vec<String>>,
 
-	#[usage(env = "MOQ_AUTH_PUBLIC_PUBLISH", cli("--auth-public-publish"), parse = "list_by_comma")]
+	#[usage(
+		env = "MOQ_AUTH_PUBLIC_PUBLISH",
+		cli("--auth-public-publish"),
+		parse = "list_by_comma"
+	)]
 	public_publish: Option<Vec<String>>,
 }
 

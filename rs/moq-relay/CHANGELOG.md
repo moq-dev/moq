@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- Every session is admitted through a `moq_auth` lease: `--auth-url` asks an auth server per session event, `--auth-public` grants anonymous patterns, and exactly one must be set. `--auth-key`, `--auth-key-dir`, `--auth-public-api`, `--auth-domain`, `--auth-api`, `--auth-api-mode`, `--auth-mtls-tier`, and `--auth-tls-*` are gone, along with the `Cache-Control` driven cache and the unrestricted mTLS grant: a verified client certificate is reported in the request and admits what the server grants.
+- `--auth-public` and its `-subscribe`/`-publish` forms take patterns (`anon/**`), not prefixes.
+- Embedding: `Connection` holds a `Lease` per session and `supervise` follows it; `AuthToken` is built from a `moq_auth::Grant`; `MtlsPeer` carries the `PeerIdentity`.
+
 ### Added
 
 - *(relay)* `ClusterOptions` so the origin is constructed with its cache settings

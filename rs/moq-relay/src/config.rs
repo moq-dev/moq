@@ -1198,7 +1198,10 @@ uid = [1001]
 		])
 		.expect("config load");
 
-		assert!(config.auth.validate().is_ok(), "CLI public flags must admit anonymous sessions");
+		assert!(
+			config.auth.validate().is_ok(),
+			"CLI public flags must admit anonymous sessions"
+		);
 		assert_eq!(config.auth.public_subscribe, vec!["demo/**".parse().unwrap()]);
 		assert_eq!(config.auth.public_publish, vec!["uploads/**".parse().unwrap()]);
 		assert!(

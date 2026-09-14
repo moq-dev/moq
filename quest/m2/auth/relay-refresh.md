@@ -85,8 +85,6 @@ Additive.
 - [Pattern interest](/quest/m2/path-patterns/interest.md) - AUTH can represent the complete grants relay revalidation returns
 - [Lite stream](/quest/m2/auth/lite.md) - supplies the AUTH stream and
   `auth::Request` this consumes
-- [Relay](/quest/m1/auth/relay.md) - supplies the connection lease and the
-  `moq_auth::Client` an in-band token attaches to
 
 ## Related
 

@@ -105,8 +105,6 @@ ALPN.
 
 - [Origin scopes](/quest/m2/path-patterns/origin.md) - resizes a live session
   when the union shrinks, for revalidation and token expiry alike
-- [Auth server](/quest/m1/auth/README.md) - the request and grant a token
-  presented in band goes through
 - [Pattern interest](/quest/m2/path-patterns/interest.md) - moves AUTH's legacy wire prefixes to patterns along with ANNOUNCE_REQUEST
 - [Expiring media grants](/quest/m2/processor/grant-lease.md) - a worker's
   lease renewal is a new in-band token

@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use axum::http;
 use moq_auth::{Counters, Grant, Request, lease};
-use moq_net::{Path, PathOwned, PathPrefixes, stats::Tier};
 use moq_auth::{Pattern, Patterns};
+use moq_net::{Path, PathOwned, PathPrefixes, stats::Tier};
 use serde::{Deserialize, Serialize};
 use serde_with::{OneOrMany, serde_as};
 use url::Url;
@@ -31,7 +31,12 @@ pub struct AuthConfig {
 	/// Patterns an anonymous session may both publish and subscribe to, such as
 	/// `anon/**`. Repeatable or comma-separated. Sets a static grant with no expiry
 	/// and no server.
-	#[usage(long = "auth-public", env = "MOQ_AUTH_PUBLIC", setting = "auth.public", delimiter = ',')]
+	#[usage(
+		long = "auth-public",
+		env = "MOQ_AUTH_PUBLIC",
+		setting = "auth.public",
+		delimiter = ','
+	)]
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "OneOrMany<_>")]
 	pub public: Vec<Pattern>,
@@ -339,7 +344,10 @@ pub fn request_for(auth: &Auth, request: &moq_tokio::Request) -> Request {
 	out.query = request.query().map(str::to_owned);
 	out.remote = request.remote_addr();
 	out.local = request.local_addr();
-	out.server_name = request.server_name().map(str::to_owned).or_else(|| request.authority().map(str::to_owned));
+	out.server_name = request
+		.server_name()
+		.map(str::to_owned)
+		.or_else(|| request.authority().map(str::to_owned));
 	out.alpn = request.alpn().map(str::to_owned);
 	out.role = request.role().map(|role| match role {
 		moq_net::Role::Publisher => moq_auth::Role::Publisher,
@@ -401,7 +409,10 @@ mod tests {
 		let request = auth.request(moq_auth::Transport::Quic, "/anon/room");
 		let admitted = futures::executor::block_on(auth.admit(request, Counters::default())).unwrap();
 		assert_eq!(admitted.token.root, Path::new("anon/room").to_owned());
-		assert_eq!(admitted.token.subscribe, PathPrefixes::from(vec![Path::new("anon").to_owned()]));
+		assert_eq!(
+			admitted.token.subscribe,
+			PathPrefixes::from(vec![Path::new("anon").to_owned()])
+		);
 		assert_eq!(admitted.token.tier, Tier::default());
 	}
 
@@ -419,7 +430,10 @@ mod tests {
 		for pattern in ["*/chat", "alice", ""] {
 			let grant = Grant::new(patterns(&[pattern]), Patterns::new());
 			let err = AuthToken::new("/", &grant).unwrap_err();
-			assert!(matches!(&err, AuthError::UnsupportedPattern(p) if p == pattern), "{pattern}: {err}");
+			assert!(
+				matches!(&err, AuthError::UnsupportedPattern(p) if p == pattern),
+				"{pattern}: {err}"
+			);
 		}
 	}
 

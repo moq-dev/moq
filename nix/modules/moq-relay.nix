@@ -6,6 +6,14 @@
 }:
 let
   cfg = config.services.moq-relay;
+  authKey = if cfg.auth.keyFile != null then cfg.auth.keyFile else "${cfg.stateDir}/root.jwk";
+  # A prefix becomes the subtree pattern the relay and the auth server grant.
+  publicPattern =
+    if cfg.auth.publicPath == null || cfg.auth.publicPath == "" then
+      "**"
+    else
+      "${cfg.auth.publicPath}/**";
+  authUrl = "http://127.0.0.1:${toString cfg.auth.port}/";
 in
 {
   options.services.moq-relay = {
@@ -70,7 +78,18 @@ in
       enable = lib.mkOption {
         type = lib.types.bool;
         default = false;
-        description = "Enable JWT authentication";
+        description = ''
+          Run a local `moq auth serve` the relay asks per session: JWTs are verified
+          against the key, cluster peers presenting a certificate are granted
+          everything, and anonymous sessions get `publicPath`. Off, the relay admits
+          anonymous sessions under `publicPath` alone.
+        '';
+      };
+
+      port = lib.mkOption {
+        type = lib.types.port;
+        default = 4440;
+        description = "The loopback port the auth server listens on";
       };
 
       keyFile = lib.mkOption {
@@ -83,7 +102,7 @@ in
         type = lib.types.nullOr lib.types.str;
         default = null;
         example = "anon";
-        description = "Public path prefix for anonymous access";
+        description = "Path prefix anonymous sessions may publish and subscribe under (`anon` grants `anon/**`)";
       };
     };
 
@@ -151,6 +170,13 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = cfg.auth.enable || cfg.auth.publicPath != null;
+        message = "services.moq-relay: set auth.enable or auth.publicPath; a relay admits nobody without one";
+      }
+    ];
+
     # Create user and group
     users.users.${cfg.user} = {
       isSystemUser = true;
@@ -161,28 +187,63 @@ in
 
     users.groups.${cfg.group} = { };
 
-    # Generate systemd service
-    systemd.services.moq-relay = {
-      description = "Media over QUIC relay server";
+    # The auth server the relay asks per session. Loopback only; it has no
+    # authentication of its own.
+    systemd.services.moq-auth = lib.mkIf cfg.auth.enable {
+      description = "Media over QUIC auth server";
       wantedBy = [ "multi-user.target" ];
       after = [ "network.target" ];
+      before = [ "moq-relay.service" ];
+      requiredBy = [ "moq-relay.service" ];
 
       preStart = ''
-        # Generate auth key if needed
-        ${lib.optionalString (cfg.auth.enable && cfg.auth.keyFile == null) ''
+        ${lib.optionalString (cfg.auth.keyFile == null) ''
           if [ ! -f "${cfg.stateDir}/root.jwk" ]; then
             ${pkgs.moq-cli}/bin/moq auth generate --out "${cfg.stateDir}/root.jwk"
             chown ${cfg.user}:${cfg.group} "${cfg.stateDir}/root.jwk"
             chmod 600 "${cfg.stateDir}/root.jwk"
           fi
         ''}
+      '';
 
+      serviceConfig = {
+        Type = "simple";
+        User = cfg.user;
+        Group = cfg.group;
+        ExecStart = lib.concatStringsSep " " (
+          [
+            "${pkgs.moq-cli}/bin/moq auth serve"
+            "--listen 127.0.0.1:${toString cfg.auth.port}"
+            "--key ${authKey}"
+            "--mtls-publish '**' --mtls-subscribe '**'"
+          ]
+          ++ lib.optionals (cfg.auth.publicPath != null) [
+            "--public-publish '${publicPattern}' --public-subscribe '${publicPattern}'"
+          ]
+        );
+        Restart = "on-failure";
+        RestartSec = "5s";
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        ReadWritePaths = [ cfg.stateDir ];
+      };
+    };
+
+    # Generate systemd service
+    systemd.services.moq-relay = {
+      description = "Media over QUIC relay server";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "network.target" ] ++ lib.optional cfg.auth.enable "moq-auth.service";
+
+      preStart = ''
         # Generate cluster token for leaf nodes
         ${lib.optionalString
           (cfg.cluster.mode == "leaf" && cfg.auth.enable && cfg.cluster.tokenFile == null)
           (
             let
-              keyPath = if cfg.auth.keyFile != null then cfg.auth.keyFile else "${cfg.stateDir}/root.jwk";
+              keyPath = authKey;
             in
             ''
               ${pkgs.moq-cli}/bin/moq auth sign --key "${keyPath}" \
@@ -244,11 +305,11 @@ in
         MOQ_LISTEN_TLS_KEY = lib.concatMapStringsSep "," (cert: "${cert.key}") cfg.tls.certs;
       }
       // lib.optionalAttrs cfg.auth.enable {
-        # Auth configuration
-        MOQ_AUTH_KEY = if cfg.auth.keyFile != null then cfg.auth.keyFile else "${cfg.stateDir}/root.jwk";
+        # The local auth server decides every session.
+        MOQ_AUTH_URL = authUrl;
       }
-      // lib.optionalAttrs (cfg.auth.publicPath != null) {
-        MOQ_AUTH_PUBLIC = cfg.auth.publicPath;
+      // lib.optionalAttrs (!cfg.auth.enable) {
+        MOQ_AUTH_PUBLIC = publicPattern;
       }
       // lib.optionalAttrs (cfg.cluster.rootUrl != null) {
         # Cluster configuration

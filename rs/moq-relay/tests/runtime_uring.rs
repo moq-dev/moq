@@ -453,7 +453,9 @@ fn mtls_only() -> moq_auth::serve::Policy {
 
 /// Serve `policy` on a loopback port for the test's lifetime, returning its URL.
 async fn spawn_auth_server(policy: moq_auth::serve::Policy) -> url::Url {
-	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind auth server");
+	let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+		.await
+		.expect("bind auth server");
 	let url = format!("http://{}/", listener.local_addr().expect("auth addr"))
 		.parse()
 		.expect("auth url");

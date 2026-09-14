@@ -27,11 +27,6 @@ pooled HLS consumer after a worker grant expires.
 Land the implementation and tests here. The release and the moq.pro
 (downstream) pin rollout stay out of this quest.
 
-## Required
-
-- [Relay](/quest/m1/auth/relay.md) - supplies the lease the relay holds per
-  session, whose `expires` enforces handle deadlines
-
 ## Related
 
 - [Relay tokens](/quest/m2/auth/relay-refresh.md) - the in-band token a

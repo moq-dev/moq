@@ -42,9 +42,14 @@ pub(crate) async fn serve_ws(
 		.ok_or(StatusCode::BAD_REQUEST)?;
 	// The SETUP has not happened yet, so the role is unknown; the path and query
 	// are the URL's, with the host the client addressed as the server name.
-	let mut request = state.auth.request(moq_auth::Transport::WebSocket, uri.path().to_string());
+	let mut request = state
+		.auth
+		.request(moq_auth::Transport::WebSocket, uri.path().to_string());
 	request.query = uri.query().map(str::to_owned);
-	request.server_name = host.parse::<axum::http::uri::Authority>().ok().map(|a| a.host().to_ascii_lowercase());
+	request.server_name = host
+		.parse::<axum::http::uri::Authority>()
+		.ok()
+		.map(|a| a.host().to_ascii_lowercase());
 	request.remote = Some(remote.0);
 	request.alpn = ws.selected_protocol().and_then(|p| p.to_str().ok()).map(str::to_owned);
 	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| crate::peer(&identity));

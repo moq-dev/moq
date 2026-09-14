@@ -1595,7 +1595,7 @@ impl Cluster {
 		// Apply the shared cluster token unless the URL already carries its own
 		// non-empty `?jwt=` (a per-peer inline token wins; the shared token still
 		// covers peers that have none). An empty
-		// `?jwt=` counts as absent, matching `AuthParams::from_url`.
+		// `?jwt=` counts as absent, as `moq auth serve` reads it.
 		// LAN dials never get the token: they authenticate with the mDNS credential.
 		if !target.lan && !token.is_empty() {
 			for url in &mut urls {

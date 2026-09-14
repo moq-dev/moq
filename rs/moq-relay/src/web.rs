@@ -733,8 +733,13 @@ async fn admit_http(
 ) -> Result<Admitted, AuthError> {
 	// The public request API represents a missing or root path as empty; the
 	// contract says what was dialed, and a URL always starts with `/`.
-	let mut request = state.auth.request(moq_auth::Transport::Http, format!("/{}", path.trim_start_matches('/')));
-	request.query = uri.query().map(str::to_owned).or_else(|| query.jwt.map(|jwt| format!("jwt={jwt}")));
+	let mut request = state
+		.auth
+		.request(moq_auth::Transport::Http, format!("/{}", path.trim_start_matches('/')));
+	request.query = uri
+		.query()
+		.map(str::to_owned)
+		.or_else(|| query.jwt.map(|jwt| format!("jwt={jwt}")));
 	request.server_name = request_host(uri, headers);
 	request.remote = Some(remote.0);
 	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| crate::peer(&identity));
@@ -799,7 +804,8 @@ async fn serve_fetch(
 		return Err(StatusCode::BAD_REQUEST.into());
 	}
 
-	let Admitted { lease, token } = admit_http(&state, path.join("/"), params.auth, &uri, &headers, remote, mtls).await?;
+	let Admitted { lease, token } =
+		admit_http(&state, path.join("/"), params.auth, &uri, &headers, remote, mtls).await?;
 	// The token's root is the canonical (alias-resolved) broadcast path.
 	let broadcast = token.root.to_string();
 
@@ -1279,9 +1285,7 @@ mod tests {
 		// configured with something for `Web` to build.
 		let mut auth_config = crate::AuthConfig::default();
 		auth_config.public_subscribe = vec![moq_auth::Pattern::all()];
-		let auth = auth_config
-			.init("test", &moq_tokio::tls::Connect::default())
-			.unwrap();
+		let auth = auth_config.init("test", &moq_tokio::tls::Connect::default()).unwrap();
 		let cluster = Cluster::new(crate::ClusterOptions::default()).unwrap();
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
 

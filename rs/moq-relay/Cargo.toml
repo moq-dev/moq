@@ -73,7 +73,6 @@ moq-net = { workspace = true }
 moq-stats = { workspace = true }
 moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "watch", "tcp"] }
 qmux = { workspace = true, features = ["ws"], optional = true }
-rand = { workspace = true }
 reqwest = { workspace = true, features = ["rustls"] }
 reqwest-middleware = "0.5"
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }

@@ -59,8 +59,7 @@ trips, and the moq-net fuzz harness's `pattern` target prevent semantic drift at
 the authorization boundary. Matching is linear and inherits `Path::MAX_PARTS`
 (32), which also bounds residual expansion.
 
-Grants and claims carry no version. The [Auth server](/quest/m1/auth/README.md)
-line makes `moq-auth` read patterns only: `foo` means exactly `foo`, a
+Grants and claims carry no version. `moq-auth` reads patterns only: `foo` means exactly `foo`, a
 subtree is `foo/**`, and an unversioned prefix credential fails verification.
 Translating the prefix credentials a deployment already issued is that
 deployment's job at its own edge for a deprecation window, which is what
@@ -86,5 +85,3 @@ CAT cannot represent `pid/*/chat`.
 
 - [Wildcard advertisements](/quest/m2/wildcard/README.md) - routing adopts the
   matcher while retaining its own cost, pool, refusal, and resolution work
-- [Auth server](/quest/m1/auth/README.md) - pattern claims and grants at
-  the authorization boundary, prefix-shaped until Origin scopes lands

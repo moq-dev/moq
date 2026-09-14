@@ -381,11 +381,15 @@ async fn a_moved_tier_keeps_the_session() {
 		"the relay re-checked"
 	);
 	assert!(
-		tokio::time::timeout(Duration::from_millis(200), pub_session.closed()).await.is_err(),
+		tokio::time::timeout(Duration::from_millis(200), pub_session.closed())
+			.await
+			.is_err(),
 		"a tier change must not close the publisher"
 	);
 	assert!(
-		tokio::time::timeout(Duration::from_millis(200), sub_session.closed()).await.is_err(),
+		tokio::time::timeout(Duration::from_millis(200), sub_session.closed())
+			.await
+			.is_err(),
 		"a tier change must not close the subscriber"
 	);
 
@@ -430,7 +434,9 @@ async fn a_refusal_closes_live_sessions() {
 	let ends = script.ends();
 	assert!(ends.len() >= 2, "an end per session, got {}", ends.len());
 	for end in &ends {
-		let Event::End { reason, .. } = &end.event else { unreachable!() };
+		let Event::End { reason, .. } = &end.event else {
+			unreachable!()
+		};
 		assert_eq!(*reason, moq_auth::lease::Reason::Refused);
 	}
 
@@ -450,7 +456,9 @@ async fn an_outage_keeps_the_session_until_expires() {
 	// Well into the outage the session is still up...
 	tokio::time::sleep(Duration::from_millis(2000)).await;
 	assert!(
-		tokio::time::timeout(Duration::from_millis(100), pub_session.closed()).await.is_err(),
+		tokio::time::timeout(Duration::from_millis(100), pub_session.closed())
+			.await
+			.is_err(),
 		"an outage must not close the publisher before expires"
 	);
 
@@ -462,7 +470,9 @@ async fn an_outage_keeps_the_session_until_expires() {
 
 	tokio::time::sleep(Duration::from_millis(200)).await;
 	for end in script.ends() {
-		let Event::End { reason, .. } = &end.event else { unreachable!() };
+		let Event::End { reason, .. } = &end.event else {
+			unreachable!()
+		};
 		assert_eq!(*reason, moq_auth::lease::Reason::Expired);
 	}
 	relay.abort();
@@ -474,7 +484,9 @@ async fn an_outage_keeps_the_session_until_expires() {
 async fn the_end_carries_duration_and_bytes() {
 	let script = Script::new(grant(Duration::from_secs(3600)));
 	let (addr, relay) = spawn_quic_relay(build_auth(script.spawn().await), None).await;
-	let url: url::Url = format!("moql://127.0.0.1:{}/room?jwt=token", addr.port()).parse().unwrap();
+	let url: url::Url = format!("moql://127.0.0.1:{}/room?jwt=token", addr.port())
+		.parse()
+		.unwrap();
 	let (pub_session, sub_session) = connect_and_round_trip(&url).await;
 
 	tokio::time::sleep(Duration::from_millis(300)).await;
@@ -487,7 +499,11 @@ async fn the_end_carries_duration_and_bytes() {
 		if ends.len() >= 2 {
 			break ends;
 		}
-		assert!(std::time::Instant::now() < deadline, "ends never arrived: {}", ends.len());
+		assert!(
+			std::time::Instant::now() < deadline,
+			"ends never arrived: {}",
+			ends.len()
+		);
 		tokio::time::sleep(Duration::from_millis(50)).await;
 	};
 	for end in &ends {
@@ -563,7 +579,9 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	.expect("connect timeout")
 	.expect("a scoped certificate is admitted");
 	assert!(
-		tokio::time::timeout(Duration::from_secs(2), session.closed()).await.is_err(),
+		tokio::time::timeout(Duration::from_secs(2), session.closed())
+			.await
+			.is_err(),
 		"the scoped publisher stays admitted"
 	);
 	// A subscribe-only client has nothing granted, so it is refused at the handshake.

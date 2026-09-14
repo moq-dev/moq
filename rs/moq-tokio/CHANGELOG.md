@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Request::remote_addr`, `local_addr`, `server_name`, and `alpn` report what the transport saw; `PeerIdentity::name` and `issuer` read the leaf certificate.
+
+### Added
+
 - *(tokio)* [**breaking**] partition LAN discovery by a DNS-SD application (`mdns::App`)
 
 ## [0.19.12](https://github.com/moq-dev/moq/compare/moq-native-v0.19.11...moq-native-v0.19.12) - 2026-08-20

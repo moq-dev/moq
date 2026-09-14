@@ -35,7 +35,7 @@ either hides paths the subscriber may use or leaks the ones it must not, and
 `request_broadcast` resolves against the route table regardless. The
 enforcing shape is a pattern-scoped grant on the consumer handle, narrowed at
 resolution and announce fan-out alike, and changed at runtime when the
-[lease](/quest/m1/auth/relay.md) the relay holds is revalidated. Narrowing a live
+lease the relay holds (`moq_auth::lease`) is revalidated. Narrowing a live
 grant must also end the subscriptions it no longer covers, not only refuse new
 ones. Prove the deafen case in the model-layer tests here: subscribe under a
 room prefix, revalidate with a grant that excludes that audio path, and assert

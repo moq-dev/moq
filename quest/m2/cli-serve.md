@@ -22,12 +22,10 @@ the listener directly.
   cluster, the auth, and the shutdown handle. `MoqSide` nests
   `moq_relay::AuthConfig` and `StatsConfig`, so `--auth-*` and `--stats-*`
   read the same on both binaries.
-- Default grant: with no auth configured the CLI keeps what it gives today, an
-  open listener over the whole origin, spelled as the relay's public prefixes
-  covering the root. The relay's own default stays a refusal, since that is
-  its `no auth-key, auth-key-dir, auth-api, or public path configured` check;
-  the difference is the listening default this quest is about, and both defaults
-  are documented side by side.
+- Default grant: the CLI and the relay both refuse a listener with neither
+  `--auth-url` nor `--auth-public` since the auth server line, so there is no
+  listening default left to reconcile; `--auth-public '**'` is the open
+  listener, spelled the same on both binaries.
 - The Unix peer-credential gate on `--listen-unix-bind` and the certificate
   endpoint `web::run_web` spawns for an explicit `--listen` survive, rehomed
   on the relay's web server or kept as the CLI's, whichever leaves one copy.

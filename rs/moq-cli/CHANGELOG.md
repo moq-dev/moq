@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- `--listen` needs `--auth-url` or `--auth-public`; a listener admits sessions through the same lease as moq-relay instead of accepting everyone.
+- `moq token` is `moq auth`, with `serve` answering the auth contract.
+
 ### Added
 
 - `--cluster-lan-app` names the DNS-SD application the LAN mesh advertises under

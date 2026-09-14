@@ -29,8 +29,8 @@
 //!   an `import hls` playlist path starting with `-`, which `./-name` covers, so
 //!   the separator stays unconditional rather than context-sensitive.
 
-use std::ffi::{OsStr, OsString};
 use anyhow::Context as _;
+use std::ffi::{OsStr, OsString};
 use std::time::Duration;
 
 use crate::publish::PublishFormat;
@@ -444,7 +444,9 @@ impl MoqSide {
 		// A listener for ordinary clients admits nobody without a decision; a mesh
 		// listener alone admits its peers by their LAN credential.
 		if self.server.has_explicit_bind() {
-			self.auth.validate().context("--listen needs --auth-url or --auth-public")?;
+			self.auth
+				.validate()
+				.context("--listen needs --auth-url or --auth-public")?;
 		} else if self.auth.url.is_some() || self.auth_public() {
 			self.auth.validate()?;
 		}
@@ -989,7 +991,8 @@ mod tests {
 	/// refuses to start with neither flag, and with both.
 	#[test]
 	fn a_listener_needs_exactly_one_auth_source() {
-		let cli = Invocation::try_parse_from(["moq", "--listen-tcp-bind", "127.0.0.1:0", "import", "ts"]).expect("parse");
+		let cli =
+			Invocation::try_parse_from(["moq", "--listen-tcp-bind", "127.0.0.1:0", "import", "ts"]).expect("parse");
 		let err = cli.moq.validate().unwrap_err().to_string();
 		assert!(err.contains("--auth-url or --auth-public"), "{err}");
 
@@ -1021,7 +1024,13 @@ mod tests {
 
 		// A local verb refuses the flag like every other MoQ-side flag.
 		let cli = Invocation::try_parse_from(["moq", "--auth-public", "**", "auth", "generate"]).expect("parse");
-		assert!(cli.moq.reject("auth").unwrap_err().to_string().contains("--auth-public"));
+		assert!(
+			cli.moq
+				.reject("auth")
+				.unwrap_err()
+				.to_string()
+				.contains("--auth-public")
+		);
 	}
 
 	/// The grammar Usage can't express: one connection, several endpoints.

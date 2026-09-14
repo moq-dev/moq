@@ -120,15 +120,12 @@ See [HTTP endpoints](/bin/relay/http).
 
 ```toml
 [auth]
-# Pick one key source:
-key = "public.jwk"                   # one verification key
-# key_dir = "/etc/moq/keys/"         # or a directory of {kid}.jwk files
-# auth_api = "https://api.example.com/auth"   # or one call returning key, public access, alias, and tier
-
-public = "anon"                      # Anonymous publish and subscribe under this prefix.
-# [auth.public]                      # Or split them:
-# subscribe = ["anon", "demo"]
-# publish = ["anon"]
+# Exactly one of these:
+url = "http://127.0.0.1:4440/"       # An auth server asked once per session event (`moq auth serve`,
+                                     # or your own). https:// presents connect.tls; unix:// is a socket.
+# public = "anon/**"                 # Or a static anonymous grant, publish and subscribe alike.
+# public_subscribe = ["anon/**", "demo/**"]   # Or split them; patterns, `foo/**` for a subtree.
+# public_publish = ["anon/**"]
 ```
 
 See [Authentication](/bin/relay/auth).
@@ -215,8 +212,8 @@ Each stats broadcast carries `publisher.json`, `subscriber.json`, and
 `sessions.json` tracks (plus compressed `.z` twins) with cumulative counters
 per broadcast: bytes, frames, groups, datagrams, subscriptions, announces, and
 connected sessions. Traffic is split by an arbitrary **tier** label chosen by
-the auth API, `--cluster-tier`, or `--auth-mtls-tier`, which is what makes
-billing per customer or per region possible. Read them with the
+the auth server's grant or `--cluster-tier`, which is what makes billing per
+customer or per region possible. Read them with the
 [`moq-stats`](https://docs.rs/moq-stats) crate.
 
 ## \[iroh]
