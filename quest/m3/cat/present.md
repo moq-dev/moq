@@ -20,7 +20,7 @@ Connecting with a token over a version that has no such option fails loud.
 - `js/net` `ConnectProps.token?: { kind: bigint; value: Uint8Array }` with
   the same behavior in `handshake.ts`.
 - `moq` CLI publish and subscribe accept the flags through the shared connect
-  config; `doc/bin/cli.md` and `doc/lib/rs/moq-tokio.md` gain them.
+  config; `doc/bin/cli.md` and `doc/lib/rs/moq-net.md` gain them.
 - Tests: the server request sees the token on every draft in Rust, JS, and
   across; a lite-only offer refuses; end to end against `moq auth serve`
   with a CAT once [Verify](/quest/m3/cat/verify.md) lands, otherwise the
