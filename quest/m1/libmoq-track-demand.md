@@ -32,9 +32,15 @@ Demand, one level-triggered watcher per handle:
   `MOQ_DEMAND_UNUSED`). Seeding with the current state is what closes the
   race the issue calls out: a track that went unused before registration
   still reports it.
-- Implement by alternating `used()`/`unused()` on the track (or the media
-  producer's `Demand`) inside the watcher task; the media watcher refuses a
-  container handle with the same error moq-ffi uses.
+- Neither `Producer` nor `Demand` exposes the current state, only the
+  level-triggered waits `used()` and `unused()`, and exactly one of them is
+  ready at any instant. The watcher task races the two to learn the initial
+  state, reports it, then loops waiting on the opposite wait. A flip between
+  reporting and arming resolves the next wait immediately, so no edge is
+  lost; a double flip collapses into no report, which is correct for a level
+  signal. Do not add an `is_used` getter to moq-net for this.
+- The media watcher refuses a container handle with the same error moq-ffi
+  uses.
 
 Requests, mirroring the broadcast path one level down:
 
@@ -52,8 +58,9 @@ Landing: regenerate `moq.h` (build.rs does not regenerate it on src-only
 changes), document every new symbol in `doc/lib/c`, and add tests in
 `rs/libmoq/src/test.rs`: a consumer subscribing then closing drives
 used -> unused; a watcher registered after the last consumer left is told
-unused first; a dynamic request is accepted and then aborted. Remove the
-dynamic-track bullet from #2152 when this lands.
+unused first; one dynamic request is accepted and the returned track
+carries frames, a second is aborted and its subscriber sees the code.
+Remove the dynamic-track bullet from #2152 when this lands.
 
 ## Closes
 
