@@ -46,7 +46,6 @@ can act on. Each still carries its own plan and regression test.
 - [Consume JSON snapshot patches](/quest/m2/json-merge.md) - measure consuming patches in snapshot encoding and decoding
 - [Relay memory](/quest/m2/relay-memory.md) - remeasure what an announcement costs after prefix routes
 - [Origin lookup CPU](/quest/m2/origin-cpu/README.md) - announce and subscribe stay cheap as the live advertisement set grows
-- [Route gauge](/quest/m2/route-gauge.md) - an operator sees how many routes a relay holds for a path
 - [PoP skipping](/quest/m2/pop-skipping/README.md) - short cold paths for unpopular broadcasts without losing warm backhaul dedup
 - [E2EE](/quest/m2/e2ee/README.md) - TypeScript and Rust peers interoperate over encrypted broadcasts no relay can decrypt
 - [SEI](/quest/m2/sei/README.md) - H.26x SEI moves into its own track, readable without subscribing to video
