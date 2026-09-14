@@ -25,10 +25,10 @@ Boundaries decided while planning:
   geo, composite `or`/`and`/`nor`) refuses the token naming the claim, so a
   restriction we do not evaluate never widens silently. DPoP (c4m section 3)
   is out of scope.
-- Provisional wire codes are hard-coded constants with a doc comment saying
-  so: the IANA "MOQT Auth Token Type" table has only `0x0` reserved and the
-  c4m claim keys are `TBD_MOQT`. We do not expect to interop on these until
-  the drafts register values.
+- Wire codes follow c4m-01: Token Type `0x01` is the value the draft
+  registers for CAT. The `moqt` and `moqt-reval` claim keys are still
+  `TBD_MOQT`, so they are hard-coded constants with a doc comment saying so.
+  We do not expect to interop on these until the draft registers them.
 - Rust only. `@moq/auth` gains nothing; `js/net` only carries bytes it was
   handed into SETUP.
 - [draft-ietf-moq-privacy-pass-auth](https://datatracker.ietf.org/doc/draft-ietf-moq-privacy-pass-auth/)
@@ -53,12 +53,14 @@ owns the `Request` this rides, the server that answers it, and the
 - [Verify](/quest/m3/cat/verify.md) - `moq_auth::cat` turns a CAT into a
   grant and `moq auth serve` admits one; `moq auth sign|verify` mint and
   check the format
-- [Present](/quest/m3/cat/present.md) - moq-tokio and js/net clients carry a
-  token into SETUP
+- [Present](/quest/m3/cat/present.md) - a CAT is one kind of configured
+  token, riding the SETUP option the in-band token quest already writes
 
 ## Related
 
 - [Auth server](/quest/m1/auth/README.md) - the contract, the lease, and the
   server every quest here builds on
 - [In-band auth](/quest/m2/auth/README.md) - credentials presented after
-  SETUP, which this line refuses on the IETF wire
+  SETUP, which this line refuses on the IETF wire; its [Token in
+  band](/quest/m2/auth/token-in-band.md) quest owns the client token
+  configuration a CAT joins

@@ -12,9 +12,12 @@ decode as an unknown key.
 
 ## Plan
 
-- `moq_net::setup::Token { kind: u64, value: Vec<u8> }` (`Token.kind` is
-  the wire Token Type; `Token::CAT` is a provisional constant with a doc
-  comment saying the IANA table is empty). Decode the draft-21 section 8.9
+- `moq_net::setup::Token { kind: u64, value: Vec<u8> }`, `kind` being the
+  wire Token Type: `Token::OUT_OF_BAND` is `0x0` and `Token::CAT` is the
+  `0x01` c4m-01 registers. This is the type [Token in
+  band](/quest/m2/auth/token-in-band.md) writes for a configured JWT
+  (`USE_VALUE`, type 0), so the two quests share one struct and one encoder;
+  whichever lands first adds them. Decode the draft-21 section 8.9
   structure: Alias Type `USE_VALUE` yields the token; `REGISTER` is treated
   as `USE_VALUE` because we advertise no `MAX_AUTH_TOKEN_CACHE_SIZE` (the
   default of 0 makes that the draft's own rule), so no alias state exists;
@@ -34,9 +37,12 @@ decode as an unknown key.
   return `None`.
 - `moq_auth::Request.token: Option<Token { kind: u64, value: base64 }>`,
   serialized with `serde_with` base64 like the rest of the request. The relay
-  fills it where it builds the request. `moq auth serve` refuses a token
-  whose `kind` it does not know, naming the code; a known kind is
-  [Verify](/quest/m3/cat/verify.md)'s.
+  fills it where it builds the request, beside the URL query it already
+  forwards. `moq auth serve` treats kind `0x0` as the JWT the deployment
+  negotiated out of band, verified exactly like `?jwt=`, refuses a kind it
+  does not know naming the code, and hands `0x01` to
+  [Verify](/quest/m3/cat/verify.md). A request carrying both a SETUP token
+  and a `jwt` query is refused naming both.
 - `js/net/src/ietf/parameters.ts` mirrors the decode and encode, and the
   `SetupOption.AuthorizationToken` handling in `handshake.ts`; the JS accept
   side exposes the token on its request the same way.
@@ -55,3 +61,8 @@ Wire: none new; the option already exists in every supported draft.
 
 - [Relay](/quest/m1/auth/relay.md) - the relay builds `moq_auth::Request`
   there; this quest adds one field to it
+
+## Related
+
+- [Token in band](/quest/m2/auth/token-in-band.md) - writes the same option
+  from the client side with the shared `setup::Token`
