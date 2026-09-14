@@ -8,7 +8,7 @@ import sys
 
 
 def install(crate: str, rendered: Path, tap: Path) -> None:
-    names = {"moq-cli": "moq", "moq-token-cli": "moq-token"}
+    names = {"moq-cli": "moq"}
     name = names.get(crate, crate)
     formulas = tap / "Formula"
     formulas.mkdir(exist_ok=True)

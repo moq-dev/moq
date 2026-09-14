@@ -88,14 +88,6 @@ let
     meta.mainProgram = "moq";
   };
 
-  moqTokenCliArgs = crateInfo ../rs/moq-token-cli/Cargo.toml // {
-    src = cleanCargoSource;
-    cargoExtraArgs = "-p moq-token-cli";
-    # The crate is `moq-token-cli`, but its `[[bin]]` ships as `moq-token`.
-    meta.mainProgram = "moq-token";
-  };
-  moqTokenPackage = buildPackage moqTokenCliArgs;
-
   moqBenchArgs = crateInfo ../rs/moq-bench/Cargo.toml // {
     src = cleanCargoSource;
     cargoExtraArgs = "-p moq-bench";
@@ -297,9 +289,6 @@ in
   moq-cli = buildPackage moqCliArgs;
 
   moq-bench = buildPackage moqBenchArgs;
-
-  moq-token = moqTokenPackage;
-  moq-token-cli = moqTokenPackage;
 
   moq-boy = buildPackage (
     crateInfo ../rs/moq-boy/Cargo.toml

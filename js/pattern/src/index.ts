@@ -5,7 +5,7 @@
  * union reduced by exact containment. Matching is linear. {@link Pattern.literal}
  * rejects `*` because it is reserved for pattern syntax.
  *
- * `@moq/net` and `@moq/token` re-export this package. The Rust twin is `moq-pattern`.
+ * `@moq/net` and `@moq/auth` re-export this package. The Rust twin is `moq-pattern`.
  *
  * ## Grammar
  *

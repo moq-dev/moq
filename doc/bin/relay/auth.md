@@ -6,8 +6,8 @@ description: JWT, anonymous, mTLS, and API-driven access control for moq-relay
 # Authentication
 
 Access is decided per connection from the URL path the client dialed. A token
-(or an anonymous rule) grants publish and subscribe rights under path
-prefixes, and the session can only see that part of the tree.
+(or an anonymous rule) grants publish and subscribe rights over path patterns
+under a root, and the session can only see that part of the tree.
 
 | Method | When to use it |
 | --- | --- |
@@ -19,18 +19,16 @@ prefixes, and the session can only see that part of the tree.
 ## Tokens
 
 Generate a key, sign a token, hand it to the client. Install the
-[moq CLI](/setup/install) and use its `moq token` subcommand.
-For token tooling alone, `cargo install moq-token-cli` installs the standalone
-`moq-token` executable with the same subcommands and options.
+[moq CLI](/setup/install) and use its `moq auth` subcommand.
 
 ```bash
 # Asymmetric: the relay only needs public.jwk.
-moq token generate --algorithm ES256 --out private.jwk --public public.jwk
+moq auth generate --algorithm ES256 --out private.jwk --public public.jwk
 
-# Let the bearer publish rooms/123/alice and subscribe to anything in rooms/123.
-moq token sign --key private.jwk --root rooms/123 --publish alice --subscribe "" --expires "$(( $(date +%s) + 3600 ))" > alice.jwt
+# Let the bearer publish under rooms/123/alice and subscribe to anything in rooms/123.
+moq auth sign --key private.jwk --root rooms/123 --publish 'alice/**' --subscribe '**' --expires "$(( $(date +%s) + 3600 ))" > alice.jwt
 
-moq token verify --key public.jwk --in alice.jwt
+moq auth verify --key public.jwk --in alice.jwt
 ```
 
 ```toml
@@ -48,26 +46,30 @@ after which it can never sign a broader token.
 | Claim | Meaning |
 | --- | --- |
 | `root` | Base path. Optional. |
-| `put` | Publish suffixes under `root`. `""` means everything; omitted means no publishing. |
-| `get` | Subscribe suffixes under `root`. Same rules. |
+| `publish` | Patterns the bearer may publish under `root`. `**` means everything; omitted means no publishing. |
+| `subscribe` | Patterns the bearer may subscribe to under `root`. Same rules. |
 | `exp`, `iat` | Expiry and issue time. `exp` is enforced for the whole session, not just at connect. |
+
+A token carrying the retired `put` and `get` prefix lists fails verification.
 
 ### Path matching
 
-Grants are `root/suffix`, matched on path boundaries (`foo` covers `foo/bar`
-but not `foobar`). Token scope stays prefix-based until origin grants become
-a pattern set: `live/*` is not a grant, and a wildcard advertisement still
-has to sit inside one of these prefixes. The connection path may equal the
-root, extend it (which narrows the grant), or be a parent of it (the grant
-still applies at the root). An unrelated path is rejected.
+Grants are [patterns](https://docs.rs/moq-pattern) relative to `root`: `foo`
+is exactly `foo`, `foo/**` is `foo` and everything beneath it, and `**` is
+everything. Matching is on path boundaries (`foo/**` covers `foo/bar` but not
+`foobar`). The relay scopes a session by prefix until origin grants become a
+pattern set, so only `foo/**` and `**` admit today: a token naming `live/*`,
+or a bare literal, is refused at connect naming the pattern. The connection
+path may equal the root, extend it (which narrows the grant), or be a parent
+of it (the grant still applies at the root). An unrelated path is rejected.
 
-| root | put | get | Publish | Subscribe |
+| root | publish | subscribe | Publish | Subscribe |
 | --- | --- | --- | --- | --- |
-| `demo` | `my-stream` | `""` | `demo/my-stream` | `demo/*` |
-| `demo` | (none) | `""` | nothing | `demo/*` |
-| `""` | `""` | `""` | everything | everything |
+| `demo` | `my-stream/**` | `**` | `demo/my-stream/**` | `demo/**` |
+| `demo` | (none) | `**` | nothing | `demo/**` |
+| `""` | `**` | `**` | everything | everything |
 
-Libraries: [`moq-token`](/lib/rs/moq-token) (Rust) and [`@moq/token`](/lib/js/token) (TypeScript) sign and verify the same tokens.
+Libraries: [`moq-auth`](/lib/rs/moq-auth) (Rust) and [`@moq/auth`](/lib/js/auth) (TypeScript) sign and verify the same tokens.
 
 ## Anonymous access
 

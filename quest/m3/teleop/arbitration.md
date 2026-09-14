@@ -22,7 +22,7 @@ press B; a vehicle is not that.
 
 Admission belongs to the relay as a path-scoped grant, not to this crate.
 Scoped signing keys landed in moq#2416 (`6b86e612b`), so the enforcing
-mechanism already exists: `Scope` in `rs/moq-token/src/claims.rs` and
+mechanism already exists: `Scope` in `rs/moq-auth/src/claims.rs` and
 `Key::with_scope` in `key.rs` bind a key to publish and subscribe path
 prefixes. Write the concrete claims down (a robot publishes `robot/<id>` and
 subscribes `control/<id>/`; an operator publishes `control/<id>/<operator>` and

@@ -933,7 +933,7 @@ struct AuthApiResponse {
 	#[serde(default)]
 	public: Option<PublicResponse>,
 	/// Verifying JWK for the requested kid (deserialized directly via
-	/// moq-token's serde); absent -> not found.
+	/// moq-auth's serde); absent -> not found.
 	#[serde(default)]
 	key: Option<Key>,
 	/// A grant the endpoint resolved from the credential itself, for a credential

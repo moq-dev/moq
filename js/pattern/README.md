@@ -15,7 +15,7 @@ patterns into those consumers is separate work.
 Literal paths stay coordinates; `@moq/net`'s path module keeps construction, joins, and
 prefix operations.
 
-`@moq/net` and `@moq/token` re-export these types. The Rust twin is
+`@moq/net` and `@moq/auth` re-export these types. The Rust twin is
 [`moq-pattern`](https://crates.io/crates/moq-pattern).
 
 ```bash

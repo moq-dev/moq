@@ -38,7 +38,7 @@ on main after the merge.
 Route cost already names this case: "The original publisher seeds it with its
 production cost: zero for a live publish, something large for a standby that
 would have to start working (a cold transcoder)"
-(`drafts/draft-lcurley-moq-lite.md`). `moq_token::Claims.publish` and
+(`drafts/draft-lcurley-moq-lite.md`). `moq_auth::Claims.publish` and
 `origin::Producer` gain versioned patterns through
 [Path patterns](/quest/m2/path-patterns/README.md), so advertisements reuse the
 same exact containment check. `Cost { warm, cold }`

@@ -34,7 +34,6 @@ on:
       - moq-cli
       - moq-gst
       - moq-relay
-      - moq-token-cli
       - Nightly
       - release-brew
       - Release Dart

@@ -58,7 +58,3 @@ address. The default answer to anything else is a refusal. On dev.
   listener, and the bind guard.
 
 Public API: `moq auth serve` is new. Wire: none.
-
-## Required
-
-- [Package](/quest/m1/auth/package.md) - the types and the JWT it serves

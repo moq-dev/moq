@@ -117,17 +117,15 @@ deprecation window. Its quests live in that repository's tree.
 
 ### Order
 
-The package first, because the server and the relay both build on it; the
-server second, because the relay's tests run against it; the relay last, the
-largest change and the one that deletes the old path. This line gates
+The package landed first, because the server and the relay both build on it
+(`rs/moq-auth`, `js/auth`, `moq auth`); the server second, because the
+relay's tests run against it; the relay last, the largest change and the one
+that deletes the old path. This line gates
 [Merge dev](/quest/m1/merge-dev.md): it is a breaking change to flags, claims,
 and package names, and the release moq.pro adopts must carry it.
 
 ## Quests
 
-- [Package](/quest/m1/auth/package.md) - `moq-auth` and `@moq/auth` own the
-  request, the grant, the lease, the HTTP client, and the JWT that `moq-token`
-  used to own
 - [Serve](/quest/m1/auth/serve.md) - `moq auth serve` answers the contract
   with keys, public rules, an explicit mTLS grant, tiers, and session limits
 - [Relay](/quest/m1/auth/relay.md) - moq-relay and `moq --server-bind` admit

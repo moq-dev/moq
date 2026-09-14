@@ -19,7 +19,7 @@ class PackageRenameTest(unittest.TestCase):
             binary = scratch / "binary"
             binary.write_text("#!/bin/sh\necho packaged\n")
             binary.chmod(0o755)
-            for name in ("moq", "moq-token"):
+            for name in ("moq",):
                 with self.subTest(name=name):
                     old = f"{name}-cli"
                     env = dict(os.environ, VERSION="99.0.0", ARCH="amd64", BINARY_PATH=str(binary))

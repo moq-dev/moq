@@ -10,7 +10,7 @@ version = 2
 yanked = "deny"
 ignore = [
     # rsa 0.9.x Marvin Attack (RSA private-key timing sidechannel). The
-    # `rsa` crate is a direct dep of moq-token but is only used for keygen
+    # `rsa` crate is a direct dep of moq-auth but is only used for keygen
     # and PEM serialization of JWK components. JWT signing/verification
     # itself runs through `jsonwebtoken` backed by `aws-lc-rs` (constant
     # time), so the vulnerable code path is not exercised. Drop the ignore

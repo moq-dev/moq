@@ -29,7 +29,5 @@ publish grant.
 ## Required
 
 - [Merge dev](/quest/m1/merge-dev.md) - the required M1 APIs must be available on main before this implementation starts
-- [Package](/quest/m1/auth/package.md) - supplies the pattern claim writers
-  this extension changes
 - [Origin scopes](/quest/m2/path-patterns/origin.md) - supplies the
   pattern-scoped origin handles the advertise scope extends

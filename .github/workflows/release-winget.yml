@@ -25,7 +25,6 @@ on:
     workflows:
       - moq-cli
       - moq-relay
-      - moq-token-cli
     types:
       - completed
   workflow_dispatch:
@@ -89,7 +88,6 @@ jobs:
           case "$crate" in
             moq-cli)       identifier="moq-dev.moq-cli" ;;
             moq-relay)     identifier="moq-dev.moq-relay" ;;
-            moq-token-cli) identifier="moq-dev.moq-token-cli" ;;
             *)
               echo "No winget identifier mapped for crate: $crate" >&2
               exit 1

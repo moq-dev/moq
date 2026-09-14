@@ -32,7 +32,7 @@ Components shared across languages use matching names and semantics (`moq-*`, `@
 
 - **net**: the pub/sub wire layer above. Everything else rides on it.
 - **json**: JSON over a track. `snapshot` is lossy latest-value with merge-patch deltas; `stream` is a lossless append-log in a single group; `window` is a retained range with checkpoints. **binary** is the same shape for opaque payloads.
-- **flate**: group-scoped DEFLATE, frames share one window. **token**: path-scoped JWTs. **stats**: relay traffic published as JSON tracks.
+- **flate**: group-scoped DEFLATE, frames share one window. **auth**: the authorization contract and path-scoped JWTs. **stats**: relay traffic published as JSON tracks.
 - **hang**: the media catalog and container. **loc** and **msf** are the IETF alternatives.
 - **mux**: containers (fmp4, ts, flv, mkv) and codec parsers <-> hang broadcasts. Native capture/encode/decode/render live in **video** and **audio**; **transcode** re-encodes rendition ladders. In the browser, **publish** and **watch** cover capture through render with optional UI.
 - **relay**, the **cli** (`moq`), and the gateways (**rtmp**, **srt**, **rtc**, **hls**) are Rust only. The bindings (**ffi**, **libmoq**, **gst**, **wasm**) wrap one Rust core.
@@ -106,11 +106,11 @@ See `CONTRIBUTING.md` before making or merging a PR.
 | `rs/moq-ffi` | `rs/libmoq`, `{py,swift,kt,dart}/`, `go/wrapper/moq/*.go` (the `go/ffi` and `dart/moq_ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs` or `dart/moq`), `doc/lib/{py,swift,kt,go,dart,c}` |
 | `rs/moq-net` wire/API | `js/net`, `doc/concept`, `drafts/draft-lcurley-moq-lite.md` (if the wire spec changes) |
 | `rs/hang` catalog/container | `js/hang`, `doc/concept`, `drafts/draft-lcurley-moq-hang.md` (if the format spec changes) |
-| `rs/moq-token` | `js/token` |
+| `rs/moq-auth` | `js/auth` |
 | `rs/moq-stats` wire (track names, frame shapes) | `doc/bin/relay/config.md` (stats section) |
 | `rs/moq-relay` config/behavior | `doc/bin/relay/` |
 | `rs/moq-cli` | `doc/bin/cli.md` |
-| `rs/moq-token-cli` | `doc/bin/relay/auth.md`, `doc/lib/rs/moq-token.md`, `doc/lib/rs/index.md` |
+| `rs/moq-cli` `auth` verb | `doc/bin/relay/auth.md`, `doc/lib/rs/moq-auth.md`, `doc/lib/rs/index.md` |
 | `rs/moq-gst` | `doc/bin/gstreamer.md` |
 | `rs/libmoq` C ABI (`moq.h`) | `cpp/obs/src`, `doc/bin/obs.md` |
 | `js/{watch,publish}` UI/API | `demo/web` if it consumes the API |

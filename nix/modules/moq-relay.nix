@@ -171,7 +171,7 @@ in
         # Generate auth key if needed
         ${lib.optionalString (cfg.auth.enable && cfg.auth.keyFile == null) ''
           if [ ! -f "${cfg.stateDir}/root.jwk" ]; then
-            ${pkgs.moq-token}/bin/moq-token generate --out "${cfg.stateDir}/root.jwk"
+            ${pkgs.moq-cli}/bin/moq auth generate --out "${cfg.stateDir}/root.jwk"
             chown ${cfg.user}:${cfg.group} "${cfg.stateDir}/root.jwk"
             chmod 600 "${cfg.stateDir}/root.jwk"
           fi
@@ -185,8 +185,8 @@ in
               keyPath = if cfg.auth.keyFile != null then cfg.auth.keyFile else "${cfg.stateDir}/root.jwk";
             in
             ''
-              ${pkgs.moq-token}/bin/moq-token sign --key "${keyPath}" \
-                --subscribe "" --publish "" --cluster \
+              ${pkgs.moq-cli}/bin/moq auth sign --key "${keyPath}" \
+                --subscribe '**' --publish '**' \
                 > "${cfg.stateDir}/cluster.jwt"
               chown ${cfg.user}:${cfg.group} "${cfg.stateDir}/cluster.jwt"
             ''

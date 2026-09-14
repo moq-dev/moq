@@ -38,13 +38,13 @@ Everything below builds on these layers.
 
 **Native and mobile apps**. One Rust core (`rs/moq-ffi`) with idiomatic bindings: Python (asyncio), Kotlin (coroutines/Flow, Android), Swift (async sequences, iOS/macOS), Go, and C (`rs/libmoq` for C/C++ build systems). Index: https://doc.moq.dev/lib/
 
-**Global delivery, hosted or self-hosted**. Don't want to run infrastructure? https://moq.pro offers most of these libraries behind an API and a global CDN, with more CDN providers to come; moq-lite is also forwards-compatible with IETF moq-transport, so it runs over third-party CDNs like Cloudflare (https://moq.dev/blog/first-cdn). To self-host: `moq-relay` clusters across regions (https://doc.moq.dev/bin/relay/cluster), authenticates with path-scoped JWTs (`moq-token`, https://doc.moq.dev/bin/relay/auth), and exposes live traffic stats as MoQ tracks (`rs/moq-stats`). Load-test with `rs/moq-bench`. Native apps can also connect P2P via Iroh.
+**Global delivery, hosted or self-hosted**. Don't want to run infrastructure? https://moq.pro offers most of these libraries behind an API and a global CDN, with more CDN providers to come; moq-lite is also forwards-compatible with IETF moq-transport, so it runs over third-party CDNs like Cloudflare (https://moq.dev/blog/first-cdn). To self-host: `moq-relay` clusters across regions (https://doc.moq.dev/bin/relay/cluster), authenticates with path-scoped JWTs (`moq-auth`, https://doc.moq.dev/bin/relay/auth), and exposes live traffic stats as MoQ tracks (`rs/moq-stats`). Load-test with `rs/moq-bench`. Native apps can also connect P2P via Iroh.
 
 **Web playback/capture on any site**. `<moq-watch>` and `<moq-publish>` are plain web components with optional UI overlays; embeddable with no build step. Docs: https://doc.moq.dev/lib/js/watch and https://doc.moq.dev/lib/js/publish
 
 ## Repo map
 
-- `rs/` Rust: `moq-net` (pub/sub), `hang` (media), `moq-relay`, `moq-cli` (installs a `moq` binary), `moq-tokio` (QUIC/TLS setup), `moq-mux` (container muxing), `moq-token[-cli]` (auth), gateways (`moq-rtmp`, `moq-srt`, `moq-rtc`, `moq-hls`), native codecs (`moq-video`, `moq-audio`, `moq-nvenc`), `moq-ffi`/`libmoq` (bindings core).
+- `rs/` Rust: `moq-net` (pub/sub), `hang` (media), `moq-relay`, `moq-cli` (installs a `moq` binary), `moq-tokio` (QUIC/TLS setup), `moq-mux` (container muxing), `moq-auth` (auth), gateways (`moq-rtmp`, `moq-srt`, `moq-rtc`, `moq-hls`), native codecs (`moq-video`, `moq-audio`, `moq-nvenc`), `moq-ffi`/`libmoq` (bindings core).
 - `js/` TypeScript, published as `@moq/*`: `net`, `hang`, `watch`, `publish`, `token`, `json`, `signals`.
 - `py/`, `swift/`, `kt/`, `go/` bindings; `cpp/obs` OBS plugin; `demo/` runnable demos.
 
@@ -53,7 +53,7 @@ Everything below builds on these layers.
 - Every client connects to a relay URL; the path scopes auth and broadcast names append to it. Public dev relay: `https://cdn.moq.dev/anon` (unauthenticated, testing only, pick a unique name). Hosted production relays: https://moq.pro. Local: `cargo install moq-relay`, or clone the repo and `nix develop -c just` to run a relay, demo media, and web UI together.
 - Media broadcast names end in `.hang` (selects the hang catalog; `.msf` selects the IETF MSF format).
 - Browsers need WebTransport (Chrome/Edge; Firefox/Safari experimental) and, outside localhost, a real TLS certificate.
-- Auth is a JWT in the `?jwt=` query parameter, signed by `moq-token`.
+- Auth is a JWT in the `?jwt=` query parameter, signed by `moq auth sign` (the `moq-auth` crate and `@moq/auth` package).
 
 ## Reference
 

@@ -1,28 +1,25 @@
 ---
 title: Install
-description: Install moq-relay, moq, moq-token, and the plugins on Linux, macOS, and Windows
+description: Install moq-relay, moq, and the plugins on Linux, macOS, and Windows
 ---
 
 # Install
 
-Three binaries and two plugins ship prebuilt:
+Two binaries and two plugins ship prebuilt:
 
 | Package | Binary | What it does |
 | --- | --- | --- |
 | `moq-relay` | `moq-relay` | The [relay server](/bin/relay/) |
-| `moq` | `moq` | The [media router](/bin/cli): publish, play, convert, gateways, and `moq token` |
-| `moq-token` | `moq-token` | Standalone JWT tool; the same commands as `moq token` |
+| `moq` | `moq` | The [media router](/bin/cli): publish, play, convert, gateways, and `moq auth` |
 | GStreamer plugin | `moqsink`, `moqsrc` | [GStreamer](/bin/gstreamer) elements |
 | OBS plugin | | [OBS Studio](/bin/obs) output and source |
 
 Homebrew and Linux package names match the executables. Cargo crates and
-Windows package IDs retain `moq-cli` and `moq-token-cli`. Existing Homebrew
+Windows package IDs retain `moq-cli`. Existing Homebrew
 installs migrate through formula renames; apt upgrades use transitional
 packages, and dnf replaces the old packages.
 
-Use `moq token` for keys and tokens; installing `moq` includes it.
-The standalone `moq-token` is optional for users who only need token tooling:
-install it with `cargo install moq-token-cli`.
+Use `moq auth` for keys and tokens; installing `moq` includes it.
 
 ## Any platform
 

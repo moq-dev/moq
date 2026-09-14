@@ -31,7 +31,7 @@ mid-stream can be handed a new one without the plugin reconnecting.
 - Docs: `doc/lib/{py,swift,kt,go,dart,c}` each gain a short auth section, and
   `doc/lib/rs` documents `Session::auth()`.
 - Tests: each wrapper's existing session test reads a grant from a local
-  relay, adds a second token minted by `moq token`, sees the union grow, and
+  relay, adds a second token minted by `moq auth`, sees the union grow, and
   releases it; the refusal path surfaces the structured error in each
   language.
 

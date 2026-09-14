@@ -9,9 +9,7 @@ decode, and render stack.
 
 ## Plan
 
-The same shape `moq token` already uses: `moq-token-cli` is lib+bin, its
-`Args` nested by moq-cli (`rs/moq-cli/src/main.rs`), its binary untouched.
-`moq-relay` is lib+bin as well (`rs/moq-relay/Cargo.toml`), with a 15-line
+`moq-relay` is lib+bin (`rs/moq-relay/Cargo.toml`), with a 15-line
 `main.rs` that installs the aws-lc-rs provider, optionally jemalloc, and calls
 `Relay::load(Config::load()?).await?.run()`.
 

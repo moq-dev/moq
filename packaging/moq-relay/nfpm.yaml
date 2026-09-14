@@ -48,14 +48,14 @@ overrides:
     recommends:
       - systemd
     suggests:
-      - moq-token-cli
+      - moq
   rpm:
     depends:
       - glibc >= 2.34
     recommends:
       - systemd
     suggests:
-      - moq-token-cli
+      - moq
 
 deb:
   fields:

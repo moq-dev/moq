@@ -19,7 +19,6 @@ on:
     workflows:
       - moq-relay
       - moq-cli
-      - moq-token-cli
       - moq-gst
     types:
       - completed
@@ -147,7 +146,6 @@ jobs:
           brew tap moq-dev/tap
           brew install moq-dev/tap/moq-relay
           brew install moq-dev/tap/moq-cli
-          brew install moq-dev/tap/moq-token-cli
           brew install moq-dev/tap/moq-gst
           ```
 

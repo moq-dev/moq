@@ -2,18 +2,17 @@
 
 ## Goal
 
-`moq-cli.yml`, `moq-relay.yml`, and `moq-token-cli.yml` are three copies of
-the same workflow (226, 225, and 226 lines) with the binary name swapped.
-They become one reusable `release-binary.yml` taking `crate` and `bin`
-inputs, and three callers of a dozen lines each that keep their tag trigger
+`moq-cli.yml` and `moq-relay.yml` are two copies of the same workflow (226
+and 225 lines) with the binary name swapped. They become one reusable
+`release-binary.yml` taking `crate` and `bin` inputs, and two callers of a
+dozen lines each that keep their tag trigger
 and workflow name, so `alert.yml`, `release-brew.yml`, and
 `release-winget.yml` keep matching on the names they match today.
 
 ## Plan
 
 - `release-binary.yml` on `workflow_call` with inputs `crate` (the cargo
-  package) and `bin` (the executable name; `moq-cli` ships `moq`,
-  `moq-token-cli` ships `moq-token`). It holds the Linux native-runner matrix,
+  package) and `bin` (the executable name; `moq-cli` ships `moq`). It holds the Linux native-runner matrix,
   the macOS tarball job, the Windows job, the `.deb` and `.rpm` packaging, the
   release creation, and the repo-publish trigger, all as `just` recipes per
   the preceding quest.

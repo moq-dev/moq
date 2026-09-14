@@ -17,24 +17,23 @@ class InstallFormulaTest(unittest.TestCase):
             tap = Path(directory)
             formulas = tap / "Formula"
             formulas.mkdir()
-            for crate in ("moq-cli", "moq-token-cli", "moq-relay"):
+            for crate in ("moq-cli", "moq-relay"):
                 (formulas / f"{crate}.rb").write_text("old")
             (tap / "formula_renames.json").write_text('{"prior": "unrelated"}')
-            (tap / "README.md").write_text("brew install moq-dev/tap/moq-cli moq-dev/tap/moq-token-cli\n")
+            (tap / "README.md").write_text("brew install moq-dev/tap/moq-cli moq-dev/tap/moq-relay\n")
             rendered = tap / "rendered.rb"
             rendered.write_text("new")
             module.install("moq-cli", rendered, tap)
             self.assertFalse((formulas / "moq-cli.rb").exists())
             self.assertEqual((formulas / "moq.rb").read_text(), "new")
-            self.assertTrue((formulas / "moq-token-cli.rb").exists())
-            self.assertNotIn("moq-token-cli", json.loads((tap / "formula_renames.json").read_text()))
-            module.install("moq-token-cli", rendered, tap)
+            self.assertTrue((formulas / "moq-relay.rb").exists())
+            self.assertNotIn("moq-relay", json.loads((tap / "formula_renames.json").read_text()))
             module.install("moq-relay", rendered, tap)
             module.install("moq-cli", rendered, tap)
             self.assertEqual(json.loads((tap / "formula_renames.json").read_text()), {
-                "prior": "unrelated", "moq-cli": "moq", "moq-token-cli": "moq-token",
+                "prior": "unrelated", "moq-cli": "moq",
             })
-            self.assertEqual((tap / "README.md").read_text(), "brew install moq-dev/tap/moq moq-dev/tap/moq-token\n")
+            self.assertEqual((tap / "README.md").read_text(), "brew install moq-dev/tap/moq moq-dev/tap/moq-relay\n")
             self.assertEqual((formulas / "moq-relay.rb").read_text(), "new")
 
 

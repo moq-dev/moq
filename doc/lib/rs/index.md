@@ -13,14 +13,14 @@ The reference implementation. Every crate is on
 | Crate | Does |
 | --- | --- |
 | [moq-net](/lib/rs/moq-net) | The pub/sub layer: sessions, origins, broadcasts, tracks, groups, frames. Transport-agnostic. |
-| [moq-pattern](https://docs.rs/moq-pattern) | Exact path patterns: grammar, matching, and set algebra. Re-exported by moq-net and moq-token. |
+| [moq-pattern](https://docs.rs/moq-pattern) | Exact path patterns: grammar, matching, and set algebra. Re-exported by moq-net and moq-auth. |
 | [moq-tokio](https://docs.rs/moq-tokio) | Stands up QUIC (quinn, quiche, or noq), TLS, WebSocket fallback, and iroh, from config or CLI flags. |
 | [hang](/lib/rs/hang) | The media layer: catalog, containers, ordered frame delivery. |
 | [moq-mux](/lib/rs/moq-mux) | Import and export fMP4/CMAF, MPEG-TS, Matroska, FLV, and Annex-B. |
 | [moq-video](/lib/rs/moq-video) | Native capture, hardware encode/decode (Apple, Windows, NVIDIA, VAAPI, V4L2, Android), and GPU rendering. |
 | [moq-audio](/lib/rs/moq-audio) | Microphone and speaker, Opus/PCM/AAC codecs, echo cancellation. |
 | [moq-transcode](https://docs.rs/moq-transcode) | Just-in-time rendition ladders, GPU-resident on NVIDIA. |
-| [moq-token](/lib/rs/moq-token) | JWT keys, signing, verification, path authorization. |
+| [moq-auth](/lib/rs/moq-auth) | The authorization contract: requests, grants, leases, the HTTP client, and JWT keys, signing, and verification. |
 | [moq-room](/lib/rs/moq-room) | Headless rooms: announce-derived roster, token claims, and a chat track. |
 | [moq-json](https://docs.rs/moq-json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
 | [moq-e2ee](https://docs.rs/moq-e2ee) | End-to-end encryption of groups, datagrams, catalogs, and track names. |

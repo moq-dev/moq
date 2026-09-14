@@ -860,8 +860,7 @@ package crate packager:
     case "{{ crate }}" in
     	moq-relay)      bin=moq-relay  ;;
     	moq-cli)        bin=moq        ;;
-        moq-token-cli)  bin=moq-token  ;;
-    	*) echo "Unknown crate: {{ crate }} (use moq-relay, moq-cli, or moq-token-cli)" >&2; exit 1 ;;
+    	*) echo "Unknown crate: {{ crate }} (use moq-relay or moq-cli)" >&2; exit 1 ;;
     esac
     case "{{ packager }}" in
     	deb)

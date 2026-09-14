@@ -29,8 +29,6 @@ Land the implementation and tests here. The release and the moq.pro
 
 ## Required
 
-- [Package](/quest/m1/auth/package.md) - supplies exact pattern grant
-  minting and the audience shape this lease extends
 - [Relay](/quest/m1/auth/relay.md) - supplies the lease the relay holds per
   session, whose `expires` enforces handle deadlines
 

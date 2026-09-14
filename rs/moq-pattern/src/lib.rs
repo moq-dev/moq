@@ -4,7 +4,7 @@
 //! reduced by exact containment. Matching is linear. [`Pattern::literal`] rejects `*`
 //! because it is reserved for pattern syntax.
 //!
-//! `moq-net` and `moq-token` re-export this crate. The TypeScript twin is `@moq/pattern`.
+//! `moq-net` and `moq-auth` re-export this crate. The TypeScript twin is `@moq/pattern`.
 //!
 //! # Grammar
 //!

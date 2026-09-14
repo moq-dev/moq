@@ -12,7 +12,7 @@ patterns into those consumers is separate work.
 Literal paths stay coordinates; `moq-net`'s `Path` and `@moq/net`'s path module keep
 construction, joins, and prefix operations.
 
-`moq-net` and `moq-token` re-export these types. The TypeScript twin is
+`moq-net` and `moq-auth` re-export these types. The TypeScript twin is
 [`@moq/pattern`](https://www.npmjs.com/package/@moq/pattern).
 
 ```bash

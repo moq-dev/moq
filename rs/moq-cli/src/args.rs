@@ -88,7 +88,7 @@ pub struct Invocation {
 	/// Only [`MoqSide::reject`] reads it. A local verb refuses a MoQ side the user
 	/// asked for, and an exported `MOQ_CONNECT` is not an ask: it is a standing
 	/// setting for the publishing this shell usually does, and it would otherwise
-	/// make `moq token` and `moq completion` fail for everyone who has one.
+	/// make `moq auth` and `moq completion` fail for everyone who has one.
 	pub typed: MoqSide,
 
 	/// The stages, in the order given. Never empty.

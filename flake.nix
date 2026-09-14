@@ -418,7 +418,6 @@
             paths = [
               moq-relay
               moq-cli
-              moq-token
             ];
           };
 
@@ -427,8 +426,6 @@
             moq-relay
             moq-cli
             moq-bench
-            moq-token
-            moq-token-cli
             moq-boy
             libmoq
             moq-gst

@@ -86,7 +86,7 @@ domain, and signing key already exist. To stand them up the first time:
      Maven Central release workflow; the apt/rpm publishers reuse them.
 
 After this, every release that publishes a `.deb` or `.rpm` (one of the
-`moq-relay-v*`, `moq-cli-v*`, `moq-token-cli-v*`, `moq-gst-v*` tags)
+`moq-relay-v*`, `moq-cli-v*`, `moq-gst-v*` tags)
 triggers `apt-repo.yml` / `rpm-repo.yml`, which downloads the assets,
 regenerates the repository metadata, signs it, and uploads the diff.
 

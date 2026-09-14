@@ -196,13 +196,16 @@ the relay. `--cluster-connect` and `--cluster-connect-api` are a MoQ side on
 their own, so `moq --cluster-connect https://relay.example import ts` needs
 no `--connect`. See [Clustering](/bin/relay/cluster).
 
-## Tokens
+## Auth
 
 ```bash
-moq token generate --algorithm ES256 --out private.jwk --public public.jwk
-moq token sign --key private.jwk --root rooms/123 --publish alice --subscribe "" > alice.jwt
-moq token verify --key public.jwk --in alice.jwt
+moq auth generate --algorithm ES256 --out private.jwk --public public.jwk
+moq auth sign --key private.jwk --root rooms/123 --publish 'alice/**' --subscribe '**' > alice.jwt
+moq auth verify --key public.jwk --in alice.jwt
 ```
+
+`--publish` and `--subscribe` take patterns: `alice` is one broadcast,
+`alice/**` is a subtree, `**` is everything under `--root`.
 
 See [Authentication](/bin/relay/auth).
 

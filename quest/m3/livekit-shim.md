@@ -7,7 +7,7 @@ runs a multi-participant room entirely over MoQ. The v1 surface is media plus
 core events: Room connect/disconnect, local and remote participants,
 camera/mic/screenshare publish, auto-subscribe, and the TrackSubscribed event
 family; data surfaces (publishData, streams, RPC) are stubbed. The token slot
-takes an ordinary moq-token, no LiveKit JWT parsing. Done when an
+takes an ordinary moq-auth token, no LiveKit JWT parsing. Done when an
 off-the-shelf LiveKit JS sample runs against a MoQ relay with only the import
 and the connect URL/token changed.
 
