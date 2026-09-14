@@ -1,6 +1,6 @@
 # moq-room
 
-Headless multi-participant rooms over [Media over QUIC](https://moq.dev/). A room is a path prefix. There is no service and no storage: joining is minting a moq-token rooted at that prefix.
+Headless multi-participant rooms over [Media over QUIC](https://moq.dev/). A room is a path prefix. There is no service and no storage: joining is minting a moq-auth token rooted at that prefix.
 
 Participants are discovered from the announce stream. Identity is the path before `camera.hang` / `screen.hang`. Each participant publishes `{identity}/camera.hang` and `{identity}/screen.hang`.
 

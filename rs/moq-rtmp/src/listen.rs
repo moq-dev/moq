@@ -15,7 +15,7 @@
 //!
 //! Auth: this listener is currently unauthenticated. Anyone who can reach the
 //! TCP port can publish or play, so gate it with the host firewall / a private
-//! network. Treating the stream key as a token (a moq-token JWT, as moq-edge
+//! network. Treating the stream key as a token (a moq-auth JWT, as moq-edge
 //! does) is the obvious next step.
 
 use std::collections::HashSet;

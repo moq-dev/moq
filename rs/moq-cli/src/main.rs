@@ -5,6 +5,7 @@
 //! plus every stage's endpoint.
 
 mod args;
+mod auth;
 mod complete;
 #[cfg(feature = "capture")]
 mod devices;
@@ -268,9 +269,9 @@ async fn main() -> anyhow::Result<()> {
 	let mut stages = std::mem::take(&mut cli.stages);
 	if stages.len() == 1 {
 		match stages.remove(0) {
-			Command::Token(token) => {
-				cli.reject("token")?;
-				return token.run();
+			Command::Auth(auth) => {
+				cli.reject("auth")?;
+				return auth.run();
 			}
 			Command::Completion(completion) => {
 				cli.reject("completion")?;

@@ -8,7 +8,7 @@ description: Headless multi-participant rooms over MoQ
 [![npm](https://img.shields.io/npm/v/@moq/room)](https://www.npmjs.com/package/@moq/room)
 
 A room is a path prefix. There is no service and no storage: joining is minting
-a moq-token rooted at that prefix and dialing the relay. Participants are
+a moq-auth token rooted at that prefix and dialing the relay. Participants are
 discovered from the announce stream. Identity is the path before `camera.hang` /
 `screen.hang`. Each participant publishes `{identity}/camera.hang` (camera + mic, hd/sd)
 and `{identity}/screen.hang` (screenshare).
@@ -17,7 +17,7 @@ and `{identity}/screen.hang` (screenshare).
 import { Local, Room } from "@moq/room";
 import { Connection, Path } from "@moq/net";
 import { claims } from "@moq/room";
-import { sign } from "@moq/token";
+import { sign } from "@moq/auth";
 
 const token = await sign(key, claims("meet/demo", "alice"));
 const connection = new Connection({

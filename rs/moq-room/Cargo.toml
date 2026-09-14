@@ -16,7 +16,7 @@ categories = ["multimedia", "network-programming"]
 kio = { workspace = true }
 moq-json = { workspace = true }
 moq-net = { workspace = true }
-moq-token = { workspace = true }
+moq-auth = { workspace = true }
 thiserror = { workspace = true }
 web-async = { workspace = true }
 

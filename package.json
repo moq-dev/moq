@@ -31,7 +31,7 @@
 		"js/net",
 		"js/clock",
 		"js/pattern",
-		"js/token",
+		"js/auth",
 		"js/flate",
 		"js/binary",
 		"js/json",

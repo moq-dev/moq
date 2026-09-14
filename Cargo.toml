@@ -4,6 +4,7 @@ members = [
     "rs/kio",
     "rs/libmoq",
     "rs/moq-archive",
+    "rs/moq-auth",
     "rs/moq-audio",
     "rs/moq-bench",
     "rs/moq-binary",
@@ -30,8 +31,6 @@ members = [
     "rs/moq-sock",
     "rs/moq-srt",
     "rs/moq-stats",
-    "rs/moq-token",
-    "rs/moq-token-cli",
     "rs/moq-tokio",
     "rs/moq-transcode",
     "rs/moq-uring",
@@ -44,6 +43,7 @@ default-members = [
     "rs/hang",
     # "rs/libmoq",    # requires C toolchain
     "rs/moq-archive",
+    "rs/moq-auth",
     "rs/moq-boy",
     "rs/moq-audio",
     "rs/moq-bench",
@@ -69,8 +69,6 @@ default-members = [
     "rs/moq-sock",
     "rs/moq-srt",
     "rs/moq-stats",
-    "rs/moq-token",
-    "rs/moq-token-cli",
     "rs/moq-tokio",
     "rs/moq-transcode",
     "rs/moq-uring",
@@ -130,6 +128,7 @@ loom = { version = "0.7.2", features = ["futures"] }
 # DNS-SD advertisement and browsing for LAN peer discovery (moq-tokio's `mdns` feature).
 # `async` awaits the event channel instead of blocking a thread on it.
 mdns-sd = { version = "0.20", features = ["async"] }
+moq-auth = { version = "0.1.0", path = "rs/moq-auth" }
 moq-audio = { version = "0.0.23", path = "rs/moq-audio", default-features = false }
 moq-binary = { version = "0.1.0", path = "rs/moq-binary" }
 moq-flate = { version = "0.1.2", path = "rs/moq-flate" }
@@ -150,8 +149,6 @@ moq-rtmp = { version = "0.2.9", path = "rs/moq-rtmp" }
 moq-sock = { version = "0.0.1", path = "rs/moq-sock" }
 moq-srt = { version = "0.2.9", path = "rs/moq-srt" }
 moq-stats = { version = "0.1.9", path = "rs/moq-stats" }
-moq-token = { version = "0.7.3", path = "rs/moq-token" }
-moq-token-cli = { version = "0.5.47", path = "rs/moq-token-cli" }
 moq-tokio = { version = "0.19.11", path = "rs/moq-tokio", default-features = false }
 # default-features off (the NVIDIA hardware codecs) on moq-transcode and
 # moq-video so each consumer opts in. Binaries enable them, but a self-compiler
@@ -245,7 +242,7 @@ debug = "line-tables-only"
 
 # Optimize the bignum crates even in dev/test builds. RSA keygen is bignum
 # arithmetic in a loop, and unoptimized it is orders of magnitude slower: the
-# moq-token key tests spend ~16s generating 2048-bit keys, versus well under a
+# moq-auth key tests spend ~16s generating 2048-bit keys, versus well under a
 # second here. These are dependencies we never step through in a debugger, so
 # optimizing them costs nothing an unoptimized build was buying us, and the
 # tests keep exercising production key sizes rather than being weakened to

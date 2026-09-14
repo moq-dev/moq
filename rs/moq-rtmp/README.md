@@ -61,7 +61,7 @@ while let Some(request) = server.accept().await {
     // Spawn per connection: `accept` pumps media for the whole connection, so
     // handling it inline would serialize clients.
     tokio::spawn(async move {
-        // Treat the stream key as a token (e.g. a moq-token JWT) and the app as
+        // Treat the stream key as a token (e.g. a moq-auth JWT) and the app as
         // the broadcast path. Verify however you like; the origin can be scoped
         // per token with `with_root` / `scope`.
         match request {
@@ -159,6 +159,6 @@ the broadcast to be announced.
 The `run` entry point (and the `moq-cli` CLI built on it) is unauthenticated:
 anyone who can reach the TCP port can publish or play, so gate them with a host firewall or a
 private network. To authenticate, use the `Server` / `Request` API above and
-verify each request in your accept loop (e.g. the stream key as a moq-token JWT,
+verify each request in your accept loop (e.g. the stream key as a moq-auth JWT,
 the app as the broadcast path) before accepting it. That is the intended
 integration point for a relay that already has JWT/path auth.

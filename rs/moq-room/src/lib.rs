@@ -1,7 +1,7 @@
 //! Headless multi-participant rooms over MoQ.
 //!
 //! A room is a path prefix. There is no service and no storage: joining is
-//! minting a moq-token rooted at that prefix (the LiveKit AccessToken analogue)
+//! minting a moq-auth token rooted at that prefix (the LiveKit AccessToken analogue)
 //! and dialing the relay.
 //!
 //! Participants are discovered from the announce stream. Identity is the path

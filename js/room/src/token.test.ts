@@ -1,23 +1,23 @@
 import { expect, test } from "bun:test";
 import { claims } from "./token.ts";
 
-test("claims root the token at the room and scope put to the identity", () => {
+test("claims root the token at the room and scope publish to the identity", () => {
 	expect(claims("meet/demo", "alice")).toEqual({
 		root: "meet/demo",
-		get: "",
-		put: "alice/",
+		subscribe: ["**"],
+		publish: ["alice/**"],
 	});
 });
 
-test("claims does not double a trailing slash on put", () => {
-	expect(claims("meet/demo", "alice/").put).toBe("alice/");
+test("claims does not double a trailing slash on publish", () => {
+	expect(claims("meet/demo", "alice/").publish).toEqual(["alice/**"]);
 });
 
 test("claims accepts a multi-segment identity", () => {
 	expect(claims("hang/room", "guest/uuid")).toEqual({
 		root: "hang/room",
-		get: "",
-		put: "guest/uuid/",
+		subscribe: ["**"],
+		publish: ["guest/uuid/**"],
 	});
 });
 

@@ -797,22 +797,22 @@ mod tests {
 			"a typed --connect stopped working"
 		);
 
-		// The other reader of the typed view: `moq token` / `devices` / `completion`
+		// The other reader of the typed view: `moq auth` / `devices` / `completion`
 		// refuse a MoQ side, and an exported variable is not one being asked for.
-		let ambient = crate::args::Invocation::try_parse_from(["moq", "token", "generate"]).expect("parse");
+		let ambient = crate::args::Invocation::try_parse_from(["moq", "auth", "generate"]).expect("parse");
 		assert!(
 			ambient.moq.client.url.is_some(),
 			"the resolved side should still pick the variable up"
 		);
 		assert!(
-			ambient.reject("token").is_ok(),
+			ambient.reject("auth").is_ok(),
 			"an exported MOQ_CONNECT was treated as a request"
 		);
 
 		let typed =
-			crate::args::Invocation::try_parse_from(["moq", "--connect", &url, "token", "generate"]).expect("parse");
+			crate::args::Invocation::try_parse_from(["moq", "--connect", &url, "auth", "generate"]).expect("parse");
 		assert!(
-			typed.reject("token").is_err(),
+			typed.reject("auth").is_err(),
 			"a typed --connect stopped being refused"
 		);
 	}

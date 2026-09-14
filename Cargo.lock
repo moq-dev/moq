@@ -4735,6 +4735,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-auth"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aws-lc-rs",
+ "base64 0.23.1",
+ "hex",
+ "jsonwebtoken",
+ "kio",
+ "moq-pattern",
+ "p256",
+ "p384",
+ "rand 0.10.2",
+ "reqwest",
+ "rsa",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "moq-bench"
 version = "0.0.1"
 dependencies = [
@@ -4795,6 +4822,7 @@ dependencies = [
  "bytes",
  "hang",
  "moq-audio",
+ "moq-auth",
  "moq-hls",
  "moq-msf",
  "moq-mux",
@@ -4802,13 +4830,13 @@ dependencies = [
  "moq-rtc",
  "moq-rtmp",
  "moq-srt",
- "moq-token-cli",
  "moq-tokio",
  "moq-transcode",
  "moq-video",
  "pollster",
  "rustls",
  "sd-notify",
+ "tempfile",
  "tokio",
  "tower-http 0.7.0",
  "tracing",
@@ -5052,10 +5080,10 @@ dependencies = [
  "http-cache-reqwest",
  "jsonwebtoken",
  "libc",
+ "moq-auth",
  "moq-net",
  "moq-sock",
  "moq-stats",
- "moq-token",
  "moq-tokio",
  "moq-uring",
  "qmux",
@@ -5089,9 +5117,9 @@ name = "moq-room"
 version = "0.1.0"
 dependencies = [
  "kio",
+ "moq-auth",
  "moq-json",
  "moq-net",
- "moq-token",
  "moq-tokio",
  "thiserror 2.0.20",
  "tokio",
@@ -5187,36 +5215,6 @@ dependencies = [
  "tokio",
  "tracing",
  "web-async",
-]
-
-[[package]]
-name = "moq-token"
-version = "0.7.3"
-dependencies = [
- "anyhow",
- "aws-lc-rs",
- "base64 0.23.1",
- "jsonwebtoken",
- "moq-pattern",
- "p256",
- "p384",
- "reqwest",
- "rsa",
- "serde",
- "serde_json",
- "serde_with",
- "thiserror 2.0.20",
- "tokio",
-]
-
-[[package]]
-name = "moq-token-cli"
-version = "0.5.47"
-dependencies = [
- "anyhow",
- "moq-token",
- "tempfile",
- "usage-rs",
 ]
 
 [[package]]
@@ -7910,6 +7908,8 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",
+ "serde",
+ "serde_json",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",

@@ -72,7 +72,7 @@ http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "r
 jsonwebtoken = { workspace = true }
 moq-net = { workspace = true }
 moq-stats = { workspace = true }
-moq-token = { workspace = true, features = ["tokio"] }
+moq-auth = { workspace = true, features = ["tokio"] }
 moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "watch", "tcp"] }
 qmux = { workspace = true, features = ["ws"], optional = true }
 rand = { workspace = true }

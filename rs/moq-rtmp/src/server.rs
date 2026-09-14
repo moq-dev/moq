@@ -500,7 +500,7 @@ impl<S: Stream> Publish<S> {
 	/// The RTMP stream key (the final component of `rtmp://host/<app>/<key>`).
 	///
 	/// Conventionally a publish secret; an embedder can treat it as a token (e.g.
-	/// a moq-token JWT) to authenticate the publish.
+	/// a moq-auth JWT) to authenticate the publish.
 	pub fn stream_key(&self) -> &str {
 		&self.stream_key
 	}

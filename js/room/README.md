@@ -7,7 +7,7 @@
 [![npm version](https://img.shields.io/npm/v/@moq/room)](https://www.npmjs.com/package/@moq/room)
 [![TypeScript](https://img.shields.io/badge/TypeScript-ready-blue.svg)](https://www.typescriptlang.org/)
 
-Headless multi-participant rooms over [Media over QUIC](https://moq.dev/). A room is a path prefix. There is no service and no storage: joining is minting a moq-token rooted at that prefix (the LiveKit AccessToken analogue) and dialing the relay.
+Headless multi-participant rooms over [Media over QUIC](https://moq.dev/). A room is a path prefix. There is no service and no storage: joining is minting a moq-auth token rooted at that prefix (the LiveKit AccessToken analogue) and dialing the relay.
 
 Participants are discovered from the announce stream. Identity is the path before `camera.hang` / `screen.hang`. Each participant publishes:
 
@@ -24,11 +24,11 @@ bun add @moq/room
 
 ## Token
 
-Sign with [`@moq/token`](../token). `root` is the room, `get: ""` subscribes to everyone, `put: "<identity>/"` so a participant cannot publish at someone else's paths.
+Sign with [`@moq/auth`](../auth). `root` is the room, `subscribe: ["**"]` subscribes to everyone, `publish: ["<identity>/**"]` so a participant cannot publish at someone else's paths.
 
 ```ts
 import { claims } from "@moq/room";
-import { sign } from "@moq/token";
+import { sign } from "@moq/auth";
 
 const token = await sign(key, claims("meet/demo", "alice"));
 // Dial https://relay.example.com/meet/demo?jwt=<token>

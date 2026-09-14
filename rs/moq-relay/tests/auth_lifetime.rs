@@ -8,7 +8,7 @@
 use std::{net::TcpListener, time::Duration};
 
 use moq_relay::{AuthConfig, Cluster, ClusterOptions, Connection, Web, WebConfig};
-use moq_token::{Algorithm, Key, KeyId};
+use moq_auth::{Algorithm, Key, KeyId};
 use moq_tokio::moq_net::{self, Hop};
 use wiremock::matchers::{method, path as path_matcher, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -143,11 +143,11 @@ fn client() -> moq_tokio::Client {
 }
 
 /// Full access under the `room` root.
-fn room_claims() -> moq_token::Claims {
-	moq_token::Claims::default()
+fn room_claims() -> moq_auth::Claims {
+	moq_auth::Claims::default()
 		.with_root("room")
-		.with_subscribe([""])
-		.with_publish([""])
+		.with_subscribe(["**".parse().unwrap()])
+		.with_publish(["**".parse().unwrap()])
 }
 
 /// The stub auth API's anonymous 200: full public access under `room`, cached
@@ -165,7 +165,7 @@ async fn mount_public(server: &MockServer) {
 }
 
 /// A relay URL for the `/room` root carrying a freshly minted JWT.
-fn room_url(scheme: &str, port: u16, key: &Key, claims: &moq_token::Claims) -> url::Url {
+fn room_url(scheme: &str, port: u16, key: &Key, claims: &moq_auth::Claims) -> url::Url {
 	let jwt = key.sign(claims).expect("sign token");
 	format!("{scheme}://127.0.0.1:{port}/room?jwt={jwt}")
 		.parse()

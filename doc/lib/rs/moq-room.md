@@ -9,7 +9,7 @@ description: Headless multi-participant rooms over MoQ
 [![docs.rs](https://docs.rs/moq-room/badge.svg)](https://docs.rs/moq-room)
 
 The native twin of [`@moq/room`](/lib/js/room). A room is a path prefix. There
-is no service and no storage: joining is minting a moq-token rooted at that
+is no service and no storage: joining is minting a moq-auth token rooted at that
 prefix and dialing the relay. Participants are discovered from the announce
 stream. Identity is the path before `camera.hang` / `screen.hang`.
 
