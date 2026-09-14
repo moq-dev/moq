@@ -1,6 +1,6 @@
 ---
 title: Authentication
-description: One auth contract for moq-relay: an auth server per session, or a static anonymous grant
+description: "One auth contract for moq-relay: an auth server per session, or a static anonymous grant"
 ---
 
 # Authentication

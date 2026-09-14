@@ -5088,7 +5088,6 @@ dependencies = [
  "moq-tokio",
  "moq-uring",
  "qmux",
- "rand 0.10.2",
  "rcgen",
  "reqwest",
  "reqwest-middleware",
