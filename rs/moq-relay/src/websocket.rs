@@ -16,6 +16,8 @@ use moq_net::stats::Session;
 
 use crate::{Admitted, AuthToken, Lease, web::MtlsPeer, web::WebState, web::landing_response};
 
+// One axum extractor per fact the upgrade needs; there is no struct to fold them into.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn serve_ws(
 	ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 	OriginalUri(uri): OriginalUri,

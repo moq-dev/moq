@@ -99,10 +99,10 @@ moq-uring = { workspace = true, optional = true }
 sd-notify = { workspace = true }
 
 [dev-dependencies]
+moq-auth = { workspace = true, features = ["client", "serve"] }
 rcgen = "0.14"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
-moq-auth = { workspace = true, features = ["client", "serve"] }
 
 # `raise(SIGINT)` at ourselves, so the shutdown test exercises the real signal
 # path rather than the trigger behind it.

@@ -1283,8 +1283,10 @@ mod tests {
 
 		// The probed route is the test's own, so auth never runs; it just has to be
 		// configured with something for `Web` to build.
-		let mut auth_config = crate::AuthConfig::default();
-		auth_config.public_subscribe = vec![moq_auth::Pattern::all()];
+		let auth_config = crate::AuthConfig {
+			public_subscribe: vec![moq_auth::Pattern::all()],
+			..Default::default()
+		};
 		let auth = auth_config.init("test", &moq_tokio::tls::Connect::default()).unwrap();
 		let cluster = Cluster::new(crate::ClusterOptions::default()).unwrap();
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
