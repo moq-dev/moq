@@ -19,6 +19,11 @@ re-export and call it `ConnectionMonitor`. Ask before landing either.
 
 Public API: breaking on moq-native, so on dev. Wire: none.
 
+## Required
+
+- PR #3679 has merged - the `presence` and wait surface this quest renames
+  comes from it
+
 ## Related
 
 - [Rate estimate names](/quest/m1/api-rate-estimate-names.md) - the estimates

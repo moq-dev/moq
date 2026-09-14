@@ -28,8 +28,11 @@ gauge accessor.
 
 Wire compatibility, both directions, without a version field:
 
-- Deserialize accepts the old names through `#[serde(alias = "sessions")]`
-  and friends, so a new consumer reads an old relay.
+- Deserialize tolerates both spellings with the canonical name winning, so a
+  new consumer reads an old relay, a new relay, and the one release where a
+  new relay emits both. A derived `#[serde(alias)]` is not enough: it rejects
+  the both-spelling frame as a duplicate field, so the impl must accept a
+  repeated key (custom `Deserialize` or equivalent) with defined precedence.
 - Serialize emits both spellings for one moq-stats release, so an old
   consumer (which defaults a missing field to zero) still reads a new relay.
   A `Serialize` impl that writes the legacy names beside the new ones is the
@@ -39,9 +42,15 @@ Wire compatibility, both directions, without a version field:
 
 Public API: breaking on moq-net and moq-stats (field renames), so on dev.
 Wire: the stats tracks gain the new field names beside the old ones; nothing
-is removed. Add a test that decodes a frame written with only the old names
-and one written with only the new names to the same `Presence`/`Traffic`,
+is removed. Add a test that decodes a frame written with only the old names,
+one written with only the new names, and one written with both spellings (the
+actual serializer output) to the same `Presence`/`Traffic`,
 and run the relay stats tests and the demo build.
+
+## Required
+
+- PR #3679 has merged - the `presence` surface and the moqsink names this
+  quest renames against come from it
 
 ## Related
 

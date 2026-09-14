@@ -34,6 +34,11 @@ Keep the moqsink properties: unlike the structure they notify on change. The
 Public API: breaking on moq-ffi, libmoq, every binding, and moq-gst, so on
 dev. Wire: none. Run `just test smoke-full` for the bindings and the obs test.
 
+## Required
+
+- PR #3679 has merged - the `connection-stats` structure spelling this quest
+  renames against comes from it
+
 ## Related
 
 - [Reconnect stats handle](/quest/m1/api-reconnect-stats-handle.md) - the
