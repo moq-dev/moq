@@ -26,3 +26,9 @@ test("claims rejects empty normalized identities", () => {
 		expect(() => claims("room", identity)).toThrow();
 	}
 });
+
+test("claims rejects identities with wildcards", () => {
+	for (const identity of ["*", "alice*", "a/*/b", "**"]) {
+		expect(() => claims("room", identity)).toThrow();
+	}
+});

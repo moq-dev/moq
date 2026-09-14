@@ -24,14 +24,14 @@ export type Claims = {
  *
  * `root` is the room prefix, `subscribe` is `**` (everything under the room), and
  * `publish` is `<identity>/**` so a participant cannot publish at anyone else's
- * paths. Empty identities are rejected after normalization.
+ * paths. Throws on an identity that is empty after normalization or contains `*`,
+ * since a wildcard would let the participant publish as someone else.
  */
 export function claims(room: string, identity: string): Claims {
-	identity = Path.from(identity);
-	if (!identity) throw new Error("participant identity must not be empty");
+	if (!Path.from(identity)) throw new Error("participant identity must not be empty");
 	return {
 		root: room,
-		subscribe: ["**"],
-		publish: [`${identity}/**`],
+		subscribe: [Path.Pattern.all().text],
+		publish: [Path.Pattern.subtree(identity).text],
 	};
 }

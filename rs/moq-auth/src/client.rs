@@ -1,3 +1,5 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
@@ -172,6 +174,9 @@ impl Driver {
 			.expect("the driver owns the producer until it ends");
 		let mut failures = 0u32;
 		let mut next = grant.revalidate.map(|cadence| Instant::now() + cadence);
+		// The re-check in flight, kept out of the select so expiry and the session's
+		// close are still polled while a stalled server holds the reply.
+		let mut inflight: Option<Pin<Box<dyn Future<Output = crate::Result<Grant>> + Send>>> = None;
 
 		loop {
 			let expires = grant.expires.map(until);
@@ -187,6 +192,12 @@ impl Driver {
 					None => std::future::pending().await,
 				}
 			};
+			let reply = async {
+				match inflight.as_mut() {
+					Some(request) => request.await,
+					None => std::future::pending().await,
+				}
+			};
 
 			tokio::select! {
 				reason = producer.closed() => return reason,
@@ -194,10 +205,9 @@ impl Driver {
 					producer.revoke(Reason::Expired);
 					return Reason::Expired;
 				}
-				() = revalidate => {
-					let mut request = self.request.clone();
-					request.event = Event::Revalidate;
-					match self.client.post(&request).await {
+				result = reply => {
+					inflight = None;
+					match result {
 						Ok(fresh) => {
 							failures = 0;
 							next = fresh.revalidate.map(|cadence| Instant::now() + cadence);
@@ -212,10 +222,18 @@ impl Driver {
 							// Evidence of nothing: the grant stands until `expires`.
 							failures += 1;
 							let delay = backoff(failures, grant.revalidate.unwrap_or(BACKOFF_MAX));
-							tracing::warn!(id = %request.id, %err, ?delay, "auth revalidation failed; retrying");
+							tracing::warn!(id = %self.request.id, %err, ?delay, "auth revalidation failed; retrying");
 							next = Some(Instant::now() + delay);
 						}
 					}
+				}
+				() = revalidate => {
+					// One re-check at a time; the reply schedules the next.
+					next = None;
+					let client = self.client.clone();
+					let mut request = self.request.clone();
+					request.event = Event::Revalidate;
+					inflight = Some(Box::pin(async move { client.post(&request).await }));
 				}
 			}
 		}
@@ -301,6 +319,8 @@ mod tests {
 		Client::new(server.uri().parse().unwrap(), None).unwrap()
 	}
 
+	/// The wire carries whole seconds, so a cadence under one second would serialize
+	/// as zero and be refused; these tests run on a one-second cadence.
 	fn grant(expires_in: Option<Duration>, revalidate: Option<Duration>) -> Grant {
 		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
 		grant.expires = expires_in.map(|d| SystemTime::now() + d);
@@ -398,7 +418,7 @@ mod tests {
 	async fn revalidate_runs_on_cadence_and_applies_the_reply() {
 		let log = Log::default();
 		let server = server(log.clone(), |request| {
-			let mut grant = grant(Some(Duration::from_secs(3600)), Some(Duration::from_millis(100)));
+			let mut grant = grant(Some(Duration::from_secs(3600)), Some(Duration::from_secs(1)));
 			if request.event == Event::Revalidate {
 				grant.tier = Some("moved".into());
 			}
@@ -407,7 +427,7 @@ mod tests {
 		.await;
 
 		let mut consumer = client(&server).connect(request(), Counters::default()).await.unwrap();
-		let fresh = tokio::time::timeout(Duration::from_secs(2), consumer.changed())
+		let fresh = tokio::time::timeout(Duration::from_secs(3), consumer.changed())
 			.await
 			.expect("a re-check within the cadence")
 			.unwrap();
@@ -419,13 +439,13 @@ mod tests {
 	async fn a_refusal_on_recheck_revokes() {
 		let server = server(Log::default(), |request| match request.event {
 			Event::Connect => ResponseTemplate::new(200)
-				.set_body_json(grant(Some(Duration::from_secs(3600)), Some(Duration::from_millis(50)))),
+				.set_body_json(grant(Some(Duration::from_secs(3600)), Some(Duration::from_secs(1)))),
 			_ => ResponseTemplate::new(403),
 		})
 		.await;
 
 		let consumer = client(&server).connect(request(), Counters::default()).await.unwrap();
-		let reason = tokio::time::timeout(Duration::from_secs(2), consumer.closed())
+		let reason = tokio::time::timeout(Duration::from_secs(3), consumer.closed())
 			.await
 			.expect("revoked within the cadence");
 		assert_eq!(reason, Reason::Refused);
@@ -436,13 +456,13 @@ mod tests {
 		let log = Log::default();
 		let server = server(log.clone(), |request| match request.event {
 			Event::Connect => ResponseTemplate::new(200)
-				.set_body_json(grant(Some(Duration::from_millis(600)), Some(Duration::from_millis(50)))),
+				.set_body_json(grant(Some(Duration::from_secs(3)), Some(Duration::from_secs(1)))),
 			_ => ResponseTemplate::new(503),
 		})
 		.await;
 
 		let consumer = client(&server).connect(request(), Counters::default()).await.unwrap();
-		tokio::time::sleep(Duration::from_millis(300)).await;
+		tokio::time::sleep(Duration::from_millis(1500)).await;
 		assert!(
 			log.events().iter().filter(|e| **e == Event::Revalidate).count() >= 1,
 			"re-checks happened"
@@ -453,7 +473,7 @@ mod tests {
 			"the grant stands through the outage"
 		);
 
-		let reason = tokio::time::timeout(Duration::from_secs(2), consumer.closed())
+		let reason = tokio::time::timeout(Duration::from_secs(5), consumer.closed())
 			.await
 			.expect("expired");
 		assert_eq!(reason, Reason::Expired);
@@ -462,6 +482,51 @@ mod tests {
 			log.last().event,
 			Event::End {
 				reason: Reason::Expired,
+				..
+			}
+		));
+	}
+
+	#[tokio::test]
+	async fn expiry_fires_while_a_recheck_is_stalled() {
+		let server = server(Log::default(), |request| match request.event {
+			Event::Connect => ResponseTemplate::new(200)
+				.set_body_json(grant(Some(Duration::from_secs(3)), Some(Duration::from_secs(1)))),
+			_ => ResponseTemplate::new(200)
+				.set_body_json(grant(Some(Duration::from_secs(3600)), Some(Duration::from_secs(60))))
+				.set_delay(Duration::from_secs(30)),
+		})
+		.await;
+
+		let consumer = client(&server).connect(request(), Counters::default()).await.unwrap();
+		let reason = tokio::time::timeout(Duration::from_secs(5), consumer.closed())
+			.await
+			.expect("expired while the re-check was in flight");
+		assert_eq!(reason, Reason::Expired);
+	}
+
+	#[tokio::test]
+	async fn a_close_is_reported_while_a_recheck_is_stalled() {
+		let log = Log::default();
+		let server = server(log.clone(), |request| match request.event {
+			Event::Connect => ResponseTemplate::new(200)
+				.set_body_json(grant(Some(Duration::from_secs(3600)), Some(Duration::from_secs(1)))),
+			Event::Revalidate => ResponseTemplate::new(200)
+				.set_body_json(grant(Some(Duration::from_secs(3600)), Some(Duration::from_secs(60))))
+				.set_delay(Duration::from_secs(30)),
+			Event::End { .. } => ResponseTemplate::new(200),
+		})
+		.await;
+
+		let consumer = client(&server).connect(request(), Counters::default()).await.unwrap();
+		tokio::time::sleep(Duration::from_millis(1500)).await;
+		assert!(log.events().contains(&Event::Revalidate), "the re-check is in flight");
+		consumer.close("disconnected");
+		settle().await;
+		assert!(matches!(
+			log.last().event,
+			Event::End {
+				reason: Reason::Session(_),
 				..
 			}
 		));

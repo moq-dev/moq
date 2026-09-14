@@ -7,14 +7,13 @@
 ///
 /// `root` is the room prefix, `subscribe` is `**` (everything under the room),
 /// and `publish` is `<identity>/**` so a participant cannot publish at anyone
-/// else's paths.
+/// else's paths. An identity that is empty after normalization or contains `*` is
+/// refused, since a wildcard would let the participant publish as someone else.
 pub fn claims(room: impl Into<String>, identity: &str) -> Result<moq_auth::Claims, crate::Error> {
-	let identity = moq_net::Path::new(identity);
-	if identity.is_empty() {
+	if moq_net::Path::new(identity).is_empty() {
 		return Err(crate::Error::EmptyIdentity);
 	}
-	// A normalized non-empty path holds no `*`, so it is always a valid pattern.
-	let publish = moq_auth::Pattern::subtree(identity.as_str()).map_err(|_| crate::Error::EmptyIdentity)?;
+	let publish = moq_auth::Pattern::subtree(identity)?;
 	Ok(moq_auth::Claims::default()
 		.with_root(room)
 		.with_subscribe([moq_auth::Pattern::all()])
@@ -33,6 +32,16 @@ mod tests {
 	fn rejects_empty_identity() {
 		for identity in ["", "/", "///"] {
 			assert!(matches!(claims("room", identity), Err(crate::Error::EmptyIdentity)));
+		}
+	}
+
+	#[test]
+	fn rejects_wildcard_identity() {
+		for identity in ["*", "alice*", "a/*/b", "**"] {
+			assert!(matches!(
+				claims("room", identity),
+				Err(crate::Error::InvalidIdentity(_))
+			));
 		}
 	}
 

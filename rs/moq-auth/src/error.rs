@@ -99,6 +99,9 @@ pub enum Error {
 	#[error("grant asks to be revalidated but never expires")]
 	UnboundedRevalidate,
 
+	#[error("grant asks to be revalidated at no interval")]
+	ZeroRevalidate,
+
 	#[error("grant has already expired")]
 	GrantExpired,
 

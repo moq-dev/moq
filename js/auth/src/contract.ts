@@ -114,8 +114,8 @@ export const GrantSchema = z
 		root: z.optional(z.string()),
 		/** When the session closes, as unix seconds. */
 		expires: z.optional(z.number()),
-		/** How long until the relay asks again, in seconds. */
-		revalidate: z.optional(z.number()),
+		/** How long until the relay asks again, in seconds. Zero would be a tight loop. */
+		revalidate: z.optional(z.number().check(z.positive())),
 		/** An opaque label handed to stats, so traffic can be bucketed. */
 		tier: z.optional(z.string()),
 	})

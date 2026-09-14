@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 /// A 2xx carrying one of these admits; anything else refuses. A grant that names
 /// nothing is a refusal too, and one that asks to be revalidated must say when it
 /// expires, so an outage always has a bound the server chose. [`validate`](Self::validate)
-/// checks both once at the boundary.
+/// checks these once at the boundary.
 #[serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -49,14 +49,18 @@ impl Grant {
 		}
 	}
 
-	/// Refuse a grant that admits nothing, asks to be revalidated without a bound, or
-	/// has already expired.
+	/// Refuse a grant that admits nothing, asks to be revalidated without a bound or
+	/// at no interval, or has already expired.
 	pub fn validate(&self) -> crate::Result<()> {
 		if self.publish.is_empty() && self.subscribe.is_empty() {
 			return Err(crate::Error::UselessGrant);
 		}
 		if self.revalidate.is_some() && self.expires.is_none() {
 			return Err(crate::Error::UnboundedRevalidate);
+		}
+		// A zero cadence would have the relay re-check in a tight loop.
+		if self.revalidate.is_some_and(|cadence| cadence.is_zero()) {
+			return Err(crate::Error::ZeroRevalidate);
 		}
 		if self.expires.is_some_and(|expires| expires <= SystemTime::now()) {
 			return Err(crate::Error::GrantExpired);
@@ -130,5 +134,8 @@ mod tests {
 
 		grant.expires = Some(SystemTime::now() + Duration::from_secs(60));
 		grant.validate().unwrap();
+
+		grant.revalidate = Some(Duration::ZERO);
+		assert!(matches!(grant.validate(), Err(crate::Error::ZeroRevalidate)));
 	}
 }

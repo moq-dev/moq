@@ -39,4 +39,7 @@ pub enum Error {
 	/// A participant identity must contain a nonempty path.
 	#[error("participant identity must not be empty")]
 	EmptyIdentity,
+	/// A participant identity holds a wildcard, so it cannot name one participant.
+	#[error("participant identity is not a literal path: {0}")]
+	InvalidIdentity(#[from] moq_auth::InvalidPattern),
 }
