@@ -66,11 +66,9 @@ axum-server = { workspace = true }
 bytes = { workspace = true }
 bytesize = "2.4.2"
 futures = { workspace = true }
-hex = { workspace = true }
 http-body = "1"
 http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "reqwest-middleware", "url-standard"], default-features = false }
-jsonwebtoken = { workspace = true }
-moq-auth = { workspace = true, features = ["tokio"] }
+moq-auth = { workspace = true, features = ["client"] }
 moq-net = { workspace = true }
 moq-stats = { workspace = true }
 moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "watch", "tcp"] }
@@ -82,7 +80,6 @@ rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false 
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_with = { workspace = true, features = ["json", "base64"] }
-sha2 = { workspace = true }
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
@@ -106,7 +103,7 @@ sd-notify = { workspace = true }
 rcgen = "0.14"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
-wiremock = "0.6"
+moq-auth = { workspace = true, features = ["client", "serve"] }
 
 # `raise(SIGINT)` at ourselves, so the shutdown test exercises the real signal
 # path rather than the trigger behind it.

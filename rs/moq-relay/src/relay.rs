@@ -89,7 +89,6 @@ impl Relay {
 			Cluster::validate_lan_versions(&config.connect, &config.listen)?;
 		}
 
-		let mtls_enabled = !config.listen.tls.root.is_empty();
 		let server_versions = config.listen.versions();
 
 		// Bind the QUIC workers first: they own the listen address when configured,
@@ -177,26 +176,15 @@ impl Relay {
 			None => (server, client),
 		};
 
-		// Before the empty check: an mTLS-only relay never builds an `Auth`, and an
-		// option that only `Auth::new` would have refused must not slip past.
-		config.auth.validate()?;
-
-		// Reject configs where neither JWT nor mTLS can authenticate anyone.
-		if config.auth.is_empty() {
-			anyhow::ensure!(
-				mtls_enabled,
-				"no auth-key, auth-key-dir, public path, or server tls.root configured; \
-				 nobody can authenticate"
-			);
-			tracing::warn!("no JWT/public auth configured; only mTLS peers will be accepted");
-		}
-
-		let auth = if config.auth.is_empty() {
-			// mTLS-only: no JWT/public source, but `--auth-mtls-tier` still applies.
-			Auth::default().with_mtls_tier(config.auth.mtls_tier.clone())
-		} else {
-			config.auth.init(&config.connect.tls).await?
-		};
+		// The name this relay reports in every auth request: the stats node label,
+		// else the cluster node URL, else nothing.
+		let node = config
+			.stats
+			.node
+			.clone()
+			.or_else(|| config.cluster.node.clone())
+			.unwrap_or_default();
+		let auth = config.auth.init(node, &config.connect.tls)?;
 
 		let cache = config.cache.init()?;
 		// Whichever worker group owns QUIC holds the certificates; the shared
@@ -289,7 +277,7 @@ impl Relay {
 		&self.client
 	}
 
-	/// The resolved auth policy (JWT/public sources, or mTLS-only).
+	/// Where every session's grant comes from: the auth server, or the static public grant.
 	pub fn auth(&self) -> &Auth {
 		&self.auth
 	}

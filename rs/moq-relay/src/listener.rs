@@ -34,6 +34,14 @@ impl Address for Peer {
 	type Listener = Listener;
 }
 
+/// Lets a handler extract the peer address as `ConnectInfo<Peer>`, so the auth
+/// request can report where a WebSocket or HTTP session came from.
+impl axum::extract::connect_info::Connected<Peer> for Peer {
+	fn connect_info(target: Peer) -> Self {
+		target
+	}
+}
+
 /// A TCP listener that classifies, counts, paces, and logs its own `accept(2)`
 /// failures instead of leaving them to `axum_server`.
 pub(crate) struct Listener {

@@ -24,7 +24,7 @@ listen = "[::]:4443"
 # See root.toml and leaf.toml for auth and clustering examples.
 [auth]
 # Allow anonymous access to everything.
-public = ""
+public = "**"
 
 # Publish a single per-node stats broadcast on the cluster origin:
 #

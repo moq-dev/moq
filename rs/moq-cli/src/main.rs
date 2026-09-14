@@ -84,16 +84,20 @@ async fn spawn_server(
 	let server = net.server(moq.server_config())?;
 	let certificates = server.certificates();
 	let cluster = attach_lan(cluster.clone(), moq, &server)?;
+	// The auth server or public grant a `--listen` endpoint admits through. A mesh
+	// listener with neither admits its peers alone.
+	let node = moq.cluster.node.clone().unwrap_or_default();
+	let auth = match moq.auth.validate() {
+		Ok(()) => moq.auth.init(node, &moq.client.tls)?,
+		Err(_) => moq_relay::Auth::refuse(node),
+	};
 	// Advertise before accepting, so a `/.cluster` dial is verified against a
 	// live credential rather than refused as "LAN discovery is not enabled".
 	let started = cluster.clone().start().await.context("cluster failed to start")?;
 
+	// No server-wide origins: every session is scoped from its own grant, and an
+	// unset side stays a no-op origin rather than falling back to everything.
 	let origin = &cluster.origin;
-	let server = if moq.lan() {
-		server
-	} else {
-		route_server(server, origin, directions)
-	};
 
 	// Stream sockets bind asynchronously in `listen`, so this must finish before
 	// `spawn_moq` reports readiness. The serve task only owns an already-bound
@@ -104,12 +108,13 @@ async fn spawn_server(
 			tasks,
 			listener,
 			cluster.clone(),
+			auth,
 			origin.clone(),
 			directions,
 			moq.server.bind.is_some(),
 		);
 	} else {
-		spawn_serve(tasks, listener);
+		spawn_serve(tasks, listener, auth, origin.clone(), directions);
 	}
 
 	// The certificate endpoint is for clients dialing a URL, so it follows the
@@ -151,6 +156,7 @@ fn spawn_cluster_serve(
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 	mut listener: moq_tokio::Listener,
 	cluster: moq_relay::Cluster,
+	auth: moq_relay::Auth,
 	origin: moq_net::origin::Producer,
 	directions: Directions,
 	public_quic: bool,
@@ -163,7 +169,7 @@ fn spawn_cluster_serve(
 		while let Some(request) = listener.accept().await {
 			while sessions.try_join_next().is_some() {}
 			if moq_relay::Cluster::is_lan_path(request.path()) {
-				let conn = moq_relay::Connection::new(request, cluster.clone(), moq_relay::Auth::default())
+				let conn = moq_relay::Connection::new(request, cluster.clone(), auth.clone())
 					.with_id(cluster.next_connection_id());
 				sessions.spawn(async move {
 					if let Err(err) = conn.run().await {
@@ -177,23 +183,64 @@ fn spawn_cluster_serve(
 				request.close(404).await.ok();
 				continue;
 			}
-			let mut request = request;
-			if directions.publish {
-				request = request.with_publisher(origin.consume());
-			}
-			if directions.consume {
-				request = request.with_subscriber(origin.clone());
-			}
+			let auth = auth.clone();
+			let origin = origin.clone();
 			sessions.spawn(async move {
-				let err = match request.ok().await {
-					Ok(session) => session.closed().await.into(),
-					Err(err) => err,
-				};
-				tracing::warn!(%err, "session ended with error");
+				if let Err(err) = serve_client(request, &auth, &origin, directions).await {
+					tracing::warn!(%err, "session ended with error");
+				}
 			});
 		}
 		anyhow::bail!("the MoQ listener stopped accepting")
 	});
+}
+
+/// Admit one ordinary client through its lease and serve it until it closes.
+///
+/// The grant scopes the process's origin to what the session may see, then the
+/// stage's directions prune the side it does not use, so a subscribe-only export
+/// never announces what a viewer could not have had anyway.
+async fn serve_client(
+	request: moq_tokio::Request,
+	auth: &moq_relay::Auth,
+	origin: &moq_net::origin::Producer,
+	directions: Directions,
+) -> anyhow::Result<()> {
+	let bytes = moq_auth::Counters::default();
+	let auth_request = moq_relay::request_for(auth, &request);
+	let moq_relay::Admitted { lease, token } = match auth.admit(auth_request, bytes.clone()).await {
+		Ok(admitted) => admitted,
+		Err(err) => {
+			let status = axum::http::StatusCode::from(&err);
+			request.close(status.as_u16()).await.ok();
+			return Err(anyhow::Error::new(err).context("session refused"));
+		}
+	};
+
+	// What the grant allows, as origin handles rooted where the session dialed.
+	let rooted = origin.with_root(&token.root);
+	let publish = directions
+		.publish
+		.then(|| rooted.as_ref().and_then(|o| o.scope(&token.subscribe)))
+		.flatten();
+	let subscribe = directions
+		.consume
+		.then(|| rooted.as_ref().and_then(|o| o.scope(&token.publish)))
+		.flatten();
+	if publish.is_none() && subscribe.is_none() {
+		request.close(403).await.ok();
+		anyhow::bail!("grant allows nothing this endpoint serves at {}", token.root);
+	}
+
+	let mut request = request;
+	if let Some(publish) = publish {
+		request = request.with_publisher(publish.consume());
+	}
+	if let Some(subscribe) = subscribe {
+		request = request.with_subscriber(subscribe);
+	}
+	let session = request.ok().await?;
+	moq_relay::supervise(session, lease, token, bytes, moq_relay::Shutdown::disabled()).await
 }
 
 /// Whether ordinary clients may use this transport on the shared LAN server.
@@ -204,45 +251,25 @@ fn is_public_transport(transport: moq_tokio::Transport, public_quic: bool) -> bo
 	}
 }
 
-/// Attach the requested directions before stream accept loops capture the server.
-fn route_server(
-	server: moq_tokio::Server,
-	origin: &moq_net::origin::Producer,
+/// Serve ordinary clients from an already-bound listener, each through its lease.
+fn spawn_serve(
+	tasks: &mut JoinSet<anyhow::Result<()>>,
+	mut listener: moq_tokio::Listener,
+	auth: moq_relay::Auth,
+	origin: moq_net::origin::Producer,
 	directions: Directions,
-) -> moq_tokio::Server {
-	match directions {
-		Directions {
-			publish: true,
-			consume: true,
-		} => server.with_publisher(origin.consume()).with_subscriber(origin.clone()),
-		Directions {
-			publish: true,
-			consume: false,
-		} => server.with_publisher(origin.consume()),
-		Directions {
-			publish: false,
-			consume: true,
-		} => server.with_subscriber(origin.clone()),
-		Directions {
-			publish: false,
-			consume: false,
-		} => unreachable!("a stage always needs a direction"),
-	}
-}
-
-/// Serve ordinary clients from an already-bound listener.
-fn spawn_serve(tasks: &mut JoinSet<anyhow::Result<()>>, mut listener: moq_tokio::Listener) {
+) {
 	if let Ok(addr) = listener.local_addr() {
 		tracing::info!(%addr, "listening");
 	}
 	tasks.spawn(async move {
 		while let Some(request) = listener.accept().await {
+			let auth = auth.clone();
+			let origin = origin.clone();
 			tokio::spawn(async move {
-				let err = match request.ok().await {
-					Ok(session) => session.closed().await.into(),
-					Err(err) => err,
-				};
-				tracing::warn!(%err, "session ended with error");
+				if let Err(err) = serve_client(request, &auth, &origin, directions).await {
+					tracing::warn!(%err, "session ended with error");
+				}
 			});
 		}
 		Ok(())

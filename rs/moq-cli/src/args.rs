@@ -30,6 +30,7 @@
 //!   the separator stays unconditional rather than context-sensitive.
 
 use std::ffi::{OsStr, OsString};
+use anyhow::Context as _;
 use std::time::Duration;
 
 use crate::publish::PublishFormat;
@@ -354,6 +355,12 @@ pub struct MoqSide {
 	/// through one implementation.
 	#[usage(flatten)]
 	pub cluster: moq_relay::ClusterConfig,
+
+	/// Who a `--listen` endpoint admits: `--auth-url` asks an auth server per
+	/// session, `--auth-public` grants anonymous patterns. The same flags as
+	/// `moq-relay`; a listener needs exactly one.
+	#[usage(flatten)]
+	pub auth: moq_relay::AuthConfig,
 }
 
 impl MoqSide {
@@ -434,7 +441,19 @@ impl MoqSide {
 				moq_relay::Cluster::validate_lan_versions(&self.client, &self.server_config())?;
 			}
 		}
+		// A listener for ordinary clients admits nobody without a decision; a mesh
+		// listener alone admits its peers by their LAN credential.
+		if self.server.has_explicit_bind() {
+			self.auth.validate().context("--listen needs --auth-url or --auth-public")?;
+		} else if self.auth.url.is_some() || self.auth_public() {
+			self.auth.validate()?;
+		}
 		Ok(())
+	}
+
+	/// Whether any public pattern was passed.
+	fn auth_public(&self) -> bool {
+		!(self.auth.public.is_empty() && self.auth.public_subscribe.is_empty() && self.auth.public_publish.is_empty())
 	}
 
 	/// Build a [`MoqSide`] from one chunk of a command line, leniently.
@@ -501,6 +520,8 @@ impl MoqSide {
 			("--cluster-token", self.cluster.token.is_some()),
 			("--cluster-id", self.cluster.id.is_some()),
 			("--cluster-tier", self.cluster.tier.is_some()),
+			("--auth-url", self.auth.url.is_some()),
+			("--auth-public", self.auth_public()),
 			("--broadcast", self.broadcast.is_some()),
 			("--hop", self.hop.is_some()),
 		];
@@ -928,8 +949,16 @@ mod tests {
 
 	#[test]
 	fn tcp_only_listener_is_a_moq_side() {
-		let cli =
-			Invocation::try_parse_from(["moq", "--listen-tcp-bind", "127.0.0.1:0", "import", "ts"]).expect("parse");
+		let cli = Invocation::try_parse_from([
+			"moq",
+			"--listen-tcp-bind",
+			"127.0.0.1:0",
+			"--auth-public",
+			"**",
+			"import",
+			"ts",
+		])
+		.expect("parse");
 		assert!(cli.moq.validate().is_ok());
 		assert!(cli.moq.serves());
 		assert_eq!(cli.moq.server_config().tcp.bind, Some("127.0.0.1:0".parse().unwrap()));
@@ -938,14 +967,61 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn unix_only_listener_is_a_moq_side() {
-		let cli = Invocation::try_parse_from(["moq", "--listen-unix-bind", "/tmp/moq-cli.sock", "export", "ts"])
-			.expect("parse");
+		let cli = Invocation::try_parse_from([
+			"moq",
+			"--listen-unix-bind",
+			"/tmp/moq-cli.sock",
+			"--auth-public",
+			"**",
+			"export",
+			"ts",
+		])
+		.expect("parse");
 		assert!(cli.moq.validate().is_ok());
 		assert!(cli.moq.serves());
 		assert_eq!(
 			cli.moq.server_config().unix.bind.as_deref(),
 			Some(std::path::Path::new("/tmp/moq-cli.sock"))
 		);
+	}
+
+	/// A listener for ordinary clients admits nobody without a decision, so it
+	/// refuses to start with neither flag, and with both.
+	#[test]
+	fn a_listener_needs_exactly_one_auth_source() {
+		let cli = Invocation::try_parse_from(["moq", "--listen-tcp-bind", "127.0.0.1:0", "import", "ts"]).expect("parse");
+		let err = cli.moq.validate().unwrap_err().to_string();
+		assert!(err.contains("--auth-url or --auth-public"), "{err}");
+
+		let cli = Invocation::try_parse_from([
+			"moq",
+			"--listen-tcp-bind",
+			"127.0.0.1:0",
+			"--auth-url",
+			"http://127.0.0.1:4440/",
+			"--auth-public",
+			"**",
+			"import",
+			"ts",
+		])
+		.expect("parse");
+		assert!(cli.moq.validate().is_err());
+
+		let cli = Invocation::try_parse_from([
+			"moq",
+			"--listen-tcp-bind",
+			"127.0.0.1:0",
+			"--auth-url",
+			"http://127.0.0.1:4440/",
+			"import",
+			"ts",
+		])
+		.expect("parse");
+		assert!(cli.moq.validate().is_ok());
+
+		// A local verb refuses the flag like every other MoQ-side flag.
+		let cli = Invocation::try_parse_from(["moq", "--auth-public", "**", "auth", "generate"]).expect("parse");
+		assert!(cli.moq.reject("auth").unwrap_err().to_string().contains("--auth-public"));
 	}
 
 	/// The grammar Usage can't express: one connection, several endpoints.

@@ -11,7 +11,7 @@ use std::net::TcpListener;
 use std::time::Duration;
 
 use moq_net::Hop;
-use moq_relay::{AuthConfig, Cluster, ClusterConfig, ClusterOptions, Connection, PublicConfig};
+use moq_relay::{AuthConfig, Cluster, ClusterConfig, ClusterOptions, Connection};
 use url::Url;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -308,13 +308,10 @@ async fn spawn_relay_with_upstream(
 	let mut server = server.listen().await.expect("listen");
 
 	// Fully public auth: any no-JWT stream client gets the whole root.
-	#[allow(deprecated)]
-	let public = PublicConfig::Simple(vec![String::new()]);
 	let mut auth_config = AuthConfig::default();
-	auth_config.public = Some(public);
+	auth_config.public = vec![moq_auth::Pattern::all()];
 	let auth = auth_config
-		.init(&moq_tokio::tls::Connect::default())
-		.await
+		.init("test", &moq_tokio::tls::Connect::default())
 		.expect("auth init");
 
 	let mut cluster_config = ClusterConfig::default();

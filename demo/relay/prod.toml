@@ -27,18 +27,16 @@ key = "key.pem"
 
 # See docs/auth.md for more information.
 [auth]
-# A single JWK key file for authentication. No kid required in JWTs.
-key = "root.jwk"
-
-# Allow anonymous subscribing for anon/** and demo/**
-# Allow anonymous publishing for anon/** only
-[auth.public]
-subscribe = ["anon", "demo"]
-publish = ["anon", "demo/viewer"]
-
-# For multiple keys with rotation, use a directory instead:
-# key_dir = "/path/to/keys/"
-# Keys are named {kid}.jwk and resolved by the kid in the JWT header.
+# The auth server asked once per session event. The policy lives there:
+#
+#   moq auth serve --listen 127.0.0.1:4440 --key root.jwk \
+#     --public-subscribe 'anon/**' --public-subscribe 'demo/**' \
+#     --public-publish 'anon/**' --public-publish 'demo/viewer/**' \
+#     --mtls-publish '**' --mtls-subscribe '**'
+#
+# For multiple keys with rotation, give it `--key-dir /path/to/keys/` instead:
+# keys are named {kid}.jwk and resolved by the kid in the JWT header.
+url = "http://127.0.0.1:4440/"
 
 # Or use a URL for remote key management:
 # key_dir = "https://api.example.com/keys"

@@ -5,7 +5,7 @@
 use std::{net::TcpListener, time::Duration};
 
 use moq_net::Hop;
-use moq_relay::{Config, PublicConfig, Relay};
+use moq_relay::{Config, Relay};
 use url::Url;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -34,7 +34,7 @@ async fn spawn_relay(
 	config.connect.version.extend(cluster_version);
 	#[allow(deprecated)]
 	{
-		config.auth.public = Some(PublicConfig::Simple(vec![String::new()]));
+		config.auth.public = vec![moq_auth::Pattern::all()];
 	}
 	config.cluster.id = Some(id);
 	config.cluster.connect = connect;

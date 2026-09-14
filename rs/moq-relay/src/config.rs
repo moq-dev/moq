@@ -249,11 +249,10 @@ impl Config {
 			&env,
 			file,
 			|dst, src| {
-				// Legacy listen/connect/quic flags, and CLI-only auth public shorthands.
+				// Legacy listen/connect/quic flags.
 				dst.listen.keep_parse_only(&src.listen);
 				dst.connect.keep_parse_only(&src.connect);
 				dst.quic.keep_parse_only(&src.quic);
-				dst.auth.keep_parse_only(&src.auth);
 			},
 		)
 		.map_err(|err| anyhow::anyhow!("{err}"))?;
@@ -788,54 +787,27 @@ key = ["cdn.key", "moq-pro.key"]
 		assert!(!config.stats.enabled);
 	}
 
-	/// An auth API loaded from TOML survives when the CLI omits it.
+	/// An auth server loaded from TOML survives when the CLI omits it.
 	#[test]
-	fn cli_does_not_clobber_toml_auth_api() {
-		let _env = EnvGuard::clear(&["MOQ_AUTH_API"]);
+	fn cli_does_not_clobber_toml_auth_url() {
+		let _env = EnvGuard::clear(&["MOQ_AUTH_URL"]);
 
 		let toml = r#"
 [auth]
-auth_api = "https://api.moq.dev/cluster/auth"
+url = "https://auth.example.com/"
 "#;
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
 		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("auth-api-toml-wins.toml");
+		let path = dir.join("auth-url-toml-wins.toml");
 		std::fs::write(&path, toml).unwrap();
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = Config::parse_and_merge(args).expect("config load");
 
 		assert_eq!(
-			config.auth.auth_api.as_deref(),
-			Some("https://api.moq.dev/cluster/auth"),
-			"TOML's auth.auth_api must not be clobbered by the CLI re-parse",
-		);
-	}
-
-	/// Same clap+TOML clobber guard for `auth.api_mode`. It's an `Option` so an
-	/// absent `--auth-api-mode` must not wipe a TOML-configured value during the
-	/// `update_from` re-parse.
-	#[test]
-	fn cli_does_not_clobber_toml_auth_api_mode() {
-		let _env = EnvGuard::clear(&["MOQ_AUTH_API", "MOQ_AUTH_API_MODE"]);
-
-		let toml = r#"
-[auth]
-auth_api = "https://api.moq.dev/cluster/auth"
-api_mode = "proxy"
-"#;
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("auth-api-mode-toml-wins.toml");
-		std::fs::write(&path, toml).unwrap();
-
-		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let config = Config::parse_and_merge(args).expect("config load");
-
-		assert_eq!(
-			config.auth.api_mode,
-			Some(crate::AuthApiMode::Proxy),
-			"TOML's auth.api_mode must not be clobbered by the CLI re-parse"
+			config.auth.url.as_ref().map(url::Url::as_str),
+			Some("https://auth.example.com/"),
+			"TOML's auth.url must not be clobbered by the CLI re-parse",
 		);
 	}
 
@@ -891,14 +863,11 @@ id = 12345
 	/// must not wipe a TOML value during the `update_from` re-parse.
 	#[test]
 	fn cli_does_not_clobber_toml_tiers() {
-		let _env = EnvGuard::clear(&["MOQ_CLUSTER_TIER", "MOQ_AUTH_MTLS_TIER"]);
+		let _env = EnvGuard::clear(&["MOQ_CLUSTER_TIER"]);
 
 		let toml = r#"
 [cluster]
 tier = "region"
-
-[auth]
-mtls_tier = "edge"
 "#;
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
 		std::fs::create_dir_all(&dir).unwrap();
@@ -912,11 +881,6 @@ mtls_tier = "edge"
 			config.cluster.tier.as_deref(),
 			Some("region"),
 			"TOML cluster.tier must survive"
-		);
-		assert_eq!(
-			config.auth.mtls_tier.as_deref(),
-			Some("edge"),
-			"TOML auth.mtls_tier must survive"
 		);
 	}
 
@@ -1214,54 +1178,29 @@ uid = [1001]
 		}
 	}
 
-	/// CLI-only `#[serde(skip)]` public shorthands must survive the TOML round-trip.
-	/// Dropping them makes `AuthConfig::is_empty` true and the relay start with no
-	/// public access, as though the flags had never been passed.
+	/// The public patterns arrive from the CLI, the environment, and TOML alike, as
+	/// patterns rather than prefixes.
 	#[test]
-	fn cli_public_shorthands_survive_merge() {
+	fn public_patterns_merge_from_every_source() {
 		let _env = EnvGuard::clear(&[
 			"MOQ_AUTH_PUBLIC",
 			"MOQ_AUTH_PUBLIC_SUBSCRIBE",
 			"MOQ_AUTH_PUBLIC_PUBLISH",
-			"MOQ_AUTH_PUBLIC_API",
-			"MOQ_AUTH_KEY",
-			"MOQ_AUTH_KEY_DIR",
-			"MOQ_AUTH_API",
+			"MOQ_AUTH_URL",
 		]);
 
 		let config = Config::parse_and_merge([
 			"moq-relay",
 			"--auth-public-subscribe",
-			"demo",
+			"demo/**",
 			"--auth-public-publish",
-			"uploads",
-			"--auth-public-api",
-			"https://api.example.com/access",
+			"uploads/**",
 		])
 		.expect("config load");
 
-		assert!(
-			!config.auth.is_empty(),
-			"CLI-only public flags must keep auth non-empty"
-		);
-		let subscribe = config
-			.auth
-			.public_subscribe
-			.clone()
-			.expect("public_subscribe")
-			.into_detailed();
-		assert_eq!(subscribe.subscribe, vec!["demo".to_string()]);
-		let publish = config
-			.auth
-			.public_publish
-			.clone()
-			.expect("public_publish")
-			.into_detailed();
-		assert_eq!(publish.publish, vec!["uploads".to_string()]);
-		assert_eq!(
-			config.auth.public_api.as_deref(),
-			Some("https://api.example.com/access")
-		);
+		assert!(config.auth.validate().is_ok(), "CLI public flags must admit anonymous sessions");
+		assert_eq!(config.auth.public_subscribe, vec!["demo/**".parse().unwrap()]);
+		assert_eq!(config.auth.public_publish, vec!["uploads/**".parse().unwrap()]);
 		assert!(
 			config
 				.source("auth.public_subscribe")
@@ -1270,15 +1209,22 @@ uid = [1001]
 			config.source("auth.public_subscribe")
 		);
 
-		unsafe { std::env::set_var("MOQ_AUTH_PUBLIC_SUBSCRIBE", "from-env") };
+		unsafe { std::env::set_var("MOQ_AUTH_PUBLIC_SUBSCRIBE", "from-env/**,other/**") };
 		let config = Config::parse_and_merge(["moq-relay"]).expect("env load");
-		let subscribe = config
-			.auth
-			.public_subscribe
-			.clone()
-			.expect("env public_subscribe")
-			.into_detailed();
-		assert_eq!(subscribe.subscribe, vec!["from-env".to_string()]);
+		assert_eq!(
+			config.auth.public_subscribe,
+			vec!["from-env/**".parse().unwrap(), "other/**".parse().unwrap()]
+		);
+		unsafe { std::env::remove_var("MOQ_AUTH_PUBLIC_SUBSCRIBE") };
+
+		let toml = "[auth]\npublic = \"anon/**\"\n";
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("auth-public-toml.toml");
+		std::fs::write(&path, toml).unwrap();
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("toml load");
+		assert_eq!(config.auth.public, vec!["anon/**".parse().unwrap()]);
 	}
 
 	/// A TOML `[cluster.lan] app` survives when the CLI omits the flag.

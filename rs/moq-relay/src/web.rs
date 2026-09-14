@@ -11,7 +11,7 @@ use anyhow::Context as _;
 use axum::{
 	Router,
 	body::Body,
-	extract::{Extension, Path, Query, State},
+	extract::{ConnectInfo, Extension, Path, Query, State},
 	http::{self, Method, StatusCode},
 	response::{Html, IntoResponse, Response},
 	routing::get,
@@ -27,7 +27,7 @@ use tokio_rustls::server::TlsStream;
 use tower_http::cors::{Any, CorsLayer};
 use tower_service::Service;
 
-use crate::{Auth, AuthParams, Cluster};
+use crate::{Admitted, Auth, AuthError, Cluster};
 
 /// Configuration for the HTTP/HTTPS web server.
 #[derive(usage::Args, Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -290,7 +290,9 @@ impl Web {
 	/// passes that router to [`crate::Relay::with_web`] instead of calling this.
 	pub async fn serve(self, app: Router) -> anyhow::Result<()> {
 		let config = self.config;
-		let app = app.fallback(serve_landing).into_make_service();
+		let app = app
+			.fallback(serve_landing)
+			.into_make_service_with_connect_info::<crate::listener::Peer>();
 		let ws = config.resolved_ws();
 
 		let http = if let Some(listen) = config.http.listen {
@@ -437,13 +439,13 @@ pub(crate) struct SocketStats(pub(crate) qmux::SharedSocketStats);
 #[derive(Clone)]
 pub(crate) struct SocketStats(std::convert::Infallible);
 
-/// Marker inserted as a request extension after HTTPS mTLS verifies a client certificate.
+/// The client certificate HTTPS mTLS verified, inserted as a request extension.
 ///
 /// Embedded routes can extract `Option<Extension<MtlsPeer>>` to mirror the
-/// built-in relay handlers, then call [`Auth::verify_mtls`] with their route
-/// path when the marker is present.
+/// built-in relay handlers and report the identity in their auth request; it is a
+/// fact for the auth server to weigh, never a grant on its own.
 #[derive(Clone, Debug)]
-pub struct MtlsPeer;
+pub struct MtlsPeer(pub moq_tokio::tls::PeerIdentity);
 
 /// Accepts a connection on a public web listener.
 ///
@@ -507,7 +509,7 @@ impl<I> MtlsStream for TlsStream<I> {
 			.1
 			.peer_certificates()
 			.filter(|certs| !certs.is_empty())
-			.map(|_| MtlsPeer)
+			.map(|certs| MtlsPeer(moq_tokio::tls::PeerIdentity::from_chain(certs.to_vec())))
 	}
 }
 
@@ -696,9 +698,9 @@ impl<'de> serde::Deserialize<'de> for FetchGroup {
 	}
 }
 
-/// The host this request was addressed to, which `AuthApiMode::Proxy` forwards so
-/// the endpoint can do its own routing. These handlers build their params from a
-/// path rather than a URL, so it has to come off the request headers.
+/// The host this request was addressed to, reported to the auth server as the
+/// session's `server_name` so it can route by hostname. These handlers build their
+/// request from a path rather than a URL, so it has to come off the request headers.
 fn request_host(uri: &http::Uri, headers: &http::HeaderMap) -> Option<String> {
 	// HTTP/2 carries the host in `:authority`, which hyper surfaces on the URI and
 	// usually WITHOUT a `Host` header. The HTTPS listener advertises h2, so reading
@@ -718,11 +720,33 @@ fn request_host(uri: &http::Uri, headers: &http::HeaderMap) -> Option<String> {
 		.filter(|host| !host.is_empty())
 }
 
+/// Admit a one-shot HTTP request as a session of its own: the auth server sees the
+/// path, the raw query, the host it was addressed to, the peer, and any certificate.
+async fn admit_http(
+	state: &WebState,
+	path: String,
+	query: AuthQuery,
+	uri: &http::Uri,
+	headers: &http::HeaderMap,
+	remote: crate::listener::Peer,
+	mtls: Option<Extension<MtlsPeer>>,
+) -> Result<Admitted, AuthError> {
+	// The public request API represents a missing or root path as empty; the
+	// contract says what was dialed, and a URL always starts with `/`.
+	let mut request = state.auth.request(moq_auth::Transport::Http, format!("/{}", path.trim_start_matches('/')));
+	request.query = uri.query().map(str::to_owned).or_else(|| query.jwt.map(|jwt| format!("jwt={jwt}")));
+	request.server_name = request_host(uri, headers);
+	request.remote = Some(remote.0);
+	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| crate::peer(&identity));
+	state.auth.admit(request, moq_auth::Counters::default()).await
+}
+
 /// Serve the announced broadcasts for a given prefix.
 async fn serve_announced(
 	path: Option<Path<String>>,
 	Query(query): Query<AuthQuery>,
 	mtls: Option<Extension<MtlsPeer>>,
+	ConnectInfo(remote): ConnectInfo<crate::listener::Peer>,
 	uri: http::Uri,
 	headers: http::HeaderMap,
 	State(state): State<Arc<WebState>>,
@@ -732,18 +756,7 @@ async fn serve_announced(
 		None => String::new(),
 	};
 
-	let params = AuthParams {
-		path: prefix,
-		host: request_host(&uri, &headers),
-		jwt: query.jwt,
-		..Default::default()
-	};
-	let token = if mtls.is_some() {
-		// mTLS peers: the API returns the canonical root and the billing tier.
-		state.auth.verify_mtls(&params.path, params.transport).await?
-	} else {
-		state.auth.verify(&params).await?
-	};
+	let Admitted { lease, token } = admit_http(&state, prefix, query, &uri, &headers, remote, mtls).await?;
 	let Some(origin) = state.cluster.subscriber(&token) else {
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
@@ -759,6 +772,7 @@ async fn serve_announced(
 		}
 	}
 
+	lease.close("done");
 	Ok(broadcasts
 		.iter()
 		.map(ToString::to_string)
@@ -771,6 +785,7 @@ async fn serve_fetch(
 	Path(path): Path<String>,
 	Query(params): Query<FetchParams>,
 	mtls: Option<Extension<MtlsPeer>>,
+	ConnectInfo(remote): ConnectInfo<crate::listener::Peer>,
 	uri: http::Uri,
 	headers: http::HeaderMap,
 	State(state): State<Arc<WebState>>,
@@ -784,18 +799,7 @@ async fn serve_fetch(
 		return Err(StatusCode::BAD_REQUEST.into());
 	}
 
-	let auth = AuthParams {
-		path: path.join("/"),
-		host: request_host(&uri, &headers),
-		jwt: params.auth.jwt,
-		..Default::default()
-	};
-	let token = if mtls.is_some() {
-		// mTLS peers: the API returns the canonical root and the billing tier.
-		state.auth.verify_mtls(&auth.path, auth.transport).await?
-	} else {
-		state.auth.verify(&auth).await?
-	};
+	let Admitted { lease, token } = admit_http(&state, path.join("/"), params.auth, &uri, &headers, remote, mtls).await?;
 	// The token's root is the canonical (alias-resolved) broadcast path.
 	let broadcast = token.root.to_string();
 
@@ -807,6 +811,8 @@ async fn serve_fetch(
 
 	let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
 
+	// Ended when the handler returns; a fetch is one request, not a session.
+	let _lease = lease;
 	let result = tokio::time::timeout_at(deadline, async {
 		// NOTE: The auth token is already scoped to the broadcast.
 		// Block until a route covers the broadcast (within the fetch deadline) so
@@ -1272,11 +1278,10 @@ mod tests {
 		// The probed route is the test's own, so auth never runs; it just has to be
 		// configured with something for `Web` to build.
 		let mut auth_config = crate::AuthConfig::default();
-		auth_config.public = Some(crate::PublicConfig::Detailed(crate::PublicDetailed {
-			subscribe: vec![String::new()],
-			..Default::default()
-		}));
-		let auth = Auth::new(auth_config).await.unwrap();
+		auth_config.public_subscribe = vec![moq_auth::Pattern::all()];
+		let auth = auth_config
+			.init("test", &moq_tokio::tls::Connect::default())
+			.unwrap();
 		let cluster = Cluster::new(crate::ClusterOptions::default()).unwrap();
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
 
@@ -1328,7 +1333,7 @@ mod tests {
 		// per-connection service but is independent of it.
 		let mut with_peer = SetConnectionExtensions {
 			inner: EchoExt,
-			peer: Some(MtlsPeer),
+			peer: Some(MtlsPeer(moq_tokio::tls::PeerIdentity::from_chain(Vec::new()))),
 			socket: None,
 		};
 		let mut no_peer = SetConnectionExtensions {

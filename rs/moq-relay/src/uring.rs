@@ -21,7 +21,7 @@ use std::task::Poll;
 
 use anyhow::Context as _;
 
-use crate::{Auth, AuthParams, Cluster, Shutdown};
+use crate::{Admitted, Auth, Cluster, Shutdown};
 
 /// One member's bound socket and its slot in the steered group.
 struct Member {
@@ -618,6 +618,8 @@ async fn serve_connection(
 	// the tokio listener still accepts: that path is moq-transport-shaped, and
 	// reaching it would drag the thread-affinity bounds `accept_request_lite`
 	// exists to avoid back onto this transport.
+	// The negotiated moq protocol: the WebTransport sub-protocol for `h3`, else the ALPN.
+	let mut alpn = conn.protocol().map(str::to_owned);
 	let (transport, url) = match conn.protocol() {
 		Some("h3") => {
 			let request = moq_uring::quic::web::Request::accept(&handle, conn)
@@ -633,6 +635,7 @@ async fn serve_connection(
 			if let Some(protocol) = &protocol {
 				response = response.with_protocol(protocol);
 			}
+			alpn = protocol.clone();
 			let session = request
 				.respond(response)
 				.await
@@ -649,19 +652,27 @@ async fn serve_connection(
 		.context("moq handshake failed")?;
 
 	// The path + `?jwt=` ride the URL for WebTransport and the SETUP for raw
-	// QUIC; either way the verdict comes from the shared runtime, which owns
-	// the auth API's HTTP client.
-	let path = match &url {
-		Some(url) => url.path().to_string(),
+	// QUIC; either way the grant comes from the shared runtime, which owns the
+	// auth client.
+	let (path, query) = match &url {
+		Some(url) => (url.path().to_string(), url.query().map(str::to_owned)),
 		None => {
 			let setup = request.path();
-			setup.split_once('?').map(|(path, _)| path).unwrap_or(setup).to_string()
+			match setup.split_once('?') {
+				Some((path, query)) => (path.to_string(), Some(query.to_string())),
+				None => (setup.to_string(), None),
+			}
 		}
 	};
-	let token = if Cluster::is_lan_path(&path) {
+	let path = if path.is_empty() { "/".to_string() } else { path };
+	let bytes = moq_auth::Counters::default();
+	let Admitted { lease, token } = if Cluster::is_lan_path(&path) {
 		match Cluster::lan_credential(&path) {
 			Some(presented) => match serve.cluster.verify_lan_credential(presented) {
-				Some(true) => serve.cluster.lan_peer_token(),
+				Some(true) => serve
+					.auth
+					.admit_fixed("/", serve.cluster.lan_peer_grant())
+					.context("LAN peer grant")?,
 				Some(false) => {
 					request.close(moq_net::Error::Unauthorized);
 					anyhow::bail!("LAN peer did not present this listener's membership proof");
@@ -677,47 +688,32 @@ async fn serve_connection(
 			}
 		}
 	} else {
-		let mut params = match &url {
-			Some(url) => serve.auth.params_from_url(url),
-			None => {
-				let setup = request.path();
-				let (path, query) = match setup.split_once('?') {
-					Some((path, query)) => (path, Some(query)),
-					None => (setup, None),
-				};
-				AuthParams::from_path_query(path, query)
-			}
-		};
-		params.transport = Some(moq_tokio::Transport::Quic);
+		let mut auth_request = serve.auth.request(moq_auth::Transport::Quic, path);
+		auth_request.query = query;
+		// moq-uring's connection does not expose the peer address or SNI yet, so
+		// the request carries the protocol alone; see quest m2/uring-link-facts.
+		auth_request.alpn = alpn.clone();
+		auth_request.role = request.role().map(|role| match role {
+			moq_net::Role::Publisher => moq_auth::Role::Publisher,
+			_ => moq_auth::Role::Subscriber,
+		});
+		auth_request.tls = identity.as_ref().and_then(crate::peer);
+		if identity.is_some() {
+			tracing::debug!(id, "client certificate verified; reported to the auth server");
+		}
 
-		// An mTLS peer's certificate is its credential, granting full access within
-		// the path's canonical root; everyone else brings a JWT (or is anonymous).
-		// Either verdict comes from the shared runtime.
 		let auth = serve.auth.clone();
-		let mtls = identity.is_some();
+		let counters = bytes.clone();
 		match serve
 			.tokio
-			.spawn(async move {
-				match mtls {
-					true => auth.verify_mtls(&params.path, params.transport).await,
-					false => auth.verify(&params).await,
-				}
-			})
+			.spawn(async move { auth.admit(auth_request, counters).await })
 			.await
 			.context("auth task failed")?
 		{
-			Ok(mut token) => {
-				if let Some(identity) = &identity {
-					tracing::debug!(id, "mTLS peer authenticated");
-					// Close the session when the client certificate expires,
-					// mirroring the JWT `exp` handling.
-					token.expires = identity.expiry();
-				}
-				token
-			}
+			Ok(admitted) => admitted,
 			Err(err) => {
 				// The status is what separates "your credential is bad" from "the
-				// auth API is down". Collapsing both into Unauthorized tells a
+				// auth server is down". Collapsing both into Unauthorized tells a
 				// client to stop reconnecting through an outage it could have
 				// waited out.
 				let status = axum::http::StatusCode::from(&err);
@@ -758,10 +754,9 @@ async fn serve_connection(
 	// its lifecycle (credential expiry, GOAWAY drain) lives with the timers
 	// and the shutdown broadcast on the shared runtime.
 	let shutdown = serve.shutdown.clone();
-	let auth = serve.auth.clone();
 	serve.tokio.spawn(async move {
 		let _node_connection = node_connection;
-		if let Err(err) = crate::connection::supervise(&auth, session, token, shutdown).await {
+		if let Err(err) = crate::connection::supervise(session, lease, token, bytes, shutdown).await {
 			tracing::warn!(id, %err, "connection closed");
 		}
 	});

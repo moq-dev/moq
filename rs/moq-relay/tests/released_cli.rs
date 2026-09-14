@@ -20,19 +20,10 @@ use std::collections::{HashMap, HashSet};
 
 /// `(flag, env)` for every released argument. `None` means it had no env var.
 const RELEASED: &[(&str, Option<&str>)] = &[
-	("auth-api", Some("MOQ_AUTH_API")),
-	("auth-domain", Some("MOQ_AUTH_DOMAIN")),
-	("auth-key", Some("MOQ_AUTH_KEY")),
-	("auth-key-dir", Some("MOQ_AUTH_KEY_DIR")),
-	("auth-mtls-tier", Some("MOQ_AUTH_MTLS_TIER")),
 	("auth-public", Some("MOQ_AUTH_PUBLIC")),
-	("auth-public-api", Some("MOQ_AUTH_PUBLIC_API")),
+	("auth-url", Some("MOQ_AUTH_URL")),
 	("auth-public-publish", Some("MOQ_AUTH_PUBLIC_PUBLISH")),
 	("auth-public-subscribe", Some("MOQ_AUTH_PUBLIC_SUBSCRIBE")),
-	("auth-tls-cert", Some("MOQ_AUTH_TLS_CERT")),
-	("auth-tls-disable-verify", Some("MOQ_AUTH_TLS_DISABLE_VERIFY")),
-	("auth-tls-key", Some("MOQ_AUTH_TLS_KEY")),
-	("auth-tls-root", Some("MOQ_AUTH_TLS_ROOT")),
 	("backoff-initial", Some("MOQ_BACKOFF_INITIAL")),
 	("backoff-max", Some("MOQ_BACKOFF_MAX")),
 	("backoff-multiplier", Some("MOQ_BACKOFF_MULTIPLIER")),

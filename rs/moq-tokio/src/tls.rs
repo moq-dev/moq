@@ -1564,7 +1564,7 @@ fn server_config(config: &Listen, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::Serv
 /// certificate that chained to a configured [`Listen::root`]. Owns the chain
 /// (leaf first) so callers can inspect it, e.g. [`expiry`](Self::expiry),
 /// without re-parsing the type-erased QUIC identity.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct PeerIdentity {
 	chain: Vec<CertificateDer<'static>>,
 }

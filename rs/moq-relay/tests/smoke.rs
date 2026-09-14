@@ -9,7 +9,7 @@
 
 use std::{net::TcpListener, time::Duration};
 
-use moq_relay::{AuthConfig, Cluster, ClusterOptions, Config, Connection, PublicConfig, Relay, Web, WebConfig};
+use moq_relay::{AuthConfig, Cluster, ClusterOptions, Config, Connection, Relay, Web, WebConfig};
 use moq_tokio::moq_net::{self, Hop};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -42,16 +42,11 @@ async fn build_web_with(web_config: WebConfig) -> Web {
 	// no-ops, but the test binary may run before any other moq code does.
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-	// AuthConfig with public Simple([""]) lets any path through. Simple is
-	// deprecated but matches what `simple_public("")` in moq-relay's auth
-	// tests uses, and the relay still honors it.
-	#[allow(deprecated)]
-	let public = PublicConfig::Simple(vec![String::new()]);
+	// A public grant of `**` lets any path through.
 	let mut auth_config = AuthConfig::default();
-	auth_config.public = Some(public);
+	auth_config.public = vec![moq_auth::Pattern::all()];
 	let auth = auth_config
-		.init(&moq_tokio::tls::Connect::default())
-		.await
+		.init("test", &moq_tokio::tls::Connect::default())
 		.expect("auth init");
 
 	let cluster = Cluster::new(ClusterOptions::default()).expect("cluster init");
@@ -129,9 +124,7 @@ async fn spawn_versioned_relay(versions: Vec<moq_net::Version>) -> (u16, tokio::
 	config.web.ws = true;
 	config.web.http.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
 
-	#[allow(deprecated)]
-	let public = PublicConfig::Simple(vec![String::new()]);
-	config.auth.public = Some(public);
+	config.auth.public = vec![moq_auth::Pattern::all()];
 
 	let relay = Relay::load(config).await.expect("load relay");
 	let (server_result_tx, mut server_result_rx) = tokio::sync::oneshot::channel();
@@ -533,8 +526,7 @@ async fn spawn_accept_relay(
 	let addr = server.local_addr().ok();
 
 	let auth = auth_config
-		.init(&moq_tokio::tls::Connect::default())
-		.await
+		.init("test", &moq_tokio::tls::Connect::default())
 		.expect("auth init");
 
 	let cluster = Cluster::new(ClusterOptions::default()).expect("cluster init");
@@ -570,10 +562,8 @@ async fn spawn_internal_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
 
 	// Public Simple([""]) lets any no-JWT stream client through at the root.
-	#[allow(deprecated)]
-	let public = PublicConfig::Simple(vec![String::new()]);
 	let mut auth_config = AuthConfig::default();
-	auth_config.public = Some(public);
+	auth_config.public = vec![moq_auth::Pattern::all()];
 
 	let (_, handle) = spawn_accept_relay(config, auth_config).await;
 
@@ -686,10 +676,8 @@ async fn spawn_internal_unix_relay() -> (std::path::PathBuf, tokio::task::JoinHa
 	config.unix.bind = Some(path.clone());
 
 	// Public Simple([""]) lets any no-JWT stream client through at the root.
-	#[allow(deprecated)]
-	let public = PublicConfig::Simple(vec![String::new()]);
 	let mut auth_config = AuthConfig::default();
-	auth_config.public = Some(public);
+	auth_config.public = vec![moq_auth::Pattern::all()];
 
 	let (_, handle) = spawn_accept_relay(config, auth_config).await;
 
@@ -905,10 +893,8 @@ async fn spawn_quic_relay() -> (std::net::SocketAddr, tokio::task::JoinHandle<()
 	config.bind = Some("127.0.0.1:0".to_string());
 	config.tls.generate = vec!["localhost".into()];
 
-	#[allow(deprecated)]
-	let public = PublicConfig::Simple(vec![String::new()]);
 	let mut auth_config = AuthConfig::default();
-	auth_config.public = Some(public);
+	auth_config.public = vec![moq_auth::Pattern::all()];
 
 	let (addr, handle) = spawn_accept_relay(config, auth_config).await;
 	(addr.expect("relay bound no QUIC socket"), handle)
@@ -966,10 +952,8 @@ async fn spawn_subscribe_only_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
 
 	// Subscribe-only public access: the root is granted for subscribing, never publishing.
-	#[allow(deprecated)]
-	let public_subscribe = PublicConfig::Simple(vec![String::new()]);
 	let mut auth_config = AuthConfig::default();
-	auth_config.public_subscribe = Some(public_subscribe);
+	auth_config.public_subscribe = vec![moq_auth::Pattern::all()];
 
 	let (_, handle) = spawn_accept_relay(config, auth_config).await;
 
@@ -1057,10 +1041,8 @@ async fn spawn_publish_only_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
 
 	// Publish-only public access: the root is granted for publishing, never subscribing.
-	#[allow(deprecated)]
-	let public_publish = PublicConfig::Simple(vec![String::new()]);
 	let mut auth_config = AuthConfig::default();
-	auth_config.public_publish = Some(public_publish);
+	auth_config.public_publish = vec![moq_auth::Pattern::all()];
 
 	let (_, handle) = spawn_accept_relay(config, auth_config).await;
 

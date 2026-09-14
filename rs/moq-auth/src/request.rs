@@ -105,7 +105,8 @@ pub enum Event {
 	},
 }
 
-/// How a session reached the relay. The names match `moq_tokio::server::Transport`.
+/// How a session reached the relay. The names match `moq_tokio::server::Transport`,
+/// plus `http` for the relay's one-shot HTTP routes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Transport {
@@ -119,6 +120,9 @@ pub enum Transport {
 	Tcp,
 	/// A Unix domain socket using qmux framing.
 	Unix,
+	/// A one-shot HTTP request on the relay's web listener (`/fetch`, `/announced`),
+	/// admitted and ended within the request.
+	Http,
 }
 
 impl Transport {
@@ -130,6 +134,7 @@ impl Transport {
 			Self::WebSocket => "websocket",
 			Self::Tcp => "tcp",
 			Self::Unix => "unix",
+			Self::Http => "http",
 		}
 	}
 }
