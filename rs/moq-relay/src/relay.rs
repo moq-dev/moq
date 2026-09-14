@@ -28,17 +28,22 @@ use crate::{Auth, Cluster, ClusterOptions, Config, Connection, Internal, Shutdow
 /// A fully assembled relay: the owner of every listener, worker group, and
 /// shutdown join.
 ///
-/// Clone the application handles ([`Self::cluster`], [`Self::auth`],
-/// [`Self::client`], [`Self::stats`], [`Self::shutdown`]) and mount extra
-/// routes with [`Self::with_web`] / [`Self::with_internal`]. [`Self::run`]
-/// is the serving loop; dropping it (or letting it return) releases the
-/// sockets and joins the workers.
+/// The accessors borrow, and [`Self::run`] consumes the relay, so clone the
+/// application handles ([`Self::cluster`], [`Self::auth`], [`Self::client`],
+/// [`Self::stats`], [`Self::shutdown`], [`Self::shutdown_trigger`]) first,
+/// then mount extra routes with [`Self::with_web`] / [`Self::with_internal`].
+/// `run` is the serving loop; it returns after [`ShutdownTrigger::start`]
+/// drains the sessions, with the sockets released and the workers joined.
 ///
 /// ```ignore
 /// let relay = Relay::load(config).await?;
 /// let origin = relay.cluster().origin.clone();
+/// let trigger = relay.shutdown_trigger().clone();
 /// let web = relay.web().routes().route("/hello", axum::routing::get(hello));
-/// relay.with_web(web).run().await?;
+/// let running = tokio::spawn(relay.with_web(web).run());
+/// // ... later, from any task:
+/// trigger.start();
+/// running.await??;
 /// ```
 pub struct Relay {
 	server: moq_tokio::Server,
@@ -306,7 +311,9 @@ impl Relay {
 		&self.shutdown
 	}
 
-	/// Starts graceful shutdown for [`Self::shutdown`].
+	/// Starts graceful shutdown: every session drains with a GOAWAY and
+	/// [`Self::run`] returns once the drain window elapses. Clone it before
+	/// `run` consumes the relay.
 	pub fn shutdown_trigger(&self) -> &ShutdownTrigger {
 		&self.shutdown_trigger
 	}
@@ -327,7 +334,10 @@ impl Relay {
 	/// relay's default router.
 	///
 	/// Build `routes` from [`Web::routes`](Web::routes) plus whatever the
-	/// application nests or merges. [`Self::run`] still owns the listeners.
+	/// application nests or merges; this replaces the router, so a bare
+	/// `Router::new()` drops every built-in route (health, certificate
+	/// fingerprint, announced, fetch, WebSocket). [`Self::run`] still owns the
+	/// listeners.
 	#[must_use = "the relay with the extra routes is returned"]
 	pub fn with_web(mut self, routes: Router) -> Self {
 		self.web_routes = Some(routes);
@@ -337,16 +347,20 @@ impl Relay {
 	/// Serve `routes` on the internal (ops) listener instead of the relay's
 	/// default ops router.
 	///
-	/// Build `routes` from [`Internal::routes`](Internal::routes) plus extras.
-	/// [`Self::run`] still owns the listener.
+	/// Build `routes` from [`Internal::routes`](Internal::routes) plus extras;
+	/// this replaces the router, so a bare `Router::new()` drops `/metrics`,
+	/// `/health`, and `/nodes`. [`Self::run`] still owns the listener.
 	#[must_use = "the relay with the extra routes is returned"]
 	pub fn with_internal(mut self, routes: Router) -> Self {
 		self.internal_routes = Some(routes);
 		self
 	}
 
-	/// Serve until something fails: accept sessions, run the cluster, and serve
-	/// both HTTP surfaces. Notifies systemd once everything is up.
+	/// Serve until something fails or shutdown completes: accept sessions, run
+	/// the cluster, and serve both HTTP surfaces. Notifies systemd once
+	/// everything is up. Returns once the drain window elapses after a signal
+	/// or [`ShutdownTrigger::start`], with every listener released and every
+	/// worker joined.
 	///
 	/// This is also the embedding loop. Extra routes go on via [`Self::with_web`]
 	/// / [`Self::with_internal`] before calling this; cloned handles outlive it.
@@ -498,7 +512,7 @@ impl Relay {
 			Err(err) = quic_workers => Err(err).context("QUIC workers failed"),
 			err = uring_failed => Err(err).context("io_uring QUIC workers failed"),
 			Err(err) = jemalloc => Err(err).context("jemalloc profiler failed"),
-			res = drain_on_signal(shutdown_trigger, shutdown.drain_timeout) => res,
+			res = drain(shutdown_trigger, shutdown.clone()) => res,
 			else => Ok(()),
 		};
 
@@ -517,16 +531,23 @@ impl Relay {
 	}
 }
 
-/// Two-stage shutdown: the first signal fires the drain broadcast (every session
-/// sends GOAWAY and waits for its peer to leave); the second signal, or the
-/// drain window elapsing, exits the process.
-async fn drain_on_signal(trigger: ShutdownTrigger, window: std::time::Duration) -> anyhow::Result<()> {
-	shutdown_signal().await?;
-	tracing::info!(
-		?window,
-		"shutdown signal received; draining sessions (signal again to exit immediately)"
-	);
-	trigger.start();
+/// Two-stage shutdown: the first signal, or an embedder firing
+/// [`ShutdownTrigger::start`], starts the drain broadcast (every session sends
+/// GOAWAY and waits for its peer to leave); a second signal, or the drain
+/// window elapsing, returns from [`Relay::run`].
+async fn drain(trigger: ShutdownTrigger, mut shutdown: Shutdown) -> anyhow::Result<()> {
+	let window = shutdown.drain_timeout;
+	tokio::select! {
+		res = shutdown_signal() => {
+			res?;
+			tracing::info!(
+				?window,
+				"shutdown signal received; draining sessions (signal again to exit immediately)"
+			);
+			trigger.start();
+		}
+		_ = shutdown.started() => tracing::info!(?window, "shutdown requested; draining sessions"),
+	}
 
 	// One extra second past the window so per-session force-closes fire first,
 	// giving every peer a proper GoawayTimeout instead of a dropped transport.

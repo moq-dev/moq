@@ -61,14 +61,20 @@ use moq_relay::{Config, Relay};
 
 let relay = Relay::load(config).await?;
 let origin = relay.cluster().origin.clone();
+let trigger = relay.shutdown_trigger().clone();
 let web = relay.web().routes().route("/hello", get(|| async { "hello" }));
 relay.with_web(web).run().await?;
 ```
 
-Clone `cluster`, `auth`, `client`, `stats`, and `shutdown` for application
-tasks. Extra listeners (RTMP, SRT, ...) sit beside `run` in the application's
-`select!`. `runtime.workers` and `runtime.io_uring` stay inside the owner;
-do not split the worker group yourself. See
+The accessors borrow and `run` consumes the relay, so clone `cluster`,
+`auth`, `client`, `stats`, `shutdown`, and `shutdown_trigger` for application
+tasks before calling it. `trigger.start()` drains every session with a GOAWAY
+and `run` returns once the drain window elapses, with the listeners released
+and the workers joined. Build routes from `web().routes()` (or
+`internal().routes()`): `with_web` replaces the router, so `Router::new()`
+drops the built-in routes. Extra listeners (RTMP, SRT, ...) sit beside `run`
+in the application's `select!`. `runtime.workers` and `runtime.io_uring` stay
+inside the owner; do not split the worker group yourself. See
 [`rs/moq-relay/examples/embed.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-relay/examples/embed.rs).
 
 ## Operate

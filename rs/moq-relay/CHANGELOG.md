@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(relay)* `Cluster::with_advertise` / `Cluster::with_connect` so a LAN mesh can advertise a generated certificate and pin it when dialing
 - *(relay)* `/.cluster/<credential>` authenticates a LAN peer without `cluster.token`
 - *(relay)* `Relay::with_web` / `Relay::with_internal` and borrowed handles (`cluster`, `auth`, `client`, `stats`, `shutdown`, `shutdown_trigger`, `web`, `internal`, `addr`) so an embedder mounts routes without taking the sockets
-- *(relay)* `ShutdownTrigger` is `Clone`, so an embedder can stop `Relay::run` from another task
+- *(relay)* `ShutdownTrigger` is `Clone`, and `Relay::run` returns once a trigger fired from an embedder's task has drained the sessions
 
 ### Changed
 
