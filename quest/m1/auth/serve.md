@@ -31,11 +31,15 @@ address. The default answer to anything else is a refusal. On dev.
   takes `--tier`. `--revalidate <duration>` sets the cadence on every grant
   (default one minute). Every grant carries an `expires`, since the contract
   refuses a cadence without one: the JWT's `exp`, the certificate's
-  `notAfter`, or `--expires <duration>` for anonymous sessions, default one
-  day, so the bare public-policy invocation admits anonymous clients and an
-  anonymous viewer reconnects daily at most.
+  `notAfter`, or `--expires <duration>`, default one day, for an anonymous
+  session and for a JWT signed without `exp` or a certificate without a
+  bound, so the bare public-policy invocation and the default signing flow
+  both produce grants the server can admit, and such a session reconnects
+  daily at most.
 - Session limits: `--limit-token <n>` caps live sessions presenting the same
-  token and `--limit-remote <n>` caps live sessions from one remote address,
+  token and `--limit-remote <n>` caps live sessions from one remote IP, the
+  `remote` socket address with its port dropped and an IPv4-mapped IPv6
+  address folded to IPv4,
   counted from `connect` and `end` events by session `id`, with a
   `connect` for a known id refreshing rather than double-counting. A slot
   ages out when its session misses two revalidation cadences, so a relay

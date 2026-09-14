@@ -28,13 +28,18 @@ lands the types and the move, and keeps the relay compiling until
   the pair; `Producer::update(grant)` and `Producer::revoke(reason)`;
   dropping the `Producer` revokes. `Consumer::grant()` reads the current
   grant, `Consumer::changed()` resolves on an update, `Consumer::closed()`
-  resolves with the reason. No callbacks, no trait.
+  resolves with the reason, and `Consumer::close(reason)` is the terminal
+  call that consumes the handle with the session's own close
+  classification; a bare drop is `Reason::Dropped`. No callbacks, no
+  trait.
 - `moq_auth::Client::new(url, tls)` and `Client::connect(request, bytes:
   Counters) -> Result<lease::Consumer>`: POSTs `connect`, validates the
   reply, builds the pair, and spawns the driver that re-POSTs `revalidate` on
   cadence with jittered backoff on failure until `expires`, applies each
   reply through `Producer::update`, and POSTs `end` with reason, duration,
-  and bytes when the `Consumer` is dropped. `moq_auth::Counters` is a cheap
+  and bytes when the `Consumer` is closed or dropped, the reason being what
+  `close` was given, `Dropped`, or the revocation the client itself
+  issued. `moq_auth::Counters` is a cheap
   clone of two shared atomic totals the session adds to as it sends and
   receives, so the client never reaches into a session and a caller with no
   meter passes `Counters::default()`. `http://` is refused for a
