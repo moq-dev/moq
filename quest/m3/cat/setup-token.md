@@ -27,8 +27,9 @@ decode as an unknown key.
   the contract has.
 - Encode side: `Parameters` learns to write a `USE_VALUE` token so
   [Present](/quest/m3/cat/present.md) has nothing to add on the wire.
-- Message parameter `0x03` on SUBSCRIBE, PUBLISH, FETCH, PUBLISH_NAMESPACE,
-  SUBSCRIBE_NAMESPACE, and TRACK_STATUS decodes and is refused with the
+- Message parameter `0x03` on SUBSCRIBE, REQUEST_UPDATE, PUBLISH, FETCH,
+  PUBLISH_NAMESPACE, SUBSCRIBE_NAMESPACE, TRACK_STATUS, and every other
+  message whose decoder reads parameters decodes and is refused with the
   request's error path (`Unsupported`, mapped through `to_code` for the
   draft) naming the parameter, so the session survives and the log says why.
 - `moq_net::Request::token() -> Option<&setup::Token>` on the accepted

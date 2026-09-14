@@ -33,10 +33,13 @@ tokens. Every claim we do not evaluate refuses the token naming the claim.
   claim set: anything outside `iss`, `sub`, `aud`, `exp`, `nbf`, `iat`,
   `cti`, `moqt`, and `moqt-reval` refuses the token naming the label.
 - `Claims::grant(&self, root) -> Result<Grant>`: for every scope,
-  `PublishNamespace` and `Publish` add the namespace pattern to `publish`;
-  `Subscribe`, `SubscribeNamespace`, `RequestUpdate`, `Fetch`, and
-  `TrackStatus` add it to `subscribe`; `ClientSetup` and `ServerSetup` add
-  nothing. The namespace fields become one `moq_pattern::Pattern` segment
+  `Publish` adds the namespace pattern to `publish` and `Subscribe` adds it
+  to `subscribe`. The grant has no narrower verbs, so `PublishNamespace` is
+  accepted only beside `Publish`, and `SubscribeNamespace`, `RequestUpdate`,
+  `Fetch`, and `TrackStatus` only beside `Subscribe`; a scope whose actions
+  are narrower than either verb refuses the token naming the scope rather
+  than widening a fetch-only token into a live subscription. `ClientSetup`
+  and `ServerSetup` add nothing. The namespace fields become one `moq_pattern::Pattern` segment
   each, the mapping `rs/moq-pattern` documents under "CAT / C4M", relative
   to the dialed path exactly as `jwt::Claims::root` is: `Exact(f)` is the
   literal segment, `Prefix(f)` is `f*`, `Suffix(f)` is `*f`, an absent
