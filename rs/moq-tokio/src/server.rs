@@ -212,8 +212,12 @@ pub struct Server {
 /// The worker group holds one of these per member until serving has stopped,
 /// so a dropped or finished member leaves the steering intact. The fields are
 /// never read: holding the endpoint clones is what keeps the sockets open.
+///
+/// Only compiled with a QUIC backend, matching the worker group that is its
+/// only caller.
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
+#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 pub(crate) struct SocketRetainer {
 	#[cfg(feature = "noq")]
 	noq: Option<web_transport_noq::noq::Endpoint>,
@@ -484,6 +488,7 @@ impl Server {
 	///
 	/// Crate-private: only the worker group retains sockets this way. A worker
 	/// member never serves quiche, so there is nothing to retain there.
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 	pub(crate) fn retain(&self) -> SocketRetainer {
 		SocketRetainer {
 			#[cfg(feature = "noq")]
