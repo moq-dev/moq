@@ -29,8 +29,11 @@ address. The default answer to anything else is a refusal. On dev.
 - `--tier <label>` on the anonymous and mTLS grants, `--tier-websocket` and
   friends only if stats need them; the JWT carries no tier, so a token grant
   takes `--tier`. `--revalidate <duration>` sets the cadence on every grant
-  (default one minute) and the JWT's `exp`, the certificate's `notAfter`, or
-  `--expires <duration>` for anonymous sessions bounds it.
+  (default one minute). Every grant carries an `expires`, since the contract
+  refuses a cadence without one: the JWT's `exp`, the certificate's
+  `notAfter`, or `--expires <duration>` for anonymous sessions, default one
+  day, so the bare public-policy invocation admits anonymous clients and an
+  anonymous viewer reconnects daily at most.
 - Session limits: `--limit-token <n>` caps live sessions presenting the same
   token and `--limit-remote <n>` caps live sessions from one remote address,
   counted from `connect` and `end` events by session `id` and aged out when a

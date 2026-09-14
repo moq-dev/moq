@@ -3,8 +3,8 @@
 ## Goal
 
 One dependency-free Rust crate and one TypeScript package implement the v1
-path-pattern grammar and exact algebra, re-exported by `moq-net`, `moq-token`,
-`@moq/net`, and `@moq/token`.
+path-pattern grammar and exact algebra, re-exported by `moq-net`, `moq-auth`,
+`@moq/net`, and `@moq/auth`.
 
 ## Plan
 

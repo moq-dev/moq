@@ -29,13 +29,15 @@ lands the types and the move, and keeps the relay compiling until
   dropping the `Producer` revokes. `Consumer::grant()` reads the current
   grant, `Consumer::changed()` resolves on an update, `Consumer::closed()`
   resolves with the reason. No callbacks, no trait.
-- `moq_auth::Client::new(url, tls)` and `Client::connect(request) ->
-  Result<lease::Consumer>`: POSTs `connect`, validates the reply, builds the
-  pair, and spawns the driver that re-POSTs `revalidate` on cadence with
-  jittered backoff on failure until `expires`, applies each reply through
-  `Producer::update`, and POSTs `end` with reason, duration, and bytes when
-  the `Consumer` is dropped. Bytes come from a counter pair the caller hands
-  in, so the client never reaches into a session. `http://` is refused for a
+- `moq_auth::Client::new(url, tls)` and `Client::connect(request, bytes:
+  Counters) -> Result<lease::Consumer>`: POSTs `connect`, validates the
+  reply, builds the pair, and spawns the driver that re-POSTs `revalidate` on
+  cadence with jittered backoff on failure until `expires`, applies each
+  reply through `Producer::update`, and POSTs `end` with reason, duration,
+  and bytes when the `Consumer` is dropped. `moq_auth::Counters` is a cheap
+  clone of two shared atomic totals the session adds to as it sends and
+  receives, so the client never reaches into a session and a caller with no
+  meter passes `Counters::default()`. `http://` is refused for a
   non-loopback host at construction, `https://` presents the given client
   identity, and `unix://` speaks HTTP over the socket.
 - Move `rs/moq-token` in: `Claims { root, publish: Patterns, subscribe:
@@ -81,4 +83,6 @@ shape. Wire: none.
 ## Related
 
 - [Matcher](/quest/m2/path-patterns/matcher.md) - the pattern crate the
-  claims and grants carry
+  claims and grants carry; `moq-pattern` and `@moq/pattern` already exist on
+  dev (#3631), so this quest builds on them and Matcher closes when dev
+  merges

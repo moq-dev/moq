@@ -16,11 +16,16 @@ expiry, an expiry that leaves the union intact ends only that token, and
   from the `moq_net::Request` builder before `.ok()`, so the relay owns the
   initial empty AUTH too and the driver's fallback never races it. An empty
   token is answered from the origin handles as the default does, plus
-  the admitted grant's `expires`. A non-empty token becomes a `connect`
-  request through the session's `moq_auth::Client`, carrying the admitted
-  session's path and transport with the token as its query and no certificate
-  facts, since a certificate cannot be presented in band. mTLS sessions reject
-  a non-empty token as `Unsupported`.
+  the admitted grant's `expires`. A non-empty token is presented through
+  `Client::attach(&connection_lease, request)`, a method this quest adds:
+  the request carries the connection's `id`, path, and transport, the query
+  `jwt=<token>` exactly as the URL would have, and no certificate facts,
+  since a certificate cannot be presented in band. An `attach` lease
+  revalidates like any other but never POSTs `end`, and the server treats a
+  `connect` for an id it already holds as one more grant on that session,
+  so lifecycle stays with the connection lease and a withdrawn token frees
+  no session-limit slot. `doc/bin/relay/auth.md` states that rule. mTLS
+  sessions reject a non-empty token as `Unsupported`.
 - Union: the connection holds the set of accepted leases. Every one
   must carry the admitted root, else `AUTH_ERROR { Unauthorized }` naming the
   root. The session's origin handles are rebuilt through `Cluster::publisher`
@@ -69,10 +74,10 @@ Additive.
 
 - [Lite stream](/quest/m2/auth/lite.md) - supplies the AUTH stream and
   `auth::Request` this consumes
+- [Relay](/quest/m1/auth/relay.md) - supplies the connection lease and the
+  `moq_auth::Client` an in-band token attaches to
 
 ## Related
 
 - [Origin scopes](/quest/m2/path-patterns/origin.md) - extends the re-scope
   to a shrinking union
-- [Relay](/quest/m1/auth/relay.md) - the tier and root outcomes a re-check
-  has; a token that changes them follows the same rules
