@@ -1611,6 +1611,34 @@ impl PeerIdentity {
 		Some(hex::encode(crypto::sha256(&crypto::provider(), leaf.as_ref())))
 	}
 
+	/// The peer's name: the leaf's first SAN DNS name, else its CN, else its
+	/// fingerprint, so it is never empty for a chain that parses.
+	pub fn name(&self) -> Option<String> {
+		let leaf = self.chain.first()?;
+		let (_, cert) = x509_parser::parse_x509_certificate(leaf).ok()?;
+		let san = cert.subject_alternative_name().ok().flatten().and_then(|san| {
+			san.value.general_names.iter().find_map(|name| match name {
+				x509_parser::extensions::GeneralName::DNSName(dns) => Some((*dns).to_string()),
+				_ => None,
+			})
+		});
+		let cn = || {
+			cert.subject()
+				.iter_common_name()
+				.next()
+				.and_then(|cn| cn.as_str().ok())
+				.map(str::to_string)
+		};
+		san.or_else(cn).or_else(|| self.fingerprint())
+	}
+
+	/// The leaf certificate's issuer, as a distinguished name.
+	pub fn issuer(&self) -> Option<String> {
+		let leaf = self.chain.first()?;
+		let (_, cert) = x509_parser::parse_x509_certificate(leaf).ok()?;
+		Some(cert.issuer().to_string())
+	}
+
 	/// The leaf certificate's `notAfter`, if it parses. A `notAfter` before the
 	/// Unix epoch is reported as `None`.
 	pub fn expiry(&self) -> Option<std::time::SystemTime> {

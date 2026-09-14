@@ -676,6 +676,13 @@ pub(crate) async fn accept(
 	span.record("id", conn.stable_id());
 	tracing::debug!(%host, ip = %remote, %alpn, "accepted");
 
+	let link = crate::server::Link {
+		remote: Some(remote),
+		local: None,
+		server_name: (!host.is_empty()).then(|| host.clone()),
+		alpn: None,
+	};
+
 	match alpn.as_str() {
 		web_transport_noq::ALPN => {
 			// Wait for the CONNECT request, then capture its URL and mTLS identity before
@@ -689,8 +696,10 @@ pub(crate) async fn accept(
 			let authority = request.url.host_str().filter(|h| !h.is_empty()).map(str::to_owned);
 
 			let mut response = web_transport_noq::proto::ConnectResponse::OK;
+			let mut link = link;
 			if let Some(protocol) = request.protocols.iter().find(|p| alpns.contains(&p.as_str())) {
 				response = response.with_protocol(protocol);
+				link.alpn = Some(protocol.clone());
 			}
 			let session = request
 				.respond(response)
@@ -701,6 +710,7 @@ pub(crate) async fn accept(
 				url,
 				identity,
 				authority,
+				link,
 			})
 		}
 		// Recognize any moq ALPN this server actually offered (its configured versions),
@@ -718,6 +728,10 @@ pub(crate) async fn accept(
 				url: None,
 				identity,
 				authority,
+				link: crate::server::Link {
+					alpn: Some(alpn.to_string()),
+					..link
+				},
 			})
 		}
 		_ => Err(Error::UnsupportedAlpn(alpn)),

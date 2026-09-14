@@ -686,6 +686,13 @@ pub(crate) async fn accept(
 	span.record("id", conn.stable_id()); // TODO can we get this earlier?
 	tracing::debug!(%host, ip = %conn.remote_address(), %alpn, "accepted");
 
+	let link = crate::server::Link {
+		remote: Some(conn.remote_address()),
+		local: None,
+		server_name: (!host.is_empty()).then(|| host.clone()),
+		alpn: None,
+	};
+
 	match alpn.as_str() {
 		web_transport_quinn::ALPN => {
 			// Wait for the CONNECT request, then capture its URL and mTLS identity before
@@ -704,8 +711,10 @@ pub(crate) async fn accept(
 			// If no match is found, we default to no sub-protocol to support older
 			// clients that don't use ALPN. We assume moq-transport-14/moq-lite-02
 			// and perform the SETUP_x exchange instead.
+			let mut link = link;
 			if let Some(protocol) = request.protocols.iter().find(|p| alpns.contains(&p.as_str())) {
 				response = response.with_protocol(protocol);
+				link.alpn = Some(protocol.clone());
 			}
 			let session = request
 				.respond(response)
@@ -716,6 +725,7 @@ pub(crate) async fn accept(
 				url,
 				identity,
 				authority,
+				link,
 			})
 		}
 		// Recognize any moq ALPN this server actually offered (its configured versions),
@@ -733,6 +743,10 @@ pub(crate) async fn accept(
 				url: None,
 				identity,
 				authority,
+				link: crate::server::Link {
+					alpn: Some(alpn.to_string()),
+					..link
+				},
 			})
 		}
 		_ => Err(Error::UnsupportedAlpn(alpn)),

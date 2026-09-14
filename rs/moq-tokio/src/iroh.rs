@@ -305,8 +305,10 @@ pub(crate) async fn accept(
 			let url = Some(request.url.clone());
 
 			let mut response = ConnectResponse::OK;
+			let mut link = crate::server::Link::default();
 			if let Some(protocol) = request.protocols.first() {
 				response = response.with_protocol(protocol);
+				link.alpn = Some(protocol.clone());
 			}
 			let session = request
 				.respond(response)
@@ -317,6 +319,7 @@ pub(crate) async fn accept(
 				url,
 				identity: None,
 				authority: None,
+				link,
 			})
 		}
 		// Raw QUIC carries no request URL; the path rides the SETUP.
@@ -327,6 +330,10 @@ pub(crate) async fn accept(
 				url: None,
 				identity: None,
 				authority: None,
+				link: crate::server::Link {
+					alpn: Some(alpn.to_string()),
+					..Default::default()
+				},
 			})
 		}
 		_ => Err(Error::UnsupportedAlpn(alpn)),

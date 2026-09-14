@@ -779,6 +779,13 @@ pub(crate) async fn accept(
 	let identity = conn.peer_certificates().map(crate::tls::PeerIdentity::from_chain);
 	tracing::debug!(ip = %conn.peer_addr(), ?alpn, "accepted via quiche");
 
+	let link = crate::server::Link {
+		remote: Some(conn.peer_addr()),
+		local: None,
+		server_name: conn.server_name().filter(|h| !h.is_empty()),
+		alpn: None,
+	};
+
 	match alpn {
 		web_transport_quiche::ALPN => {
 			// WebTransport over HTTP/3
@@ -792,8 +799,10 @@ pub(crate) async fn accept(
 			let mut response = web_transport_quiche::proto::ConnectResponse::OK;
 			// Pick the first sub-protocol that we actually support.
 			// This is the WebTransport equivalent of ALPN negotiation.
+			let mut link = link;
 			if let Some(protocol) = request.protocols.iter().find(|p| alpns.contains(&p.as_str())) {
 				response = response.with_protocol(protocol);
+				link.alpn = Some(protocol.clone());
 			}
 			let session = request
 				.respond(response)
@@ -804,6 +813,7 @@ pub(crate) async fn accept(
 				url,
 				identity,
 				authority,
+				link,
 			})
 		}
 		// Recognize any moq ALPN this server actually offered (its configured versions),
@@ -819,6 +829,10 @@ pub(crate) async fn accept(
 				url: None,
 				identity,
 				authority,
+				link: crate::server::Link {
+					alpn: Some(alpn.to_string()),
+					..link
+				},
 			})
 		}
 		_ => Err(Error::UnsupportedAlpn(alpn.to_string())),

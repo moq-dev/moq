@@ -537,6 +537,9 @@ impl Server {
 	))]
 	async fn accept_next(&mut self) -> Option<Request> {
 		loop {
+			// The QUIC endpoint address, reported as a QUIC session's local side.
+			let local = self.local_addr().ok();
+
 			// tokio::select! does not support cfg directives on arms, so we need to create the futures here.
 			#[cfg(feature = "noq")]
 			let noq_accept = async {
@@ -620,9 +623,10 @@ impl Server {
 							// Accept the transport (capturing url + mTLS identity) and exchange the
 							// MoQ SETUP up front, so path/role are known before the caller authorizes
 							// (like the stream bindings).
-							let Accepted { session, url, identity, authority } = super::noq::accept(_conn, alpns).await?;
+							let Accepted { session, url, identity, authority, mut link } = super::noq::accept(_conn, alpns).await?;
+							link.local = local;
 							let request = server.accept_request(crate::runtime::Runtime::new(), crate::transport::Async::new(session)).await?;
-							Ok(Request { transport: Transport::Quic, url, identity, authority, kind: RequestKind::Noq(Box::new(request)) })
+							Ok(Request { transport: Transport::Quic, url, identity, authority, link, kind: RequestKind::Noq(Box::new(request)) })
 						}.boxed());
 					}
 				}
@@ -631,9 +635,10 @@ impl Server {
 					{
 						let alpns = versions.alpns();
 						self.accept.push(async move {
-							let Accepted { session, url, identity, authority } = super::quinn::accept(_conn, alpns).await?;
+							let Accepted { session, url, identity, authority, mut link } = super::quinn::accept(_conn, alpns).await?;
+							link.local = local;
 							let request = server.accept_request(crate::runtime::Runtime::new(), session).await?;
-							Ok(Request { transport: Transport::Quic, url, identity, authority, kind: RequestKind::Quinn(Box::new(request)) })
+							Ok(Request { transport: Transport::Quic, url, identity, authority, link, kind: RequestKind::Quinn(Box::new(request)) })
 						}.boxed());
 					}
 				}
@@ -642,30 +647,33 @@ impl Server {
 					{
 						let alpns = versions.alpns();
 						self.accept.push(async move {
-							let Accepted { session, url, identity, authority } = super::quiche::accept(_conn, alpns).await?;
+							let Accepted { session, url, identity, authority, mut link } = super::quiche::accept(_conn, alpns).await?;
+							link.local = local;
 							let request = server.accept_request(crate::runtime::Runtime::new(), session).await?;
-							Ok(Request { transport: Transport::Quic, url, identity, authority, kind: RequestKind::Quiche(Box::new(request)) })
+							Ok(Request { transport: Transport::Quic, url, identity, authority, link, kind: RequestKind::Quiche(Box::new(request)) })
 						}.boxed());
 					}
 				}
 				Some(_conn) = iroh_accept => {
 					#[cfg(feature = "iroh")]
 					self.accept.push(async move {
-						let Accepted { session, url, identity, authority } = super::iroh::accept(_conn).await?;
+						let Accepted { session, url, identity, authority, link } = super::iroh::accept(_conn).await?;
 						let request = server.accept_request(crate::runtime::Runtime::new(), crate::transport::Async::new(session)).await?;
-						Ok(Request { transport: Transport::Iroh, url, identity, authority, kind: RequestKind::Iroh(Box::new(request)) })
+						Ok(Request { transport: Transport::Iroh, url, identity, authority, link, kind: RequestKind::Iroh(Box::new(request)) })
 					}.boxed());
 				}
 				Some(_res) = ws_accept => {
 					#[cfg(feature = "websocket")]
 					match _res {
-						Ok((session, url)) => {
+						Ok((session, url, accepted)) => {
 							// Read the SETUP off the qmux session before handing it over, so a
 							// slow peer doesn't stall the accept loop (spawned like the others).
+							let local = self.websocket_local_addr();
 							self.accept.push(async move {
 								let request = server.accept_request(crate::runtime::Runtime::new(), crate::transport::Async::new(session)).await?;
 								let authority = url.host_str().filter(|h| !h.is_empty()).map(str::to_owned);
-								Ok(Request { transport: Transport::WebSocket, url: Some(url), authority, identity: None, kind: RequestKind::Qmux(Box::new(request)) })
+								let link = Link { remote: Some(accepted.remote), local, alpn: accepted.protocol, ..Default::default() };
+								Ok(Request { transport: Transport::WebSocket, url: Some(url), authority, identity: None, link, kind: RequestKind::Qmux(Box::new(request)) })
 							}.boxed());
 						}
 						// One connection's upgrade, not the listener's: a failed
@@ -1015,10 +1023,18 @@ fn spawn_tcp_loop(
 	server: moq_net::Server,
 	tx: tokio::sync::mpsc::Sender<Request>,
 ) -> tokio::task::JoinHandle<()> {
+	let local = listener.local_addr().ok();
 	tokio::spawn(async move {
 		loop {
-			match listener.accept().await {
-				Some(Ok(session)) => spawn_stream_request(session, Transport::Tcp, server.clone(), tx.clone()),
+			match listener.accept_with_addr().await {
+				Some(Ok((session, remote))) => {
+					let link = Link {
+						remote: Some(remote),
+						local,
+						..Default::default()
+					};
+					spawn_stream_request(session, Transport::Tcp, link, server.clone(), tx.clone())
+				}
 				// Per-connection: a failed `accept(2)` is the listener's own to
 				// classify and pace, and never surfaces here.
 				Some(Err(err)) => tracing::warn!(%err, "tcp qmux handshake failed"),
@@ -1046,7 +1062,7 @@ fn spawn_unix_loop(
 						tracing::warn!(uid = cred.uid, gid = cred.gid, pid = ?cred.pid, "unix connection rejected by allow list");
 						continue;
 					}
-					spawn_stream_request(session, Transport::Unix, server.clone(), tx.clone());
+					spawn_stream_request(session, Transport::Unix, Link::default(), server.clone(), tx.clone());
 				}
 				// Per-connection, as in `spawn_tcp_loop`.
 				Some(Err(err)) => tracing::warn!(%err, "unix qmux handshake failed"),
@@ -1062,6 +1078,7 @@ fn spawn_unix_loop(
 fn spawn_stream_request(
 	session: qmux::Session,
 	transport: Transport,
+	link: Link,
 	server: moq_net::Server,
 	tx: tokio::sync::mpsc::Sender<Request>,
 ) {
@@ -1076,6 +1093,7 @@ fn spawn_stream_request(
 					url: None,
 					authority: None,
 					identity: None,
+					link,
 					kind: RequestKind::Qmux(Box::new(request)),
 				};
 				let _ = tx.send(request).await;
@@ -1116,6 +1134,24 @@ pub(crate) struct Accepted<S> {
 	pub url: Option<Url>,
 	pub identity: Option<crate::tls::PeerIdentity>,
 	pub authority: Option<String>,
+	pub link: Link,
+}
+
+/// What the transport knows about an accepted session's link, reported to whoever
+/// authorizes it. Every field is optional: a unix socket has no addresses, a qmux
+/// stream negotiates no ALPN, and iroh dials by node id.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Link {
+	/// The peer's socket address.
+	pub remote: Option<net::SocketAddr>,
+	/// The address the session arrived on.
+	pub local: Option<net::SocketAddr>,
+	/// The SNI the client presented, when the transport carried TLS.
+	pub server_name: Option<String>,
+	/// The negotiated application protocol: the TLS ALPN on raw QUIC, the chosen
+	/// sub-protocol on WebTransport and WebSocket.
+	pub alpn: Option<String>,
 }
 
 /// The network transport carrying an incoming MoQ session.
@@ -1172,6 +1208,8 @@ pub struct Request {
 	/// The peer's validated mTLS identity, captured at the transport handshake (before
 	/// the MoQ SETUP), when the backend supports it.
 	identity: Option<crate::tls::PeerIdentity>,
+	/// The link facts the transport could see.
+	link: Link,
 	kind: RequestKind,
 }
 
@@ -1249,6 +1287,7 @@ impl Request {
 			url,
 			authority,
 			identity,
+			link,
 			kind,
 		} = self;
 		let kind = request_map!(kind, request => request.with_publisher(publish));
@@ -1257,6 +1296,7 @@ impl Request {
 			url,
 			authority,
 			identity,
+			link,
 			kind,
 		}
 	}
@@ -1268,6 +1308,7 @@ impl Request {
 			url,
 			authority,
 			identity,
+			link,
 			kind,
 		} = self;
 		let kind = request_map!(kind, request => request.with_subscriber(subscribe));
@@ -1276,6 +1317,7 @@ impl Request {
 			url,
 			authority,
 			identity,
+			link,
 			kind,
 		}
 	}
@@ -1289,6 +1331,7 @@ impl Request {
 			url,
 			authority,
 			identity,
+			link,
 			kind,
 		} = self;
 		let kind = request_map!(kind, request => request.with_peer_hop(hop));
@@ -1297,6 +1340,7 @@ impl Request {
 			url,
 			authority,
 			identity,
+			link,
 			kind,
 		}
 	}
@@ -1308,6 +1352,7 @@ impl Request {
 			url,
 			authority,
 			identity,
+			link,
 			kind,
 		} = self;
 		let kind = request_map!(kind, request => request.with_stats(stats));
@@ -1316,6 +1361,7 @@ impl Request {
 			url,
 			authority,
 			identity,
+			link,
 			kind,
 		}
 	}
@@ -1379,6 +1425,27 @@ impl Request {
 		} else {
 			setup.split_once('?').map(|(_, query)| query)
 		}
+	}
+
+	/// The peer's socket address, when the transport has one.
+	pub fn remote_addr(&self) -> Option<net::SocketAddr> {
+		self.link.remote
+	}
+
+	/// The address the session arrived on, when the transport has one.
+	pub fn local_addr(&self) -> Option<net::SocketAddr> {
+		self.link.local
+	}
+
+	/// The SNI the client presented, when the transport carried TLS.
+	pub fn server_name(&self) -> Option<&str> {
+		self.link.server_name.as_deref()
+	}
+
+	/// The negotiated application protocol: the TLS ALPN on raw QUIC, the chosen
+	/// sub-protocol on WebTransport and WebSocket, `None` where nothing was negotiated.
+	pub fn alpn(&self) -> Option<&str> {
+		self.link.alpn.as_deref()
 	}
 
 	/// The single direction the client advertised in its SETUP, or `None` for a

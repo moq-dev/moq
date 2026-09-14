@@ -504,11 +504,12 @@ impl Listener {
 	pub async fn accept(&self) -> Option<Result<qmux::Session>> {
 		self.accept_with_url()
 			.await
-			.map(|result| result.map(|(session, _)| session))
+			.map(|result| result.map(|(session, _, _)| session))
 	}
 
-	/// Accept the next connection and retain the WebSocket request URL.
-	pub(crate) async fn accept_with_url(&self) -> Option<Result<(qmux::Session, Url)>> {
+	/// Accept the next connection and retain the WebSocket request URL, the chosen
+	/// sub-protocol, and the peer's address.
+	pub(crate) async fn accept_with_url(&self) -> Option<Result<(qmux::Session, Url, Accepted)>> {
 		let (stream, addr) = self.accept_socket().await;
 		tracing::debug!(%addr, "accepted WebSocket TCP connection");
 
@@ -562,11 +563,11 @@ impl Listener {
 				.take()
 				.expect("successful upgrade selected a protocol");
 			let upgraded = qmux::ws::Upgraded::new(websocket).with_keep_alive(qmux::ws::KeepAlive::default());
-			let session = match protocol {
-				Some(protocol) => upgraded.with_alpn(&protocol).accept(),
+			let session = match &protocol {
+				Some(protocol) => upgraded.with_alpn(protocol).accept(),
 				None => upgraded.accept(),
 			};
-			(session, url)
+			(session, url, Accepted { remote: addr, protocol })
 		}))
 	}
 
@@ -586,6 +587,14 @@ impl Listener {
 			}
 		}
 	}
+}
+
+/// What the upgrade learned about the peer, beside the session and URL.
+pub(crate) struct Accepted {
+	/// The peer's socket address.
+	pub remote: net::SocketAddr,
+	/// The sub-protocol the upgrade selected, if the client offered one we serve.
+	pub protocol: Option<String>,
 }
 
 /// Select a supported subprotocol, while preserving legacy clients that offer none.
@@ -661,7 +670,7 @@ mod tests {
 		let (websocket, response) = tokio_tungstenite::client_async(request_url, stream).await.unwrap();
 		assert!(!response.headers().contains_key(http::header::SEC_WEBSOCKET_PROTOCOL));
 
-		let (session, url) = accepted.await.unwrap();
+		let (session, url, _) = accepted.await.unwrap();
 		assert_eq!(url.path(), "/room");
 		assert_eq!(url.query(), Some("jwt=test"));
 		drop(session);
