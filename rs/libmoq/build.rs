@@ -26,10 +26,7 @@ fn main() {
 	// The `rerun-if-changed` below opts out of cargo's default "rerun when any
 	// file in the package changes", so the sources cbindgen reads have to be
 	// named explicitly or an edited signature leaves a stale header behind.
-	// The C fixtures under c-tests/ are compiled against that header by a unit
-	// test, so their edits must rebuild (and rerun) the test too.
 	println!("cargo:rerun-if-changed=src");
-	println!("cargo:rerun-if-changed=c-tests");
 
 	// Generate C header into target/include/. The header is profile-independent,
 	// so a debug and release build in the same target tree can share it.

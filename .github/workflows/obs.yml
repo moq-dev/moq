@@ -12,6 +12,11 @@ name: OBS
 # Narrow trigger, like swift.yml: the plugin's own sources, the libmoq header
 # they call through, and the flake that supplies the toolchain.
 #
+# libmoq's own C fixtures (`just rs c-tests`) run here too. They link libmoq.a
+# from outside cargo the same way, which is too slow for nextest's hang budget
+# and needs the debug staticlib this job has just built, so this is the one
+# PR gate that already has everything they need.
+#
 # The manifests and Cargo.lock are in there for the one way a crate the plugin
 # never names can break it: linking libmoq.a from outside cargo needs the native
 # libraries in `rs/libmoq/native-libs/*.txt`, which are maintained by hand. A
@@ -95,3 +100,8 @@ jobs:
       # the platform's CI preset.
       - name: Build
         run: nix develop --command just obs ci
+
+      # The plugin build above already produced the debug libmoq.a, so the
+      # cargo step inside is a no-op and this is just a cc and a run.
+      - name: libmoq C fixtures
+        run: nix develop --command just rs c-tests

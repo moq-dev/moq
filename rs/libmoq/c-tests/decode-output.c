@@ -2,9 +2,9 @@
 // selects the decoded CPU pixel format and target size, and accepted requests
 // produce that layout or fail explicitly.
 //
-// Compiled and run by the `video_decoder_output_c_fixture` test in
-// `rs/libmoq/src/test.rs` against this build's generated `moq.h` and
-// `libmoq.a`, so this file must only use the stable C ABI:
+// Compiled and run by `just rs c-tests` against this build's generated `moq.h`
+// and `libmoq.a`, linked from outside cargo the way an embedder does, so this
+// file must only use the stable C ABI:
 //
 //   1. Layout: compile-time asserts pin the struct fields and the pixel-format
 //      discriminants the test below depends on.

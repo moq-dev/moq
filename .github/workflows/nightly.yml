@@ -72,16 +72,21 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just rs audit
 
-      # The OBS plugin is the only thing that links libmoq.a from outside cargo,
-      # so a stale `rs/libmoq/native-libs/*.txt` breaks it and nothing else.
-      # obs.yml lists the inputs that can do that, but a list of paths can't be
-      # complete: a build script emitting `cargo::rustc-link-lib` needs no
-      # manifest change, and widening that filter to `rs/**` would run a link on
-      # nearly every PR. Being diff-independent, this run covers whatever the
-      # filter misses, at the cost of surfacing a day late rather than in review.
+      # The OBS plugin and libmoq's C fixtures are the only things that link
+      # libmoq.a from outside cargo, so a stale `rs/libmoq/native-libs/*.txt`
+      # breaks them and nothing else. obs.yml lists the inputs that can do that,
+      # but a list of paths can't be complete: a build script emitting
+      # `cargo::rustc-link-lib` needs no manifest change, and widening that
+      # filter to `rs/**` would run a link on nearly every PR. Being
+      # diff-independent, this run covers whatever the filter misses, at the
+      # cost of surfacing a day late rather than in review.
       - name: OBS
         if: ${{ !cancelled() }}
         run: nix develop --command just obs ci
+
+      - name: libmoq C fixtures
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs c-tests
 
       # The TS exporter's PCR release timing. Everything else about the stream
       # can be graded from a capture, but *when* the bytes were handed over

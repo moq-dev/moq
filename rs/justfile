@@ -561,6 +561,68 @@ audit:
 relay-minimal:
     cargo nextest run --locked -p moq-relay --no-default-features --lib -E 'test(workers_require_a_quic_backend)'
 
+# libmoq's C fixtures (`rs/libmoq/c-tests/*.c`) link `libmoq.a` the way an
+# embedder does: an external `cc` against the generated `moq.h`, plus the native
+# libraries from `rs/libmoq/native-libs` that cargo can't inject into a link it
+# doesn't drive. Each fixture pins part of the C ABI at compile time and
+# exercises it at runtime, so it has to run, not just compile.
+#
+# Outside nextest on purpose. The staticlib link alone takes ~2 minutes, past the
+# hang budget in `.config/nextest.toml` once the rest of the workspace builds
+# beside it, and `rs/CLAUDE.md` says to make a slow test fast, not to raise the
+# ceiling. obs.yml runs this on every PR that touches rs/libmoq, right after it
+# has built the same debug libmoq.a for the plugin, and nightly.yml covers the
+# paths that filter misses.
+#
+# Unix only: linking a Rust staticlib from MSVC spells the flags and the
+# archive (`moq.lib`) differently, and this recipe doesn't model that.
+
+# Compile and run libmoq's C fixtures against libmoq.a. Must run on Unix.
+c-tests:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cc="${CC:-cc}"
+    if ! command -v "$cc" >/dev/null; then
+        echo "no C compiler at '$cc'" >&2
+        exit 1
+    fi
+
+    cargo build --locked -p libmoq
+
+    # Ask cargo where it put things rather than assuming ./target: CARGO_TARGET_DIR
+    # moves both the staticlib and the header rs/libmoq/build.rs writes beside it.
+    target=$(cargo metadata --locked --format-version 1 --no-deps | jq -r .target_directory)
+    for artifact in "$target/include/moq.h" "$target/debug/libmoq.a"; do
+        if [ ! -f "$artifact" ]; then
+            echo "$artifact missing after 'cargo build --locked -p libmoq'" >&2
+            exit 1
+        fi
+    done
+
+    # Same list build.rs (moq.pc), CMakeLists.txt, and test/smoke/smoke.sh read:
+    # `framework:Foo` is a linker framework flag, anything else a plain library.
+    case "$(uname -s)" in
+        Darwin) native_libs=rs/libmoq/native-libs/apple.txt ;;
+        *) native_libs=rs/libmoq/native-libs/linux.txt ;;
+    esac
+    libs=()
+    while read -r entry; do
+        case "$entry" in
+            '' | '#'*) continue ;;
+            framework:*) libs+=(-framework "${entry#framework:}") ;;
+            *) libs+=("-l$entry") ;;
+        esac
+    done <"$native_libs"
+
+    out=$(mktemp -d)
+    trap 'rm -rf "$out"' EXIT
+    for source in rs/libmoq/c-tests/*.c; do
+        bin="$out/$(basename "$source" .c)"
+        "$cc" "$source" -I"$target/include" -L"$target/debug" -lmoq "${libs[@]}" -o "$bin"
+        echo "running $source"
+        "$bin"
+    done
+
 # The feature permutations `check` leaves out. Each is a full workspace compile
 # at a feature set that shares almost no artifacts with the default one (~6min
 # for the all-features clippy alone), which is why this is nightly rather than
