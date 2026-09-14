@@ -49,7 +49,7 @@ additive quest that builds on dev-only code start on main afterwards from
 
 - [Worker ownership](/quest/m1/api-worker-ownership.md) - consuming split ownership retains sockets and joins the group before release
 - [Origin scope API](/quest/m1/api-origin-pattern-scopes.md) - typed scope grants preserve current prefixes and refuse unsupported patterns
-- [Token claims API](/quest/m1/api-token-claims.md) - working versioned claim types precede the v1 default rollout
+- [Auth server](/quest/m1/auth/README.md) - the breaking auth contract, flags, claims, and package names the release moq.pro adopts must carry
 - [Cluster peer API](/quest/m1/api-cluster-peer-config.md) - typed peer configuration supports current symmetric policy
 - [Broadcast clock](/quest/m1/broadcast-clock.md) - the root clock replaces the published archive wall field on dev before release
 - [m0](/quest/m0/README.md) - every release blocker lands or is punted before the merge

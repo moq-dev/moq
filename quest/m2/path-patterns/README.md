@@ -2,7 +2,7 @@
 
 ## Goal
 
-Every predicate over a MoQ broadcast path uses one versioned matcher. Tokens,
+Every predicate over a MoQ broadcast path uses one matcher. Tokens,
 origin scopes, announce interests, public access rules, and wildcard
 advertisements can express `pid/*/chat` and `**/transcode.pro` without
 maintaining competing glob dialects.
@@ -52,20 +52,20 @@ the same tier.
 ### Ownership and compatibility
 
 `moq-pattern` and `@moq/pattern` own the grammar and algebra; `moq-net`,
-`moq-token`, `@moq/net`, and `@moq/token` re-export them. Literal `Path` types
+`moq-auth`, `@moq/net`, and `@moq/auth` re-export them. Literal `Path` types
 stay in `moq-net` / `@moq/net`. Golden cross-language vectors
 (`rs/moq-pattern/tests/pattern.json`), exhaustive small cases, randomized round
 trips, and the moq-net fuzz harness's `pattern` target prevent semantic drift at
 the authorization boundary. Matching is linear and inherits `Path::MAX_PARTS`
 (32), which also bounds residual expansion.
 
-Every persisted or wire policy carries a version. Missing `v` is v0 prefix
-semantics forever. V1 uses exact patterns and rejects legacy and v1 grant
-fields mixed in one object. Existing state migrates without changing access:
-`foo` becomes `foo/**` and an empty prefix becomes `**`. New SDKs, CLIs, and
-APIs default to v1 in a breaking major release; legacy minting is explicit.
-The moq.pro (downstream) token minting, public-access migration, scoped-key,
-and rule-editor work consume these versioned shapes downstream.
+Grants and claims carry no version. The [Auth server](/quest/m1/auth/README.md)
+line makes `moq-auth` read patterns only: `foo` means exactly `foo`, a
+subtree is `foo/**`, and an unversioned prefix credential fails verification.
+Translating the prefix credentials a deployment already issued is that
+deployment's job at its own edge for a deprecation window, which is what
+moq.pro (downstream) does. A wire message that carried prefixes keeps them on
+the protocol versions that defined them; only new versions carry patterns.
 
 The syntax follows Ant-style path patterns without `?`, classes, or braces.
 NATS subjects motivate segment wildcards and reserved wildcard bytes; Vault
@@ -79,18 +79,12 @@ CAT cannot represent `pid/*/chat`.
 
 - [Origin scopes](/quest/m2/path-patterns/origin.md) - literal origin roots
   carry arbitrary pattern unions without widening authorization
-- [Token SDKs](/quest/m2/path-patterns/token-sdk.md) - published libraries and
-  CLIs default new minting to v1 in a subsequent breaking dev cycle
-- [Relay auth](/quest/m2/path-patterns/relay-auth.md) - relay token, public,
-  static, and revalidation paths enforce patterns
 - [Pattern interest](/quest/m2/path-patterns/interest.md) - moq-lite-06 carries
   pattern grants in AUTH and full-pattern interest in ANNOUNCE_REQUEST
 
 ## Related
 
-- [Versioned token claims API](/quest/m1/api-token-claims.md) - owns the working v0/v1 library contract before release
-
 - [Wildcard advertisements](/quest/m2/wildcard/README.md) - routing adopts the
   matcher while retaining its own cost, pool, refusal, and resolution work
-- [mTLS explicit scope](/quest/m1/auth-api/mtls-scope.md) - an mTLS grant
-  uses the same versioned publish and subscribe pattern sets
+- [Auth server](/quest/m1/auth/README.md) - pattern claims and grants at
+  the authorization boundary, prefix-shaped until Origin scopes lands

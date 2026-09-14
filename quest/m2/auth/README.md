@@ -37,7 +37,7 @@ Decisions settled while planning, recorded so review does not relitigate them:
   the union and cancels publications and subscriptions that lose authorization.
   Other authorized work continues on the same session. An empty union leaves
   the session connected with no access, so it can accept a fresh token.
-  [Relay auth](/quest/m2/path-patterns/relay-auth.md) owns the common resize
+  [Origin scopes](/quest/m2/path-patterns/origin.md) owns the common resize
   operation; relay token handling requires it rather than shipping a temporary
   close-on-shrink policy.
 - **A public grant contains publish patterns, subscribe patterns, and an
@@ -103,8 +103,10 @@ ALPN.
 
 ## Related
 
-- [Relay auth](/quest/m2/path-patterns/relay-auth.md) - resizes a live session
+- [Origin scopes](/quest/m2/path-patterns/origin.md) - resizes a live session
   when the union shrinks, for revalidation and token expiry alike
+- [Auth server](/quest/m1/auth/README.md) - the request and grant a token
+  presented in band goes through
 - [Pattern interest](/quest/m2/path-patterns/interest.md) - moves AUTH's legacy wire prefixes to patterns along with ANNOUNCE_REQUEST
 - [Expiring media grants](/quest/m2/processor/grant-lease.md) - a worker's
   lease renewal is a new in-band token

@@ -29,10 +29,10 @@ Land the implementation and tests here. The release and the moq.pro
 
 ## Required
 
-- [Token SDKs](/quest/m2/path-patterns/token-sdk.md) - supplies exact v1 grant
+- [Package](/quest/m1/auth/package.md) - supplies exact pattern grant
   minting and the audience shape this lease extends
-- [Relay auth](/quest/m2/path-patterns/relay-auth.md) - supplies the v1 native
-  authorization owner that enforces handle deadlines
+- [Relay](/quest/m1/auth/relay.md) - supplies the lease the relay holds per
+  session, whose `expires` enforces handle deadlines
 
 ## Related
 

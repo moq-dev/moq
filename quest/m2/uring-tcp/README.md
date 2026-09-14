@@ -9,8 +9,8 @@ for UDP, and the WebSocket path is the one place the relay still pays a
 syscall per read and per write on the media hot path.
 
 Tokio is not going away. It stays as the relay's general-purpose runtime for
-the things that have no business on a pinned thread: the auth API's HTTP
-client and its response cache, `iroh`, cert reload, signals, and session
+the things that have no business on a pinned thread: the relay's
+`moq_auth::Client`, `iroh`, cert reload, signals, and session
 supervision. This line moves the media path, not the control plane.
 
 ## Plan
