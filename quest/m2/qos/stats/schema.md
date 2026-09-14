@@ -65,3 +65,5 @@ what a subscriber received and played, per audio and video. The relay is
 
 - [Starvation](/quest/m2/qos/starvation.md) - the relay's delivery counters,
   the other half of a health verdict
+- [Counter edge names](/quest/m1/api-counter-edge-names.md) - renames the
+  open side of every counter pair on these tracks

@@ -30,6 +30,7 @@ with the current dev tree before starting.
 - [Publisher finish ownership](/quest/m1/api-producer-finish.md) - terminal Rust methods consume their handles while group cuts remain reusable
 - [Rate estimate names](/quest/m1/api-rate-estimate-names.md) - the send and receive estimates carry `estimated_*_rate` on the C ABI, every binding, and moqsink
 - [Reconnect stats handle](/quest/m1/api-reconnect-stats-handle.md) - `ConnectionStatsReader` is renamed for its role
+- [Counter edge names](/quest/m1/api-counter-edge-names.md) - every cumulative open/closed pair is `*_opened` / `*_closed`, leaving the bare plural for gauges
 - [Worker metrics](/quest/m1/uring-metrics.md) - per-worker io_uring counters at `/metrics`, so the runtime's own health is visible
 - [Stream sessions](/quest/m1/uring-tcp/README.md) - serve WebSocket and HTTP from the io_uring workers, where io_uring pays off most
 - [qlog](/quest/m1/uring-qlog.md) - io_uring workers write qlog traces instead of refusing the setting
