@@ -27,7 +27,7 @@ pub(crate) struct Snapshot {
 	/// Whether the broadcast ended (`EXT-X-ENDLIST`).
 	pub finished: bool,
 	/// Wall-clock time of the first listed segment (`EXT-X-PROGRAM-DATE-TIME`), when the
-	/// timeline advertises a wall-clock anchor.
+	/// catalog advertises its root broadcast clock.
 	pub program_date_time: Option<SystemTime>,
 }
 

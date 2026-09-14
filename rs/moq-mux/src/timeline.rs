@@ -53,7 +53,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use hang::catalog::{Archive, Timeline};
 use hang::timeline::{DEFAULT_NAME, Range, Record, RecordExt};
@@ -91,18 +91,6 @@ pub struct Config {
 	/// catalog. Leave it `None` when the media decides, which is the common case for real-time
 	/// and for anything importing a source it doesn't control.
 	pub duration_max: Option<Duration>,
-
-	/// The wall-clock time of `pts` 0, advertised in the catalog when set.
-	///
-	/// It anchors content time to an absolute clock, which is what an HLS
-	/// `EXT-X-PROGRAM-DATE-TIME` or a DASH `availabilityStartTime` needs. A publisher stamping
-	/// timestamps from [`catalog::Producer::timestamp`](crate::catalog::Producer::timestamp) has
-	/// its `pts` 0 at construction, so `Some(SystemTime::now())` is the live answer; a recording
-	/// or an import passes the content's real start instead.
-	///
-	/// Clamped to the moq epoch ([`MOQ_EPOCH_UNIX_MILLIS`](hang::catalog::MOQ_EPOCH_UNIX_MILLIS),
-	/// 2020), which the wire format measures from: an earlier time isn't representable.
-	pub wall: Option<SystemTime>,
 }
 
 impl Default for Config {
@@ -110,7 +98,6 @@ impl Default for Config {
 		Self {
 			duration_min: DEFAULT_DURATION_MIN,
 			duration_max: None,
-			wall: None,
 		}
 	}
 }
@@ -449,20 +436,13 @@ impl State {
 	}
 
 	/// The catalog section advertising this timeline.
+	///
+	/// Carries the track name, timescale, and duration bound. Wall-clock mapping is the
+	/// catalog root clock's job ([`Clock`](crate::Clock)), not this section's.
 	fn section(&self) -> Timeline {
 		let mut section = Timeline::new(DEFAULT_NAME);
 		section.timescale = self.timescale.as_u64() as u32;
 		section.duration_max = self.config.duration_max.map(|max| self.units(max));
-		section.wall = self.config.wall.map(|wall| {
-			// The wire measures from the moq epoch rather than the Unix one, so the value stays
-			// small enough for a 53-bit integer even at fine timescales.
-			let unix_millis = wall
-				.duration_since(SystemTime::UNIX_EPOCH)
-				.unwrap_or_default()
-				.as_millis();
-			let moq_millis = unix_millis.saturating_sub(hang::catalog::MOQ_EPOCH_UNIX_MILLIS as u128);
-			(moq_millis * self.timescale.as_u64() as u128 / 1000) as u64
-		});
 		section
 	}
 }
@@ -1905,26 +1885,14 @@ mod test {
 	}
 
 	#[tokio::test]
-	async fn section_advertises_track_and_wall() {
+	async fn section_advertises_track_without_wall() {
+		// Wall mapping moved to the catalog root clock: the timeline section carries the track,
+		// timescale, and duration bound, and nothing else time-anchoring.
 		let (_broadcast, timeline) = setup();
 		let section = timeline.section();
 		assert_eq!(section.track, DEFAULT_NAME);
 		assert_eq!(section.timescale, 1000);
-		assert_eq!(section.wall, None);
-
-		// The wire counts from the moq epoch, so pts 0 at exactly the epoch advertises 0.
-		let (_broadcast, timeline) = setup_with(Config {
-			wall: Some(SystemTime::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS)),
-			..Default::default()
-		});
-		assert_eq!(timeline.section().wall, Some(0));
-
-		// A second later is a second's worth of timescale units.
-		let (_broadcast, timeline) = setup_with(Config {
-			wall: Some(SystemTime::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 1_000)),
-			..Default::default()
-		});
-		assert_eq!(timeline.section().wall, Some(1_000));
+		assert_eq!(section.duration_max, None);
 	}
 
 	// Clones nest like the catalog's, so the first batch to finish doesn't publish records the

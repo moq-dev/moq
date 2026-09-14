@@ -68,6 +68,7 @@ impl<E: CatalogExt> Stream for Consumer<E> {
 					video: m.video,
 					audio: m.audio,
 					archive: m.archive,
+					clock: m.clock,
 					text: m.text,
 					json: hang::catalog::Json::default(),
 					binary: hang::catalog::Binary::default(),

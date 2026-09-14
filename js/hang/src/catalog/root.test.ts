@@ -94,6 +94,17 @@ test("legacy zero jitter is absent for audio and video", () => {
 	expect(JSON.stringify(parsed)).not.toContain('"jitter"');
 });
 
+test("clock round-trips at the root", () => {
+	const parsed = RootSchema.parse({
+		clock: { wall: 1_751_846_400_000_000, timescale: 1_000_000 },
+	});
+	expect(parsed.clock).toMatchObject({ wall: 1_751_846_400_000_000, timescale: 1_000_000 });
+});
+
+test("clock stays off the wire when absent", () => {
+	expect(JSON.stringify(RootSchema.parse({}))).not.toContain('"clock"');
+});
+
 test("archive round-trips at the root", () => {
 	const parsed = RootSchema.parse({
 		archive: {

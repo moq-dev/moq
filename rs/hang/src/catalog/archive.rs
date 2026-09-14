@@ -16,9 +16,10 @@ use super::Timeline;
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct Archive {
-	/// The timeline track: its name, timescale, optional duration bound, and wall-clock
-	/// anchor. Flattened on the wire so a live publisher's `archive` is those fields
-	/// alone.
+	/// The timeline track: its name, timescale, and optional duration bound. Flattened on
+	/// the wire so a live publisher's `archive` is those fields alone. Wall-clock mapping lives
+	/// at the catalog root ([`Clock`](super::Clock)), not here: there is one broadcast clock, and
+	/// this index refers to it after timescale conversion.
 	#[serde(flatten)]
 	pub timeline: Timeline,
 

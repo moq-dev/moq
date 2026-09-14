@@ -1,0 +1,24 @@
+{
+	"video": {
+		"renditions": {
+			"video": {
+				"codec": "avc1.64001f",
+				"codedWidth": 1280,
+				"codedHeight": 720,
+				"container": { "kind": "legacy" }
+			}
+		}
+	},
+	"audio": {
+		"renditions": {
+			"audio": {
+				"codec": "opus",
+				"sampleRate": 48000,
+				"numberOfChannels": 2,
+				"container": { "kind": "legacy" }
+			}
+		}
+	},
+	"clock": { "wall": 1751846400000000, "timescale": 1000000 },
+	"archive": { "track": "timeline.z", "timescale": 1000, "durationMax": 2000 }
+}
