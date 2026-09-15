@@ -26,19 +26,15 @@ Decided 2026-09-14. Remove outright, none has an in-repo caller:
   re-export.
 - kio: `Producer::is_last()`.
 - moq-nvenc: the `#[deprecated]` `NV_ENC_INITIALIZE_PARAMS` builder block.
-- moq-relay: the stale `#[allow(deprecated)]` in `auth.rs` whose comment
-  names a `claims.cluster` field that no longer exists.
 
 Warn-then-ignore is banned, so these relay flags stop being accepted:
 `--cluster-linger` (and `MOQ_CLUSTER_LINGER`, `cluster.linger`, its
-`settings.rs` entry), the `--auth-tls-*` overrides, the URL form of
-`--auth-key-dir`, `--auth-public-api`, and the bare-host `--cluster-connect`
-form. Each becomes a `Deprecated` refusal naming its replacement where the
-last main release shipped the spelling, and is deleted otherwise.
-`PublicConfig::Simple` goes the same way: `--auth-public <prefix>`, the
-smoke, embed, and worker tests, and `examples/embed.rs` move to the detailed
-config; coordinate with [Auth server](/quest/m1/auth/README.md), which
-reshapes the same flags.
+`settings.rs` entry) and the bare-host `--cluster-connect` form. Each becomes
+a `Deprecated` refusal naming its replacement where the last main release
+shipped the spelling, and is deleted otherwise. The old auth flags
+(`--auth-key`, `--auth-key-dir`, `--auth-public-api`, `--auth-tls-*`,
+`PublicConfig::Simple`) are already gone: `--auth-url` or `--auth-public`
+patterns are the whole configuration, and an unknown flag is an error.
 
 Silent aliases become refusals or go, by the same shipped-on-main rule:
 serde `connect`->`url`, `failover_delay`->`race`, `listen`->`bind`,
