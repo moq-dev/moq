@@ -138,7 +138,5 @@ and package names, and the release moq.pro adopts must carry it.
   connection becomes a request through the same contract
 - [Origin scopes](/quest/m2/path-patterns/origin.md) - lifts the prefix-shaped
   restriction and resizes a live session on a narrower grant
-- [Relay embedding](/quest/m1/api-relay-embedding.md) - the accept loop the
-  lease is composed in
 - [Connect auth race](/quest/m0/3532-connect-auth-race.md) - the client-side
   handling of a refusal, unchanged by this line
