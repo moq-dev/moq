@@ -25,6 +25,7 @@ does not require it.
 ## Quests
 
 - [Reserved codes](/quest/m1/lite-reserved-codes.md) - the four stream codes sent from the reserved range are registered in the draft's own range and round-trip in both languages
+- [Origin scopes](/quest/m1/api-origin-scopes.md) - literal origin roots carry arbitrary pattern unions, and announce events report the match with its captures
 - [Cluster peer API](/quest/m1/api-cluster-peer-config.md) - typed peer configuration supports current symmetric policy
 - [Publisher finish borrows](/quest/m1/api-finish-borrow.md) - finish borrows the handle so abort can still run after a clean end
 - [Rate estimate names](/quest/m1/api-rate-estimate-names.md) - the send and receive estimates carry `estimated_*_rate` on the C ABI, every binding, and moqsink

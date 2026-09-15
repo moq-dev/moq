@@ -76,8 +76,6 @@ CAT cannot represent `pid/*/chat`.
 
 ## Quests
 
-- [Origin scopes](/quest/m2/path-patterns/origin.md) - literal origin roots
-  carry arbitrary pattern unions without widening authorization
 - [Pattern interest](/quest/m2/path-patterns/interest.md) - moq-lite-06 carries
   pattern grants in AUTH and full-pattern interest in ANNOUNCE_REQUEST
 
