@@ -7,7 +7,6 @@ use std::net::SocketAddr;
 use anyhow::Context;
 use axum::http::Method;
 use hang::moq_net;
-use hang::moq_net::AsPath;
 use moq_tokio::RedactedUrl;
 use url::Url;
 
@@ -68,8 +67,11 @@ pub async fn listen_import(target: ImportTarget, listen: Listen) -> anyhow::Resu
 
 /// WHEP server: serve WebRTC plays of `name` from the Origin (export).
 pub async fn listen_export(origin: moq_net::origin::Consumer, name: String, listen: Listen) -> anyhow::Result<()> {
+	let scope = moq_net::Patterns::from(
+		moq_net::Pattern::subtree(&name).with_context(|| format!("invalid broadcast name `{name}`"))?,
+	);
 	let subscriber = origin
-		.scope(&[name.as_path()])
+		.scope(&scope)
 		.with_context(|| format!("failed to scope origin to broadcast `{name}`"))?;
 	// A WHEP server only reads; it still needs a publisher handle for the shared
 	// glue, so hand it an unused, empty Origin producer.
@@ -80,8 +82,11 @@ pub async fn listen_export(origin: moq_net::origin::Consumer, name: String, list
 
 /// Restrict a producer to the single broadcast `name` so a WHIP peer can only publish it.
 fn scope_producer(origin: &moq_net::origin::Producer, name: &str) -> anyhow::Result<moq_net::origin::Producer> {
+	let scope = moq_net::Patterns::from(
+		moq_net::Pattern::subtree(name).with_context(|| format!("invalid broadcast name `{name}`"))?,
+	);
 	origin
-		.scope(&[name.as_path()])
+		.scope(&scope)
 		.with_context(|| format!("failed to scope origin to broadcast `{name}`"))
 }
 

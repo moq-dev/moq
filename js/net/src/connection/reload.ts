@@ -2,9 +2,9 @@ import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals
 import * as Announce from "../announced.ts";
 import { Allocator } from "../bandwidth.ts";
 import { error, SessionCode, SessionError } from "../error.ts";
+import { scopePrefix } from "../internal.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
-import { empty as emptyPath } from "../path.ts";
 import { type ConnectProps, connect, type WebSocketOptions, type WebTransportProps } from "./connect.ts";
 import type { Established } from "./established.ts";
 import type { Probe, Stats } from "./stats.ts";
@@ -438,7 +438,8 @@ export class Reload {
 	}
 
 	/**
-	 * Subscribe to broadcast announcements under an optional prefix, spanning reconnects.
+	 * Subscribe to broadcast announcements under `scope` (a prefix-shaped pattern, default
+	 * everything), spanning reconnects.
 	 *
 	 * The same {@link Announce.Consumer} stream as {@link Established.announced}, but everything active
 	 * is retracted (an `active: false` update) whenever the connection drops and re-announced on
@@ -446,12 +447,17 @@ export class Reload {
 	 *
 	 * Stays empty while the relay lacks {@link Established.discovery}.
 	 */
-	announced(prefix: Path.Valid = emptyPath()): Announce.Consumer {
+	announced(scope: Path.Pattern = Path.Pattern.all()): Announce.Consumer {
 		// With a subscribe origin the table already spans reconnects (the forwarder retracts
 		// a dead session's entries), so its stream is the same thing with less machinery.
-		if (this.subscribe) return this.subscribe.announced(prefix);
+		if (this.subscribe) return this.subscribe.announced(scope);
 
-		const producer = new Announce.Producer(prefix);
+		// Refuse an unsupported scope here, where the caller can see it; the pump below
+		// runs later inside an effect, which would only log the throw and leave the
+		// consumer waiting forever.
+		scopePrefix(scope);
+
+		const producer = new Announce.Producer();
 		const consumer = producer.consume();
 
 		const pump = new Effect();
@@ -463,7 +469,7 @@ export class Reload {
 			// consumer empty rather than opening a subscription that can't be answered.
 			if (!conn.discovery) return;
 
-			const upstream = conn.announced(prefix);
+			const upstream = conn.announced(scope);
 			effect.cleanup(() => upstream.close());
 
 			// Track what this connection announced so we can retract it if the connection drops.
@@ -484,8 +490,8 @@ export class Reload {
 					// Retract everything from the connection that just went away, so a per-broadcast
 					// watcher tears down instead of clinging to the dead route.
 					if (consumer.closed.peek() === undefined) {
-						for (const prefix of active) {
-							producer.append({ pattern: Path.Pattern.parse(prefix), active: false });
+						for (const pattern of active) {
+							producer.append({ pattern: Path.Pattern.parse(pattern), active: false });
 						}
 					}
 				}

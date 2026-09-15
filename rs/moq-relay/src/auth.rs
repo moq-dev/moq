@@ -4,7 +4,7 @@ use futures::FutureExt;
 use moq_auth::{Key, KeyId};
 #[cfg(test)]
 use moq_net::AsPath;
-use moq_net::{Path, PathOwned, PathPrefixes, stats::Tier};
+use moq_net::{Path, PathOwned, PathPrefixes, Pattern, Patterns, stats::Tier};
 use moq_tokio::Transport;
 use rand::RngExt;
 use reqwest_middleware::ClientWithMiddleware;
@@ -239,22 +239,17 @@ fn subtrees(prefixes: impl IntoIterator<Item = impl AsRef<str>>) -> Result<moq_a
 		.collect()
 }
 
-/// The prefixes a pattern union scopes, refusing any pattern that is not prefix-shaped.
+/// The grants the origin can scope, refusing any pattern that is not prefix-shaped.
 ///
 /// The origin scopes by prefix until pattern scopes land, so only `foo/**` and `**`
-/// have an exact prefix. A grant of `pid/*/chat` is refused at connect rather than
+/// are enforceable. A grant of `pid/*/chat` is refused at connect rather than
 /// silently dropped, and so is a literal `foo`: reading it as the prefix `foo` would
 /// widen one broadcast into a subtree.
-fn prefixes(patterns: &moq_auth::Patterns) -> Result<PathPrefixes, AuthError> {
-	patterns
-		.iter()
-		.map(|pattern| {
-			pattern
-				.as_prefix()
-				.map(|prefix| Path::new(prefix).to_owned())
-				.ok_or_else(|| AuthError::UnsupportedPattern(pattern.to_string()))
-		})
-		.collect()
+fn supported(patterns: Patterns) -> Result<Patterns, AuthError> {
+	match patterns.iter().find(|pattern| pattern.as_prefix().is_none()) {
+		Some(pattern) => Err(AuthError::UnsupportedPattern(pattern.to_string())),
+		None => Ok(patterns),
+	}
 }
 
 /// Renders an error and its `source()` chain into a single message.
@@ -1114,10 +1109,10 @@ impl AuthConfig {
 pub struct AuthToken {
 	/// The root path this token is scoped to.
 	pub root: PathOwned,
-	/// Paths the holder is allowed to subscribe to, relative to `root`.
-	pub subscribe: PathPrefixes,
-	/// Paths the holder is allowed to publish to, relative to `root`.
-	pub publish: PathPrefixes,
+	/// The subtree grants the holder may subscribe to, relative to `root`.
+	pub subscribe: Patterns,
+	/// The subtree grants the holder may publish to, relative to `root`.
+	pub publish: Patterns,
 	/// Billing tier this session's stats record under. Chosen by business logic
 	/// through configuration or the auth API's `tier` field; defaults to the
 	/// unprefixed tier.
@@ -1154,8 +1149,8 @@ impl AuthToken {
 	pub fn unrestricted(root: PathOwned) -> Self {
 		Self {
 			root,
-			subscribe: PathPrefixes::from(vec![Path::new("").to_owned()]),
-			publish: PathPrefixes::from(vec![Path::new("").to_owned()]),
+			subscribe: Patterns::from(Pattern::all()),
+			publish: Patterns::from(Pattern::all()),
 			tier: Tier::default(),
 			// Filled in by the caller from the peer certificate's notAfter.
 			expires: None,
@@ -1206,8 +1201,8 @@ pub(crate) struct Revalidate {
 #[derive(Debug, Clone)]
 struct Scope {
 	root: PathOwned,
-	subscribe: PathPrefixes,
-	publish: PathPrefixes,
+	subscribe: Patterns,
+	publish: Patterns,
 }
 
 impl Scope {
@@ -1225,11 +1220,7 @@ impl Scope {
 	/// customer adds a public prefix) must not drop live sessions, while any loss
 	/// of authority must.
 	fn covered_by(&self, token: &AuthToken) -> bool {
-		let covers = |granted: &PathPrefixes, held: &PathPrefixes| {
-			held.iter()
-				.all(|held| granted.iter().any(|granted| held.has_prefix(granted)))
-		};
-		self.root == token.root && covers(&token.subscribe, &self.subscribe) && covers(&token.publish, &self.publish)
+		self.root == token.root && token.subscribe.covers(&self.subscribe) && token.publish.covers(&self.publish)
 	}
 }
 
@@ -1925,8 +1916,8 @@ impl Auth {
 		// under route_root whatever its depth.
 		Ok(AuthToken {
 			root: route_root.to_owned(),
-			subscribe: prefixes(&permissions.subscribe)?,
-			publish: prefixes(&permissions.publish)?,
+			subscribe: supported(permissions.subscribe)?,
+			publish: supported(permissions.publish)?,
 			tier: Tier::default(),
 			expires: claims.expires,
 			revalidate: None,
@@ -2246,6 +2237,14 @@ mod tests {
 	use moq_auth::{Algorithm, Key, KeyId};
 	use tempfile::TempDir;
 
+	/// The scope granting these prefixes: each spelled as its subtree pattern.
+	fn grants(prefixes: impl IntoIterator<Item = impl AsRef<str>>) -> Patterns {
+		prefixes
+			.into_iter()
+			.map(|prefix| Pattern::subtree(prefix.as_ref()).unwrap())
+			.collect()
+	}
+
 	#[test]
 	fn auth_params_from_path() {
 		// Path + JWT (the gateway media uplink shape).
@@ -2316,13 +2315,13 @@ mod tests {
 
 		let token = auth.verify(&AuthParams::new("/anon")).await?;
 		assert_eq!(token.root, "anon".as_path());
-		assert_eq!(token.subscribe, vec!["".as_path()]);
-		assert_eq!(token.publish, vec!["".as_path()]);
+		assert_eq!(token.subscribe, grants([""]));
+		assert_eq!(token.publish, grants([""]));
 
 		let token = auth.verify(&AuthParams::new("/anon/room/123")).await?;
 		assert_eq!(token.root, Path::new("anon/room/123").to_owned());
-		assert_eq!(token.subscribe, vec![Path::new("").to_owned()]);
-		assert_eq!(token.publish, vec![Path::new("").to_owned()]);
+		assert_eq!(token.subscribe, grants([""]));
+		assert_eq!(token.publish, grants([""]));
 
 		Ok(())
 	}
@@ -2337,8 +2336,8 @@ mod tests {
 
 		let token = auth.verify(&AuthParams::new("/any/path")).await?;
 		assert_eq!(token.root, Path::new("any/path").to_owned());
-		assert_eq!(token.subscribe, vec![Path::new("").to_owned()]);
-		assert_eq!(token.publish, vec![Path::new("").to_owned()]);
+		assert_eq!(token.subscribe, grants([""]));
+		assert_eq!(token.publish, grants([""]));
 
 		Ok(())
 	}
@@ -2419,8 +2418,8 @@ mod tests {
 			})
 			.await?;
 		assert_eq!(token.root, "room/123".as_path());
-		assert_eq!(token.subscribe, vec!["".as_path()]);
-		assert_eq!(token.publish, vec!["alice".as_path()]);
+		assert_eq!(token.subscribe, grants([""]));
+		assert_eq!(token.publish, grants(["alice"]));
 
 		Ok(())
 	}
@@ -2469,7 +2468,7 @@ mod tests {
 				..Default::default()
 			})
 			.await?;
-		assert_eq!(token.publish, vec!["alice".as_path()]);
+		assert_eq!(token.publish, grants(["alice"]));
 
 		Ok(())
 	}
@@ -2568,8 +2567,8 @@ mod tests {
 			})
 			.await?;
 		assert_eq!(token.root, "room/123".as_path());
-		assert_eq!(token.subscribe, vec!["bob".as_path()]);
-		assert_eq!(token.publish, vec!["alice".as_path()]);
+		assert_eq!(token.subscribe, grants(["bob"]));
+		assert_eq!(token.publish, grants(["alice"]));
 
 		Ok(())
 	}
@@ -2597,8 +2596,8 @@ mod tests {
 				..Default::default()
 			})
 			.await?;
-		assert_eq!(token.subscribe, vec!["".as_path()]);
-		assert_eq!(token.publish, vec![]);
+		assert_eq!(token.subscribe, grants([""]));
+		assert!(token.publish.is_empty());
 
 		Ok(())
 	}
@@ -2626,8 +2625,8 @@ mod tests {
 				..Default::default()
 			})
 			.await?;
-		assert_eq!(token.subscribe, vec![]);
-		assert_eq!(token.publish, vec!["bob".as_path()]);
+		assert!(token.subscribe.is_empty());
+		assert_eq!(token.publish, grants(["bob"]));
 
 		Ok(())
 	}
@@ -2658,8 +2657,8 @@ mod tests {
 			.await?;
 
 		assert_eq!(token.root, Path::new("room/123/alice"));
-		assert_eq!(token.subscribe, vec!["".as_path()]);
-		assert_eq!(token.publish, vec!["".as_path()]);
+		assert_eq!(token.subscribe, grants([""]));
+		assert_eq!(token.publish, grants([""]));
 
 		Ok(())
 	}
@@ -2690,8 +2689,8 @@ mod tests {
 			.await?;
 
 		assert_eq!(token.root, "room/123/alice".as_path());
-		assert_eq!(token.subscribe, vec!["".as_path()]);
-		assert_eq!(token.publish, vec!["".as_path()]);
+		assert_eq!(token.subscribe, grants([""]));
+		assert_eq!(token.publish, grants([""]));
 
 		Ok(())
 	}
@@ -2722,8 +2721,8 @@ mod tests {
 			.await?;
 
 		assert_eq!(token.root, "room/123/bob".as_path());
-		assert_eq!(token.subscribe, vec!["".as_path()]);
-		assert_eq!(token.publish, vec!["".as_path()]);
+		assert_eq!(token.subscribe, grants([""]));
+		assert_eq!(token.publish, grants([""]));
 
 		Ok(())
 	}
@@ -2754,8 +2753,8 @@ mod tests {
 			.await?;
 
 		assert_eq!(verified.root, "room/123/alice".as_path());
-		assert_eq!(verified.subscribe, vec![]);
-		assert_eq!(verified.publish, vec!["".as_path()]);
+		assert!(verified.subscribe.is_empty());
+		assert_eq!(verified.publish, grants([""]));
 
 		let verified = auth
 			.verify(&AuthParams {
@@ -2766,8 +2765,8 @@ mod tests {
 			.await?;
 
 		assert_eq!(verified.root, "room/123/bob".as_path());
-		assert_eq!(verified.subscribe, vec!["".as_path()]);
-		assert_eq!(verified.publish, vec![]);
+		assert_eq!(verified.subscribe, grants([""]));
+		assert!(verified.publish.is_empty());
 
 		Ok(())
 	}
@@ -2798,8 +2797,8 @@ mod tests {
 			.await?;
 
 		assert_eq!(verified.root, "room/123/users".as_path());
-		assert_eq!(verified.subscribe, vec!["bob/screen".as_path()]);
-		assert_eq!(verified.publish, vec!["alice/camera".as_path()]);
+		assert_eq!(verified.subscribe, grants(["bob/screen"]));
+		assert_eq!(verified.publish, grants(["alice/camera"]));
 
 		let verified = auth
 			.verify(&AuthParams {
@@ -2810,8 +2809,8 @@ mod tests {
 			.await?;
 
 		assert_eq!(verified.root, "room/123/users/alice".as_path());
-		assert_eq!(verified.subscribe, vec![]);
-		assert_eq!(verified.publish, vec!["camera".as_path()]);
+		assert!(verified.subscribe.is_empty());
+		assert_eq!(verified.publish, grants(["camera"]));
 
 		Ok(())
 	}
@@ -2840,8 +2839,8 @@ mod tests {
 			})
 			.await?;
 
-		assert_eq!(verified.subscribe, vec!["".as_path()]);
-		assert_eq!(verified.publish, vec![]);
+		assert_eq!(verified.subscribe, grants([""]));
+		assert!(verified.publish.is_empty());
 
 		let claims = moq_auth::Claims::default()
 			.with_root("room/123")
@@ -2856,8 +2855,8 @@ mod tests {
 			})
 			.await?;
 
-		assert_eq!(verified.subscribe, vec![]);
-		assert_eq!(verified.publish, vec!["".as_path()]);
+		assert!(verified.subscribe.is_empty());
+		assert_eq!(verified.publish, grants([""]));
 
 		Ok(())
 	}
@@ -2900,20 +2899,20 @@ mod tests {
 		// Anonymous access to / — can subscribe under demo/
 		let token = auth.verify(&AuthParams::new("/")).await?;
 		assert_eq!(token.root, "".as_path());
-		assert_eq!(token.subscribe, vec!["demo".as_path()]);
-		assert_eq!(token.publish, vec![]);
+		assert_eq!(token.subscribe, grants(["demo"]));
+		assert!(token.publish.is_empty());
 
 		// Anonymous access to /demo — subscribe reduces to ""
 		let token = auth.verify(&AuthParams::new("/demo")).await?;
 		assert_eq!(token.root, "demo".as_path());
-		assert_eq!(token.subscribe, vec!["".as_path()]);
-		assert_eq!(token.publish, vec![]);
+		assert_eq!(token.subscribe, grants([""]));
+		assert!(token.publish.is_empty());
 
 		// Anonymous access to /demo/room/123 — still allowed (subpath of public prefix)
 		let token = auth.verify(&AuthParams::new("/demo/room/123")).await?;
 		assert_eq!(token.root, Path::new("demo/room/123").to_owned());
-		assert_eq!(token.subscribe, vec!["".as_path()]);
-		assert_eq!(token.publish, vec![]);
+		assert_eq!(token.subscribe, grants([""]));
+		assert!(token.publish.is_empty());
 
 		// Anonymous access to /other — should fail (not under public prefix)
 		let result = auth.verify(&AuthParams::new("/other")).await;
@@ -2977,8 +2976,8 @@ mod tests {
 
 		// Anonymous access to / — can publish under demo/
 		let token = auth.verify(&AuthParams::new("/")).await?;
-		assert_eq!(token.subscribe, vec![]);
-		assert_eq!(token.publish, vec!["demo".as_path()]);
+		assert!(token.subscribe.is_empty());
+		assert_eq!(token.publish, grants(["demo"]));
 
 		Ok(())
 	}
@@ -3030,13 +3029,13 @@ mod tests {
 		.await?;
 
 		let token = auth.verify(&AuthParams::new("/")).await?;
-		assert_eq!(token.subscribe, vec!["demo".as_path()]);
-		assert_eq!(token.publish, vec!["demo".as_path()]);
+		assert_eq!(token.subscribe, grants(["demo"]));
+		assert_eq!(token.publish, grants(["demo"]));
 
 		// Connecting to /demo reduces both to ""
 		let token = auth.verify(&AuthParams::new("/demo")).await?;
-		assert_eq!(token.subscribe, vec!["".as_path()]);
-		assert_eq!(token.publish, vec!["".as_path()]);
+		assert_eq!(token.subscribe, grants([""]));
+		assert_eq!(token.publish, grants([""]));
 
 		Ok(())
 	}
@@ -3051,8 +3050,8 @@ mod tests {
 
 		// Anonymous access to any path gets full pub/sub
 		let token = auth.verify(&AuthParams::new("/anything/here")).await?;
-		assert_eq!(token.subscribe, vec!["".as_path()]);
-		assert_eq!(token.publish, vec!["".as_path()]);
+		assert_eq!(token.subscribe, grants([""]));
+		assert_eq!(token.publish, grants([""]));
 
 		Ok(())
 	}
@@ -3085,8 +3084,8 @@ mod tests {
 			})
 			.await?;
 		assert_eq!(token.root, "secret".as_path());
-		assert_eq!(token.subscribe, vec!["".as_path()]);
-		assert_eq!(token.publish, vec!["alice".as_path()]);
+		assert_eq!(token.subscribe, grants([""]));
+		assert_eq!(token.publish, grants(["alice"]));
 
 		Ok(())
 	}
@@ -3119,8 +3118,8 @@ mod tests {
 
 		// Root is "/" (empty), permissions are prefixed with "demo"
 		assert_eq!(verified.root, "".as_path());
-		assert_eq!(verified.subscribe, vec!["demo".as_path()]);
-		assert_eq!(verified.publish, vec!["demo/alice".as_path()]);
+		assert_eq!(verified.subscribe, grants(["demo"]));
+		assert_eq!(verified.publish, grants(["demo/alice"]));
 
 		Ok(())
 	}
@@ -3153,8 +3152,8 @@ mod tests {
 
 		// Permissions are prefixed with the remaining "123"
 		assert_eq!(verified.root, "room".as_path());
-		assert_eq!(verified.subscribe, vec!["123".as_path()]);
-		assert_eq!(verified.publish, vec!["123/alice".as_path()]);
+		assert_eq!(verified.subscribe, grants(["123"]));
+		assert_eq!(verified.publish, grants(["123/alice"]));
 
 		Ok(())
 	}
@@ -3369,13 +3368,13 @@ api = "https://api.example.com/access"
 
 		// /anon gets full pub+sub from --auth-public
 		let token = auth.verify(&AuthParams::new("/anon")).await?;
-		assert_eq!(token.subscribe, vec!["".as_path()]);
-		assert_eq!(token.publish, vec!["".as_path()]);
+		assert_eq!(token.subscribe, grants([""]));
+		assert_eq!(token.publish, grants([""]));
 
 		// /demo gets subscribe-only from --auth-public-subscribe
 		let token = auth.verify(&AuthParams::new("/demo")).await?;
-		assert_eq!(token.subscribe, vec!["".as_path()]);
-		assert_eq!(token.publish, vec![]);
+		assert_eq!(token.subscribe, grants([""]));
+		assert!(token.publish.is_empty());
 
 		// /secret gets nothing
 		let result = auth.verify(&AuthParams::new("/secret")).await;
@@ -3396,8 +3395,8 @@ api = "https://api.example.com/access"
 
 		// /uploads gets publish-only from --auth-public-publish
 		let token = auth.verify(&AuthParams::new("/uploads")).await?;
-		assert_eq!(token.subscribe, vec![]);
-		assert_eq!(token.publish, vec!["".as_path()]);
+		assert!(token.subscribe.is_empty());
+		assert_eq!(token.publish, grants([""]));
 
 		Ok(())
 	}
@@ -3626,8 +3625,8 @@ api = "https://api.example.com/access"
 		let auth = auth_with_public_api(&server, &[], &[]).await;
 		let token = auth.verify(&AuthParams::new("/foo")).await?;
 		assert_eq!(token.root, "foo".as_path());
-		assert_eq!(token.subscribe, vec!["".as_path()]);
-		assert_eq!(token.publish, vec!["".as_path()]);
+		assert_eq!(token.subscribe, grants([""]));
+		assert_eq!(token.publish, grants([""]));
 		Ok(())
 	}
 
@@ -3644,7 +3643,7 @@ api = "https://api.example.com/access"
 		let auth = auth_with_public_api(&server, &[], &[]).await;
 		let token = auth.verify(&AuthParams::new("/demo")).await?;
 		assert_eq!(token.root, "demo".as_path());
-		assert_eq!(token.subscribe, vec!["viewer".as_path()]);
+		assert_eq!(token.subscribe, grants(["viewer"]));
 		assert!(token.publish.is_empty());
 		Ok(())
 	}
@@ -3662,7 +3661,7 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_public_api(&server, &["demo"], &[]).await;
 		let token = auth.verify(&AuthParams::new("/demo")).await?;
-		assert_eq!(token.subscribe, vec!["".as_path()]);
+		assert_eq!(token.subscribe, grants([""]));
 		Ok(())
 	}
 
@@ -3698,7 +3697,7 @@ api = "https://api.example.com/access"
 		let auth = auth_with_public_api(&server, &["demo"], &[]).await;
 		let token = auth.verify(&AuthParams::new("/")).await?;
 		// Connecting to root with static "demo" → subscribe scoped under demo/.
-		assert_eq!(token.subscribe, vec!["demo".as_path()]);
+		assert_eq!(token.subscribe, grants(["demo"]));
 		Ok(())
 	}
 
@@ -4049,7 +4048,7 @@ api = "https://api.example.com/access"
 
 		let token = auth.verify(&params).await?;
 		assert_eq!(token.root, Path::new("customer/anon/room").to_owned());
-		assert_eq!(token.subscribe, vec!["".as_path()]);
+		assert_eq!(token.subscribe, grants([""]));
 
 		// A different customer under the same suffix is rejected by the prefix check.
 		let params = auth.params_from_url(&url::Url::parse("https://other.cdn.moq.dev/anon/room")?);
@@ -4065,8 +4064,8 @@ api = "https://api.example.com/access"
 		// not the cluster root, so path-scoped subscribers (e.g. `demo/*`) see it.
 		let token = AuthToken::unrestricted(Path::new("/demo").to_owned());
 		assert_eq!(token.root, "demo".as_path());
-		assert_eq!(token.subscribe, vec!["".as_path()]);
-		assert_eq!(token.publish, vec!["".as_path()]);
+		assert_eq!(token.subscribe, grants([""]));
+		assert_eq!(token.publish, grants([""]));
 		// The billing tier is set by the caller, not baked into the token.
 		assert_eq!(token.tier, Tier::default());
 	}
@@ -4139,7 +4138,7 @@ api = "https://api.example.com/access"
 			})
 			.await?;
 		assert_eq!(verified.root, "x7k2qp/room".as_path());
-		assert_eq!(verified.subscribe, vec!["".as_path()]);
+		assert_eq!(verified.subscribe, grants([""]));
 		Ok(())
 	}
 
@@ -4214,8 +4213,8 @@ api = "https://api.example.com/access"
 			})
 			.await?;
 		assert_eq!(verified.root, "uwwdyw61".as_path());
-		assert_eq!(verified.publish, vec!["hello-world".as_path()]);
-		assert_eq!(verified.subscribe, vec!["hello-world".as_path()]);
+		assert_eq!(verified.publish, grants(["hello-world"]));
+		assert_eq!(verified.subscribe, grants(["hello-world"]));
 		Ok(())
 	}
 
@@ -4235,8 +4234,8 @@ api = "https://api.example.com/access"
 		let auth = auth_with_api(&server).await;
 		let verified = auth.verify(&AuthParams::new("/demo")).await?;
 		assert_eq!(verified.root, "x7k2qp".as_path());
-		assert_eq!(verified.subscribe, vec!["cam".as_path()]);
-		assert_eq!(verified.publish, vec![]);
+		assert_eq!(verified.subscribe, grants(["cam"]));
+		assert!(verified.publish.is_empty());
 		assert_eq!(verified.tier, Tier::default());
 		Ok(())
 	}
@@ -4558,8 +4557,8 @@ api = "https://api.example.com/access"
 			}),
 			scope: Scope {
 				root: Path::new("demo").to_owned(),
-				subscribe: PathPrefixes::default(),
-				publish: PathPrefixes::default(),
+				subscribe: Patterns::default(),
+				publish: Patterns::default(),
 			},
 			schedule,
 		}
@@ -4916,14 +4915,14 @@ api = "https://api.example.com/access"
 	fn scope_is_covered_only_while_authority_holds() {
 		let scope = |root: &str, subscribe: Vec<&str>| Scope {
 			root: Path::new(root).to_owned(),
-			subscribe: PathPrefixes::from(subscribe.iter().map(|p| Path::new(p).to_owned()).collect::<Vec<_>>()),
-			publish: PathPrefixes::default(),
+			subscribe: grants(subscribe),
+			publish: Patterns::default(),
 		};
 		let token = |root: &str, subscribe: Vec<&str>| {
 			let s = scope(root, subscribe);
 			let mut token = AuthToken::unrestricted(s.root.clone());
 			token.subscribe = s.subscribe;
-			token.publish = PathPrefixes::default();
+			token.publish = Patterns::default();
 			token
 		};
 
@@ -5152,8 +5151,8 @@ api = "https://api.example.com/access"
 			}),
 			scope: Scope {
 				root: Path::new("demo").to_owned(),
-				subscribe: PathPrefixes::from(vec![Path::new(subscribe).to_owned()]),
-				publish: PathPrefixes::default(),
+				subscribe: grants([subscribe]),
+				publish: Patterns::default(),
 			},
 			schedule: Schedule {
 				cadence: Duration::from_millis(100),
@@ -5401,11 +5400,11 @@ api = "https://api.example.com/access"
 		assert_eq!(token.root.as_str(), "x7k2qp");
 		assert_eq!(
 			token.subscribe.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
-			["room"]
+			["room/**"]
 		);
 		assert_eq!(
 			token.publish.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
-			["room/alice"]
+			["room/alice/**"]
 		);
 		Ok(())
 	}
@@ -5646,7 +5645,7 @@ api = "https://api.example.com/access"
 			let mut params = AuthParams::new("demo");
 			params.jwt = Some(viewer.into());
 			let token = auth.verify(&params).await?;
-			assert_eq!(token.subscribe, PathPrefixes::new([viewer]));
+			assert_eq!(token.subscribe, grants([viewer]));
 		}
 		Ok(())
 	}
@@ -5935,7 +5934,7 @@ api = "https://api.example.com/access"
 			})
 			.await?;
 		assert_eq!(token.root, "x7k2qp/room".as_path());
-		assert!(token.subscribe.contains(&Path::new("cam").to_owned()));
+		assert!(token.subscribe.contains(&Pattern::subtree("cam").unwrap()));
 		Ok(())
 	}
 

@@ -4,14 +4,26 @@
 
 `moq-net` origin handles retain literal roots while an arbitrary union of path
 patterns authorizes and filters every publish, subscribe, and announcement
-beneath them.
+beneath them, and an announcement reports how it matched the scope. The
+announce event shape is a published API in every language, so it settles on
+dev before the release.
 
 ## Plan
 
-- Extend the pattern-valued scope API from m1 to every supported pattern union,
+- Extend the pattern-valued scope API to every supported pattern union,
   removing its explicit refusal of non-prefix grants without changing its public
-  signatures. A root remains a literal coordinate transform; never join or
-  mount at a wildcard.
+  signatures: Rust `scope(&Patterns)`, JS `announced(scope: Path.Pattern)`. A
+  root remains a literal coordinate transform; never join or mount at a
+  wildcard.
+- Announce events carry a match, not a bare pattern: the covered pattern
+  relative to the origin, plus one capture per wildcard in the scope, the way a
+  regex match exposes the whole match and then its groups. `foo/*/chat`
+  matched by `foo/alice/chat` captures `alice`; `foo/**` matched by
+  `foo/alice/chat` captures `alice/chat`. Decide how a claim that is itself a
+  pattern reports a capture the scope cannot pin (a `**` route under a `*`
+  scope). The wire keeps echoing only the suffix beneath the literal head; the
+  match is assembled locally. Mirror the shape in Rust, JS, and every binding
+  that exposes announcements (`moq_announced`, the wrappers).
 - Watch origin-tree nodes at each pattern's literal head, then reapply the full
   matcher on broadcast creation, lookup, and announce fan-out. Patterns sharing
   a head share the node without sharing permission.
@@ -45,8 +57,6 @@ the existing subscription closes and no further objects arrive.
 
 - [#2714](https://github.com/moq-dev/moq/issues/2714) - close this issue when the quest finishes
 
-## Required
+## Related
 
-- [Merge dev](/quest/m1/merge-dev.md) - the required M1 APIs must be available on main before this implementation starts
-
-- [Origin scope pattern API](/quest/m1/api-origin-pattern-scopes.md) - the published shape and functional prefix behavior land before the release
+- [Pattern interest](/quest/m2/path-patterns/interest.md) - carries the same scopes on the lite-06 wire once they are enforced here

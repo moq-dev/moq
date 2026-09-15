@@ -15,7 +15,7 @@ import * as announce from "./announced.ts";
 import * as broadcast from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { DEFAULT_ROUTE, normalizeRoute, type Route, routesEqual } from "./hop.ts";
-import { hooks } from "./internal.ts";
+import { hooks, scopePrefix } from "./internal.ts";
 import * as Path from "./path.ts";
 
 export type { Cost, Hop, Route } from "./hop.ts";
@@ -327,8 +327,8 @@ export interface Table {
 	/** Resolve `path`, without waiting for an announcement; see {@link Consumer.request}. */
 	request(path: Path.Valid): Request;
 
-	/** The available broadcasts under `prefix`, as a live stream; see {@link Consumer.announced}. */
-	announced(prefix?: Path.Valid): announce.Consumer;
+	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
+	announced(scope?: Path.Pattern): announce.Consumer;
 }
 
 /**
@@ -623,9 +623,9 @@ export class Producer implements Table {
 		return this.#reader.routes(path);
 	}
 
-	/** The available broadcasts under `prefix`, as a live stream; see {@link Consumer.announced}. */
-	announced(prefix?: Path.Valid): announce.Consumer {
-		return this.#reader.announced(prefix);
+	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
+	announced(scope?: Path.Pattern): announce.Consumer {
+		return this.#reader.announced(scope);
 	}
 
 	/** Close the origin, every broadcast it still routes, and its announcement streams. Idempotent. */
@@ -926,22 +926,25 @@ export class Consumer {
 	}
 
 	/**
-	 * The announced routes under `prefix`, as a live stream: every currently advertised
-	 * prefix arrives first as `active`, then additions and retractions as they happen. A
-	 * local broadcast appears only after {@link broadcast.Producer.announce}; a dynamic
-	 * or received route announces the prefix it covers. Paths are relative to `prefix`.
-	 * The stream ends when the origin closes or the consumer is closed.
+	 * The announced routes under `scope`, as a live stream: every currently advertised
+	 * route arrives first as `active`, then additions and retractions as they happen.
+	 * The scope must be prefix-shaped (`foo/**`, or `**` for everything); anything else
+	 * throws rather than narrowing or widening it. A local broadcast appears only after
+	 * {@link broadcast.Producer.announce}; a dynamic or received route announces the
+	 * prefix it covers, clamped to the scope. Patterns are relative to the origin, not
+	 * the scope. The stream ends when the origin closes or the consumer is closed.
 	 */
-	announced(prefix: Path.Valid = Path.empty()): announce.Consumer {
-		const producer = new announce.Producer(prefix);
+	announced(scope: Path.Pattern = Path.Pattern.all()): announce.Consumer {
+		const prefix = scopePrefix(scope);
+		const producer = new announce.Producer();
 		void this.#runAnnounced(producer, prefix);
 		return producer.consume();
 	}
 
 	async #runAnnounced(producer: announce.Producer, prefix: Path.Valid): Promise<void> {
-		// Keyed by suffix, valued by identity plus route. Diffing identity rather than
-		// mere presence means a republish emits a retraction then a fresh announcement;
-		// a re-price of the same identity emits another active (a restart).
+		// Keyed by the presented pattern, valued by identity plus route. Diffing identity
+		// rather than mere presence means a republish emits a retraction then a fresh
+		// announcement; a re-price of the same identity emits another active (a restart).
 		let active = new Map<string, Advertised>();
 
 		try {
@@ -954,7 +957,7 @@ export class Consumer {
 				const next = new Map<string, Advertised>();
 				// Routes first, so an advertised local at the same path overwrites it: the
 				// announcement points at whatever request() would resolve.
-				// The most specific route covering `prefix` itself wins the root slot,
+				// The most specific route covering the scope itself wins the root slot,
 				// matching request() resolution.
 				let rootLen = -1;
 				for (const [key, entries] of routes ?? []) {
@@ -962,21 +965,21 @@ export class Consumer {
 					if (!entry) continue;
 					const snap: Advertised = { identity: entry.identity, route: entry.route.peek() };
 					const advertised = Path.Pattern.parse(key);
+					// Rebasing clamps the claim to the scope; rooting names the result from the origin.
 					for (const residual of advertised.rebase(prefix)) {
-						const presentedPath = residual.text;
 						if (residual.asPrefix() === "") {
 							const spec = advertised.segments.length;
 							if (spec < rootLen) continue;
 							rootLen = spec;
 						}
-						next.set(presentedPath, snap);
+						next.set(residual.rooted(prefix).text, snap);
 					}
 				}
 				for (const [path, front] of local ?? []) {
 					const route = advertisedLocal?.get(path);
 					if (!route) continue;
-					const suffix = Path.stripPrefix(prefix, path);
-					if (suffix !== null) next.set(Path.Pattern.subtree(suffix).text, { identity: front, route });
+					if (Path.hasPrefix(prefix, path))
+						next.set(Path.Pattern.subtree(path).text, { identity: front, route });
 				}
 
 				for (const [path, snap] of active) {

@@ -6,7 +6,6 @@ use std::net::SocketAddr;
 use anyhow::Context;
 use axum::http::Method;
 use hang::moq_net;
-use hang::moq_net::AsPath;
 
 use crate::moq::{ImportTarget, notify_ready};
 
@@ -74,8 +73,11 @@ pub async fn import(target: ImportTarget, playlist: String) -> anyhow::Result<()
 /// `/<name>/master.m3u8` and `/<name>/manifest.mpd`); other broadcasts in the
 /// Origin are not served.
 pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: String) -> anyhow::Result<()> {
+	let scope = moq_net::Patterns::from(
+		moq_net::Pattern::subtree(&name).with_context(|| format!("invalid broadcast name `{name}`"))?,
+	);
 	let scoped = origin
-		.scope(&[name.as_path()])
+		.scope(&scope)
 		.with_context(|| format!("failed to scope origin to broadcast `{name}`"))?;
 
 	let mut config = moq_hls::export::Config::default();

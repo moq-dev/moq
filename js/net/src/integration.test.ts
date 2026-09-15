@@ -76,11 +76,11 @@ async function runPublishSubscribeFlow(protocol: string, version?: number) {
 	expect(entry.pattern.asPrefix()).toBe("test" as Path.Valid);
 	expect(entry.active).toBe(true);
 
-	// Prefix-scoped discovery returns paths relative to the requested prefix.
-	const prefixed = client.announced(Path.from("root"));
+	// Scoped discovery only echoes the suffix on the wire, but presents the whole path.
+	const prefixed = client.announced(Path.Pattern.subtree(Path.from("root")));
 	const prefixedEntry = await prefixed.next();
 	if (!prefixedEntry) throw new Error("expected prefixed entry");
-	expect(prefixedEntry.pattern.asPrefix()).toBe("child" as Path.Valid);
+	expect(prefixedEntry.pattern.asPrefix()).toBe("root/child" as Path.Valid);
 	expect(prefixedEntry.active).toBe(true);
 
 	// Client consumes the broadcast and subscribes to a track

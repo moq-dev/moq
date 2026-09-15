@@ -518,10 +518,13 @@ pub(super) struct SubscriberDriver<S: crate::transport::poll::Session> {
 
 impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
 	pub fn new(subscriber: Subscriber<S>) -> Self {
+		// The granted scopes double as the wire announce-interest prefixes; they are
+		// always prefix-shaped, so the conversion back to paths cannot fail.
 		let prefixes = subscriber
 			.origin
 			.allowed()
-			.map(|p| p.to_owned())
+			.iter()
+			.map(|pattern| Path::new(pattern.as_prefix().expect("allowed patterns are prefix-shaped")).to_owned())
 			.collect::<Vec<PathOwned>>()
 			.into_iter()
 			.map(|prefix| AnnouncePrefix::new(subscriber.clone(), prefix))

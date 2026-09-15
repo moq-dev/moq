@@ -15,11 +15,12 @@ test("room restores the announce prefix and reconciles local identity changes", 
 	const streams: Net.Announce.Producer[] = [];
 	const connection = {
 		origin: new Signal({
-			announced(prefix: Net.Path.Valid) {
-				const stream = new Net.Announce.Producer(prefix);
+			announced(scope: Net.Path.Pattern) {
+				expect(scope.equals(Net.Path.Pattern.subtree(Net.Path.from("room-a")))).toBe(true);
+				const stream = new Net.Announce.Producer();
 				streams.push(stream);
 				stream.append({
-					pattern: Net.Path.Pattern.subtree(Net.Path.from("bob/camera.hang")),
+					pattern: Net.Path.Pattern.subtree(Net.Path.from("room-a/bob/camera.hang")),
 					active: true,
 				});
 				return stream.consume();

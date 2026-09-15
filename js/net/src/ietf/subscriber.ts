@@ -3,6 +3,7 @@ import * as broadcast from "../broadcast.ts";
 import { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation, reason } from "../error.ts";
 import * as netGroup from "../group.ts";
+import { scopePrefix } from "../internal.ts";
 import * as Path from "../path.ts";
 import type { Reader, Stream } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
@@ -104,8 +105,9 @@ export class Subscriber {
 	// to end from retracting what the other still holds.
 	#announced = new Map<Path.Valid, number>();
 
-	// Any consumers that want each new announcement.
-	#announcedConsumers = new Set<announce.Producer>();
+	// Any consumers that want each new announcement, keyed by the wire interest
+	// prefix their stream filters on.
+	#announcedConsumers = new Map<announce.Producer, Path.Valid>();
 
 	/**
 	 * Creates a new Subscriber instance.
@@ -138,20 +140,22 @@ export class Subscriber {
 	}
 
 	/**
-	 * Gets an announced reader for the specified prefix.
+	 * Gets an announced reader for `scope`, a prefix-shaped pattern (`foo/**`, or `**`
+	 * for everything). Patterns are relative to the session, not the scope.
 	 *
 	 * The peer is asked with SUBSCRIBE_NAMESPACE regardless of what it declared, and an
 	 * unsolicited PUBLISH_NAMESPACE lands here too, so a peer that only tells and one
 	 * that only answers are both discovered.
 	 */
-	announced(prefix = Path.empty()): announce.Consumer {
-		const announced = new announce.Producer(prefix);
+	announced(scope: Path.Pattern = Path.Pattern.all()): announce.Consumer {
+		// The wire speaks announce interest by prefix.
+		const prefix = scopePrefix(scope);
+		const announced = new announce.Producer();
 		for (const active of this.#announced.keys()) {
-			const suffix = Path.stripPrefix(prefix, active);
-			if (suffix === null) continue;
-			announced.append({ pattern: Path.Pattern.subtree(suffix), active: true });
+			if (!Path.hasPrefix(prefix, active)) continue;
+			announced.append({ pattern: Path.Pattern.subtree(active), active: true });
 		}
-		this.#announcedConsumers.add(announced);
+		this.#announcedConsumers.set(announced, prefix);
 
 		void this.#runAnnounced(announced, prefix).finally(() => {
 			this.#announcedConsumers.delete(announced);
@@ -171,10 +175,9 @@ export class Subscriber {
 		if (count > 0) return;
 
 		console.debug(`announced: broadcast=${path} active=true`);
-		for (const consumer of this.#announcedConsumers) {
-			const suffix = Path.stripPrefix(consumer.prefix, path);
-			if (suffix === null) continue;
-			consumer.append({ pattern: Path.Pattern.subtree(suffix), active: true });
+		for (const [consumer, prefix] of this.#announcedConsumers) {
+			if (!Path.hasPrefix(prefix, path)) continue;
+			consumer.append({ pattern: Path.Pattern.subtree(path), active: true });
 		}
 	}
 
@@ -196,11 +199,10 @@ export class Subscriber {
 		this.#consumes.evict(path);
 		console.debug(`announced: broadcast=${path} active=false`);
 
-		for (const consumer of this.#announcedConsumers) {
-			const suffix = Path.stripPrefix(consumer.prefix, path);
-			if (suffix === null) continue;
+		for (const [consumer, prefix] of this.#announcedConsumers) {
+			if (!Path.hasPrefix(prefix, path)) continue;
 			try {
-				consumer.append({ pattern: Path.Pattern.subtree(suffix), active: false });
+				consumer.append({ pattern: Path.Pattern.subtree(path), active: false });
 			} catch {
 				// Consumer already closed, will be cleaned up
 			}

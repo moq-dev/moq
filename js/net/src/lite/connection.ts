@@ -7,7 +7,7 @@ import { type Transport, transportOf } from "../connection/transport.ts";
 import { error, fromClose, StreamCode, StreamError } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
-import * as Path from "../path.ts";
+import type * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
 import { AnnounceRequest } from "./announce.ts";
 import { Fetch } from "./fetch.ts";
@@ -169,8 +169,8 @@ export class Connection implements Established {
 		}
 	}
 
-	announced(prefix = Path.empty()): announce.Consumer {
-		return this.#subscriber.announced(prefix);
+	announced(scope?: Path.Pattern): announce.Consumer {
+		return this.#subscriber.announced(scope);
 	}
 
 	consume(path: Path.Valid): broadcast.Consumer {

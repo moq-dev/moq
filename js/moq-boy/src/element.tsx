@@ -130,7 +130,7 @@ export default class MoqBoy extends HTMLElement {
 
 		// The origin's stream spans reconnects: entries retract when the session dies and
 		// return when the next one re-announces them, so this loop never needs to restart.
-		const announced = this.origin.consume().announced(prefix);
+		const announced = this.origin.consume().announced(Moq.Path.Pattern.subtree(prefix));
 		effect.cleanup(() => announced.close());
 
 		effect.spawn(async () => {
@@ -139,7 +139,9 @@ export default class MoqBoy extends HTMLElement {
 				if (!entry) break;
 
 				// Skip nested paths (e.g. "viewer/..." sub-broadcasts).
-				const suffix = entry.pattern.asPrefix();
+				const covered = entry.pattern.asPrefix();
+				if (covered === undefined) continue;
+				const suffix = Moq.Path.stripPrefix(prefix, Moq.Path.from(covered));
 				if (!suffix || suffix.includes("/")) continue;
 
 				const id = suffix;

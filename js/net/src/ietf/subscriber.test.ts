@@ -57,7 +57,7 @@ test("every peer is asked", async () => {
 	const session = new NativeSession(pair.server, VERSION, true);
 
 	const subscriber = new Subscriber({ session });
-	subscriber.announced(Path.empty());
+	subscriber.announced();
 
 	expect(await nextStream(pair.client)).toBeDefined();
 });
@@ -71,7 +71,7 @@ test("an unsolicited announcement lands", async () => {
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
 
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 
 	// The question we asked, which this peer never answers.
 	expect(await nextStream(pair.client)).toBeDefined();
@@ -148,7 +148,7 @@ test("an announcement survives the first of its two sources ending", async () =>
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
 
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	const subscription = await acceptSubscribeNamespace(pair.client);
 
 	// Unsolicited first, then the same path inline on the subscription.
@@ -185,7 +185,7 @@ test("an announcement ends once its last source does", async () => {
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
 
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	const subscription = await acceptSubscribeNamespace(pair.client);
 
 	const request = await Stream.open(pair.server, { version: VERSION });
@@ -222,9 +222,9 @@ test("a subscription that dies releases what it advertised", async () => {
 	const subscriber = new Subscriber({ session });
 
 	// Two feeds, so one outlives the stream that carries the advertisement.
-	const doomed = subscriber.announced(Path.empty());
+	const doomed = subscriber.announced();
 	const streamA = await acceptSubscribeNamespace(pair.client);
-	const survivor = subscriber.announced(Path.empty());
+	const survivor = subscriber.announced();
 	await acceptSubscribeNamespace(pair.client);
 
 	await inlineNamespace(streamA, Path.from("orphan"));
@@ -249,7 +249,7 @@ test("a duplicate legacy publish_namespace is still refused", async () => {
 	const session = new NativeSession(pair.server, Version.DRAFT_15, true);
 	const subscriber = new Subscriber({ session });
 
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 
 	const first = await Stream.open(pair.server, { version: Version.DRAFT_15 });
 	const handler = subscriber.runPublishNamespace(
@@ -285,7 +285,7 @@ test("an entry buffered past a consumer close does not pin the path", async () =
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
 
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	const subscription = await acceptSubscribeNamespace(pair.client);
 
 	// Both entries land in one chunk, so the second is buffered while the first is being
@@ -298,7 +298,7 @@ test("an entry buffered past a consumer close does not pin the path", async () =
 	// Whatever the loop managed to attach, the stream gave back on its way out.
 	await new Promise((resolve) => setTimeout(resolve, 50));
 
-	const fresh = subscriber.announced(Path.empty());
+	const fresh = subscriber.announced();
 	const seeded = await Promise.race([
 		fresh.next(),
 		new Promise<"nothing">((resolve) => setTimeout(() => resolve("nothing"), 250)),
@@ -316,7 +316,7 @@ test("concurrent legacy publish_namespace requests take one reference", async ()
 	const session = new NativeSession(pair.server, Version.DRAFT_15, true);
 	const subscriber = new Subscriber({ session });
 
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 
 	// Dispatched together, as the connection would on two incoming streams.
 	const first = await Stream.open(pair.server, { version: Version.DRAFT_15 });
@@ -356,7 +356,7 @@ test("an inline NAMESPACE that looped back through us is dropped", async () => {
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
 
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	const subscription = await acceptSubscribeNamespace(pair.client);
 
 	// Ours coming back, then someone else's. Only the second is news.
@@ -374,7 +374,7 @@ test("an inline NAMESPACE that starts looping back is retracted", async () => {
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
 
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	const subscription = await acceptSubscribeNamespace(pair.client);
 
 	await inlineNamespace(subscription, Path.from("theirs"), { hops: [PEER], cost: 0n });
@@ -390,7 +390,7 @@ test("a PUBLISH_NAMESPACE that looped back through us is refused", async () => {
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
 
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	const subscription = await acceptSubscribeNamespace(pair.client);
 
 	const request = await Stream.open(pair.server, { version: VERSION });
@@ -424,7 +424,7 @@ test("a NAMESPACE missing its hop path closes the session", async () => {
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
 
-	subscriber.announced(Path.empty());
+	subscriber.announced();
 	const subscription = await acceptSubscribeNamespace(pair.client);
 
 	// The base form, which a negotiated session must never send.
@@ -447,7 +447,7 @@ test("a PUBLISH_NAMESPACE update that starts looping back is detached", async ()
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
 
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await acceptSubscribeNamespace(pair.client);
 
 	const advert = (hops: Hop[]) =>

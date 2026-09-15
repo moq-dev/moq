@@ -80,7 +80,7 @@ additive). Wire: none.
 
 ## Related
 
-- [Origin scopes](/quest/m2/path-patterns/origin.md) - lifts the
+- [Origin scopes](/quest/m1/api-origin-scopes.md) - lifts the
   prefix-shaped restriction and resizes instead of closing on a narrower grant
 - [Relay tokens](/quest/m2/auth/relay-refresh.md) - an in-band token becomes
   a `connect` request through the same client

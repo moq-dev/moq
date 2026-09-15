@@ -6,6 +6,7 @@
 import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import type { Handle } from "../bandwidth.ts";
+import { scopePrefix } from "../internal.ts";
 import * as Origin from "../origin.ts";
 import * as Path from "../path.ts";
 import { type AcceptProps as AcceptPropsType, accept } from "./accept.ts";
@@ -262,12 +263,17 @@ export class Connection {
 	}
 
 	/**
-	 * Subscribe to broadcast announcements under an optional prefix, spanning reconnects
-	 * and URL switches: a switch retracts everything from the old relay's origin, then the
-	 * new one's arrivals stream in.
+	 * Subscribe to broadcast announcements under `scope` (a prefix-shaped pattern, default
+	 * everything), spanning reconnects and URL switches: a switch retracts everything from
+	 * the old relay's origin, then the new one's arrivals stream in.
 	 */
-	announced(prefix: Path.Valid = Path.empty()): Announce.Consumer {
-		const producer = new Announce.Producer(prefix);
+	announced(scope: Path.Pattern = Path.Pattern.all()): Announce.Consumer {
+		// Refuse an unsupported scope here, where the caller can see it; the pump below
+		// runs later inside an effect, which would only log the throw and leave the
+		// consumer waiting forever.
+		scopePrefix(scope);
+
+		const producer = new Announce.Producer();
 		const consumer = producer.consume();
 
 		// Closing the consumer closes the shared state, so stop appending after that.
@@ -284,7 +290,7 @@ export class Connection {
 			const origin = effect.get(this.#origin);
 			if (!origin) return;
 
-			const upstream = origin.announced(prefix);
+			const upstream = origin.announced(scope);
 			effect.cleanup(() => upstream.close());
 
 			// Track what this origin announced so a URL switch retracts it.

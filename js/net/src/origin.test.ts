@@ -188,25 +188,25 @@ test("the table is reactive", async () => {
 	origin.close();
 });
 
-test("announced streams the table with prefix-relative paths", async () => {
+test("announced streams the table under a scope with origin-relative paths", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 
 	const a = publish(origin, Path.from("room/a"));
 
-	const announced = consumer.announced(Path.from("room"));
+	const announced = consumer.announced(Path.Pattern.subtree(Path.from("room")));
 
-	// The initial state arrives first.
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("a")), active: true });
+	// The initial state arrives first, named from the origin rather than the scope.
+	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room/a")), active: true });
 
-	// Additions under the prefix stream in; paths outside it are invisible.
+	// Additions under the scope stream in; paths outside it are invisible.
 	const b = publish(origin, Path.from("room/b"));
 	publish(origin, Path.from("lobby/c"));
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("b")), active: true });
+	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room/b")), active: true });
 
 	// Removals retract.
 	b.close();
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("b")), active: false });
+	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room/b")), active: false });
 
 	// The stream ends when the origin closes.
 	origin.close();
@@ -248,13 +248,14 @@ test("announced reports a broader covering route at the root", async () => {
 	const upstream = new BroadcastProducer();
 	const dispose = serve(origin, Path.from("room"), provider(upstream));
 
-	// A route above the requested prefix covers everything under it, so it
-	// presents at the root, matching what request() resolves there.
-	const announced = consumer.announced(Path.from("room/alice"));
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.empty()), active: true });
+	// A route above the requested scope covers everything under it, so it clamps
+	// to the scope, matching what request() resolves there.
+	const scope = Path.Pattern.subtree(Path.from("room/alice"));
+	const announced = consumer.announced(scope);
+	expect(await announced.next()).toMatchObject({ pattern: scope, active: true });
 
 	dispose();
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.empty()), active: false });
+	expect(await announced.next()).toMatchObject({ pattern: scope, active: false });
 
 	announced.close();
 	upstream.close();
@@ -1023,5 +1024,28 @@ test("literal and subtree claims keep distinct pattern identities", async () => 
 	expect(ended?.active).toBe(false);
 	subtree.close();
 	announced.close();
+	origin.close();
+});
+
+test("announced refuses a scope that is not prefix-shaped", () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+
+	const refused = (text: string) => {
+		expect(() => consumer.announced(Path.Pattern.parse(text))).toThrow();
+	};
+
+	// An exact path is not a scope over its subtree.
+	refused("room");
+	// The empty pattern names only the root, not everything beneath it.
+	refused("");
+	// Suffixes and segment wildcards name sets a prefix cannot cover.
+	refused("*room");
+	refused("room/*");
+	refused("*");
+	// A `**` anywhere but the end is not a subtree.
+	refused("**/room");
+	refused("room/**/chat");
+
 	origin.close();
 });
