@@ -62,8 +62,7 @@ export class Room {
 			const origin = effect.get(this.connection.origin);
 			if (!origin) return;
 			const prefix = effect.get(this.prefix) ?? Moq.Path.empty();
-			// The origin speaks scopes; the intended prefix converts explicitly to its subtree.
-			const announced = origin.announced(new Moq.Path.Patterns([Moq.Path.Pattern.subtree(prefix)]));
+			const announced = origin.announced(Moq.Path.Pattern.subtree(prefix));
 			effect.cleanup(() => announced.close());
 
 			effect.spawn(this.#run.bind(this, announced, prefix, effect));
@@ -86,7 +85,9 @@ export class Room {
 
 			const covered = update.pattern.isLiteral ? update.pattern.text : update.pattern.asPrefix();
 			if (covered === undefined) continue;
-			const suffix = Moq.Path.from(covered);
+			// Announcements name the whole path; participants are named beneath the prefix.
+			const suffix = Moq.Path.stripPrefix(prefix, Moq.Path.from(covered));
+			if (suffix === null) continue;
 			const parsed = parse(suffix);
 			if (!parsed) continue;
 
@@ -94,7 +95,7 @@ export class Room {
 			if (local && parsed.identity === local) continue;
 
 			if (update.active) {
-				this.#add(parsed.identity, parsed.kind, Moq.Path.join(prefix, suffix));
+				this.#add(parsed.identity, parsed.kind, Moq.Path.from(covered));
 			} else {
 				this.#remove(parsed.identity, parsed.kind);
 			}

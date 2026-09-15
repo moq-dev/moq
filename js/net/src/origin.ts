@@ -15,7 +15,7 @@ import * as announce from "./announced.ts";
 import * as broadcast from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { DEFAULT_ROUTE, normalizeRoute, type Route, routesEqual } from "./hop.ts";
-import { hooks } from "./internal.ts";
+import { hooks, scopePrefix } from "./internal.ts";
 import * as Path from "./path.ts";
 
 export type { Cost, Hop, Route } from "./hop.ts";
@@ -328,7 +328,7 @@ export interface Table {
 	request(path: Path.Valid): Request;
 
 	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
-	announced(scope?: Path.Patterns): announce.Consumer;
+	announced(scope?: Path.Pattern): announce.Consumer;
 }
 
 /**
@@ -624,7 +624,7 @@ export class Producer implements Table {
 	}
 
 	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
-	announced(scope?: Path.Patterns): announce.Consumer {
+	announced(scope?: Path.Pattern): announce.Consumer {
 		return this.#reader.announced(scope);
 	}
 
@@ -693,27 +693,6 @@ let finishBroadcastRequest: (request: BroadcastRequest, err: Error) => void;
 function prefixPattern(pattern: Path.Pattern | string): { parsed: Path.Pattern; prefix: Path.Valid } {
 	const parsed = typeof pattern === "string" ? Path.Pattern.parse(pattern) : pattern;
 	return { parsed, prefix: Path.from(parsed.text) };
-}
-
-/**
- * The literal prefixes a scope grants, validating the whole union first.
- *
- * `foo/**` keeps the old `foo` prefix meaning and `**` keeps the old empty-prefix
- * meaning. Anything else (an exact `foo`, the empty pattern, a suffix, or any
- * segment wildcard) throws rather than narrowing or widening the grant, so a
- * supported member cannot conceal an unsupported one. An empty union grants
- * nothing and yields no prefixes.
- */
-function scopePrefixes(scope: Path.Patterns): Path.Valid[] {
-	const prefixes: Path.Valid[] = [];
-	for (const pattern of scope) {
-		const prefix = pattern.asPrefix();
-		if (prefix === undefined) {
-			throw new Error(`announced() only supports prefix-shaped patterns (foo/**), got "${pattern.text}"`);
-		}
-		prefixes.push(Path.from(prefix));
-	}
-	return prefixes;
 }
 
 /**
@@ -948,25 +927,24 @@ export class Consumer {
 
 	/**
 	 * The announced routes under `scope`, as a live stream: every currently advertised
-	 * route arriving first as `active`, then additions and retractions as they happen.
-	 * Each member must be prefix-shaped (`foo/**` for the old `foo` prefix, `**` for
-	 * everything); anything else throws rather than narrowing or widening the grant.
-	 * An empty union grants nothing and stays silent. A local broadcast appears only
-	 * after {@link broadcast.Producer.announce}; a dynamic or received route announces
-	 * the prefix it covers. Paths are relative to each scope member's prefix.
-	 * The stream ends when the origin closes or the consumer is closed.
+	 * route arrives first as `active`, then additions and retractions as they happen.
+	 * The scope must be prefix-shaped (`foo/**`, or `**` for everything); anything else
+	 * throws rather than narrowing or widening it. A local broadcast appears only after
+	 * {@link broadcast.Producer.announce}; a dynamic or received route announces the
+	 * prefix it covers, clamped to the scope. Patterns are relative to the origin, not
+	 * the scope. The stream ends when the origin closes or the consumer is closed.
 	 */
-	announced(scope: Path.Patterns = new Path.Patterns([Path.Pattern.all()])): announce.Consumer {
-		const prefixes = scopePrefixes(scope);
-		const producer = new announce.Producer(scope);
-		void this.#runAnnounced(producer, prefixes);
+	announced(scope: Path.Pattern = Path.Pattern.all()): announce.Consumer {
+		const prefix = scopePrefix(scope);
+		const producer = new announce.Producer();
+		void this.#runAnnounced(producer, prefix);
 		return producer.consume();
 	}
 
-	async #runAnnounced(producer: announce.Producer, prefixes: Path.Valid[]): Promise<void> {
-		// Keyed by suffix, valued by identity plus route. Diffing identity rather than
-		// mere presence means a republish emits a retraction then a fresh announcement;
-		// a re-price of the same identity emits another active (a restart).
+	async #runAnnounced(producer: announce.Producer, prefix: Path.Valid): Promise<void> {
+		// Keyed by the presented pattern, valued by identity plus route. Diffing identity
+		// rather than mere presence means a republish emits a retraction then a fresh
+		// announcement; a re-price of the same identity emits another active (a restart).
 		let active = new Map<string, Advertised>();
 
 		try {
@@ -979,31 +957,29 @@ export class Consumer {
 				const next = new Map<string, Advertised>();
 				// Routes first, so an advertised local at the same path overwrites it: the
 				// announcement points at whatever request() would resolve.
-				// Each scope member keeps its own root slot: the most specific route
-				// covering that member's prefix wins it, matching request() resolution.
-				for (const prefix of prefixes) {
-					let rootLen = -1;
-					for (const [key, entries] of routes ?? []) {
-						const entry = entries[0];
-						if (!entry) continue;
-						const snap: Advertised = { identity: entry.identity, route: entry.route.peek() };
-						const advertised = Path.Pattern.parse(key);
-						for (const residual of advertised.rebase(prefix)) {
-							const presentedPath = residual.text;
-							if (residual.asPrefix() === "") {
-								const spec = advertised.segments.length;
-								if (spec < rootLen) continue;
-								rootLen = spec;
-							}
-							next.set(presentedPath, snap);
+				// The most specific route covering the scope itself wins the root slot,
+				// matching request() resolution.
+				let rootLen = -1;
+				for (const [key, entries] of routes ?? []) {
+					const entry = entries[0];
+					if (!entry) continue;
+					const snap: Advertised = { identity: entry.identity, route: entry.route.peek() };
+					const advertised = Path.Pattern.parse(key);
+					// Rebasing clamps the claim to the scope; rooting names the result from the origin.
+					for (const residual of advertised.rebase(prefix)) {
+						if (residual.asPrefix() === "") {
+							const spec = advertised.segments.length;
+							if (spec < rootLen) continue;
+							rootLen = spec;
 						}
+						next.set(residual.rooted(prefix).text, snap);
 					}
-					for (const [path, front] of local ?? []) {
-						const route = advertisedLocal?.get(path);
-						if (!route) continue;
-						const suffix = Path.stripPrefix(prefix, path);
-						if (suffix !== null) next.set(Path.Pattern.subtree(suffix).text, { identity: front, route });
-					}
+				}
+				for (const [path, front] of local ?? []) {
+					const route = advertisedLocal?.get(path);
+					if (!route) continue;
+					if (Path.hasPrefix(prefix, path))
+						next.set(Path.Pattern.subtree(path).text, { identity: front, route });
 				}
 
 				for (const [path, snap] of active) {

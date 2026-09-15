@@ -182,7 +182,7 @@ function createTile(name: string): WatchTile {
 const discovery = new Signals.Effect();
 discovery.run((effect) => {
 	const prefix = prefixPath(effect.get(prefixInput));
-	const announced = connection.announced(prefix);
+	const announced = connection.announced(Net.Path.Pattern.subtree(prefix));
 	effect.cleanup(() => announced.close());
 
 	const live = new Set<string>();
@@ -190,9 +190,9 @@ discovery.run((effect) => {
 		for (;;) {
 			const entry = await Promise.race([effect.cancel, announced.next()]);
 			if (!entry) break;
-			const suffix = entry.pattern.asPrefix();
-			if (suffix === undefined) continue;
-			const path = Net.Path.join(prefix, Net.Path.from(suffix));
+			const covered = entry.pattern.asPrefix();
+			if (covered === undefined) continue;
+			const path = Net.Path.from(covered);
 			// Only catalog-backed broadcasts are watchable streams; this skips the relay's
 			// `.stats` broadcast (see the stats dashboard demo for that one).
 			if (!path.endsWith(".hang") && !path.endsWith(".msf")) continue;

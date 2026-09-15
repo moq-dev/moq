@@ -1,5 +1,5 @@
 /**
- * Broadcast announcement streams: which broadcast paths are available under a prefix.
+ * Broadcast announcement streams: which broadcast paths are available under a scope.
  *
  * @module
  */
@@ -21,7 +21,10 @@ import * as Path from "./path.js";
  * @public
  */
 export interface Event {
-	/** What the route covers, relative to the scope passed to `announced()`. */
+	/**
+	 * What the route covers, relative to the origin (for a session, its URL path). A
+	 * route claimed above the scope passed to `announced()` is clamped to that scope.
+	 */
 	pattern: Path.Pattern;
 	/** True while the route is advertised, false when it was retracted. */
 	active: boolean;
@@ -50,14 +53,7 @@ function closeState(state: AnnounceState, abort?: Error) {
  * @public
  */
 export class Producer {
-	/** The scopes this stream presents, as prefix-shaped patterns (`foo/**`, `**`). */
-	scope: Path.Patterns;
-
 	#state = new AnnounceState();
-
-	constructor(scope: Path.Patterns = new Path.Patterns([Path.Pattern.all()])) {
-		this.scope = scope;
-	}
 
 	/**
 	 * Settles once the stream closes: `null` on a clean close, or the abort {@link Error}.
@@ -69,7 +65,7 @@ export class Producer {
 
 	/** A read handle for this announcement stream. */
 	consume(): Consumer {
-		return makeConsumer(this.scope, this.#state);
+		return makeConsumer(this.#state);
 	}
 
 	/** Writes an announcement to the queue. */
@@ -88,24 +84,20 @@ export class Producer {
 
 // Constructs a Consumer from within this module without exposing a public constructor
 // that would leak the unexported AnnounceState. Assigned in the class's static block.
-let makeConsumer: (scope: Path.Patterns, state: AnnounceState) => Consumer;
+let makeConsumer: (state: AnnounceState) => Consumer;
 
 /**
  * The read side of an announcement stream.
  *
  * Created internally: obtain one from {@link Producer.consume} or the connection's
- * `announced(prefix)`.
+ * `announced(scope)`.
  *
  * @public
  */
 export class Consumer {
-	/** The scopes this stream presents, as prefix-shaped patterns (`foo/**`, `**`). */
-	scope: Path.Patterns;
-
 	#state: AnnounceState;
 
-	private constructor(scope: Path.Patterns, state: AnnounceState) {
-		this.scope = scope;
+	private constructor(state: AnnounceState) {
 		this.#state = state;
 	}
 
@@ -115,7 +107,7 @@ export class Consumer {
 	}
 
 	static {
-		makeConsumer = (scope, state) => new Consumer(scope, state);
+		makeConsumer = (state) => new Consumer(state);
 	}
 
 	/** Returns the next announcement. */
@@ -276,7 +268,8 @@ export class Broadcast {
 				return;
 			}
 
-			const announced = conn.announced(path);
+			const scope = Path.Pattern.subtree(path);
+			const announced = conn.announced(scope);
 			effect.cleanup(() => announced.close());
 
 			let current: broadcast.Consumer | undefined;
@@ -296,9 +289,9 @@ export class Broadcast {
 						const event = await Promise.race([effect.cancel, announced.next()]);
 						if (!event) break;
 
-						// Prefix-shaped claims covering this path (`asPrefix() === ""`). A literal
-						// PATTERN ad at the same path has `asPrefix() === undefined` and is skipped.
-						if (event.pattern.asPrefix() !== "") continue;
+						// Prefix-shaped claims covering this path clamp to its subtree. A literal
+						// PATTERN ad at the same path is not prefix-shaped and is skipped.
+						if (!event.pattern.equals(scope)) continue;
 
 						if (event.active) {
 							// A live subscription survives a redundant (re-)announce; only replace a dead one.
@@ -343,7 +336,8 @@ export class Broadcast {
 		// connection at all (and keeps resolving while one reconnects), and the
 		// identity-diffed announcements swap the handle on a republish.
 		// The scope is the path's subtree: the exact path plus everything beneath it.
-		const announced = origin.announced(new Path.Patterns([Path.Pattern.subtree(this.path)]));
+		const scope = Path.Pattern.subtree(this.path);
+		const announced = origin.announced(scope);
 		effect.cleanup(() => announced.close());
 
 		// Held open while the path is announced. A request resolves to the table's route when
@@ -368,9 +362,9 @@ export class Broadcast {
 				const event = await Promise.race([effect.cancel, announced.next()]);
 				if (!event) break;
 
-				// Prefix-shaped claims covering this path (`asPrefix() === ""`). A literal
-				// PATTERN ad at the same path has `asPrefix() === undefined` and is skipped.
-				if (event.pattern.asPrefix() !== "") continue;
+				// Prefix-shaped claims covering this path clamp to its subtree. A literal
+				// PATTERN ad at the same path is not prefix-shaped and is skipped.
+				if (!event.pattern.equals(scope)) continue;
 				live.set(event.active);
 			}
 

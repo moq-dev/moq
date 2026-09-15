@@ -262,14 +262,12 @@ export class Connection {
 	}
 
 	/**
-	 * Subscribe to broadcast announcements under an optional prefix, spanning reconnects
-	 * and URL switches: a switch retracts everything from the old relay's origin, then the
-	 * new one's arrivals stream in.
+	 * Subscribe to broadcast announcements under `scope` (a prefix-shaped pattern, default
+	 * everything), spanning reconnects and URL switches: a switch retracts everything from
+	 * the old relay's origin, then the new one's arrivals stream in.
 	 */
-	announced(prefix: Path.Valid = Path.empty()): Announce.Consumer {
-		// The origin speaks scopes; the intended prefix converts explicitly to its subtree.
-		const scope = new Path.Patterns([Path.Pattern.subtree(prefix)]);
-		const producer = new Announce.Producer(scope);
+	announced(scope: Path.Pattern = Path.Pattern.all()): Announce.Consumer {
+		const producer = new Announce.Producer();
 		const consumer = producer.consume();
 
 		// Closing the consumer closes the shared state, so stop appending after that.

@@ -8,8 +8,24 @@
 import type { Dispose, Getter } from "@moq/signals";
 import type { Announcer, Producer as BroadcastProducer } from "./broadcast.ts";
 import type { Frame, Consumer as GroupConsumer } from "./group.ts";
+import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
 import type { Groups, Producer, Request, Subscriber } from "./track.ts";
+
+/**
+ * The literal prefix a discovery scope covers: `foo` for `foo/**`, the empty path for `**`.
+ *
+ * Anything else (an exact `foo`, the empty pattern, a suffix, or any segment wildcard)
+ * throws rather than narrowing or widening the scope. Until general pattern matching
+ * lands, discovery filters by prefix.
+ */
+export function scopePrefix(scope: Path.Pattern): Path.Valid {
+	const prefix = scope.asPrefix();
+	if (prefix === undefined) {
+		throw new Error(`announced() only supports prefix-shaped patterns (foo/**), got "${scope.text}"`);
+	}
+	return Path.from(prefix);
+}
 
 /**
  * What a non-blocking group read found, which is everything the caller needs to decide what

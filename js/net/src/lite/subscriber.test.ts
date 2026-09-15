@@ -130,7 +130,7 @@ const PEER = HopSchema.parse(2n);
 
 test("a restart from the same publisher is a route change, not a republish", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
@@ -170,7 +170,7 @@ test("a restart from the same publisher is a route change, not a republish", asy
 
 test("a restart that re-prices the same publisher emits the new route", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
@@ -206,7 +206,7 @@ test("a restart that re-prices the same publisher emits the new route", async ()
 
 test("a lite-05 duplicate announce follows the same restart rule", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_05);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_05));
@@ -233,7 +233,7 @@ test("a lite-05 duplicate announce follows the same restart rule", async () => {
 // `unknown_publisher_restart_replaces` regression.
 test("a restart from an unidentified publisher replaces rather than reroutes", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	await send((w) => new AnnounceOk(UNKNOWN_HOP, 0).encode(w, Version.DRAFT_06));
@@ -347,7 +347,7 @@ test("an announce skipped as a reflected loop still holds its path", async () =>
 	// The subscriber's own origin, so a chain naming it reflects back through us.
 	const SELF = 1n;
 	const { subscriber, send, abortReason, sessionEnded, settle } = announceHarness(Version.DRAFT_06, SELF);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
@@ -389,7 +389,7 @@ test("an announce skipped as a reflected loop still holds its path", async () =>
 test("a restart replaces an announce that was skipped as a reflected loop", async () => {
 	const SELF = 1n;
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06, SELF);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
@@ -419,7 +419,7 @@ test("a restart replaces an announce that was skipped as a reflected loop", asyn
 test("retiring an id whose announce was skipped ends nothing", async () => {
 	const SELF = 1n;
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06, SELF);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
@@ -454,7 +454,7 @@ test("retiring an id whose announce was skipped ends nothing", async () => {
 
 test("a draft-02 initial announcement can still be retracted", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_02);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	// ANNOUNCE_INIT carries the initial set. These are advertisements like any other, so
@@ -472,7 +472,7 @@ test("a draft-02 initial announcement can still be retracted", async () => {
 test("a duplicate start is reported even when its own route reflects", async () => {
 	const SELF = 1n;
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06, SELF);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
@@ -506,7 +506,7 @@ test("a duplicate start is reported even when its own route reflects", async () 
 
 test("a draft-02 initial set naming a path twice is refused", async () => {
 	const { subscriber, send, abortReason, sessionEnded, settle } = announceHarness(Version.DRAFT_02);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	// One advertisement per path, and the initial set is advertisements. Two entries for
@@ -530,7 +530,7 @@ test("a draft-02 initial set naming a path twice is refused", async () => {
 test("a violation on a very long path still ends the session", async () => {
 	const SELF = 1n;
 	const { subscriber, send, sessionEnded, settle } = announceHarness(Version.DRAFT_06, SELF);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
@@ -557,7 +557,7 @@ test("a draft-04 duplicate start is a violation, not a restart", async () => {
 	// restart, is exempt. The Rust loop routes every other version through `start_announce`,
 	// which rejects it.
 	const { subscriber, send, sessionEnded, settle } = announceHarness(Version.DRAFT_04);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	const active: AnnounceBroadcast = { status: "active", suffix: Path.from("room"), hops: [PUBLISHER_A] };
@@ -574,7 +574,7 @@ test("a draft-04 duplicate start is a violation, not a restart", async () => {
 
 test("a draft-05 duplicate start is still a restart", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_05);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_05));
@@ -598,7 +598,7 @@ test("a draft-05 duplicate start is still a restart", async () => {
 
 test("literal pattern and prefix wire claims retain separate identities", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
 	await send((w) =>

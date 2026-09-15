@@ -6,7 +6,7 @@ import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { error, fromClose, ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
-import * as Path from "../path.ts";
+import type * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
 import { ControlStreamAdapter, NativeSession, type Session } from "./adapter.ts";
 import * as Cluster from "./cluster.ts";
@@ -177,13 +177,9 @@ export class Connection implements Established {
 		}
 	}
 
-	/**
-	 * Gets an announced reader for the specified prefix.
-	 * @param prefix - The prefix for announcements
-	 * @returns An Announced instance
-	 */
-	announced(prefix = Path.empty()): announce.Consumer {
-		return this.#subscriber.announced(prefix);
+	/** Gets an announced reader for `scope`; see {@link Established.announced}. */
+	announced(scope?: Path.Pattern): announce.Consumer {
+		return this.#subscriber.announced(scope);
 	}
 
 	/**
