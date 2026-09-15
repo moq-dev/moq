@@ -1793,16 +1793,28 @@ async fn run_source(
 					broadcast = %full,
 					"path already live with a different publisher; parking this source until it ends",
 				);
-				// Wait for the incumbent front to close, or for our own route to
-				// change: a new route observation earns another takeover attempt, and
-				// our source closing means giving up.
+				// Snapshot the local-publisher hold: a remote parked by it must retry
+				// when the hold releases (the local route unannounces or its last
+				// source detaches into linger), not just when the front closes, or
+				// the path stays dark despite an announced remote waiting.
+				let held = incumbent.read().holds_local_publisher();
+				// Wait for the incumbent front to close or release its hold, or for
+				// our own route to change: a new route observation earns another
+				// takeover attempt, and our source closing means giving up.
 				let update = kio::wait(|waiter| {
 					if let Poll::Ready(update) = source.poll_route_changed(waiter) {
 						return Poll::Ready(Some(update));
 					}
-					// Ready on either the closed flag or the channel itself dying;
-					// both mean the incumbent is gone.
-					match incumbent.poll(waiter, |s| if s.closed { Poll::Ready(()) } else { Poll::Pending }) {
+					// Ready on the closed flag, the channel itself dying (both mean
+					// the incumbent is gone), or the local-publisher hold changing
+					// shape so a parked remote gets another attempt.
+					match incumbent.poll(waiter, |s| {
+						if s.closed || s.holds_local_publisher() != held {
+							Poll::Ready(())
+						} else {
+							Poll::Pending
+						}
+					}) {
 						Poll::Ready(_) => Poll::Ready(None),
 						Poll::Pending => Poll::Pending,
 					}
@@ -1911,9 +1923,10 @@ enum Attach {
 	/// The path's live front belongs to a different original publisher and this
 	/// source may not take it: either the source is offline (so it would rank below
 	/// every route the front holds), it already spent its takeover attempt on this
-	/// route and lost, or its chain leads back through a peer the front is already
-	/// exposed to, making it a reflection rather than rival content. The caller
-	/// parks on the returned table until the front closes.
+	/// route and lost, its chain leads back through a peer the front is already
+	/// exposed to, making it a reflection rather than rival content, or the front
+	/// is held by a local publisher. The caller parks on the returned table until
+	/// the front closes or the local-publisher hold releases.
 	Parked(kio::Producer<FrontState>),
 }
 
@@ -5542,6 +5555,44 @@ mod tests {
 			.unwrap();
 		settle().await;
 		settle().await;
+		announced.assert_next_some("test");
+		assert_eq!(consumer.get_broadcast("test").unwrap().route().hops, echo);
+	}
+
+	/// A parked remote retries when the local-publisher hold releases without the
+	/// front closing. If the local route unannounces while its source stays open,
+	/// the hold is gone and the waiting announced remote must take the path,
+	/// otherwise the path stays dark despite an available source.
+	#[tokio::test]
+	async fn test_parked_remote_retries_when_local_unannounces() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+
+		let mut local = origin.create_broadcast("test", announce()).unwrap();
+		settle().await;
+		announced.assert_next_some("test");
+
+		// Parked by the local hold: the echo of our own announce.
+		let echo = OriginList::try_from(vec![Origin::UNKNOWN]).unwrap();
+		let _remote = origin
+			.create_broadcast("test", announce().with_hops(echo.clone()))
+			.unwrap();
+		settle().await;
+		settle().await;
+		announced.assert_next_wait();
+
+		// The local source stays open but stops announcing: cached content
+		// reachable by exact path is not a claim on the path.
+		local.set_route(broadcast::Route::new()).unwrap();
+		settle().await;
+		settle().await;
+
+		// The parked remote takes over: unannounce of the local front, then an
+		// announce for the remote one.
+		announced.assert_next_none("test");
 		announced.assert_next_some("test");
 		assert_eq!(consumer.get_broadcast("test").unwrap().route().hops, echo);
 	}
