@@ -487,6 +487,28 @@ async fn http_routes_hold_a_lease() {
 	.expect("publisher connect timeout")
 	.expect("publisher connect failed");
 
+	// Wait until the announcement reaches the relay before asking over HTTP:
+	// the /announced handler only reports what has arrived so far.
+	let sub_origin = moq_tokio::origin::spawn(Hop::random());
+	let mut announcements = sub_origin.consume().announced();
+	let _sub_session = tokio::time::timeout(
+		TIMEOUT,
+		client()
+			.with_subscriber(sub_origin)
+			.with_reconnect(false)
+			.connect(room_url("ws", port))
+			.established(),
+	)
+	.await
+	.expect("subscriber connect timeout")
+	.expect("subscriber connect failed");
+	let update = tokio::time::timeout(TIMEOUT, announcements.next())
+		.await
+		.expect("announcement timeout")
+		.expect("origin closed");
+	assert_eq!(update.pattern.as_prefix().expect("prefix announcement"), "test");
+	assert!(update.active, "expected announce, got retraction");
+
 	let http = reqwest::Client::new();
 	let announced = http
 		.get(format!("http://127.0.0.1:{port}/announced/room?jwt=token"))
