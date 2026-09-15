@@ -8,7 +8,7 @@
 use std::{net::TcpListener, time::Duration};
 
 use moq_auth::{Algorithm, Key, KeyId};
-use moq_relay::{AuthConfig, Cluster, ClusterOptions, Connection, Web, WebConfig};
+use moq_relay::{Connection, auth, cluster, web};
 use moq_tokio::moq_net::{self, Hop};
 use wiremock::matchers::{method, path as path_matcher, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -32,8 +32,8 @@ async fn mount_valid_key(server: &MockServer, key: &Key) {
 }
 
 /// An auth stack on the stub auth API with revalidation enabled.
-async fn build_api_auth(api: &MockServer) -> moq_relay::Auth {
-	let mut auth_config = AuthConfig::default();
+async fn build_api_auth(api: &MockServer) -> moq_relay::auth::Auth {
+	let mut auth_config = auth::Config::default();
 	auth_config.auth_api = Some(format!("{}/auth", api.uri()));
 	auth_config
 		.init(&moq_tokio::tls::Connect::default())
@@ -43,10 +43,10 @@ async fn build_api_auth(api: &MockServer) -> moq_relay::Auth {
 
 /// An auth stack verifying JWTs with `key` alone. The key file is re-read per
 /// connection, so the returned guard must outlive the relay.
-async fn build_auth(key: &Key) -> (moq_relay::Auth, tempfile::NamedTempFile) {
+async fn build_auth(key: &Key) -> (moq_relay::auth::Auth, tempfile::NamedTempFile) {
 	let key_file = tempfile::NamedTempFile::new().expect("temp key file");
 	key.to_file(key_file.path()).expect("write key");
-	let mut auth_config = AuthConfig::default();
+	let mut auth_config = auth::Config::default();
 	auth_config.key = Some(key_file.path().to_string_lossy().into_owned());
 	let auth = auth_config
 		.init(&moq_tokio::tls::Connect::default())
@@ -69,7 +69,7 @@ async fn wait_for_listener(port: u16) {
 
 /// Stand up the relay's accept loop on a plain-TCP qmux listener and return the
 /// port plus an abort handle.
-async fn spawn_relay(auth: moq_relay::Auth) -> (u16, tokio::task::JoinHandle<()>) {
+async fn spawn_relay(auth: moq_relay::auth::Auth) -> (u16, tokio::task::JoinHandle<()>) {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 	let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
@@ -80,7 +80,7 @@ async fn spawn_relay(auth: moq_relay::Auth) -> (u16, tokio::task::JoinHandle<()>
 	config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
 	let server = config.init(Default::default()).expect("server init");
 	let mut server = server.listen().await.expect("listen");
-	let cluster = Cluster::new(ClusterOptions::default()).expect("cluster init");
+	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
 
 	let handle = tokio::spawn(async move {
 		let mut id = 0;
@@ -100,14 +100,14 @@ async fn spawn_relay(auth: moq_relay::Auth) -> (u16, tokio::task::JoinHandle<()>
 
 /// Stand up the relay's axum web stack with WebSocket enabled and return the
 /// port plus an abort handle.
-async fn spawn_ws_relay(auth: moq_relay::Auth) -> (u16, tokio::task::JoinHandle<()>) {
+async fn spawn_ws_relay(auth: moq_relay::auth::Auth) -> (u16, tokio::task::JoinHandle<()>) {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 	let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
 	let port = probe.local_addr().expect("local addr").port();
 	drop(probe);
 
-	let cluster = Cluster::new(ClusterOptions::default()).expect("cluster init");
+	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
 
 	// Stream listeners bind lazily, so this server never opens a socket; only
 	// its certificate handle is used.
@@ -119,10 +119,10 @@ async fn spawn_ws_relay(auth: moq_relay::Auth) -> (u16, tokio::task::JoinHandle<
 		.expect("server init")
 		.certificates();
 
-	let mut web_config = WebConfig::default();
+	let mut web_config = web::Config::default();
 	web_config.ws = true;
 	web_config.http.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
-	let web = Web::new(auth, cluster, certificates, web_config);
+	let web = web::Web::new(auth, cluster, certificates, web_config);
 
 	let handle = tokio::spawn(async move {
 		let _ = web.run().await;

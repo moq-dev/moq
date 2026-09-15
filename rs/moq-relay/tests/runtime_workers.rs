@@ -9,7 +9,7 @@
 use std::net::{SocketAddr, UdpSocket};
 use std::time::Duration;
 
-use moq_relay::{Config, PublicConfig, Relay};
+use moq_relay::{Config, Relay, auth};
 use moq_tokio::moq_net::{self, Hop};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -51,7 +51,7 @@ fn worker_config(cert: &std::path::Path, key: &std::path::Path, port: u16, worke
 	config.runtime.workers = Some(workers);
 	config.runtime.pin = false;
 	#[allow(deprecated)]
-	let public = PublicConfig::Simple(vec![String::new()]);
+	let public = auth::Public::Simple(vec![String::new()]);
 	config.auth.public = Some(public);
 	config
 }

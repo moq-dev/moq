@@ -1,4 +1,4 @@
-use crate::{Auth, AuthError, AuthParams, AuthToken, Cluster};
+use crate::{auth, cluster};
 
 use axum::http;
 use moq_tokio::Request;
@@ -12,8 +12,8 @@ struct StatusError {
 	source: anyhow::Error,
 }
 
-impl From<AuthError> for StatusError {
-	fn from(err: AuthError) -> Self {
+impl From<auth::Error> for StatusError {
+	fn from(err: auth::Error) -> Self {
 		Self {
 			status: (&err).into(),
 			source: err.into(),
@@ -32,24 +32,24 @@ pub struct Connection {
 	/// The raw QUIC/WebTransport request to accept or reject.
 	request: Request,
 	/// The cluster state used to resolve origins.
-	cluster: Cluster,
+	cluster: cluster::Cluster,
 	/// The authenticator used to verify credentials.
-	auth: Auth,
+	auth: auth::Auth,
 	/// Relay-wide shutdown broadcast: when it fires, the session is drained with
 	/// a GOAWAY instead of being cut off.
-	shutdown: crate::Shutdown,
+	shutdown: crate::shutdown::Observer,
 }
 
 impl Connection {
 	/// Wrap an accepted request, resolving origins through `cluster` and
 	/// credentials through `auth`.
-	pub fn new(request: Request, cluster: Cluster, auth: Auth) -> Self {
+	pub fn new(request: Request, cluster: cluster::Cluster, auth: auth::Auth) -> Self {
 		Self {
 			id: 0,
 			request,
 			cluster,
 			auth,
-			shutdown: crate::Shutdown::disabled(),
+			shutdown: crate::shutdown::Observer::disabled(),
 		}
 	}
 
@@ -61,7 +61,7 @@ impl Connection {
 
 	/// Attach the relay-wide shutdown broadcast so the session drains with a
 	/// GOAWAY when it fires. Without it the session is cut off on process exit.
-	pub fn with_shutdown(mut self, shutdown: crate::Shutdown) -> Self {
+	pub fn with_shutdown(mut self, shutdown: crate::shutdown::Observer) -> Self {
 		self.shutdown = shutdown;
 		self
 	}
@@ -110,7 +110,7 @@ impl Connection {
 		supervise(&self.auth, session, token, self.shutdown.clone()).await
 	}
 
-	/// Resolve an [`AuthToken`] for this connection. Any failure is returned as a
+	/// Resolve an [`auth::Token`] for this connection. Any failure is returned as a
 	/// [`StatusError`] so [`run`] can close the request with the mapped HTTP
 	/// status exactly once.
 	///
@@ -123,12 +123,12 @@ impl Connection {
 	///   moq-lite-05 SETUP. A no-JWT connection resolves anonymous/public access
 	///   for its path exactly like a tokenless QUIC client (`--auth-public`).
 	///   Unix peer-credential gating happens earlier, in the listener.
-	async fn authenticate(&self) -> Result<AuthToken, StatusError> {
+	async fn authenticate(&self) -> Result<auth::Token, StatusError> {
 		// A LAN mesh dial is marked by its path, not a JWT or client certificate.
 		// Checked first so a `/.cluster` request is never routed through public
 		// prefixes, and a relay without LAN discovery refuses it instead of
 		// treating the path as a broadcast root.
-		if Cluster::is_lan_path(self.request.path()) {
+		if cluster::Cluster::is_lan_path(self.request.path()) {
 			return self.authenticate_lan();
 		}
 
@@ -155,7 +155,7 @@ impl Connection {
 				params
 			}
 			// URL-less stream transports: path + `?jwt=` ride the SETUP.
-			None => AuthParams::from_path_query(self.request.path(), self.request.query()),
+			None => auth::Params::from_path_query(self.request.path(), self.request.query()),
 		};
 		params.transport = Some(transport);
 
@@ -163,8 +163,8 @@ impl Connection {
 	}
 
 	/// Authorize a `/.cluster/<credential>` dial against the live LAN advertisement.
-	fn authenticate_lan(&self) -> Result<AuthToken, StatusError> {
-		let Some(presented) = Cluster::lan_credential(self.request.path()) else {
+	fn authenticate_lan(&self) -> Result<auth::Token, StatusError> {
+		let Some(presented) = cluster::Cluster::lan_credential(self.request.path()) else {
 			return Err(StatusError {
 				status: http::StatusCode::FORBIDDEN,
 				source: anyhow::anyhow!("LAN peer did not present a membership proof"),
@@ -209,8 +209,8 @@ pub(crate) struct Grants {
 /// instead of being accepted and then silently carrying no media (the bug
 /// that motivated the role hint).
 pub(crate) fn authorize(
-	cluster: &Cluster,
-	token: &AuthToken,
+	cluster: &cluster::Cluster,
+	token: &auth::Token,
 	role: Option<moq_net::Role>,
 	transport: &dyn std::fmt::Display,
 ) -> anyhow::Result<Grants> {
@@ -279,10 +279,10 @@ pub(crate) fn authorize(
 /// The session handle is `Send + Sync` whatever transport carries it, so this
 /// runs on the shared runtime even for sessions a pinned QUIC worker drives.
 pub(crate) async fn supervise(
-	auth: &Auth,
+	auth: &auth::Auth,
 	session: moq_net::Session,
-	token: AuthToken,
-	mut shutdown: crate::Shutdown,
+	token: auth::Token,
+	mut shutdown: crate::shutdown::Observer,
 ) -> anyhow::Result<()> {
 	tokio::select! {
 		err = session.closed() => Err(err.into()),

@@ -1,6 +1,6 @@
 //! Internal (ops) listener.
 //!
-//! A tiny plain-HTTP server, separate from the customer-facing [`Web`](crate::Web)
+//! A tiny plain-HTTP server, separate from the customer-facing [`Web`](crate::web::Web)
 //! server, for endpoints that should never touch the public port. It's a
 //! trusted-plane surface named for WHO may reach it, not for any single
 //! endpoint, so it's the home for operational endpoints in general.
@@ -22,7 +22,7 @@
 //!
 //! Everything here is unauthenticated, so bind it only to a trusted plane -
 //! loopback for a co-located scraper/agent, or a private overlay address; see
-//! [`InternalConfig::listen`]. Unset by default (opt-in). Any future endpoint
+//! [`Config::listen`]. Unset by default (opt-in). Any future endpoint
 //! added here inherits that "unauthenticated, trusted-plane-only" contract; a
 //! mutating/control endpoint would need its own auth and doesn't belong on an
 //! unauthenticated bind as-is.
@@ -58,7 +58,7 @@ type UringWorker = std::convert::Infallible;
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
-pub struct InternalConfig {
+pub struct Config {
 	/// Socket address for the internal listener (plain HTTP), serving the ops
 	/// endpoints (`/metrics`, `/health`, and `/nodes`).
 	///
@@ -80,7 +80,7 @@ pub struct InternalConfig {
 /// The internal (ops) service: a plain-HTTP server over the node's stats
 /// registry ([`moq_net::stats::Registry`]).
 pub struct Internal {
-	config: InternalConfig,
+	config: Config,
 	stats: moq_net::stats::Registry,
 	nodes: Option<crate::nodes::Nodes>,
 	health: moq_tokio::accept::Health,
@@ -98,7 +98,7 @@ struct InternalState {
 
 impl Internal {
 	/// Create the service from its config and the node's stats registry.
-	pub fn new(config: InternalConfig, stats: moq_net::stats::Registry) -> Self {
+	pub fn new(config: Config, stats: moq_net::stats::Registry) -> Self {
 		// This listener registers itself: it is the one rendering the counters, and
 		// its own are evidence about the node (the resources it can run out of are
 		// process-wide) rather than about this socket. Only when it will actually run,
@@ -123,7 +123,7 @@ impl Internal {
 	/// Report other listeners' accept health at `/metrics`.
 	///
 	/// Takes an iterator so the accessors feed it directly, however many listeners
-	/// they turn out to describe: [`Web::accept_health`](crate::Web::accept_health)
+	/// they turn out to describe: [`Web::accept_health`](crate::web::Web::accept_health)
 	/// yields an `Option`, [`moq_tokio::Server::accept_health`] a `Vec`, and an
 	/// embedder can pass its own. Register every socket on the node, so a scrape
 	/// covers the one that actually went quiet.
@@ -168,7 +168,7 @@ impl Internal {
 	}
 
 	/// Attach the relay cluster used to serve the `/nodes` topology snapshot.
-	pub fn with_cluster(mut self, cluster: &crate::Cluster) -> Self {
+	pub fn with_cluster(mut self, cluster: &crate::cluster::Cluster) -> Self {
 		self.nodes = Some(cluster.nodes.clone());
 		self
 	}
@@ -193,9 +193,9 @@ impl Internal {
 			})
 	}
 
-	/// Serve `app` on [`InternalConfig::listen`] until it shuts down.
+	/// Serve `app` on [`Config::listen`] until it shuts down.
 	///
-	/// The mirror of [`Web::serve`](crate::Web::serve): the caller builds `app`
+	/// The mirror of [`Web::serve`](crate::web::Web::serve): the caller builds `app`
 	/// from [`routes`](Self::routes) plus whatever extra ops routes it merged in,
 	/// and this owns the listener. An embedder that binds the socket itself
 	/// instead would fork both the socket options and the disabled-listener
@@ -231,7 +231,7 @@ impl Internal {
 }
 
 /// Liveness probe mirror for the internal listener. Always `200 ok`. The
-/// customer-facing [`Web`](crate::Web) server serves its own public `/health`;
+/// customer-facing [`Web`](crate::web::Web) server serves its own public `/health`;
 /// this one lets an internal prober check the process over the trusted plane
 /// without touching the public port.
 async fn serve_health() -> Response {
@@ -570,9 +570,9 @@ fn render_uring(_out: &mut String, _workers: &[UringWorker]) {}
 mod tests {
 	use super::*;
 
-	/// An `InternalConfig` whose listener is enabled, so `Internal` registers its own.
-	fn listening() -> InternalConfig {
-		InternalConfig {
+	/// An `Config` whose listener is enabled, so `Internal` registers its own.
+	fn listening() -> Config {
+		Config {
 			listen: Some("127.0.0.1:0".parse().unwrap()),
 		}
 	}
@@ -586,7 +586,7 @@ mod tests {
 	/// Both halves are silent in exactly the way that reads as healthy.
 	#[test]
 	fn absent_listeners_are_not_reported_as_healthy() {
-		let disabled = Internal::new(InternalConfig::default(), moq_net::stats::Registry::disabled());
+		let disabled = Internal::new(Config::default(), moq_net::stats::Registry::disabled());
 		let body = render_metrics(
 			&moq_net::stats::Registry::disabled().snapshot(),
 			&disabled.listeners,
@@ -754,10 +754,7 @@ mod tests {
 			.local_addr()
 			.expect("probe addr");
 
-		let internal = Internal::new(
-			InternalConfig { listen: Some(listen) },
-			moq_net::stats::Registry::disabled(),
-		);
+		let internal = Internal::new(Config { listen: Some(listen) }, moq_net::stats::Registry::disabled());
 		let app = internal
 			.routes()
 			.merge(Router::new().route("/embedder", get(async || "embedded\n")));
@@ -795,7 +792,7 @@ mod tests {
 	/// an arm immediately and tearing the rest of the process down with it.
 	#[tokio::test(start_paused = true)]
 	async fn serve_stays_pending_without_a_listen_address() {
-		let internal = Internal::new(InternalConfig::default(), moq_net::stats::Registry::disabled());
+		let internal = Internal::new(Config::default(), moq_net::stats::Registry::disabled());
 		let app = internal.routes();
 
 		let elapsed = tokio::time::timeout(std::time::Duration::from_secs(60), internal.serve(app)).await;

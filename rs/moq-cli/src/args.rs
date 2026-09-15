@@ -353,7 +353,7 @@ pub struct MoqSide {
 	/// `moq-relay`, so a CLI process and a relay on the same network mesh
 	/// through one implementation.
 	#[usage(flatten)]
-	pub cluster: moq_relay::ClusterConfig,
+	pub cluster: moq_relay::cluster::Config,
 }
 
 impl MoqSide {
@@ -371,7 +371,7 @@ impl MoqSide {
 	/// The cluster this process publishes and subscribes on. Built once; the
 	/// origin is its origin. `--hop` fills `--cluster-id` when the latter is
 	/// unset; they must agree when both are set.
-	pub fn cluster(&self) -> anyhow::Result<moq_relay::Cluster> {
+	pub fn cluster(&self) -> anyhow::Result<moq_relay::cluster::Cluster> {
 		let mut config = self.cluster.clone();
 		match (config.id, self.hop) {
 			(None, Some(hop)) => config.id = Some(hop),
@@ -380,7 +380,7 @@ impl MoqSide {
 			}
 			_ => {}
 		}
-		moq_relay::Cluster::new(moq_relay::ClusterOptions::new(config))
+		moq_relay::cluster::Cluster::new(moq_relay::cluster::Options::new(config))
 	}
 
 	/// Whether `--cluster-lan` asked this process to mesh over the LAN.
@@ -431,7 +431,7 @@ impl MoqSide {
 		{
 			self.cluster.lan.validate()?;
 			if self.lan() {
-				moq_relay::Cluster::validate_lan_versions(&self.client, &self.server_config())?;
+				moq_relay::cluster::Cluster::validate_lan_versions(&self.client, &self.server_config())?;
 			}
 		}
 		Ok(())

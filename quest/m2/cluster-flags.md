@@ -38,7 +38,7 @@ Every rename is user-facing, so old spellings stay as hidden aliases per the
 deprecation rules: no `--help` entry, no "deprecated, use X" note, and `/doc`
 examples updated to the new names only. The flags are TOML keys too, so this
 is a config-file migration as well as a CLI one, and moq-cli already nests
-`ClusterConfig` so the same flags are read by both binaries. Grep both binary
+`cluster::Config` so the same flags are read by both binaries. Grep both binary
 names repo-wide and reconcile every sample invocation under `doc/bin/`,
 `doc/setup/`, and `demo/` against `--help`.
 

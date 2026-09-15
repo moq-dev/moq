@@ -14,13 +14,13 @@ use axum::{
 use moq_net::origin;
 use moq_net::stats::Session;
 
-use crate::{Auth, AuthParams, web::MtlsPeer, web::WebState, web::landing_response};
+use crate::{auth, web, web::WebState, web::landing_response};
 
 pub(crate) async fn serve_ws(
 	ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 	OriginalUri(uri): OriginalUri,
 	headers: HeaderMap,
-	mtls: Option<Extension<MtlsPeer>>,
+	mtls: Option<Extension<web::MtlsPeer>>,
 	socket_stats: Option<Extension<crate::web::SocketStats>>,
 	Extension(versions): Extension<moq_net::Versions>,
 	State(state): State<Arc<WebState>>,
@@ -83,7 +83,7 @@ pub(crate) async fn serve_ws(
 }
 
 /// Apply the same host and path authentication routing used by native WebTransport.
-fn request_auth_params(auth: &Auth, host: &str, uri: &Uri) -> Result<AuthParams, StatusCode> {
+fn request_auth_params(auth: &auth::Auth, host: &str, uri: &Uri) -> Result<auth::Params, StatusCode> {
 	let path = uri.path_and_query().ok_or(StatusCode::BAD_REQUEST)?;
 	let url = url::Url::parse(&format!("https://{host}{path}")).map_err(|_| StatusCode::BAD_REQUEST)?;
 	Ok(auth.params_from_url(&url))
@@ -96,7 +96,7 @@ struct SessionInputs {
 	publish: Option<origin::Producer>,
 	subscribe: Option<origin::Producer>,
 	stats: Session,
-	shutdown: crate::Shutdown,
+	shutdown: crate::shutdown::Observer,
 	/// The kernel's view of the socket under the upgrade, captured at accept time.
 	socket_stats: Option<crate::web::SocketStats>,
 }
@@ -106,7 +106,7 @@ struct SessionInputs {
 async fn handle_socket<T>(
 	socket: T,
 	session: SessionInputs,
-	expired: impl Future<Output = crate::Expired>,
+	expired: impl Future<Output = crate::auth::Expired>,
 ) -> anyhow::Result<()>
 where
 	T: futures::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
@@ -376,7 +376,7 @@ fn tungstenite_text_to_axum(text: tungstenite::Utf8Bytes) -> axum::extract::ws::
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::AuthConfig;
+	use crate::auth;
 	use axum::{Router, extract::WebSocketUpgrade, routing::any};
 	use futures::SinkExt;
 	use std::{io, sync::atomic::AtomicBool, time::Duration};
@@ -471,12 +471,12 @@ mod tests {
 
 	#[tokio::test]
 	async fn websocket_auth_applies_subdomain_routing() {
-		let config: AuthConfig = serde_json::from_value(serde_json::json!({
+		let config: auth::Config = serde_json::from_value(serde_json::json!({
 			"domains": ["cdn.moq.pro"],
 			"public": "viewer"
 		}))
 		.expect("parse auth config");
-		let auth = Auth::new(config).await.expect("build auth");
+		let auth = auth::Auth::new(config).await.expect("build auth");
 		for uri in ["/bbb.hang?jwt=token", "https://demo.cdn.moq.pro/bbb.hang?jwt=token"] {
 			let uri: Uri = uri.parse().expect("parse URI");
 			let params = request_auth_params(&auth, "demo.cdn.moq.pro", &uri).expect("build auth params");
@@ -912,7 +912,7 @@ mod tests {
 			publish: None,
 			subscribe: None,
 			stats: Session::default(),
-			shutdown: crate::Shutdown::disabled(),
+			shutdown: crate::shutdown::Observer::disabled(),
 			// No descriptor to hand over: this drives the transport directly rather
 			// than through an accepted socket.
 			socket_stats: None,
@@ -920,7 +920,7 @@ mod tests {
 		let server = tokio::spawn(handle_socket(
 			Pipe::new(server_incoming, server_to_client, frozen.clone()),
 			session,
-			std::future::pending::<crate::Expired>(),
+			std::future::pending::<crate::auth::Expired>(),
 		));
 
 		// A real qmux peer, so the transport handshake completes and its 10s

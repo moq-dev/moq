@@ -10,25 +10,25 @@
 //! which keeps the listeners, workers, and shutdown joins. `main.rs` is a thin
 //! wrapper over the two.
 
-mod auth;
-mod cache;
-mod cluster;
+pub mod auth;
+pub mod cache;
+pub mod cluster;
 mod config;
 mod connection;
 mod http_client;
-mod internal;
+pub mod internal;
 mod listener;
 mod nodes;
 mod relay;
-mod runtime;
+pub mod runtime;
 mod settings;
-mod shutdown;
-mod stats;
+pub mod shutdown;
+pub mod stats;
 #[cfg(test)]
 mod test_env;
 #[cfg(all(target_os = "linux", feature = "_uring"))]
 pub mod uring;
-mod web;
+pub mod web;
 #[cfg(feature = "websocket")]
 mod websocket;
 
@@ -47,14 +47,6 @@ fn configured_tier(label: Option<String>) -> moq_net::stats::Tier {
 	label.map(moq_net::stats::Tier::new).unwrap_or_default()
 }
 
-pub use auth::*;
-pub use cache::*;
-pub use cluster::*;
 pub use config::*;
 pub use connection::*;
-pub use internal::*;
 pub use relay::*;
-pub use runtime::*;
-pub use shutdown::*;
-pub use stats::*;
-pub use web::*;

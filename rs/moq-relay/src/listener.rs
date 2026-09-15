@@ -1,4 +1,4 @@
-//! The TCP listener under [`Web`](crate::Web) and [`Internal`](crate::Internal).
+//! The TCP listener under [`Web`](crate::web::Web) and [`Internal`](crate::internal::Internal).
 //!
 //! `axum_server` owns the serve loop (TLS, HTTP version negotiation, WebSocket
 //! upgrades, graceful shutdown), and its loop reacts to a failed `accept(2)` by

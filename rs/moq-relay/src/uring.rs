@@ -21,7 +21,7 @@ use std::task::Poll;
 
 use anyhow::Context as _;
 
-use crate::{Auth, AuthParams, Cluster, Shutdown};
+use crate::{auth, cluster, shutdown};
 
 /// One member's bound socket and its slot in the steered group.
 struct Member {
@@ -62,9 +62,9 @@ impl Stop {
 /// Everything a worker needs to serve a connection, cloned per thread.
 #[derive(Clone)]
 struct Serve {
-	cluster: Cluster,
-	auth: Auth,
-	shutdown: Shutdown,
+	cluster: cluster::Cluster,
+	auth: auth::Auth,
+	shutdown: shutdown::Observer,
 	/// The shared runtime, which owns authentication (the auth API's HTTP
 	/// client needs its reactor) and session supervision.
 	tokio: tokio::runtime::Handle,
@@ -293,7 +293,12 @@ impl Workers {
 	/// authentication and session supervision. Returns once every worker is
 	/// serving; a worker that cannot start (an old kernel, a ring failure) is
 	/// an error here rather than a thread that quietly died.
-	pub fn serve(&mut self, cluster: Cluster, auth: Auth, shutdown: Shutdown) -> anyhow::Result<()> {
+	pub fn serve(
+		&mut self,
+		cluster: cluster::Cluster,
+		auth: auth::Auth,
+		shutdown: shutdown::Observer,
+	) -> anyhow::Result<()> {
 		let serve = Serve {
 			cluster,
 			auth,
@@ -658,8 +663,8 @@ async fn serve_connection(
 			setup.split_once('?').map(|(path, _)| path).unwrap_or(setup).to_string()
 		}
 	};
-	let token = if Cluster::is_lan_path(&path) {
-		match Cluster::lan_credential(&path) {
+	let token = if cluster::Cluster::is_lan_path(&path) {
+		match cluster::Cluster::lan_credential(&path) {
 			Some(presented) => match serve.cluster.verify_lan_credential(presented) {
 				Some(true) => serve.cluster.lan_peer_token(),
 				Some(false) => {
@@ -685,7 +690,7 @@ async fn serve_connection(
 					Some((path, query)) => (path, Some(query)),
 					None => (setup, None),
 				};
-				AuthParams::from_path_query(path, query)
+				auth::Params::from_path_query(path, query)
 			}
 		};
 		params.transport = Some(moq_tokio::Transport::Quic);

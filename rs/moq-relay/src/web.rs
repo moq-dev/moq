@@ -27,23 +27,23 @@ use tokio_rustls::server::TlsStream;
 use tower_http::cors::{Any, CorsLayer};
 use tower_service::Service;
 
-use crate::{Auth, AuthParams, Cluster};
+use crate::{auth, cluster};
 
 /// Configuration for the HTTP/HTTPS web server.
 #[derive(usage::Args, Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
-pub struct WebConfig {
+pub struct Config {
 	/// Plain HTTP listener settings.
 	#[usage(flatten)]
 	#[serde(default)]
-	pub http: HttpConfig,
+	pub http: Http,
 
 	/// HTTPS listener settings with TLS.
 	#[usage(flatten)]
 	#[serde(default)]
-	pub https: HttpsConfig,
+	pub https: Https,
 
 	/// If true (default), expose a WebTransport compatible WebSocket polyfill.
 	#[usage(
@@ -56,17 +56,17 @@ pub struct WebConfig {
 	pub ws: bool,
 }
 
-impl Default for WebConfig {
+impl Default for Config {
 	fn default() -> Self {
 		Self {
-			http: HttpConfig::default(),
-			https: HttpsConfig::default(),
+			http: Http::default(),
+			https: Https::default(),
 			ws: true,
 		}
 	}
 }
 
-impl WebConfig {
+impl Config {
 	/// Whether the WebSocket polyfill is served.
 	pub fn resolved_ws(&self) -> bool {
 		self.ws
@@ -78,7 +78,7 @@ impl WebConfig {
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
-pub struct HttpConfig {
+pub struct Http {
 	/// Socket address to bind the HTTP listener to.
 	#[usage(
 		long = "web-http-listen",
@@ -95,7 +95,7 @@ pub struct HttpConfig {
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
-pub struct HttpsConfig {
+pub struct Https {
 	/// Socket address to bind the HTTPS listener to.
 	#[usage(
 		long = "web-https-listen",
@@ -160,9 +160,9 @@ pub struct HttpsConfig {
 /// build a [`Web`] from its parts via [`Web::new`] rather than constructing this.
 pub(crate) struct WebState {
 	/// The authenticator for verifying incoming requests.
-	pub(crate) auth: Auth,
+	pub(crate) auth: auth::Auth,
 	/// The cluster state for resolving origins.
-	pub(crate) cluster: Cluster,
+	pub(crate) cluster: cluster::Cluster,
 	/// TLS certificate information served at `/certificate.sha256`.
 	pub(crate) certificates: moq_tokio::tls::Certificates,
 	/// Monotonically increasing connection counter for WebSocket sessions.
@@ -171,13 +171,13 @@ pub(crate) struct WebState {
 	/// Relay-wide shutdown broadcast; WebSocket sessions drain with a GOAWAY
 	/// when it fires. Defaults to a handle that never fires.
 	#[cfg_attr(not(feature = "websocket"), allow(dead_code))]
-	pub(crate) shutdown: crate::Shutdown,
+	pub(crate) shutdown: crate::shutdown::Observer,
 }
 
 /// Run a HTTP server using Axum
 pub struct Web {
 	state: Arc<WebState>,
-	config: WebConfig,
+	config: Config,
 	versions: moq_net::Versions,
 	health: moq_tokio::accept::Health,
 }
@@ -186,13 +186,18 @@ impl Web {
 	/// Build a web server from its parts. `certificates` is the relay's TLS
 	/// certificate handle (e.g. `server.certificates()`), whose fingerprints are
 	/// served at `/certificate.sha256`.
-	pub fn new(auth: Auth, cluster: Cluster, certificates: moq_tokio::tls::Certificates, config: WebConfig) -> Self {
+	pub fn new(
+		auth: auth::Auth,
+		cluster: cluster::Cluster,
+		certificates: moq_tokio::tls::Certificates,
+		config: Config,
+	) -> Self {
 		let state = Arc::new(WebState {
 			auth,
 			cluster,
 			certificates,
 			conn_id: AtomicU64::new(0),
-			shutdown: crate::Shutdown::disabled(),
+			shutdown: crate::shutdown::Observer::disabled(),
 		});
 		Self {
 			state,
@@ -231,7 +236,7 @@ impl Web {
 
 	/// Attach the relay-wide shutdown broadcast so WebSocket sessions drain with
 	/// a GOAWAY when it fires. Without it they are cut off on process exit.
-	pub fn with_shutdown(mut self, shutdown: crate::Shutdown) -> Self {
+	pub fn with_shutdown(mut self, shutdown: crate::shutdown::Observer) -> Self {
 		let state = Arc::get_mut(&mut self.state).expect("with_shutdown called after routes were built");
 		state.shutdown = shutdown;
 		self
@@ -244,7 +249,7 @@ impl Web {
 	///
 	/// This is the public-facing router (customer media routes plus a liveness
 	/// probe). `/metrics` is deliberately NOT here: node traffic counters ride
-	/// the separate internal listener ([`Internal`](crate::Internal)) so they're
+	/// the separate internal listener ([`Internal`](crate::internal::Internal)) so they're
 	/// never exposed on the public listener.
 	///
 	/// Includes the WebSocket polyfill catch-all (`/{*path}`, when
@@ -440,7 +445,7 @@ pub(crate) struct SocketStats(std::convert::Infallible);
 /// Marker inserted as a request extension after HTTPS mTLS verifies a client certificate.
 ///
 /// Embedded routes can extract `Option<Extension<MtlsPeer>>` to mirror the
-/// built-in relay handlers, then call [`Auth::verify_mtls`] with their route
+/// built-in relay handlers, then call [`auth::Auth::verify_mtls`] with their route
 /// path when the marker is present.
 #[derive(Clone, Debug)]
 pub struct MtlsPeer;
@@ -696,7 +701,7 @@ impl<'de> serde::Deserialize<'de> for FetchGroup {
 	}
 }
 
-/// The host this request was addressed to, which `AuthApiMode::Proxy` forwards so
+/// The host this request was addressed to, which `auth::ApiMode::Proxy` forwards so
 /// the endpoint can do its own routing. These handlers build their params from a
 /// path rather than a URL, so it has to come off the request headers.
 fn request_host(uri: &http::Uri, headers: &http::HeaderMap) -> Option<String> {
@@ -732,7 +737,7 @@ async fn serve_announced(
 		None => String::new(),
 	};
 
-	let params = AuthParams {
+	let params = auth::Params {
 		path: prefix,
 		host: request_host(&uri, &headers),
 		jwt: query.jwt,
@@ -784,7 +789,7 @@ async fn serve_fetch(
 		return Err(StatusCode::BAD_REQUEST.into());
 	}
 
-	let auth = AuthParams {
+	let auth = auth::Params {
 		path: path.join("/"),
 		host: request_host(&uri, &headers),
 		jwt: params.auth.jwt,
@@ -1263,7 +1268,7 @@ mod tests {
 		let (ca, cert, key) = make_certs(&dir);
 		let (http, https) = free_ports();
 
-		let mut config = WebConfig::default();
+		let mut config = Config::default();
 		config.http.listen = Some(format!("127.0.0.1:{http}").parse().unwrap());
 		config.https.listen = Some(format!("127.0.0.1:{https}").parse().unwrap());
 		config.https.cert = vec![cert.clone()];
@@ -1271,13 +1276,13 @@ mod tests {
 
 		// The probed route is the test's own, so auth never runs; it just has to be
 		// configured with something for `Web` to build.
-		let mut auth_config = crate::AuthConfig::default();
-		auth_config.public = Some(crate::PublicConfig::Detailed(crate::PublicDetailed {
+		let mut auth_config = crate::auth::Config::default();
+		auth_config.public = Some(crate::auth::Public::Detailed(crate::auth::PublicDetailed {
 			subscribe: vec![String::new()],
 			..Default::default()
 		}));
-		let auth = Auth::new(auth_config).await.unwrap();
-		let cluster = Cluster::new(crate::ClusterOptions::default()).unwrap();
+		let auth = auth::Auth::new(auth_config).await.unwrap();
+		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
 
 		let web = Web::new(auth, cluster, certificates, config);

@@ -16,7 +16,7 @@
 
 use std::time::Duration;
 
-use moq_relay::{Cluster, ClusterConfig, ClusterOptions, LanAdvertise, LanConfig};
+use moq_relay::cluster;
 
 /// Two clusters that can advertise (fingerprint + node) start without a secret.
 /// Binding mDNS is the recipe's gate; skip when the host cannot announce.
@@ -41,17 +41,17 @@ async fn moq_import_cluster_lan_beside_a_relay() {
 	connect.tls.fingerprint = vec![fingerprint.clone()];
 	let client = connect.clone().init(Default::default()).expect("client");
 
-	let mut lan = LanConfig::default();
+	let mut lan = cluster::LanConfig::default();
 	lan.enabled = true;
-	let mut config = ClusterConfig::default();
+	let mut config = cluster::Config::default();
 	config.lan = lan;
 	config.node = Some(format!("https://127.0.0.1:{port}/"));
 
-	let cluster = Cluster::new(ClusterOptions::new(config))
+	let cluster = cluster::Cluster::new(cluster::Options::new(config))
 		.expect("cluster")
 		.with_client(client)
 		.with_connect(connect, Default::default())
-		.with_advertise(LanAdvertise::new(port).with_fingerprint(fingerprint));
+		.with_advertise(cluster::LanAdvertise::new(port).with_fingerprint(fingerprint));
 
 	match tokio::time::timeout(Duration::from_secs(10), cluster.start()).await {
 		Ok(Ok(_)) => {}

@@ -137,10 +137,10 @@ See [Authentication](/bin/relay/auth).
 
 ```toml
 [cluster]
-connect = ["https://us-east.example.com/?cost=10"]   # Peers to dial. ?cost prices the link.
+connect = ["https://us-east.example.com/?cost=10"]   # Peers to dial. ?cost prices the link, or use {url, cost, egress, token} objects.
 node = "https://us-west.example.com/"                 # This relay's own URL.
 mesh = true                                           # Gossip: peers discover and dial `node`.
-connect_api = "https://api.example.com/peers"        # Or fetch the peer list (JSON array) live.
+connect_api = "https://api.example.com/peers"        # Or fetch the peer list (JSON array of URLs and/or objects) live.
 token = "cluster.jwt"                                 # JWT for dials without an inline ?jwt=.
 id = 12345                                            # Stable Hop ID across restarts.
 

@@ -16,7 +16,7 @@
 
 use std::{net::TcpListener, time::Duration};
 
-use moq_relay::{AuthConfig, Config, PublicConfig, Relay};
+use moq_relay::{Config, Relay, auth};
 
 /// Long enough that "exited immediately" and "waited out the window" cannot be
 /// confused, short enough to keep the test quick: `Relay::run` sleeps this plus
@@ -117,8 +117,8 @@ fn relay_config() -> (u16, Config) {
 
 	// Fully public auth: any no-JWT stream client gets the whole root.
 	#[allow(deprecated)]
-	let public = PublicConfig::Simple(vec![String::new()]);
-	let mut auth = AuthConfig::default();
+	let public = auth::Public::Simple(vec![String::new()]);
+	let mut auth = auth::Config::default();
 	auth.public = Some(public);
 
 	let mut config = Config::default();
