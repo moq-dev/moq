@@ -83,7 +83,7 @@ with the current dev tree before starting.
 - [#3188](/quest/m1/3188-make-every-blocking-go-operation-cancellable-with-context.md) - Make every blocking Go operation cancellable with context.Context
 - [Native Go context](/quest/m1/go-native-context.md) - the Go generator emits context.Context itself, retiring the hand-rolled cancellation token
 - [#3208](/quest/m1/3208-make-2-5-ms-opus-frame-durations-work-across-bindings.md) - Make 2.5 ms Opus frame durations work across bindings
-- [Track demand](/quest/m1/libmoq-track-demand.md) - a C publisher sees used/unused per track and serves dynamic track requests, so an encoder runs only while someone watches
+- [Track demand](/quest/m1/libmoq-track-demand.md) - a C publisher sees used/unused per track and serves dynamic track and group requests, so an encoder runs only while someone watches
 - [#2152](/quest/m1/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - libmoq: C ABI catch-up with the moq-ffi surface
 - [Route cold cost](/quest/m1/route-cold-cost.md) - MoqRoute carries warm and cold, so an observed route re-announces intact
 - [Anonymous rank](/quest/m1/anonymous-route-rank.md) - moq-net: a route through an anonymous hop ranks below every identified route at any cost, and hop 0 travels the chain to say so

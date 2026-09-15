@@ -10,8 +10,9 @@ within the issue's stated scope and boundaries.
 Rescoped during the 2026-08 grooming: subscription options, track info, abort
 codes, and client TLS roots landed in dev's rs/libmoq. Remaining gaps:
 fetch_group, server-side accept, and datagrams, tracked against the dev FFI
-surface. Dynamic track serving and demand split into the track demand quest
-linked below. Broadcast serving is not in
+surface. Dynamic track serving, dynamic group serving, and demand split into
+the track demand quest linked below; `fetch_group` on the consume side stays
+here. Broadcast serving is not in
 this quest: the announce handle that advertises a prefix and yields its
 requests reaches C through the bindings quest linked below, so do not add a
 separate `requested_broadcast` path here.
