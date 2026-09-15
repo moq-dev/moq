@@ -9,7 +9,7 @@
 
 #![cfg(feature = "_quic")]
 
-use std::net::{SocketAddr, TcpListener, UdpSocket};
+use std::net::{SocketAddr, TcpListener};
 use std::time::Duration;
 
 use moq_relay::{Config, PublicConfig, Relay};
@@ -24,8 +24,10 @@ fn free_tcp_port() -> u16 {
 	port
 }
 
+/// Only the Linux worker layouts bind a fixed QUIC port.
+#[cfg(target_os = "linux")]
 fn free_udp_port() -> u16 {
-	let probe = UdpSocket::bind("127.0.0.1:0").expect("bind probe");
+	let probe = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind probe");
 	let port = probe.local_addr().expect("local addr").port();
 	drop(probe);
 	port
