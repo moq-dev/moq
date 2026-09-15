@@ -45,6 +45,7 @@ Relays that gossip namespaces with PUBLISH_NAMESPACE quickly break down: adverti
 This extension adds the HOP_PATH parameter to PUBLISH_NAMESPACE and NAMESPACE.
 It lists every node an advertisement has passed through, starting with the original publisher, which is enough to break loops and to compare paths.
 Each connection also declares its own Hop ID at SETUP, so loops are avoided even across multiple connections between the same pair of relays.
+A namespace is routed to one publisher: the mesh carries the best path to it, not one path per publisher ({{single}}).
 
 Not every route is equal: one crossing a metered backbone costs more than one inside a datacenter.
 The RELAY_COST Setup Option prices what subscribing from an endpoint costs, defaulting to 1 so an unpriced mesh simply ranks by hop count.
@@ -53,19 +54,18 @@ The ROUTE_COST parameter carries the accumulated price per namespace, and a rela
 
 # Setup Negotiation
 
-## Relay Hops
+## Hop ID {#hop-id}
 The extension is negotiated during the SETUP exchange ({{moqt}} Section 10.3).
 An endpoint indicates support with the following Setup Option, whose value is its own Hop ID:
 
 ~~~
-RELAY_HOPS Setup Option {
-  Option Key (vi64) = 0x40B55
-  Option Value Length (vi64)
+HOP_ID Setup Option {
+  Option Key (vi64) = 0x40B54
   Hop ID (vi64)
 }
 ~~~
 
-Negotiation is per session; a relay MUST NOT assume that because one of its sessions negotiated Relay Hops, another did.
+Negotiation is per session; a relay MUST NOT assume that because one of its sessions negotiated the extension, another did.
 It also enables the extended NAMESPACE message ({{namespace}}), which is what lets a NAMESPACE carry these parameters at all.
 
 On a session that negotiated the extension, an endpoint MUST include HOP_PATH on every PUBLISH_NAMESPACE and NAMESPACE it sends, and a receiver MUST close the session with a PROTOCOL_VIOLATION if one arrives without it.
@@ -80,12 +80,16 @@ RELAY_COST Setup Option {
 }
 ~~~
 
-The option prices one direction, the sender's own egress, so each endpoint declares its own and the two need not match.
+The option prices one direction, the sender's own egress, so each endpoint declares its own and the two need not match, as OSPF prices each router's own output interfaces ({{?RFC2328, Section 9}}).
 A receiver adds the value the sender declared to the ROUTE_COST of every advertisement that sender forwards.
 An absent option means 1, under which the accumulated cost equals the hop count.
 0 is meaningful and distinct from absent: it makes that direction free, which is how a deployment describes two relays in the same datacenter.
 
 A declared cost is an assertion, not an instruction: a receiver MAY charge a locally configured value instead, so a peer cannot reprice its neighbours by declaring itself cheap.
+
+The cost is one dimensionless integer, as in every widely deployed routing metric: RIP's hop count ({{?RFC2453, Section 3.5}}), OSPF's interface cost, and IS-IS's default metric, whose companion delay, expense, and error metrics went unimplemented ({{?RFC5305, Section 3}}) just as OSPF's per-type-of-service metrics were deleted for lack of use ({{?RFC2178, Appendix G.10}}).
+A deployment that weighs several factors, such as latency, hop count, and price, folds them into the one value it declares.
+Like BGP's MULTI_EXIT_DISC ({{?RFC4271, Section 5.1.4}}), the value is comparable only within the deployment that chose its units, which is why a trust boundary clamps or replaces it ({{security}}).
 
 
 # Hop IDs
@@ -132,10 +136,10 @@ An assigned ID is indistinguishable on the wire from a declared one, so it ident
 This extension carries HOP_PATH and ROUTE_COST as Key-Value-Pair parameters ({{moqt}} Section 2.5).
 PUBLISH_NAMESPACE ({{moqt}} Section 10.15) already has a Parameters field.
 
-NAMESPACE ({{moqt}} Section 10.16) does not, and a subscriber-driven mesh propagates advertisements as NAMESPACE messages, so this extension defines an extended form used only on a session that negotiated Relay Hops:
+NAMESPACE ({{moqt}} Section 10.16) does not, and a subscriber-driven mesh propagates advertisements as NAMESPACE messages, so this extension defines an extended form used only on a session that negotiated the extension:
 
 ~~~
-NAMESPACE Message (Relay Hops) {
+NAMESPACE Message (Cluster) {
   Type (vi64) = 0x8,
   Length (16),
   Track Namespace Suffix (..),
@@ -202,7 +206,11 @@ Equal Hop IDs (including two relays that both declared 0) cannot be ordered, and
 Cheaper advertisements from anything else carry no such hazard and SHOULD be adopted immediately.
 
 ## Updating an Advertisement {#updating}
-An endpoint updates an advertisement by re-sending it with new parameters **on the stream that already carries it**: the original PUBLISH_NAMESPACE request stream, or the SUBSCRIBE_NAMESPACE response stream the NAMESPACE arrived on.
+An endpoint updates a PUBLISH_NAMESPACE with REQUEST_UPDATE ({{moqt}} Section 9.5) on its request stream, carrying the HOP_PATH or ROUTE_COST that changed.
+A parameter omitted from REQUEST_UPDATE keeps its value, so a relay that starts carrying a namespace sends ROUTE_COST as an explicit 0 rather than omitting it.
+The receiver answers REQUEST_OK, or REQUEST_ERROR and closes the stream, which withdraws the advertisement.
+
+NAMESPACE is a response and has no REQUEST_UPDATE, so an endpoint updates one by re-sending it with new parameters on the SUBSCRIBE_NAMESPACE response stream that carries it.
 A receiver MUST NOT treat the repeat as a duplicate or a protocol violation.
 
 In {{moqt}} an advertisement lives for the lifetime of its stream, so an update on a *new* stream would leave two streams claiming one namespace and let the superseded one retract its replacement.
@@ -234,7 +242,20 @@ If only excluded sources remain the subscription is unroutable, since serving it
 Applying one rule to both advertisement and dispatch keeps advertised paths truthful and prevents subscription cycles of any length.
 
 
-# Security Considerations
+# One Publisher per Namespace {#single}
+{{moqt}} allows several publishers to advertise one namespace and expects a relay to forward a matching SUBSCRIBE to each.
+This extension does not: a session advertises a namespace at most once, a relay advertises only the best path it knows ({{selection}}), and a subscription is served from one source.
+
+A relay holding paths to two publishers of one namespace has no good move.
+SUBSCRIBE names a track, not a publisher, so a relay could only forward it along every path and deliver both publishers' Objects to every subscriber below it, or pick one path silently.
+Two publishers also share no history, so nothing fetched from one is valid against the other.
+Advertising a namespace once per publisher would only push the same choice one hop downstream.
+
+A second publisher of a namespace therefore replaces the first rather than joining it ({{selection}}).
+Redundant ingest of one content is a deployment concern outside this document.
+
+
+# Security Considerations {#security}
 A Hop ID reveals nothing beyond what its operator encodes in it, and a deployment that considers its identifiers sensitive can use random values or declare 0 ({{zero}}).
 Declaring 0 hides an identity from the mesh but not from the peer itself, which MAY assign one and forward it onward ({{assigned}}); an endpoint that needs to stay unlinkable past its first hop cannot get that from this extension.
 A HOP_PATH does expose how many hops an advertisement crossed, which hints at the size of a deployment; a relay MAY coalesce its internal hops into one entry, or strip HOP_PATH, before forwarding across a trust boundary.
@@ -257,23 +278,31 @@ This document requests two registrations in the "MOQT Setup Options" registry ({
 
 | Value   | Name       | Reference     |
 |:--------|:-----------|:--------------|
-| 0x40B55 | RELAY_HOPS | This Document |
+| 0x40B54 | HOP_ID     | This Document |
 | 0x40B56 | RELAY_COST | This Document |
 
 ## MOQT Message Parameters
 
 This document requests two registrations in the "MOQT Message Parameters" registry ({{moqt}} Section 15.7).
-Both are carried in PUBLISH_NAMESPACE and in the extended NAMESPACE message ({{namespace}}).
+Both are carried in PUBLISH_NAMESPACE, in REQUEST_UPDATE of a PUBLISH_NAMESPACE ({{updating}}), and in the extended NAMESPACE message ({{namespace}}).
 
-| Value   | Name        | Carried In                   | Reference     |
-|:--------|:------------|:-----------------------------|:--------------|
-| 0x40B57 | HOP_PATH    | PUBLISH_NAMESPACE, NAMESPACE | This Document |
-| 0x40B58 | ROUTE_COST  | PUBLISH_NAMESPACE, NAMESPACE | This Document |
+| Value   | Name        | Carried In                                   | Reference     |
+|:--------|:------------|:---------------------------------------------|:--------------|
+| 0x40B57 | HOP_PATH    | PUBLISH_NAMESPACE, REQUEST_UPDATE, NAMESPACE | This Document |
+| 0x40B58 | ROUTE_COST  | PUBLISH_NAMESPACE, REQUEST_UPDATE, NAMESPACE | This Document |
 
-The Key-Value-Pair parity is load-bearing: HOP_PATH and RELAY_HOPS are odd, so their values are length-prefixed byte strings, while ROUTE_COST and RELAY_COST are even, so their values are bare varints.
+The Key-Value-Pair parity is load-bearing: HOP_PATH is odd, so its value is a length-prefixed byte string, while HOP_ID, RELAY_COST, and ROUTE_COST are even, so their values are bare varints.
 
 
 --- back
+
+# Appendix A: Changelog
+
+## moq-cluster-01
+- Renamed the RELAY_HOPS Setup Option to HOP_ID and moved it to the even key 0x40B54, so its value is a bare varint rather than a length-prefixed one.
+- A PUBLISH_NAMESPACE is updated with REQUEST_UPDATE on its request stream instead of a repeated PUBLISH_NAMESPACE; HOP_PATH and ROUTE_COST are registered for REQUEST_UPDATE. A NAMESPACE is still re-sent on its stream.
+- Stated that a namespace is routed to one publisher: a session advertises it at most once and a second publisher replaces the first.
+- Named the routing protocols whose single per-direction metric RELAY_COST follows.
 
 # Acknowledgments
 {:numbered="false"}

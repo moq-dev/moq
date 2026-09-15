@@ -77,6 +77,7 @@ with the current dev tree before starting.
 - [Plan: A/V clock](/quest/m1/plan-av-clock.md) - settle how the audio playhead drives Sync.reference while audio plays, then build it
 - [Config provenance](/quest/m1/config-provenance.md) - the merge records which source set a value, so TOML survives CLI defaults and empty lists, and env outranks the file
 - [Cluster construction](/quest/m1/cluster-construction.md) - construct one stable origin after its cache settings are known, deleting the rebuilding builder
+- [Cluster -01](/quest/m1/cluster-01/README.md) - rs/moq-net and js/net speak the revised cluster extension (HOP_ID, REQUEST_UPDATE repricing) and -01 is published
 - [Abort on drop](/quest/m1/abort-on-drop.md) - one abort-on-drop task guard per crate, replacing five copies of the same Drop
 - [#3126](/quest/m1/3126-moq-bench-every-readme-example-fails-to-parse-and.md) - moq-bench: every README example fails to parse, and cumulative latency percentiles cannot be windowed to steady state
 - [#816](/quest/m1/816-expose-transportconfig.md) - QUIC flow-control windows on quic::Client and quic::Server, applied or refused per backend
