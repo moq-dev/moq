@@ -22,7 +22,7 @@ version = ["moq-lite-05"]            # Restrict accepted versions. Omit for all.
 cert = "cert.pem"                    # Certificate chain and key. Reloaded on change.
 key = "key.pem"
 generate = ["localhost"]             # Or: a self-signed cert for development.
-root = ["peer-ca.pem"]               # Optional: CAs whose client certs get full access (mTLS).
+root = ["peer-ca.pem"]               # Optional: CAs for client certs (mTLS), reported to the auth server.
                                      # The quiche backend fixes these at startup; restart to rotate them.
 
 [listen.tcp]                         # Plaintext qmux over TCP for trusted local workers.

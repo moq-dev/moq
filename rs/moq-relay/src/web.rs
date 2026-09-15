@@ -27,7 +27,7 @@ use tokio_rustls::server::TlsStream;
 use tower_http::cors::{Any, CorsLayer};
 use tower_service::Service;
 
-use crate::{Admitted, Auth, AuthError, Cluster};
+use crate::{Admitted, Auth, AuthError, AuthToken, Cluster, Lease, Recheck};
 
 /// Configuration for the HTTP/HTTPS web server.
 #[derive(usage::Args, Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -138,10 +138,10 @@ pub struct HttpsConfig {
 	/// PEM file(s) of root CAs for validating optional client certificates (mTLS).
 	///
 	/// When set, clients *may* present a certificate during the TLS handshake.
-	/// A verified peer is granted full publish/subscribe access scoped to the
-	/// URL path without a JWT, mirroring the QUIC server's `--server-tls-root`
-	/// behavior. Clients that don't present a cert continue through the normal
-	/// JWT path.
+	/// A verified peer is reported to the auth source as [`MtlsPeer`], a fact for
+	/// the server behind `--auth-url` to weigh; it grants nothing on its own, and
+	/// under `--auth-public` the peer gets what any anonymous session gets. Same
+	/// as the QUIC listener's `--listen-tls-root`.
 	///
 	/// In config files, accepts either a single string or a TOML array.
 	#[usage(
@@ -817,8 +817,8 @@ async fn serve_fetch(
 
 	let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
 
-	// Ended when the handler returns; a fetch is one request, not a session.
-	let _lease = lease;
+	// The lease outlives this handler: the body streams after it returns, so the
+	// response holds the lease and ends it when the last frame is served.
 	let result = tokio::time::timeout_at(deadline, async {
 		// NOTE: The auth token is already scoped to the broadcast.
 		// Block until a route covers the broadcast (within the fetch deadline) so
@@ -855,27 +855,73 @@ async fn serve_fetch(
 
 		tracing::info!(%track, group = %group.sequence, "serving group");
 
-		Ok(ServeGroup { group, deadline })
+		Ok(group)
 	})
 	.await;
 
 	match result {
-		Ok(Ok(serve)) => Ok(serve),
-		Ok(Err(status)) => Err(status.into()),
-		Err(_) => Err(StatusCode::GATEWAY_TIMEOUT.into()),
+		Ok(Ok(group)) => Ok(ServeGroup {
+			group,
+			deadline,
+			lease: Some(lease),
+			token,
+		}),
+		Ok(Err(status)) => {
+			lease.close(status.to_string());
+			Err(status.into())
+		}
+		Err(_) => {
+			lease.close("timeout");
+			Err(StatusCode::GATEWAY_TIMEOUT.into())
+		}
 	}
 }
 
+/// A group streamed as the response body, holding the fetch's lease until the
+/// last frame is served so a refusal or expiry mid-transfer cuts it off and the
+/// `end` event carries the outcome.
 struct ServeGroup {
 	group: moq_net::group::Consumer,
 	deadline: tokio::time::Instant,
+	/// Taken when the body ends, so the reason is reported once.
+	lease: Option<Lease>,
+	token: AuthToken,
 }
 
 impl ServeGroup {
 	async fn next(&mut self) -> moq_net::Result<Option<Bytes>> {
-		match tokio::time::timeout_at(self.deadline, self.group.read_frame()).await {
-			Ok(res) => Ok(res?.map(|frame| frame.payload)),
-			Err(_) => Err(moq_net::Error::Timeout),
+		let Some(lease) = self.lease.as_mut() else {
+			return Ok(None);
+		};
+		loop {
+			tokio::select! {
+				res = tokio::time::timeout_at(self.deadline, self.group.read_frame()) => {
+					return match res {
+						Ok(res) => Ok(res?.map(|frame| frame.payload)),
+						Err(_) => Err(moq_net::Error::Timeout),
+					};
+				}
+				changed = lease.changed() => match changed {
+					Ok(grant) => match crate::recheck(&self.token, &grant) {
+						Recheck::Covered => continue,
+						Recheck::Closed(why) => {
+							tracing::info!(%why, "grant no longer covers the fetch, closing");
+							return Err(moq_net::Error::Unauthorized);
+						}
+					},
+					Err(reason) => {
+						tracing::info!(%reason, "lease ended, closing fetch");
+						return Err(moq_net::Error::Unauthorized);
+					}
+				},
+			}
+		}
+	}
+
+	/// End the lease with the body's outcome.
+	fn end(&mut self, reason: &str) {
+		if let Some(lease) = self.lease.take() {
+			lease.close(reason);
 		}
 	}
 }
@@ -897,16 +943,24 @@ impl http_body::Body for ServeGroup {
 		let this = self.get_mut();
 
 		// Use `poll_fn` to turn the async function into a Future
-		let future = this.next();
-		tokio::pin!(future);
-
-		match ready!(future.poll(cx)) {
+		let res = {
+			let future = this.next();
+			tokio::pin!(future);
+			ready!(future.poll(cx))
+		};
+		match res {
 			Ok(Some(data)) => {
 				let frame = http_body::Frame::data(data);
 				Poll::Ready(Some(Ok(frame)))
 			}
-			Ok(None) => Poll::Ready(None),
-			Err(e) => Poll::Ready(Some(Err(ServeGroupError(e)))),
+			Ok(None) => {
+				this.end("done");
+				Poll::Ready(None)
+			}
+			Err(e) => {
+				this.end(&e.to_string());
+				Poll::Ready(Some(Err(ServeGroupError(e))))
+			}
 		}
 	}
 }

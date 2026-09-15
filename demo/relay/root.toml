@@ -14,10 +14,10 @@ bind = "[::]:4443"
 tls.cert = ["root.crt"]
 tls.key = ["root.key"]
 
-# Trust client certificates signed by this CA for mTLS peer auth.
-# Any connection presenting such a cert is granted full access (publish/
-# subscribe/cluster), which is how leaves join without a `cluster.token`
-# JWT. `just ca` generates the CA.
+# Trust client certificates signed by this CA for mTLS peer auth. The
+# certificate is a fact for the auth source: `auth.public = "**"` below admits
+# the leaves, and an auth server would grant them through `--mtls-publish` /
+# `--mtls-subscribe`. `just ca` generates the CA.
 tls.root = ["ca.pem"]
 
 [web.http]

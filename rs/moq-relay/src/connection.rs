@@ -255,8 +255,8 @@ pub(crate) enum Recheck {
 /// the origin cannot be resized in place until pattern scopes land. A changed tier
 /// is kept for this session and applies to its next connection, since the stats
 /// carriers resolve their counters once at admission.
-pub(crate) fn recheck(path: &str, token: &AuthToken, grant: &Grant) -> Recheck {
-	let fresh = match AuthToken::new(path, grant) {
+pub(crate) fn recheck(token: &AuthToken, grant: &Grant) -> Recheck {
+	let fresh = match token.recheck(grant) {
 		Ok(fresh) => fresh,
 		Err(err) => {
 			tracing::warn!(%err, "re-checked grant cannot scope the session");
@@ -295,7 +295,6 @@ pub async fn supervise(
 	bytes: moq_auth::Counters,
 	mut shutdown: crate::Shutdown,
 ) -> anyhow::Result<()> {
-	let path = token.root.to_string();
 	// The transport's own totals, read once at the end so the `end` event carries
 	// what the session moved without the payload path paying for a second meter.
 	let meter = |session: &moq_net::Session| {
@@ -315,7 +314,7 @@ pub async fn supervise(
 				return Err(err.into());
 			}
 			changed = lease.changed() => match changed {
-				Ok(grant) => match recheck(&path, &token, &grant) {
+				Ok(grant) => match recheck(&token, &grant) {
 					Recheck::Covered => continue,
 					Recheck::Closed(why) => {
 						tracing::info!(%why, "grant no longer covers the session, closing");

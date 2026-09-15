@@ -161,11 +161,13 @@ impl axum::response::IntoResponse for AuthError {
 
 /// The grant a session was admitted under, reduced to what the origin scopes by.
 ///
-/// Built from a [`Grant`] and the path the session dialed; rebuilt whenever the
-/// lease changes, so a re-check is compared field by field.
+/// Built from a [`Grant`] and the path the session dialed; rebuilt from the same
+/// dialed path whenever the lease changes, so a re-check is compared field by field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct AuthToken {
+	/// The path the session dialed, which a grant without `root` is relative to.
+	pub(crate) path: String,
 	/// The root the session is scoped to: the grant's `root` alias, else the dialed path.
 	pub root: PathOwned,
 	/// Prefixes the holder may subscribe to, relative to `root`.
@@ -197,11 +199,18 @@ impl AuthToken {
 		};
 		let root = grant.root.as_deref().unwrap_or(path);
 		Ok(Self {
+			path: path.to_string(),
 			root: Path::new(root).to_owned(),
 			subscribe: prefixes(&grant.subscribe)?,
 			publish: prefixes(&grant.publish)?,
 			tier: crate::configured_tier(grant.tier.clone()),
 		})
+	}
+
+	/// Rebuild the token from a re-checked grant, relative to the same dialed path,
+	/// so a grant that drops its `root` alias resolves back to what was dialed.
+	pub(crate) fn recheck(&self, grant: &Grant) -> Result<Self, AuthError> {
+		Self::new(&self.path, grant)
 	}
 
 	/// Whether `other` still covers everything this token scopes: the same root and
@@ -446,5 +455,22 @@ mod tests {
 		assert!(narrow.covered_by(&wide));
 		assert!(!wide.covered_by(&narrow));
 		assert!(!wide.covered_by(&moved));
+	}
+
+	#[test]
+	fn a_recheck_resolves_a_dropped_root_to_the_dialed_path() {
+		let everything = || Grant::new(patterns(&["**"]), patterns(&["**"]));
+		let mut aliased = everything();
+		aliased.root = Some("pid/room".into());
+		let token = AuthToken::new("/vanity/room", &aliased).unwrap();
+		assert_eq!(token.root, Path::new("pid/room").to_owned());
+
+		// The same alias still names the same root.
+		assert_eq!(token.recheck(&aliased).unwrap().root, token.root);
+		// A grant without the alias is relative to what was dialed, not to the old root.
+		assert_eq!(
+			token.recheck(&everything()).unwrap().root,
+			Path::new("vanity/room").to_owned()
+		);
 	}
 }

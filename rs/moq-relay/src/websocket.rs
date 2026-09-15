@@ -171,7 +171,6 @@ where
 		.await?;
 	let mut driver = runtime.take().expect("accept hands the machine to its runtime");
 
-	let path = token.root.to_string();
 	let meter = |session: &moq_net::Session| {
 		let stats = session.stats();
 		bytes.add_sent(stats.bytes_sent.unwrap_or_default());
@@ -189,7 +188,7 @@ where
 			}
 			changed = lease.changed() => {
 				let why = match changed {
-					Ok(grant) => match crate::recheck(&path, &token, &grant) {
+					Ok(grant) => match crate::recheck(&token, &grant) {
 						crate::Recheck::Covered => continue,
 						crate::Recheck::Closed(why) => {
 							tracing::info!(%why, "grant no longer covers the session, closing");
