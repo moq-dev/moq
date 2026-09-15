@@ -51,10 +51,10 @@ async function run(): Promise<void> {
 		// wait into consume(); the JS API leaves it to the caller. The outer timeout
 		// below bounds how long we wait.
 		//
-		// `announced(path)` is scoped to `path`, so each entry's `path` is relative to it
-		// (empty for the broadcast at `path` itself). Any active entry means a matching
-		// broadcast is up, so wait for one.
-		const announced = connection.announced(path);
+		// The scope is the subtree at `path`, so each entry's pattern is relative to the
+		// connection (`path` itself for the broadcast there). Any active entry means a
+		// matching broadcast is up, so wait for one.
+		const announced = connection.announced(Moq.Path.Pattern.subtree(path));
 		try {
 			for (;;) {
 				const entry = await announced.next();
