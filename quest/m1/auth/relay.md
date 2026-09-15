@@ -15,8 +15,8 @@ client and no cache. On dev.
 
 `rs/moq-relay/src/auth.rs` is deleted along with its config, the shared
 HTTP cache, in-flight coalescing, `Cache-Control` parsing, `verify_mtls`,
-`AuthToken::unrestricted`, and `--auth-domain`. What remains of `AuthConfig`
-is `url: Option<Url>` and `public: Option<Public>`, validated as exactly
+`auth::Token::unrestricted`, and `--auth-domain`. What remains of `auth::Config`
+is `url: Option<Url>` and `public: Option<auth::Public>`, validated as exactly
 one. The `MtlsPeer` marker in `web.rs` and `websocket.rs` carries the
 identity so WebSocket and HTTPS sessions report it too.
 

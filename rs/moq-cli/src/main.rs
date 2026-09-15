@@ -163,7 +163,7 @@ fn spawn_cluster_serve(
 		while let Some(request) = listener.accept().await {
 			while sessions.try_join_next().is_some() {}
 			if moq_relay::cluster::Cluster::is_lan_path(request.path()) {
-				let conn = moq_relay::Connection::new(request, cluster.clone(), moq_relay::Auth::default())
+				let conn = moq_relay::Connection::new(request, cluster.clone(), moq_relay::auth::Auth::default())
 					.with_id(cluster.next_connection_id());
 				sessions.spawn(async move {
 					if let Err(err) = conn.run().await {

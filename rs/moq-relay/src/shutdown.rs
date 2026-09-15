@@ -9,12 +9,12 @@ use tokio::sync::watch;
 /// Fires the relay-wide shutdown broadcast. Held by `Relay::run` for the OS
 /// signal path; an embedder clones one to stop the relay from its own task.
 #[derive(Clone)]
-pub struct ShutdownTrigger {
+pub struct Trigger {
 	tx: watch::Sender<bool>,
 }
 
-impl ShutdownTrigger {
-	/// Start the drain: every [`Shutdown`] handle's [`started`](Shutdown::started)
+impl Trigger {
+	/// Start the drain: every [`Observer`] handle's [`started`](Observer::started)
 	/// resolves and sessions begin sending GOAWAY.
 	pub fn start(&self) {
 		let _ = self.tx.send(true);
@@ -26,17 +26,17 @@ impl ShutdownTrigger {
 /// Cheap to clone; each accepted session waits on [`started`](Self::started)
 /// and drains itself via [`drain_session`](Self::drain_session) when it fires.
 #[derive(Clone)]
-pub struct Shutdown {
+pub struct Observer {
 	rx: watch::Receiver<bool>,
 	/// How long a drained session may keep running before it is force-closed.
 	pub drain_timeout: Duration,
 }
 
-impl Shutdown {
+impl Observer {
 	/// Create the trigger and its observer half.
-	pub fn new(drain_timeout: Duration) -> (ShutdownTrigger, Self) {
+	pub fn new(drain_timeout: Duration) -> (Trigger, Self) {
 		let (tx, rx) = watch::channel(false);
-		(ShutdownTrigger { tx }, Self { rx, drain_timeout })
+		(Trigger { tx }, Self { rx, drain_timeout })
 	}
 
 	/// A handle that never fires, for callers without shutdown coordination

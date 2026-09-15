@@ -23,7 +23,7 @@ const GOVERNOR_INTERVAL: Duration = Duration::from_secs(5);
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
-pub struct CacheConfig {
+pub struct Config {
 	/// Target bytes of cached group payload, e.g. "8GiB", "512MB", or a
 	/// percentage of memory like "75%" (respecting the cgroup limit when set).
 	/// Unbounded when unset.
@@ -89,7 +89,7 @@ pub struct Cache {
 	pub duration: Duration,
 }
 
-impl CacheConfig {
+impl Config {
 	/// Resolve the size knobs into a shared [`cache::Pool`] and age ceiling,
 	/// spawning the headroom governor when configured. Requires a tokio runtime.
 	///
@@ -200,7 +200,7 @@ mod tests {
 
 	#[test]
 	fn default_config_enables_expiry_without_clamping_media_time() {
-		let cache = CacheConfig::default().init().unwrap();
+		let cache = Config::default().init().unwrap();
 		assert_eq!(cache.pool.expiry(), Some(cache::DEFAULT_EXPIRY));
 		assert_eq!(cache.duration, Duration::MAX);
 	}
@@ -208,7 +208,7 @@ mod tests {
 	#[test]
 	fn explicit_duration_configures_both_bounds() {
 		let duration = Duration::from_secs(5);
-		let config = CacheConfig {
+		let config = Config {
 			duration: Some(duration.into()),
 			..Default::default()
 		};
@@ -241,8 +241,8 @@ mod tests {
 	}
 
 	/// A config whose only knob is the headroom governor.
-	fn governed() -> CacheConfig {
-		CacheConfig {
+	fn governed() -> Config {
+		Config {
 			headroom: Some("10%".to_string()),
 			..Default::default()
 		}
@@ -264,7 +264,7 @@ mod tests {
 
 	/// The prefix of [`crate::Relay::load`] that owns the cache: resolve it, then
 	/// hand it to a cluster whose construction can still fail.
-	fn attach(cache: &CacheConfig, cluster: crate::cluster::Config) -> anyhow::Result<crate::cluster::Cluster> {
+	fn attach(cache: &Config, cluster: crate::cluster::Config) -> anyhow::Result<crate::cluster::Cluster> {
 		let cache = cache.init()?;
 		crate::cluster::Cluster::new(crate::cluster::Options::new(cluster).with_cache(cache))
 	}
@@ -314,7 +314,7 @@ mod tests {
 	/// assumed so the governor's task can be told apart from them.
 	async fn cluster_tasks() -> usize {
 		let before = spawned();
-		let cluster = attach(&CacheConfig::default(), crate::cluster::Config::default()).unwrap();
+		let cluster = attach(&Config::default(), crate::cluster::Config::default()).unwrap();
 		settle().await;
 		let own = spawned() - before;
 		drop(cluster);

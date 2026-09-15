@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
-pub struct StatsConfig {
+pub struct Config {
 	/// Master switch for stats publishing. Defaults to false.
 	#[usage(
 		long = "stats-enabled",
@@ -79,7 +79,7 @@ pub struct StatsConfig {
 	pub depth: usize,
 }
 
-impl Default for StatsConfig {
+impl Default for Config {
 	fn default() -> Self {
 		Self {
 			enabled: false,
@@ -91,7 +91,7 @@ impl Default for StatsConfig {
 	}
 }
 
-impl StatsConfig {
+impl Config {
 	/// Build a [`moq_stats::Producer`] from this config, publishing on `origin`.
 	///
 	/// Returns a no-op producer when [`Self::enabled`] is false, so the relay can

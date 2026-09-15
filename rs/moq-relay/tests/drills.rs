@@ -20,7 +20,7 @@
 use std::time::Duration;
 
 use moq_native::moq_net::{self, Origin};
-use moq_relay::{Config, PublicConfig, PublicDetailed, Relay};
+use moq_relay::{Config, Relay, auth};
 
 /// Ceiling for anything a drill waits on. Every wait is bounded, so a broken
 /// handoff fails as a timeout with a message instead of hanging the suite.
@@ -56,7 +56,7 @@ impl RelayHost {
 		let mut config = Config::default();
 		config.server.bind = Some(format!("127.0.0.1:{}", requested_port.unwrap_or_default()));
 		config.server.tls.generate = vec!["localhost".into()];
-		config.auth.public = Some(PublicConfig::Detailed(PublicDetailed {
+		config.auth.public = Some(auth::Public::Detailed(auth::PublicDetailed {
 			subscribe: vec![String::new()],
 			publish: vec![String::new()],
 			api: None,

@@ -16,7 +16,7 @@ use tokio::task::AbortHandle;
 use tracing::Instrument as _;
 use url::Url;
 
-use crate::{AuthToken, nodes::MESH_PREFIX};
+use crate::{auth, nodes::MESH_PREFIX};
 
 /// The request path prefix a LAN mesh dial presents, marking it as a peer rather
 /// than an ordinary publisher or viewer on the same listener.
@@ -902,7 +902,7 @@ pub struct Options {
 	///
 	/// `None` uses an unbounded pool with the standard LRU window and no
 	/// media-timestamp ceiling.
-	pub cache: Option<crate::Cache>,
+	pub cache: Option<crate::cache::Cache>,
 }
 
 impl Options {
@@ -915,7 +915,7 @@ impl Options {
 	}
 
 	/// Use this resolved cache when constructing the origin.
-	pub fn with_cache(mut self, cache: crate::Cache) -> Self {
+	pub fn with_cache(mut self, cache: crate::cache::Cache) -> Self {
 		self.cache = Some(cache);
 		self
 	}
@@ -1139,7 +1139,7 @@ impl Cluster {
 	/// Attach a stats producer, replacing the default disabled registry with its
 	/// registry and taking over keeping its publish task alive.
 	///
-	/// Build one with [`StatsConfig::build`](crate::StatsConfig::build), passing
+	/// Build one with [`stats::Config::build`](crate::stats::Config::build), passing
 	/// [`Self::origin`] so it publishes through the same origin cluster peers read
 	/// from. The cluster holds the producer from here on, so the caller may drop
 	/// its own handle: publishing lasts exactly as long as the cluster does.
@@ -1159,12 +1159,12 @@ impl Cluster {
 	///
 	/// Passed by reference to [`moq_net::Server::with_publisher`] (or the
 	/// equivalent per-request setter), which derives the read handle.
-	pub fn subscriber(&self, token: &AuthToken) -> Option<origin::Producer> {
+	pub fn subscriber(&self, token: &auth::Token) -> Option<origin::Producer> {
 		self.origin.with_root(&token.root)?.scope(&token.subscribe)
 	}
 
 	/// Returns an [`origin::Producer`] scoped to this session's publish permissions.
-	pub fn publisher(&self, token: &AuthToken) -> Option<origin::Producer> {
+	pub fn publisher(&self, token: &auth::Token) -> Option<origin::Producer> {
 		self.origin.with_root(&token.root)?.scope(&token.publish)
 	}
 
@@ -1244,8 +1244,8 @@ impl Cluster {
 
 	/// Grant the cluster-peer scope a `cluster.token` would: unscoped publish
 	/// and subscribe, billed under `--cluster-tier`.
-	pub(crate) fn lan_peer_token(&self) -> AuthToken {
-		let mut token = AuthToken::unrestricted(Path::new("").to_owned());
+	pub(crate) fn lan_peer_token(&self) -> auth::Token {
+		let mut token = auth::Token::unrestricted(Path::new("").to_owned());
 		token.tier = self.cluster_tier();
 		token
 	}
@@ -1797,7 +1797,7 @@ impl Cluster {
 		// Apply the shared cluster token unless the URL already carries its own
 		// non-empty `?jwt=` (a per-peer inline token or object `token` wins; the
 		// shared token still covers peers that have none). An empty
-		// `?jwt=` counts as absent, matching `AuthParams::from_url`.
+		// `?jwt=` counts as absent, matching `auth::Params::from_url`.
 		// LAN dials never get the token: they authenticate with the mDNS credential.
 		if !target.lan && !token.is_empty() {
 			for url in &mut urls {
@@ -2191,7 +2191,7 @@ mod tests {
 	/// proves nothing.
 	#[tokio::test]
 	async fn stats_publishing_outlives_the_producer_handle() {
-		let config = crate::StatsConfig {
+		let config = crate::stats::Config {
 			enabled: true,
 			node: Some("test".to_string()),
 			..Default::default()
@@ -2813,7 +2813,7 @@ mod tests {
 	#[tokio::test]
 	async fn constructed_origin_keeps_cache_and_handles() {
 		let duration = Duration::from_secs(5);
-		let cache = crate::CacheConfig {
+		let cache = crate::cache::Config {
 			duration: Some(duration.into()),
 			..Default::default()
 		}
@@ -2835,7 +2835,7 @@ mod tests {
 		assert_eq!(origin.info().cache_duration, duration);
 		assert_eq!(origin.info().pool.expiry(), Some(duration));
 
-		let stats = crate::StatsConfig {
+		let stats = crate::stats::Config {
 			enabled: true,
 			node: Some("test".to_string()),
 			..Default::default()
@@ -3462,7 +3462,7 @@ mod tests {
 		tokio::spawn(async move {
 			let mut listener = listener;
 			while let Some(request) = listener.accept().await {
-				let conn = crate::Connection::new(request, accept.clone(), crate::Auth::default());
+				let conn = crate::Connection::new(request, accept.clone(), crate::auth::Auth::default());
 				tokio::spawn(async move {
 					let _ = conn.run().await;
 				});

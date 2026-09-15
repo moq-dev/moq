@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{AuthConfig, CacheConfig, InternalConfig, StatsConfig, WebConfig, cluster};
+use crate::{auth, cache, cluster, internal, stats, web};
 
 /// Top-level relay configuration, as a composable args group.
 ///
@@ -47,7 +47,7 @@ pub struct Config {
 	/// `runtime.workers` is set.
 	#[usage(flatten)]
 	#[serde(default)]
-	pub runtime: crate::RuntimeConfig,
+	pub runtime: crate::runtime::Config,
 
 	/// Cluster configuration.
 	#[usage(flatten)]
@@ -57,29 +57,29 @@ pub struct Config {
 	/// Authentication configuration.
 	#[usage(flatten)]
 	#[serde(default)]
-	pub auth: AuthConfig,
+	pub auth: auth::Config,
 
 	/// Optionally run a TCP HTTP/WebSocket server.
 	#[usage(flatten)]
 	#[serde(default)]
-	pub web: WebConfig,
+	pub web: web::Config,
 
 	/// Stats publishing configuration. Disabled unless `stats.enabled = true`.
 	#[usage(flatten)]
 	#[serde(default)]
-	pub stats: StatsConfig,
+	pub stats: stats::Config,
 
 	/// Group cache sizing. Unbounded unless `cache.capacity` or `cache.headroom`
 	/// is set.
 	#[usage(flatten)]
 	#[serde(default)]
-	pub cache: CacheConfig,
+	pub cache: cache::Config,
 
 	/// Internal (ops) listener for `/metrics`, `/health`, and `/nodes`. Disabled unless
 	/// `internal.listen` is set.
 	#[usage(flatten)]
 	#[serde(default)]
-	pub internal: InternalConfig,
+	pub internal: internal::Config,
 
 	/// How long accepted sessions may keep running after a shutdown signal, e.g.
 	/// "10s" or "500ms". The first signal sends every session a GOAWAY and waits
@@ -558,14 +558,14 @@ duration = "30s"
 	/// `None` serialize path, which the merge test above never exercises.
 	#[test]
 	fn cache_duration_serde_round_trip() {
-		let set: CacheConfig = toml::from_str(r#"duration = "30s""#).expect("deserialize Some");
+		let set: cache::Config = toml::from_str(r#"duration = "30s""#).expect("deserialize Some");
 		assert_eq!(set.duration, Some(std::time::Duration::from_secs(30).into()));
 
-		let unset: CacheConfig = toml::from_str("").expect("deserialize absent");
+		let unset: cache::Config = toml::from_str("").expect("deserialize absent");
 		assert_eq!(unset.duration, None);
 
 		let encoded = toml::to_string(&set).expect("serialize Some");
-		let decoded: CacheConfig = toml::from_str(&encoded).expect("re-deserialize");
+		let decoded: cache::Config = toml::from_str(&encoded).expect("re-deserialize");
 		assert_eq!(decoded.duration, set.duration, "round trip must preserve the duration");
 
 		toml::to_string(&unset).expect("serialize None");
@@ -834,7 +834,7 @@ api_mode = "proxy"
 
 		assert_eq!(
 			config.auth.api_mode,
-			Some(crate::AuthApiMode::Proxy),
+			Some(crate::auth::ApiMode::Proxy),
 			"TOML's auth.api_mode must not be clobbered by the CLI re-parse"
 		);
 	}
@@ -1215,7 +1215,7 @@ uid = [1001]
 	}
 
 	/// CLI-only `#[serde(skip)]` public shorthands must survive the TOML round-trip.
-	/// Dropping them makes `AuthConfig::is_empty` true and the relay start with no
+	/// Dropping them makes `auth::Config::is_empty` true and the relay start with no
 	/// public access, as though the flags had never been passed.
 	#[test]
 	fn cli_public_shorthands_survive_merge() {

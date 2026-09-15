@@ -23,18 +23,18 @@ use url::Url;
 /// relay after parsing the request (the URL/SETUP parsers don't know it).
 ///
 /// `#[non_exhaustive]` so a new field is additive: build one with
-/// [`AuthParams::new`] and set fields, rather than by struct literal.
+/// [`Params::new`] and set fields, rather than by struct literal.
 #[derive(Default, Debug, Clone)]
 #[non_exhaustive]
-pub struct AuthParams {
+pub struct Params {
 	/// The URL path identifying the broadcast root.
 	pub path: String,
-	/// The URL host, forwarded to the auth API in [`AuthApiMode::Proxy`] so the
+	/// The URL host, forwarded to the auth API in [`ApiMode::Proxy`] so the
 	/// endpoint can do its own subdomain routing. `None` outside a URL-dialed
 	/// connection (the gateways pass a path directly).
 	pub host: Option<String>,
 	/// The credential from the `jwt` query parameter. A JWT the relay verifies
-	/// itself, or in [`AuthApiMode::Proxy`] an opaque string only the endpoint
+	/// itself, or in [`ApiMode::Proxy`] an opaque string only the endpoint
 	/// interprets.
 	pub jwt: Option<String>,
 	/// The connection's transport, forwarded to the auth API as `transport=` so it
@@ -44,7 +44,7 @@ pub struct AuthParams {
 	pub transport: Option<Transport>,
 }
 
-impl AuthParams {
+impl Params {
 	/// Creates params with just a path and no token.
 	pub fn new(path: impl Into<String>) -> Self {
 		Self {
@@ -154,7 +154,7 @@ fn match_domain(host: Option<&str>, domains: &[String]) -> Option<String> {
 /// Errors returned when authentication or authorization fails.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
-pub enum AuthError {
+pub enum Error {
 	#[error("authentication is disabled")]
 	UnexpectedToken,
 
@@ -201,7 +201,7 @@ pub enum AuthError {
 	UnsupportedPattern(String),
 }
 
-impl AuthError {
+impl Error {
 	/// True when the auth API answered and the answer was "no".
 	///
 	/// The distinction is what lets [`Auth::revalidate`] tell a withdrawn grant
@@ -230,11 +230,11 @@ impl AuthError {
 ///
 /// The public rules, the proxy grant, and the public API still speak prefixes; the
 /// claims they become speak patterns.
-fn subtrees(prefixes: impl IntoIterator<Item = impl AsRef<str>>) -> Result<moq_auth::Patterns, AuthError> {
+fn subtrees(prefixes: impl IntoIterator<Item = impl AsRef<str>>) -> Result<moq_auth::Patterns, Error> {
 	prefixes
 		.into_iter()
 		.map(|prefix| {
-			moq_auth::Pattern::subtree(prefix.as_ref()).map_err(|err| AuthError::ApiInvalidResponse(err.to_string()))
+			moq_auth::Pattern::subtree(prefix.as_ref()).map_err(|err| Error::ApiInvalidResponse(err.to_string()))
 		})
 		.collect()
 }
@@ -245,14 +245,14 @@ fn subtrees(prefixes: impl IntoIterator<Item = impl AsRef<str>>) -> Result<moq_a
 /// have an exact prefix. A grant of `pid/*/chat` is refused at connect rather than
 /// silently dropped, and so is a literal `foo`: reading it as the prefix `foo` would
 /// widen one broadcast into a subtree.
-fn prefixes(patterns: &moq_auth::Patterns) -> Result<PathPrefixes, AuthError> {
+fn prefixes(patterns: &moq_auth::Patterns) -> Result<PathPrefixes, Error> {
 	patterns
 		.iter()
 		.map(|pattern| {
 			pattern
 				.as_prefix()
 				.map(|prefix| Path::new(prefix).to_owned())
-				.ok_or_else(|| AuthError::UnsupportedPattern(pattern.to_string()))
+				.ok_or_else(|| Error::UnsupportedPattern(pattern.to_string()))
 		})
 		.collect()
 }
@@ -280,32 +280,32 @@ pub(crate) fn message(err: impl std::error::Error) -> String {
 // otherwise be undiagnosable. Both HTTP error types land on the same variant, so `?` works on `.send()`
 // (which returns `reqwest_middleware::Error`) and on `.error_for_status()` / `.text()`
 // (which return `reqwest::Error`) alike.
-impl From<reqwest::Error> for AuthError {
+impl From<reqwest::Error> for Error {
 	fn from(err: reqwest::Error) -> Self {
 		Self::ApiUnavailable(message(err))
 	}
 }
 
-impl From<reqwest_middleware::Error> for AuthError {
+impl From<reqwest_middleware::Error> for Error {
 	fn from(err: reqwest_middleware::Error) -> Self {
 		Self::ApiUnavailable(message(err))
 	}
 }
 
-impl From<serde_json::Error> for AuthError {
+impl From<serde_json::Error> for Error {
 	fn from(err: serde_json::Error) -> Self {
 		Self::ApiInvalidResponse(message(err))
 	}
 }
 
-impl From<url::ParseError> for AuthError {
+impl From<url::ParseError> for Error {
 	fn from(err: url::ParseError) -> Self {
 		Self::InvalidUrl(message(err))
 	}
 }
 
-impl From<&AuthError> for http::StatusCode {
-	fn from(err: &AuthError) -> Self {
+impl From<&Error> for http::StatusCode {
+	fn from(err: &Error) -> Self {
 		match err {
 			// Upstream auth API unreachable or misconfigured — this is a server-side
 			// problem, not a credential problem.
@@ -317,23 +317,22 @@ impl From<&AuthError> for http::StatusCode {
 			// `ApiStale` belongs here too: the endpoint was unreachable and the cache
 			// answered for it. Reporting that as 401 would tell a client its
 			// credential was rejected when nothing was ever checked.
-			AuthError::ApiUnavailable(_)
-			| AuthError::ApiInvalidResponse(_)
-			| AuthError::NotFound
-			| AuthError::ApiStale => http::StatusCode::BAD_GATEWAY,
-			AuthError::InvalidUrl(_) => http::StatusCode::INTERNAL_SERVER_ERROR,
+			Error::ApiUnavailable(_) | Error::ApiInvalidResponse(_) | Error::NotFound | Error::ApiStale => {
+				http::StatusCode::BAD_GATEWAY
+			}
+			Error::InvalidUrl(_) => http::StatusCode::INTERNAL_SERVER_ERROR,
 			_ => http::StatusCode::UNAUTHORIZED,
 		}
 	}
 }
 
-impl From<AuthError> for http::StatusCode {
-	fn from(err: AuthError) -> Self {
+impl From<Error> for http::StatusCode {
+	fn from(err: Error) -> Self {
 		Self::from(&err)
 	}
 }
 
-impl axum::response::IntoResponse for AuthError {
+impl axum::response::IntoResponse for Error {
 	fn into_response(self) -> axum::response::Response {
 		http::StatusCode::from(self).into_response()
 	}
@@ -348,7 +347,7 @@ impl axum::response::IntoResponse for AuthError {
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
-pub struct AuthTls {
+pub struct Tls {
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[usage(
 		name = "auth-tls-root",
@@ -394,7 +393,7 @@ pub struct AuthTls {
 	pub disable_verify: Option<bool>,
 }
 
-impl AuthConfig {
+impl Config {
 	/// Fields a TOML round-trip would drop: injected TLS plus CLI-only public shorthands.
 	pub fn keep_parse_only(&mut self, from: &Self) {
 		self.client_tls = from.client_tls.clone();
@@ -404,7 +403,7 @@ impl AuthConfig {
 	}
 }
 
-impl AuthTls {
+impl Tls {
 	/// True when any deprecated `--auth-tls-*` override is configured, in which
 	/// case it takes precedence over the shared `--connect-tls-*` identity.
 	fn is_set(&self) -> bool {
@@ -435,7 +434,7 @@ impl AuthTls {
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default)]
 #[non_exhaustive]
-pub struct AuthConfig {
+pub struct Config {
 	/// A single JWK key file for authentication.
 	/// No `kid` header is required in JWTs.
 	#[usage(long = "auth-key", env = "MOQ_AUTH_KEY", setting = "auth.key")]
@@ -452,12 +451,12 @@ pub struct AuthConfig {
 	#[usage(long = "auth-key-dir", env = "MOQ_AUTH_KEY_DIR", setting = "auth.key_dir")]
 	pub key_dir: Option<String>,
 
-	/// Deprecated `--auth-tls-*` overrides; see [`AuthTls`].
+	/// Deprecated `--auth-tls-*` overrides; see [`Tls`].
 	#[usage(flatten)]
 	#[serde(default)]
-	pub tls: AuthTls,
+	pub tls: Tls,
 
-	/// Cluster client TLS injected by [`AuthConfig::init`] so outbound auth HTTP
+	/// Cluster client TLS injected by [`Config::init`] so outbound auth HTTP
 	/// (JWK + auth/public-API fetches) reuses the `--connect-tls-*` identity.
 	/// Not a CLI or TOML field; the deprecated `--auth-tls-*` flags override it.
 	#[usage(skip)]
@@ -470,8 +469,8 @@ pub struct AuthConfig {
 	/// TOML: Accepts a string, array, or table `{ subscribe = ..., publish = ... }`.
 	/// Any value starting with `http://` or `https://` is treated as a URL endpoint.
 	#[usage(long = "auth-public", env = "MOQ_AUTH_PUBLIC", setting = "auth.public")]
-	#[serde(default, deserialize_with = "PublicConfig::deserialize_option")]
-	pub public: Option<PublicConfig>,
+	#[serde(default, deserialize_with = "Public::deserialize_option")]
+	pub public: Option<Public>,
 
 	/// Public (unauthenticated) subscribe access configuration.
 	///
@@ -483,7 +482,7 @@ pub struct AuthConfig {
 		setting = "auth.public_subscribe"
 	)]
 	#[serde(skip)]
-	pub public_subscribe: Option<PublicConfig>,
+	pub public_subscribe: Option<Public>,
 
 	/// Public (unauthenticated) publish access configuration.
 	///
@@ -495,7 +494,7 @@ pub struct AuthConfig {
 		setting = "auth.public_publish"
 	)]
 	#[serde(skip)]
-	pub public_publish: Option<PublicConfig>,
+	pub public_publish: Option<Public>,
 
 	/// CLI-only shorthand: `--auth-public-api <url>` sets a URL endpoint that returns
 	/// `{ subscribe: [...], publish: [...] }` per namespace. The connection namespace is
@@ -595,7 +594,7 @@ pub struct AuthConfig {
 	/// `Option` so a TOML value survives the CLI re-parse.
 	#[usage(long = "auth-api-mode", env = "MOQ_AUTH_API_MODE", setting = "auth.api_mode")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub api_mode: Option<AuthApiMode>,
+	pub api_mode: Option<ApiMode>,
 
 	/// Billing tier label for mTLS peers when the auth API doesn't return one
 	/// (or no `--auth-api` is configured). Defaults to the unprefixed tier.
@@ -614,7 +613,7 @@ pub struct AuthConfig {
 ///
 /// CLI: `--auth-public <prefix>` creates `Simple(vec![prefix])`.
 #[derive(Clone, Debug)]
-pub enum PublicConfig {
+pub enum Public {
 	/// One or more prefixes granting both subscribe and publish.
 	#[deprecated = "Use the detailed config; this is for backwards compatibility only"]
 	Simple(Vec<String>),
@@ -638,22 +637,22 @@ pub struct PublicDetailed {
 	pub api: Option<String>,
 }
 
-impl PublicConfig {
+impl Public {
 	/// Normalize into the detailed form.
 	pub fn into_detailed(self) -> PublicDetailed {
 		match self {
 			#[allow(deprecated)]
-			PublicConfig::Simple(prefixes) => PublicDetailed {
+			Public::Simple(prefixes) => PublicDetailed {
 				subscribe: prefixes.clone(),
 				publish: prefixes,
 				api: None,
 			},
-			PublicConfig::Detailed(d) => d,
+			Public::Detailed(d) => d,
 		}
 	}
 
-	/// Deserialize `Option<PublicConfig>` from TOML: dispatches based on value type.
-	fn deserialize_option<'de, D>(deserializer: D) -> Result<Option<PublicConfig>, D::Error>
+	/// Deserialize `Option<Public>` from TOML: dispatches based on value type.
+	fn deserialize_option<'de, D>(deserializer: D) -> Result<Option<Public>, D::Error>
 	where
 		D: serde::Deserializer<'de>,
 	{
@@ -664,7 +663,7 @@ impl PublicConfig {
 
 		match value {
 			#[allow(deprecated)]
-			toml::Value::String(s) => Ok(Some(PublicConfig::Simple(vec![s]))),
+			toml::Value::String(s) => Ok(Some(Public::Simple(vec![s]))),
 			toml::Value::Array(arr) => {
 				let strings: Vec<String> = arr
 					.into_iter()
@@ -674,7 +673,7 @@ impl PublicConfig {
 					Ok(None)
 				} else {
 					#[allow(deprecated)]
-					Ok(Some(PublicConfig::Simple(strings)))
+					Ok(Some(Public::Simple(strings)))
 				}
 			}
 			toml::Value::Table(table) => {
@@ -682,7 +681,7 @@ impl PublicConfig {
 				if d.subscribe.is_empty() && d.publish.is_empty() && d.api.is_none() {
 					Ok(None)
 				} else {
-					Ok(Some(PublicConfig::Detailed(d)))
+					Ok(Some(Public::Detailed(d)))
 				}
 			}
 			other => Err(serde::de::Error::custom(format!(
@@ -693,25 +692,25 @@ impl PublicConfig {
 }
 
 /// Clap parses `--auth-public <value>` as a string.
-impl std::str::FromStr for PublicConfig {
+impl std::str::FromStr for Public {
 	type Err = std::convert::Infallible;
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		#[allow(deprecated)]
-		Ok(PublicConfig::Simple(vec![s.to_string()]))
+		Ok(Public::Simple(vec![s.to_string()]))
 	}
 }
 
-impl Serialize for PublicConfig {
+impl Serialize for Public {
 	fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
 	where
 		S: serde::Serializer,
 	{
 		match self {
 			#[allow(deprecated)]
-			PublicConfig::Simple(v) if v.len() == 1 => v[0].serialize(serializer),
+			Public::Simple(v) if v.len() == 1 => v[0].serialize(serializer),
 			#[allow(deprecated)]
-			PublicConfig::Simple(v) => v.serialize(serializer),
-			PublicConfig::Detailed(d) => d.serialize(serializer),
+			Public::Simple(v) => v.serialize(serializer),
+			Public::Detailed(d) => d.serialize(serializer),
 		}
 	}
 }
@@ -738,7 +737,7 @@ struct PublicResponse {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
-pub enum AuthApiMode {
+pub enum ApiMode {
 	/// The endpoint returns a verifying `key` for the JWT's `kid`, or the `public`
 	/// prefixes for a tokenless connection, and the relay checks the credential
 	/// itself.
@@ -765,7 +764,7 @@ pub enum AuthApiMode {
 /// Parses the same spellings the CLI and TOML accept, case-insensitively. An
 /// unrecognized mode is an ERROR, not a silent fall back to the default: the
 /// value decides who authorizes every connection.
-impl std::str::FromStr for AuthApiMode {
+impl std::str::FromStr for ApiMode {
 	type Err = String;
 
 	fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
@@ -792,7 +791,7 @@ struct AuthApi {
 	/// How this endpoint decides a connection. Part of the endpoint rather than
 	/// of [`Auth`], so a live session's re-check asks the question its admission
 	/// asked - see [`Revalidate::api`].
-	mode: AuthApiMode,
+	mode: ApiMode,
 	client: ClientWithMiddleware,
 	revalidator: Arc<Revalidator>,
 }
@@ -820,7 +819,7 @@ impl AuthApi {
 	/// error is an `Err`): with `--auth-api` the verifying key comes from here,
 	/// so there is no safe fallback. Also returns the response's `Cache-Control`
 	/// timings, which drive revalidation.
-	async fn fetch(&self, request: &AuthApiRequest) -> Result<(AuthApiResponse, CacheHints), AuthError> {
+	async fn fetch(&self, request: &AuthApiRequest) -> Result<(AuthApiResponse, CacheHints), Error> {
 		let mut get = self.client.get(request.url(&self.base));
 		let forwarded = request.credential.is_some();
 		if let Some(credential) = &request.credential {
@@ -834,14 +833,14 @@ impl AuthApi {
 		// the staleness deadline forever, so a revoked session would keep serving
 		// for the whole outage and the window would never fail closed.
 		if Self::revalidation_failed(response.headers()) {
-			return Err(AuthError::ApiStale);
+			return Err(Error::ApiStale);
 		}
 		// A 404 is the endpoint answering, not failing: it means no grant here.
 		// Named so revalidation can close the session immediately instead of
 		// waiting out the staleness window, while admission keeps reporting it as
 		// an upstream problem (see the StatusCode mapping).
 		if response.status() == http::StatusCode::NOT_FOUND {
-			return Err(AuthError::NotFound);
+			return Err(Error::NotFound);
 		}
 		// A 401/403 is only a statement about a VIEWER where the relay actually
 		// forwarded that viewer's credential - i.e. proxy mode with one present.
@@ -854,7 +853,7 @@ impl AuthApi {
 				response.status(),
 				http::StatusCode::UNAUTHORIZED | http::StatusCode::FORBIDDEN
 			) {
-			return Err(AuthError::Refused);
+			return Err(Error::Refused);
 		}
 		let response = response.error_for_status()?;
 		let hints = CacheHints::from_headers(response.headers());
@@ -868,13 +867,13 @@ impl AuthApi {
 struct AuthApiRequest {
 	/// The connection path.
 	path: String,
-	/// The connection's URL host. Sent in [`AuthApiMode::Proxy`] only, where the
+	/// The connection's URL host. Sent in [`ApiMode::Proxy`] only, where the
 	/// endpoint does its own subdomain routing.
 	host: Option<String>,
-	/// The JWT `kid` to resolve a verifying key for ([`AuthApiMode::Token`]).
+	/// The JWT `kid` to resolve a verifying key for ([`ApiMode::Token`]).
 	kid: Option<String>,
 	/// The credential, forwarded as `Authorization: Bearer`
-	/// ([`AuthApiMode::Proxy`]).
+	/// ([`ApiMode::Proxy`]).
 	credential: Option<String>,
 	/// Set only after the relay has verified the peer's client certificate.
 	mtls: bool,
@@ -923,7 +922,7 @@ impl AuthApiRequest {
 }
 
 /// Response from the unified `--auth-api` endpoint. Every field is optional; the
-/// relay defaults anything absent (see [`AuthConfig::auth_api`]).
+/// relay defaults anything absent (see [`Config::auth_api`]).
 #[derive(Debug, Default, Deserialize)]
 struct AuthApiResponse {
 	/// Canonical full root to scope to; absent -> use the request path as-is.
@@ -937,7 +936,7 @@ struct AuthApiResponse {
 	#[serde(default)]
 	key: Option<Key>,
 	/// A grant the endpoint resolved from the credential itself, for a credential
-	/// the relay cannot verify locally. Read only in [`AuthApiMode::Proxy`]; token
+	/// the relay cannot verify locally. Read only in [`ApiMode::Proxy`]; token
 	/// mode ignores it entirely. See [`GrantResponse`].
 	#[serde(default)]
 	grant: Option<GrantResponse>,
@@ -958,7 +957,7 @@ impl AuthApiResponse {
 }
 
 /// A grant the auth API resolved itself, instead of handing back a key for the
-/// relay to verify a JWT against. Read only in [`AuthApiMode::Proxy`].
+/// relay to verify a JWT against. Read only in [`ApiMode::Proxy`].
 ///
 /// This is what lets a credential the relay cannot parse authorize a connection:
 /// the relay forwards it as `Authorization: Bearer` and the endpoint answers with
@@ -986,19 +985,19 @@ impl GrantResponse {
 	/// `Key::verify` does with an expired JWT. Admitting it would hand back a
 	/// session that closes on its next tick, which looks like a flap rather than a
 	/// refusal.
-	fn to_claims(&self, path: &str) -> Result<moq_auth::Claims, AuthError> {
+	fn to_claims(&self, path: &str) -> Result<moq_auth::Claims, Error> {
 		// `SystemTime + Duration` PANICS on overflow, so an endpoint answering with
 		// a huge `exp` would take down the connection task rather than be refused.
 		let expires = match self.exp {
 			Some(exp) => Some(
 				std::time::UNIX_EPOCH
 					.checked_add(Duration::from_secs(exp))
-					.ok_or(AuthError::Refused)?,
+					.ok_or(Error::Refused)?,
 			),
 			None => None,
 		};
 		if expires.is_some_and(|expires| expires <= std::time::SystemTime::now()) {
-			return Err(AuthError::Refused);
+			return Err(Error::Refused);
 		}
 		let mut claims = moq_auth::Claims::default()
 			.with_root(self.root.clone().unwrap_or_else(|| path.to_string()))
@@ -1030,7 +1029,7 @@ impl PublicAccess {
 	}
 }
 
-impl AuthConfig {
+impl Config {
 	/// Initializes an [`Auth`] instance from this configuration.
 	///
 	/// `client_tls` is the cluster client TLS (`--connect-tls-*`); the auth client
@@ -1080,7 +1079,7 @@ impl AuthConfig {
 		// and still forwards the host, so an endpoint doing its own routing
 		// prepends `customer` again.
 		anyhow::ensure!(
-			self.api_mode != Some(AuthApiMode::Proxy) || self.domains.is_empty(),
+			self.api_mode != Some(ApiMode::Proxy) || self.domains.is_empty(),
 			"--auth-api-mode proxy cannot be combined with --auth-domain: the endpoint owns subdomain routing"
 		);
 
@@ -1111,7 +1110,7 @@ impl AuthConfig {
 /// [`Auth::verify`]) rather than by struct literal.
 #[derive(Debug)]
 #[non_exhaustive]
-pub struct AuthToken {
+pub struct Token {
 	/// The root path this token is scoped to.
 	pub root: PathOwned,
 	/// Paths the holder is allowed to subscribe to, relative to `root`.
@@ -1133,7 +1132,7 @@ pub struct AuthToken {
 	pub(crate) revalidate: Option<Revalidate>,
 }
 
-impl AuthToken {
+impl Token {
 	/// Wait until the backing credential expires, or forever when it has no expiry.
 	pub(crate) async fn expired(&self) {
 		elapsed(self.expires).await
@@ -1187,7 +1186,7 @@ pub(crate) struct Revalidate {
 	/// differently-configured endpoint, or against none at all.
 	api: AuthApi,
 	/// The admission request, replayed verbatim on each re-check.
-	params: Arc<AuthParams>,
+	params: Arc<Params>,
 	/// The scope admission granted. A replay that no longer covers it is a
 	/// revocation, so a narrowed grant closes the session and the client
 	/// reconnects into the narrower one.
@@ -1195,14 +1194,14 @@ pub(crate) struct Revalidate {
 	/// The schedule admission resolved. Its existence IS the opt-in: no `max-age`
 	/// on the admission reply means no `Revalidate` at all.
 	schedule: Schedule,
-	/// The outer bound admission granted. Fixed in [`AuthApiMode::Token`], where
+	/// The outer bound admission granted. Fixed in [`ApiMode::Token`], where
 	/// it comes from a signed JWT that no endpoint reply gets to extend. Proxy
 	/// mode has no signature to respect - the endpoint IS the authority - so each
 	/// re-check's word replaces this outright.
 	expires: Option<std::time::SystemTime>,
 }
 
-/// The part of an [`AuthToken`] a re-check has to keep vouching for.
+/// The part of an [`Token`] a re-check has to keep vouching for.
 #[derive(Debug, Clone)]
 struct Scope {
 	root: PathOwned,
@@ -1211,7 +1210,7 @@ struct Scope {
 }
 
 impl Scope {
-	fn new(token: &AuthToken) -> Self {
+	fn new(token: &Token) -> Self {
 		Self {
 			root: token.root.clone(),
 			subscribe: token.subscribe.clone(),
@@ -1224,7 +1223,7 @@ impl Scope {
 	/// Deliberately "covers" and not "equals": an endpoint WIDENING a grant (the
 	/// customer adds a public prefix) must not drop live sessions, while any loss
 	/// of authority must.
-	fn covered_by(&self, token: &AuthToken) -> bool {
+	fn covered_by(&self, token: &Token) -> bool {
 		let covers = |granted: &PathPrefixes, held: &PathPrefixes| {
 			held.iter()
 				.all(|held| granted.iter().any(|granted| held.has_prefix(granted)))
@@ -1311,7 +1310,7 @@ enum Alias {
 	Rename,
 	/// The endpoint owns the whole mapping and may add or drop segments, which is
 	/// what lets it resolve a forwarded host to a root the client never dialed.
-	/// Only [`AuthApiMode::Proxy`], where the endpoint decides everything anyway.
+	/// Only [`ApiMode::Proxy`], where the endpoint decides everything anyway.
 	Rewrite,
 }
 
@@ -1340,9 +1339,9 @@ struct FlightSlot {
 /// One auth-API re-check request; sessions that would issue the identical
 /// request share a flight. Built by [`AuthApiRequest::identity`].
 ///
-/// In [`AuthApiMode::Token`] the credential is absent, so an audience sharing one
+/// In [`ApiMode::Token`] the credential is absent, so an audience sharing one
 /// `kid` shares one re-check however many distinct tokens they hold. In
-/// [`AuthApiMode::Proxy`] the credential is the authorization, so nothing merges
+/// [`ApiMode::Proxy`] the credential is the authorization, so nothing merges
 /// across viewers - that is the cost of the mode, not a defect in the key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct FlightKey {
@@ -1412,38 +1411,38 @@ impl KeyResolver {
 		Self { source }
 	}
 
-	async fn resolve(&self, kid: Option<&str>) -> Result<Arc<Key>, AuthError> {
+	async fn resolve(&self, kid: Option<&str>) -> Result<Arc<Key>, Error> {
 		match &self.source {
 			KeySource::File(path) => {
-				let key = Key::from_file_async(path).await.map_err(|_| AuthError::KeyNotFound)?;
+				let key = Key::from_file_async(path).await.map_err(|_| Error::KeyNotFound)?;
 				Ok(Arc::new(key))
 			}
 			KeySource::Dir(dir) => {
-				let kid = kid.ok_or(AuthError::MissingKeyId)?;
+				let kid = kid.ok_or(Error::MissingKeyId)?;
 				let kid = KeyId::decode(kid)?;
 				let path = dir.join(format!("{kid}.jwk"));
-				let key = Key::from_file_async(&path).await.map_err(|_| AuthError::KeyNotFound)?;
+				let key = Key::from_file_async(&path).await.map_err(|_| Error::KeyNotFound)?;
 				Ok(Arc::new(key))
 			}
 			KeySource::Url { url, client } => Self::fetch_key(client, url.clone()).await,
 			KeySource::UrlDir { base, client } => {
-				let kid = kid.ok_or(AuthError::MissingKeyId)?;
+				let kid = kid.ok_or(Error::MissingKeyId)?;
 				let kid = KeyId::decode(kid)?;
-				let url = base.join(&format!("{kid}.jwk")).map_err(|_| AuthError::KeyNotFound)?;
+				let url = base.join(&format!("{kid}.jwk")).map_err(|_| Error::KeyNotFound)?;
 				Self::fetch_key(client, url).await
 			}
 		}
 	}
 
-	async fn fetch_key(client: &ClientWithMiddleware, url: url::Url) -> Result<Arc<Key>, AuthError> {
+	async fn fetch_key(client: &ClientWithMiddleware, url: url::Url) -> Result<Arc<Key>, Error> {
 		let response = client.get(url).send().await?;
 
 		if response.status() == http::StatusCode::NOT_FOUND {
-			return Err(AuthError::KeyNotFound);
+			return Err(Error::KeyNotFound);
 		}
 
 		let body = response.error_for_status()?.text().await?;
-		let key = Key::from_str(&body).map_err(|_| AuthError::DecodeFailed)?;
+		let key = Key::from_str(&body).map_err(|_| Error::DecodeFailed)?;
 		Ok(Arc::new(key))
 	}
 }
@@ -1459,19 +1458,19 @@ pub struct Auth {
 	resolver: Option<Arc<KeyResolver>>,
 	/// Public (unauthenticated) access with static prefixes and/or an API.
 	public: PublicAccess,
-	/// Domain suffixes for subdomain-based slug routing. See [`AuthConfig::domains`].
+	/// Domain suffixes for subdomain-based slug routing. See [`Config::domains`].
 	domains: Arc<[String]>,
 	/// Optional unified auth API: one call per connection resolves the key,
 	/// public access, and alias together. Mutually exclusive with the standalone
-	/// key/public sources. See [`AuthConfig::auth_api`].
+	/// key/public sources. See [`Config::auth_api`].
 	auth_api: Option<AuthApi>,
 	/// Billing tier recorded for an mTLS peer when the auth API doesn't return a
-	/// tier (or none is configured). See [`AuthConfig::mtls_tier`].
+	/// tier (or none is configured). See [`Config::mtls_tier`].
 	mtls_tier: Tier,
 }
 
 impl Auth {
-	pub async fn new(config: AuthConfig) -> anyhow::Result<Self> {
+	pub async fn new(config: Config) -> anyhow::Result<Self> {
 		config.validate()?;
 
 		// Outbound auth HTTP (JWK + auth/public-API fetches) reuses the cluster
@@ -1598,8 +1597,8 @@ impl Auth {
 				client: crate::http_client::build(
 					&tls,
 					match config.api_mode.unwrap_or_default() {
-						AuthApiMode::Token => crate::http_client::CacheScope::Shared,
-						AuthApiMode::Proxy => crate::http_client::CacheScope::Private,
+						ApiMode::Token => crate::http_client::CacheScope::Shared,
+						ApiMode::Proxy => crate::http_client::CacheScope::Private,
 					},
 				)?,
 				revalidator: Arc::default(),
@@ -1618,17 +1617,17 @@ impl Auth {
 
 	/// Override the mTLS fallback billing tier. For the
 	/// mTLS-only stub built via [`Auth::default`], where there is no
-	/// [`AuthConfig`] to carry `--auth-mtls-tier`. An empty label selects the
+	/// [`Config`] to carry `--auth-mtls-tier`. An empty label selects the
 	/// default (unprefixed) tier.
 	pub fn with_mtls_tier(mut self, tier: Option<String>) -> Self {
 		self.mtls_tier = crate::configured_tier(tier);
 		self
 	}
 
-	/// Build [`AuthParams`] from an incoming connection URL, applying any
+	/// Build [`Params`] from an incoming connection URL, applying any
 	/// configured subdomain-based slug routing.
-	pub(crate) fn params_from_url(&self, url: &url::Url) -> AuthParams {
-		AuthParams::from_url(url, &self.domains)
+	pub(crate) fn params_from_url(&self, url: &url::Url) -> Params {
+		Params::from_url(url, &self.domains)
 	}
 
 	/// Build a full-access token for a peer already authenticated by mTLS.
@@ -1637,9 +1636,9 @@ impl Auth {
 	/// This method applies the relay's canonical alias resolution and billing
 	/// tier decision, so embedded HTTP handlers get the same authorization scope
 	/// as the built-in relay routes.
-	pub async fn verify_mtls(&self, path: &str, transport: Option<Transport>) -> Result<AuthToken, AuthError> {
+	pub async fn verify_mtls(&self, path: &str, transport: Option<Transport>) -> Result<Token, Error> {
 		let (root, tier) = self.resolve_mtls(path, transport).await?;
-		let mut token = AuthToken::unrestricted(Path::new(&root).to_owned());
+		let mut token = Token::unrestricted(Path::new(&root).to_owned());
 		token.tier = tier;
 		Ok(token)
 	}
@@ -1658,7 +1657,7 @@ impl Auth {
 	/// canonical root (e.g. `x7k2qp`), producing a zombie session: the publisher
 	/// believes it is connected and never reconnects, but nothing is ever served.
 	/// Failing closed lets the client retry and self-heal once the API recovers.
-	async fn resolve_mtls(&self, path: &str, transport: Option<Transport>) -> Result<(String, Tier), AuthError> {
+	async fn resolve_mtls(&self, path: &str, transport: Option<Transport>) -> Result<(String, Tier), Error> {
 		let Some(api) = &self.auth_api else {
 			return Ok((path.to_string(), self.mtls_tier.clone()));
 		};
@@ -1680,7 +1679,7 @@ impl Auth {
 	/// Verify a connection via the unified `--auth-api`: one call returns the
 	/// alias (root), the billing tier, and EITHER something to verify the
 	/// credential against (a `key`) or the answer itself (a `grant`).
-	async fn verify_via_api(&self, api: &AuthApi, params: &AuthParams) -> Result<(AuthToken, CacheHints), AuthError> {
+	async fn verify_via_api(&self, api: &AuthApi, params: &Params) -> Result<(Token, CacheHints), Error> {
 		let request = Self::api_request(api, params)?;
 		let (resp, hints) = api.fetch(&request).await?;
 		Ok((Self::authorize(api, params, &resp)?, hints))
@@ -1691,25 +1690,25 @@ impl Auth {
 	/// Split out from the fetch because the two have different scopes: the reply
 	/// depends only on the request and is shared, while the authorization depends
 	/// on the credential and is emphatically NOT. See [`Fetched`].
-	fn authorize(api: &AuthApi, params: &AuthParams, resp: &AuthApiResponse) -> Result<AuthToken, AuthError> {
+	fn authorize(api: &AuthApi, params: &Params, resp: &AuthApiResponse) -> Result<Token, Error> {
 		let claims = match api.mode {
 			// The endpoint hands back something to check the credential AGAINST,
 			// and the relay does the checking.
-			AuthApiMode::Token => match params.jwt.as_deref() {
+			ApiMode::Token => match params.jwt.as_deref() {
 				Some(token) => {
-					let key = resp.key.as_ref().ok_or(AuthError::KeyNotFound)?;
+					let key = resp.key.as_ref().ok_or(Error::KeyNotFound)?;
 					// claims.root is the token's own root (a vanity name OR a pid); it
 					// is checked against the ORIGINAL connection path below, not the
 					// alias, so a vanity token matches a vanity URL and a pid token
 					// matches a pid URL.
-					key.verify(token).map_err(|_| AuthError::DecodeFailed)?
+					key.verify(token).map_err(|_| Error::DecodeFailed)?
 				}
 				None => {
 					let public = resp.public.as_ref();
 					let subscribe = public.map(|p| p.subscribe.clone()).unwrap_or_default();
 					let publish = public.map(|p| p.publish.clone()).unwrap_or_default();
 					if subscribe.is_empty() && publish.is_empty() {
-						return Err(AuthError::ExpectedToken);
+						return Err(Error::ExpectedToken);
 					}
 					// Anonymous access: anchor the public claims at the connection path
 					// so the overlap check below is a no-op; routing lands on the alias.
@@ -1721,10 +1720,10 @@ impl Auth {
 			},
 			// The endpoint already decided. A reply with no usable grant is a
 			// refusal; there is no second shape to fall back to.
-			AuthApiMode::Proxy => {
-				let grant = resp.grant.as_ref().ok_or(AuthError::Refused)?;
+			ApiMode::Proxy => {
+				let grant = resp.grant.as_ref().ok_or(Error::Refused)?;
 				if grant.is_empty() {
-					return Err(AuthError::Refused);
+					return Err(Error::Refused);
 				}
 				grant.to_claims(&params.path)?
 			}
@@ -1737,21 +1736,17 @@ impl Auth {
 	///
 	/// Admission and every re-check build the request here, so the flight key can
 	/// be taken from the request itself rather than reconstructed beside it.
-	fn api_request(api: &AuthApi, params: &AuthParams) -> Result<AuthApiRequest, AuthError> {
+	fn api_request(api: &AuthApi, params: &Params) -> Result<AuthApiRequest, Error> {
 		let transport = params.transport.map(Transport::as_str);
 		Ok(match api.mode {
 			// The credential is NEVER sent: the response depends only on (kid, root,
 			// transport), which is what lets a whole audience sharing a signing key
 			// resolve to one cached request per relay.
-			AuthApiMode::Token => AuthApiRequest {
+			ApiMode::Token => AuthApiRequest {
 				path: params.path.clone(),
 				host: None,
 				kid: match params.jwt.as_deref() {
-					Some(token) => {
-						jsonwebtoken::decode_header(token)
-							.map_err(|_| AuthError::DecodeFailed)?
-							.kid
-					}
+					Some(token) => jsonwebtoken::decode_header(token).map_err(|_| Error::DecodeFailed)?.kid,
 					None => None,
 				},
 				credential: None,
@@ -1759,7 +1754,7 @@ impl Auth {
 				transport,
 			},
 			// The connection goes over verbatim and the relay verifies nothing.
-			AuthApiMode::Proxy => AuthApiRequest {
+			ApiMode::Proxy => AuthApiRequest {
 				path: params.path.clone(),
 				host: params.host.clone(),
 				kid: None,
@@ -1787,18 +1782,18 @@ impl Auth {
 	/// routes to the request path unchanged. Connections default to the unprefixed
 	/// tier; the API may bucket specific ones under a named tier.
 	fn finalize_api(
-		params: &AuthParams,
-		mode: AuthApiMode,
+		params: &Params,
+		mode: ApiMode,
 		alias: Option<String>,
 		tier: Option<Tier>,
 		claims: moq_auth::Claims,
-	) -> Result<AuthToken, AuthError> {
+	) -> Result<Token, Error> {
 		let route_root = alias.unwrap_or_else(|| params.path.clone());
 		// Check the token root against the ORIGINAL connection path (vanity or
 		// pid); anchor the resulting scope on the alias (canonical pid).
 		let alias = match mode {
-			AuthApiMode::Token => Alias::Rename,
-			AuthApiMode::Proxy => Alias::Rewrite,
+			ApiMode::Token => Alias::Rename,
+			ApiMode::Proxy => Alias::Rewrite,
 		};
 		let mut token = Self::finalize(&params.path, &route_root, alias, claims)?;
 		token.tier = tier.unwrap_or_default();
@@ -1813,7 +1808,7 @@ impl Auth {
 	/// mTLS peers are the one exemption: they authenticate through
 	/// [`Auth::verify_mtls`], which never reaches here, so the relay mesh is never
 	/// torn down by a customer-facing decision.
-	async fn admit_via_api(&self, api: &AuthApi, params: &AuthParams) -> Result<AuthToken, AuthError> {
+	async fn admit_via_api(&self, api: &AuthApi, params: &Params) -> Result<Token, Error> {
 		let (mut token, hints) = self.verify_via_api(api, params).await?;
 		// No schedule means the endpoint named no `max-age`, so it has not asked to
 		// be re-consulted; the credential's own `exp` stays the only bound.
@@ -1827,15 +1822,15 @@ impl Auth {
 		Ok(token)
 	}
 
-	async fn fetch_public_response(client: &ClientWithMiddleware, url: &url::Url) -> Result<PublicResponse, AuthError> {
+	async fn fetch_public_response(client: &ClientWithMiddleware, url: &url::Url) -> Result<PublicResponse, Error> {
 		let body = client.get(url.clone()).send().await?.error_for_status()?.text().await?;
-		serde_json::from_str(&body).map_err(AuthError::from)
+		serde_json::from_str(&body).map_err(Error::from)
 	}
 
 	/// Parse the token from the user provided URL, returning the claims if successful.
 	/// If no token is provided, then the claims will use the public access configuration.
 	#[allow(deprecated)] // `claims.cluster` is deprecated but still accepted for backwards compat
-	pub async fn verify(&self, params: &AuthParams) -> Result<AuthToken, AuthError> {
+	pub async fn verify(&self, params: &Params) -> Result<Token, Error> {
 		// The unified API resolves key/grant + public + alias in one call.
 		if let Some(api) = &self.auth_api {
 			return self.admit_via_api(api, params).await;
@@ -1843,17 +1838,17 @@ impl Auth {
 
 		let claims = if let Some(token) = params.jwt.as_deref() {
 			let Some(resolver) = &self.resolver else {
-				return Err(AuthError::UnexpectedToken);
+				return Err(Error::UnexpectedToken);
 			};
 
 			// Extract kid from JWT header (may be None for single-key modes)
-			let header = jsonwebtoken::decode_header(token).map_err(|_| AuthError::DecodeFailed)?;
+			let header = jsonwebtoken::decode_header(token).map_err(|_| Error::DecodeFailed)?;
 
 			// Resolve the key (kid requirement depends on the source type)
 			let key = resolver.resolve(header.kid.as_deref()).await?;
 
 			// Verify the token with the resolved key
-			key.verify(token).map_err(|_| AuthError::DecodeFailed)?
+			key.verify(token).map_err(|_| Error::DecodeFailed)?
 		} else if !self.public.is_empty() {
 			// No JWT. Use public access (static prefixes + optional API).
 			let root = Path::new(&params.path);
@@ -1876,33 +1871,28 @@ impl Auth {
 					.with_subscribe(subtrees(&response.subscribe)?)
 					.with_publish(subtrees(&response.publish)?)
 			} else {
-				return Err(AuthError::ExpectedToken);
+				return Err(Error::ExpectedToken);
 			}
 		} else {
-			return Err(AuthError::ExpectedToken);
+			return Err(Error::ExpectedToken);
 		};
 
 		Self::finalize(&params.path, &params.path, Alias::Rename, claims)
 	}
 
-	/// Reduce verified `claims` into an [`AuthToken`].
+	/// Reduce verified `claims` into an [`Token`].
 	///
 	/// [`Claims::authorize`](moq_auth::Claims::authorize) does the overlap check and
 	/// rebases the permission prefixes against `check_root` (the ORIGINAL connection
 	/// path the client dialed, e.g. a vanity name); a token whose root sits outside
-	/// that path is rejected. The resulting `AuthToken.root` is anchored at
+	/// that path is rejected. The resulting `Token.root` is anchored at
 	/// `route_root` (the `--auth-api` alias, i.e. the canonical pid), so broadcasts
 	/// live under the stable pid on the backbone and survive vanity-name changes.
 	/// `route_root` is `check_root` with only its leading segment swapped to the pid
 	/// (same depth), so the rebased relative prefixes anchor unchanged. The standalone
 	/// path passes the same value for both (no alias). Shared by the standalone and
 	/// `--auth-api` paths.
-	fn finalize(
-		check_root: &str,
-		route_root: &str,
-		alias: Alias,
-		claims: moq_auth::Claims,
-	) -> Result<AuthToken, AuthError> {
+	fn finalize(check_root: &str, route_root: &str, alias: Alias, claims: moq_auth::Claims) -> Result<Token, Error> {
 		let root = Path::new(check_root);
 		let route_root = Path::new(route_root);
 		let depth = |path: &Path<'_>| {
@@ -1914,16 +1904,16 @@ impl Auth {
 		};
 
 		if alias == Alias::Rename && depth(&root) != depth(&route_root) {
-			return Err(AuthError::IncorrectRoot);
+			return Err(Error::IncorrectRoot);
 		}
 
 		// A token that grants nothing here is indistinguishable from one aimed at
 		// another root, so both reduce to IncorrectRoot.
-		let permissions = claims.authorize(check_root).map_err(|_| AuthError::IncorrectRoot)?;
+		let permissions = claims.authorize(check_root).map_err(|_| Error::IncorrectRoot)?;
 
 		// authorize() returns patterns already RELATIVE to check_root, so they anchor
 		// under route_root whatever its depth.
-		Ok(AuthToken {
+		Ok(Token {
 			root: route_root.to_owned(),
 			subscribe: prefixes(&permissions.subscribe)?,
 			publish: prefixes(&permissions.publish)?,
@@ -1941,7 +1931,7 @@ impl Auth {
 	/// the admitting endpoint. Proxy rechecks replace the expiry; token-mode
 	/// rechecks retain the signed expiry. Without revalidation, only the
 	/// credential's expiry applies. With neither, this waits forever.
-	pub async fn expired(&self, token: &AuthToken) -> Expired {
+	pub async fn expired(&self, token: &Token) -> Expired {
 		match &token.revalidate {
 			// The loop starts from this same credential bound and each reply may move
 			// it, so it subsumes the timer below rather than racing it. Racing would
@@ -2005,8 +1995,8 @@ impl Auth {
 					// admission's: the bound came off a signed JWT that a re-check only
 					// re-verifies, so no reply gets to move it.
 					bound = match grant.api.mode {
-						AuthApiMode::Token => grant.expires,
-						AuthApiMode::Proxy => expires,
+						ApiMode::Token => grant.expires,
+						ApiMode::Proxy => expires,
 					};
 					// A reply that stops naming `max-age` keeps the schedule the session
 					// already opted into, rather than silently becoming unrevocable.
@@ -2249,32 +2239,32 @@ mod tests {
 	#[test]
 	fn auth_params_from_path() {
 		// Path + JWT (the gateway media uplink shape).
-		let p = AuthParams::from_path_query("/customer/foo/bar", Some("jwt=xd"));
+		let p = Params::from_path_query("/customer/foo/bar", Some("jwt=xd"));
 		assert_eq!(p.path, "/customer/foo/bar");
 		assert_eq!(p.jwt.as_deref(), Some("xd"));
 
 		// Path only (tokenless public playback).
-		let p = AuthParams::from_path_query("/customer/foo/bar", None);
+		let p = Params::from_path_query("/customer/foo/bar", None);
 		assert_eq!(p.path, "/customer/foo/bar");
 		assert_eq!(p.jwt, None);
 
 		// Missing and root paths share the public empty representation, then use the
 		// canonical URL root for authentication.
-		let p = AuthParams::from_path_query("", None);
+		let p = Params::from_path_query("", None);
 		assert_eq!(p.path, "/");
 		assert_eq!(p.jwt, None);
 
 		// An empty jwt value counts as absent.
-		let p = AuthParams::from_path_query("/foo", Some("jwt="));
+		let p = Params::from_path_query("/foo", Some("jwt="));
 		assert_eq!(p.jwt, None);
 
 		// The jwt may sit among other query params and be URL-encoded.
-		let p = AuthParams::from_path_query("/foo", Some("a=1&jwt=ab%20cd"));
+		let p = Params::from_path_query("/foo", Some("a=1&jwt=ab%20cd"));
 		assert_eq!(p.path, "/foo");
 		assert_eq!(p.jwt.as_deref(), Some("ab cd"));
 
 		// Match URL query parsing when a client supplies duplicate credentials.
-		let p = AuthParams::from_path_query("/foo", Some("jwt=first&jwt=second"));
+		let p = Params::from_path_query("/foo", Some("jwt=first&jwt=second"));
 		assert_eq!(p.jwt.as_deref(), Some("second"));
 		let p = parse("https://example.com/foo?jwt=first&jwt=second", &[]);
 		assert_eq!(p.jwt.as_deref(), Some("second"));
@@ -2293,13 +2283,13 @@ mod tests {
 		dir
 	}
 
-	fn simple_public(prefix: &str) -> Option<PublicConfig> {
+	fn simple_public(prefix: &str) -> Option<Public> {
 		#[allow(deprecated)]
-		Some(PublicConfig::Simple(vec![prefix.to_string()]))
+		Some(Public::Simple(vec![prefix.to_string()]))
 	}
 
-	fn detailed_public(subscribe: &[&str], publish: &[&str]) -> Option<PublicConfig> {
-		Some(PublicConfig::Detailed(PublicDetailed {
+	fn detailed_public(subscribe: &[&str], publish: &[&str]) -> Option<Public> {
+		Some(Public::Detailed(PublicDetailed {
 			subscribe: subscribe.iter().map(|s| s.to_string()).collect(),
 			publish: publish.iter().map(|s| s.to_string()).collect(),
 			api: None,
@@ -2308,18 +2298,18 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_anonymous_access_with_public_path() -> anyhow::Result<()> {
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			public: simple_public("anon"),
 			..Default::default()
 		})
 		.await?;
 
-		let token = auth.verify(&AuthParams::new("/anon")).await?;
+		let token = auth.verify(&Params::new("/anon")).await?;
 		assert_eq!(token.root, "anon".as_path());
 		assert_eq!(token.subscribe, vec!["".as_path()]);
 		assert_eq!(token.publish, vec!["".as_path()]);
 
-		let token = auth.verify(&AuthParams::new("/anon/room/123")).await?;
+		let token = auth.verify(&Params::new("/anon/room/123")).await?;
 		assert_eq!(token.root, Path::new("anon/room/123").to_owned());
 		assert_eq!(token.subscribe, vec![Path::new("").to_owned()]);
 		assert_eq!(token.publish, vec![Path::new("").to_owned()]);
@@ -2329,13 +2319,13 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_anonymous_access_fully_public() -> anyhow::Result<()> {
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			public: simple_public(""),
 			..Default::default()
 		})
 		.await?;
 
-		let token = auth.verify(&AuthParams::new("/any/path")).await?;
+		let token = auth.verify(&Params::new("/any/path")).await?;
 		assert_eq!(token.root, Path::new("any/path").to_owned());
 		assert_eq!(token.subscribe, vec![Path::new("").to_owned()]);
 		assert_eq!(token.publish, vec![Path::new("").to_owned()]);
@@ -2345,13 +2335,13 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_anonymous_access_denied_wrong_prefix() -> anyhow::Result<()> {
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			public: simple_public("anon"),
 			..Default::default()
 		})
 		.await?;
 
-		let result = auth.verify(&AuthParams::new("/secret")).await;
+		let result = auth.verify(&Params::new("/secret")).await;
 		assert!(result.is_err());
 
 		Ok(())
@@ -2362,13 +2352,13 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
 
-		let result = auth.verify(&AuthParams::new("/any/path")).await;
+		let result = auth.verify(&Params::new("/any/path")).await;
 		assert!(result.is_err());
 
 		Ok(())
@@ -2376,14 +2366,14 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_token_provided_but_no_key_configured() -> anyhow::Result<()> {
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			public: simple_public("anon"),
 			..Default::default()
 		})
 		.await?;
 
 		let result = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/any/path".into(),
 				jwt: Some("fake-token".into()),
 				..Default::default()
@@ -2399,7 +2389,7 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
@@ -2412,7 +2402,7 @@ mod tests {
 		let token = key.sign(&claims)?;
 
 		let token = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/room/123".into(),
 				jwt: Some(token),
 				..Default::default()
@@ -2430,7 +2420,7 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
@@ -2444,7 +2434,7 @@ mod tests {
 				.with_root("room")
 				.with_subscribe([pattern.parse().unwrap()]);
 			let err = auth
-				.verify(&AuthParams {
+				.verify(&Params {
 					path: "/room".into(),
 					jwt: Some(key.sign(&claims)?),
 					..Default::default()
@@ -2452,7 +2442,7 @@ mod tests {
 				.await
 				.unwrap_err();
 			assert!(
-				matches!(&err, AuthError::UnsupportedPattern(p) if p == pattern),
+				matches!(&err, Error::UnsupportedPattern(p) if p == pattern),
 				"{pattern}: {err}"
 			);
 			assert!(err.is_refusal());
@@ -2463,7 +2453,7 @@ mod tests {
 			.with_root("room")
 			.with_publish(["alice/**".parse().unwrap()]);
 		let token = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/room".into(),
 				jwt: Some(key.sign(&claims)?),
 				..Default::default()
@@ -2479,7 +2469,7 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
@@ -2500,7 +2490,7 @@ mod tests {
 		let token = key.sign(&claims)?;
 
 		let token = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/room/123".into(),
 				jwt: Some(token),
 				..Default::default()
@@ -2519,7 +2509,7 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
@@ -2532,7 +2522,7 @@ mod tests {
 		let token = key.sign(&claims)?;
 
 		let result = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/secret".into(),
 				jwt: Some(token),
 				..Default::default()
@@ -2548,7 +2538,7 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
@@ -2561,7 +2551,7 @@ mod tests {
 		let token = key.sign(&claims)?;
 
 		let token = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/room/123".into(),
 				jwt: Some(token),
 				..Default::default()
@@ -2579,7 +2569,7 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
@@ -2591,7 +2581,7 @@ mod tests {
 		let token = key.sign(&claims)?;
 
 		let token = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/room/123".into(),
 				jwt: Some(token),
 				..Default::default()
@@ -2608,7 +2598,7 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
@@ -2620,7 +2610,7 @@ mod tests {
 		let token = key.sign(&claims)?;
 
 		let token = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/room/123".into(),
 				jwt: Some(token),
 				..Default::default()
@@ -2637,7 +2627,7 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
@@ -2650,7 +2640,7 @@ mod tests {
 		let token = key.sign(&claims)?;
 
 		let token = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/room/123/alice".into(),
 				jwt: Some(token),
 				..Default::default()
@@ -2669,7 +2659,7 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
@@ -2682,7 +2672,7 @@ mod tests {
 		let token = key.sign(&claims)?;
 
 		let token = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/room/123/alice".into(),
 				jwt: Some(token),
 				..Default::default()
@@ -2701,7 +2691,7 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
@@ -2714,7 +2704,7 @@ mod tests {
 		let token = key.sign(&claims)?;
 
 		let token = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/room/123/bob".into(),
 				jwt: Some(token),
 				..Default::default()
@@ -2733,7 +2723,7 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
@@ -2746,7 +2736,7 @@ mod tests {
 		let token = key.sign(&claims)?;
 
 		let verified = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/room/123/alice".into(),
 				jwt: Some(token.clone()),
 				..Default::default()
@@ -2758,7 +2748,7 @@ mod tests {
 		assert_eq!(verified.publish, vec!["".as_path()]);
 
 		let verified = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/room/123/bob".into(),
 				jwt: Some(token),
 				..Default::default()
@@ -2777,7 +2767,7 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
@@ -2790,7 +2780,7 @@ mod tests {
 		let token = key.sign(&claims)?;
 
 		let verified = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/room/123/users".into(),
 				jwt: Some(token.clone()),
 				..Default::default()
@@ -2802,7 +2792,7 @@ mod tests {
 		assert_eq!(verified.publish, vec!["alice/camera".as_path()]);
 
 		let verified = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/room/123/users/alice".into(),
 				jwt: Some(token),
 				..Default::default()
@@ -2821,7 +2811,7 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
@@ -2833,7 +2823,7 @@ mod tests {
 		let token = key.sign(&claims)?;
 
 		let verified = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/room/123/alice".into(),
 				jwt: Some(token),
 				..Default::default()
@@ -2849,7 +2839,7 @@ mod tests {
 		let token = key.sign(&claims)?;
 
 		let verified = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/room/123/alice".into(),
 				jwt: Some(token),
 				..Default::default()
@@ -2865,7 +2855,7 @@ mod tests {
 	#[tokio::test]
 	async fn test_key_resolver_file_missing_key() -> anyhow::Result<()> {
 		let dir = TempDir::new()?;
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
@@ -2878,45 +2868,45 @@ mod tests {
 		let token = key.sign(&claims)?;
 
 		let result = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/test".into(),
 				jwt: Some(token),
 				..Default::default()
 			})
 			.await;
-		assert!(matches!(result, Err(AuthError::KeyNotFound)));
+		assert!(matches!(result, Err(Error::KeyNotFound)));
 
 		Ok(())
 	}
 
 	#[tokio::test]
 	async fn test_public_subscribe_only() -> anyhow::Result<()> {
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			public: detailed_public(&["demo"], &[]),
 			..Default::default()
 		})
 		.await?;
 
 		// Anonymous access to / — can subscribe under demo/
-		let token = auth.verify(&AuthParams::new("/")).await?;
+		let token = auth.verify(&Params::new("/")).await?;
 		assert_eq!(token.root, "".as_path());
 		assert_eq!(token.subscribe, vec!["demo".as_path()]);
 		assert_eq!(token.publish, vec![]);
 
 		// Anonymous access to /demo — subscribe reduces to ""
-		let token = auth.verify(&AuthParams::new("/demo")).await?;
+		let token = auth.verify(&Params::new("/demo")).await?;
 		assert_eq!(token.root, "demo".as_path());
 		assert_eq!(token.subscribe, vec!["".as_path()]);
 		assert_eq!(token.publish, vec![]);
 
 		// Anonymous access to /demo/room/123 — still allowed (subpath of public prefix)
-		let token = auth.verify(&AuthParams::new("/demo/room/123")).await?;
+		let token = auth.verify(&Params::new("/demo/room/123")).await?;
 		assert_eq!(token.root, Path::new("demo/room/123").to_owned());
 		assert_eq!(token.subscribe, vec!["".as_path()]);
 		assert_eq!(token.publish, vec![]);
 
 		// Anonymous access to /other — should fail (not under public prefix)
-		let result = auth.verify(&AuthParams::new("/other")).await;
+		let result = auth.verify(&Params::new("/other")).await;
 		assert!(result.is_err());
 
 		Ok(())
@@ -2928,7 +2918,7 @@ mod tests {
 		let key2 = create_test_key_with_kid("key-2");
 		let dir = setup_key_dir(&[("key-1", &key1), ("key-2", &key2)]);
 
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
@@ -2941,7 +2931,7 @@ mod tests {
 		let token1 = key1.sign(&claims)?;
 
 		let verified = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/room/1".into(),
 				jwt: Some(token1),
 				..Default::default()
@@ -2956,7 +2946,7 @@ mod tests {
 		let token2 = key2.sign(&claims)?;
 
 		let verified = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/room/2".into(),
 				jwt: Some(token2),
 				..Default::default()
@@ -2969,14 +2959,14 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_public_publish_only() -> anyhow::Result<()> {
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			public: detailed_public(&[], &["demo"]),
 			..Default::default()
 		})
 		.await?;
 
 		// Anonymous access to / — can publish under demo/
-		let token = auth.verify(&AuthParams::new("/")).await?;
+		let token = auth.verify(&Params::new("/")).await?;
 		assert_eq!(token.subscribe, vec![]);
 		assert_eq!(token.publish, vec!["demo".as_path()]);
 
@@ -2998,7 +2988,7 @@ mod tests {
 		let key = Key::generate(Algorithm::HS256, None)?;
 		let dir = TempDir::new()?;
 
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
@@ -3010,31 +3000,31 @@ mod tests {
 		let token = key.sign(&claims)?;
 
 		let result = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/test".into(),
 				jwt: Some(token),
 				..Default::default()
 			})
 			.await;
-		assert!(matches!(result, Err(AuthError::MissingKeyId)));
+		assert!(matches!(result, Err(Error::MissingKeyId)));
 
 		Ok(())
 	}
 
 	#[tokio::test]
 	async fn test_public_detailed_both() -> anyhow::Result<()> {
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			public: detailed_public(&["demo"], &["demo"]),
 			..Default::default()
 		})
 		.await?;
 
-		let token = auth.verify(&AuthParams::new("/")).await?;
+		let token = auth.verify(&Params::new("/")).await?;
 		assert_eq!(token.subscribe, vec!["demo".as_path()]);
 		assert_eq!(token.publish, vec!["demo".as_path()]);
 
 		// Connecting to /demo reduces both to ""
-		let token = auth.verify(&AuthParams::new("/demo")).await?;
+		let token = auth.verify(&Params::new("/demo")).await?;
 		assert_eq!(token.subscribe, vec!["".as_path()]);
 		assert_eq!(token.publish, vec!["".as_path()]);
 
@@ -3043,14 +3033,14 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_public_empty_string_allows_everything() -> anyhow::Result<()> {
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			public: simple_public(""),
 			..Default::default()
 		})
 		.await?;
 
 		// Anonymous access to any path gets full pub/sub
-		let token = auth.verify(&AuthParams::new("/anything/here")).await?;
+		let token = auth.verify(&Params::new("/anything/here")).await?;
 		assert_eq!(token.subscribe, vec!["".as_path()]);
 		assert_eq!(token.publish, vec!["".as_path()]);
 
@@ -3063,7 +3053,7 @@ mod tests {
 		let key_file = tempfile::NamedTempFile::new()?;
 		key.to_file(key_file.path())?;
 
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			key: Some(key_file.path().to_string_lossy().to_string()),
 			public: detailed_public(&["demo"], &[]),
 			..Default::default()
@@ -3078,7 +3068,7 @@ mod tests {
 		let jwt = key.sign(&claims)?;
 
 		let token = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/secret".into(),
 				jwt: Some(jwt),
 				..Default::default()
@@ -3096,7 +3086,7 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
@@ -3110,7 +3100,7 @@ mod tests {
 		let token = key.sign(&claims)?;
 
 		let verified = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/".into(),
 				jwt: Some(token),
 				..Default::default()
@@ -3130,7 +3120,7 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
@@ -3144,7 +3134,7 @@ mod tests {
 		let token = key.sign(&claims)?;
 
 		let verified = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/room".into(),
 				jwt: Some(token),
 				..Default::default()
@@ -3164,7 +3154,7 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
@@ -3178,13 +3168,13 @@ mod tests {
 		let token = key.sign(&claims)?;
 
 		let result = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/other".into(),
 				jwt: Some(token),
 				..Default::default()
 			})
 			.await;
-		assert!(matches!(result, Err(AuthError::IncorrectRoot)));
+		assert!(matches!(result, Err(Error::IncorrectRoot)));
 
 		Ok(())
 	}
@@ -3194,7 +3184,7 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
@@ -3208,20 +3198,20 @@ mod tests {
 
 		// Connecting to /other should fail — no permissions remain after filtering
 		let result = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/other".into(),
 				jwt: Some(token),
 				..Default::default()
 			})
 			.await;
-		assert!(matches!(result, Err(AuthError::IncorrectRoot)));
+		assert!(matches!(result, Err(Error::IncorrectRoot)));
 
 		Ok(())
 	}
 
 	#[test]
 	fn test_toml_public_string() {
-		let config: AuthConfig = toml::from_str(r#"public = "anon""#).unwrap();
+		let config: Config = toml::from_str(r#"public = "anon""#).unwrap();
 		let d = config.public.unwrap().into_detailed();
 		assert_eq!(d.subscribe, vec!["anon"]);
 		assert_eq!(d.publish, vec!["anon"]);
@@ -3229,7 +3219,7 @@ mod tests {
 
 	#[test]
 	fn test_toml_public_empty_string() {
-		let config: AuthConfig = toml::from_str(r#"public = """#).unwrap();
+		let config: Config = toml::from_str(r#"public = """#).unwrap();
 		let d = config.public.unwrap().into_detailed();
 		assert_eq!(d.subscribe, vec![""]);
 		assert_eq!(d.publish, vec![""]);
@@ -3237,7 +3227,7 @@ mod tests {
 
 	#[test]
 	fn test_toml_public_array() {
-		let config: AuthConfig = toml::from_str(r#"public = ["anon", "demo"]"#).unwrap();
+		let config: Config = toml::from_str(r#"public = ["anon", "demo"]"#).unwrap();
 		let d = config.public.unwrap().into_detailed();
 		assert_eq!(d.subscribe, vec!["anon", "demo"]);
 		assert_eq!(d.publish, vec!["anon", "demo"]);
@@ -3245,7 +3235,7 @@ mod tests {
 
 	#[test]
 	fn test_toml_public_table_both() {
-		let config: AuthConfig = toml::from_str(
+		let config: Config = toml::from_str(
 			r#"[public]
 subscribe = "demo"
 publish = "anon"
@@ -3259,7 +3249,7 @@ publish = "anon"
 
 	#[test]
 	fn test_toml_public_table_arrays() {
-		let config: AuthConfig = toml::from_str(
+		let config: Config = toml::from_str(
 			r#"[public]
 subscribe = ["anon", "demo"]
 publish = ["anon"]
@@ -3273,7 +3263,7 @@ publish = ["anon"]
 
 	#[test]
 	fn test_toml_public_table_subscribe_only() {
-		let config: AuthConfig = toml::from_str(
+		let config: Config = toml::from_str(
 			r#"[public]
 subscribe = "demo"
 "#,
@@ -3286,7 +3276,7 @@ subscribe = "demo"
 
 	#[test]
 	fn test_toml_public_table_publish_only() {
-		let config: AuthConfig = toml::from_str(
+		let config: Config = toml::from_str(
 			r#"[public]
 publish = ["anon", "demo"]
 "#,
@@ -3299,13 +3289,13 @@ publish = ["anon", "demo"]
 
 	#[test]
 	fn test_toml_public_not_set() {
-		let config: AuthConfig = toml::from_str("").unwrap();
+		let config: Config = toml::from_str("").unwrap();
 		assert!(config.public.is_none());
 	}
 
 	#[test]
 	fn test_toml_public_url_string() {
-		let config: AuthConfig = toml::from_str(r#"public = "https://api.example.com/access""#).unwrap();
+		let config: Config = toml::from_str(r#"public = "https://api.example.com/access""#).unwrap();
 		let d = config.public.unwrap().into_detailed();
 		assert_eq!(d.subscribe, vec!["https://api.example.com/access"]);
 		assert_eq!(d.publish, vec!["https://api.example.com/access"]);
@@ -3313,7 +3303,7 @@ publish = ["anon", "demo"]
 
 	#[test]
 	fn test_toml_public_table_api() {
-		let config: AuthConfig = toml::from_str(
+		let config: Config = toml::from_str(
 			r#"[public]
 api = "https://api.example.com/access"
 "#,
@@ -3327,7 +3317,7 @@ api = "https://api.example.com/access"
 
 	#[test]
 	fn test_toml_public_table_api_with_static() {
-		let config: AuthConfig = toml::from_str(
+		let config: Config = toml::from_str(
 			r#"[public]
 subscribe = "anon"
 publish = "anon"
@@ -3343,7 +3333,7 @@ api = "https://api.example.com/access"
 
 	#[test]
 	fn test_usage_public_from_str() {
-		let config: PublicConfig = "anon".parse().unwrap();
+		let config: Public = "anon".parse().unwrap();
 		let d = config.into_detailed();
 		assert_eq!(d.subscribe, vec!["anon"]);
 		assert_eq!(d.publish, vec!["anon"]);
@@ -3351,7 +3341,7 @@ api = "https://api.example.com/access"
 
 	#[test]
 	fn test_usage_public_url_from_str() {
-		let config: PublicConfig = "https://api.example.com/access".parse().unwrap();
+		let config: Public = "https://api.example.com/access".parse().unwrap();
 		let d = config.into_detailed();
 		assert_eq!(d.subscribe, vec!["https://api.example.com/access"]);
 		assert_eq!(d.publish, vec!["https://api.example.com/access"]);
@@ -3360,7 +3350,7 @@ api = "https://api.example.com/access"
 	#[tokio::test]
 	async fn test_public_subscribe_flag_merged() -> anyhow::Result<()> {
 		// Simulates: --auth-public anon --auth-public-subscribe demo
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			public: simple_public("anon"),
 			public_subscribe: simple_public("demo"),
 			..Default::default()
@@ -3368,17 +3358,17 @@ api = "https://api.example.com/access"
 		.await?;
 
 		// /anon gets full pub+sub from --auth-public
-		let token = auth.verify(&AuthParams::new("/anon")).await?;
+		let token = auth.verify(&Params::new("/anon")).await?;
 		assert_eq!(token.subscribe, vec!["".as_path()]);
 		assert_eq!(token.publish, vec!["".as_path()]);
 
 		// /demo gets subscribe-only from --auth-public-subscribe
-		let token = auth.verify(&AuthParams::new("/demo")).await?;
+		let token = auth.verify(&Params::new("/demo")).await?;
 		assert_eq!(token.subscribe, vec!["".as_path()]);
 		assert_eq!(token.publish, vec![]);
 
 		// /secret gets nothing
-		let result = auth.verify(&AuthParams::new("/secret")).await;
+		let result = auth.verify(&Params::new("/secret")).await;
 		assert!(result.is_err());
 
 		Ok(())
@@ -3387,7 +3377,7 @@ api = "https://api.example.com/access"
 	#[tokio::test]
 	async fn test_public_publish_flag_merged() -> anyhow::Result<()> {
 		// Simulates: --auth-public anon --auth-public-publish uploads
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			public: simple_public("anon"),
 			public_publish: simple_public("uploads"),
 			..Default::default()
@@ -3395,7 +3385,7 @@ api = "https://api.example.com/access"
 		.await?;
 
 		// /uploads gets publish-only from --auth-public-publish
-		let token = auth.verify(&AuthParams::new("/uploads")).await?;
+		let token = auth.verify(&Params::new("/uploads")).await?;
 		assert_eq!(token.subscribe, vec![]);
 		assert_eq!(token.publish, vec!["".as_path()]);
 
@@ -3416,7 +3406,7 @@ api = "https://api.example.com/access"
 
 	/// Build an Auth wired to a wiremock server's `/keys/` URL key-dir.
 	async fn auth_with_url_key_dir(server: &MockServer) -> Auth {
-		Auth::new(AuthConfig {
+		Auth::new(Config {
 			key_dir: Some(format!("{}/keys/", server.uri())),
 			..Default::default()
 		})
@@ -3426,8 +3416,8 @@ api = "https://api.example.com/access"
 
 	/// Build an Auth wired to a wiremock server's `/public/` URL with optional static prefixes.
 	async fn auth_with_public_api(server: &MockServer, static_subscribe: &[&str], static_publish: &[&str]) -> Auth {
-		Auth::new(AuthConfig {
-			public: Some(PublicConfig::Detailed(PublicDetailed {
+		Auth::new(Config {
+			public: Some(Public::Detailed(PublicDetailed {
 				subscribe: static_subscribe.iter().map(|s| s.to_string()).collect(),
 				publish: static_publish.iter().map(|s| s.to_string()).collect(),
 				api: Some(format!("{}/public/", server.uri())),
@@ -3457,7 +3447,7 @@ api = "https://api.example.com/access"
 		let token = key.sign(&claims)?;
 
 		let verified = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/room/1".into(),
 				jwt: Some(token),
 				..Default::default()
@@ -3484,13 +3474,13 @@ api = "https://api.example.com/access"
 			.with_subscribe(["**".parse().unwrap()]);
 		let token = key.sign(&claims)?;
 		let result = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/room/1".into(),
 				jwt: Some(token),
 				..Default::default()
 			})
 			.await;
-		assert!(matches!(result, Err(AuthError::KeyNotFound)));
+		assert!(matches!(result, Err(Error::KeyNotFound)));
 		Ok(())
 	}
 
@@ -3511,20 +3501,20 @@ api = "https://api.example.com/access"
 			.with_subscribe(["**".parse().unwrap()]);
 		let token = key.sign(&claims)?;
 		let result = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/room/1".into(),
 				jwt: Some(token),
 				..Default::default()
 			})
 			.await;
-		assert!(matches!(result, Err(AuthError::ApiUnavailable(_))));
+		assert!(matches!(result, Err(Error::ApiUnavailable(_))));
 		Ok(())
 	}
 
 	#[tokio::test]
 	async fn test_url_key_dir_network_error_returns_api_unavailable() -> anyhow::Result<()> {
 		// Unreachable port — TCP connect refused.
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			key_dir: Some("http://127.0.0.1:1/keys/".to_string()),
 			..Default::default()
 		})
@@ -3536,13 +3526,13 @@ api = "https://api.example.com/access"
 			.with_subscribe(["**".parse().unwrap()]);
 		let token = key.sign(&claims)?;
 		let result = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/room/1".into(),
 				jwt: Some(token),
 				..Default::default()
 			})
 			.await;
-		assert!(matches!(result, Err(AuthError::ApiUnavailable(_))));
+		assert!(matches!(result, Err(Error::ApiUnavailable(_))));
 		Ok(())
 	}
 
@@ -3564,13 +3554,13 @@ api = "https://api.example.com/access"
 			.with_subscribe(["**".parse().unwrap()]);
 		let token = key.sign(&claims)?;
 		let result = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/room/1".into(),
 				jwt: Some(token),
 				..Default::default()
 			})
 			.await;
-		assert!(matches!(result, Err(AuthError::DecodeFailed)));
+		assert!(matches!(result, Err(Error::DecodeFailed)));
 		Ok(())
 	}
 
@@ -3599,7 +3589,7 @@ api = "https://api.example.com/access"
 		let token = key.sign(&claims)?;
 
 		for _ in 0..2 {
-			auth.verify(&AuthParams {
+			auth.verify(&Params {
 				path: "/room/1".into(),
 				jwt: Some(token.clone()),
 				..Default::default()
@@ -3624,7 +3614,7 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_public_api(&server, &[], &[]).await;
-		let token = auth.verify(&AuthParams::new("/foo")).await?;
+		let token = auth.verify(&Params::new("/foo")).await?;
 		assert_eq!(token.root, "foo".as_path());
 		assert_eq!(token.subscribe, vec!["".as_path()]);
 		assert_eq!(token.publish, vec!["".as_path()]);
@@ -3642,7 +3632,7 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_public_api(&server, &[], &[]).await;
-		let token = auth.verify(&AuthParams::new("/demo")).await?;
+		let token = auth.verify(&Params::new("/demo")).await?;
 		assert_eq!(token.root, "demo".as_path());
 		assert_eq!(token.subscribe, vec!["viewer".as_path()]);
 		assert!(token.publish.is_empty());
@@ -3661,7 +3651,7 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_public_api(&server, &["demo"], &[]).await;
-		let token = auth.verify(&AuthParams::new("/demo")).await?;
+		let token = auth.verify(&Params::new("/demo")).await?;
 		assert_eq!(token.subscribe, vec!["".as_path()]);
 		Ok(())
 	}
@@ -3679,7 +3669,7 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_public_api(&server, &["other"], &[]).await;
-		auth.verify(&AuthParams::new("/demo")).await?;
+		auth.verify(&Params::new("/demo")).await?;
 		Ok(())
 	}
 
@@ -3696,7 +3686,7 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_public_api(&server, &["demo"], &[]).await;
-		let token = auth.verify(&AuthParams::new("/")).await?;
+		let token = auth.verify(&Params::new("/")).await?;
 		// Connecting to root with static "demo" → subscribe scoped under demo/.
 		assert_eq!(token.subscribe, vec!["demo".as_path()]);
 		Ok(())
@@ -3704,8 +3694,8 @@ api = "https://api.example.com/access"
 
 	#[tokio::test]
 	async fn test_public_api_unreachable_returns_api_unavailable() -> anyhow::Result<()> {
-		let auth = Auth::new(AuthConfig {
-			public: Some(PublicConfig::Detailed(PublicDetailed {
+		let auth = Auth::new(Config {
+			public: Some(Public::Detailed(PublicDetailed {
 				subscribe: vec![],
 				publish: vec![],
 				api: Some("http://127.0.0.1:1/public/".to_string()),
@@ -3714,8 +3704,8 @@ api = "https://api.example.com/access"
 		})
 		.await?;
 
-		let result = auth.verify(&AuthParams::new("/demo")).await;
-		assert!(matches!(result, Err(AuthError::ApiUnavailable(_))));
+		let result = auth.verify(&Params::new("/demo")).await;
+		assert!(matches!(result, Err(Error::ApiUnavailable(_))));
 		Ok(())
 	}
 
@@ -3728,8 +3718,8 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_public_api(&server, &[], &[]).await;
-		let result = auth.verify(&AuthParams::new("/demo")).await;
-		assert!(matches!(result, Err(AuthError::ApiUnavailable(_))));
+		let result = auth.verify(&Params::new("/demo")).await;
+		assert!(matches!(result, Err(Error::ApiUnavailable(_))));
 		Ok(())
 	}
 
@@ -3744,8 +3734,8 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_public_api(&server, &[], &[]).await;
-		let result = auth.verify(&AuthParams::new("/demo")).await;
-		assert!(matches!(result, Err(AuthError::ApiInvalidResponse(_))));
+		let result = auth.verify(&Params::new("/demo")).await;
+		assert!(matches!(result, Err(Error::ApiInvalidResponse(_))));
 		assert_eq!(
 			http::StatusCode::from(result.unwrap_err()),
 			http::StatusCode::BAD_GATEWAY
@@ -3860,9 +3850,9 @@ api = "https://api.example.com/access"
 		let fx = mtls_fixture().await;
 
 		// With identity: the server accepts the connection and returns the JWK.
-		let auth_with_identity = Auth::new(AuthConfig {
+		let auth_with_identity = Auth::new(Config {
 			key_dir: Some(format!("{}/keys/", fx.base_url)),
-			tls: AuthTls {
+			tls: Tls {
 				root: vec![fx.ca_pem_path.clone()],
 				cert: Some(fx.client_cert_path.clone()),
 				key: Some(fx.client_key_path.clone()),
@@ -3877,7 +3867,7 @@ api = "https://api.example.com/access"
 			.with_subscribe(["**".parse().unwrap()]);
 		let token = fx.key.sign(&claims)?;
 		let verified = auth_with_identity
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/room/1".into(),
 				jwt: Some(token.clone()),
 				..Default::default()
@@ -3886,20 +3876,20 @@ api = "https://api.example.com/access"
 		assert_eq!(verified.root, "room/1".as_path());
 
 		// New path: the identity is supplied via the shared --client-tls-* config
-		// (injected through AuthConfig::init) instead of the deprecated
+		// (injected through Config::init) instead of the deprecated
 		// --auth-tls-* flags. The server accepts it the same way.
 		let mut client_tls = moq_tokio::tls::Connect::default();
 		client_tls.root = vec![fx.ca_pem_path.clone()];
 		client_tls.cert = Some(fx.client_cert_path.clone());
 		client_tls.key = Some(fx.client_key_path.clone());
-		let auth_via_client_tls = AuthConfig {
+		let auth_via_client_tls = Config {
 			key_dir: Some(format!("{}/keys/", fx.base_url)),
 			..Default::default()
 		}
 		.init(&client_tls)
 		.await?;
 		let verified = auth_via_client_tls
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/room/1".into(),
 				jwt: Some(token.clone()),
 				..Default::default()
@@ -3908,9 +3898,9 @@ api = "https://api.example.com/access"
 		assert_eq!(verified.root, "room/1".as_path());
 
 		// Without identity: the server should reject the TLS handshake → ApiUnavailable.
-		let auth_no_identity = Auth::new(AuthConfig {
+		let auth_no_identity = Auth::new(Config {
 			key_dir: Some(format!("{}/keys/", fx.base_url)),
-			tls: AuthTls {
+			tls: Tls {
 				root: vec![fx.ca_pem_path.clone()],
 				cert: None,
 				key: None,
@@ -3920,28 +3910,28 @@ api = "https://api.example.com/access"
 		})
 		.await?;
 		let result = auth_no_identity
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/room/1".into(),
 				jwt: Some(token),
 				..Default::default()
 			})
 			.await;
 		assert!(
-			matches!(result, Err(AuthError::ApiUnavailable(_))),
+			matches!(result, Err(Error::ApiUnavailable(_))),
 			"expected ApiUnavailable when client cert missing, got {result:?}"
 		);
 
 		Ok(())
 	}
 
-	fn parse(url: &str, domains: &[&str]) -> AuthParams {
+	fn parse(url: &str, domains: &[&str]) -> Params {
 		// Mirror the canonicalization Auth::new does so unit tests of from_url
 		// take suffixes in the same form callers would.
 		let domains: Vec<String> = domains
 			.iter()
 			.map(|s| format!(".{}", s.trim_start_matches('.').to_ascii_lowercase()))
 			.collect();
-		AuthParams::from_url(&url::Url::parse(url).unwrap(), &domains)
+		Params::from_url(&url::Url::parse(url).unwrap(), &domains)
 	}
 
 	#[test]
@@ -4021,7 +4011,7 @@ api = "https://api.example.com/access"
 			vec!["cdn.moq.dev".to_string(), "usw.cdn.moq.dev".to_string()],
 			vec!["usw.cdn.moq.dev".to_string(), "cdn.moq.dev".to_string()],
 		] {
-			let auth = Auth::new(AuthConfig {
+			let auth = Auth::new(Config {
 				public: detailed_public(&["customer"], &[]),
 				domains: order,
 				..Default::default()
@@ -4037,7 +4027,7 @@ api = "https://api.example.com/access"
 	async fn test_subdomain_slug_flows_through_public_prefix() -> anyhow::Result<()> {
 		// End-to-end: a subdomain slug, combined with a public prefix scoped to
 		// the customer, authorizes a connection that would otherwise be rejected.
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			public: detailed_public(&["customer/anon"], &[]),
 			domains: vec!["cdn.moq.dev".to_string()],
 			..Default::default()
@@ -4063,7 +4053,7 @@ api = "https://api.example.com/access"
 	fn unrestricted_scopes_to_root() {
 		// An mTLS publisher dialing "/demo" must announce under the `demo` root,
 		// not the cluster root, so path-scoped subscribers (e.g. `demo/*`) see it.
-		let token = AuthToken::unrestricted(Path::new("/demo").to_owned());
+		let token = Token::unrestricted(Path::new("/demo").to_owned());
 		assert_eq!(token.root, "demo".as_path());
 		assert_eq!(token.subscribe, vec!["".as_path()]);
 		assert_eq!(token.publish, vec!["".as_path()]);
@@ -4075,7 +4065,7 @@ api = "https://api.example.com/access"
 	fn unrestricted_empty_root_is_unscoped() {
 		// Cluster peers dial "/", which normalizes to an empty root, leaving the
 		// grant unscoped across the whole cluster.
-		let token = AuthToken::unrestricted(Path::new("/").to_owned());
+		let token = Token::unrestricted(Path::new("/").to_owned());
 		assert_eq!(token.root, "".as_path());
 		assert_eq!(token.tier, Tier::default());
 	}
@@ -4086,7 +4076,7 @@ api = "https://api.example.com/access"
 
 	/// Build an Auth wired to a wiremock server's `/auth` unified endpoint.
 	async fn auth_with_api(server: &MockServer) -> Auth {
-		Auth::new(AuthConfig {
+		Auth::new(Config {
 			auth_api: Some(format!("{}/auth", server.uri())),
 			..Default::default()
 		})
@@ -4096,9 +4086,9 @@ api = "https://api.example.com/access"
 
 	/// The same endpoint, with the relay forwarding instead of verifying.
 	async fn auth_with_api_proxy(server: &MockServer) -> Auth {
-		Auth::new(AuthConfig {
+		Auth::new(Config {
 			auth_api: Some(format!("{}/auth", server.uri())),
-			api_mode: Some(AuthApiMode::Proxy),
+			api_mode: Some(ApiMode::Proxy),
 			..Default::default()
 		})
 		.await
@@ -4132,7 +4122,7 @@ api = "https://api.example.com/access"
 		let token = key.sign(&claims)?;
 
 		let verified = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/demo/room".into(),
 				jwt: Some(token),
 				..Default::default()
@@ -4168,7 +4158,7 @@ api = "https://api.example.com/access"
 		let token = key.sign(&claims)?;
 
 		let verified = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/demo/room/cam".into(),
 				jwt: Some(token),
 				..Default::default()
@@ -4207,7 +4197,7 @@ api = "https://api.example.com/access"
 		let token = key.sign(&claims)?;
 
 		let verified = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/kixelated".into(),
 				jwt: Some(token),
 				..Default::default()
@@ -4233,7 +4223,7 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		let verified = auth.verify(&AuthParams::new("/demo")).await?;
+		let verified = auth.verify(&Params::new("/demo")).await?;
 		assert_eq!(verified.root, "x7k2qp".as_path());
 		assert_eq!(verified.subscribe, vec!["cam".as_path()]);
 		assert_eq!(verified.publish, vec![]);
@@ -4255,8 +4245,8 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		let result = auth.verify(&AuthParams::new("/demo/room")).await;
-		assert!(matches!(result, Err(AuthError::IncorrectRoot)));
+		let result = auth.verify(&Params::new("/demo/room")).await;
+		assert!(matches!(result, Err(Error::IncorrectRoot)));
 		Ok(())
 	}
 
@@ -4276,7 +4266,7 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		let verified = auth.verify(&AuthParams::new("/demo")).await?;
+		let verified = auth.verify(&Params::new("/demo")).await?;
 		assert_eq!(verified.tier, Tier::new("region/sjc"));
 		Ok(())
 	}
@@ -4299,7 +4289,7 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		let params = AuthParams {
+		let params = Params {
 			path: "/customer/live".into(),
 			transport: Some(Transport::Unix),
 			..Default::default()
@@ -4339,7 +4329,7 @@ api = "https://api.example.com/access"
 			.with_subscribe(["**".parse().unwrap()]);
 		let token = key.sign(&claims)?;
 		let verified = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/unknown".into(),
 				jwt: Some(token),
 				..Default::default()
@@ -4368,13 +4358,13 @@ api = "https://api.example.com/access"
 				.with_subscribe(["**".parse().unwrap()]),
 		)?;
 		let result = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/demo".into(),
 				jwt: Some(token),
 				..Default::default()
 			})
 			.await;
-		assert!(matches!(result, Err(AuthError::KeyNotFound)));
+		assert!(matches!(result, Err(Error::KeyNotFound)));
 		Ok(())
 	}
 
@@ -4389,7 +4379,7 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		let result = auth.verify(&AuthParams::new("/demo")).await;
+		let result = auth.verify(&Params::new("/demo")).await;
 		assert!(result.is_err());
 		Ok(())
 	}
@@ -4458,7 +4448,7 @@ api = "https://api.example.com/access"
 		// With no auth API configured the cert is the only credential: use the path
 		// and configured tier unchanged. This is the sole fail-open case. (A public
 		// path just makes the config valid; mTLS resolution ignores it.)
-		let auth = Auth::new(AuthConfig {
+		let auth = Auth::new(Config {
 			public: simple_public("anon"),
 			..Default::default()
 		})
@@ -4486,7 +4476,7 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_api(&server).await;
 		let err = auth.resolve_mtls("/demo", None).await.unwrap_err();
-		assert!(matches!(err, AuthError::NotFound));
+		assert!(matches!(err, Error::NotFound));
 		assert_eq!(http::StatusCode::from(err), http::StatusCode::BAD_GATEWAY);
 		Ok(())
 	}
@@ -4505,7 +4495,7 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_api(&server).await;
 		let err = auth.resolve_mtls("/demo", None).await.unwrap_err();
-		assert!(matches!(err, AuthError::ApiInvalidResponse(_)));
+		assert!(matches!(err, Error::ApiInvalidResponse(_)));
 		assert_eq!(http::StatusCode::from(err), http::StatusCode::BAD_GATEWAY);
 		Ok(())
 	}
@@ -4513,7 +4503,7 @@ api = "https://api.example.com/access"
 	#[tokio::test]
 	async fn auth_api_mutually_exclusive_with_key_dir() {
 		// --auth-api can't be combined with the standalone key/public sources.
-		let result = Auth::new(AuthConfig {
+		let result = Auth::new(Config {
 			auth_api: Some("https://api.example.com/cluster/auth".into()),
 			key_dir: Some("https://api.example.com/cluster/keys".into()),
 			..Default::default()
@@ -4551,7 +4541,7 @@ api = "https://api.example.com/access"
 		Revalidate {
 			api: test_api(auth),
 			expires: None,
-			params: Arc::new(AuthParams {
+			params: Arc::new(Params {
 				path: "demo".into(),
 				jwt,
 				..Default::default()
@@ -4687,7 +4677,7 @@ api = "https://api.example.com/access"
 		)?;
 
 		let verified = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "/demo".into(),
 				jwt: Some(jwt),
 				..Default::default()
@@ -4696,7 +4686,7 @@ api = "https://api.example.com/access"
 		let grant = verified.revalidate.expect("jwt session should carry a grant");
 		assert_eq!(grant.schedule.cadence, Duration::from_secs(300));
 
-		let anon = auth.verify(&AuthParams::new("/demo")).await?;
+		let anon = auth.verify(&Params::new("/demo")).await?;
 		assert!(anon.revalidate.is_some(), "anonymous sessions must revalidate too");
 
 		// mTLS is the one exemption: a customer decision must never tear down the
@@ -4723,7 +4713,7 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		let token = auth.verify(&AuthParams::new("/demo")).await?;
+		let token = auth.verify(&Params::new("/demo")).await?;
 		assert!(token.revalidate.is_none(), "no max-age means no opt-in");
 
 		// And so `expired` never resolves for a credential with no `exp` either.
@@ -4748,11 +4738,8 @@ api = "https://api.example.com/access"
 		assert!(!AuthApi::revalidation_failed(&http::HeaderMap::new()));
 		// And it must classify as unavailable, never as a revocation - nor, at
 		// admission, as the client's credential being rejected.
-		assert!(!AuthError::ApiStale.is_refusal());
-		assert_eq!(
-			http::StatusCode::from(&AuthError::ApiStale),
-			http::StatusCode::BAD_GATEWAY
-		);
+		assert!(!Error::ApiStale.is_refusal());
+		assert_eq!(http::StatusCode::from(&Error::ApiStale), http::StatusCode::BAD_GATEWAY);
 	}
 
 	/// An auth API that goes down must not sever the fleet. With no stale
@@ -4811,7 +4798,7 @@ api = "https://api.example.com/access"
 		.await;
 
 		let auth = auth_with_api(&server).await;
-		let token = auth.verify(&AuthParams::new("demo")).await?;
+		let token = auth.verify(&Params::new("demo")).await?;
 		let grant = token.revalidate.clone().expect("a max-age opts in");
 		assert_eq!(grant.schedule.cadence, CacheHints::MAX_TIMING);
 		assert_eq!(grant.schedule.staleness, CacheHints::MAX_TIMING);
@@ -4921,7 +4908,7 @@ api = "https://api.example.com/access"
 		};
 		let token = |root: &str, subscribe: Vec<&str>| {
 			let s = scope(root, subscribe);
-			let mut token = AuthToken::unrestricted(s.root.clone());
+			let mut token = Token::unrestricted(s.root.clone());
 			token.subscribe = s.subscribe;
 			token.publish = PathPrefixes::default();
 			token
@@ -5074,7 +5061,7 @@ api = "https://api.example.com/access"
 		let auth = auth_with_api(&server).await;
 		let a = test_grant(&auth, None, Duration::from_millis(100));
 		let mut b = a.clone();
-		b.params = Arc::new(AuthParams {
+		b.params = Arc::new(Params {
 			path: "other".into(),
 			..Default::default()
 		});
@@ -5146,7 +5133,7 @@ api = "https://api.example.com/access"
 		let scoped = |subscribe: &str| Revalidate {
 			api: test_api(&auth),
 			expires: None,
-			params: Arc::new(AuthParams {
+			params: Arc::new(Params {
 				path: "demo".into(),
 				..Default::default()
 			}),
@@ -5390,7 +5377,7 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_api_proxy(&server).await;
 		let token = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "demo".into(),
 				host: Some("live.example.com".into()),
 				jwt: Some("opaque-session-cookie".into()),
@@ -5424,7 +5411,7 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_api_proxy(&server).await;
 		let token = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "demo".into(),
 				jwt: Some("opaque".into()),
 				..Default::default()
@@ -5450,13 +5437,13 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_api_proxy(&server).await;
 		let result = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "demo".into(),
 				jwt: Some("opaque".into()),
 				..Default::default()
 			})
 			.await;
-		assert!(matches!(result, Err(AuthError::Refused)), "got {result:?}");
+		assert!(matches!(result, Err(Error::Refused)), "got {result:?}");
 		Ok(())
 	}
 
@@ -5474,13 +5461,13 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_api_proxy(&server).await;
 		let result = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "demo".into(),
 				jwt: Some("opaque".into()),
 				..Default::default()
 			})
 			.await;
-		assert!(matches!(result, Err(AuthError::Refused)), "got {result:?}");
+		assert!(matches!(result, Err(Error::Refused)), "got {result:?}");
 		Ok(())
 	}
 
@@ -5500,13 +5487,13 @@ api = "https://api.example.com/access"
 			mount_auth(&server, "max-age=60", body.clone()).await;
 			let auth = auth_with_api_proxy(&server).await;
 			let result = auth
-				.verify(&AuthParams {
+				.verify(&Params {
 					path: "demo".into(),
 					jwt: Some("opaque".into()),
 					..Default::default()
 				})
 				.await;
-			assert!(matches!(result, Err(AuthError::Refused)), "{body} gave {result:?}");
+			assert!(matches!(result, Err(Error::Refused)), "{body} gave {result:?}");
 		}
 		Ok(())
 	}
@@ -5519,7 +5506,7 @@ api = "https://api.example.com/access"
 		mount_auth(&server, "max-age=60", r#"{"grant":{"subscribe":[""]}}"#.to_string()).await;
 
 		let auth = auth_with_api_proxy(&server).await;
-		let token = auth.verify(&AuthParams::new("demo")).await?;
+		let token = auth.verify(&Params::new("demo")).await?;
 		assert!(token.revalidate.is_some(), "anonymous proxy sessions revalidate too");
 
 		let sent = server.received_requests().await.expect("recorded requests");
@@ -5551,7 +5538,7 @@ api = "https://api.example.com/access"
 				.with_root("demo")
 				.with_subscribe(["**".parse().unwrap()]),
 		)?;
-		auth.verify(&AuthParams {
+		auth.verify(&Params {
 			path: "demo".into(),
 			host: Some("live.example.com".into()),
 			jwt: Some(jwt),
@@ -5595,14 +5582,14 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_api(&server).await;
 		let result = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "demo".into(),
 				jwt: Some(forged.into()),
 				..Default::default()
 			})
 			.await;
 		assert!(
-			matches!(result, Err(AuthError::KeyNotFound)),
+			matches!(result, Err(Error::KeyNotFound)),
 			"a kid lookup must require a key, got {result:?}"
 		);
 		Ok(())
@@ -5618,7 +5605,7 @@ api = "https://api.example.com/access"
 		)
 		.await;
 		let auth = auth_with_api(&server).await;
-		let params = AuthParams::new("demo");
+		let params = Params::new("demo");
 		for _ in 0..2 {
 			auth.verify(&params).await?;
 		}
@@ -5643,7 +5630,7 @@ api = "https://api.example.com/access"
 		}
 		let auth = auth_with_api_proxy(&server).await;
 		for viewer in ["alice", "bob", "alice", "bob"] {
-			let mut params = AuthParams::new("demo");
+			let mut params = Params::new("demo");
 			params.jwt = Some(viewer.into());
 			let token = auth.verify(&params).await?;
 			assert_eq!(token.subscribe, PathPrefixes::new([viewer]));
@@ -5659,7 +5646,7 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_api_proxy(&server).await;
 		let token = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "demo".into(),
 				jwt: Some("opaque".into()),
 				..Default::default()
@@ -5709,7 +5696,7 @@ api = "https://api.example.com/access"
 
 		let issuer = auth_with_api_proxy(&server).await;
 		let token = issuer
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "demo".into(),
 				jwt: Some("opaque".into()),
 				..Default::default()
@@ -5729,8 +5716,8 @@ api = "https://api.example.com/access"
 	/// rather than a relay that quietly keeps token behavior.
 	#[tokio::test]
 	async fn proxy_mode_requires_an_auth_api() {
-		let err = Auth::new(AuthConfig {
-			api_mode: Some(AuthApiMode::Proxy),
+		let err = Auth::new(Config {
+			api_mode: Some(ApiMode::Proxy),
 			key: Some("/dev/null".into()),
 			..Default::default()
 		})
@@ -5745,8 +5732,8 @@ api = "https://api.example.com/access"
 	/// mode silently discarded.
 	#[test]
 	fn proxy_mode_requires_an_auth_api_even_when_otherwise_empty() {
-		let config = AuthConfig {
-			api_mode: Some(AuthApiMode::Proxy),
+		let config = Config {
+			api_mode: Some(ApiMode::Proxy),
 			..Default::default()
 		};
 		assert!(config.is_empty(), "the mTLS-only shortcut is what this guards");
@@ -5760,9 +5747,9 @@ api = "https://api.example.com/access"
 	/// root", and applying both routes the subdomain twice.
 	#[tokio::test]
 	async fn proxy_mode_rejects_auth_domain() {
-		let err = Auth::new(AuthConfig {
+		let err = Auth::new(Config {
 			auth_api: Some("https://api.example.com/auth".into()),
-			api_mode: Some(AuthApiMode::Proxy),
+			api_mode: Some(ApiMode::Proxy),
 			domains: vec!["cdn.moq.dev".into()],
 			..Default::default()
 		})
@@ -5778,7 +5765,7 @@ api = "https://api.example.com/access"
 	/// Token mode is unaffected: the relay resolves the subdomain itself there.
 	#[tokio::test]
 	async fn token_mode_still_accepts_auth_domain() -> anyhow::Result<()> {
-		Auth::new(AuthConfig {
+		Auth::new(Config {
 			auth_api: Some("https://api.example.com/auth".into()),
 			domains: vec!["cdn.moq.dev".into()],
 			..Default::default()
@@ -5791,9 +5778,9 @@ api = "https://api.example.com/access"
 	/// since the value decides who authorizes every connection.
 	#[test]
 	fn unknown_api_mode_is_rejected() {
-		assert_eq!("proxy".parse::<AuthApiMode>(), Ok(AuthApiMode::Proxy));
-		assert_eq!("TOKEN".parse::<AuthApiMode>(), Ok(AuthApiMode::Token));
-		assert!("prxy".parse::<AuthApiMode>().is_err());
+		assert_eq!("proxy".parse::<ApiMode>(), Ok(ApiMode::Proxy));
+		assert_eq!("TOKEN".parse::<ApiMode>(), Ok(ApiMode::Token));
+		assert!("prxy".parse::<ApiMode>().is_err());
 	}
 
 	/// A proxy endpoint rejecting the forwarded credential with 401/403 is saying
@@ -5902,7 +5889,7 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_api_proxy(&server).await;
 		let token = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "".into(),
 				host: Some("customer.example.com".into()),
 				jwt: Some("opaque".into()),
@@ -5927,7 +5914,7 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_api_proxy(&server).await;
 		let token = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "room".into(),
 				host: Some("customer.example.com".into()),
 				jwt: Some("opaque".into()),
@@ -5954,13 +5941,13 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_api(&server).await;
 		let result = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "demo".into(),
 				..Default::default()
 			})
 			.await;
 		assert!(
-			matches!(result, Err(AuthError::IncorrectRoot)),
+			matches!(result, Err(Error::IncorrectRoot)),
 			"a reshaping alias must be refused in token mode, got {result:?}"
 		);
 		Ok(())
@@ -6029,7 +6016,7 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_api_proxy(&server).await;
 		let token = auth
-			.verify(&AuthParams {
+			.verify(&Params {
 				path: "demo".into(),
 				jwt: Some("opaque".into()),
 				..Default::default()
@@ -6078,7 +6065,7 @@ api = "https://api.example.com/access"
 	#[tokio::test]
 	async fn expired_resolves_at_credential_expiry() {
 		let auth = Auth::default();
-		let mut token = AuthToken::unrestricted(Path::new("").to_owned());
+		let mut token = Token::unrestricted(Path::new("").to_owned());
 		let bound = std::time::SystemTime::now() + Duration::from_millis(100);
 		token.expires = Some(bound);
 
@@ -6096,7 +6083,7 @@ api = "https://api.example.com/access"
 	#[tokio::test(start_paused = true)]
 	async fn expired_pends_without_an_expiry() {
 		let auth = Auth::default();
-		let token = AuthToken::unrestricted(Path::new("").to_owned());
+		let token = Token::unrestricted(Path::new("").to_owned());
 
 		let bounded = tokio::time::timeout(Duration::from_millis(200), auth.expired(&token)).await;
 		assert!(bounded.is_err(), "a token without exp or grant must never expire");

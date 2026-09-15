@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use moq_net::Hop;
 use moq_relay::{
-	AuthConfig, Connection, PublicConfig,
-	cluster::{self, Cluster, Peer},
+	Connection, auth,
+	cluster::{self, Peer},
 };
 use url::Url;
 
@@ -115,7 +115,7 @@ async fn drain_session_with_zero_timeout_closes_at_once_inner() {
 		.await
 		.expect("accept channel closed");
 
-	let (_trigger, shutdown) = moq_relay::Shutdown::new(Duration::ZERO);
+	let (_trigger, shutdown) = moq_relay::shutdown::Observer::new(Duration::ZERO);
 
 	// The assertion is that this resolves at all: with the window passed through as
 	// a wire timeout it would await a peer under no deadline to leave.
@@ -206,7 +206,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 
 		let mut cluster_config = cluster::Config::default();
 		cluster_config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{port_a}/"))];
-		let cluster = Cluster::new(cluster::Options::new(cluster_config))
+		let cluster = cluster::Cluster::new(cluster::Options::new(cluster_config))
 			.expect("cluster init")
 			.with_client(client);
 
@@ -312,8 +312,8 @@ async fn spawn_relay_with_upstream(
 
 	// Fully public auth: any no-JWT stream client gets the whole root.
 	#[allow(deprecated)]
-	let public = PublicConfig::Simple(vec![String::new()]);
-	let mut auth_config = AuthConfig::default();
+	let public = auth::Public::Simple(vec![String::new()]);
+	let mut auth_config = auth::Config::default();
 	auth_config.public = Some(public);
 	let auth = auth_config
 		.init(&moq_tokio::tls::Connect::default())
@@ -330,7 +330,7 @@ async fn spawn_relay_with_upstream(
 	client_config.goaway.handover = Duration::from_secs(2).into();
 	let client = client_config.init(Default::default()).expect("client init");
 
-	let cluster = Cluster::new(cluster::Options::new(cluster_config))
+	let cluster = cluster::Cluster::new(cluster::Options::new(cluster_config))
 		.expect("cluster init")
 		.with_client(client);
 
@@ -348,7 +348,7 @@ async fn spawn_relay_with_upstream(
 			}
 			let conn = Connection::new(request, cluster.clone(), auth.clone())
 				.with_id(id)
-				.with_shutdown(moq_relay::Shutdown::disabled());
+				.with_shutdown(moq_relay::shutdown::Observer::disabled());
 			id += 1;
 			tokio::spawn(async move {
 				let _ = conn.run().await;
@@ -675,7 +675,7 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 
 	let mut cluster_config = cluster::Config::default();
 	cluster_config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{port}/"))];
-	let cluster = Cluster::new(cluster::Options::new(cluster_config))
+	let cluster = cluster::Cluster::new(cluster::Options::new(cluster_config))
 		.expect("cluster init")
 		.with_client(client);
 	let started = cluster.clone().start().await.expect("cluster start");

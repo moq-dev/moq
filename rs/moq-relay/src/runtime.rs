@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
-pub struct RuntimeConfig {
+pub struct Config {
 	/// Serve QUIC from this many single-threaded workers instead of the shared
 	/// runtime, each pinned to a core with its own socket on the listen address.
 	///
@@ -57,7 +57,7 @@ pub struct RuntimeConfig {
 	pub io_uring: bool,
 }
 
-impl RuntimeConfig {
+impl Config {
 	/// The worker group this asks for, or `None` to keep QUIC on the shared
 	/// runtime.
 	///
@@ -74,7 +74,7 @@ impl RuntimeConfig {
 	}
 }
 
-impl Default for RuntimeConfig {
+impl Default for Config {
 	fn default() -> Self {
 		Self {
 			workers: None,

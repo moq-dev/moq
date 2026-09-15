@@ -12,7 +12,7 @@
 use std::net::{SocketAddr, TcpListener, UdpSocket};
 use std::time::Duration;
 
-use moq_relay::{Config, PublicConfig, Relay};
+use moq_relay::{Config, Relay, auth};
 use moq_tokio::moq_net::{self, Hop};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -45,7 +45,7 @@ fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf
 fn public_auth(config: &mut Config) {
 	#[allow(deprecated)]
 	{
-		config.auth.public = Some(PublicConfig::Simple(vec![String::new()]));
+		config.auth.public = Some(auth::Public::Simple(vec![String::new()]));
 	}
 }
 
@@ -89,7 +89,7 @@ async fn assert_owner_stopped(quic: SocketAddr, http: SocketAddr) {
 
 /// Fire the embedder stop and wait for `run` to return: the join every
 /// worker thread and listener goes through, as opposed to aborting the task.
-async fn stop(trigger: moq_relay::ShutdownTrigger, running: tokio::task::JoinHandle<anyhow::Result<()>>) {
+async fn stop(trigger: moq_relay::shutdown::Trigger, running: tokio::task::JoinHandle<anyhow::Result<()>>) {
 	trigger.start();
 	tokio::time::timeout(TIMEOUT, running)
 		.await
