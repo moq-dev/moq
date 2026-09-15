@@ -6,10 +6,12 @@ A moq-net subscriber joins a moq-transport draft-14 to draft-19 relay at a
 group boundary, with history when it asked for some: every `SUBSCRIBE` uses
 the Largest Object filter and is followed by a joining `FETCH`, relative at
 offset 0 for a live join and absolute at the requested group for an explicit
-`group_start`, so the delivered groups run contiguously from the fetched
-range into the live subscription. Today an explicit start is spelled as an
-`AbsoluteStart` filter, which a publisher MAY honor and Cloudflare's relay
-ignores, and a live join trusts the peer to start at a group boundary, which
+group-aligned and unbounded `group_start`, so the delivered groups run
+contiguously from the fetched range into the live subscription. Today
+`subscribe_join` collapses every pre-draft-20 subscription to
+`Filter::Unfiltered`, so an explicit start never reaches the wire (an absent
+filter parameter on drafts 15-19, `AbsoluteStart{0,0}` inline on draft-14),
+and a live join trusts the peer to start at a group boundary, which
 a peer that starts at its literal Largest Object does not.
 
 Ranked here by maintainer decision although it is additive: it is what a
@@ -28,7 +30,12 @@ In `ietf::subscriber`, `subscribe_join` on a pre-draft-20 version always
 yields `Filter::NextObject` plus a joining fetch, sent as its own request
 after the SUBSCRIBE (the subscribe's request id names it):
 `RelativeJoining { group_offset: 0 }` for `None`, `AbsoluteJoining` at
-`start.group` for `Some(start)`.
+`start.group` for `Some(start)` with `start.frame == 0` and `end.is_none()`.
+A frame-level start or any bounded end has no joining-FETCH spelling
+(`AbsoluteJoining` names only a group, with no object or end), so those
+shapes are refused rather than rounded down or left open: silently widening
+them would deliver frames below the requested floor or continue live past
+the requested cap.
 
 The fill machinery is the seam to reuse, not duplicate. The relative join is
 the draft-20 fill by another name: the fetch stream carries the head of the
@@ -51,7 +58,8 @@ Decisions:
   is what bounds the stitch.
 
 Verification is unit tests with a scripted peer in `ietf::subscriber`: the
-join is spelled correctly per draft and per start, a mid-group subscribe stream
+join is spelled correctly per draft and per start, a frame-level start or a
+bounded end is refused rather than widened, a mid-group subscribe stream
 waits for and stitches onto the fetched head, a whole-group stream discards the
 fetch, a multi-group absolute fetch stitches into the live tail with no gap or
 overlap, a refused fetch continues live, and a short fetch delivers its prefix.
