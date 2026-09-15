@@ -8,7 +8,10 @@
 use std::{net::TcpListener, time::Duration};
 
 use moq_auth::{Algorithm, Key, KeyId};
-use moq_relay::{AuthConfig, Cluster, ClusterOptions, Connection, Web, WebConfig};
+use moq_relay::{
+	AuthConfig, Connection, Web, WebConfig,
+	cluster::{self, Cluster},
+};
 use moq_tokio::moq_net::{self, Hop};
 use wiremock::matchers::{method, path as path_matcher, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -80,7 +83,7 @@ async fn spawn_relay(auth: moq_relay::Auth) -> (u16, tokio::task::JoinHandle<()>
 	config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
 	let server = config.init(Default::default()).expect("server init");
 	let mut server = server.listen().await.expect("listen");
-	let cluster = Cluster::new(ClusterOptions::default()).expect("cluster init");
+	let cluster = Cluster::new(cluster::Options::default()).expect("cluster init");
 
 	let handle = tokio::spawn(async move {
 		let mut id = 0;
@@ -107,7 +110,7 @@ async fn spawn_ws_relay(auth: moq_relay::Auth) -> (u16, tokio::task::JoinHandle<
 	let port = probe.local_addr().expect("local addr").port();
 	drop(probe);
 
-	let cluster = Cluster::new(ClusterOptions::default()).expect("cluster init");
+	let cluster = Cluster::new(cluster::Options::default()).expect("cluster init");
 
 	// Stream listeners bind lazily, so this server never opens a socket; only
 	// its certificate handle is used.

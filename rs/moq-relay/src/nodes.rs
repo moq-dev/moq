@@ -126,7 +126,7 @@ impl Nodes {
 	/// Record a dial this relay initiated, keyed by the URL it dialed.
 	///
 	/// `id` is the session's `conn` id from
-	/// [`Cluster::next_connection_id`](crate::Cluster::next_connection_id).
+	/// [`Cluster::next_connection_id`](crate::cluster::Cluster::next_connection_id).
 	pub(crate) fn connect_outbound(&self, id: u64, node: impl Into<String>) -> ConnectionGuard {
 		self.connect(id, Direction::Outbound, ConnectionTarget::Node(node.into()))
 	}
@@ -134,7 +134,7 @@ impl Nodes {
 	/// Record a session this relay accepted, keyed by the origin the peer declared.
 	///
 	/// `id` is the session's `conn` id from
-	/// [`Cluster::next_connection_id`](crate::Cluster::next_connection_id).
+	/// [`Cluster::next_connection_id`](crate::cluster::Cluster::next_connection_id).
 	pub(crate) fn connect_inbound(&self, id: u64, origin: Hop) -> ConnectionGuard {
 		self.connect(id, Direction::Inbound, ConnectionTarget::Hop(origin))
 	}

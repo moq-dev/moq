@@ -11,7 +11,10 @@ use std::net::TcpListener;
 use std::time::Duration;
 
 use moq_net::Hop;
-use moq_relay::{AuthConfig, Cluster, ClusterConfig, ClusterOptions, Connection, Peer, PublicConfig};
+use moq_relay::{
+	AuthConfig, Connection, PublicConfig,
+	cluster::{self, Cluster, Peer},
+};
 use url::Url;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -201,9 +204,9 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		client_config.goaway.handover = Duration::from_secs(2).into();
 		let client = client_config.init(Default::default()).expect("client init");
 
-		let mut cluster_config = ClusterConfig::default();
+		let mut cluster_config = cluster::Config::default();
 		cluster_config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{port_a}/"))];
-		let cluster = Cluster::new(ClusterOptions::new(cluster_config))
+		let cluster = Cluster::new(cluster::Options::new(cluster_config))
 			.expect("cluster init")
 			.with_client(client);
 
@@ -317,7 +320,7 @@ async fn spawn_relay_with_upstream(
 		.await
 		.expect("auth init");
 
-	let mut cluster_config = ClusterConfig::default();
+	let mut cluster_config = cluster::Config::default();
 	cluster_config.connect = vec![Peer::new(upstream_url)];
 	// Short drain so the test observes teardown quickly.
 
@@ -327,7 +330,7 @@ async fn spawn_relay_with_upstream(
 	client_config.goaway.handover = Duration::from_secs(2).into();
 	let client = client_config.init(Default::default()).expect("client init");
 
-	let cluster = Cluster::new(ClusterOptions::new(cluster_config))
+	let cluster = Cluster::new(cluster::Options::new(cluster_config))
 		.expect("cluster init")
 		.with_client(client);
 
@@ -670,9 +673,9 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 	client_config.goaway.handover = Duration::from_secs(2).into();
 	let client = client_config.init(Default::default()).expect("client init");
 
-	let mut cluster_config = ClusterConfig::default();
+	let mut cluster_config = cluster::Config::default();
 	cluster_config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{port}/"))];
-	let cluster = Cluster::new(ClusterOptions::new(cluster_config))
+	let cluster = Cluster::new(cluster::Options::new(cluster_config))
 		.expect("cluster init")
 		.with_client(client);
 	let started = cluster.clone().start().await.expect("cluster start");

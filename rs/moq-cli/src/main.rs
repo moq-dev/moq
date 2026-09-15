@@ -73,10 +73,10 @@ impl Net {
 async fn spawn_server(
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 	moq: &MoqSide,
-	cluster: &moq_relay::Cluster,
+	cluster: &moq_relay::cluster::Cluster,
 	net: &Net,
 	directions: Directions,
-) -> anyhow::Result<moq_relay::Started> {
+) -> anyhow::Result<moq_relay::cluster::Started> {
 	if !moq.serves() {
 		return cluster.clone().start().await.context("cluster failed to start");
 	}
@@ -123,10 +123,10 @@ async fn spawn_server(
 
 /// Advertise the bound listener on the LAN when `--cluster-lan` is on.
 fn attach_lan(
-	cluster: moq_relay::Cluster,
+	cluster: moq_relay::cluster::Cluster,
 	moq: &MoqSide,
 	server: &moq_tokio::Server,
-) -> anyhow::Result<moq_relay::Cluster> {
+) -> anyhow::Result<moq_relay::cluster::Cluster> {
 	if !moq.lan() {
 		return Ok(cluster);
 	}
@@ -134,7 +134,7 @@ fn attach_lan(
 		.local_addr()
 		.context("--cluster-lan needs a QUIC listener")?
 		.port();
-	let mut advertise = moq_relay::LanAdvertise::new(port);
+	let mut advertise = moq_relay::cluster::LanAdvertise::new(port);
 	if !moq.server_config().tls.generate.is_empty()
 		&& let Some(fingerprint) = server.certificates().fingerprints().into_iter().next()
 	{
@@ -150,7 +150,7 @@ fn attach_lan(
 fn spawn_cluster_serve(
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 	mut listener: moq_tokio::Listener,
-	cluster: moq_relay::Cluster,
+	cluster: moq_relay::cluster::Cluster,
 	origin: moq_net::origin::Producer,
 	directions: Directions,
 	public_quic: bool,
@@ -162,7 +162,7 @@ fn spawn_cluster_serve(
 		let mut sessions = tokio::task::JoinSet::new();
 		while let Some(request) = listener.accept().await {
 			while sessions.try_join_next().is_some() {}
-			if moq_relay::Cluster::is_lan_path(request.path()) {
+			if moq_relay::cluster::Cluster::is_lan_path(request.path()) {
 				let conn = moq_relay::Connection::new(request, cluster.clone(), moq_relay::Auth::default())
 					.with_id(cluster.next_connection_id());
 				sessions.spawn(async move {
@@ -365,7 +365,7 @@ impl Directions {
 async fn spawn_moq(
 	moq: &MoqSide,
 	net: &Net,
-	cluster: moq_relay::Cluster,
+	cluster: moq_relay::cluster::Cluster,
 	directions: Directions,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<(moq_net::bandwidth::Allocator, moq_net::origin::Producer)> {

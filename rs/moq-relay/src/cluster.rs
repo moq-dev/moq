@@ -48,7 +48,7 @@ fn should_dial(self_url: &str, peer: &str) -> bool {
 	peer > self_url
 }
 
-/// One cluster peer to dial, as listed in [`ClusterConfig::connect`] or returned
+/// One cluster peer to dial, as listed in [`Config::connect`] or returned
 /// by a `connect_api` endpoint.
 ///
 /// Accepts a bare URL string (the legacy form) or an object with `url` plus
@@ -130,12 +130,6 @@ impl std::str::FromStr for Peer {
 	}
 }
 
-impl std::fmt::Display for Peer {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.write_str(&self.url)
-	}
-}
-
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PeerObject {
@@ -148,27 +142,40 @@ struct PeerObject {
 	token: Option<String>,
 }
 
-#[derive(serde::Deserialize)]
-#[serde(untagged)]
-enum PeerDe {
-	Url(String),
-	Object(PeerObject),
-}
-
+/// A bare string is the URL form; a map is the object form. Dispatching on the
+/// shape ourselves (rather than an untagged enum) keeps serde's real error, so a
+/// typo'd field names itself instead of "did not match any variant".
 impl<'de> serde::Deserialize<'de> for Peer {
 	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
 	where
 		D: serde::Deserializer<'de>,
 	{
-		match PeerDe::deserialize(deserializer)? {
-			PeerDe::Url(url) => Ok(Self::new(url)),
-			PeerDe::Object(object) => Ok(Self {
-				url: object.url,
-				cost: object.cost,
-				egress: object.egress,
-				token: object.token,
-			}),
+		struct Visitor;
+
+		impl<'de> serde::de::Visitor<'de> for Visitor {
+			type Value = Peer;
+
+			fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+				f.write_str("a peer URL string or an object with url, cost, egress, token")
+			}
+
+			fn visit_str<E: serde::de::Error>(self, url: &str) -> Result<Peer, E> {
+				Ok(Peer::new(url))
+			}
+
+			fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<Peer, A::Error> {
+				let object: PeerObject =
+					serde::Deserialize::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+				Ok(Peer {
+					url: object.url,
+					cost: object.cost,
+					egress: object.egress,
+					token: object.token,
+				})
+			}
 		}
+
+		deserializer.deserialize_any(Visitor)
 	}
 }
 
@@ -219,27 +226,14 @@ struct DialTarget {
 	/// Advertised certificate fingerprint to pin. LAN only.
 	fingerprint: Option<String>,
 	/// Present the mDNS credential on `/.cluster/<credential>` and skip
-	/// [`ClusterConfig::token`]. LAN only.
+	/// [`Config::token`]. LAN only.
 	lan: bool,
 }
 
 impl DialTarget {
+	/// Parse a bare peer URL, keeping its inline `?cost=` / `?jwt=`.
 	fn parse(peer: &str) -> anyhow::Result<Self> {
-		let mut url = peer_url(peer)?;
-		let key = {
-			let mut identity = url.clone();
-			identity.set_query(None);
-			identity.into()
-		};
-		let cost = take_cost(&mut url)?;
-		Ok(Self {
-			key,
-			url,
-			urls: Vec::new(),
-			cost,
-			fingerprint: None,
-			lan: false,
-		})
+		Self::from_peer(&Peer::new(peer))
 	}
 
 	/// Normalize a configured [`Peer`] into dial state. A bare URL keeps its
@@ -257,22 +251,22 @@ impl DialTarget {
 				"cluster peer sets cost/egress alongside a URL ?cost=; use one or the other"
 			);
 		}
-		if peer.token.as_ref().is_some_and(|token| !token.is_empty()) {
+		let token = peer.token.as_deref().filter(|token| !token.is_empty());
+		if token.is_some() {
 			anyhow::ensure!(
 				!has_jwt,
 				"cluster peer sets token alongside a URL ?jwt=; use one or the other"
 			);
 		}
-		let mut cost = take_cost(&mut url)?;
-		if let Some(configured) = peer.cost {
-			cost = Some(configured);
-		}
-		let egress = peer.egress.or(cost);
+		let cost = peer.cost.or(take_cost(&mut url)?);
+		// An unpriced link costs 1 (see `moq_net::Client::with_cost`), so `egress`
+		// alone is symmetric only at that price.
+		let charged = cost.unwrap_or(1);
 		anyhow::ensure!(
-			egress == cost,
+			peer.egress.unwrap_or(charged) == charged,
 			"cluster peer sets egress different from cost; asymmetric costs are not supported yet"
 		);
-		if let Some(token) = peer.token.as_ref().filter(|token| !token.is_empty()) {
+		if let Some(token) = token {
 			url.query_pairs_mut().append_pair("jwt", token);
 		}
 		let key = {
@@ -644,7 +638,7 @@ impl DialMap {
 #[serde_with::skip_serializing_none]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
-pub struct ClusterConfig {
+pub struct Config {
 	/// Fixed origin (hop) id for this relay, identifying it in the hop chains
 	/// carried on each broadcast for loop detection and shortest-path routing.
 	///
@@ -789,7 +783,7 @@ pub struct ClusterConfig {
 /// Advertises this process over mDNS and dials the peers that advertise back,
 /// so a rack or a home lab meshes with no seed list and no shared rendezvous.
 /// A LAN peer authenticates with its mDNS credential on `/.cluster/<credential>`
-/// and is never handed [`ClusterConfig::token`].
+/// and is never handed [`Config::token`].
 #[derive(usage::Args, Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde_with::skip_serializing_none]
@@ -799,7 +793,7 @@ pub struct ClusterConfig {
 pub struct LanConfig {
 	/// Enable mDNS discovery. Boolean flag: pass `--cluster-lan` (or `=true` /
 	/// `=false`). Advertises the listener fingerprint when the certificate was
-	/// generated or supplied in-memory, the [`ClusterConfig::node`] URL when one
+	/// generated or supplied in-memory, the [`Config::node`] URL when one
 	/// is configured, and needs at least one of them.
 	#[usage(
 		name = "cluster-lan",
@@ -859,7 +853,7 @@ impl LanConfig {
 ///
 /// Pass to [`Cluster::with_advertise`] after the QUIC listener is bound. The
 /// fingerprint is the generated or in-memory certificate's, when there is one;
-/// a loaded certificate is dialed by name via [`ClusterConfig::node`] instead.
+/// a loaded certificate is dialed by name via [`Config::node`] instead.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct LanAdvertise {
@@ -900,9 +894,9 @@ struct LanAuth {
 /// [`Cluster::with_stats`]) attach afterwards without rebuilding it.
 #[derive(Default)]
 #[non_exhaustive]
-pub struct ClusterOptions {
+pub struct Options {
 	/// Cluster identity, peers, and discovery.
-	pub config: ClusterConfig,
+	pub config: Config,
 
 	/// Shared group pool and per-track retention ceiling.
 	///
@@ -911,9 +905,9 @@ pub struct ClusterOptions {
 	pub cache: Option<crate::Cache>,
 }
 
-impl ClusterOptions {
+impl Options {
 	/// Construct from cluster config, leaving the origin cache at its defaults.
-	pub fn new(config: ClusterConfig) -> Self {
+	pub fn new(config: Config) -> Self {
 		Self {
 			config,
 			..Default::default()
@@ -995,7 +989,7 @@ struct Work {
 /// client can serve local sessions but cannot dial remote peers.
 #[derive(Clone)]
 pub struct Cluster {
-	config: ClusterConfig,
+	config: Config,
 	client: Option<moq_tokio::Client>,
 	/// Dial template for LAN peers that pin a fingerprint; static and gossip
 	/// dials keep [`Self::client`].
@@ -1039,7 +1033,7 @@ pub struct Cluster {
 }
 
 impl Cluster {
-	/// Creates a cluster with one origin, using [`ClusterOptions`] for identity
+	/// Creates a cluster with one origin, using [`Options`] for identity
 	/// and cache.
 	///
 	/// Use [`with_client`](Self::with_client) to enable dialing remote peers
@@ -1053,8 +1047,8 @@ impl Cluster {
 	///
 	/// Errors if `config.id` is set but invalid: it must be non-zero and below
 	/// 2^62 (the wire varint limit). An unset id picks a fresh random origin.
-	pub fn new(options: ClusterOptions) -> anyhow::Result<Self> {
-		let ClusterOptions { config, cache } = options;
+	pub fn new(options: Options) -> anyhow::Result<Self> {
+		let Options { config, cache } = options;
 		let id = match config.id {
 			Some(0) => anyhow::bail!("--cluster-id must be non-zero"),
 			Some(id) if id >= 1 << 62 => {
@@ -1606,7 +1600,7 @@ impl Cluster {
 	/// Each candidate is [`Peer::urls`](moq_tokio::mdns::Peer::urls) in order
 	/// (node first) on `/.cluster/<credential>`, with the advertised fingerprint
 	/// pinned. The lower discovery id dials; the other waits inbound. A LAN dial
-	/// never carries `?jwt=` — [`ClusterConfig::token`] is for static and gossip
+	/// never carries `?jwt=` — [`Config::token`] is for static and gossip
 	/// peers only.
 	#[cfg(feature = "cluster-lan")]
 	async fn run_mdns(self, dialed: DialMap, mut discovery: moq_tokio::mdns::Discovery) -> anyhow::Result<()> {
@@ -2045,7 +2039,7 @@ fn take_cost(url: &mut Url) -> anyhow::Result<Option<u64>> {
 	Ok(Some(cost))
 }
 
-/// Drop `?jwt=` so a LAN dial never presents [`ClusterConfig::token`].
+/// Drop `?jwt=` so a LAN dial never presents [`Config::token`].
 #[cfg(feature = "cluster-lan")]
 fn strip_jwt(url: &mut Url) {
 	let remaining: Vec<(String, String)> = url
@@ -2178,10 +2172,10 @@ where
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::Config;
+	use crate::Config as RelayConfig;
 
-	fn new_cluster(config: ClusterConfig) -> anyhow::Result<Cluster> {
-		Cluster::new(ClusterOptions::new(config))
+	fn new_cluster(config: Config) -> anyhow::Result<Cluster> {
+		Cluster::new(Options::new(config))
 	}
 
 	/// The publish task holds only a `Weak` to its producer, so it stops when the
@@ -2203,7 +2197,7 @@ mod tests {
 			..Default::default()
 		};
 
-		let cluster = new_cluster(ClusterConfig::default()).expect("cluster");
+		let cluster = new_cluster(Config::default()).expect("cluster");
 		let stats = config.build(cluster.origin.clone());
 		let cluster = cluster.with_stats(stats);
 
@@ -2252,10 +2246,10 @@ mod tests {
 
 	#[tokio::test]
 	async fn cluster_tier_defaults_to_unprefixed() {
-		let cluster = new_cluster(ClusterConfig::default()).expect("cluster");
+		let cluster = new_cluster(Config::default()).expect("cluster");
 		assert_eq!(cluster.cluster_tier(), Tier::default());
 
-		let cluster = new_cluster(ClusterConfig {
+		let cluster = new_cluster(Config {
 			tier: Some("region/sjc".to_string()),
 			..Default::default()
 		})
@@ -2591,7 +2585,7 @@ mod tests {
 	/// tear down or reconfigure the last-known-good dial set.
 	#[tokio::test]
 	async fn malformed_peer_list_preserves_current_dial() {
-		let cluster = new_cluster(ClusterConfig::default()).expect("cluster");
+		let cluster = new_cluster(Config::default()).expect("cluster");
 		let dialed = DialMap::default();
 		let current = DialTarget::parse("https://peer.example/?cost=1").unwrap();
 		let task = tokio::spawn(std::future::pending::<()>());
@@ -2674,13 +2668,18 @@ mod tests {
 	}
 
 	/// `egress` defaults to `cost`, so a matching value is accepted and prices
-	/// the link exactly like the bare URL form.
+	/// the link exactly like the bare URL form. An unpriced link costs 1, so
+	/// `egress = 1` alone is symmetric too.
 	#[test]
 	fn peer_symmetric_egress_is_supported() {
 		let cost_only = DialTarget::from_peer(&Peer::new("https://peer.example/?cost=2")).unwrap();
 		let symmetric: Peer = serde_json::from_str(r#"{"url": "https://peer.example/", "cost": 2, "egress": 2}"#)
 			.expect("parse symmetric peer");
 		assert_eq!(DialTarget::from_peer(&symmetric).unwrap(), cost_only);
+
+		let unpriced = DialTarget::from_peer(&Peer::new("https://peer.example/")).unwrap();
+		let default_egress = DialTarget::from_peer(&Peer::new("https://peer.example/").with_egress(1)).unwrap();
+		assert_eq!(default_egress, unpriced);
 	}
 
 	/// An `egress` that differs from the effective cost is refused, never
@@ -2721,11 +2720,22 @@ mod tests {
 	}
 
 	/// Unknown object fields reject the entry, so a typo keeps the last-good
-	/// topology instead of dialing with a silently dropped policy.
+	/// topology instead of dialing with a silently dropped policy. The error
+	/// names the field rather than a generic shape mismatch.
 	#[test]
 	fn peer_unknown_field_is_rejected() {
-		serde_json::from_str::<Vec<Peer>>(r#"[{"url": "https://peer.example/", "cosst": 1}]"#)
+		let err = serde_json::from_str::<Vec<Peer>>(r#"[{"url": "https://peer.example/", "cosst": 1}]"#)
 			.expect_err("unknown field must fail");
+		assert!(err.to_string().contains("cosst"), "error must name the field: {err}");
+
+		#[derive(Debug, serde::Deserialize)]
+		struct Doc {
+			#[allow(dead_code)]
+			connect: Vec<Peer>,
+		}
+		let err = toml::from_str::<Doc>("connect = [{ url = \"https://peer.example/\", cost = \"cheap\" }]")
+			.expect_err("wrong type must fail");
+		assert!(err.to_string().contains("cost"), "error must name the field: {err}");
 	}
 
 	/// Equivalent URL and object forms of one peer dedupe, while differing
@@ -2744,7 +2754,7 @@ mod tests {
 	/// malformed URL does.
 	#[tokio::test]
 	async fn malformed_object_peer_list_preserves_current_dial() {
-		let cluster = new_cluster(ClusterConfig::default()).expect("cluster");
+		let cluster = new_cluster(Config::default()).expect("cluster");
 		let dialed = DialMap::default();
 		let current = DialTarget::from_peer(&Peer::new("https://peer.example/?cost=1")).unwrap();
 		let task = tokio::spawn(std::future::pending::<()>());
@@ -2776,7 +2786,7 @@ mod tests {
 	/// advertise, so it must fail fast with a message naming the missing flag.
 	#[tokio::test]
 	async fn gossip_without_node_errors() {
-		let config = ClusterConfig {
+		let config = Config {
 			mesh: Some("true".to_string()),
 			..Default::default()
 		};
@@ -2790,7 +2800,7 @@ mod tests {
 	/// node a stable identity across restarts.
 	#[tokio::test]
 	async fn cluster_id_sets_origin() {
-		let cluster = new_cluster(ClusterConfig {
+		let cluster = new_cluster(Config {
 			id: Some(42),
 			..Default::default()
 		})
@@ -2812,7 +2822,7 @@ mod tests {
 		let pool = cache.pool.clone();
 
 		let cluster = Cluster::new(
-			ClusterOptions::new(ClusterConfig {
+			Options::new(Config {
 				id: Some(42),
 				..Default::default()
 			})
@@ -2880,7 +2890,7 @@ mod tests {
 	#[test]
 	fn cluster_id_out_of_range_errors() {
 		for bad in [0, 1u64 << 62] {
-			let err = new_cluster(ClusterConfig {
+			let err = new_cluster(Config {
 				id: Some(bad),
 				..Default::default()
 			})
@@ -2896,7 +2906,7 @@ mod tests {
 	/// (i.e. not exit and drop the broadcast).
 	#[tokio::test(start_paused = true)]
 	async fn passive_rendezvous_runs_without_client_and_advertises_self() {
-		let cluster = new_cluster(ClusterConfig {
+		let cluster = new_cluster(Config {
 			node: Some("rendezvous.example.com:4443".to_string()),
 			mesh: Some("true".to_string()),
 			..Default::default()
@@ -2949,7 +2959,7 @@ mod tests {
 		std::fs::write(&path, toml).unwrap();
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let config = Config::parse_and_merge(args).expect("config load");
+		let config = RelayConfig::parse_and_merge(args).expect("config load");
 		assert_eq!(config.cluster.node.as_deref(), Some("us-east.example.com:4443"));
 		// A TOML boolean deserializes into the string form.
 		assert_eq!(config.cluster.mesh.as_deref(), Some("true"));
@@ -2971,7 +2981,7 @@ mod tests {
 		std::fs::write(&path, toml).unwrap();
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let config = Config::parse_and_merge(args).expect("config load");
+		let config = RelayConfig::parse_and_merge(args).expect("config load");
 		assert_eq!(
 			config.cluster.connect,
 			vec![
@@ -2991,7 +3001,7 @@ mod tests {
 	/// backwards compatibility: it enables gossip and supplies the node URL.
 	#[tokio::test]
 	async fn legacy_mesh_url_enables_gossip_as_node() {
-		let cluster = new_cluster(ClusterConfig {
+		let cluster = new_cluster(Config {
 			mesh: Some("rendezvous.example.com:4443".to_string()),
 			..Default::default()
 		})
@@ -3168,7 +3178,7 @@ mod tests {
 	/// conflict, not a silent pick.
 	#[tokio::test]
 	async fn legacy_mesh_url_conflicting_with_node_errors() {
-		let cluster = new_cluster(ClusterConfig {
+		let cluster = new_cluster(Config {
 			mesh: Some("a.example.com:4443".to_string()),
 			node: Some("b.example.com:4443".to_string()),
 			..Default::default()
@@ -3194,7 +3204,7 @@ mod tests {
 		std::fs::write(&path, toml).unwrap();
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let config = Config::parse_and_merge(args).expect("config load");
+		let config = RelayConfig::parse_and_merge(args).expect("config load");
 		assert!(config.cluster.lan.enabled);
 		assert_eq!(config.cluster.lan.secret.as_deref(), Some("cluster.key"));
 		assert_eq!(
@@ -3226,7 +3236,7 @@ mod tests {
 			std::ffi::OsString::from("--cluster-lan-app"),
 			std::ffi::OsString::from("from-cli"),
 		];
-		let config = Config::parse_and_merge(args).expect("config load");
+		let config = RelayConfig::parse_and_merge(args).expect("config load");
 		assert_eq!(config.cluster.lan.secret.as_deref(), Some("from-cli.key"));
 		assert_eq!(
 			config.cluster.lan.app.as_ref().map(ToString::to_string).as_deref(),
@@ -3264,7 +3274,7 @@ mod tests {
 	#[cfg(feature = "cluster-lan")]
 	#[tokio::test]
 	async fn lan_without_node_needs_a_fingerprint() {
-		let config = ClusterConfig {
+		let config = Config {
 			lan: LanConfig {
 				enabled: true,
 				..Default::default()
@@ -3296,7 +3306,7 @@ mod tests {
 	#[cfg(feature = "cluster-lan")]
 	#[tokio::test]
 	async fn lan_without_a_secret_is_open() {
-		let config = ClusterConfig {
+		let config = Config {
 			node: Some("https://us-west.example.com".to_string()),
 			lan: LanConfig {
 				enabled: true,
@@ -3409,7 +3419,7 @@ mod tests {
 		std::fs::write(&path, toml).unwrap();
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let config = Config::parse_and_merge(args).expect("config load");
+		let config = RelayConfig::parse_and_merge(args).expect("config load");
 		assert_eq!(
 			config.cluster.connect_api.as_deref(),
 			Some("https://api.example.com/cluster/connect")
@@ -3428,8 +3438,8 @@ mod tests {
 		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-		let node = new_cluster(ClusterConfig::default()).expect("node cluster");
-		let fingerprint = new_cluster(ClusterConfig::default()).expect("fingerprint cluster");
+		let node = new_cluster(Config::default()).expect("node cluster");
+		let fingerprint = new_cluster(Config::default()).expect("fingerprint cluster");
 
 		let _from_node = node.origin.create_broadcast("from-node").expect("create");
 		_from_node.announce(Default::default()).expect("announce");
@@ -3503,7 +3513,7 @@ mod tests {
 	#[tokio::test]
 	async fn lan_path_without_discovery_is_refused() {
 		assert_eq!(
-			new_cluster(ClusterConfig::default())
+			new_cluster(Config::default())
 				.expect("cluster")
 				.verify_lan_credential("anything"),
 			None

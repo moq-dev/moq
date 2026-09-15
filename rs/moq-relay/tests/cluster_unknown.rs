@@ -5,7 +5,7 @@
 use std::{net::TcpListener, time::Duration};
 
 use moq_net::Hop;
-use moq_relay::{Config, Peer, PublicConfig, Relay};
+use moq_relay::{Config, PublicConfig, Relay, cluster::Peer};
 use url::Url;
 
 const TIMEOUT: Duration = Duration::from_secs(10);

@@ -168,7 +168,7 @@ impl Internal {
 	}
 
 	/// Attach the relay cluster used to serve the `/nodes` topology snapshot.
-	pub fn with_cluster(mut self, cluster: &crate::Cluster) -> Self {
+	pub fn with_cluster(mut self, cluster: &crate::cluster::Cluster) -> Self {
 		self.nodes = Some(cluster.nodes.clone());
 		self
 	}

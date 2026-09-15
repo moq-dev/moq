@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{AuthConfig, CacheConfig, ClusterConfig, InternalConfig, StatsConfig, WebConfig};
+use crate::{AuthConfig, CacheConfig, InternalConfig, StatsConfig, WebConfig, cluster};
 
 /// Top-level relay configuration, as a composable args group.
 ///
@@ -52,7 +52,7 @@ pub struct Config {
 	/// Cluster configuration.
 	#[usage(flatten)]
 	#[serde(default)]
-	pub cluster: ClusterConfig,
+	pub cluster: cluster::Config,
 
 	/// Authentication configuration.
 	#[usage(flatten)]

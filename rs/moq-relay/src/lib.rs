@@ -12,7 +12,7 @@
 
 mod auth;
 mod cache;
-mod cluster;
+pub mod cluster;
 mod config;
 mod connection;
 mod http_client;
@@ -49,7 +49,6 @@ fn configured_tier(label: Option<String>) -> moq_net::stats::Tier {
 
 pub use auth::*;
 pub use cache::*;
-pub use cluster::*;
 pub use config::*;
 pub use connection::*;
 pub use internal::*;

@@ -1,4 +1,4 @@
-use crate::{Auth, AuthError, AuthParams, AuthToken, Cluster};
+use crate::{Auth, AuthError, AuthParams, AuthToken, cluster::Cluster};
 
 use axum::http;
 use moq_tokio::Request;

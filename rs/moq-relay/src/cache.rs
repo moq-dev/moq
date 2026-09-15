@@ -71,7 +71,7 @@ pub struct CacheConfig {
 /// The headroom governor, when configured, is owned by [`Self::pool`] rather than
 /// by this struct: it holds only a [`cache::PoolWeak`] and stops on its next tick
 /// once every [`cache::Pool`] clone has dropped. Handing this to
-/// [`Cluster::new`](crate::Cluster::new) therefore moves the governor's lifetime
+/// [`Cluster::new`](crate::cluster::Cluster::new) therefore moves the governor's lifetime
 /// onto the cluster, and dropping this struct afterwards keeps it running.
 /// Conversely, holding a clone of [`Self::pool`] past the relay keeps the governor
 /// running too, deliberately: as long as anything can still cache into the budget,
@@ -264,9 +264,9 @@ mod tests {
 
 	/// The prefix of [`crate::Relay::load`] that owns the cache: resolve it, then
 	/// hand it to a cluster whose construction can still fail.
-	fn attach(cache: &CacheConfig, cluster: crate::ClusterConfig) -> anyhow::Result<crate::Cluster> {
+	fn attach(cache: &CacheConfig, cluster: crate::cluster::Config) -> anyhow::Result<crate::cluster::Cluster> {
 		let cache = cache.init()?;
-		crate::Cluster::new(crate::ClusterOptions::new(cluster).with_cache(cache))
+		crate::cluster::Cluster::new(crate::cluster::Options::new(cluster).with_cache(cache))
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -300,7 +300,7 @@ mod tests {
 		let before = spawned();
 
 		// `--cluster-id 0` is rejected, so the cache is dropped before it is attached.
-		let cluster = crate::ClusterConfig {
+		let cluster = crate::cluster::Config {
 			id: Some(0),
 			..Default::default()
 		};
@@ -314,7 +314,7 @@ mod tests {
 	/// assumed so the governor's task can be told apart from them.
 	async fn cluster_tasks() -> usize {
 		let before = spawned();
-		let cluster = attach(&CacheConfig::default(), crate::ClusterConfig::default()).unwrap();
+		let cluster = attach(&CacheConfig::default(), crate::cluster::Config::default()).unwrap();
 		settle().await;
 		let own = spawned() - before;
 		drop(cluster);
@@ -326,7 +326,7 @@ mod tests {
 	async fn last_owner_drop_stops_governor() {
 		let own = cluster_tasks().await;
 		let before = spawned();
-		let cluster = attach(&governed(), crate::ClusterConfig::default()).unwrap();
+		let cluster = attach(&governed(), crate::cluster::Config::default()).unwrap();
 
 		settle().await;
 		assert_eq!(
@@ -344,7 +344,7 @@ mod tests {
 	async fn extra_cluster_handle_keeps_governor() {
 		let own = cluster_tasks().await;
 		let before = spawned();
-		let cluster = attach(&governed(), crate::ClusterConfig::default()).unwrap();
+		let cluster = attach(&governed(), crate::cluster::Config::default()).unwrap();
 		let session = cluster.clone();
 
 		drop(cluster);

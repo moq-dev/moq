@@ -23,7 +23,7 @@
 use anyhow::Context;
 use axum::Router;
 
-use crate::{Auth, Cluster, ClusterOptions, Config, Connection, Internal, Shutdown, ShutdownTrigger, Web};
+use crate::{Auth, Config, Connection, Internal, Shutdown, ShutdownTrigger, Web, cluster, cluster::Cluster};
 
 /// A fully assembled relay: the owner of every listener, worker group, and
 /// shutdown join.
@@ -210,12 +210,12 @@ impl Relay {
 			(None, Some(certificates)) => certificates,
 			(None, None) => server.certificates(),
 		};
-		let mut advertise = crate::LanAdvertise::new(addr.map(|a| a.port()).unwrap_or(0));
+		let mut advertise = cluster::LanAdvertise::new(addr.map(|a| a.port()).unwrap_or(0));
 		let generated = !config.listen.tls.generate.is_empty() || config.listen.tls.identity.is_some();
 		if generated && let Some(fingerprint) = certificates.fingerprints().into_iter().next() {
 			advertise = advertise.with_fingerprint(fingerprint);
 		}
-		let cluster = Cluster::new(ClusterOptions::new(config.cluster).with_cache(cache))?
+		let cluster = Cluster::new(cluster::Options::new(config.cluster).with_cache(cache))?
 			.with_client(client.clone())
 			.with_client_tls(config.connect.tls.build()?)
 			.with_connect(config.connect.clone(), config.quic.clone())
