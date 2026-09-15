@@ -26,6 +26,7 @@ does not require it.
 
 - [Auth server](/quest/m1/auth/README.md) - one JSON request per connection through `moq-auth`, `--auth-url` or `--auth-public` as the whole relay configuration, `moq auth serve` carrying the old policy, mTLS a fact and never a grant, moq-token retired
 - [Worker ownership](/quest/m1/api-worker-ownership.md) - consuming split ownership retains sockets and joins the group before release
+- [Origin scopes](/quest/m1/api-origin-scopes.md) - literal origin roots carry arbitrary pattern unions, and announce events report the match with its captures
 - [Cluster peer API](/quest/m1/api-cluster-peer-config.md) - typed peer configuration supports current symmetric policy
 - [Broadcast clock](/quest/m1/broadcast-clock.md) - replace archive wall with one fixed catalog-root clock shared by every track
 - [Publisher finish borrows](/quest/m1/api-finish-borrow.md) - finish borrows the handle so abort can still run after a clean end

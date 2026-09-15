@@ -32,4 +32,4 @@ IETF over-request plus local-filter fallback.
 
 - [Lite auth](/quest/m2/auth/lite.md) - establish the AUTH exchange before upgrading its grants to patterns
 
-- [Origin scopes](/quest/m2/path-patterns/origin.md)
+- [Origin scopes](/quest/m1/api-origin-scopes.md) - the scopes this wire carries are enforced there first
