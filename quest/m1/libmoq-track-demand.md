@@ -26,11 +26,14 @@ convention exactly (a positive handle per event, then exactly one terminal
 
 Demand, one level-triggered watcher per handle:
 
-- `moq_publish_track_demand(track, on_demand, user_data)` and
-  `moq_publish_media_demand(media, on_demand, user_data)` return a watcher
-  handle; `moq_publish_demand_close(watcher)` stops it.
+- `moq_publish_track_demand(track, on_demand, user_data)`,
+  `moq_publish_media_demand(media, on_demand, user_data)`, and the same on
+  the built-in encoder handles, `moq_publish_video_raw_demand` and
+  `moq_publish_audio_raw_demand` (moq-ffi's `MoqVideoProducer` and
+  `MoqAudioProducer` carry `used`/`unused` too), return a watcher handle;
+  `moq_publish_demand_close(watcher)` stops it.
 - `on_demand(user_data, int32_t status)` fires immediately with the current
-  state, again on every edge, then once with a terminal `<= 0`. Positive
+  state, again on every observed change, then once with a terminal `<= 0`. Positive
   values come from a `moq_demand` enum (`MOQ_DEMAND_USED`,
   `MOQ_DEMAND_UNUSED`). Seeding with the current state is what closes the
   race the issue calls out: a track that went unused before registration
