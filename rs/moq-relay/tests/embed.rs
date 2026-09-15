@@ -14,7 +14,7 @@ use std::net::UdpSocket;
 use std::net::{SocketAddr, TcpListener};
 use std::time::Duration;
 
-use moq_relay::{Config, PublicConfig, Relay};
+use moq_relay::{Config, Relay};
 use moq_tokio::moq_net::{self, Hop};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -48,10 +48,7 @@ fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf
 }
 
 fn public_auth(config: &mut Config) {
-	#[allow(deprecated)]
-	{
-		config.auth.public = Some(PublicConfig::Simple(vec![String::new()]));
-	}
+	config.auth.public = vec![moq_auth::Pattern::all()];
 }
 
 fn client() -> moq_tokio::Client {

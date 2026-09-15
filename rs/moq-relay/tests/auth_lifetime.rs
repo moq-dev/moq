@@ -655,9 +655,10 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (root, client_cert, client_key) = signed_client(dir.path());
 
-	let policy = |rules: moq_auth::serve::Rules| moq_auth::serve::Policy {
-		mtls: rules,
-		..Default::default()
+	let policy = |rules: moq_auth::serve::Rules| {
+		let mut policy = moq_auth::serve::Policy::default();
+		policy.mtls = rules;
+		policy
 	};
 	let serve = |policy: moq_auth::serve::Policy| async move {
 		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -688,10 +689,10 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	relay.abort();
 
 	// A narrow grant: the certificate publishes under `mine/**` and nothing else.
-	let narrow = serve(policy(moq_auth::serve::Rules {
-		publish: ["mine/**".parse().unwrap()].into_iter().collect(),
-		subscribe: Patterns::new(),
-	}))
+	let narrow = serve(policy(moq_auth::serve::Rules::new(
+		["mine/**".parse().unwrap()].into_iter().collect(),
+		Patterns::new(),
+	)))
 	.await;
 	let (addr, relay) = spawn_quic_relay(build_auth(narrow), Some(root.clone())).await;
 	let url: url::Url = format!("moql://127.0.0.1:{}/room", addr.port()).parse().unwrap();

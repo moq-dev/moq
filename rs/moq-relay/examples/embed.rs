@@ -16,7 +16,7 @@
 //! `select!`; they never take the QUIC sockets out of the relay.
 
 use axum::routing::get;
-use moq_relay::{Config, PublicConfig, Relay};
+use moq_relay::{Config, Relay};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -28,10 +28,7 @@ async fn main() -> anyhow::Result<()> {
 	config.listen.bind = Some("127.0.0.1:0".into());
 	config.listen.tls.generate = vec!["localhost".into()];
 	config.web.http.listen = Some("127.0.0.1:0".parse()?);
-	#[allow(deprecated)]
-	{
-		config.auth.public = Some(PublicConfig::Simple(vec![String::new()]));
-	}
+	config.auth.public = vec![moq_auth::Pattern::all()];
 
 	let relay = Relay::load(config).await?;
 	// Cloned before `run` consumes the relay. In-process workers publish into
