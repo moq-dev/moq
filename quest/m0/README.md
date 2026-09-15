@@ -17,3 +17,4 @@ rather than holding the merge.
 ## Quests
 
 - [Connect auth race](/quest/m0/3532-connect-auth-race.md) - moq-tokio: a 403 on the WebSocket arm no longer fails a connect whose QUIC arm is still in flight
+- [Text fallback](/quest/m0/js-text-catalog-fallback.md) - @moq/hang refuses a catalog whose text section is malformed instead of silently dropping the captions, matching Rust

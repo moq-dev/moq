@@ -45,6 +45,10 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 
 ## Quests
 
+- [Binding audio tests](/quest/m2/binding-audio-tests.md) - every binding proves the Opus frame duration and throwing setters it exposes, and smoke-full publishes audio with an explicit config
+- [Decode format](/quest/m2/ffi-decode-format.md) - the C-only decode pixel format knob reaches every uniffi binding
+- [JSON mutate](/quest/m2/json-mutate.md) - Rust gains the closure edit JS already has, beside the guard
+- [0.0.x crate names](/quest/m2/api-unreleased-crate-names.md) - moq-sock, moq-uring, moq-archive, and moq-e2ee follow the naming rules after the merge
 - [Publisher clocks](/quest/m2/publisher-clock.md) - wire the shared clock through native and browser publisher restarts
 
 - [Audio jitter target](/quest/m2/audio-jitter-target/README.md) - the audio playout target is a measured estimate of arrival timing in both languages, not a round-trip guess
