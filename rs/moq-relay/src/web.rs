@@ -1,10 +1,8 @@
 use std::{
-	future::Future,
 	net,
 	path::PathBuf,
-	pin::Pin,
 	sync::{Arc, atomic::AtomicU64},
-	task::{Context, Poll, ready},
+	task::{Context, Poll},
 };
 
 use anyhow::Context as _;
@@ -928,50 +926,23 @@ impl ServeGroup {
 
 impl IntoResponse for ServeGroup {
 	fn into_response(self) -> Response {
-		Response::new(Body::new(self))
-	}
-}
-
-impl http_body::Body for ServeGroup {
-	type Data = Bytes;
-	type Error = ServeGroupError;
-
-	fn poll_frame(
-		self: Pin<&mut Self>,
-		cx: &mut Context<'_>,
-	) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
-		let this = self.get_mut();
-
-		// Use `poll_fn` to turn the async function into a Future
-		let res = {
-			let future = this.next();
-			tokio::pin!(future);
-			ready!(future.poll(cx))
-		};
-		match res {
-			Ok(Some(data)) => {
-				let frame = http_body::Frame::data(data);
-				Poll::Ready(Some(Ok(frame)))
+		// One stream owns the body for its whole life, so the waiters `next`
+		// registers with the group and the lease survive between polls.
+		let frames = futures::stream::unfold(Some(self), async |serve| {
+			let mut serve = serve?;
+			match serve.next().await {
+				Ok(Some(data)) => Some((Ok(data), Some(serve))),
+				Ok(None) => {
+					serve.end("done");
+					None
+				}
+				Err(err) => {
+					serve.end(&err.to_string());
+					Some((Err(err), None))
+				}
 			}
-			Ok(None) => {
-				this.end("done");
-				Poll::Ready(None)
-			}
-			Err(e) => {
-				this.end(&e.to_string());
-				Poll::Ready(Some(Err(ServeGroupError(e))))
-			}
-		}
-	}
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error(transparent)]
-struct ServeGroupError(moq_net::Error);
-
-impl IntoResponse for ServeGroupError {
-	fn into_response(self) -> Response {
-		(StatusCode::INTERNAL_SERVER_ERROR, self.0.to_string()).into_response()
+		});
+		Response::new(Body::from_stream(frames))
 	}
 }
 

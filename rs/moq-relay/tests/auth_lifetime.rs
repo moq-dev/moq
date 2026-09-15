@@ -34,6 +34,9 @@ enum Answer {
 struct Script {
 	connect: Arc<Mutex<Answer>>,
 	revalidate: Arc<Mutex<Answer>>,
+	/// A re-check answer for one-shot HTTP sessions only, so a test can move a
+	/// fetch without touching the sessions serving it.
+	revalidate_http: Arc<Mutex<Option<Answer>>>,
 	seen: Arc<Mutex<Vec<Request>>>,
 }
 
@@ -42,6 +45,7 @@ impl Script {
 		Self {
 			connect: Arc::new(Mutex::new(Answer::Grant(grant.clone()))),
 			revalidate: Arc::new(Mutex::new(Answer::Grant(grant))),
+			revalidate_http: Arc::new(Mutex::new(None)),
 			seen: Arc::new(Mutex::new(Vec::new())),
 		}
 	}
@@ -52,6 +56,10 @@ impl Script {
 
 	fn on_revalidate(&self, answer: Answer) {
 		*self.revalidate.lock().unwrap() = answer;
+	}
+
+	fn on_revalidate_http(&self, answer: Answer) {
+		*self.revalidate_http.lock().unwrap() = Some(answer);
 	}
 
 	fn ends(&self) -> Vec<Request> {
@@ -68,6 +76,12 @@ impl Script {
 		script.seen.lock().unwrap().push(request.clone());
 		let answer = match request.event {
 			Event::Connect => script.connect.lock().unwrap().clone(),
+			Event::Revalidate if request.transport == moq_auth::Transport::Http => script
+				.revalidate_http
+				.lock()
+				.unwrap()
+				.clone()
+				.unwrap_or_else(|| script.revalidate.lock().unwrap().clone()),
 			Event::Revalidate => script.revalidate.lock().unwrap().clone(),
 			Event::End { .. } => return StatusCode::NO_CONTENT.into_response(),
 		};
@@ -440,6 +454,121 @@ async fn a_refusal_closes_live_sessions() {
 		assert_eq!(*reason, moq_auth::lease::Reason::Refused);
 	}
 
+	relay.abort();
+}
+
+/// The one-shot HTTP routes are sessions of their own: `/announced` is admitted
+/// as `http` and ended when it answers, and `/fetch` holds its lease for as long
+/// as the body streams, so a refusal on re-check cuts the transfer and the `end`
+/// says why.
+#[tokio::test]
+async fn http_routes_hold_a_lease() {
+	let script = Script::new(grant(Duration::from_secs(3600)));
+	let (port, relay) = spawn_ws_relay(build_auth(script.spawn().await)).await;
+
+	// A publisher whose group stays open, so a fetch of it keeps streaming.
+	let pub_origin = moq_tokio::origin::spawn(Hop::random());
+	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	broadcast.announce(Default::default()).expect("announce");
+	let mut track = broadcast.create_track("video", None).expect("create track");
+	let mut group = track.append_group().expect("append group");
+	group
+		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.expect("write frame");
+	let pub_session = tokio::time::timeout(
+		TIMEOUT,
+		client()
+			.with_publisher(pub_origin.consume())
+			.with_reconnect(false)
+			.connect(room_url("ws", port))
+			.established(),
+	)
+	.await
+	.expect("publisher connect timeout")
+	.expect("publisher connect failed");
+
+	let http = reqwest::Client::new();
+	let announced = http
+		.get(format!("http://127.0.0.1:{port}/announced/room?jwt=token"))
+		.send()
+		.await
+		.expect("announced request");
+	assert_eq!(announced.status(), 200);
+	assert_eq!(announced.text().await.expect("announced body").trim(), "test");
+
+	let connects: Vec<Request> = script
+		.seen
+		.lock()
+		.unwrap()
+		.iter()
+		.filter(|r| r.event == Event::Connect && r.transport == moq_auth::Transport::Http)
+		.cloned()
+		.collect();
+	assert_eq!(connects.len(), 1, "one http session for the announced request");
+	assert_eq!(connects[0].path, "/room");
+	assert_eq!(connects[0].query.as_deref(), Some("jwt=token"));
+	assert!(connects[0].remote.is_some_and(|addr| addr.ip().is_loopback()));
+	let ends = |script: &Script| -> Vec<Request> {
+		script
+			.ends()
+			.into_iter()
+			.filter(|r| r.transport == moq_auth::Transport::Http)
+			.collect()
+	};
+	let end_reason = |request: &Request| match &request.event {
+		Event::End { reason, .. } => reason.clone(),
+		_ => unreachable!(),
+	};
+	tokio::time::sleep(Duration::from_millis(200)).await;
+	let done = ends(&script);
+	assert_eq!(done.len(), 1, "the announced session ended");
+	assert_eq!(end_reason(&done[0]), "done".into());
+
+	let mut fetch = http
+		.get(format!("http://127.0.0.1:{port}/fetch/room/test/video?jwt=token"))
+		.send()
+		.await
+		.expect("fetch request");
+	assert_eq!(fetch.status(), 200);
+	let first = tokio::time::timeout(TIMEOUT, fetch.chunk())
+		.await
+		.expect("first frame timeout")
+		.expect("first frame")
+		.expect("body ended early");
+	assert_eq!(&first[..], b"hello");
+
+	// The body is still streaming, so the fetch's lease is still held.
+	tokio::time::sleep(Duration::from_millis(200)).await;
+	assert_eq!(ends(&script).len(), 1, "the fetch must not end while its body streams");
+
+	// A refusal on the fetch's re-check cuts the transfer; the publisher is untouched.
+	script.on_revalidate_http(Answer::Status(403));
+	let cut = tokio::time::timeout(Duration::from_secs(5), async {
+		loop {
+			match fetch.chunk().await {
+				Ok(Some(_)) => continue,
+				other => break other,
+			}
+		}
+	})
+	.await
+	.expect("the refused fetch kept streaming");
+	assert!(cut.is_err(), "a refused fetch must not end cleanly: {cut:?}");
+
+	tokio::time::sleep(Duration::from_millis(200)).await;
+	let ended = ends(&script);
+	assert_eq!(ended.len(), 2, "the fetch session ended");
+	assert_eq!(end_reason(&ended[1]), moq_auth::lease::Reason::Refused);
+	assert!(
+		tokio::time::timeout(Duration::from_millis(200), pub_session.closed())
+			.await
+			.is_err(),
+		"refusing the fetch must not close the publisher"
+	);
+
+	drop(group);
+	drop(track);
+	drop(broadcast);
 	relay.abort();
 }
 
