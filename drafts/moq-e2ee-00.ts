@@ -135,6 +135,12 @@ function checkU53(value: bigint, label: string): void {
 	}
 }
 
+export function checkPhysicalName(name: string): void {
+	if (name.length !== 22 || !/^[A-Za-z0-9_-]{22}$/.test(name)) {
+		throw new ProfileError("identity", `malformed physical name: ${name}`);
+	}
+}
+
 export function checkIdentity(group: bigint, frame: number): void {
 	checkU53(group, "group");
 	if (!Number.isInteger(frame) || frame < 0 || frame > MAX_U32)
@@ -220,6 +226,7 @@ export async function deriveKey(
 	prk?: Uint8Array<ArrayBuffer>,
 ): Promise<{ prk: Uint8Array<ArrayBuffer>; info: Uint8Array<ArrayBuffer>; key: Uint8Array<ArrayBuffer> }> {
 	checkGeneration(credential);
+	checkPhysicalName(physicalName);
 	if (domain !== DOMAIN_GROUP && domain !== DOMAIN_DATAGRAM) {
 		throw new ProfileError("identity", `unknown domain ${domain}`);
 	}
@@ -432,6 +439,21 @@ async function generate() {
 	] as const) {
 		negative.push({ id, operation: "generation", error, generation: generationJson(generation) });
 	}
+	for (const [id, physicalName] of [
+		["physical-name-short", "abc"],
+		["physical-name-long", "a".repeat(23)],
+		["physical-name-charset", "!!!!!!!!!!!!!!!!!!!!!!"],
+		["physical-name-padded", "abcdefghijklmnopqrstu="],
+	] as const) {
+		negative.push({
+			id,
+			operation: "key",
+			error: "identity",
+			generation: generationJson(base),
+			physical_name: physicalName,
+			domain: DOMAIN_GROUP,
+		});
+	}
 	for (const field of ["context", "epoch", "semantic_name"] as const) {
 		negative.push({
 			id: `${field.replaceAll("_", "-")}-too-long`,
@@ -526,6 +548,12 @@ type NegativeVector = { id: string; error: string } & (
 			plaintext_len: number;
 			payload_limit: number;
 	  }
+	| {
+			operation: "key";
+			generation: ReturnType<typeof generationJson>;
+			physical_name: string;
+			domain: Domain;
+	  }
 	| { operation: "identity"; group: string; frame: number | "NaN" | "Infinity" | "-Infinity" }
 	| { operation: "generation"; generation: ReturnType<typeof generationJson> }
 	| { operation: "bytes"; field: "context" | "epoch" | "semantic_name"; length: number }
@@ -617,6 +645,9 @@ async function verify(doc: Awaited<ReturnType<typeof generate>>): Promise<void> 
 						new Uint8Array(row.plaintext_len),
 						row.payload_limit,
 					);
+					break;
+				case "key":
+					await deriveKey(parseGeneration(row.generation), row.physical_name, row.domain);
 					break;
 				case "identity":
 					nonce(BigInt(row.group), Number(row.frame));

@@ -474,6 +474,58 @@
 			}
 		},
 		{
+			"id": "physical-name-short",
+			"operation": "key",
+			"error": "identity",
+			"generation": {
+				"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
+				"epoch": "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f",
+				"kid": 7,
+				"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
+			},
+			"physical_name": "abc",
+			"domain": 0
+		},
+		{
+			"id": "physical-name-long",
+			"operation": "key",
+			"error": "identity",
+			"generation": {
+				"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
+				"epoch": "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f",
+				"kid": 7,
+				"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
+			},
+			"physical_name": "aaaaaaaaaaaaaaaaaaaaaaa",
+			"domain": 0
+		},
+		{
+			"id": "physical-name-charset",
+			"operation": "key",
+			"error": "identity",
+			"generation": {
+				"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
+				"epoch": "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f",
+				"kid": 7,
+				"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
+			},
+			"physical_name": "!!!!!!!!!!!!!!!!!!!!!!",
+			"domain": 0
+		},
+		{
+			"id": "physical-name-padded",
+			"operation": "key",
+			"error": "identity",
+			"generation": {
+				"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
+				"epoch": "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f",
+				"kid": 7,
+				"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
+			},
+			"physical_name": "abcdefghijklmnopqrstu=",
+			"domain": 0
+		},
+		{
 			"id": "context-too-long",
 			"operation": "bytes",
 			"error": "identity",

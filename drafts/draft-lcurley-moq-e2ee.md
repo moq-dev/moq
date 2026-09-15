@@ -129,7 +129,8 @@ The RECOMMENDED epoch is the lowercase text of a UUID version 7 ({{RFC9562}}): i
 A protected broadcast is published at `<name>.e2ee/<epoch>`, where `<name>.e2ee` is the application's broadcast name with an `.e2ee` suffix and `<epoch>` is the epoch text.
 The `.e2ee` suffix marks every path beneath it as ciphertext.
 A protected path never ends in a plaintext format suffix such as `.hang`; the format an authorized client finds after decryption may appear inside the name, as in `meeting.hang.e2ee/<epoch>`.
-Subscribers discover instances by the `<name>.e2ee/` prefix and select the greatest epoch, which for UUID version 7 is the newest.
+Subscribers discover instances by the `<name>.e2ee/` prefix and select the greatest epoch when epochs are UUID version 7 text, where greatest is newest.
+Opaque epochs carry no creation order, so any other epoch form needs an application rule for which instance is current.
 A subscriber that already knows the full path takes the epoch from its last segment.
 
 The epoch and the path are not secret and are not authenticated.
@@ -299,7 +300,7 @@ Each negative row specifies an `operation`, its inputs, and its expected typed e
 Non-finite frame inputs use the strings `NaN`, `Infinity`, and `-Infinity`; group inputs in identity tests are decimal strings.
 Implementations whose types cannot represent an invalid input MUST reject it at their input boundary.
 
-The file covers derivation, physical naming, grouped frames, a datagram at the fixed budget, the same identity under two epochs, relocation across every identity dimension, tag failure, identity bounds, and oversize plaintext.
+The file covers derivation, physical naming, grouped frames, a datagram at the fixed budget, the same identity under two epochs, relocation across every identity dimension, tag failure, malformed physical names, identity bounds, and oversize plaintext.
 
 The shared verifier is stateless.
 It does not verify `reuse`, `exhausted`, `duplicate`, or failure propagation.
