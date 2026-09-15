@@ -6,6 +6,7 @@
 import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import type { Handle } from "../bandwidth.ts";
+import { scopePrefix } from "../internal.ts";
 import * as Origin from "../origin.ts";
 import * as Path from "../path.ts";
 import { type AcceptProps as AcceptPropsType, accept } from "./accept.ts";
@@ -267,6 +268,11 @@ export class Connection {
 	 * the old relay's origin, then the new one's arrivals stream in.
 	 */
 	announced(scope: Path.Pattern = Path.Pattern.all()): Announce.Consumer {
+		// Refuse an unsupported scope here, where the caller can see it; the pump below
+		// runs later inside an effect, which would only log the throw and leave the
+		// consumer waiting forever.
+		scopePrefix(scope);
+
 		const producer = new Announce.Producer();
 		const consumer = producer.consume();
 
