@@ -3,6 +3,7 @@ import * as broadcast from "../broadcast.ts";
 import { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation, reason } from "../error.ts";
 import * as netGroup from "../group.ts";
+import { scopePrefix } from "../internal.ts";
 import * as Path from "../path.ts";
 import type { Reader, Stream } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
@@ -139,20 +140,20 @@ export class Subscriber {
 	}
 
 	/**
-	 * Gets an announced reader for the specified prefix.
+	 * Gets an announced reader for `scope`, a prefix-shaped pattern (`foo/**`, or `**`
+	 * for everything). Patterns are relative to the session, not the scope.
 	 *
 	 * The peer is asked with SUBSCRIBE_NAMESPACE regardless of what it declared, and an
 	 * unsolicited PUBLISH_NAMESPACE lands here too, so a peer that only tells and one
 	 * that only answers are both discovered.
 	 */
-	announced(prefix = Path.empty()): announce.Consumer {
-		// The announce stream presents scopes; the wire interest prefix converts
-		// explicitly to its subtree.
-		const announced = new announce.Producer(new Path.Patterns([Path.Pattern.subtree(prefix)]));
+	announced(scope: Path.Pattern = Path.Pattern.all()): announce.Consumer {
+		// The wire speaks announce interest by prefix.
+		const prefix = scopePrefix(scope);
+		const announced = new announce.Producer();
 		for (const active of this.#announced.keys()) {
-			const suffix = Path.stripPrefix(prefix, active);
-			if (suffix === null) continue;
-			announced.append({ pattern: Path.Pattern.subtree(suffix), active: true });
+			if (!Path.hasPrefix(prefix, active)) continue;
+			announced.append({ pattern: Path.Pattern.subtree(active), active: true });
 		}
 		this.#announcedConsumers.set(announced, prefix);
 
@@ -175,9 +176,8 @@ export class Subscriber {
 
 		console.debug(`announced: broadcast=${path} active=true`);
 		for (const [consumer, prefix] of this.#announcedConsumers) {
-			const suffix = Path.stripPrefix(prefix, path);
-			if (suffix === null) continue;
-			consumer.append({ pattern: Path.Pattern.subtree(suffix), active: true });
+			if (!Path.hasPrefix(prefix, path)) continue;
+			consumer.append({ pattern: Path.Pattern.subtree(path), active: true });
 		}
 	}
 
@@ -200,10 +200,9 @@ export class Subscriber {
 		console.debug(`announced: broadcast=${path} active=false`);
 
 		for (const [consumer, prefix] of this.#announcedConsumers) {
-			const suffix = Path.stripPrefix(prefix, path);
-			if (suffix === null) continue;
+			if (!Path.hasPrefix(prefix, path)) continue;
 			try {
-				consumer.append({ pattern: Path.Pattern.subtree(suffix), active: false });
+				consumer.append({ pattern: Path.Pattern.subtree(path), active: false });
 			} catch {
 				// Consumer already closed, will be cleaned up
 			}

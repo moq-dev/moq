@@ -6,6 +6,7 @@ import { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
+import { scopePrefix } from "../internal.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
 import * as Time from "../time.ts";
@@ -152,17 +153,18 @@ export class Subscriber {
 	}
 
 	/**
-	 * Subscribe to broadcast announcements under `prefix`.
+	 * Subscribe to broadcast announcements under `scope`, a prefix-shaped pattern
+	 * (`foo/**`, or `**` for everything). Patterns are relative to the session, not
+	 * the scope.
 	 *
 	 * Reflected announces (those whose hop chain already includes this
 	 * connection) are always dropped: moq-lite-06 has none to keep, and older
 	 * versions stay consistent with that.
 	 */
-	announced(prefix = Path.empty()): announce.Consumer {
-		// The announce stream presents scopes; the wire interest prefix converts
-		// explicitly to its subtree.
-		const announced = new announce.Producer(new Path.Patterns([Path.Pattern.subtree(prefix)]));
-		void this.#runAnnounced(announced, prefix);
+	announced(scope: Path.Pattern = Path.Pattern.all()): announce.Consumer {
+		const announced = new announce.Producer();
+		// The wire speaks announce interest by prefix, and echoes suffixes beneath it.
+		void this.#runAnnounced(announced, scopePrefix(scope));
 		return announced.consume();
 	}
 
@@ -230,13 +232,13 @@ export class Subscriber {
 					// ANNOUNCE_OK, so nothing names the publisher.
 					for (const suffix of init.suffixes) {
 						const pattern = Path.Pattern.subtree(suffix);
-						const path = Path.join(prefix, suffix);
+						const claim = pattern.rooted(prefix);
 						if (advertised.has(pattern.text)) {
-							throw new ProtocolViolation(`duplicate announce for ${path}`);
+							throw new ProtocolViolation(`duplicate announce for ${claim.text}`);
 						}
 						advertised.set(pattern.text, { publisher: undefined, live: true });
-						console.debug(`announced: broadcast=${path} active=true`);
-						announced.append({ pattern, active: true, route: Route.default });
+						console.debug(`announced: broadcast=${claim.text} active=true`);
+						announced.append({ pattern: claim, active: true, route: Route.default });
 					}
 					break;
 				}
@@ -318,6 +320,8 @@ export class Subscriber {
 						continue;
 				}
 
+				// The wire names the suffix beneath the interest prefix; the claim names the
+				// covered paths from the session root, which is what the consumer sees.
 				const claim = pattern.rooted(prefix);
 				const suffix = pattern.asPrefix();
 				const path = suffix === undefined ? undefined : Path.join(prefix, Path.from(suffix));
@@ -352,7 +356,7 @@ export class Subscriber {
 					if (!previous?.live) return;
 					if (path !== undefined) this.#consumes.evict(path);
 					console.debug(`announced: broadcast=${claim.text} active=false`);
-					announced.append({ pattern, active: false });
+					announced.append({ pattern: claim, active: false });
 				};
 
 				// In Lite05+ the sender's origin arrives via AnnounceOk, not in each hop
@@ -398,7 +402,7 @@ export class Subscriber {
 						if (!routesEqual(previous.route, route)) {
 							advertised.set(pattern.text, { publisher, live: true, route });
 							console.debug(`announced: broadcast=${claim.text} rerouted`);
-							announced.append({ pattern, active: true, route });
+							announced.append({ pattern: claim, active: true, route });
 						} else {
 							console.debug(`announced: broadcast=${claim.text} rerouted`);
 						}
@@ -416,7 +420,7 @@ export class Subscriber {
 				advertised.set(pattern.text, { publisher, live: true, route });
 
 				console.debug(`announced: broadcast=${claim.text} active=true`);
-				announced.append({ pattern, active: true, route });
+				announced.append({ pattern: claim, active: true, route });
 			}
 
 			announced.close();

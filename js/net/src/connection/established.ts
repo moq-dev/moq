@@ -34,8 +34,11 @@ export interface Established {
 	 */
 	readonly discovery: boolean;
 
-	/** Subscribe to broadcast announcements under an optional path prefix, returning paths relative to that prefix. */
-	announced(prefix?: Path.Valid): announce.Consumer;
+	/**
+	 * Subscribe to broadcast announcements under `scope`, a prefix-shaped pattern (`foo/**`,
+	 * default `**` for everything). Patterns are relative to the session, not the scope.
+	 */
+	announced(scope?: Path.Pattern): announce.Consumer;
 
 	/**
 	 * Consume the broadcast at the given path, immediately.
