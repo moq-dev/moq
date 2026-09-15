@@ -2468,7 +2468,7 @@ mod tests {
 				..Default::default()
 			})
 			.await?;
-		assert_eq!(token.publish, vec!["alice".as_path()]);
+		assert_eq!(token.publish, grants(["alice"]));
 
 		Ok(())
 	}

@@ -61,7 +61,7 @@ Decisions settled while planning, recorded so review does not relitigate them.
 - **Revalidate and outage.** A re-check that returns a grant applies it: a
   changed `tier` retags subsequent bytes, a changed `root` closes the session,
   a narrower grant closes the session until
-  [Origin scopes](/quest/m2/path-patterns/origin.md) resizes in place. A
+  [Origin scopes](/quest/m1/api-origin-scopes.md) resizes in place. A
   refusal closes it now. A failed re-check retries with backoff and the
   session lives until `expires`; a grant with `revalidate` and no `expires`
   is refused at startup validation of the reply, so an outage always has a
@@ -134,7 +134,7 @@ and package names, and the release moq.pro adopts must carry it.
 
 - [In-band auth](/quest/m2/auth/README.md) - a token presented after the
   connection becomes a request through the same contract
-- [Origin scopes](/quest/m2/path-patterns/origin.md) - lifts the prefix-shaped
+- [Origin scopes](/quest/m1/api-origin-scopes.md) - lifts the prefix-shaped
   restriction and resizes a live session on a narrower grant
 - [Connect auth race](/quest/m0/3532-connect-auth-race.md) - the client-side
   handling of a refusal, unchanged by this line
