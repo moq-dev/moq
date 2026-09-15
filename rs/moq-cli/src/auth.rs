@@ -6,7 +6,7 @@ use anyhow::Context;
 use std::net::SocketAddr;
 use std::{io, path::PathBuf};
 
-use moq_auth::serve::{Keys, Limits, Policy, Rules};
+use moq_auth::serve::{Keys, Policy, Rules};
 use moq_auth::{Algorithm, Pattern};
 
 /// Generate, sign, and verify the JWT tokens a relay authenticates with.
@@ -255,28 +255,29 @@ pub struct Serve {
 }
 
 impl Serve {
-	/// The policy these flags describe.
-	fn policy(&self) -> Policy {
-		let rules = |publish: &[Pattern], subscribe: &[Pattern]| Rules {
-			publish: publish.iter().cloned().collect(),
-			subscribe: subscribe.iter().cloned().collect(),
-		};
-		Policy {
-			keys: match (&self.key, &self.key_dir) {
-				(Some(key), _) => Some(Keys::File(key.clone())),
-				(None, Some(dir)) => Some(Keys::Dir(dir.clone())),
-				(None, None) => None,
-			},
-			public: rules(&self.public_publish, &self.public_subscribe),
-			mtls: rules(&self.mtls_publish, &self.mtls_subscribe),
-			tier: self.tier.clone(),
-			revalidate: self.revalidate.into_std(),
-			expires: self.expires.into_std(),
-			limits: Limits {
-				token: self.limit_token,
-				remote: self.limit_remote,
-			},
+	/// The policy these flags describe, refusing a cadence the relay would spin on.
+	fn policy(&self) -> anyhow::Result<Policy> {
+		let revalidate = self.revalidate.into_std();
+		if revalidate.is_zero() {
+			anyhow::bail!("--revalidate must be longer than 0s; every client would re-check in a tight loop");
 		}
+		let rules = |publish: &[Pattern], subscribe: &[Pattern]| {
+			Rules::new(publish.iter().cloned().collect(), subscribe.iter().cloned().collect())
+		};
+		let mut policy = Policy::default();
+		policy.keys = match (&self.key, &self.key_dir) {
+			(Some(key), _) => Some(Keys::File(key.clone())),
+			(None, Some(dir)) => Some(Keys::Dir(dir.clone())),
+			(None, None) => None,
+		};
+		policy.public = rules(&self.public_publish, &self.public_subscribe);
+		policy.mtls = rules(&self.mtls_publish, &self.mtls_subscribe);
+		policy.tier = self.tier.clone();
+		policy.revalidate = revalidate;
+		policy.expires = self.expires.into_std();
+		policy.limits.token = self.limit_token;
+		policy.limits.remote = self.limit_remote;
+		Ok(policy)
 	}
 
 	/// Where to listen, refusing a non-loopback address without `--listen-public`.
@@ -298,7 +299,7 @@ impl Serve {
 
 	async fn run(self) -> anyhow::Result<()> {
 		let listen = self.listener()?;
-		let server = moq_auth::serve::Server::new(self.policy());
+		let server = moq_auth::serve::Server::new(self.policy()?);
 		match listen {
 			Listen::Tcp(addr) => {
 				let listener = tokio::net::TcpListener::bind(addr)
@@ -309,8 +310,7 @@ impl Serve {
 			}
 			#[cfg(unix)]
 			Listen::Unix(path) => {
-				// A socket file left by a previous run would refuse the bind.
-				let _ = std::fs::remove_file(&path);
+				unlink_socket(&path)?;
 				let listener = tokio::net::UnixListener::bind(&path)
 					.with_context(|| format!("failed to bind {}", path.display()))?;
 				tracing::info!(path = %path.display(), "auth server listening");
@@ -327,6 +327,21 @@ impl Serve {
 enum Listen {
 	Tcp(SocketAddr),
 	Unix(PathBuf),
+}
+
+/// Remove the socket file a previous run left at `path`, which would refuse the bind.
+/// Anything that is not a socket stays put: a typo must not delete a file.
+#[cfg(unix)]
+fn unlink_socket(path: &std::path::Path) -> anyhow::Result<()> {
+	use std::os::unix::fs::FileTypeExt;
+	match std::fs::symlink_metadata(path) {
+		Ok(meta) if meta.file_type().is_socket() => {
+			std::fs::remove_file(path).with_context(|| format!("failed to remove the stale socket {}", path.display()))
+		}
+		Ok(_) => anyhow::bail!("{} exists and is not a socket; refusing to replace it", path.display()),
+		Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+		Err(err) => Err(err).with_context(|| format!("failed to inspect {}", path.display())),
+	}
 }
 
 fn is_dash(path: &std::path::Path) -> bool {
@@ -461,7 +476,8 @@ mod tests {
 			"--limit-remote",
 			"8",
 		])
-		.policy();
+		.policy()
+		.unwrap();
 		assert!(matches!(&policy.keys, Some(Keys::Dir(dir)) if dir == std::path::Path::new("/keys")));
 		assert_eq!(
 			policy.public.subscribe,
@@ -472,20 +488,40 @@ mod tests {
 		assert_eq!(policy.tier.as_deref(), Some("internal"));
 		assert_eq!(policy.revalidate, std::time::Duration::from_secs(30));
 		assert_eq!(policy.expires, std::time::Duration::from_secs(7200));
-		assert_eq!(
-			policy.limits,
-			Limits {
-				token: Some(3),
-				remote: Some(8)
-			}
-		);
+		assert_eq!(policy.limits.token, Some(3));
+		assert_eq!(policy.limits.remote, Some(8));
 
 		// Nothing configured is a server that refuses everyone, on the defaults.
-		let bare = serve(&["moq", "auth", "serve"]).policy();
+		let bare = serve(&["moq", "auth", "serve"]).policy().unwrap();
 		assert!(bare.keys.is_none());
 		assert!(bare.public.is_empty() && bare.mtls.is_empty());
 		assert_eq!(bare.revalidate, std::time::Duration::from_secs(60));
 		assert_eq!(bare.expires, std::time::Duration::from_secs(86400));
+
+		// A zero cadence would have every client re-check in a tight loop.
+		let err = serve(&["moq", "auth", "serve", "--revalidate", "0s"])
+			.policy()
+			.unwrap_err();
+		assert!(err.to_string().contains("--revalidate"), "{err}");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn unlink_socket_leaves_anything_but_a_socket_alone() {
+		let dir = tempfile::tempdir().unwrap();
+
+		let file = dir.path().join("config");
+		std::fs::write(&file, "keep me").unwrap();
+		let err = unlink_socket(&file).unwrap_err();
+		assert!(err.to_string().contains("not a socket"), "{err}");
+		assert_eq!(std::fs::read_to_string(&file).unwrap(), "keep me");
+
+		unlink_socket(&dir.path().join("missing")).unwrap();
+
+		let stale = dir.path().join("auth.sock");
+		drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+		unlink_socket(&stale).unwrap();
+		assert!(!stale.exists());
 	}
 
 	#[tokio::test]

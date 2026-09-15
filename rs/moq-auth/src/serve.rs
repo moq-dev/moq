@@ -32,7 +32,10 @@ pub enum Keys {
 }
 
 /// What a class of session is granted: a pattern union per role.
+///
+/// `#[non_exhaustive]`, so build one with [`Rules::new`] rather than a struct literal.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Rules {
 	/// Patterns the session may publish.
 	pub publish: Patterns,
@@ -41,6 +44,11 @@ pub struct Rules {
 }
 
 impl Rules {
+	/// Rules granting `publish` and `subscribe`.
+	pub fn new(publish: Patterns, subscribe: Patterns) -> Self {
+		Self { publish, subscribe }
+	}
+
 	/// Whether the rules grant nothing, which is a refusal.
 	pub fn is_empty(&self) -> bool {
 		self.publish.is_empty() && self.subscribe.is_empty()
@@ -49,11 +57,14 @@ impl Rules {
 
 /// Caps on live sessions, counted from `connect` and `end` events.
 ///
-/// A nuisance limit, not a security boundary: a relay that dies without sending
-/// `end` holds its slots until they age out after two cadences, a restart empties
-/// the table until the fleet's next cadence refills it, and the worst case is one
-/// session admitted over the cap for one cadence.
+/// A nuisance limit, not a security boundary, gating admission and never revoking:
+/// a relay that dies without sending `end` holds its slots until they age out after
+/// two cadences, a restart empties the table until the fleet's next cadence refills
+/// it, and a session admitted while a live one's slot was missing stays over the cap.
+///
+/// `#[non_exhaustive]`, so start from [`Limits::default`] and set the fields.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Limits {
 	/// The most live sessions presenting one token; `None` is unlimited.
 	pub token: Option<usize>,
@@ -64,7 +75,10 @@ pub struct Limits {
 /// The decisions the server answers with, evaluated in order and stopping at the
 /// first that applies: a `jwt` in the query, then a verified certificate, then the
 /// anonymous rules. A malformed or expired token is a refusal, never a fall through.
+///
+/// `#[non_exhaustive]`, so start from [`Policy::default`] and set the fields.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Policy {
 	/// The keys a `jwt` is verified against; `None` refuses every token.
 	pub keys: Option<Keys>,
@@ -173,14 +187,15 @@ impl Policy {
 	}
 }
 
-/// The `jwt` query parameter, when the request carries a non-empty one.
+/// The `jwt` query parameter, when the request carries a non-empty one. The last one
+/// wins, as it did on the relay, so a client that appends a fresh token is believed.
 fn token(request: &Request) -> Option<&str> {
 	let query = request.query.as_deref()?;
 	// Borrow rather than decode: a JWT is base64url and never needs unescaping.
 	query
 		.split('&')
 		.filter_map(|pair| pair.strip_prefix("jwt="))
-		.find(|jwt| !jwt.is_empty())
+		.rfind(|jwt| !jwt.is_empty())
 }
 
 /// A path with its slashes trimmed and collapsed, the way a root is compared.
@@ -246,7 +261,9 @@ impl Sessions {
 		Ok(())
 	}
 
-	/// A `revalidate` keeps the slot alive, re-registering one that aged out.
+	/// A `revalidate` keeps the slot alive, re-registering one that aged out or was
+	/// lost to a restart. The cap is not enforced here: the session was admitted, and
+	/// which survivor to revoke would be an accident of arrival order.
 	fn revalidate(&mut self, request: &Request) {
 		let slot = self.slots.entry(request.id.clone()).or_insert_with(|| Slot {
 			token: token(request).map(hash),
@@ -393,13 +410,30 @@ mod tests {
 		key.sign(&claims).unwrap()
 	}
 
-	async fn serve(policy: Policy) -> (Client, Server) {
+	/// The server behind a client, with a signal for each `end` it has handled.
+	async fn serve(policy: Policy) -> (Client, Arc<tokio::sync::Notify>) {
 		let server = Server::new(policy);
+		let ended = Arc::new(tokio::sync::Notify::new());
+		let router = Router::new()
+			.route(
+				"/",
+				post({
+					let ended = ended.clone();
+					move |state: State<Server>, Json(request): Json<Request>| async move {
+						let is_end = matches!(request.event, Event::End { .. });
+						let response = handle(state, Json(request)).await;
+						if is_end {
+							ended.notify_one();
+						}
+						response
+					}
+				}),
+			)
+			.with_state(server);
 		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 		let url = format!("http://{}/", listener.local_addr().unwrap());
-		let serving = server.clone();
-		tokio::spawn(async move { serving.serve(listener).await });
-		(Client::new(url.parse().unwrap(), None).unwrap(), server)
+		tokio::spawn(async move { axum::serve(listener, router).await });
+		(Client::new(url.parse().unwrap(), None).unwrap(), ended)
 	}
 
 	#[tokio::test]
@@ -530,6 +564,30 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn the_last_jwt_in_the_query_wins() {
+		let (dir, key) = key_dir();
+		let policy = Policy {
+			keys: Some(Keys::Dir(dir.path().into())),
+			..Default::default()
+		};
+		let fresh = sign(&key, "demo", &["**"], &[], None);
+
+		// A client that appends a fresh token after a stale one is believed, as on the
+		// relay; a trailing empty value does not blank it out.
+		let mut request = request("/demo");
+		request.query = Some(format!("a=1&jwt=stale&jwt={fresh}&jwt="));
+		assert_eq!(token(&request), Some(fresh.as_str()));
+		assert!(policy.decide(&request).await.is_ok());
+
+		request.query = Some(format!("jwt={fresh}&jwt=stale"));
+		let err = policy.decide(&request).await.unwrap_err();
+		assert!(matches!(err, Refusal::InvalidToken(_)), "{err}");
+
+		request.query = Some("jwt=&b=2".into());
+		assert_eq!(token(&request), None);
+	}
+
+	#[tokio::test]
 	async fn a_certificate_is_a_fact_and_admits_only_what_is_granted() {
 		let none = Policy::default();
 		assert_eq!(
@@ -649,7 +707,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn the_client_admits_and_reads_the_refusal() {
-		let (client, _server) = serve(Policy {
+		let (client, ended) = serve(Policy {
 			public: rules(&["**"], &[]),
 			limits: Limits {
 				token: None,
@@ -667,7 +725,7 @@ mod tests {
 
 		// The end frees the slot for the next session.
 		consumer.close("done");
-		tokio::time::sleep(Duration::from_millis(50)).await;
+		ended.notified().await;
 		client.connect(request("/demo"), Counters::default()).await.unwrap();
 	}
 

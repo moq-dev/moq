@@ -216,10 +216,11 @@ or `--expires` (default one day) when neither has one.
 `--limit-token N` and `--limit-remote N` cap live sessions per token and
 per remote address (port dropped, IPv4-mapped IPv6 folded), counted from
 `connect` and `end` by session id. The cap is a nuisance limit, not a security
-boundary: a relay that dies without an `end` holds its slots until they miss
-two cadences, a restart empties the table until the fleet's next cadence
-refills it, and one session can slip over the cap for one cadence. A refusal
-names the rule in the 403 body.
+boundary: it gates admission and never revokes. A relay that dies without an
+`end` holds its slots until they miss two cadences, a restart empties the table
+until the fleet's next cadence refills it, and a session admitted while a live
+one's slot was missing stays over the cap. A refusal names the rule in the 403
+body.
 
 `--listen unix:/run/moq-auth.sock` serves a socket. Binding anything but a
 loopback address needs `--listen-public`: the server has no authentication of
