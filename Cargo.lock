@@ -5078,7 +5078,6 @@ dependencies = [
  "bytes",
  "bytesize",
  "futures",
- "http-body",
  "http-cache-reqwest",
  "libc",
  "moq-auth",
