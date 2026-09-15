@@ -58,13 +58,26 @@ fn should_dial(self_url: &str, peer: &str) -> bool {
 /// lands. An object `token` behaves exactly like an inline `?jwt=` and is
 /// redacted the same way. Unknown object fields are rejected, as is an object
 /// that sets policy while its `url` still carries `?cost=` or `?jwt=`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Peer {
 	url: String,
 	cost: Option<u64>,
 	egress: Option<u64>,
 	token: Option<String>,
+}
+
+impl std::fmt::Debug for Peer {
+	/// Redact `token`: [`crate::Config::load`] traces the whole resolved config,
+	/// so a derived `Debug` would print cluster credentials into logs.
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Peer")
+			.field("url", &self.url)
+			.field("cost", &self.cost)
+			.field("egress", &self.egress)
+			.field("token", &self.token.as_ref().map(|_| "..."))
+			.finish()
+	}
 }
 
 impl Peer {
@@ -1057,6 +1070,10 @@ impl Cluster {
 			Some(id) => Hop::new(id).expect("cluster id already validated"),
 			None => Hop::random(),
 		};
+		// Reject a repeated static identity with conflicting policy up front,
+		// matching the `--cluster-connect-api` validation, instead of silently
+		// keeping the first entry when dials spawn.
+		parse_peer_list(config.connect.clone(), None).context("invalid --cluster-connect peer list")?;
 		#[allow(deprecated)]
 		if config.linger.is_some() {
 			tracing::warn!(
@@ -2748,6 +2765,50 @@ mod tests {
 			panic!("differing policies must conflict");
 		};
 		assert!(format!("{err:#}").contains("conflicting configurations"));
+	}
+
+	/// `Config::load` traces the whole resolved config, so `Peer` redacts its
+	/// credential from `Debug` instead of printing it into logs.
+	#[test]
+	fn peer_debug_redacts_token() {
+		let peer = Peer::new("https://peer.example/").with_cost(2).with_token("secret");
+		let debug = format!("{peer:?}");
+		assert!(!debug.contains("secret"), "Debug must not leak the credential: {debug}");
+		assert!(
+			debug.contains("https://peer.example/"),
+			"Debug keeps the address: {debug}"
+		);
+	}
+
+	/// Static `--cluster-connect` entries get the same all-or-nothing
+	/// validation as `--cluster-connect-api` lists: a repeated identity with
+	/// conflicting policy fails construction instead of silently keeping the
+	/// first entry, while equivalent entries dedupe.
+	#[tokio::test]
+	async fn static_conflicting_peers_fail_at_construction() {
+		let conflicting = Config {
+			connect: vec![
+				Peer::new("https://peer.example/?cost=1"),
+				Peer::new("https://peer.example/?cost=2"),
+			],
+			..Default::default()
+		};
+		let Err(err) = new_cluster(conflicting) else {
+			panic!("conflicting static peers must fail");
+		};
+		assert!(
+			format!("{err:#}").contains("conflicting configurations"),
+			"refusal must say so: {err:#}"
+		);
+
+		let equivalent = Config {
+			connect: vec![
+				Peer::new("https://peer.example/?cost=2"),
+				serde_json::from_str(r#"{"url": "https://peer.example/", "cost": 2}"#).expect("parse object peer"),
+			],
+			..Default::default()
+		};
+		new_cluster(equivalent).expect("equivalent static peers dedupe");
 	}
 
 	/// A malformed object entry keeps the last-good dials, exactly like a
