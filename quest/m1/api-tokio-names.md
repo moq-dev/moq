@@ -33,10 +33,6 @@ Public API: breaking on moq-tokio, so on dev. Wire: none. Consumers:
 moq-relay, moq-cli, moq-ffi, moq-gst, and the docs under `doc/lib/rs`; run
 `just check` across the workspace and the rustdoc lint.
 
-## Required
-
-- [Reconnect stats handle](/quest/m1/api-reconnect-stats-handle.md) - the `connection` module goes public there; this quest lands on that layout
-
 ## Related
 
 - [Merge dev](/quest/m1/merge-dev.md) - requires this so moq-tokio releases under settled names

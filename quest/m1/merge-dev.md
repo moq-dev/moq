@@ -48,7 +48,6 @@ additive quest that builds on dev-only code start on main afterwards from
 ## Required
 
 - [Reserved codes](/quest/m1/lite-reserved-codes.md) - nothing provisional ships on the released wire
-- [Reconnect stats handle](/quest/m1/api-reconnect-stats-handle.md) - `ConnectionStatsReader` does not ship
 - [Rate estimate names](/quest/m1/api-rate-estimate-names.md) - the estimates carry one name on the C ABI and every binding
 - [Counter edge names](/quest/m1/api-counter-edge-names.md) - the stats counters name both edges before the wire ossifies
 - [Announce names](/quest/m1/api-announce-names.md) - the announce and request surface releases under one name per concept
