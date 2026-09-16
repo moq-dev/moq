@@ -252,7 +252,7 @@ pub(crate) struct Session {
 	/// The live recv-bitrate estimate, tracked across reconnects by the reconnect loop. Read directly
 	/// by the `estimated-recv-bitrate` getter.
 	recv_bandwidth: moq_net::bandwidth::Consumer,
-	connection_stats: moq_tokio::ConnectionStatsReader,
+	connection_stats: moq_tokio::connection::Monitor,
 	/// This publication's completion. The task moves it to `Failed` on a fatal transport error, so the
 	/// pad streaming threads stop feeding a dead session without consulting the element.
 	completion: CompletionHandle,
@@ -296,7 +296,7 @@ impl Session {
 		// Persistent handles that survive reconnects; the getters read them without touching the loop.
 		let send_bandwidth = reconnect.send_bandwidth();
 		let recv_bandwidth = reconnect.recv_bandwidth();
-		let connection_stats = reconnect.stats();
+		let connection_stats = reconnect.monitor();
 
 		// The task is spawned parked. An immediate auth rejection would otherwise race the element
 		// installing this session, and its bus error would be discarded for belonging to no live one.
@@ -413,7 +413,7 @@ async fn forward_registered(
 	// Persistent across reconnects; watched only to fire property notifications.
 	let mut send_bandwidth = reconnect.send_bandwidth();
 	let mut recv_bandwidth = reconnect.recv_bandwidth();
-	let mut connection_stats = reconnect.stats();
+	let mut connection_stats = reconnect.monitor();
 
 	loop {
 		tokio::select! {

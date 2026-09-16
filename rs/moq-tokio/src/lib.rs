@@ -34,7 +34,8 @@ pub use moq_sock::bind;
 pub mod cli;
 pub mod client;
 pub mod connect;
-mod connection;
+#[doc = "Connection lifecycle and monitoring across reconnects."]
+pub mod connection;
 mod crypto;
 mod deprecated;
 mod duration;
@@ -90,7 +91,7 @@ pub mod websocket;
 // new `pub` item in these modules doesn't silently join it.
 pub use client::Client;
 pub use connect::{Addrs, ConnectError};
-pub use connection::{Backoff, Connection, ConnectionSnapshot, ConnectionStatsReader, GoawayConfig, Redirect, Status};
+pub use connection::{Backoff, Connection, GoawayConfig, Redirect, Status};
 pub use deprecated::Deprecated;
 pub use duration::Duration;
 pub use error::{Error, Result};

@@ -101,6 +101,15 @@ send cap, and iroh cannot disable GSO. `quic::Resolved::default()` is what an
 untouched config resolves to, so read the defaults from there. The
 [relay reference](/bin/relay/config#quic) documents each field.
 
+## Connection monitoring
+
+`Connection::monitor()` returns a cloneable `moq_tokio::connection::Monitor`
+that observes the live session across reconnects without keeping the connection
+loop alive. Its `stats()` and `snapshot()` return `None` between connections;
+`connection::Snapshot` pairs transport statistics with the negotiated protocol.
+Use `presence()` for cumulative connects and disconnects, or
+`presence_changed().await` to wait for those counters to change.
+
 ## WebAssembly
 
 `moq-net` compiles to `wasm32-unknown-unknown` and rides the browser's own

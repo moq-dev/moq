@@ -876,7 +876,7 @@ impl MoqSession {
 		let _guard = crate::ffi::enter();
 		match &self.inner {
 			#[cfg(not(target_arch = "wasm32"))]
-			Inner::Connection(connection) => connection.stats().stats(),
+			Inner::Connection(connection) => connection.monitor().stats(),
 			Inner::Session(session) => Some(session.stats()),
 		}
 		.unwrap_or_default()

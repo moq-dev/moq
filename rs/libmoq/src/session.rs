@@ -15,7 +15,7 @@ struct TaskEntry {
 	close: Option<oneshot::Sender<()>>,
 	callback: ffi::OnStatus,
 	/// Reads live connection stats, reporting `None` while reconnecting.
-	stats: moq_tokio::ConnectionStatsReader,
+	stats: moq_tokio::connection::Monitor,
 	/// One allocator for the session. Every `moq_session_bandwidth` handle clones
 	/// it, so they share one reservation registry.
 	bandwidth: moq_net::bandwidth::Allocator,
@@ -81,10 +81,10 @@ impl Session {
 			callback,
 		} = request;
 
-		// Build the reconnect loop up front so we can grab a stats reader for it
+		// Build the reconnect loop up front so we can grab a monitor for it
 		// before moving it into the spawned task.
 		let reconnect = client.connect(url);
-		let stats = reconnect.stats();
+		let stats = reconnect.monitor();
 		let bandwidth = moq_net::bandwidth::Allocator::new(reconnect.send_bandwidth());
 
 		let closed = oneshot::channel();
@@ -149,7 +149,7 @@ impl Session {
 	///
 	/// Errors with [`Error::SessionNotFound`] if the handle is unknown, or [`Error::Offline`]
 	/// if the session is currently between connections (reconnecting).
-	pub fn snapshot(&self, id: Id) -> Result<moq_tokio::ConnectionSnapshot, Error> {
+	pub fn snapshot(&self, id: Id) -> Result<moq_tokio::connection::Snapshot, Error> {
 		self.task
 			.get(id)
 			.and_then(|entry| entry.as_ref())
