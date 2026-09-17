@@ -197,11 +197,10 @@ export class Subscriber {
 			let responderOrigin: Hop | undefined;
 			if (hasAnnounceOk(this.version)) {
 				const ok = await AnnounceOk.decode(stream.reader, this.version);
-				// A responder that withholds its identity sends the reserved 0. It names
-				// nobody, so folding it into a chain would stamp a placeholder that cannot
-				// close a loop or tell two publishers apart. Treat it as absent instead,
-				// which is the loop-blind route the draft describes.
-				responderOrigin = ok.hop === UNKNOWN_HOP ? undefined : ok.hop;
+				// Keep a withheld 0: it names nobody for loop detection, but it is the
+				// anonymous mark and must travel the reconstructed chain. Assigned identities
+				// stay off this hop and are never forwarded.
+				responderOrigin = ok.hop;
 			}
 
 			// Every advertisement the peer currently has live, keyed by suffix (at most one

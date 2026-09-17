@@ -2032,6 +2032,24 @@ fn create_broadcast_does_not_announce() {
 }
 
 #[test]
+fn announce_accepts_an_anonymous_hop() {
+	let origin = id(moq_origin_create());
+	let path = b"anon";
+	let broadcast = id(unsafe { moq_origin_create_broadcast(origin, path.as_ptr() as *const c_char, path.len()) });
+	let hops = [0u64];
+	let route = moq_route {
+		hops: hops.as_ptr(),
+		hops_len: hops.len(),
+		cost: 1,
+		cold: 0,
+		has_cold: false,
+	};
+	assert_eq!(unsafe { moq_publish_announce(broadcast, &route) }, 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
 fn dynamic_serves_a_request_under_a_prefix() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();

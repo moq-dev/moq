@@ -607,7 +607,8 @@ pub struct moq_section {
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
 pub struct moq_route {
-	/// Hop ids, oldest first. NULL when `hops_len` is 0.
+	/// Hop ids, oldest first. NULL when `hops_len` is 0. 0 is the anonymous
+	/// mark and is legal on a received chain.
 	pub hops: *const u64,
 	pub hops_len: usize,
 	/// Preference among routes covering the same prefix: lower wins.
@@ -650,7 +651,11 @@ unsafe fn parse_route(route: *const moq_route) -> Result<moq_net::origin::Route,
 		}
 		let hops = unsafe { std::slice::from_raw_parts(route.hops, route.hops_len) };
 		for id in hops {
-			let hop = moq_net::Hop::new(*id).map_err(|e| Error::InvalidConfig(e.to_string()))?;
+			let hop = if *id == 0 {
+				moq_net::Hop::UNKNOWN
+			} else {
+				moq_net::Hop::new(*id).map_err(|e| Error::InvalidConfig(e.to_string()))?
+			};
 			out = out.with_hop(hop).map_err(|e| Error::InvalidConfig(e.to_string()))?;
 		}
 	}

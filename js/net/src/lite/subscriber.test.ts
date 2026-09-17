@@ -133,6 +133,26 @@ test("a local empty hop chain is not anonymous", () => {
 	expect(isAnonymous({ hops: [UNKNOWN_HOP], cost: Route.default.cost })).toBe(true);
 });
 
+test("an unidentified responder keeps hop 0 on a nonempty chain", async () => {
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
+	const announced = subscriber.announced(Path.empty());
+	await settle();
+
+	await send((w) => new AnnounceOk(UNKNOWN_HOP, 0).encode(w, Version.DRAFT_06));
+	await send((w) =>
+		encodeAnnounceBroadcast(w, { status: "active", suffix: Path.from("room"), hops: [PUBLISHER_A] }, Version.DRAFT_06),
+	);
+	expect(await announced.next()).toMatchObject({
+		pattern: Path.Pattern.subtree(Path.from("room")),
+		active: true,
+		anonymous: true,
+		route: { hops: [PUBLISHER_A, UNKNOWN_HOP] },
+	});
+
+	announced.close();
+	subscriber.close();
+});
+
 test("a received empty hop list is filled with hop 0 and marked anonymous", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
 	const announced = subscriber.announced();
