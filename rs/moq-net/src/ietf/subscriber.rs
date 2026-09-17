@@ -2400,17 +2400,24 @@ where
 		largest: Option<ietf::Location>,
 		head: &mut Option<(u64, u64, crate::recv::Group)>,
 	) -> Result<(), Error> {
+		let mut prior_group = None;
 		while let Some(object) = decode_fetch_object(stream, self.version).await? {
 			if !object.subgroup_ok {
 				tracing::warn!("subgroup ID is not supported, dropping fill");
 				return Err(Error::Unsupported);
 			}
 
+			// Object ID still keys off whether the wire Group ID field was present.
+			let group = resolve_fetch_group(self.version, prior_group, object.group)?;
+			if let Some(sequence) = group {
+				prior_group = Some(sequence);
+			}
+
 			match head.as_ref().map(|(sequence, next, _)| (*sequence, *next)) {
 				None => {
-					let (Some(sequence), Some(0)) = (object.group, object.object) else {
+					let (Some(sequence), Some(0)) = (group, object.object) else {
 						tracing::warn!(
-							group = ?object.group,
+							group = ?group,
 							object = ?object.object,
 							"a fill must start at a group's first object"
 						);
@@ -2418,13 +2425,13 @@ where
 					};
 					open_fill_group(track, head, sequence)?;
 				}
-				Some((sequence, _)) if object.group.is_some_and(|group| group != sequence) => {
-					let Some(group) = object.group else {
+				Some((sequence, _)) if group.is_some_and(|group| group != sequence) => {
+					let Some(group) = group else {
 						unreachable!("the filter above proved group is Some");
 					};
 					if object.object != Some(0) {
 						tracing::warn!(
-							group = ?object.group,
+							group,
 							object = ?object.object,
 							"a fill must start at a group's first object"
 						);
@@ -2544,6 +2551,27 @@ async fn decode_fetch_object<R: crate::transport::poll::RecvStream>(
 			properties,
 		}),
 	})
+}
+
+/// Absolute Group ID from a fetch object's Group ID field.
+///
+/// The first object is always absolute. Draft-14 through draft-17 keep sending the
+/// absolute ID when the field is present; draft-18 and later send a Group ID Delta,
+/// resolved here in the ascending order this FETCH requested.
+fn resolve_fetch_group(version: Version, prior: Option<u64>, wire: Option<u64>) -> Result<Option<u64>, Error> {
+	let Some(wire) = wire else {
+		return Ok(None);
+	};
+	let Some(prior) = prior else {
+		return Ok(Some(wire));
+	};
+	match version {
+		Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => Ok(Some(wire)),
+		_ => {
+			let step = wire.checked_add(1).ok_or(Error::Unsupported)?;
+			prior.checked_add(step).map(Some).ok_or(Error::Unsupported)
+		}
+	}
 }
 
 fn open_fill_group(
@@ -4994,6 +5022,7 @@ mod stitch_tests {
 		ietf::FetchHeader { request_id }.encode(&mut buf, VERSION).unwrap();
 
 		let mut object_index = 0usize;
+		let mut prev_group = None;
 		for &(sequence, payloads) in groups {
 			for (index, payload) in payloads.iter().enumerate() {
 				let payload = payload.as_ref();
@@ -5004,11 +5033,18 @@ mod stitch_tests {
 					properties.to_vec()
 				});
 
-				// Only the first object of a group carries absolute IDs; the rest inherit.
+				// The first object of the stream carries the absolute Group ID. From
+				// draft-18 on, the first object of a later group carries the ascending
+				// Group ID Delta (new = prior + delta + 1), so 7 then 8 is delta 0.
 				let first = index == 0;
+				let group = match (first, prev_group) {
+					(false, _) => None,
+					(true, None) => Some(sequence),
+					(true, Some(prev)) => Some(sequence.checked_sub(prev + 1).expect("ascending groups")),
+				};
 				ietf::FetchObject::Object {
 					subgroup: ietf::FetchSubgroup::Zero,
-					group: first.then_some(sequence),
+					group,
 					object: first.then_some(0),
 					priority: first.then_some(0),
 					properties,
@@ -5020,6 +5056,7 @@ mod stitch_tests {
 				buf.put_slice(payload);
 				object_index += 1;
 			}
+			prev_group = Some(sequence);
 		}
 
 		buf.to_vec()
@@ -5474,8 +5511,27 @@ mod stitch_tests {
 		assert_eq!(frames[0].1, b"whole-0");
 	}
 
+	/// From draft-18 on, a later object's Group ID field is a delta: 7 then 8 is 0, not 8.
+	/// Draft-17 and earlier still send the absolute ID.
+	#[test]
+	fn a_later_fetch_group_field_is_a_delta() {
+		assert_eq!(
+			resolve_fetch_group(Version::Draft18, Some(7), Some(0)).unwrap(),
+			Some(8)
+		);
+		assert_eq!(
+			resolve_fetch_group(Version::Draft20, Some(7), Some(0)).unwrap(),
+			Some(8)
+		);
+		assert_eq!(
+			resolve_fetch_group(Version::Draft17, Some(7), Some(8)).unwrap(),
+			Some(8)
+		);
+	}
+
 	/// An absolute joining FETCH writes complete groups below Largest Location, then the
 	/// live group's head; the subscribe stream continues that last group with no gap.
+	/// Consecutive groups encode as ascending delta 0 from draft-18 on.
 	#[tokio::test]
 	async fn an_absolute_fetch_stitches_into_the_live_tail() {
 		const START: u64 = 7;
