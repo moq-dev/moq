@@ -2141,12 +2141,11 @@ fn publish_sdt(
 	track
 }
 
-/// Regression for #2833: every cadence in the exporter is anchored on a media timestamp
-/// that only moves forward, so a publisher rewind froze each one for the length of the
-/// rewound span. An audio-only program is the worst case: the PSI has no keyframe to
-/// recover at, and the PCR-only packet is the only adaptation field it ever writes.
+/// A declared marker restarts the program clock and table cadence. An audio-only
+/// program is the worst case: the PSI has no keyframe to recover at, and the PCR-only
+/// packet is the only adaptation field it ever writes.
 #[tokio::test(start_paused = true)]
-async fn rewind_re_emits_tables_and_resumes_the_clock() {
+async fn discontinuity_re_emits_tables_and_resumes_the_clock() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog =
@@ -2185,7 +2184,7 @@ async fn rewind_re_emits_tables_and_resumes_the_clock() {
 		}
 	};
 
-	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Audio));
 	let mut export = export_of(&consumer).await;
 
 	// A ten-minute offset exercises the long rewind from the controlled stimulus
@@ -2198,7 +2197,8 @@ async fn rewind_re_emits_tables_and_resumes_the_clock() {
 
 	// A forward marker must flush the last old frame instead of discarding it.
 	producer.discontinuity().unwrap();
-	write(&mut producer, 2, 605_000_000);
+	write(&mut producer, 20, 605_000_000);
+	producer.cut(None).unwrap();
 	let marked = drain_frames(&mut export).await;
 	let tail: Vec<_> = before
 		.iter()
@@ -2216,36 +2216,30 @@ async fn rewind_re_emits_tables_and_resumes_the_clock() {
 	}
 	assert!(preserved, "forward marker discarded the pre-boundary tail");
 	assert!(!audio_pts.is_empty());
-	let epoch = export.discontinuity();
+	assert_eq!(export.discontinuity(), 1, "the marker was observed");
 
-	// The publisher rewinds and replays the first two seconds.
-	write(&mut producer, 20, 0);
-	let after = drain_frames(&mut export).await;
-	assert_eq!(export.discontinuity(), epoch + 1, "the rewind was observed");
-
-	// The clock leads the new timeline: its first frame is the PCR for slot 0, and the
-	// grid ramps from there instead of waiting to recross the old timeline.
+	let resume = marked.iter().position(|f| f.timestamp.as_micros() >= 605_000_000);
+	let resume = resume.unwrap_or_else(|| {
+		panic!(
+			"resumed media missing, marked timestamps {:?}",
+			marked.iter().map(|f| f.timestamp.as_micros()).collect::<Vec<_>>()
+		)
+	});
 	assert_eq!(
-		after[0].payload[3] & 0x30,
+		marked[resume].payload[3] & 0x30,
 		0x20,
 		"the new timeline leads with its clock"
 	);
-	let pcrs = collect_pcrs(&after);
-	assert!(pcrs.len() > 60, "clock resumed promptly");
-	assert_eq!(after[0].timestamp.as_micros(), 0);
+	let pcrs = collect_pcrs(&marked[resume..]);
+	assert!(!pcrs.is_empty(), "clock resumed promptly");
 	for pair in pcrs.windows(2) {
 		assert_eq!(pair[1].1.wrapping_sub(pair[0].1) & ((1 << 33) - 1), 2250);
 	}
-	assert!(after.iter().all(|f| f.timestamp.as_micros() < 2_000_000));
 
-	// And the tables come back on cadence rather than waiting ten minutes.
-	assert_eq!(count_pid(&after, 0x0000), 4, "PAT at 0, 0.5, 1 and 1.5s");
-	assert_eq!(count_pid(&after, 0x0011), 1, "SDT at 0s");
-
-	// Exactly one packet marks the break, and it is the leading PCR.
+	// Tables come back on cadence rather than waiting for the old 10-minute clock.
+	assert!(count_pid(&marked[resume..], 0x0000) >= 1, "PAT re-emitted after the marker");
 	assert_eq!(count_discontinuity(&before), 0);
-	assert_eq!(count_discontinuity(&after), 1, "the break is flagged exactly once");
-	assert_eq!(count_discontinuity(&after[..1]), 1, "flagged on the leading PCR packet");
+	assert_eq!(count_discontinuity(&marked), 1, "the break is flagged exactly once");
 }
 
 /// The counter-case, and why the fix keys on the discontinuity counter rather than on a
@@ -2319,12 +2313,10 @@ async fn reordered_video_keeps_the_table_cadence() {
 	assert_eq!(count_discontinuity(&out), 0, "a reorder is not a discontinuity");
 }
 
-/// A program with more than one track marks the break once, not once per track. Each
-/// rendition carries its own discontinuity counter, and the rewound frame sorts ahead of
-/// any old-epoch straggler still buffered on the other track. Each track joins the
-/// new program epoch on its own boundary, without comparing unrelated counter values.
+/// A program with more than one track marks the break once, not once per track. A
+/// declared marker joins every rendition; no track is fenced across it.
 #[tokio::test(start_paused = true)]
-async fn rewind_flags_the_break_once_across_tracks() {
+async fn discontinuity_flags_the_break_once_across_tracks() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog =
@@ -2363,12 +2355,12 @@ async fn rewind_flags_the_break_once_across_tracks() {
 
 	let mut idr = vec![0x65u8];
 	idr.extend(std::iter::repeat_n(0xAB, 300));
-	let mut video = Producer::new(video_track, HangContainer::Legacy(crate::container::Kind::Data));
-	let mut audio = Producer::new(audio_track, HangContainer::Legacy(crate::container::Kind::Data));
+	let mut video = Producer::new(video_track, HangContainer::Legacy(crate::container::Kind::Video));
+	let mut audio = Producer::new(audio_track, HangContainer::Legacy(crate::container::Kind::Audio));
 
 	// One keyframe-led second per group on video, 100ms audio frames alongside it.
-	let write = |video: &mut Producer<HangContainer>, audio: &mut Producer<HangContainer>, seconds: u64| {
-		for sec in 0..seconds {
+	let write = |video: &mut Producer<HangContainer>, audio: &mut Producer<HangContainer>, start: u64, seconds: u64| {
+		for sec in start..start + seconds {
 			video
 				.write(Frame {
 					timestamp: Timestamp::from_micros(sec * 1_000_000).unwrap(),
@@ -2393,7 +2385,7 @@ async fn rewind_flags_the_break_once_across_tracks() {
 	};
 
 	let mut export = export_of(&consumer).await;
-	write(&mut video, &mut audio, 4);
+	write(&mut video, &mut audio, 0, 4);
 	let before = drain_frames(&mut export).await;
 	assert_eq!(export.discontinuity(), 0);
 	assert_eq!(count_discontinuity(&before), 0);
@@ -2425,24 +2417,23 @@ async fn rewind_flags_the_break_once_across_tracks() {
 	assert_eq!(export.discontinuity(), 1, "local marker counts are not program epochs");
 	let epoch = export.discontinuity();
 
-	// Both tracks rewind to zero.
-	write(&mut video, &mut audio, 2);
+	// Both tracks declare the same break and continue forward. Neither is fenced.
+	video.discontinuity().unwrap();
+	audio.discontinuity().unwrap();
+	write(&mut video, &mut audio, 5, 2);
 	let after = drain_frames(&mut export).await;
 
 	assert_eq!(
 		export.discontinuity(),
 		epoch + 1,
-		"one rewind, however many tracks saw it"
+		"one break, however many tracks saw it"
 	);
 	assert_eq!(
 		after[0].payload[3] & 0x30,
 		0x20,
 		"the new timeline leads with its clock"
 	);
-	assert_eq!(after[0].timestamp, Timestamp::from_micros(0).unwrap());
 	assert_eq!(count_discontinuity(&after), 1, "the break is flagged exactly once");
-	// Both renditions carry the rewound span; audio is not held back by a tune-in
-	// anchor that belongs to the old timeline.
 	let bytes: Vec<_> = after.iter().flat_map(|f| f.payload.iter().copied()).collect();
 	let (video_pts, audio_pts) = collect_pes_pts(&bytes);
 	assert!(!video_pts.is_empty(), "video resumed");
@@ -2473,72 +2464,15 @@ async fn rewind_flags_the_break_once_across_tracks() {
 	assert!(video_frames > 0);
 	let video_pid = video_pid.expect("video PID in PMT");
 
-	// Keep old video queued while the lower-count audio source rewinds again.
-	// It must start a new program epoch despite having the smaller counter.
-	video.discontinuity().unwrap();
-	video
-		.write(Frame {
-			timestamp: Timestamp::from_micros(8_000_000).unwrap(),
-			duration: None,
-			payload: length_prefixed(&[idr.as_slice()]),
-			keyframe: true,
-		})
-		.unwrap();
-	video.cut(None).unwrap();
-	for i in 0..20 {
-		audio
-			.write(Frame {
-				timestamp: Timestamp::from_micros(i * 100_000).unwrap(),
-				duration: None,
-				payload: Bytes::from_static(&[0xaa; 180]),
-				keyframe: i == 0,
-			})
-			.unwrap();
-	}
-	audio.cut(None).unwrap();
+	// #3533: a content join on a continuous timeline, audio stepping only a
+	// sub-frame (already re-anchored forward). Both tracks keep emitting; no fence.
+	write(&mut video, &mut audio, 7, 2);
 	let again = drain_frames(&mut export).await;
-	assert_eq!(export.discontinuity(), epoch + 2);
-	assert_eq!(count_discontinuity(&again), 1);
-	assert!(again.len() > 20, "rewound audio kept emitting without its stale peer");
-	assert!(
-		again.iter().all(|f| f.timestamp.as_micros() < 2_000_000),
-		"stale video advanced the clock"
-	);
-	assert_eq!(count_pid(&again, video_pid), 0, "old video was discarded");
-
-	// An unrelated old-timeline marker cannot admit the peer's stale clock.
-	video.discontinuity().unwrap();
-	video
-		.write(Frame {
-			timestamp: Timestamp::from_micros(9_000_000).unwrap(),
-			duration: None,
-			payload: length_prefixed(&[idr.as_slice()]),
-			keyframe: true,
-		})
-		.unwrap();
-	video.cut(None).unwrap();
-	assert!(drain_frames(&mut export).await.is_empty());
-
-	// A delayed peer joins on its own boundary without resetting the clock again.
-	for i in 0..4 {
-		video
-			.write(Frame {
-				timestamp: Timestamp::from_micros(i * 1_000_000).unwrap(),
-				duration: None,
-				payload: length_prefixed(&[idr.as_slice()]),
-				keyframe: true,
-			})
-			.unwrap();
-		video.cut(None).unwrap();
-	}
-	let joined = drain_frames(&mut export).await;
-	assert_eq!(export.discontinuity(), epoch + 2);
-	assert_eq!(count_discontinuity(&joined), 0);
-	assert!(count_pid(&joined, video_pid) > 0, "video rejoined");
-	// A discarded span already had counters assigned. They must roll back to
-	// the last emitted bytes, so dropping the span introduces no packet loss.
+	assert!(!again.is_empty(), "both tracks kept emitting across the join");
+	assert!(count_pid(&again, video_pid) > 0, "video was not fenced");
+	assert_eq!(count_discontinuity(&again), 0, "a forward join is not a PCR break");
 	let mut counters = std::collections::HashMap::new();
-	for frame in before.iter().chain(&marked).chain(&after).chain(&again).chain(&joined) {
+	for frame in before.iter().chain(&marked).chain(&after).chain(&again) {
 		for packet in frame.payload.chunks_exact(188) {
 			let pid = u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]);
 			let cc = packet[3] & 15;

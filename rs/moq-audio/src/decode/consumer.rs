@@ -46,7 +46,7 @@ pub struct Consumer {
 	end: Option<moq_net::Timestamp>,
 	/// Presentation time of the first decoded terminal frame.
 	terminal_start: Option<moq_net::Timestamp>,
-	/// Last container discontinuity applied to codec and resampler state.
+	/// Last container playhead generation applied to timeline state.
 	discontinuity: u64,
 }
 
@@ -299,7 +299,8 @@ impl Consumer {
 		}
 	}
 
-	/// Reset every stateful decode stage before the first packet of a new epoch.
+	/// A playhead event re-applies startup delay and skip. The decoder is not reset:
+	/// the next group already starts on a keyframe, and pre-skip is a play-path concern.
 	fn apply_discontinuity(&mut self) -> Result<(), Error> {
 		let discontinuity = self.track.discontinuity();
 		if discontinuity == self.discontinuity {
@@ -307,15 +308,9 @@ impl Consumer {
 		}
 
 		self.discontinuity = discontinuity;
-		self.decoder.reset()?;
-		if let Some(resampler) = self.resampler.as_mut() {
-			resampler.reset();
-		}
 		self.next_start = None;
 		self.spans.clear();
 		self.trailing = Activity::Active;
-		self.epoch = None;
-		self.delay_trimmed = 0;
 		self.frames_decoded = 0;
 		self.end = None;
 		self.terminal_start = None;
@@ -914,20 +909,21 @@ mod tests {
 
 		// A 20 ms Opus packet decodes 960 frames, less the pre-skip on the first one,
 		// so it doesn't fill the 960-frame chunk and is held whole.
-		let write = |producer: &mut moq_mux::container::Producer<_>, frames: u64, payload: Bytes| {
+		let write = |producer: &mut moq_mux::container::Producer<_>, frames: u64, payload: Bytes, keyframe: bool| {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_scale(frames, 48_000).unwrap(),
 					duration: None,
 					payload,
-					keyframe: true,
+					keyframe,
 				})
 				.unwrap();
 		};
-		write(&mut producer, 0, active.payload);
+		write(&mut producer, 0, active.payload, true);
 		// The end marker, then the terminal packet a second past where it belongs.
-		write(&mut producer, 3 * 48_000, Bytes::new());
-		write(&mut producer, 48_000, dtx.payload);
+		// Same group: a new group at 1s would sit below the marker's live edge.
+		write(&mut producer, 3 * 48_000, Bytes::new(), false);
+		write(&mut producer, 48_000, dtx.payload, false);
 		producer.finish().unwrap();
 
 		let frame = consumer.read().await.unwrap().expect("decoded frame");

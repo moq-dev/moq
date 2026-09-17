@@ -533,6 +533,7 @@ impl<E: catalog::Catalog> Import<E> {
 			tail: Vec::new(),
 			tail_pts: None,
 			resync: Resync::new(pid.as_u16(), descriptor.track_suffix),
+			shift: None,
 		}))
 	}
 
@@ -2287,6 +2288,8 @@ struct LegacyStream<E: CatalogExt = ()> {
 	/// only covers frames that begin in that PES.
 	tail_pts: Option<Timestamp>,
 	resync: Resync,
+	/// Added to source PTS after a timebase reset so the hang timeline never rewinds.
+	shift: Option<Timestamp>,
 }
 
 impl<E: CatalogExt> LegacyStream<E> {
@@ -2311,7 +2314,11 @@ impl<E: CatalogExt> LegacyStream<E> {
 		// ISO 13818-1, a PES PTS refers to the first access unit starting in it).
 		// After each frame it advances by that frame's duration (per frame, not
 		// `index * constant`: E-AC-3 varies the samples per frame).
-		let mut pts = if carried > 0 { self.tail_pts.take() } else { pes_base };
+		let mut pts = if carried > 0 {
+			self.tail_pts.take()
+		} else {
+			self.reanchor(pes_base)?
+		};
 		let mut in_tail = carried > 0;
 
 		let mut offset = 0;
@@ -2320,7 +2327,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 		let mut fallback = None;
 		while offset + self.descriptor.min_header_len <= data.len() {
 			if in_tail && offset >= carried {
-				pts = pes_base;
+				pts = self.reanchor(pes_base)?;
 				in_tail = false;
 			}
 
@@ -2397,7 +2404,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 					match self.resync.recover(data, offset, &self.descriptor.into()) {
 						Recover::At(next) => {
 							if in_tail {
-								pts = pes_base;
+								pts = self.reanchor(pes_base)?;
 								in_tail = false;
 							}
 							offset = next;
@@ -2415,7 +2422,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 								}
 								None => {
 									if in_tail {
-										pts = pes_base;
+										pts = self.reanchor(pes_base)?;
 										in_tail = false;
 									}
 									offset = next;
@@ -2464,7 +2471,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 		// PES, with the PTS it should carry.
 		if offset < data.len() {
 			if in_tail && offset >= carried {
-				pts = pes_base;
+				pts = self.reanchor(pes_base)?;
 			}
 			self.tail = data[offset..].to_vec();
 			self.tail_pts = pts;
@@ -2473,9 +2480,29 @@ impl<E: CatalogExt> LegacyStream<E> {
 		Ok(published)
 	}
 
+	fn reanchor(&mut self, pts: Option<Timestamp>) -> anyhow::Result<Option<Timestamp>> {
+		let Some(pts) = pts else {
+			return Ok(None);
+		};
+		if let Some(delta) = self.shift {
+			return Ok(Some(pts.checked_add(delta.convert(pts.scale())?)?));
+		}
+		let Some(edge) = self.import.as_ref().and_then(legacy::Import::live_edge) else {
+			return Ok(Some(pts));
+		};
+		if pts.as_micros() >= edge.as_micros() {
+			return Ok(Some(pts));
+		}
+		let delta = edge.as_micros() - pts.as_micros();
+		let delta = Timestamp::from_micros(u64::try_from(delta)?)?;
+		self.shift = Some(delta);
+		Ok(Some(edge.convert(pts.scale())?))
+	}
+
 	fn discontinuity(&mut self, published: bool) -> anyhow::Result<()> {
 		self.desync();
 		self.unwrap.discontinuity();
+		self.shift = None;
 		if published && let Some(import) = &mut self.import {
 			import.discontinuity()?;
 		}
@@ -3496,7 +3523,7 @@ mod test {
 			.unwrap();
 		let mut reader = crate::container::Consumer::new(
 			track,
-			crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+			crate::catalog::hang::Container::Legacy(crate::container::Kind::Audio),
 		);
 		let mut frames = Vec::new();
 		while let Ok(Ok(Some(frame))) = tokio::time::timeout(Duration::from_millis(50), reader.read()).await {
@@ -4085,6 +4112,53 @@ mod test {
 			Timestamp::from_micros(3_000_000).unwrap(),
 			"not re-anchored on the new PES"
 		);
+	}
+
+	// #3533: a content join on a continuous transport timeline can land a PES PTS a few
+	// milliseconds below the extrapolated high-water mark. Re-anchor forward from the live
+	// edge instead of refusing the frame and aborting the import.
+	#[tokio::test(start_paused = true)]
+	async fn legacy_resync_below_the_live_edge_publishes_forward() {
+		const MP2_PID: u16 = 0x0061;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		// Two frames so the first is confirmed and published: live edge is 90_000 ticks.
+		let mut first = mp2_frame(0xAA);
+		first.extend_from_slice(&mp2_frame(0xBB));
+		import
+			.decode(audio_pes_packet(MP2_PID, 0, 90_000, &first).as_slice())
+			.unwrap();
+
+		// A join a millisecond behind the live edge.
+		let mut join = mp2_frame(0xDD);
+		join.extend_from_slice(&mp2_frame(0xEE));
+		import
+			.decode(audio_pes_packet(MP2_PID, 1, 89_910, &join).as_slice())
+			.expect("a PES PTS below the live edge must not abort the import");
+		import.finish().unwrap();
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert!(
+			frames.len() >= 3,
+			"expected published frames after the join, got {}",
+			frames.len()
+		);
+		let mut last = 0;
+		for frame in &frames {
+			assert!(
+				frame.timestamp.as_micros() >= last,
+				"published a rewind: {last} then {}",
+				frame.timestamp.as_micros()
+			);
+			last = frame.timestamp.as_micros();
+		}
 	}
 
 	// Confirming a joined frame means holding it when the buffer ends too soon after it to
@@ -4850,7 +4924,7 @@ mod test {
 		let track = consumer.track(name).unwrap().subscribe(subscription).await.unwrap();
 		let mut reader = crate::container::Consumer::new(
 			track,
-			crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+			crate::catalog::hang::Container::Legacy(crate::container::Kind::Audio),
 		);
 		let mut frames = Vec::new();
 		while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await
@@ -4942,7 +5016,10 @@ mod test {
 		let name = catalog.snapshot().mpegts.tracks.keys().next().unwrap().clone();
 		let (frames, breaks) = read_breaks(&consumer, &name).await;
 		assert_eq!(frames.len(), 3);
-		assert_eq!(breaks, 2, "sections must participate in reset boundaries");
+		assert_eq!(
+			breaks, 0,
+			"a data sequence hole whose timestamps do not jump is not a playhead event"
+		);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -5045,8 +5122,8 @@ mod test {
 			let stamps: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
 			assert_eq!(stamps[0], 45_000_000, "the old timeline");
 			assert!(
-				stamps.last().is_some_and(|&last| last < 2_000_000),
-				"the restarted clock was unwrapped as a field rollover: {stamps:?}"
+				stamps.last().is_some_and(|&last| last >= 45_000_000),
+				"the restarted clock rewound instead of continuing forward: {stamps:?}"
 			);
 		}
 	}
@@ -5259,16 +5336,8 @@ mod test {
 		);
 	}
 
-	/// How a shared forward boundary is identified across renditions: it is not.
-	///
-	/// The break reaches each rendition as its own marker, landing at that rendition's own
-	/// media position, and a consumer counter is local to the track it came from. One program
-	/// break and two renditions with independent gaps are the same evidence, so the exporter
-	/// takes each forward marker at face value and re-anchors the clock for it. That costs a
-	/// redundant flag per peer, which a receiver re-acquires on; coalescing them would have to
-	/// tell a peer's delayed marker for this break from its own later one, and admit a peer
-	/// that rewinds while the first went forwards, so it waits on a boundary the wire carries
-	/// rather than a heuristic over local counters.
+	/// A shared forward boundary is one program break. Every rendition joins the new
+	/// generation, so the clock flags it once however many tracks declared the marker.
 	#[tokio::test(start_paused = true)]
 	async fn a_shared_forward_boundary_resets_once_per_rendition() {
 		const PES_TICKS: u64 = 2 * 72 * 90;
@@ -5291,6 +5360,6 @@ mod test {
 		stimulus.extend_from_slice(&clock_break_packet(PCR_PID));
 		media(&mut stimulus, &mut cc, 31 * 90_000);
 
-		assert_eq!(export_discontinuities(&stimulus).await, 2, "one flag per rendition");
+		assert_eq!(export_discontinuities(&stimulus).await, 1, "one flag per program break");
 	}
 }

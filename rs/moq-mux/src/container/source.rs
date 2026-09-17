@@ -184,12 +184,12 @@ impl ExportSource {
 		self.description.as_ref()
 	}
 
-	/// The underlying consumer's timeline-discontinuity counter, or 0 until the
+	/// The underlying consumer's playhead generation, or 0 until the
 	/// subscription resolves.
 	///
 	/// See [`Consumer::discontinuity`]. Sample it alongside each frame returned by
 	/// [`poll_read`](Self::poll_read): the frame read while the counter changes is
-	/// the first of a new timeline, so anything anchored on the media clock (a
+	/// the first after a playhead event, so anything anchored on the media clock (a
 	/// repetition cadence, a clock grid, a pacer) has to re-anchor to it.
 	pub fn discontinuity(&self) -> u64 {
 		match &self.state {

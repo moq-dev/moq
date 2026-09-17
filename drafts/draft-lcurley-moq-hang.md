@@ -508,13 +508,17 @@ type Container =
 The `kind` field selects the framing; a consumer MUST ignore a rendition whose `kind` it does not recognize.
 Every container shares the same group rules:
 
-Each moq-lite group MUST start with a keyframe.
+Each moq-lite group MUST start with a keyframe, except a group that contains only a discontinuity marker.
 If the codec does not support delta frames (e.g. audio), a group MAY consist of multiple keyframes.
 Otherwise, a group MUST consist of a single keyframe followed by zero or more delta frames.
 
-An empty group declares a discontinuity between codec epochs.
-A consumer MUST reset codec state before decoding the next non-empty group, including reapplying any codec startup delay or pre-skip.
-This applies whether the resumed timestamps move backward or forward.
+A group with no decodable frames is a walk-now discontinuity: one empty codec payload and no media.
+A consumer MUST NOT submit the marker to a decoder.
+Empty groups (zero objects) are permitted and mean nothing.
+After a discontinuity the timeline continues forward.
+A group whose timestamps fall below the live edge earlier groups reached is malformed.
+A delivered sequence hole is a playhead event unless the boundary is contiguous within 1 ms.
+A consumer re-applies startup delay and skip at a playhead event; it does not reset codec state.
 
 ## legacy
 The default, used when the `container` field is absent.
@@ -1049,6 +1053,7 @@ A publisher MAY estimate an unknown final duration from the frame cadence, but M
 - Compared existing track properties by parsed values rather than JSON serialization.
 - Required exclusive DVR restart recovery to remove unreferenced group objects left by interrupted expiration.
 - Replaced the catalog root `timeline` field with `archive`, carrying the timeline track plus optional `replay`, `store`, and recording `version`.
+- A marker group of one empty frame declares a discontinuity. Empty groups mean nothing. Timestamps only move forward; a group below the live edge is malformed. A delivered sequence hole is a playhead event unless contiguous within 1 ms.
 
 # Acknowledgments
 {:numbered="false"}

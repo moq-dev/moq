@@ -59,10 +59,10 @@ turn. The same flag on an elementary PID other than the program PCR PID, a
 continuity-counter gap, and the 33-bit timestamp rollover move no clock and
 declare nothing. FLV covers H.264 + AAC.
 
-MPEG-TS export restarts its clock and table cadence after a publisher rewind,
+MPEG-TS export restarts its clock and table cadence after a declared marker,
 discarding the old mux buffer. The first new clock packet signals the break and
-stdout pacing re-anchors. Other renditions resume at their own discontinuity
-boundary, so old-timeline frames cannot advance the new clock.
+stdout pacing re-anchors. Every rendition joins the new program generation;
+no track is fenced across the marker.
 
 fMP4 export writes one fragment per publisher group on each track. Audio follows
 the publisher's cuts; video normally follows GOPs. Closing a group flushes it

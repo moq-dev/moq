@@ -159,6 +159,10 @@ pub enum Error {
 	#[error("{0}")]
 	InvalidEnd(#[from] crate::container::InvalidEnd),
 
+	/// A frame's timestamp sits below the live edge earlier groups reached.
+	#[error("{0}")]
+	TimestampRewind(#[from] crate::container::TimestampRewind),
+
 	/// A FLV video frame resolved to a negative presentation timestamp.
 	#[error("negative FLV video presentation timestamp: dts={dts_ms}ms composition_time={composition_time_ms}ms")]
 	NegativeFlvPts {
