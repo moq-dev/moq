@@ -64,11 +64,36 @@ A **verbatim** track carries an elementary stream the publisher did not decode, 
 # Introduction {#introduction}
 A transport stream reaches MoQ in one of two shapes.
 A publisher can leave the multiplex intact and carry the packet stream as opaque payload, which is what {{msfts}} specifies.
-Or it can demultiplex, which is what this document addresses: each elementary stream becomes its own MoQ track with a codec description, so a relay can drop and prioritize per track and a subscriber can decode without a transport-stream parser.
+Or it can demultiplex, which is what this document addresses: each elementary stream becomes its own MoQ track with a codec description, so a relay can drop and prioritize per track and a subscriber can decode without a transport-stream parser ({{comparison}}).
 
 Demultiplexing loses everything that is not media: the PID layout, the PMT descriptors, the program identity, the service information, and any stream the publisher has no decoder for.
 The `mpegts` section records that.
 It defines no packaging and no container: decoded media keeps the container its catalog entry declares, and verbatim tracks use the framing in {{verbatim}}.
+
+
+# Comparison with m2ts Packaging {#comparison}
+{{msfts}} carries the transport stream as it arrives: each object is a run of whole 188- or 192-byte packets, and the receiver demultiplexes as it always has.
+This document takes the stream apart at the publisher and discards the packetization layer, because MoQ already provides what it was there for:
+
+- **Packet framing** interleaves elementary streams onto one serial pipe. MoQ delivers each track separately.
+- **Null packets** pad a multiplex to a constant bitrate. There is no bitrate to pad to.
+- **The PCR** distributes the multiplex's timebase. Each track carries its own timestamps.
+- **Continuity counters** detect loss within a stream. That is the transport's job.
+- **PSI repetition** lets a receiver join mid-stream. The catalog is a track a subscriber fetches on join.
+
+What remains is media in a codec-neutral catalog, plus the signaling a demultiplexer cannot reconstruct: that is the `mpegts` section.
+
+| | m2ts packaging | mpegts section |
+|:--------|:--------|:--------|
+| MoQ track | one per program | one per elementary stream |
+| Object payload | whole source packets | one media frame, or one verbatim PES payload or section |
+| Packaging | `m2ts` | none defined; media keeps its own |
+| Catalog | `m2ts*` members on each track | one `mpegts` root member |
+| Relay | caches and drops whole objects | drops and prioritizes per elementary stream |
+
+The two overlap only on program identity: `m2tsProgramNumber` and `m2tsPmtPid` against {{field-program}}, and `m2tsPsiInterval` against a per-PID `interval` ({{field-si}}).
+They do not collide, since those members sit on a track and this section sits at the root.
+A track is one shape or the other.
 
 
 # The mpegts Section {#section}
@@ -108,7 +133,7 @@ A consumer MUST ignore an entry with neither a `verbatim` record nor a track the
 ## programDescriptors
 The PMT's program-level descriptors (`program_info`), in PMT order ({{descriptor}}).
 
-## program
+## program {#field-program}
 The program identity from the PAT:
 
 ~~~
@@ -124,7 +149,7 @@ They are the only service-layer fields this document parses; everything else abo
 
 A publisher MUST include `program` when the broadcast came from a transport stream, and omit it otherwise.
 
-## si
+## si {#field-si}
 The standalone service information tables, keyed by the PID they ride on:
 
 ~~~
@@ -204,8 +229,7 @@ A publisher MUST NOT name a section after a member MSF itself defines.
 
 The keys of the section's own `tracks` member are MSF track names; a decoded track also has an MSF track object, a verbatim track does not.
 
-This document defines no packaging value.
-{{msfts}} registers `m2ts` for the passthrough shape in {{introduction}}; the two are alternatives, and a track is one or the other.
+This document defines no packaging value; {{msfts}} registers `m2ts` for the passthrough shape ({{comparison}}).
 
 
 # Rebuilding a Transport Stream {#rebuild}
