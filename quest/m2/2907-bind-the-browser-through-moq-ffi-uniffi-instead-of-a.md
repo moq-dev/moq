@@ -17,7 +17,7 @@ Reach the browser through `moq-ffi` (UniFFI) instead of maintaining a second han
 
 #### Why
 
-`rs/moq-ffi` already exports the model `moq-wasm` keeps trying to grow: `MoqBroadcast`/`MoqTrack`/`MoqGroup` producers and consumers, `MoqAnnounced`, `MoqTrackRequest`, `MoqSubscription`, `fetchGroup`, `requestedTrack`, `used`/`unused`. #2814 was a second hand-written copy of that surface, and it was closed for that reason.
+`rs/moq-ffi` already exports the model `moq-wasm` keeps trying to grow: `MoqBroadcast`/`MoqTrack`/`MoqGroup` producers and consumers, `MoqAnnounceConsumer`, `MoqTrackRequest`, `MoqSubscription`, `fetchGroup`, `requestedTrack`, `used`/`unused`. #2814 was a second hand-written copy of that surface, and it was closed for that reason.
 
 `moq-ffi` also already solved the lifecycle problem that sank #2814. `moq-ffi/src/ffi.rs::Task<T>` is `Arc<Mutex<T>>` plus a `cancel` watch channel: concurrent calls queue instead of erroring, `cancel()` interrupts a pending call, `Drop` cancels, and `SubscriberControl` and `info` live outside the lock so `update()` works while a `recv_group()` is in flight. That design has been through five language bindings.
 
