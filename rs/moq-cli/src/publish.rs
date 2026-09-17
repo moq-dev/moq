@@ -381,13 +381,13 @@ impl Publish {
 			#[cfg(feature = "capture")]
 			Source::Capture { catalog, video, audio } => {
 				// Each enabled medium publishes its own track onto the shared
-				// broadcast + catalog. A single shared clock keeps the audio and
-				// video timelines aligned even though the devices open at
-				// different times. Video encodes on demand (camera opens only
-				// while subscribed). Both run on this task rather than a spawn:
-				// on macOS the audio future holds ObjC handles across an await,
+				// broadcast + catalog. Frames are stamped from the catalog's
+				// advertised clock so HLS/DASH wall times match the mapping on
+				// the wire. Video encodes on demand (camera opens only while
+				// subscribed). Both run on this task rather than a spawn: on
+				// macOS the audio future holds ObjC handles across an await,
 				// so it is `!Send`.
-				let clock = moq_mux::Clock::new();
+				let clock = catalog.clock();
 				let video_fut = {
 					let broadcast = self.broadcast.clone();
 					let catalog = catalog.clone();

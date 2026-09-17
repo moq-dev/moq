@@ -49,7 +49,8 @@ pub struct Clock {
 	pub wall: u64,
 
 	/// Units per second for [`wall`](Self::wall). Defaults to 1,000,000 (microseconds), the
-	/// broadcast clock's own timescale.
+	/// broadcast clock's own timescale. An omitted field takes that default; an explicit
+	/// null is refused.
 	#[serde(
 		default = "Clock::default_timescale",
 		deserialize_with = "deserialize_timescale_or_default"
@@ -61,7 +62,8 @@ pub(crate) fn deserialize_timescale_or_default<'de, D>(deserializer: D) -> std::
 where
 	D: Deserializer<'de>,
 {
-	let value = Option::<u32>::deserialize(deserializer)?.unwrap_or_else(Clock::default_timescale);
+	// A missing field uses the serde `default`; an explicit null is not a number and is refused.
+	let value = u32::deserialize(deserializer)?;
 	if value == 0 {
 		return Err(serde::de::Error::custom("invalid timescale: 0"));
 	}
@@ -153,6 +155,12 @@ mod test {
 	#[test]
 	fn zero_timescale_is_refused() {
 		serde_json::from_str::<Clock>(r#"{"wall":0,"timescale":0}"#).expect_err("a zero timescale must not decode");
+	}
+
+	#[test]
+	fn explicit_null_timescale_is_refused() {
+		serde_json::from_str::<Clock>(r#"{"wall":0,"timescale":null}"#)
+			.expect_err("an explicit null timescale must not decode as the default");
 	}
 
 	#[test]

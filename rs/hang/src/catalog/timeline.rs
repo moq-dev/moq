@@ -101,6 +101,12 @@ mod test {
 	}
 
 	#[test]
+	fn explicit_null_timescale_is_refused() {
+		serde_json::from_str::<Timeline>(r#"{"track":"timeline.z","timescale":null}"#)
+			.expect_err("an explicit null timescale must not decode as the default");
+	}
+
+	#[test]
 	fn roundtrip() {
 		let mut timeline = Timeline::new("timeline.z");
 		timeline.duration_max = Some(2000);

@@ -18,8 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [**breaking**] Replace `timeline::Config::wall` with the broadcast `Clock`'s fixed wall
   mapping, advertised at the catalog root as `clock: { wall, timescale }` independently of
   any archive. `catalog::Config::with_clock` names the content's real start for an import;
-  `catalog::Producer::clock` shares the epoch. Zero timescales and walls past the JSON-safe
-  integer range are refused.
+  `catalog::Producer::clock` shares the epoch. Zero timescales, walls before the moq epoch,
+  and walls past the JSON-safe integer range are refused.
 - `import::ContainerStream::new` takes a bare `ContainerFormat` instead of a `ContainerInit`. It
   only ever read the format, so the init's leading bytes were accepted and dropped. A stream
   recovers its own framing, so push everything through `decode` instead.

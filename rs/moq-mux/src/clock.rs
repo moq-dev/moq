@@ -25,10 +25,13 @@ fn wall_units(wall: SystemTime) -> crate::Result<u64> {
 	let unix_micros = wall
 		.duration_since(SystemTime::UNIX_EPOCH)
 		.map(|d| d.as_micros())
-		.unwrap_or(0);
-	// A clock before 2020 (an unsynced peer) saturates at the epoch: the wire cannot name it.
-	let moq_micros = unix_micros.saturating_sub(MOQ_EPOCH_UNIX_MILLIS as u128 * 1000);
-	let wall = u64::try_from(moq_micros).unwrap_or(u64::MAX);
+		.map_err(|_| hang::Error::InvalidWall(0))?;
+	let moq_epoch_micros = MOQ_EPOCH_UNIX_MILLIS as u128 * 1000;
+	// A time before 2020 cannot be named on the wire; refuse it rather than advertise 2020.
+	if unix_micros < moq_epoch_micros {
+		return Err(hang::Error::InvalidWall(0).into());
+	}
+	let wall = u64::try_from(unix_micros - moq_epoch_micros).unwrap_or(u64::MAX);
 	if wall > MAX_SAFE_INTEGER {
 		return Err(hang::Error::InvalidWall(wall).into());
 	}
@@ -65,8 +68,8 @@ impl Clock {
 	/// Start a clock anchored at the current instant, with PTS zero at `wall`.
 	///
 	/// For an import whose content carries its own start (a recording): the media keeps its
-	/// relative spacing and that start names the wall epoch. Refuses a wall outside the
-	/// JSON-safe integer range rather than publishing a number browsers misread.
+	/// relative spacing and that start names the wall epoch. Refuses a wall before the moq
+	/// epoch or outside the JSON-safe integer range rather than publishing a fabricated mapping.
 	pub fn with_wall(wall: SystemTime) -> crate::Result<Self> {
 		Ok(Self {
 			epoch: Instant::now(),
@@ -308,6 +311,12 @@ mod tests {
 		let far = SystemTime::UNIX_EPOCH + Duration::from_micros(past_safe);
 		assert!(Clock::with_wall(far).is_err());
 		assert!(Clock::new_at(epoch(), far).is_err());
+
+		// Before 2020 cannot be named on the wire; saturating to the epoch would lie.
+		assert!(Clock::with_wall(SystemTime::UNIX_EPOCH).is_err());
+		assert!(Clock::new_at(epoch(), SystemTime::UNIX_EPOCH).is_err());
+		assert!(Clock::with_wall(moq_epoch() - Duration::from_micros(1)).is_err());
+		assert_eq!(Clock::new_at(epoch(), moq_epoch()).unwrap().wall(), 0);
 	}
 
 	#[test]

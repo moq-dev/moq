@@ -29,6 +29,10 @@ test("a zero timescale is refused", () => {
 	expect(() => ClockSchema.parse({ wall: 0, timescale: 0 })).toThrow();
 });
 
+test("an explicit null timescale is refused", () => {
+	expect(() => ClockSchema.parse({ wall: 0, timescale: null })).toThrow();
+});
+
 test("a wall past the JSON-safe integers is refused", () => {
 	expect(() => ClockSchema.parse({ wall: Number.MAX_SAFE_INTEGER + 1 })).toThrow();
 });
