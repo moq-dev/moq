@@ -19,9 +19,11 @@ of the previous instance. The doc comment on `cancel` in
 not when the handle drops; the implementation only cancels the task.
 
 The surface is the one UniFFI method. Every binding reaches it under its own
-name: Go `Server.Close`, Swift and Python `cancel`, Kotlin `close`, Dart
-through the generated `MoqServer`; none needs a new operation, only the
-existing one to wait.
+name: Go `Server.Close`, Swift `cancel`, Kotlin `close`, Python only through
+`Server.__aexit__` (the public wrapper exposes no `cancel`; the generated
+`moq_ffi.MoqServer` does), Dart through the generated `MoqServer`. None
+needs a new operation, only the existing one to wait, and the regression per
+binding drives the entry point its callers actually use.
 
 Open questions:
 
