@@ -207,11 +207,6 @@ pub enum Error {
 	#[error("reserved catalog section: {0}")]
 	ReservedSection(String),
 
-	/// A catalog extension did not serialize to a JSON object of named sections, so it
-	/// cannot be written to either catalog track.
-	#[error("catalog extension is not an object of sections")]
-	CatalogExtShape,
-
 	/// A rendition declared a container `kind` this build does not recognize, so its
 	/// frames cannot be parsed. Such a rendition must be ignored, not guessed at.
 	#[error("unsupported container: {0}")]

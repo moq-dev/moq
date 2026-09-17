@@ -52,7 +52,7 @@ impl<E: CatalogExt> Consumer<E> {
 				Some(frame) => {
 					self.group = None;
 					let json = std::str::from_utf8(&frame.payload).map_err(|_| Error::InvalidUtf8)?;
-					let msf = match moq_msf::Catalog::from_str(json) {
+					let msf = match moq_msf::Catalog::<E>::from_str(json) {
 						Ok(msf) => msf,
 						Err(err) => {
 							tracing::warn!(error = %err, "failed to parse MSF catalog frame");
@@ -102,21 +102,18 @@ impl<E: CatalogExt> From<moq_net::track::Subscriber> for Consumer<E> {
 /// [`moq_msf::Packaging::Cmaf`] requires `init_data` to be present (base64-encoded ftyp+moov);
 /// a missing or malformed init segment is an error.
 ///
-/// The catalog's root sections beyond the ones MSF defines become the extension `E`, the same
-/// sections the hang catalog carries flat alongside `video`/`audio`. A section `E` does not
+/// The catalog's root members beyond the ones MSF defines are the extension `E`, the same
+/// sections the hang catalog carries flat alongside `video`/`audio`. A member `E` does not
 /// declare is dropped, as it is on the hang track.
 ///
 /// Fields with no representation in `hang::Catalog` (`generated_at`, `is_complete`, `is_live`,
 /// `render_group`, `alt_group`, `max_grp_sap_starting_type`, `max_obj_sap_starting_type`) are
 /// dropped.
-pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog) -> Result<Catalog<E>> {
-	// The extension is deserialized the way the hang track deserializes it: from a JSON object of
-	// root sections, flattened into the catalog. `video`/`audio` are then filled in from the MSF
-	// track list, so a section by either name is ignored rather than fighting the media sections.
-	let mut catalog: Catalog<E> =
-		serde_json::from_value(serde_json::Value::Object(msf.extra.clone())).map_err(|_| Error::MalformedSections)?;
-	catalog.video = Default::default();
-	catalog.audio = Default::default();
+pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>) -> Result<Catalog<E>> {
+	let mut catalog = Catalog {
+		ext: msf.ext.clone(),
+		..Default::default()
+	};
 
 	for track in &msf.tracks {
 		let Some(role) = track.role.as_ref() else {

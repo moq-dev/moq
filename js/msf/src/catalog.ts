@@ -59,11 +59,12 @@ export type Track = z.infer<typeof TrackSchema>;
 /** Zod schema for the top-level MSF catalog: a version-agnostic snapshot of tracks. */
 export const CatalogSchema = z.object({
 	tracks: z.array(TrackSchema),
-	// Root sections beyond the ones MSF defines, keyed by name and carried verbatim.
-	// An extension adds a section here, e.g. the `mpegts` section of
-	// draft-lcurley-moq-mpegts. Sections this build does not recognize survive a
+	// The application extension: root members beyond the ones MSF defines, kept
+	// verbatim. An extension adds a section here, e.g. the `mpegts` section of
+	// draft-lcurley-moq-mpegts. Mirrors `Catalog::ext` in `moq-msf`, which is typed;
+	// here it stays an untyped map, so members this build has never seen survive a
 	// decode/encode round trip unchanged.
-	extra: z.optional(z.record(z.string(), z.unknown())),
+	ext: z.optional(z.record(z.string(), z.unknown())),
 });
 
 /** The MSF catalog: a snapshot of the available tracks. */
@@ -123,9 +124,10 @@ export function encode(catalog: Catalog): Uint8Array {
 	const wire: Record<string, unknown> = { version: VERSION, tracks };
 	if (initDataList.length > 0) wire.initDataList = initDataList;
 
-	// Extension sections are written flat, so one named after a field MSF defines would
-	// emit a duplicate key and lose one of the two on re-parse. Refuse instead.
-	for (const [name, value] of Object.entries(catalog.extra ?? {})) {
+	// Extension members are written flat, so one named after a field MSF defines would
+	// emit a duplicate key and lose one of the two on re-parse. Refuse instead. The Rust
+	// side needs no such check: there the extension is a struct, not a map.
+	for (const [name, value] of Object.entries(catalog.ext ?? {})) {
 		if (RESERVED_ROOT.includes(name)) {
 			throw new Error(`MSF catalog section "${name}" collides with a reserved root field`);
 		}
@@ -142,10 +144,10 @@ export function decode(raw: Uint8Array): Catalog {
 		const root = JSON.parse(str);
 		const wire = WireCatalogSchema.parse(root);
 
-		// Every root member MSF itself does not define is an extension section, kept verbatim.
-		const extra: Record<string, unknown> = {};
+		// Every root member MSF itself does not define belongs to the extension, kept verbatim.
+		const ext: Record<string, unknown> = {};
 		for (const [name, value] of Object.entries(root as Record<string, unknown>)) {
-			if (!RESERVED_ROOT.includes(name)) extra[name] = value;
+			if (!RESERVED_ROOT.includes(name)) ext[name] = value;
 		}
 
 		// id -> inline payload, built once so resolution is linear in the number
@@ -165,7 +167,7 @@ export function decode(raw: Uint8Array): Catalog {
 			return track;
 		});
 
-		return Object.keys(extra).length > 0 ? { tracks, extra } : { tracks };
+		return Object.keys(ext).length > 0 ? { tracks, ext } : { tracks };
 	} catch (error) {
 		console.warn("invalid MSF catalog", str);
 		throw error;

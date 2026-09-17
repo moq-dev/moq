@@ -35,12 +35,16 @@ pub const DEFAULT_NAME: &str = "catalog";
 /// resolved tracks with inline [`Track::init_data`]. Parsing accepts both
 /// draft-00 and draft-01 catalogs; serializing always emits the newest draft.
 ///
+/// Generic over an application extension `E` (defaulting to `()` for none), which is
+/// serialized as a flat union with the members MSF defines: `ext`'s own members and
+/// `tracks` share one JSON object on the wire. See [`CatalogExt`].
+///
 /// Marked `#[non_exhaustive]` because the MSF drafts continue to grow optional
 /// root fields. External callers build a catalog with [`Catalog::new`] or
 /// [`Catalog::default`] and then assign whichever optional fields they need.
 #[derive(Debug, Clone, PartialEq, Default)]
 #[non_exhaustive]
-pub struct Catalog {
+pub struct Catalog<E: CatalogExt = ()> {
 	/// Catalog generation time as Unix epoch milliseconds.
 	pub generated_at: Option<u64>,
 
@@ -50,13 +54,44 @@ pub struct Catalog {
 	/// The tracks in this catalog snapshot.
 	pub tracks: Vec<Track>,
 
-	/// Root sections beyond the ones MSF defines, keyed by name and carried verbatim.
-	///
-	/// An extension to the catalog adds a section here, for example the `mpegts`
-	/// section of draft-lcurley-moq-mpegts. Sections the reader does not recognize
-	/// survive a parse and re-serialize unchanged.
-	pub extra: serde_json::Map<String, serde_json::Value>,
+	/// The application extension: root members beyond the ones MSF defines.
+	pub ext: E,
 }
+
+/// An application's catalog extension: a plain serde struct of extra root members,
+/// serialized as a flat union with the members MSF itself defines.
+///
+/// Any type that serializes to a JSON object qualifies, so a caller names its own
+/// struct and never touches `serde_json`:
+///
+/// ```
+/// use serde::{Deserialize, Serialize};
+///
+/// #[derive(Serialize, Deserialize, Clone, Default)]
+/// struct Mpegts {
+///     program_number: u16,
+/// }
+///
+/// #[derive(Serialize, Deserialize, Clone, Default)]
+/// struct MpegtsExt {
+///     #[serde(skip_serializing_if = "Option::is_none")]
+///     mpegts: Option<Mpegts>,
+/// }
+///
+/// let mut catalog = moq_msf::Catalog::<MpegtsExt>::default();
+/// catalog.ext.mpegts = Some(Mpegts { program_number: 1 });
+/// ```
+///
+/// `()` is the no-extension case, so [`Catalog<()>`] carries only what MSF defines and
+/// drops the rest. For passthrough of members that aren't known at compile time, use
+/// `serde_json::Map<String, serde_json::Value>`, which keeps them verbatim.
+///
+/// An extension MUST NOT name a member after one MSF defines (`version`, `generatedAt`,
+/// `isComplete`, `tracks`, `initDataList`); the wire JSON would carry a duplicate key.
+pub trait CatalogExt: Serialize + serde::de::DeserializeOwned + Default + Clone + Send + Unpin + 'static {}
+
+// Blanket, so a caller writes no impl: naming the trait is only about readable bounds.
+impl<T: Serialize + serde::de::DeserializeOwned + Default + Clone + Send + Unpin + 'static> CatalogExt for T {}
 
 /// A single track in the MSF catalog.
 ///
@@ -151,14 +186,23 @@ pub struct Track {
 	pub jitter: Option<Duration>,
 }
 
-impl Catalog {
+impl Catalog<()> {
 	/// Construct a catalog with tracks and no root-level optional fields.
+	///
+	/// This is the no-extension case. Use [`with_ext`](Catalog::with_ext) to carry one.
 	pub fn new(tracks: Vec<Track>) -> Self {
+		Self::with_ext(tracks, ())
+	}
+}
+
+impl<E: CatalogExt> Catalog<E> {
+	/// Construct a catalog with tracks and an application extension ([`CatalogExt`]).
+	pub fn with_ext(tracks: Vec<Track>, ext: E) -> Self {
 		Self {
 			generated_at: None,
 			is_complete: false,
 			tracks,
-			extra: serde_json::Map::new(),
+			ext,
 		}
 	}
 
@@ -177,20 +221,9 @@ impl Catalog {
 /// The newest MSF draft string this crate emits.
 const CURRENT_VERSION: &str = "draft-01";
 
-/// Root member names MSF itself defines, which an extension section must not reuse.
-const RESERVED_ROOT: &[&str] = &["version", "generatedAt", "isComplete", "tracks", "initDataList"];
-
-impl Serialize for Catalog {
+impl<E: CatalogExt> Serialize for Catalog<E> {
 	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
 		use std::collections::HashMap;
-
-		// `extra` is written flat, so a section named after a field MSF defines would emit a
-		// duplicate key and silently lose one of the two on re-parse. Refuse instead.
-		if let Some(name) = RESERVED_ROOT.iter().find(|name| self.extra.contains_key(**name)) {
-			return Err(serde::ser::Error::custom(format!(
-				"MSF catalog section {name:?} collides with a reserved root field"
-			)));
-		}
 
 		// Hoist inline init payloads into a shared, deduplicated initDataList and
 		// point each track at its entry via initRef. That's the draft-01 wire
@@ -225,17 +258,17 @@ impl Serialize for Catalog {
 			is_complete: self.is_complete,
 			tracks,
 			init_data_list: (!init_data_list.is_empty()).then_some(init_data_list),
-			extra: self.extra.clone(),
+			ext: self.ext.clone(),
 		}
 		.serialize(serializer)
 	}
 }
 
-impl<'de> Deserialize<'de> for Catalog {
+impl<'de, E: CatalogExt> Deserialize<'de> for Catalog<E> {
 	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
 		use std::collections::HashMap;
 
-		let wire = Wire::deserialize(deserializer)?;
+		let wire = Wire::<E>::deserialize(deserializer)?;
 		let init_data_list = wire.init_data_list.unwrap_or_default();
 
 		// id -> init data entry, built once so resolution is linear in the number
@@ -284,7 +317,7 @@ impl<'de> Deserialize<'de> for Catalog {
 			generated_at: wire.generated_at,
 			is_complete: wire.is_complete,
 			tracks,
-			extra: wire.extra,
+			ext: wire.ext,
 		})
 	}
 }
@@ -297,7 +330,8 @@ fn is_false(value: &bool) -> bool {
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Wire {
+#[serde(bound(serialize = "E: Serialize", deserialize = "E: serde::de::DeserializeOwned"))]
+struct Wire<E> {
 	version: WireVersion,
 	generated_at: Option<u64>,
 	#[serde(default, skip_serializing_if = "is_false")]
@@ -306,9 +340,9 @@ struct Wire {
 	tracks: Vec<Track>,
 	init_data_list: Option<Vec<InitData>>,
 
-	/// Every root member MSF itself does not define, captured verbatim.
+	/// The extension's own root members, written flat alongside the ones above.
 	#[serde(flatten)]
-	extra: serde_json::Map<String, serde_json::Value>,
+	ext: E,
 }
 
 /// Wire encoding of the catalog version. Deserialization accepts draft-00's
@@ -617,7 +651,7 @@ mod test {
 		let catalog = Catalog::new(vec![video_track()]);
 
 		let json = catalog.to_json().unwrap();
-		let parsed = Catalog::from_str(&json).unwrap();
+		let parsed = Catalog::<()>::from_str(&json).unwrap();
 		assert_eq!(catalog, parsed);
 
 		// Verify audio fields are not present in JSON.
@@ -638,7 +672,7 @@ mod test {
 		let catalog = Catalog::new(vec![audio_track()]);
 
 		let json = catalog.to_json().unwrap();
-		let parsed = Catalog::from_str(&json).unwrap();
+		let parsed = Catalog::<()>::from_str(&json).unwrap();
 		assert_eq!(catalog, parsed);
 
 		// Verify video fields are not present in JSON.
@@ -686,7 +720,7 @@ mod test {
 	fn roundtrip_empty() {
 		let catalog = Catalog::new(vec![]);
 		let json = catalog.to_json().unwrap();
-		let parsed = Catalog::from_str(&json).unwrap();
+		let parsed = Catalog::<()>::from_str(&json).unwrap();
 		assert_eq!(catalog, parsed);
 	}
 
@@ -704,7 +738,7 @@ mod test {
 
 		let json = catalog.to_json().unwrap();
 		assert!(json.contains("\"packaging\":\"cmaf\""));
-		let parsed = Catalog::from_str(&json).unwrap();
+		let parsed = Catalog::<()>::from_str(&json).unwrap();
 		assert_eq!(catalog, parsed);
 		assert_eq!(parsed.tracks[0].init_data.as_deref(), Some("AQID"));
 	}
@@ -748,7 +782,7 @@ mod test {
 			}]
 		}"#;
 
-		let catalog = Catalog::from_str(json).unwrap();
+		let catalog = Catalog::<()>::from_str(json).unwrap();
 		let track = &catalog.tracks[0];
 		assert_eq!(track.max_grp_sap_starting_type, None);
 		assert_eq!(track.max_obj_sap_starting_type, None);
@@ -760,7 +794,7 @@ mod test {
 		let original = Catalog::new(vec![track_with_sap_and_jitter()]);
 
 		let json = original.to_json().unwrap();
-		let parsed = Catalog::from_str(&json).unwrap();
+		let parsed = Catalog::<()>::from_str(&json).unwrap();
 		assert_eq!(original, parsed);
 		assert_eq!(parsed.tracks[0].max_grp_sap_starting_type, Some(1));
 		assert_eq!(parsed.tracks[0].max_obj_sap_starting_type, Some(2));
@@ -781,7 +815,7 @@ mod test {
 			}]
 		}"#;
 
-		let catalog = Catalog::from_str(json).expect("fractional jitter must decode");
+		let catalog = Catalog::<()>::from_str(json).expect("fractional jitter must decode");
 		assert_eq!(catalog.tracks[0].jitter, Some(Duration::from_millis(15)));
 
 		let value: serde_json::Value = serde_json::from_str(&catalog.to_json().unwrap()).unwrap();
@@ -791,7 +825,7 @@ mod test {
 	#[test]
 	fn serialize_emits_draft01_version() {
 		// Callers never set a version; we always emit the newest draft string.
-		let json = Catalog::default().to_json().unwrap();
+		let json = Catalog::<()>::default().to_json().unwrap();
 		let value: serde_json::Value = serde_json::from_str(&json).unwrap();
 		assert_eq!(value["version"], serde_json::json!("draft-01"));
 	}
@@ -800,7 +834,7 @@ mod test {
 	fn draft00_numeric_version_decodes_and_normalizes() {
 		// draft-00 put the JSON number 1 in `version`. It must decode, and on
 		// re-serialize we normalize to the current draft string.
-		let catalog = Catalog::from_str(r#"{"version":1,"tracks":[]}"#).unwrap();
+		let catalog = Catalog::<()>::from_str(r#"{"version":1,"tracks":[]}"#).unwrap();
 		assert!(catalog.tracks.is_empty());
 
 		let value: serde_json::Value = serde_json::from_str(&catalog.to_json().unwrap()).unwrap();
@@ -809,7 +843,7 @@ mod test {
 
 	#[test]
 	fn draft01_string_version_decodes() {
-		let catalog = Catalog::from_str(r#"{"version":"draft-01","tracks":[]}"#).unwrap();
+		let catalog = Catalog::<()>::from_str(r#"{"version":"draft-01","tracks":[]}"#).unwrap();
 		assert!(catalog.tracks.is_empty());
 	}
 
@@ -817,21 +851,21 @@ mod test {
 	fn unknown_version_string_is_accepted() {
 		// A future draft we don't specifically recognize still decodes; we don't
 		// expose the version, so callers are unaffected.
-		assert!(Catalog::from_str(r#"{"version":"draft-99","tracks":[]}"#).is_ok());
+		assert!(Catalog::<()>::from_str(r#"{"version":"draft-99","tracks":[]}"#).is_ok());
 	}
 
 	#[test]
 	fn unsupported_numeric_version_errors() {
 		// Numbers other than 1 never had a defined meaning, so reject them.
-		assert!(Catalog::from_str(r#"{"version":2,"tracks":[]}"#).is_err());
+		assert!(Catalog::<()>::from_str(r#"{"version":2,"tracks":[]}"#).is_err());
 	}
 
 	#[test]
 	fn float_numeric_version_is_accepted() {
 		// `1.0` is a valid JSON spelling of the draft-00 version; accept it so we
 		// don't reject a catalog the JS decoder would happily parse.
-		assert!(Catalog::from_str(r#"{"version":1.0,"tracks":[]}"#).is_ok());
-		assert!(Catalog::from_str(r#"{"version":2.0,"tracks":[]}"#).is_err());
+		assert!(Catalog::<()>::from_str(r#"{"version":1.0,"tracks":[]}"#).is_ok());
+		assert!(Catalog::<()>::from_str(r#"{"version":2.0,"tracks":[]}"#).is_err());
 	}
 
 	#[test]
@@ -849,7 +883,7 @@ mod test {
 			]
 		}"#;
 
-		let err = Catalog::from_str(json).expect_err("dangling initRef must fail");
+		let err = Catalog::<()>::from_str(json).expect_err("dangling initRef must fail");
 		assert!(err.to_string().contains("missing initData"), "unexpected error: {err}");
 	}
 
@@ -868,7 +902,7 @@ mod test {
 			]
 		}"#;
 
-		let err = Catalog::from_str(json).expect_err("unsupported initRef type must fail");
+		let err = Catalog::<()>::from_str(json).expect_err("unsupported initRef type must fail");
 		assert!(err.to_string().contains("unsupported type"), "unexpected error: {err}");
 	}
 
@@ -885,7 +919,7 @@ mod test {
 			]
 		}"#;
 
-		let err = Catalog::from_str(json).expect_err("conflicting initData/initRef must fail");
+		let err = Catalog::<()>::from_str(json).expect_err("conflicting initData/initRef must fail");
 		assert!(err.to_string().contains("conflicting"), "unexpected error: {err}");
 	}
 
@@ -902,7 +936,7 @@ mod test {
 			]
 		}"#;
 
-		let catalog = Catalog::from_str(json).unwrap();
+		let catalog = Catalog::<()>::from_str(json).unwrap();
 		assert_eq!(catalog.tracks[0].init_data.as_deref(), Some("AQID"));
 	}
 
@@ -921,7 +955,7 @@ mod test {
 			]
 		}"#;
 
-		let catalog = Catalog::from_str(json).unwrap();
+		let catalog = Catalog::<()>::from_str(json).unwrap();
 		assert_eq!(catalog.tracks[0].init_data.as_deref(), Some("AQID"));
 	}
 
@@ -952,7 +986,7 @@ mod test {
 		}
 
 		// And it round-trips back to inline init_data for both tracks.
-		let parsed = Catalog::from_str(&catalog.to_json().unwrap()).unwrap();
+		let parsed = Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap();
 		assert_eq!(parsed.tracks[0].init_data.as_deref(), Some("AQID"));
 		assert_eq!(parsed.tracks[1].init_data.as_deref(), Some("AQID"));
 	}
@@ -995,7 +1029,7 @@ mod test {
 			]
 		}"#;
 
-		let catalog = Catalog::from_str(json).expect("draft-00 AV catalog must decode");
+		let catalog = Catalog::<()>::from_str(json).expect("draft-00 AV catalog must decode");
 		assert_eq!(catalog.generated_at, Some(1746104606044));
 		assert_eq!(catalog.tracks.len(), 2);
 		assert_eq!(catalog.tracks[0].framerate, Some(30.0));
@@ -1032,7 +1066,7 @@ mod test {
 			]
 		}"#;
 
-		let catalog = Catalog::from_str(json).expect("draft-00 timeline catalog must decode");
+		let catalog = Catalog::<()>::from_str(json).expect("draft-00 timeline catalog must decode");
 		assert_eq!(catalog.tracks.len(), 2);
 		// The timeline track had no isLive; it must default rather than fail the parse.
 		assert!(!catalog.tracks[0].is_live);
@@ -1048,7 +1082,7 @@ mod test {
 			"isComplete": true,
 			"tracks": []
 		}"#;
-		let catalog = Catalog::from_str(json).expect("draft-00 completion catalog must decode");
+		let catalog = Catalog::<()>::from_str(json).expect("draft-00 completion catalog must decode");
 		assert_eq!(catalog.generated_at, Some(1746104606044));
 		assert!(catalog.is_complete);
 		assert!(catalog.tracks.is_empty());
@@ -1060,39 +1094,75 @@ mod test {
 
 	#[test]
 	fn default_catalog_omits_completion_fields() {
-		let value: serde_json::Value = serde_json::from_str(&Catalog::default().to_json().unwrap()).unwrap();
+		let value: serde_json::Value = serde_json::from_str(&Catalog::<()>::default().to_json().unwrap()).unwrap();
 		assert!(value.get("generatedAt").is_none());
 		assert!(value.get("isComplete").is_none());
 	}
 
+	/// A typed extension rides the catalog root without the caller touching serde_json.
 	#[test]
-	fn extra_root_sections_roundtrip() {
-		// An extension section (here `mpegts`) rides the catalog root untouched, and a
-		// section this build has never heard of survives the same way.
+	fn typed_extension_roundtrip() {
+		#[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
+		#[serde(rename_all = "camelCase")]
+		struct Program {
+			program_number: u16,
+			pmt_pid: u16,
+		}
+
+		#[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
+		struct MpegtsExt {
+			#[serde(default, skip_serializing_if = "Option::is_none")]
+			mpegts: Option<Program>,
+		}
+
+		let ext = MpegtsExt {
+			mpegts: Some(Program {
+				program_number: 1,
+				pmt_pid: 100,
+			}),
+		};
+		let catalog = Catalog::with_ext(vec![video_track()], ext.clone());
+
+		let json = catalog.to_json().unwrap();
+		let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+		assert_eq!(
+			value["mpegts"]["pmtPid"],
+			serde_json::json!(100),
+			"written flat: {json}"
+		);
+
+		let parsed = Catalog::<MpegtsExt>::from_str(&json).expect("typed extension must decode");
+		assert_eq!(parsed.ext, ext);
+		assert_eq!(parsed.tracks.len(), 1);
+	}
+
+	/// Root members the extension does not model are dropped, exactly as the hang catalog
+	/// drops sections its extension does not declare.
+	#[test]
+	fn unmodeled_root_members_are_dropped() {
+		let json = r#"{ "version": "draft-01", "tracks": [], "somethingElse": [1, 2, 3] }"#;
+		let catalog = Catalog::<()>::from_str(json).expect("an unknown member must not fail the parse");
+		let value: serde_json::Value = serde_json::from_str(&catalog.to_json().unwrap()).unwrap();
+		assert!(value.get("somethingElse").is_none());
+	}
+
+	/// The untyped extension: a serde_json map keeps every unmodeled member verbatim, for a
+	/// caller that does not know the sections at compile time.
+	#[test]
+	fn untyped_extension_is_passthrough() {
+		type Extra = serde_json::Map<String, serde_json::Value>;
+
 		let json = r#"{
 			"version": "draft-01",
 			"tracks": [],
-			"mpegts": { "program": { "programNumber": 1, "pmtPid": 100, "transportStreamId": 4660 } },
+			"mpegts": { "program": { "pmtPid": 100 } },
 			"somethingElse": [1, 2, 3]
 		}"#;
-		let catalog = Catalog::from_str(json).expect("extension sections must not fail the parse");
-		assert_eq!(catalog.extra.len(), 2);
-		assert_eq!(catalog.extra["mpegts"]["program"]["pmtPid"], serde_json::json!(100));
+		let catalog = Catalog::<Extra>::from_str(json).expect("passthrough must decode");
+		assert_eq!(catalog.ext.len(), 2);
 
 		let value: serde_json::Value = serde_json::from_str(&catalog.to_json().unwrap()).unwrap();
-		assert_eq!(value["mpegts"]["program"]["programNumber"], serde_json::json!(1));
+		assert_eq!(value["mpegts"]["program"]["pmtPid"], serde_json::json!(100));
 		assert_eq!(value["somethingElse"], serde_json::json!([1, 2, 3]));
-	}
-
-	#[test]
-	fn extra_cannot_shadow_a_defined_root_field() {
-		// `extra` is serialized flat, so a section named after an MSF field would emit a
-		// duplicate key and lose one of the two on re-parse. Refuse to write it at all.
-		let mut catalog = Catalog::default();
-		catalog.extra.insert("tracks".to_string(), serde_json::json!("nope"));
-		let err = catalog
-			.to_json()
-			.expect_err("a reserved section name must not serialize");
-		assert!(err.to_string().contains("tracks"), "{err}");
 	}
 }

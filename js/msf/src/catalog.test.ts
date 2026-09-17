@@ -206,7 +206,7 @@ test.each([
 	expect(tracks[0].stalled).toBe(stalled);
 });
 
-test("carries extension root sections through decode and encode", () => {
+test("carries extension root members through decode and encode", () => {
 	// An extension section (here `mpegts`) rides the catalog root untouched, and a
 	// section this build has never heard of survives the same way.
 	const catalog = decode(
@@ -219,7 +219,7 @@ test("carries extension root sections through decode and encode", () => {
 		}),
 	);
 
-	expect(Object.keys(catalog.extra ?? {})).toEqual(["mpegts", "somethingElse"]);
+	expect(Object.keys(catalog.ext ?? {})).toEqual(["mpegts", "somethingElse"]);
 
 	const wire = decodeJson(encode(catalog));
 	expect(wire.mpegts).toEqual({ program: { transportStreamId: 4660, programNumber: 1, pmtPid: 100 } });
@@ -229,5 +229,5 @@ test("carries extension root sections through decode and encode", () => {
 });
 
 test("refuses an extension section named after a reserved root field", () => {
-	expect(() => encode({ tracks: [], extra: { tracks: "nope" } })).toThrow(/reserved root field/);
+	expect(() => encode({ tracks: [], ext: { tracks: "nope" } })).toThrow(/reserved root field/);
 });

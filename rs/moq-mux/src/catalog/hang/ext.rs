@@ -27,7 +27,10 @@ use serde::{Deserialize, Serialize};
 /// ```
 ///
 /// The unit type `()` is the no-extension case, so [`Catalog<()>`] is just the base media catalog.
-pub trait CatalogExt: Serialize + DeserializeOwned + Default + Clone + Send + Unpin + 'static {}
+///
+/// The same extension rides the MSF catalog track, so this requires [`moq_msf::CatalogExt`];
+/// that trait is blanket-implemented, so one `impl CatalogExt` is still all a caller writes.
+pub trait CatalogExt: moq_msf::CatalogExt {}
 
 impl CatalogExt for () {}
 

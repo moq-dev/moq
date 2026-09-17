@@ -20,9 +20,6 @@ pub enum Error {
 	#[error("failed to parse MSF catalog frame")]
 	ParseFrame,
 
-	#[error("MSF catalog root sections do not match the expected extension")]
-	MalformedSections,
-
 	#[error("MSF CMAF track {0:?} missing init_data")]
 	MissingCmafInit(String),
 

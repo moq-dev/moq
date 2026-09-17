@@ -113,8 +113,9 @@ impl<E: CatalogExt> Outputs<E> {
 		self.hangz.update(catalog)?;
 
 		// The MSF catalog is derived from our own types, so a serialize failure means an extension broke
-		// the shape; report it like any other JSON failure rather than panicking.
-		let msf = to_msf(&catalog.media()).to_json().map_err(moq_json::Error::from)?;
+		// the shape; report it like any other JSON failure rather than panicking. `abort` below is
+		// what keeps the tracks consistent if this fails after the hang tracks were updated.
+		let msf = to_msf(catalog).to_json().map_err(moq_json::Error::from)?;
 		let mut group = self.msf_track.append_group()?;
 		group.write_frame(moq_net::Timestamp::now(), msf)?;
 		group.finish()?;
@@ -780,27 +781,15 @@ fn packaging_of(container: &hang::catalog::Container) -> Option<moq_msf::Packagi
 }
 
 /// Convert a catalog to its MSF equivalent: the media sections become MSF tracks and the
-/// extension's sections ride the MSF root under the same names they use in the hang catalog.
-fn to_msf<E: CatalogExt>(catalog: &Catalog<E>) -> crate::Result<moq_msf::Catalog> {
+/// extension rides the MSF root under the same member names it uses in the hang catalog.
+fn to_msf<E: CatalogExt>(catalog: &Catalog<E>) -> moq_msf::Catalog<E> {
 	let mut msf = to_msf_media(&catalog.media());
-	msf.extra = ext_sections(&catalog.ext)?;
-	Ok(msf)
-}
-
-/// The extension's root sections, as a JSON object keyed by section name.
-///
-/// The hang catalog serializes its extension flat, so an extension is either a JSON object of
-/// named sections or the unit `()`. Anything else cannot be a set of catalog sections.
-fn ext_sections<E: CatalogExt>(ext: &E) -> crate::Result<serde_json::Map<String, serde_json::Value>> {
-	match serde_json::to_value(ext).map_err(moq_json::Error::from)? {
-		serde_json::Value::Object(sections) => Ok(sections),
-		serde_json::Value::Null => Ok(serde_json::Map::new()),
-		_ => Err(crate::Error::CatalogExtShape),
-	}
+	msf.ext = catalog.ext.clone();
+	msf
 }
 
 /// Convert the base media sections of a hang catalog into MSF tracks.
-fn to_msf_media(catalog: &hang::Catalog) -> moq_msf::Catalog {
+fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog) -> moq_msf::Catalog<E> {
 	let mut tracks = Vec::new();
 
 	let has_multiple_video = catalog.video.renditions.len() > 1;
@@ -866,7 +855,7 @@ fn to_msf_media(catalog: &hang::Catalog) -> moq_msf::Catalog {
 		tracks.push(track);
 	}
 
-	moq_msf::Catalog::new(tracks)
+	moq_msf::Catalog::with_ext(tracks, E::default())
 }
 
 #[cfg(test)]
@@ -1265,7 +1254,7 @@ mod test {
 		catalog.video.renditions = video_renditions;
 		catalog.audio.renditions = audio_renditions;
 
-		let msf = to_msf_media(&catalog);
+		let msf = to_msf_media::<()>(&catalog);
 
 		assert_eq!(msf.tracks.len(), 2);
 
@@ -1316,7 +1305,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.video.renditions = video_renditions;
 
-		let msf = to_msf_media(&catalog);
+		let msf = to_msf_media::<()>(&catalog);
 		assert_eq!(msf.tracks.len(), 1);
 		assert_eq!(msf.tracks[0].packaging, moq_msf::Packaging::Loc);
 	}
@@ -1332,7 +1321,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.audio.renditions = audio_renditions;
 
-		let msf = to_msf_media(&catalog);
+		let msf = to_msf_media::<()>(&catalog);
 		assert_eq!(msf.tracks.len(), 1);
 		assert_eq!(msf.tracks[0].packaging, moq_msf::Packaging::Loc);
 	}
@@ -1353,7 +1342,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.audio.renditions = audio_renditions;
 
-		let msf = to_msf_media(&catalog);
+		let msf = to_msf_media::<()>(&catalog);
 		assert_eq!(msf.tracks.len(), 1);
 		assert_eq!(
 			msf.tracks[0].packaging,
@@ -1380,7 +1369,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.video.renditions = video_renditions;
 
-		let msf = to_msf_media(&catalog);
+		let msf = to_msf_media::<()>(&catalog);
 		let video = &msf.tracks[0];
 		assert_eq!(video.init_data, Some("AQID".to_string()));
 	}
@@ -1388,7 +1377,7 @@ mod test {
 	#[test]
 	fn convert_empty() {
 		let catalog = hang::Catalog::default();
-		let msf = to_msf_media(&catalog);
+		let msf = to_msf_media::<()>(&catalog);
 		assert!(msf.tracks.is_empty());
 	}
 
@@ -1415,7 +1404,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.video.renditions = video_renditions;
 
-		let msf = to_msf_media(&catalog);
+		let msf = to_msf_media::<()>(&catalog);
 		let video = &msf.tracks[0];
 		assert_eq!(video.packaging, moq_msf::Packaging::Cmaf);
 		assert_eq!(video.init_data, Some("AAAYZ2Z0eXA=".to_string()));
@@ -1449,7 +1438,7 @@ mod test {
 		catalog.video.renditions = video_renditions;
 		catalog.audio.renditions = audio_renditions;
 
-		let msf = to_msf_media(&catalog);
+		let msf = to_msf_media::<()>(&catalog);
 
 		let video = &msf.tracks[0];
 		assert_eq!(video.role, Some(moq_msf::Role::Video));
@@ -1489,7 +1478,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.video.renditions = video_renditions;
 
-		let msf = to_msf_media(&catalog);
+		let msf = to_msf_media::<()>(&catalog);
 		let video = &msf.tracks[0];
 		// H.265 SAP behavior isn't validated end-to-end yet, so we omit the
 		// SAP fields rather than advertise something we haven't verified.
@@ -1511,7 +1500,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.video.renditions = video_renditions;
 
-		let msf = to_msf_media(&catalog);
+		let msf = to_msf_media::<()>(&catalog);
 		let video = &msf.tracks[0];
 		assert_eq!(video.max_grp_sap_starting_type, None);
 		assert_eq!(video.max_obj_sap_starting_type, None);
