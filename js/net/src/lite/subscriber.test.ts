@@ -140,7 +140,11 @@ test("an unidentified responder keeps hop 0 on a nonempty chain", async () => {
 
 	await send((w) => new AnnounceOk(UNKNOWN_HOP, 0).encode(w, Version.DRAFT_06));
 	await send((w) =>
-		encodeAnnounceBroadcast(w, { status: "active", suffix: Path.from("room"), hops: [PUBLISHER_A] }, Version.DRAFT_06),
+		encodeAnnounceBroadcast(
+			w,
+			{ status: "active", suffix: Path.from("room"), hops: [PUBLISHER_A] },
+			Version.DRAFT_06,
+		),
 	);
 	expect(await announced.next()).toMatchObject({
 		pattern: Path.Pattern.subtree(Path.from("room")),
