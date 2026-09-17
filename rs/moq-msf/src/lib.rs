@@ -223,8 +223,9 @@ const CURRENT_VERSION: &str = "draft-01";
 
 /// The extension's first member that collides with one MSF defines, if any.
 ///
-/// Serializes the extension to inspect its member names. Called from `debug_assert`, which
-/// type-checks its arguments in release too, so this cannot be `cfg(debug_assertions)`.
+/// Serializes the extension to inspect its member names, so it is only called under
+/// `debug_assertions`.
+#[cfg(debug_assertions)]
 fn colliding_member<E: CatalogExt>(ext: &E) -> Option<String> {
 	match serde_json::to_value(ext) {
 		Ok(serde_json::Value::Object(members)) => members.into_iter().map(|(name, _)| name).find(|n| reserved_root(n)),
@@ -253,13 +254,12 @@ impl<E: CatalogExt> Serialize for Catalog<E> {
 		// An extension member named after one MSF defines emits a duplicate JSON key, which serde
 		// writes without complaint and a reader resolves by keeping the last. A typed extension
 		// fixes its member names at compile time, so this is a bug in the extension rather than
-		// something a peer can trigger: check it where it costs nothing to ship.
+		// something a peer can trigger: check it where it costs nothing to ship. A `cfg` block
+		// rather than `debug_assert!`, whose arguments a release build still compiles.
 		#[cfg(debug_assertions)]
-		debug_assert!(
-			colliding_member(&self.ext).is_none(),
-			"MSF catalog extension member {:?} collides with a reserved root member",
-			colliding_member(&self.ext).unwrap_or_default(),
-		);
+		if let Some(name) = colliding_member(&self.ext) {
+			panic!("MSF catalog extension member {name:?} collides with a reserved root member");
+		}
 
 		// Hoist inline init payloads into a shared, deduplicated initDataList and
 		// point each track at its entry via initRef. That's the draft-01 wire
