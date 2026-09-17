@@ -8,6 +8,10 @@
 //! identity ([`Program`]), and the standalone SI table map ([`SiEntry`]).
 //! Demuxed media tracks keep their codec config in the base `video`/`audio`
 //! sections; only their MPEG-TS identity lands here.
+//!
+//! The section is specified by `drafts/draft-lcurley-moq-mpegts.md` and rides the
+//! root of either catalog: the hang track alongside `video`/`audio`, and the MSF
+//! track alongside `tracks`.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -393,5 +397,85 @@ mod test {
 
 		let parsed: Ext = serde_json::from_str(&json).unwrap();
 		assert_eq!(parsed.mpegts, mpegts, "program and SI round-trip");
+	}
+
+	/// The `mpegts` section is not hang-only: the same JSON rides the MSF catalog track, so a
+	/// broadcast demuxed from MPEG-TS can be re-muxed from either catalog.
+	#[tokio::test]
+	async fn section_rides_the_msf_catalog() {
+		use crate::catalog::Stream as _;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut producer =
+			crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<Ext>::default())
+				.unwrap();
+
+		let mut guard = producer.lock();
+		guard.mpegts.program = Some(Program {
+			transport_stream_id: 0x1234,
+			program_number: 1,
+			pmt_pid: 0x0064,
+			..Default::default()
+		});
+		guard.mpegts.tracks.insert(
+			".ts".to_string(),
+			Track {
+				pid: 0x0102,
+				descriptors: vec![Descriptor {
+					tag: 0x05,
+					data: Bytes::from_static(b"CUEI"),
+				}],
+				verbatim: Some(Verbatim::new(0x86, Framing::Section)),
+			},
+		);
+		let expected = guard.mpegts.clone();
+		drop(guard);
+
+		let mut consumer =
+			crate::catalog::Consumer::<Ext>::new(&broadcast.consume(), crate::catalog::CatalogFormat::Msf)
+				.await
+				.unwrap();
+
+		let catalog = consumer.next().await.unwrap().expect("catalog published");
+		assert_eq!(catalog.mpegts, expected, "the mpegts section survives the MSF track");
+	}
+
+	/// A repeated section must not count as a change: SI repeats every couple of
+	/// seconds, so treating a repeat as an update would republish the catalog forever.
+	/// A *revised* section (same identity, new bytes) replaces in place, and a sibling
+	/// section (same table, different `section_number`) is added alongside.
+	#[test]
+	fn si_upsert_dedupes_by_section_identity() {
+		// Long-form SDT Actual: table_id 0x42, syntax indicator set, extension 0x0001.
+		let section = |section_number: u8, fill: u8| {
+			Bytes::from(vec![
+				0x42,
+				0xf0,
+				0x0b,
+				0x00,
+				0x01,
+				0xc1,
+				section_number,
+				0x01,
+				fill,
+				fill,
+				fill,
+				fill,
+				fill,
+				fill,
+			])
+		};
+
+		let mut si = Si::default();
+		assert!(si.upsert(section(0, 0xaa)), "first section");
+		assert!(!si.upsert(section(0, 0xaa)), "a byte-identical repeat is not a change");
+		assert_eq!(si.sections.len(), 1);
+
+		assert!(si.upsert(section(0, 0xbb)), "revised section 0 is a change");
+		assert_eq!(si.sections.len(), 1, "the revision replaced in place");
+		assert_eq!(si.sections[0], section(0, 0xbb));
+
+		assert!(si.upsert(section(1, 0xcc)), "section 1 is a sibling, not a replacement");
+		assert_eq!(si.sections.len(), 2, "both sections of the table are held");
 	}
 }

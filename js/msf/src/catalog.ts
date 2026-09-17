@@ -59,10 +59,18 @@ export type Track = z.infer<typeof TrackSchema>;
 /** Zod schema for the top-level MSF catalog: a version-agnostic snapshot of tracks. */
 export const CatalogSchema = z.object({
 	tracks: z.array(TrackSchema),
+	// Root sections beyond the ones MSF defines, keyed by name and carried verbatim.
+	// An extension adds a section here, e.g. the `mpegts` section of
+	// draft-lcurley-moq-mpegts. Sections this build does not recognize survive a
+	// decode/encode round trip unchanged.
+	extra: z.optional(z.record(z.string(), z.unknown())),
 });
 
 /** The MSF catalog: a snapshot of the available tracks. */
 export type Catalog = z.infer<typeof CatalogSchema>;
+
+/** Root member names MSF itself defines, which an extension section must not reuse. */
+const RESERVED_ROOT = ["version", "generatedAt", "isComplete", "tracks", "initDataList"];
 
 /** The newest MSF draft version string this package emits on the wire. */
 export const VERSION = "draft-01";
@@ -115,6 +123,15 @@ export function encode(catalog: Catalog): Uint8Array {
 	const wire: Record<string, unknown> = { version: VERSION, tracks };
 	if (initDataList.length > 0) wire.initDataList = initDataList;
 
+	// Extension sections are written flat, so one named after a field MSF defines would
+	// emit a duplicate key and lose one of the two on re-parse. Refuse instead.
+	for (const [name, value] of Object.entries(catalog.extra ?? {})) {
+		if (RESERVED_ROOT.includes(name)) {
+			throw new Error(`MSF catalog section "${name}" collides with a reserved root field`);
+		}
+		wire[name] = value;
+	}
+
 	return new TextEncoder().encode(JSON.stringify(wire));
 }
 
@@ -122,7 +139,14 @@ export function encode(catalog: Catalog): Uint8Array {
 export function decode(raw: Uint8Array): Catalog {
 	const str = new TextDecoder().decode(raw);
 	try {
-		const wire = WireCatalogSchema.parse(JSON.parse(str));
+		const root = JSON.parse(str);
+		const wire = WireCatalogSchema.parse(root);
+
+		// Every root member MSF itself does not define is an extension section, kept verbatim.
+		const extra: Record<string, unknown> = {};
+		for (const [name, value] of Object.entries(root as Record<string, unknown>)) {
+			if (!RESERVED_ROOT.includes(name)) extra[name] = value;
+		}
 
 		// id -> inline payload, built once so resolution is linear in the number
 		// of tracks rather than tracks x entries.
@@ -141,7 +165,7 @@ export function decode(raw: Uint8Array): Catalog {
 			return track;
 		});
 
-		return { tracks };
+		return Object.keys(extra).length > 0 ? { tracks, extra } : { tracks };
 	} catch (error) {
 		console.warn("invalid MSF catalog", str);
 		throw error;

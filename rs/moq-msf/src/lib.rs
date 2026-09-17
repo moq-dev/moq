@@ -49,6 +49,13 @@ pub struct Catalog {
 
 	/// The tracks in this catalog snapshot.
 	pub tracks: Vec<Track>,
+
+	/// Root sections beyond the ones MSF defines, keyed by name and carried verbatim.
+	///
+	/// An extension to the catalog adds a section here, for example the `mpegts`
+	/// section of draft-lcurley-moq-mpegts. Sections the reader does not recognize
+	/// survive a parse and re-serialize unchanged.
+	pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// A single track in the MSF catalog.
@@ -151,6 +158,7 @@ impl Catalog {
 			generated_at: None,
 			is_complete: false,
 			tracks,
+			extra: serde_json::Map::new(),
 		}
 	}
 
@@ -169,9 +177,20 @@ impl Catalog {
 /// The newest MSF draft string this crate emits.
 const CURRENT_VERSION: &str = "draft-01";
 
+/// Root member names MSF itself defines, which an extension section must not reuse.
+const RESERVED_ROOT: &[&str] = &["version", "generatedAt", "isComplete", "tracks", "initDataList"];
+
 impl Serialize for Catalog {
 	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
 		use std::collections::HashMap;
+
+		// `extra` is written flat, so a section named after a field MSF defines would emit a
+		// duplicate key and silently lose one of the two on re-parse. Refuse instead.
+		if let Some(name) = RESERVED_ROOT.iter().find(|name| self.extra.contains_key(**name)) {
+			return Err(serde::ser::Error::custom(format!(
+				"MSF catalog section {name:?} collides with a reserved root field"
+			)));
+		}
 
 		// Hoist inline init payloads into a shared, deduplicated initDataList and
 		// point each track at its entry via initRef. That's the draft-01 wire
@@ -206,6 +225,7 @@ impl Serialize for Catalog {
 			is_complete: self.is_complete,
 			tracks,
 			init_data_list: (!init_data_list.is_empty()).then_some(init_data_list),
+			extra: self.extra.clone(),
 		}
 		.serialize(serializer)
 	}
@@ -264,6 +284,7 @@ impl<'de> Deserialize<'de> for Catalog {
 			generated_at: wire.generated_at,
 			is_complete: wire.is_complete,
 			tracks,
+			extra: wire.extra,
 		})
 	}
 }
@@ -284,6 +305,10 @@ struct Wire {
 	#[serde(default)]
 	tracks: Vec<Track>,
 	init_data_list: Option<Vec<InitData>>,
+
+	/// Every root member MSF itself does not define, captured verbatim.
+	#[serde(flatten)]
+	extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Wire encoding of the catalog version. Deserialization accepts draft-00's
@@ -1038,5 +1063,36 @@ mod test {
 		let value: serde_json::Value = serde_json::from_str(&Catalog::default().to_json().unwrap()).unwrap();
 		assert!(value.get("generatedAt").is_none());
 		assert!(value.get("isComplete").is_none());
+	}
+
+	#[test]
+	fn extra_root_sections_roundtrip() {
+		// An extension section (here `mpegts`) rides the catalog root untouched, and a
+		// section this build has never heard of survives the same way.
+		let json = r#"{
+			"version": "draft-01",
+			"tracks": [],
+			"mpegts": { "program": { "programNumber": 1, "pmtPid": 100, "transportStreamId": 4660 } },
+			"somethingElse": [1, 2, 3]
+		}"#;
+		let catalog = Catalog::from_str(json).expect("extension sections must not fail the parse");
+		assert_eq!(catalog.extra.len(), 2);
+		assert_eq!(catalog.extra["mpegts"]["program"]["pmtPid"], serde_json::json!(100));
+
+		let value: serde_json::Value = serde_json::from_str(&catalog.to_json().unwrap()).unwrap();
+		assert_eq!(value["mpegts"]["program"]["programNumber"], serde_json::json!(1));
+		assert_eq!(value["somethingElse"], serde_json::json!([1, 2, 3]));
+	}
+
+	#[test]
+	fn extra_cannot_shadow_a_defined_root_field() {
+		// `extra` is serialized flat, so a section named after an MSF field would emit a
+		// duplicate key and lose one of the two on re-parse. Refuse to write it at all.
+		let mut catalog = Catalog::default();
+		catalog.extra.insert("tracks".to_string(), serde_json::json!("nope"));
+		let err = catalog
+			.to_json()
+			.expect_err("a reserved section name must not serialize");
+		assert!(err.to_string().contains("tracks"), "{err}");
 	}
 }

@@ -2,9 +2,9 @@
 //!
 //! The IETF MoQT Streaming Format catalog, served on the `catalog`
 //! track. moq-mux subscribes here but doesn't publish; [`Consumer`]
-//! reads MSF and converts it to a [`hang::Catalog`] on the fly so the
-//! rest of the pipeline only sees one shape. Publishing is the hang
-//! producer's job (it writes both tracks).
+//! reads MSF and converts it to a [`Catalog<E>`](crate::catalog::hang::Catalog)
+//! on the fly so the rest of the pipeline only sees one shape. Publishing is
+//! the hang producer's job (it writes both tracks).
 
 mod consumer;
 
@@ -19,6 +19,9 @@ pub enum Error {
 
 	#[error("failed to parse MSF catalog frame")]
 	ParseFrame,
+
+	#[error("MSF catalog root sections do not match the expected extension")]
+	MalformedSections,
 
 	#[error("MSF CMAF track {0:?} missing init_data")]
 	MissingCmafInit(String),

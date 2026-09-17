@@ -4,15 +4,15 @@
 //! advertises and yields [`Catalog<E>`](super::hang::Catalog) snapshots so callers
 //! and exporters only deal with one shape.
 
-use std::task::{Poll, ready};
+use std::task::Poll;
 
 use super::hang::{Catalog, CatalogExt};
 use super::{CatalogFormat, Stream};
 
 /// A catalog stream sourced from a [`moq_net::broadcast::Consumer`].
 ///
-/// Both variants emit [`Catalog<E>`](super::hang::Catalog); the MSF variant is
-/// media-only, so its extension is always the default. Wrap with
+/// Both variants emit [`Catalog<E>`](super::hang::Catalog), extension included:
+/// MSF carries the same root sections as the hang catalog. Wrap with
 /// [`Select`](super::Select) to narrow the rendition set before handing the
 /// stream to an exporter.
 ///
@@ -23,7 +23,7 @@ pub enum Consumer<E: CatalogExt = ()> {
 	#[doc(hidden)]
 	Hang(super::hang::Consumer<E>),
 	#[doc(hidden)]
-	Msf(super::msf::Consumer),
+	Msf(super::msf::Consumer<E>),
 }
 
 impl<E: CatalogExt> Consumer<E> {
@@ -58,22 +58,7 @@ impl<E: CatalogExt> Stream for Consumer<E> {
 	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Catalog<E>>>> {
 		match self {
 			Self::Hang(c) => c.poll_next(waiter),
-			Self::Msf(c) => {
-				// MSF carries only the media sections, so the data sections and the extension default.
-				let media = match ready!(c.poll_next(waiter)) {
-					Ok(media) => media,
-					Err(err) => return Poll::Ready(Err(err)),
-				};
-				Poll::Ready(Ok(media.map(|m| Catalog::<E> {
-					video: m.video,
-					audio: m.audio,
-					archive: m.archive,
-					text: m.text,
-					json: hang::catalog::Json::default(),
-					binary: hang::catalog::Binary::default(),
-					ext: E::default(),
-				})))
-			}
+			Self::Msf(c) => c.poll_next(waiter),
 		}
 	}
 }

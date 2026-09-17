@@ -641,13 +641,24 @@ mod tests {
 	/// [`Duration::ZERO`] collapses to the live edge:
 	/// completeness has to be asked for, exactly as a real recorder does.
 	const RECORDING_MAX_AGE: std::time::Duration = Duration::from_secs(30);
+	/// Full CLI round-trip over the hang catalog.
+	#[tokio::test(start_paused = true)]
+	async fn ts_verbatim_streams_round_trip_through_cli() {
+		ts_verbatim_round_trip(CatalogFormat::Hang).await;
+	}
+
+	/// The same round-trip over the MSF catalog: the `mpegts` section rides the MSF
+	/// track's root, so the export rebuilds the multiplex from either catalog.
+	#[tokio::test(start_paused = true)]
+	async fn ts_verbatim_streams_round_trip_through_msf() {
+		ts_verbatim_round_trip(CatalogFormat::Msf).await;
+	}
 
 	/// Full CLI round-trip: a TS feed with undecoded streams goes through `Publish`
 	/// (which selects the `mpegts` catalog) and the subscribe-side `Export::with_ts`,
 	/// and the SCTE-35 section and the verbatim PES survive with their PIDs, framing,
 	/// PES stream_id, and byte-exact payloads.
-	#[tokio::test(start_paused = true)]
-	async fn ts_verbatim_streams_round_trip_through_cli() {
+	async fn ts_verbatim_round_trip(format: CatalogFormat) {
 		// Paused time auto-advances when the exporter parks, so the `drain` timeouts
 		// fire instantly instead of waiting on the wall clock.
 		let input = manufacture_input().await;
@@ -669,7 +680,7 @@ mod tests {
 		// Subscribe side: the same `with_ts` call `run_ts` makes, re-emitting the
 		// ancillary streams verbatim.
 		let output = drain(
-			Export::with_ts(moq_mux::Source::new(origin.consume(), "cli"), CatalogFormat::Hang)
+			Export::with_ts(moq_mux::Source::new(origin.consume(), "cli"), format)
 				.await
 				.unwrap()
 				.with_max_age(RECORDING_MAX_AGE),

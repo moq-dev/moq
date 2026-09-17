@@ -205,3 +205,29 @@ test.each([
 	const tracks = wire.tracks as { stalled?: boolean }[];
 	expect(tracks[0].stalled).toBe(stalled);
 });
+
+test("carries extension root sections through decode and encode", () => {
+	// An extension section (here `mpegts`) rides the catalog root untouched, and a
+	// section this build has never heard of survives the same way.
+	const catalog = decode(
+		encodeJson({
+			version: "draft-01",
+			generatedAt: 1746104606044,
+			tracks: [],
+			mpegts: { program: { transportStreamId: 4660, programNumber: 1, pmtPid: 100 } },
+			somethingElse: [1, 2, 3],
+		}),
+	);
+
+	expect(Object.keys(catalog.extra ?? {})).toEqual(["mpegts", "somethingElse"]);
+
+	const wire = decodeJson(encode(catalog));
+	expect(wire.mpegts).toEqual({ program: { transportStreamId: 4660, programNumber: 1, pmtPid: 100 } });
+	expect(wire.somethingElse).toEqual([1, 2, 3]);
+	// `generatedAt` is MSF's own field, not an extension section, so it is not smuggled back.
+	expect(wire.generatedAt).toBeUndefined();
+});
+
+test("refuses an extension section named after a reserved root field", () => {
+	expect(() => encode({ tracks: [], extra: { tracks: "nope" } })).toThrow(/reserved root field/);
+});
