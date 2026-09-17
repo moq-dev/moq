@@ -54,7 +54,7 @@ Its object payloads share a single DEFLATE window, in order, and the window star
 A publisher MUST send a compressed track in Subgroup 0 only, and MUST NOT send it in datagrams, so that a group is one ordered stream.
 A consumer MUST reject a compressed track that uses any other subgroup or arrives in a datagram.
 
-{{moql}} has no subgroups: a group is already one ordered stream of frames, and the datagram form of a group MUST NOT be used.
+{{moql}} has no subgroups: a group is already one ordered stream of frames.
 
 An object with no payload is skipped, neither advancing nor resetting the window.
 
