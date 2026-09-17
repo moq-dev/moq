@@ -75,8 +75,8 @@ impl AuthConfig {
 	}
 
 	/// Whether no source is named at all. Such a relay admits nothing on its own:
-	/// what [`Relay::embed`](crate::Relay::embed) requires, and what
-	/// [`validate`](Self::validate) refuses for a binary.
+	/// [`Relay::load`](crate::Relay::load) hands its sessions to the embedder as
+	/// [`Admissions`], and [`validate`](Self::validate) refuses it for a binary.
 	pub(crate) fn is_empty(&self) -> bool {
 		self.url.is_none() && self.public_grant().is_none()
 	}

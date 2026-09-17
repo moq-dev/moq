@@ -75,8 +75,8 @@ and the workers joined. Build routes from `web().routes()` (or
 drops the built-in routes. Extra listeners (RTMP, SRT, ...) sit beside `run`
 in the application's `select!`. `runtime.workers` and `runtime.io_uring` stay
 inside the owner; do not split the worker group yourself. An application that
-decides admissions itself leaves `[auth]` empty and builds the relay with
-`Relay::embed`; see [Authentication](/bin/relay/auth#in-process). See
+decides admissions itself leaves `[auth]` empty and answers
+`relay.admissions()`; see [Authentication](/bin/relay/auth#in-process). See
 [`rs/moq-relay/examples/embed.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-relay/examples/embed.rs).
 
 ## Operate

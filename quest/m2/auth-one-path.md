@@ -33,8 +33,8 @@ decision whether to fold the rest onto it:
 
 How a downstream embedder uses the landed API, for reference. moq.pro's edge
 serves the contract on a unix socket today and points `--auth-url` at itself;
-with `Admissions` its `auth::start` takes the queue `Relay::embed` returns
-and runs one loop:
+with `Admissions` its `auth::start` takes `relay.admissions()` after
+`Relay::load` and runs one loop:
 
 ```rust
 while let Some(admission) = admissions.next().await {
