@@ -364,8 +364,8 @@ Each frame is a Low Overhead Container frame {{!I-D.ietf-moq-loc}}: a property b
 # Compression {#compression}
 Some metadata tracks are compressed, conventionally marked with a `.z` suffix on the track name.
 
-Such a track is compressed per {{moqflate}}, whose compression scope is the group: each group is one raw DEFLATE stream, sync-flushed at each frame boundary, and a consumer MUST decompress its frames in order starting from the first.
-The suffix is the declaration; compression is invisible to the transport.
+Such a track is compressed per {{moqflate}}: each group is one raw DEFLATE stream, sync flushed at each frame boundary.
+The suffix is the declaration.
 
 
 # Timeline {#timeline}
