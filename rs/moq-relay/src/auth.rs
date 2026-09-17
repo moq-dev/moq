@@ -77,7 +77,7 @@ impl AuthConfig {
 	/// Whether no source is named at all. Such a relay admits nothing on its own:
 	/// [`Relay::load`](crate::Relay::load) hands its sessions to the embedder as
 	/// [`Admissions`], and [`validate`](Self::validate) refuses it for a binary.
-	pub fn is_empty(&self) -> bool {
+	pub(crate) fn is_empty(&self) -> bool {
 		self.url.is_none() && self.public_grant().is_none()
 	}
 
@@ -350,9 +350,13 @@ impl Auth {
 				admissions
 					.send(Admission { request, bytes, reply })
 					.map_err(|_| AuthError::Unavailable("nobody is answering admissions".into()))?;
-				answer
+				let lease: Lease = answer
 					.await
-					.map_err(|_| AuthError::Unavailable("the admission went unanswered".into()))??
+					.map_err(|_| AuthError::Unavailable("the admission went unanswered".into()))??;
+				// Held to what a server's answer is held to: a grant that admits nothing
+				// or asks for a re-check without a bound is the decider's bug, not a refusal.
+				lease.grant().validate()?;
+				lease
 			}
 			Mode::Refuse => return Err(AuthError::Refused),
 		};
@@ -524,6 +528,9 @@ mod tests {
 			admission.grant(Lease::fixed(Grant::new(patterns(&["**"]), patterns(&["**"]))));
 			let admission = admissions.next().await.expect("an admission");
 			admission.refuse(AuthError::Refused);
+			// A grant that admits nothing is the decider's mistake, refused like a server's.
+			let admission = admissions.next().await.expect("an admission");
+			admission.grant(Lease::fixed(Grant::new(Patterns::new(), Patterns::new())));
 			// Dropped without an answer.
 			drop(admissions.next().await.expect("an admission"));
 			admissions
@@ -535,10 +542,12 @@ mod tests {
 				auth.admit(request(), Counters::default()).await,
 				Err(AuthError::Refused)
 			));
-			assert!(matches!(
-				auth.admit(request(), Counters::default()).await,
-				Err(AuthError::Unavailable(_))
-			));
+			for _ in 0..2 {
+				assert!(matches!(
+					auth.admit(request(), Counters::default()).await,
+					Err(AuthError::Unavailable(_))
+				));
+			}
 		};
 		let (admissions, ()) = tokio::join!(decide, admit);
 
