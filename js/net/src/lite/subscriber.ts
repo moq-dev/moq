@@ -5,7 +5,7 @@ import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
 import * as netGroup from "../group.ts";
-import { type Cost, DEFAULT_ROUTE, type Hop, type Route, routesEqual, UNKNOWN_HOP, ZERO_COST } from "../hop.ts";
+import { Cost, type Hop, Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
 import * as Time from "../time.ts";
@@ -267,7 +267,7 @@ export class Subscriber {
 						}
 						advertised.set(pattern.text, { publisher: undefined, live: true });
 						console.debug(`announced: broadcast=${path} active=true`);
-						announced.append({ pattern, active: true, route: DEFAULT_ROUTE });
+						announced.append({ pattern, active: true, route: Route.default });
 					}
 					break;
 				}
@@ -417,7 +417,7 @@ export class Subscriber {
 				const identified = publisher !== undefined && publisher !== UNKNOWN_HOP;
 				const fullHops =
 					hops !== undefined && responderOrigin !== undefined ? [...hops, responderOrigin] : (hops ?? []);
-				const route: Route = { hops: fullHops, cost: cost ?? ZERO_COST };
+				const route: Route = { hops: fullHops, cost: cost ?? Cost.zero };
 
 				// A second advertisement for a path we already carry is a restart: either an
 				// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE.

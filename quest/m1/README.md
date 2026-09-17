@@ -36,7 +36,6 @@ does not require it.
 - [Announce names](/quest/m1/api-announce-names.md) - one name per announce, request, and origin config concept in Rust, JS, moq-ffi, and C
 - [moq-tokio names](/quest/m1/api-tokio-names.md) - moq-tokio's public names sit under their modules with no root compounds, adapter names, or forgettable close()
 - [JSON config names](/quest/m1/api-json-binary-config-names.md) - `Config` means the codec options and `producer::Config` / `consumer::Config` the track pair in all four json and binary packages
-- [JS names](/quest/m1/api-js-net-names.md) - @moq/net and @moq/pattern mirror Rust: `consume`, typed durations, one `readFrame()`, `InvalidPattern`
 - [FFI units](/quest/m1/api-ffi-units-verbs.md) - every moq-ffi duration is microseconds and `publish()` / `consume()` pair with their setters
 - [Deprecated sweep](/quest/m1/deprecated-sweep.md) - uncalled deprecated items, warn-then-ignore flags, and silent aliases are removed or become refusals before the release
 - [External API proof](/quest/m1/api-release-proof.md) - packaged callers exercise real moq.pro use cases and record each audit finding's disposition

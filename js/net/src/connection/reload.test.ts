@@ -6,6 +6,7 @@ import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
+import * as Time from "../time.ts";
 import { accept } from "./index.ts";
 import { Reload, type ReloadProps } from "./reload.ts";
 
@@ -143,7 +144,7 @@ test("a peer that severs immediately keeps escalating the backoff", async () => 
 		enabled: true,
 		url,
 		websocket: { enabled: false },
-		delay: { initial: 1000, multiplier: 2, max: 1000, timeout: 1 },
+		delay: { initial: Time.Milli(1000), multiplier: 2, max: Time.Milli(1000), timeout: Time.Milli(1) },
 	});
 	try {
 		await waitUntil(() => reload.error.peek() !== undefined);
@@ -184,7 +185,7 @@ test("an explicitly undefined delay field falls back to its default", async () =
 		enabled: true,
 		url,
 		websocket: { enabled: false },
-		delay: { initial: undefined, multiplier: undefined, max: undefined, timeout: 0 },
+		delay: { initial: undefined, multiplier: undefined, max: undefined, timeout: Time.Milli(0) },
 	});
 	try {
 		await waitUntil(() => dials > 0);
@@ -229,7 +230,7 @@ test("announcedBroadcast follows the reconnect loop", async () => {
 		enabled: true,
 		url,
 		websocket: { enabled: false },
-		delay: { initial: 10, multiplier: 1, max: 10 },
+		delay: { initial: Time.Milli(10), multiplier: 1, max: Time.Milli(10) },
 	});
 	const watched = reload.announcedBroadcast(Path.from("late"));
 
@@ -270,8 +271,8 @@ test("a reload that gives up keeps requests pending until it is disposed", async
 		enabled: true,
 		url,
 		websocket: { enabled: false },
-		delay: { initial: 1, multiplier: 2, max: 1, timeout: 0 },
-		subscribe: origin,
+		delay: { initial: Time.Milli(1), multiplier: 2, max: Time.Milli(1), timeout: Time.Milli(0) },
+		consume: origin,
 	});
 
 	// A reconnecting connection holds requests pending, which is the point: no session is
@@ -321,7 +322,7 @@ test("a page hide after give-up does not retry the refused URL", async () => {
 		enabled: true,
 		url,
 		websocket: { enabled: false },
-		delay: { initial: 1, multiplier: 1, max: 1, timeout: 0 },
+		delay: { initial: Time.Milli(1), multiplier: 1, max: Time.Milli(1), timeout: Time.Milli(0) },
 	});
 
 	try {
@@ -367,7 +368,7 @@ test("a session rejected as unauthorized surfaces the code and stops retrying", 
 		enabled: true,
 		url,
 		websocket: { enabled: false },
-		delay: { initial: 1, multiplier: 2, max: 1, timeout: 0 },
+		delay: { initial: Time.Milli(1), multiplier: 2, max: Time.Milli(1), timeout: Time.Milli(0) },
 	});
 	const watch = new Effect();
 	watch.run((effect) => {
@@ -427,7 +428,7 @@ test("an unauthorized session close during setup stops retrying", async () => {
 		url,
 		websocket: { enabled: false },
 		// Unlimited retries prove that `closed` settles only because the rejection is terminal.
-		delay: { initial: 1, multiplier: 1, max: 1, timeout: 0 },
+		delay: { initial: Time.Milli(1), multiplier: 1, max: Time.Milli(1), timeout: Time.Milli(0) },
 	});
 
 	try {
@@ -477,7 +478,7 @@ test("a setup stream reset is not mistaken for an unauthorized session", async (
 		websocket: { enabled: false },
 		// Unlimited retries, so a second attempt can only happen because the first failure
 		// was treated as retryable rather than terminal.
-		delay: { initial: 1, multiplier: 1, max: 1, timeout: 0 },
+		delay: { initial: Time.Milli(1), multiplier: 1, max: Time.Milli(1), timeout: Time.Milli(0) },
 	});
 
 	try {
@@ -504,7 +505,7 @@ test("origins span reconnects: local re-announces, remote re-populates", async (
 		const pair = createMockTransportPair(Lite.ALPN_05);
 		const saw = new OriginProducer();
 		const serverOrigin = new OriginProducer();
-		void accept(pair.server, url, { publish: serverOrigin.consume(), subscribe: saw }).then((session) => {
+		void accept(pair.server, url, { publish: serverOrigin.consume(), consume: saw }).then((session) => {
 			publish(serverOrigin, Path.from("remote"));
 			servers.push({ session, saw });
 		});
@@ -516,9 +517,9 @@ test("origins span reconnects: local re-announces, remote re-populates", async (
 		enabled: true,
 		url,
 		websocket: { enabled: false },
-		delay: { initial: 10, multiplier: 1, max: 10 },
+		delay: { initial: Time.Milli(10), multiplier: 1, max: Time.Milli(10) },
 		publish: publishOrigin.consume(),
-		subscribe: subscribeOrigin,
+		consume: subscribeOrigin,
 	});
 	const reader = subscribeOrigin.consume();
 

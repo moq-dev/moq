@@ -11,7 +11,7 @@ import { createMockTransportPair } from "./mock.ts";
 import type { Consumer as OriginConsumer } from "./origin.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
-import { Timescale, Timestamp } from "./time.ts";
+import { Milli, Timescale, Timestamp } from "./time.ts";
 import type { Producer as TrackProducer } from "./track.ts";
 import { withTimeout } from "./util/timeout.ts";
 
@@ -1650,7 +1650,7 @@ test("integration: ietf blind handle picks up a publisher that arrives late", as
 });
 
 // ---------------------------------------------------------------------------
-// Origin-fed sessions: the `subscribe` option end to end.
+// Origin-fed sessions: the `consume` option end to end.
 // ---------------------------------------------------------------------------
 
 /** Poll until `pred` holds, so a regression fails the test instead of hanging it. */
@@ -1668,7 +1668,7 @@ async function runOriginFlow(protocol: string, version?: number) {
 	const clientOrigin = new OriginProducer();
 
 	const [client, server] = await Promise.all([
-		connect(url, { transport: pair.client, subscribe: clientOrigin }),
+		connect(url, { transport: pair.client, consume: clientOrigin }),
 		accept(pair.server, url, { version, publish: serverOrigin.consume() }),
 	]);
 
@@ -1726,7 +1726,7 @@ test("origin: remote entries retract when the session dies, local ones survive",
 	const clientOrigin = new OriginProducer();
 
 	const [client, server] = await Promise.all([
-		connect(url, { transport: pair.client, subscribe: clientOrigin }),
+		connect(url, { transport: pair.client, consume: clientOrigin }),
 		accept(pair.server, url, { publish: serverOrigin.consume() }),
 	]);
 
@@ -1761,8 +1761,8 @@ test("origin: one origin on both directions consumes locally and never echoes", 
 	const serverSees = new OriginProducer();
 
 	const [client, server] = await Promise.all([
-		connect(url, { transport: pair.client, publish: shared.consume(), subscribe: shared }),
-		accept(pair.server, url, { publish: serverSees.consume(), subscribe: serverSees }),
+		connect(url, { transport: pair.client, publish: shared.consume(), consume: shared }),
+		accept(pair.server, url, { publish: serverSees.consume(), consume: serverSees }),
 	]);
 
 	// The server announces a broadcast; it lands in the shared origin as a remote entry.
@@ -1808,7 +1808,7 @@ test("origin: a request resolves blind on a relay without discovery", async () =
 
 	const [client, server] = await Promise.all([
 		// The client believes the relay lacks discovery, so no announce stream opens.
-		connect(url, { transport: pair.client, subscribe: clientOrigin, discovery: false }),
+		connect(url, { transport: pair.client, consume: clientOrigin, discovery: false }),
 		accept(pair.server, url, { publish: serverOrigin.consume() }),
 	]);
 
@@ -1865,8 +1865,8 @@ test("origin: a request is re-answered by the next session", async () => {
 		enabled: true,
 		url: reconnectUrl,
 		websocket: { enabled: false },
-		delay: { initial: 10, multiplier: 1, max: 10 },
-		subscribe: clientOrigin,
+		delay: { initial: Milli(10), multiplier: 1, max: Milli(10) },
+		consume: clientOrigin,
 		share: false,
 	});
 
@@ -1897,7 +1897,7 @@ test("origin: a reactive handle follows announcements, republishes, and reconnec
 	const clientOrigin = new OriginProducer();
 
 	const [client, server] = await Promise.all([
-		connect(url, { transport: pair.client, subscribe: clientOrigin }),
+		connect(url, { transport: pair.client, consume: clientOrigin }),
 		accept(pair.server, url, { publish: serverOrigin.consume() }),
 	]);
 
@@ -1937,7 +1937,7 @@ test("origin: overlapping sessions carrying one path fail over", async () => {
 		const pair = createMockTransportPair(Lite.ALPN_05);
 		const serverOrigin = new OriginProducer();
 		const [client, server] = await Promise.all([
-			connect(url, { transport: pair.client, subscribe: clientOrigin }),
+			connect(url, { transport: pair.client, consume: clientOrigin }),
 			accept(pair.server, url, { publish: serverOrigin.consume() }),
 		]);
 		const broadcast = publish(serverOrigin, Path.from("redundant"));
@@ -1987,7 +1987,7 @@ test("origin: a standby session re-answers a request when the answerer dies", as
 		const serverOrigin = new OriginProducer();
 		const [client, server] = await Promise.all([
 			// No discovery: requests are the only way through.
-			connect(url, { transport: pair.client, subscribe: clientOrigin, discovery: false }),
+			connect(url, { transport: pair.client, consume: clientOrigin, discovery: false }),
 			accept(pair.server, url, { publish: serverOrigin.consume() }),
 		]);
 		const broadcast = publish(serverOrigin, Path.from("blind"));

@@ -3,7 +3,7 @@
  *
  * Publish broadcasts into an origin and hand the origin to one or more connections to
  * serve them; the broadcasts outlive any single session. Hand the same (or another)
- * origin to a connection's `subscribe` option and the peer's announced routes appear
+ * origin to a connection's `consume` option and the peer's announced routes appear
  * in the table too: each route covers a path prefix, and a request for a path under
  * it resolves through the session that announced it. Mirrors the `origin` module in
  * `rs/moq-net`.
@@ -14,12 +14,11 @@ import { Derived, type Dispose, type GetPromise, type Getter, getter, Once, Sign
 import * as announce from "./announced.ts";
 import * as broadcast from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
-import { DEFAULT_ROUTE, normalizeRoute, type Route, routesEqual } from "./hop.ts";
+import { Route, routesEqual } from "./hop.ts";
 import { hooks } from "./internal.ts";
 import * as Path from "./path.ts";
 
 export type { Cost, Hop, Route } from "./hop.ts";
-export { DEFAULT_ROUTE, normalizeRoute, ZERO_COST } from "./hop.ts";
 
 /**
  * One requested path: the notify node for everything watching it.
@@ -439,9 +438,9 @@ export class Producer implements Table {
 	 */
 	dynamic(
 		pattern: Path.Pattern | string,
-		route: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint } = DEFAULT_ROUTE,
+		route: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint } = Route.default,
 	): Dynamic {
-		return this.#insertRoute(pattern, normalizeRoute(route), true);
+		return this.#insertRoute(pattern, Route.normalize(route), true);
 	}
 
 	/**
@@ -452,9 +451,9 @@ export class Producer implements Table {
 	 */
 	receive(
 		pattern: Path.Pattern | string,
-		route: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint } = DEFAULT_ROUTE,
+		route: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint } = Route.default,
 	): Dynamic {
-		return this.#insertRoute(pattern, normalizeRoute(route), false);
+		return this.#insertRoute(pattern, Route.normalize(route), false);
 	}
 
 	#insertRoute(pattern: Path.Pattern | string, route: Route, originated: boolean): Dynamic {
@@ -1101,7 +1100,7 @@ export class Dynamic {
 	/** Re-price the route in place. The prefix is fixed at announce time. */
 	update(route: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint }): void {
 		if (this.#closed) throw new Error("dynamic is closed");
-		this.#entry.route.set(normalizeRoute(route));
+		this.#entry.route.set(Route.normalize(route));
 		this.#state.rebuildOriginated();
 		this.#state.refreshPrefix(this.#prefix);
 		this.#state.routes.mutate(() => {});

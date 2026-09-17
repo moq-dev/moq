@@ -53,7 +53,6 @@ additive quest that builds on dev-only code start on main afterwards from
 - [Announce names](/quest/m1/api-announce-names.md) - the announce and request surface releases under one name per concept
 - [moq-tokio names](/quest/m1/api-tokio-names.md) - moq-tokio's first release under this name has settled names
 - [JSON config names](/quest/m1/api-json-binary-config-names.md) - the json and binary packages agree on Config
-- [JS names](/quest/m1/api-js-net-names.md) - the npm packages mirror Rust
 - [FFI units](/quest/m1/api-ffi-units-verbs.md) - the binding records release with one duration unit
 - [Deprecated sweep](/quest/m1/deprecated-sweep.md) - the breaking release removes what it deprecates
 - [Worker ownership](/quest/m1/api-worker-ownership.md) - consuming split ownership retains sockets and joins the group before release

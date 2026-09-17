@@ -8,6 +8,7 @@ import * as Announce from "../announced.ts";
 import type { Handle } from "../bandwidth.ts";
 import * as Origin from "../origin.ts";
 import * as Path from "../path.ts";
+import * as Time from "../time.ts";
 import { type AcceptProps as AcceptPropsType, accept } from "./accept.ts";
 import { isWebTransportSupported } from "./browser.ts";
 import {
@@ -24,7 +25,7 @@ import type { Probe as ProbeType, Stats as StatsType } from "./stats.ts";
 import type { Transport as TransportType } from "./transport.ts";
 
 /** How long an unreferenced shared connection lingers before it actually closes. */
-const LINGER_MS = 2000;
+const LINGER_MS = Time.Milli(2000);
 
 /** Options for {@link Connection}. */
 export interface ConnectionProps {
@@ -35,14 +36,13 @@ export interface ConnectionProps {
 	enabled?: boolean | Signal<boolean>;
 
 	/**
-	 * How long the underlying connection outlives its last handle, in milliseconds
-	 * (default: 2000).
+	 * How long the underlying connection outlives its last handle (default: 2000ms).
 	 *
 	 * The window is what makes moving an element around the DOM free: the connection and
 	 * everything it discovered are still warm when the new owner asks for them. Applied by
 	 * whoever dials first, so a later handle sharing the connection inherits it.
 	 */
-	linger?: DOMHighResTimeStamp;
+	linger?: Time.Milli;
 
 	/**
 	 * Share a pooled transport keyed on the URL (default: true).
@@ -66,7 +66,7 @@ export interface ConnectionProps {
 	publish?: Origin.Consumer;
 
 	/** The origin fed with the peer's announced broadcasts, spanning reconnects. Requires {@link ConnectionProps.share} `false`. */
-	subscribe?: Origin.Producer;
+	consume?: Origin.Producer;
 
 	/** Backoff settings for the reconnect loop; an unset field uses its default. */
 	delay?: ReloadDelay;
@@ -232,21 +232,21 @@ export class Connection {
 	}
 
 	#runPrivate(props: ConnectionProps, href: Getter<string | undefined>): void {
-		const owned = props.subscribe === undefined;
-		const origin = props.subscribe ?? new Origin.Producer();
+		const owned = props.consume === undefined;
+		const origin = props.consume ?? new Origin.Producer();
 		if (owned) this.#signals.cleanup(() => origin.close());
 
 		const loop = new Reload({
 			url: this.url,
 			enabled: this.enabled,
 			publish: props.publish ?? (owned ? origin.consume() : undefined),
-			subscribe: origin,
+			consume: origin,
 			webtransport: props.webtransport,
 			websocket: props.websocket,
 			discovery: props.discovery,
 			// A handle nobody watches wants unlimited retries; an auth rejection still
 			// stops this URL, and a new one starts another sequence.
-			delay: props.delay ?? { timeout: 0 },
+			delay: props.delay ?? { timeout: Time.Milli(0) },
 		});
 		this.#signals.cleanup(() => loop.close());
 
@@ -378,7 +378,7 @@ function refuse(props?: ConnectionProps): void {
 	}
 	if (props.share === false) return;
 
-	if (props.publish || props.subscribe) {
+	if (props.publish || props.consume) {
 		throw new Error("caller-owned origins cannot be shared; pass share: false");
 	}
 	const hashes = props.webtransport?.serverCertificateHashes?.length ?? 0;
@@ -404,7 +404,7 @@ interface Entry {
 	origin: Origin.Producer;
 	connection: Reload;
 	refs: number;
-	linger: DOMHighResTimeStamp;
+	linger: Time.Milli;
 	timer?: ReturnType<typeof setTimeout>;
 }
 
@@ -412,7 +412,7 @@ interface Entry {
 const pool = new Map<string, Entry>();
 
 /** Take a reference on the shared entry for `key`, creating it on first use. */
-function acquire(key: string, linger?: DOMHighResTimeStamp): Entry & { release: () => void } {
+function acquire(key: string, linger?: Time.Milli): Entry & { release: () => void } {
 	let entry = pool.get(key);
 	if (!entry) {
 		const origin = new Origin.Producer();
@@ -420,11 +420,11 @@ function acquire(key: string, linger?: DOMHighResTimeStamp): Entry & { release: 
 			url: new URL(key),
 			enabled: true,
 			publish: origin.consume(),
-			subscribe: origin,
+			consume: origin,
 			// Nobody observes a shared loop's `closed`, so giving up would strand every handle
 			// on this URL offline until the page reloads. Retry for as long as the entry lives
 			// instead; an auth rejection still stops this URL, and evicts below.
-			delay: { timeout: 0 },
+			delay: { timeout: Time.Milli(0) },
 		});
 
 		const created: Entry = { origin, connection, refs: 0, linger: linger ?? LINGER_MS };

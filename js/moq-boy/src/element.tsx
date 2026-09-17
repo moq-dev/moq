@@ -49,7 +49,7 @@ export default class MoqBoy extends HTMLElement {
 		this.connection = new Moq.Connection({
 			enabled: this.#enabled,
 			publish: this.origin.consume(),
-			subscribe: this.origin,
+			consume: this.origin,
 			share: false,
 		});
 		this.#signals.cleanup(() => this.connection.close());

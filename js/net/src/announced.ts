@@ -235,7 +235,7 @@ export class Broadcast {
 	 *
 	 * Prefer `announcedBroadcast(path)` on the connection itself. Reach for this when the
 	 * source you want to follow isn't either connection type, e.g. your own
-	 * `Getter<Established | undefined>` or an origin fed by a `subscribe` option.
+	 * `Getter<Established | undefined>` or an origin fed by a `consume` option.
 	 */
 	constructor({ connection, path, origin }: BroadcastProps) {
 		this.path = path;

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { getter } from "@moq/signals";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
-import { DEFAULT_ROUTE } from "./hop.ts";
+import { Route } from "./hop.ts";
 import type { Consumer } from "./origin.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
@@ -15,7 +15,7 @@ function publish(origin: Producer, path: Path.Valid) {
 
 /** Land a received prefix, served from `consume`, the way a session does. */
 function serve(origin: Producer, prefix: Path.Valid, consume: () => BroadcastConsumer) {
-	const handle = origin.receive(Path.Pattern.subtree(prefix), DEFAULT_ROUTE);
+	const handle = origin.receive(Path.Pattern.subtree(prefix), Route.default);
 	void (async () => {
 		try {
 			for await (const request of handle.requested()) {
@@ -856,7 +856,7 @@ test("createBroadcast is unadvertised until announce", async () => {
 	const announced = consumer.announced();
 	const pending = announced.next();
 	broadcast.announce();
-	expect(await pending).toMatchObject({ pattern: Path.Pattern.subtree(path), active: true, route: DEFAULT_ROUTE });
+	expect(await pending).toMatchObject({ pattern: Path.Pattern.subtree(path), active: true, route: Route.default });
 
 	broadcast.announce({ cost: 4n });
 	expect(await announced.next()).toMatchObject({

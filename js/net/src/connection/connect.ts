@@ -104,7 +104,7 @@ export interface ConnectProps {
 	 * origin: a locally published path is then served back to local consumers directly, and
 	 * the session still never announces the peer's own broadcasts back to it.
 	 */
-	subscribe?: OriginProducer;
+	consume?: OriginProducer;
 
 	/**
 	 * Aborts the connection attempt with the signal's reason. An already-aborted
@@ -157,7 +157,7 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 		// A `pending` rejection propagates unless the abort beat it to the finish line.
 		const connection = await Promise.race([pending, abort.then(() => undefined)]);
 		if (connection && !signal.aborted) {
-			if (props?.subscribe) forwardAnnounced(connection, props.subscribe);
+			if (props?.consume) forwardAnnounced(connection, props.consume);
 			return connection;
 		}
 

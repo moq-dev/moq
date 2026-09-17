@@ -48,9 +48,9 @@ export class Consumer {
 			const latest = this.#track.latest();
 			if (latest !== undefined) this.#track.setGroups({ start: { included: latest } });
 
-			let next: Awaited<ReturnType<Moq.Track.Ordered["readFrameSequence"]>>;
+			let next: Awaited<ReturnType<Moq.Track.Ordered["readFrame"]>>;
 			try {
-				next = await this.#track.readFrameSequence();
+				next = await this.#track.readFrame();
 			} catch (err) {
 				// Falling behind a group's eviction window is recoverable: the next group carries a
 				// complete value of its own, so resync there rather than surfacing a partial read.

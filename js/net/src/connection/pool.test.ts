@@ -5,6 +5,7 @@ import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
+import * as Time from "../time.ts";
 import { accept } from "./index.ts";
 import { Connection, resetShared } from "./pool.ts";
 
@@ -33,7 +34,7 @@ async function waitUntil(pred: () => boolean, ms = 1000): Promise<void> {
 
 // A tiny window keeps the linger tests quick without mocking timers. The wait is a wide
 // multiple of it so a loaded runner's timer drift can't be mistaken for lingering.
-const linger = 20;
+const linger = Time.Milli(20);
 
 async function expired() {
 	await new Promise((resolve) => setTimeout(resolve, linger * 15));
@@ -102,7 +103,7 @@ test("the connection closes after the last handle and the linger window", async 
 test("a handle taken within the linger window reuses the warm connection", async () => {
 	const dials = stubTransports();
 
-	const first = new Connection({ url, linger: 10_000 });
+	const first = new Connection({ url, linger: Time.Milli(10_000) });
 	await waitUntil(() => first.status.peek() === "connected");
 	const origin = first.origin.peek();
 	first.close();
@@ -228,7 +229,7 @@ test("share: false keeps a private loop and origin", async () => {
 test("caller-owned origins, transport options, and delay refuse to share", () => {
 	const origin = new OriginProducer();
 	try {
-		expect(() => new Connection({ subscribe: origin })).toThrow(/share: false/);
+		expect(() => new Connection({ consume: origin })).toThrow(/share: false/);
 		expect(() => new Connection({ publish: origin.consume() })).toThrow(/share: false/);
 		expect(() => new Connection({ webtransport: { serverCertificate: "x" } })).toThrow(/share: false/);
 		expect(() => new Connection({ webtransport: { serverCertificateHashes: [{ value: "aa" }] } })).toThrow(
@@ -237,7 +238,7 @@ test("caller-owned origins, transport options, and delay refuse to share", () =>
 		expect(() => new Connection({ webtransport: { congestionControl: "throughput" } })).toThrow(/share: false/);
 		expect(() => new Connection({ websocket: { enabled: false } })).toThrow(/share: false/);
 		expect(() => new Connection({ discovery: false })).toThrow(/share: false/);
-		expect(() => new Connection({ delay: { timeout: 0 } })).toThrow(/share: false/);
+		expect(() => new Connection({ delay: { timeout: Time.Milli(0) } })).toThrow(/share: false/);
 	} finally {
 		origin.close();
 	}
@@ -324,7 +325,7 @@ test("exhausted retries then a new URL recovers a private handle", async () => {
 		url,
 		share: false,
 		websocket: { enabled: false },
-		delay: { initial: 1, multiplier: 1, max: 1, timeout: 1 },
+		delay: { initial: Time.Milli(1), multiplier: 1, max: Time.Milli(1), timeout: Time.Milli(1) },
 	});
 	try {
 		await waitUntil(() => handle.error.peek() !== undefined);

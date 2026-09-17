@@ -67,28 +67,30 @@ export type Segment =
 	| { readonly kind: "partial"; readonly prefix: string; readonly suffix: string }
 	| { readonly kind: "globstar" };
 
-/** Why a string or a segment list is not a valid {@link Pattern}. */
-export type ErrorCode =
-	/** A segment is empty: a leading, trailing, or doubled `/`. */
-	| "empty-segment"
-	/** A segment's kind, fields, or wildcard syntax is invalid. */
-	| "invalid-segment"
-	/** More than one `**`. */
-	| "multiple-globstars"
-	/** More than {@link Pattern.MAX_SEGMENTS} segments. */
-	| "too-many-segments";
-
 /** Thrown when a pattern's text or segments violate the grammar. */
-export class PatternError extends Error {
+export class InvalidPattern extends Error {
 	/** Which rule was broken. */
-	readonly code: ErrorCode;
+	readonly code: InvalidPattern.Code;
 
 	/** Create an error with the violated grammar rule in `code` and a human-readable `message`. */
-	constructor(code: ErrorCode, message: string) {
+	constructor(code: InvalidPattern.Code, message: string) {
 		super(message);
-		this.name = "PatternError";
+		this.name = "InvalidPattern";
 		this.code = code;
 	}
+}
+
+export namespace InvalidPattern {
+	/** Why a string or a segment list is not a valid {@link Pattern}. */
+	export type Code =
+		/** A segment is empty: a leading, trailing, or doubled `/`. */
+		| "empty-segment"
+		/** A segment's kind, fields, or wildcard syntax is invalid. */
+		| "invalid-segment"
+		/** More than one `**`. */
+		| "multiple-globstars"
+		/** More than {@link Pattern.MAX_SEGMENTS} segments. */
+		| "too-many-segments";
 }
 
 /**
@@ -133,12 +135,12 @@ function splitPath(path: string): string[] {
 	return path.split("/").filter((part) => part !== "");
 }
 
-function invalidSegment(text: string): PatternError {
-	return new PatternError("invalid-segment", `invalid pattern segment: ${JSON.stringify(text)}`);
+function invalidSegment(text: string): InvalidPattern {
+	return new InvalidPattern("invalid-segment", `invalid pattern segment: ${JSON.stringify(text)}`);
 }
 
 function parseSegment(text: string): Segment {
-	if (text === "") throw new PatternError("empty-segment", "empty path segment");
+	if (text === "") throw new InvalidPattern("empty-segment", "empty path segment");
 	if (text === "*") return WILDCARD;
 	if (text === "**") return GLOBSTAR;
 	if (text.includes("/")) throw invalidSegment(text);
@@ -176,7 +178,7 @@ function freezeSegment(segment: Segment): Segment {
 		case "globstar":
 			return Object.freeze({ kind: "globstar" });
 		default:
-			throw new PatternError("invalid-segment", "unknown pattern segment kind");
+			throw new InvalidPattern("invalid-segment", "unknown pattern segment kind");
 	}
 }
 
@@ -282,7 +284,7 @@ export class Pattern {
 
 	private constructor(segments: readonly Segment[]) {
 		if (segments.length > MAX_PATTERN_SEGMENTS) {
-			throw new PatternError("too-many-segments", `more than ${MAX_PATTERN_SEGMENTS} segments`);
+			throw new InvalidPattern("too-many-segments", `more than ${MAX_PATTERN_SEGMENTS} segments`);
 		}
 		const owned = segments.map(freezeSegment);
 		segments = owned;
@@ -291,20 +293,20 @@ export class Pattern {
 		for (const [i, segment] of segments.entries()) {
 			if (segment.kind === "literal") {
 				if (typeof segment.value !== "string") {
-					throw new PatternError("invalid-segment", "literal value must be a string");
+					throw new InvalidPattern("invalid-segment", "literal value must be a string");
 				}
-				if (segment.value === "") throw new PatternError("empty-segment", "empty path segment");
+				if (segment.value === "") throw new InvalidPattern("empty-segment", "empty path segment");
 				if (segment.value.includes("*") || segment.value.includes("/")) throw invalidSegment(segment.value);
 			} else if (segment.kind === "partial") {
 				const { prefix, suffix } = segment;
 				if (typeof prefix !== "string" || typeof suffix !== "string") {
-					throw new PatternError("invalid-segment", "partial prefix and suffix must be strings");
+					throw new InvalidPattern("invalid-segment", "partial prefix and suffix must be strings");
 				}
 				if ((prefix === "" && suffix === "") || /[*/]/.test(prefix) || /[*/]/.test(suffix)) {
 					throw invalidSegment(`${prefix}*${suffix}`);
 				}
 			} else if (segment.kind === "globstar") {
-				if (globstar !== undefined) throw new PatternError("multiple-globstars", "more than one ** segment");
+				if (globstar !== undefined) throw new InvalidPattern("multiple-globstars", "more than one ** segment");
 				globstar = i;
 			}
 		}
@@ -335,7 +337,7 @@ export class Pattern {
 	}
 
 	/**
-	 * Parse a pattern's text. Throws {@link PatternError} on invalid syntax.
+	 * Parse a pattern's text. Throws {@link InvalidPattern} on invalid syntax.
 	 *
 	 * Unlike a path, slashes are not normalized: a leading, trailing, or doubled `/` is
 	 * an error, so a typo cannot silently widen a grant.
@@ -345,7 +347,7 @@ export class Pattern {
 		return new Pattern(text.split("/").map(parseSegment));
 	}
 
-	/** A pattern from its segments, validating the grammar. Throws {@link PatternError}. */
+	/** A pattern from its segments, validating the grammar. Throws {@link InvalidPattern}. */
 	static from(segments: Iterable<Segment>): Pattern {
 		return new Pattern([...segments]);
 	}

@@ -5,6 +5,7 @@ import { error, SessionCode, SessionError } from "../error.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { empty as emptyPath } from "../path.ts";
+import * as Time from "../time.ts";
 import { type ConnectProps, connect, type WebSocketOptions, type WebTransportProps } from "./connect.ts";
 import type { Established } from "./established.ts";
 import type { Probe, Stats } from "./stats.ts";
@@ -19,21 +20,21 @@ import type { Probe, Stats } from "./stats.ts";
  * @internal
  */
 export type ReloadDelay = {
-	/** The delay in milliseconds before reconnecting (default: 1000). */
-	initial?: DOMHighResTimeStamp;
+	/** The delay before reconnecting (default: 1000ms). */
+	initial?: Time.Milli;
 
 	/** The multiplier for the delay (default: 2). */
 	multiplier?: number;
 
-	/** The maximum delay in milliseconds (default: 5000). */
-	max?: DOMHighResTimeStamp;
+	/** The maximum delay (default: 5000ms). */
+	max?: Time.Milli;
 
 	/**
-	 * Maximum total time in milliseconds to spend retrying the current URL before giving up
-	 * (default: 10000). Resets after each successful connection, a URL change, or a
+	 * Maximum total time to spend retrying the current URL before giving up
+	 * (default: 10000ms). Resets after each successful connection, a URL change, or a
 	 * disable/re-enable. Set to 0 for unlimited retries.
 	 */
-	timeout?: DOMHighResTimeStamp;
+	timeout?: Time.Milli;
 };
 
 /**
@@ -72,10 +73,10 @@ export type ReloadProps = Omit<ConnectProps, "signal" | "transport"> & {
  * starts another sequence.
  */
 const DEFAULT_DELAY: Required<ReloadDelay> = {
-	initial: 1000,
+	initial: Time.Milli(1000),
 	multiplier: 2,
-	max: 5000,
-	timeout: 10000,
+	max: Time.Milli(5000),
+	timeout: Time.Milli(10000),
 };
 
 /** How often the send-rate estimate is sampled from the live transport. */
@@ -159,9 +160,9 @@ export class Reload {
 	 *
 	 * The entries a session fed retract when it dies, and the next session re-populates the
 	 * table, so a consumer watching the origin sees offline/online transitions across a
-	 * reconnect. See the `subscribe` connect option.
+	 * reconnect. See the `consume` connect option.
 	 */
-	subscribe?: OriginProducer;
+	consume?: OriginProducer;
 
 	/** Backoff settings for the reconnect loop; an unset field uses its default. */
 	delay: ReloadDelay;
@@ -215,15 +216,15 @@ export class Reload {
 		this.websocket = props?.websocket;
 		this.discovery = props?.discovery;
 		this.publish = props?.publish;
-		this.subscribe = props?.subscribe;
+		this.consume = props?.consume;
 
-		// Requests on the subscribe origin stay pending across a reconnect, and before the
+		// Requests on the consume origin stay pending across a reconnect, and before the
 		// first session establishes, rather than reading as unroutable the moment no session
 		// is attached. Released only when this loop is disposed: giving up the current URL
 		// is recoverable (a new URL or a disable/re-enable starts another sequence), so a
 		// request must keep waiting rather than go unroutable in the gap.
-		if (this.subscribe) {
-			this.#signals.cleanup(this.subscribe.expect());
+		if (this.consume) {
+			this.#signals.cleanup(this.consume.expect());
 		}
 
 		this.error = this.#error;
@@ -328,7 +329,7 @@ export class Reload {
 					webtransport: this.webtransport,
 					discovery: this.discovery,
 					publish: this.publish,
-					subscribe: this.subscribe,
+					consume: this.consume,
 					signal,
 				});
 
@@ -447,9 +448,9 @@ export class Reload {
 	 * Stays empty while the relay lacks {@link Established.discovery}.
 	 */
 	announced(prefix: Path.Valid = emptyPath()): Announce.Consumer {
-		// With a subscribe origin the table already spans reconnects (the forwarder retracts
+		// With a consume origin the table already spans reconnects (the forwarder retracts
 		// a dead session's entries), so its stream is the same thing with less machinery.
-		if (this.subscribe) return this.subscribe.announced(prefix);
+		if (this.consume) return this.consume.announced(prefix);
 
 		const producer = new Announce.Producer(prefix);
 		const consumer = producer.consume();
@@ -511,7 +512,7 @@ export class Reload {
 	 */
 	announcedBroadcast(path: Path.Valid): Announce.Broadcast {
 		// Same delegation as announced(): the origin's table is the reconnect-spanning view.
-		if (this.subscribe) return new Announce.Broadcast({ origin: this.subscribe, path });
+		if (this.consume) return new Announce.Broadcast({ origin: this.consume, path });
 		return new Announce.Broadcast({ connection: this.established, path });
 	}
 

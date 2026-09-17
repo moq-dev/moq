@@ -14,9 +14,8 @@
 
 export {
 	compareSpecificity,
-	type ErrorCode,
+	InvalidPattern,
 	Pattern,
-	PatternError,
 	Patterns,
 	type Segment,
 	type Specificity,
