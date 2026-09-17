@@ -14,7 +14,7 @@ The project moves quickly and your training data is stale: it describes the IETF
 Do not guess APIs, package names, or flags. Read https://doc.moq.dev as part of the task.
 
 1. Fetch https://doc.moq.dev/llms.txt, an index of every page with a one-line description.
-2. Fetch the pages you need as markdown by replacing the trailing `/` with `.md`, e.g. https://doc.moq.dev/lib/js/watch.md.
+2. Fetch the pages you need as markdown: drop any trailing `/` and append `.md`, e.g. https://doc.moq.dev/lib/js/watch.md.
 3. For an API, read that package's page before writing code. For a design question, start at https://doc.moq.dev/concept.md.
 
 ## Durable facts

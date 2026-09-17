@@ -31,4 +31,4 @@ Contributions welcome; it's just markdown.
 
 ## Reading the Docs
 
-Every page on this site is also served as plain markdown: swap the trailing `/` for `.md`, so `/bin/relay/` becomes `/bin/relay.md`. [`/llms.txt`](/llms.txt) indexes every page with a one-line description, and [`/llms-full.txt`](/llms-full.txt) bundles them all into one file, following the [llms.txt](https://llmstxt.org) convention.
+Every page on this site is also served as plain markdown: drop any trailing `/` and append `.md`, so `/bin/relay/` becomes `/bin/relay.md` and `/lib/js/watch` becomes `/lib/js/watch.md`. [`/llms.txt`](/llms.txt) indexes every page with a one-line description, and [`/llms-full.txt`](/llms-full.txt) bundles them all into one file, following the [llms.txt](https://llmstxt.org) convention.
