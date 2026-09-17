@@ -221,6 +221,19 @@ impl<E: CatalogExt> Catalog<E> {
 /// The newest MSF draft string this crate emits.
 const CURRENT_VERSION: &str = "draft-01";
 
+/// The extension's first member that collides with one MSF defines, if any.
+///
+/// Serializes the extension to inspect its member names, so it is only called under
+/// `debug_assertions`.
+#[cfg(debug_assertions)]
+fn colliding_member<E: CatalogExt>(ext: &E) -> Option<String> {
+	match serde_json::to_value(ext) {
+		Ok(serde_json::Value::Object(members)) => members.into_iter().map(|(name, _)| name).find(|n| reserved_root(n)),
+		// Not an object (the `()` no-extension case) or unserializable: nothing to collide.
+		_ => None,
+	}
+}
+
 /// Whether `name` is a root member MSF itself defines, which an extension MUST NOT reuse.
 ///
 /// An extension is serialized flat, so a member by one of these names emits a duplicate JSON
@@ -237,6 +250,16 @@ pub fn reserved_root(name: &str) -> bool {
 impl<E: CatalogExt> Serialize for Catalog<E> {
 	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
 		use std::collections::HashMap;
+
+		// An extension member named after one MSF defines emits a duplicate JSON key, which serde
+		// writes without complaint and a reader resolves by keeping the last. A typed extension
+		// fixes its member names at compile time, so this is a bug in the extension rather than
+		// something a peer can trigger: check it where it costs nothing to ship.
+		debug_assert!(
+			colliding_member(&self.ext).is_none(),
+			"MSF catalog extension member {:?} collides with a reserved root member",
+			colliding_member(&self.ext).unwrap_or_default(),
+		);
 
 		// Hoist inline init payloads into a shared, deduplicated initDataList and
 		// point each track at its entry via initRef. That's the draft-01 wire
@@ -1147,6 +1170,19 @@ mod test {
 		let parsed = Catalog::<MpegtsExt>::from_str(&json).expect("typed extension must decode");
 		assert_eq!(parsed.ext, ext);
 		assert_eq!(parsed.tracks.len(), 1);
+	}
+
+	/// A typed extension whose member name collides with one MSF defines trips the debug
+	/// assertion: nothing else catches it, since serde writes the duplicate key happily.
+	#[test]
+	#[should_panic(expected = "collides with a reserved root member")]
+	fn colliding_typed_extension_trips_the_debug_assertion() {
+		#[derive(Serialize, Deserialize, Clone, Default)]
+		struct BadExt {
+			tracks: Vec<String>,
+		}
+
+		let _ = Catalog::with_ext(Vec::new(), BadExt::default()).to_json();
 	}
 
 	/// Root members the extension does not model are dropped, exactly as the hang catalog

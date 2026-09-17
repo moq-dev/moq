@@ -339,7 +339,7 @@ mod test {
 		for name in ["version", "generatedAt", "isComplete", "tracks", "initDataList"] {
 			assert!(
 				matches!(
-					producer.lock().set_section(name, serde_json::json!("nope")),
+					producer.modify().unwrap().set_section(name, serde_json::json!("nope")),
 					Err(crate::Error::ReservedSection(_))
 				),
 				"{name} must be refused",

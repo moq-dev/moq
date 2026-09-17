@@ -150,27 +150,42 @@ They are the only service-layer fields this document parses; everything else abo
 A publisher MUST include `program` when the broadcast came from a transport stream, and omit it otherwise.
 
 ## si {#field-si}
-The standalone service information tables, keyed by the PID they ride on:
+The standalone service information tables, keyed by the PID they ride on and then by `table_id`:
 
 ~~~
-type Si = {
-  "sections": string[],
+type Si = Map<PidString, Map<TableIdString, SiEntry>>
+
+type SiEntry = {
+  "track": string,
   "interval": number | undefined,
 }
 ~~~
 
-JSON object keys are strings, so a PID key is decimal with no leading zeros, `"17"` for 0x0011.
-A consumer MUST ignore an entry whose key is not such an integer in 0..8191.
+JSON object keys are strings, so both are decimal with no leading zeros: `"17"` for PID 0x0011, `"66"` for `table_id` 0x42.
+A consumer MUST ignore an entry whose PID key is not an integer in 0..8191, or whose `table_id` key is not an integer in 0..255.
 
-`sections` are complete sections ({{mpeg2}} Section 2.4.4), header and CRC included, base64 ({{!RFC4648, Section 4}}), in the order first seen.
-They are never parsed, so an SDT, a NIT, and a table nobody recognizes all survive the same way.
-One PID carries a set of them, so a publisher MUST replace a section in place when it is re-signaled with the same `table_id`, `table_id_extension`, and `section_number`, and MUST NOT append a duplicate.
+`table_id` is byte 0 of generic section syntax ({{mpeg2}} Section 2.4.4), so the key is no less generic than the PID; which ranges mean what is a delivery-system convention this document does not rely on.
 
-`interval` bounds how often a rebuilt stream repeats this PID's sections, in milliseconds.
-A publisher SHOULD use its delivery system's maximum repetition interval, for example {{dvbrep}} for DVB: 10000 for the NIT PID, 2000 for the SDT/BAT PID.
-It MUST omit `interval` for a PID whose requirement it does not know; a consumer then falls back to its own PSI cadence.
+`track` names the snapshot track carrying the entry's sections ({{si-track}}), published in the same broadcast as the catalog.
+The sections are not in the catalog: a full EPG is megabytes and would be republished on every unrelated catalog change.
+
+`interval` bounds how often a rebuilt stream repeats the entry's sections, in milliseconds.
+A publisher SHOULD use its delivery system's maximum repetition interval for that `table_id`, for example {{dvbrep}} for DVB: 2000 for SDT actual and EIT present/following actual, 10000 for the NIT, the BAT, SDT other and EIT schedule actual, 30000 for EIT schedule other.
+It MUST omit `interval` for a `table_id` whose requirement it does not know; a consumer then falls back to its own PSI cadence.
+The key is `table_id` rather than PID because that is the granularity the requirements are defined at: one PID carries tables wanting different rates.
 
 PAT and PMT are never carried here: they are rebuilt from `program`, `programDescriptors`, and the per-track entries.
+
+### SI Track {#si-track}
+Each group is a complete picture of the entry's current sections: one frame per sub-table, each frame that sub-table's sections concatenated verbatim in `section_number` order.
+Sections are self-delimiting through `section_length`, so a frame needs no further framing.
+A joiner reads only the newest group.
+
+Frames apply in order and a later frame replaces an earlier one of the same sub-table, so a publisher MAY append a revision within a group rather than opening a new one.
+A publisher MUST commit a revised sub-table whole: no group may expose part of one version beside part of another.
+
+A sub-table is identified by its `table_id_extension`, plus the bytes that disambiguate it where the extension alone does not: `original_network_id` for SDT other, and `transport_stream_id` with `original_network_id` for the EIT, whose extension is a service id unique only within a transport stream.
+A short-form section carries no extension, version, or numbering, so its `table_id` is one latest-value slot and each arrival replaces the last; that is what lets a time table be proxied rather than synthesized.
 
 ## Descriptor {#descriptor}
 One PMT descriptor:
@@ -238,7 +253,7 @@ A consumer rebuilding a transport stream:
 - MUST place each track on its recorded `pid`, and MUST assign an unused PID to a track with none.
 - MUST put the PMT on `program.pmtPid` and build the PAT and PMT from `program`.
 - MUST re-emit each track's `descriptors` as its ES-level descriptors, and `programDescriptors` as the PMT's `program_info`.
-- MUST re-emit each `si` PID's sections byte-for-byte on that PID, at least as often as its `interval` when declared.
+- MUST re-emit each `si` entry's sections byte-for-byte on that entry's PID, reading them from its track ({{si-track}}), at least as often as its `interval` when declared.
 - MUST repacketize each verbatim track per its `framing` and `streamType`, using `streamId` when recorded.
 
 With no `program` the consumer synthesizes an identity, and SHOULD then omit any carried `si`, which describes a program that no longer exists.
@@ -250,8 +265,8 @@ A consumer MUST NOT derive one that contradicts a recorded descriptor.
 # Security Considerations
 Every binary field here is re-emitted without inspection, by a publisher that never parsed it and a relay that never looked, so a consumer MUST treat all of it as untrusted input.
 
-Nothing bounds the number of PIDs, sections, or track entries, all of it base64 in a catalog republished on every change.
-A consumer MUST bound the size and entry count it accepts, and MUST reject a section it cannot bound rather than truncate it into a stream that silently differs from what was described.
+Nothing bounds the number of entries in the section, nor the size of an SI track: a publisher controls both, and an EPG is large by nature.
+A consumer MUST bound what it accepts of each, and MUST reject a catalog it cannot bound rather than truncate it into a stream that silently differs from what was described.
 PIDs, program numbers, and stream types are 13-, 16-, and 8-bit values in a JSON document that can hold any number, so a consumer MUST range-check each one.
 A catalog can also name one PID twice, so a consumer MUST NOT emit a stream in which two elementary streams share a PID.
 
@@ -271,7 +286,7 @@ Should {{msf}} establish a registry of catalog root members, this document reque
 # Appendix A: Example
 {:numbered="false"}
 
-A broadcast demultiplexed from a DVB transport stream: video and audio described as ordinary renditions, a verbatim SCTE-35 stream, and the source's SDT carried opaquely.
+A broadcast demultiplexed from a DVB transport stream: video and audio described as ordinary renditions, a verbatim SCTE-35 stream, and the source's SDT Actual (`table_id` 0x42 on PID 0x0011) carried opaquely on its own track.
 
 ~~~
 {
@@ -296,7 +311,9 @@ A broadcast demultiplexed from a DVB transport stream: video and audio described
       }
     },
     "si": {
-      "17": { "sections": [ "QvAl..." ], "interval": 2000 }
+      "17": {
+        "66": { "track": "si/17/66", "interval": 2000 }
+      }
     }
   }
 }
