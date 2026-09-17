@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - [**breaking**] `encode::Producer::finish` borrows (`&mut self`) instead of consuming, so a later
-  `abort(self)` can still run after a clean end.
+  `abort(self)` can still run after a clean end. Writes after finish fail with `Closed`.
 
 ## [0.0.24](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.23...moq-audio-v0.0.24) - 2026-09-13
 

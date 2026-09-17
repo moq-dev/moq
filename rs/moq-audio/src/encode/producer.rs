@@ -122,6 +122,9 @@ pub struct Producer<E: CatalogExt = ()> {
 	decoder_boundary: bool,
 	/// How the encoder classified the packet it published most recently.
 	activity: Activity,
+	/// Set after a successful [`finish`](Self::finish). Writes then fail with
+	/// [`moq_net::Error::Closed`]; [`abort`](Self::abort) can still run.
+	finished: bool,
 }
 
 struct Terminal {
@@ -211,6 +214,7 @@ impl<E: CatalogExt> Reserved<E> {
 			pending_discontinuity: false,
 			decoder_boundary: true,
 			activity: Activity::Active,
+			finished: false,
 		}
 	}
 }
@@ -339,7 +343,13 @@ impl<E: CatalogExt> Producer<E> {
 	///
 	/// [`Frame::activity`] is ignored: the encoder classifies what it actually
 	/// produced, which [`activity`](Self::activity) reports.
+	///
+	/// Writes after a successful [`finish`](Self::finish) fail with
+	/// [`moq_net::Error::Closed`].
 	pub fn write(&mut self, frame: &Frame) -> Result<(), Error> {
+		if self.finished {
+			return Err(moq_net::Error::Closed.into());
+		}
 		if self.pending_discontinuity {
 			self.track.discontinuity()?;
 			self.pending_discontinuity = false;
@@ -453,8 +463,12 @@ impl<E: CatalogExt> Producer<E> {
 	/// the track.
 	///
 	/// Borrows rather than consumes, so a later [`abort`](Self::abort) can still
-	/// run after a successful finish.
+	/// run after a successful finish. Writes after this fail with
+	/// [`moq_net::Error::Closed`].
 	pub fn finish(&mut self) -> Result<(), Error> {
+		if self.finished {
+			return Ok(());
+		}
 		// Whatever the resampler still holds belongs to this track: its last partial
 		// chunk, plus the audio its filter is running behind on. Dropping it here
 		// would publish a track that ends before its source did.
@@ -498,6 +512,7 @@ impl<E: CatalogExt> Producer<E> {
 		}
 
 		self.track.finish()?;
+		self.finished = true;
 		Ok(())
 	}
 
@@ -936,6 +951,33 @@ mod tests {
 		producer.write(&full_frame(0)).unwrap();
 		producer.finish().unwrap();
 		assert!(track.read().await.unwrap().is_some());
+		producer.abort(moq_net::Error::Cancel);
+	}
+
+	/// A sub-frame write never reaches the closed track, so the producer must
+	/// refuse it itself rather than buffering samples that cannot be published.
+	#[tokio::test]
+	async fn write_after_finish_is_closed() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let options = Options {
+			track: Some("audio".to_string()),
+			..Options::default()
+		};
+		let mut producer = Producer::new(
+			&mut broadcast,
+			catalog,
+			Input {
+				channels: 1,
+				..Input::default()
+			},
+			&options,
+		)
+		.unwrap();
+
+		producer.finish().unwrap();
+		let err = producer.write(&pcm_frame(&[0.1; 100], 0)).unwrap_err();
+		assert!(matches!(err, Error::Net(moq_net::Error::Closed)));
 		producer.abort(moq_net::Error::Cancel);
 	}
 
