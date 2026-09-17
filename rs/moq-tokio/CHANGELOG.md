@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- [**breaking**] `ConnectionStatsReader::presence` reports `sessions_started` / `sessions_ended`.
+- [**breaking**] `connection::Monitor::presence` reports `sessions_started` / `sessions_ended`.
 
 ### Added
 

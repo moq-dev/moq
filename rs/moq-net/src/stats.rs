@@ -329,10 +329,23 @@ pub struct Traffic {
 	pub stale: Content,
 }
 
+/// One spelling of a counter edge on the wire: absent, or a present integer.
+///
+/// Decoding goes through `u64`, so an explicit `null` is refused rather than
+/// read as absent; only a missing field takes the default.
+#[derive(Default, Clone, Copy)]
+struct Edge(Option<u64>);
+
+impl<'de> Deserialize<'de> for Edge {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		u64::deserialize(deserializer).map(|v| Self(Some(v)))
+	}
+}
+
 /// Prefer the canonical `*_started`/`*_ended` spelling; fall back to the
 /// legacy name so a consumer built after the rename still reads an older relay.
-fn counter_edge(canonical: Option<u64>, legacy: Option<u64>) -> u64 {
-	canonical.or(legacy).unwrap_or(0)
+fn counter_edge(canonical: Edge, legacy: Edge) -> u64 {
+	canonical.0.or(legacy.0).unwrap_or(0)
 }
 
 #[derive(Serialize)]
@@ -387,19 +400,19 @@ impl From<Traffic> for TrafficSer {
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct TrafficDe {
-	announces_started: Option<u64>,
-	announced: Option<u64>,
-	announces_ended: Option<u64>,
-	announced_closed: Option<u64>,
+	announces_started: Edge,
+	announced: Edge,
+	announces_ended: Edge,
+	announced_closed: Edge,
 	announced_bytes: u64,
-	broadcasts_started: Option<u64>,
-	broadcasts: Option<u64>,
-	broadcasts_ended: Option<u64>,
-	broadcasts_closed: Option<u64>,
-	subscriptions_started: Option<u64>,
-	subscriptions: Option<u64>,
-	subscriptions_ended: Option<u64>,
-	subscriptions_closed: Option<u64>,
+	broadcasts_started: Edge,
+	broadcasts: Edge,
+	broadcasts_ended: Edge,
+	broadcasts_closed: Edge,
+	subscriptions_started: Edge,
+	subscriptions: Edge,
+	subscriptions_ended: Edge,
+	subscriptions_closed: Edge,
 	fetches: u64,
 	bytes: u64,
 	frames: u64,
@@ -528,10 +541,10 @@ impl From<Presence> for PresenceSer {
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct PresenceDe {
-	sessions_started: Option<u64>,
-	sessions: Option<u64>,
-	sessions_ended: Option<u64>,
-	sessions_closed: Option<u64>,
+	sessions_started: Edge,
+	sessions: Edge,
+	sessions_ended: Edge,
+	sessions_closed: Edge,
 }
 
 impl From<PresenceDe> for Presence {
@@ -1974,5 +1987,14 @@ mod tests {
 				.unwrap();
 		assert_eq!(presence.sessions_started, 4);
 		assert_eq!(presence.sessions_ended, 2);
+	}
+
+	#[test]
+	fn counter_edge_refuses_null() {
+		// A present null is malformed, not absent: it must not fall through to the legacy spelling or to zero.
+		assert!(serde_json::from_str::<Traffic>(r#"{"announces_started":null,"announced":7}"#).is_err());
+		assert!(serde_json::from_str::<Traffic>(r#"{"subscriptions_closed":null}"#).is_err());
+		assert!(serde_json::from_str::<Presence>(r#"{"sessions_started":null}"#).is_err());
+		assert!(serde_json::from_str::<Presence>(r#"{"sessions":null,"sessions_closed":1}"#).is_err());
 	}
 }

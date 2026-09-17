@@ -60,6 +60,10 @@ what a subscriber received and played, per audio and video. The relay is
   under the old `Traffic` with the extension ignored; the aggregate sums two
   clients' counters and leaves gauges alone; the per-broadcast track for a
   tiered name and a refused ambiguous one.
+- Drop the legacy `announced` / bare-plural / `*_closed` spellings from the
+  `Traffic` and `Presence` serializers once a moq-stats release carrying both
+  has shipped and the demo dashboard (and any moq.pro consumer) reads the
+  `*_started` / `*_ended` names. Deserialize keeps accepting them. Wire only.
 
 ## Related
 
