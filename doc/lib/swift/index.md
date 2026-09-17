@@ -28,9 +28,9 @@ import Moq
 let client = Client()
 let session = try await client.connect(to: "https://relay.example.com")
 
-for try await announcement in try session.consumer.announced(prefix: "live/") {
+for try await announcement in try session.consume.announced(prefix: "live/") {
     // An announcement is a route; its path is relative to the prefix.
-    let broadcast = try await session.consumer.requestBroadcast(path: "live/" + announcement.path)
+    let broadcast = try await session.consume.requestBroadcast(path: "live/" + announcement.path)
     for try await catalog in try broadcast.subscribeCatalog() {
         print(catalog)
     }
@@ -40,7 +40,7 @@ for try await announcement in try session.consumer.announced(prefix: "live/") {
 ```swift
 // Publish encoded frames, or raw pixels with the codec inside the binding (VideoToolbox).
 // opusInit, packet, pts, and rgba come from your encoder or capture source.
-let broadcast = try session.publisher.createBroadcast(path: "my-stream.hang")
+let broadcast = try session.publish.createBroadcast(path: "my-stream.hang")
 let audio = try broadcast.publishAudio(format: .opus, initData: opusInit)
 try audio.writeFrame(packet, timestampUs: 20_000)
 
@@ -54,10 +54,10 @@ try broadcast.announce()
 session.shutdown()
 ```
 
-The three advertising operations: `session.publisher.createBroadcast(path:)`
+The three advertising operations: `session.publish.createBroadcast(path:)`
 returns an unadvertised producer; `broadcast.announce(route:)` /
 `broadcast.unannounce()` own that exact-path advertisement;
-`session.publisher.dynamic(pattern:route:)` claims every matching path
+`session.publish.dynamic(pattern:route:)` claims every matching path
 (`foo/**` for a prefix). Hold the returned `OriginDynamic` while the claim
 should stay advertised. A wildcard is a capability, not an inventory;
 `announcement.path` is the covered prefix for a prefix-shaped claim and the

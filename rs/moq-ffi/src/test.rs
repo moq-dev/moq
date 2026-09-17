@@ -209,7 +209,7 @@ fn audio_output() -> crate::audio::MoqAudioDecoderOutput {
 		format: MoqAudioSampleFormat::F32,
 		sample_rate: None,
 		channels: None,
-		max_age_ms: None,
+		max_age_us: None,
 	}
 }
 
@@ -505,7 +505,7 @@ async fn raw_track_datagram_roundtrip() {
 			"events".into(),
 			Some(MoqTrackInfo {
 				priority: 0,
-				max_age_ms: None,
+				max_age_us: None,
 				timescale: Some(1_000_000),
 			}),
 		)
@@ -535,7 +535,7 @@ async fn raw_track_info_reports_publisher_properties() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let info = MoqTrackInfo {
 		priority: 7,
-		max_age_ms: Some(2_500),
+		max_age_us: Some(2_500_000),
 		timescale: Some(90_000),
 	};
 	let track = broadcast.publish_track("status".into(), Some(info)).unwrap();
@@ -543,7 +543,7 @@ async fn raw_track_info_reports_publisher_properties() {
 
 	let got = consumer.info().unwrap();
 	assert_eq!(got.priority, 7);
-	assert_eq!(got.max_age_ms, Some(2_500));
+	assert_eq!(got.max_age_us, Some(2_500_000));
 	assert_eq!(got.timescale, Some(90_000));
 }
 
@@ -560,7 +560,7 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 
 	consumer.update(MoqSubscription {
 		priority: 10,
-		max_age_ms: 25,
+		max_age_us: 25_000,
 		group_start: Some(0),
 		group_end: None,
 	});
@@ -2422,7 +2422,7 @@ async fn raw_track_update_during_pending_group_still_reads_datagram() {
 
 	consumer.update(MoqSubscription {
 		priority: 10,
-		max_age_ms: 25,
+		max_age_us: 25_000,
 		group_start: Some(0),
 		group_end: None,
 	});
@@ -3010,8 +3010,8 @@ async fn server_client_roundtrip_auto_origin() {
 		.expect("connect timed out")
 		.expect("connect failed");
 
-	let publisher = cs.publisher();
-	let consumer = cs.consumer();
+	let publisher = cs.publish();
+	let consumer = cs.consume();
 
 	let server_session = tokio::time::timeout(TIMEOUT, accept)
 		.await
@@ -3268,10 +3268,10 @@ async fn client_reconnects_and_resumes_announcements() {
 	// Fast retries so the test doesn't wait out the default 1s backoff.
 	client
 		.set_backoff(MoqBackoff {
-			initial_ms: 50,
+			initial_us: 50_000,
 			multiplier: 2,
-			max_ms: 200,
-			timeout_ms: 0,
+			max_us: 200_000,
+			timeout_us: 0,
 		})
 		.unwrap();
 
@@ -3493,10 +3493,10 @@ async fn cancelled_status_does_not_swallow_the_next_transition() {
 	client.set_bind("127.0.0.1:0".into()).unwrap();
 	client
 		.set_backoff(MoqBackoff {
-			initial_ms: 50,
+			initial_us: 50_000,
 			multiplier: 2,
-			max_ms: 200,
-			timeout_ms: 0,
+			max_us: 200_000,
+			timeout_us: 0,
 		})
 		.unwrap();
 

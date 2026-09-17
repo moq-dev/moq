@@ -1001,7 +1001,7 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 	assert!(video_cfg.container.init.is_null());
 
 	let frame_cb = Callback::new();
-	let consumer = id(unsafe { moq_consume_video(catalog, 0, 10_000, Some(channel_callback), frame_cb.ptr) });
+	let consumer = id(unsafe { moq_consume_video(catalog, 0, 10_000_000, Some(channel_callback), frame_cb.ptr) });
 
 	let timestamp_us = 42_000;
 	let payload = b"codec frame";
@@ -1325,7 +1325,7 @@ fn publish_track_invalid_broadcast() {
 	assert!(unsafe { moq_publish_track(0, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) } < 0);
 	let info = moq_track_info {
 		priority: 1,
-		max_age_ms: 0,
+		max_age_us: 0,
 		max_age_present: false,
 		timescale: 0,
 		timescale_present: false,
@@ -1339,7 +1339,7 @@ fn publish_track_invalid_broadcast() {
 
 	let subscription = moq_subscription {
 		priority: 1,
-		max_age_ms: 0,
+		max_age_us: 0,
 		group_start: 0,
 		group_start_present: false,
 		group_end: 0,
@@ -1355,7 +1355,7 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 	let name = b"data";
 	let info = moq_track_info {
 		priority: 0,
-		max_age_ms: 0,
+		max_age_us: 0,
 		max_age_present: false,
 		timescale: 0,
 		timescale_present: true,
@@ -1389,7 +1389,7 @@ fn raw_track_publish_consume() {
 	// finish draining if the second becomes visible while the callback runs.
 	let subscription = moq_subscription {
 		priority: 0,
-		max_age_ms: 1_000,
+		max_age_us: 1_000_000,
 		group_start: 0,
 		group_start_present: false,
 		group_end: 0,
@@ -1570,7 +1570,7 @@ fn raw_track_subscription_options_and_update() {
 	let track_name = b"data";
 	let info = moq_track_info {
 		priority: 3,
-		max_age_ms: 1_000,
+		max_age_us: 1_000_000,
 		max_age_present: true,
 		timescale: 1_000_000,
 		timescale_present: true,
@@ -1591,7 +1591,7 @@ fn raw_track_subscription_options_and_update() {
 	let frame_cb = Callback::new();
 	let subscription = moq_subscription {
 		priority: 5,
-		max_age_ms: 25,
+		max_age_us: 25_000,
 		group_start: 1,
 		group_start_present: true,
 		group_end: 2,
@@ -1855,7 +1855,7 @@ fn double_close_all_resource_types() {
 	let catalog_id = id(catalog_cb.recv());
 
 	let frame_cb = Callback::new();
-	let track = id(unsafe { moq_consume_audio(catalog_id, 0, 10_000, Some(channel_callback), frame_cb.ptr) });
+	let track = id(unsafe { moq_consume_audio(catalog_id, 0, 10_000_000, Some(channel_callback), frame_cb.ptr) });
 
 	let payload = b"test";
 	assert_eq!(
@@ -2178,7 +2178,7 @@ fn local_publish_consume() {
 	);
 
 	let frame_cb = Callback::new();
-	let track = id(unsafe { moq_consume_audio(catalog_id, 0, 10_000, Some(channel_callback), frame_cb.ptr) });
+	let track = id(unsafe { moq_consume_audio(catalog_id, 0, 10_000_000, Some(channel_callback), frame_cb.ptr) });
 
 	let payload = b"opus audio payload data";
 	let timestamp_us: u64 = 1_000_000;
@@ -2339,7 +2339,7 @@ fn consume_audio_follows_a_sibling_broadcast_reference() {
 	let catalog_id = id(catalog_cb.recv());
 
 	let frame_cb = Callback::new();
-	let track = id(unsafe { moq_consume_audio(catalog_id, 0, 10_000, Some(channel_callback), frame_cb.ptr) });
+	let track = id(unsafe { moq_consume_audio(catalog_id, 0, 10_000_000, Some(channel_callback), frame_cb.ptr) });
 
 	// Published on the sibling, so it only arrives if the reference was followed.
 	let payload = b"opus audio payload data";
@@ -2467,7 +2467,7 @@ fn video_publish_consume() {
 	);
 
 	let frame_cb = Callback::new();
-	let track = id(unsafe { moq_consume_video(catalog_id, 0, 10_000, Some(channel_callback), frame_cb.ptr) });
+	let track = id(unsafe { moq_consume_video(catalog_id, 0, 10_000_000, Some(channel_callback), frame_cb.ptr) });
 
 	let keyframe = [0x00, 0x00, 0x00, 0x01, 0x65, 0xAA, 0xBB, 0xCC];
 	assert_eq!(
@@ -2663,7 +2663,7 @@ fn video_raw_publish_consume() {
 	let catalog_id = id(catalog_cb.recv());
 
 	let decoder = moq_video_decoder_output {
-		max_age_ms: 10_000,
+		max_age_us: 10_000_000,
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
 		width: 0,
 		height: 0,
@@ -2721,7 +2721,7 @@ fn video_raw_decode_output_rejected() {
 	use crate::ffi::ReturnCode;
 
 	let bad_format = moq_video_decoder_output {
-		max_age_ms: 0,
+		max_age_us: 0,
 		format: 999,
 		width: 0,
 		height: 0,
@@ -2733,7 +2733,7 @@ fn video_raw_decode_output_rejected() {
 
 	for (width, height) in [(320, 0), (0, 240), (321, 240), (320, 241), (u32::MAX - 1, u32::MAX - 1)] {
 		let bad_size = moq_video_decoder_output {
-			max_age_ms: 0,
+			max_age_us: 0,
 			format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
 			width,
 			height,
@@ -2751,7 +2751,7 @@ fn video_raw_decode_output_rejected() {
 	);
 
 	let valid = moq_video_decoder_output {
-		max_age_ms: 0,
+		max_age_us: 0,
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 160,
 		height: 120,
@@ -2854,7 +2854,7 @@ fn decode_first_frame(output: &moq_video_decoder_output) -> (u32, u32, usize) {
 #[test]
 fn video_raw_decode_rgba() {
 	let output = moq_video_decoder_output {
-		max_age_ms: 10_000,
+		max_age_us: 10_000_000,
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 0,
 		height: 0,
@@ -2867,7 +2867,7 @@ fn video_raw_decode_rgba() {
 #[test]
 fn video_raw_decode_resize() {
 	let output = moq_video_decoder_output {
-		max_age_ms: 10_000,
+		max_age_us: 10_000_000,
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
 		width: 160,
 		height: 120,
@@ -3195,7 +3195,7 @@ fn video_raw_decode() {
 
 	// Subscribe + decode before publishing frames so the keyframe group is delivered.
 	let output = moq_video_decoder_output {
-		max_age_ms: 10_000,
+		max_age_us: 10_000_000,
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
 		width: 0,
 		height: 0,
@@ -3273,7 +3273,7 @@ fn multiple_frames_ordering() {
 	let catalog_id = id(catalog_cb.recv());
 
 	let frame_cb = Callback::new();
-	let track = id(unsafe { moq_consume_audio(catalog_id, 0, 10_000, Some(channel_callback), frame_cb.ptr) });
+	let track = id(unsafe { moq_consume_audio(catalog_id, 0, 10_000_000, Some(channel_callback), frame_cb.ptr) });
 
 	let timestamps: [u64; 5] = [0, 20_000, 40_000, 60_000, 80_000];
 	for (i, &ts) in timestamps.iter().enumerate() {
@@ -3537,17 +3537,17 @@ fn defaults_report_what_a_zeroed_config_dials() {
 
 	assert!(config.has_backoff_initial);
 	assert_eq!(
-		config.backoff_initial_ms,
-		expected.connect.backoff.initial().as_millis() as u64
+		config.backoff_initial_us,
+		expected.connect.backoff.initial().as_micros() as u64
 	);
 	assert!(config.has_backoff_multiplier);
 	assert_eq!(config.backoff_multiplier, expected.connect.backoff.multiplier());
 	assert!(config.has_backoff_max);
-	assert_eq!(config.backoff_max_ms, expected.connect.backoff.max().as_millis() as u64);
+	assert_eq!(config.backoff_max_us, expected.connect.backoff.max().as_micros() as u64);
 	assert!(config.has_backoff_timeout);
 	assert_eq!(
-		config.backoff_timeout_ms,
-		expected.connect.backoff.timeout().as_millis() as u64
+		config.backoff_timeout_us,
+		expected.connect.backoff.timeout().as_micros() as u64
 	);
 
 	assert!(config.has_websocket_enabled);
@@ -3589,7 +3589,7 @@ fn defaults_report_what_a_zeroed_config_dials() {
 #[test]
 fn zero_with_a_flag_set_is_a_real_value() {
 	let mut config = client_config();
-	config.backoff_timeout_ms = 0;
+	config.backoff_timeout_us = 0;
 	config.has_backoff_timeout = true;
 	config.quic_keep_alive_ms = 0;
 	config.has_quic_keep_alive = true;
@@ -3705,11 +3705,11 @@ fn config_rejects_unknown_congestion_control() {
 #[test]
 fn config_quic_and_backoff_knobs_apply() {
 	let mut config = client_config();
-	config.backoff_initial_ms = 500;
+	config.backoff_initial_us = 500_000;
 	config.has_backoff_initial = true;
 	config.backoff_multiplier = 3;
 	config.has_backoff_multiplier = true;
-	config.backoff_max_ms = 10_000;
+	config.backoff_max_us = 10_000_000;
 	config.has_backoff_max = true;
 
 	config.quic_max_streams = 4096;
@@ -3726,9 +3726,15 @@ fn config_quic_and_backoff_knobs_apply() {
 	config.quic_qlog_len = dir.len();
 
 	let parsed = parsed(&config);
-	assert_eq!(parsed.connect.backoff.initial(), std::time::Duration::from_millis(500));
+	assert_eq!(
+		parsed.connect.backoff.initial(),
+		std::time::Duration::from_micros(500_000)
+	);
 	assert_eq!(parsed.connect.backoff.multiplier(), 3);
-	assert_eq!(parsed.connect.backoff.max(), std::time::Duration::from_millis(10_000));
+	assert_eq!(
+		parsed.connect.backoff.max(),
+		std::time::Duration::from_micros(10_000_000)
+	);
 	assert_eq!(parsed.quic.max_streams, Some(4096));
 	assert_eq!(parsed.quic.idle_timeout, std::time::Duration::from_millis(15_000));
 	assert_eq!(parsed.quic.gso, Some(false));

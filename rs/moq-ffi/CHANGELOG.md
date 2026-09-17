@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Bare-integer durations are microseconds: `max_age_us` on decoder outputs,
+  track info, and subscriptions; `MoqBackoff` is `initial_us` / `max_us` /
+  `timeout_us`. `MoqSession::publish()` / `consume()` match `set_publish` /
+  `set_consume`.
+
 - Client, server, and pending-request configuration setters now return `Result` and
   apply or fail. They error with `Busy` while connect/listen/accept owns the handle
   and `Cancelled` after `cancel()`. Server bind/TLS is captured at `listen()` and

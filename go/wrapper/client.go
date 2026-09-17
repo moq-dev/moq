@@ -67,31 +67,31 @@ func (b Backoff) ffi() ffi.MoqBackoff {
 	// Zero is the native encoding of "forever" and also Go's zero value, so the
 	// two are spelled apart here: Backoff{} keeps the documented default and
 	// forever is explicit at the call site.
-	timeoutMs := backoffMs(b.Timeout, defaultBackoffTimeout)
+	timeoutUs := backoffUs(b.Timeout, defaultBackoffTimeout)
 	if b.Timeout == RetryForever {
-		timeoutMs = 0
+		timeoutUs = 0
 	}
 
 	return ffi.MoqBackoff{
-		InitialMs:  backoffMs(b.Initial, defaultBackoffInitial),
+		InitialUs:  backoffUs(b.Initial, defaultBackoffInitial),
 		Multiplier: multiplier,
-		MaxMs:      backoffMs(b.Max, defaultBackoffMax),
-		TimeoutMs:  timeoutMs,
+		MaxUs:      backoffUs(b.Max, defaultBackoffMax),
+		TimeoutUs:  timeoutUs,
 	}
 }
 
-// backoffMs converts d to milliseconds, substituting def when it is unset or
-// negative (a negative would wrap when cast to uint64) and flooring at 1ms so a
-// sub-millisecond duration doesn't truncate to an unpaced zero.
-func backoffMs(d, def time.Duration) uint64 {
+// backoffUs converts d to microseconds, substituting def when it is unset or
+// negative (a negative would wrap when cast to uint64) and flooring at 1us so a
+// sub-microsecond duration doesn't truncate to an unpaced zero.
+func backoffUs(d, def time.Duration) uint64 {
 	if d <= 0 {
 		d = def
 	}
-	ms := d.Milliseconds()
-	if ms < 1 {
-		ms = 1
+	us := d.Microseconds()
+	if us < 1 {
+		us = 1
 	}
-	return uint64(ms)
+	return uint64(us)
 }
 
 // WithTLSVerify toggles TLS certificate verification. Verification is on by
@@ -254,8 +254,8 @@ func Dial(ctx context.Context, url string, opts ...ClientOption) (*Client, error
 
 	// The session always exposes both sides, wired from the options above or auto-created,
 	// so publishing and discovery always have somewhere to go.
-	c.publisher = c.session.Publisher()
-	c.consumer = c.session.Consumer()
+	c.publisher = c.session.Publish()
+	c.consumer = c.session.Consume()
 
 	return c, nil
 }

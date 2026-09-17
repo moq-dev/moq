@@ -31,17 +31,17 @@ class Moq internal constructor(
      *
      * Advertise it with `announce` after populating tracks. `finish()` unpublishes immediately.
      */
-    fun createBroadcast(path: String): BroadcastProducer = session.publisher().createBroadcast(path)
+    fun createBroadcast(path: String): BroadcastProducer = session.publish().createBroadcast(path)
 
     /**
      * Discover routes whose prefix starts with [prefix] as a [Flow]. The
      * subscription is acquired on collection and cancelled when collection
      * ends. Use [announced] for the raw handle.
      */
-    fun announcements(prefix: String = ""): Flow<MoqAnnouncement> = session.consumer().announcements(prefix)
+    fun announcements(prefix: String = ""): Flow<MoqAnnouncement> = session.consume().announcements(prefix)
 
     /** Raw announcement handle under [prefix]. */
-    fun announced(prefix: String = ""): MoqAnnounced = session.consumer().announced(prefix)
+    fun announced(prefix: String = ""): MoqAnnounced = session.consume().announced(prefix)
 
     /**
      * Await a route covering exactly [path], then resolve the broadcast there.
@@ -49,7 +49,7 @@ class Moq internal constructor(
      * Unlike [requestBroadcast] this waits indefinitely for a future
      * announcement. Cancel the returned handle to stop waiting.
      */
-    fun announcedBroadcast(path: String): MoqAnnouncedBroadcast = session.consumer().announcedBroadcast(path)
+    fun announcedBroadcast(path: String): MoqAnnouncedBroadcast = session.consume().announcedBroadcast(path)
 
     /**
      * Resolve the broadcast at [path] as soon as it can be served: a local
@@ -59,7 +59,7 @@ class Moq internal constructor(
      * Unlike [announcedBroadcast] this does not wait for a future announcement;
      * it throws when neither can serve the path.
      */
-    suspend fun requestBroadcast(path: String): MoqBroadcastConsumer = session.consumer().requestBroadcast(path)
+    suspend fun requestBroadcast(path: String): MoqBroadcastConsumer = session.consume().requestBroadcast(path)
 
     /**
      * The connection epoch: 1 for the connect that built this session, one more on

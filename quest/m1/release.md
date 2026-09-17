@@ -45,8 +45,7 @@ with its PR and the replacement call:
 - bindings: the Go module is `moq.dev/moq` with `context.Context` on every
   blocking call (#2957); `MoqAudioCodec` is an `opus()` object (#3671); the
   configuration setters are fallible (#3642); durations are microseconds and
-  the rate estimates are `estimated_*` ([FFI units](/quest/m1/api-ffi-units-verbs.md),
-  [Rate estimate names](/quest/m1/api-rate-estimate-names.md)); the decode format knob from
+  the rate estimates are `estimated_*` ([Rate estimate names](/quest/m1/api-rate-estimate-names.md)); the decode format knob from
   [Decode format](/quest/m2/ffi-decode-format.md).
 
 Release-notes outline, the additions worth leading with, in order of value to

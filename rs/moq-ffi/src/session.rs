@@ -23,7 +23,7 @@ impl Client {
 		let client = self.config.clone().init(self.quic.clone()).map_err(map_connect_error)?;
 
 		// Materialize both origin sides so the session can publish/subscribe and the FFI can
-		// always hand back a publisher/consumer.
+		// always hand back a publish/consume origin.
 		let (publish, subscribe) = crate::origin::resolve_pair(self.publish.as_ref(), self.consume.as_ref());
 
 		let connection = client
@@ -246,26 +246,26 @@ mod tests {
 
 /// Retry pacing for the automatic reconnect (see [`MoqClient::set_backoff`]).
 ///
-/// The delay starts at `initial_ms`, multiplies by `multiplier` after each failed
-/// attempt, and caps at `max_ms`. After `timeout_ms` of consecutive failures the
+/// The delay starts at `initial_us`, multiplies by `multiplier` after each failed
+/// attempt, and caps at `max_us`. After `timeout_us` of consecutive failures the
 /// connection gives up for good (0 retries forever); the window resets whenever a
-/// session stays up past `initial_ms`. The defaults mirror the native
+/// session stays up past `initial_us`. The defaults mirror the native
 /// [`moq_tokio::Backoff`]: 1s, x2, 5s, and a 10s window.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct MoqBackoff {
-	/// Delay before the first reconnect attempt, in milliseconds.
-	#[uniffi(default = 1000)]
-	pub initial_ms: u64,
+	/// Delay before the first reconnect attempt, in microseconds.
+	#[uniffi(default = 1000000)]
+	pub initial_us: u64,
 	/// Multiplier applied to the delay after each failure.
 	#[uniffi(default = 2)]
 	pub multiplier: u32,
-	/// Maximum delay between reconnect attempts, in milliseconds.
-	#[uniffi(default = 5000)]
-	pub max_ms: u64,
-	/// Time spent retrying before giving up, in milliseconds. 0 retries forever.
-	#[uniffi(default = 10000)]
-	pub timeout_ms: u64,
+	/// Maximum delay between reconnect attempts, in microseconds.
+	#[uniffi(default = 5000000)]
+	pub max_us: u64,
+	/// Time spent retrying before giving up, in microseconds. 0 retries forever.
+	#[uniffi(default = 10000000)]
+	pub timeout_us: u64,
 }
 
 /// Browser WebTransport client configuration.
@@ -540,10 +540,10 @@ impl MoqClient {
 	pub fn set_backoff(&self, backoff: MoqBackoff) -> Result<(), MoqError> {
 		self.configure(|state| {
 			let mut out = moq_tokio::Backoff::default();
-			out.initial = std::time::Duration::from_millis(backoff.initial_ms).into();
+			out.initial = std::time::Duration::from_micros(backoff.initial_us).into();
 			out.multiplier = backoff.multiplier;
-			out.max = std::time::Duration::from_millis(backoff.max_ms).into();
-			out.timeout = std::time::Duration::from_millis(backoff.timeout_ms).into();
+			out.max = std::time::Duration::from_micros(backoff.max_us).into();
+			out.timeout = std::time::Duration::from_micros(backoff.timeout_us).into();
 			state.config.backoff = out;
 		})
 	}
@@ -570,8 +570,8 @@ impl MoqClient {
 	/// connect/disconnect transitions, [`MoqSession::epoch`] for the reconnect count,
 	/// and [`MoqSession::closed`] for the connection giving up for good.
 	///
-	/// Both origin sides are always accessible via [`MoqSession::publisher`] and
-	/// [`MoqSession::consumer`], without the caller constructing a [`MoqOriginProducer`]
+	/// Both origin sides are always accessible via [`MoqSession::publish`] and
+	/// [`MoqSession::consume`], without the caller constructing a [`MoqOriginProducer`]
 	/// themselves. With neither [`set_publish`](Self::set_publish) nor
 	/// [`set_consume`](Self::set_consume) wired, the two sides share one origin, so a broadcast
 	/// announced on this session is also discoverable through it. Wiring either side opts out of
@@ -721,7 +721,7 @@ impl MoqSession {
 	}
 
 	fn build(inner: Inner, publish: moq_net::origin::Producer, subscribe: moq_net::origin::Producer) -> Self {
-		// Eagerly wrap the wired origin sides so each publisher()/consumer()
+		// Eagerly wrap the wired origin sides so each publish()/consume()
 		// call hands back the same Arc. `publish` is published into; `subscribe`
 		// is where the remote's broadcasts land (read via its consumer view).
 		let publisher = Arc::new(MoqOriginProducer::from_inner(publish));
@@ -842,7 +842,7 @@ impl MoqSession {
 	/// to the remote. Either the producer the caller wired via
 	/// `set_publish` / `set_consume` before connect/accept, or one
 	/// auto-created if neither was set.
-	pub fn publisher(&self) -> Arc<MoqOriginProducer> {
+	pub fn publish(&self) -> Arc<MoqOriginProducer> {
 		self.publisher.clone()
 	}
 
@@ -850,7 +850,7 @@ impl MoqSession {
 	/// announcements pushed by the remote. Either derived from the
 	/// origin the caller wired via `set_consume`, or auto-created if
 	/// neither was set.
-	pub fn consumer(&self) -> Arc<MoqOriginConsumer> {
+	pub fn consume(&self) -> Arc<MoqOriginConsumer> {
 		self.consumer.clone()
 	}
 

@@ -101,7 +101,7 @@ async def test_client_reconnects_and_resumes_announcements():
                 tls_verify=False,
                 bind="127.0.0.1:0",
                 # Fast retries so the test doesn't wait out the default 1s backoff.
-                backoff=moq.Backoff(initial_ms=50, multiplier=2, max_ms=200, timeout_ms=0),
+                backoff=moq.Backoff(initial_us=50_000, multiplier=2, max_us=200_000, timeout_us=0),
             ) as client:
                 session = client.session
                 assert session is not None

@@ -31,7 +31,7 @@
 
 _Static_assert(MOQ_VIDEO_PIXEL_FORMAT_I420 == 0, "I420 discriminant moved");
 _Static_assert(MOQ_VIDEO_PIXEL_FORMAT_RGBA == 1, "RGBA discriminant moved");
-_Static_assert(offsetof(moq_video_decoder_output, max_age_ms) == 0, "max_age_ms moved");
+_Static_assert(offsetof(moq_video_decoder_output, max_age_us) == 0, "max_age_us moved");
 _Static_assert(offsetof(moq_video_decoder_output, format) == 8, "format moved");
 _Static_assert(offsetof(moq_video_decoder_output, width) == 12, "width moved");
 _Static_assert(offsetof(moq_video_decoder_output, height) == 16, "height moved");
@@ -256,11 +256,11 @@ int main(void) {
     pthread_mutex_unlock(&c.mu);
 
     // The I420 native default, RGBA at native size, and a resized I420.
-    moq_video_decoder_output native_i420 = {10000, MOQ_VIDEO_PIXEL_FORMAT_I420, 0, 0};
+    moq_video_decoder_output native_i420 = {10000000, MOQ_VIDEO_PIXEL_FORMAT_I420, 0, 0};
     decode_once(&c, catalog, &native_i420, WIDTH, HEIGHT, WIDTH * HEIGHT * 3 / 2, producer);
-    moq_video_decoder_output native_rgba = {10000, MOQ_VIDEO_PIXEL_FORMAT_RGBA, 0, 0};
+    moq_video_decoder_output native_rgba = {10000000, MOQ_VIDEO_PIXEL_FORMAT_RGBA, 0, 0};
     decode_once(&c, catalog, &native_rgba, WIDTH, HEIGHT, WIDTH * HEIGHT * 4, producer);
-    moq_video_decoder_output small_i420 = {10000, MOQ_VIDEO_PIXEL_FORMAT_I420, 160, 120};
+    moq_video_decoder_output small_i420 = {10000000, MOQ_VIDEO_PIXEL_FORMAT_I420, 160, 120};
     decode_once(&c, catalog, &small_i420, 160, 120, 160 * 120 * 3 / 2, producer);
 
     if (moq_consume_catalog_free((uint32_t)catalog) < 0)

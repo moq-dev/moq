@@ -76,7 +76,7 @@ covered prefix for a prefix-shaped claim and the pattern text otherwise.
 Sessions reconnect with backoff when the transport drops and re-announce local
 broadcasts. `session.epoch()` counts the connections, 1 on the first, pairing
 with `session.status()` to log each reconnect; `moq.Backoff` tunes the pacing
-(`timeout_ms=0` retries forever); and `moq.connect(..., max_streams=...)`
+(`timeout_us=0` retries forever); and `moq.connect(..., max_streams=...)`
 raises the peer's inbound stream cap.
 
 Everything in the [shared feature list](/lib/#what-every-binding-can-do) is

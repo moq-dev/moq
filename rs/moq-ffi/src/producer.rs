@@ -18,10 +18,10 @@ pub struct MoqTrackInfo {
 	#[uniffi(default = 0)]
 	pub priority: u8,
 	/// Maximum age of a non-latest group before the publisher evicts it, in
-	/// milliseconds. Null uses the default. This is the publisher-side half of
-	/// [`MoqSubscription::max_age_ms`](crate::consumer::MoqSubscription::max_age_ms).
+	/// microseconds. Null uses the default. This is the publisher-side half of
+	/// [`MoqSubscription::max_age_us`](crate::consumer::MoqSubscription::max_age_us).
 	#[uniffi(default = None)]
-	pub max_age_ms: Option<u64>,
+	pub max_age_us: Option<u64>,
 	/// Per-frame timescale in ticks per second. Null uses microseconds.
 	#[uniffi(default = None)]
 	pub timescale: Option<u64>,
@@ -34,8 +34,8 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 		let mut out = moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MICRO)
 			.with_priority(info.priority);
-		if let Some(ms) = info.max_age_ms {
-			out = out.with_max_age(std::time::Duration::from_millis(ms));
+		if let Some(us) = info.max_age_us {
+			out = out.with_max_age(std::time::Duration::from_micros(us));
 		}
 		if let Some(ticks) = info.timescale {
 			let scale =
@@ -56,11 +56,11 @@ impl TryFrom<&moq_net::track::Info> for MoqTrackInfo {
 	type Error = MoqError;
 
 	fn try_from(info: &moq_net::track::Info) -> Result<Self, MoqError> {
-		let max_age_ms = u64::try_from(info.max_age.as_millis())
+		let max_age_us = u64::try_from(info.max_age.as_micros())
 			.map_err(|_| MoqError::Codec("track max_age duration overflow".into()))?;
 		Ok(Self {
 			priority: info.priority,
-			max_age_ms: Some(max_age_ms),
+			max_age_us: Some(max_age_us),
 			timescale: Some(info.timescale.as_u64()),
 		})
 	}

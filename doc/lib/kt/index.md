@@ -62,7 +62,7 @@ the pattern text otherwise.
 Sessions reconnect with backoff when the transport drops and re-announce local
 broadcasts. `moq.epoch()` counts the connections, 1 on the first, pairing with
 `MoqSession.status` to log each reconnect; the `backoff` argument tunes the
-pacing (`timeoutMs = 0` retries forever); and `maxStreams` raises the peer's
+pacing (`timeoutUs = 0` retries forever); and `maxStreams` raises the peer's
 inbound stream cap.
 
 `Server.listen(bind, tlsGenerate = ...)` accepts sessions with per-request

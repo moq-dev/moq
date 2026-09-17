@@ -62,13 +62,13 @@ public final class Client: Sendable {
     }
 
     /// Wire the origin whose local broadcasts get advertised to the remote. If
-    /// left unset, `connect` auto-creates one, reachable via `Session.publisher`.
+    /// left unset, `connect` auto-creates one, reachable via `Session.publish`.
     public func setPublish(_ origin: OriginProducer?) throws {
         try ffi.setPublish(origin: origin?.ffi)
     }
 
     /// Wire the origin used to receive the remote's announcements. If left
-    /// unset, `connect` auto-creates one, reachable via `Session.consumer`.
+    /// unset, `connect` auto-creates one, reachable via `Session.consume`.
     public func setConsume(_ origin: OriginProducer?) throws {
         try ffi.setConsume(origin: origin?.ffi)
     }
@@ -89,8 +89,8 @@ public final class Client: Sendable {
     /// Connect and wait for the session to be established. Cancellable via `cancel()`.
     ///
     /// With neither `setPublish` nor `setConsume` wired, both sides of the session share one
-    /// origin, so a broadcast announced via `Session.publisher` is also discoverable through
-    /// `Session.consumer`. Wiring either side opts out and isolates the two directions.
+    /// origin, so a broadcast announced via `Session.publish` is also discoverable through
+    /// `Session.consume`. Wiring either side opts out and isolates the two directions.
     public func connect(to url: String) async throws -> Session {
         Session(try await ffi.connect(url: url))
     }
@@ -111,14 +111,14 @@ public final class Session: Sendable {
 
     /// The publish-side origin: where local broadcasts are advertised to the
     /// remote. Either the one wired via `Client.setPublish`, or auto-created.
-    public var publisher: OriginProducer {
-        OriginProducer(ffi.publisher())
+    public var publish: OriginProducer {
+        OriginProducer(ffi.publish())
     }
 
     /// The subscribe-side origin: a read handle for the remote's announcements.
     /// Either derived from `Client.setConsume`, or auto-created.
-    public var consumer: OriginConsumer {
-        OriginConsumer(ffi.consumer())
+    public var consume: OriginConsumer {
+        OriginConsumer(ffi.consume())
     }
 
     /// Suspend until the session is over: an error when the connection gave up for

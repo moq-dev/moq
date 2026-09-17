@@ -58,11 +58,11 @@ final class Moq {
   /// Advertise it with `announce` after populating tracks. Create, `dynamic`
   /// if tracks are served on demand, populate, then announce.
   MoqBroadcastProducer createBroadcast(String path) =>
-      session.publisher().createBroadcast(path: path);
+      session.publish().createBroadcast(path: path);
 
   /// Stream announcements whose paths begin with [prefix].
   Stream<MoqAnnouncement> announcements({String prefix = ''}) async* {
-    final announced = session.consumer().announced(prefix: prefix);
+    final announced = session.consume().announced(prefix: prefix);
     try {
       while (true) {
         final announcement = await announced.next();
@@ -77,15 +77,15 @@ final class Moq {
 
   /// Return the raw announcement cursor for [prefix].
   MoqAnnounced announced({String prefix = ''}) =>
-      session.consumer().announced(prefix: prefix);
+      session.consume().announced(prefix: prefix);
 
   /// Wait for a broadcast announced at exactly [path].
   MoqAnnouncedBroadcast announcedBroadcast(String path) =>
-      session.consumer().announcedBroadcast(path: path);
+      session.consume().announcedBroadcast(path: path);
 
   /// Resolve an existing broadcast at [path].
   Future<MoqBroadcastConsumer> requestBroadcast(String path) =>
-      session.consumer().requestBroadcast(path: path);
+      session.consume().requestBroadcast(path: path);
 
   /// The connection epoch: 1 for the connect that built this session, one more
   /// on each reconnect. A server-accepted session stays at 1.

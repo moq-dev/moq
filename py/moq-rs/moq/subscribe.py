@@ -458,7 +458,7 @@ class BroadcastConsumer:
         dynamic flow, where you subscribe before the catalog exists.
         ``subscription`` tunes delivery priority, group
         range, and the max age; omit for defaults. Raise
-        :attr:`Subscription.max_age_ms` to buffer instead of skipping a
+        :attr:`Subscription.max_age_us` to buffer instead of skipping a
         stalled group.
         """
         container = track if isinstance(track, Container) else track.container
@@ -494,10 +494,10 @@ class BroadcastConsumer:
         ``await broadcast.catalog()`` followed by
         ``catalog.audio[name]``). Only Opus and AAC-LC tracks are supported;
         AAC is decode only, since nothing here encodes it.
-        Use ``output.max_age_ms`` to
+        Use ``output.max_age_us`` to
         control how aggressively stalled groups get skipped. That's
         the congestion-control knob. (Named ``_max`` to leave room for
-        a future ``min_buffer_ms`` jitter-buffer floor, which is a
+        a future ``min_buffer_us`` jitter-buffer floor, which is a
         distinct knob: this one bounds how stale a group may be, that
         one how much to hold before presenting.)
         """

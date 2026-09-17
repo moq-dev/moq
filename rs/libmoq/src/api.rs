@@ -483,10 +483,10 @@ pub struct moq_track_info {
 	/// Priority, used to break ties between subscriptions of equal subscriber priority.
 	pub priority: u8,
 
-	/// Maximum age of a non-latest group before the publisher evicts it, in milliseconds.
-	/// The publisher-side half of `moq_subscription.max_age_ms`.
-	pub max_age_ms: u64,
-	/// Whether `max_age_ms` is set. When false, the publisher's default applies.
+	/// Maximum age of a non-latest group before the publisher evicts it, in microseconds.
+	/// The publisher-side half of `moq_subscription.max_age_us`.
+	pub max_age_us: u64,
+	/// Whether `max_age_us` is set. When false, the publisher's default applies.
 	pub max_age_present: bool,
 
 	/// Per-frame timescale in ticks per second.
@@ -506,7 +506,7 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 			.with_timescale(moq_net::Timescale::MICRO)
 			.with_priority(info.priority);
 		if info.max_age_present {
-			out = out.with_max_age(std::time::Duration::from_millis(info.max_age_ms));
+			out = out.with_max_age(std::time::Duration::from_micros(info.max_age_us));
 		}
 		if info.timescale_present {
 			out = out.with_timescale(moq_net::Timescale::new(info.timescale)?);
@@ -525,11 +525,11 @@ pub struct moq_subscription {
 	/// Delivery priority. Higher values preempt lower ones under contention.
 	pub priority: u8,
 
-	/// Maximum age of a non-latest group before it is skipped, in milliseconds.
+	/// Maximum age of a non-latest group before it is skipped, in microseconds.
 	/// Zero skips immediately. Enforced by the publisher's cache and by any local buffering.
-	pub max_age_ms: u64,
+	pub max_age_us: u64,
 
-	/// The lowest group to deliver (a floor). A floor is not a request: `max_age_ms` is
+	/// The lowest group to deliver (a floor). A floor is not a request: `max_age_us` is
 	/// what asks for data, and delivery starts at the oldest group at or above the floor
 	/// within that budget (the latest group at the default budget of 0).
 	pub group_start: u64,
@@ -547,7 +547,7 @@ impl From<&moq_subscription> for moq_net::track::Subscription {
 	fn from(subscription: &moq_subscription) -> Self {
 		let mut out = moq_net::track::Subscription::default()
 			.with_priority(subscription.priority)
-			.with_max_age(std::time::Duration::from_millis(subscription.max_age_ms));
+			.with_max_age(std::time::Duration::from_micros(subscription.max_age_us));
 		if subscription.group_start_present {
 			out = out.with_start(moq_net::track::Position::group(subscription.group_start));
 		}
@@ -921,6 +921,11 @@ fn millis(duration: std::time::Duration) -> u64 {
 	duration.as_millis().min(u64::MAX as u128) as u64
 }
 
+/// A duration as the microseconds reconnect backoff fields take, saturating rather than wrapping.
+fn micros(duration: std::time::Duration) -> u64 {
+	duration.as_micros().min(u64::MAX as u128) as u64
+}
+
 /// Settings for [moq_session_connect], or NULL to dial with the defaults.
 ///
 /// Zero it (`memset`, or a `{0}` initializer) and set only what you need: a
@@ -1002,14 +1007,14 @@ pub struct moq_client_config {
 
 	/// Reconnect pacing. Each must leave a non-zero delay or retrying would
 	/// spin, which is rejected at dial.
-	pub backoff_initial_ms: u64,
+	pub backoff_initial_us: u64,
 	pub has_backoff_initial: bool,
 	pub backoff_multiplier: u32,
 	pub has_backoff_multiplier: bool,
-	pub backoff_max_ms: u64,
+	pub backoff_max_us: u64,
 	pub has_backoff_max: bool,
 	/// How long reconnection keeps trying before giving up for good.
-	pub backoff_timeout_ms: u64,
+	pub backoff_timeout_us: u64,
 	pub has_backoff_timeout: bool,
 
 	/// QUIC transport tuning, all ignored by the WebSocket fallback.
@@ -1073,13 +1078,13 @@ pub extern "C" fn moq_client_defaults() -> moq_client_config {
 		dst.websocket_delay_ms = millis(config.connect.websocket.resolved_delay());
 		dst.has_websocket_delay = true;
 
-		dst.backoff_initial_ms = millis(config.connect.backoff.initial());
+		dst.backoff_initial_us = micros(config.connect.backoff.initial());
 		dst.has_backoff_initial = true;
 		dst.backoff_multiplier = config.connect.backoff.multiplier();
 		dst.has_backoff_multiplier = true;
-		dst.backoff_max_ms = millis(config.connect.backoff.max());
+		dst.backoff_max_us = micros(config.connect.backoff.max());
 		dst.has_backoff_max = true;
-		dst.backoff_timeout_ms = millis(config.connect.backoff.timeout());
+		dst.backoff_timeout_us = micros(config.connect.backoff.timeout());
 		dst.has_backoff_timeout = true;
 
 		let quic = config.quic.resolve();
@@ -2587,7 +2592,7 @@ pub unsafe extern "C" fn moq_consume_catalog_section(
 
 /// Consume a video track from a broadcast, delivering frames in order.
 ///
-/// - `max_age_ms` controls the maximum amount of buffering allowed before skipping a GoP.
+/// - `max_age_us` controls the maximum amount of buffering allowed before skipping a GoP.
 /// - `on_frame` is called with a positive frame ID per frame, then exactly once
 ///   more with a terminal code: `0` (closed cleanly) or a negative error. After
 ///   the terminal (`<= 0`) callback, `on_frame` is never called again and
@@ -2602,14 +2607,14 @@ pub unsafe extern "C" fn moq_consume_catalog_section(
 pub unsafe extern "C" fn moq_consume_video(
 	catalog: u32,
 	index: u32,
-	max_age_ms: u64,
+	max_age_us: u64,
 	on_frame: Option<extern "C" fn(user_data: *mut c_void, frame: i32)>,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
-		let max_age = std::time::Duration::from_millis(max_age_ms);
+		let max_age = std::time::Duration::from_micros(max_age_us);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
 		State::lock().consume.video(catalog, index, max_age, on_frame)
 	})
@@ -2636,7 +2641,7 @@ pub extern "C" fn moq_consume_video_close(track: u32) -> i32 {
 /// the terminal (`<= 0`) callback, `on_frame` is never called again and
 /// `user_data` is never touched again, so release `user_data` there. The
 /// terminal callback fires even after [moq_consume_audio_close].
-/// The `max_age_ms` parameter controls how long to wait before skipping frames.
+/// The `max_age_us` parameter controls how long to wait before skipping frames.
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
@@ -2646,14 +2651,14 @@ pub extern "C" fn moq_consume_video_close(track: u32) -> i32 {
 pub unsafe extern "C" fn moq_consume_audio(
 	catalog: u32,
 	index: u32,
-	max_age_ms: u64,
+	max_age_us: u64,
 	on_frame: Option<extern "C" fn(user_data: *mut c_void, frame: i32)>,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
-		let max_age = std::time::Duration::from_millis(max_age_ms);
+		let max_age = std::time::Duration::from_micros(max_age_us);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
 		State::lock().consume.audio(catalog, index, max_age, on_frame)
 	})

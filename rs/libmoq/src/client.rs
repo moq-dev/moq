@@ -90,16 +90,16 @@ pub unsafe fn parse_client(config: Option<&moq_client_config>) -> Result<Config,
 
 	// Reconnect backoff
 	if config.has_backoff_initial {
-		out.connect.backoff.initial = std::time::Duration::from_millis(config.backoff_initial_ms).into();
+		out.connect.backoff.initial = std::time::Duration::from_micros(config.backoff_initial_us).into();
 	}
 	if config.has_backoff_multiplier {
 		out.connect.backoff.multiplier = config.backoff_multiplier;
 	}
 	if config.has_backoff_max {
-		out.connect.backoff.max = std::time::Duration::from_millis(config.backoff_max_ms).into();
+		out.connect.backoff.max = std::time::Duration::from_micros(config.backoff_max_us).into();
 	}
 	if config.has_backoff_timeout {
-		out.connect.backoff.timeout = std::time::Duration::from_millis(config.backoff_timeout_ms).into();
+		out.connect.backoff.timeout = std::time::Duration::from_micros(config.backoff_timeout_us).into();
 	}
 
 	// QUIC

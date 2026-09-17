@@ -93,14 +93,14 @@ func (r *Reservation) Update(maxBps uint64) {
 	r.inner.Update(maxBps)
 }
 
-// Publisher returns the origin used to advertise local broadcasts to the remote.
-func (s *Session) Publisher() *OriginProducer {
-	return &OriginProducer{inner: s.inner.Publisher()}
+// Publish returns the origin used to advertise local broadcasts to the remote.
+func (s *Session) Publish() *OriginProducer {
+	return &OriginProducer{inner: s.inner.Publish()}
 }
 
-// Consumer returns the origin used to receive broadcasts from the remote.
-func (s *Session) Consumer() *OriginConsumer {
-	return &OriginConsumer{inner: s.inner.Consumer()}
+// Consume returns the origin used to receive broadcasts from the remote.
+func (s *Session) Consume() *OriginConsumer {
+	return &OriginConsumer{inner: s.inner.Consume()}
 }
 
 // Shutdown closes the session gracefully.

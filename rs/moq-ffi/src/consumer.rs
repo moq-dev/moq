@@ -49,15 +49,15 @@ pub struct MoqSubscription {
 	/// Delivery priority; higher values preempt lower ones under bandwidth contention.
 	#[uniffi(default = 0)]
 	pub priority: u8,
-	/// Maximum age of a non-latest group before it is skipped, in milliseconds.
+	/// Maximum age of a non-latest group before it is skipped, in microseconds.
 	/// `0` skips immediately; a larger value tolerates that much reordering.
 	///
 	/// Enforced both by the publisher's cache (sent on the wire) and by any local
 	/// buffering, such as `subscribe_media`'s jitter buffer.
 	#[uniffi(default = 0)]
-	pub max_age_ms: u64,
+	pub max_age_us: u64,
 	/// The lowest group to deliver (a floor), or null for none. A floor is not a
-	/// request: `max_age_ms` is what asks for data, and delivery starts at the oldest
+	/// request: `max_age_us` is what asks for data, and delivery starts at the oldest
 	/// group at or above the floor within that budget (the latest group at the default
 	/// budget of 0).
 	#[uniffi(default = None)]
@@ -86,7 +86,7 @@ impl From<MoqSubscription> for moq_net::track::Subscription {
 	fn from(s: MoqSubscription) -> Self {
 		moq_net::track::Subscription::default()
 			.with_priority(s.priority)
-			.with_max_age(std::time::Duration::from_millis(s.max_age_ms))
+			.with_max_age(std::time::Duration::from_micros(s.max_age_us))
 			.with_start(s.group_start.map(moq_net::track::Position::group))
 			.with_end(s.group_end.map(moq_net::track::Position::group))
 	}
@@ -317,7 +317,7 @@ impl MoqBroadcastConsumer {
 	/// `container` is the track container from the catalog.
 	/// `subscription` tunes delivery priority, group range, and staleness; omit for defaults.
 	///
-	/// [`MoqSubscription::max_age_ms`] bounds the local jitter buffer as well as
+	/// [`MoqSubscription::max_age_us`] bounds the local jitter buffer as well as
 	/// the publisher's cache, so both ends skip a stalled group on the same budget.
 	///
 	/// `cancel` aborts this call alone; see [`MoqCancel`].

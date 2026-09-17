@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Bare-integer durations are microseconds: `max_age_us` on decoder outputs,
+  track info, subscriptions, and `moq_consume_video` / `moq_consume_audio`;
+  reconnect backoff is `backoff_initial_us` / `backoff_max_us` /
+  `backoff_timeout_us`.
+
 - `moq_publish_media` splits into `moq_publish_audio`, `moq_publish_video`, and
   `moq_publish_container`, taking `moq_audio_init`, `moq_video_init`, and `moq_container_init`.
   Each carries only the fields its kind can honor, so a label on a container no longer compiles.

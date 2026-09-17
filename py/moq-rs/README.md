@@ -138,7 +138,7 @@ client = moq.Client(
 - **`Session`**. An established connection. Holding it keeps the connection alive; it is also an `async with` context manager that shuts down on exit.
   - `await .closed()`. Wait until the session closes.
   - `.cancel(code)`, `.shutdown()`. Close with an error code, or gracefully (code 0).
-  - `.publisher() → OriginProducer`, `.consumer() → OriginConsumer`. The wired origin sides.
+  - `.publish() → OriginProducer`, `.consume() → OriginConsumer`. The wired origin sides.
   - `.stats() → ConnectionStats`. Snapshot RTT, bandwidth estimates, and byte/packet counters.
 
 ### Publishing

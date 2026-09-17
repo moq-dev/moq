@@ -138,10 +138,10 @@ pub struct moq_video_encoder_frame {
 #[allow(non_camel_case_types)]
 pub struct moq_video_decoder_output {
 	/// Upper bound on buffering before skipping a stalled group, in
-	/// milliseconds. Same congestion-control knob as
-	/// `moq_consume_video`'s `max_age_ms`. 0 = skip aggressively
+	/// microseconds. Same congestion-control knob as
+	/// `moq_consume_video`'s `max_age_us`. 0 = skip aggressively
 	/// (the moq-mux default); set to your playout buffer for a softer skip.
-	pub max_age_ms: u64,
+	pub max_age_us: u64,
 	/// `moq_video_pixel_format` discriminant. Unknown values fail
 	/// [`moq_decode_video`] rather than decoding into an assumed layout.
 	pub format: u32,
@@ -852,7 +852,7 @@ pub unsafe extern "C" fn moq_decode_video(
 
 		let mut config = moq_video::decode::Config::new();
 		config.start = moq_video::decode::Start::Latest;
-		config.max_age = Duration::from_millis(raw.max_age_ms);
+		config.max_age = Duration::from_micros(raw.max_age_us);
 		// A backend with a hardware scaler (NVDEC) honors this for free; the
 		// delivery loop still enforces it, since other backends ignore it.
 		config.resize = size;

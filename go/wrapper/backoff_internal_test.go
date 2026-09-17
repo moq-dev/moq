@@ -12,7 +12,7 @@ import (
 // to the reconnect loop. Passing it through unresolved turns the most natural
 // literal a caller writes, Backoff{}, into an unthrottled dial loop.
 func TestBackoffFfiResolvesUnsetFields(t *testing.T) {
-	defaults := ffi.MoqBackoff{InitialMs: 1000, Multiplier: 2, MaxMs: 5000, TimeoutMs: 10000}
+	defaults := ffi.MoqBackoff{InitialUs: 1_000_000, Multiplier: 2, MaxUs: 5_000_000, TimeoutUs: 10_000_000}
 
 	cases := []struct {
 		name string
@@ -27,27 +27,27 @@ func TestBackoffFfiResolvesUnsetFields(t *testing.T) {
 		{
 			name: "a partial override keeps the defaults for everything else",
 			in:   Backoff{Max: time.Second},
-			want: ffi.MoqBackoff{InitialMs: 1000, Multiplier: 2, MaxMs: 1000, TimeoutMs: 10000},
+			want: ffi.MoqBackoff{InitialUs: 1_000_000, Multiplier: 2, MaxUs: 1_000_000, TimeoutUs: 10_000_000},
 		},
 		{
 			name: "RetryForever is the only way to reach the native zero timeout",
 			in:   Backoff{Timeout: RetryForever},
-			want: ffi.MoqBackoff{InitialMs: 1000, Multiplier: 2, MaxMs: 5000, TimeoutMs: 0},
+			want: ffi.MoqBackoff{InitialUs: 1_000_000, Multiplier: 2, MaxUs: 5_000_000, TimeoutUs: 0},
 		},
 		{
-			name: "negatives fall back instead of wrapping to ~1.8e19 ms",
+			name: "negatives fall back instead of wrapping to ~1.8e19 us",
 			in:   Backoff{Initial: -time.Second, Max: -time.Hour},
 			want: defaults,
 		},
 		{
-			name: "a sub-millisecond delay floors at 1ms instead of truncating to zero",
+			name: "a sub-microsecond delay floors at 1us instead of truncating to zero",
 			in:   Backoff{Initial: time.Nanosecond},
-			want: ffi.MoqBackoff{InitialMs: 1, Multiplier: 2, MaxMs: 5000, TimeoutMs: 10000},
+			want: ffi.MoqBackoff{InitialUs: 1, Multiplier: 2, MaxUs: 5_000_000, TimeoutUs: 10_000_000},
 		},
 		{
 			name: "explicit values pass through",
 			in:   Backoff{Initial: 500 * time.Millisecond, Multiplier: 3, Max: 10 * time.Second, Timeout: time.Minute},
-			want: ffi.MoqBackoff{InitialMs: 500, Multiplier: 3, MaxMs: 10000, TimeoutMs: 60000},
+			want: ffi.MoqBackoff{InitialUs: 500_000, Multiplier: 3, MaxUs: 10_000_000, TimeoutUs: 60_000_000},
 		},
 	}
 

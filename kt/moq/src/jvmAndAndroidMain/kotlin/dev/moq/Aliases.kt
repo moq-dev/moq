@@ -11,7 +11,7 @@ package dev.moq
 // listen facade (see Server.kt), which exposes the raw handle as `server`.
 /** A MoQ client: configure the TLS/bind knobs, then connect to a relay. */
 typealias Client = uniffi.moq.MoqClient
-/** A live pub/sub session with a relay, exposing a publisher and a consumer. */
+/** A live pub/sub session with a relay, exposing publish and consume origins. */
 typealias Session = uniffi.moq.MoqSession
 /** An incoming session awaiting a decision: accept it to handshake, or reject it. */
 typealias Request = uniffi.moq.MoqRequest

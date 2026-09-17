@@ -16,7 +16,7 @@ import sys
 import moq
 
 READ_CHUNK = 64 * 1024
-MAX_AGE_MS = 1_000  # subscribe_media congestion-control / lookahead window
+MAX_AGE_US = 1_000_000  # subscribe_media congestion-control / lookahead window
 
 
 async def publish(url: str, broadcast: str) -> None:
@@ -63,7 +63,7 @@ async def subscribe(url: str, broadcast: str, timeout: float) -> None:
         video = catalog.video[track_name]
 
         media = await consumer.subscribe_media(
-            track_name, video.container, moq.Subscription(max_age_ms=MAX_AGE_MS)
+            track_name, video.container, moq.Subscription(max_age_us=MAX_AGE_US)
         )
 
         total = 0

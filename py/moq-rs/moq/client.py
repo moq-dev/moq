@@ -108,8 +108,8 @@ class Client:
 
         # The session always exposes both sides, wired from the origins above or
         # auto-created, so publishing and discovery always have somewhere to go.
-        self._publisher = self._session.publisher()
-        self._consumer = self._session.consumer()
+        self._publisher = self._session.publish()
+        self._consumer = self._session.consume()
 
         return self
 
