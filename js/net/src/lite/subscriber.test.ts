@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { error, reason } from "../error.ts";
-import { HopSchema, UNKNOWN_HOP } from "../hop.ts";
+import { HopSchema, isAnonymous, Route, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import { Writer } from "../stream.ts";
 import * as Time from "../time.ts";
@@ -127,6 +127,54 @@ const PUBLISHER_A = HopSchema.parse(7n);
 const PUBLISHER_B = HopSchema.parse(8n);
 const PUBLISHER_C = HopSchema.parse(9n);
 const PEER = HopSchema.parse(2n);
+
+test("a local empty hop chain is not anonymous", () => {
+	expect(isAnonymous(Route.default)).toBe(false);
+	expect(isAnonymous({ hops: [UNKNOWN_HOP], cost: Route.default.cost })).toBe(true);
+});
+
+test("a received empty hop list is filled with hop 0 and marked anonymous", async () => {
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
+	const announced = subscriber.announced();
+	await settle();
+
+	await send((w) => new AnnounceOk(UNKNOWN_HOP, 0).encode(w, Version.DRAFT_06));
+	await send((w) =>
+		encodeAnnounceBroadcast(w, { status: "active", suffix: Path.from("room"), hops: [] }, Version.DRAFT_06),
+	);
+	expect(await announced.next()).toMatchObject({
+		pattern: Path.Pattern.subtree(Path.from("room")),
+		active: true,
+		anonymous: true,
+		route: { hops: [UNKNOWN_HOP] },
+	});
+
+	announced.close();
+	subscriber.close();
+});
+
+test("a received chain with hop 0 is marked anonymous", async () => {
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
+	const announced = subscriber.announced();
+	await settle();
+
+	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
+	await send((w) =>
+		encodeAnnounceBroadcast(
+			w,
+			{ status: "active", suffix: Path.from("room"), hops: [UNKNOWN_HOP, PUBLISHER_A] },
+			Version.DRAFT_06,
+		),
+	);
+	expect(await announced.next()).toMatchObject({
+		pattern: Path.Pattern.subtree(Path.from("room")),
+		active: true,
+		anonymous: true,
+	});
+
+	announced.close();
+	subscriber.close();
+});
 
 test("a restart from the same publisher is a route change, not a republish", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);

@@ -46,8 +46,11 @@ enumerate broadcasts by listing routes, but a route can also cover a subtree
 (`foo/**`) or a richer path pattern (`live/*`, `**/a`), letting a server
 advertise capability without enumerating inventory. Each route carries the
 chain of relay identities it passed through, which is how forwarding loops are
-caught, and a cost, which is how a subscriber picks the cheapest of several
-routes to the same broadcast. Wildcard advertisements are forwarded and
+caught, and a cost, which is how a subscriber picks among several routes to
+the same broadcast. A hop of 0 is the anonymous mark and travels the chain
+unchanged. A route that passed through an anonymous hop at any depth ranks
+below every fully identified route, whatever the costs say; among anonymous
+routes, cost keeps ordering. Wildcard advertisements are forwarded and
 authorized; resolving one into a subscription is not implemented yet.
 
 ## Path patterns

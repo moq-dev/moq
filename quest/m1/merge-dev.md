@@ -29,8 +29,7 @@ hit, so the merge PR re-checks each on the combined tree:
   (#3531), bounded `moq_json::window` timeline (#3240), and duration marker
   (#3575) keep their regressions; main's draft-21 (#3574) is in every
   per-version list, including the stream and request registries.
-- The hop-0 ban is abandoned (#3623); anonymous routes rank last instead
-  ([Anonymous rank](/quest/m1/anonymous-route-rank.md)).
+- The hop-0 ban is abandoned (#3623); anonymous routes rank last instead.
 - Auto-merged files hide breakage: `just check` and `just test` run before
   the merge commit, not after.
 

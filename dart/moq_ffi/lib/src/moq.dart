@@ -1514,7 +1514,13 @@ class MoqRoute {
   final List<int> hops;
   final int cost;
   final int? cold;
-  MoqRoute({this.hops = const [], this.cost = 0, this.cold = null});
+  final bool anonymous;
+  MoqRoute({
+    this.hops = const [],
+    this.cost = 0,
+    this.cold = null,
+    this.anonymous = false,
+  });
 }
 
 class FfiConverterMoqRoute {
@@ -1539,8 +1545,13 @@ class FfiConverterMoqRoute {
     );
     final cold = cold_lifted.value;
     new_offset += cold_lifted.bytesRead;
+    final anonymous_lifted = FfiConverterBool.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final anonymous = anonymous_lifted.value;
+    new_offset += anonymous_lifted.bytesRead;
     return LiftRetVal(
-      MoqRoute(hops: hops, cost: cost, cold: cold),
+      MoqRoute(hops: hops, cost: cost, cold: cold, anonymous: anonymous),
       new_offset - buf.offsetInBytes,
     );
   }
@@ -1550,6 +1561,7 @@ class FfiConverterMoqRoute {
         FfiConverterSequenceUInt64.allocationSize(value.hops) +
         FfiConverterUInt64.allocationSize(value.cost) +
         FfiConverterOptionalUInt64.allocationSize(value.cold) +
+        FfiConverterBool.allocationSize(value.anonymous) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -1570,6 +1582,10 @@ class FfiConverterMoqRoute {
       value.cold,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterBool.write(
+      value.anonymous,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     return new_offset - buf.offsetInBytes;
   }
 
@@ -1577,6 +1593,7 @@ class FfiConverterMoqRoute {
     return FfiConverterSequenceUInt64.allocationSize(value.hops) +
         FfiConverterUInt64.allocationSize(value.cost) +
         FfiConverterOptionalUInt64.allocationSize(value.cold) +
+        FfiConverterBool.allocationSize(value.anonymous) +
         0;
   }
 }

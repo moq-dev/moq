@@ -275,9 +275,16 @@ fn route_cold_cost_conversions_are_lossless() {
 		hops: vec![],
 		cost: 5,
 		cold: None,
+		anonymous: false,
 	})
 	.unwrap();
 	assert_eq!(seeded.cost, moq_net::origin::Cost::from((5u64, 5u64)));
+
+	let anonymous = MoqRoute::from(
+		moq_net::origin::Route::default().with_hops(moq_net::Hops::try_from(vec![moq_net::Hop::UNKNOWN]).unwrap()),
+	);
+	assert!(anonymous.anonymous);
+	assert_eq!(anonymous.hops, vec![0]);
 }
 
 #[tokio::test]
@@ -290,6 +297,7 @@ async fn announced_route_keeps_cold_cost_on_reannounce() {
 			hops: vec![],
 			cost: 0,
 			cold: Some(9),
+			anonymous: false,
 		})
 		.unwrap();
 

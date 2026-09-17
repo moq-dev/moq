@@ -34,5 +34,4 @@ neither quest touches the draft again except the changelog.
 
 ## Related
 
-- [Anonymous rank](/quest/m1/anonymous-route-rank.md) - edits the same draft's identity sections
 - [Warm advertise](/quest/m2/pop-skipping/warm-advertise.md) - the repricing this update path carries

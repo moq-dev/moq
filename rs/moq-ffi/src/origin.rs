@@ -23,7 +23,8 @@ pub struct MoqOriginConfig {
 /// whatever is requested beneath it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
 pub struct MoqRoute {
-	/// Hop ids of the relay hops the route traversed, oldest first.
+	/// Hop ids of the relay hops the route traversed, oldest first. 0 is the
+	/// anonymous mark and is legal on a received chain.
 	#[uniffi(default = [])]
 	pub hops: Vec<u64>,
 	/// Preference among routes covering the same prefix: lower wins. A publisher
@@ -36,6 +37,10 @@ pub struct MoqRoute {
 	/// same as `cost`, which is right for a publisher seeding a production cost.
 	#[uniffi(default = None)]
 	pub cold: Option<u64>,
+	/// Whether the chain holds a 0 anywhere. An anonymous route ranks below every
+	/// fully identified one, whatever the costs say.
+	#[uniffi(default = false)]
+	pub anonymous: bool,
 }
 
 impl From<moq_net::origin::Route> for MoqRoute {
@@ -44,6 +49,7 @@ impl From<moq_net::origin::Route> for MoqRoute {
 			hops: route.hops.iter().map(|origin| origin.id()).collect(),
 			cost: route.cost.warm,
 			cold: Some(route.cost.cold),
+			anonymous: route.is_anonymous(),
 		}
 	}
 }
@@ -55,7 +61,11 @@ impl TryFrom<MoqRoute> for moq_net::origin::Route {
 		let cold = route.cold.unwrap_or(route.cost);
 		let mut out = moq_net::origin::Route::default().with_cost((route.cost, cold));
 		for id in route.hops {
-			let origin = moq_net::Hop::new(id).map_err(|e| MoqError::InvalidRoute(e.to_string()))?;
+			let origin = if id == 0 {
+				moq_net::Hop::UNKNOWN
+			} else {
+				moq_net::Hop::new(id).map_err(|e| MoqError::InvalidRoute(e.to_string()))?
+			};
 			out = out
 				.with_hop(origin)
 				.map_err(|e| MoqError::InvalidRoute(e.to_string()))?;

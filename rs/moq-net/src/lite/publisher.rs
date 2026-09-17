@@ -3155,11 +3155,13 @@ mod tests {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 
 		let mut echoed_hops = Hops::new();
-		echoed_hops.push(assigned).unwrap();
+		echoed_hops.push(crate::Hop::UNKNOWN).unwrap();
 		let _echoed = origin
 			.dynamic(
 				crate::Pattern::subtree("echoed").unwrap(),
-				crate::origin::Route::default().with_hops(echoed_hops),
+				crate::origin::Route::default()
+					.with_hops(echoed_hops)
+					.with_via(assigned),
 			)
 			.unwrap();
 
@@ -3211,9 +3213,14 @@ mod tests {
 		let origin = crate::origin::Config::new(self_origin).produce();
 
 		let mut tainted_hops = Hops::new();
-		tainted_hops.push(assigned).unwrap();
+		tainted_hops.push(crate::Hop::UNKNOWN).unwrap();
 		let _tainted = origin
-			.announce("echoed", crate::origin::Route::default().with_hops(tainted_hops))
+			.announce(
+				"echoed",
+				crate::origin::Route::default()
+					.with_hops(tainted_hops)
+					.with_via(assigned),
+			)
 			.unwrap();
 
 		let mut clean_hops = Hops::new();

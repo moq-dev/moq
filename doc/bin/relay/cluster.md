@@ -48,10 +48,13 @@ route: each hop appends its identity, adds the link price, and passes the
 claim on. An advertisement must be contained by one of the publisher's granted
 prefixes (`grant/**`); an over-wide pattern is refused rather than clamped.
 
-Routing prefers the most specific pattern, then the lowest cost, then the
-shortest hop list, breaking any remaining tie toward the newest announcement
-so a reconnecting publisher isn't outranked by the session it replaced.
-Resolving a non-prefix pattern into a subscription is not implemented yet.
+Routing prefers the most specific pattern, then a fully identified hop list
+over one that holds a 0 (an anonymous hop) at any depth, then the lowest cost,
+then the shortest hop list, breaking any remaining tie toward the newest
+announcement so a reconnecting publisher isn't outranked by the session it
+replaced. An assigned identity for an anonymous peer is local selection state
+and is never written into the hop list. Resolving a non-prefix pattern into a
+subscription is not implemented yet.
 
 ```toml
 [cluster]

@@ -30,7 +30,7 @@ use crate::{
 ///
 /// Local hops are built with [`Hop::new`] or [`Hop::random`], both of which guarantee a
 /// non-zero id so loop detection can work. Remote peers may still send `0`; it is legal
-/// on the wire but cannot be used for loop detection.
+/// on the wire, names nobody, and marks the chain anonymous for route selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Hop {
 	/// 62-bit identifier. Encoded as a QUIC varint on the wire.
@@ -38,15 +38,19 @@ pub struct Hop {
 }
 
 impl Hop {
-	/// Placeholder for hop entries whose actual id is not on the wire (Lite03).
-	/// Also used for remote peers that choose the legal but loop-blind id 0.
-	pub(crate) const UNKNOWN: Self = Self { id: 0 };
+	/// The reserved id 0: no identity.
+	///
+	/// It stands in for an endpoint that never declared one, and for Lite03 hop-count
+	/// placeholders. Any number of endpoints can be 0, so it identifies nothing: it is
+	/// never a loop, never a publisher two chains have in common, and a chain that
+	/// holds one anywhere is anonymous for route selection.
+	pub const UNKNOWN: Self = Self { id: 0 };
 
 	/// Build a hop from a stable id.
 	///
 	/// The id must be non-zero and fit in the 62-bit QUIC varint range. Wire
-	/// decode accepts remote id 0, but a local hop should not use it because
-	/// downstream peers cannot exclude it for loop detection.
+	/// decode accepts remote id 0 ([`Self::UNKNOWN`]), but a local hop should
+	/// not use it because it cannot be excluded for loop detection.
 	pub fn new(id: u64) -> Result<Self, InvalidHop> {
 		if id == 0 || id >= 1u64 << 62 {
 			return Err(InvalidHop::Range);
@@ -488,18 +492,36 @@ impl From<(u64, u64)> for Cost {
 /// that a publisher announces each broadcast's exact path, so subscribers can
 /// enumerate broadcasts; a service instead announces one short prefix and
 /// answers whatever is requested beneath it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Route {
 	/// The chain of origins the route has traversed, oldest first. Each relay
 	/// appends its own [`crate::Hop`] when forwarding; used for loop detection
-	/// and as the selection tie-break.
+	/// and as the selection tie-break. A 0 entry is the anonymous mark and
+	/// travels unchanged; see [`Self::is_anonymous`].
 	pub hops: Hops,
 
-	/// What pulling content via this route costs, accumulated per link: lower wins,
-	/// with ties broken by hop length, then a deterministic hash, and finally the
-	/// most recently announced route. See [`Cost`].
+	/// What pulling content via this route costs, accumulated per link: lower wins
+	/// among routes of the same anonymity, with ties broken by hop length, then a
+	/// deterministic hash, and finally the most recently announced route. See [`Cost`].
 	pub cost: Cost,
+
+	/// The announcing session's declared or assigned identity.
+	///
+	/// Local selection state: split-horizon matches this as well as the chain, so a
+	/// route is never advertised back to the session it came from even when that
+	/// session withheld an identity (hop 0). Never forwarded.
+	pub(crate) via: Hop,
+}
+
+impl Default for Route {
+	fn default() -> Self {
+		Self {
+			hops: Hops::new(),
+			cost: Cost::default(),
+			via: Hop::UNKNOWN,
+		}
+	}
 }
 
 impl Route {
@@ -518,13 +540,33 @@ impl Route {
 		self
 	}
 
-	/// Set the cost: lower wins among routes covering the same prefix.
+	/// Set the cost: lower wins among routes covering the same prefix and anonymity.
 	///
 	/// A bare `u64` prices the route undiscounted (both halves of [`Cost`] alike),
 	/// which is what a publisher seeding its production cost means.
 	pub fn with_cost(mut self, cost: impl Into<Cost>) -> Self {
 		self.cost = cost.into();
 		self
+	}
+
+	/// The announcing session's declared or assigned identity, for split-horizon.
+	///
+	/// Not part of the advertised route: an assigned identity is private selection
+	/// state and must not be forwarded.
+	pub(crate) fn with_via(mut self, via: Hop) -> Self {
+		self.via = via;
+		self
+	}
+
+	/// Whether this route passed through an anonymous hop.
+	///
+	/// True when the chain holds a 0 anywhere, including Lite03 hop-count
+	/// placeholders. An anonymous route ranks below every fully identified one,
+	/// whatever the costs say. An empty chain is a local announcement, not the
+	/// anonymous mark; ingress fills a received empty list with 0 before it
+	/// enters the table.
+	pub fn is_anonymous(&self) -> bool {
+		self.hops.iter().any(|hop| *hop == Hop::UNKNOWN)
 	}
 }
 
@@ -576,13 +618,15 @@ fn fnv_key(name: &str, origins: impl IntoIterator<Item = Hop>) -> u64 {
 	hash
 }
 
-/// Ordering key for a route entry covering one prefix. Lower wins: the cheapest
+/// Ordering key for a route entry covering one prefix. Lower wins: an identified
+/// chain (no 0) outranks an anonymous one regardless of cost, then the cheapest
 /// cost, then the shortest hop chain, then a deterministic hash of the prefix and
 /// chain so every node converges on the same winner, and finally the newest
 /// announcement, so a reconnect under an otherwise identical route wins the
 /// moment it lands instead of after the transport retires the old session.
-fn route_order(pattern: &Pattern, entry: &RouteEntry) -> (Cost, usize, u64, Reverse<u64>) {
+fn route_order(pattern: &Pattern, entry: &RouteEntry) -> (bool, Cost, usize, u64, Reverse<u64>) {
 	(
+		entry.is_anonymous(),
 		entry.cost,
 		entry.hops.len(),
 		fnv_key(pattern.as_str(), entry.hops.iter().copied()),
@@ -678,6 +722,7 @@ impl OriginConsumerState {
 			route: Route {
 				hops: meta.0,
 				cost: meta.1,
+				via: Hop::UNKNOWN,
 			},
 			active,
 		})
@@ -690,11 +735,32 @@ struct RouteEntry {
 	pattern: Pattern,
 	hops: Hops,
 	cost: Cost,
+	/// The announcing session's declared or assigned identity. Split-horizon
+	/// matches this as well as [`Self::hops`], so an anonymous hop 0 still
+	/// cannot echo back to the session it came from.
+	via: Hop,
 	/// The queue requests under this route are served from, when the announcer
 	/// serves content on demand (a [`Dynamic`]). `None` for an advertise-only
 	/// announcement (a broadcast's exact path, or [`Producer::announce`]), whose
 	/// covered paths resolve only through the tree.
 	server: Option<kio::Shared<ServeState>>,
+}
+
+impl RouteEntry {
+	fn is_anonymous(&self) -> bool {
+		self.hops.iter().any(|hop| *hop == Hop::UNKNOWN)
+	}
+
+	/// Whether this entry may be observed or served to a requester excluding `peer`.
+	///
+	/// A non-zero peer is hidden when it is the announcing session (`via`) or
+	/// appears in the chain. Hop 0 identifies nobody, so it is never excluded.
+	fn visible_to(&self, exclude: Option<Hop>) -> bool {
+		match exclude {
+			Some(peer) if peer != Hop::UNKNOWN => self.via != peer && !self.hops.contains(&peer),
+			_ => true,
+		}
+	}
 }
 
 /// A served route's request queue: what materializes a requested path on demand.
@@ -756,7 +822,8 @@ struct TableCursor {
 	/// The absolute prefixes this cursor is scoped to (its token / scope). A route
 	/// is visible where it intersects one of these, clamped to the intersection.
 	allowed: Vec<PathOwned>,
-	/// Skip routes whose hop chain contains this peer (control-plane split horizon).
+	/// Skip routes whose hop chain or announcing session (`via`) is this peer
+	/// (control-plane split horizon).
 	exclude: Option<Hop>,
 	/// The delivery buffer, drained by the cursor's `poll_next`.
 	state: kio::Producer<OriginConsumerState>,
@@ -788,10 +855,7 @@ impl TableCursor {
 
 	/// Whether this cursor may observe `entry` at all (split horizon).
 	fn visible(&self, entry: &RouteEntry) -> bool {
-		match self.exclude {
-			Some(peer) if peer != Hop::UNKNOWN => !entry.hops.contains(&peer),
-			_ => true,
-		}
+		entry.visible_to(self.exclude)
 	}
 }
 
@@ -1512,6 +1576,7 @@ impl Announcing {
 			"announce called with a looping hop chain",
 		);
 
+		let via = route.via;
 		let meta: RouteMeta = (route.hops, route.cost);
 
 		let mut shared = self.shared.lock();
@@ -1529,6 +1594,7 @@ impl Announcing {
 				pattern: pattern.clone(),
 				hops: meta.0.clone(),
 				cost: meta.1,
+				via,
 				server: server.clone(),
 			});
 			shared.sync_route(pattern);
@@ -1612,6 +1678,7 @@ impl AnnounceProducer {
 			};
 			entry.hops = route.hops.clone();
 			entry.cost = route.cost;
+			entry.via = route.via;
 			let pattern = entry.pattern.clone();
 			shared.generation += 1;
 			shared.sync_route(&pattern);
@@ -3043,10 +3110,7 @@ impl OriginState {
 				Some(prefix) => path.has_prefix(Path::new(prefix)),
 				None => false,
 			})
-			.filter(|entry| match exclude {
-				Some(peer) if peer != Hop::UNKNOWN => !entry.hops.contains(&peer),
-				_ => true,
-			})
+			.filter(|entry| entry.visible_to(exclude))
 			.filter(|entry| match publisher {
 				Some(first) => entry.hops.iter().next() == Some(&first),
 				None => true,
@@ -3459,9 +3523,10 @@ pub struct Consumer {
 	// publisher/egress side). Empty (no-op) unless a session tagged this handle.
 	stats: stats::Session,
 
-	// Split horizon: routes whose hop chain contains this peer are invisible to
-	// `announced` and skipped by `request_broadcast`, so a peer is never served
-	// (or advertised) its own content back. `None` (the default) filters nothing.
+	// Split horizon: routes whose hop chain or announcing session (`via`) is this
+	// peer are invisible to `announced` and skipped by `request_broadcast`, so a
+	// peer is never served (or advertised) its own content back. `None` (the
+	// default) filters nothing.
 	exclude: Option<Hop>,
 
 	// The origin config remote fronts inherit (identity, cache pool, retention),
@@ -3502,9 +3567,11 @@ impl Consumer {
 	}
 
 	/// A clone that never serves the given peer its own data: routes whose hop
-	/// chain contains `peer` are invisible and never resolved from, matching what
-	/// the announce loop advertises to them. Sessions apply this once they learn
-	/// the peer's origin id.
+	/// chain contains `peer`, or whose announcing session is `peer`, are invisible
+	/// and never resolved from, matching what the announce loop advertises to them.
+	/// Sessions apply this once they learn the peer's origin id. Hop 0 identifies
+	/// nobody, so the announcing session's assigned identity is what keeps an
+	/// anonymous route from echoing back.
 	pub(crate) fn excluding(mut self, peer: Hop) -> Self {
 		self.exclude = Some(peer);
 		self
@@ -4095,8 +4162,8 @@ mod tests {
 
 	fn hops(ids: &[u64]) -> Hops {
 		let mut list = Hops::new();
-		for id in ids {
-			list.push(origin(*id)).unwrap();
+		for &id in ids {
+			list.push(if id == 0 { Hop::UNKNOWN } else { origin(id) }).unwrap();
 		}
 		list
 	}
@@ -4383,6 +4450,109 @@ mod tests {
 
 		let mut visible = producer.consume().excluding(origin(8)).announced();
 		visible.assert_next_active("room");
+	}
+
+	#[tokio::test]
+	async fn exclude_matches_via_when_the_chain_is_anonymous() {
+		let producer = origin(1).produce();
+		let assigned = origin(777);
+		let _echoed = producer
+			.announce("echoed", Route::default().with_hops(hops(&[0])).with_via(assigned))
+			.unwrap();
+		let _local = producer
+			.announce("local", Route::default().with_hops(hops(&[10])))
+			.unwrap();
+
+		let mut hidden = producer.consume().excluding(assigned).announced();
+		hidden.assert_next_active("local");
+		hidden.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn anonymous_route_loses_to_identified_at_any_cost() {
+		let producer = origin(1).produce();
+		let mut announced = producer.consume().announced();
+
+		let _anonymous = producer
+			.announce("room", Route::default().with_hops(hops(&[0])).with_cost(1))
+			.unwrap();
+		let route = announced.assert_next_active("room");
+		assert!(route.is_anonymous());
+		assert_eq!(route.cost, Cost::new(1));
+
+		let _identified = producer
+			.announce("room", Route::default().with_hops(hops(&[10])).with_cost(5))
+			.unwrap();
+		let route = announced.assert_next_active("room");
+		assert!(!route.is_anonymous());
+		assert_eq!(route.cost, Cost::new(5));
+	}
+
+	#[tokio::test]
+	async fn anonymous_routes_order_by_cost() {
+		let producer = origin(1).produce();
+		let mut announced = producer.consume().announced();
+
+		let expensive = producer
+			.announce("room", Route::default().with_hops(hops(&[0])).with_cost(5))
+			.unwrap();
+		let route = announced.assert_next_active("room");
+		assert_eq!(route.cost, Cost::new(5));
+
+		let _cheap = producer
+			.announce("room", Route::default().with_hops(hops(&[0, 7])).with_cost(1))
+			.unwrap();
+		let route = announced.assert_next_active("room");
+		assert!(route.is_anonymous());
+		assert_eq!(route.cost, Cost::new(1));
+
+		drop(expensive);
+		announced.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn anonymous_chain_from_identified_peer_still_ranks_last() {
+		let producer = origin(1).produce();
+		let mut announced = producer.consume().announced();
+
+		let _anonymous = producer
+			.announce(
+				"room",
+				Route::default()
+					.with_hops(hops(&[0, 7]))
+					.with_cost(1)
+					.with_via(origin(7)),
+			)
+			.unwrap();
+		announced.assert_next_active("room");
+
+		let _identified = producer
+			.announce("room", Route::default().with_hops(hops(&[10, 20])).with_cost(5))
+			.unwrap();
+		let route = announced.assert_next_active("room");
+		assert!(!route.is_anonymous());
+		assert_eq!(route.cost, Cost::new(5));
+	}
+
+	#[tokio::test]
+	async fn request_prefers_identified_over_cheaper_anonymous() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+
+		let anonymous = producer
+			.dynamic(subtree("room"), Route::default().with_hops(hops(&[0])).with_cost(1))
+			.unwrap();
+		let identified = producer
+			.dynamic(subtree("room"), Route::default().with_hops(hops(&[10])).with_cost(5))
+			.unwrap();
+
+		let _pending = consumer.request_broadcast("room/alice");
+		let request = queued(&identified).await;
+		assert_eq!(request.path().as_str(), "room/alice");
+		assert!(
+			anonymous.poll_requested_broadcast(&kio::Waiter::noop()).is_pending(),
+			"the cheaper anonymous route must not serve"
+		);
 	}
 
 	#[tokio::test]

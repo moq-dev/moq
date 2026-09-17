@@ -1120,9 +1120,14 @@ mod tests {
 		let assigned = request.assigned_hop;
 
 		let mut echoed_hops = crate::Hops::new();
-		echoed_hops.push(assigned).unwrap();
+		echoed_hops.push(crate::Hop::UNKNOWN).unwrap();
 		let _echoed = origin
-			.announce("echoed-route", crate::origin::Route::default().with_hops(echoed_hops))
+			.announce(
+				"echoed-route",
+				crate::origin::Route::default()
+					.with_hops(echoed_hops)
+					.with_via(assigned),
+			)
 			.unwrap();
 
 		let mut local_hops = crate::Hops::new();

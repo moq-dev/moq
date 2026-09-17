@@ -210,8 +210,8 @@ impl Peer {
 	/// The identity the peer declared, or `None` when it declared none.
 	///
 	/// Declaring the reserved 0 turns the extension on while withholding an identity,
-	/// which reads here exactly like declaring nothing at all. The receiver assigns one
-	/// instead, so there is no third state for callers to get wrong.
+	/// which reads here exactly like declaring nothing at all. The receiver may assign
+	/// one as local selection state (`Route.via`); it is never written into HOP_PATH.
 	pub fn identity(&self) -> Option<Hop> {
 		self.hop.filter(|hop| *hop != Hop::UNKNOWN)
 	}

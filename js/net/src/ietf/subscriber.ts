@@ -3,6 +3,7 @@ import * as broadcast from "../broadcast.ts";
 import { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation, reason } from "../error.ts";
 import * as netGroup from "../group.ts";
+import { UNKNOWN_HOP } from "../hop.ts";
 import { scopePrefix } from "../internal.ts";
 import * as Path from "../path.ts";
 import type { Reader, Stream } from "../stream.ts";
@@ -103,7 +104,7 @@ export class Subscriber {
 	// two messages about one source, which the MoQ Solicit draft requires us to tolerate.
 	// Counting them is what keeps the second from duplicating the announce and the first
 	// to end from retracting what the other still holds.
-	#announced = new Map<Path.Valid, number>();
+	#announced = new Map<Path.Valid, { count: number; anonymous: boolean }>();
 
 	// Any consumers that want each new announcement, keyed by the wire interest
 	// prefix their stream filters on.
@@ -139,6 +140,11 @@ export class Subscriber {
 		return advert !== undefined && this.#cluster !== undefined && Cluster.loops(advert, this.#cluster.self);
 	}
 
+	/** Whether the advertisement passed through an anonymous hop, or carried no path. */
+	#anonymous(advert: Cluster.Advert | undefined): boolean {
+		return advert === undefined || advert.hops.includes(UNKNOWN_HOP);
+	}
+
 	/**
 	 * Gets an announced reader for `scope`, a prefix-shaped pattern (`foo/**`, or `**`
 	 * for everything). Patterns are relative to the session, not the scope.
@@ -151,9 +157,9 @@ export class Subscriber {
 		// The wire speaks announce interest by prefix.
 		const prefix = scopePrefix(scope);
 		const announced = new announce.Producer();
-		for (const active of this.#announced.keys()) {
+		for (const [active, info] of this.#announced) {
 			if (!Path.hasPrefix(prefix, active)) continue;
-			announced.append({ pattern: Path.Pattern.subtree(active), active: true });
+			announced.append({ pattern: Path.Pattern.subtree(active), active: true, anonymous: info.anonymous });
 		}
 		this.#announcedConsumers.set(announced, prefix);
 
@@ -169,15 +175,18 @@ export class Subscriber {
 	 * Record one more advertisement for a path, telling consumers only when it is the
 	 * first. A second one is the same namespace said twice, not news.
 	 */
-	#attachAnnounce(path: Path.Valid) {
-		const count = this.#announced.get(path) ?? 0;
-		this.#announced.set(path, count + 1);
-		if (count > 0) return;
+	#attachAnnounce(path: Path.Valid, anonymous: boolean) {
+		const existing = this.#announced.get(path);
+		if (existing) {
+			existing.count += 1;
+			return;
+		}
+		this.#announced.set(path, { count: 1, anonymous });
 
 		console.debug(`announced: broadcast=${path} active=true`);
 		for (const [consumer, prefix] of this.#announcedConsumers) {
 			if (!Path.hasPrefix(prefix, path)) continue;
-			consumer.append({ pattern: Path.Pattern.subtree(path), active: true });
+			consumer.append({ pattern: Path.Pattern.subtree(path), active: true, anonymous });
 		}
 	}
 
@@ -185,10 +194,10 @@ export class Subscriber {
 	 * Drop one advertisement for a path, retracting it only once the last one goes.
 	 */
 	#detachAnnounce(path: Path.Valid) {
-		const count = this.#announced.get(path);
-		if (count === undefined) return;
-		if (count > 1) {
-			this.#announced.set(path, count - 1);
+		const existing = this.#announced.get(path);
+		if (existing === undefined) return;
+		if (existing.count > 1) {
+			existing.count -= 1;
 			return;
 		}
 
@@ -293,7 +302,7 @@ export class Subscriber {
 							// A repeat updates the advertisement; only the first is news.
 							if (!live.has(path)) {
 								live.add(path);
-								this.#attachAnnounce(path);
+								this.#attachAnnounce(path, this.#anonymous(entry.cluster));
 							}
 						} else if (msgType === SubscribeNamespaceEntryDone.id) {
 							const entry = await SubscribeNamespaceEntryDone.decode(stream.reader, version);
@@ -727,7 +736,7 @@ export class Subscriber {
 			// Only now is the advertisement ours to announce, for the reason above: a
 			// consumer reacting with a SUBSCRIBE must not interleave with that OK.
 			attached = true;
-			this.#attachAnnounce(path);
+			this.#attachAnnounce(path, this.#anonymous(msg.cluster));
 
 			// An advertisement is updated in place, by repeating PUBLISH_NAMESPACE on the
 			// stream that already carries it, so read until the stream ends rather than
@@ -771,7 +780,7 @@ export class Subscriber {
 				// Re-attach: a clean path replaced the reflected one we detached from.
 				if (!attached) {
 					attached = true;
-					this.#attachAnnounce(path);
+					this.#attachAnnounce(path, this.#anonymous(update.cluster));
 				}
 			}
 		} finally {

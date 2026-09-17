@@ -19,6 +19,7 @@ import { hooks, scopePrefix } from "./internal.ts";
 import * as Path from "./path.ts";
 
 export type { Cost, Hop, Route } from "./hop.ts";
+export { isAnonymous } from "./hop.ts";
 
 /**
  * One requested path: the notify node for everything watching it.

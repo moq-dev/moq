@@ -389,18 +389,15 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session, R: crate::runti
 	// Traffic stats are attributed through this tagged origin handle.
 	origin: origin::Producer,
 	control: Control,
-	// The origin naming this link, appended to the hop chain of every broadcast from
-	// this session when the peer declares none of its own (see `session_route`). Base
-	// moq-transport carries no hop ids, so a peer only has an identity if it negotiated
-	// the MoQ Cluster extension or the caller assigned it one
-	// (`Client::with_peer_hop`), which also makes the route recognizable across
-	// sessions dialing the same relay.
+	// The origin naming this link for split-horizon (`Route.via`) when the peer
+	// declares none of its own (see `session_route`). Base moq-transport carries no
+	// hop ids, so a peer only has an identity if it negotiated the MoQ Cluster
+	// extension or the caller assigned it one (`Client::with_peer_hop`).
 	//
 	// Otherwise this is `Hop::UNKNOWN` (0), the reserved "no identity" value.
-	// Minting one here is not this layer's call: the peer never learns the id, so
-	// only the side that assigned it can exclude it for loop detection, and whether
-	// two sessions should look like one identity or two is the caller's policy. A
-	// server answers it per accepted session; a client only when it knows the peer.
+	// The assigned id stays local: it is never written into a hop chain, so a peer
+	// that withheld an identity is not named on the wire. A server answers it per
+	// accepted session; a client only when it knows the peer.
 	session_origin: crate::Hop,
 	// Our own Hop ID, which an advertisement must not already contain: one that does
 	// looped back through us.
@@ -512,18 +509,21 @@ where
 		}
 	}
 
+	/// The announcing session's declared or assigned identity, for split-horizon.
+	///
+	/// Local selection state: it is stored as `Route.via` and never written into the
+	/// hop chain, so an assigned id is not forwarded as a name for a peer that
+	/// declined to give one.
+	fn via(&self, peer: &cluster::Peer) -> crate::Hop {
+		peer.identity().unwrap_or(self.session_origin)
+	}
+
 	/// The route for an advertisement that carries no path of its own.
 	///
-	/// Base moq-transport has no hops on the wire, so the chain is a single entry
-	/// attributed to this session (`Hop::UNKNOWN` unless the peer or the caller
-	/// supplied an identity).
-	///
-	/// That entry doubles as the content identity, which is what makes an assigned
-	/// identity worth having: every session dialing the same relay produces the same
-	/// first hop, so a reconnect splices into the front its predecessor was serving
-	/// instead of replacing it. The cost is that we cannot tell the peer's own content
-	/// apart from our own coming back through it, since neither carries a chain. Loop
-	/// detection for that case is `FrontState::excluded`, not the chain.
+	/// Base moq-transport has no hops on the wire, so the chain is a single 0: the
+	/// anonymous mark, forwarded unchanged. The session's assigned identity stays
+	/// on `via` for split-horizon; putting it in the chain would publish a name for
+	/// a peer that declined to give one.
 	///
 	/// The link is charged all the same. Such an advertisement carries no ROUTE_COST,
 	/// which reads as 0, but the draft charges every advertisement for the direction it
@@ -532,15 +532,16 @@ where
 	///
 	/// It is charged only one hop, though the chain it stands for may be arbitrarily
 	/// long: a peer that carries no hop ids hides its depth, so this route understates
-	/// its true length and can out-rank a longer-looking but genuinely shorter one.
-	/// Price such a link with [`crate::Client::with_cost`] rather than trusting the
-	/// default.
+	/// its true length. An anonymous route already ranks below every identified one,
+	/// so that understatement cannot beat a real path. Price such a link with
+	/// [`crate::Client::with_cost`] among other anonymous routes.
 	fn session_route(&self, peer: &cluster::Peer) -> crate::origin::Route {
 		let mut hops = crate::Hops::new();
-		hops.push(self.session_origin)
+		hops.push(crate::Hop::UNKNOWN)
 			.expect("an empty hop chain has room for one entry");
 		crate::origin::Route::default()
 			.with_hops(hops)
+			.with_via(self.via(peer))
 			// A peer with no Cluster extension advertises no cost at all, so its cold
 			// path is unknown rather than free.
 			.with_cost(crate::origin::Cost::UNKNOWN.charged(cluster::link_cost(self.cost, peer)))
@@ -550,8 +551,8 @@ where
 	///
 	/// A negotiated peer supplies the path and cost, so the route is what the mesh
 	/// actually knows: the full chain, and the accumulated cost plus this link's price.
-	/// An advertisement whose path already contains our own Hop ID looped back, and
-	/// neither forwarding it nor subscribing through it is safe.
+	/// A received 0 stays 0. An advertisement whose path already contains our own Hop
+	/// ID looped back, and neither forwarding it nor subscribing through it is safe.
 	fn route(&self, advert: Option<&cluster::Advert>, peer: &cluster::Peer) -> Option<Advertised> {
 		let Some(advert) = advert else {
 			return Some(Advertised {
@@ -564,7 +565,9 @@ where
 		}
 
 		Some(Advertised {
-			route: advert.route(cluster::link_cost(self.cost, peer)),
+			route: advert
+				.route(cluster::link_cost(self.cost, peer))
+				.with_via(self.via(peer)),
 		})
 	}
 
@@ -3654,11 +3657,9 @@ mod tests {
 		assert!(!table.map.contains_key(&0), "the oldest tombstone is forgotten first");
 	}
 
-	/// moq-transport carries no hop ids, so a peer's broadcasts are normally
-	/// attributed to a random per-connection origin. An identity assigned via
-	/// `Client::with_peer_hop` pins it, so sessions dialing the same relay
-	/// resolve to one recognizable route, and a reconnect splices rather than
-	/// replacing.
+	/// moq-transport carries no hop ids, so a peer's broadcasts are marked
+	/// anonymous (hop 0). An identity assigned via `Client::with_peer_hop` is
+	/// stored as `via` for split-horizon and never written into the chain.
 	#[tokio::test]
 	async fn assigned_peer_hop_attributes_announces() {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
@@ -3689,7 +3690,11 @@ mod tests {
 		let mut announced = consumer.announced();
 		let route = announced.assert_next_active("room/host");
 		let hops: Vec<_> = route.hops.iter().copied().collect();
-		assert_eq!(hops, vec![assigned]);
+		assert_eq!(hops, vec![crate::Hop::UNKNOWN]);
+		assert!(route.is_anonymous());
+
+		let mut hidden = consumer.excluding(assigned).announced();
+		hidden.assert_next_wait();
 	}
 
 	/// Both directions of a sync target point at one relay, which has no way to tell
@@ -3749,11 +3754,9 @@ mod tests {
 		assert_eq!(route.hops, upstream);
 	}
 
-	/// The assigned identity is a content identity too, so a second session dialing
-	/// the same relay produces the same first hop and splices into the front its
-	/// predecessor is serving. That is what makes a reconnect immediate instead of
-	/// waiting for the transport to retire the dead session, and the reflection guard
-	/// must not cost us it.
+	/// Two sessions assigned the same identity announce the same anonymous chain.
+	/// The cursor treats that as an identical re-announce, so a reconnect is
+	/// invisible and retracting the stale session leaves the fresh route standing.
 	#[tokio::test]
 	async fn reconnecting_peer_joins_the_front_it_replaces() {
 		let peer = crate::Hop::new(777).unwrap();

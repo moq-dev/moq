@@ -30,6 +30,13 @@ export interface Update {
 	active: boolean;
 	/** Hops and cost of an active advertisement; omitted on a retraction. */
 	route?: Route;
+	/**
+	 * Whether the route passed through an anonymous hop (id 0) at any depth.
+	 *
+	 * Present on active announcements from a session. An anonymous route ranks
+	 * below every fully identified one; this client does not rank routes itself.
+	 */
+	anonymous?: boolean;
 }
 
 /** Reactive backing state shared by announcement producers and consumers. */

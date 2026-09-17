@@ -32,7 +32,8 @@ export type Hop = z.infer<typeof HopSchema>;
  *
  * It stands in for an endpoint that never declared one, and any number of endpoints can
  * be 0, so it identifies nothing: it is never a loop, never a publisher two chains have
- * in common, and never excluded from an advertisement.
+ * in common, and never excluded from an advertisement. A chain that holds a 0 anywhere
+ * is anonymous for route selection.
  */
 export const UNKNOWN_HOP: Hop = HopSchema.parse(0n);
 
@@ -117,6 +118,16 @@ export const Route = {
 		return { hops, cost: { warm: cost.warm, cold: cost.cold } };
 	},
 };
+
+/**
+ * Whether this route passed through an anonymous hop (id 0) at any depth.
+ *
+ * An empty chain is a local announcement, not the anonymous mark. Ingress fills a
+ * received empty list with {@link UNKNOWN_HOP} before yielding it.
+ */
+export function isAnonymous(route: Route): boolean {
+	return route.hops.includes(UNKNOWN_HOP);
+}
 
 /** Whether two routes name the same hop chain and cost. */
 export function routesEqual(a: Route | undefined, b: Route | undefined): boolean {

@@ -5,7 +5,7 @@ import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
 import * as netGroup from "../group.ts";
-import { Cost, type Hop, Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
+import { Cost, type Hop, isAnonymous, Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { scopePrefix } from "../internal.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
@@ -238,7 +238,8 @@ export class Subscriber {
 						}
 						advertised.set(pattern.text, { publisher: undefined, live: true });
 						console.debug(`announced: broadcast=${claim.text} active=true`);
-						announced.append({ pattern: claim, active: true, route: Route.default });
+						const route = { hops: [UNKNOWN_HOP], cost: Cost.zero };
+						announced.append({ pattern: claim, active: true, route, anonymous: isAnonymous(route) });
 					}
 					break;
 				}
@@ -389,8 +390,13 @@ export class Subscriber {
 				// `publisher == Hop::UNKNOWN` arm of the Rust `restart_announce`.
 				const identified = publisher !== undefined && publisher !== UNKNOWN_HOP;
 				const fullHops =
-					hops !== undefined && responderOrigin !== undefined ? [...hops, responderOrigin] : (hops ?? []);
+					hops !== undefined && responderOrigin !== undefined
+						? [...hops, responderOrigin]
+						: [...(hops ?? [])];
+				// A received empty list is the anonymous mark, not a local announcement.
+				if (fullHops.length === 0) fullHops.push(UNKNOWN_HOP);
 				const route: Route = { hops: fullHops, cost: cost ?? Cost.zero };
+				const anonymous = isAnonymous(route);
 
 				// A second advertisement for a path we already carry is a restart: either an
 				// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE.
@@ -402,7 +408,7 @@ export class Subscriber {
 						if (!routesEqual(previous.route, route)) {
 							advertised.set(pattern.text, { publisher, live: true, route });
 							console.debug(`announced: broadcast=${claim.text} rerouted`);
-							announced.append({ pattern: claim, active: true, route });
+							announced.append({ pattern: claim, active: true, route, anonymous });
 						} else {
 							console.debug(`announced: broadcast=${claim.text} rerouted`);
 						}
@@ -420,7 +426,7 @@ export class Subscriber {
 				advertised.set(pattern.text, { publisher, live: true, route });
 
 				console.debug(`announced: broadcast=${claim.text} active=true`);
-				announced.append({ pattern: claim, active: true, route });
+				announced.append({ pattern: claim, active: true, route, anonymous });
 			}
 
 			announced.close();

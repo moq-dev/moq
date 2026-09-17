@@ -3398,9 +3398,14 @@ mod tests {
 		);
 
 		let mut echoed_hops = crate::Hops::new();
-		echoed_hops.push(assigned).unwrap();
+		echoed_hops.push(crate::Hop::UNKNOWN).unwrap();
 		let echoed = origin
-			.announce("from/peer", crate::origin::Route::default().with_hops(echoed_hops))
+			.announce(
+				"from/peer",
+				crate::origin::Route::default()
+					.with_hops(echoed_hops)
+					.with_via(assigned),
+			)
 			.unwrap();
 
 		let mut local_hops = crate::Hops::new();
@@ -3431,12 +3436,53 @@ mod tests {
 		assert_eq!(publisher.select(&local, &peer), Advert::Plain);
 	}
 
+	/// An anonymous chain received from an identified peer keeps the 0 on the wire
+	/// and is never advertised back to that session: split-horizon matches `via`
+	/// as well as the chain.
+	#[tokio::test(start_paused = true)]
+	async fn anonymous_chain_is_forwarded_with_zero_and_not_echoed() {
+		let assigned = crate::Hop::new(777).unwrap();
+		let r1 = crate::Hop::new(9).unwrap();
+		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let consumer = origin.consume();
+		let publisher = Publisher::new(
+			TestRuntime::new(),
+			crate::lite::test_transport::SinkSession::new(Default::default()),
+			origin.consume(),
+			Control::new(None, false),
+			Some(assigned),
+			peer::PeerSetup::default(),
+			Version::Draft19,
+		);
+
+		let mut hops = crate::Hops::new();
+		hops.push(crate::Hop::UNKNOWN).unwrap();
+		hops.push(r1).unwrap();
+		let _echoed = origin
+			.announce(
+				"from/peer",
+				crate::origin::Route::default().with_hops(hops.clone()).with_via(r1),
+			)
+			.unwrap();
+
+		let peer = cluster::Peer {
+			hop: Some(r1),
+			cost: None,
+		};
+		let mut announced = consumer.excluding(publisher.exclude(&peer)).announced();
+		announced.assert_next_wait();
+
+		let forwarded = cluster::Advert::forward(&hops, 0, crate::Hop::new(1).unwrap()).unwrap();
+		let ids: Vec<_> = forwarded.hops.hops().iter().map(|h| h.id()).collect();
+		assert_eq!(ids, vec![0, 9, 1]);
+	}
+
 	/// Declaring the reserved 0 turns the extension on while naming nobody, so the
 	/// identity we assigned stands in, exactly as for a peer that never negotiated.
 	/// Asserted on the resolution itself rather than through an advertisement: a
 	/// negotiated peer always sends its own HOP_PATH, so a route attributed to the
 	/// assigned identity is a state this peer class cannot reach; see
-	/// [`a_declared_zero_chain_is_still_advertised_back`] for what it gets instead.
+	/// [`a_declared_zero_chain_is_not_advertised_back`] for what it gets instead.
 	#[tokio::test(start_paused = true)]
 	async fn withheld_peer_hop_falls_back_to_assigned() {
 		let assigned = crate::Hop::new(777).unwrap();
@@ -3462,11 +3508,10 @@ mod tests {
 
 	/// A peer that negotiated the extension MUST send a HOP_PATH on every advertisement,
 	/// and one that declared 0 names itself 0 there. An arriving chain is not rewritten,
-	/// so the route carries 0, the assigned identity appears nowhere in it, and the
-	/// split-horizon filter has nothing to match: the peer is advertised its own route
-	/// back.
+	/// so the route carries 0; the assigned identity stays on `via` and split-horizon
+	/// matches it, so the peer is not advertised its own route back.
 	#[tokio::test(start_paused = true)]
-	async fn a_declared_zero_chain_is_still_advertised_back() {
+	async fn a_declared_zero_chain_is_not_advertised_back() {
 		let assigned = crate::Hop::new(777).unwrap();
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
@@ -3481,25 +3526,23 @@ mod tests {
 			Version::Draft16,
 		);
 
-		// The chain as ingress stores it: the peer named itself 0.
+		// The chain as ingress stores it: the peer named itself 0, and `via` is the
+		// identity we assigned that session.
 		let mut hops = crate::Hops::new();
 		hops.push(crate::Hop::UNKNOWN).unwrap();
 		let _echoed = origin
-			.announce("from/peer", crate::origin::Route::default().with_hops(hops))
+			.announce(
+				"from/peer",
+				crate::origin::Route::default().with_hops(hops).with_via(assigned),
+			)
 			.unwrap();
 
 		let peer = cluster::Peer {
 			hop: Some(crate::Hop::UNKNOWN),
 			cost: None,
 		};
-		// The excluding cursor cannot match hop 0 (it names nobody), so the route
-		// still reaches this peer's stream.
 		let mut announced = consumer.excluding(publisher.exclude(&peer)).announced();
-		let echoed = announced.assert_next_active("from/peer");
-		assert!(
-			publisher.select(&echoed, &peer).wanted(),
-			"known gap: the assigned identity is not in the chain, so nothing filters it",
-		);
+		announced.assert_next_wait();
 	}
 
 	/// A same-path source can splice into (or detach from) an existing broadcast
@@ -3525,13 +3568,16 @@ mod tests {
 			Version::Draft16,
 		);
 
-		// The prefix starts with only a route through the assigned peer.
+		// The prefix starts with only a route from the assigned peer: hop 0 on the
+		// chain, identity on `via`.
 		let mut tainted_hops = crate::Hops::new();
-		tainted_hops.push(assigned).unwrap();
+		tainted_hops.push(crate::Hop::UNKNOWN).unwrap();
 		let _tainted = origin
 			.announce(
 				"route-flip-cam",
-				crate::origin::Route::default().with_hops(tainted_hops),
+				crate::origin::Route::default()
+					.with_hops(tainted_hops)
+					.with_via(assigned),
 			)
 			.unwrap();
 		settle().await;
