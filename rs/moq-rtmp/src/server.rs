@@ -453,6 +453,14 @@ impl<S: Stream> Request<S> {
 		}
 	}
 
+	/// The URL the client dialed, as its `connect` reported it in `tcUrl`.
+	pub fn tc_url(&self) -> Option<&str> {
+		match self {
+			Request::Publish(r) => r.tc_url(),
+			Request::Play(r) => r.tc_url(),
+		}
+	}
+
 	/// The remote peer address.
 	pub fn peer(&self) -> SocketAddr {
 		match self {
@@ -482,6 +490,7 @@ pub struct Publish<S = Conn> {
 	work: VecDeque<ServerSessionResult>,
 	app: String,
 	stream_key: String,
+	tc_url: Option<String>,
 	peer: SocketAddr,
 	/// Retention declared on the media tracks this publish mints, or `None` for hang's
 	/// own default. Override with [`with_max_age`](Self::with_max_age).
@@ -503,6 +512,13 @@ impl<S: Stream> Publish<S> {
 	/// a moq-auth JWT) to authenticate the publish.
 	pub fn stream_key(&self) -> &str {
 		&self.stream_key
+	}
+
+	/// The URL the client dialed (`rtmp://host/<app>`), as its `connect` reported
+	/// it in `tcUrl`, or `None` when it sent none. The only place a plaintext RTMP
+	/// session carries the hostname it was addressed to; RTMPS has the SNI too.
+	pub fn tc_url(&self) -> Option<&str> {
+		self.tc_url.as_deref()
 	}
 
 	/// The remote peer address.
@@ -636,6 +652,7 @@ pub struct Play<S = Conn> {
 	work: VecDeque<ServerSessionResult>,
 	app: String,
 	stream_key: String,
+	tc_url: Option<String>,
 	peer: SocketAddr,
 	/// How long the FLV muxer waits for a stalled group before skipping to a newer
 	/// one. Defaults to [`DEFAULT_MAX_AGE`](crate::DEFAULT_MAX_AGE); override with
@@ -657,6 +674,12 @@ impl<S: Stream> Play<S> {
 	/// viewer.
 	pub fn stream_key(&self) -> &str {
 		&self.stream_key
+	}
+
+	/// The URL the client dialed, as its `connect` reported it in `tcUrl`; see
+	/// [`Publish::tc_url`].
+	pub fn tc_url(&self) -> Option<&str> {
+		self.tc_url.as_deref()
 	}
 
 	/// The remote peer address.
@@ -906,6 +929,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 	}
 
 	let mut client_capabilities = ClientCapabilities::default();
+	let mut tc_url = None;
 
 	let mut buffer = [0u8; READ_BUFFER];
 	loop {
@@ -919,14 +943,17 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 					ServerSessionEvent::ConnectionRequested {
 						request_id,
 						app_name,
+						tc_url: dialed,
 						caps_ex,
 						video_fourccs,
 						audio_fourccs,
 					} => {
 						client_capabilities = ClientCapabilities::new(caps_ex, video_fourccs, audio_fourccs);
+						tc_url = dialed;
 						tracing::debug!(
 							%peer,
 							%app_name,
+							tc_url = tc_url.as_deref().unwrap_or(""),
 							caps_ex,
 							client_multitrack = client_capabilities.multitrack,
 							client_video_fourccs = client_capabilities.video.fourccs.len(),
@@ -955,6 +982,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							work,
 							app: app_name,
 							stream_key,
+							tc_url,
 							peer,
 							max_age: None,
 							bandwidth: moq_net::bandwidth::Allocator::unlimited(),
@@ -976,6 +1004,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							work,
 							app: app_name,
 							stream_key,
+							tc_url,
 							peer,
 							latency: crate::DEFAULT_MAX_AGE,
 							capabilities: client_capabilities.clone(),

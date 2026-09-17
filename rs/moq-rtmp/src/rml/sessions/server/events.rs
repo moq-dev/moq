@@ -34,13 +34,15 @@ pub enum ServerSessionEvent {
 	ClientChunkSizeChanged { new_chunk_size: u32 },
 
 	/// The client is requesting a connection on the specified RTMP application name.
-	/// `caps_ex` is the enhanced-RTMP `capsEx` capability bitmask the client
-	/// advertised in its `connect` command object (0 if absent). The FourCC
+	/// `tc_url` is the URL the client dialed as it reported it in `tcUrl`, when it
+	/// sent one. `caps_ex` is the enhanced-RTMP `capsEx` capability bitmask the
+	/// client advertised in its `connect` command object (0 if absent). The FourCC
 	/// support fields combine `fourCcList` with any per-kind `*FourCcInfoMap`
 	/// entries that set the `CanDecode` bit.
 	ConnectionRequested {
 		request_id: u32,
 		app_name: String,
+		tc_url: Option<String>,
 		caps_ex: u32,
 		video_fourccs: FourCcSupport,
 		audio_fourccs: FourCcSupport,

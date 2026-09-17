@@ -497,6 +497,13 @@ impl ServerSession {
 			None => return Err(ServerSessionError::NoAppNameForConnectionRequest),
 		};
 
+		// The URL the client dialed, which is the only place plaintext RTMP carries
+		// the hostname; an embedder that routes by it reads it off the request.
+		let tc_url = match properties.remove("tcUrl") {
+			Some(Amf0Value::Utf8String(url)) if !url.is_empty() => Some(url),
+			_ => None,
+		};
+
 		self.object_encoding = match properties.remove("objectEncoding") {
 			Some(value) => match value {
 				Amf0Value::Number(number) => number,
@@ -536,6 +543,7 @@ impl ServerSession {
 		let event = ServerSessionEvent::ConnectionRequested {
 			app_name: app_name,
 			request_id: request_number,
+			tc_url,
 			caps_ex,
 			video_fourccs,
 			audio_fourccs,

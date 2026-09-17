@@ -282,6 +282,47 @@ fn accepted_connection_responds_with_same_object_encoding_value_as_connection_re
 }
 
 #[test]
+fn connect_request_reports_tc_url() {
+	let (mut deserializer, mut serializer, mut session) = common_basic_setup();
+	let payload = RtmpMessage::Amf0Command {
+		command_name: "connect".to_string(),
+		transaction_id: 1.0,
+		command_object: Amf0Value::Object(HashMap::from([
+			("app".to_string(), Amf0Value::Utf8String("some_app".to_string())),
+			(
+				"tcUrl".to_string(),
+				Amf0Value::Utf8String("rtmp://demo.cdn.example:1935/some_app".to_string()),
+			),
+		])),
+		additional_arguments: vec![],
+	}
+	.into_message_payload(RtmpTimestamp::new(15), 0)
+	.unwrap();
+	let packet = serializer.serialize(&payload, true, false).unwrap();
+	let results = session.handle_input(&packet.bytes[..]).unwrap();
+
+	let (_, events) = split_results(&mut deserializer, results);
+	assert_eq!(events.len(), 1, "Unexpected number of events returned");
+	match &events[0] {
+		ServerSessionEvent::ConnectionRequested { tc_url, .. } => {
+			assert_eq!(tc_url.as_deref(), Some("rtmp://demo.cdn.example:1935/some_app"));
+		}
+		_ => panic!("First event was not as expected: {:?}", events[0]),
+	}
+
+	// Absent, or an empty string, is `None`: an embedder never routes on "".
+	let (mut deserializer, mut serializer, mut session) = common_basic_setup();
+	let payload = create_connect_message("some_app".to_string(), 15, 0, 0.0);
+	let packet = serializer.serialize(&payload, true, false).unwrap();
+	let results = session.handle_input(&packet.bytes[..]).unwrap();
+	let (_, events) = split_results(&mut deserializer, results);
+	match &events[0] {
+		ServerSessionEvent::ConnectionRequested { tc_url, .. } => assert_eq!(*tc_url, None),
+		_ => panic!("First event was not as expected: {:?}", events[0]),
+	}
+}
+
+#[test]
 fn connect_request_reports_fourcc_list() {
 	let (mut deserializer, mut serializer, mut session) = common_basic_setup();
 	let payload = RtmpMessage::Amf0Command {
