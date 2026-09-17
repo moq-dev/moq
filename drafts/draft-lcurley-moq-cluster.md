@@ -242,7 +242,8 @@ One rule for advertisement and dispatch keeps advertised paths truthful and prev
 Under this extension an advertisement is a path, so a session advertises a namespace at most once, a relay forwards only the best path it knows ({{selection}}), and a subscription is served from one source at a time.
 
 A receiver MAY still hold paths to several publishers of one namespace and choose between them as it sees fit: serve from the cheapest and move to the next when it fails or refuses the request, or try each in cost order until one accepts.
-Moving a subscription between distinct publishers is a discontinuity: their groups are not one sequence, so a subscriber sees an unrelated Location, and a FETCH that succeeds against one may fail against the other.
+The advertised path and the served source stay the same publisher: a relay that moves to another MUST withdraw its advertisement and advertise the new path ({{updating}}), so the first Hop ID downstream always names the publisher whose Objects flow.
+Moving between distinct publishers is a discontinuity: their groups are not one sequence, so a subscriber sees an unrelated Location, and a FETCH that succeeds against one may fail against the other.
 
 Redundant publishers of the same content avoid this by sharing a Hop ID ({{hop-ids}}), which makes their paths interchangeable and lets a subscription fail over at a group boundary.
 Publishers that do not share one are treated as reusing a name.
