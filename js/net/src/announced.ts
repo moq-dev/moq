@@ -20,7 +20,7 @@ import * as Path from "./path.js";
  *
  * @public
  */
-export interface Event {
+export interface Update {
 	/** What the route covers, relative to the prefix passed to `announced()`. */
 	pattern: Path.Pattern;
 	/** True while the route is advertised, false when it was retracted. */
@@ -31,7 +31,7 @@ export interface Event {
 
 /** Reactive backing state shared by announcement producers and consumers. */
 class AnnounceState {
-	queue = new Signal<Event[]>([]);
+	queue = new Signal<Update[]>([]);
 	closed = new Once<Error | null>();
 }
 
@@ -73,10 +73,10 @@ export class Producer {
 	}
 
 	/** Writes an announcement to the queue. */
-	append(event: Event) {
+	append(update: Update) {
 		if (this.#state.closed.peek() !== undefined) throw new Error("announcements are closed");
 		this.#state.queue.mutate((queue) => {
-			queue.push(event);
+			queue.push(update);
 		});
 	}
 
@@ -119,7 +119,7 @@ export class Consumer {
 	}
 
 	/** Returns the next announcement. */
-	async next(): Promise<Event | undefined> {
+	async next(): Promise<Update | undefined> {
 		for (;;) {
 			const announce = this.#state.queue.peek().shift();
 			if (announce) return announce;

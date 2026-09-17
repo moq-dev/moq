@@ -82,7 +82,7 @@ A subscriber watching under a prefix sees the advertisement rebased to that
 scope. `**/a` advertised cluster-wide and consumed at `a` arrives as both the
 empty pattern (exactly `a`) and `**/a` (deeper paths ending in `a`). A pattern
 that cannot match under the prefix is not sent. Announce events carry the
-matcher: Rust `announce::Update.pattern` and TypeScript `Announce.Event.pattern`
+matcher: Rust `announce::Update.pattern` and TypeScript `Announce.Update.pattern`
 are a `Pattern`. Use `as_prefix()` / `asPrefix()` when a consumer specifically
 needs a prefix-shaped claim.
 
@@ -195,7 +195,7 @@ message; unknown and application codes retain their numeric value. Transport
 failures without a protocol code remain separate.
 
 Route announcements expose the matcher directly: Rust `announce::Update.pattern`
-and TypeScript `Announce.Event.pattern` carry a `Pattern`. A subtree claim is
+and TypeScript `Announce.Update.pattern` carry a `Pattern`. A subtree claim is
 `room/**`, while `room/*` covers one child segment. Use `as_prefix()` in Rust or
 `asPrefix()` in TypeScript when a consumer specifically needs a prefix-shaped
 claim; an arbitrary pattern is not a concrete broadcast name.

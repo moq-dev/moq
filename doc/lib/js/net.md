@@ -82,7 +82,7 @@ Three operations, on an origin:
   with no local broadcast is a `BroadcastRequest` to `accept` or `reject`.
 
 A wildcard is a capability, not an inventory. `origin.announced(prefix)`
-yields `Announce.Event` values: `pattern` is the claim relative to `prefix`,
+yields `Announce.Update` values: `pattern` is the claim relative to `prefix`,
 `active` is false on a retraction, and `route` carries hops and cost while
 advertised (omitted on a retraction). Use
 `pattern.asPrefix()` when you need a prefix-shaped claim; an arbitrary
