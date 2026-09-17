@@ -50,7 +50,3 @@ Cross-package sync from the root CLAUDE.md table, with the lines that mirror
 Tests: a moq-ffi unit test that each setter lands in `config.websocket`, and a
 wrapper test where the tls setter is covered today
 (`py/moq-rs/tests/test_server.py`). `just test smoke-full` for the bindings.
-
-## Related
-
-- [Connect auth race](/quest/m0/3532-connect-auth-race.md) - the race that a disabled fallback sidesteps entirely

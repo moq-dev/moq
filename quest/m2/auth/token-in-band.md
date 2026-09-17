@@ -47,9 +47,8 @@ AUTH can carry the full grant once the pattern-interest prerequisite lands.
   accepted AUTH before being refused, so an AUTH-capable client with tokens
   only in band gets in and a client that never presents anything is still
   refused. The URL query stays the connect-time credential in the `moq_auth::Request`.
-- The WebSocket 403 in [Connect auth race](/quest/m0/3532-connect-auth-race.md)
-  keeps its meaning: a URL credential is still refused at connect on either
-  arm, and an in-band refusal is an AUTH_ERROR after connect.
+- A URL credential is still refused at connect when both arms reject it, and
+  an in-band refusal is an AUTH_ERROR after connect.
 - Docs: `doc/bin/cli.md`, `doc/bin/relay/auth.md` (the admission deadline and
   that the URL token is one member of the union), `doc/lib/*` client
   configuration, and the example invocations carrying `?jwt=` in `doc/`,

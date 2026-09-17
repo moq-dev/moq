@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - *(tokio)* [**breaking**] partition LAN discovery by a DNS-SD application (`mdns::App`)
 
+### Fixed
+
+- *(tokio)* a 403 on the WebSocket fallback no longer fails a connect whose QUIC arm is still in flight
+
 ## [0.19.12](https://github.com/moq-dev/moq/compare/moq-native-v0.19.11...moq-native-v0.19.12) - 2026-08-20
 
 ### Added
