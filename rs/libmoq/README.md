@@ -44,7 +44,7 @@ int32_t moq_origin_request_close(uint32_t task);
 int32_t moq_origin_consume_announced(uint32_t origin, const char *path, uintptr_t path_len, void (*on_broadcast)(void *user_data, int32_t broadcast), void *user_data);
 int32_t moq_origin_consume_announced_close(uint32_t task);
 int32_t moq_origin_announced(uint32_t origin, void (*on_announce)(void *user_data, int32_t announced), void *user_data);
-int32_t moq_origin_announced_info(uint32_t announced, moq_announced *dst);
+int32_t moq_origin_announced_info(uint32_t announced, moq_announce_update *dst);
 int32_t moq_origin_announced_free(uint32_t announced);
 int32_t moq_origin_announced_close(uint32_t announced);
 

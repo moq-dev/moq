@@ -190,10 +190,10 @@ All consumers (`CatalogConsumer`, `MediaConsumer`, `TrackConsumer`, `AudioConsum
   - `.dynamic(pattern, route=Route()) → OriginDynamic`
   - `.create_broadcast(path) → BroadcastProducer`
 - **`OriginDynamic`**. Async source of broadcasts requested by consumers.
-  - `await .requested_broadcast() → BroadcastRequest`. Call `.accept(broadcast)` to serve it, or `.abort(code)` to fail the requester.
+  - `await .requested_broadcast() → BroadcastRequest`. Call `.accept(broadcast)` to serve it, or `.reject(code)` to fail the requester.
   - Async iterator yielding `BroadcastRequest`
 - **`OriginConsumer`**. Discover broadcasts.
-  - `.announced(prefix) → Announced` (async iterator)
+  - `.announced(prefix) → AnnounceConsumer` (async iterator)
   - `.announced_broadcast(path) → AnnouncedBroadcast` (awaitable, waits for a future announcement)
   - `.request_broadcast(path) → BroadcastConsumer` (awaitable; announced now or a dynamic fallback, else raises)
 

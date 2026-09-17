@@ -47,7 +47,7 @@ for ann, err := range announced.All(ctx) {
 		}
 		log.Fatal(err)
 	}
-	fmt.Println("got broadcast", ann.Path())
+	fmt.Println("got broadcast", ann.Pattern())
 }
 ```
 

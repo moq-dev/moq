@@ -61,7 +61,7 @@ final class Moq {
       session.publish().createBroadcast(path: path);
 
   /// Stream announcements whose paths begin with [prefix].
-  Stream<MoqAnnouncement> announcements({String prefix = ''}) async* {
+  Stream<MoqAnnounceUpdate> announcements({String prefix = ''}) async* {
     final announced = session.consume().announced(prefix: prefix);
     try {
       while (true) {
@@ -76,7 +76,7 @@ final class Moq {
   }
 
   /// Return the raw announcement cursor for [prefix].
-  MoqAnnounced announced({String prefix = ''}) =>
+  MoqAnnounceConsumer announced({String prefix = ''}) =>
       session.consume().announced(prefix: prefix);
 
   /// Wait for a broadcast announced at exactly [path].

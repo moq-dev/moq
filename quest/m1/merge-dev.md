@@ -49,7 +49,6 @@ additive quest that builds on dev-only code start on main afterwards from
 
 - [Reserved codes](/quest/m1/lite-reserved-codes.md) - nothing provisional ships on the released wire
 - [Rate estimate names](/quest/m1/api-rate-estimate-names.md) - the estimates carry one name on the C ABI and every binding
-- [Announce names](/quest/m1/api-announce-names.md) - the announce and request surface releases under one name per concept
 - [moq-tokio names](/quest/m1/api-tokio-names.md) - moq-tokio's first release under this name has settled names
 - [JSON config names](/quest/m1/api-json-binary-config-names.md) - the json and binary packages agree on Config
 - [Origin scope API](/quest/m1/api-origin-pattern-scopes.md) - typed scope grants preserve current prefixes and refuse unsupported patterns

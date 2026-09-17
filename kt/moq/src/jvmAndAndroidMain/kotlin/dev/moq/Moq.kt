@@ -1,12 +1,11 @@
 package dev.moq
 
 import kotlinx.coroutines.flow.Flow
-import uniffi.moq.MoqAnnounced
+import uniffi.moq.MoqAnnounceConsumer
 import uniffi.moq.MoqAnnouncedBroadcast
-import uniffi.moq.MoqAnnouncement
+import uniffi.moq.MoqAnnounceUpdate
 import uniffi.moq.MoqBroadcastConsumer
 import uniffi.moq.MoqClient
-import uniffi.moq.MoqOriginOptions
 import uniffi.moq.MoqOriginProducer
 import uniffi.moq.MoqSession
 
@@ -38,10 +37,10 @@ class Moq internal constructor(
      * subscription is acquired on collection and cancelled when collection
      * ends. Use [announced] for the raw handle.
      */
-    fun announcements(prefix: String = ""): Flow<MoqAnnouncement> = session.consume().announcements(prefix)
+    fun announcements(prefix: String = ""): Flow<MoqAnnounceUpdate> = session.consume().announcements(prefix)
 
     /** Raw announcement handle under [prefix]. */
-    fun announced(prefix: String = ""): MoqAnnounced = session.consume().announced(prefix)
+    fun announced(prefix: String = ""): MoqAnnounceConsumer = session.consume().announced(prefix)
 
     /**
      * Await a route covering exactly [path], then resolve the broadcast there.

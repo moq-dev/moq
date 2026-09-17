@@ -41,8 +41,8 @@ type (
 	FetchGroupOptions = ffi.MoqFetchGroupOptions
 	// ProtocolKind is a recognized protocol kind, or App / Unknown when the code is not named.
 	ProtocolKind = ffi.MoqProtocolKind
-	// OriginOptions configures a new origin, such as its maximum cache size in bytes.
-	OriginOptions = ffi.MoqOriginOptions
+	// OriginConfig configures a new origin, such as its maximum cache size in bytes.
+	OriginConfig = ffi.MoqOriginConfig
 	// Route is the hop chain a broadcast takes to reach an origin, and its costs: warm Cost plus undiscounted Cold (nil Cold means Cost).
 	Route = ffi.MoqRoute
 	// Subscription holds subscriber-side delivery preferences: priority, ordering, max age, and group range.

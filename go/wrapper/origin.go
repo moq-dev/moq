@@ -17,12 +17,12 @@ type OriginProducer struct {
 
 // NewOriginProducer creates an empty origin.
 func NewOriginProducer() *OriginProducer {
-	return NewOriginProducerWithOptions(OriginOptions{})
+	return NewOriginProducerWithConfig(OriginConfig{})
 }
 
-// NewOriginProducerWithOptions creates an origin with explicit options.
-func NewOriginProducerWithOptions(options OriginOptions) *OriginProducer {
-	return &OriginProducer{inner: ffi.NewMoqOriginProducer(options)}
+// NewOriginProducerWithConfig creates an origin with explicit config.
+func NewOriginProducerWithConfig(config OriginConfig) *OriginProducer {
+	return &OriginProducer{inner: ffi.NewMoqOriginProducer(config)}
 }
 
 // Consume returns a consumer that observes broadcasts published to this origin.
@@ -109,9 +109,9 @@ func (r *BroadcastRequest) Accept(broadcast *BroadcastProducer) error {
 	return r.inner.Accept(broadcast.inner)
 }
 
-// Abort fails the request with an application error code.
-func (r *BroadcastRequest) Abort(errorCode uint16) error {
-	return r.inner.Abort(errorCode)
+// Reject fails the request with an application error code.
+func (r *BroadcastRequest) Reject(errorCode uint16) error {
+	return r.inner.Reject(errorCode)
 }
 
 // OriginConsumer discovers and requests broadcasts published to an origin.
@@ -120,12 +120,12 @@ type OriginConsumer struct {
 }
 
 // Announced streams route announcements whose prefix starts with prefix.
-func (o *OriginConsumer) Announced(prefix string) (*Announced, error) {
+func (o *OriginConsumer) Announced(prefix string) (*AnnounceConsumer, error) {
 	inner, err := o.inner.Announced(prefix)
 	if err != nil {
 		return nil, err
 	}
-	return &Announced{inner: inner}, nil
+	return &AnnounceConsumer{inner: inner}, nil
 }
 
 // AnnouncedBroadcast waits for a route covering an exact path, then resolves
@@ -151,38 +151,38 @@ func (o *OriginConsumer) RequestBroadcast(ctx context.Context, path string) (*Br
 	return &BroadcastConsumer{inner: inner}, nil
 }
 
-// Announcement is a route announcement or retraction. A route claims that
-// paths under Path can be served; it carries no broadcast. Resolve a specific
+// AnnounceUpdate is a route announcement or retraction. A route claims that
+// paths under Pattern can be served; it carries no broadcast. Resolve a specific
 // path with [OriginConsumer.RequestBroadcast]. By convention a publisher
 // announces each broadcast's exact path.
-type Announcement struct {
-	inner *ffi.MoqAnnouncement
+type AnnounceUpdate struct {
+	inner *ffi.MoqAnnounceUpdate
 }
 
-// Path is the announced route's prefix, relative to the Announced prefix.
-func (a *Announcement) Path() string {
-	return a.inner.Path()
+// Pattern is the announced route's pattern, relative to the announced prefix.
+func (a *AnnounceUpdate) Pattern() string {
+	return a.inner.Pattern()
 }
 
 // Active reports whether the route is active (true) or was retracted (false).
 // A repeated active announcement for the same path is a metadata update.
-func (a *Announcement) Active() bool {
+func (a *AnnounceUpdate) Active() bool {
 	return a.inner.Active()
 }
 
 // Route is the route serving the prefix: its relay hops and costs (warm Cost, undiscounted Cold).
-func (a *Announcement) Route() Route {
+func (a *AnnounceUpdate) Route() Route {
 	return a.inner.Route()
 }
 
-// Announced is a stream of route announcements and retractions.
-type Announced struct {
-	inner *ffi.MoqAnnounced
+// AnnounceConsumer is a stream of route announcements and retractions.
+type AnnounceConsumer struct {
+	inner *ffi.MoqAnnounceConsumer
 }
 
 // Next returns the next announcement, or (nil, nil) when the stream ends.
-func (a *Announced) Next(ctx context.Context) (*Announcement, error) {
-	res, err := runHandle(ctx, a.inner.Cancel, func(ctx context.Context) (*ffi.MoqAnnouncement, error) {
+func (a *AnnounceConsumer) Next(ctx context.Context) (*AnnounceUpdate, error) {
+	res, err := runHandle(ctx, a.inner.Cancel, func(ctx context.Context) (*ffi.MoqAnnounceUpdate, error) {
 		res, err := a.inner.Next(ctx)
 		if err != nil || res == nil {
 			return nil, err
@@ -192,16 +192,16 @@ func (a *Announced) Next(ctx context.Context) (*Announcement, error) {
 	if err != nil || res == nil {
 		return nil, err
 	}
-	return &Announcement{inner: res}, nil
+	return &AnnounceUpdate{inner: res}, nil
 }
 
 // All ranges over announcements until the stream ends or the loop breaks.
-func (a *Announced) All(ctx context.Context) iter.Seq2[*Announcement, error] {
+func (a *AnnounceConsumer) All(ctx context.Context) iter.Seq2[*AnnounceUpdate, error] {
 	return streamSeq(ctx, a.Next)
 }
 
 // Cancel stops the announcement stream.
-func (a *Announced) Cancel() {
+func (a *AnnounceConsumer) Cancel() {
 	a.inner.Cancel()
 }
 

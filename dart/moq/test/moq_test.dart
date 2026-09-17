@@ -7,7 +7,7 @@ const timeout = Duration(seconds: 10);
 
 void main() {
   test('connects, announces, subscribes, and delivers a frame', () async {
-    final relay = MoqOriginProducer(options: MoqOriginOptions());
+    final relay = MoqOriginProducer(config: MoqOriginConfig());
     final server = MoqServer();
     server.setBind(addr: '127.0.0.1:0');
     server.setTlsGenerate(hostnames: ['localhost']);
@@ -34,10 +34,10 @@ void main() {
     final track = broadcast.publishTrack(name: 'events', info: null);
     broadcast.announce(route: MoqRoute());
     final announced = await announcement.timeout(timeout);
-    expect(announced.path(), 'live');
+    expect(announced.pattern(), 'live');
 
     final requested = await client
-        .requestBroadcast(announced.path())
+        .requestBroadcast(announced.pattern())
         .timeout(timeout);
     final consumer = await requested
         .subscribeTrack(name: 'events', subscription: null)
@@ -62,19 +62,19 @@ void main() {
   });
 
   test('announce then unannounce is visible', () async {
-    final origin = MoqOriginProducer(options: MoqOriginOptions());
+    final origin = MoqOriginProducer(config: MoqOriginConfig());
     final broadcast = origin.createBroadcast(path: 'live');
     broadcast.publishTrack(name: 'events', info: null);
     broadcast.announce(route: MoqRoute());
 
     final announced = origin.consume().announced(prefix: '');
     final first = await announced.next().timeout(timeout);
-    expect(first?.path(), 'live');
+    expect(first?.pattern(), 'live');
     expect(first?.active(), isTrue);
 
     broadcast.unannounce();
     final retracted = await announced.next().timeout(timeout);
-    expect(retracted?.path(), 'live');
+    expect(retracted?.pattern(), 'live');
     expect(retracted?.active(), isFalse);
     await origin.consume().requestBroadcast(path: 'live').timeout(timeout);
     announced.cancel();
@@ -82,7 +82,7 @@ void main() {
   });
 
   test('dynamic serves a request under a prefix', () async {
-    final origin = MoqOriginProducer(options: MoqOriginOptions());
+    final origin = MoqOriginProducer(config: MoqOriginConfig());
     final dynamic = origin.dynamic_(pattern: 'live/**', route: MoqRoute());
     final pending = origin.consume().requestBroadcast(path: 'live/cam');
     final request = await dynamic.requestedBroadcast().timeout(timeout);
@@ -96,7 +96,7 @@ void main() {
   });
 
   test('dynamic accepts a non-prefix pattern', () {
-    final origin = MoqOriginProducer(options: MoqOriginOptions());
+    final origin = MoqOriginProducer(config: MoqOriginConfig());
     origin.dynamic_(pattern: 'live/*', route: MoqRoute());
   });
 }

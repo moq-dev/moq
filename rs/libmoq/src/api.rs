@@ -657,16 +657,16 @@ unsafe fn parse_route(route: *const moq_route) -> Result<moq_net::origin::Route,
 	Ok(out)
 }
 
-/// Information about a broadcast announced by an origin.
+/// A route announcement or retraction from an origin.
 #[repr(C)]
 #[allow(non_camel_case_types)]
-pub struct moq_announced {
-	/// The path of the broadcast, NOT NULL terminated
-	pub path: *const c_char,
-	pub path_len: usize,
+pub struct moq_announce_update {
+	/// The covered pattern, NOT NULL terminated
+	pub pattern: *const c_char,
+	pub pattern_len: usize,
 
-	/// Whether the broadcast is active or has ended
-	/// This MUST toggle between true and false over the lifetime of the broadcast
+	/// Whether the route is active or was retracted
+	/// This MUST toggle between true and false over the lifetime of the route
 	pub active: bool,
 }
 
@@ -1381,7 +1381,7 @@ pub extern "C" fn moq_origin_dynamic_close(dynamic: u32) -> i32 {
 /// The path of a broadcast request delivered to a [moq_origin_dynamic] callback.
 ///
 /// The destination borrows the request's storage: copy it out before accept,
-/// abort, or [moq_broadcast_request_free].
+/// reject, or [moq_broadcast_request_free].
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -1413,12 +1413,12 @@ pub extern "C" fn moq_broadcast_request_accept(request: u32, broadcast: u32) -> 
 	})
 }
 
-/// Abort a broadcast request with an application error code.
+/// Reject a broadcast request with an application error code.
 ///
 /// Consumes the request handle. Returns a zero on success, or a negative code
 /// on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_broadcast_request_abort(request: u32, error_code: u16) -> i32 {
+pub extern "C" fn moq_broadcast_request_reject(request: u32, error_code: u16) -> i32 {
 	ffi::enter(move || {
 		let request = ffi::parse_id(request)?;
 		let pending = State::lock().origin.broadcast_request_take(request)?;
@@ -1427,7 +1427,7 @@ pub extern "C" fn moq_broadcast_request_abort(request: u32, error_code: u16) -> 
 	})
 }
 
-/// Free a broadcast request without accepting or aborting it.
+/// Free a broadcast request without accepting or rejecting it.
 ///
 /// Dropping the request rejects it. Returns a zero on success, or a negative
 /// code if the handle is unknown.
@@ -1471,16 +1471,16 @@ pub unsafe extern "C" fn moq_origin_announced(
 
 /// Query information about a broadcast discovered by [moq_origin_announced].
 ///
-/// The destination is filled with the broadcast information. The `path` pointer borrows
+/// The destination is filled with the broadcast information. The `pattern` pointer borrows
 /// the announcement's storage: copy it out before calling [moq_origin_announced_free], which
 /// invalidates it.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must ensure that `dst` is a valid pointer to a [moq_announced] struct.
+/// - The caller must ensure that `dst` is a valid pointer to a [moq_announce_update] struct.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_origin_announced_info(announced: u32, dst: *mut moq_announced) -> i32 {
+pub unsafe extern "C" fn moq_origin_announced_info(announced: u32, dst: *mut moq_announce_update) -> i32 {
 	ffi::enter(move || {
 		let announced = ffi::parse_id(announced)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
@@ -1493,7 +1493,7 @@ pub unsafe extern "C" fn moq_origin_announced_info(announced: u32, dst: *mut moq
 /// Each announce / unannounce event hands the callback a distinct announcement handle (read
 /// with [moq_origin_announced_info]); release it here once done to avoid leaking one per event
 /// over the life of the listener. This is per-announcement and distinct from
-/// [moq_origin_announced_close], which stops the listener itself. After freeing, any `path`
+/// [moq_origin_announced_close], which stops the listener itself. After freeing, any `pattern`
 /// pointer obtained from [moq_origin_announced_info] for this handle is dangling.
 ///
 /// Returns zero on success, or a negative code if the handle is unknown.

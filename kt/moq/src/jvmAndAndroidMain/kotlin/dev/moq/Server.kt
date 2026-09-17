@@ -9,7 +9,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.launch
 import uniffi.moq.MoqException
-import uniffi.moq.MoqOriginOptions
+import uniffi.moq.MoqOriginConfig
 import uniffi.moq.MoqOriginProducer
 import uniffi.moq.MoqRequest
 import uniffi.moq.MoqServer
@@ -117,7 +117,7 @@ class Server internal constructor(
             // With neither side specified, wire ONE shared origin to both so a
             // broadcast announced on this server is also visible to sessions
             // publishing into it. Mirrors Moq.connect.
-            val shared = if (publish == null && subscribe == null) MoqOriginProducer(MoqOriginOptions()) else null
+            val shared = if (publish == null && subscribe == null) MoqOriginProducer(MoqOriginConfig()) else null
             val publishOrigin = publish ?: shared
             val subscribeOrigin = subscribe ?: shared
 

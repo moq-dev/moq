@@ -30,7 +30,7 @@ let session = try await client.connect(to: "https://relay.example.com")
 
 for try await announcement in try session.consume.announced(prefix: "live/") {
     // An announcement is a route; its path is relative to the prefix.
-    let broadcast = try await session.consume.requestBroadcast(path: "live/" + announcement.path)
+    let broadcast = try await session.consume.requestBroadcast(path: "live/" + announcement.pattern)
     for try await catalog in try broadcast.subscribeCatalog() {
         print(catalog)
     }
@@ -60,7 +60,7 @@ returns an unadvertised producer; `broadcast.announce(route:)` /
 `session.publish.dynamic(pattern:route:)` claims every matching path
 (`foo/**` for a prefix). Hold the returned `OriginDynamic` while the claim
 should stay advertised. A wildcard is a capability, not an inventory;
-`announcement.path` is the covered prefix for a prefix-shaped claim and the
+`announcement.pattern` is the covered prefix for a prefix-shaped claim and the
 pattern text otherwise.
 
 For a self-signed relay on your own test network, `try client.setTlsVerify(false)`

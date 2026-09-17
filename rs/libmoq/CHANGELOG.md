@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   track info, subscriptions, and `moq_consume_video` / `moq_consume_audio`;
   reconnect backoff is `backoff_initial_us` / `backoff_max_us` /
   `backoff_timeout_us`.
-
+- `moq_announced` is `moq_announce_update` with `pattern` / `pattern_len` instead of `path` / `path_len`. `moq_broadcast_request_abort` is `moq_broadcast_request_reject`; `_free` is unchanged.
 - `moq_publish_media` splits into `moq_publish_audio`, `moq_publish_video`, and
   `moq_publish_container`, taking `moq_audio_init`, `moq_video_init`, and `moq_container_init`.
   Each carries only the fields its kind can honor, so a label on a container no longer compiles.

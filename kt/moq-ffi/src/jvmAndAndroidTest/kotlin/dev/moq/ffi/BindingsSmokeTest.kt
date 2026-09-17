@@ -3,7 +3,7 @@ package dev.moq.ffi
 import kotlinx.coroutines.test.runTest
 import uniffi.moq.MoqClient
 import uniffi.moq.MoqException
-import uniffi.moq.MoqOriginOptions
+import uniffi.moq.MoqOriginConfig
 import uniffi.moq.MoqOriginProducer
 import kotlin.test.Test
 import kotlin.test.assertFailsWith
@@ -26,7 +26,7 @@ class BindingsSmokeTest {
 
     @Test
     fun `origin producer constructs and consumes`() = runTest {
-        MoqOriginProducer(MoqOriginOptions()).use { origin ->
+        MoqOriginProducer(MoqOriginConfig()).use { origin ->
             origin.consume().use { /* lifecycle smoke */ }
         }
     }

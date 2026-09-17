@@ -6,7 +6,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.onCompletion
-import uniffi.moq.MoqAnnouncement
+import uniffi.moq.MoqAnnounceUpdate
 import uniffi.moq.MoqAudioConsumer
 import uniffi.moq.MoqAudioFrame
 import uniffi.moq.MoqBroadcastConsumer
@@ -209,7 +209,7 @@ fun MoqGroupConsumer.frames(): Flow<MoqFrame> = flow {
  * ends, so callers never touch the underlying handle. Use the raw
  * `announced(prefix)` if you need to hold and cancel the handle yourself.
  */
-fun MoqOriginConsumer.announcements(prefix: String): Flow<MoqAnnouncement> {
+fun MoqOriginConsumer.announcements(prefix: String): Flow<MoqAnnounceUpdate> {
     val consumer = this
     return flow {
         val announced = consumer.announced(prefix)

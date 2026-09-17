@@ -97,9 +97,9 @@ asyncio.run(main())
    OriginProducer
    OriginConsumer
    OriginDynamic
-   Announced
+   AnnounceConsumer
    AnnouncedBroadcast
-   Announcement
+   AnnounceUpdate
 ```
 
 ## Data types

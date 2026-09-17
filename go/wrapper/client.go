@@ -268,7 +268,7 @@ func (c *Client) CreateBroadcast(path string) (*BroadcastProducer, error) {
 }
 
 // Announced streams routes announced by the remote under prefix.
-func (c *Client) Announced(prefix string) (*Announced, error) {
+func (c *Client) Announced(prefix string) (*AnnounceConsumer, error) {
 	return c.consumer.Announced(prefix)
 }
 

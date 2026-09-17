@@ -5,9 +5,9 @@ use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::producer::MoqBroadcastProducer;
 
-/// Options used when creating an origin.
+/// Config used when creating an origin.
 #[derive(Clone, Default, uniffi::Record)]
-pub struct MoqOriginOptions {
+pub struct MoqOriginConfig {
 	/// Maximum cached group bytes across broadcasts under this origin. Null is unbounded.
 	#[uniffi(default = None)]
 	pub cache_capacity_bytes: Option<u64>,
@@ -75,7 +75,7 @@ pub struct MoqOriginConsumer {
 }
 
 #[derive(uniffi::Object)]
-pub struct MoqAnnounced {
+pub struct MoqAnnounceConsumer {
 	task: Task<Announced>,
 }
 
@@ -88,7 +88,7 @@ pub struct MoqOriginDynamic {
 }
 
 #[derive(uniffi::Object)]
-/// A pending dynamic broadcast request that must be accepted or aborted.
+/// A pending dynamic broadcast request that must be accepted or rejected.
 pub struct MoqBroadcastRequest {
 	inner: std::sync::Mutex<Option<moq_net::origin::Request>>,
 }
@@ -122,10 +122,10 @@ impl OriginDynamic {
 }
 
 impl Announced {
-	async fn next(&mut self) -> Result<Option<Arc<MoqAnnouncement>>, MoqError> {
+	async fn next(&mut self) -> Result<Option<Arc<MoqAnnounceUpdate>>, MoqError> {
 		match self.inner.next().await {
-			Some(update) => Ok(Some(Arc::new(MoqAnnouncement {
-				prefix: update
+			Some(update) => Ok(Some(Arc::new(MoqAnnounceUpdate {
+				pattern: update
 					.pattern
 					.as_prefix()
 					.unwrap_or_else(|| update.pattern.as_str())
@@ -157,11 +157,11 @@ impl AnnouncedBroadcast {
 /// A route announcement (or retraction) from an origin.
 ///
 /// Carries no broadcast: resolve a specific path with
-/// `MoqOriginConsumer::request_broadcast` (after this announcement proves it is
+/// `MoqOriginConsumer::request_broadcast` (after this update proves it is
 /// covered). The application decides which paths name broadcasts.
 #[derive(uniffi::Object)]
-pub struct MoqAnnouncement {
-	prefix: String,
+pub struct MoqAnnounceUpdate {
+	pattern: String,
 	route: MoqRoute,
 	active: bool,
 }
@@ -183,22 +183,22 @@ impl MoqOriginProducer {
 		Self { inner }
 	}
 
-	fn from_options(options: MoqOriginOptions) -> Self {
-		let mut info = moq_net::origin::Info::new(moq_net::Hop::random());
-		if let Some(capacity) = options.cache_capacity_bytes {
-			let config = moq_net::cache::Config::default()
+	fn from_config(config: MoqOriginConfig) -> Self {
+		let mut origin = moq_net::origin::Config::new(moq_net::Hop::random());
+		if let Some(capacity) = config.cache_capacity_bytes {
+			let cache = moq_net::cache::Config::default()
 				.with_capacity(capacity)
-				.with_expiry(info.pool.expiry());
-			info = info.with_pool(moq_net::cache::Pool::new(config));
+				.with_expiry(origin.pool.expiry());
+			origin.pool = moq_net::cache::Pool::new(cache);
 		}
 
-		Self { inner: spawn(info) }
+		Self { inner: spawn(origin) }
 	}
 }
 
 /// Build an origin producer, spawning its driver on the FFI runtime.
-pub(crate) fn spawn(info: moq_net::origin::Info) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(info);
+pub(crate) fn spawn(config: moq_net::origin::Config) -> moq_net::origin::Producer {
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	#[cfg(not(target_arch = "wasm32"))]
 	crate::ffi::spawn(driver.run(moq_tokio::runtime::Runtime::<()>::new()));
 	#[cfg(target_arch = "wasm32")]
@@ -239,9 +239,9 @@ pub(crate) fn resolve_pair(
 impl MoqOriginProducer {
 	/// Create a new origin for publishing and/or consuming broadcasts.
 	#[uniffi::constructor]
-	pub fn new(options: MoqOriginOptions) -> Arc<Self> {
+	pub fn new(config: MoqOriginConfig) -> Arc<Self> {
 		let _guard = crate::ffi::enter();
-		Arc::new(Self::from_options(options))
+		Arc::new(Self::from_config(config))
 	}
 
 	/// Create a consumer for this origin.
@@ -294,10 +294,10 @@ impl MoqOriginProducer {
 #[uniffi::export]
 impl MoqOriginConsumer {
 	/// Subscribe to all route announcements under a prefix.
-	pub fn announced(&self, prefix: String) -> Result<Arc<MoqAnnounced>, MoqError> {
+	pub fn announced(&self, prefix: String) -> Result<Arc<MoqAnnounceConsumer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let origin = self.inner.with_root(prefix).ok_or(MoqError::Unauthorized)?;
-		Ok(Arc::new(MoqAnnounced {
+		Ok(Arc::new(MoqAnnounceConsumer {
 			task: Task::new(Announced {
 				inner: origin.announced(),
 			}),
@@ -351,7 +351,7 @@ impl MoqOriginDynamic {
 	/// Wait for the next requested broadcast no local broadcast resolves under
 	/// this handle's pattern.
 	///
-	/// Returns a [`MoqBroadcastRequest`]: accept it with a broadcast producer or abort
+	/// Returns a [`MoqBroadcastRequest`]: accept it with a broadcast producer or reject
 	/// it with an application error code. The requesting consumer stays pending until then.
 	pub async fn requested_broadcast(&self) -> Result<Arc<MoqBroadcastRequest>, MoqError> {
 		let task = self.task.lock().unwrap().clone().ok_or(MoqError::Closed)?;
@@ -414,8 +414,8 @@ impl MoqBroadcastRequest {
 		Ok(())
 	}
 
-	/// Abort the request with an application error code.
-	pub fn abort(&self, error_code: u16) -> Result<(), MoqError> {
+	/// Reject the request with an application error code.
+	pub fn reject(&self, error_code: u16) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let request = self.take()?;
 		request.reject(moq_net::Error::App(error_code));
@@ -423,12 +423,12 @@ impl MoqBroadcastRequest {
 	}
 }
 
-// ---- MoqAnnounced ----
+// ---- MoqAnnounceConsumer ----
 
 #[uniffi::export]
-impl MoqAnnounced {
+impl MoqAnnounceConsumer {
 	/// Get the next route announcement or retraction. Returns `None` when the origin is closed.
-	pub async fn next(&self) -> Result<Option<Arc<MoqAnnouncement>>, MoqError> {
+	pub async fn next(&self) -> Result<Option<Arc<MoqAnnounceUpdate>>, MoqError> {
 		self.task.run(|mut state| async move { state.next().await }).await
 	}
 
@@ -441,10 +441,10 @@ impl MoqAnnounced {
 }
 
 #[uniffi::export]
-impl MoqAnnouncement {
-	/// The covered prefix, relative to the `announced` call's prefix.
-	pub fn path(&self) -> String {
-		self.prefix.clone()
+impl MoqAnnounceUpdate {
+	/// The covered pattern, relative to the `announced` call's prefix.
+	pub fn pattern(&self) -> String {
+		self.pattern.clone()
 	}
 
 	/// The route serving the prefix: its hops and costs.
