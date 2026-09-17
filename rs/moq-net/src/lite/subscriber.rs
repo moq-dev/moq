@@ -1381,7 +1381,7 @@ mod tests {
 	/// rather than outliving the subscription it belonged to.
 	#[test]
 	fn unsubscribe_drops_the_datagram_and_releases_the_producer() {
-		let origin = origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			session: SinkSession::default(),
 			origin,
@@ -1453,7 +1453,7 @@ mod tests {
 		let gate = kio::Producer::new(false);
 		let session = SinkSession::gated_bi(gate.consume());
 
-		let origin = origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			session: session.clone(),
 			origin,
@@ -1525,7 +1525,7 @@ mod tests {
 			// what was true at the instant it would.
 			let gate = kio::Producer::new(true);
 			let session = SinkSession::gated_bi(gate.consume());
-			let origin = origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 			let subscriber = Subscriber::new(SubscriberConfig {
 				session: session.clone(),
 				origin,
@@ -1949,7 +1949,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_double_announce_is_an_error_even_when_reflected() {
 		let assigned = crate::Hop::new(777).unwrap();
-		let origin = origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			session: SinkSession::new(Default::default()),
 			origin,
@@ -2004,7 +2004,7 @@ mod tests {
 	#[tokio::test]
 	async fn every_declined_announce_is_recorded() {
 		let assigned = crate::Hop::new(777).unwrap();
-		let origin = origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			session: SinkSession::new(Default::default()),
 			origin,
@@ -2061,7 +2061,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_dropped_announce_still_holds_its_path() {
 		let assigned = crate::Hop::new(777).unwrap();
-		let origin = origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			session: SinkSession::new(Default::default()),
@@ -2116,7 +2116,7 @@ mod tests {
 	async fn an_announce_reflected_by_its_sender_is_dropped() {
 		let assigned = crate::Hop::new(777).unwrap();
 
-		let origin = origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			session: SinkSession::new(Default::default()),
@@ -2156,7 +2156,7 @@ mod tests {
 	async fn a_wildcard_reflected_by_its_sender_is_dropped() {
 		let assigned = crate::Hop::new(777).unwrap();
 
-		let origin = origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			session: SinkSession::new(Default::default()),
 			origin,
@@ -2192,7 +2192,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_reflected_announce_does_not_displace_the_local_front() {
 		let relay = crate::Hop::new(1).unwrap();
-		let origin = origin::Info::new(relay).produce();
+		let origin = origin::Config::new(relay).produce();
 		let assigned = crate::Hop::new(777).unwrap();
 
 		let mut local = origin.create_broadcast("room/host").unwrap();
@@ -2276,7 +2276,7 @@ mod tests {
 		let session = SinkSession::new(Default::default());
 		let assigned = crate::Hop::new(777).unwrap();
 
-		let origin = origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			session,
@@ -2338,7 +2338,7 @@ mod tests {
 	}
 
 	fn restart_subscriber(session: SinkSession) -> (Subscriber<SinkSession>, crate::origin::Consumer) {
-		let origin = origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			session,
@@ -2399,7 +2399,7 @@ mod tests {
 	/// to the session (outliving the stream) would leak the announcement instead.
 	#[tokio::test(start_paused = true)]
 	async fn a_lost_announce_stream_retracts_the_route() {
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			session: SinkSession::new(Default::default()),
@@ -3040,7 +3040,7 @@ impl<S: crate::transport::poll::Session> TrackServeRun<S> {
 			}
 		} else {
 			// No TRACK stream, so the publisher's retention window never reaches us:
-			// the accepting side picks it (see `origin::Info::default_max_age`).
+			// the accepting side picks it (see `origin::Config::default_max_age`).
 			let info = track::Info::default().with_max_age(serve.subscriber.origin.default_max_age());
 			TrackRunState::Serve(ServeLoop::new(&serve, request, info, None))
 		};

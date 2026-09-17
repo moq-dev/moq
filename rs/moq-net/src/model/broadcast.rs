@@ -31,7 +31,7 @@ pub struct Info {
 	/// so the pool has a single home on the origin rather than being copied per
 	/// broadcast. Defaults to an unknown origin with an unbounded pool (a standalone
 	/// broadcast with no relay origin).
-	pub origin: super::origin::Info,
+	pub origin: super::origin::Config,
 
 	/// The path this broadcast is named by, which relative references in a catalog it
 	/// serves (hang's `broadcast` field) resolve against.

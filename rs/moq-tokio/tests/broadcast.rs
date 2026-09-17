@@ -1358,8 +1358,11 @@ async fn max_age_test(version: &str) -> Duration {
 	// ── subscriber (client) ─────────────────────────────────────────
 	// The origin the session writes remote broadcasts into decides the window for
 	// tracks whose protocol can't carry the publisher's.
-	let sub_origin =
-		moq_tokio::origin::spawn(moq_net::origin::Info::new(Hop::random()).with_default_max_age(MAX_AGE_DEFAULT));
+	let sub_origin = {
+		let mut config = moq_net::origin::Config::new(Hop::random());
+		config.default_max_age = MAX_AGE_DEFAULT;
+		moq_tokio::origin::spawn(config)
+	};
 	let sub_consumer = sub_origin.consume();
 	let mut announcements = sub_consumer.announced();
 

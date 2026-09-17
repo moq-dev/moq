@@ -932,7 +932,7 @@ mod tests {
 		// bound it: paused time makes the deadline fire the moment nothing else can run.
 		tokio::time::pause();
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let session = crate::lite::test_transport::ScriptedSession::new(namespace_without_hop_path(VERSION).await);
 		let log = session.log.clone();
 
@@ -981,7 +981,7 @@ mod tests {
 	/// called `run_subscribe_namespace` itself.
 	#[tokio::test]
 	async fn every_permitted_prefix_gets_its_own_subscribe_namespace() {
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let scoped = origin
 			.with_root("rootns")
 			.and_then(|rooted| rooted.scope(&[crate::Path::new("cam"), crate::Path::new("mic")]))
@@ -1033,7 +1033,7 @@ mod tests {
 	/// The scripted peer answers nothing, so an advertisement parks after writing. That is
 	/// enough: the question is only whether the bytes went out unasked.
 	async fn announce_occurrences(peer_declared: Option<peer::Peer>) -> usize {
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let _cam = origin.announce("solo-cam", crate::origin::Route::default()).unwrap();
 
 		// An open gate: an unsolicited PUBLISH_NAMESPACE can reach the wire.
@@ -1119,14 +1119,14 @@ mod tests {
 	fn the_hop_id_comes_from_whichever_origin_the_caller_set() {
 		let ours = crate::Hop::new(42).unwrap();
 
-		let publish = crate::origin::Info::new(ours).produce();
+		let publish = crate::origin::Config::new(ours).produce();
 		assert_eq!(self_origin(Some(&publish.consume()), None), ours, "the publish half");
 
-		let subscribe = crate::origin::Info::new(ours).produce();
+		let subscribe = crate::origin::Config::new(ours).produce();
 		assert_eq!(self_origin(None, Some(&subscribe)), ours, "the subscribe half alone");
 
 		// Neither half: nothing to route, so any id will do as long as it is ours.
-		let publish = crate::origin::Info::new(ours).produce();
+		let publish = crate::origin::Config::new(ours).produce();
 		assert_eq!(self_origin(Some(&publish.consume()), Some(&subscribe)), ours);
 	}
 
@@ -1145,7 +1145,7 @@ mod tests {
 		// deadline fire the moment nothing else can run.
 		tokio::time::pause();
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let log = session.log.clone();
 
 		let (driver, _goaway) = start(Config {
@@ -1209,7 +1209,7 @@ mod tests {
 	async fn dispatch_uni(payload: Vec<u8>, retired_alias: Option<u64>) -> crate::lite::test_transport::Log {
 		const VERSION: Version = Version::Draft19;
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		// The peer opens one uni stream and then goes quiet, so
 		// the loop is still running when the assertion is taken.
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![payload]);
@@ -1332,7 +1332,7 @@ mod tests {
 	async fn a_repeated_publish_namespace_done_does_not_end_the_session() {
 		const VERSION: Version = Version::Draft14;
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
 		let mut session =

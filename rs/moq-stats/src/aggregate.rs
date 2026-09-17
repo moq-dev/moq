@@ -206,7 +206,7 @@ enum Reader<V: Mergeable> {
 	/// retracting (the table has already changed), while an unqueued
 	/// `Unroutable` means nothing serves the path at all.
 	Resolving {
-		pending: Pending<origin::Requesting>,
+		pending: Pending<origin::Pending>,
 		queued: bool,
 	},
 	/// Awaiting the subscription handshake.

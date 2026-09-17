@@ -1470,7 +1470,7 @@ where
 		// Accepting at milliseconds (the default) would truncate microsecond precision.
 		//
 		// moq-transport carries no publisher retention property, so the window comes
-		// from the accepting side (see `origin::Info::default_max_age`) rather than
+		// from the accepting side (see `origin::Config::default_max_age`) rather than
 		// from the peer.
 		let info = track::Info::default()
 			.with_timescale(crate::Timescale::MICRO)
@@ -2756,7 +2756,7 @@ mod tests {
 	/// What an unsolicited advertisement means to a subscriber on `version` whose peer
 	/// declared `solicit`.
 	fn unsolicited_is_a_violation(solicit: Option<bool>, version: Version) -> bool {
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
 		let peer_setup = peer::PeerSetup::default();
 		peer_setup.set(peer::Peer {
@@ -2825,7 +2825,7 @@ mod tests {
 	/// so sending it asks for a prefix that matches nothing there.
 	#[tokio::test]
 	async fn a_rooted_subscriber_asks_for_its_scope_not_its_root() {
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let scoped = origin
 			.with_root("rootns")
 			.and_then(|rooted| rooted.scope(&[crate::Path::new("cam")]))
@@ -2896,7 +2896,7 @@ mod tests {
 	async fn a_rooted_subscriber_mounts_a_reply_under_its_root_once() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let scoped = origin
 			.with_root("rootns")
@@ -3044,7 +3044,7 @@ mod tests {
 		let subscriber = Subscriber::new(
 			TestRuntime::new(),
 			crate::lite::test_transport::SinkSession::new(Default::default()),
-			crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce(),
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
 			peer::PeerSetup::default(),
@@ -3195,7 +3195,7 @@ mod tests {
 		let mut subscriber = Subscriber::new(
 			TestRuntime::new(),
 			session,
-			crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce(),
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
 			peer::PeerSetup::default(),
@@ -3251,7 +3251,7 @@ mod tests {
 		let mut subscriber = Subscriber::new(
 			TestRuntime::new(),
 			session,
-			crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce(),
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
 			peer::PeerSetup::default(),
@@ -3356,7 +3356,7 @@ mod tests {
 		let mut subscriber = Subscriber::new(
 			TestRuntime::new(),
 			adapter,
-			crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce(),
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			control,
 			None,
 			peer::PeerSetup::default(),
@@ -3472,7 +3472,7 @@ mod tests {
 		let mut subscriber = Subscriber::new(
 			TestRuntime::new(),
 			session,
-			crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce(),
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
 			peer::PeerSetup::default(),
@@ -3570,7 +3570,7 @@ mod tests {
 		let mut subscriber = Subscriber::new(
 			TestRuntime::new(),
 			session,
-			crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce(),
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
 			peer::PeerSetup::default(),
@@ -3658,7 +3658,7 @@ mod tests {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
 		let assigned = crate::Hop::new(777).unwrap();
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let mut subscriber = Subscriber::new(
@@ -3698,7 +3698,7 @@ mod tests {
 		let peer = crate::Hop::new(777).unwrap();
 		let self_origin = crate::Hop::new(1).unwrap();
 
-		let origin = crate::origin::Info::new(self_origin).produce();
+		let origin = crate::origin::Config::new(self_origin).produce();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
@@ -3753,7 +3753,7 @@ mod tests {
 		let peer = crate::Hop::new(777).unwrap();
 		let self_origin = crate::Hop::new(1).unwrap();
 
-		let origin = crate::origin::Info::new(self_origin).produce();
+		let origin = crate::origin::Config::new(self_origin).produce();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
@@ -3801,7 +3801,7 @@ mod tests {
 		crate::origin::Producer,
 	) {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
-		let origin = crate::origin::Info::new(self_origin).produce();
+		let origin = crate::origin::Config::new(self_origin).produce();
 		let (tasks, task_set) = crate::util::TaskSet::new();
 		// The set only drains announce-serving tasks; the tests here drive the model
 		// directly, so leaking it keeps the handles alive without a spawner.
@@ -3928,7 +3928,7 @@ mod tests {
 	async fn a_lost_namespace_stream_closes_the_broadcast() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
 		// The peer answers, advertises one namespace, then the stream ends without ever
@@ -4005,7 +4005,7 @@ mod tests {
 			.unwrap();
 		let script = log.writes.lock().unwrap().clone();
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let session = crate::lite::test_transport::ScriptedSession::eof(script);
 		let (tasks, task_set) = crate::util::TaskSet::new();
@@ -4054,7 +4054,7 @@ mod tests {
 	async fn a_broken_publish_namespace_stream_closes_the_broadcast() {
 		const VERSION: Version = Version::Draft19;
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
 		// The peer sends something that does not belong on this stream, ending it with an
@@ -4401,7 +4401,7 @@ mod tests {
 		const VERSION: Version = Version::Draft19;
 		let script = publish_namespace_updates(request_id, "room/host", updates).await;
 		let session = crate::lite::test_transport::ScriptedSession::new(script);
-		let origin = crate::origin::Info::new(self_origin).produce();
+		let origin = crate::origin::Config::new(self_origin).produce();
 		let consumer = origin.consume();
 		let (tasks, task_set) = crate::util::TaskSet::new();
 		// The tests drive the loop directly, so nothing spawns; leaking keeps the
@@ -4586,7 +4586,7 @@ mod tests {
 			// An open gate, so the rejection actually reaches the wire.
 			let gate = kio::Producer::new(true);
 			let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
-			let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 			let consumer = origin.consume();
 			let (tasks, task_set) = crate::util::TaskSet::new();
 			std::mem::forget(task_set);
@@ -5107,7 +5107,7 @@ mod stitch_tests {
 	impl Harness {
 		fn new(fill: Fill, scripts: Vec<Vec<u8>>) -> Self {
 			let session = ScriptedSession::per_stream_eof(scripts);
-			let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 			let tasks = TaskSet::new();
 
 			let subscriber = Subscriber::new(

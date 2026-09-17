@@ -890,7 +890,7 @@ enum TrackInfoState {
 	/// Resolving the broadcast (may wait on a dynamic handler).
 	Request {
 		msg: lite::Track<'static>,
-		requesting: origin::Requesting,
+		requesting: origin::Pending,
 	},
 	/// Waiting for the track's info.
 	Query {
@@ -1019,7 +1019,7 @@ enum SubscribeState<S: crate::transport::poll::Session> {
 	/// Resolving the broadcast (may wait on a dynamic handler).
 	Request {
 		msg: lite::Subscribe<'static>,
-		requesting: origin::Requesting,
+		requesting: origin::Pending,
 	},
 	/// Waiting for the model subscription to be confirmed.
 	Confirm {
@@ -1245,7 +1245,7 @@ enum FetchState {
 	/// Resolving the broadcast (may wait on a dynamic handler).
 	Request {
 		msg: lite::Fetch<'static>,
-		requesting: origin::Requesting,
+		requesting: origin::Pending,
 	},
 	/// Waiting for the fetched group.
 	Fetch {
@@ -3147,7 +3147,7 @@ mod tests {
 	async fn serving_origin_falls_back_to_the_assigned_identity() {
 		let assigned = crate::Hop::new(777).unwrap();
 		let upstream = crate::Hop::new(778).unwrap();
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 
 		let mut echoed_hops = Hops::new();
 		echoed_hops.push(assigned).unwrap();
@@ -3203,7 +3203,7 @@ mod tests {
 		let assigned = crate::Hop::new(777).unwrap();
 		let clean_publisher = crate::Hop::new(778).unwrap();
 		let self_origin = crate::Hop::new(1).unwrap();
-		let origin = crate::origin::Info::new(self_origin).produce();
+		let origin = crate::origin::Config::new(self_origin).produce();
 
 		let mut tainted_hops = Hops::new();
 		tainted_hops.push(assigned).unwrap();

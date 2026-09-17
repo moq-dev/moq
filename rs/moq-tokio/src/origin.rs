@@ -10,10 +10,10 @@
 ///
 /// Panics if called outside a tokio runtime.
 ///
-/// Accepts an [`Info`](moq_net::origin::Info) or a bare
+/// Accepts a [`Config`](moq_net::origin::Config) or a bare
 /// [`Hop`](moq_net::Hop) id (which uses the default config).
-pub fn spawn(info: impl Into<moq_net::origin::Info>) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(info.into());
+pub fn spawn(config: impl Into<moq_net::origin::Config>) -> moq_net::origin::Producer {
+	let (producer, driver) = moq_net::origin::Producer::new(config.into());
 	tokio::spawn(driver.run(crate::runtime::Runtime::<()>::new()));
 	producer
 }
@@ -26,7 +26,7 @@ mod tests {
 	/// reaches a consumer, and dropping the announcement retracts it.
 	#[tokio::test]
 	async fn spawn_drives_the_origin() {
-		let origin = spawn(moq_net::origin::Info::new(moq_net::Hop::random()));
+		let origin = spawn(moq_net::origin::Config::new(moq_net::Hop::random()));
 		let mut announced = origin.consume().announced();
 
 		let mut broadcast = origin.create_broadcast("cam").expect("create broadcast");
@@ -46,6 +46,6 @@ mod tests {
 	#[test]
 	#[should_panic(expected = "no reactor running")]
 	fn spawn_outside_runtime_panics() {
-		let _ = spawn(moq_net::origin::Info::new(moq_net::Hop::random()));
+		let _ = spawn(moq_net::origin::Config::new(moq_net::Hop::random()));
 	}
 }

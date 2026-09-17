@@ -2489,7 +2489,7 @@ mod serve_tests {
 	}
 
 	fn serve(version: Version) -> Serve {
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let mut broadcast = origin.create_broadcast("room").unwrap();
 		let track = broadcast.create_track("video", None).unwrap();
 
@@ -3381,7 +3381,7 @@ mod tests {
 		Vec<crate::model::AnnounceProducer>,
 	) {
 		let other = crate::Hop::new(778).unwrap();
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
@@ -3466,7 +3466,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_declared_zero_chain_is_still_advertised_back() {
 		let assigned = crate::Hop::new(777).unwrap();
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
 		let publisher = Publisher::new(
@@ -3508,7 +3508,7 @@ mod tests {
 	async fn namespace_follows_route_eligibility_changes() {
 		let assigned = crate::Hop::new(777).unwrap();
 		let clean_publisher = crate::Hop::new(778).unwrap();
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 
 		let gate = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(gate.consume());
@@ -3603,7 +3603,7 @@ mod tests {
 	async fn a_refusal_that_forbids_retrying_is_not_retried() {
 		const VERSION: Version = Version::Draft17;
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let _cam = origin.announce("lonely-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
@@ -3689,7 +3689,7 @@ mod tests {
 	async fn v14_subscribe_namespace_is_answered_with_publish_namespace() {
 		const VERSION: Version = Version::Draft14;
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
 		// Announced before the peer subscribes: it must only hit the wire after.
@@ -3775,7 +3775,7 @@ mod tests {
 	async fn a_peer_that_declared_nothing_is_told_unsolicited() {
 		const VERSION: Version = Version::Draft17;
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let _local = origin.announce("local-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
@@ -3821,7 +3821,7 @@ mod tests {
 	async fn advertise_both_ways(solicit: Option<bool>) -> (usize, usize) {
 		const VERSION: Version = Version::Draft17;
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
@@ -3893,7 +3893,7 @@ mod tests {
 	async fn a_parked_open_still_lets_a_namespace_be_withdrawn() {
 		const VERSION: Version = Version::Draft14;
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let first = origin.announce("first-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
@@ -3973,7 +3973,7 @@ mod tests {
 	async fn a_namespace_that_stops_being_advertisable_stops_being_deferred() {
 		let assigned = crate::Hop::new(777).unwrap();
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 
 		// A route that already passed through us must never be forwarded: `select`
 		// wants nothing, which is what the peer already holds.
@@ -4015,7 +4015,7 @@ mod tests {
 	async fn a_route_change_still_waits_out_a_refusal() {
 		const VERSION: Version = Version::Draft17;
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let cam = origin.announce("solo-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
@@ -4076,7 +4076,7 @@ mod tests {
 	async fn a_modern_withdrawal_is_the_fin_alone() {
 		const VERSION: Version = Version::Draft17;
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let cam = origin.announce("solo-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
@@ -4129,7 +4129,7 @@ mod tests {
 	async fn a_silent_answer_still_lets_the_next_namespace_be_advertised() {
 		const VERSION: Version = Version::Draft14;
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let _first = origin.announce("first-cam", crate::origin::Route::default()).unwrap();
 		let _second = origin.announce("second-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
@@ -4177,7 +4177,7 @@ mod tests {
 	async fn a_namespace_refused_a_stream_is_retried_on_its_own() {
 		const VERSION: Version = Version::Draft14;
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let _cam = origin.announce("lonely-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
@@ -4242,7 +4242,7 @@ mod tests {
 	}
 
 	fn harness(version: Version) -> Harness {
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]);
 		let log = session.log.clone();
 

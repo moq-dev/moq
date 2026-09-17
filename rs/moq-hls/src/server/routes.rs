@@ -357,11 +357,11 @@ mod tests {
 		lite_pair_pub(moq_net::Hop::random()).await
 	}
 
-	async fn lite_pair_pub(info: impl Into<moq_net::origin::Info>) -> LitePair {
+	async fn lite_pair_pub(config: impl Into<moq_net::origin::Config>) -> LitePair {
 		use std::net::TcpListener;
 
 		let lite: moq_net::Version = "moq-lite-05".parse().expect("lite version");
-		let pub_origin = moq_tokio::origin::spawn(info);
+		let pub_origin = moq_tokio::origin::spawn(config);
 		let sub_origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 
 		for _ in 0..20 {
@@ -480,7 +480,12 @@ mod tests {
 	#[tokio::test]
 	async fn a_session_crossed_cache_miss_answers_404() {
 		let pool = moq_net::cache::Pool::new(moq_net::cache::Config::default().with_capacity(1));
-		let pair = lite_pair_pub(moq_net::origin::Info::new(moq_net::Hop::random()).with_pool(pool)).await;
+		let pair = lite_pair_pub({
+			let mut config = moq_net::origin::Config::new(moq_net::Hop::random());
+			config.pool = pool;
+			config
+		})
+		.await;
 		let mut broadcast = pair.pub_origin.create_broadcast("live").expect("publish");
 		broadcast.announce(Default::default()).expect("announce");
 		let (_catalog, _registration, _track, mut media) = publish_video(&mut broadcast, video_config(), None);

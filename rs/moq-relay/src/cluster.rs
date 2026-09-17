@@ -874,11 +874,12 @@ impl Cluster {
 		};
 		let deprecated = config.deprecated();
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
-		let mut info = origin::Info::new(id);
+		let mut origin_config = origin::Config::new(id);
 		if let Some(cache) = cache {
-			info = info.with_pool(cache.pool).with_cache_duration(cache.duration);
+			origin_config.pool = cache.pool;
+			origin_config.cache_duration = cache.duration;
 		}
-		let origin = moq_tokio::origin::spawn(info);
+		let origin = moq_tokio::origin::spawn(origin_config);
 		let nodes = crate::nodes::Nodes::new(origin.clone());
 		tracing::info!(hop_id = %origin.id(), configured = config.id.is_some(), "cluster initialized");
 		Ok(Cluster {
@@ -2503,8 +2504,8 @@ mod tests {
 
 		let origin = cluster.origin.clone();
 		assert_eq!(origin.id(), 42);
-		assert_eq!(origin.info().cache_duration, duration);
-		assert_eq!(origin.info().pool.expiry(), Some(duration));
+		assert_eq!(origin.config().cache_duration, duration);
+		assert_eq!(origin.config().pool.expiry(), Some(duration));
 
 		let stats = crate::StatsConfig {
 			enabled: true,
@@ -2515,8 +2516,8 @@ mod tests {
 		let cluster = cluster.with_stats(stats);
 
 		assert_eq!(cluster.origin.id(), origin.id());
-		assert_eq!(cluster.origin.info().cache_duration, duration);
-		assert_eq!(cluster.origin.info().pool.expiry(), Some(duration));
+		assert_eq!(cluster.origin.config().cache_duration, duration);
+		assert_eq!(cluster.origin.config().pool.expiry(), Some(duration));
 
 		let mut broadcast = origin.create_broadcast("cam").expect("create");
 		broadcast.announce(Default::default()).expect("announce");

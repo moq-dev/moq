@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - [**breaking**] `connection::Monitor::presence` reports `sessions_started` / `sessions_ended`.
+- `origin::spawn` takes an `origin::Config` (formerly `origin::Info`) or a bare `Hop`.
 
 ### Added
 

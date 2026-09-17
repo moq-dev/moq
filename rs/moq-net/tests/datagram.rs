@@ -20,7 +20,7 @@ const PAYLOAD: &[u8] = b"datagram payload";
 
 /// Build an origin producer, spawning its driver on the ambient runtime.
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Info::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
 	tokio::spawn(driver.run(TokioRuntime::<()>::new()));
 	producer
 }

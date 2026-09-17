@@ -60,7 +60,7 @@ impl Source {
 	}
 
 	/// Begin resolving the catalog broadcast (the one at this source's path).
-	pub(crate) fn request_catalog(&self) -> kio::Pending<moq_net::origin::Requesting> {
+	pub(crate) fn request_catalog(&self) -> kio::Pending<moq_net::origin::Pending> {
 		self.origin.request_broadcast(&self.path)
 	}
 
@@ -100,7 +100,7 @@ impl Source {
 	pub(crate) fn request(
 		&self,
 		rel: Option<&moq_net::PathRelative<'_>>,
-	) -> crate::Result<kio::Pending<moq_net::origin::Requesting>> {
+	) -> crate::Result<kio::Pending<moq_net::origin::Pending>> {
 		Ok(self.origin.request_broadcast(&self.target(rel)?))
 	}
 
@@ -113,7 +113,7 @@ impl Source {
 	pub(crate) fn try_request(
 		&self,
 		rel: Option<&moq_net::PathRelative<'_>>,
-	) -> Option<kio::Pending<moq_net::origin::Requesting>> {
+	) -> Option<kio::Pending<moq_net::origin::Pending>> {
 		Some(self.origin.request_broadcast(&self.resolve_reference(rel)?))
 	}
 
@@ -222,7 +222,7 @@ enum Bound {
 	/// A broadcast the caller already holds.
 	Ready(moq_net::broadcast::Consumer),
 	/// A request issued when the binding was made.
-	Requested(moq_net::origin::Requesting),
+	Requested(moq_net::origin::Pending),
 }
 
 impl Binding {

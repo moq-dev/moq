@@ -85,7 +85,7 @@ impl Hop {
 /// bump), so it's stored by value rather than behind another `Arc`.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
-pub struct Info {
+pub struct Config {
 	/// The origin's wire identity, appended to broadcast hop chains for loop
 	/// detection and shortest-path routing.
 	pub id: Hop,
@@ -94,7 +94,7 @@ pub struct Info {
 	/// down the ownership chain (origin -> broadcast -> track -> group): a track opens
 	/// an account against it, and its groups charge through that. It has no byte target
 	/// and uses [`cache::DEFAULT_EXPIRY`] by default; a relay sets a shared configured
-	/// pool (via [`Self::with_pool`]) so cached groups across the whole process share
+	/// pool (assign [`Self::pool`]) so cached groups across the whole process share
 	/// one policy.
 	pub pool: cache::Pool,
 
@@ -119,7 +119,7 @@ pub struct Info {
 	pub default_max_age: Duration,
 }
 
-impl Default for Info {
+impl Default for Config {
 	/// An unknown origin (id `0`, no loop detection) with no byte target and the
 	/// default idle expiry. This is what a standalone broadcast inherits.
 	fn default() -> Self {
@@ -133,35 +133,15 @@ impl Default for Info {
 	}
 }
 
-impl Info {
+impl Config {
 	/// Config for the given origin id with no byte target and the default idle expiry.
 	pub fn new(id: Hop) -> Self {
 		Self { id, ..Self::default() }
 	}
-
-	/// Set the cache pool this origin's broadcasts inherit, returning `self` for chaining.
-	pub fn with_pool(mut self, pool: cache::Pool) -> Self {
-		self.pool = pool;
-		self
-	}
-
-	/// Set the retention ceiling (see [`Self::cache_duration`]) applied to every track
-	/// under this origin, returning `self` for chaining.
-	pub fn with_cache_duration(mut self, cache_duration: Duration) -> Self {
-		self.cache_duration = cache_duration;
-		self
-	}
-
-	/// Set the retention window (see [`Self::default_max_age`]) used for tracks whose
-	/// publisher advertises none, returning `self` for chaining.
-	pub fn with_default_max_age(mut self, default_max_age: Duration) -> Self {
-		self.default_max_age = default_max_age;
-		self
-	}
 }
 
-impl From<Hop> for Info {
-	/// Config for the given origin id with the defaults of [`Info::new`].
+impl From<Hop> for Config {
+	/// Config for the given origin id with the defaults of [`Config::new`].
 	fn from(id: Hop) -> Self {
 		Self::new(id)
 	}
@@ -1065,11 +1045,11 @@ pub struct Producer {
 	pool: cache::Pool,
 
 	// Retention ceiling inherited by broadcasts created under this origin (see
-	// [`Info::cache_duration`]). `Duration::MAX` (no ceiling) by default.
+	// [`Config::cache_duration`]). `Duration::MAX` (no ceiling) by default.
 	cache_duration: Duration,
 
 	// Retention window for a track whose publisher advertises none (see
-	// [`Info::default_max_age`]).
+	// [`Config::default_max_age`]).
 	default_max_age: Duration,
 
 	// Ingress stats context. Broadcasts created through this producer are attributed
@@ -1095,7 +1075,7 @@ impl std::ops::Deref for Producer {
 }
 
 impl Producer {
-	/// Build a producer from an [`Info`] (identity + cache pool) with no scoped
+	/// Build a producer from a [`Config`] (identity + cache pool) with no scoped
 	/// prefix and no pre-existing broadcasts, paired with the [`Driver`] that runs
 	/// the origin's lifecycle work.
 	///
@@ -1103,20 +1083,20 @@ impl Producer {
 	/// returned [`Run`] (spawn it, await it, or step [`Run::poll`]) for the
 	/// origin to make progress; see the [`Driver`] docs for the exact contract.
 	/// `moq_tokio::origin::spawn` wraps this for tokio callers.
-	pub fn new(info: Info) -> (Self, Driver) {
+	pub fn new(config: Config) -> (Self, Driver) {
 		let (tasks, set) = TaskSet::new();
 		let nodes = OriginNodes::default();
 		let shared = kio::Shared::<OriginState>::default();
 		let timers = TimersSlot::default();
-		let pool = info.pool.clone();
+		let pool = config.pool.clone();
 		let producer = Self {
-			info: info.id,
+			info: config.id,
 			nodes: nodes.clone(),
 			root: PathOwned::default(),
 			shared: shared.clone(),
-			pool: info.pool,
-			cache_duration: info.cache_duration,
-			default_max_age: info.default_max_age,
+			pool: config.pool,
+			cache_duration: config.cache_duration,
+			default_max_age: config.default_max_age,
 			stats: stats::Session::default(),
 			tasks,
 			timers: timers.clone(),
@@ -1143,10 +1123,10 @@ impl Producer {
 		self
 	}
 
-	/// This origin's [`Info`] (identity + cache pool), the parent handle a broadcast
+	/// This origin's [`Config`] (identity + cache pool), the parent handle a broadcast
 	/// created under this origin carries (see [`broadcast::Info::origin`]).
-	pub fn info(&self) -> Info {
-		Info {
+	pub fn config(&self) -> Config {
+		Config {
 			id: self.info,
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
@@ -1155,7 +1135,7 @@ impl Producer {
 	}
 
 	// The retention window for a track whose publisher advertises none (see
-	// [`Info::default_max_age`]). Cheaper than `info()`, which clones the pool.
+	// [`Config::default_max_age`]). Cheaper than `config()`, which clones the pool.
 	pub(crate) fn default_max_age(&self) -> Duration {
 		self.default_max_age
 	}
@@ -1259,7 +1239,7 @@ impl Producer {
 		};
 
 		let source = broadcast::Info {
-			origin: self.info(),
+			origin: self.config(),
 			path: full.clone(),
 		}
 		.produce()
@@ -1269,7 +1249,7 @@ impl Producer {
 
 		// Attach synchronously: the source is visible to exact lookups before this
 		// returns; only lifecycle work needs the driver.
-		let origin = self.info();
+		let origin = self.config();
 		let ctx = AttachContext {
 			origin: &origin,
 			tree: &tree,
@@ -1311,7 +1291,7 @@ impl Producer {
 		let full = self.root.join(&path).to_owned();
 		let ingress = self.stats.ingress(&full);
 		broadcast::Info {
-			origin: self.info(),
+			origin: self.config(),
 			path: full,
 		}
 		.produce()
@@ -2071,7 +2051,7 @@ async fn run_source(task: SourceTask) {
 
 /// Everything about a source's attach that does not change between attempts.
 struct AttachContext<'a> {
-	origin: &'a Info,
+	origin: &'a Config,
 	/// The origin's tree root: the one node pruning never removes, so the leaf is
 	/// resolved from here rather than pinned by a handle that a prune can orphan.
 	tree: &'a Lock<OriginNode>,
@@ -3283,7 +3263,7 @@ impl Drop for Request {
 /// immediately when the broadcast was already announced, or once an [`Dynamic`]
 /// handler serves the request. Resolves to an error if the request is rejected or every
 /// handler drops before serving it.
-pub struct Requesting {
+pub struct Pending {
 	inner: RequestState,
 	// The path the requester asked for, relative to its cursor's root. Stamped on the
 	// resolved broadcast (see [`broadcast::Info::path`]) because a handler is free to
@@ -3307,7 +3287,7 @@ enum RequestState {
 	Pending(kio::Consumer<PendingBroadcast>),
 }
 
-impl Requesting {
+impl Pending {
 	fn ready(broadcast: broadcast::Consumer) -> Self {
 		Self::new(RequestState::Ready(broadcast))
 	}
@@ -3316,7 +3296,7 @@ impl Requesting {
 		Self::new(RequestState::Failed(error))
 	}
 
-	fn pending(consumer: kio::Consumer<PendingBroadcast>) -> Self {
+	fn queued(consumer: kio::Consumer<PendingBroadcast>) -> Self {
 		Self::new(RequestState::Pending(consumer))
 	}
 
@@ -3385,7 +3365,7 @@ impl Requesting {
 	}
 }
 
-impl kio::Pollable for Requesting {
+impl kio::Pollable for Pending {
 	type Output = Result<broadcast::Consumer, Error>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
@@ -3481,7 +3461,7 @@ pub struct Consumer {
 
 	// The origin config remote fronts inherit (identity, cache pool, retention),
 	// mirroring what `create_broadcast` gives a local front.
-	origin: Info,
+	origin: Config,
 
 	// Non-owning submission handle to the origin's [`Driver`], for the front
 	// watcher a routed `request_broadcast` spawns. Non-owning so a lingering
@@ -3510,7 +3490,7 @@ impl Consumer {
 			shared: producer.shared.clone(),
 			stats,
 			exclude: None,
-			origin: producer.info(),
+			origin: producer.config(),
 			tasks: producer.tasks.downgrade(),
 			timers: producer.timers.clone(),
 		}
@@ -3722,7 +3702,7 @@ impl Consumer {
 	/// A route claims capability, not inventory: resolving a covered path
 	/// succeeds optimistically, and a path that names nothing surfaces as
 	/// [`Error::NotFound`] on its tracks instead.
-	pub fn request_broadcast(&self, path: impl AsPath) -> kio::Pending<Requesting> {
+	pub fn request_broadcast(&self, path: impl AsPath) -> kio::Pending<Pending> {
 		let path = path.as_path();
 
 		// Key requests by absolute path so scoped/rooted consumers and handlers
@@ -3737,20 +3717,20 @@ impl Consumer {
 
 		// A local broadcast at the exact path wins.
 		if let Some(broadcast) = self.resolve(&path) {
-			let resolved = Requesting::ready(broadcast).with_path(requested).with_stats(scope);
+			let resolved = Pending::ready(broadcast).with_path(requested).with_stats(scope);
 			return kio::Pending::new(resolved);
 		}
 
 		// Routes only cover paths within this consumer's scope.
 		if self.nodes.get(&path).is_none() {
-			return kio::Pending::new(Requesting::failed(Error::Unroutable));
+			return kio::Pending::new(Pending::failed(Error::Unroutable));
 		}
 
 		let mut state = self.shared.lock();
 
 		// The origin's driver dropped: nothing will ever serve this.
 		if state.closed {
-			return kio::Pending::new(Requesting::failed(Error::Closed));
+			return kio::Pending::new(Pending::failed(Error::Closed));
 		}
 
 		// Join the live front for this path and exclusion, if any: its watcher
@@ -3760,7 +3740,7 @@ impl Consumer {
 		// for as long as its session does.
 		let key = (absolute.clone(), self.exclude);
 		if let Some(front) = state.fronts.get(&key) {
-			let pending = Requesting::pending(front.request.consume())
+			let pending = Pending::queued(front.request.consume())
 				.with_path(requested)
 				.with_stats(scope)
 				.with_generation(state.generation);
@@ -3772,7 +3752,7 @@ impl Consumer {
 			.best_route(&absolute.as_path(), self.exclude, None, &HashSet::new())
 			.is_none()
 		{
-			return kio::Pending::new(Requesting::failed(Error::Unroutable));
+			return kio::Pending::new(Pending::failed(Error::Unroutable));
 		}
 
 		// A route covers the path: mint the front and hand its watcher the
@@ -3811,7 +3791,7 @@ impl Consumer {
 			timers: self.timers.clone(),
 		}));
 		kio::Pending::new(
-			Requesting::pending(consumer)
+			Pending::queued(consumer)
 				.with_path(requested)
 				.with_stats(scope)
 				.with_generation(generation),
@@ -4066,7 +4046,7 @@ pub(crate) trait ProduceTest {
 }
 
 #[cfg(test)]
-impl ProduceTest for Info {
+impl ProduceTest for Config {
 	fn produce(self) -> Producer {
 		let (producer, driver) = Producer::new(self);
 		if tokio::runtime::Handle::try_current().is_ok() {
@@ -4083,7 +4063,7 @@ impl ProduceTest for Info {
 #[cfg(test)]
 impl ProduceTest for Hop {
 	fn produce(self) -> Producer {
-		Info::new(self).produce()
+		Config::new(self).produce()
 	}
 }
 
@@ -5003,7 +4983,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn teardown_ends_everything() {
-		let (producer, driver) = Producer::new(Info::new(origin(1)));
+		let (producer, driver) = Producer::new(Config::new(origin(1)));
 		let consumer = producer.consume();
 		let _announcement = producer.announce("room", Route::default()).unwrap();
 		let mut announced = consumer.announced();
@@ -5135,7 +5115,7 @@ mod tests {
 	/// drops, however many read handles remain.
 	#[tokio::test]
 	async fn driver_resolves_with_live_consumers() {
-		let (producer, driver) = Producer::new(Info::new(origin(1)));
+		let (producer, driver) = Producer::new(Config::new(origin(1)));
 		let consumer = producer.consume();
 		let run = driver.run(crate::runtime::tokio_test::Tokio::<()>::new());
 		drop(producer);
@@ -5496,7 +5476,11 @@ mod tests {
 	/// Mint an origin whose pool reclaims idle content after `expiry`.
 	fn expiring_origin(expiry: Duration) -> Producer {
 		let pool = cache::Pool::new(cache::Config::default().with_expiry(expiry));
-		Info::default().with_pool(pool).produce()
+		Config {
+			pool,
+			..Config::default()
+		}
+		.produce()
 	}
 
 	/// A publisher that stalls with a group still open runs no write path, so the
@@ -5535,7 +5519,11 @@ mod tests {
 	/// window keeps idle content until byte pressure takes it, sweep or no sweep.
 	#[tokio::test(start_paused = true)]
 	async fn sweep_respects_a_disabled_expiry() {
-		let origin = Info::default().with_pool(cache::Pool::unbounded()).produce();
+		let origin = Config {
+			pool: cache::Pool::unbounded(),
+			..Config::default()
+		}
+		.produce();
 		let mut broadcast = origin.create_broadcast("test").unwrap();
 		let mut track = broadcast.create_track("video", None).unwrap();
 
