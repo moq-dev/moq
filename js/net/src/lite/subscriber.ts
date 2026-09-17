@@ -5,7 +5,7 @@ import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
 import * as netGroup from "../group.ts";
-import { Cost, type Hop, isAnonymous, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
+import { Cost, type Hop, isAnonymous, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { scopePrefix } from "../internal.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
@@ -394,6 +394,13 @@ export class Subscriber {
 						: [...(hops ?? [])];
 				// A received empty list is the anonymous mark, not a local announcement.
 				if (fullHops.length === 0) fullHops.push(UNKNOWN_HOP);
+				// Appending a withheld AnnounceOk(0) onto a 32-entry list is the same
+				// drop Rust's Hops::push makes: do not expose an overlong chain.
+				if (fullHops.length > MAX_HOPS) {
+					console.debug(`announced: broadcast=${claim.text} dropped (hop chain at MAX_HOPS)`);
+					advertised.set(pattern.text, { publisher: undefined, live: false });
+					continue;
+				}
 				const route: Route = { hops: fullHops, cost: cost ?? Cost.zero };
 				const anonymous = isAnonymous(route);
 
