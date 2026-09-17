@@ -5758,7 +5758,7 @@ mod joining_fetch_tests {
 			let subscriber = Subscriber::new(
 				TestRuntime::new(),
 				session.clone(),
-				crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce(),
+				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 				Control::new(None, false),
 				None,
 				peer::PeerSetup::default(),
@@ -5903,7 +5903,7 @@ mod joining_fetch_tests {
 		let mut subscriber = Subscriber::new(
 			TestRuntime::new(),
 			session,
-			crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce(),
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
 			peer::PeerSetup::default(),
