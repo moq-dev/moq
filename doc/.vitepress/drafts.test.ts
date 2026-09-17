@@ -45,8 +45,17 @@ describe("kramdown constructs are translated", () => {
 		// just a typo. The rest would render as literal punctuation.
 		expect(body).not.toInclude("{{");
 		expect(body).not.toMatch(/^\{:/m);
-		expect(body).not.toMatch(/^--- (abstract|middle|back)$/m);
+		expect(body).not.toMatch(/^--- (abstract|note_\S+|middle|back)$/m);
 		expect(body).not.toInclude("{::boilerplate");
+	});
+});
+
+describe("front-matter notes render", () => {
+	test.each(pages.map((p) => [p.name, p] as const))("%s", (_name, page) => {
+		// Every draft carries the AI attribution note. Without a translator case
+		// the marker line would land in the abstract as literal text.
+		expect(content(page)).toInclude("\n## Note to Readers\n");
+		expect(html(page)).toInclude('<h2 id="note-to-readers"');
 	});
 });
 
