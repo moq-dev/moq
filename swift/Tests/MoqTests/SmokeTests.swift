@@ -63,12 +63,12 @@ final class SmokeTests: XCTestCase {
 
         let announced = try origin.consume().announced(prefix: "")
         let first = try await announced.next()
-        XCTAssertEqual(first?.path, "live")
+        XCTAssertEqual(first?.pattern, "live")
         XCTAssertEqual(first?.active, true)
 
         try broadcast.unannounce()
         let retracted = try await announced.next()
-        XCTAssertEqual(retracted?.path, "live")
+        XCTAssertEqual(retracted?.pattern, "live")
         XCTAssertEqual(retracted?.active, false)
         _ = try await origin.consume().requestBroadcast(path: "live")
     }

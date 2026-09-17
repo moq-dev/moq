@@ -165,7 +165,7 @@ func (a *AnnounceUpdate) Pattern() string {
 }
 
 // Active reports whether the route is active (true) or was retracted (false).
-// A repeated active announcement for the same path is a metadata update.
+// A repeated active announcement for the same pattern is a metadata update.
 func (a *AnnounceUpdate) Active() bool {
 	return a.inner.Active()
 }

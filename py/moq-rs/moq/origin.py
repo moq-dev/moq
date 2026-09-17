@@ -41,7 +41,7 @@ class AnnounceUpdate:
     def active(self) -> bool:
         """Whether the route is active (``True``) or was retracted (``False``).
 
-        A repeated active announcement for the same path is a metadata update.
+        A repeated active announcement for the same pattern is a metadata update.
         """
         return self._inner.active()
 

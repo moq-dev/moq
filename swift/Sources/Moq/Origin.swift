@@ -181,7 +181,7 @@ public final class AnnounceUpdate: Sendable {
     }
 
     /// Whether the route is active (`true`) or was retracted (`false`). A
-    /// repeated active announcement for the same path is a metadata update.
+    /// repeated active announcement for the same pattern is a metadata update.
     public var active: Bool {
         ffi.active()
     }

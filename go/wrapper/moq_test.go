@@ -321,7 +321,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 		t.Fatal("expected an announcement")
 	}
 	if ann.Pattern() != "live" {
-		t.Fatalf("path = %q, want %q", ann.Pattern(), "live")
+		t.Fatalf("pattern = %q, want %q", ann.Pattern(), "live")
 	}
 	if !ann.Active() {
 		t.Fatal("expected an active announcement")
