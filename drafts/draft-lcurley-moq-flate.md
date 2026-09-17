@@ -95,12 +95,12 @@ A sync flush is `Z_SYNC_FLUSH` in zlib and its ports, so this format needs no DE
 
 # Declaring Compression {#declare}
 The FLATE property declares that every object payload on a track is compressed per this document.
-It is a track-level Key-Value-Pair ({{moqt}} Section 2.5), carried with the track's properties and delivered in SUBSCRIBE_OK or TRACK_STATUS ({{moqt}} Section 12).
+It is a track-level Key-Value-Pair ({{moqt}} Section 8.3), carried in the Track Properties of PUBLISH, SUBSCRIBE_OK, FETCH_OK, and TRACK_STATUS_OK ({{moqt}} Section 8.4).
 Because the value is a single integer, FLATE uses an even Type so the value is a bare varint with no length prefix:
 
 ~~~
 FLATE Track Property {
-  Type (vi64) = 0xF1A7E
+  Type (vi64) = 0x7F1A
   Value (vi64) = 1
 }
 ~~~
@@ -113,12 +113,13 @@ A consumer MUST treat any other value as malformed and reject the track.
 Absence means the track is uncompressed.
 A consumer MUST NOT infer compression from the payload bytes: raw DEFLATE has no magic number, and a wrong guess yields plausible garbage.
 
-The property is fixed for the lifetime of the track and MUST NOT change; compression is a property of the track's encoding, not of one subscription.
-A relay MUST forward the property unchanged and MUST NOT compress or decompress on an endpoint's behalf.
+FLATE is a Mandatory Track Property ({{moqt}} Section 3.6), which is what makes the declaration safe.
+An endpoint that does not understand it refuses the track with UNSUPPORTED_EXTENSION rather than handing compressed bytes to its application, so a consumer predating this document fails loudly instead of decoding garbage.
+The cost is borne by relays: one that has never heard of this document declines to forward a compressed track at all.
+Understanding FLATE at a relay means no more than recognizing the property, since payloads stay opaque; a relay MUST NOT compress or decompress on an endpoint's behalf.
 
-This is a declaration, not a negotiation.
-{{moqt}} has a receiver ignore a property it does not understand, so the property alone does not stop a consumer that has never heard of this document from handing compressed bytes to its application.
-A publisher therefore compresses a track only where the application expects compressed tracks, and sends the property so that a consumer that does implement this document never has to derive the encoding from a name.
+The property is fixed for the lifetime of the track and MUST NOT change; compression is a property of the track's encoding, not of one subscription.
+It MUST appear at most once, either in the Track Properties or inside Immutable Properties ({{moqt}} Section 10.7), which suits a value that never changes.
 
 An application whose transport has no track properties, such as {{moql}}, declares compression out of band instead: a catalog field, or a name convention such as the `.z` track-name suffix of {{hang}}.
 Either way the declaration is explicit.
@@ -136,19 +137,22 @@ A few bytes can inflate to gigabytes, so a consumer MUST bound the decompressed 
 A consumer SHOULD also bound the number of scopes it decompresses concurrently, because each holds a window (up to 32 KiB) for as long as its subgroup is open.
 
 Compression changes an endpoint's traffic profile, which may reveal properties of the content to an observer that plaintext sizes would not.
-It gives a relay no new access: payloads stay opaque, and a relay that implements nothing in this document forwards a compressed track correctly.
+It gives a relay no new access, since payloads stay opaque either way.
+A relay that has never heard of this document refuses to forward a compressed track ({{declare}}), which costs availability rather than confidentiality.
 
 
 # IANA Considerations
 
-This document requests one registration in the "MOQ Properties" registry ({{moqt}} Section 15.8), whose policy is Specification Required.
-A high, distinctive value is requested to avoid the low ranges reserved by {{moqt}} and to minimize collisions with provisional registrations by other extensions; it also avoids the greasing pattern (`0x7f * N + 0x9D`).
+This document requests one registration in the "MOQ Properties" registry ({{moqt}} Section 16.8).
 
-| Value   | Name  | Scope | Reference     |
-|:--------|:------|:------|:--------------|
-| 0xF1A7E | FLATE | Track | This Document |
+| Value  | Name  | Scope | Reference     |
+|:-------|:------|:------|:--------------|
+| 0x7F1A | FLATE | Track | This Document |
 
-The Type is even, so the value is a bare varint with no length prefix (see {{moqt}} Section 2.5).
+The value falls in the `0x4000` to `0x7FFF` range {{moqt}} reserves for Mandatory Track Properties, which require Track scope: a consumer that does not understand FLATE cannot decode the track at all, so refusing it is the only safe behavior.
+Within that range a high, distinctive value is requested to minimize collisions with provisional registrations by other extensions.
+The Type is even, so the value is a bare varint with no length prefix ({{moqt}} Section 8.3).
+
 This document defines only the values 0 and 1.
 An extension that specifies a different compression algorithm registers its own property rather than overloading this one, so that a consumer never has to understand an algorithm to know it cannot decode the track.
 

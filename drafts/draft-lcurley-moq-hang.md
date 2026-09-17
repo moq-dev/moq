@@ -18,6 +18,14 @@ author:
 
 normative:
   moql: I-D.lcurley-moq-lite
+  moqflate:
+    title: "MoQ DEFLATE Extension"
+    target: https://datatracker.ietf.org/doc/draft-lcurley-moq-flate/
+    author:
+      -
+        ins: L. Curley
+        name: Luke Curley
+    date: false
   webcodecs:
     title: "WebCodecs"
     target: https://www.w3.org/TR/webcodecs/
@@ -356,12 +364,8 @@ Each frame is a Low Overhead Container frame {{!I-D.ietf-moq-loc}}: a property b
 # Compression {#compression}
 Some metadata tracks are compressed, conventionally marked with a `.z` suffix on the track name.
 
-Each group is one raw DEFLATE stream ({{!RFC1951}}), sync-flushed at each frame boundary.
-Each frame is therefore a self-delimited, byte-aligned slice, while later frames compress against the earlier ones in the same group.
-A consumer MUST decompress a group's frames in order, starting from the first.
-
-A sync flush ends with the empty-block marker `0x00 0x00 0xff 0xff`.
-A publisher MUST omit this trailing marker from each frame and a consumer MUST append it before decompressing, the same trick as permessage-deflate ({{!RFC7692, Section 7.2.1}}).
+Such a track is compressed per {{moqflate}}, whose compression scope is the group: each group is one raw DEFLATE stream, sync-flushed at each frame boundary, and a consumer MUST decompress its frames in order starting from the first.
+The `.z` suffix is the declaration; the FLATE track property is not used here.
 
 
 # Timeline {#timeline}
