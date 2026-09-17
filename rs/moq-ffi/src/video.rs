@@ -360,7 +360,7 @@ impl MoqVideoProducer {
 	/// Flush any frames the codec is still holding and finalize the track.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let mut producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
+		let producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
 		// Stop following and release the share before draining, so siblings can
 		// take the room while the last frames go out.
 		self.follow.lock().unwrap().take();
