@@ -1,3 +1,5 @@
+//! The reconnect loop around a session, and the [`Monitor`] that observes it.
+
 use std::task::{Poll, ready};
 use std::time::Duration;
 

@@ -34,7 +34,6 @@ pub use moq_sock::bind;
 pub mod cli;
 pub mod client;
 pub mod connect;
-#[doc = "Connection lifecycle and monitoring across reconnects."]
 pub mod connection;
 mod crypto;
 mod deprecated;
