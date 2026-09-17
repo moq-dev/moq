@@ -39,8 +39,7 @@ pub enum Compression {
 }
 
 impl Compression {
-	/// Whether frames are DEFLATE-compressed.
-	pub const fn is_deflate(self) -> bool {
+	pub(crate) const fn is_deflate(self) -> bool {
 		matches!(self, Self::Deflate)
 	}
 }

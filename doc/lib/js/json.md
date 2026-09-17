@@ -24,7 +24,7 @@ import { Snapshot } from "@moq/json";
 const producer = new Snapshot.Producer({ track, compression: "deflate" });
 producer.update({ hello: "world" });
 
-const consumer = new Snapshot.Consumer({ track, compression: "deflate" });
+const consumer = new Snapshot.Consumer({ track: track.subscribe(), compression: "deflate" });
 for await (const value of consumer) {
     console.log(value);
 }
