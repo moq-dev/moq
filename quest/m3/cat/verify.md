@@ -52,7 +52,7 @@ rather than a set of prefixed names; `@moq/auth` stays flat.
   bare `**` with nothing appended. A field value containing `/` or `*`
   cannot be a segment and refuses the token naming the scope. `f*` and `*f`
   are patterns the relay only admits once [Origin
-  scopes](/quest/m2/path-patterns/origin.md) lifts its prefix-shaped
+  scopes](/quest/m1/api-origin-scopes.md) lifts its prefix-shaped
   adapter, which is why that quest is required here. A scope with a track match is refused naming the scope.
   `exp` is `expires`, `moqt-reval` is
   `revalidate`, and `Grant::validate` keeps refusing a cadence without an
@@ -85,7 +85,7 @@ gain flags. Wire: none.
 
 ## Required
 
-- [Origin scopes](/quest/m2/path-patterns/origin.md) - the relay admits
+- [Origin scopes](/quest/m1/api-origin-scopes.md) - the relay admits
   `f*` and `*f` grants only after it
 - [Setup token](/quest/m3/cat/setup-token.md) - the token reaches the
   server's request
