@@ -125,12 +125,13 @@ type handle interface {
 
 // run races a blocking FFI call against ctx.
 //
-// Generated async calls take context.Context and cancel the UniFFI future
-// themselves. `cancel` is the object's own cancel() for a call that owns a
-// stream, session, or listener, so a cancelled Next still ends the stream and a
-// cancelled Connect still tears the client down. The blocked goroutine then
-// unwinds on its own; the result channel is buffered so its send never blocks
-// and it can't leak.
+// `cancel` is the object's own cancel() for a call that owns a stream, session,
+// or listener, so a cancelled Next still ends the stream and a cancelled Connect
+// still tears the client down. The generated binding is given a context that
+// does not cancel with the caller (see objectCallContext); otherwise it can
+// return ctx.Err() into the result channel first and skip that abort. The
+// blocked goroutine then unwinds on its own; the result channel is buffered so
+// its send never blocks and it can't leak.
 //
 // release, for a call that returns a native handle, disposes of a result nobody
 // received. Cancelling is not a retraction: select picks at random when the
@@ -184,7 +185,7 @@ func run[T any](ctx context.Context, cancel func(), call func() (T, error), rele
 // cancel is the object's own cancel() for a call that owns its stream, session,
 // or listener. One-shot calls pass ctx straight to the generated binding.
 func runCancellable[T any](ctx context.Context, cancel func(), call func(context.Context) (T, error)) (T, error) {
-	return run(ctx, cancel, func() (T, error) { return call(ctx) }, nil)
+	return run(ctx, cancel, func() (T, error) { return call(objectCallContext(ctx, cancel)) }, nil)
 }
 
 // runHandle is runCancellable for a call that returns a native handle, which is
@@ -192,7 +193,18 @@ func runCancellable[T any](ctx context.Context, cancel func(), call func(context
 // the Go finalizer it would stay live in the meantime: a subscription still
 // running on the wire, or an incoming request accepted and never answered.
 func runHandle[T handle](ctx context.Context, cancel func(), call func(context.Context) (T, error)) (T, error) {
-	return run(ctx, cancel, func() (T, error) { return call(ctx) }, releaseHandle[T])
+	return run(ctx, cancel, func() (T, error) { return call(objectCallContext(ctx, cancel)) }, releaseHandle[T])
+}
+
+// objectCallContext is the context the generated binding sees. Object-owned
+// calls already abort via cancel; sharing the caller's ctx lets the binding
+// return ctx.Err() first and skip that abort, leaving the stream, session, or
+// request active.
+func objectCallContext(ctx context.Context, cancel func()) context.Context {
+	if cancel == nil {
+		return ctx
+	}
+	return context.WithoutCancel(ctx)
 }
 
 // runErr is runCancellable for calls that return only an error.
