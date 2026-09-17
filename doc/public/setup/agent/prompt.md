@@ -15,7 +15,7 @@ Notes:
 - Add `--global` to install user-level instead of project-level.
 - Add `-a <agent>` (e.g. `-a claude-code`) to target a specific agent instead of auto-detection.
 
-The skill teaches the agent the MoQ architecture, the `@moq/*` npm packages and `moq-*` Rust crates, the web components, relay setup, and common pitfalls.
+The skill tells the agent what MoQ is and how to read the documentation as markdown (https://doc.moq.dev/llms.txt) instead of guessing APIs.
 
 ## Verify
 

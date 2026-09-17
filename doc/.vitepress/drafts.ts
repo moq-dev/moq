@@ -383,9 +383,16 @@ function render(source: string, routes: Map<string, string>): { meta: Metadata; 
 		return out;
 	};
 
+	// The abstract's first line doubles as the page description for llms.txt
+	// and the meta tag, with citations reduced to their labels.
+	const description = cite(abstract.find((line) => line.trim() !== "") ?? "")
+		.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+		.trim();
+
 	const page = [
 		"---",
 		`title: ${JSON.stringify(meta.title)}`,
+		`description: ${JSON.stringify(description)}`,
 		"outline: deep",
 		"---",
 		"",

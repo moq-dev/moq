@@ -1,4 +1,5 @@
 import { defineConfig } from "vitepress";
+import llmstxt from "vitepress-plugin-llms";
 import { syncDrafts } from "./drafts";
 
 // Generated before VitePress enumerates routes, so the pages and this sidebar
@@ -230,6 +231,18 @@ export default defineConfig({
 	markdown: {
 		theme: "github-dark",
 		lineNumbers: true,
+	},
+
+	// Serves /llms.txt (an index), /llms-full.txt (every page inline), and a
+	// .md twin of every page so agents can read the docs without the HTML.
+	vite: {
+		plugins: [
+			llmstxt({
+				domain: "https://doc.moq.dev",
+				// Static files are already served verbatim.
+				ignoreFiles: ["public/**"],
+			}),
+		],
 	},
 
 	ignoreDeadLinks: [
