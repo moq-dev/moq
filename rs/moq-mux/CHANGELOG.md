@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.16](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.15...moq-mux-v0.9.16) - 2026-09-17
+
+### Fixed
+
+- bump h264-parser to 0.4.2 ([#3707](https://github.com/moq-dev/moq/pull/3707))
+
 ## [0.9.15](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.14...moq-mux-v0.9.15) - 2026-09-13
 
 ### Other

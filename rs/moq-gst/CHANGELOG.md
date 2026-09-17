@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.12](https://github.com/moq-dev/moq/compare/moq-gst-v0.3.11...moq-gst-v0.3.12) - 2026-09-17
+
+### Added
+
+- *(moq-gst)* expose connection statistics ([#3679](https://github.com/moq-dev/moq/pull/3679))
+
 ## [0.3.11](https://github.com/moq-dev/moq/compare/moq-gst-v0.3.10...moq-gst-v0.3.11) - 2026-09-13
 
 ### Other
