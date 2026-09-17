@@ -255,6 +255,7 @@ impl<E: CatalogExt> Serialize for Catalog<E> {
 		// writes without complaint and a reader resolves by keeping the last. A typed extension
 		// fixes its member names at compile time, so this is a bug in the extension rather than
 		// something a peer can trigger: check it where it costs nothing to ship.
+		#[cfg(debug_assertions)]
 		debug_assert!(
 			colliding_member(&self.ext).is_none(),
 			"MSF catalog extension member {:?} collides with a reserved root member",
