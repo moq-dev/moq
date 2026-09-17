@@ -69,6 +69,8 @@ A publisher MUST omit it from each object and a consumer MUST append it before d
 
 A zero-length payload is neither compressed nor decompressed.
 
+The stream is never terminated: no object ends in a final block, so a consumer decompresses incrementally and MUST NOT treat the absent end of stream as truncation.
+
 A consumer missing an object MUST abandon the rest of the group, which it can no longer decompress.
 The compression level is a publisher's choice; any conformant stream decodes.
 
