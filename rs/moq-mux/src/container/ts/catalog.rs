@@ -399,6 +399,29 @@ mod test {
 		assert_eq!(parsed.mpegts, mpegts, "program and SI round-trip");
 	}
 
+	#[test]
+	fn unknown_framing_is_refused() {
+		let json = r#"{
+			"tracks": {
+				"x.ts": {
+					"pid": 500,
+					"verbatim": { "streamType": 6, "framing": "future" }
+				}
+			}
+		}"#;
+		let err = serde_json::from_str::<Mpegts>(json).expect_err("unknown framing must fail");
+		assert!(
+			err.to_string().contains("future"),
+			"error should name the unknown variant: {err}"
+		);
+	}
+
+	#[test]
+	fn invalid_si_pid_key_is_refused() {
+		let json = r#"{ "si": { "not-a-pid": { "66": { "track": "si" } } } }"#;
+		serde_json::from_str::<Mpegts>(json).expect_err("a non-integer SI PID key must fail");
+	}
+
 	/// The `mpegts` section is not hang-only: the same JSON rides the MSF catalog track, so a
 	/// broadcast demuxed from MPEG-TS can be re-muxed from either catalog.
 	#[tokio::test]

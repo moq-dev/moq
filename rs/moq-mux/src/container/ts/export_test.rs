@@ -2111,6 +2111,105 @@ fn count_discontinuity(frames: &[Frame]) -> usize {
 		.count()
 }
 
+/// An SI PID that equals the PMT PID would interleave tables with the program map.
+#[tokio::test(start_paused = true)]
+async fn export_rejects_si_pid_on_the_pmt() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+
+	let track = broadcast
+		.create_track(
+			broadcast.unique_name(".aac"),
+			hang::container::track_info(hang::catalog::PRIORITY.audio),
+		)
+		.unwrap();
+	let name = track.name().to_string();
+	{
+		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.container = Container::Legacy;
+		let mut guard = catalog.modify().unwrap();
+		guard.audio.renditions.insert(name, cfg);
+		guard.mpegts.program = Some(tscat::Program {
+			transport_stream_id: 1,
+			program_number: 1,
+			pmt_pid: 0x1000,
+			..Default::default()
+		});
+		guard.mpegts.si.entry(0x1000).or_default().insert(
+			0x42,
+			tscat::SiEntry {
+				track: "si".to_string(),
+				interval: Some(Duration::from_secs(2)),
+				..Default::default()
+			},
+		);
+	}
+	let _producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+
+	let mut exporter = Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
+		.await
+		.unwrap()
+		.with_max_age(RECORDING_MAX_AGE);
+	let err = exporter
+		.next()
+		.await
+		.expect_err("an SI PID on the PMT must fail the export");
+	assert!(
+		err.to_string().contains("mpegts.si PID"),
+		"expected a PID collision, got {err}"
+	);
+}
+
+/// An SI PID that equals an elementary-stream PID would interleave tables with media.
+#[tokio::test(start_paused = true)]
+async fn export_rejects_si_pid_on_an_elementary_stream() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+
+	let track = broadcast
+		.create_track(
+			broadcast.unique_name(".aac"),
+			hang::container::track_info(hang::catalog::PRIORITY.audio),
+		)
+		.unwrap();
+	let name = track.name().to_string();
+	{
+		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.container = Container::Legacy;
+		let mut guard = catalog.modify().unwrap();
+		guard.audio.renditions.insert(name.clone(), cfg);
+		guard.mpegts.tracks.insert(name, tscat::Track::new(0x101));
+		guard.mpegts.si.entry(0x101).or_default().insert(
+			0x42,
+			tscat::SiEntry {
+				track: "si".to_string(),
+				interval: Some(Duration::from_secs(2)),
+				..Default::default()
+			},
+		);
+	}
+	let _producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+
+	let mut exporter = Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
+		.await
+		.unwrap()
+		.with_max_age(RECORDING_MAX_AGE);
+	let err = exporter
+		.next()
+		.await
+		.expect_err("an SI PID on an elementary stream must fail the export");
+	assert!(
+		err.to_string().contains("mpegts.si PID"),
+		"expected a PID collision, got {err}"
+	);
+}
+
 /// A `mpegts`-extension exporter over an announced broadcast.
 async fn export_of(consumer: &moq_net::broadcast::Consumer) -> Export<tscat::Ext> {
 	Export::with_ts(crate::source::announced(consumer), crate::catalog::CatalogFormat::Hang)

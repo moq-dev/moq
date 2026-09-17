@@ -734,6 +734,7 @@ impl<E: catalog::Catalog> Export<E> {
 		// not part of the latched layout.
 		self.si
 			.retain(|key, _| mpegts.si.get(&key.0).is_some_and(|t| t.contains_key(&key.1)));
+		reject_colliding_si_pids(&mpegts, self.pmt_pid(), &[])?;
 		for (pid, tables) in mpegts.si.iter() {
 			for (table_id, entry) in tables.iter() {
 				match self.si.get_mut(&(*pid, *table_id)) {
@@ -787,6 +788,8 @@ impl<E: catalog::Catalog> Export<E> {
 					"TS track layout changed after PAT/PMT was emitted: '{name}' removed"
 				);
 			}
+			let es_pids: Vec<u16> = self.tracks.values().map(|t| t.pid).collect();
+			reject_colliding_si_pids(&mpegts, self.pmt_pid(), &es_pids)?;
 			return Ok(());
 		}
 
@@ -815,6 +818,8 @@ impl<E: catalog::Catalog> Export<E> {
 				pids.insert(name.clone(), pid);
 			}
 		}
+		let es_pids: Vec<u16> = pids.values().copied().collect();
+		reject_colliding_si_pids(&mpegts, self.pmt_pid(), &es_pids)?;
 
 		// Reuse each track's existing source (and any pending frame) by name; refresh
 		// its PID, kind, and descriptors from this snapshot. Drop tracks no longer present.
@@ -1894,6 +1899,17 @@ fn opus_es_payload(packet: &[u8]) -> Vec<u8> {
 	}
 	out.extend_from_slice(packet);
 	out
+}
+
+/// Refuse an SI PID that would share a packet stream with PAT, PMT, null, or an ES.
+fn reject_colliding_si_pids(mpegts: &catalog::Mpegts, pmt_pid: u16, es_pids: &[u16]) -> anyhow::Result<()> {
+	for pid in mpegts.si.keys() {
+		anyhow::ensure!(
+			(1..0x1FFF).contains(pid) && *pid != pmt_pid && !es_pids.contains(pid),
+			"mpegts.si PID {pid} collides with PAT, PMT, null, or an elementary stream"
+		);
+	}
+	Ok(())
 }
 
 /// The PMT descriptors recorded for `name` in the `mpegts` section, if any.

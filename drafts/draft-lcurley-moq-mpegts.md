@@ -158,7 +158,7 @@ A publisher MUST include `program` when the broadcast came from a transport stre
 The standalone service information tables, keyed by the PID they ride on and then by `table_id`:
 
 ~~~
-type Si = Map<PidString, Map<TableIdString, SiEntry>>
+type Si = Map<TableIdString, SiEntry>
 
 type SiEntry = {
   "track": string,
@@ -167,7 +167,7 @@ type SiEntry = {
 ~~~
 
 JSON object keys are strings, so both are decimal with no leading zeros: `"17"` for PID 0x0011, `"66"` for `table_id` 0x42.
-A consumer MUST ignore an entry whose PID key is not an integer in 0..8191, or whose `table_id` key is not an integer in 0..255.
+A consumer MUST refuse a catalog whose PID key is not an integer in 0..8191, or whose `table_id` key is not an integer in 0..255.
 
 `table_id` is byte 0 of generic section syntax ({{mpeg2}} Section 2.4.4), so the key is no less generic than the PID; which ranges mean what is a delivery-system convention this document does not rely on.
 
@@ -224,7 +224,7 @@ type Verbatim = {
 `framing` says how the payload is framed, defaulting to `"pes"`.
 With `"pes"` each frame is one complete PES payload, timestamped with its PTS, or 0 if it carried none.
 With `"section"` each frame is one complete section, header and CRC included, timestamped with the media time it arrived at.
-A consumer MUST ignore a track whose `framing` it does not recognize rather than guess.
+A consumer MUST refuse a catalog that names a `framing` it does not recognize, rather than guess.
 
 `streamId` is the original PES `stream_id`, for example 0xBD (`private_stream_1`) for teletext, DVB subtitles, and DVB AC-3.
 It applies only to `"pes"` framing.
@@ -273,7 +273,7 @@ Every binary field here is re-emitted without inspection, by a publisher that ne
 Nothing bounds the number of entries in the section, nor the size of an SI track: a publisher controls both, and an EPG is large by nature.
 A consumer MUST bound what it accepts of each, and MUST reject a catalog it cannot bound rather than truncate it into a stream that silently differs from what was described.
 PIDs, program numbers, and stream types are 13-, 16-, and 8-bit values in a JSON document that can hold any number, so a consumer MUST range-check each one.
-A catalog can also name one PID twice, so a consumer MUST NOT emit a stream in which two elementary streams share a PID.
+A catalog can also name one PID twice, so a consumer MUST NOT emit a stream in which two elementary streams share a PID, or in which an SI table shares a PID with PAT, PMT, null packets, or an elementary stream.
 
 The section makes a broadcast's provenance legible to anything that can read the catalog, relays included: the service name, provider, and network inside the carried SI, and the original PID layout.
 A publisher that does not want that MUST omit the section.
@@ -332,6 +332,8 @@ A broadcast demultiplexed from a DVB transport stream: video and audio described
 {:numbered="false"}
 
 - Initial version.
+- The `Si` type is keyed by `table_id` only; the PID lives on the enclosing `si` map.
+- A consumer refuses a catalog with an unrecognized `framing` or an invalid `si` map key.
 
 
 # Acknowledgments
