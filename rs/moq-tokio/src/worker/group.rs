@@ -205,6 +205,7 @@ impl Workers {
 			shared,
 		}
 	}
+
 	/// Stop every worker and wait for its threads, off the caller's runtime.
 	///
 	/// For a bound group that was never split: drops the servers with the
@@ -390,10 +391,10 @@ fn join(threads: Vec<(u16, std::thread::JoinHandle<()>)>) {
 	let current = std::thread::current().id();
 	for (index, thread) in threads {
 		// A handle for the calling thread means this runs on a worker, so
-		// detach it instead of deadlocking on a self-join.
+		// drop it to detach instead of deadlocking on a self-join. Forgetting
+		// the handle would leave a joinable thread's OS resources behind.
 		if thread.thread().id() == current {
 			tracing::warn!(index, "QUIC worker group dropped on its own thread; detaching it");
-			std::mem::forget(thread);
 			continue;
 		}
 		if thread.join().is_err() {
@@ -426,10 +427,14 @@ impl Shared {
 	/// Resolve once [`cancel`](Self::cancel) has run, whenever that was.
 	async fn stopped(&self) {
 		loop {
+			// Subscribe before reading the flag: a cancel between a false load
+			// and `notified()` would call `notify_waiters` with no waiter and
+			// this future would sleep through an already-true shutdown.
+			let notified = self.notify.notified();
 			if self.shutdown.load(Ordering::SeqCst) {
 				return;
 			}
-			self.notify.notified().await;
+			notified.await;
 		}
 	}
 }
