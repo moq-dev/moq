@@ -1,6 +1,9 @@
 import * as z from "@zod/mini";
-import { nonzeroU53Schema, u53, u53Schema } from "./integers";
+import { u53Schema } from "./integers";
 import { MOQ_EPOCH_UNIX_MILLIS } from "./timeline";
+
+/** Units per second for a catalog clock. Matches Rust `u32`; zero is refused. */
+const clockTimescaleSchema = z.number().check(z.int(), z.positive(), z.lte(4_294_967_295));
 
 /**
  * The broadcast's one continuous clock, advertised at the catalog root.
@@ -18,8 +21,9 @@ export const ClockSchema = z.object({
 	wall: u53Schema,
 
 	// Units per second for `wall`. Defaults to 1_000_000 (microseconds), the broadcast clock's
-	// own timescale. Zero is refused: no timestamp can be expressed in it.
-	timescale: z._default(nonzeroU53Schema, u53(1_000_000)),
+	// own timescale. Zero is refused: no timestamp can be expressed in it. Bounded to u32 so
+	// Rust and JS accept the same catalogs.
+	timescale: z._default(clockTimescaleSchema, 1_000_000),
 });
 
 /** The broadcast's one continuous clock. */
@@ -34,7 +38,7 @@ export type Clock = z.infer<typeof ClockSchema>;
  */
 export function wallClockTime(clock: Clock, pts: number, ptsTimescale: number): Date {
 	if (!Number.isSafeInteger(clock.wall)) throw new RangeError(`invalid wall clock: ${clock.wall}`);
-	if (!Number.isSafeInteger(clock.timescale) || clock.timescale <= 0)
+	if (!Number.isSafeInteger(clock.timescale) || clock.timescale <= 0 || clock.timescale > 4_294_967_295)
 		throw new RangeError(`invalid timescale: ${clock.timescale}`);
 	if (!Number.isSafeInteger(pts) || pts < 0) throw new RangeError(`invalid pts: ${pts}`);
 	if (!Number.isSafeInteger(ptsTimescale) || ptsTimescale <= 0)

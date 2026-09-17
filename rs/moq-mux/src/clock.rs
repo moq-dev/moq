@@ -206,7 +206,9 @@ impl SourceMap {
 						"{pts:?} lands before the broadcast began"
 					)));
 				}
-				let mapped = mapped as u64;
+				let mapped = u64::try_from(mapped).map_err(|_| {
+					crate::Error::UnmappableTimestamp(format!("{pts:?} lands outside the representable range"))
+				})?;
 				match self.last_broadcast {
 					Some(last) if mapped < last && last - mapped > Self::MAX_REORDER.as_micros() as u64 => {
 						// A source reset: re-anchor forward, counting the downtime as content.
@@ -432,6 +434,20 @@ mod tests {
 		// And the broadcast continues from the reordered frontier.
 		let next = source.translate_at(us(80_000), 1_080_000).unwrap();
 		assert_eq!(next.as_micros(), 1_080_000);
+	}
+
+	#[test]
+	fn mapping_past_u64_micros_is_refused() {
+		let clock = Clock::new_at(epoch(), moq_epoch()).unwrap();
+		let mut source = clock.source();
+
+		assert_eq!(source.translate_at(us(0), 0).unwrap().as_micros(), 0);
+		// A seconds-scale timestamp whose microsecond mapping exceeds u64::MAX.
+		let huge = moq_net::Timestamp::from_secs(u64::MAX / 1_000_000 + 2).unwrap();
+		assert!(matches!(
+			source.translate_at(huge, 0),
+			Err(crate::Error::UnmappableTimestamp(_))
+		));
 	}
 
 	#[test]
