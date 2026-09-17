@@ -59,7 +59,3 @@ Public API: breaking for callers who bind a non-`mut` producer and call
 Wire: none. Run the affected Rust and `moq-ffi` check/test recipes, including
 `finish_closes_producer` and the Python local tests that encode take-on-finish,
 then `just test smoke-full` because `moq-ffi` behavior changes.
-
-## Related
-
-- [External API proof](/quest/m1/api-release-proof.md) - records this disposition

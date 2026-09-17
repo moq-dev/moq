@@ -40,7 +40,6 @@ does not require it.
 - [JS names](/quest/m1/api-js-net-names.md) - @moq/net and @moq/pattern mirror Rust: `consume`, typed durations, one `readFrame()`, `InvalidPattern`
 - [FFI units](/quest/m1/api-ffi-units-verbs.md) - every moq-ffi duration is microseconds and `publish()` / `consume()` pair with their setters
 - [Deprecated sweep](/quest/m1/deprecated-sweep.md) - uncalled deprecated items, warn-then-ignore flags, and silent aliases are removed or become refusals before the release
-- [External API proof](/quest/m1/api-release-proof.md) - packaged callers exercise real moq.pro use cases and record each audit finding's disposition
 - [Monotonic timeline](/quest/m1/monotonic-timeline.md) - a marker group of one empty frame declares a break and moves the live edge; producers refuse a rewind; consumers jump the playhead on an unproven hole and drop rewind detection
 - [Joining FETCH](/quest/m1/joining-fetch.md) - moq-net: every subscribe to a draft-14 to draft-19 relay joins at a group boundary, with contiguous history for an explicit start, via Largest Object plus a joining FETCH
 - [Anonymous rank](/quest/m1/anonymous-route-rank.md) - moq-net: a route through an anonymous hop ranks below every identified route at any cost, and hop 0 travels the chain to say so
