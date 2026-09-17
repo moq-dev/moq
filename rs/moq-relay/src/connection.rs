@@ -3,6 +3,7 @@ use crate::{Admitted, Auth, AuthError, AuthToken, Cluster, Lease};
 use axum::http;
 use moq_auth::Grant;
 use moq_tokio::Request;
+use std::time::SystemTime;
 
 /// An error carrying the HTTP status to send when closing the request.
 ///
@@ -302,7 +303,16 @@ pub async fn supervise(
 		bytes.add_sent(stats.bytes_sent.unwrap_or_default());
 		bytes.add_received(stats.bytes_received.unwrap_or_default());
 	};
+	// The relay closes the session at `expires` itself, whoever drives the lease:
+	// a fixed lease has no driver, and an auth server's may be mid-outage.
+	let mut expires = lease.grant().expires;
 	loop {
+		let expire = async {
+			match expires {
+				Some(at) => tokio::time::sleep(at.duration_since(SystemTime::now()).unwrap_or_default()).await,
+				None => std::future::pending().await,
+			}
+		};
 		tokio::select! {
 			err = session.closed() => {
 				meter(&session);
@@ -315,7 +325,7 @@ pub async fn supervise(
 			}
 			changed = lease.changed() => match changed {
 				Ok(grant) => match recheck(&token, &grant) {
-					Recheck::Covered => continue,
+					Recheck::Covered => expires = grant.expires,
 					Recheck::Closed(why) => {
 						tracing::info!(%why, "grant no longer covers the session, closing");
 						session.abort(moq_net::Error::Unauthorized);
@@ -331,6 +341,13 @@ pub async fn supervise(
 					return Ok(());
 				}
 			},
+			() = expire => {
+				tracing::info!("grant expired, closing session");
+				session.abort(moq_net::Error::Unauthorized);
+				meter(&session);
+				lease.close(moq_auth::lease::Reason::Expired);
+				return Ok(());
+			}
 			_ = shutdown.started() => {
 				tracing::info!("relay shutting down; draining session");
 				// Empty URI: "reconnect to me" (the relay is restarting). The session's

@@ -104,14 +104,18 @@ impl Producer {
 		(Self { state: state.clone() }, Consumer { state, seen: 0 })
 	}
 
-	/// Replace the grant, waking the consumer. A no-op once the lease ended.
-	pub fn update(&self, grant: Grant) {
+	/// Replace the grant, waking the consumer. Refuses a grant that fails
+	/// [`Grant::validate`], so a bad re-check is the producer's error rather than
+	/// the session's. A no-op once the lease ended.
+	pub fn update(&self, grant: Grant) -> crate::Result<()> {
+		grant.validate()?;
 		let mut state = self.state.lock();
 		if state.closed.is_some() {
-			return;
+			return Ok(());
 		}
 		state.grant = grant;
 		state.epoch += 1;
+		Ok(())
 	}
 
 	/// End the lease with `reason`, consuming the handle. The consumer's
@@ -224,10 +228,16 @@ mod tests {
 		assert_eq!(consumer.grant(), grant("a/**"));
 		assert!(poll(consumer.changed()).is_pending());
 
-		producer.update(grant("b/**"));
+		producer.update(grant("b/**")).expect("a valid grant");
 		assert_eq!(poll(consumer.changed()), Poll::Ready(Ok(grant("b/**"))));
 		assert_eq!(consumer.grant(), grant("b/**"));
 		assert!(poll(consumer.changed()).is_pending());
+
+		// An invalid grant is refused at the producer and never reaches the consumer.
+		let empty = Grant::new(crate::Patterns::new(), crate::Patterns::new());
+		assert!(matches!(producer.update(empty), Err(crate::Error::UselessGrant)));
+		assert!(poll(consumer.changed()).is_pending());
+		assert_eq!(consumer.grant(), grant("b/**"));
 	}
 
 	#[test]

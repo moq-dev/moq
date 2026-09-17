@@ -14,6 +14,11 @@ use serde_with::{OneOrMany, serde_as};
 use tokio::sync::{mpsc, oneshot};
 use url::Url;
 
+/// The longest an embedder may take to answer an admission, the bound
+/// `moq_auth::Client` puts on a server, so a stalled decider refuses rather
+/// than parks the sessions behind it.
+const ADMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Where every session's grant comes from. Exactly one of `url` and the public
 /// patterns is set; [`validate`](Self::validate) refuses anything else.
 #[serde_as]
@@ -245,7 +250,8 @@ pub struct Lease {
 }
 
 impl Lease {
-	/// A lease on a static grant: no expiry, no re-check, no `end`.
+	/// A lease on a static grant: no re-check and no `end`. The session still
+	/// closes at the grant's `expires`, if it names one.
 	pub fn fixed(grant: Grant) -> Self {
 		let (producer, consumer) = lease::Producer::new(grant);
 		Self {
@@ -350,8 +356,9 @@ impl Auth {
 				admissions
 					.send(Admission { request, bytes, reply })
 					.map_err(|_| AuthError::Unavailable("nobody is answering admissions".into()))?;
-				let lease: Lease = answer
+				let lease: Lease = tokio::time::timeout(ADMIT_TIMEOUT, answer)
 					.await
+					.map_err(|_| AuthError::Unavailable("the admission timed out".into()))?
 					.map_err(|_| AuthError::Unavailable("the admission went unanswered".into()))??;
 				// Held to what a server's answer is held to: a grant that admits nothing
 				// or asks for a re-check without a bound is the decider's bug, not a refusal.
@@ -384,8 +391,10 @@ pub struct Admitted {
 /// The sessions an embedded [`Auth`] is waiting to admit, in arrival order.
 ///
 /// The transport has already accepted each one; it waits for its answer, so a
-/// slow decider holds connects the way a slow auth server would. Answer in place
-/// or hand each [`Admission`] to its own task; nothing here serializes them.
+/// slow decider holds connects the way a slow auth server would, and one that
+/// takes longer than a server may (ten seconds) is refused as unavailable.
+/// Answer in place or hand each [`Admission`] to its own task; nothing here
+/// serializes them.
 pub struct Admissions(mpsc::UnboundedReceiver<Admission>);
 
 impl Admissions {
