@@ -803,7 +803,7 @@ url = "https://auth.example.com/"
 		let _env = EnvGuard::clear(&["MOQ_CLIENT_TLS_SYSTEM_ROOTS"]);
 
 		let toml = r#"
-[client.tls]
+[connect.tls]
 system_roots = true
 "#;
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
@@ -817,7 +817,7 @@ system_roots = true
 		assert_eq!(
 			config.connect.tls.system_roots,
 			Some(true),
-			"TOML's client.tls.system_roots must not be clobbered by the CLI re-parse"
+			"TOML's connect.tls.system_roots must not be clobbered by the CLI re-parse"
 		);
 	}
 
