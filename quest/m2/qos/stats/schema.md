@@ -61,12 +61,6 @@ what a subscriber received and played, per audio and video. The relay is
   clients' counters and leaves gauges alone; the per-broadcast track for a
   tiered name and a refused ambiguous one.
 
-## Required
-
-- [Counter edge names](/quest/m1/api-counter-edge-names.md) - renames the
-  open side of every counter pair on these tracks; land it first or fold it
-  into this change
-
 ## Related
 
 - [Starvation](/quest/m2/qos/starvation.md) - the relay's delivery counters,

@@ -116,8 +116,8 @@ fn connection_stats_structure(stats: moq_net::ConnectionStats) -> gst::Structure
 /// One coherent readout of both presence counters, so `started - ended` never mixes two samples.
 pub(super) fn sessions_structure(presence: moq_net::stats::Presence) -> gst::Structure {
 	gst::Structure::builder("moq-sessions")
-		.field("started", presence.sessions)
-		.field("ended", presence.sessions_closed)
+		.field("started", presence.sessions_started)
+		.field("ended", presence.sessions_ended)
 		.build()
 }
 
@@ -506,8 +506,8 @@ mod tests {
 	fn sessions_structure_reads_both_counters_together() {
 		gst::init().unwrap();
 		let mut presence = moq_net::stats::Presence::default();
-		presence.sessions = 3;
-		presence.sessions_closed = 2;
+		presence.sessions_started = 3;
+		presence.sessions_ended = 2;
 		let structure = sessions_structure(presence);
 		assert_eq!(structure.name(), "moq-sessions");
 		assert_eq!(structure.get::<u64>("started"), Ok(3));

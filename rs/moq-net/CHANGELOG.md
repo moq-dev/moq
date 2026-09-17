@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- [**breaking**] `stats::Presence` and `stats::Traffic` name both edges of each cumulative pair `*_started` / `*_ended` (`sessions_started` / `sessions_ended`, `announces_started` / `announces_ended`, `broadcasts_*`, `subscriptions_*`). Serialize still writes the previous `announced` / `*_closed` names beside the new ones; deserialize accepts either spelling, with the canonical name winning.
 - `track::Producer::write_datagram(Datagram)` is now `insert_datagram(sequence, timestamp, payload)`, matching TypeScript `insertDatagram`. The supplied sequence is preserved; `append_datagram` remains the next-sequence convenience.
 - `Timescale` no longer implements `From<NonZero<u64>>`. Use `Timescale::new` or `TryFrom` so values above the QUIC varint range are refused at construction.
 - Register moq-lite stream codes NOT_FOUND 0x33, OLD 0x34, and EVICTED 0x35 so a cache miss round-trips as the named variant instead of an opaque reserved-range placeholder.

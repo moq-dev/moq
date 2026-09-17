@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- [**breaking**] `ConnectionStatsReader::presence` reports `sessions_started` / `sessions_ended`.
+
 ### Added
 
 - `Request::remote_addr`, `local_addr`, `server_name`, and `alpn` report what the transport saw; `PeerIdentity::name` and `issuer` read the leaf certificate.

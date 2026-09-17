@@ -3867,8 +3867,8 @@ pub struct AnnounceConsumer {
 	stats: stats::Session,
 
 	// Live egress announce guards, keyed by absolute prefix. An announce
-	// opens one (bumping `announced` + `announced_bytes`); the matching retraction
-	// drops it (bumping `announced_closed` + `announced_bytes`).
+	// opens one (bumping `announces_started` + `announced_bytes`); the matching retraction
+	// drops it (bumping `announces_ended` + `announced_bytes`).
 	guards: HashMap<Pattern, stats::Announce>,
 }
 

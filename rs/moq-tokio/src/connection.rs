@@ -480,7 +480,7 @@ impl Shared {
 		if let Ok(mut state) = self.state.write() {
 			state.status = Some(Status::Connected);
 			state.epoch += 1;
-			state.presence.sessions += 1;
+			state.presence.sessions_started += 1;
 			state.version = Some(session.version());
 			state.session = Some(session.clone());
 		}
@@ -502,7 +502,7 @@ impl Shared {
 			// intervening connect (e.g. Drop after the loop already reported
 			// the close) must not move the counter again.
 			if state.session.is_some() {
-				state.presence.sessions_closed += 1;
+				state.presence.sessions_ended += 1;
 			}
 			state.status = Some(Status::Disconnected);
 			state.version = None;
@@ -544,7 +544,7 @@ pub struct Monitor {
 
 impl Monitor {
 	/// Cumulative connects and disconnects of this reconnect loop, the same shape as a relay's
-	/// sessions track: `sessions - sessions_closed` is 1 while connected, and a rate is a delta over
+	/// sessions track: `sessions_started - sessions_ended` is 1 while connected, and a rate is a delta over
 	/// any window.
 	pub fn presence(&self) -> moq_net::stats::Presence {
 		self.state.read().presence

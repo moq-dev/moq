@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Track suffixes derive from the typed import format, so the suffix and the codec cannot disagree.
+- `Presence` fields used by the sessions structure are `sessions_started` / `sessions_ended`; the GStreamer properties stay `started` / `ended`.
 
 ## [0.3.11](https://github.com/moq-dev/moq/compare/moq-gst-v0.3.10...moq-gst-v0.3.11) - 2026-09-13
 

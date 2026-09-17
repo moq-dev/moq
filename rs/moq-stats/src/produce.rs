@@ -800,7 +800,7 @@ struct SessionSlotState {
 /// `prev_emitted` and hand `snap` to `emit` iff the slot is live or changed
 /// this drain.
 fn process_slot(snap: Traffic, slot_state: &mut SlotState, emit: impl FnOnce(Traffic)) {
-	// A slot is live while any open counter still exceeds its `*_closed`
+	// A slot is live while any started counter still exceeds its `*_ended`
 	// counterpart: a guard is held, so a subscription could begin at any
 	// moment. Live slots are emitted every drain so a downstream "currently
 	// active" view always sees the full set. Once every pair is equal no
@@ -1102,9 +1102,12 @@ mod tests {
 		let (_, broadcast) = announced(&origin).await;
 		let frame = read_last_frame(&broadcast, "publisher.json").await;
 		let snap = frame.get("foo/bar").expect("foo/bar entry");
-		assert_eq!(snap.announced, 1, "egress announce stream bumps announced");
-		assert_eq!(snap.broadcasts, 1, "one session subscribed");
-		assert_eq!(snap.subscriptions, 1);
+		assert_eq!(
+			snap.announces_started, 1,
+			"egress announce stream bumps announces_started"
+		);
+		assert_eq!(snap.broadcasts_started, 1, "one session subscribed");
+		assert_eq!(snap.subscriptions_started, 1);
 		assert_eq!(snap.bytes, 42);
 		assert_eq!(snap.frames, 1);
 	}
@@ -1120,7 +1123,7 @@ mod tests {
 		let (_, broadcast) = announced(&origin).await;
 		let frame = read_last_frame(&broadcast, "publisher.json").await;
 		let snap = frame.get("foo/bar").expect("foo/bar entry");
-		assert_eq!(snap.announced, 1);
+		assert_eq!(snap.announces_started, 1);
 		assert_eq!(
 			snap.announced_bytes,
 			"foo/bar".len() as u64,
@@ -1130,7 +1133,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn announced_decouples_from_broadcasts() {
-		// An announce with no subscription should bump announced but NOT broadcasts
+		// An announce with no subscription should bump announces_started but NOT broadcasts_started
 		// (which only counts sessions with an active sub).
 		let (producer, origin) = test_producer(Some("sjc"));
 		let _f = feed(producer.registry(), Tier::default(), "foo/bar", false, 0, 0).await;
@@ -1140,16 +1143,16 @@ mod tests {
 		let (_, broadcast) = announced(&origin).await;
 		let frame = read_last_frame(&broadcast, "publisher.json").await;
 		let snap = frame.get("foo/bar").expect("foo/bar entry");
-		assert_eq!(snap.announced, 1);
-		assert_eq!(snap.broadcasts, 0, "no subscription, no broadcasts sentinel");
-		assert_eq!(snap.subscriptions, 0);
+		assert_eq!(snap.announces_started, 1);
+		assert_eq!(snap.broadcasts_started, 0, "no subscription, no broadcasts sentinel");
+		assert_eq!(snap.subscriptions_started, 0);
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn short_lived_sub_is_surfaced() {
 		// A subscription that opens AND closes within a single drain window
-		// must still surface as a complete broadcasts open/close cycle. The
-		// cumulative counters retain broadcasts=1/broadcasts_closed=1, and the
+		// must still surface as a complete broadcasts start/end cycle. The
+		// cumulative counters retain broadcasts_started=1/broadcasts_ended=1, and the
 		// change-driven inclusion surfaces the entry even though it's net-idle
 		// by drain time.
 		let (producer, origin) = test_producer(Some("sjc"));
@@ -1165,10 +1168,10 @@ mod tests {
 		let frame = read_last_frame(&broadcast, "publisher.json").await;
 		let snap = frame.get("foo/bar").expect("foo/bar entry");
 		// One session opened then closed a subscription within the drain.
-		assert_eq!(snap.subscriptions, 1);
-		assert_eq!(snap.subscriptions_closed, 1);
-		assert_eq!(snap.broadcasts, 1, "one session subscribed");
-		assert_eq!(snap.broadcasts_closed, 1);
+		assert_eq!(snap.subscriptions_started, 1);
+		assert_eq!(snap.subscriptions_ended, 1);
+		assert_eq!(snap.broadcasts_started, 1, "one session subscribed");
+		assert_eq!(snap.broadcasts_ended, 1);
 		assert_eq!(snap.bytes, 123);
 		assert_eq!(snap.frames, 1);
 	}
@@ -1185,8 +1188,8 @@ mod tests {
 		let (_, broadcast) = announced(&origin).await;
 		let frame = read_session_frame(&broadcast, "sessions.json").await;
 		let snap = frame.get("acme").expect("root entry");
-		assert_eq!(snap.sessions, 2);
-		assert_eq!(snap.sessions_closed, 0);
+		assert_eq!(snap.sessions_started, 2);
+		assert_eq!(snap.sessions_ended, 0);
 		assert!(
 			!frame.contains_key("peer"),
 			"regional session must not appear on the default track"
@@ -1196,7 +1199,7 @@ mod tests {
 			.await
 			.get("peer")
 			.expect("regional entry");
-		assert_eq!(snap.sessions, 1);
+		assert_eq!(snap.sessions_started, 1);
 	}
 
 	#[tokio::test(start_paused = true)]

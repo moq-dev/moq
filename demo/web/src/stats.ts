@@ -13,9 +13,12 @@
  *   sessions.json    sessions by auth root
  *
  * Each frame is `{ "<broadcast path>": Snapshot }`. Counters are cumulative;
- * "active" = open - closed. The relay only includes currently-live entries, so
+ * "active" = started - ended. The relay only includes currently-live entries, so
  * the latest frame is a snapshot of now. We sample the aggregate on an interval
- * to derive per-second throughput rates for the charts.
+ * to derive per-second throughput rates for the charts. A relay built after the
+ * started/ended rename still writes the legacy names beside the new ones; this
+ * dashboard prefers the canonical spelling and falls back so it also reads an
+ * older relay.
  */
 
 import "./highlight";
@@ -39,13 +42,19 @@ const $ = <T extends HTMLElement>(id: string): T => {
 // ---- Frame shapes (see module comment) ------------------------------------
 
 interface Snapshot {
+	announces_started?: number;
 	announced?: number;
+	announces_ended?: number;
 	announced_closed?: number;
 	// Broadcast-name bytes charged for each announce/unannounce, separate from payload `bytes`.
 	announced_bytes?: number;
+	broadcasts_started?: number;
 	broadcasts?: number;
+	broadcasts_ended?: number;
 	broadcasts_closed?: number;
+	subscriptions_started?: number;
 	subscriptions?: number;
+	subscriptions_ended?: number;
 	subscriptions_closed?: number;
 	// One-shot group fetches requested (counted at request time, not on resolution).
 	fetches?: number;
@@ -59,7 +68,9 @@ interface Snapshot {
 type BroadcastFrame = Record<string, Snapshot>;
 
 interface SessionCounters {
+	sessions_started?: number;
 	sessions?: number;
+	sessions_ended?: number;
 	sessions_closed?: number;
 }
 type SessionFrame = Record<string, SessionCounters>;
@@ -70,7 +81,18 @@ interface NodeStats {
 	sessions: SessionFrame; // sessions.json
 }
 
-const active = (open?: number, closed?: number) => (open ?? 0) - (closed ?? 0);
+// Canonical spelling wins when a frame carries both names.
+const edge = (started?: number, legacy?: number) => started ?? legacy ?? 0;
+const active = (started?: number, ended?: number) => (started ?? 0) - (ended ?? 0);
+
+const announcesStarted = (s: Snapshot) => edge(s.announces_started, s.announced);
+const announcesEnded = (s: Snapshot) => edge(s.announces_ended, s.announced_closed);
+const broadcastsStarted = (s: Snapshot) => edge(s.broadcasts_started, s.broadcasts);
+const broadcastsEnded = (s: Snapshot) => edge(s.broadcasts_ended, s.broadcasts_closed);
+const subscriptionsStarted = (s: Snapshot) => edge(s.subscriptions_started, s.subscriptions);
+const subscriptionsEnded = (s: Snapshot) => edge(s.subscriptions_ended, s.subscriptions_closed);
+const sessionsStarted = (s: SessionCounters) => edge(s.sessions_started, s.sessions);
+const sessionsEnded = (s: SessionCounters) => edge(s.sessions_ended, s.sessions_closed);
 
 // Broadcasts whose path starts with "." are system broadcasts (e.g. the `.stats` feed
 // this dashboard itself reads). We exclude them from the user-facing counters.
@@ -182,7 +204,7 @@ function aggregate(ingress: BroadcastFrame, egress: BroadcastFrame) {
 
 	for (const [path, s] of Object.entries(ingress)) {
 		if (isSystem(path)) continue;
-		if (active(s.announced, s.announced_closed) > 0) broadcasters++;
+		if (active(announcesStarted(s), announcesEnded(s)) > 0) broadcasters++;
 		ingressBytes += s.bytes ?? 0;
 		announceBytes += s.announced_bytes ?? 0;
 		fetches += s.fetches ?? 0;
@@ -191,8 +213,8 @@ function aggregate(ingress: BroadcastFrame, egress: BroadcastFrame) {
 	for (const [path, s] of Object.entries(egress)) {
 		if (isSystem(path)) continue;
 		egressBytes += s.bytes ?? 0;
-		viewers += active(s.broadcasts, s.broadcasts_closed);
-		tracks += active(s.subscriptions, s.subscriptions_closed);
+		viewers += active(broadcastsStarted(s), broadcastsEnded(s));
+		tracks += active(subscriptionsStarted(s), subscriptionsEnded(s));
 		announceBytes += s.announced_bytes ?? 0;
 		fetches += s.fetches ?? 0;
 		datagrams += s.datagrams ?? 0;
@@ -201,7 +223,7 @@ function aggregate(ingress: BroadcastFrame, egress: BroadcastFrame) {
 }
 
 const countSessions = (f: SessionFrame) =>
-	Object.values(f).reduce((n, s) => n + active(s.sessions, s.sessions_closed), 0);
+	Object.values(f).reduce((n, s) => n + active(sessionsStarted(s), sessionsEnded(s)), 0);
 
 // ---- Time-series history ---------------------------------------------------
 
@@ -462,8 +484,8 @@ ui.run((effect) => {
 				key: path,
 				cells: [
 					path,
-					active(i.announced, i.announced_closed) > 0 ? "yes" : "no",
-					String(active(i.subscriptions, i.subscriptions_closed)), // live tracks
+					active(announcesStarted(i), announcesEnded(i)) > 0 ? "yes" : "no",
+					String(active(subscriptionsStarted(i), subscriptionsEnded(i))), // live tracks
 					formatBytes(i.bytes ?? 0),
 					String(i.frames ?? 0),
 					String(i.groups ?? 0),
@@ -481,8 +503,8 @@ ui.run((effect) => {
 				key: path,
 				cells: [
 					path,
-					String(active(e.broadcasts, e.broadcasts_closed)), // viewers / peers
-					String(active(e.subscriptions, e.subscriptions_closed)), // live tracks
+					String(active(broadcastsStarted(e), broadcastsEnded(e))), // viewers / peers
+					String(active(subscriptionsStarted(e), subscriptionsEnded(e))), // live tracks
 					formatBytes(e.bytes ?? 0), // egress
 					String(e.frames ?? 0),
 					String(e.groups ?? 0),
@@ -500,7 +522,11 @@ ui.run((effect) => {
 			const s = stats.sessions[root] ?? {};
 			return {
 				key: root,
-				cells: [root || "(none)", String(active(s.sessions, s.sessions_closed)), String(s.sessions ?? 0)],
+				cells: [
+					root || "(none)",
+					String(active(sessionsStarted(s), sessionsEnded(s))),
+					String(sessionsStarted(s)),
+				],
 			};
 		});
 
