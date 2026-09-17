@@ -71,8 +71,9 @@ See [doc/bin/relay/cluster.md](https://github.com/moq-dev/moq/blob/main/doc/bin/
 
 The relay admits a session through an auth server (`--auth-url`, one JSON
 request per session event; `moq auth serve` is the reference server) or a
-static anonymous grant (`--auth-public`). A verified client certificate is
-reported to the server as a fact, never a grant on its own.
+static anonymous grant (`--auth-public`); an application embedding the relay
+can decide in process instead. A verified client certificate is reported to
+the server as a fact, never a grant on its own.
 
 For the contract, the server's flags, and token generation, see:
 **[Authentication Documentation](https://github.com/moq-dev/moq/blob/main/doc/bin/relay/auth.md)**

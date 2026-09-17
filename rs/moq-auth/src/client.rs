@@ -211,7 +211,7 @@ impl Driver {
 						Ok(fresh) => {
 							failures = 0;
 							next = fresh.revalidate.map(|cadence| Instant::now() + cadence);
-							producer.update(fresh.clone());
+							producer.update(fresh.clone()).expect("post validated the grant");
 							grant = fresh;
 						}
 						Err(Error::Refused) => {

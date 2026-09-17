@@ -12,9 +12,10 @@ A relay admits a session in exactly one of two ways:
 | `--auth-url` | An auth server, asked once per session event with everything the relay knows. `moq auth serve` is the reference server; a Worker or a service of your own answers the same contract. |
 | `--auth-public` | A static grant for anonymous sessions: patterns under the dialed path, no server. |
 
-Setting both, or neither, fails at startup. Nothing else admits anyone: a
-verified client certificate is a fact the server weighs, never a grant on its
-own. A grant names publish and subscribe rights as path patterns under a root,
+Setting both, or neither, fails at startup; an application that embeds the
+relay may leave both unset and decide [in process](#in-process) instead.
+Nothing else admits anyone: a verified client certificate is a fact the server
+weighs, never a grant on its own. A grant names publish and subscribe rights as path patterns under a root,
 and the session can only see that part of the tree.
 
 ## The contract
@@ -236,6 +237,38 @@ Both on one host:
 ```bash
 moq auth serve --listen 127.0.0.1:4440 --key-dir /etc/moq/keys --public-subscribe 'anon/**'
 moq-relay --auth-url http://127.0.0.1:4440/
+```
+
+### In process
+
+An application that [embeds](/bin/relay/#embed) the relay can be the auth
+server without the HTTP: leave `[auth]` empty and take `relay.admissions()`
+before `run`. Each `Admission` carries the same `moq_auth::Request` the server
+would have read, and is answered with `grant(lease)` or `refuse(err)`. A
+`Lease::fixed(grant)` never changes; a `lease::Consumer` is driven by the
+`lease::Producer` the application keeps, which re-checks, updates, revokes, and
+learns when the session ends. Either way the relay closes the session at the
+grant's `expires`. `run` refuses to start while nobody has taken the
+admissions, a dropped `Admissions` fails every later session as unavailable,
+and an admission left unanswered for ten seconds (the bound an auth server
+gets) is refused the same way.
+
+```rust
+let mut relay = Relay::load(config).await?;
+let mut admissions = relay.admissions().expect("[auth] is empty");
+tokio::spawn(async move {
+    while let Some(admission) = admissions.next().await {
+        match policy.decide(&admission.request) {
+            Ok(grant) => {
+                let (producer, consumer) = moq_auth::lease::Producer::new(grant);
+                admission.grant(consumer);
+                tokio::spawn(revalidate(producer)); // update, revoke, await closed()
+            }
+            Err(err) => admission.refuse(err),
+        }
+    }
+});
+relay.run().await
 ```
 
 ## Stream listeners

@@ -84,6 +84,12 @@ let
     # jemalloc's configure uses -O0 test builds, which conflict with
     # Nix's _FORTIFY_SOURCE hardening (requires -O).
     hardeningDisable = [ "fortify" ];
+    # `cluster_connect_api_http_attaches_client_tls` builds the connect TLS
+    # config the way the relay's Auth does, which loads native roots and errors
+    # when none are found. Same fix as moq-relay: point rustls-native-certs at
+    # cacert's bundle for the check phase.
+    nativeBuildInputs = [ final.cacert ];
+    SSL_CERT_FILE = "${final.cacert}/etc/ssl/certs/ca-bundle.crt";
     # The crate is `moq-cli`, but its `[[bin]]` ships as `moq`.
     meta.mainProgram = "moq";
   };
