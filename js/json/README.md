@@ -57,4 +57,4 @@ for await (const record of consumer) {
 }
 ```
 
-Both modes support optional group-scoped DEFLATE compression (`{ compression: true }` on both sides), interoperable with the Rust `moq-json` crate.
+Both modes support optional group-scoped DEFLATE compression (`{ compression: "deflate" }` on both sides), interoperable with the Rust `moq-json` crate. `Config` is the codec options; `Producer.Config` / `Consumer.Config` add the track.

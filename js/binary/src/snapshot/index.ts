@@ -8,11 +8,11 @@
  * preserved, use the `Stream` module instead.
  *
  * On the wire each value is one group holding one frame, so a group is self-contained and a
- * consumer never needs an older one. With {@link ProducerConfig.compression} on, that frame is its
+ * consumer never needs an older one. With {@link Config.compression} `"deflate"`, that frame is its
  * own raw DEFLATE stream; there is no window to share across a single-frame group.
  *
  * @module
  */
 
-export { Consumer, type ConsumerConfig } from "./consumer.ts";
-export { Producer, type ProducerConfig } from "./producer.ts";
+export { Consumer } from "./consumer.ts";
+export { type Config, Producer } from "./producer.ts";

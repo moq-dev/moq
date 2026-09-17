@@ -4,27 +4,8 @@ use std::marker::PhantomData;
 
 use serde::de::DeserializeOwned;
 
+use super::Config;
 use crate::Result;
-
-/// Configuration for a [`Decoder`], and so for the [`Consumer`](super::Consumer) wrapping one.
-///
-/// Build from [`Default`] and override fields (the struct is `#[non_exhaustive]`, so new options
-/// stay additive).
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct ConsumerConfig {
-	/// Whether the frames are DEFLATE-compressed. Must match the encoder's
-	/// [`ProducerConfig::compression`](super::ProducerConfig::compression). Defaults to `false`.
-	pub compression: bool,
-}
-
-impl ConsumerConfig {
-	/// Set [`compression`](Self::compression) (a builder, since the struct is `#[non_exhaustive]`).
-	pub fn with_compression(mut self, compression: bool) -> Self {
-		self.compression = compression;
-		self
-	}
-}
 
 /// Decodes JSON records from frame payloads, sharing one DEFLATE window across the log.
 ///
@@ -41,10 +22,10 @@ pub struct Decoder<T> {
 
 impl<T> Decoder<T> {
 	/// Create a decoder with a cold window.
-	pub fn new(config: ConsumerConfig) -> Self {
+	pub fn new(config: Config) -> Self {
 		Self {
-			flate: config.compression.then(moq_flate::Decoder::new),
-			compression: config.compression,
+			flate: config.compression.is_deflate().then(moq_flate::Decoder::new),
+			compression: config.compression.is_deflate(),
 			_marker: PhantomData,
 		}
 	}
@@ -67,14 +48,25 @@ impl<T: DeserializeOwned> Decoder<T> {
 
 #[cfg(test)]
 mod test {
-	use super::super::{Encoder, ProducerConfig};
+	use super::super::{Config, Encoder};
 	use super::*;
+	use crate::Compression;
 	use serde_json::{Value, json};
+
+	fn cfg(compression: bool) -> Config {
+		Config {
+			compression: if compression {
+				Compression::Deflate
+			} else {
+				Compression::None
+			},
+		}
+	}
 
 	/// Round-trip a sequence of records through an encoder and decoder.
 	fn roundtrip(compression: bool, values: &[Value]) -> Vec<Value> {
-		let mut encoder = Encoder::<Value>::new(ProducerConfig::default().with_compression(compression));
-		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default().with_compression(compression));
+		let mut encoder = Encoder::<Value>::new(cfg(compression));
+		let mut decoder = Decoder::<Value>::new(cfg(compression));
 
 		values
 			.iter()
@@ -101,7 +93,7 @@ mod test {
 
 	#[test]
 	fn the_shared_window_shrinks_repetitive_records() {
-		let mut encoder = Encoder::<Value>::new(ProducerConfig::default().with_compression(true));
+		let mut encoder = Encoder::<Value>::new(cfg(true));
 		let sizes: Vec<usize> = (0..8)
 			.map(|n| {
 				let record = encoder.encode(&json!({ "group": n, "pts": n * 2_000 })).unwrap();
@@ -123,8 +115,8 @@ mod test {
 	/// against context the decoder on the other side never received.
 	#[test]
 	fn reset_starts_a_cold_window_on_both_sides() {
-		let mut encoder = Encoder::<Value>::new(ProducerConfig::default().with_compression(true));
-		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default().with_compression(true));
+		let mut encoder = Encoder::<Value>::new(cfg(true));
+		let mut decoder = Decoder::<Value>::new(cfg(true));
 
 		for n in 0..4 {
 			let record = encoder.encode(&json!({ "n": n })).unwrap();
@@ -143,16 +135,23 @@ mod test {
 
 #[cfg(test)]
 mod desync_test {
-	use super::super::{Encoder, ProducerConfig};
+	use super::super::{Config, Encoder};
 	use super::*;
+	use crate::Compression;
 	use serde_json::{Value, json};
+
+	fn deflate() -> Config {
+		Config {
+			compression: Compression::Deflate,
+		}
+	}
 
 	/// A compressed record that never reached the wire leaves the window ahead of the consumer, and a
 	/// log has no keyframe to resynchronize on. Continuing would emit frames nothing can decode, so
 	/// the encoder refuses until the caller rolls a new group and resets.
 	#[test]
 	fn an_uncommitted_compressed_record_stops_the_encoder() {
-		let mut encoder = Encoder::<Value>::new(ProducerConfig::default().with_compression(true));
+		let mut encoder = Encoder::<Value>::new(deflate());
 		encoder.encode(&json!({ "n": 0 })).unwrap().commit();
 
 		// This one fails to write, so the caller never commits it.
@@ -163,7 +162,7 @@ mod desync_test {
 		// Rolling a new group gives the consumer a cold window too, so the reset clears it.
 		encoder.reset();
 		let record = encoder.encode(&json!({ "n": 2 })).unwrap();
-		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default().with_compression(true));
+		let mut decoder = Decoder::<Value>::new(deflate());
 		assert_eq!(decoder.decode(record.payload()).unwrap(), json!({ "n": 2 }));
 		record.commit();
 	}
@@ -172,13 +171,13 @@ mod desync_test {
 	/// rather than an undecodable stream, and the encoder keeps going.
 	#[test]
 	fn an_uncommitted_plaintext_record_does_not_stop_the_encoder() {
-		let mut encoder = Encoder::<Value>::new(ProducerConfig::default());
+		let mut encoder = Encoder::<Value>::new(Config::default());
 		drop(encoder.encode(&json!({ "n": 0 })).unwrap());
 
 		let record = encoder
 			.encode(&json!({ "n": 1 }))
 			.expect("plaintext records are independent");
-		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+		let mut decoder = Decoder::<Value>::new(Config::default());
 		assert_eq!(decoder.decode(record.payload()).unwrap(), json!({ "n": 1 }));
 		record.commit();
 	}

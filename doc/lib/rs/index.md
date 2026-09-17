@@ -22,7 +22,8 @@ The reference implementation. Every crate is on
 | [moq-transcode](https://docs.rs/moq-transcode) | Just-in-time rendition ladders, GPU-resident on NVIDIA. |
 | [moq-auth](/lib/rs/moq-auth) | The authorization contract: requests, grants, leases, the HTTP client, the reference server, and JWT keys, signing, and verification. |
 | [moq-room](/lib/rs/moq-room) | Headless rooms: announce-derived roster, token claims, and a chat track. |
-| [moq-json](https://docs.rs/moq-json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
+| [moq-json](/lib/rs/moq-json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
+| [moq-binary](/lib/rs/moq-binary) | Opaque payloads over tracks: snapshots or append logs. |
 | [moq-e2ee](https://docs.rs/moq-e2ee) | End-to-end encryption of groups, datagrams, catalogs, and track names. |
 | [moq-flate](https://docs.rs/moq-flate) | Group-scoped DEFLATE for any track. |
 | [moq-loc](https://docs.rs/moq-loc), [moq-msf](https://docs.rs/moq-msf) | The IETF LOC container and MSF catalog. |

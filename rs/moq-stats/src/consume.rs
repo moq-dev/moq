@@ -68,7 +68,10 @@ impl Consumer {
 
 	async fn subscribe<T: serde::de::DeserializeOwned>(&self, name: &str) -> Result<moq_json::snapshot::Consumer<T>> {
 		let track = self.broadcast.track(name)?.subscribe(None).await?;
-		let config = moq_json::snapshot::ConsumerConfig::default().with_compression(self.config.compression);
+		let mut config = moq_json::snapshot::consumer::Config::default();
+		if self.config.compression {
+			config.compression = moq_json::Compression::Deflate;
+		}
 		Ok(moq_json::snapshot::Consumer::new(track, config))
 	}
 }

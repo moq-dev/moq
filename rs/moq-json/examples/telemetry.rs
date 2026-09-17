@@ -9,7 +9,8 @@
 
 use std::task::Poll;
 
-use moq_json::snapshot::{Consumer, ConsumerConfig, Producer, ProducerConfig};
+use moq_json::Compression;
+use moq_json::snapshot::{self, Consumer, Producer};
 use serde_json::{Value, json};
 
 /// One second of telemetry for a fleet device: a big static core plus a few moving numbers.
@@ -75,7 +76,7 @@ fn telemetry(tick: u64) -> Value {
 }
 
 /// Total wire bytes of every frame across every group for a full run under `config`.
-fn wire_bytes(config: ProducerConfig, ticks: u64) -> usize {
+fn wire_bytes(config: snapshot::Config, ticks: u64) -> usize {
 	let track = moq_net::broadcast::Info::new()
 		.produce()
 		.create_track("telemetry", None)
@@ -102,7 +103,7 @@ fn wire_bytes(config: ProducerConfig, ticks: u64) -> usize {
 
 /// Drive a producer and a live consumer in lockstep, asserting that EVERY tick reconstructs to the
 /// exact input value after decompression and delta application (not just the final one).
-fn verify(producer_config: ProducerConfig, ticks: u64) {
+fn verify(producer_config: snapshot::Config, ticks: u64) {
 	let track = moq_net::broadcast::Info::new()
 		.produce()
 		.create_track("telemetry", None)
@@ -110,7 +111,7 @@ fn verify(producer_config: ProducerConfig, ticks: u64) {
 	let consumer = track.subscribe(None);
 	let mut producer = Producer::<Value>::new(track, producer_config.clone());
 
-	let mut consumer_config = ConsumerConfig::default();
+	let mut consumer_config = snapshot::consumer::Config::default();
 	consumer_config.compression = producer_config.compression;
 	let mut consumer = Consumer::<Value>::new(consumer, consumer_config);
 	let waiter = kio::Waiter::noop();
@@ -140,7 +141,7 @@ fn verify(producer_config: ProducerConfig, ticks: u64) {
 ///
 /// Returns how many values the late joiner surfaced to the application: with backlog collapsing this
 /// is far below `ticks`, since stale intermediate reconstructions are applied internally but skipped.
-fn verify_late_joiner(producer_config: ProducerConfig, ticks: u64) -> usize {
+fn verify_late_joiner(producer_config: snapshot::Config, ticks: u64) -> usize {
 	let track = moq_net::broadcast::Info::new()
 		.produce()
 		.create_track("telemetry", None)
@@ -152,7 +153,7 @@ fn verify_late_joiner(producer_config: ProducerConfig, ticks: u64) -> usize {
 	}
 	producer.finish().unwrap();
 
-	let mut consumer_config = ConsumerConfig::default();
+	let mut consumer_config = snapshot::consumer::Config::default();
 	consumer_config.compression = producer_config.compression;
 	let mut consumer = Consumer::<Value>::new(consumer, consumer_config);
 	let waiter = kio::Waiter::noop();
@@ -170,10 +171,14 @@ fn verify_late_joiner(producer_config: ProducerConfig, ticks: u64) -> usize {
 	yielded
 }
 
-fn cfg(delta_ratio: u32, compression: bool) -> ProducerConfig {
-	let mut config = ProducerConfig::default();
+fn cfg(delta_ratio: u32, compression: bool) -> snapshot::Config {
+	let mut config = snapshot::Config::default();
 	config.delta_ratio = delta_ratio;
-	config.compression = compression;
+	config.compression = if compression {
+		Compression::Deflate
+	} else {
+		Compression::None
+	};
 	config
 }
 

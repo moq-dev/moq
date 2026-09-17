@@ -36,6 +36,10 @@ test("object literals reject positional tracks and producer tracks on consumers"
 		new Stream.Producer(new Track.Producer("test"));
 		// @ts-expect-error a producer track is not a subscriber
 		new Stream.Consumer({ track: new Track.Producer("test") });
+		// @ts-expect-error compression is an enum, not a boolean
+		new Snapshot.Producer({ track: new Track.Producer("test"), compression: true });
+		// @ts-expect-error compression is an enum, not a boolean
+		new Stream.Producer({ track: new Track.Producer("test"), compression: true });
 	};
 	expect(reject).toBeDefined();
 });

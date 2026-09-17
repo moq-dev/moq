@@ -1,14 +1,8 @@
 import { Decoder as Flate } from "@moq/flate";
 import * as Moq from "@moq/net";
 
-/** Snapshot consumer options, including the source track. */
-export interface ConsumerConfig {
-	/** Track to read values from. */
-	track: Moq.Track.Subscriber;
-
-	/** Whether the frames are `deflate-raw` compressed. Must match the producer. Defaults to `false`. */
-	compression?: boolean;
-}
+import { isDeflate } from "../compression.ts";
+import type { Config as CodecConfig } from "./producer.ts";
 
 /**
  * Consumes a binary value from a track, yielding the newest one.
@@ -27,9 +21,9 @@ export class Consumer {
 	// normally one frame, but the window is per group either way.
 	#flate?: Flate;
 
-	constructor(config: ConsumerConfig) {
+	constructor(config: Consumer.Config) {
 		this.#track = config.track.ordered();
-		this.#decompress = config.compression ?? false;
+		this.#decompress = isDeflate(config.compression);
 	}
 
 	/**
@@ -81,4 +75,9 @@ export class Consumer {
 			yield value;
 		}
 	}
+}
+
+export namespace Consumer {
+	/** Snapshot consumer options, including the source track. */
+	export type Config = CodecConfig & { track: Moq.Track.Subscriber };
 }

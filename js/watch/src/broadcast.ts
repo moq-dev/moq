@@ -311,7 +311,7 @@ export class Broadcast {
 			const consumer = new Json.Snapshot.Consumer<Catalog.Root>({
 				track,
 				schema: Catalog.RootSchema,
-				compression: format === "hangz",
+				compression: format === "hangz" ? "deflate" : "none",
 			});
 			fetchNext = () => consumer.next();
 		} else {

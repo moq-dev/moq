@@ -2,6 +2,7 @@ import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "@moq/flate";
 import { Group } from "@moq/net";
 import type * as z from "@zod/mini";
 
+import { type Compression, isDeflate } from "../compression.ts";
 import { deepEqual, diff } from "../diff.ts";
 
 // Maximum frames (snapshot + deltas) in a single group before a new snapshot is forced. Kept
@@ -38,9 +39,9 @@ export interface Config<T> {
 
 	// Compress each group as one sync-flushed `deflate-raw` (RFC 1951) stream, so deltas reuse the
 	// snapshot as context and shrink sharply. Interoperable with the Rust `moq-json` producer.
-	// `false`/unset (the default) writes plaintext JSON frames. A {@link Decoder} reading them
-	// must set the same flag.
-	compression?: boolean;
+	// `"none"`/unset (the default) writes plaintext JSON frames. A {@link Decoder} reading them
+	// must set the same {@link compression}.
+	compression?: Compression;
 }
 
 /** One encoded frame, and the group boundary it implies. */
@@ -138,7 +139,7 @@ export class Encoder<T> {
 
 	constructor(config: Config<T> = {}) {
 		this.#config = config;
-		this.#compress = config.compression ?? false;
+		this.#compress = isDeflate(config.compression);
 	}
 
 	/**

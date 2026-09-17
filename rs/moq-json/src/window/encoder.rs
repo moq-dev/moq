@@ -34,7 +34,7 @@ pub struct ProducerConfig {
 	/// `0` disables ops entirely, so every edit is its own single-frame group.
 	///
 	/// This is the window's counterpart to
-	/// [`snapshot::ProducerConfig::delta_ratio`](crate::snapshot::ProducerConfig::delta_ratio), and
+	/// [`snapshot::Config::delta_ratio`](crate::snapshot::Config::delta_ratio), and
 	/// the same trade: a bigger ratio spends less on headers and makes a late joiner read more ops.
 	///
 	/// Defaults to `8`.

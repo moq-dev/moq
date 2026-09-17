@@ -362,7 +362,7 @@ test("a compressed delta is gated on its encoded size, not its plaintext", async
 	// plus a tiny patch that compresses to more than it measures would otherwise slip through the
 	// gate and evict frame 0.
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track, compression: true });
+	const producer = new Producer<Value>({ track, compression: "deflate" });
 
 	// Highly repetitive, so the compressed snapshot lands just under the cap.
 	producer.update({ v: "x".repeat(Group.MAX_GROUP_CACHE_BYTES) });
@@ -385,7 +385,7 @@ test("a compressed delta is gated on its encoded size, not its plaintext", async
 
 	const consumer = new Consumer<Value>({
 		track: track.subscribe({ maxAge: REPLAY_LATENCY }),
-		compression: true,
+		compression: "deflate",
 	});
 	const values: Value[] = [];
 	for await (const value of consumer) values.push(value);

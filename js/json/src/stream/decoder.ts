@@ -1,10 +1,7 @@
 import { Decoder as Flate } from "@moq/flate";
 
-/** Options for a {@link Decoder}. */
-export interface ConsumerConfig {
-	/** Whether the frames are `deflate-raw` compressed. Must match the encoder. Defaults to `false`. */
-	compression?: boolean;
-}
+import { isDeflate } from "../compression.ts";
+import type { Config } from "./encoder.ts";
 
 /**
  * Decodes JSON records from frame payloads, sharing one DEFLATE window across the log.
@@ -18,8 +15,8 @@ export class Decoder<T> {
 	// The DEFLATE window for the whole log, present while decompressing.
 	#flate?: Flate;
 
-	constructor(config: ConsumerConfig = {}) {
-		this.#decompress = config.compression ?? false;
+	constructor(config: Config = {}) {
+		this.#decompress = isDeflate(config.compression);
 		this.#flate = this.#decompress ? new Flate() : undefined;
 	}
 

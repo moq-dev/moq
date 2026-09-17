@@ -9,5 +9,7 @@ The bytes are opaque: this package frames them onto a track and optionally compr
 never looks inside. For JSON documents reach for [`@moq/json`](../json) instead, which adds RFC 7396
 merge-patch deltas on top of the same two modes.
 
-Compression is [`@moq/flate`](../flate), the same group-scoped DEFLATE `@moq/json` uses, so the two
-agree on the wire. Interoperable with the Rust `moq-binary` crate.
+`Config` is the codec options (`compression: "none" | "deflate"`). `Producer.Config` /
+`Consumer.Config` add the track. Compression is [`@moq/flate`](../flate), the same group-scoped
+DEFLATE `@moq/json` uses, so the two agree on the wire. Interoperable with the Rust `moq-binary`
+crate.

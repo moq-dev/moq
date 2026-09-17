@@ -127,14 +127,14 @@ test("compressed roundtrip", () => {
 		{ a: 1, b: 2 },
 		{ a: 5, b: 2 },
 	];
-	expect(roundtrip({ compression: true }, values)).toEqual(values);
+	expect(roundtrip({ compression: "deflate" }, values)).toEqual(values);
 });
 
 // The window is per group, so a keyframe mid-stream has to restart it on both sides. A decoder that
 // kept the old window here would fail to inflate the new group's snapshot.
 test("compressed roundtrip across a group boundary", () => {
 	const values: Doc[] = Array.from({ length: 41 }, (_, n) => ({ n }));
-	const got = roundtrip({ deltaRatio: 2, compression: true }, values);
+	const got = roundtrip({ deltaRatio: 2, compression: "deflate" }, values);
 	expect(got.at(-1)).toEqual({ n: 40 });
 });
 
@@ -170,7 +170,10 @@ test("frames apply without materializing", () => {
 
 test("compressed deltas reuse the group window", () => {
 	const phrase = "Media over QUIC delivers real-time latency at massive scale";
-	const frames = encode({ deltaRatio: 100, compression: true }, [{ note: phrase }, { note: phrase, echo: phrase }]);
+	const frames = encode({ deltaRatio: 100, compression: "deflate" }, [
+		{ note: phrase },
+		{ note: phrase, echo: phrase },
+	]);
 
 	// The raw patch repeats the whole phrase; compressed against the window it's a fraction.
 	const raw = new TextEncoder().encode(JSON.stringify({ echo: phrase })).length;

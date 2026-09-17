@@ -13,14 +13,32 @@
 //! On the wire the log is a single group that is never rolled, one payload per frame. A payload
 //! that cannot be written ends the track rather than opening a second group: a log missing a record
 //! is not lossless, and a gap dressed up as a complete log is worse than a visible failure. With
-//! [`ProducerConfig::compression`] on, that one group is one sync-flushed DEFLATE stream, so each
+//! [`Config::compression`] set to [`Compression::Deflate`], that one
+//! group is one sync-flushed DEFLATE stream, so each
 //! payload compresses against the earlier ones and a run of similar payloads shrinks sharply.
 
-mod consumer;
-mod producer;
+use crate::Compression;
 
-pub use consumer::{Consumer, ConsumerConfig};
-pub use producer::{Producer, ProducerConfig};
+pub mod consumer;
+pub mod producer;
+
+pub use consumer::Consumer;
+pub use producer::Producer;
+
+/// Codec options for a stream track.
+///
+/// Build from [`Default`] and override fields (the struct is `#[non_exhaustive]`, so new options
+/// stay additive).
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct Config {
+	/// Compress the group as one sync-flushed DEFLATE stream, so each payload reuses the earlier
+	/// ones as context.
+	///
+	/// [`Compression::None`] (the default) writes the bytes through untouched. A [`Consumer`] must
+	/// set the same [`compression`](Self::compression).
+	pub compression: Compression,
+}
 
 #[cfg(test)]
 mod test {
@@ -30,21 +48,28 @@ mod test {
 
 	use super::*;
 
+	fn cfg(compression: bool) -> Config {
+		Config {
+			compression: if compression {
+				Compression::Deflate
+			} else {
+				Compression::None
+			},
+		}
+	}
+
 	fn producer(compression: bool) -> (Producer, moq_net::track::Subscriber) {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
 			.create_track("test", None)
 			.unwrap();
 		let consumer = track.subscribe(None);
-		(
-			Producer::new(track, ProducerConfig::default().with_compression(compression)),
-			consumer,
-		)
+		(Producer::new(track, cfg(compression)), consumer)
 	}
 
 	/// Drain every payload currently available without blocking.
 	fn drain(track: moq_net::track::Subscriber, compression: bool) -> Vec<Bytes> {
-		let mut consumer = Consumer::new(track, ConsumerConfig::default().with_compression(compression));
+		let mut consumer = Consumer::new(track, cfg(compression));
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();
 		while let Poll::Ready(Ok(Some(payload))) = consumer.poll_next(&waiter) {
@@ -154,7 +179,7 @@ mod test {
 	fn a_failed_write_aborts_the_track() {
 		let track = rejecting_track();
 		let mut subscriber = track.subscribe(None);
-		let mut producer = Producer::new(track, ProducerConfig::default());
+		let mut producer = Producer::new(track, Config::default());
 
 		assert!(producer.append(&b"rejected"[..]).is_err());
 
@@ -177,7 +202,7 @@ mod test {
 			.create_track("test", None)
 			.unwrap();
 		let mut subscriber = track.subscribe(None);
-		let mut producer = Producer::new(track, ProducerConfig::default().with_compression(true));
+		let mut producer = Producer::new(track, cfg(true));
 
 		assert!(producer.is_used());
 		let oversized = Bytes::from(vec![0u8; moq_flate::DEFAULT_MAX_FRAME_SIZE as usize + 1]);
@@ -204,7 +229,7 @@ mod test {
 			.create_track("test", None)
 			.unwrap();
 		let mut subscriber = track.subscribe(None);
-		let mut producer = Producer::new(track, ProducerConfig::default());
+		let mut producer = Producer::new(track, Config::default());
 
 		producer.append(&b"first"[..]).unwrap();
 
@@ -239,7 +264,7 @@ mod test {
 	#[test]
 	fn a_failed_write_ends_the_track() {
 		let track = rejecting_track();
-		let mut producer = Producer::new(track, ProducerConfig::default());
+		let mut producer = Producer::new(track, Config::default());
 
 		assert!(producer.append(&b"rejected"[..]).is_err());
 		assert!(
@@ -272,7 +297,7 @@ mod test {
 		}
 		track.finish().unwrap();
 
-		let mut consumer = Consumer::new(subscriber, ConsumerConfig::default().with_compression(true));
+		let mut consumer = Consumer::new(subscriber, cfg(true));
 		let waiter = kio::Waiter::noop();
 
 		// The log's one group reads normally.
@@ -303,7 +328,7 @@ mod test {
 		let mut second = track.append_group().unwrap();
 		second.write_frame(moq_net::Timestamp::now(), &b"second"[..]).unwrap();
 
-		let mut consumer = Consumer::new(subscriber, ConsumerConfig::default());
+		let mut consumer = Consumer::new(subscriber, Config::default());
 		let waiter = kio::Waiter::noop();
 
 		assert!(matches!(
@@ -345,7 +370,7 @@ mod test {
 		}
 		track.finish().unwrap();
 
-		let mut consumer = Consumer::new(subscriber, ConsumerConfig::default().with_compression(true));
+		let mut consumer = Consumer::new(subscriber, cfg(true));
 		let waiter = kio::Waiter::noop();
 
 		assert!(matches!(
@@ -378,7 +403,7 @@ mod test {
 		producer.append(&b"only"[..]).unwrap();
 		producer.finish().unwrap();
 
-		let mut consumer = Consumer::new(track, ConsumerConfig::default());
+		let mut consumer = Consumer::new(track, Config::default());
 		let waiter = kio::Waiter::noop();
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(Some(_)))));
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(None))));

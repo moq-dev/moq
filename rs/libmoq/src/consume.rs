@@ -896,7 +896,7 @@ impl Consume {
 		&mut self,
 		broadcast: Id,
 		name: &str,
-		config: moq_json::snapshot::ConsumerConfig,
+		config: moq_json::snapshot::consumer::Config,
 		on_value: OnStatus,
 	) -> Result<Id, Error> {
 		let broadcast = self
@@ -965,7 +965,7 @@ impl Consume {
 		&mut self,
 		broadcast: Id,
 		name: &str,
-		config: moq_json::stream::ConsumerConfig,
+		config: moq_json::stream::Config,
 		on_value: OnStatus,
 	) -> Result<Id, Error> {
 		let broadcast = self

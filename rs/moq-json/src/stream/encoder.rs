@@ -5,29 +5,21 @@ use std::marker::PhantomData;
 use bytes::Bytes;
 use serde::Serialize;
 
-use crate::{Error, Result};
+use crate::{Compression, Error, Result};
 
-/// Configuration for an [`Encoder`], and so for the [`Producer`](super::Producer) wrapping one.
+/// Codec options for an [`Encoder`], and so for the [`Producer`](super::Producer) wrapping one.
 ///
 /// Build from [`Default`] and override fields (the struct is `#[non_exhaustive]`, so new
 /// options stay additive).
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
-pub struct ProducerConfig {
+pub struct Config {
 	/// Compress the group as one sync-flushed DEFLATE stream, so each record reuses the earlier
 	/// ones as context and shrinks sharply.
 	///
-	/// `false` (the default) emits plaintext JSON frames. A [`Decoder`](super::Decoder) reading them
-	/// must set [`ConsumerConfig::compression`](super::ConsumerConfig::compression) to match.
-	pub compression: bool,
-}
-
-impl ProducerConfig {
-	/// Set [`compression`](Self::compression) (a builder, since the struct is `#[non_exhaustive]`).
-	pub fn with_compression(mut self, compression: bool) -> Self {
-		self.compression = compression;
-		self
-	}
+	/// [`Compression::None`] (the default) emits plaintext JSON frames. A [`Decoder`](super::Decoder)
+	/// reading them must set the same [`compression`](Self::compression).
+	pub compression: Compression,
 }
 
 /// An encoded record the caller has not yet acknowledged writing.
@@ -93,10 +85,10 @@ pub struct Encoder<T> {
 
 impl<T> Encoder<T> {
 	/// Create an encoder with a cold window.
-	pub fn new(config: ProducerConfig) -> Self {
+	pub fn new(config: Config) -> Self {
 		Self {
-			flate: config.compression.then(moq_flate::Encoder::new),
-			compression: config.compression,
+			flate: config.compression.is_deflate().then(moq_flate::Encoder::new),
+			compression: config.compression.is_deflate(),
 			desynced: false,
 			_marker: PhantomData,
 		}

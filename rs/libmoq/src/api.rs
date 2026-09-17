@@ -2301,9 +2301,13 @@ pub unsafe extern "C" fn moq_publish_json_snapshot(
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? };
 		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
-		let mut producer = moq_json::snapshot::ProducerConfig::default();
+		let mut producer = moq_json::snapshot::Config::default();
 		producer.delta_ratio = config.delta_ratio;
-		producer.compression = config.compression;
+		producer.compression = if config.compression {
+			moq_json::Compression::Deflate
+		} else {
+			moq_json::Compression::None
+		};
 		State::lock().publish.json_snapshot(broadcast, name, producer)
 	})
 }
@@ -2355,7 +2359,10 @@ pub unsafe extern "C" fn moq_publish_json_stream(
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? };
 		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
-		let producer = moq_json::stream::ProducerConfig::default().with_compression(config.compression);
+		let mut producer = moq_json::stream::Config::default();
+		if config.compression {
+			producer.compression = moq_json::Compression::Deflate;
+		}
 		State::lock().publish.json_stream(broadcast, name, producer)
 	})
 }
@@ -2921,8 +2928,12 @@ pub unsafe extern "C" fn moq_consume_json_snapshot(
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? };
 		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
-		let mut consumer = moq_json::snapshot::ConsumerConfig::default();
-		consumer.compression = config.compression;
+		let mut consumer = moq_json::snapshot::consumer::Config::default();
+		consumer.compression = if config.compression {
+			moq_json::Compression::Deflate
+		} else {
+			moq_json::Compression::None
+		};
 		let on_value = unsafe { ffi::OnStatus::new(user_data, on_value) };
 		State::lock().consume.json_snapshot(broadcast, name, consumer, on_value)
 	})
@@ -2952,7 +2963,10 @@ pub unsafe extern "C" fn moq_consume_json_stream(
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? };
 		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
-		let consumer = moq_json::stream::ConsumerConfig::default().with_compression(config.compression);
+		let mut consumer = moq_json::stream::Config::default();
+		if config.compression {
+			consumer.compression = moq_json::Compression::Deflate;
+		}
 		let on_value = unsafe { ffi::OnStatus::new(user_data, on_value) };
 		State::lock().consume.json_stream(broadcast, name, consumer, on_value)
 	})

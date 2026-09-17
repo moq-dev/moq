@@ -6,28 +6,7 @@ use bytes::Bytes;
 
 use crate::Result;
 
-/// Configuration for a [`Producer`].
-///
-/// Build from [`Default`] and override fields (the struct is `#[non_exhaustive]`, so new options
-/// stay additive).
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct ProducerConfig {
-	/// Compress the group as one sync-flushed DEFLATE stream, so each payload reuses the earlier
-	/// ones as context.
-	///
-	/// `false` (the default) writes the bytes through untouched. A [`Consumer`](super::Consumer)
-	/// must set [`ConsumerConfig::compression`](super::ConsumerConfig::compression) to match.
-	pub compression: bool,
-}
-
-impl ProducerConfig {
-	/// Set [`compression`](Self::compression) (a builder, since the struct is `#[non_exhaustive]`).
-	pub fn with_compression(mut self, compression: bool) -> Self {
-		self.compression = compression;
-		self
-	}
-}
+pub use super::Config;
 
 /// Publishes an ordered log of binary payloads over a track, one payload per frame in a single
 /// group.
@@ -41,12 +20,12 @@ pub struct Producer {
 
 impl Producer {
 	/// Create a producer that publishes to the given track.
-	pub fn new(track: moq_net::track::Producer, config: ProducerConfig) -> Self {
+	pub fn new(track: moq_net::track::Producer, config: Config) -> Self {
 		Self {
 			inner: Arc::new(Mutex::new(Inner {
 				track,
 				group: None,
-				flate: config.compression.then(moq_flate::Encoder::new),
+				flate: config.compression.is_deflate().then(moq_flate::Encoder::new),
 			})),
 		}
 	}

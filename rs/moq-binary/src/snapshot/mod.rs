@@ -7,14 +7,32 @@
 //! preserved, use [`stream`](crate::stream) instead.
 //!
 //! On the wire each value is one group holding one frame, so a group is self-contained and a
-//! consumer never needs an older one. With [`ProducerConfig::compression`] on, that frame is its own
-//! raw DEFLATE stream; there is no window to share across a single-frame group.
+//! consumer never needs an older one. With [`Config::compression`] set to
+//! [`Compression::Deflate`], that frame is its own raw DEFLATE stream;
+//! there is no window to share across a single-frame group.
 
-mod consumer;
-mod producer;
+use crate::Compression;
 
-pub use consumer::{Consumer, ConsumerConfig};
-pub use producer::{Producer, ProducerConfig};
+pub mod consumer;
+pub mod producer;
+
+pub use consumer::Consumer;
+pub use producer::Producer;
+
+/// Codec options for a snapshot track.
+///
+/// Build from [`Default`] and override fields (the struct is `#[non_exhaustive]`, so new options
+/// stay additive).
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct Config {
+	/// Compress each value as its own raw DEFLATE stream.
+	///
+	/// A snapshot group holds a single self-contained value, so there is no window to share: each
+	/// value is compressed alone. [`Compression::None`] (the default) writes the bytes through
+	/// untouched. A [`Consumer`] must set the same [`compression`](Self::compression).
+	pub compression: Compression,
+}
 
 #[cfg(test)]
 mod test {
@@ -24,20 +42,27 @@ mod test {
 
 	use super::*;
 
+	fn cfg(compression: bool) -> Config {
+		Config {
+			compression: if compression {
+				Compression::Deflate
+			} else {
+				Compression::None
+			},
+		}
+	}
+
 	fn producer(compression: bool) -> (Producer, moq_net::track::Subscriber) {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
 			.create_track("test", None)
 			.unwrap();
 		let consumer = track.subscribe(None);
-		(
-			Producer::new(track, ProducerConfig::default().with_compression(compression)),
-			consumer,
-		)
+		(Producer::new(track, cfg(compression)), consumer)
 	}
 
-	fn consumer(track: moq_net::track::Subscriber, compression: bool) -> Consumer {
-		Consumer::new(track, ConsumerConfig::default().with_compression(compression))
+	fn consume(track: moq_net::track::Subscriber, compression: bool) -> Consumer {
+		Consumer::new(track, cfg(compression))
 	}
 
 	/// Drain every value currently available without blocking.
@@ -59,13 +84,13 @@ mod test {
 
 		// Two updates => two groups. A consumer that joins after both only sees the latest.
 		assert_eq!(track.latest(), Some(1));
-		assert_eq!(drain(consumer(track, false)), vec![Bytes::from_static(b"second")]);
+		assert_eq!(drain(consume(track, false)), vec![Bytes::from_static(b"second")]);
 	}
 
 	#[test]
 	fn live_consumer_sees_each_update() {
 		let (mut producer, track) = producer(false);
-		let mut consumer = consumer(track, false);
+		let mut consumer = consume(track, false);
 		let waiter = kio::Waiter::noop();
 
 		for n in 0..3u8 {
@@ -84,7 +109,7 @@ mod test {
 		producer.update(payload.clone()).unwrap();
 		producer.finish().unwrap();
 
-		assert_eq!(drain(consumer(track, true)), vec![payload]);
+		assert_eq!(drain(consume(track, true)), vec![payload]);
 	}
 
 	/// The compressed frame on the wire is much smaller than the value it carries, so a consumer
@@ -125,7 +150,7 @@ mod test {
 		producer.finish().unwrap();
 
 		// A reader arriving now still finds the last good value, not an empty superseding group.
-		assert_eq!(drain(consumer(track, false)), vec![Bytes::from_static(b"keep")]);
+		assert_eq!(drain(consume(track, false)), vec![Bytes::from_static(b"keep")]);
 	}
 
 	/// `finish` closes the underlying track, so a later update fails rather than being silently
@@ -148,7 +173,7 @@ mod test {
 		producer.update(&b"only"[..]).unwrap();
 		producer.finish().unwrap();
 
-		let mut consumer = consumer(track, false);
+		let mut consumer = consume(track, false);
 		let waiter = kio::Waiter::noop();
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(Some(_)))));
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(None))));

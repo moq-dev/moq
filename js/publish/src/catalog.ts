@@ -42,7 +42,7 @@ export class CatalogProducer {
 	serve(track: Moq.Track.Producer, effect: Effect, opts?: { compression?: boolean }): void {
 		const output = new Json.Snapshot.Producer<Catalog.Root>({
 			track,
-			compression: opts?.compression,
+			compression: opts?.compression ? "deflate" : "none",
 			deltaRatio: 0,
 		});
 		output.update(this.#value);

@@ -1,14 +1,8 @@
 import { Decoder as Flate } from "@moq/flate";
 import type * as Moq from "@moq/net";
 
-/** Stream consumer options, including the source track. */
-export interface ConsumerConfig {
-	/** Track to read payloads from. */
-	track: Moq.Track.Subscriber;
-
-	/** Whether the frames are `deflate-raw` compressed. Must match the producer. Defaults to `false`. */
-	compression?: boolean;
-}
+import { isDeflate } from "../compression.ts";
+import type { Config as CodecConfig } from "./producer.ts";
 
 /**
  * Thrown by a stream read when the track carried a second group, which a lossless log cannot do.
@@ -55,9 +49,9 @@ export class Consumer {
 	// The DEFLATE window for the group, present while decompressing.
 	#flate?: Flate;
 
-	constructor(config: ConsumerConfig) {
+	constructor(config: Consumer.Config) {
 		this.#track = config.track;
-		this.#decompress = config.compression ?? false;
+		this.#decompress = isDeflate(config.compression);
 	}
 
 	/** Get the next payload, or `undefined` once the track ends. */
@@ -144,4 +138,9 @@ export class Consumer {
 			yield value;
 		}
 	}
+}
+
+export namespace Consumer {
+	/** Stream consumer options, including the source track. */
+	export type Config = CodecConfig & { track: Moq.Track.Subscriber };
 }

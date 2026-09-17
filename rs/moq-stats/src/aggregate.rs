@@ -260,7 +260,7 @@ struct Merged<V: Mergeable> {
 	depth: usize,
 	/// Track name subscribed on each node broadcast.
 	name: String,
-	config: moq_json::snapshot::ConsumerConfig,
+	config: moq_json::snapshot::consumer::Config,
 	/// One entry per live node broadcast, keyed by absolute announced path.
 	nodes: HashMap<PathOwned, Node<V>>,
 }
@@ -273,7 +273,13 @@ impl<V: Mergeable> Merged<V> {
 			prefix: config.prefix.clone(),
 			depth: config.depth,
 			name,
-			config: moq_json::snapshot::ConsumerConfig::default().with_compression(config.compression),
+			config: {
+				let mut json = moq_json::snapshot::consumer::Config::default();
+				if config.compression {
+					json.compression = moq_json::Compression::Deflate;
+				}
+				json
+			},
 			nodes: HashMap::new(),
 		}
 	}
@@ -385,7 +391,7 @@ impl<V: Mergeable> Merged<V> {
 fn advance<V: Mergeable>(
 	node: &mut Node<V>,
 	origin: &origin::Consumer,
-	config: &moq_json::snapshot::ConsumerConfig,
+	config: &moq_json::snapshot::consumer::Config,
 	name: &str,
 	waiter: &Waiter,
 ) -> bool {
@@ -602,7 +608,7 @@ mod tests {
 			source.announce(origin::Route::default()).expect("announce");
 			let name = traffic_track(&Tier::default(), Role::Publisher, false);
 			let track = source.create_track(name, None).expect("create track");
-			let config = moq_json::snapshot::ProducerConfig::default().with_delta_ratio(0);
+			let config = moq_json::snapshot::Config::default().with_delta_ratio(0);
 			Self {
 				traffic: moq_json::snapshot::Producer::new(track.clone(), config),
 				track,

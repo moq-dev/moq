@@ -1,10 +1,8 @@
 import { Decoder as Flate } from "@moq/flate";
 
+import { isDeflate } from "../compression.ts";
 import { merge } from "../diff.ts";
 import type { Config } from "./encoder.ts";
-
-/** Options for a {@link Decoder}: the knobs it actually reads. */
-export type ConsumerConfig<T> = Pick<Config<T>, "schema" | "compression">;
 
 /**
  * Reconstructs a JSON value from the snapshot and delta frames of a group.
@@ -19,7 +17,7 @@ export type ConsumerConfig<T> = Pick<Config<T>, "schema" | "compression">;
  * that wants a value per frame just calls it every time.
  */
 export class Decoder<T> {
-	#schema?: ConsumerConfig<T>["schema"];
+	#schema?: Config<T>["schema"];
 	// Whether frames are `deflate-raw` compressed. Must match the encoder's {@link Config.compression}.
 	#decompress: boolean;
 
@@ -28,9 +26,9 @@ export class Decoder<T> {
 	// The reconstructed value, `undefined` until the first snapshot.
 	#current?: unknown;
 
-	constructor(config: ConsumerConfig<T> = {}) {
+	constructor(config: Pick<Config<T>, "schema" | "compression"> = {}) {
 		this.#schema = config.schema;
-		this.#decompress = config.compression ?? false;
+		this.#decompress = isDeflate(config.compression);
 	}
 
 	/**

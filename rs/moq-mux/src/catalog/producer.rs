@@ -294,13 +294,13 @@ impl<E: CatalogExt> Producer<E> {
 		let msf_track = broadcast.create_track(moq_msf::DEFAULT_NAME, msf_info)?;
 
 		// Disable deltas for now to stay byte-compatible with consumers that only read snapshots.
-		let mut json_config = moq_json::snapshot::ProducerConfig::default();
+		let mut json_config = moq_json::snapshot::Config::default();
 		json_config.delta_ratio = 0;
 		let hang = moq_json::snapshot::Producer::new(hang_track.clone(), json_config.clone());
 
 		// The `.z` track carries the same catalog, DEFLATE-compressed. Deltas stay off for parity
 		// with the plaintext track; only the per-group compression differs.
-		json_config.compression = true;
+		json_config.compression = moq_json::Compression::Deflate;
 		let hangz = moq_json::snapshot::Producer::new(hangz_track, json_config);
 
 		let timeline = crate::timeline::Producer::new(broadcast, crate::timeline::Config::default());

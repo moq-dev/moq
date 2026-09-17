@@ -6,7 +6,7 @@ use bytes::Bytes;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::{Diff, Result, diff};
+use crate::{Compression, Diff, Result, diff};
 
 /// Maximum frames (snapshot + deltas) in a single group before a new snapshot is forced.
 ///
@@ -14,13 +14,13 @@ use crate::{Diff, Result, diff};
 /// at frame 0 before the group is evicted.
 pub(super) const MAX_DELTA_FRAMES: usize = 256;
 
-/// Configuration for an [`Encoder`], and so for the [`Producer`](super::Producer) wrapping one.
+/// Codec options for an [`Encoder`], and so for the [`Producer`](super::Producer) wrapping one.
 ///
 /// Build from [`Default`] and override fields (the struct is `#[non_exhaustive]`, so new
-/// options stay additive), or chain the `with_*` setters.
+/// options stay additive), or chain [`with_delta_ratio`](Self::with_delta_ratio).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct ProducerConfig {
+pub struct Config {
 	/// Controls how aggressively the encoder emits deltas (merge patches) instead of full snapshots.
 	///
 	/// A ratio of `0` disables deltas: every change is encoded as a new snapshot.
@@ -31,8 +31,8 @@ pub struct ProducerConfig {
 	/// still lands before the group rolls. So `1` allows roughly one snapshot's worth of deltas before
 	/// rolling, and a larger ratio tolerates more.
 	///
-	/// When [`compression`](Self::compression) is on, both sides of the comparison are measured on
-	/// the *compressed* frame sizes (the real wire cost).
+	/// When [`compression`](Self::compression) is [`Compression::Deflate`], both sides of the
+	/// comparison are measured on the *compressed* frame sizes (the real wire cost).
 	///
 	/// Defaults to `8`.
 	pub delta_ratio: u32,
@@ -40,31 +40,25 @@ pub struct ProducerConfig {
 	/// Compress each group as one sync-flushed DEFLATE stream, so deltas reuse the snapshot as
 	/// context and shrink sharply.
 	///
-	/// `false` (the default) emits plaintext JSON frames, identical on the wire to an uncompressed
-	/// track. A [`Decoder`](super::Decoder) reading them must set
-	/// [`ConsumerConfig::compression`](super::ConsumerConfig::compression) to match.
-	pub compression: bool,
+	/// [`Compression::None`] (the default) emits plaintext JSON frames, identical on the wire to an
+	/// uncompressed track. A [`Decoder`](super::Decoder) reading them must set the same
+	/// [`compression`](Self::compression).
+	pub compression: Compression,
 }
 
-impl ProducerConfig {
+impl Config {
 	/// Set [`delta_ratio`](Self::delta_ratio) (a builder, since the struct is `#[non_exhaustive]`).
 	pub fn with_delta_ratio(mut self, delta_ratio: u32) -> Self {
 		self.delta_ratio = delta_ratio;
 		self
 	}
-
-	/// Set [`compression`](Self::compression) (a builder, since the struct is `#[non_exhaustive]`).
-	pub fn with_compression(mut self, compression: bool) -> Self {
-		self.compression = compression;
-		self
-	}
 }
 
-impl Default for ProducerConfig {
+impl Default for Config {
 	fn default() -> Self {
 		Self {
 			delta_ratio: 8,
-			compression: false,
+			compression: Compression::None,
 		}
 	}
 }
@@ -72,7 +66,7 @@ impl Default for ProducerConfig {
 /// One encoded frame, and the group boundary it implies.
 #[derive(Clone, Debug)]
 pub struct Encoded {
-	/// The frame payload, DEFLATE-compressed when [`ProducerConfig::compression`] is set.
+	/// The frame payload, DEFLATE-compressed when [`Config::compression`] is [`Compression::Deflate`].
 	pub payload: Bytes,
 
 	/// Whether this frame is a full snapshot, which must open a new group.
@@ -164,7 +158,7 @@ impl<T> Drop for Pending<'_, T> {
 /// If the caller cuts a group for its own reasons (a `cut`, `seek`, or discontinuity), call
 /// [`reset`](Self::reset) directly so the next value opens the new group with a snapshot.
 pub struct Encoder<T> {
-	config: ProducerConfig,
+	config: Config,
 
 	/// The last encoded value, the baseline every delta is diffed against. `None` until the first
 	/// snapshot, which is what makes that first [`update`](Self::update) a keyframe.
@@ -195,7 +189,7 @@ pub struct Encoder<T> {
 
 impl<T> Encoder<T> {
 	/// Create an encoder with a cold baseline, so the first [`update`](Self::update) is a snapshot.
-	pub fn new(config: ProducerConfig) -> Self {
+	pub fn new(config: Config) -> Self {
 		Self {
 			config,
 			last: None,
@@ -284,7 +278,7 @@ impl<T: Serialize> Encoder<T> {
 		// Same cap as a snapshot, on the patch's plaintext: a delta that decompresses past the
 		// consumer's limit makes the whole group unreadable, since there is no keyframe after it to
 		// resynchronize on. Rejecting here leaves the encoder to reset and the group as it was.
-		if self.config.compression && bytes.len() as u64 > moq_flate::DEFAULT_MAX_FRAME_SIZE {
+		if self.config.compression.is_deflate() && bytes.len() as u64 > moq_flate::DEFAULT_MAX_FRAME_SIZE {
 			return Err(moq_flate::Error::TooLarge(moq_flate::DEFAULT_MAX_FRAME_SIZE).into());
 		}
 		let payload = match self.flate.as_mut() {
@@ -341,7 +335,7 @@ impl<T: Serialize> Encoder<T> {
 		// Every consumer decodes with moq-flate's default output cap, so a value past it would be
 		// unreadable however small it compresses to. Reject it before anything is published, so the
 		// previously published value stands rather than being superseded by one nothing can read.
-		if self.config.compression && snapshot.len() as u64 > moq_flate::DEFAULT_MAX_FRAME_SIZE {
+		if self.config.compression.is_deflate() && snapshot.len() as u64 > moq_flate::DEFAULT_MAX_FRAME_SIZE {
 			return Err(moq_flate::Error::TooLarge(moq_flate::DEFAULT_MAX_FRAME_SIZE).into());
 		}
 
@@ -361,12 +355,12 @@ impl<T: Serialize> Encoder<T> {
 		// Open a fresh per-group encoder (cold window) and compress the snapshot as frame 0, recording
 		// its wire size as the delta anchor.
 		let (payload, flate) = match self.config.compression {
-			true => {
+			Compression::Deflate => {
 				let mut flate = moq_flate::Encoder::new();
 				let payload = flate.frame(&snapshot);
 				(payload, Some(flate))
 			}
-			false => (Bytes::from(snapshot), None),
+			Compression::None => (Bytes::from(snapshot), None),
 		};
 
 		self.snapshot_len = payload.len() as u64;
@@ -390,7 +384,7 @@ mod test {
 
 	/// Encode a sequence of values, committing each frame, and return `(keyframe, payload_len)` per
 	/// emitted frame.
-	fn encode(config: ProducerConfig, values: &[Value]) -> Vec<(bool, usize)> {
+	fn encode(config: Config, values: &[Value]) -> Vec<(bool, usize)> {
 		let mut encoder = Encoder::<Value>::new(config);
 		let mut out = Vec::new();
 		for value in values {
@@ -415,21 +409,21 @@ mod test {
 
 	#[test]
 	fn first_update_is_a_keyframe() {
-		let frames = encode(ProducerConfig::default(), &[json!({ "a": 1 })]);
+		let frames = encode(Config::default(), &[json!({ "a": 1 })]);
 		assert_eq!(frames.len(), 1);
 		assert!(frames[0].0);
 	}
 
 	#[test]
 	fn unchanged_value_encodes_nothing() {
-		let frames = encode(ProducerConfig::default(), &[json!({ "a": 1 }), json!({ "a": 1 })]);
+		let frames = encode(Config::default(), &[json!({ "a": 1 }), json!({ "a": 1 })]);
 		assert_eq!(frames.len(), 1);
 	}
 
 	#[test]
 	fn changes_ride_as_deltas() {
 		let frames = encode(
-			ProducerConfig::default().with_delta_ratio(100),
+			Config::default().with_delta_ratio(100),
 			&[
 				json!({ "a": 1, "b": 1 }),
 				json!({ "a": 1, "b": 2 }),
@@ -442,7 +436,7 @@ mod test {
 	#[test]
 	fn deltas_off_forces_a_keyframe_per_change() {
 		let frames = encode(
-			ProducerConfig::default().with_delta_ratio(0),
+			Config::default().with_delta_ratio(0),
 			&[json!({ "a": 1 }), json!({ "a": 2 })],
 		);
 		assert_eq!(frames.iter().map(|f| f.0).collect::<Vec<_>>(), vec![true, true]);
@@ -454,7 +448,7 @@ mod test {
 	#[test]
 	fn a_null_field_forces_a_keyframe() {
 		let frames = encode(
-			ProducerConfig::default().with_delta_ratio(100),
+			Config::default().with_delta_ratio(100),
 			&[json!({ "a": 1, "b": 1 }), json!({ "a": 1, "b": null })],
 		);
 		assert_eq!(frames.iter().map(|f| f.0).collect::<Vec<_>>(), vec![true, true]);
@@ -464,7 +458,7 @@ mod test {
 	#[test]
 	fn a_non_object_root_forces_a_keyframe() {
 		let frames = encode(
-			ProducerConfig::default().with_delta_ratio(100),
+			Config::default().with_delta_ratio(100),
 			&[json!({ "a": 1 }), json!([1, 2, 3])],
 		);
 		assert_eq!(frames.iter().map(|f| f.0).collect::<Vec<_>>(), vec![true, true]);
@@ -473,7 +467,7 @@ mod test {
 	#[test]
 	fn frame_cap_forces_a_keyframe() {
 		let values: Vec<Value> = (0..=MAX_DELTA_FRAMES).map(|n| json!({ "n": n })).collect();
-		let frames = encode(ProducerConfig::default().with_delta_ratio(1_000_000), &values);
+		let frames = encode(Config::default().with_delta_ratio(1_000_000), &values);
 
 		// The snapshot plus MAX_DELTA_FRAMES - 1 deltas fill the group, then the cap rolls it.
 		assert_eq!(frames.len(), MAX_DELTA_FRAMES + 1);
@@ -485,7 +479,7 @@ mod test {
 	/// be a delta against a window and a baseline the new group never carried.
 	#[test]
 	fn reset_forces_the_next_update_to_be_a_keyframe() {
-		let mut encoder = Encoder::<Value>::new(ProducerConfig::default().with_delta_ratio(100));
+		let mut encoder = Encoder::<Value>::new(Config::default().with_delta_ratio(100));
 		assert!(commit(&mut encoder, &json!({ "a": 1 })).unwrap().keyframe);
 		assert!(!commit(&mut encoder, &json!({ "a": 2 })).unwrap().keyframe);
 
@@ -498,7 +492,7 @@ mod test {
 	/// and it has to resynchronize on its own: a caller cannot be relied on to remember.
 	#[test]
 	fn an_uncommitted_frame_resynchronizes_the_encoder() {
-		let mut encoder = Encoder::<Value>::new(ProducerConfig::default().with_delta_ratio(100));
+		let mut encoder = Encoder::<Value>::new(Config::default().with_delta_ratio(100));
 		commit(&mut encoder, &json!({ "a": 1 })).unwrap();
 
 		// The caller wrote this one and said so, so the next value can still ride as a delta.
@@ -522,7 +516,7 @@ mod test {
 	/// already published and skip it as unchanged.
 	#[test]
 	fn an_uncommitted_first_frame_is_reencoded() {
-		let mut encoder = Encoder::<Value>::new(ProducerConfig::default());
+		let mut encoder = Encoder::<Value>::new(Config::default());
 		drop(encoder.update(&json!({ "a": 1 })).unwrap().expect("a snapshot"));
 
 		let retried = commit(&mut encoder, &json!({ "a": 1 })).expect("the same value, re-encoded");
@@ -533,7 +527,7 @@ mod test {
 	/// open with a snapshot, so "unchanged" can't mean "write nothing" there.
 	#[test]
 	fn reset_republishes_an_unchanged_value() {
-		let mut encoder = Encoder::<Value>::new(ProducerConfig::default());
+		let mut encoder = Encoder::<Value>::new(Config::default());
 		commit(&mut encoder, &json!({ "a": 1 })).unwrap();
 
 		encoder.reset();
@@ -548,7 +542,10 @@ mod test {
 	fn compressed_deltas_reuse_the_group_window() {
 		let phrase = "Media over QUIC delivers real-time latency at massive scale";
 		let frames = encode(
-			ProducerConfig::default().with_delta_ratio(100).with_compression(true),
+			Config {
+				delta_ratio: 100,
+				compression: Compression::Deflate,
+			},
 			&[json!({ "note": phrase }), json!({ "note": phrase, "echo": phrase })],
 		);
 
@@ -585,7 +582,7 @@ mod test {
 	#[test]
 	fn a_snapshot_serializes_its_value_once() {
 		let value = Ticking(std::cell::Cell::new(0));
-		let mut encoder = Encoder::<Ticking>::new(ProducerConfig::default());
+		let mut encoder = Encoder::<Ticking>::new(Config::default());
 		let payload = {
 			let frame = encoder.update(&value).unwrap().expect("a snapshot");
 			let payload = frame.payload.clone();
@@ -602,7 +599,7 @@ mod test {
 
 	#[test]
 	fn value_tracks_the_baseline() {
-		let mut encoder = Encoder::<Value>::new(ProducerConfig::default().with_delta_ratio(100));
+		let mut encoder = Encoder::<Value>::new(Config::default().with_delta_ratio(100));
 		assert_eq!(encoder.value(), None);
 
 		commit(&mut encoder, &json!({ "a": 1, "b": 1 }));

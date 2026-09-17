@@ -4,7 +4,9 @@ use std::task::Poll;
 
 use serde::de::DeserializeOwned;
 
-use super::{ConsumerConfig, Decoder};
+use super::Decoder;
+
+pub use super::Config;
 use crate::Result;
 
 /// Consumes an ordered log of JSON records from a track, yielding every record in order.
@@ -34,9 +36,8 @@ pub struct Consumer<T> {
 impl<T: DeserializeOwned> Consumer<T> {
 	/// Create a consumer reading from the given track subscriber.
 	///
-	/// Set [`ConsumerConfig::compression`] to read a track written by a producer with
-	/// [`ProducerConfig::compression`](super::ProducerConfig::compression) on.
-	pub fn new(track: moq_net::track::Subscriber, config: ConsumerConfig) -> Self {
+	/// Set [`Config::compression`] to match the encoder that wrote the track.
+	pub fn new(track: moq_net::track::Subscriber, config: Config) -> Self {
 		Self {
 			track,
 			group: None,

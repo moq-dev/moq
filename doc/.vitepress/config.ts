@@ -167,6 +167,8 @@ export default defineConfig({
 								{ text: "moq-audio", link: "/lib/rs/moq-audio" },
 								{ text: "moq-auth", link: "/lib/rs/moq-auth" },
 								{ text: "moq-room", link: "/lib/rs/moq-room" },
+								{ text: "moq-json", link: "/lib/rs/moq-json" },
+								{ text: "moq-binary", link: "/lib/rs/moq-binary" },
 							],
 						},
 						{
@@ -180,6 +182,8 @@ export default defineConfig({
 								{ text: "@moq/room", link: "/lib/js/room" },
 								{ text: "@moq/auth", link: "/lib/js/auth" },
 								{ text: "@moq/signals", link: "/lib/js/signals" },
+								{ text: "@moq/json", link: "/lib/js/json" },
+								{ text: "@moq/binary", link: "/lib/js/binary" },
 							],
 						},
 						{ text: "Swift", link: "/lib/swift/" },

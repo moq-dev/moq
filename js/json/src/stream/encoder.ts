@@ -1,13 +1,15 @@
 import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "@moq/flate";
 
+import { type Compression, isDeflate } from "../compression.ts";
+
 /** Options for an {@link Encoder}. */
 export interface Config {
 	/**
 	 * Compress the group as one sync-flushed `deflate-raw` stream, so each record reuses the earlier
 	 * ones as context and shrinks sharply. A {@link Decoder} reading the frames must set the same
-	 * flag. Defaults to `false`.
+	 * {@link compression}. Defaults to `"none"`.
 	 */
-	compression?: boolean;
+	compression?: Compression;
 }
 
 /**
@@ -60,7 +62,7 @@ export class Encoder<T> {
 	#generation = 0;
 
 	constructor(config: Config = {}) {
-		this.#compress = config.compression ?? false;
+		this.#compress = isDeflate(config.compression);
 		this.#flate = this.#compress ? new Flate() : undefined;
 	}
 

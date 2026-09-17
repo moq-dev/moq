@@ -13,7 +13,7 @@
 //! order. A consumer jumps to the newest group, reads the snapshot, and applies the deltas, so
 //! a late joiner never needs older groups.
 //!
-//! Deltas are controlled by [`ProducerConfig::delta_ratio`]. A ratio of `0` disables them, so every
+//! Deltas are controlled by [`Config::delta_ratio`]. A ratio of `0` disables them, so every
 //! change is a fresh snapshot group, matching a plain "one JSON blob per group" track.
 //!
 //! The encoder rolls a group on its own budget, but a caller can roll one for its own reasons with
@@ -36,14 +36,14 @@
 //! [`Pending`] the caller commits once the write succeeds. Dropping it uncommitted resynchronizes
 //! the encoder, which keeps a frame that never reached the wire from desyncing the stream.
 
-mod consumer;
+pub mod consumer;
 mod decoder;
 mod encoder;
-mod producer;
+pub mod producer;
 
 pub use consumer::Consumer;
-pub use decoder::{ConsumerConfig, Decoder};
-pub use encoder::{Encoded, Encoder, Pending, ProducerConfig};
+pub use decoder::Decoder;
+pub use encoder::{Config, Encoded, Encoder, Pending};
 pub use producer::{Guard, Producer};
 
 #[cfg(test)]
@@ -55,23 +55,32 @@ mod test {
 
 	use super::encoder::MAX_DELTA_FRAMES;
 	use super::*;
+	use crate::Compression;
 
 	/// An uncompressed config with the given delta ratio.
-	fn cfg(delta_ratio: u32) -> ProducerConfig {
-		ProducerConfig::default().with_delta_ratio(delta_ratio)
+	fn cfg(delta_ratio: u32) -> Config {
+		Config::default().with_delta_ratio(delta_ratio)
 	}
 
 	/// A DEFLATE-compressed config with the given delta ratio.
-	fn cfg_deflate(delta_ratio: u32) -> ProducerConfig {
-		cfg(delta_ratio).with_compression(true)
+	fn cfg_deflate(delta_ratio: u32) -> Config {
+		Config {
+			delta_ratio,
+			compression: Compression::Deflate,
+		}
 	}
 
 	/// A consumer reading compressed frames.
 	fn deflate_consumer(track: moq_net::track::Subscriber) -> Consumer<Value> {
-		Consumer::new(track, ConsumerConfig::default().with_compression(true))
+		Consumer::new(
+			track,
+			consumer::Config {
+				compression: Compression::Deflate,
+			},
+		)
 	}
 
-	fn producer(config: ProducerConfig) -> (Producer<Value>, moq_net::track::Subscriber) {
+	fn producer(config: Config) -> (Producer<Value>, moq_net::track::Subscriber) {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
 			.create_track("test", None)
@@ -82,7 +91,7 @@ mod test {
 
 	/// Drain every value currently available from a plaintext consumer without blocking.
 	fn drain(track: moq_net::track::Subscriber) -> Vec<Value> {
-		drain_with(Consumer::<Value>::new(track, ConsumerConfig::default()))
+		drain_with(Consumer::<Value>::new(track, consumer::Config::default()))
 	}
 
 	/// Drain every value currently available from an already-built consumer without blocking.
@@ -188,8 +197,8 @@ mod test {
 
 	#[test]
 	fn live_consumer_sees_each_update() {
-		let (mut producer, track) = producer(ProducerConfig::default());
-		let mut consumer = Consumer::<Value>::new(track, ConsumerConfig::default());
+		let (mut producer, track) = producer(Config::default());
+		let mut consumer = Consumer::<Value>::new(track, consumer::Config::default());
 		let waiter = kio::Waiter::noop();
 
 		for n in 1..=3 {
@@ -221,7 +230,7 @@ mod test {
 
 	#[test]
 	fn unchanged_value_writes_nothing() {
-		let (mut producer, track) = producer(ProducerConfig::default());
+		let (mut producer, track) = producer(Config::default());
 		producer.update(&json!({ "a": 1 })).unwrap();
 		producer.update(&json!({ "a": 1 })).unwrap();
 		producer.finish().unwrap();
@@ -332,7 +341,7 @@ mod test {
 			.create_track("test", None)
 			.unwrap();
 		let consumer = track.subscribe(None);
-		let mut producer = Producer::<Doc>::new(track, ProducerConfig::default());
+		let mut producer = Producer::<Doc>::new(track, Config::default());
 
 		// First owner sets its field.
 		producer.modify().unwrap().video = Some("v1".to_string());
@@ -345,7 +354,7 @@ mod test {
 
 		producer.finish().unwrap();
 
-		let mut consumer = Consumer::<Doc>::new(consumer, ConsumerConfig::default());
+		let mut consumer = Consumer::<Doc>::new(consumer, consumer::Config::default());
 		let waiter = kio::Waiter::noop();
 		let mut last = None;
 		while let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) {
@@ -455,7 +464,7 @@ mod test {
 		}
 
 		// Every frame is rejected, so each publish fails and the encoder resynchronizes.
-		let mut producer = Producer::<Doc>::new(rejecting_track(), ProducerConfig::default());
+		let mut producer = Producer::<Doc>::new(rejecting_track(), Config::default());
 
 		let mut guard = producer.modify().unwrap();
 		guard.video = Some("v1".to_string());
@@ -551,7 +560,7 @@ mod test {
 		// snapshot group (the gate overshoots the budget by one delta before rolling).
 		let (mut producer, track) = producer(cfg(1));
 		let observer = producer.consume();
-		let mut consumer = Consumer::<Value>::new(track, ConsumerConfig::default());
+		let mut consumer = Consumer::<Value>::new(track, consumer::Config::default());
 		let waiter = kio::Waiter::noop();
 
 		producer.update(&json!({ "a": 1 })).unwrap(); // snapshot, group 0
@@ -586,7 +595,7 @@ mod test {
 		let consumer_track = track.subscribe(None);
 		track.finish().unwrap();
 
-		let mut consumer = Consumer::<Value>::new(consumer_track, ConsumerConfig::default());
+		let mut consumer = Consumer::<Value>::new(consumer_track, consumer::Config::default());
 		let waiter = kio::Waiter::noop();
 
 		// Track is finished but the open group is empty: pending, not end-of-stream.
@@ -765,7 +774,7 @@ mod test {
 		let (mut producer, track) = producer(cfg(0));
 		producer.update(&json!({ "inner": { "count": 300 } })).unwrap();
 
-		let mut consumer = Consumer::<Outer>::new(track, ConsumerConfig::default());
+		let mut consumer = Consumer::<Outer>::new(track, consumer::Config::default());
 		let Poll::Ready(Err(err)) = consumer.poll_next(&kio::Waiter::noop()) else {
 			panic!("expected a deserialize error");
 		};
@@ -780,7 +789,7 @@ mod test {
 		let (mut producer, track) = producer(cfg(0));
 		producer.update(&json!("not a map")).unwrap();
 
-		let mut consumer = Consumer::<std::collections::BTreeMap<String, u8>>::new(track, ConsumerConfig::default());
+		let mut consumer = Consumer::<std::collections::BTreeMap<String, u8>>::new(track, consumer::Config::default());
 		let Poll::Ready(Err(err)) = consumer.poll_next(&kio::Waiter::noop()) else {
 			panic!("expected a deserialize error");
 		};
@@ -791,7 +800,7 @@ mod test {
 	}
 
 	/// Publish a single value and return the byte length of the resulting (frame 0) wire frame.
-	fn wire_frame_len(config: ProducerConfig, value: &Value) -> usize {
+	fn wire_frame_len(config: Config, value: &Value) -> usize {
 		let (mut producer, track) = producer(config);
 		producer.update(value).unwrap();
 		producer.finish().unwrap();
