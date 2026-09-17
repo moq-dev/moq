@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use moq_mux::catalog::hang::Extra;
 
-use crate::cancel::{self, MoqCancel};
 use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqSubscription, MoqTrackConsumer};
 use crate::error::MoqError;
 use crate::ffi::Task;
@@ -692,21 +691,15 @@ impl MoqTrackProducer {
 	}
 
 	/// Wait until this track has at least one active consumer.
-	///
-	/// `cancel` aborts this call alone; see [`MoqCancel`].
-	#[uniffi::method(default(cancel = None))]
-	pub async fn used(&self, cancel: Option<Arc<MoqCancel>>) -> Result<(), MoqError> {
+	pub async fn used(&self) -> Result<(), MoqError> {
 		let track = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.clone();
-		cancel::guard(cancel, crate::ffi::detached(async move { track.used().await })).await
+		crate::ffi::detached(async move { track.used().await }).await
 	}
 
 	/// Wait until this track has no active consumers.
-	///
-	/// `cancel` aborts this call alone; see [`MoqCancel`].
-	#[uniffi::method(default(cancel = None))]
-	pub async fn unused(&self, cancel: Option<Arc<MoqCancel>>) -> Result<(), MoqError> {
+	pub async fn unused(&self) -> Result<(), MoqError> {
 		let track = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.clone();
-		cancel::guard(cancel, crate::ffi::detached(async move { track.unused().await })).await
+		crate::ffi::detached(async move { track.unused().await }).await
 	}
 
 	/// Create a consumer that reads from this producer's track.
@@ -898,10 +891,7 @@ impl MoqMediaProducer {
 	}
 
 	/// Wait until this track has at least one active consumer.
-	///
-	/// `cancel` aborts this call alone; see [`MoqCancel`].
-	#[uniffi::method(default(cancel = None))]
-	pub async fn used(&self, cancel: Option<Arc<MoqCancel>>) -> Result<(), MoqError> {
+	pub async fn used(&self) -> Result<(), MoqError> {
 		let demand = self
 			.inner
 			.lock()
@@ -910,14 +900,11 @@ impl MoqMediaProducer {
 			.ok_or(MoqError::Closed)?
 			.demand
 			.clone();
-		cancel::guard(cancel, crate::ffi::detached(async move { demand.used().await })).await
+		crate::ffi::detached(async move { demand.used().await }).await
 	}
 
 	/// Wait until this track has no active consumers.
-	///
-	/// `cancel` aborts this call alone; see [`MoqCancel`].
-	#[uniffi::method(default(cancel = None))]
-	pub async fn unused(&self, cancel: Option<Arc<MoqCancel>>) -> Result<(), MoqError> {
+	pub async fn unused(&self) -> Result<(), MoqError> {
 		let demand = self
 			.inner
 			.lock()
@@ -926,7 +913,7 @@ impl MoqMediaProducer {
 			.ok_or(MoqError::Closed)?
 			.demand
 			.clone();
-		cancel::guard(cancel, crate::ffi::detached(async move { demand.unused().await })).await
+		crate::ffi::detached(async move { demand.unused().await }).await
 	}
 
 	/// Write `frame` to this track.

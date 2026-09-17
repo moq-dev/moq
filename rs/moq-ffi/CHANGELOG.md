@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- `MoqCancel` and the trailing `cancel` argument on blocking async methods. Bindings with
+  native async cancellation never needed it; Go now cancels through `context.Context` on
+  the generated call.
+
 ### Added
 
 - `MoqError::Busy` when a configuration setter races an in-flight connect, listen, or accept.

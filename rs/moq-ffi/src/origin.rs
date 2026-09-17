@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::cancel::{self, MoqCancel};
 use crate::consumer::MoqBroadcastConsumer;
 use crate::error::MoqError;
 use crate::ffi::Task;
@@ -339,19 +338,9 @@ impl MoqOriginConsumer {
 	///
 	/// Calling this straight after connecting therefore races the session's announcements
 	/// and can report a live broadcast as unroutable. Await `announced_broadcast` first.
-	///
-	/// `cancel` aborts this call alone; see [`MoqCancel`].
-	#[uniffi::method(default(cancel = None))]
-	pub async fn request_broadcast(
-		&self,
-		path: String,
-		cancel: Option<Arc<MoqCancel>>,
-	) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		cancel::guard(cancel, async {
-			let broadcast = self.inner.request_broadcast(path.as_str()).await?;
-			Ok(Arc::new(MoqBroadcastConsumer::routed(broadcast, self.inner.clone())))
-		})
-		.await
+	pub async fn request_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
+		let broadcast = self.inner.request_broadcast(path.as_str()).await?;
+		Ok(Arc::new(MoqBroadcastConsumer::routed(broadcast, self.inner.clone())))
 	}
 }
 
