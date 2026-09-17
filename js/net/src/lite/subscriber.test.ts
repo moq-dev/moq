@@ -135,7 +135,7 @@ test("a local empty hop chain is not anonymous", () => {
 
 test("an unidentified responder keeps hop 0 on a nonempty chain", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	await send((w) => new AnnounceOk(UNKNOWN_HOP, 0).encode(w, Version.DRAFT_06));

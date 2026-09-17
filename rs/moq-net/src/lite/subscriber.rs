@@ -2311,7 +2311,7 @@ mod tests {
 	#[tokio::test]
 	async fn lite03_placeholders_stay_anonymous() {
 		let assigned = crate::Hop::new(777).unwrap();
-		let origin = origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			session: SinkSession::new(Default::default()),

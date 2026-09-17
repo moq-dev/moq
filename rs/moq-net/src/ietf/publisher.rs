@@ -3443,7 +3443,7 @@ mod tests {
 	async fn anonymous_chain_is_forwarded_with_zero_and_not_echoed() {
 		let assigned = crate::Hop::new(777).unwrap();
 		let r1 = crate::Hop::new(9).unwrap();
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let publisher = Publisher::new(
 			TestRuntime::new(),
