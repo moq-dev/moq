@@ -16,7 +16,7 @@ use web_transport_trait::{MaybeSend, MaybeSync};
 
 use super::{Requests, WeakCache, WeakEntry};
 use crate::{
-	AsPath, Error, Path, PathOwned, PathPrefixes, Pattern, Patterns,
+	AsPath, Error, InvalidPattern, Path, PathOwned, PathPrefixes, Pattern, Patterns,
 	coding::{BoundsExceeded, Decode, DecodeError, Encode, EncodeError},
 	runtime::{AnyTimers, Instant, Timers, TimersSlot},
 	util::{TaskSet, Tasks, TasksWeak},
@@ -3597,8 +3597,13 @@ impl Consumer {
 
 		// Scope a fresh consumer down to this path's subtree: any covering route then
 		// clamps to exactly the path, so we only wake for relevant announcements.
-		let subtree = Pattern::subtree(path.as_str()).ok()?;
-		let consumer = self.scope(&Patterns::from(subtree))?;
+		// A max-depth path cannot be spelled as `path/**` (`**` would be a 33rd
+		// segment), so watch the existing stream and match covering claims instead.
+		let consumer = match Pattern::subtree(path.as_str()) {
+			Ok(subtree) => self.scope(&Patterns::from(subtree))?,
+			Err(InvalidPattern::TooManySegments) => self.clone(),
+			Err(_) => return None,
+		};
 
 		// `scope` keeps narrower permissions intact: if we ask for `foo` on a
 		// consumer limited to `foo/specific`, no route can ever clamp to exactly
@@ -3612,7 +3617,10 @@ impl Consumer {
 		let mut announced = consumer.untagged().announced();
 		loop {
 			let update = announced.next().await?;
-			if update.active && update.pattern.as_prefix() == Some(path.as_str()) {
+			if !update.active {
+				continue;
+			}
+			if update.pattern.as_prefix() == Some(path.as_str()) || update.pattern.matches(path.as_str()) {
 				return Some(update.route);
 			}
 		}
@@ -3632,13 +3640,9 @@ impl Consumer {
 	pub async fn routed_broadcast(&self, path: impl AsPath) -> Result<broadcast::Consumer, Error> {
 		let path = path.as_path();
 
-		// `scope` keeps narrower permissions intact: if the whole path is not
+		// `allowed` keeps narrower permissions intact: if the whole path is not
 		// reachable, no route can ever cover it, so bail rather than loop forever.
-		let subtree = Pattern::subtree(path.as_str())
-			.map(Patterns::from)
-			.map_err(|_| Error::Unauthorized)?;
-		let scoped = self.scope(&subtree).ok_or(Error::Unauthorized)?;
-		if !scoped.allowed().matches(path.as_str()) {
+		if !self.allowed().matches(path.as_str()) {
 			return Err(Error::Unauthorized);
 		}
 		loop {
@@ -4993,6 +4997,27 @@ mod tests {
 		assert!((&mut fut).now_or_never().is_none());
 
 		let _exact = producer.announce("room/alice", Route::default()).unwrap();
+		fut.now_or_never().expect("covered").expect("routed");
+	}
+
+	#[tokio::test]
+	async fn routed_accepts_a_max_depth_path() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let path = (0..Path::MAX_PARTS)
+			.map(|i| format!("s{i}"))
+			.collect::<Vec<_>>()
+			.join("/");
+		assert_eq!(Path::new(&path).parts().count(), Path::MAX_PARTS);
+		assert_eq!(Pattern::subtree(&path), Err(InvalidPattern::TooManySegments));
+
+		assert!(consumer.allowed().matches(&path));
+
+		let mut fut = consumer.routed(&path).boxed();
+		assert!((&mut fut).now_or_never().is_none());
+
+		// A covering root still resolves: the lookup must not require `path/**`.
+		let _a = producer.announce("", Route::default()).unwrap();
 		fut.now_or_never().expect("covered").expect("routed");
 	}
 

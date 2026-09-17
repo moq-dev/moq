@@ -78,13 +78,13 @@ subscriber must not treat the pattern as a concrete broadcast name. Use
 `create_broadcast(path)` and `announce(route)` when the path is known; use
 `dynamic` when the set of paths is not.
 
-A subscriber watching under a prefix sees the advertisement rebased to that
-scope. `**/a` advertised cluster-wide and consumed at `a` arrives as both the
-empty pattern (exactly `a`) and `**/a` (deeper paths ending in `a`). A pattern
-that cannot match under the prefix is not sent. Announce events carry the
-matcher: Rust `announce::Update.pattern` and TypeScript `Announce.Update.pattern`
-are a `Pattern`. Use `as_prefix()` / `asPrefix()` when a consumer specifically
-needs a prefix-shaped claim.
+A subscriber watching under a prefix sees advertisements named from the origin,
+clamped to the requested scope. A route claimed above the scope is presented as
+the scope itself: `room` advertised cluster-wide and consumed at `room/alice`
+arrives as `room/alice/**`. A pattern that cannot match under the prefix is not
+sent. Announce events carry the matcher: Rust `announce::Update.pattern` and
+TypeScript `Announce.Update.pattern` are a `Pattern`. Use `as_prefix()` /
+`asPrefix()` when a consumer specifically needs a prefix-shaped claim.
 
 When a subscriber asks for a matching path the advertiser will not serve, the
 advertiser refuses that request rather than stretching the claim. The same
