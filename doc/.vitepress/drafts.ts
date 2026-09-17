@@ -128,16 +128,28 @@ function datatracker(docname: string): string {
 	return `https://datatracker.ietf.org/doc/${docname.replace(/-latest$/, "")}/`;
 }
 
-/** Split a draft into its metadata block and the abstract/middle/back sections. */
-function split(source: string): { meta: Metadata; abstract: string[]; middle: string[]; back: string[] } {
+/** A front-matter note (`--- note_Note_to_Readers`), rendered between the abstract and the body. */
+interface Note {
+	title: string;
+	lines: string[];
+}
+
+/** Split a draft into its metadata block and the abstract/note/middle/back sections. */
+function split(source: string): { meta: Metadata; abstract: string[]; notes: Note[]; middle: string[]; back: string[] } {
 	const lines = source.split("\n");
 
 	// The metadata block opens with `---` and closes at the first `--- <section>`.
 	const start = lines.findIndex((l) => l.trim() === "---");
 	const sections = new Map<string, number>();
+	const noteStarts: { title: string; line: number }[] = [];
 	for (let i = start + 1; i < lines.length; i++) {
-		const match = /^---\s+(abstract|middle|back)\s*$/.exec(lines[i]);
-		if (match) sections.set(match[1], i);
+		const match = /^---\s+(abstract|middle|back|note_\S+)\s*$/.exec(lines[i]);
+		if (!match) continue;
+		if (match[1].startsWith("note_")) {
+			noteStarts.push({ title: match[1].slice("note_".length).replace(/_/g, " "), line: i });
+		} else {
+			sections.set(match[1], i);
+		}
 	}
 
 	const abstract = sections.get("abstract");
@@ -146,6 +158,13 @@ function split(source: string): { meta: Metadata; abstract: string[]; middle: st
 	if (abstract === undefined || middle === undefined || back === undefined) {
 		throw new Error("draft is missing an --- abstract/middle/back section marker");
 	}
+
+	// kramdown-rfc only allows notes between the abstract and the middle, and
+	// they end at the next marker.
+	const notes = noteStarts.map(({ title, line }, n) => {
+		if (line < abstract || line > middle) throw new Error(`--- note_ section must sit between --- abstract and --- middle`);
+		return { title, lines: lines.slice(line + 1, noteStarts[n + 1]?.line ?? middle) };
+	});
 
 	const parsed = parseYaml(lines.slice(start + 1, abstract).join("\n")) ?? {};
 	const meta: Metadata = {
@@ -158,7 +177,8 @@ function split(source: string): { meta: Metadata; abstract: string[]; middle: st
 
 	return {
 		meta,
-		abstract: lines.slice(abstract + 1, middle),
+		abstract: lines.slice(abstract + 1, noteStarts[0]?.line ?? middle),
+		notes,
 		middle: lines.slice(middle + 1, back),
 		back: lines.slice(back + 1),
 	};
@@ -317,7 +337,7 @@ function citeSegment(
 
 /** Render one draft to a VitePress page. */
 function render(source: string, routes: Map<string, string>): { meta: Metadata; body: string } {
-	const { meta, abstract, middle, back } = split(source);
+	const { meta, abstract, notes, middle, back } = split(source);
 	const labels = anchors([...middle, ...back]);
 
 	const cite = (line: string) => {
@@ -405,6 +425,7 @@ function render(source: string, routes: Map<string, string>): { meta: Metadata; 
 		"",
 		"## Abstract",
 		...body(abstract),
+		...notes.flatMap((note) => [`## ${note.title}`, ...body(note.lines)]),
 		...body(middle),
 		...references(meta, routes),
 		...body(back),
