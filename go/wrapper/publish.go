@@ -492,7 +492,7 @@ func (t *TrackProducer) Consume(subscription *Subscription) (*TrackConsumer, err
 	return &TrackConsumer{inner: inner}, nil
 }
 
-// Finish closes the track.
+// Finish ends the track at the live edge. The handle remains so Abort can still run.
 func (t *TrackProducer) Finish() error {
 	return t.inner.Finish()
 }
@@ -527,7 +527,7 @@ func (g *GroupProducer) WriteFrame(frame Frame) error {
 	return g.inner.WriteFrame(frame)
 }
 
-// Finish closes the group.
+// Finish marks the group complete. The handle remains so Abort can still run.
 func (g *GroupProducer) Finish() error {
 	return g.inner.Finish()
 }

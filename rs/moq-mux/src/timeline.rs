@@ -761,12 +761,12 @@ impl Output {
 
 	fn finish(&mut self) -> crate::Result<()> {
 		self.closed = true;
-		let Some(sink) = self.sink.as_ref() else {
+		let Some(sink) = self.sink.as_mut() else {
 			return Ok(());
 		};
 		// Keep this handle alive after closing so the finished track remains discoverable for
-		// subscribers; finish consumes a clone and closes their shared producer state.
-		match sink.clone().finish() {
+		// subscribers.
+		match sink.finish() {
 			Ok(()) => Ok(()),
 			Err(moq_json::Error::Net(err)) => Err(err.into()),
 			Err(err) => Err(err.into()),

@@ -298,7 +298,7 @@ pub struct DecoderOutput {
 /// anyway would leave a truncated stream indistinguishable from a complete one,
 /// and only the local caller would ever learn otherwise.
 fn finalize(
-	producer: moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
+	mut producer: moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
 	drained: Result<(), moq_video::Error>,
 ) -> Result<(), Error> {
 	match drained {

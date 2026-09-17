@@ -775,14 +775,14 @@ impl MoqTrackProducer {
 		Ok(())
 	}
 
-	/// Release this producer, ending the track at the live edge.
+	/// End the track at the live edge.
 	///
 	/// [`finish_at`](Self::finish_at) declares the boundary ahead of time, so this keeps
-	/// that boundary and only releases the producer.
+	/// that boundary. The handle remains so a later [`abort`](Self::abort) can still run.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
-		let mut track = guard.take().ok_or(MoqError::Closed)?;
+		let track = guard.as_mut().ok_or(MoqError::Closed)?;
 		if track.final_sequence().is_none() {
 			track.finish()?;
 		}
@@ -838,10 +838,12 @@ impl MoqGroupProducer {
 	}
 
 	/// Mark the group as complete. No more frames can be written.
+	///
+	/// The handle remains so a later [`abort`](Self::abort) can still run.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
-		let mut group = guard.take().ok_or(MoqError::Closed)?;
+		let group = guard.as_mut().ok_or(MoqError::Closed)?;
 		group.finish()?;
 		Ok(())
 	}

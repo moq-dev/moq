@@ -157,6 +157,7 @@ client = moq.Client(
 - **`TrackProducer` / `GroupProducer`**. Write raw payloads with no codec parsing.
   - `.write_frame(payload, timestamp_us=0)` writes a payload with a presentation timestamp in microseconds.
   - `.create_group(sequence)` creates a sparse or replayed group at an explicit sequence.
+  - `.finish()` ends at the live edge; the handle remains so `.abort(error_code)` can still run.
   - `.finish_at(final_sequence)` declares the first group that will never be produced while leaving lower groups writable.
   - `.abort(error_code)` terminates the track or group with an application error.
   - `.append_datagram(payload, timestamp_us=0) -> sequence` (`TrackProducer`) sends a best-effort datagram. Payloads are capped at 1200 bytes and there is no stream fallback.

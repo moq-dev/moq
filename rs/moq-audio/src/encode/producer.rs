@@ -238,7 +238,7 @@ impl<E: CatalogExt> Reserved<E> {
 	}
 
 	/// Finalize a track that never got a rendition.
-	pub(crate) fn finish(mut self) -> Result<(), Error> {
+	pub(crate) fn finish(&mut self) -> Result<(), Error> {
 		self.track.finish()?;
 		Ok(())
 	}
@@ -451,7 +451,10 @@ impl<E: CatalogExt> Producer<E> {
 
 	/// Flush pending samples, resampler output, and codec lookahead, then finalize
 	/// the track.
-	pub fn finish(mut self) -> Result<(), Error> {
+	///
+	/// Borrows rather than consumes, so a later [`abort`](Self::abort) can still
+	/// run after a successful finish.
+	pub fn finish(&mut self) -> Result<(), Error> {
 		// Whatever the resampler still holds belongs to this track: its last partial
 		// chunk, plus the audio its filter is running behind on. Dropping it here
 		// would publish a track that ends before its source did.
@@ -470,7 +473,7 @@ impl<E: CatalogExt> Producer<E> {
 		let source_frames = self.pending.len() / channels;
 		let start = Self::timestamp(epoch_us, self.frames_produced, codec_rate)?;
 		let end = Self::timestamp(epoch_us, self.frames_produced + source_frames as u64, codec_rate)?;
-		let finish = self.encoder.finish(&self.pending)?;
+		let finish = self.encoder.drain(&self.pending)?;
 		let discard_padding = finish.discard_padding();
 		let packets = finish.into_packets();
 
@@ -500,6 +503,8 @@ impl<E: CatalogExt> Producer<E> {
 
 	/// Abort the track with `err` instead of finishing it, so subscribers see the
 	/// real cause rather than [`moq_net::Error::Dropped`]. Pending samples are dropped.
+	///
+	/// Consumes the producer. Still callable after [`finish`](Self::finish).
 	pub fn abort(self, err: moq_net::Error) {
 		self.track.abort(err);
 	}
@@ -896,6 +901,42 @@ mod tests {
 		// appear in the PTS (otherwise audio drifts behind a wall-clock video track).
 		let pts = published_pts(&[full_frame(0), full_frame(5_000_000)], Some(1)).await;
 		assert_eq!(pts, vec![0, 5_000_000]);
+	}
+
+	/// Finish leaves the handle, so abort can still run.
+	#[tokio::test]
+	async fn abort_after_finish() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let consumer = broadcast.consume();
+		let options = Options {
+			track: Some("audio".to_string()),
+			..Options::default()
+		};
+		let mut producer = Producer::new(
+			&mut broadcast,
+			catalog,
+			Input {
+				channels: 1,
+				..Input::default()
+			},
+			&options,
+		)
+		.unwrap();
+		let mut track = moq_mux::container::Consumer::new(
+			consumer
+				.track("audio")
+				.unwrap()
+				.subscribe(moq_net::track::Subscription::default())
+				.await
+				.unwrap(),
+			moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio),
+		);
+
+		producer.write(&full_frame(0)).unwrap();
+		producer.finish().unwrap();
+		assert!(track.read().await.unwrap().is_some());
+		producer.abort(moq_net::Error::Cancel);
 	}
 
 	/// `Options::track = None` derives a codec-suffixed name rather than making

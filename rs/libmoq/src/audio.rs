@@ -428,7 +428,8 @@ pub extern "C" fn moq_encode_audio_finish(producer: u32) -> i32 {
 		// The id is dropped first, so nothing new queues behind the flush; whatever
 		// is mid-encode still finishes before this takes the producer.
 		let producer = State::lock().audio.remove(producer)?;
-		producer.take().ok_or(Error::MediaNotFound)?.producer.finish()?;
+		let mut producer = producer.take().ok_or(Error::MediaNotFound)?.producer;
+		producer.finish()?;
 		Ok(())
 	})
 }

@@ -496,6 +496,11 @@ impl Encoder {
 	/// Consuming the encoder prevents encoding across the artificial terminal
 	/// padding.
 	pub fn finish(mut self, pcm: &[f32]) -> Result<Finish, Error> {
+		self.drain(pcm)
+	}
+
+	/// Same drain as [`finish`](Self::finish), without consuming the encoder.
+	pub(super) fn drain(&mut self, pcm: &[f32]) -> Result<Finish, Error> {
 		let channels = self.codec_channels as usize;
 		let frame_samples = self.frame_size * channels;
 		if pcm.len() > frame_samples || !pcm.len().is_multiple_of(channels) {

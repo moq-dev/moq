@@ -30,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `timeout_us`. `MoqSession::publish()` / `consume()` match `set_publish` /
   `set_consume`.
 - `MoqAnnounced` is `MoqAnnounceConsumer`, `MoqAnnouncement` is `MoqAnnounceUpdate` with `pattern()` instead of `path()`, `MoqBroadcastRequest::abort` is `reject`, and `MoqOriginOptions` is `MoqOriginConfig`.
+
+- [**breaking**] `MoqTrackProducer::finish` and `MoqGroupProducer::finish` keep the handle open so a
+  later `abort` can still run. Broadcast, audio, video, and JSON producers still close on finish.
 - Client, server, and pending-request configuration setters now return `Result` and
   apply or fail. They error with `Busy` while connect/listen/accept owns the handle
   and `Cancelled` after `cancel()`. Server bind/TLS is captured at `listen()` and

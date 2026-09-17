@@ -232,7 +232,7 @@ impl MoqAudioProducer {
 
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
+		let mut producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
 		self.reservation.lock().unwrap().take();
 		producer.finish()?;
 		Ok(())

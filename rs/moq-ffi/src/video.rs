@@ -139,7 +139,7 @@ pub struct MoqVideoFrame {
 /// anyway would leave a truncated stream indistinguishable from a complete one,
 /// and only the local caller would ever learn otherwise.
 fn finalize(
-	producer: moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
+	mut producer: moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
 	drained: Result<(), moq_video::Error>,
 ) -> Result<(), MoqError> {
 	match drained {
@@ -360,7 +360,7 @@ impl MoqVideoProducer {
 	/// Flush any frames the codec is still holding and finalize the track.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
+		let mut producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
 		// Stop following and release the share before draining, so siblings can
 		// take the room while the last frames go out.
 		self.follow.lock().unwrap().take();

@@ -71,7 +71,11 @@ impl<T> Producer<T> {
 	}
 
 	/// Finish the track, closing any open group.
-	pub fn finish(self) -> Result<()> {
+	///
+	/// Borrows rather than consumes, matching snapshot and stream, so the handle stays
+	/// usable afterwards (reads, a second finish). Writes after this fail with
+	/// [`moq_net::Error::Closed`].
+	pub fn finish(&mut self) -> Result<()> {
 		self.inner.lock().unwrap().finish()
 	}
 }

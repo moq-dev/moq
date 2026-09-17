@@ -544,14 +544,19 @@ def test_raw_group_write_after_finish_fails():
         group.write_frame(b"too late", 0)
 
 
-def test_raw_group_finish_twice_fails():
+def test_raw_group_abort_after_finish():
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("t")
     group = track.append_group()
     group.finish()
+    group.abort(409)
 
-    with pytest.raises(Exception):
-        group.finish()
+
+def test_raw_track_abort_after_finish():
+    broadcast = moq.BroadcastProducer()
+    track = broadcast.publish_track("t")
+    track.finish()
+    track.abort(409)
 
 
 def test_raw_track_write_after_finish_fails():

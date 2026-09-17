@@ -759,6 +759,42 @@ fn raw_track_supports_sparse_groups_and_known_end() {
 }
 
 #[tokio::test]
+async fn abort_after_finish_keeps_the_track_handle() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("aborted".into(), None).unwrap();
+	let consumer = track.consume(None).unwrap();
+
+	track
+		.write_frame(MoqFrame {
+			payload: b"late abort".to_vec(),
+			timestamp_us: 0,
+		})
+		.unwrap();
+	track.finish().unwrap();
+	assert!(consumer.read_frame().await.unwrap().is_some());
+	track.abort(409).unwrap();
+}
+
+#[tokio::test]
+async fn abort_after_finish_reaches_group_consumer() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("aborted".into(), None).unwrap();
+	let group = track.append_group().unwrap();
+	let consumer = group.consume().unwrap();
+
+	group
+		.write_frame(MoqFrame {
+			payload: b"late abort".to_vec(),
+			timestamp_us: 0,
+		})
+		.unwrap();
+	group.finish().unwrap();
+	group.abort(409).unwrap();
+
+	assert!(consumer.read_frame().await.is_err());
+}
+
+#[tokio::test]
 async fn raw_group_abort_reaches_consumer() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("aborted".into(), None).unwrap();

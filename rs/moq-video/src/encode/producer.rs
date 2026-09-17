@@ -213,9 +213,9 @@ impl<E: CatalogExt> Producer<E> {
 
 	/// Finalize the track.
 	///
-	/// Consumes the producer: nothing can be published after the track ends, so
-	/// this is the last call rather than one leaving a dead producer in your hands.
-	pub fn finish(mut self) -> Result<(), Error> {
+	/// Borrows rather than consumes, so a later [`abort`](Self::abort) can still
+	/// run after a successful finish.
+	pub fn finish(&mut self) -> Result<(), Error> {
 		match &mut self.codecs {
 			Codecs::H264 { import, .. } => import.finish()?,
 			Codecs::H265 { import, .. } => import.finish()?,
@@ -226,7 +226,7 @@ impl<E: CatalogExt> Producer<E> {
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
 	/// see the real cause rather than [`moq_net::Error::Dropped`].
 	///
-	/// Consumes the producer, like [`finish`](Self::finish).
+	/// Consumes the producer. Still callable after [`finish`](Self::finish).
 	pub fn abort(self, err: moq_net::Error) {
 		match self.codecs {
 			Codecs::H264 { import, .. } => import.abort(err),
@@ -789,6 +789,29 @@ mod tests {
 		// Neither is in the bitstream, so both come from the config that was probed.
 		assert_eq!(rendition.framerate, Some(30.0));
 		assert_eq!(rendition.bitrate, Some(6_000_000));
+	}
+
+	/// Finish leaves the handle, so abort can still run.
+	#[tokio::test]
+	async fn abort_after_finish() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut config = Config::new(320, 240, 30);
+		config.kind = encoder::Kind::Software;
+		let track = broadcast
+			.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut subscriber = track.subscribe(None);
+		let mut producer = Producer::with_track(track, catalog, config.probe().await.unwrap()).unwrap();
+		let mut encoder = Encoder::new(&config).unwrap();
+		let rgba = vec![0x80u8; 320 * 240 * 4];
+		let surface = crate::Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
+		let frame = Frame::new(surface, Timestamp::from_micros(0).unwrap());
+		producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
+
+		producer.finish().unwrap();
+		assert!(subscriber.recv_group().await.unwrap().is_some());
+		producer.abort(moq_net::Error::Cancel);
 	}
 
 	#[tokio::test]

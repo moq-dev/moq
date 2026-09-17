@@ -151,7 +151,7 @@ mod test {
 
 		fn finish(self) -> Vec<Event<Value>> {
 			let Live {
-				producer,
+				mut producer,
 				mut consumer,
 				mut events,
 			} = self;
@@ -496,6 +496,22 @@ mod test {
 			panic!("the rejected group's header was published");
 		};
 		assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
+	}
+
+	#[test]
+	fn the_handle_remains_usable_after_finish() {
+		let (mut producer, track) = producer(ProducerConfig::default());
+		producer.push(&rec(1)).unwrap();
+		producer.finish().unwrap();
+
+		assert_eq!(producer.window(), vec![rec(1)]);
+		assert_eq!(producer.range(), 0..1);
+		assert_eq!(producer.consume().latest(), track.latest());
+		producer.finish().unwrap();
+		assert!(matches!(
+			producer.push(&rec(2)),
+			Err(crate::Error::Net(moq_net::Error::Closed))
+		));
 	}
 
 	#[test]
