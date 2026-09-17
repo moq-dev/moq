@@ -6,6 +6,8 @@
 //! flows, then asserts the relay follows the server's word: a re-check that moves
 //! the tier keeps the session, a narrower grant or a refusal closes it, an outage
 //! keeps it until `expires`, and every close reports `end` with what it moved.
+//! The last tests swap the server for an in-process decider answering
+//! `Admissions`, and prove the lease it drives reaches the session the same way.
 
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
@@ -17,7 +19,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use moq_auth::{Event, Grant, Pattern, Patterns, Request};
-use moq_relay::{AuthConfig, Cluster, ClusterOptions, Connection, Web, WebConfig};
+use moq_relay::{AuthConfig, Cluster, ClusterOptions, Config, Connection, Relay, Web, WebConfig};
 use moq_tokio::moq_net::{self, Hop};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -765,4 +767,120 @@ fn signed_client(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathB
 	std::fs::write(&cert_path, cert.pem()).expect("write client cert");
 	std::fs::write(&key_path, key.serialize_pem()).expect("write client key");
 	(root_path, cert_path, key_path)
+}
+
+/// An in-process decider: grants every admission `grant`, keeping the producers
+/// so a test can revoke a session and the requests so it can check what arrived.
+struct Decider {
+	producers: Arc<Mutex<Vec<moq_auth::lease::Producer>>>,
+	seen: Arc<Mutex<Vec<Request>>>,
+}
+
+impl Decider {
+	fn spawn(mut admissions: moq_relay::Admissions, grant: Grant) -> Self {
+		let producers = Arc::new(Mutex::new(Vec::new()));
+		let seen = Arc::new(Mutex::new(Vec::new()));
+		let decider = Self {
+			producers: producers.clone(),
+			seen: seen.clone(),
+		};
+		tokio::spawn(async move {
+			while let Some(admission) = admissions.next().await {
+				seen.lock().unwrap().push(admission.request.clone());
+				let (producer, consumer) = moq_auth::lease::Producer::new(grant.clone());
+				producers.lock().unwrap().push(producer);
+				admission.grant(consumer);
+			}
+		});
+		decider
+	}
+}
+
+/// The embedder's grant admits a session, its request carries what the relay
+/// knows, and revoking the producer closes the session; once the decider is
+/// gone, nobody is admitted.
+#[tokio::test]
+async fn an_embedded_decider_admits_and_revokes() {
+	let (auth, admissions) = moq_relay::Auth::embedded("test-relay");
+	let decider = Decider::spawn(admissions, grant(Duration::from_secs(3600)));
+	let (port, relay) = spawn_relay(auth.clone()).await;
+	let (pub_session, sub_session) = connect_and_round_trip(&room_url("tcp", port)).await;
+
+	let seen = decider.seen.lock().unwrap().clone();
+	assert_eq!(seen.len(), 2, "one admission per session");
+	assert_eq!(seen[0].node, "test-relay");
+	assert_eq!(seen[0].transport, moq_auth::Transport::Tcp);
+	assert_eq!(seen[0].path, "/room");
+	assert_eq!(seen[0].query.as_deref(), Some("jwt=token"));
+
+	// The publisher was admitted first; revoking its lease closes it alone.
+	let publisher = decider.producers.lock().unwrap().remove(0);
+	publisher.revoke(moq_auth::lease::Reason::Refused);
+	assert_closed(pub_session, Duration::from_secs(5), "publisher").await;
+	assert!(
+		tokio::time::timeout(Duration::from_millis(200), sub_session.closed())
+			.await
+			.is_err(),
+		"revoking one lease must not close the other session"
+	);
+
+	// A refusal reaches the session's transport before it establishes.
+	let (refusing, mut refusals) = moq_relay::Auth::embedded("test-relay");
+	tokio::spawn(async move {
+		while let Some(admission) = refusals.next().await {
+			admission.refuse(moq_relay::AuthError::Refused);
+		}
+	});
+	let (refused_port, refusing_relay) = spawn_relay(refusing).await;
+	assert_refused(&room_url("tcp", refused_port)).await;
+
+	// Nobody answering is an outage: no session gets through.
+	let (orphaned, admissions) = moq_relay::Auth::embedded("test-relay");
+	drop(admissions);
+	let (orphan_port, orphan_relay) = spawn_relay(orphaned).await;
+	assert_refused(&room_url("tcp", orphan_port)).await;
+
+	relay.abort();
+	refusing_relay.abort();
+	orphan_relay.abort();
+}
+
+/// A relay whose config names no auth source is the embedder's to decide: `run`
+/// refuses to start until the admissions are taken, and once they are, the
+/// decider's grant admits sessions through the assembled relay.
+#[tokio::test]
+async fn a_relay_without_an_auth_source_is_decided_by_the_embedder() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let config = |port: u16| {
+		let mut config = Config::default();
+		config.listen.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
+		// The sessions are gone by the time the trigger fires; no need to wait out the default window.
+		config.drain_timeout = Duration::from_millis(100).into();
+		config
+	};
+
+	let untaken = Relay::load(config(free_port())).await.expect("load relay");
+	let err = untaken.run().await.expect_err("nobody can authenticate");
+	assert!(err.to_string().contains("nobody can authenticate"), "{err}");
+
+	let port = free_port();
+	let mut relay = Relay::load(config(port)).await.expect("load relay");
+	let admissions = relay.admissions().expect("an empty [auth] hands over the admissions");
+	assert!(relay.admissions().is_none(), "taken once");
+	let decider = Decider::spawn(admissions, grant(Duration::from_secs(3600)));
+	let trigger = relay.shutdown_trigger().clone();
+	let running = tokio::spawn(relay.run());
+	wait_for_listener(port).await;
+
+	let (pub_session, sub_session) = connect_and_round_trip(&room_url("tcp", port)).await;
+	assert_eq!(decider.seen.lock().unwrap().len(), 2, "one admission per session");
+	drop(pub_session);
+	drop(sub_session);
+
+	trigger.start();
+	tokio::time::timeout(TIMEOUT, running)
+		.await
+		.expect("run returned after the trigger")
+		.expect("relay task panicked")
+		.expect("relay exited with an error");
 }

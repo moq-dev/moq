@@ -1,6 +1,7 @@
-//! How a session is admitted: through an auth server behind `--auth-url`, or with
-//! the static grant `--auth-public` names for anonymous sessions. Nothing else admits
-//! anyone; a verified client certificate is reported to the server as a fact.
+//! How a session is admitted: through an auth server behind `--auth-url`, with the
+//! static grant `--auth-public` names for anonymous sessions, or by the embedding
+//! process answering [`Admissions`]. Nothing else admits anyone; a verified client
+//! certificate is reported to whoever decides as a fact.
 
 use std::sync::Arc;
 
@@ -10,6 +11,7 @@ use moq_auth::{Pattern, Patterns};
 use moq_net::{Path, PathOwned, PathPrefixes, stats::Tier};
 use serde::{Deserialize, Serialize};
 use serde_with::{OneOrMany, serde_as};
+use tokio::sync::{mpsc, oneshot};
 use url::Url;
 
 /// Where every session's grant comes from. Exactly one of `url` and the public
@@ -70,6 +72,13 @@ impl AuthConfig {
 		let publish: Patterns = self.public.iter().chain(&self.public_publish).cloned().collect();
 		let subscribe: Patterns = self.public.iter().chain(&self.public_subscribe).cloned().collect();
 		(!publish.is_empty() || !subscribe.is_empty()).then(|| Grant::new(publish, subscribe))
+	}
+
+	/// Whether no source is named at all. Such a relay admits nothing on its own:
+	/// [`Relay::load`](crate::Relay::load) hands its sessions to the embedder as
+	/// [`Admissions`], and [`validate`](Self::validate) refuses it for a binary.
+	pub fn is_empty(&self) -> bool {
+		self.url.is_none() && self.public_grant().is_none()
 	}
 
 	/// Refuse a configuration that admits nobody, or that names both a server and
@@ -226,8 +235,10 @@ impl AuthToken {
 
 /// The lease a session holds, with whatever keeps it alive.
 ///
-/// A server-backed lease is driven by the [`moq_auth::Client`]; a static one holds
-/// its own [`lease::Producer`] so the grant never changes and never revokes.
+/// A driven lease is the [`lease::Consumer`] of a [`lease::Producer`] someone else
+/// holds: the [`moq_auth::Client`] behind an auth server, or the embedder answering
+/// an [`Admission`]. A static one holds its own producer so the grant never changes
+/// and never revokes.
 pub struct Lease {
 	consumer: lease::Consumer,
 	_static: Option<lease::Producer>,
@@ -259,16 +270,30 @@ impl Lease {
 	}
 }
 
+/// A lease someone else drives: whoever holds the producer updates and revokes it.
+impl From<lease::Consumer> for Lease {
+	fn from(consumer: lease::Consumer) -> Self {
+		Self {
+			consumer,
+			_static: None,
+		}
+	}
+}
+
 enum Mode {
 	Server(moq_auth::Client),
 	Public(Grant),
+	/// The embedding process decides: every session is queued for whoever holds
+	/// the [`Admissions`], and admits nothing once they are gone.
+	Embedded(mpsc::UnboundedSender<Admission>),
 	/// Nothing admits an ordinary session; only a locally decided grant (the LAN
 	/// mesh credential) gets through. What a `--cluster-lan` process with no
 	/// listener of its own runs.
 	Refuse,
 }
 
-/// Admits sessions: asks the server, or hands out the static public grant.
+/// Admits sessions: asks the server, hands out the static public grant, or queues
+/// the session for the embedder.
 #[derive(Clone)]
 pub struct Auth {
 	mode: Arc<Mode>,
@@ -276,6 +301,18 @@ pub struct Auth {
 }
 
 impl Auth {
+	/// An `Auth` the embedding process answers for: every session is queued on the
+	/// returned [`Admissions`] and waits for its [`Admission`] to be granted or
+	/// refused. Dropping the `Admissions` fails every later session as unavailable.
+	pub fn embedded(node: impl Into<String>) -> (Self, Admissions) {
+		let (sender, receiver) = mpsc::unbounded_channel();
+		let auth = Self {
+			mode: Arc::new(Mode::Embedded(sender)),
+			node: Arc::from(node.into()),
+		};
+		(auth, Admissions(receiver))
+	}
+
 	/// An `Auth` that refuses every session a server or a public grant would have
 	/// decided, admitting only what the relay decides for itself (a LAN peer).
 	pub fn refuse(node: impl Into<String>) -> Self {
@@ -308,6 +345,15 @@ impl Auth {
 			// A certificate is a fact for a server to weigh; with no server it admits
 			// nothing on its own, so the peer gets what any anonymous session gets.
 			Mode::Public(grant) => Lease::fixed(grant.clone()),
+			Mode::Embedded(admissions) => {
+				let (reply, answer) = oneshot::channel();
+				admissions
+					.send(Admission { request, bytes, reply })
+					.map_err(|_| AuthError::Unavailable("nobody is answering admissions".into()))?;
+				answer
+					.await
+					.map_err(|_| AuthError::Unavailable("the admission went unanswered".into()))??
+			}
 			Mode::Refuse => return Err(AuthError::Refused),
 		};
 		let token = AuthToken::new(&path, &lease.grant())?;
@@ -329,6 +375,46 @@ pub struct Admitted {
 	pub lease: Lease,
 	/// The grant reduced to what the origin scopes by.
 	pub token: AuthToken,
+}
+
+/// The sessions an embedded [`Auth`] is waiting to admit, in arrival order.
+///
+/// The transport has already accepted each one; it waits for its answer, so a
+/// slow decider holds connects the way a slow auth server would. Answer in place
+/// or hand each [`Admission`] to its own task; nothing here serializes them.
+pub struct Admissions(mpsc::UnboundedReceiver<Admission>);
+
+impl Admissions {
+	/// The next session to decide, or `None` once every clone of the [`Auth`] is gone.
+	pub async fn next(&mut self) -> Option<Admission> {
+		self.0.recv().await
+	}
+}
+
+/// One session waiting to be admitted: what the relay knows, and the two answers.
+///
+/// Dropping it unanswered fails the session as unavailable.
+pub struct Admission {
+	/// The `connect` request the relay built: every fact the transport knows.
+	pub request: Request,
+	/// What the session meters, for an `end` report; live for as long as it runs.
+	pub bytes: Counters,
+	reply: oneshot::Sender<Result<Lease, AuthError>>,
+}
+
+impl Admission {
+	/// Admit the session on `lease`: [`Lease::fixed`] for a grant that never changes,
+	/// or a [`lease::Consumer`] whose producer the decider keeps to re-check, update,
+	/// revoke, and learn when the session ends.
+	pub fn grant(self, lease: impl Into<Lease>) {
+		// The session may have given up waiting; nothing to tell it then.
+		let _ = self.reply.send(Ok(lease.into()));
+	}
+
+	/// Refuse the session, with the reason its transport reports.
+	pub fn refuse(self, err: AuthError) {
+		let _ = self.reply.send(Err(err));
+	}
 }
 
 /// The `moq_auth::Request` for an accepted transport request: every fact the
@@ -423,6 +509,44 @@ mod tests {
 			PathPrefixes::from(vec![Path::new("anon").to_owned()])
 		);
 		assert_eq!(admitted.token.tier, Tier::default());
+	}
+
+	/// The embedder's answer is the session's verdict; an answer that never comes,
+	/// or a decider that is gone, is an outage rather than a refusal.
+	#[tokio::test]
+	async fn an_embedded_auth_admits_what_the_embedder_answers() {
+		let (auth, mut admissions) = Auth::embedded("relay-1");
+		let request = || auth.request(moq_auth::Transport::Quic, "/anon/room");
+
+		let decide = async {
+			let admission = admissions.next().await.expect("an admission");
+			assert_eq!(admission.request.path, "/anon/room");
+			admission.grant(Lease::fixed(Grant::new(patterns(&["**"]), patterns(&["**"]))));
+			let admission = admissions.next().await.expect("an admission");
+			admission.refuse(AuthError::Refused);
+			// Dropped without an answer.
+			drop(admissions.next().await.expect("an admission"));
+			admissions
+		};
+		let admit = async {
+			let admitted = auth.admit(request(), Counters::default()).await.expect("granted");
+			assert_eq!(admitted.token.root, Path::new("anon/room").to_owned());
+			assert!(matches!(
+				auth.admit(request(), Counters::default()).await,
+				Err(AuthError::Refused)
+			));
+			assert!(matches!(
+				auth.admit(request(), Counters::default()).await,
+				Err(AuthError::Unavailable(_))
+			));
+		};
+		let (admissions, ()) = tokio::join!(decide, admit);
+
+		drop(admissions);
+		assert!(matches!(
+			auth.admit(request(), Counters::default()).await,
+			Err(AuthError::Unavailable(_))
+		));
 	}
 
 	#[test]

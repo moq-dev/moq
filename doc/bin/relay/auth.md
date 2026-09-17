@@ -238,6 +238,35 @@ moq auth serve --listen 127.0.0.1:4440 --key-dir /etc/moq/keys --public-subscrib
 moq-relay --auth-url http://127.0.0.1:4440/
 ```
 
+### In process
+
+An application that [embeds](/bin/relay/#embed) the relay can be the auth
+server without the HTTP: leave `[auth]` empty and take `relay.admissions()`
+before `run`. Each `Admission` carries the same `moq_auth::Request` the server
+would have read, and is answered with `grant(lease)` or `refuse(err)`. A
+`Lease::fixed(grant)` never changes; a `lease::Consumer` is driven by the
+`lease::Producer` the application keeps, which re-checks, updates, revokes, and
+learns when the session ends. `run` refuses to start while nobody has taken the
+admissions, and a dropped `Admissions` fails every later session as unavailable.
+
+```rust
+let mut relay = Relay::load(config).await?;
+let mut admissions = relay.admissions().expect("[auth] is empty");
+tokio::spawn(async move {
+    while let Some(admission) = admissions.next().await {
+        match policy.decide(&admission.request) {
+            Ok(grant) => {
+                let (producer, consumer) = moq_auth::lease::Producer::new(grant);
+                admission.grant(consumer);
+                tokio::spawn(revalidate(producer)); // update, revoke, await closed()
+            }
+            Err(err) => admission.refuse(err),
+        }
+    }
+});
+relay.run().await
+```
+
 ## Stream listeners
 
 The plaintext TCP and Unix-socket listeners are admitted exactly like QUIC:
