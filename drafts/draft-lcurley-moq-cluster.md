@@ -35,11 +35,6 @@ Submit an [issue](https://github.com/moq-dev/moq/issues) or [PR](https://github.
 
 --- middle
 
-# Note to Readers
-This document was written with the assistance of Claude, an AI model by Anthropic.
-The author reviewed every revision and is responsible for its content.
-
-
 # Conventions and Definitions
 {::boilerplate bcp14-tagged}
 
