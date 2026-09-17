@@ -223,9 +223,8 @@ const CURRENT_VERSION: &str = "draft-01";
 
 /// The extension's first member that collides with one MSF defines, if any.
 ///
-/// Serializes the extension to inspect its member names, so it is only called under
-/// `debug_assertions`.
-#[cfg(debug_assertions)]
+/// Serializes the extension to inspect its member names. Called from `debug_assert`, which
+/// type-checks its arguments in release too, so this cannot be `cfg(debug_assertions)`.
 fn colliding_member<E: CatalogExt>(ext: &E) -> Option<String> {
 	match serde_json::to_value(ext) {
 		Ok(serde_json::Value::Object(members)) => members.into_iter().map(|(name, _)| name).find(|n| reserved_root(n)),
