@@ -116,9 +116,9 @@ pub struct Producer<E: CatalogExt = ()> {
 	/// (re)start. Emitted PTS = `epoch + frames_produced / codec_rate`. `None`
 	/// until the first write so the next frame re-anchors to its timestamp.
 	epoch_us: Option<u64>,
-	/// An encoder reset that still needs an empty group before its next packet.
+	/// An encoder reset that still needs a marker group before its next packet.
 	pending_discontinuity: bool,
-	/// Whether an empty group already separates the next packet from prior codec state.
+	/// Whether a marker group already separates the next packet from prior codec state.
 	decoder_boundary: bool,
 	/// How the encoder classified the packet it published most recently.
 	activity: Activity,
@@ -301,8 +301,8 @@ impl<E: CatalogExt> Producer<E> {
 	/// released-then-reopened microphone) so the gap appears in the PTS and
 	/// audio stays aligned with a wall-clock video track, rather than the gap
 	/// being compressed out by the running sample count. Mirrors moq-boy's
-	/// `reset_epoch`. If the codec had started, an empty group is published before
-	/// the next packet so subscribers reset their decoders too.
+	/// `reset_epoch`. If the codec had started, a marker group is published before
+	/// the next packet so subscribers jump the playhead.
 	pub fn reset_epoch(&mut self) {
 		if self.encoder.started() && !self.decoder_boundary {
 			self.pending_discontinuity = true;

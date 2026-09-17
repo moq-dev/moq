@@ -1302,6 +1302,25 @@ test("Consumer empty groups mean nothing", async () => {
 	consumer.close();
 });
 
+test("Consumer latency skip bumps playhead generation once", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(replay(track), { format: new LegacyFormat("audio"), maxAge: 0 as Time.Milli });
+
+	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro]);
+	await settle();
+	expect((await nextFrame(consumer))?.frame?.timestamp).toBe(0 as Time.Micro);
+	expect((await consumer.next())?.frame).toBeUndefined();
+
+	writeGroupWithLegacyFrames(track, 2, [100_000 as Time.Micro]);
+	await settle();
+
+	const resumed = await nextFrame(consumer);
+	expect(resumed?.frame?.timestamp).toBe(100_000 as Time.Micro);
+	expect(resumed?.discontinuity).toBe(1);
+
+	consumer.close();
+});
+
 test("Consumer jumps the playhead after a shed marker with a timestamp hole", async () => {
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("audio"), maxAge: 0 as Time.Milli });

@@ -2237,7 +2237,10 @@ async fn discontinuity_re_emits_tables_and_resumes_the_clock() {
 	}
 
 	// Tables come back on cadence rather than waiting for the old 10-minute clock.
-	assert!(count_pid(&marked[resume..], 0x0000) >= 1, "PAT re-emitted after the marker");
+	assert!(
+		count_pid(&marked[resume..], 0x0000) >= 1,
+		"PAT re-emitted after the marker"
+	);
 	assert_eq!(count_discontinuity(&before), 0);
 	assert_eq!(count_discontinuity(&marked), 1, "the break is flagged exactly once");
 }

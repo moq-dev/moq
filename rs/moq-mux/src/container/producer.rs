@@ -820,7 +820,11 @@ mod tests {
 		let groups = collect_payloads(consumer).await;
 		assert_eq!(groups.len(), 3);
 		assert_eq!(groups[0], vec![(0, 2), (10_000, 2)]);
-		assert_eq!(groups[1], vec![(10_000, 0)], "the marker is one empty frame at the exclusive end");
+		assert_eq!(
+			groups[1],
+			vec![(10_000, 0)],
+			"the marker is one empty frame at the exclusive end"
+		);
 		assert_eq!(groups[2][0], (2_405_070_000, 2));
 	}
 

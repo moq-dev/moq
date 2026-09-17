@@ -5,8 +5,7 @@
 Work intended to land on `dev` before it merges to `main`, or be explicitly
 deferred by the maintainer: the breaking
 API and wire changes (the announce and wildcard surface, error codes, the
-allocator mirrors, the bindings), the merge gates (the monotonic timeline),
-and the merge itself.
+allocator mirrors, the bindings), the merge gates, and the merge itself.
 
 ## Plan
 
@@ -37,7 +36,6 @@ does not require it.
 - [JSON config names](/quest/m1/api-json-binary-config-names.md) - `Config` means the codec options and `producer::Config` / `consumer::Config` the track pair in all four json and binary packages
 - [FFI units](/quest/m1/api-ffi-units-verbs.md) - every moq-ffi duration is microseconds and `publish()` / `consume()` pair with their setters
 - [Deprecated sweep](/quest/m1/deprecated-sweep.md) - uncalled deprecated items, warn-then-ignore flags, and silent aliases are removed or become refusals before the release
-- [Monotonic timeline](/quest/m1/monotonic-timeline.md) - a marker group of one empty frame declares a break and moves the live edge; producers refuse a rewind; consumers jump the playhead on an unproven hole and drop rewind detection
 - [Joining FETCH](/quest/m1/joining-fetch.md) - moq-net: every subscribe to a draft-14 to draft-19 relay joins at a group boundary, with contiguous history for an explicit start, via Largest Object plus a joining FETCH
 - [Anonymous rank](/quest/m1/anonymous-route-rank.md) - moq-net: a route through an anonymous hop ranks below every identified route at any cost, and hop 0 travels the chain to say so
 - [Cluster -01](/quest/m1/cluster-01/README.md) - rs/moq-net and js/net speak the revised cluster extension (HOP_ID, REQUEST_UPDATE repricing) and -01 is published

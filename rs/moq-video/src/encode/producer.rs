@@ -661,7 +661,7 @@ mod tests {
 	}
 
 	/// An on-demand capture resumes on the same wall clock after releasing its camera and encoder,
-	/// so the idle transition must publish an empty group between the two runs. This uses synthetic
+	/// so the idle transition must publish a marker group between the two runs. This uses synthetic
 	/// frames and the software encoder to exercise the transition without capture hardware.
 	#[tokio::test]
 	async fn idle_capture_publishes_a_discontinuity_before_resume() {
@@ -695,7 +695,7 @@ mod tests {
 		}
 		producer.finish().unwrap();
 
-		assert_eq!(collect_groups(consumer).await, vec![1, 0, 1]);
+		assert_eq!(collect_groups(consumer).await, vec![1, 1, 1]);
 	}
 
 	#[tokio::test]

@@ -439,7 +439,7 @@ mod tests {
 		let subscriber = broadcast.consume();
 		let mut producer = moq_mux::container::Producer::new(
 			track,
-			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
 		);
 		producer
 			.write(moq_mux::container::Frame {
@@ -472,6 +472,7 @@ mod tests {
 			"video",
 			Config {
 				kind: Kind::Named(probe::BUFFERED_NAME.into()),
+				max_age: std::time::Duration::from_secs(10),
 				..Config::new()
 			},
 		)

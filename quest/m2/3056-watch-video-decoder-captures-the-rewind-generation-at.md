@@ -27,17 +27,13 @@ against the re-anchored clock for the full distance between the two timelines.
 - The regression needs a real WebCodecs decoder, so it lives in a browser
   harness rather than a bun unit test.
 
-[Monotonic timeline](/quest/m1/monotonic-timeline.md) makes the container
-signal a playhead generation, not a codec reset: native decode stops flushing
-on it. This quest is whether watch still calls `decoder.reset()` to drop
-in-flight WebCodecs chunks when that generation bumps. The decoder is the
-same on main, so the fix lands there once the timeline quest has settled.
+The container signals a playhead generation, not a codec reset: native decode
+stops flushing on it. This quest is whether watch still calls `decoder.reset()`
+to drop in-flight WebCodecs chunks when that generation bumps.
 
 ## Required
 
 - [Merge dev](/quest/m1/merge-dev.md) - the required M1 APIs must be available on main before this implementation starts
-
-- [Monotonic timeline](/quest/m1/monotonic-timeline.md) - settles playhead generation before watch's reaction to it is pinned
 
 ## Closes
 

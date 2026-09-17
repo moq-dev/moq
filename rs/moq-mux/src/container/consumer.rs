@@ -230,7 +230,10 @@ impl<F: Container> Consumer<F> {
 					}
 					Poll::Ready(Ok(Some(Event::FrameEnd(end)))) => {
 						let seq = group.group.sequence;
-						if self.live_edge.is_none_or(|(_, high)| end.as_micros() > high.as_micros()) {
+						if self
+							.live_edge
+							.is_none_or(|(_, high)| end.as_micros() > high.as_micros())
+						{
 							self.live_edge = Some((seq, end));
 						}
 						return Poll::Ready(Ok(Some(Event::FrameEnd(end))));
@@ -375,12 +378,10 @@ impl<F: Container> Consumer<F> {
 				&& front_sequence > self.current
 			{
 				let _ = self.pending.front_mut().unwrap().buffer_all(waiter, &self.format);
-				let next_start = self.pending.front().and_then(|group| {
-					group
-						.min_timestamp
-						.map(std::time::Duration::from)
-						.or(group.max_end)
-				});
+				let next_start = self
+					.pending
+					.front()
+					.and_then(|group| group.min_timestamp.map(std::time::Duration::from).or(group.max_end));
 				if let Some(start) = next_start
 					&& !pts_contiguous(current_end.or(self.presented_end), start)
 				{
@@ -2480,10 +2481,14 @@ mod tests {
 			track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(10))),
 			DurationWire,
 		);
-		let mut group0 = track.create_group(moq_net::group::Info { sequence: 1_000_000 }).unwrap();
+		let mut group0 = track
+			.create_group(moq_net::group::Info { sequence: 1_000_000 })
+			.unwrap();
 		write_duration_frame(&mut group0, ts(0), ts(33_000));
 		group0.finish().unwrap();
-		let mut group1 = track.create_group(moq_net::group::Info { sequence: 1_090_000 }).unwrap();
+		let mut group1 = track
+			.create_group(moq_net::group::Info { sequence: 1_090_000 })
+			.unwrap();
 		write_duration_frame(&mut group1, ts(33_000), ts(33_000));
 		group1.finish().unwrap();
 		track.finish().unwrap();

@@ -59,7 +59,6 @@ belong to the M2 integration; do not claim those adapters are already wired.
 
 - [Publisher clocks](/quest/m2/publisher-clock.md) - adopts the clock contract across native capture, CLI import, and browser publication
 
-- [Monotonic timeline](/quest/m1/monotonic-timeline.md) - forward-only publication and declared discontinuities
 - [GStreamer wall clock](/quest/m2/3021-moq-gst-anchor-generated-media-timelines-to-wall-clock.md) - selects one trusted clock mapping for every pad
 - [Browser wall access](/quest/m2/2278-watch-absolute-wall-clock-latency-target-for-synchronized.md) - exposes the same broadcast clock to applications
 - [Cross-track correlation](/quest/m3/teleop/correlation.md) - applications compare clocks they know are synchronized
