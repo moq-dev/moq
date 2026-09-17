@@ -23,7 +23,6 @@ normative:
 
 informative:
   moql: I-D.lcurley-moq-lite
-  hang: I-D.lcurley-moq-hang
 
 --- abstract
 
@@ -54,8 +53,7 @@ This document takes the middle position: the window is scoped to what the transp
 A dropped or late group costs nothing beyond itself, and joining mid-track costs only the current group.
 Compression stays invisible to the transport, so a relay routes, caches, and drops a compressed track exactly as it does any other.
 
-{{hang}} already compresses its metadata tracks this way.
-This document specifies the format independently so that any track can use it, and so that an implementation has something to conform to that is not tied to one catalog format.
+This document specifies the format independently of any catalog, so that any track can use it and an implementation has something to conform to.
 
 
 # Compression Scope {#scope}
@@ -97,7 +95,7 @@ A sync flush is `Z_SYNC_FLUSH` in zlib and its ports, so this format needs no DE
 Compression is declared by the application, never by the transport.
 A consumer MUST know before it reads a track whether the track is compressed, and MUST NOT infer it from the payload bytes: raw DEFLATE has no magic number, and a wrong guess yields plausible garbage.
 
-The conventional declaration is a `.z` suffix on the track name, which is what {{hang}} uses for its compressed metadata tracks.
+The conventional declaration is a `.z` suffix on the track name.
 An application with a catalog MAY declare it there instead.
 Either way the declaration is explicit and belongs to the layer that already tells a consumer how to interpret the track's payloads.
 
