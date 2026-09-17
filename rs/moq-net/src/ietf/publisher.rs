@@ -1024,7 +1024,10 @@ where
 			let mut deadline = crate::runtime::Deadline::after(&self.runtime, Duration::from_secs(10));
 			kio::wait(|waiter| {
 				let mut cx = std::task::Context::from_waker(waiter.waker());
-				if stream.writer.poll_closed(&mut cx).is_ready() {
+				// The request reader is what the subscriber FINs or resets. The writer
+				// on a draft-14-16 virtual stream reports closed immediately, which is
+				// not a cancellation.
+				if stream.reader.poll_closed(&mut cx).is_ready() {
 					return Poll::Ready(Err(Error::Cancel));
 				}
 				let joins = self.joins.poll(waiter, |joins| match joins.get(&subscribe_id) {
