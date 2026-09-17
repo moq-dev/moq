@@ -27,7 +27,7 @@ informative:
 --- abstract
 
 This document specifies how a MoQ Transport {{moqt}} track carries DEFLATE-compressed payloads.
-Each group is one raw DEFLATE stream, sync flushed at each object boundary, so every object stays self-delimited while later objects compress against the earlier ones in the group.
+Each subgroup is one raw DEFLATE stream, sync flushed at each object boundary, so every object stays self-delimited while later objects compress against the earlier ones in the subgroup.
 Small repetitive payloads compress several times better than they do alone, and a dropped group costs nothing beyond itself because the window never spans one.
 Nothing is added to the wire: the application declares the track compressed, and a relay forwards it unchanged.
 
@@ -44,23 +44,20 @@ The redundancy worth exploiting is between payloads: a JSON snapshot followed by
 
 Compressing a whole track captures that redundancy but breaks on delivery.
 Groups are dropped, arrive out of order, and a subscriber joins at an arbitrary point, so a window spanning data it never received cannot be reconstructed.
-Scoping the window to a group is the compromise: a drop costs nothing beyond itself, joining costs only the current group, and the transport never has to know.
+Scoping the window to a subgroup is the compromise: a drop costs nothing beyond itself, joining costs only the current group, and the transport never has to know.
 
 
 # Compression Scope {#scope}
-A group is one compression scope.
-Its object payloads share a single DEFLATE window, in order, and the window starts cold at each new group.
+Each subgroup is a separate DEFLATE stream: its object payloads share one window, in order, starting cold.
+{{moql}} has no subgroups, so each group is one stream of frames.
 
-A publisher MUST send a compressed track in Subgroup 0 only, and MUST NOT send it in datagrams, so that a group is one ordered stream.
-A consumer MUST reject a compressed track that uses any other subgroup or arrives in a datagram.
-
-{{moql}} has no subgroups: a group is already one ordered stream of frames.
+A publisher MUST NOT send a compressed track in datagrams, which are neither ordered nor reliable.
 
 An object with no payload is skipped, neither advancing nor resetting the window.
 
 
 # Compressed Stream {#stream}
-A group's payloads are compressed, in order, into one raw DEFLATE stream {{RFC1951}}, with no zlib or gzip wrapper.
+A subgroup's payloads are compressed, in order, into one raw DEFLATE stream {{RFC1951}}, with no zlib or gzip wrapper.
 A publisher MUST sync flush after each payload, which ends the block and byte-aligns the output while retaining the window ({{RFC1951, Section 3.2.4}}, `Z_SYNC_FLUSH` in zlib).
 Each object carries the bytes that flush produced, with no length prefix.
 
@@ -71,7 +68,7 @@ A zero-length payload is neither compressed nor decompressed.
 
 The stream is never terminated: no object ends in a final block, so a consumer decompresses incrementally and MUST NOT treat the absent end of stream as truncation.
 
-A consumer missing an object MUST abandon the rest of the group, which it can no longer decompress.
+A consumer missing an object MUST abandon the rest of the subgroup, which it can no longer decompress.
 The compression level is a publisher's choice; any conformant stream decodes.
 
 
@@ -87,11 +84,11 @@ Instead a relay forwards opaque bytes, and an endpoint that has never heard of t
 # Security Considerations
 A shared window is a side channel.
 The compressed size of one payload reveals how much it has in common with the payloads before it, enough to recover a secret an attacker can partially guess, as CRIME and BREACH demonstrated against TLS and HTTP compression.
-A publisher MUST NOT compress a secret and attacker-influenced data in the same group.
+A publisher MUST NOT compress a secret and attacker-influenced data in the same subgroup.
 Encryption does not mitigate this, since the sizes are visible to anyone on the path.
 
-A few bytes can inflate to gigabytes, so a consumer MUST bound the decompressed size of each object and abandon the group once that bound is exceeded.
-Each open group also holds a window of up to 32 KiB, so a consumer SHOULD bound how many it decompresses at once.
+A few bytes can inflate to gigabytes, so a consumer MUST bound the decompressed size of each object and abandon the subgroup once that bound is exceeded.
+Each open subgroup also holds a window of up to 32 KiB, so a consumer SHOULD bound how many it decompresses at once.
 
 
 # IANA Considerations
