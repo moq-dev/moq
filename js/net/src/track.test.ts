@@ -788,7 +788,7 @@ test("a handed-out frame cancels its in-flight operation when it expires", async
 	const guarded = hooks.guardGroup(group, operation);
 	producer.writeString("new");
 
-	await expect(guarded).rejects.toThrow("latency budget");
+	await expect(guarded).rejects.toThrow("max age budget");
 	release();
 });
 
@@ -814,7 +814,7 @@ test("a guarded write keeps the position of the frame removed from the buffer", 
 	// A group beyond the edge, so group 0's reach (1s) is provably behind it: a group is
 	// bounded by where its successor begins, so the successor alone never convicts it.
 	producer.writeFrame({ payload: enc.encode("later"), timestamp: Timestamp.fromMillis(2_000) });
-	await expect(guarded).rejects.toThrow("latency budget");
+	await expect(guarded).rejects.toThrow("max age budget");
 	read.complete();
 	release();
 });
@@ -844,7 +844,7 @@ test("clean source closure stays provisional while a frame write can expire", as
 	// See above: a group is bounded by where its successor begins, so convicting group 0
 	// needs a group beyond that successor.
 	producer.writeFrame({ payload: enc.encode("later"), timestamp: Timestamp.fromMillis(2_000) });
-	await expect(guarded).rejects.toThrow("latency budget");
+	await expect(guarded).rejects.toThrow("max age budget");
 	expect(await closed).toBeInstanceOf(Error);
 
 	read.complete();

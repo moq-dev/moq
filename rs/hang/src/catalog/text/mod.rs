@@ -35,7 +35,7 @@ pub struct Text {
 /// `text` only became a reserved media section with captions; before that an application could
 /// carry its own `text` key through the catalog extension mechanism. Failing the decode would take
 /// the whole catalog down with it, so a section we can't read costs its captions and nothing else.
-/// The JS parser does the same (`z.catch` in `catalog/root.ts`).
+/// The JS parser does the same (`section` in `catalog/root.ts`).
 ///
 /// Use it on the `text` field of any catalog root that embeds this section:
 /// `#[serde(default, deserialize_with = "hang::catalog::deserialize_text")]`.

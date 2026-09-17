@@ -30,15 +30,12 @@ export const RootSchema = z.looseObject({
 	// The broadcast's one continuous clock, if the publisher exposes one. Independent of
 	// `archive`: a live-only publisher exposes its mapping without creating a segment index.
 	clock: z.optional(ClockSchema),
-	// `text` is now a reserved media section, but a catalog that carried an unrelated `text` key
-	// before this existed must not fail to parse: fall back to `undefined` (dropping the section)
-	// rather than rejecting the whole catalog, so video/audio still play.
-	text: z.catch(z.optional(TextSchema), undefined),
-	// Lenient for the same reason as `text` above: `json` and `binary` are generic enough keys that
-	// an application could have been carrying its own before these sections were reserved. Narrower
-	// than `text`'s blanket catch, though, because these entries have a required field: a value that
-	// IS a section but carries a mode-less track still fails, rather than silently dropping every
-	// data track. See `section`.
+	// `text`, `json`, and `binary` are generic enough keys that an application could have been
+	// carrying its own before these sections were reserved, so a value that isn't a section decodes
+	// as absent rather than failing the whole catalog. A value that IS a section but carries a
+	// malformed entry (a rendition with no `format`, a track with no `mode`) still fails, the same
+	// as Rust, rather than silently dropping every caption or data track. See `section`.
+	text: section(TextSchema, "renditions"),
 	json: section(JsonSchema, "tracks"),
 	binary: section(BinarySchema, "tracks"),
 });

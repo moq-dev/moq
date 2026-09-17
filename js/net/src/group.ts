@@ -419,7 +419,7 @@ export class Consumer {
 		if (!this.#expiry?.expired()) return false;
 
 		if (unread) {
-			this.#terminal = new Error("group exceeded the subscription latency budget");
+			this.#terminal = new Error("group exceeded the subscription max age budget");
 		} else {
 			this.#ended = true;
 		}
