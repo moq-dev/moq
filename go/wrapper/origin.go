@@ -144,9 +144,7 @@ func (o *OriginConsumer) AnnouncedBroadcast(path string) (*AnnouncedBroadcast, e
 // the origin; errors if nothing can serve it. Unlike AnnouncedBroadcast, it
 // does not wait for a future announcement. Blocks until resolved.
 func (o *OriginConsumer) RequestBroadcast(ctx context.Context, path string) (*BroadcastConsumer, error) {
-	inner, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqBroadcastConsumer, error) {
-		return o.inner.RequestBroadcast(path, &cancel)
-	})
+	inner, err := o.inner.RequestBroadcast(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -184,8 +182,8 @@ type Announced struct {
 
 // Next returns the next announcement, or (nil, nil) when the stream ends.
 func (a *Announced) Next(ctx context.Context) (*Announcement, error) {
-	res, err := runHandle(ctx, a.inner.Cancel, func() (*ffi.MoqAnnouncement, error) {
-		res, err := a.inner.Next()
+	res, err := runHandle(ctx, a.inner.Cancel, func(ctx context.Context) (*ffi.MoqAnnouncement, error) {
+		res, err := a.inner.Next(ctx)
 		if err != nil || res == nil {
 			return nil, err
 		}

@@ -14,9 +14,7 @@ type BroadcastConsumer struct {
 
 // SubscribeCatalog subscribes to the broadcast's catalog track.
 func (b *BroadcastConsumer) SubscribeCatalog(ctx context.Context) (*CatalogConsumer, error) {
-	inner, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqCatalogConsumer, error) {
-		return b.inner.SubscribeCatalog(&cancel)
-	})
+	inner, err := b.inner.SubscribeCatalog(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -30,9 +28,7 @@ func (b *BroadcastConsumer) SubscribeTrack(
 	name string,
 	subscription *Subscription,
 ) (*TrackConsumer, error) {
-	inner, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqTrackConsumer, error) {
-		return b.inner.SubscribeTrack(name, subscription, &cancel)
-	})
+	inner, err := b.inner.SubscribeTrack(ctx, name, subscription)
 	if err != nil {
 		return nil, err
 	}
@@ -47,9 +43,7 @@ func (b *BroadcastConsumer) FetchGroup(
 	sequence uint64,
 	options *FetchGroupOptions,
 ) (*GroupConsumer, error) {
-	inner, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqGroupConsumer, error) {
-		return b.inner.FetchGroup(name, sequence, options, &cancel)
-	})
+	inner, err := b.inner.FetchGroup(ctx, name, sequence, options)
 	if err != nil {
 		return nil, err
 	}
@@ -66,9 +60,7 @@ func (b *BroadcastConsumer) FetchMediaGroup(
 	container Container,
 	options *FetchGroupOptions,
 ) (*MediaGroupConsumer, error) {
-	inner, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqMediaGroupConsumer, error) {
-		return b.inner.FetchMediaGroup(name, sequence, container, options, &cancel)
-	})
+	inner, err := b.inner.FetchMediaGroup(ctx, name, sequence, container, options)
 	if err != nil {
 		return nil, err
 	}
@@ -85,9 +77,7 @@ func (b *BroadcastConsumer) SubscribeMedia(
 	container Container,
 	subscription *Subscription,
 ) (*MediaConsumer, error) {
-	inner, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqMediaConsumer, error) {
-		return b.inner.SubscribeMedia(name, container, subscription, &cancel)
-	})
+	inner, err := b.inner.SubscribeMedia(ctx, name, container, subscription)
 	if err != nil {
 		return nil, err
 	}
@@ -104,9 +94,7 @@ func (b *BroadcastConsumer) SubscribeMedia(
 // Errors if this broadcast came from a local producer rather than an origin, since a
 // standalone broadcast has no sibling to name.
 func (b *BroadcastConsumer) Resolve(ctx context.Context, reference *string) (*BroadcastConsumer, error) {
-	inner, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqBroadcastConsumer, error) {
-		return b.inner.Resolve(reference, &cancel)
-	})
+	inner, err := b.inner.Resolve(ctx, reference)
 	if err != nil {
 		return nil, err
 	}
@@ -121,9 +109,7 @@ func (b *BroadcastConsumer) DecodeAudio(
 	catalogAudio Audio,
 	output AudioDecoderOutput,
 ) (*AudioConsumer, error) {
-	inner, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqAudioConsumer, error) {
-		return b.inner.DecodeAudio(name, catalogAudio, output, &cancel)
-	})
+	inner, err := b.inner.DecodeAudio(ctx, name, catalogAudio, output)
 	if err != nil {
 		return nil, err
 	}
@@ -139,9 +125,7 @@ func (b *BroadcastConsumer) DecodeVideo(
 	catalogVideo Video,
 	output VideoDecoderOutput,
 ) (*VideoConsumer, error) {
-	inner, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqVideoConsumer, error) {
-		return b.inner.DecodeVideo(name, catalogVideo, output, &cancel)
-	})
+	inner, err := b.inner.DecodeVideo(ctx, name, catalogVideo, output)
 	if err != nil {
 		return nil, err
 	}
@@ -247,8 +231,8 @@ type TrackConsumer struct {
 // or (nil, nil) when the track ends. Prefer this for live, latency-sensitive
 // consumption.
 func (t *TrackConsumer) RecvGroup(ctx context.Context) (*GroupConsumer, error) {
-	res, err := runHandle(ctx, t.inner.Cancel, func() (*ffi.MoqGroupConsumer, error) {
-		res, err := t.inner.RecvGroup()
+	res, err := runHandle(ctx, t.inner.Cancel, func(ctx context.Context) (*ffi.MoqGroupConsumer, error) {
+		res, err := t.inner.RecvGroup(ctx)
 		if err != nil || res == nil {
 			return nil, err
 		}
@@ -265,8 +249,8 @@ func (t *TrackConsumer) RecvGroup(ctx context.Context) (*GroupConsumer, error) {
 // more than latency. Shares the sequence cursor with ReadFrame: a group one
 // method has already taken is not returned by the other.
 func (t *TrackConsumer) NextGroup(ctx context.Context) (*GroupConsumer, error) {
-	res, err := runHandle(ctx, t.inner.Cancel, func() (*ffi.MoqGroupConsumer, error) {
-		res, err := t.inner.NextGroup()
+	res, err := runHandle(ctx, t.inner.Cancel, func(ctx context.Context) (*ffi.MoqGroupConsumer, error) {
+		res, err := t.inner.NextGroup(ctx)
 		if err != nil || res == nil {
 			return nil, err
 		}

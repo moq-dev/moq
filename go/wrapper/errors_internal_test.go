@@ -5,8 +5,6 @@ import (
 	"errors"
 	"testing"
 	"time"
-
-	ffi "moq.dev/moq-ffi/moq"
 )
 
 // stubHandle stands in for a uniffi object: something the wrapper owns and has
@@ -38,7 +36,7 @@ func TestRunHandleReleasesAResultNobodyReceived(t *testing.T) {
 		cancelCtx()
 	}()
 
-	val, err := runHandle(ctx, nil, func() (*stubHandle, error) {
+	val, err := runHandle(ctx, nil, func(context.Context) (*stubHandle, error) {
 		close(started)
 		<-finish
 		return stub, nil
@@ -72,7 +70,7 @@ func TestRunHandleIgnoresAResultThatIsNoHandle(t *testing.T) {
 		cancelCtx()
 	}()
 
-	_, err := runHandle(ctx, nil, func() (*stubHandle, error) {
+	_, err := runHandle(ctx, nil, func(context.Context) (*stubHandle, error) {
 		close(started)
 		<-finish
 		close(returned)
@@ -96,7 +94,7 @@ func TestRunHandleStartsNothingForADoneContext(t *testing.T) {
 	cancelCtx()
 
 	called := false
-	val, err := runHandle(ctx, nil, func() (*stubHandle, error) {
+	val, err := runHandle(ctx, nil, func(context.Context) (*stubHandle, error) {
 		called = true
 		return &stubHandle{destroyed: make(chan struct{})}, nil
 	})
@@ -116,7 +114,7 @@ func TestRunHandleStartsNothingForADoneContext(t *testing.T) {
 func TestRunHandleReturnsAResultThatWon(t *testing.T) {
 	stub := &stubHandle{destroyed: make(chan struct{})}
 
-	val, err := runHandle(context.Background(), nil, func() (*stubHandle, error) {
+	val, err := runHandle(context.Background(), nil, func(context.Context) (*stubHandle, error) {
 		return stub, nil
 	})
 	if err != nil {
@@ -132,48 +130,3 @@ func TestRunHandleReturnsAResultThatWon(t *testing.T) {
 	}
 }
 
-// The generated bindings panic on any use of a destroyed object, and a token is
-// used from two goroutines: the caller cancels, the call releases. A cancel that
-// loses that race has to find the token gone rather than call into it.
-func TestTokenIgnoresACancelAfterRelease(t *testing.T) {
-	tok := newToken()
-	tok.release()
-
-	// Both of these would panic if they reached the native object.
-	tok.cancel()
-	tok.release()
-}
-
-// A cancel before the release still reaches the native object, which is the
-// whole point of the token.
-func TestTokenCancelsWhileLive(t *testing.T) {
-	tok := newToken()
-	tok.cancel()
-	tok.release()
-}
-
-// A context already done mints no token, since nothing would be left to release
-// one: run starts no call, so the deferred release never runs.
-func TestRunOperationMintsNothingForADoneContext(t *testing.T) {
-	ctx, cancelCtx := context.WithCancel(context.Background())
-	cancelCtx()
-
-	called := false
-	val, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqCancel, error) {
-		called = true
-		return cancel, nil
-	})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("err = %v, want context.Canceled", err)
-	}
-	if val != nil {
-		t.Fatalf("val = %v, want nil", val)
-	}
-	if called {
-		t.Fatal("the call ran for a context that was already done")
-	}
-
-	if err := runOperationErr(ctx, func(*ffi.MoqCancel) error { return nil }); !errors.Is(err, context.Canceled) {
-		t.Fatalf("err = %v, want context.Canceled", err)
-	}
-}

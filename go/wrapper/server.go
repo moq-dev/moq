@@ -78,8 +78,8 @@ func (r *Request) Accept(ctx context.Context) (*Session, error) {
 
 // Reject refuses the session with an HTTP status code (default convention: 404).
 func (r *Request) Reject(ctx context.Context, code uint16) error {
-	return runErr(ctx, r.inner.Cancel, func() error {
-		return r.inner.Reject(code)
+	return runErr(ctx, r.inner.Cancel, func(ctx context.Context) error {
+		return r.inner.Reject(ctx, code)
 	})
 }
 
@@ -212,17 +212,11 @@ func (s *Server) CreateBroadcast(path string) (*BroadcastProducer, error) {
 // Cancelling ctx aborts this accept alone and leaves the server listening; use
 // Close to tear the listener down.
 func (s *Server) Accept(ctx context.Context) (*Request, error) {
-	res, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqRequest, error) {
-		res, err := s.inner.Accept(&cancel)
-		if err != nil || res == nil {
-			return nil, err
-		}
-		return *res, nil
-	})
+	res, err := s.inner.Accept(ctx)
 	if err != nil || res == nil {
 		return nil, err
 	}
-	return &Request{inner: res}, nil
+	return &Request{inner: *res}, nil
 }
 
 // Requests ranges over incoming requests until the server stops or the loop

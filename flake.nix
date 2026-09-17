@@ -256,13 +256,13 @@
         # check` skips itself, which reads as a pass in CI.
         #
         # The tag pairs the generator's own version with the uniffi release it
-        # targets (v0.8.0+v0.32.0 -> uniffi 0.32), and it only understands
+        # targets (v0.9.0+v0.32.0 -> uniffi 0.32), and it only understands
         # metadata emitted by that uniffi, so it moves with the `uniffi`
         # dependency in rs/moq-ffi/Cargo.toml. Five other places name the same
         # generator version and must be bumped together: the repo and revision
         # in release-go-ffi.yml, and the `cargo install` line in
         # rs/moq-ffi/build.sh, go/ffi/README.md, go/scripts/check.sh, and
-        # doc/lib/go/index.md.
+        # go/scripts/stage.sh.
         #
         # This points at a fork rather than NordSecurity because upstream has no
         # uniffi 0.32 generator: the metadata encoding changed in 0.32 even
@@ -272,16 +272,16 @@
         # they tag a 0.32 release.
         uniffi-bindgen-go = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-go";
-          version = "0.8.0+v0.32.0";
+          version = "0.9.0+v0.32.0";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-bindgen-go";
             rev = "v${version}";
-            hash = "sha256-BBa47Ib8dQb8GSSqaQv3xxR0RYjiseM3L7ND1HhQcVI=";
+            hash = "sha256-7Hli9SmLknZe5p7iGYsRNxmUL6ovKL2jhX62Z/79K4o=";
           };
 
-          cargoHash = "sha256-U7JLPB83CknoIf5nHoXBzqY6O2YveZ6HNOkYVKukY0Q=";
+          cargoHash = "sha256-ecpo/Z9hc3oPt/pF9Y+EB6SZANR8TDOJR6f/xSzJ9Uw=";
 
           # The tag is a virtual workspace whose other members are uniffi test
           # fixtures. Building from the root would compile all of them, and CI
