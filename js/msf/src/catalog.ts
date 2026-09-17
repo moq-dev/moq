@@ -121,7 +121,10 @@ export function encode(catalog: Catalog): Uint8Array {
 		return { ...wireTrack, initRef: id };
 	});
 
-	const wire: Record<string, unknown> = { version: VERSION, tracks };
+	// Null prototype: a `__proto__` member of the extension must land as an own property.
+	// Assigning it to an ordinary object would invoke the prototype setter instead, dropping
+	// the member from the encoded catalog.
+	const wire: Record<string, unknown> = Object.assign(Object.create(null), { version: VERSION, tracks });
 	if (initDataList.length > 0) wire.initDataList = initDataList;
 
 	// Extension members are written flat, so one named after a field MSF defines would
@@ -145,7 +148,9 @@ export function decode(raw: Uint8Array): Catalog {
 		const wire = WireCatalogSchema.parse(root);
 
 		// Every root member MSF itself does not define belongs to the extension, kept verbatim.
-		const ext: Record<string, unknown> = {};
+		// Null prototype for the same reason as `encode`, and so a `__proto__` member of an
+		// untrusted catalog cannot become an inherited property of this map.
+		const ext: Record<string, unknown> = Object.create(null);
 		for (const [name, value] of Object.entries(root as Record<string, unknown>)) {
 			if (!RESERVED_ROOT.includes(name)) ext[name] = value;
 		}

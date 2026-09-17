@@ -221,6 +221,19 @@ impl<E: CatalogExt> Catalog<E> {
 /// The newest MSF draft string this crate emits.
 const CURRENT_VERSION: &str = "draft-01";
 
+/// Whether `name` is a root member MSF itself defines, which an extension MUST NOT reuse.
+///
+/// An extension is serialized flat, so a member by one of these names emits a duplicate JSON
+/// key: serde does not reject it, and a reader keeps whichever came last. A typed extension
+/// fixes its member names at compile time, but one built at runtime (a `serde_json::Map`)
+/// needs this check wherever it accepts a name.
+pub fn reserved_root(name: &str) -> bool {
+	matches!(
+		name,
+		"version" | "generatedAt" | "isComplete" | "tracks" | "initDataList"
+	)
+}
+
 impl<E: CatalogExt> Serialize for Catalog<E> {
 	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
 		use std::collections::HashMap;
