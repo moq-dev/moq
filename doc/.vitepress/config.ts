@@ -193,9 +193,13 @@ export default defineConfig({
 			],
 		},
 
-		// GitHub and Discord are rendered by theme/Community.vue instead, with
-		// live counts and the hand-drawn icons from moq.dev.
+		// GitHub and Discord stay here so the mobile overlay still has them.
+		// theme/Community.vue is the desktop pair, with live counts and the
+		// hand-drawn icons from moq.dev; custom.css hides these two in the
+		// navbar so they do not duplicate.
 		socialLinks: [
+			{ icon: "github", link: "https://github.com/moq-dev/moq" },
+			{ icon: "discord", link: "https://discord.gg/FCYF3p99mr" },
 			{ icon: "x", link: "https://x.com/kixelated" },
 			{ icon: "bluesky", link: "https://bsky.app/profile/kixel.me" },
 			{ icon: "linkedin", link: "https://www.linkedin.com/in/luke-curley-635a457/" },

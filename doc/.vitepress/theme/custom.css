@@ -130,6 +130,14 @@
 	border-bottom-color: #334155;
 }
 
+/* Community.vue is the GitHub/Discord pair in the desktop navbar. Keep the
+   stock entries so the mobile overlay still has those links, and hide the
+   duplicates here (VPNavBarExtra is also inside VPNavBar). */
+.VPNavBar .VPSocialLink[href="https://github.com/moq-dev/moq"],
+.VPNavBar .VPSocialLink[href="https://discord.gg/FCYF3p99mr"] {
+	display: none;
+}
+
 /* Sidebar styling */
 .VPSidebar {
 	background-color: #0f172a;

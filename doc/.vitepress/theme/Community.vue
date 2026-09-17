@@ -1,7 +1,8 @@
 <script setup>
 /**
  * GitHub stars and Discord members in the navbar, with the hand-drawn icons
- * from moq.dev in place of VitePress's stock social links.
+ * from moq.dev. Hidden below 768px; the stock socialLinks keep GitHub and
+ * Discord reachable in the mobile overlay.
  *
  * The counts are fetched in the browser because the site is static and only
  * rebuilt on deploy. Both APIs allow anonymous CORS requests; GitHub's limit is
@@ -53,7 +54,7 @@ onMounted(async () => {
 			fetchNumber(DISCORD, "approximate_member_count"),
 		]);
 		stats = { stars: s, chatters: c };
-		if (s !== undefined || c !== undefined) writeCache(stats);
+		if (s !== undefined && c !== undefined) writeCache(stats);
 	}
 	stars.value = stats.stars;
 	chatters.value = stats.chatters;
