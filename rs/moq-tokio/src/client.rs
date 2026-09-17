@@ -419,6 +419,13 @@ impl Client {
 				.await?);
 		}
 
+		// A WebSocket URL names its transport. No QUIC backend can dial it, so there is
+		// nothing to race and the fallback's answer is the connect's verdict.
+		#[cfg(feature = "websocket")]
+		if matches!(url.scheme(), "ws" | "wss") {
+			return self.connect_websocket(addr).await;
+		}
+
 		// iroh offers the moq ALPNs ahead of H3, so two moq endpoints normally land on raw
 		// QUIC, which carries no request URI. The scheme can't tell us which we got, so the
 		// request target waits on the negotiated binding: the SETUP for raw QUIC, the
@@ -503,18 +510,23 @@ impl Client {
 		}
 
 		#[cfg(feature = "websocket")]
-		{
-			let alpns = self.versions.alpns();
-			let session =
-				crate::websocket::connect(&self.websocket, &self.tls, self.tls_host_name.as_deref(), addr, &alpns)
-					.await?;
-			return Ok(moq
-				.connect(crate::runtime::Runtime::new(), crate::transport::Async::new(session))
-				.await?);
-		}
+		return self.connect_websocket(addr).await;
 
 		#[cfg(not(feature = "websocket"))]
 		return Err(Error::NoBackend("no QUIC backend matched; this should not happen"));
+	}
+
+	/// Connect over WebSocket alone. qmux over WebSocket carries the path in its request
+	/// URI, so the plain builder is used: repeating it in the SETUP is a protocol violation.
+	#[cfg(feature = "websocket")]
+	async fn connect_websocket(&self, addr: crate::connect::Addr) -> crate::Result<moq_net::Session> {
+		let alpns = self.versions.alpns();
+		let session =
+			crate::websocket::connect(&self.websocket, &self.tls, self.tls_host_name.as_deref(), addr, &alpns).await?;
+		Ok(self
+			.moq
+			.connect(crate::runtime::Runtime::new(), crate::transport::Async::new(session))
+			.await?)
 	}
 
 	/// Race the QUIC dial against the WebSocket fallback, handshaking whichever wins.
