@@ -57,6 +57,7 @@ pub(crate) async fn serve_ws(
 	request.alpn = ws.selected_protocol().and_then(|p| p.to_str().ok()).map(str::to_owned);
 	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| crate::peer(&identity));
 	let bytes = moq_auth::Counters::default();
+	let session_id = request.id.clone();
 	let Admitted { lease, token } = state.auth.admit(request, bytes.clone()).await?;
 	let publish = state.cluster.publisher(&token);
 	let subscribe = state.cluster.subscriber(&token);
@@ -79,6 +80,7 @@ pub(crate) async fn serve_ws(
 		let socket = WebSocketAdapter::new(socket);
 		let session = SessionInputs {
 			id,
+			session: session_id,
 			remote: remote.0,
 			alpn,
 			versions,
@@ -94,6 +96,8 @@ pub(crate) async fn serve_ws(
 
 struct SessionInputs {
 	id: u64,
+	/// The moq-auth session id, the key every auth event for this session shares.
+	session: String,
 	remote: SocketAddr,
 	alpn: Option<String>,
 	versions: moq_net::Versions,
@@ -106,7 +110,7 @@ struct SessionInputs {
 }
 
 /// Serve one upgraded WebSocket until it closes or its lease ends.
-#[tracing::instrument("ws", err, skip_all, fields(id = session.id, remote = %session.remote))]
+#[tracing::instrument("ws", err, skip_all, fields(id = session.id, remote = %session.remote, session = %session.session))]
 async fn handle_socket<T>(
 	socket: T,
 	session: SessionInputs,
@@ -123,6 +127,7 @@ where
 {
 	let SessionInputs {
 		id: _,
+		session: _,
 		remote: _,
 		alpn,
 		versions,
@@ -930,6 +935,7 @@ mod tests {
 
 		let session = SessionInputs {
 			id: 0,
+			session: String::new(),
 			remote: "127.0.0.1:0".parse().unwrap(),
 			alpn: Some(alpn.clone()),
 			versions: moq_net::Versions::all(),
