@@ -4,7 +4,7 @@
 
 A viewer joining an Opus rendition mid-stream, or skipping within it, never
 hears the decoder's first unconverged output. Publishers set the rendition's
-`warmup` to the Opus pre-roll (80 ms, RFC 7845 section 4.4), import sets it
+`warmup` to the Opus pre-roll (80 ms, RFC 7845 section 4.6), import sets it
 for Opus tracks, and both audio consumers join that much earlier and discard
 decoded samples stamped before the join group's start plus `warmup`. AAC-LC
 frames decode independently and set nothing; HE-AAC is out of scope.

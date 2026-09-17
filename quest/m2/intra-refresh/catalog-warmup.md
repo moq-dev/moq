@@ -23,9 +23,10 @@ honours it yet; the consumer, import, and encoder quests do.
 - `drafts/draft-lcurley-moq-hang.md`: add a `warmup` field section next to
   `jitter` for both rendition types, with the video (refresh cycle) and audio
   (Opus pre-roll, 80 ms) examples. Relax the group rule at the "Each moq-lite
-  group MUST start with a keyframe" text: a group MUST start at a random access
-  point, which is a keyframe unless the rendition declares `warmup`, in which
-  case it is a picture from which decoding converges within `warmup`. Run
-  `just drafts check`.
+  group MUST start with a keyframe" text for video only: a video group MUST
+  start at a random access point, which is a keyframe unless the rendition
+  declares `warmup`, in which case it is a picture from which decoding
+  converges within `warmup`. Audio keeps its group rule; there `warmup` is
+  pre-roll and says nothing about group starts. Run `just drafts check`.
 - Keep the field out of every producer and consumer in this quest; the
   catalog change lands alone so the dependents can proceed in parallel.

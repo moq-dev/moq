@@ -31,8 +31,10 @@ so this lands on `main`.
   testable without hardware.
 - Group boundaries in refresh mode come from counting: backends report
   `keyframe = false` for a sweep start, so the producer marks the first frame
-  of each cycle by frame count from the last cut, opens the group there, and
-  sets the rendition's `warmup` to the cycle length over the framerate.
+  of each cycle by frame count from the last cut and opens the group there.
+  A backend reports the sweep length it actually configured, which can be
+  shorter than the cycle (NVENC needs it strictly shorter), and the producer
+  publishes `warmup` as that length over the framerate.
 - `rs/moq-transcode/src/rung.rs` keeps its eight-second override for
   `Keyframe` only; `Refresh` keeps the caller's cycle, defaulting to two
   seconds, since a cycle is both the tune-in delay and how thinly the intra

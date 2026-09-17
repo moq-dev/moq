@@ -21,11 +21,16 @@ replaces both: the rule is timestamp arithmetic on the group start.
 
 - Withhold rule, keyed on the same non-continuous signal in both consumers:
   `js/hang/src/container/consumer.ts` `next()` reports `continuous: false`
-  after a subscribe, a declared discontinuity, or any skip (`#gap`), and
-  `rs/moq-mux/src/container` `Consumer` has the equivalent. For the first
+  after a subscribe, a declared discontinuity, or any skip (`#gap`). The Rust
+  `rs/moq-mux/src/container` `Consumer` has no such signal: `read()` returns a
+  bare frame and `discontinuity()` covers only empty groups and rewinds, so
+  this quest adds a per-delivery continuity flag there, set on a sequence gap
+  and on a latency skip, and `rs/moq-video/src/decode/consumer.rs` propagates
+  it. For the first
   group after that signal, every frame is decoded (the decoder needs them to
   build reference state) and frames stamped below `group.start + warmup` are
-  not presented. `js/watch/src/video/decoder.ts` and
+  not presented; frames stamped at or above that boundary are, so the recovery
+  picture itself is never withheld. `js/watch/src/video/decoder.ts` and
   `rs/moq-video/src/decode` are where presentation happens; the transcoder
   gets the skip for free because it consumes the same decode path. Keep the
   last painted frame on screen, as `#onDiscontinuity` already does.
