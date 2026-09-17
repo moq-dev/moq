@@ -51,6 +51,8 @@ Scoping the window to a subgroup is the compromise: a drop costs nothing beyond 
 Each subgroup is a separate DEFLATE stream: its object payloads share one window, in order, starting cold.
 {{moql}} has no subgroups, so each group is one stream of frames.
 
+The application decides which subgroups a track uses; a consumer knows which to expect and decodes each one's objects in order.
+
 A publisher MUST NOT send a compressed track in datagrams, which are neither ordered nor reliable.
 
 An object with no payload is skipped, neither advancing nor resetting the window.
