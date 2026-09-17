@@ -6,7 +6,7 @@ use crate::coding;
 /// unchanged; 64+ are the application's. The stream registry is [`StreamError`] and the two
 /// are disjoint, so the same integer means different things in each.
 ///
-/// Variants above the shared codes encode into the draft's reserved 32-63 range. Those are
+/// Variants above the shared codes encode into the draft's reserved 32-47 range. Those are
 /// placeholders, not assignments: we send them because there has to be *some* code, but a
 /// receiver must not read one back (see [`from_code`](Self::from_code)).
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
@@ -90,7 +90,7 @@ impl SessionError {
 	///
 	/// Unlike a raw peer code, the registered ones are specified, so decoding them is a
 	/// wire contract rather than an assumption. Anything unregistered stays
-	/// [`Self::Unknown`], including 32-63: we emit placeholders there for conditions the
+	/// [`Self::Unknown`], including 32-47: we emit placeholders there for conditions the
 	/// shared codes don't cover, but the draft assigns it no meaning, so a received one is
 	/// not read back as our own placeholder. `to_code` is deliberately not injective as a
 	/// result.
@@ -118,10 +118,9 @@ impl SessionError {
 /// The counterpart to [`SessionError`], and a disjoint space: a stream reset of 0 is
 /// [`Internal`](Self::Internal), not a cancellation ([`Cancel`](Self::Cancel) is 1).
 ///
-/// Conditions the shared codes don't cover encode into 32-63. 32 through 47 is reserved:
-/// those are placeholders, not assignments, and a receiver must not read one back (see
-/// [`from_code`](Self::from_code)). 48 through 63 is moq-lite's own assigned range and
-/// does round-trip.
+/// Conditions the shared codes don't cover are assigned in moq-lite's own 48-63 range and
+/// round-trip like any other registered code. 32 through 47 is reserved: nothing is sent
+/// there and a received one stays [`Unknown`](Self::Unknown).
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum StreamError {
@@ -218,11 +217,10 @@ impl StreamError {
 			Self::NotFound => 0x33,
 			Self::Old => 0x34,
 			Self::Evicted => 0x35,
-			// Placeholders in the reserved 32-47 range: sent, not read back.
-			Self::Unroutable => 0x21,
-			Self::WrongSize => 0x24,
-			Self::FrameTooLarge => 0x25,
-			Self::TimestampMismatch => 0x26,
+			Self::Unroutable => 0x36,
+			Self::WrongSize => 0x37,
+			Self::FrameTooLarge => 0x38,
+			Self::TimestampMismatch => 0x39,
 			Self::App(app) => *app as u32 + 64,
 			Self::Unknown(code) => *code,
 		}
@@ -230,11 +228,9 @@ impl StreamError {
 
 	/// Decode a code received off the wire.
 	///
-	/// Only the registered codes decode. 32 through 47 is reserved: we emit placeholders
-	/// there for conditions the shared codes don't cover, but the draft assigns it no
-	/// meaning, so a received one stays [`Unknown`](Self::Unknown) rather than being read
-	/// as our own placeholder. 48 through 63 is moq-lite's own and does round-trip.
-	/// `to_code` is deliberately not injective for the reserved placeholders.
+	/// Only the registered codes decode; anything else, the reserved 32-47 range included,
+	/// stays [`Unknown`](Self::Unknown) rather than being given a meaning the draft does
+	/// not assign.
 	///
 	/// `SESSION_CLOSED` decodes to `Session(SessionError::Internal)`: the peer's actual
 	/// session code is not on this stream, so the specific reason is unknown here.
@@ -251,6 +247,10 @@ impl StreamError {
 			0x33 => Self::NotFound,
 			0x34 => Self::Old,
 			0x35 => Self::Evicted,
+			0x36 => Self::Unroutable,
+			0x37 => Self::WrongSize,
+			0x38 => Self::FrameTooLarge,
+			0x39 => Self::TimestampMismatch,
 			code @ 64.. => match u16::try_from(code - 64) {
 				Ok(app) => Self::App(app),
 				Err(_) => Self::Unknown(code),
@@ -702,7 +702,7 @@ mod tests {
 		assert_eq!(SessionError::GoawayTimeout.to_code(), 0x10);
 		assert_eq!(SessionError::Version.to_code(), 0x15);
 
-		// The rest encode into 32-63, which the draft reserves rather than assigns. We
+		// The rest encode into 32-47, which the draft reserves rather than assigns. We
 		// send a placeholder because there has to be some code, but decoding one back
 		// would be reading a meaning the wire does not carry, so it stays Unknown. That
 		// makes to_code deliberately non-injective.
@@ -712,7 +712,7 @@ mod tests {
 			SessionError::UnexpectedStream,
 		] {
 			let code = err.to_code();
-			assert!((0x20..0x40).contains(&code), "{err:?} left the reserved range");
+			assert!((0x20..0x30).contains(&code), "{err:?} left the reserved range");
 			assert_eq!(SessionError::from_code(code), SessionError::Unknown(code));
 		}
 
@@ -734,41 +734,34 @@ mod tests {
 			StreamError::NotFound,
 			StreamError::Old,
 			StreamError::Evicted,
+			StreamError::Unroutable,
+			StreamError::WrongSize,
+			StreamError::FrameTooLarge,
+			StreamError::TimestampMismatch,
 			StreamError::App(7),
 		];
 		for err in registered {
 			assert_eq!(StreamError::from_code(err.to_code()), err, "{err:?} did not round trip");
 		}
 
-		assert_eq!(StreamError::GroupTooLarge.to_code(), 0x32);
-
-		// moq-lite's own 48-63 range: assigned, so they round-trip, and they stay
-		// off 0x30-0x31 (NO_CAPACITY / CONTROL_TIMEOUT).
-		for err in [
-			StreamError::GroupTooLarge,
-			StreamError::NotFound,
-			StreamError::Old,
-			StreamError::Evicted,
+		// moq-lite's own 48-63 range, pinned to the draft's table. They stay off 0x30-0x31
+		// (NO_CAPACITY / CONTROL_TIMEOUT), which other work assigns.
+		for (err, code) in [
+			(StreamError::GroupTooLarge, 0x32),
+			(StreamError::NotFound, 0x33),
+			(StreamError::Old, 0x34),
+			(StreamError::Evicted, 0x35),
+			(StreamError::Unroutable, 0x36),
+			(StreamError::WrongSize, 0x37),
+			(StreamError::FrameTooLarge, 0x38),
+			(StreamError::TimestampMismatch, 0x39),
 		] {
-			let code = err.to_code();
-			assert!((0x30..0x40).contains(&code), "{err:?} left moq-lite's 48-63 range");
-			assert!(!matches!(code, 0x30 | 0x31), "{err:?} collided with 0x30-0x31");
+			assert_eq!(err.to_code(), code, "{err:?} moved off its assigned code");
 		}
 
-		// The rest encode into the reserved 32-47 range and decode back as Unknown, for
-		// the same reason as the session codes above. 0x20-0x23 stay unreadable so a
-		// peer that still emits the old placeholders is not given a meaning.
-		for err in [
-			StreamError::Unroutable,
-			StreamError::WrongSize,
-			StreamError::FrameTooLarge,
-			StreamError::TimestampMismatch,
-		] {
-			let code = err.to_code();
-			assert!((0x20..0x30).contains(&code), "{err:?} left the reserved range");
-			assert_eq!(StreamError::from_code(code), StreamError::Unknown(code));
-		}
-		for code in [0x20, 0x22, 0x23] {
+		// The reserved 32-47 range carries no meaning, including the values the four
+		// codes above used to be sent from: a peer still emitting them is not given one.
+		for code in 0x20..0x30 {
 			assert_eq!(StreamError::from_code(code), StreamError::Unknown(code));
 		}
 
@@ -797,7 +790,9 @@ mod tests {
 		assert_eq!(relayed.to_code(), 0x3);
 
 		// Registered stream codes survive the hop unchanged.
-		for code in [0x0, 0x1, 0x2, 0x4, 0x5, 0x12, 0x32, 0x33, 0x34, 0x35] {
+		for code in [
+			0x0, 0x1, 0x2, 0x4, 0x5, 0x12, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
+		] {
 			let relayed = StreamError::from(&Error::from(StreamError::from_code(code)));
 			assert_eq!(relayed.to_code(), code, "stream {code:#x} changed across a relay");
 		}
@@ -870,9 +865,10 @@ mod tests {
 		assert!(matches!(stream(0x5), Error::Stream(StreamError::TooFarBehind)));
 		assert!(matches!(stream(0x32), Error::Stream(StreamError::GroupTooLarge)));
 
-		// Assigned lite codes round-trip to the named error. The old 32-47 placeholders
-		// stay opaque: the draft still forbids reading a meaning out of that range.
+		// Assigned lite codes round-trip to the named error. The reserved 32-47 range
+		// stays opaque: the draft forbids reading a meaning out of it.
 		assert!(matches!(stream(0x34), Error::Stream(StreamError::Old)));
+		assert!(matches!(stream(0x38), Error::Stream(StreamError::FrameTooLarge)));
 		assert!(matches!(stream(0x22), Error::Stream(StreamError::Unknown(0x22))));
 		assert!(matches!(session(0x22), Error::Session(SessionError::Unknown(0x22))));
 

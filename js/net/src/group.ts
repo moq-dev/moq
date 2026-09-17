@@ -51,8 +51,8 @@ export interface Info {
  * Thrown by a frame read when the reader asked for a frame the group never held, and by a
  * frame write when the frame or the group exceeds its cache budget.
  *
- * All three carry a moq-lite stream code. Registered peer resets decode to Lagged or
- * GroupTooLarge; reserved codes such as FrameTooLarge remain opaque StreamError values.
+ * All three carry a moq-lite stream code, and a peer's reset with one decodes back into the
+ * same class.
  */
 export { FrameTooLarge, GroupTooLarge, Lagged } from "./error.ts";
 

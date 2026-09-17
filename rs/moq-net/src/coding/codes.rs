@@ -84,7 +84,7 @@ mod tests {
 	use super::*;
 
 	/// The registry follows the negotiated protocol, not the other way around: a group
-	/// dropped for being old is a moq-lite placeholder and an INTERNAL_ERROR on the IETF
+	/// dropped for being old is a moq-lite code and an INTERNAL_ERROR on the IETF
 	/// wire, and the same number read back on each wire has to mean what that wire said.
 	#[test]
 	fn the_version_picks_the_registry() {

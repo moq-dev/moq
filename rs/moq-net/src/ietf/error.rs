@@ -77,7 +77,7 @@ fn has_malformed_track(version: Version) -> bool {
 ///
 /// Conditions without a matching reset code use INTERNAL_ERROR. Request rejection has
 /// its own registry: a missing track belongs in a request error response, not a reset.
-/// moq-lite's provisional and application ranges have no corresponding ranges here.
+/// moq-lite's own 48-63 range and its application offset have no corresponding ranges here.
 pub fn to_stream_code(err: &StreamError, version: Version) -> u32 {
 	match err {
 		StreamError::Internal => INTERNAL_ERROR,
@@ -604,9 +604,9 @@ mod tests {
 	}
 
 	/// Conditions this registry has no value for say INTERNAL_ERROR rather than borrowing
-	/// moq-lite's provisional 32-63 range or its application offset. A peer treats an
-	/// unregistered code as INTERNAL_ERROR anyway (draft-20 section 14), so the placeholder
-	/// would carry no more meaning while looking like a registration.
+	/// moq-lite's own 48-63 range or its application offset. A peer treats an unregistered
+	/// code as INTERNAL_ERROR anyway (draft-20 section 14), so the borrowed value would
+	/// carry no more meaning while looking like a registration.
 	#[test]
 	fn unregistered_conditions_are_internal() {
 		for err in [
@@ -630,7 +630,21 @@ mod tests {
 
 		// And nothing decodes back into them: an unregistered code keeps its number and
 		// stays opaque instead of being read as a meaning the wire did not carry.
-		for code in [0x6, 0x7, 0x9, 0x20, 0x22, 0x33, 0x34, 0x35, 64 + 7] {
+		for code in [
+			0x6,
+			0x7,
+			0x9,
+			0x20,
+			0x22,
+			0x33,
+			0x34,
+			0x35,
+			0x36,
+			0x37,
+			0x38,
+			0x39,
+			64 + 7,
+		] {
 			assert_eq!(from_stream_code(code, Version::Draft20), StreamError::Unknown(code));
 			assert!(matches!(
 				Error::from(from_stream_code(code, Version::Draft20)),
@@ -662,8 +676,8 @@ mod tests {
 	];
 
 	/// Every code we can put on a moq-transport stream has to be one the negotiated draft
-	/// registers. moq-lite's own table is not: it emits provisional values in 32-63 and
-	/// offsets application codes past 64, neither of which this registry has a range for,
+	/// registers. moq-lite's own table is not: it assigns values in 48-63 and offsets
+	/// application codes past 64, neither of which this registry has a range for,
 	/// and it assigns 0x4 and 0x5 meanings the earlier drafts give to something else.
 	///
 	/// The table is transcribed from the drafts (draft-14 section 13.1.8 through draft-20

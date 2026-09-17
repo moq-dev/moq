@@ -21,9 +21,9 @@ export type SessionCode = number & { readonly [SESSION_CODE]: true };
  * to construct an application code in the 64+ range. {@link StreamCode} is the other registry,
  * and the two are disjoint, so the same integer means different things in each.
  *
- * Codes 32-63 are reserved rather than assigned. An implementation may send one for a
- * condition with no code here, but the draft gives it no meaning, so treat anything not
- * listed below as an unspecified error rather than guessing.
+ * Codes 32-63 are reserved rather than assigned. A peer may send one for a condition with
+ * no code here, but the draft gives it no meaning, so treat anything not listed below as an
+ * unspecified error rather than guessing.
  *
  * @public
  */
@@ -61,11 +61,9 @@ export type StreamCode = number & { readonly [STREAM_CODE]: true };
  * {@link StreamCode.Internal}, not a cancellation ({@link StreamCode.Cancel} is 1). Call
  * `StreamCode(code)` to construct an application code in the 64+ range.
  *
- * 32 through 47 is reserved: the entries below in that range are placeholders this
- * implementation and the Rust one agree on, so a condition the shared codes don't cover
- * still says something. Send them, but don't read a peer's back through them unless you
- * know the peer is one of ours. 48 through 63 is moq-lite's own assigned range and a
- * received one is the named code.
+ * Conditions the shared codes don't cover are assigned in moq-lite's own 48-63 range, so a
+ * received one is the named code. 32 through 47 is reserved: nothing is sent there and a
+ * received one is an unspecified error.
  *
  * @public
  */
@@ -91,11 +89,11 @@ export const StreamCode = Object.freeze(
 		Old: 0x34 as StreamCode,
 		/** The group was dropped under memory pressure, so it can be re-fetched. */
 		Evicted: 0x35 as StreamCode,
-		/** A frame declared a payload larger than the receiver accepts. Reserved range. */
-		FrameTooLarge: 0x25 as StreamCode,
+		/** A frame declared a payload larger than the receiver accepts. */
+		FrameTooLarge: 0x38 as StreamCode,
 		/** The publisher could serve this request but has no capacity for it now. */
 		NoCapacity: 0x30 as StreamCode,
-		/** A group grew past its cache budget and was aborted. moq-lite's own range. */
+		/** A group grew past its cache budget and was aborted. */
 		GroupTooLarge: 0x32 as StreamCode,
 	} as const),
 );
@@ -202,6 +200,7 @@ export class Lagged extends StreamError {
 /**
  * A frame is larger than a group can cache, so appending it would exceed the budget by itself.
  *
+ * Raised locally by a frame write, and decoded from a moq-lite peer's `FRAME_TOO_LARGE` reset.
  * Mirrors the Rust `Error::FrameTooLarge`, which rejects the same frame before touching any state.
  *
  * @public
@@ -322,8 +321,7 @@ function localStreamCode(err: unknown): StreamCode {
  * covers both, and works in a runtime with no `WebTransportError` at all.
  *
  * On moq-lite, a code with a local class decodes back into it, so a peer's condition is caught by
- * the same `instanceof` as one raised here. Only the registered codes do: the reserved 32-47
- * placeholders carry no meaning the draft assigns, so they stay a plain {@link StreamError}.
+ * the same `instanceof` as one raised here.
  *
  * On an IETF stream a code keeps its value unless moq-lite claims that number for something
  * the draft does not: `0x4` is GOING_AWAY here but UNKNOWN_OBJECT_STATUS on draft-16 and 17,
@@ -341,6 +339,7 @@ export function fromTransport(err: unknown, options?: TransportErrorOptions): Er
 		return new StreamError(StreamCode.Internal, { cause: err, message: `remote error: ${code}` });
 	}
 	if (code === StreamCode.TooFarBehind) return new Lagged({ cause: err });
+	if (code === StreamCode.FrameTooLarge) return new FrameTooLarge({ cause: err });
 	if (code === StreamCode.GroupTooLarge) return new GroupTooLarge({ cause: err });
 	return new StreamError(code, { cause: err });
 }
