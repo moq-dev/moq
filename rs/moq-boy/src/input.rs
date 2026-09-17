@@ -108,7 +108,7 @@ async fn handle_viewer_commands(
 ) -> anyhow::Result<()> {
 	let track = broadcast.track("command")?.subscribe(None).await?;
 	let mut commands =
-		moq_json::snapshot::Consumer::<RawCommand>::new(track, moq_json::snapshot::ConsumerConfig::default());
+		moq_json::snapshot::Consumer::<RawCommand>::new(track, moq_json::snapshot::consumer::Config::default());
 
 	loop {
 		let command = match commands.next().await {

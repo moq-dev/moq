@@ -43,7 +43,7 @@ impl StatusPublisher {
 		let producer = broadcast.create_track("status", None)?;
 
 		Ok(Self {
-			producer: moq_json::snapshot::Producer::new(producer, moq_json::snapshot::ProducerConfig::default()),
+			producer: moq_json::snapshot::Producer::new(producer, moq_json::snapshot::Config::default()),
 		})
 	}
 

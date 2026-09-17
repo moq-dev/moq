@@ -2,17 +2,16 @@ import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "@moq/flate";
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 
-/** Stream producer options, including the destination track. */
-export interface ProducerConfig {
-	/** Track that receives the payload log. */
-	track: Moq.Track.Producer;
+import { type Compression, isDeflate } from "../compression.ts";
 
+/** Codec options for a stream track. */
+export interface Config {
 	/**
 	 * Compress the group as one sync-flushed `deflate-raw` stream, so each payload reuses the
-	 * earlier ones as context. A {@link Consumer} reading the frames must set the same flag.
-	 * Defaults to `false`.
+	 * earlier ones as context. A {@link Consumer} reading the frames must set the same
+	 * {@link compression}. Defaults to `"none"`.
 	 */
-	compression?: boolean;
+	compression?: Compression;
 }
 
 /**
@@ -28,9 +27,9 @@ export class Producer {
 	#group?: Moq.Group.Producer;
 
 	/** Wrap a track to publish a payload log into it. */
-	constructor(config: ProducerConfig) {
+	constructor(config: Producer.Config) {
 		this.#track = config.track;
-		this.#compress = config.compression ?? false;
+		this.#compress = isDeflate(config.compression);
 		this.#flate = this.#compress ? new Flate() : undefined;
 	}
 
@@ -89,4 +88,11 @@ export class Producer {
 		this.#group = undefined;
 		this.#track.close();
 	}
+}
+
+type Init = Config & { track: Moq.Track.Producer };
+
+export namespace Producer {
+	/** Stream producer options, including the destination track. */
+	export type Config = Init;
 }

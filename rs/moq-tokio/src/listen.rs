@@ -21,9 +21,13 @@ pub struct Config {
 	/// (first address only; Quinn cannot bind multiple). Leave unset while a
 	/// `tcp`/`unix` listener is configured to run a stream-only server with no
 	/// QUIC.
-	#[serde(alias = "listen")]
 	#[usage(name = "listen", long = "listen", env = "MOQ_LISTEN", setting = "listen.bind")]
 	pub bind: Option<String>,
+
+	/// The released `listen` key, kept so [`deprecated`](Self::deprecated) can name [`bind`](Self::bind).
+	#[serde(default, skip_serializing)]
+	#[usage(skip)]
+	pub(crate) listen: Option<String>,
 
 	/// Plaintext qmux TCP listener (`--listen-tcp-bind`, no TLS). Requires the
 	/// `tcp` feature.
@@ -314,6 +318,9 @@ impl Config {
 	/// skipped the check can't reach a listener that quietly ignored half of it.
 	pub fn deprecated(&self) -> crate::Deprecated {
 		let mut found = self.legacy.deprecated();
+		if self.listen.is_some() {
+			found.toml("listen", "bind", None);
+		}
 		if self.quic.is_some() {
 			found.toml("[server.quic]", "[quic]", Some("now applies to both directions"));
 		}
@@ -416,6 +423,19 @@ mod tests {
 
 		let config = config_from(["test", "--listen", "[::]:443"]);
 		assert!(config.deprecated().is_empty());
+	}
+
+	/// The released TOML key still parses so the process can name `bind`, but it
+	/// configures nothing.
+	#[test]
+	fn released_listen_key_is_reported_not_applied() {
+		let config: Config = toml::from_str(r#"listen = "[::]:443""#).expect("parse");
+		assert_eq!(config.bind, None);
+		assert!(
+			config.deprecated().to_string().contains("listen -> bind"),
+			"{}",
+			config.deprecated()
+		);
 	}
 
 	/// A nonce with no server id is meaningless. Checked here rather than with a

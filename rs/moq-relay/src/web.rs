@@ -1,17 +1,15 @@
 use std::{
-	future::Future,
 	net,
 	path::PathBuf,
-	pin::Pin,
 	sync::{Arc, atomic::AtomicU64},
-	task::{Context, Poll, ready},
+	task::{Context, Poll},
 };
 
 use anyhow::Context as _;
 use axum::{
 	Router,
 	body::Body,
-	extract::{Extension, Path, Query, State},
+	extract::{ConnectInfo, Extension, Path, Query, State},
 	http::{self, Method, StatusCode},
 	response::{Html, IntoResponse, Response},
 	routing::get,
@@ -27,7 +25,7 @@ use tokio_rustls::server::TlsStream;
 use tower_http::cors::{Any, CorsLayer};
 use tower_service::Service;
 
-use crate::{auth, cluster};
+use crate::{Recheck, auth, cluster};
 
 /// Configuration for the HTTP/HTTPS web server.
 #[derive(usage::Args, Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -138,10 +136,10 @@ pub struct Https {
 	/// PEM file(s) of root CAs for validating optional client certificates (mTLS).
 	///
 	/// When set, clients *may* present a certificate during the TLS handshake.
-	/// A verified peer is granted full publish/subscribe access scoped to the
-	/// URL path without a JWT, mirroring the QUIC server's `--server-tls-root`
-	/// behavior. Clients that don't present a cert continue through the normal
-	/// JWT path.
+	/// A verified peer is reported to the auth source as [`MtlsPeer`], a fact for
+	/// the server behind `--auth-url` to weigh; it grants nothing on its own, and
+	/// under `--auth-public` the peer gets what any anonymous session gets. Same
+	/// as the QUIC listener's `--listen-tls-root`.
 	///
 	/// In config files, accepts either a single string or a TOML array.
 	#[usage(
@@ -249,7 +247,7 @@ impl Web {
 	///
 	/// This is the public-facing router (customer media routes plus a liveness
 	/// probe). `/metrics` is deliberately NOT here: node traffic counters ride
-	/// the separate internal listener ([`Internal`](crate::internal::Internal)) so they're
+	/// the separate internal listener ([`internal::Internal`](crate::internal::Internal)) so they're
 	/// never exposed on the public listener.
 	///
 	/// Includes the WebSocket polyfill catch-all (`/{*path}`, when
@@ -295,7 +293,9 @@ impl Web {
 	/// passes that router to [`crate::Relay::with_web`] instead of calling this.
 	pub async fn serve(self, app: Router) -> anyhow::Result<()> {
 		let config = self.config;
-		let app = app.fallback(serve_landing).into_make_service();
+		let app = app
+			.fallback(serve_landing)
+			.into_make_service_with_connect_info::<crate::listener::Peer>();
 		let ws = config.resolved_ws();
 
 		let http = if let Some(listen) = config.http.listen {
@@ -442,13 +442,13 @@ pub(crate) struct SocketStats(pub(crate) qmux::SharedSocketStats);
 #[derive(Clone)]
 pub(crate) struct SocketStats(std::convert::Infallible);
 
-/// Marker inserted as a request extension after HTTPS mTLS verifies a client certificate.
+/// The client certificate HTTPS mTLS verified, inserted as a request extension.
 ///
 /// Embedded routes can extract `Option<Extension<MtlsPeer>>` to mirror the
-/// built-in relay handlers, then call [`auth::Auth::verify_mtls`] with their route
-/// path when the marker is present.
+/// built-in relay handlers and report the identity in their auth request; it is a
+/// fact for the auth server to weigh, never a grant on its own.
 #[derive(Clone, Debug)]
-pub struct MtlsPeer;
+pub struct MtlsPeer(pub moq_tokio::tls::PeerIdentity);
 
 /// Accepts a connection on a public web listener.
 ///
@@ -512,7 +512,7 @@ impl<I> MtlsStream for TlsStream<I> {
 			.1
 			.peer_certificates()
 			.filter(|certs| !certs.is_empty())
-			.map(|_| MtlsPeer)
+			.map(|certs| MtlsPeer(moq_tokio::tls::PeerIdentity::from_chain(certs.to_vec())))
 	}
 }
 
@@ -701,9 +701,9 @@ impl<'de> serde::Deserialize<'de> for FetchGroup {
 	}
 }
 
-/// The host this request was addressed to, which `auth::ApiMode::Proxy` forwards so
-/// the endpoint can do its own routing. These handlers build their params from a
-/// path rather than a URL, so it has to come off the request headers.
+/// The host this request was addressed to, reported to the auth server as the
+/// session's `server_name` so it can route by hostname. These handlers build their
+/// request from a path rather than a URL, so it has to come off the request headers.
 fn request_host(uri: &http::Uri, headers: &http::HeaderMap) -> Option<String> {
 	// HTTP/2 carries the host in `:authority`, which hyper surfaces on the URI and
 	// usually WITHOUT a `Host` header. The HTTPS listener advertises h2, so reading
@@ -723,11 +723,38 @@ fn request_host(uri: &http::Uri, headers: &http::HeaderMap) -> Option<String> {
 		.filter(|host| !host.is_empty())
 }
 
+/// Admit a one-shot HTTP request as a session of its own: the auth server sees the
+/// path, the raw query, the host it was addressed to, the peer, and any certificate.
+async fn admit_http(
+	state: &WebState,
+	path: String,
+	query: AuthQuery,
+	uri: &http::Uri,
+	headers: &http::HeaderMap,
+	remote: crate::listener::Peer,
+	mtls: Option<Extension<MtlsPeer>>,
+) -> Result<auth::Admitted, auth::Error> {
+	// The public request API represents a missing or root path as empty; the
+	// contract says what was dialed, and a URL always starts with `/`.
+	let mut request = state
+		.auth
+		.request(moq_auth::Transport::Http, format!("/{}", path.trim_start_matches('/')));
+	request.query = uri
+		.query()
+		.map(str::to_owned)
+		.or_else(|| query.jwt.map(|jwt| format!("jwt={jwt}")));
+	request.server_name = request_host(uri, headers);
+	request.remote = Some(remote.0);
+	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| auth::peer(&identity));
+	state.auth.admit(request, moq_auth::Counters::default()).await
+}
+
 /// Serve the announced broadcasts for a given prefix.
 async fn serve_announced(
 	path: Option<Path<String>>,
 	Query(query): Query<AuthQuery>,
 	mtls: Option<Extension<MtlsPeer>>,
+	ConnectInfo(remote): ConnectInfo<crate::listener::Peer>,
 	uri: http::Uri,
 	headers: http::HeaderMap,
 	State(state): State<Arc<WebState>>,
@@ -737,18 +764,7 @@ async fn serve_announced(
 		None => String::new(),
 	};
 
-	let params = auth::Params {
-		path: prefix,
-		host: request_host(&uri, &headers),
-		jwt: query.jwt,
-		..Default::default()
-	};
-	let token = if mtls.is_some() {
-		// mTLS peers: the API returns the canonical root and the billing tier.
-		state.auth.verify_mtls(&params.path, params.transport).await?
-	} else {
-		state.auth.verify(&params).await?
-	};
+	let auth::Admitted { lease, token } = admit_http(&state, prefix, query, &uri, &headers, remote, mtls).await?;
 	let Some(origin) = state.cluster.subscriber(&token) else {
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
@@ -764,6 +780,7 @@ async fn serve_announced(
 		}
 	}
 
+	lease.close("done");
 	Ok(broadcasts
 		.iter()
 		.map(ToString::to_string)
@@ -776,6 +793,7 @@ async fn serve_fetch(
 	Path(path): Path<String>,
 	Query(params): Query<FetchParams>,
 	mtls: Option<Extension<MtlsPeer>>,
+	ConnectInfo(remote): ConnectInfo<crate::listener::Peer>,
 	uri: http::Uri,
 	headers: http::HeaderMap,
 	State(state): State<Arc<WebState>>,
@@ -789,18 +807,8 @@ async fn serve_fetch(
 		return Err(StatusCode::BAD_REQUEST.into());
 	}
 
-	let auth = auth::Params {
-		path: path.join("/"),
-		host: request_host(&uri, &headers),
-		jwt: params.auth.jwt,
-		..Default::default()
-	};
-	let token = if mtls.is_some() {
-		// mTLS peers: the API returns the canonical root and the billing tier.
-		state.auth.verify_mtls(&auth.path, auth.transport).await?
-	} else {
-		state.auth.verify(&auth).await?
-	};
+	let auth::Admitted { lease, token } =
+		admit_http(&state, path.join("/"), params.auth, &uri, &headers, remote, mtls).await?;
 	// The token's root is the canonical (alias-resolved) broadcast path.
 	let broadcast = token.root.to_string();
 
@@ -812,6 +820,8 @@ async fn serve_fetch(
 
 	let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
 
+	// The lease outlives this handler: the body streams after it returns, so the
+	// response holds the lease and ends it when the last frame is served.
 	let result = tokio::time::timeout_at(deadline, async {
 		// NOTE: The auth token is already scoped to the broadcast.
 		// Block until a route covers the broadcast (within the fetch deadline) so
@@ -848,69 +858,96 @@ async fn serve_fetch(
 
 		tracing::info!(%track, group = %group.sequence, "serving group");
 
-		Ok(ServeGroup { group, deadline })
+		Ok(group)
 	})
 	.await;
 
 	match result {
-		Ok(Ok(serve)) => Ok(serve),
-		Ok(Err(status)) => Err(status.into()),
-		Err(_) => Err(StatusCode::GATEWAY_TIMEOUT.into()),
+		Ok(Ok(group)) => Ok(ServeGroup {
+			group,
+			deadline,
+			lease: Some(lease),
+			token,
+		}),
+		Ok(Err(status)) => {
+			lease.close(status.to_string());
+			Err(status.into())
+		}
+		Err(_) => {
+			lease.close("timeout");
+			Err(StatusCode::GATEWAY_TIMEOUT.into())
+		}
 	}
 }
 
+/// A group streamed as the response body, holding the fetch's lease until the
+/// last frame is served so a refusal or expiry mid-transfer cuts it off and the
+/// `end` event carries the outcome.
 struct ServeGroup {
 	group: moq_net::group::Consumer,
 	deadline: tokio::time::Instant,
+	/// Taken when the body ends, so the reason is reported once.
+	lease: Option<auth::Lease>,
+	token: auth::Token,
 }
 
 impl ServeGroup {
 	async fn next(&mut self) -> moq_net::Result<Option<Bytes>> {
-		match tokio::time::timeout_at(self.deadline, self.group.read_frame()).await {
-			Ok(res) => Ok(res?.map(|frame| frame.payload)),
-			Err(_) => Err(moq_net::Error::Timeout),
+		let Some(lease) = self.lease.as_mut() else {
+			return Ok(None);
+		};
+		loop {
+			tokio::select! {
+				res = tokio::time::timeout_at(self.deadline, self.group.read_frame()) => {
+					return match res {
+						Ok(res) => Ok(res?.map(|frame| frame.payload)),
+						Err(_) => Err(moq_net::Error::Timeout),
+					};
+				}
+				changed = lease.changed() => match changed {
+					Ok(grant) => match crate::recheck(&self.token, &grant) {
+						Recheck::Covered => continue,
+						Recheck::Closed(why) => {
+							tracing::info!(%why, "grant no longer covers the fetch, closing");
+							return Err(moq_net::Error::Unauthorized);
+						}
+					},
+					Err(reason) => {
+						tracing::info!(%reason, "lease ended, closing fetch");
+						return Err(moq_net::Error::Unauthorized);
+					}
+				},
+			}
+		}
+	}
+
+	/// End the lease with the body's outcome.
+	fn end(&mut self, reason: &str) {
+		if let Some(lease) = self.lease.take() {
+			lease.close(reason);
 		}
 	}
 }
 
 impl IntoResponse for ServeGroup {
 	fn into_response(self) -> Response {
-		Response::new(Body::new(self))
-	}
-}
-
-impl http_body::Body for ServeGroup {
-	type Data = Bytes;
-	type Error = ServeGroupError;
-
-	fn poll_frame(
-		self: Pin<&mut Self>,
-		cx: &mut Context<'_>,
-	) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
-		let this = self.get_mut();
-
-		// Use `poll_fn` to turn the async function into a Future
-		let future = this.next();
-		tokio::pin!(future);
-
-		match ready!(future.poll(cx)) {
-			Ok(Some(data)) => {
-				let frame = http_body::Frame::data(data);
-				Poll::Ready(Some(Ok(frame)))
+		// One stream owns the body for its whole life, so the waiters `next`
+		// registers with the group and the lease survive between polls.
+		let frames = futures::stream::unfold(Some(self), async |serve| {
+			let mut serve = serve?;
+			match serve.next().await {
+				Ok(Some(data)) => Some((Ok(data), Some(serve))),
+				Ok(None) => {
+					serve.end("done");
+					None
+				}
+				Err(err) => {
+					serve.end(&err.to_string());
+					Some((Err(err), None))
+				}
 			}
-			Ok(None) => Poll::Ready(None),
-			Err(e) => Poll::Ready(Some(Err(ServeGroupError(e)))),
-		}
-	}
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error(transparent)]
-struct ServeGroupError(moq_net::Error);
-
-impl IntoResponse for ServeGroupError {
-	fn into_response(self) -> Response {
-		(StatusCode::INTERNAL_SERVER_ERROR, self.0.to_string()).into_response()
+		});
+		Response::new(Body::from_stream(frames))
 	}
 }
 
@@ -1276,12 +1313,11 @@ mod tests {
 
 		// The probed route is the test's own, so auth never runs; it just has to be
 		// configured with something for `Web` to build.
-		let mut auth_config = crate::auth::Config::default();
-		auth_config.public = Some(crate::auth::Public::Detailed(crate::auth::PublicDetailed {
-			subscribe: vec![String::new()],
+		let auth_config = crate::auth::Config {
+			public_subscribe: vec![moq_auth::Pattern::all()],
 			..Default::default()
-		}));
-		let auth = auth::Auth::new(auth_config).await.unwrap();
+		};
+		let auth = auth_config.init("test", &moq_tokio::tls::Connect::default()).unwrap();
 		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
 
@@ -1333,7 +1369,7 @@ mod tests {
 		// per-connection service but is independent of it.
 		let mut with_peer = SetConnectionExtensions {
 			inner: EchoExt,
-			peer: Some(MtlsPeer),
+			peer: Some(MtlsPeer(moq_tokio::tls::PeerIdentity::from_chain(Vec::new()))),
 			socket: None,
 		};
 		let mut no_peer = SetConnectionExtensions {

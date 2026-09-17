@@ -27,7 +27,7 @@ import dev.moq.*
 Moq.connect("https://relay.example.com", tlsRoots = listOf("ca.pem")).use { moq ->
     moq.announcements("live/").collect { announcement ->
         // An announcement is a route; its path is relative to the prefix.
-        val broadcast = moq.requestBroadcast("live/" + announcement.path())
+        val broadcast = moq.requestBroadcast("live/" + announcement.pattern())
         println(broadcast.catalog())
     }
 }
@@ -56,13 +56,13 @@ The three advertising operations: `moq.createBroadcast(path)` (or
 advertisement; `origin.dynamic(pattern, route)` claims every matching path
 (`foo/**` for a prefix). Hold the returned `OriginDynamic` while the claim
 should stay advertised. A wildcard is a capability, not an inventory;
-`announcement.path()` is the covered prefix for a prefix-shaped claim and
+`announcement.pattern()` is the covered prefix for a prefix-shaped claim and
 the pattern text otherwise.
 
 Sessions reconnect with backoff when the transport drops and re-announce local
 broadcasts. `moq.epoch()` counts the connections, 1 on the first, pairing with
 `MoqSession.status` to log each reconnect; the `backoff` argument tunes the
-pacing (`timeoutMs = 0` retries forever); and `maxStreams` raises the peer's
+pacing (`timeoutUs = 0` retries forever); and `maxStreams` raises the peer's
 inbound stream cap.
 
 `Server.listen(bind, tlsGenerate = ...)` accepts sessions with per-request

@@ -62,10 +62,10 @@ export class Room {
 			const origin = effect.get(this.connection.origin);
 			if (!origin) return;
 			const prefix = effect.get(this.prefix) ?? Moq.Path.empty();
-			const announced = origin.announced(prefix);
+			const announced = origin.announced(Moq.Path.Pattern.subtree(prefix));
 			effect.cleanup(() => announced.close());
 
-			effect.spawn(this.#run.bind(this, announced, effect));
+			effect.spawn(this.#run.bind(this, announced, prefix, effect));
 			effect.cleanup(() => {
 				for (const remote of this.#remotes.peek().values()) remote.close();
 				this.#remotes.set(new Map());
@@ -78,14 +78,16 @@ export class Room {
 		return this.#remotes;
 	}
 
-	async #run(announced: Moq.Announce.Consumer, effect: Effect): Promise<void> {
+	async #run(announced: Moq.Announce.Consumer, prefix: Moq.Path.Valid, effect: Effect): Promise<void> {
 		for (;;) {
 			const update = await Promise.race([effect.cancel, announced.next()]);
 			if (!update) break;
 
 			const covered = update.pattern.isLiteral ? update.pattern.text : update.pattern.asPrefix();
 			if (covered === undefined) continue;
-			const suffix = Moq.Path.from(covered);
+			// Announcements name the whole path; participants are named beneath the prefix.
+			const suffix = Moq.Path.stripPrefix(prefix, Moq.Path.from(covered));
+			if (suffix === null) continue;
 			const parsed = parse(suffix);
 			if (!parsed) continue;
 
@@ -93,7 +95,7 @@ export class Room {
 			if (local && parsed.identity === local) continue;
 
 			if (update.active) {
-				this.#add(parsed.identity, parsed.kind, Moq.Path.join(announced.prefix, suffix));
+				this.#add(parsed.identity, parsed.kind, Moq.Path.from(covered));
 			} else {
 				this.#remove(parsed.identity, parsed.kind);
 			}

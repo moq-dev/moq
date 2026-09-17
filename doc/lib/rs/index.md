@@ -20,9 +20,10 @@ The reference implementation. Every crate is on
 | [moq-video](/lib/rs/moq-video) | Native capture, hardware encode/decode (Apple, Windows, NVIDIA, VAAPI, V4L2, Android), and GPU rendering. |
 | [moq-audio](/lib/rs/moq-audio) | Microphone and speaker, Opus/PCM/AAC codecs, echo cancellation. |
 | [moq-transcode](https://docs.rs/moq-transcode) | Just-in-time rendition ladders, GPU-resident on NVIDIA. |
-| [moq-auth](/lib/rs/moq-auth) | The authorization contract: requests, grants, leases, the HTTP client, and JWT keys, signing, and verification. |
+| [moq-auth](/lib/rs/moq-auth) | The authorization contract: requests, grants, leases, the HTTP client, the reference server, and JWT keys, signing, and verification. |
 | [moq-room](/lib/rs/moq-room) | Headless rooms: announce-derived roster, token claims, and a chat track. |
-| [moq-json](https://docs.rs/moq-json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
+| [moq-json](/lib/rs/moq-json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
+| [moq-binary](/lib/rs/moq-binary) | Opaque payloads over tracks: snapshots or append logs. |
 | [moq-e2ee](https://docs.rs/moq-e2ee) | End-to-end encryption of groups, datagrams, catalogs, and track names. |
 | [moq-flate](https://docs.rs/moq-flate) | Group-scoped DEFLATE for any track. |
 | [moq-loc](https://docs.rs/moq-loc), [moq-msf](https://docs.rs/moq-msf) | The IETF LOC container and MSF catalog. |
@@ -100,6 +101,15 @@ a knob that backend cannot honor rather than dropping it: quiche has no local
 send cap, and iroh cannot disable GSO. `quic::Resolved::default()` is what an
 untouched config resolves to, so read the defaults from there. The
 [relay reference](/bin/relay/config#quic) documents each field.
+
+## Connection monitoring
+
+`Connection::monitor()` returns a cloneable `moq_tokio::connection::Monitor`
+that observes the live session across reconnects without keeping the connection
+loop alive. Its `stats()` and `snapshot()` return `None` between connections;
+`connection::Snapshot` pairs transport statistics with the negotiated protocol.
+Use `presence()` for cumulative connects and disconnects, or
+`presence_changed().await` to wait for those counters to change.
 
 ## WebAssembly
 

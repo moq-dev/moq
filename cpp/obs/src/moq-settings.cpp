@@ -198,9 +198,9 @@ const DefaultValues &LibraryDefaults()
 
 		d.connect_timeout_ms = (long long)config.connect_timeout_ms;
 		d.failover_delay_ms = (long long)config.failover_delay_ms;
-		d.backoff_initial_ms = (long long)config.backoff_initial_ms;
-		d.backoff_max_ms = (long long)config.backoff_max_ms;
-		d.backoff_timeout_ms = (long long)config.backoff_timeout_ms;
+		d.backoff_initial_ms = (long long)(config.backoff_initial_us / 1000);
+		d.backoff_max_ms = (long long)(config.backoff_max_us / 1000);
+		d.backoff_timeout_ms = (long long)(config.backoff_timeout_us / 1000);
 		d.quic_max_streams = (long long)config.quic_max_streams;
 		d.quic_idle_timeout_ms = (long long)config.quic_idle_timeout_ms;
 		// Absent means "no keep-alive", which the UI shows as zero.
@@ -427,11 +427,11 @@ bool BuildConfig(obs_data_t *settings, Config *out)
 	borrow(OptionalString(settings, TLS_HOST_NAME), &out->host_name, &config.tls_host_name,
 	       &config.tls_host_name_len);
 
-	config.backoff_initial_ms = (uint64_t)Amount(settings, BACKOFF_INITIAL);
+	config.backoff_initial_us = (uint64_t)Amount(settings, BACKOFF_INITIAL) * 1000;
 	config.has_backoff_initial = true;
-	config.backoff_max_ms = (uint64_t)Amount(settings, BACKOFF_MAX);
+	config.backoff_max_us = (uint64_t)Amount(settings, BACKOFF_MAX) * 1000;
 	config.has_backoff_max = true;
-	config.backoff_timeout_ms = (uint64_t)Amount(settings, BACKOFF_TIMEOUT);
+	config.backoff_timeout_us = (uint64_t)Amount(settings, BACKOFF_TIMEOUT) * 1000;
 	config.has_backoff_timeout = true;
 
 	config.quic_max_streams = (uint64_t)Amount(settings, QUIC_MAX_STREAMS);

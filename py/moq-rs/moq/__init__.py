@@ -9,9 +9,9 @@ from .client import Client, connect
 from .errors import is_auth, is_shutdown, protocol_error
 from .log import log_level
 from .origin import (
-    Announced,
+    AnnounceConsumer,
     AnnouncedBroadcast,
-    Announcement,
+    AnnounceUpdate,
     BroadcastRequest,
     OriginConsumer,
     OriginDynamic,
@@ -89,9 +89,9 @@ from .types import (
 )
 
 __all__ = [
-    "Announced",
+    "AnnounceConsumer",
     "AnnouncedBroadcast",
-    "Announcement",
+    "AnnounceUpdate",
     "Audio",
     "AudioCodec",
     "AudioConsumer",

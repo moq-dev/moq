@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- `MoqCancel` and the trailing `cancel` argument on blocking async methods. Bindings with
+  native async cancellation never needed it; Go now cancels through `context.Context` on
+  the generated call.
+
 ### Added
 
 - `MoqError::Busy` when a configuration setter races an in-flight connect, listen, or accept.
@@ -19,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Bare-integer durations are microseconds: `max_age_us` on decoder outputs,
+  track info, and subscriptions; `MoqBackoff` is `initial_us` / `max_us` /
+  `timeout_us`. `MoqSession::publish()` / `consume()` match `set_publish` /
+  `set_consume`.
+- `MoqAnnounced` is `MoqAnnounceConsumer`, `MoqAnnouncement` is `MoqAnnounceUpdate` with `pattern()` instead of `path()`, `MoqBroadcastRequest::abort` is `reject`, and `MoqOriginOptions` is `MoqOriginConfig`.
+
+- [**breaking**] `MoqTrackProducer::finish` and `MoqGroupProducer::finish` keep the handle open so a
+  later `abort` can still run. Broadcast, audio, video, and JSON producers still close on finish.
 - Client, server, and pending-request configuration setters now return `Result` and
   apply or fail. They error with `Busy` while connect/listen/accept owns the handle
   and `Cancelled` after `cancel()`. Server bind/TLS is captured at `listen()` and
@@ -62,6 +76,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `publish_media` and `publish_media_stream` reject a `MoqInit` label or video hint on a container
   format, and an audio format rejects a video hint, instead of silently dropping either.
 
+## [0.3.18](https://github.com/moq-dev/moq/compare/moq-ffi-v0.3.17...moq-ffi-v0.3.18) - 2026-09-13
+
+### Other
+
+- update Cargo.lock dependencies
 
 ## [0.3.17](https://github.com/moq-dev/moq/compare/moq-ffi-v0.3.16...moq-ffi-v0.3.17) - 2026-09-09
 

@@ -8,6 +8,10 @@ on:
   push:
     tags:
       - "moq-ffi-v*"
+  # Dry-run: build everything, publish nothing. Nightly calls every release
+  # workflow this way so a broken build surfaces before the tag is cut.
+  workflow_call:
+  workflow_dispatch:
   pull_request:
     paths:
       - ".github/workflows/release-dart-ffi.yml"
@@ -40,15 +44,7 @@ jobs:
 
       - name: Parse version
         id: parse
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            VERSION=$(grep '^version' rs/moq-ffi/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          else
-            .github/scripts/release.sh parse-version moq-ffi
-          fi
+        run: .github/scripts/release.sh parse-version moq-ffi
 
   build:
     name: Build Native Asset (${{ matrix.target }})
@@ -175,7 +171,7 @@ jobs:
   release:
     name: Attach Native Assets
     needs: [parse-version, build]
-    if: github.event_name == 'push'
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -209,7 +205,7 @@ jobs:
   publish:
     name: Publish moq_ffi to pub.dev
     needs: [parse-version, package, release]
-    if: github.event_name == 'push'
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     environment:
       name: pub.dev

@@ -206,7 +206,10 @@ class GroupProducer:
         self._inner.write_frame(Frame(payload=payload, timestamp_us=timestamp_us))
 
     def finish(self) -> None:
-        """Close this group cleanly, marking it complete for subscribers."""
+        """Close this group cleanly, marking it complete for subscribers.
+
+        The handle remains so :meth:`abort` can still run.
+        """
         self._inner.finish()
 
     def abort(self, error_code: int) -> None:
@@ -274,7 +277,10 @@ class TrackProducer:
         self._inner.abort(error_code)
 
     def finish(self) -> None:
-        """Finish publishing and flush a clean end to subscribers."""
+        """Finish publishing and flush a clean end to subscribers.
+
+        The handle remains so :meth:`abort` can still run.
+        """
         self._inner.finish()
 
     def finish_at(self, final_sequence: int) -> None:

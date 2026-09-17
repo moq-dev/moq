@@ -38,7 +38,7 @@
 //!
 //! A bare pool is inert by default ([`Pool::unbounded`]): publishers and subscribers
 //! that never set a capacity or expiry pay only a couple of atomic counters, and
-//! register nothing. A standalone [`origin`](crate::origin::Info) enables
+//! register nothing. A standalone [`origin`](crate::origin::Config) enables
 //! [`DEFAULT_EXPIRY`], while a relay creates one configured pool and shares it across
 //! every origin so the whole process caches into a single policy.
 
@@ -1009,7 +1009,7 @@ mod test {
 
 	#[test]
 	fn standalone_origin_enables_default_expiry() {
-		assert_eq!(crate::origin::Info::default().pool.expiry(), Some(DEFAULT_EXPIRY));
+		assert_eq!(crate::origin::Config::default().pool.expiry(), Some(DEFAULT_EXPIRY));
 	}
 
 	#[test]

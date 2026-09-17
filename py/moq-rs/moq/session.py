@@ -69,16 +69,16 @@ class Session:
         """Graceful shutdown; equivalent to `cancel(0)` (0 means no error)."""
         self._inner.shutdown()
 
-    def publisher(self) -> OriginProducer:
+    def publish(self) -> OriginProducer:
         """The publish-side origin: where local broadcasts are advertised to
         the remote. Either the origin wired before connect/accept, or one
         auto-created if none was set."""
-        return OriginProducer._from_inner(self._inner.publisher())
+        return OriginProducer._from_inner(self._inner.publish())
 
-    def consumer(self) -> OriginConsumer:
+    def consume(self) -> OriginConsumer:
         """The subscribe-side origin: a read handle for announcements pushed by
         the remote."""
-        return OriginConsumer(self._inner.consumer())
+        return OriginConsumer(self._inner.consume())
 
     def stats(self) -> ConnectionStats:
         """Snapshot the current connection statistics (RTT, bandwidth estimates,

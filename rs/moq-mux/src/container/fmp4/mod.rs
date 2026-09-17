@@ -58,6 +58,10 @@ pub enum Error {
 	#[error("{0}")]
 	InvalidEnd(#[from] crate::container::InvalidEnd),
 
+	/// A frame's timestamp sits below the live edge earlier groups reached.
+	#[error("{0}")]
+	TimestampRewind(#[from] crate::container::TimestampRewind),
+
 	#[error("timestamp overflow")]
 	TimestampOverflow(#[from] moq_net::TimeOverflow),
 

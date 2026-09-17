@@ -8,72 +8,9 @@
 use std::ffi::c_void;
 
 use crate::sys::nvEncodeAPI::{
-	GUID, NV_ENC_BUFFER_FORMAT, NV_ENC_CONFIG, NV_ENC_INITIALIZE_PARAMS, NV_ENC_INITIALIZE_PARAMS_VER,
-	NV_ENC_INPUT_RESOURCE_TYPE, NV_ENC_PIC_FLAGS, NV_ENC_PIC_PARAMS, NV_ENC_PIC_PARAMS_VER, NV_ENC_REGISTER_RESOURCE,
-	NV_ENC_REGISTER_RESOURCE_VER,
+	NV_ENC_BUFFER_FORMAT, NV_ENC_INPUT_RESOURCE_TYPE, NV_ENC_PIC_FLAGS, NV_ENC_PIC_PARAMS, NV_ENC_PIC_PARAMS_VER,
+	NV_ENC_REGISTER_RESOURCE, NV_ENC_REGISTER_RESOURCE_VER,
 };
-
-#[deprecated(note = "use the safe wrapper `EncoderInitParams`")]
-impl NV_ENC_INITIALIZE_PARAMS {
-	/// Builder for [`NV_ENC_INITIALIZE_PARAMS`].
-	#[must_use]
-	pub fn new(encode_guid: GUID, width: u32, height: u32) -> Self {
-		NV_ENC_INITIALIZE_PARAMS {
-			version: NV_ENC_INITIALIZE_PARAMS_VER,
-			encodeGUID: encode_guid,
-			encodeWidth: width,
-			encodeHeight: height,
-			..Default::default()
-		}
-	}
-
-	/// Specifies the preset for encoding. If the preset GUID is set then
-	/// the preset configuration will be applied before any other parameter.
-	pub fn preset_guid(&mut self, preset_guid: GUID) -> &mut Self {
-		self.presetGUID = preset_guid;
-		self
-	}
-
-	/// Specifies the advanced codec specific structure. If client has sent a
-	/// valid codec config structure, it will override parameters set by the
-	/// [`NV_ENC_INITIALIZE_PARAMS::preset_guid`].
-	///
-	/// The client can query the interface for codec-specific parameters
-	/// using [`Encoder::get_preset_config`](super::encoder::Encoder::get_preset_config).
-	/// It can then modify (if required) some of the codec config parameters and
-	/// send down a custom config structure using this method. Even in this
-	/// case the client is recommended to pass the same preset GUID it has
-	/// used to get the config.
-	pub fn encode_config(&mut self, encode_config: &mut NV_ENC_CONFIG) -> &mut Self {
-		self.encodeConfig = encode_config;
-		self
-	}
-
-	/// Specifies the display aspect ratio (H264/HEVC) or the render
-	/// width/height (AV1).
-	pub fn display_aspect_ratio(&mut self, width: u32, height: u32) -> &mut Self {
-		self.darWidth = width;
-		self.darHeight = height;
-		self
-	}
-
-	/// Specifies the framerate in frames per second as a fraction
-	/// `numerator / denominator`.
-	pub fn framerate(&mut self, numerator: u32, denominator: u32) -> &mut Self {
-		self.frameRateNum = numerator;
-		self.frameRateDen = denominator;
-		self
-	}
-
-	/// Enable the Picture Type Decision to be taken by the
-	/// `NvEncodeAPI` interface.
-	pub fn enable_picture_type_decision(&mut self) -> &mut Self {
-		self.enablePTD = 1;
-		self
-	}
-
-	// TODO: Add other options
-}
 
 impl NV_ENC_PIC_PARAMS {
 	/// Create an EOS empty frame that is used at the

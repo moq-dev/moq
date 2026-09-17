@@ -67,6 +67,8 @@ The API is the most important thing to get right. A bad shape costs a breaking c
 - No em dashes.
 - Match the existing conventions, patterns, and naming when possible.
 - Fix any outdated docs and comments inline; don't add a separate PR for it.
+- Add the AI marker `(Written by <model>)` to any posts on GitHub, excluding commit messages that contain `Co-Authored-By:` trailers.
+- Any AI comments may be challenged, and not confused with human maintainers.
 
 # Guidelines
 

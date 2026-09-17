@@ -43,8 +43,8 @@
 //! traffic records under that label; default-tier tracks always exist and hold
 //! `{}` while idle. Compute names with [`traffic_track`] / [`sessions_track`].
 //!
-//! An entry appears in a frame while it is live (an open counter still exceeds
-//! its `*_closed` counterpart, so traffic could resume at any moment) or on
+//! An entry appears in a frame while it is live (a started counter still exceeds
+//! its `*_ended` counterpart, so traffic could resume at any moment) or on
 //! the tick its snapshot changed, then is dropped once fully closed. Counters
 //! are cumulative and monotonic: a downstream aggregator computes rates from
 //! successive snapshots, and a counter going backwards means the relay

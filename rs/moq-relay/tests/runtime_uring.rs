@@ -10,7 +10,7 @@
 use std::net::{SocketAddr, UdpSocket};
 use std::time::Duration;
 
-use moq_relay::{Config, Relay, auth};
+use moq_relay::{Config, Relay};
 use moq_tokio::moq_net::{self, Hop};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -86,9 +86,7 @@ fn uring_config(cert: &std::path::Path, key: &std::path::Path, port: u16) -> Con
 	config.runtime.workers = Some(WORKERS);
 	config.runtime.pin = false;
 	config.runtime.io_uring = true;
-	#[allow(deprecated)]
-	let public = auth::Public::Simple(vec![String::new()]);
-	config.auth.public = Some(public);
+	config.auth.public = vec![moq_auth::Pattern::all()];
 	config
 }
 
@@ -257,12 +255,12 @@ async fn uring_workers_publish_their_certificate_fingerprint() {
 	let _ = serving.await;
 }
 
-/// A client certificate is a credential the io_uring workers accept.
+/// A client certificate the io_uring workers verified is reported to the auth
+/// server, whose mTLS grant admits it.
 ///
 /// `listen.tls.root` used to be refused at startup here, so the mode could not
-/// authenticate a peer mesh at all. There is deliberately no JWT or public path
-/// configured below, so `Auth::verify` refuses every one of these connections:
-/// only the mTLS path can carry the round trip through.
+/// authenticate a peer mesh at all. The server below grants certificates and
+/// nothing else, so only the mTLS path can carry the round trip through.
 #[tokio::test]
 async fn an_mtls_client_authenticates_without_a_token() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -276,7 +274,8 @@ async fn an_mtls_client_authenticates_without_a_token() {
 	let port = free_udp_port();
 
 	let mut config = uring_config(&cert, &key, port);
-	config.auth.public = None;
+	config.auth.public = Vec::new();
+	config.auth.url = Some(spawn_auth_server(mtls_only()).await);
 	config.listen.tls.root = vec![root];
 
 	let relay = Relay::load(config).await.expect("load relay");
@@ -292,7 +291,7 @@ async fn an_mtls_client_authenticates_without_a_token() {
 		dial.init(Default::default()).expect("client init")
 	};
 
-	// An mTLS token is unrestricted within its root, so one certificate covers
+	// The server grants a certificate everything, so one certificate covers
 	// both roles. A publish that reaches a subscriber is the proof: an
 	// unauthorized session establishes and is then closed, so merely
 	// connecting proves nothing.
@@ -439,4 +438,28 @@ async fn uring_workers_write_qlog_traces() {
 				.unwrap_or_else(|err| panic!("{}: {err}: {record}", path.display()));
 		}
 	}
+}
+
+/// A policy admitting verified certificates and nobody else.
+fn mtls_only() -> moq_auth::serve::Policy {
+	moq_auth::serve::Policy {
+		mtls: moq_auth::serve::Rules {
+			publish: [moq_auth::Pattern::all()].into_iter().collect(),
+			subscribe: [moq_auth::Pattern::all()].into_iter().collect(),
+		},
+		..Default::default()
+	}
+}
+
+/// Serve `policy` on a loopback port for the test's lifetime, returning its URL.
+async fn spawn_auth_server(policy: moq_auth::serve::Policy) -> url::Url {
+	let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+		.await
+		.expect("bind auth server");
+	let url = format!("http://{}/", listener.local_addr().expect("auth addr"))
+		.parse()
+		.expect("auth url");
+	let server = moq_auth::serve::Server::new(policy);
+	tokio::spawn(async move { server.serve(listener).await });
+	url
 }

@@ -4,7 +4,7 @@ use std::task::{Poll, ready};
 
 use moq_net::{
 	Path, PathOwned, announce, broadcast,
-	origin::{self, Requesting},
+	origin::{self, Pending},
 };
 
 use crate::path::{Kind, parse};
@@ -38,7 +38,7 @@ struct Inflight {
 	identity: PathOwned,
 	kind: Kind,
 	path: PathOwned,
-	request: Requesting,
+	request: Pending,
 }
 
 /// Runs the announce loop and yields remote participant broadcasts.

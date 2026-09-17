@@ -26,9 +26,9 @@ No implementation here, requirements only.
 The relay core is media-agnostic by design, so TS-level monitoring belongs at the **TS
 edges**, not in the relay:
 
-- **Ingest** (e.g. `moq-srt`, `moq-cli publish ts`): validate the incoming contribution
+- **Ingest** (e.g. `moq-srt`, `moq import ts`): validate the incoming contribution
   feed and expose its health.
-- **Egress** (e.g. `moq-srt` m=request, `moq-cli subscribe --format ts`): validate the
+- **Egress** (e.g. `moq-srt` m=request, `moq export ts`): validate the
   TS we hand downstream.
   Important nuance from the two-lane model (#1799):
 - **Media-aware lane** (today): PAT/PMT/PCR/CC are *regenerated* by our muxer, so at

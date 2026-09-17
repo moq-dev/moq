@@ -5,7 +5,7 @@
  */
 import { type GetPromise, Once, Signal } from "@moq/signals";
 import type { Consumer as GroupConsumer } from "./group.ts";
-import { DEFAULT_ROUTE, normalizeRoute, type Route } from "./hop.ts";
+import { Route } from "./hop.ts";
 import { hooks, type TrackSequence } from "./internal.ts";
 import * as track from "./track.ts";
 
@@ -251,12 +251,12 @@ export class Producer implements track.Broadcast {
 	 * {@link unannounce} or {@link close}. Throws if this producer was not created through an
 	 * origin, or if the broadcast is already closed.
 	 */
-	announce(route: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint } = DEFAULT_ROUTE): void {
+	announce(route: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint } = Route.default): void {
 		if (this.#state.closed.peek() !== undefined) {
 			throw new Error(`broadcast is closed: ${this.#state.closed.peek()}`);
 		}
 		if (!this.#announcer) throw new Error("broadcast is not attached to an origin");
-		this.#announcer.announce(normalizeRoute(route));
+		this.#announcer.announce(Route.normalize(route));
 	}
 
 	/** Retract the advertisement of this broadcast's path, if any. */

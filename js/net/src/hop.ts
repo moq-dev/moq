@@ -32,7 +32,8 @@ export type Hop = z.infer<typeof HopSchema>;
  *
  * It stands in for an endpoint that never declared one, and any number of endpoints can
  * be 0, so it identifies nothing: it is never a loop, never a publisher two chains have
- * in common, and never excluded from an advertisement.
+ * in common, and never excluded from an advertisement. A chain that holds a 0 anywhere
+ * is anonymous for route selection.
  */
 export const UNKNOWN_HOP: Hop = HopSchema.parse(0n);
 
@@ -83,8 +84,11 @@ export interface Cost {
 	cold: bigint;
 }
 
-/** A free path in both magnitudes: what a live publisher seeds. */
-export const ZERO_COST: Cost = { warm: 0n, cold: 0n };
+/** Constructors for {@link Cost}. */
+export const Cost = {
+	/** A free path in both magnitudes: what a live publisher seeds. */
+	zero: { warm: 0n, cold: 0n } as Cost,
+};
 
 /**
  * The path a route took through the mesh and what using it costs.
@@ -100,16 +104,29 @@ export interface Route {
 	cost: Cost;
 }
 
-/** An empty hop chain at zero cost: what a publisher seeds for a live broadcast. */
-export const DEFAULT_ROUTE: Route = { hops: [], cost: ZERO_COST };
+/** Constructors and helpers for {@link Route}. */
+export const Route = {
+	/** An empty hop chain at zero cost: what a publisher seeds for a live broadcast. */
+	default: { hops: [], cost: Cost.zero } as Route,
 
-/** Normalize a partial route, treating a bare bigint cost as both magnitudes alike. */
-export function normalizeRoute(route: Route | { hops?: readonly Hop[]; cost?: Cost | bigint } = {}): Route {
-	const hops = route.hops ? [...route.hops] : [];
-	const cost = route.cost;
-	if (cost === undefined) return { hops, cost: ZERO_COST };
-	if (typeof cost === "bigint") return { hops, cost: { warm: cost, cold: cost } };
-	return { hops, cost: { warm: cost.warm, cold: cost.cold } };
+	/** Normalize a partial route, treating a bare bigint cost as both magnitudes alike. */
+	normalize(route: Route | { hops?: readonly Hop[]; cost?: Cost | bigint } = {}): Route {
+		const hops = route.hops ? [...route.hops] : [];
+		const cost = route.cost;
+		if (cost === undefined) return { hops, cost: Cost.zero };
+		if (typeof cost === "bigint") return { hops, cost: { warm: cost, cold: cost } };
+		return { hops, cost: { warm: cost.warm, cold: cost.cold } };
+	},
+};
+
+/**
+ * Whether this route passed through an anonymous hop (id 0) at any depth.
+ *
+ * An empty chain is a local announcement, not the anonymous mark. Ingress fills a
+ * received empty list with {@link UNKNOWN_HOP} before yielding it.
+ */
+export function isAnonymous(route: Route): boolean {
+	return route.hops.includes(UNKNOWN_HOP);
 }
 
 /** Whether two routes name the same hop chain and cost. */

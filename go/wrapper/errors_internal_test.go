@@ -5,8 +5,6 @@ import (
 	"errors"
 	"testing"
 	"time"
-
-	ffi "moq.dev/moq-ffi/moq"
 )
 
 // stubHandle stands in for a uniffi object: something the wrapper owns and has
@@ -38,7 +36,7 @@ func TestRunHandleReleasesAResultNobodyReceived(t *testing.T) {
 		cancelCtx()
 	}()
 
-	val, err := runHandle(ctx, nil, func() (*stubHandle, error) {
+	val, err := runHandle(ctx, nil, func(context.Context) (*stubHandle, error) {
 		close(started)
 		<-finish
 		return stub, nil
@@ -72,7 +70,7 @@ func TestRunHandleIgnoresAResultThatIsNoHandle(t *testing.T) {
 		cancelCtx()
 	}()
 
-	_, err := runHandle(ctx, nil, func() (*stubHandle, error) {
+	_, err := runHandle(ctx, nil, func(context.Context) (*stubHandle, error) {
 		close(started)
 		<-finish
 		close(returned)
@@ -96,7 +94,7 @@ func TestRunHandleStartsNothingForADoneContext(t *testing.T) {
 	cancelCtx()
 
 	called := false
-	val, err := runHandle(ctx, nil, func() (*stubHandle, error) {
+	val, err := runHandle(ctx, nil, func(context.Context) (*stubHandle, error) {
 		called = true
 		return &stubHandle{destroyed: make(chan struct{})}, nil
 	})
@@ -111,12 +109,96 @@ func TestRunHandleStartsNothingForADoneContext(t *testing.T) {
 	}
 }
 
+// Object-owned calls must not share the caller's cancellation with the generated
+// binding. If they do, the binding can return ctx.Err() into the result channel
+// before run invokes cancel, and ReadFrame / Closed / Accept report cancellation
+// while leaving the stream, session, or request active.
+func TestRunHidesCallerCancelFromAnObjectOwnedCall(t *testing.T) {
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	defer cancelCtx()
+
+	got := make(chan context.Context, 1)
+	_, err := runCancellable(ctx, func() {}, func(callCtx context.Context) (int, error) {
+		got <- callCtx
+		return 1, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	callCtx := <-got
+	cancelCtx()
+	if callCtx.Err() != nil {
+		t.Fatal("object-owned generated call shares the caller's cancellation")
+	}
+}
+
+// A call with no object to abort still sees ctx, so one-shot generated methods
+// can cancel the UniFFI future themselves.
+func TestRunPassesCallerCancelWhenThereIsNoObjectCancel(t *testing.T) {
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	defer cancelCtx()
+
+	got := make(chan context.Context, 1)
+	_, err := runCancellable(ctx, nil, func(callCtx context.Context) (int, error) {
+		got <- callCtx
+		return 1, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	callCtx := <-got
+	cancelCtx()
+	if callCtx.Err() == nil {
+		t.Fatal("a call with no object cancel should see the caller's context")
+	}
+}
+
+// Cancelling ctx while an object-owned call is blocked still runs cancel, which
+// is what unblocks the native work once the generated binding no longer sees ctx.
+func TestRunCancelsTheObjectWhenCtxEndsDuringTheCall(t *testing.T) {
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	objectCancelled := make(chan struct{})
+	returned := make(chan struct{})
+	sawCallCtxDone := make(chan struct{})
+
+	go func() {
+		<-started
+		cancelCtx()
+	}()
+
+	_, err := runCancellable(ctx, func() { close(objectCancelled) }, func(callCtx context.Context) (int, error) {
+		close(started)
+		<-objectCancelled
+		select {
+		case <-callCtx.Done():
+			close(sawCallCtxDone)
+		default:
+		}
+		close(returned)
+		return 0, nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("generated call never returned")
+	}
+	select {
+	case <-sawCallCtxDone:
+		t.Fatal("generated call saw the cancelled caller context")
+	default:
+	}
+}
+
 // A call that beats its context keeps its result: the reconciliation must not
 // cost the caller a handle it did receive.
 func TestRunHandleReturnsAResultThatWon(t *testing.T) {
 	stub := &stubHandle{destroyed: make(chan struct{})}
 
-	val, err := runHandle(context.Background(), nil, func() (*stubHandle, error) {
+	val, err := runHandle(context.Background(), nil, func(context.Context) (*stubHandle, error) {
 		return stub, nil
 	})
 	if err != nil {
@@ -129,51 +211,5 @@ func TestRunHandleReturnsAResultThatWon(t *testing.T) {
 	case <-stub.destroyed:
 		t.Fatal("a handle handed to the caller was destroyed")
 	default:
-	}
-}
-
-// The generated bindings panic on any use of a destroyed object, and a token is
-// used from two goroutines: the caller cancels, the call releases. A cancel that
-// loses that race has to find the token gone rather than call into it.
-func TestTokenIgnoresACancelAfterRelease(t *testing.T) {
-	tok := newToken()
-	tok.release()
-
-	// Both of these would panic if they reached the native object.
-	tok.cancel()
-	tok.release()
-}
-
-// A cancel before the release still reaches the native object, which is the
-// whole point of the token.
-func TestTokenCancelsWhileLive(t *testing.T) {
-	tok := newToken()
-	tok.cancel()
-	tok.release()
-}
-
-// A context already done mints no token, since nothing would be left to release
-// one: run starts no call, so the deferred release never runs.
-func TestRunOperationMintsNothingForADoneContext(t *testing.T) {
-	ctx, cancelCtx := context.WithCancel(context.Background())
-	cancelCtx()
-
-	called := false
-	val, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqCancel, error) {
-		called = true
-		return cancel, nil
-	})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("err = %v, want context.Canceled", err)
-	}
-	if val != nil {
-		t.Fatalf("val = %v, want nil", val)
-	}
-	if called {
-		t.Fatal("the call ran for a context that was already done")
-	}
-
-	if err := runOperationErr(ctx, func(*ffi.MoqCancel) error { return nil }); !errors.Is(err, context.Canceled) {
-		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 }

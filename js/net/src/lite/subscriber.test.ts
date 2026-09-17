@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { error, reason } from "../error.ts";
-import { HopSchema, UNKNOWN_HOP } from "../hop.ts";
+import { HopSchema, isAnonymous, MAX_HOPS, Route, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import { Writer } from "../stream.ts";
 import * as Time from "../time.ts";
@@ -128,9 +128,109 @@ const PUBLISHER_B = HopSchema.parse(8n);
 const PUBLISHER_C = HopSchema.parse(9n);
 const PEER = HopSchema.parse(2n);
 
+test("a local empty hop chain is not anonymous", () => {
+	expect(isAnonymous(Route.default)).toBe(false);
+	expect(isAnonymous({ hops: [UNKNOWN_HOP], cost: Route.default.cost })).toBe(true);
+});
+
+test("a max-length chain plus withheld responder is dropped", async () => {
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
+	const announced = subscriber.announced();
+	await settle();
+
+	const hops = Array.from({ length: MAX_HOPS }, (_, i) => HopSchema.parse(BigInt(i + 1)));
+	await send((w) => new AnnounceOk(UNKNOWN_HOP, 0).encode(w, Version.DRAFT_06));
+	await send((w) =>
+		encodeAnnounceBroadcast(w, { status: "active", suffix: Path.from("full"), hops }, Version.DRAFT_06),
+	);
+	await send((w) =>
+		encodeAnnounceBroadcast(
+			w,
+			{ status: "active", suffix: Path.from("room"), hops: [PUBLISHER_A] },
+			Version.DRAFT_06,
+		),
+	);
+	expect(await announced.next()).toMatchObject({
+		pattern: Path.Pattern.subtree(Path.from("room")),
+		active: true,
+		anonymous: true,
+		route: { hops: [PUBLISHER_A, UNKNOWN_HOP] },
+	});
+
+	announced.close();
+	subscriber.close();
+});
+
+test("an unidentified responder keeps hop 0 on a nonempty chain", async () => {
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
+	const announced = subscriber.announced();
+	await settle();
+
+	await send((w) => new AnnounceOk(UNKNOWN_HOP, 0).encode(w, Version.DRAFT_06));
+	await send((w) =>
+		encodeAnnounceBroadcast(
+			w,
+			{ status: "active", suffix: Path.from("room"), hops: [PUBLISHER_A] },
+			Version.DRAFT_06,
+		),
+	);
+	expect(await announced.next()).toMatchObject({
+		pattern: Path.Pattern.subtree(Path.from("room")),
+		active: true,
+		anonymous: true,
+		route: { hops: [PUBLISHER_A, UNKNOWN_HOP] },
+	});
+
+	announced.close();
+	subscriber.close();
+});
+
+test("a received empty hop list is filled with hop 0 and marked anonymous", async () => {
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
+	const announced = subscriber.announced();
+	await settle();
+
+	await send((w) => new AnnounceOk(UNKNOWN_HOP, 0).encode(w, Version.DRAFT_06));
+	await send((w) =>
+		encodeAnnounceBroadcast(w, { status: "active", suffix: Path.from("room"), hops: [] }, Version.DRAFT_06),
+	);
+	expect(await announced.next()).toMatchObject({
+		pattern: Path.Pattern.subtree(Path.from("room")),
+		active: true,
+		anonymous: true,
+		route: { hops: [UNKNOWN_HOP] },
+	});
+
+	announced.close();
+	subscriber.close();
+});
+
+test("a received chain with hop 0 is marked anonymous", async () => {
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
+	const announced = subscriber.announced();
+	await settle();
+
+	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
+	await send((w) =>
+		encodeAnnounceBroadcast(
+			w,
+			{ status: "active", suffix: Path.from("room"), hops: [UNKNOWN_HOP, PUBLISHER_A] },
+			Version.DRAFT_06,
+		),
+	);
+	expect(await announced.next()).toMatchObject({
+		pattern: Path.Pattern.subtree(Path.from("room")),
+		active: true,
+		anonymous: true,
+	});
+
+	announced.close();
+	subscriber.close();
+});
+
 test("a restart from the same publisher is a route change, not a republish", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
@@ -170,7 +270,7 @@ test("a restart from the same publisher is a route change, not a republish", asy
 
 test("a restart that re-prices the same publisher emits the new route", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
@@ -206,7 +306,7 @@ test("a restart that re-prices the same publisher emits the new route", async ()
 
 test("a lite-05 duplicate announce follows the same restart rule", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_05);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_05));
@@ -233,7 +333,7 @@ test("a lite-05 duplicate announce follows the same restart rule", async () => {
 // `unknown_publisher_restart_replaces` regression.
 test("a restart from an unidentified publisher replaces rather than reroutes", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	await send((w) => new AnnounceOk(UNKNOWN_HOP, 0).encode(w, Version.DRAFT_06));
@@ -347,7 +447,7 @@ test("an announce skipped as a reflected loop still holds its path", async () =>
 	// The subscriber's own origin, so a chain naming it reflects back through us.
 	const SELF = 1n;
 	const { subscriber, send, abortReason, sessionEnded, settle } = announceHarness(Version.DRAFT_06, SELF);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
@@ -389,7 +489,7 @@ test("an announce skipped as a reflected loop still holds its path", async () =>
 test("a restart replaces an announce that was skipped as a reflected loop", async () => {
 	const SELF = 1n;
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06, SELF);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
@@ -419,7 +519,7 @@ test("a restart replaces an announce that was skipped as a reflected loop", asyn
 test("retiring an id whose announce was skipped ends nothing", async () => {
 	const SELF = 1n;
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06, SELF);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
@@ -454,7 +554,7 @@ test("retiring an id whose announce was skipped ends nothing", async () => {
 
 test("a draft-02 initial announcement can still be retracted", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_02);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	// ANNOUNCE_INIT carries the initial set. These are advertisements like any other, so
@@ -472,7 +572,7 @@ test("a draft-02 initial announcement can still be retracted", async () => {
 test("a duplicate start is reported even when its own route reflects", async () => {
 	const SELF = 1n;
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06, SELF);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
@@ -506,7 +606,7 @@ test("a duplicate start is reported even when its own route reflects", async () 
 
 test("a draft-02 initial set naming a path twice is refused", async () => {
 	const { subscriber, send, abortReason, sessionEnded, settle } = announceHarness(Version.DRAFT_02);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	// One advertisement per path, and the initial set is advertisements. Two entries for
@@ -530,7 +630,7 @@ test("a draft-02 initial set naming a path twice is refused", async () => {
 test("a violation on a very long path still ends the session", async () => {
 	const SELF = 1n;
 	const { subscriber, send, sessionEnded, settle } = announceHarness(Version.DRAFT_06, SELF);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
@@ -557,7 +657,7 @@ test("a draft-04 duplicate start is a violation, not a restart", async () => {
 	// restart, is exempt. The Rust loop routes every other version through `start_announce`,
 	// which rejects it.
 	const { subscriber, send, sessionEnded, settle } = announceHarness(Version.DRAFT_04);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	const active: AnnounceBroadcast = { status: "active", suffix: Path.from("room"), hops: [PUBLISHER_A] };
@@ -574,7 +674,7 @@ test("a draft-04 duplicate start is a violation, not a restart", async () => {
 
 test("a draft-05 duplicate start is still a restart", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_05);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_05));
@@ -598,7 +698,7 @@ test("a draft-05 duplicate start is still a restart", async () => {
 
 test("literal pattern and prefix wire claims retain separate identities", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
-	const announced = subscriber.announced(Path.empty());
+	const announced = subscriber.announced();
 	await settle();
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
 	await send((w) =>

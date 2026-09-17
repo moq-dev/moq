@@ -140,7 +140,7 @@ where
 pub struct FileSource<'a> {
 	/// Path shown in origin descriptions.
 	pub path: &'a Path,
-	/// Already-parsed document, aliases already normalized.
+	/// Already-parsed document.
 	pub value: &'a toml::Value,
 }
 

@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::bandwidth::{MoqBandwidth, MoqReservation};
-use crate::cancel::{self, MoqCancel};
 use crate::consumer::MoqBroadcastConsumer;
 use crate::error::MoqError;
 use crate::ffi::Task;
@@ -109,16 +108,16 @@ pub struct MoqAudioDecoderOutput {
 	#[uniffi(default = None)]
 	pub channels: Option<u32>,
 	/// Upper bound on buffering before skipping a stalled group, in
-	/// milliseconds. Same congestion-control knob as
-	/// [`MoqSubscription::max_age_ms`](crate::consumer::MoqSubscription::max_age_ms):
+	/// microseconds. Same congestion-control knob as
+	/// [`MoqSubscription::max_age_us`](crate::consumer::MoqSubscription::max_age_us):
 	/// when a group stalls and a newer group is more than this far ahead,
 	/// the consumer skips. `None` keeps the moq-mux default of zero (skip
 	/// aggressively). Named `_max` to leave room for a future
-	/// `min_buffer_ms` (jitter-buffer floor), which is a distinct knob: this
+	/// `min_buffer_us` (jitter-buffer floor), which is a distinct knob: this
 	/// one bounds how stale a group may be, that one how much to hold before
 	/// presenting.
 	#[uniffi(default = None)]
-	pub max_age_ms: Option<u64>,
+	pub max_age_us: Option<u64>,
 }
 
 /// One audio frame: payload bytes plus a presentation timestamp.
@@ -192,21 +191,15 @@ impl MoqAudioProducer {
 	}
 
 	/// Wait until this audio track has at least one active consumer.
-	///
-	/// `cancel` aborts this call alone; see [`MoqCancel`].
-	#[uniffi::method(default(cancel = None))]
-	pub async fn used(&self, cancel: Option<Arc<MoqCancel>>) -> Result<(), MoqError> {
+	pub async fn used(&self) -> Result<(), MoqError> {
 		let demand = self.demand()?;
-		cancel::guard(cancel, crate::ffi::detached(async move { demand.used().await })).await
+		crate::ffi::detached(async move { demand.used().await }).await
 	}
 
 	/// Wait until this audio track has no active consumers.
-	///
-	/// `cancel` aborts this call alone; see [`MoqCancel`].
-	#[uniffi::method(default(cancel = None))]
-	pub async fn unused(&self, cancel: Option<Arc<MoqCancel>>) -> Result<(), MoqError> {
+	pub async fn unused(&self) -> Result<(), MoqError> {
 		let demand = self.demand()?;
-		cancel::guard(cancel, crate::ffi::detached(async move { demand.unused().await })).await
+		crate::ffi::detached(async move { demand.unused().await }).await
 	}
 
 	/// Re-anchor the timeline to the next frame's timestamp.
@@ -239,7 +232,7 @@ impl MoqAudioProducer {
 
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
+		let mut producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
 		self.reservation.lock().unwrap().take();
 		producer.finish()?;
 		Ok(())
@@ -366,36 +359,29 @@ impl MoqBroadcastConsumer {
 	///
 	/// A rendition whose [`broadcast`](crate::media::MoqAudio::broadcast) names another broadcast
 	/// is subscribed there, so `name` is always read from the broadcast the catalog points at.
-	///
-	/// `cancel` aborts this call alone; see [`MoqCancel`].
-	#[uniffi::method(default(cancel = None))]
 	pub async fn decode_audio(
 		&self,
 		name: String,
 		catalog_audio: crate::media::MoqAudio,
 		output: MoqAudioDecoderOutput,
-		cancel: Option<Arc<MoqCancel>>,
 	) -> Result<Arc<MoqAudioConsumer>, MoqError> {
-		cancel::guard(cancel, async {
-			// Reject the codec before resolving: resolving reaches the origin, which can invoke a
-			// dynamic handler and open an upstream subscription we would immediately drop.
-			let reference = catalog_audio.broadcast.clone();
-			let cfg = audio_config(catalog_audio)?;
-			let broadcast = self.resolve_inner(reference.as_deref()).await?;
+		// Reject the codec before resolving: resolving reaches the origin, which can invoke a
+		// dynamic handler and open an upstream subscription we would immediately drop.
+		let reference = catalog_audio.broadcast.clone();
+		let cfg = audio_config(catalog_audio)?;
+		let broadcast = self.resolve_inner(reference.as_deref()).await?;
 
-			let mut config = moq_audio::decode::Config::default();
-			config.format = output.format.into();
-			config.sample_rate = output.sample_rate;
-			config.channels = output.channels;
-			config.max_age = output.max_age_ms.map(Duration::from_millis).unwrap_or_default();
+		let mut config = moq_audio::decode::Config::default();
+		config.format = output.format.into();
+		config.sample_rate = output.sample_rate;
+		config.channels = output.channels;
+		config.max_age = output.max_age_us.map(Duration::from_micros).unwrap_or_default();
 
-			let consumer = moq_audio::decode::Consumer::new(&broadcast, &cfg, name, config).await?;
+		let consumer = moq_audio::decode::Consumer::new(&broadcast, &cfg, name, config).await?;
 
-			Ok(Arc::new(MoqAudioConsumer {
-				task: Task::new(ConsumerInner { consumer }),
-			}))
-		})
-		.await
+		Ok(Arc::new(MoqAudioConsumer {
+			task: Task::new(ConsumerInner { consumer }),
+		}))
 	}
 }
 

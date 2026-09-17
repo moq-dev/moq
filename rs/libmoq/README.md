@@ -44,7 +44,7 @@ int32_t moq_origin_request_close(uint32_t task);
 int32_t moq_origin_consume_announced(uint32_t origin, const char *path, uintptr_t path_len, void (*on_broadcast)(void *user_data, int32_t broadcast), void *user_data);
 int32_t moq_origin_consume_announced_close(uint32_t task);
 int32_t moq_origin_announced(uint32_t origin, void (*on_announce)(void *user_data, int32_t announced), void *user_data);
-int32_t moq_origin_announced_info(uint32_t announced, moq_announced *dst);
+int32_t moq_origin_announced_info(uint32_t announced, moq_announce_update *dst);
 int32_t moq_origin_announced_free(uint32_t announced);
 int32_t moq_origin_announced_close(uint32_t announced);
 
@@ -78,11 +78,11 @@ int32_t moq_consume_video_stalled(uint32_t catalog, uint32_t index, bool *dst);
 int32_t moq_consume_audio_config(uint32_t catalog, uint32_t index, moq_audio_config *dst);
 
 // Consuming: Video
-int32_t moq_consume_video(uint32_t catalog, uint32_t index, uint64_t max_age_ms, void (*on_frame)(void *user_data, int32_t frame), void *user_data);
+int32_t moq_consume_video(uint32_t catalog, uint32_t index, uint64_t max_age_us, void (*on_frame)(void *user_data, int32_t frame), void *user_data);
 int32_t moq_consume_video_close(uint32_t track);
 
 // Consuming: Audio
-int32_t moq_consume_audio(uint32_t catalog, uint32_t index, uint64_t max_age_ms, void (*on_frame)(void *user_data, int32_t frame), void *user_data);
+int32_t moq_consume_audio(uint32_t catalog, uint32_t index, uint64_t max_age_us, void (*on_frame)(void *user_data, int32_t frame), void *user_data);
 int32_t moq_consume_audio_close(uint32_t track);
 
 // Consuming: Frames

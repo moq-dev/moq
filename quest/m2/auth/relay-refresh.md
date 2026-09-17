@@ -35,7 +35,7 @@ expiry, an expiry that leaves the union intact ends only that token, and
   token happened to carry subscribe prefixes, and swapped in whenever the set
   grows, the first live re-scope the relay performs; keep it behind one
   function that
-  [Origin scopes](/quest/m2/path-patterns/origin.md) later extends to a
+  [Origin scopes](/quest/m1/api-origin-scopes.md) later extends to a
   shrinking union.
 - Expiry: the deadline today is the admitted lease's `closed()` inside one
   `tokio::select!` arm. Select on one lease per token in the set instead, and on any firing recompute the union without it: unchanged
@@ -85,10 +85,8 @@ Additive.
 - [Pattern interest](/quest/m2/path-patterns/interest.md) - AUTH can represent the complete grants relay revalidation returns
 - [Lite stream](/quest/m2/auth/lite.md) - supplies the AUTH stream and
   `auth::Request` this consumes
-- [Relay](/quest/m1/auth/relay.md) - supplies the connection lease and the
-  `moq_auth::Client` an in-band token attaches to
 
 ## Related
 
-- [Origin scopes](/quest/m2/path-patterns/origin.md) - extends the re-scope
+- [Origin scopes](/quest/m1/api-origin-scopes.md) - extends the re-scope
   to a shrinking union

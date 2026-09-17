@@ -483,10 +483,10 @@ pub struct moq_track_info {
 	/// Priority, used to break ties between subscriptions of equal subscriber priority.
 	pub priority: u8,
 
-	/// Maximum age of a non-latest group before the publisher evicts it, in milliseconds.
-	/// The publisher-side half of `moq_subscription.max_age_ms`.
-	pub max_age_ms: u64,
-	/// Whether `max_age_ms` is set. When false, the publisher's default applies.
+	/// Maximum age of a non-latest group before the publisher evicts it, in microseconds.
+	/// The publisher-side half of `moq_subscription.max_age_us`.
+	pub max_age_us: u64,
+	/// Whether `max_age_us` is set. When false, the publisher's default applies.
 	pub max_age_present: bool,
 
 	/// Per-frame timescale in ticks per second.
@@ -506,7 +506,7 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 			.with_timescale(moq_net::Timescale::MICRO)
 			.with_priority(info.priority);
 		if info.max_age_present {
-			out = out.with_max_age(std::time::Duration::from_millis(info.max_age_ms));
+			out = out.with_max_age(std::time::Duration::from_micros(info.max_age_us));
 		}
 		if info.timescale_present {
 			out = out.with_timescale(moq_net::Timescale::new(info.timescale)?);
@@ -525,11 +525,11 @@ pub struct moq_subscription {
 	/// Delivery priority. Higher values preempt lower ones under contention.
 	pub priority: u8,
 
-	/// Maximum age of a non-latest group before it is skipped, in milliseconds.
+	/// Maximum age of a non-latest group before it is skipped, in microseconds.
 	/// Zero skips immediately. Enforced by the publisher's cache and by any local buffering.
-	pub max_age_ms: u64,
+	pub max_age_us: u64,
 
-	/// The lowest group to deliver (a floor). A floor is not a request: `max_age_ms` is
+	/// The lowest group to deliver (a floor). A floor is not a request: `max_age_us` is
 	/// what asks for data, and delivery starts at the oldest group at or above the floor
 	/// within that budget (the latest group at the default budget of 0).
 	pub group_start: u64,
@@ -547,7 +547,7 @@ impl From<&moq_subscription> for moq_net::track::Subscription {
 	fn from(subscription: &moq_subscription) -> Self {
 		let mut out = moq_net::track::Subscription::default()
 			.with_priority(subscription.priority)
-			.with_max_age(std::time::Duration::from_millis(subscription.max_age_ms));
+			.with_max_age(std::time::Duration::from_micros(subscription.max_age_us));
 		if subscription.group_start_present {
 			out = out.with_start(moq_net::track::Position::group(subscription.group_start));
 		}
@@ -607,7 +607,8 @@ pub struct moq_section {
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
 pub struct moq_route {
-	/// Hop ids, oldest first. NULL when `hops_len` is 0.
+	/// Hop ids, oldest first. NULL when `hops_len` is 0. 0 is the anonymous
+	/// mark and is legal on a received chain.
 	pub hops: *const u64,
 	pub hops_len: usize,
 	/// Preference among routes covering the same prefix: lower wins.
@@ -650,23 +651,27 @@ unsafe fn parse_route(route: *const moq_route) -> Result<moq_net::origin::Route,
 		}
 		let hops = unsafe { std::slice::from_raw_parts(route.hops, route.hops_len) };
 		for id in hops {
-			let hop = moq_net::Hop::new(*id).map_err(|e| Error::InvalidConfig(e.to_string()))?;
+			let hop = if *id == 0 {
+				moq_net::Hop::UNKNOWN
+			} else {
+				moq_net::Hop::new(*id).map_err(|e| Error::InvalidConfig(e.to_string()))?
+			};
 			out = out.with_hop(hop).map_err(|e| Error::InvalidConfig(e.to_string()))?;
 		}
 	}
 	Ok(out)
 }
 
-/// Information about a broadcast announced by an origin.
+/// A route announcement or retraction from an origin.
 #[repr(C)]
 #[allow(non_camel_case_types)]
-pub struct moq_announced {
-	/// The path of the broadcast, NOT NULL terminated
-	pub path: *const c_char,
-	pub path_len: usize,
+pub struct moq_announce_update {
+	/// The covered pattern, NOT NULL terminated
+	pub pattern: *const c_char,
+	pub pattern_len: usize,
 
-	/// Whether the broadcast is active or has ended
-	/// This MUST toggle between true and false over the lifetime of the broadcast
+	/// Whether the route is active or was retracted
+	/// This MUST toggle between true and false over the lifetime of the route
 	pub active: bool,
 }
 
@@ -921,6 +926,11 @@ fn millis(duration: std::time::Duration) -> u64 {
 	duration.as_millis().min(u64::MAX as u128) as u64
 }
 
+/// A duration as the microseconds reconnect backoff fields take, saturating rather than wrapping.
+fn micros(duration: std::time::Duration) -> u64 {
+	duration.as_micros().min(u64::MAX as u128) as u64
+}
+
 /// Settings for [moq_session_connect], or NULL to dial with the defaults.
 ///
 /// Zero it (`memset`, or a `{0}` initializer) and set only what you need: a
@@ -1002,14 +1012,14 @@ pub struct moq_client_config {
 
 	/// Reconnect pacing. Each must leave a non-zero delay or retrying would
 	/// spin, which is rejected at dial.
-	pub backoff_initial_ms: u64,
+	pub backoff_initial_us: u64,
 	pub has_backoff_initial: bool,
 	pub backoff_multiplier: u32,
 	pub has_backoff_multiplier: bool,
-	pub backoff_max_ms: u64,
+	pub backoff_max_us: u64,
 	pub has_backoff_max: bool,
 	/// How long reconnection keeps trying before giving up for good.
-	pub backoff_timeout_ms: u64,
+	pub backoff_timeout_us: u64,
 	pub has_backoff_timeout: bool,
 
 	/// QUIC transport tuning, all ignored by the WebSocket fallback.
@@ -1073,13 +1083,13 @@ pub extern "C" fn moq_client_defaults() -> moq_client_config {
 		dst.websocket_delay_ms = millis(config.connect.websocket.resolved_delay());
 		dst.has_websocket_delay = true;
 
-		dst.backoff_initial_ms = millis(config.connect.backoff.initial());
+		dst.backoff_initial_us = micros(config.connect.backoff.initial());
 		dst.has_backoff_initial = true;
 		dst.backoff_multiplier = config.connect.backoff.multiplier();
 		dst.has_backoff_multiplier = true;
-		dst.backoff_max_ms = millis(config.connect.backoff.max());
+		dst.backoff_max_us = micros(config.connect.backoff.max());
 		dst.has_backoff_max = true;
-		dst.backoff_timeout_ms = millis(config.connect.backoff.timeout());
+		dst.backoff_timeout_us = micros(config.connect.backoff.timeout());
 		dst.has_backoff_timeout = true;
 
 		let quic = config.quic.resolve();
@@ -1376,7 +1386,7 @@ pub extern "C" fn moq_origin_dynamic_close(dynamic: u32) -> i32 {
 /// The path of a broadcast request delivered to a [moq_origin_dynamic] callback.
 ///
 /// The destination borrows the request's storage: copy it out before accept,
-/// abort, or [moq_broadcast_request_free].
+/// reject, or [moq_broadcast_request_free].
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -1408,12 +1418,12 @@ pub extern "C" fn moq_broadcast_request_accept(request: u32, broadcast: u32) -> 
 	})
 }
 
-/// Abort a broadcast request with an application error code.
+/// Reject a broadcast request with an application error code.
 ///
 /// Consumes the request handle. Returns a zero on success, or a negative code
 /// on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_broadcast_request_abort(request: u32, error_code: u16) -> i32 {
+pub extern "C" fn moq_broadcast_request_reject(request: u32, error_code: u16) -> i32 {
 	ffi::enter(move || {
 		let request = ffi::parse_id(request)?;
 		let pending = State::lock().origin.broadcast_request_take(request)?;
@@ -1422,7 +1432,7 @@ pub extern "C" fn moq_broadcast_request_abort(request: u32, error_code: u16) -> 
 	})
 }
 
-/// Free a broadcast request without accepting or aborting it.
+/// Free a broadcast request without accepting or rejecting it.
 ///
 /// Dropping the request rejects it. Returns a zero on success, or a negative
 /// code if the handle is unknown.
@@ -1466,16 +1476,16 @@ pub unsafe extern "C" fn moq_origin_announced(
 
 /// Query information about a broadcast discovered by [moq_origin_announced].
 ///
-/// The destination is filled with the broadcast information. The `path` pointer borrows
+/// The destination is filled with the broadcast information. The `pattern` pointer borrows
 /// the announcement's storage: copy it out before calling [moq_origin_announced_free], which
 /// invalidates it.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must ensure that `dst` is a valid pointer to a [moq_announced] struct.
+/// - The caller must ensure that `dst` is a valid pointer to a [moq_announce_update] struct.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_origin_announced_info(announced: u32, dst: *mut moq_announced) -> i32 {
+pub unsafe extern "C" fn moq_origin_announced_info(announced: u32, dst: *mut moq_announce_update) -> i32 {
 	ffi::enter(move || {
 		let announced = ffi::parse_id(announced)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
@@ -1488,7 +1498,7 @@ pub unsafe extern "C" fn moq_origin_announced_info(announced: u32, dst: *mut moq
 /// Each announce / unannounce event hands the callback a distinct announcement handle (read
 /// with [moq_origin_announced_info]); release it here once done to avoid leaking one per event
 /// over the life of the listener. This is per-announcement and distinct from
-/// [moq_origin_announced_close], which stops the listener itself. After freeing, any `path`
+/// [moq_origin_announced_close], which stops the listener itself. After freeing, any `pattern`
 /// pointer obtained from [moq_origin_announced_info] for this handle is dangling.
 ///
 /// Returns zero on success, or a negative code if the handle is unknown.
@@ -2296,9 +2306,13 @@ pub unsafe extern "C" fn moq_publish_json_snapshot(
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? };
 		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
-		let mut producer = moq_json::snapshot::ProducerConfig::default();
+		let mut producer = moq_json::snapshot::Config::default();
 		producer.delta_ratio = config.delta_ratio;
-		producer.compression = config.compression;
+		producer.compression = if config.compression {
+			moq_json::Compression::Deflate
+		} else {
+			moq_json::Compression::None
+		};
 		State::lock().publish.json_snapshot(broadcast, name, producer)
 	})
 }
@@ -2350,7 +2364,10 @@ pub unsafe extern "C" fn moq_publish_json_stream(
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? };
 		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
-		let producer = moq_json::stream::ProducerConfig::default().with_compression(config.compression);
+		let mut producer = moq_json::stream::Config::default();
+		if config.compression {
+			producer.compression = moq_json::Compression::Deflate;
+		}
 		State::lock().publish.json_stream(broadcast, name, producer)
 	})
 }
@@ -2587,7 +2604,7 @@ pub unsafe extern "C" fn moq_consume_catalog_section(
 
 /// Consume a video track from a broadcast, delivering frames in order.
 ///
-/// - `max_age_ms` controls the maximum amount of buffering allowed before skipping a GoP.
+/// - `max_age_us` controls the maximum amount of buffering allowed before skipping a GoP.
 /// - `on_frame` is called with a positive frame ID per frame, then exactly once
 ///   more with a terminal code: `0` (closed cleanly) or a negative error. After
 ///   the terminal (`<= 0`) callback, `on_frame` is never called again and
@@ -2602,14 +2619,14 @@ pub unsafe extern "C" fn moq_consume_catalog_section(
 pub unsafe extern "C" fn moq_consume_video(
 	catalog: u32,
 	index: u32,
-	max_age_ms: u64,
+	max_age_us: u64,
 	on_frame: Option<extern "C" fn(user_data: *mut c_void, frame: i32)>,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
-		let max_age = std::time::Duration::from_millis(max_age_ms);
+		let max_age = std::time::Duration::from_micros(max_age_us);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
 		State::lock().consume.video(catalog, index, max_age, on_frame)
 	})
@@ -2636,7 +2653,7 @@ pub extern "C" fn moq_consume_video_close(track: u32) -> i32 {
 /// the terminal (`<= 0`) callback, `on_frame` is never called again and
 /// `user_data` is never touched again, so release `user_data` there. The
 /// terminal callback fires even after [moq_consume_audio_close].
-/// The `max_age_ms` parameter controls how long to wait before skipping frames.
+/// The `max_age_us` parameter controls how long to wait before skipping frames.
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
@@ -2646,14 +2663,14 @@ pub extern "C" fn moq_consume_video_close(track: u32) -> i32 {
 pub unsafe extern "C" fn moq_consume_audio(
 	catalog: u32,
 	index: u32,
-	max_age_ms: u64,
+	max_age_us: u64,
 	on_frame: Option<extern "C" fn(user_data: *mut c_void, frame: i32)>,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
-		let max_age = std::time::Duration::from_millis(max_age_ms);
+		let max_age = std::time::Duration::from_micros(max_age_us);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
 		State::lock().consume.audio(catalog, index, max_age, on_frame)
 	})
@@ -2916,8 +2933,12 @@ pub unsafe extern "C" fn moq_consume_json_snapshot(
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? };
 		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
-		let mut consumer = moq_json::snapshot::ConsumerConfig::default();
-		consumer.compression = config.compression;
+		let mut consumer = moq_json::snapshot::consumer::Config::default();
+		consumer.compression = if config.compression {
+			moq_json::Compression::Deflate
+		} else {
+			moq_json::Compression::None
+		};
 		let on_value = unsafe { ffi::OnStatus::new(user_data, on_value) };
 		State::lock().consume.json_snapshot(broadcast, name, consumer, on_value)
 	})
@@ -2947,7 +2968,10 @@ pub unsafe extern "C" fn moq_consume_json_stream(
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? };
 		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
-		let consumer = moq_json::stream::ConsumerConfig::default().with_compression(config.compression);
+		let mut consumer = moq_json::stream::Config::default();
+		if config.compression {
+			consumer.compression = moq_json::Compression::Deflate;
+		}
 		let on_value = unsafe { ffi::OnStatus::new(user_data, on_value) };
 		State::lock().consume.json_stream(broadcast, name, consumer, on_value)
 	})

@@ -8,7 +8,7 @@ public final class OriginProducer: Sendable {
     /// Create a standalone origin, optionally capping its cache at `cacheCapacityBytes`
     /// (nil uses the default capacity).
     public init(cacheCapacityBytes: UInt64? = nil) {
-        ffi = MoqOriginProducer(options: MoqOriginOptions(cacheCapacityBytes: cacheCapacityBytes))
+        ffi = MoqOriginProducer(config: MoqOriginConfig(cacheCapacityBytes: cacheCapacityBytes))
     }
 
     init(_ ffi: MoqOriginProducer) {
@@ -61,9 +61,9 @@ public final class BroadcastRequest: Sendable {
         try ffi.accept(broadcast: broadcast.ffi)
     }
 
-    /// Abort the request with an application error code.
-    public func abort(errorCode: UInt16) throws {
-        try ffi.abort(errorCode: errorCode)
+    /// Reject the request with an application error code.
+    public func reject(errorCode: UInt16) throws {
+        try ffi.reject(errorCode: errorCode)
     }
 }
 
@@ -113,8 +113,8 @@ public final class OriginConsumer: Sendable {
     }
 
     /// Stream every route announced under a prefix.
-    public func announced(prefix: String) throws -> Announced {
-        Announced(try ffi.announced(prefix: prefix))
+    public func announced(prefix: String) throws -> AnnounceConsumer {
+        AnnounceConsumer(try ffi.announced(prefix: prefix))
     }
 
     /// Wait for a route covering an exact path, then resolve the broadcast there.
@@ -135,19 +135,19 @@ public final class OriginConsumer: Sendable {
 /// A stream of route announcements and retractions. Iterate directly:
 /// `for try await announcement in announced { ... }`. The sequence ends when the
 /// origin closes; cancelling the consuming task cancels the subscription.
-public final class Announced: AsyncSequence, Sendable {
+public final class AnnounceConsumer: AsyncSequence, Sendable {
     /// The broadcast announcement emitted by this sequence.
-    public typealias Element = Announcement
+    public typealias Element = AnnounceUpdate
 
-    let ffi: MoqAnnounced
+    let ffi: MoqAnnounceConsumer
 
-    init(_ ffi: MoqAnnounced) {
+    init(_ ffi: MoqAnnounceConsumer) {
         self.ffi = ffi
     }
 
     /// The next announcement, or `nil` once the origin closes.
-    public func next() async throws -> Announcement? {
-        (try await ffi.next()).map(Announcement.init)
+    public func next() async throws -> AnnounceUpdate? {
+        (try await ffi.next()).map(AnnounceUpdate.init)
     }
 
     /// Cancel all current and future `next()` calls.
@@ -156,32 +156,32 @@ public final class Announced: AsyncSequence, Sendable {
     }
 
     /// Create an iterator that cancels native reads when iteration ends.
-    public func makeAsyncIterator() -> AsyncThrowingStream<Announcement, Swift.Error>.Iterator {
+    public func makeAsyncIterator() -> AsyncThrowingStream<AnnounceUpdate, Swift.Error>.Iterator {
         moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
-            (try await ffi.next()).map(Announcement.init)
+            (try await ffi.next()).map(AnnounceUpdate.init)
         }.makeAsyncIterator()
     }
 }
 
 /// A single route announcement or retraction.
 ///
-/// A route claims that paths under `path` can be served; it carries no
+/// A route claims that paths under `pattern` can be served; it carries no
 /// broadcast. Resolve a specific path with `OriginConsumer.requestBroadcast`.
 /// By convention a publisher announces each broadcast's exact path.
-public final class Announcement: Sendable {
-    let ffi: MoqAnnouncement
+public final class AnnounceUpdate: Sendable {
+    let ffi: MoqAnnounceUpdate
 
-    init(_ ffi: MoqAnnouncement) {
+    init(_ ffi: MoqAnnounceUpdate) {
         self.ffi = ffi
     }
 
-    /// The announced route's prefix, relative to the `announced` prefix.
-    public var path: String {
-        ffi.path()
+    /// The announced route's pattern, relative to the `announced` prefix.
+    public var pattern: String {
+        ffi.pattern()
     }
 
     /// Whether the route is active (`true`) or was retracted (`false`). A
-    /// repeated active announcement for the same path is a metadata update.
+    /// repeated active announcement for the same pattern is a metadata update.
     public var active: Bool {
         ffi.active()
     }

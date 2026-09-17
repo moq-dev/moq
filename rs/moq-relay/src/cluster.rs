@@ -51,7 +51,7 @@ fn should_dial(self_url: &str, peer: &str) -> bool {
 /// One cluster peer to dial, as listed in [`Config::connect`] or returned
 /// by a `connect_api` endpoint.
 ///
-/// Accepts a bare URL string (the legacy form) or an object with `url` plus
+/// Accepts a URL string or an object with `url` plus
 /// policy: `cost` prices the link, `egress` declares this relay's own price to
 /// the peer, and `token` carries the peer's credential. `egress` defaults to
 /// `cost`; a different effective value is rejected until asymmetric routing
@@ -81,7 +81,7 @@ impl std::fmt::Debug for Peer {
 }
 
 impl Peer {
-	/// Dial this URL, with no policy. Accepts a full URL or a bare host.
+	/// Dial this URL, with no policy.
 	pub fn new(url: impl Into<String>) -> Self {
 		Self {
 			url: url.into(),
@@ -668,12 +668,11 @@ pub struct Config {
 	)]
 	pub id: Option<u64>,
 
-	/// Connect to one or more other cluster nodes. Each entry is a bare URL, e.g.
+	/// Connect to one or more other cluster nodes. Each entry is a full URL, e.g.
 	/// `https://host/?jwt=TOKEN`, or an object with `url`, `cost`, `egress`,
-	/// and `token`; see [`Peer`]. A bare host or `host:port` is deprecated but
-	/// still accepted (wrapped in `https://.../`). Accepts a comma-separated list
-	/// on the CLI or repeat the flag; in config files use a TOML array of URLs
-	/// and/or objects.
+	/// and `token`; see [`Peer`]. A bare host or `host:port` is refused; pass the
+	/// full URL instead. Accepts a comma-separated list on the CLI or repeat the
+	/// flag; in config files use a TOML array of URLs and/or objects.
 	///
 	/// A `?cost=N` query param (or object `cost`) prices the link (moq-lite-06+):
 	/// every announcement crossing it adds `N` to its route cost, so routing
@@ -682,7 +681,6 @@ pub struct Config {
 	/// which reproduces plain hop counting. The param is consumed by this relay,
 	/// not sent to the peer. Object `egress` defaults to `cost`; anything else is
 	/// rejected until asymmetric routing lands.
-	#[serde(alias = "connect")]
 	#[usage(
 		name = "cluster-connect",
 		long = "cluster-connect",
@@ -777,10 +775,8 @@ pub struct Config {
 		setting = "cluster.tier"
 	)]
 	pub tier: Option<String>,
-	// Accepted so existing configs keep parsing (`deny_unknown_fields`), but
-	// ignored: a broadcast now closes as soon as its last publisher is lost.
+	/// Released spelling, kept so [`Self::deprecated`] can name that linger is gone.
 	#[doc(hidden)]
-	#[deprecated(note = "ignored; a broadcast closes as soon as its last publisher is lost")]
 	#[usage(
 		name = "cluster-linger",
 		long = "cluster-linger",
@@ -789,6 +785,30 @@ pub struct Config {
 		hide = true
 	)]
 	pub linger: Option<moq_tokio::Duration>,
+}
+
+impl Config {
+	/// Released spellings this config was parsed from, each paired with what replaced it.
+	pub fn deprecated(&self) -> moq_tokio::Deprecated {
+		let mut found = moq_tokio::Deprecated::default();
+		if self.linger.is_some() {
+			found.changed(
+				"--cluster-linger",
+				Some("MOQ_CLUSTER_LINGER"),
+				"(removed)",
+				"a broadcast closes as soon as its last publisher is lost",
+			);
+		}
+		if self.connect.iter().any(|peer| is_legacy_peer(peer.url())) {
+			found.changed(
+				"--cluster-connect",
+				Some("MOQ_CLUSTER_CONNECT"),
+				"a full URL like https://host/?jwt=TOKEN",
+				"a bare host or host:port is no longer accepted",
+			);
+		}
+		found
+	}
 }
 
 /// LAN discovery configuration (`[cluster.lan]`).
@@ -1070,21 +1090,18 @@ impl Cluster {
 			Some(id) => Hop::new(id).expect("cluster id already validated"),
 			None => Hop::random(),
 		};
+		let deprecated = config.deprecated();
+		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
 		// Reject a repeated static identity with conflicting policy up front,
 		// matching the `--cluster-connect-api` validation, instead of silently
 		// keeping the first entry when dials spawn.
 		parse_peer_list(config.connect.clone(), None).context("invalid --cluster-connect peer list")?;
-		#[allow(deprecated)]
-		if config.linger.is_some() {
-			tracing::warn!(
-				"cluster linger is deprecated and ignored; a broadcast closes as soon as its last publisher is lost"
-			);
-		}
-		let mut info = origin::Info::new(id);
+		let mut origin_config = origin::Config::new(id);
 		if let Some(cache) = cache {
-			info = info.with_pool(cache.pool).with_cache_duration(cache.duration);
+			origin_config.pool = cache.pool;
+			origin_config.cache_duration = cache.duration;
 		}
-		let origin = moq_tokio::origin::spawn(info);
+		let origin = moq_tokio::origin::spawn(origin_config);
 		let nodes = crate::nodes::Nodes::new(origin.clone());
 		tracing::info!(hop_id = %origin.id(), configured = config.id.is_some(), "cluster initialized");
 		Ok(Cluster {
@@ -1259,12 +1276,16 @@ impl Cluster {
 		None
 	}
 
-	/// Grant the cluster-peer scope a `cluster.token` would: unscoped publish
-	/// and subscribe, billed under `--cluster-tier`.
-	pub(crate) fn lan_peer_token(&self) -> auth::Token {
-		let mut token = auth::Token::unrestricted(Path::new("").to_owned());
-		token.tier = self.cluster_tier();
-		token
+	/// The grant a LAN peer gets once its membership proof checks out: everything,
+	/// billed under `--cluster-tier`. The proof is a secret this relay minted for
+	/// itself, so no auth server is asked.
+	pub(crate) fn lan_peer_grant(&self) -> moq_auth::Grant {
+		let mut grant = moq_auth::Grant::new(
+			[moq_auth::Pattern::all()].into_iter().collect(),
+			[moq_auth::Pattern::all()].into_iter().collect(),
+		);
+		grant.tier = self.config.tier.clone().filter(|tier| !tier.is_empty());
+		grant
 	}
 
 	/// Whether a protocol version carries the request path used to mark a mesh dial.
@@ -1441,13 +1462,6 @@ impl Cluster {
 			let target = DialTarget::from_peer(peer).context("invalid --cluster-connect peer URL")?;
 			if dialed.contains(&target.key) {
 				continue;
-			}
-			if is_legacy_peer(peer.url()) {
-				tracing::warn!(
-					peer = %peer.url(),
-					"DEPRECATED: pass --cluster-connect as a full URL like \"https://<host>/?jwt=TOKEN\"; \
-					 a bare host or \"host:port\" is deprecated and will be removed in a future release"
-				);
 			}
 			let this = self.clone();
 			let token = token.clone();
@@ -1668,7 +1682,7 @@ impl Cluster {
 					.client_tls
 					.as_ref()
 					.expect("http(s) connect_api source requires client TLS");
-				let http = match crate::http_client::build(tls, crate::http_client::CacheScope::Shared) {
+				let http = match crate::http_client::build(tls) {
 					Ok(http) => http,
 					Err(err) => {
 						tracing::error!(%err, "cluster.connect_api: failed to build HTTP client");
@@ -1814,7 +1828,7 @@ impl Cluster {
 		// Apply the shared cluster token unless the URL already carries its own
 		// non-empty `?jwt=` (a per-peer inline token or object `token` wins; the
 		// shared token still covers peers that have none). An empty
-		// `?jwt=` counts as absent, matching `auth::Params::from_url`.
+		// `?jwt=` counts as absent, as `moq auth serve` reads it.
 		// LAN dials never get the token: they authenticate with the mDNS credential.
 		if !target.lan && !token.is_empty() {
 			for url in &mut urls {
@@ -2082,9 +2096,9 @@ fn connect_api_is_http(source: &str) -> bool {
 /// Resolve a cluster peer to the URL we dial.
 ///
 /// The modern form is a full URL, e.g. `https://host/?jwt=TOKEN`, which is used
-/// verbatim. A bare host or `host:port` is still accepted for backwards
-/// compatibility and wrapped in `https://.../` (callers warn about this legacy
-/// form for user-supplied `--cluster-connect` entries).
+/// verbatim. A bare host or `host:port` is wrapped in `https://.../` for
+/// gossip and `--cluster-connect-api` lists; user-supplied `--cluster-connect`
+/// entries refuse that form through [`Config::deprecated`].
 fn peer_url(peer: &str) -> anyhow::Result<Url> {
 	// A full URL has a scheme separator; a bare host or `host:port` does not
 	// (and `Url::parse` would otherwise mis-read `host:port` as scheme `host`).
@@ -2122,8 +2136,9 @@ pub(crate) fn advertised_node_url(advertised: &str) -> String {
 	}
 }
 
-/// Whether a peer string uses the deprecated bare-host / `host:port` form rather
-/// than a full URL. Used to warn on legacy `--cluster-connect` entries.
+/// Whether a peer string uses the released bare-host / `host:port` form rather
+/// than a full URL. Used so [`Config::deprecated`] can refuse
+/// `--cluster-connect` entries that still use it.
 fn is_legacy_peer(peer: &str) -> bool {
 	!peer.contains("://")
 }
@@ -2893,8 +2908,8 @@ mod tests {
 
 		let origin = cluster.origin.clone();
 		assert_eq!(origin.id(), 42);
-		assert_eq!(origin.info().cache_duration, duration);
-		assert_eq!(origin.info().pool.expiry(), Some(duration));
+		assert_eq!(origin.config().cache_duration, duration);
+		assert_eq!(origin.config().pool.expiry(), Some(duration));
 
 		let stats = crate::stats::Config {
 			enabled: true,
@@ -2905,8 +2920,8 @@ mod tests {
 		let cluster = cluster.with_stats(stats);
 
 		assert_eq!(cluster.origin.id(), origin.id());
-		assert_eq!(cluster.origin.info().cache_duration, duration);
-		assert_eq!(cluster.origin.info().pool.expiry(), Some(duration));
+		assert_eq!(cluster.origin.config().cache_duration, duration);
+		assert_eq!(cluster.origin.config().pool.expiry(), Some(duration));
 
 		let mut broadcast = origin.create_broadcast("cam").expect("create");
 		broadcast.announce(Default::default()).expect("announce");
@@ -3012,8 +3027,7 @@ mod tests {
 		// that mutate it.
 		let _env = crate::test_env::EnvGuard::lock();
 
-		let toml =
-			"[cluster]\nnode = \"us-east.example.com:4443\"\nmesh = true\nconnect = [\"root.example.com:4443\"]\n";
+		let toml = "[cluster]\nnode = \"us-east.example.com:4443\"\nmesh = true\nconnect = [\"https://root.example.com:4443/\"]\n";
 		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
 		std::fs::create_dir_all(&dir).unwrap();
 		let path = dir.join("cluster-node-mesh-toml.toml");
@@ -3024,7 +3038,10 @@ mod tests {
 		assert_eq!(config.cluster.node.as_deref(), Some("us-east.example.com:4443"));
 		// A TOML boolean deserializes into the string form.
 		assert_eq!(config.cluster.mesh.as_deref(), Some("true"));
-		assert_eq!(config.cluster.connect, vec![Peer::new("root.example.com:4443")]);
+		assert_eq!(
+			config.cluster.connect,
+			vec![Peer::new("https://root.example.com:4443/")]
+		);
 	}
 
 	/// Static config accepts the object form beside bare URLs, through the same
@@ -3092,6 +3109,24 @@ mod tests {
 		assert!(is_legacy_peer("cdn.example.com"));
 		assert!(is_legacy_peer("localhost:4443"));
 		assert!(!is_legacy_peer("https://cdn.example.com/?jwt=abc"));
+	}
+
+	/// Linger and a bare `--cluster-connect` host still parse so the process can
+	/// name what replaced them, but they configure nothing and must stop a run.
+	#[test]
+	fn released_cluster_spellings_are_reported_not_applied() {
+		let config = Config {
+			linger: Some(std::time::Duration::from_secs(5).into()),
+			connect: vec![Peer::new("root.example.com:4443")],
+			..Default::default()
+		};
+		let reported = config.deprecated().to_string();
+		assert!(reported.contains("--cluster-linger / MOQ_CLUSTER_LINGER"), "{reported}");
+		assert!(
+			reported.contains("a full URL like https://host/?jwt=TOKEN"),
+			"{reported}"
+		);
+		assert!(new_cluster(config).is_err());
 	}
 
 	/// A malformed URL may contain a credential, so parse errors must not echo the
@@ -3523,7 +3558,7 @@ mod tests {
 		tokio::spawn(async move {
 			let mut listener = listener;
 			while let Some(request) = listener.accept().await {
-				let conn = crate::Connection::new(request, accept.clone(), crate::auth::Auth::default());
+				let conn = crate::Connection::new(request, accept.clone(), crate::auth::Auth::refuse("test"));
 				tokio::spawn(async move {
 					let _ = conn.run().await;
 				});

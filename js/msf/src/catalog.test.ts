@@ -205,3 +205,45 @@ test.each([
 	const tracks = wire.tracks as { stalled?: boolean }[];
 	expect(tracks[0].stalled).toBe(stalled);
 });
+
+test("carries extension root members through decode and encode", () => {
+	// An extension section (here `mpegts`) rides the catalog root untouched, and a
+	// section this build has never heard of survives the same way.
+	const catalog = decode(
+		encodeJson({
+			version: "draft-01",
+			generatedAt: 1746104606044,
+			tracks: [],
+			mpegts: { program: { transportStreamId: 4660, programNumber: 1, pmtPid: 100 } },
+			somethingElse: [1, 2, 3],
+		}),
+	);
+
+	expect(Object.keys(catalog.ext ?? {})).toEqual(["mpegts", "somethingElse"]);
+
+	const wire = decodeJson(encode(catalog));
+	expect(wire.mpegts).toEqual({ program: { transportStreamId: 4660, programNumber: 1, pmtPid: 100 } });
+	expect(wire.somethingElse).toEqual([1, 2, 3]);
+	// `generatedAt` is MSF's own field, not an extension section, so it is not smuggled back.
+	expect(wire.generatedAt).toBeUndefined();
+});
+
+test("refuses an extension section named after a reserved root field", () => {
+	expect(() => encode({ tracks: [], ext: { tracks: "nope" } })).toThrow(/reserved root field/);
+});
+
+test("round-trips a __proto__ extension member as data", () => {
+	// Assigning `__proto__` to an ordinary object invokes the prototype setter: the member
+	// vanishes from the catalog and its value becomes the map's prototype. Built as raw JSON,
+	// since `__proto__:` in an object literal is that same setter syntax and never lands as a key.
+	const raw = '{"version":"draft-01","tracks":[],"__proto__":{"polluted":1},"ok":2}';
+	const catalog = decode(new TextEncoder().encode(raw));
+
+	const ext = catalog.ext ?? {};
+	expect(Object.keys(ext).sort()).toEqual(["__proto__", "ok"]);
+	expect(Object.getPrototypeOf(ext)).toBeNull();
+
+	const wire = decodeJson(encode(catalog));
+	expect(Object.keys(wire)).toContain("__proto__");
+	expect(wire.ok).toBe(2);
+});

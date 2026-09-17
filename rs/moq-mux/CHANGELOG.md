@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged and leaves the tracks open on failure.
 - [**breaking**] Advertise the broadcast timeline through `catalog.archive`
   (`hang::catalog::Archive`). `timeline::Producer::section` returns `Archive`.
+- [**breaking**] Replace `timeline::Config::wall` with the broadcast `Clock`'s fixed wall
+  mapping, advertised at the catalog root as `clock: { wall, timescale }` independently of
+  any archive. `catalog::Config::with_clock` names the content's real start for an import;
+  `catalog::Producer::clock` shares the epoch. Zero timescales, walls before the moq epoch,
+  and walls past the JSON-safe integer range are refused.
 - `import::ContainerStream::new` takes a bare `ContainerFormat` instead of a `ContainerInit`. It
   only ever read the format, so the init's leading bytes were accepted and dropped. A stream
   recovers its own framing, so push everything through `decode` instead.
@@ -36,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Propagate rendition labels through single-track media imports.
+- `Clock::with_wall` / `Clock::new_at` for imports and synthetic sources, `Clock::source`
+  translating a source's own zero onto the broadcast mapping (first frame anchors live, a
+  reset re-anchors forward preserving the idle gap, in-group B-frame reordering survives),
+  and `Error::UnmappableTimestamp` refusing a mapping that would move backwards past the
+  broadcast's start or out of range.
 - `From<hang::catalog::VideoConfig> for catalog::VideoHint`, a total conversion for a caller that
   already has a whole rendition. Replaces the per-field copy in `moq-video`, which dropped the label.
 
@@ -47,6 +57,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An audio format rejects an `import::Init` video hint instead of dropping it.
 - `catalog::VideoHint::label` is no longer public. `import::Init::label` is the single source of a
   rendition label, matching the hang draft, which classifies it as a common rendition field.
+
+## [0.9.15](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.14...moq-mux-v0.9.15) - 2026-09-13
+
+### Other
+
+- updated the following local packages: kio, moq-net, hang, moq-json, moq-loc
 
 ## [0.9.14](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.13...moq-mux-v0.9.14) - 2026-09-09
 

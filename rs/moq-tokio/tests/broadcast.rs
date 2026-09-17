@@ -1358,8 +1358,11 @@ async fn max_age_test(version: &str) -> Duration {
 	// ── subscriber (client) ─────────────────────────────────────────
 	// The origin the session writes remote broadcasts into decides the window for
 	// tracks whose protocol can't carry the publisher's.
-	let sub_origin =
-		moq_tokio::origin::spawn(moq_net::origin::Info::new(Hop::random()).with_default_max_age(MAX_AGE_DEFAULT));
+	let sub_origin = {
+		let mut config = moq_net::origin::Config::new(Hop::random());
+		config.default_max_age = MAX_AGE_DEFAULT;
+		moq_tokio::origin::spawn(config)
+	};
 	let sub_consumer = sub_origin.consume();
 	let mut announcements = sub_consumer.announced();
 
@@ -2662,7 +2665,7 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 
 	let publish = pub_origin
 		.consume()
-		.scope(&["allowed".into()])
+		.scope(&moq_net::Patterns::from(moq_net::Pattern::subtree("allowed").unwrap()))
 		.expect("failed to scope publish origin");
 
 	let (mut server, addr) = test_server().await;
@@ -2671,7 +2674,12 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 	// "denied" is disjoint from the publisher's scope, so its announce stream is FINed.
 	let sub_origin = moq_tokio::origin::spawn(Hop::random());
 	let consume = sub_origin
-		.scope(&["allowed".into(), "denied".into()])
+		.scope(
+			&["allowed", "denied"]
+				.into_iter()
+				.map(|prefix| moq_net::Pattern::subtree(prefix).unwrap())
+				.collect::<moq_net::Patterns>(),
+		)
 		.expect("failed to scope consume origin");
 	let sub_consumer = consume.consume();
 	let mut announcements = sub_consumer.announced();
@@ -2729,7 +2737,12 @@ async fn publish_only_client_to_subscribe_only_server() {
 	// ── subscriber (server): interested in both "allowed" and "denied" ──
 	let sub_origin = moq_tokio::origin::spawn(Hop::random());
 	let consume = sub_origin
-		.scope(&["allowed".into(), "denied".into()])
+		.scope(
+			&["allowed", "denied"]
+				.into_iter()
+				.map(|prefix| moq_net::Pattern::subtree(prefix).unwrap())
+				.collect::<moq_net::Patterns>(),
+		)
 		.expect("failed to scope consume origin");
 	let sub_consumer = consume.consume();
 	let mut announcements = sub_consumer.announced();
@@ -2805,7 +2818,7 @@ async fn publish_only_client_to_subscribe_only_server() {
 
 	let publish = pub_origin
 		.consume()
-		.scope(&["allowed".into()])
+		.scope(&moq_net::Patterns::from(moq_net::Pattern::subtree("allowed").unwrap()))
 		.expect("failed to scope publish origin");
 
 	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(test_client().with_publisher(publish), url))

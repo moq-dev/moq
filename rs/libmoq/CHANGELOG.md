@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Bare-integer durations are microseconds: `max_age_us` on decoder outputs,
+  track info, subscriptions, and `moq_consume_video` / `moq_consume_audio`;
+  reconnect backoff is `backoff_initial_us` / `backoff_max_us` /
+  `backoff_timeout_us`.
+- `moq_announced` is `moq_announce_update` with `pattern` / `pattern_len` instead of `path` / `path_len`. `moq_broadcast_request_abort` is `moq_broadcast_request_reject`; `_free` is unchanged.
 - `moq_publish_media` splits into `moq_publish_audio`, `moq_publish_video`, and
   `moq_publish_container`, taking `moq_audio_init`, `moq_video_init`, and `moq_container_init`.
   Each carries only the fields its kind can honor, so a label on a container no longer compiles.
@@ -31,6 +36,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for the encoded path.
 - `moq_audio_format` (the PCM sample layout) is now `moq_audio_sample_format`, matching
   `moq_video_pixel_format`.
+
+## [0.5.15](https://github.com/moq-dev/moq/compare/libmoq-v0.5.14...libmoq-v0.5.15) - 2026-09-13
+
+### Added
+
+- *(moq-net)* add moq-transport draft-21 (moqt-21) ([#3574](https://github.com/moq-dev/moq/pull/3574))
+
+### Fixed
+
+- *(moq-video,moq-audio)* open a decoder at the live edge ([#3565](https://github.com/moq-dev/moq/pull/3565))
+
+### Other
+
+- reach Cargo through mbx's shim and delete RUST_CARGO ([#3553](https://github.com/moq-dev/moq/pull/3553))
 
 ## [0.5.14](https://github.com/moq-dev/moq/compare/libmoq-v0.5.13...libmoq-v0.5.14) - 2026-09-09
 

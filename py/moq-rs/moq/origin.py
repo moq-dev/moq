@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from moq_ffi import (
-    MoqAnnounced,
+    MoqAnnounceConsumer,
     MoqAnnouncedBroadcast,
-    MoqAnnouncement,
+    MoqAnnounceUpdate,
     MoqBroadcastRequest,
+    MoqOriginConfig,
     MoqOriginConsumer,
     MoqOriginDynamic,
-    MoqOriginOptions,
     MoqOriginProducer,
 )
 from moq_ffi import (
@@ -20,28 +20,28 @@ from .publish import BroadcastProducer
 from .subscribe import BroadcastConsumer
 
 
-class Announcement:
+class AnnounceUpdate:
     """A route announcement (or retraction) from :meth:`OriginConsumer.announced`.
 
-    A route claims that paths under :attr:`path` can be served; it carries no
+    A route claims that paths under :attr:`pattern` can be served; it carries no
     broadcast. Resolve a specific path with :meth:`OriginConsumer.request_broadcast`.
     By convention a publisher announces each broadcast's exact path, so
     subscribers can enumerate broadcasts from routes.
     """
 
-    def __init__(self, inner: MoqAnnouncement) -> None:
+    def __init__(self, inner: MoqAnnounceUpdate) -> None:
         self._inner = inner
 
     @property
-    def path(self) -> str:
-        """The announced route's prefix, relative to the ``announced`` prefix."""
-        return self._inner.path()
+    def pattern(self) -> str:
+        """The announced route's pattern, relative to the ``announced`` prefix."""
+        return self._inner.pattern()
 
     @property
     def active(self) -> bool:
         """Whether the route is active (``True``) or was retracted (``False``).
 
-        A repeated active announcement for the same path is a metadata update.
+        A repeated active announcement for the same pattern is a metadata update.
         """
         return self._inner.active()
 
@@ -51,14 +51,14 @@ class Announcement:
         return self._inner.route()
 
 
-class Announced:
-    """Async-iterable stream of :class:`Announcement` route updates as they arrive.
+class AnnounceConsumer:
+    """Async-iterable stream of :class:`AnnounceUpdate` route updates as they arrive.
 
     Usable as an async context manager; iterate with ``async for`` and it keeps
     yielding announcements and retractions until cancelled.
     """
 
-    def __init__(self, inner: MoqAnnounced) -> None:
+    def __init__(self, inner: MoqAnnounceConsumer) -> None:
         self._inner = inner
 
     async def __aenter__(self):
@@ -70,11 +70,11 @@ class Announced:
     def __aiter__(self):
         return self
 
-    async def __anext__(self) -> Announcement:
+    async def __anext__(self) -> AnnounceUpdate:
         result = await self._inner.next()
         if result is None:
             raise StopAsyncIteration
-        return Announcement(result)
+        return AnnounceUpdate(result)
 
     def cancel(self) -> None:
         """Stop iterating and release the underlying announcement stream."""
@@ -124,9 +124,9 @@ class BroadcastRequest:
         """Serve the request with an unannounced broadcast."""
         self._inner.accept(broadcast._inner)
 
-    def abort(self, error_code: int) -> None:
-        """Abort the request with an application error code."""
-        self._inner.abort(error_code)
+    def reject(self, error_code: int) -> None:
+        """Reject the request with an application error code."""
+        self._inner.reject(error_code)
 
 
 class OriginDynamic:
@@ -165,9 +165,9 @@ class OriginConsumer:
     def __init__(self, inner: MoqOriginConsumer) -> None:
         self._inner = inner
 
-    def announced(self, prefix: str = "") -> Announced:
+    def announced(self, prefix: str = "") -> AnnounceConsumer:
         """Async-iterate route announcements under ``prefix`` (empty matches all)."""
-        return Announced(self._inner.announced(prefix))
+        return AnnounceConsumer(self._inner.announced(prefix))
 
     def announced_broadcast(self, path: str) -> AnnouncedBroadcast:
         """Await a route covering ``path``, then resolve the broadcast there."""
@@ -195,7 +195,7 @@ class OriginProducer:
     """
 
     def __init__(self, *, cache_capacity_bytes: int | None = None) -> None:
-        self._inner = MoqOriginProducer(MoqOriginOptions(cache_capacity_bytes=cache_capacity_bytes))
+        self._inner = MoqOriginProducer(MoqOriginConfig(cache_capacity_bytes=cache_capacity_bytes))
 
     @classmethod
     def _from_inner(cls, inner: MoqOriginProducer) -> OriginProducer:

@@ -50,7 +50,7 @@ impl VideoTransform {
 enum SourceState {
 	/// Waiting for the target broadcast (the catalog broadcast, or a cross-broadcast
 	/// reference) to resolve; the track (by name) is subscribed once it does.
-	Requesting(kio::Pending<moq_net::origin::Requesting>, String),
+	Requesting(kio::Pending<moq_net::origin::Pending>, String),
 	/// Waiting for the subscription to resolve (blocks on the publisher's SUBSCRIBE_OK).
 	Subscribing(kio::Pending<moq_net::track::Subscribing>),
 	/// The resolved consumer, reading frames. Boxed because it's much larger than
@@ -184,12 +184,12 @@ impl ExportSource {
 		self.description.as_ref()
 	}
 
-	/// The underlying consumer's timeline-discontinuity counter, or 0 until the
+	/// The underlying consumer's playhead generation, or 0 until the
 	/// subscription resolves.
 	///
 	/// See [`Consumer::discontinuity`]. Sample it alongside each frame returned by
 	/// [`poll_read`](Self::poll_read): the frame read while the counter changes is
-	/// the first of a new timeline, so anything anchored on the media clock (a
+	/// the first after a playhead event, so anything anchored on the media clock (a
 	/// repetition cadence, a clock grid, a pacer) has to re-anchor to it.
 	pub fn discontinuity(&self) -> u64 {
 		match &self.state {

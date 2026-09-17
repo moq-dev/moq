@@ -24,7 +24,7 @@ async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
         # Subscribe to media. An announcement is a route; resolve the broadcast at its path.
         async for announcement in client.announced("live/"):
-            broadcast = await client.request_broadcast(announcement.path())
+            broadcast = await client.request_broadcast(announcement.pattern)
             catalog = await broadcast.catalog()
             name, track = next(iter(catalog.audio.items()))
             async for frame in await broadcast.subscribe_media(name, track):
@@ -70,13 +70,13 @@ an unadvertised producer; `broadcast.announce(route)` /
 `broadcast.unannounce()` own that exact-path advertisement;
 `origin.dynamic(pattern, route)` claims every matching path (`foo/**` for a
 prefix). Hold the returned handle while the claim should stay advertised. A
-wildcard is a capability, not an inventory; announcement `.path` is the
+wildcard is a capability, not an inventory; announcement `.pattern` is the
 covered prefix for a prefix-shaped claim and the pattern text otherwise.
 
 Sessions reconnect with backoff when the transport drops and re-announce local
 broadcasts. `session.epoch()` counts the connections, 1 on the first, pairing
 with `session.status()` to log each reconnect; `moq.Backoff` tunes the pacing
-(`timeout_ms=0` retries forever); and `moq.connect(..., max_streams=...)`
+(`timeout_us=0` retries forever); and `moq.connect(..., max_streams=...)`
 raises the peer's inbound stream cap.
 
 Everything in the [shared feature list](/lib/#what-every-binding-can-do) is

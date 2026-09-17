@@ -320,8 +320,8 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	if ann == nil {
 		t.Fatal("expected an announcement")
 	}
-	if ann.Path() != "live" {
-		t.Fatalf("path = %q, want %q", ann.Path(), "live")
+	if ann.Pattern() != "live" {
+		t.Fatalf("pattern = %q, want %q", ann.Pattern(), "live")
 	}
 	if !ann.Active() {
 		t.Fatal("expected an active announcement")
@@ -330,7 +330,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 		t.Fatalf("route hops = %v, want empty for local origin", route.Hops)
 	}
 
-	bc, err := consumer.RequestBroadcast(ctx, ann.Path())
+	bc, err := consumer.RequestBroadcast(ctx, ann.Pattern())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -844,7 +844,7 @@ func TestRequestBroadcastCancelKeepsTheOrigin(t *testing.T) {
 	case <-waitCtx.Done():
 		t.Fatal("RequestBroadcast did not return after its context was cancelled")
 	}
-	_ = pending.Abort(0)
+	_ = pending.Reject(0)
 
 	// The same consumer resolves the next path, which it could not do if the
 	// cancel had torn the origin down.
@@ -1087,7 +1087,7 @@ func TestAnnounceThenUnannounceIsVisible(t *testing.T) {
 	defer announced.Cancel()
 
 	ann, err := announced.Next(ctx)
-	if err != nil || ann == nil || ann.Path() != "live" || !ann.Active() {
+	if err != nil || ann == nil || ann.Pattern() != "live" || !ann.Active() {
 		t.Fatalf("announce: ann=%+v err=%v", ann, err)
 	}
 
@@ -1095,7 +1095,7 @@ func TestAnnounceThenUnannounceIsVisible(t *testing.T) {
 		t.Fatal(err)
 	}
 	ann, err = announced.Next(ctx)
-	if err != nil || ann == nil || ann.Path() != "live" || ann.Active() {
+	if err != nil || ann == nil || ann.Pattern() != "live" || ann.Active() {
 		t.Fatalf("unannounce: ann=%+v err=%v", ann, err)
 	}
 	if _, err := consumer.RequestBroadcast(ctx, "live"); err != nil {

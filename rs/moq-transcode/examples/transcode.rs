@@ -1,7 +1,7 @@
 // Consume a hang broadcast from a relay and publish a just-in-time transcoded
 // derivative next to it.
 //
-// Publish something first (e.g. `moq publish camera` from moq-cli), then:
+// Publish something first (e.g. `moq import capture` from moq-cli), then:
 //
 //     cargo run -p moq-transcode --example transcode -- \
 //         --url http://localhost:4443/anon --source my-broadcast

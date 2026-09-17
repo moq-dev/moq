@@ -24,5 +24,6 @@
  * @module
  */
 
+export type { Compression } from "./compression.ts";
 export * as Snapshot from "./snapshot/index.ts";
 export * as Stream from "./stream/index.ts";

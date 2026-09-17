@@ -382,6 +382,24 @@ mod tests {
 		assert_eq!(ConnectError::from_status_u16(403), Some(ConnectError::Forbidden));
 	}
 
+	/// Released TOML keys still parse so the process can name the replacements, but
+	/// they configure nothing.
+	#[test]
+	fn released_toml_keys_are_reported_not_applied() {
+		let config: Config = toml::from_str(
+			r#"
+connect = "https://relay.example/anon"
+failover_delay = "1s"
+"#,
+		)
+		.expect("parse");
+		assert!(config.url.is_none());
+		assert_eq!(config.race, crate::Duration::from(DEFAULT_RACE));
+		let reported = config.deprecated().to_string();
+		assert!(reported.contains("connect -> url"), "{reported}");
+		assert!(reported.contains("failover_delay -> race"), "{reported}");
+	}
+
 	#[test]
 	fn non_auth_statuses_are_not_terminal() {
 		for status in [400, 404, 500] {
@@ -477,9 +495,14 @@ pub struct Config {
 	/// request/auth path (e.g. `/anon` for a public relay) and `?jwt=` supplies a
 	/// token. `http://` first fetches `/certificate.sha256` for the (insecure)
 	/// self-signed fingerprint; `https://` connects directly.
-	#[serde(alias = "connect", skip_serializing_if = "Option::is_none")]
+	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(name = "connect", long = "connect", env = "MOQ_CONNECT", setting = "connect.url")]
 	pub url: Option<Url>,
+
+	/// The released `connect` key, kept so [`deprecated`](Self::deprecated) can name [`url`](Self::url).
+	#[serde(default, skip_serializing)]
+	#[usage(skip)]
+	pub(crate) connect: Option<Url>,
 
 	/// Send from this local UDP address. Defaults to an ephemeral dual-stack port.
 	///
@@ -513,7 +536,6 @@ pub struct Config {
 	///
 	/// This staggers the attempts within one [`crate::Client::connect`]; [`Self::timeout`]
 	/// bounds that call as a whole.
-	#[serde(alias = "failover_delay")]
 	#[usage(
 		name = "connect-race",
 		long = "connect-race",
@@ -522,6 +544,11 @@ pub struct Config {
 		setting = "connect.race"
 	)]
 	pub race: crate::Duration,
+
+	/// The released `failover_delay` key, kept so [`deprecated`](Self::deprecated) can name [`race`](Self::race).
+	#[serde(default, skip_serializing)]
+	#[usage(skip)]
+	pub(crate) failover_delay: Option<crate::Duration>,
 
 	/// Delay before dialing an IPv4 address while the full DNS answer is outstanding.
 	///
@@ -665,9 +692,11 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			url: None,
+			connect: None,
 			bind: None,
 			backend: None,
 			race: DEFAULT_RACE.into(),
+			failover_delay: None,
 			resolution_delay: DEFAULT_RESOLUTION_DELAY.into(),
 			timeout: DEFAULT_TIMEOUT.into(),
 			version: Vec::new(),
@@ -694,6 +723,12 @@ impl Config {
 	/// skipped the check can't reach a dial that quietly ignored half of it.
 	pub fn deprecated(&self) -> crate::Deprecated {
 		let mut found = self.legacy.deprecated();
+		if self.connect.is_some() {
+			found.toml("connect", "url", None);
+		}
+		if self.failover_delay.is_some() {
+			found.toml("failover_delay", "race", None);
+		}
 		if self.reconnect.is_some() {
 			found.toml("reconnect", "once", Some("inverted: reconnect = false is once = true"));
 		}

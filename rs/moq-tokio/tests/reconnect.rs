@@ -84,6 +84,25 @@ async fn the_epoch_advances_on_reconnect() {
 	.expect("the epoch never advanced past the first connect");
 }
 
+#[tokio::test]
+async fn monitor_is_cloneable_without_keeping_the_connection_alive() {
+	tokio::time::pause();
+	let connection = quick_client(Default::default()).connect("tcp://127.0.0.1:1".parse::<url::Url>().unwrap());
+	let monitor: moq_tokio::connection::Monitor = connection.monitor();
+	let mut cloned = monitor.clone();
+	let snapshot: Option<moq_tokio::connection::Snapshot> = cloned.snapshot();
+	assert!(snapshot.is_none());
+	assert!(monitor.stats().is_none());
+	assert_eq!(monitor.presence(), moq_net::stats::Presence::default());
+
+	drop(connection);
+	assert!(matches!(
+		cloned.presence_changed().await,
+		Err(moq_tokio::Error::Stopped)
+	));
+	assert!(monitor.snapshot().is_none());
+}
+
 /// A stream-only moq server on a free loopback TCP port.
 ///
 /// Returns the port, a receiver yielding every accepted session (so a test can

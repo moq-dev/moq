@@ -163,11 +163,9 @@ func (b *BroadcastConsumer) SubscribeJSONSnapshot(
 	name string,
 	options JSONSubscribeOptions,
 ) (*JSONSnapshotConsumer, error) {
-	inner, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqJsonSnapshotConsumer, error) {
-		return b.inner.SubscribeJsonSnapshot(name, ffi.MoqJsonSnapshotConfig{
-			DeltaRatio:  0,
-			Compression: options.Compression,
-		}, &cancel)
+	inner, err := b.inner.SubscribeJsonSnapshot(ctx, name, ffi.MoqJsonSnapshotConfig{
+		DeltaRatio:  0,
+		Compression: options.Compression,
 	})
 	if err != nil {
 		return nil, err
@@ -181,9 +179,7 @@ func (b *BroadcastConsumer) SubscribeJSONStream(
 	name string,
 	options JSONSubscribeOptions,
 ) (*JSONStreamConsumer, error) {
-	inner, err := runOperation(ctx, func(cancel *ffi.MoqCancel) (*ffi.MoqJsonStreamConsumer, error) {
-		return b.inner.SubscribeJsonStream(name, ffi.MoqJsonStreamConfig{Compression: options.Compression}, &cancel)
-	})
+	inner, err := b.inner.SubscribeJsonStream(ctx, name, ffi.MoqJsonStreamConfig{Compression: options.Compression})
 	if err != nil {
 		return nil, err
 	}

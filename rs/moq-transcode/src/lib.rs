@@ -34,8 +34,6 @@ mod rung;
 pub use config::Config;
 pub use ladder::{Ladder, Rung};
 
-#[allow(deprecated)]
-pub use config::source_reference;
 pub use error::Error;
 
 /// Transcode `source` into `output` until the source broadcast ends.

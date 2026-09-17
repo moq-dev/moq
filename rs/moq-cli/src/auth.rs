@@ -3,8 +3,10 @@
 //! The `moq-auth` library underneath stays free of CLI concerns.
 
 use anyhow::Context;
+use std::net::SocketAddr;
 use std::{io, path::PathBuf};
 
+use moq_auth::serve::{Keys, Policy, Rules};
 use moq_auth::{Algorithm, Pattern};
 
 /// Generate, sign, and verify the JWT tokens a relay authenticates with.
@@ -17,9 +19,10 @@ pub struct Args {
 
 impl Args {
 	/// Run the requested command, writing the key, token, or payload to the chosen
-	/// destination (stdout by default).
-	pub fn run(self) -> anyhow::Result<()> {
+	/// destination (stdout by default). `serve` runs until killed.
+	pub async fn run(self) -> anyhow::Result<()> {
 		match self.command {
+			Command::Serve(serve) => serve.run().await?,
 			Command::Generate {
 				algorithm,
 				id,
@@ -179,6 +182,9 @@ enum Command {
 		issued: Option<UnixTimestamp>,
 	},
 
+	/// Answer a relay's auth requests with keys, public rules, an mTLS grant, tiers, and session limits.
+	Serve(Serve),
+
 	/// Verify a token, writing the payload to stdout.
 	Verify {
 		/// Path to the key file. Use `-` for stdin (requires `--in` to be a file).
@@ -189,6 +195,153 @@ enum Command {
 		#[usage(long = "in", default = "-", value_hint = usage::ValueHint::FilePath)]
 		token: PathBuf,
 	},
+}
+
+/// The reference auth server: the policy a relay used to hold, behind `--auth-url`.
+#[derive(usage::Args, Clone, Debug)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+pub struct Serve {
+	/// Where to answer: a socket address, or `unix:<path>` for a unix socket.
+	#[usage(long, default = "127.0.0.1:4440")]
+	listen: String,
+
+	/// Allow a bind on a non-loopback address. The server has no authentication of its own.
+	#[usage(long)]
+	listen_public: bool,
+
+	/// The key file a `jwt` is verified against.
+	#[usage(long, conflicts = "--key-dir", value_hint = usage::ValueHint::FilePath, extensions("jwk", "json"))]
+	key: Option<PathBuf>,
+
+	/// A directory of `{kid}.jwk` files, selected by the token's `kid`.
+	#[usage(long, conflicts = "--key", value_hint = usage::ValueHint::DirPath)]
+	key_dir: Option<PathBuf>,
+
+	/// Patterns an anonymous session may publish (repeatable); `foo/**` for a subtree.
+	#[usage(long)]
+	public_publish: Vec<Pattern>,
+
+	/// Patterns an anonymous session may subscribe to (repeatable).
+	#[usage(long)]
+	public_subscribe: Vec<Pattern>,
+
+	/// Patterns a session with a verified certificate may publish (repeatable). Empty refuses certificates.
+	#[usage(long)]
+	mtls_publish: Vec<Pattern>,
+
+	/// Patterns a session with a verified certificate may subscribe to (repeatable).
+	#[usage(long)]
+	mtls_subscribe: Vec<Pattern>,
+
+	/// The tier label stamped on every grant, handed to the relay's stats.
+	#[usage(long)]
+	tier: Option<String>,
+
+	/// How often the relay re-checks each grant.
+	#[usage(long, default = "1m")]
+	revalidate: moq_tokio::Duration,
+
+	/// How long a grant with no bound of its own lasts: anonymous sessions, tokens without `exp`, certificates without one.
+	#[usage(long, default = "1d")]
+	expires: moq_tokio::Duration,
+
+	/// The most live sessions presenting one token.
+	#[usage(long)]
+	limit_token: Option<usize>,
+
+	/// The most live sessions from one remote address.
+	#[usage(long)]
+	limit_remote: Option<usize>,
+}
+
+impl Serve {
+	/// The policy these flags describe, refusing a cadence the relay would spin on.
+	fn policy(&self) -> anyhow::Result<Policy> {
+		let revalidate = self.revalidate.into_std();
+		if revalidate.is_zero() {
+			anyhow::bail!("--revalidate must be longer than 0s; every client would re-check in a tight loop");
+		}
+		let rules = |publish: &[Pattern], subscribe: &[Pattern]| {
+			Rules::new(publish.iter().cloned().collect(), subscribe.iter().cloned().collect())
+		};
+		let mut policy = Policy::default();
+		policy.keys = match (&self.key, &self.key_dir) {
+			(Some(key), _) => Some(Keys::File(key.clone())),
+			(None, Some(dir)) => Some(Keys::Dir(dir.clone())),
+			(None, None) => None,
+		};
+		policy.public = rules(&self.public_publish, &self.public_subscribe);
+		policy.mtls = rules(&self.mtls_publish, &self.mtls_subscribe);
+		policy.tier = self.tier.clone();
+		policy.revalidate = revalidate;
+		policy.expires = self.expires.into_std();
+		policy.limits.token = self.limit_token;
+		policy.limits.remote = self.limit_remote;
+		Ok(policy)
+	}
+
+	/// Where to listen, refusing a non-loopback address without `--listen-public`.
+	fn listener(&self) -> anyhow::Result<Listen> {
+		if let Some(path) = self.listen.strip_prefix("unix:") {
+			return Ok(Listen::Unix(path.into()));
+		}
+		let addr: SocketAddr = self
+			.listen
+			.parse()
+			.with_context(|| format!("--listen expects a socket address or unix:<path>, got {}", self.listen))?;
+		if !addr.ip().is_loopback() && !self.listen_public {
+			anyhow::bail!(
+				"--listen {addr} is not a loopback address; the server has no authentication of its own, so pass --listen-public to expose it on purpose"
+			);
+		}
+		Ok(Listen::Tcp(addr))
+	}
+
+	async fn run(self) -> anyhow::Result<()> {
+		let listen = self.listener()?;
+		let server = moq_auth::serve::Server::new(self.policy()?);
+		match listen {
+			Listen::Tcp(addr) => {
+				let listener = tokio::net::TcpListener::bind(addr)
+					.await
+					.with_context(|| format!("failed to bind {addr}"))?;
+				tracing::info!(%addr, "auth server listening");
+				server.serve(listener).await?;
+			}
+			#[cfg(unix)]
+			Listen::Unix(path) => {
+				unlink_socket(&path)?;
+				let listener = tokio::net::UnixListener::bind(&path)
+					.with_context(|| format!("failed to bind {}", path.display()))?;
+				tracing::info!(path = %path.display(), "auth server listening");
+				server.serve_unix(listener).await?;
+			}
+			#[cfg(not(unix))]
+			Listen::Unix(path) => anyhow::bail!("unix sockets are not supported here: {}", path.display()),
+		}
+		Ok(())
+	}
+}
+
+#[derive(Debug)]
+enum Listen {
+	Tcp(SocketAddr),
+	Unix(PathBuf),
+}
+
+/// Remove the socket file a previous run left at `path`, which would refuse the bind.
+/// Anything that is not a socket stays put: a typo must not delete a file.
+#[cfg(unix)]
+fn unlink_socket(path: &std::path::Path) -> anyhow::Result<()> {
+	use std::os::unix::fs::FileTypeExt;
+	match std::fs::symlink_metadata(path) {
+		Ok(meta) if meta.file_type().is_socket() => {
+			std::fs::remove_file(path).with_context(|| format!("failed to remove the stale socket {}", path.display()))
+		}
+		Ok(_) => anyhow::bail!("{} exists and is not a socket; refusing to replace it", path.display()),
+		Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+		Err(err) => Err(err).with_context(|| format!("failed to inspect {}", path.display())),
+	}
 }
 
 fn is_dash(path: &std::path::Path) -> bool {
@@ -253,17 +406,126 @@ mod tests {
 	use super::*;
 	/// Drive the same Usage grammar the binary exposes, rather than building
 	/// `Command` directly, so the flags stay part of what's under test.
-	fn run(args: &[&str]) -> anyhow::Result<()> {
+	async fn run(args: &[&str]) -> anyhow::Result<()> {
+		parse(args)?.run().await
+	}
+
+	fn parse(args: &[&str]) -> anyhow::Result<Args> {
 		let mut cli =
 			crate::args::Invocation::try_parse_from(args.iter().copied()).map_err(|err| anyhow::anyhow!("{err}"))?;
 		match cli.stages.remove(0) {
-			crate::args::Command::Auth(auth) => auth.run(),
+			crate::args::Command::Auth(auth) => Ok(auth),
 			other => anyhow::bail!("parsed something other than `moq auth`: {}", other.name()),
 		}
 	}
 
+	fn serve(args: &[&str]) -> Serve {
+		match parse(args).unwrap().command {
+			Command::Serve(serve) => serve,
+			other => panic!("expected serve, got {other:?}"),
+		}
+	}
+
 	#[test]
-	fn generate_writes_a_usable_keypair() {
+	fn serve_refuses_a_public_bind_without_saying_so() {
+		let err = serve(&["moq", "auth", "serve", "--listen", "0.0.0.0:4440"])
+			.listener()
+			.unwrap_err();
+		assert!(err.to_string().contains("--listen-public"), "{err}");
+
+		assert!(matches!(
+			serve(&["moq", "auth", "serve", "--listen", "0.0.0.0:4440", "--listen-public"]).listener(),
+			Ok(Listen::Tcp(_))
+		));
+		assert!(
+			matches!(serve(&["moq", "auth", "serve"]).listener(), Ok(Listen::Tcp(addr)) if addr.ip().is_loopback())
+		);
+		assert!(matches!(
+			serve(&["moq", "auth", "serve", "--listen", "unix:/run/moq-auth.sock"]).listener(),
+			Ok(Listen::Unix(path)) if path == std::path::Path::new("/run/moq-auth.sock")
+		));
+		assert!(
+			serve(&["moq", "auth", "serve", "--listen", "nowhere"])
+				.listener()
+				.is_err()
+		);
+	}
+
+	#[test]
+	fn serve_flags_become_the_policy() {
+		let policy = serve(&[
+			"moq",
+			"auth",
+			"serve",
+			"--key-dir",
+			"/keys",
+			"--public-subscribe",
+			"anon/**",
+			"--mtls-publish",
+			"**",
+			"--mtls-subscribe",
+			"**",
+			"--tier",
+			"internal",
+			"--revalidate",
+			"30s",
+			"--expires",
+			"2h",
+			"--limit-token",
+			"3",
+			"--limit-remote",
+			"8",
+		])
+		.policy()
+		.unwrap();
+		assert!(matches!(&policy.keys, Some(Keys::Dir(dir)) if dir == std::path::Path::new("/keys")));
+		assert_eq!(
+			policy.public.subscribe,
+			["anon/**".parse().unwrap()].into_iter().collect()
+		);
+		assert!(policy.public.publish.is_empty());
+		assert_eq!(policy.mtls.publish, ["**".parse().unwrap()].into_iter().collect());
+		assert_eq!(policy.tier.as_deref(), Some("internal"));
+		assert_eq!(policy.revalidate, std::time::Duration::from_secs(30));
+		assert_eq!(policy.expires, std::time::Duration::from_secs(7200));
+		assert_eq!(policy.limits.token, Some(3));
+		assert_eq!(policy.limits.remote, Some(8));
+
+		// Nothing configured is a server that refuses everyone, on the defaults.
+		let bare = serve(&["moq", "auth", "serve"]).policy().unwrap();
+		assert!(bare.keys.is_none());
+		assert!(bare.public.is_empty() && bare.mtls.is_empty());
+		assert_eq!(bare.revalidate, std::time::Duration::from_secs(60));
+		assert_eq!(bare.expires, std::time::Duration::from_secs(86400));
+
+		// A zero cadence would have every client re-check in a tight loop.
+		let err = serve(&["moq", "auth", "serve", "--revalidate", "0s"])
+			.policy()
+			.unwrap_err();
+		assert!(err.to_string().contains("--revalidate"), "{err}");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn unlink_socket_leaves_anything_but_a_socket_alone() {
+		let dir = tempfile::tempdir().unwrap();
+
+		let file = dir.path().join("config");
+		std::fs::write(&file, "keep me").unwrap();
+		let err = unlink_socket(&file).unwrap_err();
+		assert!(err.to_string().contains("not a socket"), "{err}");
+		assert_eq!(std::fs::read_to_string(&file).unwrap(), "keep me");
+
+		unlink_socket(&dir.path().join("missing")).unwrap();
+
+		let stale = dir.path().join("auth.sock");
+		drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+		unlink_socket(&stale).unwrap();
+		assert!(!stale.exists());
+	}
+
+	#[tokio::test]
+	async fn generate_writes_a_usable_keypair() {
 		let dir = tempfile::tempdir().unwrap();
 		let private = dir.path().join("private.jwk");
 		let public = dir.path().join("public.jwk");
@@ -280,6 +542,7 @@ mod tests {
 			"--public",
 			public.to_str().unwrap(),
 		])
+		.await
 		.unwrap();
 
 		// Sign through the CLI grammar rather than the library, so the value parsers
@@ -299,6 +562,7 @@ mod tests {
 			"--expires",
 			"4102444800",
 		])
+		.await
 		.unwrap();
 
 		// What the relay actually does with these two files: the public half has to
@@ -324,14 +588,17 @@ mod tests {
 			"--in",
 			path.to_str().unwrap(),
 		])
+		.await
 		.unwrap();
 	}
 
-	#[test]
-	fn generate_to_a_directory_names_the_file_after_the_kid() {
+	#[tokio::test]
+	async fn generate_to_a_directory_names_the_file_after_the_kid() {
 		let dir = tempfile::tempdir().unwrap();
 
-		run(&["moq", "auth", "generate", "--out-dir", dir.path().to_str().unwrap()]).unwrap();
+		run(&["moq", "auth", "generate", "--out-dir", dir.path().to_str().unwrap()])
+			.await
+			.unwrap();
 
 		let written: Vec<_> = std::fs::read_dir(dir.path())
 			.unwrap()
@@ -345,15 +612,19 @@ mod tests {
 
 	// Both halves on stdout would interleave into one unparseable blob, so it's
 	// rejected up front rather than written.
-	#[test]
-	fn both_keys_to_stdout_is_rejected() {
-		let err = run(&["moq", "auth", "generate", "--algorithm", "ES256", "--public", "-"]).unwrap_err();
+	#[tokio::test]
+	async fn both_keys_to_stdout_is_rejected() {
+		let err = run(&["moq", "auth", "generate", "--algorithm", "ES256", "--public", "-"])
+			.await
+			.unwrap_err();
 		assert!(err.to_string().contains("cannot write both keys to stdout"), "{err}");
 	}
 
-	#[test]
-	fn both_inputs_from_stdin_is_rejected() {
-		let err = run(&["moq", "auth", "verify", "--key", "-", "--in", "-"]).unwrap_err();
+	#[tokio::test]
+	async fn both_inputs_from_stdin_is_rejected() {
+		let err = run(&["moq", "auth", "verify", "--key", "-", "--in", "-"])
+			.await
+			.unwrap_err();
 		assert!(err.to_string().contains("cannot both read from stdin"), "{err}");
 	}
 

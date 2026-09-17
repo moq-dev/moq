@@ -33,8 +33,6 @@ media tag, and a byte-identical round trip.
 
 - [Merge dev](/quest/m1/merge-dev.md) - the required M1 APIs must be available on main before this implementation starts
 
-- [Broadcast clock](/quest/m1/broadcast-clock.md) - event times use the landed shared clock contract
-
 - [Metadata association contract](/quest/m2/metadata-association.md) - settles the shared framing and missing-data semantics before this section adopts them
 
 ## Related

@@ -225,8 +225,11 @@ pub(crate) fn populate(
 	out.video = Video::default();
 	out.audio = hang::catalog::Audio::default();
 	// A derivative does not synthesize its own archive: keep the child's, including a
-	// live-only timeline, so replay/store discovery survives composition.
+	// live-only timeline, so replay/store discovery survives composition. The clock goes with
+	// it: the derivative republishes the child's timeline, so its timestamps only mean
+	// something under the child's wall mapping.
 	out.archive = source.archive.clone();
+	out.clock = source.clock;
 
 	// Display metadata applies to the rungs too (same picture, smaller).
 	out.video.display = source.video.display.clone();
@@ -548,9 +551,12 @@ mod tests {
 		archive.replay = Some(PathRelativeOwned::from("./recordings/clip".to_string()));
 		archive.version = Some(hang::catalog::Archive::VERSION);
 		child.archive = Some(archive.clone());
+		let clock = hang::catalog::Clock::new(1_751_846_400_000_000).unwrap();
+		child.clock = Some(clock);
 
 		let mut out = moq_mux::catalog::hang::Catalog::<()>::default();
 		populate(&mut out, &child, &[], None).unwrap();
 		assert_eq!(out.archive, Some(archive), "a derivative keeps the child's archive");
+		assert_eq!(out.clock, Some(clock), "a derivative keeps the child's clock");
 	}
 }

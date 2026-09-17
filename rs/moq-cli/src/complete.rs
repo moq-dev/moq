@@ -721,6 +721,9 @@ mod tests {
 
 		/// Every command path that declares a value by this name.
 		fn declaring(command: &usage::spec::CommandMeta<'_>, value: &str, at: &str, found: &mut Vec<String>) {
+			if command.hide {
+				return;
+			}
 			let declares = command
 				.flags
 				.iter()

@@ -761,7 +761,7 @@ impl TrackState {
 	}
 
 	/// Attach `info` to this track, clamping the publisher's window down to the
-	/// origin's [`cache_duration`](crate::origin::Info::cache_duration) ceiling so a
+	/// origin's [`cache_duration`](crate::origin::Config::cache_duration) ceiling so a
 	/// group is never retained longer than the origin allows. Every path that binds an
 	/// info to a track funnels through here, covering local publishers and relayed
 	/// (lite / IETF) tracks alike.
@@ -4742,7 +4742,10 @@ mod test {
 
 	/// Mint a track under an origin caching into `pool`.
 	fn track_producer_pooled(name: impl Into<Arc<str>>, pool: cache::Pool) -> Producer {
-		let origin = crate::origin::Info::default().with_pool(pool);
+		let origin = crate::origin::Config {
+			pool,
+			..crate::origin::Config::default()
+		};
 		Producer::new(
 			Arc::new(broadcast::Info {
 				origin,
@@ -4950,7 +4953,10 @@ mod test {
 	/// Mint a track under an origin whose retention ceiling is `cap`, so the
 	/// track's own window is clamped down to it on bind.
 	fn track_producer_capped(name: impl Into<Arc<str>>, info: Info, cap: Duration) -> Producer {
-		let origin = crate::origin::Info::default().with_cache_duration(cap);
+		let origin = crate::origin::Config {
+			cache_duration: cap,
+			..crate::origin::Config::default()
+		};
 		Producer::new(
 			Arc::new(broadcast::Info {
 				origin,
@@ -7195,7 +7201,10 @@ mod test {
 			.with_expiry(cache::DEFAULT_EXPIRY);
 		let pool = cache::Pool::new(config);
 		let broadcast = broadcast::Info {
-			origin: crate::origin::Info::default().with_pool(pool.clone()),
+			origin: crate::origin::Config {
+				pool: pool.clone(),
+				..crate::origin::Config::default()
+			},
 			..Default::default()
 		};
 		let producer = Producer::new(Arc::new(broadcast), "test", None);
@@ -7370,7 +7379,10 @@ mod test {
 			.with_expiry(cache::DEFAULT_EXPIRY);
 		let pool = cache::Pool::new(config);
 		let broadcast = broadcast::Info {
-			origin: crate::origin::Info::default().with_pool(pool.clone()),
+			origin: crate::origin::Config {
+				pool: pool.clone(),
+				..crate::origin::Config::default()
+			},
 			..Default::default()
 		};
 		let request = Request::new(Arc::new(broadcast), "test");
@@ -7558,7 +7570,10 @@ mod test {
 			.with_expiry(cache::DEFAULT_EXPIRY);
 		let pool = cache::Pool::new(config);
 		let broadcast = broadcast::Info {
-			origin: crate::origin::Info::default().with_pool(pool.clone()),
+			origin: crate::origin::Config {
+				pool: pool.clone(),
+				..crate::origin::Config::default()
+			},
 			..Default::default()
 		};
 		let request = Request::new(Arc::new(broadcast), "test");

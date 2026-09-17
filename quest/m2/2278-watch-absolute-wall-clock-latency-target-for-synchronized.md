@@ -32,7 +32,6 @@ a live-only broadcast with no archive timeline.
 
 - [Merge dev](/quest/m1/merge-dev.md) - the required M1 APIs must be available on main before this implementation starts
 
-- [Broadcast clock](/quest/m1/broadcast-clock.md) - the catalog shape and shared clock owner
 - [Publisher clocks](/quest/m2/publisher-clock.md) - built-in publishers populate the mapping applications read
 
 ## Closes

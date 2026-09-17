@@ -473,11 +473,11 @@ test("nextGroup abandons the frame helpers' group when it passes it", async () =
 	producer.writeGroup(two);
 
 	// The frame path enters group 0; a direct nextGroup then takes group 1.
-	expect((await track.readFrameSequence())?.group).toBe(0);
+	expect((await track.readFrame())?.group).toBe(0);
 	expect((await track.nextGroup())?.sequence).toBe(1);
 
 	// The frame path must not resume group 0 behind the cursor: it continues at 2.
-	const next = await track.readFrameSequence();
+	const next = await track.readFrame();
 	expect(next?.group).toBe(2);
 	expect(dec.decode(next?.payload)).toBe("2.0");
 });
@@ -1127,17 +1127,17 @@ test("setGroups caps frame-level reads like the group cursor", async () => {
 	producer.writeFrame({ payload: enc.encode("one"), timestamp: Timestamp.fromMillis(1) });
 	producer.close();
 
-	expect((await track.readFrameSequence())?.group).toBe(0);
+	expect((await track.readFrame())?.group).toBe(0);
 
 	// Group 1 parks above the cap; a clean close must not resolve it as finished.
-	const parked = track.readFrameSequence();
+	const parked = track.readFrame();
 	const timeout = new Promise((resolve) => setTimeout(() => resolve("pending"), 10));
 	expect(await Promise.race([parked, timeout])).toBe("pending");
 
 	// Raising the cap releases the parked group, frames intact.
 	track.setGroups({ end: { excluded: 2 } });
 	expect((await parked)?.group).toBe(1);
-	expect(await track.readFrameSequence()).toBeUndefined();
+	expect(await track.readFrame()).toBeUndefined();
 });
 
 test("local cursor bounds can skip, pause, and release buffered groups", async () => {

@@ -25,7 +25,7 @@ import (
 const readChunk = 64 * 1024
 
 // SubscribeMedia max age: how much reordering the jitter buffer tolerates.
-const maxAgeMs = 1_000
+const maxAgeUs = 1_000_000
 
 func publish(ctx context.Context, url, broadcast string) error {
 	client, err := moq.Dial(ctx, url, moq.WithTLSVerify(false))
@@ -126,7 +126,7 @@ func subscribe(ctx context.Context, url, broadcast string, timeout time.Duration
 		break
 	}
 
-	media, err := consumer.SubscribeMedia(ctx, name, video.Container, &moq.Subscription{MaxAgeMs: maxAgeMs})
+	media, err := consumer.SubscribeMedia(ctx, name, video.Container, &moq.Subscription{MaxAgeUs: maxAgeUs})
 	if err != nil {
 		return err
 	}

@@ -6,29 +6,7 @@ use bytes::Bytes;
 
 use crate::Result;
 
-/// Configuration for a [`Producer`].
-///
-/// Build from [`Default`] and override fields (the struct is `#[non_exhaustive]`, so new options
-/// stay additive).
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct ProducerConfig {
-	/// Compress each value as its own raw DEFLATE stream.
-	///
-	/// A snapshot group holds a single self-contained value, so there is no window to share: each
-	/// value is compressed alone. `false` (the default) writes the bytes through untouched. A
-	/// [`Consumer`](super::Consumer) must set
-	/// [`ConsumerConfig::compression`](super::ConsumerConfig::compression) to match.
-	pub compression: bool,
-}
-
-impl ProducerConfig {
-	/// Set [`compression`](Self::compression) (a builder, since the struct is `#[non_exhaustive]`).
-	pub fn with_compression(mut self, compression: bool) -> Self {
-		self.compression = compression;
-		self
-	}
-}
+pub use super::Config;
 
 /// Publishes a binary value over a track, one value per group.
 ///
@@ -44,11 +22,11 @@ pub struct Producer {
 
 impl Producer {
 	/// Create a producer that publishes to the given track.
-	pub fn new(track: moq_net::track::Producer, config: ProducerConfig) -> Self {
+	pub fn new(track: moq_net::track::Producer, config: Config) -> Self {
 		Self {
 			inner: Arc::new(Mutex::new(Inner {
 				track,
-				compression: config.compression,
+				compression: config.compression.is_deflate(),
 			})),
 		}
 	}

@@ -2,19 +2,18 @@ import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "@moq/flate";
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 
-/** Snapshot producer options, including the destination track. */
-export interface ProducerConfig {
-	/** Track that receives each value as its own group. */
-	track: Moq.Track.Producer;
+import { type Compression, isDeflate } from "../compression.ts";
 
+/** Codec options for a snapshot track. */
+export interface Config {
 	/**
 	 * Compress each value as its own raw DEFLATE stream.
 	 *
 	 * A snapshot group holds a single self-contained value, so there is no window to share: each
-	 * value is compressed alone. A {@link Consumer} reading the frames must set the same flag.
-	 * Defaults to `false`.
+	 * value is compressed alone. A {@link Consumer} reading the frames must set the same
+	 * {@link compression}. Defaults to `"none"`.
 	 */
-	compression?: boolean;
+	compression?: Compression;
 }
 
 /**
@@ -29,9 +28,9 @@ export class Producer {
 	#compress: boolean;
 
 	/** Wrap a track to publish a binary value into it. */
-	constructor(config: ProducerConfig) {
+	constructor(config: Producer.Config) {
 		this.#track = config.track;
-		this.#compress = config.compression ?? false;
+		this.#compress = isDeflate(config.compression);
 	}
 
 	/**
@@ -70,4 +69,11 @@ export class Producer {
 	finish(): void {
 		this.#track.close();
 	}
+}
+
+type Init = Config & { track: Moq.Track.Producer };
+
+export namespace Producer {
+	/** Snapshot producer options, including the destination track. */
+	export type Config = Init;
 }

@@ -46,8 +46,11 @@ enumerate broadcasts by listing routes, but a route can also cover a subtree
 (`foo/**`) or a richer path pattern (`live/*`, `**/a`), letting a server
 advertise capability without enumerating inventory. Each route carries the
 chain of relay identities it passed through, which is how forwarding loops are
-caught, and a cost, which is how a subscriber picks the cheapest of several
-routes to the same broadcast. Wildcard advertisements are forwarded and
+caught, and a cost, which is how a subscriber picks among several routes to
+the same broadcast. A hop of 0 is the anonymous mark and travels the chain
+unchanged. A route that passed through an anonymous hop at any depth ranks
+below every fully identified route, whatever the costs say; among anonymous
+routes, cost keeps ordering. Wildcard advertisements are forwarded and
 authorized; resolving one into a subscription is not implemented yet.
 
 ## Path patterns
@@ -78,13 +81,13 @@ subscriber must not treat the pattern as a concrete broadcast name. Use
 `create_broadcast(path)` and `announce(route)` when the path is known; use
 `dynamic` when the set of paths is not.
 
-A subscriber watching under a prefix sees the advertisement rebased to that
-scope. `**/a` advertised cluster-wide and consumed at `a` arrives as both the
-empty pattern (exactly `a`) and `**/a` (deeper paths ending in `a`). A pattern
-that cannot match under the prefix is not sent. Announce events carry the
-matcher: Rust `announce::Update.pattern` and TypeScript `Announce.Event.pattern`
-are a `Pattern`. Use `as_prefix()` / `asPrefix()` when a consumer specifically
-needs a prefix-shaped claim.
+A subscriber watching under a prefix sees advertisements named from the origin,
+clamped to the requested scope. A route claimed above the scope is presented as
+the scope itself: `room` advertised cluster-wide and consumed at `room/alice`
+arrives as `room/alice/**`. A pattern that cannot match under the prefix is not
+sent. Announce events carry the matcher: Rust `announce::Update.pattern` and
+TypeScript `Announce.Update.pattern` are a `Pattern`. Use `as_prefix()` /
+`asPrefix()` when a consumer specifically needs a prefix-shaped claim.
 
 When a subscriber asks for a matching path the advertiser will not serve, the
 advertiser refuses that request rather than stretching the claim. The same
@@ -195,7 +198,7 @@ message; unknown and application codes retain their numeric value. Transport
 failures without a protocol code remain separate.
 
 Route announcements expose the matcher directly: Rust `announce::Update.pattern`
-and TypeScript `Announce.Event.pattern` carry a `Pattern`. A subtree claim is
+and TypeScript `Announce.Update.pattern` carry a `Pattern`. A subtree claim is
 `room/**`, while `room/*` covers one child segment. Use `as_prefix()` in Rust or
 `asPrefix()` in TypeScript when a consumer specifically needs a prefix-shaped
 claim; an arbitrary pattern is not a concrete broadcast name.

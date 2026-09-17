@@ -29,8 +29,7 @@ hit, so the merge PR re-checks each on the combined tree:
   (#3531), bounded `moq_json::window` timeline (#3240), and duration marker
   (#3575) keep their regressions; main's draft-21 (#3574) is in every
   per-version list, including the stream and request registries.
-- The hop-0 ban is abandoned (#3623); anonymous routes rank last instead
-  ([Anonymous rank](/quest/m1/anonymous-route-rank.md)).
+- The hop-0 ban is abandoned (#3623); anonymous routes rank last instead.
 - Auto-merged files hide breakage: `just check` and `just test` run before
   the merge commit, not after.
 
@@ -39,21 +38,18 @@ broadcast that has been up for days must get a playlist promptly. The bounded
 `moq_json::window` timeline (#3240) is what makes that hold, and only a long
 run proves it.
 
-The breaking-change targeting rules in CONTRIBUTING.md govern the release
-that follows. Dart already has that surface, so nothing waits on this
+[Release](/quest/m1/release.md) cuts the release that follows and holds
+what gates it but not the merge. Dart already has that surface, so nothing waits on this
 merge for it. The rest of the archive line, wildcard resolution, and every
 additive quest that builds on dev-only code start on main afterwards from
 [m2](/quest/m2/README.md).
 
 ## Required
 
-- [Worker ownership](/quest/m1/api-worker-ownership.md) - consuming split ownership retains sockets and joins the group before release
-- [Origin scope API](/quest/m1/api-origin-pattern-scopes.md) - typed scope grants preserve current prefixes and refuse unsupported patterns
-- [Auth server](/quest/m1/auth/README.md) - the breaking auth contract, flags, claims, and package names the release moq.pro adopts must carry
-- [Broadcast clock](/quest/m1/broadcast-clock.md) - the root clock replaces the published archive wall field on dev before release
+- [Reserved codes](/quest/m1/lite-reserved-codes.md) - nothing provisional ships on the released wire
+- [Rate estimate names](/quest/m1/api-rate-estimate-names.md) - the estimates carry one name on the C ABI and every binding
+- [moq-tokio names](/quest/m1/api-tokio-names.md) - moq-tokio's first release under this name has settled names
 - [m0](/quest/m0/README.md) - every release blocker lands or is punted before the merge
-- [External API proof](/quest/m1/api-release-proof.md) - the packaged consumer fixture and explicit fix/deferral decisions must be recorded before merge
-- [Monotonic timeline](/quest/m1/monotonic-timeline.md) - so a shed marker still jumps the playhead on a timestamp hole (#3291)
 
 ## Closes
 

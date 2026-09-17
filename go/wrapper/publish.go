@@ -319,12 +319,12 @@ func (m *MediaProducer) Name() (string, error) {
 
 // Used blocks until the track has at least one active subscriber.
 func (m *MediaProducer) Used(ctx context.Context) error {
-	return runOperationErr(ctx, func(cancel *ffi.MoqCancel) error { return m.inner.Used(&cancel) })
+	return m.inner.Used(ctx)
 }
 
 // Unused blocks until the track has no active subscribers.
 func (m *MediaProducer) Unused(ctx context.Context) error {
-	return runOperationErr(ctx, func(cancel *ffi.MoqCancel) error { return m.inner.Unused(&cancel) })
+	return m.inner.Unused(ctx)
 }
 
 // WriteFrame appends frame to the media track. The importer derives keyframe status from
@@ -431,12 +431,12 @@ func (t *TrackProducer) Name() (string, error) {
 
 // Used blocks until the track has at least one active subscriber.
 func (t *TrackProducer) Used(ctx context.Context) error {
-	return runOperationErr(ctx, func(cancel *ffi.MoqCancel) error { return t.inner.Used(&cancel) })
+	return t.inner.Used(ctx)
 }
 
 // Unused blocks until the track has no active subscribers.
 func (t *TrackProducer) Unused(ctx context.Context) error {
-	return runOperationErr(ctx, func(cancel *ffi.MoqCancel) error { return t.inner.Unused(&cancel) })
+	return t.inner.Unused(ctx)
 }
 
 // Dynamic serves fetches for groups that are not currently cached.
@@ -492,7 +492,7 @@ func (t *TrackProducer) Consume(subscription *Subscription) (*TrackConsumer, err
 	return &TrackConsumer{inner: inner}, nil
 }
 
-// Finish closes the track.
+// Finish ends the track at the live edge. The handle remains so Abort can still run.
 func (t *TrackProducer) Finish() error {
 	return t.inner.Finish()
 }
@@ -527,7 +527,7 @@ func (g *GroupProducer) WriteFrame(frame Frame) error {
 	return g.inner.WriteFrame(frame)
 }
 
-// Finish closes the group.
+// Finish marks the group complete. The handle remains so Abort can still run.
 func (g *GroupProducer) Finish() error {
 	return g.inner.Finish()
 }
@@ -602,12 +602,12 @@ func (a *AudioProducer) Name() (string, error) {
 
 // Used blocks until the audio track has at least one active subscriber.
 func (a *AudioProducer) Used(ctx context.Context) error {
-	return runOperationErr(ctx, func(cancel *ffi.MoqCancel) error { return a.inner.Used(&cancel) })
+	return a.inner.Used(ctx)
 }
 
 // Unused blocks until the audio track has no active subscribers.
 func (a *AudioProducer) Unused(ctx context.Context) error {
-	return runOperationErr(ctx, func(cancel *ffi.MoqCancel) error { return a.inner.Unused(&cancel) })
+	return a.inner.Unused(ctx)
 }
 
 // ResetEpoch re-anchors the timeline to the next frame after an idle gap.
@@ -648,12 +648,12 @@ func (v *VideoProducer) Name() (string, error) {
 
 // Used blocks until the video track has at least one active subscriber.
 func (v *VideoProducer) Used(ctx context.Context) error {
-	return runOperationErr(ctx, func(cancel *ffi.MoqCancel) error { return v.inner.Used(&cancel) })
+	return v.inner.Used(ctx)
 }
 
 // Unused blocks until the video track has no active subscribers.
 func (v *VideoProducer) Unused(ctx context.Context) error {
-	return runOperationErr(ctx, func(cancel *ffi.MoqCancel) error { return v.inner.Unused(&cancel) })
+	return v.inner.Unused(ctx)
 }
 
 // Write encodes and publishes one frame in the configured input format. A

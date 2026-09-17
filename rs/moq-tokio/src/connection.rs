@@ -1,3 +1,5 @@
+//! The reconnect loop around a session, and the [`Monitor`] that observes it.
+
 use std::task::{Poll, ready};
 use std::time::Duration;
 
@@ -439,12 +441,15 @@ struct State {
 	/// Advanced by `Shared::connected` with the same write that publishes `status`,
 	/// so a reader can't see `Connected` without its epoch.
 	epoch: u64,
+	/// Cumulative connects and disconnects, bumped by the reconnect loop itself so a session that
+	/// connects and drops before a consumer polls still counts.
+	presence: moq_net::stats::Presence,
 	/// The negotiated MoQ version of the live session, or `None` when disconnected.
 	version: Option<Version>,
 	/// Set when the reconnect loop permanently gives up (reconnect timeout exceeded).
 	error: Option<Error>,
 	/// The currently-connected session, or `None` while reconnecting. Read by
-	/// [`ConnectionStatsReader`] to snapshot live connection stats.
+	/// [`Monitor`] to snapshot live connection stats.
 	session: Option<moq_net::Session>,
 }
 
@@ -475,6 +480,7 @@ impl Shared {
 		if let Ok(mut state) = self.state.write() {
 			state.status = Some(Status::Connected);
 			state.epoch += 1;
+			state.presence.sessions_started += 1;
 			state.version = Some(session.version());
 			state.session = Some(session.clone());
 		}
@@ -492,6 +498,12 @@ impl Shared {
 	/// and drops the estimates that belonged to it.
 	fn disconnected(&self) {
 		if let Ok(mut state) = self.state.write() {
+			// Count one close per live session; a second call without an
+			// intervening connect (e.g. Drop after the loop already reported
+			// the close) must not move the counter again.
+			if state.session.is_some() {
+				state.presence.sessions_ended += 1;
+			}
 			state.status = Some(Status::Disconnected);
 			state.version = None;
 			state.session = None;
@@ -512,7 +524,7 @@ impl Drop for Shared {
 	fn drop(&mut self) {
 		// The loop is over, including when its task was aborted out from under it.
 		// Whoever still holds a consumer keeps the last state readable, so a
-		// [`ConnectionStatsReader`] outliving every [`Connection`] would otherwise
+		// [`Monitor`] outliving every [`Connection`] would otherwise
 		// keep the session clone parked here alive and the transport open with
 		// nothing left able to reach it. Releasing it drops the last clone, which
 		// is what closes the transport.
@@ -520,26 +532,57 @@ impl Drop for Shared {
 	}
 }
 
-/// A cloneable read handle for the live connection stats of a [`Connection`].
+/// A cloneable observer of a [`Connection`] across reconnects.
 ///
-/// Obtained via [`Connection::stats`]. [`stats`](Self::stats) returns `None` while the loop is
+/// Obtained via [`Connection::monitor`]. [`stats`](Self::stats) returns `None` while the loop is
 /// between connections (reconnecting), and `Some` snapshot while a session is established.
 #[derive(Clone)]
-pub struct ConnectionStatsReader {
+pub struct Monitor {
 	state: kio::Consumer<State>,
+	last_presence: moq_net::stats::Presence,
 }
 
-impl ConnectionStatsReader {
+impl Monitor {
+	/// Cumulative connects and disconnects of this reconnect loop, the same shape as a relay's
+	/// sessions track: `sessions_started - sessions_ended` is 1 while connected, and a rate is a delta over
+	/// any window.
+	pub fn presence(&self) -> moq_net::stats::Presence {
+		self.state.read().presence
+	}
+
+	/// Poll until either presence counter moves past what this handle last reported.
+	pub fn poll_presence(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<moq_net::stats::Presence>> {
+		let last = self.last_presence;
+		let presence = match ready!(self.state.poll(waiter, |state| match state.presence {
+			presence if presence != last => Poll::Ready(presence),
+			_ => Poll::Pending,
+		})) {
+			Ok(presence) => presence,
+			Err(state) => return Poll::Ready(Err(terminal(&state))),
+		};
+
+		self.last_presence = presence;
+		Poll::Ready(Ok(presence))
+	}
+
+	/// Wait until either presence counter moves past what this handle last reported.
+	///
+	/// Unlike [`Connection::status`], a connect and disconnect that both land before the caller polls
+	/// are not coalesced away: the counters still moved.
+	pub async fn presence_changed(&mut self) -> crate::Result<moq_net::stats::Presence> {
+		kio::wait(|waiter| self.poll_presence(waiter)).await
+	}
+
 	/// Snapshot the current connection's stats, or `None` if not currently connected.
 	pub fn stats(&self) -> Option<moq_net::ConnectionStats> {
 		self.state.read().session.as_ref().map(moq_net::Session::stats)
 	}
 
 	/// Snapshot statistics and protocol together, or `None` while disconnected.
-	pub fn snapshot(&self) -> Option<ConnectionSnapshot> {
+	pub fn snapshot(&self) -> Option<Snapshot> {
 		let state = self.state.read();
 		let session = state.session.as_ref()?;
-		Some(ConnectionSnapshot {
+		Some(Snapshot {
 			stats: session.stats(),
 			version: session.version(),
 		})
@@ -548,7 +591,7 @@ impl ConnectionStatsReader {
 
 /// Statistics and protocol sampled from the same live connection.
 #[non_exhaustive]
-pub struct ConnectionSnapshot {
+pub struct Snapshot {
 	/// Transport statistics at the time of the snapshot.
 	pub stats: moq_net::ConnectionStats,
 	/// Protocol negotiated by the connection that supplied these statistics.
@@ -1080,12 +1123,13 @@ impl Connection {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
-	/// A cloneable handle for reading the current connection's stats.
+	/// Observe the connection's statistics and presence across reconnects.
 	///
-	/// The handle keeps working across reconnects, reporting `None` between connections.
-	pub fn stats(&self) -> ConnectionStatsReader {
-		ConnectionStatsReader {
+	/// The handle keeps working across reconnects without keeping the connection loop alive.
+	pub fn monitor(&self) -> Monitor {
+		Monitor {
 			state: self.state.clone(),
+			last_presence: moq_net::stats::Presence::default(),
 		}
 	}
 }

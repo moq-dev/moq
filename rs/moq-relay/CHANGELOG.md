@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- Every session is admitted through a `moq_auth` lease: `--auth-url` asks an auth server per session event, `--auth-public` grants anonymous patterns, and exactly one must be set. `--auth-key`, `--auth-key-dir`, `--auth-public-api`, `--auth-domain`, `--auth-api`, `--auth-api-mode`, `--auth-mtls-tier`, and `--auth-tls-*` are gone, along with the `Cache-Control` driven cache and the unrestricted mTLS grant: a verified client certificate is reported in the request and admits what the server grants.
+- `--auth-public` and its `-subscribe`/`-publish` forms take patterns (`anon/**`), not prefixes.
+- Embedding: `Connection` holds a `Lease` per session and `supervise` follows it; `AuthToken` is built from a `moq_auth::Grant`; `MtlsPeer` carries the `PeerIdentity`.
+
 ### Added
 
 - *(relay)* `ClusterOptions` so the origin is constructed with its cache settings
@@ -31,6 +37,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - *(relay)* `Cluster::with_cache`; pass the cache to `Cluster::new` via `ClusterOptions`
 - *(relay)* [**breaking**] public `Relay` fields (`server`, `workers`, `uring`, and the rest). Use the accessors and `run`.
+
+## [0.14.17](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.16...moq-relay-v0.14.17) - 2026-09-13
+
+### Added
+
+- *(moq-net)* add moq-transport draft-21 (moqt-21) ([#3574](https://github.com/moq-dev/moq/pull/3574))
 
 ## [0.14.16](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.15...moq-relay-v0.14.16) - 2026-09-09
 

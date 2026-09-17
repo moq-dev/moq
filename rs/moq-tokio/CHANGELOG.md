@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- [**breaking**] `connection::Monitor::presence` reports `sessions_started` / `sessions_ended`.
+- `origin::spawn` takes an `origin::Config` (formerly `origin::Info`) or a bare `Hop`.
+
+### Added
+
+- `Request::remote_addr`, `local_addr`, `server_name`, and `alpn` report what the transport saw; `PeerIdentity::name` and `issuer` read the leaf certificate.
+
 ### Added
 
 - *(tokio)* [**breaking**] partition LAN discovery by a DNS-SD application (`mdns::App`)

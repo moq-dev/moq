@@ -22,7 +22,7 @@ version = ["moq-lite-05"]            # Restrict accepted versions. Omit for all.
 cert = "cert.pem"                    # Certificate chain and key. Reloaded on change.
 key = "key.pem"
 generate = ["localhost"]             # Or: a self-signed cert for development.
-root = ["peer-ca.pem"]               # Optional: CAs whose client certs get full access (mTLS).
+root = ["peer-ca.pem"]               # Optional: CAs for client certs (mTLS), reported to the auth server.
                                      # The quiche backend fixes these at startup; restart to rotate them.
 
 [listen.tcp]                         # Plaintext qmux over TCP for trusted local workers.
@@ -120,15 +120,12 @@ See [HTTP endpoints](/bin/relay/http).
 
 ```toml
 [auth]
-# Pick one key source:
-key = "public.jwk"                   # one verification key
-# key_dir = "/etc/moq/keys/"         # or a directory of {kid}.jwk files
-# auth_api = "https://api.example.com/auth"   # or one call returning key, public access, alias, and tier
-
-public = "anon"                      # Anonymous publish and subscribe under this prefix.
-# [auth.public]                      # Or split them:
-# subscribe = ["anon", "demo"]
-# publish = ["anon"]
+# Exactly one of these:
+url = "http://127.0.0.1:4440/"       # An auth server asked once per session event (`moq auth serve`,
+                                     # or your own). https:// presents connect.tls; unix:// is a socket.
+# public = "anon/**"                 # Or a static anonymous grant, publish and subscribe alike.
+# public_subscribe = ["anon/**", "demo/**"]   # Or split them; patterns, `foo/**` for a subtree.
+# public_publish = ["anon/**"]
 ```
 
 See [Authentication](/bin/relay/auth).
@@ -193,10 +190,10 @@ publisher that stalls but stays connected still has its idle groups reclaimed
 waiting forever).
 
 `headroom` starts a background task that re-samples system memory every few
-seconds and resizes the pool. Embedders calling `CacheConfig::init` directly
+seconds and resizes the pool. Embedders calling `cache::Config::init` directly
 should know that the task is owned by the `cache::Pool` it resizes, not by the
-`Cache` struct or the `Relay`: it stops on its next tick once the last `Pool`
-clone drops. Handing the `Cache` to `Cluster::new` therefore moves the
+`cache::Cache` struct or the `Relay`: it stops on its next tick once the last `Pool`
+clone drops. Handing the `cache::Cache` to `cluster::Cluster::new` therefore moves the
 task's lifetime onto the cluster, and keeping a `Pool` clone of your own keeps
 the task running for as long as you hold it.
 
@@ -213,11 +210,17 @@ depth = 1                            # Also bucket by the first N path segments 
 
 Each stats broadcast carries `publisher.json`, `subscriber.json`, and
 `sessions.json` tracks (plus compressed `.z` twins) with cumulative counters
-per broadcast: bytes, frames, groups, datagrams, subscriptions, announces, and
-connected sessions. Traffic is split by an arbitrary **tier** label chosen by
-the auth API, `--cluster-tier`, or `--auth-mtls-tier`, which is what makes
-billing per customer or per region possible. Read them with the
-[`moq-stats`](https://docs.rs/moq-stats) crate.
+per broadcast. Every counter pair is `*_started` / `*_ended`:
+`announces_started` / `announces_ended`, `broadcasts_started` /
+`broadcasts_ended`, `subscriptions_started` / `subscriptions_ended`, and
+`sessions_started` / `sessions_ended`. A live count is started minus ended.
+This release also writes the previous `announced` / `*_closed` spellings beside
+the new names so an older consumer still reads a new relay; a new consumer
+accepts either spelling, with the canonical name winning. Payload counters
+(bytes, frames, groups, datagrams) are unchanged. Traffic is split by an
+arbitrary **tier** label chosen by the auth server's grant or `--cluster-tier`,
+which is what makes billing per customer or per region possible. Read them with
+the [`moq-stats`](https://docs.rs/moq-stats) crate.
 
 ## \[iroh]
 
@@ -237,7 +240,7 @@ See [Transport](/concept/transport#iroh-peer-to-peer-experimental).
 level = "info"                       # RUST_LOG overrides this.
 ```
 
-At `info` the relay logs one `listening` record for the `[server]` QUIC socket
+At `info` the relay logs one `listening` record for the `[listen]` QUIC socket
 and each public `[web]` listener as it binds. Each record carries the bound
 address and a `kind` naming the listener:
 
@@ -251,5 +254,5 @@ For these listeners, `addr` is the address the socket bound, not the one
 configured, so a `listen` port of `0` reports the port the OS picked. That is
 the only way to learn it from outside the process, and the QUIC and TCP ports
 are chosen independently.
-A relay with no `[server]` UDP socket logs `listening (stream transports only)`
+A relay with no `[listen]` UDP socket logs `listening (stream transports only)`
 instead of the `quic` line.

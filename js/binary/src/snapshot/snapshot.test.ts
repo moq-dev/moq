@@ -10,7 +10,7 @@ const REPLAY_LATENCY = 30_000;
 
 // Drain every value currently available from a fresh consumer over the (finished) track.
 async function drain(track: Track.Subscriber, compression: boolean): Promise<Uint8Array[]> {
-	const consumer = new Consumer({ track, compression });
+	const consumer = new Consumer({ track, compression: compression ? "deflate" : "none" });
 	const out: Uint8Array[] = [];
 	for (;;) {
 		const value = await consumer.next();
@@ -57,7 +57,7 @@ test("a live consumer sees each update", async () => {
 
 test("compressed roundtrip", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer({ track, compression: true });
+	const producer = new Producer({ track, compression: "deflate" });
 	const payload = new TextEncoder().encode("the quick brown fox".repeat(64));
 	producer.update(payload);
 	producer.finish();
@@ -69,7 +69,7 @@ test("compression shrinks the frame on the wire", async () => {
 	// A consumer that ignored the catalog's compression flag would read this raw and get garbage,
 	// which is why the flag has to be carried rather than guessed.
 	const track = new Track.Producer("test");
-	const producer = new Producer({ track, compression: true });
+	const producer = new Producer({ track, compression: "deflate" });
 	const payload = new TextEncoder().encode("the quick brown fox".repeat(64));
 	producer.update(payload);
 	producer.finish();

@@ -1,26 +1,30 @@
 use futures::{Sink, Stream};
 use qmux::ws::tungstenite;
 use std::{
+	net::SocketAddr,
 	pin::Pin,
 	sync::{Arc, atomic::Ordering},
 	task::{Context, Poll},
 };
 
 use axum::{
-	extract::{Extension, OriginalUri, State, WebSocketUpgrade, ws::rejection::WebSocketUpgradeRejection},
-	http::{HeaderMap, HeaderValue, StatusCode, Uri, header::HOST},
+	extract::{ConnectInfo, Extension, OriginalUri, State, WebSocketUpgrade, ws::rejection::WebSocketUpgradeRejection},
+	http::{HeaderMap, HeaderValue, StatusCode, header::HOST},
 	response::Response,
 };
 use moq_net::origin;
 use moq_net::stats::Session;
 
-use crate::{auth, web, web::WebState, web::landing_response};
+use crate::{auth, web::MtlsPeer, web::WebState, web::landing_response};
 
+// One axum extractor per fact the upgrade needs; there is no struct to fold them into.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn serve_ws(
 	ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 	OriginalUri(uri): OriginalUri,
 	headers: HeaderMap,
-	mtls: Option<Extension<web::MtlsPeer>>,
+	mtls: Option<Extension<MtlsPeer>>,
+	ConnectInfo(remote): ConnectInfo<crate::listener::Peer>,
 	socket_stats: Option<Extension<crate::web::SocketStats>>,
 	Extension(versions): Extension<moq_net::Versions>,
 	State(state): State<Arc<WebState>>,
@@ -39,14 +43,22 @@ pub(crate) async fn serve_ws(
 		.map(axum::http::uri::Authority::as_str)
 		.or_else(|| headers.get(HOST).and_then(|value| value.to_str().ok()))
 		.ok_or(StatusCode::BAD_REQUEST)?;
-	let mut params = request_auth_params(&state.auth, host, &uri)?;
-	params.transport = Some(moq_tokio::Transport::WebSocket);
-	let token = if mtls.is_some() {
-		// mTLS peers: the API returns the canonical root and the billing tier.
-		state.auth.verify_mtls(&params.path, params.transport).await?
-	} else {
-		state.auth.verify(&params).await?
-	};
+	// The SETUP has not happened yet, so the role is unknown; the path and query
+	// are the URL's, with the host the client addressed as the server name.
+	let mut request = state
+		.auth
+		.request(moq_auth::Transport::WebSocket, uri.path().to_string());
+	request.query = uri.query().map(str::to_owned);
+	request.server_name = host
+		.parse::<axum::http::uri::Authority>()
+		.ok()
+		.map(|a| a.host().to_ascii_lowercase());
+	request.remote = Some(remote.0);
+	request.alpn = ws.selected_protocol().and_then(|p| p.to_str().ok()).map(str::to_owned);
+	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| auth::peer(&identity));
+	let bytes = moq_auth::Counters::default();
+	let session_id = request.id.clone();
+	let auth::Admitted { lease, token } = state.auth.admit(request, bytes.clone()).await?;
 	let publish = state.cluster.publisher(&token);
 	let subscribe = state.cluster.subscriber(&token);
 	let stats = state.cluster.stats.tier(token.tier.clone()).session(&token.root);
@@ -68,6 +80,8 @@ pub(crate) async fn serve_ws(
 		let socket = WebSocketAdapter::new(socket);
 		let session = SessionInputs {
 			id,
+			session: session_id,
+			remote: remote.0,
 			alpn,
 			versions,
 			publish,
@@ -76,21 +90,15 @@ pub(crate) async fn serve_ws(
 			shutdown: state.shutdown.clone(),
 			socket_stats: socket_stats.map(|Extension(s)| s),
 		};
-		let auth = state.auth.clone();
-		let expired = async move { auth.expired(&token).await };
-		let _ = handle_socket(socket, session, expired).await;
+		let _ = handle_socket(socket, session, lease, token, bytes).await;
 	}))
-}
-
-/// Apply the same host and path authentication routing used by native WebTransport.
-fn request_auth_params(auth: &auth::Auth, host: &str, uri: &Uri) -> Result<auth::Params, StatusCode> {
-	let path = uri.path_and_query().ok_or(StatusCode::BAD_REQUEST)?;
-	let url = url::Url::parse(&format!("https://{host}{path}")).map_err(|_| StatusCode::BAD_REQUEST)?;
-	Ok(auth.params_from_url(&url))
 }
 
 struct SessionInputs {
 	id: u64,
+	/// The moq-auth session id, the key every auth event for this session shares.
+	session: String,
+	remote: SocketAddr,
 	alpn: Option<String>,
 	versions: moq_net::Versions,
 	publish: Option<origin::Producer>,
@@ -101,12 +109,14 @@ struct SessionInputs {
 	socket_stats: Option<crate::web::SocketStats>,
 }
 
-/// Serve one upgraded WebSocket until it closes or its credential expires.
-#[tracing::instrument("ws", err, skip_all, fields(id = session.id))]
+/// Serve one upgraded WebSocket until it closes or its lease ends.
+#[tracing::instrument("ws", err, skip_all, fields(id = session.id, remote = %session.remote, session = %session.session))]
 async fn handle_socket<T>(
 	socket: T,
 	session: SessionInputs,
-	expired: impl Future<Output = crate::auth::Expired>,
+	mut lease: auth::Lease,
+	token: auth::Token,
+	bytes: moq_auth::Counters,
 ) -> anyhow::Result<()>
 where
 	T: futures::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
@@ -117,6 +127,8 @@ where
 {
 	let SessionInputs {
 		id: _,
+		session: _,
+		remote: _,
 		alpn,
 		versions,
 		publish,
@@ -168,24 +180,58 @@ where
 		.await?;
 	let mut driver = runtime.take().expect("accept hands the machine to its runtime");
 
-	tokio::select! {
-		res = &mut driver => res.map_err(Into::into),
-		reason = expired => {
-			tracing::info!(%reason, "credential no longer valid, closing session");
-			session.abort(moq_net::Error::Unauthorized);
-			// Drive the teardown so the close reaches the peer.
-			driver.await.map_err(Into::into)
-		}
-		_ = shutdown.started() => {
-			tracing::info!("relay shutting down; draining session");
-			// Unlike QUIC sessions (whose driver is spawned), this driver runs
-			// inline, so keep polling it while the drain waits: the GOAWAY only
-			// reaches the wire through it.
-			let drain = shutdown.drain_session(&session);
-			let mut drain = std::pin::pin!(drain);
-			tokio::select! {
-				res = &mut driver => res.map_err(Into::into),
-				_ = &mut drain => driver.await.map_err(Into::into),
+	let meter = |session: &moq_net::Session| {
+		let stats = session.stats();
+		bytes.add_sent(stats.bytes_sent.unwrap_or_default());
+		bytes.add_received(stats.bytes_received.unwrap_or_default());
+	};
+	loop {
+		tokio::select! {
+			res = &mut driver => {
+				meter(&session);
+				lease.close(match &res {
+					Ok(()) => "closed".to_string(),
+					Err(err) => err.to_string(),
+				});
+				return res.map_err(Into::into);
+			}
+			changed = lease.changed() => {
+				let why = match changed {
+					Ok(grant) => match crate::recheck(&token, &grant) {
+						crate::Recheck::Covered => continue,
+						crate::Recheck::Closed(why) => {
+							tracing::info!(%why, "grant no longer covers the session, closing");
+							Some(why)
+						}
+					},
+					Err(reason) => {
+						tracing::info!(%reason, "lease ended, closing session");
+						None
+					}
+				};
+				session.abort(moq_net::Error::Unauthorized);
+				// Drive the teardown so the close reaches the peer.
+				let res = driver.await.map_err(Into::into);
+				meter(&session);
+				if let Some(why) = why {
+					lease.close(why);
+				}
+				return res;
+			}
+			_ = shutdown.started() => {
+				tracing::info!("relay shutting down; draining session");
+				// Unlike QUIC sessions (whose driver is spawned), this driver runs
+				// inline, so keep polling it while the drain waits: the GOAWAY only
+				// reaches the wire through it.
+				let drain = shutdown.drain_session(&session);
+				let mut drain = std::pin::pin!(drain);
+				let res = tokio::select! {
+					res = &mut driver => res.map_err(Into::into),
+					_ = &mut drain => driver.await.map_err(Into::into),
+				};
+				meter(&session);
+				lease.close("shutdown");
+				return res;
 			}
 		}
 	}
@@ -376,7 +422,6 @@ fn tungstenite_text_to_axum(text: tungstenite::Utf8Bytes) -> axum::extract::ws::
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::auth;
 	use axum::{Router, extract::WebSocketUpgrade, routing::any};
 	use futures::SinkExt;
 	use std::{io, sync::atomic::AtomicBool, time::Duration};
@@ -467,23 +512,6 @@ mod tests {
 		let converted = axum::body::Bytes::from(converted);
 		assert_eq!(converted, retained);
 		assert_eq!(converted.as_ptr(), retained.as_ptr());
-	}
-
-	#[tokio::test]
-	async fn websocket_auth_applies_subdomain_routing() {
-		let config: auth::Config = serde_json::from_value(serde_json::json!({
-			"domains": ["cdn.moq.pro"],
-			"public": "viewer"
-		}))
-		.expect("parse auth config");
-		let auth = auth::Auth::new(config).await.expect("build auth");
-		for uri in ["/bbb.hang?jwt=token", "https://demo.cdn.moq.pro/bbb.hang?jwt=token"] {
-			let uri: Uri = uri.parse().expect("parse URI");
-			let params = request_auth_params(&auth, "demo.cdn.moq.pro", &uri).expect("build auth params");
-
-			assert_eq!(params.path, "/demo/bbb.hang");
-			assert_eq!(params.jwt.as_deref(), Some("token"));
-		}
 	}
 
 	/// The newest moq ALPN both sides agree on. Derived from the same source
@@ -907,6 +935,8 @@ mod tests {
 
 		let session = SessionInputs {
 			id: 0,
+			session: String::new(),
+			remote: "127.0.0.1:0".parse().unwrap(),
 			alpn: Some(alpn.clone()),
 			versions: moq_net::Versions::all(),
 			publish: None,
@@ -917,10 +947,17 @@ mod tests {
 			// than through an accepted socket.
 			socket_stats: None,
 		};
+		let lease = crate::auth::Lease::fixed(moq_auth::Grant::new(
+			[moq_auth::Pattern::all()].into_iter().collect(),
+			[moq_auth::Pattern::all()].into_iter().collect(),
+		));
+		let token = crate::auth::Token::new("/", &lease.grant()).expect("token");
 		let server = tokio::spawn(handle_socket(
 			Pipe::new(server_incoming, server_to_client, frozen.clone()),
 			session,
-			std::future::pending::<crate::auth::Expired>(),
+			lease,
+			token,
+			moq_auth::Counters::default(),
 		));
 
 		// A real qmux peer, so the transport handshake completes and its 10s

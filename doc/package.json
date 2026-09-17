@@ -16,6 +16,7 @@
 		"@types/node": "^26.4.1",
 		"typescript": "7.0.2",
 		"vitepress": "^1.6.4",
+		"vitepress-plugin-llms": "^1.14.0",
 		"wrangler": "^4.129.0",
 		"yaml": "^2.9.0"
 	}

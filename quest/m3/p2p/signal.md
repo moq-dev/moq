@@ -38,7 +38,7 @@ ICE failure is terminal for the pair until either side re-announces; no
 retry loop. Each established connection goes through `Connection.connect`
 with the supplied transport on the dialing side and `Connection.accept` on
 the answering side, both with `publish: origin.consume()` and
-`subscribe: origin`. Because the JS origin serves only what the tab publishes
+`consume: origin`. Because the JS origin serves only what the tab publishes
 locally, transit stays a follow-up.
 
 ## Required

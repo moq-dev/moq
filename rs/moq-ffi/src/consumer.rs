@@ -4,7 +4,6 @@ use std::task::{Poll, ready};
 
 use bytes::Buf;
 
-use crate::cancel::{self, MoqCancel};
 use crate::error::MoqError;
 use crate::ffi::{Guard, Task};
 use crate::media::*;
@@ -49,15 +48,15 @@ pub struct MoqSubscription {
 	/// Delivery priority; higher values preempt lower ones under bandwidth contention.
 	#[uniffi(default = 0)]
 	pub priority: u8,
-	/// Maximum age of a non-latest group before it is skipped, in milliseconds.
+	/// Maximum age of a non-latest group before it is skipped, in microseconds.
 	/// `0` skips immediately; a larger value tolerates that much reordering.
 	///
 	/// Enforced both by the publisher's cache (sent on the wire) and by any local
 	/// buffering, such as `subscribe_media`'s jitter buffer.
 	#[uniffi(default = 0)]
-	pub max_age_ms: u64,
+	pub max_age_us: u64,
 	/// The lowest group to deliver (a floor), or null for none. A floor is not a
-	/// request: `max_age_ms` is what asks for data, and delivery starts at the oldest
+	/// request: `max_age_us` is what asks for data, and delivery starts at the oldest
 	/// group at or above the floor within that budget (the latest group at the default
 	/// budget of 0).
 	#[uniffi(default = None)]
@@ -86,7 +85,7 @@ impl From<MoqSubscription> for moq_net::track::Subscription {
 	fn from(s: MoqSubscription) -> Self {
 		moq_net::track::Subscription::default()
 			.with_priority(s.priority)
-			.with_max_age(std::time::Duration::from_millis(s.max_age_ms))
+			.with_max_age(std::time::Duration::from_micros(s.max_age_us))
 			.with_start(s.group_start.map(moq_net::track::Position::group))
 			.with_end(s.group_end.map(moq_net::track::Position::group))
 	}
@@ -203,61 +202,39 @@ impl MoqBroadcastConsumer {
 	/// standalone broadcast has no sibling to name, and reports a sibling that exists but is not
 	/// announced yet as unroutable rather than waiting for it (see
 	/// [`MoqOriginConsumer::request_broadcast`](crate::origin::MoqOriginConsumer::request_broadcast)).
-	///
-	/// `cancel` aborts this call alone; see [`MoqCancel`].
-	#[uniffi::method(default(cancel = None))]
-	pub async fn resolve(
-		&self,
-		reference: Option<String>,
-		cancel: Option<Arc<MoqCancel>>,
-	) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		cancel::guard(cancel, async {
-			let broadcast = self.resolve_inner(reference.as_deref()).await?;
-			Ok(Arc::new(match self.origin.clone() {
-				Some(origin) => Self::routed(broadcast, origin),
-				None => Self::new(broadcast),
-			}))
-		})
-		.await
+	pub async fn resolve(&self, reference: Option<String>) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
+		let broadcast = self.resolve_inner(reference.as_deref()).await?;
+		Ok(Arc::new(match self.origin.clone() {
+			Some(origin) => Self::routed(broadcast, origin),
+			None => Self::new(broadcast),
+		}))
 	}
 
 	/// Subscribe to the catalog for this broadcast.
-	///
-	/// `cancel` aborts this call alone; see [`MoqCancel`].
-	#[uniffi::method(default(cancel = None))]
-	pub async fn subscribe_catalog(&self, cancel: Option<Arc<MoqCancel>>) -> Result<Arc<MoqCatalogConsumer>, MoqError> {
-		cancel::guard(cancel, async {
-			let track = self
-				.inner
-				.track(hang::catalog::Catalog::DEFAULT_NAME)?
-				.subscribe(hang::catalog::Catalog::default_subscription())
-				.await?;
-			let consumer = moq_mux::catalog::hang::Consumer::from(track);
-			Ok(Arc::new(MoqCatalogConsumer {
-				task: Task::new(Catalog { inner: consumer }),
-			}))
-		})
-		.await
+	pub async fn subscribe_catalog(&self) -> Result<Arc<MoqCatalogConsumer>, MoqError> {
+		let track = self
+			.inner
+			.track(hang::catalog::Catalog::DEFAULT_NAME)?
+			.subscribe(hang::catalog::Catalog::default_subscription())
+			.await?;
+		let consumer = moq_mux::catalog::hang::Consumer::from(track);
+		Ok(Arc::new(MoqCatalogConsumer {
+			task: Task::new(Catalog { inner: consumer }),
+		}))
 	}
 
 	/// Subscribe to a track by name, the same pattern as moq-boy's command/status tracks.
 	///
 	/// Frames are returned as plain byte payloads with no codec or container parsing.
 	/// `subscription` tunes delivery priority, group range, and staleness; omit for defaults.
-	/// `cancel` aborts this call alone; see [`MoqCancel`].
-	#[uniffi::method(default(cancel = None))]
 	pub async fn subscribe_track(
 		&self,
 		name: String,
 		subscription: Option<MoqSubscription>,
-		cancel: Option<Arc<MoqCancel>>,
 	) -> Result<Arc<MoqTrackConsumer>, MoqError> {
-		cancel::guard(cancel, async {
-			let subscription = subscription.map(moq_net::track::Subscription::from);
-			let track = self.inner.track(&name)?.subscribe(subscription).await?;
-			Ok(Arc::new(MoqTrackConsumer::new(track)))
-		})
-		.await
+		let subscription = subscription.map(moq_net::track::Subscription::from);
+		let track = self.inner.track(&name)?.subscribe(subscription).await?;
+		Ok(Arc::new(MoqTrackConsumer::new(track)))
 	}
 
 	/// Fetch one complete group by track name and group sequence.
@@ -265,23 +242,16 @@ impl MoqBroadcastConsumer {
 	/// This does not create a live subscription. A retained group resolves immediately;
 	/// otherwise the request waits for a dynamic producer to serve it. The returned
 	/// group may still be in progress, so read frames until `read_frame()` returns `None`.
-	///
-	/// `cancel` aborts this call alone; see [`MoqCancel`].
-	#[uniffi::method(default(cancel = None))]
 	pub async fn fetch_group(
 		&self,
 		name: String,
 		sequence: u64,
 		options: Option<MoqFetchGroupOptions>,
-		cancel: Option<Arc<MoqCancel>>,
 	) -> Result<Arc<MoqGroupConsumer>, MoqError> {
-		cancel::guard(cancel, async {
-			let options = options.map(moq_net::group::Fetch::from);
-			let track = self.inner.track(&name).map_err(map_fetch_error)?;
-			let group = track.fetch_group(sequence, options).await.map_err(map_fetch_error)?;
-			Ok(Arc::new(MoqGroupConsumer::new(group)))
-		})
-		.await
+		let options = options.map(moq_net::group::Fetch::from);
+		let track = self.inner.track(&name).map_err(map_fetch_error)?;
+		let group = track.fetch_group(sequence, options).await.map_err(map_fetch_error)?;
+		Ok(Arc::new(MoqGroupConsumer::new(group)))
 	}
 
 	/// Fetch one group and decode its track container into media frames.
@@ -289,27 +259,20 @@ impl MoqBroadcastConsumer {
 	/// Unlike [`Self::subscribe_media`], this does not create a live subscription or apply
 	/// age-based group skipping. The returned consumer reads exactly the requested group
 	/// until [`MoqMediaGroupConsumer::next`] returns `None`.
-	///
-	/// `cancel` aborts this call alone; see [`MoqCancel`].
-	#[uniffi::method(default(cancel = None))]
 	pub async fn fetch_media_group(
 		&self,
 		name: String,
 		sequence: u64,
 		container: MoqContainer,
 		options: Option<MoqFetchGroupOptions>,
-		cancel: Option<Arc<MoqCancel>>,
 	) -> Result<Arc<MoqMediaGroupConsumer>, MoqError> {
-		cancel::guard(cancel, async {
-			// Parse the container before fetching so invalid CMAF init data does not leave a
-			// dynamic group request waiting for a consumer that can never read it.
-			let media = media_container(container)?;
-			let options = options.map(moq_net::group::Fetch::from);
-			let track = self.inner.track(&name).map_err(map_fetch_error)?;
-			let group = track.fetch_group(sequence, options).await.map_err(map_fetch_error)?;
-			Ok(Arc::new(MoqMediaGroupConsumer::new(group, media)))
-		})
-		.await
+		// Parse the container before fetching so invalid CMAF init data does not leave a
+		// dynamic group request waiting for a consumer that can never read it.
+		let media = media_container(container)?;
+		let options = options.map(moq_net::group::Fetch::from);
+		let track = self.inner.track(&name).map_err(map_fetch_error)?;
+		let group = track.fetch_group(sequence, options).await.map_err(map_fetch_error)?;
+		Ok(Arc::new(MoqMediaGroupConsumer::new(group, media)))
 	}
 
 	/// Subscribe to a track by name, delivering frames in decode order.
@@ -317,30 +280,23 @@ impl MoqBroadcastConsumer {
 	/// `container` is the track container from the catalog.
 	/// `subscription` tunes delivery priority, group range, and staleness; omit for defaults.
 	///
-	/// [`MoqSubscription::max_age_ms`] bounds the local jitter buffer as well as
+	/// [`MoqSubscription::max_age_us`] bounds the local jitter buffer as well as
 	/// the publisher's cache, so both ends skip a stalled group on the same budget.
-	///
-	/// `cancel` aborts this call alone; see [`MoqCancel`].
-	#[uniffi::method(default(cancel = None))]
 	pub async fn subscribe_media(
 		&self,
 		name: String,
 		container: MoqContainer,
 		subscription: Option<MoqSubscription>,
-		cancel: Option<Arc<MoqCancel>>,
 	) -> Result<Arc<MoqMediaConsumer>, MoqError> {
-		cancel::guard(cancel, async {
-			// Parse the container before subscribing so we don't leave a dangling
-			// subscription if init parsing fails.
-			let media = media_container(container)?;
-			let subscription = subscription.map(moq_net::track::Subscription::from).unwrap_or_default();
-			let track = self.inner.track(&name)?.subscribe(subscription).await?;
-			let consumer = moq_mux::container::Consumer::new(track, media);
-			Ok(Arc::new(MoqMediaConsumer {
-				task: Task::new(Media { inner: consumer }),
-			}))
-		})
-		.await
+		// Parse the container before subscribing so we don't leave a dangling
+		// subscription if init parsing fails.
+		let media = media_container(container)?;
+		let subscription = subscription.map(moq_net::track::Subscription::from).unwrap_or_default();
+		let track = self.inner.track(&name)?.subscribe(subscription).await?;
+		let consumer = moq_mux::container::Consumer::new(track, media);
+		Ok(Arc::new(MoqMediaConsumer {
+			task: Task::new(Media { inner: consumer }),
+		}))
 	}
 }
 

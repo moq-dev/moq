@@ -259,10 +259,15 @@ impl Decoder {
 	/// Reset codec history and reapply startup delay for a new discontinuous epoch.
 	pub fn reset(&mut self) -> Result<(), Error> {
 		self.reset_prediction()?;
+		self.reapply_delay();
+		Ok(())
+	}
+
+	/// Reapply catalog startup delay for a new playhead epoch without resetting codec prediction.
+	pub(super) fn reapply_delay(&mut self) {
 		if let Backend::Opus(opus) = &mut self.backend {
 			opus.pre_skip_remaining = self.delay;
 		}
-		Ok(())
 	}
 
 	/// Reset codec prediction after packet loss without reapplying stream startup delay.

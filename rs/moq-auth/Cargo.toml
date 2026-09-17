@@ -13,10 +13,13 @@ rust-version.workspace = true
 default = ["client"]
 # The HTTP client that drives a lease against an auth server.
 client = ["dep:reqwest", "dep:rustls", "dep:tokio", "dep:tracing", "dep:rand", "dep:hex"]
+# The reference auth server behind `moq auth serve`: the policy a relay held, on axum.
+serve = ["dep:axum", "dep:tokio", "dep:tracing", "tokio/net"]
 tokio = ["dep:tokio"]
 
 [dependencies]
 aws-lc-rs = { workspace = true }
+axum = { workspace = true, optional = true }
 base64 = { workspace = true }
 hex = { workspace = true, optional = true }
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
@@ -38,5 +41,7 @@ url = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
+moq-auth = { path = ".", features = ["client", "serve"] }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 wiremock = "0.6"

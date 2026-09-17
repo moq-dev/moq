@@ -1,4 +1,5 @@
-.watch-ui__unsupported-indicator {
+/* A centered text notice explaining why video isn't playing. */
+.watch-ui__notice {
 	position: absolute;
 	top: 50%;
 	left: 50%;
@@ -15,7 +16,7 @@
 	pointer-events: auto;
 }
 
-.watch-ui__unsupported-text {
+.watch-ui__notice-text {
 	font-size: 0.875rem;
 	font-weight: 600;
 	line-height: 1.4;
@@ -23,12 +24,12 @@
 }
 
 @media (max-width: 480px) {
-	.watch-ui__unsupported-indicator {
+	.watch-ui__notice {
 		max-width: 90%;
 		padding: 0.625rem 0.875rem;
 	}
 
-	.watch-ui__unsupported-text {
+	.watch-ui__notice-text {
 		font-size: 0.75rem;
 	}
 }

@@ -238,6 +238,13 @@ impl Listener {
 	/// loop, so this always yields. It stays because dropping it is a breaking change
 	/// to a published signature.
 	pub async fn accept(&self) -> Option<Result<qmux::Session>> {
+		self.accept_with_addr()
+			.await
+			.map(|result| result.map(|(session, _)| session))
+	}
+
+	/// Accept the next connection and retain the peer's address.
+	pub(crate) async fn accept_with_addr(&self) -> Option<Result<(qmux::Session, net::SocketAddr)>> {
 		let (stream, addr) = self.accept_socket().await;
 		tracing::debug!(%addr, "accepted TCP connection");
 		let session = qmux::tcp::Config::new(WIRE_VERSION)
@@ -245,7 +252,7 @@ impl Listener {
 			.accept(stream)
 			.await
 			.map_err(|err| Error::Accept(crate::error::message(err)));
-		Some(session)
+		Some(session.map(|session| (session, addr)))
 	}
 
 	/// The `accept(2)` half: keep asking until a connection comes back.

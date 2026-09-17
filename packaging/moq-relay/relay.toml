@@ -5,12 +5,12 @@
 # See https://moq.dev/docs/auth and the example configs at
 # https://github.com/moq-dev/moq/tree/main/demo/relay for more.
 
-[server]
+[listen]
 # Listen for QUIC connections on UDP:443.
 # This is the default port for WebTransport.
-listen = "[::]:443"
+bind = "[::]:443"
 
-[server.tls]
+[listen.tls]
 # Provide real certificates from Let's Encrypt or your CA of choice.
 # The default paths below are owned by the moq-relay service (DynamicUser)
 # via StateDirectory; drop your cert/key in /var/lib/moq-relay/.
@@ -28,13 +28,16 @@ key = "/var/lib/moq-relay/key.pem"
 # [web.http]
 # listen = "[::]:80"
 
-# JWT authentication. Generate a key with `moq auth generate`.
-# See https://moq.dev/docs/auth for the full reference.
+# Who is admitted. The relay asks an auth server once per session event; the
+# policy (keys, public patterns, the grant for mTLS peers) lives there:
+#
+#   moq auth serve --listen 127.0.0.1:4440 --key /var/lib/moq-relay/root.jwk \
+#     --public-subscribe 'anon/**' --public-subscribe 'demo/**' \
+#     --public-publish 'anon/**' --public-publish 'demo/viewer/**'
+#
+# Generate the key with `moq auth generate`. See https://moq.dev/docs/auth.
 [auth]
-key = "/var/lib/moq-relay/root.jwk"
+url = "http://127.0.0.1:4440/"
 
-# Allow anonymous subscribe under anon/** and demo/**.
-# Allow anonymous publish under anon/** and demo/viewer.
-[auth.public]
-subscribe = ["anon", "demo"]
-publish = ["anon", "demo/viewer"]
+# Or, with no server, a static anonymous grant:
+# public = "anon/**"

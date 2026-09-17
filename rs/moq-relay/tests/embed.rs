@@ -9,10 +9,12 @@
 
 #![cfg(feature = "_quic")]
 
-use std::net::{SocketAddr, TcpListener, UdpSocket};
+#[cfg(target_os = "linux")]
+use std::net::UdpSocket;
+use std::net::{SocketAddr, TcpListener};
 use std::time::Duration;
 
-use moq_relay::{Config, Relay, auth};
+use moq_relay::{Config, Relay};
 use moq_tokio::moq_net::{self, Hop};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -24,6 +26,9 @@ fn free_tcp_port() -> u16 {
 	port
 }
 
+/// Only used by the Linux-only worker/uring tests below; without the gate the
+/// macOS test build fails `-D warnings` on dead code.
+#[cfg(target_os = "linux")]
 fn free_udp_port() -> u16 {
 	let probe = UdpSocket::bind("127.0.0.1:0").expect("bind probe");
 	let port = probe.local_addr().expect("local addr").port();
@@ -43,10 +48,7 @@ fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf
 }
 
 fn public_auth(config: &mut Config) {
-	#[allow(deprecated)]
-	{
-		config.auth.public = Some(auth::Public::Simple(vec![String::new()]));
-	}
+	config.auth.public = vec![moq_auth::Pattern::all()];
 }
 
 fn client() -> moq_tokio::Client {

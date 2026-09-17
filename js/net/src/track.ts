@@ -401,8 +401,7 @@ let bindProducerSequence: (producer: Producer, sequence: TrackSequence) => void;
 let makeOrdered: (subscriber: Subscriber) => Ordered;
 let ordered_: {
 	nextGroup(subscriber: Subscriber): Promise<GroupConsumer | undefined>;
-	readFrame(subscriber: Subscriber): Promise<Frame | undefined>;
-	readFrameSequence(subscriber: Subscriber): Promise<({ group: number; frame: number } & Frame) | undefined>;
+	readFrame(subscriber: Subscriber): Promise<({ group: number; frame: number } & Frame) | undefined>;
 	readString(subscriber: Subscriber): Promise<string | undefined>;
 	readJson(subscriber: Subscriber): Promise<unknown | undefined>;
 	readBool(subscriber: Subscriber): Promise<boolean | undefined>;
@@ -999,7 +998,6 @@ export class Subscriber {
 		ordered_ = {
 			nextGroup: (subscriber) => subscriber.#nextGroup(),
 			readFrame: (subscriber) => subscriber.#readFrame(),
-			readFrameSequence: (subscriber) => subscriber.#readFrameSequence(),
 			readString: (subscriber) => subscriber.#readString(),
 			readJson: (subscriber) => subscriber.#readJson(),
 			readBool: (subscriber) => subscriber.#readBool(),
@@ -1304,16 +1302,7 @@ export class Subscriber {
 	}
 
 	/**
-	 * Reads the next frame across groups, in sequence order.
-	 * Treat the returned frame bytes as read-only; they are shared with other consumers.
-	 */
-	async #readFrame(): Promise<Frame | undefined> {
-		const next = await this.#readFrameSequence();
-		return next ? { payload: next.payload, timestamp: next.timestamp } : undefined;
-	}
-
-	/**
-	 * Reads the next frame along with its group and frame sequence numbers.
+	 * Reads the next frame across groups, in sequence order, with its group and frame numbers.
 	 * Treat the returned frame bytes as read-only; they are shared with other consumers.
 	 *
 	 * Groups are acquired through the same sequence cursor as {@link Ordered.nextGroup},
@@ -1322,7 +1311,7 @@ export class Subscriber {
 	 * mid-stall ends cleanly and the cursor resyncs from the next group; a gap inside a
 	 * group still surfaces as {@link Lagged} or {@link GroupTooLarge}.
 	 */
-	async #readFrameSequence(): Promise<({ group: number; frame: number } & Frame) | undefined> {
+	async #readFrame(): Promise<({ group: number; frame: number } & Frame) | undefined> {
 		for (;;) {
 			if (!this.#frameGroup) {
 				this.#frameGroup = await this.#nextGroup();
@@ -1499,19 +1488,14 @@ export class Ordered {
 	}
 
 	/**
-	 * Read the next frame across groups, in sequence order.
+	 * Read the next frame across groups, in sequence order, with its group and frame numbers.
 	 *
 	 * Rides the same cursor as {@link nextGroup} and shares this handle's contract: a
 	 * buffered backlog is drained in full up to the point `maxAge` proves it useless.
 	 * Treat the returned frame bytes as read-only; they are shared with other consumers.
 	 */
-	readFrame(): Promise<Frame | undefined> {
+	readFrame(): Promise<({ group: number; frame: number } & Frame) | undefined> {
 		return ordered_.readFrame(this.#subscriber);
-	}
-
-	/** The same, plus the group and frame sequence numbers the frame came from. */
-	readFrameSequence(): Promise<({ group: number; frame: number } & Frame) | undefined> {
-		return ordered_.readFrameSequence(this.#subscriber);
 	}
 
 	/** Read the next frame and decode it as a UTF-8 string. */

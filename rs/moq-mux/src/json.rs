@@ -112,10 +112,11 @@ impl<T: Serialize, E: CatalogExt> Snapshot<T, E> {
 		mut rendition: Rendition<E, JsonConfig>,
 		config: &Config,
 	) -> crate::Result<Self> {
-		let inner = moq_json::snapshot::Producer::new(
-			track,
-			moq_json::snapshot::ProducerConfig::default().with_compression(config.compression),
-		);
+		let mut json = moq_json::snapshot::Config::default();
+		if config.compression {
+			json.compression = moq_json::Compression::Deflate;
+		}
+		let inner = moq_json::snapshot::Producer::new(track, json);
 		rendition.set(config.entry(Mode::Snapshot))?;
 		Ok(Self { inner, rendition })
 	}
@@ -165,10 +166,11 @@ impl<T: Serialize, E: CatalogExt> Stream<T, E> {
 		mut rendition: Rendition<E, JsonConfig>,
 		config: &Config,
 	) -> crate::Result<Self> {
-		let inner = moq_json::stream::Producer::new(
-			track,
-			moq_json::stream::ProducerConfig::default().with_compression(config.compression),
-		);
+		let mut json = moq_json::stream::Config::default();
+		if config.compression {
+			json.compression = moq_json::Compression::Deflate;
+		}
+		let inner = moq_json::stream::Producer::new(track, json);
 		rendition.set(config.entry(Mode::Stream))?;
 		Ok(Self {
 			inner,
@@ -247,14 +249,20 @@ impl<T: DeserializeOwned> Consumer<T> {
 		let compression = crate::compression(config.compression.as_ref())?;
 
 		let inner = match &config.mode {
-			Mode::Snapshot => Inner::Snapshot(moq_json::snapshot::Consumer::new(
-				track,
-				moq_json::snapshot::ConsumerConfig::default().with_compression(compression),
-			)),
-			Mode::Stream => Inner::Stream(moq_json::stream::Consumer::new(
-				track,
-				moq_json::stream::ConsumerConfig::default().with_compression(compression),
-			)),
+			Mode::Snapshot => {
+				let mut json = moq_json::snapshot::consumer::Config::default();
+				if compression {
+					json.compression = moq_json::Compression::Deflate;
+				}
+				Inner::Snapshot(moq_json::snapshot::Consumer::new(track, json))
+			}
+			Mode::Stream => {
+				let mut json = moq_json::stream::Config::default();
+				if compression {
+					json.compression = moq_json::Compression::Deflate;
+				}
+				Inner::Stream(moq_json::stream::Consumer::new(track, json))
+			}
 			other => return Err(crate::Error::UnsupportedMode(other.to_string())),
 		};
 

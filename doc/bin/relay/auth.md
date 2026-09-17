@@ -1,25 +1,86 @@
 ---
 title: Authentication
-description: JWT, anonymous, mTLS, and API-driven access control for moq-relay
+description: "One auth contract for moq-relay: an auth server per session, or a static anonymous grant"
 ---
 
 # Authentication
 
-Access is decided per connection from the URL path the client dialed. A token
-(or an anonymous rule) grants publish and subscribe rights over path patterns
-under a root, and the session can only see that part of the tree.
+A relay admits a session in exactly one of two ways:
 
-| Method | When to use it |
+| Flag | What admits |
 | --- | --- |
-| **JWT** in `?jwt=` | Normal clients. Path-scoped, expiring, signed by a key the relay can verify. |
-| **Anonymous prefixes** | Public rooms, demos, viewer input channels. |
-| **mTLS** | Relay-to-relay clustering and trusted services. Full access under the dialed path. |
-| **Auth API** | A service that decides everything per connection: key, public access, path alias, billing tier. |
+| `--auth-url` | An auth server, asked once per session event with everything the relay knows. `moq auth serve` is the reference server; a Worker or a service of your own answers the same contract. |
+| `--auth-public` | A static grant for anonymous sessions: patterns under the dialed path, no server. |
+
+Setting both, or neither, fails at startup. Nothing else admits anyone: a
+verified client certificate is a fact the server weighs, never a grant on its
+own. A grant names publish and subscribe rights as path patterns under a root,
+and the session can only see that part of the tree.
+
+## The contract
+
+The relay POSTs one JSON body per session event to `--auth-url` and reads a
+grant back. The schemas are `moq_auth::Request` and `moq_auth::Grant`
+([Rust](/lib/rs/moq-auth), [TypeScript](/lib/js/auth)).
+
+**Request.** `id` (random 128-bit hex, unique per session), `event`
+(`connect`, `revalidate`, or `end`), `node` (the relay's `--stats-node`, else
+`--cluster-node`), `transport` (`quic`, `websocket`, `tcp`, `unix`, `iroh`, or
+`http` for a one-shot `/fetch` or `/announced` request), `remote` and `local`
+socket addresses, `server_name` (the SNI or the host the client addressed),
+`alpn` (the negotiated moq protocol), `path` exactly as dialed, `query` raw,
+`role` the client declared at SETUP (`publisher`, `subscriber`, absent for
+both), and `tls` with the verified client certificate when one was presented:
+`name` (first SAN DNS name, else CN, else the fingerprint), `fingerprint`
+(SHA-256 of the leaf), `expires`, `issuer`. Nothing is parsed on the server's
+behalf: the `jwt` query parameter is a convention of `moq auth serve`, not of
+the relay. An `end` adds `reason`, `duration` in seconds, and `bytes` sent and
+received.
+
+**Grant.** `publish` and `subscribe` as pattern unions (`foo/**` is a subtree,
+`**` is everything, an empty list is nothing), `root` (optional; replaces the
+dialed path, which is how a slug aliases to a canonical id), `expires`
+(optional unix seconds; the session closes then), `revalidate` (optional
+seconds until the relay asks again), and `tier` (optional label handed to
+[stats](/bin/relay/config#stats)). A 2xx with a grant admits. A 403 refuses.
+Anything else at connect, a timeout, a 5xx, or an unparseable body, refuses and
+logs an error; nothing is admitted because the server was down. A grant that
+names nothing refuses, and one with `revalidate` but no `expires` is refused
+as invalid.
+
+**Revalidate and outage.** On the cadence the relay POSTs `revalidate` with the
+same request. A grant applies: a changed `root` or one that no longer covers
+what the session holds closes it with `Unauthorized` (the origin cannot be
+resized in place until pattern scopes land); a changed `tier` is logged and
+applies to the session's next connection, since its stats counters were
+resolved at admission. A 403 closes the session now. Anything else retries
+with jittered backoff and the session lives until `expires`, so an outage always
+has the bound the server chose. There is no `Cache-Control` and no cache on the
+relay.
+
+**End.** Every close reports `end` with the reason: `expired`, `refused`, the
+session's own close classification, or `dropped`. The byte totals are what the
+transport reports; QUIC reports them, the qmux stream transports do not yet.
+
+**The link.** `https://` presents the relay's `connect.tls` client certificate
+when one is configured, so a remote server can tell which relay is asking;
+`unix://` speaks HTTP over a socket; `http://` is accepted for a loopback host
+only. There is no shared secret.
+
+**Patterns today.** The relay scopes a session by prefix until pattern scopes
+land, so only `foo/**` and `**` admit: a grant naming `live/*`, or a bare
+literal `foo`, is refused at connect naming the pattern.
+
+```toml
+[auth]
+url = "http://127.0.0.1:4440/"
+```
 
 ## Tokens
 
-Generate a key, sign a token, hand it to the client. Install the
-[moq CLI](/setup/install) and use its `moq auth` subcommand.
+With `moq auth serve`, a client presents a JWT in `?jwt=`. Generate a key,
+sign a token, hand it to the client. Install the [moq CLI](/setup/install)
+and use its `moq auth` subcommand.
 
 ```bash
 # Asymmetric: the relay only needs public.jwk.
@@ -31,9 +92,8 @@ moq auth sign --key private.jwk --root rooms/123 --publish 'alice/**' --subscrib
 moq auth verify --key public.jwk --in alice.jwt
 ```
 
-```toml
-[auth]
-key = "public.jwk"          # or key_dir = "/etc/moq/keys/" for {kid}.jwk rotation
+```bash
+moq auth serve --key public.jwk   # or --key-dir /etc/moq/keys/ for {kid}.jwk rotation
 ```
 
 The client dials `https://relay.example.com/rooms/123?jwt=<token>`. HMAC
@@ -75,116 +135,115 @@ Libraries: [`moq-auth`](/lib/rs/moq-auth) (Rust) and [`@moq/auth`](/lib/js/auth)
 
 ```toml
 [auth]
-key = "public.jwk"
-public = "anon"             # anyone may publish and subscribe under anon/
+public = "anon/**"                    # anyone may publish and subscribe under anon/
 
 # or asymmetric rules:
-[auth.public]
-subscribe = ["anon", "demo"]
-publish = ["anon"]
+public_subscribe = ["anon/**", "demo/**"]
+public_publish = ["anon/**"]
 ```
 
-`public = ""` opens everything and is for development only.
+A static grant with no expiry and no re-check. `public = "**"` opens everything
+and is for development only. With `--auth-url` the anonymous rules live on the
+server instead (`moq auth serve --public-*`).
 
 ## mTLS
 
-Clients presenting a certificate signed by a trusted CA get full access under
-the path they dialed. A cluster peer dialing `/` gets everything, which is how
-relays authenticate to each other without long-lived JWTs.
+`listen.tls.root` verifies a client certificate chain at the handshake, and a
+bad chain still fails there. What the certificate admits is the server's
+decision: the relay reports its facts in the request's `tls` and enforces the
+grant it gets back. `moq auth serve` grants a certificate only what
+`--mtls-publish` and `--mtls-subscribe` name, empty by default. A relay on
+`--auth-public` grants a certificate what it grants everyone.
+
+Cluster peers are admitted the same way, so a mesh runs
+`moq auth serve --mtls-publish '**' --mtls-subscribe '**'` (or a server
+granting its cluster CA everything); see [Clustering](/bin/relay/cluster).
+The LAN mesh credential on `/.cluster/<credential>` stays relay-internal: it
+is a secret the relay minted for itself, checked locally, and never a request
+to the server.
 
 ```toml
 [listen.tls]
 root = ["/etc/moq/peer-ca.pem"]
 
 [connect.tls]
-cert = "/etc/moq/relay.pem"    # presented on outbound dials and to the auth API
+cert = "/etc/moq/relay.pem"    # presented on outbound dials and to an https:// auth server
 key = "/etc/moq/relay.key"
 ```
 
-## Auth API
+## Auth server
 
-One HTTP call per connection replaces `key_dir`, `public`, and the rest:
+`moq auth serve` is the reference auth server: the policy the relay used to
+hold, answered over the contract above.
 
-```toml
-[auth]
-auth_api = "https://api.example.com/auth"
+```bash
+moq auth serve --listen 127.0.0.1:4440 \
+  --key-dir /etc/moq/keys \
+  --public-subscribe 'anon/**' --public-publish 'anon/**' \
+  --mtls-publish '**' --mtls-subscribe '**' \
+  --tier edge --revalidate 1m --limit-remote 64
 ```
 
-The relay issues `GET <url>?root=<path>&kid=<kid>&mtls=true&transport=<quic|websocket|tcp|unix|iroh>`
-and expects JSON with optional fields:
+Policy runs in this order and stops at the first that applies:
 
-| Field | Purpose |
+1. A `jwt` in the query is verified against `--key FILE` or `--key-dir DIR`
+   (by `kid`, read per request so rotation needs no restart). Its
+   claims are the grant and its `root` must equal the dialed path. A
+   malformed, expired, or unknown-key token is refused; it never falls
+   through to the anonymous rules.
+2. A verified client certificate gets `--mtls-publish` and
+   `--mtls-subscribe`, and nothing when they are empty. Cluster peers are
+   admitted this way; a mesh needs `'**'` for both.
+3. Anything else gets `--public-publish` and `--public-subscribe`, and is
+   refused when they are empty.
+
+Every grant carries `--tier`, a `revalidate` cadence (`--revalidate`, default
+one minute), and an `expires`: the token's `exp`, the certificate's notAfter,
+or `--expires` (default one day) when neither has one.
+
+`--limit-token N` and `--limit-remote N` cap live sessions per token and
+per remote address (port dropped, IPv4-mapped IPv6 folded), counted from
+`connect` and `end` by session id. The cap is a nuisance limit, not a security
+boundary: it gates admission and never revokes. A relay that dies without an
+`end` holds its slots until they miss two cadences, a restart empties the table
+until the fleet's next cadence refills it, and a session admitted while a live
+one's slot was missing stays over the cap. A refusal names the rule in the 403
+body.
+
+`--listen unix:/run/moq-auth.sock` serves a socket. Binding anything but a
+loopback address needs `--listen-public`: the server has no authentication of
+its own.
+
+### Migrating from the relay flags
+
+The relay flags below were deleted; the policy moves to the server and the
+relay gets `--auth-url`.
+
+| Removed relay flag | `moq auth serve` |
 | --- | --- |
-| `key` | The verifying JWK for this `kid`. |
-| `public` | `{ "subscribe": [...], "publish": [...] }` anonymous prefixes under the root. |
-| `alias` | Rewrite the root, so a vanity name and a stable id map to one broadcast tree. |
-| `tier` | The label this session's [stats](/bin/relay/config#stats) record under, for billing. |
+| `--auth-key FILE` | `--key FILE` |
+| `--auth-key-dir DIR` | `--key-dir DIR` |
+| `--auth-public PREFIX` | `--public-publish 'PREFIX/**' --public-subscribe 'PREFIX/**'` |
+| `--auth-public-publish` / `--auth-public-subscribe` | `--public-publish` / `--public-subscribe`, as patterns |
+| `--auth-public-api URL` | your own server answering the contract |
+| `--auth-mtls-tier LABEL` | `--tier LABEL` (one tier per server) |
+| `listen.tls.root` alone admitting a peer unscoped | `--mtls-publish '**' --mtls-subscribe '**'` |
+| `--auth-api` (token or proxy mode), `Cache-Control` | `--auth-url` pointed at any server answering the contract; `revalidate` and `expires` in the grant |
+| `--auth-domain` | your server reads `server_name` and decides |
 
-It fails closed: a network error or non-2xx rejects the connection. If the
-response carries `Cache-Control: max-age`, the relay re-asks on that cadence
-and closes sessions whose grant is withdrawn, so revoking a key or banning a
-tenant takes effect on live sessions rather than only new ones.
-`stale-if-error` says how long to keep serving through an outage (default one
-hour).
+Both on one host:
 
-### Proxy mode
-
-Set `api_mode = "proxy"` in `[auth]` (or `--auth-api-mode proxy`) to let the
-endpoint authorize an opaque credential instead of returning a verifying key.
-The default mode is `token`.
-
-```http
-GET <url>?root=demo&host=live.example.com&transport=quic
-Authorization: Bearer <credential>
+```bash
+moq auth serve --listen 127.0.0.1:4440 --key-dir /etc/moq/keys --public-subscribe 'anon/**'
+moq-relay --auth-url http://127.0.0.1:4440/
 ```
-
-```json
-{
-  "alias": "x7k2qp",
-  "tier": "region/sjc",
-  "grant": { "subscribe": ["room"], "publish": ["room/alice"], "exp": 1893456000 }
-}
-```
-
-The host comes from the URL authority or HTTP/1.1 `Host` header. The credential
-arrives in the client's `?jwt=` parameter but need not be a JWT. The endpoint
-owns verification and policy; the relay enforces the returned grant. `key` and
-`public` fields do not authorize proxy connections. An absent or empty grant
-refuses access.
-
-Grant prefixes are relative to `grant.root`, which defaults to the connection
-path. The alias may reshape that path: `/` can become `x7k2qp`, or `/room` can
-become `x7k2qp/room`, with the granted prefixes following the mapping. Token
-mode aliases must preserve path depth. Proxy mode cannot be combined with
-`--auth-domain`; either mode requires `--auth-api` when explicitly configured.
-
-`exp` is Unix seconds and bounds the whole session, including in-flight
-rechecks. Each successful proxy recheck replaces it, allowing renewal or a
-shorter lifetime. Token mode cannot extend a signed JWT's expiry. A response
-without a usable positive `max-age` does not enable rechecks, so an omitted
-`exp` then leaves the session without an expiry timer.
-
-A `404` or withdrawn grant closes a revalidated session. `401`/`403` also revoke
-it when the proxy request carried a credential. For anonymous proxy requests
-and token-mode requests, those statuses remain outages subject to
-`stale-if-error`, because they cannot identify a rejected viewer credential.
-
-Proxy responses cache per credential, using a SHA-256 cache key even if the
-endpoint omits `Vary: Authorization`. Send that header for any intermediate
-caches. The proxy client uses private HTTP caching, so plain `max-age` works
-with credentials. Token, JWK, and cluster clients retain shared caching and
-honor `s-maxage`. In token mode viewers sharing a key share requests; proxy
-mode's auth traffic scales with distinct credentials. Anonymous requests
-share entries for the same URL.
-
-mTLS peers still use the alias and tier lookup; proxy grants do not restrict
-or revalidate them.
 
 ## Stream listeners
 
-The plaintext TCP and Unix-socket listeners authenticate exactly like QUIC:
-the JWT rides the `SETUP` path (`tcp://127.0.0.1:4444/room?jwt=...`), and
-tokenless connections fall back to the public rules. A Unix socket can also
+The plaintext TCP and Unix-socket listeners are admitted exactly like QUIC:
+the path and query ride the `SETUP` (`tcp://127.0.0.1:4444/room?jwt=...`) and
+reach the auth server in the same request shape, with `transport` set to `tcp`
+or `unix` and no addresses on a socket. A Unix socket can also
 require a specific uid, gid, or pid:
 
 ```toml

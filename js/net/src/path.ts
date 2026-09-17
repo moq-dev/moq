@@ -319,9 +319,8 @@ export function relative(target: Valid, base: Valid): string | undefined {
 /** Path patterns: grammar and algebra owned by `@moq/pattern`. */
 export {
 	compareSpecificity,
-	type ErrorCode,
+	InvalidPattern,
 	Pattern,
-	PatternError,
 	Patterns,
 	type Segment,
 	type Specificity,

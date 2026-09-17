@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- `--listen` needs `--auth-url` or `--auth-public`; a listener admits sessions through the same lease as moq-relay instead of accepting everyone.
+- `moq token` is `moq auth`, with `serve` answering the auth contract.
+
 ### Added
 
 - `--cluster-lan-app` names the DNS-SD application the LAN mesh advertises under
@@ -22,6 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--cluster-connect` and `--cluster-connect-api` count as a MoQ side
 - local verbs refuse the WAN `--cluster-*` flags
 - HTTP `--cluster-connect-api` attaches client TLS so the CLI can fetch the peer list
+
+## [0.11.1](https://github.com/moq-dev/moq/compare/moq-cli-v0.11.0...moq-cli-v0.11.1) - 2026-09-13
+
+### Fixed
+
+- *(moq-video,moq-audio)* open a decoder at the live edge ([#3565](https://github.com/moq-dev/moq/pull/3565))
 
 ## [0.11.0](https://github.com/moq-dev/moq/compare/moq-cli-v0.10.0...moq-cli-v0.11.0) - 2026-09-09
 

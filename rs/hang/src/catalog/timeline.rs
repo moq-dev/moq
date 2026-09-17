@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// The moq epoch (2020-01-01T00:00:00Z) in Unix-epoch milliseconds.
 ///
-/// Timeline [`wall`](Timeline::wall) values are measured from here rather than the Unix epoch so
+/// Timeline [`wall`](crate::catalog::Clock::wall) values are measured from here rather than the Unix epoch so
 /// the numbers stay small (and safely within a 53-bit integer even at fine timescales); a
 /// consumer recovers Unix time by adding this back.
 pub const MOQ_EPOCH_UNIX_MILLIS: u64 = 1_577_836_800_000;
@@ -17,7 +17,9 @@ pub const MOQ_EPOCH_UNIX_MILLIS: u64 = 1_577_836_800_000;
 /// The section lives inside the catalog's root [`Archive`](crate::catalog::Archive) (flattened
 /// on the wire): there is one timeline per broadcast, because its whole point is that
 /// segments are aligned across the broadcast's tracks. A publisher that doesn't segment
-/// simply omits the archive entry.
+/// simply omits the archive entry. Wall-clock mapping is the catalog root
+/// [`Clock`](crate::catalog::Clock)'s job, not this section's: every track and this index
+/// refer to that one mapping after timescale conversion.
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -27,9 +29,12 @@ pub struct Timeline {
 	/// ([`timeline::DEFAULT_NAME`](crate::timeline::DEFAULT_NAME) by convention).
 	pub track: String,
 
-	/// Units per second for the timeline's `pts` and [`wall`](Self::wall). Defaults to 1000
-	/// (milliseconds).
-	#[serde(default = "Timeline::default_timescale")]
+	/// Units per second for the timeline's `pts`. Defaults to 1000
+	/// (milliseconds). Zero is refused: no timestamp can be expressed in it.
+	#[serde(
+		default = "Timeline::default_timescale",
+		deserialize_with = "super::deserialize_timescale_or_default"
+	)]
 	pub timescale: u32,
 
 	/// The declared upper bound on a segment's duration, in [`timescale`](Self::timescale)
@@ -44,15 +49,6 @@ pub struct Timeline {
 	/// GOP can be minutes long) and for a publisher importing a source it doesn't control. A
 	/// consumer needing a bound then derives one from the records it has seen.
 	pub duration_max: Option<u64>,
-
-	/// The wall-clock time of `pts` 0, in [`timescale`](Self::timescale) units since the moq
-	/// epoch ([`MOQ_EPOCH_UNIX_MILLIS`], 2020-01-01), if known. A consumer derives the wall-clock
-	/// time of any group as `wall + pts`, and Unix time by adding the moq epoch back (an absolute
-	/// clock for HLS `EXT-X-PROGRAM-DATE-TIME` / DASH `availabilityStartTime`).
-	///
-	/// Measured from 2020 rather than 1970 so the value stays small and safely within a 53-bit
-	/// integer even at fine timescales.
-	pub wall: Option<u64>,
 }
 
 impl Timeline {
@@ -63,15 +59,13 @@ impl Timeline {
 	}
 
 	/// A timeline section naming `track`, at the default millisecond timescale, with no
-	/// declared duration bound and no wall-clock anchor. Set
-	/// [`timescale`](Self::timescale) / [`duration_max`](Self::duration_max) /
-	/// [`wall`](Self::wall) afterward.
+	/// declared duration bound. Set [`timescale`](Self::timescale) /
+	/// [`duration_max`](Self::duration_max) afterward.
 	pub fn new(track: impl Into<String>) -> Self {
 		Self {
 			track: track.into(),
 			timescale: Self::default_timescale(),
 			duration_max: None,
-			wall: None,
 		}
 	}
 }
@@ -87,7 +81,6 @@ mod test {
 		assert_eq!(decoded.track, "timeline.z");
 		assert_eq!(decoded.timescale, 1000);
 		assert_eq!(decoded.duration_max, Some(2000));
-		assert_eq!(decoded.wall, None);
 	}
 
 	#[test]
@@ -102,15 +95,23 @@ mod test {
 	}
 
 	#[test]
-	fn roundtrip_with_wall() {
+	fn zero_timescale_is_refused() {
+		serde_json::from_str::<Timeline>(r#"{"track":"timeline.z","timescale":0}"#)
+			.expect_err("a zero timescale must not decode");
+	}
+
+	#[test]
+	fn explicit_null_timescale_is_refused() {
+		serde_json::from_str::<Timeline>(r#"{"track":"timeline.z","timescale":null}"#)
+			.expect_err("an explicit null timescale must not decode as the default");
+	}
+
+	#[test]
+	fn roundtrip() {
 		let mut timeline = Timeline::new("timeline.z");
 		timeline.duration_max = Some(2000);
-		timeline.wall = Some(1_751_846_400_000);
 		let json = serde_json::to_string(&timeline).unwrap();
-		assert_eq!(
-			json,
-			r#"{"track":"timeline.z","timescale":1000,"durationMax":2000,"wall":1751846400000}"#
-		);
+		assert_eq!(json, r#"{"track":"timeline.z","timescale":1000,"durationMax":2000}"#);
 		assert_eq!(serde_json::from_str::<Timeline>(&json).unwrap(), timeline);
 	}
 }

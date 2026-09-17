@@ -48,10 +48,13 @@ route: each hop appends its identity, adds the link price, and passes the
 claim on. An advertisement must be contained by one of the publisher's granted
 prefixes (`grant/**`); an over-wide pattern is refused rather than clamped.
 
-Routing prefers the most specific pattern, then the lowest cost, then the
-shortest hop list, breaking any remaining tie toward the newest announcement
-so a reconnecting publisher isn't outranked by the session it replaced.
-Resolving a non-prefix pattern into a subscription is not implemented yet.
+Routing prefers the most specific pattern, then a fully identified hop list
+over one that holds a 0 (an anonymous hop) at any depth, then the lowest cost,
+then the shortest hop list, breaking any remaining tie toward the newest
+announcement so a reconnecting publisher isn't outranked by the session it
+replaced. An assigned identity for an anonymous peer is local selection state
+and is never written into the hop list. Resolving a non-prefix pattern into a
+subscription is not implemented yet.
 
 ```toml
 [cluster]
@@ -166,13 +169,19 @@ clients decode it.
 
 ## Authentication
 
-Peers authenticate with **mTLS** (recommended: `listen.tls.root` on the
-listener, `connect.tls.cert`/`key` on the dialer) or a **JWT** (inline
-`?jwt=` on a peer URL, `token` on a peer object, or a shared `cluster.token`
-file for static and gossip peers). LAN peers authenticate with the mDNS credential on
-`/.cluster/<credential>` and never receive `cluster.token`. Dials retry
-forever with capped backoff, so a rejected token is loud in the logs rather
-than fatal. See [Authentication](/bin/relay/auth#mtls).
+Peers dial with **mTLS** (recommended: `listen.tls.root` on the listener,
+`connect.tls.cert`/`key` on the dialer) or a **JWT** (inline `?jwt=` on a peer
+URL, `token` on a peer object, or a shared `cluster.token` file for static and
+gossip peers). The
+accepting relay admits a peer through the same lease as any client: its
+certificate is reported to the auth server, which grants it, so a mesh needs
+`moq auth serve --mtls-publish '**' --mtls-subscribe '**'` (or a server of
+your own that grants the cluster CA) behind `--auth-url`. A relay on
+`--auth-public '**'` admits peers through that grant instead. LAN peers
+authenticate with the mDNS credential on `/.cluster/<credential>`, a secret
+the relay minted for itself and checks locally, and never receive
+`cluster.token`. Dials retry forever with capped backoff, so a rejected peer
+is loud in the logs rather than fatal. See [Authentication](/bin/relay/auth#mtls).
 
 The `/nodes` [internal endpoint](/bin/relay/http#get-nodes) shows the cluster
 as this relay sees it.

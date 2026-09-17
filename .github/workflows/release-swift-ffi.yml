@@ -10,6 +10,10 @@ on:
   push:
     tags:
       - "moq-ffi-v*"
+  # Dry-run: build everything, publish nothing. Nightly calls every release
+  # workflow this way so a broken build surfaces before the tag is cut.
+  workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -164,6 +168,7 @@ jobs:
     # SPM tag.
     name: Attach assets to GitHub release
     needs: [package, parse-version]
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write

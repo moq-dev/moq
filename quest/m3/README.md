@@ -45,3 +45,4 @@ worth settling now. Deferral does not by itself abandon a feature.
 - [Carrier voice](/quest/m3/carrier-voice/README.md) - determine whether MoQ should be the call fabric for programmable carrier voice
 - [LiveKit WebRTC bridge](/quest/m3/livekit-webrtc-bridge.md) - a go/no-go verdict, backed by a spike, on per-track LiveKit-to-MoQ bridging
 - [Vision worker](/quest/m3/processor-vision.md) - a documented customer-run vision worker proves the processor contract
+- [Common Access Tokens](/quest/m3/cat/README.md) - a moq-transport client presents a CAT in SETUP and `moq auth serve` admits it with the scope its `moqt` claim names

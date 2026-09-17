@@ -6,25 +6,7 @@ use bytes::Bytes;
 
 use crate::Result;
 
-/// Configuration for a [`Consumer`].
-///
-/// Build from [`Default`] and override fields (the struct is `#[non_exhaustive]`, so new options
-/// stay additive).
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct ConsumerConfig {
-	/// Whether the frames are DEFLATE-compressed. Must match the producer's
-	/// [`ProducerConfig::compression`](super::ProducerConfig::compression). Defaults to `false`.
-	pub compression: bool,
-}
-
-impl ConsumerConfig {
-	/// Set [`compression`](Self::compression) (a builder, since the struct is `#[non_exhaustive]`).
-	pub fn with_compression(mut self, compression: bool) -> Self {
-		self.compression = compression;
-		self
-	}
-}
+pub use super::Config;
 
 /// Consumes a binary value from a track, yielding the newest one.
 ///
@@ -42,14 +24,13 @@ pub struct Consumer {
 impl Consumer {
 	/// Create a consumer reading from the given track subscriber.
 	///
-	/// Set [`ConsumerConfig::compression`] to read a track written by a producer with
-	/// [`ProducerConfig::compression`](super::ProducerConfig::compression) on.
-	pub fn new(track: moq_net::track::Subscriber, config: ConsumerConfig) -> Self {
+	/// Set [`Config::compression`] to match the producer that wrote the track.
+	pub fn new(track: moq_net::track::Subscriber, config: Config) -> Self {
 		Self {
 			track: track.ordered(),
 			group: None,
 			flate: None,
-			compression: config.compression,
+			compression: config.compression.is_deflate(),
 		}
 	}
 

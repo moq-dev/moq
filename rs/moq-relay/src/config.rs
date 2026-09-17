@@ -23,14 +23,22 @@ pub struct Config {
 	/// The QUIC/TLS configuration for the server.
 	#[usage(flatten)]
 	#[serde(default)]
-	#[serde(alias = "server")]
 	pub listen: moq_tokio::listen::Config,
+
+	/// The released `[server]` table, kept so [`Config::resolve`] can name `[listen]`.
+	#[serde(default, skip_serializing)]
+	#[usage(skip)]
+	pub(crate) server: Option<moq_tokio::listen::Config>,
 
 	/// The QUIC/TLS configuration for the client. (clustering only)
 	#[usage(flatten)]
 	#[serde(default)]
-	#[serde(alias = "client")]
 	pub connect: moq_tokio::connect::Config,
+
+	/// The released `[client]` table, kept so [`Config::resolve`] can name `[connect]`.
+	#[serde(default, skip_serializing)]
+	#[usage(skip)]
+	pub(crate) client: Option<moq_tokio::connect::Config>,
 
 	/// QUIC transport tuning (`--quic-*`), shared by the dial and accept sides:
 	/// these knobs mean the same thing whichever way the connection was opened.
@@ -116,7 +124,9 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			listen: Default::default(),
+			server: None,
 			connect: Default::default(),
+			client: None,
 			quic: Default::default(),
 			log: Default::default(),
 			runtime: Default::default(),
@@ -228,13 +238,10 @@ impl Config {
 			.as_ref()
 			.map(|path| std::fs::read_to_string(path).map(|source| (path.clone(), source)))
 			.transpose()?;
-		let mut file_value = file_body
+		let file_value = file_body
 			.as_ref()
 			.map(|(_, source)| toml::from_str::<toml::Value>(source))
 			.transpose()?;
-		if let Some(value) = file_value.as_mut() {
-			normalize_toml_aliases(value)?;
-		}
 		let file = file_body
 			.as_ref()
 			.zip(file_value.as_ref())
@@ -249,11 +256,10 @@ impl Config {
 			&env,
 			file,
 			|dst, src| {
-				// Legacy listen/connect/quic flags, and CLI-only auth public shorthands.
+				// Legacy listen/connect/quic flags.
 				dst.listen.keep_parse_only(&src.listen);
 				dst.connect.keep_parse_only(&src.connect);
 				dst.quic.keep_parse_only(&src.quic);
-				dst.auth.keep_parse_only(&src.auth);
 			},
 		)
 		.map_err(|err| anyhow::anyhow!("{err}"))?;
@@ -271,38 +277,6 @@ impl Config {
 	}
 }
 
-fn normalize_toml_aliases(value: &mut toml::Value) -> anyhow::Result<()> {
-	let Some(root) = value.as_table_mut() else {
-		return Ok(());
-	};
-	rename_toml_key(root, "server", "listen")?;
-	rename_toml_key(root, "client", "connect")?;
-
-	if let Some(listen) = root.get_mut("listen").and_then(toml::Value::as_table_mut) {
-		rename_toml_key(listen, "listen", "bind")?;
-	}
-	if let Some(connect) = root.get_mut("connect").and_then(toml::Value::as_table_mut) {
-		rename_toml_key(connect, "connect", "url")?;
-		rename_toml_key(connect, "failover_delay", "race")?;
-		if let Some(tls) = connect.get_mut("tls").and_then(toml::Value::as_table_mut) {
-			rename_toml_key(tls, "disable_verify", "insecure")?;
-		}
-	}
-	Ok(())
-}
-
-fn rename_toml_key(table: &mut toml::Table, alias: &str, canonical: &str) -> anyhow::Result<()> {
-	let Some(value) = table.remove(alias) else {
-		return Ok(());
-	};
-	anyhow::ensure!(
-		!table.contains_key(canonical),
-		"TOML specifies both `{alias}` and `{canonical}`"
-	);
-	table.insert(canonical.into(), value);
-	Ok(())
-}
-
 impl Config {
 	/// Refuse a config parsed from released spellings, then apply the relay's own
 	/// defaults.
@@ -314,6 +288,15 @@ impl Config {
 		let mut deprecated = self.quic.deprecated();
 		deprecated.extend(self.listen.deprecated());
 		deprecated.extend(self.connect.deprecated());
+		deprecated.extend(self.cluster.deprecated());
+		if let Some(server) = &self.server {
+			deprecated.toml("[server]", "[listen]", None);
+			deprecated.extend(server.deprecated());
+		}
+		if let Some(client) = &self.client {
+			deprecated.toml("[client]", "[connect]", None);
+			deprecated.extend(client.deprecated());
+		}
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
 
 		self.quic.max_streams.get_or_insert(crate::DEFAULT_MAX_STREAMS);
@@ -394,10 +377,11 @@ max_streams = 4096
 max_streams = 64
 "#;
 		let mut config: Config = toml::from_str(toml).expect("released config must still parse");
-		// The section renames are plain serde aliases, so those keep working.
-		assert_eq!(config.listen.bind.as_deref(), Some("[::]:443"));
+		assert_eq!(config.listen.bind, None, "the released table configures nothing");
 
 		let err = config.resolve().expect_err("must refuse").to_string();
+		assert!(err.contains("[server] -> [listen]"), "{err}");
+		assert!(err.contains("listen -> bind"), "{err}");
 		assert!(err.contains("[server.quic] -> [quic]"), "{err}");
 		assert!(err.contains("[client.quic] -> [quic]"), "{err}");
 		assert!(err.contains("both directions"), "{err}");
@@ -571,9 +555,8 @@ duration = "30s"
 		toml::to_string(&unset).expect("serialize None");
 	}
 
-	/// A deprecated TOML value still survives the merge so validation can name it.
+	/// A released TOML value still survives the merge so validation can name it.
 	#[test]
-	#[allow(deprecated)]
 	fn cli_does_not_clobber_toml_linger() {
 		let _env = EnvGuard::clear(&["MOQ_CLUSTER_LINGER"]);
 
@@ -587,13 +570,15 @@ linger = "30s"
 		std::fs::write(&path, toml).unwrap();
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let config = Config::parse_and_merge(args).expect("config load");
+		let mut config = Config::parse_and_merge(args).expect("config load");
 
 		assert_eq!(
 			config.cluster.linger,
 			Some(std::time::Duration::from_secs(30).into()),
 			"TOML's cluster.linger must not be clobbered by the CLI re-parse"
 		);
+		let err = config.resolve().expect_err("must refuse").to_string();
+		assert!(err.contains("--cluster-linger"), "{err}");
 	}
 
 	/// Preferred addresses loaded from TOML survive when the CLI omits them.
@@ -720,7 +705,7 @@ send_window = 33554432
 		let _env = EnvGuard::clear(&["MOQ_CLIENT_CONNECT_TIMEOUT"]);
 
 		let toml = r#"
-[client]
+[connect]
 timeout = "2m"
 "#;
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
@@ -788,54 +773,27 @@ key = ["cdn.key", "moq-pro.key"]
 		assert!(!config.stats.enabled);
 	}
 
-	/// An auth API loaded from TOML survives when the CLI omits it.
+	/// An auth server loaded from TOML survives when the CLI omits it.
 	#[test]
-	fn cli_does_not_clobber_toml_auth_api() {
-		let _env = EnvGuard::clear(&["MOQ_AUTH_API"]);
+	fn cli_does_not_clobber_toml_auth_url() {
+		let _env = EnvGuard::clear(&["MOQ_AUTH_URL"]);
 
 		let toml = r#"
 [auth]
-auth_api = "https://api.moq.dev/cluster/auth"
+url = "https://auth.example.com/"
 "#;
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
 		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("auth-api-toml-wins.toml");
+		let path = dir.join("auth-url-toml-wins.toml");
 		std::fs::write(&path, toml).unwrap();
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = Config::parse_and_merge(args).expect("config load");
 
 		assert_eq!(
-			config.auth.auth_api.as_deref(),
-			Some("https://api.moq.dev/cluster/auth"),
-			"TOML's auth.auth_api must not be clobbered by the CLI re-parse",
-		);
-	}
-
-	/// Same clap+TOML clobber guard for `auth.api_mode`. It's an `Option` so an
-	/// absent `--auth-api-mode` must not wipe a TOML-configured value during the
-	/// `update_from` re-parse.
-	#[test]
-	fn cli_does_not_clobber_toml_auth_api_mode() {
-		let _env = EnvGuard::clear(&["MOQ_AUTH_API", "MOQ_AUTH_API_MODE"]);
-
-		let toml = r#"
-[auth]
-auth_api = "https://api.moq.dev/cluster/auth"
-api_mode = "proxy"
-"#;
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("auth-api-mode-toml-wins.toml");
-		std::fs::write(&path, toml).unwrap();
-
-		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let config = Config::parse_and_merge(args).expect("config load");
-
-		assert_eq!(
-			config.auth.api_mode,
-			Some(crate::auth::ApiMode::Proxy),
-			"TOML's auth.api_mode must not be clobbered by the CLI re-parse"
+			config.auth.url.as_ref().map(url::Url::as_str),
+			Some("https://auth.example.com/"),
+			"TOML's auth.url must not be clobbered by the CLI re-parse",
 		);
 	}
 
@@ -845,7 +803,7 @@ api_mode = "proxy"
 		let _env = EnvGuard::clear(&["MOQ_CLIENT_TLS_SYSTEM_ROOTS"]);
 
 		let toml = r#"
-[client.tls]
+[connect.tls]
 system_roots = true
 "#;
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
@@ -859,7 +817,7 @@ system_roots = true
 		assert_eq!(
 			config.connect.tls.system_roots,
 			Some(true),
-			"TOML's client.tls.system_roots must not be clobbered by the CLI re-parse"
+			"TOML's connect.tls.system_roots must not be clobbered by the CLI re-parse"
 		);
 	}
 
@@ -891,14 +849,11 @@ id = 12345
 	/// must not wipe a TOML value during the `update_from` re-parse.
 	#[test]
 	fn cli_does_not_clobber_toml_tiers() {
-		let _env = EnvGuard::clear(&["MOQ_CLUSTER_TIER", "MOQ_AUTH_MTLS_TIER"]);
+		let _env = EnvGuard::clear(&["MOQ_CLUSTER_TIER"]);
 
 		let toml = r#"
 [cluster]
 tier = "region"
-
-[auth]
-mtls_tier = "edge"
 "#;
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
 		std::fs::create_dir_all(&dir).unwrap();
@@ -913,11 +868,6 @@ mtls_tier = "edge"
 			Some("region"),
 			"TOML cluster.tier must survive"
 		);
-		assert_eq!(
-			config.auth.mtls_tier.as_deref(),
-			Some("edge"),
-			"TOML auth.mtls_tier must survive"
-		);
 	}
 
 	/// A Unix listener and its allowlist loaded from TOML survive together.
@@ -927,13 +877,13 @@ mtls_tier = "edge"
 		let _env = EnvGuard::clear(&["MOQ_SERVER_UNIX_BIND", "MOQ_SERVER_UNIX_ALLOW_UID"]);
 
 		let toml = r#"
-[server]
+[listen]
 bind = "[::]:443"
 
-[server.unix]
+[listen.unix]
 bind = "/run/moq/internal.sock"
 
-[server.unix.allow]
+[listen.unix.allow]
 uid = [1001]
 "#;
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
@@ -948,7 +898,7 @@ uid = [1001]
 		assert_eq!(
 			config.listen.unix.bind.as_deref(),
 			Some(std::path::Path::new("/run/moq/internal.sock")),
-			"TOML's server.unix.bind must not be clobbered by the CLI re-parse"
+			"TOML's listen.unix.bind must not be clobbered by the CLI re-parse"
 		);
 		assert_eq!(
 			config.listen.unix.allow.uid,
@@ -1214,54 +1164,32 @@ uid = [1001]
 		}
 	}
 
-	/// CLI-only `#[serde(skip)]` public shorthands must survive the TOML round-trip.
-	/// Dropping them makes `auth::Config::is_empty` true and the relay start with no
-	/// public access, as though the flags had never been passed.
+	/// The public patterns arrive from the CLI, the environment, and TOML alike, as
+	/// patterns rather than prefixes.
 	#[test]
-	fn cli_public_shorthands_survive_merge() {
+	fn public_patterns_merge_from_every_source() {
 		let _env = EnvGuard::clear(&[
 			"MOQ_AUTH_PUBLIC",
 			"MOQ_AUTH_PUBLIC_SUBSCRIBE",
 			"MOQ_AUTH_PUBLIC_PUBLISH",
-			"MOQ_AUTH_PUBLIC_API",
-			"MOQ_AUTH_KEY",
-			"MOQ_AUTH_KEY_DIR",
-			"MOQ_AUTH_API",
+			"MOQ_AUTH_URL",
 		]);
 
 		let config = Config::parse_and_merge([
 			"moq-relay",
 			"--auth-public-subscribe",
-			"demo",
+			"demo/**",
 			"--auth-public-publish",
-			"uploads",
-			"--auth-public-api",
-			"https://api.example.com/access",
+			"uploads/**",
 		])
 		.expect("config load");
 
 		assert!(
-			!config.auth.is_empty(),
-			"CLI-only public flags must keep auth non-empty"
+			config.auth.validate().is_ok(),
+			"CLI public flags must admit anonymous sessions"
 		);
-		let subscribe = config
-			.auth
-			.public_subscribe
-			.clone()
-			.expect("public_subscribe")
-			.into_detailed();
-		assert_eq!(subscribe.subscribe, vec!["demo".to_string()]);
-		let publish = config
-			.auth
-			.public_publish
-			.clone()
-			.expect("public_publish")
-			.into_detailed();
-		assert_eq!(publish.publish, vec!["uploads".to_string()]);
-		assert_eq!(
-			config.auth.public_api.as_deref(),
-			Some("https://api.example.com/access")
-		);
+		assert_eq!(config.auth.public_subscribe, vec!["demo/**".parse().unwrap()]);
+		assert_eq!(config.auth.public_publish, vec!["uploads/**".parse().unwrap()]);
 		assert!(
 			config
 				.source("auth.public_subscribe")
@@ -1270,15 +1198,22 @@ uid = [1001]
 			config.source("auth.public_subscribe")
 		);
 
-		unsafe { std::env::set_var("MOQ_AUTH_PUBLIC_SUBSCRIBE", "from-env") };
+		unsafe { std::env::set_var("MOQ_AUTH_PUBLIC_SUBSCRIBE", "from-env/**,other/**") };
 		let config = Config::parse_and_merge(["moq-relay"]).expect("env load");
-		let subscribe = config
-			.auth
-			.public_subscribe
-			.clone()
-			.expect("env public_subscribe")
-			.into_detailed();
-		assert_eq!(subscribe.subscribe, vec!["from-env".to_string()]);
+		assert_eq!(
+			config.auth.public_subscribe,
+			vec!["from-env/**".parse().unwrap(), "other/**".parse().unwrap()]
+		);
+		unsafe { std::env::remove_var("MOQ_AUTH_PUBLIC_SUBSCRIBE") };
+
+		let toml = "[auth]\npublic = \"anon/**\"\n";
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("auth-public-toml.toml");
+		std::fs::write(&path, toml).unwrap();
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("toml load");
+		assert_eq!(config.auth.public, vec!["anon/**".parse().unwrap()]);
 	}
 
 	/// A TOML `[cluster.lan] app` survives when the CLI omits the flag.

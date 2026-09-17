@@ -14,10 +14,10 @@ bind = "[::]:4443"
 tls.cert = ["root.crt"]
 tls.key = ["root.key"]
 
-# Trust client certificates signed by this CA for mTLS peer auth.
-# Any connection presenting such a cert is granted full access (publish/
-# subscribe/cluster), which is how leaves join without a `cluster.token`
-# JWT. `just ca` generates the CA.
+# Trust client certificates signed by this CA for mTLS peer auth. The
+# certificate is a fact for the auth source: `auth.public = "**"` below admits
+# the leaves, and an auth server would grant them through `--mtls-publish` /
+# `--mtls-subscribe`. `just ca` generates the CA.
 tls.root = ["ca.pem"]
 
 [web.http]
@@ -27,11 +27,9 @@ listen = "[::]:4443"
 
 [auth]
 # Local development: anonymous access to everything, so no JWT is needed.
-public = ""
+public = "**"
 
-# To exercise JWT + public-prefix auth instead, drop `public` above and restore:
-# key = "root.jwk"
-#
-# [auth.public]
-# subscribe = ["anon", "demo"]
-# publish = ["anon", "demo/viewer"]
+# To exercise JWT + public-pattern auth instead, drop `public` above, run
+# `moq auth serve --key root.jwk --public-subscribe 'anon/**' --public-subscribe 'demo/**' --public-publish 'anon/**' --mtls-publish '**' --mtls-subscribe '**'`,
+# and point the relay at it:
+# url = "http://127.0.0.1:4440/"

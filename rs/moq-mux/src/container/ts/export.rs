@@ -173,17 +173,9 @@ struct Track {
 }
 
 impl Track {
-	/// A fenced rendition must rewind its own clock before joining the program.
-	/// Forward markers on its old timeline cannot admit stale media.
+	/// Admit any frame that belongs to the current program generation.
 	fn admit(&mut self, pending: Pending, epoch: u64) -> Option<Pending> {
-		if self.epoch == epoch
-			|| (pending.discontinuity != self.discontinuity
-				&& self.timeline.is_none_or(|last| pending.frame.timestamp < last))
-		{
-			return Some(pending);
-		}
-		self.discontinuity = pending.discontinuity;
-		None
+		(self.epoch == epoch).then_some(pending)
 	}
 }
 
@@ -277,7 +269,7 @@ struct SiTrack {
 enum SiState {
 	/// Waiting for the catalog broadcast to resolve; the track (by name) is
 	/// subscribed once it does.
-	Requesting(kio::Pending<moq_net::origin::Requesting>, String),
+	Requesting(kio::Pending<moq_net::origin::Pending>, String),
 	/// Waiting for the subscription to resolve.
 	Subscribing(kio::Pending<moq_net::track::Subscribing>),
 	/// The resolved subscription, reading snapshot groups.
@@ -578,22 +570,14 @@ impl<E: catalog::Catalog> Export<E> {
 			if changed {
 				let joined = self.tracks[&name].epoch == self.epoch;
 				if joined {
-					let backwards = self.tracks[&name]
-						.timeline
-						.is_some_and(|last| pending.frame.timestamp < last);
-					if !backwards && !self.pending.is_empty() {
-						// A forward boundary ends valid media rather than reneging it.
+					if !self.pending.is_empty() {
+						// A boundary ends valid media rather than reneging it.
 						// Return that tail under the old generation before adopting the new one.
 						self.emit(None)?;
 						self.tracks.get_mut(&name).unwrap().pending = Some(pending);
 						continue;
 					}
-					// A backwards boundary fences its peers, so one program break costs one
-					// reset however many tracks cross it. A forward one cannot: the marker is
-					// local to its track, and a peer's marker for this same break looks exactly
-					// like its own later gap, so each is taken at face value and the program
-					// re-anchors for it. Telling them apart needs a boundary the wire carries.
-					self.rewind(backwards);
+					self.rewind();
 				}
 				let track = self.tracks.get_mut(&name).unwrap();
 				track.discontinuity = pending.discontinuity;
@@ -734,6 +718,7 @@ impl<E: catalog::Catalog> Export<E> {
 		// not part of the latched layout.
 		self.si
 			.retain(|key, _| mpegts.si.get(&key.0).is_some_and(|t| t.contains_key(&key.1)));
+		reject_colliding_si_pids(&mpegts, self.pmt_pid(), &[])?;
 		for (pid, tables) in mpegts.si.iter() {
 			for (table_id, entry) in tables.iter() {
 				match self.si.get_mut(&(*pid, *table_id)) {
@@ -787,6 +772,8 @@ impl<E: catalog::Catalog> Export<E> {
 					"TS track layout changed after PAT/PMT was emitted: '{name}' removed"
 				);
 			}
+			let es_pids: Vec<u16> = self.tracks.values().map(|t| t.pid).collect();
+			reject_colliding_si_pids(&mpegts, self.pmt_pid(), &es_pids)?;
 			return Ok(());
 		}
 
@@ -815,6 +802,8 @@ impl<E: catalog::Catalog> Export<E> {
 				pids.insert(name.clone(), pid);
 			}
 		}
+		let es_pids: Vec<u16> = pids.values().copied().collect();
+		reject_colliding_si_pids(&mpegts, self.pmt_pid(), &es_pids)?;
 
 		// Reuse each track's existing source (and any pending frame) by name; refresh
 		// its PID, kind, and descriptors from this snapshot. Drop tracks no longer present.
@@ -923,9 +912,9 @@ impl<E: catalog::Catalog> Export<E> {
 		self.emitted_epoch
 	}
 
-	/// Discard uncommitted bytes and restart the program clock. On a backwards
-	/// boundary, peers must cross their own boundary before joining this generation.
-	fn rewind(&mut self, backwards: bool) {
+	/// Discard uncommitted bytes and restart the program clock. Every rendition
+	/// joins the new generation: no track is fenced across a declared marker.
+	fn rewind(&mut self) {
 		self.epoch += 1;
 		if let Some(counters) = self.span_counters.take() {
 			self.counters = counters;
@@ -945,8 +934,9 @@ impl<E: catalog::Catalog> Export<E> {
 		self.pcr_discontinuity = true;
 		for track in self.tracks.values_mut() {
 			track.last_dts = None;
-			if !backwards || track.timeline.is_none() {
-				track.epoch = self.epoch;
+			track.epoch = self.epoch;
+			if let Some(pending) = track.pending.as_ref() {
+				track.discontinuity = pending.discontinuity;
 			}
 			if let Some(pending) = track.pending.take() {
 				track.pending = track.admit(pending, self.epoch);
@@ -1134,17 +1124,12 @@ impl<E: catalog::Catalog> Export<E> {
 		Ok(())
 	}
 
-	/// A boundary takes precedence over stale peer data; otherwise use timestamp order.
+	/// Use timestamp order. No track is fenced, so a boundary does not jump the queue.
 	fn pick_next_track(&self) -> Option<String> {
 		self.tracks
 			.iter()
 			.filter_map(|(n, t)| t.pending.as_ref().map(|p| (p.frame.timestamp, t.pid, n)))
-			.min_by_key(|(timestamp, pid, name)| {
-				let track = &self.tracks[*name];
-				let changed = track.pending.as_ref().unwrap().discontinuity != track.discontinuity;
-				let backwards = changed && track.timeline.is_some_and(|last| *timestamp < last);
-				(!backwards, *timestamp, *pid, *name)
-			})
+			.min_by_key(|(timestamp, pid, name)| (*timestamp, *pid, *name))
 			.map(|(_, _, name)| name.clone())
 	}
 
@@ -1894,6 +1879,17 @@ fn opus_es_payload(packet: &[u8]) -> Vec<u8> {
 	}
 	out.extend_from_slice(packet);
 	out
+}
+
+/// Refuse an SI PID that would share a packet stream with PAT, PMT, null, or an ES.
+fn reject_colliding_si_pids(mpegts: &catalog::Mpegts, pmt_pid: u16, es_pids: &[u16]) -> anyhow::Result<()> {
+	for pid in mpegts.si.keys() {
+		anyhow::ensure!(
+			(1..0x1FFF).contains(pid) && *pid != pmt_pid && !es_pids.contains(pid),
+			"mpegts.si PID {pid} collides with PAT, PMT, null, or an elementary stream"
+		);
+	}
+	Ok(())
 }
 
 /// The PMT descriptors recorded for `name` in the `mpegts` section, if any.

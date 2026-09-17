@@ -637,7 +637,7 @@ impl<E: CatalogExt> Track<E> {
 		}
 	}
 
-	fn finish(self) -> Result<(), Error> {
+	fn finish(&mut self) -> Result<(), Error> {
 		match self {
 			Self::Reserved(reserved) => reserved.finish(),
 			Self::Encoding(producer) => producer.finish(),

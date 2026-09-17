@@ -407,7 +407,7 @@ impl Publish {
 		&mut self,
 		broadcast: Id,
 		name: &str,
-		config: moq_json::snapshot::ProducerConfig,
+		config: moq_json::snapshot::Config,
 	) -> Result<Id, Error> {
 		let broadcast = self.producer(broadcast)?;
 		let track = broadcast.create_track(name, None)?;
@@ -432,12 +432,7 @@ impl Publish {
 	/// Create a JSON stream track (lossless append-log) on a broadcast.
 	///
 	/// Every record appended via [`Self::json_stream_append`] is preserved and delivered in order.
-	pub fn json_stream(
-		&mut self,
-		broadcast: Id,
-		name: &str,
-		config: moq_json::stream::ProducerConfig,
-	) -> Result<Id, Error> {
+	pub fn json_stream(&mut self, broadcast: Id, name: &str, config: moq_json::stream::Config) -> Result<Id, Error> {
 		let broadcast = self.producer(broadcast)?;
 		let track = broadcast.create_track(name, None)?;
 		let producer = moq_json::stream::Producer::new(track, config);

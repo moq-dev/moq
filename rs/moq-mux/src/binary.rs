@@ -108,10 +108,11 @@ impl<E: CatalogExt> Snapshot<E> {
 		mut rendition: Rendition<E, BinaryConfig>,
 		config: &Config,
 	) -> crate::Result<Self> {
-		let inner = moq_binary::snapshot::Producer::new(
-			track,
-			moq_binary::snapshot::ProducerConfig::default().with_compression(config.compression),
-		);
+		let mut binary = moq_binary::snapshot::Config::default();
+		if config.compression {
+			binary.compression = moq_binary::Compression::Deflate;
+		}
+		let inner = moq_binary::snapshot::Producer::new(track, binary);
 		rendition.set(config.entry(Mode::Snapshot))?;
 		Ok(Self { inner, rendition })
 	}
@@ -161,10 +162,11 @@ impl<E: CatalogExt> Stream<E> {
 		mut rendition: Rendition<E, BinaryConfig>,
 		config: &Config,
 	) -> crate::Result<Self> {
-		let inner = moq_binary::stream::Producer::new(
-			track,
-			moq_binary::stream::ProducerConfig::default().with_compression(config.compression),
-		);
+		let mut binary = moq_binary::stream::Config::default();
+		if config.compression {
+			binary.compression = moq_binary::Compression::Deflate;
+		}
+		let inner = moq_binary::stream::Producer::new(track, binary);
 		rendition.set(config.entry(Mode::Stream))?;
 		Ok(Self {
 			inner,
@@ -243,14 +245,20 @@ impl Consumer {
 		let compression = crate::compression(config.compression.as_ref())?;
 
 		let inner = match &config.mode {
-			Mode::Snapshot => Inner::Snapshot(moq_binary::snapshot::Consumer::new(
-				track,
-				moq_binary::snapshot::ConsumerConfig::default().with_compression(compression),
-			)),
-			Mode::Stream => Inner::Stream(moq_binary::stream::Consumer::new(
-				track,
-				moq_binary::stream::ConsumerConfig::default().with_compression(compression),
-			)),
+			Mode::Snapshot => {
+				let mut binary = moq_binary::snapshot::Config::default();
+				if compression {
+					binary.compression = moq_binary::Compression::Deflate;
+				}
+				Inner::Snapshot(moq_binary::snapshot::Consumer::new(track, binary))
+			}
+			Mode::Stream => {
+				let mut binary = moq_binary::stream::Config::default();
+				if compression {
+					binary.compression = moq_binary::Compression::Deflate;
+				}
+				Inner::Stream(moq_binary::stream::Consumer::new(track, binary))
+			}
 			other => return Err(crate::Error::UnsupportedMode(other.to_string())),
 		};
 

@@ -24,6 +24,23 @@ pub mod window;
 
 pub use crate::diff::{Diff, diff};
 
+/// How a JSON track compresses its frames.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Compression {
+	/// Uncompressed JSON frames.
+	#[default]
+	None,
+
+	/// Group-scoped raw DEFLATE, sync-flushed at each frame boundary.
+	Deflate,
+}
+
+impl Compression {
+	pub(crate) const fn is_deflate(self) -> bool {
+		matches!(self, Self::Deflate)
+	}
+}
+
 /// Errors produced while publishing or consuming JSON.
 #[derive(thiserror::Error, Debug, Clone)]
 #[non_exhaustive]

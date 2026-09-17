@@ -10,8 +10,8 @@
 import * as z from "@zod/mini";
 import { PatternListSchema } from "./claims.ts";
 
-/** How a session reached the relay. */
-export const TransportSchema = z.enum(["quic", "iroh", "websocket", "tcp", "unix"]);
+/** How a session reached the relay; `http` is a one-shot request on the relay's web listener. */
+export const TransportSchema = z.enum(["quic", "iroh", "websocket", "tcp", "unix", "http"]);
 export type Transport = z.infer<typeof TransportSchema>;
 
 /** The single direction a client declared at SETUP. */

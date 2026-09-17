@@ -5,27 +5,8 @@ use std::marker::PhantomData;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use super::consumer::Config;
 use crate::{Error, Result};
-
-/// Configuration for a [`Decoder`], and so for the [`Consumer`](super::Consumer) wrapping one.
-///
-/// Build from [`Default`] and override fields (the struct is `#[non_exhaustive]`, so new options
-/// stay additive), or chain the `with_*` setters.
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct ConsumerConfig {
-	/// Whether the frames are DEFLATE-compressed. Must match the encoder's
-	/// [`ProducerConfig::compression`](super::ProducerConfig::compression). Defaults to `false`.
-	pub compression: bool,
-}
-
-impl ConsumerConfig {
-	/// Set [`compression`](Self::compression) (a builder, since the struct is `#[non_exhaustive]`).
-	pub fn with_compression(mut self, compression: bool) -> Self {
-		self.compression = compression;
-		self
-	}
-}
 
 /// Reconstructs a JSON value from the snapshot and delta frames of a group.
 ///
@@ -61,9 +42,9 @@ pub struct Decoder<T> {
 
 impl<T> Decoder<T> {
 	/// Create a decoder with no value, awaiting its first [`snapshot`](Self::snapshot).
-	pub fn new(config: ConsumerConfig) -> Self {
+	pub fn new(config: Config) -> Self {
 		Self {
-			compression: config.compression,
+			compression: config.compression.is_deflate(),
 			flate: None,
 			current: None,
 			_marker: PhantomData,
@@ -136,16 +117,29 @@ impl<T: DeserializeOwned> Decoder<T> {
 
 #[cfg(test)]
 mod test {
-	use super::super::{Encoder, ProducerConfig};
+	use super::super::consumer::Config as ConsumerConfig;
+	use super::super::{Config, Encoder};
 	use super::*;
-	use serde_json::json;
+	use crate::Compression;
+	use serde_json::{Value, json};
+
+	fn consume(compression: Compression) -> ConsumerConfig {
+		ConsumerConfig { compression }
+	}
+
+	fn deflate() -> Config {
+		Config {
+			compression: Compression::Deflate,
+			..Default::default()
+		}
+	}
 
 	/// Round-trip a sequence of values through an encoder and decoder, yielding the value the
 	/// decoder reconstructs after each frame.
-	fn roundtrip(config: ProducerConfig, values: &[Value]) -> Vec<Value> {
+	fn roundtrip(config: Config, values: &[Value]) -> Vec<Value> {
 		let compression = config.compression;
 		let mut encoder = Encoder::<Value>::new(config);
-		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default().with_compression(compression));
+		let mut decoder = Decoder::<Value>::new(consume(compression));
 
 		let mut out = Vec::new();
 		for value in values {
@@ -169,7 +163,7 @@ mod test {
 			json!({ "a": 1, "b": 2 }),
 			json!({ "a": 5, "b": 2 }),
 		];
-		assert_eq!(roundtrip(ProducerConfig::default(), &values), values);
+		assert_eq!(roundtrip(Config::default(), &values), values);
 	}
 
 	#[test]
@@ -179,8 +173,7 @@ mod test {
 			json!({ "a": 1, "b": 2 }),
 			json!({ "a": 5, "b": 2 }),
 		];
-		let config = ProducerConfig::default().with_compression(true);
-		assert_eq!(roundtrip(config, &values), values);
+		assert_eq!(roundtrip(deflate(), &values), values);
 	}
 
 	/// The window is per group, so a keyframe mid-stream has to restart it on both sides. A decoder
@@ -189,7 +182,7 @@ mod test {
 	fn compressed_roundtrip_across_a_group_boundary() {
 		// A tight ratio guarantees at least one roll partway through.
 		let values: Vec<Value> = (0..=40).map(|n| json!({ "n": n })).collect();
-		let config = ProducerConfig::default().with_delta_ratio(2).with_compression(true);
+		let config = deflate().with_delta_ratio(2);
 		assert_eq!(roundtrip(config, &values).last().unwrap(), &json!({ "n": 40 }));
 	}
 
@@ -210,7 +203,7 @@ mod test {
 	/// stale, and deserializing each one is exactly the cost the split exists to avoid.
 	#[test]
 	fn frames_apply_without_materializing() {
-		let mut encoder = Encoder::<Value>::new(ProducerConfig::default().with_delta_ratio(100));
+		let mut encoder = Encoder::<Value>::new(Config::default().with_delta_ratio(100));
 		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
 
 		for n in 0..=20 {

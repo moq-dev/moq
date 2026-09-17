@@ -50,7 +50,7 @@ relay_config() {
         '[log]' \
         'level = "warn"' \
         '' \
-        '[server]' \
+        '[listen]' \
         "bind = \"127.0.0.1:$port\"" \
         "${tls[@]}" \
         '' \

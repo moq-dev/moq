@@ -26,7 +26,7 @@ pub struct Consumer {
 	pending: VecDeque<Frame>,
 	/// Whether the ended track's decoder has already been drained.
 	drained: bool,
-	/// Last container discontinuity observed. A change starts a fresh codec epoch.
+	/// Last container playhead generation observed.
 	discontinuity: u64,
 }
 
@@ -104,10 +104,9 @@ impl Consumer {
 			let mux_frame = self.track.read().await?;
 			let discontinuity = self.track.discontinuity();
 			if discontinuity != self.discontinuity {
-				// The tail belongs to the abandoned codec epoch. Draining resets the
-				// backend for reuse, but none of those pictures may cross the seam.
-				self.decoder.flush().await?;
-				self.pending.clear();
+				// A playhead event re-applies startup delay and skip; the next group
+				// already starts on a keyframe with parameter sets, so the decoder is
+				// not flushed.
 				self.discontinuity = discontinuity;
 			}
 
@@ -429,11 +428,10 @@ mod tests {
 		);
 	}
 
-	/// A declared discontinuity abandons the previous codec epoch. A delayed
-	/// picture from before the seam is drained and discarded before the first new
-	/// keyframe is decoded.
+	/// A declared discontinuity is a playhead event, not a decoder flush. A delayed
+	/// picture from before the seam still surfaces; the next group continues forward.
 	#[tokio::test]
-	async fn discontinuity_discards_buffered_tail() {
+	async fn discontinuity_does_not_flush_the_decoder() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
@@ -441,7 +439,7 @@ mod tests {
 		let subscriber = broadcast.consume();
 		let mut producer = moq_mux::container::Producer::new(
 			track,
-			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
 		);
 		producer
 			.write(moq_mux::container::Frame {
@@ -454,7 +452,7 @@ mod tests {
 		producer.discontinuity().unwrap();
 		producer
 			.write(moq_mux::container::Frame {
-				timestamp: Timestamp::ZERO,
+				timestamp: Timestamp::from_micros(200_000).unwrap(),
 				duration: None,
 				payload: Bytes::from_static(b"new access unit"),
 				keyframe: true,
@@ -474,6 +472,7 @@ mod tests {
 			"video",
 			Config {
 				kind: Kind::Named(probe::BUFFERED_NAME.into()),
+				max_age: std::time::Duration::from_secs(10),
 				..Config::new()
 			},
 		)
@@ -484,7 +483,7 @@ mod tests {
 		while let Some(frame) = consumer.read().await.unwrap() {
 			timestamps.push(frame.timestamp.as_micros());
 		}
-		assert_eq!(timestamps, vec![0]);
+		assert_eq!(timestamps, vec![100_000, 200_000]);
 	}
 
 	/// Cancellation while a threaded flush is in flight leaves the sink poisoned.

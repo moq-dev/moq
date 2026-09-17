@@ -47,7 +47,7 @@ same exact containment check. `Cost { warm, cold }`
 
 [moq#3225](https://github.com/moq-dev/moq/pull/3225) moved a long way toward
 this. An announcement carries a `Pattern` covering a set of paths. Rust
-`announce::Update.pattern` and TypeScript `Announce.Event.pattern` use the
+`announce::Update.pattern` and TypeScript `Announce.Update.pattern` use the
 matcher directly, so callers explicitly select prefix-shaped claims when
 they need a concrete broadcast path.
 

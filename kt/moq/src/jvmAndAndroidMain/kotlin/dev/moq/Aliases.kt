@@ -11,7 +11,7 @@ package dev.moq
 // listen facade (see Server.kt), which exposes the raw handle as `server`.
 /** A MoQ client: configure the TLS/bind knobs, then connect to a relay. */
 typealias Client = uniffi.moq.MoqClient
-/** A live pub/sub session with a relay, exposing a publisher and a consumer. */
+/** A live pub/sub session with a relay, exposing publish and consume origins. */
 typealias Session = uniffi.moq.MoqSession
 /** An incoming session awaiting a decision: accept it to handshake, or reject it. */
 typealias Request = uniffi.moq.MoqRequest
@@ -19,20 +19,20 @@ typealias Request = uniffi.moq.MoqRequest
 // Origin (broadcast discovery / announcement).
 /** The publish side of an origin: create broadcasts so subscribers can discover them. */
 typealias OriginProducer = uniffi.moq.MoqOriginProducer
-/** Options for creating an origin, such as its total cache budget. */
-typealias OriginOptions = uniffi.moq.MoqOriginOptions
+/** Config for creating an origin, such as its total cache budget. */
+typealias OriginConfig = uniffi.moq.MoqOriginConfig
 /** The subscribe side of an origin: discover and request published broadcasts. */
 typealias OriginConsumer = uniffi.moq.MoqOriginConsumer
 /** A served route: advertises a path pattern and yields broadcast requests beneath it. */
 typealias OriginDynamic = uniffi.moq.MoqOriginDynamic
-/** A requested broadcast not yet accepted: fulfill it with a producer or abort it. */
+/** A requested broadcast not yet accepted: fulfill it with a producer or reject it. */
 typealias BroadcastRequest = uniffi.moq.MoqBroadcastRequest
 /** A stream of route announcements and retractions under a prefix. */
-typealias Announced = uniffi.moq.MoqAnnounced
+typealias AnnounceConsumer = uniffi.moq.MoqAnnounceConsumer
 /** A pending wait for a route to cover a specific path. */
 typealias AnnouncedBroadcast = uniffi.moq.MoqAnnouncedBroadcast
-/** A single route announcement or retraction: its path, route metadata, and active flag. */
-typealias Announcement = uniffi.moq.MoqAnnouncement
+/** A single route announcement or retraction: its pattern, route metadata, and active flag. */
+typealias AnnounceUpdate = uniffi.moq.MoqAnnounceUpdate
 // Broadcast / track / group producers and consumers.
 /** The write side of a broadcast: publish tracks into it. */
 typealias BroadcastProducer = uniffi.moq.MoqBroadcastProducer

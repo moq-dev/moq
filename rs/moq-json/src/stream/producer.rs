@@ -5,8 +5,10 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 
-use super::{Encoder, ProducerConfig};
+use super::Encoder;
 use crate::Result;
+
+pub use super::Config;
 
 /// Publishes an ordered log of JSON records over a track, one record per frame in a single group.
 ///
@@ -41,7 +43,7 @@ impl<T> Producer<T> {
 
 impl<T: Serialize> Producer<T> {
 	/// Create a producer that publishes to the given track.
-	pub fn new(track: moq_net::track::Producer, config: ProducerConfig) -> Self {
+	pub fn new(track: moq_net::track::Producer, config: Config) -> Self {
 		Self {
 			inner: Arc::new(Mutex::new(Inner {
 				track: Track {

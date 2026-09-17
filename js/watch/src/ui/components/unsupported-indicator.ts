@@ -4,12 +4,12 @@ import type MoqWatch from "../../element";
 /** Shows why video cannot start when every catalog rendition is unsupported. */
 export function unsupportedIndicator(parent: Effect, watch: MoqWatch): HTMLElement {
 	const container = document.createElement("div");
-	container.className = "watch-ui__unsupported-indicator";
+	container.className = "watch-ui__notice watch-ui__unsupported-indicator";
 	container.setAttribute("role", "status");
 	container.setAttribute("aria-live", "polite");
 
 	const text = document.createElement("span");
-	text.className = "watch-ui__unsupported-text";
+	text.className = "watch-ui__notice-text";
 	container.appendChild(text);
 
 	parent.run((effect) => {

@@ -10,8 +10,8 @@ Existing plaintext operation remains the default; an explicit application creden
 
 - Integrate the TypeScript E2EE layer before the existing Hang publish and after the existing Hang subscribe boundaries, keeping codec selection, synchronization, and rendering in the post-decryption pipelines.
 - Accept keys through a programmatic property/API only, never an HTML attribute, URL, persistent browser storage, analytics event, or log. Clear owned secret bytes when the component is replaced or disconnected; do not make extractability a hidden requirement.
-- Derive the encrypted catalog name from the credential, decrypt it before existing Hang selection, then subscribe to its opaque media and timeline tracks. Publish every catalog representation and semantic track name through the same protected naming contract.
-- Cover camera/microphone publication, audio/video playback, late subscription, bounded WebCrypto backpressure, generation replacement, bad-group termination, and bad-datagram events in browser tests.
+- Discover the newest epoch under the `.e2ee/` prefix, derive the encrypted catalog name from that generation, decrypt it before existing Hang selection, then subscribe to its opaque media and timeline tracks. Publish every catalog representation and semantic track name through the same protected naming contract.
+- Cover camera/microphone publication, audio/video playback, late subscription, bounded WebCrypto backpressure, a restarted publisher under a new epoch, bad-group termination, and bad-datagram events in browser tests.
 
 ## Required
 

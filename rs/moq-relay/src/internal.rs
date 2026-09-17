@@ -346,25 +346,25 @@ fn render_metrics(
 		&mut out,
 		"moq_relay_subscriptions_opened_total",
 		"Track subscriptions opened.",
-		|c| c.subscriptions,
+		|c| c.subscriptions_started,
 	);
 	counter(
 		&mut out,
 		"moq_relay_subscriptions_closed_total",
 		"Track subscriptions closed; subtract from opened for live subscriptions.",
-		|c| c.subscriptions_closed,
+		|c| c.subscriptions_ended,
 	);
 	counter(
 		&mut out,
 		"moq_relay_viewers_opened_total",
 		"Distinct (broadcast, session) subscriptions opened.",
-		|c| c.broadcasts,
+		|c| c.broadcasts_started,
 	);
 	counter(
 		&mut out,
 		"moq_relay_viewers_closed_total",
 		"Distinct (broadcast, session) subscriptions closed; subtract from opened for live viewers.",
-		|c| c.broadcasts_closed,
+		|c| c.broadcasts_ended,
 	);
 
 	// Sessions are per-tier only (no role), so they don't fit the helper above.
@@ -375,7 +375,7 @@ fn render_metrics(
 			out,
 			"moq_relay_sessions_opened_total{{tier=\"{}\"}} {}",
 			tier.as_str(),
-			sessions.sessions
+			sessions.sessions_started
 		);
 	}
 	let _ = writeln!(
@@ -388,7 +388,7 @@ fn render_metrics(
 			out,
 			"moq_relay_sessions_closed_total{{tier=\"{}\"}} {}",
 			tier.as_str(),
-			sessions.sessions_closed
+			sessions.sessions_ended
 		);
 	}
 

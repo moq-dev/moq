@@ -28,7 +28,7 @@ impl<E: CatalogExt> Consumer<E> {
 	pub fn new(track: moq_net::track::Subscriber) -> Self {
 		Self {
 			base: track.broadcast().path.clone(),
-			inner: moq_json::snapshot::Consumer::new(track, moq_json::snapshot::ConsumerConfig::default()),
+			inner: moq_json::snapshot::Consumer::new(track, moq_json::snapshot::consumer::Config::default()),
 		}
 	}
 
@@ -36,8 +36,8 @@ impl<E: CatalogExt> Consumer<E> {
 	///
 	/// The track must be the compressed one (see [`hang::Catalog::COMPRESSED_NAME`]).
 	pub fn compressed(track: moq_net::track::Subscriber) -> Self {
-		let mut config = moq_json::snapshot::ConsumerConfig::default();
-		config.compression = true;
+		let mut config = moq_json::snapshot::consumer::Config::default();
+		config.compression = moq_json::Compression::Deflate;
 		Self {
 			base: track.broadcast().path.clone(),
 			inner: moq_json::snapshot::Consumer::new(track, config),

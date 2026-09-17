@@ -311,13 +311,10 @@ async fn spawn_relay_with_upstream(
 	let mut server = server.listen().await.expect("listen");
 
 	// Fully public auth: any no-JWT stream client gets the whole root.
-	#[allow(deprecated)]
-	let public = auth::Public::Simple(vec![String::new()]);
 	let mut auth_config = auth::Config::default();
-	auth_config.public = Some(public);
+	auth_config.public = vec![moq_auth::Pattern::all()];
 	let auth = auth_config
-		.init(&moq_tokio::tls::Connect::default())
-		.await
+		.init("test", &moq_tokio::tls::Connect::default())
 		.expect("auth init");
 
 	let mut cluster_config = cluster::Config::default();

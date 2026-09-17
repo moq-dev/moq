@@ -1,10 +1,11 @@
 /**
- * Feeds a session's announced routes into an origin; the `subscribe` connect option.
+ * Feeds a session's announced routes into an origin; the `consume` connect option.
  *
  * @module
  */
 import type { Dispose } from "@moq/signals";
-import { DEFAULT_ROUTE, type Dynamic, type Producer as OriginProducer, type RequestSlot } from "../origin.ts";
+import { Route } from "../hop.ts";
+import type { Dynamic, Producer as OriginProducer, RequestSlot } from "../origin.ts";
 import type * as Path from "../path.ts";
 import type { Established } from "./established.ts";
 
@@ -60,7 +61,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 
 				if (event.active) {
 					const existing = inserted.get(event.pattern.text);
-					const route = event.route ?? DEFAULT_ROUTE;
+					const route = event.route ?? Route.default;
 					if (existing) {
 						existing.update(route);
 					} else {

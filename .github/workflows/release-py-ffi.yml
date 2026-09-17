@@ -10,6 +10,10 @@ on:
   push:
     tags:
       - "moq-ffi-v*"
+  # Dry-run: build everything, publish nothing. Nightly calls every release
+  # workflow this way so a broken build surfaces before the tag is cut.
+  workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -39,6 +43,7 @@ jobs:
       # hand without bumping Cargo.toml first, the wheel would ship with
       # the previous version and PyPI would reject the duplicate upload.
       - name: Verify Cargo.toml matches tag
+        if: github.ref_type == 'tag'
         env:
           TAG_VERSION: ${{ steps.parse.outputs.version }}
         run: |
@@ -58,8 +63,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # manylinux_2_28 (AlmaLinux 8) on both Linux targets: manylinux2014
+          # (CentOS 7) only packages clang 3.4, too old for the bindgen that
+          # moq-vaapi and v4l2-sys run at build time.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            manylinux: 2_28
           - target: aarch64-unknown-linux-gnu
             # Native headers and compiler keep bindgen on the target ABI.
             os: ubuntu-24.04-arm
@@ -126,6 +135,7 @@ jobs:
   publish:
     name: Publish to PyPI
     needs: [build, sdist]
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     environment:
       name: pypi

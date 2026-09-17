@@ -1,5 +1,5 @@
 /**
- * Broadcast announcement streams: which broadcast paths are available under a prefix.
+ * Broadcast announcement streams: which broadcast paths are available under a scope.
  *
  * @module
  */
@@ -20,18 +20,28 @@ import * as Path from "./path.js";
  *
  * @public
  */
-export interface Event {
-	/** What the route covers, relative to the prefix passed to `announced()`. */
+export interface Update {
+	/**
+	 * What the route covers, relative to the origin (for a session, its URL path). A
+	 * route claimed above the scope passed to `announced()` is clamped to that scope.
+	 */
 	pattern: Path.Pattern;
 	/** True while the route is advertised, false when it was retracted. */
 	active: boolean;
 	/** Hops and cost of an active advertisement; omitted on a retraction. */
 	route?: Route;
+	/**
+	 * Whether the route passed through an anonymous hop (id 0) at any depth.
+	 *
+	 * Present on active announcements from a session. An anonymous route ranks
+	 * below every fully identified one; this client does not rank routes itself.
+	 */
+	anonymous?: boolean;
 }
 
 /** Reactive backing state shared by announcement producers and consumers. */
 class AnnounceState {
-	queue = new Signal<Event[]>([]);
+	queue = new Signal<Update[]>([]);
 	closed = new Once<Error | null>();
 }
 
@@ -50,14 +60,7 @@ function closeState(state: AnnounceState, abort?: Error) {
  * @public
  */
 export class Producer {
-	/** Path prefix this stream is scoped to. */
-	prefix: Path.Valid;
-
 	#state = new AnnounceState();
-
-	constructor(prefix = Path.empty()) {
-		this.prefix = prefix;
-	}
 
 	/**
 	 * Settles once the stream closes: `null` on a clean close, or the abort {@link Error}.
@@ -69,14 +72,14 @@ export class Producer {
 
 	/** A read handle for this announcement stream. */
 	consume(): Consumer {
-		return makeConsumer(this.prefix, this.#state);
+		return makeConsumer(this.#state);
 	}
 
 	/** Writes an announcement to the queue. */
-	append(event: Event) {
+	append(update: Update) {
 		if (this.#state.closed.peek() !== undefined) throw new Error("announcements are closed");
 		this.#state.queue.mutate((queue) => {
-			queue.push(event);
+			queue.push(update);
 		});
 	}
 
@@ -88,24 +91,20 @@ export class Producer {
 
 // Constructs a Consumer from within this module without exposing a public constructor
 // that would leak the unexported AnnounceState. Assigned in the class's static block.
-let makeConsumer: (prefix: Path.Valid, state: AnnounceState) => Consumer;
+let makeConsumer: (state: AnnounceState) => Consumer;
 
 /**
  * The read side of an announcement stream.
  *
  * Created internally: obtain one from {@link Producer.consume} or the connection's
- * `announced(prefix)`.
+ * `announced(scope)`.
  *
  * @public
  */
 export class Consumer {
-	/** Path prefix this stream is scoped to. */
-	prefix: Path.Valid;
-
 	#state: AnnounceState;
 
-	private constructor(prefix: Path.Valid, state: AnnounceState) {
-		this.prefix = prefix;
+	private constructor(state: AnnounceState) {
 		this.#state = state;
 	}
 
@@ -115,11 +114,11 @@ export class Consumer {
 	}
 
 	static {
-		makeConsumer = (prefix, state) => new Consumer(prefix, state);
+		makeConsumer = (state) => new Consumer(state);
 	}
 
 	/** Returns the next announcement. */
-	async next(): Promise<Event | undefined> {
+	async next(): Promise<Update | undefined> {
 		for (;;) {
 			const announce = this.#state.queue.peek().shift();
 			if (announce) return announce;
@@ -235,7 +234,7 @@ export class Broadcast {
 	 *
 	 * Prefer `announcedBroadcast(path)` on the connection itself. Reach for this when the
 	 * source you want to follow isn't either connection type, e.g. your own
-	 * `Getter<Established | undefined>` or an origin fed by a `subscribe` option.
+	 * `Getter<Established | undefined>` or an origin fed by a `consume` option.
 	 */
 	constructor({ connection, path, origin }: BroadcastProps) {
 		this.path = path;
@@ -276,7 +275,8 @@ export class Broadcast {
 				return;
 			}
 
-			const announced = conn.announced(path);
+			const scope = Path.Pattern.subtree(path);
+			const announced = conn.announced(scope);
 			effect.cleanup(() => announced.close());
 
 			let current: broadcast.Consumer | undefined;
@@ -296,9 +296,9 @@ export class Broadcast {
 						const event = await Promise.race([effect.cancel, announced.next()]);
 						if (!event) break;
 
-						// Prefix-shaped claims covering this path (`asPrefix() === ""`). A literal
-						// PATTERN ad at the same path has `asPrefix() === undefined` and is skipped.
-						if (event.pattern.asPrefix() !== "") continue;
+						// Prefix-shaped claims covering this path clamp to its subtree. A literal
+						// PATTERN ad at the same path is not prefix-shaped and is skipped.
+						if (!event.pattern.equals(scope)) continue;
 
 						if (event.active) {
 							// A live subscription survives a redundant (re-)announce; only replace a dead one.
@@ -342,7 +342,9 @@ export class Broadcast {
 		// Follow the table regardless of sessions: a local publish resolves with no
 		// connection at all (and keeps resolving while one reconnects), and the
 		// identity-diffed announcements swap the handle on a republish.
-		const announced = origin.announced(this.path);
+		// The scope is the path's subtree: the exact path plus everything beneath it.
+		const scope = Path.Pattern.subtree(this.path);
+		const announced = origin.announced(scope);
 		effect.cleanup(() => announced.close());
 
 		// Held open while the path is announced. A request resolves to the table's route when
@@ -367,9 +369,9 @@ export class Broadcast {
 				const event = await Promise.race([effect.cancel, announced.next()]);
 				if (!event) break;
 
-				// Prefix-shaped claims covering this path (`asPrefix() === ""`). A literal
-				// PATTERN ad at the same path has `asPrefix() === undefined` and is skipped.
-				if (event.pattern.asPrefix() !== "") continue;
+				// Prefix-shaped claims covering this path clamp to its subtree. A literal
+				// PATTERN ad at the same path is not prefix-shaped and is skipped.
+				if (!event.pattern.equals(scope)) continue;
 				live.set(event.active);
 			}
 

@@ -112,54 +112,25 @@ struct ClusterLan {
 #[derive(usage::Config)]
 #[usage(prefix = "auth")]
 struct Auth {
-	#[usage(env = "MOQ_AUTH_KEY", cli("--auth-key"))]
-	key: Option<String>,
+	#[usage(env = "MOQ_AUTH_URL", cli("--auth-url"))]
+	url: Option<String>,
 
-	#[usage(env = "MOQ_AUTH_KEY_DIR", cli("--auth-key-dir"))]
-	key_dir: Option<String>,
+	#[usage(env = "MOQ_AUTH_PUBLIC", cli("--auth-public"), parse = "list_by_comma")]
+	public: Option<Vec<String>>,
 
-	#[usage(env = "MOQ_AUTH_PUBLIC", cli("--auth-public"))]
-	public: Option<String>,
+	#[usage(
+		env = "MOQ_AUTH_PUBLIC_SUBSCRIBE",
+		cli("--auth-public-subscribe"),
+		parse = "list_by_comma"
+	)]
+	public_subscribe: Option<Vec<String>>,
 
-	#[usage(env = "MOQ_AUTH_PUBLIC_SUBSCRIBE", cli("--auth-public-subscribe"))]
-	public_subscribe: Option<String>,
-
-	#[usage(env = "MOQ_AUTH_PUBLIC_PUBLISH", cli("--auth-public-publish"))]
-	public_publish: Option<String>,
-
-	#[usage(env = "MOQ_AUTH_PUBLIC_API", cli("--auth-public-api"))]
-	public_api: Option<String>,
-
-	#[usage(env = "MOQ_AUTH_DOMAIN", cli("--auth-domain"), parse = "list_by_comma")]
-	domains: Option<Vec<String>>,
-
-	#[usage(env = "MOQ_AUTH_API", cli("--auth-api"))]
-	auth_api: Option<String>,
-
-	#[usage(env = "MOQ_AUTH_API_MODE", cli("--auth-api-mode"))]
-	api_mode: Option<String>,
-
-	#[usage(env = "MOQ_AUTH_MTLS_TIER", cli("--auth-mtls-tier"))]
-	mtls_tier: Option<String>,
-
-	#[usage(flatten)]
-	tls: AuthTls,
-}
-
-#[derive(usage::Config)]
-#[usage(prefix = "auth.tls")]
-struct AuthTls {
-	#[usage(env = "MOQ_AUTH_TLS_ROOT", cli("--auth-tls-root"), parse = "list_by_comma")]
-	root: Option<Vec<String>>,
-
-	#[usage(env = "MOQ_AUTH_TLS_CERT", cli("--auth-tls-cert"))]
-	cert: Option<String>,
-
-	#[usage(env = "MOQ_AUTH_TLS_KEY", cli("--auth-tls-key"))]
-	key: Option<String>,
-
-	#[usage(env = "MOQ_AUTH_TLS_DISABLE_VERIFY", cli("--auth-tls-disable-verify"))]
-	disable_verify: Option<bool>,
+	#[usage(
+		env = "MOQ_AUTH_PUBLIC_PUBLISH",
+		cli("--auth-public-publish"),
+		parse = "list_by_comma"
+	)]
+	public_publish: Option<Vec<String>>,
 }
 
 #[derive(usage::Config)]

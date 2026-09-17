@@ -1,10 +1,7 @@
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 
-import { type Config, DEFAULT_DELTA_RATIO, type Encoded, Encoder } from "./encoder.ts";
-
-/** Snapshot producer options, including the destination track. */
-export type ProducerConfig<T> = Config<T> & { track: Moq.Track.Producer };
+import { type Config as CodecConfig, DEFAULT_DELTA_RATIO, type Encoded, Encoder } from "./encoder.ts";
 
 /**
  * Publishes a JSON value over a track, choosing snapshots and deltas automatically.
@@ -24,7 +21,7 @@ export class Producer<T> {
 	// is closed the moment it's written and never held open.
 	#deltas: boolean;
 
-	constructor(config: ProducerConfig<T>) {
+	constructor(config: Producer.Config<T>) {
 		this.#track = config.track;
 		this.#encoder = new Encoder(config);
 		this.#initial = config.initial;
@@ -152,4 +149,9 @@ export class Producer<T> {
 		this.#encoder.reset();
 		this.#track.close();
 	}
+}
+
+export namespace Producer {
+	/** Snapshot producer options, including the destination track. */
+	export type Config<T> = CodecConfig<T> & { track: Moq.Track.Producer };
 }

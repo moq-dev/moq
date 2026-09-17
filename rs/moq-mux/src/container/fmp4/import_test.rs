@@ -393,7 +393,7 @@ async fn test_msf_catalog_roundtrip() {
 		.subscribe(None)
 		.await
 		.expect("MSF catalog track should exist");
-	let mut msf = crate::catalog::msf::Consumer::new(track);
+	let mut msf = crate::catalog::msf::Consumer::<()>::new(track);
 
 	let catalog = msf
 		.next()

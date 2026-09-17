@@ -83,13 +83,6 @@ pub enum Error {
 	)]
 	ConflictingClientAuth,
 
-	#[doc(hidden)]
-	#[deprecated(note = "an in-memory Identity is now supported; pinned peers return PeersUnsupported")]
-	#[error(
-		"the quiche backend cannot use an in-memory Identity or pin client fingerprints; use the quinn or noq backend"
-	)]
-	MemoryUnsupported,
-
 	/// A pinned peer set was configured on a backend that cannot run a rustls verifier.
 	#[error("the quiche backend cannot pin client fingerprints; use the quinn or noq backend")]
 	PeersUnsupported,
@@ -520,7 +513,7 @@ pub struct Connect {
 	/// Danger: Disable TLS certificate verification.
 	///
 	/// Fine for local development and between relays, but should be used in caution in production.
-	#[serde(alias = "disable_verify", skip_serializing_if = "Option::is_none")]
+	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(
 		name = "connect-tls-insecure",
 		long = "connect-tls-insecure",
@@ -531,6 +524,11 @@ pub struct Connect {
 		require_equals = true,
 	)]
 	pub insecure: Option<bool>,
+
+	/// The released `disable_verify` key, kept so [`deprecated`](Self::deprecated) can name [`insecure`](Self::insecure).
+	#[serde(default, skip_serializing)]
+	#[usage(skip)]
+	pub(crate) disable_verify: Option<bool>,
 
 	/// Override the TLS SNI and certificate verification hostname for outbound connections.
 	///
@@ -843,6 +841,9 @@ impl Connect {
 	pub fn deprecated(&self) -> crate::Deprecated {
 		let old = &self.deprecated;
 		let mut found = crate::Deprecated::default();
+		if self.disable_verify.is_some() {
+			found.toml("disable_verify", "insecure", None);
+		}
 
 		for (used, flag, env, new) in [
 			(
@@ -1564,7 +1565,7 @@ fn server_config(config: &Listen, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::Serv
 /// certificate that chained to a configured [`Listen::root`]. Owns the chain
 /// (leaf first) so callers can inspect it, e.g. [`expiry`](Self::expiry),
 /// without re-parsing the type-erased QUIC identity.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct PeerIdentity {
 	chain: Vec<CertificateDer<'static>>,
 }
@@ -1609,6 +1610,34 @@ impl PeerIdentity {
 	pub fn fingerprint(&self) -> Option<String> {
 		let leaf = self.chain.first()?;
 		Some(hex::encode(crypto::sha256(&crypto::provider(), leaf.as_ref())))
+	}
+
+	/// The peer's name: the leaf's first SAN DNS name, else its CN, else its
+	/// fingerprint, so it is never empty for a chain that parses.
+	pub fn name(&self) -> Option<String> {
+		let leaf = self.chain.first()?;
+		let (_, cert) = x509_parser::parse_x509_certificate(leaf).ok()?;
+		let san = cert.subject_alternative_name().ok().flatten().and_then(|san| {
+			san.value.general_names.iter().find_map(|name| match name {
+				x509_parser::extensions::GeneralName::DNSName(dns) => Some((*dns).to_string()),
+				_ => None,
+			})
+		});
+		let cn = || {
+			cert.subject()
+				.iter_common_name()
+				.next()
+				.and_then(|cn| cn.as_str().ok())
+				.map(str::to_string)
+		};
+		san.or_else(cn).or_else(|| self.fingerprint())
+	}
+
+	/// The leaf certificate's issuer, as a distinguished name.
+	pub fn issuer(&self) -> Option<String> {
+		let leaf = self.chain.first()?;
+		let (_, cert) = x509_parser::parse_x509_certificate(leaf).ok()?;
+		Some(cert.issuer().to_string())
 	}
 
 	/// The leaf certificate's `notAfter`, if it parses. A `notAfter` before the
@@ -3177,6 +3206,19 @@ mod legacy_tests {
 
 		let tls = parse(&["--connect-tls-root", "/tmp/new.pem"]).connect;
 		assert!(tls.deprecated().is_empty());
+	}
+
+	/// The released TOML key still parses so the process can name `insecure`, but it
+	/// configures nothing.
+	#[test]
+	fn released_disable_verify_key_is_reported_not_applied() {
+		let tls: Connect = toml::from_str("disable_verify = true").expect("parse");
+		assert_eq!(tls.insecure, None);
+		assert!(
+			tls.deprecated().to_string().contains("disable_verify -> insecure"),
+			"{}",
+			tls.deprecated()
+		);
 	}
 
 	/// The released served-identity spellings: the bare `--tls-*` flags and the

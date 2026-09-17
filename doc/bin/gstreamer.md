@@ -52,9 +52,26 @@ Each `sink_%u` request pad is one track. Pad properties: `track` names it
 `track-status`/`track-error` report its lifecycle. Element properties:
 `url`, `broadcast`, `tls-disable-verify`, `quic-idle-timeout`,
 `quic-keep-alive`, and read-only `status`, `connected`, `moq-version`, and
-`estimated-send-bitrate`. The sink reconnects for as long as the pipeline
-runs and only reports `failed` on an answer redialing can't change, such as a
-rejected token.
+`estimated-send-bitrate`, `estimated-recv-bitrate`, `connection-stats`, and
+`sessions`. The sink reconnects for as long as the pipeline runs and only
+reports `failed` on an answer redialing can't change, such as a rejected token.
+
+`connection-stats` is null while disconnected. While connected it is a
+`GstStructure` named `moq-connection-stats` containing the transport metrics
+available from the active backend. Missing metrics are omitted rather than
+reported as zero. Its possible `guint64` fields are `rtt-us`,
+`estimated-send-rate-bps`, `estimated-recv-rate-bps`, `bytes-sent`,
+`bytes-received`, `bytes-lost`, `packets-sent`, `packets-received`, and
+`packets-lost`. Poll the property for current counters; property notification
+marks connection and disconnection edges.
+
+`sessions` is a `GstStructure` named `moq-sessions` with `guint64` fields
+`started` and `ended`, the cumulative connect and disconnect counts for the
+current element session in the same shape as the relay's sessions track. One
+read returns both counters from the same instant, so `started - ended` is 1
+while connected and 0 otherwise, reconnects are `started - 1` once `started`
+is at least 1, and a rate is the delta over any window you sample. Unlike
+`status`, a connection that drops before you poll still moves both counters.
 
 ## moqsrc
 

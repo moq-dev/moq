@@ -10,7 +10,7 @@ use std::{
 use web_transport_trait::Stats;
 
 use crate::{
-	AsPath, Error, Hop, Hops,
+	Error, Hop, Hops,
 	coding::{Encode, Stream, Writer},
 	lite::{
 		self,
@@ -200,7 +200,7 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> Publisher<S
 		stream: &mut Stream<S, Version>,
 		origin: &origin::Consumer,
 		announced: &mut announce::Consumer,
-		prefix: impl AsPath,
+		prefix: impl crate::AsPath,
 		self_origin: Hop,
 		version: Version,
 	) -> Result<(), Error> {
@@ -542,10 +542,15 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 		// that doesn't grant it), we simply have nothing to announce. Respond with an
 		// empty set and keep the stream open (the subscriber treats a FIN here as a
 		// fatal stream close), rather than erroring, which would reset the stream.
+		// The wire prefix decodes as a literal path; convert it explicitly to its
+		// subtree grant, refusing anything that cannot be a subtree.
+		let scope = crate::Pattern::subtree(prefix.as_str())
+			.map(crate::Patterns::from)
+			.unwrap_or_default();
 		let origin = self
 			.shared
 			.origin
-			.scope(&[prefix.as_path()])
+			.scope(&scope)
 			.unwrap_or_else(|| self.shared.origin.empty());
 		// Register the split-horizon peer on the announce cursor too. The origin
 		// model uses this exposure to park a reflected copy before it can replace
@@ -890,7 +895,7 @@ enum TrackInfoState {
 	/// Resolving the broadcast (may wait on a dynamic handler).
 	Request {
 		msg: lite::Track<'static>,
-		requesting: origin::Requesting,
+		requesting: origin::Pending,
 	},
 	/// Waiting for the track's info.
 	Query {
@@ -1019,7 +1024,7 @@ enum SubscribeState<S: crate::transport::poll::Session> {
 	/// Resolving the broadcast (may wait on a dynamic handler).
 	Request {
 		msg: lite::Subscribe<'static>,
-		requesting: origin::Requesting,
+		requesting: origin::Pending,
 	},
 	/// Waiting for the model subscription to be confirmed.
 	Confirm {
@@ -1245,7 +1250,7 @@ enum FetchState {
 	/// Resolving the broadcast (may wait on a dynamic handler).
 	Request {
 		msg: lite::Fetch<'static>,
-		requesting: origin::Requesting,
+		requesting: origin::Pending,
 	},
 	/// Waiting for the fetched group.
 	Fetch {
@@ -3147,14 +3152,16 @@ mod tests {
 	async fn serving_origin_falls_back_to_the_assigned_identity() {
 		let assigned = crate::Hop::new(777).unwrap();
 		let upstream = crate::Hop::new(778).unwrap();
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 
 		let mut echoed_hops = Hops::new();
-		echoed_hops.push(assigned).unwrap();
+		echoed_hops.push(crate::Hop::UNKNOWN).unwrap();
 		let _echoed = origin
 			.dynamic(
 				crate::Pattern::subtree("echoed").unwrap(),
-				crate::origin::Route::default().with_hops(echoed_hops),
+				crate::origin::Route::default()
+					.with_hops(echoed_hops)
+					.with_via(assigned),
 			)
 			.unwrap();
 
@@ -3203,12 +3210,17 @@ mod tests {
 		let assigned = crate::Hop::new(777).unwrap();
 		let clean_publisher = crate::Hop::new(778).unwrap();
 		let self_origin = crate::Hop::new(1).unwrap();
-		let origin = crate::origin::Info::new(self_origin).produce();
+		let origin = crate::origin::Config::new(self_origin).produce();
 
 		let mut tainted_hops = Hops::new();
-		tainted_hops.push(assigned).unwrap();
+		tainted_hops.push(crate::Hop::UNKNOWN).unwrap();
 		let _tainted = origin
-			.announce("echoed", crate::origin::Route::default().with_hops(tainted_hops))
+			.announce(
+				"echoed",
+				crate::origin::Route::default()
+					.with_hops(tainted_hops)
+					.with_via(assigned),
+			)
 			.unwrap();
 
 		let mut clean_hops = Hops::new();

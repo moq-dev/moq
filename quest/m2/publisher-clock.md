@@ -29,7 +29,6 @@ catalog representation. GStreamer's clock observation remains its own quest.
 
 - [Merge dev](/quest/m1/merge-dev.md) - the required M1 APIs must be available on main before this implementation starts
 
-- [Broadcast clock](/quest/m1/broadcast-clock.md) - functional owner and catalog contract
 - [Publisher discontinuity](/quest/m2/js-publish-discontinuity.md) - use the settled browser restart-marker path
 
 ## Related

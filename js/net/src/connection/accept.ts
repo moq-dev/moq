@@ -25,9 +25,9 @@ export interface AcceptProps {
 
 	/**
 	 * The origin the session feeds with the peer's announced broadcasts. Omit to discover
-	 * nothing. The entries retract when the session dies; see the `subscribe` connect option.
+	 * nothing. The entries retract when the session dies; see the `consume` connect option.
 	 */
-	subscribe?: OriginProducer;
+	consume?: OriginProducer;
 }
 
 /** The per-session wiring shared by every negotiated protocol path. */
@@ -46,7 +46,7 @@ type SessionProps = {
  */
 export async function accept(transport: WebTransport, url: URL, props?: AcceptProps): Promise<Established> {
 	const connection = await acceptInner(transport, url, props);
-	if (props?.subscribe) forwardAnnounced(connection, props.subscribe);
+	if (props?.consume) forwardAnnounced(connection, props.consume);
 	return connection;
 }
 

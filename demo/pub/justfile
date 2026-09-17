@@ -154,7 +154,7 @@ h264 name url="http://localhost:4443" *args:
 serve name *args:
     just download "{{ name }}"
     cargo build --bin moq
-    just ffmpeg-ts "media/{{ name }}.mp4" | cargo run --bin moq -- {{ args }} --listen "[::]:4443" --listen-tls-generate "localhost" --broadcast "{{ name }}.hang" import ts
+    just ffmpeg-ts "media/{{ name }}.mp4" | cargo run --bin moq -- {{ args }} --listen "[::]:4443" --listen-tls-generate "localhost" --auth-public "**" --broadcast "{{ name }}.hang" import ts
 
 # Generate and serve an HLS stream from a video for testing.
 serve-hls name port="8000":

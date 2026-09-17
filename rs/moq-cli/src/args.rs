@@ -29,6 +29,7 @@
 //!   an `import hls` playlist path starting with `-`, which `./-name` covers, so
 //!   the separator stays unconditional rather than context-sensitive.
 
+use anyhow::Context as _;
 use std::ffi::{OsStr, OsString};
 use std::time::Duration;
 
@@ -196,7 +197,9 @@ impl Invocation {
 		let cli = Cli::parse_from(&first).map_err(|err| parse_error(Cli::spec(), Cli::command(), &first, err))?;
 		let typed = MoqSide::from_argv(&first, Environment::Ignore).unwrap_or_else(|| cli.moq.clone());
 
-		let mut stages = vec![cli.command];
+		let mut deprecated = cli.moq.deprecated();
+		deprecated.extend(cli.command.deprecated());
+		let mut stages = vec![cli.command.current()];
 		for chunk in chunks {
 			// A trailing or doubled `--` leaves an empty chunk, which Usage would report as a
 			// bare missing-subcommand usage dump. Name what's actually wrong instead.
@@ -208,21 +211,17 @@ impl Invocation {
 			}
 
 			let chunk = chunk.iter().map(OsString::as_os_str).collect::<Vec<_>>();
-			stages.push(
-				Stage::parse_from(&chunk)
-					.map_err(|err| parse_error(Stage::spec(), Stage::command(), &chunk, err))?
-					.command,
-			);
+			let command = Stage::parse_from(&chunk)
+				.map_err(|err| parse_error(Stage::spec(), Stage::command(), &chunk, err))?
+				.command;
+			deprecated.extend(command.deprecated());
+			stages.push(command.current());
 		}
 
 		// Before anything reads the config: a released spelling parses into a hidden
 		// field that nothing honors, so continuing would run on settings the command
 		// line never asked for. Every stage is in by now, since a stage can carry a
 		// config of its own. A Usage error, since that is what this is.
-		let mut deprecated = cli.moq.deprecated();
-		for stage in &stages {
-			deprecated.extend(stage.deprecated());
-		}
 		if !deprecated.is_empty() {
 			return Err(ParseError::new(
 				ParseErrorKind::ValueValidation,
@@ -312,8 +311,12 @@ pub struct MoqSide {
 	/// `--connect` dials), which default to the root broadcast at the connection
 	/// path; required by the `--listen` endpoints and `hls export`, which bridge one
 	/// named broadcast.
-	#[usage(long, alias = "name", help_heading = "MoQ")]
+	#[usage(long, help_heading = "MoQ")]
 	pub broadcast: Option<String>,
+
+	/// The released spelling of [`Self::broadcast`].
+	#[usage(long = "name", hide = true)]
+	name: Option<String>,
 
 	/// Fix this process's Hop ID instead of minting a fresh random one.
 	///
@@ -354,6 +357,12 @@ pub struct MoqSide {
 	/// through one implementation.
 	#[usage(flatten)]
 	pub cluster: moq_relay::cluster::Config,
+
+	/// Who a `--listen` endpoint admits: `--auth-url` asks an auth server per
+	/// session, `--auth-public` grants anonymous patterns. The same flags as
+	/// `moq-relay`; a listener needs exactly one.
+	#[usage(flatten)]
+	pub auth: moq_relay::auth::Config,
 }
 
 impl MoqSide {
@@ -362,8 +371,12 @@ impl MoqSide {
 		let mut found = self.client.deprecated();
 		found.extend(self.quic.deprecated());
 		found.extend(self.server.deprecated());
+		found.extend(self.cluster.deprecated());
 		if self.origin.is_some() {
 			found.flag("--origin", Some("MOQ_ORIGIN"), "--hop / MOQ_HOP");
+		}
+		if self.name.is_some() {
+			found.flag("--name", None, "--broadcast");
 		}
 		found
 	}
@@ -434,7 +447,21 @@ impl MoqSide {
 				moq_relay::cluster::Cluster::validate_lan_versions(&self.client, &self.server_config())?;
 			}
 		}
+		// A listener for ordinary clients admits nobody without a decision; a mesh
+		// listener alone admits its peers by their LAN credential.
+		if self.server.has_explicit_bind() {
+			self.auth
+				.validate()
+				.context("--listen needs --auth-url or --auth-public")?;
+		} else if self.auth.url.is_some() || self.auth_public() {
+			self.auth.validate()?;
+		}
 		Ok(())
+	}
+
+	/// Whether any public pattern was passed.
+	fn auth_public(&self) -> bool {
+		!(self.auth.public.is_empty() && self.auth.public_subscribe.is_empty() && self.auth.public_publish.is_empty())
 	}
 
 	/// Build a [`MoqSide`] from one chunk of a command line, leniently.
@@ -501,6 +528,8 @@ impl MoqSide {
 			("--cluster-token", self.cluster.token.is_some()),
 			("--cluster-id", self.cluster.id.is_some()),
 			("--cluster-tier", self.cluster.tier.is_some()),
+			("--auth-url", self.auth.url.is_some()),
+			("--auth-public", self.auth_public()),
 			("--broadcast", self.broadcast.is_some()),
 			("--hop", self.hop.is_some()),
 		];
@@ -532,15 +561,15 @@ impl MoqSide {
 #[derive(usage::Subcommands, Clone)]
 pub enum Command {
 	/// Route media INTO MoQ from one source.
-	///
-	/// `alias_hidden`, not `alias`: Usage advertises an `alias` in help and
-	/// completions, and `import` / `export` are the canonical spellings. The old
-	/// names keep parsing without rejoining the published surface.
-	#[usage(alias_hidden = "publish")]
 	Import(Import),
 	/// Route media OUT OF MoQ to one sink.
-	#[usage(alias_hidden = "subscribe")]
 	Export(Export),
+	/// The released spelling of [`Self::Import`].
+	#[usage(hide = true)]
+	Publish(Import),
+	/// The released spelling of [`Self::Export`].
+	#[usage(hide = true)]
+	Subscribe(Export),
 	/// Play a broadcast in a native window and speaker.
 	#[cfg(feature = "play")]
 	Play(crate::play::Args),
@@ -567,19 +596,37 @@ impl Command {
 	/// serving plaintext rather than reaching the builder that refuses.
 	fn deprecated(&self) -> moq_tokio::Deprecated {
 		match self {
-			Self::Export(export) => match &export.sink {
-				ExportSink::Hls(hls) => hls.tls.deprecated(),
-				_ => moq_tokio::Deprecated::default(),
-			},
+			Self::Import(import) => import.deprecated(),
+			Self::Publish(import) => {
+				let mut found = import.deprecated();
+				found.flag("publish", None, "import");
+				found
+			}
+			Self::Export(export) => export.deprecated(),
+			Self::Subscribe(export) => {
+				let mut found = export.deprecated();
+				found.flag("subscribe", None, "export");
+				found
+			}
 			_ => moq_tokio::Deprecated::default(),
+		}
+	}
+
+	/// Rewrite a released verb to the current one. The migration is recorded by
+	/// [`Self::deprecated`] before this runs.
+	fn current(self) -> Self {
+		match self {
+			Self::Publish(import) => Self::Import(import),
+			Self::Subscribe(export) => Self::Export(export),
+			other => other,
 		}
 	}
 
 	/// The verb as typed, for error messages.
 	pub fn name(&self) -> &'static str {
 		match self {
-			Self::Import(_) => "import",
-			Self::Export(_) => "export",
+			Self::Import(_) | Self::Publish(_) => "import",
+			Self::Export(_) | Self::Subscribe(_) => "export",
 			#[cfg(feature = "play")]
 			Self::Play(_) => "play",
 			#[cfg(feature = "transcode")]
@@ -593,7 +640,10 @@ impl Command {
 
 	/// Whether this verb can share a process (and an Origin) with other stages.
 	pub fn is_stageable(&self) -> bool {
-		matches!(self, Self::Import(_) | Self::Export(_))
+		matches!(
+			self,
+			Self::Import(_) | Self::Export(_) | Self::Publish(_) | Self::Subscribe(_)
+		)
 	}
 
 	/// The broadcast this stage names, falling back to the process-wide `--broadcast`.
@@ -603,8 +653,8 @@ impl Command {
 	/// itself.
 	pub fn broadcast(&self, moq: &MoqSide) -> String {
 		let stage = match self {
-			Self::Import(import) => import.broadcast.as_deref(),
-			Self::Export(export) => export.broadcast.as_deref(),
+			Self::Import(import) | Self::Publish(import) => import.broadcast.as_deref(),
+			Self::Export(export) | Self::Subscribe(export) => export.broadcast.as_deref(),
 			_ => None,
 		};
 
@@ -622,8 +672,12 @@ pub struct Import {
 	///
 	/// Required when a process imports more than one broadcast; a single stage can
 	/// keep naming it before the verb.
-	#[usage(long, alias = "name")]
+	#[usage(long)]
 	pub broadcast: Option<String>,
+
+	/// The released spelling of [`Self::broadcast`].
+	#[usage(long = "name", hide = true)]
+	name: Option<String>,
 
 	/// How long relays keep a non-latest group of the published media tracks fetchable,
 	/// e.g. "30s" or "5s". Defaults to hang's 30s.
@@ -634,16 +688,29 @@ pub struct Import {
 	/// advertise segments that are still fetchable; lower it when nothing reads history and the
 	/// memory matters. Media tracks only -- the catalog and timeline are read at the live edge,
 	/// which is retained unconditionally.
-	// `--latency-max` was the released spelling and keeps parsing. A field-level `alias` is
-	// already hidden (`visible_alias` is the advertised form), so the dead name stays out of
-	// `--help`. An implementation comment rather than a doc one for the same reason: `///`
-	// here *is* the help text.
-	#[usage(long, alias = "latency-max")]
+	#[usage(long)]
 	pub max_age: Option<moq_tokio::Duration>,
+
+	/// The released spelling of [`Self::max_age`].
+	#[usage(long = "latency-max", hide = true)]
+	latency_max: Option<moq_tokio::Duration>,
 
 	/// The single source feeding the Origin.
 	#[usage(subcommand)]
 	pub source: ImportSource,
+}
+
+impl Import {
+	fn deprecated(&self) -> moq_tokio::Deprecated {
+		let mut found = moq_tokio::Deprecated::default();
+		if self.name.is_some() {
+			found.flag("--name", None, "--broadcast");
+		}
+		if self.latency_max.is_some() {
+			found.flag("--latency-max", None, "--max-age");
+		}
+		found
+	}
 }
 
 /// The single source feeding the Origin on an import. The container formats read
@@ -695,8 +762,12 @@ pub struct Export {
 	///
 	/// Required when a process exports more than one broadcast; a single stage can
 	/// keep naming it before the verb.
-	#[usage(long, alias = "name")]
+	#[usage(long)]
 	pub broadcast: Option<String>,
+
+	/// The released spelling of [`Self::broadcast`].
+	#[usage(long = "name", hide = true)]
+	name: Option<String>,
 
 	/// Catalog format to read for track discovery (default: detect from the broadcast suffix).
 	#[usage(long = "catalog-format", value_enum)]
@@ -709,6 +780,27 @@ pub struct Export {
 	/// The single sink draining the Origin.
 	#[usage(subcommand)]
 	pub sink: ExportSink,
+}
+
+impl Export {
+	fn deprecated(&self) -> moq_tokio::Deprecated {
+		let mut found = moq_tokio::Deprecated::default();
+		if self.name.is_some() {
+			found.flag("--name", None, "--broadcast");
+		}
+		match &self.sink {
+			ExportSink::Fmp4(args) | ExportSink::Mkv(args) => found.extend(args.container.deprecated()),
+			ExportSink::Ts(args) | ExportSink::Flv(args) | ExportSink::H264(args) | ExportSink::H265(args) => {
+				found.extend(args.deprecated())
+			}
+			ExportSink::Hls(hls) => found.extend(hls.tls.deprecated()),
+			ExportSink::Rtmp(rtmp) if rtmp.latency_max.is_some() => {
+				found.flag("--latency-max", None, "--max-age");
+			}
+			_ => {}
+		}
+		found
+	}
 }
 
 /// The single sink draining the Origin on an export. The container formats write
@@ -767,8 +859,22 @@ impl ExportSink {
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Container {
 	/// How stale a group may get before it is skipped (e.g. `500ms`, `1s`).
-	#[usage(long, alias = "latency-max", default = "500ms")]
+	#[usage(long, default = "500ms")]
 	pub max_age: moq_tokio::Duration,
+
+	/// The released spelling of [`Self::max_age`].
+	#[usage(long = "latency-max", hide = true)]
+	latency_max: Option<moq_tokio::Duration>,
+}
+
+impl Container {
+	fn deprecated(&self) -> moq_tokio::Deprecated {
+		let mut found = moq_tokio::Deprecated::default();
+		if self.latency_max.is_some() {
+			found.flag("--latency-max", None, "--max-age");
+		}
+		found
+	}
 }
 
 /// The fmp4 / mkv stdout containers: [`Container`] plus a fragment cap.
@@ -928,8 +1034,16 @@ mod tests {
 
 	#[test]
 	fn tcp_only_listener_is_a_moq_side() {
-		let cli =
-			Invocation::try_parse_from(["moq", "--listen-tcp-bind", "127.0.0.1:0", "import", "ts"]).expect("parse");
+		let cli = Invocation::try_parse_from([
+			"moq",
+			"--listen-tcp-bind",
+			"127.0.0.1:0",
+			"--auth-public",
+			"**",
+			"import",
+			"ts",
+		])
+		.expect("parse");
 		assert!(cli.moq.validate().is_ok());
 		assert!(cli.moq.serves());
 		assert_eq!(cli.moq.server_config().tcp.bind, Some("127.0.0.1:0".parse().unwrap()));
@@ -938,13 +1052,67 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn unix_only_listener_is_a_moq_side() {
-		let cli = Invocation::try_parse_from(["moq", "--listen-unix-bind", "/tmp/moq-cli.sock", "export", "ts"])
-			.expect("parse");
+		let cli = Invocation::try_parse_from([
+			"moq",
+			"--listen-unix-bind",
+			"/tmp/moq-cli.sock",
+			"--auth-public",
+			"**",
+			"export",
+			"ts",
+		])
+		.expect("parse");
 		assert!(cli.moq.validate().is_ok());
 		assert!(cli.moq.serves());
 		assert_eq!(
 			cli.moq.server_config().unix.bind.as_deref(),
 			Some(std::path::Path::new("/tmp/moq-cli.sock"))
+		);
+	}
+
+	/// A listener for ordinary clients admits nobody without a decision, so it
+	/// refuses to start with neither flag, and with both.
+	#[test]
+	fn a_listener_needs_exactly_one_auth_source() {
+		let cli =
+			Invocation::try_parse_from(["moq", "--listen-tcp-bind", "127.0.0.1:0", "import", "ts"]).expect("parse");
+		let err = cli.moq.validate().unwrap_err().to_string();
+		assert!(err.contains("--auth-url or --auth-public"), "{err}");
+
+		let cli = Invocation::try_parse_from([
+			"moq",
+			"--listen-tcp-bind",
+			"127.0.0.1:0",
+			"--auth-url",
+			"http://127.0.0.1:4440/",
+			"--auth-public",
+			"**",
+			"import",
+			"ts",
+		])
+		.expect("parse");
+		assert!(cli.moq.validate().is_err());
+
+		let cli = Invocation::try_parse_from([
+			"moq",
+			"--listen-tcp-bind",
+			"127.0.0.1:0",
+			"--auth-url",
+			"http://127.0.0.1:4440/",
+			"import",
+			"ts",
+		])
+		.expect("parse");
+		assert!(cli.moq.validate().is_ok());
+
+		// A local verb refuses the flag like every other MoQ-side flag.
+		let cli = Invocation::try_parse_from(["moq", "--auth-public", "**", "auth", "generate"]).expect("parse");
+		assert!(
+			cli.moq
+				.reject("auth")
+				.unwrap_err()
+				.to_string()
+				.contains("--auth-public")
 		);
 	}
 
@@ -1203,22 +1371,38 @@ mod tests {
 		assert_eq!(import.max_age, Some(Duration::from_secs(5).into()));
 	}
 
-	/// The released spelling keeps parsing, so a script written against it still runs.
+	/// The released spelling still parses so the process can name `--max-age`, but
+	/// it configures nothing and must stop a run.
 	#[test]
-	fn latency_max_still_parses_as_max_age() {
-		let cli = Invocation::try_parse_from(["moq", "import", "--latency-max", "5s", "ts"]).unwrap();
-		let Command::Import(import) = &cli.stages[0] else {
-			panic!("expected import")
+	fn latency_max_is_refused_with_a_migration() {
+		let Err(err) = Invocation::try_parse_from(["moq", "import", "--latency-max", "5s", "ts"]) else {
+			panic!("--latency-max must not start a run");
 		};
-		assert_eq!(import.max_age, Some(Duration::from_secs(5).into()));
+		assert!(err.to_string().contains("--latency-max -> --max-age"), "{}", err);
 
-		let cli =
-			Invocation::try_parse_from(["moq", "export", "--broadcast", "b", "ts", "--latency-max", "1s"]).unwrap();
-		let Command::Export(export) = &cli.stages[0] else {
-			panic!("expected export")
+		let Err(err) = Invocation::try_parse_from(["moq", "export", "--broadcast", "b", "ts", "--latency-max", "1s"])
+		else {
+			panic!("--latency-max must not start a run");
 		};
-		let (_, max_age, _) = export.sink.stdout().expect("ts writes to stdout");
-		assert_eq!(max_age, Duration::from_secs(1));
+		assert!(err.to_string().contains("--latency-max -> --max-age"), "{}", err);
+	}
+
+	#[test]
+	fn the_released_name_and_verb_spellings_are_refused() {
+		let Err(err) = Invocation::try_parse_from(["moq", "--name", "room", "import", "ts"]) else {
+			panic!("--name must not start a run");
+		};
+		assert!(err.to_string().contains("--name -> --broadcast"), "{err}");
+
+		let Err(err) = Invocation::try_parse_from(["moq", "publish", "ts"]) else {
+			panic!("publish must not start a run");
+		};
+		assert!(err.to_string().contains("publish -> import"), "{err}");
+
+		let Err(err) = Invocation::try_parse_from(["moq", "subscribe", "ts"]) else {
+			panic!("subscribe must not start a run");
+		};
+		assert!(err.to_string().contains("subscribe -> export"), "{err}");
 	}
 
 	#[test]

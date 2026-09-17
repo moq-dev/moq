@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from moq_ffi import MoqClient
 
-from .origin import Announced, AnnouncedBroadcast, OriginConsumer, OriginProducer
+from .origin import AnnounceConsumer, AnnouncedBroadcast, OriginConsumer, OriginProducer
 from .publish import BroadcastProducer
 from .session import Session
 from .subscribe import BroadcastConsumer
@@ -108,8 +108,8 @@ class Client:
 
         # The session always exposes both sides, wired from the origins above or
         # auto-created, so publishing and discovery always have somewhere to go.
-        self._publisher = self._session.publisher()
-        self._consumer = self._session.consumer()
+        self._publisher = self._session.publish()
+        self._consumer = self._session.consume()
 
         return self
 
@@ -131,7 +131,7 @@ class Client:
         """
         return self._require_publisher().create_broadcast(path)
 
-    def announced(self, prefix: str = "") -> Announced:
+    def announced(self, prefix: str = "") -> AnnounceConsumer:
         """Async-iterate broadcasts announced under ``prefix`` (empty matches all).
 
         See :meth:`OriginConsumer.announced`.

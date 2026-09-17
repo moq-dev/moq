@@ -797,9 +797,9 @@ mod tests {
 		assert_eq!(chunks[1].0, start + 2 * SLOT, "the new generation is the live edge");
 	}
 
-	/// End to end over a real SRT receiver: a publisher that rewinds ten minutes must
-	/// keep the program flowing, with the new generation stamped at the wall clock it
-	/// was muxed at rather than back at the connection's first packet.
+	/// End to end over a real SRT receiver: a publisher that declares a marker after
+	/// ten minutes must keep the program flowing, with the new generation stamped at
+	/// the wall clock it was muxed at rather than back at the connection's first packet.
 	///
 	/// The receiver's TSBPD releases each message at the origin instant the sender
 	/// stamped, so what it observes is exactly the pacing decision under test: with a
@@ -807,7 +807,7 @@ mod tests {
 	/// already a latency in the past by the time it is sent, so it is released at once
 	/// (or dropped as too late) instead of on the media clock.
 	#[tokio::test]
-	async fn a_publisher_rewind_keeps_an_srt_receiver_playing() {
+	async fn a_publisher_marker_keeps_an_srt_receiver_playing() {
 		use moq_mux::catalog::hang::Container as MuxContainer;
 		use moq_mux::container::{Producer, ts};
 		use moq_net::Timestamp;
@@ -842,7 +842,7 @@ mod tests {
 		let mut producer = Producer::new(track, MuxContainer::Legacy(moq_mux::container::Kind::Audio));
 
 		// 100ms audio frames in one-second groups.
-		let mut write = |count: u64, offset: u64| {
+		fn write(producer: &mut Producer<MuxContainer>, count: u64, offset: u64) {
 			for i in 0..count {
 				producer
 					.write(Frame {
@@ -856,7 +856,7 @@ mod tests {
 					producer.cut(None).unwrap();
 				}
 			}
-		};
+		}
 
 		let probe = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
 		let addr: SocketAddr = probe.local_addr().unwrap();
@@ -878,8 +878,8 @@ mod tests {
 		let mut receiver = caller.await.unwrap();
 
 		// Three seconds of program, then wait until the receiver is actually playing it
-		// so the rewind lands a real wall-clock distance after the first packet.
-		write(30, OFFSET);
+		// so the marker lands a real wall-clock distance after the first packet.
+		write(&mut producer, 30, OFFSET);
 		let mut received = Vec::new();
 		let first = tokio::time::timeout(Duration::from_secs(10), receiver.next())
 			.await
@@ -888,16 +888,17 @@ mod tests {
 			.unwrap();
 		received.push(first);
 
-		// The publisher restarts at the top of its source.
-		write(30, 0);
+		// The publisher declares a break and continues forward.
+		producer.discontinuity().unwrap();
+		write(&mut producer, 30, OFFSET + 3_000_000);
 
 		// Drain until the muxer flags the break, which it does exactly once, on the new
 		// generation's leading clock packet.
 		let boundary = loop {
 			let payload = tokio::time::timeout(Duration::from_secs(10), receiver.next())
 				.await
-				.expect("the rewound generation never arrived")
-				.expect("the SRT egress closed before the rewind")
+				.expect("the resumed generation never arrived")
+				.expect("the SRT egress closed before the marker")
 				.unwrap();
 			received.push(payload);
 			if let Some(index) = received.iter().position(|(_, payload)| flags_a_break(payload)) {
@@ -908,7 +909,7 @@ mod tests {
 		assert!(boundary > 0, "the break cannot be in the connection's first payload");
 		assert!(
 			received[boundary].0 > received[0].0 + Duration::from_millis(100),
-			"the rewound generation must be stamped at the wall clock it was muxed at, \
+			"the new generation must be stamped at the wall clock it was muxed at, \
 			 not back at the first packet ({:?} after it)",
 			received[boundary].0.saturating_duration_since(received[0].0),
 		);

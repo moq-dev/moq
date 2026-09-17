@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { compareSpecificity, type ErrorCode, Pattern, PatternError, Patterns, type Segment } from "./index.ts";
+import { compareSpecificity, InvalidPattern, Pattern, Patterns, type Segment } from "./index.ts";
 
 // The golden vectors live with the Rust crate, so both implementations replay one file.
 interface Vectors {
-	parse: { text: string; canonical?: string; segments?: Segment[] | null; error?: ErrorCode }[];
-	literal: ({ path: string; pattern: string } | { path: string; error: ErrorCode })[];
+	parse: { text: string; canonical?: string; segments?: Segment[] | null; error?: InvalidPattern.Code }[];
+	literal: ({ path: string; pattern: string } | { path: string; error: InvalidPattern.Code })[];
 	subtree: { path: string; pattern: string }[];
 	head: { pattern: string; head: string; literal: boolean; globstar: boolean }[];
 	matches: { pattern: string; path: string; expect: boolean }[];
@@ -13,7 +13,10 @@ interface Vectors {
 	overlaps: { a: string; b: string; expect: boolean }[];
 	specificity: { descending: string[][]; equal: string[][] };
 	rebase: { pattern: string; root: string; expect: string[] }[];
-	rooted: ({ pattern: string; root: string; expect: string } | { pattern: string; root: string; error: ErrorCode })[];
+	rooted: (
+		| { pattern: string; root: string; expect: string }
+		| { pattern: string; root: string; error: InvalidPattern.Code }
+	)[];
 	union: { input: string[]; reduced: string[] }[];
 	unionContains: { union: string[]; pattern: string; expect: boolean }[];
 }
@@ -21,12 +24,12 @@ const vectors = JSON.parse(
 	await Bun.file(join(import.meta.dir, "../../../rs/moq-pattern/tests/pattern.json")).text(),
 ) as Vectors;
 
-function errorCode(fn: () => unknown): ErrorCode | "ok" {
+function errorCode(fn: () => unknown): InvalidPattern.Code | "ok" {
 	try {
 		fn();
 		return "ok";
 	} catch (err) {
-		if (err instanceof PatternError) return err.code;
+		if (err instanceof InvalidPattern) return err.code;
 		throw err;
 	}
 }
@@ -200,7 +203,7 @@ function allPatterns(alphabet: Alphabet): Pattern[] {
 					out.push(Pattern.from(segments));
 					next.push(segments);
 				} catch (err) {
-					if (!(err instanceof PatternError)) throw err;
+					if (!(err instanceof InvalidPattern)) throw err;
 				}
 			}
 		}
@@ -323,7 +326,7 @@ describe("random text", () => {
 			try {
 				pattern = Pattern.parse(text);
 			} catch (err) {
-				if (err instanceof PatternError) continue;
+				if (err instanceof InvalidPattern) continue;
 				throw err;
 			}
 			expect(Pattern.parse(pattern.text).equals(pattern)).toBe(true);

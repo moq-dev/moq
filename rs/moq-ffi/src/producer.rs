@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use moq_mux::catalog::hang::Extra;
 
-use crate::cancel::{self, MoqCancel};
 use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqSubscription, MoqTrackConsumer};
 use crate::error::MoqError;
 use crate::ffi::Task;
@@ -18,10 +17,10 @@ pub struct MoqTrackInfo {
 	#[uniffi(default = 0)]
 	pub priority: u8,
 	/// Maximum age of a non-latest group before the publisher evicts it, in
-	/// milliseconds. Null uses the default. This is the publisher-side half of
-	/// [`MoqSubscription::max_age_ms`](crate::consumer::MoqSubscription::max_age_ms).
+	/// microseconds. Null uses the default. This is the publisher-side half of
+	/// [`MoqSubscription::max_age_us`](crate::consumer::MoqSubscription::max_age_us).
 	#[uniffi(default = None)]
-	pub max_age_ms: Option<u64>,
+	pub max_age_us: Option<u64>,
 	/// Per-frame timescale in ticks per second. Null uses microseconds.
 	#[uniffi(default = None)]
 	pub timescale: Option<u64>,
@@ -34,8 +33,8 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 		let mut out = moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MICRO)
 			.with_priority(info.priority);
-		if let Some(ms) = info.max_age_ms {
-			out = out.with_max_age(std::time::Duration::from_millis(ms));
+		if let Some(us) = info.max_age_us {
+			out = out.with_max_age(std::time::Duration::from_micros(us));
 		}
 		if let Some(ticks) = info.timescale {
 			let scale =
@@ -56,11 +55,11 @@ impl TryFrom<&moq_net::track::Info> for MoqTrackInfo {
 	type Error = MoqError;
 
 	fn try_from(info: &moq_net::track::Info) -> Result<Self, MoqError> {
-		let max_age_ms = u64::try_from(info.max_age.as_millis())
+		let max_age_us = u64::try_from(info.max_age.as_micros())
 			.map_err(|_| MoqError::Codec("track max_age duration overflow".into()))?;
 		Ok(Self {
 			priority: info.priority,
-			max_age_ms: Some(max_age_ms),
+			max_age_us: Some(max_age_us),
 			timescale: Some(info.timescale.as_u64()),
 		})
 	}
@@ -692,21 +691,15 @@ impl MoqTrackProducer {
 	}
 
 	/// Wait until this track has at least one active consumer.
-	///
-	/// `cancel` aborts this call alone; see [`MoqCancel`].
-	#[uniffi::method(default(cancel = None))]
-	pub async fn used(&self, cancel: Option<Arc<MoqCancel>>) -> Result<(), MoqError> {
+	pub async fn used(&self) -> Result<(), MoqError> {
 		let track = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.clone();
-		cancel::guard(cancel, crate::ffi::detached(async move { track.used().await })).await
+		crate::ffi::detached(async move { track.used().await }).await
 	}
 
 	/// Wait until this track has no active consumers.
-	///
-	/// `cancel` aborts this call alone; see [`MoqCancel`].
-	#[uniffi::method(default(cancel = None))]
-	pub async fn unused(&self, cancel: Option<Arc<MoqCancel>>) -> Result<(), MoqError> {
+	pub async fn unused(&self) -> Result<(), MoqError> {
 		let track = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.clone();
-		cancel::guard(cancel, crate::ffi::detached(async move { track.unused().await })).await
+		crate::ffi::detached(async move { track.unused().await }).await
 	}
 
 	/// Create a consumer that reads from this producer's track.
@@ -782,14 +775,14 @@ impl MoqTrackProducer {
 		Ok(())
 	}
 
-	/// Release this producer, ending the track at the live edge.
+	/// End the track at the live edge.
 	///
 	/// [`finish_at`](Self::finish_at) declares the boundary ahead of time, so this keeps
-	/// that boundary and only releases the producer.
+	/// that boundary. The handle remains so a later [`abort`](Self::abort) can still run.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
-		let mut track = guard.take().ok_or(MoqError::Closed)?;
+		let track = guard.as_mut().ok_or(MoqError::Closed)?;
 		if track.final_sequence().is_none() {
 			track.finish()?;
 		}
@@ -845,10 +838,12 @@ impl MoqGroupProducer {
 	}
 
 	/// Mark the group as complete. No more frames can be written.
+	///
+	/// The handle remains so a later [`abort`](Self::abort) can still run.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
-		let mut group = guard.take().ok_or(MoqError::Closed)?;
+		let group = guard.as_mut().ok_or(MoqError::Closed)?;
 		group.finish()?;
 		Ok(())
 	}
@@ -898,10 +893,7 @@ impl MoqMediaProducer {
 	}
 
 	/// Wait until this track has at least one active consumer.
-	///
-	/// `cancel` aborts this call alone; see [`MoqCancel`].
-	#[uniffi::method(default(cancel = None))]
-	pub async fn used(&self, cancel: Option<Arc<MoqCancel>>) -> Result<(), MoqError> {
+	pub async fn used(&self) -> Result<(), MoqError> {
 		let demand = self
 			.inner
 			.lock()
@@ -910,14 +902,11 @@ impl MoqMediaProducer {
 			.ok_or(MoqError::Closed)?
 			.demand
 			.clone();
-		cancel::guard(cancel, crate::ffi::detached(async move { demand.used().await })).await
+		crate::ffi::detached(async move { demand.used().await }).await
 	}
 
 	/// Wait until this track has no active consumers.
-	///
-	/// `cancel` aborts this call alone; see [`MoqCancel`].
-	#[uniffi::method(default(cancel = None))]
-	pub async fn unused(&self, cancel: Option<Arc<MoqCancel>>) -> Result<(), MoqError> {
+	pub async fn unused(&self) -> Result<(), MoqError> {
 		let demand = self
 			.inner
 			.lock()
@@ -926,7 +915,7 @@ impl MoqMediaProducer {
 			.ok_or(MoqError::Closed)?
 			.demand
 			.clone();
-		cancel::guard(cancel, crate::ffi::detached(async move { demand.unused().await })).await
+		crate::ffi::detached(async move { demand.unused().await }).await
 	}
 
 	/// Write `frame` to this track.

@@ -69,23 +69,18 @@ See [doc/bin/relay/cluster.md](https://github.com/moq-dev/moq/blob/main/doc/bin/
 
 ## Authentication
 
-The relay supports JWT-based authentication and authorization with path-based access control.
+The relay admits a session through an auth server (`--auth-url`, one JSON
+request per session event; `moq auth serve` is the reference server) or a
+static anonymous grant (`--auth-public`). A verified client certificate is
+reported to the server as a fact, never a grant on its own.
 
-For detailed authentication setup, including token generation and configuration examples, see:
+For the contract, the server's flags, and token generation, see:
 **[Authentication Documentation](https://github.com/moq-dev/moq/blob/main/doc/bin/relay/auth.md)**
-
-Key features:
-
-- JWT tokens passed via query parameters (`?jwt=<token>`)
-- Path-based authorization with `root`, `pub`, and `sub` claims
-- Anonymous access support for public content
-- Symmetric key cryptography (HMAC-SHA256/384/512)
-- Asymmetric key cryptography (RSASSA-PKCS1-SHA256/384/512, RSASSA-PSS-SHA256/384/512, ECDSA-SHA256/384, EdDSA)
 
 Quick example configuration in your `.toml` file:
 
 ```toml
 [auth]
-key = "demo/relay/root.jwk"    # JWT signing key (relative to working directory)
-public = "anon"         # Allow anonymous access to /anon prefix
+url = "http://127.0.0.1:4440/"    # moq auth serve --key root.jwk --public-subscribe 'anon/**'
+# public = "anon/**"              # or a static anonymous grant with no server
 ```

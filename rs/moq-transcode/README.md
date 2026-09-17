@@ -69,7 +69,7 @@ below which. Filtering against the source drops rungs but never reorders them.
 
 ## Example
 
-Publish something first (e.g. `moq publish camera` from
+Publish something first (e.g. `moq import capture` from
 [`moq-cli`](../moq-cli)), then:
 
 ```bash

@@ -1,4 +1,5 @@
 import { defineConfig } from "vitepress";
+import llmstxt from "vitepress-plugin-llms";
 import { syncDrafts } from "./drafts";
 
 // Generated before VitePress enumerates routes, so the pages and this sidebar
@@ -166,6 +167,8 @@ export default defineConfig({
 								{ text: "moq-audio", link: "/lib/rs/moq-audio" },
 								{ text: "moq-auth", link: "/lib/rs/moq-auth" },
 								{ text: "moq-room", link: "/lib/rs/moq-room" },
+								{ text: "moq-json", link: "/lib/rs/moq-json" },
+								{ text: "moq-binary", link: "/lib/rs/moq-binary" },
 							],
 						},
 						{
@@ -179,6 +182,8 @@ export default defineConfig({
 								{ text: "@moq/room", link: "/lib/js/room" },
 								{ text: "@moq/auth", link: "/lib/js/auth" },
 								{ text: "@moq/signals", link: "/lib/js/signals" },
+								{ text: "@moq/json", link: "/lib/js/json" },
+								{ text: "@moq/binary", link: "/lib/js/binary" },
 							],
 						},
 						{ text: "Swift", link: "/lib/swift/" },
@@ -230,6 +235,18 @@ export default defineConfig({
 	markdown: {
 		theme: "github-dark",
 		lineNumbers: true,
+	},
+
+	// Serves /llms.txt (an index), /llms-full.txt (every page inline), and a
+	// .md twin of every page so agents can read the docs without the HTML.
+	vite: {
+		plugins: [
+			llmstxt({
+				domain: "https://doc.moq.dev",
+				// Static files are already served verbatim.
+				ignoreFiles: ["public/**"],
+			}),
+		],
 	},
 
 	ignoreDeadLinks: [

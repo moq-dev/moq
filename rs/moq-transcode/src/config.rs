@@ -1,20 +1,8 @@
 //! Transcoder configuration: the rung ladder and catalog wiring.
 
-use moq_net::{AsPath, PathRelativeOwned};
+use moq_net::PathRelativeOwned;
 
 use crate::Ladder;
-
-#[doc(hidden)]
-#[deprecated(note = "use moq_net::Path::relative")]
-pub fn source_reference(source: impl AsPath, output: impl AsPath) -> Option<PathRelativeOwned> {
-	let source = source.as_path();
-	let output = output.as_path();
-	if output.strip_prefix(&source)?.is_empty() {
-		return None;
-	}
-
-	source.relative(&output)
-}
 
 /// Transcoder configuration for [`run`](crate::run).
 ///
@@ -54,26 +42,4 @@ pub struct Config {
 
 	/// Frame resize behavior. Automatic mode keeps GPU-backed frames on the GPU.
 	pub resize: moq_video::resize::Config,
-}
-
-#[cfg(test)]
-#[allow(deprecated)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn source_reference_normalizes_and_counts_output_depth() {
-		assert_eq!(source_reference("a/b", "a/b/transcode.hang").unwrap().as_str(), ".");
-		assert_eq!(source_reference("/a//b/", "a/b/dir/").unwrap().as_str(), ".");
-		assert_eq!(
-			source_reference("a/b", "a/b/dir/transcode.hang").unwrap().as_str(),
-			".."
-		);
-		assert_eq!(
-			source_reference("a/b", "a/b/one/two/transcode.hang").unwrap().as_str(),
-			"../.."
-		);
-		assert!(source_reference("a/b", "other/transcode.hang").is_none());
-		assert!(source_reference("a/b", "a/b").is_none());
-	}
 }

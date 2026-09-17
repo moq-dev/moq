@@ -7,8 +7,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use super::{Encoded, Encoder, ProducerConfig};
+use super::{Encoded, Encoder};
 use crate::{Error, Result};
+
+pub use super::Config;
 
 /// Take the shared publishing state, recovering if a prior guard panicked while holding it.
 ///
@@ -59,7 +61,7 @@ impl<T> Producer<T> {
 
 impl<T: Serialize> Producer<T> {
 	/// Create a producer that publishes to the given track.
-	pub fn new(track: moq_net::track::Producer, config: ProducerConfig) -> Self {
+	pub fn new(track: moq_net::track::Producer, config: Config) -> Self {
 		Self {
 			inner: Arc::new(Mutex::new(Inner {
 				track: Track {

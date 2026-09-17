@@ -73,6 +73,10 @@ test("object literals reject producer knobs and positional tracks", () => {
 		new Stream.Encoder({ track: new Track.Producer("test") });
 		// @ts-expect-error Decoder does not take a track
 		new Window.Decoder({ track });
+		// @ts-expect-error compression is an enum, not a boolean
+		new Snapshot.Producer({ track: new Track.Producer("test"), compression: true });
+		// @ts-expect-error compression is an enum, not a boolean
+		new Stream.Producer({ track: new Track.Producer("test"), compression: true });
 	};
 	expect(reject).toBeDefined();
 });

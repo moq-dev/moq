@@ -2,7 +2,7 @@ use std::ffi::c_char;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
-use crate::{Error, Id, NonZeroSlab, State, moq_announced};
+use crate::{Error, Id, NonZeroSlab, State, moq_announce_update};
 
 /// A spawned task entry: `close` signals shutdown, `callback` delivers status.
 ///
@@ -37,7 +37,7 @@ pub struct Origin {
 	/// Served routes from [Self::dynamic], retracted when the handle is closed.
 	dynamic: NonZeroSlab<Option<DynamicEntry>>,
 
-	/// Broadcast requests delivered to a dynamic handler, freed after accept/abort.
+	/// Broadcast requests delivered to a dynamic handler, freed after accept/reject.
 	broadcast_request: NonZeroSlab<Option<moq_net::origin::Request>>,
 }
 
@@ -112,11 +112,11 @@ impl Origin {
 		}
 	}
 
-	pub fn announced_info(&self, announced: Id, dst: &mut moq_announced) -> Result<(), Error> {
+	pub fn announced_info(&self, announced: Id, dst: &mut moq_announce_update) -> Result<(), Error> {
 		let announced = self.announced.get(announced).ok_or(Error::AnnouncementNotFound)?;
-		*dst = moq_announced {
-			path: announced.0.as_str().as_ptr() as *const c_char,
-			path_len: announced.0.len(),
+		*dst = moq_announce_update {
+			pattern: announced.0.as_str().as_ptr() as *const c_char,
+			pattern_len: announced.0.len(),
 			active: announced.1,
 		};
 		Ok(())

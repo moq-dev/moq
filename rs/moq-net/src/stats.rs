@@ -25,35 +25,36 @@
 //!
 //! Per-counter semantics:
 //!
-//! * `announced` / `announced_closed`: cumulative broadcast announce/unannounce
-//!   events on this `(tier, role)`. Driven by the tagged announce stream on the
-//!   egress side, and by `create_broadcast` route transitions on the ingress
-//!   side.
+//! * `announces_started` / `announces_ended`: cumulative broadcast
+//!   announce/unannounce events on this `(tier, role)`. Driven by the tagged
+//!   announce stream on the egress side, and by `create_broadcast` route
+//!   transitions on the ingress side.
 //! * `announced_bytes`: cumulative broadcast-name length summed over each
 //!   model-visible announce and unannounce of this broadcast (the name, not the
 //!   encoded message size, so hop/framing overhead isn't charged, and the count
 //!   is the same across protocol versions). Kept separate from the `bytes`
 //!   payload counter.
-//! * `broadcasts` / `broadcasts_closed`: per-(broadcast, context) egress
+//! * `broadcasts_started` / `broadcasts_ended`: per-(broadcast, context) egress
 //!   subscription sentinel. The first active subscription a context opens for a
-//!   broadcast bumps `broadcasts`; the last it closes bumps `broadcasts_closed`.
-//!   Summed across contexts, `broadcasts - broadcasts_closed` is the number of
-//!   distinct sessions currently subscribed (viewers on the egress side).
-//! * `subscriptions` / `subscriptions_closed`: cumulative track-level
+//!   broadcast bumps `broadcasts_started`; the last it closes bumps
+//!   `broadcasts_ended`. Summed across contexts, `broadcasts_started -
+//!   broadcasts_ended` is the number of distinct sessions currently subscribed
+//!   (viewers on the egress side).
+//! * `subscriptions_started` / `subscriptions_ended`: cumulative track-level
 //!   subscriptions opened/dropped (egress `track::Subscriber`, ingress
 //!   `track::Producer`).
 //! * `fetches`: cumulative one-shot group fetches *requested* by a calling
 //!   context, counted once per coalesced fetch at request time. A fetch that
-//!   resolves to `NotFound` still counts. Separate from `subscriptions` and the
-//!   viewer refcount; fetched payload still flows into `bytes` / `frames` /
-//!   `groups`.
+//!   resolves to `NotFound` still counts. Separate from `subscriptions_started`
+//!   and the viewer refcount; fetched payload still flows into `bytes` /
+//!   `frames` / `groups`.
 //! * `bytes` / `frames` / `groups`: cumulative payload counters bumped as
 //!   groups/frames are read (egress) or written (ingress) in the model.
 //! * `datagrams`: cumulative single-frame groups carried over unreliable QUIC
 //!   datagrams. A datagram is metered as the group it stands in for, so it also
 //!   bumps `groups`, `frames`, and `bytes`; this counter breaks out how many of
 //!   those took the datagram path.
-//! * `sessions` / `sessions_closed` ([`Presence`]): cumulative count of
+//! * `sessions_started` / `sessions_ended` ([`Presence`]): cumulative count of
 //!   sessions connected/disconnected under an auth root on this tier.
 //!   Driven by [`Handle::session`] (the [`Session`] context).
 //!
@@ -81,19 +82,19 @@
 //!
 //! # Snapshot atomicity
 //!
-//! Each counter readout loads `*_closed` atomics (with `Acquire`)
-//! before their open counterparts (with `Relaxed`). The matching close
-//! bumps in the RAII guards' `Drop` impls use `Release`. With this
-//! pairing the readout always satisfies `open >= closed` even on
+//! Each counter readout loads `*_ended` atomics (with `Acquire`)
+//! before their `*_started` counterparts (with `Relaxed`). The matching
+//! end bumps in the RAII guards' `Drop` impls use `Release`. With this
+//! pairing the readout always satisfies `started >= ended` even on
 //! weakly-ordered architectures (ARM, POWER): the `Acquire` load of
-//! close synchronizes-with the `Release` bump that produced the
-//! observed value, making every write that happened-before that close
-//! (including the matching open bump on whichever thread opened the
-//! guard) visible to the reading thread. Open / payload counters can
+//! ended synchronizes-with the `Release` bump that produced the
+//! observed value, making every write that happened-before that end
+//! (including the matching start bump on whichever thread opened the
+//! guard) visible to the reading thread. Started / payload counters can
 //! then stay `Relaxed` because the visibility comes for free through
-//! the close pairing. The cost is a slight upward bias on the open
+//! the ended pairing. The cost is a slight upward bias on the started
 //! counts when a bump lands between the two loads, which never produces
-//! a logically impossible (`closed > open`) readout for downstream.
+//! a logically impossible (`ended > started`) readout for downstream.
 //!
 //! # Cycles
 //!
@@ -112,40 +113,41 @@ use std::{
 	},
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use web_async::Lock;
 
 use crate::{AsPath, PathOwned};
 
 /// Cumulative atomic counters for a single `(tier, role)` on a broadcast.
 ///
-/// Open counters bump when a model handle records activity; their `_closed`
+/// Started counters bump when a model handle records activity; their `_ended`
 /// counterparts bump from the [`Scope`] / [`Subscription`] / [`Announce`] RAII
-/// guards on drop. `broadcasts` / `broadcasts_closed` are the per-(broadcast,
-/// context) egress subscription sentinel (the first active subscription a context
-/// opens for the broadcast bumps `broadcasts`, the last to close bumps
-/// `broadcasts_closed`), so summed across contexts `broadcasts -
-/// broadcasts_closed` is the count of distinct sessions currently subscribed.
+/// guards on drop. `broadcasts_started` / `broadcasts_ended` are the
+/// per-(broadcast, context) egress subscription sentinel (the first active
+/// subscription a context opens for the broadcast bumps `broadcasts_started`,
+/// the last to close bumps `broadcasts_ended`), so summed across contexts
+/// `broadcasts_started - broadcasts_ended` is the count of distinct sessions
+/// currently subscribed.
 // Kept crate-private: the load/store orderings are load-bearing (see the
 // module-level "Snapshot atomicity" note), so external code only ever sees
 // the derived [`Traffic`] readout.
 #[derive(Default, Debug)]
 pub(crate) struct Counters {
-	announced: AtomicU64,
-	announced_closed: AtomicU64,
+	announces_started: AtomicU64,
+	announces_ended: AtomicU64,
 	// Cumulative broadcast-name length summed over each announce and unannounce
 	// of this broadcast. Counts the name, not the encoded message size, so it
 	// doesn't penalize the broadcast for hop/framing overhead. Kept separate
 	// from `bytes`, which is media payload.
 	announced_bytes: AtomicU64,
-	subscriptions: AtomicU64,
-	subscriptions_closed: AtomicU64,
+	subscriptions_started: AtomicU64,
+	subscriptions_ended: AtomicU64,
 	// Cumulative one-shot group fetches requested by a calling context. Counted
 	// once per coalesced fetch, at request time rather than on resolution; does
-	// not touch `subscriptions` or the viewer refcount.
+	// not touch `subscriptions_started` or the viewer refcount.
 	fetches: AtomicU64,
-	broadcasts: AtomicU64,
-	broadcasts_closed: AtomicU64,
+	broadcasts_started: AtomicU64,
+	broadcasts_ended: AtomicU64,
 	bytes: AtomicU64,
 	frames: AtomicU64,
 	groups: AtomicU64,
@@ -184,35 +186,35 @@ impl ContentCounters {
 }
 
 impl Counters {
-	/// Read all atomics into a [`Traffic`]. Closed counters are read with
-	/// `Acquire` ordering before their open counterparts so the readout
-	/// always satisfies `open >= closed`; see the module-level "Snapshot
-	/// atomicity" note. Open / payload counters stay `Relaxed`: the
-	/// Acquire on close synchronizes-with the matching Release on the
-	/// close bump, which transitively makes all earlier writes (including
-	/// the prior open bump) visible to this thread.
+	/// Read all atomics into a [`Traffic`]. Ended counters are read with
+	/// `Acquire` ordering before their started counterparts so the readout
+	/// always satisfies `started >= ended`; see the module-level "Snapshot
+	/// atomicity" note. Started / payload counters stay `Relaxed`: the
+	/// Acquire on ended synchronizes-with the matching Release on the
+	/// end bump, which transitively makes all earlier writes (including
+	/// the prior start bump) visible to this thread.
 	fn snapshot(&self) -> Traffic {
-		let announced_closed = self.announced_closed.load(Ordering::Acquire);
-		let subscriptions_closed = self.subscriptions_closed.load(Ordering::Acquire);
-		let broadcasts_closed = self.broadcasts_closed.load(Ordering::Acquire);
-		let announced = self.announced.load(Ordering::Relaxed);
+		let announces_ended = self.announces_ended.load(Ordering::Acquire);
+		let subscriptions_ended = self.subscriptions_ended.load(Ordering::Acquire);
+		let broadcasts_ended = self.broadcasts_ended.load(Ordering::Acquire);
+		let announces_started = self.announces_started.load(Ordering::Relaxed);
 		let announced_bytes = self.announced_bytes.load(Ordering::Relaxed);
-		let subscriptions = self.subscriptions.load(Ordering::Relaxed);
+		let subscriptions_started = self.subscriptions_started.load(Ordering::Relaxed);
 		let fetches = self.fetches.load(Ordering::Relaxed);
-		let broadcasts = self.broadcasts.load(Ordering::Relaxed);
+		let broadcasts_started = self.broadcasts_started.load(Ordering::Relaxed);
 		let bytes = self.bytes.load(Ordering::Relaxed);
 		let frames = self.frames.load(Ordering::Relaxed);
 		let groups = self.groups.load(Ordering::Relaxed);
 		let datagrams = self.datagrams.load(Ordering::Relaxed);
 		let stale = self.stale.snapshot();
 		Traffic {
-			announced,
-			announced_closed,
+			announces_started,
+			announces_ended,
 			announced_bytes,
-			broadcasts,
-			broadcasts_closed,
-			subscriptions,
-			subscriptions_closed,
+			broadcasts_started,
+			broadcasts_ended,
+			subscriptions_started,
+			subscriptions_ended,
 			fetches,
 			bytes,
 			frames,
@@ -253,24 +255,24 @@ impl Content {
 }
 
 /// Per-(tier, root) session gauge. One of these is shared (via `Arc`) by every
-/// [`Session`] guard for the same auth root on the same tier: `sessions`
-/// bumps on connect, `sessions_closed` on disconnect.
+/// [`Session`] guard for the same auth root on the same tier: `sessions_started`
+/// bumps on connect, `sessions_ended` on disconnect.
 #[derive(Default, Debug)]
 struct SessionCounters {
-	sessions: AtomicU64,
-	sessions_closed: AtomicU64,
+	sessions_started: AtomicU64,
+	sessions_ended: AtomicU64,
 }
 
 impl SessionCounters {
-	/// Read the gauge into a [`Presence`]. Closed is loaded with `Acquire`
-	/// before open with `Relaxed`, the same pairing as [`Counters::snapshot`],
-	/// so the readout never shows `closed > open`.
+	/// Read the gauge into a [`Presence`]. Ended is loaded with `Acquire`
+	/// before started with `Relaxed`, the same pairing as [`Counters::snapshot`],
+	/// so the readout never shows `ended > started`.
 	fn snapshot(&self) -> Presence {
-		let sessions_closed = self.sessions_closed.load(Ordering::Acquire);
-		let sessions = self.sessions.load(Ordering::Relaxed);
+		let sessions_ended = self.sessions_ended.load(Ordering::Acquire);
+		let sessions_started = self.sessions_started.load(Ordering::Relaxed);
 		Presence {
-			sessions,
-			sessions_closed,
+			sessions_started,
+			sessions_ended,
 		}
 	}
 }
@@ -279,33 +281,35 @@ impl SessionCounters {
 /// `(tier, role)`, or any sum of such slices).
 ///
 /// Every counter is cumulative, so a rate is `delta / delta_t` and a live
-/// count is `open - closed`. This is also the wire shape of one entry on a
-/// published stats track (the `moq-stats` crate serializes maps of these), so
-/// it derives both serde directions; unknown fields from a newer publisher are
+/// count is `started - ended`. This is also the wire shape of one entry on a
+/// published stats track (the `moq-stats` crate serializes maps of these).
+/// Serialize writes both the canonical `*_started`/`*_ended` names and the
+/// legacy `announced`/`*_closed` spellings so an older consumer still reads a
+/// new relay; deserialize accepts either spelling, with the canonical name
+/// winning when both are present. Unknown fields from a newer publisher are
 /// ignored and missing fields from an older one default to zero.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Traffic {
 	/// Cumulative broadcast announce events on this slice.
-	pub announced: u64,
+	pub announces_started: u64,
 	/// Cumulative broadcast unannounce events on this slice.
-	pub announced_closed: u64,
+	pub announces_ended: u64,
 	/// Cumulative announce-control bytes: the broadcast name length summed
 	/// over each announce and unannounce. Distinct from `bytes` (payload).
 	pub announced_bytes: u64,
 	/// Per-(broadcast, session) subscription sentinel opens: the first active
 	/// subscription a session holds on a broadcast.
-	pub broadcasts: u64,
+	pub broadcasts_started: u64,
 	/// Sentinel closes: the session's last subscription to the broadcast ended.
-	pub broadcasts_closed: u64,
+	pub broadcasts_ended: u64,
 	/// Cumulative track-level subscriptions opened.
-	pub subscriptions: u64,
+	pub subscriptions_started: u64,
 	/// Cumulative track-level subscriptions closed.
-	pub subscriptions_closed: u64,
+	pub subscriptions_ended: u64,
 	/// Cumulative one-shot group fetches requested. Counted once per coalesced fetch
 	/// when the fetch is issued, so one that resolves to `NotFound` still counts.
-	/// Separate from `subscriptions` and the viewer refcount. Fetched payload still
+	/// Separate from `subscriptions_started` and the viewer refcount. Fetched payload still
 	/// flows into `bytes`/`frames`/`groups`.
 	pub fetches: u64,
 	/// Cumulative payload bytes.
@@ -325,16 +329,140 @@ pub struct Traffic {
 	pub stale: Content,
 }
 
+/// One spelling of a counter edge on the wire: absent, or a present integer.
+///
+/// Decoding goes through `u64`, so an explicit `null` is refused rather than
+/// read as absent; only a missing field takes the default.
+#[derive(Default, Clone, Copy)]
+struct Edge(Option<u64>);
+
+impl<'de> Deserialize<'de> for Edge {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		u64::deserialize(deserializer).map(|v| Self(Some(v)))
+	}
+}
+
+/// Prefer the canonical `*_started`/`*_ended` spelling; fall back to the
+/// legacy name so a consumer built after the rename still reads an older relay.
+fn counter_edge(canonical: Edge, legacy: Edge) -> u64 {
+	canonical.0.or(legacy.0).unwrap_or(0)
+}
+
+#[derive(Serialize)]
+struct TrafficSer {
+	announces_started: u64,
+	announced: u64,
+	announces_ended: u64,
+	announced_closed: u64,
+	announced_bytes: u64,
+	broadcasts_started: u64,
+	broadcasts: u64,
+	broadcasts_ended: u64,
+	broadcasts_closed: u64,
+	subscriptions_started: u64,
+	subscriptions: u64,
+	subscriptions_ended: u64,
+	subscriptions_closed: u64,
+	fetches: u64,
+	bytes: u64,
+	frames: u64,
+	groups: u64,
+	datagrams: u64,
+	stale: Content,
+}
+
+impl From<Traffic> for TrafficSer {
+	fn from(t: Traffic) -> Self {
+		Self {
+			announces_started: t.announces_started,
+			announced: t.announces_started,
+			announces_ended: t.announces_ended,
+			announced_closed: t.announces_ended,
+			announced_bytes: t.announced_bytes,
+			broadcasts_started: t.broadcasts_started,
+			broadcasts: t.broadcasts_started,
+			broadcasts_ended: t.broadcasts_ended,
+			broadcasts_closed: t.broadcasts_ended,
+			subscriptions_started: t.subscriptions_started,
+			subscriptions: t.subscriptions_started,
+			subscriptions_ended: t.subscriptions_ended,
+			subscriptions_closed: t.subscriptions_ended,
+			fetches: t.fetches,
+			bytes: t.bytes,
+			frames: t.frames,
+			groups: t.groups,
+			datagrams: t.datagrams,
+			stale: t.stale,
+		}
+	}
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct TrafficDe {
+	announces_started: Edge,
+	announced: Edge,
+	announces_ended: Edge,
+	announced_closed: Edge,
+	announced_bytes: u64,
+	broadcasts_started: Edge,
+	broadcasts: Edge,
+	broadcasts_ended: Edge,
+	broadcasts_closed: Edge,
+	subscriptions_started: Edge,
+	subscriptions: Edge,
+	subscriptions_ended: Edge,
+	subscriptions_closed: Edge,
+	fetches: u64,
+	bytes: u64,
+	frames: u64,
+	groups: u64,
+	datagrams: u64,
+	stale: Content,
+}
+
+impl From<TrafficDe> for Traffic {
+	fn from(d: TrafficDe) -> Self {
+		Self {
+			announces_started: counter_edge(d.announces_started, d.announced),
+			announces_ended: counter_edge(d.announces_ended, d.announced_closed),
+			announced_bytes: d.announced_bytes,
+			broadcasts_started: counter_edge(d.broadcasts_started, d.broadcasts),
+			broadcasts_ended: counter_edge(d.broadcasts_ended, d.broadcasts_closed),
+			subscriptions_started: counter_edge(d.subscriptions_started, d.subscriptions),
+			subscriptions_ended: counter_edge(d.subscriptions_ended, d.subscriptions_closed),
+			fetches: d.fetches,
+			bytes: d.bytes,
+			frames: d.frames,
+			groups: d.groups,
+			datagrams: d.datagrams,
+			stale: d.stale,
+		}
+	}
+}
+
+impl Serialize for Traffic {
+	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		TrafficSer::from(*self).serialize(serializer)
+	}
+}
+
+impl<'de> Deserialize<'de> for Traffic {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		TrafficDe::deserialize(deserializer).map(Into::into)
+	}
+}
+
 impl Traffic {
 	/// Fold another readout into this one, counter by counter.
 	pub fn add(&mut self, other: Traffic) {
-		self.announced += other.announced;
-		self.announced_closed += other.announced_closed;
+		self.announces_started += other.announces_started;
+		self.announces_ended += other.announces_ended;
 		self.announced_bytes += other.announced_bytes;
-		self.broadcasts += other.broadcasts;
-		self.broadcasts_closed += other.broadcasts_closed;
-		self.subscriptions += other.subscriptions;
-		self.subscriptions_closed += other.subscriptions_closed;
+		self.broadcasts_started += other.broadcasts_started;
+		self.broadcasts_ended += other.broadcasts_ended;
+		self.subscriptions_started += other.subscriptions_started;
+		self.subscriptions_ended += other.subscriptions_ended;
 		self.fetches += other.fetches;
 		self.bytes += other.bytes;
 		self.frames += other.frames;
@@ -345,17 +473,17 @@ impl Traffic {
 
 	/// True while the broadcast is announced (an announce guard is open).
 	pub fn is_announced(&self) -> bool {
-		self.announced > self.announced_closed
+		self.announces_started > self.announces_ended
 	}
 
 	/// Distinct sessions currently subscribed (viewers on the egress side).
 	pub fn active_broadcasts(&self) -> u64 {
-		self.broadcasts.saturating_sub(self.broadcasts_closed)
+		self.broadcasts_started.saturating_sub(self.broadcasts_ended)
 	}
 
 	/// Track subscriptions currently open.
 	pub fn active_subscriptions(&self) -> u64 {
-		self.subscriptions.saturating_sub(self.subscriptions_closed)
+		self.subscriptions_started.saturating_sub(self.subscriptions_ended)
 	}
 
 	/// All bytes attributable to this slice: payload plus announce overhead.
@@ -365,41 +493,91 @@ impl Traffic {
 		self.bytes.saturating_add(self.announced_bytes)
 	}
 
-	/// True once every open counter equals its closed counterpart: no guard is
-	/// held, so no more traffic can flow until a new open.
+	/// True once every started counter equals its ended counterpart: no guard is
+	/// held, so no more traffic can flow until a new start.
 	pub fn is_idle(&self) -> bool {
-		self.announced == self.announced_closed
-			&& self.subscriptions == self.subscriptions_closed
-			&& self.broadcasts == self.broadcasts_closed
+		self.announces_started == self.announces_ended
+			&& self.subscriptions_started == self.subscriptions_ended
+			&& self.broadcasts_started == self.broadcasts_ended
 	}
 }
 
 /// Connected-session presence for one slice (an auth root on a tier, or any
-/// sum of such slices): cumulative connects and disconnects. `sessions -
-/// sessions_closed` is the current live session count.
+/// sum of such slices): cumulative connects and disconnects. `sessions_started
+/// - sessions_ended` is the current live session count.
 ///
 /// Like [`Traffic`], this is also the wire shape of one entry on a published
-/// sessions track, so it derives both serde directions.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+/// sessions track. Serialize writes both the canonical names and the legacy
+/// `sessions`/`sessions_closed` spellings; deserialize accepts either, with
+/// the canonical name winning when both are present.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Presence {
 	/// Cumulative sessions connected.
-	pub sessions: u64,
+	pub sessions_started: u64,
 	/// Cumulative sessions disconnected.
-	pub sessions_closed: u64,
+	pub sessions_ended: u64,
+}
+
+#[derive(Serialize)]
+struct PresenceSer {
+	sessions_started: u64,
+	sessions: u64,
+	sessions_ended: u64,
+	sessions_closed: u64,
+}
+
+impl From<Presence> for PresenceSer {
+	fn from(p: Presence) -> Self {
+		Self {
+			sessions_started: p.sessions_started,
+			sessions: p.sessions_started,
+			sessions_ended: p.sessions_ended,
+			sessions_closed: p.sessions_ended,
+		}
+	}
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct PresenceDe {
+	sessions_started: Edge,
+	sessions: Edge,
+	sessions_ended: Edge,
+	sessions_closed: Edge,
+}
+
+impl From<PresenceDe> for Presence {
+	fn from(d: PresenceDe) -> Self {
+		Self {
+			sessions_started: counter_edge(d.sessions_started, d.sessions),
+			sessions_ended: counter_edge(d.sessions_ended, d.sessions_closed),
+		}
+	}
+}
+
+impl Serialize for Presence {
+	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		PresenceSer::from(*self).serialize(serializer)
+	}
+}
+
+impl<'de> Deserialize<'de> for Presence {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		PresenceDe::deserialize(deserializer).map(Into::into)
+	}
 }
 
 impl Presence {
 	/// Fold another readout into this one.
 	pub fn add(&mut self, other: Presence) {
-		self.sessions += other.sessions;
-		self.sessions_closed += other.sessions_closed;
+		self.sessions_started += other.sessions_started;
+		self.sessions_ended += other.sessions_ended;
 	}
 
 	/// Sessions currently connected.
 	pub fn active(&self) -> u64 {
-		self.sessions.saturating_sub(self.sessions_closed)
+		self.sessions_started.saturating_sub(self.sessions_ended)
 	}
 }
 
@@ -857,7 +1035,7 @@ impl Handle {
 
 	/// Record a connected session authenticated under `root` on this tier. Hold
 	/// the returned guard for the session's lifetime; dropping it bumps
-	/// `sessions_closed`. Counts presence regardless of any data flow, so a
+	/// `sessions_ended`. Counts presence regardless of any data flow, so a
 	/// session that merely connects is still billable. Surfaced on the session
 	/// track for this tier, keyed by `root`.
 	pub fn session(&self, root: impl AsPath) -> Session {
@@ -899,11 +1077,11 @@ impl Side {
 ///
 /// * the tier + auth root, so any broadcast reached through a tagged origin handle
 ///   resolves the right per-`(path, tier)` counters,
-/// * the presence gauge: `sessions` bumps when the context is created and
-///   `sessions_closed` when the last clone drops (a more honest close than a
+/// * the presence gauge: `sessions_started` bumps when the context is created and
+///   `sessions_ended` when the last clone drops (a more honest close than a
 ///   separately-held guard),
 /// * the egress viewer refcount map (first/last active subscription per broadcast),
-///   driving `broadcasts` / `broadcasts_closed`.
+///   driving `broadcasts_started` / `broadcasts_ended`.
 ///
 /// [`Session::default`] is the no-op context (disabled registry / untagged caller):
 /// every bump reached through it is silently dropped, so a handle can hold one
@@ -922,15 +1100,15 @@ struct SessionInner {
 	/// The presence gauge for `(tier, root)`, or `None` for a disabled registry.
 	presence: Option<Arc<SessionCounters>>,
 	/// Egress viewer refcount, keyed by absolute broadcast path: the first active
-	/// subscription this context opens for a broadcast bumps `broadcasts`, the last
-	/// to close bumps `broadcasts_closed`.
+	/// subscription this context opens for a broadcast bumps `broadcasts_started`, the last
+	/// to close bumps `broadcasts_ended`.
 	viewers: Mutex<HashMap<PathOwned, u32>>,
 }
 
 impl Session {
 	fn new(handle: Handle, presence: Option<Arc<SessionCounters>>) -> Self {
 		if let Some(presence) = &presence {
-			presence.sessions.fetch_add(1, Ordering::Relaxed);
+			presence.sessions_started.fetch_add(1, Ordering::Relaxed);
 		}
 		Self {
 			inner: Some(Arc::new(SessionInner {
@@ -971,7 +1149,7 @@ impl Session {
 	}
 
 	/// Register one active egress subscription to `path`, returning `true` if it was
-	/// the first (so the caller bumps `broadcasts`).
+	/// the first (so the caller bumps `broadcasts_started`).
 	fn viewer_open(&self, path: &PathOwned) -> bool {
 		let Some(inner) = &self.inner else { return false };
 		let mut viewers = inner.viewers.lock().expect("stats viewers poisoned");
@@ -982,7 +1160,7 @@ impl Session {
 	}
 
 	/// Release one active egress subscription to `path`, returning `true` if it was
-	/// the last (so the caller bumps `broadcasts_closed`).
+	/// the last (so the caller bumps `broadcasts_ended`).
 	fn viewer_close(&self, path: &PathOwned) -> bool {
 		let Some(inner) = &self.inner else { return false };
 		let mut viewers = inner.viewers.lock().expect("stats viewers poisoned");
@@ -1004,9 +1182,9 @@ impl Session {
 impl Drop for SessionInner {
 	fn drop(&mut self) {
 		if let Some(presence) = &self.presence {
-			// Release pairs with the readout's Acquire load of `sessions_closed`
+			// Release pairs with the readout's Acquire load of `sessions_ended`
 			// (see the module-level "Snapshot atomicity" note).
-			presence.sessions_closed.fetch_add(1, Ordering::Release);
+			presence.sessions_ended.fetch_add(1, Ordering::Release);
 		}
 	}
 }
@@ -1118,20 +1296,20 @@ impl Scope {
 		}
 	}
 
-	/// Open a track-subscription guard: bumps `subscriptions` now and
-	/// `subscriptions_closed` on drop. On the egress (publisher) side it also drives
-	/// the context's viewer refcount (`broadcasts` / `broadcasts_closed`).
+	/// Open a track-subscription guard: bumps `subscriptions_started` now and
+	/// `subscriptions_ended` on drop. On the egress (publisher) side it also drives
+	/// the context's viewer refcount (`broadcasts_started` / `broadcasts_ended`).
 	pub(crate) fn subscribe(&self) -> Subscription {
 		if let Some(counters) = self.counters() {
-			counters.subscriptions.fetch_add(1, Ordering::Relaxed);
+			counters.subscriptions_started.fetch_add(1, Ordering::Relaxed);
 		}
-		// Viewer refcount is egress-only: `broadcasts` counts distinct sessions
+		// Viewer refcount is egress-only: `broadcasts_started` counts distinct sessions
 		// watching a broadcast.
 		let viewer = if matches!(self.side, Side::Publisher) && self.counters.is_some() {
 			if self.session.viewer_open(&self.path)
 				&& let Some(counters) = self.counters()
 			{
-				counters.broadcasts.fetch_add(1, Ordering::Relaxed);
+				counters.broadcasts_started.fetch_add(1, Ordering::Relaxed);
 			}
 			Some((self.session.clone(), self.path.clone()))
 		} else {
@@ -1151,14 +1329,14 @@ impl Scope {
 		}
 	}
 
-	/// Open an announce guard: bumps `announced` and adds the path length to
-	/// `announced_bytes` now; on drop bumps `announced_closed` and adds the path
+	/// Open an announce guard: bumps `announces_started` and adds the path length to
+	/// `announced_bytes` now; on drop bumps `announces_ended` and adds the path
 	/// length again. Used for egress announce-stream events and ingress
 	/// route-transition (un)announces.
 	pub(crate) fn announce(&self) -> Announce {
 		let len = self.path.as_str().len() as u64;
 		if let Some(counters) = self.counters() {
-			counters.announced.fetch_add(1, Ordering::Relaxed);
+			counters.announces_started.fetch_add(1, Ordering::Relaxed);
 			counters.announced_bytes.fetch_add(len, Ordering::Relaxed);
 		}
 		Announce {
@@ -1186,17 +1364,17 @@ impl Drop for Subscription {
 			&& session.viewer_close(path)
 			&& let Some(counters) = &self.counters
 		{
-			// Release pairs with the readout's Acquire load of `broadcasts_closed`.
+			// Release pairs with the readout's Acquire load of `broadcasts_ended`.
 			self.side
 				.counters(counters)
-				.broadcasts_closed
+				.broadcasts_ended
 				.fetch_add(1, Ordering::Release);
 		}
 		if let Some(counters) = &self.counters {
-			// Release pairs with the readout's Acquire load of `subscriptions_closed`.
+			// Release pairs with the readout's Acquire load of `subscriptions_ended`.
 			self.side
 				.counters(counters)
-				.subscriptions_closed
+				.subscriptions_ended
 				.fetch_add(1, Ordering::Release);
 		}
 	}
@@ -1215,8 +1393,8 @@ impl Drop for Announce {
 		if let Some(counters) = &self.counters {
 			let counters = self.side.counters(counters);
 			counters.announced_bytes.fetch_add(self.len, Ordering::Relaxed);
-			// Release pairs with the readout's Acquire load of `announced_closed`.
-			counters.announced_closed.fetch_add(1, Ordering::Release);
+			// Release pairs with the readout's Acquire load of `announces_ended`.
+			counters.announces_ended.fetch_add(1, Ordering::Release);
 		}
 	}
 }
@@ -1330,9 +1508,12 @@ mod tests {
 				.expect("tier present")
 		};
 		let default_sessions = sessions(Tier::default());
-		assert_eq!(default_sessions.sessions, 2, "two default-tier sessions under one root");
-		assert_eq!(default_sessions.sessions_closed, 0, "guards still held");
-		assert_eq!(sessions(Tier::new("region/sjc")).sessions, 1);
+		assert_eq!(
+			default_sessions.sessions_started, 2,
+			"two default-tier sessions under one root"
+		);
+		assert_eq!(default_sessions.sessions_ended, 0, "guards still held");
+		assert_eq!(sessions(Tier::new("region/sjc")).sessions_started, 1);
 	}
 
 	#[test]
@@ -1354,7 +1535,7 @@ mod tests {
 			.find(|row| row.path == key)
 			.expect("live entry present");
 		assert_eq!(row.publisher.bytes, 42);
-		assert_eq!(row.publisher.subscriptions, 1);
+		assert_eq!(row.publisher.subscriptions_started, 1);
 		assert!(!row.publisher.is_idle(), "subscription guard still open");
 		assert!(
 			stats.shared().entries.lock().contains_key(&key),
@@ -1372,7 +1553,7 @@ mod tests {
 			.iter()
 			.find(|row| row.path == key)
 			.expect("closing values still reported once");
-		assert_eq!(row.publisher.subscriptions_closed, 1);
+		assert_eq!(row.publisher.subscriptions_ended, 1);
 		assert!(row.publisher.is_idle());
 		assert!(
 			!stats.shared().entries.lock().contains_key(&key),
@@ -1384,7 +1565,7 @@ mod tests {
 	#[test]
 	fn report_keeps_idle_but_announced_entry() {
 		// A broadcast with a live announce guard but no traffic must stay in
-		// the registry indefinitely: announced != announced_closed means a
+		// the registry indefinitely: announces_started != announces_ended means a
 		// subscription could still begin at any moment.
 		let stats = test_stats();
 		let key = PathOwned::from("foo/bar");
@@ -1466,12 +1647,13 @@ mod tests {
 	#[test]
 	fn session_counts_by_root() {
 		// session() counts connected sessions per auth root, independent of any
-		// broadcast: open bumps `sessions`, drop bumps `sessions_closed`.
+		// broadcast: open bumps `sessions_started`, drop bumps `sessions_ended`.
 		let stats = test_stats();
 		let ext = stats.tier(Tier::default());
 
-		let snap =
-			|root: &str| session_snapshot(&stats, &Tier::default(), root).map(|p| (p.sessions, p.sessions_closed));
+		let snap = |root: &str| {
+			session_snapshot(&stats, &Tier::default(), root).map(|p| (p.sessions_started, p.sessions_ended))
+		};
 
 		let a1 = ext.session("acme");
 		let a2 = ext.session("acme");
@@ -1492,19 +1674,19 @@ mod tests {
 		// Wire forward/backward compat: a frame entry from an older publisher
 		// (missing fields) or a newer one (extra fields) must still parse.
 		let old: Traffic = serde_json::from_str(r#"{"announced":1,"bytes":5}"#).expect("older shape parses");
-		assert_eq!(old.announced, 1);
+		assert_eq!(old.announces_started, 1);
 		assert_eq!(old.bytes, 5);
 		assert_eq!(old.announced_bytes, 0, "missing fields default to zero");
 
-		let new: Traffic = serde_json::from_str(r#"{"announced":1,"announced_closed":1,"future_counter":9}"#)
+		let new: Traffic = serde_json::from_str(r#"{"announces_started":1,"announces_ended":1,"future_counter":9}"#)
 			.expect("newer shape parses");
 		assert!(new.is_idle());
 	}
 
 	#[test]
-	fn snapshot_reads_closed_before_open() {
-		// Reading closed counters before their open counterparts is the
-		// guarantee that a readout never shows close > open under concurrent
+	fn snapshot_reads_ended_before_started() {
+		// Reading ended counters before their started counterparts is the
+		// guarantee that a readout never shows ended > started under concurrent
 		// bumps. This unit-test pins the ordering at the source level so a
 		// future refactor that re-orders the loads trips the test.
 		let src = include_str!("stats.rs");
@@ -1512,43 +1694,48 @@ mod tests {
 		// check the line order.
 		let body_start = src.find("fn snapshot(&self) -> Traffic").expect("snapshot fn present");
 		let body = &src[body_start..];
-		let closed_pos = body.find("self.announced_closed.load").expect("announced_closed load");
-		let open_pos = body.find("self.announced.load(").expect("announced load");
+		let ended_pos = body.find("self.announces_ended.load").expect("announces_ended load");
+		let started_pos = body
+			.find("self.announces_started.load")
+			.expect("announces_started load");
 		assert!(
-			closed_pos < open_pos,
-			"announced_closed must be loaded before announced; reversing breaks the open>=closed invariant",
+			ended_pos < started_pos,
+			"announces_ended must be loaded before announces_started; reversing breaks the started>=ended invariant",
 		);
-		let subs_closed_pos = body
-			.find("self.subscriptions_closed.load")
-			.expect("subscriptions_closed load");
-		let subs_pos = body.find("self.subscriptions.load").expect("subscriptions load");
+		let subs_ended_pos = body
+			.find("self.subscriptions_ended.load")
+			.expect("subscriptions_ended load");
+		let subs_pos = body
+			.find("self.subscriptions_started.load")
+			.expect("subscriptions_started load");
 		assert!(
-			subs_closed_pos < subs_pos,
-			"subscriptions_closed must be loaded before subscriptions",
+			subs_ended_pos < subs_pos,
+			"subscriptions_ended must be loaded before subscriptions_started",
 		);
-		let bcast_closed_pos = body
-			.find("self.broadcasts_closed.load")
-			.expect("broadcasts_closed load");
-		let bcast_pos = body.find("self.broadcasts.load").expect("broadcasts load");
+		let bcast_ended_pos = body.find("self.broadcasts_ended.load").expect("broadcasts_ended load");
+		let bcast_pos = body
+			.find("self.broadcasts_started.load")
+			.expect("broadcasts_started load");
 		assert!(
-			bcast_closed_pos < bcast_pos,
-			"broadcasts_closed must be loaded before broadcasts",
+			bcast_ended_pos < bcast_pos,
+			"broadcasts_ended must be loaded before broadcasts_started",
 		);
 	}
 
 	#[test]
 	fn context_presence_closes_on_last_clone() {
-		// The reshaped Session context bumps `sessions` once at creation and
-		// `sessions_closed` only when the last clone drops.
+		// The reshaped Session context bumps `sessions_started` once at creation and
+		// `sessions_ended` only when the last clone drops.
 		let stats = test_stats();
-		let snap =
-			|root: &str| session_snapshot(&stats, &Tier::default(), root).map(|p| (p.sessions, p.sessions_closed));
+		let snap = |root: &str| {
+			session_snapshot(&stats, &Tier::default(), root).map(|p| (p.sessions_started, p.sessions_ended))
+		};
 
 		let ctx = stats.tier(Tier::default()).session("acme");
 		assert_eq!(snap("acme"), Some((1, 0)));
 
 		let clone = ctx.clone();
-		// A clone shares the Arc: no extra `sessions`, and dropping one does nothing.
+		// A clone shares the Arc: no extra `sessions_started`, and dropping one does nothing.
 		assert_eq!(snap("acme"), Some((1, 0)));
 		drop(ctx);
 		assert_eq!(snap("acme"), Some((1, 0)));
@@ -1581,8 +1768,8 @@ mod tests {
 
 	#[test]
 	fn egress_subscribe_drives_subscriptions_and_viewers() {
-		// An egress subscription bumps `subscriptions` and, being the context's first
-		// for the broadcast, `broadcasts`. Dropping closes both.
+		// An egress subscription bumps `subscriptions_started` and, being the context's first
+		// for the broadcast, `broadcasts_started`. Dropping closes both.
 		let stats = test_stats();
 		let ctx = stats.tier(Tier::default()).session("root");
 		let raw = || tier_counters(&stats, "demo/bbb", &Tier::default()).publisher.snapshot();
@@ -1591,16 +1778,16 @@ mod tests {
 		let s1 = scope.subscribe();
 		let s2 = scope.subscribe();
 		let r = raw();
-		assert_eq!(r.subscriptions, 2, "two track subs");
-		assert_eq!(r.broadcasts, 1, "one context => one viewer");
-		assert_eq!(r.broadcasts_closed, 0);
+		assert_eq!(r.subscriptions_started, 2, "two track subs");
+		assert_eq!(r.broadcasts_started, 1, "one context => one viewer");
+		assert_eq!(r.broadcasts_ended, 0);
 
 		drop(s1);
-		assert_eq!(raw().broadcasts_closed, 0, "context still has a sub open");
+		assert_eq!(raw().broadcasts_ended, 0, "context still has a sub open");
 		drop(s2);
 		let r = raw();
-		assert_eq!(r.subscriptions_closed, 2);
-		assert_eq!(r.broadcasts_closed, 1, "last sub closed => one broadcasts_closed");
+		assert_eq!(r.subscriptions_ended, 2);
+		assert_eq!(r.broadcasts_ended, 1, "last sub closed => one broadcasts_ended");
 	}
 
 	#[test]
@@ -1610,14 +1797,14 @@ mod tests {
 		let raw = || tier_counters(&stats, "demo/bbb", &Tier::default()).publisher.snapshot();
 
 		let v1 = stats.tier(Tier::default()).session("a").egress("demo/bbb").subscribe();
-		assert_eq!(raw().broadcasts, 1);
+		assert_eq!(raw().broadcasts_started, 1);
 		let v2 = stats.tier(Tier::default()).session("b").egress("demo/bbb").subscribe();
-		assert_eq!(raw().broadcasts, 2, "two distinct contexts => two viewers");
+		assert_eq!(raw().broadcasts_started, 2, "two distinct contexts => two viewers");
 
 		drop(v1);
 		assert_eq!(raw().active_broadcasts(), 1);
 		drop(v2);
-		assert_eq!(raw().broadcasts_closed, 2);
+		assert_eq!(raw().broadcasts_ended, 2);
 	}
 
 	#[test]
@@ -1630,21 +1817,21 @@ mod tests {
 		let sub = tier_counters(&stats, "demo/bbb", &Tier::default())
 			.subscriber
 			.snapshot();
-		assert_eq!(sub.subscriptions, 1);
-		assert_eq!(sub.broadcasts, 0, "ingress has no viewer refcount");
+		assert_eq!(sub.subscriptions_started, 1);
+		assert_eq!(sub.broadcasts_started, 0, "ingress has no viewer refcount");
 		drop(guard);
 		assert_eq!(
 			tier_counters(&stats, "demo/bbb", &Tier::default())
 				.subscriber
 				.snapshot()
-				.subscriptions_closed,
+				.subscriptions_ended,
 			1
 		);
 	}
 
 	#[test]
 	fn fetch_counts_separately_from_subscriptions() {
-		// A fetch bumps `fetches`, not `subscriptions` or the viewer refcount.
+		// A fetch bumps `fetches`, not `subscriptions_started` or the viewer refcount.
 		let stats = test_stats();
 		let ctx = stats.tier(Tier::default()).session("root");
 		let scope = ctx.egress("demo/bbb");
@@ -1652,27 +1839,27 @@ mod tests {
 		scope.fetch();
 		let r = tier_counters(&stats, "demo/bbb", &Tier::default()).publisher.snapshot();
 		assert_eq!(r.fetches, 2);
-		assert_eq!(r.subscriptions, 0);
-		assert_eq!(r.broadcasts, 0);
+		assert_eq!(r.subscriptions_started, 0);
+		assert_eq!(r.broadcasts_started, 0);
 	}
 
 	#[test]
 	fn announce_guard_records_bytes_on_open_and_close() {
-		// The announce guard bumps `announced` + the path length on open, and
-		// `announced_closed` + the path length again on drop.
+		// The announce guard bumps `announces_started` + the path length on open, and
+		// `announces_ended` + the path length again on drop.
 		let stats = test_stats();
 		let ctx = stats.tier(Tier::default()).session("root");
 		let path_len = "demo/bbb".len() as u64;
 
 		let guard = ctx.egress("demo/bbb").announce();
 		let r = tier_counters(&stats, "demo/bbb", &Tier::default()).publisher.snapshot();
-		assert_eq!(r.announced, 1);
-		assert_eq!(r.announced_closed, 0);
+		assert_eq!(r.announces_started, 1);
+		assert_eq!(r.announces_ended, 0);
 		assert_eq!(r.announced_bytes, path_len);
 
 		drop(guard);
 		let r = tier_counters(&stats, "demo/bbb", &Tier::default()).publisher.snapshot();
-		assert_eq!(r.announced_closed, 1);
+		assert_eq!(r.announces_ended, 1);
 		assert_eq!(
 			r.announced_bytes,
 			path_len * 2,
@@ -1710,17 +1897,104 @@ mod tests {
 	}
 
 	#[test]
-	fn session_snapshot_reads_closed_before_open() {
-		// Same `closed`-before-`open` invariant as `Counters::snapshot`, pinned
+	fn session_snapshot_reads_ended_before_started() {
+		// Same `ended`-before-`started` invariant as `Counters::snapshot`, pinned
 		// at the source level so a reordering refactor can't let
-		// `sessions_closed > sessions` leak into a readout.
+		// `sessions_ended > sessions_started` leak into a readout.
 		let src = include_str!("stats.rs");
 		let body_start = src
 			.find("fn snapshot(&self) -> Presence")
 			.expect("SessionCounters::snapshot fn present");
 		let body = &src[body_start..];
-		let closed_pos = body.find("self.sessions_closed.load").expect("sessions_closed load");
-		let open_pos = body.find("self.sessions.load").expect("sessions load");
-		assert!(closed_pos < open_pos, "sessions_closed must be loaded before sessions",);
+		let ended_pos = body.find("self.sessions_ended.load").expect("sessions_ended load");
+		let started_pos = body.find("self.sessions_started.load").expect("sessions_started load");
+		assert!(
+			ended_pos < started_pos,
+			"sessions_ended must be loaded before sessions_started",
+		);
+	}
+
+	fn expected_traffic() -> Traffic {
+		Traffic {
+			announces_started: 2,
+			announces_ended: 1,
+			broadcasts_started: 4,
+			broadcasts_ended: 3,
+			subscriptions_started: 6,
+			subscriptions_ended: 5,
+			bytes: 9,
+			..Default::default()
+		}
+	}
+
+	fn expected_presence() -> Presence {
+		Presence {
+			sessions_started: 3,
+			sessions_ended: 1,
+		}
+	}
+
+	#[test]
+	fn traffic_decodes_old_new_and_both_spellings() {
+		// A new consumer reads an old relay, a new relay, and the dual-name
+		// frame this serializer actually emits, all as the same Traffic.
+		let expected = expected_traffic();
+		let old = r#"{"announced":2,"announced_closed":1,"broadcasts":4,"broadcasts_closed":3,"subscriptions":6,"subscriptions_closed":5,"bytes":9}"#;
+		let new = r#"{"announces_started":2,"announces_ended":1,"broadcasts_started":4,"broadcasts_ended":3,"subscriptions_started":6,"subscriptions_ended":5,"bytes":9}"#;
+		assert_eq!(serde_json::from_str::<Traffic>(old).unwrap(), expected);
+		assert_eq!(serde_json::from_str::<Traffic>(new).unwrap(), expected);
+		let both = serde_json::to_string(&expected).unwrap();
+		assert!(both.contains("\"announces_started\":2"), "{both}");
+		assert!(both.contains("\"announced\":2"), "{both}");
+		assert!(both.contains("\"announces_ended\":1"), "{both}");
+		assert!(both.contains("\"announced_closed\":1"), "{both}");
+		assert!(both.contains("\"broadcasts_started\":4"), "{both}");
+		assert!(both.contains("\"broadcasts\":4"), "{both}");
+		assert!(both.contains("\"subscriptions_started\":6"), "{both}");
+		assert!(both.contains("\"subscriptions\":6"), "{both}");
+		assert_eq!(serde_json::from_str::<Traffic>(&both).unwrap(), expected);
+	}
+
+	#[test]
+	fn presence_decodes_old_new_and_both_spellings() {
+		let expected = expected_presence();
+		assert_eq!(
+			serde_json::from_str::<Presence>(r#"{"sessions":3,"sessions_closed":1}"#).unwrap(),
+			expected
+		);
+		assert_eq!(
+			serde_json::from_str::<Presence>(r#"{"sessions_started":3,"sessions_ended":1}"#).unwrap(),
+			expected
+		);
+		let both = serde_json::to_string(&expected).unwrap();
+		assert!(both.contains("\"sessions_started\":3"), "{both}");
+		assert!(both.contains("\"sessions\":3"), "{both}");
+		assert!(both.contains("\"sessions_ended\":1"), "{both}");
+		assert!(both.contains("\"sessions_closed\":1"), "{both}");
+		assert_eq!(serde_json::from_str::<Presence>(&both).unwrap(), expected);
+	}
+
+	#[test]
+	fn counter_edge_canonical_wins_when_spellings_disagree() {
+		let traffic: Traffic =
+			serde_json::from_str(r#"{"announces_started":9,"announced":1,"announces_ended":8,"announced_closed":0}"#)
+				.unwrap();
+		assert_eq!(traffic.announces_started, 9);
+		assert_eq!(traffic.announces_ended, 8);
+
+		let presence: Presence =
+			serde_json::from_str(r#"{"sessions_started":4,"sessions":0,"sessions_ended":2,"sessions_closed":9}"#)
+				.unwrap();
+		assert_eq!(presence.sessions_started, 4);
+		assert_eq!(presence.sessions_ended, 2);
+	}
+
+	#[test]
+	fn counter_edge_refuses_null() {
+		// A present null is malformed, not absent: it must not fall through to the legacy spelling or to zero.
+		assert!(serde_json::from_str::<Traffic>(r#"{"announces_started":null,"announced":7}"#).is_err());
+		assert!(serde_json::from_str::<Traffic>(r#"{"subscriptions_closed":null}"#).is_err());
+		assert!(serde_json::from_str::<Presence>(r#"{"sessions_started":null}"#).is_err());
+		assert!(serde_json::from_str::<Presence>(r#"{"sessions":null,"sessions_closed":1}"#).is_err());
 	}
 }

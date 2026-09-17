@@ -27,6 +27,23 @@
 pub mod snapshot;
 pub mod stream;
 
+/// How a binary track compresses its frames.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Compression {
+	/// Uncompressed payloads.
+	#[default]
+	None,
+
+	/// Group-scoped raw DEFLATE, sync-flushed at each frame boundary.
+	Deflate,
+}
+
+impl Compression {
+	pub(crate) const fn is_deflate(self) -> bool {
+		matches!(self, Self::Deflate)
+	}
+}
+
 /// Errors produced while publishing or consuming binary payloads.
 #[derive(thiserror::Error, Debug, Clone)]
 #[non_exhaustive]

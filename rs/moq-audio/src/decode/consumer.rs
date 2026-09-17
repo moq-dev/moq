@@ -46,7 +46,7 @@ pub struct Consumer {
 	end: Option<moq_net::Timestamp>,
 	/// Presentation time of the first decoded terminal frame.
 	terminal_start: Option<moq_net::Timestamp>,
-	/// Last container discontinuity applied to codec and resampler state.
+	/// Last container playhead generation applied to timeline state.
 	discontinuity: u64,
 }
 
@@ -299,7 +299,8 @@ impl Consumer {
 		}
 	}
 
-	/// Reset every stateful decode stage before the first packet of a new epoch.
+	/// A playhead event re-applies startup delay and skip. The decoder is not reset:
+	/// the next group already starts on a keyframe, and pre-skip is a play-path concern.
 	fn apply_discontinuity(&mut self) -> Result<(), Error> {
 		let discontinuity = self.track.discontinuity();
 		if discontinuity == self.discontinuity {
@@ -307,18 +308,15 @@ impl Consumer {
 		}
 
 		self.discontinuity = discontinuity;
-		self.decoder.reset()?;
-		if let Some(resampler) = self.resampler.as_mut() {
-			resampler.reset();
-		}
 		self.next_start = None;
 		self.spans.clear();
 		self.trailing = Activity::Active;
-		self.epoch = None;
-		self.delay_trimmed = 0;
 		self.frames_decoded = 0;
 		self.end = None;
 		self.terminal_start = None;
+		self.epoch = None;
+		self.delay_trimmed = 0;
+		self.decoder.reapply_delay();
 		Ok(())
 	}
 
@@ -914,20 +912,21 @@ mod tests {
 
 		// A 20 ms Opus packet decodes 960 frames, less the pre-skip on the first one,
 		// so it doesn't fill the 960-frame chunk and is held whole.
-		let write = |producer: &mut moq_mux::container::Producer<_>, frames: u64, payload: Bytes| {
+		let write = |producer: &mut moq_mux::container::Producer<_>, frames: u64, payload: Bytes, keyframe: bool| {
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_scale(frames, 48_000).unwrap(),
 					duration: None,
 					payload,
-					keyframe: true,
+					keyframe,
 				})
 				.unwrap();
 		};
-		write(&mut producer, 0, active.payload);
+		write(&mut producer, 0, active.payload, true);
 		// The end marker, then the terminal packet a second past where it belongs.
-		write(&mut producer, 3 * 48_000, Bytes::new());
-		write(&mut producer, 48_000, dtx.payload);
+		// Same group: a new group at 1s would sit below the marker's live edge.
+		write(&mut producer, 3 * 48_000, Bytes::new(), false);
+		write(&mut producer, 48_000, dtx.payload, false);
 		producer.finish().unwrap();
 
 		let frame = consumer.read().await.unwrap().expect("decoded frame");
@@ -1127,6 +1126,68 @@ mod tests {
 		let first_frames = first.data.len() / size_of::<f32>();
 		let expected = advance(first.timestamp, first_frames, 48_000).unwrap();
 		assert_eq!(second.timestamp, expected);
+	}
+
+	#[tokio::test]
+	async fn a_playhead_event_reapplies_opus_pre_skip() {
+		let input = Input {
+			format: Format::F32,
+			sample_rate: 48_000,
+			channels: 1,
+		};
+		let mut encoder = Encoder::new(&crate::encode::Config::new(input)).unwrap();
+		let catalog = encoder.catalog();
+		let frame_size = encoder.frame_size();
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let subscriber = broadcast.consume();
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
+		let mut consumer = Consumer::new(
+			&subscriber,
+			&catalog,
+			"audio",
+			Config {
+				max_age: std::time::Duration::from_secs(1),
+				..Config::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		let pcm = vec![0.25f32; frame_size];
+		let write = |producer: &mut moq_mux::container::Producer<_>, packet: u64, payload: bytes::Bytes| {
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::from_scale(packet * frame_size as u64, 48_000).unwrap(),
+					duration: None,
+					payload,
+					keyframe: true,
+				})
+				.unwrap();
+			producer.cut(None).unwrap();
+		};
+		write(&mut producer, 0, encoder.encode(&pcm).unwrap().payload);
+		write(&mut producer, 1, encoder.encode(&pcm).unwrap().payload);
+		producer.discontinuity().unwrap();
+		write(&mut producer, 2, encoder.encode(&pcm).unwrap().payload);
+		producer.finish().unwrap();
+
+		let first = consumer.read().await.unwrap().expect("first decoded frame");
+		let _second = consumer.read().await.unwrap().expect("second decoded frame");
+		let resumed = consumer.read().await.unwrap().expect("resumed decoded frame");
+		let first_frames = first.data.len() / size_of::<f32>();
+		let resumed_frames = resumed.data.len() / size_of::<f32>();
+		assert!(first_frames < frame_size, "the first epoch trims pre-skip");
+		assert_eq!(
+			resumed_frames, first_frames,
+			"a playhead event reapplies pre-skip without flushing the decoder"
+		);
 	}
 
 	#[tokio::test]

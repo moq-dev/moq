@@ -159,6 +159,10 @@ pub enum Error {
 	#[error("{0}")]
 	InvalidEnd(#[from] crate::container::InvalidEnd),
 
+	/// A frame's timestamp sits below the live edge earlier groups reached.
+	#[error("{0}")]
+	TimestampRewind(#[from] crate::container::TimestampRewind),
+
 	/// A FLV video frame resolved to a negative presentation timestamp.
 	#[error("negative FLV video presentation timestamp: dts={dts_ms}ms composition_time={composition_time_ms}ms")]
 	NegativeFlvPts {
@@ -202,6 +206,10 @@ pub enum Error {
 	#[error("invalid timeline timescale: {0}")]
 	InvalidTimescale(u32),
 
+	/// A source timestamp cannot be mapped onto the broadcast clock: it would land before the
+	/// broadcast began or outside the representable range.
+	#[error("timestamp cannot be mapped onto the broadcast clock: {0}")]
+	UnmappableTimestamp(String),
 	/// Tried to set an application catalog section whose name collides with a
 	/// reserved media section (`video`/`audio`).
 	#[error("reserved catalog section: {0}")]

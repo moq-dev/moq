@@ -7,7 +7,7 @@
 //! # Why this is a type and not just `main`
 //!
 //! An embedder wanting the relay PLUS its own workers - extra routes on the web
-//! server, an in-process recorder against [`Cluster::origin`], another listener
+//! server, an in-process recorder against [`cluster::Cluster::origin`], another listener
 //! in its own `select!` - loads a [`Relay`], clones the handles it needs, mounts
 //! routes, and calls [`Relay::run`]. The owner keeps the listeners, worker
 //! threads, error propagation, and shutdown joins, so a new socket added here
@@ -89,7 +89,6 @@ impl Relay {
 			cluster::Cluster::validate_lan_versions(&config.connect, &config.listen)?;
 		}
 
-		let mtls_enabled = !config.listen.tls.root.is_empty();
 		let server_versions = config.listen.versions();
 
 		// Bind the QUIC workers first: they own the listen address when configured,
@@ -177,26 +176,15 @@ impl Relay {
 			None => (server, client),
 		};
 
-		// Before the empty check: an mTLS-only relay never builds an `Auth`, and an
-		// option that only `Auth::new` would have refused must not slip past.
-		config.auth.validate()?;
-
-		// Reject configs where neither JWT nor mTLS can authenticate anyone.
-		if config.auth.is_empty() {
-			anyhow::ensure!(
-				mtls_enabled,
-				"no auth-key, auth-key-dir, public path, or server tls.root configured; \
-				 nobody can authenticate"
-			);
-			tracing::warn!("no JWT/public auth configured; only mTLS peers will be accepted");
-		}
-
-		let auth = if config.auth.is_empty() {
-			// mTLS-only: no JWT/public source, but `--auth-mtls-tier` still applies.
-			auth::Auth::default().with_mtls_tier(config.auth.mtls_tier.clone())
-		} else {
-			config.auth.init(&config.connect.tls).await?
-		};
+		// The name this relay reports in every auth request: the stats node label,
+		// else the cluster node URL, else nothing.
+		let node = config
+			.stats
+			.node
+			.clone()
+			.or_else(|| config.cluster.node.clone())
+			.unwrap_or_default();
+		let auth = config.auth.init(node, &config.connect.tls)?;
 
 		let cache = config.cache.init()?;
 		// Whichever worker group owns QUIC holds the certificates; the shared
@@ -210,7 +198,7 @@ impl Relay {
 			(None, Some(certificates)) => certificates,
 			(None, None) => server.certificates(),
 		};
-		let mut advertise = cluster::LanAdvertise::new(addr.map(|a| a.port()).unwrap_or(0));
+		let mut advertise = crate::cluster::LanAdvertise::new(addr.map(|a| a.port()).unwrap_or(0));
 		let generated = !config.listen.tls.generate.is_empty() || config.listen.tls.identity.is_some();
 		if generated && let Some(fingerprint) = certificates.fingerprints().into_iter().next() {
 			advertise = advertise.with_fingerprint(fingerprint);
@@ -252,7 +240,7 @@ impl Relay {
 		};
 
 		// `kind` so the QUIC line is distinguishable from the web listeners', which
-		// log the same way from `Web::serve` and may sit on a different port.
+		// log the same way from `web::Web::serve` and may sit on a different port.
 		match addr {
 			Some(addr) => tracing::info!(%addr, kind = "quic", "listening"),
 			None => tracing::info!("listening (stream transports only)"),
@@ -289,7 +277,7 @@ impl Relay {
 		&self.client
 	}
 
-	/// The resolved auth policy (JWT/public sources, or mTLS-only).
+	/// Where every session's grant comes from: the auth server, or the static public grant.
 	pub fn auth(&self) -> &auth::Auth {
 		&self.auth
 	}
@@ -429,11 +417,11 @@ impl Relay {
 		let uring_failed = std::future::pending::<anyhow::Error>();
 
 		// Each worker serves from its own thread, so the future built here only
-		// reports the outcome. The group is what owns those threads, so it has to
-		// outlive the loop below: the borrow ends here, and the group is torn down
-		// after it.
+		// reports the outcome. The group owns those threads and ends serving
+		// when the first member finishes, so it has to outlive the loop below
+		// and is torn down after it.
 		#[cfg(feature = "_quic")]
-		let mut workers = workers;
+		let mut workers = workers.map(|workers| workers.split());
 
 		// Pends forever with no workers, so it composes into the `select!` either
 		// way. A worker only stops on error or on shutdown, so the first one to
@@ -442,12 +430,12 @@ impl Relay {
 		let quic_workers = {
 			let mut running = futures::stream::FuturesUnordered::new();
 			if let Some(workers) = workers.as_mut() {
-				for (server, spawner) in workers.split() {
+				for (server, spawner) in workers.members() {
 					let index = spawner.index();
 					let cluster = cluster.clone();
 					let auth = auth.clone();
 					let worker_shutdown = shutdown.clone();
-					let task = spawner.run(move || serve(server, cluster, auth, worker_shutdown));
+					let task = spawner.serve(server, move |server| serve(server, cluster, auth, worker_shutdown));
 					running.push(async move {
 						match task.await {
 							Ok(res) => res.with_context(|| format!("QUIC worker {index} failed")),

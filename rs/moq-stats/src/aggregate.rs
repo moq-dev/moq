@@ -175,12 +175,12 @@ impl Mergeable for Traffic {
 	/// broadcasts or subscriptions, so the merged view must not keep counting
 	/// them as live. The cumulative counters, bytes included, stay.
 	fn retire(&mut self) -> bool {
-		let changed = self.announced_closed < self.announced
-			|| self.broadcasts_closed < self.broadcasts
-			|| self.subscriptions_closed < self.subscriptions;
-		self.announced_closed = self.announced_closed.max(self.announced);
-		self.broadcasts_closed = self.broadcasts_closed.max(self.broadcasts);
-		self.subscriptions_closed = self.subscriptions_closed.max(self.subscriptions);
+		let changed = self.announces_ended < self.announces_started
+			|| self.broadcasts_ended < self.broadcasts_started
+			|| self.subscriptions_ended < self.subscriptions_started;
+		self.announces_ended = self.announces_ended.max(self.announces_started);
+		self.broadcasts_ended = self.broadcasts_ended.max(self.broadcasts_started);
+		self.subscriptions_ended = self.subscriptions_ended.max(self.subscriptions_started);
 		changed
 	}
 }
@@ -206,7 +206,7 @@ enum Reader<V: Mergeable> {
 	/// retracting (the table has already changed), while an unqueued
 	/// `Unroutable` means nothing serves the path at all.
 	Resolving {
-		pending: Pending<origin::Requesting>,
+		pending: Pending<origin::Pending>,
 		queued: bool,
 	},
 	/// Awaiting the subscription handshake.
@@ -260,7 +260,7 @@ struct Merged<V: Mergeable> {
 	depth: usize,
 	/// Track name subscribed on each node broadcast.
 	name: String,
-	config: moq_json::snapshot::ConsumerConfig,
+	config: moq_json::snapshot::consumer::Config,
 	/// One entry per live node broadcast, keyed by absolute announced path.
 	nodes: HashMap<PathOwned, Node<V>>,
 }
@@ -273,7 +273,13 @@ impl<V: Mergeable> Merged<V> {
 			prefix: config.prefix.clone(),
 			depth: config.depth,
 			name,
-			config: moq_json::snapshot::ConsumerConfig::default().with_compression(config.compression),
+			config: {
+				let mut json = moq_json::snapshot::consumer::Config::default();
+				if config.compression {
+					json.compression = moq_json::Compression::Deflate;
+				}
+				json
+			},
 			nodes: HashMap::new(),
 		}
 	}
@@ -385,7 +391,7 @@ impl<V: Mergeable> Merged<V> {
 fn advance<V: Mergeable>(
 	node: &mut Node<V>,
 	origin: &origin::Consumer,
-	config: &moq_json::snapshot::ConsumerConfig,
+	config: &moq_json::snapshot::consumer::Config,
 	name: &str,
 	waiter: &Waiter,
 ) -> bool {
@@ -602,7 +608,7 @@ mod tests {
 			source.announce(origin::Route::default()).expect("announce");
 			let name = traffic_track(&Tier::default(), Role::Publisher, false);
 			let track = source.create_track(name, None).expect("create track");
-			let config = moq_json::snapshot::ProducerConfig::default().with_delta_ratio(0);
+			let config = moq_json::snapshot::Config::default().with_delta_ratio(0);
 			Self {
 				traffic: moq_json::snapshot::Producer::new(track.clone(), config),
 				track,
@@ -648,8 +654,8 @@ mod tests {
 		let frame = read_until_bytes(&mut traffic, "acme/room", 140).await;
 		let snap = frame.get("acme/room").expect("entry");
 		assert_eq!(snap.bytes, 140, "bytes sum across both nodes");
-		assert_eq!(snap.subscriptions, 2, "one subscription per node");
-		assert_eq!(snap.broadcasts, 2, "one viewer per node");
+		assert_eq!(snap.subscriptions_started, 2, "one subscription per node");
+		assert_eq!(snap.broadcasts_started, 2, "one viewer per node");
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -793,12 +799,12 @@ mod tests {
 		let mut node_a = NodeBroadcast::new(&origin, "acme", "a");
 
 		let mut published = Traffic::default();
-		published.announced = 2;
-		published.announced_closed = 1;
-		published.broadcasts = 3;
-		published.broadcasts_closed = 1;
-		published.subscriptions = 4;
-		published.subscriptions_closed = 1;
+		published.announces_started = 2;
+		published.announces_ended = 1;
+		published.broadcasts_started = 3;
+		published.broadcasts_ended = 1;
+		published.subscriptions_started = 4;
+		published.subscriptions_ended = 1;
 		published.bytes = 100;
 		node_a.frame.insert("acme/room".to_string(), published);
 		node_a.traffic.update(&node_a.frame).expect("publish");

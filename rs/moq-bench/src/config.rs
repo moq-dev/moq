@@ -189,13 +189,10 @@ impl Config {
 			.as_ref()
 			.map(|path| std::fs::read_to_string(path).map(|source| (path.clone(), source)))
 			.transpose()?;
-		let mut file_value = file_body
+		let file_value = file_body
 			.as_ref()
 			.map(|(_, source)| toml::from_str::<toml::Value>(source))
 			.transpose()?;
-		if let Some(value) = file_value.as_mut() {
-			normalize_client_aliases(value)?;
-		}
 		let file = file_body
 			.as_ref()
 			.zip(file_value.as_ref())
@@ -296,34 +293,6 @@ impl Config {
 	}
 }
 
-fn normalize_client_aliases(value: &mut toml::Value) -> anyhow::Result<()> {
-	let Some(connect) = value
-		.as_table_mut()
-		.and_then(|root| root.get_mut("client"))
-		.and_then(toml::Value::as_table_mut)
-	else {
-		return Ok(());
-	};
-	rename_toml_key(connect, "connect", "url")?;
-	rename_toml_key(connect, "failover_delay", "race")?;
-	if let Some(tls) = connect.get_mut("tls").and_then(toml::Value::as_table_mut) {
-		rename_toml_key(tls, "disable_verify", "insecure")?;
-	}
-	Ok(())
-}
-
-fn rename_toml_key(table: &mut toml::Table, alias: &str, canonical: &str) -> anyhow::Result<()> {
-	let Some(value) = table.remove(alias) else {
-		return Ok(());
-	};
-	anyhow::ensure!(
-		!table.contains_key(canonical),
-		"TOML specifies both `{alias}` and `{canonical}`"
-	);
-	table.insert(canonical.into(), value);
-	Ok(())
-}
-
 #[allow(dead_code)]
 #[derive(usage::Config)]
 struct Settings {
@@ -384,7 +353,7 @@ connections = 100
 fps = "24:60"
 
 [client]
-connect = "https://example.com"
+url = "https://example.com"
 tls.insecure = true
 
 [client.websocket]
@@ -431,7 +400,7 @@ enabled = false
 output = "stats.jsonl"
 
 [client]
-connect = "https://example.com"
+url = "https://example.com"
 "#;
 		let dir = std::env::temp_dir().join("moq-bench-output-test");
 		std::fs::create_dir_all(&dir).unwrap();

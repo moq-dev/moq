@@ -113,8 +113,9 @@ impl<E: CatalogExt> Outputs<E> {
 		self.hangz.update(catalog)?;
 
 		// The MSF catalog is derived from our own types, so a serialize failure means an extension broke
-		// the shape; report it like any other JSON failure rather than panicking.
-		let msf = to_msf(&catalog.media()).to_json().map_err(moq_json::Error::from)?;
+		// the shape; report it like any other JSON failure rather than panicking. `abort` below is
+		// what keeps the tracks consistent if this fails after the hang tracks were updated.
+		let msf = to_msf(catalog).to_json().map_err(moq_json::Error::from)?;
 		let mut group = self.msf_track.append_group()?;
 		group.write_frame(moq_net::Timestamp::now(), msf)?;
 		group.finish()?;
@@ -146,8 +147,8 @@ impl<E: CatalogExt> Outputs<E> {
 /// Generic over the application extension `E` (defaulting to `()` for none). The catalog is a
 /// [`Catalog<E>`](super::hang::Catalog): `video`/`audio` are direct fields (`catalog.video`) and the
 /// extension is reachable directly via deref (`catalog.scte35`) or as `catalog.ext`. Define an
-/// extension with [`CatalogExt`](super::hang::CatalogExt). The MSF track is always derived from the base
-/// media sections, regardless of any extension.
+/// extension with [`CatalogExt`](super::hang::CatalogExt). The MSF track carries the same catalog:
+/// the media sections become MSF tracks and the extension's sections ride the MSF root.
 ///
 /// The JSON catalog is updated when tracks are added/removed but is *not* automatically published.
 /// You'll have to call [`modify`](Self::modify) to update and publish the catalog.
@@ -162,8 +163,11 @@ pub struct Producer<E: CatalogExt = ()> {
 	current: Arc<Mutex<State<E>>>,
 
 	/// Shared wall clock for the broadcast's tracks. Every importer on this catalog
-	/// gets a clone (a `Copy` of the same epoch), so timestamps they synthesize when
+	/// gets a copy (the same epoch), so timestamps they synthesize when
 	/// a caller has none land on one timeline and audio/video stay in sync.
+	///
+	/// It also owns the broadcast's wall mapping, published at the catalog root as
+	/// `clock: { wall, timescale }` independently of any archive timeline.
 	clock: crate::Clock,
 
 	/// The broadcast's timeline: the shared boundary list every enrolled track's groups map
@@ -206,6 +210,7 @@ pub struct Config<E: CatalogExt = ()> {
 	catalog: Catalog<E>,
 	max_age: Option<std::time::Duration>,
 	bandwidth: moq_net::bandwidth::Allocator,
+	clock: crate::Clock,
 }
 
 impl Default for Config<()> {
@@ -214,6 +219,7 @@ impl Default for Config<()> {
 			catalog: Catalog::default(),
 			max_age: None,
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
+			clock: crate::Clock::new(),
 		}
 	}
 }
@@ -227,7 +233,18 @@ impl<E: CatalogExt> Config<E> {
 			catalog,
 			max_age: self.max_age,
 			bandwidth: self.bandwidth,
+			clock: self.clock,
 		}
+	}
+
+	/// Publish with this broadcast clock instead of a fresh one.
+	///
+	/// The clock's wall mapping is advertised at the catalog root, so pass a clock whose PTS
+	/// zero names the content's real start when importing a recording; live publishers use the
+	/// default. The mapping is fixed for the broadcast and never overwritten.
+	pub fn with_clock(mut self, clock: crate::Clock) -> Self {
+		self.clock = clock;
+		self
 	}
 
 	/// Override how long the media tracks minted under this catalog keep a non-latest group
@@ -293,13 +310,13 @@ impl<E: CatalogExt> Producer<E> {
 		let msf_track = broadcast.create_track(moq_msf::DEFAULT_NAME, msf_info)?;
 
 		// Disable deltas for now to stay byte-compatible with consumers that only read snapshots.
-		let mut json_config = moq_json::snapshot::ProducerConfig::default();
+		let mut json_config = moq_json::snapshot::Config::default();
 		json_config.delta_ratio = 0;
 		let hang = moq_json::snapshot::Producer::new(hang_track.clone(), json_config.clone());
 
 		// The `.z` track carries the same catalog, DEFLATE-compressed. Deltas stay off for parity
 		// with the plaintext track; only the per-group compression differs.
-		json_config.compression = true;
+		json_config.compression = moq_json::Compression::Deflate;
 		let hangz = moq_json::snapshot::Producer::new(hangz_track, json_config);
 
 		let timeline = crate::timeline::Producer::new(broadcast, crate::timeline::Config::default());
@@ -308,6 +325,12 @@ impl<E: CatalogExt> Producer<E> {
 			recorder: timeline.track(hang::Catalog::DEFAULT_NAME),
 			last_sequence: None,
 		}));
+
+		// The broadcast clock is advertised at the catalog root from the first snapshot,
+		// independently of any archive timeline: a live-only publisher exposes its mapping
+		// without creating a segment index.
+		let mut catalog = config.catalog;
+		catalog.clock = Some(config.clock.section());
 
 		// The contents are `Send + Sync` natively; on wasm moq-net's handles are
 		// `Rc`-backed, so clippy sees a pointlessly atomic `Arc`. Keeping one type for
@@ -322,12 +345,12 @@ impl<E: CatalogExt> Producer<E> {
 				catalog_timeline,
 			},
 			current: Arc::new(Mutex::new(State {
-				catalog: config.catalog,
+				catalog,
 				owned: BTreeSet::new(),
 				reservations: Reservations::default(),
 				closed: None,
 			})),
-			clock: crate::Clock::new(),
+			clock: config.clock,
 			timeline,
 			max_age: config.max_age,
 			bandwidth: config.bandwidth,
@@ -387,6 +410,16 @@ impl<E: CatalogExt> Producer<E> {
 	/// Get a snapshot of the current catalog.
 	pub fn snapshot(&self) -> Catalog<E> {
 		take(&self.current).catalog.clone()
+	}
+
+	/// The broadcast's shared clock: the epoch importers stamp against and the wall mapping
+	/// advertised at the catalog root.
+	///
+	/// Copies share the epoch, so handing them to concurrent producers keeps every track on
+	/// one timeline. Translate a source with its own zero through
+	/// [`Clock::source`](crate::Clock::source).
+	pub fn clock(&self) -> crate::Clock {
+		self.clock
 	}
 
 	/// Pace the broadcast's timeline with `config` instead of the default.
@@ -779,8 +812,16 @@ fn packaging_of(container: &hang::catalog::Container) -> Option<moq_msf::Packagi
 	}
 }
 
-/// Convert a hang catalog to an MSF catalog.
-fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
+/// Convert a catalog to its MSF equivalent: the media sections become MSF tracks and the
+/// extension rides the MSF root under the same member names it uses in the hang catalog.
+fn to_msf<E: CatalogExt>(catalog: &Catalog<E>) -> moq_msf::Catalog<E> {
+	let mut msf = to_msf_media(&catalog.media());
+	msf.ext = catalog.ext.clone();
+	msf
+}
+
+/// Convert the base media sections of a hang catalog into MSF tracks.
+fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog) -> moq_msf::Catalog<E> {
 	let mut tracks = Vec::new();
 
 	let has_multiple_video = catalog.video.renditions.len() > 1;
@@ -846,7 +887,7 @@ fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 		tracks.push(track);
 	}
 
-	moq_msf::Catalog::new(tracks)
+	moq_msf::Catalog::with_ext(tracks, E::default())
 }
 
 #[cfg(test)]
@@ -1068,13 +1109,36 @@ mod test {
 
 		// A broadcast that never segments never advertises an archive.
 		assert_eq!(catalog.snapshot().archive, None);
-
 		let _recorder = catalog.enroll("video0").unwrap();
 		assert_eq!(
 			catalog.snapshot().archive,
 			Some(catalog.timeline().section()),
 			"the root archive should advertise the timeline track"
 		);
+	}
+
+	#[test]
+	fn clock_is_advertised_without_an_archive() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast).unwrap();
+
+		// A live-only broadcast exposes its clock without creating a segment index.
+		let snapshot = catalog.snapshot();
+		assert_eq!(snapshot.archive, None);
+		assert_eq!(snapshot.clock, Some(catalog.clock().section()));
+	}
+
+	#[test]
+	fn with_clock_names_the_contents_real_start() {
+		use std::time::{Duration, SystemTime};
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let wall = SystemTime::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 60_000);
+		let config = Config::default().with_clock(crate::Clock::with_wall(wall).expect("a representable wall"));
+		let catalog = Producer::with_config(&mut broadcast, config).unwrap();
+
+		// A recording import advertises the content's start, not the construction instant.
+		assert_eq!(catalog.snapshot().clock.map(|clock| clock.wall), Some(60_000_000));
 	}
 
 	fn h264_config() -> VideoConfig {
@@ -1245,7 +1309,7 @@ mod test {
 		catalog.video.renditions = video_renditions;
 		catalog.audio.renditions = audio_renditions;
 
-		let msf = to_msf(&catalog);
+		let msf = to_msf_media::<()>(&catalog);
 
 		assert_eq!(msf.tracks.len(), 2);
 
@@ -1296,7 +1360,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.video.renditions = video_renditions;
 
-		let msf = to_msf(&catalog);
+		let msf = to_msf_media::<()>(&catalog);
 		assert_eq!(msf.tracks.len(), 1);
 		assert_eq!(msf.tracks[0].packaging, moq_msf::Packaging::Loc);
 	}
@@ -1312,7 +1376,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.audio.renditions = audio_renditions;
 
-		let msf = to_msf(&catalog);
+		let msf = to_msf_media::<()>(&catalog);
 		assert_eq!(msf.tracks.len(), 1);
 		assert_eq!(msf.tracks[0].packaging, moq_msf::Packaging::Loc);
 	}
@@ -1333,7 +1397,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.audio.renditions = audio_renditions;
 
-		let msf = to_msf(&catalog);
+		let msf = to_msf_media::<()>(&catalog);
 		assert_eq!(msf.tracks.len(), 1);
 		assert_eq!(
 			msf.tracks[0].packaging,
@@ -1360,7 +1424,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.video.renditions = video_renditions;
 
-		let msf = to_msf(&catalog);
+		let msf = to_msf_media::<()>(&catalog);
 		let video = &msf.tracks[0];
 		assert_eq!(video.init_data, Some("AQID".to_string()));
 	}
@@ -1368,7 +1432,7 @@ mod test {
 	#[test]
 	fn convert_empty() {
 		let catalog = hang::Catalog::default();
-		let msf = to_msf(&catalog);
+		let msf = to_msf_media::<()>(&catalog);
 		assert!(msf.tracks.is_empty());
 	}
 
@@ -1395,7 +1459,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.video.renditions = video_renditions;
 
-		let msf = to_msf(&catalog);
+		let msf = to_msf_media::<()>(&catalog);
 		let video = &msf.tracks[0];
 		assert_eq!(video.packaging, moq_msf::Packaging::Cmaf);
 		assert_eq!(video.init_data, Some("AAAYZ2Z0eXA=".to_string()));
@@ -1429,7 +1493,7 @@ mod test {
 		catalog.video.renditions = video_renditions;
 		catalog.audio.renditions = audio_renditions;
 
-		let msf = to_msf(&catalog);
+		let msf = to_msf_media::<()>(&catalog);
 
 		let video = &msf.tracks[0];
 		assert_eq!(video.role, Some(moq_msf::Role::Video));
@@ -1469,7 +1533,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.video.renditions = video_renditions;
 
-		let msf = to_msf(&catalog);
+		let msf = to_msf_media::<()>(&catalog);
 		let video = &msf.tracks[0];
 		// H.265 SAP behavior isn't validated end-to-end yet, so we omit the
 		// SAP fields rather than advertise something we haven't verified.
@@ -1491,7 +1555,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.video.renditions = video_renditions;
 
-		let msf = to_msf(&catalog);
+		let msf = to_msf_media::<()>(&catalog);
 		let video = &msf.tracks[0];
 		assert_eq!(video.max_grp_sap_starting_type, None);
 		assert_eq!(video.max_obj_sap_starting_type, None);

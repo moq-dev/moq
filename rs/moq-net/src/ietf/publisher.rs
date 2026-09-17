@@ -1024,7 +1024,10 @@ where
 			let mut deadline = crate::runtime::Deadline::after(&self.runtime, Duration::from_secs(10));
 			kio::wait(|waiter| {
 				let mut cx = std::task::Context::from_waker(waiter.waker());
-				if stream.writer.poll_closed(&mut cx).is_ready() {
+				// The request reader is what the subscriber FINs or resets. The writer
+				// on a draft-14-16 virtual stream reports closed immediately, which is
+				// not a cancellation.
+				if stream.reader.poll_closed(&mut cx).is_ready() {
 					return Poll::Ready(Err(Error::Cancel));
 				}
 				let joins = self.joins.poll(waiter, |joins| match joins.get(&subscribe_id) {
@@ -1614,10 +1617,12 @@ where
 		// A prefix outside our scope (empty origin, or a token that doesn't grant it)
 		// just means we have nothing to announce; respond with an empty set rather than
 		// erroring, which would look fatal to the peer.
-		let origin = self
-			.origin
-			.scope(&[prefix.as_path()])
-			.unwrap_or_else(|| self.origin.empty());
+		// The wire prefix decodes as a literal path; convert it explicitly to its
+		// subtree grant, refusing anything that cannot be a subtree.
+		let scope = crate::Pattern::subtree(prefix.as_str())
+			.map(crate::Patterns::from)
+			.unwrap_or_default();
+		let origin = self.origin.scope(&scope).unwrap_or_else(|| self.origin.empty());
 
 		// Send OK response
 		match self.version {
@@ -2486,7 +2491,7 @@ mod serve_tests {
 	}
 
 	fn serve(version: Version) -> Serve {
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let mut broadcast = origin.create_broadcast("room").unwrap();
 		let track = broadcast.create_track("video", None).unwrap();
 
@@ -3378,7 +3383,7 @@ mod tests {
 		Vec<crate::model::AnnounceProducer>,
 	) {
 		let other = crate::Hop::new(778).unwrap();
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
@@ -3393,9 +3398,14 @@ mod tests {
 		);
 
 		let mut echoed_hops = crate::Hops::new();
-		echoed_hops.push(assigned).unwrap();
+		echoed_hops.push(crate::Hop::UNKNOWN).unwrap();
 		let echoed = origin
-			.announce("from/peer", crate::origin::Route::default().with_hops(echoed_hops))
+			.announce(
+				"from/peer",
+				crate::origin::Route::default()
+					.with_hops(echoed_hops)
+					.with_via(assigned),
+			)
 			.unwrap();
 
 		let mut local_hops = crate::Hops::new();
@@ -3426,12 +3436,53 @@ mod tests {
 		assert_eq!(publisher.select(&local, &peer), Advert::Plain);
 	}
 
+	/// An anonymous chain received from an identified peer keeps the 0 on the wire
+	/// and is never advertised back to that session: split-horizon matches `via`
+	/// as well as the chain.
+	#[tokio::test(start_paused = true)]
+	async fn anonymous_chain_is_forwarded_with_zero_and_not_echoed() {
+		let assigned = crate::Hop::new(777).unwrap();
+		let r1 = crate::Hop::new(9).unwrap();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let consumer = origin.consume();
+		let publisher = Publisher::new(
+			TestRuntime::new(),
+			crate::lite::test_transport::SinkSession::new(Default::default()),
+			origin.consume(),
+			Control::new(None, false),
+			Some(assigned),
+			peer::PeerSetup::default(),
+			Version::Draft19,
+		);
+
+		let mut hops = crate::Hops::new();
+		hops.push(crate::Hop::UNKNOWN).unwrap();
+		hops.push(r1).unwrap();
+		let _echoed = origin
+			.announce(
+				"from/peer",
+				crate::origin::Route::default().with_hops(hops.clone()).with_via(r1),
+			)
+			.unwrap();
+
+		let peer = cluster::Peer {
+			hop: Some(r1),
+			cost: None,
+		};
+		let mut announced = consumer.excluding(publisher.exclude(&peer)).announced();
+		announced.assert_next_wait();
+
+		let forwarded = cluster::Advert::forward(&hops, 0, crate::Hop::new(1).unwrap()).unwrap();
+		let ids: Vec<_> = forwarded.hops.hops().iter().map(|h| h.id()).collect();
+		assert_eq!(ids, vec![0, 9, 1]);
+	}
+
 	/// Declaring the reserved 0 turns the extension on while naming nobody, so the
 	/// identity we assigned stands in, exactly as for a peer that never negotiated.
 	/// Asserted on the resolution itself rather than through an advertisement: a
 	/// negotiated peer always sends its own HOP_PATH, so a route attributed to the
 	/// assigned identity is a state this peer class cannot reach; see
-	/// [`a_declared_zero_chain_is_still_advertised_back`] for what it gets instead.
+	/// [`a_declared_zero_chain_is_not_advertised_back`] for what it gets instead.
 	#[tokio::test(start_paused = true)]
 	async fn withheld_peer_hop_falls_back_to_assigned() {
 		let assigned = crate::Hop::new(777).unwrap();
@@ -3457,13 +3508,12 @@ mod tests {
 
 	/// A peer that negotiated the extension MUST send a HOP_PATH on every advertisement,
 	/// and one that declared 0 names itself 0 there. An arriving chain is not rewritten,
-	/// so the route carries 0, the assigned identity appears nowhere in it, and the
-	/// split-horizon filter has nothing to match: the peer is advertised its own route
-	/// back.
+	/// so the route carries 0; the assigned identity stays on `via` and split-horizon
+	/// matches it, so the peer is not advertised its own route back.
 	#[tokio::test(start_paused = true)]
-	async fn a_declared_zero_chain_is_still_advertised_back() {
+	async fn a_declared_zero_chain_is_not_advertised_back() {
 		let assigned = crate::Hop::new(777).unwrap();
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
 		let publisher = Publisher::new(
@@ -3476,25 +3526,23 @@ mod tests {
 			Version::Draft16,
 		);
 
-		// The chain as ingress stores it: the peer named itself 0.
+		// The chain as ingress stores it: the peer named itself 0, and `via` is the
+		// identity we assigned that session.
 		let mut hops = crate::Hops::new();
 		hops.push(crate::Hop::UNKNOWN).unwrap();
 		let _echoed = origin
-			.announce("from/peer", crate::origin::Route::default().with_hops(hops))
+			.announce(
+				"from/peer",
+				crate::origin::Route::default().with_hops(hops).with_via(assigned),
+			)
 			.unwrap();
 
 		let peer = cluster::Peer {
 			hop: Some(crate::Hop::UNKNOWN),
 			cost: None,
 		};
-		// The excluding cursor cannot match hop 0 (it names nobody), so the route
-		// still reaches this peer's stream.
 		let mut announced = consumer.excluding(publisher.exclude(&peer)).announced();
-		let echoed = announced.assert_next_active("from/peer");
-		assert!(
-			publisher.select(&echoed, &peer).wanted(),
-			"known gap: the assigned identity is not in the chain, so nothing filters it",
-		);
+		announced.assert_next_wait();
 	}
 
 	/// A same-path source can splice into (or detach from) an existing broadcast
@@ -3505,7 +3553,7 @@ mod tests {
 	async fn namespace_follows_route_eligibility_changes() {
 		let assigned = crate::Hop::new(777).unwrap();
 		let clean_publisher = crate::Hop::new(778).unwrap();
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 
 		let gate = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(gate.consume());
@@ -3520,13 +3568,16 @@ mod tests {
 			Version::Draft16,
 		);
 
-		// The prefix starts with only a route through the assigned peer.
+		// The prefix starts with only a route from the assigned peer: hop 0 on the
+		// chain, identity on `via`.
 		let mut tainted_hops = crate::Hops::new();
-		tainted_hops.push(assigned).unwrap();
+		tainted_hops.push(crate::Hop::UNKNOWN).unwrap();
 		let _tainted = origin
 			.announce(
 				"route-flip-cam",
-				crate::origin::Route::default().with_hops(tainted_hops),
+				crate::origin::Route::default()
+					.with_hops(tainted_hops)
+					.with_via(assigned),
 			)
 			.unwrap();
 		settle().await;
@@ -3600,7 +3651,7 @@ mod tests {
 	async fn a_refusal_that_forbids_retrying_is_not_retried() {
 		const VERSION: Version = Version::Draft17;
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let _cam = origin.announce("lonely-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
@@ -3686,7 +3737,7 @@ mod tests {
 	async fn v14_subscribe_namespace_is_answered_with_publish_namespace() {
 		const VERSION: Version = Version::Draft14;
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
 		// Announced before the peer subscribes: it must only hit the wire after.
@@ -3772,7 +3823,7 @@ mod tests {
 	async fn a_peer_that_declared_nothing_is_told_unsolicited() {
 		const VERSION: Version = Version::Draft17;
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let _local = origin.announce("local-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
@@ -3818,7 +3869,7 @@ mod tests {
 	async fn advertise_both_ways(solicit: Option<bool>) -> (usize, usize) {
 		const VERSION: Version = Version::Draft17;
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
@@ -3890,7 +3941,7 @@ mod tests {
 	async fn a_parked_open_still_lets_a_namespace_be_withdrawn() {
 		const VERSION: Version = Version::Draft14;
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let first = origin.announce("first-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
@@ -3970,7 +4021,7 @@ mod tests {
 	async fn a_namespace_that_stops_being_advertisable_stops_being_deferred() {
 		let assigned = crate::Hop::new(777).unwrap();
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 
 		// A route that already passed through us must never be forwarded: `select`
 		// wants nothing, which is what the peer already holds.
@@ -4012,7 +4063,7 @@ mod tests {
 	async fn a_route_change_still_waits_out_a_refusal() {
 		const VERSION: Version = Version::Draft17;
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let cam = origin.announce("solo-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
@@ -4073,7 +4124,7 @@ mod tests {
 	async fn a_modern_withdrawal_is_the_fin_alone() {
 		const VERSION: Version = Version::Draft17;
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let cam = origin.announce("solo-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
@@ -4126,7 +4177,7 @@ mod tests {
 	async fn a_silent_answer_still_lets_the_next_namespace_be_advertised() {
 		const VERSION: Version = Version::Draft14;
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let _first = origin.announce("first-cam", crate::origin::Route::default()).unwrap();
 		let _second = origin.announce("second-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
@@ -4174,7 +4225,7 @@ mod tests {
 	async fn a_namespace_refused_a_stream_is_retried_on_its_own() {
 		const VERSION: Version = Version::Draft14;
 
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let _cam = origin.announce("lonely-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
@@ -4239,7 +4290,7 @@ mod tests {
 	}
 
 	fn harness(version: Version) -> Harness {
-		let origin = crate::origin::Info::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]);
 		let log = session.log.clone();
 

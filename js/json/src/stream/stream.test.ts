@@ -6,7 +6,7 @@ type Rec = { n: number };
 
 // Drain every record currently available from a fresh consumer over the (finished) track.
 async function drain(track: Track.Subscriber, compression: boolean): Promise<number[]> {
-	const consumer = new Consumer<Rec>({ track, compression });
+	const consumer = new Consumer<Rec>({ track, compression: compression ? "deflate" : "none" });
 	const out: number[] = [];
 	for (;;) {
 		const record = await consumer.next();
@@ -27,7 +27,7 @@ test("plaintext roundtrip in order", async () => {
 
 test("compressed roundtrip in order", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Rec>({ track, compression: true });
+	const producer = new Producer<Rec>({ track, compression: "deflate" });
 	for (let n = 0; n < 20; n++) producer.append({ n });
 	producer.finish();
 
@@ -36,7 +36,7 @@ test("compressed roundtrip in order", async () => {
 
 test("the whole log rides one group, never rolled", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Rec>({ track, compression: true });
+	const producer = new Producer<Rec>({ track, compression: "deflate" });
 	for (let n = 0; n < 50; n++) producer.append({ n });
 	producer.finish();
 
@@ -52,12 +52,12 @@ test("records with embedded newlines round-trip (JSON escapes the newline)", asy
 	// Each record is its own frame (one JSON object), and JSON.stringify escapes control characters,
 	// so a string value containing a newline round-trips cleanly.
 	const track = new Track.Producer("test");
-	const producer = new Producer<{ s: string }>({ track, compression: true });
+	const producer = new Producer<{ s: string }>({ track, compression: "deflate" });
 	const value = { s: "line1\nline2\ttab" };
 	for (let i = 0; i < 4; i++) producer.append(value);
 	producer.finish();
 
-	const consumer = new Consumer<{ s: string }>({ track: track.subscribe(), compression: true });
+	const consumer = new Consumer<{ s: string }>({ track: track.subscribe(), compression: "deflate" });
 	const out: { s: string }[] = [];
 	for (;;) {
 		const record = await consumer.next();

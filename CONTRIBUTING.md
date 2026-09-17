@@ -9,11 +9,13 @@ PRs are squash-merged, so the PR title becomes the commit subject and the PR des
 # PRs
 
 Keep the body short and structured, not narrated.
+Have at least these sections:
 
 - **Problem**: a summary of the problem and why this PR is needed.
 - **Approach**: a summary of the approach taken to solve the problem.
 - **Impact**: a bullet point for every public API/wire change made.
 - **Alternatives**: any alternative approaches considered.
+- **Follow-ups**: any issues encountered or quests created.
 
 When pushing additional commits to an existing PR, update the title and description if needed.
 When taking over someone else's PR, push commits on top of theirs so they keep credit.
@@ -25,9 +27,10 @@ Fix any merge conflicts and failing CI checks.
 # AI
 
 AI-assisted issues, pull requests, reviews, and comments are welcome.
-GitHub issues are the public front door for brainstorming. Prefer a quest for work needing durable scope or coordination.
+Especially bug reports; dive deep into the root issue before proposing a solution.
 
-Add the AI marker `(Written by <model>)` to any posts on GitHub, excluding commit messages that contain `Co-Authored-By:` trailers.
+GitHub issues are the public front door for brainstorming.
+Prefer a quest for work needing durable scope or coordination.
 
 # Reviews
 

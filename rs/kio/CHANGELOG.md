@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.9](https://github.com/moq-dev/moq/compare/kio-v0.5.8...kio-v0.5.9) - 2026-09-13
+
+### Fixed
+
+- *(kio)* bound waiter registration work ([#3635](https://github.com/moq-dev/moq/pull/3635))
+
 ## [0.5.8](https://github.com/moq-dev/moq/compare/kio-v0.5.7...kio-v0.5.8) - 2026-09-09
 
 ### Other

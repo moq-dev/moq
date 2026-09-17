@@ -32,7 +32,7 @@ const producer = new Snapshot.Producer({ track });
 producer.update({ hello: "world" });
 
 // Consume: yields the latest reconstructed value, collapsing any backlog.
-const consumer = new Snapshot.Consumer({ track });
+const consumer = new Snapshot.Consumer({ track: track.subscribe() });
 for await (const value of consumer) {
 	console.log(value);
 }
@@ -51,10 +51,10 @@ const producer = new Stream.Producer({ track });
 producer.append({ event: "started" });
 producer.append({ event: "stopped" });
 
-const consumer = new Stream.Consumer({ track });
+const consumer = new Stream.Consumer({ track: track.subscribe() });
 for await (const record of consumer) {
 	console.log(record);
 }
 ```
 
-Both modes support optional group-scoped DEFLATE compression (`{ compression: true }` on both sides), interoperable with the Rust `moq-json` crate.
+Both modes support optional group-scoped DEFLATE compression (`{ compression: "deflate" }` on both sides), interoperable with the Rust `moq-json` crate. `Config` is the codec options; `Producer.Config` / `Consumer.Config` add the track.

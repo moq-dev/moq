@@ -59,10 +59,10 @@ turn. The same flag on an elementary PID other than the program PCR PID, a
 continuity-counter gap, and the 33-bit timestamp rollover move no clock and
 declare nothing. FLV covers H.264 + AAC.
 
-MPEG-TS export restarts its clock and table cadence after a publisher rewind,
+MPEG-TS export restarts its clock and table cadence after a declared marker,
 discarding the old mux buffer. The first new clock packet signals the break and
-stdout pacing re-anchors. Other renditions resume at their own discontinuity
-boundary, so old-timeline frames cannot advance the new clock.
+stdout pacing re-anchors. Every rendition joins the new program generation;
+no track is fenced across the marker.
 
 fMP4 export writes one fragment per publisher group on each track. Audio follows
 the publisher's cuts; video normally follows GOPs. Closing a group flushes it
@@ -206,6 +206,14 @@ moq auth verify --key public.jwk --in alice.jwt
 
 `--publish` and `--subscribe` take patterns: `alice` is one broadcast,
 `alice/**` is a subtree, `**` is everything under `--root`.
+
+`moq auth serve` answers a relay's auth requests with the same keys, public
+rules, an explicit mTLS grant, tiers, and session limits; see
+[Auth server](/bin/relay/auth#auth-server).
+
+```bash
+moq auth serve --listen 127.0.0.1:4440 --key-dir keys/ --public-subscribe 'anon/**'
+```
 
 See [Authentication](/bin/relay/auth).
 

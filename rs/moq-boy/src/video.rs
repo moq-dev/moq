@@ -85,7 +85,7 @@ impl VideoEncoder {
 		}
 	}
 
-	/// Publish an empty group marking a pause, so the PTS jump on resume reads as a break
+	/// Publish a marker group marking a pause, so the PTS jump on resume reads as a break
 	/// rather than one very long frame, and a viewer arriving mid-pause isn't served the
 	/// pre-pause group as if it were live.
 	///

@@ -38,11 +38,6 @@ pub enum Error {
 	#[error("no DNS entries found")]
 	NoDnsEntries,
 
-	#[doc(hidden)]
-	#[deprecated(note = "fingerprint verification over http:// is now supported; this is never returned")]
-	#[error("fingerprint verification (http:// scheme) is not supported with the quiche backend")]
-	FingerprintUnsupported,
-
 	/// The `http://` fingerprint bootstrap could not reach the relay.
 	#[error("failed to fetch certificate fingerprint: {0}")]
 	FetchFingerprint(String),
@@ -66,16 +61,6 @@ pub enum Error {
 	/// The URL scheme is one this backend cannot dial.
 	#[error("url scheme must be 'https', 'moqt', or 'moql'")]
 	InvalidScheme,
-
-	#[doc(hidden)]
-	#[deprecated(note = "TLS hostname overrides are now supported; this is never returned")]
-	#[error("client tls host_name override is not supported with the quiche backend")]
-	HostNameUnsupported,
-
-	#[doc(hidden)]
-	#[deprecated(note = "GSO can now be disabled; this is never returned")]
-	#[error("the quiche backend cannot disable GSO; drop --*-quic-gso=false or use the quinn backend")]
-	GsoUnsupported,
 
 	/// quiche has no local cap on unacknowledged send data, so `quic.send_window`
 	/// cannot be honored.
@@ -106,16 +91,6 @@ pub enum Error {
 	/// reuseport group built on it would have no way to steer packets back.
 	#[error("the quiche backend cannot serve per-core workers; use the quinn backend")]
 	ShardUnsupported,
-
-	#[doc(hidden)]
-	#[deprecated(note = "the shared tls::Error::NoCertSource is returned instead")]
-	#[error("--tls-cert and --tls-key are required with the quiche backend")]
-	CertRequired,
-
-	#[doc(hidden)]
-	#[deprecated(note = "the shared tls::Error::CertKeyCountMismatch is returned instead")]
-	#[error("must provide matching --tls-cert and --tls-key pairs")]
-	CertPairMismatch,
 
 	/// The QUIC connection could not be started, usually a bad address or an unusable socket.
 	#[error("failed to connect to quiche server")]
@@ -779,6 +754,13 @@ pub(crate) async fn accept(
 	let identity = conn.peer_certificates().map(crate::tls::PeerIdentity::from_chain);
 	tracing::debug!(ip = %conn.peer_addr(), ?alpn, "accepted via quiche");
 
+	let link = crate::server::Link {
+		remote: Some(conn.peer_addr()),
+		local: None,
+		server_name: conn.server_name().filter(|h| !h.is_empty()),
+		alpn: None,
+	};
+
 	match alpn {
 		web_transport_quiche::ALPN => {
 			// WebTransport over HTTP/3
@@ -792,8 +774,10 @@ pub(crate) async fn accept(
 			let mut response = web_transport_quiche::proto::ConnectResponse::OK;
 			// Pick the first sub-protocol that we actually support.
 			// This is the WebTransport equivalent of ALPN negotiation.
+			let mut link = link;
 			if let Some(protocol) = request.protocols.iter().find(|p| alpns.contains(&p.as_str())) {
 				response = response.with_protocol(protocol);
+				link.alpn = Some(protocol.clone());
 			}
 			let session = request
 				.respond(response)
@@ -804,6 +788,7 @@ pub(crate) async fn accept(
 				url,
 				identity,
 				authority,
+				link,
 			})
 		}
 		// Recognize any moq ALPN this server actually offered (its configured versions),
@@ -819,6 +804,10 @@ pub(crate) async fn accept(
 				url: None,
 				identity,
 				authority,
+				link: crate::server::Link {
+					alpn: Some(alpn.to_string()),
+					..link
+				},
 			})
 		}
 		_ => Err(Error::UnsupportedAlpn(alpn.to_string())),

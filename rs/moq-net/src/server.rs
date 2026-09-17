@@ -1089,7 +1089,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn anonymous_peer_hop_filters_routes_from_server_session() {
 		let other = Hop::new(778).unwrap();
-		let origin = crate::origin::Info::new(Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(Hop::new(1).unwrap()).produce();
 
 		let gate = kio::Producer::new(true);
 		let transport = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
@@ -1120,9 +1120,14 @@ mod tests {
 		let assigned = request.assigned_hop;
 
 		let mut echoed_hops = crate::Hops::new();
-		echoed_hops.push(assigned).unwrap();
+		echoed_hops.push(crate::Hop::UNKNOWN).unwrap();
 		let _echoed = origin
-			.announce("echoed-route", crate::origin::Route::default().with_hops(echoed_hops))
+			.announce(
+				"echoed-route",
+				crate::origin::Route::default()
+					.with_hops(echoed_hops)
+					.with_via(assigned),
+			)
 			.unwrap();
 
 		let mut local_hops = crate::Hops::new();

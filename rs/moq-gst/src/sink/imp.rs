@@ -23,6 +23,7 @@ use super::pad::{CapsOutcome, ProducerOptions, PushOutcome, caps_supported};
 use super::request_pad::{MoqSinkPad, Notifications};
 use super::session::{
 	CAT, Completion, CompletionHandle, ConnectionStatus, RUNTIME, ResolvedSettings, Session, SessionRegistration,
+	notify, sessions_structure,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -221,6 +222,16 @@ impl ObjectImpl for MoqSink {
 					.blurb("Estimated receive bitrate in bits per second, 0 when unavailable")
 					.read_only()
 					.build(),
+				glib::ParamSpecBoxed::builder::<gst::Structure>("connection-stats")
+					.nick("Connection statistics")
+					.blurb("Current optional transport statistics, null while disconnected")
+					.read_only()
+					.build(),
+				glib::ParamSpecBoxed::builder::<gst::Structure>("sessions")
+					.nick("Sessions")
+					.blurb("Cumulative connects and disconnects during this element session")
+					.read_only()
+					.build(),
 			]
 		});
 		PROPS.as_ref()
@@ -258,7 +269,13 @@ impl ObjectImpl for MoqSink {
 
 	fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
 		match pspec.name() {
-			"status" | "connected" | "moq-version" | "estimated-send-bitrate" | "estimated-recv-bitrate" => {
+			"status"
+			| "connected"
+			| "moq-version"
+			| "estimated-send-bitrate"
+			| "estimated-recv-bitrate"
+			| "connection-stats"
+			| "sessions" => {
 				let control = self.control.lock().unwrap();
 				let session = control.live.as_ref().map(|s| &s.session);
 				match pspec.name() {
@@ -267,6 +284,8 @@ impl ObjectImpl for MoqSink {
 					"moq-version" => session.and_then(|s| s.status().version()).to_value(),
 					"estimated-send-bitrate" => session.map(|s| s.send_bitrate()).unwrap_or(0).to_value(),
 					"estimated-recv-bitrate" => session.map(|s| s.recv_bitrate()).unwrap_or(0).to_value(),
+					"connection-stats" => session.and_then(Session::connection_stats).to_value(),
+					"sessions" => sessions_structure(session.map(Session::presence).unwrap_or_default()).to_value(),
 					_ => unreachable!(),
 				}
 			}
@@ -600,6 +619,18 @@ impl MoqSink {
 				.collect::<Vec<_>>();
 			(state, updates, failure)
 		};
+		notify(
+			&self.obj().downgrade(),
+			&[
+				"status",
+				"connected",
+				"moq-version",
+				"estimated-send-bitrate",
+				"estimated-recv-bitrate",
+				"connection-stats",
+				"sessions",
+			],
+		);
 		let _rt = RUNTIME.enter();
 		if let Some(mut catalog) = state.catalog.take()
 			&& let Err(err) = catalog.finish().context("finalize catalog")
@@ -1424,12 +1455,18 @@ mod tests {
 			"moq-version",
 			"estimated-send-bitrate",
 			"estimated-recv-bitrate",
+			"connection-stats",
+			"sessions",
 		] {
 			assert!(
 				!spec(&sink, name).flags().contains(glib::ParamFlags::WRITABLE),
 				"{name} is writable"
 			);
 		}
+		assert!(sink.property::<Option<gst::Structure>>("connection-stats").is_none());
+		let sessions = sink.property::<gst::Structure>("sessions");
+		assert_eq!(sessions.get::<u64>("started"), Ok(0));
+		assert_eq!(sessions.get::<u64>("ended"), Ok(0));
 	}
 
 	#[test]

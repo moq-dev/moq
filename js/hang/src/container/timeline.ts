@@ -18,7 +18,7 @@ import * as Json from "@moq/json";
 import type * as Moq from "@moq/net";
 import type { Time } from "@moq/net";
 import type * as Catalog from "../catalog";
-import { MOQ_EPOCH_UNIX_MILLIS, u53 } from "../catalog";
+import { u53 } from "../catalog";
 
 /**
  * A contiguous run of groups a track contributes to a segment, `start` through `end`
@@ -94,18 +94,6 @@ export interface ProducerProps {
 	 * importing a source the publisher doesn't control.
 	 */
 	durationMax?: number;
-
-	/**
-	 * The wall-clock time of `pts` 0, advertised in the catalog when set.
-	 *
-	 * It anchors content time to an absolute clock, which is what an HLS
-	 * EXT-X-PROGRAM-DATE-TIME or a DASH availabilityStartTime needs: `new Date()` for a live
-	 * publisher whose timestamps start now, or the content's real start for a recording.
-	 *
-	 * Clamped to the moq epoch ({@link Catalog.MOQ_EPOCH_UNIX_MILLIS}, 2020), which the wire
-	 * format measures from: an earlier time isn't representable.
-	 */
-	wall?: Date;
 }
 
 /** One enrolled track's report state. */
@@ -150,18 +138,12 @@ export class Producer {
 	#reservers = 0;
 	// A segment overran durationMax, so the timeline stopped publishing.
 	#overrun?: Error;
-	// The wall-clock time of pts 0, in timescale units since the moq epoch (advertised in the section).
-	#wall?: number;
 
 	/** Wrap an already-created MoQ track (named {@link DEFAULT_NAME} by convention). */
 	constructor(track: Moq.Track.Producer, props: ProducerProps = {}) {
 		this.#trackName = track.name;
 		this.#durationMinUs = (props.durationMin ?? DEFAULT_DURATION_MIN_MS) * 1000;
 		this.#durationMaxUs = props.durationMax === undefined ? undefined : props.durationMax * 1000;
-		if (props.wall !== undefined) {
-			const unixMillis = Math.max(props.wall.getTime(), MOQ_EPOCH_UNIX_MILLIS);
-			this.#wall = Math.floor(((unixMillis - MOQ_EPOCH_UNIX_MILLIS) * DEFAULT_TIMESCALE) / 1000);
-		}
 		this.#window = new Json.Window.Producer<Record>({
 			track,
 			compression: true,
@@ -262,7 +244,6 @@ export class Producer {
 			track: this.#trackName,
 			timescale: u53(DEFAULT_TIMESCALE),
 			durationMax,
-			wall: this.#wall === undefined ? undefined : u53(this.#wall),
 		};
 	}
 

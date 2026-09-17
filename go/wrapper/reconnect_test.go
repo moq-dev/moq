@@ -114,7 +114,7 @@ func waitEpoch(t *testing.T, ctx context.Context, session *moq.Session, want uin
 }
 
 // awaitAnnouncement drains announcements until an active one names path.
-func awaitAnnouncement(t *testing.T, ctx context.Context, announced *moq.Announced, path string) {
+func awaitAnnouncement(t *testing.T, ctx context.Context, announced *moq.AnnounceConsumer, path string) {
 	t.Helper()
 
 	for {
@@ -125,7 +125,7 @@ func awaitAnnouncement(t *testing.T, ctx context.Context, announced *moq.Announc
 		if ann == nil {
 			t.Fatalf("announcement stream ended before %q", path)
 		}
-		if ann.Active() && ann.Path() == path {
+		if ann.Active() && ann.Pattern() == path {
 			return
 		}
 	}

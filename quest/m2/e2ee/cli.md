@@ -10,8 +10,8 @@ Existing plaintext commands remain the default; an explicit application credenti
 
 - Integrate the Rust E2EE layer into `moq-cli` publication and playback before semantic mux output and after protected track input. Keep codec, capture, playback, and synchronization logic outside the crypto layer.
 - Accept the credential through a dedicated file descriptor, otherwise-unused stdin, or a permission-checked file (`0600` on Unix), never a command argument or environment variable. Redact errors and tracing, zeroize owned secret bytes, and document shell-safe invocation.
-- Inject opaque physical names into mux, video, audio, timeline, and catalog construction. Derive and decrypt the protected catalog before existing selection, and suppress every plaintext Hang or MSF catalog representation.
-- Cover native audio/video publication and playback, late subscription, generation replacement, retransmission, clean authentication errors, and both lite and IETF transports.
+- Inject opaque physical names into mux, video, audio, timeline, and catalog construction. Mint a UUIDv7 epoch per publisher run and discover the newest one when playing; derive and decrypt the protected catalog before existing selection, and suppress every plaintext Hang or MSF catalog representation.
+- Cover native audio/video publication and playback, late subscription, a restarted publisher under a new epoch, clean authentication errors, and both lite and IETF transports.
 
 ## Required
 
