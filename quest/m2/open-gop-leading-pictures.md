@@ -7,10 +7,9 @@ decoder a leading picture whose references it does not have, while a viewer
 already playing keeps every frame. The rule is the same for H.264
 recovery-point keyframes with `recovery_frame_cnt = 0` (the broadcast
 contribution case, and what the reference capture carries) and H.265 CRA
-pictures. Gradual recovery (`recovery_frame_cnt > 0`) is out of scope: the
-splitter does not retain the count, and unsafe pictures there can sit at or
-after the keyframe timestamp, so it has its own quest,
-[gradual recovery](/quest/m2/open-gop-gradual-recovery.md).
+pictures. Gradual recovery (`recovery_frame_cnt > 0`) is out of scope: unsafe pictures
+there sit at or after the keyframe timestamp, and the catalog `warmup` rule in
+[consumer warmup](/quest/m2/intra-refresh/consumer-warmup.md) covers them.
 
 ## Plan
 
@@ -46,4 +45,4 @@ everyone.
 
 ## Related
 
-- [Gradual recovery](/quest/m2/open-gop-gradual-recovery.md) - the `recovery_frame_cnt > 0` case this rule does not cover
+- [Consumer warmup](/quest/m2/intra-refresh/consumer-warmup.md) - the `recovery_frame_cnt > 0` case this rule does not cover

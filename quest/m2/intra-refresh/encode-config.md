@@ -1,0 +1,47 @@
+# [M] Encode config: a Gop enum, cut(), and refresh-mode groups
+
+## Goal
+
+`moq_video::encode::Config` expresses the group structure as one enum, so a
+caller picks keyframes at an interval or intra refresh with a cycle length and
+cannot ask for both. A forced cut starts a new group in either mode: an IDR
+with keyframes, a fresh sweep with refresh. In refresh mode the producer opens
+a group at every sweep start and publishes `warmup` equal to the cycle. Every
+backend that cannot encode refresh mode refuses it when configured, and the
+CLI and transcoder expose the choice. moq-video and moq-transcode are `0.0.x`,
+so this lands on `main`.
+
+## Plan
+
+- `rs/moq-video/src/encode/encoder.rs`: replace `gop: u32` with `gop: Gop`,
+  `enum Gop { Keyframe(u32), Refresh(u32) }`, both in frames as today, default
+  `Keyframe(framerate * 2)`. Keeping the `gop` name and frame unit means every
+  backend's wiring changes by one match. If `Refresh` reads wrong beside
+  "keyframe", `Sweep` is the alternative; keep the field name.
+- Rename `Encoder::keyframe()` to `cut()` to match the ffi and producer
+  vocabulary; in `Keyframe` mode it forces an IDR as now, in `Refresh` mode it
+  asks the backend to restart the sweep. The producer's forced cut on every
+  (re)open (`rs/moq-video/src/encode/producer.rs`) goes through the same
+  path.
+- `Backend::encode(frame, keyframe)` in `rs/moq-video/src/encode/backend/mod.rs`
+  becomes `encode(frame, cut)`, and each backend gets the mode at construction.
+  VideoToolbox, openh264, VAAPI, Media Foundation, and MediaCodec return an
+  error for `Refresh` (supported or refused, never a silent fallback to
+  keyframes). The test-only probe backend accepts it so the producer logic is
+  testable without hardware.
+- Group boundaries in refresh mode come from counting: backends report
+  `keyframe = false` for a sweep start, so the producer marks the first frame
+  of each cycle by frame count from the last cut, opens the group there, and
+  sets the rendition's `warmup` to the cycle length over the framerate.
+- `rs/moq-transcode/src/rung.rs` keeps its eight-second override for
+  `Keyframe` only; `Refresh` keeps the caller's cycle, defaulting to two
+  seconds, since a cycle is both the tune-in delay and how thinly the intra
+  bits are spread. `rs/moq-cli` `publish` and `transcode` expose the mode and
+  interval, and `doc/bin/cli.md` documents it.
+- Tests: the probe backend in refresh mode yields one group per cycle with
+  `warmup` in the catalog; a cut mid-cycle opens a group and restarts the
+  count; a backend without refresh support refuses the config.
+
+## Required
+
+- [Catalog warmup](/quest/m2/intra-refresh/catalog-warmup.md) - the field the producer publishes
