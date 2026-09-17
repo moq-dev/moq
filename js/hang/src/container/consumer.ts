@@ -338,7 +338,8 @@ export class Consumer {
 			);
 
 			const nextStart = this.#groups[0]?.frames.at(0)?.timestamp ?? this.#groups[0]?.end;
-			if (!ptsContiguous(first.end ?? this.#presentedEnd, nextStart)) {
+			const marker = !first.empty && !first.media;
+			if (marker || !ptsContiguous(first.end ?? this.#presentedEnd, nextStart)) {
 				hole = true;
 			}
 			first.consumer.close();

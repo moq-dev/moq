@@ -1340,6 +1340,31 @@ test("Consumer jumps the playhead after a shed marker with a timestamp hole", as
 	consumer.close();
 });
 
+test("Consumer zero-budget skip keeps a contiguous marker", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(replay(track), { format: new LegacyFormat("audio"), maxAge: 0 as Time.Milli });
+
+	const group0 = new Group.Producer(0);
+	track.writeGroup(group0);
+	group0.writeFrame({
+		payload: encodeLegacy(0 as Time.Micro),
+		timestamp: Time.Timestamp.now(),
+	});
+	await settle();
+	expect((await nextFrame(consumer))?.frame?.timestamp).toBe(0 as Time.Micro);
+
+	writeMarkerGroup(track, 1, 0 as Time.Micro);
+	writeGroupWithLegacyFrames(track, 2, [500 as Time.Micro]);
+	await settle();
+
+	const resumed = await nextFrame(consumer);
+	expect(resumed?.frame?.timestamp).toBe(500 as Time.Micro);
+	expect(resumed?.discontinuity).toBe(1);
+	group0.close();
+
+	consumer.close();
+});
+
 // The case the group-number heuristic got backwards: ids jump, but the PTS timeline is unbroken.
 test("Consumer reports continuity across a PTS-contiguous group id jump (CMAF)", async () => {
 	const track = new Track.Producer("test");

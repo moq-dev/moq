@@ -81,6 +81,10 @@ pub struct Consumer<F: Container> {
 	// malformed.
 	live_edge: Option<(u64, Timestamp)>,
 
+	// Max timestamp of groups the cursor has left. Open-GOP pictures may sit below this
+	// group's running max, but not below an earlier group's edge.
+	group_edge: Option<Timestamp>,
+
 	// Presentation end of the group we most recently advanced past, for the 1 ms
 	// contiguity check on a delivered hole.
 	presented_end: Option<std::time::Duration>,
@@ -127,6 +131,7 @@ impl<F: Container> Consumer<F> {
 			startup: start.is_none(),
 			max_age,
 			live_edge: None,
+			group_edge: None,
 			presented_end: None,
 			discontinuity: 0,
 			end: None,
@@ -223,6 +228,9 @@ impl<F: Container> Consumer<F> {
 					Poll::Ready(Ok(Some(Event::Frame(frame)))) => {
 						let seq = group.group.sequence;
 						let ts = frame.timestamp;
+						if self.group_edge.is_some_and(|edge| ts.as_micros() < edge.as_micros()) {
+							return Poll::Ready(Err(TimestampRewind.into()));
+						}
 						if self.live_edge.is_none_or(|(_, high)| ts.as_micros() > high.as_micros()) {
 							self.live_edge = Some((seq, ts));
 						}
@@ -269,6 +277,7 @@ impl<F: Container> Consumer<F> {
 						}
 						self.pending.pop_front();
 						self.current += 1;
+						self.note_group_edge();
 						if marker {
 							self.bump_playhead();
 						}
@@ -335,6 +344,7 @@ impl<F: Container> Consumer<F> {
 					self.bump_playhead();
 				}
 				self.current = front_sequence;
+				self.note_group_edge();
 				continue;
 			}
 
@@ -361,8 +371,9 @@ impl<F: Container> Consumer<F> {
 				&& should_skip
 			{
 				let hole = !pts_contiguous(current_end.or(self.presented_end), next_start);
+				let had_marker = self.pending.iter().take(new_idx).any(GroupBuffer::marker);
 				self.pending.drain(0..new_idx);
-				if hole {
+				if hole || had_marker {
 					self.bump_playhead();
 				}
 				let new_current = self.pending.front().map(|g| g.sequence).unwrap();
@@ -370,6 +381,7 @@ impl<F: Container> Consumer<F> {
 				tracing::debug!(old = self.current, new = new_current, "skipping slow groups");
 
 				self.current = new_current;
+				self.note_group_edge();
 				continue;
 			}
 
@@ -388,6 +400,7 @@ impl<F: Container> Consumer<F> {
 					self.bump_playhead();
 				}
 				self.current = front_sequence;
+				self.note_group_edge();
 				continue;
 			}
 
@@ -402,6 +415,12 @@ impl<F: Container> Consumer<F> {
 	fn bump_playhead(&mut self) {
 		self.discontinuity += 1;
 		self.end = None;
+	}
+
+	fn note_group_edge(&mut self) {
+		if let Some((_, ts)) = self.live_edge {
+			self.group_edge = Some(ts);
+		}
 	}
 
 	// Reads any new groups from the track until we're completely finished.
@@ -1141,6 +1160,51 @@ mod tests {
 			1,
 			"a shed marker with a timestamp jump is a playhead event"
 		);
+	}
+
+	#[tokio::test]
+	async fn a_zero_budget_skip_keeps_a_contiguous_marker() {
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Audio));
+		consumer.max_age = Duration::ZERO;
+
+		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		Container::Legacy(crate::container::Kind::Audio)
+			.write(
+				&mut group0,
+				&[Frame {
+					timestamp: ts(0),
+					payload: Bytes::from_static(&[0xDE, 0xAD]),
+					keyframe: false,
+					duration: None,
+				}],
+			)
+			.unwrap();
+		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(0));
+
+		write_marker_group(&mut track, 1, ts(10_000));
+		write_group(&mut track, 2, &[ts(10_000)]);
+
+		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(10_000));
+		assert_eq!(
+			consumer.discontinuity(),
+			1,
+			"a drained marker still declares the encoder restart"
+		);
+		group0.finish().unwrap();
+	}
+
+	#[tokio::test]
+	async fn a_later_frame_below_the_previous_group_edge_aborts() {
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Data));
+		write_group(&mut track, 0, &[ts(100_000)]);
+		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(100_000));
+		write_group(&mut track, 1, &[ts(200_000), ts(50_000)]);
+		track.finish().unwrap();
+		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(200_000));
+		let err = consumer.read().await.unwrap_err();
+		assert!(matches!(err, crate::Error::TimestampRewind(_)));
 	}
 
 	// ---- Empty payloads ----
