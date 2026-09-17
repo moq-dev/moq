@@ -32,8 +32,8 @@ use crate::{Admissions, Auth, Cluster, ClusterOptions, Config, Connection, Inter
 /// application handles ([`Self::cluster`], [`Self::auth`], [`Self::client`],
 /// [`Self::stats`], [`Self::shutdown`], [`Self::shutdown_trigger`]) first,
 /// then mount extra routes with [`Self::with_web`] / [`Self::with_internal`].
-/// An application that decides admissions itself leaves `[auth]` empty and
-/// takes [`Self::admissions`]. `run` is the serving loop; it returns after
+/// An application that decides admissions itself builds the relay with
+/// [`Self::embed`] instead. `run` is the serving loop; it returns after
 /// [`ShutdownTrigger::start`] drains the sessions, with the sockets released
 /// and the workers joined.
 ///
@@ -51,9 +51,6 @@ pub struct Relay {
 	server: moq_tokio::Server,
 	client: moq_tokio::Client,
 	auth: Auth,
-	/// The sessions the embedder decides, until it takes them. `None` when the
-	/// config named a source; `run` refuses to start while this is still held.
-	admissions: Option<Admissions>,
 	cluster: Cluster,
 	stats: moq_stats::Producer,
 	internal: Internal,
@@ -88,7 +85,37 @@ impl Relay {
 	/// it.
 	pub async fn load(mut config: Config) -> anyhow::Result<Self> {
 		config.resolve()?;
+		let auth = config.auth.init(Self::node(&config), &config.connect.tls)?;
+		Self::assemble(config, auth).await
+	}
 
+	/// Like [`Self::load`], but the application admits every session itself:
+	/// `[auth]` must name no source, and each session arrives on the returned
+	/// [`Admissions`] to be granted or refused. Dropping it fails every later
+	/// session as unavailable.
+	pub async fn embed(mut config: Config) -> anyhow::Result<(Self, Admissions)> {
+		config.resolve()?;
+		anyhow::ensure!(
+			config.auth.is_empty(),
+			"--auth-url or --auth-public is set; an embedder that decides admissions itself leaves [auth] empty"
+		);
+		let (auth, admissions) = Auth::embedded(Self::node(&config));
+		Ok((Self::assemble(config, auth).await?, admissions))
+	}
+
+	/// The name this relay reports in every auth request: the stats node label,
+	/// else the cluster node URL, else nothing.
+	fn node(config: &Config) -> String {
+		config
+			.stats
+			.node
+			.clone()
+			.or_else(|| config.cluster.node.clone())
+			.unwrap_or_default()
+	}
+
+	/// Everything `load` does once the auth source is settled.
+	async fn assemble(config: Config, auth: Auth) -> anyhow::Result<Self> {
 		#[cfg(feature = "cluster-lan")]
 		if config.cluster.lan.enabled {
 			Cluster::validate_lan_versions(&config.connect, &config.listen)?;
@@ -181,24 +208,6 @@ impl Relay {
 			None => (server, client),
 		};
 
-		// The name this relay reports in every auth request: the stats node label,
-		// else the cluster node URL, else nothing.
-		let node = config
-			.stats
-			.node
-			.clone()
-			.or_else(|| config.cluster.node.clone())
-			.unwrap_or_default();
-		// No `[auth]` source means the embedder decides: it takes the admissions
-		// before `run`, which refuses to start if nobody did.
-		let (auth, admissions) = match config.auth.is_empty() {
-			true => {
-				let (auth, admissions) = Auth::embedded(node);
-				(auth, Some(admissions))
-			}
-			false => (config.auth.init(node, &config.connect.tls)?, None),
-		};
-
 		let cache = config.cache.init()?;
 		// Whichever worker group owns QUIC holds the certificates; the shared
 		// server then has none of its own.
@@ -263,7 +272,6 @@ impl Relay {
 			server,
 			client,
 			auth,
-			admissions,
 			cluster,
 			stats,
 			internal,
@@ -292,17 +300,10 @@ impl Relay {
 	}
 
 	/// Where every session's grant comes from: the auth server, the static public
-	/// grant, or the embedder answering [`Self::admissions`]. Clone it to admit
-	/// your own listeners' sessions the same way.
+	/// grant, or the embedder answering the [`Admissions`] from [`Self::embed`].
+	/// Clone it to admit your own listeners' sessions the same way.
 	pub fn auth(&self) -> &Auth {
 		&self.auth
-	}
-
-	/// The sessions to decide when `[auth]` names no source: take them before
-	/// [`Self::run`] and answer each [`Admission`](crate::Admission). `None` when
-	/// the config named a source, or once taken.
-	pub fn admissions(&mut self) -> Option<Admissions> {
-		self.admissions.take()
 	}
 
 	/// The shared cluster: the origin every session and peer publishes into.
@@ -379,7 +380,6 @@ impl Relay {
 		let Relay {
 			server,
 			auth,
-			admissions,
 			cluster,
 			internal,
 			web,
@@ -396,13 +396,6 @@ impl Relay {
 
 		let web_routes = web_routes.unwrap_or_else(|| web.routes());
 		let internal_routes = internal_routes.unwrap_or_else(|| internal.routes());
-
-		// Nobody configured and nobody took over: refuse before binding is
-		// reported ready, the way a missing source refuses a binary.
-		anyhow::ensure!(
-			admissions.is_none(),
-			"no --auth-url or --auth-public configured; nobody can authenticate (an embedder decides by taking Relay::admissions)"
-		);
 
 		// Validate the cluster and bind its LAN advertisement before claiming to be
 		// ready: the `cluster.run()` below is first polled after the notify, so a bad

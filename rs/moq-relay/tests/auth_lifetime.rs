@@ -845,11 +845,11 @@ async fn an_embedded_decider_admits_and_revokes() {
 	orphan_relay.abort();
 }
 
-/// A relay whose config names no auth source is the embedder's to decide: `run`
-/// refuses to start until the admissions are taken, and once they are, the
-/// decider's grant admits sessions through the assembled relay.
+/// A relay built with `embed` is the embedder's to decide: `load` refuses the
+/// same config as it always has, `embed` refuses one that names a source, and
+/// the decider's grant admits sessions through the assembled relay.
 #[tokio::test]
-async fn a_relay_without_an_auth_source_is_decided_by_the_embedder() {
+async fn an_embedded_relay_is_decided_by_the_embedder() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let config = |port: u16| {
 		let mut config = Config::default();
@@ -859,14 +859,20 @@ async fn a_relay_without_an_auth_source_is_decided_by_the_embedder() {
 		config
 	};
 
-	let untaken = Relay::load(config(free_port())).await.expect("load relay");
-	let err = untaken.run().await.expect_err("nobody can authenticate");
+	let Err(err) = Relay::load(config(free_port())).await else {
+		panic!("a relay with no auth source loaded");
+	};
 	assert!(err.to_string().contains("nobody can authenticate"), "{err}");
 
+	let mut configured = config(free_port());
+	configured.auth.public = vec![Pattern::all()];
+	let Err(err) = Relay::embed(configured).await else {
+		panic!("a source and an embedder cannot both decide");
+	};
+	assert!(err.to_string().contains("leaves [auth] empty"), "{err}");
+
 	let port = free_port();
-	let mut relay = Relay::load(config(port)).await.expect("load relay");
-	let admissions = relay.admissions().expect("an empty [auth] hands over the admissions");
-	assert!(relay.admissions().is_none(), "taken once");
+	let (relay, admissions) = Relay::embed(config(port)).await.expect("embed relay");
 	let decider = Decider::spawn(admissions, grant(Duration::from_secs(3600)));
 	let trigger = relay.shutdown_trigger().clone();
 	let running = tokio::spawn(relay.run());

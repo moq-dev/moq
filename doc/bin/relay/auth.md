@@ -241,17 +241,16 @@ moq-relay --auth-url http://127.0.0.1:4440/
 ### In process
 
 An application that [embeds](/bin/relay/#embed) the relay can be the auth
-server without the HTTP: leave `[auth]` empty and take `relay.admissions()`
-before `run`. Each `Admission` carries the same `moq_auth::Request` the server
-would have read, and is answered with `grant(lease)` or `refuse(err)`. A
-`Lease::fixed(grant)` never changes; a `lease::Consumer` is driven by the
-`lease::Producer` the application keeps, which re-checks, updates, revokes, and
-learns when the session ends. `run` refuses to start while nobody has taken the
-admissions, and a dropped `Admissions` fails every later session as unavailable.
+server without the HTTP: leave `[auth]` empty and build the relay with
+`Relay::embed`, which returns the `Admissions` beside it. Each `Admission`
+carries the same `moq_auth::Request` the server would have read, and is
+answered with `grant(lease)` or `refuse(err)`. A `Lease::fixed(grant)` never
+changes; a `lease::Consumer` is driven by the `lease::Producer` the application
+keeps, which re-checks, updates, revokes, and learns when the session ends. A
+dropped `Admissions` fails every later session as unavailable.
 
 ```rust
-let mut relay = Relay::load(config).await?;
-let mut admissions = relay.admissions().expect("[auth] is empty");
+let (relay, mut admissions) = Relay::embed(config).await?;
 tokio::spawn(async move {
     while let Some(admission) = admissions.next().await {
         match policy.decide(&admission.request) {
