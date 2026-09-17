@@ -456,9 +456,9 @@ pub struct ClusterConfig {
 	pub id: Option<u64>,
 
 	/// Connect to one or more other cluster nodes. Each peer is a full URL, e.g.
-	/// `https://host/?jwt=TOKEN`; a bare host or `host:port` is deprecated but
-	/// still accepted (wrapped in `https://.../`). Accepts a comma-separated list
-	/// on the CLI or repeat the flag; in config files use a TOML array.
+	/// `https://host/?jwt=TOKEN`. A bare host or `host:port` is refused; pass the
+	/// full URL instead. Accepts a comma-separated list on the CLI or repeat the
+	/// flag; in config files use a TOML array.
 	///
 	/// A `?cost=N` query param prices the link (moq-lite-06+): every
 	/// announcement crossing it adds `N` to its route cost, so routing prefers
@@ -466,7 +466,6 @@ pub struct ClusterConfig {
 	/// something large for a metered backbone; an unpriced link costs 1, which
 	/// reproduces plain hop counting. The param is consumed by this relay, not
 	/// sent to the peer.
-	#[serde(alias = "connect")]
 	#[usage(
 		name = "cluster-connect",
 		long = "cluster-connect",
@@ -558,10 +557,8 @@ pub struct ClusterConfig {
 		setting = "cluster.tier"
 	)]
 	pub tier: Option<String>,
-	// Accepted so existing configs keep parsing (`deny_unknown_fields`), but
-	// ignored: a broadcast now closes as soon as its last publisher is lost.
+	/// Released spelling, kept so [`Self::deprecated`] can name that linger is gone.
 	#[doc(hidden)]
-	#[deprecated(note = "ignored; a broadcast closes as soon as its last publisher is lost")]
 	#[usage(
 		name = "cluster-linger",
 		long = "cluster-linger",
@@ -570,6 +567,30 @@ pub struct ClusterConfig {
 		hide = true
 	)]
 	pub linger: Option<moq_tokio::Duration>,
+}
+
+impl ClusterConfig {
+	/// Released spellings this config was parsed from, each paired with what replaced it.
+	pub fn deprecated(&self) -> moq_tokio::Deprecated {
+		let mut found = moq_tokio::Deprecated::default();
+		if self.linger.is_some() {
+			found.changed(
+				"--cluster-linger",
+				Some("MOQ_CLUSTER_LINGER"),
+				"(removed)",
+				"a broadcast closes as soon as its last publisher is lost",
+			);
+		}
+		if self.connect.iter().any(|peer| is_legacy_peer(peer)) {
+			found.changed(
+				"--cluster-connect",
+				Some("MOQ_CLUSTER_CONNECT"),
+				"a full URL like https://host/?jwt=TOKEN",
+				"a bare host or host:port is no longer accepted",
+			);
+		}
+		found
+	}
 }
 
 /// LAN discovery configuration (`[cluster.lan]`).
@@ -851,12 +872,8 @@ impl Cluster {
 			Some(id) => Hop::new(id).expect("cluster id already validated"),
 			None => Hop::random(),
 		};
-		#[allow(deprecated)]
-		if config.linger.is_some() {
-			tracing::warn!(
-				"cluster linger is deprecated and ignored; a broadcast closes as soon as its last publisher is lost"
-			);
-		}
+		let deprecated = config.deprecated();
+		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
 		let mut info = origin::Info::new(id);
 		if let Some(cache) = cache {
 			info = info.with_pool(cache.pool).with_cache_duration(cache.duration);
@@ -1222,13 +1239,6 @@ impl Cluster {
 			let target = DialTarget::parse(peer).context("invalid --cluster-connect peer URL")?;
 			if dialed.contains(&target.key) {
 				continue;
-			}
-			if is_legacy_peer(peer) {
-				tracing::warn!(
-					%peer,
-					"DEPRECATED: pass --cluster-connect as a full URL like \"https://<host>/?jwt=TOKEN\"; \
-					 a bare host or \"host:port\" is deprecated and will be removed in a future release"
-				);
 			}
 			let this = self.clone();
 			let token = token.clone();
@@ -1863,9 +1873,9 @@ fn connect_api_is_http(source: &str) -> bool {
 /// Resolve a cluster peer to the URL we dial.
 ///
 /// The modern form is a full URL, e.g. `https://host/?jwt=TOKEN`, which is used
-/// verbatim. A bare host or `host:port` is still accepted for backwards
-/// compatibility and wrapped in `https://.../` (callers warn about this legacy
-/// form for user-supplied `--cluster-connect` entries).
+/// verbatim. A bare host or `host:port` is wrapped in `https://.../` for
+/// gossip and `--cluster-connect-api` lists; user-supplied `--cluster-connect`
+/// entries refuse that form through [`ClusterConfig::deprecated`].
 fn peer_url(peer: &str) -> anyhow::Result<Url> {
 	// A full URL has a scheme separator; a bare host or `host:port` does not
 	// (and `Url::parse` would otherwise mis-read `host:port` as scheme `host`).
@@ -1903,8 +1913,9 @@ pub(crate) fn advertised_node_url(advertised: &str) -> String {
 	}
 }
 
-/// Whether a peer string uses the deprecated bare-host / `host:port` form rather
-/// than a full URL. Used to warn on legacy `--cluster-connect` entries.
+/// Whether a peer string uses the released bare-host / `host:port` form rather
+/// than a full URL. Used so [`ClusterConfig::deprecated`] can refuse
+/// `--cluster-connect` entries that still use it.
 fn is_legacy_peer(peer: &str) -> bool {
 	!peer.contains("://")
 }
@@ -2611,8 +2622,7 @@ mod tests {
 		// that mutate it.
 		let _env = crate::test_env::EnvGuard::lock();
 
-		let toml =
-			"[cluster]\nnode = \"us-east.example.com:4443\"\nmesh = true\nconnect = [\"root.example.com:4443\"]\n";
+		let toml = "[cluster]\nnode = \"us-east.example.com:4443\"\nmesh = true\nconnect = [\"https://root.example.com:4443/\"]\n";
 		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
 		std::fs::create_dir_all(&dir).unwrap();
 		let path = dir.join("cluster-node-mesh-toml.toml");
@@ -2623,7 +2633,10 @@ mod tests {
 		assert_eq!(config.cluster.node.as_deref(), Some("us-east.example.com:4443"));
 		// A TOML boolean deserializes into the string form.
 		assert_eq!(config.cluster.mesh.as_deref(), Some("true"));
-		assert_eq!(config.cluster.connect, vec!["root.example.com:4443".to_string()]);
+		assert_eq!(
+			config.cluster.connect,
+			vec!["https://root.example.com:4443/".to_string()]
+		);
 	}
 
 	/// The legacy `--cluster-mesh <url>` form (now a boolean) is honored for
@@ -2660,6 +2673,24 @@ mod tests {
 		assert!(is_legacy_peer("cdn.example.com"));
 		assert!(is_legacy_peer("localhost:4443"));
 		assert!(!is_legacy_peer("https://cdn.example.com/?jwt=abc"));
+	}
+
+	/// Linger and a bare `--cluster-connect` host still parse so the process can
+	/// name what replaced them, but they configure nothing and must stop a run.
+	#[test]
+	fn released_cluster_spellings_are_reported_not_applied() {
+		let config = ClusterConfig {
+			linger: Some(std::time::Duration::from_secs(5).into()),
+			connect: vec!["root.example.com:4443".into()],
+			..Default::default()
+		};
+		let reported = config.deprecated().to_string();
+		assert!(reported.contains("--cluster-linger / MOQ_CLUSTER_LINGER"), "{reported}");
+		assert!(
+			reported.contains("a full URL like https://host/?jwt=TOKEN"),
+			"{reported}"
+		);
+		assert!(new_cluster(config).is_err());
 	}
 
 	/// A malformed URL may contain a credential, so parse errors must not echo the

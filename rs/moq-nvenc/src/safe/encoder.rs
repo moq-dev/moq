@@ -385,8 +385,8 @@ impl Encoder {
 	/// Initialize an encoder session with the given configuration.
 	///
 	/// You must do this before you can encode a picture.
-	/// You should use the [`NV_ENC_INITIALIZE_PARAMS`] builder
-	/// via [`NV_ENC_INITIALIZE_PARAMS::new`].
+	/// You should use the [`EncoderInitParams`] builder
+	/// via [`EncoderInitParams::new`].
 	///
 	/// See [NVIDIA docs](https://docs.nvidia.com/video-technologies/video-codec-sdk/12.0/nvenc-video-encoder-api-prog-guide/index.html#initializing-the-hardware-encoder-session).
 	///

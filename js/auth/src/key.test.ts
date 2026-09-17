@@ -142,14 +142,13 @@ test("toPublicKey - defaulted key_ops yields exactly verify", async () => {
 	expect(publicKey.key_ops).toEqual(["verify"]);
 });
 
-test("load - legacy oct key without kty", () => {
+test("load - oct key without kty is refused", () => {
 	const { kty: _ignored, ...legacyKey } = testKey;
 	const jwk = encodeJwk(legacyKey);
-	const key = load(jwk);
 
-	expect(key.kty).toBe("oct");
-	expect(key.alg).toBe(testKey.alg);
-	expect(key.key_ops).toEqual(testKey.key_ops as unknown as typeof key.key_ops);
+	expect(() => {
+		load(jwk);
+	}).toThrow(/Failed to validate JWK/);
 });
 
 test("sign - successful signing", async () => {

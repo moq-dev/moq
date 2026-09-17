@@ -388,12 +388,6 @@ impl<C: Container> Producer<C> {
 		add_micros(last, self.cadence?)
 	}
 
-	#[doc(hidden)]
-	#[deprecated(note = "use `cut`")]
-	pub fn finish_group(&mut self) -> Result<(), C::Error> {
-		self.cut(None)
-	}
-
 	/// Close the current group (if any) and open the next group at the given sequence.
 	///
 	/// The next [`write`](Self::write) must be a keyframe and will land in a group with
@@ -976,22 +970,6 @@ mod tests {
 		producer
 			.cut(Some(moq_net::Timestamp::from_micros(15_000).unwrap()))
 			.unwrap();
-		producer.write(frame(20_000, true)).unwrap();
-		producer.finish().unwrap();
-
-		assert_eq!(collect_groups(consumer).await, vec![2, 1]);
-	}
-
-	#[tokio::test]
-	#[allow(deprecated)]
-	async fn deprecated_finish_group_still_closes() {
-		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let consumer = track.subscribe(replay());
-		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data));
-
-		producer.write(frame(0, true)).unwrap();
-		producer.write(frame(10_000, false)).unwrap();
-		producer.finish_group().unwrap();
 		producer.write(frame(20_000, true)).unwrap();
 		producer.finish().unwrap();
 

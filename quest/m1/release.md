@@ -41,7 +41,14 @@ with its PR and the replacement call:
   application (#3621) and meshes CLI and relay peers (#3648); config merges
   with provenance (#3587); `--auth-api-mode proxy` (#3044); the CLI parses
   with usage-rs and refuses the flags it dropped (#3030); moq-native is
-  moq-tokio (#2896).
+  moq-tokio (#2896). Released spellings refuse rather than warn or silently
+  alias: `--cluster-linger` is gone; `--cluster-connect` needs a full URL;
+  TOML `connect`/`failover_delay`/`listen`/`disable_verify`/`[server]`/`[client]`
+  name `url`/`race`/`bind`/`insecure`/`[listen]`/`[connect]`; CLI `--origin`/
+  `--name`/`--latency-max` and `publish`/`subscribe` name `--hop`/`--broadcast`/
+  `--max-age` and `import`/`export`. Unused `#[deprecated]` items are gone.
+  JS `announced()` always drops reflected announces (`ignoreSelf` is gone);
+  an `oct` JWK without `kty` is refused.
 - bindings: the Go module is `moq.dev/moq` with `context.Context` on every
   blocking call (#2957); `MoqAudioCodec` is an `opus()` object (#3671); the
   configuration setters are fallible (#3642); durations are microseconds and

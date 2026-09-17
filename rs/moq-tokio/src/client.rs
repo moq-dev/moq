@@ -957,19 +957,18 @@ mod tests {
 	}
 
 	#[test]
-	fn test_toml_failover_delay_survives_update_from() {
+	fn test_toml_failover_delay_is_reported_not_applied() {
 		let toml = r#"
 			failover_delay = "1s"
 		"#;
 
 		let config: crate::connect::Config = toml::from_str(toml).unwrap();
-		assert_eq!(config.race, std::time::Duration::from_secs(1));
-
-		// Simulate: TOML loaded, then CLI args re-applied (no --client-failover-delay flag).
-		let mut cli = Cli { config };
-		cli.update_from(&[]);
-		let config = cli.config;
-		assert_eq!(config.race, std::time::Duration::from_secs(1));
+		assert_eq!(config.race, crate::Duration::from(crate::connect::DEFAULT_RACE));
+		assert!(
+			config.deprecated().to_string().contains("failover_delay -> race"),
+			"{}",
+			config.deprecated()
+		);
 	}
 
 	#[test]
@@ -1072,7 +1071,7 @@ mod tests {
 	#[test]
 	fn test_toml_connect_survives_update_from() {
 		let toml = r#"
-			connect = "https://relay.example.com/anon"
+			url = "https://relay.example.com/anon"
 		"#;
 
 		let config: crate::connect::Config = toml::from_str(toml).unwrap();

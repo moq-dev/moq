@@ -4,9 +4,9 @@
 [log]
 level = "info"
 
-[server]
+[listen]
 # QUIC on UDP. 127.0.0.1 avoids IPv6 flakiness on CI runners.
-listen = "127.0.0.1:4443"
+bind = "127.0.0.1:4443"
 tls.generate = ["localhost", "127.0.0.1"]
 
 [web.http]

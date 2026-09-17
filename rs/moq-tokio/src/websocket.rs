@@ -165,7 +165,6 @@ pub(crate) struct Legacy {
 	#[usage(
 		name = "websocket-enabled",
 		long = "websocket-enabled",
-		alias = "client-websocket-enabled",
 		env = "MOQ_CLIENT_WEBSOCKET_ENABLED",
 		hide = true,
 		default_missing = "true",
@@ -177,7 +176,6 @@ pub(crate) struct Legacy {
 	#[usage(
 		name = "websocket-delay",
 		long = "websocket-delay",
-		alias = "client-websocket-delay",
 		env = "MOQ_CLIENT_WEBSOCKET_DELAY",
 		hide = true
 	)]

@@ -5,12 +5,12 @@
 # See https://moq.dev/docs/auth and the example configs at
 # https://github.com/moq-dev/moq/tree/main/demo/relay for more.
 
-[server]
+[listen]
 # Listen for QUIC connections on UDP:443.
 # This is the default port for WebTransport.
-listen = "[::]:443"
+bind = "[::]:443"
 
-[server.tls]
+[listen.tls]
 # Provide real certificates from Let's Encrypt or your CA of choice.
 # The default paths below are owned by the moq-relay service (DynamicUser)
 # via StateDirectory; drop your cert/key in /var/lib/moq-relay/.

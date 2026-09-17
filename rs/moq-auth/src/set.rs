@@ -106,18 +106,6 @@ impl KeySet {
 		key.sign(payload)
 	}
 
-	#[doc(hidden)]
-	#[deprecated(note = "renamed to KeySet::sign")]
-	pub fn encode(&self, payload: &Claims) -> crate::Result<String> {
-		self.sign(payload)
-	}
-
-	#[doc(hidden)]
-	#[deprecated(note = "renamed to KeySet::verify")]
-	pub fn decode(&self, token: &str) -> crate::Result<Claims> {
-		self.verify(token)
-	}
-
 	/// Verify a token with the key matching its `kid` header, returning its claims.
 	///
 	/// A token without a `kid` is accepted only when the set holds exactly one key.

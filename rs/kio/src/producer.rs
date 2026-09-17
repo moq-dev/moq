@@ -287,16 +287,6 @@ impl<T> Producer<T> {
 		self.state.is_clone(&other.state)
 	}
 
-	/// Returns `true` if this is the only remaining producer.
-	#[doc(hidden)]
-	#[deprecated(
-		note = "racy: a clone, or a Weak upgraded by another thread, can invalidate the answer \
-		        before you act on it. Run last-handle cleanup from the Drop of a shared guard instead."
-	)]
-	pub fn is_last(&self) -> bool {
-		self.counts.producers.load(Ordering::Acquire) == 1
-	}
-
 	/// Create a [`ProducerWeak`] reference that doesn't affect the producer/consumer ref counts.
 	pub fn weak(&self) -> ProducerWeak<T> {
 		ProducerWeak {

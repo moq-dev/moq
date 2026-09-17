@@ -42,6 +42,6 @@ is a config-file migration as well as a CLI one, and moq-cli already nests
 names repo-wide and reconcile every sample invocation under `doc/bin/`,
 `doc/setup/`, and `demo/` against `--help`.
 
-Leave `--cluster-linger` alone: it is already a hidden no-op.
+`--cluster-linger` is already a `Deprecated` refusal; do not revive it.
 
 

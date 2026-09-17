@@ -59,11 +59,6 @@ const OctKeySchema = z.extend(BaseKeySchema, {
 	),
 });
 
-const LegacyOctKeySchema = z.extend(BaseKeySchema, {
-	k: Base64FieldSchema,
-	kty: z.optional(z.undefined()),
-});
-
 const RsaKeySchema = z
 	.extend(BaseKeySchema, {
 		kty: z.literal("RSA"),
@@ -115,7 +110,6 @@ export type Key = z.infer<typeof KeySchema>;
 export type AsymmetricKey = Exclude<Key, { kty: "oct" }>;
 export type SymmetricKey = Extract<Key, { kty: "oct" }>;
 export type PublicKey = Omit<AsymmetricKey, "d" | "p" | "q" | "dp" | "dq" | "qi">;
-type LegacyOctKey = z.infer<typeof LegacyOctKeySchema>;
 
 export function toPublicKey(key: Key): PublicKey {
 	switch (key.kty) {
@@ -180,7 +174,12 @@ function loadKey(jwk: string): Key | PublicKey {
 		}
 	}
 
-	const key = parseKeyWithLegacyFallback(data);
+	let key: Key;
+	try {
+		key = KeySchema.parse(data);
+	} catch (error) {
+		throw new Error(`Failed to validate JWK: ${error instanceof Error ? error.message : "unknown error"}`);
+	}
 
 	try {
 		validateKey(key);
@@ -250,26 +249,6 @@ function ensureClaimsWithinScope(key: PublicKey | SymmetricKey | Key, claims: Cl
 	if (key.scope && !scopeAllows(key.scope, claims)) {
 		throw new Error("Token capabilities exceed the key scope");
 	}
-}
-
-function parseKeyWithLegacyFallback(data: unknown): Key {
-	try {
-		return KeySchema.parse(data);
-	} catch (primaryError) {
-		try {
-			const legacy = LegacyOctKeySchema.parse(data);
-			return upgradeLegacyKey(legacy);
-		} catch {
-			throw new Error(
-				`Failed to validate JWK: ${primaryError instanceof Error ? primaryError.message : "unknown error"}`,
-			);
-		}
-	}
-}
-
-function upgradeLegacyKey(key: LegacyOctKey): Key {
-	const { kty: _ignored, ...rest } = key;
-	return { ...rest, kty: "oct" } as Key;
 }
 
 function validateKey(key: Key): void {

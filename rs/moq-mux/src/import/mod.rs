@@ -28,14 +28,3 @@ pub use container::*;
 pub use format::{AudioFormat, ContainerFormat, Format, Kind, VideoFormat};
 pub use init::{AudioInit, ContainerInit, VideoInit};
 pub use track::*;
-
-#[doc(hidden)]
-#[deprecated(
-	note = "call broadcast.unique_track(suffix, info) directly, with the catalog's track_info() when one is in scope so a declared retention reaches the track"
-)]
-pub fn unique_track(
-	broadcast: &mut moq_net::broadcast::Producer,
-	suffix: &str,
-) -> crate::Result<moq_net::track::Producer> {
-	Ok(broadcast.unique_track(suffix, hang::container::track_info(0))?)
-}

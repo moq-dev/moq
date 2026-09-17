@@ -1513,12 +1513,6 @@ impl Request {
 	pub fn peer_identity(&self) -> Option<crate::tls::PeerIdentity> {
 		self.identity.clone()
 	}
-
-	#[doc(hidden)]
-	#[deprecated(note = "use `peer_identity` instead")]
-	pub fn has_peer_certificate(&self) -> bool {
-		self.peer_identity().is_some()
-	}
 }
 
 #[cfg(test)]

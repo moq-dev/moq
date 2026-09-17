@@ -603,18 +603,6 @@ impl Key {
 		Ok(token)
 	}
 
-	#[doc(hidden)]
-	#[deprecated(note = "renamed to Key::sign")]
-	pub fn encode(&self, payload: &Claims) -> crate::Result<String> {
-		self.sign(payload)
-	}
-
-	#[doc(hidden)]
-	#[deprecated(note = "renamed to Key::verify")]
-	pub fn decode(&self, token: &str) -> crate::Result<Claims> {
-		self.verify(token)
-	}
-
 	/// Generate a key pair for the given algorithm, returning the private and public keys.
 	pub fn generate(algorithm: Algorithm, id: Option<crate::KeyId>) -> crate::Result<Self> {
 		generate(algorithm, id)

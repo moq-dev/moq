@@ -11,17 +11,15 @@
 //! on the command line while quietly ignoring the environment. That is what this
 //! pins.
 //!
-//! The list is from `moq-relay` at the last release before the connect/listen
-//! rename. Add to it when a flag ships; only remove an entry when the spelling is
-//! deliberately dropped, which is a breaking change to call out in the release
-//! notes.
+//! The list is the spellings the last main release actually shipped. Add to it
+//! when a flag ships; only remove an entry when the spelling is deliberately
+//! dropped, which is a breaking change to call out in the release notes.
 
 use std::collections::{HashMap, HashSet};
 
 /// `(flag, env)` for every released argument. `None` means it had no env var.
 const RELEASED: &[(&str, Option<&str>)] = &[
 	("auth-public", Some("MOQ_AUTH_PUBLIC")),
-	("auth-url", Some("MOQ_AUTH_URL")),
 	("auth-public-publish", Some("MOQ_AUTH_PUBLIC_PUBLISH")),
 	("auth-public-subscribe", Some("MOQ_AUTH_PUBLIC_SUBSCRIBE")),
 	("backoff-initial", Some("MOQ_BACKOFF_INITIAL")),

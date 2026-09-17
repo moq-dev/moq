@@ -31,15 +31,7 @@ import {
 	SubscribeUpdate,
 } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
-import {
-	hasAnnounceId,
-	hasAnnounceOk,
-	hasDatagrams,
-	hasExcludeHop,
-	hasProbeRtt,
-	restartSupported,
-	Version,
-} from "./version.ts";
+import { hasAnnounceId, hasAnnounceOk, hasDatagrams, hasProbeRtt, restartSupported, Version } from "./version.ts";
 
 // Bound on how long stream-open plus the first response (SUBSCRIBE_OK on older
 // drafts, or TRACK_INFO on lite-05+) may take. Browsers cap concurrent QUIC streams
@@ -63,24 +55,6 @@ function supportsTrackStream(version: Version): boolean {
 		default:
 			return true;
 	}
-}
-
-/**
- * Options accepted by {@link Subscriber.announced}.
- */
-export interface AnnouncedOptions {
-	/**
-	 * If true, skip announcements whose hop chain contains this connection's
-	 * own Hop ID. Useful for meshes that reflect announces back. Defaults
-	 * to false for backwards compatibility: existing code (notably hang.live)
-	 * relies on seeing its own publishes as the signal that a namespace
-	 * published successfully.
-	 *
-	 * Only meaningful on lite-04/05, where the peer filters reflected announces
-	 * on request (ANNOUNCE_REQUEST's `Exclude Hop`). Later versions dropped that
-	 * field, so reflected announces are always skipped.
-	 */
-	ignoreSelf?: boolean;
 }
 
 interface SubscribeEntry {
@@ -127,8 +101,7 @@ export class Subscriber {
 	// The version of the connection.
 	readonly version: Version;
 
-	// Shared with the Publisher so callers can optionally filter out their
-	// own announcements on a per-call basis (see {@link AnnouncedOptions}).
+	// Shared with the Publisher so reflected announces can be dropped on receipt.
 	readonly hop: Hop;
 
 	// Our subscribed tracks. `timescale` resolves once known (from TRACK_INFO on
@@ -181,29 +154,23 @@ export class Subscriber {
 	/**
 	 * Subscribe to broadcast announcements under `prefix`.
 	 *
-	 * Pass `{ ignoreSelf: true }` to skip announces that have already traversed
-	 * this connection's {@link origin}.
+	 * Reflected announces (those whose hop chain already includes this
+	 * connection) are always dropped: moq-lite-06 has none to keep, and older
+	 * versions stay consistent with that.
 	 */
-	announced(prefix = Path.empty(), options: AnnouncedOptions = {}): announce.Consumer {
+	announced(prefix = Path.empty()): announce.Consumer {
 		const announced = new announce.Producer(prefix);
-		void this.#runAnnounced(announced, prefix, options);
+		void this.#runAnnounced(announced, prefix);
 		return announced.consume();
 	}
 
-	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid, options: AnnouncedOptions): Promise<void> {
+	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid): Promise<void> {
 		console.debug(`announced: prefix=${prefix}`);
 		// Lite04/05: send our own session-level Hop ID so the peer can skip announces
 		// whose hop chain already passed through us. Encoding drops it on every other
 		// version, where we drop the reflected announce on receipt instead. Matches the
 		// Rust subscriber's `exclude_hop: self.self_origin.id` in `run_announce_prefix`.
 		const msg = new AnnounceRequest(prefix, this.hop);
-
-		// Drop reflected announces so callers asking for "someone else's broadcasts"
-		// don't re-see their own publishes. A caller can always ask for this, and it is
-		// required on versions that don't carry excludeHop above: there the peer isn't
-		// filtering them out for us, so filtering here keeps what the app sees the same
-		// as lite-05. Lite01-03 carry no real hop ids, so the check never matches there.
-		const dropReflected = options.ignoreSelf || !hasExcludeHop(this.version);
 
 		// Opened outside the try so the catch can reach it: a protocol violation below has
 		// to reset the stream, not just close our side of it.
@@ -222,7 +189,7 @@ export class Subscriber {
 
 			// Lite05+: the publisher reports its own Hop ID before any announces.
 			// It no longer stamps itself onto each hop chain, so we append it here to
-			// keep the ignoreSelf loop check seeing the full chain.
+			// keep the reflected-announce loop check seeing the full chain.
 			let responderOrigin: Hop | undefined;
 			if (hasAnnounceOk(this.version)) {
 				const ok = await AnnounceOk.decode(stream.reader, this.version);
@@ -278,7 +245,7 @@ export class Subscriber {
 
 			// Lite06+: announce ids. Each received `active` implicitly assigns the next
 			// per-stream ordinal; `endedId`/`restart` reference it. Tracked even for
-			// announces we skip via ignoreSelf, since the sender doesn't know we skipped.
+			// announces we skip as reflected, since the sender doesn't know we skipped.
 			let nextAnnounceId = 0n;
 			const announcedById = new Map<bigint, Path.Pattern | null>();
 
@@ -388,7 +355,7 @@ export class Subscriber {
 
 				// In Lite05+ the sender's origin arrives via AnnounceOk, not in each hop
 				// list, so fold it back in before checking.
-				if (hops !== undefined && dropReflected) {
+				if (hops !== undefined) {
 					const full = responderOrigin !== undefined ? [...hops, responderOrigin] : hops;
 					if (full.includes(this.hop)) {
 						// A reflected restart means the peer's remaining route loops back through

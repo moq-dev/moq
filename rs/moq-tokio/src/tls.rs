@@ -83,13 +83,6 @@ pub enum Error {
 	)]
 	ConflictingClientAuth,
 
-	#[doc(hidden)]
-	#[deprecated(note = "an in-memory Identity is now supported; pinned peers return PeersUnsupported")]
-	#[error(
-		"the quiche backend cannot use an in-memory Identity or pin client fingerprints; use the quinn or noq backend"
-	)]
-	MemoryUnsupported,
-
 	/// A pinned peer set was configured on a backend that cannot run a rustls verifier.
 	#[error("the quiche backend cannot pin client fingerprints; use the quinn or noq backend")]
 	PeersUnsupported,
@@ -520,7 +513,7 @@ pub struct Connect {
 	/// Danger: Disable TLS certificate verification.
 	///
 	/// Fine for local development and between relays, but should be used in caution in production.
-	#[serde(alias = "disable_verify", skip_serializing_if = "Option::is_none")]
+	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(
 		name = "connect-tls-insecure",
 		long = "connect-tls-insecure",
@@ -531,6 +524,11 @@ pub struct Connect {
 		require_equals = true,
 	)]
 	pub insecure: Option<bool>,
+
+	/// The released `disable_verify` key, kept so [`deprecated`](Self::deprecated) can name [`insecure`](Self::insecure).
+	#[serde(default, skip_serializing)]
+	#[usage(skip)]
+	pub(crate) disable_verify: Option<bool>,
 
 	/// Override the TLS SNI and certificate verification hostname for outbound connections.
 	///
@@ -843,6 +841,9 @@ impl Connect {
 	pub fn deprecated(&self) -> crate::Deprecated {
 		let old = &self.deprecated;
 		let mut found = crate::Deprecated::default();
+		if self.disable_verify.is_some() {
+			found.toml("disable_verify", "insecure", None);
+		}
 
 		for (used, flag, env, new) in [
 			(
@@ -3205,6 +3206,19 @@ mod legacy_tests {
 
 		let tls = parse(&["--connect-tls-root", "/tmp/new.pem"]).connect;
 		assert!(tls.deprecated().is_empty());
+	}
+
+	/// The released TOML key still parses so the process can name `insecure`, but it
+	/// configures nothing.
+	#[test]
+	fn released_disable_verify_key_is_reported_not_applied() {
+		let tls: Connect = toml::from_str("disable_verify = true").expect("parse");
+		assert_eq!(tls.insecure, None);
+		assert!(
+			tls.deprecated().to_string().contains("disable_verify -> insecure"),
+			"{}",
+			tls.deprecated()
+		);
 	}
 
 	/// The released served-identity spellings: the bare `--tls-*` flags and the
