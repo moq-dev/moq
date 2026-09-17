@@ -29,7 +29,7 @@ clock-free estimates from the media span of each emitted batch.
   minimum and the measurement stays at zero, which is correct for something
   that is not live.
 - Call sites: the `moq-video` and `moq-audio` encode producers, the capture
-  path in `moq-cli publish`, `moq-gst`, and `libmoq` (so OBS). `js/publish`
+  path in `moq import capture`, `moq-gst`, and `libmoq` (so OBS). `js/publish`
   mirrors the measurement in the video and audio encoders and replaces its
   fixed `ceil(1000 / framerate)` and frame-duration hints. `container::Producer`
   does not call it on its own.

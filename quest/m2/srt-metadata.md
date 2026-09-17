@@ -4,7 +4,7 @@
 
 The SRT publisher preserves ID3, SCTE-35, private sections, private PES, and
 unknown elementary streams with the same typed `mpegts` catalog and
-byte-faithful tracks as `moq-cli publish --container ts`.
+byte-faithful tracks as `moq import ts`.
 
 ## Plan
 
