@@ -68,7 +68,7 @@ impl Connection {
 	}
 
 	/// Admits and serves this connection until it closes.
-	#[tracing::instrument("conn", skip_all, fields(id = self.id, session = tracing::field::Empty))]
+	#[tracing::instrument("conn", skip_all, fields(id = self.id, remote = self.request.remote_addr().map(tracing::field::display), session = tracing::field::Empty))]
 	pub async fn run(self) -> anyhow::Result<()> {
 		let peer_hop = self.request.peer_hop();
 		let bytes = moq_auth::Counters::default();

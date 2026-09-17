@@ -1,6 +1,7 @@
 use futures::{Sink, Stream};
 use qmux::ws::tungstenite;
 use std::{
+	net::SocketAddr,
 	pin::Pin,
 	sync::{Arc, atomic::Ordering},
 	task::{Context, Poll},
@@ -78,6 +79,7 @@ pub(crate) async fn serve_ws(
 		let socket = WebSocketAdapter::new(socket);
 		let session = SessionInputs {
 			id,
+			remote: remote.0,
 			alpn,
 			versions,
 			publish,
@@ -92,6 +94,7 @@ pub(crate) async fn serve_ws(
 
 struct SessionInputs {
 	id: u64,
+	remote: SocketAddr,
 	alpn: Option<String>,
 	versions: moq_net::Versions,
 	publish: Option<origin::Producer>,
@@ -103,7 +106,7 @@ struct SessionInputs {
 }
 
 /// Serve one upgraded WebSocket until it closes or its lease ends.
-#[tracing::instrument("ws", err, skip_all, fields(id = session.id))]
+#[tracing::instrument("ws", err, skip_all, fields(id = session.id, remote = %session.remote))]
 async fn handle_socket<T>(
 	socket: T,
 	session: SessionInputs,
@@ -120,6 +123,7 @@ where
 {
 	let SessionInputs {
 		id: _,
+		remote: _,
 		alpn,
 		versions,
 		publish,
@@ -926,6 +930,7 @@ mod tests {
 
 		let session = SessionInputs {
 			id: 0,
+			remote: "127.0.0.1:0".parse().unwrap(),
 			alpn: Some(alpn.clone()),
 			versions: moq_net::Versions::all(),
 			publish: None,
