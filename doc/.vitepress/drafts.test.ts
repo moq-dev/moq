@@ -51,9 +51,15 @@ describe("kramdown constructs are translated", () => {
 });
 
 describe("front-matter notes render", () => {
-	test.each(pages.map((p) => [p.name, p] as const))("%s", (_name, page) => {
-		// Every draft carries the AI attribution note. Without a translator case
-		// the marker line would land in the abstract as literal text.
+	const noted = pages.filter((p) => /^--- note_/m.test(source(p)));
+
+	test("at least one draft carries a note", () => {
+		expect(noted.length).toBeGreaterThan(0);
+	});
+
+	test.each(noted.map((p) => [p.name, p] as const))("%s", (_name, page) => {
+		// Without a translator case the marker line would land in the abstract
+		// as literal text.
 		expect(content(page)).toInclude("\n## Note to Readers\n");
 		expect(html(page)).toInclude('<h2 id="note-to-readers"');
 	});
