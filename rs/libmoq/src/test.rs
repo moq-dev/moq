@@ -2249,6 +2249,26 @@ fn track_demand_follows_subscribers() {
 }
 
 #[test]
+fn track_demand_reports_current_state_before_close() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"track-demand-close");
+	let name = b"data";
+	let track =
+		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+
+	// Close before the watcher task is polled still seeds UNUSED, then the terminal.
+	let demand_cb = Callback::new();
+	let watcher = id(unsafe { moq_publish_track_demand(track, Some(channel_callback), demand_cb.ptr) });
+	assert_eq!(moq_publish_demand_close(watcher), 0);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNUSED as i32);
+	assert_eq!(demand_cb.recv_terminal(), 0);
+
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
 fn track_demand_reports_an_abort() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"track-demand-abort");
@@ -2501,10 +2521,13 @@ fn track_dynamic_serves_a_fetch_miss() {
 	let request = id(group_cb.recv());
 	let mut sequence = 0u64;
 	let mut priority = 0u8;
+	let mut frame_start = 1u64;
 	assert_eq!(unsafe { moq_group_request_sequence(request, &mut sequence) }, 0);
 	assert_eq!(unsafe { moq_group_request_priority(request, &mut priority) }, 0);
+	assert_eq!(unsafe { moq_group_request_frame_start(request, &mut frame_start) }, 0);
 	assert_eq!(sequence, 5);
 	assert_eq!(priority, 11);
+	assert_eq!(frame_start, 0);
 
 	let group = id(moq_group_request_accept(request));
 	assert!(moq_group_request_free(request) < 0, "accept consumes the request");
@@ -2525,6 +2548,74 @@ fn track_dynamic_serves_a_fetch_miss() {
 		.unwrap()
 		.expect_err("a rejected fetch fails");
 	assert!(matches!(err, moq_net::Error::App(9)), "got {err:?}");
+
+	assert_eq!(moq_publish_dynamic_close(dynamic), 0);
+	assert_eq!(group_cb.recv_terminal(), 0);
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Fetch one group of a published track from `frame_start`, returning the consumer's
+/// index at resolve and the first frame's payload.
+fn fetch_group_from(
+	broadcast: u32,
+	name: &str,
+	sequence: u64,
+	priority: u8,
+	frame_start: u64,
+) -> mpsc::Receiver<Result<(u64, Vec<u8>), moq_net::Error>> {
+	let consumer = State::lock()
+		.publish
+		.producer(Id::try_from(broadcast).unwrap())
+		.unwrap()
+		.consume();
+	let name = name.to_string();
+	let (tx, rx) = mpsc::channel();
+	crate::ffi::RUNTIME.spawn(async move {
+		let res = async {
+			let track = consumer.track(&name)?;
+			let options = moq_net::group::Fetch::default()
+				.with_priority(priority)
+				.with_frame_start(frame_start);
+			let mut group = track.fetch_group(sequence, options).await?;
+			let index = group.index();
+			let frame = group.read_frame().await?.expect("expected a fetched frame");
+			Ok((index, frame.payload.to_vec()))
+		}
+		.await;
+		let _ = tx.send(res);
+	});
+	rx
+}
+
+#[test]
+fn track_dynamic_serves_a_fetch_from_frame_start() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"track-dynamic-frame-start");
+	let name = b"data";
+	let track =
+		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+
+	let group_cb = Callback::new();
+	let dynamic = id(unsafe { moq_publish_track_dynamic(track, Some(channel_callback), group_cb.ptr) });
+
+	let fetch = fetch_group_from(broadcast, "data", 5, 0, 3);
+	let request = id(group_cb.recv());
+	let mut frame_start = 0u64;
+	assert_eq!(unsafe { moq_group_request_frame_start(request, &mut frame_start) }, 0);
+	assert_eq!(frame_start, 3);
+
+	let group = id(moq_group_request_accept(request));
+	let payload = b"tail";
+	assert_eq!(
+		unsafe { moq_publish_group_frame(group, payload.as_ptr(), payload.len(), 100_000) },
+		0
+	);
+	assert_eq!(moq_publish_group_finish(group), 0);
+	let (index, got) = fetch.recv_timeout(TIMEOUT).unwrap().unwrap();
+	assert_eq!(index, 3, "the consumer resumes at the requested frame");
+	assert_eq!(got, payload);
 
 	assert_eq!(moq_publish_dynamic_close(dynamic), 0);
 	assert_eq!(group_cb.recv_terminal(), 0);

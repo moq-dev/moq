@@ -86,6 +86,7 @@ int32_t moq_track_request_abort(uint32_t request, uint16_t error_code);
 int32_t moq_track_request_free(uint32_t request);
 int32_t moq_group_request_sequence(uint32_t request, uint64_t *dst);
 int32_t moq_group_request_priority(uint32_t request, uint8_t *dst);
+int32_t moq_group_request_frame_start(uint32_t request, uint64_t *dst);
 int32_t moq_group_request_accept(uint32_t request);
 int32_t moq_group_request_abort(uint32_t request, uint16_t error_code);
 int32_t moq_group_request_free(uint32_t request);

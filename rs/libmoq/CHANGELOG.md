@@ -16,8 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Track requests: `moq_publish_dynamic` serves subscriptions to undeclared tracks as
   `moq_track_request_*` handles (`name`, `accept`, `video`, `audio`, `abort`, `free`).
   Group requests: `moq_publish_track_dynamic` and `moq_track_request_dynamic` serve fetches
-  of uncached groups as `moq_group_request_*` handles (`sequence`, `priority`, `accept`,
-  `abort`, `free`). Both handlers close with `moq_publish_dynamic_close`.
+  of uncached groups as `moq_group_request_*` handles (`sequence`, `priority`, `frame_start`,
+  `accept`, `abort`, `free`). `accept` positions the producer at `frame_start`. Both
+  handlers close with `moq_publish_dynamic_close`.
 - `moq_error_protocol` fills a `moq_protocol_error` (scope, verbatim wire code, kind) for
   the last protocol failure on this thread. Do not parse `moq_error()` for that. Local
   `Unauthorized` still returns status -34; a session-scoped unauthorized protocol close is

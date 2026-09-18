@@ -416,11 +416,11 @@ impl Publish {
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		// Neither handle exposes the current state, only the level-triggered waits, and exactly
-		// one of them is ready at any instant: racing them is the read. A dropped track is its
-		// end, not a failure; the watcher does not keep it alive and reports the close as clean.
+		// one of them is ready at any instant: racing them is the read. Close is ignored until
+		// that seed is delivered, so a watcher closed before its first poll still reports USED
+		// or UNUSED before the terminal. A dropped track is its end, not a failure; the watcher
+		// does not keep it alive and reports the close as clean.
 		let mut used = tokio::select! {
-			biased;
-			_ = &mut close => return Ok(()),
 			res = demand.used() => match res {
 				Ok(()) => true,
 				Err(moq_net::Error::Dropped) => return Ok(()),
@@ -620,16 +620,24 @@ impl Publish {
 		Ok(())
 	}
 
-	/// The sequence and priority of a requested group.
-	pub fn group_request_info(&self, request: Id) -> Result<(u64, u8), Error> {
+	/// The sequence, priority, and first frame of a requested group.
+	pub fn group_request_info(&self, request: Id) -> Result<(u64, u8, u64), Error> {
 		let request = self.group_request.get(request).ok_or(Error::NotFound)?;
-		Ok((request.sequence(), request.priority()))
+		Ok((request.sequence(), request.priority(), request.frame_start()))
 	}
 
 	/// Accept a group request, returning a group handle like [`Self::track_group`].
+	///
+	/// The producer is positioned at the request's `frame_start` so frames keep the
+	/// indices they have in the group rather than restarting at 0.
 	pub fn group_request_accept(&mut self, request: Id) -> Result<Id, Error> {
 		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
-		let group = request.accept(None)?;
+		let frame_start = request.frame_start();
+		let mut group = request.accept(None)?;
+		if let Err(err) = group.start_at(frame_start) {
+			let _ = group.abort(err.clone());
+			return Err(err.into());
+		}
 		self.groups.insert(group)
 	}
 

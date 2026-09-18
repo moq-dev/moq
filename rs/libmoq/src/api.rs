@@ -2562,11 +2562,33 @@ pub unsafe extern "C" fn moq_group_request_priority(request: u32, dst: *mut u8) 
 	})
 }
 
+/// The first frame of the group the fetch wants; 0 is the whole group.
+///
+/// [moq_group_request_accept] positions the returned producer here, so frames you
+/// write keep the indices they have in the group rather than restarting at 0. Read
+/// this to know which frames to fetch from storage.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - `dst` must point at a writable `uint64_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_group_request_frame_start(request: u32, dst: *mut u64) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		*dst = State::lock().publish.group_request_info(request)?.2;
+		Ok(())
+	})
+}
+
 /// Accept a group request, resolving the waiting fetches with the group you then fill.
 ///
-/// Consumes the request handle. Returns a non-zero group handle usable with
-/// [moq_publish_group_frame] and [moq_publish_group_finish], or a negative code on
-/// failure, including when the group is already cached.
+/// Consumes the request handle. The returned producer starts at
+/// [moq_group_request_frame_start], so the first frame you write lands at that
+/// index. Returns a non-zero group handle usable with [moq_publish_group_frame]
+/// and [moq_publish_group_finish], or a negative code on failure, including when
+/// the group is already cached.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_group_request_accept(request: u32) -> i32 {
 	ffi::enter(move || {

@@ -39,7 +39,3 @@ through an origin, drop the consumer, and assert the source producer's
 
 Public API: none. Wire: none. Behavior: upstream subscriptions end when the
 last reader leaves instead of 30 s later.
-
-## Related
-
-- [Track demand](/quest/m1/libmoq-track-demand.md) - the C ABI watchers that first measured the 30 s delay

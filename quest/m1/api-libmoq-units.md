@@ -52,4 +52,3 @@ Public API: breaking on libmoq's C ABI, so on dev. Wire: none. Consumers:
 ## Related
 
 - [Binding parity](/quest/m2/binding-parity.md) - the uniffi wrappers' half
-- [Track demand](/quest/m1/libmoq-track-demand.md) - lands on the same header
