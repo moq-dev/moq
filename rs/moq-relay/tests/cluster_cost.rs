@@ -36,6 +36,13 @@ struct LogSink(Arc<Mutex<Vec<u8>>>);
 impl std::io::Write for LogSink {
 	fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
 		self.0.lock().expect("log sink poisoned").extend_from_slice(buf);
+		// `CLUSTER_COST_LOG=<path>` also streams the log to a file, for a run
+		// the harness kills before an assertion can dump it.
+		if let Ok(path) = std::env::var("CLUSTER_COST_LOG")
+			&& let Ok(mut file) = std::fs::OpenOptions::new().append(true).create(true).open(path)
+		{
+			let _ = file.write_all(buf);
+		}
 		Ok(buf.len())
 	}
 
@@ -228,8 +235,14 @@ async fn subscribe(relay: &RelayHost) -> Subscriber {
 			loop {
 				let mut group = match track.recv_group().await {
 					Ok(Some(group)) => group,
-					Ok(None) => panic!("track finished under the test"),
-					Err(err) => panic!("track failed under the test: {err}"),
+					Ok(None) => {
+						tracing::error!("test subscriber: track finished under the test");
+						return;
+					}
+					Err(err) => {
+						tracing::error!(%err, "test subscriber: track failed under the test");
+						return;
+					}
 				};
 				while let Ok(Some(_frame)) = group.read_frame().await {
 					frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -306,11 +319,10 @@ async fn triangle(ids: [u64; 3], direct: Profile) -> Triangle {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn lossy_direct_edge_is_routed_around() {
 	let cluster = triangle([11, 12, 13], Profile::rtt(Duration::from_millis(110)).with_loss(0.01)).await;
-	// The cluster's first announcements travel over whichever links came up
-	// first and settle onto the direct link once every price has landed. A
-	// subscriber that attaches during that shuffle pins a copy on the losing
-	// route, so wait it out before measuring anything.
-	tokio::time::sleep(Duration::from_secs(5)).await;
+	// The clients attach while the first announcements still travel over
+	// whichever links came up first, so the route shuffles a few times before it
+	// settles: each shuffle caps the copy it leaves and lifts the cap on the one
+	// it returns to, which is the handover that used to wedge the whole chain.
 	let _publisher = publish(&cluster.sjc).await;
 	let mut subscriber = subscribe(&cluster.nyc).await;
 
@@ -376,7 +388,6 @@ async fn lossy_direct_edge_is_routed_around() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn clean_direct_edge_stays_direct() {
 	let cluster = triangle([21, 22, 23], Profile::rtt(Duration::from_millis(110))).await;
-	tokio::time::sleep(Duration::from_secs(5)).await;
 	let _publisher = publish(&cluster.sjc).await;
 	let mut subscriber = subscribe(&cluster.nyc).await;
 
