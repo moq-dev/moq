@@ -16,4 +16,5 @@ rather than holding the merge.
 
 ## Quests
 
+- [Idle consumer](/quest/m0/origin-idle-consumer.md) - moq-net: an origin front drops the source's track when its last reader leaves, so upstream and producer demand end then, not 30 s later
 - [Connect auth race](/quest/m0/3532-connect-auth-race.md) - moq-tokio: a 403 on the WebSocket arm no longer fails a connect whose QUIC arm is still in flight

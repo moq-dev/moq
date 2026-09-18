@@ -45,11 +45,16 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 
 ## Quests
 
+- [Origin narrowing](/quest/m2/origin-narrowing.md) - a live origin grant narrows in place and ends the subscriptions it no longer covers, the deafen boundary #2714 asked for
 - [Binding audio tests](/quest/m2/binding-audio-tests.md) - every binding proves the Opus frame duration and throwing setters it exposes, and smoke-full publishes audio with an explicit config
 - [Decode format](/quest/m2/ffi-decode-format.md) - the C-only decode pixel format knob reaches every uniffi binding
 - [JSON mutate](/quest/m2/json-mutate.md) - Rust gains the closure edit JS already has, beside the guard
 - [0.0.x crate names](/quest/m2/api-unreleased-crate-names.md) - moq-sock, moq-uring, moq-archive, and moq-e2ee follow the naming rules after the merge
 - [Publisher clocks](/quest/m2/publisher-clock.md) - wire the shared clock through native and browser publisher restarts
+- [Broadcast route](/quest/m2/js-broadcast-route.md) - JS Announce.Broadcast goes live on any claim matching its path, like Rust routed()
+- [io_uring check](/quest/m2/check-uring-feature.md) - a moq-relay diff compiles the io-uring-quinn feature in `just check`, not only nightly
+- [Flaky timing tests](/quest/m2/flaky-timing-tests.md) - three real-clock tests become deterministic instead of failing under load
+- [Binding stats docs](/quest/m2/binding-stats-docs.md) - every binding's doc page lists its connection stats fields with units
 
 - [Audio jitter target](/quest/m2/audio-jitter-target/README.md) - the audio playout target is a measured estimate of arrival timing in both languages, not a round-trip guess
 - [A/V clock](/quest/m2/plan-av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
