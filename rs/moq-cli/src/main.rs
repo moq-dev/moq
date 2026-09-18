@@ -241,7 +241,7 @@ async fn serve_client(
 		request = request.with_subscriber(subscribe);
 	}
 	let session = request.ok().await?;
-	moq_relay::supervise(session, lease, bytes, moq_relay::shutdown::Observer::disabled()).await
+	moq_relay::supervise(session, lease, bytes, moq_relay::shutdown::Observer::disabled(), None).await
 }
 
 /// Whether ordinary clients may use this transport on the shared LAN server.

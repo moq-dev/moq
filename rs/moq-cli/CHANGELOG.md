@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `moq auth sessions` and `moq auth revalidate` list or nudge live sessions on a relay's internal listener
 - `--cluster-lan-app` names the DNS-SD application the LAN mesh advertises under
 - `--cluster-connect`, `--cluster-connect-api`, `--cluster-node`, `--cluster-mesh`, `--cluster-token`, `--cluster-id`, and `--cluster-tier` match `moq-relay`
 
