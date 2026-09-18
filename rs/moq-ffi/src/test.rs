@@ -4009,3 +4009,90 @@ async fn request_origin_setters_cancelled_after_cancel() {
 	let _ = tokio::time::timeout(TIMEOUT, connect).await;
 	server.cancel();
 }
+
+/// Stopping the runtime is process-wide, so the scenario runs in a child test process: this
+/// test re-runs its own binary filtered to itself with the marker set, and judges the exit.
+#[tokio::test]
+async fn shutdown_cancels_and_drops_cleanly() {
+	const MARKER: &str = "MOQ_FFI_TEST_SHUTDOWN_CHILD";
+	if std::env::var_os(MARKER).is_none() {
+		let status = std::process::Command::new(std::env::current_exe().unwrap())
+			.args(["--exact", "test::shutdown_cancels_and_drops_cleanly"])
+			.env(MARKER, "1")
+			.status()
+			.expect("failed to spawn the child test process");
+		assert!(status.success(), "child test process failed: {status}");
+		return;
+	}
+
+	let server_origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let server = MoqServer::new();
+	server.set_bind("127.0.0.1:0".into()).unwrap();
+	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	server.set_publish(Some(server_origin.clone())).unwrap();
+	let addr = tokio::time::timeout(TIMEOUT, server.listen())
+		.await
+		.expect("listen timed out")
+		.expect("listen failed");
+
+	let accept_server = server.clone();
+	let accept = tokio::spawn(async move {
+		let request = accept_server.accept().await.unwrap().expect("accept returned None");
+		request.accept().await.expect("handshake failed")
+	});
+
+	let client_origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let client = MoqClient::new();
+	client.set_tls_disable_verify(true).unwrap();
+	client.set_consume(Some(client_origin.clone())).unwrap();
+	let session = tokio::time::timeout(TIMEOUT, client.connect(format!("https://{addr}")))
+		.await
+		.expect("connect timed out")
+		.expect("connect failed");
+	let server_session = tokio::time::timeout(TIMEOUT, accept)
+		.await
+		.expect("accept timed out")
+		.expect("accept task panicked");
+
+	// A track with no frames, so the read parks on the runtime.
+	let broadcast = create_announced(&server_origin, "hello");
+	let track = broadcast.publish_track("data".into(), None).unwrap();
+	let consumer = client_origin.consume();
+	let bc = await_announced(&consumer, "hello").await;
+	let subscriber = tokio::time::timeout(TIMEOUT, bc.subscribe_track("data".into(), None))
+		.await
+		.expect("subscribe timed out")
+		.expect("subscribe failed");
+	let parked = spawn_parked({
+		let subscriber = subscriber.clone();
+		async move { subscriber.read_frame().await }
+	})
+	.await;
+
+	crate::moq_ffi_shutdown();
+	// Idempotent: the thread is already gone.
+	crate::moq_ffi_shutdown();
+
+	let parked = tokio::time::timeout(TIMEOUT, parked)
+		.await
+		.expect("the parked read never resolved")
+		.expect("the read task panicked");
+	assert!(matches!(parked, Err(MoqError::Cancelled)));
+	assert!(matches!(subscriber.read_frame().await, Err(MoqError::Cancelled)));
+	let closed = session.closed().await;
+	assert!(matches!(closed, Err(MoqError::Cancelled)), "{closed:?}");
+
+	// The interpreter frees these in an arbitrary order during finalization. The session's
+	// transport close spawns onto the dead runtime, which must be dropped rather than a panic.
+	drop(track);
+	drop(broadcast);
+	drop(subscriber);
+	drop(bc);
+	drop(consumer);
+	drop(session);
+	drop(server_session);
+	drop(client);
+	drop(server);
+	drop(client_origin);
+	drop(server_origin);
+}

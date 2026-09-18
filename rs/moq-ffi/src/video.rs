@@ -284,7 +284,7 @@ impl MoqVideoProducer {
 	/// A backend that pipelines publishes an earlier frame's output here, so a
 	/// call that emits nothing on the wire is normal rather than an error.
 	pub fn write(&self, frame: MoqVideoFrame) -> Result<(), MoqError> {
-		let _guard = crate::ffi::RUNTIME.enter();
+		let _guard = crate::ffi::runtime().enter();
 		let mut guard = self.inner.lock().unwrap();
 		let producer = guard.as_mut().ok_or(MoqError::Closed)?;
 		producer.write(frame)
@@ -328,7 +328,7 @@ impl MoqVideoProducer {
 	/// encoder keeps running at its current rate, so stop adapting rather than
 	/// stop publishing.
 	pub fn set_bitrate(&self, bitrate: u64) -> Result<(), MoqError> {
-		let _guard = crate::ffi::RUNTIME.enter();
+		let _guard = crate::ffi::runtime().enter();
 		{
 			let mut guard = self.inner.lock().unwrap();
 			let producer = guard.as_mut().ok_or(MoqError::Closed)?;
@@ -359,7 +359,7 @@ impl MoqVideoProducer {
 
 	/// Flush any frames the codec is still holding and finalize the track.
 	pub fn finish(&self) -> Result<(), MoqError> {
-		let _guard = crate::ffi::RUNTIME.enter();
+		let _guard = crate::ffi::runtime().enter();
 		let producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
 		// Stop following and release the share before draining, so siblings can
 		// take the room while the last frames go out.
@@ -391,7 +391,7 @@ impl MoqBroadcastProducer {
 		output: MoqVideoEncoderOutput,
 		bandwidth: Option<Arc<MoqBandwidth>>,
 	) -> Result<Arc<MoqVideoProducer>, MoqError> {
-		let _guard = crate::ffi::RUNTIME.enter();
+		let _guard = crate::ffi::runtime().enter();
 
 		let mut config = moq_video::encode::Config::new(input.width, input.height, input.framerate);
 		config.codec = output.codec.into();
