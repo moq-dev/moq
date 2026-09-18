@@ -1,4 +1,11 @@
-use std::{sync::Arc, task::Poll, time::Duration};
+use std::{
+	sync::{
+		Arc,
+		atomic::{AtomicU64, Ordering},
+	},
+	task::Poll,
+	time::Duration,
+};
 
 use web_transport_trait::Stats;
 
@@ -12,7 +19,8 @@ struct Close {
 }
 
 /// What the protocol tasks share with the handle about the link itself: this
-/// end's egress price and where the peer's declared identity can be read.
+/// end's egress price, where the peer's declared identity can be read, and what
+/// this end has served over it.
 #[derive(Clone)]
 pub(crate) struct Link {
 	/// This end's egress price, folded into the cost of every route advertised
@@ -20,14 +28,36 @@ pub(crate) struct Link {
 	pub egress: kio::Shared<u64>,
 	/// The peer's SETUP, per protocol, for [`Session::peer_hop`].
 	pub peer: PeerSlot,
+	/// Groups and payload served to the peer, on the wires this crate counts.
+	pub served: Option<Arc<Served>>,
 }
 
 impl Link {
-	pub fn new(peer: PeerSlot) -> Self {
+	pub fn new(peer: PeerSlot, served: Option<Arc<Served>>) -> Self {
 		Self {
 			egress: kio::Shared::new(0),
 			peer,
+			served,
 		}
+	}
+}
+
+/// Running totals of what a session's publisher half has sent.
+#[derive(Default)]
+pub(crate) struct Served {
+	/// Groups whose stream was opened toward the peer.
+	pub groups: AtomicU64,
+	/// Payload bytes handed to the transport for those groups.
+	pub bytes: AtomicU64,
+}
+
+impl Served {
+	pub fn group(&self) {
+		self.groups.fetch_add(1, Ordering::Relaxed);
+	}
+
+	pub fn bytes(&self, n: usize) {
+		self.bytes.fetch_add(n as u64, Ordering::Relaxed);
 	}
 }
 
@@ -67,6 +97,15 @@ pub struct ConnectionStats {
 	///
 	/// `None` unless the negotiated version supports PROBE (moq-lite-03+).
 	pub estimated_recv_rate: Option<u64>,
+
+	/// Groups this session has served to the peer, counted by MoQ rather than the
+	/// transport, so a sender can tell how big the groups crossing the link are.
+	///
+	/// `None` on moq-transport, which this crate does not count yet.
+	pub groups_sent: Option<u64>,
+
+	/// Payload bytes of [`groups_sent`](Self::groups_sent), headers excluded.
+	pub payload_sent: Option<u64>,
 
 	/// Total bytes sent over the connection, including retransmissions and overhead.
 	pub bytes_sent: Option<u64>,
@@ -158,6 +197,10 @@ impl Session {
 			.as_ref()
 			.and_then(bandwidth::Consumer::peek)
 			.map(bandwidth::Rate::as_bps);
+		if let Some(served) = &self.link.served {
+			stats.groups_sent = Some(served.groups.load(Ordering::Relaxed));
+			stats.payload_sent = Some(served.bytes.load(Ordering::Relaxed));
+		}
 		stats
 	}
 

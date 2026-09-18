@@ -39,6 +39,8 @@ pub(super) struct PublisherConfig<S: crate::transport::poll::Session, R: crate::
 	/// This end's egress price, added to every advertised cost. See
 	/// [`crate::Session::set_egress`].
 	pub egress: kio::Shared<u64>,
+	/// Where served groups and payload are counted for [`crate::Session::stats`].
+	pub served: Arc<crate::session::Served>,
 }
 
 /// Context shared by every control-stream child.
@@ -63,6 +65,7 @@ struct Shared<S: crate::transport::poll::Session> {
 	goaway: crate::goaway::Protocol,
 	// This end's egress price; every announce stream re-prices when it moves.
 	egress: kio::Shared<u64>,
+	served: Arc<crate::session::Served>,
 }
 
 /// Largest millisecond duration every implementation can carry losslessly.
@@ -162,6 +165,7 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> Publisher<S
 				version: config.version,
 				goaway: config.goaway,
 				egress: config.egress,
+				served: config.served,
 			}),
 			runtime: config.runtime,
 			accept,
@@ -1294,6 +1298,7 @@ impl<S: crate::transport::poll::Session> SubscribeServe<S> {
 						id: msg.id,
 						track_name: Arc::from(track.name()),
 						priority: self.shared.priority.clone(),
+						served: self.shared.served.clone(),
 						track_priority: track_priority_tx.consume(),
 						track_priority_seen: msg.priority,
 						version: self.shared.version,
@@ -2450,6 +2455,7 @@ struct Subscription<S: crate::transport::poll::Session> {
 	id: u64,
 	track_name: Arc<str>,
 	priority: PriorityQueue,
+	served: Arc<crate::session::Served>,
 	track_priority: kio::Consumer<u8>,
 	/// Last track priority observed by this clone, so a change only fires once.
 	track_priority_seen: u8,
@@ -2654,6 +2660,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 
 						let frame_start = group.index();
 						tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "serving group");
+						self.ctx.served.group();
 
 						// Use the latest priority for new groups so SUBSCRIBE_UPDATE applies to them too.
 						let current_priority = self.ctx.track_priority_current();
@@ -2855,7 +2862,10 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 								}
 							} else if let Some(pending) = frame {
 								match pending.poll_read_chunk(waiter) {
-									Poll::Ready(Ok(Some(next))) => *chunk = Some(next),
+									Poll::Ready(Ok(Some(next))) => {
+										self.ctx.served.bytes(next.len());
+										*chunk = Some(next);
+									}
 									Poll::Ready(Ok(None)) => *frame = None,
 									Poll::Ready(Err(err)) => break 'serve Err(err),
 									Poll::Pending => return Poll::Pending,
@@ -2874,6 +2884,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 								}
 								let payload = std::mem::take(&mut batched.payload);
 								if !payload.is_empty() {
+									self.ctx.served.bytes(payload.len());
 									*chunk = Some(payload);
 								}
 								*batch_pos += 1;
@@ -3083,6 +3094,7 @@ mod serve_group_test {
 
 		let track_priority = kio::Producer::new(0u8);
 		let subscription = Subscription {
+			served: Default::default(),
 			session,
 			id: 0,
 			track_name: "test".into(),
@@ -3123,6 +3135,7 @@ mod serve_group_test {
 		let log = session.log.clone();
 		let track_priority = kio::Producer::new(0u8);
 		let subscription = Subscription {
+			served: Default::default(),
 			session,
 			id: 0,
 			track_name: "test".into(),
@@ -3167,6 +3180,7 @@ mod serve_group_test {
 		let log = session.log.clone();
 		let track_priority = kio::Producer::new(0u8);
 		let subscription = Subscription {
+			served: Default::default(),
 			session,
 			id: 0,
 			track_name: "test".into(),
@@ -3229,6 +3243,7 @@ mod serve_group_test {
 		let session = SinkSession::gated_open_uni(gate.consume());
 		let track_priority = kio::Producer::new(0u8);
 		let subscription = Subscription {
+			served: Default::default(),
 			session,
 			id: 0,
 			track_name: "test".into(),
@@ -3298,6 +3313,7 @@ mod serve_group_test {
 
 		let track_priority = kio::Producer::new(0u8);
 		let subscription = Subscription {
+			served: Default::default(),
 			session,
 			id: 0,
 			track_name: "test".into(),
@@ -3385,6 +3401,7 @@ mod tests {
 			goaway,
 			peer_hop: Some(assigned),
 			egress: kio::Shared::new(0),
+			served: Default::default(),
 		});
 
 		let serving = kio::wait(|waiter| publisher.shared.poll_serving_origin(waiter)).await;
@@ -3488,6 +3505,7 @@ mod tests {
 			goaway,
 			peer_hop: None,
 			egress: kio::Shared::new(0),
+			served: Default::default(),
 		});
 		ProbeServe::new(publisher.shared.clone(), publisher.runtime.clone(), stream)
 	}

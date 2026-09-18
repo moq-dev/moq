@@ -115,7 +115,7 @@ where
 		None if !cluster::supported(version) => peer_setup.set(peer::Peer::default()),
 		None => {}
 	}
-	let link = crate::session::Link::new(crate::session::PeerSlot::Ietf(peer_setup.clone()));
+	let link = crate::session::Link::new(crate::session::PeerSlot::Ietf(peer_setup.clone()), None);
 	let egress = link.egress.clone();
 
 	let driver = async move {

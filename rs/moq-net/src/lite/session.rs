@@ -169,10 +169,14 @@ where
 
 	// Versions without a Setup Stream never learn the peer's identity, so the
 	// handle must not wait on one.
-	let link = crate::session::Link::new(match version.has_setup_stream() {
-		true => crate::session::PeerSlot::Lite(peer_setup.clone()),
-		false => crate::session::PeerSlot::None,
-	});
+	let served = std::sync::Arc::new(crate::session::Served::default());
+	let link = crate::session::Link::new(
+		match version.has_setup_stream() {
+			true => crate::session::PeerSlot::Lite(peer_setup.clone()),
+			false => crate::session::PeerSlot::None,
+		},
+		Some(served.clone()),
+	);
 
 	let publisher = Publisher::new(PublisherConfig {
 		runtime: runtime.clone(),
@@ -183,6 +187,7 @@ where
 		goaway: goaway.clone(),
 		peer_hop,
 		egress: link.egress.clone(),
+		served,
 	});
 	let subscriber = Subscriber::new(SubscriberConfig {
 		session: session.clone(),
