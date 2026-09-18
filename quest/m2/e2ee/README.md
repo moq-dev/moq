@@ -4,7 +4,7 @@
 
 TypeScript and Rust publishers and subscribers interoperate over encrypted MoQ broadcasts while every relay, cache, and control plane remains unable to recover content.
 
-Every application payload and semantic track name is confidential and authenticated. MoQ still exposes the outer broadcast path including the epoch, opaque physical track names, group and frame structure, timestamps, sizes, and traffic patterns; padding and metadata-flow confidentiality are out of scope.
+Every application payload and semantic track name is confidential and authenticated. MoQ still exposes the outer broadcast path (an opaque name and the epoch), opaque physical track names, group and frame structure, timestamps, sizes, and traffic patterns; padding and metadata-flow confidentiality are out of scope.
 
 ## Plan
 
@@ -19,9 +19,9 @@ The contract is [draft-lcurley-moq-e2ee](/drafts/draft-lcurley-moq-e2ee.md), pro
 
 ### Epoch and identity
 
-- Every publisher instance mints an epoch, a UUIDv7 in lowercase text, and publishes at `<name>.e2ee/<epoch>`. The epoch is an input to every HKDF derivation, so a restart, takeover, or explicit group sequence cannot repeat a nonce under a key: nothing is persisted across instances and no generation counter is redistributed. Subscribers discover instances under the `<name>.e2ee/` prefix and take the greatest epoch, which sorts newest; a known full path carries its epoch in the last segment.
+- Every publisher instance mints an epoch, a UUIDv7 in lowercase text, and publishes at `<opaque>/<epoch>`, where `<opaque>` derives from the credential and the semantic broadcast name without the epoch ([Opaque broadcast path](/quest/m2/e2ee/path.md)). The epoch is an input to every HKDF derivation, so a restart, takeover, or explicit group sequence cannot repeat a nonce under a key: nothing is persisted across instances and no generation counter is redistributed. Subscribers discover instances under the `<opaque>/` prefix and take the greatest epoch, which sorts newest; a known full path carries its epoch in the last segment.
 - The epoch is untrusted and unauthenticated. A wrong epoch fails authentication and a withheld one denies service; neither can make a nonce repeat, because only the publisher instance chooses what it encrypts under. This is the same trust a cache needs to serve the right instance, and it is deliberately e2ee-only: plaintext hang keeps its current paths.
-- A protected path never ends in `.hang`. The plaintext format sits inside the name, as in `meeting.hang.e2ee/<epoch>`, so `**/*.hang` matchers, HLS and DASH export, and any plaintext player never touch ciphertext; everything under a `.e2ee` node is protected.
+- Nothing in the path says the bytes are encrypted. The format after decryption (`meeting.hang`) is inside the opaque name; a plaintext player, exporter, or matcher that opens a protected broadcast finds no catalog it can read and fails with its usual typed refusal, the same as for any format it does not support.
 - One 32-byte secret authorizes the whole broadcast; HKDF-SHA-256 derives separate AES-128-GCM keys for each physical track and for grouped-frame versus datagram domains. A grouped frame uses the 96-bit nonce `uint64_be(group) || uint32_be(frame)`; a datagram uses its sequence with frame zero under the datagram domain. Empty AAD: every immutable end-to-end field is in the HKDF info or the nonce.
 - Within an instance, group and datagram sequences are allocated monotonically and frames are numbered in write order, which is the whole reuse rule. There is no ciphertext retention or retransmission API: relays forward bytes unchanged, and an application that needs to resend encrypts nothing twice because it never gets the same identity twice.
 - Per-key limits are `2^24` AEAD invocations (failed opens included) and `2^36` plaintext bytes. Datagram plaintext is capped at `1200 - 24 - 16` bytes against the widest moq-lite header; a publisher cannot see the Subscribe ID each hop encodes, so the library does not pretend to budget it.
@@ -39,11 +39,13 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 ### Application and platform shape
 
 - Deterministic secret-derived physical names hide catalog, codec, role, quality, timeline, and custom-track semantics. Authorized clients derive the encrypted catalog track name, then learn the remaining opaque names from its decrypted contents. Every catalog representation is encrypted; Rust publishers must not emit a plaintext MSF catalog.
-- A platform that forwards and meters protected bytes must never preview, record, archive, transmux, transcode, transcribe, compose, or inspect them, rejecting those paths before opening a processing session or writing product state. Applications needing those operations terminate E2EE outside the platform. The moq.pro (downstream) exclusion classifier and dashboard work build on the `.e2ee` rule and stay downstream.
+- A platform that forwards and meters protected bytes must never preview, record, archive, transmux, transcode, transcribe, compose, or inspect them, rejecting those paths before opening a processing session or writing product state. Applications needing those operations terminate E2EE outside the platform. A platform classifies protected broadcasts by its own credential or product state, never by name; the moq.pro (downstream) exclusion classifier and dashboard work stay downstream.
 - The first proof covers browser TypeScript and native Rust publication and playback in both directions, with grouped audio and video over both moq-lite and MoQ Transport. Shared vectors cover groups and moq-lite datagrams; MoQ Transport has no datagram delivery.
 
 ## Quests
 
+- [Opaque broadcast path](/quest/m2/e2ee/path.md) - the draft, vectors,
+  and questline publish at `<opaque>/<epoch>` with no `.e2ee` suffix
 - [Rust E2EE core on moq-e2ee-00](/quest/m2/e2ee/rust.md) - reshape the merged
   `moq-e2ee` crate to the epoch profile and the shared library surface, and retire
   the `moq-e2ee-01` vectors
@@ -70,4 +72,4 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 ## Related
 
 - [archive](/quest/m2/archive/README.md) - protected broadcasts are deliberately outside recording and replay formats
-- [Merge dev](/quest/m1/merge-dev.md) - its HLS soak (a fresh viewer joining a days-old broadcast, playable since #3240) covers plaintext broadcasts only; stock HLS and DASH exclude `.e2ee` broadcasts
+- [Merge dev](/quest/m1/merge-dev.md) - its HLS soak (a fresh viewer joining a days-old broadcast, playable since #3240) covers plaintext broadcasts only; stock HLS and DASH cannot read a protected catalog
