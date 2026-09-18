@@ -58,10 +58,9 @@ its own loss and the groups it sends, and it folds the price into every route
 it forwards, so nothing new crosses the wire. RTT is a median over the last 15
 samples; loss and the group size are ratios over the last 5000 packets sent,
 however long ago, so an idle link keeps what its last stream measured. Prices
-round to `step` and only move once they have drifted a whole step or a tenth of
-the price, and a route only moves to a path that beats the one in use by more
-than `hop_penalty`, so a path does not flap on one slow ack or on several links
-drifting at once. Costs ride moq-lite-06 and the MoQ Cluster extension; a link
+round to `step` and only move once they have drifted a whole step, and a route
+only moves to a path that beats the one in use by more than `hop_penalty`, so a
+path does not flap on one slow ack or on several links drifting at once. Costs ride moq-lite-06 and the MoQ Cluster extension; a link
 negotiated on an older version carries hop counts only, whatever it measures.
 
 Loss is only learned from packets, so a link that has carried nothing is priced

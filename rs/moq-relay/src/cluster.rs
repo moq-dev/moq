@@ -2276,10 +2276,6 @@ const LOSS_MIN_PACKETS: u64 = 200;
 /// stands until this much later traffic has shown otherwise.
 const LOSS_WINDOW_PACKETS: u64 = 5_000;
 
-/// A price moves once it has drifted this fraction of itself, or a whole
-/// [`CostConfig::step`], whichever is larger.
-const PRICE_BAND: u64 = 10;
-
 /// Measured link pricing (`[cluster.cost]`).
 ///
 /// A cluster link nobody priced with `cost` is priced by what it does to a live
@@ -2557,10 +2553,11 @@ fn link_price(estimate: &LinkEstimate, pricing: &Pricing) -> u64 {
 }
 
 /// Rounds a price to the configured step and moves the announced value only
-/// once the raw price has drifted a whole step, or a tenth of itself, away from
-/// it, so a link that sits on a rounding boundary settles on one price instead
-/// of re-announcing every sample, and a long lossy link whose loss estimate
-/// breathes does not re-announce either.
+/// once the raw price has drifted a whole step away from it, so a link that sits
+/// on a rounding boundary settles on one price instead of re-announcing every
+/// sample. Whether a route follows a moved price is the origin's switch margin
+/// (see [`moq_net::origin::Config::switch_margin`]), so this only has to keep
+/// the wire quiet.
 struct Quantizer {
 	/// The step in milliseconds, at least 1.
 	step: u64,
@@ -2586,13 +2583,7 @@ impl Quantizer {
 		match self.current {
 			Some(current) if current == quantized => None,
 			// Inside the dead band around the announced price: hold it.
-			Some(current)
-				if current < ceiling
-					&& raw < ceiling
-					&& raw.abs_diff(current) < self.step.max(current / PRICE_BAND) =>
-			{
-				None
-			}
+			Some(current) if current < ceiling && raw < ceiling && raw.abs_diff(current) < self.step => None,
 			_ => {
 				self.current = Some(quantized);
 				Some(quantized)
@@ -4418,13 +4409,12 @@ mod tests {
 		assert_eq!(q.update(53), None);
 		assert_eq!(q.update(51), None);
 		assert_eq!(q.update(50), Some(50));
-		// A jump lands on the nearest step in one move.
+		// A jump lands on the nearest step in one move, and the band is the same
+		// step whatever the price: 230 holds until 225 or 235.
 		assert_eq!(q.update(228), Some(230));
-		// Past ten steps the band is a tenth of the price: 230 holds until 207 or 253.
-		assert_eq!(q.update(250), None);
-		assert_eq!(q.update(208), None);
-		assert_eq!(q.update(253), Some(255));
-		assert_eq!(q.update(229), Some(230));
+		assert_eq!(q.update(233), None);
+		assert_eq!(q.update(226), None);
+		assert_eq!(q.update(235), Some(235));
 		// The ceiling is announced as is, and coming back from it is a move.
 		assert_eq!(q.update(moq_net::origin::MAX_COST), Some(moq_net::origin::MAX_COST));
 		assert_eq!(q.update(moq_net::origin::MAX_COST), None);
