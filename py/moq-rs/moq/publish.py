@@ -35,6 +35,7 @@ from .types import (
     AudioEncoderInput,
     AudioEncoderOutput,
     AudioFrame,
+    Compression,
     Frame,
     Route,
     Subscription,
@@ -695,16 +696,16 @@ class BroadcastProducer:
         return TrackProducer(self._inner.publish_track(name, info))
 
     def publish_json_snapshot(
-        self, name: str, *, delta_ratio: int | None = None, compression: bool = False
+        self, name: str, *, delta_ratio: int | None = None, compression: Compression = Compression.NONE
     ) -> JsonSnapshotProducer:
         """Publish a JSON snapshot track (lossy latest-value).
 
         Each update supersedes the last; a late joiner only sees the newest value.
         ``delta_ratio`` controls how aggressively deltas are emitted instead of full
         snapshots (0 disables deltas); ``None`` uses the binding's default. Set
-        ``compression`` to DEFLATE-compress each group; the consumer must pass the same
-        flag. Advertise the track with :meth:`set_catalog_section` if consumers should
-        discover it.
+        ``compression`` to :attr:`Compression.DEFLATE` to compress each group; the
+        consumer must pass the same value. Advertise the track with
+        :meth:`set_catalog_section` if consumers should discover it.
         """
         # Let the record supply delta_ratio's default rather than restating it here.
         config = (
@@ -714,11 +715,12 @@ class BroadcastProducer:
         )
         return JsonSnapshotProducer(self._inner.publish_json_snapshot(name, config))
 
-    def publish_json_stream(self, name: str, *, compression: bool = False) -> JsonStreamProducer:
+    def publish_json_stream(self, name: str, *, compression: Compression = Compression.NONE) -> JsonStreamProducer:
         """Publish a JSON stream track (lossless append-log).
 
-        Every appended record is preserved and delivered in order. Set ``compression`` to
-        DEFLATE-compress the group; the consumer must pass the same flag.
+        Every appended record is preserved and delivered in order. Set ``compression``
+        to :attr:`Compression.DEFLATE` to compress the group; the consumer must pass
+        the same value.
         """
         config = MoqJsonStreamConfig(compression=compression)
         return JsonStreamProducer(self._inner.publish_json_stream(name, config))

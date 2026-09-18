@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 /// How a metadata track's groups carry its payloads.
 ///
-/// The two modes are equally primary and there is no safe default: reading an append log as a
+/// The modes are equally primary and there is no safe default: reading an append log as a
 /// latest-value document silently drops every record but the last. So a
 /// [`JsonConfig`](crate::catalog::JsonConfig) or [`BinaryConfig`](crate::catalog::BinaryConfig)
 /// always states its mode, and a consumer that doesn't recognize the value
@@ -27,6 +27,12 @@ pub enum Mode {
 	#[display("stream")]
 	Stream,
 
+	/// Bounded window: records append at the back and drop from the front, and a reader can join
+	/// at any point. Each group restates the retained suffix so a late joiner and a reader that
+	/// kept up see the same window.
+	#[display("window")]
+	Window,
+
 	/// A mode this build does not recognize, preserved verbatim.
 	///
 	/// A consumer MUST ignore the track: it cannot know whether skipping to the newest group
@@ -42,6 +48,7 @@ impl FromStr for Mode {
 		Ok(match s {
 			"snapshot" => Self::Snapshot,
 			"stream" => Self::Stream,
+			"window" => Self::Window,
 			_ => Self::Unknown(s.to_string()),
 		})
 	}
@@ -53,7 +60,11 @@ mod test {
 
 	#[test]
 	fn known_roundtrip() {
-		for (mode, json) in [(Mode::Snapshot, r#""snapshot""#), (Mode::Stream, r#""stream""#)] {
+		for (mode, json) in [
+			(Mode::Snapshot, r#""snapshot""#),
+			(Mode::Stream, r#""stream""#),
+			(Mode::Window, r#""window""#),
+		] {
 			let config = crate::catalog::JsonConfig::new(mode.clone());
 			let encoded = serde_json::to_value(&config).unwrap();
 			assert_eq!(encoded["mode"].to_string(), json);

@@ -37,7 +37,6 @@ contract, so it gates [Release](/quest/m1/release.md) rather than the merge.
 - [moq-tokio shapes](/quest/m1/api-tokio-shapes.md) - a `Drop` on `Listener`, a worker `Member` that cannot be cross-wired, `std::time::Duration` fields, one construction idiom, no six-argument merge
 - [@moq/net API](/quest/m1/api-js-net.md) - one error namespace with Rust's names, one connect shape, one path-to-broadcast call, `Time.Milli` everywhere, wire-layer methods internal
 - [@moq/auth API](/quest/m1/api-js-auth.md) - `Key` and `KeySet` namespaces with moq-auth's verbs instead of `load`/`signWith`
-- [JSON configs](/quest/m1/api-json-config.md) - window takes the Config shape snapshot and stream have, mux takes the hang entry, the dead per-track `timeline` field goes
 - [Catalog types](/quest/m1/api-hang-catalog.md) - `hang::Catalog<E>` is the one section list, `Clock` holds a `Timestamp`, `Timeline` folds into `Archive`
 - [Rendition ownership](/quest/m1/api-mux-rendition.md) - one handle publishes a media track and reports its estimate, instead of five
 - [Watch and publish shapes](/quest/m1/api-watch-publish.md) - props objects everywhere, silent `latency`/`jitter` aliases refuse, `Sync` stops needing a jitter bridge, rooms get bandwidth

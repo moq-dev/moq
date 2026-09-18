@@ -146,7 +146,7 @@ export class Producer {
 		this.#durationMaxUs = props.durationMax === undefined ? undefined : props.durationMax * 1000;
 		this.#window = new Json.Window.Producer<Record>({
 			track,
-			compression: true,
+			compression: "deflate",
 			checkpointRecords: CHECKPOINT_RECORDS,
 		});
 	}

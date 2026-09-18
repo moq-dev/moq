@@ -587,10 +587,10 @@ impl<E: CatalogExt> Producer<E> {
 	pub fn json_snapshot<T: serde::Serialize>(
 		&self,
 		track: moq_net::track::Producer,
-		config: crate::json::Config,
+		entry: hang::catalog::JsonConfig,
 	) -> crate::Result<crate::json::Snapshot<T, E>> {
 		let rendition = self.data_entry(track.name())?;
-		crate::json::Snapshot::new(track, rendition, &config)
+		crate::json::Snapshot::new(track, rendition, entry)
 	}
 
 	/// Publish `track` as an append-log JSON track, advertising it in the catalog.
@@ -600,10 +600,10 @@ impl<E: CatalogExt> Producer<E> {
 	pub fn json_stream<T: serde::Serialize>(
 		&self,
 		track: moq_net::track::Producer,
-		config: crate::json::Config,
+		entry: hang::catalog::JsonConfig,
 	) -> crate::Result<crate::json::Stream<T, E>> {
 		let rendition = self.data_entry(track.name())?;
-		crate::json::Stream::new(track, rendition, &config)
+		crate::json::Stream::new(track, rendition, entry)
 	}
 
 	/// Publish `track` as a latest-value binary track, advertising it in the catalog.
@@ -613,10 +613,10 @@ impl<E: CatalogExt> Producer<E> {
 	pub fn binary_snapshot(
 		&self,
 		track: moq_net::track::Producer,
-		config: crate::binary::Config,
+		entry: hang::catalog::BinaryConfig,
 	) -> crate::Result<crate::binary::Snapshot<E>> {
 		let rendition = self.data_entry(track.name())?;
-		crate::binary::Snapshot::new(track, rendition, &config)
+		crate::binary::Snapshot::new(track, rendition, entry)
 	}
 
 	/// Publish `track` as an append-log binary track, advertising it in the catalog.
@@ -626,10 +626,10 @@ impl<E: CatalogExt> Producer<E> {
 	pub fn binary_stream(
 		&self,
 		track: moq_net::track::Producer,
-		config: crate::binary::Config,
+		entry: hang::catalog::BinaryConfig,
 	) -> crate::Result<crate::binary::Stream<E>> {
 		let rendition = self.data_entry(track.name())?;
-		crate::binary::Stream::new(track, rendition, &config)
+		crate::binary::Stream::new(track, rendition, entry)
 	}
 
 	/// Reserve the catalog entry a data producer owns, keyed by its track name.

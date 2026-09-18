@@ -1,5 +1,8 @@
 import { Decoder as Flate } from "@moq/flate";
 
+import { isDeflate } from "../compression.ts";
+import type { Config as EncoderConfig } from "./encoder.ts";
+
 function object(value: unknown, label: string): Record<string, unknown> {
 	if (value === null || typeof value !== "object" || Array.isArray(value)) {
 		throw new Error(`${label} must be an object`);
@@ -15,10 +18,7 @@ function index(value: unknown, label: string): number {
 }
 
 /** Options for a {@link Decoder}. */
-export interface ConsumerConfig {
-	/** Read frames written with `Config.compression` on. Defaults to `false`. */
-	compression?: boolean;
-}
+export type Config = Pick<EncoderConfig, "compression">;
 
 /**
  * One change to the window, as the consumer sees it.
@@ -71,8 +71,8 @@ export class Decoder<T> {
 	#events: Queued<T>[] = [];
 	#nextEvent = 0;
 
-	constructor(config: ConsumerConfig = {}) {
-		this.#compress = config.compression ?? false;
+	constructor(config: Config = {}) {
+		this.#compress = isDeflate(config.compression);
 	}
 
 	/** Create the decoder for one MoQ group. */

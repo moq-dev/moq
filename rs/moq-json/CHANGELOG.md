@@ -9,9 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- [**breaking**] Codec options are `Config` in snapshot and stream. Track-owning options are
-  `producer::Config` / `consumer::Config`. `compression` is a `Compression` enum (`None` / `Deflate`)
-  instead of a `bool`, and `with_compression` is gone.
+- [**breaking**] Codec options are `Config` in snapshot, stream, and window. Track-owning options
+  are `producer::Config` / `consumer::Config`. `compression` is a `Compression` enum (`None` /
+  `Deflate`) instead of a `bool`, and the `with_*` builders are gone.
 
 - [**breaking**] `window::Producer::finish` borrows (`&mut self`) instead of consuming, matching
   snapshot and stream, so the handle stays usable after a clean end.
