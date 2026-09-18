@@ -264,6 +264,11 @@ impl Lease {
 		&self.token
 	}
 
+	/// Ask the lease's producer to re-check now. A no-op on a fixed lease.
+	pub fn revalidate(&self) {
+		self.consumer.revalidate();
+	}
+
 	/// Wait for the lease to stop covering the session: the grant expired, was
 	/// revoked, or was re-checked into one that no longer covers the token.
 	///

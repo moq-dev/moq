@@ -58,7 +58,8 @@ pub(crate) async fn serve_ws(
 	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| auth::peer(&identity));
 	let bytes = moq_auth::Counters::default();
 	let session_id = request.id.clone();
-	let lease = state.auth.admit(request, bytes.clone()).await?;
+	let lease = state.auth.admit(request.clone(), bytes.clone()).await?;
+	let registration = Some(state.sessions.register(request));
 	let token = lease.token();
 	let publish = state.cluster.publisher(token);
 	let subscribe = state.cluster.subscriber(token);
@@ -91,7 +92,7 @@ pub(crate) async fn serve_ws(
 			shutdown: state.shutdown.clone(),
 			socket_stats: socket_stats.map(|Extension(s)| s),
 		};
-		let _ = handle_socket(socket, session, lease, bytes).await;
+		let _ = handle_socket(socket, session, lease, bytes, registration).await;
 	}))
 }
 
@@ -117,6 +118,7 @@ async fn handle_socket<T>(
 	session: SessionInputs,
 	mut lease: auth::Lease,
 	bytes: moq_auth::Counters,
+	registration: Option<crate::session::Registration>,
 ) -> anyhow::Result<()>
 where
 	T: futures::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
@@ -185,38 +187,47 @@ where
 		bytes.add_sent(stats.bytes_sent.unwrap_or_default());
 		bytes.add_received(stats.bytes_received.unwrap_or_default());
 	};
-	tokio::select! {
-		res = &mut driver => {
-			meter(&session);
-			lease.close(match &res {
-				Ok(()) => "closed".to_string(),
-				Err(err) => err.to_string(),
-			});
-			res.map_err(Into::into)
-		}
-		why = lease.ended() => {
-			tracing::info!(%why, "lease ended, closing session");
-			session.abort(moq_net::Error::Unauthorized);
-			// Drive the teardown so the close reaches the peer.
-			let res = driver.await.map_err(Into::into);
-			meter(&session);
-			lease.close(why);
-			res
-		}
-		_ = shutdown.started() => {
-			tracing::info!("relay shutting down; draining session");
-			// Unlike QUIC sessions (whose driver is spawned), this driver runs
-			// inline, so keep polling it while the drain waits: the GOAWAY only
-			// reaches the wire through it.
-			let drain = shutdown.drain_session(&session);
-			let mut drain = std::pin::pin!(drain);
-			let res = tokio::select! {
-				res = &mut driver => res.map_err(Into::into),
-				_ = &mut drain => driver.await.map_err(Into::into),
-			};
-			meter(&session);
-			lease.close("shutdown");
-			res
+	loop {
+		let nudged = async {
+			match &registration {
+				Some(registration) => registration.nudged().await,
+				None => std::future::pending().await,
+			}
+		};
+		tokio::select! {
+			res = &mut driver => {
+				meter(&session);
+				lease.close(match &res {
+					Ok(()) => "closed".to_string(),
+					Err(err) => err.to_string(),
+				});
+				return res.map_err(Into::into);
+			}
+			why = lease.ended() => {
+				tracing::info!(%why, "lease ended, closing session");
+				session.abort(moq_net::Error::Unauthorized);
+				// Drive the teardown so the close reaches the peer.
+				let res = driver.await.map_err(Into::into);
+				meter(&session);
+				lease.close(why);
+				return res;
+			}
+			_ = shutdown.started() => {
+				tracing::info!("relay shutting down; draining session");
+				// Unlike QUIC sessions (whose driver is spawned), this driver runs
+				// inline, so keep polling it while the drain waits: the GOAWAY only
+				// reaches the wire through it.
+				let drain = shutdown.drain_session(&session);
+				let mut drain = std::pin::pin!(drain);
+				let res = tokio::select! {
+					res = &mut driver => res.map_err(Into::into),
+					_ = &mut drain => driver.await.map_err(Into::into),
+				};
+				meter(&session);
+				lease.close("shutdown");
+				return res;
+			}
+			() = nudged => lease.revalidate(),
 		}
 	}
 }
@@ -941,6 +952,7 @@ mod tests {
 			session,
 			lease,
 			moq_auth::Counters::default(),
+			None,
 		));
 
 		// A real qmux peer, so the transport handshake completes and its 10s

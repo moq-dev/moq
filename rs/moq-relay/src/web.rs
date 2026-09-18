@@ -170,6 +170,10 @@ pub(crate) struct WebState {
 	/// when it fires. Defaults to a handle that never fires.
 	#[cfg_attr(not(feature = "websocket"), allow(dead_code))]
 	pub(crate) shutdown: crate::shutdown::Observer,
+	/// Live sessions on this node, so a WebSocket session is listed and nudged
+	/// like a QUIC one.
+	#[cfg_attr(not(feature = "websocket"), allow(dead_code))]
+	pub(crate) sessions: crate::session::Registry,
 }
 
 /// Run a HTTP server using Axum
@@ -196,6 +200,7 @@ impl Web {
 			certificates,
 			conn_id: AtomicU64::new(0),
 			shutdown: crate::shutdown::Observer::disabled(),
+			sessions: crate::session::Registry::new(),
 		});
 		Self {
 			state,
@@ -237,6 +242,14 @@ impl Web {
 	pub fn with_shutdown(mut self, shutdown: crate::shutdown::Observer) -> Self {
 		let state = Arc::get_mut(&mut self.state).expect("with_shutdown called after routes were built");
 		state.shutdown = shutdown;
+		self
+	}
+
+	/// Register WebSocket sessions in the node's live table so they can be listed
+	/// and nudged. Without it they are served but do not appear.
+	pub fn with_sessions(mut self, sessions: crate::session::Registry) -> Self {
+		let state = Arc::get_mut(&mut self.state).expect("with_sessions called after routes were built");
+		state.sessions = sessions;
 		self
 	}
 

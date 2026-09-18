@@ -19,23 +19,24 @@
 //!   that don't want to hit the customer port.
 //! - `/nodes` - the cluster nodes visible through gossip plus established
 //!   direct relay connections.
+//! - `/sessions` and `/sessions/revalidate` - list or nudge live sessions on
+//!   this node. A push only causes a re-check, so a caller on this trusted
+//!   plane gains nothing a scheduled cadence would not do.
 //!
 //! Everything here is unauthenticated, so bind it only to a trusted plane -
 //! loopback for a co-located scraper/agent, or a private overlay address; see
-//! [`Config::listen`]. Unset by default (opt-in). Any future endpoint
-//! added here inherits that "unauthenticated, trusted-plane-only" contract; a
-//! mutating/control endpoint would need its own auth and doesn't belong on an
-//! unauthenticated bind as-is.
+//! [`Config::listen`]. Unset by default (opt-in). A push can only cause
+//! re-checks, never close a session on its own, so it belongs on this plane.
 
 use std::net;
 
 use anyhow::Context as _;
 use axum::{
 	Json, Router,
-	extract::State,
+	extract::{RawQuery, State},
 	http::{self, StatusCode},
 	response::{IntoResponse, Response},
-	routing::get,
+	routing::{get, post},
 };
 use axum_server::accept::DefaultAcceptor;
 
@@ -60,7 +61,8 @@ type UringWorker = std::convert::Infallible;
 #[non_exhaustive]
 pub struct Config {
 	/// Socket address for the internal listener (plain HTTP), serving the ops
-	/// endpoints (`/metrics`, `/health`, and `/nodes`).
+	/// endpoints (`/metrics`, `/health`, `/nodes`, `/sessions`, and
+	/// `/sessions/revalidate`).
 	///
 	/// These endpoints are unauthenticated, so bind it only to a trusted plane:
 	/// loopback (e.g. `127.0.0.1:9101`) for a co-located scraper/agent, or a
@@ -83,6 +85,7 @@ pub struct Internal {
 	config: Config,
 	stats: moq_net::stats::Registry,
 	nodes: Option<crate::nodes::Nodes>,
+	sessions: crate::session::Registry,
 	health: moq_tokio::accept::Health,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
@@ -92,6 +95,7 @@ pub struct Internal {
 struct InternalState {
 	stats: moq_net::stats::Registry,
 	nodes: Option<crate::nodes::Nodes>,
+	sessions: crate::session::Registry,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
 }
@@ -114,6 +118,7 @@ impl Internal {
 			config,
 			stats,
 			nodes: None,
+			sessions: crate::session::Registry::new(),
 			health,
 			listeners,
 			uring: Vec::new(),
@@ -173,9 +178,16 @@ impl Internal {
 		self
 	}
 
-	/// Build the ops router (`/metrics`, `/health`, and `/nodes`), returning a
-	/// state-erased [`Router`] an embedder can extend (`merge`/`nest` its own ops
-	/// routes) before handing it to [`crate::Relay::with_internal`] or
+	/// Attach the live session table served at `/sessions` and nudged at
+	/// `/sessions/revalidate`.
+	pub fn with_sessions(mut self, sessions: crate::session::Registry) -> Self {
+		self.sessions = sessions;
+		self
+	}
+
+	/// Build the ops router (`/metrics`, `/health`, `/nodes`, `/sessions`),
+	/// returning a state-erased [`Router`] an embedder can extend (`merge`/`nest`
+	/// its own ops routes) before handing it to [`crate::Relay::with_internal`] or
 	/// [`serve`](Self::serve).
 	///
 	/// Anything merged in inherits this listener's "unauthenticated,
@@ -185,9 +197,12 @@ impl Internal {
 			.route("/metrics", get(serve_metrics))
 			.route("/health", get(serve_health))
 			.route("/nodes", get(serve_nodes))
+			.route("/sessions", get(serve_sessions))
+			.route("/sessions/revalidate", post(revalidate_sessions))
 			.with_state(InternalState {
 				stats: self.stats.clone(),
 				nodes: self.nodes.clone(),
+				sessions: self.sessions.clone(),
 				listeners: self.listeners.clone(),
 				uring: self.uring.clone(),
 			})
@@ -260,6 +275,36 @@ async fn serve_metrics(State(state): State<InternalState>) -> Response {
 /// unique match are omitted.
 async fn serve_nodes(State(state): State<InternalState>) -> Json<crate::nodes::Snapshot> {
 	Json(state.nodes.map(|nodes| nodes.snapshot()).unwrap_or_default())
+}
+
+/// Live sessions matching the query filter: the dry run for a selector.
+/// `query` is omitted from each entry so a jwt on the plane cannot be replayed.
+async fn serve_sessions(RawQuery(query): RawQuery, State(state): State<InternalState>) -> Response {
+	match crate::session::Filter::from_query(query.as_deref()) {
+		Ok(filter) => Json(crate::session::List {
+			sessions: state.sessions.list(&filter),
+		})
+		.into_response(),
+		Err(err) => err.into_response(),
+	}
+}
+
+/// Nudge every matching session to re-check now. The re-checks run in the
+/// background; their outcome arrives as `end` events. No match is 200 with an
+/// empty list, not a 404.
+async fn revalidate_sessions(RawQuery(query): RawQuery, State(state): State<InternalState>) -> Response {
+	match crate::session::Filter::from_query(query.as_deref()) {
+		Ok(filter) => {
+			let ids = state.sessions.revalidate(&filter);
+			let status = if ids.is_empty() {
+				StatusCode::OK
+			} else {
+				StatusCode::ACCEPTED
+			};
+			(status, Json(crate::session::Nudged { ids })).into_response()
+		}
+		Err(err) => err.into_response(),
+	}
 }
 
 /// Render a [`moq_net::stats::Snapshot`] as Prometheus text exposition (v0.0.4).
@@ -804,6 +849,7 @@ mod tests {
 		let state = InternalState {
 			stats: moq_net::stats::Registry::disabled(),
 			nodes: None,
+			sessions: crate::session::Registry::new(),
 			listeners: Vec::new(),
 			uring: Vec::new(),
 		};
@@ -820,6 +866,7 @@ mod tests {
 		let state = InternalState {
 			stats: moq_net::stats::Registry::disabled(),
 			nodes: Some(nodes),
+			sessions: crate::session::Registry::new(),
 			listeners: Vec::new(),
 			uring: Vec::new(),
 		};
