@@ -64,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
 
 	match config.role {
 		Command::Publish => {
-			let mut broadcast = origin
+			let broadcast = origin
 				.create_broadcast(&config.broadcast)
 				.context("failed to create broadcast")?;
 			let track = broadcast.create_track(track, None)?;
@@ -110,18 +110,16 @@ async fn main() -> anyhow::Result<()> {
 
 			loop {
 				tokio::select! {
-					Some(update) = announced.next() => match update.active {
+					Some(update) = announced.next() => match update.kind.is_active() {
 						true => {
-							let Some(prefix) = update.pattern.as_prefix() else { continue; };
-							let path = moq_net::Path::new(prefix).to_owned();
-							tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
-							let broadcast = consumer.request_broadcast(&path).await?;
+							tracing::info!(broadcast = %update.path, "broadcast is online, subscribing to track");
+							let broadcast = consumer.request_broadcast(&update.path).await?;
 							let track = broadcast
 								.track(&track)?.subscribe(None).await?;
 							clock = Some(Subscriber::new(track));
 						}
 						false => {
-							tracing::warn!(broadcast = %update.pattern, "broadcast is offline, waiting...");
+							tracing::warn!(broadcast = %update.path, "broadcast is offline, waiting...");
 						}
 					},
 					res = reconnect.closed() => return Ok(res?),
@@ -142,7 +140,7 @@ impl Publisher {
 		Self { track }
 	}
 
-	async fn run(mut self) -> anyhow::Result<()> {
+	async fn run(self) -> anyhow::Result<()> {
 		let start = Utc::now();
 		let mut now = start;
 

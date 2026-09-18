@@ -1347,7 +1347,7 @@ mod tests {
 			payload: &'static [u8],
 			recorder: Option<moq_mux::timeline::Recorder>,
 		) -> Box<dyn std::any::Any> {
-			let mut broadcast = origin.create_broadcast("media").expect("publish allowed");
+			let broadcast = origin.create_broadcast("media").expect("publish allowed");
 			broadcast.announce(Default::default()).expect("publish allowed");
 			let track = broadcast.create_track("video0", None).unwrap();
 
@@ -1515,9 +1515,7 @@ mod tests {
 
 		let mut old_media = moq_net::broadcast::Info::new().produce();
 		let _old_track = write_routed_media(&mut old_media, OLD, recorder, 0);
-		let old_server = origin
-			.dynamic(moq_net::Pattern::subtree("media").unwrap(), sibling_route(10))
-			.unwrap();
+		let old_server = origin.dynamic("media", sibling_route(10)).unwrap();
 		settle().await;
 
 		let source = moq_mux::Source::new(origin.consume(), "live");
@@ -1543,9 +1541,7 @@ mod tests {
 
 		// The replacement is already announced before the incumbent is dropped, matching a
 		// rival publisher that appears while the current first hop is still serving.
-		let new_server = origin
-			.dynamic(moq_net::Pattern::subtree("media").unwrap(), sibling_route(11))
-			.unwrap();
+		let new_server = origin.dynamic("media", sibling_route(11)).unwrap();
 		drop((old_server, old_media, _old_track));
 		until_empty(&rendition).await;
 		assert!(
@@ -1613,9 +1609,7 @@ mod tests {
 
 		let mut media = moq_net::broadcast::Info::new().produce();
 		let _track = write_routed_media(&mut media, NEW, recorder, 0);
-		let server = origin
-			.dynamic(moq_net::Pattern::subtree("media").unwrap(), sibling_route(11))
-			.unwrap();
+		let server = origin.dynamic("media", sibling_route(11)).unwrap();
 		settle().await;
 
 		let source = moq_mux::Source::new(origin.consume(), "live");
@@ -1657,9 +1651,7 @@ mod tests {
 
 		let mut old_media = moq_net::broadcast::Info::new().produce();
 		let _old_track = write_routed_media(&mut old_media, OLD, recorder, 0);
-		let old_server = origin
-			.dynamic(moq_net::Pattern::subtree("media").unwrap(), sibling_route(10))
-			.unwrap();
+		let old_server = origin.dynamic("media", sibling_route(10)).unwrap();
 		settle().await;
 
 		let source = moq_mux::Source::new(origin.consume(), "live");
@@ -1684,9 +1676,7 @@ mod tests {
 			assert!(rendition.segment(0).await.unwrap().is_none());
 		}
 
-		let new_server = origin
-			.dynamic(moq_net::Pattern::subtree("media").unwrap(), sibling_route(11))
-			.unwrap();
+		let new_server = origin.dynamic("media", sibling_route(11)).unwrap();
 		let mut new_media = moq_net::broadcast::Info::new().produce();
 		let _ = rendition.playlist();
 		accept_sibling(&new_server, &new_media).await;

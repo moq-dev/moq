@@ -1,3 +1,6 @@
+//! Accepting a MoQ session, including the paused handshake that inspects the
+//! peer's SETUP before granting origins.
+
 use crate::origin;
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_20, ALPN_21, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04,
@@ -152,7 +155,7 @@ impl Server {
 		&self,
 		runtime: R,
 		mut session: R::Transport,
-	) -> Result<Request<R::Transport, R>, Error>
+	) -> Result<Handshake<R::Transport, R>, Error>
 	where
 		R: crate::runtime::Runtime + 'static,
 	{
@@ -172,7 +175,7 @@ impl Server {
 					client_setup.path.clone(),
 					client_setup.role,
 					client_setup.hop,
-					Handshake::LiteSetup {
+					PausedHandshake::LiteSetup {
 						session,
 						version,
 						client_setup,
@@ -187,7 +190,7 @@ impl Server {
 					None,
 					None,
 					None,
-					Handshake::LiteBare {
+					PausedHandshake::LiteBare {
 						session,
 						version: lite::Version::Lite04,
 					},
@@ -201,7 +204,7 @@ impl Server {
 					None,
 					None,
 					None,
-					Handshake::LiteBare {
+					PausedHandshake::LiteBare {
 						session,
 						version: lite::Version::Lite03,
 					},
@@ -210,7 +213,7 @@ impl Server {
 			_ => return Err(Error::Version),
 		};
 
-		Ok(Request {
+		Ok(Handshake {
 			path,
 			role,
 			origin,
@@ -247,9 +250,9 @@ impl Server {
 	/// the caller can authorize/scope before serving.
 	///
 	/// Reads the client's SETUP (the in-band path lives there on URL-less transports),
-	/// then returns a [`Request`]: inspect [`path`](Request::path), set the origins to
-	/// serve, and call [`ok`](Request::ok) or [`close`](Request::close). Session start
-	/// is deferred to `ok()`, so origins set on the `Request` always take effect.
+	/// then returns a [`Handshake`]: inspect [`path`](Handshake::path), set the origins to
+	/// serve, and call [`ok`](Handshake::ok) or [`close`](Handshake::close). Session start
+	/// is deferred to `ok()`, so origins set on the handshake always take effect.
 	///
 	/// The path is surfaced for moq-lite-05 and every moq-transport draft we speak;
 	/// it's empty on versions with no in-band request path (e.g. lite 01-04).
@@ -257,7 +260,7 @@ impl Server {
 		&self,
 		runtime: R,
 		mut session: R::Transport,
-	) -> Result<Request<R::Transport, R>, Error>
+	) -> Result<Handshake<R::Transport, R>, Error>
 	where
 		R: crate::runtime::Runtime + MaybeSend + MaybeSync + 'static,
 		R::Transport: crate::transport::poll::Boxable,
@@ -349,7 +352,7 @@ impl Server {
 			Version::Lite(_) => (None, None, ietf::peer::Peer::default()),
 		};
 
-		Ok(Request {
+		Ok(Handshake {
 			path,
 			role: None,
 			origin: None,
@@ -357,7 +360,7 @@ impl Server {
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
-				handshake: Handshake::Boxed(Box::new(PausedLegacy {
+				handshake: PausedHandshake::Boxed(Box::new(PausedLegacy {
 					session,
 					stream,
 					version,
@@ -375,7 +378,7 @@ impl Server {
 		runtime: R,
 		mut session: R::Transport,
 		version: ietf::Version,
-	) -> Result<Request<R::Transport, R>, Error>
+	) -> Result<Handshake<R::Transport, R>, Error>
 	where
 		R: crate::runtime::Runtime + MaybeSend + MaybeSync + 'static,
 		R::Transport: crate::transport::poll::Boxable,
@@ -384,7 +387,7 @@ impl Server {
 		R::Timer: MaybeSend,
 	{
 		let peer_setup = ietf::accept_setup(&mut session, version).await?;
-		Ok(Request {
+		Ok(Handshake {
 			path: peer_setup.path.clone(),
 			role: None,
 			// A moq-transport peer only has an identity if it negotiated the MoQ
@@ -394,7 +397,7 @@ impl Server {
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
-				handshake: Handshake::Boxed(Box::new(PausedIetfModern {
+				handshake: PausedHandshake::Boxed(Box::new(PausedIetfModern {
 					session,
 					version,
 					peer_setup,
@@ -411,29 +414,29 @@ impl Server {
 /// the origins to serve, then call [`ok`](Self::ok) to complete the handshake, or
 /// [`close`](Self::close) to reject it. Modeled on the WebTransport `Request` in
 /// moq-tokio.
-pub struct Request<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
+pub struct Handshake<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
 	path: Option<String>,
 	role: Option<Role>,
 	origin: Option<crate::Hop>,
 	/// The identity this session's routes are stamped with when the peer declares none
 	/// on the wire. Fresh per request unless the caller overrides it
-	/// ([`Request::with_peer_hop`]).
+	/// ([`Handshake::with_peer_hop`]).
 	assigned_hop: crate::Hop,
 	// Taken by `ok`/`close`; `Drop` rejects the handshake if neither ran.
 	inner: Option<RequestInner<S, R>>,
 }
 
-/// The parts of a [`Request`] consumed by [`Request::ok`] / [`Request::close`].
+/// The parts of a [`Handshake`] consumed by [`Handshake::ok`] / [`Handshake::close`].
 struct RequestInner<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
 	server: Server,
 	/// Receives the session's machine once `ok()` completes the handshake.
 	runtime: R,
-	handshake: Handshake<S, R>,
+	handshake: PausedHandshake<S, R>,
 }
 
 /// The handshake state captured at the pause point. Every variant defers its
-/// session start to [`Request::ok`] so origins set on the Request still apply.
-enum Handshake<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
+/// session start to [`Handshake::ok`] so origins set on the handshake still apply.
+enum PausedHandshake<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
 	/// moq-lite 03/04: no Setup Stream.
 	LiteBare { session: S, version: lite::Version },
 	/// moq-lite 05+: the client's Setup Stream has been read. `ok()` starts the
@@ -444,7 +447,7 @@ enum Handshake<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
 		client_setup: lite::Setup,
 	},
 	/// An IETF (or legacy bidi-SETUP) handshake, boxed where its
-	/// thread-affinity bounds held. The boxing is what keeps [`Request`] and
+	/// thread-affinity bounds held. The boxing is what keeps [`Handshake`] and
 	/// its lite path free of those bounds: the ietf machinery erases its
 	/// futures, which forces a per-target `Send` choice a pinned `!Send`
 	/// transport cannot satisfy, so the choice is made here, at construction,
@@ -452,12 +455,12 @@ enum Handshake<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
 	Boxed(Box<dyn Paused<R>>),
 }
 
-/// A paused non-lite handshake. See [`Handshake::Boxed`] for why this is a
+/// A paused non-lite handshake. See [`PausedHandshake::Boxed`] for why this is a
 /// trait object.
 ///
-/// `MaybeSync` is not decoration: a caller holding a [`Request`] across an
+/// `MaybeSync` is not decoration: a caller holding a [`Handshake`] across an
 /// await behind `&self` (moq-relay authenticates that way) needs
-/// `&Request: Send`, which is `Request: Sync`, which is this.
+/// `&Handshake: Send`, which is `Handshake: Sync`, which is this.
 trait Paused<R: crate::runtime::Runtime>: MaybeSend + MaybeSync {
 	/// Complete the handshake with the final server config.
 	fn ok(
@@ -649,7 +652,7 @@ where
 	}
 }
 
-impl<S, R> Request<S, R>
+impl<S, R> Handshake<S, R>
 where
 	S: crate::transport::poll::Session,
 	R: crate::runtime::Runtime<Transport = S> + 'static,
@@ -742,13 +745,15 @@ where
 		} = self.inner.take().expect("request already responded");
 
 		match handshake {
-			Handshake::LiteBare { session, version } => server.start_lite(runtime, session, version, None, peer_hop),
-			Handshake::LiteSetup {
+			PausedHandshake::LiteBare { session, version } => {
+				server.start_lite(runtime, session, version, None, peer_hop)
+			}
+			PausedHandshake::LiteSetup {
 				session,
 				version,
 				client_setup,
 			} => server.start_lite(runtime, session, version, Some(client_setup), peer_hop),
-			Handshake::Boxed(paused) => paused.ok(server, runtime, peer_hop).await,
+			PausedHandshake::Boxed(paused) => paused.ok(server, runtime, peer_hop).await,
 		}
 	}
 
@@ -762,20 +767,20 @@ where
 impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> RequestInner<S, R> {
 	fn close(self, err: Error) {
 		let mut session = match self.handshake {
-			Handshake::LiteBare { session, .. } => session,
-			Handshake::LiteSetup { session, .. } => session,
-			Handshake::Boxed(paused) => return paused.close(err),
+			PausedHandshake::LiteBare { session, .. } => session,
+			PausedHandshake::LiteSetup { session, .. } => session,
+			PausedHandshake::Boxed(paused) => return paused.close(err),
 		};
 		session.close(SessionError::from(&err).to_code(), &err.to_string());
 	}
 }
 
-impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> Drop for Request<S, R> {
+impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> Drop for Handshake<S, R> {
 	// A dropped request would otherwise leave the client hanging until its idle
 	// timeout: it already sent SETUP and is waiting on a response. Reject loudly.
 	fn drop(&mut self) {
 		if let Some(inner) = self.inner.take() {
-			tracing::warn!("Request dropped without ok() or close(); rejecting the session");
+			tracing::warn!("Handshake dropped without ok() or close(); rejecting the session");
 			inner.close(Error::Cancel);
 		}
 	}
@@ -1095,7 +1100,7 @@ mod tests {
 		let transport = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
 		let log = transport.log.clone();
 		let version = ietf::Version::Draft18;
-		let request = Request {
+		let request = Handshake {
 			path: None,
 			role: None,
 			origin: None,
@@ -1103,7 +1108,7 @@ mod tests {
 			inner: Some(RequestInner {
 				server: Server::new().with_publisher(&origin),
 				runtime: crate::runtime::tokio_test::Tokio::new(),
-				handshake: Handshake::Boxed(Box::new(PausedIetfModern {
+				handshake: PausedHandshake::Boxed(Box::new(PausedIetfModern {
 					session: transport,
 					version,
 					peer_setup: ietf::PeerSetup {

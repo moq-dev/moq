@@ -168,7 +168,7 @@ mod tests {
 		let track = source.clone().create_track("video", None).unwrap();
 
 		let update = announced.next().await.expect("announce");
-		assert!(update.active);
+		assert!(update.kind.is_active());
 		let consumer = egress.request_broadcast(path).await.expect("resolve");
 		let sub = consumer.track("video").unwrap().subscribe(None).await.unwrap();
 
@@ -185,12 +185,10 @@ mod tests {
 		let mut consumer = origin.consume().announced();
 		tokio::time::advance(Duration::from_millis(1)).await;
 		let update = consumer.next().await.expect("expected announce");
-		assert!(update.active);
+		assert!(update.kind.is_active());
 		origin
 			.consume()
-			.request_broadcast(moq_net::Path::new(
-				update.pattern.as_prefix().expect("prefix announcement"),
-			))
+			.request_broadcast(moq_net::Path::new(update.path.as_str()))
 			.await
 			.expect("resolve")
 	}

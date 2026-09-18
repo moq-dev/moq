@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { Effect, Signal } from "@moq/signals";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
 import { SessionCode, SessionError, StreamCode, toTransport } from "../error.ts";
+import { Route } from "../hop.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -558,7 +559,7 @@ test("closing an announce consumer during upstream teardown does not append retr
 	const consumer = reload.announced();
 	const errors = spyOn(console, "error").mockImplementation(() => {});
 	try {
-		upstream.append({ pattern: Path.Pattern.literal("alice/camera.hang"), active: true });
+		upstream.append({ path: Path.from("alice/camera.hang"), kind: "announced", route: Route.default });
 		await consumer.next();
 		upstream.close();
 		// Let the upstream read settle, but close before the pump's finally callback runs.

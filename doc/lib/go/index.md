@@ -37,7 +37,7 @@ for ann, err := range announced.All(ctx) {
         log.Fatal(err)
     }
     // An announcement is a route; resolve the broadcast at its path.
-    broadcast, err := client.RequestBroadcast(ctx, "live/" + ann.Pattern())
+    broadcast, err := client.RequestBroadcast(ctx, "live/" + ann.Path())
     if err != nil {
         log.Fatal(err)
     }
@@ -70,11 +70,11 @@ broadcast.Finish()   // keep the producer reachable while publishing, then finis
 The three advertising operations: `client.CreateBroadcast(path)` (or
 `origin.CreateBroadcast`) returns an unadvertised producer;
 `broadcast.Announce(route)` / `broadcast.Unannounce()` own that exact-path
-advertisement; `origin.Dynamic(pattern, route)` claims every matching path
-(`foo/**` for a prefix). Hold the returned `OriginDynamic` while the claim
-should stay advertised. A wildcard is a capability, not an inventory;
-`ann.Pattern()` is the covered prefix for a prefix-shaped claim and the pattern
-text otherwise.
+advertisement; `origin.Dynamic(prefix, route)` claims `prefix` and every
+path beneath it (`""` for everything). Hold the returned `OriginDynamic`
+while the claim should stay advertised, and reject the requests you will not
+serve. A route is a capability, not an inventory; `ann.Path()` is the covered
+prefix.
 
 Every call that can block takes a `context.Context` first. Cancelling it
 returns `ctx.Err()` promptly and tears the in-flight native work down, so a

@@ -1042,7 +1042,7 @@ mod tests {
 		/// themselves current, with no per-frame bookkeeping in the caller.
 		#[test]
 		fn measures_a_custom_track() {
-			let (mut broadcast, mut catalog) = produce();
+			let (broadcast, mut catalog) = produce();
 			let reserved = catalog.reserve();
 			let mut rendition = reserved.init::<Telemetry>("gps").unwrap();
 			drop(reserved);

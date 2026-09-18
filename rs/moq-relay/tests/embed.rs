@@ -137,9 +137,9 @@ async fn embed_and_stop(mut config: Config) {
 		.expect("read embedded response");
 	assert_eq!(body, "embedded\n");
 
-	let mut broadcast = origin.create_broadcast("test").expect("create broadcast");
+	let broadcast = origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce");
-	let mut track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -166,8 +166,8 @@ async fn embed_and_stop(mut config: Config) {
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	assert_eq!(update.pattern.as_prefix().expect("prefix announcement"), "test");
-	assert!(update.active, "expected announce, got retraction");
+	assert_eq!(update.path.as_str(), "test");
+	assert!(update.kind.is_active(), "expected announce, got retraction");
 	let announced = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test"))
 		.await
 		.expect("request timeout")

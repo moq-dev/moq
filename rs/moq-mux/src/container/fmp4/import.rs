@@ -904,7 +904,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let new_segment = track.segment != Some(self.segment);
 			let start_group = track.group.is_none() || new_segment;
 			let mut g = if start_group {
-				if let Some(mut prev) = track.group.take() {
+				if let Some(prev) = track.group.take() {
 					prev.finish()?;
 				}
 				track.segment = Some(self.segment);
@@ -980,7 +980,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		for track in self.tracks.values_mut() {
 			track.estimator.cut(None);
 			track.publish_estimate()?;
-			if let Some(mut g) = track.group.take() {
+			if let Some(g) = track.group.take() {
 				g.finish()?;
 			}
 			track.track.finish()?;
@@ -1008,7 +1008,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		for track in self.tracks.values_mut() {
 			track.estimator.cut(None);
 			track.publish_estimate()?;
-			if let Some(mut g) = track.group.take() {
+			if let Some(g) = track.group.take() {
 				g.finish()?;
 			}
 			track.pending_sequence = Some(sequence);

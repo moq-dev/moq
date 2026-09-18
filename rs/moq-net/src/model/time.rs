@@ -181,12 +181,7 @@ impl Timestamp {
 	}
 
 	/// Const-context twin of [`Self::new`] that panics on overflow.
-	///
-	/// For building `const` timestamps where `?`/`unwrap` on the [`Result`] isn't
-	/// available. The panic fires only on a compile-time-known out-of-range literal, so
-	/// it's a build-time assertion, not a runtime failure path. Use [`Self::new`]
-	/// everywhere else.
-	pub const fn new_const(value: u64, scale: Timescale) -> Self {
+	const fn new_const(value: u64, scale: Timescale) -> Self {
 		match Self::new(value, scale) {
 			Ok(time) => time,
 			Err(_) => panic!("timestamp value exceeds 2^62 - 1"),

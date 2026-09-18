@@ -35,7 +35,6 @@ This document defines a clustering extension for MoQ Transport {{moqt}}, used to
 Each namespace advertisement carries the list of Hop IDs it has passed through, starting with the original publisher, and the accumulated cost of that path.
 A receiver uses the list to detect loops and to tell which advertisements come from the same publisher, and the cost to choose between paths.
 Each endpoint declares its own Hop ID at setup, so a peer never advertises or serves it a path that already passed through it.
-Pattern advertisements are defined and negotiated separately by {{I-D.lcurley-moq-pattern}}; this extension supplies their routing metadata when both are enabled.
 
 --- note_Note_to_Readers
 
@@ -155,13 +154,13 @@ NAMESPACE Message (Cluster) {
 ~~~
 
 The added fields are encoded exactly as in PUBLISH_NAMESPACE.
-Negotiating either this extension or {{I-D.lcurley-moq-pattern}} enables the block on every NAMESPACE, with a parameter count of 0 when it is empty; when both are negotiated an endpoint appends one block holding the parameters of both, not two blocks.
-An endpoint MUST NOT append the block when neither is negotiated, and MUST NOT include HOP_PATH or ROUTE_COST unless this extension is.
+Negotiating this extension enables the block on every NAMESPACE, with a parameter count of 0 when it is empty; when another extension defines the same block an endpoint appends one block holding the parameters of both, not two blocks.
+An endpoint MUST NOT append the block when nothing negotiated it, and MUST NOT include HOP_PATH or ROUTE_COST unless this extension is.
 
-NAMESPACE_DONE ({{moqt}} Section 10.17) carries no state from this extension; its pattern block is present only when {{I-D.lcurley-moq-pattern}} is negotiated.
+NAMESPACE_DONE ({{moqt}} Section 10.17) carries no state from this extension.
 
 An advertisement claims capability, not inventory: namespaces beneath the advertised one can be served, not that any exists.
-Patterns and per-request refusals follow {{I-D.lcurley-moq-pattern}}.
+Per-request refusals follow {{I-D.lcurley-moq-pattern}}.
 
 ## HOP_PATH Parameter {#hop-path}
 HOP_PATH is the ordered list of Hop IDs an advertisement has passed through, from the original publisher to the peer sending it:
@@ -235,7 +234,6 @@ A receiver MUST NOT treat the repeat as a duplicate or a protocol violation.
 
 An advertisement lives as long as its stream, so an update on a new stream would leave two streams claiming one namespace.
 An endpoint MUST NOT open a second stream for an advertisement it already maintains on the session.
-A pattern advertisement's identity includes its segment kinds ({{I-D.lcurley-moq-pattern}}), so identical bytes with different kinds are distinct advertisements.
 
 An update replaces the old parameters atomically, so a receiver MUST NOT tear down subscriptions or drop cached state because one arrived.
 If the first HOP_PATH entry is unchanged the content is continuous and subscriptions MAY resume on the new route at a group boundary, even when that entry is 0: there is one advertisement, and its stream is the continuity.
@@ -245,17 +243,10 @@ The expected update is a ROUTE_COST change, which is how a relay signals that it
 
 
 # Path Selection {#selection}
-A receiver resolving a request consults only the most specific advertisements covering it: the longest prefix, or, when patterns are enabled, the specificity {{I-D.lcurley-moq-pattern}} defines.
-Pattern support does not follow from this extension; advertisements to a session without it MUST remain prefixes.
+A receiver resolving a request consults only the most specific advertisements covering it: the longest prefix.
 
 Within that tier, a receiver SHOULD prefer a HOP_PATH that contains no 0 entry over one that does, then the lowest ROUTE_COST, breaking ties toward the shorter HOP_PATH and then toward the most recently received.
 This is advisory: a receiver MAY apply local policy, such as measured RTT, instead.
-
-Pattern advertisements tied at the lowest cost form a pool, and a deterministic hash spreads distinct namespaces across them.
-The hash is FNV-1a from the basis 0x420C0DECB00B over each requested namespace field, encoded as its byte length in eight little-endian bytes then its bytes, followed by the advertiser's first Hop ID in eight little-endian bytes: for each byte, XOR it in and multiply by 0x100000001B3 wrapping at 64 bits.
-The highest result wins.
-An advertisement whose first Hop ID is 0 is keyed by the session it arrived on instead: the receiver gives each such session a distinct 64-bit key, stable for its lifetime, and appends its eight little-endian bytes after the zero.
-That key is local selection state, not an identity, and MUST NOT be forwarded as a Hop ID.
 
 NO_CAPACITY and its single re-resolution are defined by {{I-D.lcurley-moq-pattern}}.
 Excluding the refusing advertiser excludes every route with its non-zero first Hop ID, or its session when that ID is 0.
@@ -335,4 +326,4 @@ The Key-Value-Pair parity is load-bearing: HOP_PATH is odd, so its value is a le
 - A PUBLISH_NAMESPACE is updated with REQUEST_UPDATE on its request stream instead of a repeated PUBLISH_NAMESPACE; HOP_PATH and ROUTE_COST are registered for REQUEST_UPDATE. A NAMESPACE is still re-sent on its stream.
 - A session advertises a namespace at most once and a subscription is served from one source at a time. A receiver chooses among several publishers of one namespace; moving between them is a discontinuity unless they share a Hop ID.
 - Named the routing protocols whose single per-direction metric RELAY_COST follows.
-- Pattern advertisements ({{I-D.lcurley-moq-pattern}}) share the NAMESPACE parameter block. Path selection consults the most specific advertisement first and spreads pattern advertisers tied on cost with a namespace hash. Standby seeds are bounded by deployment limits.
+- Path selection consults the most specific advertisement first, the longest prefix; an advertisement is always a prefix, and a request beneath it that the advertiser will not serve is refused ({{I-D.lcurley-moq-pattern}}). Standby seeds are bounded by deployment limits.

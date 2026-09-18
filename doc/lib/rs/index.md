@@ -20,7 +20,7 @@ The reference implementation. Every crate is on
 | [moq-video](/lib/rs/moq-video) | Native capture, hardware encode/decode (Apple, Windows, NVIDIA, VAAPI, V4L2, Android), and GPU rendering. |
 | [moq-audio](/lib/rs/moq-audio) | Microphone and speaker, Opus/PCM/AAC codecs, echo cancellation. |
 | [moq-transcode](https://docs.rs/moq-transcode) | Just-in-time rendition ladders, GPU-resident on NVIDIA. |
-| [moq-auth](/lib/rs/moq-auth) | The authorization contract: requests, grants, leases, the HTTP client, the reference server, and JWT keys, signing, and verification. |
+| [moq-auth](/lib/rs/moq-auth) | The authorization contract: requests, grants, leases, the HTTP client, the reference server, JWT keys, signing, and verification, plus listing live sessions and pushing a re-check. |
 | [moq-room](/lib/rs/moq-room) | Headless rooms: announce-derived roster, token claims, and a chat track. |
 | [moq-json](/lib/rs/moq-json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
 | [moq-binary](/lib/rs/moq-binary) | Opaque payloads over tracks: snapshots or append logs. |
@@ -51,9 +51,8 @@ let session = client.with_subscriber(origin.clone()).with_publisher(&origin).con
 let consumer = origin.consume();
 let mut announced = consumer.announced();
 while let Some(update) = announced.next().await {
-    if !update.active { continue }
-    let Some(prefix) = update.pattern.as_prefix() else { continue };
-    let broadcast = consumer.request_broadcast(prefix).await?;
+    if !update.kind.is_active() { continue }
+    let broadcast = consumer.request_broadcast(&update.path).await?;
     let catalog = broadcast
         .track(hang::Catalog::DEFAULT_NAME)?
         .subscribe(hang::Catalog::default_subscription())
@@ -68,7 +67,7 @@ let mut broadcast = origin.create_broadcast("my-stream.hang")?;
 // moq-mux (from a container) or moq-video / moq-audio (from a device) fill it.
 broadcast.announce(Default::default())?;
 // The route retracts on `unannounce()` or when the broadcast ends. To serve a whole
-// subtree on demand instead, `origin.dynamic("room/**".parse()?, Default::default())?` yields
+// subtree on demand instead, `origin.dynamic("room", Default::default())?` yields
 // each requested path for the application to accept or reject.
 ```
 

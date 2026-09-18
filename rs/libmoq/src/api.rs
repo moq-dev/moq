@@ -680,9 +680,9 @@ unsafe fn parse_route(route: *const moq_route) -> Result<moq_net::origin::Route,
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_announce_update {
-	/// The covered pattern, NOT NULL terminated
-	pub pattern: *const c_char,
-	pub pattern_len: usize,
+	/// The covered path prefix, NOT NULL terminated
+	pub path: *const c_char,
+	pub path_len: usize,
 
 	/// Whether the route is active or was retracted
 	/// This MUST toggle between true and false over the lifetime of the route
@@ -745,16 +745,18 @@ pub struct moq_connection_stats {
 	pub packets_lost_valid: bool,
 }
 
-impl From<&moq_net::ConnectionStats> for moq_connection_stats {
-	fn from(stats: &moq_net::ConnectionStats) -> Self {
+impl From<&moq_net::session::Stats> for moq_connection_stats {
+	fn from(stats: &moq_net::session::Stats) -> Self {
 		// An Option<u64> becomes a (value, valid) pair; absent metrics report 0/false.
 		fn split(value: Option<u64>) -> (u64, bool) {
 			(value.unwrap_or(0), value.is_some())
 		}
 
 		let (rtt_us, rtt_valid) = split(stats.rtt.map(|d| d.as_micros() as u64));
-		let (estimated_send_rate_bps, estimated_send_rate_valid) = split(stats.estimated_send_rate);
-		let (estimated_recv_rate_bps, estimated_recv_rate_valid) = split(stats.estimated_recv_rate);
+		let (estimated_send_rate_bps, estimated_send_rate_valid) =
+			split(stats.estimated_send_rate.map(moq_net::bandwidth::Rate::as_bps));
+		let (estimated_recv_rate_bps, estimated_recv_rate_valid) =
+			split(stats.estimated_recv_rate.map(moq_net::bandwidth::Rate::as_bps));
 		let (bytes_sent, bytes_sent_valid) = split(stats.bytes_sent);
 		let (bytes_received, bytes_received_valid) = split(stats.bytes_received);
 		let (bytes_lost, bytes_lost_valid) = split(stats.bytes_lost);
@@ -1334,12 +1336,13 @@ pub unsafe extern "C" fn moq_origin_create_broadcast(origin: u32, path: *const c
 	})
 }
 
-/// Advertise `pattern` and serve the requests beneath it.
+/// Advertise `prefix` and serve the requests beneath it.
 ///
-/// `pattern` is in the path Pattern dialect; a prefix is spelled `foo/**`.
-/// A non-prefix pattern is advertised as a covering claim; resolving one into
-/// a subscription is not implemented yet. `on_request` is required: a NULL callback is refused before the
-/// route is advertised. It is invoked with a positive request handle for each
+/// A route claims `prefix` and every path beneath it (the empty prefix claims
+/// every path). A service that only serves some of them advertises the
+/// covering prefix and rejects the rest as they are requested. `on_request` is
+/// required: a NULL callback is refused before the route is advertised. It is
+/// invoked with a positive request handle for each
 /// pending broadcast, then exactly once more with a terminal code: `0` (stopped
 /// cleanly, including after [moq_origin_dynamic_close]) or a negative error.
 /// After the terminal (`<= 0`) callback, `user_data` is never touched again.
@@ -1347,15 +1350,15 @@ pub unsafe extern "C" fn moq_origin_create_broadcast(origin: u32, path: *const c
 /// Returns a non-zero handle on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must ensure that pattern is a valid pointer to pattern_len bytes of data.
+/// - The caller must ensure that prefix is a valid pointer to prefix_len bytes of data.
 /// - `route` may be NULL, or must point at a readable [moq_route].
 /// - `on_request` must be non-NULL; a missing callback is refused before the route is advertised.
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_request` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_origin_dynamic(
 	origin: u32,
-	pattern: *const c_char,
-	pattern_len: usize,
+	prefix: *const c_char,
+	prefix_len: usize,
 	route: *const moq_route,
 	on_request: Option<extern "C" fn(user_data: *mut c_void, request: i32)>,
 	user_data: *mut c_void,
@@ -1363,14 +1366,14 @@ pub unsafe extern "C" fn moq_origin_dynamic(
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
 		let on_request = on_request.ok_or(Error::InvalidPointer)?;
-		let pattern: moq_net::Pattern = unsafe { ffi::parse_str(pattern, pattern_len)? }.parse()?;
+		let prefix = unsafe { ffi::parse_str(prefix, prefix_len)? };
 		let route = unsafe { parse_route(route)? };
 		let on_request = unsafe { ffi::OnStatus::new(user_data, Some(on_request)) };
-		State::lock().origin.dynamic(origin, pattern, route, on_request)
+		State::lock().origin.dynamic(origin, prefix, route, on_request)
 	})
 }
 
-/// Re-price a served route in place. The pattern cannot change.
+/// Re-price a served route in place. The prefix cannot change.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///

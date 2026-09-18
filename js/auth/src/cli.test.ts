@@ -30,7 +30,7 @@ describe.skipIf(process.platform === "win32")("generate permissions", () => {
 
 	test("private key is owner-only", () => {
 		const key = join(dir, "private.jwk");
-		run("generate", "--key", key);
+		run("generate", "--out", key);
 		expect(mode(key)).toBe(0o600);
 	});
 
@@ -39,7 +39,7 @@ describe.skipIf(process.platform === "win32")("generate permissions", () => {
 		writeFileSync(key, "stale");
 		chmodSync(key, 0o644);
 
-		run("generate", "--key", key);
+		run("generate", "--out", key);
 		expect(mode(key)).toBe(0o600);
 
 		// The old contents are gone, not just hidden behind the new mode.
@@ -52,7 +52,7 @@ describe.skipIf(process.platform === "win32")("generate permissions", () => {
 		writeFileSync(pub, "");
 		chmodSync(pub, 0o644);
 
-		run("generate", "--key", key, "--algorithm", "ES256", "--public", pub);
+		run("generate", "--out", key, "--algorithm", "ES256", "--public", pub);
 		expect(mode(pub)).toBe(0o644);
 	});
 });

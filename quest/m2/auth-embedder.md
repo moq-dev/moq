@@ -47,7 +47,6 @@ reasons.
 
 ## Required
 
-- [Auth contract](/quest/m1/auth-contract.md) - the types this builds on settle first
 - [Merge dev](/quest/m1/merge-dev.md) - starts on main
 
 ## Related

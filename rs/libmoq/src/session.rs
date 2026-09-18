@@ -135,7 +135,7 @@ impl Session {
 	///
 	/// Errors with [`Error::SessionNotFound`] if the handle is unknown, or [`Error::Offline`]
 	/// if the session is currently between connections (reconnecting).
-	pub fn stats(&self, id: Id) -> Result<moq_net::ConnectionStats, Error> {
+	pub fn stats(&self, id: Id) -> Result<moq_net::session::Stats, Error> {
 		self.task
 			.get(id)
 			.and_then(|entry| entry.as_ref())

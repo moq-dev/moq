@@ -17,5 +17,4 @@ rather than holding the merge.
 ## Quests
 
 - [Published types](/quest/m0/js-net-internal-types.md) - @moq/net: the emitted `.d.ts` no longer strips `ReloadDelay`/`ReloadStatus` from under `Connection`
-- [Idle consumer](/quest/m0/origin-idle-consumer.md) - moq-net: an origin front drops the source's track when its last reader leaves, so upstream and producer demand end then, not 30 s later
 

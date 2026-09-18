@@ -92,12 +92,12 @@ impl Consumer {
 			.await?;
 		// A decoder often opens on a track that is already cached: a replacement
 		// decoder subscribes while its predecessor still holds groups, and a
-		// rendition switched away from and back to stays warm for
-		// `TRACK_IDLE_LINGER`. A caller that asked for `Start::Latest` wants
-		// none of that backlog, because a cursor starting at sequence zero
-		// replays every cached group at decode speed before reaching live
-		// media, which on a thirty-second retention is half a minute of sound raced
-		// through.
+		// rendition switched away from and back to stays warm on the origin for
+		// `TRACK_IDLE_LINGER` (cached groups, not an upstream subscription). A
+		// caller that asked for `Start::Latest` wants none of that backlog,
+		// because a cursor starting at sequence zero replays every cached group
+		// at decode speed before reaching live media, which on a thirty-second
+		// retention is half a minute of sound raced through.
 		//
 		// This moves the local read cursor and deliberately not
 		// `Subscription::group_start`. That field is a request to the publisher,
@@ -531,7 +531,7 @@ mod tests {
 	/// at 44.1 kHz never fills the 882-frame chunk evenly.
 	#[tokio::test]
 	async fn resampled_timestamps_follow_the_samples() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
@@ -590,7 +590,7 @@ mod tests {
 	/// 44.1 kHz guarantees a remainder, never filling the 882-frame chunk evenly.
 	#[tokio::test]
 	async fn resampled_tail_survives_the_end_of_the_track() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
@@ -665,7 +665,7 @@ mod tests {
 		.unwrap();
 		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 1);
 
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
@@ -740,7 +740,7 @@ mod tests {
 	/// Publish PCM packets of `frames` samples each at the given stamps, and read
 	/// back every decoded frame as `(microseconds, output frames)`.
 	async fn pcm_gaps(rate: u32, out_rate: u32, frames: usize, stamps: &[Timestamp]) -> Vec<(u128, usize)> {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
@@ -889,7 +889,7 @@ mod tests {
 			.find(|packet| packet.activity.is_dtx())
 			.expect("silence should enter Opus DTX");
 
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
@@ -989,7 +989,7 @@ mod tests {
 		let mut encoder = Encoder::new(&crate::encode::Config::new(input)).unwrap();
 		let catalog = encoder.catalog();
 
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
@@ -1052,7 +1052,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn max_age_is_clamped_to_publisher_retention() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let broadcast = moq_net::broadcast::Info::new().produce();
 		let info = hang::container::track_info(hang::catalog::PRIORITY.audio)
 			.with_max_age(std::time::Duration::from_millis(100));
 		let _track = broadcast.create_track("audio", info).unwrap();
@@ -1087,7 +1087,7 @@ mod tests {
 		let mut encoder = Encoder::new(&crate::encode::Config::new(input)).unwrap();
 		let catalog = encoder.catalog();
 
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
@@ -1139,7 +1139,7 @@ mod tests {
 		let catalog = encoder.catalog();
 		let frame_size = encoder.frame_size();
 
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
@@ -1192,7 +1192,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn reads_the_container_the_catalog_declares() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
@@ -1262,7 +1262,7 @@ mod tests {
 		let init = muxer.init().unwrap().expect("an out-of-band codec has an init segment");
 		catalog.container = hang::catalog::Container::Cmaf { init };
 
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let broadcast = moq_net::broadcast::Info::new().produce();
 		let subscriber = broadcast.consume();
 		let track = broadcast
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))

@@ -320,10 +320,7 @@ impl<V: Mergeable> Merged<V> {
 	/// changed (only a non-sticky contribution leaving does; a sticky one is
 	/// kept).
 	fn apply_announce(&mut self, update: moq_net::announce::Update) -> bool {
-		let Some(prefix) = update.pattern.as_prefix() else {
-			return false;
-		};
-		let path = moq_net::Path::new(prefix).to_owned();
+		let path = update.path;
 		let absolute = self.announce.absolute(&path).to_owned();
 
 		// Only fold node-category routes; skip sibling categories a producer
@@ -333,7 +330,7 @@ impl<V: Mergeable> Merged<V> {
 			return false;
 		}
 
-		if update.active {
+		if update.kind.is_active() {
 			// A route update on a node already tracked (a reprice, or a takeover
 			// with different metadata) keeps the live reader: existing
 			// subscriptions survive a takeover, and the reader re-resolves through
@@ -532,12 +529,12 @@ mod tests {
 		let egress = feed_origin.consume().with_stats(ctx.clone());
 
 		let mut announced = egress.announced();
-		let mut source = feed_origin.create_broadcast(path).expect("create_broadcast");
+		let source = feed_origin.create_broadcast(path).expect("create_broadcast");
 		source.announce(origin::Route::default()).expect("announce");
-		let mut track = source.create_track("video", None).expect("create_track");
+		let track = source.create_track("video", None).expect("create_track");
 
 		let update = announced.next().await.expect("announce");
-		assert!(update.active);
+		assert!(update.kind.is_active());
 		let consumer = egress.request_broadcast(path).await.expect("resolve");
 		let mut sub = consumer.track("video").unwrap().subscribe(None).await.unwrap();
 
@@ -604,7 +601,7 @@ mod tests {
 	impl NodeBroadcast {
 		fn new(origin: &origin::Producer, group: &str, node: &str) -> Self {
 			let path = format!(".stats/{group}/node/{node}");
-			let mut source = origin.create_broadcast(path.as_str()).expect("create broadcast");
+			let source = origin.create_broadcast(path.as_str()).expect("create broadcast");
 			source.announce(origin::Route::default()).expect("announce");
 			let name = traffic_track(&Tier::default(), Role::Publisher, false);
 			let track = source.create_track(name, None).expect("create track");

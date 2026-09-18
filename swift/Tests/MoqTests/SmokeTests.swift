@@ -52,7 +52,7 @@ final class SmokeTests: XCTestCase {
     func testOriginProducerIsConstructible() throws {
         let origin = OriginProducer(cacheCapacityBytes: 4096)
         _ = origin.consume()
-        _ = try origin.dynamic(pattern: "**")
+        _ = try origin.dynamic(prefix: "")
     }
 
     func testAnnounceThenUnannounceIsVisible() async throws {
@@ -63,19 +63,19 @@ final class SmokeTests: XCTestCase {
 
         let announced = try origin.consume().announced(prefix: "")
         let first = try await announced.next()
-        XCTAssertEqual(first?.pattern, "live")
+        XCTAssertEqual(first?.path, "live")
         XCTAssertEqual(first?.active, true)
 
         try broadcast.unannounce()
         let retracted = try await announced.next()
-        XCTAssertEqual(retracted?.pattern, "live")
+        XCTAssertEqual(retracted?.path, "live")
         XCTAssertEqual(retracted?.active, false)
         _ = try await origin.consume().requestBroadcast(path: "live")
     }
 
     func testDynamicServesARequestUnderAPrefix() async throws {
         let origin = OriginProducer()
-        let dynamic = try origin.dynamic(pattern: "live/**")
+        let dynamic = try origin.dynamic(prefix: "live")
         let pending = Task {
             try await origin.consume().requestBroadcast(path: "live/cam")
         }
@@ -87,11 +87,6 @@ final class SmokeTests: XCTestCase {
         dynamic.cancel()
     }
 
-    func testDynamicAcceptsANonPrefixPattern() throws {
-        let origin = OriginProducer()
-        let dynamic = try origin.dynamic(pattern: "live/*")
-        dynamic.cancel()
-    }
 
     func testBroadcastProducerOpensTracks() throws {
         let broadcast = try BroadcastProducer()

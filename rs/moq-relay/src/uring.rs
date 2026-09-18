@@ -65,6 +65,7 @@ struct Serve {
 	cluster: cluster::Cluster,
 	auth: auth::Auth,
 	shutdown: shutdown::Observer,
+	sessions: crate::session::Registry,
 	/// The shared runtime, which owns authentication (the auth API's HTTP
 	/// client needs its reactor) and session supervision.
 	tokio: tokio::runtime::Handle,
@@ -298,11 +299,13 @@ impl Workers {
 		cluster: cluster::Cluster,
 		auth: auth::Auth,
 		shutdown: shutdown::Observer,
+		sessions: crate::session::Registry,
 	) -> anyhow::Result<()> {
 		let serve = Serve {
 			cluster,
 			auth,
 			shutdown,
+			sessions,
 			tokio: tokio::runtime::Handle::current(),
 			alpns: self.alpns.clone(),
 			versions: self.versions.clone(),
@@ -670,7 +673,7 @@ async fn serve_connection(
 		}
 	};
 	let path = if path.is_empty() { "/".to_string() } else { path };
-	let bytes = moq_auth::Counters::default();
+	let mut registration = None;
 	let lease = if cluster::Cluster::is_lan_path(&path) {
 		match cluster::Cluster::lan_credential(&path) {
 			Some(presented) => match serve.cluster.verify_lan_credential(presented) {
@@ -708,14 +711,20 @@ async fn serve_connection(
 		}
 
 		let auth = serve.auth.clone();
-		let counters = bytes.clone();
+		let sessions = serve.sessions.clone();
 		match serve
 			.tokio
-			.spawn(async move { auth.admit(auth_request, counters).await })
+			.spawn(async move {
+				let lease = auth.admit(auth_request.clone()).await?;
+				Ok::<_, crate::auth::Error>((lease, sessions.register(auth_request)))
+			})
 			.await
 			.context("auth task failed")?
 		{
-			Ok(admitted) => admitted,
+			Ok((admitted, registered)) => {
+				registration = Some(registered);
+				admitted
+			}
 			Err(err) => {
 				// The status is what separates "your credential is bad" from "the
 				// auth server is down". Collapsing both into Unauthorized tells a
@@ -761,7 +770,7 @@ async fn serve_connection(
 	let shutdown = serve.shutdown.clone();
 	serve.tokio.spawn(async move {
 		let _node_connection = node_connection;
-		if let Err(err) = crate::connection::supervise(session, lease, bytes, shutdown).await {
+		if let Err(err) = crate::connection::supervise(session, lease, shutdown, registration).await {
 			tracing::warn!(id, %err, "connection closed");
 		}
 	});

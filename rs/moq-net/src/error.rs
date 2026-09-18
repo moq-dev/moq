@@ -241,7 +241,17 @@ impl StreamError {
 	}
 }
 
-/// A list of possible errors that can occur during the session.
+/// Failures in this crate, both local conditions and codes received off the wire.
+///
+/// Local conditions are the flat variants (`Cancel`, `NotFound`, `Lagged`, and so
+/// on): this side decided what went wrong. Codes received from a peer are nested
+/// in [`Self::Session`] or [`Self::Stream`], preserving the registry and the numeric
+/// value. [`Self::Remote`] is an unrecognized request-rejection code (the IETF
+/// request registry), not a session or stream unknown.
+///
+/// The two registries are the wire. Mapping a local condition onto a code is
+/// [`SessionError::from`] / [`StreamError::from`]; folding the flat variants into
+/// those registries is a later decision.
 #[derive(thiserror::Error, Debug, Clone)]
 #[non_exhaustive]
 pub enum Error {
@@ -289,8 +299,8 @@ pub enum Error {
 	Old,
 
 	/// An application-chosen close code. Bounded to `u16` and offset past the library's
-	/// reserved range (`+ 64`) on the wire by [`Self::to_code`], so app codes never
-	/// collide with protocol ones.
+	/// reserved range (`+ 64`) on the wire by [`SessionError::to_code`] /
+	/// [`StreamError::to_code`], so app codes never collide with protocol ones.
 	///
 	/// The width asymmetry with [`Self::Remote`] is deliberate: `App` is a code *this*
 	/// side chooses to send, while `Remote` carries a raw code *received* off the wire
@@ -431,49 +441,6 @@ pub enum Error {
 }
 
 impl Error {
-	/// An integer code that is sent over the wire.
-	pub fn to_code(&self) -> u32 {
-		match self {
-			Self::Cancel => 0,
-			Self::Old => 2,
-			Self::Timeout => 3,
-			Self::Transport(_) => 4,
-			Self::Decode(_) => 5,
-			Self::Unauthorized => 6,
-			Self::Version => 9,
-			Self::UnexpectedStream => 10,
-			Self::BoundsExceeded(_) => 11,
-			Self::Duplicate => 12,
-			Self::NotFound => 13,
-			Self::WrongSize => 14,
-			Self::ProtocolViolation => 15,
-			Self::UnexpectedMessage => 16,
-			Self::Unsupported => 17,
-			Self::Encode(_) => 18,
-			Self::TooManyParameters => 19,
-			Self::UnknownAlpn(_) => 21,
-			Self::Dropped => 24,
-			Self::Closed => 25,
-			Self::Lagged => 26,
-			Self::FrameTooLarge => 27,
-			Self::GroupTooLarge => 34,
-			// 22 was unused in the 0-31 library range.
-			Self::FrameOpen => 22,
-			// 28 is reserved (was per-frame decompression, removed in draft-05).
-			Self::TimestampMismatch => 29,
-			Self::Unroutable => 30,
-			Self::Evicted => 31,
-			Self::GoingAway => 32,
-			Self::GoawayTimeout => 33,
-			Self::MalformedTrack => 22,
-			Self::SessionClosed => 25,
-			Self::App(app) => *app as u32 + 64,
-			Self::Session(err) => err.to_code(),
-			Self::Stream(err) => err.to_code(),
-			Self::Remote(code) => *code,
-		}
-	}
-
 	/// The session-scoped protocol error, if this was received as one.
 	pub fn session(&self) -> Option<&SessionError> {
 		match self {
@@ -622,26 +589,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	// The codes this implementation *sends* must stay put across a variant rename
-	// (e.g. CacheFull -> Lagged), since peers and logs already see them. Pin the
-	// load-bearing ones. This is our table, not a wire-wide registry: see
-	// `from_transport` for why a received code is never mapped back through it.
-	#[test]
-	fn to_code_is_stable() {
-		assert_eq!(Error::Cancel.to_code(), 0);
-		assert_eq!(Error::Version.to_code(), 9);
-		assert_eq!(Error::UnknownAlpn(String::new()).to_code(), 21);
-		assert_eq!(Error::Lagged.to_code(), 26);
-		assert_eq!(Error::GroupTooLarge.to_code(), 34);
-		assert_eq!(Error::Evicted.to_code(), 31);
-		assert_eq!(Error::GoingAway.to_code(), 32);
-		assert_eq!(Error::GoawayTimeout.to_code(), 33);
-		// App codes sit past the reserved library range; Remote is the raw received code.
-		assert_eq!(Error::App(0).to_code(), 64);
-		assert_eq!(Error::App(404).to_code(), 468);
-		assert_eq!(Error::Remote(468).to_code(), 468);
-	}
 
 	// Both registries are wire contracts now (draft-lcurley-moq-lite, Error Codes), so
 	// every code we send must decode back to what we meant.

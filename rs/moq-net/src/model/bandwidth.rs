@@ -113,9 +113,10 @@ impl Producer {
 		Ok(())
 	}
 
-	/// Block until the channel is closed.
-	pub async fn closed(&self) {
-		self.state.closed().await
+	/// Block until the channel is closed, returning the cause.
+	pub async fn closed(&self) -> Error {
+		self.state.closed().await;
+		self.close_error()
 	}
 
 	/// Block until there are no active consumers.
@@ -636,7 +637,7 @@ mod tests {
 
 	/// A standalone track at `priority`, plus the broadcast keeping it alive.
 	fn track(priority: u8) -> (broadcast::Producer, track::Producer) {
-		let mut broadcast = broadcast::Info::default().produce();
+		let broadcast = broadcast::Info::default().produce();
 		let track = broadcast
 			.create_track("t", track::Info::default().with_priority(priority))
 			.unwrap();

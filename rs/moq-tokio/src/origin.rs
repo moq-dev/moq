@@ -29,16 +29,16 @@ mod tests {
 		let origin = spawn(moq_net::origin::Config::new(moq_net::Hop::random()));
 		let mut announced = origin.consume().announced();
 
-		let mut broadcast = origin.create_broadcast("cam").expect("create broadcast");
+		let broadcast = origin.create_broadcast("cam").expect("create broadcast");
 		broadcast.announce(Default::default()).expect("create broadcast");
 
 		let update = announced.next().await.expect("announce");
-		assert_eq!(update.pattern.as_prefix().expect("prefix announcement"), "cam");
-		assert!(update.active);
+		assert_eq!(update.path.as_str(), "cam");
+		assert!(update.kind.is_active());
 
 		broadcast.finish();
 		let update = announced.next().await.expect("retraction");
-		assert!(!update.active);
+		assert!(!update.kind.is_active());
 	}
 
 	/// Outside a runtime the spawn has nowhere to run the driver: it panics

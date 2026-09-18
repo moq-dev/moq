@@ -110,7 +110,9 @@ moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs
 moq-transcode = { workspace = true, optional = true }
 moq-video = { workspace = true, optional = true }
 pollster = { workspace = true, optional = true }
+reqwest = { workspace = true, features = ["rustls", "json"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tower-http = { workspace = true }
 tracing = { workspace = true }

@@ -460,7 +460,7 @@ async fn fetches(
 fn spawn_fetch(
 	tasks: &mut tokio::task::JoinSet<()>,
 	rung: Rung,
-	request: moq_net::track::GroupRequest,
+	request: moq_net::group::Request,
 	permit: tokio::sync::OwnedSemaphorePermit,
 ) {
 	tasks.spawn(async move {
@@ -478,7 +478,7 @@ fn spawn_fetch(
 /// `GroupRequest` auto-rejects with [`moq_net::Error::Dropped`], which reads as
 /// "the handler vanished" and hides the actual decode/encode/source failure from
 /// the waiting consumer.
-async fn fetch(rung: Rung, request: moq_net::track::GroupRequest) -> Result<(), Error> {
+async fn fetch(rung: Rung, request: moq_net::group::Request) -> Result<(), Error> {
 	let options = moq_net::group::Fetch::default().with_priority(request.priority());
 	let mut source = match rung.source.fetch_group(request.sequence(), options).await {
 		Ok(source) => source,
@@ -737,8 +737,8 @@ mod tests {
 		let mut cursor = active.consume();
 		let rendition = cursor.try_next().expect("ladder").rendition;
 
-		let mut broadcast = moq_net::broadcast::Info::default().produce();
-		let mut track = broadcast
+		let broadcast = moq_net::broadcast::Info::default().produce();
+		let track = broadcast
 			.create_track("video/120p", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
 		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();

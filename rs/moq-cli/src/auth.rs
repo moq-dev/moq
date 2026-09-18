@@ -6,8 +6,8 @@ use anyhow::Context;
 use std::net::SocketAddr;
 use std::{io, path::PathBuf};
 
-use moq_auth::serve::{Keys, Policy, Rules};
-use moq_auth::{Algorithm, Pattern};
+use moq_auth::serve::{Keys, Policy};
+use moq_auth::{Algorithm, Pattern, Permissions};
 
 /// Generate, sign, and verify the JWT tokens a relay authenticates with.
 #[derive(usage::Args, Clone, Debug)]
@@ -105,6 +105,9 @@ impl Args {
 
 				println!("{payload:#?}");
 			}
+
+			Command::Sessions(filter) => filter.get("/sessions").await?,
+			Command::Revalidate(filter) => filter.post("/sessions/revalidate").await?,
 		}
 
 		Ok(())
@@ -185,6 +188,12 @@ enum Command {
 	/// Answer a relay's auth requests with keys, public rules, an mTLS grant, tiers, and session limits.
 	Serve(Serve),
 
+	/// List live sessions on a relay's internal listener.
+	Sessions(SessionFilter),
+
+	/// Ask a relay to re-check matching sessions now.
+	Revalidate(SessionFilter),
+
 	/// Verify a token, writing the payload to stdout.
 	Verify {
 		/// Path to the key file. Use `-` for stdin (requires `--in` to be a file).
@@ -195,6 +204,147 @@ enum Command {
 		#[usage(long = "in", default = "-", value_hint = usage::ValueHint::FilePath)]
 		token: PathBuf,
 	},
+}
+
+/// Filter flags shared by `moq auth sessions` and `moq auth revalidate`.
+#[derive(usage::Args, Clone, Debug)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+pub struct SessionFilter {
+	/// The relay's internal listener, e.g. `http://127.0.0.1:9101`.
+	#[usage(long)]
+	internal_url: url::Url,
+
+	/// Session id.
+	#[usage(long)]
+	id: Option<String>,
+
+	/// Pattern matched against the dialed path, e.g. `demo/**`.
+	#[usage(long)]
+	path: Option<String>,
+
+	/// Peer IP or CIDR; the port is dropped.
+	#[usage(long)]
+	remote: Option<String>,
+
+	/// How the session reached the relay: `quic`, `websocket`, `tcp`, ...
+	#[usage(long)]
+	transport: Option<String>,
+
+	/// The relay's node name.
+	#[usage(long)]
+	node: Option<String>,
+
+	/// The relay's local socket, exact including port.
+	#[usage(long)]
+	local: Option<String>,
+
+	/// SNI or the host the client addressed.
+	#[usage(long)]
+	server_name: Option<String>,
+
+	/// Negotiated application protocol.
+	#[usage(long)]
+	alpn: Option<String>,
+
+	/// SETUP role: `publisher` or `subscriber`.
+	#[usage(long)]
+	role: Option<String>,
+
+	/// Certificate SAN/CN/fingerprint.
+	#[usage(long)]
+	tls_name: Option<String>,
+
+	/// Certificate SHA-256, hex.
+	#[usage(long)]
+	tls_fingerprint: Option<String>,
+
+	/// Certificate issuer DN.
+	#[usage(long)]
+	tls_issuer: Option<String>,
+}
+
+impl SessionFilter {
+	fn query(&self) -> Vec<(&'static str, &str)> {
+		let mut query = Vec::new();
+		if let Some(value) = &self.id {
+			query.push(("id", value.as_str()));
+		}
+		if let Some(value) = &self.path {
+			query.push(("path", value.as_str()));
+		}
+		if let Some(value) = &self.remote {
+			query.push(("remote", value.as_str()));
+		}
+		if let Some(value) = &self.transport {
+			query.push(("transport", value.as_str()));
+		}
+		if let Some(value) = &self.node {
+			query.push(("node", value.as_str()));
+		}
+		if let Some(value) = &self.local {
+			query.push(("local", value.as_str()));
+		}
+		if let Some(value) = &self.server_name {
+			query.push(("server_name", value.as_str()));
+		}
+		if let Some(value) = &self.alpn {
+			query.push(("alpn", value.as_str()));
+		}
+		if let Some(value) = &self.role {
+			query.push(("role", value.as_str()));
+		}
+		if let Some(value) = &self.tls_name {
+			query.push(("tls.name", value.as_str()));
+		}
+		if let Some(value) = &self.tls_fingerprint {
+			query.push(("tls.fingerprint", value.as_str()));
+		}
+		if let Some(value) = &self.tls_issuer {
+			query.push(("tls.issuer", value.as_str()));
+		}
+		query
+	}
+
+	fn url(&self, path: &str) -> url::Url {
+		let mut url = self.internal_url.clone();
+		let base = url.path().trim_end_matches('/');
+		url.set_path(&format!("{base}{path}"));
+		let query = self.query();
+		if !query.is_empty() {
+			url.set_query(Some(
+				&url::form_urlencoded::Serializer::new(String::new())
+					.extend_pairs(query)
+					.finish(),
+			));
+		}
+		url
+	}
+
+	async fn get(&self, path: &str) -> anyhow::Result<()> {
+		self.send(reqwest::Method::GET, path).await
+	}
+
+	async fn post(&self, path: &str) -> anyhow::Result<()> {
+		self.send(reqwest::Method::POST, path).await
+	}
+
+	async fn send(&self, method: reqwest::Method, path: &str) -> anyhow::Result<()> {
+		let response = reqwest::Client::new()
+			.request(method, self.url(path))
+			.send()
+			.await
+			.with_context(|| format!("failed to reach {}", self.internal_url))?;
+		let status = response.status();
+		let body = response.text().await.context("failed to read the reply")?;
+		if !status.is_success() {
+			anyhow::bail!("{status}: {body}");
+		}
+		match serde_json::from_str::<serde_json::Value>(&body) {
+			Ok(value) => println!("{}", serde_json::to_string_pretty(&value)?),
+			Err(_) => println!("{body}"),
+		}
+		Ok(())
+	}
 }
 
 /// The reference auth server: the policy a relay used to hold, behind `--auth-url`.
@@ -262,7 +412,7 @@ impl Serve {
 			anyhow::bail!("--revalidate must be longer than 0s; every client would re-check in a tight loop");
 		}
 		let rules = |publish: &[Pattern], subscribe: &[Pattern]| {
-			Rules::new(publish.iter().cloned().collect(), subscribe.iter().cloned().collect())
+			Permissions::new(publish.iter().cloned().collect(), subscribe.iter().cloned().collect())
 		};
 		let mut policy = Policy::default();
 		policy.keys = match (&self.key, &self.key_dir) {
@@ -626,6 +776,85 @@ mod tests {
 			.await
 			.unwrap_err();
 		assert!(err.to_string().contains("cannot both read from stdin"), "{err}");
+	}
+
+	#[test]
+	fn revalidate_and_sessions_flags_parse() {
+		let args = parse(&[
+			"moq",
+			"auth",
+			"revalidate",
+			"--internal-url",
+			"http://127.0.0.1:9101",
+			"--id",
+			"abc",
+			"--path",
+			"demo/**",
+			"--remote",
+			"203.0.113.0/24",
+			"--tls-name",
+			"edge0",
+		])
+		.unwrap();
+		match args.command {
+			Command::Revalidate(filter) => {
+				assert_eq!(filter.id.as_deref(), Some("abc"));
+				assert_eq!(filter.path.as_deref(), Some("demo/**"));
+				assert_eq!(filter.remote.as_deref(), Some("203.0.113.0/24"));
+				assert_eq!(filter.tls_name.as_deref(), Some("edge0"));
+			}
+			other => panic!("expected revalidate, got {other:?}"),
+		}
+
+		assert!(matches!(
+			parse(&["moq", "auth", "sessions", "--internal-url", "http://127.0.0.1:9101"])
+				.unwrap()
+				.command,
+			Command::Sessions(_)
+		));
+	}
+
+	#[tokio::test]
+	async fn revalidate_posts_against_the_internal_listener() {
+		let sessions = moq_relay::session::Registry::new();
+		let mut request = moq_auth::Request::new("relay-1", moq_auth::Transport::Quic, "/demo/room");
+		request.id = "abc".into();
+		request.remote = Some("203.0.113.9:4433".parse().unwrap());
+		request.query = Some("jwt=secret".into());
+		let _reg = sessions.register(request);
+
+		let listen = std::net::TcpListener::bind("127.0.0.1:0")
+			.expect("probe bind")
+			.local_addr()
+			.expect("probe addr");
+		let mut internal_config = moq_relay::internal::Config::default();
+		internal_config.listen = Some(listen);
+		let internal =
+			moq_relay::internal::Internal::new(internal_config, moq_tokio::moq_net::stats::Registry::disabled())
+				.with_sessions(sessions);
+		tokio::spawn(async move {
+			let _ = internal.run().await;
+		});
+
+		let url = format!("http://{listen}");
+		let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+		while reqwest::Client::new()
+			.get(format!("{url}/health"))
+			.send()
+			.await
+			.is_err()
+		{
+			assert!(std::time::Instant::now() < deadline, "internal listener never came up");
+			tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+		}
+
+		run(&["moq", "auth", "revalidate", "--internal-url", &url, "--id", "abc"])
+			.await
+			.expect("revalidate");
+
+		run(&["moq", "auth", "sessions", "--internal-url", &url, "--path", "demo/**"])
+			.await
+			.expect("sessions");
 	}
 
 	#[test]

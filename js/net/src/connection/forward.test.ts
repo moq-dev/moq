@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import * as Announce from "../announced.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "../broadcast.ts";
+import { Route } from "../hop.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import type { Established } from "./established.ts";
@@ -72,7 +73,7 @@ test("a discovery failure under a live session downgrades the origin", async () 
 	forwardAnnounced(session.session, origin);
 
 	// The relay announces a broadcast, which lands in the table.
-	session.announces.append({ pattern: Path.Pattern.subtree(path), active: true });
+	session.announces.append({ path, kind: "announced", route: Route.default });
 	await settle();
 	expect(origin.discovery.peek()).toBe(true);
 	expect(origin.routes(path)).toBe(true);
@@ -113,7 +114,7 @@ test("a request outlives the discovery failure that fed it", async () => {
 	forwardAnnounced(session.session, origin);
 
 	// Announced, so the table routes it and no blind answer is needed.
-	session.announces.append({ pattern: Path.Pattern.subtree(path), active: true });
+	session.announces.append({ path, kind: "announced", route: Route.default });
 	await settle();
 
 	const request = origin.request(path);

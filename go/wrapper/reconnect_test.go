@@ -125,7 +125,7 @@ func awaitAnnouncement(t *testing.T, ctx context.Context, announced *moq.Announc
 		if ann == nil {
 			t.Fatalf("announcement stream ended before %q", path)
 		}
-		if ann.Active() && ann.Pattern() == path {
+		if ann.Active() && ann.Path() == path {
 			return
 		}
 	}

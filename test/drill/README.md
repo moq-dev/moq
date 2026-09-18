@@ -34,12 +34,11 @@ and infallible, and a reader that falls behind is shed rather than waited for.
 So "backpressure" in the first drill is measured as an unread backlog sitting
 behind a live subscription, which is the state the cancel has to unwind.
 
-That drill deliberately does not wait for the publisher to go idle. A relay
-holds its upstream subscription for `TRACK_IDLE_LINGER` (30s in moq-net) after
-its last local reader leaves, so a viewer who comes back does not pay for a
-fresh upstream subscribe. Waiting that out would make this the slowest test in
-the workspace in order to watch a deliberate delay elapse; the rejoin the drill
-does assert is the half of that behavior worth grading.
+That drill deliberately does not wait for the publisher to go idle. That
+edge is the origin front's: it drops the source track when the last local
+reader leaves, and is covered by moq-net's origin tests. Waiting out a
+linger would make this the slowest test in the workspace; the rejoin the
+drill does assert is the half of that behavior worth grading here.
 
 The negative control is what keeps the rest honest. Three drills prove things by
 reading a frame; if the harness could report success without data moving, they

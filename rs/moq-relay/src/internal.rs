@@ -19,23 +19,24 @@
 //!   that don't want to hit the customer port.
 //! - `/nodes` - the cluster nodes visible through gossip plus established
 //!   direct relay connections.
+//! - `/sessions` and `/sessions/revalidate` - list or nudge live sessions on
+//!   this node. A push only causes a re-check, so a caller on this trusted
+//!   plane gains nothing a scheduled cadence would not do.
 //!
 //! Everything here is unauthenticated, so bind it only to a trusted plane -
 //! loopback for a co-located scraper/agent, or a private overlay address; see
-//! [`Config::listen`]. Unset by default (opt-in). Any future endpoint
-//! added here inherits that "unauthenticated, trusted-plane-only" contract; a
-//! mutating/control endpoint would need its own auth and doesn't belong on an
-//! unauthenticated bind as-is.
+//! [`Config::listen`]. Unset by default (opt-in). A push can only cause
+//! re-checks, never close a session on its own, so it belongs on this plane.
 
 use std::net;
 
 use anyhow::Context as _;
 use axum::{
 	Json, Router,
-	extract::State,
+	extract::{RawQuery, State},
 	http::{self, StatusCode},
 	response::{IntoResponse, Response},
-	routing::get,
+	routing::{get, post},
 };
 use axum_server::accept::DefaultAcceptor;
 
@@ -60,7 +61,8 @@ type UringWorker = std::convert::Infallible;
 #[non_exhaustive]
 pub struct Config {
 	/// Socket address for the internal listener (plain HTTP), serving the ops
-	/// endpoints (`/metrics`, `/health`, and `/nodes`).
+	/// endpoints (`/metrics`, `/health`, `/nodes`, `/sessions`, and
+	/// `/sessions/revalidate`).
 	///
 	/// These endpoints are unauthenticated, so bind it only to a trusted plane:
 	/// loopback (e.g. `127.0.0.1:9101`) for a co-located scraper/agent, or a
@@ -83,6 +85,7 @@ pub struct Internal {
 	config: Config,
 	stats: moq_net::stats::Registry,
 	nodes: Option<crate::nodes::Nodes>,
+	sessions: crate::session::Registry,
 	health: moq_tokio::accept::Health,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
@@ -92,6 +95,7 @@ pub struct Internal {
 struct InternalState {
 	stats: moq_net::stats::Registry,
 	nodes: Option<crate::nodes::Nodes>,
+	sessions: crate::session::Registry,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
 }
@@ -114,6 +118,7 @@ impl Internal {
 			config,
 			stats,
 			nodes: None,
+			sessions: crate::session::Registry::new(),
 			health,
 			listeners,
 			uring: Vec::new(),
@@ -173,9 +178,16 @@ impl Internal {
 		self
 	}
 
-	/// Build the ops router (`/metrics`, `/health`, and `/nodes`), returning a
-	/// state-erased [`Router`] an embedder can extend (`merge`/`nest` its own ops
-	/// routes) before handing it to [`crate::Relay::with_internal`] or
+	/// Attach the live session table served at `/sessions` and nudged at
+	/// `/sessions/revalidate`.
+	pub fn with_sessions(mut self, sessions: crate::session::Registry) -> Self {
+		self.sessions = sessions;
+		self
+	}
+
+	/// Build the ops router (`/metrics`, `/health`, `/nodes`, `/sessions`),
+	/// returning a state-erased [`Router`] an embedder can extend (`merge`/`nest`
+	/// its own ops routes) before handing it to [`crate::Relay::with_internal`] or
 	/// [`serve`](Self::serve).
 	///
 	/// Anything merged in inherits this listener's "unauthenticated,
@@ -185,9 +197,12 @@ impl Internal {
 			.route("/metrics", get(serve_metrics))
 			.route("/health", get(serve_health))
 			.route("/nodes", get(serve_nodes))
+			.route("/sessions", get(serve_sessions))
+			.route("/sessions/revalidate", post(revalidate_sessions))
 			.with_state(InternalState {
 				stats: self.stats.clone(),
 				nodes: self.nodes.clone(),
+				sessions: self.sessions.clone(),
 				listeners: self.listeners.clone(),
 				uring: self.uring.clone(),
 			})
@@ -260,6 +275,36 @@ async fn serve_metrics(State(state): State<InternalState>) -> Response {
 /// unique match are omitted.
 async fn serve_nodes(State(state): State<InternalState>) -> Json<crate::nodes::Snapshot> {
 	Json(state.nodes.map(|nodes| nodes.snapshot()).unwrap_or_default())
+}
+
+/// Live sessions matching the query filter: the dry run for a selector.
+/// `query` is omitted from each entry so a jwt on the plane cannot be replayed.
+async fn serve_sessions(RawQuery(query): RawQuery, State(state): State<InternalState>) -> Response {
+	match crate::session::Filter::from_query(query.as_deref()) {
+		Ok(filter) => Json(crate::session::List {
+			sessions: state.sessions.list(&filter),
+		})
+		.into_response(),
+		Err(err) => err.into_response(),
+	}
+}
+
+/// Nudge every matching session to re-check now. The re-checks run in the
+/// background; their outcome arrives as `end` events. No match is 200 with an
+/// empty list, not a 404.
+async fn revalidate_sessions(RawQuery(query): RawQuery, State(state): State<InternalState>) -> Response {
+	match crate::session::Filter::from_query(query.as_deref()) {
+		Ok(filter) => {
+			let ids = state.sessions.revalidate(&filter);
+			let status = if ids.is_empty() {
+				StatusCode::OK
+			} else {
+				StatusCode::ACCEPTED
+			};
+			(status, Json(crate::session::Nudged { ids })).into_response()
+		}
+		Err(err) => err.into_response(),
+	}
 }
 
 /// Render a [`moq_net::stats::Snapshot`] as Prometheus text exposition (v0.0.4).
@@ -804,6 +849,7 @@ mod tests {
 		let state = InternalState {
 			stats: moq_net::stats::Registry::disabled(),
 			nodes: None,
+			sessions: crate::session::Registry::new(),
 			listeners: Vec::new(),
 			uring: Vec::new(),
 		};
@@ -820,6 +866,7 @@ mod tests {
 		let state = InternalState {
 			stats: moq_net::stats::Registry::disabled(),
 			nodes: Some(nodes),
+			sessions: crate::session::Registry::new(),
 			listeners: Vec::new(),
 			uring: Vec::new(),
 		};
@@ -844,17 +891,17 @@ mod tests {
 		let pub_origin = moq_tokio::origin::spawn(Hop::random());
 		let egress = pub_origin.consume().with_stats(default_ctx.clone());
 		let mut announced = egress.announced();
-		let mut pub_source = pub_origin.create_broadcast("demo/x").unwrap();
+		let pub_source = pub_origin.create_broadcast("demo/x").unwrap();
 		pub_source.announce(Default::default()).unwrap();
-		let mut pub_track = pub_source.create_track("video", None).unwrap();
+		let pub_track = pub_source.create_track("video", None).unwrap();
 
 		// Named-tier ingress: a tagged ingress producer writes, so subscriber
 		// `bytes` advance on the regional tier.
 		let regional_ctx = stats.tier(Tier::new("region/sjc")).session("peer");
 		let sub_origin = moq_tokio::origin::spawn(Hop::random()).with_stats(regional_ctx.clone());
-		let mut sub_source = sub_origin.create_broadcast("demo/x").unwrap();
+		let sub_source = sub_origin.create_broadcast("demo/x").unwrap();
 		sub_source.announce(Default::default()).unwrap();
-		let mut sub_track = sub_source.create_track("audio", None).unwrap();
+		let sub_track = sub_source.create_track("audio", None).unwrap();
 
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -862,11 +909,9 @@ mod tests {
 		// Leave 46 bytes across two frames behind the live edge, then read 1234
 		// egress bytes out of the default-tier broadcast.
 		let update = announced.next().await.unwrap();
-		assert!(update.active);
+		assert!(update.kind.is_active());
 		let bc = egress
-			.request_broadcast(moq_net::Path::new(
-				update.pattern.as_prefix().expect("prefix announcement"),
-			))
+			.request_broadcast(moq_net::Path::new(update.path.as_str()))
 			.await
 			.unwrap();
 		let mut egress_sub = bc.track("video").unwrap().subscribe(None).await.unwrap();

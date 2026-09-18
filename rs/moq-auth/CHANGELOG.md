@@ -12,12 +12,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Request`, `Grant`, and `Event`: the JSON contract between a relay and an auth server.
 - `lease::{Producer, Consumer}`: the handle a session holds for the grant that admitted it.
 - `Client`: the HTTP implementation, driving a lease against `--auth-url`.
+- `lease::Consumer::revalidate` asks the producer to re-check now; `Producer::{poll_revalidate, revalidate_requested}` resolve once per burst. A fixed lease is a no-op. The HTTP client POSTs at once when idle or in backoff, and once more when a nudge arrives during an in-flight re-check.
 - `lease::Reason::Invalid`: a re-check whose grant fails validation (`end.reason` is `invalid`).
 
 ### Fixed
 
 - A re-check that answers 401 or a 2xx that fails `Grant::validate` ends the session instead of retrying until `expires`.
 - `Grant::validate` and the lease expiry deadline tolerate a few seconds of clock skew.
+
+### Breaking
+
+- `Counters` is gone. `Client::connect` takes only the request; `lease::Consumer::close(reason, bytes)` reports the totals, and `Drop` reports zero. `Producer::closed` returns `(Reason, Bytes)`.
+- `Request::new(node, transport, path)` mints the session id; the four-argument form and `Request::connect` are gone.
+- An `oct` JWK without `kty` is refused rather than defaulted.
+- `serve::Rules` is gone; `Policy.public` and `Policy.mtls` are `Permissions`.
+- `serve::Policy::decide` authorizes a token at the dialed path with `Claims::authorize` and grants the residuals, instead of refusing when `root != path`.
 
 ### Changed
 

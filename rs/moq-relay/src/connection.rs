@@ -38,6 +38,8 @@ pub struct Connection {
 	/// Relay-wide shutdown broadcast: when it fires, the session is drained with
 	/// a GOAWAY instead of being cut off.
 	shutdown: crate::shutdown::Observer,
+	/// Live sessions on this node, so an operator can list and nudge this one.
+	sessions: Option<crate::session::Registry>,
 }
 
 impl Connection {
@@ -50,6 +52,7 @@ impl Connection {
 			cluster,
 			auth,
 			shutdown: crate::shutdown::Observer::disabled(),
+			sessions: None,
 		}
 	}
 
@@ -66,13 +69,19 @@ impl Connection {
 		self
 	}
 
+	/// Register this session in the node's live table after it is admitted.
+	/// Without it the session is served but cannot be listed or nudged.
+	pub fn with_sessions(mut self, sessions: crate::session::Registry) -> Self {
+		self.sessions = Some(sessions);
+		self
+	}
+
 	/// Admits and serves this connection until it closes.
 	#[tracing::instrument("conn", skip_all, fields(id = self.id, remote = self.request.remote_addr().map(tracing::field::display), session = tracing::field::Empty))]
 	pub async fn run(self) -> anyhow::Result<()> {
 		let peer_hop = self.request.peer_hop();
-		let bytes = moq_auth::Counters::default();
-		let lease = match self.admit(bytes.clone()).await {
-			Ok(lease) => lease,
+		let (lease, registration) = match self.admit().await {
+			Ok(admitted) => admitted,
 			Err(err) => {
 				let _ = self.request.close(err.status.as_u16()).await;
 				return Err(err.source);
@@ -108,7 +117,7 @@ impl Connection {
 
 		tracing::info!(version = %session.version(), %transport, "negotiated");
 
-		supervise(session, lease, bytes, self.shutdown.clone()).await
+		supervise(session, lease, self.shutdown.clone(), registration).await
 	}
 
 	/// Admit this connection. Any failure is returned as a [`StatusError`] so
@@ -117,7 +126,7 @@ impl Connection {
 	/// Every transport goes through the same lease; the request the server sees
 	/// carries what the transport knows. A LAN mesh dial is the one exception: its
 	/// credential is a secret the relay minted for itself, checked locally.
-	async fn admit(&self, bytes: moq_auth::Counters) -> Result<auth::Lease, StatusError> {
+	async fn admit(&self) -> Result<(auth::Lease, Option<crate::session::Registration>), StatusError> {
 		// Checked first so a `/.cluster` request is never routed through the public
 		// grant, and a relay without LAN discovery refuses it instead of treating the
 		// path as a broadcast root.
@@ -130,11 +139,13 @@ impl Connection {
 		if self.request.peer_identity().is_some() {
 			tracing::debug!("client certificate verified; reported to the auth server");
 		}
-		Ok(self.auth.admit(request, bytes).await?)
+		let lease = self.auth.admit(request.clone()).await?;
+		let registration = self.sessions.as_ref().map(|sessions| sessions.register(request));
+		Ok((lease, registration))
 	}
 
 	/// Authorize a `/.cluster/<credential>` dial against the live LAN advertisement.
-	fn admit_lan(&self) -> Result<auth::Lease, StatusError> {
+	fn admit_lan(&self) -> Result<(auth::Lease, Option<crate::session::Registration>), StatusError> {
 		let Some(presented) = cluster::Cluster::lan_credential(self.request.path()) else {
 			return Err(StatusError {
 				status: http::StatusCode::FORBIDDEN,
@@ -144,7 +155,7 @@ impl Connection {
 		match self.cluster.verify_lan_credential(presented) {
 			Some(true) => {
 				tracing::info!("accepted LAN peer");
-				Ok(self.auth.admit_fixed("/", self.cluster.lan_peer_grant())?)
+				Ok((self.auth.admit_fixed("/", self.cluster.lan_peer_grant())?, None))
 			}
 			Some(false) => Err(StatusError {
 				status: http::StatusCode::FORBIDDEN,
@@ -243,7 +254,10 @@ pub(crate) fn authorize(
 /// Hold an accepted session open for as long as its lease allows.
 ///
 /// Public so an embedder running its own accept loop (`moq --listen`) holds a
-/// session the same way the relay does.
+/// session the same way the relay does. Pass the [`session::Registration`](crate::session::Registration)
+/// from [`Registry::register`](crate::session::Registry::register) so a push on
+/// the internal listener re-checks this lease; `None` for a session that is
+/// not in the table.
 ///
 /// The lease is the decider's live word on the grant: when it stops covering
 /// the session ([`auth::Lease::ended`]) the session closes with the reason, and
@@ -256,42 +270,51 @@ pub(crate) fn authorize(
 pub async fn supervise(
 	session: moq_net::Session,
 	mut lease: auth::Lease,
-	bytes: moq_auth::Counters,
 	mut shutdown: crate::shutdown::Observer,
+	registration: Option<crate::session::Registration>,
 ) -> anyhow::Result<()> {
-	// The transport's own totals, read once at the end so the `end` event carries
-	// what the session moved without the payload path paying for a second meter.
-	let meter = |session: &moq_net::Session| {
-		let stats = session.stats();
-		bytes.add_sent(stats.bytes_sent.unwrap_or_default());
-		bytes.add_received(stats.bytes_received.unwrap_or_default());
-	};
-	tokio::select! {
-		err = session.closed() => {
-			meter(&session);
-			let reason = match &err {
-				moq_net::Error::Cancel => "closed".to_string(),
-				other => other.to_string(),
-			};
-			lease.close(reason);
-			Err(err.into())
+	loop {
+		let nudged = async {
+			match &registration {
+				Some(registration) => registration.nudged().await,
+				None => std::future::pending().await,
+			}
+		};
+		tokio::select! {
+			err = session.closed() => {
+				let reason = match &err {
+					moq_net::Error::Cancel => "closed".to_string(),
+					other => other.to_string(),
+				};
+				lease.close(reason, session_bytes(&session));
+				return Err(err.into());
+			}
+			why = lease.ended() => {
+				tracing::info!(%why, "lease ended, closing session");
+				session.abort(moq_net::Error::Unauthorized);
+				lease.close(why, session_bytes(&session));
+				return Ok(());
+			}
+			_ = shutdown.started() => {
+				tracing::info!("relay shutting down; draining session");
+				// Empty URI: "reconnect to me" (the relay is restarting). The session's
+				// machine runs on its own, so the GOAWAY still reaches the wire while
+				// we wait here.
+				shutdown.drain_session(&session).await;
+				lease.close("shutdown", session_bytes(&session));
+				return Ok(());
+			}
+			() = nudged => lease.revalidate(),
 		}
-		why = lease.ended() => {
-			tracing::info!(%why, "lease ended, closing session");
-			session.abort(moq_net::Error::Unauthorized);
-			meter(&session);
-			lease.close(why);
-			Ok(())
-		}
-		_ = shutdown.started() => {
-			tracing::info!("relay shutting down; draining session");
-			// Empty URI: "reconnect to me" (the relay is restarting). The session's
-			// machine runs on its own, so the GOAWAY still reaches the wire while
-			// we wait here.
-			shutdown.drain_session(&session).await;
-			meter(&session);
-			lease.close("shutdown");
-			Ok(())
-		}
+	}
+}
+
+/// The transport's own totals, read once at the end so the `end` event carries
+/// what the session moved without the payload path paying for a second meter.
+pub(crate) fn session_bytes(session: &moq_net::Session) -> moq_auth::Bytes {
+	let stats = session.stats();
+	moq_auth::Bytes {
+		sent: stats.bytes_sent.unwrap_or_default(),
+		received: stats.bytes_received.unwrap_or_default(),
 	}
 }

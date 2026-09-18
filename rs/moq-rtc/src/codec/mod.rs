@@ -128,7 +128,7 @@ pub(crate) struct DeferredVideo<I> {
 impl<I: DeferredImport> DeferredVideo<I> {
 	/// Create the media track without gating the initial catalog snapshot.
 	pub fn new(
-		mut broadcast: moq_net::broadcast::Producer,
+		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,
 		suffix: &str,
 	) -> Result<Self> {

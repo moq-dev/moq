@@ -24,7 +24,7 @@ async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
         # Subscribe to media. An announcement is a route; resolve the broadcast at its path.
         async for announcement in client.announced("live/"):
-            broadcast = await client.request_broadcast(announcement.pattern)
+            broadcast = await client.request_broadcast(announcement.path)
             catalog = await broadcast.catalog()
             name, track = next(iter(catalog.audio.items()))
             async for frame in await broadcast.subscribe_media(name, track):
@@ -68,10 +68,10 @@ The three advertising operations, as the other bindings spell them:
 `client.create_broadcast(path)` (or `OriginProducer.create_broadcast`) returns
 an unadvertised producer; `broadcast.announce(route)` /
 `broadcast.unannounce()` own that exact-path advertisement;
-`origin.dynamic(pattern, route)` claims every matching path (`foo/**` for a
-prefix). Hold the returned handle while the claim should stay advertised. A
-wildcard is a capability, not an inventory; announcement `.pattern` is the
-covered prefix for a prefix-shaped claim and the pattern text otherwise.
+`origin.dynamic(prefix, route)` claims `prefix` and every path beneath it
+(`""` for everything). Hold the returned handle while the claim should stay
+advertised, and reject the requests you will not serve. A route is a
+capability, not an inventory; announcement `.path` is the covered prefix.
 
 Sessions reconnect with backoff when the transport drops and re-announce local
 broadcasts. `session.epoch()` counts the connections, 1 on the first, pairing
@@ -82,7 +82,7 @@ raises the peer's inbound stream cap.
 Everything in the [shared feature list](/lib/#what-every-binding-can-do) is
 here: `moq.Server` with per-request accept/reject, `fetch_group` and
 `fetch_media_group`, `dynamic()` handlers for on-demand tracks and
-`dynamic(pattern)` for broadcasts, `append_datagram`/`recv_datagram`, `set_catalog_section`,
+`dynamic(prefix)` for broadcasts, `append_datagram`/`recv_datagram`, `set_catalog_section`,
 `route_updates()`, and `used()`/`unused()` so capture can idle when nobody is
 subscribed. `request.set_publish`/`set_consume` raise if the request is already
 answered, cancelled, or currently accepting. `session.bandwidth()` divides the connection's send estimate;

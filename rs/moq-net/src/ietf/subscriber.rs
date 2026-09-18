@@ -263,7 +263,7 @@ impl Fill {
 	/// Finishing rather than aborting, because the head is a valid prefix of the group: it
 	/// starts at the group's first object and has no holes.
 	fn release(&mut self) {
-		if let Fill::Ready { mut producer, .. } = std::mem::replace(self, Fill::Done) {
+		if let Fill::Ready { producer, .. } = std::mem::replace(self, Fill::Done) {
 			let _ = producer.finish();
 		}
 	}
@@ -829,7 +829,6 @@ where
 		stream: Stream<S, Version>,
 		peer: cluster::Peer,
 		declared: Option<bool>,
-		patterns: bool,
 	) -> Result<MaybeSendBox<'static, ()>, Error> {
 		let mut this = self.clone();
 		let task = match id {
@@ -849,7 +848,7 @@ where
 			ietf::PublishNamespace::ID => {
 				// A negotiated session that omits HOP_PATH fails the decode here, which
 				// the dispatcher turns into the protocol violation the draft requires.
-				let msg = ietf::PublishNamespace::decode_body(&mut data, this.version, peer.negotiated(), patterns)?;
+				let msg = ietf::PublishNamespace::decode_body(&mut data, this.version, peer.negotiated())?;
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
 				}
@@ -884,11 +883,6 @@ where
 	/// that waited on it would park forever if it never were.
 	pub(super) async fn solicit(&self) -> Option<bool> {
 		self.peer_setup.get().await.solicit
-	}
-
-	/// Whether the peer negotiated NAMESPACE_PATTERNS.
-	pub(super) async fn patterns(&self) -> bool {
-		self.peer_setup.get().await.patterns
 	}
 
 	/// Whether an incoming PUBLISH_NAMESPACE means the peer ignored our SETUP.
@@ -1333,8 +1327,7 @@ where
 			}
 			Entry::Vacant(entry) => {
 				// Propagates Error::Unauthorized if the namespace is out of scope.
-				let pattern = crate::Pattern::subtree(path.as_str()).map_err(|_| Error::Unsupported)?;
-				let dynamic = self.origin.dynamic(pattern, route.clone())?;
+				let dynamic = self.origin.dynamic(&path, route.clone())?;
 
 				entry.insert(BroadcastState {
 					route,
@@ -3183,7 +3176,7 @@ mod tests {
 			);
 			assert_ne!(
 				crate::ietf::error::CANCELLED,
-				Error::Cancel.to_code(),
+				crate::SessionError::Cancel.to_code(),
 				"the two error spaces disagree; that is why this code is mapped separately",
 			);
 		}
@@ -4153,8 +4146,6 @@ mod tests {
 			request_id: RequestId(0),
 			track_namespace: path.borrow(),
 			cluster: None,
-
-			pattern: None,
 		};
 		subscriber
 			.run_publish_namespace_stream(stream, msg, cluster::Peer::default(), None)
@@ -4211,8 +4202,6 @@ mod tests {
 			request_id: RequestId(0),
 			track_namespace: path.borrow(),
 			cluster: None,
-
-			pattern: None,
 		};
 		subscriber
 			.run_publish_namespace_stream(stream, msg, cluster::Peer::default(), None)
@@ -4480,9 +4469,6 @@ mod tests {
 		);
 	}
 
-	/// The peer's REQUEST_UPDATEs, framed exactly as the update loop reads them, built
-	/// with the crate's own writer so the framing cannot drift from the encoder. Each
-	/// carries the whole advertisement, as a peer whose path and cost both moved would.
 	async fn publish_namespace_updates(updates: &[cluster::Advert]) -> Vec<u8> {
 		const VERSION: Version = Version::Draft19;
 		let log = crate::lite::test_transport::Log::default();
@@ -4882,7 +4868,6 @@ mod tests {
 						cost: 0,
 						..clean.clone()
 					}),
-					pattern: None,
 				})
 				.await
 				.unwrap();
@@ -5633,7 +5618,7 @@ mod stitch_tests {
 	/// the head outlives the subscription unfinished and a consumer blocks on it.
 	#[tokio::test]
 	async fn a_head_finishing_after_teardown_is_published_not_installed() {
-		let mut track = track::Producer::new(
+		let track = track::Producer::new(
 			std::sync::Arc::new(crate::broadcast::Info::default()),
 			"video",
 			track::Info::default().with_timescale(Timescale::MICRO),

@@ -18,7 +18,3 @@ takes the Rust flag spellings. moq.pro's API mints through `jose` today, so
 its churn is nil.
 
 Public API: breaking on @moq/auth, so on dev. Wire: none.
-
-## Related
-
-- [Auth contract](/quest/m1/auth-contract.md) - the Rust side of the same surface

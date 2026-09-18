@@ -23,7 +23,7 @@ typealias OriginProducer = uniffi.moq.MoqOriginProducer
 typealias OriginConfig = uniffi.moq.MoqOriginConfig
 /** The subscribe side of an origin: discover and request published broadcasts. */
 typealias OriginConsumer = uniffi.moq.MoqOriginConsumer
-/** A served route: advertises a path pattern and yields broadcast requests beneath it. */
+/** A served route: advertises a path prefix and yields broadcast requests beneath it. */
 typealias OriginDynamic = uniffi.moq.MoqOriginDynamic
 /** A requested broadcast not yet accepted: fulfill it with a producer or reject it. */
 typealias BroadcastRequest = uniffi.moq.MoqBroadcastRequest
@@ -31,7 +31,7 @@ typealias BroadcastRequest = uniffi.moq.MoqBroadcastRequest
 typealias AnnounceConsumer = uniffi.moq.MoqAnnounceConsumer
 /** A pending wait for a route to cover a specific path. */
 typealias AnnouncedBroadcast = uniffi.moq.MoqAnnouncedBroadcast
-/** A single route announcement or retraction: its pattern, route metadata, and active flag. */
+/** A single route announcement or retraction: its path, route metadata, and active flag. */
 typealias AnnounceUpdate = uniffi.moq.MoqAnnounceUpdate
 // Broadcast / track / group producers and consumers.
 /** The write side of a broadcast: publish tracks into it. */

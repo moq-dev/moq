@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use axum::http;
-use moq_auth::{Counters, Grant, Request, lease};
+use moq_auth::{Bytes, Grant, Request, lease};
 use moq_auth::{Pattern, Patterns};
 use moq_net::{Path, PathOwned, stats::Tier};
 use serde::{Deserialize, Serialize};
@@ -264,6 +264,11 @@ impl Lease {
 		&self.token
 	}
 
+	/// Ask the lease's producer to re-check now. A no-op on a fixed lease.
+	pub fn revalidate(&self) {
+		self.consumer.revalidate();
+	}
+
 	/// Wait for the lease to stop covering the session: the grant expired, was
 	/// revoked, or was re-checked into one that no longer covers the token.
 	///
@@ -302,10 +307,11 @@ impl Lease {
 		}
 	}
 
-	/// End the lease with the session's close classification, and learn what it
-	/// ended with: that, or the decider's reason if it revoked first.
-	pub fn close(self, reason: impl Into<lease::Reason>) -> lease::Reason {
-		self.consumer.close(reason)
+	/// End the lease with the session's close classification and the totals it
+	/// moved, and learn what it ended with: that, or the decider's reason if it
+	/// revoked first. Dropping the consumer reports zero bytes.
+	pub fn close(self, reason: impl Into<lease::Reason>, bytes: Bytes) -> lease::Reason {
+		self.consumer.close(reason, bytes)
 	}
 }
 
@@ -358,23 +364,21 @@ impl Auth {
 
 	/// A fresh `connect` request for this relay, before the transport's facts are filled in.
 	pub fn request(&self, transport: moq_auth::Transport, path: impl Into<String>) -> Request {
-		Request::connect(self.node.as_ref(), transport, path)
+		Request::new(self.node.as_ref(), transport, path)
 	}
 
 	/// Admit a session: the lease it holds, carrying the scope the origin applies.
-	///
-	/// `bytes` is what the session meters, reported in the `end` event.
-	pub async fn admit(&self, request: Request, bytes: Counters) -> Result<Lease, Error> {
+	pub async fn admit(&self, request: Request) -> Result<Lease, Error> {
 		let path = request.path.clone();
 		let consumer = match self.mode.as_ref() {
-			Mode::Server(client) => client.connect(request, bytes).await?,
+			Mode::Server(client) => client.connect(request).await?,
 			// A certificate is a fact for a server to weigh; with no server it admits
 			// nothing on its own, so the peer gets what any anonymous session gets.
 			Mode::Public(grant) => lease::Consumer::fixed(grant.clone()),
 			Mode::Embedded(admissions) => {
 				let (reply, answer) = oneshot::channel();
 				admissions
-					.send(Admission { request, bytes, reply })
+					.send(Admission { request, reply })
 					.map_err(|_| Error::Unavailable("nobody is answering admissions".into()))?;
 				let consumer = tokio::time::timeout(ADMIT_TIMEOUT, answer)
 					.await
@@ -419,8 +423,6 @@ impl Admissions {
 pub struct Admission {
 	/// The `connect` request the relay built: every fact the transport knows.
 	pub request: Request,
-	/// What the session meters, for an `end` report; live for as long as it runs.
-	pub bytes: Counters,
 	reply: oneshot::Sender<Result<lease::Consumer, Error>>,
 }
 
@@ -524,7 +526,7 @@ mod tests {
 			.init("relay-1", &moq_tokio::tls::Connect::default())
 			.unwrap();
 		let request = auth.request(moq_auth::Transport::Quic, "/anon/room");
-		let lease = futures::executor::block_on(auth.admit(request, Counters::default())).unwrap();
+		let lease = futures::executor::block_on(auth.admit(request)).unwrap();
 		assert_eq!(lease.token().root, Path::new("anon/room").to_owned());
 		assert_eq!(lease.token().subscribe, patterns(&["anon/**"]));
 		assert_eq!(lease.token().tier, Tier::default());
@@ -551,26 +553,17 @@ mod tests {
 			admissions
 		};
 		let admit = async {
-			let lease = auth.admit(request(), Counters::default()).await.expect("granted");
+			let lease = auth.admit(request()).await.expect("granted");
 			assert_eq!(lease.token().root, Path::new("anon/room").to_owned());
-			assert!(matches!(
-				auth.admit(request(), Counters::default()).await,
-				Err(Error::Refused)
-			));
+			assert!(matches!(auth.admit(request()).await, Err(Error::Refused)));
 			for _ in 0..2 {
-				assert!(matches!(
-					auth.admit(request(), Counters::default()).await,
-					Err(Error::Unavailable(_))
-				));
+				assert!(matches!(auth.admit(request()).await, Err(Error::Unavailable(_))));
 			}
 		};
 		let (admissions, ()) = tokio::join!(decide, admit);
 
 		drop(admissions);
-		assert!(matches!(
-			auth.admit(request(), Counters::default()).await,
-			Err(Error::Unavailable(_))
-		));
+		assert!(matches!(auth.admit(request()).await, Err(Error::Unavailable(_))));
 	}
 
 	#[test]

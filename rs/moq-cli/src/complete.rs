@@ -486,16 +486,13 @@ fn broadcasts(_ctx: CompleteCtx<'_>) -> CompletionFuture<'static> {
 		let mut until = deadline;
 		while let Ok(Some(update)) = timeout_at(until, announced.next()).await {
 			until = deadline.min(Instant::now() + SETTLE);
-			let Some(prefix) = update.pattern.as_prefix() else {
-				continue;
-			};
-			let path = prefix.to_owned();
+			let path = update.path.to_string();
 			// The root broadcast is the connection path itself, which an unset
 			// `--broadcast` already names; there is no word to insert for it.
 			if path.is_empty() {
 				continue;
 			}
-			match update.active {
+			match update.kind.is_active() {
 				true => live.insert(path),
 				false => live.remove(&path),
 			};
@@ -942,10 +939,10 @@ mod tests {
 	async fn the_catalog_format_on_the_line_is_honored() {
 		let _env = EnvGuard::clear(&["MOQ_CONNECT"]);
 		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
-		let mut broadcast = origin.create_broadcast("room").expect("broadcast");
+		let broadcast = origin.create_broadcast("room").expect("broadcast");
 		broadcast.announce(Default::default()).expect("broadcast");
 
-		let mut track = broadcast
+		let track = broadcast
 			.create_track(moq_msf::DEFAULT_NAME, moq_net::track::Info::default())
 			.expect("msf track");
 		let mut msf = moq_msf::Track::new("hd", moq_msf::Packaging::Loc);

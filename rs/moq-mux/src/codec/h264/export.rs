@@ -271,8 +271,8 @@ mod tests {
 		let catalog = avc1_catalog("video.m4s", avcc);
 
 		// Producer side: publish the broadcast with one length-prefixed video track.
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let mut track = broadcast
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
 			.create_track("video.m4s", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
 

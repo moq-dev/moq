@@ -28,7 +28,7 @@ final moq = await Moq.connect('https://relay.example.com');
 
 // Subscribe. The stream is live, so listen to it rather than awaiting its end.
 moq.announcements(prefix: 'live/').listen((announcement) {
-  print(announcement.pattern());
+  print(announcement.path());
 });
 final broadcast = await moq.requestBroadcast('live/camera');
 ```
@@ -46,12 +46,12 @@ moq.close();
 The three advertising operations: `moq.createBroadcast(path)` (or
 `origin.createBroadcast`) returns an unadvertised producer;
 `broadcast.announce(route:)` / `broadcast.unannounce()` own that exact-path
-advertisement; `origin.dynamic_(pattern:, route:)` claims every matching
-path (`foo/**` for a prefix; Dart spells the origin method `dynamic_`
-because `dynamic` is reserved). Hold the returned handle while the claim
-should stay advertised. A wildcard is a capability, not an inventory;
-`announcement.pattern()` is the covered prefix for a prefix-shaped claim and
-the pattern text otherwise.
+advertisement; `origin.dynamic_(prefix:, route:)` claims `prefix` and
+every path beneath it (`''` for everything; Dart spells the origin method
+`dynamic_` because `dynamic` is reserved). Hold the returned handle while the
+claim should stay advertised, and reject the requests you will not serve. A
+route is a capability, not an inventory; `announcement.path()` is the covered
+prefix.
 
 Sessions reconnect with backoff when the transport drops and re-announce local
 broadcasts. `moq.epoch` counts the connections, 1 on the first, pairing with

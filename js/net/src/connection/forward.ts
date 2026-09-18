@@ -4,7 +4,7 @@
  * @module
  */
 import type { Dispose } from "@moq/signals";
-import { Route } from "../hop.ts";
+import { isActive } from "../announced.ts";
 import type { Dynamic, Producer as OriginProducer, RequestSlot } from "../origin.ts";
 import type * as Path from "../path.ts";
 import type { Established } from "./established.ts";
@@ -46,7 +46,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 	}
 
 	const announced = conn.announced();
-	const inserted = new Map<string, Dynamic>();
+	const inserted = new Map<Path.Valid, Dynamic>();
 
 	// End the stream the moment the session closes rather than waiting for the wire to
 	// error it, so the retractions below land promptly.
@@ -59,19 +59,18 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 				const event = await announced.next();
 				if (!event) break;
 
-				if (event.active) {
-					const existing = inserted.get(event.pattern.text);
-					const route = event.route ?? Route.default;
+				if (isActive(event.kind)) {
+					const existing = inserted.get(event.path);
 					if (existing) {
-						existing.update(route);
+						existing.update(event.route);
 					} else {
-						const handle = origin.receive(event.pattern, route);
-						inserted.set(event.pattern.text, handle);
+						const handle = origin.receive(event.path, event.route);
+						inserted.set(event.path, handle);
 						void drive(handle, conn);
 					}
 				} else {
-					const handle = inserted.get(event.pattern.text);
-					inserted.delete(event.pattern.text);
+					const handle = inserted.get(event.path);
+					inserted.delete(event.path);
 					handle?.close();
 				}
 			}

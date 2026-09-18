@@ -20,18 +20,13 @@ quest here and merged main into dev. The auth API line is here for its
 request-side break (`mtls=<identity>` and the now-required fields) and ranks
 first because moq.pro adopts the release only once that contract is settled;
 it is priority, not a merge gate, and [Merge dev](/quest/m1/merge-dev.md)
-does not require it. [Session revalidate](/quest/m1/session-revalidate.md)
-is on the line for the same reason: the lease's push surface is part of that
-contract, so it gates [Release](/quest/m1/release.md) rather than the merge.
+does not require it.
 
 ## Quests
 
 - [One auth path](/quest/m1/auth-one-path.md) - the server and public modes become clients of the same `Admissions` queue the embedder answers, a reshape of the unpublished auth API that is dev-line work by priority, not a gate
-- [Session revalidate](/quest/m1/session-revalidate.md) - the internal listener re-checks sessions by id, path, or address now, so a kick lands in one round trip and the cadence stops carrying it; lands with the auth API and gates the release, not the merge
-- [Auth contract](/quest/m1/auth-contract.md) - moq-auth and @moq/auth ship one type per concept: no `Counters`, one publish/subscribe pair, a reference server that scopes like the library, no `kty` default
 - [Announce event](/quest/m1/api-net-announce.md) - publishers announce prefixes on every wire, consumers scoped by a pattern read the covered path already trimmed, with no `as_prefix().expect()` at 89 call sites
 - [Origin scoping](/quest/m1/api-net-origin.md) - `scope(root, patterns)` is one fallible call, a fresh origin has a random hop, and the handles stop derefing to `Hop`
-- [moq-net surface](/quest/m1/api-net-surface.md) - dead exports go, compounds sit under their modules, creators take `&self`
 - [Bindings announce match](/quest/m1/api-origin-scopes.md) - every binding takes a pattern scope and reports the announce match with its captures
 - [PathPrefixes](/quest/m1/api-path-prefixes.md) - the unused moq_net::PathPrefixes type is deleted before the release
 - [moq-tokio shapes](/quest/m1/api-tokio-shapes.md) - a `Drop` on `Listener`, a worker `Member` that cannot be cross-wired, `std::time::Duration` fields, one construction idiom, no six-argument merge

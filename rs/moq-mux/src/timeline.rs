@@ -1867,14 +1867,14 @@ mod test {
 	// The timeline track (and its catalog section) exist only once a media track enrolls.
 	#[tokio::test]
 	async fn the_track_is_created_on_first_enrollment() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let broadcast = moq_net::broadcast::Info::new().produce();
 		let timeline = Producer::new(&broadcast, Config::default());
 		assert!(
 			broadcast.create_track(DEFAULT_NAME, None).is_ok(),
 			"nothing took the name yet"
 		);
 
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let broadcast = moq_net::broadcast::Info::new().produce();
 		let timeline2 = Producer::new(&broadcast, Config::default());
 		let _recorder = timeline2.pacing_track("video0").unwrap();
 		assert!(
@@ -2096,7 +2096,7 @@ mod test {
 	// timeline track is never created and its name stays free.
 	#[tokio::test]
 	async fn non_pacing_tracks_alone_publish_no_timeline() {
-		let (mut broadcast, mut timeline) = setup();
+		let (broadcast, mut timeline) = setup();
 		let mut catalog = timeline.track("catalog.json");
 
 		catalog.record(0, ms(0), true);
