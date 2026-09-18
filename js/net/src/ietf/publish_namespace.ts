@@ -103,8 +103,18 @@ export class PublishNamespaceUpdate {
 		return Message.encode(w, (wr) => this.#encode(wr, version));
 	}
 
+	/**
+	 * Decode the message. Every way this fails is the peer's violation: a truncated or
+	 * trailing body, a draft with no such message, or a malformed parameter block. They
+	 * surface as one {@link ProtocolViolation}, which the session dispatch closes over.
+	 */
 	static async decode(r: Reader, version: IetfVersion): Promise<PublishNamespaceUpdate> {
-		return Message.decode(r, (rd) => PublishNamespaceUpdate.#decode(rd, version));
+		try {
+			return await Message.decode(r, (rd) => PublishNamespaceUpdate.#decode(rd, version));
+		} catch (err) {
+			if (err instanceof ProtocolViolation) throw err;
+			throw new ProtocolViolation(reason(err), { cause: err });
+		}
 	}
 
 	static #modern(version: IetfVersion) {
@@ -119,13 +129,7 @@ export class PublishNamespaceUpdate {
 		if (version === Version.DRAFT_17) {
 			await r.u62(); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
 		}
-		// A malformed block is the peer's violation, as it is on the advertisement itself.
-		let params: Parameters;
-		try {
-			params = await Parameters.decode(r, version);
-		} catch (err) {
-			throw new ProtocolViolation(reason(err), { cause: err });
-		}
+		const params = await Parameters.decode(r, version);
 		return new PublishNamespaceUpdate({ requestId, update: Cluster.updateFromParams(params) });
 	}
 }
