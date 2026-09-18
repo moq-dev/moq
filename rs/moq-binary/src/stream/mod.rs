@@ -278,7 +278,7 @@ mod test {
 	/// continuous log. Written by hand because this producer never rolls.
 	#[test]
 	fn a_second_group_is_a_rolled_log() {
-		let mut track = moq_net::broadcast::Info::new()
+		let track = moq_net::broadcast::Info::new()
 			.produce()
 			.create_track("test", None)
 			.unwrap();
@@ -316,7 +316,7 @@ mod test {
 	/// on a log that already lost payloads. The payloads already in hand are still delivered.
 	#[test]
 	fn a_second_group_is_reported_while_the_first_is_open() {
-		let mut track = moq_net::broadcast::Info::new()
+		let track = moq_net::broadcast::Info::new()
 			.produce()
 			.create_track("test", None)
 			.unwrap();
@@ -353,7 +353,7 @@ mod test {
 	/// sequence and end the log cleanly, reporting a truncated log as a whole one.
 	#[test]
 	fn a_late_lower_group_is_still_reported() {
-		let mut track = moq_net::broadcast::Info::new()
+		let track = moq_net::broadcast::Info::new()
 			.produce()
 			.create_track("test", None)
 			.unwrap();

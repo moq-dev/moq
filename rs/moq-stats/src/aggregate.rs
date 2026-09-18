@@ -532,9 +532,9 @@ mod tests {
 		let egress = feed_origin.consume().with_stats(ctx.clone());
 
 		let mut announced = egress.announced();
-		let mut source = feed_origin.create_broadcast(path).expect("create_broadcast");
+		let source = feed_origin.create_broadcast(path).expect("create_broadcast");
 		source.announce(origin::Route::default()).expect("announce");
-		let mut track = source.create_track("video", None).expect("create_track");
+		let track = source.create_track("video", None).expect("create_track");
 
 		let update = announced.next().await.expect("announce");
 		assert!(update.active);
@@ -604,7 +604,7 @@ mod tests {
 	impl NodeBroadcast {
 		fn new(origin: &origin::Producer, group: &str, node: &str) -> Self {
 			let path = format!(".stats/{group}/node/{node}");
-			let mut source = origin.create_broadcast(path.as_str()).expect("create broadcast");
+			let source = origin.create_broadcast(path.as_str()).expect("create broadcast");
 			source.announce(origin::Route::default()).expect("announce");
 			let name = traffic_track(&Tier::default(), Role::Publisher, false);
 			let track = source.create_track(name, None).expect("create track");

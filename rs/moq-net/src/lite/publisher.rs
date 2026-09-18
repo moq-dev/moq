@@ -971,7 +971,7 @@ impl<S: crate::transport::poll::Session> TrackInfoServe<S> {
 				}
 				TrackInfoState::Request { msg, requesting } => {
 					let broadcast = ready!(requesting.poll_ok(waiter))?;
-					let querying = broadcast.track(&msg.track)?.info().into_inner();
+					let querying = broadcast.track(&msg.track)?.query().into_inner();
 					self.state = TrackInfoState::Query { querying };
 				}
 				TrackInfoState::Query { querying } => {
@@ -1491,7 +1491,7 @@ mod test {
 	fn a_pre06_wire_is_pinned_to_the_live_edge() {
 		use futures::FutureExt;
 
-		let mut producer = track_producer("test");
+		let producer = track_producer("test");
 		for second in 0..3 {
 			let mut group = producer.append_group().unwrap();
 			group
@@ -2030,7 +2030,7 @@ mod announce_test {
 		settle().await;
 		match h.wire.take_announces().as_slice() {
 			[lite::AnnounceBroadcast::Restart { cost, .. }] => {
-				assert_eq!(*cost, crate::origin::Cost::new(crate::origin::MAX_COST));
+				assert_eq!(*cost, crate::origin::Cost::MAX);
 			}
 			other => panic!("expected a clamped restart, got {other:?}"),
 		}
@@ -2817,7 +2817,7 @@ mod serve_group_test {
 	/// only a subscriber that asked for a partial group may receive one.
 	#[test]
 	fn position_group_skips_a_missing_head() {
-		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "video", None);
+		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "video", None);
 		let mut group = track.create_group(group::Info { sequence: 3 }).unwrap();
 		group.start_at(5).unwrap();
 		group.write_frame(Timestamp::ZERO, b"tail".to_vec()).unwrap();
@@ -2846,7 +2846,7 @@ mod serve_group_test {
 	/// The end bound caps the end group and leaves the others whole.
 	#[test]
 	fn position_group_caps_the_end_group() {
-		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "video", None);
+		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "video", None);
 		let mut group = track.create_group(group::Info { sequence: 7 }).unwrap();
 		for i in 0..4u8 {
 			group.write_frame(Timestamp::ZERO, vec![i]).unwrap();
@@ -2896,7 +2896,7 @@ mod serve_group_test {
 			timescale: Some(crate::Timescale::default()),
 		};
 
-		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
 		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 		group
 			.write_frame(Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
@@ -2936,7 +2936,7 @@ mod serve_group_test {
 			timescale: Some(crate::Timescale::default()),
 		};
 
-		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_group().unwrap();
 		old.write_frame(Timestamp::ZERO, b"old".as_slice()).unwrap();
@@ -2980,7 +2980,7 @@ mod serve_group_test {
 			timescale: Some(crate::Timescale::default()),
 		};
 
-		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_group().unwrap();
 		let mut frame = old
@@ -3042,7 +3042,7 @@ mod serve_group_test {
 			timescale: Some(crate::Timescale::default()),
 		};
 
-		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_group().unwrap();
 		old.write_frame(Timestamp::ZERO, b"old".as_slice()).unwrap();
@@ -3111,7 +3111,7 @@ mod serve_group_test {
 			timescale: Some(crate::Timescale::default()),
 		};
 
-		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
 		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 		group
 			.write_frame(Timestamp::from_millis(0).unwrap(), b"hello".as_slice())

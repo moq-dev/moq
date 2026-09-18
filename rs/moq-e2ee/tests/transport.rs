@@ -38,7 +38,7 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 	let publisher = produce_origin(1);
 	let consumer_origin = produce_origin(2);
 
-	let mut broadcast = publisher.create_broadcast("bench.e2ee").unwrap();
+	let broadcast = publisher.create_broadcast("bench.e2ee").unwrap();
 	let net = broadcast.create_track(physical.as_str(), None).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 

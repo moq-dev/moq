@@ -728,7 +728,7 @@ mod tests {
 	#[test]
 	fn charged_cost_stays_encodable() {
 		let mut buf = Vec::new();
-		Cost::new(crate::origin::MAX_COST)
+		crate::origin::Cost::MAX
 			.charged(1)
 			.encode(&mut buf, Version::Lite06Wip)
 			.expect("a charged cost must stay encodable");

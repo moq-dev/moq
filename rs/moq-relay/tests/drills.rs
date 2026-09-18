@@ -260,7 +260,7 @@ async fn cancel_under_backpressure_releases_the_reader() {
 	let url = relay.url();
 
 	let publisher = moq_tokio::origin::spawn(Hop::random());
-	let mut broadcast = publisher.create_broadcast("live").expect("create broadcast");
+	let broadcast = publisher.create_broadcast("live").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
 	let mut track = broadcast.create_track(TRACK, None).expect("create track");
 	let publish_session = tokio::time::timeout(
@@ -380,7 +380,7 @@ async fn relay_killed_mid_group_aborts_then_resumes() {
 	let url = relay.url();
 
 	let publisher = moq_tokio::origin::spawn(Hop::random());
-	let mut broadcast = publisher.create_broadcast("live").expect("create broadcast");
+	let broadcast = publisher.create_broadcast("live").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
 	let mut track = broadcast.create_track(TRACK, None).expect("create track");
 	let mut publish_loop = client(&url).publish(publisher.consume()).expect("no connect url");
@@ -496,7 +496,7 @@ async fn interrupted_publisher_republishes_new_content() {
 	let mut announced = subscribed.announced();
 
 	let first = moq_tokio::origin::spawn(Hop::random());
-	let mut broadcast = first.create_broadcast("live").expect("create broadcast");
+	let broadcast = first.create_broadcast("live").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
 	let mut track = broadcast.create_track(TRACK, None).expect("create track");
 	let first_session = tokio::time::timeout(
@@ -535,7 +535,7 @@ async fn interrupted_publisher_republishes_new_content() {
 
 	// Restore: the same name, a new publisher, different content.
 	let second = moq_tokio::origin::spawn(Hop::random());
-	let mut broadcast = second.create_broadcast("live").expect("re-create broadcast");
+	let broadcast = second.create_broadcast("live").expect("re-create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
 	let mut track = broadcast.create_track(TRACK, None).expect("re-create track");
 	let second_session = tokio::time::timeout(

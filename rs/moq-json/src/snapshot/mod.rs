@@ -587,7 +587,7 @@ mod test {
 	fn open_group_pends_after_track_finish() {
 		// A group appended before the track finishes may still deliver frames, so the consumer must
 		// keep waiting on it rather than ending the stream. Regression for the backlog-collapse poll.
-		let mut track = moq_net::broadcast::Info::new()
+		let track = moq_net::broadcast::Info::new()
 			.produce()
 			.create_track("test", None)
 			.unwrap();

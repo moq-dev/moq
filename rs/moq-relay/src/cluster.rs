@@ -2923,7 +2923,7 @@ mod tests {
 		assert_eq!(cluster.origin.config().cache_duration, duration);
 		assert_eq!(cluster.origin.config().pool.expiry(), Some(duration));
 
-		let mut broadcast = origin.create_broadcast("cam").expect("create");
+		let broadcast = origin.create_broadcast("cam").expect("create");
 		broadcast.announce(Default::default()).expect("announce");
 		let mut track = broadcast.create_track("data", None).expect("track");
 		track.write_frame(moq_net::Timestamp::ZERO, b"hello").expect("write");

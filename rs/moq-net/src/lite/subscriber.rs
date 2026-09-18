@@ -1389,7 +1389,7 @@ mod tests {
 			going_away: Default::default(),
 		});
 
-		let mut broadcast = crate::broadcast::Info::new().produce();
+		let broadcast = crate::broadcast::Info::new().produce();
 		// The broadcast keeps only a weak handle, so the map below owns the only strong
 		// `track::Producer`: dropping it is what ends the track.
 		let producer = broadcast.create_track("datagrams", None).unwrap();
@@ -1467,7 +1467,7 @@ mod tests {
 			name: "catalog.json".to_string(),
 		};
 
-		let mut broadcast = crate::broadcast::Info::new().produce();
+		let broadcast = crate::broadcast::Info::new().produce();
 		let mut producer = broadcast.create_track("catalog.json", None).unwrap();
 		let mut sub = Sub::None;
 		let mut establish = std::pin::pin!(serve.establish(
@@ -1532,7 +1532,7 @@ mod tests {
 				cost: None,
 				going_away: Default::default(),
 			});
-			let mut broadcast = crate::broadcast::Info::new().produce();
+			let broadcast = crate::broadcast::Info::new().produce();
 			let producer = broadcast.create_track("catalog.json", None).unwrap();
 
 			Self {
@@ -2187,8 +2187,8 @@ mod tests {
 		let origin = origin::Config::new(relay).produce();
 		let assigned = crate::Hop::new(777).unwrap();
 
-		let mut local = origin.create_broadcast("room/host").unwrap();
-		let mut track = local.create_track("video", None).unwrap();
+		let local = origin.create_broadcast("room/host").unwrap();
+		let track = local.create_track("video", None).unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"local".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -3454,10 +3454,10 @@ struct FetchServeRun<S: crate::transport::poll::Session> {
 
 enum FetchRunState<S: crate::transport::poll::Session> {
 	Open {
-		request: Option<track::GroupRequest>,
+		request: Option<group::Request>,
 	},
 	Send {
-		request: Option<track::GroupRequest>,
+		request: Option<group::Request>,
 		stream: Stream<S, Version>,
 		frame_start: u64,
 	},
@@ -3470,7 +3470,7 @@ enum FetchRunState<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> FetchServeRun<S> {
-	fn new(serve: TrackServe<S>, request: track::GroupRequest, timescale: Option<Timescale>) -> Self {
+	fn new(serve: TrackServe<S>, request: group::Request, timescale: Option<Timescale>) -> Self {
 		let session = serve.subscriber.session.clone();
 		let group = request.sequence();
 		Self {
@@ -3619,7 +3619,7 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 					};
 					match res {
 						Ok(()) => {
-							let mut producer = producer;
+							let producer = producer;
 							let _ = producer.finish();
 						}
 						Err(err) => {

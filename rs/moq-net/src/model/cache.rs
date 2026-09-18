@@ -295,7 +295,8 @@ impl Pool {
 	}
 
 	/// Returns true if both handles share the same underlying pool.
-	pub fn same_pool(&self, other: &Self) -> bool {
+	#[cfg(test)]
+	pub(crate) fn same_pool(&self, other: &Self) -> bool {
 		Arc::ptr_eq(&self.inner, &other.inner)
 	}
 

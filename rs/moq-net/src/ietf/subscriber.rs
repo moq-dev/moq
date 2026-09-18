@@ -263,7 +263,7 @@ impl Fill {
 	/// Finishing rather than aborting, because the head is a valid prefix of the group: it
 	/// starts at the group's first object and has no holes.
 	fn release(&mut self) {
-		if let Fill::Ready { mut producer, .. } = std::mem::replace(self, Fill::Done) {
+		if let Fill::Ready { producer, .. } = std::mem::replace(self, Fill::Done) {
 			let _ = producer.finish();
 		}
 	}
@@ -3183,7 +3183,7 @@ mod tests {
 			);
 			assert_ne!(
 				crate::ietf::error::CANCELLED,
-				Error::Cancel.to_code(),
+				crate::SessionError::Cancel.to_code(),
 				"the two error spaces disagree; that is why this code is mapped separately",
 			);
 		}
@@ -5633,7 +5633,7 @@ mod stitch_tests {
 	/// the head outlives the subscription unfinished and a consumer blocks on it.
 	#[tokio::test]
 	async fn a_head_finishing_after_teardown_is_published_not_installed() {
-		let mut track = track::Producer::new(
+		let track = track::Producer::new(
 			std::sync::Arc::new(crate::broadcast::Info::default()),
 			"video",
 			track::Info::default().with_timescale(Timescale::MICRO),

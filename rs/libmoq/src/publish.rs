@@ -29,7 +29,7 @@ struct TrackRequest {
 /// A request a handler pulled, before it has a handle.
 enum Request {
 	Track(TrackRequest),
-	Group(moq_net::track::GroupRequest),
+	Group(moq_net::group::Request),
 }
 
 /// What a request handler serves.
@@ -112,7 +112,7 @@ pub struct Publish {
 	track_request: NonZeroSlab<TrackRequest>,
 
 	/// Group requests delivered to a handler, freed on accept, abort, or free.
-	group_request: NonZeroSlab<moq_net::track::GroupRequest>,
+	group_request: NonZeroSlab<moq_net::group::Request>,
 }
 
 impl Publish {
@@ -177,7 +177,7 @@ impl Publish {
 	/// see a normal end rather than [`moq_net::Error::Dropped`].
 	pub fn finish(&mut self, broadcast: Id) -> Result<(), Error> {
 		let Broadcast {
-			mut producer,
+			producer,
 			mut catalog,
 			video,
 			audio,
@@ -200,7 +200,7 @@ impl Publish {
 			catalog,
 			..
 		} = self.broadcasts.get(broadcast).ok_or(Error::BroadcastNotFound)?;
-		let mut broadcast = broadcast.clone();
+		let broadcast = broadcast.clone();
 		let name = broadcast.unique_name(&format!(".{}", init.format));
 		let request = broadcast.reserve_track(name)?;
 
@@ -215,7 +215,7 @@ impl Publish {
 			catalog,
 			..
 		} = self.broadcasts.get(broadcast).ok_or(Error::BroadcastNotFound)?;
-		let mut broadcast = broadcast.clone();
+		let broadcast = broadcast.clone();
 		let name = broadcast.unique_name(&format!(".{}", init.format));
 		let request = broadcast.reserve_track(name)?;
 
@@ -702,7 +702,7 @@ impl Publish {
 	/// [`Self::track_finish_at`] declares the boundary ahead of time, so this keeps that
 	/// boundary and only releases the handle.
 	pub fn track_finish(&mut self, track: Id) -> Result<(), Error> {
-		let mut track = self.tracks.remove(track).ok_or(Error::TrackNotFound)?;
+		let track = self.tracks.remove(track).ok_or(Error::TrackNotFound)?;
 		if track.final_sequence().is_none() {
 			track.finish()?;
 		}
@@ -787,7 +787,7 @@ impl Publish {
 
 	/// Finish a raw group. No more frames can be written.
 	pub fn group_finish(&mut self, group: Id) -> Result<(), Error> {
-		let mut group = self.groups.remove(group).ok_or(Error::GroupNotFound)?;
+		let group = self.groups.remove(group).ok_or(Error::GroupNotFound)?;
 		group.finish()?;
 		Ok(())
 	}

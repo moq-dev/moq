@@ -234,7 +234,7 @@ mod tests {
 	/// decode speed before the picture reaches live media.
 	#[tokio::test]
 	async fn a_second_consumer_starts_at_the_live_edge() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
@@ -315,7 +315,7 @@ mod tests {
 	/// so it is pinned beside the other one.
 	#[tokio::test]
 	async fn the_default_reads_every_cached_group() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
@@ -378,7 +378,7 @@ mod tests {
 	/// drains the backend once and returns its tail before reporting the end.
 	#[tokio::test]
 	async fn track_end_drains_buffered_decoder() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
@@ -432,7 +432,7 @@ mod tests {
 	/// picture from before the seam still surfaces; the next group continues forward.
 	#[tokio::test]
 	async fn discontinuity_does_not_flush_the_decoder() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
@@ -493,7 +493,7 @@ mod tests {
 	#[tokio::test]
 	async fn cancelled_track_end_flush_is_not_reported_as_drained() {
 		probe::prepare_blocking_flush();
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
@@ -561,7 +561,7 @@ mod tests {
 		};
 		let catalog = config.probe().await.expect("probe the software encoder");
 
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();

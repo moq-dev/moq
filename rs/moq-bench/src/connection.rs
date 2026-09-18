@@ -124,7 +124,7 @@ pub async fn run(ctx: Connection) {
 	};
 
 	for (relative, path) in paths {
-		let mut broadcast = match publish.create_broadcast(&path) {
+		let broadcast = match publish.create_broadcast(&path) {
 			Ok(broadcast) => broadcast,
 			Err(err) => {
 				tracing::error!(connection, %err, "failed to create broadcast");
@@ -215,7 +215,7 @@ async fn produce(
 	connection: u64,
 	path: String,
 	rolled: Rolled,
-	mut track: track::Producer,
+	track: track::Producer,
 	stats: Arc<Stats>,
 ) -> anyhow::Result<()> {
 	let _gauge = Gauge::inc(&stats.broadcasts);
@@ -605,7 +605,7 @@ mod tests {
 		tokio::time::pause();
 
 		let stats = Arc::new(Stats::default());
-		let mut broadcast = broadcast::Info::new().produce();
+		let broadcast = broadcast::Info::new().produce();
 		let track = broadcast.create_track(TRACK, None).unwrap();
 		let consumer = broadcast.consume();
 
@@ -649,7 +649,7 @@ mod tests {
 		tokio::time::pause();
 
 		let stats = Arc::new(Stats::default());
-		let mut broadcast = broadcast::Info::new().produce();
+		let broadcast = broadcast::Info::new().produce();
 		let track = broadcast.create_track(TRACK, None).unwrap();
 		let consumer = broadcast.consume();
 
@@ -680,7 +680,7 @@ mod tests {
 		tokio::time::pause();
 
 		let stats = Arc::new(Stats::default());
-		let mut broadcast = broadcast::Info::new().produce();
+		let broadcast = broadcast::Info::new().produce();
 		let track = broadcast.create_track(TRACK, None).unwrap();
 		let consumer = broadcast.consume();
 
@@ -713,7 +713,7 @@ mod tests {
 		tokio::time::pause();
 
 		let stats = Arc::new(Stats::default());
-		let mut broadcast = broadcast::Info::new().produce();
+		let broadcast = broadcast::Info::new().produce();
 		let track = broadcast.create_track(TRACK, None).unwrap();
 		let consumer = broadcast.consume();
 
@@ -757,9 +757,9 @@ mod tests {
 		let own = HashSet::from(["9/9".to_string()]);
 
 		// One legitimate peer under the bench namespace with a single finished group.
-		let mut peer = origin.create_broadcast("bench/current/0/0").unwrap();
+		let peer = origin.create_broadcast("bench/current/0/0").unwrap();
 		peer.announce(Default::default()).unwrap();
-		let mut track = peer.create_track(TRACK, None).unwrap();
+		let track = peer.create_track(TRACK, None).unwrap();
 		let mut group = track.append_group().unwrap();
 		group
 			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"{}"))
@@ -784,9 +784,9 @@ mod tests {
 		let consume = origin.consume();
 		let task = tokio::spawn(subscribe_named(consume, "bench/run/chat".into(), stats.clone()));
 
-		let mut broadcast = origin.create_broadcast("bench/run/chat").unwrap();
+		let broadcast = origin.create_broadcast("bench/run/chat").unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		let mut track = broadcast.create_track(TRACK, None).unwrap();
+		let track = broadcast.create_track(TRACK, None).unwrap();
 		tokio::task::yield_now().await;
 		let mut group = track.append_group().unwrap();
 		let header = serde_json::json!({
@@ -822,7 +822,7 @@ mod tests {
 		}
 
 		let stats = Arc::new(Stats::default());
-		let mut broadcast = broadcast::Info::new().produce();
+		let broadcast = broadcast::Info::new().produce();
 		let mut track = broadcast.create_track(TRACK, None).unwrap();
 		let consumer = broadcast.consume();
 

@@ -444,7 +444,7 @@ mod tests {
 			hops: hop_path(&[1]),
 			cost: u64::MAX,
 		};
-		assert_eq!(absurd.route(10).cost.warm, crate::origin::MAX_COST);
+		assert_eq!(absurd.route(10).cost.warm, crate::origin::Cost::MAX.warm);
 	}
 
 	/// Negotiating the extension and declaring an identity are separate questions, and a

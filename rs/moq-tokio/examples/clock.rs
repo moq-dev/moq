@@ -64,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
 
 	match config.role {
 		Command::Publish => {
-			let mut broadcast = origin
+			let broadcast = origin
 				.create_broadcast(&config.broadcast)
 				.context("failed to create broadcast")?;
 			let track = broadcast.create_track(track, None)?;
@@ -142,7 +142,7 @@ impl Publisher {
 		Self { track }
 	}
 
-	async fn run(mut self) -> anyhow::Result<()> {
+	async fn run(self) -> anyhow::Result<()> {
 		let start = Utc::now();
 		let mut now = start;
 

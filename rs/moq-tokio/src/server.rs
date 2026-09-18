@@ -1146,7 +1146,7 @@ fn spawn_stream_request(
 /// every transport before the caller authorizes. The variant only distinguishes the
 /// underlying session type; all of them delegate identically.
 /// A pending moq-net request over transport `S`, driven by our tokio runtime.
-type PendingRequest<S> = moq_net::Request<S, crate::runtime::Runtime<S>>;
+type PendingRequest<S> = moq_net::server::Handshake<S, crate::runtime::Runtime<S>>;
 
 pub(crate) enum RequestKind {
 	#[cfg(feature = "noq")]
@@ -1249,7 +1249,7 @@ pub struct Request {
 	kind: RequestKind,
 }
 
-/// Delegate a read-only call to the inner [`moq_net::Request`], whatever the transport.
+/// Delegate a read-only call to the inner [`moq_net::server::Handshake`], whatever the transport.
 macro_rules! request_ref {
 	($self:expr, $r:ident => $body:expr) => {
 		match &$self.kind {
@@ -1359,7 +1359,7 @@ impl Request {
 	}
 
 	/// Assign the identity this peer's routes are attributed to; see
-	/// [`moq_net::Request::with_peer_hop`]. Derive it from [`Self::peer_identity`],
+	/// [`moq_net::server::Handshake::with_peer_hop`]. Derive it from [`Self::peer_identity`],
 	/// never from something coarser.
 	pub fn with_peer_hop(self, hop: moq_net::Hop) -> Self {
 		let Request {
@@ -1626,9 +1626,9 @@ mod tests {
 		let _ = std::fs::remove_file(&path);
 
 		let origin = crate::origin::spawn(moq_net::Hop::random());
-		let mut broadcast = origin.create_broadcast("test").expect("create broadcast");
+		let broadcast = origin.create_broadcast("test").expect("create broadcast");
 		broadcast.announce(Default::default()).expect("announce broadcast");
-		let mut track = broadcast.create_track("video", None).expect("create track");
+		let track = broadcast.create_track("video", None).expect("create track");
 		let mut group = track.append_group().expect("append group");
 		group
 			.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())

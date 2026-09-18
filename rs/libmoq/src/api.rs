@@ -745,16 +745,18 @@ pub struct moq_connection_stats {
 	pub packets_lost_valid: bool,
 }
 
-impl From<&moq_net::ConnectionStats> for moq_connection_stats {
-	fn from(stats: &moq_net::ConnectionStats) -> Self {
+impl From<&moq_net::session::Stats> for moq_connection_stats {
+	fn from(stats: &moq_net::session::Stats) -> Self {
 		// An Option<u64> becomes a (value, valid) pair; absent metrics report 0/false.
 		fn split(value: Option<u64>) -> (u64, bool) {
 			(value.unwrap_or(0), value.is_some())
 		}
 
 		let (rtt_us, rtt_valid) = split(stats.rtt.map(|d| d.as_micros() as u64));
-		let (estimated_send_rate_bps, estimated_send_rate_valid) = split(stats.estimated_send_rate);
-		let (estimated_recv_rate_bps, estimated_recv_rate_valid) = split(stats.estimated_recv_rate);
+		let (estimated_send_rate_bps, estimated_send_rate_valid) =
+			split(stats.estimated_send_rate.map(moq_net::bandwidth::Rate::as_bps));
+		let (estimated_recv_rate_bps, estimated_recv_rate_valid) =
+			split(stats.estimated_recv_rate.map(moq_net::bandwidth::Rate::as_bps));
 		let (bytes_sent, bytes_sent_valid) = split(stats.bytes_sent);
 		let (bytes_received, bytes_received_valid) = split(stats.bytes_received);
 		let (bytes_lost, bytes_lost_valid) = split(stats.bytes_lost);

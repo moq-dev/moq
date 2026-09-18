@@ -137,9 +137,9 @@ async fn embed_and_stop(mut config: Config) {
 		.expect("read embedded response");
 	assert_eq!(body, "embedded\n");
 
-	let mut broadcast = origin.create_broadcast("test").expect("create broadcast");
+	let broadcast = origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce");
-	let mut track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())

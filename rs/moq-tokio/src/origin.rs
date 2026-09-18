@@ -29,7 +29,7 @@ mod tests {
 		let origin = spawn(moq_net::origin::Config::new(moq_net::Hop::random()));
 		let mut announced = origin.consume().announced();
 
-		let mut broadcast = origin.create_broadcast("cam").expect("create broadcast");
+		let broadcast = origin.create_broadcast("cam").expect("create broadcast");
 		broadcast.announce(Default::default()).expect("create broadcast");
 
 		let update = announced.next().await.expect("announce");

@@ -99,7 +99,7 @@ mod tests {
 	/// Read one retained group end to end, without a subscription.
 	#[tokio::test]
 	async fn reads_a_group_to_completion() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast.create_track("media", None).unwrap();
 		let consumer = broadcast.consume();
 
@@ -126,7 +126,7 @@ mod tests {
 	#[tokio::test]
 	async fn empty_data_frames_survive_subscription_and_fetch() {
 		for config in [hang::catalog::Container::Legacy, hang::catalog::Container::Loc] {
-			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let broadcast = moq_net::broadcast::Info::new().produce();
 			let track = broadcast.create_track("data", hang::container::track_info(0)).unwrap();
 			let subscription = track.subscribe(moq_net::track::Subscription::default());
 			let consumer = broadcast.consume();
@@ -155,7 +155,7 @@ mod tests {
 	/// An empty payload times the previous frame and is not returned as media.
 	#[tokio::test]
 	async fn a_duration_marker_times_the_last_frame() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast.create_track("media", None).unwrap();
 		let consumer = broadcast.consume();
 
@@ -193,7 +193,7 @@ mod tests {
 		// The format is not Clone, so decode with a second instance built from the same init.
 		let format = Hang::new(&cmaf, crate::container::Kind::Video).unwrap();
 
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast.create_track("video", None).unwrap();
 		let consumer = broadcast.consume();
 

@@ -523,7 +523,7 @@ pub struct MoqTrackConsumer {
 	groups: Task<ReadLane>,
 	/// Datagram reads. Independent of [`Self::groups`].
 	datagrams: Task<ReadLane>,
-	control: moq_net::track::SubscriberControl,
+	control: moq_net::track::Control,
 	info: moq_net::track::Info,
 }
 

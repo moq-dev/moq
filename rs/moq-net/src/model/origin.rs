@@ -269,32 +269,6 @@ impl Hops {
 		Ok(())
 	}
 
-	/// Replace the first entry equal to `target` with `replacement`, returning
-	/// true if a match was found. The length is unchanged.
-	///
-	/// Fails with [`InvalidHop::Duplicate`] only when the rewrite would actually name
-	/// `replacement` twice, which is the loop [`Self::push`] refuses to build. A `target`
-	/// that is not present changes nothing and so cannot duplicate anything, and the slot
-	/// being overwritten is not a duplicate of itself.
-	pub fn replace_first(&mut self, target: Hop, replacement: Hop) -> Result<bool, InvalidHop> {
-		let Some(index) = self.0.iter().position(|entry| *entry == target) else {
-			return Ok(false);
-		};
-
-		if replacement != Hop::UNKNOWN
-			&& self
-				.0
-				.iter()
-				.enumerate()
-				.any(|(i, entry)| i != index && *entry == replacement)
-		{
-			return Err(InvalidHop::Duplicate);
-		}
-
-		self.0[index] = replacement;
-		Ok(true)
-	}
-
 	/// Returns true if any entry matches `hop`.
 	pub fn contains(&self, hop: &Hop) -> bool {
 		self.0.contains(hop)
@@ -387,19 +361,7 @@ where
 /// The ceiling is the wire's, not the model's: lite-06 carries each cost as a QUIC
 /// varint, which tops out at 2^62-1, so a larger value could be selected on but
 /// never forwarded.
-pub const MAX_COST: u64 = (1 << 62) - 1;
-
-/// The cost given to a route whose session is draining, so every other candidate
-/// outranks it while it stays selectable as the last path to the content.
-///
-/// A session sets this on its routes when its peer sends a GOAWAY. Draining is
-/// deliberately not a distinct state: cost is the whole mechanism, so a route
-/// whose accumulated cost saturates the wire ceiling ranks (and is treated)
-/// identically, as a path of last resort.
-///
-/// It is [`MAX_COST`] rather than a value beyond it for the reason above: a
-/// draining route is still announced downstream, so its cost has to fit the wire.
-pub const DRAIN_COST: u64 = MAX_COST;
+const MAX_COST: u64 = (1 << 62) - 1;
 
 /// What pulling content via a route costs, in two magnitudes that accumulate
 /// together and are compared in that order: lower [`warm`](Self::warm) wins, and
@@ -425,7 +387,7 @@ pub struct Cost {
 	/// The same path with every warm discount removed: what pulling the content
 	/// would cost if no relay along it were carrying anything.
 	///
-	/// Accumulates exactly like [`warm`](Self::warm) but never restarts. [`MAX_COST`]
+	/// Accumulates exactly like [`warm`](Self::warm) but never restarts. [`MAX`](Self::MAX)
 	/// when the peer's wire cannot express it (pre-lite-06, or the MoQ Cluster
 	/// extension), which ranks last rather than pretending the path is free.
 	pub cold: u64,
@@ -438,9 +400,17 @@ impl Cost {
 		Self { warm: cost, cold: cost }
 	}
 
-	/// The cost of a draining route: the ceiling in both magnitudes, so every other
-	/// candidate outranks it. See [`DRAIN_COST`].
-	pub const DRAIN: Self = Self::new(DRAIN_COST);
+	/// The highest cost either half can take, and where accumulation saturates.
+	///
+	/// A draining session stamps this on its routes so every other candidate outranks
+	/// them while they stay selectable as the last path to the content. Draining is
+	/// not a distinct state: cost is the whole mechanism, and a route whose accumulated
+	/// cost saturates the wire ceiling ranks (and is treated) the same way.
+	pub const MAX: Self = Self::new(MAX_COST);
+
+	/// A draining route: [`MAX`](Self::MAX) in both magnitudes, so every other
+	/// candidate outranks it.
+	pub const DRAIN: Self = Self::MAX;
 
 	/// What a peer advertises when its wire has no room for a cost at all: free to
 	/// reach (leaving hop count as the effective metric, exactly as before route
@@ -1408,8 +1378,6 @@ impl Producer {
 		let announcement = announcing.announce(route, Some(serve.clone()))?;
 		Ok(Dynamic {
 			announcement,
-			hop: self.info,
-			root: self.root.clone(),
 			state: serve,
 		})
 	}
@@ -1950,7 +1918,7 @@ fn teardown_broadcasts(node: &Lock<OriginNode>) {
 		let children: Vec<_> = guard.nested.values().cloned().collect();
 		(guard.broadcast.take(), children)
 	};
-	if let Some(mut entry) = entry {
+	if let Some(entry) = entry {
 		// Close the front so anything still holding its table observes the end.
 		if let Ok(mut state) = entry.state.write() {
 			state.closed = true;
@@ -2230,7 +2198,7 @@ fn attach_source(
 /// until the last source detaches, then unpublishes the broadcast.
 async fn run_front(
 	state: kio::Producer<FrontState>,
-	mut broadcast: broadcast::Producer,
+	broadcast: broadcast::Producer,
 	tree: Lock<OriginNode>,
 	full: PathOwned,
 	tasks: Tasks,
@@ -2509,7 +2477,7 @@ async fn serve_track(
 					Ok(track) => {
 						// `into_inner` sheds the `Pending` future wrapper so only
 						// the pollable (which is `Sync`) is held across the await.
-						let query = track.info().into_inner();
+						let query = track.query().into_inner();
 						let skip = |id: u64| refused.contains(&id) || dead.contains(&id);
 						let info = kio::wait(|waiter| {
 							if let Poll::Ready(result) = query.poll(waiter) {
@@ -3162,17 +3130,10 @@ struct PendingBroadcast {
 pub struct Dynamic {
 	/// The advertisement, retracted on drop.
 	announcement: AnnounceProducer,
-	hop: Hop,
-	root: PathOwned,
 	state: kio::Shared<ServeState>,
 }
 
 impl Dynamic {
-	/// The id of the origin this handler belongs to.
-	pub fn hop(&self) -> Hop {
-		self.hop
-	}
-
 	/// Re-price the route in place: replace its hops and cost.
 	///
 	/// Consumers observe another active update for the same prefix; sessions
@@ -3223,11 +3184,6 @@ impl Dynamic {
 	/// the route; concurrent callers each receive distinct requests.
 	pub async fn requested_broadcast(&self) -> Result<Request, Error> {
 		kio::wait(|waiter| self.poll_requested_broadcast(waiter)).await
-	}
-
-	/// Returns the prefix that is automatically stripped from requested paths.
-	pub fn root(&self) -> &Path<'_> {
-		&self.root
 	}
 }
 
@@ -4232,7 +4188,7 @@ mod tests {
 		let mut announced = consumer.announced();
 
 		// Created unannounced: reachable by exact path, invisible to the cursor.
-		let mut broadcast = producer.create_broadcast("room/alice").unwrap();
+		let broadcast = producer.create_broadcast("room/alice").unwrap();
 		announced.assert_next_wait();
 		let local = consumer
 			.request_broadcast("room/alice")
@@ -4325,7 +4281,7 @@ mod tests {
 		assert_eq!(producer.node_count(), bare, "rooting should not create nodes");
 		drop(scoped);
 
-		let mut broadcast = producer.create_broadcast("room/a/chat").unwrap();
+		let broadcast = producer.create_broadcast("room/a/chat").unwrap();
 		assert_eq!(producer.node_count(), bare + 3, "room, a and chat");
 		broadcast.finish();
 		settle(|| producer.node_count() == bare).await;
@@ -4341,7 +4297,7 @@ mod tests {
 		let consumer = producer.consume().scope(&scopes(&["channel"])).unwrap();
 
 		// Create the scoped subtree and prune it straight back out.
-		let mut first = scoped.create_broadcast("channel/chat").unwrap();
+		let first = scoped.create_broadcast("channel/chat").unwrap();
 		assert!(consumer.get_broadcast("channel/chat").is_some());
 		first.finish();
 		settle(|| consumer.get_broadcast("channel/chat").is_none()).await;
@@ -5027,9 +4983,9 @@ mod tests {
 		let consumer = producer.consume();
 		let server = producer.dynamic(subtree("room"), Route::default()).unwrap();
 
-		let mut source = broadcast::Info::new().produce();
+		let source = broadcast::Info::new().produce();
 		for name in ["a", "b"] {
-			let mut track = source.create_track(name, None).unwrap();
+			let track = source.create_track(name, None).unwrap();
 			let mut group = track.append_group().unwrap();
 			group.write_frame(crate::Timestamp::ZERO, name.as_bytes()).unwrap();
 			group.finish().unwrap();
@@ -5253,8 +5209,8 @@ mod tests {
 
 			let pending = consumer.request_broadcast("room/alice");
 			let request = queued(&server).await;
-			let mut source = broadcast::Info::new().produce();
-			let mut track = source.create_track("video", None).unwrap();
+			let source = broadcast::Info::new().produce();
+			let track = source.create_track("video", None).unwrap();
 			let mut group = track.append_group().unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
 			group.finish().unwrap();
@@ -5302,8 +5258,8 @@ mod tests {
 	/// the same subscription, at the group boundary.
 	async fn assert_resumes(rig: &mut ResumeRig, server: &Dynamic) {
 		let request = queued(server).await;
-		let mut replacement = broadcast::Info::new().produce();
-		let mut track = replacement.create_track("video", None).unwrap();
+		let replacement = broadcast::Info::new().produce();
+		let track = replacement.create_track("video", None).unwrap();
 		// The same content: group 0 was already delivered through the old route,
 		// so the splice resumes at group 1.
 		let mut group = track.append_group().unwrap();
@@ -5370,8 +5326,8 @@ mod tests {
 			// The standby shares the first hop, so the front re-requests through it,
 			// but its copy of the track is on another grid.
 			let request = queued(&standby_server).await;
-			let mut successor = broadcast::Info::new().produce();
-			let mut track = successor.create_track("video", replacement).unwrap();
+			let successor = broadcast::Info::new().produce();
+			let track = successor.create_track("video", replacement).unwrap();
 			let mut group = track.append_group().unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
 			group.finish().unwrap();
@@ -5384,7 +5340,7 @@ mod tests {
 
 			// Reopening the aborted logical track must not forget the broadcast's metadata.
 			let reopened = rig.resolved.track("video").unwrap();
-			assert!(matches!(reopened.info().await, Err(Error::Unsupported)));
+			assert!(matches!(reopened.query().await, Err(Error::Unsupported)));
 			assert!(matches!(reopened.subscribe(None).await, Err(Error::Unsupported)));
 		}
 	}
@@ -5445,8 +5401,8 @@ mod tests {
 		let consumer = producer.consume().excluding(origin(30));
 		let pending = consumer.request_broadcast("room/alice");
 		let request = queued(&server_a).await;
-		let mut source_a = broadcast::Info::new().produce();
-		let mut track_a = source_a.create_track("video", None).unwrap();
+		let source_a = broadcast::Info::new().produce();
+		let track_a = source_a.create_track("video", None).unwrap();
 		let mut group = track_a.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"from-a".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -5497,8 +5453,8 @@ mod tests {
 			.unwrap();
 		let pending = consumer.request_broadcast("room/alice");
 		let request = queued(&server_b).await;
-		let mut source_b = broadcast::Info::new().produce();
-		let mut track_b = source_b.create_track("video", None).unwrap();
+		let source_b = broadcast::Info::new().produce();
+		let track_b = source_b.create_track("video", None).unwrap();
 		let mut group = track_b.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"from-b".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -5529,7 +5485,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn reprice_is_invisible_to_the_subscription() {
-		let (rig, incumbent, mut source) = ResumeRig::new(&[10]).await;
+		let (rig, incumbent, source) = ResumeRig::new(&[10]).await;
 
 		// A metadata-only reprice of the only route: nothing re-requests and the
 		// subscription keeps flowing from the same source.
@@ -5537,7 +5493,7 @@ mod tests {
 			.update(Route::default().with_hops(hops(&[10])).with_cost(9))
 			.unwrap();
 
-		let mut track = source.create_track("audio", None).unwrap();
+		let track = source.create_track("audio", None).unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"steady".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -5567,7 +5523,7 @@ mod tests {
 		// keeps serving. The front migrates to the standby without waiting for
 		// the death.
 		incumbent
-			.update(Route::default().with_hops(hops(&[10])).with_cost(DRAIN_COST))
+			.update(Route::default().with_hops(hops(&[10])).with_cost(Cost::DRAIN))
 			.unwrap();
 
 		assert_resumes(&mut rig, &standby_server).await;
@@ -5582,7 +5538,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 
-		let mut first = producer.create_broadcast("room/alice").unwrap();
+		let first = producer.create_broadcast("room/alice").unwrap();
 		let resolved = consumer
 			.request_broadcast("room/alice")
 			.now_or_never()
@@ -5590,7 +5546,7 @@ mod tests {
 			.expect("resolves");
 
 		// A second source at the same path joins the same front.
-		let mut second = producer.create_broadcast("room/alice").unwrap();
+		let second = producer.create_broadcast("room/alice").unwrap();
 		let again = consumer
 			.request_broadcast("room/alice")
 			.now_or_never()
@@ -5617,8 +5573,8 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 
-		let mut first = producer.create_broadcast("room/alice").unwrap();
-		let mut track = first.create_track("video", None).unwrap();
+		let first = producer.create_broadcast("room/alice").unwrap();
+		let track = first.create_track("video", None).unwrap();
 		let resolved = consumer
 			.request_broadcast("room/alice")
 			.now_or_never()
@@ -5637,7 +5593,7 @@ mod tests {
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
 
 		// The newest source is dispatched the track, and refused for its metadata.
-		let mut second = producer.create_broadcast("room/alice").unwrap();
+		let second = producer.create_broadcast("room/alice").unwrap();
 		let _incompatible = second
 			.create_track("video", track::Info::default().with_timescale(crate::Timescale::MICRO))
 			.unwrap();
@@ -5717,7 +5673,7 @@ mod tests {
 		assert_eq!(rooted.allowed(), scopes(&[""]));
 
 		// Publishing through the nested view lands where the root says.
-		let mut broadcast = nested.create_broadcast("room/chat/live").unwrap();
+		let broadcast = nested.create_broadcast("room/chat/live").unwrap();
 		assert!(producer.consume().get_broadcast("room/chat/live").is_some());
 		broadcast.finish();
 	}
@@ -5803,8 +5759,8 @@ mod tests {
 	async fn stalled_publisher_open_group_is_reclaimed() {
 		let expiry = Duration::from_secs(1);
 		let origin = expiring_origin(expiry);
-		let mut broadcast = origin.create_broadcast("test").unwrap();
-		let mut track = broadcast.create_track("video", None).unwrap();
+		let broadcast = origin.create_broadcast("test").unwrap();
+		let track = broadcast.create_track("video", None).unwrap();
 
 		let mut stalled = track.append_group().unwrap();
 		stalled.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
@@ -5837,8 +5793,8 @@ mod tests {
 			..Config::default()
 		}
 		.produce();
-		let mut broadcast = origin.create_broadcast("test").unwrap();
-		let mut track = broadcast.create_track("video", None).unwrap();
+		let broadcast = origin.create_broadcast("test").unwrap();
+		let track = broadcast.create_track("video", None).unwrap();
 
 		let mut stalled = track.append_group().unwrap();
 		stalled.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();

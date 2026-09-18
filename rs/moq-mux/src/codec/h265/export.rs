@@ -262,8 +262,8 @@ mod tests {
 		let trail = &[0x02, 0x01, 0xe0, 0x12][..];
 
 		let catalog = hvc1_catalog("video.hvc1", hvcc(vps, sps, pps));
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let mut track = broadcast
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
 			.create_track("video.hvc1", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
 

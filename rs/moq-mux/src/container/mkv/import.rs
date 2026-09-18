@@ -406,7 +406,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// Manage groups: new group on video keyframe; audio always finishes its group immediately.
 		match track.kind {
 			TrackKind::Video => {
-				if keyframe && let Some(mut prev) = track.group.take() {
+				if keyframe && let Some(prev) = track.group.take() {
 					prev.finish()?;
 				}
 				track.track.write(frame)?;
@@ -434,7 +434,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Finish all tracks, flushing current groups.
 	pub fn finish(&mut self) -> Result<()> {
 		for track in self.tracks.values_mut() {
-			if let Some(mut g) = track.group.take() {
+			if let Some(g) = track.group.take() {
 				g.finish()?;
 			}
 			track.track.finish()?;

@@ -942,10 +942,10 @@ mod tests {
 	async fn the_catalog_format_on_the_line_is_honored() {
 		let _env = EnvGuard::clear(&["MOQ_CONNECT"]);
 		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
-		let mut broadcast = origin.create_broadcast("room").expect("broadcast");
+		let broadcast = origin.create_broadcast("room").expect("broadcast");
 		broadcast.announce(Default::default()).expect("broadcast");
 
-		let mut track = broadcast
+		let track = broadcast
 			.create_track(moq_msf::DEFAULT_NAME, moq_net::track::Info::default())
 			.expect("msf track");
 		let mut msf = moq_msf::Track::new("hd", moq_msf::Packaging::Loc);

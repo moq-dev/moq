@@ -322,7 +322,7 @@ impl MoqBroadcastProducer {
 		let state = guard.as_ref().ok_or(MoqError::Closed)?;
 
 		let init: moq_mux::import::AudioInit = init.into();
-		let mut broadcast = state.broadcast.clone();
+		let broadcast = state.broadcast.clone();
 		let name = broadcast.unique_name(&format!(".{}", init.format));
 		let request = broadcast
 			.reserve_track(name)
@@ -344,7 +344,7 @@ impl MoqBroadcastProducer {
 		let state = guard.as_ref().ok_or(MoqError::Closed)?;
 
 		let init: moq_mux::import::VideoInit = init.into();
-		let mut broadcast = state.broadcast.clone();
+		let broadcast = state.broadcast.clone();
 		let name = broadcast.unique_name(&format!(".{}", init.format));
 		let request = broadcast
 			.reserve_track(name)
@@ -417,7 +417,7 @@ impl MoqBroadcastProducer {
 		let state = guard.as_ref().ok_or(MoqError::Closed)?;
 
 		let init: moq_mux::import::VideoInit = init.into();
-		let mut broadcast = state.broadcast.clone();
+		let broadcast = state.broadcast.clone();
 		let name = broadcast.unique_name(&format!(".{}", init.format));
 		let request = broadcast
 			.reserve_track(name)
@@ -462,7 +462,7 @@ impl MoqBroadcastProducer {
 		let state = guard.as_ref().ok_or(MoqError::Closed)?;
 		let info = raw_track_info(info)?;
 		// Clone the broadcast handle (shared Arc internally) to get &mut access.
-		let mut broadcast = state.broadcast.clone();
+		let broadcast = state.broadcast.clone();
 		let producer = broadcast.create_track(name, Some(info))?;
 		Ok(Arc::new(MoqTrackProducer {
 			inner: std::sync::Mutex::new(Some(producer)),
@@ -538,11 +538,11 @@ impl MoqTrackDynamic {
 pub struct MoqGroupRequest {
 	sequence: u64,
 	priority: u8,
-	inner: std::sync::Mutex<Option<moq_net::track::GroupRequest>>,
+	inner: std::sync::Mutex<Option<moq_net::group::Request>>,
 }
 
 impl MoqGroupRequest {
-	fn new(request: moq_net::track::GroupRequest) -> Self {
+	fn new(request: moq_net::group::Request) -> Self {
 		Self {
 			sequence: request.sequence(),
 			priority: request.priority(),
@@ -550,7 +550,7 @@ impl MoqGroupRequest {
 		}
 	}
 
-	fn take(&self) -> Result<moq_net::track::GroupRequest, MoqError> {
+	fn take(&self) -> Result<moq_net::group::Request, MoqError> {
 		self.inner.lock().unwrap().take().ok_or(MoqError::Closed)
 	}
 }

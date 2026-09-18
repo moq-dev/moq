@@ -786,7 +786,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn existing_track_opus_uses_existing_name() {
-		let (mut broadcast, catalog) = new_broadcast();
+		let (broadcast, catalog) = new_broadcast();
 		// The importer accepts the reserved track, setting its (microsecond) timescale.
 		let request = broadcast.reserve_track("requested-audio").unwrap();
 		let mut import = Track::audio(
@@ -810,7 +810,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn aac_import_attaches_audio_specific_config() {
-		let (mut broadcast, catalog) = new_broadcast();
+		let (broadcast, catalog) = new_broadcast();
 		let config = crate::codec::aac::Config {
 			profile: 2,
 			sample_rate: 44_100,
@@ -843,7 +843,7 @@ mod tests {
 	/// the published rendition, since the codec parser resolves everything else from the init bytes.
 	#[tokio::test(start_paused = true)]
 	async fn an_audio_init_publishes_its_container() {
-		let (mut broadcast, catalog) = new_broadcast();
+		let (broadcast, catalog) = new_broadcast();
 		let request = broadcast.reserve_track("audio").unwrap();
 
 		let _import = Track::audio(
@@ -863,7 +863,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn unique_track_opus_attaches_catalog_and_retires_on_drop() {
-		let (mut broadcast, catalog) = new_broadcast();
+		let (broadcast, catalog) = new_broadcast();
 
 		// A freshly reserved track attaches its catalog rendition on init.
 		let name = broadcast.unique_name(".opus");
@@ -890,7 +890,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn opus_import_delivers_frames() {
-		let (mut broadcast, catalog) = new_broadcast();
+		let (broadcast, catalog) = new_broadcast();
 		let track = broadcast
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
@@ -1038,7 +1038,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn existing_track_h264_uses_existing_name_in_catalog() {
-		let (mut broadcast, catalog) = new_broadcast();
+		let (broadcast, catalog) = new_broadcast();
 		let request = broadcast.reserve_track("camera").unwrap();
 
 		let import = Track::video(
@@ -1060,7 +1060,7 @@ mod tests {
 	/// tracks to reject a reconfiguration, so the second key frame succeeds.
 	#[tokio::test(start_paused = true)]
 	async fn reconfiguration_updates_in_place() {
-		let (mut broadcast, catalog) = new_broadcast();
+		let (broadcast, catalog) = new_broadcast();
 		let request = broadcast.reserve_track("video").unwrap();
 		let mut import =
 			Track::video(request, catalog.reserve(), VideoInit::new(VideoFormat::Vp8, Vec::new())).unwrap();
@@ -1083,7 +1083,7 @@ mod tests {
 	/// An audio format publishes its catalog immediately from the init bytes.
 	#[tokio::test(start_paused = true)]
 	async fn audio_publishes_from_init() {
-		let (mut broadcast, catalog) = new_broadcast();
+		let (broadcast, catalog) = new_broadcast();
 		let request = broadcast.reserve_track("audio").unwrap();
 		let _import = Track::audio(
 			request,
@@ -1104,7 +1104,7 @@ mod tests {
 	async fn each_kind_ranks_as_itself() {
 		use hang::catalog::PRIORITY;
 
-		let (mut broadcast, catalog) = new_broadcast();
+		let (broadcast, catalog) = new_broadcast();
 		let consumer = broadcast.consume();
 
 		let request = broadcast.reserve_track("audio").unwrap();
@@ -1118,10 +1118,10 @@ mod tests {
 		let request = broadcast.reserve_track("video").unwrap();
 		let _video = Track::video(request, catalog.reserve(), VideoInit::new(VideoFormat::Vp8, Vec::new())).unwrap();
 
-		let audio = consumer.track("audio").unwrap().info().await.unwrap();
+		let audio = consumer.track("audio").unwrap().query().await.unwrap();
 		assert_eq!(audio.priority, PRIORITY.audio);
 
-		let video = consumer.track("video").unwrap().info().await.unwrap();
+		let video = consumer.track("video").unwrap().query().await.unwrap();
 		assert_eq!(video.priority, PRIORITY.video);
 	}
 
@@ -1129,7 +1129,7 @@ mod tests {
 	/// rather than registering a track that never publishes.
 	#[tokio::test(start_paused = true)]
 	async fn audio_without_init_errors() {
-		let (mut broadcast, catalog) = new_broadcast();
+		let (broadcast, catalog) = new_broadcast();
 		let request = broadcast.reserve_track("audio").unwrap();
 		let result = Track::audio(
 			request,
@@ -1142,7 +1142,7 @@ mod tests {
 	/// A video codec with no extra parameters (VP8) publishes the catalog before the first key frame.
 	#[tokio::test(start_paused = true)]
 	async fn video_publishes_before_first_frame() {
-		let (mut broadcast, catalog) = new_broadcast();
+		let (broadcast, catalog) = new_broadcast();
 		let request = broadcast.reserve_track("video").unwrap();
 		let _import = Track::video(
 			request,
@@ -1164,7 +1164,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn existing_track_hvc1_uses_existing_name_in_catalog() {
 		let hvcc = crate::codec::h265::fixtures::hvcc();
-		let (mut broadcast, catalog) = new_broadcast();
+		let (broadcast, catalog) = new_broadcast();
 		let request = broadcast.reserve_track("camera").unwrap();
 
 		let import = Track::video(
@@ -1188,7 +1188,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn hvc1_track_delivers_length_prefixed_keyframe() {
 		let hvcc = crate::codec::h265::fixtures::hvcc();
-		let (mut broadcast, catalog) = new_broadcast();
+		let (broadcast, catalog) = new_broadcast();
 		let consumer = broadcast.consume();
 		let request = broadcast.reserve_track("video").unwrap();
 		let mut import = Track::video(request, catalog.reserve(), VideoInit::new(VideoFormat::Hvc1, hvcc)).unwrap();

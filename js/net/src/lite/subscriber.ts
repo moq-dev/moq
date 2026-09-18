@@ -657,7 +657,7 @@ export class Subscriber {
 	}
 
 	// Resolve a track's immutable model info via a TRACK stream (lite-05+), for the
-	// ConsumeBroadcast backing track.Consumer.info(). On older drafts there's no TRACK
+	// ConsumeBroadcast backing track.Consumer.query(). On older drafts there's no TRACK
 	// stream, so this rejects rather than fabricating defaults.
 	async resolveTrackInfo(broadcast: Path.Valid, track: string): Promise<track.Info> {
 		if (!supportsTrackStream(this.version)) {
@@ -1058,7 +1058,7 @@ export class Subscriber {
 }
 
 /**
- * A broadcast consumed from a lite session. It resolves `track.Consumer.info()` and
+ * A broadcast consumed from a lite session. It resolves `track.Consumer.query()` and
  * `.fetchGroup()` over the wire (lite-05+ TRACK / FETCH streams) by reaching into the
  * {@link Subscriber} it was opened from, the way the Rust `BroadcastConsumer` holds its
  * session. Live subscribes still flow through the inherited requested() queue.

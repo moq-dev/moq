@@ -1347,7 +1347,7 @@ mod tests {
 			payload: &'static [u8],
 			recorder: Option<moq_mux::timeline::Recorder>,
 		) -> Box<dyn std::any::Any> {
-			let mut broadcast = origin.create_broadcast("media").expect("publish allowed");
+			let broadcast = origin.create_broadcast("media").expect("publish allowed");
 			broadcast.announce(Default::default()).expect("publish allowed");
 			let track = broadcast.create_track("video0", None).unwrap();
 

@@ -878,7 +878,7 @@ async fn fetches_cached_group_without_subscribing() {
 
 #[tokio::test]
 async fn fetches_cached_media_group_and_decodes_container() {
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let broadcast = moq_net::broadcast::Info::new().produce();
 	let track = broadcast.create_track("media", None).unwrap();
 	let consumer = MoqBroadcastConsumer::new(broadcast.consume());
 	let mut media = moq_mux::container::Producer::new(
@@ -928,7 +928,7 @@ async fn fetches_cached_media_group_and_decodes_container() {
 
 #[tokio::test]
 async fn fetch_media_group_rejects_invalid_container_before_fetching() {
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let broadcast = moq_net::broadcast::Info::new().produce();
 	let _track = broadcast.create_track("media", None).unwrap();
 	let consumer = MoqBroadcastConsumer::new(broadcast.consume());
 
@@ -955,7 +955,7 @@ async fn fetch_media_group_decodes_multiple_cmaf_samples() {
 	let container =
 		moq_mux::catalog::hang::Container::new(&catalog_container, moq_mux::container::Kind::Video).unwrap();
 
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let broadcast = moq_net::broadcast::Info::new().produce();
 	let track = broadcast.create_track("video", None).unwrap();
 	let consumer = MoqBroadcastConsumer::new(broadcast.consume());
 	// Buffer both samples into one moof+mdat, which is what this decodes.
@@ -1423,7 +1423,7 @@ async fn announced_broadcasts_resolve_siblings_under_the_prefix() {
 /// sibling names nothing. Reporting that beats silently reading the catalog's own broadcast.
 #[tokio::test]
 async fn resolve_rejects_a_reference_without_an_origin() {
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let broadcast = moq_net::broadcast::Info::new().produce();
 	let _audio = broadcast.create_track("audio", None).unwrap();
 	let consumer = MoqBroadcastConsumer::new(broadcast.consume());
 

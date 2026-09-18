@@ -31,7 +31,6 @@ contract, so it gates [Release](/quest/m1/release.md) rather than the merge.
 - [Auth contract](/quest/m1/auth-contract.md) - moq-auth and @moq/auth ship one type per concept: no `Counters`, one publish/subscribe pair, a reference server that scopes like the library, no `kty` default
 - [Announce event](/quest/m1/api-net-announce.md) - publishers announce prefixes on every wire, consumers scoped by a pattern read the covered path already trimmed, with no `as_prefix().expect()` at 89 call sites
 - [Origin scoping](/quest/m1/api-net-origin.md) - `scope(root, patterns)` is one fallible call, a fresh origin has a random hop, and the handles stop derefing to `Hop`
-- [moq-net surface](/quest/m1/api-net-surface.md) - dead exports go, compounds sit under their modules, creators take `&self`
 - [Bindings announce match](/quest/m1/api-origin-scopes.md) - every binding takes a pattern scope and reports the announce match with its captures
 - [PathPrefixes](/quest/m1/api-path-prefixes.md) - the unused moq_net::PathPrefixes type is deleted before the release
 - [moq-tokio shapes](/quest/m1/api-tokio-shapes.md) - a `Drop` on `Listener`, a worker `Member` that cannot be cross-wired, `std::time::Duration` fields, one construction idiom, no six-argument merge
