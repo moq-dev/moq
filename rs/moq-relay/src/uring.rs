@@ -702,7 +702,7 @@ async fn serve_connection(
 			moq_net::Role::Publisher => moq_auth::Role::Publisher,
 			_ => moq_auth::Role::Subscriber,
 		});
-		auth_request.tls = identity.as_ref().and_then(crate::peer);
+		auth_request.tls = identity.as_ref().and_then(crate::auth::peer);
 		if identity.is_some() {
 			tracing::debug!(id, "client certificate verified; reported to the auth server");
 		}
@@ -778,7 +778,8 @@ mod tests {
 	/// force. Each is named separately so the message points at the right line.
 	#[test]
 	fn windows_are_refused() {
-		let cases: [(&str, fn(&mut moq_tokio::quic::Config)); 3] = [
+		type Set = fn(&mut moq_tokio::quic::Config);
+		let cases: [(&str, Set); 3] = [
 			("quic.receive_window", |quic| quic.receive_window = Some(64 << 20)),
 			("quic.stream_receive_window", |quic| {
 				quic.stream_receive_window = Some(8 << 20)

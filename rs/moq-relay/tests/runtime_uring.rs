@@ -442,13 +442,12 @@ async fn uring_workers_write_qlog_traces() {
 
 /// A policy admitting verified certificates and nobody else.
 fn mtls_only() -> moq_auth::serve::Policy {
-	moq_auth::serve::Policy {
-		mtls: moq_auth::serve::Rules {
-			publish: [moq_auth::Pattern::all()].into_iter().collect(),
-			subscribe: [moq_auth::Pattern::all()].into_iter().collect(),
-		},
-		..Default::default()
-	}
+	let mut policy = moq_auth::serve::Policy::default();
+	policy.mtls = moq_auth::serve::Rules::new(
+		[moq_auth::Pattern::all()].into_iter().collect(),
+		[moq_auth::Pattern::all()].into_iter().collect(),
+	);
+	policy
 }
 
 /// Serve `policy` on a loopback port for the test's lifetime, returning its URL.
