@@ -385,14 +385,18 @@ struct ProbeServe<S: crate::transport::poll::Session, R: crate::runtime::Runtime
 	padding: Option<(Writer<S::SendStream, Version>, bool)>,
 }
 
+/// The most padding one tick sends, so a target far above the link never
+/// queues more than the window drains in a few round trips.
+const PADDING_MAX_PER_TICK: usize = 256 * 1024;
+/// One buffer of zeros every padding stream slices from, so a tick never
+/// allocates for bytes the receiver throws away.
+static PADDING_ZEROS: [u8; PADDING_MAX_PER_TICK] = [0; PADDING_MAX_PER_TICK];
+
 impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> ProbeServe<S, R> {
 	const PROBE_INTERVAL: Duration = Duration::from_millis(100);
 	const PROBE_MAX_AGE: Duration = Duration::from_secs(10);
 	const PROBE_MAX_DELTA: f64 = 0.25;
 	const PROBE_RTT_DELTA: f64 = 0.25;
-	/// The most padding one tick sends, so a target far above the link never
-	/// queues more than the window drains in a few round trips.
-	const PADDING_MAX_PER_TICK: usize = 256 * 1024;
 	/// Padding goes out behind every other stream.
 	const PADDING_SEND_ORDER: u8 = 0;
 
@@ -440,7 +444,7 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> ProbeServe<
 	fn padding_bytes(target: u64, sent_since_tick: u64, interval: Duration) -> Option<usize> {
 		let wanted = target as f64 * interval.as_secs_f64() / 8.0;
 		let gap = wanted - sent_since_tick as f64;
-		(gap >= 1.0).then(|| (gap as usize).min(Self::PADDING_MAX_PER_TICK))
+		(gap >= 1.0).then(|| (gap as usize).min(PADDING_MAX_PER_TICK))
 	}
 
 	/// Open one padding stream carrying `bytes` of zeros behind every other
@@ -458,7 +462,7 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> ProbeServe<
 		let mut writer = Writer::new(stream, version);
 		writer.set_priority(Self::PADDING_SEND_ORDER);
 		writer.buffer(&lite::DataType::Padding)?;
-		writer.buffer_raw(&vec![0u8; bytes]);
+		writer.buffer_raw(&PADDING_ZEROS[..bytes.min(PADDING_MAX_PER_TICK)]);
 		Poll::Ready(Ok(writer))
 	}
 
