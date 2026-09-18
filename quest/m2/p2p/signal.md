@@ -23,9 +23,12 @@ origin, one per tab, as `origin::Producer::empty(Hop::random())` does in
 Rust, so the id in the roster is the id in every chain the tab forwards.
 
 Roster: each peer publishes `<prefix><id>` with an `info.json` snapshot track:
-the moq ALPNs it accepts, `webrtc: true`, the application's `meta`, and for
-native peers an optional `webtransport: { url, fingerprint }` and `iroh`
-endpoint id. The schema is shared with [moq-cli](/quest/m2/p2p/cli.md).
+the moq ALPNs it accepts, `webrtc: true`, whether it can run qmux unordered,
+the application's `meta`, and for native peers an optional
+`webtransport: { url, fingerprint }` and `iroh` endpoint id. The schema is
+shared with [moq-cli](/quest/m2/p2p/cli.md). Unordered is advertised here so
+the dialer can set `RTCDataChannel.ordered` at create time; see
+[unordered qmux](/quest/m2/p2p/unordered.md).
 
 Pairing is sparse: broadcasts exist only for pairs some `select` chose, so
 the cost is the dialed pairs, not the square of the roster. Whoever selects a
@@ -66,15 +69,17 @@ possession, so a peer that received one could replay it against the relay.
 Instead the relay issues each session a peer grant, a relay-signed statement
 of that session's path scopes bound to its hop id and short-lived, which the
 peer presents in band; the other side verifies the relay's signature, checks
-the hop id against the roster, and serves only the granted paths. The grant
-rides the [in-band auth](/quest/m2/auth/README.md) exchange and that line
-gains the issuing step. A peer session with no verifiable grant serves
-nothing; there is no equal-scope shortcut.
+the hop id against the roster, and serves only the granted paths. Issuance,
+asymmetric keys, JWKS distribution, and refresh live in
+[Peer grants](/quest/m2/auth/peer-grant.md): HMAC keys cannot be given to
+browsers without also letting them forge grants, so an HS256-only relay
+issues nothing. A peer session with no verifiable grant serves nothing;
+there is no equal-scope shortcut.
 
 ## Required
 
 - [Data channel transport](/quest/m2/p2p/transport.md)
-- [In-band auth](/quest/m2/auth/README.md) - the per-peer grant filtering a direct session needs
+- [Peer grants](/quest/m2/auth/peer-grant.md) - the hop-bound, asymmetrically signed credential a direct session presents; HS256 keys issue none
 
 ## Related
 

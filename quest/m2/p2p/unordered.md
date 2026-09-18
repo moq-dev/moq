@@ -22,8 +22,19 @@ RESET_STREAM by final size) need nothing. Params-first setup still holds
 because the transport parameters travel in the first record and the receiver
 holds later records until it has them.
 
-Bindings: `@moq/p2p` and the `moq-tokio` transport create the channel with
-`ordered: false` when the parameter is negotiated, otherwise as today.
+`RTCDataChannel.ordered` is fixed at `createDataChannel`. The qmux
+parameter arrives in the first record on that already-created channel, so
+neither binding can learn unordered from the handshake and then flip the
+channel. Advertise the capability in the roster `info.json`
+(`unordered: true`) before any channel exists, the same place ALPNs live.
+The dialer creates the channel with `ordered: false` only when both roster
+entries say so, and both sides then send the parameter; otherwise the
+channel stays ordered and the parameter is not sent. A channel created
+unordered whose peer omits the parameter, or a parameter on an ordered
+channel, aborts the session. Do not open a second channel, and do not
+learn the mode from the first record. Native iroh and QUIC have no
+constructor constraint; the parameter alone is enough there.
+
 Draft: `draft-lcurley-qmux.md` gains the parameter and the relaxed rule; the
 data channel row in `draft-lcurley-moq-lite.md` says which mode it runs.
 `just drafts check` passes.
@@ -36,3 +47,4 @@ throughput must not regress.
 
 - [Harness](/quest/m2/p2p/harness.md) - the loss row this quest is measured against
 - [qmux on the QUIC core](/quest/m2/quic/qmux.md) - the receive buffer that makes reassembly free
+- [Signaling and policy](/quest/m2/p2p/signal.md) - the roster advertisement that decides ordered before the channel exists

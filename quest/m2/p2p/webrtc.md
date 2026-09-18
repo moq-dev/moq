@@ -32,7 +32,8 @@ reliable ordered str0m channel, the way `ws::Upgraded` does, and feed
 `qmux::Session` through `transport::Session` like `websocket.rs`. One record
 per message, `max_record_size` 16 KiB by default, clamped to the negotiated
 message size. `ordered` is a config knob for
-[unordered qmux](/quest/m2/p2p/unordered.md).
+[unordered qmux](/quest/m2/p2p/unordered.md), set from the roster before
+the channel is created, never from the first qmux record.
 
 Tests: an in-process str0m pair over loopback runs moq-net's session tests;
 a second pair puts a fake STUN server between them and asserts the reflexive

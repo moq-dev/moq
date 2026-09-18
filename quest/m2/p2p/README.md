@@ -78,9 +78,12 @@ The cost is head-of-line blocking: one lost chunk stalls every stream until
 SCTP retransmits it. qmux frames already carry stream offsets, so the
 follow-up is a qmux transport parameter that permits reordering plus receiver
 reassembly, which [qmux on the QUIC core](/quest/m2/quic/qmux.md) provides
-for free; the channel then runs `ordered: false` and a loss stalls only the
-stream it hit. The [harness](/quest/m2/p2p/harness.md) supplies the numbers
-that decide when that follow-up is worth it.
+for free. Both sides advertise that capability in the roster before the
+channel is created so it can run `ordered: false`; a loss then stalls only
+the stream it hit. `RTCDataChannel.ordered` cannot change after the
+channel exists, so the first qmux record is too late to choose. The
+[harness](/quest/m2/p2p/harness.md) supplies the numbers that decide when
+that follow-up is worth it.
 
 Channel-per-stream is not planned. moq opens a stream per group, so it churns
 against Chrome's 1024-id cap and its close-event id reclaim, needs DCEP per
@@ -144,6 +147,7 @@ re-derived.
 
 ## Related
 
+- [Peer grants](/quest/m2/auth/peer-grant.md) - the hop-bound credential a direct session presents; HMAC keys issue none
 - [Route cost in the JS origin](/quest/m2/route-cost.md) - the watcher-side route pick this line needs
 - [One port](/quest/m2/one-port/README.md) - the relay answers STUN on its QUIC port
 - [E2EE](/quest/m2/e2ee/README.md) - what a peer would need if the token scope stopped being the trust boundary
