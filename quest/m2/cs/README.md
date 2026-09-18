@@ -2,7 +2,7 @@
 
 ## Goal
 
-A .NET developer adds the `Moq` NuGet package and holds the moq-ffi surface as
+A .NET developer adds the NuGet package and holds the moq-ffi surface as
 classes whose async operations are `Task`s, with native libraries for every
 runtime identifier in the package. Same recipe as the C++ line: generate from
 moq-ffi with a pinned generator, add a thin idiomatic wrapper, never hand-roll

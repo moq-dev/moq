@@ -33,9 +33,12 @@ stop here and write down why.
   workflow, `cpp/ffi/README.md`, `doc/lib/cpp`). `just cpp check` regenerates
   into `cpp/ffi` and compiles the probe; wire it into the check workflow the way
   `just go check` is.
-- Decide and document Task semantics per the #2907 finding: moq-ffi's native
-  `Task::run` spawns on the runtime thread, so a dropped future cancels a join,
-  never the work mid-write. The generated future's `cancel()` maps onto that.
+- Document the cancellation contract from what moq-ffi does: native
+  `Task::run` and `detached` hold an `AbortOnDrop` on the spawned task
+  (`rs/moq-ffi/src/ffi.rs`), so dropping the Rust future aborts the work, and
+  a mid-write abort is possible. The generated future's `cancel()` and its
+  destructor map onto that; the wrapper says so where it matters (finish a
+  group before dropping its write future).
 - Offer both the 0.32 port and the expected flag upstream to LiveKit and
   NordSecurity; the fork exists only until they tag.
 

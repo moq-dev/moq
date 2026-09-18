@@ -9,7 +9,8 @@ cancellable futures, with no `user_data` plumbing, no handle integers, and no
 thread of their own to babysit. The OBS plugin is the in-tree consumer that
 proves the shape; external SDK users are the audience.
 
-Non-goals: libmoq stays as the plain-C ABI and keeps its own release; no
+Non-goals: libmoq stays as the plain-C ABI, keeps its own release, and keeps
+following the Cross-Package Sync table like every other wrapper; no
 second hand-written C++ surface (ergonomics are fixed in moq-ffi where every
 binding benefits); no wire or public Rust API change.
 
