@@ -287,9 +287,10 @@ mod tests {
 
 	#[test]
 	fn copies_share_one_epoch() {
-		let clock = Clock::new();
+		let clock = Clock::new_at(epoch(), moq_epoch() + Duration::from_secs(1)).unwrap();
 		let shared = clock;
-		assert_eq!(clock.micros(), shared.micros());
+		// Compare the anchors, not live readings: two `micros()` calls race the clock.
+		assert_eq!(clock.epoch, shared.epoch);
 		assert_eq!(clock.wall(), shared.wall());
 	}
 
