@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
-use std::task::{Poll, ready};
 
 use moq_mux::catalog::hang::Extra;
 use moq_mux::catalog::{Rendition, RenditionConfig};
@@ -25,6 +24,12 @@ struct TaskEntry {
 struct TrackRequest {
 	broadcast: Id,
 	request: moq_net::track::Request,
+}
+
+/// A request a handler pulled, before it has a handle.
+enum Request {
+	Track(TrackRequest),
+	Group(moq_net::track::GroupRequest),
 }
 
 /// What a request handler serves.
@@ -527,30 +532,33 @@ impl Publish {
 	) -> Result<(), Error> {
 		loop {
 			// The handler is owned here, so returning drops it and rejects whatever is pending.
-			// `biased` so a pending close always wins over a ready request. The request is
-			// buffered under the lock, which is released before the callback.
+			// `biased` so a pending close always wins over a ready request.
 			let res = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
 				res = kio::wait(|waiter| match &mut dynamic {
-					Dynamic::Broadcast(dynamic, broadcast) => {
-						let request = ready!(dynamic.poll_requested_track(waiter));
-						let request = request.map(|request| TrackRequest { broadcast: *broadcast, request });
-						Poll::Ready(request.map_err(Error::from).and_then(|request| State::lock().publish.track_request.insert(request)))
-					}
-					Dynamic::Track(dynamic) => {
-						let request = ready!(dynamic.poll_requested_group(waiter));
-						Poll::Ready(request.map_err(Error::from).and_then(|request| State::lock().publish.group_request.insert(request)))
-					}
+					Dynamic::Broadcast(dynamic, broadcast) => dynamic
+						.poll_requested_track(waiter)
+						.map_ok(|request| Request::Track(TrackRequest { broadcast: *broadcast, request })),
+					Dynamic::Track(dynamic) => dynamic.poll_requested_group(waiter).map_ok(Request::Group),
 				}) => res,
 			};
 
 			// A finished broadcast or track is the end of the requests, not a failure.
-			match res {
-				Ok(request) => callback.call(request),
-				Err(Error::Moq(moq_net::Error::Closed | moq_net::Error::Dropped)) => return Ok(()),
-				Err(err) => return Err(err),
-			}
+			let request = match res {
+				Ok(request) => request,
+				Err(moq_net::Error::Closed | moq_net::Error::Dropped) => return Ok(()),
+				Err(err) => return Err(err.into()),
+			};
+
+			// Hold the lock only to buffer the request; release it before the callback.
+			let mut state = State::lock();
+			let id = match request {
+				Request::Track(request) => state.publish.track_request.insert(request)?,
+				Request::Group(request) => state.publish.group_request.insert(request)?,
+			};
+			drop(state);
+			callback.call(id);
 		}
 	}
 
