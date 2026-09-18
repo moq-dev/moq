@@ -13,7 +13,8 @@ empty filter is every session on this node. A push does not decide anything:
 the relay re-POSTs `revalidate` and the server's reply kicks, narrows,
 retiers, or keeps the session exactly as a scheduled re-check would. An
 embedder holding the `lease::Producer` sees the same nudge in process, and
-`moq auth revalidate` posts it from the command line. On dev.
+`moq auth revalidate` posts it from the command line. Additive on the
+lease and the relay dev already has, so it starts on `main` once dev merges.
 
 Boundaries: one node, no cluster fan-out; the server knows each session's
 `node` from `connect` and calls that relay. The contract's JSON is untouched
@@ -49,12 +50,16 @@ lets it live on the unauthenticated internal plane.
   scalar field are exact matches, `path` is a `moq_pattern::Pattern` matched
   against the dialed path, `remote` is an IP or CIDR matched with the port
   dropped and IPv4-mapped IPv6 folded, and `tls.name`, `tls.fingerprint`,
-  and `tls.issuer` reach the certificate facts. An unknown field is a 400
-  naming it, never ignored. The filter rides as query parameters on both
+  and `tls.issuer` reach the certificate facts. `query` is not a filter
+  field: it may carry the credential, and an equality match on it would be
+  an oracle for one. An unknown field is a 400 naming it, never ignored. The filter rides as query parameters on both
   routes, so a curl needs no body and one encoding serves list and push.
 - **The routes.** On the internal listener beside `/metrics`:
   `GET /sessions` returns `{"sessions": [...]}` with each match's request
-  and start time, the dry run for a selector and an ops inventory;
+  and start time, the dry run for a selector and an ops inventory. The
+  entry is a dedicated view, never the stored request: `query` is omitted,
+  since a `jwt` in it would let anyone on the plane replay every live
+  token;
   `POST /sessions/revalidate` nudges every match and returns 202 with their
   ids, the re-checks running in the background and their outcome arriving
   as `end` events. No match is 200 with an empty list, not a 404. The
@@ -66,8 +71,9 @@ lets it live on the unauthenticated internal plane.
   `--remote`, `--transport`, `--tls-name`, ...) and print the reply as
   JSON. `doc/bin/cli.md` shows a kick by id and a path-wide push.
 - **Docs.** `doc/bin/relay/auth.md` gains a "Push" section after
-  "Revalidate and outage" with the curl form and the rule that a push is a
-  re-check, `doc/bin/relay/config.md`'s `[internal]` lists the two routes,
+  "Revalidate and outage" with the curl form, the rule that a push is a
+  re-check, and the note that an empty filter re-POSTs once per session,
+  so a node under load is nudged through a selector, `doc/bin/relay/config.md`'s `[internal]` lists the two routes,
   and the CHANGELOGs of moq-auth, moq-relay, and moq-cli record the
   additions.
 - **Tests.** moq-auth: a nudge while idle POSTs at once, during backoff
@@ -78,14 +84,19 @@ lets it live on the unauthenticated internal plane.
   well inside the cadence and its `end` says `refused`; a path pattern
   and a CIDR each match the right subset of three sessions and leave the
   rest untouched; an empty filter reaches all; a retier arrives on the
-  next reply; `GET /sessions` lists what the push would match; an unknown
-  field is refused. The CLI test drives `moq auth revalidate` against the
-  same fixture.
+  next reply; `GET /sessions` lists what the push would match without
+  its `query`; an unknown field and a `query` filter are refused. The CLI
+  test drives `moq auth revalidate` against the same fixture.
 
 Public API: additive, `lease::Consumer::revalidate`,
 `lease::Producer::{poll_revalidate, revalidate_requested}`,
 `moq_relay::session::{Registry, Filter}`, `Relay::sessions()`, two internal
 routes, and two `moq auth` subcommands. Wire: none.
+
+## Required
+
+- [Merge dev](/quest/m1/merge-dev.md) - builds on the moq-auth lease and
+  the relay admission path that only dev has
 
 ## Related
 
