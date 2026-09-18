@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.13](https://github.com/moq-dev/moq/compare/moq-json-v0.3.12...moq-json-v0.3.13) - 2026-09-18
+
+### Other
+
+- updated the following local packages: moq-net
+
 ## [0.3.12](https://github.com/moq-dev/moq/compare/moq-json-v0.3.11...moq-json-v0.3.12) - 2026-09-17
 
 ### Other

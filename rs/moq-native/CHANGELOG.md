@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0](https://github.com/moq-dev/moq/compare/moq-native-v0.19.19...moq-native-v0.20.0) - 2026-09-18
+
+### Added
+
+- *(native)* default the QUIC backend to noq ([#3757](https://github.com/moq-dev/moq/pull/3757))
+
 ## [0.19.19](https://github.com/moq-dev/moq/compare/moq-native-v0.19.18...moq-native-v0.19.19) - 2026-09-17
 
 ### Added
