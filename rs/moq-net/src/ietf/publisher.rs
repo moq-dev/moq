@@ -4268,6 +4268,7 @@ mod tests {
 			Control::new(None, false),
 			None,
 			clustered(Some(false)),
+			kio::Shared::new(0),
 			VERSION,
 		);
 
@@ -4340,6 +4341,7 @@ mod tests {
 			Control::new(None, false),
 			None,
 			clustered(Some(false)),
+			kio::Shared::new(0),
 			VERSION,
 		);
 
@@ -4413,6 +4415,7 @@ mod tests {
 			Control::new(None, false),
 			None,
 			clustered(Some(false)),
+			kio::Shared::new(0),
 			VERSION,
 		);
 

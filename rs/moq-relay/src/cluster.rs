@@ -2311,7 +2311,7 @@ pub struct CostConfig {
 		value_name = "DURATION",
 		setting = "cluster.cost.interval"
 	)]
-	pub interval: Option<moq_tokio::Duration>,
+	pub interval: Option<moq_tokio::cli::Duration>,
 
 	/// What one more relay hop costs a stream, added to every measured link, e.g.
 	/// "8ms". A two-hop detour has to beat the direct link by this much before
@@ -2323,7 +2323,7 @@ pub struct CostConfig {
 		value_name = "DURATION",
 		setting = "cluster.cost.hop_penalty"
 	)]
-	pub hop_penalty: Option<moq_tokio::Duration>,
+	pub hop_penalty: Option<moq_tokio::cli::Duration>,
 
 	/// Prices round to this step and only move once the measured price has
 	/// drifted a whole step from the announced one, e.g. "5ms". Defaults to 5ms.
@@ -2334,7 +2334,7 @@ pub struct CostConfig {
 		value_name = "DURATION",
 		setting = "cluster.cost.step"
 	)]
-	pub step: Option<moq_tokio::Duration>,
+	pub step: Option<moq_tokio::cli::Duration>,
 
 	/// Bits per second to keep flowing on every measured link, as PROBE padding
 	/// the peer sends when nothing else does, so a link learns its loss before a
