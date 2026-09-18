@@ -57,6 +57,5 @@ Public API: breaking on @moq/net, so on dev. Wire: none. Consumers:
 
 ## Related
 
-- [Published types](/quest/m0/js-net-internal-types.md) - the `@internal` tag that already strips a referenced type
 - [@moq/net additive](/quest/m2/js-net-additive.md) - the iterators and getters that follow on main
 - [Broadcast route](/quest/m2/js-broadcast-route.md) - what `announced: true` matches
