@@ -74,7 +74,7 @@ pub struct MoqProtocolError {
 	/// Whether this code is from the session or stream registry.
 	pub scope: MoqErrorScope,
 	/// The integer on the wire, kept verbatim. Do not re-derive this from [`Self::kind`]:
-	/// `to_code` is not injective for the session codes sent from the reserved 32-47 range.
+	/// App and Unknown each cover many codes, and the same kind is a different integer in each scope.
 	pub code: u32,
 	/// The known kind when the code is recognized, otherwise [`MoqProtocolKind::App`] or
 	/// [`MoqProtocolKind::Unknown`].
