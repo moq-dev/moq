@@ -16,10 +16,9 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use moq_pattern::Patterns;
 use tokio::time::Instant;
 
-use crate::{Event, Grant, Key, KeyId, Request};
+use crate::{Event, Grant, Key, KeyId, Permissions, Request};
 
 /// Where the signing keys a `jwt` is verified against come from. Read per request,
 /// so a rotated file takes effect without a restart.
@@ -29,30 +28,6 @@ pub enum Keys {
 	File(PathBuf),
 	/// A directory of `{kid}.jwk`, selected by the token's `kid`.
 	Dir(PathBuf),
-}
-
-/// What a class of session is granted: a pattern union per role.
-///
-/// `#[non_exhaustive]`, so build one with [`Rules::new`] rather than a struct literal.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct Rules {
-	/// Patterns the session may publish.
-	pub publish: Patterns,
-	/// Patterns the session may subscribe to.
-	pub subscribe: Patterns,
-}
-
-impl Rules {
-	/// Rules granting `publish` and `subscribe`.
-	pub fn new(publish: Patterns, subscribe: Patterns) -> Self {
-		Self { publish, subscribe }
-	}
-
-	/// Whether the rules grant nothing, which is a refusal.
-	pub fn is_empty(&self) -> bool {
-		self.publish.is_empty() && self.subscribe.is_empty()
-	}
 }
 
 /// Caps on live sessions, counted from `connect` and `end` events.
@@ -83,9 +58,9 @@ pub struct Policy {
 	/// The keys a `jwt` is verified against; `None` refuses every token.
 	pub keys: Option<Keys>,
 	/// What an anonymous session is granted; empty refuses it.
-	pub public: Rules,
+	pub public: Permissions,
 	/// What a session presenting a verified certificate is granted; empty refuses it.
-	pub mtls: Rules,
+	pub mtls: Permissions,
 	/// The tier stamped on every grant.
 	pub tier: Option<String>,
 	/// How often the relay re-checks each grant.
@@ -101,8 +76,8 @@ impl Default for Policy {
 	fn default() -> Self {
 		Self {
 			keys: None,
-			public: Rules::default(),
-			mtls: Rules::default(),
+			public: Permissions::default(),
+			mtls: Permissions::default(),
 			tier: None,
 			revalidate: Duration::from_secs(60),
 			expires: Duration::from_secs(24 * 60 * 60),
@@ -123,8 +98,10 @@ pub enum Refusal {
 	UnknownKey,
 	#[error("the token is invalid: {0}")]
 	InvalidToken(String),
-	#[error("the token root `{root}` is not the dialed path `{path}`")]
+	#[error("the token root `{root}` does not overlap the dialed path `{path}`")]
 	RootMismatch { root: String, path: String },
+	#[error("the token grants no access at `{path}`")]
+	NoAccess { path: String },
 	#[error("a certificate was presented but nothing is granted to certificates")]
 	NoMtlsGrant,
 	#[error("anonymous access is not granted")]
@@ -138,21 +115,18 @@ pub enum Refusal {
 impl Policy {
 	/// Decide `request` by the policy alone, ignoring session limits.
 	pub async fn decide(&self, request: &Request) -> Result<Grant, Refusal> {
-		let (rules, expires) = if let Some(jwt) = token(request) {
+		let (permissions, expires) = if let Some(jwt) = token(request) {
 			let key = self.key(jwt).await?;
 			let claims = key.verify(jwt).map_err(|err| Refusal::InvalidToken(err.to_string()))?;
-			let root = normalize(&claims.root);
-			let path = normalize(&request.path);
-			if root != path {
-				return Err(Refusal::RootMismatch { root, path });
-			}
-			(
-				Rules {
-					publish: claims.publish,
-					subscribe: claims.subscribe,
+			let permissions = claims.authorize(&request.path).map_err(|err| match err {
+				crate::Error::RootMismatch(path) => Refusal::RootMismatch {
+					root: claims.root.clone(),
+					path,
 				},
-				claims.expires,
-			)
+				crate::Error::NoAccess(path) => Refusal::NoAccess { path },
+				other => Refusal::InvalidToken(other.to_string()),
+			})?;
+			(permissions, claims.expires)
 		} else if let Some(peer) = &request.tls {
 			if self.mtls.is_empty() {
 				return Err(Refusal::NoMtlsGrant);
@@ -165,7 +139,7 @@ impl Policy {
 			(self.public.clone(), None)
 		};
 
-		let mut grant = Grant::new(rules.publish, rules.subscribe);
+		let mut grant = Grant::new(permissions.publish, permissions.subscribe);
 		// The contract refuses a cadence without a bound, so every grant carries one.
 		grant.expires = Some(expires.unwrap_or_else(|| SystemTime::now() + self.expires));
 		grant.revalidate = Some(self.revalidate);
@@ -196,14 +170,6 @@ fn token(request: &Request) -> Option<&str> {
 		.split('&')
 		.filter_map(|pair| pair.strip_prefix("jwt="))
 		.rfind(|jwt| !jwt.is_empty())
-}
-
-/// A path with its slashes trimmed and collapsed, the way a root is compared.
-fn normalize(path: &str) -> String {
-	path.split('/')
-		.filter(|part| !part.is_empty())
-		.collect::<Vec<_>>()
-		.join("/")
 }
 
 /// The remote address without its port, an IPv4-mapped IPv6 address folded to IPv4.
@@ -359,21 +325,19 @@ async fn handle(State(server): State<Server>, Json(request): Json<Request>) -> R
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::{Algorithm, Bytes, Claims, Client, Counters, Error, Peer, Transport, lease::Reason};
+	use crate::{Algorithm, Bytes, Claims, Client, Error, Peer, Transport, lease::Reason};
+	use moq_pattern::Patterns;
 
 	fn patterns(texts: &[&str]) -> Patterns {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
 	}
 
-	fn rules(publish: &[&str], subscribe: &[&str]) -> Rules {
-		Rules {
-			publish: patterns(publish),
-			subscribe: patterns(subscribe),
-		}
+	fn rules(publish: &[&str], subscribe: &[&str]) -> Permissions {
+		Permissions::new(patterns(publish), patterns(subscribe))
 	}
 
 	fn request(path: &str) -> Request {
-		let mut request = Request::connect("relay-1", Transport::Quic, path);
+		let mut request = Request::new("relay-1", Transport::Quic, path);
 		request.remote = Some("203.0.113.9:4433".parse().unwrap());
 		request
 	}
@@ -479,18 +443,23 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn a_token_root_must_be_the_dialed_path() {
+	async fn a_token_is_authorized_at_the_dialed_path() {
 		let (dir, key) = key_dir();
 		let policy = Policy {
 			keys: Some(Keys::Dir(dir.path().into())),
 			..Default::default()
 		};
-		let jwt = sign(&key, "demo", &["**"], &[], None);
-		let err = policy
-			.decide(&with_token(request("/demo/room"), &jwt))
-			.await
-			.unwrap_err();
+		let jwt = sign(&key, "demo", &["alice/**"], &["**"], None);
+		let grant = policy.decide(&with_token(request("/demo/alice"), &jwt)).await.unwrap();
+		assert_eq!(grant.publish, patterns(&["**"]));
+		assert_eq!(grant.subscribe, patterns(&["**"]));
+
+		let err = policy.decide(&with_token(request("/other"), &jwt)).await.unwrap_err();
 		assert!(matches!(err, Refusal::RootMismatch { .. }), "{err}");
+
+		let jwt = sign(&key, "", &[], &["demo/**"], None);
+		let err = policy.decide(&with_token(request("/other"), &jwt)).await.unwrap_err();
+		assert!(matches!(err, Refusal::NoAccess { .. }), "{err}");
 	}
 
 	#[tokio::test]
@@ -717,16 +686,16 @@ mod tests {
 		})
 		.await;
 
-		let consumer = client.connect(request("/demo"), Counters::default()).await.unwrap();
+		let consumer = client.connect(request("/demo")).await.unwrap();
 		assert_eq!(consumer.grant().publish, patterns(&["**"]));
 
-		let err = client.connect(request("/demo"), Counters::default()).await.unwrap_err();
+		let err = client.connect(request("/demo")).await.unwrap_err();
 		assert!(matches!(err, Error::Refused), "{err}");
 
 		// The end frees the slot for the next session.
-		consumer.close("done");
+		consumer.close("done", Bytes::default());
 		ended.notified().await;
-		client.connect(request("/demo"), Counters::default()).await.unwrap();
+		client.connect(request("/demo")).await.unwrap();
 	}
 
 	#[cfg(unix)]
@@ -744,7 +713,7 @@ mod tests {
 		let url = url::Url::from_file_path(&path).unwrap();
 		let url = format!("unix://{}", url.path()).parse().unwrap();
 		let client = Client::new(url, None).unwrap();
-		let consumer = client.connect(request("/"), Counters::default()).await.unwrap();
+		let consumer = client.connect(request("/")).await.unwrap();
 		assert_eq!(consumer.grant().subscribe, patterns(&["**"]));
 	}
 }

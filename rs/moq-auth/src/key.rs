@@ -144,9 +144,9 @@ pub struct RsaAdditionalPrime {
 /// This is the serialized form of a key, with plain fields you can build and edit. It is not
 /// usable on its own: call [`import`](Self::import) to validate it and get a usable [`Key`], and
 /// [`Key::export`] to go back the other way. What that key may do is whatever `key_ops` allows,
-/// so a verify-only JWK imports fine and simply cannot sign.
+/// so a verify-only JWK imports fine and simply cannot sign. `kty` is required; a missing value
+/// is refused rather than defaulted to `oct`.
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(remote = "Self")]
 #[non_exhaustive]
 pub struct Jwk {
 	/// The algorithm used by the key.
@@ -158,7 +158,7 @@ pub struct Jwk {
 	#[serde(rename = "key_ops", default = "sign_verify")]
 	pub operations: HashSet<KeyOperation>,
 
-	/// The key material. Defaults to [`KeyMaterial::OCT`] when `kty` is absent.
+	/// The key material.
 	#[serde(flatten)]
 	pub material: KeyMaterial,
 
@@ -175,7 +175,7 @@ fn sign_verify() -> HashSet<KeyOperation> {
 	[KeyOperation::Sign, KeyOperation::Verify].into()
 }
 
-/// Matches the minimum `js/token` enforces, so a key that loads in one loads in the other.
+/// Matches the minimum `@moq/auth` enforces, so a key that loads in one loads in the other.
 const MIN_OCT_SECRET_BYTES: usize = 32;
 
 impl Jwk {
@@ -214,35 +214,6 @@ impl Jwk {
 			decode: Default::default(),
 			encode: Default::default(),
 		})
-	}
-}
-
-impl<'de> Deserialize<'de> for Jwk {
-	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-	where
-		D: Deserializer<'de>,
-	{
-		let mut value = serde_json::Value::deserialize(deserializer)?;
-
-		// Normally the "kty" parameter is required in a JWK: https://datatracker.ietf.org/doc/html/rfc7517#section-4.1
-		// But for backwards compatibility we need to default to "oct" because in a previous
-		// implementation the parameter was omitted, and we want to keep previously generated tokens valid
-		if let Some(obj) = value.as_object_mut()
-			&& !obj.contains_key("kty")
-		{
-			obj.insert("kty".to_string(), serde_json::Value::String("oct".to_string()));
-		}
-
-		Self::deserialize(value).map_err(serde::de::Error::custom)
-	}
-}
-
-impl Serialize for Jwk {
-	fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-	where
-		S: Serializer,
-	{
-		Self::serialize(self, serializer)
 	}
 }
 
@@ -292,9 +263,7 @@ impl<'de> Deserialize<'de> for Key {
 	where
 		D: Deserializer<'de>,
 	{
-		// Call the trait impl explicitly: the bare path would resolve to the inherent method that
-		// serde's `remote = "Self"` generates, skipping the `kty` default above.
-		let jwk = <Jwk as Deserialize>::deserialize(deserializer)?;
+		let jwk = Jwk::deserialize(deserializer)?;
 		Key::try_from(jwk).map_err(serde::de::Error::custom)
 	}
 }
@@ -735,30 +704,11 @@ mod tests {
 		assert_eq!(loaded_key.kid, key.kid);
 	}
 
-	/// Tests whether Key::from_str() works for keys without a kty value to fall back to OCT
+	/// An oct JWK without `kty` is refused; JS already did, and so does this crate.
 	#[test]
-	fn test_key_oct_backwards_compatibility() {
+	fn test_key_oct_without_kty_is_refused() {
 		let json = r#"{"alg":"HS256","key_ops":["sign","verify"],"k":"Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68"}"#;
-		let key = Key::from_str(json);
-
-		assert!(key.is_ok());
-		let key = key.unwrap();
-
-		if let KeyMaterial::OCT { secret, .. } = &key.material {
-			let base64_key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret);
-			assert_eq!(base64_key, "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68");
-		} else {
-			panic!("Expected OCT key");
-		}
-
-		let key_str = key.to_str().unwrap();
-
-		// Round-trip through from_str and verify fields
-		let loaded = Key::from_str(&key_str).unwrap();
-		assert_eq!(loaded.algorithm, Algorithm::HS256);
-		assert!(loaded.operations.contains(&KeyOperation::Sign));
-		assert!(loaded.operations.contains(&KeyOperation::Verify));
-		assert!(matches!(loaded.material, KeyMaterial::OCT { .. }));
+		assert!(Key::from_str(json).is_err());
 	}
 
 	#[test]
@@ -933,7 +883,7 @@ mod tests {
 		jwk.scope = Some(useless);
 		assert!(matches!(Key::try_from(jwk), Err(crate::Error::UselessScope)));
 
-		let json = r#"{"alg":"HS256","key_ops":["sign"],"k":"Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68","scope":{}}"#;
+		let json = r#"{"kty":"oct","alg":"HS256","key_ops":["sign"],"k":"Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68","scope":{}}"#;
 		assert!(Key::from_str(json).is_err());
 	}
 

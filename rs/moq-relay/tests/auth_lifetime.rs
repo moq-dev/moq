@@ -679,7 +679,7 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (root, client_cert, client_key) = signed_client(dir.path());
 
-	let policy = |rules: moq_auth::serve::Rules| {
+	let policy = |rules: moq_auth::Permissions| {
 		let mut policy = moq_auth::serve::Policy::default();
 		policy.mtls = rules;
 		policy
@@ -703,7 +703,7 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	};
 	// No grant for certificates: refused, over QUIC with a certificate and over
 	// WebSocket without one.
-	let none = serve(policy(moq_auth::serve::Rules::default())).await;
+	let none = serve(policy(moq_auth::Permissions::default())).await;
 	let (addr, relay) = spawn_quic_relay(build_auth(none.clone()), Some(root.clone())).await;
 	let url: url::Url = format!("moql://127.0.0.1:{}/room", addr.port()).parse().unwrap();
 	assert_refused_with(mtls_client(), &url).await;
@@ -713,7 +713,7 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	relay.abort();
 
 	// A narrow grant: the certificate publishes under `mine/**` and nothing else.
-	let narrow = serve(policy(moq_auth::serve::Rules::new(
+	let narrow = serve(policy(moq_auth::Permissions::new(
 		["mine/**".parse().unwrap()].into_iter().collect(),
 		Patterns::new(),
 	)))

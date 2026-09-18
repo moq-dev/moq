@@ -746,7 +746,7 @@ async fn admit_http(
 	request.server_name = request_host(uri, headers);
 	request.remote = Some(remote.0);
 	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| auth::peer(&identity));
-	state.auth.admit(request, moq_auth::Counters::default()).await
+	state.auth.admit(request).await
 }
 
 /// Serve the announced broadcasts for a given prefix.
@@ -780,7 +780,7 @@ async fn serve_announced(
 		}
 	}
 
-	lease.close("done");
+	lease.close("done", moq_auth::Bytes::default());
 	Ok(broadcasts
 		.iter()
 		.map(ToString::to_string)
@@ -868,11 +868,11 @@ async fn serve_fetch(
 			lease: Some(lease),
 		}),
 		Ok(Err(status)) => {
-			lease.close(status.to_string());
+			lease.close(status.to_string(), moq_auth::Bytes::default());
 			Err(status.into())
 		}
 		Err(_) => {
-			lease.close("timeout");
+			lease.close("timeout", moq_auth::Bytes::default());
 			Err(StatusCode::GATEWAY_TIMEOUT.into())
 		}
 	}
@@ -908,7 +908,7 @@ impl ServeGroup {
 	/// End the lease with the body's outcome.
 	fn end(&mut self, reason: &str) {
 		if let Some(lease) = self.lease.take() {
-			lease.close(reason);
+			lease.close(reason, moq_auth::Bytes::default());
 		}
 	}
 }

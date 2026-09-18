@@ -70,8 +70,7 @@ impl Connection {
 	#[tracing::instrument("conn", skip_all, fields(id = self.id, remote = self.request.remote_addr().map(tracing::field::display), session = tracing::field::Empty))]
 	pub async fn run(self) -> anyhow::Result<()> {
 		let peer_hop = self.request.peer_hop();
-		let bytes = moq_auth::Counters::default();
-		let lease = match self.admit(bytes.clone()).await {
+		let lease = match self.admit().await {
 			Ok(lease) => lease,
 			Err(err) => {
 				let _ = self.request.close(err.status.as_u16()).await;
@@ -108,7 +107,7 @@ impl Connection {
 
 		tracing::info!(version = %session.version(), %transport, "negotiated");
 
-		supervise(session, lease, bytes, self.shutdown.clone()).await
+		supervise(session, lease, self.shutdown.clone()).await
 	}
 
 	/// Admit this connection. Any failure is returned as a [`StatusError`] so
@@ -117,7 +116,7 @@ impl Connection {
 	/// Every transport goes through the same lease; the request the server sees
 	/// carries what the transport knows. A LAN mesh dial is the one exception: its
 	/// credential is a secret the relay minted for itself, checked locally.
-	async fn admit(&self, bytes: moq_auth::Counters) -> Result<auth::Lease, StatusError> {
+	async fn admit(&self) -> Result<auth::Lease, StatusError> {
 		// Checked first so a `/.cluster` request is never routed through the public
 		// grant, and a relay without LAN discovery refuses it instead of treating the
 		// path as a broadcast root.
@@ -130,7 +129,7 @@ impl Connection {
 		if self.request.peer_identity().is_some() {
 			tracing::debug!("client certificate verified; reported to the auth server");
 		}
-		Ok(self.auth.admit(request, bytes).await?)
+		Ok(self.auth.admit(request).await?)
 	}
 
 	/// Authorize a `/.cluster/<credential>` dial against the live LAN advertisement.
@@ -256,31 +255,21 @@ pub(crate) fn authorize(
 pub async fn supervise(
 	session: moq_net::Session,
 	mut lease: auth::Lease,
-	bytes: moq_auth::Counters,
 	mut shutdown: crate::shutdown::Observer,
 ) -> anyhow::Result<()> {
-	// The transport's own totals, read once at the end so the `end` event carries
-	// what the session moved without the payload path paying for a second meter.
-	let meter = |session: &moq_net::Session| {
-		let stats = session.stats();
-		bytes.add_sent(stats.bytes_sent.unwrap_or_default());
-		bytes.add_received(stats.bytes_received.unwrap_or_default());
-	};
 	tokio::select! {
 		err = session.closed() => {
-			meter(&session);
 			let reason = match &err {
 				moq_net::Error::Cancel => "closed".to_string(),
 				other => other.to_string(),
 			};
-			lease.close(reason);
+			lease.close(reason, session_bytes(&session));
 			Err(err.into())
 		}
 		why = lease.ended() => {
 			tracing::info!(%why, "lease ended, closing session");
 			session.abort(moq_net::Error::Unauthorized);
-			meter(&session);
-			lease.close(why);
+			lease.close(why, session_bytes(&session));
 			Ok(())
 		}
 		_ = shutdown.started() => {
@@ -289,9 +278,18 @@ pub async fn supervise(
 			// machine runs on its own, so the GOAWAY still reaches the wire while
 			// we wait here.
 			shutdown.drain_session(&session).await;
-			meter(&session);
-			lease.close("shutdown");
+			lease.close("shutdown", session_bytes(&session));
 			Ok(())
 		}
+	}
+}
+
+/// The transport's own totals, read once at the end so the `end` event carries
+/// what the session moved without the payload path paying for a second meter.
+pub(crate) fn session_bytes(session: &moq_net::Session) -> moq_auth::Bytes {
+	let stats = session.stats();
+	moq_auth::Bytes {
+		sent: stats.bytes_sent.unwrap_or_default(),
+		received: stats.bytes_received.unwrap_or_default(),
 	}
 }

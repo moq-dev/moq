@@ -1,7 +1,5 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use url::Url;
@@ -14,40 +12,6 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The longest a failed re-check waits before trying again.
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
-
-/// Two shared byte totals a session adds to as it sends and receives.
-///
-/// Cheap to clone; every clone reads and writes the same counters. The client reads
-/// them for the `end` event, so it never reaches into a session, and a caller with no
-/// meter passes `Counters::default()`.
-#[derive(Clone, Default, Debug)]
-pub struct Counters(Arc<Totals>);
-
-#[derive(Default, Debug)]
-struct Totals {
-	sent: AtomicU64,
-	received: AtomicU64,
-}
-
-impl Counters {
-	/// Count bytes sent to the peer.
-	pub fn add_sent(&self, bytes: u64) {
-		self.0.sent.fetch_add(bytes, Ordering::Relaxed);
-	}
-
-	/// Count bytes received from the peer.
-	pub fn add_received(&self, bytes: u64) {
-		self.0.received.fetch_add(bytes, Ordering::Relaxed);
-	}
-
-	/// The totals so far.
-	pub fn bytes(&self) -> Bytes {
-		Bytes {
-			sent: self.0.sent.load(Ordering::Relaxed),
-			received: self.0.received.load(Ordering::Relaxed),
-		}
-	}
-}
 
 /// The HTTP side of the contract: one JSON POST per event to an auth server.
 ///
@@ -104,8 +68,8 @@ impl Client {
 	}
 
 	/// Admit a session: POST `connect`, validate the reply, and return the lease the
-	/// session holds. `bytes` is read for the `end` event; pass what the session meters.
-	pub async fn connect(&self, request: Request, bytes: Counters) -> crate::Result<lease::Consumer> {
+	/// session holds. The session reports totals through [`lease::Consumer::close`].
+	pub async fn connect(&self, request: Request) -> crate::Result<lease::Consumer> {
 		let mut request = request;
 		request.event = Event::Connect;
 
@@ -116,7 +80,6 @@ impl Client {
 			client: self.clone(),
 			request,
 			producer: Some(producer),
-			bytes,
 			started: Instant::now(),
 		};
 		tokio::spawn(driver.run(grant));
@@ -146,19 +109,18 @@ struct Driver {
 	client: Client,
 	request: Request,
 	producer: Option<lease::Producer>,
-	bytes: Counters,
 	started: Instant,
 }
 
 impl Driver {
 	async fn run(mut self, grant: Grant) {
-		let reason = self.drive(grant).await;
+		let (reason, bytes) = self.drive(grant).await;
 
 		let mut request = self.request.clone();
 		request.event = Event::End {
 			reason,
 			duration: self.started.elapsed(),
-			bytes: self.bytes.bytes(),
+			bytes,
 		};
 		// The session is already gone; nothing to do with a failure but say so.
 		if let Err(err) = self.client.post_end(&request).await {
@@ -166,8 +128,8 @@ impl Driver {
 		}
 	}
 
-	/// Re-check until the lease ends, returning why it did.
-	async fn drive(&mut self, mut grant: Grant) -> Reason {
+	/// Re-check until the lease ends, returning why it did and the totals the session reported.
+	async fn drive(&mut self, mut grant: Grant) -> (Reason, Bytes) {
 		let producer = self
 			.producer
 			.take()
@@ -200,8 +162,8 @@ impl Driver {
 			};
 
 			tokio::select! {
-				reason = producer.closed() => return reason,
-				() = expire => return producer.revoke(Reason::Expired),
+				ended = producer.closed() => return ended,
+				() = expire => return producer.finish(Reason::Expired, Bytes::default()),
 				result = reply => {
 					inflight = None;
 					match result {
@@ -211,7 +173,7 @@ impl Driver {
 							producer.update(fresh.clone());
 							grant = fresh;
 						}
-						Err(Error::Refused) => return producer.revoke(Reason::Refused),
+						Err(Error::Refused) => return producer.finish(Reason::Refused, Bytes::default()),
 						Err(err) => {
 							// Evidence of nothing: the grant stands until `expires`.
 							failures += 1;
@@ -265,7 +227,7 @@ fn backoff(failures: u32, cadence: Duration) -> Duration {
 mod tests {
 	use super::*;
 	use moq_pattern::Patterns;
-	use std::sync::Mutex;
+	use std::sync::{Arc, Mutex};
 	use wiremock::matchers::{method, path};
 	use wiremock::{Mock, MockServer, Request as Received, ResponseTemplate};
 
@@ -274,7 +236,9 @@ mod tests {
 	}
 
 	fn request() -> Request {
-		Request::new("0123", "relay-1", crate::Transport::Quic, "/demo/room")
+		let mut request = Request::new("relay-1", crate::Transport::Quic, "/demo/room");
+		request.id = "0123".into();
+		request
 	}
 
 	/// Records every request body the server saw, in order.
@@ -334,14 +298,11 @@ mod tests {
 		})
 		.await;
 
-		let bytes = Counters::default();
-		let consumer = client(&server).connect(request(), bytes.clone()).await.unwrap();
+		let consumer = client(&server).connect(request()).await.unwrap();
 		assert_eq!(consumer.grant().publish, patterns(&["**"]));
 		assert_eq!(log.events(), [Event::Connect]);
 
-		bytes.add_sent(7);
-		bytes.add_received(11);
-		consumer.close("disconnected");
+		consumer.close("disconnected", Bytes { sent: 7, received: 11 });
 		settle().await;
 
 		let end = log.last();
@@ -363,27 +324,25 @@ mod tests {
 		})
 		.await;
 
-		let consumer = client(&server).connect(request(), Counters::default()).await.unwrap();
+		let consumer = client(&server).connect(request()).await.unwrap();
 		drop(consumer);
 		settle().await;
 
-		assert!(matches!(
-			log.last().event,
+		match log.last().event {
 			Event::End {
 				reason: Reason::Dropped,
+				bytes,
 				..
-			}
-		));
+			} => assert_eq!(bytes, Bytes::default()),
+			other => panic!("expected a dropped end, got {other:?}"),
+		}
 	}
 
 	#[tokio::test]
 	async fn refusals_and_outages_refuse_at_connect() {
 		for status in [403, 404, 500, 503] {
 			let server = server(Log::default(), move |_| ResponseTemplate::new(status)).await;
-			let err = client(&server)
-				.connect(request(), Counters::default())
-				.await
-				.unwrap_err();
+			let err = client(&server).connect(request()).await.unwrap_err();
 			match status {
 				403 => assert!(matches!(err, Error::Refused), "{status}: {err}"),
 				_ => assert!(matches!(err, Error::Unavailable(_)), "{status}: {err}"),
@@ -391,20 +350,14 @@ mod tests {
 		}
 
 		let garbage = server(Log::default(), |_| ResponseTemplate::new(200).set_body_string("nope")).await;
-		let err = client(&garbage)
-			.connect(request(), Counters::default())
-			.await
-			.unwrap_err();
+		let err = client(&garbage).connect(request()).await.unwrap_err();
 		assert!(matches!(err, Error::Unavailable(_)), "{err}");
 
 		let nothing = server(Log::default(), |_| {
 			ResponseTemplate::new(200).set_body_json(Grant::default())
 		})
 		.await;
-		let err = client(&nothing)
-			.connect(request(), Counters::default())
-			.await
-			.unwrap_err();
+		let err = client(&nothing).connect(request()).await.unwrap_err();
 		assert!(matches!(err, Error::UselessGrant), "{err}");
 	}
 
@@ -420,7 +373,7 @@ mod tests {
 		})
 		.await;
 
-		let mut consumer = client(&server).connect(request(), Counters::default()).await.unwrap();
+		let mut consumer = client(&server).connect(request()).await.unwrap();
 		let fresh = tokio::time::timeout(Duration::from_secs(3), consumer.changed())
 			.await
 			.expect("a re-check within the cadence")
@@ -438,7 +391,7 @@ mod tests {
 		})
 		.await;
 
-		let consumer = client(&server).connect(request(), Counters::default()).await.unwrap();
+		let consumer = client(&server).connect(request()).await.unwrap();
 		let reason = tokio::time::timeout(Duration::from_secs(3), consumer.closed())
 			.await
 			.expect("revoked within the cadence");
@@ -455,7 +408,7 @@ mod tests {
 		})
 		.await;
 
-		let consumer = client(&server).connect(request(), Counters::default()).await.unwrap();
+		let consumer = client(&server).connect(request()).await.unwrap();
 		tokio::time::sleep(Duration::from_millis(1500)).await;
 		assert!(
 			log.events().iter().filter(|e| **e == Event::Revalidate).count() >= 1,
@@ -492,7 +445,7 @@ mod tests {
 		})
 		.await;
 
-		let consumer = client(&server).connect(request(), Counters::default()).await.unwrap();
+		let consumer = client(&server).connect(request()).await.unwrap();
 		let reason = tokio::time::timeout(Duration::from_secs(5), consumer.closed())
 			.await
 			.expect("expired while the re-check was in flight");
@@ -512,10 +465,10 @@ mod tests {
 		})
 		.await;
 
-		let consumer = client(&server).connect(request(), Counters::default()).await.unwrap();
+		let consumer = client(&server).connect(request()).await.unwrap();
 		tokio::time::sleep(Duration::from_millis(1500)).await;
 		assert!(log.events().contains(&Event::Revalidate), "the re-check is in flight");
-		consumer.close("disconnected");
+		consumer.close("disconnected", Bytes::default());
 		settle().await;
 		assert!(matches!(
 			log.last().event,

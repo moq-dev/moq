@@ -443,7 +443,7 @@ async fn uring_workers_write_qlog_traces() {
 /// A policy admitting verified certificates and nobody else.
 fn mtls_only() -> moq_auth::serve::Policy {
 	let mut policy = moq_auth::serve::Policy::default();
-	policy.mtls = moq_auth::serve::Rules::new(
+	policy.mtls = moq_auth::Permissions::new(
 		[moq_auth::Pattern::all()].into_iter().collect(),
 		[moq_auth::Pattern::all()].into_iter().collect(),
 	);
