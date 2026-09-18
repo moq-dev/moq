@@ -20,9 +20,29 @@ check open PRs before starting.
   claim rides moq-lite and moq-transport alike. `ANNOUNCE_PATTERN` leaves
   the lite-06-wip draft; PR #3746's non-prefix presented patterns go with
   it.
-- Consuming stays a pattern. `announced(scope)` accepts any `Pattern`; the
-  network or the library drops claims that do not overlap the scope, and
-  `captures` (what each scope wildcard stood for, per #3746) stays.
+- Consuming stays a pattern, and the pattern never reaches the wire. A
+  pattern lives in two places only: the token, which the relay enforces by
+  scoping its origin handle, and the client library, which filters and
+  trims. `announced(scope: Patterns)` takes the literal head of each member
+  (`room/*/chat` and `room/*/video` both head at `room`), drops heads
+  another member covers, opens one ANNOUNCED or SUBSCRIBE_NAMESPACE per
+  surviving head, and multiplexes every cursor over those. One wire
+  subscription per distinct head, never per pattern, on moq-lite and
+  moq-transport alike. `captures` (what each scope wildcard stood for) is
+  derived from the announced prefix against the scope member, so it stays
+  and is always empty until scopes are patterns.
+- Announcements are hints; requests are the authority. A prefix route
+  `room` that overlaps a grant of `room/*/chat` is forwarded as
+  `ANNOUNCE_START room`, and a request for `room/bob/video` is refused by
+  `matches` at the relay, the same contract a dynamic route has today. No
+  set-valued intersection, clamp, or tie-break. The lite draft says so in
+  one sentence, so nobody reintroduces a narrowing message to fix the
+  over-claim.
+- The cost is accepted: a scope with an empty literal head (`**/chat`)
+  subscribes to every announcement and filters locally. Announcements are
+  per broadcast and tens of bytes; a per-connection announce budget or a
+  head on the pattern is the answer if a relay ever measures it, not a wire
+  hint.
 - The event is `announce::Update { path: PathOwned, captures, route: Route,
   kind: Kind }` with `Kind::{Announced, Updated, Retracted}` replacing the
   boolean; `path` is the covered prefix relative to the consumer's root,
@@ -40,8 +60,15 @@ check open PRs before starting.
   resolved against pattern interest.
 
 Public API: breaking on moq-net, @moq/net, moq-ffi, libmoq, and the
-bindings, so on dev. Wire: `ANNOUNCE_PATTERN` is removed from
-`drafts/draft-lcurley-moq-lite.md` (lite-06-wip); run `just drafts check`.
+bindings, so on dev. Wire: `ANNOUNCE_PATTERN` and the `Patterns` section
+leave `drafts/draft-lcurley-moq-lite.md` (lite-06-wip), and
+`NAMESPACE_PATTERN` and its setup option leave
+`drafts/draft-lcurley-moq-pattern.md`, which keeps only the matching and
+authorization rules the token and the library share; run `just drafts
+check`. Two PRs: this one carries the prefix table and the full event
+shape (`path`, `Kind`, `Stream`/`asyncIterator`, no `anonymous`); PR #3746
+rebases onto it as [Bindings announce match](/quest/m1/api-origin-scopes.md)
+and keeps only its surviving half.
 Consumers: moq-relay, moq-stats, moq-cli, the JS packages, `demo/web`,
 and moq.pro's recorder, stats, and ingest loops.
 
@@ -49,5 +76,5 @@ and moq.pro's recorder, stats, and ingest loops.
 
 - [Bindings announce match](/quest/m1/api-origin-scopes.md) - the binding half, which takes the shape settled here
 - [Wildcard](/quest/m2/wildcard/README.md) - the resolution side, now against prefix claims
-- [Pattern interest](/quest/m2/path-patterns/interest.md) - the consumer pattern on the lite-06 wire
+- [Pattern grants](/quest/m2/path-patterns/interest.md) - AUTH carries pattern grants; ANNOUNCE_REQUEST stays a prefix by this decision
 - [Ingest source](/quest/m2/net-ingest-source.md) - a further field the same event should carry

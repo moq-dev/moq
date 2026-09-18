@@ -76,8 +76,8 @@ CAT cannot represent `pid/*/chat`.
 
 ## Quests
 
-- [Pattern interest](/quest/m2/path-patterns/interest.md) - moq-lite-06 carries
-  pattern grants in AUTH and full-pattern interest in ANNOUNCE_REQUEST
+- [Pattern grants](/quest/m2/path-patterns/interest.md) - moq-lite-06 carries
+  pattern grants in AUTH; interest stays a literal head, filtered by the library
 
 ## Related
 

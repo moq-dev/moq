@@ -29,9 +29,15 @@ across the fleet in resident memory.
 
 ## Plan
 
-`dynamic(pattern, route)` advertises any path Pattern, prefix-shaped or not.
-A prefix is spelled `foo/**`. Resolve and Demand here are additive and land
-on main after the merge.
+Decided 2026-09-18: publishing is prefix-only on every wire and patterns
+never leave the token or the client library
+([announce event](/quest/m1/api-net-announce.md)). `dynamic(prefix, route)`
+advertises a prefix; a suffix or catch-all claim is expressed as the
+widest prefix that covers it (`**` is the root) and the request is the
+authority, so the advertise half of this questline is re-scoped to prefix
+claims resolved against pattern interest. The three workloads above still
+hold: the transcoder claims the root and refuses what it will not serve.
+Resolve and Demand are additive and land on main after the merge.
 
 ### What already exists, and what does not
 

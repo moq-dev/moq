@@ -1,33 +1,54 @@
-# [M] Bindings report the announce match
+# [M] Scopes are patterns and every binding reports the match
 
 ## Goal
 
-Every binding that exposes announcements takes a pattern scope and reports
-the announce match the way Rust and JS do: the covered pattern relative to
-the origin, plus one capture per wildcard in the scope. `moq-ffi`'s
-`MoqOriginConsumer::announced(prefix)` (`rs/moq-ffi/src/origin.rs`) scopes
-by a literal root today, so its only wildcard is the implicit trailing `**`
-and a capture there would always equal the pattern. The announce event shape
-is a published API in every language, so it settles on dev before the
-release.
+An origin handle is scoped by any pattern union (`room/*/chat`, `**/a`,
+exact `foo`), a route is visible to a cursor when the announced prefix
+overlaps a scope member, a request is checked with `matches`, and the
+announce event reports `captures`, what each scope wildcard stood for. Every
+binding that exposes announcements takes the same pattern scope and reports
+the same match. `moq-ffi`'s `MoqOriginConsumer::announced(prefix)` scopes by
+a literal root today, so its only wildcard is the implicit trailing `**`.
 
 ## Plan
 
-- `announced(scope)` takes a pattern (the moq-ffi `Pattern` type, or its
-  string form parsed with the same rules as JS), refuses nothing the origin
-  accepts, and delivers events relative to the origin with `captures` on
-  `MoqAnnounceUpdate`, mirroring `AnnounceUpdate.captures` in Rust and
-  `Announce.Update.captures` in JS.
-- Follow the Cross-Package Sync checklist: `rs/libmoq` (`moq_announce_update`
-  gains the captures; a C caller reads them with the existing string-out
-  convention), the `py`, `swift`, `kt`, `dart`, and `go` wrappers, `doc/lib/*`
-  for each, and `just test smoke-full`.
+This is PR #3746 (branch `quest/m1/api-origin-scopes`) rebased onto
+[announce event](/quest/m1/api-net-announce.md) and re-scoped to what
+survives once route entries are prefixes and the wire carries no pattern:
+
+- `scope(root, &Patterns)` accepts any union and intersects; `with_root`
+  refuses only a root nothing lies under; `allowed` is the set-valued
+  rebase. Visibility is `overlaps(prefix/**, member)`; `create_broadcast`,
+  `resolve`, and `request_broadcast` check `matches`. `dynamic(prefix)`
+  under a wildcard grant is accepted when the prefix overlaps the grant and
+  its requests are filtered, which is what makes a wildcard grant usable
+  with prefix interest on the wire.
+- Deleted from #3746: the `Pattern` route table, the runtime
+  `Pattern::intersect` clamp and tie-break, `ANNOUNCE_PATTERN` on lite-06,
+  and any lite-versus-transport special path. `Pattern::intersect` and
+  `captures` stay as library helpers.
+- The relay's `AuthToken::new` keeps any grant as written and
+  `AuthError::UnsupportedPattern` goes; `moq_net::stats::Config::exclude`
+  is a `Patterns`. JS `announced(scope)` takes any `Path.Pattern` on
+  `Origin` and `Connection`; `@moq/room` reads the participant from the
+  `**` capture.
+- Bindings, per the Cross-Package Sync checklist: `announced(scope)` takes
+  the moq-ffi `Pattern` type or its string form, sends literal heads
+  exactly as the Rust and JS libraries do, and delivers events relative to
+  the origin with `captures` on `MoqAnnounceUpdate`; `rs/libmoq`
+  (`moq_announce_update` gains the captures under the existing string-out
+  convention), the `py`, `swift`, `kt`, `dart`, and `go` wrappers,
+  `doc/lib/*` for each, and `just test smoke-full`.
 - `announced_broadcast(path)` keeps its shape; it is the literal case.
 
-Public API: breaking on moq-ffi, libmoq, and every binding, so on dev.
-Wire: none.
+Public API: breaking on moq-net, @moq/net, moq-ffi, libmoq, and every
+binding, so on dev. Wire: none beyond what the announce quest removes.
+
+## Required
+
+- [Announce event](/quest/m1/api-net-announce.md) - the prefix table and event shape this rebases onto
 
 ## Related
 
 - [Origin narrowing](/quest/m2/origin-narrowing.md) - the runtime half that closes #2714 after the merge
-- [Pattern interest](/quest/m2/path-patterns/interest.md) - carries the same scopes on the lite-06 wire
+- [Pattern grants](/quest/m2/path-patterns/interest.md) - the same scopes in the AUTH message
