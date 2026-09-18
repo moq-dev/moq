@@ -26,7 +26,7 @@ with its PR and the replacement call:
   JS publishers (#3616); @moq/net and @moq/pattern mirror Rust (`consume`, `Time.Milli`,
   one `readFrame()`, `InvalidPattern`); the announce and request names; and
   moq-tokio's names sit under their modules (`connection::Goaway`, `cli::Duration`,
-  `transport::Session`, `watch::Files`, `resolve()`).
+  `transport::Session`, `watch::Files`, `resolve()`; #3745).
 - hang and json: the catalog `timeline` is `archive` (#3612); `json` and
   `binary` catalog sections (#3109) take one options object (#3640); Rust
   `modify()` is fallible and a failed dropped edit aborts the track (#3644),
