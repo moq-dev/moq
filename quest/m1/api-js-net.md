@@ -36,12 +36,18 @@ on the handles an application holds.
 - Bounds: `Subscription.groups?: Groups` replaces `startGroup`/`endGroup`
   (exclusive) beside `setGroups({ start: { included } })`; Rust has one
   `RangeBounds` shape for both.
-- Internal: `Broadcast.Producer/Consumer.{subscribe, resolveTrackInfo,
-  fetchGroup, requested}` and `Track.Broadcast` are `@internal` (they are
-  documented "used by the wire layer"); so are `Announce.Producer`,
-  `Bandwidth.Want`/`allocate`, and `Track.Consumer`'s constructor.
-- Delete `NO_DISCOVERY_HOSTS` in `connection/connect.ts`; a hardcoded
-  hostname list in a library is a caller-side `discovery: false`.
+- Private, not `@internal`: `Broadcast.Producer/Consumer.{subscribe,
+  resolveTrackInfo, fetchGroup, requested}`, `Track.Broadcast`, and the
+  eight `@internal` members on `origin.ts` move behind a friend module
+  (`wire.ts` exporting `wireOf(handle)` over a `WeakMap` the constructors
+  register into) that `index.ts` never re-exports; the package `exports`
+  map already lists only `.` and `./zod`, so consumers cannot reach it at
+  type level or at runtime. `@internal` only strips the declaration and
+  leaves the method callable. `Announce.Producer`, `Bandwidth.Want`/
+  `allocate`, and `Track.Consumer`'s constructor go the same way.
+- Delete `NO_DISCOVERY_HOSTS` in `connection/connect.ts`; Cloudflare's
+  draft-16 relay supports announcements now, so the list is stale and
+  `discovery` defaults to true everywhere.
 - Bugs in the same files: a second handle's `linger` is silently ignored on
   a shared connection (refuse or take the max); a partial private `delay`
   inherits the 10 s default timeout where none means retry forever.
