@@ -177,6 +177,9 @@ impl Driver {
 		// The re-check in flight, kept out of the select so expiry and the session's
 		// close are still polled while a stalled server holds the reply.
 		let mut inflight: Option<Pin<Box<dyn Future<Output = crate::Result<Grant>> + Send>>> = None;
+		// A nudge while a re-check is in flight: POST once more when the reply lands,
+		// so a ban set after this request left is not missed until the next cadence.
+		let mut pending = false;
 
 		loop {
 			let expires = grant.expires.map(until);
@@ -220,17 +223,34 @@ impl Driver {
 							next = Some(Instant::now() + delay);
 						}
 					}
+					if pending {
+						pending = false;
+						next = None;
+						inflight = Some(self.post_revalidate());
+					}
 				}
 				() = revalidate => {
 					// One re-check at a time; the reply schedules the next.
 					next = None;
-					let client = self.client.clone();
-					let mut request = self.request.clone();
-					request.event = Event::Revalidate;
-					inflight = Some(Box::pin(async move { client.post(&request).await }));
+					inflight = Some(self.post_revalidate());
+				}
+				() = producer.revalidate_requested() => {
+					if inflight.is_some() {
+						pending = true;
+					} else {
+						next = None;
+						inflight = Some(self.post_revalidate());
+					}
 				}
 			}
 		}
+	}
+
+	fn post_revalidate(&self) -> Pin<Box<dyn Future<Output = crate::Result<Grant>> + Send>> {
+		let client = self.client.clone();
+		let mut request = self.request.clone();
+		request.event = Event::Revalidate;
+		Box::pin(async move { client.post(&request).await })
 	}
 }
 
@@ -542,6 +562,114 @@ mod tests {
 		));
 		#[cfg(unix)]
 		assert!(Client::new("unix:///run/moq-auth.sock".parse().unwrap(), None).is_ok());
+	}
+
+	#[tokio::test]
+	async fn a_nudge_while_idle_posts_at_once() {
+		let log = Log::default();
+		let server = server(log.clone(), |_| {
+			ResponseTemplate::new(200)
+				.set_body_json(grant(Some(Duration::from_secs(3600)), Some(Duration::from_secs(3600))))
+		})
+		.await;
+
+		let consumer = client(&server).connect(request(), Counters::default()).await.unwrap();
+		assert_eq!(log.events(), [Event::Connect]);
+		consumer.revalidate();
+		tokio::time::timeout(Duration::from_secs(2), async {
+			loop {
+				if log.events().contains(&Event::Revalidate) {
+					break;
+				}
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("a nudge while idle POSTs at once");
+	}
+
+	#[tokio::test]
+	async fn a_nudge_during_backoff_posts_at_once() {
+		let log = Log::default();
+		let server = server(log.clone(), |request| match request.event {
+			Event::Connect => ResponseTemplate::new(200)
+				.set_body_json(grant(Some(Duration::from_secs(3600)), Some(Duration::from_secs(3600)))),
+			_ => ResponseTemplate::new(503),
+		})
+		.await;
+
+		let consumer = client(&server).connect(request(), Counters::default()).await.unwrap();
+		consumer.revalidate();
+		tokio::time::timeout(Duration::from_secs(2), async {
+			loop {
+				if log.events().contains(&Event::Revalidate) {
+					break;
+				}
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("the first re-check ran");
+		settle().await;
+		let before = log.events().iter().filter(|event| **event == Event::Revalidate).count();
+
+		consumer.revalidate();
+		tokio::time::timeout(Duration::from_secs(2), async {
+			loop {
+				if log.events().iter().filter(|event| **event == Event::Revalidate).count() > before {
+					break;
+				}
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("a nudge during backoff POSTs at once");
+	}
+
+	#[tokio::test]
+	async fn a_nudge_during_inflight_posts_once_more_when_the_reply_lands() {
+		let log = Log::default();
+		let server = server(log.clone(), |request| match request.event {
+			Event::Connect => ResponseTemplate::new(200)
+				.set_body_json(grant(Some(Duration::from_secs(3600)), Some(Duration::from_secs(3600)))),
+			Event::Revalidate => ResponseTemplate::new(200)
+				.set_body_json(grant(Some(Duration::from_secs(3600)), Some(Duration::from_secs(3600))))
+				.set_delay(Duration::from_millis(400)),
+			Event::End { .. } => ResponseTemplate::new(200),
+		})
+		.await;
+
+		let consumer = client(&server).connect(request(), Counters::default()).await.unwrap();
+		consumer.revalidate();
+		tokio::time::timeout(Duration::from_secs(2), async {
+			loop {
+				if log.events().contains(&Event::Revalidate) {
+					break;
+				}
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("the first re-check is in flight");
+
+		consumer.revalidate();
+		consumer.revalidate();
+		tokio::time::timeout(Duration::from_secs(3), async {
+			loop {
+				if log.events().iter().filter(|event| **event == Event::Revalidate).count() >= 2 {
+					break;
+				}
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("the in-flight nudge POSTs once more when the reply lands");
+		settle().await;
+		assert_eq!(
+			log.events().iter().filter(|event| **event == Event::Revalidate).count(),
+			2,
+			"a burst during an in-flight re-check is one extra POST"
+		);
 	}
 
 	#[test]

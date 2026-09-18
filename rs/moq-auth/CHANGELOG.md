@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Request`, `Grant`, and `Event`: the JSON contract between a relay and an auth server.
 - `lease::{Producer, Consumer}`: the handle a session holds for the grant that admitted it.
 - `Client`: the HTTP implementation, driving a lease against `--auth-url`.
+- `lease::Consumer::revalidate` asks the producer to re-check now; `Producer::{poll_revalidate, revalidate_requested}` resolve once per burst. A fixed lease is a no-op. The HTTP client POSTs at once when idle or in backoff, and once more when a nudge arrives during an in-flight re-check.
 
 ### Changed
 

@@ -83,6 +83,9 @@ struct State {
 	epoch: u64,
 	/// Set once by whichever side ends the lease first; the other side reads it.
 	closed: Option<Reason>,
+	/// Bumped on each re-check ask; the producer observes and clears, so a burst
+	/// coalesces into one wake.
+	revalidate: u64,
 }
 
 /// The authorizing side of a lease: applies new grants and revokes.
@@ -100,6 +103,7 @@ impl Producer {
 			grant,
 			epoch: 0,
 			closed: None,
+			revalidate: 0,
 		});
 		(Self { state: state.clone() }, Consumer { state, seen: 0 })
 	}
@@ -131,6 +135,19 @@ impl Producer {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
+	/// Poll until at least one re-check has been asked since the last observation.
+	/// A burst of asks resolves once.
+	pub fn poll_revalidate(&self, waiter: &kio::Waiter) -> Poll<()> {
+		let mut state = std::task::ready!(self.state.poll(waiter, |state| ready_if(state.revalidate > 0)));
+		state.revalidate = 0;
+		Poll::Ready(())
+	}
+
+	/// Wait until a re-check has been asked since the last observation.
+	pub async fn revalidate_requested(&self) {
+		kio::wait(|waiter| self.poll_revalidate(waiter)).await
+	}
+
 	fn close(&self, reason: Reason) -> Reason {
 		self.state.lock().closed.get_or_insert(reason).clone()
 	}
@@ -159,6 +176,7 @@ impl Consumer {
 			grant,
 			epoch: 0,
 			closed: None,
+			revalidate: 0,
 		});
 		Self { state, seen: 0 }
 	}
@@ -196,6 +214,12 @@ impl Consumer {
 	/// Wait for the lease to end.
 	pub async fn closed(&self) -> Reason {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
+	}
+
+	/// Ask the producer to re-check now. A no-op on a [`fixed`](Self::fixed)
+	/// lease, which has nobody to ask.
+	pub fn revalidate(&self) {
+		self.state.lock().revalidate += 1;
 	}
 
 	/// End the lease with the session's own close classification, consuming the
@@ -282,7 +306,26 @@ mod tests {
 		assert_eq!(consumer.grant(), grant("a/**"));
 		assert!(poll(consumer.changed()).is_pending());
 		assert!(poll(consumer.closed()).is_pending());
+		consumer.revalidate();
+		assert_eq!(consumer.grant(), grant("a/**"));
+		assert!(poll(consumer.changed()).is_pending());
+		assert!(poll(consumer.closed()).is_pending());
 		assert_eq!(consumer.close("done"), Reason::Session("done".into()));
+	}
+
+	#[test]
+	fn n_nudges_wake_the_producer_once() {
+		let (producer, consumer) = Producer::new(grant("a/**"));
+		assert!(poll(producer.revalidate_requested()).is_pending());
+
+		for _ in 0..8 {
+			consumer.revalidate();
+		}
+		assert_eq!(poll(producer.revalidate_requested()), Poll::Ready(()));
+		assert!(poll(producer.revalidate_requested()).is_pending());
+
+		consumer.revalidate();
+		assert_eq!(poll(producer.revalidate_requested()), Poll::Ready(()));
 	}
 
 	#[test]
