@@ -18,6 +18,8 @@ pub(crate) struct SessionStart<S: crate::transport::poll::Session, R: crate::run
 	pub driver: Driver<S, R>,
 	/// The session-side GOAWAY halves, stored on the public [`crate::Session`].
 	pub goaway: crate::goaway::Handle,
+	/// The link state the public [`crate::Session`] prices and inspects.
+	pub link: crate::session::Link,
 }
 
 /// Server: read the peer's single SETUP message off its Setup Stream before starting
@@ -165,6 +167,24 @@ where
 	// Read out before the setup machine takes ownership below.
 	let our_cost = our_setup.cost;
 
+	// A wire with a Padding Stream lets us honour a probe target, so a publisher
+	// that can report can also increase.
+	if our_setup.probe == super::ProbeLevel::Report && version.has_padding() {
+		our_setup.probe = super::ProbeLevel::Increase;
+	}
+	let pads = our_setup.probe == super::ProbeLevel::Increase && version.has_padding();
+
+	// Versions without a Setup Stream never learn the peer's identity, so the
+	// handle must not wait on one.
+	let served = std::sync::Arc::new(crate::session::Served::default());
+	let link = crate::session::Link::new(
+		match version.has_setup_stream() {
+			true => crate::session::PeerSlot::Lite(peer_setup.clone()),
+			false => crate::session::PeerSlot::None,
+		},
+		Some(served.clone()),
+	);
+
 	let publisher = Publisher::new(PublisherConfig {
 		runtime: runtime.clone(),
 		session: session.clone(),
@@ -173,6 +193,9 @@ where
 		peer_setup: peer_setup.clone(),
 		goaway: goaway.clone(),
 		peer_hop,
+		egress: link.egress.clone(),
+		served,
+		pads,
 	});
 	let subscriber = Subscriber::new(SubscriberConfig {
 		session: session.clone(),
@@ -186,6 +209,7 @@ where
 		// for its own egress.
 		cost: our_cost,
 		going_away: goaway.going_away.clone(),
+		probe_target: link.probe_target.clone(),
 	});
 
 	let driver = Driver {
@@ -203,6 +227,7 @@ where
 		recv_bandwidth: recv_bw_consumer,
 		driver,
 		goaway: goaway_handle,
+		link,
 	})
 }
 

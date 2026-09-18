@@ -15,6 +15,9 @@ const PARAM_ROLE: u64 = 0x3;
 const PARAM_COST: u64 = 0x4;
 /// Setup Parameter id for the endpoint's Hop ID.
 const PARAM_HOP: u64 = 0x5;
+/// Setup Parameter id for the flag that this endpoint prices its own egress into
+/// the routes it forwards, so the receiver charges nothing more on arrival.
+const PARAM_PRICED: u64 = 0x6;
 
 /// The cost of crossing a link that neither end priced.
 ///
@@ -182,6 +185,12 @@ pub struct Setup {
 	/// filter applies). `None` when the endpoint has no meaningful identity (a
 	/// leaf that never forwards); a wire value of 0 decodes as `None`.
 	pub hop: Option<crate::Hop>,
+	/// Whether this endpoint folds its own egress price into the route cost of
+	/// every announcement it forwards (lite-06+), so the peer charges nothing more
+	/// on arrival instead of its default of 1. A relay pricing its links by
+	/// measurement sets it; see [`crate::Session::set_egress`]. Ignored when
+	/// [`cost`](Self::cost) is declared, which prices the link outright.
+	pub priced: bool,
 }
 
 impl Message for Setup {
@@ -208,6 +217,7 @@ impl Message for Setup {
 		// 0 is legal on the wire but carries no identity (it can't be excluded),
 		// so it decodes as "not declared" rather than an error.
 		let hop = params.get_varint(PARAM_HOP)?.and_then(|id| crate::Hop::new(id).ok());
+		let priced = params.get_varint(PARAM_PRICED)?.is_some_and(|flag| flag != 0);
 
 		Ok(Self {
 			probe,
@@ -215,6 +225,7 @@ impl Message for Setup {
 			role,
 			cost,
 			hop,
+			priced,
 		})
 	}
 
@@ -241,6 +252,9 @@ impl Message for Setup {
 		}
 		if let Some(hop) = self.hop {
 			params.set_varint(PARAM_HOP, hop.id());
+		}
+		if self.priced {
+			params.set_varint(PARAM_PRICED, 1);
 		}
 
 		params.encode(w, version)
@@ -276,6 +290,11 @@ impl PeerSetup {
 	/// parameter. `None` when it declared none: a leaf with no identity worth excluding.
 	pub fn poll_hop(&self, waiter: &kio::Waiter) -> std::task::Poll<Option<crate::Hop>> {
 		self.poll_get(waiter, |setup| setup.hop)
+	}
+
+	/// Poll for whether the peer prices its own egress into the routes it forwards.
+	pub fn poll_priced(&self, waiter: &kio::Waiter) -> std::task::Poll<bool> {
+		self.poll_get(waiter, |setup| setup.priced)
 	}
 
 	/// Poll for a field of the peer's SETUP.
@@ -377,6 +396,7 @@ mod tests {
 	fn hop_round_trip() {
 		let msg = Setup {
 			hop: Some(crate::Hop::new(42).unwrap()),
+			priced: false,
 			..Default::default()
 		};
 		assert_eq!(round_trip(&msg), msg);
@@ -384,6 +404,23 @@ mod tests {
 
 	// A declared id of 0 carries no identity (it cannot be excluded), so it
 	// decodes as absent rather than erroring.
+	/// The Priced flag survives the wire on lite-06 and is absent by default.
+	#[test]
+	fn priced_round_trip() {
+		let v = Version::Lite06Wip;
+		for priced in [false, true] {
+			let msg = Setup {
+				priced,
+				..Default::default()
+			};
+			let mut buf = Vec::new();
+			msg.encode(&mut buf, v).unwrap();
+			let mut slice = &buf[..];
+			let got = Setup::decode(&mut slice, v).unwrap();
+			assert_eq!(got.priced, priced);
+		}
+	}
+
 	#[test]
 	fn hop_zero_decodes_as_none() {
 		use crate::coding::Encode;

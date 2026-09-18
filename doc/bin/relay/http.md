@@ -92,3 +92,8 @@ logs use). A route is priced twice: `cost` as the cluster stands, which reads 0
 through a relay already carrying the broadcast, and `cold_cost` with those
 discounts removed, which is what tells two warm relays apart. It is best-effort
 correlation, not authenticated identity.
+
+`links` lists the links this relay prices by measurement (see
+[Link costs](/bin/relay/cluster#link-costs)), one per peer Hop ID: the price
+its routes charge in milliseconds, and the `rtt_ms`, `loss`, and `group_bytes`
+it came from.

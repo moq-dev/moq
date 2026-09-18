@@ -38,6 +38,9 @@ pub enum DataType {
 	Group = 0,
 	/// The lite-05+ SETUP stream: one SETUP message, then FIN.
 	Setup = 1,
+	/// A lite-06+ padding stream: bytes a publisher sends to reach a probe target,
+	/// which the receiver discards.
+	Padding = 2,
 }
 
 impl Decode<Version> for DataType {

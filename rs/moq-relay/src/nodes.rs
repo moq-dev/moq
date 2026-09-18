@@ -20,6 +20,8 @@ pub(crate) const MESH_PREFIX: &str = ".internal/origins";
 pub(crate) struct Nodes {
 	origin: origin::Producer,
 	connections: Arc<Connections>,
+	/// The links this relay prices by measurement, when it does.
+	links: Option<crate::cluster::Links>,
 }
 
 #[derive(Default)]
@@ -44,6 +46,9 @@ enum ConnectionTarget {
 pub(crate) struct Snapshot {
 	/// Announced or directly connected cluster nodes.
 	pub nodes: Vec<Node>,
+	/// The measured price of each link this relay sends on, by peer Hop ID:
+	/// what its routes charge and the RTT, loss, and group size behind it.
+	pub links: Vec<crate::cluster::LinkEntry>,
 }
 
 /// One known cluster node in the local topology view.
@@ -120,7 +125,14 @@ impl Nodes {
 		Self {
 			origin,
 			connections: Arc::default(),
+			links: None,
 		}
+	}
+
+	/// Report the links this relay prices alongside the nodes.
+	pub(crate) fn with_links(mut self, links: crate::cluster::Links) -> Self {
+		self.links = Some(links);
+		self
 	}
 
 	/// Record a dial this relay initiated, keyed by the URL it dialed.
@@ -246,6 +258,11 @@ impl Nodes {
 					connections: node.connections,
 				})
 				.collect(),
+			links: self
+				.links
+				.as_ref()
+				.map(|links| links.table(self.origin.id(), None).links)
+				.unwrap_or_default(),
 		}
 	}
 }
@@ -327,7 +344,8 @@ mod tests {
 						{ "id": 0, "direction": "outbound" },
 						{ "id": 1, "direction": "inbound" }
 					]
-				}]
+				}],
+				"links": []
 			}),
 		);
 	}

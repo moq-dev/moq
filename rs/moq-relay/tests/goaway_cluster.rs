@@ -19,6 +19,18 @@ use url::Url;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// The next announcement that is not one of the relay's own `.internal/`
+/// broadcasts (its mesh advertisement, its link table), which a peer sees as
+/// soon as the session is up.
+async fn next_user_announce(announced: &mut moq_net::announce::Consumer) -> Option<moq_net::announce::Update> {
+	loop {
+		let update = announced.next().await?;
+		if !update.path.as_str().starts_with(".internal/") {
+			return Some(update);
+		}
+	}
+}
+
 /// Bound `fut` by [`TEST_TIMEOUT`], panicking with `step` so a hang names the
 /// exact stage that failed instead of a bare "test timed out".
 async fn within<T>(step: &str, fut: impl std::future::Future<Output = T>) -> T {
@@ -246,7 +258,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		// unannounce the path (metadata updates are expected: the drain
 		// re-prices the old route and the sibling announces its own).
 		let mut announcements = cluster.origin.consume().announced();
-		let first = announcements.next().await.expect("initial announce");
+		let first = next_user_announce(&mut announcements).await.expect("initial announce");
 		assert_eq!(first.path.as_str(), "cam");
 
 		// ── sibling A drains with a redirect to sibling B ────────────────
@@ -453,9 +465,12 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	// Watch announcements for the whole test: the failover must never
 	// unannounce the broadcast under the subscriber.
 	let mut announcements = sub_origin.consume().announced();
-	let first = within("broadcast announced through the MID-A leg", announcements.next())
-		.await
-		.expect("origin closed before the announce");
+	let first = within(
+		"broadcast announced through the MID-A leg",
+		next_user_announce(&mut announcements),
+	)
+	.await
+	.expect("origin closed before the announce");
 	assert_eq!(first.path.as_str(), "diamond");
 
 	let bc = within("broadcast resolves on the subscriber origin", async {

@@ -1402,6 +1402,28 @@ impl Request {
 		}
 	}
 
+	/// Declare that this end prices its own egress into the routes it forwards on
+	/// this session; see [`moq_net::server::Request::with_priced`].
+	pub fn with_priced(self) -> Self {
+		let Request {
+			transport,
+			url,
+			authority,
+			identity,
+			link,
+			kind,
+		} = self;
+		let kind = request_map!(kind, request => request.with_priced());
+		Request {
+			transport,
+			url,
+			authority,
+			identity,
+			link,
+			kind,
+		}
+	}
+
 	/// Accept the session, starting the MoQ session loops.
 	pub async fn ok(self) -> crate::Result<Session> {
 		Ok(request_into!(self.kind, request => request.ok().await?))
@@ -1501,6 +1523,12 @@ impl Request {
 	/// authenticated identity: authorize on the token or client certificate.
 	pub fn peer_hop(&self) -> Option<moq_net::Hop> {
 		request_ref!(self, r => r.peer_hop())
+	}
+
+	/// The price the peer declared for crossing this link in its SETUP, when the
+	/// negotiated protocol carries one; see [`moq_net::server::Request::peer_cost`].
+	pub fn peer_cost(&self) -> Option<u64> {
+		request_ref!(self, r => r.peer_cost())
 	}
 
 	/// The client certificate chain the peer presented, if any, validated

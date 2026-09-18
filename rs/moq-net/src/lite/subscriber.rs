@@ -39,6 +39,9 @@ pub(super) struct SubscriberConfig<S: crate::transport::poll::Session> {
 	/// Set once the peer sends a GOAWAY; new request streams are then rejected
 	/// with [`Error::GoingAway`] (the peer told us to stop asking).
 	pub going_away: crate::goaway::GoingAway,
+	/// The bitrate to ask the peer to pad up to on the probe stream, when set.
+	/// See [`crate::Session::set_probe_target`].
+	pub probe_target: kio::Shared<Option<u64>>,
 }
 
 #[derive(Clone)]
@@ -76,6 +79,7 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	/// [`SourceServe`] machines.
 	sources: kio::Queue<(PathOwned, crate::broadcast::Dynamic)>,
 	going_away: crate::goaway::GoingAway,
+	probe_target: kio::Shared<Option<u64>>,
 }
 
 #[derive(Clone)]
@@ -106,6 +110,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			cost: config.cost,
 			sources: kio::Queue::new(),
 			going_away: config.going_away,
+			probe_target: config.probe_target,
 		}
 	}
 
@@ -124,9 +129,10 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 	/// A locally configured price wins, since what we charge our own routing is local
 	/// policy. Otherwise we charge what the peer declared, which is how a server prices
 	/// a link at all: it cannot tell a sibling from a stranger, so the dialer that chose
-	/// the peer declares the price for both of them. Falls back to
-	/// [`super::DEFAULT_COST`] when neither priced it, and to `0` on a version that
-	/// carries no cost at all, whose routes rank on hop count alone.
+	/// the peer declares the price for both of them. A peer that declared no price but
+	/// prices its own egress into the routes it forwards (the Priced flag) is charged
+	/// nothing more. Falls back to [`super::DEFAULT_COST`] otherwise, and to `0` on a
+	/// version that carries no cost at all, whose routes rank on hop count alone.
 	///
 	/// Our own price short-circuits the peer's, so a session that configured one never
 	/// blocks on a SETUP to start routing.
@@ -137,13 +143,17 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		if !self.version.has_route_cost() {
 			return Poll::Ready(0);
 		}
-		match self.cost {
-			Some(cost) => Poll::Ready(cost),
-			None => self
-				.peer_setup
-				.poll_cost(waiter)
-				.map(|cost| cost.unwrap_or(super::DEFAULT_COST)),
+		if let Some(cost) = self.cost {
+			return Poll::Ready(cost);
 		}
+		if let Some(cost) = ready!(self.peer_setup.poll_cost(waiter)) {
+			return Poll::Ready(cost);
+		}
+		// Both fields come from the one SETUP already read above.
+		self.peer_setup.poll_priced(waiter).map(|priced| match priced {
+			true => 0,
+			false => super::DEFAULT_COST,
+		})
 	}
 
 	/// Apply one received announce message to the origin and the per-stream
@@ -607,6 +617,10 @@ enum UniState<S: crate::transport::poll::Session> {
 		reader: Reader<S::RecvStream, Version>,
 	},
 	Group(GroupRecv<S>),
+	/// Discarding a lite-06+ Padding Stream to its end.
+	Padding {
+		reader: Reader<S::RecvStream, Version>,
+	},
 	Done,
 }
 
@@ -623,7 +637,7 @@ impl<S: crate::transport::poll::Session> UniServe<S> {
 	/// Abort the stream with the given error, wherever the reader currently lives.
 	fn abort(&mut self, err: &Error) {
 		match &mut self.state {
-			UniState::Start { reader } | UniState::Setup { reader } => reader.abort(err),
+			UniState::Start { reader } | UniState::Setup { reader } | UniState::Padding { reader } => reader.abort(err),
 			UniState::Group(recv) => recv.reader.abort(err),
 			UniState::Done => {}
 		}
@@ -643,7 +657,28 @@ impl<S: crate::transport::poll::Session> UniServe<S> {
 					self.state = match kind {
 						lite::DataType::Group => UniState::Group(GroupRecv::new(self.subscriber.clone(), reader)),
 						lite::DataType::Setup => UniState::Setup { reader },
+						lite::DataType::Padding => UniState::Padding { reader },
 					};
+				}
+				UniState::Padding { reader } => {
+					if !self.subscriber.version.has_padding() {
+						let err = Error::UnexpectedStream;
+						self.abort(&err);
+						return Poll::Ready(Ok(()));
+					}
+					// Read to the end and drop it: the bytes exist to be counted by the
+					// transport, not to be kept.
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					loop {
+						match ready!(reader.poll_read_chunk(&mut cx, 64 * 1024)) {
+							Ok(Some(_)) => {}
+							Ok(None) => return Poll::Ready(Ok(())),
+							Err(err) => {
+								self.abort(&err);
+								return Poll::Ready(Ok(()));
+							}
+						}
+					}
 				}
 				UniState::Setup { reader } => {
 					if !self.subscriber.version.has_setup_stream() {
@@ -1004,8 +1039,14 @@ struct ProbeStream<S: crate::transport::poll::Session> {
 
 enum ProbeState<S: crate::transport::poll::Session> {
 	Open,
-	Send { stream: Stream<S, Version> },
-	Read { stream: Stream<S, Version> },
+	Send {
+		stream: Stream<S, Version>,
+	},
+	Read {
+		stream: Stream<S, Version>,
+		/// The target last written to the peer, so a moved one is sent once.
+		target: Option<u64>,
+	},
 }
 
 impl<S: crate::transport::poll::Session> ProbeStream<S> {
@@ -1036,9 +1077,32 @@ impl<S: crate::transport::poll::Session> ProbeStream<S> {
 					let ProbeState::Send { stream } = std::mem::replace(&mut self.state, ProbeState::Open) else {
 						unreachable!()
 					};
-					self.state = ProbeState::Read { stream };
+					self.state = ProbeState::Read { stream, target: None };
 				}
-				ProbeState::Read { stream } => {
+				ProbeState::Read { stream, target } => {
+					// A moved target goes to a peer that can act on it: one that advertised
+					// Increase on a wire with a Padding Stream. Anything else only reports,
+					// and a PROBE it never expected is a stream it may not read past. Poll
+					// until Pending so the waiter stays registered for the next move.
+					while self.subscriber.version.has_padding()
+						&& let Poll::Ready(level) = self.subscriber.peer_setup.poll_probe_level(waiter)
+						&& level >= lite::ProbeLevel::Increase
+						&& let Poll::Ready(wanted) =
+							self.subscriber
+								.probe_target
+								.poll(waiter, |wanted| match **wanted != *target {
+									true => Poll::Ready(()),
+									false => Poll::Pending,
+								}) {
+						let wanted = *wanted;
+						*target = wanted;
+						stream.writer.buffer(&lite::Probe {
+							bitrate: wanted,
+							rtt: None,
+						})?;
+					}
+					ready!(stream.writer.poll_flush(&mut cx))?;
+
 					let bandwidth = self.subscriber.recv_bandwidth.as_ref().expect("gated by RecvBandwidth");
 					loop {
 						let Some(probe) = ready!(stream.reader.poll_decode_maybe::<lite::Probe>(&mut cx))? else {
@@ -1338,6 +1402,7 @@ mod tests {
 			peer_hop: None,
 			cost: None,
 			going_away: Default::default(),
+			probe_target: Default::default(),
 		});
 
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -1410,6 +1475,7 @@ mod tests {
 			peer_hop: None,
 			cost: None,
 			going_away: Default::default(),
+			probe_target: Default::default(),
 		});
 		let subscribes = subscriber.subscribes.clone();
 		let serve = TrackServe {
@@ -1482,6 +1548,7 @@ mod tests {
 				peer_hop: None,
 				cost: None,
 				going_away: Default::default(),
+				probe_target: Default::default(),
 			});
 			let broadcast = crate::broadcast::Info::new().produce();
 			let producer = broadcast.create_track("catalog.json", None).unwrap();
@@ -1906,6 +1973,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(assigned),
 			going_away: Default::default(),
+			probe_target: Default::default(),
 		});
 
 		let path = Path::new("room/host").to_owned();
@@ -1961,6 +2029,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(assigned),
 			going_away: Default::default(),
+			probe_target: Default::default(),
 		});
 
 		let path = Path::new("room/host").to_owned();
@@ -2016,6 +2085,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(assigned),
 			going_away: Default::default(),
+			probe_target: Default::default(),
 		});
 
 		let path = Path::new("room/host").to_owned();
@@ -2071,6 +2141,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(assigned),
 			going_away: Default::default(),
+			probe_target: Default::default(),
 		});
 
 		// The sender's identity is already in the chain: the route came back through it.
@@ -2139,6 +2210,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(assigned),
 			going_away: Default::default(),
+			probe_target: Default::default(),
 		});
 
 		// The path as advertised to the peer: our hop is already in the chain.
@@ -2195,6 +2267,7 @@ mod tests {
 			peer_hop: Some(assigned),
 			cost: None,
 			going_away: Default::default(),
+			probe_target: Default::default(),
 		});
 
 		// An announce with an empty chain and no responder id: the versions that
@@ -2239,6 +2312,7 @@ mod tests {
 			cost: None,
 			peer_hop: Some(assigned),
 			going_away: Default::default(),
+			probe_target: Default::default(),
 		});
 
 		let hops = crate::Hops::try_from(vec![crate::Hop::UNKNOWN, crate::Hop::UNKNOWN]).unwrap();
@@ -2301,6 +2375,7 @@ mod tests {
 			cost: None,
 			peer_hop: None,
 			going_away: Default::default(),
+			probe_target: Default::default(),
 		});
 		(subscriber, consumer)
 	}
@@ -2362,6 +2437,7 @@ mod tests {
 			cost: None,
 			peer_hop: None,
 			going_away: Default::default(),
+			probe_target: Default::default(),
 		});
 
 		let path = Path::new("room/host").to_owned();

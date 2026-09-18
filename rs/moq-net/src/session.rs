@@ -1,16 +1,80 @@
 //! A MoQ session handle and a snapshot of its connection statistics.
 
-use std::{sync::Arc, task::Poll, time::Duration};
+use std::{
+	sync::{
+		Arc,
+		atomic::{AtomicU64, Ordering},
+	},
+	task::Poll,
+	time::Duration,
+};
 
 use web_transport_trait::Stats as _;
 
-use crate::{Error, SessionError, Version, bandwidth, goaway};
+use crate::{Error, Hop, SessionError, Version, bandwidth, goaway};
 
 /// A close requested by a session handle, executed by the machine.
 #[derive(Clone)]
 struct Close {
 	code: u32,
 	reason: String,
+}
+
+/// What the protocol tasks share with the handle about the link itself: this
+/// end's egress price, where the peer's declared identity can be read, and what
+/// this end has served over it.
+#[derive(Clone)]
+pub(crate) struct Link {
+	/// This end's egress price, folded into the cost of every route advertised
+	/// to the peer. Zero until [`Session::set_egress`] prices it.
+	pub egress: kio::Shared<u64>,
+	/// The peer's SETUP, per protocol, for [`Session::peer_hop`].
+	pub peer: PeerSlot,
+	/// Groups and payload served to the peer, on the wires this crate counts.
+	pub served: Option<Arc<Served>>,
+	/// The bitrate this end asks the peer to pad the connection up to, in bits
+	/// per second, while it holds a receive-bandwidth consumer. See
+	/// [`Session::set_probe_target`].
+	pub probe_target: kio::Shared<Option<u64>>,
+}
+
+impl Link {
+	pub fn new(peer: PeerSlot, served: Option<Arc<Served>>) -> Self {
+		Self {
+			egress: kio::Shared::new(0),
+			peer,
+			served,
+			probe_target: kio::Shared::new(None),
+		}
+	}
+}
+
+/// Running totals of what a session's publisher half has sent.
+#[derive(Default)]
+pub(crate) struct Served {
+	/// Groups whose stream was opened toward the peer.
+	pub groups: AtomicU64,
+	/// Payload bytes handed to the transport for those groups.
+	pub bytes: AtomicU64,
+}
+
+impl Served {
+	pub fn group(&self) {
+		self.groups.fetch_add(1, Ordering::Relaxed);
+	}
+
+	pub fn bytes(&self, n: usize) {
+		self.bytes.fetch_add(n as u64, Ordering::Relaxed);
+	}
+}
+
+/// Where the identity the peer declared in its SETUP is read from.
+#[derive(Clone)]
+pub(crate) enum PeerSlot {
+	Lite(crate::lite::PeerSetup),
+	Ietf(crate::ietf::peer::PeerSetup),
+	/// The negotiated version carries no SETUP identity, so there is nothing to wait for.
+	None,
 }
 
 /// The stats cell shared between the machine's sampler and the handles.
@@ -40,6 +104,15 @@ pub struct Stats {
 	///
 	/// `None` unless the negotiated version supports PROBE (moq-lite-03+).
 	pub estimated_recv_rate: Option<bandwidth::Rate>,
+
+	/// Groups this session has served to the peer, counted by MoQ rather than the
+	/// transport, so a sender can tell how big the groups crossing the link are.
+	///
+	/// `None` on moq-transport, which this crate does not count yet.
+	pub groups_sent: Option<u64>,
+
+	/// Payload bytes of [`groups_sent`](Self::groups_sent), headers excluded.
+	pub payload_sent: Option<u64>,
 
 	/// Total bytes sent over the connection, including retransmissions and overhead.
 	pub bytes_sent: Option<u64>,
@@ -87,6 +160,7 @@ pub struct Session {
 	send_bandwidth: Option<bandwidth::Consumer>,
 	recv_bandwidth: Option<bandwidth::Consumer>,
 	goaway: Arc<goaway::Handle>,
+	link: Link,
 }
 
 impl Session {
@@ -126,6 +200,10 @@ impl Session {
 			state.sample
 		};
 		stats.estimated_recv_rate = self.recv_bandwidth.as_ref().and_then(bandwidth::Consumer::peek);
+		if let Some(served) = &self.link.served {
+			stats.groups_sent = Some(served.groups.load(Ordering::Relaxed));
+			stats.payload_sent = Some(served.bytes.load(Ordering::Relaxed));
+		}
 		stats
 	}
 
@@ -197,6 +275,57 @@ impl Session {
 	pub fn draining(&self) -> goaway::Consumer {
 		self.goaway.consumer()
 	}
+
+	/// Price this end's egress on the link from now on, in the units route costs use.
+	///
+	/// Added to the cost of every route this session advertises to the peer, on top of
+	/// whatever the peer charges on arrival (the price declared at setup, or its
+	/// default of 1). Routes already advertised are re-priced in place, so a relay
+	/// downstream re-ranks without any subscription moving until it chooses to. This
+	/// is how a relay folds a measured link price into its routes without another
+	/// SETUP. Only moq-lite-06 and the MoQ Cluster extension carry a cost; older
+	/// wires ignore it.
+	pub fn set_egress(&self, cost: u64) {
+		let mut egress = self.link.egress.lock();
+		if *egress != cost {
+			*egress = cost;
+		}
+	}
+
+	/// Ask the peer to pad the connection up to `bits_per_second` while this end
+	/// consumes [`recv_bandwidth`](Self::recv_bandwidth), or `None` to stop.
+	///
+	/// A publisher that advertised the Increase probe level (moq-lite-06+) sends
+	/// padding streams, bounded by its congestion window and behind every other
+	/// stream, until its sending rate reaches the target; one that advertised less,
+	/// or an older wire, keeps reporting and sends nothing. What a relay uses to
+	/// learn a link's loss before a stream crosses it, at a cost it chooses.
+	pub fn set_probe_target(&self, bits_per_second: Option<u64>) {
+		let mut target = self.link.probe_target.lock();
+		if *target != bits_per_second {
+			*target = bits_per_second;
+		}
+	}
+
+	/// Poll for the identity the peer declared in its SETUP.
+	///
+	/// Resolves once the peer's SETUP is read: `Some` when it declared a non-zero Hop
+	/// ID (a relay, on moq-lite-05+ or the MoQ Cluster extension), `None` when it
+	/// declared nothing or the negotiated version carries no identity. Self-declared,
+	/// so a correlation hint rather than an authenticated identity.
+	pub fn poll_peer_hop(&self, waiter: &kio::Waiter) -> Poll<Option<Hop>> {
+		match &self.link.peer {
+			PeerSlot::Lite(setup) => setup.poll_hop(waiter),
+			PeerSlot::Ietf(setup) => setup.poll_hop(waiter),
+			PeerSlot::None => Poll::Ready(None),
+		}
+	}
+
+	/// Wait for the identity the peer declared in its SETUP; see
+	/// [`poll_peer_hop`](Self::poll_peer_hop).
+	pub async fn peer_hop(&self) -> Option<Hop> {
+		kio::wait(|waiter| self.poll_peer_hop(waiter)).await
+	}
 }
 
 impl Session {
@@ -207,6 +336,7 @@ impl Session {
 		recv_bandwidth: Option<bandwidth::Consumer>,
 		protocol: crate::runtime::Protocol<R>,
 		goaway: goaway::Handle,
+		link: Link,
 	) -> (Self, crate::runtime::Machine<R>)
 	where
 		R: crate::runtime::Runtime + 'static,
@@ -248,6 +378,7 @@ impl Session {
 			send_bandwidth,
 			recv_bandwidth,
 			goaway: Arc::new(goaway),
+			link,
 		};
 		let machine = crate::runtime::Machine::new(crate::runtime::MachineState {
 			protocol,
@@ -266,11 +397,20 @@ impl Session {
 		recv_bandwidth: Option<bandwidth::Consumer>,
 		protocol: crate::runtime::Protocol<R>,
 		goaway: goaway::Handle,
+		link: Link,
 	) -> Self
 	where
 		R: crate::runtime::Runtime + 'static,
 	{
-		let (session, machine) = Self::new(runtime.clone(), session, version, recv_bandwidth, protocol, goaway);
+		let (session, machine) = Self::new(
+			runtime.clone(),
+			session,
+			version,
+			recv_bandwidth,
+			protocol,
+			goaway,
+			link,
+		);
 		runtime.spawn(machine);
 		session
 	}

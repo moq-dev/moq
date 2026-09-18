@@ -38,10 +38,62 @@ a full mesh trades that for one fewer hop. Mix shapes as your traffic demands.
 
 ## Link costs
 
-Add `?cost=N` to a peer URL to route by price instead of hop count. An unpriced
-link costs 1, which reproduces plain hop counting. Each relay adds the price of
-the link an announcement arrived on before forwarding it, so a route's cost is
-the sum of what it crossed.
+Every link has a price, and the cheapest path wins. By default the price is
+measured: each relay samples the cluster sessions it sends on once a second and
+prices a link by what it does to a live stream, its round-trip time, one more
+round trip for the share of groups a lost packet stalls, and a penalty for
+terminating QUIC on one more relay:
+
+```
+cost_ms = rtt * (1 + stall) + hop_penalty
+stall   = 1 - (1 - loss) ^ (group_bytes / 1200)
+```
+
+A lost packet costs about a round trip to recover and holds every frame behind
+it in its group, so what loss does to a stream depends on how many packets a
+group spans: 1% loss stalls nearly every 300 KB video group and one in
+twenty-five 4 KB audio groups. A link that has carried no group yet is priced
+against the largest group the relay carries on its other links. The sender prices the link because only it sees
+its own loss and the groups it sends, and it folds the price into every route
+it forwards, so nothing new crosses the wire. RTT is a median over the last 15
+samples; loss and the group size are ratios over the last 5000 packets sent,
+however long ago, so an idle link keeps what its last stream measured. Prices
+round to `step` and only move once they have drifted a whole step, and a route
+only moves to a path that beats the one in use by more than `hop_penalty`, so a
+path does not flap on one slow ack or on several links drifting at once. Costs ride moq-lite-06 and the MoQ Cluster extension; a link
+negotiated on an older version carries hop counts only, whatever it measures.
+
+Loss is only learned from packets, so a link that has carried nothing is priced
+on its RTT until a stream crosses it, and the first stream pays to discover a
+lossy edge. `probe` buys that knowledge up front: each relay asks its peers to
+pad every measured link up to that many bits per second whenever nothing else
+flows (the PROBE `Increase` level, moq-lite-06), so a 1% edge shows up within a
+minute at 100 kbit/s for about 12 KB/s per idle link.
+
+```toml
+[cluster.cost]
+hop_penalty = "8ms"       # What one more relay costs a stream. Default.
+step = "5ms"              # Prices round to this and move by whole steps. Default.
+# probe = 100000          # Bits per second of padding on every idle link. Off by default.
+# measure = false         # Price every unpriced link at 1 instead (hop counting).
+```
+
+A relay prices its links once it is part of a cluster: it dials peers, gossips,
+joins a LAN, or, for a relay that only accepts peers, has a `node` URL of its
+own. A pricing relay publishes its links under `.internal/links/<hop id>` as a
+JSON track, and reads its peers' tables to name, at `info`, every direct link
+that a two-hop path through another peer beats by more than the hop penalty.
+Routing takes such a detour on its own; the log is what tells an operator which
+backbone edges are worth having. A pricing relay says so in its SETUP, so a peer
+charges nothing more for the link on arrival; a peer on a release without that
+flag still adds its default of 1, and a relay that measures nothing (`measure =
+false`, or an older release) is priced at 1 per link by its peers, which ranks
+its links as nearly free next to measured ones.
+
+To price a link by hand instead, add `?cost=N` to the peer URL. A configured
+price is the operator's policy for that link, so both ends keep it and neither
+measures it. Each relay adds the price of the link an announcement arrived on
+before forwarding it, so a route's cost is the sum of what it crossed.
 
 Wildcard advertisements are forwarded and costed the same way as an exact-path
 route: each hop appends its identity, adds the link price, and passes the

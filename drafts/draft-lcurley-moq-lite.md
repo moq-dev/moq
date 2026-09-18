@@ -486,7 +486,7 @@ The publisher advertises its Probe level in SETUP (see [Probe Parameter](#probe-
 
 The subscriber sends a PROBE message with a target bitrate on the bidirectional stream.
 The subscriber MAY send additional PROBE messages on the same stream to update the target bitrate; the publisher MUST treat each PROBE as a new target to attempt.
-If the publisher advertised the Increase capability, it SHOULD pad the connection (or send redundant data) to achieve the most recent target bitrate, without exceeding the congestion window.
+If the publisher advertised the Increase capability, it SHOULD pad the connection with [Padding Streams](#padding-stream) (or send redundant data) to achieve the most recent target bitrate, without exceeding the congestion window.
 A publisher that advertised Report but not Increase ignores the target and only reports; it MUST NOT pad above its current sending rate.
 In either case the publisher periodically replies with PROBE messages on the same bidirectional stream containing the current estimated bitrate and smoothed RTT.
 
@@ -601,6 +601,8 @@ Unidirectional streams are used for data transmission.
 | ------ | -------- | ----------- |
 |    0x1 | Setup    | Either      |
 | ------ | -------- | ----------- |
+|    0x2 | Padding  | Publisher   |
+| ------ | -------- | ----------- |
 
 ### Setup {#setup-stream}
 Each endpoint MUST open a Setup Stream (0x1) at the start of the session to advertise the optional capabilities and extensions it supports.
@@ -627,6 +629,13 @@ A subscriber assembling a Group from more than one publisher does so across sepa
 Both the publisher and subscriber MAY reset the stream at any time.
 This is not a fatal error and the session remains active.
 The subscriber MAY cache the error and potentially retry later.
+
+### Padding {#padding-stream}
+A publisher that advertised the `Increase` Probe level opens Padding Streams (0x2) to raise its sending rate toward the target a subscriber named on a [Probe Stream](#probe).
+
+A Padding Stream carries the stream type followed by arbitrary bytes and a FIN; it has no messages.
+The receiver reads it to the end and discards the bytes; a receiver on a version without it MUST reset the stream.
+A publisher MUST NOT send padding beyond what its congestion controller allows, SHOULD send it at a lower priority than every other stream, and MUST stop once the subscriber lowers the target to 0 or closes the Probe Stream.
 
 ## Datagrams
 QUIC datagrams provide unreliable, unordered delivery for latency-sensitive content that does not need retransmission.
@@ -736,6 +745,8 @@ The following Setup Parameters are defined:
 |------|-----------|-------------|
 | 0x5  | Hop       | Hop ID (i)  |
 |------|-----------|-------------|
+| 0x6  | Priced    | Priced (i)  |
+|------|-----------|-------------|
 
 ### Probe Parameter {#probe-parameter}
 The Probe Parameter advertises the sender's capability level when acting as a publisher on a [Probe Stream](#probe).
@@ -796,6 +807,16 @@ The Parameter Value is a variable-length integer; a value of 0 carries no identi
 Declaring it at setup gives the receiver the peer's identity before any other stream arrives, so route selection applies the same exclusion to the peer's subscriptions as to its announcements (see [Routing](#routing)), even on a session that never opens an Announce Stream.
 Either endpoint MAY send it; a subscriber-only endpoint with no identity MAY omit it, but a publisher SHOULD have a Hop ID regardless (see [ANNOUNCE_OK](#announce-ok)).
 A relay MUST NOT forward it.
+
+### Priced Parameter {#priced-parameter}
+The Priced Parameter declares that the sender folds the price of its own egress into both Route Costs of every announcement it forwards, so the receiver adds nothing more on arrival.
+
+The Parameter Value is a variable-length integer; any non-zero value sets the flag and 0 is equivalent to omitting it.
+A receiver that also received a [Cost Parameter](#cost-parameter) from the same endpoint ignores this one: a declared cost prices the link outright.
+Otherwise a receiver charges 0 for that direction instead of the default cost of 1, and MAY still charge a locally configured value.
+
+This is how a relay that measures its links prices them: the measured value can change over the life of the session, and the sender carries each change as an [ANNOUNCE_UPDATE](#announce-update) of the routes it forwards rather than a new SETUP.
+Both endpoints send it independently and a relay MUST NOT forward it.
 
 
 ## ANNOUNCE_REQUEST {#announce-request}

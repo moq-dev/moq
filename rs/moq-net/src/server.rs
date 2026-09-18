@@ -19,6 +19,7 @@ pub struct Server {
 	publish: Option<origin::Consumer>,
 	subscribe: Option<origin::Producer>,
 	stats: stats::Session,
+	priced: bool,
 	versions: Versions,
 }
 
@@ -50,6 +51,13 @@ impl Server {
 	/// Pass [`stats::Session::default`] (a no-op context) to opt out.
 	pub fn with_stats(mut self, stats: stats::Session) -> Self {
 		self.stats = stats;
+		self
+	}
+
+	/// Declare that this end prices its own egress into the routes it forwards;
+	/// see [`Client::with_priced`](crate::Client::with_priced).
+	pub fn with_priced(mut self) -> Self {
+		self.priced = true;
 		self
 	}
 
@@ -104,6 +112,7 @@ impl Server {
 				cost: None,
 				// Filled by `lite::start` from the attached origin handles.
 				hop: None,
+				priced: self.priced,
 			}
 		} else {
 			lite::Setup::default()
@@ -128,6 +137,7 @@ impl Server {
 			start.recv_bandwidth,
 			crate::runtime::Protocol::Lite(Box::new(start.driver)),
 			start.goaway,
+			start.link,
 		))
 	}
 
@@ -159,7 +169,7 @@ impl Server {
 	where
 		R: crate::runtime::Runtime + 'static,
 	{
-		let (path, role, origin, handshake) = match session.protocol() {
+		let (path, role, origin, cost, handshake) = match session.protocol() {
 			Some(alpn @ (ALPN_LITE_05 | ALPN_LITE_06_WIP)) => {
 				let version = match alpn {
 					ALPN_LITE_06_WIP => lite::Version::Lite06Wip,
@@ -175,6 +185,7 @@ impl Server {
 					client_setup.path.clone(),
 					client_setup.role,
 					client_setup.hop,
+					client_setup.cost,
 					PausedHandshake::LiteSetup {
 						session,
 						version,
@@ -187,6 +198,7 @@ impl Server {
 					.select(Version::Lite(lite::Version::Lite04))
 					.ok_or(Error::Version)?;
 				(
+					None,
 					None,
 					None,
 					None,
@@ -204,6 +216,7 @@ impl Server {
 					None,
 					None,
 					None,
+					None,
 					PausedHandshake::LiteBare {
 						session,
 						version: lite::Version::Lite03,
@@ -217,6 +230,7 @@ impl Server {
 			path,
 			role,
 			origin,
+			cost,
 			assigned_hop: crate::Hop::random(),
 			inner: Some(RequestInner {
 				server: self.clone(),
@@ -356,6 +370,7 @@ impl Server {
 			path,
 			role: None,
 			origin: None,
+			cost: None,
 			assigned_hop: crate::Hop::random(),
 			inner: Some(RequestInner {
 				server: self.clone(),
@@ -393,6 +408,7 @@ impl Server {
 			// A moq-transport peer only has an identity if it negotiated the MoQ
 			// Cluster extension and declared a non-zero Hop ID.
 			origin: peer_setup.declared.cluster.hop.filter(|h| *h != crate::Hop::UNKNOWN),
+			cost: peer_setup.declared.cluster.cost,
 			assigned_hop: crate::Hop::random(),
 			inner: Some(RequestInner {
 				server: self.clone(),
@@ -418,6 +434,7 @@ pub struct Handshake<S: crate::transport::poll::Session, R: crate::runtime::Runt
 	path: Option<String>,
 	role: Option<Role>,
 	origin: Option<crate::Hop>,
+	cost: Option<u64>,
 	/// The identity this session's routes are stamped with when the peer declares none
 	/// on the wire. Fresh per request unless the caller overrides it
 	/// ([`Handshake::with_peer_hop`]).
@@ -508,7 +525,7 @@ where
 
 			// The client's SETUP was read at the pause; hand the stream back
 			// for GOAWAY. A server never advertises a path, hence `None`.
-			let (protocol, goaway) = ietf::start(ietf::Config {
+			let (protocol, goaway, link) = ietf::start(ietf::Config {
 				runtime: runtime.clone(),
 				session: session.clone(),
 				setup: None,
@@ -519,6 +536,7 @@ where
 				peer_hop,
 				// Only the dialing side prices a link.
 				cost: None,
+				priced: server.priced,
 				version,
 				path: None,
 				peer_setup_stream: Some(peer_setup.stream),
@@ -532,6 +550,7 @@ where
 				None,
 				crate::runtime::Protocol::Ietf(protocol),
 				goaway,
+				link,
 			))
 		}
 		.maybe_boxed()
@@ -598,7 +617,7 @@ where
 			};
 			stream.writer.encode(&server_setup).await?;
 
-			let (recv_bw, protocol, goaway) = match version {
+			let (recv_bw, protocol, goaway, link) = match version {
 				Version::Lite(v) => {
 					let stream = stream.with_version(v);
 					// Pre-lite-05: no Setup Stream, so nothing to advertise or seed.
@@ -617,12 +636,13 @@ where
 						start.recv_bandwidth,
 						crate::runtime::Protocol::Lite(Box::new(start.driver)),
 						start.goaway,
+						start.link,
 					)
 				}
 				Version::Ietf(v) => {
 					let stream = stream.with_version(v);
 					// Draft 14-16: path came in the bidi SETUP, no uni SETUP to hand back.
-					let (protocol, goaway) = ietf::start(ietf::Config {
+					let (protocol, goaway, link) = ietf::start(ietf::Config {
 						runtime: runtime.clone(),
 						session: session.clone(),
 						setup: Some(stream),
@@ -632,16 +652,19 @@ where
 						subscribe,
 						peer_hop,
 						cost: None,
+						priced: server.priced,
 						version: v,
 						path: None,
 						peer_setup_stream: None,
 						peer_declared: Some(peer_declared),
 					})?;
-					(None, crate::runtime::Protocol::Ietf(protocol), goaway)
+					(None, crate::runtime::Protocol::Ietf(protocol), goaway, link)
 				}
 			};
 
-			Ok(Session::spawn(runtime, session, version, recv_bw, protocol, goaway))
+			Ok(Session::spawn(
+				runtime, session, version, recv_bw, protocol, goaway, link,
+			))
 		}
 		.maybe_boxed()
 	}
@@ -691,6 +714,16 @@ where
 		self.origin
 	}
 
+	/// The price the peer declared for crossing this link, when the negotiated
+	/// protocol carries one (moq-lite-06, or `moqt-17`+ via the MoQ Cluster extension).
+	///
+	/// `None` when it declared nothing, which the session charges at the default of 1.
+	/// A declared price is the dialer's configured policy for the link, so a relay
+	/// pricing its own egress by measurement defers to it.
+	pub fn peer_cost(&self) -> Option<u64> {
+		self.cost
+	}
+
 	/// Publish to the connected client. Overrides any value from the [`Server`]
 	/// builder; typically set after inspecting [`path`](Self::path).
 	pub fn with_publisher(mut self, publish: impl Consume<origin::Consumer>) -> Self {
@@ -725,6 +758,13 @@ where
 	/// [`Server`] builder.
 	pub fn with_stats(mut self, stats: stats::Session) -> Self {
 		self.inner_mut().server.stats = stats;
+		self
+	}
+
+	/// Declare that this end prices its own egress into the routes it forwards on
+	/// this session; see [`Client::with_priced`](crate::Client::with_priced).
+	pub fn with_priced(mut self) -> Self {
+		self.inner_mut().server.priced = true;
 		self
 	}
 
@@ -952,6 +992,7 @@ mod tests {
 			role,
 			cost: None,
 			hop,
+			priced: false,
 		}
 		.encode(&mut buf, v)
 		.unwrap();
@@ -1104,6 +1145,7 @@ mod tests {
 			path: None,
 			role: None,
 			origin: None,
+			cost: None,
 			assigned_hop: Hop::random(),
 			inner: Some(RequestInner {
 				server: Server::new().with_publisher(&origin),

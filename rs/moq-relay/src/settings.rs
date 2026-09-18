@@ -93,6 +93,28 @@ struct Cluster {
 	#[cfg(feature = "cluster-lan")]
 	#[usage(flatten)]
 	lan: ClusterLan,
+
+	#[usage(flatten)]
+	cost: ClusterCost,
+}
+
+#[derive(usage::Config)]
+#[usage(prefix = "cluster.cost")]
+struct ClusterCost {
+	#[usage(env = "MOQ_CLUSTER_COST_MEASURE", cli("--cluster-cost-measure"))]
+	measure: Option<bool>,
+
+	#[usage(env = "MOQ_CLUSTER_COST_INTERVAL", cli("--cluster-cost-interval"))]
+	interval: Option<String>,
+
+	#[usage(env = "MOQ_CLUSTER_COST_HOP_PENALTY", cli("--cluster-cost-hop-penalty"))]
+	hop_penalty: Option<String>,
+
+	#[usage(env = "MOQ_CLUSTER_COST_STEP", cli("--cluster-cost-step"))]
+	step: Option<String>,
+
+	#[usage(env = "MOQ_CLUSTER_COST_PROBE", cli("--cluster-cost-probe"))]
+	probe: Option<u64>,
 }
 
 #[cfg(feature = "cluster-lan")]

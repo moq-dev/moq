@@ -41,6 +41,16 @@ impl PeerSetup {
 		}
 	}
 
+	/// Poll for the identity the peer declared, waiting until its SETUP arrives.
+	/// `None` when it declared none, or withheld it as the reserved 0.
+	pub fn poll_hop(&self, waiter: &kio::Waiter) -> std::task::Poll<Option<crate::Hop>> {
+		let slot = std::task::ready!(self.0.poll(waiter, |peer| match peer.is_some() {
+			true => std::task::Poll::Ready(()),
+			false => std::task::Poll::Pending,
+		}));
+		std::task::Poll::Ready(slot.expect("waited for Some").cluster.identity())
+	}
+
 	/// Await the peer's SETUP.
 	///
 	/// The peer MUST send exactly one, so this resolves once that stream is read. Waits
@@ -71,6 +81,7 @@ mod tests {
 			cluster: cluster::Peer {
 				hop: Some(crate::Hop::new(42).unwrap()),
 				cost: Some(3),
+				priced: false,
 			},
 			solicit: None,
 		};
@@ -81,6 +92,7 @@ mod tests {
 			cluster: cluster::Peer {
 				hop: Some(crate::Hop::new(99).unwrap()),
 				cost: Some(0),
+				priced: false,
 			},
 			solicit: Some(true),
 		});

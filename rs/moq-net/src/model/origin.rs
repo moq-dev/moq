@@ -129,6 +129,16 @@ pub struct Config {
 	/// edge. Defaults to [`track::DEFAULT_MAX_AGE`], and [`Self::cache_duration`]
 	/// still caps it.
 	pub default_max_age: Duration,
+
+	/// How much cheaper a challenger must be, in route cost units, before it
+	/// displaces the route a path is already served or advertised from.
+	///
+	/// Route costs are sums over links whose prices move, so with no margin a
+	/// path flips between two near-equal routes every time one of them drifts.
+	/// A relay pricing its links by measurement sets this to its hop penalty; the
+	/// default of 0 keeps the cheapest route winning outright. A route that leaves
+	/// the table, drains, or turns anonymous is replaced regardless.
+	pub switch_margin: u64,
 }
 
 impl Default for Config {
@@ -141,6 +151,7 @@ impl Default for Config {
 			pool,
 			cache_duration: Duration::MAX,
 			default_max_age: track::DEFAULT_MAX_AGE,
+			switch_margin: 0,
 		}
 	}
 }
@@ -1117,6 +1128,8 @@ pub struct Producer {
 	// Retention window for a track whose publisher advertises none (see
 	// [`Config::default_max_age`]).
 	default_max_age: Duration,
+	// See [`Config::switch_margin`].
+	switch_margin: u64,
 
 	// Ingress stats context. Broadcasts created through this producer are attributed
 	// to it (writes counted on the subscriber/ingress side). Empty (no-op) unless a
@@ -1153,6 +1166,7 @@ impl Producer {
 		let (tasks, set) = TaskSet::new();
 		let nodes = OriginNodes::default();
 		let shared = kio::Shared::<OriginState>::default();
+		shared.lock().switch_margin = config.switch_margin;
 		let timers = TimersSlot::default();
 		let pool = config.pool.clone();
 		let producer = Self {
@@ -1163,6 +1177,7 @@ impl Producer {
 			pool: config.pool,
 			cache_duration: config.cache_duration,
 			default_max_age: config.default_max_age,
+			switch_margin: config.switch_margin,
 			stats: stats::Session::default(),
 			tasks,
 			timers: timers.clone(),
@@ -1197,6 +1212,7 @@ impl Producer {
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
 			default_max_age: self.default_max_age,
+			switch_margin: self.switch_margin,
 		}
 	}
 
@@ -1222,6 +1238,7 @@ impl Producer {
 			pool: cache::Pool::default(),
 			cache_duration: Duration::MAX,
 			default_max_age: track::DEFAULT_MAX_AGE,
+			switch_margin: 0,
 			stats: stats::Session::default(),
 			tasks,
 			timers: TimersSlot::default(),
@@ -1447,6 +1464,7 @@ impl Producer {
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
 			default_max_age: self.default_max_age,
+			switch_margin: self.switch_margin,
 			stats: self.stats.clone(),
 			tasks: self.tasks.clone(),
 			timers: self.timers.clone(),
@@ -1478,6 +1496,7 @@ impl Producer {
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
 			default_max_age: self.default_max_age,
+			switch_margin: self.switch_margin,
 			stats: self.stats.clone(),
 			tasks: self.tasks.clone(),
 			timers: self.timers.clone(),
@@ -2753,12 +2772,12 @@ async fn run_remote_front(task: RemoteFrontTask) {
 				break 'run;
 			}
 			refused.retain(|id| table.routes.iter().any(|entry| entry.id == *id));
+			let serving_route = front.serving.as_ref().map(|(_, route, _)| *route);
 			let best = match front.identity.routable() {
-				true => table.best_route(&path.as_path(), exclude, front.identity.pin(), &refused),
+				true => table.best_route(&path.as_path(), exclude, front.identity.pin(), &refused, serving_route),
 				false => None,
 			};
 			decided = best.map(|entry| entry.id);
-			let serving_route = front.serving.as_ref().map(|(_, route, _)| *route);
 			match best {
 				// The serving route is still the best qualifying one.
 				Some(entry) if Some(entry.id) == serving_route => {
@@ -2837,6 +2856,7 @@ async fn run_remote_front(task: RemoteFrontTask) {
 
 		let pin = front.identity.pin();
 		let routable = front.identity.routable();
+		let serving_route = front.serving.as_ref().map(|(_, route, _)| *route);
 
 		let step = kio::wait(|waiter| {
 			if let Poll::Ready((name, resume)) = front.broadcast.poll_spliced_assigned(waiter) {
@@ -2867,7 +2887,9 @@ async fn run_remote_front(task: RemoteFrontTask) {
 					return Poll::Ready(());
 				}
 				let best = match routable {
-					true => table.best_route(&path.as_path(), exclude, pin, &refused).map(|e| e.id),
+					true => table
+						.best_route(&path.as_path(), exclude, pin, &refused, serving_route)
+						.map(|e| e.id),
 					false => None,
 				};
 				match best == decided {
@@ -3044,6 +3066,26 @@ struct OriginState {
 	// Set when the origin's driver dropped: new requests fail with `Closed`
 	// immediately and handlers observe the end instead of parking forever.
 	closed: bool,
+
+	// See [`Config::switch_margin`].
+	switch_margin: u64,
+}
+
+/// The route to use given the cheapest candidate and the one in use: the
+/// incumbent stands unless the challenger beats it by more than `margin`, or
+/// ranks above it for a reason cost cannot express (it is anonymous, or it is
+/// the very entry that went away). See [`Config::switch_margin`].
+fn hold<'a>(best: &'a RouteEntry, incumbent: Option<&'a RouteEntry>, margin: u64) -> &'a RouteEntry {
+	match incumbent {
+		Some(current)
+			if current.id != best.id
+				&& current.is_anonymous() == best.is_anonymous()
+				&& best.cost.warm.saturating_add(margin) >= current.cost.warm =>
+		{
+			current
+		}
+		_ => best,
+	}
 }
 
 impl OriginState {
@@ -3053,16 +3095,18 @@ impl OriginState {
 	fn sync_route(&mut self, prefix: &Path) {
 		// Split borrows: the recompute reads `routes` while mutating a cursor.
 		let routes = &self.routes;
+		let margin = self.switch_margin;
 		for cursor in self.cursors.values_mut() {
 			for presented in cursor.presented(prefix) {
-				Self::sync_cursor(routes, cursor, &presented);
+				Self::sync_cursor(routes, cursor, &presented, margin);
 			}
 		}
 	}
 
 	/// Recompute the best visible route presenting at `presented` (relative) for
-	/// one cursor and deliver the change, if any.
-	fn sync_cursor(routes: &[RouteEntry], cursor: &mut TableCursor, presented: &PathOwned) {
+	/// one cursor and deliver the change, if any. The route last delivered holds
+	/// against a challenger inside the switch margin.
+	fn sync_cursor(routes: &[RouteEntry], cursor: &mut TableCursor, presented: &PathOwned, margin: u64) {
 		// Among entries presenting here, the longest prefix wins outright, so the
 		// metadata a cursor advertises matches what a request through it actually
 		// resolves.
@@ -3072,11 +3116,16 @@ impl OriginState {
 			.filter(|entry| cursor.presented(&entry.prefix).contains(presented))
 			.collect();
 		let most = candidates.iter().map(|entry| entry.prefix.len()).max();
+		let incumbent = cursor.current.get(presented).map(|(id, ..)| *id);
 		let best = most.and_then(|most| {
-			candidates
+			let tier: Vec<&RouteEntry> = candidates
 				.into_iter()
 				.filter(|entry| entry.prefix.len() == most)
+				.collect();
+			let current = incumbent.and_then(|id| tier.iter().copied().find(|entry| entry.id == id));
+			tier.into_iter()
 				.min_by_key(|entry| route_order(presented, entry))
+				.map(|best| hold(best, current, margin))
 		});
 
 		match best {
@@ -3123,7 +3172,7 @@ impl OriginState {
 			}
 		}
 		for p in &presented {
-			Self::sync_cursor(routes, &mut cursor, p);
+			Self::sync_cursor(routes, &mut cursor, p, self.switch_margin);
 		}
 		self.cursors.insert(id, cursor);
 	}
@@ -3140,13 +3189,15 @@ impl OriginState {
 	/// candidates: this is the identity a front resumes through, and a route from
 	/// anyone else is different content rather than an alternate path (see
 	/// [`run_remote_front`]). `Hop::UNKNOWN` identifies nobody, so callers never
-	/// pin it.
+	/// pin it. The `incumbent` route, when it is still a candidate, holds against
+	/// a challenger inside the switch margin.
 	fn best_route(
 		&self,
 		path: &Path,
 		exclude: Option<Hop>,
 		publisher: Option<Hop>,
 		refused: &HashSet<u64>,
+		incumbent: Option<u64>,
 	) -> Option<&RouteEntry> {
 		let candidates: Vec<&RouteEntry> = self
 			.routes
@@ -3162,10 +3213,14 @@ impl OriginState {
 
 		// Covering prefixes of one path form a chain, so the longest is unique.
 		let most = candidates.iter().map(|entry| entry.prefix.len()).max()?;
-		candidates
+		let tier: Vec<&RouteEntry> = candidates
 			.into_iter()
 			.filter(|entry| entry.prefix.len() == most && entry.server.is_some())
+			.collect();
+		let current = incumbent.and_then(|id| tier.iter().copied().find(|entry| entry.id == id));
+		tier.into_iter()
 			.min_by_key(|entry| route_order(&entry.prefix, entry))
+			.map(|best| hold(best, current, self.switch_margin))
 	}
 }
 
@@ -3851,7 +3906,7 @@ impl Consumer {
 
 		// Nothing serves the path: no local broadcast and no served route.
 		if state
-			.best_route(&absolute.as_path(), self.exclude, None, &HashSet::new())
+			.best_route(&absolute.as_path(), self.exclude, None, &HashSet::new(), None)
 			.is_none()
 		{
 			return kio::Pending::new(Pending::failed(Error::Unroutable));
@@ -4432,6 +4487,45 @@ mod tests {
 		// Losing the last retracts.
 		drop(expensive);
 		announced.assert_next_ended("room");
+	}
+
+	/// With a switch margin, a cheaper route displaces the advertised one only
+	/// when it beats it by more than the margin; losing the incumbent still
+	/// falls back to whatever is best.
+	#[tokio::test]
+	async fn switch_margin_holds_the_incumbent() {
+		let mut config = Config::new(origin(1));
+		config.switch_margin = 10;
+		let producer = config.produce();
+		let mut announced = producer.consume().announced();
+
+		let first = producer
+			.announce("room", Route::default().with_hops(hops(&[10])).with_cost(20))
+			.unwrap();
+		assert_eq!(announced.assert_next_active("room").cost, Cost::new(20));
+
+		// Cheaper, but by less than the margin: the incumbent holds.
+		let _close = producer
+			.announce("room", Route::default().with_hops(hops(&[20])).with_cost(12))
+			.unwrap();
+		announced.assert_next_wait();
+
+		// Cheaper by more than the margin: it takes over.
+		let far = producer
+			.announce("room", Route::default().with_hops(hops(&[30])).with_cost(5))
+			.unwrap();
+		assert_eq!(announced.assert_next_active("room").cost, Cost::new(5));
+
+		// The incumbent re-priced above the margin loses too.
+		far.update(Route::default().with_hops(hops(&[30])).with_cost(30))
+			.unwrap();
+		assert_eq!(announced.assert_next_active("room").cost, Cost::new(12));
+
+		// Losing the incumbent falls back to the best survivor.
+		drop(first);
+		announced.assert_next_wait();
+		drop(far);
+		announced.assert_next_wait();
 	}
 
 	#[tokio::test]

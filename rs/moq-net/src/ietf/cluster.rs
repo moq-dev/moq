@@ -7,7 +7,9 @@
 //! - each endpoint declares its own [`Hop`](crate::Hop) (Hop ID) via the
 //!   HOP_ID Setup Option, which is also what negotiates the extension;
 //! - each endpoint prices what subscribing from it costs via the RELAY_COST Setup
-//!   Option, so the two directions are priced independently;
+//!   Option, so the two directions are priced independently, or declares with the
+//!   PRICED Setup Option that it already folds a (measured, moving) price into what
+//!   it forwards;
 //! - every advertisement carries the HOP_PATH it traversed and the accumulated
 //!   ROUTE_COST of that path, as Key-Value-Pair message parameters.
 //!
@@ -33,6 +35,11 @@ pub const RELAY_COST: u64 = 0x40B56;
 /// HOP_PATH message parameter: the ordered Hop IDs an advertisement traversed.
 /// Odd, so the value is a length-prefixed byte string of varints.
 pub const HOP_PATH: u64 = 0x40B57;
+
+/// PRICED Setup Option: the sender folds its own egress price into the ROUTE_COST of
+/// everything it forwards, so the receiver adds nothing. Even, so the value is a bare
+/// varint; any non-zero value sets it.
+pub const PRICED: u64 = 0x40B5E;
 
 /// ROUTE_COST message parameter: the accumulated cost of the advertised path.
 /// Even, so the value is a bare varint.
@@ -198,6 +205,10 @@ pub struct Peer {
 	/// (meaning [`DEFAULT_COST`]). Directional: this prices what we pull from the peer,
 	/// while our own declaration prices the other way, and the two need not match.
 	pub cost: Option<u64>,
+
+	/// Whether the peer folds its own egress price into the ROUTE_COST it forwards
+	/// (PRICED), so this direction costs nothing more on arrival.
+	pub priced: bool,
 }
 
 impl Peer {
@@ -223,9 +234,11 @@ impl Peer {
 /// RELAY_COST is directional: each endpoint declares what subscribing from *it* costs,
 /// so the peer's declaration is what prices this direction. `local` overrides it, since
 /// what we charge our own routing is local policy and a peer should not be able to
-/// reprice our mesh unilaterally. Falls back to [`DEFAULT_COST`] when neither priced it.
+/// reprice our mesh unilaterally. A peer that declared PRICED instead has already
+/// charged its egress on every ROUTE_COST it sends, so it costs nothing more here.
+/// Falls back to [`DEFAULT_COST`] when nobody priced it.
 pub fn link_cost(local: Option<u64>, peer: &Peer) -> u64 {
-	local.or(peer.cost).unwrap_or(DEFAULT_COST)
+	local.or(peer.cost).or(peer.priced.then_some(0)).unwrap_or(DEFAULT_COST)
 }
 
 /// Read the cluster Setup Options out of a decoded SETUP parameter block.
@@ -243,13 +256,23 @@ pub fn peer_from_setup(params: &super::Parameters, version: Version) -> Result<P
 	Ok(Peer {
 		hop,
 		cost: params.get_varint(super::ParameterVarInt::RelayCost),
+		priced: params
+			.get_varint(super::ParameterVarInt::Priced)
+			.is_some_and(|value| value != 0),
 	})
 }
 
 /// Write our cluster Setup Options into a SETUP parameter block.
 ///
-/// `cost` is the price we put on this link, which only the dialing side declares.
-pub fn peer_into_setup(params: &mut super::Parameters, self_hop: Hop, cost: Option<u64>, version: Version) {
+/// `cost` is the price we put on this link, which only the dialing side declares;
+/// `priced` says we fold a measured price into what we forward instead.
+pub fn peer_into_setup(
+	params: &mut super::Parameters,
+	self_hop: Hop,
+	cost: Option<u64>,
+	priced: bool,
+	version: Version,
+) {
 	if !supported(version) {
 		return;
 	}
@@ -258,6 +281,9 @@ pub fn peer_into_setup(params: &mut super::Parameters, self_hop: Hop, cost: Opti
 
 	if let Some(cost) = cost {
 		params.set_varint(super::ParameterVarInt::RelayCost, cost);
+	}
+	if priced {
+		params.set_varint(super::ParameterVarInt::Priced, 1);
 	}
 }
 
@@ -458,6 +484,7 @@ mod tests {
 		let anonymous = Peer {
 			hop: Some(Hop::UNKNOWN),
 			cost: Some(0),
+			priced: false,
 		};
 		assert!(anonymous.negotiated());
 		assert_eq!(anonymous.identity(), None);
@@ -465,6 +492,7 @@ mod tests {
 		let named = Peer {
 			hop: Some(hop(9)),
 			cost: None,
+			priced: false,
 		};
 		assert!(named.negotiated());
 		assert_eq!(named.identity(), Some(hop(9)));
@@ -476,10 +504,12 @@ mod tests {
 		let priced = Peer {
 			hop: Some(hop(9)),
 			cost: Some(7),
+			priced: false,
 		};
 		let free = Peer {
 			hop: Some(hop(9)),
 			cost: Some(0),
+			priced: false,
 		};
 
 		// The peer prices its own egress, so absent local policy that is what
@@ -493,13 +523,34 @@ mod tests {
 		assert_eq!(link_cost(Some(0), &priced), 0);
 		// Nobody priced it, so this direction ranks by hop count.
 		assert_eq!(link_cost(None, &unpriced), DEFAULT_COST);
+
+		// A peer that folds its egress into what it forwards costs nothing more,
+		// unless it also declared a price, which prices the link outright, or
+		// local policy says otherwise.
+		let folded = Peer {
+			hop: Some(hop(9)),
+			cost: None,
+			priced: true,
+		};
+		assert_eq!(link_cost(None, &folded), 0);
+		assert_eq!(link_cost(Some(3), &folded), 3);
+		let both = Peer {
+			cost: Some(7),
+			..folded
+		};
+		assert_eq!(link_cost(None, &both), 7);
 	}
 
 	#[test]
 	fn setup_options_round_trip() {
-		for (self_hop, cost) in [(hop(42), Some(0)), (hop(42), Some(9)), (Hop::UNKNOWN, None)] {
+		for (self_hop, cost, priced) in [
+			(hop(42), Some(0), false),
+			(hop(42), Some(9), false),
+			(hop(42), None, true),
+			(Hop::UNKNOWN, None, false),
+		] {
 			let mut params = super::super::Parameters::default();
-			peer_into_setup(&mut params, self_hop, cost, VERSION);
+			peer_into_setup(&mut params, self_hop, cost, priced, VERSION);
 
 			let mut buf = BytesMut::new();
 			params.encode(&mut buf, VERSION).unwrap();
@@ -509,6 +560,7 @@ mod tests {
 			let peer = peer_from_setup(&decoded, VERSION).unwrap();
 			assert_eq!(peer.hop, Some(self_hop));
 			assert_eq!(peer.cost, cost);
+			assert_eq!(peer.priced, priced);
 		}
 	}
 
@@ -517,7 +569,7 @@ mod tests {
 		// The key sits at delta 0x40B54 from the start of the block and the value follows
 		// it directly: a length byte here would make us unreadable to every -01 peer.
 		let mut params = super::super::Parameters::default();
-		peer_into_setup(&mut params, hop(42), None, VERSION);
+		peer_into_setup(&mut params, hop(42), None, false, VERSION);
 
 		let mut buf = BytesMut::new();
 		params.encode(&mut buf, VERSION).unwrap();
@@ -553,7 +605,7 @@ mod tests {
 		// Draft-14..16 exchange SETUP over the legacy control stream, which this
 		// extension does not cover; we neither send nor read the options there.
 		let mut params = super::super::Parameters::default();
-		peer_into_setup(&mut params, hop(42), Some(3), Version::Draft16);
+		peer_into_setup(&mut params, hop(42), Some(3), false, Version::Draft16);
 		assert!(params.get_varint(super::super::ParameterVarInt::HopId).is_none());
 		assert!(!peer_from_setup(&params, Version::Draft16).unwrap().negotiated());
 	}

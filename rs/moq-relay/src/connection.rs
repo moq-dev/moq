@@ -80,6 +80,7 @@ impl Connection {
 	#[tracing::instrument("conn", skip_all, fields(id = self.id, remote = self.request.remote_addr().map(tracing::field::display), session = tracing::field::Empty))]
 	pub async fn run(self) -> anyhow::Result<()> {
 		let peer_hop = self.request.peer_hop();
+		let peer_cost = self.request.peer_cost();
 		let (lease, registration) = match self.admit().await {
 			Ok(admitted) => admitted,
 			Err(err) => {
@@ -106,6 +107,9 @@ impl Connection {
 		// moq-net defaults the unset side to a fresh no-op origin, which is fine for a
 		// publish-only or subscribe-only session.
 		let mut request = self.request.with_stats(grants.stats);
+		if self.cluster.prices(peer_hop, peer_cost) {
+			request = request.with_priced();
+		}
 		if let Some(subscribe) = grants.subscribe {
 			request = request.with_publisher(&subscribe);
 		}
@@ -114,6 +118,8 @@ impl Connection {
 		}
 		let session = request.ok().await?;
 		let _node_connection = peer_hop.map(|origin| self.cluster.nodes.connect_inbound(self.id, origin));
+		// A cluster peer's link is priced for as long as the session is supervised.
+		let _metered = self.cluster.meter_inbound(self.id, &session, peer_hop, peer_cost);
 
 		tracing::info!(version = %session.version(), %transport, "negotiated");
 

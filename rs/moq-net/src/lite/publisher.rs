@@ -36,6 +36,14 @@ pub(super) struct PublisherConfig<S: crate::transport::poll::Session, R: crate::
 	/// The origin (hop) id assigned to the peer, used whenever the peer doesn't
 	/// declare one itself. See `Client::with_peer_hop`.
 	pub peer_hop: Option<Hop>,
+	/// This end's egress price, added to every advertised cost. See
+	/// [`crate::Session::set_egress`].
+	pub egress: kio::Shared<u64>,
+	/// Where served groups and payload are counted for [`crate::Session::stats`].
+	pub served: Arc<crate::session::Served>,
+	/// Whether we advertised the Increase probe level on a wire with a Padding
+	/// Stream, so a probe target above our sending rate is answered with padding.
+	pub pads: bool,
 }
 
 /// Context shared by every control-stream child.
@@ -58,6 +66,10 @@ struct Shared<S: crate::transport::poll::Session> {
 	priority: PriorityQueue,
 	version: Version,
 	goaway: crate::goaway::Protocol,
+	// This end's egress price; every announce stream re-prices when it moves.
+	egress: kio::Shared<u64>,
+	served: Arc<crate::session::Served>,
+	pads: bool,
 }
 
 /// Largest millisecond duration every implementation can carry losslessly.
@@ -156,6 +168,9 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> Publisher<S
 				priority: Default::default(),
 				version: config.version,
 				goaway: config.goaway,
+				egress: config.egress,
+				served: config.served,
+				pads: config.pads,
 			}),
 			runtime: config.runtime,
 			accept,
@@ -204,8 +219,46 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> Publisher<S
 		self_origin: Hop,
 		version: Version,
 	) -> Result<(), Error> {
+		Self::run_announce_priced(
+			stream,
+			origin,
+			announced,
+			prefix,
+			self_origin,
+			version,
+			kio::Shared::new(0),
+		)
+		.await
+	}
+
+	/// [`Self::run_announce`] with a live egress price, re-priced exactly as
+	/// [`AnnounceServe`] does when the price moves.
+	async fn run_announce_priced(
+		stream: &mut Stream<S, Version>,
+		origin: &origin::Consumer,
+		announced: &mut announce::Consumer,
+		prefix: impl crate::AsPath,
+		self_origin: Hop,
+		version: Version,
+		egress: kio::Shared<u64>,
+	) -> Result<(), Error> {
 		let mut run = AnnounceRun::new(prefix.as_path().to_owned(), self_origin, version);
-		kio::wait(|waiter| run.poll(stream, origin, announced, waiter)).await
+		run.egress = *egress.read();
+		kio::wait(|waiter| {
+			loop {
+				let moved = egress.poll(waiter, |price| match **price != run.egress {
+					true => Poll::Ready(()),
+					false => Poll::Pending,
+				});
+				let Poll::Ready(price) = moved else { break };
+				let price = *price;
+				if let Err(err) = run.reprice(stream, price) {
+					return Poll::Ready(Err(err));
+				}
+			}
+			run.poll(stream, origin, announced, waiter)
+		})
+		.await
 	}
 }
 
@@ -314,20 +367,38 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> Control<S, 
 }
 
 /// Serves one PROBE stream: periodic bandwidth estimates until the peer closes
-/// its side.
+/// its side, and padding up to the peer's target when we advertised Increase.
 struct ProbeServe<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
 	shared: Arc<Shared<S>>,
 	runtime: R,
 	stream: Option<Stream<S, Version>>,
 	last_sent: Option<(lite::Probe, crate::runtime::Instant)>,
 	next_probe: crate::runtime::Deadline<R>,
+	/// The bitrate the peer last asked us to reach, in bits per second.
+	target: Option<u64>,
+	/// The transport's byte counter at the previous tick, for the sending rate.
+	sent: Option<u64>,
+	/// The padding stream still draining into the transport, if any, and whether
+	/// its FIN is sent. One at a time: a stream the congestion window has not let
+	/// out yet is the bound the draft asks for, so the next tick skips rather
+	/// than queues.
+	padding: Option<(Writer<S::SendStream, Version>, bool)>,
 }
+
+/// The most padding one tick sends, so a target far above the link never
+/// queues more than the window drains in a few round trips.
+const PADDING_MAX_PER_TICK: usize = 256 * 1024;
+/// One buffer of zeros every padding stream slices from, so a tick never
+/// allocates for bytes the receiver throws away.
+static PADDING_ZEROS: [u8; PADDING_MAX_PER_TICK] = [0; PADDING_MAX_PER_TICK];
 
 impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> ProbeServe<S, R> {
 	const PROBE_INTERVAL: Duration = Duration::from_millis(100);
 	const PROBE_MAX_AGE: Duration = Duration::from_secs(10);
 	const PROBE_MAX_DELTA: f64 = 0.25;
 	const PROBE_RTT_DELTA: f64 = 0.25;
+	/// Padding goes out behind every other stream.
+	const PADDING_SEND_ORDER: u8 = 0;
 
 	/// Whether a metric moved enough to be worth another report. Gaining or
 	/// losing a value always counts; both unknown never does.
@@ -362,7 +433,37 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> ProbeServe<
 			// Send the first probe immediately, then keep an anchored cadence.
 			next_probe: crate::runtime::Deadline::at(&runtime, runtime.now()),
 			runtime,
+			target: None,
+			sent: None,
+			padding: None,
 		}
+	}
+
+	/// The padding one tick should send to close the gap between what the
+	/// transport sent since the last tick and `target`, or `None` for no gap.
+	fn padding_bytes(target: u64, sent_since_tick: u64, interval: Duration) -> Option<usize> {
+		let wanted = target as f64 * interval.as_secs_f64() / 8.0;
+		let gap = wanted - sent_since_tick as f64;
+		(gap >= 1.0).then(|| (gap as usize).min(PADDING_MAX_PER_TICK))
+	}
+
+	/// Open one padding stream carrying `bytes` of zeros behind every other
+	/// stream. Pending while the transport grants no stream credit.
+	fn poll_pad(
+		session: &mut S,
+		version: Version,
+		cx: &mut Context<'_>,
+		bytes: usize,
+	) -> Poll<Result<Writer<S::SendStream, Version>, Error>> {
+		let stream = match ready!(session.poll_open_uni(cx)) {
+			Ok(stream) => stream,
+			Err(err) => return Poll::Ready(Err(Error::from_transport(err))),
+		};
+		let mut writer = Writer::new(stream, version);
+		writer.set_priority(Self::PADDING_SEND_ORDER);
+		writer.buffer(&lite::DataType::Padding)?;
+		writer.buffer_raw(&PADDING_ZEROS[..bytes.min(PADDING_MAX_PER_TICK)]);
+		Poll::Ready(Ok(writer))
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -384,9 +485,38 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> ProbeServe<
 			// Deliver the previous estimate before ticking out the next one.
 			ready!(stream.writer.poll_flush(&mut cx))?;
 
-			// Tick the probe interval, bailing as soon as the peer closes its side.
-			if let Poll::Ready(res) = stream.reader.poll_closed(&mut cx) {
-				return Poll::Ready(res);
+			// Drain the padding in flight: flush, FIN, then wait for the transport to
+			// let go of it. A stream error there is the padding's alone, so drop it and
+			// carry on reporting.
+			if let Some((writer, finished)) = &mut self.padding {
+				let drained = match writer.poll_flush(&mut cx) {
+					Poll::Ready(Ok(())) => {
+						if !*finished {
+							*finished = writer.finish().is_ok();
+						}
+						writer.poll_closed(&mut cx)
+					}
+					other => other,
+				};
+				match drained {
+					Poll::Ready(Ok(())) => self.padding = None,
+					Poll::Ready(Err(err)) => {
+						tracing::debug!(%err, "padding stream ended early");
+						self.padding = None;
+					}
+					Poll::Pending => {}
+				}
+			}
+
+			// The peer's targets, and its close: a PROBE from the subscriber names the
+			// bitrate to reach, a FIN ends the stream.
+			loop {
+				match stream.reader.poll_decode_maybe::<lite::Probe>(&mut cx) {
+					Poll::Ready(Ok(Some(probe))) => self.target = probe.bitrate,
+					Poll::Ready(Ok(None)) => return Poll::Ready(Ok(())),
+					Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+					Poll::Pending => break,
+				}
 			}
 			ready!(self.next_probe.poll(waiter));
 			let next = self
@@ -394,6 +524,36 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> ProbeServe<
 				.deadline()
 				.and_then(|at| at.checked_add(Self::PROBE_INTERVAL));
 			self.next_probe.set(next);
+
+			// Pad toward the target with whatever the last tick's traffic left short,
+			// once the previous padding has drained. Bounded by the congestion window
+			// through the transport, and behind every other stream. The transport's
+			// byte counter is the sending rate; a transport that reports none falls
+			// back to the payload this session served, so a busy link is never padded
+			// as if it were idle.
+			if self.shared.pads
+				&& let Some(target) = self.target
+			{
+				let sent_now = self
+					.shared
+					.session
+					.stats()
+					.bytes_sent()
+					.unwrap_or_else(|| self.shared.served.bytes.load(std::sync::atomic::Ordering::Relaxed));
+				let sent_since = self.sent.map(|prev| sent_now.saturating_sub(prev)).unwrap_or(0);
+				self.sent = Some(sent_now);
+				if self.padding.is_none()
+					&& let Some(bytes) = Self::padding_bytes(target, sent_since, Self::PROBE_INTERVAL)
+				{
+					let mut session = self.shared.session.clone();
+					match Self::poll_pad(&mut session, self.shared.version, &mut cx, bytes) {
+						Poll::Ready(Ok(writer)) => self.padding = Some((writer, false)),
+						Poll::Ready(Err(err)) => tracing::debug!(%err, "could not open a padding stream"),
+						// No stream credit this tick: the window is the bound.
+						Poll::Pending => {}
+					}
+				}
+			}
 
 			// The two fields are independent on the wire, each using 0 for unknown,
 			// so a transport that exposes only one still has something to report.
@@ -516,6 +676,21 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 				}
 				AnnounceState::Run { origin, announced, run } => {
 					let stream = self.stream.as_mut().expect("stream present");
+					// A moved egress price re-prices every live advertisement before more
+					// updates are streamed. Poll until Pending: only a Pending poll leaves
+					// the waiter registered for the next move.
+					loop {
+						let moved = self.shared.egress.poll(waiter, |price| match **price != run.egress {
+							true => Poll::Ready(()),
+							false => Poll::Pending,
+						});
+						let Poll::Ready(price) = moved else { break };
+						let price = *price;
+						if let Err(err) = run.reprice(stream, price) {
+							self.stream.take().expect("stream present").writer.abort(&err);
+							return Poll::Ready(Ok(()));
+						}
+					}
 					let res = ready!(run.poll(stream, origin, announced, waiter));
 					if let Err(err) = res {
 						match &err {
@@ -560,7 +735,8 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 			Err(_) => origin,
 		};
 		let announced = origin.announced();
-		let run = AnnounceRun::new(prefix, self.shared.self_origin, self.shared.version);
+		let mut run = AnnounceRun::new(prefix, self.shared.self_origin, self.shared.version);
+		run.egress = *self.shared.egress.read();
 		self.state = AnnounceState::Run { origin, announced, run };
 	}
 }
@@ -577,9 +753,20 @@ struct AnnounceRun {
 	// were never seen by the peer).
 	next_announce_id: u64,
 	// The routes the peer currently holds, keyed by the suffix under the requested
-	// prefix. The value is the announce id on versions that assign them.
-	live: HashMap<crate::PathOwned, Option<u64>>,
+	// prefix.
+	live: HashMap<crate::PathOwned, Live>,
+	// This end's egress price, added to every cost put on the wire. See
+	// `crate::Session::set_egress`.
+	egress: u64,
 	phase: AnnouncePhase,
+}
+
+/// One advertisement the peer holds: its announce id (on versions that assign
+/// them) and the route it was priced from, so a re-price can re-send it.
+struct Live {
+	id: Option<u64>,
+	route: crate::origin::Route,
+	absolute: crate::PathOwned,
 }
 
 enum AnnouncePhase {
@@ -598,8 +785,43 @@ impl AnnounceRun {
 			version,
 			next_announce_id: 0,
 			live: HashMap::new(),
+			egress: 0,
 			phase: AnnouncePhase::Init,
 		}
+	}
+
+	/// Re-price every live advertisement at a new egress price.
+	///
+	/// A restart carries the new cost in place (lite-05 as a duplicate ANNOUNCE,
+	/// lite-06 by id). Older wires carry no cost, or cannot update a live
+	/// advertisement, so the peer keeps what it holds.
+	fn reprice<S: crate::transport::poll::Session>(
+		&mut self,
+		stream: &mut Stream<S, Version>,
+		egress: u64,
+	) -> Result<(), Error> {
+		self.egress = egress;
+		if !self.version.has_route_cost() || !lite::restart_supported(self.version) {
+			return Ok(());
+		}
+		let suffixes: Vec<crate::PathOwned> = self.live.keys().cloned().collect();
+		for suffix in suffixes {
+			let live = &self.live[&suffix];
+			let Some((hops, cost)) = self.outgoing(&live.route, &live.absolute) else {
+				// Unforwardable now means it was unforwardable when it went live.
+				continue;
+			};
+			tracing::debug!(route = %live.absolute, cost = cost.warm, "reprice");
+			match live.id {
+				Some(id) => stream
+					.writer
+					.buffer(&lite::AnnounceBroadcast::Restart { id, hops, cost })?,
+				None => stream
+					.writer
+					.buffer(&lite::AnnounceBroadcast::Active { suffix, hops, cost })?,
+			}
+		}
+		Ok(())
 	}
 
 	/// Where an update travels on this stream: its path relative to the requested
@@ -633,9 +855,10 @@ impl AnnounceRun {
 		}
 
 		// Pre-lite-06 wires carry no cost at all, leaving hop count as the
-		// effective metric exactly as before.
+		// effective metric exactly as before. Our own egress price goes on top,
+		// saturating like every other link charge.
 		let cost = match self.version.has_route_cost() {
-			true => route.cost.clamped(),
+			true => route.cost.charged(self.egress).clamped(),
 			false => crate::origin::Cost::UNKNOWN,
 		};
 		Some((hops, cost))
@@ -658,7 +881,7 @@ impl AnnounceRun {
 		suffix: crate::PathOwned,
 		absolute: &crate::Path,
 	) -> Result<(), Error> {
-		let Some(id) = self.live.remove(&suffix) else {
+		let Some(Live { id, .. }) = self.live.remove(&suffix) else {
 			// Filtered on the way out; the peer never saw it.
 			return Ok(());
 		};
@@ -715,7 +938,7 @@ impl AnnounceRun {
 				// stashing suffix+hops so we can both COUNT them for AnnounceOk and re-send
 				// them afterward. The receiver stamps our origin onto each hop chain, so we
 				// forward the stored chain as-is (no self push here).
-				let mut initial: Vec<(crate::PathOwned, Hops, crate::origin::Cost)> = Vec::new();
+				let mut initial: Vec<(crate::PathOwned, Live, Hops, crate::origin::Cost)> = Vec::new();
 				while let Some(update) = announced.try_next() {
 					let absolute = origin.absolute(&update.path);
 					let suffix = self.suffix(&update);
@@ -726,7 +949,12 @@ impl AnnounceRun {
 						};
 						tracing::debug!(route = %absolute, "announce");
 						initial.retain(|(s, ..)| s != &suffix);
-						initial.push((suffix, hops, cost));
+						let live = Live {
+							id: None,
+							route: update.route.clone(),
+							absolute: absolute.to_owned(),
+						};
+						initial.push((suffix, live, hops, cost));
 					} else {
 						// A potential race: a just-announced route already retracted.
 						tracing::debug!(route = %absolute, "unannounce");
@@ -741,9 +969,9 @@ impl AnnounceRun {
 					active: initial.len() as u64,
 				};
 				stream.writer.buffer(&ok)?;
-				for (suffix, hops, cost) in initial {
-					let id = self.assign_id();
-					self.live.insert(suffix.clone(), id);
+				for (suffix, mut live, hops, cost) in initial {
+					live.id = self.assign_id();
+					self.live.insert(suffix.clone(), live);
 					stream
 						.writer
 						.buffer(&lite::AnnounceBroadcast::Active { suffix, hops, cost })?;
@@ -805,12 +1033,13 @@ impl AnnounceRun {
 			}
 
 			match self.outgoing(&update.route, &absolute) {
-				Some((hops, cost)) => match self.live.get(&suffix) {
+				Some((hops, cost)) => match self.live.get_mut(&suffix) {
 					// A metadata update on a live advertisement: restart it in
 					// place (lite-05 restarts via a duplicate ANNOUNCE).
-					Some(&id) if lite::restart_supported(self.version) => {
+					Some(live) if lite::restart_supported(self.version) => {
 						tracing::debug!(route = %absolute, "reannounce");
-						match id {
+						live.route = update.route.clone();
+						match live.id {
 							Some(id) => stream
 								.writer
 								.buffer(&lite::AnnounceBroadcast::Restart { id, hops, cost })?,
@@ -825,7 +1054,14 @@ impl AnnounceRun {
 					None => {
 						tracing::debug!(route = %absolute, "announce");
 						let id = self.assign_id();
-						self.live.insert(suffix.clone(), id);
+						self.live.insert(
+							suffix.clone(),
+							Live {
+								id,
+								route: update.route.clone(),
+								absolute: absolute.to_owned(),
+							},
+						);
 						stream
 							.writer
 							.buffer(&lite::AnnounceBroadcast::Active { suffix, hops, cost })?;
@@ -1143,6 +1379,7 @@ impl<S: crate::transport::poll::Session> SubscribeServe<S> {
 						id: msg.id,
 						track_name: Arc::from(track.name()),
 						priority: self.shared.priority.clone(),
+						served: self.shared.served.clone(),
 						track_priority: track_priority_tx.consume(),
 						track_priority_seen: msg.priority,
 						version: self.shared.version,
@@ -1717,6 +1954,8 @@ mod announce_test {
 		origin: origin::Producer,
 		/// The initial announcement; drop to retract, update to restart.
 		announcement: crate::model::AnnounceProducer,
+		/// This end's egress price; write it to re-price the live advertisements.
+		egress: kio::Shared<u64>,
 		wire: Wire,
 		task: tokio::task::JoinHandle<Result<(), Error>>,
 	}
@@ -1752,10 +1991,23 @@ mod announce_test {
 			writer: Writer::new(SinkSend::new(log), VERSION),
 			reader: Reader::new(PendingRecv, VERSION),
 		};
-		let task = tokio::spawn(async move {
-			let mut announced = consumer.announced();
-			let self_origin = *consumer;
-			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, "", self_origin, VERSION).await
+		let egress = kio::Shared::new(0);
+		let task = tokio::spawn({
+			let egress = egress.clone();
+			async move {
+				let mut announced = consumer.announced();
+				let self_origin = *consumer;
+				TestPublisher::run_announce_priced(
+					&mut stream,
+					&consumer,
+					&mut announced,
+					"",
+					self_origin,
+					VERSION,
+					egress,
+				)
+				.await
+			}
 		});
 		settle().await;
 
@@ -1773,9 +2025,88 @@ mod announce_test {
 		Harness {
 			origin,
 			announcement,
+			egress,
 			wire,
 			task,
 		}
+	}
+
+	/// Pricing our egress restarts every live advertisement at the route cost plus
+	/// the price, keeps its id, and prices later announces and restarts the same
+	/// way. An unchanged price is quiet.
+	#[tokio::test(start_paused = true)]
+	async fn egress_reprices_live_advertisements() {
+		let mut h = harness().await;
+
+		*h.egress.lock() = 5;
+		settle().await;
+		match h.wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::Restart { id: 0, hops, cost }] => {
+				assert_eq!(hops, &pub_hops());
+				assert_eq!(*cost, crate::origin::Cost::new(12));
+			}
+			other => panic!("expected a repriced restart, got {other:?}"),
+		}
+
+		// A second move with nothing else waking the loop re-prices too: the
+		// poll that saw the first move registered no waiter.
+		*h.egress.lock() = 7;
+		settle().await;
+		match h.wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::Restart { id: 0, cost, .. }] => {
+				assert_eq!(*cost, crate::origin::Cost::new(14));
+			}
+			other => panic!("expected a second repriced restart, got {other:?}"),
+		}
+
+		// A route update after the re-price still carries the price.
+		h.announcement
+			.update(crate::origin::Route::default().with_hops(pub_hops()).with_cost(3))
+			.unwrap();
+		settle().await;
+		match h.wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::Restart { id: 0, cost, .. }] => {
+				assert_eq!(*cost, crate::origin::Cost::new(10));
+			}
+			other => panic!("expected a priced restart, got {other:?}"),
+		}
+
+		// So does a fresh announce.
+		let _mic = h
+			.origin
+			.announce(
+				"mic",
+				crate::origin::Route::default().with_hops(pub_hops()).with_cost(1),
+			)
+			.unwrap();
+		settle().await;
+		match h.wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::Active { suffix, cost, .. }] => {
+				assert_eq!(suffix.as_str(), "mic");
+				assert_eq!(*cost, crate::origin::Cost::new(8));
+			}
+			other => panic!("expected a priced announce, got {other:?}"),
+		}
+
+		// Writing the same price again is not a move.
+		*h.egress.lock() = 7;
+		settle().await;
+		h.assert_idle();
+
+		// Saturation: an absurd price ranks last rather than wrapping to best.
+		*h.egress.lock() = u64::MAX;
+		settle().await;
+		let restarts = h.wire.take_announces();
+		assert_eq!(restarts.len(), 2, "both live advertisements re-price: {restarts:?}");
+		for restart in restarts {
+			match restart {
+				lite::AnnounceBroadcast::Restart { cost, .. } => {
+					assert_eq!(cost, crate::origin::Cost::MAX);
+				}
+				other => panic!("expected a restart, got {other:?}"),
+			}
+		}
+		h.assert_idle();
 	}
 
 	/// A live announce goes out as an Active with a fresh id; its retraction
@@ -2125,6 +2456,7 @@ struct Subscription<S: crate::transport::poll::Session> {
 	id: u64,
 	track_name: Arc<str>,
 	priority: PriorityQueue,
+	served: Arc<crate::session::Served>,
 	track_priority: kio::Consumer<u8>,
 	/// Last track priority observed by this clone, so a change only fires once.
 	track_priority_seen: u8,
@@ -2329,6 +2661,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 
 						let frame_start = group.index();
 						tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "serving group");
+						self.ctx.served.group();
 
 						// Use the latest priority for new groups so SUBSCRIBE_UPDATE applies to them too.
 						let current_priority = self.ctx.track_priority_current();
@@ -2530,7 +2863,10 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 								}
 							} else if let Some(pending) = frame {
 								match pending.poll_read_chunk(waiter) {
-									Poll::Ready(Ok(Some(next))) => *chunk = Some(next),
+									Poll::Ready(Ok(Some(next))) => {
+										self.ctx.served.bytes(next.len());
+										*chunk = Some(next);
+									}
 									Poll::Ready(Ok(None)) => *frame = None,
 									Poll::Ready(Err(err)) => break 'serve Err(err),
 									Poll::Pending => return Poll::Pending,
@@ -2549,6 +2885,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 								}
 								let payload = std::mem::take(&mut batched.payload);
 								if !payload.is_empty() {
+									self.ctx.served.bytes(payload.len());
 									*chunk = Some(payload);
 								}
 								*batch_pos += 1;
@@ -2758,6 +3095,7 @@ mod serve_group_test {
 
 		let track_priority = kio::Producer::new(0u8);
 		let subscription = Subscription {
+			served: Default::default(),
 			session,
 			id: 0,
 			track_name: "test".into(),
@@ -2798,6 +3136,7 @@ mod serve_group_test {
 		let log = session.log.clone();
 		let track_priority = kio::Producer::new(0u8);
 		let subscription = Subscription {
+			served: Default::default(),
 			session,
 			id: 0,
 			track_name: "test".into(),
@@ -2842,6 +3181,7 @@ mod serve_group_test {
 		let log = session.log.clone();
 		let track_priority = kio::Producer::new(0u8);
 		let subscription = Subscription {
+			served: Default::default(),
 			session,
 			id: 0,
 			track_name: "test".into(),
@@ -2904,6 +3244,7 @@ mod serve_group_test {
 		let session = SinkSession::gated_open_uni(gate.consume());
 		let track_priority = kio::Producer::new(0u8);
 		let subscription = Subscription {
+			served: Default::default(),
 			session,
 			id: 0,
 			track_name: "test".into(),
@@ -2973,6 +3314,7 @@ mod serve_group_test {
 
 		let track_priority = kio::Producer::new(0u8);
 		let subscription = Subscription {
+			served: Default::default(),
 			session,
 			id: 0,
 			track_name: "test".into(),
@@ -3056,6 +3398,9 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: Some(assigned),
+			egress: kio::Shared::new(0),
+			pads: false,
+			served: Default::default(),
 		});
 
 		let serving = kio::wait(|waiter| publisher.shared.poll_serving_origin(waiter)).await;
@@ -3158,6 +3503,9 @@ mod tests {
 			peer_setup: crate::lite::PeerSetup::default(),
 			goaway,
 			peer_hop: None,
+			egress: kio::Shared::new(0),
+			pads: false,
+			served: Default::default(),
 		});
 		ProbeServe::new(publisher.shared.clone(), publisher.runtime.clone(), stream)
 	}
@@ -3200,6 +3548,61 @@ mod tests {
 		assert_eq!(probes.len(), 1, "expected exactly one report");
 		assert_eq!(probes[0].rtt, Some(40));
 		assert_eq!(probes[0].bitrate, None, "unknown bitrate, not a measured zero");
+	}
+
+	/// A subscriber's target above what the transport sent gets padding streams
+	/// behind every other stream on a wire that has them, and nothing on one that
+	/// does not, or when we advertised Report alone.
+	#[tokio::test(start_paused = true)]
+	async fn pads_toward_the_subscribers_target() {
+		async fn padding_after_two_ticks(version: Version, pads: bool) -> (Vec<u8>, usize) {
+			// The subscriber asks for 800 kbit/s: 10 KB a tick.
+			let mut script = Vec::new();
+			lite::Probe {
+				bitrate: Some(800_000),
+				rtt: None,
+			}
+			.encode(&mut script, version)
+			.unwrap();
+			let mut session = crate::lite::test_transport::ScriptedSession::new(script);
+			let log = session.log.clone();
+			let stream = Stream::open(&mut session, version).await.unwrap();
+
+			let origin = Hop::random().produce();
+			let (_, goaway) = crate::goaway::Handle::new(true);
+			let publisher = Publisher::new(PublisherConfig {
+				runtime: TestRuntime::new(),
+				session,
+				origin: origin.consume(),
+				version,
+				peer_setup: crate::lite::PeerSetup::default(),
+				goaway,
+				peer_hop: None,
+				egress: kio::Shared::new(0),
+				served: Default::default(),
+				pads,
+			});
+			let mut server = ProbeServe::new(publisher.shared.clone(), TestRuntime::new(), stream);
+			let mut run = std::pin::pin!(kio::wait(|waiter| server.poll_probe(waiter)));
+			for _ in 0..3 {
+				assert!(futures::poll!(run.as_mut()).is_pending());
+				tokio::time::sleep(Duration::from_millis(100)).await;
+			}
+			let priorities = log.priorities();
+			let written = log.writes.lock().unwrap().len();
+			(priorities, written)
+		}
+
+		let (priorities, written) = padding_after_two_ticks(Version::Lite06Wip, true).await;
+		assert!(
+			priorities.contains(&0),
+			"padding goes out at the lowest send order: {priorities:?}"
+		);
+		assert!(written >= 10_000, "a tick's worth of padding was written: {written}");
+
+		let (priorities, written) = padding_after_two_ticks(Version::Lite06Wip, false).await;
+		assert!(!priorities.contains(&0), "Report alone never pads: {priorities:?}");
+		assert!(written < 1_000, "only reports were written: {written}");
 	}
 
 	/// The mirror case: a send rate with no RTT still reports.

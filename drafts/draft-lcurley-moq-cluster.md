@@ -56,7 +56,7 @@ Relays that simply forward PUBLISH_NAMESPACE to each other break down: advertise
 
 This extension adds two parameters to PUBLISH_NAMESPACE and NAMESPACE.
 HOP_PATH lists every endpoint an advertisement has passed through, starting with the original publisher, which breaks loops and lets paths be compared.
-ROUTE_COST is the accumulated price of the path: the publisher seeds it, and each hop adds the RELAY_COST its upstream declared at setup, so an unpriced mesh ranks by hop count.
+ROUTE_COST is the accumulated price of the path: the publisher seeds it, and each hop adds the RELAY_COST its upstream declared at setup, or nothing when that upstream declared PRICED and folds its own price in, so an unpriced mesh ranks by hop count.
 A relay that already carries a namespace advertises a lower cost, steering subscribers toward its warm copy.
 
 Each endpoint also declares its own Hop ID at setup, so a peer can leave it out of every path it advertises or serves to it, even across several connections between the same two relays.
@@ -99,6 +99,23 @@ A declared cost is an assertion, not an instruction: a receiver MAY charge a loc
 The cost is one dimensionless integer, as in every deployed routing metric: RIP's hop count ({{?RFC2453, Section 3.5}}), OSPF's interface cost, and IS-IS's default metric, whose delay, expense, and error metrics went unimplemented ({{?RFC5305, Section 3}}), as did OSPF's per-type-of-service metrics ({{?RFC2178, Appendix G.10}}).
 A deployment that weighs latency, hop count, and price folds them into the one value.
 Like BGP's MULTI_EXIT_DISC ({{?RFC4271, Section 5.1.4}}), the value only means something within the deployment that chose its units, so a trust boundary clamps or replaces it ({{security}}).
+
+## Priced {#priced}
+An endpoint MAY declare instead that it folds the price of its own egress into the ROUTE_COST of every advertisement it forwards:
+
+~~~
+PRICED Setup Option {
+  Option Key (vi64) = 0x40B5E
+  Option Value (vi64)
+}
+~~~
+
+Any non-zero value sets it and 0 is equivalent to omitting it.
+A receiver that also received RELAY_COST from the same endpoint ignores PRICED: a declared cost prices the link outright.
+Otherwise the receiver adds nothing for that link ({{accumulating}}) instead of the default of 1, and MAY still charge a locally configured value.
+
+This is how a relay that measures its links prices them: the measured value changes over the life of the session, and the sender carries each change as a REQUEST_UPDATE of the advertisements it forwards ({{updating}}) rather than a new SETUP.
+Both endpoints send it independently and a relay MUST NOT forward it.
 
 
 # Hop IDs {#hop-ids}
@@ -212,6 +229,7 @@ The identity a receiver assigned that upstream ({{assigned}}) is local selection
 
 ## Accumulating Cost {#accumulating}
 Before forwarding or acting on an advertisement, a relay MUST add the RELAY_COST the sender declared ({{relay-cost}}) to the ROUTE_COST it received.
+A sender that declared PRICED and no RELAY_COST ({{priced}}) has already folded its egress into the ROUTE_COST it sent, so the relay adds nothing for that link.
 The addition MUST saturate rather than wrap, so an absurd value ranks last instead of overflowing to best.
 
 A relay actively carrying the namespace (a live subscription exists for at least one of its tracks) SHOULD advertise 0 instead: its ingress is already paid for, so another subscriber costs only the links below it.
@@ -294,12 +312,13 @@ High, distinctive values are requested to avoid the low ranges reserved by {{moq
 
 ## MOQT Setup Options
 
-This document requests two registrations in the "MOQT Setup Options" registry ({{moqt}} Section 15.4), whose policy is Specification Required.
+This document requests three registrations in the "MOQT Setup Options" registry ({{moqt}} Section 15.4), whose policy is Specification Required.
 
 | Value   | Name       | Reference     |
 |:--------|:-----------|:--------------|
 | 0x40B54 | HOP_ID     | This Document |
 | 0x40B56 | RELAY_COST | This Document |
+| 0x40B5E | PRICED     | This Document |
 
 ## MOQT Message Parameters
 
@@ -311,7 +330,7 @@ Both are carried in PUBLISH_NAMESPACE, in REQUEST_UPDATE of a PUBLISH_NAMESPACE 
 | 0x40B57 | HOP_PATH    | PUBLISH_NAMESPACE, REQUEST_UPDATE, NAMESPACE | This Document |
 | 0x40B58 | ROUTE_COST  | PUBLISH_NAMESPACE, REQUEST_UPDATE, NAMESPACE | This Document |
 
-The Key-Value-Pair parity is load-bearing: HOP_PATH is odd, so its value is a length-prefixed byte string, while HOP_ID, RELAY_COST, and ROUTE_COST are even, so their values are bare varints.
+The Key-Value-Pair parity is load-bearing: HOP_PATH is odd, so its value is a length-prefixed byte string, while HOP_ID, RELAY_COST, PRICED, and ROUTE_COST are even, so their values are bare varints.
 
 
 --- back
@@ -326,4 +345,5 @@ The Key-Value-Pair parity is load-bearing: HOP_PATH is odd, so its value is a le
 - A PUBLISH_NAMESPACE is updated with REQUEST_UPDATE on its request stream instead of a repeated PUBLISH_NAMESPACE; HOP_PATH and ROUTE_COST are registered for REQUEST_UPDATE. A NAMESPACE is still re-sent on its stream.
 - A session advertises a namespace at most once and a subscription is served from one source at a time. A receiver chooses among several publishers of one namespace; moving between them is a discontinuity unless they share a Hop ID.
 - Named the routing protocols whose single per-direction metric RELAY_COST follows.
+- Added the PRICED Setup Option: an endpoint that measures its links folds the price into the ROUTE_COST it forwards, so the receiver adds nothing and a repriced link travels as a REQUEST_UPDATE rather than a new SETUP.
 - Path selection consults the most specific advertisement first, the longest prefix; an advertisement is always a prefix, and a request beneath it that the advertiser will not serve is refused ({{I-D.lcurley-moq-pattern}}). Standby seeds are bounded by deployment limits.

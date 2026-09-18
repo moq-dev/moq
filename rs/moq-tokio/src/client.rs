@@ -257,6 +257,13 @@ impl Client {
 		self
 	}
 
+	/// Declare that this end prices its own egress into the routes it forwards;
+	/// see [`moq_net::Client::with_priced`].
+	pub fn with_priced(mut self) -> Self {
+		self.moq = self.moq.with_priced();
+		self
+	}
+
 	/// Assign an origin (hop) id to the peers this client dials, used whenever a
 	/// peer doesn't declare one itself; see [`moq_net::Client::with_peer_hop`].
 	pub fn with_peer_hop(mut self, hop: moq_net::Hop) -> Self {

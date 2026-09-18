@@ -50,6 +50,11 @@ pub struct Config<S: crate::transport::poll::Session, R: crate::runtime::Runtime
 	/// cost at all, so nothing is charged and their routes rank on hop count alone.
 	pub cost: Option<u64>,
 
+	/// Declare PRICED: we fold our own egress price ([`crate::Session::set_egress`])
+	/// into every ROUTE_COST we forward, so the peer charges nothing more for this
+	/// direction. Ignored where `cost` is declared.
+	pub priced: bool,
+
 	pub version: Version,
 
 	/// The request path we advertise in our SETUP (draft-17+ clients on URL-less
@@ -66,9 +71,15 @@ pub struct Config<S: crate::transport::poll::Session, R: crate::runtime::Runtime
 	pub peer_declared: Option<peer::Peer>,
 }
 
-pub fn start<S, R>(
-	config: Config<S, R>,
-) -> Result<(MaybeSendBox<'static, Result<(), Error>>, crate::goaway::Handle), Error>
+/// What [`start`] hands the public session: the driver to run, the GOAWAY
+/// halves, and the link state it prices and inspects.
+pub type Started = (
+	MaybeSendBox<'static, Result<(), Error>>,
+	crate::goaway::Handle,
+	crate::session::Link,
+);
+
+pub fn start<S, R>(config: Config<S, R>) -> Result<Started, Error>
 where
 	S: crate::transport::poll::Boxable,
 	R: crate::runtime::Runtime + MaybeSend + MaybeSync + 'static,
@@ -84,6 +95,7 @@ where
 		subscribe,
 		peer_hop,
 		cost,
+		priced,
 		version,
 		path,
 		peer_setup_stream,
@@ -95,6 +107,22 @@ where
 	// A moq-transport client MUST send an empty New Session URI: it cannot tell a
 	// server to open connections (draft-19 sect 10.4).
 	let (goaway_handle, goaway) = crate::goaway::Handle::new(!client);
+
+	// What the peer declared in its SETUP. Seeded now when that stream was already
+	// read (the legacy handshake, or a gated server accept), and filled by the uni
+	// loop otherwise.
+	let peer_setup = peer::PeerSetup::default();
+	let setup_read = peer_declared.is_some();
+	match peer_declared {
+		Some(declared) => peer_setup.set(declared),
+		// A legacy caller that passed nothing (our own tests, and the lite paths):
+		// settle the slot rather than leave the announce loops waiting on a value
+		// that is never coming.
+		None if !cluster::supported(version) => peer_setup.set(peer::Peer::default()),
+		None => {}
+	}
+	let link = crate::session::Link::new(crate::session::PeerSlot::Ietf(peer_setup.clone()), None);
+	let egress = link.egress.clone();
 
 	let driver = async move {
 		// Our own Hop ID, taken from whichever origin the caller actually supplied so
@@ -109,20 +137,6 @@ where
 		// nothing, and an empty subscribe origin issues no SUBSCRIBE_NAMESPACE.
 		let publish = publish.unwrap_or_else(|| origin::Producer::empty(Hop::random()).consume());
 		let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()));
-
-		// What the peer declared in its SETUP. Seeded now when that stream was already
-		// read (the legacy handshake, or a gated server accept), and filled by the uni
-		// loop otherwise.
-		let peer_setup = peer::PeerSetup::default();
-		let setup_read = peer_declared.is_some();
-		match peer_declared {
-			Some(declared) => peer_setup.set(declared),
-			// A legacy caller that passed nothing (our own tests, and the lite paths):
-			// settle the slot rather than leave the announce loops waiting on a value
-			// that is never coming.
-			None if !cluster::supported(version) => peer_setup.set(peer::Peer::default()),
-			None => {}
-		}
 
 		let res = match version {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
@@ -141,6 +155,7 @@ where
 					control.clone(),
 					peer_hop,
 					peer_setup.clone(),
+					egress.clone(),
 					version,
 				);
 				let (tasks, mut task_set) = TaskSet::new();
@@ -276,7 +291,9 @@ where
 					let session = session.clone();
 					let goaway = goaway.clone();
 					async move {
-						if let Err(err) = run_setup(runtime, session, version, path, self_origin, cost, goaway).await {
+						if let Err(err) =
+							run_setup(runtime, session, version, path, self_origin, cost, priced, goaway).await
+						{
 							tracing::warn!(%err, "setup send error");
 						}
 						std::future::pending::<()>().await;
@@ -291,6 +308,7 @@ where
 					control.clone(),
 					peer_hop,
 					peer_setup.clone(),
+					egress,
 					version,
 				);
 				let (tasks, mut task_set) = TaskSet::new();
@@ -420,7 +438,7 @@ where
 	}
 	.maybe_boxed();
 
-	Ok((driver, goaway_handle))
+	Ok((driver, goaway_handle, link))
 }
 
 /// What a peer's SETUP told us, beyond the stream it arrived on.
@@ -511,9 +529,10 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 /// also our GOAWAY channel, so a fired drain trigger encodes the GOAWAY here.
 ///
 /// `path` is the request path we advertise (clients on URL-less transports); a
-/// server passes `None`. `self_origin` and `cost` are the MoQ Cluster options, which
-/// declare our identity and (client-only) what this link costs to cross. The MoQ Solicit
-/// declaration is unconditional, so it takes no argument.
+/// server passes `None`. `self_origin`, `cost`, and `priced` are the MoQ Cluster options,
+/// which declare our identity and how this link is priced. The MoQ Solicit declaration
+/// is unconditional, so it takes no argument.
+#[allow(clippy::too_many_arguments)]
 async fn run_setup<S: crate::transport::poll::Session, R: crate::runtime::Runtime>(
 	runtime: R,
 	mut session: S,
@@ -521,6 +540,7 @@ async fn run_setup<S: crate::transport::poll::Session, R: crate::runtime::Runtim
 	path: Option<String>,
 	self_origin: Hop,
 	cost: Option<u64>,
+	priced: bool,
 	goaway: crate::goaway::Protocol,
 ) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
@@ -533,7 +553,7 @@ async fn run_setup<S: crate::transport::poll::Session, R: crate::runtime::Runtim
 	if let Some(path) = path {
 		parameters.set_bytes(ietf::ParameterBytes::Path, path.into_bytes());
 	}
-	cluster::peer_into_setup(&mut parameters, self_origin, cost, version);
+	cluster::peer_into_setup(&mut parameters, self_origin, cost, priced, version);
 	solicit::into_setup(&mut parameters, version);
 	let parameters = parameters.encode_bytes(version)?;
 
@@ -933,7 +953,7 @@ mod tests {
 		let session = crate::lite::test_transport::ScriptedSession::new(namespace_without_hop_path(VERSION).await);
 		let log = session.log.clone();
 
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _link) = start(Config {
 			runtime: TestRuntime::new(),
 			session,
 			setup: None,
@@ -943,6 +963,7 @@ mod tests {
 			subscribe: Some(origin),
 			peer_hop: None,
 			cost: None,
+			priced: false,
 			version: VERSION,
 			path: None,
 			peer_setup_stream: None,
@@ -952,6 +973,7 @@ mod tests {
 				cluster: cluster::Peer {
 					hop: Some(crate::Hop::new(2).unwrap()),
 					cost: None,
+					priced: false,
 				},
 				..Default::default()
 			}),
@@ -992,7 +1014,7 @@ mod tests {
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
 		let log = session.log.clone();
 
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _link) = start(Config {
 			runtime: TestRuntime::new(),
 			session,
 			setup: None,
@@ -1002,6 +1024,7 @@ mod tests {
 			subscribe: Some(scoped),
 			peer_hop: None,
 			cost: None,
+			priced: false,
 			version: Version::Draft18,
 			path: None,
 			peer_setup_stream: None,
@@ -1042,7 +1065,7 @@ mod tests {
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
 		let log = session.log.clone();
 
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _link) = start(Config {
 			runtime: TestRuntime::new(),
 			session,
 			setup: None,
@@ -1052,6 +1075,7 @@ mod tests {
 			subscribe: None,
 			peer_hop: None,
 			cost: None,
+			priced: false,
 			version: Version::Draft18,
 			path: None,
 			peer_setup_stream: None,
@@ -1149,7 +1173,7 @@ mod tests {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let log = session.log.clone();
 
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _link) = start(Config {
 			runtime: TestRuntime::new(),
 			session,
 			setup: None,
@@ -1159,6 +1183,7 @@ mod tests {
 			subscribe: Some(origin),
 			peer_hop: None,
 			cost: None,
+			priced: false,
 			version: VERSION,
 			path: None,
 			peer_setup_stream: None,
@@ -1341,7 +1366,7 @@ mod tests {
 			.await
 			.expect("open the control stream");
 
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _link) = start(Config {
 			runtime: TestRuntime::new(),
 			session,
 			setup: Some(setup),
@@ -1351,6 +1376,7 @@ mod tests {
 			subscribe: Some(origin),
 			peer_hop: None,
 			cost: None,
+			priced: false,
 			version: VERSION,
 			path: None,
 			peer_setup_stream: None,
