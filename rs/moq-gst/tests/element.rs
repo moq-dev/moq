@@ -1491,8 +1491,8 @@ fn connect_failure_retries_without_erroring() {
 	let msg = bus.timed_pop_filtered(gst::ClockTime::from_seconds(3), &[gst::MessageType::Error]);
 	let connected = sink.property::<bool>("connected");
 	let status = sink.property::<gstmoq::ConnectionStatus>("status");
-	let send_bitrate = sink.property::<u64>("estimated-send-bitrate");
-	let recv_bitrate = sink.property::<u64>("estimated-recv-bitrate");
+	let send_bitrate = sink.property::<u64>("estimated-send-rate");
+	let recv_bitrate = sink.property::<u64>("estimated-recv-rate");
 	let _ = pipeline.set_state(gst::State::Null);
 
 	assert!(

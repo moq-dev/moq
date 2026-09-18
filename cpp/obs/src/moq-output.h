@@ -31,10 +31,10 @@ public:
 		int reconnects = 0;
 		bool rtt_valid = false;
 		double rtt_ms = 0;
-		bool send_rate_valid = false;
-		double send_rate_bps = 0;
-		bool recv_rate_valid = false;
-		double recv_rate_bps = 0;
+		bool estimated_send_rate_valid = false;
+		double estimated_send_rate_bps = 0;
+		bool estimated_recv_rate_valid = false;
+		double estimated_recv_rate_bps = 0;
 		bool bytes_sent_valid = false;
 		uint64_t bytes_sent = 0;
 		bool loss_valid = false;

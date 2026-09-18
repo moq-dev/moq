@@ -52,7 +52,7 @@ Each `sink_%u` request pad is one track. Pad properties: `track` names it
 `track-status`/`track-error` report its lifecycle. Element properties:
 `url`, `broadcast`, `tls-disable-verify`, `quic-idle-timeout`,
 `quic-keep-alive`, and read-only `status`, `connected`, `moq-version`, and
-`estimated-send-bitrate`, `estimated-recv-bitrate`, `connection-stats`, and
+`estimated-send-rate`, `estimated-recv-rate`, `connection-stats`, and
 `sessions`. The sink reconnects for as long as the pipeline runs and only
 reports `failed` on an answer redialing can't change, such as a rejected token.
 

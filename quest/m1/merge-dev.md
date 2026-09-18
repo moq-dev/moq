@@ -46,7 +46,6 @@ additive quest that builds on dev-only code start on main afterwards from
 
 ## Required
 
-- [Rate estimate names](/quest/m1/api-rate-estimate-names.md) - the estimates carry one name on the C ABI and every binding
 - [moq-tokio names](/quest/m1/api-tokio-names.md) - moq-tokio's first release under this name has settled names
 - [m0](/quest/m0/README.md) - every release blocker lands or is punted before the merge
 

@@ -348,10 +348,12 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 	snapshot.reconnects = GetReconnectCount();
 	snapshot.rtt_valid = raw.rtt_valid;
 	snapshot.rtt_ms = raw.rtt_valid ? static_cast<double>(raw.rtt_us) / 1000.0 : 0;
-	snapshot.send_rate_valid = raw.send_rate_valid;
-	snapshot.send_rate_bps = raw.send_rate_valid ? static_cast<double>(raw.send_rate_bps) : 0;
-	snapshot.recv_rate_valid = raw.recv_rate_valid;
-	snapshot.recv_rate_bps = raw.recv_rate_valid ? static_cast<double>(raw.recv_rate_bps) : 0;
+	snapshot.estimated_send_rate_valid = raw.estimated_send_rate_valid;
+	snapshot.estimated_send_rate_bps =
+		raw.estimated_send_rate_valid ? static_cast<double>(raw.estimated_send_rate_bps) : 0;
+	snapshot.estimated_recv_rate_valid = raw.estimated_recv_rate_valid;
+	snapshot.estimated_recv_rate_bps =
+		raw.estimated_recv_rate_valid ? static_cast<double>(raw.estimated_recv_rate_bps) : 0;
 	snapshot.bytes_sent_valid = raw.bytes_sent_valid;
 	snapshot.bytes_sent = raw.bytes_sent_valid ? raw.bytes_sent : 0;
 	if (raw.packets_sent_valid && raw.packets_lost_valid && raw.packets_sent > 0) {

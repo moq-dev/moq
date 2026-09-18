@@ -1268,8 +1268,8 @@ void MoQDock::UpdateStatus()
 
 	{
 		rttSpark->Push(stats.rtt_valid, stats.rtt_ms);
-		sendSpark->Push(stats.send_rate_valid, stats.send_rate_bps);
-		recvSpark->Push(stats.recv_rate_valid, stats.recv_rate_bps);
+		sendSpark->Push(stats.estimated_send_rate_valid, stats.estimated_send_rate_bps);
+		recvSpark->Push(stats.estimated_recv_rate_valid, stats.estimated_recv_rate_bps);
 		lossSpark->Push(stats.loss_valid, stats.loss_pct);
 		sentSpark->Push(stats.bytes_sent_valid, static_cast<double>(stats.bytes_sent));
 	}

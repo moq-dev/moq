@@ -212,12 +212,12 @@ impl ObjectImpl for MoqSink {
 					.blurb("The negotiated MoQ protocol version, null when disconnected")
 					.read_only()
 					.build(),
-				glib::ParamSpecUInt64::builder("estimated-send-bitrate")
+				glib::ParamSpecUInt64::builder("estimated-send-rate")
 					.nick("Estimated send bitrate")
 					.blurb("Estimated send bitrate in bits per second (congestion controller), 0 when unavailable")
 					.read_only()
 					.build(),
-				glib::ParamSpecUInt64::builder("estimated-recv-bitrate")
+				glib::ParamSpecUInt64::builder("estimated-recv-rate")
 					.nick("Estimated receive bitrate")
 					.blurb("Estimated receive bitrate in bits per second, 0 when unavailable")
 					.read_only()
@@ -272,8 +272,8 @@ impl ObjectImpl for MoqSink {
 			"status"
 			| "connected"
 			| "moq-version"
-			| "estimated-send-bitrate"
-			| "estimated-recv-bitrate"
+			| "estimated-send-rate"
+			| "estimated-recv-rate"
 			| "connection-stats"
 			| "sessions" => {
 				let control = self.control.lock().unwrap();
@@ -282,8 +282,8 @@ impl ObjectImpl for MoqSink {
 					"status" => session.map(|s| s.status().status()).unwrap_or_default().to_value(),
 					"connected" => session.is_some_and(|s| s.status().connected()).to_value(),
 					"moq-version" => session.and_then(|s| s.status().version()).to_value(),
-					"estimated-send-bitrate" => session.map(|s| s.send_bitrate()).unwrap_or(0).to_value(),
-					"estimated-recv-bitrate" => session.map(|s| s.recv_bitrate()).unwrap_or(0).to_value(),
+					"estimated-send-rate" => session.map(|s| s.estimated_send_rate()).unwrap_or(0).to_value(),
+					"estimated-recv-rate" => session.map(|s| s.estimated_recv_rate()).unwrap_or(0).to_value(),
 					"connection-stats" => session.and_then(Session::connection_stats).to_value(),
 					"sessions" => sessions_structure(session.map(Session::presence).unwrap_or_default()).to_value(),
 					_ => unreachable!(),
@@ -625,8 +625,8 @@ impl MoqSink {
 				"status",
 				"connected",
 				"moq-version",
-				"estimated-send-bitrate",
-				"estimated-recv-bitrate",
+				"estimated-send-rate",
+				"estimated-recv-rate",
 				"connection-stats",
 				"sessions",
 			],
@@ -1453,8 +1453,8 @@ mod tests {
 			"status",
 			"connected",
 			"moq-version",
-			"estimated-send-bitrate",
-			"estimated-recv-bitrate",
+			"estimated-send-rate",
+			"estimated-recv-rate",
 			"connection-stats",
 			"sessions",
 		] {

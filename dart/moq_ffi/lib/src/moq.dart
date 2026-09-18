@@ -1772,8 +1772,8 @@ class FfiConverterMoqBackoff {
 
 class MoqConnectionStats {
   final int? rttUs;
-  final int? sendRateBps;
-  final int? recvRateBps;
+  final int? estimatedSendRateBps;
+  final int? estimatedRecvRateBps;
   final int? bytesSent;
   final int? bytesReceived;
   final int? bytesLost;
@@ -1782,8 +1782,8 @@ class MoqConnectionStats {
   final int? packetsLost;
   MoqConnectionStats({
     this.rttUs,
-    this.sendRateBps,
-    this.recvRateBps,
+    this.estimatedSendRateBps,
+    this.estimatedRecvRateBps,
     this.bytesSent,
     this.bytesReceived,
     this.bytesLost,
@@ -1805,16 +1805,16 @@ class FfiConverterMoqConnectionStats {
     );
     final rttUs = rttUs_lifted.value;
     new_offset += rttUs_lifted.bytesRead;
-    final sendRateBps_lifted = FfiConverterOptionalUInt64.read(
+    final estimatedSendRateBps_lifted = FfiConverterOptionalUInt64.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final sendRateBps = sendRateBps_lifted.value;
-    new_offset += sendRateBps_lifted.bytesRead;
-    final recvRateBps_lifted = FfiConverterOptionalUInt64.read(
+    final estimatedSendRateBps = estimatedSendRateBps_lifted.value;
+    new_offset += estimatedSendRateBps_lifted.bytesRead;
+    final estimatedRecvRateBps_lifted = FfiConverterOptionalUInt64.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final recvRateBps = recvRateBps_lifted.value;
-    new_offset += recvRateBps_lifted.bytesRead;
+    final estimatedRecvRateBps = estimatedRecvRateBps_lifted.value;
+    new_offset += estimatedRecvRateBps_lifted.bytesRead;
     final bytesSent_lifted = FfiConverterOptionalUInt64.read(
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -1848,8 +1848,8 @@ class FfiConverterMoqConnectionStats {
     return LiftRetVal(
       MoqConnectionStats(
         rttUs: rttUs,
-        sendRateBps: sendRateBps,
-        recvRateBps: recvRateBps,
+        estimatedSendRateBps: estimatedSendRateBps,
+        estimatedRecvRateBps: estimatedRecvRateBps,
         bytesSent: bytesSent,
         bytesReceived: bytesReceived,
         bytesLost: bytesLost,
@@ -1864,8 +1864,8 @@ class FfiConverterMoqConnectionStats {
   static RustBuffer lower(MoqConnectionStats value) {
     final total_length =
         FfiConverterOptionalUInt64.allocationSize(value.rttUs) +
-        FfiConverterOptionalUInt64.allocationSize(value.sendRateBps) +
-        FfiConverterOptionalUInt64.allocationSize(value.recvRateBps) +
+        FfiConverterOptionalUInt64.allocationSize(value.estimatedSendRateBps) +
+        FfiConverterOptionalUInt64.allocationSize(value.estimatedRecvRateBps) +
         FfiConverterOptionalUInt64.allocationSize(value.bytesSent) +
         FfiConverterOptionalUInt64.allocationSize(value.bytesReceived) +
         FfiConverterOptionalUInt64.allocationSize(value.bytesLost) +
@@ -1885,11 +1885,11 @@ class FfiConverterMoqConnectionStats {
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterOptionalUInt64.write(
-      value.sendRateBps,
+      value.estimatedSendRateBps,
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterOptionalUInt64.write(
-      value.recvRateBps,
+      value.estimatedRecvRateBps,
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterOptionalUInt64.write(
@@ -1921,8 +1921,8 @@ class FfiConverterMoqConnectionStats {
 
   static int allocationSize(MoqConnectionStats value) {
     return FfiConverterOptionalUInt64.allocationSize(value.rttUs) +
-        FfiConverterOptionalUInt64.allocationSize(value.sendRateBps) +
-        FfiConverterOptionalUInt64.allocationSize(value.recvRateBps) +
+        FfiConverterOptionalUInt64.allocationSize(value.estimatedSendRateBps) +
+        FfiConverterOptionalUInt64.allocationSize(value.estimatedRecvRateBps) +
         FfiConverterOptionalUInt64.allocationSize(value.bytesSent) +
         FfiConverterOptionalUInt64.allocationSize(value.bytesReceived) +
         FfiConverterOptionalUInt64.allocationSize(value.bytesLost) +

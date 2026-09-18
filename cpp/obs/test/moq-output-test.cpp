@@ -306,10 +306,10 @@ int32_t moq_session_stats(uint32_t session, moq_connection_stats *dst)
 	if (g_stats_partial.load())
 		return 0;
 
-	dst->send_rate_bps = 2'500'000;
-	dst->send_rate_valid = true;
-	dst->recv_rate_bps = 120'000;
-	dst->recv_rate_valid = true;
+	dst->estimated_send_rate_bps = 2'500'000;
+	dst->estimated_send_rate_valid = true;
+	dst->estimated_recv_rate_bps = 120'000;
+	dst->estimated_recv_rate_valid = true;
 	dst->bytes_sent = 4'000'000;
 	dst->bytes_sent_valid = true;
 	dst->packets_sent = 100;
@@ -788,10 +788,10 @@ int main()
 		CHECK(o.TryGetConnectionStats(&stats));
 		CHECK(stats.rtt_valid);
 		CHECK(stats.rtt_ms > 12.4 && stats.rtt_ms < 12.6);
-		CHECK(stats.send_rate_valid);
-		CHECK(stats.send_rate_bps == 2'500'000.0);
-		CHECK(stats.recv_rate_valid);
-		CHECK(stats.recv_rate_bps == 120'000.0);
+		CHECK(stats.estimated_send_rate_valid);
+		CHECK(stats.estimated_send_rate_bps == 2'500'000.0);
+		CHECK(stats.estimated_recv_rate_valid);
+		CHECK(stats.estimated_recv_rate_bps == 120'000.0);
 		CHECK(stats.bytes_sent_valid);
 		CHECK(stats.bytes_sent == 4'000'000ULL);
 		CHECK(stats.loss_valid);
@@ -823,8 +823,8 @@ int main()
 		g_stats_partial = true;
 		CHECK(o.TryGetConnectionStats(&stats));
 		CHECK(stats.rtt_valid);
-		CHECK(!stats.send_rate_valid);
-		CHECK(!stats.recv_rate_valid);
+		CHECK(!stats.estimated_send_rate_valid);
+		CHECK(!stats.estimated_recv_rate_valid);
 		CHECK(!stats.bytes_sent_valid);
 		CHECK(!stats.loss_valid);
 		CHECK(stats.reconnects == 4);
