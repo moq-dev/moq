@@ -20,14 +20,21 @@ for the files both share, or a generated copy in the packaging script; pick
 whichever `swift build` and Xcode both accept and write the reason down. The
 shared files `import MoqFFI` today; in the shared set that becomes
 `#if canImport(MoqFFINet) import MoqFFINet #else import MoqFFI #endif`, which
-resolves per target since each wrapper depends on exactly one binding. The
-generated `Aliases.swift` names codec types, so it is split the same way.
+resolves per target since each wrapper depends on exactly one binding. `Aliases.swift` names codec types, and `Broadcast.swift` declares
+`subscribeAudio`, `publishAudio`, `publishVideo`, and `setVideoProperties`
+against generated methods the slim binding lacks; those move into codec-only
+files (`Broadcast+Media.swift`, a codec half of `Aliases.swift`) that only
+the `Moq` target compiles. The rule for the split is mechanical: a shared
+file compiles against `MoqFFINet`, so `swift build --product MoqNet` is the
+check.
 
 `release-swift-ffi.yml` (through the reusable release-ffi workflow) builds
 each target twice and stages two xcframework zips; `Package.swift.template`
-gets both `binaryTarget` entries with their checksums. `MoqTests` adds `MoqNet` to
-its dependencies and `SmokeTests` gains a `MoqNet` case that publishes and
-subscribes a raw track.
+gets both `binaryTarget` entries with their checksums. A separate `MoqNetTests`
+target depending only on `MoqNet` publishes and subscribes a raw track; it
+cannot share `MoqTests`, since linking both xcframeworks into one executable
+exports the same UniFFI C symbols twice and would let the full library
+satisfy the slim product's calls.
 
 Public API: additive. No existing product, target, or symbol changes.
 
