@@ -1520,13 +1520,16 @@ fn combined_subscription(subs: &Subscriptions, bound: Option<Duration>, waiter: 
 		if sub.is_closed() {
 			continue;
 		}
-		// Arm the closed waiter explicitly. `poll` below registers on the value
-		// channel only when it returns Pending, so a subscriber that contributes
-		// demand (always the case for the first one) would leave nothing watching
-		// for its departure, and the last one leaving would never wake this poll.
+		// Arm both waiters explicitly. `poll` registers on the value channel only
+		// when it returns Pending, and a subscriber that contributes demand (always
+		// the case for the first one) folds as Ready, so nothing would watch for its
+		// departure or its next update: the last one leaving would never wake this
+		// poll, and a reader lifting the cap it had set would leave the publisher's
+		// upstream parked at that cap for good.
 		let _ = sub.poll_closed(waiter);
-		if let Poll::Ready(Ok(sub)) = sub.poll(waiter, |sub| sub.poll_combined(&combined)) {
-			combined = Some(sub);
+		let _ = sub.poll(waiter, |_| Poll::<()>::Pending);
+		if let Poll::Ready(merged) = sub.read().poll_combined(&combined) {
+			combined = Some(merged);
 		}
 	}
 	clamp_combined(combined, bound)
@@ -3618,6 +3621,40 @@ mod test {
 			woken.load(Ordering::SeqCst),
 			"the last subscriber leaving must wake the aggregate watcher",
 		);
+	}
+
+	#[test]
+	fn widest_subscriber_update_wakes_the_aggregate() {
+		// The value counterpart of the drop above. A subscriber that widens the
+		// fold takes the Ready path too, so its next update registered no waiter.
+		// A relay whose upstream cap came from a downstream reader then never
+		// learned that the reader lifted it, and the groups parked upstream never
+		// resumed: every session stayed up and nothing flowed.
+		use std::sync::atomic::{AtomicBool, Ordering};
+
+		let mut producer = track_producer("test", None);
+		let _narrow = producer.subscribe(Subscription::default().with_group_end(3));
+		let mut wide = producer.subscribe(Subscription::default());
+
+		let woken = Arc::new(AtomicBool::new(false));
+		let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
+
+		assert!(matches!(
+			producer.poll_subscription_changed(&waiter),
+			Poll::Ready(Ok(Some(_)))
+		));
+		assert!(producer.poll_subscription_changed(&waiter).is_pending());
+		assert!(!woken.load(Ordering::SeqCst), "nothing happened yet");
+
+		wide.update(Subscription::default().with_group_end(5)).unwrap();
+		assert!(
+			woken.load(Ordering::SeqCst),
+			"the widest subscriber changing must wake the aggregate watcher",
+		);
+		match producer.poll_subscription_changed(&waiter) {
+			Poll::Ready(Ok(Some(sub))) => assert_eq!(sub.group_end, Some(5)),
+			other => panic!("expected the narrowed aggregate, got {other:?}"),
+		}
 	}
 
 	/// An [`ArcWake`] that just records that it was woken.
