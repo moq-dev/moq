@@ -79,6 +79,14 @@ impl Origin {
 		self.id
 	}
 
+	/// Build an origin from an id read off the wire, where 0 is legal.
+	pub(crate) fn from_wire(id: u64) -> Result<Self, DecodeError> {
+		if id >= 1u64 << 62 {
+			return Err(DecodeError::InvalidValue);
+		}
+		Ok(Self { id })
+	}
+
 	/// Consume this [Origin] to create a producer that carries its id, with an
 	/// unbounded cache pool. Use [`Info::produce`] to configure the pool.
 	pub fn produce(self) -> Producer {
@@ -220,11 +228,7 @@ where
 	u64: Decode<V>,
 {
 	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
-		let id = u64::decode(r, version)?;
-		if id >= 1u64 << 62 {
-			return Err(DecodeError::InvalidValue);
-		}
-		Ok(Self { id })
+		Self::from_wire(u64::decode(r, version)?)
 	}
 }
 

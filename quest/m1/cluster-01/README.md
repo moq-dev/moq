@@ -16,7 +16,8 @@ revision is published to the datatracker, answering afrind's review of -00
 
 The draft moved first, on main. The text-only halves of that review, one
 publisher per namespace and the single per-direction cost metric, needed no
-code and are already answered there. What remains is the two wire changes.
+code and are already answered there. HOP_ID landed on main; what remains is
+the cost update.
 
 Nothing deployed speaks -00: cluster sessions run moq-lite-06 (see
 [PoP skipping](/quest/m2/pop-skipping/README.md)), and a -00 peer meeting a
@@ -25,11 +26,10 @@ the session runs as plain moq-transport.
 
 The draft on dev carries pattern-extension and selection changes main does
 not. The merge keeps dev's text and this revision's wire changes together;
-neither quest touches the draft again except the changelog.
+the quest does not touch the draft again except the changelog.
 
 ## Quests
 
-- [HOP_ID option](/quest/m1/cluster-01/hop-id.md) - both implementations negotiate with HOP_ID at 0x40B54, a bare varint
 - [Cost update](/quest/m1/cluster-01/cost-update.md) - a PUBLISH_NAMESPACE reprices with REQUEST_UPDATE, and -01 is published
 
 ## Related

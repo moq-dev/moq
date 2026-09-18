@@ -1,11 +1,11 @@
 /**
- * The MoQ Cluster extension (draft-lcurley-moq-cluster-00).
+ * The MoQ Cluster extension (draft-lcurley-moq-cluster-01).
  *
  * moq-transport carries no routing information, so a peer cannot tell whether an
  * advertisement already passed through us. This extension adds it:
  *
- * - each endpoint declares its own Hop ID via the RELAY_HOPS Setup Option, which is also
- *   what negotiates the extension;
+ * - each endpoint declares its own Hop ID via the HOP_ID Setup Option, which is also what
+ *   negotiates the extension;
  * - every advertisement carries the HOP_PATH it traversed and the accumulated ROUTE_COST
  *   of that path, as Key-Value-Pair message parameters on PUBLISH_NAMESPACE and NAMESPACE.
  *
@@ -53,7 +53,7 @@ export interface Hops {
 	self: Origin;
 
 	/**
-	 * The peer's Hop ID, or `undefined` when it declared no RELAY_HOPS.
+	 * The peer's Hop ID, or `undefined` when it declared no HOP_ID.
 	 *
 	 * This is what decides whether advertisements carry the parameters at all, in both
 	 * directions: a peer that declared nothing has not read ours either, so sending it a
@@ -89,15 +89,10 @@ export interface Advert {
 export function fromSetup(params: SetupOptions, version: IetfVersion): Origin | undefined {
 	if (!supported(version)) return undefined;
 
-	// RELAY_HOPS is odd, so its value is a length-prefixed byte string holding the sender's
-	// Hop ID as a single varint. 0 is legal: the peer speaks the extension but withholds
-	// its identity.
-	const value = params.getBytes(SetupOption.RelayHops);
+	// 0 is legal: the peer speaks the extension but withholds its identity.
+	const value = params.getVarint(SetupOption.HopId);
 	if (value === undefined) return undefined;
-
-	const [origin, rest] = Varint.decodeLeadingOnes(value);
-	if (rest.length !== 0) throw new Error("trailing bytes in RELAY_HOPS");
-	return OriginSchema.parse(origin);
+	return OriginSchema.parse(value);
 }
 
 /**
@@ -107,7 +102,7 @@ export function fromSetup(params: SetupOptions, version: IetfVersion): Origin | 
  */
 export function intoSetup(params: SetupOptions, self: Origin, version: IetfVersion) {
 	if (!supported(version)) return;
-	params.setBytes(SetupOption.RelayHops, Varint.encodeLeadingOnes(self));
+	params.setVarint(SetupOption.HopId, self);
 }
 
 /**

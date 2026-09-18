@@ -47,10 +47,6 @@ decodes the repeat as an update.
   the maintainer clicks the confirmation link. Reply on the four issues with
   the -01 link.
 
-## Required
-
-- [HOP_ID option](/quest/m1/cluster-01/hop-id.md) - -01 publishes with both wire changes in
-
 ## Closes
 
 - [#3698](https://github.com/moq-dev/moq/issues/3698) - close this issue when the quest finishes
