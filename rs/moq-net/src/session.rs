@@ -2,13 +2,42 @@ use std::{sync::Arc, task::Poll, time::Duration};
 
 use web_transport_trait::Stats;
 
-use crate::{Error, SessionError, Version, bandwidth, goaway};
+use crate::{Error, Hop, SessionError, Version, bandwidth, goaway};
 
 /// A close requested by a session handle, executed by the machine.
 #[derive(Clone)]
 struct Close {
 	code: u32,
 	reason: String,
+}
+
+/// What the protocol tasks share with the handle about the link itself: this
+/// end's egress price and where the peer's declared identity can be read.
+#[derive(Clone)]
+pub(crate) struct Link {
+	/// This end's egress price, folded into the cost of every route advertised
+	/// to the peer. Zero until [`Session::set_egress`] prices it.
+	pub egress: kio::Shared<u64>,
+	/// The peer's SETUP, per protocol, for [`Session::peer_hop`].
+	pub peer: PeerSlot,
+}
+
+impl Link {
+	pub fn new(peer: PeerSlot) -> Self {
+		Self {
+			egress: kio::Shared::new(0),
+			peer,
+		}
+	}
+}
+
+/// Where the identity the peer declared in its SETUP is read from.
+#[derive(Clone)]
+pub(crate) enum PeerSlot {
+	Lite(crate::lite::PeerSetup),
+	Ietf(crate::ietf::peer::PeerSetup),
+	/// The negotiated version carries no SETUP identity, so there is nothing to wait for.
+	None,
 }
 
 /// The stats cell shared between the machine's sampler and the handles.
@@ -85,6 +114,7 @@ pub struct Session {
 	send_bandwidth: Option<bandwidth::Consumer>,
 	recv_bandwidth: Option<bandwidth::Consumer>,
 	goaway: Arc<goaway::Handle>,
+	link: Link,
 }
 
 impl Session {
@@ -199,6 +229,42 @@ impl Session {
 	pub fn draining(&self) -> goaway::Consumer {
 		self.goaway.consumer()
 	}
+
+	/// Price this end's egress on the link from now on, in the units route costs use.
+	///
+	/// Added to the cost of every route this session advertises to the peer, on top of
+	/// whatever the peer charges on arrival (the price declared at setup, or its
+	/// default of 1). Routes already advertised are re-priced in place, so a relay
+	/// downstream re-ranks without any subscription moving until it chooses to. This
+	/// is how a relay folds a measured link price into its routes without another
+	/// SETUP. Only moq-lite-06 and the MoQ Cluster extension carry a cost; older
+	/// wires ignore it.
+	pub fn set_egress(&self, cost: u64) {
+		let mut egress = self.link.egress.lock();
+		if *egress != cost {
+			*egress = cost;
+		}
+	}
+
+	/// Poll for the identity the peer declared in its SETUP.
+	///
+	/// Resolves once the peer's SETUP is read: `Some` when it declared a non-zero Hop
+	/// ID (a relay, on moq-lite-05+ or the MoQ Cluster extension), `None` when it
+	/// declared nothing or the negotiated version carries no identity. Self-declared,
+	/// so a correlation hint rather than an authenticated identity.
+	pub fn poll_peer_hop(&self, waiter: &kio::Waiter) -> Poll<Option<Hop>> {
+		match &self.link.peer {
+			PeerSlot::Lite(setup) => setup.poll_hop(waiter),
+			PeerSlot::Ietf(setup) => setup.poll_hop(waiter),
+			PeerSlot::None => Poll::Ready(None),
+		}
+	}
+
+	/// Wait for the identity the peer declared in its SETUP; see
+	/// [`poll_peer_hop`](Self::poll_peer_hop).
+	pub async fn peer_hop(&self) -> Option<Hop> {
+		kio::wait(|waiter| self.poll_peer_hop(waiter)).await
+	}
 }
 
 impl Session {
@@ -209,6 +275,7 @@ impl Session {
 		recv_bandwidth: Option<bandwidth::Consumer>,
 		protocol: crate::runtime::Protocol<R>,
 		goaway: goaway::Handle,
+		link: Link,
 	) -> (Self, crate::runtime::Machine<R>)
 	where
 		R: crate::runtime::Runtime + 'static,
@@ -250,6 +317,7 @@ impl Session {
 			send_bandwidth,
 			recv_bandwidth,
 			goaway: Arc::new(goaway),
+			link,
 		};
 		let machine = crate::runtime::Machine::new(crate::runtime::MachineState {
 			protocol,
@@ -268,11 +336,20 @@ impl Session {
 		recv_bandwidth: Option<bandwidth::Consumer>,
 		protocol: crate::runtime::Protocol<R>,
 		goaway: goaway::Handle,
+		link: Link,
 	) -> Self
 	where
 		R: crate::runtime::Runtime + 'static,
 	{
-		let (session, machine) = Self::new(runtime.clone(), session, version, recv_bandwidth, protocol, goaway);
+		let (session, machine) = Self::new(
+			runtime.clone(),
+			session,
+			version,
+			recv_bandwidth,
+			protocol,
+			goaway,
+			link,
+		);
 		runtime.spawn(machine);
 		session
 	}

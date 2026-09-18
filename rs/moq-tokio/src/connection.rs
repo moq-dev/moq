@@ -578,6 +578,16 @@ impl Monitor {
 		self.state.read().session.as_ref().map(moq_net::Session::stats)
 	}
 
+	/// The live session, or `None` while disconnected.
+	///
+	/// For what only a session can do, such as pricing its egress or reading the
+	/// peer's identity. A reconnect replaces it, so read it per use rather than
+	/// holding it: a held clone keeps the old transport open after the loop has
+	/// moved on. [`Connection::epoch`] tells the two apart.
+	pub fn session(&self) -> Option<moq_net::Session> {
+		self.state.read().session.clone()
+	}
+
 	/// Snapshot statistics and protocol together, or `None` while disconnected.
 	pub fn snapshot(&self) -> Option<Snapshot> {
 		let state = self.state.read();

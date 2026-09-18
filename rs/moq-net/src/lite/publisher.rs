@@ -36,6 +36,9 @@ pub(super) struct PublisherConfig<S: crate::transport::poll::Session, R: crate::
 	/// The origin (hop) id assigned to the peer, used whenever the peer doesn't
 	/// declare one itself. See `Client::with_peer_hop`.
 	pub peer_hop: Option<Hop>,
+	/// This end's egress price, added to every advertised cost. See
+	/// [`crate::Session::set_egress`].
+	pub egress: kio::Shared<u64>,
 }
 
 /// Context shared by every control-stream child.
@@ -58,6 +61,8 @@ struct Shared<S: crate::transport::poll::Session> {
 	priority: PriorityQueue,
 	version: Version,
 	goaway: crate::goaway::Protocol,
+	// This end's egress price; every announce stream re-prices when it moves.
+	egress: kio::Shared<u64>,
 }
 
 /// Largest millisecond duration every implementation can carry losslessly.
@@ -156,6 +161,7 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> Publisher<S
 				priority: Default::default(),
 				version: config.version,
 				goaway: config.goaway,
+				egress: config.egress,
 			}),
 			runtime: config.runtime,
 			accept,
@@ -204,8 +210,45 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> Publisher<S
 		self_origin: Hop,
 		version: Version,
 	) -> Result<(), Error> {
+		Self::run_announce_priced(
+			stream,
+			origin,
+			announced,
+			prefix,
+			self_origin,
+			version,
+			kio::Shared::new(0),
+		)
+		.await
+	}
+
+	/// [`Self::run_announce`] with a live egress price, re-priced exactly as
+	/// [`AnnounceServe`] does when the price moves.
+	async fn run_announce_priced(
+		stream: &mut Stream<S, Version>,
+		origin: &origin::Consumer,
+		announced: &mut announce::Consumer,
+		prefix: impl crate::AsPath,
+		self_origin: Hop,
+		version: Version,
+		egress: kio::Shared<u64>,
+	) -> Result<(), Error> {
 		let mut run = AnnounceRun::new(prefix.as_path().to_owned(), self_origin, version);
-		kio::wait(|waiter| run.poll(stream, origin, announced, waiter)).await
+		run.egress = *egress.read();
+		kio::wait(|waiter| {
+			let moved = egress.poll(waiter, |price| match **price != run.egress {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			});
+			if let Poll::Ready(price) = moved {
+				let price = *price;
+				if let Err(err) = run.reprice(stream, price) {
+					return Poll::Ready(Err(err));
+				}
+			}
+			run.poll(stream, origin, announced, waiter)
+		})
+		.await
 	}
 }
 
@@ -516,6 +559,19 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 				}
 				AnnounceState::Run { origin, announced, run } => {
 					let stream = self.stream.as_mut().expect("stream present");
+					// A moved egress price re-prices every live advertisement before more
+					// updates are streamed; the poll registers the waiter for the next move.
+					let moved = self.shared.egress.poll(waiter, |price| match **price != run.egress {
+						true => Poll::Ready(()),
+						false => Poll::Pending,
+					});
+					if let Poll::Ready(price) = moved {
+						let price = *price;
+						if let Err(err) = run.reprice(stream, price) {
+							self.stream.take().expect("stream present").writer.abort(&err);
+							return Poll::Ready(Ok(()));
+						}
+					}
 					let res = ready!(run.poll(stream, origin, announced, waiter));
 					if let Err(err) = res {
 						match &err {
@@ -560,7 +616,8 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 			Err(_) => origin,
 		};
 		let announced = origin.announced();
-		let run = AnnounceRun::new(prefix, self.shared.self_origin, self.shared.version);
+		let mut run = AnnounceRun::new(prefix, self.shared.self_origin, self.shared.version);
+		run.egress = *self.shared.egress.read();
 		self.state = AnnounceState::Run { origin, announced, run };
 	}
 }
@@ -576,10 +633,20 @@ struct AnnounceRun {
 	// path. Only announces that actually hit the wire get an id (filtered ones
 	// were never seen by the peer).
 	next_announce_id: u64,
-	// The routes the peer currently holds, keyed by the presented pattern. The
-	// value is the announce id on versions that assign them.
-	live: HashMap<crate::Pattern, Option<u64>>,
+	// The routes the peer currently holds, keyed by the presented pattern.
+	live: HashMap<crate::Pattern, Live>,
+	// This end's egress price, added to every cost put on the wire. See
+	// `crate::Session::set_egress`.
+	egress: u64,
 	phase: AnnouncePhase,
+}
+
+/// One advertisement the peer holds: its announce id (on versions that assign
+/// them) and the route it was priced from, so a re-price can re-send it.
+struct Live {
+	id: Option<u64>,
+	route: crate::origin::Route,
+	absolute: crate::Pattern,
 }
 
 enum AnnouncePhase {
@@ -598,8 +665,41 @@ impl AnnounceRun {
 			version,
 			next_announce_id: 0,
 			live: HashMap::new(),
+			egress: 0,
 			phase: AnnouncePhase::Init,
 		}
+	}
+
+	/// Re-price every live advertisement at a new egress price.
+	///
+	/// A restart carries the new cost in place (lite-05 as a duplicate ANNOUNCE,
+	/// lite-06 by id). Older wires carry no cost, or cannot update a live
+	/// advertisement, so the peer keeps what it holds.
+	fn reprice<S: crate::transport::poll::Session>(
+		&mut self,
+		stream: &mut Stream<S, Version>,
+		egress: u64,
+	) -> Result<(), Error> {
+		self.egress = egress;
+		if !self.version.has_route_cost() || !lite::restart_supported(self.version) {
+			return Ok(());
+		}
+		let patterns: Vec<crate::Pattern> = self.live.keys().cloned().collect();
+		for pattern in patterns {
+			let live = &self.live[&pattern];
+			let Some((hops, cost)) = self.outgoing(&live.route, &live.absolute) else {
+				// Unforwardable now means it was unforwardable when it went live.
+				continue;
+			};
+			tracing::debug!(route = %live.absolute, cost = cost.warm, "reprice");
+			match live.id {
+				Some(id) => stream
+					.writer
+					.buffer(&lite::AnnounceBroadcast::Restart { id, hops, cost })?,
+				None => stream.writer.buffer(&Self::encode_active(&pattern, hops, cost))?,
+			}
+		}
+		Ok(())
 	}
 
 	/// The presented patterns an update travels under on this stream, relative
@@ -652,9 +752,10 @@ impl AnnounceRun {
 		}
 
 		// Pre-lite-06 wires carry no cost at all, leaving hop count as the
-		// effective metric exactly as before.
+		// effective metric exactly as before. Our own egress price goes on top,
+		// saturating like every other link charge.
 		let cost = match self.version.has_route_cost() {
-			true => route.cost.clamped(),
+			true => route.cost.charged(self.egress).clamped(),
 			false => crate::origin::Cost::UNKNOWN,
 		};
 		Some((hops, cost))
@@ -677,7 +778,7 @@ impl AnnounceRun {
 		pattern: crate::Pattern,
 		absolute: &crate::Pattern,
 	) -> Result<(), Error> {
-		let Some(id) = self.live.remove(&pattern) else {
+		let Some(Live { id, .. }) = self.live.remove(&pattern) else {
 			// Filtered on the way out; the peer never saw it.
 			return Ok(());
 		};
@@ -742,7 +843,7 @@ impl AnnounceRun {
 				// stashing suffix+hops so we can both COUNT them for AnnounceOk and re-send
 				// them afterward. The receiver stamps our origin onto each hop chain, so we
 				// forward the stored chain as-is (no self push here).
-				let mut initial: Vec<(crate::Pattern, Hops, crate::origin::Cost)> = Vec::new();
+				let mut initial: Vec<(crate::Pattern, Live, Hops, crate::origin::Cost)> = Vec::new();
 				while let Some(update) = announced.try_next() {
 					let absolute = update
 						.pattern
@@ -759,7 +860,12 @@ impl AnnounceRun {
 							};
 							tracing::debug!(route = %absolute, "announce");
 							initial.retain(|(s, ..)| s != &pattern);
-							initial.push((pattern, hops, cost));
+							let live = Live {
+								id: None,
+								route: update.route.clone(),
+								absolute: absolute.clone(),
+							};
+							initial.push((pattern, live, hops, cost));
 						} else {
 							// A potential race: a just-announced route already retracted.
 							tracing::debug!(route = %absolute, "unannounce");
@@ -775,9 +881,9 @@ impl AnnounceRun {
 					active: initial.len() as u64,
 				};
 				stream.writer.buffer(&ok)?;
-				for (pattern, hops, cost) in initial {
-					let id = self.assign_id();
-					self.live.insert(pattern.clone(), id);
+				for (pattern, mut live, hops, cost) in initial {
+					live.id = self.assign_id();
+					self.live.insert(pattern.clone(), live);
 					stream.writer.buffer(&Self::encode_active(&pattern, hops, cost))?;
 				}
 			}
@@ -843,12 +949,13 @@ impl AnnounceRun {
 				}
 
 				match self.outgoing(&update.route, &absolute) {
-					Some((hops, cost)) => match self.live.get(&pattern) {
+					Some((hops, cost)) => match self.live.get_mut(&pattern) {
 						// A metadata update on a live advertisement: restart it in
 						// place (lite-05 restarts via a duplicate ANNOUNCE).
-						Some(&id) if lite::restart_supported(self.version) => {
+						Some(live) if lite::restart_supported(self.version) => {
 							tracing::debug!(route = %absolute, "reannounce");
-							match id {
+							live.route = update.route.clone();
+							match live.id {
 								Some(id) => {
 									stream
 										.writer
@@ -863,7 +970,14 @@ impl AnnounceRun {
 						None => {
 							tracing::debug!(route = %absolute, "announce");
 							let id = self.assign_id();
-							self.live.insert(pattern.clone(), id);
+							self.live.insert(
+								pattern.clone(),
+								Live {
+									id,
+									route: update.route.clone(),
+									absolute: absolute.clone(),
+								},
+							);
 							stream.writer.buffer(&Self::encode_active(&pattern, hops, cost))?;
 						}
 					},
@@ -1758,6 +1872,8 @@ mod announce_test {
 		origin: origin::Producer,
 		/// The initial announcement; drop to retract, update to restart.
 		announcement: crate::model::AnnounceProducer,
+		/// This end's egress price; write it to re-price the live advertisements.
+		egress: kio::Shared<u64>,
 		wire: Wire,
 		task: tokio::task::JoinHandle<Result<(), Error>>,
 	}
@@ -1793,10 +1909,23 @@ mod announce_test {
 			writer: Writer::new(SinkSend::new(log), VERSION),
 			reader: Reader::new(PendingRecv, VERSION),
 		};
-		let task = tokio::spawn(async move {
-			let mut announced = consumer.announced();
-			let self_origin = *consumer;
-			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, "", self_origin, VERSION).await
+		let egress = kio::Shared::new(0);
+		let task = tokio::spawn({
+			let egress = egress.clone();
+			async move {
+				let mut announced = consumer.announced();
+				let self_origin = *consumer;
+				TestPublisher::run_announce_priced(
+					&mut stream,
+					&consumer,
+					&mut announced,
+					"",
+					self_origin,
+					VERSION,
+					egress,
+				)
+				.await
+			}
 		});
 		settle().await;
 
@@ -1814,9 +1943,77 @@ mod announce_test {
 		Harness {
 			origin,
 			announcement,
+			egress,
 			wire,
 			task,
 		}
+	}
+
+	/// Pricing our egress restarts every live advertisement at the route cost plus
+	/// the price, keeps its id, and prices later announces and restarts the same
+	/// way. An unchanged price is quiet.
+	#[tokio::test(start_paused = true)]
+	async fn egress_reprices_live_advertisements() {
+		let mut h = harness().await;
+
+		*h.egress.lock() = 5;
+		settle().await;
+		match h.wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::Restart { id: 0, hops, cost }] => {
+				assert_eq!(hops, &pub_hops());
+				assert_eq!(*cost, crate::origin::Cost::new(12));
+			}
+			other => panic!("expected a repriced restart, got {other:?}"),
+		}
+
+		// A route update after the re-price still carries the price.
+		h.announcement
+			.update(crate::origin::Route::default().with_hops(pub_hops()).with_cost(3))
+			.unwrap();
+		settle().await;
+		match h.wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::Restart { id: 0, cost, .. }] => {
+				assert_eq!(*cost, crate::origin::Cost::new(8));
+			}
+			other => panic!("expected a priced restart, got {other:?}"),
+		}
+
+		// So does a fresh announce.
+		let _mic = h
+			.origin
+			.announce(
+				"mic",
+				crate::origin::Route::default().with_hops(pub_hops()).with_cost(1),
+			)
+			.unwrap();
+		settle().await;
+		match h.wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::Active { suffix, cost, .. }] => {
+				assert_eq!(suffix.as_str(), "mic");
+				assert_eq!(*cost, crate::origin::Cost::new(6));
+			}
+			other => panic!("expected a priced announce, got {other:?}"),
+		}
+
+		// Writing the same price again is not a move.
+		*h.egress.lock() = 5;
+		settle().await;
+		h.assert_idle();
+
+		// Saturation: an absurd price ranks last rather than wrapping to best.
+		*h.egress.lock() = u64::MAX;
+		settle().await;
+		let restarts = h.wire.take_announces();
+		assert_eq!(restarts.len(), 2, "both live advertisements re-price: {restarts:?}");
+		for restart in restarts {
+			match restart {
+				lite::AnnounceBroadcast::Restart { cost, .. } => {
+					assert_eq!(cost, crate::origin::Cost::new(crate::origin::MAX_COST));
+				}
+				other => panic!("expected a restart, got {other:?}"),
+			}
+		}
+		h.assert_idle();
 	}
 
 	/// A live announce goes out as an Active with a fresh id; its retraction
@@ -3187,6 +3384,7 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: Some(assigned),
+			egress: kio::Shared::new(0),
 		});
 
 		let serving = kio::wait(|waiter| publisher.shared.poll_serving_origin(waiter)).await;
@@ -3289,6 +3487,7 @@ mod tests {
 			peer_setup: crate::lite::PeerSetup::default(),
 			goaway,
 			peer_hop: None,
+			egress: kio::Shared::new(0),
 		});
 		ProbeServe::new(publisher.shared.clone(), publisher.runtime.clone(), stream)
 	}

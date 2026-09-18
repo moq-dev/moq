@@ -18,6 +18,8 @@ pub(crate) struct SessionStart<S: crate::transport::poll::Session, R: crate::run
 	pub driver: Driver<S, R>,
 	/// The session-side GOAWAY halves, stored on the public [`crate::Session`].
 	pub goaway: crate::goaway::Handle,
+	/// The link state the public [`crate::Session`] prices and inspects.
+	pub link: crate::session::Link,
 }
 
 /// Server: read the peer's single SETUP message off its Setup Stream before starting
@@ -165,6 +167,13 @@ where
 	// Read out before the setup machine takes ownership below.
 	let our_cost = our_setup.cost;
 
+	// Versions without a Setup Stream never learn the peer's identity, so the
+	// handle must not wait on one.
+	let link = crate::session::Link::new(match version.has_setup_stream() {
+		true => crate::session::PeerSlot::Lite(peer_setup.clone()),
+		false => crate::session::PeerSlot::None,
+	});
+
 	let publisher = Publisher::new(PublisherConfig {
 		runtime: runtime.clone(),
 		session: session.clone(),
@@ -173,6 +182,7 @@ where
 		peer_setup: peer_setup.clone(),
 		goaway: goaway.clone(),
 		peer_hop,
+		egress: link.egress.clone(),
 	});
 	let subscriber = Subscriber::new(SubscriberConfig {
 		session: session.clone(),
@@ -203,6 +213,7 @@ where
 		recv_bandwidth: recv_bw_consumer,
 		driver,
 		goaway: goaway_handle,
+		link,
 	})
 }
 

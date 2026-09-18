@@ -217,6 +217,8 @@ enum NamespaceEvent {
 	Update(Option<crate::announce::Update>),
 	/// The retry sleep fired: re-offer whatever the peer should be holding and isn't.
 	Retry,
+	/// Our egress price moved: every live advertisement carries a stale cost.
+	Reprice,
 }
 
 #[derive(Clone)]
@@ -238,6 +240,9 @@ pub(super) struct Publisher<S: crate::transport::poll::Session, R: crate::runtim
 	peer_hop: Option<crate::Hop>,
 	// What the peer declared in its SETUP, filled when that stream is read.
 	peer_setup: peer::PeerSetup,
+	// This end's egress price, added to every advertised cost. See
+	// `crate::Session::set_egress`.
+	egress: kio::Shared<u64>,
 	// Shared across request handlers; None marks a dispatched subscription still resolving.
 	joins: kio::Shared<HashMap<RequestId, Option<Joined>>>,
 	version: Version,
@@ -279,6 +284,7 @@ where
 	R: crate::runtime::Runtime + MaybeSend + MaybeSync + 'static,
 	R::Timer: MaybeSend,
 {
+	#[allow(clippy::too_many_arguments)]
 	pub fn new(
 		runtime: R,
 		session: S,
@@ -286,6 +292,7 @@ where
 		control: Control,
 		peer_hop: Option<crate::Hop>,
 		peer_setup: peer::PeerSetup,
+		egress: kio::Shared<u64>,
 		version: Version,
 	) -> Self {
 		Self {
@@ -296,6 +303,7 @@ where
 			control,
 			peer_hop,
 			peer_setup,
+			egress,
 			joins: Default::default(),
 			version,
 		}
@@ -368,7 +376,8 @@ where
 
 		// The Cluster extension has room for the warm cost only; a peer on this
 		// wire learns nothing about the cold path (see `cluster::Advert::route`).
-		let cost = route.cost.clamped().warm;
+		// Our own egress price goes on top, saturating like every other link charge.
+		let cost = route.cost.charged(*self.egress.read()).clamped().warm;
 		// Our own Hop ID is always the last entry, so the peer reconstructs the full
 		// path. A chain with no room left is a loop in all but name.
 		match cluster::Advert::forward(&route.hops, cost, self.self_origin) {
@@ -1764,6 +1773,9 @@ where
 		let mut retry_at: Option<crate::runtime::Instant> = None;
 		let mut retry_delay = RETRY_BASE;
 
+		// The egress price the live advertisements were costed at; a move re-syncs them.
+		let mut egress = *self.egress.read();
+
 		// Stream updates (origin route (un)announces), bailing if the peer closes
 		// its side first.
 		let res = loop {
@@ -1791,6 +1803,16 @@ where
 					if retry.poll(waiter).is_ready() {
 						return Poll::Ready(NamespaceEvent::Retry);
 					}
+					if self
+						.egress
+						.poll(waiter, |price| match **price != egress {
+							true => Poll::Ready(()),
+							false => Poll::Pending,
+						})
+						.is_ready()
+					{
+						return Poll::Ready(NamespaceEvent::Reprice);
+					}
 					Poll::Pending
 				})
 				.await
@@ -1798,6 +1820,14 @@ where
 
 			match event {
 				NamespaceEvent::Closed(res) => break res,
+				NamespaceEvent::Reprice => {
+					egress = *self.egress.read();
+					let live: Vec<crate::PathOwned> = ns.watched.keys().cloned().collect();
+					for suffix in live {
+						let path = prefix.join(&suffix);
+						self.sync_namespace(&mut ns, &suffix, &path).await?;
+					}
+				}
 				NamespaceEvent::Retry => {
 					retry_at = None;
 					retry_delay = (retry_delay * 2).min(RETRY_MAX);
@@ -2571,6 +2601,7 @@ mod serve_tests {
 			Control::new(None, false),
 			None,
 			peer_setup,
+			kio::Shared::new(0),
 			version,
 		);
 
@@ -3457,6 +3488,7 @@ mod tests {
 			Control::new(None, false),
 			Some(assigned),
 			peer::PeerSetup::default(),
+			kio::Shared::new(0),
 			Version::Draft16,
 		);
 
@@ -3515,6 +3547,7 @@ mod tests {
 			Control::new(None, false),
 			Some(assigned),
 			peer::PeerSetup::default(),
+			kio::Shared::new(0),
 			Version::Draft19,
 		);
 
@@ -3586,6 +3619,7 @@ mod tests {
 			Control::new(None, false),
 			Some(assigned),
 			peer::PeerSetup::default(),
+			kio::Shared::new(0),
 			Version::Draft16,
 		);
 
@@ -3628,6 +3662,7 @@ mod tests {
 			Control::new(None, false),
 			Some(assigned),
 			requires_solicitation(),
+			kio::Shared::new(0),
 			Version::Draft16,
 		);
 
@@ -3732,6 +3767,7 @@ mod tests {
 			Control::new(None, false),
 			None,
 			declared(Some(false)),
+			kio::Shared::new(0),
 			VERSION,
 		);
 
@@ -3820,6 +3856,7 @@ mod tests {
 			Control::new(None, false),
 			None,
 			requires_solicitation(),
+			kio::Shared::new(0),
 			VERSION,
 		);
 
@@ -3905,6 +3942,7 @@ mod tests {
 			Control::new(None, false),
 			None,
 			peer_setup,
+			kio::Shared::new(0),
 			VERSION,
 		);
 
@@ -3951,6 +3989,7 @@ mod tests {
 			Control::new(None, false),
 			None,
 			declared(solicit),
+			kio::Shared::new(0),
 			VERSION,
 		);
 
@@ -4021,6 +4060,7 @@ mod tests {
 			Control::new(None, false),
 			None,
 			declared(Some(false)),
+			kio::Shared::new(0),
 			VERSION,
 		);
 
@@ -4099,6 +4139,7 @@ mod tests {
 			Control::new(None, false),
 			Some(assigned),
 			declared(Some(false)),
+			kio::Shared::new(0),
 			Version::Draft17,
 		);
 
@@ -4143,6 +4184,7 @@ mod tests {
 			Control::new(None, false),
 			None,
 			declared(Some(false)),
+			kio::Shared::new(0),
 			VERSION,
 		);
 
@@ -4436,6 +4478,7 @@ mod tests {
 			Control::new(None, false),
 			None,
 			declared(None),
+			kio::Shared::new(0),
 			VERSION,
 		);
 
@@ -4491,6 +4534,7 @@ mod tests {
 			Control::new(None, false),
 			None,
 			declared(Some(false)),
+			kio::Shared::new(0),
 			VERSION,
 		);
 
@@ -4539,6 +4583,7 @@ mod tests {
 			Control::new(None, false),
 			None,
 			declared(Some(false)),
+			kio::Shared::new(0),
 			VERSION,
 		);
 
@@ -4602,6 +4647,7 @@ mod tests {
 			Control::new(None, false),
 			None,
 			peer_setup,
+			kio::Shared::new(0),
 			version,
 		);
 
