@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.23](https://github.com/moq-dev/moq/compare/moq-net-v0.2.22...moq-net-v0.2.23) - 2026-09-18
+
+### Added
+
+- *(net)* negotiate the cluster extension with HOP_ID ([#3747](https://github.com/moq-dev/moq/pull/3747))
+
+### Fixed
+
+- *(net)* wake the demand aggregate when its widest subscriber changes ([#3785](https://github.com/moq-dev/moq/pull/3785))
+
 ## [0.2.22](https://github.com/moq-dev/moq/compare/moq-net-v0.2.21...moq-net-v0.2.22) - 2026-09-17
 
 ### Fixed

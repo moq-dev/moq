@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.13](https://github.com/moq-dev/moq/compare/moq-gst-v0.3.12...moq-gst-v0.3.13) - 2026-09-18
+
+### Other
+
+- *(drafts)* note that each draft is AI generated from the implementation ([#3728](https://github.com/moq-dev/moq/pull/3728))
+
 ## [0.3.12](https://github.com/moq-dev/moq/compare/moq-gst-v0.3.11...moq-gst-v0.3.12) - 2026-09-17
 
 ### Added
