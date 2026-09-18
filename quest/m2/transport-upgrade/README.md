@@ -67,4 +67,3 @@ Shared decisions:
 ## Related
 
 - [Drain](/quest/m2/drain/README.md) - the peer-initiated half of the same handover
-- [Connect auth race](/quest/m0/3532-connect-auth-race.md) - the same race function on main, auth handling only
