@@ -79,7 +79,6 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 - [Path patterns](/quest/m2/path-patterns/README.md) - one matcher for every predicate over broadcast paths: tokens, origins, interest
 - [In-band auth](/quest/m2/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish
 - [Stats retier](/quest/m2/stats-retier.md) - a re-checked tier retags a live session's stats in place instead of waiting for its next connection
-- [One auth path](/quest/m2/auth-one-path.md) - the server and public modes become clients of the same `Admissions` queue the embedder answers
 - [io_uring link facts](/quest/m2/uring-link-facts.md) - the io_uring workers report a session's peer address and SNI to the auth server like the tokio listener does
 - [Decoded frame ownership](/quest/m2/decoded-frames.md) - retain moq-video Frames across bindings, with native views or CPU conversion as needed
 - [OBS native codecs](/quest/m2/obs-moq-video/README.md) - remove FFmpeg decoding dependencies, deliver GPU frames, and use native audio/video encoders

@@ -24,6 +24,7 @@ does not require it.
 
 ## Quests
 
+- [One auth path](/quest/m1/auth-one-path.md) - the server and public modes become clients of the same `Admissions` queue the embedder answers, so `Auth` has one admission path before moq-auth is published
 - [Bindings announce match](/quest/m1/api-origin-scopes.md) - every binding takes a pattern scope and reports the announce match with its captures
 - [PathPrefixes](/quest/m1/api-path-prefixes.md) - the unused moq_net::PathPrefixes type is deleted before the release
 - [Rate estimate names](/quest/m1/api-rate-estimate-names.md) - the send and receive estimates carry `estimated_*_rate` on the C ABI, every binding, and moqsink

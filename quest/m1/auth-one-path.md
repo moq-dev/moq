@@ -6,7 +6,7 @@
 `moq_auth::Client`, `Public` hands out a fixed lease, `Refuse` says no, and
 `Embedded` queues an `Admission` for whoever holds the `Admissions`. The
 embedder's path is the general one: a `connect` request goes out, a `Lease`
-or an `AuthError` comes back, and a `lease::Producer` somewhere drives the
+or an an `auth::Error` comes back, and a `lease::Producer` somewhere drives the
 session for as long as it runs. The other three could be tasks answering the
 same queue, so a change to how a session is admitted, re-checked, or ended is
 made once.
@@ -16,12 +16,12 @@ made once.
 Unplanned. The shape landed with the embedded mode, so this quest is the
 decision whether to fold the rest onto it:
 
-- `AuthConfig::init` would spawn the decider: for `--auth-url`, a task that
+- `auth::Config::init` would spawn the decider: for `--auth-url`, a task that
   takes each `Admission`, calls `Client::connect(request, bytes)`, and answers
   `grant(consumer)` or `refuse(err.into())`, one spawned task per admission so
   a slow server does not serialize connects; for `--auth-public`, a task
   answering `grant(lease::Consumer::fixed(grant))`. `Refuse` stays a mode, or becomes a
-  task answering `AuthError::Refused`: a dropped `Admissions` is an outage
+  task answering `auth::Error::Refused`: a dropped `Admissions` is an outage
   (502), not a policy.
 - The costs to weigh: one channel hop and one task per admission on the
   server path; `init` needing a Tokio runtime, which
@@ -47,8 +47,8 @@ while let Some(admission) = admissions.next().await {
                 admission.grant(consumer);
                 authorizer.drive(producer, admission.request, admission.bytes, grant).await;
             }
-            Err(Error::Refused(why)) => admission.refuse(AuthError::Refused),
-            Err(Error::Unavailable(why)) => admission.refuse(AuthError::Unavailable(why)),
+            Err(Error::Refused(why)) => admission.refuse(auth::Error::Refused),
+            Err(Error::Unavailable(why)) => admission.refuse(auth::Error::Unavailable(why)),
         }
     });
 }
