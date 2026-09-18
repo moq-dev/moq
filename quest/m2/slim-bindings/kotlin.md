@@ -14,6 +14,10 @@ counterpart. An Android app that depends on `moq-net` never links a codec.
 directory, and artifact id. Gradle gets two library modules per layer
 (`moq-ffi-net`, `moq-net`) whose source sets point at the shared directories
 with the codec files excluded via `sourceSets` `exclude`, so nothing is copied.
+`moq-net` depends on `moq-ffi-net`, never `moq-ffi`. The exclusion list is
+every file that names a codec type: `Video.kt`, the audio counterpart, and
+the codec halves of `Aliases.kt` and `Flows.kt`, which split into a shared
+file and a codec file first.
 The generated Kotlin package name stays `dev.moq.ffi` in both artifacts; an
 app depends on one pair, never both, and the README says so.
 

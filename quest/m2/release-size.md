@@ -43,7 +43,9 @@ goes in the same table as the sizes.
 Then the nightly job: a `size` recipe under `sh/` that builds both moq-ffi
 configurations and `libmoq` with the release profile, prints stripped sizes
 and `cargo bloat --crates -n 30` per build, and posts the result to the job
-summary. Wire it into `nightly.yml` beside `Features`. The one-line AV1 regex
+summary. `cargo bloat` reads the symbol table, so if `strip` lands the recipe
+builds with `CARGO_PROFILE_RELEASE_STRIP=none` for the bloat pass and strips
+a copy for the size column. Wire it into `nightly.yml` beside `Features`. The one-line AV1 regex
 in hang is worth replacing with a hand parser while the bloat table is open,
 if it is what keeps regex in the link (tracing-subscriber's env filter also
 uses regex-automata, so check the table rather than assume).

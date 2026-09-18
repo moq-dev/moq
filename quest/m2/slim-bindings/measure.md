@@ -6,9 +6,10 @@ A table of stripped moq-ffi library sizes on `aarch64-apple-ios`,
 `aarch64-linux-android`, and `armv7-linux-androideabi`, default versus
 `--no-default-features`, built with the release profile the release size
 quest settles. The table is the go or no-go for the rest of the line:
-under roughly 15% saved on both platforms, the questline is abandoned in this
-quest's PR and the decision is recorded in the PR description; above it, the
-three packaging quests proceed.
+the line proceeds only if every one of the three targets saves at least 15%
+of the stripped size, compared on the raw byte counts; otherwise the
+questline is abandoned in this quest's PR and the decision is recorded in the
+PR description.
 
 ## Plan
 

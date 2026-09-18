@@ -18,12 +18,16 @@ not a Rust change. SwiftPM targets cannot share a source directory, so the
 wrapper split is a `Sources/MoqNet` directory of symlinks into `Sources/Moq`
 for the files both share, or a generated copy in the packaging script; pick
 whichever `swift build` and Xcode both accept and write the reason down. The
+shared files `import MoqFFI` today; in the shared set that becomes
+`#if canImport(MoqFFINet) import MoqFFINet #else import MoqFFI #endif`, which
+resolves per target since each wrapper depends on exactly one binding. The
 generated `Aliases.swift` names codec types, so it is split the same way.
 
 `release-swift-ffi.yml` (through the reusable release-ffi workflow) builds
 each target twice and stages two xcframework zips; `Package.swift.template`
-gets both `binaryTarget` entries with their checksums. `SmokeTests` gains a
-`MoqNet` case that publishes and subscribes a raw track.
+gets both `binaryTarget` entries with their checksums. `MoqTests` adds `MoqNet` to
+its dependencies and `SmokeTests` gains a `MoqNet` case that publishes and
+subscribes a raw track.
 
 Public API: additive. No existing product, target, or symbol changes.
 

@@ -28,8 +28,9 @@ the feature set.
 `rs/libmoq/build.sh` takes `--no-default-features` like moq-ffi's, and
 `libmoq.yml` runs it twice per target and uploads both assets. `doc/lib/c`
 documents the variant and which symbols it lacks. A test builds the slim
-library and links a C program that opens a session and publishes a raw track,
-so the feature gates cannot rot.
+library, asserts its `moq.h` declares none of the gated symbols, and links a
+C program that opens a session and publishes a raw track, so the feature
+gates cannot rot in either direction.
 
 Public API: additive at the crate level (new features) and no change to the
 full library's C ABI. The slim header is a subset.
