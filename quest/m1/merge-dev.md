@@ -44,6 +44,11 @@ merge for it. The rest of the archive line, wildcard resolution, and every
 additive quest that builds on dev-only code start on main afterwards from
 [m2](/quest/m2/README.md).
 
+The `api-*` quests beside this one in [m1](/quest/m1/README.md) are the
+2026-09-18 review's breaking follow-ups; each lands here or is deferred by
+the maintainer before the PR opens, since deferring one means a semver
+bump on main later.
+
 ## Required
 
 - [moq-tokio names](/quest/m1/api-tokio-names.md) - moq-tokio's first release under this name has settled names

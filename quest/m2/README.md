@@ -47,6 +47,17 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 
 - [Origin narrowing](/quest/m2/origin-narrowing.md) - a live origin grant narrows in place and ends the subscriptions it no longer covers, the deafen boundary #2714 asked for
 - [Session revalidate](/quest/m2/session-revalidate.md) - the internal listener re-checks sessions by id, path, or address now, so a kick lands in one round trip and the cadence stops carrying it
+- [Relay embedding](/quest/m2/relay-embed.md) - an embedder reads the resolved config, reuses the CLI merge, registers listener health, and spawns a test relay without TOML strings
+- [Auth embedder](/quest/m2/auth-embedder.md) - the lease owns its re-check clock, a gateway session holds a lease, and `Cluster::admit` scopes and tags origins in one call
+- [Binding parity](/quest/m2/binding-parity.md) - every wrapper reaches every moq-ffi method in its own idiom with moq-net's verbs
+- [Binding docs](/quest/m2/binding-docs.md) - every binding doc sample names a symbol that exists, checked nightly
+- [Gateway embedding](/quest/m2/gateway-embed.md) - moq-hls, moq-rtmp, and moq-rtc expose the loop their binaries run to an in-process embedder
+- [Catalog consumer](/quest/m2/hang-catalog-consumer.md) - reading a catalog is one call in Rust and JS, and JS gains a timeline consumer
+- [Ingest source](/quest/m2/net-ingest-source.md) - an announce says whether the broadcast entered on this relay or a peer
+- [Headless player](/quest/m2/watch-player.md) - `Watch.Player` assembles the pipeline the element, the room, and moq.pro each rebuild
+- [@moq/net additive](/quest/m2/js-net-additive.md) - a live-broadcasts getter, `Table.dynamic`, credential refresh before redial, inferred `share`
+- [Last frame duration](/quest/m2/mux-last-frame-duration.md) - a group's final frame keeps its duration on 90 kHz and nanosecond imports
+- [Snapshot clobber](/quest/m2/json-modify-clobber.md) - a snapshot edit fails on a shape mismatch instead of seeding a default
 - [Binding audio tests](/quest/m2/binding-audio-tests.md) - every binding proves the Opus frame duration and throwing setters it exposes, and smoke-full publishes audio with an explicit config
 - [Decode format](/quest/m2/ffi-decode-format.md) - the C-only decode pixel format knob reaches every uniffi binding
 - [JSON mutate](/quest/m2/json-mutate.md) - Rust gains the closure edit JS already has, beside the guard

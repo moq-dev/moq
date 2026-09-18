@@ -62,6 +62,8 @@ same loop.
 
 ## Related
 
+- [Auth contract](/quest/m1/auth-contract.md) - deletes `Counters`, so `Client::connect(request)` and `Admission` lose the `bytes` argument the sketch above passes
+- [Auth embedder](/quest/m2/auth-embedder.md) - the lease owns the re-check clock, so `drive` above becomes a loop over `producer.due()` instead of a second driver
 - [In-band auth](/quest/m2/auth/README.md) - a token presented in band is
   another admission on the same lease
 - [Stats retier](/quest/m2/stats-retier.md) - what a re-checked grant should

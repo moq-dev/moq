@@ -25,7 +25,7 @@ asked for; the scope and match half already landed in #3672 and #3746.
   transport that never learns about the change still cannot keep reading.
 - Relay revalidation uses it: a re-checked grant with the same root narrows
   the session's origin handles instead of closing the session
-  (`Recheck::Closed("grant narrowed")` in `rs/moq-relay/src/connection.rs`),
+  (`Lease::ended` reporting "grant narrowed" in `rs/moq-relay/src/auth.rs`),
   so the lease the relay holds (`moq_auth::lease`) is the boundary. A changed
   root still closes.
 - Prove the deafen case at the model layer: subscribe under a room prefix,

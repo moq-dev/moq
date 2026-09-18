@@ -17,13 +17,18 @@ The outliers on dev, each with the settled replacement:
 - `moq_tokio::Duration`, the CLI and TOML parsing newtype, moves to
   `cli::Duration` so the bare name stops shadowing `std::time::Duration`.
 - `transport::{Async, AsyncSend, AsyncRecv}` (`rs/moq-tokio/src/transport.rs`)
-  become `transport::{Session, SendStream, RecvStream}`, named for their
-  role; the doc calling the adapter transitional goes with it.
+  keep names that say adapter. `moq_tokio::Transport` (the accepted-session
+  enum) and `Request` move under `server::`, so the module and the enum stop
+  sharing a word for two things.
 - `Connection::close()` is deleted; `abort(err)` covers the explicit case and
   Drop the rest, as its own doc already advises.
 - `keep_parse_only` on the seven config types (`tcp`, `quic`, `unix`,
   `listen`, `connect`, `websocket`, `tls`) becomes private to the merge that
-  needs it.
+  needs it; that merge is `cli::merge`, whose `keep` callback is what
+  [moq-tokio shapes](/quest/m1/api-tokio-shapes.md) replaces with a trait.
+- `moq_tokio::Deprecated` moves to `cli::Deprecated`; `websocket::Listener::bind_with_alpns`
+  has no caller outside its own `bind` and follows `tcp`/`unix` with
+  `with_protocols`.
 - `watch::FileWatcher` becomes `watch::Files`.
 - The `resolved_*` accessors on `connect` and `websocket` configs and
   `quic::Config::resolve() -> Resolved` become one spelling: `resolve()`
@@ -36,3 +41,4 @@ moq-relay, moq-cli, moq-ffi, moq-gst, and the docs under `doc/lib/rs`; run
 ## Related
 
 - [Merge dev](/quest/m1/merge-dev.md) - requires this so moq-tokio releases under settled names
+- [moq-tokio shapes](/quest/m1/api-tokio-shapes.md) - the type-level fixes that follow the renames

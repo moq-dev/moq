@@ -25,9 +25,22 @@ does not require it.
 ## Quests
 
 - [One auth path](/quest/m1/auth-one-path.md) - the server and public modes become clients of the same `Admissions` queue the embedder answers, a reshape of the unpublished auth API that is dev-line work by priority, not a gate
+- [Auth contract](/quest/m1/auth-contract.md) - moq-auth and @moq/auth ship one type per concept: no `Counters`, one publish/subscribe pair, a reference server that scopes like the library, no `kty` default
+- [Announce event](/quest/m1/api-net-announce.md) - an announce says the path it covers and whether it is new, updated, or retracted, with no `as_prefix().expect()` at 89 call sites
+- [Origin scoping](/quest/m1/api-net-origin.md) - `scope(root, patterns)` is one fallible call, a fresh origin has a random hop, and the handles stop derefing to `Hop`
+- [moq-net surface](/quest/m1/api-net-surface.md) - dead exports go, compounds sit under their modules, creators take `&self`
 - [Bindings announce match](/quest/m1/api-origin-scopes.md) - every binding takes a pattern scope and reports the announce match with its captures
 - [PathPrefixes](/quest/m1/api-path-prefixes.md) - the unused moq_net::PathPrefixes type is deleted before the release
 - [moq-tokio names](/quest/m1/api-tokio-names.md) - moq-tokio's public names sit under their modules with no root compounds, adapter names, or forgettable close()
+- [moq-tokio shapes](/quest/m1/api-tokio-shapes.md) - a `Drop` on `Listener`, a worker `Member` that cannot be cross-wired, `std::time::Duration` fields, one construction idiom, no six-argument merge
+- [@moq/net API](/quest/m1/api-js-net.md) - one error namespace with Rust's names, one connect shape, one path-to-broadcast call, `Time.Milli` everywhere, wire-layer methods internal
+- [@moq/auth API](/quest/m1/api-js-auth.md) - `Key` and `KeySet` namespaces with moq-auth's verbs instead of `load`/`signWith`
+- [JSON configs](/quest/m1/api-json-config.md) - window takes the Config shape snapshot and stream have, mux takes the hang entry, the dead per-track `timeline` field goes
+- [Catalog types](/quest/m1/api-hang-catalog.md) - `hang::Catalog<E>` is the one section list, `Clock` holds a `Timestamp`, `Timeline` folds into `Archive`
+- [Rendition ownership](/quest/m1/api-mux-rendition.md) - one handle publishes a media track and reports its estimate, instead of five
+- [Watch and publish shapes](/quest/m1/api-watch-publish.md) - props objects everywhere, silent `latency`/`jitter` aliases refuse, `Sync` stops needing a jitter bridge, rooms get bandwidth
+- [Gateway types](/quest/m1/api-gateways.md) - no `anyhow` in a gateway `Error`, `PathOwned` prefixes, `Duration` segments, `moq_rtc::Server::new(config)`, an SRT reject with a reason
+- [libmoq units](/quest/m1/api-libmoq-units.md) - `moq_client_config` is all microseconds, the header declares every enum and error code, NULL callbacks are refused
 - [Cluster -01](/quest/m1/cluster-01/README.md) - rs/moq-net and js/net speak the revised cluster extension (HOP_ID, REQUEST_UPDATE repricing) and -01 is published
 - [Track demand](/quest/m1/libmoq-track-demand.md) - a C publisher sees used/unused per track and serves dynamic track and group requests, so an encoder runs only while someone watches
 - [Python teardown panic](/quest/m1/py-smoke-teardown-panic.md) - the python smoke pair never aborts the moq-ffi thread on subscriber teardown

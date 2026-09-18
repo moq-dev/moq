@@ -15,7 +15,7 @@ behind a lock or an `ArcSwap`, moves its presence gauge from the old tier's
 counters to the new on a swap, and `Scope`/`Meter` either re-resolve on the
 next bump (a lookup per bump, which the payload path has avoided) or hold an
 `Arc` the session swaps. Traffic already counted stays where it was. The
-relay's `connection::recheck` then applies the tier instead of logging it, and
+relay's `auth::Lease::ended` (`rs/moq-relay/src/auth.rs`) then applies the tier instead of logging it, and
 `tests/auth_lifetime.rs` asserts the swap through the stats registry. Run
 `/plan-quests` on this file.
 
