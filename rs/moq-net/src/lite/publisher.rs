@@ -245,11 +245,12 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> Publisher<S
 		let mut run = AnnounceRun::new(prefix.as_path().to_owned(), self_origin, version);
 		run.egress = *egress.read();
 		kio::wait(|waiter| {
-			let moved = egress.poll(waiter, |price| match **price != run.egress {
-				true => Poll::Ready(()),
-				false => Poll::Pending,
-			});
-			if let Poll::Ready(price) = moved {
+			loop {
+				let moved = egress.poll(waiter, |price| match **price != run.egress {
+					true => Poll::Ready(()),
+					false => Poll::Pending,
+				});
+				let Poll::Ready(price) = moved else { break };
 				let price = *price;
 				if let Err(err) = run.reprice(stream, price) {
 					return Poll::Ready(Err(err));
@@ -522,11 +523,19 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> ProbeServe<
 
 			// Pad toward the target with whatever the last tick's traffic left short,
 			// once the previous padding has drained. Bounded by the congestion window
-			// through the transport, and behind every other stream.
+			// through the transport, and behind every other stream. The transport's
+			// byte counter is the sending rate; a transport that reports none falls
+			// back to the payload this session served, so a busy link is never padded
+			// as if it were idle.
 			if self.shared.pads
 				&& let Some(target) = self.target
 			{
-				let sent_now = self.shared.session.stats().bytes_sent().unwrap_or(0);
+				let sent_now = self
+					.shared
+					.session
+					.stats()
+					.bytes_sent()
+					.unwrap_or_else(|| self.shared.served.bytes.load(std::sync::atomic::Ordering::Relaxed));
 				let sent_since = self.sent.map(|prev| sent_now.saturating_sub(prev)).unwrap_or(0);
 				self.sent = Some(sent_now);
 				if self.padding.is_none()
@@ -664,12 +673,14 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 				AnnounceState::Run { origin, announced, run } => {
 					let stream = self.stream.as_mut().expect("stream present");
 					// A moved egress price re-prices every live advertisement before more
-					// updates are streamed; the poll registers the waiter for the next move.
-					let moved = self.shared.egress.poll(waiter, |price| match **price != run.egress {
-						true => Poll::Ready(()),
-						false => Poll::Pending,
-					});
-					if let Poll::Ready(price) = moved {
+					// updates are streamed. Poll until Pending: only a Pending poll leaves
+					// the waiter registered for the next move.
+					loop {
+						let moved = self.shared.egress.poll(waiter, |price| match **price != run.egress {
+							true => Poll::Ready(()),
+							false => Poll::Pending,
+						});
+						let Poll::Ready(price) = moved else { break };
 						let price = *price;
 						if let Err(err) = run.reprice(stream, price) {
 							self.stream.take().expect("stream present").writer.abort(&err);
@@ -2071,6 +2082,17 @@ mod announce_test {
 			other => panic!("expected a repriced restart, got {other:?}"),
 		}
 
+		// A second move with nothing else waking the loop re-prices too: the
+		// poll that saw the first move registered no waiter.
+		*h.egress.lock() = 7;
+		settle().await;
+		match h.wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::Restart { id: 0, cost, .. }] => {
+				assert_eq!(*cost, crate::origin::Cost::new(14));
+			}
+			other => panic!("expected a second repriced restart, got {other:?}"),
+		}
+
 		// A route update after the re-price still carries the price.
 		h.announcement
 			.update(crate::origin::Route::default().with_hops(pub_hops()).with_cost(3))
@@ -2078,7 +2100,7 @@ mod announce_test {
 		settle().await;
 		match h.wire.take_announces().as_slice() {
 			[lite::AnnounceBroadcast::Restart { id: 0, cost, .. }] => {
-				assert_eq!(*cost, crate::origin::Cost::new(8));
+				assert_eq!(*cost, crate::origin::Cost::new(10));
 			}
 			other => panic!("expected a priced restart, got {other:?}"),
 		}
@@ -2095,13 +2117,13 @@ mod announce_test {
 		match h.wire.take_announces().as_slice() {
 			[lite::AnnounceBroadcast::Active { suffix, cost, .. }] => {
 				assert_eq!(suffix.as_str(), "mic");
-				assert_eq!(*cost, crate::origin::Cost::new(6));
+				assert_eq!(*cost, crate::origin::Cost::new(8));
 			}
 			other => panic!("expected a priced announce, got {other:?}"),
 		}
 
 		// Writing the same price again is not a move.
-		*h.egress.lock() = 5;
+		*h.egress.lock() = 7;
 		settle().await;
 		h.assert_idle();
 

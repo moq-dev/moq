@@ -1117,8 +1117,9 @@ impl<S: crate::transport::poll::Session> ProbeStream<S> {
 				ProbeState::Read { stream, target } => {
 					// A moved target goes to a peer that can act on it: one that advertised
 					// Increase on a wire with a Padding Stream. Anything else only reports,
-					// and a PROBE it never expected is a stream it may not read past.
-					if self.subscriber.version.has_padding()
+					// and a PROBE it never expected is a stream it may not read past. Poll
+					// until Pending so the waiter stays registered for the next move.
+					while self.subscriber.version.has_padding()
 						&& let Poll::Ready(level) = self.subscriber.peer_setup.poll_probe_level(waiter)
 						&& level >= lite::ProbeLevel::Increase
 						&& let Poll::Ready(wanted) =
