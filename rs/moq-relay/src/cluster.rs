@@ -1109,12 +1109,19 @@ impl Cluster {
 		parse_peer_list(config.connect.clone(), None).context("invalid --cluster-connect peer list")?;
 		let pricing = config.cost.pricing()?;
 		let mut origin_config = origin::Config::new(id);
+		// A route only moves to a challenger that beats it by the hop penalty, the
+		// same margin the detour log applies, so link prices drifting inside their
+		// band never flip a path.
+		if let Some(pricing) = &pricing {
+			origin_config.switch_margin = u64::try_from(pricing.hop_penalty.as_millis()).unwrap_or(u64::MAX);
+		}
 		if let Some(cache) = cache {
 			origin_config.pool = cache.pool;
 			origin_config.cache_duration = cache.duration;
 		}
 		let origin = moq_tokio::origin::spawn(origin_config);
-		let nodes = crate::nodes::Nodes::new(origin.clone());
+		let links = Links::default();
+		let nodes = crate::nodes::Nodes::new(origin.clone()).with_links(links.clone());
 		tracing::info!(hop_id = %origin.id(), configured = config.id.is_some(), "cluster initialized");
 		Ok(Cluster {
 			config,
@@ -1125,7 +1132,7 @@ impl Cluster {
 			#[cfg(feature = "cluster-lan")]
 			lan_auth: Arc::new(std::sync::OnceLock::new()),
 			nodes,
-			links: Links::default(),
+			links,
 			pricing,
 			connection_ids: Arc::default(),
 			client_tls: None,
@@ -2242,12 +2249,12 @@ const DEFAULT_HOP_PENALTY: Duration = Duration::from_millis(8);
 /// Default for [`CostConfig::step`].
 const DEFAULT_COST_STEP: Duration = Duration::from_millis(5);
 
-/// Default for [`CostConfig::loss_weight`]: a group of about a hundred packets
-/// stalls once per group at 1% loss, so 1% costs a whole RTT.
-const DEFAULT_LOSS_WEIGHT: u32 = 100;
-
-/// Samples the RTT median and the bandwidth minimum are taken over.
+/// Samples the RTT median is taken over.
 const LINK_WINDOW: usize = 15;
+
+/// What one QUIC packet carries of a group, to turn a group's bytes into the
+/// packets a loss can hit.
+const PACKET_BYTES: f64 = 1200.0;
 
 /// Fewest packets the loss window must hold before its ratio counts: below
 /// this one lost packet swings the price by more than a whole RTT.
@@ -2266,11 +2273,11 @@ const PRICE_BAND: u64 = 10;
 /// Measured link pricing (`[cluster.cost]`).
 ///
 /// A cluster link nobody priced with `cost` is priced by what it does to a live
-/// stream: its RTT, one more RTT per expected retransmission, and a penalty for
-/// terminating QUIC on one more relay. Each relay measures the links it sends on
-/// and folds the price into the routes it forwards (see
+/// stream: its RTT, one more RTT for the share of groups a lost packet stalls,
+/// and a penalty for terminating QUIC on one more relay. Each relay measures the
+/// links it sends on and folds the price into the routes it forwards (see
 /// [`moq_net::Session::set_egress`]), so a `cost` configured at either end still
-/// wins and a peer that does not measure is priced at the default of 1.
+/// wins.
 #[derive(usage::Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde_with::skip_serializing_none]
@@ -2312,16 +2319,6 @@ pub struct CostConfig {
 	)]
 	pub hop_penalty: Option<moq_tokio::Duration>,
 
-	/// How many RTTs a unit of loss costs: the price adds `loss_weight * loss * rtt`.
-	/// Defaults to 100, so 1% loss costs one RTT.
-	#[usage(
-		name = "cluster-cost-loss-weight",
-		long = "cluster-cost-loss-weight",
-		env = "MOQ_CLUSTER_COST_LOSS_WEIGHT",
-		setting = "cluster.cost.loss_weight"
-	)]
-	pub loss_weight: Option<u32>,
-
 	/// Prices round to this step and only move once the measured price has
 	/// drifted a whole step from the announced one, e.g. "5ms". Defaults to 5ms.
 	#[usage(
@@ -2332,19 +2329,6 @@ pub struct CostConfig {
 		setting = "cluster.cost.step"
 	)]
 	pub step: Option<moq_tokio::Duration>,
-
-	/// Bits per second below which the sender's bandwidth estimate makes a link
-	/// unusable: it is priced at the ceiling so every other path outranks it.
-	/// Unset never does. The estimate comes from the congestion controller, so
-	/// it only reflects capacity while the link is carrying traffic.
-	#[usage(
-		name = "cluster-cost-min-bandwidth",
-		long = "cluster-cost-min-bandwidth",
-		env = "MOQ_CLUSTER_COST_MIN_BANDWIDTH",
-		value_name = "BPS",
-		setting = "cluster.cost.min_bandwidth"
-	)]
-	pub min_bandwidth: Option<u64>,
 }
 
 impl Default for CostConfig {
@@ -2353,9 +2337,7 @@ impl Default for CostConfig {
 			measure: true,
 			interval: None,
 			hop_penalty: None,
-			loss_weight: None,
 			step: None,
-			min_bandwidth: None,
 		}
 	}
 }
@@ -2376,9 +2358,7 @@ impl CostConfig {
 		Ok(Some(Pricing {
 			interval,
 			hop_penalty: self.hop_penalty.map(|d| *d).unwrap_or(DEFAULT_HOP_PENALTY),
-			loss_weight: self.loss_weight.unwrap_or(DEFAULT_LOSS_WEIGHT),
 			step,
-			min_bandwidth: self.min_bandwidth,
 		}))
 	}
 }
@@ -2388,19 +2368,18 @@ impl CostConfig {
 struct Pricing {
 	interval: Duration,
 	hop_penalty: Duration,
-	loss_weight: u32,
 	step: Duration,
-	min_bandwidth: Option<u64>,
 }
 
-/// One reading of a link's transport counters, from the sending side.
+/// One reading of a link's counters, from the sending side.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct LinkSample {
 	rtt: Option<Duration>,
 	packets_sent: Option<u64>,
 	packets_lost: Option<u64>,
-	/// The congestion controller's send estimate, in bits per second.
-	bandwidth: Option<u64>,
+	/// Groups served over the link and their payload, from MoQ's own count.
+	groups_sent: Option<u64>,
+	payload_sent: Option<u64>,
 }
 
 impl From<&moq_net::ConnectionStats> for LinkSample {
@@ -2409,7 +2388,8 @@ impl From<&moq_net::ConnectionStats> for LinkSample {
 			rtt: stats.rtt,
 			packets_sent: stats.packets_sent,
 			packets_lost: stats.packets_lost,
-			bandwidth: stats.estimated_send_rate,
+			groups_sent: stats.groups_sent,
+			payload_sent: stats.payload_sent,
 		}
 	}
 }
@@ -2420,24 +2400,46 @@ struct LinkEstimate {
 	rtt: Duration,
 	/// The fraction of sent packets declared lost, `0.0` until traffic has shown any.
 	loss: f64,
-	bandwidth: Option<u64>,
+	/// Mean payload bytes per group served over the link, once it has served one.
+	group_bytes: Option<u64>,
+}
+
+impl LinkEstimate {
+	/// The share of groups a lost packet stalls: one minus the chance every packet
+	/// of a group of this link's size gets through. A link that has served no
+	/// group yet is priced as if a group were one packet.
+	fn stall(&self) -> f64 {
+		let packets = self
+			.group_bytes
+			.map(|bytes| (bytes as f64 / PACKET_BYTES).max(1.0))
+			.unwrap_or(1.0);
+		1.0 - (1.0 - self.loss).powf(packets)
+	}
+}
+
+/// One sampling interval's traffic on a link.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Interval {
+	sent: u64,
+	lost: u64,
+	groups: u64,
+	bytes: u64,
 }
 
 /// Smooths a link's samples: a median over the last [`LINK_WINDOW`] intervals
-/// for RTT (one slow ack must not move a route), a minimum over the same for
-/// bandwidth, and for loss the lost-to-sent ratio over the last
-/// [`LOSS_WINDOW_PACKETS`] packets, however long ago they were sent. A ratio per
-/// interval is far too noisy at the loss rates that matter (one packet in a
-/// hundred), and a window in time would let an idle link's keepalives wash out
-/// what its last stream measured.
+/// for RTT (one slow ack must not move a route), and over the last
+/// [`LOSS_WINDOW_PACKETS`] packets, however long ago they were sent, the
+/// lost-to-sent ratio and the mean group size. A ratio per interval is far too
+/// noisy at the loss rates that matter (one packet in a hundred), and a window
+/// in time would let an idle link's keepalives wash out what its last stream
+/// measured.
 #[derive(Default)]
 struct LinkMeter {
 	rtts: VecDeque<Duration>,
-	bandwidths: VecDeque<u64>,
-	/// `(sent, lost)` per interval that carried traffic, oldest first.
-	traffic: VecDeque<(u64, u64)>,
-	/// The `(sent, lost)` counters at the previous sample.
-	counters: Option<(u64, u64)>,
+	/// The intervals that carried traffic, oldest first.
+	traffic: VecDeque<Interval>,
+	/// The cumulative counters at the previous sample.
+	counters: Option<Interval>,
 }
 
 impl LinkMeter {
@@ -2446,26 +2448,33 @@ impl LinkMeter {
 		if let Some(rtt) = sample.rtt {
 			push_window(&mut self.rtts, rtt);
 		}
-		if let Some(bandwidth) = sample.bandwidth {
-			push_window(&mut self.bandwidths, bandwidth);
-		}
-		if let (Some(sent), Some(lost)) = (sample.packets_sent, sample.packets_lost)
-			&& let Some((prev_sent, prev_lost)) = self.counters.replace((sent, lost))
-		{
-			let delta_sent = sent.saturating_sub(prev_sent);
-			// Loss detection lags sending, so an interval can declare more lost
-			// than it sent; the ratio is clamped where it is read.
-			let delta_lost = lost.saturating_sub(prev_lost);
-			if delta_sent > 0 {
-				self.traffic.push_back((delta_sent, delta_lost));
-				// Keep the newest intervals worth LOSS_WINDOW_PACKETS; the oldest go
-				// once the rest still cover the window on their own.
-				let mut total: u64 = self.traffic.iter().map(|(sent, _)| sent).sum();
-				while let Some((oldest, _)) = self.traffic.front()
-					&& total - oldest >= LOSS_WINDOW_PACKETS
-				{
-					total -= oldest;
-					self.traffic.pop_front();
+		if let (Some(sent), Some(lost)) = (sample.packets_sent, sample.packets_lost) {
+			let now = Interval {
+				sent,
+				lost,
+				groups: sample.groups_sent.unwrap_or(0),
+				bytes: sample.payload_sent.unwrap_or(0),
+			};
+			if let Some(prev) = self.counters.replace(now) {
+				let delta = Interval {
+					sent: sent.saturating_sub(prev.sent),
+					// Loss detection lags sending, so an interval can declare more
+					// lost than it sent; the ratio is clamped where it is read.
+					lost: lost.saturating_sub(prev.lost),
+					groups: now.groups.saturating_sub(prev.groups),
+					bytes: now.bytes.saturating_sub(prev.bytes),
+				};
+				if delta.sent > 0 {
+					self.traffic.push_back(delta);
+					// Keep the newest intervals worth LOSS_WINDOW_PACKETS; the oldest
+					// go once the rest still cover the window on their own.
+					let mut total: u64 = self.traffic.iter().map(|i| i.sent).sum();
+					while let Some(oldest) = self.traffic.front()
+						&& total - oldest.sent >= LOSS_WINDOW_PACKETS
+					{
+						total -= oldest.sent;
+						self.traffic.pop_front();
+					}
 				}
 			}
 		}
@@ -2478,24 +2487,26 @@ impl LinkMeter {
 		}
 		let mut sorted: Vec<Duration> = self.rtts.iter().copied().collect();
 		sorted.sort_unstable();
-		let (sent, lost) = self
-			.traffic
-			.iter()
-			.fold((0u64, 0u64), |(s, l), (sent, lost)| (s + sent, l + lost));
-		let loss = match sent >= LOSS_MIN_PACKETS {
-			true => (lost as f64 / sent as f64).min(1.0),
+		let total = self.traffic.iter().fold(Interval::default(), |acc, i| Interval {
+			sent: acc.sent + i.sent,
+			lost: acc.lost + i.lost,
+			groups: acc.groups + i.groups,
+			bytes: acc.bytes + i.bytes,
+		});
+		let loss = match total.sent >= LOSS_MIN_PACKETS {
+			true => (total.lost as f64 / total.sent as f64).min(1.0),
 			false => 0.0,
 		};
 		Some(LinkEstimate {
 			rtt: sorted[sorted.len() / 2],
 			loss,
-			bandwidth: self.bandwidths.iter().copied().min(),
+			group_bytes: (total.groups > 0).then(|| total.bytes / total.groups),
 		})
 	}
 
 	/// Whether anything has been observed since the last reset.
 	fn is_empty(&self) -> bool {
-		self.rtts.is_empty() && self.bandwidths.is_empty() && self.counters.is_none()
+		self.rtts.is_empty() && self.counters.is_none()
 	}
 }
 
@@ -2506,19 +2517,13 @@ fn push_window<T>(window: &mut VecDeque<T>, value: T) {
 	window.push_back(value);
 }
 
-/// What a link does to a live stream, in milliseconds: its RTT, one more RTT per
-/// expected retransmission (a lost packet costs about an RTT to recover), and the
-/// hop penalty. Below the bandwidth floor the link is unusable and prices at the
-/// ceiling, which ranks last without wrapping.
+/// What a link does to a live stream, in milliseconds: its RTT, one more RTT
+/// for the share of groups a lost packet stalls (a loss costs about an RTT to
+/// recover and holds every frame behind it in the group), and the hop penalty.
 fn link_price(estimate: &LinkEstimate, pricing: &Pricing) -> u64 {
-	if let (Some(floor), Some(bandwidth)) = (pricing.min_bandwidth, estimate.bandwidth)
-		&& bandwidth < floor
-	{
-		return moq_net::origin::MAX_COST;
-	}
 	let rtt = estimate.rtt.as_secs_f64() * 1000.0;
 	let penalty = pricing.hop_penalty.as_secs_f64() * 1000.0;
-	let price = rtt + f64::from(pricing.loss_weight) * estimate.loss * rtt + penalty;
+	let price = rtt * (1.0 + estimate.stall()) + penalty;
 	(price.round() as u64).min(moq_net::origin::MAX_COST)
 }
 
@@ -2578,9 +2583,9 @@ pub(crate) struct LinkEntry {
 	pub rtt_ms: f64,
 	/// The smoothed fraction of sent packets lost.
 	pub loss: f64,
-	/// The lowest recent send estimate, in bits per second, when the transport reports one.
+	/// Mean payload bytes per group served over the link, once it has served one.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub bandwidth: Option<u64>,
+	pub group_bytes: Option<u64>,
 }
 
 /// The table a relay publishes under [`LINKS_PREFIX`]: the measured price of
@@ -2609,7 +2614,7 @@ struct LinkStatus {
 /// Every session this relay prices, keyed by connection id, plus the wakeup for
 /// the table publisher and the publisher itself.
 #[derive(Clone, Default)]
-struct Links(Arc<LinksInner>);
+pub(crate) struct Links(Arc<LinksInner>);
 
 #[derive(Default)]
 struct LinksInner {
@@ -2633,7 +2638,7 @@ impl Links {
 
 	/// The table to publish: one entry per identified peer, at the cheapest of
 	/// its sessions.
-	fn table(&self, hop: u64, node: Option<String>) -> LinkTable {
+	pub(crate) fn table(&self, hop: u64, node: Option<String>) -> LinkTable {
 		let mut by_peer: BTreeMap<u64, LinkEntry> = BTreeMap::new();
 		for status in self.0.state.lock().expect("links poisoned").values() {
 			let Some(peer) = status.peer else { continue };
@@ -2642,7 +2647,7 @@ impl Links {
 				cost: status.cost,
 				rtt_ms: status.estimate.rtt.as_secs_f64() * 1000.0,
 				loss: status.estimate.loss,
-				bandwidth: status.estimate.bandwidth,
+				group_bytes: status.estimate.group_bytes,
 			};
 			match by_peer.get(&peer) {
 				Some(existing) if existing.cost <= entry.cost => {}
@@ -2711,7 +2716,7 @@ impl Link {
 				cost = price,
 				rtt_ms = estimate.rtt.as_millis() as u64,
 				loss = format_args!("{:.4}", estimate.loss),
-				bandwidth = estimate.bandwidth.unwrap_or(0),
+				group_bytes = estimate.group_bytes.unwrap_or(0),
 				"priced cluster link"
 			);
 		}
@@ -4293,52 +4298,41 @@ mod tests {
 		dialed.release("never-dialed", DialSource::Mdns, &mut |_| panic!("must not redial"));
 	}
 
-	fn price_config(hop_penalty_ms: u64, loss_weight: u32, step_ms: u64, min_bandwidth: Option<u64>) -> Pricing {
+	fn price_config(hop_penalty_ms: u64, step_ms: u64) -> Pricing {
 		Pricing {
 			interval: Duration::from_secs(1),
 			hop_penalty: Duration::from_millis(hop_penalty_ms),
-			loss_weight,
 			step: Duration::from_millis(step_ms),
-			min_bandwidth,
 		}
 	}
 
-	fn estimate(rtt_ms: u64, loss: f64, bandwidth: Option<u64>) -> LinkEstimate {
+	fn estimate(rtt_ms: u64, loss: f64, group_bytes: Option<u64>) -> LinkEstimate {
 		LinkEstimate {
 			rtt: Duration::from_millis(rtt_ms),
 			loss,
-			bandwidth,
+			group_bytes,
 		}
 	}
 
-	/// The price is the RTT, one RTT per expected retransmission, and the hop
-	/// penalty; a clean link pays only its RTT and the penalty.
+	/// The price is the RTT, one more RTT for the share of groups a loss stalls,
+	/// and the hop penalty: a clean link pays its RTT and the penalty, a link
+	/// whose groups are hundreds of packets pays nearly a whole extra RTT at 1%
+	/// loss, and one with tiny groups barely notices the same loss.
 	#[test]
-	fn link_price_charges_rtt_loss_and_the_hop() {
-		let pricing = price_config(8, 100, 5, None);
+	fn link_price_charges_rtt_stalls_and_the_hop() {
+		let pricing = price_config(8, 5);
 		assert_eq!(link_price(&estimate(110, 0.0, None), &pricing), 118);
-		assert_eq!(link_price(&estimate(110, 0.01, None), &pricing), 228);
-		assert_eq!(link_price(&estimate(50, 0.0, None), &pricing), 58);
-		// Weight and penalty are the operator's knobs.
-		assert_eq!(
-			link_price(&estimate(100, 0.01, None), &price_config(0, 10, 5, None)),
-			110
-		);
-	}
-
-	/// Below the bandwidth floor the link is unusable: priced at the wire ceiling,
-	/// which ranks last without wrapping. No floor, or no estimate, never trips it.
-	#[test]
-	fn link_price_floors_on_bandwidth() {
-		let floor = price_config(8, 100, 5, Some(5_000_000));
-		assert_eq!(
-			link_price(&estimate(10, 0.0, Some(4_000_000)), &floor),
-			moq_net::origin::MAX_COST
-		);
-		assert_eq!(link_price(&estimate(10, 0.0, Some(5_000_000)), &floor), 18);
-		assert_eq!(link_price(&estimate(10, 0.0, None), &floor), 18);
-		let open = price_config(8, 100, 5, None);
-		assert_eq!(link_price(&estimate(10, 0.0, Some(1)), &open), 18);
+		assert_eq!(link_price(&estimate(50, 0.0, Some(320 * 1024)), &pricing), 58);
+		// 320 KiB groups are 273 packets: 1 - 0.99^273 = 0.936 of them stall.
+		assert_eq!(link_price(&estimate(110, 0.01, Some(320 * 1024)), &pricing), 221);
+		// 4 KiB groups are 4 packets: 4% of them stall.
+		assert_eq!(link_price(&estimate(110, 0.01, Some(4 * 1024)), &pricing), 122);
+		// No group served yet prices a group as one packet.
+		assert_eq!(link_price(&estimate(110, 0.01, None), &pricing), 119);
+		// Every packet lost stalls every group.
+		assert_eq!(link_price(&estimate(100, 1.0, Some(1)), &pricing), 208);
+		// Penalty and step are the operator's knobs.
+		assert_eq!(link_price(&estimate(100, 0.0, None), &price_config(0, 5)), 100);
 	}
 
 	/// Prices round to the step and hold until the raw price drifts a whole step
@@ -4371,68 +4365,71 @@ mod tests {
 		assert_eq!(fine.update(8), Some(8));
 	}
 
-	fn sample(rtt_ms: u64, sent: u64, lost: u64, bandwidth: Option<u64>) -> LinkSample {
+	fn sample(rtt_ms: u64, sent: u64, lost: u64, groups: u64, bytes: u64) -> LinkSample {
 		LinkSample {
 			rtt: Some(Duration::from_millis(rtt_ms)),
 			packets_sent: Some(sent),
 			packets_lost: Some(lost),
-			bandwidth,
+			groups_sent: Some(groups),
+			payload_sent: Some(bytes),
 		}
 	}
 
-	/// RTT is a windowed median (one slow sample does not move it), loss the
-	/// ratio over every packet the window's intervals carried (idle intervals
-	/// contribute nothing), and bandwidth the windowed minimum.
+	/// RTT is a windowed median (one slow sample does not move it); loss and the
+	/// group size are ratios over every packet the window's intervals carried,
+	/// and idle intervals contribute nothing.
 	#[test]
 	fn meter_smooths_a_synthetic_link() {
 		let mut meter = LinkMeter::default();
 		assert_eq!(meter.observe(LinkSample::default()), None, "no RTT yet");
 
-		let first = meter.observe(sample(50, 0, 0, Some(10_000_000))).unwrap();
-		assert_eq!(first, estimate(50, 0.0, Some(10_000_000)));
+		let first = meter.observe(sample(50, 0, 0, 0, 0)).unwrap();
+		assert_eq!(first, estimate(50, 0.0, None));
 
 		// One outlier among a window of steady samples.
-		meter.observe(sample(50, 100, 0, Some(9_000_000)));
-		let spike = meter.observe(sample(400, 200, 0, Some(12_000_000))).unwrap();
+		meter.observe(sample(50, 100, 0, 1, 100_000));
+		let spike = meter.observe(sample(400, 200, 0, 2, 200_000)).unwrap();
 		assert_eq!(spike.rtt, Duration::from_millis(50), "the median ignores one spike");
-		assert_eq!(spike.bandwidth, Some(9_000_000), "the minimum over the window");
+		assert_eq!(spike.group_bytes, Some(100_000), "the mean group over the window");
 
 		// Ten lost out of the 1200 packets the window has seen so far.
-		let lossy = meter.observe(sample(50, 1200, 10, None)).unwrap();
+		let lossy = meter.observe(sample(50, 1200, 10, 3, 300_000)).unwrap();
 		assert!((lossy.loss - 10.0 / 1200.0).abs() < 1e-9, "{lossy:?}");
-		let clean = meter.observe(sample(50, 2200, 10, None)).unwrap();
+		let clean = meter.observe(sample(50, 2200, 10, 4, 400_000)).unwrap();
 		assert!((clean.loss - 10.0 / 2200.0).abs() < 1e-9, "{clean:?}");
 
 		// An idle interval teaches nothing: the estimate stands.
-		let idle = meter.observe(sample(50, 2200, 10, None)).unwrap();
+		let idle = meter.observe(sample(50, 2200, 10, 4, 400_000)).unwrap();
 		assert!((idle.loss - 10.0 / 2200.0).abs() < 1e-9, "{idle:?}");
+		assert_eq!(idle.group_bytes, Some(100_000));
 
 		// Too few packets to believe: a lost handshake packet is not 50% loss.
 		let mut fresh = LinkMeter::default();
-		fresh.observe(sample(50, 0, 0, None));
-		let sparse = fresh.observe(sample(50, 2, 1, None)).unwrap();
+		fresh.observe(sample(50, 0, 0, 0, 0));
+		let sparse = fresh.observe(sample(50, 2, 1, 0, 0)).unwrap();
 		assert_eq!(sparse.loss, 0.0, "{sparse:?}");
-		let direct = fresh.observe(sample(50, 1002, 11, None)).unwrap();
+		let direct = fresh.observe(sample(50, 1002, 11, 0, 0)).unwrap();
 		assert!((direct.loss - 11.0 / 1002.0).abs() < 1e-9, "{direct:?}");
+		assert_eq!(direct.group_bytes, None, "no group served yet");
 
 		// Detection lags sending, so an interval can lose more than it sent.
-		let burst = meter.observe(sample(50, 2240, 3000, None)).unwrap();
+		let burst = meter.observe(sample(50, 2240, 3000, 4, 400_000)).unwrap();
 		assert!(burst.loss <= 1.0, "{burst:?}");
 
-		// The RTT and bandwidth windows forget: enough steady samples push the
-		// spike out. Loss is windowed by packets, not samples: fifteen keepalive
-		// intervals of a hundred packets do not flush the burst.
+		// The RTT window forgets: enough steady samples push the spike out. Loss
+		// is windowed by packets, not samples: fifteen keepalive intervals of a
+		// hundred packets do not flush the burst, and keep the group size too.
 		for i in 1..=LINK_WINDOW as u64 {
-			meter.observe(sample(60, 2240 + i * 100, 3000, Some(20_000_000)));
+			meter.observe(sample(60, 2240 + i * 100, 3000, 4, 400_000));
 		}
 		let settled = meter.estimate().unwrap();
 		assert_eq!(settled.rtt, Duration::from_millis(60));
-		assert_eq!(settled.bandwidth, Some(20_000_000));
 		assert!(settled.loss > 0.5, "{settled:?}");
+		assert_eq!(settled.group_bytes, Some(100_000));
 
 		// Once LOSS_WINDOW_PACKETS of clean traffic have followed, the burst is gone.
 		let after = 2240 + LINK_WINDOW as u64 * 100 + LOSS_WINDOW_PACKETS;
-		let flushed = meter.observe(sample(60, after, 3000, None)).unwrap();
+		let flushed = meter.observe(sample(60, after, 3000, 4, 400_000)).unwrap();
 		assert_eq!(flushed.loss, 0.0, "{flushed:?}");
 	}
 
@@ -4442,7 +4439,7 @@ mod tests {
 			cost,
 			rtt_ms: cost as f64,
 			loss: 0.0,
-			bandwidth: None,
+			group_bytes: None,
 		}
 	}
 
@@ -4532,9 +4529,7 @@ mod tests {
 		let pricing = CostConfig::default().pricing().unwrap().expect("measuring by default");
 		assert_eq!(pricing.interval, DEFAULT_COST_INTERVAL);
 		assert_eq!(pricing.hop_penalty, DEFAULT_HOP_PENALTY);
-		assert_eq!(pricing.loss_weight, DEFAULT_LOSS_WEIGHT);
 		assert_eq!(pricing.step, DEFAULT_COST_STEP);
-		assert_eq!(pricing.min_bandwidth, None);
 
 		let off = CostConfig {
 			measure: false,
@@ -4559,7 +4554,7 @@ mod tests {
 	fn cluster_cost_survives_toml_merge() {
 		let _env = crate::test_env::EnvGuard::lock();
 
-		let toml = "[cluster.cost]\nmeasure = false\nhop_penalty = \"12ms\"\nloss_weight = 50\nstep = \"10ms\"\nmin_bandwidth = 2000000\n";
+		let toml = "[cluster.cost]\nmeasure = false\nhop_penalty = \"12ms\"\nstep = \"10ms\"\n";
 		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
 		std::fs::create_dir_all(&dir).unwrap();
 		let path = dir.join("cluster-cost-toml.toml");
@@ -4570,20 +4565,16 @@ mod tests {
 		let cost = &config.cluster.cost;
 		assert!(!cost.measure, "TOML's measure = false must survive the CLI re-parse");
 		assert_eq!(cost.hop_penalty.map(|d| *d), Some(Duration::from_millis(12)));
-		assert_eq!(cost.loss_weight, Some(50));
 		assert_eq!(cost.step.map(|d| *d), Some(Duration::from_millis(10)));
-		assert_eq!(cost.min_bandwidth, Some(2_000_000));
 
 		// And a flag wins over the file.
 		let args = vec![
 			std::ffi::OsString::from("moq-relay"),
 			std::ffi::OsString::from(&path),
-			std::ffi::OsString::from("--cluster-cost-loss-weight=7"),
 			std::ffi::OsString::from("--cluster-cost-measure=true"),
 			std::ffi::OsString::from("--cluster-cost-hop-penalty=3ms"),
 		];
 		let config = RelayConfig::parse_and_merge(args).expect("config load");
-		assert_eq!(config.cluster.cost.loss_weight, Some(7), "u32 flag");
 		assert!(config.cluster.cost.measure, "bool flag");
 		assert_eq!(
 			config.cluster.cost.hop_penalty.map(|d| *d),

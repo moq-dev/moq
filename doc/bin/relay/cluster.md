@@ -41,31 +41,32 @@ a full mesh trades that for one fewer hop. Mix shapes as your traffic demands.
 Every link has a price, and the cheapest path wins. By default the price is
 measured: each relay samples the cluster sessions it sends on once a second and
 prices a link by what it does to a live stream, its round-trip time, one more
-round trip per expected retransmission, and a penalty for terminating QUIC on
-one more relay:
+round trip for the share of groups a lost packet stalls, and a penalty for
+terminating QUIC on one more relay:
 
 ```
-cost_ms = rtt + loss_weight * loss * rtt + hop_penalty
+cost_ms = rtt * (1 + stall) + hop_penalty
+stall   = 1 - (1 - loss) ^ (group_bytes / 1200)
 ```
 
-The sender prices the link because only it sees its own loss and bandwidth
-estimate, and it folds the price into every route it forwards, so nothing new
-crosses the wire. RTT is a median over the last 15 samples, loss the ratio
-over every packet those samples carried, and bandwidth the lowest recent
-estimate; prices round to `step` and only move once they have drifted a whole
-step or a tenth of the price, so a route does not flap on one slow ack or a
-breathing loss estimate. Loss is only learned from traffic, so a link that has
-carried nothing is priced on its RTT until a stream crosses it. A link the
-congestion controller estimates below `min_bandwidth` is priced at the ceiling
-and used last. Costs ride moq-lite-06 and the MoQ Cluster extension; a link
+A lost packet costs about a round trip to recover and holds every frame behind
+it in its group, so what loss does to a stream depends on how many packets a
+group spans: 1% loss stalls nearly every 300 KB video group and one in
+twenty-five 4 KB audio groups. The sender prices the link because only it sees
+its own loss and the groups it sends, and it folds the price into every route
+it forwards, so nothing new crosses the wire. RTT is a median over the last 15
+samples; loss and the group size are ratios over the last 5000 packets sent,
+however long ago, so an idle link keeps what its last stream measured. Prices
+round to `step` and only move once they have drifted a whole step or a tenth of
+the price, and a route only moves to a path that beats the one in use by more
+than `hop_penalty`, so a path does not flap on one slow ack or on several links
+drifting at once. Costs ride moq-lite-06 and the MoQ Cluster extension; a link
 negotiated on an older version carries hop counts only, whatever it measures.
 
 ```toml
 [cluster.cost]
 hop_penalty = "8ms"       # What one more relay costs a stream. Default.
-loss_weight = 100         # 1% loss costs one RTT. Default.
 step = "5ms"              # Prices round to this and move by whole steps. Default.
-# min_bandwidth = 5000000 # Bits per second below which a link is unusable.
 # measure = false         # Price every unpriced link at 1 instead (hop counting).
 ```
 

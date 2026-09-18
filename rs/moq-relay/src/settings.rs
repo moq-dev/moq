@@ -110,14 +110,8 @@ struct ClusterCost {
 	#[usage(env = "MOQ_CLUSTER_COST_HOP_PENALTY", cli("--cluster-cost-hop-penalty"))]
 	hop_penalty: Option<String>,
 
-	#[usage(env = "MOQ_CLUSTER_COST_LOSS_WEIGHT", cli("--cluster-cost-loss-weight"))]
-	loss_weight: Option<u32>,
-
 	#[usage(env = "MOQ_CLUSTER_COST_STEP", cli("--cluster-cost-step"))]
 	step: Option<String>,
-
-	#[usage(env = "MOQ_CLUSTER_COST_MIN_BANDWIDTH", cli("--cluster-cost-min-bandwidth"))]
-	min_bandwidth: Option<u64>,
 }
 
 #[cfg(feature = "cluster-lan")]
