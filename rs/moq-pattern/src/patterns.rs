@@ -54,6 +54,15 @@ impl Patterns {
 		self.0.iter().any(|member| member.overlaps(pattern))
 	}
 
+	/// The paths in both unions, as one union: every member of this one intersected
+	/// with every member of `other`. See [`Pattern::intersect`].
+	pub fn intersect(&self, other: &Self) -> Self {
+		self.0
+			.iter()
+			.flat_map(|member| other.0.iter().flat_map(move |candidate| member.intersect(candidate)))
+			.collect()
+	}
+
 	/// Every member rebased at `root`, as one union. See [`Pattern::rebase`].
 	pub fn rebase(&self, root: &str) -> Self {
 		self.0.iter().flat_map(|member| member.rebase(root)).collect()
@@ -204,6 +213,15 @@ mod tests {
 	fn serde_round_trips_reduced() {
 		let set: Patterns = serde_json::from_str(r#"["a/b", "a/*", "**/c"]"#).unwrap();
 		assert_eq!(serde_json::to_string(&set).unwrap(), r#"["**/c","a/*"]"#);
+	}
+
+	#[test]
+	fn intersect_is_pairwise() {
+		let grant = patterns(&["a/*", "b/**"]);
+		let claim = patterns(&["*/c", "b/d/**"]);
+		assert_eq!(grant.intersect(&claim), patterns(&["a/c", "b/c", "b/d/**"]));
+		assert!(grant.intersect(&patterns(&["x"])).is_empty());
+		assert!(Patterns::new().intersect(&grant).is_empty());
 	}
 
 	#[test]

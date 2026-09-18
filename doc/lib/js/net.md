@@ -40,7 +40,7 @@ for (;;) {
 - **Origins** hold the broadcasts, not the connection: closing a session unannounces them but leaves them created for the next one. `origin.request(path)` prefers a local broadcast, so a page that watches what it publishes reads its own copy with no round trip. Create, populate, then `announce()` for an exact path; use `dynamic(pattern, route)` when the set of paths is not known: an exact-path subscribe before the tracks exist is refused, and announcing only makes a path discoverable.
 - **Connections** race WebTransport against WebSocket. `new Connection({ url })` pools one connection per relay URL and reconnects with backoff, which the elements use. `closed` settles when the handle is released (`null` on a clean close); the failure that stopped retrying the current URL is `error`, and a new URL recovers the same handle. A connection owns one send-rate sampler and one `Bandwidth.Allocator`; publishers reserve against it so their encoder targets sum to the estimate instead of each matching it.
 - **Bandwidth** (`Bandwidth.Allocator`) divides the connection's send-rate estimate by track priority, max-min fair within a tier. An idle track claims nothing. The receive side is untouched.
-- **Discovery** by scope (`origin.announced(scope)`, a prefix-shaped `Path.Pattern` like `live/**`; default everything). Each event's `pattern` is the claim, relative to the origin. `origin.dynamic(pattern, route)` advertises any path pattern.
+- **Discovery** by scope (`origin.announced(scope)`, any `Path.Pattern`: `live/**` for a subtree, `room/*/chat` for each room's chat; default everything). Each event is a match against the scope: `pattern` is the claim clamped to the scope, relative to the origin, and `captures` is what each scope wildcard stood for. `origin.dynamic(pattern, route)` advertises any path pattern.
 - **Subscriptions** carry a priority and max age; groups arrive out of order and are read frame by frame, with `Lagged` when a reader asks for a frame the group never held and `GroupTooLarge` when a write exceeds the cache budget and aborts the group.
 - **Datagrams** on moq-lite 05+ and fetch-by-sequence for history.
 - **Errors** split by scope: a stream reset throws `StreamError` with a `StreamCode`, a session close gives `SessionError` with a `SessionCode`. The registries are disjoint, so the same number means different things in each, and 64+ is yours. Same on either transport. Named conditions like `Lagged` subclass `StreamError`, so one `code` check catches a gap whether it happened here or at the peer, and resetting a moq-lite stream with one sends that code rather than a bare internal error. IETF streams use their own mapping: cancellation sends CANCELLED, other local failures send INTERNAL\_ERROR, and received codes remain opaque.
@@ -78,16 +78,21 @@ Three operations, on an origin:
   advertisement. Announcing again re-prices the standing route.
 - `origin.dynamic(pattern, route)` claims every matching path. A prefix is
   `foo/**`. Hold the returned `Origin.Dynamic` while the claim should stay
-  advertised; `close()` retracts it. A request under a prefix-shaped claim
-  with no local broadcast is a `BroadcastRequest` to `accept` or `reject`.
+  advertised; `close()` retracts it. A request under a claim with no local
+  broadcast is a `BroadcastRequest` to `accept` or `reject`.
 
 A wildcard is a capability, not an inventory. `origin.announced(scope)`
-yields `Announce.Update` values: `pattern` is the claim relative to the origin,
-clamped to `scope`; `active` is false on a retraction, and `route` carries hops and cost while
-advertised (omitted on a retraction). Use
-`pattern.asPrefix()` when you need a prefix-shaped claim; an arbitrary
-pattern is not a broadcast name. Resolving a non-prefix pattern into a
-subscription is not implemented yet. Token grants stay prefixes.
+yields `Announce.Update` values, a match against `scope`: `pattern` is the
+claim clamped to the scope, relative to the origin; `captures` is one pattern
+per wildcard segment of the scope (`alice` for a broadcast at
+`room/alice/chat` under `room/*/chat`, `alice/chat/**` under `room/**` since a
+broadcast claims its subtree, and the wildcard itself where a pattern claim
+cannot pin it); `active` is false on a retraction; and `route` carries hops
+and cost while advertised (omitted on a retraction). Use `pattern.asPrefix()`
+when you need a prefix-shaped claim; an arbitrary pattern is not a broadcast
+name. On the wire a session asks for the scope's literal head and filters
+what the peer echoes, so a scope with wildcards receives its matches from a
+relay only on moq-lite-06, where a non-prefix claim has a message.
 
 Examples in
 [`js/net/examples/`](https://github.com/moq-dev/moq/tree/main/js/net/examples).

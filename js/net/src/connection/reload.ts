@@ -2,7 +2,6 @@ import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals
 import * as Announce from "../announced.ts";
 import { Allocator } from "../bandwidth.ts";
 import { error, SessionCode, SessionError } from "../error.ts";
-import { scopePrefix } from "../internal.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import * as Time from "../time.ts";
@@ -439,8 +438,8 @@ export class Reload {
 	}
 
 	/**
-	 * Subscribe to broadcast announcements under `scope` (a prefix-shaped pattern, default
-	 * everything), spanning reconnects.
+	 * Subscribe to broadcast announcements under `scope` (any pattern, default everything),
+	 * spanning reconnects.
 	 *
 	 * The same {@link Announce.Consumer} stream as {@link Established.announced}, but everything active
 	 * is retracted (an `active: false` update) whenever the connection drops and re-announced on
@@ -452,11 +451,6 @@ export class Reload {
 		// With a consume origin the table already spans reconnects (the forwarder retracts
 		// a dead session's entries), so its stream is the same thing with less machinery.
 		if (this.consume) return this.consume.announced(scope);
-
-		// Refuse an unsupported scope here, where the caller can see it; the pump below
-		// runs later inside an effect, which would only log the throw and leave the
-		// consumer waiting forever.
-		scopePrefix(scope);
 
 		const producer = new Announce.Producer();
 		const consumer = producer.consume();
@@ -474,14 +468,15 @@ export class Reload {
 			effect.cleanup(() => upstream.close());
 
 			// Track what this connection announced so we can retract it if the connection drops.
-			const active = new Set<string>();
+			// Keyed by the presented pattern; the captures ride along for the retraction.
+			const active = new Map<string, Path.Pattern[]>();
 
 			effect.spawn(async () => {
 				try {
 					for (;;) {
 						const entry = await Promise.race([effect.cancel, upstream.next()]);
 						if (!entry) break;
-						if (entry.active) active.add(entry.pattern.text);
+						if (entry.active) active.set(entry.pattern.text, entry.captures);
 						else active.delete(entry.pattern.text);
 						producer.append(entry);
 					}
@@ -491,8 +486,8 @@ export class Reload {
 					// Retract everything from the connection that just went away, so a per-broadcast
 					// watcher tears down instead of clinging to the dead route.
 					if (consumer.closed.peek() === undefined) {
-						for (const pattern of active) {
-							producer.append({ pattern: Path.Pattern.parse(pattern), active: false });
+						for (const [pattern, captures] of active) {
+							producer.append({ pattern: Path.Pattern.parse(pattern), captures, active: false });
 						}
 					}
 				}

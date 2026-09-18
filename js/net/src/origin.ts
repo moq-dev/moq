@@ -15,7 +15,7 @@ import * as announce from "./announced.ts";
 import * as broadcast from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { Route, routesEqual } from "./hop.ts";
-import { hooks, scopePrefix } from "./internal.ts";
+import { hooks, scopeMatches } from "./internal.ts";
 import * as Path from "./path.ts";
 
 export type { Cost, Hop, Route } from "./hop.ts";
@@ -928,24 +928,26 @@ export class Consumer {
 	/**
 	 * The announced routes under `scope`, as a live stream: every currently advertised
 	 * route arrives first as `active`, then additions and retractions as they happen.
-	 * The scope must be prefix-shaped (`foo/**`, or `**` for everything); anything else
-	 * throws rather than narrowing or widening it. A local broadcast appears only after
+	 * The scope is any {@link Path.Pattern}: `foo/**` for a subtree, `**` for everything,
+	 * `room/* /chat` for each room's chat. A local broadcast appears only after
 	 * {@link broadcast.Producer.announce}; a dynamic or received route announces the
-	 * prefix it covers, clamped to the scope. Patterns are relative to the origin, not
-	 * the scope. The stream ends when the origin closes or the consumer is closed.
+	 * paths it covers, clamped to the scope. Each event is a match against the scope:
+	 * its `pattern` is relative to the origin, not the scope, and its `captures` are
+	 * what the scope's wildcards stood for. The stream ends when the origin closes or
+	 * the consumer is closed.
 	 */
 	announced(scope: Path.Pattern = Path.Pattern.all()): announce.Consumer {
-		const prefix = scopePrefix(scope);
 		const producer = new announce.Producer();
-		void this.#runAnnounced(producer, prefix);
+		void this.#runAnnounced(producer, scope);
 		return producer.consume();
 	}
 
-	async #runAnnounced(producer: announce.Producer, prefix: Path.Valid): Promise<void> {
+	async #runAnnounced(producer: announce.Producer, scope: Path.Pattern): Promise<void> {
 		// Keyed by the presented pattern, valued by identity plus route. Diffing identity
 		// rather than mere presence means a republish emits a retraction then a fresh
 		// announcement; a re-price of the same identity emits another active (a restart).
-		let active = new Map<string, Advertised>();
+		type Presented = Advertised & { captures: Path.Pattern[]; specificity: Path.Specificity };
+		let active = new Map<string, Presented>();
 
 		try {
 			for (;;) {
@@ -954,43 +956,44 @@ export class Consumer {
 				const routes = this.#state.routes.peek();
 				if (local === undefined && advertisedLocal === undefined && routes === undefined) break;
 
-				const next = new Map<string, Advertised>();
-				// Routes first, so an advertised local at the same path overwrites it: the
-				// announcement points at whatever request() would resolve.
-				// The most specific route covering the scope itself wins the root slot,
-				// matching request() resolution.
-				let rootLen = -1;
+				const next = new Map<string, Presented>();
+				// Where several claims present the same pattern, the most specific claim
+				// wins, matching request() resolution.
+				const present = (claim: Path.Pattern, snap: Advertised) => {
+					const specificity = claim.specificity();
+					for (const { pattern, captures } of scopeMatches(scope, claim)) {
+						const held = next.get(pattern.text);
+						if (held && Path.compareSpecificity(held.specificity, specificity) > 0) continue;
+						next.set(pattern.text, { ...snap, captures, specificity });
+					}
+				};
 				for (const [key, entries] of routes ?? []) {
 					const entry = entries[0];
 					if (!entry) continue;
-					const snap: Advertised = { identity: entry.identity, route: entry.route.peek() };
-					const advertised = Path.Pattern.parse(key);
-					// Rebasing clamps the claim to the scope; rooting names the result from the origin.
-					for (const residual of advertised.rebase(prefix)) {
-						if (residual.asPrefix() === "") {
-							const spec = advertised.segments.length;
-							if (spec < rootLen) continue;
-							rootLen = spec;
-						}
-						next.set(residual.rooted(prefix).text, snap);
-					}
+					present(Path.Pattern.parse(key), { identity: entry.identity, route: entry.route.peek() });
 				}
+				// An advertised local at its own path is the most specific claim there, so it
+				// overwrites a route's: the announcement points at whatever request() resolves.
 				for (const [path, front] of local ?? []) {
 					const route = advertisedLocal?.get(path);
 					if (!route) continue;
-					if (Path.hasPrefix(prefix, path))
-						next.set(Path.Pattern.subtree(path).text, { identity: front, route });
+					present(Path.Pattern.subtree(path), { identity: front, route });
 				}
 
 				for (const [path, snap] of active) {
 					const cur = next.get(path);
 					if (!cur || cur.identity !== snap.identity)
-						producer.append({ pattern: Path.Pattern.parse(path), active: false });
+						producer.append({ pattern: Path.Pattern.parse(path), captures: snap.captures, active: false });
 				}
 				for (const [path, snap] of next) {
 					const prev = active.get(path);
 					if (!prev || prev.identity !== snap.identity || !routesEqual(prev.route, snap.route)) {
-						producer.append({ pattern: Path.Pattern.parse(path), active: true, route: snap.route });
+						producer.append({
+							pattern: Path.Pattern.parse(path),
+							captures: snap.captures,
+							active: true,
+							route: snap.route,
+						});
 					}
 				}
 				active = next;

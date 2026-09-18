@@ -1027,25 +1027,98 @@ test("literal and subtree claims keep distinct pattern identities", async () => 
 	origin.close();
 });
 
-test("announced refuses a scope that is not prefix-shaped", () => {
+test("announced accepts any scope and reports the match with captures", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 
-	const refused = (text: string) => {
-		expect(() => consumer.announced(Path.Pattern.parse(text))).toThrow();
-	};
+	const announced = consumer.announced(Path.Pattern.parse("room/*/chat"));
 
-	// An exact path is not a scope over its subtree.
-	refused("room");
-	// The empty pattern names only the root, not everything beneath it.
-	refused("");
-	// Suffixes and segment wildcards name sets a prefix cannot cover.
-	refused("*room");
-	refused("room/*");
-	refused("*");
-	// A `**` anywhere but the end is not a subtree.
-	refused("**/room");
-	refused("room/**/chat");
+	// A broadcast's subtree claim clamps to the chat the scope grants, capturing the room.
+	const alice = publish(origin, Path.from("room/alice/chat"));
+	expect(await announced.next()).toMatchObject({
+		pattern: Path.Pattern.parse("room/alice/chat"),
+		captures: [Path.Pattern.parse("alice")],
+		active: true,
+	});
 
+	// Neither a sibling track nor a stranger's room presents at all.
+	const audio = publish(origin, Path.from("room/alice/audio"));
+	const lobby = publish(origin, Path.from("lobby/alice/chat"));
+
+	// A subtree claim the scope cannot pin presents the scope's own wildcard.
+	const broad = origin.dynamic("room/**");
+	expect(await announced.next()).toMatchObject({
+		pattern: Path.Pattern.parse("room/*/chat"),
+		captures: [Path.Pattern.parse("*")],
+		active: true,
+	});
+	broad.close();
+	expect(await announced.next()).toMatchObject({
+		pattern: Path.Pattern.parse("room/*/chat"),
+		captures: [Path.Pattern.parse("*")],
+		active: false,
+	});
+
+	alice.close();
+	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.parse("room/alice/chat"), active: false });
+
+	announced.close();
+	audio.close();
+	lobby.close();
+	origin.close();
+});
+
+test("a suffix scope captures the leading run", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const deep = publish(origin, Path.from("room/alice/chat"));
+	const top = publish(origin, Path.from("chat"));
+
+	const announced = consumer.announced(Path.Pattern.parse("**/chat"));
+	const seen = new Map<string, string[]>();
+	for (let i = 0; i < 4; i++) {
+		const update = await announced.next();
+		if (update)
+			seen.set(
+				update.pattern.text,
+				update.captures.map((c) => c.text),
+			);
+	}
+	expect(seen).toEqual(
+		new Map([
+			["room/alice/chat", ["room/alice"]],
+			["chat", [""]],
+			// Each broadcast's subtree claim covers deeper chats too.
+			["room/alice/chat/**/chat", ["room/alice/chat/**"]],
+			["chat/**/chat", ["chat/**"]],
+		]),
+	);
+
+	announced.close();
+	deep.close();
+	top.close();
+	origin.close();
+});
+
+test("an exact scope presents only that path", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const announced = consumer.announced(Path.Pattern.parse("room/alice"));
+
+	const alice = publish(origin, Path.from("room/alice"));
+	expect(await announced.next()).toMatchObject({
+		pattern: Path.Pattern.parse("room/alice"),
+		captures: [],
+		active: true,
+	});
+
+	const deeper = publish(origin, Path.from("room/alice/cam"));
+	const bob = publish(origin, Path.from("room/bob"));
+	alice.close();
+	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.parse("room/alice"), active: false });
+
+	announced.close();
+	deeper.close();
+	bob.close();
 	origin.close();
 });

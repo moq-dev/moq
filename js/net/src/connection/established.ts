@@ -35,8 +35,10 @@ export interface Established {
 	readonly discovery: boolean;
 
 	/**
-	 * Subscribe to broadcast announcements under `scope`, a prefix-shaped pattern (`foo/**`,
-	 * default `**` for everything). Patterns are relative to the session, not the scope.
+	 * Subscribe to broadcast announcements under `scope`, any pattern (`foo/**` for a
+	 * subtree, `room/* /chat` for each room's chat, default `**` for everything). Each
+	 * event is a match against the scope: its pattern is relative to the session, not the
+	 * scope, and its captures are what the scope's wildcards stood for.
 	 */
 	announced(scope?: Path.Pattern): announce.Consumer;
 

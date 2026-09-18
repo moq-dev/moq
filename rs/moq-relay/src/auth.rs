@@ -131,11 +131,6 @@ pub enum Error {
 	#[error("auth server unavailable: {0}")]
 	Unavailable(String),
 
-	/// The grant names a pattern the relay cannot enforce yet: only `literal/**`
-	/// and bare `**` scope an origin until pattern scopes land.
-	#[error("unsupported pattern in grant: {0} (only foo/** and ** scope a session)")]
-	UnsupportedPattern(String),
-
 	/// The relay could not build the request the server needs.
 	#[error("{0}")]
 	Request(String),
@@ -184,9 +179,9 @@ pub struct Token {
 	pub(crate) path: String,
 	/// The root the session is scoped to: the grant's `root` alias, else the dialed path.
 	pub root: PathOwned,
-	/// The subtree grants the holder may subscribe to, relative to `root`.
+	/// The patterns the holder may subscribe to, relative to `root`.
 	pub subscribe: Patterns,
-	/// The subtree grants the holder may publish to, relative to `root`.
+	/// The patterns the holder may publish to, relative to `root`.
 	pub publish: Patterns,
 	/// The tier this session's stats record under.
 	pub tier: Tier,
@@ -195,37 +190,29 @@ pub struct Token {
 impl Token {
 	/// Reduce `grant` for a session that dialed `path`.
 	///
-	/// The origin scopes by prefix, so only `foo/**` and `**` have an exact prefix.
-	/// Anything else is refused naming the pattern, including a literal `foo`:
-	/// reading it as the prefix `foo` would widen one broadcast into a subtree.
-	/// The token keeps the Patterns the grant already yields rather than converting
-	/// them to prefixes.
-	pub fn new(path: &str, grant: &Grant) -> Result<Self, Error> {
-		let supported = |patterns: &Patterns| -> Result<Patterns, Error> {
-			match patterns.iter().find(|pattern| pattern.as_prefix().is_none()) {
-				Some(pattern) => Err(Error::UnsupportedPattern(pattern.to_string())),
-				None => Ok(patterns.clone()),
-			}
-		};
+	/// The token keeps the patterns the grant yields: the origin scopes by any
+	/// pattern union, so `alice`, `*/chat`, and `alice/**` each mean exactly what
+	/// they say.
+	pub fn new(path: &str, grant: &Grant) -> Self {
 		let root = grant.root.as_deref().unwrap_or(path);
-		Ok(Self {
+		Self {
 			path: path.to_string(),
 			root: Path::new(root).to_owned(),
-			subscribe: supported(&grant.subscribe)?,
-			publish: supported(&grant.publish)?,
+			subscribe: grant.subscribe.clone(),
+			publish: grant.publish.clone(),
 			tier: crate::configured_tier(grant.tier.clone()),
-		})
+		}
 	}
 
 	/// Rebuild the token from a re-checked grant, relative to the same dialed path,
 	/// so a grant that drops its `root` alias resolves back to what was dialed.
-	pub(crate) fn recheck(&self, grant: &Grant) -> Result<Self, Error> {
+	pub(crate) fn recheck(&self, grant: &Grant) -> Self {
 		Self::new(&self.path, grant)
 	}
 
 	/// Whether `other` still covers everything this token scopes: the same root and
-	/// every grant still held. A narrower re-check closes the session until
-	/// pattern scopes can resize it in place.
+	/// every grant still held. A narrower re-check closes the session: the live
+	/// origin handles are not resized in place.
 	pub(crate) fn covered_by(&self, other: &Self) -> bool {
 		self.root == other.root && other.subscribe.covers(&self.subscribe) && other.publish.covers(&self.publish)
 	}
@@ -360,7 +347,7 @@ impl Auth {
 			}
 			Mode::Refuse => return Err(Error::Refused),
 		};
-		let token = Token::new(&path, &lease.grant())?;
+		let token = Token::new(&path, &lease.grant());
 		Ok(Admitted { lease, token })
 	}
 
@@ -368,7 +355,7 @@ impl Auth {
 	/// mesh credential, which the relay minted for itself.
 	pub(crate) fn admit_fixed(&self, path: &str, grant: Grant) -> Result<Admitted, Error> {
 		let lease = Lease::fixed(grant);
-		let token = Token::new(path, &lease.grant())?;
+		let token = Token::new(path, &lease.grant());
 		Ok(Admitted { lease, token })
 	}
 }
@@ -558,31 +545,28 @@ mod tests {
 	}
 
 	#[test]
-	fn token_reduces_a_grant_and_refuses_what_it_cannot_scope() {
+	fn token_keeps_the_grant_as_written() {
 		let mut grant = Grant::new(patterns(&["alice/**"]), patterns(&["**"]));
 		grant.root = Some("pid/room".into());
 		grant.tier = Some("gold".into());
-		let token = Token::new("/vanity/room", &grant).unwrap();
+		let token = Token::new("/vanity/room", &grant);
 		assert_eq!(token.root, Path::new("pid/room").to_owned());
 		assert_eq!(token.publish, patterns(&["alice/**"]));
 		assert_eq!(token.subscribe, patterns(&["**"]));
 		assert_eq!(token.tier, Tier::new("gold"));
 
+		// Exact, wildcard, and empty grants are kept as written, not read as prefixes.
 		for pattern in ["*/chat", "alice", ""] {
 			let grant = Grant::new(patterns(&[pattern]), Patterns::new());
-			let err = Token::new("/", &grant).unwrap_err();
-			assert!(
-				matches!(&err, Error::UnsupportedPattern(p) if p == pattern),
-				"{pattern}: {err}"
-			);
+			assert_eq!(Token::new("/", &grant).publish, patterns(&[pattern]), "{pattern}");
 		}
 	}
 
 	#[test]
 	fn a_narrower_recheck_is_not_covered() {
-		let wide = Token::new("/room", &Grant::new(patterns(&["**"]), patterns(&["**"]))).unwrap();
-		let narrow = Token::new("/room", &Grant::new(patterns(&["alice/**"]), patterns(&["**"]))).unwrap();
-		let moved = Token::new("/other", &Grant::new(patterns(&["**"]), patterns(&["**"]))).unwrap();
+		let wide = Token::new("/room", &Grant::new(patterns(&["**"]), patterns(&["**"])));
+		let narrow = Token::new("/room", &Grant::new(patterns(&["alice/**"]), patterns(&["**"])));
+		let moved = Token::new("/other", &Grant::new(patterns(&["**"]), patterns(&["**"])));
 		assert!(wide.covered_by(&wide));
 		assert!(narrow.covered_by(&wide));
 		assert!(!wide.covered_by(&narrow));
@@ -594,15 +578,12 @@ mod tests {
 		let everything = || Grant::new(patterns(&["**"]), patterns(&["**"]));
 		let mut aliased = everything();
 		aliased.root = Some("pid/room".into());
-		let token = Token::new("/vanity/room", &aliased).unwrap();
+		let token = Token::new("/vanity/room", &aliased);
 		assert_eq!(token.root, Path::new("pid/room").to_owned());
 
 		// The same alias still names the same root.
-		assert_eq!(token.recheck(&aliased).unwrap().root, token.root);
+		assert_eq!(token.recheck(&aliased).root, token.root);
 		// A grant without the alias is relative to what was dialed, not to the old root.
-		assert_eq!(
-			token.recheck(&everything()).unwrap().root,
-			Path::new("vanity/room").to_owned()
-		);
+		assert_eq!(token.recheck(&everything()).root, Path::new("vanity/room").to_owned());
 	}
 }

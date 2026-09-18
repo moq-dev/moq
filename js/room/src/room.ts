@@ -83,13 +83,14 @@ export class Room {
 			const update = await Promise.race([effect.cancel, announced.next()]);
 			if (!update) break;
 
-			const covered = update.pattern.isLiteral ? update.pattern.text : update.pattern.asPrefix();
-			if (covered === undefined) continue;
-			// Announcements name the whole path; participants are named beneath the prefix.
-			const suffix = Moq.Path.stripPrefix(prefix, Moq.Path.from(covered));
-			if (suffix === null) continue;
-			const parsed = parse(suffix);
+			// The scope's `**` captures what lies beneath the prefix: a broadcast claims
+			// its subtree, so the participant's path is the capture's prefix.
+			const capture = update.captures[0];
+			const suffix = capture?.isLiteral ? capture.text : capture?.asPrefix();
+			if (suffix === undefined) continue;
+			const parsed = parse(Moq.Path.from(suffix));
 			if (!parsed) continue;
+			const covered = Moq.Path.join(prefix, Moq.Path.from(suffix));
 
 			const local = this.identity.peek();
 			if (local && parsed.identity === local) continue;

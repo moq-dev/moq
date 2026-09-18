@@ -51,8 +51,8 @@ as invalid.
 
 **Revalidate and outage.** On the cadence the relay POSTs `revalidate` with the
 same request. A grant applies: a changed `root` or one that no longer covers
-what the session holds closes it with `Unauthorized` (the origin cannot be
-resized in place until pattern scopes land); a changed `tier` is logged and
+what the session holds closes it with `Unauthorized` (the live session is not
+resized in place); a changed `tier` is logged and
 applies to the session's next connection, since its stats counters were
 resolved at admission. A 403 closes the session now. Anything else retries
 with jittered backoff and the session lives until `expires`, so an outage always
@@ -68,9 +68,13 @@ when one is configured, so a remote server can tell which relay is asking;
 `unix://` speaks HTTP over a socket; `http://` is accepted for a loopback host
 only. There is no shared secret.
 
-**Patterns today.** The relay scopes a session by prefix until pattern scopes
-land, so only `foo/**` and `**` admit: a grant naming `live/*`, or a bare
-literal `foo`, is refused at connect naming the pattern.
+**Patterns.** A grant is any pattern union and means exactly what it says:
+`foo/**` is a subtree, a bare `foo` is that one broadcast, `live/*` is every
+broadcast one segment under `live`, and `room/*/chat` is each room's chat and
+nothing beside it. The relay announces, publishes, and resolves only the paths
+inside the grant. Announcements travel by literal head on the wire, so a
+non-prefix grant is filtered on each side; a grant with wildcards presents its
+matches as pattern announcements, which need moq-lite-06 to reach a client.
 
 ```toml
 [auth]

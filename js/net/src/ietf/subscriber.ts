@@ -4,7 +4,7 @@ import { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation, reason } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { UNKNOWN_HOP } from "../hop.ts";
-import { scopePrefix } from "../internal.ts";
+import { scopeHead, scopeMatches } from "../internal.ts";
 import * as Path from "../path.ts";
 import type { Reader, Stream } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
@@ -108,7 +108,7 @@ export class Subscriber {
 
 	// Any consumers that want each new announcement, keyed by the wire interest
 	// prefix their stream filters on.
-	#announcedConsumers = new Map<announce.Producer, Path.Valid>();
+	#announcedConsumers = new Map<announce.Producer, Path.Pattern>();
 
 	/**
 	 * Creates a new Subscriber instance.
@@ -146,22 +146,25 @@ export class Subscriber {
 	}
 
 	/**
-	 * Gets an announced reader for `scope`, a prefix-shaped pattern (`foo/**`, or `**`
-	 * for everything). Patterns are relative to the session, not the scope.
+	 * Gets an announced reader for `scope`, any pattern (`foo/**` for a subtree, `**` for
+	 * everything). Events are a match against the scope: patterns are relative to the
+	 * session, not the scope, and `captures` are what the scope's wildcards stood for.
 	 *
 	 * The peer is asked with SUBSCRIBE_NAMESPACE regardless of what it declared, and an
 	 * unsolicited PUBLISH_NAMESPACE lands here too, so a peer that only tells and one
 	 * that only answers are both discovered.
 	 */
 	announced(scope: Path.Pattern = Path.Pattern.all()): announce.Consumer {
-		// The wire speaks announce interest by prefix.
-		const prefix = scopePrefix(scope);
+		// The wire speaks announce interest by prefix: ask for the scope's literal head
+		// and filter what arrives with the matcher.
+		const prefix = scopeHead(scope);
 		const announced = new announce.Producer();
 		for (const [active, info] of this.#announced) {
-			if (!Path.hasPrefix(prefix, active)) continue;
-			announced.append({ pattern: Path.Pattern.subtree(active), active: true, anonymous: info.anonymous });
+			for (const match of scopeMatches(scope, Path.Pattern.subtree(active))) {
+				announced.append({ ...match, active: true, anonymous: info.anonymous });
+			}
 		}
-		this.#announcedConsumers.set(announced, prefix);
+		this.#announcedConsumers.set(announced, scope);
 
 		void this.#runAnnounced(announced, prefix).finally(() => {
 			this.#announcedConsumers.delete(announced);
@@ -184,9 +187,10 @@ export class Subscriber {
 		this.#announced.set(path, { count: 1, anonymous });
 
 		console.debug(`announced: broadcast=${path} active=true`);
-		for (const [consumer, prefix] of this.#announcedConsumers) {
-			if (!Path.hasPrefix(prefix, path)) continue;
-			consumer.append({ pattern: Path.Pattern.subtree(path), active: true, anonymous });
+		for (const [consumer, scope] of this.#announcedConsumers) {
+			for (const match of scopeMatches(scope, Path.Pattern.subtree(path))) {
+				consumer.append({ ...match, active: true, anonymous });
+			}
 		}
 	}
 
@@ -208,12 +212,13 @@ export class Subscriber {
 		this.#consumes.evict(path);
 		console.debug(`announced: broadcast=${path} active=false`);
 
-		for (const [consumer, prefix] of this.#announcedConsumers) {
-			if (!Path.hasPrefix(prefix, path)) continue;
-			try {
-				consumer.append({ pattern: Path.Pattern.subtree(path), active: false });
-			} catch {
-				// Consumer already closed, will be cleaned up
+		for (const [consumer, scope] of this.#announcedConsumers) {
+			for (const match of scopeMatches(scope, Path.Pattern.subtree(path))) {
+				try {
+					consumer.append({ ...match, active: false });
+				} catch {
+					// Consumer already closed, will be cleaned up
+				}
 			}
 		}
 	}

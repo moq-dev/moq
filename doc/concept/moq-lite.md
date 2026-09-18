@@ -81,26 +81,37 @@ subscriber must not treat the pattern as a concrete broadcast name. Use
 `create_broadcast(path)` and `announce(route)` when the path is known; use
 `dynamic` when the set of paths is not.
 
-A subscriber watching under a prefix sees advertisements named from the origin,
-clamped to the requested scope. A route claimed above the scope is presented as
-the scope itself: `room` advertised cluster-wide and consumed at `room/alice`
-arrives as `room/alice/**`. A pattern that cannot match under the prefix is not
-sent. Announce events carry the matcher: Rust `announce::Update.pattern` and
-TypeScript `Announce.Update.pattern` are a `Pattern`. Use `as_prefix()` /
-`asPrefix()` when a consumer specifically needs a prefix-shaped claim.
+A subscriber watching under a scope sees advertisements named from the origin,
+clamped to that scope. A scope is any pattern union: `room/**` is a subtree,
+`room/*/chat` is each room's chat. A route claimed above the scope is
+presented as the intersection: `room` advertised cluster-wide and consumed
+under `room/alice/**` arrives as `room/alice/**`, and under `room/*/chat` as
+`room/*/chat`. A claim that cannot match inside the scope is not sent.
+
+Announce events are a match against the scope, the way a regex match exposes
+the whole match and then its groups. Rust `announce::Update` and TypeScript
+`Announce.Update` carry `pattern`, the covered paths inside the scope, and
+`captures`, one pattern per wildcard segment of the scope: a broadcast at
+`room/alice/chat` under `room/*/chat` captures `alice`. A capture is a pattern
+because the claim may be one: a broadcast claims its subtree, so the same
+broadcast under `room/**` captures `alice/chat/**`, and a wildcard the claim
+cannot pin captures itself (`room/**` under `room/*/chat` captures `*`). Use
+`as_prefix()` / `asPrefix()` when a consumer specifically needs a prefix-shaped
+claim.
 
 When a subscriber asks for a matching path the advertiser will not serve, the
-advertiser refuses that request rather than stretching the claim. The same
-rule applies on the way in: an advertisement must be contained by one of the
-producer's `prefix/**` scopes, and an over-wide claim is refused rather than
-clamped. Token scope stays prefix-based until origin grants become a pattern
-set.
+advertiser refuses that request rather than stretching the claim. On the way
+in, an advertisement is clamped to the producer's scope: a peer answering the
+interest `room` announces every broadcast beneath it, and a grant of
+`room/*/chat` lands only the chats. A claim with nothing inside the scope is
+refused. Token grants are pattern unions and mean exactly what they say.
 
-Resolving a non-prefix pattern into a subscription is not implemented yet;
-only prefix-shaped claims currently serve `request_broadcast`. The
-advertisement is still forwarded and costed. The wire is
-[ANNOUNCE\_PATTERN in moq-lite](/draft/moq-lite) (lite-06+) and the
-[pattern extension](/draft/moq-pattern) on moq-transport.
+Any pattern serves `request_broadcast`: the most specific claim matching the
+path wins, and the requester's scope decides whether the path may be asked
+for at all. The wire is [ANNOUNCE\_PATTERN in moq-lite](/draft/moq-lite)
+(lite-06+) and the [pattern extension](/draft/moq-pattern) on moq-transport;
+older versions carry only prefix-shaped claims, so a scope with wildcards
+receives its matches only on lite-06.
 
 ```typescript
 import { Path } from "@moq/net";

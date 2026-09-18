@@ -12,19 +12,31 @@ import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
 import type { Groups, Producer, Request, Subscriber } from "./track.ts";
 
+/** What a scope presents of one claim: the covered pattern and the captures the scope pins. */
+export interface ScopeMatch {
+	pattern: Path.Pattern;
+	captures: Path.Pattern[];
+}
+
 /**
- * The literal prefix a discovery scope covers: `foo` for `foo/**`, the empty path for `**`.
- *
- * Anything else (an exact `foo`, the empty pattern, a suffix, or any segment wildcard)
- * throws rather than narrowing or widening the scope. Until general pattern matching
- * lands, discovery filters by prefix.
+ * Everything a scope presents of one claim: each intersection with the scope, paired with
+ * the captures the scope pins in it. Empty when the claim lies outside the scope.
  */
-export function scopePrefix(scope: Path.Pattern): Path.Valid {
-	const prefix = scope.asPrefix();
-	if (prefix === undefined) {
-		throw new Error(`announced() only supports prefix-shaped patterns (foo/**), got "${scope.text}"`);
+export function scopeMatches(scope: Path.Pattern, claim: Path.Pattern): ScopeMatch[] {
+	const out: ScopeMatch[] = [];
+	for (const pattern of claim.intersect(scope)) {
+		// An intersection is contained by the scope, so the captures always exist.
+		out.push({ pattern, captures: scope.captures(pattern) ?? [] });
 	}
-	return Path.from(prefix);
+	return out;
+}
+
+/**
+ * The announce-interest prefix a scope needs on a prefix-shaped wire: its literal head.
+ * The peer echoes every suffix beneath it, and {@link scopeMatches} filters what arrives.
+ */
+export function scopeHead(scope: Path.Pattern): Path.Valid {
+	return Path.from(scope.head);
 }
 
 /**

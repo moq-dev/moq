@@ -253,17 +253,11 @@ pub(crate) enum Recheck {
 /// Compare a re-checked grant against what the session was admitted with.
 ///
 /// A changed root or a grant that no longer covers the session's scope closes it:
-/// the origin cannot be resized in place until pattern scopes land. A changed tier
-/// is kept for this session and applies to its next connection, since the stats
-/// carriers resolve their counters once at admission.
+/// the live origin handles are not resized in place. A changed tier is kept for
+/// this session and applies to its next connection, since the stats carriers
+/// resolve their counters once at admission.
 pub(crate) fn recheck(token: &auth::Token, grant: &Grant) -> Recheck {
-	let fresh = match token.recheck(grant) {
-		Ok(fresh) => fresh,
-		Err(err) => {
-			tracing::warn!(%err, "re-checked grant cannot scope the session");
-			return Recheck::Closed("unsupported grant");
-		}
-	};
+	let fresh = token.recheck(grant);
 	if fresh.root != token.root {
 		return Recheck::Closed("root changed");
 	}

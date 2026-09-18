@@ -6,7 +6,7 @@ import { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, isAnonymous, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
-import { scopePrefix } from "../internal.ts";
+import { scopeHead, scopeMatches } from "../internal.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
 import * as Time from "../time.ts";
@@ -153,9 +153,10 @@ export class Subscriber {
 	}
 
 	/**
-	 * Subscribe to broadcast announcements under `scope`, a prefix-shaped pattern
-	 * (`foo/**`, or `**` for everything). Patterns are relative to the session, not
-	 * the scope.
+	 * Subscribe to broadcast announcements under `scope`, any pattern (`foo/**` for a
+	 * subtree, `**` for everything, `room/* /chat` for each room's chat). Events are a
+	 * match against the scope: patterns are relative to the session, not the scope,
+	 * and `captures` are what the scope's wildcards stood for.
 	 *
 	 * Reflected announces (those whose hop chain already includes this
 	 * connection) are always dropped: moq-lite-06 has none to keep, and older
@@ -163,12 +164,14 @@ export class Subscriber {
 	 */
 	announced(scope: Path.Pattern = Path.Pattern.all()): announce.Consumer {
 		const announced = new announce.Producer();
-		// The wire speaks announce interest by prefix, and echoes suffixes beneath it.
-		void this.#runAnnounced(announced, scopePrefix(scope));
+		// The wire speaks announce interest by prefix and echoes suffixes beneath it:
+		// ask for the scope's literal head and filter what arrives with the matcher.
+		void this.#runAnnounced(announced, scope);
 		return announced.consume();
 	}
 
-	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid): Promise<void> {
+	async #runAnnounced(announced: announce.Producer, scope: Path.Pattern): Promise<void> {
+		const prefix = scopeHead(scope);
 		console.debug(`announced: prefix=${prefix}`);
 		// Lite04/05: send our own session-level Hop ID so the peer can skip announces
 		// whose hop chain already passed through us. Encoding drops it on every other
@@ -238,7 +241,9 @@ export class Subscriber {
 						advertised.set(pattern.text, { publisher: undefined, live: true });
 						console.debug(`announced: broadcast=${claim.text} active=true`);
 						const route = { hops: [UNKNOWN_HOP], cost: Cost.zero };
-						announced.append({ pattern: claim, active: true, route, anonymous: isAnonymous(route) });
+						for (const match of scopeMatches(scope, claim)) {
+							announced.append({ ...match, active: true, route, anonymous: isAnonymous(route) });
+						}
 					}
 					break;
 				}
@@ -321,8 +326,10 @@ export class Subscriber {
 				}
 
 				// The wire names the suffix beneath the interest prefix; the claim names the
-				// covered paths from the session root, which is what the consumer sees.
+				// covered paths from the session root, and the scope clamps it to what the
+				// consumer sees. A claim outside the scope is still tracked, never surfaced.
 				const claim = pattern.rooted(prefix);
+				const matches = scopeMatches(scope, claim);
 				const suffix = pattern.asPrefix();
 				const path = suffix === undefined ? undefined : Path.join(prefix, Path.from(suffix));
 
@@ -356,7 +363,7 @@ export class Subscriber {
 					if (!previous?.live) return;
 					if (path !== undefined) this.#consumes.evict(path);
 					console.debug(`announced: broadcast=${claim.text} active=false`);
-					announced.append({ pattern: claim, active: false });
+					for (const match of matches) announced.append({ ...match, active: false });
 				};
 
 				// In Lite05+ the sender's origin arrives via AnnounceOk, not in each hop
@@ -414,7 +421,7 @@ export class Subscriber {
 						if (!routesEqual(previous.route, route)) {
 							advertised.set(pattern.text, { publisher, live: true, route });
 							console.debug(`announced: broadcast=${claim.text} rerouted`);
-							announced.append({ pattern: claim, active: true, route, anonymous });
+							for (const match of matches) announced.append({ ...match, active: true, route, anonymous });
 						} else {
 							console.debug(`announced: broadcast=${claim.text} rerouted`);
 						}
@@ -432,7 +439,7 @@ export class Subscriber {
 				advertised.set(pattern.text, { publisher, live: true, route });
 
 				console.debug(`announced: broadcast=${claim.text} active=true`);
-				announced.append({ pattern: claim, active: true, route, anonymous });
+				for (const match of matches) announced.append({ ...match, active: true, route, anonymous });
 			}
 
 			announced.close();

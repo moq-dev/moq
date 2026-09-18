@@ -378,14 +378,3 @@ test("auth eviction lets a later handle dial fresh and the old lease still clean
 
 	second.close();
 });
-
-test("announced refuses a non-prefix scope before any connection exists", () => {
-	const handle = new Connection({ url });
-	try {
-		// The pump that would reach the origin runs inside an effect, which only logs a
-		// throw; the refusal has to happen where the caller can see it.
-		expect(() => handle.announced(Path.Pattern.parse("room/*"))).toThrow(/prefix-shaped/);
-	} finally {
-		handle.close();
-	}
-});
