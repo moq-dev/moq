@@ -25,7 +25,7 @@ use tokio_rustls::server::TlsStream;
 use tower_http::cors::{Any, CorsLayer};
 use tower_service::Service;
 
-use crate::{Recheck, auth, cluster};
+use crate::{auth, cluster};
 
 /// Configuration for the HTTP/HTTPS web server.
 #[derive(usage::Args, Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -733,7 +733,7 @@ async fn admit_http(
 	headers: &http::HeaderMap,
 	remote: crate::listener::Peer,
 	mtls: Option<Extension<MtlsPeer>>,
-) -> Result<auth::Admitted, auth::Error> {
+) -> Result<auth::Lease, auth::Error> {
 	// The public request API represents a missing or root path as empty; the
 	// contract says what was dialed, and a URL always starts with `/`.
 	let mut request = state
@@ -764,8 +764,8 @@ async fn serve_announced(
 		None => String::new(),
 	};
 
-	let auth::Admitted { lease, token } = admit_http(&state, prefix, query, &uri, &headers, remote, mtls).await?;
-	let Some(origin) = state.cluster.subscriber(&token) else {
+	let lease = admit_http(&state, prefix, query, &uri, &headers, remote, mtls).await?;
+	let Some(origin) = state.cluster.subscriber(lease.token()) else {
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
 
@@ -807,12 +807,11 @@ async fn serve_fetch(
 		return Err(StatusCode::BAD_REQUEST.into());
 	}
 
-	let auth::Admitted { lease, token } =
-		admit_http(&state, path.join("/"), params.auth, &uri, &headers, remote, mtls).await?;
+	let lease = admit_http(&state, path.join("/"), params.auth, &uri, &headers, remote, mtls).await?;
 	// The token's root is the canonical (alias-resolved) broadcast path.
-	let broadcast = token.root.to_string();
+	let broadcast = lease.token().root.to_string();
 
-	let Some(origin) = state.cluster.subscriber(&token) else {
+	let Some(origin) = state.cluster.subscriber(lease.token()) else {
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
 
@@ -867,7 +866,6 @@ async fn serve_fetch(
 			group,
 			deadline,
 			lease: Some(lease),
-			token,
 		}),
 		Ok(Err(status)) => {
 			lease.close(status.to_string());
@@ -888,7 +886,6 @@ struct ServeGroup {
 	deadline: tokio::time::Instant,
 	/// Taken when the body ends, so the reason is reported once.
 	lease: Option<auth::Lease>,
-	token: auth::Token,
 }
 
 impl ServeGroup {
@@ -896,27 +893,14 @@ impl ServeGroup {
 		let Some(lease) = self.lease.as_mut() else {
 			return Ok(None);
 		};
-		loop {
-			tokio::select! {
-				res = tokio::time::timeout_at(self.deadline, self.group.read_frame()) => {
-					return match res {
-						Ok(res) => Ok(res?.map(|frame| frame.payload)),
-						Err(_) => Err(moq_net::Error::Timeout),
-					};
-				}
-				changed = lease.changed() => match changed {
-					Ok(grant) => match crate::recheck(&self.token, &grant) {
-						Recheck::Covered => continue,
-						Recheck::Closed(why) => {
-							tracing::info!(%why, "grant no longer covers the fetch, closing");
-							return Err(moq_net::Error::Unauthorized);
-						}
-					},
-					Err(reason) => {
-						tracing::info!(%reason, "lease ended, closing fetch");
-						return Err(moq_net::Error::Unauthorized);
-					}
-				},
+		tokio::select! {
+			res = tokio::time::timeout_at(self.deadline, self.group.read_frame()) => match res {
+				Ok(res) => Ok(res?.map(|frame| frame.payload)),
+				Err(_) => Err(moq_net::Error::Timeout),
+			},
+			why = lease.ended() => {
+				tracing::info!(%why, "lease ended, closing fetch");
+				Err(moq_net::Error::Unauthorized)
 			}
 		}
 	}

@@ -208,8 +208,8 @@ async fn serve_client(
 ) -> anyhow::Result<()> {
 	let bytes = moq_auth::Counters::default();
 	let auth_request = moq_relay::auth::request_for(auth, &request);
-	let moq_relay::auth::Admitted { lease, token } = match auth.admit(auth_request, bytes.clone()).await {
-		Ok(admitted) => admitted,
+	let lease = match auth.admit(auth_request, bytes.clone()).await {
+		Ok(lease) => lease,
 		Err(err) => {
 			let status = axum::http::StatusCode::from(&err);
 			request.close(status.as_u16()).await.ok();
@@ -218,6 +218,7 @@ async fn serve_client(
 	};
 
 	// What the grant allows, as origin handles rooted where the session dialed.
+	let token = lease.token();
 	let rooted = origin.with_root(&token.root);
 	let publish = directions
 		.publish
@@ -240,7 +241,7 @@ async fn serve_client(
 		request = request.with_subscriber(subscribe);
 	}
 	let session = request.ok().await?;
-	moq_relay::supervise(session, lease, token, bytes, moq_relay::shutdown::Observer::disabled()).await
+	moq_relay::supervise(session, lease, bytes, moq_relay::shutdown::Observer::disabled()).await
 }
 
 /// Whether ordinary clients may use this transport on the shared LAN server.

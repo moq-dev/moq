@@ -104,24 +104,20 @@ impl Producer {
 		(Self { state: state.clone() }, Consumer { state, seen: 0 })
 	}
 
-	/// Replace the grant, waking the consumer. Refuses a grant that fails
-	/// [`Grant::validate`], so a bad re-check is the producer's error rather than
-	/// the session's. A no-op once the lease ended.
-	pub fn update(&self, grant: Grant) -> crate::Result<()> {
-		grant.validate()?;
+	/// Replace the grant, waking the consumer. A no-op once the lease ended.
+	pub fn update(&self, grant: Grant) {
 		let mut state = self.state.lock();
 		if state.closed.is_some() {
-			return Ok(());
+			return;
 		}
 		state.grant = grant;
 		state.epoch += 1;
-		Ok(())
 	}
 
-	/// End the lease with `reason`, consuming the handle. The consumer's
-	/// [`closed`](Consumer::closed) resolves with it.
-	pub fn revoke(self, reason: Reason) {
-		self.close(reason);
+	/// End the lease with `reason`, consuming the handle, and return the reason
+	/// the lease ended with: `reason`, or the consumer's if it closed first.
+	pub fn revoke(self, reason: Reason) -> Reason {
+		self.close(reason)
 	}
 
 	/// Poll for the lease ending, from either side.
@@ -135,8 +131,8 @@ impl Producer {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
-	fn close(&self, reason: Reason) {
-		self.state.lock().closed.get_or_insert(reason);
+	fn close(&self, reason: Reason) -> Reason {
+		self.state.lock().closed.get_or_insert(reason).clone()
 	}
 }
 
@@ -156,6 +152,17 @@ pub struct Consumer {
 }
 
 impl Consumer {
+	/// A lease on a grant nobody drives: it never changes and is never revoked,
+	/// so only the holder ends it. What a static or public grant admits under.
+	pub fn fixed(grant: Grant) -> Self {
+		let state = kio::Shared::new(State {
+			grant,
+			epoch: 0,
+			closed: None,
+		});
+		Self { state, seen: 0 }
+	}
+
 	/// The grant as it stands now.
 	pub fn grant(&self) -> Grant {
 		self.state.read().grant.clone()
@@ -191,9 +198,11 @@ impl Consumer {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
-	/// End the lease with the session's own close classification, consuming the handle.
-	pub fn close(self, reason: impl Into<Reason>) {
-		self.state.lock().closed.get_or_insert(reason.into());
+	/// End the lease with the session's own close classification, consuming the
+	/// handle, and return the reason the lease ended with: `reason`, or the
+	/// producer's if it revoked first.
+	pub fn close(self, reason: impl Into<Reason>) -> Reason {
+		self.state.lock().closed.get_or_insert(reason.into()).clone()
 	}
 }
 
@@ -228,16 +237,10 @@ mod tests {
 		assert_eq!(consumer.grant(), grant("a/**"));
 		assert!(poll(consumer.changed()).is_pending());
 
-		producer.update(grant("b/**")).expect("a valid grant");
+		producer.update(grant("b/**"));
 		assert_eq!(poll(consumer.changed()), Poll::Ready(Ok(grant("b/**"))));
 		assert_eq!(consumer.grant(), grant("b/**"));
 		assert!(poll(consumer.changed()).is_pending());
-
-		// An invalid grant is refused at the producer and never reaches the consumer.
-		let empty = Grant::new(crate::Patterns::new(), crate::Patterns::new());
-		assert!(matches!(producer.update(empty), Err(crate::Error::UselessGrant)));
-		assert!(poll(consumer.changed()).is_pending());
-		assert_eq!(consumer.grant(), grant("b/**"));
 	}
 
 	#[test]
@@ -262,14 +265,24 @@ mod tests {
 		let (producer, consumer) = Producer::new(grant("a/**"));
 		assert!(poll(producer.closed()).is_pending());
 
-		consumer.close("disconnected");
+		let recorded = consumer.close("disconnected");
+		assert_eq!(recorded, Reason::Session("disconnected".into()));
 		assert_eq!(
 			poll(producer.closed()),
 			Poll::Ready(Reason::Session("disconnected".into()))
 		);
 
-		// A later revocation or drop changes nothing.
-		producer.revoke(Reason::Expired);
+		// A later revocation changes nothing, and says so.
+		assert_eq!(producer.revoke(Reason::Expired), Reason::Session("disconnected".into()));
+	}
+
+	#[test]
+	fn a_fixed_lease_only_ends_by_the_holder() {
+		let mut consumer = Consumer::fixed(grant("a/**"));
+		assert_eq!(consumer.grant(), grant("a/**"));
+		assert!(poll(consumer.changed()).is_pending());
+		assert!(poll(consumer.closed()).is_pending());
+		assert_eq!(consumer.close("done"), Reason::Session("done".into()));
 	}
 
 	#[test]

@@ -20,8 +20,8 @@ with its PR and the replacement call:
   are explicit (#3647); groups expire on timestamps alone; an oversized group
   aborts with GROUP_TOO_LARGE instead of shedding its head (#3585); the
   `Latency` type became `max_age` and delivery order became the `Ordered`
-  handle (#2688, #2955); the moq-lite stream codes registered by
-  [Reserved codes](/quest/m1/lite-reserved-codes.md); subscriptions resume
+  handle (#2688, #2955); the four moq-lite stream codes sent from the
+  reserved range moved to 0x36-0x39 in the draft's own range; subscriptions resume
   across routes sharing a first hop (#3312); the send estimate is split among
   JS publishers (#3616); @moq/net and @moq/pattern mirror Rust (`consume`, `Time.Milli`,
   one `readFrame()`, `InvalidPattern`); the announce and request names; and [moq-tokio names](/quest/m1/api-tokio-names.md).

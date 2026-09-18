@@ -10,8 +10,8 @@ export const SetupOption = {
 	MaxAuthTokenCacheSize: 4n,
 	Authority: 5n,
 	Implementation: 7n,
-	/** RELAY_HOPS, from the MoQ Cluster extension. See `cluster.ts`. */
-	RelayHops: 0x40b55n,
+	/** HOP_ID, from the MoQ Cluster extension. See `cluster.ts`. */
+	HopId: 0x40b54n,
 	/** RELAY_COST, from the MoQ Cluster extension. See `cluster.ts`. */
 	RelayCost: 0x40b56n,
 	/** SOLICIT, from the MoQ Solicit extension. See `solicit.ts`. */

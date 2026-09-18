@@ -33,10 +33,8 @@ expiry, an expiry that leaves the union intact ends only that token, and
   prefixes, intersected with the role the client declared at SETUP so a
   publish-only session never starts receiving announcements because a later
   token happened to carry subscribe prefixes, and swapped in whenever the set
-  grows, the first live re-scope the relay performs; keep it behind one
-  function that
-  [Origin scopes](/quest/m1/api-origin-scopes.md) later extends to a
-  shrinking union.
+  grows; keep it behind one function, and a shrinking union goes through
+  [Origin narrowing](/quest/m2/origin-narrowing.md) rather than a close.
 - Expiry: the deadline today is the admitted lease's `closed()` inside one
   `tokio::select!` arm. Select on one lease per token in the set instead, and on any firing recompute the union without it: unchanged
   means `AUTH_ERROR { Expired }` on that token's stream and the session
@@ -82,11 +80,7 @@ Additive.
 ## Required
 
 - [Merge dev](/quest/m1/merge-dev.md) - release the origin scope and connection surfaces used by AUTH
+- [Origin narrowing](/quest/m2/origin-narrowing.md) - the live re-scope a shrinking token union needs, so no temporary close-on-shrink policy ships
 - [Pattern interest](/quest/m2/path-patterns/interest.md) - AUTH can represent the complete grants relay revalidation returns
 - [Lite stream](/quest/m2/auth/lite.md) - supplies the AUTH stream and
   `auth::Request` this consumes
-
-## Related
-
-- [Origin scopes](/quest/m1/api-origin-scopes.md) - extends the re-scope
-  to a shrinking union

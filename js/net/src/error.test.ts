@@ -217,36 +217,31 @@ test("the code tables match the spec", () => {
 		expect(code).toBeLessThan(32);
 	}
 
-	// The stream table adds moq-lite's own 48-63 assignments and the reserved 32-47
-	// placeholders this implementation still sends. 32-47 carries no meaning the draft
-	// publishes, so a code we put in it is an agreement with our own Rust implementation
-	// rather than a spec value.
+	// The stream table adds moq-lite's own 48-63 assignments. 32-47 is reserved and
+	// carries nothing, so no code sits there.
 	const assignedLite: StreamCode[] = [
 		StreamCode.NoCapacity,
 		StreamCode.GroupTooLarge,
 		StreamCode.NotFound,
 		StreamCode.Old,
 		StreamCode.Evicted,
+		StreamCode.FrameTooLarge,
 	];
-	const placeholders: StreamCode[] = [StreamCode.FrameTooLarge];
 	for (const code of Object.values(StreamCode)) {
 		if (assignedLite.includes(code)) {
 			expect(code).toBeGreaterThanOrEqual(48);
 			expect(code).toBeLessThan(64);
-		} else if (placeholders.includes(code)) {
-			expect(code).toBeGreaterThanOrEqual(32);
-			expect(code).toBeLessThan(48);
 		} else {
 			expect(code).toBeLessThan(32);
 		}
 	}
 	// The values the Rust `StreamError` sends for the same conditions.
+	expect(Number(StreamCode.NoCapacity)).toBe(0x30);
+	expect(Number(StreamCode.GroupTooLarge)).toBe(0x32);
 	expect(Number(StreamCode.NotFound)).toBe(0x33);
 	expect(Number(StreamCode.Old)).toBe(0x34);
 	expect(Number(StreamCode.Evicted)).toBe(0x35);
-	expect(Number(StreamCode.FrameTooLarge)).toBe(0x25);
-	expect(Number(StreamCode.NoCapacity)).toBe(0x30);
-	expect(Number(StreamCode.GroupTooLarge)).toBe(0x32);
+	expect(Number(StreamCode.FrameTooLarge)).toBe(0x38);
 
 	// The spaces are disjoint: 0 ends a session cleanly but fails a stream.
 	expect(Number(SessionCode.Cancel)).not.toBe(Number(StreamCode.Cancel));
@@ -337,6 +332,7 @@ test("toStreamCode and fromTransport agree on what a code means", () => {
 		StreamCode.NotFound,
 		StreamCode.Old,
 		StreamCode.Evicted,
+		StreamCode.FrameTooLarge,
 		StreamCode(70),
 	]) {
 		expect(toStreamCode(fromTransport(toTransport(code, "reset")))).toBe(code);
@@ -345,12 +341,29 @@ test("toStreamCode and fromTransport agree on what a code means", () => {
 	// A gap is one class whichever side it happened on, so a `catch` needs only one check.
 	expect(fromTransport(toTransport(StreamCode.TooFarBehind, "lagged"))).toBeInstanceOf(Lagged);
 	expect(new Lagged()).toBeInstanceOf(StreamError);
+	expect(fromTransport(toTransport(StreamCode.FrameTooLarge, "oversized"))).toBeInstanceOf(FrameTooLarge);
+	expect(new FrameTooLarge()).toBeInstanceOf(StreamError);
 	expect(fromTransport(toTransport(StreamCode.GroupTooLarge, "overflow"))).toBeInstanceOf(GroupTooLarge);
 	expect(new GroupTooLarge()).toBeInstanceOf(StreamError);
+
+	// The values the four codes were sent from before they were assigned stay reserved:
+	// a peer still emitting one is not read as anything.
+	for (const code of [0x21, 0x24, 0x25, 0x26]) {
+		const err = fromTransport(toTransport(code as StreamCode, "stale"));
+		expect(err).toBeInstanceOf(StreamError);
+		expect(err).not.toBeInstanceOf(FrameTooLarge);
+		expect(Number((err as StreamError).code)).toBe(code);
+	}
 });
 
-test("toStreamCode: lite-only cache-miss codes do not reach an IETF peer", () => {
-	for (const code of [StreamCode.NotFound, StreamCode.Old, StreamCode.Evicted, StreamCode.GroupTooLarge]) {
+test("toStreamCode: lite-only codes do not reach an IETF peer", () => {
+	for (const code of [
+		StreamCode.NotFound,
+		StreamCode.Old,
+		StreamCode.Evicted,
+		StreamCode.GroupTooLarge,
+		StreamCode.FrameTooLarge,
+	]) {
 		expect(toStreamCode(new StreamError(code), { version: Version.DRAFT_20 })).toBe(StreamCode.Internal);
 	}
 });

@@ -513,6 +513,18 @@ mod test {
 		}
 	}
 
+	/// The counterpart to the above: the fallback covers someone else's key, not our own bugs. A
+	/// value that *is* a text section still has to decode, or a rendition with no format would
+	/// silently cost a publisher every caption it advertised.
+	#[test]
+	fn a_malformed_text_section_still_fails() {
+		let json = r#"{"text":{"renditions":{"captions":{"container":{"kind":"legacy"}}}}}"#;
+		assert!(
+			Catalog::from_str(json).is_err(),
+			"a format-less text rendition decoded instead of failing"
+		);
+	}
+
 	#[test]
 	fn unknown_text_role_keeps_the_catalog() {
 		// A future `role` value must not take down the whole catalog: audio and video have to keep

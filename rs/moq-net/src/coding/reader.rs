@@ -324,7 +324,7 @@ mod tests {
 	}
 
 	/// And the registry follows the negotiated protocol, not just the stream direction. A
-	/// group dropped for being old is a moq-lite placeholder with no moq-transport value, so
+	/// group dropped for being old is a moq-lite code with no moq-transport value, so
 	/// the same abort has to leave a different number on each wire.
 	#[test]
 	fn abort_stops_with_the_negotiated_protocols_code() {

@@ -30,9 +30,8 @@ import { type IetfVersion, Version } from "./version.ts";
  * So GOING_AWAY sent to a draft-17 peer reads as UNKNOWN_OBJECT_STATUS, and that peer's
  * UNKNOWN_OBJECT_STATUS read as GOING_AWAY would retire a session that is not going
  * anywhere. Anything this says `false` about is sent as, and read as, INTERNAL_ERROR: the
- * codes moq-lite keeps in 32-63 (reserved placeholders and its own 48-63 assignments),
- * and the ones the draft assigns that moq-lite has no name for (UNKNOWN_OBJECT_STATUS,
- * EXPIRED_AUTH_TOKEN, EXCESSIVE_LOAD).
+ * codes moq-lite assigns in its own 48-63 range, and the ones the draft assigns that
+ * moq-lite has no name for (UNKNOWN_OBJECT_STATUS, EXPIRED_AUTH_TOKEN, EXCESSIVE_LOAD).
  *
  * @internal
  */

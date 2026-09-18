@@ -671,13 +671,10 @@ async fn serve_connection(
 	};
 	let path = if path.is_empty() { "/".to_string() } else { path };
 	let bytes = moq_auth::Counters::default();
-	let auth::Admitted { lease, token } = if cluster::Cluster::is_lan_path(&path) {
+	let lease = if cluster::Cluster::is_lan_path(&path) {
 		match cluster::Cluster::lan_credential(&path) {
 			Some(presented) => match serve.cluster.verify_lan_credential(presented) {
-				Some(true) => serve
-					.auth
-					.admit_fixed("/", serve.cluster.lan_peer_grant())
-					.context("LAN peer grant")?,
+				Some(true) => serve.auth.admit_fixed("/", serve.cluster.lan_peer_grant()),
 				Some(false) => {
 					request.close(moq_net::Error::Unauthorized);
 					anyhow::bail!("LAN peer did not present this listener's membership proof");
@@ -702,7 +699,7 @@ async fn serve_connection(
 			moq_net::Role::Publisher => moq_auth::Role::Publisher,
 			_ => moq_auth::Role::Subscriber,
 		});
-		auth_request.tls = identity.as_ref().and_then(crate::peer);
+		auth_request.tls = identity.as_ref().and_then(crate::auth::peer);
 		if identity.is_some() {
 			tracing::debug!(id, "client certificate verified; reported to the auth server");
 		}
@@ -734,7 +731,7 @@ async fn serve_connection(
 	};
 
 	let role = request.role();
-	let grants = match crate::connection::authorize(&serve.cluster, &token, role, &moq_tokio::Transport::Quic) {
+	let grants = match crate::connection::authorize(&serve.cluster, lease.token(), role, &moq_tokio::Transport::Quic) {
 		Ok(grants) => grants,
 		Err(err) => {
 			request.close(moq_net::Error::Unauthorized);
@@ -761,7 +758,7 @@ async fn serve_connection(
 	let shutdown = serve.shutdown.clone();
 	serve.tokio.spawn(async move {
 		let _node_connection = node_connection;
-		if let Err(err) = crate::connection::supervise(session, lease, token, bytes, shutdown).await {
+		if let Err(err) = crate::connection::supervise(session, lease, bytes, shutdown).await {
 			tracing::warn!(id, %err, "connection closed");
 		}
 	});
@@ -778,7 +775,8 @@ mod tests {
 	/// force. Each is named separately so the message points at the right line.
 	#[test]
 	fn windows_are_refused() {
-		let cases: [(&str, fn(&mut moq_tokio::quic::Config)); 3] = [
+		type Set = fn(&mut moq_tokio::quic::Config);
+		let cases: [(&str, Set); 3] = [
 			("quic.receive_window", |quic| quic.receive_window = Some(64 << 20)),
 			("quic.stream_receive_window", |quic| {
 				quic.stream_receive_window = Some(8 << 20)

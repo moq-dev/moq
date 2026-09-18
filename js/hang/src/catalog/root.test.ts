@@ -134,3 +134,21 @@ test("a legacy root timeline is not an archive", () => {
 test("an invalid store URL is refused", () => {
 	expect(() => RootSchema.parse({ archive: { track: "timeline.z", store: "not a url" } })).toThrow();
 });
+
+test("an absent or foreign text section parses to empty", () => {
+	// `text` was an ordinary application key before captions reserved it, so a value that isn't
+	// a section costs its captions and nothing else: video and audio keep playing.
+	expect(RootSchema.parse({ video: { renditions: {} } }).text).toBeUndefined();
+	for (const legacy of ["a caption overlay", ["a", "b"], { overlay: { x: 1 } }, { renditions: 42 }]) {
+		const parsed = RootSchema.parse({ video: { renditions: {} }, text: legacy });
+		expect(parsed.text).toBeUndefined();
+		expect(parsed.video).toBeDefined();
+	}
+});
+
+test("a malformed text rendition rejects the catalog", () => {
+	// The counterpart: the fallback covers someone else's key, not our own bugs. A value that IS
+	// a text section still has to decode, or a rendition with no format would silently cost a
+	// publisher its captions in the browser while Rust refuses the same catalog.
+	expect(() => RootSchema.parse({ text: { renditions: { captions: { container: { kind: "legacy" } } } } })).toThrow();
+});

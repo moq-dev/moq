@@ -1,11 +1,11 @@
-//! The MoQ Cluster extension (draft-lcurley-moq-cluster-00).
+//! The MoQ Cluster extension (draft-lcurley-moq-cluster-01).
 //!
 //! moq-transport carries no routing information, so a mesh of relays gossiping
 //! namespaces loops forever and has no basis for choosing between two peers
 //! advertising the same namespace. This extension adds it:
 //!
 //! - each endpoint declares its own [`Hop`](crate::Hop) (Hop ID) via the
-//!   RELAY_HOPS Setup Option, which is also what negotiates the extension;
+//!   HOP_ID Setup Option, which is also what negotiates the extension;
 //! - each endpoint prices what subscribing from it costs via the RELAY_COST Setup
 //!   Option, so the two directions are priced independently;
 //! - every advertisement carries the HOP_PATH it traversed and the accumulated
@@ -22,9 +22,9 @@ use crate::{Hop, Hops};
 
 use super::{Param, Version};
 
-/// RELAY_HOPS Setup Option: the sender's own Hop ID, and the signal that it speaks
-/// this extension. Odd, so the value is a length-prefixed byte string holding one varint.
-pub const RELAY_HOPS: u64 = 0x40B55;
+/// HOP_ID Setup Option: the sender's own Hop ID, and the signal that it speaks this
+/// extension. Even, so the value is a bare varint.
+pub const HOP_ID: u64 = 0x40B54;
 
 /// RELAY_COST Setup Option: what subscribing from the sender costs. Even, so the value
 /// is a bare varint. Directional, so each endpoint declares its own.
@@ -189,7 +189,7 @@ impl Advert {
 /// What the peer declared in its SETUP.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Peer {
-	/// What the peer put in RELAY_HOPS, or `None` when it did not negotiate the
+	/// What the peer put in HOP_ID, or `None` when it did not negotiate the
 	/// extension. Read [`Self::identity`] for the identity; this field answers whether
 	/// the extension is on, which is a different question when the peer declared 0.
 	pub hop: Option<Hop>,
@@ -234,19 +234,11 @@ pub fn peer_from_setup(params: &super::Parameters, version: Version) -> Result<P
 		return Ok(Peer::default());
 	}
 
-	// RELAY_HOPS is odd, so its value is a length-prefixed byte string holding the
-	// sender's Hop ID as a single varint.
-	let hop = match params.get_bytes(super::ParameterBytes::RelayHops) {
-		Some(mut bytes) => {
-			// 0 is legal here: the peer speaks the extension but withholds its identity.
-			let hop = Hop::decode(&mut bytes, version)?;
-			if bytes.has_remaining() {
-				return Err(DecodeError::TrailingBytes);
-			}
-			Some(hop)
-		}
-		None => None,
-	};
+	// 0 is legal here: the peer speaks the extension but withholds its identity.
+	let hop = params
+		.get_varint(super::ParameterVarInt::HopId)
+		.map(Hop::from_wire)
+		.transpose()?;
 
 	Ok(Peer {
 		hop,
@@ -262,9 +254,7 @@ pub fn peer_into_setup(params: &mut super::Parameters, self_hop: Hop, cost: Opti
 		return;
 	}
 
-	let mut id = Vec::new();
-	self_hop.encode(&mut id, version).expect("a varint always fits a Vec");
-	params.set_bytes(super::ParameterBytes::RelayHops, id);
+	params.set_varint(super::ParameterVarInt::HopId, self_hop.id());
 
 	if let Some(cost) = cost {
 		params.set_varint(super::ParameterVarInt::RelayCost, cost);
@@ -307,11 +297,11 @@ mod tests {
 		// The registry values are what other implementations key on; a typo here is
 		// invisible against ourselves and fatal against anyone else. The parity is
 		// load-bearing too: odd values are length-prefixed, even ones bare varints.
-		assert_eq!(RELAY_HOPS, 0x40B55);
+		assert_eq!(HOP_ID, 0x40B54);
 		assert_eq!(RELAY_COST, 0x40B56);
 		assert_eq!(HOP_PATH, 0x40B57);
 		assert_eq!(ROUTE_COST, 0x40B58);
-		assert_eq!(RELAY_HOPS % 2, 1);
+		assert_eq!(HOP_ID % 2, 0);
 		assert_eq!(RELAY_COST % 2, 0);
 		assert_eq!(HOP_PATH % 2, 1);
 		assert_eq!(ROUTE_COST % 2, 0);
@@ -523,9 +513,38 @@ mod tests {
 	}
 
 	#[test]
-	fn setup_without_relay_hops_is_not_negotiated() {
+	fn hop_id_is_a_bare_varint() {
+		// The key sits at delta 0x40B54 from the start of the block and the value follows
+		// it directly: a length byte here would make us unreadable to every -01 peer.
+		let mut params = super::super::Parameters::default();
+		peer_into_setup(&mut params, hop(42), None, VERSION);
+
+		let mut buf = BytesMut::new();
+		params.encode(&mut buf, VERSION).unwrap();
+		assert_eq!(buf.to_vec(), vec![0xC4, 0x0B, 0x54, 0x2A]);
+	}
+
+	#[test]
+	fn setup_without_hop_id_is_not_negotiated() {
 		let params = super::super::Parameters::default();
 		let peer = peer_from_setup(&params, VERSION).unwrap();
+		assert!(!peer.negotiated());
+	}
+
+	#[test]
+	fn setup_with_only_relay_hops_is_not_negotiated() {
+		// A -00 peer declares its Hop ID under the odd key 0x40B55 as a length-prefixed
+		// varint. That key is unknown now, so the session runs as plain moq-transport
+		// rather than misreading the value.
+		let mut params = super::super::Parameters::default();
+		params.set_bytes(super::super::ParameterBytes::Unknown(0x40B55), vec![0x2A]);
+
+		let mut buf = BytesMut::new();
+		params.encode(&mut buf, VERSION).unwrap();
+		let mut bytes = buf.freeze();
+		let decoded = super::super::Parameters::decode(&mut bytes, VERSION).unwrap();
+
+		let peer = peer_from_setup(&decoded, VERSION).unwrap();
 		assert!(!peer.negotiated());
 	}
 
@@ -535,7 +554,7 @@ mod tests {
 		// extension does not cover; we neither send nor read the options there.
 		let mut params = super::super::Parameters::default();
 		peer_into_setup(&mut params, hop(42), Some(3), Version::Draft16);
-		assert!(params.get_bytes(super::super::ParameterBytes::RelayHops).is_none());
+		assert!(params.get_varint(super::super::ParameterVarInt::HopId).is_none());
 		assert!(!peer_from_setup(&params, Version::Draft16).unwrap().negotiated());
 	}
 }

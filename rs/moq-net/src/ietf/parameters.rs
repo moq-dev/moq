@@ -20,6 +20,8 @@ pub enum ParameterVarInt {
 	/// Removed in draft-17; only used in draft-14/15/16.
 	MaxRequestId = 2,
 	MaxAuthTokenCacheSize = 4,
+	/// HOP_ID, from the MoQ Cluster extension.
+	HopId = super::cluster::HOP_ID,
 	/// RELAY_COST, from the MoQ Cluster extension.
 	RelayCost = super::cluster::RELAY_COST,
 	/// SOLICIT, from the MoQ Solicit extension.
@@ -37,8 +39,6 @@ pub enum ParameterBytes {
 	AuthorizationToken = 3,
 	Authority = 5,
 	Implementation = 7,
-	/// RELAY_HOPS, from the MoQ Cluster extension.
-	RelayHops = super::cluster::RELAY_HOPS,
 	/// NAMESPACE_PATTERN, from the MoQ Pattern extension.
 	NamespacePattern = super::pattern::NAMESPACE_PATTERN,
 	#[num_enum(catch_all)]
