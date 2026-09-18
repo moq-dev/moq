@@ -16,8 +16,8 @@ editor stability across a play-stop-play cycle.
   Keep `bEnableExceptions` off to prove the `expected` error style holds.
 - Marshal futures onto the game thread with `AsyncTask(ENamedThreads::GameThread, ...)`
   as the `moq::Executor`; never touch `UObject`s from a continuation.
-- Decode: use the moq-ffi video consumer once it exists; until then the
-  prototype may stop at encoded frames and the verdict says so.
+- Decode: the moq-ffi video consumer feeds the texture; the CPU frame path
+  is enough for the verdict, GPU import is not measured here.
 - Record: editor hot-reload behavior with a static Rust library loaded, the
   dispatcher shutdown on module unload, and package size.
 - Verdict promotes a real `cpp/unreal` plugin quest into m2 or abandons this
@@ -26,7 +26,4 @@ editor stability across a play-stop-play cycle.
 ## Required
 
 - [Package](/quest/m2/cpp/package.md) - the tarball the module links
-
-## Related
-
-- [FFI video consumer](/quest/m2/mobile/ffi-video-consumer.md) - the decode path the texture needs
+- [FFI video consumer](/quest/m2/mobile/ffi-video-consumer.md) - the decoded frames the texture needs

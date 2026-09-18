@@ -16,9 +16,10 @@ catches a typed `MoqException`, on the host runtime.
 - Pin it in `flake.nix` beside the other generators with the same list of
   places that name the version. `just cs check` regenerates into `cs/ffi`
   and runs the probe; wire it into the check workflow like `just go check`.
-- Check how the generator maps moq-ffi's cancel-on-drop tasks onto
-  `CancellationToken` and `IDisposable`; record any gap in the package quest
-  rather than patching it in a wrapper.
+- Map moq-ffi's abort-on-drop futures onto `CancellationToken` in the
+  generator: a cancelled token drops the Rust future, and `IDisposable` on a
+  handle cancels its pending calls. If upstream lacks the mapping, it lands in
+  the fork here, never in the wrapper; the probe above is the acceptance test.
 
 ## Related
 

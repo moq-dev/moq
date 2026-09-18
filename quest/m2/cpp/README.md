@@ -44,13 +44,15 @@ on a future under `__cpp_impl_coroutine`, `std::expected` under
 Distribution is all of: a release tarball with a CMake package config and
 pkg-config file (mirroring `libmoq.yml`), a vcpkg registry we own, and a Conan
 remote we own, the latter two fetching the prebuilt tarball so consumers never
-need a Rust toolchain or the bindgen fork.
+need a Rust toolchain or the bindgen fork. vcpkg lands first; the Conan recipe
+reads the same release manifest so a release bumps both.
 
 ## Quests
 
 - [Generator](/quest/m2/cpp/generator.md) - the uniffi 0.32 C++ generator with futures and expected-style errors, pinned and generating `cpp/ffi` in CI
 - [Package](/quest/m2/cpp/package.md) - the `cpp/moq` wrapper, CMake package, release tarball, smoke client, and docs
-- [Registries](/quest/m2/cpp/registry.md) - a vcpkg registry and a Conan remote serve the prebuilt package
+- [vcpkg registry](/quest/m2/cpp/vcpkg.md) - a registry we own serves the prebuilt package to `vcpkg` manifests
+- [Conan remote](/quest/m2/cpp/conan.md) - a remote we own serves the same tarball to `conan install`
 - [OBS migration](/quest/m2/cpp/obs.md) - the OBS plugin moves from libmoq handles and trampolines to the generated C++
 
 ## Related
