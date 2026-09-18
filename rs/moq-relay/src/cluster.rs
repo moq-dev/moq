@@ -1,5 +1,5 @@
 use std::{
-	collections::HashMap,
+	collections::{BTreeMap, HashMap, VecDeque},
 	path::PathBuf,
 	sync::{
 		Arc, Mutex,
@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::Context;
 use moq_net::origin;
-use moq_net::{Hop, Path, stats::Tier};
+use moq_net::{Hop, Path, kio, stats::Tier};
 use reqwest_middleware::ClientWithMiddleware;
 use tokio::task::AbortHandle;
 use tracing::Instrument as _;
@@ -775,6 +775,11 @@ pub struct Config {
 		setting = "cluster.tier"
 	)]
 	pub tier: Option<String>,
+
+	/// Measured link pricing (`[cluster.cost]`).
+	#[usage(flatten)]
+	#[serde(default)]
+	pub cost: CostConfig,
 	/// Released spelling, kept so [`Self::deprecated`] can name that linger is gone.
 	#[doc(hidden)]
 	#[usage(
@@ -1036,6 +1041,12 @@ pub struct Cluster {
 	lan_auth: Arc<std::sync::OnceLock<LanAuth>>,
 	pub(crate) nodes: crate::nodes::Nodes,
 
+	/// Every cluster session this relay prices by measurement, and the task
+	/// that publishes them as a table. See [`CostConfig`].
+	links: Links,
+	/// The resolved `[cluster.cost]`, or `None` when measurement is off.
+	pricing: Option<Pricing>,
+
 	/// Hands out the `conn` id every session logs under, inbound and outbound
 	/// alike, so one id space covers the whole process and an id in the `/nodes`
 	/// view always points at the same session in the logs.
@@ -1096,6 +1107,7 @@ impl Cluster {
 		// matching the `--cluster-connect-api` validation, instead of silently
 		// keeping the first entry when dials spawn.
 		parse_peer_list(config.connect.clone(), None).context("invalid --cluster-connect peer list")?;
+		let pricing = config.cost.pricing()?;
 		let mut origin_config = origin::Config::new(id);
 		if let Some(cache) = cache {
 			origin_config.pool = cache.pool;
@@ -1113,6 +1125,8 @@ impl Cluster {
 			#[cfg(feature = "cluster-lan")]
 			lan_auth: Arc::new(std::sync::OnceLock::new()),
 			nodes,
+			links: Links::default(),
+			pricing,
 			connection_ids: Arc::default(),
 			client_tls: None,
 			origin,
@@ -1931,16 +1945,26 @@ impl Cluster {
 		// GOAWAY would break rolling handoff, redialing the drained URL after the
 		// old session finally closed instead of migrating to the replacement.
 		let mut reconnect = client.with_reconnect(true).connect(addrs.clone());
-		let mut connection = None;
-		loop {
-			match reconnect.status().await? {
-				moq_tokio::Status::Connected if connection.is_none() => {
-					connection = Some(self.nodes.connect_outbound(id, redacted.to_string()));
+		// Prices the link across reconnects while the lifecycle below runs; both
+		// handles share the loop and drop together.
+		let metered = reconnect.clone();
+		let meter = self.meter_outbound(id, &metered, cost);
+		let lifecycle = async {
+			let mut connection = None;
+			loop {
+				match reconnect.status().await? {
+					moq_tokio::Status::Connected if connection.is_none() => {
+						connection = Some(self.nodes.connect_outbound(id, redacted.to_string()));
+					}
+					moq_tokio::Status::Disconnected => connection = None,
+					moq_tokio::Status::Migrating => {}
+					_ => {}
 				}
-				moq_tokio::Status::Disconnected => connection = None,
-				moq_tokio::Status::Migrating => {}
-				_ => {}
 			}
+		};
+		tokio::select! {
+			res = lifecycle => res,
+			() = meter => anyhow::bail!("cluster link meter ended"),
 		}
 	}
 
@@ -2199,6 +2223,741 @@ where
 			BoolOrString::Str(value) => value,
 		}),
 	)
+}
+
+/// Namespace each relay publishes its measured link table under: one broadcast
+/// per relay, named by its hop id, carrying a [`LINKS_TRACK`] JSON track.
+pub(crate) const LINKS_PREFIX: &str = ".internal/links";
+
+/// The JSON track inside a [`LINKS_PREFIX`] broadcast: a [`LinkTable`].
+const LINKS_TRACK: &str = "links";
+
+/// Default for [`CostConfig::interval`].
+const DEFAULT_COST_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Default for [`CostConfig::hop_penalty`]: what terminating QUIC on one more
+/// relay costs a stream, in the milliseconds a link's RTT is priced in.
+const DEFAULT_HOP_PENALTY: Duration = Duration::from_millis(8);
+
+/// Default for [`CostConfig::step`].
+const DEFAULT_COST_STEP: Duration = Duration::from_millis(5);
+
+/// Default for [`CostConfig::loss_weight`]: a group of about a hundred packets
+/// stalls once per group at 1% loss, so 1% costs a whole RTT.
+const DEFAULT_LOSS_WEIGHT: u32 = 100;
+
+/// Samples the RTT median and the bandwidth minimum are taken over.
+const LINK_WINDOW: usize = 15;
+
+/// Weight of the newest interval in the loss estimate.
+const LOSS_ALPHA: f64 = 0.3;
+
+/// Fewest packets an interval must have sent before its loss ratio counts.
+const LOSS_MIN_PACKETS: u64 = 20;
+
+/// Measured link pricing (`[cluster.cost]`).
+///
+/// A cluster link nobody priced with `cost` is priced by what it does to a live
+/// stream: its RTT, one more RTT per expected retransmission, and a penalty for
+/// terminating QUIC on one more relay. Each relay measures the links it sends on
+/// and folds the price into the routes it forwards (see
+/// [`moq_net::Session::set_egress`]), so a `cost` configured at either end still
+/// wins and a peer that does not measure is priced at the default of 1.
+#[derive(usage::Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+#[serde_with::skip_serializing_none]
+#[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
+pub struct CostConfig {
+	/// Price unpriced cluster links by measurement. Boolean flag: pass
+	/// `--cluster-cost-measure=false` to price every unpriced link at 1 instead,
+	/// which is plain hop counting.
+	#[usage(
+		name = "cluster-cost-measure",
+		long = "cluster-cost-measure",
+		env = "MOQ_CLUSTER_COST_MEASURE",
+		setting = "cluster.cost.measure",
+		default = "true",
+		bool_value
+	)]
+	pub measure: bool,
+
+	/// How often each link is sampled, e.g. "1s". Defaults to 1s.
+	#[usage(
+		name = "cluster-cost-interval",
+		long = "cluster-cost-interval",
+		env = "MOQ_CLUSTER_COST_INTERVAL",
+		value_name = "DURATION",
+		setting = "cluster.cost.interval"
+	)]
+	pub interval: Option<moq_tokio::Duration>,
+
+	/// What one more relay hop costs a stream, added to every measured link, e.g.
+	/// "8ms". A two-hop detour has to beat the direct link by this much before
+	/// routing takes it. Defaults to 8ms.
+	#[usage(
+		name = "cluster-cost-hop-penalty",
+		long = "cluster-cost-hop-penalty",
+		env = "MOQ_CLUSTER_COST_HOP_PENALTY",
+		value_name = "DURATION",
+		setting = "cluster.cost.hop_penalty"
+	)]
+	pub hop_penalty: Option<moq_tokio::Duration>,
+
+	/// How many RTTs a unit of loss costs: the price adds `loss_weight * loss * rtt`.
+	/// Defaults to 100, so 1% loss costs one RTT.
+	#[usage(
+		name = "cluster-cost-loss-weight",
+		long = "cluster-cost-loss-weight",
+		env = "MOQ_CLUSTER_COST_LOSS_WEIGHT",
+		setting = "cluster.cost.loss_weight"
+	)]
+	pub loss_weight: Option<u32>,
+
+	/// Prices round to this step and only move once the measured price has
+	/// drifted a whole step from the announced one, e.g. "5ms". Defaults to 5ms.
+	#[usage(
+		name = "cluster-cost-step",
+		long = "cluster-cost-step",
+		env = "MOQ_CLUSTER_COST_STEP",
+		value_name = "DURATION",
+		setting = "cluster.cost.step"
+	)]
+	pub step: Option<moq_tokio::Duration>,
+
+	/// Bits per second below which the sender's bandwidth estimate makes a link
+	/// unusable: it is priced at the ceiling so every other path outranks it.
+	/// Unset never does. The estimate comes from the congestion controller, so
+	/// it only reflects capacity while the link is carrying traffic.
+	#[usage(
+		name = "cluster-cost-min-bandwidth",
+		long = "cluster-cost-min-bandwidth",
+		env = "MOQ_CLUSTER_COST_MIN_BANDWIDTH",
+		value_name = "BPS",
+		setting = "cluster.cost.min_bandwidth"
+	)]
+	pub min_bandwidth: Option<u64>,
+}
+
+impl Default for CostConfig {
+	fn default() -> Self {
+		Self {
+			measure: true,
+			interval: None,
+			hop_penalty: None,
+			loss_weight: None,
+			step: None,
+			min_bandwidth: None,
+		}
+	}
+}
+
+impl CostConfig {
+	/// Resolve the pricing the meters run with, or `None` when measurement is off.
+	fn pricing(&self) -> anyhow::Result<Option<Pricing>> {
+		if !self.measure {
+			return Ok(None);
+		}
+		let interval = self.interval.map(|d| *d).unwrap_or(DEFAULT_COST_INTERVAL);
+		anyhow::ensure!(!interval.is_zero(), "--cluster-cost-interval must be positive");
+		let step = self.step.map(|d| *d).unwrap_or(DEFAULT_COST_STEP);
+		anyhow::ensure!(
+			step >= Duration::from_millis(1),
+			"--cluster-cost-step must be at least 1ms"
+		);
+		Ok(Some(Pricing {
+			interval,
+			hop_penalty: self.hop_penalty.map(|d| *d).unwrap_or(DEFAULT_HOP_PENALTY),
+			loss_weight: self.loss_weight.unwrap_or(DEFAULT_LOSS_WEIGHT),
+			step,
+			min_bandwidth: self.min_bandwidth,
+		}))
+	}
+}
+
+/// The resolved [`CostConfig`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Pricing {
+	interval: Duration,
+	hop_penalty: Duration,
+	loss_weight: u32,
+	step: Duration,
+	min_bandwidth: Option<u64>,
+}
+
+/// One reading of a link's transport counters, from the sending side.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct LinkSample {
+	rtt: Option<Duration>,
+	packets_sent: Option<u64>,
+	packets_lost: Option<u64>,
+	/// The congestion controller's send estimate, in bits per second.
+	bandwidth: Option<u64>,
+}
+
+impl From<&moq_net::ConnectionStats> for LinkSample {
+	fn from(stats: &moq_net::ConnectionStats) -> Self {
+		Self {
+			rtt: stats.rtt,
+			packets_sent: stats.packets_sent,
+			packets_lost: stats.packets_lost,
+			bandwidth: stats.estimated_send_rate,
+		}
+	}
+}
+
+/// The smoothed picture of one link.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LinkEstimate {
+	rtt: Duration,
+	/// The fraction of sent packets declared lost, `0.0` until traffic has shown any.
+	loss: f64,
+	bandwidth: Option<u64>,
+}
+
+/// Smooths a link's samples: a windowed median for RTT (one slow ack must not
+/// move a route), an EWMA over each interval's own loss ratio (the counters are
+/// cumulative, so an old burst never resurfaces), and a windowed minimum for
+/// bandwidth. Loss is only learned from traffic: an interval that sent fewer than
+/// [`LOSS_MIN_PACKETS`] says nothing, so an idle link keeps its last estimate.
+#[derive(Default)]
+struct LinkMeter {
+	rtts: VecDeque<Duration>,
+	bandwidths: VecDeque<u64>,
+	loss: Option<f64>,
+	/// The `(sent, lost)` counters at the previous sample.
+	counters: Option<(u64, u64)>,
+}
+
+impl LinkMeter {
+	/// Fold in one sample; `None` until the link has reported an RTT.
+	fn observe(&mut self, sample: LinkSample) -> Option<LinkEstimate> {
+		if let Some(rtt) = sample.rtt {
+			push_window(&mut self.rtts, rtt);
+		}
+		if let Some(bandwidth) = sample.bandwidth {
+			push_window(&mut self.bandwidths, bandwidth);
+		}
+		if let (Some(sent), Some(lost)) = (sample.packets_sent, sample.packets_lost)
+			&& let Some((prev_sent, prev_lost)) = self.counters.replace((sent, lost))
+		{
+			let delta_sent = sent.saturating_sub(prev_sent);
+			let delta_lost = lost.saturating_sub(prev_lost);
+			if delta_sent >= LOSS_MIN_PACKETS {
+				// Loss detection lags sending, so an interval can declare more lost than it sent.
+				let ratio = (delta_lost as f64 / delta_sent as f64).min(1.0);
+				self.loss = Some(match self.loss {
+					Some(loss) => loss + LOSS_ALPHA * (ratio - loss),
+					None => ratio,
+				});
+			}
+		}
+		self.estimate()
+	}
+
+	fn estimate(&self) -> Option<LinkEstimate> {
+		if self.rtts.is_empty() {
+			return None;
+		}
+		let mut sorted: Vec<Duration> = self.rtts.iter().copied().collect();
+		sorted.sort_unstable();
+		Some(LinkEstimate {
+			rtt: sorted[sorted.len() / 2],
+			loss: self.loss.unwrap_or(0.0),
+			bandwidth: self.bandwidths.iter().copied().min(),
+		})
+	}
+
+	/// Whether anything has been observed since the last reset.
+	fn is_empty(&self) -> bool {
+		self.rtts.is_empty() && self.bandwidths.is_empty() && self.counters.is_none()
+	}
+}
+
+fn push_window<T>(window: &mut VecDeque<T>, value: T) {
+	if window.len() == LINK_WINDOW {
+		window.pop_front();
+	}
+	window.push_back(value);
+}
+
+/// What a link does to a live stream, in milliseconds: its RTT, one more RTT per
+/// expected retransmission (a lost packet costs about an RTT to recover), and the
+/// hop penalty. Below the bandwidth floor the link is unusable and prices at the
+/// ceiling, which ranks last without wrapping.
+fn link_price(estimate: &LinkEstimate, pricing: &Pricing) -> u64 {
+	if let (Some(floor), Some(bandwidth)) = (pricing.min_bandwidth, estimate.bandwidth)
+		&& bandwidth < floor
+	{
+		return moq_net::origin::MAX_COST;
+	}
+	let rtt = estimate.rtt.as_secs_f64() * 1000.0;
+	let penalty = pricing.hop_penalty.as_secs_f64() * 1000.0;
+	let price = rtt + f64::from(pricing.loss_weight) * estimate.loss * rtt + penalty;
+	(price.round() as u64).min(moq_net::origin::MAX_COST)
+}
+
+/// Rounds a price to the configured step and moves the announced value only
+/// once the raw price has drifted a whole step from it, so a link that sits on
+/// a rounding boundary settles on one price instead of re-announcing every
+/// sample.
+struct Quantizer {
+	/// The step in milliseconds, at least 1.
+	step: u64,
+	/// The announced price, once there is one.
+	current: Option<u64>,
+}
+
+impl Quantizer {
+	fn new(step: Duration) -> Self {
+		Self {
+			step: u64::try_from(step.as_millis()).unwrap_or(u64::MAX).max(1),
+			current: None,
+		}
+	}
+
+	/// The price to announce for `raw`, or `None` when the announced one stands.
+	fn update(&mut self, raw: u64) -> Option<u64> {
+		let ceiling = moq_net::origin::MAX_COST;
+		let quantized = match raw {
+			raw if raw >= ceiling => ceiling,
+			raw => raw.saturating_add(self.step / 2) / self.step * self.step,
+		};
+		match self.current {
+			Some(current) if current == quantized => None,
+			// Inside the dead band around the announced price: hold it.
+			Some(current) if current < ceiling && raw < ceiling && raw.abs_diff(current) < self.step => None,
+			_ => {
+				self.current = Some(quantized);
+				Some(quantized)
+			}
+		}
+	}
+}
+
+/// One measured link in a relay's published [`LinkTable`].
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct LinkEntry {
+	/// The peer's hop id.
+	pub peer: u64,
+	/// The announced price of sending to the peer, in milliseconds.
+	pub cost: u64,
+	/// The smoothed round-trip time, in milliseconds.
+	pub rtt_ms: f64,
+	/// The smoothed fraction of sent packets lost.
+	pub loss: f64,
+	/// The lowest recent send estimate, in bits per second, when the transport reports one.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub bandwidth: Option<u64>,
+}
+
+/// The table a relay publishes under [`LINKS_PREFIX`]: the measured price of
+/// each of its links, so a peer can see the two-hop paths its own routing
+/// cannot compare against the direct link.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct LinkTable {
+	/// The publishing relay's hop id.
+	pub hop: u64,
+	/// Its `cluster.node` URL, when configured, so a log line can name it.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub node: Option<String>,
+	pub links: Vec<LinkEntry>,
+}
+
+/// One metered session as the registry keeps it.
+#[derive(Clone, Copy, Debug)]
+struct LinkStatus {
+	/// The peer's hop id, once its SETUP named one.
+	peer: Option<u64>,
+	estimate: LinkEstimate,
+	/// The announced price.
+	cost: u64,
+}
+
+/// Every session this relay prices, keyed by connection id, plus the wakeup for
+/// the table publisher and the publisher itself.
+#[derive(Clone, Default)]
+struct Links(Arc<LinksInner>);
+
+#[derive(Default)]
+struct LinksInner {
+	state: Mutex<BTreeMap<u64, LinkStatus>>,
+	changed: tokio::sync::Notify,
+	/// The table publisher and detour check, started with the first metered link.
+	task: std::sync::OnceLock<AbortHandle>,
+}
+
+impl Links {
+	fn update(&self, id: u64, status: LinkStatus) {
+		self.0.state.lock().expect("links poisoned").insert(id, status);
+		self.0.changed.notify_one();
+	}
+
+	fn remove(&self, id: u64) {
+		if self.0.state.lock().expect("links poisoned").remove(&id).is_some() {
+			self.0.changed.notify_one();
+		}
+	}
+
+	/// The table to publish: one entry per identified peer, at the cheapest of
+	/// its sessions.
+	fn table(&self, hop: u64, node: Option<String>) -> LinkTable {
+		let mut by_peer: BTreeMap<u64, LinkEntry> = BTreeMap::new();
+		for status in self.0.state.lock().expect("links poisoned").values() {
+			let Some(peer) = status.peer else { continue };
+			let entry = LinkEntry {
+				peer,
+				cost: status.cost,
+				rtt_ms: status.estimate.rtt.as_secs_f64() * 1000.0,
+				loss: status.estimate.loss,
+				bandwidth: status.estimate.bandwidth,
+			};
+			match by_peer.get(&peer) {
+				Some(existing) if existing.cost <= entry.cost => {}
+				_ => {
+					by_peer.insert(peer, entry);
+				}
+			}
+		}
+		LinkTable {
+			hop,
+			node,
+			links: by_peer.into_values().collect(),
+		}
+	}
+
+	async fn changed(&self) {
+		self.0.changed.notified().await
+	}
+}
+
+/// Prices one cluster session for as long as it lives: samples its transport,
+/// prices the link, and re-prices the session's egress when the quantized price
+/// moves. Dropping it takes the session out of the published table.
+struct Link {
+	id: u64,
+	peer: Option<u64>,
+	pricing: Pricing,
+	meter: LinkMeter,
+	quantizer: Quantizer,
+	links: Links,
+}
+
+impl Link {
+	fn new(id: u64, peer: Option<u64>, pricing: Pricing, links: Links) -> Self {
+		Self {
+			id,
+			peer,
+			pricing,
+			meter: LinkMeter::default(),
+			quantizer: Quantizer::new(pricing.step),
+			links,
+		}
+	}
+
+	/// Forget the session's history: a reconnect is a new path.
+	fn reset(&mut self) {
+		if self.meter.is_empty() {
+			return;
+		}
+		self.meter = LinkMeter::default();
+		self.quantizer = Quantizer::new(self.pricing.step);
+		self.peer = None;
+		self.links.remove(self.id);
+	}
+
+	fn sample(&mut self, session: &moq_net::Session) {
+		let stats = session.stats();
+		let Some(estimate) = self.meter.observe(LinkSample::from(&stats)) else {
+			return;
+		};
+		let raw = link_price(&estimate, &self.pricing);
+		if let Some(price) = self.quantizer.update(raw) {
+			session.set_egress(price);
+			tracing::info!(
+				peer = self.peer.unwrap_or(0),
+				cost = price,
+				rtt_ms = estimate.rtt.as_millis() as u64,
+				loss = format_args!("{:.4}", estimate.loss),
+				bandwidth = estimate.bandwidth.unwrap_or(0),
+				"priced cluster link"
+			);
+		}
+		let cost = self.quantizer.current.expect("priced above");
+		self.links.update(
+			self.id,
+			LinkStatus {
+				peer: self.peer,
+				estimate,
+				cost,
+			},
+		);
+	}
+}
+
+impl Drop for Link {
+	fn drop(&mut self) {
+		self.links.remove(self.id);
+	}
+}
+
+/// Stops a link's meter when the session it prices is done with.
+pub(crate) struct Metered(AbortHandle);
+
+impl Drop for Metered {
+	fn drop(&mut self) {
+		self.0.abort();
+	}
+}
+
+impl Cluster {
+	/// Price an accepted cluster session by measurement for as long as the
+	/// returned guard lives, or `None` when this session is not priced: measurement
+	/// is off, the peer declared no identity (a leaf, not a relay), or the dialer
+	/// declared a price, which is its configured policy for the link and so stands
+	/// in both directions.
+	pub(crate) fn meter_inbound(
+		&self,
+		id: u64,
+		session: &moq_net::Session,
+		peer: Option<Hop>,
+		declared: Option<u64>,
+	) -> Option<Metered> {
+		let pricing = self.pricing?;
+		let peer = peer?;
+		if declared.is_some() {
+			return None;
+		}
+		self.ensure_links();
+		let session = session.clone();
+		let mut link = Link::new(id, Some(peer.id()), pricing, self.links.clone());
+		let handle = tokio::spawn(async move {
+			loop {
+				tokio::select! {
+					() = tokio::time::sleep(pricing.interval) => link.sample(&session),
+					_ = session.closed() => break,
+				}
+			}
+		});
+		Some(Metered(handle.abort_handle()))
+	}
+
+	/// Price a dialed cluster connection by measurement across its reconnects.
+	/// Never returns; race it against the connection's own lifecycle. A link the
+	/// operator priced with `cost` is left alone.
+	async fn meter_outbound(&self, id: u64, connection: &moq_tokio::Connection, cost: Option<u64>) {
+		let Some(pricing) = self.pricing.filter(|_| cost.is_none()) else {
+			return std::future::pending().await;
+		};
+		self.ensure_links();
+		let monitor = connection.monitor();
+		let mut link = Link::new(id, None, pricing, self.links.clone());
+		let mut epoch = connection.epoch();
+		loop {
+			tokio::time::sleep(pricing.interval).await;
+			let Some(session) = monitor.session() else {
+				link.reset();
+				continue;
+			};
+			if connection.epoch() != epoch {
+				epoch = connection.epoch();
+				link.reset();
+			}
+			if link.peer.is_none() {
+				// Known once the peer's SETUP is read, which follows the handshake
+				// closely; a version without one resolves to `None` at once and the
+				// session stays out of the published table.
+				link.peer = tokio::time::timeout(pricing.interval, session.peer_hop())
+					.await
+					.ok()
+					.flatten()
+					.map(Hop::id);
+			}
+			link.sample(&session);
+		}
+	}
+
+	/// Start the link-table publisher and detour check once, with the first
+	/// metered link, so a relay pricing nothing publishes nothing.
+	fn ensure_links(&self) {
+		self.links.0.task.get_or_init(|| {
+			let this = self.clone();
+			tokio::spawn(this.run_links()).abort_handle()
+		});
+	}
+
+	/// Publish this relay's [`LinkTable`] and watch every peer's, logging each
+	/// direct link a two-hop path beats by more than the hop penalty. Routing
+	/// already takes those detours on its own; naming them is what tells an
+	/// operator which backbone edges are worth having.
+	async fn run_links(self) {
+		let Some(pricing) = self.pricing else { return };
+		let hop = self.origin.id();
+		let path = Path::new(LINKS_PREFIX).join(hop.to_string());
+		let mut broadcast = match self.origin.create_broadcast(&path) {
+			Ok(broadcast) => broadcast,
+			Err(err) => {
+				tracing::warn!(%err, %path, "cannot publish the cluster link table");
+				return;
+			}
+		};
+		let track = match broadcast
+			.announce(origin::Route::default())
+			.and_then(|()| broadcast.create_track(LINKS_TRACK, None))
+		{
+			Ok(track) => track,
+			Err(err) => {
+				tracing::warn!(%err, %path, "cannot publish the cluster link table");
+				return;
+			}
+		};
+		let mut producer = moq_json::snapshot::Producer::new(track, Default::default());
+		let Some(consumer) = self.origin.consume().with_root(LINKS_PREFIX) else {
+			tracing::warn!("could not scope cluster origin to {LINKS_PREFIX}; link tables disabled");
+			return;
+		};
+		let mut announced = consumer.announced();
+
+		let (tables_tx, mut tables_rx) = tokio::sync::mpsc::unbounded_channel::<(u64, Option<LinkTable>)>();
+		let mut readers: HashMap<u64, AbortHandle> = HashMap::new();
+		let mut tables: HashMap<u64, LinkTable> = HashMap::new();
+		let mut own = LinkTable::default();
+		let mut detoured: BTreeMap<(u64, u64), Detour> = BTreeMap::new();
+		let penalty = u64::try_from(pricing.hop_penalty.as_millis()).unwrap_or(u64::MAX);
+
+		loop {
+			tokio::select! {
+				() = self.links.changed() => {
+					own = self.links.table(hop, self.config.node.clone());
+					if let Err(err) = producer.update(&own) {
+						tracing::warn!(%err, "cluster link table closed");
+						return;
+					}
+				}
+				update = announced.next() => {
+					let Some(update) = update else { return };
+					let Some(peer) = update.pattern.as_prefix().and_then(|p| p.parse::<u64>().ok()) else {
+						continue;
+					};
+					if peer == hop {
+						continue;
+					}
+					if update.active {
+						if readers.contains_key(&peer) {
+							continue;
+						}
+						let consumer = consumer.clone();
+						let tx = tables_tx.clone();
+						let reader = tokio::spawn(async move {
+							if let Err(err) = read_links(consumer, peer, &tx).await {
+								tracing::debug!(%err, peer, "cluster link table reader ended");
+							}
+							let _ = tx.send((peer, None));
+						});
+						readers.insert(peer, reader.abort_handle());
+					} else if let Some(reader) = readers.remove(&peer) {
+						reader.abort();
+						tables.remove(&peer);
+					}
+				}
+				Some((peer, table)) = tables_rx.recv() => {
+					match table {
+						Some(table) => {
+							tables.insert(peer, table);
+						}
+						None => {
+							readers.remove(&peer);
+							tables.remove(&peer);
+						}
+					}
+				}
+			}
+
+			let now = detours(&own, &tables, penalty);
+			for ((peer, via), detour) in &now {
+				if detoured.contains_key(&(*peer, *via)) {
+					continue;
+				}
+				tracing::info!(
+					peer,
+					peer_node = tables.get(peer).and_then(|t| t.node.as_deref()).unwrap_or(""),
+					via,
+					via_node = tables.get(via).and_then(|t| t.node.as_deref()).unwrap_or(""),
+					direct_ms = detour.direct,
+					detour_ms = detour.detour,
+					"cluster link detour: the two-hop path beats the direct link by more than the hop penalty"
+				);
+			}
+			for ((peer, via), detour) in &detoured {
+				if now.contains_key(&(*peer, *via)) {
+					continue;
+				}
+				tracing::info!(
+					peer,
+					via,
+					direct_ms = detour.direct,
+					"cluster link detour over: the direct link is competitive again"
+				);
+			}
+			detoured = now;
+		}
+	}
+}
+
+/// Read one peer's [`LinkTable`] for as long as it publishes one.
+async fn read_links(
+	consumer: origin::Consumer,
+	peer: u64,
+	tx: &tokio::sync::mpsc::UnboundedSender<(u64, Option<LinkTable>)>,
+) -> anyhow::Result<()> {
+	let broadcast = consumer.routed_broadcast(&peer.to_string()).await?;
+	let track = broadcast.track(LINKS_TRACK)?.subscribe(None).await?;
+	let mut json = moq_json::snapshot::Consumer::<LinkTable>::new(track, Default::default());
+	while let Some(table) = kio::wait(|waiter| json.poll_next(waiter)).await? {
+		if tx.send((peer, Some(table))).is_err() {
+			break;
+		}
+	}
+	Ok(())
+}
+
+/// The prices behind one logged detour, in milliseconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Detour {
+	/// The direct link's price.
+	direct: u64,
+	/// The two-hop path's price: both links plus the hop penalty.
+	detour: u64,
+}
+
+/// The direct links in `own` that a two-hop path through another of its peers
+/// beats by more than the hop penalty, keyed by `(peer, via)`. Each link price
+/// already carries one penalty; the extra one is what a marginal detour must
+/// clear so a coin flip between two routes never reads as a bad edge.
+fn detours(own: &LinkTable, tables: &HashMap<u64, LinkTable>, penalty: u64) -> BTreeMap<(u64, u64), Detour> {
+	let mut found = BTreeMap::new();
+	for direct in &own.links {
+		for via in &own.links {
+			if via.peer == direct.peer {
+				continue;
+			}
+			let Some(table) = tables.get(&via.peer) else { continue };
+			let Some(second) = table.links.iter().find(|link| link.peer == direct.peer) else {
+				continue;
+			};
+			let detour = via.cost.saturating_add(second.cost).saturating_add(penalty);
+			if direct.cost > detour {
+				found.insert(
+					(direct.peer, via.peer),
+					Detour {
+						direct: direct.cost,
+						detour,
+					},
+				);
+			}
+		}
+	}
+	found
 }
 
 #[cfg(test)]
@@ -3502,6 +4261,296 @@ mod tests {
 		dialed.release("never-dialed", DialSource::Mdns, &mut |_| panic!("must not redial"));
 	}
 
+	fn price_config(hop_penalty_ms: u64, loss_weight: u32, step_ms: u64, min_bandwidth: Option<u64>) -> Pricing {
+		Pricing {
+			interval: Duration::from_secs(1),
+			hop_penalty: Duration::from_millis(hop_penalty_ms),
+			loss_weight,
+			step: Duration::from_millis(step_ms),
+			min_bandwidth,
+		}
+	}
+
+	fn estimate(rtt_ms: u64, loss: f64, bandwidth: Option<u64>) -> LinkEstimate {
+		LinkEstimate {
+			rtt: Duration::from_millis(rtt_ms),
+			loss,
+			bandwidth,
+		}
+	}
+
+	/// The price is the RTT, one RTT per expected retransmission, and the hop
+	/// penalty; a clean link pays only its RTT and the penalty.
+	#[test]
+	fn link_price_charges_rtt_loss_and_the_hop() {
+		let pricing = price_config(8, 100, 5, None);
+		assert_eq!(link_price(&estimate(110, 0.0, None), &pricing), 118);
+		assert_eq!(link_price(&estimate(110, 0.01, None), &pricing), 228);
+		assert_eq!(link_price(&estimate(50, 0.0, None), &pricing), 58);
+		// Weight and penalty are the operator's knobs.
+		assert_eq!(
+			link_price(&estimate(100, 0.01, None), &price_config(0, 10, 5, None)),
+			110
+		);
+	}
+
+	/// Below the bandwidth floor the link is unusable: priced at the wire ceiling,
+	/// which ranks last without wrapping. No floor, or no estimate, never trips it.
+	#[test]
+	fn link_price_floors_on_bandwidth() {
+		let floor = price_config(8, 100, 5, Some(5_000_000));
+		assert_eq!(
+			link_price(&estimate(10, 0.0, Some(4_000_000)), &floor),
+			moq_net::origin::MAX_COST
+		);
+		assert_eq!(link_price(&estimate(10, 0.0, Some(5_000_000)), &floor), 18);
+		assert_eq!(link_price(&estimate(10, 0.0, None), &floor), 18);
+		let open = price_config(8, 100, 5, None);
+		assert_eq!(link_price(&estimate(10, 0.0, Some(1)), &open), 18);
+	}
+
+	/// Prices round to the step and hold until the raw price drifts a whole step
+	/// from the announced one, so a link on a rounding boundary never flaps.
+	#[test]
+	fn quantizer_rounds_and_holds() {
+		let mut q = Quantizer::new(Duration::from_millis(5));
+		assert_eq!(q.update(52), Some(50));
+		// Plain rounding would flip at 52.5; the band holds to a full step.
+		assert_eq!(q.update(54), None);
+		assert_eq!(q.update(53), None);
+		assert_eq!(q.update(55), Some(55));
+		assert_eq!(q.update(53), None);
+		assert_eq!(q.update(51), None);
+		assert_eq!(q.update(50), Some(50));
+		// A jump lands on the nearest step in one move.
+		assert_eq!(q.update(228), Some(230));
+		// The ceiling is announced as is, and coming back from it is a move.
+		assert_eq!(q.update(moq_net::origin::MAX_COST), Some(moq_net::origin::MAX_COST));
+		assert_eq!(q.update(moq_net::origin::MAX_COST), None);
+		assert_eq!(q.update(60), Some(60));
+		// A sub-millisecond step still rounds to whole milliseconds.
+		let mut fine = Quantizer::new(Duration::from_micros(100));
+		assert_eq!(fine.update(7), Some(7));
+		assert_eq!(fine.update(8), Some(8));
+	}
+
+	fn sample(rtt_ms: u64, sent: u64, lost: u64, bandwidth: Option<u64>) -> LinkSample {
+		LinkSample {
+			rtt: Some(Duration::from_millis(rtt_ms)),
+			packets_sent: Some(sent),
+			packets_lost: Some(lost),
+			bandwidth,
+		}
+	}
+
+	/// RTT is a windowed median (one slow sample does not move it), loss an EWMA
+	/// of each interval's own ratio that idle intervals leave alone, and bandwidth
+	/// the windowed minimum.
+	#[test]
+	fn meter_smooths_a_synthetic_link() {
+		let mut meter = LinkMeter::default();
+		assert_eq!(meter.observe(LinkSample::default()), None, "no RTT yet");
+
+		let first = meter.observe(sample(50, 0, 0, Some(10_000_000))).unwrap();
+		assert_eq!(first, estimate(50, 0.0, Some(10_000_000)));
+
+		// One outlier among a window of steady samples.
+		meter.observe(sample(50, 100, 0, Some(9_000_000)));
+		let spike = meter.observe(sample(400, 200, 0, Some(12_000_000))).unwrap();
+		assert_eq!(spike.rtt, Duration::from_millis(50), "the median ignores one spike");
+		assert_eq!(spike.bandwidth, Some(9_000_000), "the minimum over the window");
+
+		// The clean intervals above already taught a loss of zero, so 1% over an
+		// interval that sent 1000 packets moves the estimate by the EWMA weight,
+		// and the next clean interval decays it by the same weight.
+		assert_eq!(spike.loss, 0.0);
+		let lossy = meter.observe(sample(50, 1200, 10, None)).unwrap();
+		assert!((lossy.loss - 0.003).abs() < 1e-9, "{lossy:?}");
+		let clean = meter.observe(sample(50, 2200, 10, None)).unwrap();
+		assert!((clean.loss - 0.0021).abs() < 1e-9, "{clean:?}");
+
+		// An interval below the packet floor teaches nothing, and neither does an
+		// interval with no traffic at all: the last estimate stands.
+		let quiet = meter.observe(sample(50, 2210, 12, None)).unwrap();
+		assert!((quiet.loss - 0.0021).abs() < 1e-9, "{quiet:?}");
+		let idle = meter.observe(sample(50, 2210, 12, None)).unwrap();
+		assert!((idle.loss - 0.0021).abs() < 1e-9, "{idle:?}");
+
+		// A fresh meter's first believable interval lands directly.
+		let mut fresh = LinkMeter::default();
+		fresh.observe(sample(50, 0, 0, None));
+		let direct = fresh.observe(sample(50, 1000, 10, None)).unwrap();
+		assert!((direct.loss - 0.01).abs() < 1e-9, "{direct:?}");
+
+		// Detection lags sending, so an interval can lose more than it sent.
+		let burst = meter.observe(sample(50, 2240, 100, None)).unwrap();
+		assert!(burst.loss <= 1.0, "{burst:?}");
+
+		// The window forgets: enough steady samples push the spike out.
+		for _ in 0..LINK_WINDOW {
+			meter.observe(sample(60, 2240, 100, Some(20_000_000)));
+		}
+		let settled = meter.estimate().unwrap();
+		assert_eq!(settled.rtt, Duration::from_millis(60));
+		assert_eq!(settled.bandwidth, Some(20_000_000));
+	}
+
+	fn entry(peer: u64, cost: u64) -> LinkEntry {
+		LinkEntry {
+			peer,
+			cost,
+			rtt_ms: cost as f64,
+			loss: 0.0,
+			bandwidth: None,
+		}
+	}
+
+	fn table(hop: u64, links: &[(u64, u64)]) -> LinkTable {
+		LinkTable {
+			hop,
+			node: None,
+			links: links.iter().map(|&(peer, cost)| entry(peer, cost)).collect(),
+		}
+	}
+
+	/// The lossy triangle: sjc's direct link to nyc prices at 228, the path over
+	/// dal at 58 + 68 (+ the penalty) beats it, and the clean triangle does not.
+	/// A peer whose table is missing, or that names no link to the destination,
+	/// is not a detour.
+	#[test]
+	fn detours_name_only_the_violations() {
+		let sjc = 1;
+		let dal = 2;
+		let nyc = 3;
+		let mut tables = HashMap::new();
+		tables.insert(dal, table(dal, &[(sjc, 58), (nyc, 68)]));
+
+		let lossy = table(sjc, &[(dal, 58), (nyc, 228)]);
+		let found = detours(&lossy, &tables, 8);
+		assert_eq!(found.len(), 1, "{found:?}");
+		assert_eq!(
+			found[&(nyc, dal)],
+			Detour {
+				direct: 228,
+				detour: 134
+			}
+		);
+
+		let clean = table(sjc, &[(dal, 58), (nyc, 118)]);
+		assert!(detours(&clean, &tables, 8).is_empty());
+
+		// A detour has to beat the direct link by more than the penalty.
+		let marginal = table(sjc, &[(dal, 58), (nyc, 134)]);
+		assert!(detours(&marginal, &tables, 8).is_empty());
+		let over = table(sjc, &[(dal, 58), (nyc, 135)]);
+		assert_eq!(over.links.len(), 2);
+		assert_eq!(detours(&over, &tables, 8).len(), 1);
+
+		// No table from dal, or a dal that does not reach nyc: nothing to compare.
+		assert!(detours(&lossy, &HashMap::new(), 8).is_empty());
+		let mut partial = HashMap::new();
+		partial.insert(dal, table(dal, &[(sjc, 58)]));
+		assert!(detours(&lossy, &partial, 8).is_empty());
+	}
+
+	/// The published table names each identified peer once, at the cheapest of
+	/// its sessions, and leaves sessions whose peer is still unknown out.
+	#[test]
+	fn link_table_merges_sessions_per_peer() {
+		let links = Links::default();
+		let status = |peer: Option<u64>, cost: u64| LinkStatus {
+			peer,
+			estimate: estimate(cost, 0.0, None),
+			cost,
+		};
+		links.update(1, status(Some(7), 60));
+		links.update(2, status(Some(7), 50));
+		links.update(3, status(None, 10));
+		links.update(4, status(Some(9), 90));
+
+		let table = links.table(42, Some("https://sjc.example/".into()));
+		assert_eq!(table.hop, 42);
+		assert_eq!(table.node.as_deref(), Some("https://sjc.example/"));
+		assert_eq!(
+			table.links.iter().map(|l| (l.peer, l.cost)).collect::<Vec<_>>(),
+			vec![(7, 50), (9, 90)]
+		);
+
+		links.remove(2);
+		let table = links.table(42, None);
+		assert_eq!(
+			table.links.iter().map(|l| (l.peer, l.cost)).collect::<Vec<_>>(),
+			vec![(7, 60), (9, 90)]
+		);
+	}
+
+	/// The defaults price by measurement; `measure = false` turns it off, and a
+	/// zero interval or step is refused rather than spinning or dividing by zero.
+	#[test]
+	fn cost_config_resolves_and_validates() {
+		let pricing = CostConfig::default().pricing().unwrap().expect("measuring by default");
+		assert_eq!(pricing.interval, DEFAULT_COST_INTERVAL);
+		assert_eq!(pricing.hop_penalty, DEFAULT_HOP_PENALTY);
+		assert_eq!(pricing.loss_weight, DEFAULT_LOSS_WEIGHT);
+		assert_eq!(pricing.step, DEFAULT_COST_STEP);
+		assert_eq!(pricing.min_bandwidth, None);
+
+		let off = CostConfig {
+			measure: false,
+			..Default::default()
+		};
+		assert!(off.pricing().unwrap().is_none());
+
+		let zero = CostConfig {
+			interval: Some(Duration::ZERO.into()),
+			..Default::default()
+		};
+		assert!(zero.pricing().is_err());
+		let fine = CostConfig {
+			step: Some(Duration::from_micros(10).into()),
+			..Default::default()
+		};
+		assert!(fine.pricing().is_err());
+	}
+
+	/// `[cluster.cost]` loads from TOML and the CLI re-parse leaves it alone.
+	#[test]
+	fn cluster_cost_survives_toml_merge() {
+		let _env = crate::test_env::EnvGuard::lock();
+
+		let toml = "[cluster.cost]\nmeasure = false\nhop_penalty = \"12ms\"\nloss_weight = 50\nstep = \"10ms\"\nmin_bandwidth = 2000000\n";
+		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("cluster-cost-toml.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = RelayConfig::parse_and_merge(args).expect("config load");
+		let cost = &config.cluster.cost;
+		assert!(!cost.measure, "TOML's measure = false must survive the CLI re-parse");
+		assert_eq!(cost.hop_penalty.map(|d| *d), Some(Duration::from_millis(12)));
+		assert_eq!(cost.loss_weight, Some(50));
+		assert_eq!(cost.step.map(|d| *d), Some(Duration::from_millis(10)));
+		assert_eq!(cost.min_bandwidth, Some(2_000_000));
+
+		// And a flag wins over the file.
+		let args = vec![
+			std::ffi::OsString::from("moq-relay"),
+			std::ffi::OsString::from(&path),
+			std::ffi::OsString::from("--cluster-cost-loss-weight=7"),
+			std::ffi::OsString::from("--cluster-cost-measure=true"),
+			std::ffi::OsString::from("--cluster-cost-hop-penalty=3ms"),
+		];
+		let config = RelayConfig::parse_and_merge(args).expect("config load");
+		assert_eq!(config.cluster.cost.loss_weight, Some(7), "u32 flag");
+		assert!(config.cluster.cost.measure, "bool flag");
+		assert_eq!(
+			config.cluster.cost.hop_penalty.map(|d| *d),
+			Some(Duration::from_millis(3)),
+			"duration flag"
+		);
+	}
+
 	#[test]
 	fn cluster_connect_api_survives_toml_merge() {
 		// Usage reads the environment while parsing, so serialize with the tests
@@ -3520,6 +4569,19 @@ mod tests {
 			config.cluster.connect_api.as_deref(),
 			Some("https://api.example.com/cluster/connect")
 		);
+	}
+
+	/// The next announcement that is not one of the relay's own `.internal/`
+	/// broadcasts (the mesh advertisement, the link table), which a peer sees
+	/// as soon as the session is up.
+	#[cfg(feature = "cluster-lan")]
+	async fn next_user_announce(announced: &mut moq_net::announce::Consumer) -> Option<moq_net::announce::Update> {
+		loop {
+			let update = announced.next().await?;
+			if !update.pattern.as_str().starts_with(".internal/") {
+				return Some(update);
+			}
+		}
 	}
 
 	/// Two in-process origins share broadcasts both ways over one
@@ -3584,7 +4646,7 @@ mod tests {
 		let _dial = fingerprint.dial_lan_target(&target).expect("dial");
 
 		let mut announced = fingerprint.origin.consume().announced();
-		let update = tokio::time::timeout(TIMEOUT, announced.next())
+		let update = tokio::time::timeout(TIMEOUT, next_user_announce(&mut announced))
 			.await
 			.expect("timed out waiting for from-node")
 			.expect("origin closed");

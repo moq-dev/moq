@@ -38,10 +38,47 @@ a full mesh trades that for one fewer hop. Mix shapes as your traffic demands.
 
 ## Link costs
 
-Add `?cost=N` to a peer URL to route by price instead of hop count. An unpriced
-link costs 1, which reproduces plain hop counting. Each relay adds the price of
-the link an announcement arrived on before forwarding it, so a route's cost is
-the sum of what it crossed.
+Every link has a price, and the cheapest path wins. By default the price is
+measured: each relay samples the cluster sessions it sends on once a second and
+prices a link by what it does to a live stream, its round-trip time, one more
+round trip per expected retransmission, and a penalty for terminating QUIC on
+one more relay:
+
+```
+cost_ms = rtt + loss_weight * loss * rtt + hop_penalty
+```
+
+The sender prices the link because only it sees its own loss and bandwidth
+estimate, and it folds the price into every route it forwards, so nothing new
+crosses the wire. RTT is a median over the last 15 samples, loss an average
+that weights the newest interval, and bandwidth the lowest recent estimate;
+prices round to `step` and only move once they have drifted a whole step, so a
+route does not flap on one slow ack. Loss is only learned from traffic, so a
+link that has carried nothing is priced on its RTT until a stream crosses it.
+A link the congestion controller estimates below `min_bandwidth` is priced at
+the ceiling and used last.
+
+```toml
+[cluster.cost]
+hop_penalty = "8ms"       # What one more relay costs a stream. Default.
+loss_weight = 100         # 1% loss costs one RTT. Default.
+step = "5ms"              # Prices round to this and move by whole steps. Default.
+# min_bandwidth = 5000000 # Bits per second below which a link is unusable.
+# measure = false         # Price every unpriced link at 1 instead (hop counting).
+```
+
+A relay pricing its links publishes them under `.internal/links/<hop id>` as a
+JSON track, and reads its peers' tables to name, at `info`, every direct link
+that a two-hop path through another peer beats by more than the hop penalty.
+Routing takes such a detour on its own; the log is what tells an operator which
+backbone edges are worth having. A relay that measures nothing (`measure =
+false`, or an older release) is priced at 1 per link by its peers, so mixing
+the two in one cluster ranks its links as nearly free.
+
+To price a link by hand instead, add `?cost=N` to the peer URL. A configured
+price is the operator's policy for that link, so both ends keep it and neither
+measures it. Each relay adds the price of the link an announcement arrived on
+before forwarding it, so a route's cost is the sum of what it crossed.
 
 Wildcard advertisements are forwarded and costed the same way as an exact-path
 route: each hop appends its identity, adds the link price, and passes the

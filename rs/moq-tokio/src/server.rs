@@ -1503,6 +1503,12 @@ impl Request {
 		request_ref!(self, r => r.peer_hop())
 	}
 
+	/// The price the peer declared for crossing this link in its SETUP, when the
+	/// negotiated protocol carries one; see [`moq_net::server::Request::peer_cost`].
+	pub fn peer_cost(&self) -> Option<u64> {
+		request_ref!(self, r => r.peer_cost())
+	}
+
 	/// The client certificate chain the peer presented, if any, validated
 	/// against a configured [`crate::tls::Listen::root`] during the handshake.
 	///

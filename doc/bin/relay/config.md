@@ -145,6 +145,14 @@ id = 12345                                            # Stable Hop ID across res
 enabled = true
 # secret = "/etc/moq/cluster.key"                     # Optional: 64 hex chars, or a file holding them.
 # app = "default"                                     # DNS-SD subtype; moq-cli shares this name.
+
+[cluster.cost]                                        # Measured link prices for links without ?cost.
+# measure = true                                      # false prices every unpriced link at 1 (hop counting).
+# interval = "1s"                                     # How often each link is sampled.
+# hop_penalty = "8ms"                                 # What one more relay costs a stream.
+# loss_weight = 100                                   # RTTs charged per unit of loss: 1% loss costs one RTT.
+# step = "5ms"                                        # Prices round to this and move by whole steps.
+# min_bandwidth = 5000000                             # Bits per second below which a link is used last.
 ```
 
 See [Clustering](/bin/relay/cluster).
