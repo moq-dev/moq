@@ -21,8 +21,9 @@ whichever `swift build` and Xcode both accept and write the reason down. The
 shared files `import MoqFFI` today; in the shared set that becomes
 `#if canImport(MoqFFINet) import MoqFFINet #else import MoqFFI #endif`, which
 resolves per target since each wrapper depends on exactly one binding. `Aliases.swift` names codec types, and `Broadcast.swift` declares
-`subscribeAudio`, `publishAudio`, `publishVideo`, and `setVideoProperties`
-against generated methods the slim binding lacks; those move into codec-only
+`subscribeAudio`, `publishAudio`, and `publishVideo` against generated
+methods the slim binding lacks (`setVideoProperties` stays shared: it only
+writes catalog metadata and is not feature-gated in moq-ffi); those move into codec-only
 files (`Broadcast+Media.swift`, a codec half of `Aliases.swift`) that only
 the `Moq` target compiles. The rule for the split is mechanical: a shared
 file compiles against `MoqFFINet`, so `swift build --product MoqNet` is the

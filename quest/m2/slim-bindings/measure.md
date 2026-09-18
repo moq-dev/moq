@@ -2,10 +2,13 @@
 
 ## Goal
 
-A table of stripped moq-ffi library sizes on `aarch64-apple-ios`,
+A table of what an app actually ships on `aarch64-apple-ios`,
 `aarch64-linux-android`, and `armv7-linux-androideabi`, default versus
 `--no-default-features`, built with the release profile the release size
-quest settles. The table is the go or no-go for the rest of the line:
+quest settles. Android embeds `libmoq_ffi.so` verbatim, so its row is the
+stripped shared library. iOS links `libmoq_ffi.a` out of the xcframework and
+dead-strips it, so the raw archive overstates the saving; its row is the
+binary of a smoke app linked against each variant. The table is the go or no-go for the rest of the line:
 the line proceeds only if every one of the three targets saves at least 15%
 of the stripped size, compared on the raw byte counts; otherwise the
 questline is abandoned in this quest's PR and the decision is recorded in the
