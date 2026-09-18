@@ -129,7 +129,6 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 - [Relay memory](/quest/m2/relay-memory.md) - remeasure what an announcement costs after prefix routes
 - [Origin lookup CPU](/quest/m2/origin-cpu/README.md) - announce and subscribe stay cheap as the live advertisement set grows
 - [PoP skipping](/quest/m2/pop-skipping/README.md) - short cold paths for unpopular broadcasts without losing warm backhaul dedup
-- [Stale standby handover](/quest/m2/stale-standby-handover.md) - moving a front back onto a source it left seconds ago no longer stalls every relay upstream of it
 - [Fresh subscription ramp](/quest/m2/fresh-subscription-ramp.md) - a track re-spliced onto an idle link reaches the publisher's rate within a round trip or two
 - [Route cost in the JS origin](/quest/m2/route-cost.md) - the browser origin ranks routes by cost and hops like Rust instead of newest-first
 - [Publish channel count](/quest/m2/publish-audio-channel-count.md) - forcing a channel count on an Audio.Capture stops costing the subscriber gaps of silence
