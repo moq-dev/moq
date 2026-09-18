@@ -43,25 +43,29 @@ received.
 dialed path, which is how a slug aliases to a canonical id), `expires`
 (optional unix seconds; the session closes then), `revalidate` (optional
 seconds until the relay asks again), and `tier` (optional label handed to
-[stats](/bin/relay/config#stats)). A 2xx with a grant admits. A 403 refuses.
+[stats](/bin/relay/config#stats)). A 2xx with a grant admits. A 401 or 403 refuses.
 Anything else at connect, a timeout, a 5xx, or an unparseable body, refuses and
 logs an error; nothing is admitted because the server was down. A grant that
 names nothing refuses, and one with `revalidate` but no `expires` is refused
-as invalid.
+as invalid. A few seconds of clock skew are tolerated on `expires`.
 
 **Revalidate and outage.** On the cadence the relay POSTs `revalidate` with the
 same request. A grant applies: a changed `root` or one that no longer covers
 what the session holds closes it with `Unauthorized` (the origin cannot be
 resized in place until pattern scopes land); a changed `tier` is logged and
 applies to the session's next connection, since its stats counters were
-resolved at admission. A 403 closes the session now. Anything else retries
-with jittered backoff and the session lives until `expires`, so an outage always
-has the bound the server chose. There is no `Cache-Control` and no cache on the
-relay.
+resolved at admission. A 401 or 403 closes the session now, as does a 2xx
+whose grant names nothing. A 2xx that fails validation otherwise (already
+expired, `revalidate` without `expires`, or a zero cadence) closes it as
+`invalid`. Anything else (408, 429, 404, 400, 5xx, a timeout, a transport
+error) retries with jittered backoff and the session lives until `expires`, so
+an outage always has the bound the server chose. There is no `Cache-Control`
+and no cache on the relay.
 
-**End.** Every close reports `end` with the reason: `expired`, `refused`, the
-session's own close classification, or `dropped`. The byte totals are what the
-transport reports; QUIC reports them, the qmux stream transports do not yet.
+**End.** Every close reports `end` with the reason: `expired`, `refused`,
+`invalid`, the session's own close classification, or `dropped`. The byte
+totals are what the transport reports; QUIC reports them, the qmux stream
+transports do not yet.
 
 **The link.** `https://` presents the relay's `connect.tls` client certificate
 when one is configured, so a remote server can tell which relay is asking;

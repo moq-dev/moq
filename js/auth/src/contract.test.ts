@@ -37,6 +37,19 @@ test("an end request carries its facts beside the rest", () => {
 	if (request.event !== "end") throw new Error("expected an end");
 	expect(request.reason).toBe("disconnected");
 	expect(request.bytes.received).toBe(20);
+
+	const invalid = RequestSchema.parse({
+		id: "00ff",
+		event: "end",
+		node: "relay-1",
+		transport: "unix",
+		path: "",
+		reason: "invalid",
+		duration: 1.5,
+		bytes: { sent: 10, received: 20 },
+	});
+	if (invalid.event !== "end") throw new Error("expected an end");
+	expect(invalid.reason).toBe("invalid");
 });
 
 test("a connect must not carry end facts, and an unknown transport is refused", () => {

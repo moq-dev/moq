@@ -435,28 +435,35 @@ async fn a_narrower_grant_closes_live_sessions() {
 }
 
 /// A refusal on re-check closes the session, and the `end` says why.
+/// 403, 401, and an empty grant are all a no.
 #[tokio::test]
 async fn a_refusal_closes_live_sessions() {
-	let script = Script::new(grant(Duration::from_secs(3600)));
-	let (port, relay) = spawn_relay(build_auth(script.spawn().await)).await;
-	let (pub_session, sub_session) = connect_and_round_trip(&room_url("tcp", port)).await;
+	for (label, answer) in [
+		("403", Answer::Status(403)),
+		("401", Answer::Status(401)),
+		("empty grant", Answer::Grant(Grant::default())),
+	] {
+		let script = Script::new(grant(Duration::from_secs(3600)));
+		let (port, relay) = spawn_relay(build_auth(script.spawn().await)).await;
+		let (pub_session, sub_session) = connect_and_round_trip(&room_url("tcp", port)).await;
 
-	script.on_revalidate(Answer::Status(403));
+		script.on_revalidate(answer);
 
-	assert_closed(pub_session, Duration::from_secs(5), "publisher").await;
-	assert_closed(sub_session, Duration::from_secs(5), "subscriber").await;
+		assert_closed(pub_session, Duration::from_secs(5), &format!("{label} publisher")).await;
+		assert_closed(sub_session, Duration::from_secs(5), &format!("{label} subscriber")).await;
 
-	tokio::time::sleep(Duration::from_millis(200)).await;
-	let ends = script.ends();
-	assert!(ends.len() >= 2, "an end per session, got {}", ends.len());
-	for end in &ends {
-		let Event::End { reason, .. } = &end.event else {
-			unreachable!()
-		};
-		assert_eq!(*reason, moq_auth::lease::Reason::Refused);
+		tokio::time::sleep(Duration::from_millis(200)).await;
+		let ends = script.ends();
+		assert!(ends.len() >= 2, "{label}: an end per session, got {}", ends.len());
+		for end in &ends {
+			let Event::End { reason, .. } = &end.event else {
+				unreachable!()
+			};
+			assert_eq!(*reason, moq_auth::lease::Reason::Refused, "{label}");
+		}
+
+		relay.abort();
 	}
-
-	relay.abort();
 }
 
 /// The one-shot HTTP routes are sessions of their own: `/announced` is admitted

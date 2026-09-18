@@ -25,6 +25,8 @@ pub enum Reason {
 	Expired,
 	/// The auth server refused the session on a re-check.
 	Refused,
+	/// The auth server answered a grant the relay cannot honor.
+	Invalid,
 	/// The session ended for its own reason, named by whoever closed it.
 	Session(String),
 }
@@ -36,6 +38,7 @@ impl Reason {
 			Self::Dropped => "dropped",
 			Self::Expired => "expired",
 			Self::Refused => "refused",
+			Self::Invalid => "invalid",
 			Self::Session(reason) => reason,
 		}
 	}
@@ -53,6 +56,7 @@ impl From<&str> for Reason {
 			"dropped" => Self::Dropped,
 			"expired" => Self::Expired,
 			"refused" => Self::Refused,
+			"invalid" => Self::Invalid,
 			other => Self::Session(other.to_string()),
 		}
 	}
@@ -297,6 +301,8 @@ mod tests {
 		for (reason, text) in [
 			(Reason::Dropped, "\"dropped\""),
 			(Reason::Expired, "\"expired\""),
+			(Reason::Refused, "\"refused\""),
+			(Reason::Invalid, "\"invalid\""),
 			(Reason::Session("protocol error".into()), "\"protocol error\""),
 		] {
 			assert_eq!(serde_json::to_string(&reason).unwrap(), text);

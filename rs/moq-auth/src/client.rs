@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use url::Url;
 
@@ -53,8 +53,8 @@ impl Counters {
 ///
 /// `connect` admits a session and hands back the [`lease::Consumer`] it holds; a task
 /// behind it re-POSTs `revalidate` on the grant's cadence, applies each reply, revokes
-/// when the server refuses or the grant expires, and POSTs `end` when the session
-/// closes.
+/// when the server refuses, answers an invalid grant, or the grant expires, and POSTs
+/// `end` when the session closes.
 #[derive(Clone)]
 pub struct Client {
 	http: reqwest::Client,
@@ -124,19 +124,24 @@ impl Client {
 		Ok(consumer)
 	}
 
-	/// One POST: a 2xx with a valid grant admits, a 403 refuses, and everything else is
-	/// an outage the caller decides about.
+	/// One POST: a 2xx with a valid grant admits, a 401 or 403 refuses, a 2xx
+	/// whose grant fails validation is that error, and everything else is an
+	/// outage the caller decides about.
 	async fn post(&self, request: &Request) -> crate::Result<Grant> {
 		let response = self.http.post(self.url.clone()).json(request).send().await?;
 		let status = response.status();
-		if status == reqwest::StatusCode::FORBIDDEN {
+		if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
 			return Err(Error::Refused);
 		}
 		if !status.is_success() {
 			return Err(Error::Unavailable(format!("auth server answered {status}")));
 		}
 		let grant: Grant = response.json().await?;
-		grant.validate()?;
+		grant.validate().map_err(|err| match err {
+			// An empty grant is a refusal, not a malformed answer.
+			Error::UselessGrant => Error::Refused,
+			other => other,
+		})?;
 		Ok(grant)
 	}
 }
@@ -179,7 +184,7 @@ impl Driver {
 		let mut inflight: Option<Pin<Box<dyn Future<Output = crate::Result<Grant>> + Send>>> = None;
 
 		loop {
-			let expires = grant.expires.map(until);
+			let expires = grant.expires.map(crate::grant::until);
 			let revalidate = async {
 				match next {
 					Some(at) => tokio::time::sleep_until(at.into()).await,
@@ -212,6 +217,9 @@ impl Driver {
 							grant = fresh;
 						}
 						Err(Error::Refused) => return producer.revoke(Reason::Refused),
+						Err(Error::GrantExpired | Error::UnboundedRevalidate | Error::ZeroRevalidate) => {
+							return producer.revoke(Reason::Invalid);
+						}
 						Err(err) => {
 							// Evidence of nothing: the grant stands until `expires`.
 							failures += 1;
@@ -246,11 +254,6 @@ impl Client {
 	}
 }
 
-/// How long until `at`, or zero when it has passed.
-fn until(at: SystemTime) -> Duration {
-	at.duration_since(SystemTime::now()).unwrap_or_default()
-}
-
 /// Exponential backoff from one second, capped by the cadence and [`BACKOFF_MAX`],
 /// jittered by up to a quarter so a fleet does not retry in lockstep.
 fn backoff(failures: u32, cadence: Duration) -> Duration {
@@ -266,6 +269,7 @@ mod tests {
 	use super::*;
 	use moq_pattern::Patterns;
 	use std::sync::Mutex;
+	use std::time::SystemTime;
 	use wiremock::matchers::{method, path};
 	use wiremock::{Mock, MockServer, Request as Received, ResponseTemplate};
 
@@ -378,14 +382,14 @@ mod tests {
 
 	#[tokio::test]
 	async fn refusals_and_outages_refuse_at_connect() {
-		for status in [403, 404, 500, 503] {
+		for status in [401, 403, 400, 404, 408, 429, 500, 503] {
 			let server = server(Log::default(), move |_| ResponseTemplate::new(status)).await;
 			let err = client(&server)
 				.connect(request(), Counters::default())
 				.await
 				.unwrap_err();
 			match status {
-				403 => assert!(matches!(err, Error::Refused), "{status}: {err}"),
+				401 | 403 => assert!(matches!(err, Error::Refused), "{status}: {err}"),
 				_ => assert!(matches!(err, Error::Unavailable(_)), "{status}: {err}"),
 			}
 		}
@@ -405,7 +409,7 @@ mod tests {
 			.connect(request(), Counters::default())
 			.await
 			.unwrap_err();
-		assert!(matches!(err, Error::UselessGrant), "{err}");
+		assert!(matches!(err, Error::Refused), "{err}");
 	}
 
 	#[tokio::test]
@@ -431,10 +435,36 @@ mod tests {
 
 	#[tokio::test]
 	async fn a_refusal_on_recheck_revokes() {
-		let server = server(Log::default(), |request| match request.event {
+		for answer in [
+			ResponseTemplate::new(401),
+			ResponseTemplate::new(403),
+			ResponseTemplate::new(200).set_body_json(Grant::default()),
+		] {
+			let server = server(Log::default(), {
+				let answer = answer.clone();
+				move |request| match request.event {
+					Event::Connect => ResponseTemplate::new(200)
+						.set_body_json(grant(Some(Duration::from_secs(3600)), Some(Duration::from_secs(1)))),
+					_ => answer.clone(),
+				}
+			})
+			.await;
+
+			let consumer = client(&server).connect(request(), Counters::default()).await.unwrap();
+			let reason = tokio::time::timeout(Duration::from_secs(3), consumer.closed())
+				.await
+				.expect("revoked within the cadence");
+			assert_eq!(reason, Reason::Refused);
+		}
+	}
+
+	#[tokio::test]
+	async fn an_invalid_grant_on_recheck_revokes() {
+		let unbounded = grant(None, Some(Duration::from_secs(1)));
+		let server = server(Log::default(), move |request| match request.event {
 			Event::Connect => ResponseTemplate::new(200)
 				.set_body_json(grant(Some(Duration::from_secs(3600)), Some(Duration::from_secs(1)))),
-			_ => ResponseTemplate::new(403),
+			_ => ResponseTemplate::new(200).set_body_json(unbounded.clone()),
 		})
 		.await;
 
@@ -442,7 +472,31 @@ mod tests {
 		let reason = tokio::time::timeout(Duration::from_secs(3), consumer.closed())
 			.await
 			.expect("revoked within the cadence");
-		assert_eq!(reason, Reason::Refused);
+		assert_eq!(reason, Reason::Invalid);
+	}
+
+	#[tokio::test]
+	async fn a_grant_within_clock_skew_stays_live() {
+		let server = server(Log::default(), |_| {
+			let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
+			grant.expires = Some(SystemTime::now() - Duration::from_secs(1));
+			ResponseTemplate::new(200).set_body_json(grant)
+		})
+		.await;
+
+		let consumer = client(&server).connect(request(), Counters::default()).await.unwrap();
+		tokio::time::sleep(Duration::from_millis(500)).await;
+		assert!(
+			tokio::time::timeout(Duration::from_millis(100), consumer.closed())
+				.await
+				.is_err(),
+			"still live inside the skew window"
+		);
+
+		let reason = tokio::time::timeout(crate::grant::CLOCK_SKEW + Duration::from_secs(1), consumer.closed())
+			.await
+			.expect("expired once the skew window ended");
+		assert_eq!(reason, Reason::Expired);
 	}
 
 	#[tokio::test]

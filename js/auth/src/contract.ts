@@ -87,7 +87,7 @@ export const RequestSchema = z.discriminatedUnion("event", [
 	z.extend(BaseRequestSchema, {
 		/** The session closed. */
 		event: z.literal("end"),
-		/** Why it closed: `dropped`, `expired`, `refused`, or the session's own classification. */
+		/** Why it closed: `dropped`, `expired`, `refused`, `invalid`, or the session's own classification. */
 		reason: z.string(),
 		/** How long it was admitted, in seconds. */
 		duration: z.number(),

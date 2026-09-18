@@ -247,6 +247,16 @@ mod tests {
 			serde_json::to_string(&request).unwrap(),
 			r#"{"id":"00ff","event":"end","reason":"expired","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc"}"#
 		);
+
+		request.event = Event::End {
+			reason: Reason::Invalid,
+			duration: Duration::from_millis(1500),
+			bytes: Bytes { sent: 10, received: 20 },
+		};
+		assert_eq!(
+			serde_json::to_string(&request).unwrap(),
+			r#"{"id":"00ff","event":"end","reason":"invalid","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc"}"#
+		);
 	}
 
 	#[test]

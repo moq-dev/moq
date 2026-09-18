@@ -52,6 +52,5 @@ reasons.
 
 ## Related
 
-- [Re-check refusal](/quest/m0/auth-recheck-refusal.md) - the refusal rule the shared loop enforces
 - [Relay embedding](/quest/m2/relay-embed.md) - the rest of the embedder surface
 - [Stats retier](/quest/m2/stats-retier.md) - what a re-checked tier does to the `stats::Session` handed out here

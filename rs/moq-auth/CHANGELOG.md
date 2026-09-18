@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Request`, `Grant`, and `Event`: the JSON contract between a relay and an auth server.
 - `lease::{Producer, Consumer}`: the handle a session holds for the grant that admitted it.
 - `Client`: the HTTP implementation, driving a lease against `--auth-url`.
+- `lease::Reason::Invalid`: a re-check whose grant fails validation (`end.reason` is `invalid`).
+
+### Fixed
+
+- A re-check that answers 401 or a 2xx that fails `Grant::validate` ends the session instead of retrying until `expires`.
+- `Grant::validate` and the lease expiry deadline tolerate a few seconds of clock skew.
 
 ### Changed
 
