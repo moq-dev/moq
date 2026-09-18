@@ -3,7 +3,8 @@
 ## Goal
 
 The OBS plugin's video output follows the connection's bandwidth share: it
-reserves the Quality tab's bitrate for the video track through libmoq, reads
+reserves the Quality tab's bitrate for the video track through the generated
+C++ package, reads
 the grant before each encoded frame, and retunes the OBS encoder when the grant
 moves, with the configured bitrate as the ceiling. Audio reserves its bitrate
 and never follows. The dock's Stream stats show the current target beside the
@@ -15,11 +16,12 @@ Uses the reservation surface from
 [Binding rate control](/quest/m1/binding-rate-control.md). Apply grants through
 the shape `moq_video::encode::rate::Control` uses (drops at once, raises ramp,
 hysteresis) rather than pushing every change into `obs_encoder_update`; whether
-that policy sits in libmoq behind the reservation or in the plugin depends on
-whether a second C consumer wants it. Verify against a shaped uplink and with
+that policy sits in moq-ffi behind the reservation or in the plugin depends on
+whether a second binding wants it. Verify against a shaped uplink and with
 `just obs compile` and `just obs test`; document the behaviour in
 `doc/bin/obs.md`.
 
 ## Required
 
+- [OBS migration](/quest/m2/cpp/obs.md) - the plugin is on the generated C++ first
 - [Binding rate control](/quest/m1/binding-rate-control.md) - the reservation the plugin reads

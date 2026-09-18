@@ -55,7 +55,7 @@ ready now.
 
 ## Related
 
-- [OBS native codecs](/quest/m2/obs-moq-video/README.md) - the OBS source and encoder adapters consume this through libmoq; #3498 narrowed OBS to what moq-audio decodes today
+- [OBS native codecs](/quest/m2/obs-moq-video/README.md) - the OBS source and encoder adapters consume this through moq-ffi; #3498 narrowed OBS to what moq-audio decodes today
 - [Mobile](/quest/m2/mobile/README.md) - the iOS and Android slices ship these backends through moq-ffi
 - [Runtime QA hosts](/quest/m2/runtime-qa-hosts.md) - Windows and Android verification needs a host; the Windows and macOS CI gates run nightly, not per PR
 - [Dart codec parity](/quest/m2/dart-codecs.md) - Dart gains these once it builds with the `audio` feature
