@@ -1046,6 +1046,11 @@ pub struct Cluster {
 	links: Links,
 	/// The resolved `[cluster.cost]`, or `None` when measurement is off.
 	pricing: Option<Pricing>,
+	/// Set by [`Self::start`] once this relay is part of a cluster: it has peers
+	/// to dial, gossip or a LAN to join, or a `node` URL of its own (which is how
+	/// a relay that only accepts peers says so). A standalone relay prices no
+	/// session and publishes no link table.
+	active: Arc<std::sync::atomic::AtomicBool>,
 
 	/// Hands out the `conn` id every session logs under, inbound and outbound
 	/// alike, so one id space covers the whole process and an id in the `/nodes`
@@ -1134,6 +1139,7 @@ impl Cluster {
 			nodes,
 			links,
 			pricing,
+			active: Arc::default(),
 			connection_ids: Arc::default(),
 			client_tls: None,
 			origin,
@@ -1380,6 +1386,7 @@ impl Cluster {
 		// there is something to dial with, not only when a peer was listed.
 		let can_dial = has_outbound || lan;
 		let has_work = can_dial || gossip;
+		self.active.store(has_work || node.is_some(), Ordering::Relaxed);
 		if !has_work {
 			tracing::info!("no cluster peers configured; running standalone");
 			return Ok(Started {
@@ -2833,11 +2840,12 @@ impl Cluster {
 	}
 
 	/// Whether an accepted session's link is priced by measurement: measurement is
-	/// on, the peer declared an identity (a relay, not a leaf), and it declared no
-	/// price of its own, which would be the dialer's configured policy for the link.
-	/// Decides the Priced flag in our SETUP as well as whether a meter runs.
+	/// on, this relay is part of a cluster, the peer declared an identity (a
+	/// relay, not a leaf), and it declared no price of its own, which would be the
+	/// dialer's configured policy for the link. Decides the Priced flag in our
+	/// SETUP as well as whether a meter runs.
 	pub(crate) fn prices(&self, peer: Option<Hop>, declared: Option<u64>) -> bool {
-		self.pricing.is_some() && peer.is_some() && declared.is_none()
+		self.pricing.is_some() && self.active.load(Ordering::Relaxed) && peer.is_some() && declared.is_none()
 	}
 
 	/// Price a dialed cluster connection by measurement across its reconnects.

@@ -79,7 +79,9 @@ step = "5ms"              # Prices round to this and move by whole steps. Defaul
 # measure = false         # Price every unpriced link at 1 instead (hop counting).
 ```
 
-A relay pricing its links publishes them under `.internal/links/<hop id>` as a
+A relay prices its links once it is part of a cluster: it dials peers, gossips,
+joins a LAN, or, for a relay that only accepts peers, has a `node` URL of its
+own. A pricing relay publishes its links under `.internal/links/<hop id>` as a
 JSON track, and reads its peers' tables to name, at `info`, every direct link
 that a two-hop path through another peer beats by more than the hop penalty.
 Routing takes such a detour on its own; the log is what tells an operator which
