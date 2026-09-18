@@ -25,7 +25,7 @@ does not require it.
 ## Quests
 
 - [Reserved codes](/quest/m1/lite-reserved-codes.md) - the four stream codes sent from the reserved range are registered in the draft's own range and round-trip in both languages
-- [Origin scopes](/quest/m1/api-origin-scopes.md) - literal origin roots carry arbitrary pattern unions, and announce events report the match with its captures
+- [Origin scopes](/quest/m1/api-origin-scopes.md) - a live origin grant narrows in place and the bindings report the announce match like Rust and JS
 - [Rate estimate names](/quest/m1/api-rate-estimate-names.md) - the send and receive estimates carry `estimated_*_rate` on the C ABI, every binding, and moqsink
 - [moq-tokio names](/quest/m1/api-tokio-names.md) - moq-tokio's public names sit under their modules with no root compounds, adapter names, or forgettable close()
 - [Cluster -01](/quest/m1/cluster-01/README.md) - rs/moq-net and js/net speak the revised cluster extension (HOP_ID, REQUEST_UPDATE repricing) and -01 is published

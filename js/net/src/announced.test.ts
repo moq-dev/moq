@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import * as Announce from "./announced.ts";
-import type { Producer as BroadcastProducer } from "./broadcast.ts";
+import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 
@@ -84,6 +84,39 @@ test("an origin handle resolves a local publish with no session attached", async
 	first.close();
 	await settle();
 	expect(watch.active.peek()).toBeUndefined();
+
+	watch.close();
+	origin.close();
+});
+
+test("an origin handle follows a literal claim of exactly its path", async () => {
+	const origin = new OriginProducer();
+	const path = p("room/alice/chat");
+
+	const watch = new Announce.Broadcast({ origin, path });
+	await settle();
+	expect(watch.active.peek()).toBeUndefined();
+
+	// A grant of exactly this path presents the broadcast as a literal, not a subtree,
+	// and the literal route serves the request the handle stands.
+	const exact = origin.dynamic(Path.Pattern.literal(path));
+	const served = new BroadcastProducer();
+	void (async () => {
+		for await (const request of exact.requested()) request.accept(served);
+	})();
+	await settle();
+	await settle();
+	expect(watch.active.peek()).toBeDefined();
+	exact.close();
+	await settle();
+	expect(watch.active.peek()).toBeUndefined();
+	served.close();
+
+	// A wildcard covering the path is a capability, not an inventory: nothing to open.
+	const wildcard = origin.dynamic("room/*/chat");
+	await settle();
+	expect(watch.active.peek()).toBeUndefined();
+	wildcard.close();
 
 	watch.close();
 	origin.close();

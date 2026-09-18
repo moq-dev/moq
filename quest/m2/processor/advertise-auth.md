@@ -29,5 +29,3 @@ publish grant.
 ## Required
 
 - [Merge dev](/quest/m1/merge-dev.md) - the required M1 APIs must be available on main before this implementation starts
-- [Origin scopes](/quest/m1/api-origin-scopes.md) - supplies the
-  pattern-scoped origin handles the advertise scope extends

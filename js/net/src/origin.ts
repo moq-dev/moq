@@ -205,9 +205,7 @@ class OriginState {
 	 */
 	refreshPrefix(prefix: Path.Valid): void {
 		const parsed = Path.Pattern.parse(prefix);
-		const shaped = parsed.asPrefix();
-		const covers = (path: Path.Valid) =>
-			shaped !== undefined ? Path.hasPrefix(Path.from(shaped), path) : parsed.matches(path);
+		const covers = (path: Path.Valid) => parsed.matches(path);
 		for (const [path, cached] of [...this.materialized]) {
 			if (!covers(path)) continue;
 			if (cached.entry !== this.bestEntry(path)) {
@@ -253,18 +251,17 @@ class OriginState {
 		cached.front.close();
 	}
 
-	/** The newest entry on the most specific route covering `path`, if any. */
+	/** The newest entry on the most specific route matching `path`, if any. */
 	bestEntry(path: Path.Valid): RouteEntry | undefined {
-		let bestPrefix: Path.Valid | undefined;
+		let bestSpecificity: Path.Specificity | undefined;
 		let best: RouteEntry | undefined;
 		for (const [key, entries] of this.routes.peek() ?? []) {
 			if (!entries[0]) continue;
 			const parsed = Path.Pattern.parse(key);
-			const prefix = parsed.asPrefix();
-			if (prefix === undefined) continue;
-			if (!Path.hasPrefix(Path.from(prefix), path)) continue;
-			if (bestPrefix === undefined || prefix.length > bestPrefix.length) {
-				bestPrefix = Path.from(prefix);
+			if (!parsed.matches(path)) continue;
+			const specificity = parsed.specificity();
+			if (bestSpecificity === undefined || Path.compareSpecificity(specificity, bestSpecificity) > 0) {
+				bestSpecificity = specificity;
 				best = entries[0];
 			}
 		}
@@ -428,14 +425,14 @@ export class Producer implements Table {
 	}
 
 	/**
-	 * Advertise a path pattern and serve the requests beneath it.
+	 * Advertise a path pattern and serve the requests it matches.
 	 *
-	 * A prefix is spelled `foo/**` (`**` for every path). A non-prefix pattern is
-	 * advertised as a covering claim; resolving one into a subscription is not
-	 * implemented yet. The advertisement is visible to {@link Consumer.announced}
-	 * and forwarded by sessions for as long as the returned {@link Dynamic} lives.
-	 * A consumer resolving a path under a prefix-shaped pattern that no local
-	 * broadcast covers is handed to the handle as a {@link BroadcastRequest}.
+	 * A prefix is spelled `foo/**` (`**` for every path); any pattern is a covering
+	 * claim, and the most specific one matching a path serves it. The advertisement
+	 * is visible to {@link Consumer.announced} and forwarded by sessions for as long
+	 * as the returned {@link Dynamic} lives. A consumer resolving a matching path
+	 * that no local broadcast covers is handed to the handle as a
+	 * {@link BroadcastRequest}.
 	 */
 	dynamic(
 		pattern: Path.Pattern | string,

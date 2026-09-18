@@ -154,6 +154,11 @@ export class Consumer {
 // once per connection instead of once per watched path.
 const warnedNoDiscovery = new WeakSet<Established>();
 
+/** Whether a presented claim names `path` itself: its subtree `scope`, or exactly the path. */
+function covers(pattern: Path.Pattern, scope: Path.Pattern, path: Path.Valid): boolean {
+	return pattern.equals(scope) || (pattern.isLiteral && pattern.text === path);
+}
+
 /**
  * What to watch, for {@link Broadcast}: a path on exactly one source, enforced by the
  * union so a call with neither or both does not compile.
@@ -309,9 +314,10 @@ export class Broadcast {
 						const event = await Promise.race([effect.cancel, announced.next()]);
 						if (!event) break;
 
-						// Prefix-shaped claims covering this path clamp to its subtree. A literal
-						// PATTERN ad at the same path is not prefix-shaped and is skipped.
-						if (!event.pattern.equals(scope)) continue;
+						// Prefix-shaped claims covering this path clamp to its subtree, and a
+						// grant of exactly this path presents it as a literal. Any other
+						// wildcard claim is a capability, not an inventory, and is skipped.
+						if (!covers(event.pattern, scope, path)) continue;
 
 						if (event.active) {
 							// A live subscription survives a redundant (re-)announce; only replace a dead one.
@@ -382,9 +388,10 @@ export class Broadcast {
 				const event = await Promise.race([effect.cancel, announced.next()]);
 				if (!event) break;
 
-				// Prefix-shaped claims covering this path clamp to its subtree. A literal
-				// PATTERN ad at the same path is not prefix-shaped and is skipped.
-				if (!event.pattern.equals(scope)) continue;
+				// Prefix-shaped claims covering this path clamp to its subtree, and a grant
+				// of exactly this path presents it as a literal. Any other wildcard claim is
+				// a capability, not an inventory, and is skipped.
+				if (!covers(event.pattern, scope, this.path)) continue;
 				live.set(event.active);
 			}
 
