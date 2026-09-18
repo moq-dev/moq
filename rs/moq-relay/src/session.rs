@@ -180,13 +180,21 @@ impl std::str::FromStr for Remote {
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		if let Some((addr, prefix)) = s.split_once('/') {
 			let addr: IpAddr = addr.parse().map_err(|_| format!("invalid remote CIDR: {s}"))?;
-			let prefix: u8 = prefix.parse().map_err(|_| format!("invalid remote CIDR: {s}"))?;
-			let max = if addr.is_ipv4() { 32 } else { 128 };
+			let mut prefix: u8 = prefix.parse().map_err(|_| format!("invalid remote CIDR: {s}"))?;
+			let canonical = addr.to_canonical();
+			// An IPv4-mapped IPv6 network names IPv4 bits after the 96-bit mapping prefix.
+			if canonical.is_ipv4() && !addr.is_ipv4() {
+				if prefix < 96 {
+					return Err(format!("invalid remote CIDR: {s}"));
+				}
+				prefix -= 96;
+			}
+			let max = if canonical.is_ipv4() { 32 } else { 128 };
 			if prefix > max {
 				return Err(format!("invalid remote CIDR: {s}"));
 			}
 			Ok(Self::Cidr {
-				addr: addr.to_canonical(),
+				addr: canonical,
 				prefix,
 			})
 		} else {
@@ -494,6 +502,29 @@ mod tests {
 		let mapped = request("m", "/demo/one", "[::ffff:203.0.113.9]:1");
 		assert!(cidr.matches(&mapped));
 		assert!(Filter::from_query(Some("remote=203.0.113.9")).unwrap().matches(&mapped));
+	}
+
+	#[test]
+	fn mapped_cidr_prefix_folds_to_ipv4() {
+		let mapped: Remote = "::ffff:203.0.113.0/120".parse().unwrap();
+		assert_eq!(
+			mapped,
+			Remote::Cidr {
+				addr: "203.0.113.0".parse().unwrap(),
+				prefix: 24,
+			}
+		);
+		let a = request("a", "/demo/one", "203.0.113.9:1");
+		let b = request("b", "/demo/two", "198.51.100.2:1");
+		let filter = Filter {
+			remote: Some(mapped),
+			..Filter::default()
+		};
+		assert!(filter.matches(&a));
+		assert!(!filter.matches(&b));
+
+		assert!("::ffff:203.0.113.0/80".parse::<Remote>().is_err());
+		assert!("::ffff:203.0.113.0/129".parse::<Remote>().is_err());
 	}
 
 	#[test]

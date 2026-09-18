@@ -20,7 +20,7 @@ The reference implementation. Every crate is on
 | [moq-video](/lib/rs/moq-video) | Native capture, hardware encode/decode (Apple, Windows, NVIDIA, VAAPI, V4L2, Android), and GPU rendering. |
 | [moq-audio](/lib/rs/moq-audio) | Microphone and speaker, Opus/PCM/AAC codecs, echo cancellation. |
 | [moq-transcode](https://docs.rs/moq-transcode) | Just-in-time rendition ladders, GPU-resident on NVIDIA. |
-| [moq-auth](/lib/rs/moq-auth) | The authorization contract: requests, grants, leases, the HTTP client, the reference server, and JWT keys, signing, and verification. |
+| [moq-auth](/lib/rs/moq-auth) | The authorization contract: requests, grants, leases, the HTTP client, the reference server, JWT keys, signing, and verification, plus listing live sessions and pushing a re-check. |
 | [moq-room](/lib/rs/moq-room) | Headless rooms: announce-derived roster, token claims, and a chat track. |
 | [moq-json](/lib/rs/moq-json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
 | [moq-binary](/lib/rs/moq-binary) | Opaque payloads over tracks: snapshots or append logs. |
