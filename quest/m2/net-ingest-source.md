@@ -12,16 +12,27 @@ to what this relay ingests with 734 lines of `Dynamic` mirrors
 
 ## Plan
 
-The origin already knows which routes are local. Add
-`source: Source::{Local, Peer(Hop)}` to the announce event settled in
-[announce event](/quest/m1/api-net-announce.md), stamp the relay's own hop
-on local ingest so a sidecar and an in-process worker read the same chain,
-and give `origin::Consumer::local()` (a view of the routes that entered
-here) so the ingest filter is one call. Decide whether a `Route` carries
-the same fact for `routed_broadcast` callers.
+The fact is origin bookkeeping, not a chain fact. Within an origin the
+origin's own hop is the implicit last hop of every route: on lite-05 and
+later the sender reports its id once through ANNOUNCE_OK and the receiver
+appends it, and `outgoing` drops any chain that already names the sender as
+a reflection. Stamping the local hop on ingest would therefore drop every
+locally ingested broadcast at the forwarding step, or name the relay twice
+downstream. So:
 
-Public API: additive on moq-net and @moq/net (a new event field). Wire:
-none.
+- The origin records which announce producer inserted each route (a
+  session, an in-process producer, or a peer session) and exposes it as
+  `source: Source::{Local, Peer(Hop)}` on the announce event settled in
+  [announce event](/quest/m1/api-net-announce.md).
+- `origin::Consumer::local()` is a view of the routes that entered here, so
+  the ingest filter is one call.
+- A sidecar reading over the wire sees `[.., x, relay]` and cannot tell a
+  client `x` from a peer `x`; the relay publishes its cluster peer set in
+  its stats track so a wire consumer can, and moq.pro's Python sidecar reads
+  that instead of a bit prefix.
+
+Public API: additive on moq-net and @moq/net (a new event field and a
+consumer view). Wire: none.
 
 ## Required
 

@@ -9,13 +9,18 @@ hop.
 
 ## Plan
 
-- `origin::Config::default()` mints `Hop::random()`; `Hop::UNKNOWN` moves to
-  an explicit `Config::anonymous()` for the standalone broadcast case. 195
-  call sites here and 48 in moq.pro spell `Config::new(Hop::random())` or
+- `origin::Config::default()` mints `Hop::random()`. 195 call sites here
+  and 48 in moq.pro spell `Config::new(Hop::random())` or
   `spawn(Hop::random())` today, and none of them wants loop detection off.
   `moq_tokio::origin::spawn()` then takes no argument for the common case.
   Decide the `TEMPORARY` 53-bit cap in `origin.rs` at the same time; JS
   already reads a full u62.
+- `broadcast::Info` stops embedding an `origin::Config`. Nothing reads a
+  broadcast's `origin.id`; only the cache pool is used, so `Info { pool,
+  path }` with `create_broadcast` handing the origin's pool down. Otherwise
+  a random-hop `Default` makes every standalone broadcast (every
+  `Info::new()` in moq-json) mint an identity nobody reads and a pool of its
+  own.
 - `with_root(prefix)?.scope(&patterns)` becomes
   `scope(root, &Patterns) -> Result<Self, Error>` returning `Unauthorized`
   for an empty intersection or a root nothing lies under, on both Producer
