@@ -1,9 +1,6 @@
 import * as Moq from "@moq/net";
 
-import { type ConsumerConfig as CodecConfig, Decoder, type Event, type Group } from "./decoder.ts";
-
-/** Window consumer options, including the source track. */
-export type ConsumerConfig = CodecConfig & { track: Moq.Track.Subscriber };
+import { type Config as CodecConfig, Decoder, type Event, type Group } from "./decoder.ts";
 
 // A group that ended early rather than failing: the next one restates the window, so a gap is
 // something to resync from. Old and Evicted are how the publisher says it dropped a group it was
@@ -36,7 +33,7 @@ export class Consumer<T> {
 	#codec?: Group;
 	#reading = false;
 
-	constructor(config: ConsumerConfig) {
+	constructor(config: Consumer.Config) {
 		this.#track = config.track.ordered();
 		this.#decoder = new Decoder(config);
 	}
@@ -100,4 +97,9 @@ export class Consumer<T> {
 			yield event;
 		}
 	}
+}
+
+export namespace Consumer {
+	/** Window consumer options, including the source track. */
+	export type Config = CodecConfig & { track: Moq.Track.Subscriber };
 }

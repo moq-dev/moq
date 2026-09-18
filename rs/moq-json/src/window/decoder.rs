@@ -4,26 +4,10 @@ use std::collections::VecDeque;
 
 use serde::de::DeserializeOwned;
 
+use super::consumer::Config;
 use super::encoder::MAX_INDEX;
 use super::op::{Header, Op};
 use crate::{Error, Result};
-
-/// Configuration for a [`Decoder`], and so for the [`Consumer`](super::Consumer) wrapping one.
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct ConsumerConfig {
-	/// Read frames written with
-	/// [`ProducerConfig::compression`](super::ProducerConfig::compression) on.
-	pub compression: bool,
-}
-
-impl ConsumerConfig {
-	/// Set [`compression`](Self::compression) (a builder, since the struct is `#[non_exhaustive]`).
-	pub fn with_compression(mut self, compression: bool) -> Self {
-		self.compression = compression;
-		self
-	}
-}
 
 /// One change to the window, as the consumer sees it.
 ///
@@ -88,7 +72,7 @@ impl Codec {
 /// only what is new, so a reader sees one continuous stream of edits no matter how often the
 /// publisher rolled for compression's sake.
 pub struct Decoder<T> {
-	config: ConsumerConfig,
+	config: Config,
 
 	/// Absolute index of the window's front, once a group header has positioned us.
 	front: u64,
@@ -106,7 +90,7 @@ pub struct Decoder<T> {
 
 impl<T> Decoder<T> {
 	/// Create a decoder that has not yet been positioned by a group header.
-	pub fn new(config: ConsumerConfig) -> Self {
+	pub fn new(config: Config) -> Self {
 		Self {
 			config,
 			front: 0,
@@ -155,8 +139,10 @@ impl<T: DeserializeOwned> Decoder<T> {
 	/// Decode one frame, queueing the events it implies.
 	pub(super) fn decode(&mut self, group: &mut Codec, payload: &[u8]) -> Result<()> {
 		let inflated = match self.config.compression {
-			true => Some(group.flate.get_or_insert_with(moq_flate::Decoder::new).frame(payload)?),
-			false => None,
+			crate::Compression::Deflate => {
+				Some(group.flate.get_or_insert_with(moq_flate::Decoder::new).frame(payload)?)
+			}
+			crate::Compression::None => None,
 		};
 		let bytes = inflated.as_deref().unwrap_or(payload);
 

@@ -8,9 +8,7 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
-
 import "package:ffi/ffi.dart";
-
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -246,8 +244,8 @@ class FfiConverterMoqProtocolError {
 
 class MoqJsonSnapshotConfig {
   final int deltaRatio;
-  final bool compression;
-  MoqJsonSnapshotConfig({this.deltaRatio = 8, this.compression = false});
+  final MoqCompression compression;
+  MoqJsonSnapshotConfig({this.deltaRatio = 8, required this.compression});
 }
 
 class FfiConverterMoqJsonSnapshotConfig {
@@ -262,7 +260,7 @@ class FfiConverterMoqJsonSnapshotConfig {
     );
     final deltaRatio = deltaRatio_lifted.value;
     new_offset += deltaRatio_lifted.bytesRead;
-    final compression_lifted = FfiConverterBool.read(
+    final compression_lifted = FfiConverterMoqCompression.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final compression = compression_lifted.value;
@@ -276,7 +274,7 @@ class FfiConverterMoqJsonSnapshotConfig {
   static RustBuffer lower(MoqJsonSnapshotConfig value) {
     final total_length =
         FfiConverterUInt32.allocationSize(value.deltaRatio) +
-        FfiConverterBool.allocationSize(value.compression) +
+        FfiConverterMoqCompression.allocationSize(value.compression) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -289,7 +287,7 @@ class FfiConverterMoqJsonSnapshotConfig {
       value.deltaRatio,
       Uint8List.view(buf.buffer, new_offset),
     );
-    new_offset += FfiConverterBool.write(
+    new_offset += FfiConverterMoqCompression.write(
       value.compression,
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -298,14 +296,14 @@ class FfiConverterMoqJsonSnapshotConfig {
 
   static int allocationSize(MoqJsonSnapshotConfig value) {
     return FfiConverterUInt32.allocationSize(value.deltaRatio) +
-        FfiConverterBool.allocationSize(value.compression) +
+        FfiConverterMoqCompression.allocationSize(value.compression) +
         0;
   }
 }
 
 class MoqJsonStreamConfig {
-  final bool compression;
-  MoqJsonStreamConfig({this.compression = false});
+  final MoqCompression compression;
+  MoqJsonStreamConfig({required this.compression});
 }
 
 class FfiConverterMoqJsonStreamConfig {
@@ -315,7 +313,7 @@ class FfiConverterMoqJsonStreamConfig {
 
   static LiftRetVal<MoqJsonStreamConfig> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final compression_lifted = FfiConverterBool.read(
+    final compression_lifted = FfiConverterMoqCompression.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final compression = compression_lifted.value;
@@ -327,7 +325,8 @@ class FfiConverterMoqJsonStreamConfig {
   }
 
   static RustBuffer lower(MoqJsonStreamConfig value) {
-    final total_length = FfiConverterBool.allocationSize(value.compression) + 0;
+    final total_length =
+        FfiConverterMoqCompression.allocationSize(value.compression) + 0;
     final buf = Uint8List(total_length);
     write(value, buf);
     return toRustBuffer(buf);
@@ -335,7 +334,7 @@ class FfiConverterMoqJsonStreamConfig {
 
   static int write(MoqJsonStreamConfig value, Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    new_offset += FfiConverterBool.write(
+    new_offset += FfiConverterMoqCompression.write(
       value.compression,
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -343,7 +342,7 @@ class FfiConverterMoqJsonStreamConfig {
   }
 
   static int allocationSize(MoqJsonStreamConfig value) {
-    return FfiConverterBool.allocationSize(value.compression) + 0;
+    return FfiConverterMoqCompression.allocationSize(value.compression) + 0;
   }
 }
 
@@ -3383,6 +3382,42 @@ class FfiConverterMoqProtocolKind {
   }
 
   static int write(MoqProtocolKind value, Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, value.index + 1);
+    return 4;
+  }
+}
+
+enum MoqCompression { none, deflate }
+
+class FfiConverterMoqCompression {
+  static LiftRetVal<MoqCompression> read(Uint8List buf) {
+    final index = buf.buffer.asByteData(buf.offsetInBytes).getInt32(0);
+    switch (index) {
+      case 1:
+        return LiftRetVal(MoqCompression.none, 4);
+      case 2:
+        return LiftRetVal(MoqCompression.deflate, 4);
+      default:
+        throw UniffiInternalError(
+          UniffiInternalError.unexpectedEnumCase,
+          "Unable to determine enum variant",
+        );
+    }
+  }
+
+  static MoqCompression lift(RustBuffer buffer) {
+    return FfiConverterMoqCompression.read(buffer.asUint8List()).value;
+  }
+
+  static RustBuffer lower(MoqCompression input) {
+    return toRustBuffer(createUint8ListFromInt(input.index + 1));
+  }
+
+  static int allocationSize(MoqCompression _value) {
+    return 4;
+  }
+
+  static int write(MoqCompression value, Uint8List buf) {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, value.index + 1);
     return 4;
   }

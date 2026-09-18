@@ -39,5 +39,5 @@ export const TimelineSchema = z.object({
 	durationMax: z.optional(u53Schema),
 });
 
-/** A media track's companion timeline description. */
+/** The broadcast's timeline track, as advertised by the catalog's root archive entry. */
 export type Timeline = z.infer<typeof TimelineSchema>;

@@ -84,8 +84,8 @@ class SmokeTest {
             framerate = 60.0,
             optimizeForLatency = true,
         )
-        val snapshot: JsonSnapshotConfig = JsonSnapshotConfig(deltaRatio = 8u, compression = false)
-        val stream: JsonStreamConfig = JsonStreamConfig(compression = false)
+        val snapshot: JsonSnapshotConfig = JsonSnapshotConfig(deltaRatio = 8u, compression = Compression.NONE)
+        val stream: JsonStreamConfig = JsonStreamConfig(compression = Compression.NONE)
         val properties: VideoProperties = VideoProperties(rotation = 315.0)
         val backoff: Backoff = Backoff(
             initialUs = 500_000uL,
@@ -96,7 +96,7 @@ class SmokeTest {
         val status: ConnectionStatus = ConnectionStatus.CONNECTED
         assertEquals(4_000_000uL, hint.bitrate)
         assertEquals(8u, snapshot.deltaRatio)
-        assertEquals(false, stream.compression)
+        assertEquals(Compression.NONE, stream.compression)
         assertNull(properties.display)
         assertNull(properties.flip)
         assertEquals(500_000uL, backoff.initialUs)
@@ -182,7 +182,7 @@ class SmokeTest {
     @Test
     fun `typed json snapshot round-trips a serializable value`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = JsonSnapshotConfig(deltaRatio = 0u, compression = false)
+            val config = JsonSnapshotConfig(deltaRatio = 0u, compression = Compression.NONE)
             val producer = broadcast.publishJsonSnapshot("status", config)
             producer.update(Status(state = "live"))
 
@@ -199,7 +199,7 @@ class SmokeTest {
     @Test
     fun `raw json string passes through unencoded`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = JsonSnapshotConfig(deltaRatio = 0u, compression = false)
+            val config = JsonSnapshotConfig(deltaRatio = 0u, compression = Compression.NONE)
             val producer = broadcast.publishJsonSnapshot("status", config)
             producer.update("""{"state":"raw"}""")
 

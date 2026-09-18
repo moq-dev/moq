@@ -5,8 +5,20 @@ use std::task::Poll;
 use serde::de::DeserializeOwned;
 
 use super::decoder::Codec;
-use super::{ConsumerConfig, Decoder, Event};
-use crate::Result;
+use super::{Decoder, Event};
+use crate::{Compression, Result};
+
+/// Track-owning options for a [`Consumer`].
+///
+/// Build from [`Default`] and override fields (the struct is `#[non_exhaustive]`, so new options
+/// stay additive).
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct Config {
+	/// How the frames are compressed. Must match the encoder's
+	/// [`Config::compression`](super::Config::compression). Defaults to [`Compression::None`].
+	pub compression: Compression,
+}
 
 /// Consumes a sliding window of JSON records from a track, yielding one event per change.
 ///
@@ -26,7 +38,7 @@ pub struct Consumer<T> {
 
 impl<T: DeserializeOwned> Consumer<T> {
 	/// Create a consumer reading from the given track subscriber.
-	pub fn new(track: moq_net::track::Subscriber, config: ConsumerConfig) -> Self {
+	pub fn new(track: moq_net::track::Subscriber, config: Config) -> Self {
 		Self {
 			track: track.ordered(),
 			group: None,

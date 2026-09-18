@@ -1,10 +1,7 @@
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 
-import { type Config, type Encoded, Encoder } from "./encoder.ts";
-
-/** Window producer options, including the destination track. */
-export type ProducerConfig = Config & { track: Moq.Track.Producer };
+import { type Config as CodecConfig, type Encoded, Encoder } from "./encoder.ts";
 
 /**
  * Publishes a sliding window of JSON records to a track.
@@ -24,7 +21,7 @@ export class Producer<T> {
 	#group?: Moq.Group.Producer;
 
 	/** Wrap a track to publish a window into it. */
-	constructor(config: ProducerConfig) {
+	constructor(config: Producer.Config) {
 		this.#track = config.track;
 		this.#encoder = new Encoder(config);
 	}
@@ -100,4 +97,9 @@ export class Producer<T> {
 
 		this.#track.close();
 	}
+}
+
+export namespace Producer {
+	/** Window producer options, including the destination track. */
+	export type Config = CodecConfig & { track: Moq.Track.Producer };
 }

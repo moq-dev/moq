@@ -1,7 +1,7 @@
 import * as z from "zod/mini";
 
 /** The modes this build knows how to read. */
-export type KnownMode = "snapshot" | "stream";
+export type KnownMode = "snapshot" | "stream" | "window";
 
 /**
  * How a data track's groups carry its payloads.
@@ -10,6 +10,8 @@ export type KnownMode = "snapshot" | "stream";
  *   consumer reads only the newest. A JSON track may follow a group's first frame with RFC 7396
  *   merge-patch deltas; a binary track writes one frame per group.
  * - `"stream"`: lossless. A single group, never rolled, one payload per frame in order.
+ * - `"window"`: bounded. Records append at the back and drop from the front; a reader can join
+ *   at any point. Each group restates the retained suffix.
  *
  * Always stated by the publisher: there is no default, because reading an append log as a
  * latest-value document silently discards every payload but the last.
@@ -24,5 +26,5 @@ export type Mode = z.infer<typeof ModeSchema>;
 
 /** Whether this build knows how to read a track published in `mode`. */
 export function modeSupported(mode: Mode): mode is KnownMode {
-	return mode === "snapshot" || mode === "stream";
+	return mode === "snapshot" || mode === "stream" || mode === "window";
 }

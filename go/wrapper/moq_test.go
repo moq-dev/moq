@@ -523,11 +523,11 @@ func TestJSONTracks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	snapshot, err := broadcast.PublishJSONSnapshot("status", moq.JSONSnapshotOptions{Compression: true})
+	snapshot, err := broadcast.PublishJSONSnapshot("status", moq.JSONSnapshotOptions{Compression: moq.CompressionDeflate})
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshotConsumer, err := consumer.SubscribeJSONSnapshot(ctx, "status", moq.JSONSubscribeOptions{Compression: true})
+	snapshotConsumer, err := consumer.SubscribeJSONSnapshot(ctx, "status", moq.JSONSubscribeOptions{Compression: moq.CompressionDeflate})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -547,11 +547,11 @@ func TestJSONTracks(t *testing.T) {
 		t.Fatalf("snapshot = %s", *value)
 	}
 
-	stream, err := broadcast.PublishJSONStream("events", moq.JSONStreamOptions{Compression: true})
+	stream, err := broadcast.PublishJSONStream("events", moq.JSONStreamOptions{Compression: moq.CompressionDeflate})
 	if err != nil {
 		t.Fatal(err)
 	}
-	streamConsumer, err := consumer.SubscribeJSONStream(ctx, "events", moq.JSONSubscribeOptions{Compression: true})
+	streamConsumer, err := consumer.SubscribeJSONStream(ctx, "events", moq.JSONSubscribeOptions{Compression: moq.CompressionDeflate})
 	if err != nil {
 		t.Fatal(err)
 	}
