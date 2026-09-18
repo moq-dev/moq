@@ -82,12 +82,11 @@ field.
 
 ### Decisions
 
-- **One pattern: the [path-patterns](/quest/m2/path-patterns/README.md)
-  dialect.** An advertisement carries the same path pattern token rules use
-  (literal, `*`, or `lit*lit` segments, at most one `**`),
-  matched by the same shared matcher, so nothing resembles a second grammar. Exact set-valued
-  rebasing preserves every match inside a rooted view, including both the root
-  and deeper residuals when `**` consumes zero or more segments.
+- **One prefix on the wire, one pattern in the token and the filter.** An
+  advertisement is a path prefix; the [path-patterns](/quest/m2/path-patterns/README.md)
+  dialect is what tokens and the consume-side filter use, matched by the
+  shared matcher, so nothing resembles a second grammar and nothing on the
+  wire spells a wildcard.
 - **Most specific pattern wins, and its refusal is final.** This is the rule
   routing already follows: `best_server` filters to the longest covering prefix
   before it compares cost, and the lite draft says the same, matching
@@ -190,11 +189,9 @@ field.
   that needs that guarantee has to carry it in its own media contract, not in
   routing.
 - **Patterns are independent of clustering.** `draft-lcurley-moq-pattern`
-  owns shared semantics and the moq-transport NAMESPACE_PATTERNS capability,
-  NAMESPACE_PATTERN parameter, and pattern withdrawal framing. moq-lite-06
-  carries ANNOUNCE_PATTERN (0x3) natively and references those semantics.
-  moq-cluster adds hop lists, costs, and pool selection when both extensions
-  are negotiated. Neither extension implies support for the other.
+  owns the matching and authorization semantics tokens and filters share;
+  no wire message carries a pattern on either protocol. moq-cluster adds hop
+  lists, costs, and pool selection to prefix advertisements.
 - **A pattern travels as typed segments, not text.** Each wire segment is a
   kind (0 literal, 1 wildcard, 2 globstar, 3 partial = prefix + suffix) plus a
   length-prefixed value, so no glob syntax reaches the wire, an unknown kind

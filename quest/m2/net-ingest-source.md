@@ -21,9 +21,11 @@ locally ingested broadcast at the forwarding step, or name the relay twice
 downstream. So:
 
 - The origin records which announce producer inserted each route (a
-  session, an in-process producer, or a peer session) and exposes it as
-  `source: Source::{Local, Peer(Hop)}` on the announce event settled in
-  [announce event](/quest/m1/api-net-announce.md).
+  session, an in-process producer, or a peer session). The event field
+  `source: Source::{Local, Peer(Hop)}` is part of the shape
+  [announce event](/quest/m1/api-net-announce.md) settles before the
+  release, since a required field added later breaks exhaustive matches
+  and event constructors; this quest fills it in.
 - `origin::Consumer::local()` is a view of the routes that entered here, so
   the ingest filter is one call.
 - A sidecar reading over the wire sees `[.., x, relay]` and cannot tell a
@@ -31,8 +33,10 @@ downstream. So:
   its stats track so a wire consumer can, and moq.pro's Python sidecar reads
   that instead of a bit prefix.
 
-Public API: additive on moq-net and @moq/net (a new event field and a
-consumer view). Wire: none.
+Public API: additive on moq-net and @moq/net (the consumer view; the
+event field is settled on dev). Wire: the relay's stats track gains a
+cluster peer-set frame; name its shape in `doc/bin/relay/config.md` (stats
+section) in the same PR so the Python sidecar and the producer agree.
 
 ## Required
 

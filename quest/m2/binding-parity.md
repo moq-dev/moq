@@ -25,18 +25,16 @@ Gaps found method by method against `rs/moq-ffi/src`:
   `FetchMediaGroup`, `SubscribeMedia`, `DecodeAudio`, and `DecodeVideo` take
   four or more positional arguments.
 - Verbs: `announced` is `announcements` in Kotlin and Dart; `next` is
-  `All`/`Requests`/`Updates`/`Frames`/`Values` in Go; `set_tls_disable_verify`
-  is inverted to `tls_verify` in all five (rename the core setter to
-  `set_tls_verify(bool)` so the wrappers mirror it); `set_consume` is
-  `subscribe=` in four. Decide which side moves.
-- `MoqRequest::transport` is a `String` in Rust, so Go invents an open-set
-  type and Python a `Literal`; make it an enum in moq-ffi.
+  `All`/`Requests`/`Updates`/`Frames`/`Values` in Go; `set_consume` is
+  `subscribe=` in four. The wrappers move to the core's spelling; the two
+  core changes (`set_tls_verify`, the transport enum) land on dev in
+  [libmoq units](/quest/m1/api-libmoq-units.md).
 - `rtt_us` and the other microsecond fields are raw integers in every
   wrapper; a `Duration`/`timedelta` at the boundary where the language has
   one.
 
-Public API: additive on the wrappers; breaking on moq-ffi for the two
-renames. Wire: none. Binding parity gates the release, not the merge.
+Public API: additive on the wrappers. Wire: none. Binding parity gates
+the release, not the merge.
 
 ## Required
 

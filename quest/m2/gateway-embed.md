@@ -28,8 +28,6 @@ Additive, so on main after the merge:
   `Publish::accept`.
 - `moq-rtc` gains a `server` feature (default on) gating axum, the routers,
   and `pub use axum`; moq.pro's `default-features = false` is a no-op today.
-- `moq_hls::import::Config.playlist` is a `Url` (or a `Playlist` enum) instead
-  of a string parsed at run time.
 
 Public API: additive. Wire: none.
 

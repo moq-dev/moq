@@ -12,20 +12,28 @@ not revoke anything.
 
 ## Plan
 
-- `Client::post` (`rs/moq-auth/src/client.rs`) refuses on every 4xx and on
-  a grant that fails validation (`UselessGrant`, `GrantExpired`,
-  `UnboundedRevalidate`, `ZeroRevalidate`); 5xx, timeouts, and transport
-  errors stay the outage path. A `lease::Reason::Invalid` names the decider's
-  bug in the `end` event so the operator sees which side was wrong.
-- `Grant::validate` allows a few seconds of skew on `expires <= now`; a
-  short-lived grant from a server whose clock runs ahead is refused as
-  "unavailable" (502) today instead of admitted.
+- `Client::post` (`rs/moq-auth/src/client.rs`) refuses on the terminal
+  statuses, 401 and 403, and on a 2xx whose grant fails validation
+  (`UselessGrant`, `GrantExpired`, `UnboundedRevalidate`, `ZeroRevalidate`).
+  Every other status stays the outage path: 408 and 429 are an intermediary
+  asking for time, 404 and 400 are a misconfiguration, and 5xx, timeouts,
+  and transport errors are what the path already covers. A
+  `lease::Reason::Invalid` names the decider's bug in the `end` event so
+  the operator sees which side was wrong.
+- A few seconds of clock skew apply to both `Grant::validate` and the lease
+  deadline `Client::drive` schedules from `expires`; today a grant whose
+  `expires` sits a second in the past because the auth server's clock runs
+  behind the relay's is refused as "unavailable" (502), and relaxing only
+  the validation would admit it and revoke it as expired on the next tick.
+  Test that such a lease stays live for the skew window.
 - Regression in `rs/moq-relay/tests/auth_lifetime.rs`: a `revalidate` answered
   with `Grant::default()` ends the session with `Reason::Refused`, and one
   answered with 401 does the same. The 403 and 503 cases already exist.
 
 Public API: `lease::Reason` gains a variant (it is `#[non_exhaustive]`).
-Wire: none.
+Wire: the auth `end` event's `reason` gains the value `invalid`; add it to
+the `@moq/auth` schema, `doc/bin/relay/auth.md`, and the shared interop
+vector in the same PR.
 
 ## Related
 

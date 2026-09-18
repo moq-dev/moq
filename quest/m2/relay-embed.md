@@ -32,8 +32,9 @@ All additive on `moq-relay` and `moq-tokio`, so on main after the merge:
   watchers, so an embedder's RTMPS listener reloads like `:443` instead of
   snapshotting a `ServerConfig` and re-implementing SIGHUP.
 - `DEFAULT_MAX_STREAMS` lives in moq-tokio and the client default uses it;
-  custom TLS roots add to the system roots unless told otherwise. The edge
-  hand-copies both.
+  the edge hand-copies it. Custom TLS roots keep replacing the system store
+  by default (a private CA is supplied to restrict trust); the edge opts
+  into both with `system_roots`, which already exists.
 - `Relay::web_addrs()` and `Relay::ready()`, and a `test-support` feature
   with `test_relay() -> TestRelay { relay, quic, http, url }` on ephemeral
   ports with a generated certificate; both downstream fixtures race for free

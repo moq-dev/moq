@@ -35,7 +35,10 @@ read through the same `Section` trait. No consumer unpacks a timestamp into
   timeline.
 - JS parity in the same pass: the archive `timescale` bound matches Rust's
   u32; the timeline `durationMin`/`durationMax` props are `Time.Milli`;
-  `Catalog.TRACK` and `Catalog::DEFAULT_NAME` agree on a name.
+  `Catalog.TRACK` and `Catalog::DEFAULT_NAME` agree on a name; the JS
+  timeline moves from `Container.Timeline` (it is not a container) to a
+  `Hang.Timeline` namespace, matching the Rust split between `hang::timeline`
+  records and `moq_mux::timeline` machinery.
 
 Public API: breaking on hang, @moq/hang, moq-mux, and moq-hls, so on dev.
 Wire: none (serde shapes are unchanged). Consumers: moq-mux, moq-hls,

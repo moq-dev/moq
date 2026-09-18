@@ -11,10 +11,12 @@ silently keeps `duration: None`. fMP4 export then infers it.
 
 ## Plan
 
-Compute in micros and convert back to the frame's scale, or reuse
-`close_duration` in `container/mod.rs`, which already does this safely.
-Regression: 90 kHz frames, `cut(None)`, assert the last frame's duration is
-`Some`. Public API: none. Wire: none.
+Convert the boundary into the frame's own scale before subtracting, so a
+90 kHz frame gets a 90 kHz duration; going through micros and back rounds
+(3003 ticks is not a whole number of micros) and fMP4's `trun_duration`
+then refuses the inexact conversion. Regression: 90 kHz frames, `cut(None)`,
+assert the last frame's duration is exactly the tick count, and encode the
+resulting fMP4. Public API: none. Wire: none.
 
 ## Required
 

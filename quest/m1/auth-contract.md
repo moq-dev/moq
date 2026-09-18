@@ -35,6 +35,11 @@ it refuses.
   server cannot tell apart. Decide between
   `Peer { fingerprint, dns: Vec<String>, common_name: Option<String>, expires, issuer }`
   and leaving `name` with its precedence documented on the wire.
+- Decide whether `Grant.tier: Option<String>` becomes a `Tier` newtype with
+  `Tier::INTERNAL`, shared by `moq-stats` and `@moq/auth`; the label is a
+  string in three languages today and a mismatch bills the mesh to
+  customers. Changing the field type is a break, so it is decided here, not
+  after the release.
 - Decide the `jwt::` module move that [CAT verify](/quest/m3/cat/verify.md)
   defers: `Claims`, `Key`, `Jwk`, `KeyId`, `Algorithm`, `KeySet`, and `Scope`
   are root exports today. Moving them is free before 0.1.0 ships and a

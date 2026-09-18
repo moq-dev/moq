@@ -30,7 +30,8 @@ check open PRs before starting.
   in two places only: the token, which the relay enforces by scoping its
   origin handle, and that local filter. `captures` (what each filter
   wildcard stood for) is derived from the announced prefix against the
-  filter, so it stays and is empty when no filter is set.
+  filter, so it stays and is `None` when no filter is set or the prefix
+  does not pin it.
 - Announcements are hints; requests are the authority. A prefix route
   `room` that overlaps a grant of `room/*/chat` is forwarded as
   `ANNOUNCE_START room`, and a request for `room/bob/video` is refused by
@@ -43,11 +44,18 @@ check open PRs before starting.
   per broadcast and tens of bytes; a per-connection announce budget or a
   head on the pattern is the answer if a relay ever measures it, not a wire
   hint.
-- The event is `announce::Update { path: PathOwned, captures, route: Route,
-  kind: Kind }` with `Kind::{Announced, Updated, Retracted}` replacing the
-  boolean; `path` is the covered prefix relative to the consumer's root,
-  trimmed by the library so no caller does it. The retracted event keeps
-  its last `route` in JS the way Rust already does.
+- The event is `announce::Update { path: PathOwned, captures:
+  Option<Captures>, route: Route, kind: Kind, source: Source }` with
+  `Kind::{Announced, Updated, Retracted}` replacing the boolean; `path` is
+  the covered prefix relative to the consumer's root, trimmed by the library
+  so no caller does it. `captures` is `Some` only when the announced prefix
+  pins every wildcard of the filter: a broadcast at `room/alice/chat` under
+  `room/*/chat` captures `alice`, a dynamic claim of `room` under the same
+  filter overlaps but pins nothing and carries `None`. `source` is
+  `Local` or `Peer(Hop)` from the origin's bookkeeping
+  ([ingest source](/quest/m2/net-ingest-source.md) fills it in; the field
+  is settled here so it is never added after the release). The retracted
+  event keeps its last `route` in JS the way Rust already does.
 - Delete `Announce.Update.anonymous` in JS (`js/net/src/announced.ts`); it
   is computed from `route` and `Origin.isAnonymous(route)` is exported.
 - `announce::Consumer` gets a `futures::Stream` impl in Rust and

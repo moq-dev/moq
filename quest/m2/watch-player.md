@@ -16,9 +16,7 @@ that `Emitter.out.enabled` feeds `Decoder.in.enabled`.
 `new Watch.Player({ origin, probe, name, announced, catalogFormat,
 ...controls })` exposing `broadcast/video/audio/text/renderer/emitter/sync`
 as readonly fields. `Broadcast`, `Sync`, and the per-kind classes stay
-exported for composition but stop being the front door. Trim `room.Local`'s
-seventeen readonly fields to the sources, captures, and broadcasts the demo
-touches; move `parseCatalogFormat` from the watch index to the element.
+exported for composition but stop being the front door.
 
 Public API: additive on @moq/watch and @moq/room. Wire: none.
 

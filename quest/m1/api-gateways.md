@@ -23,7 +23,8 @@ now and a full bump later.
   `String` that needs a trailing slash today); moq-stats already does this.
 - `moq_hls::Segment.duration: Duration` (an `f64` of seconds built from a
   `Duration`); `Kind` parses through a real error or `Kind::parse ->
-  Option`.
+  Option`; `import::Config.playlist` is a `Url` (or a `Playlist` enum)
+  instead of a string parsed at run time.
 - moq-stats: `produce::Config`, `consume::Config`, `consume::{Traffic,
   Sessions}` replace the root `ProducerConfig`/`ConsumerConfig`/
   `TrafficConsumer`/`SessionsConsumer`, matching `aggregate::Config`.
@@ -31,18 +32,24 @@ now and a full bump later.
   documented as a path prefix and taken as a `String`.
 - `moq_srt::{Publish, Subscribe}::reject(self, Reject)` with
   `Reject::{Unauthorized, Forbidden, Unavailable, BadRequest}` mapped to the
-  SRT extended codes; today `reject()` sends a fixed `Forbidden` and
-  moq.pro's quest waits on it.
+  SRT extended codes (1401, 1403, 1503, 1400); today `reject()` sends a
+  fixed `Forbidden`. A `moq_srt` enum rather than a re-export of
+  `srt_tokio::ServerRejectReason`, so a backend swap is not an API
+  migration. Prove it over the wire for a rejected publish and a rejected
+  subscribe with a non-default reason, beside the existing clean-close
+  coverage, and update `rs/moq-cli/src/srt.rs` and the `rs/moq-srt/README.md`
+  embedder example.
 - `moq_rtmp::Play::with_max_age(Duration)` and
   `Publish::with_max_age(Option<Duration>)` take the same shape.
 - Decide the moq-srt dial shape: free functions over a `Config` today where
   moq-rtmp has a `Client` builder with the bring-your-own-transport seam
   moq.pro uses. Recommended: the `Client`.
 
-Public API: breaking on every crate named, so on dev. Wire: none.
-Consumers: moq-cli, moq.pro's edge (all four gateways in-process).
+Public API: breaking on every crate named, so on dev. Wire: an SRT
+client sees the extended reject code that matches the verdict; run
+`just test smoke-full`. Consumers: moq-cli, moq.pro's edge (all four
+gateways in-process).
 
 ## Related
 
 - [Gateway embedding](/quest/m2/gateway-embed.md) - the additive entry points an in-process embedder still lacks
-- [SRT rejection reason](/quest/m2/srt-reject-reason.md) - retired by the `Reject` enum here

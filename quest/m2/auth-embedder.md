@@ -28,7 +28,9 @@ Additive on `moq-auth` and `moq-relay`, so on main after the merge:
   holds non-session work for as long as the lease allows, the way
   `supervise` does for a `moq_net::Session`.
 - `moq_auth::Transport::{Rtmp, Srt, WebRtc}` so gateway sessions produce
-  `connect`/`end` events and count toward `serve::Limits`.
+  `connect`/`end` events and count toward `serve::Limits`; the `@moq/auth`
+  `TransportSchema` is a strict enum, so it gains the three values with
+  interop coverage in the same PR.
 - `Key::decode<C: DeserializeOwned>(token) -> Result<C>` (signature,
   algorithm pinning, `kid`, nothing else) with `verify` built on it, and
   `decode()` beside `verify()` in `@moq/auth`; `Claims` refuses unknown
@@ -39,9 +41,6 @@ Additive on `moq-auth` and `moq-relay`, so on main after the merge:
   today.
 - `serve::Keys::Set(PathBuf)` reading a JWKS through `KeySet::verify`, so a
   key file, a directory, and a set all enforce `kid`.
-- A `Tier` newtype with `Tier::INTERNAL` shared by `moq-stats`,
-  `moq_auth::Grant`, and `@moq/auth`; the label is a string in three
-  languages today and a mismatch bills the mesh to customers.
 
 Public API: additive. Wire: the auth JSON gains transport values and end
 reasons.

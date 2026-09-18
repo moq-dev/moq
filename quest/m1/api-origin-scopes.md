@@ -31,7 +31,8 @@ survives once route entries are prefixes and the wire carries no pattern:
   `AuthError::UnsupportedPattern` goes; `moq_net::stats::Config::exclude`
   is a `Patterns`. JS `announced(prefix)` gains the same optional pattern filter on
   `Origin` and `Connection`; `@moq/room` reads the participant from the
-  `**` capture.
+  capture of each broadcast's exact announce, which pins it, and ignores
+  overlap-only claims that carry `None`.
 - Bindings, per the Cross-Package Sync checklist: `announced(prefix)`
   keeps its prefix and takes an optional filter (the moq-ffi `Pattern`
   type or its string form), and delivers events relative to the origin

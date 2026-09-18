@@ -33,6 +33,12 @@ became `moq_client_config`), so this is the release to finish it.
   every wrapper use, and `moq_origin_consume_announced` becomes
   `moq_origin_announced_broadcast` to match `announced_broadcast`; fourteen
   functions plus `cpp/obs`. One break now instead of a second later.
+- In moq-ffi, on the same release: `set_tls_disable_verify(bool)` becomes
+  `set_tls_verify(bool)`, the polarity every wrapper already inverts by
+  hand, and `MoqRequest::transport` is an enum instead of a `String` that
+  Go turns into an open-set type and Python into a `Literal`. Both ripple
+  through the five wrappers and `doc/lib/*` per the Cross-Package Sync
+  checklist.
 - `CHANGELOG.md` `[Unreleased]` names the setter deletion, the bandwidth
   functions, `create_broadcast`/`announce`/`dynamic`, the decoder output
   format, `moq_route`, the `estimated_*_rate` stats fields, and

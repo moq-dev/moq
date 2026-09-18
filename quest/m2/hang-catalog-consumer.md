@@ -13,10 +13,10 @@ name and runs its own read loop.
 
 - `hang::Catalog::subscribe(&broadcast::Consumer) -> catalog::Consumer<E>`
   in Rust; `Catalog.watch(broadcast): AsyncIterable<Root>` in `@moq/hang`.
-- JS timeline moves from `Container.Timeline` (it is not a container) to a
-  `Hang.Timeline` namespace and gains a `Consumer` yielding
-  `{ push } | { pop } | { skip }` to mirror the Rust `Event`; nothing in JS
-  reads `archive`, `clock`, or `wallClockTime` today.
+- JS `Hang.Timeline` (moved there by [catalog types](/quest/m1/api-hang-catalog.md))
+  gains a `Consumer` yielding `{ push } | { pop } | { skip }` to mirror the
+  Rust `Event`; nothing in JS reads `archive`, `clock`, or `wallClockTime`
+  today.
 - `hang::container::MAX_AGE` is public; moq.pro's fleet config cites it by
   a name that no longer exists.
 - `@moq/json` consumers stop swallowing `readFrame` errors and expose the
@@ -24,10 +24,7 @@ name and runs its own read loop.
   `Stream.Config` takes a `schema` like snapshot. moq.pro wraps `next()` in
   a failure counter because a dead track and a bad frame reject alike.
 
-Public API: additive on hang, @moq/hang, @moq/json; the JS namespace move
-is breaking on @moq/hang and rides the same release as
-[catalog types](/quest/m1/api-hang-catalog.md) if it lands before the
-merge. Wire: none.
+Public API: additive on hang, @moq/hang, @moq/json. Wire: none.
 
 ## Required
 

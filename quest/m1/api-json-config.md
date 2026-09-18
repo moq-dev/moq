@@ -19,7 +19,10 @@ the catalog entry that describes it carries no field nobody writes.
 - `moq_mux::json::Config` and `moq_mux::binary::Config` (`compression: bool`
   plus `with_compression`) go; `catalog::Producer::json_snapshot(track,
   entry: JsonConfig)` and its siblings take the hang catalog entry directly
-  and refuse an entry whose `mode` disagrees. The moq-ffi `bool` follows.
+  and refuse an entry whose `mode` disagrees. The moq-ffi `bool` follows,
+  and with it `rs/libmoq`, the five hand-written wrappers, and `doc/lib/*`
+  per the Cross-Package Sync checklist, in this quest and not after the
+  merge.
 - Delete the per-track `timeline` field on `JsonConfig` and `BinaryConfig`
   in `rs/hang`, `js/hang`, and the hang draft; the timeline lives under the
   root `archive` since #3612 and nothing writes the field.

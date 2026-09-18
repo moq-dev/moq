@@ -30,6 +30,9 @@ the last release spelled differently instead of aliasing them silently.
   split is silently off. `LocalProps` uses `GetterInit` like `RoomProps`.
 - `Publish.Broadcast.in.maxAge` is `Getter<Time.Milli | undefined>`, not a
   bare `number`.
+- `room.Local` exports the sources, captures, and broadcasts the demo
+  touches, not seventeen readonly fields; `parseCatalogFormat` moves from
+  the watch index to the element.
 - Every publish source exposes `out.source: { video?, audio? } | undefined`;
   camera, screen, and file each have a different shape today and the
   element unwraps three ways.
