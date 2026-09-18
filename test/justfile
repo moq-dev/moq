@@ -105,6 +105,17 @@ smoke-media *args:
 drill *args:
     just rs test -p moq-relay --test drills {{ args }}
 
+# Starts N relay processes on one machine with a userspace UDP shaper on every
+# inter-relay link (delay, loss, rate), streams one broadcast across the
+# cluster, and prints the route, frame ages, missing frames, per-link bytes,
+# per-relay CPU, and the detours the relays logged. Scenarios: triangle_lossy,
+# triangle_clean, ten_regions. `MOQ_TESTBED_SECS` sets the run length (60),
+# `MOQ_TESTBED_KEEP=1` keeps the run directory with every relay's log.
+
+# Measure link costs and routing on a shaped cluster.
+cluster scenario="":
+    just rs test -p moq-relay --test cluster_testbed --run-ignored only --no-capture {{ scenario }}
+
 # Removes one recovery behavior at a time in a disposable copy of the tree and
 # requires the drill covering it to fail, for the reason the mutation names. The
 # checkout is never modified. `--list` shows the mutations.

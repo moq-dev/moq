@@ -194,6 +194,8 @@ async fn publish(relay: &RelayHost) -> Publisher {
 struct Subscriber {
 	_connection: moq_tokio::Connection,
 	announced: moq_net::announce::Consumer,
+	/// Frames read so far, so a test can prove the stream survives a re-route.
+	frames: Arc<std::sync::atomic::AtomicU64>,
 	_drain: tokio::task::JoinHandle<()>,
 }
 
@@ -212,27 +214,44 @@ async fn subscribe(relay: &RelayHost) -> Subscriber {
 	.expect("subscriber connect failed");
 
 	let announced = consumer.announced();
-	let drain = tokio::spawn(async move {
-		let broadcast = consumer.routed_broadcast(PATH).await.expect("broadcast routed");
-		let mut track = broadcast
-			.track(TRACK)
-			.expect("track handle")
-			.subscribe(None)
-			.await
-			.expect("subscribe");
-		while let Ok(Some(mut group)) = track.recv_group().await {
-			while let Ok(Some(_frame)) = group.read_frame().await {}
+	let frames = Arc::new(std::sync::atomic::AtomicU64::new(0));
+	let drain = tokio::spawn({
+		let frames = frames.clone();
+		async move {
+			let broadcast = consumer.routed_broadcast(PATH).await.expect("broadcast routed");
+			let mut track = broadcast
+				.track(TRACK)
+				.expect("track handle")
+				.subscribe(None)
+				.await
+				.expect("subscribe");
+			loop {
+				let mut group = match track.recv_group().await {
+					Ok(Some(group)) => group,
+					Ok(None) => panic!("track finished under the test"),
+					Err(err) => panic!("track failed under the test: {err}"),
+				};
+				while let Ok(Some(_frame)) = group.read_frame().await {
+					frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+				}
+			}
 		}
 	});
 
 	Subscriber {
 		_connection: connection,
 		announced,
+		frames,
 		_drain: drain,
 	}
 }
 
 impl Subscriber {
+	/// Frames read so far.
+	fn frames(&self) -> u64 {
+		self.frames.load(std::sync::atomic::Ordering::Relaxed)
+	}
+
 	/// The hop chain of the next route update for [`PATH`].
 	async fn next_route(&mut self) -> Vec<u64> {
 		loop {
@@ -287,6 +306,11 @@ async fn triangle(ids: [u64; 3], direct: Profile) -> Triangle {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn lossy_direct_edge_is_routed_around() {
 	let cluster = triangle([11, 12, 13], Profile::rtt(Duration::from_millis(110)).with_loss(0.01)).await;
+	// The cluster's first announcements travel over whichever links came up
+	// first and settle onto the direct link once every price has landed. A
+	// subscriber that attaches during that shuffle pins a copy on the losing
+	// route, so wait it out before measuring anything.
+	tokio::time::sleep(Duration::from_secs(5)).await;
 	let _publisher = publish(&cluster.sjc).await;
 	let mut subscriber = subscribe(&cluster.nyc).await;
 
@@ -307,6 +331,26 @@ async fn lossy_direct_edge_is_routed_around() {
 	{
 		panic!("the route never moved onto dal; relay logs:\n{}", logs());
 	}
+
+	// The stream survives the move: the handover lands at a group boundary and
+	// frames keep arriving over the new path. The fresh subscription ramps over
+	// a few seconds before it carries the full rate, so give it a while.
+	let before = subscriber.frames();
+	let flowing = tokio::time::timeout(Duration::from_secs(20), async {
+		loop {
+			tokio::time::sleep(Duration::from_millis(250)).await;
+			if subscriber.frames() >= before + 200 {
+				return;
+			}
+		}
+	})
+	.await;
+	assert!(
+		flowing.is_ok(),
+		"only {} frames arrived in 20 s after the re-route (had {before}); relay logs:\n{}",
+		subscriber.frames() - before,
+		logs()
+	);
 
 	// The detour is logged by sjc (peer nyc via dal) once dal's table arrives.
 	let needle = format!("peer={} ", cluster.nyc.id);
@@ -332,6 +376,7 @@ async fn lossy_direct_edge_is_routed_around() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn clean_direct_edge_stays_direct() {
 	let cluster = triangle([21, 22, 23], Profile::rtt(Duration::from_millis(110))).await;
+	tokio::time::sleep(Duration::from_secs(5)).await;
 	let _publisher = publish(&cluster.sjc).await;
 	let mut subscriber = subscribe(&cluster.nyc).await;
 

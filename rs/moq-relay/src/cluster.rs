@@ -2253,6 +2253,12 @@ const LINK_WINDOW: usize = 15;
 /// this one lost packet swings the price by more than a whole RTT.
 const LOSS_MIN_PACKETS: u64 = 200;
 
+/// How many sent packets the loss window keeps, however old. A lossy link a
+/// route has left carries keepalives alone, and a price that relaxed on those
+/// would pull the route back only to measure the loss again; instead the price
+/// stands until this much later traffic has shown otherwise.
+const LOSS_WINDOW_PACKETS: u64 = 5_000;
+
 /// A price moves once it has drifted this fraction of itself, or a whole
 /// [`CostConfig::step`], whichever is larger.
 const PRICE_BAND: u64 = 10;
@@ -2417,17 +2423,18 @@ struct LinkEstimate {
 	bandwidth: Option<u64>,
 }
 
-/// Smooths a link's samples over a window of [`LINK_WINDOW`] intervals: a median
-/// for RTT (one slow ack must not move a route), the lost-to-sent ratio of every
-/// packet the window covers for loss (a ratio per interval is far too noisy at
-/// the loss rates that matter: one packet in a hundred), and a minimum for
-/// bandwidth. Loss is only learned from traffic: intervals that sent nothing
-/// contribute nothing, so an idle link keeps the last estimate its window holds.
+/// Smooths a link's samples: a median over the last [`LINK_WINDOW`] intervals
+/// for RTT (one slow ack must not move a route), a minimum over the same for
+/// bandwidth, and for loss the lost-to-sent ratio over the last
+/// [`LOSS_WINDOW_PACKETS`] packets, however long ago they were sent. A ratio per
+/// interval is far too noisy at the loss rates that matter (one packet in a
+/// hundred), and a window in time would let an idle link's keepalives wash out
+/// what its last stream measured.
 #[derive(Default)]
 struct LinkMeter {
 	rtts: VecDeque<Duration>,
 	bandwidths: VecDeque<u64>,
-	/// `(sent, lost)` per interval that carried traffic.
+	/// `(sent, lost)` per interval that carried traffic, oldest first.
 	traffic: VecDeque<(u64, u64)>,
 	/// The `(sent, lost)` counters at the previous sample.
 	counters: Option<(u64, u64)>,
@@ -2450,7 +2457,16 @@ impl LinkMeter {
 			// than it sent; the ratio is clamped where it is read.
 			let delta_lost = lost.saturating_sub(prev_lost);
 			if delta_sent > 0 {
-				push_window(&mut self.traffic, (delta_sent, delta_lost));
+				self.traffic.push_back((delta_sent, delta_lost));
+				// Keep the newest intervals worth LOSS_WINDOW_PACKETS; the oldest go
+				// once the rest still cover the window on their own.
+				let mut total: u64 = self.traffic.iter().map(|(sent, _)| sent).sum();
+				while let Some((oldest, _)) = self.traffic.front()
+					&& total - oldest >= LOSS_WINDOW_PACKETS
+				{
+					total -= oldest;
+					self.traffic.pop_front();
+				}
 			}
 		}
 		self.estimate()
@@ -4403,14 +4419,21 @@ mod tests {
 		let burst = meter.observe(sample(50, 2240, 3000, None)).unwrap();
 		assert!(burst.loss <= 1.0, "{burst:?}");
 
-		// The window forgets: enough steady samples push the spike and the burst out.
+		// The RTT and bandwidth windows forget: enough steady samples push the
+		// spike out. Loss is windowed by packets, not samples: fifteen keepalive
+		// intervals of a hundred packets do not flush the burst.
 		for i in 1..=LINK_WINDOW as u64 {
 			meter.observe(sample(60, 2240 + i * 100, 3000, Some(20_000_000)));
 		}
 		let settled = meter.estimate().unwrap();
 		assert_eq!(settled.rtt, Duration::from_millis(60));
 		assert_eq!(settled.bandwidth, Some(20_000_000));
-		assert_eq!(settled.loss, 0.0);
+		assert!(settled.loss > 0.5, "{settled:?}");
+
+		// Once LOSS_WINDOW_PACKETS of clean traffic have followed, the burst is gone.
+		let after = 2240 + LINK_WINDOW as u64 * 100 + LOSS_WINDOW_PACKETS;
+		let flushed = meter.observe(sample(60, after, 3000, None)).unwrap();
+		assert_eq!(flushed.loss, 0.0, "{flushed:?}");
 	}
 
 	fn entry(peer: u64, cost: u64) -> LinkEntry {
