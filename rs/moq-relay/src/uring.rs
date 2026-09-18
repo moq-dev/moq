@@ -671,7 +671,7 @@ async fn serve_connection(
 	};
 	let path = if path.is_empty() { "/".to_string() } else { path };
 	let bytes = moq_auth::Counters::default();
-	let auth::Admitted { lease, token } = if cluster::Cluster::is_lan_path(&path) {
+	let lease = if cluster::Cluster::is_lan_path(&path) {
 		match cluster::Cluster::lan_credential(&path) {
 			Some(presented) => match serve.cluster.verify_lan_credential(presented) {
 				Some(true) => serve
@@ -734,7 +734,7 @@ async fn serve_connection(
 	};
 
 	let role = request.role();
-	let grants = match crate::connection::authorize(&serve.cluster, &token, role, &moq_tokio::Transport::Quic) {
+	let grants = match crate::connection::authorize(&serve.cluster, lease.token(), role, &moq_tokio::Transport::Quic) {
 		Ok(grants) => grants,
 		Err(err) => {
 			request.close(moq_net::Error::Unauthorized);
@@ -761,7 +761,7 @@ async fn serve_connection(
 	let shutdown = serve.shutdown.clone();
 	serve.tokio.spawn(async move {
 		let _node_connection = node_connection;
-		if let Err(err) = crate::connection::supervise(session, lease, token, bytes, shutdown).await {
+		if let Err(err) = crate::connection::supervise(session, lease, bytes, shutdown).await {
 			tracing::warn!(id, %err, "connection closed");
 		}
 	});

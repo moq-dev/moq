@@ -1,9 +1,7 @@
 use crate::{auth, cluster};
 
 use axum::http;
-use moq_auth::Grant;
 use moq_tokio::Request;
-use std::time::SystemTime;
 
 /// An error carrying the HTTP status to send when closing the request.
 ///
@@ -73,8 +71,8 @@ impl Connection {
 	pub async fn run(self) -> anyhow::Result<()> {
 		let peer_hop = self.request.peer_hop();
 		let bytes = moq_auth::Counters::default();
-		let auth::Admitted { lease, token } = match self.admit(bytes.clone()).await {
-			Ok(admitted) => admitted,
+		let lease = match self.admit(bytes.clone()).await {
+			Ok(lease) => lease,
 			Err(err) => {
 				let _ = self.request.close(err.status.as_u16()).await;
 				return Err(err.source);
@@ -83,7 +81,7 @@ impl Connection {
 
 		let transport = self.request.transport();
 		let role = self.request.role();
-		let grants = match authorize(&self.cluster, &token, role, &transport) {
+		let grants = match authorize(&self.cluster, lease.token(), role, &transport) {
 			Ok(grants) => grants,
 			Err(err) => {
 				let _ = self.request.close(http::StatusCode::FORBIDDEN.as_u16()).await;
@@ -110,7 +108,7 @@ impl Connection {
 
 		tracing::info!(version = %session.version(), %transport, "negotiated");
 
-		supervise(session, lease, token, bytes, self.shutdown.clone()).await
+		supervise(session, lease, bytes, self.shutdown.clone()).await
 	}
 
 	/// Admit this connection. Any failure is returned as a [`StatusError`] so
@@ -119,7 +117,7 @@ impl Connection {
 	/// Every transport goes through the same lease; the request the server sees
 	/// carries what the transport knows. A LAN mesh dial is the one exception: its
 	/// credential is a secret the relay minted for itself, checked locally.
-	async fn admit(&self, bytes: moq_auth::Counters) -> Result<auth::Admitted, StatusError> {
+	async fn admit(&self, bytes: moq_auth::Counters) -> Result<auth::Lease, StatusError> {
 		// Checked first so a `/.cluster` request is never routed through the public
 		// grant, and a relay without LAN discovery refuses it instead of treating the
 		// path as a broadcast root.
@@ -136,7 +134,7 @@ impl Connection {
 	}
 
 	/// Authorize a `/.cluster/<credential>` dial against the live LAN advertisement.
-	fn admit_lan(&self) -> Result<auth::Admitted, StatusError> {
+	fn admit_lan(&self) -> Result<auth::Lease, StatusError> {
 		let Some(presented) = cluster::Cluster::lan_credential(self.request.path()) else {
 			return Err(StatusError {
 				status: http::StatusCode::FORBIDDEN,
@@ -242,48 +240,14 @@ pub(crate) fn authorize(
 	})
 }
 
-/// What a re-checked grant means for the session holding `token`.
-pub(crate) enum Recheck {
-	/// The grant still covers what the session holds; nothing changes.
-	Covered,
-	/// The grant moved out from under the session, which closes.
-	Closed(&'static str),
-}
-
-/// Compare a re-checked grant against what the session was admitted with.
-///
-/// A changed root or a grant that no longer covers the session's scope closes it:
-/// the origin cannot be resized in place until pattern scopes land. A changed tier
-/// is kept for this session and applies to its next connection, since the stats
-/// carriers resolve their counters once at admission.
-pub(crate) fn recheck(token: &auth::Token, grant: &Grant) -> Recheck {
-	let fresh = match token.recheck(grant) {
-		Ok(fresh) => fresh,
-		Err(err) => {
-			tracing::warn!(%err, "re-checked grant cannot scope the session");
-			return Recheck::Closed("unsupported grant");
-		}
-	};
-	if fresh.root != token.root {
-		return Recheck::Closed("root changed");
-	}
-	if !token.covered_by(&fresh) {
-		return Recheck::Closed("grant narrowed");
-	}
-	if fresh.tier != token.tier {
-		tracing::info!(from = %token.tier, to = %fresh.tier, "tier changed; applies to the next session");
-	}
-	Recheck::Covered
-}
-
 /// Hold an accepted session open for as long as its lease allows.
 ///
 /// Public so an embedder running its own accept loop (`moq --listen`) holds a
 /// session the same way the relay does.
 ///
-/// The lease is the server's live word on the grant: a change that no longer
-/// covers the session closes it, a revocation closes it with the reason, and the
-/// session's own close is reported back through the lease as the `end` event.
+/// The lease is the decider's live word on the grant: when it stops covering
+/// the session ([`auth::Lease::ended`]) the session closes with the reason, and
+/// the session's own close is reported back through the lease as the `end` event.
 /// Either way, a relay shutdown drains the session with a GOAWAY instead of
 /// cutting it off.
 ///
@@ -292,7 +256,6 @@ pub(crate) fn recheck(token: &auth::Token, grant: &Grant) -> Recheck {
 pub async fn supervise(
 	session: moq_net::Session,
 	mut lease: auth::Lease,
-	token: auth::Token,
 	bytes: moq_auth::Counters,
 	mut shutdown: crate::shutdown::Observer,
 ) -> anyhow::Result<()> {
@@ -303,61 +266,32 @@ pub async fn supervise(
 		bytes.add_sent(stats.bytes_sent.unwrap_or_default());
 		bytes.add_received(stats.bytes_received.unwrap_or_default());
 	};
-	// The relay closes the session at `expires` itself, whoever drives the lease:
-	// a fixed lease has no driver, and an auth server's may be mid-outage.
-	let mut expires = lease.grant().expires;
-	loop {
-		let expire = async {
-			match expires {
-				Some(at) => tokio::time::sleep(at.duration_since(SystemTime::now()).unwrap_or_default()).await,
-				None => std::future::pending().await,
-			}
-		};
-		tokio::select! {
-			err = session.closed() => {
-				meter(&session);
-				let reason = match &err {
-					moq_net::Error::Cancel => "closed".to_string(),
-					other => other.to_string(),
-				};
-				lease.close(reason);
-				return Err(err.into());
-			}
-			changed = lease.changed() => match changed {
-				Ok(grant) => match recheck(&token, &grant) {
-					Recheck::Covered => expires = grant.expires,
-					Recheck::Closed(why) => {
-						tracing::info!(%why, "grant no longer covers the session, closing");
-						session.abort(moq_net::Error::Unauthorized);
-						meter(&session);
-						lease.close(why);
-						return Ok(());
-					}
-				},
-				Err(reason) => {
-					tracing::info!(%reason, "lease ended, closing session");
-					session.abort(moq_net::Error::Unauthorized);
-					meter(&session);
-					return Ok(());
-				}
-			},
-			() = expire => {
-				tracing::info!("grant expired, closing session");
-				session.abort(moq_net::Error::Unauthorized);
-				meter(&session);
-				lease.close(moq_auth::lease::Reason::Expired);
-				return Ok(());
-			}
-			_ = shutdown.started() => {
-				tracing::info!("relay shutting down; draining session");
-				// Empty URI: "reconnect to me" (the relay is restarting). The session's
-				// machine runs on its own, so the GOAWAY still reaches the wire while
-				// we wait here.
-				shutdown.drain_session(&session).await;
-				meter(&session);
-				lease.close("shutdown");
-				return Ok(());
-			}
+	tokio::select! {
+		err = session.closed() => {
+			meter(&session);
+			let reason = match &err {
+				moq_net::Error::Cancel => "closed".to_string(),
+				other => other.to_string(),
+			};
+			lease.close(reason);
+			Err(err.into())
+		}
+		why = lease.ended() => {
+			tracing::info!(%why, "lease ended, closing session");
+			session.abort(moq_net::Error::Unauthorized);
+			meter(&session);
+			lease.close(why);
+			Ok(())
+		}
+		_ = shutdown.started() => {
+			tracing::info!("relay shutting down; draining session");
+			// Empty URI: "reconnect to me" (the relay is restarting). The session's
+			// machine runs on its own, so the GOAWAY still reaches the wire while
+			// we wait here.
+			shutdown.drain_session(&session).await;
+			meter(&session);
+			lease.close("shutdown");
+			Ok(())
 		}
 	}
 }

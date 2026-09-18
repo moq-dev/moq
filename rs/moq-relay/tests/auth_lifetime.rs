@@ -846,22 +846,27 @@ async fn an_embedded_decider_admits_and_revokes() {
 }
 
 /// A fixed lease has no driver, so the relay itself closes the session at the
-/// grant's `expires`.
+/// grant's `expires`, on every transport that holds a lease.
 #[tokio::test]
 async fn a_fixed_lease_still_expires() {
-	let (auth, mut admissions) = moq_relay::auth::Auth::embedded("test-relay");
-	tokio::spawn(async move {
-		while let Some(admission) = admissions.next().await {
-			let mut grant = Grant::new(all(), all());
-			grant.expires = Some(SystemTime::now() + Duration::from_secs(1));
-			admission.grant(moq_relay::auth::Lease::fixed(grant));
-		}
-	});
-	let (port, relay) = spawn_relay(auth).await;
-	let (pub_session, sub_session) = connect_and_round_trip(&room_url("tcp", port)).await;
-	assert_closed(pub_session, Duration::from_secs(5), "publisher").await;
-	assert_closed(sub_session, Duration::from_secs(5), "subscriber").await;
-	relay.abort();
+	for scheme in ["tcp", "ws"] {
+		let (auth, mut admissions) = moq_relay::auth::Auth::embedded("test-relay");
+		tokio::spawn(async move {
+			while let Some(admission) = admissions.next().await {
+				let mut grant = Grant::new(all(), all());
+				grant.expires = Some(SystemTime::now() + Duration::from_secs(1));
+				admission.grant(moq_auth::lease::Consumer::fixed(grant));
+			}
+		});
+		let (port, relay) = match scheme {
+			"tcp" => spawn_relay(auth).await,
+			_ => spawn_ws_relay(auth).await,
+		};
+		let (pub_session, sub_session) = connect_and_round_trip(&room_url(scheme, port)).await;
+		assert_closed(pub_session, Duration::from_secs(5), &format!("{scheme} publisher")).await;
+		assert_closed(sub_session, Duration::from_secs(5), &format!("{scheme} subscriber")).await;
+		relay.abort();
+	}
 }
 
 /// A relay whose config names no auth source is the embedder's to decide: `run`

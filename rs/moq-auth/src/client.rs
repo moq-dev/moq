@@ -201,23 +201,17 @@ impl Driver {
 
 			tokio::select! {
 				reason = producer.closed() => return reason,
-				() = expire => {
-					producer.revoke(Reason::Expired);
-					return Reason::Expired;
-				}
+				() = expire => return producer.revoke(Reason::Expired),
 				result = reply => {
 					inflight = None;
 					match result {
 						Ok(fresh) => {
 							failures = 0;
 							next = fresh.revalidate.map(|cadence| Instant::now() + cadence);
-							producer.update(fresh.clone()).expect("post validated the grant");
+							producer.update(fresh.clone());
 							grant = fresh;
 						}
-						Err(Error::Refused) => {
-							producer.revoke(Reason::Refused);
-							return Reason::Refused;
-						}
+						Err(Error::Refused) => return producer.revoke(Reason::Refused),
 						Err(err) => {
 							// Evidence of nothing: the grant stands until `expires`.
 							failures += 1;

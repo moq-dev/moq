@@ -245,9 +245,9 @@ An application that [embeds](/bin/relay/#embed) the relay can be the auth
 server without the HTTP: leave `[auth]` empty and take `relay.admissions()`
 before `run`. Each `Admission` carries the same `moq_auth::Request` the server
 would have read, and is answered with `grant(lease)` or `refuse(err)`. A
-`Lease::fixed(grant)` never changes; a `lease::Consumer` is driven by the
-`lease::Producer` the application keeps, which re-checks, updates, revokes, and
-learns when the session ends. Either way the relay closes the session at the
+`lease::Consumer::fixed(grant)` never changes; the consumer of a
+`lease::Producer` the application keeps is driven by it, which re-checks,
+updates, revokes, and learns when the session ends. Either way the relay closes the session at the
 grant's `expires`. `run` refuses to start while nobody has taken the
 admissions, a dropped `Admissions` fails every later session as unavailable,
 and an admission left unanswered for ten seconds (the bound an auth server

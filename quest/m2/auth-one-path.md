@@ -20,7 +20,7 @@ decision whether to fold the rest onto it:
   takes each `Admission`, calls `Client::connect(request, bytes)`, and answers
   `grant(consumer)` or `refuse(err.into())`, one spawned task per admission so
   a slow server does not serialize connects; for `--auth-public`, a task
-  answering `grant(Lease::fixed(grant))`. `Refuse` stays a mode, or becomes a
+  answering `grant(lease::Consumer::fixed(grant))`. `Refuse` stays a mode, or becomes a
   task answering `AuthError::Refused`: a dropped `Admissions` is an outage
   (502), not a policy.
 - The costs to weigh: one channel hop and one task per admission on the
@@ -41,7 +41,7 @@ while let Some(admission) = admissions.next().await {
     let authorizer = authorizer.clone();
     tokio::spawn(async move {
         match authorizer.decide(Facts::from_request(&admission.request), false).await {
-            Ok(grant) if grant.revalidate.is_none() => admission.grant(Lease::fixed(grant)),
+            Ok(grant) if grant.revalidate.is_none() => admission.grant(lease::Consumer::fixed(grant)),
             Ok(grant) => {
                 let (producer, consumer) = lease::Producer::new(grant.clone());
                 admission.grant(consumer);

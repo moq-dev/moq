@@ -58,9 +58,10 @@ pub(crate) async fn serve_ws(
 	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| auth::peer(&identity));
 	let bytes = moq_auth::Counters::default();
 	let session_id = request.id.clone();
-	let auth::Admitted { lease, token } = state.auth.admit(request, bytes.clone()).await?;
-	let publish = state.cluster.publisher(&token);
-	let subscribe = state.cluster.subscriber(&token);
+	let lease = state.auth.admit(request, bytes.clone()).await?;
+	let token = lease.token();
+	let publish = state.cluster.publisher(token);
+	let subscribe = state.cluster.subscriber(token);
 	let stats = state.cluster.stats.tier(token.tier.clone()).session(&token.root);
 
 	if publish.is_none() && subscribe.is_none() {
@@ -90,7 +91,7 @@ pub(crate) async fn serve_ws(
 			shutdown: state.shutdown.clone(),
 			socket_stats: socket_stats.map(|Extension(s)| s),
 		};
-		let _ = handle_socket(socket, session, lease, token, bytes).await;
+		let _ = handle_socket(socket, session, lease, bytes).await;
 	}))
 }
 
@@ -115,7 +116,6 @@ async fn handle_socket<T>(
 	socket: T,
 	session: SessionInputs,
 	mut lease: auth::Lease,
-	token: auth::Token,
 	bytes: moq_auth::Counters,
 ) -> anyhow::Result<()>
 where
@@ -185,54 +185,38 @@ where
 		bytes.add_sent(stats.bytes_sent.unwrap_or_default());
 		bytes.add_received(stats.bytes_received.unwrap_or_default());
 	};
-	loop {
-		tokio::select! {
-			res = &mut driver => {
-				meter(&session);
-				lease.close(match &res {
-					Ok(()) => "closed".to_string(),
-					Err(err) => err.to_string(),
-				});
-				return res.map_err(Into::into);
-			}
-			changed = lease.changed() => {
-				let why = match changed {
-					Ok(grant) => match crate::recheck(&token, &grant) {
-						crate::Recheck::Covered => continue,
-						crate::Recheck::Closed(why) => {
-							tracing::info!(%why, "grant no longer covers the session, closing");
-							Some(why)
-						}
-					},
-					Err(reason) => {
-						tracing::info!(%reason, "lease ended, closing session");
-						None
-					}
-				};
-				session.abort(moq_net::Error::Unauthorized);
-				// Drive the teardown so the close reaches the peer.
-				let res = driver.await.map_err(Into::into);
-				meter(&session);
-				if let Some(why) = why {
-					lease.close(why);
-				}
-				return res;
-			}
-			_ = shutdown.started() => {
-				tracing::info!("relay shutting down; draining session");
-				// Unlike QUIC sessions (whose driver is spawned), this driver runs
-				// inline, so keep polling it while the drain waits: the GOAWAY only
-				// reaches the wire through it.
-				let drain = shutdown.drain_session(&session);
-				let mut drain = std::pin::pin!(drain);
-				let res = tokio::select! {
-					res = &mut driver => res.map_err(Into::into),
-					_ = &mut drain => driver.await.map_err(Into::into),
-				};
-				meter(&session);
-				lease.close("shutdown");
-				return res;
-			}
+	tokio::select! {
+		res = &mut driver => {
+			meter(&session);
+			lease.close(match &res {
+				Ok(()) => "closed".to_string(),
+				Err(err) => err.to_string(),
+			});
+			res.map_err(Into::into)
+		}
+		why = lease.ended() => {
+			tracing::info!(%why, "lease ended, closing session");
+			session.abort(moq_net::Error::Unauthorized);
+			// Drive the teardown so the close reaches the peer.
+			let res = driver.await.map_err(Into::into);
+			meter(&session);
+			lease.close(why);
+			res
+		}
+		_ = shutdown.started() => {
+			tracing::info!("relay shutting down; draining session");
+			// Unlike QUIC sessions (whose driver is spawned), this driver runs
+			// inline, so keep polling it while the drain waits: the GOAWAY only
+			// reaches the wire through it.
+			let drain = shutdown.drain_session(&session);
+			let mut drain = std::pin::pin!(drain);
+			let res = tokio::select! {
+				res = &mut driver => res.map_err(Into::into),
+				_ = &mut drain => driver.await.map_err(Into::into),
+			};
+			meter(&session);
+			lease.close("shutdown");
+			res
 		}
 	}
 }
@@ -947,16 +931,15 @@ mod tests {
 			// than through an accepted socket.
 			socket_stats: None,
 		};
-		let lease = crate::auth::Lease::fixed(moq_auth::Grant::new(
+		let grant = moq_auth::Grant::new(
 			[moq_auth::Pattern::all()].into_iter().collect(),
 			[moq_auth::Pattern::all()].into_iter().collect(),
-		));
-		let token = crate::auth::Token::new("/", &lease.grant()).expect("token");
+		);
+		let lease = crate::auth::Lease::new("/", moq_auth::lease::Consumer::fixed(grant)).expect("lease");
 		let server = tokio::spawn(handle_socket(
 			Pipe::new(server_incoming, server_to_client, frozen.clone()),
 			session,
 			lease,
-			token,
 			moq_auth::Counters::default(),
 		));
 

@@ -4,6 +4,7 @@
 //! certificate is reported to whoever decides as a fact.
 
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use axum::http;
 use moq_auth::{Counters, Grant, Request, lease};
@@ -231,51 +232,80 @@ impl Token {
 	}
 }
 
-/// The lease a session holds, with whatever keeps it alive.
+/// What admitted a session and keeps it admitted: the grant's lease and the
+/// scope it was reduced to.
 ///
-/// A driven lease is the [`lease::Consumer`] of a [`lease::Producer`] someone else
-/// holds: the [`moq_auth::Client`] behind an auth server, or the embedder answering
-/// an [`Admission`]. A static one holds its own producer so the grant never changes
-/// and never revokes.
+/// The lease is the decider's live word on the grant: the [`moq_auth::Client`]
+/// behind an auth server, the embedder answering an [`Admission`], or nobody for
+/// a fixed grant. [`ended`](Self::ended) resolves when that word no longer covers
+/// the session; the holder then closes the session, and the lease with the reason.
 pub struct Lease {
 	consumer: lease::Consumer,
-	_static: Option<lease::Producer>,
+	token: Token,
+	/// When the grant runs out, enforced here whoever drives the lease: a fixed
+	/// grant has no driver, and an auth server's may be mid-outage.
+	expires: Option<SystemTime>,
 }
 
 impl Lease {
-	/// A lease on a static grant: no re-check and no `end`. The session still
-	/// closes at the grant's `expires`, if it names one.
-	pub fn fixed(grant: Grant) -> Self {
-		let (producer, consumer) = lease::Producer::new(grant);
-		Self {
+	/// Hold `consumer` for a session that dialed `path`, reducing its grant to
+	/// what the origin scopes by.
+	pub fn new(path: &str, consumer: lease::Consumer) -> Result<Self, Error> {
+		let grant = consumer.grant();
+		Ok(Self {
+			token: Token::new(path, &grant)?,
+			expires: grant.expires,
 			consumer,
-			_static: Some(producer),
+		})
+	}
+
+	/// The scope the session was admitted under.
+	pub fn token(&self) -> &Token {
+		&self.token
+	}
+
+	/// Wait for the lease to stop covering the session: the grant expired, was
+	/// revoked, or was re-checked into one that no longer covers the token.
+	///
+	/// A changed root or a narrower grant ends it: the origin cannot be resized in
+	/// place until pattern scopes land. A changed tier is kept for this session and
+	/// applies to its next connection, since the stats carriers resolved their
+	/// counters at admission.
+	pub async fn ended(&mut self) -> lease::Reason {
+		loop {
+			let expire = async {
+				match self.expires {
+					Some(at) => tokio::time::sleep(at.duration_since(SystemTime::now()).unwrap_or_default()).await,
+					None => std::future::pending().await,
+				}
+			};
+			tokio::select! {
+				changed = self.consumer.changed() => match changed {
+					Ok(grant) => match self.token.recheck(&grant) {
+						Ok(fresh) if fresh.root != self.token.root => return "root changed".into(),
+						Ok(fresh) if !self.token.covered_by(&fresh) => return "grant narrowed".into(),
+						Ok(fresh) => {
+							if fresh.tier != self.token.tier {
+								tracing::info!(from = %self.token.tier, to = %fresh.tier, "tier changed; applies to the next session");
+							}
+							self.expires = grant.expires;
+						}
+						Err(err) => {
+							tracing::warn!(%err, "re-checked grant cannot scope the session");
+							return "unsupported grant".into();
+						}
+					},
+					Err(reason) => return reason,
+				},
+				() = expire => return lease::Reason::Expired,
+			}
 		}
 	}
 
-	/// The grant as it stands now.
-	pub fn grant(&self) -> Grant {
-		self.consumer.grant()
-	}
-
-	/// The next update: the new grant, or the reason the lease ended.
-	pub async fn changed(&mut self) -> Result<Grant, lease::Reason> {
-		self.consumer.changed().await
-	}
-
-	/// End the lease with the session's close classification.
-	pub fn close(self, reason: impl Into<lease::Reason>) {
-		self.consumer.close(reason);
-	}
-}
-
-/// A lease someone else drives: whoever holds the producer updates and revokes it.
-impl From<lease::Consumer> for Lease {
-	fn from(consumer: lease::Consumer) -> Self {
-		Self {
-			consumer,
-			_static: None,
-		}
+	/// End the lease with the session's close classification, and learn what it
+	/// ended with: that, or the decider's reason if it revoked first.
+	pub fn close(self, reason: impl Into<lease::Reason>) -> lease::Reason {
+		self.consumer.close(reason)
 	}
 }
 
@@ -331,54 +361,40 @@ impl Auth {
 		Request::connect(self.node.as_ref(), transport, path)
 	}
 
-	/// Admit a session: the lease it holds and the scope the origin applies.
+	/// Admit a session: the lease it holds, carrying the scope the origin applies.
 	///
 	/// `bytes` is what the session meters, reported in the `end` event.
-	pub async fn admit(&self, request: Request, bytes: Counters) -> Result<Admitted, Error> {
+	pub async fn admit(&self, request: Request, bytes: Counters) -> Result<Lease, Error> {
 		let path = request.path.clone();
-		let lease = match self.mode.as_ref() {
-			Mode::Server(client) => Lease {
-				consumer: client.connect(request, bytes).await?,
-				_static: None,
-			},
+		let consumer = match self.mode.as_ref() {
+			Mode::Server(client) => client.connect(request, bytes).await?,
 			// A certificate is a fact for a server to weigh; with no server it admits
 			// nothing on its own, so the peer gets what any anonymous session gets.
-			Mode::Public(grant) => Lease::fixed(grant.clone()),
+			Mode::Public(grant) => lease::Consumer::fixed(grant.clone()),
 			Mode::Embedded(admissions) => {
 				let (reply, answer) = oneshot::channel();
 				admissions
 					.send(Admission { request, bytes, reply })
 					.map_err(|_| Error::Unavailable("nobody is answering admissions".into()))?;
-				let lease: Lease = tokio::time::timeout(ADMIT_TIMEOUT, answer)
+				let consumer = tokio::time::timeout(ADMIT_TIMEOUT, answer)
 					.await
 					.map_err(|_| Error::Unavailable("the admission timed out".into()))?
 					.map_err(|_| Error::Unavailable("the admission went unanswered".into()))??;
 				// Held to what a server's answer is held to: a grant that admits nothing
 				// or asks for a re-check without a bound is the decider's bug, not a refusal.
-				lease.grant().validate()?;
-				lease
+				consumer.grant().validate()?;
+				consumer
 			}
 			Mode::Refuse => return Err(Error::Refused),
 		};
-		let token = Token::new(&path, &lease.grant())?;
-		Ok(Admitted { lease, token })
+		Lease::new(&path, consumer)
 	}
 
 	/// Admit a session on a grant decided locally, bypassing the server: the LAN
 	/// mesh credential, which the relay minted for itself.
-	pub(crate) fn admit_fixed(&self, path: &str, grant: Grant) -> Result<Admitted, Error> {
-		let lease = Lease::fixed(grant);
-		let token = Token::new(path, &lease.grant())?;
-		Ok(Admitted { lease, token })
+	pub(crate) fn admit_fixed(&self, path: &str, grant: Grant) -> Result<Lease, Error> {
+		Lease::new(path, lease::Consumer::fixed(grant))
 	}
-}
-
-/// An admitted session: its lease and the scope it was admitted under.
-pub struct Admitted {
-	/// The lease the session holds for as long as it runs.
-	pub lease: Lease,
-	/// The grant reduced to what the origin scopes by.
-	pub token: Token,
 }
 
 /// The sessions an embedded [`Auth`] is waiting to admit, in arrival order.
@@ -405,16 +421,16 @@ pub struct Admission {
 	pub request: Request,
 	/// What the session meters, for an `end` report; live for as long as it runs.
 	pub bytes: Counters,
-	reply: oneshot::Sender<Result<Lease, Error>>,
+	reply: oneshot::Sender<Result<lease::Consumer, Error>>,
 }
 
 impl Admission {
-	/// Admit the session on `lease`: [`Lease::fixed`] for a grant that never changes,
-	/// or a [`lease::Consumer`] whose producer the decider keeps to re-check, update,
-	/// revoke, and learn when the session ends.
-	pub fn grant(self, lease: impl Into<Lease>) {
+	/// Admit the session on `lease`: [`lease::Consumer::fixed`] for a grant that
+	/// never changes, or the consumer of a [`lease::Producer`] the decider keeps to
+	/// re-check, update, revoke, and learn when the session ends.
+	pub fn grant(self, lease: lease::Consumer) {
 		// The session may have given up waiting; nothing to tell it then.
-		let _ = self.reply.send(Ok(lease.into()));
+		let _ = self.reply.send(Ok(lease));
 	}
 
 	/// Refuse the session, with the reason its transport reports.
@@ -508,10 +524,10 @@ mod tests {
 			.init("relay-1", &moq_tokio::tls::Connect::default())
 			.unwrap();
 		let request = auth.request(moq_auth::Transport::Quic, "/anon/room");
-		let admitted = futures::executor::block_on(auth.admit(request, Counters::default())).unwrap();
-		assert_eq!(admitted.token.root, Path::new("anon/room").to_owned());
-		assert_eq!(admitted.token.subscribe, patterns(&["anon/**"]));
-		assert_eq!(admitted.token.tier, Tier::default());
+		let lease = futures::executor::block_on(auth.admit(request, Counters::default())).unwrap();
+		assert_eq!(lease.token().root, Path::new("anon/room").to_owned());
+		assert_eq!(lease.token().subscribe, patterns(&["anon/**"]));
+		assert_eq!(lease.token().tier, Tier::default());
 	}
 
 	/// The embedder's answer is the session's verdict; an answer that never comes,
@@ -524,19 +540,19 @@ mod tests {
 		let decide = async {
 			let admission = admissions.next().await.expect("an admission");
 			assert_eq!(admission.request.path, "/anon/room");
-			admission.grant(Lease::fixed(Grant::new(patterns(&["**"]), patterns(&["**"]))));
+			admission.grant(lease::Consumer::fixed(Grant::new(patterns(&["**"]), patterns(&["**"]))));
 			let admission = admissions.next().await.expect("an admission");
 			admission.refuse(Error::Refused);
 			// A grant that admits nothing is the decider's mistake, refused like a server's.
 			let admission = admissions.next().await.expect("an admission");
-			admission.grant(Lease::fixed(Grant::new(Patterns::new(), Patterns::new())));
+			admission.grant(lease::Consumer::fixed(Grant::new(Patterns::new(), Patterns::new())));
 			// Dropped without an answer.
 			drop(admissions.next().await.expect("an admission"));
 			admissions
 		};
 		let admit = async {
-			let admitted = auth.admit(request(), Counters::default()).await.expect("granted");
-			assert_eq!(admitted.token.root, Path::new("anon/room").to_owned());
+			let lease = auth.admit(request(), Counters::default()).await.expect("granted");
+			assert_eq!(lease.token().root, Path::new("anon/room").to_owned());
 			assert!(matches!(
 				auth.admit(request(), Counters::default()).await,
 				Err(Error::Refused)
