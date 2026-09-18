@@ -2249,11 +2249,13 @@ const DEFAULT_LOSS_WEIGHT: u32 = 100;
 /// Samples the RTT median and the bandwidth minimum are taken over.
 const LINK_WINDOW: usize = 15;
 
-/// Weight of the newest interval in the loss estimate.
-const LOSS_ALPHA: f64 = 0.3;
+/// Fewest packets the loss window must hold before its ratio counts: below
+/// this one lost packet swings the price by more than a whole RTT.
+const LOSS_MIN_PACKETS: u64 = 200;
 
-/// Fewest packets an interval must have sent before its loss ratio counts.
-const LOSS_MIN_PACKETS: u64 = 20;
+/// A price moves once it has drifted this fraction of itself, or a whole
+/// [`CostConfig::step`], whichever is larger.
+const PRICE_BAND: u64 = 10;
 
 /// Measured link pricing (`[cluster.cost]`).
 ///
@@ -2415,16 +2417,18 @@ struct LinkEstimate {
 	bandwidth: Option<u64>,
 }
 
-/// Smooths a link's samples: a windowed median for RTT (one slow ack must not
-/// move a route), an EWMA over each interval's own loss ratio (the counters are
-/// cumulative, so an old burst never resurfaces), and a windowed minimum for
-/// bandwidth. Loss is only learned from traffic: an interval that sent fewer than
-/// [`LOSS_MIN_PACKETS`] says nothing, so an idle link keeps its last estimate.
+/// Smooths a link's samples over a window of [`LINK_WINDOW`] intervals: a median
+/// for RTT (one slow ack must not move a route), the lost-to-sent ratio of every
+/// packet the window covers for loss (a ratio per interval is far too noisy at
+/// the loss rates that matter: one packet in a hundred), and a minimum for
+/// bandwidth. Loss is only learned from traffic: intervals that sent nothing
+/// contribute nothing, so an idle link keeps the last estimate its window holds.
 #[derive(Default)]
 struct LinkMeter {
 	rtts: VecDeque<Duration>,
 	bandwidths: VecDeque<u64>,
-	loss: Option<f64>,
+	/// `(sent, lost)` per interval that carried traffic.
+	traffic: VecDeque<(u64, u64)>,
 	/// The `(sent, lost)` counters at the previous sample.
 	counters: Option<(u64, u64)>,
 }
@@ -2442,14 +2446,11 @@ impl LinkMeter {
 			&& let Some((prev_sent, prev_lost)) = self.counters.replace((sent, lost))
 		{
 			let delta_sent = sent.saturating_sub(prev_sent);
+			// Loss detection lags sending, so an interval can declare more lost
+			// than it sent; the ratio is clamped where it is read.
 			let delta_lost = lost.saturating_sub(prev_lost);
-			if delta_sent >= LOSS_MIN_PACKETS {
-				// Loss detection lags sending, so an interval can declare more lost than it sent.
-				let ratio = (delta_lost as f64 / delta_sent as f64).min(1.0);
-				self.loss = Some(match self.loss {
-					Some(loss) => loss + LOSS_ALPHA * (ratio - loss),
-					None => ratio,
-				});
+			if delta_sent > 0 {
+				push_window(&mut self.traffic, (delta_sent, delta_lost));
 			}
 		}
 		self.estimate()
@@ -2461,9 +2462,17 @@ impl LinkMeter {
 		}
 		let mut sorted: Vec<Duration> = self.rtts.iter().copied().collect();
 		sorted.sort_unstable();
+		let (sent, lost) = self
+			.traffic
+			.iter()
+			.fold((0u64, 0u64), |(s, l), (sent, lost)| (s + sent, l + lost));
+		let loss = match sent >= LOSS_MIN_PACKETS {
+			true => (lost as f64 / sent as f64).min(1.0),
+			false => 0.0,
+		};
 		Some(LinkEstimate {
 			rtt: sorted[sorted.len() / 2],
-			loss: self.loss.unwrap_or(0.0),
+			loss,
 			bandwidth: self.bandwidths.iter().copied().min(),
 		})
 	}
@@ -2498,9 +2507,10 @@ fn link_price(estimate: &LinkEstimate, pricing: &Pricing) -> u64 {
 }
 
 /// Rounds a price to the configured step and moves the announced value only
-/// once the raw price has drifted a whole step from it, so a link that sits on
-/// a rounding boundary settles on one price instead of re-announcing every
-/// sample.
+/// once the raw price has drifted a whole step, or a tenth of itself, away from
+/// it, so a link that sits on a rounding boundary settles on one price instead
+/// of re-announcing every sample, and a long lossy link whose loss estimate
+/// breathes does not re-announce either.
 struct Quantizer {
 	/// The step in milliseconds, at least 1.
 	step: u64,
@@ -2526,7 +2536,13 @@ impl Quantizer {
 		match self.current {
 			Some(current) if current == quantized => None,
 			// Inside the dead band around the announced price: hold it.
-			Some(current) if current < ceiling && raw < ceiling && raw.abs_diff(current) < self.step => None,
+			Some(current)
+				if current < ceiling
+					&& raw < ceiling
+					&& raw.abs_diff(current) < self.step.max(current / PRICE_BAND) =>
+			{
+				None
+			}
 			_ => {
 				self.current = Some(quantized);
 				Some(quantized)
@@ -4324,6 +4340,11 @@ mod tests {
 		assert_eq!(q.update(50), Some(50));
 		// A jump lands on the nearest step in one move.
 		assert_eq!(q.update(228), Some(230));
+		// Past ten steps the band is a tenth of the price: 230 holds until 207 or 253.
+		assert_eq!(q.update(250), None);
+		assert_eq!(q.update(208), None);
+		assert_eq!(q.update(253), Some(255));
+		assert_eq!(q.update(229), Some(230));
 		// The ceiling is announced as is, and coming back from it is a move.
 		assert_eq!(q.update(moq_net::origin::MAX_COST), Some(moq_net::origin::MAX_COST));
 		assert_eq!(q.update(moq_net::origin::MAX_COST), None);
@@ -4343,9 +4364,9 @@ mod tests {
 		}
 	}
 
-	/// RTT is a windowed median (one slow sample does not move it), loss an EWMA
-	/// of each interval's own ratio that idle intervals leave alone, and bandwidth
-	/// the windowed minimum.
+	/// RTT is a windowed median (one slow sample does not move it), loss the
+	/// ratio over every packet the window's intervals carried (idle intervals
+	/// contribute nothing), and bandwidth the windowed minimum.
 	#[test]
 	fn meter_smooths_a_synthetic_link() {
 		let mut meter = LinkMeter::default();
@@ -4360,39 +4381,36 @@ mod tests {
 		assert_eq!(spike.rtt, Duration::from_millis(50), "the median ignores one spike");
 		assert_eq!(spike.bandwidth, Some(9_000_000), "the minimum over the window");
 
-		// The clean intervals above already taught a loss of zero, so 1% over an
-		// interval that sent 1000 packets moves the estimate by the EWMA weight,
-		// and the next clean interval decays it by the same weight.
-		assert_eq!(spike.loss, 0.0);
+		// Ten lost out of the 1200 packets the window has seen so far.
 		let lossy = meter.observe(sample(50, 1200, 10, None)).unwrap();
-		assert!((lossy.loss - 0.003).abs() < 1e-9, "{lossy:?}");
+		assert!((lossy.loss - 10.0 / 1200.0).abs() < 1e-9, "{lossy:?}");
 		let clean = meter.observe(sample(50, 2200, 10, None)).unwrap();
-		assert!((clean.loss - 0.0021).abs() < 1e-9, "{clean:?}");
+		assert!((clean.loss - 10.0 / 2200.0).abs() < 1e-9, "{clean:?}");
 
-		// An interval below the packet floor teaches nothing, and neither does an
-		// interval with no traffic at all: the last estimate stands.
-		let quiet = meter.observe(sample(50, 2210, 12, None)).unwrap();
-		assert!((quiet.loss - 0.0021).abs() < 1e-9, "{quiet:?}");
-		let idle = meter.observe(sample(50, 2210, 12, None)).unwrap();
-		assert!((idle.loss - 0.0021).abs() < 1e-9, "{idle:?}");
+		// An idle interval teaches nothing: the estimate stands.
+		let idle = meter.observe(sample(50, 2200, 10, None)).unwrap();
+		assert!((idle.loss - 10.0 / 2200.0).abs() < 1e-9, "{idle:?}");
 
-		// A fresh meter's first believable interval lands directly.
+		// Too few packets to believe: a lost handshake packet is not 50% loss.
 		let mut fresh = LinkMeter::default();
 		fresh.observe(sample(50, 0, 0, None));
-		let direct = fresh.observe(sample(50, 1000, 10, None)).unwrap();
-		assert!((direct.loss - 0.01).abs() < 1e-9, "{direct:?}");
+		let sparse = fresh.observe(sample(50, 2, 1, None)).unwrap();
+		assert_eq!(sparse.loss, 0.0, "{sparse:?}");
+		let direct = fresh.observe(sample(50, 1002, 11, None)).unwrap();
+		assert!((direct.loss - 11.0 / 1002.0).abs() < 1e-9, "{direct:?}");
 
 		// Detection lags sending, so an interval can lose more than it sent.
-		let burst = meter.observe(sample(50, 2240, 100, None)).unwrap();
+		let burst = meter.observe(sample(50, 2240, 3000, None)).unwrap();
 		assert!(burst.loss <= 1.0, "{burst:?}");
 
-		// The window forgets: enough steady samples push the spike out.
-		for _ in 0..LINK_WINDOW {
-			meter.observe(sample(60, 2240, 100, Some(20_000_000)));
+		// The window forgets: enough steady samples push the spike and the burst out.
+		for i in 1..=LINK_WINDOW as u64 {
+			meter.observe(sample(60, 2240 + i * 100, 3000, Some(20_000_000)));
 		}
 		let settled = meter.estimate().unwrap();
 		assert_eq!(settled.rtt, Duration::from_millis(60));
 		assert_eq!(settled.bandwidth, Some(20_000_000));
+		assert_eq!(settled.loss, 0.0);
 	}
 
 	fn entry(peer: u64, cost: u64) -> LinkEntry {

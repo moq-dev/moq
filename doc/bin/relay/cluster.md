@@ -50,13 +50,15 @@ cost_ms = rtt + loss_weight * loss * rtt + hop_penalty
 
 The sender prices the link because only it sees its own loss and bandwidth
 estimate, and it folds the price into every route it forwards, so nothing new
-crosses the wire. RTT is a median over the last 15 samples, loss an average
-that weights the newest interval, and bandwidth the lowest recent estimate;
-prices round to `step` and only move once they have drifted a whole step, so a
-route does not flap on one slow ack. Loss is only learned from traffic, so a
-link that has carried nothing is priced on its RTT until a stream crosses it.
-A link the congestion controller estimates below `min_bandwidth` is priced at
-the ceiling and used last.
+crosses the wire. RTT is a median over the last 15 samples, loss the ratio
+over every packet those samples carried, and bandwidth the lowest recent
+estimate; prices round to `step` and only move once they have drifted a whole
+step or a tenth of the price, so a route does not flap on one slow ack or a
+breathing loss estimate. Loss is only learned from traffic, so a link that has
+carried nothing is priced on its RTT until a stream crosses it. A link the
+congestion controller estimates below `min_bandwidth` is priced at the ceiling
+and used last. Costs ride moq-lite-06 and the MoQ Cluster extension; a link
+negotiated on an older version carries hop counts only, whatever it measures.
 
 ```toml
 [cluster.cost]
