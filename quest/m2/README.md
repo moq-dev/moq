@@ -76,7 +76,7 @@ can act on. Each still carries its own plan and regression test.
 - [fMP4 emsg](/quest/m2/emsg.md) - event messages survive fMP4 import instead of being silently discarded
 - [AV1 metadata OBUs](/quest/m2/av1-metadata.md) - HDR10+, timecode and scalability OBUs become addressable
 - [FLV script tags](/quest/m2/flv-script.md) - onMetaData and AMF data messages survive RTMP and FLV import
-- [Release size](/quest/m2/release-size.md) - link-time optimization on the release profile and a nightly report of what each moq-ffi build ships
+- [Release size](/quest/m2/release-size.md) - the release scripts' LTO exports become the workspace release profile, and a nightly report shows what each moq-ffi build ships
 - [Bindgen CLI split](/quest/m2/uniffi-cli-feature.md) - a library build of moq-ffi stops compiling uniffi_bindgen and its 46 crates
 - [Network-only bindings](/quest/m2/slim-bindings/README.md) - Swift, Kotlin, and C ship a codec-free `net` artifact beside the full one, if the post-LTO numbers justify it
 - [Mobile](/quest/m2/mobile/README.md) - MoQ runs natively on iOS and Android: an FFI video consumer, the ownership decision, capture, and the Dart device proof

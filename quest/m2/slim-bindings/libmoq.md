@@ -14,10 +14,16 @@ building the full library.
 `src/audio.rs` and `src/video.rs` go behind `cfg(feature)`, and the entry
 points in `api.rs` that reach them move into those modules or behind the same
 cfg. cbindgen learns the features through its `[defines]` table so `moq.h`
-wraps the gated declarations in `#ifdef MOQ_VIDEO` / `MOQ_AUDIO` and the
-slim build defines neither; one header, no second copy to drift. The
-`native-libs/*.txt` link lists that the OBS build reads get a slim variant, or
-the recipe that emits them takes the feature set.
+wraps the gated declarations in `#ifdef MOQ_VIDEO` / `MOQ_AUDIO`. A
+`[defines]` mapping only emits the guards; nothing enables them, so on its own
+it would hide the codec API from every full-library consumer, OBS included.
+`build.rs` therefore reads `CARGO_FEATURE_VIDEO` / `CARGO_FEATURE_AUDIO` and
+writes `#define MOQ_VIDEO 1` / `#define MOQ_AUDIO 1` into the header's
+`after_includes` block for each feature that is on. The full package's header
+declares everything it does today with no consumer-side flag; the slim
+package's header declares the subset. The `native-libs/*.txt` link lists that
+the OBS build reads get a slim variant, or the recipe that emits them takes
+the feature set.
 
 `rs/libmoq/build.sh` takes `--no-default-features` like moq-ffi's, and
 `libmoq.yml` runs it twice per target and uploads both assets. `doc/lib/c`

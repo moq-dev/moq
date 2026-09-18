@@ -18,12 +18,14 @@ the slim artifact is a strict subset build.
 ## Plan
 
 The measured saving on macOS is small: the codecs are about 0.9 MiB of the
-11.5 MiB linked into the moq-ffi dylib, 1.4 MB of the 14.8 MB stripped file.
+11.5 MiB linked into the moq-ffi dylib, 1.4 MB of the 14.1 MB stripped file
+built the way the release script builds it (thin LTO, one codegen unit).
 VideoToolbox is reached through dlsym so moq_video itself links to almost
 nothing on Apple targets; Android carries openh264's C objects and should
-measure higher. The [release size](/quest/m2/release-size.md) quest changes
-every number, so the line opens with a measurement gate on the real targets
-and is abandoned if the codec share stays near a tenth. Keeping hang and
+measure higher. The [release size](/quest/m2/release-size.md) quest settles the
+profile and gives the line its measurement recipe, so the line opens with a
+measurement gate on the real targets and is abandoned if the codec share
+stays near a tenth. Keeping hang and
 moq-mux in the slim build was decided on the same table: they are another
 1.2 MiB, but dropping them means decoupling the FFI producer and consumer from
 the catalog, the surgery [#2907](/quest/m2/2907-bind-the-browser-through-moq-ffi-uniffi-instead-of-a.md)

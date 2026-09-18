@@ -4,8 +4,8 @@
 
 A table of stripped moq-ffi library sizes on `aarch64-apple-ios`,
 `aarch64-linux-android`, and `armv7-linux-androideabi`, default versus
-`--no-default-features`, built with the release profile after link-time
-optimization landed. The table is the go or no-go for the rest of the line:
+`--no-default-features`, built with the release profile the release size
+quest settles. The table is the go or no-go for the rest of the line:
 under roughly 15% saved on both platforms, the questline is abandoned in this
 quest's PR and the decision is recorded in the PR description; above it, the
 three packaging quests proceed.
@@ -25,4 +25,4 @@ lose this `Required` entry, or the directory is deleted.
 
 ## Required
 
-- [Release size](/quest/m2/release-size.md) - the profile change moves every number, so measuring before it lands is wasted
+- [Release size](/quest/m2/release-size.md) - supplies the `size` recipe and the final profile, so measuring before it lands measures the wrong build

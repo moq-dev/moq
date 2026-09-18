@@ -5,7 +5,7 @@
 `rs/moq-ffi` declares `uniffi = { features = ["cli"] }` as a normal dependency
 so its `uniffi-bindgen` binary builds. That feature drags `uniffi_bindgen`,
 `goblin`, `cargo_metadata`, `clap`, `askama`, and friends (46 crates, about
-8 MiB of a 95 MB `libmoq_ffi.a` on aarch64-apple-darwin) into every library
+8 MiB of a 95 MB `libmoq_ffi.a` on aarch64-apple-darwin before the release script's thin LTO) into every library
 build. The dynamic library dead-strips it; the static consumers (the Swift
 xcframework, Go's cgo link) and every compile of the crate do not. After this
 quest a library build of `moq-ffi` never compiles `uniffi_bindgen`.
