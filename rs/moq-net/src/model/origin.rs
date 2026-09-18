@@ -489,7 +489,7 @@ impl From<(u64, u64)> for Cost {
 /// The path a route took through the mesh and what using it costs.
 ///
 /// The metadata half of an advertisement: [`Producer::dynamic`] pairs it with
-/// the pattern it covers, [`broadcast::Producer::announce`] with the
+/// the prefix it covers, [`broadcast::Producer::announce`] with the
 /// broadcast's exact path, and [`Consumer::announced`] yields both. A route
 /// claims capability, not inventory: it says paths under its prefix are
 /// servable, never that any specific broadcast exists. The common convention is
@@ -628,12 +628,12 @@ fn fnv_key(name: &str, origins: impl IntoIterator<Item = Hop>) -> u64 {
 /// chain so every node converges on the same winner, and finally the newest
 /// announcement, so a reconnect under an otherwise identical route wins the
 /// moment it lands instead of after the transport retires the old session.
-fn route_order(pattern: &Pattern, entry: &RouteEntry) -> (bool, Cost, usize, u64, Reverse<u64>) {
+fn route_order(prefix: &Path, entry: &RouteEntry) -> (bool, Cost, usize, u64, Reverse<u64>) {
 	(
 		entry.is_anonymous(),
 		entry.cost,
 		entry.hops.len(),
-		fnv_key(pattern.as_str(), entry.hops.iter().copied()),
+		fnv_key(prefix.as_str(), entry.hops.iter().copied()),
 		Reverse(entry.id),
 	)
 }
@@ -659,20 +659,20 @@ enum PendingUpdate {
 /// tests can predict it.
 #[derive(Default)]
 struct OriginConsumerState {
-	pending: BTreeMap<Pattern, PendingUpdate>,
-	/// Patterns whose most recently delivered update was an announce. A pending
+	pending: BTreeMap<PathOwned, PendingUpdate>,
+	/// Prefixes whose most recently delivered update was an announce. A pending
 	/// `Announce` is ambiguous on its own: it is an unseen initial announce (a
 	/// retraction cancels it entirely) or a metadata update on a route the
 	/// consumer already observed (a retraction must still be delivered).
-	delivered: BTreeSet<Pattern>,
+	delivered: BTreeSet<PathOwned>,
 	/// Set by the origin's teardown: the cursor drains `pending`, then reports
 	/// the end instead of parking forever on a table that can never fire again.
 	ended: bool,
 }
 
 impl OriginConsumerState {
-	fn apply_announce(&mut self, pattern: Pattern, meta: RouteMeta) {
-		let new = match self.pending.remove(&pattern) {
+	fn apply_announce(&mut self, prefix: PathOwned, meta: RouteMeta) {
+		let new = match self.pending.remove(&prefix) {
 			// First announce, a stale announce being replaced, or a metadata update.
 			None | Some(PendingUpdate::Announce(_)) => PendingUpdate::Announce(meta),
 			// Consumer needs to observe the retraction before this announce.
@@ -680,63 +680,67 @@ impl OriginConsumerState {
 				PendingUpdate::UnannounceAnnounce { old, new: meta }
 			}
 		};
-		self.pending.insert(pattern, new);
+		self.pending.insert(prefix, new);
 	}
 
-	fn apply_unannounce(&mut self, pattern: Pattern, last: RouteMeta) {
-		match self.pending.remove(&pattern) {
+	fn apply_unannounce(&mut self, prefix: PathOwned, last: RouteMeta) {
+		match self.pending.remove(&prefix) {
 			// The pending announce was never delivered and neither was any earlier
 			// one, so the pair cancels entirely.
-			Some(PendingUpdate::Announce(_)) if !self.delivered.contains(&pattern) => {}
+			Some(PendingUpdate::Announce(_)) if !self.delivered.contains(&prefix) => {}
 			// Either nothing is pending or the pending announce was a metadata
 			// update on a delivered route; the consumer still owes a retraction.
 			None | Some(PendingUpdate::Announce(_) | PendingUpdate::Unannounce(_)) => {
-				self.pending.insert(pattern, PendingUpdate::Unannounce(last));
+				self.pending.insert(prefix, PendingUpdate::Unannounce(last));
 			}
 			// The embedded announce cancels with this retraction; the consumer still
 			// needs the leading one.
 			Some(PendingUpdate::UnannounceAnnounce { old, .. }) => {
-				self.pending.insert(pattern, PendingUpdate::Unannounce(old));
+				self.pending.insert(prefix, PendingUpdate::Unannounce(old));
 			}
 		}
 	}
 
 	/// Take one update to deliver to the consumer, if any.
 	fn take(&mut self) -> Option<AnnounceUpdate> {
-		let pattern = self.pending.keys().next()?.clone();
-		let (meta, active) = match self.pending.remove(&pattern).unwrap() {
+		let prefix = self.pending.keys().next()?.clone();
+		let (meta, kind) = match self.pending.remove(&prefix).unwrap() {
 			PendingUpdate::Announce(meta) => {
-				self.delivered.insert(pattern.clone());
-				(meta, true)
+				// The consumer has seen this prefix before, so it is a metadata update.
+				let kind = match self.delivered.insert(prefix.clone()) {
+					true => AnnounceKind::Announced,
+					false => AnnounceKind::Updated,
+				};
+				(meta, kind)
 			}
 			PendingUpdate::Unannounce(meta) => {
-				self.delivered.remove(&pattern);
-				(meta, false)
+				self.delivered.remove(&prefix);
+				(meta, AnnounceKind::Retracted)
 			}
 			PendingUpdate::UnannounceAnnounce { old, new } => {
 				// Deliver the retraction now; leave the trailing announce pending so
 				// the next take returns it for the same prefix.
-				self.delivered.remove(&pattern);
-				self.pending.insert(pattern.clone(), PendingUpdate::Announce(new));
-				(old, false)
+				self.delivered.remove(&prefix);
+				self.pending.insert(prefix.clone(), PendingUpdate::Announce(new));
+				(old, AnnounceKind::Retracted)
 			}
 		};
 		Some(AnnounceUpdate {
-			pattern,
+			path: prefix,
 			route: Route {
 				hops: meta.0,
 				cost: meta.1,
 				via: Hop::UNKNOWN,
 			},
-			active,
+			kind,
 		})
 	}
 }
 
-/// One announced route in the origin's table, absolute pattern.
+/// One announced route in the origin's table, absolute prefix.
 struct RouteEntry {
 	id: u64,
-	pattern: Pattern,
+	prefix: PathOwned,
 	hops: Hops,
 	cost: Cost,
 	/// The announcing session's declared or assigned identity. Split-horizon
@@ -831,30 +835,37 @@ struct TableCursor {
 	exclude: Option<Hop>,
 	/// The delivery buffer, drained by the cursor's `poll_next`.
 	state: kio::Producer<OriginConsumerState>,
-	/// The last delivered best route per presented (relative) pattern, for change
+	/// The last delivered best route per presented (relative) prefix, for change
 	/// detection: `(entry id, hops, cost)`.
 	// entry id, metadata, and whether the entry could serve requests: the last
 	// is part of the dedupe key (see `sync_cursor`) but never leaves the model.
-	current: HashMap<Pattern, (u64, RouteMeta, bool)>,
+	current: HashMap<PathOwned, (u64, RouteMeta, bool)>,
 }
 
 impl TableCursor {
-	/// Where `pattern` presents on this cursor: each residual of rebasing it
-	/// under an allowed scope, named relative to the cursor root.
-	fn presented(&self, pattern: &Pattern) -> Vec<Pattern> {
-		let mut out = Patterns::new();
+	/// Where `prefix` presents on this cursor: its intersection with each allowed
+	/// scope, named relative to the cursor root. A scope nested inside another
+	/// presents nothing of its own.
+	fn presented(&self, prefix: &Path) -> Vec<PathOwned> {
+		let mut out: Vec<PathOwned> = Vec::new();
 		for allowed in &self.allowed {
-			let Some(allowed_rel) = allowed.strip_prefix(&self.root) else {
+			if !allowed.has_prefix(&self.root) {
+				continue;
+			}
+			let Some(covered) = intersect_prefix(prefix, &allowed.as_path()) else {
 				continue;
 			};
-			for residual in pattern.rebase(allowed.as_str()) {
-				let Ok(relative) = residual.rooted(allowed_rel.as_str()) else {
-					continue;
-				};
-				out.insert(relative);
+			let relative = covered
+				.strip_prefix(&self.root)
+				.expect("the intersection starts with the scope, which starts with the root")
+				.to_owned();
+			if out.iter().any(|seen| relative.has_prefix(seen)) {
+				continue;
 			}
+			out.retain(|seen| !seen.has_prefix(&relative));
+			out.push(relative);
 		}
-		out.iter().cloned().collect()
+		out
 	}
 
 	/// Whether this cursor may observe `entry` at all (split horizon).
@@ -865,7 +876,6 @@ impl TableCursor {
 
 /// The intersection of two path prefixes: the longer one when one contains the
 /// other (segment-wise), `None` when they are disjoint.
-#[cfg(test)]
 fn intersect_prefix(a: &Path, b: &Path) -> Option<PathOwned> {
 	if a.has_prefix(b) {
 		Some(a.to_owned())
@@ -1071,24 +1081,41 @@ impl Default for OriginNodes {
 	}
 }
 
-/// A route announcement or retraction, delivered by [`AnnounceConsumer`].
+/// What an [`AnnounceUpdate`] reports about its path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnnounceKind {
+	/// A route now covers the path; the cursor had none there.
+	Announced,
+	/// The route covering the path changed hops or cost; it is delivered in place.
+	Updated,
+	/// No route covers the path any more.
+	Retracted,
+}
+
+impl AnnounceKind {
+	/// Whether a route covers the path after this update.
+	pub fn is_active(self) -> bool {
+		!matches!(self, Self::Retracted)
+	}
+}
+
+/// A route announcement, update, or retraction, delivered by [`AnnounceConsumer`].
 ///
-/// An announcement carries no broadcast: it advertises that paths matching
-/// [`pattern`](Self::pattern) are servable. Resolve a specific path with
+/// An announcement carries no broadcast: it advertises that [`path`](Self::path)
+/// and every path beneath it are servable. Resolve a specific path with
 /// [`Consumer::request_broadcast`]; the application decides which paths name
-/// broadcasts.
+/// broadcasts, and filters with a [`Pattern`] locally when it wants a subset.
 #[derive(Clone, Debug)]
 pub struct AnnounceUpdate {
-	/// What the route covers, relative to the consuming cursor's root. A route
-	/// announced above the cursor's scope is clamped to that scope, which is the
-	/// exact set of covered paths the cursor may see.
-	pub pattern: Pattern,
-	/// The route serving the pattern. On a retraction this carries its last
+	/// The prefix the route covers, relative to the consuming cursor's root. A
+	/// route announced above the cursor's scope is clamped to that scope, which
+	/// is the exact set of covered paths the cursor may see.
+	pub path: PathOwned,
+	/// The route serving the prefix. On a retraction this carries its last
 	/// advertised metadata.
 	pub route: Route,
-	/// `false` when the route was retracted. A repeated `true` for the same
-	/// pattern is a metadata update (new hops or cost), delivered in place.
-	pub active: bool,
+	/// Whether the path was announced, re-priced, or retracted.
+	pub kind: AnnounceKind,
 }
 
 /// Publishes broadcasts and announces routes into an origin.
@@ -1260,8 +1287,7 @@ impl Producer {
 	/// Fails with [`Error::Unauthorized`] if `path` is outside the prefixes this
 	/// producer may publish under (after [`scope`](Self::scope) /
 	/// [`with_root`](Self::with_root)), [`Error::BoundsExceeded`] if the full
-	/// rooted subtree claim exceeds [`Pattern::MAX_SEGMENTS`],
-	/// [`Error::Unsupported`] if the path contains wildcard syntax, or [`Error::Closed`] once the
+	/// rooted path exceeds [`Path::MAX_PARTS`], or [`Error::Closed`] once the
 	/// origin's [`Driver`] has been dropped.
 	pub fn create_broadcast(&self, path: impl AsPath) -> Result<broadcast::Producer, Error> {
 		let path = path.as_path();
@@ -1298,10 +1324,7 @@ impl Producer {
 				hop: self.info,
 				shared: self.shared.clone(),
 				requested: full.clone(),
-				patterns: vec![Pattern::subtree(full.as_str()).map_err(|err| match err {
-					crate::InvalidPattern::TooManySegments => Error::from(BoundsExceeded),
-					_ => Error::Unsupported,
-				})?],
+				prefixes: vec![full.clone()],
 				stats: self.stats.clone(),
 			},
 			current: None,
@@ -1377,32 +1400,35 @@ impl Producer {
 	/// [`Dynamic`] handler, which serve what they claim.
 	#[cfg(test)]
 	pub(crate) fn announce(&self, prefix: impl AsPath, route: Route) -> Result<AnnounceProducer, Error> {
-		Announcing::new(self, prefix)?.announce(route, None)
+		Announcing::clamped(self, prefix)?.announce(route, None)
 	}
 
-	/// Advertise a route and serve the requests beneath it.
+	/// Advertise a route over `prefix` and serve the requests beneath it.
 	///
-	/// `pattern` is in the [`Pattern`] dialect; a prefix is spelled `foo/**`.
-	/// A non-prefix pattern is advertised as a covering claim; resolving one
-	/// into a subscription is not implemented yet, so only prefix-shaped
-	/// patterns currently serve [`Consumer::request_broadcast`].
+	/// A route is always a prefix: it claims `prefix` and every path beneath it
+	/// (the empty prefix claims every path). A service that only serves some of
+	/// them, say `pid/*.hang`, advertises the covering prefix and refuses the
+	/// rest as they are requested; consumers narrow with a [`Pattern`] locally.
+	/// This is the one shape every wire carries, so a route means the same
+	/// thing on every hop.
 	///
 	/// The advertisement is visible to [`Consumer::announced`] and forwarded by
 	/// sessions for as long as the returned [`Dynamic`] (and every clone) lives.
-	/// A consumer resolving a path under a prefix-shaped pattern that no local
-	/// broadcast covers is handed to the handler as a [`Request`] to materialize
-	/// on demand. This is how a service answers a whole subtree without
-	/// publishing each path, and how sessions land the routes a peer announces
-	/// to them; a publisher that knows its broadcasts advertises each one's
-	/// exact path with [`broadcast::Producer::announce`] instead, so subscribers
-	/// can enumerate them.
+	/// A consumer resolving a path under it that no local broadcast covers is
+	/// handed to the handler as a [`Request`] to materialize on demand. This is
+	/// how a service answers a whole subtree without publishing each path, and
+	/// how sessions land the routes a peer announces to them; a publisher that
+	/// knows its broadcasts advertises each one's exact path with
+	/// [`broadcast::Producer::announce`] instead, so subscribers can enumerate
+	/// them.
 	///
-	/// The advertised pattern must be contained by `prefix/**` for one of this
-	/// producer's prefixes; an over-wide claim is refused rather than clamped.
-	/// Fails with [`Error::Unauthorized`] when it is not contained, and
-	/// [`Error::Closed`] once the origin's [`Driver`] has been dropped.
-	pub fn dynamic(&self, pattern: Pattern, route: Route) -> Result<Dynamic, Error> {
-		let announcing = Announcing::pattern(self, pattern)?;
+	/// `prefix` must be inside one of this producer's prefixes; an over-wide
+	/// claim is refused rather than clamped. Fails with [`Error::Unauthorized`]
+	/// when it is not, [`Error::BoundsExceeded`] if the rooted prefix exceeds
+	/// [`Path::MAX_PARTS`], and [`Error::Closed`] once the origin's [`Driver`]
+	/// has been dropped.
+	pub fn dynamic(&self, prefix: impl AsPath, route: Route) -> Result<Dynamic, Error> {
+		let announcing = Announcing::new(self, prefix)?;
 		let serve = kio::Shared::<ServeState>::default();
 		serve.lock().requests.add_handler();
 		let announcement = announcing.announce(route, Some(serve.clone()))?;
@@ -1517,7 +1543,7 @@ impl Producer {
 	}
 }
 
-/// What it takes to insert a route: the patterns it covers and the origin table
+/// What it takes to insert a route: the prefixes it covers and the origin table
 /// to insert them into. Built by [`Producer::announce`], [`Producer::dynamic`],
 /// and [`Announcer`], which is the same advertisement re-issued from a broadcast.
 struct Announcing {
@@ -1526,50 +1552,46 @@ struct Announcing {
 	/// The absolute prefix as requested, before clamping: what the ingress
 	/// announce counters are keyed by.
 	requested: PathOwned,
-	/// The patterns inserted into the table: clamped prefix-shaped routes, or
-	/// one contained pattern advertisement.
-	patterns: Vec<Pattern>,
+	/// The prefixes inserted into the table: one per allowed scope the request
+	/// intersects when clamped, or the requested prefix itself.
+	prefixes: Vec<PathOwned>,
 	stats: stats::Session,
 }
 
 impl Announcing {
-	#[cfg(test)]
+	/// The requested prefix as-is, refused when it reaches outside every scope.
 	fn new(producer: &Producer, prefix: impl AsPath) -> Result<Self, Error> {
 		let requested = producer.root.join(prefix.as_path()).to_owned();
-		let prefixes = producer.clamp_prefix(&requested)?;
-		let patterns = prefixes
-			.into_iter()
-			.map(|prefix| Pattern::subtree(prefix.as_str()).expect("a clamped prefix cannot contain '*'"))
-			.collect();
+		if requested.parts().count() > Path::MAX_PARTS {
+			return Err(BoundsExceeded.into());
+		}
+		let contained = producer
+			.nodes
+			.nodes
+			.iter()
+			.any(|(allowed, _)| requested.has_prefix(producer.root.join(allowed)));
+		if !contained {
+			return Err(Error::Unauthorized);
+		}
 		Ok(Self {
 			hop: producer.info,
 			shared: producer.shared.clone(),
-			requested,
-			patterns,
+			requested: requested.clone(),
+			prefixes: vec![requested],
 			stats: producer.stats.clone(),
 		})
 	}
 
-	fn pattern(producer: &Producer, pattern: Pattern) -> Result<Self, Error> {
-		let advertised = pattern.rooted(producer.root.as_str()).map_err(|_| BoundsExceeded)?;
-		if advertised.segments().len() > Path::MAX_PARTS {
-			return Err(BoundsExceeded.into());
-		}
-		let contained = producer.nodes.nodes.iter().any(|(allowed, _)| {
-			let allowed = producer.root.join(allowed);
-			Pattern::subtree(allowed.as_str())
-				.map(|scope| scope.contains(&advertised))
-				.unwrap_or(false)
-		});
-		if !contained {
-			return Err(Error::Unauthorized);
-		}
-		let requested = Path::new(advertised.as_prefix().unwrap_or_else(|| advertised.as_str())).to_owned();
+	/// The requested prefix clamped to each scope it intersects.
+	#[cfg(test)]
+	fn clamped(producer: &Producer, prefix: impl AsPath) -> Result<Self, Error> {
+		let requested = producer.root.join(prefix.as_path()).to_owned();
+		let prefixes = producer.clamp_prefix(&requested)?;
 		Ok(Self {
 			hop: producer.info,
 			shared: producer.shared.clone(),
 			requested,
-			patterns: vec![advertised],
+			prefixes,
 			stats: producer.stats.clone(),
 		})
 	}
@@ -1588,20 +1610,20 @@ impl Announcing {
 			return Err(Error::Closed);
 		}
 
-		let mut ids = Vec::with_capacity(self.patterns.len());
-		for pattern in &self.patterns {
+		let mut ids = Vec::with_capacity(self.prefixes.len());
+		for prefix in &self.prefixes {
 			let id = shared.next_route;
 			shared.next_route += 1;
 			shared.generation += 1;
 			shared.routes.push(RouteEntry {
 				id,
-				pattern: pattern.clone(),
+				prefix: prefix.clone(),
 				hops: meta.0.clone(),
 				cost: meta.1,
 				via,
 				server: server.clone(),
 			});
-			shared.sync_route(pattern);
+			shared.sync_route(prefix);
 			ids.push(id);
 		}
 		drop(shared);
@@ -1683,9 +1705,9 @@ impl AnnounceProducer {
 			entry.hops = route.hops.clone();
 			entry.cost = route.cost;
 			entry.via = route.via;
-			let pattern = entry.pattern.clone();
+			let prefix = entry.prefix.clone();
 			shared.generation += 1;
-			shared.sync_route(&pattern);
+			shared.sync_route(&prefix);
 		}
 		Ok(())
 	}
@@ -1711,7 +1733,7 @@ impl AnnounceProducer {
 					}
 				}
 			}
-			shared.sync_route(&entry.pattern);
+			shared.sync_route(&entry.prefix);
 		}
 	}
 }
@@ -3005,14 +3027,14 @@ struct OriginState {
 }
 
 impl OriginState {
-	/// Re-deliver the best route at every presented residual `pattern` maps to, on
-	/// every cursor. Called after an entry covering `pattern` was added, updated,
+	/// Re-deliver the best route at every presented prefix `prefix` maps to, on
+	/// every cursor. Called after an entry covering `prefix` was added, updated,
 	/// or removed.
-	fn sync_route(&mut self, pattern: &Pattern) {
+	fn sync_route(&mut self, prefix: &Path) {
 		// Split borrows: the recompute reads `routes` while mutating a cursor.
 		let routes = &self.routes;
 		for cursor in self.cursors.values_mut() {
-			for presented in cursor.presented(pattern) {
+			for presented in cursor.presented(prefix) {
 				Self::sync_cursor(routes, cursor, &presented);
 			}
 		}
@@ -3020,20 +3042,20 @@ impl OriginState {
 
 	/// Recompute the best visible route presenting at `presented` (relative) for
 	/// one cursor and deliver the change, if any.
-	fn sync_cursor(routes: &[RouteEntry], cursor: &mut TableCursor, presented: &Pattern) {
-		// Among entries presenting here, the most specific pattern wins outright,
-		// so the metadata a cursor advertises matches what a request through it
-		// actually resolves. Prefix-shaped routes still shadow broader ones.
+	fn sync_cursor(routes: &[RouteEntry], cursor: &mut TableCursor, presented: &PathOwned) {
+		// Among entries presenting here, the longest prefix wins outright, so the
+		// metadata a cursor advertises matches what a request through it actually
+		// resolves.
 		let candidates: Vec<&RouteEntry> = routes
 			.iter()
 			.filter(|entry| cursor.visible(entry))
-			.filter(|entry| cursor.presented(&entry.pattern).contains(presented))
+			.filter(|entry| cursor.presented(&entry.prefix).contains(presented))
 			.collect();
-		let most = candidates.iter().map(|entry| entry.pattern.specificity()).max();
+		let most = candidates.iter().map(|entry| entry.prefix.len()).max();
 		let best = most.and_then(|most| {
 			candidates
 				.into_iter()
-				.filter(|entry| entry.pattern.specificity() == most)
+				.filter(|entry| entry.prefix.len() == most)
 				.min_by_key(|entry| route_order(presented, entry))
 		});
 
@@ -3069,12 +3091,12 @@ impl OriginState {
 		}
 	}
 
-	/// Register a cursor and replay the current best route per presented pattern.
+	/// Register a cursor and replay the current best route per presented prefix.
 	fn register_cursor(&mut self, id: ConsumerId, mut cursor: TableCursor) {
 		let routes = &self.routes;
-		let mut presented: Vec<Pattern> = Vec::new();
+		let mut presented: Vec<PathOwned> = Vec::new();
 		for entry in routes {
-			for p in cursor.presented(&entry.pattern) {
+			for p in cursor.presented(&entry.prefix) {
 				if !presented.contains(&p) {
 					presented.push(p);
 				}
@@ -3109,11 +3131,7 @@ impl OriginState {
 		let candidates: Vec<&RouteEntry> = self
 			.routes
 			.iter()
-			.filter(|entry| match entry.pattern.as_prefix() {
-				// Wildcard advertisements are not resolved into a subscription yet.
-				Some(prefix) => path.has_prefix(Path::new(prefix)),
-				None => false,
-			})
+			.filter(|entry| path.has_prefix(&entry.prefix))
 			.filter(|entry| entry.visible_to(exclude))
 			.filter(|entry| match publisher {
 				Some(first) => entry.hops.iter().next() == Some(&first),
@@ -3123,16 +3141,11 @@ impl OriginState {
 			.collect();
 
 		// Covering prefixes of one path form a chain, so the longest is unique.
-		let most = candidates
-			.iter()
-			.filter_map(|entry| entry.pattern.as_prefix().map(|prefix| prefix.len()))
-			.max()?;
+		let most = candidates.iter().map(|entry| entry.prefix.len()).max()?;
 		candidates
 			.into_iter()
-			.filter(|entry| {
-				entry.pattern.as_prefix().map(|prefix| prefix.len()) == Some(most) && entry.server.is_some()
-			})
-			.min_by_key(|entry| route_order(&entry.pattern, entry))
+			.filter(|entry| entry.prefix.len() == most && entry.server.is_some())
+			.min_by_key(|entry| route_order(&entry.prefix, entry))
 	}
 }
 
@@ -3147,7 +3160,7 @@ struct PendingBroadcast {
 	resolved: Option<Result<broadcast::Consumer, Error>>,
 }
 
-/// A served route, from [`Producer::dynamic`]: advertises a path pattern and
+/// A served route, from [`Producer::dynamic`]: advertises a path prefix and
 /// answers the [`Consumer::request_broadcast`] calls beneath it.
 ///
 /// The origin-level analogue of [`broadcast::Dynamic`]: where that serves tracks
@@ -3688,10 +3701,7 @@ impl Consumer {
 		let mut announced = consumer.untagged().announced();
 		loop {
 			let update = announced.next().await?;
-			if !update.active {
-				continue;
-			}
-			if update.pattern.as_prefix() == Some(path.as_str()) || update.pattern.matches(path.as_str()) {
+			if update.kind.is_active() && path.has_prefix(&update.path) {
 				return Some(update.route);
 			}
 		}
@@ -3937,7 +3947,11 @@ pub struct AnnounceConsumer {
 	// Live egress announce guards, keyed by absolute prefix. An announce
 	// opens one (bumping `announces_started` + `announced_bytes`); the matching retraction
 	// drops it (bumping `announces_ended` + `announced_bytes`).
-	guards: HashMap<Pattern, stats::Announce>,
+	guards: HashMap<PathOwned, stats::Announce>,
+
+	// Holds the waiter a `Stream` poll registered; disjoint from `state` so the
+	// borrow never collides with the body's.
+	park: kio::Park,
 }
 
 impl AnnounceConsumer {
@@ -3979,34 +3993,31 @@ impl AnnounceConsumer {
 			state,
 			stats,
 			guards: HashMap::new(),
+			park: kio::Park::default(),
 		}
 	}
 
 	/// Drive the egress announce guards for one update.
 	fn hand_out(&mut self, update: AnnounceUpdate) -> AnnounceUpdate {
-		let absolute = self
-			.root
-			.join(Path::new(
-				update.pattern.as_prefix().unwrap_or_else(|| update.pattern.as_str()),
-			))
-			.to_owned();
-		if update.active {
+		let absolute = self.root.join(&update.path).to_owned();
+		if update.kind.is_active() {
 			let scope = self.stats.egress(&absolute);
 			self.guards
-				.entry(update.pattern.clone())
+				.entry(update.path.clone())
 				.or_insert_with(|| scope.announce());
 		} else {
-			self.guards.remove(&update.pattern);
+			self.guards.remove(&update.path);
 		}
 		update
 	}
 
-	/// Returns the next route announcement or retraction, its prefix relative to
-	/// this cursor's root.
+	/// Returns the next route announcement, update, or retraction, its prefix
+	/// relative to this cursor's root.
 	///
 	/// A retraction is only delivered for a previously announced prefix, and a
 	/// repeated announcement for the same prefix is a metadata update. Returns
-	/// None if the cursor is closed.
+	/// None if the cursor is closed. The consumer is also a [`futures::Stream`]
+	/// of the same updates.
 	pub async fn next(&mut self) -> Option<AnnounceUpdate> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
@@ -4068,6 +4079,16 @@ impl AnnounceConsumer {
 	}
 }
 
+impl futures::Stream for AnnounceConsumer {
+	type Item = AnnounceUpdate;
+
+	fn poll_next(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Option<Self::Item>> {
+		let this = self.get_mut();
+		let waiter = this.park.hold(cx).clone();
+		this.poll_next(&waiter)
+	}
+}
+
 impl Drop for AnnounceConsumer {
 	fn drop(&mut self) {
 		self.shared.lock().cursors.remove(&self.id);
@@ -4084,12 +4105,8 @@ impl AnnounceConsumer {
 	pub fn assert_next_active(&mut self, expected: impl AsPath) -> Route {
 		let expected = expected.as_path();
 		let update = self.next().now_or_never().expect("next blocked").expect("no next");
-		assert_eq!(
-			crate::Path::new(update.pattern.as_prefix().expect("prefix announcement")),
-			expected,
-			"wrong prefix"
-		);
-		assert!(update.active, "should be an active route");
+		assert_eq!(update.path, expected, "wrong prefix");
+		assert!(update.kind.is_active(), "should be an active route");
 		update.route
 	}
 
@@ -4097,12 +4114,8 @@ impl AnnounceConsumer {
 	pub fn assert_try_next_active(&mut self, expected: impl AsPath) -> Route {
 		let expected = expected.as_path();
 		let update = self.try_next().expect("no next");
-		assert_eq!(
-			crate::Path::new(update.pattern.as_prefix().expect("prefix announcement")),
-			expected,
-			"wrong prefix"
-		);
-		assert!(update.active, "should be an active route");
+		assert_eq!(update.path, expected, "wrong prefix");
+		assert!(update.kind.is_active(), "should be an active route");
 		update.route
 	}
 
@@ -4110,17 +4123,13 @@ impl AnnounceConsumer {
 	pub fn assert_next_ended(&mut self, expected: impl AsPath) {
 		let expected = expected.as_path();
 		let update = self.next().now_or_never().expect("next blocked").expect("no next");
-		assert_eq!(
-			crate::Path::new(update.pattern.as_prefix().expect("prefix announcement")),
-			expected,
-			"wrong prefix"
-		);
-		assert!(!update.active, "should be a retraction");
+		assert_eq!(update.path, expected, "wrong prefix");
+		assert_eq!(update.kind, AnnounceKind::Retracted, "should be a retraction");
 	}
 
 	pub fn assert_next_wait(&mut self) {
 		if let Some(res) = self.next().now_or_never() {
-			panic!("next should block: got {:?}", res.map(|u| u.pattern));
+			panic!("next should block: got {:?}", res.map(|u| u.path));
 		}
 	}
 }
@@ -4172,13 +4181,12 @@ mod tests {
 		list
 	}
 
-	fn subtree(prefix: &str) -> Pattern {
-		Pattern::subtree(prefix).unwrap()
-	}
-
 	/// The scope granting these prefixes: each spelled as its subtree pattern.
 	fn scopes(prefixes: &[&str]) -> Patterns {
-		prefixes.iter().map(|prefix| subtree(prefix)).collect()
+		prefixes
+			.iter()
+			.map(|prefix| Pattern::subtree(prefix).unwrap())
+			.collect()
 	}
 
 	/// Yield to the driver until `check` passes, bounded so a bug fails instead
@@ -4544,10 +4552,10 @@ mod tests {
 		let consumer = producer.consume();
 
 		let anonymous = producer
-			.dynamic(subtree("room"), Route::default().with_hops(hops(&[0])).with_cost(1))
+			.dynamic("room", Route::default().with_hops(hops(&[0])).with_cost(1))
 			.unwrap();
 		let identified = producer
-			.dynamic(subtree("room"), Route::default().with_hops(hops(&[10])).with_cost(5))
+			.dynamic("room", Route::default().with_hops(hops(&[10])).with_cost(5))
 			.unwrap();
 
 		let _pending = consumer.request_broadcast("room/alice");
@@ -4648,155 +4656,101 @@ mod tests {
 	}
 
 	#[test]
-	fn dynamic_accepts_a_non_prefix_pattern() {
+	fn create_broadcast_accepts_a_max_depth_path() {
 		let producer = origin(1).produce();
-		let _server = producer
-			.dynamic("live/*".parse().unwrap(), Route::default())
-			.expect("a non-prefix pattern is advertised");
-	}
-
-	#[test]
-	fn create_broadcast_refuses_unrepresentable_subtree_claims() {
-		let producer = origin(1).produce();
-		let path = vec!["a"; Pattern::MAX_SEGMENTS].join("/");
+		let path = vec!["a"; Path::MAX_PARTS].join("/");
+		let _broadcast = producer.create_broadcast(path.as_str()).expect("max depth is allowed");
+		let deeper = vec!["a"; Path::MAX_PARTS + 1].join("/");
 		assert!(matches!(
-			producer.create_broadcast(path.as_str()),
+			producer.create_broadcast(deeper.as_str()),
 			Err(Error::BoundsExceeded(_))
 		));
-		assert!(matches!(producer.create_broadcast("room/*"), Err(Error::Unsupported)));
 	}
 
 	#[tokio::test]
-	async fn literal_and_subtree_claims_are_distinct() {
+	async fn duplicate_routes_aggregate_until_the_last_leaves() {
 		let producer = origin(1).produce();
-		let literal = producer.dynamic("room".parse().unwrap(), Route::default()).unwrap();
-		let _subtree = producer.dynamic("room/**".parse().unwrap(), Route::default()).unwrap();
-		let mut announced = producer.consume().announced();
-		let first = announced.try_next().unwrap();
-		let second = announced.try_next().unwrap();
-		let patterns: HashSet<_> = [first.pattern, second.pattern].into_iter().collect();
-		assert_eq!(
-			patterns,
-			HashSet::from(["room".parse().unwrap(), "room/**".parse().unwrap()])
-		);
-		drop(literal);
-		let ended = announced.try_next().unwrap();
-		assert_eq!(ended.pattern.as_str(), "room");
-		assert!(!ended.active);
-		assert_eq!(announced.guards.len(), 1);
-		announced.assert_next_wait();
-	}
-
-	#[tokio::test]
-	async fn wildcard_and_prefix_coexist() {
-		let producer = origin(1).produce();
-		let _prefix = producer.announce("live", Route::default().with_cost(1)).unwrap();
-		let _pattern = producer
-			.dynamic("live/*".parse().unwrap(), Route::default().with_cost(9))
-			.unwrap();
+		let first = producer.dynamic("live", Route::default().with_cost(3)).unwrap();
+		let second = producer.dynamic("live", Route::default().with_cost(1)).unwrap();
 
 		let mut announced = producer.consume().announced();
-		let first = announced.next().now_or_never().expect("next blocked").expect("no next");
-		let second = announced.next().now_or_never().expect("next blocked").expect("no next");
-		let texts: std::collections::HashSet<_> = [first, second]
-			.into_iter()
-			.map(|u| u.pattern.as_str().to_string())
-			.collect();
-		assert!(texts.contains("live/**"), "prefix-shaped live: {texts:?}");
-		assert!(texts.contains("live/*"), "wildcard live/*: {texts:?}");
-		announced.assert_next_wait();
-	}
-
-	#[tokio::test]
-	async fn duplicate_patterns_aggregate_until_the_last_leaves() {
-		let producer = origin(1).produce();
-		let first = producer
-			.dynamic("live/*".parse().unwrap(), Route::default().with_cost(3))
-			.unwrap();
-		let second = producer
-			.dynamic("live/*".parse().unwrap(), Route::default().with_cost(1))
-			.unwrap();
-
-		let mut announced = producer.consume().announced();
-		let route = announced.next().now_or_never().expect("next").expect("no next");
-		assert_eq!(route.pattern.as_str(), "live/*");
-		assert!(route.active);
-		assert_eq!(route.route.cost, Cost::new(1));
+		let update = announced.next().now_or_never().expect("next").expect("no next");
+		assert_eq!(update.path.as_str(), "live");
+		assert_eq!(update.kind, AnnounceKind::Announced);
+		assert_eq!(update.route.cost, Cost::new(1));
 		announced.assert_next_wait();
 
 		drop(second);
-		let route = announced.next().now_or_never().expect("next").expect("no next");
-		assert_eq!(route.pattern.as_str(), "live/*");
-		assert!(route.active);
-		assert_eq!(route.route.cost, Cost::new(3));
+		let update = announced.next().now_or_never().expect("next").expect("no next");
+		assert_eq!(update.path.as_str(), "live");
+		assert_eq!(update.kind, AnnounceKind::Updated);
+		assert_eq!(update.route.cost, Cost::new(3));
 
 		drop(first);
-		let ended = announced.next().now_or_never().expect("next").expect("no next");
-		assert_eq!(ended.pattern.as_str(), "live/*");
-		assert!(!ended.active);
+		announced.assert_next_ended("live");
 		announced.assert_next_wait();
 	}
 
-	#[tokio::test]
-	async fn globstar_rebase_yields_root_and_descendant_residuals() {
-		let producer = origin(1).produce();
-		let _server = producer.dynamic("**/a".parse().unwrap(), Route::default()).unwrap();
-
-		let consumer = producer.consume().with_root("a").unwrap();
-		let mut announced = consumer.announced();
-		let mut texts = Vec::new();
-		while let Some(update) = announced.next().now_or_never().flatten() {
-			assert!(update.active);
-			texts.push(update.pattern.as_str().to_string());
-		}
-		texts.sort();
-		assert_eq!(texts, ["", "**/a"]);
-	}
-
 	#[test]
-	fn wildcard_scope_is_refused_not_clamped() {
+	fn dynamic_outside_scope_is_refused_not_clamped() {
 		let producer = origin(1).produce();
 		let scoped = producer.scope(&scopes(&["room"])).unwrap();
 		let err = scoped
-			.dynamic("**".parse().unwrap(), Route::default())
+			.dynamic("", Route::default())
 			.err()
-			.expect("an over-wide pattern is refused");
+			.expect("an over-wide prefix is refused");
 		assert!(matches!(err, Error::Unauthorized));
 
 		let _ok = scoped
-			.dynamic("room/*".parse().unwrap(), Route::default())
-			.expect("a contained pattern is accepted");
+			.dynamic("room/alice", Route::default())
+			.expect("a contained prefix is accepted");
 	}
 
 	#[tokio::test]
-	async fn wildcard_exclusion_skips_routes_through_the_subscriber() {
+	async fn dynamic_exclusion_skips_routes_through_the_subscriber() {
 		let producer = origin(1).produce();
 		let _server = producer
-			.dynamic("live/*".parse().unwrap(), Route::default().with_hops(hops(&[7])))
+			.dynamic("live", Route::default().with_hops(hops(&[7])))
 			.unwrap();
 
 		let mut excluded = producer.consume().excluding(origin(7)).announced();
 		excluded.assert_next_wait();
 
 		let mut clean = producer.consume().excluding(origin(8)).announced();
-		let update = clean.next().now_or_never().expect("next").expect("no next");
-		assert_eq!(update.pattern.as_str(), "live/*");
-		assert!(update.active);
+		clean.assert_next_active("live");
+	}
+
+	/// The consumer is a `Stream` of the same updates as `next`.
+	#[tokio::test]
+	async fn announce_consumer_is_a_stream() {
+		use futures::StreamExt;
+		let producer = origin(1).produce();
+		let server = producer.dynamic("live", Route::default()).unwrap();
+		let mut announced = producer.consume().announced();
+		let update = StreamExt::next(&mut announced)
+			.now_or_never()
+			.expect("next")
+			.expect("no next");
+		assert_eq!(update.path.as_str(), "live");
+		assert_eq!(update.kind, AnnounceKind::Announced);
+		assert!(StreamExt::next(&mut announced).now_or_never().is_none());
+		drop(server);
+		let update = StreamExt::next(&mut announced)
+			.now_or_never()
+			.expect("next")
+			.expect("no next");
+		assert_eq!(update.kind, AnnounceKind::Retracted);
 	}
 
 	#[tokio::test]
-	async fn wildcard_retracts() {
+	async fn dynamic_retracts() {
 		let producer = origin(1).produce();
-		let server = producer.dynamic("live/*".parse().unwrap(), Route::default()).unwrap();
+		let server = producer.dynamic("live", Route::default()).unwrap();
 		let mut announced = producer.consume().announced();
-		let update = announced.next().now_or_never().expect("next").expect("no next");
-		assert_eq!(update.pattern.as_str(), "live/*");
-		assert!(update.active);
+		announced.assert_next_active("live");
 
 		drop(server);
-		let ended = announced.next().now_or_never().expect("next").expect("no next");
-		assert_eq!(ended.pattern.as_str(), "live/*");
-		assert!(!ended.active);
+		announced.assert_next_ended("live");
 	}
 
 	#[test]
@@ -4819,7 +4773,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 
-		let server = producer.dynamic(subtree("room"), Route::default()).unwrap();
+		let server = producer.dynamic("room", Route::default()).unwrap();
 
 		let pending = consumer.request_broadcast("room/alice");
 		let request = queued(&server).await;
@@ -4845,7 +4799,7 @@ mod tests {
 	async fn served_requests_coalesce() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let server = producer.dynamic(subtree("room"), Route::default()).unwrap();
+		let server = producer.dynamic("room", Route::default()).unwrap();
 
 		let first = consumer.request_broadcast("room/alice");
 		let second = consumer.request_broadcast("room/alice");
@@ -4866,7 +4820,7 @@ mod tests {
 	async fn retract_rejects_pending_requests() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let server = producer.dynamic(subtree("room"), Route::default()).unwrap();
+		let server = producer.dynamic("room", Route::default()).unwrap();
 
 		let pending = consumer.request_broadcast("room/alice");
 		drop(server);
@@ -4891,9 +4845,9 @@ mod tests {
 
 		// Three identical routes, oldest first: the newest identical route wins
 		// requests, and swapping between them emits no announce update.
-		let standby_server = producer.dynamic(subtree("room"), Route::default()).unwrap();
-		let second_server = producer.dynamic(subtree("room"), Route::default()).unwrap();
-		let incumbent_server = producer.dynamic(subtree("room"), Route::default()).unwrap();
+		let standby_server = producer.dynamic("room", Route::default()).unwrap();
+		let second_server = producer.dynamic("room", Route::default()).unwrap();
+		let incumbent_server = producer.dynamic("room", Route::default()).unwrap();
 
 		let mut resolving = Box::pin(consumer.routed_broadcast("room/alice"));
 		assert!((&mut resolving).now_or_never().is_none());
@@ -4920,7 +4874,7 @@ mod tests {
 	async fn split_horizon_skips_routes_through_the_requester() {
 		let producer = origin(1).produce();
 		let _server = producer
-			.dynamic(subtree("room"), Route::default().with_hops(hops(&[7])))
+			.dynamic("room", Route::default().with_hops(hops(&[7])))
 			.unwrap();
 
 		// The requester's own bytes must not be served back to it.
@@ -4946,7 +4900,7 @@ mod tests {
 	async fn handler_rejection_is_final() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let server = producer.dynamic(subtree("room"), Route::default()).unwrap();
+		let server = producer.dynamic("room", Route::default()).unwrap();
 
 		let pending = consumer.request_broadcast("room/alice");
 		let request = queued(&server).await;
@@ -4973,7 +4927,7 @@ mod tests {
 	async fn routed_broadcast_waits_out_a_rejection() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let server = producer.dynamic(subtree("room"), Route::default()).unwrap();
+		let server = producer.dynamic("room", Route::default()).unwrap();
 
 		let mut resolving = Box::pin(consumer.routed_broadcast("room/alice"));
 		assert!((&mut resolving).now_or_never().is_none());
@@ -5002,7 +4956,7 @@ mod tests {
 	async fn routed_broadcast_wakes_for_a_local_broadcast() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let server = producer.dynamic(subtree("room"), Route::default()).unwrap();
+		let server = producer.dynamic("room", Route::default()).unwrap();
 
 		let mut resolving = Box::pin(consumer.routed_broadcast("room/alice"));
 		assert!((&mut resolving).now_or_never().is_none());
@@ -5025,7 +4979,7 @@ mod tests {
 	async fn late_track_on_a_served_front_replays() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let server = producer.dynamic(subtree("room"), Route::default()).unwrap();
+		let server = producer.dynamic("room", Route::default()).unwrap();
 
 		let mut source = broadcast::Info::new().produce();
 		for name in ["a", "b"] {
@@ -5064,7 +5018,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 
-		let broad_server = producer.dynamic(Pattern::all(), Route::default()).unwrap();
+		let broad_server = producer.dynamic("", Route::default()).unwrap();
 		// A narrow advertise-only claim: requests under it must NOT route to the
 		// broad server; they fall through to the (absent) fallback handler.
 		let _narrow = producer.announce(".dash", Route::default()).unwrap();
@@ -5088,7 +5042,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let mut announced = consumer.announced();
-		let dynamic = producer.dynamic(Pattern::all(), Route::default()).unwrap();
+		let dynamic = producer.dynamic("", Route::default()).unwrap();
 		// The root claim is advertised like any other prefix.
 		announced.assert_next_active("");
 
@@ -5121,7 +5075,7 @@ mod tests {
 	#[tokio::test]
 	async fn out_of_scope_request_never_reaches_the_dynamic_handler() {
 		let producer = origin(1).produce();
-		let dynamic = producer.dynamic(Pattern::all(), Route::default()).unwrap();
+		let dynamic = producer.dynamic("", Route::default()).unwrap();
 		let scoped = producer.consume().scope(&scopes(&["tenant-a"])).unwrap();
 
 		// `tenant-a-other` shares a character prefix but not a segment, so this
@@ -5183,7 +5137,6 @@ mod tests {
 			.collect::<Vec<_>>()
 			.join("/");
 		assert_eq!(Path::new(&path).parts().count(), Path::MAX_PARTS);
-		assert_eq!(Pattern::subtree(&path), Err(InvalidPattern::TooManySegments));
 
 		assert!(consumer.allowed().matches(&path));
 
@@ -5203,7 +5156,7 @@ mod tests {
 		let mut announced = consumer.announced();
 		announced.assert_next_active("room");
 
-		let _server = producer.dynamic(subtree("served"), Route::default()).unwrap();
+		let _server = producer.dynamic("served", Route::default()).unwrap();
 		let pending = consumer.request_broadcast("served/path");
 
 		drop(driver);
@@ -5248,7 +5201,7 @@ mod tests {
 			let consumer = producer.consume();
 
 			let server = producer
-				.dynamic(subtree("room"), Route::default().with_hops(hops(first)))
+				.dynamic("room", Route::default().with_hops(hops(first)))
 				.unwrap();
 
 			let pending = consumer.request_broadcast("room/alice");
@@ -5291,7 +5244,7 @@ mod tests {
 		/// back its handle, ready to answer the front's re-request.
 		fn standby(&self, first: &[u64]) -> Dynamic {
 			self.producer
-				.dynamic(subtree("room"), Route::default().with_hops(hops(first)))
+				.dynamic("room", Route::default().with_hops(hops(first)))
 				.unwrap()
 		}
 	}
@@ -5437,7 +5390,7 @@ mod tests {
 
 		// Session A: an assigned anonymous hop serving the path.
 		let server_a = producer
-			.dynamic(subtree("room"), Route::default().with_hops(hops(&[10])))
+			.dynamic("room", Route::default().with_hops(hops(&[10])))
 			.unwrap();
 
 		// Session C: a third anonymous session, excluding the hop the server
@@ -5493,7 +5446,7 @@ mod tests {
 
 		// Session B attaches at the same path. Its front is served immediately.
 		let server_b = producer
-			.dynamic(subtree("room"), Route::default().with_hops(hops(&[20])))
+			.dynamic("room", Route::default().with_hops(hops(&[20])))
 			.unwrap();
 		let pending = consumer.request_broadcast("room/alice");
 		let request = queued(&server_b).await;

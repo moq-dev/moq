@@ -1250,8 +1250,8 @@ where
 	/// A loop writing inline (draft-16+ answering a SUBSCRIBE_NAMESPACE) re-sends
 	/// NAMESPACE on that stream, which the receiver treats as a replacement, and
 	/// retracts with NAMESPACE_DONE. Otherwise each advertisement rides its own
-	/// PUBLISH_NAMESPACE request: an update is a REQUEST_UPDATE **on the stream that
-	/// already carries it**, since a second stream would leave two claiming one
+	/// PUBLISH_NAMESPACE request: an update re-sends PUBLISH_NAMESPACE **on the stream
+	/// that already carries it**, since a second stream would leave two claiming one
 	/// namespace, and a withdrawal closes the request with PUBLISH_NAMESPACE_DONE.
 	async fn sync_namespace(
 		&self,
@@ -1292,8 +1292,8 @@ where
 		}
 
 		let absolute = self.origin.absolute(path).to_owned();
-		// Only a PUBLISH_NAMESPACE request or an update to one can be refused; everything
-		// else below either rides a stream the peer already accepted or says nothing at all.
+		// Only a fresh PUBLISH_NAMESPACE request can be refused; everything else below
+		// either rides a stream the peer already accepted or says nothing at all.
 		let mut refused = watch.refused;
 		let sent = match target {
 			Target::Requests(_) => {
@@ -1304,10 +1304,17 @@ where
 						}
 						self.withdraw_namespace(target, requests, suffix.clone()).await?;
 					}
-					(true, Some(_)) => {
-						tracing::debug!(broadcast = %absolute, "publish_namespace update");
-						refused = self
-							.update_namespace(target, requests, path, suffix, &watch.sent, &advert)
+					(true, Some(request)) => {
+						tracing::debug!(broadcast = %absolute, "announce update");
+						request.stream.writer.encode(&ietf::PublishNamespace::ID).await?;
+						request
+							.stream
+							.writer
+							.encode(&ietf::PublishNamespace {
+								request_id: request.request_id,
+								track_namespace: request.path.as_path(),
+								cluster: advert.params(),
+							})
 							.await?;
 					}
 					(true, None) => {
@@ -1317,9 +1324,9 @@ where
 							.await?;
 					}
 				}
-				// The peer can reject a fresh PUBLISH_NAMESPACE or an update, which leaves
-				// no request behind. Record what it actually holds, so a later route change
-				// retries instead of believing the namespace is already advertised.
+				// The peer can reject a fresh PUBLISH_NAMESPACE, which leaves no request
+				// behind. Record what it actually holds, so a later route change retries
+				// instead of believing the namespace is already advertised.
 				match requests.contains_key(suffix) {
 					true => advert,
 					false => Advert::None,
@@ -1395,7 +1402,6 @@ where
 				request_id,
 				track_namespace: path.as_path(),
 				cluster,
-				pattern: None,
 			})
 			.await?;
 
@@ -1438,77 +1444,6 @@ where
 			},
 		);
 		Ok(Refused::No)
-	}
-
-	/// Reprice a namespace the peer holds: REQUEST_UPDATE on the request that carries
-	/// it, with only the parameters that changed, then its answer.
-	///
-	/// Waiting for the answer keeps one update outstanding per stream, which satisfies
-	/// any MAX_REQUEST_UPDATES the peer set without reading it, and the answer is what
-	/// decides whether the peer still holds the namespace: a REQUEST_ERROR closes the
-	/// stream and withdraws the advertisement (moq-transport Section 9.5.1), so the
-	/// request is dropped here and the retry re-offers it fresh. An unanswered update
-	/// is dropped the same way, since a peer that ignored it cannot be assumed to hold
-	/// either price.
-	///
-	/// A different original publisher is not an update. The cluster draft has it
-	/// withdrawn and advertised again, so the receiver never reads two publishers'
-	/// content as one continuous stream.
-	///
-	/// Returns what the refusal, if any, said about coming back.
-	async fn update_namespace(
-		&self,
-		target: &mut Target<S>,
-		requests: &mut HashMap<crate::PathOwned, NamespaceRequest<S>>,
-		path: &crate::PathOwned,
-		suffix: &crate::PathOwned,
-		held: &Advert,
-		advert: &Advert,
-	) -> Result<Refused, Error> {
-		// A plain advertisement has no parameters to reprice, and a namespace the peer
-		// does not hold has nothing to update; neither is a wire message.
-		let (Some(next), Some(held)) = (advert.params(), held.params()) else {
-			return Ok(Refused::No);
-		};
-		if held.hops.hops().iter().next() != next.hops.hops().iter().next() {
-			tracing::debug!(broadcast = %self.origin.absolute(path), "publisher changed; advertising again");
-			self.withdraw_namespace(target, requests, suffix.clone()).await?;
-			return self
-				.advertise_namespace(requests, path, suffix.clone(), Some(next))
-				.await;
-		}
-		let Some(request) = requests.get_mut(suffix) else {
-			return Ok(Refused::No);
-		};
-		let request_id = self.control.next_request_id(&self.runtime).await?;
-		let update = ietf::PublishNamespaceUpdate::between(request_id, &held, &next);
-
-		request.stream.writer.encode(&ietf::PublishNamespaceUpdate::ID).await?;
-		request.stream.writer.encode(&update).await?;
-
-		let absolute = self.origin.absolute(&request.path).to_owned();
-		let Some((type_id, mut data)) = self.read_response(&mut request.stream).await? else {
-			tracing::debug!(broadcast = %absolute, "no answer to the update");
-			// Abrupt: a peer that never answers is not owed the FIN handshake.
-			requests.remove(suffix);
-			return Ok(Refused::No);
-		};
-
-		match type_id {
-			ietf::RequestOk::ID => {
-				let msg = ietf::RequestOk::decode_msg(&mut data, self.version)?;
-				tracing::debug!(message = ?msg, "publish_namespace update ok");
-				Ok(Refused::No)
-			}
-			ietf::RequestError::ID => {
-				let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
-				tracing::warn!(message = ?msg, "publish_namespace update error");
-				// The peer closed its side; finishing ours completes the withdrawal.
-				self.withdraw_namespace(target, requests, suffix.clone()).await?;
-				Ok(self.refusal(msg.retry_interval))
-			}
-			_ => Err(Error::UnexpectedMessage),
-		}
 	}
 
 	/// How to read a refusal's retry interval, in milliseconds.
@@ -1828,18 +1763,13 @@ where
 					return stream.writer.closed().await;
 				}
 				NamespaceEvent::Update(Some(update)) => {
-					let Some(path) = update.pattern.as_prefix() else {
-						// Decode-first: do not emit NAMESPACE_PATTERN until receivers
-						// that negotiated it also land it, and never as a literal prefix.
-						continue;
-					};
-					let path = crate::Path::new(path).to_owned();
+					let path = update.path;
 					let suffix = path
 						.strip_prefix(&prefix)
 						.expect("origin returned invalid prefix")
 						.to_owned();
 
-					if update.active {
+					if update.kind.is_active() {
 						// A repeat for a live suffix is a metadata update: keep the
 						// peer's refusal state and re-run the selection.
 						match ns.watched.get_mut(&suffix) {
@@ -4174,240 +4104,6 @@ mod tests {
 		);
 
 		drop(cam);
-	}
-
-	/// A SETUP slot for a peer that negotiated the cluster extension, so an
-	/// advertisement carries a path and a cost worth repricing.
-	fn clustered(solicit: Option<bool>) -> peer::PeerSetup {
-		let slot = peer::PeerSetup::default();
-		slot.set(peer::Peer {
-			cluster: cluster::Peer {
-				hop: Some(crate::Hop::new(9).unwrap()),
-				cost: None,
-			},
-			solicit,
-			..Default::default()
-		});
-		slot
-	}
-
-	/// The bytes of one REQUEST_UPDATE, framed as the publisher writes it.
-	async fn request_update(version: Version, msg: &ietf::PublishNamespaceUpdate) -> Vec<u8> {
-		let log = crate::lite::test_transport::Log::default();
-		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
-		writer.encode(&ietf::PublishNamespaceUpdate::ID).await.unwrap();
-		writer.encode(msg).await.unwrap();
-		log.writes.lock().unwrap().clone()
-	}
-
-	/// A relay that starts carrying a namespace reprices it with REQUEST_UPDATE on the
-	/// request that already carries it, sending the changed parameter only. The new cost
-	/// is 0, which has to be explicit: REQUEST_UPDATE keeps an omitted parameter, so
-	/// leaving it out would keep the old price.
-	#[tokio::test]
-	async fn a_repricing_is_a_request_update() {
-		const VERSION: Version = Version::Draft19;
-
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _cold = origin
-			.announce("cam", crate::origin::Route::default().with_cost(4))
-			.unwrap();
-		settle().await;
-
-		// One stream: the PUBLISH_NAMESPACE request and its update, each answered OK.
-		let ok = publish_namespace_ok(VERSION).await;
-		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![[ok.clone(), ok].concat()]);
-		let log = session.log.clone();
-
-		let publisher = Publisher::new(
-			TestRuntime::new(),
-			session,
-			origin.consume(),
-			Control::new(None, false),
-			None,
-			clustered(Some(false)),
-			VERSION,
-		);
-
-		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, b"cam") >= 1 {
-				break;
-			}
-			settle().await;
-		}
-		assert_eq!(occurrences(&log, b"cam"), 1, "the advertisement never went out");
-
-		// We start carrying it: a free route outranks the cold one.
-		let _warm = origin
-			.announce("cam", crate::origin::Route::default().with_cost(0))
-			.unwrap();
-
-		// The request consumed id 1, so the update takes the next of our parity. The
-		// path is unchanged and omitted; the cost is an explicit 0.
-		let expected = request_update(
-			VERSION,
-			&ietf::PublishNamespaceUpdate {
-				request_id: RequestId(3),
-				hops: None,
-				cost: Some(0),
-			},
-		)
-		.await;
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, &expected) >= 1 {
-				break;
-			}
-			settle().await;
-		}
-
-		assert_eq!(occurrences(&log, &expected), 1, "REQUEST_UPDATE with an explicit 0");
-		assert_eq!(occurrences(&log, b"cam"), 1, "PUBLISH_NAMESPACE was not repeated");
-		assert_eq!(log.bi_opens(), 1, "the update rode the request's own stream");
-	}
-
-	/// A route from a different original publisher is not an update: its content is not
-	/// continuous with what the peer holds, so the draft has the advertisement withdrawn
-	/// and made again rather than repriced in place.
-	#[tokio::test]
-	async fn a_publisher_change_is_withdrawn_and_advertised_again() {
-		const VERSION: Version = Version::Draft19;
-
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let publisher_a = crate::Hops::try_from(vec![crate::Hop::new(7).unwrap()]).unwrap();
-		let publisher_b = crate::Hops::try_from(vec![crate::Hop::new(8).unwrap()]).unwrap();
-		let _from_a = origin
-			.announce(
-				"cam",
-				crate::origin::Route::default().with_hops(publisher_a).with_cost(4),
-			)
-			.unwrap();
-		settle().await;
-
-		// Stream 1 accepts the advertisement from A; stream 2 accepts the one from B.
-		let ok = publish_namespace_ok(VERSION).await;
-		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![ok.clone(), ok]);
-		let log = session.log.clone();
-
-		let publisher = Publisher::new(
-			TestRuntime::new(),
-			session,
-			origin.consume(),
-			Control::new(None, false),
-			None,
-			clustered(Some(false)),
-			VERSION,
-		);
-
-		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, b"cam") >= 1 {
-				break;
-			}
-			settle().await;
-		}
-		assert_eq!(occurrences(&log, b"cam"), 1, "the advertisement never went out");
-
-		// A cheaper route from B wins the selection.
-		let _from_b = origin
-			.announce(
-				"cam",
-				crate::origin::Route::default().with_hops(publisher_b).with_cost(0),
-			)
-			.unwrap();
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, b"cam") >= 2 {
-				break;
-			}
-			settle().await;
-		}
-
-		assert_eq!(occurrences(&log, b"cam"), 2, "advertised again for the new publisher");
-		assert_eq!(log.bi_opens(), 2, "on a fresh request stream");
-		let update = request_update(
-			VERSION,
-			&ietf::PublishNamespaceUpdate {
-				request_id: RequestId(3),
-				hops: Some(cluster::HopPath::new(
-					crate::Hops::try_from(vec![crate::Hop::new(8).unwrap(), crate::Hop::new(1).unwrap()]).unwrap(),
-				)),
-				cost: Some(0),
-			},
-		)
-		.await;
-		assert_eq!(occurrences(&log, &update), 0, "a publisher change is never an update");
-	}
-
-	/// A peer that refuses an update closes the stream, which withdraws the
-	/// advertisement. The namespace is then not held at all, so it comes back as a fresh
-	/// PUBLISH_NAMESPACE once the refusal's wait is out, not as another update on a
-	/// stream the peer already ended.
-	#[tokio::test(start_paused = true)]
-	async fn a_refused_update_is_re_advertised_fresh() {
-		const VERSION: Version = Version::Draft19;
-
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _cold = origin
-			.announce("cam", crate::origin::Route::default().with_cost(4))
-			.unwrap();
-		settle().await;
-
-		// Stream 1 accepts the advertisement and refuses its update, with a wait shorter
-		// than the retry sweep; stream 2 accepts the fresh advertisement.
-		let ok = publish_namespace_ok(VERSION).await;
-		let refusal = publish_namespace_error(VERSION, 50).await;
-		let session =
-			crate::lite::test_transport::ScriptedSession::per_stream(vec![[ok.clone(), refusal].concat(), ok]);
-		let log = session.log.clone();
-
-		let publisher = Publisher::new(
-			TestRuntime::new(),
-			session,
-			origin.consume(),
-			Control::new(None, false),
-			None,
-			clustered(Some(false)),
-			VERSION,
-		);
-
-		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, b"cam") >= 1 {
-				break;
-			}
-			settle().await;
-		}
-		assert_eq!(occurrences(&log, b"cam"), 1, "the advertisement never went out");
-
-		let _warm = origin
-			.announce("cam", crate::origin::Route::default().with_cost(0))
-			.unwrap();
-
-		for _ in 0..100 {
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			if occurrences(&log, b"cam") >= 2 {
-				break;
-			}
-			tick().await;
-		}
-
-		assert_eq!(occurrences(&log, b"cam"), 2, "re-advertised after the refusal");
-		assert_eq!(log.bi_opens(), 2, "on a fresh request stream");
-		let update = request_update(
-			VERSION,
-			&ietf::PublishNamespaceUpdate {
-				request_id: RequestId(3),
-				hops: None,
-				cost: Some(0),
-			},
-		)
-		.await;
-		assert_eq!(occurrences(&log, &update), 1, "only the one update was attempted");
 	}
 
 	/// Draft-17+ has no PUBLISH_NAMESPACE_DONE, so a withdrawal there is the FIN and

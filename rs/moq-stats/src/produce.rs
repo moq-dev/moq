@@ -946,7 +946,7 @@ mod tests {
 		let mut producer = source.create_track("video", None).expect("create_track");
 
 		let update = announced.next().await.expect("announce");
-		assert!(update.active);
+		assert!(update.kind.is_active());
 		let consumer = egress.request_broadcast(path).await.expect("resolve");
 
 		let sub = if subscribe {
@@ -987,18 +987,13 @@ mod tests {
 		let mut consumer = origin.consume().announced();
 		tokio::time::advance(Duration::from_millis(1)).await;
 		let update = consumer.next().await.expect("expected announce");
-		assert!(update.active);
+		assert!(update.kind.is_active());
 		let broadcast = origin
 			.consume()
-			.request_broadcast(moq_net::Path::new(
-				update.pattern.as_prefix().expect("prefix announcement"),
-			))
+			.request_broadcast(moq_net::Path::new(update.path.as_str()))
 			.await
 			.expect("resolve");
-		(
-			update.pattern.as_prefix().expect("prefix announcement").to_string(),
-			broadcast,
-		)
+		(update.path.as_str().to_string(), broadcast)
 	}
 
 	/// Advance past one publish interval so the task drains and writes frames.

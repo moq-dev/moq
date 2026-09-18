@@ -320,10 +320,7 @@ impl<V: Mergeable> Merged<V> {
 	/// changed (only a non-sticky contribution leaving does; a sticky one is
 	/// kept).
 	fn apply_announce(&mut self, update: moq_net::announce::Update) -> bool {
-		let Some(prefix) = update.pattern.as_prefix() else {
-			return false;
-		};
-		let path = moq_net::Path::new(prefix).to_owned();
+		let path = update.path;
 		let absolute = self.announce.absolute(&path).to_owned();
 
 		// Only fold node-category routes; skip sibling categories a producer
@@ -333,7 +330,7 @@ impl<V: Mergeable> Merged<V> {
 			return false;
 		}
 
-		if update.active {
+		if update.kind.is_active() {
 			// A route update on a node already tracked (a reprice, or a takeover
 			// with different metadata) keeps the live reader: existing
 			// subscriptions survive a takeover, and the reader re-resolves through
@@ -537,7 +534,7 @@ mod tests {
 		let mut track = source.create_track("video", None).expect("create_track");
 
 		let update = announced.next().await.expect("announce");
-		assert!(update.active);
+		assert!(update.kind.is_active());
 		let consumer = egress.request_broadcast(path).await.expect("resolve");
 		let mut sub = consumer.track("video").unwrap().subscribe(None).await.unwrap();
 

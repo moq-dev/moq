@@ -486,16 +486,13 @@ fn broadcasts(_ctx: CompleteCtx<'_>) -> CompletionFuture<'static> {
 		let mut until = deadline;
 		while let Ok(Some(update)) = timeout_at(until, announced.next()).await {
 			until = deadline.min(Instant::now() + SETTLE);
-			let Some(prefix) = update.pattern.as_prefix() else {
-				continue;
-			};
-			let path = prefix.to_owned();
+			let path = update.path.to_string();
 			// The root broadcast is the connection path itself, which an unset
 			// `--broadcast` already names; there is no word to insert for it.
 			if path.is_empty() {
 				continue;
 			}
-			match update.active {
+			match update.kind.is_active() {
 				true => live.insert(path),
 				false => live.remove(&path),
 			};

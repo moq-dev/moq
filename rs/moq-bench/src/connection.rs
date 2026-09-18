@@ -336,11 +336,10 @@ async fn subscribe(
 			_ = &mut deadline => break,
 			update = announced.next() => {
 				let Some(update) = update else { break };
-				if !update.active {
+				if !update.kind.is_active() {
 					continue;
 				}
-				let Some(prefix) = update.pattern.as_prefix() else { continue; };
-		let path = prefix.to_owned();
+				let path = update.path.to_string();
 				if own.contains(&path) || !seen.insert(path.clone()) {
 					continue;
 				}
@@ -364,13 +363,10 @@ async fn subscribe(
 		let Some(update) = announced.next().await else {
 			break;
 		};
-		if !update.active {
+		if !update.kind.is_active() {
 			continue;
 		}
-		let Some(prefix) = update.pattern.as_prefix() else {
-			continue;
-		};
-		let path = prefix.to_owned();
+		let path = update.path.to_string();
 		if own.contains(&path) || !seen.insert(path.clone()) {
 			continue;
 		}

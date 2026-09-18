@@ -72,21 +72,23 @@ Three operations, on an origin:
 - `broadcast.announce(route)` / `broadcast.unannounce()` own that
   advertisement. Announcing again re-prices the standing route. The route
   retracts on `unannounce()`, `finish()`, or the last producer dropping.
-- `origin.dynamic(pattern, route)` claims every matching path. A prefix is
-  `foo/**`. Hold the returned `origin::Dynamic` while the claim should stay
-  advertised; drop it to retract. A request under a prefix-shaped claim with
-  no local broadcast is a `Request` to `accept` or `reject`.
+- `origin.dynamic(prefix, route)` claims `prefix` and every path beneath it
+  (`""` claims everything). Hold the returned `origin::Dynamic` while the
+  claim should stay advertised; drop it to retract. A request beneath it with
+  no local broadcast is a `Request` to `accept` or `reject`; reject what you
+  will not serve rather than narrowing the claim, since a route is always a
+  prefix on every wire.
 
-A wildcard is a capability, not an inventory. The advertised pattern must sit
+A route is a capability, not an inventory. The advertised prefix must sit
 inside one of the producer's `prefix/**` scopes; an over-wide claim is
 `Unauthorized`, not clamped. Token grants stay prefixes.
 
-`origin.consume().announced()` yields `announce::Update` values. `pattern` is
-the claim relative to the consumer's root, `active` is false on a retraction,
-and `route` carries hops and cost. A subtree is `room/**`; `room/*` is one
-child segment. Use `pattern.as_prefix()` when you need a prefix-shaped claim;
-an arbitrary pattern is not a broadcast name. Resolving a non-prefix pattern
-into a subscription is not implemented yet.
+`origin.consume().announced()` yields `announce::Update` values: `path` is the
+covered prefix relative to the consumer's root, `kind` is `Announced`,
+`Updated` (a reprice in place), or `Retracted`, and `route` carries hops and
+cost (on a retraction, its last values). The consumer is also a
+`futures::Stream`. A prefix is not a broadcast name; filter with a `Pattern`
+locally when you follow a subset.
 
 ## Limiting reads
 

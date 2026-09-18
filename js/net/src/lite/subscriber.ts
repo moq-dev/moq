@@ -5,7 +5,7 @@ import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
 import * as netGroup from "../group.ts";
-import { Cost, type Hop, isAnonymous, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
+import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { scopePrefix } from "../internal.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
@@ -154,7 +154,7 @@ export class Subscriber {
 
 	/**
 	 * Subscribe to broadcast announcements under `scope`, a prefix-shaped pattern
-	 * (`foo/**`, or `**` for everything). Patterns are relative to the session, not
+	 * (`foo/**`, or `**` for everything). Paths are relative to the session, not
 	 * the scope.
 	 *
 	 * Reflected announces (those whose hop chain already includes this
@@ -215,8 +215,8 @@ export class Subscriber {
 			// `publisher` is what lets a restart tell a route change (same publisher,
 			// subscriptions resume) from a replacement (a new generation took the path,
 			// nothing carries over).
-			type Advertisement = { publisher: Hop | undefined; live: boolean; route?: Route };
-			const advertised = new Map<string, Advertisement>();
+			type Advertisement = { publisher: Hop | undefined; live: boolean; route: Route };
+			const advertised = new Map<Path.Valid, Advertisement>();
 
 			switch (this.version) {
 				case Version.DRAFT_01:
@@ -230,15 +230,14 @@ export class Subscriber {
 					// and the record is what catches either. Draft01/02 carry no hop ids and no
 					// ANNOUNCE_OK, so nothing names the publisher.
 					for (const suffix of init.suffixes) {
-						const pattern = Path.Pattern.subtree(suffix);
-						const claim = pattern.rooted(prefix);
-						if (advertised.has(pattern.text)) {
-							throw new ProtocolViolation(`duplicate announce for ${claim.text}`);
+						const path = Path.join(prefix, suffix);
+						if (advertised.has(path)) {
+							throw new ProtocolViolation(`duplicate announce for ${path}`);
 						}
-						advertised.set(pattern.text, { publisher: undefined, live: true });
-						console.debug(`announced: broadcast=${claim.text} active=true`);
 						const route = { hops: [UNKNOWN_HOP], cost: Cost.zero };
-						announced.append({ pattern: claim, active: true, route, anonymous: isAnonymous(route) });
+						advertised.set(path, { publisher: undefined, live: true, route });
+						console.debug(`announced: broadcast=${path} active=true`);
+						announced.append({ path, kind: "announced", route });
 					}
 					break;
 				}
@@ -251,7 +250,7 @@ export class Subscriber {
 			// per-stream ordinal; `endedId`/`restart` reference it. Tracked even for
 			// announces we skip as reflected, since the sender doesn't know we skipped.
 			let nextAnnounceId = 0n;
-			const announcedById = new Map<bigint, Path.Pattern | null>();
+			const announcedById = new Map<bigint, Path.Valid | null>();
 
 			// Receive announce updates (for Draft03, this includes initial state)
 			for (;;) {
@@ -263,7 +262,7 @@ export class Subscriber {
 				if (!announce) break;
 				if (announce instanceof Error) throw announce;
 
-				let pattern: Path.Pattern;
+				let path: Path.Valid;
 				let active: boolean;
 				// Present on active/restart; ended messages never carry hops worth checking.
 				let hops: Hop[] | undefined;
@@ -271,60 +270,44 @@ export class Subscriber {
 
 				switch (announce.status) {
 					case "active":
-						pattern = Path.Pattern.subtree(announce.suffix);
+						// The wire names the suffix beneath the interest prefix; the consumer
+						// sees the covered path from the session root.
+						path = Path.join(prefix, announce.suffix);
 						active = true;
 						hops = announce.hops;
 						cost = announce.cost;
 						if (hasAnnounceId(this.version)) {
-							announcedById.set(nextAnnounceId++, pattern);
+							announcedById.set(nextAnnounceId++, path);
 						}
 						break;
 					case "ended":
-						pattern = Path.Pattern.subtree(announce.suffix);
+						path = Path.join(prefix, announce.suffix);
 						active = false;
 						break;
 					case "endedId": {
 						// Resolve and retire the id; an unknown or retired id is a protocol violation.
-						const path = announcedById.get(announce.id);
-						if (path === undefined) throw new ProtocolViolation(`unknown announce id: ${announce.id}`);
+						const resolved = announcedById.get(announce.id);
+						if (resolved === undefined) throw new ProtocolViolation(`unknown announce id: ${announce.id}`);
 						announcedById.delete(announce.id);
-						if (path === null) continue;
-						pattern = path;
+						if (resolved === null) continue;
+						path = resolved;
 						active = false;
 						break;
 					}
 					case "restart": {
 						// Resolve the id; it stays live (the replacement reuses it).
-						const path = announcedById.get(announce.id);
-						if (path === undefined) throw new ProtocolViolation(`unknown announce id: ${announce.id}`);
-						if (path === null) continue;
-						pattern = path;
+						const resolved = announcedById.get(announce.id);
+						if (resolved === undefined) throw new ProtocolViolation(`unknown announce id: ${announce.id}`);
+						if (resolved === null) continue;
+						path = resolved;
 						active = true;
 						hops = announce.hops;
 						cost = announce.cost;
 						break;
 					}
-					case "pattern": {
-						pattern = announce.pattern;
-						active = true;
-						hops = announce.hops;
-						cost = { warm: announce.cost, cold: announce.cost };
-						announcedById.set(nextAnnounceId++, pattern);
-						break;
-					}
-					case "ignored": {
-						announcedById.set(nextAnnounceId++, null);
-						continue;
-					}
 					case "skipped":
 						continue;
 				}
-
-				// The wire names the suffix beneath the interest prefix; the claim names the
-				// covered paths from the session root, which is what the consumer sees.
-				const claim = pattern.rooted(prefix);
-				const suffix = pattern.asPrefix();
-				const path = suffix === undefined ? undefined : Path.join(prefix, Path.from(suffix));
 
 				// One current advertisement per path per stream, decided before anything below
 				// can skip this announcement. A second ANNOUNCE_START for a path the peer
@@ -338,12 +321,8 @@ export class Subscriber {
 				// a duplicate means the same thing on both sides of it. Mirrors the branch the
 				// Rust announce loop takes before `start_announce`.
 				const duplicateIsRestart = restartSupported(this.version) && !hasAnnounceId(this.version);
-				if (
-					(announce.status === "active" || announce.status === "pattern") &&
-					!duplicateIsRestart &&
-					advertised.has(pattern.text)
-				) {
-					throw new ProtocolViolation(`duplicate announce for ${claim.text}`);
+				if (announce.status === "active" && !duplicateIsRestart && advertised.has(path)) {
+					throw new ProtocolViolation(`duplicate announce for ${path}`);
 				}
 
 				// Retract the path: forget the advertisement, drop the shared consume entry so a
@@ -351,12 +330,12 @@ export class Subscriber {
 				// and tell the consumer. A no-op for an advertisement never surfaced, which is
 				// what an id retiring a skipped announce resolves to.
 				const retract = () => {
-					const previous = advertised.get(pattern.text);
-					advertised.delete(pattern.text);
+					const previous = advertised.get(path);
+					advertised.delete(path);
 					if (!previous?.live) return;
-					if (path !== undefined) this.#consumes.evict(path);
-					console.debug(`announced: broadcast=${claim.text} active=false`);
-					announced.append({ pattern: claim, active: false });
+					this.#consumes.evict(path);
+					console.debug(`announced: broadcast=${path} active=false`);
+					announced.append({ path, kind: "retracted", route: previous.route });
 				};
 
 				// In Lite05+ the sender's origin arrives via AnnounceOk, not in each hop
@@ -369,7 +348,11 @@ export class Subscriber {
 						// advertisement stays live: the peer still holds the path and its id still
 						// resolves here.
 						retract();
-						advertised.set(pattern.text, { publisher: undefined, live: false });
+						advertised.set(path, {
+							publisher: undefined,
+							live: false,
+							route: { hops: full, cost: Cost.zero },
+						});
 						continue;
 					}
 				}
@@ -397,26 +380,25 @@ export class Subscriber {
 				// Appending a withheld AnnounceOk(0) onto a 32-entry list is the same
 				// drop Rust's Hops::push makes: do not expose an overlong chain.
 				if (fullHops.length > MAX_HOPS) {
-					console.debug(`announced: broadcast=${claim.text} dropped (hop chain at MAX_HOPS)`);
-					advertised.set(pattern.text, { publisher: undefined, live: false });
+					console.debug(`announced: broadcast=${path} dropped (hop chain at MAX_HOPS)`);
+					advertised.set(path, { publisher: undefined, live: false, route: { hops: [], cost: Cost.zero } });
 					continue;
 				}
 				const route: Route = { hops: fullHops, cost: cost ?? Cost.zero };
-				const anonymous = isAnonymous(route);
 
 				// A second advertisement for a path we already carry is a restart: either an
 				// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE.
-				const previous = advertised.get(pattern.text);
+				const previous = advertised.get(path);
 				if (previous?.live) {
 					if (identified && previous.publisher === publisher) {
 						// Same publisher, new route. In-flight subscriptions resume across it.
 						// Emit the route so a forwarder can re-price without retracting.
 						if (!routesEqual(previous.route, route)) {
-							advertised.set(pattern.text, { publisher, live: true, route });
-							console.debug(`announced: broadcast=${claim.text} rerouted`);
-							announced.append({ pattern: claim, active: true, route, anonymous });
+							advertised.set(path, { publisher, live: true, route });
+							console.debug(`announced: broadcast=${path} rerouted`);
+							announced.append({ path, kind: "updated", route });
 						} else {
-							console.debug(`announced: broadcast=${claim.text} rerouted`);
+							console.debug(`announced: broadcast=${path} rerouted`);
 						}
 						continue;
 					}
@@ -429,10 +411,10 @@ export class Subscriber {
 				// After `retract()`, which clears the entry: the path is advertised again, by
 				// whoever just took it over. Recording it before would leave nothing behind, so
 				// the *next* takeover would read as a first announcement and skip its own end.
-				advertised.set(pattern.text, { publisher, live: true, route });
+				advertised.set(path, { publisher, live: true, route });
 
-				console.debug(`announced: broadcast=${claim.text} active=true`);
-				announced.append({ pattern: claim, active: true, route, anonymous });
+				console.debug(`announced: broadcast=${path} active=true`);
+				announced.append({ path, kind: "announced", route });
 			}
 
 			announced.close();

@@ -1572,8 +1572,7 @@ impl Cluster {
 			tokio::select! {
 				ann = announced.next() => {
 					let Some(update) = ann else { return; };
-					let Some(prefix) = update.pattern.as_prefix() else { continue; };
-					let relative = moq_net::Path::new(prefix);
+					let relative = update.path;
 					// The address to dial, which keeps its query: `run_remote` reads
 					// `?cost=` and `?jwt=` off it. The key is only its identity.
 					let peer = advertised_node_url(relative.as_str());
@@ -1590,7 +1589,7 @@ impl Cluster {
 						continue;
 					}
 					let advertisement = relative.as_str().to_owned();
-					match update.active {
+					match update.kind.is_active() {
 						true => {
 							let target = live.announce(advertisement, target);
 							let mut spawn = |target: DialTarget| {
@@ -2947,7 +2946,7 @@ mod tests {
 			.await
 			.expect("node advertised")
 			.expect("announce");
-		assert!(update.active);
+		assert!(update.kind.is_active());
 		let snapshot = cluster.nodes.snapshot();
 		assert!(
 			snapshot.nodes.iter().any(|node| node.node.contains("peer.example")),
@@ -3001,11 +3000,8 @@ mod tests {
 
 		// The self-registration route must be visible on the origin.
 		let update = watcher.try_next().expect("self-registration must be published");
-		assert_eq!(
-			update.pattern.as_prefix().expect("prefix announcement"),
-			".internal/origins/rendezvous.example.com:4443"
-		);
-		assert!(update.active);
+		assert_eq!(update.path.as_str(), ".internal/origins/rendezvous.example.com:4443");
+		assert!(update.kind.is_active());
 
 		// run() must NOT have returned: dropping the broadcast (via run returning)
 		// would unannounce the registration immediately. Use a short timeout to
@@ -3588,7 +3584,7 @@ mod tests {
 			.await
 			.expect("timed out waiting for from-node")
 			.expect("origin closed");
-		assert_eq!(update.pattern.as_prefix().expect("prefix announcement"), "from-node");
+		assert_eq!(update.path.as_str(), "from-node");
 
 		let _from_fp = fingerprint.origin.create_broadcast("from-fingerprint").expect("create");
 		_from_fp.announce(Default::default()).expect("announce");
@@ -3598,7 +3594,7 @@ mod tests {
 				.await
 				.expect("timed out waiting for from-fingerprint")
 				.expect("origin closed");
-			if update.pattern.as_prefix().expect("prefix announcement") == "from-fingerprint" {
+			if update.path.as_str() == "from-fingerprint" {
 				break;
 			}
 		}

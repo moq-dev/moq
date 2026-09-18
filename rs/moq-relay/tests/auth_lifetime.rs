@@ -257,8 +257,8 @@ async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_t
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	assert_eq!(update.pattern.as_prefix().expect("prefix announcement"), "test");
-	assert!(update.active, "expected announce, got retraction");
+	assert_eq!(update.path.as_str(), "test");
+	assert!(update.kind.is_active(), "expected announce, got retraction");
 	let bc = sub_consumer
 		.request_broadcast("test")
 		.await
@@ -508,8 +508,8 @@ async fn http_routes_hold_a_lease() {
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	assert_eq!(update.pattern.as_prefix().expect("prefix announcement"), "test");
-	assert!(update.active, "expected announce, got retraction");
+	assert_eq!(update.path.as_str(), "test");
+	assert!(update.kind.is_active(), "expected announce, got retraction");
 
 	let http = reqwest::Client::new();
 	let announced = http

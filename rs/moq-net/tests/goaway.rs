@@ -442,8 +442,8 @@ async fn goaway_drains_routes(version: Version) {
 		let mut announced = sub.announced();
 		loop {
 			let update = announced.next().await.expect("update");
-			if update.active
-				&& update.pattern.as_prefix().expect("prefix announcement") == "test"
+			if update.kind.is_active()
+				&& update.path.as_str() == "test"
 				&& update.route.cost == moq_net::origin::Cost::DRAIN
 			{
 				break;

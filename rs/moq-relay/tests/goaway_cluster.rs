@@ -247,7 +247,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		// re-prices the old route and the sibling announces its own).
 		let mut announcements = cluster.origin.consume().announced();
 		let first = announcements.next().await.expect("initial announce");
-		assert_eq!(first.pattern.as_prefix().expect("prefix announcement"), "cam");
+		assert_eq!(first.path.as_str(), "cam");
 
 		// ── sibling A drains with a redirect to sibling B ────────────────
 		session_a
@@ -286,7 +286,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		loop {
 			match tokio::time::timeout(Duration::from_millis(500), announcements.next()).await {
 				Err(_) => break,
-				Ok(Some(update)) if update.active => continue,
+				Ok(Some(update)) if update.kind.is_active() => continue,
 				Ok(event) => panic!("migration must not retract the path on the cluster origin: {event:?}"),
 			}
 		}
@@ -456,7 +456,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let first = within("broadcast announced through the MID-A leg", announcements.next())
 		.await
 		.expect("origin closed before the announce");
-	assert_eq!(first.pattern.as_prefix().expect("prefix announcement"), "diamond");
+	assert_eq!(first.path.as_str(), "diamond");
 
 	let bc = within("broadcast resolves on the subscriber origin", async {
 		let consumer = sub_origin.consume();
@@ -606,7 +606,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	loop {
 		match tokio::time::timeout(Duration::from_millis(500), announcements.next()).await {
 			Err(_) => break,
-			Ok(Some(update)) if update.active => continue,
+			Ok(Some(update)) if update.kind.is_active() => continue,
 			Ok(event) => panic!("failover must not retract the path under the subscriber: {event:?}"),
 		}
 	}

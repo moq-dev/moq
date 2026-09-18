@@ -20,14 +20,14 @@ public final class OriginProducer: Sendable {
         OriginConsumer(ffi.consume())
     }
 
-    /// Advertise `pattern` and serve the requests beneath it.
+    /// Advertise `prefix` and serve the requests beneath it.
     ///
-    /// `pattern` is in the path Pattern dialect; a prefix is spelled `foo/**`.
-    /// Wildcards are advertised, but only prefix-shaped patterns serve requests.
-    /// Create, `dynamic` if tracks are served on demand, populate,
+    /// A route claims `prefix` and every path beneath it (`""` claims every path).
+    /// A service that only serves some of them rejects the rest as they are
+    /// requested. Create, `dynamic` if tracks are served on demand, populate,
     /// then `BroadcastProducer.announce`.
-    public func dynamic(pattern: String, route: Route = Route()) throws -> OriginDynamic {
-        OriginDynamic(try ffi.dynamic(pattern: pattern, route: route))
+    public func dynamic(prefix: String, route: Route = Route()) throws -> OriginDynamic {
+        OriginDynamic(try ffi.dynamic(prefix: prefix, route: route))
     }
 
     /// Create a broadcast at `path`, returning the producer that feeds it.
@@ -165,8 +165,8 @@ public final class AnnounceConsumer: AsyncSequence, Sendable {
 
 /// A single route announcement or retraction.
 ///
-/// A route claims that paths under `pattern` can be served; it carries no
-/// broadcast. Resolve a specific path with `OriginConsumer.requestBroadcast`.
+/// A route claims that `path` and every path beneath it can be served; it
+/// carries no broadcast. Resolve a specific path with `OriginConsumer.requestBroadcast`.
 /// By convention a publisher announces each broadcast's exact path.
 public final class AnnounceUpdate: Sendable {
     let ffi: MoqAnnounceUpdate
@@ -175,13 +175,13 @@ public final class AnnounceUpdate: Sendable {
         self.ffi = ffi
     }
 
-    /// The announced route's pattern, relative to the `announced` prefix.
-    public var pattern: String {
-        ffi.pattern()
+    /// The prefix the route covers, relative to the `announced` prefix.
+    public var path: String {
+        ffi.path()
     }
 
     /// Whether the route is active (`true`) or was retracted (`false`). A
-    /// repeated active announcement for the same pattern is a metadata update.
+    /// repeated active announcement for the same path is a metadata update.
     public var active: Bool {
         ffi.active()
     }

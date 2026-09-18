@@ -190,13 +190,11 @@ discovery.run((effect) => {
 		for (;;) {
 			const entry = await Promise.race([effect.cancel, announced.next()]);
 			if (!entry) break;
-			const covered = entry.pattern.asPrefix();
-			if (covered === undefined) continue;
-			const path = Net.Path.from(covered);
+			const path = entry.path;
 			// Only catalog-backed broadcasts are watchable streams; this skips the relay's
 			// `.stats` broadcast (see the stats dashboard demo for that one).
 			if (!path.endsWith(".hang") && !path.endsWith(".msf")) continue;
-			if (entry.active) live.add(path);
+			if (Net.Announce.isActive(entry.kind)) live.add(path);
 			else live.delete(path);
 			broadcasts.set([...live].sort());
 		}

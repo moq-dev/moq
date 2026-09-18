@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import * as Announce from "./announced.ts";
 import type { Producer as BroadcastProducer } from "./broadcast.ts";
+import { Route } from "./hop.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 
@@ -16,25 +17,43 @@ test("next streams every appended event in order", async () => {
 	const producer = new Announce.Producer();
 	const consumer = producer.consume();
 
-	producer.append({ pattern: Path.Pattern.subtree(p("a")), active: true });
-	producer.append({ pattern: Path.Pattern.subtree(p("a")), active: false });
+	const route = Route.default;
+	producer.append({ path: p("a"), kind: "announced", route });
+	producer.append({ path: p("a"), kind: "retracted", route });
 
-	expect(await consumer.next()).toEqual({ pattern: Path.Pattern.subtree(p("a")), active: true });
-	expect(await consumer.next()).toEqual({ pattern: Path.Pattern.subtree(p("a")), active: false });
+	expect(await consumer.next()).toEqual({ path: p("a"), kind: "announced", route });
+	expect(await consumer.next()).toEqual({ path: p("a"), kind: "retracted", route });
+});
+
+test("the consumer is an async iterable of the same events", async () => {
+	const producer = new Announce.Producer();
+	const consumer = producer.consume();
+
+	const route = Route.default;
+	producer.append({ path: p("a"), kind: "announced", route });
+	producer.append({ path: p("a"), kind: "retracted", route });
+
+	const events = consumer[Symbol.asyncIterator]();
+	expect((await events.next()).value?.kind).toBe("announced");
+	expect((await events.next()).value?.kind).toBe("retracted");
+	// A close drops what was queued and ends the iteration.
+	producer.close();
+	expect((await events.next()).done).toBe(true);
 });
 
 test("a same-name re-announce is a distinct update", async () => {
 	const producer = new Announce.Producer();
 	const consumer = producer.consume();
 
-	// The stream is a log, not a set: it carries a redundant active:true as its own update rather
+	// The stream is a log, not a set: it carries a redundant announce as its own update rather
 	// than collapsing it. Deciding what a repeat means belongs to the session layer, which resolves
 	// a restart into either nothing (a route change) or an end + start (a new publisher).
-	producer.append({ pattern: Path.Pattern.subtree(p("a")), active: true });
-	producer.append({ pattern: Path.Pattern.subtree(p("a")), active: true });
+	const route = Route.default;
+	producer.append({ path: p("a"), kind: "announced", route });
+	producer.append({ path: p("a"), kind: "announced", route });
 
-	expect(await consumer.next()).toEqual({ pattern: Path.Pattern.subtree(p("a")), active: true });
-	expect(await consumer.next()).toEqual({ pattern: Path.Pattern.subtree(p("a")), active: true });
+	expect(await consumer.next()).toEqual({ path: p("a"), kind: "announced", route });
+	expect(await consumer.next()).toEqual({ path: p("a"), kind: "announced", route });
 });
 
 test("closing resolves next with undefined", async () => {

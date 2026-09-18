@@ -1680,8 +1680,8 @@ mod tests {
 			.await
 			.expect("announce timeout")
 			.expect("origin closed");
-		assert_eq!(update.pattern.as_prefix().expect("prefix announcement"), "test");
-		assert!(update.active);
+		assert_eq!(update.path.as_str(), "test");
+		assert!(update.kind.is_active());
 		let broadcast = consumer.request_broadcast("test").await.expect("resolve");
 
 		let mut track = broadcast

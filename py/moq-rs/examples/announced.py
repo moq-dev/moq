@@ -15,7 +15,7 @@ async def run(url: str, prefix: str, tls_verify: bool) -> None:
         print(f"watching route announcements under {prefix!r} at {url}")
         async for announcement in client.announced(prefix):
             sign = "+" if announcement.active else "-"
-            print(f"  {sign} {announcement.pattern}")
+            print(f"  {sign} {announcement.path}")
 
 
 def main() -> None:

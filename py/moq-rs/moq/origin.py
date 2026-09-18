@@ -23,8 +23,8 @@ from .subscribe import BroadcastConsumer
 class AnnounceUpdate:
     """A route announcement (or retraction) from :meth:`OriginConsumer.announced`.
 
-    A route claims that paths under :attr:`pattern` can be served; it carries no
-    broadcast. Resolve a specific path with :meth:`OriginConsumer.request_broadcast`.
+    A route claims that :attr:`path` and every path beneath it can be served; it
+    carries no broadcast. Resolve a specific path with :meth:`OriginConsumer.request_broadcast`.
     By convention a publisher announces each broadcast's exact path, so
     subscribers can enumerate broadcasts from routes.
     """
@@ -33,9 +33,9 @@ class AnnounceUpdate:
         self._inner = inner
 
     @property
-    def pattern(self) -> str:
-        """The announced route's pattern, relative to the ``announced`` prefix."""
-        return self._inner.pattern()
+    def path(self) -> str:
+        """The prefix the route covers, relative to the ``announced`` prefix."""
+        return self._inner.path()
 
     @property
     def active(self) -> bool:
@@ -130,7 +130,7 @@ class BroadcastRequest:
 
 
 class OriginDynamic:
-    """A served route: advertises a pattern and yields requests beneath it."""
+    """A served route: advertises a prefix and yields requests beneath it."""
 
     def __init__(self, inner: MoqOriginDynamic) -> None:
         self._inner = inner
@@ -189,7 +189,7 @@ class OriginProducer:
     """The publishing side of an origin: announce broadcasts for consumers to discover.
 
     Call :meth:`create_broadcast` to publish at a path, :meth:`consume` for a
-    matching :class:`OriginConsumer`, or :meth:`dynamic` to advertise a pattern
+    matching :class:`OriginConsumer`, or :meth:`dynamic` to advertise a prefix
     and serve on-demand requests. Create, :meth:`dynamic` if tracks are served
     on demand, populate, then :meth:`BroadcastProducer.announce`.
     """
@@ -208,14 +208,15 @@ class OriginProducer:
         """Create a consumer that discovers the broadcasts this origin publishes."""
         return OriginConsumer(self._inner.consume())
 
-    def dynamic(self, pattern: str, route: Route | None = None) -> OriginDynamic:
-        """Advertise ``pattern`` and serve the requests beneath it.
+    def dynamic(self, prefix: str, route: Route | None = None) -> OriginDynamic:
+        """Advertise ``prefix`` and serve the requests beneath it.
 
-        ``pattern`` is in the path Pattern dialect; a prefix is spelled ``foo/**``.
-        Wildcards are advertised, but only prefix-shaped patterns serve requests.
-        Hold the returned handle while the route should stay advertised.
+        A route claims ``prefix`` and every path beneath it (``""`` claims every
+        path). A service that only serves some of them rejects the rest as they
+        are requested. Hold the returned handle while the route should stay
+        advertised.
         """
-        return OriginDynamic(self._inner.dynamic(pattern, route if route is not None else Route()))
+        return OriginDynamic(self._inner.dynamic(prefix, route if route is not None else Route()))
 
     def create_broadcast(self, path: str) -> BroadcastProducer:
         """Create a broadcast at ``path``, returning the producer that feeds it.

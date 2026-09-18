@@ -9,9 +9,7 @@
 //! - each endpoint prices what subscribing from it costs via the RELAY_COST Setup
 //!   Option, so the two directions are priced independently;
 //! - every advertisement carries the HOP_PATH it traversed and the accumulated
-//!   ROUTE_COST of that path, as Key-Value-Pair message parameters, and a
-//!   PUBLISH_NAMESPACE is repriced with the same parameters on a REQUEST_UPDATE
-//!   ([`PublishNamespaceUpdate`](super::PublishNamespaceUpdate)).
+//!   ROUTE_COST of that path, as Key-Value-Pair message parameters.
 //!
 //! The semantics are the same ones moq-lite carries natively (see
 //! [`crate::origin::Route`]); this module is only the moq-transport binding.

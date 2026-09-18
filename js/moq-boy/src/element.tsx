@@ -139,13 +139,11 @@ export default class MoqBoy extends HTMLElement {
 				if (!entry) break;
 
 				// Skip nested paths (e.g. "viewer/..." sub-broadcasts).
-				const covered = entry.pattern.asPrefix();
-				if (covered === undefined) continue;
-				const suffix = Moq.Path.stripPrefix(prefix, Moq.Path.from(covered));
+				const suffix = Moq.Path.stripPrefix(prefix, entry.path);
 				if (!suffix || suffix.includes("/")) continue;
 
 				const id = suffix;
-				if (entry.active && !this.#sessions.has(id)) {
+				if (Moq.Announce.isActive(entry.kind) && !this.#sessions.has(id)) {
 					const config: GameConfig = {
 						sessionId: id,
 						connection: this.connection,
@@ -157,7 +155,7 @@ export default class MoqBoy extends HTMLElement {
 					const game = new Game(config);
 					this.#sessions.set(id, game);
 					this.games.set(new Map(this.#sessions));
-				} else if (!entry.active) {
+				} else if (entry.kind === "retracted") {
 					const game = this.#sessions.get(id);
 					if (game) {
 						game.close();

@@ -123,8 +123,8 @@ async fn workers_serve_quic_and_share_one_origin() {
 			.await
 			.unwrap_or_else(|_| panic!("subscriber {index} announcement timeout"))
 			.expect("origin closed");
-		assert_eq!(update.pattern.as_prefix().expect("prefix announcement"), "test");
-		assert!(update.active, "expected announce, got retraction");
+		assert_eq!(update.path.as_str(), "test");
+		assert!(update.kind.is_active(), "expected announce, got retraction");
 		let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test"))
 			.await
 			.unwrap_or_else(|_| panic!("subscriber {index} request timeout"))

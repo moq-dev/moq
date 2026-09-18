@@ -862,11 +862,9 @@ mod tests {
 		// Leave 46 bytes across two frames behind the live edge, then read 1234
 		// egress bytes out of the default-tier broadcast.
 		let update = announced.next().await.unwrap();
-		assert!(update.active);
+		assert!(update.kind.is_active());
 		let bc = egress
-			.request_broadcast(moq_net::Path::new(
-				update.pattern.as_prefix().expect("prefix announcement"),
-			))
+			.request_broadcast(moq_net::Path::new(update.path.as_str()))
 			.await
 			.unwrap();
 		let mut egress_sub = bc.track("video").unwrap().subscribe(None).await.unwrap();

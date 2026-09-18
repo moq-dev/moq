@@ -151,9 +151,8 @@ test("a max-length chain plus withheld responder is dropped", async () => {
 		),
 	);
 	expect(await announced.next()).toMatchObject({
-		pattern: Path.Pattern.subtree(Path.from("room")),
-		active: true,
-		anonymous: true,
+		path: Path.from("room"),
+		kind: "announced",
 		route: { hops: [PUBLISHER_A, UNKNOWN_HOP] },
 	});
 
@@ -175,9 +174,8 @@ test("an unidentified responder keeps hop 0 on a nonempty chain", async () => {
 		),
 	);
 	expect(await announced.next()).toMatchObject({
-		pattern: Path.Pattern.subtree(Path.from("room")),
-		active: true,
-		anonymous: true,
+		path: Path.from("room"),
+		kind: "announced",
 		route: { hops: [PUBLISHER_A, UNKNOWN_HOP] },
 	});
 
@@ -195,9 +193,8 @@ test("a received empty hop list is filled with hop 0 and marked anonymous", asyn
 		encodeAnnounceBroadcast(w, { status: "active", suffix: Path.from("room"), hops: [] }, Version.DRAFT_06),
 	);
 	expect(await announced.next()).toMatchObject({
-		pattern: Path.Pattern.subtree(Path.from("room")),
-		active: true,
-		anonymous: true,
+		path: Path.from("room"),
+		kind: "announced",
 		route: { hops: [UNKNOWN_HOP] },
 	});
 
@@ -219,9 +216,8 @@ test("a received chain with hop 0 is marked anonymous", async () => {
 		),
 	);
 	expect(await announced.next()).toMatchObject({
-		pattern: Path.Pattern.subtree(Path.from("room")),
-		active: true,
-		anonymous: true,
+		path: Path.from("room"),
+		kind: "announced",
 	});
 
 	announced.close();
@@ -241,7 +237,7 @@ test("a restart from the same publisher is a route change, not a republish", asy
 			Version.DRAFT_06,
 		),
 	);
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room")), active: true });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room"), kind: "announced" });
 
 	// Same publisher over an identical route. In-flight subscriptions resume across it,
 	// and there is no metadata to forward, so the subscriber must not surface a restart.
@@ -250,19 +246,19 @@ test("a restart from the same publisher is a route change, not a republish", asy
 	// A different publisher took the path: nothing carries over, so this one does surface,
 	// as an end before the start. Reaching it proves the identical reroute above emitted nothing.
 	await send((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [PUBLISHER_B] }, Version.DRAFT_06));
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room")), active: false });
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room")), active: true });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room"), kind: "retracted" });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room"), kind: "announced" });
 
 	// A third publisher takes over. The replacement above has to leave its own publisher on
 	// record, or this one reads as a first announcement and skips the end.
 	await send((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [PUBLISHER_C] }, Version.DRAFT_06));
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room")), active: false });
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room")), active: true });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room"), kind: "retracted" });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room"), kind: "announced" });
 
 	// And the new owner's own reroute is still transparent.
 	await send((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [PUBLISHER_C] }, Version.DRAFT_06));
 	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 0n }, Version.DRAFT_06));
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room")), active: false });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room"), kind: "retracted" });
 
 	announced.close();
 	subscriber.close();
@@ -282,8 +278,8 @@ test("a restart that re-prices the same publisher emits the new route", async ()
 		),
 	);
 	expect(await announced.next()).toMatchObject({
-		pattern: Path.Pattern.subtree(Path.from("room")),
-		active: true,
+		path: Path.from("room"),
+		kind: "announced",
 		route: { hops: [PUBLISHER_A, PEER], cost: { warm: 0n, cold: 0n } },
 	});
 
@@ -295,8 +291,8 @@ test("a restart that re-prices the same publisher emits the new route", async ()
 		),
 	);
 	expect(await announced.next()).toMatchObject({
-		pattern: Path.Pattern.subtree(Path.from("room")),
-		active: true,
+		path: Path.from("room"),
+		kind: "updated",
 		route: { hops: [PUBLISHER_A, PEER], cost: { warm: 4n, cold: 4n } },
 	});
 
@@ -314,13 +310,13 @@ test("a lite-05 duplicate announce follows the same restart rule", async () => {
 		encodeAnnounceBroadcast(w, { status: "active", suffix: Path.from("room"), hops }, Version.DRAFT_05);
 
 	await send(active([PUBLISHER_A]));
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room")), active: true });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room"), kind: "announced" });
 
 	// On lite-05 a restart travels as a duplicate ANNOUNCE rather than its own message.
 	await send(active([PUBLISHER_A]));
 	await send(active([PUBLISHER_B]));
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room")), active: false });
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room")), active: true });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room"), kind: "retracted" });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room"), kind: "announced" });
 
 	announced.close();
 	subscriber.close();
@@ -340,12 +336,12 @@ test("a restart from an unidentified publisher replaces rather than reroutes", a
 	await send((w) =>
 		encodeAnnounceBroadcast(w, { status: "active", suffix: Path.from("room"), hops: [] }, Version.DRAFT_06),
 	);
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room")), active: true });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room"), kind: "announced" });
 
 	// Nobody is named on either side, so this is not provably the same content.
 	await send((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [] }, Version.DRAFT_06));
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room")), active: false });
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room")), active: true });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room"), kind: "retracted" });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room"), kind: "announced" });
 
 	announced.close();
 	subscriber.close();
@@ -506,11 +502,11 @@ test("a restart replaces an announce that was skipped as a reflected loop", asyn
 
 	// The id stays live, so the peer may restart it into a route that is usable here.
 	await send((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [PUBLISHER_A] }, Version.DRAFT_06));
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room")), active: true });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room"), kind: "announced" });
 
 	// Retiring the id ends what the restart attached, and nothing else.
 	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 0n }, Version.DRAFT_06));
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room")), active: false });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room"), kind: "retracted" });
 
 	announced.close();
 	subscriber.close();
@@ -540,13 +536,13 @@ test("retiring an id whose announce was skipped ends nothing", async () => {
 			Version.DRAFT_06,
 		),
 	);
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("lobby")), active: true });
+	expect(await announced.next()).toMatchObject({ path: Path.from("lobby"), kind: "announced" });
 
 	// Retire the skipped one, then the live one. The first must surface nothing, so the
 	// only end a consumer sees is "lobby".
 	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 0n }, Version.DRAFT_06));
 	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 1n }, Version.DRAFT_06));
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("lobby")), active: false });
+	expect(await announced.next()).toMatchObject({ path: Path.from("lobby"), kind: "retracted" });
 
 	announced.close();
 	subscriber.close();
@@ -560,10 +556,10 @@ test("a draft-02 initial announcement can still be retracted", async () => {
 	// ANNOUNCE_INIT carries the initial set. These are advertisements like any other, so
 	// the peer may retract one later and the consumer has to hear about it.
 	await send((w) => new AnnounceInit([Path.from("room")]).encode(w, Version.DRAFT_02));
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room")), active: true });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room"), kind: "announced" });
 
 	await send((w) => encodeAnnounceBroadcast(w, { status: "ended", suffix: Path.from("room") }, Version.DRAFT_02));
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room")), active: false });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room"), kind: "retracted" });
 
 	announced.close();
 	subscriber.close();
@@ -585,7 +581,7 @@ test("a duplicate start is reported even when its own route reflects", async () 
 			Version.DRAFT_06,
 		),
 	);
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room")), active: true });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room"), kind: "announced" });
 
 	// A second start for that path, carrying a route that loops back through us. Skipping
 	// it must not pre-empt the violation: the peer sent two starts with no end between
@@ -641,7 +637,7 @@ test("a violation on a very long path still ends the session", async () => {
 	const long = Path.from("x".repeat(2000));
 	const active: AnnounceBroadcast = { status: "active", suffix: long, hops: [PUBLISHER_A] };
 	await send((w) => encodeAnnounceBroadcast(w, active, Version.DRAFT_06));
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(long), active: true });
+	expect(await announced.next()).toMatchObject({ path: long, kind: "announced" });
 
 	await send((w) => encodeAnnounceBroadcast(w, active, Version.DRAFT_06));
 	await expect(announced.next()).rejects.toThrow("duplicate announce");
@@ -662,7 +658,7 @@ test("a draft-04 duplicate start is a violation, not a restart", async () => {
 
 	const active: AnnounceBroadcast = { status: "active", suffix: Path.from("room"), hops: [PUBLISHER_A] };
 	await send((w) => encodeAnnounceBroadcast(w, active, Version.DRAFT_04));
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room")), active: true });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room"), kind: "announced" });
 
 	await send((w) => encodeAnnounceBroadcast(w, active, Version.DRAFT_04));
 
@@ -681,7 +677,7 @@ test("a draft-05 duplicate start is still a restart", async () => {
 
 	const active: AnnounceBroadcast = { status: "active", suffix: Path.from("room"), hops: [PUBLISHER_A] };
 	await send((w) => encodeAnnounceBroadcast(w, active, Version.DRAFT_05));
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room")), active: true });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room"), kind: "announced" });
 
 	// Same publisher over a new route: transparent, and emphatically not an error.
 	await send((w) => encodeAnnounceBroadcast(w, active, Version.DRAFT_05));
@@ -689,46 +685,9 @@ test("a draft-05 duplicate start is still a restart", async () => {
 	// A different publisher does surface, which is what proves the reroute above passed.
 	const replaced: AnnounceBroadcast = { status: "active", suffix: Path.from("room"), hops: [PUBLISHER_B] };
 	await send((w) => encodeAnnounceBroadcast(w, replaced, Version.DRAFT_05));
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room")), active: false });
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room")), active: true });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room"), kind: "retracted" });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room"), kind: "announced" });
 
 	announced.close();
-	subscriber.close();
-});
-
-test("literal pattern and prefix wire claims retain separate identities", async () => {
-	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
-	const announced = subscriber.announced();
-	await settle();
-	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
-	await send((w) =>
-		encodeAnnounceBroadcast(
-			w,
-			{
-				status: "active",
-				suffix: Path.from("room"),
-				hops: [PUBLISHER_A],
-			},
-			Version.DRAFT_06,
-		),
-	);
-	await send((w) =>
-		encodeAnnounceBroadcast(
-			w,
-			{
-				status: "pattern",
-				pattern: Path.Pattern.parse("room"),
-				hops: [PUBLISHER_A],
-				cost: 0n,
-			},
-			Version.DRAFT_06,
-		),
-	);
-	expect((await announced.next())?.pattern.text).toBe("room/**");
-	expect((await announced.next())?.pattern.text).toBe("room");
-	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 1n }, Version.DRAFT_06));
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.parse("room"), active: false });
-	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 0n }, Version.DRAFT_06));
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.parse("room/**"), active: false });
 	subscriber.close();
 });

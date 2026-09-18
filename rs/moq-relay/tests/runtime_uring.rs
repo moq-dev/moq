@@ -160,8 +160,8 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 			.await
 			.unwrap_or_else(|_| panic!("subscriber {index} announcement timeout"))
 			.expect("origin closed");
-		assert_eq!(update.pattern.as_prefix().expect("prefix announcement"), "test");
-		assert!(update.active, "expected announce, got retraction");
+		assert_eq!(update.path.as_str(), "test");
+		assert!(update.kind.is_active(), "expected announce, got retraction");
 		let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test"))
 			.await
 			.unwrap_or_else(|_| panic!("subscriber {index} request timeout"))
@@ -316,8 +316,8 @@ async fn an_mtls_client_authenticates_without_a_token() {
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	assert_eq!(update.pattern.as_prefix().expect("prefix announcement"), "test");
-	assert!(update.active, "expected announce, got retraction");
+	assert_eq!(update.path.as_str(), "test");
+	assert!(update.kind.is_active(), "expected announce, got retraction");
 	let announced = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test"))
 		.await
 		.expect("request timeout")
@@ -395,7 +395,7 @@ async fn uring_workers_write_qlog_traces() {
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	assert!(update.active, "expected announce, got retraction");
+	assert!(update.kind.is_active(), "expected announce, got retraction");
 
 	assert!(!running.is_finished(), "the relay stopped while serving");
 	drop(track);
