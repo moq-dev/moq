@@ -2338,6 +2338,166 @@ async fn rewind_flags_the_break_once_across_tracks() {
 	}
 }
 
+/// Regression for #3533: a content restart on a continuous transport timeline must
+/// not fence video for good. Only the audio importer re-locks at the join, stepping
+/// back by less than one audio frame; video never rewinds and never marks a new
+/// timeline. The join may cost one clock and PSI reset, but both renditions keep
+/// emitting across it.
+#[tokio::test(start_paused = true)]
+async fn content_restart_on_continuous_timeline_does_not_fence_video() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+
+	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
+	let video_track = broadcast
+		.create_track(broadcast.unique_name(".avc1"), hang::container::track_info())
+		.unwrap();
+	let audio_track = broadcast
+		.create_track(broadcast.unique_name(".aac"), hang::container::track_info())
+		.unwrap();
+	{
+		let mut guard = catalog.lock();
+		let mut video = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0,
+			level: 0x1f,
+			inline: false,
+		});
+		video.container = Container::Legacy;
+		video.description = Some(avcc);
+		guard.video.renditions.insert(video_track.name().to_string(), video);
+
+		let mut audio = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		audio.container = Container::Legacy;
+		guard.audio.renditions.insert(audio_track.name().to_string(), audio);
+	}
+
+	let mut idr = vec![0x65u8];
+	idr.extend(std::iter::repeat_n(0xAB, 300));
+	let mut video = Producer::new(video_track, HangContainer::Legacy);
+	let mut audio = Producer::new(audio_track, HangContainer::Legacy);
+
+	// One keyframe-led second per group on video, 100ms audio frames alongside it.
+	for sec in 0..4u64 {
+		video
+			.write(Frame {
+				timestamp: Timestamp::from_micros(sec * 1_000_000).unwrap(),
+				duration: None,
+				payload: length_prefixed(&[idr.as_slice()]),
+				keyframe: true,
+			})
+			.unwrap();
+		video.cut(None).unwrap();
+		for tenth in 0..10u64 {
+			audio
+				.write(Frame {
+					timestamp: Timestamp::from_micros(sec * 1_000_000 + tenth * 100_000).unwrap(),
+					duration: None,
+					payload: Bytes::from_iter((0..180u16).map(|b| (b ^ tenth as u16) as u8)),
+					keyframe: tenth == 0,
+				})
+				.unwrap();
+		}
+		audio.cut(None).unwrap();
+	}
+
+	let mut export = export_of(&consumer).await;
+	let before = drain_frames(&mut export).await;
+	assert_eq!(export.discontinuity(), 0, "no rewind yet");
+	assert_eq!(count_discontinuity(&before), 0);
+	let epoch = export.discontinuity();
+
+	// The join: video just continues forward with no marker. Audio alone re-locks,
+	// stepping back 5ms (less than one 100ms frame) below its own high-water mark
+	// on its new timeline. That sub-frame backwards step is the importer's
+	// re-lock after a resync, not a transport rewind.
+	audio.discontinuity().unwrap();
+	for tenth in 0..10u64 {
+		// 3.895s, 3.995s, ...: the first frame is the sub-frame backwards step.
+		let micros = 3_900_000 + tenth * 100_000 - 5_000;
+		audio
+			.write(Frame {
+				timestamp: Timestamp::from_micros(micros).unwrap(),
+				duration: None,
+				payload: Bytes::from_iter((0..180u16).map(|b| (b ^ tenth as u16) as u8)),
+				keyframe: tenth == 0,
+			})
+			.unwrap();
+	}
+	audio.cut(None).unwrap();
+	// Video continues on its old timeline: 4s, 5s, ... with no boundary.
+	for sec in 4..7u64 {
+		video
+			.write(Frame {
+				timestamp: Timestamp::from_micros(sec * 1_000_000).unwrap(),
+				duration: None,
+				payload: length_prefixed(&[idr.as_slice()]),
+				keyframe: true,
+			})
+			.unwrap();
+		video.cut(None).unwrap();
+	}
+	// Audio keeps advancing on the new timeline so the reset clock climbs past video.
+	for tenth in 10..30u64 {
+		let micros = 3_900_000 + tenth * 100_000 - 5_000;
+		audio
+			.write(Frame {
+				timestamp: Timestamp::from_micros(micros).unwrap(),
+				duration: None,
+				payload: Bytes::from_iter((0..180u16).map(|b| (b ^ tenth as u16) as u8)),
+				keyframe: tenth % 10 == 0,
+			})
+			.unwrap();
+		if tenth % 10 == 9 {
+			audio.cut(None).unwrap();
+		}
+	}
+
+	let after = drain_frames(&mut export).await;
+	assert_eq!(
+		export.discontinuity(),
+		epoch + 1,
+		"the single-track backwards step costs one reset"
+	);
+	assert_eq!(count_discontinuity(&after), 1, "the join is flagged exactly once");
+
+	// Both renditions carry the post-join span; video rejoined within one frame
+	// instead of stalling at 0.31 Mb/s worth of passthrough. PIDs are read off
+	// the pre-join PMT and counted raw: the post-join output opens with the
+	// discarded tail, so a stateful reader starting at `after` has no PAT yet.
+	let mut reader = TsPacketReader::new(Cursor::new(
+		before
+			.iter()
+			.flat_map(|f| f.payload.iter().copied())
+			.collect::<Vec<_>>(),
+	));
+	let (mut video_pid, mut audio_pid) = (None, None);
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(TsPayload::Pmt(pmt)) = packet.payload {
+			for es in &pmt.es_info {
+				match es.stream_type {
+					StreamType::H264 => video_pid = Some(es.elementary_pid),
+					StreamType::AdtsAac => audio_pid = Some(es.elementary_pid),
+					_ => {}
+				}
+			}
+		}
+	}
+	let (video_pid, audio_pid) = (
+		video_pid.expect("video PID in PMT").as_u16(),
+		audio_pid.expect("audio PID in PMT").as_u16(),
+	);
+	assert!(count_pid(&after, video_pid) > 0, "video kept emitting across the join");
+	assert!(count_pid(&after, audio_pid) > 0, "audio kept emitting across the join");
+	assert!(
+		after.iter().any(|f| f.timestamp.as_micros() >= 4_000_000),
+		"the program clock advanced past the join"
+	);
+}
+
 /// A DVB SI section larger than one TS packet must be reassembled and captured verbatim.
 /// `si_packet` only covers a single-packet section; a real SDT with several services (or a
 /// NIT) spans packets, exercising the `SectionReassembler` PUSI + continuity path that
