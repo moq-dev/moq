@@ -124,9 +124,10 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 	/// A locally configured price wins, since what we charge our own routing is local
 	/// policy. Otherwise we charge what the peer declared, which is how a server prices
 	/// a link at all: it cannot tell a sibling from a stranger, so the dialer that chose
-	/// the peer declares the price for both of them. Falls back to
-	/// [`super::DEFAULT_COST`] when neither priced it, and to `0` on a version that
-	/// carries no cost at all, whose routes rank on hop count alone.
+	/// the peer declares the price for both of them. A peer that declared no price but
+	/// prices its own egress into the routes it forwards (the Priced flag) is charged
+	/// nothing more. Falls back to [`super::DEFAULT_COST`] otherwise, and to `0` on a
+	/// version that carries no cost at all, whose routes rank on hop count alone.
 	///
 	/// Our own price short-circuits the peer's, so a session that configured one never
 	/// blocks on a SETUP to start routing.
@@ -137,13 +138,17 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		if !self.version.has_route_cost() {
 			return Poll::Ready(0);
 		}
-		match self.cost {
-			Some(cost) => Poll::Ready(cost),
-			None => self
-				.peer_setup
-				.poll_cost(waiter)
-				.map(|cost| cost.unwrap_or(super::DEFAULT_COST)),
+		if let Some(cost) = self.cost {
+			return Poll::Ready(cost);
 		}
+		if let Some(cost) = ready!(self.peer_setup.poll_cost(waiter)) {
+			return Poll::Ready(cost);
+		}
+		// Both fields come from the one SETUP already read above.
+		self.peer_setup.poll_priced(waiter).map(|priced| match priced {
+			true => 0,
+			false => super::DEFAULT_COST,
+		})
 	}
 
 	/// Apply one received announce message to the origin and the per-stream

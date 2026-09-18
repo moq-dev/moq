@@ -1402,6 +1402,28 @@ impl Request {
 		}
 	}
 
+	/// Declare that this end prices its own egress into the routes it forwards on
+	/// this session; see [`moq_net::server::Request::with_priced`].
+	pub fn with_priced(self) -> Self {
+		let Request {
+			transport,
+			url,
+			authority,
+			identity,
+			link,
+			kind,
+		} = self;
+		let kind = request_map!(kind, request => request.with_priced());
+		Request {
+			transport,
+			url,
+			authority,
+			identity,
+			link,
+			kind,
+		}
+	}
+
 	/// Accept the session, starting the MoQ session loops.
 	pub async fn ok(self) -> crate::Result<Session> {
 		Ok(request_into!(self.kind, request => request.ok().await?))

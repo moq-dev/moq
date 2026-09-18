@@ -760,6 +760,8 @@ The following Setup Parameters are defined:
 |------|-----------|-------------|
 | 0x5  | Hop       | Hop ID (i)  |
 |------|-----------|-------------|
+| 0x6  | Priced    | Priced (i)  |
+|------|-----------|-------------|
 
 ### Probe Parameter {#probe-parameter}
 The Probe Parameter advertises the sender's capability level when acting as a publisher on a [Probe Stream](#probe).
@@ -820,6 +822,16 @@ The Parameter Value is a variable-length integer; a value of 0 carries no identi
 Declaring it at setup gives the receiver the peer's identity before any other stream arrives, so route selection applies the same exclusion to the peer's subscriptions as to its announcements (see [Routing](#routing)), even on a session that never opens an Announce Stream.
 Either endpoint MAY send it; a subscriber-only endpoint with no identity MAY omit it, but a publisher SHOULD have a Hop ID regardless (see [ANNOUNCE_OK](#announce-ok)).
 A relay MUST NOT forward it.
+
+### Priced Parameter {#priced-parameter}
+The Priced Parameter declares that the sender folds the price of its own egress into both Route Costs of every announcement it forwards, so the receiver adds nothing more on arrival.
+
+The Parameter Value is a variable-length integer; any non-zero value sets the flag and 0 is equivalent to omitting it.
+A receiver that also received a [Cost Parameter](#cost-parameter) from the same endpoint ignores this one: a declared cost prices the link outright.
+Otherwise a receiver charges 0 for that direction instead of the default cost of 1, and MAY still charge a locally configured value.
+
+This is how a relay that measures its links prices them: the measured value can change over the life of the session, and the sender carries each change as an [ANNOUNCE_UPDATE](#announce-update) of the routes it forwards rather than a new SETUP.
+Both endpoints send it independently and a relay MUST NOT forward it.
 
 
 ## ANNOUNCE_REQUEST {#announce-request}

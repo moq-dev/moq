@@ -1938,6 +1938,9 @@ impl Cluster {
 			.with_stats(self.stats.tier(self.cluster_tier()).session(""));
 		if let Some(cost) = cost {
 			client = client.with_cost(cost);
+		} else if self.pricing.is_some() {
+			// We price this link ourselves, so the peer charges nothing more on arrival.
+			client = client.with_priced();
 		}
 		// The GOAWAY lifecycle lives in the reconnect loop: on an upstream GOAWAY it
 		// dials the replacement while the old session keeps serving, so the old
@@ -2760,11 +2763,11 @@ impl Cluster {
 		peer: Option<Hop>,
 		declared: Option<u64>,
 	) -> Option<Metered> {
-		let pricing = self.pricing?;
-		let peer = peer?;
-		if declared.is_some() {
+		if !self.prices(peer, declared) {
 			return None;
 		}
+		let pricing = self.pricing?;
+		let peer = peer?;
 		self.ensure_links();
 		let session = session.clone();
 		let mut link = Link::new(id, Some(peer.id()), pricing, self.links.clone());
@@ -2777,6 +2780,14 @@ impl Cluster {
 			}
 		});
 		Some(Metered(handle.abort_handle()))
+	}
+
+	/// Whether an accepted session's link is priced by measurement: measurement is
+	/// on, the peer declared an identity (a relay, not a leaf), and it declared no
+	/// price of its own, which would be the dialer's configured policy for the link.
+	/// Decides the Priced flag in our SETUP as well as whether a meter runs.
+	pub(crate) fn prices(&self, peer: Option<Hop>, declared: Option<u64>) -> bool {
+		self.pricing.is_some() && peer.is_some() && declared.is_none()
 	}
 
 	/// Price a dialed cluster connection by measurement across its reconnects.

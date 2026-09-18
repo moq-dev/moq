@@ -16,6 +16,7 @@ pub struct Server {
 	publish: Option<origin::Consumer>,
 	subscribe: Option<origin::Producer>,
 	stats: stats::Session,
+	priced: bool,
 	versions: Versions,
 }
 
@@ -47,6 +48,13 @@ impl Server {
 	/// Pass [`stats::Session::default`] (a no-op context) to opt out.
 	pub fn with_stats(mut self, stats: stats::Session) -> Self {
 		self.stats = stats;
+		self
+	}
+
+	/// Declare that this end prices its own egress into the routes it forwards
+	/// (moq-lite-06+); see [`Client::with_priced`](crate::Client::with_priced).
+	pub fn with_priced(mut self) -> Self {
+		self.priced = true;
 		self
 	}
 
@@ -101,6 +109,7 @@ impl Server {
 				cost: None,
 				// Filled by `lite::start` from the attached origin handles.
 				hop: None,
+				priced: self.priced,
 			}
 		} else {
 			lite::Setup::default()
@@ -747,6 +756,13 @@ where
 		self
 	}
 
+	/// Declare that this end prices its own egress into the routes it forwards on
+	/// this session (moq-lite-06+); see [`Client::with_priced`](crate::Client::with_priced).
+	pub fn with_priced(mut self) -> Self {
+		self.inner_mut().server.priced = true;
+		self
+	}
+
 	fn inner_mut(&mut self) -> &mut RequestInner<S, R> {
 		self.inner.as_mut().expect("request already responded")
 	}
@@ -969,6 +985,7 @@ mod tests {
 			role,
 			cost: None,
 			hop,
+			priced: false,
 		}
 		.encode(&mut buf, v)
 		.unwrap();

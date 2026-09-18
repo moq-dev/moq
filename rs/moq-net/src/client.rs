@@ -19,6 +19,7 @@ pub struct Client {
 	versions: Versions,
 	setup_path: Option<String>,
 	cost: Option<u64>,
+	priced: bool,
 	peer_hop: Option<crate::Hop>,
 }
 
@@ -102,6 +103,16 @@ impl Client {
 		self
 	}
 
+	/// Declare that this end prices its own egress into the routes it forwards
+	/// (moq-lite-06+), so the peer charges nothing more on arrival instead of its
+	/// default of 1. What a relay pricing its links by measurement sets; the price
+	/// itself is applied with [`crate::Session::set_egress`]. A configured
+	/// [`cost`](Self::with_cost) still prices the link outright.
+	pub fn with_priced(mut self) -> Self {
+		self.priced = true;
+		self
+	}
+
 	/// Assign an origin (hop) id to the peer, used whenever the peer doesn't declare
 	/// one itself.
 	///
@@ -173,6 +184,7 @@ impl Client {
 				cost: self.cost,
 				// Filled by `lite::start` from the attached origin handles.
 				hop: None,
+				priced: self.priced,
 			}
 		} else {
 			lite::Setup::default()

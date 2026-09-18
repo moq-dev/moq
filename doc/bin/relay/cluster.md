@@ -74,9 +74,11 @@ A relay pricing its links publishes them under `.internal/links/<hop id>` as a
 JSON track, and reads its peers' tables to name, at `info`, every direct link
 that a two-hop path through another peer beats by more than the hop penalty.
 Routing takes such a detour on its own; the log is what tells an operator which
-backbone edges are worth having. A relay that measures nothing (`measure =
-false`, or an older release) is priced at 1 per link by its peers, so mixing
-the two in one cluster ranks its links as nearly free.
+backbone edges are worth having. A pricing relay says so in its SETUP, so a peer
+charges nothing more for the link on arrival; a peer on a release without that
+flag still adds its default of 1, and a relay that measures nothing (`measure =
+false`, or an older release) is priced at 1 per link by its peers, which ranks
+its links as nearly free next to measured ones.
 
 To price a link by hand instead, add `?cost=N` to the peer URL. A configured
 price is the operator's policy for that link, so both ends keep it and neither
