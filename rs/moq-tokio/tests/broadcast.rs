@@ -2772,6 +2772,143 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 		.expect("server task failed");
 }
 
+/// A wildcard grant on both ends of a session. The subscriber asks for the grant's
+/// literal head (`room`) and lands only what its scope admits; the server's grant
+/// (`server_scope`) filters what it advertises and serves. Every wire still carries
+/// prefix announcements; arbitrary patterns are local authorization and filtering.
+async fn wildcard_scope_test(version: &str, server_scope: &str) {
+	let scope = |text: &str| moq_net::Patterns::from(text.parse::<moq_net::Pattern>().unwrap());
+
+	// ── publisher (server): rooms with a chat and an audio track each ──
+	let pub_origin = moq_tokio::origin::spawn(Hop::random());
+	let mut broadcasts = Vec::new();
+	for path in [
+		"room/alice/chat",
+		"room/alice/audio",
+		"room/bob/chat",
+		"lobby/alice/chat",
+	] {
+		let mut broadcast = pub_origin.create_broadcast(path).expect("create broadcast");
+		broadcast.announce(Default::default()).expect("announce");
+		let mut track = broadcast.create_track("data", None).expect("create track");
+		let mut group = track.append_group().expect("append group");
+		group
+			.write_frame(moq_net::Timestamp::ZERO, path.as_bytes())
+			.expect("write frame");
+		group.finish().expect("finish group");
+		broadcasts.push((broadcast, track));
+	}
+	// The server's own grant excludes bob: the client never learns of his chat.
+	let publish = pub_origin
+		.consume()
+		.scope(&scope(server_scope))
+		.expect("scope publish origin");
+
+	let mut server_config = moq_tokio::listen::Config::default();
+	server_config.bind = Some("[::]:0".to_string());
+	server_config.tls.generate = vec!["localhost".into()];
+	server_config.version = vec![version.parse().unwrap()];
+	let server = server_config.init(Default::default()).expect("init server");
+	let mut server = server.listen().await.expect("failed to listen");
+	let addr = server.local_addr().expect("local addr");
+
+	// ── subscriber (client): every room's chat ──
+	let sub_origin = moq_tokio::origin::spawn(Hop::random());
+	let consume = sub_origin.scope(&scope("room/*/chat")).expect("scope consume origin");
+	let sub_consumer = consume.consume();
+	let mut announcements = sub_consumer.announced();
+
+	let mut client_config = moq_tokio::connect::Config::default();
+	client_config.tls.insecure = Some(true);
+	client_config.version = vec![version.parse().unwrap()];
+	let client = client_config.init(Default::default()).expect("init client");
+	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
+
+	let server_handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("no incoming connection");
+		let session = request.with_publisher(publish).ok().await?;
+		let _broadcasts = broadcasts;
+		let _ = session.closed().await;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let client = client.with_subscriber(consume);
+	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+		.await
+		.expect("client connect timed out")
+		.expect("client connect failed");
+
+	// Exactly alice's chat: bob's is outside the server's grant, alice's audio and the
+	// lobby are outside the client's. The match pins the room.
+	let update = next_announce(&mut announcements).await;
+	assert_eq!(update.path.as_str(), "room/alice/chat");
+	assert_eq!(update.captures, Some(vec!["alice".parse::<moq_net::Pattern>().unwrap()]));
+	assert!(update.kind.is_active());
+	assert!(
+		tokio::time::timeout(Duration::from_millis(200), announcements.next())
+			.await
+			.is_err(),
+		"a path outside one of the grants was announced"
+	);
+
+	// The granted path serves; the excluded ones are refused before the wire.
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("room/alice/chat"))
+		.await
+		.expect("request timed out")
+		.expect("announced broadcast resolves");
+	let mut sub = bc.track("data").unwrap().subscribe(None).await.expect("subscribe");
+	let mut group = tokio::time::timeout(TIMEOUT, sub.recv_group())
+		.await
+		.expect("recv_group timed out")
+		.expect("recv_group failed")
+		.expect("track closed");
+	let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+		.await
+		.expect("read_frame timed out")
+		.expect("read_frame failed")
+		.expect("group closed");
+	assert_eq!(frame.payload.as_ref(), b"room/alice/chat");
+	for path in ["room/alice/audio", "room/bob/chat", "lobby/alice/chat"] {
+		let refused = sub_consumer.request_broadcast(path).await.err();
+		assert!(
+			matches!(refused, Some(moq_net::Error::Unroutable)),
+			"{path}: {refused:?}"
+		);
+	}
+
+	drop(connection);
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server task failed");
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_wildcard_scopes_lite_05() {
+	wildcard_scope_test("moq-lite-05", "room/alice/**").await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_wildcard_scopes_lite_06() {
+	wildcard_scope_test("moq-lite-06-wip", "room/alice/**").await;
+}
+
+/// A leading-wildcard server grant still filters literal prefix announcements.
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_wildcard_server_scope_lite_06() {
+	wildcard_scope_test("moq-lite-06-wip", "*/alice/chat").await;
+}
+
+/// Older wires use the same literal-head interest and local filtering.
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_wildcard_server_scope_lite_05() {
+	wildcard_scope_test("moq-lite-05", "*/alice/chat").await;
+}
+
 /// Reverse of the usual direction: a publish-only client (`with_publisher`, no `with_subscriber`)
 /// serving a subscribe-only server (`with_subscriber`, no `with_publisher`). The server is also
 /// interested in a disjoint "denied" prefix the client can't serve, so the server's
