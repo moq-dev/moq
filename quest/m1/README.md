@@ -24,11 +24,12 @@ does not require it.
 
 ## Quests
 
-- [One auth path](/quest/m1/auth-one-path.md) - the server and public modes become clients of the same `Admissions` queue the embedder answers, a reshape of the unpublished auth API that is dev-line work by priority, not a gate
+- [One auth path](/quest/m1/auth-one-path.md) - Server, Public, and Refuse become tasks on the `Admissions` queue; `admit()` stays send-plus-await; `Mode` is gone
 - [Announce event](/quest/m1/api-net-announce.md) - publishers announce prefixes on every wire, consumers scoped by a pattern read the covered path already trimmed, with no `as_prefix().expect()` at 89 call sites
 - [Origin scoping](/quest/m1/api-net-origin.md) - `scope(root, patterns)` is one fallible call, a fresh origin has a random hop, and the handles stop derefing to `Hop`
 - [Bindings announce match](/quest/m1/api-origin-scopes.md) - every binding takes a pattern scope and reports the announce match with its captures
 - [PathPrefixes](/quest/m1/api-path-prefixes.md) - the unused moq_net::PathPrefixes type is deleted before the release
+- [Route cost](/quest/m1/api-route-cost.md) - `Route::with_hop` and `Cost: From<(u64, u64)>` go; ffi and libmoq build `Hops` and `Cost::from_warm_cold`
 - [moq-tokio shapes](/quest/m1/api-tokio-shapes.md) - a `Drop` on `Listener`, a worker `Member` that cannot be cross-wired, `std::time::Duration` fields, one construction idiom, no six-argument merge
 - [@moq/net API](/quest/m1/api-js-net.md) - one error namespace with Rust's names, one connect shape, one path-to-broadcast call, `Time.Milli` everywhere, wire-layer methods internal
 - [@moq/auth API](/quest/m1/api-js-auth.md) - `Key` and `KeySet` namespaces with moq-auth's verbs instead of `load`/`signWith`

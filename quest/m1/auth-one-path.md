@@ -2,34 +2,39 @@
 
 ## Goal
 
-`moq_relay::Auth` has one admission path. Today it has four: `Server` asks
-`moq_auth::Client`, `Public` hands out a fixed lease, `Refuse` says no, and
-`Embedded` queues an `Admission` for whoever holds the `Admissions`. The
-embedder's path is the general one: a `connect` request goes out, a `Lease`
-or an `auth::Error` comes back, and a `lease::Producer` somewhere drives the
-session for as long as it runs. The other three could be tasks answering the
-same queue, so a change to how a session is admitted, re-checked, or ended is
-made once.
+`moq_relay::Auth` has one admission path. `admit()` is send-plus-await on
+the `Admissions` queue. `--auth-url`, `--auth-public`, and refuse are
+decider tasks that answer that queue; embedded is the same queue with no
+task, so the embedder answers it. A change to how a session is admitted,
+re-checked, or ended is made once.
+
+`--auth-url` / `--auth-public` / refuse / embedded stay as configuration.
+`Mode` is gone. Gateways still do not call `admit`. `admit_fixed` stays the
+LAN bypass and is not a fifth mode. Not this quest: the lease clock, in-band
+tokens, or a live stats retier.
 
 ## Plan
 
-Unplanned. The shape landed with the embedded mode, so this quest is the
-decision whether to fold the rest onto it:
+Fold Server, Public, and Refuse onto the queue Embedded already uses.
 
-- `auth::Config::init` would spawn the decider: for `--auth-url`, a task that
-  takes each `Admission`, calls `Client::connect(request)`, and answers
-  `grant(consumer)` or `refuse(err.into())`, one spawned task per admission so
-  a slow server does not serialize connects; for `--auth-public`, a task
-  answering `grant(lease::Consumer::fixed(grant))`. `Refuse` stays a mode, or becomes a
-  task answering `auth::Error::Refused`: a dropped `Admissions` is an outage
-  (502), not a policy.
-- The costs to weigh: one channel hop and one task per admission on the
-  server path; `init` needing a Tokio runtime, which
-  `a_public_config_admits_anonymous_and_certificate_alike` today proves it
-  does not; and `Auth` no longer being self-contained, so a clone kept past
-  the decider task admits nothing.
-- The upside: `Mode` disappears, `admit` is `send` plus `await`, and the
-  server path is tested through the same `Decider` the embedded tests use.
+- `Auth` always holds the `Admission` sender. `admit()` sends and awaits the
+  oneshot, the way Embedded does today, including the ten-second bound.
+- `Config::init` builds that queue and spawns the matching decider, so it
+  needs a Tokio runtime. `a_public_config_admits_anonymous_and_certificate_alike`
+  becomes a `#[tokio::test]`. Empty config (no url, no public) still means
+  embedded: `Relay::load` returns `Admissions` and spawns nothing.
+- `--auth-url`: a loop on `Admissions::next` that `tokio::spawn`s one task
+  per admission, `Client::connect(request)`, then `grant` or `refuse`. A slow
+  server does not serialize connects.
+- `--auth-public`: a loop that answers `grant(lease::Consumer::fixed(grant))`.
+- Refuse (`Auth::refuse`, LAN-only with no listener): a loop that answers
+  `auth::Error::Refused`. A dropped `Admissions` stays an outage (502), not a
+  policy.
+- Dropping every `Auth` clone ends `next()` with `None` and the decider
+  exits. Dropping the decider first makes later `admit()` fail unavailable,
+  the same as dropping `Admissions` today.
+- `Mode` is deleted. The server path is tested through the same grant/refuse
+  answers the embedded tests already use.
 
 How a downstream embedder uses the landed API, for reference. moq.pro's edge
 serves the contract on a unix socket today and points `--auth-url` at itself;
@@ -56,9 +61,12 @@ while let Some(admission) = admissions.next().await {
 
 `drive` is the edge's re-check loop: sleep the cadence, `decide(.., true)`,
 `producer.update` or `producer.revoke`, and `producer.closed()` for the end
-event with the totals the session reported through `lease::Consumer::close`. The unix socket, the axum router, and the JSON
-round trip go away; the gateways keep calling `auth.admit` and now reach the
-same loop.
+event with the totals the session reported through `lease::Consumer::close`.
+The unix socket, the axum router, and the JSON round trip go away; the
+gateways keep not calling `admit`, and relay/CLI `--listen` keep calling it.
+
+Public API: breaking on moq-relay's unpublished auth module (`Mode` gone,
+`init` requires a runtime). Wire: none.
 
 ## Related
 
