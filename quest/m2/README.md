@@ -46,6 +46,7 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 ## Quests
 
 - [Origin narrowing](/quest/m2/origin-narrowing.md) - a live origin grant narrows in place and ends the subscriptions it no longer covers, the deafen boundary #2714 asked for
+- [Session push](/quest/m2/session-revalidate.md) - the internal listener re-checks sessions by id, path, or address now, so a kick lands in one round trip and the cadence stops carrying it
 - [Binding audio tests](/quest/m2/binding-audio-tests.md) - every binding proves the Opus frame duration and throwing setters it exposes, and smoke-full publishes audio with an explicit config
 - [Decode format](/quest/m2/ffi-decode-format.md) - the C-only decode pixel format knob reaches every uniffi binding
 - [JSON mutate](/quest/m2/json-mutate.md) - Rust gains the closure edit JS already has, beside the guard
