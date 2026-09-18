@@ -24,8 +24,9 @@ A `test/smoke/clients/cpp` client joins `just test smoke-full`, and
   installs its own (`moq::set_executor`) before the first call, and that
   continuations must not block on the moq-ffi runtime thread.
 - Build: `cpp/CMakeLists.txt` builds `libmoq_ffi` (staticlib, features
-  `video`+`audio`) through Corrosion or a `cargo build` custom command, compiles
-  `cpp/ffi`, installs headers, `moqConfig.cmake`, and `moq.pc`. Windows MSVC,
+  `video`+`audio`) with the same `cargo build` custom command and
+  `BUILD_RUST_LIB` switch `rs/libmoq/CMakeLists.txt` uses (no Corrosion, so
+  the two CMake entry points stay alike), compiles `cpp/ffi`, installs headers, `moqConfig.cmake`, and `moq.pc`. Windows MSVC,
   macOS, and Linux, both architectures, matching `libmoq.yml`'s matrix.
 - Release: `release-cpp.yml` mirrors `libmoq.yml` (tag `cpp-v*`, nightly
   dry-run through the `workflow_call` chain), producing one tarball per target
