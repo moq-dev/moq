@@ -26,7 +26,7 @@ as plain async methods. No callbacks.
 
 Mode `qmux`: implement `qmux::transport::{Transport, Writer, Reader}` over one
 reliable ordered str0m channel, the way `ws::Upgraded` does, and feed
-`qmux::Session` through `transport::Async` like `websocket.rs`.
+`qmux::Session` through `transport::Session` like `websocket.rs`.
 
 Mode `stream`: a native `poll::Session` where each moq stream is a str0m
 channel, with the control channel for reset codes and the unreliable datagram
