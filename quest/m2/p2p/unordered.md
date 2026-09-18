@@ -15,7 +15,10 @@ transport parameter, `unordered`, that both sides must send for the relaxed
 rule to apply, and receiver-side reassembly by offset for STREAM frames when
 it does. Once [qmux on the QUIC core](/quest/m2/quic/qmux.md) lands, that
 reassembly is QUIC's own receive buffer and this quest is the parameter plus
-the binding flip; before it, do not build a second reassembly buffer.
+the binding flip; before it, do not build a second reassembly buffer. One
+record is one SCTP message, so the unordered writer emits frames for only
+one stream per record; mixing streams in a record would stall both on one
+lost chunk and is forbidden when unordered is on.
 
 Frames that QUIC itself handles out of order (MAX_DATA, MAX_STREAM_DATA,
 RESET_STREAM by final size) need nothing. Params-first setup still holds

@@ -28,12 +28,16 @@ a short header 64 to 127, as long as the fixed bit is set, so every backend
 config disables QUIC-bit greasing (RFC 9287) explicitly; quinn and quiche
 turn it on by default and nothing here disables it today. SRT does not fit:
 its data packets start with a 0 bit and its control packets with a 1, so both
-overlap. SRT is demuxed by flow instead. A packet from an unknown 4-tuple
-whose first byte is 0x80 and control type is 0 is an induction handshake and
-pins that 4-tuple to SRT; every later packet from a pinned 4-tuple is SRT
-regardless of byte. Anything else from an unknown 4-tuple with a QUIC-shaped
-first byte is QUIC, which handles its own migration by connection id. RTP
-from an unknown 4-tuple cannot happen, because ICE runs first.
+overlap. SRT is demuxed by flow instead. A 4-tuple ICE has succeeded on is pinned
+to WebRTC in the outer table before any SRT test, because an RTP v2 packet
+with marker 0 and payload type 0 begins `80 00`, the same two bytes as a
+naive SRT induction check. SRT induction is classified only for still-
+unknown tuples, and the check is the full handshake header (control bit,
+type 0, and the SRT magic), not the first two bytes. Every later packet
+from a pinned 4-tuple follows that pin regardless of byte. Anything else
+from an unknown 4-tuple with a QUIC-shaped first byte is QUIC, which
+handles its own migration by connection id. An RTP-shaped packet from an
+unknown tuple is not SRT; it is dropped or given to the WebRTC mux.
 
 ### Virtual sockets
 

@@ -22,8 +22,12 @@ the router and its ALPN list are untouched. RTMP connections are the
 embedder's to hand to `moq_rtmp::Server::accept_stream`; upstream nothing
 consumes them, so the relay logs and drops them unless a consumer is wired.
 
-The peek is non-destructive on `TcpStream` and on the rustls stream alike;
-add a bounded read timeout so an idle connection cannot hold the acceptor.
+The accept loop never peeks or handshakes. Each accepted socket is spawned
+onto its own task with a bounded read timeout; that task peeks, optionally
+terminates TLS, and yields `Accepted`. An idle or slow client stalls only
+its own task, so a peer that connects and sends nothing cannot block later
+accepts. The peek is non-destructive on `TcpStream` and on the rustls
+stream alike.
 
 Tests: an HTTP request, a WebSocket upgrade, a raw RTMP C0, and an RTMPS C0
 against one listener each land in the right arm.

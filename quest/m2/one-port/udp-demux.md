@@ -31,6 +31,8 @@ STUN: a `stun` virtual socket answered by a small responder in `moq-sock`,
 Binding request to Binding success with XOR-MAPPED-ADDRESS, str0m's
 `StunMessage` or a maintained crate for the codec, behind a per-source token
 bucket and a global budget since the answer is up to 2.2 times the request.
+The per-source table is fixed-capacity with expiry, or a hashed/stateless
+limiter; spoofed sources cannot grow it.
 An ICE connectivity check is also a Binding request, so the STUN class splits
 on the USERNAME attribute: a request carrying one belongs to a WebRTC session
 and goes to the mux, which reads the local ufrag from it; a request without
@@ -42,6 +44,8 @@ Off by default in `moq-relay`, on with `--stun`, following
 WebRTC: `moq_rtc::server::mux::Mux` gains `Mux::feed(src, bytes)` and a
 constructor over a virtual socket, so it stops binding its own port; its
 advertised candidates become the shared address. `Config.udp_bind` goes.
+When ICE succeeds on a 4-tuple the mux reports it and the outer flow table
+pins that tuple to WebRTC, so later RTP cannot be classified as SRT.
 
 Tests: a unit test per first-byte class routes to the right virtual socket;
 an integration test runs a QUIC client, a STUN Binding round trip, and a WHIP
