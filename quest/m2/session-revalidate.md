@@ -42,8 +42,11 @@ lets it live on the unauthenticated internal plane.
   into every `Connection`, holds each admitted session's `moq_auth::Request`
   as the server saw it, its start time, and a handle that wakes `supervise`,
   which then calls `revalidate()` on the lease it owns. A session registers
-  after `admit` and leaves on close, io_uring and tokio sessions alike; LAN
-  peers and one-shot `http` requests are not sessions and stay out.
+  after `admit` and leaves on close, io_uring and tokio sessions alike, and
+  so does the built-in WebSocket path: `serve_ws` in `websocket.rs` admits
+  and runs `handle_socket` without a `Connection`, so it takes the registry
+  through `WebState` and selects on the same wake. LAN peers and one-shot
+  `http` requests are not sessions and stay out.
   `Relay::sessions()` exposes the registry so an embedder's own listeners
   register too.
 - **The filter.** `session::Filter` is the partial request: `id` and every
@@ -83,7 +86,8 @@ lets it live on the unauthenticated internal plane.
   reply flips: a push by id closes a refused session with `Unauthorized`
   well inside the cadence and its `end` says `refused`; a path pattern
   and a CIDR each match the right subset of three sessions and leave the
-  rest untouched; an empty filter reaches all; a retier arrives on the
+  rest untouched; a WebSocket session is listed and closes on a push like
+  a QUIC one; an empty filter reaches all; a retier arrives on the
   next reply; `GET /sessions` lists what the push would match without
   its `query`; an unknown field and a `query` filter are refused. The CLI
   test drives `moq auth revalidate` against the same fixture.
