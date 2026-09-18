@@ -24,4 +24,4 @@ the consumer to the other.
 
 ## Related
 
-- [Web P2P](/quest/m3/p2p/README.md) - the watcher-side route pick that line needs
+- [P2P](/quest/m2/p2p/README.md) - the watcher-side route pick that line needs

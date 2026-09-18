@@ -100,6 +100,8 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 - [Transport upgrade](/quest/m2/transport-upgrade/README.md) - a session that came up over WebSocket moves to QUIC once the QUIC dial lands, handing over at a group boundary
 - [Custom QUIC](/quest/m2/quic/README.md) - noq as the upstream for per-stream
   ACK progress, reliable reset, hierarchical scheduling, and qmux
+- [P2P](/quest/m2/p2p/README.md) - opted-in clients serve each other over data channels and iroh while the relay stays the rendezvous and the fallback, under application policy
+- [One port](/quest/m2/one-port/README.md) - a relay speaks QUIC, STUN, WebRTC media, and SRT on one UDP port and HTTP, RTMP, and RTMPS on one TCP port
 - [Scope track priority](/quest/m2/track-priority-scope.md) - priority orders one owner's streams, and a shared cluster session is fair across tenants
 - [Stream sessions](/quest/m2/uring-tcp/README.md) - serve WebSocket and HTTP from the io_uring workers, where io_uring pays off most
 - [IETF on the ring](/quest/m2/uring-ietf.md) - the io_uring workers serve moq-transport sessions too, so a uring relay drops no client protocol
