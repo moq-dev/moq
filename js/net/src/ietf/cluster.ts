@@ -7,7 +7,8 @@
  * - each endpoint declares its own Hop ID via the HOP_ID Setup Option, which is also what
  *   negotiates the extension;
  * - every advertisement carries the HOP_PATH it traversed and the accumulated ROUTE_COST
- *   of that path, as Key-Value-Pair message parameters on PUBLISH_NAMESPACE and NAMESPACE.
+ *   of that path, as Key-Value-Pair message parameters on PUBLISH_NAMESPACE and NAMESPACE,
+ *   and a PUBLISH_NAMESPACE is repriced with the same parameters on a REQUEST_UPDATE.
  *
  * These are the semantics moq-lite carries natively on every announcement (see
  * `lite/announce.ts`); this module is the moq-transport binding, negotiated on draft-17+
@@ -82,6 +83,21 @@ export interface Advert {
 }
 
 /**
+ * The cluster parameters a REQUEST_UPDATE on a PUBLISH_NAMESPACE carries: only what
+ * changed, since an omitted parameter keeps its value.
+ *
+ * @internal
+ */
+export interface Update {
+	/** HOP_PATH, when the route changed. */
+	hops?: Hop[];
+
+	/** ROUTE_COST, when the cost changed. A cost that dropped to 0 arrives as an explicit
+	 * 0 here, unlike the advertisement itself where absent means 0. */
+	cost?: bigint;
+}
+
+/**
  * Read the peer's Hop ID out of its SETUP, or `undefined` when it did not negotiate.
  *
  * @internal
@@ -150,25 +166,41 @@ export function loops(advert: Advert, self: Hop): boolean {
  * @internal
  */
 export function intoParams(advert: Advert): Parameters {
-	validate(advert.hops);
-
 	const params = new Parameters();
-
-	// The entries fill the value, so they are written with no count of their own and framed
-	// by the parameter's own length prefix.
-	const hops = advert.hops.map((hop) => Varint.encodeLeadingOnes(hop));
-	const value = new Uint8Array(hops.reduce((total, hop) => total + hop.length, 0));
-	let offset = 0;
-	for (const hop of hops) {
-		value.set(hop, offset);
-		offset += hop.length;
-	}
-	params.hopPath = value;
+	params.hopPath = encodeHops(advert.hops);
 
 	// Absent means 0, so a free path sends nothing.
 	if (advert.cost !== 0n) params.routeCost = advert.cost;
 
 	return params;
+}
+
+/**
+ * Write a REQUEST_UPDATE's parameters: only what changed, and a cost of 0 explicitly,
+ * since an omitted parameter keeps its value.
+ *
+ * @internal
+ */
+export function updateIntoParams(update: Update): Parameters {
+	const params = new Parameters();
+	if (update.hops !== undefined) params.hopPath = encodeHops(update.hops);
+	if (update.cost !== undefined) params.routeCost = update.cost;
+	return params;
+}
+
+/** Write a HOP_PATH value: the entries fill it with no count of their own, framed by the
+ * parameter's own length prefix. */
+function encodeHops(hops: Hop[]): Uint8Array {
+	validate(hops);
+
+	const encoded = hops.map((hop) => Varint.encodeLeadingOnes(hop));
+	const value = new Uint8Array(encoded.reduce((total, hop) => total + hop.length, 0));
+	let offset = 0;
+	for (const hop of encoded) {
+		value.set(hop, offset);
+		offset += hop.length;
+	}
+	return value;
 }
 
 /**
@@ -205,25 +237,53 @@ export function fromParams(params: Parameters): Advert {
 	try {
 		const value = params.hopPath;
 		if (value === undefined) throw new Error("advertisement is missing HOP_PATH");
-
-		const hops: Hop[] = [];
-		let rest = value;
-		while (rest.length > 0) {
-			// A short read here means the entries did not exactly fill the length.
-			const [hop, remain] = Varint.decodeLeadingOnes(rest);
-			hops.push(HopSchema.parse(hop));
-			rest = remain;
-
-			// Bail before the buffer does: a hostile length would otherwise cost us one
-			// allocation per entry all the way to 64KB of parameter value.
-			if (hops.length > MAX_HOPS) throw new Error(`hop count exceeds maximum ${MAX_HOPS}`);
-		}
-
-		validate(hops);
-		return { hops, cost: params.routeCost ?? 0n };
+		return { hops: decodeHops(value), cost: params.routeCost ?? 0n };
 	} catch (err) {
 		throw new ProtocolViolation(reason(err), { cause: err });
 	}
+}
+
+/**
+ * Read a REQUEST_UPDATE's parameters: each is optional, and a malformed HOP_PATH is the
+ * same violation it is on an advertisement.
+ *
+ * @internal
+ */
+export function updateFromParams(params: Parameters): Update {
+	try {
+		const value = params.hopPath;
+		return { hops: value === undefined ? undefined : decodeHops(value), cost: params.routeCost };
+	} catch (err) {
+		throw new ProtocolViolation(reason(err), { cause: err });
+	}
+}
+
+/**
+ * The advertisement after `update` lands on `held`: an omitted parameter keeps its value.
+ *
+ * @internal
+ */
+export function apply(held: Advert, update: Update): Advert {
+	return { hops: update.hops ?? held.hops, cost: update.cost ?? held.cost };
+}
+
+/** Read a HOP_PATH value: bare varints filling the parameter, with no count of their own. */
+function decodeHops(value: Uint8Array): Hop[] {
+	const hops: Hop[] = [];
+	let rest = value;
+	while (rest.length > 0) {
+		// A short read here means the entries did not exactly fill the length.
+		const [hop, remain] = Varint.decodeLeadingOnes(rest);
+		hops.push(HopSchema.parse(hop));
+		rest = remain;
+
+		// Bail before the buffer does: a hostile length would otherwise cost us one
+		// allocation per entry all the way to 64KB of parameter value.
+		if (hops.length > MAX_HOPS) throw new Error(`hop count exceeds maximum ${MAX_HOPS}`);
+	}
+
+	validate(hops);
+	return hops;
 }
 
 /**

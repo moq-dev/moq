@@ -63,6 +63,78 @@ impl Message for PublishNamespace<'_> {
 	}
 }
 
+/// REQUEST_UPDATE (0x02) on a PUBLISH_NAMESPACE stream: the cluster parameters that
+/// changed (draft-lcurley-moq-cluster, Updating an Advertisement).
+///
+/// An omitted parameter keeps its value (moq-transport Section 9.5), so a cost that
+/// dropped to 0 is sent as an explicit 0, unlike the advertisement itself where absent
+/// means 0. Draft-17+ only: the extension negotiates on nothing earlier.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublishNamespaceUpdate {
+	/// The update's own Request ID; every REQUEST_UPDATE consumes one.
+	pub request_id: RequestId,
+	/// HOP_PATH, when the route changed.
+	pub hops: Option<cluster::HopPath>,
+	/// ROUTE_COST, when the cost changed.
+	pub cost: Option<u64>,
+}
+
+impl PublishNamespaceUpdate {
+	/// The update that moves a peer holding `held` to `next`: only what changed.
+	pub fn between(request_id: RequestId, held: &cluster::Advert, next: &cluster::Advert) -> Self {
+		Self {
+			request_id,
+			hops: (held.hops != next.hops).then(|| next.hops.clone()),
+			cost: (held.cost != next.cost).then_some(next.cost),
+		}
+	}
+
+	/// The advertisement after this update is applied to `held`.
+	pub fn apply(&self, held: &cluster::Advert) -> cluster::Advert {
+		cluster::Advert {
+			hops: self.hops.clone().unwrap_or_else(|| held.hops.clone()),
+			cost: self.cost.unwrap_or(held.cost),
+		}
+	}
+}
+
+impl Message for PublishNamespaceUpdate {
+	const ID: u64 = 0x02;
+
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		match version {
+			Version::Draft14 | Version::Draft15 | Version::Draft16 => return Err(EncodeError::Version),
+			Version::Draft17 => {
+				self.request_id.encode(w, version)?;
+				0u64.encode(w, version)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
+			}
+			_ => self.request_id.encode(w, version)?,
+		}
+		encode_params!(w, version,
+			cluster::HOP_PATH => self.hops,
+			cluster::ROUTE_COST => self.cost,
+		);
+		Ok(())
+	}
+
+	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		let request_id = match version {
+			Version::Draft14 | Version::Draft15 | Version::Draft16 => return Err(DecodeError::Version),
+			Version::Draft17 => {
+				let request_id = RequestId::decode(r, version)?;
+				let _required_request_id_delta = u64::decode(r, version)?;
+				request_id
+			}
+			_ => RequestId::decode(r, version)?,
+		};
+		decode_params!(r, version,
+			cluster::HOP_PATH => hops: Option<cluster::HopPath>,
+			cluster::ROUTE_COST => cost: Option<u64>,
+		);
+		Ok(Self { request_id, hops, cost })
+	}
+}
+
 /// Write the Parameters field of an advertisement.
 ///
 /// On a session that negotiated the MoQ Cluster extension every advertisement carries
@@ -432,6 +504,60 @@ mod tests {
 
 		let mut buf = BytesMut::new();
 		assert!(msg.encode_msg(&mut buf, Version::Draft17).is_err());
+	}
+
+	fn hop_path(ids: &[u64]) -> cluster::HopPath {
+		let hops: Vec<crate::Hop> = ids.iter().map(|&id| crate::Hop::new(id).unwrap()).collect();
+		cluster::HopPath::new(crate::Hops::try_from(hops).unwrap())
+	}
+
+	/// An update carries only what changed, and a cost that dropped to 0 is an explicit 0:
+	/// REQUEST_UPDATE keeps an omitted parameter, so leaving it out would keep the old price.
+	#[test]
+	fn update_carries_only_the_change_and_an_explicit_zero() {
+		let held = cluster::Advert {
+			hops: hop_path(&[7, 9]),
+			cost: 4,
+		};
+		let cheaper = cluster::Advert {
+			cost: 0,
+			..held.clone()
+		};
+
+		let msg = PublishNamespaceUpdate::between(RequestId(2), &held, &cheaper);
+		assert_eq!(msg.hops, None, "an unchanged path is omitted");
+		assert_eq!(msg.cost, Some(0), "a cost of 0 is sent explicitly");
+
+		for version in [Version::Draft17, Version::Draft18, Version::Draft21] {
+			let encoded = encode_message(&msg, version);
+			let decoded: PublishNamespaceUpdate = decode_message(&encoded, version).unwrap();
+			assert_eq!(decoded, msg, "{version}");
+			assert_eq!(decoded.apply(&held), cheaper, "{version}");
+		}
+
+		let rerouted = cluster::Advert {
+			hops: hop_path(&[7, 11]),
+			cost: 4,
+		};
+		let msg = PublishNamespaceUpdate::between(RequestId(4), &held, &rerouted);
+		assert_eq!(msg.hops, Some(hop_path(&[7, 11])));
+		assert_eq!(msg.cost, None, "an unchanged cost is omitted");
+		let decoded: PublishNamespaceUpdate =
+			decode_message(&encode_message(&msg, Version::Draft19), Version::Draft19).unwrap();
+		assert_eq!(decoded.apply(&held), rerouted);
+	}
+
+	/// The extension negotiates on draft-17+ only, so the update has no legacy shape.
+	#[test]
+	fn update_has_no_legacy_encoding() {
+		let msg = PublishNamespaceUpdate {
+			request_id: RequestId(2),
+			hops: None,
+			cost: Some(0),
+		};
+		let mut buf = BytesMut::new();
+		assert!(msg.encode_msg(&mut buf, Version::Draft16).is_err());
+		assert!(decode_message::<PublishNamespaceUpdate>(&[0x02, 0x00], Version::Draft16).is_err());
 	}
 
 	#[test]

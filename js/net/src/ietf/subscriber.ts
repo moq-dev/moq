@@ -3,7 +3,7 @@ import * as broadcast from "../broadcast.ts";
 import { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation, reason } from "../error.ts";
 import * as netGroup from "../group.ts";
-import { Cost, type Route, UNKNOWN_HOP } from "../hop.ts";
+import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { scopePrefix } from "../internal.ts";
 import * as Path from "../path.ts";
 import type { Reader, Stream } from "../stream.ts";
@@ -18,10 +18,11 @@ import { Frame, type Group as GroupMessage } from "./object.ts";
 import { toWire } from "./priority.ts";
 import { type Publish, PublishError } from "./publish.ts";
 import {
-	PublishNamespace,
+	type PublishNamespace,
 	PublishNamespaceDone,
 	PublishNamespaceError,
 	PublishNamespaceOk,
+	PublishNamespaceUpdate,
 } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { joinFilter, Subscribe, SubscribeError, SubscribeOk, Unsubscribe } from "./subscribe.ts";
@@ -192,6 +193,22 @@ export class Subscriber {
 	}
 
 	/**
+	 * Replace the stored route for a path that is already announced. A no-op when the
+	 * hops and cost did not change; otherwise consumers hear `updated` so a forwarder
+	 * can reprice without retracting.
+	 */
+	#updateAnnounce(path: Path.Valid, route: Route) {
+		const existing = this.#announced.get(path);
+		if (existing === undefined || routesEqual(existing.route, route)) return;
+		existing.route = route;
+		console.debug(`announced: broadcast=${path} rerouted`);
+		for (const [consumer, prefix] of this.#announcedConsumers) {
+			if (!Path.hasPrefix(prefix, path)) continue;
+			consumer.append({ path, kind: "updated", route });
+		}
+	}
+
+	/**
 	 * Drop one advertisement for a path, retracting it only once the last one goes.
 	 */
 	#detachAnnounce(path: Path.Valid) {
@@ -300,10 +317,14 @@ export class Subscriber {
 								continue;
 							}
 
-							// A repeat updates the advertisement; only the first is news.
-							if (!live.has(path)) {
+							// A repeat replaces the advertisement in place: HOP_PATH / ROUTE_COST
+							// can change without a NAMESPACE_DONE. Only the first is a new path.
+							const route = this.#route(entry.cluster);
+							if (live.has(path)) {
+								this.#updateAnnounce(path, route);
+							} else {
 								live.add(path);
-								this.#attachAnnounce(path, this.#route(entry.cluster));
+								this.#attachAnnounce(path, route);
 							}
 						} else if (msgType === SubscribeNamespaceEntryDone.id) {
 							const entry = await SubscribeNamespaceEntryDone.decode(stream.reader, version);
@@ -739,9 +760,11 @@ export class Subscriber {
 			attached = true;
 			this.#attachAnnounce(path, this.#route(msg.cluster));
 
-			// An advertisement is updated in place, by repeating PUBLISH_NAMESPACE on the
-			// stream that already carries it, so read until the stream ends rather than
-			// waiting on the close. Nothing else would deliver a re-parented route.
+			// An advertisement is updated in place with REQUEST_UPDATE on the stream that
+			// already carries it, so read until the stream ends rather than waiting on the
+			// close. Nothing else would deliver a re-parented route. What the peer holds
+			// is kept current, since an update carries only what changed.
+			let held = msg.cluster;
 			const done = version === Version.DRAFT_16 || legacy;
 			for (;;) {
 				if (await stream.reader.done()) break;
@@ -751,38 +774,63 @@ export class Subscriber {
 					await PublishNamespaceDone.decode(stream.reader, version);
 					break;
 				}
-				if (typeId !== PublishNamespace.id) {
+				// A repeated PUBLISH_NAMESPACE lands here too: a second request on the
+				// stream is the base draft's duplicate request ID.
+				if (typeId !== PublishNamespaceUpdate.id) {
 					throw new ProtocolViolation(
 						`unexpected message on publish_namespace stream: 0x${typeId.toString(16)}`,
 					);
 				}
 
-				const update = await PublishNamespace.decode(stream.reader, version, Cluster.negotiated(this.#cluster));
+				const update = await PublishNamespaceUpdate.decode(stream.reader, version);
 
-				// The stream is the advertisement, so an update on it must name the same
-				// one. Applying a mismatched update would retarget this path with metadata
-				// meant for a different request.
-				if (update.requestId !== msg.requestId || update.trackNamespace !== path) {
-					throw new ProtocolViolation("publish_namespace update does not match its stream");
+				// The parameters exist only on a session that negotiated the extension;
+				// anywhere else they are the peer's violation.
+				if (held === undefined) {
+					if (update.update.hops !== undefined || update.update.cost !== undefined) {
+						throw new ProtocolViolation("cluster parameters on a session that negotiated none");
+					}
+				} else {
+					// A different original publisher is a different advertisement, which the
+					// draft has withdrawn and made again: its content is not continuous with
+					// what is held. Refusing the update closes the stream, which is that
+					// withdrawal.
+					if (update.update.hops !== undefined && update.update.hops[0] !== held.hops[0]) {
+						console.warn(`publish_namespace update changes the publisher: broadcast=${path}`);
+						await stream.writer.u53(RequestError.id);
+						await new RequestError({
+							errorCode: toRequestCode("not_supported", "publish_namespace", version),
+							reasonPhrase: "a new publisher is a new advertisement",
+						}).encode(stream.writer, version);
+						stream.close();
+						return;
+					}
+					held = Cluster.apply(held, update.update);
 				}
 
-				// A path that now runs through us is unusable, so give it back. Keep
-				// reading: this stream is the advertisement's only channel, so a later
-				// clean path arrives here or nowhere.
-				if (this.#reflected(update.cluster)) {
+				// A path that now runs through us is unusable, so give it back. The update
+				// itself is accepted, and reading continues: this stream is the
+				// advertisement's only channel, so a later clean path arrives here or
+				// nowhere.
+				if (this.#reflected(held)) {
 					if (attached) {
 						attached = false;
 						console.debug(`publish_namespace now loops back, detaching: broadcast=${path}`);
 						this.#detachAnnounce(path);
 					}
-					continue;
+				} else if (!attached) {
+					// Re-attach: a clean path replaced the reflected one we detached from.
+					attached = true;
+					this.#attachAnnounce(path, this.#route(held));
+				} else {
+					this.#updateAnnounce(path, this.#route(held));
 				}
 
-				// Re-attach: a clean path replaced the reflected one we detached from.
-				if (!attached) {
-					attached = true;
-					this.#attachAnnounce(path, this.#route(update.cluster));
-				}
+				// Nothing here can fail to apply, so every update is acknowledged. A leaf
+				// routes nothing, so a repricing changes nothing it holds; consumers still
+				// hear the new route so a forwarder can reprice.
+				await stream.writer.u53(RequestOk.id);
+				await new RequestOk({}).encode(stream.writer, version);
 			}
 		} finally {
 			if (legacy) this.#legacyRequests.delete(path);

@@ -1,3 +1,4 @@
+import { ProtocolViolation, reason } from "../error.ts";
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Cluster from "./cluster.ts";
@@ -67,6 +68,65 @@ export class PublishNamespace {
 
 		await Parameters.decode(r, version); // ignore parameters
 		return new PublishNamespace({ requestId, trackNamespace });
+	}
+}
+
+/**
+ * REQUEST_UPDATE (0x02) on a PUBLISH_NAMESPACE stream: the cluster parameters that
+ * changed (draft-lcurley-moq-cluster, Updating an Advertisement).
+ *
+ * Draft-17+ only: the extension negotiates on nothing earlier. We are a leaf and never
+ * reprice, so only a relay sends one to us.
+ */
+export class PublishNamespaceUpdate {
+	static id = 0x02;
+
+	/** The update's own Request ID; every REQUEST_UPDATE consumes one. */
+	requestId: bigint;
+	update: Cluster.Update;
+
+	constructor({ requestId, update }: { requestId: bigint; update: Cluster.Update }) {
+		this.requestId = requestId;
+		this.update = update;
+	}
+
+	async #encode(w: Writer, version: IetfVersion): Promise<void> {
+		PublishNamespaceUpdate.#modern(version);
+		await w.u62(this.requestId);
+		if (version === Version.DRAFT_17) {
+			await w.u62(0n); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
+		}
+		await Cluster.updateIntoParams(this.update).encode(w, version);
+	}
+
+	async encode(w: Writer, version: IetfVersion): Promise<void> {
+		return Message.encode(w, (wr) => this.#encode(wr, version));
+	}
+
+	static async decode(r: Reader, version: IetfVersion): Promise<PublishNamespaceUpdate> {
+		return Message.decode(r, (rd) => PublishNamespaceUpdate.#decode(rd, version));
+	}
+
+	static #modern(version: IetfVersion) {
+		if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
+			throw new Error("REQUEST_UPDATE on PUBLISH_NAMESPACE requires draft-17+");
+		}
+	}
+
+	static async #decode(r: Reader, version: IetfVersion): Promise<PublishNamespaceUpdate> {
+		PublishNamespaceUpdate.#modern(version);
+		const requestId = await r.u62();
+		if (version === Version.DRAFT_17) {
+			await r.u62(); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
+		}
+		// A malformed block is the peer's violation, as it is on the advertisement itself.
+		let params: Parameters;
+		try {
+			params = await Parameters.decode(r, version);
+		} catch (err) {
+			throw new ProtocolViolation(reason(err), { cause: err });
+		}
+		return new PublishNamespaceUpdate({ requestId, update: Cluster.updateFromParams(params) });
 	}
 }
 

@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import type * as announce from "../announced.ts";
+import { ProtocolViolation } from "../error.ts";
 import { type Hop, HopSchema } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
@@ -8,7 +9,7 @@ import type * as track from "../track.ts";
 import { ControlStreamAdapter, NativeSession } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
 import { type GroupFlags, Group as GroupMessage } from "./object.ts";
-import { PublishNamespace } from "./publish_namespace.ts";
+import { PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { Subscribe, SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
@@ -384,6 +385,34 @@ test("an inline NAMESPACE that starts looping back is retracted", async () => {
 	expect(await announced.next()).toMatchObject({ path: Path.from("theirs"), kind: "retracted" });
 });
 
+/**
+ * NAMESPACE has no REQUEST_UPDATE, so a peer reprices one by re-sending it. The repeat is
+ * neither a duplicate nor a retraction: the stored route changes and consumers hear
+ * `updated`.
+ */
+test("a repeated NAMESPACE reprices in place", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
+
+	const announced = subscriber.announced();
+	const subscription = await acceptSubscribeNamespace(pair.client);
+
+	await inlineNamespace(subscription, Path.from("theirs"), { hops: [PEER], cost: 4n });
+	expect(await announced.next()).toMatchObject({
+		path: Path.from("theirs"),
+		kind: "announced",
+		route: { hops: [PEER], cost: { warm: 4n, cold: 4n } },
+	});
+
+	await inlineNamespace(subscription, Path.from("theirs"), { hops: [PEER], cost: 0n });
+	expect(await announced.next()).toMatchObject({
+		path: Path.from("theirs"),
+		kind: "updated",
+		route: { hops: [PEER], cost: { warm: 0n, cold: 0n } },
+	});
+});
+
 /** The same rule on the other kind of advertisement, which is a request we can refuse. */
 test("a PUBLISH_NAMESPACE that looped back through us is refused", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
@@ -438,9 +467,10 @@ test("a NAMESPACE missing its hop path closes the session", async () => {
 });
 
 /**
- * An advertisement is updated in place, by repeating PUBLISH_NAMESPACE on the stream that
- * carries it. One re-parented onto a route through us is unusable, so the announcement has
- * to go even though the stream stays open.
+ * An advertisement is updated in place with REQUEST_UPDATE on the stream that carries it,
+ * and each update is acknowledged. One re-parented onto a route through us is unusable,
+ * so the announcement has to go even though the stream stays open, and a later clean
+ * path on the same stream brings it back.
  */
 test("a PUBLISH_NAMESPACE update that starts looping back is detached", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
@@ -450,27 +480,168 @@ test("a PUBLISH_NAMESPACE update that starts looping back is detached", async ()
 	const announced = subscriber.announced();
 	await acceptSubscribeNamespace(pair.client);
 
-	const advert = (hops: Hop[]) =>
+	// Published by 11, relayed by the peer. Every update keeps that publisher.
+	const publisher = HopSchema.parse(11n);
+	const request = await Stream.open(pair.server, { version: VERSION });
+	const handler = subscriber.runPublishNamespace(
 		new PublishNamespace({
 			requestId: 0n,
 			trackNamespace: Path.from("theirs"),
-			cluster: { hops, cost: 0n },
-		});
-
-	const request = await Stream.open(pair.server, { version: VERSION });
-	const handler = subscriber.runPublishNamespace(advert([PEER]), request);
+			cluster: { hops: [publisher, PEER], cost: 0n },
+		}),
+		request,
+	);
 	expect(await announced.next()).toMatchObject({ path: Path.from("theirs"), kind: "announced" });
 
-	// The peer re-parents the namespace onto a route that runs back through us.
 	const peer = await nextStream(pair.client);
 	if (!peer) throw new Error("no PUBLISH_NAMESPACE stream");
-	await peer.writer.u53(PublishNamespace.id);
-	await advert([SELF, PEER]).encode(peer.writer, VERSION);
+	expect(await peer.reader.u53()).toBe(RequestOk.id);
+	await RequestOk.decode(peer.reader, VERSION);
+
+	// The peer re-parents the namespace onto a route that runs back through us.
+	await peer.writer.u53(PublishNamespaceUpdate.id);
+	await new PublishNamespaceUpdate({ requestId: 3n, update: { hops: [publisher, SELF, PEER] } }).encode(
+		peer.writer,
+		VERSION,
+	);
 
 	expect(await announced.next()).toMatchObject({ path: Path.from("theirs"), kind: "retracted" });
+	expect(await peer.reader.u53()).toBe(RequestOk.id);
+	await RequestOk.decode(peer.reader, VERSION);
+
+	// A clean path again, with the cost alongside: the path it lands on is the one held.
+	await peer.writer.u53(PublishNamespaceUpdate.id);
+	await new PublishNamespaceUpdate({ requestId: 5n, update: { hops: [publisher, PEER], cost: 0n } }).encode(
+		peer.writer,
+		VERSION,
+	);
+	expect(await announced.next()).toMatchObject({ path: Path.from("theirs"), kind: "announced" });
+	expect(await peer.reader.u53()).toBe(RequestOk.id);
+	await RequestOk.decode(peer.reader, VERSION);
 
 	peer.close();
 	await handler;
+});
+
+/**
+ * REQUEST_UPDATE keeps an omitted parameter, so an explicit ROUTE_COST of 0 lands on the
+ * path already held without disturbing the announcement. Consumers hear `updated` with the
+ * new cost; the stream ending is what retracts it.
+ */
+test("a PUBLISH_NAMESPACE repricing is acknowledged in place", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
+
+	const announced = subscriber.announced();
+	await acceptSubscribeNamespace(pair.client);
+
+	const request = await Stream.open(pair.server, { version: VERSION });
+	const handler = subscriber.runPublishNamespace(
+		new PublishNamespace({
+			requestId: 0n,
+			trackNamespace: Path.from("theirs"),
+			cluster: { hops: [PEER], cost: 4n },
+		}),
+		request,
+	);
+	expect(await announced.next()).toMatchObject({
+		path: Path.from("theirs"),
+		kind: "announced",
+		route: { hops: [PEER], cost: { warm: 4n, cold: 4n } },
+	});
+
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("no PUBLISH_NAMESPACE stream");
+	expect(await peer.reader.u53()).toBe(RequestOk.id);
+	await RequestOk.decode(peer.reader, VERSION);
+
+	await peer.writer.u53(PublishNamespaceUpdate.id);
+	await new PublishNamespaceUpdate({ requestId: 3n, update: { cost: 0n } }).encode(peer.writer, VERSION);
+	expect(await peer.reader.u53()).toBe(RequestOk.id);
+	await RequestOk.decode(peer.reader, VERSION);
+	expect(await announced.next()).toMatchObject({
+		path: Path.from("theirs"),
+		kind: "updated",
+		route: { hops: [PEER], cost: { warm: 0n, cold: 0n } },
+	});
+
+	// Still announced: the stream ending is what retracts it.
+	peer.close();
+	await handler;
+	expect(await announced.next()).toMatchObject({ path: Path.from("theirs"), kind: "retracted" });
+});
+
+/**
+ * An update whose first Hop ID differs names a different publisher, whose content is not
+ * continuous with what is held. The draft has the sender withdraw and advertise again
+ * instead, so the update is refused and the stream closed, which is that withdrawal.
+ */
+test("a PUBLISH_NAMESPACE update that changes the publisher is refused", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
+
+	const announced = subscriber.announced();
+	await acceptSubscribeNamespace(pair.client);
+
+	const request = await Stream.open(pair.server, { version: VERSION });
+	const handler = subscriber.runPublishNamespace(
+		new PublishNamespace({
+			requestId: 0n,
+			trackNamespace: Path.from("theirs"),
+			cluster: { hops: [HopSchema.parse(11n), PEER], cost: 0n },
+		}),
+		request,
+	);
+	expect(await announced.next()).toMatchObject({ path: Path.from("theirs"), kind: "announced" });
+
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("no PUBLISH_NAMESPACE stream");
+	expect(await peer.reader.u53()).toBe(RequestOk.id);
+	await RequestOk.decode(peer.reader, VERSION);
+
+	await peer.writer.u53(PublishNamespaceUpdate.id);
+	await new PublishNamespaceUpdate({ requestId: 3n, update: { hops: [HopSchema.parse(8n), PEER] } }).encode(
+		peer.writer,
+		VERSION,
+	);
+	expect(await peer.reader.u53()).toBe(RequestError.id);
+	await RequestError.decode(peer.reader, VERSION);
+
+	// The refusal closed the stream, which withdrew the advertisement.
+	await handler;
+	expect(await announced.next()).toMatchObject({ path: Path.from("theirs"), kind: "retracted" });
+});
+
+/**
+ * A second PUBLISH_NAMESPACE on the stream that already carries one is no longer an
+ * update: it is the base draft's duplicate request, a protocol violation.
+ */
+test("a repeated PUBLISH_NAMESPACE is a protocol violation", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
+
+	const announced = subscriber.announced();
+	await acceptSubscribeNamespace(pair.client);
+
+	const advert = new PublishNamespace({
+		requestId: 0n,
+		trackNamespace: Path.from("theirs"),
+		cluster: { hops: [PEER], cost: 0n },
+	});
+	const request = await Stream.open(pair.server, { version: VERSION });
+	const handler = subscriber.runPublishNamespace(advert, request);
+	expect(await announced.next()).toMatchObject({ path: Path.from("theirs"), kind: "announced" });
+
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("no PUBLISH_NAMESPACE stream");
+	await peer.writer.u53(PublishNamespace.id);
+	await advert.encode(peer.writer, VERSION);
+
+	await expect(handler).rejects.toThrow(ProtocolViolation);
+	expect(await announced.next()).toMatchObject({ path: Path.from("theirs"), kind: "retracted" });
 });
 
 /**

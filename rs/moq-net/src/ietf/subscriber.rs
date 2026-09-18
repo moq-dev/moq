@@ -950,7 +950,7 @@ where
 			}
 		}
 
-		// An endpoint updates an advertisement by re-sending it on the stream that
+		// An endpoint updates an advertisement with REQUEST_UPDATE on the stream that
 		// already carries it, so keep reading until the stream ends: a close on
 		// draft-17+, or v14-16's PublishNamespaceDone (see `terminal_publish_namespace`).
 		//
@@ -958,7 +958,7 @@ where
 		// update) is not released twice here.
 		let mut attached = true;
 		let res = self
-			.run_publish_namespace_updates(&mut stream, &path, request_id, peer, &mut attached)
+			.run_publish_namespace_updates(&mut stream, &path, msg.cluster, peer, &mut attached)
 			.await;
 
 		if attached {
@@ -994,11 +994,16 @@ where
 	}
 
 	/// Read advertisement updates off a live PUBLISH_NAMESPACE stream until it closes.
+	///
+	/// `held` is what the peer advertised, kept current because a REQUEST_UPDATE carries
+	/// only what changed. Each one is answered with REQUEST_OK, or REQUEST_ERROR and a
+	/// closed stream when it cannot be applied, which withdraws the advertisement
+	/// (moq-transport Section 9.5.1).
 	async fn run_publish_namespace_updates(
 		&mut self,
 		stream: &mut Stream<S, Version>,
 		path: &PathOwned,
-		request_id: RequestId,
+		mut held: Option<cluster::Advert>,
 		peer: cluster::Peer,
 		attached: &mut bool,
 	) -> Result<(), Error> {
@@ -1008,7 +1013,9 @@ where
 				None => return Ok(()),
 			};
 			let terminal = self.terminal_publish_namespace(type_id);
-			if type_id != ietf::PublishNamespace::ID && !terminal {
+			if type_id != ietf::PublishNamespaceUpdate::ID && !terminal {
+				// A repeated PUBLISH_NAMESPACE lands here too: a second request on the
+				// stream is the base draft's duplicate request ID.
 				tracing::warn!(type_id, "unexpected message on publish_namespace stream");
 				return Err(Error::UnexpectedMessage);
 			}
@@ -1025,41 +1032,79 @@ where
 				return Ok(());
 			}
 
-			let msg = ietf::PublishNamespace::decode_body(&mut data, self.version, peer.negotiated())?;
+			let msg = ietf::PublishNamespaceUpdate::decode_msg(&mut data, self.version)?;
 			// Junk inside the declared size would otherwise be applied silently, which
 			// is the one decode path that skipped the check the others make.
 			if !data.is_empty() {
 				return Err(Error::WrongSize);
 			}
 
-			// The stream is the advertisement, so an update on it must name the same one.
-			// Applying a mismatched update would retarget this path's routing with
-			// metadata meant for a different request.
-			if msg.request_id != request_id || msg.track_namespace.as_str() != path.as_str() {
-				tracing::warn!(%path, "publish_namespace update does not match its stream");
-				return Err(Error::ProtocolViolation);
-			}
+			// An omitted parameter keeps its value, so the update lands on what the peer
+			// already advertised. The parameters exist only on a session that negotiated
+			// the extension; anywhere else they are the peer's violation.
+			held = match &held {
+				Some(current) => {
+					// A different original publisher is a different advertisement, which
+					// the draft has withdrawn and made again: applying it in place would
+					// carry subscriptions across content that is not continuous. Refusing
+					// the update closes the stream, which is the withdrawal the peer owed.
+					if let Some(hops) = &msg.hops
+						&& hops.hops().iter().next() != current.hops.hops().iter().next()
+					{
+						tracing::warn!(%path, "publish_namespace update changes the publisher");
+						self.write_error(
+							stream,
+							msg.request_id,
+							&Error::Unsupported,
+							"a new publisher is a new advertisement",
+						)
+						.await?;
+						if stream.writer.finish().is_ok() {
+							let _ = stream.writer.closed().await;
+						}
+						return Ok(());
+					}
+					Some(msg.apply(current))
+				}
+				None if msg.hops.is_some() || msg.cost.is_some() => {
+					tracing::warn!(%path, "cluster parameters on a session that negotiated none");
+					return Err(Error::ProtocolViolation);
+				}
+				None => None,
+			};
 
 			// A path that now runs through us is unusable, so detach rather than keep
-			// serving it. Keep reading though: this stream is the only channel the
-			// advertisement has, so a later clean path arrives here or nowhere. Ending
-			// the stream is also not ours to do, since a peer MAY legitimately send a
-			// path carrying our Hop ID when a redundant sibling shares it.
-			let Some(advert) = self.route(msg.cluster.as_ref(), &peer) else {
+			// serving it. The update itself is accepted, and reading continues: this
+			// stream is the only channel the advertisement has, so a later clean path
+			// arrives here or nowhere. Ending the stream is also not ours to do, since a
+			// peer MAY legitimately send a path carrying our Hop ID when a redundant
+			// sibling shares it.
+			let Some(advert) = self.route(held.as_ref(), &peer) else {
 				if std::mem::take(attached) {
 					tracing::debug!(%path, "publish_namespace now loops back; detaching");
 					let _ = self.stop_announce(path.clone(), Detach::Graceful);
 				}
+				self.write_ok(stream, msg.request_id).await?;
 				continue;
 			};
 
 			tracing::debug!(%path, hops = advert.route.hops.len(), cost = ?advert.route.cost, "publish_namespace update");
-			match *attached {
-				true => self.update_announce(path.clone(), advert)?,
+			let applied = match *attached {
+				true => self.update_announce(path.clone(), advert),
 				// Re-attach: a clean path replaced the reflected one we detached from.
-				false => {
-					self.start_announce(path.clone(), advert)?;
-					*attached = true;
+				false => self.start_announce(path.clone(), advert).map(|()| *attached = true),
+			};
+
+			match applied {
+				Ok(()) => self.write_ok(stream, msg.request_id).await?,
+				Err(err) => {
+					tracing::warn!(%path, %err, "publish_namespace update refused");
+					self.write_error(stream, msg.request_id, &err, &err.to_string()).await?;
+					// The close is the withdrawal; the caller releases what was attached.
+					if stream.writer.finish().is_ok() {
+						let _ = stream.writer.closed().await;
+					}
+					return Ok(());
 				}
 			}
 		}
@@ -3964,6 +4009,81 @@ mod tests {
 		);
 	}
 
+	/// NAMESPACE has no REQUEST_UPDATE, so a peer reprices one by re-sending it on the
+	/// SUBSCRIBE_NAMESPACE stream. The repeat is neither a duplicate nor a violation: it
+	/// replaces the advertisement in place, and the route is never retracted for it.
+	#[tokio::test(start_paused = true)]
+	async fn a_re_sent_namespace_reprices_in_place() {
+		const VERSION: Version = Version::Draft19;
+
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let consumer = origin.consume();
+
+		let script = {
+			let log = crate::lite::test_transport::Log::default();
+			let mut writer =
+				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+			writer.encode(&ietf::RequestOk::ID).await.unwrap();
+			writer.encode(&ietf::RequestOk { request_id: None }).await.unwrap();
+			for cost in [4, 0] {
+				writer.encode(&ietf::Namespace::ID).await.unwrap();
+				writer
+					.encode(&ietf::Namespace {
+						suffix: crate::Path::new("x.hang"),
+						cluster: Some(cluster::Advert {
+							hops: hop_path(&[7, 9]),
+							cost,
+						}),
+					})
+					.await
+					.unwrap();
+			}
+			log.writes.lock().unwrap().clone()
+		};
+
+		let session = crate::lite::test_transport::ScriptedSession::new(script);
+		let (tasks, task_set) = crate::util::TaskSet::new();
+		std::mem::forget(task_set);
+		// A negotiated peer over a free link, so the route cost is what it advertised.
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer {
+			cluster: cluster::Peer {
+				hop: Some(crate::Hop::new(9).unwrap()),
+				cost: Some(0),
+			},
+			..Default::default()
+		});
+		let mut subscriber = Subscriber::new(
+			TestRuntime::new(),
+			session.clone(),
+			origin,
+			Control::new(None, false),
+			None,
+			peer_setup,
+			crate::Hop::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+			Default::default(),
+		);
+
+		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("").to_owned()));
+		for _ in 0..100 {
+			assert!(
+				futures::poll!(run.as_mut()).is_pending(),
+				"the stream stays open through a repeat"
+			);
+			if routed_now(&consumer, "x.hang").is_some_and(|route| route.cost.warm == 0) {
+				break;
+			}
+			settle().await;
+		}
+
+		let route = routed_now(&consumer, "x.hang").expect("still routed");
+		assert_eq!(route.cost.warm, 0, "the repeat repriced the route");
+	}
+
 	/// The peer explicitly retracting a namespace ends the broadcast immediately: it
 	/// said the namespace is gone, so a later create at the path is new content.
 	#[tokio::test(start_paused = true)]
@@ -4349,24 +4469,19 @@ mod tests {
 		);
 	}
 
-	/// The peer's advertisement updates, framed exactly as the update loop reads them,
-	/// built with the crate's own writer so the framing cannot drift from the encoder.
-	async fn publish_namespace_updates(
-		request_id: RequestId,
-		path: &str,
-		updates: &[Option<cluster::Advert>],
-	) -> Vec<u8> {
+	async fn publish_namespace_updates(updates: &[cluster::Advert]) -> Vec<u8> {
 		const VERSION: Version = Version::Draft19;
 		let log = crate::lite::test_transport::Log::default();
 		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
 
-		for cluster in updates {
-			writer.encode(&ietf::PublishNamespace::ID).await.unwrap();
+		for (i, advert) in updates.iter().enumerate() {
+			writer.encode(&ietf::PublishNamespaceUpdate::ID).await.unwrap();
 			writer
-				.encode(&ietf::PublishNamespace {
-					request_id,
-					track_namespace: crate::Path::new(path),
-					cluster: cluster.clone(),
+				.encode(&ietf::PublishNamespaceUpdate {
+					// Each update consumes a request id of the peer's parity.
+					request_id: RequestId(3 + 2 * i as u64),
+					hops: Some(advert.hops.clone()),
+					cost: Some(advert.cost),
 				})
 				.await
 				.unwrap();
@@ -4376,23 +4491,23 @@ mod tests {
 		writes.clone()
 	}
 
-	/// Build a subscriber whose peer replays `updates` on one PUBLISH_NAMESPACE stream,
-	/// with the advertisement already attached.
-	async fn reflected_harness(
+	/// Build a subscriber whose peer replays `script` on one PUBLISH_NAMESPACE stream,
+	/// with the advertisement already attached. The origin's driver is returned so a
+	/// test can tear the origin down underneath a live advertisement.
+	async fn update_harness(
 		self_origin: crate::Hop,
-		request_id: RequestId,
 		peer: &cluster::Peer,
 		attached: &cluster::Advert,
-		updates: &[Option<cluster::Advert>],
+		script: Vec<u8>,
 	) -> (
 		Subscriber<crate::lite::test_transport::ScriptedSession, TestRuntime>,
 		crate::origin::Consumer,
 		Stream<crate::lite::test_transport::ScriptedSession, Version>,
+		crate::origin::Driver,
 	) {
 		const VERSION: Version = Version::Draft19;
-		let script = publish_namespace_updates(request_id, "room/host", updates).await;
 		let session = crate::lite::test_transport::ScriptedSession::new(script);
-		let origin = crate::origin::Config::new(self_origin).produce();
+		let (origin, driver) = crate::origin::Producer::new(crate::origin::Config::new(self_origin));
 		let consumer = origin.consume();
 		let (tasks, task_set) = crate::util::TaskSet::new();
 		// The tests drive the loop directly, so nothing spawns; leaking keeps the
@@ -4419,7 +4534,45 @@ mod tests {
 		assert!(routed_now(&consumer, "room/host").is_some(), "attached to start with");
 
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		(subscriber, consumer, stream, driver)
+	}
+
+	/// Build a subscriber whose peer replays `updates` on one PUBLISH_NAMESPACE stream,
+	/// with the advertisement already attached.
+	async fn reflected_harness(
+		self_origin: crate::Hop,
+		peer: &cluster::Peer,
+		attached: &cluster::Advert,
+		updates: &[cluster::Advert],
+	) -> (
+		Subscriber<crate::lite::test_transport::ScriptedSession, TestRuntime>,
+		crate::origin::Consumer,
+		Stream<crate::lite::test_transport::ScriptedSession, Version>,
+	) {
+		let script = publish_namespace_updates(updates).await;
+		let (subscriber, consumer, stream, driver) = update_harness(self_origin, peer, attached, script).await;
+		// Dropping the driver tears the origin down, so leak it: these tests only
+		// need the synchronous half.
+		std::mem::forget(driver);
 		(subscriber, consumer, stream)
+	}
+
+	/// How many times `type_id` was written to the peer, as a one-byte message type.
+	fn replies(log: &crate::lite::test_transport::Log, type_id: u64) -> usize {
+		let writes = log.writes.lock().unwrap();
+		// A REQUEST_OK is the type, a two-byte length of 1, and an empty parameter
+		// block; a REQUEST_ERROR's body is longer. Counting the type at the start of
+		// each framed message keeps a body byte from being mistaken for a type.
+		let mut count = 0;
+		let mut at = 0;
+		while at + 3 <= writes.len() {
+			if writes[at] as u64 == type_id {
+				count += 1;
+			}
+			let len = u16::from_be_bytes([writes[at + 1], writes[at + 2]]) as usize;
+			at += 3 + len;
+		}
+		count
 	}
 
 	fn peer_9() -> cluster::Peer {
@@ -4451,12 +4604,11 @@ mod tests {
 	#[tokio::test]
 	async fn a_reflected_update_detaches_but_keeps_the_stream() {
 		let self_origin = crate::Hop::new(5).unwrap();
-		let request_id = RequestId(1);
 		let peer = peer_9();
 		let (clean, looped) = clean_and_looped();
 
-		let (mut subscriber, consumer, mut stream) =
-			reflected_harness(self_origin, request_id, &peer, &clean, &[Some(looped)]).await;
+		let (mut subscriber, consumer, mut stream) = reflected_harness(self_origin, &peer, &clean, &[looped]).await;
+		let log = subscriber.session.log.clone();
 
 		let path = crate::Path::new("room/host").to_owned();
 		let mut attached = true;
@@ -4464,7 +4616,7 @@ mod tests {
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 				&mut stream,
 				&path,
-				request_id,
+				Some(clean.clone()),
 				peer,
 				&mut attached,
 			));
@@ -4486,6 +4638,11 @@ mod tests {
 			"an unusable path must not stay attached"
 		);
 		assert!(!attached, "the caller must not release it a second time");
+		assert_eq!(
+			replies(&log, ietf::RequestOk::ID),
+			1,
+			"the update was applied, so it is acknowledged"
+		);
 	}
 
 	/// Having kept the stream, a later usable path re-attaches on it. This is the whole
@@ -4493,18 +4650,11 @@ mod tests {
 	#[tokio::test]
 	async fn a_clean_update_after_a_reflection_reattaches() {
 		let self_origin = crate::Hop::new(5).unwrap();
-		let request_id = RequestId(1);
 		let peer = peer_9();
 		let (clean, looped) = clean_and_looped();
 
-		let (mut subscriber, consumer, mut stream) = reflected_harness(
-			self_origin,
-			request_id,
-			&peer,
-			&clean,
-			&[Some(looped), Some(clean.clone())],
-		)
-		.await;
+		let (mut subscriber, consumer, mut stream) =
+			reflected_harness(self_origin, &peer, &clean, &[looped, clean.clone()]).await;
 
 		let path = crate::Path::new("room/host").to_owned();
 		let mut attached = true;
@@ -4512,7 +4662,7 @@ mod tests {
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 				&mut stream,
 				&path,
-				request_id,
+				Some(clean.clone()),
 				peer,
 				&mut attached,
 			));
@@ -4532,6 +4682,222 @@ mod tests {
 			routed_now(&consumer, "room/host").is_some(),
 			"the namespace is routable again",
 		);
+	}
+
+	/// The expected update: a relay that started carrying the namespace reprices it to
+	/// 0. REQUEST_UPDATE keeps an omitted parameter, so the 0 arrives explicit and alone,
+	/// lands on the path already held, and is answered REQUEST_OK.
+	#[tokio::test]
+	async fn an_explicit_zero_reprices_the_held_path() {
+		const VERSION: Version = Version::Draft19;
+		let self_origin = crate::Hop::new(5).unwrap();
+		// A free link, so the route cost is exactly what the peer advertised.
+		let peer = cluster::Peer {
+			hop: Some(crate::Hop::new(9).unwrap()),
+			cost: Some(0),
+		};
+		let held = cluster::Advert {
+			hops: hop_path(&[7, 9]),
+			cost: 4,
+		};
+
+		let script = {
+			let log = crate::lite::test_transport::Log::default();
+			let mut writer =
+				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+			writer.encode(&ietf::PublishNamespaceUpdate::ID).await.unwrap();
+			writer
+				.encode(&ietf::PublishNamespaceUpdate {
+					request_id: RequestId(3),
+					hops: None,
+					cost: Some(0),
+				})
+				.await
+				.unwrap();
+			let writes = log.writes.lock().unwrap();
+			writes.clone()
+		};
+
+		let (mut subscriber, consumer, mut stream, driver) = update_harness(self_origin, &peer, &held, script).await;
+		std::mem::forget(driver);
+		let log = subscriber.session.log.clone();
+		assert_eq!(routed_now(&consumer, "room/host").expect("routed").cost.warm, 4);
+
+		let path = crate::Path::new("room/host").to_owned();
+		let mut attached = true;
+		{
+			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
+				&mut stream,
+				&path,
+				Some(held.clone()),
+				peer,
+				&mut attached,
+			));
+			for _ in 0..20 {
+				assert!(futures::poll!(run.as_mut()).is_pending(), "the stream stays open");
+				settle().await;
+			}
+		}
+
+		let route = routed_now(&consumer, "room/host").expect("still routed");
+		assert_eq!(route.cost.warm, 0, "the explicit 0 replaced the held cost");
+		let hops: Vec<_> = route.hops.iter().map(|h| h.id()).collect();
+		assert_eq!(hops, vec![7, 9], "the omitted path kept its value");
+		assert!(attached, "a repricing is not a retraction");
+		assert_eq!(replies(&log, ietf::RequestOk::ID), 1);
+		assert_eq!(replies(&log, ietf::RequestError::ID), 0);
+	}
+
+	/// An update that cannot be applied is refused with REQUEST_ERROR and the stream
+	/// closed, which withdraws the advertisement (moq-transport Section 9.5.1). The
+	/// caller releases the route, so the loop must return cleanly rather than fault the
+	/// session.
+	#[tokio::test]
+	async fn a_failed_update_withdraws_the_advertisement() {
+		let self_origin = crate::Hop::new(5).unwrap();
+		let peer = peer_9();
+		let (clean, _) = clean_and_looped();
+		let cheaper = cluster::Advert {
+			cost: 0,
+			..clean.clone()
+		};
+
+		let script = publish_namespace_updates(&[cheaper]).await;
+		let (mut subscriber, _consumer, mut stream, driver) = update_harness(self_origin, &peer, &clean, script).await;
+		let log = subscriber.session.log.clone();
+
+		// Tear the origin down underneath the advertisement: the route can no longer be
+		// repriced, which is the one way an in-place update fails.
+		drop(driver);
+
+		let path = crate::Path::new("room/host").to_owned();
+		let mut attached = true;
+		let mut result = None;
+		{
+			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
+				&mut stream,
+				&path,
+				Some(clean.clone()),
+				peer,
+				&mut attached,
+			));
+			for _ in 0..20 {
+				if let std::task::Poll::Ready(res) = futures::poll!(run.as_mut()) {
+					result = Some(res);
+					break;
+				}
+				settle().await;
+			}
+		}
+
+		assert!(
+			matches!(result, Some(Ok(()))),
+			"a refused update ends the stream cleanly, got {result:?}"
+		);
+		assert!(attached, "the caller releases the route it attached");
+		assert_eq!(replies(&log, ietf::RequestError::ID), 1, "REQUEST_ERROR went out");
+		assert_eq!(replies(&log, ietf::RequestOk::ID), 0);
+	}
+
+	/// An update whose first Hop ID differs names a different publisher, whose content
+	/// is not continuous with what is held. The draft has the sender withdraw and
+	/// advertise again instead, so the update is refused and the stream closed, which
+	/// is that withdrawal.
+	#[tokio::test]
+	async fn an_update_that_changes_the_publisher_is_refused() {
+		let self_origin = crate::Hop::new(5).unwrap();
+		let peer = peer_9();
+		let (clean, _) = clean_and_looped();
+		let other_publisher = cluster::Advert {
+			hops: hop_path(&[8, 9]),
+			cost: 0,
+		};
+
+		let script = publish_namespace_updates(&[other_publisher]).await;
+		let (mut subscriber, consumer, mut stream, driver) = update_harness(self_origin, &peer, &clean, script).await;
+		std::mem::forget(driver);
+		let log = subscriber.session.log.clone();
+
+		let path = crate::Path::new("room/host").to_owned();
+		let mut attached = true;
+		let mut result = None;
+		{
+			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
+				&mut stream,
+				&path,
+				Some(clean.clone()),
+				peer,
+				&mut attached,
+			));
+			for _ in 0..20 {
+				if let std::task::Poll::Ready(res) = futures::poll!(run.as_mut()) {
+					result = Some(res);
+					break;
+				}
+				settle().await;
+			}
+		}
+
+		assert!(matches!(result, Some(Ok(()))), "refused cleanly, got {result:?}");
+		assert_eq!(replies(&log, ietf::RequestError::ID), 1, "REQUEST_ERROR went out");
+		assert_eq!(replies(&log, ietf::RequestOk::ID), 0);
+		let route = routed_now(&consumer, "room/host").expect("the caller releases the route");
+		let hops: Vec<_> = route.hops.iter().map(|h| h.id()).collect();
+		assert_eq!(hops, vec![7, 9], "the held path was not replaced");
+	}
+
+	/// A second PUBLISH_NAMESPACE on the stream that already carries one is not an
+	/// update any more: it is the base draft's duplicate request, a protocol violation.
+	#[tokio::test]
+	async fn a_repeated_publish_namespace_is_a_duplicate() {
+		const VERSION: Version = Version::Draft19;
+		let self_origin = crate::Hop::new(5).unwrap();
+		let peer = peer_9();
+		let (clean, _) = clean_and_looped();
+
+		let script = {
+			let log = crate::lite::test_transport::Log::default();
+			let mut writer =
+				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+			writer.encode(&ietf::PublishNamespace::ID).await.unwrap();
+			writer
+				.encode(&ietf::PublishNamespace {
+					request_id: RequestId(1),
+					track_namespace: crate::Path::new("room/host"),
+					cluster: Some(cluster::Advert {
+						cost: 0,
+						..clean.clone()
+					}),
+				})
+				.await
+				.unwrap();
+			let writes = log.writes.lock().unwrap();
+			writes.clone()
+		};
+
+		let (mut subscriber, _consumer, mut stream, driver) = update_harness(self_origin, &peer, &clean, script).await;
+		std::mem::forget(driver);
+
+		let path = crate::Path::new("room/host").to_owned();
+		let mut attached = true;
+		let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
+			&mut stream,
+			&path,
+			Some(clean.clone()),
+			peer,
+			&mut attached,
+		));
+		let mut result = None;
+		for _ in 0..20 {
+			if let std::task::Poll::Ready(res) = futures::poll!(run.as_mut()) {
+				result = Some(res);
+				break;
+			}
+			settle().await;
+		}
+
+		let err = result.expect("the loop ends").expect_err("a repeat is refused");
+		assert!(is_protocol_violation(&err), "a duplicate request is fatal, got {err}");
 	}
 
 	/// The SUBSCRIBE_NAMESPACE stream owns every advertisement it carried. When it ends
