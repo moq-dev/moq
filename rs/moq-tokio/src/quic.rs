@@ -223,13 +223,6 @@ pub struct Config {
 	pub(crate) legacy: Legacy,
 }
 
-impl Config {
-	/// Hidden CLI-only fields a TOML round-trip would drop.
-	pub fn keep_parse_only(&mut self, from: &Self) {
-		self.legacy = from.legacy.clone();
-	}
-}
-
 impl Default for Config {
 	fn default() -> Self {
 		Self {

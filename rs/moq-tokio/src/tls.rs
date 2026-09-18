@@ -819,15 +819,6 @@ pub(crate) enum Verification {
 }
 
 impl Connect {
-	/// Hidden CLI-only fields a TOML round-trip would drop.
-	pub fn keep_parse_only(&mut self, from: &Self) {
-		self.deprecated = from.deprecated.clone();
-		#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-		{
-			self.identity = from.identity.clone();
-		}
-	}
-
 	/// The released spellings in use, each paired with what replaced it.
 	///
 	/// Two generations of them: the bare `--tls-*` flags, which split by role, and
@@ -1374,16 +1365,6 @@ pub(crate) struct ListenDeprecated {
 }
 
 impl Listen {
-	/// Hidden CLI-only fields a TOML round-trip would drop.
-	pub fn keep_parse_only(&mut self, from: &Self) {
-		self.deprecated = from.deprecated.clone();
-		#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-		{
-			self.identity = from.identity.clone();
-		}
-		self.peers = from.peers.clone();
-	}
-
 	/// The released spellings in use, each paired with what replaced it.
 	///
 	/// Public for the same reason as [`Connect::deprecated`]: this type is flattened

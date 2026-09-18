@@ -156,18 +156,6 @@ pub struct Config {
 	pub quic: Option<crate::quic::Config>,
 }
 
-impl Config {
-	/// Hidden CLI-only fields a TOML round-trip would drop.
-	pub fn keep_parse_only(&mut self, from: &Self) {
-		self.legacy = from.legacy.clone();
-		self.tls.keep_parse_only(&from.tls);
-		#[cfg(feature = "tcp")]
-		self.tcp.keep_parse_only(&from.tcp);
-		#[cfg(all(feature = "uds", unix))]
-		self.unix.keep_parse_only(&from.unix);
-	}
-}
-
 /// One server's claim on a slot in a `SO_REUSEPORT` group, and the slot it
 /// names once bound.
 ///

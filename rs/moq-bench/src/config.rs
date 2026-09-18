@@ -145,16 +145,15 @@ impl Config {
 		Ok(config)
 	}
 
-	/// Refuse a config parsed from released spellings, naming what replaced each.
+	/// The released spellings in use, each paired with what replaced it.
 	///
-	/// Checked in `parse_and_merge`, before anything reads the config: those
+	/// Refused in `parse_and_merge`, before anything reads the config: those
 	/// spellings land on hidden fields that nothing honors, so continuing would dial
 	/// with settings the command line never asked for.
-	fn check_deprecated(&self) -> anyhow::Result<()> {
+	fn deprecated(&self) -> moq_tokio::Deprecated {
 		let mut deprecated = self.client.deprecated();
 		deprecated.extend(self.quic.deprecated());
-		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
-		Ok(())
+		deprecated
 	}
 
 	/// Merge CLI, environment, then TOML, then declared defaults.
@@ -200,20 +199,15 @@ impl Config {
 				path: std::path::Path::new(path),
 				value,
 			});
-		let (mut config, resolved) = moq_tokio::cli::merge(
-			Settings::SETTINGS_REGISTRY,
-			config,
-			&cli_layer,
-			&env,
-			file,
-			|dst, src| {
-				dst.client.keep_parse_only(&src.client);
-				dst.quic.keep_parse_only(&src.quic);
-			},
-		)
-		.map_err(|err| anyhow::anyhow!("{err}"))?;
+		// The released CLI spellings live on hidden fields the merge's TOML round-trip
+		// drops, so they are collected from the parse and reported with the file's
+		// own released keys in one message.
+		let mut deprecated = config.deprecated();
+		let (mut config, resolved) = moq_tokio::cli::merge(Settings::SETTINGS_REGISTRY, config, &cli_layer, &env, file)
+			.map_err(|err| anyhow::anyhow!("{err}"))?;
+		deprecated.extend(config.deprecated());
+		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
 		config.origins = Some(resolved);
-		config.check_deprecated()?;
 		// `Stats::report` feeds this into `tokio::time::interval`, which panics on a
 		// zero period. Reject it up front with a clear message.
 		anyhow::ensure!(!config.report().is_zero(), "--report must be greater than 0s");

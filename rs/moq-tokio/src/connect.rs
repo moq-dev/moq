@@ -679,16 +679,6 @@ pub struct Config {
 	pub quic: Option<crate::quic::Config>,
 }
 
-impl Config {
-	/// Hidden CLI-only fields a TOML round-trip would drop.
-	pub fn keep_parse_only(&mut self, from: &Self) {
-		self.legacy = from.legacy.clone();
-		self.tls.keep_parse_only(&from.tls);
-		#[cfg(feature = "websocket")]
-		self.websocket.keep_parse_only(&from.websocket);
-	}
-}
-
 impl Default for Config {
 	fn default() -> Self {
 		Self {

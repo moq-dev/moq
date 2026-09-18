@@ -94,11 +94,6 @@ pub(crate) struct Legacy {
 }
 
 impl Config {
-	/// Hidden CLI-only fields a TOML round-trip would drop.
-	pub fn keep_parse_only(&mut self, from: &Self) {
-		self.legacy = from.legacy.clone();
-	}
-
 	/// The released spellings in use, each paired with what replaced it. Reached
 	/// through [`crate::listen::Config::deprecated`].
 	pub(crate) fn deprecated(&self) -> crate::Deprecated {

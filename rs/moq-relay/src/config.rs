@@ -249,20 +249,20 @@ impl Config {
 				path: std::path::Path::new(path),
 				value,
 			});
+		// The released CLI spellings live on hidden fields the merge's TOML round-trip
+		// drops, so they are collected from the parse and reported with the file's
+		// own released keys in one message.
+		let mut deprecated = cli.config.deprecated();
 		let (mut config, resolved) = moq_tokio::cli::merge(
 			crate::settings::Settings::SETTINGS_REGISTRY,
 			cli.config,
 			&cli_layer,
 			&env,
 			file,
-			|dst, src| {
-				// Legacy listen/connect/quic flags.
-				dst.listen.keep_parse_only(&src.listen);
-				dst.connect.keep_parse_only(&src.connect);
-				dst.quic.keep_parse_only(&src.quic);
-			},
 		)
 		.map_err(|err| anyhow::anyhow!("{err}"))?;
+		deprecated.extend(config.deprecated());
+		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
 		config.origins = Some(resolved);
 		Ok(config)
 	}
@@ -278,13 +278,9 @@ impl Config {
 }
 
 impl Config {
-	/// Refuse a config parsed from released spellings, then apply the relay's own
-	/// defaults.
-	///
-	/// The check comes first because those spellings configure nothing: a relay that
-	/// booted anyway would be serving on defaults, with the deployment's own
-	/// `--server-bind` and TLS material silently absent.
-	pub(crate) fn resolve(&mut self) -> anyhow::Result<()> {
+	/// The released spellings in use across every section, each paired with what
+	/// replaced it.
+	fn deprecated(&self) -> moq_tokio::Deprecated {
 		let mut deprecated = self.quic.deprecated();
 		deprecated.extend(self.listen.deprecated());
 		deprecated.extend(self.connect.deprecated());
@@ -297,6 +293,17 @@ impl Config {
 			deprecated.toml("[client]", "[connect]", None);
 			deprecated.extend(client.deprecated());
 		}
+		deprecated
+	}
+
+	/// Refuse a config parsed from released spellings, then apply the relay's own
+	/// defaults.
+	///
+	/// The check comes first because those spellings configure nothing: a relay that
+	/// booted anyway would be serving on defaults, with the deployment's own
+	/// `--server-bind` and TLS material silently absent.
+	pub(crate) fn resolve(&mut self) -> anyhow::Result<()> {
+		let deprecated = self.deprecated();
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
 
 		self.quic.max_streams.get_or_insert(crate::DEFAULT_MAX_STREAMS);
@@ -385,6 +392,36 @@ max_streams = 64
 		assert!(err.contains("[server.quic] -> [quic]"), "{err}");
 		assert!(err.contains("[client.quic] -> [quic]"), "{err}");
 		assert!(err.contains("both directions"), "{err}");
+	}
+
+	/// A released flag and a released table are refused together, in one message.
+	///
+	/// The flag lands on a hidden field the merge's TOML round-trip drops, so a
+	/// check that only reads the merged config would boot on the default bind. The
+	/// table is only visible after the merge. Reporting them separately would make
+	/// the operator fix one, rerun, and hit the other.
+	#[test]
+	fn released_spellings_refuse_across_the_merge() {
+		let _env = EnvGuard::clear(&["MOQ_LISTEN", "MOQ_SERVER_BIND"]);
+
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("released-quic-table.toml");
+		std::fs::write(&path, "[server.quic]\nmax_streams = 4096\n").unwrap();
+
+		let err = Config::parse_and_merge([
+			std::ffi::OsString::from("moq-relay"),
+			std::ffi::OsString::from("--server-bind"),
+			std::ffi::OsString::from("[::]:4443"),
+			std::ffi::OsString::from(&path),
+		])
+		.expect_err("must refuse")
+		.to_string();
+		assert!(
+			err.contains("--server-bind / MOQ_SERVER_BIND -> --listen / MOQ_LISTEN"),
+			"{err}"
+		);
+		assert!(err.contains("[server.quic] -> [quic]"), "{err}");
 	}
 
 	/// The canonical top-level table, which is what the demo configs use.
@@ -555,7 +592,7 @@ duration = "30s"
 		toml::to_string(&unset).expect("serialize None");
 	}
 
-	/// A released TOML value still survives the merge so validation can name it.
+	/// A released TOML value still survives the merge so the refusal can name it.
 	#[test]
 	fn cli_does_not_clobber_toml_linger() {
 		let _env = EnvGuard::clear(&["MOQ_CLUSTER_LINGER"]);
@@ -570,14 +607,7 @@ linger = "30s"
 		std::fs::write(&path, toml).unwrap();
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let mut config = Config::parse_and_merge(args).expect("config load");
-
-		assert_eq!(
-			config.cluster.linger,
-			Some(std::time::Duration::from_secs(30).into()),
-			"TOML's cluster.linger must not be clobbered by the CLI re-parse"
-		);
-		let err = config.resolve().expect_err("must refuse").to_string();
+		let err = Config::parse_and_merge(args).expect_err("must refuse").to_string();
 		assert!(err.contains("--cluster-linger"), "{err}");
 	}
 
