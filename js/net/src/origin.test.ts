@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { getter } from "@moq/signals";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
-import { Route } from "./hop.ts";
+import { HopSchema, Route, UNKNOWN_HOP } from "./hop.ts";
 import type { Consumer } from "./origin.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
@@ -1098,6 +1098,39 @@ test("a suffix scope captures the leading run", async () => {
 	deep.close();
 	top.close();
 	origin.close();
+});
+
+test("collapsed claims announce the route that serves", async () => {
+	// An exact scope collapses two equally specific claims onto one presented pattern;
+	// the announced route must be the one a request resolves through.
+	for (const ids of [
+		[10n, 20n],
+		[20n, 10n],
+	]) {
+		const origin = new Producer();
+		const hops = ids.map((id) => HopSchema.parse(id));
+		const dynamics = ["a*/x", "*a/x"].map((claim, i) => origin.dynamic(claim, { hops: [hops[i] ?? UNKNOWN_HOP] }));
+		const consumer = origin.consume();
+		const announced = consumer.announced(Path.Pattern.parse("a/x"));
+		const update = await announced.next();
+		expect(update?.pattern.text).toBe("a/x");
+
+		const pending = consumer.demand(Path.from("a/x"));
+		const iterators = dynamics.map((handle) => handle.requested());
+		const served = await Promise.race(iterators.map(async (it, i) => ((await it.next()).value ? i : undefined)));
+		expect(served).toBeDefined();
+		expect(update?.route?.hops).toEqual([hops[served ?? 0] ?? UNKNOWN_HOP]);
+
+		// Closing the routes rejects the request and ends both iterators.
+		const refused = pending.then(
+			() => undefined,
+			(err: unknown) => err,
+		);
+		for (const handle of dynamics) handle.close();
+		expect(await refused).toBeInstanceOf(Error);
+		announced.close();
+		origin.close();
+	}
 });
 
 test("an exact scope presents only that path", async () => {

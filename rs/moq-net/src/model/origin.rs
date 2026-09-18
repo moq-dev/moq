@@ -2988,7 +2988,9 @@ impl OriginState {
 	fn sync_cursor(routes: &[RouteEntry], cursor: &mut TableCursor, presented: &Pattern, captures: Vec<Pattern>) {
 		// Among entries presenting here, the most specific pattern wins outright,
 		// so the metadata a cursor advertises matches what a request through it
-		// actually resolves. Prefix-shaped routes still shadow broader ones.
+		// actually resolves. Prefix-shaped routes still shadow broader ones. Ties
+		// break on the entry's own pattern, as `best_route` does: a narrow scope
+		// can collapse distinct claims onto one presented pattern.
 		let candidates: Vec<&RouteEntry> = routes
 			.iter()
 			.filter(|entry| cursor.visible(entry))
@@ -2999,7 +3001,7 @@ impl OriginState {
 			candidates
 				.into_iter()
 				.filter(|entry| entry.pattern.specificity() == most)
-				.min_by_key(|entry| route_order(presented, entry))
+				.min_by_key(|entry| route_order(&entry.pattern, entry))
 		});
 
 		match best {
@@ -5928,6 +5930,49 @@ mod tests {
 			.expect("refused synchronously");
 		assert!(matches!(refused, Err(Error::Unroutable)));
 		assert!(dynamic.requested_broadcast().now_or_never().is_none());
+	}
+
+	#[tokio::test]
+	async fn collapsed_claims_announce_the_route_that_serves() {
+		// An exact scope collapses two equally specific claims onto one presented
+		// pattern; the announced hops must name the route a request resolves through.
+		for ids in [[10, 20], [20, 10], [11, 12], [12, 11], [3, 7], [7, 3]] {
+			let producer = origin(1).produce();
+			let dynamics: Vec<_> = ["a*/x", "*a/x"]
+				.into_iter()
+				.zip(ids)
+				.map(|(claim, id)| {
+					producer
+						.dynamic(claim.parse().unwrap(), Route::default().with_hops(hops(&[id])))
+						.unwrap()
+				})
+				.collect();
+			let consumer = producer
+				.consume()
+				.scope(&Patterns::from("a/x".parse::<Pattern>().unwrap()))
+				.unwrap();
+			let mut announced = consumer.announced();
+			let update = announced.try_next().unwrap();
+			assert_eq!(update.pattern.as_str(), "a/x");
+			assert!(announced.try_next().is_none(), "one presented pattern");
+
+			let pending = consumer.request_broadcast("a/x");
+			let mut served = None;
+			settle(|| {
+				served = dynamics.iter().enumerate().find_map(|(i, dynamic)| {
+					match dynamic.poll_requested_broadcast(&kio::Waiter::noop()) {
+						Poll::Ready(Ok(request)) => Some((i, request)),
+						_ => None,
+					}
+				});
+				served.is_some()
+			})
+			.await;
+			let (served, request) = served.unwrap();
+			assert_eq!(update.route.hops, hops(&[ids[served]]), "hops {ids:?}");
+			request.reject(Error::NotFound);
+			assert!(matches!(pending.await, Err(Error::NotFound)));
+		}
 	}
 
 	#[tokio::test]

@@ -955,12 +955,14 @@ export class Consumer {
 
 				const next = new Map<string, Presented>();
 				// Where several claims present the same pattern, the most specific claim
-				// wins, matching request() resolution.
-				const present = (claim: Path.Pattern, snap: Advertised) => {
+				// wins and a tie keeps the earlier route, matching request() resolution
+				// (`bestEntry` walks the same table in the same order).
+				const present = (claim: Path.Pattern, snap: Advertised, override = false) => {
 					const specificity = claim.specificity();
 					for (const { pattern, captures } of scopeMatches(scope, claim)) {
 						const held = next.get(pattern.text);
-						if (held && Path.compareSpecificity(held.specificity, specificity) > 0) continue;
+						const order = held ? Path.compareSpecificity(held.specificity, specificity) : -1;
+						if (order > 0 || (order === 0 && !override)) continue;
 						next.set(pattern.text, { ...snap, captures, specificity });
 					}
 				};
@@ -974,7 +976,7 @@ export class Consumer {
 				for (const [path, front] of local ?? []) {
 					const route = advertisedLocal?.get(path);
 					if (!route) continue;
-					present(Path.Pattern.subtree(path), { identity: front, route });
+					present(Path.Pattern.subtree(path), { identity: front, route }, true);
 				}
 
 				for (const [path, snap] of active) {
