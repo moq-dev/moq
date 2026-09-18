@@ -10,7 +10,7 @@
 import * as z from "@zod/mini";
 import * as jose from "jose";
 import type { Claims } from "./claims.ts";
-import { type Key, KeySchema, type PublicKey, sign, toPublicKey, verify } from "./key.ts";
+import { Key, KeySchema, type PublicKey } from "./key.ts";
 
 /**
  * A JWK Set.
@@ -32,7 +32,7 @@ export interface PublicKeySet {
 }
 
 /** Parse a JWK Set from JSON. Throws when the JSON or any key in it is invalid. */
-export function loadSet(jwks: string): KeySet {
+function parse(jwks: string): KeySet {
 	let data: unknown;
 	try {
 		data = JSON.parse(jwks.trim());
@@ -48,20 +48,20 @@ export function loadSet(jwks: string): KeySet {
 }
 
 /** Strip the private material from every key in the set. Throws on a symmetric (oct) key, which has no public half. */
-export function toPublicSet(set: KeySet): PublicKeySet {
-	return { keys: set.keys.map(toPublicKey) };
+function toPublic(set: KeySet): PublicKeySet {
+	return { keys: set.keys.map(Key.public) };
 }
 
 /** The key with the given `kid`, or undefined when the set has no such key. */
-export function findKey(set: KeySet, kid: string): Key | undefined {
+function find(set: KeySet, kid: string): Key | undefined {
 	return set.keys.find((key) => key.kid === kid);
 }
 
 /** Sign the claims with the first key that permits signing and contains signing material. */
-export async function signWith(set: KeySet, claims: Claims): Promise<string> {
+async function sign(set: KeySet, claims: Claims): Promise<string> {
 	const key = set.keys.find((key) => key.key_ops.includes("sign") && (key.kty === "oct" || key.d !== undefined));
 	if (!key) throw new Error("Cannot find signing key");
-	return await sign(key, claims);
+	return await Key.sign(key, claims);
 }
 
 /**
@@ -69,7 +69,7 @@ export async function signWith(set: KeySet, claims: Claims): Promise<string> {
  *
  * A token without a `kid` is accepted only when the set holds exactly one key.
  */
-export async function verifyWith(set: KeySet, token: string): Promise<Claims> {
+async function verify(set: KeySet, token: string): Promise<Claims> {
 	let kid: string | undefined;
 	try {
 		kid = jose.decodeProtectedHeader(token).kid;
@@ -79,7 +79,7 @@ export async function verifyWith(set: KeySet, token: string): Promise<Claims> {
 
 	let key: Key | undefined;
 	if (kid !== undefined) {
-		key = findKey(set, kid);
+		key = find(set, kid);
 		if (!key) throw new Error(`Cannot find key with kid ${kid}`);
 	} else if (set.keys.length === 1) {
 		// No kid to match on, but there's only one key it could be.
@@ -88,5 +88,23 @@ export async function verifyWith(set: KeySet, token: string): Promise<Claims> {
 		throw new Error("Missing kid in JWT header");
 	}
 
-	return await verify(key, token);
+	return await Key.verify(key, token);
 }
+
+/**
+ * Parse, sign, and verify with a JWK Set.
+ *
+ * The counterpart of the Rust `moq-auth` crate's `KeySet`.
+ */
+export const KeySet = {
+	/** Parse a JWK Set from JSON. Throws when the JSON or any key in it is invalid. */
+	parse,
+	/** Strip the private material from every key in the set. Throws on a symmetric (oct) key, which has no public half. */
+	public: toPublic,
+	/** The key with the given `kid`, or undefined when the set has no such key. */
+	find,
+	/** Sign the claims with the first key that permits signing and contains signing material. */
+	sign,
+	/** Verify a token with the key matching its `kid` header, returning its claims. */
+	verify,
+};

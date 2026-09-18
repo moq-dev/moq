@@ -16,8 +16,6 @@ import type { Probe, Stats } from "./stats.ts";
  * The delays carry jitter, so a fleet of tabs knocked offline together doesn't reconnect in
  * lockstep. Every failure is retried; {@link ReloadDelay.timeout} is what stops the current
  * URL. A new URL or a disable/re-enable starts another sequence.
- *
- * @internal
  */
 export type ReloadDelay = {
 	/** The delay before reconnecting (default: 1000ms). */
@@ -82,10 +80,7 @@ const DEFAULT_DELAY: Required<ReloadDelay> = {
 /** How often the send-rate estimate is sampled from the live transport. */
 const BANDWIDTH_POLL = 100;
 
-/** Current state of a reconnecting connection.
- *
- * @internal
- */
+/** Current state of a reconnecting connection. */
 export type ReloadStatus = "connecting" | "connected" | "disconnected";
 
 /**

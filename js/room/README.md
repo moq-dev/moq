@@ -28,9 +28,9 @@ Sign with [`@moq/auth`](../auth). `root` is the room, `subscribe: ["**"]` subscr
 
 ```ts
 import { claims } from "@moq/room";
-import { sign } from "@moq/auth";
+import { Key } from "@moq/auth";
 
-const token = await sign(key, claims("meet/demo", "alice"));
+const token = await Key.sign(key, claims("meet/demo", "alice"));
 // Dial https://relay.example.com/meet/demo?jwt=<token>
 ```
 

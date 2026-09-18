@@ -6,8 +6,9 @@
  * @module
  */
 import type { Dispose, Getter } from "@moq/signals";
-import type { Announcer, Producer as BroadcastProducer } from "./broadcast.ts";
+import type { Producer as BroadcastProducer } from "./broadcast.ts";
 import type { Frame, Consumer as GroupConsumer } from "./group.ts";
+import type { Route } from "./hop.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
 import type { Groups, Producer, Request, Subscriber } from "./track.ts";
@@ -113,7 +114,10 @@ export const hooks: {
 	/** Make an evicted mirror terminal while its track timeline still contains it. */
 	evictGroup: (group: GroupConsumer) => void;
 	/** Attach the origin advertisement of a created broadcast. */
-	attachAnnouncer: (producer: BroadcastProducer, announcer: Announcer) => void;
+	attachAnnouncer: (
+		producer: BroadcastProducer,
+		announcer: { announce(route: Route): void; unannounce(): void },
+	) => void;
 } = {
 	makeRequest: () => {
 		throw new Error("track.ts not loaded");

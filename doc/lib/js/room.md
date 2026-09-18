@@ -17,9 +17,9 @@ and `{identity}/screen.hang` (screenshare).
 import { Local, Room } from "@moq/room";
 import { Connection, Path } from "@moq/net";
 import { claims } from "@moq/room";
-import { sign } from "@moq/auth";
+import { Key } from "@moq/auth";
 
-const token = await sign(key, claims("meet/demo", "alice"));
+const token = await Key.sign(key, claims("meet/demo", "alice"));
 const connection = new Connection({
     url: new URL(`https://relay.example.com/meet/demo?jwt=${token}`),
     enabled: true,

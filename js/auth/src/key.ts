@@ -111,7 +111,8 @@ export type AsymmetricKey = Exclude<Key, { kty: "oct" }>;
 export type SymmetricKey = Extract<Key, { kty: "oct" }>;
 export type PublicKey = Omit<AsymmetricKey, "d" | "p" | "q" | "dp" | "dq" | "qi">;
 
-export function toPublicKey(key: Key): PublicKey {
+/** Derive a verify-only copy of this key, dropping the private material. */
+function toPublic(key: Key): PublicKey {
 	switch (key.kty) {
 		case "oct":
 			throw new Error("Cannot derive public key from oct (symmetric) key");
@@ -133,23 +134,8 @@ export function toPublicKey(key: Key): PublicKey {
 	}
 }
 
-export function load(jwk: string): Key {
-	const key = loadKey(jwk);
-	if (key.kty !== "oct") {
-		ensurePrivateMaterial(key as Key);
-	}
-	return key as Key;
-}
-
-export function loadPublic(jwk: string): PublicKey {
-	const key = loadKey(jwk);
-	if (key.kty === "oct") {
-		throw new Error("Cannot load oct (symmetric) key as a public key; use load() instead.");
-	}
-	return toPublicKey(key as Key);
-}
-
-function loadKey(jwk: string): Key | PublicKey {
+/** Parse a key from a string, auto-detecting JSON or base64url encoding. */
+function parse(jwk: string): Key {
 	const trimmed = jwk.trim();
 
 	let data: unknown;
@@ -196,7 +182,7 @@ function loadKey(jwk: string): Key | PublicKey {
  * `iat` is written only when the claims carry one, so an unset field stays off the
  * wire rather than being stamped with the current time.
  */
-export async function sign(key: Key, claims: Claims): Promise<string> {
+async function sign(key: Key, claims: Claims): Promise<string> {
 	ensureOperationSupported(key, "sign");
 
 	// Validate claims before signing
@@ -225,7 +211,7 @@ export async function sign(key: Key, claims: Claims): Promise<string> {
  * Rejects an expired token (the `exp` claim). Scoping the claims to a connection path
  * is a separate step; see {@link authorize}.
  */
-export async function verify(key: PublicKey | SymmetricKey, token: string): Promise<Claims> {
+async function verify(key: PublicKey | SymmetricKey, token: string): Promise<Claims> {
 	ensureOperationSupported(key, "verify");
 	const joseKey = await importJoseKey(key);
 	const { payload } = await jose.jwtVerify(token, joseKey, {
@@ -244,6 +230,184 @@ export async function verify(key: PublicKey | SymmetricKey, token: string): Prom
 
 	return claims;
 }
+
+/** Generate a random key ID (16 hex characters). */
+function randomKid(): KeyId {
+	const bytes = new Uint8Array(8);
+	crypto.getRandomValues(bytes);
+	return Array.from(bytes)
+		.map((b) => b.toString(16).padStart(2, "0"))
+		.join("") as KeyId;
+}
+
+/** Generate a new key for the given algorithm. A random key ID is assigned if none is provided. */
+async function generate(algorithm: Algorithm, kid?: string): Promise<Key> {
+	const validKid: KeyId = kid?.trim() ? KeyIdSchema.parse(kid.trim()) : randomKid();
+	switch (algorithm) {
+		case "HS256":
+			return generateHmacKey(algorithm, 32, validKid);
+		case "HS384":
+			return generateHmacKey(algorithm, 48, validKid);
+		case "HS512":
+			return generateHmacKey(algorithm, 64, validKid);
+		case "RS256":
+		case "RS384":
+		case "RS512":
+			return generateRsaKey(algorithm, "RSASSA-PKCS1-v1_5", validKid);
+		case "PS256":
+		case "PS384":
+		case "PS512":
+			return generateRsaKey(algorithm, "RSA-PSS", validKid);
+		case "ES256":
+			return generateEcKey(algorithm, "P-256", validKid);
+		case "ES384":
+			return generateEcKey(algorithm, "P-384", validKid);
+		case "EdDSA":
+			return generateEdDsaKey(algorithm, validKid);
+		default:
+			throw new Error(`Unsupported algorithm: ${algorithm}`);
+	}
+}
+
+async function generateHmacKey(alg: Algorithm, byteLength: number, kid: KeyId): Promise<Key> {
+	const bytes = new Uint8Array(byteLength);
+	crypto.getRandomValues(bytes);
+
+	const k = base64.fromArrayBuffer(bytes.buffer, true);
+
+	return {
+		kty: "oct",
+		alg,
+		k,
+		kid,
+		key_ops: ["sign", "verify"],
+	};
+}
+
+async function generateRsaKey(alg: Algorithm, name: "RSASSA-PKCS1-v1_5" | "RSA-PSS", kid: KeyId): Promise<Key> {
+	const keyPair = await crypto.subtle.generateKey(
+		{
+			name,
+			modulusLength: 2048,
+			publicExponent: new Uint8Array([1, 0, 1]), // 65537
+			hash: getHashForAlgorithm(alg),
+		},
+		true,
+		["sign", "verify"],
+	);
+
+	const privateKey = "privateKey" in keyPair ? keyPair.privateKey : keyPair;
+	const jwk = (await crypto.subtle.exportKey("jwk", privateKey)) as {
+		kty: "RSA";
+		n: string;
+		e: string;
+		d: string;
+		p: string;
+		q: string;
+		dp: string;
+		dq: string;
+		qi: string;
+	};
+
+	return {
+		kty: "RSA",
+		alg,
+		n: jwk.n,
+		e: jwk.e,
+		d: jwk.d,
+		p: jwk.p,
+		q: jwk.q,
+		dp: jwk.dp,
+		dq: jwk.dq,
+		qi: jwk.qi,
+		kid,
+		key_ops: ["sign", "verify"],
+	};
+}
+
+async function generateEcKey(alg: "ES256" | "ES384", namedCurve: "P-256" | "P-384", kid: KeyId): Promise<Key> {
+	const keyPair = await crypto.subtle.generateKey(
+		{
+			name: "ECDSA",
+			namedCurve,
+		},
+		true,
+		["sign", "verify"],
+	);
+
+	const privateKey = "privateKey" in keyPair ? keyPair.privateKey : keyPair;
+	const jwk = (await crypto.subtle.exportKey("jwk", privateKey)) as {
+		kty: "EC";
+		crv: "P-256" | "P-384";
+		x: string;
+		y: string;
+		d: string;
+	};
+
+	return {
+		kty: "EC",
+		alg,
+		crv: jwk.crv,
+		x: jwk.x,
+		y: jwk.y,
+		d: jwk.d,
+		kid,
+		key_ops: ["sign", "verify"],
+	};
+}
+
+async function generateEdDsaKey(alg: "EdDSA", kid: KeyId): Promise<Key> {
+	const keyPair = await crypto.subtle.generateKey(
+		{
+			name: "Ed25519",
+		},
+		true,
+		["sign", "verify"],
+	);
+
+	const privateKey = "privateKey" in keyPair ? keyPair.privateKey : keyPair;
+	const jwk = (await crypto.subtle.exportKey("jwk", privateKey)) as {
+		kty: "OKP";
+		crv: "Ed25519";
+		x: string;
+		d: string;
+	};
+
+	return {
+		kty: "OKP",
+		alg,
+		crv: "Ed25519",
+		x: jwk.x,
+		d: jwk.d,
+		kid,
+		key_ops: ["sign", "verify"],
+	};
+}
+
+function getHashForAlgorithm(alg: Algorithm): "SHA-256" | "SHA-384" | "SHA-512" {
+	if (alg.endsWith("256")) return "SHA-256";
+	if (alg.endsWith("384")) return "SHA-384";
+	if (alg.endsWith("512")) return "SHA-512";
+	throw new Error(`Cannot determine hash for algorithm: ${alg}`);
+}
+
+/**
+ * Parse, generate, sign, and verify a JWK.
+ *
+ * The counterpart of the Rust `moq-auth` crate's `Key`.
+ */
+export const Key = {
+	/** Parse a key from JSON or base64url-encoded JSON. */
+	parse,
+	/** Derive a verify-only copy, dropping the private material. Throws on a symmetric (oct) key, which has no public half. */
+	public: toPublic,
+	/** Sign the claims with this key, returning the encoded token. */
+	sign,
+	/** Verify a token's signature with this key and return its claims. */
+	verify,
+	/** Generate a key for the given algorithm. A random key ID is assigned if none is provided. */
+	generate,
+};
 
 function ensureClaimsWithinScope(key: PublicKey | SymmetricKey | Key, claims: Claims): void {
 	if (key.scope && !scopeAllows(key.scope, claims)) {

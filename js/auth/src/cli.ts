@@ -5,9 +5,7 @@ import * as base64 from "@hexagon/base64";
 import { Command, Option } from "commander";
 import type { Algorithm } from "./algorithm.ts";
 import { authorize, type Claims, type Scope, ScopeSchema } from "./claims.ts";
-import { generate } from "./generate.ts";
-import type { Key, PublicKey } from "./key.ts";
-import { load, loadPublic, sign, toPublicKey, verify } from "./key.ts";
+import { Key } from "./key.ts";
 
 const program = new Command();
 
@@ -27,7 +25,7 @@ program
 	.action(async (options) => {
 		try {
 			const algorithm = options.algorithm as Algorithm;
-			let key = await generate(algorithm, options.id);
+			let key = await Key.generate(algorithm, options.id);
 			if (options.publish || options.subscribe) {
 				// Parse rather than cast, so a useless scope fails here like it does
 				// in the Rust CLI instead of writing an unusable key to disk.
@@ -51,7 +49,7 @@ program
 			console.log(`Generated ${algorithm} key: ${options.out}`);
 
 			if (options.public && key.kty !== "oct") {
-				const publicKey = toPublicKey(key);
+				const publicKey = Key.public(key);
 				writeFileSync(options.public, encodeKey(publicKey), "utf-8");
 				console.log(`Generated public key: ${options.public}`);
 			} else if (options.public && key.kty === "oct") {
@@ -75,7 +73,7 @@ program
 	.action(async (options) => {
 		try {
 			const keyEncoded = readFileSync(options.key, "utf-8");
-			const key = load(keyEncoded);
+			const key = Key.parse(keyEncoded);
 
 			const claims: Claims = {
 				root: options.root,
@@ -85,7 +83,7 @@ program
 				...(options.issued && { iat: options.issued }),
 			};
 
-			const token = await sign(key, claims);
+			const token = await Key.sign(key, claims);
 			console.log(token);
 		} catch (error) {
 			console.error("Error signing token:", error instanceof Error ? error.message : error);
@@ -95,25 +93,19 @@ program
 
 program
 	.command("verify")
-	.description("Verify a token from stdin, writing the payload to stdout")
+	.description("Verify a token, writing the payload to stdout")
 	.requiredOption("--key <path>", "Path to the key file")
 	.option("--in <path>", "Path to read the token from. Use - for stdin.", "-")
 	.addOption(new Option("--root <root>", "Path to authorize the token against").hideHelp())
 	.action(async (options) => {
 		try {
-			const keyEncoded = readFileSync(options.key, "utf-8");
+			const parsed = Key.parse(readFileSync(options.key, "utf-8"));
+			// EdDSA (and WebCrypto) cannot verify with a JWK that still carries `d`.
+			const key = parsed.kty === "oct" ? parsed : Key.public(parsed);
 
-			// Try to load as public key first (for asymmetric), fall back to symmetric key
-			let key: Key | PublicKey | undefined;
-			try {
-				key = loadPublic(keyEncoded);
-			} catch {
-				key = load(keyEncoded);
-			}
+			const token = readFileSync(options.in === "-" ? 0 : options.in, "utf-8").trim();
 
-			const token = (options.in === "-" ? readFileSync(0, "utf-8") : readFileSync(options.in, "utf-8")).trim();
-
-			const claims = await verify(key, token);
+			const claims = await Key.verify(key, token);
 			if (options.root !== undefined) {
 				authorize(claims, options.root);
 			}

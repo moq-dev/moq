@@ -16,5 +16,6 @@ rather than holding the merge.
 
 ## Quests
 
+- [Re-check refusal](/quest/m0/auth-recheck-refusal.md) - moq-auth: a re-check that answers 4xx or an invalid grant ends the session instead of keeping it until `expires`
 - [Published types](/quest/m0/js-net-internal-types.md) - @moq/net: the emitted `.d.ts` no longer strips `ReloadDelay`/`ReloadStatus` from under `Connection`
 

@@ -92,6 +92,8 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 - [Stats retier](/quest/m2/stats-retier.md) - a re-checked tier retags a live session's stats in place instead of waiting for its next connection
 - [io_uring link facts](/quest/m2/uring-link-facts.md) - the io_uring workers report a session's peer address and SNI to the auth server like the tokio listener does
 - [Decoded frame ownership](/quest/m2/decoded-frames.md) - retain moq-video Frames across bindings, with native views or CPU conversion as needed
+- [C++ through moq-ffi](/quest/m2/cpp/README.md) - generated C++ over moq-ffi with futures and expected-style errors, shipped as a tarball, vcpkg, and Conan, and adopted by the OBS plugin
+- [C# through moq-ffi](/quest/m2/cs/README.md) - generated C# over moq-ffi as a NuGet package with native runtimes
 - [OBS native codecs](/quest/m2/obs-moq-video/README.md) - remove FFmpeg decoding dependencies, deliver GPU frames, and use native audio/video encoders
 - [Audio codecs](/quest/m2/audio-codecs/README.md) - platform audio codecs, explicit unsupported cases, and channel layouts up to 7.1
 - [Keyframe trigger](/quest/m2/keyframe-trigger.md) - an application can ask the built-in capture encoder for a keyframe
@@ -166,9 +168,14 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 - [ID3 catalog section](/quest/m2/id3.md) - timed ID3 as a first-class container-neutral catalog section
 - [fMP4 emsg](/quest/m2/emsg.md) - event messages survive fMP4 import instead of being silently discarded
 - [FLV script tags](/quest/m2/flv-script.md) - onMetaData and AMF data messages survive RTMP and FLV import
+- [Release size](/quest/m2/release-size.md) - the release scripts' LTO exports become the workspace release profile, and a nightly report shows what each moq-ffi build ships
+- [Bindgen CLI split](/quest/m2/uniffi-cli-feature.md) - a library build of moq-ffi stops compiling uniffi_bindgen and its 46 crates
+- [Network-only bindings](/quest/m2/slim-bindings/README.md) - Swift, Kotlin, and C ship a codec-free `net` artifact beside the full one, if the post-LTO numbers justify it
 - [Mobile bindings](/quest/m2/mobile/README.md) - preserve the FFI video consumer and Dart device proof while mobile capture is deferred
 - [Compressed tracks](/quest/m2/flate/README.md) - any track compresses per group from every language, not only the JSON modes
 - [VAAPI encode and decode](/quest/m2/video-vaapi.md) - DMA-BUF encode, H.265 decode, and pre-generated bindings that remove the libclang build dependency, all gated on a moq-dev/vaapi release
+- [libmoq shutdown](/quest/m2/libmoq-shutdown.md) - OBS exits cleanly with the plugin loaded: a C ABI `moq_shutdown` stops the libmoq thread before the module is unloaded
+- [Kotlin JVM exit](/quest/m2/kt-jvm-exit.md) - a Kotlin/JVM program exits cleanly whatever the moq-ffi runtime thread is doing, like Python does since #3766
 - [Dart leaks](/quest/m2/dart-leak.md) - the generated Dart bindings leak native memory on every call
 - [Dart publish](/quest/m2/dart-publish.md) - the packages are built and dry-run clean but exist nowhere consumers can install from
 - [Dart codec parity](/quest/m2/dart-codecs.md) - Dart is the one binding that cannot originate media

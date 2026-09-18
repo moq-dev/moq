@@ -6,7 +6,7 @@ Remove the MoQ OBS plugin's dependency on OBS/system FFmpeg ABI versions by deco
 
 ## Plan
 
-Portability and FFmpeg removal lead. The current MoQ source uses libavcodec, libavutil, and libswscale for video; it has no audio playback. Its swresample linkage is unused. Video replacement can therefore remove direct FFmpeg dependencies without waiting for audio. Build libmoq statically with only the codec features needed here; OS frameworks and runtime GPU drivers remain valid dependencies. Verify plugin imports instead of promising a completely static OBS plugin.
+Portability and FFmpeg removal lead. The current MoQ source uses libavcodec, libavutil, and libswscale for video; it has no audio playback. Its swresample linkage is unused. Video replacement can therefore remove direct FFmpeg dependencies without waiting for audio. The plugin reaches codecs through the generated C++ package over moq-ffi (the migration quest linked below lands first); build `libmoq_ffi` statically with only the codec features needed here; OS frameworks and runtime GPU drivers remain valid dependencies. Verify plugin imports instead of promising a completely static OBS plugin.
 
 Attempt GPU delivery immediately, starting on macOS. Windows and Linux can ship independently. Prefer direct surface reuse, allow GPU conversion/blits, and automatically fall back to CPU delivery when import is unavailable or fails. Stats must show the actual decoder/encoder, delivery path, and fallback reason. Retaining a texture handle is insufficient unless pool ownership and synchronization also prevent reuse while work is in flight.
 
@@ -14,7 +14,7 @@ Initial video decoding covers H.264, HEVC, and AV1 where moq-video has an availa
 
 Publishing remains opt-in, with one **Use MoQ encoders** choice for video and audio. Keep the existing OBS encoder mode. Internal OBS encoder adapters call moq-video/moq-audio, preserving OBS's A/V handling and the existing encoded MoQ output. The combined choice is enabled only when both adapters are present. Start with H.264, supported HEVC, and Opus; defer AV1/AAC encoding and PCM publishing UI. Keep bitrate separate from **Low latency** (default), **Balanced**, and **Quality** presets. Presets describe supported buffering/compression controls, not an end-to-end delay promise.
 
-The quests separate portable decoding, platform GPU delivery, audio, and publishing so each can land and be validated independently. The existing CPU C decoder is a fallback primitive, not a GPU implementation: it explicitly converts every surface to I420. Native frame ownership must cross the C boundary without that conversion.
+The quests separate portable decoding, platform GPU delivery, audio, and publishing so each can land and be validated independently. The existing CPU decode path is a fallback primitive, not a GPU implementation: it explicitly converts every surface to I420. Native frame ownership must cross the FFI boundary without that conversion.
 
 ## Quests
 
@@ -32,8 +32,8 @@ The quests separate portable decoding, platform GPU delivery, audio, and publish
 
 ## Related
 
+- [OBS migration](/quest/m2/cpp/obs.md) - every quest here starts from the plugin on the generated C++, so codec surface is designed in moq-ffi and reaches libmoq and the other wrappers through the Cross-Package Sync table, not as OBS-only C symbols
 - [Linux GPU input](/quest/m3/obs-linux-gpu.md) - allocation-export feasibility and its dependent implementation are deferred
-
 - [VAAPI encode and decode](/quest/m2/video-vaapi.md) - owns Linux backend decode/import capabilities; reconcile its older dependency assumptions against current code
 - [Video hardware validation](/quest/m3/video-hardware.md) - physical hardware evidence is required for each claimed GPU path
-- [Audio codecs](/quest/m2/audio-codecs/README.md) - HE-AAC, multichannel, and native AAC encode reach the OBS source and encoder adapters through libmoq
+- [Audio codecs](/quest/m2/audio-codecs/README.md) - HE-AAC, multichannel, and native AAC encode reach the OBS source and encoder adapters through moq-ffi

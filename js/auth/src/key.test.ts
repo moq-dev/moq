@@ -3,9 +3,8 @@ import * as base64 from "@hexagon/base64";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import type { Algorithm } from "./algorithm.ts";
 import { authorize, type Claims } from "./claims.ts";
-import { generate } from "./generate.ts";
 import { INSECURE_TEST_RS256_OTHER, INSECURE_TEST_RSA_KEYS } from "./insecure-test-keys.ts";
-import { type Key, load, loadPublic, sign, toPublicKey, verify } from "./key.ts";
+import { Key } from "./key.ts";
 
 // Helper function to encode JSON to base64url
 function encodeJwk(obj: unknown): string {
@@ -55,9 +54,9 @@ async function generateAsymmetricKeyPair(
 	};
 }
 
-test("load - valid JWK", () => {
+test("parse - valid JWK", () => {
 	const jwk = encodeJwk(testKey);
-	const key = load(jwk);
+	const key = Key.parse(jwk);
 
 	expect(key.alg).toBe("HS256");
 	expect(key.key_ops).toEqual(["sign", "verify"]);
@@ -66,25 +65,25 @@ test("load - valid JWK", () => {
 	expect(key.kid).toBe("test-key-1");
 });
 
-test("load - invalid base64url", () => {
+test("parse - invalid base64url", () => {
 	const invalidJwk = "invalid-base64url!@#$%";
 
 	expect(() => {
-		load(invalidJwk);
+		Key.parse(invalidJwk);
 	}).toThrow();
 });
 
-test("load - invalid JSON after base64url decode", () => {
+test("parse - invalid JSON after base64url decode", () => {
 	// Base64url encode invalid JSON
 	const data = new TextEncoder().encode("invalid json");
 	const invalidJwk = base64.fromArrayBuffer(data.buffer as ArrayBuffer, true); // true for urlSafe
 
 	expect(() => {
-		load(invalidJwk);
+		Key.parse(invalidJwk);
 	}).toThrow();
 });
 
-test("load - invalid secret format", () => {
+test("parse - invalid secret format", () => {
 	const invalidKey = {
 		...testKey,
 		k: "invalid-base64url-chars!@#$%",
@@ -92,11 +91,11 @@ test("load - invalid secret format", () => {
 	const jwk = encodeJwk(invalidKey);
 
 	expect(() => {
-		load(jwk);
+		Key.parse(jwk);
 	}).toThrow();
 });
 
-test("load - secret too short", () => {
+test("parse - secret too short", () => {
 	const invalidKey = {
 		...testKey,
 		k: "c2hvcnQ", // "short" in base64url (only 5 bytes)
@@ -104,11 +103,11 @@ test("load - secret too short", () => {
 	const jwk = encodeJwk(invalidKey);
 
 	expect(() => {
-		load(jwk);
+		Key.parse(jwk);
 	}).toThrow();
 });
 
-test("load - missing required fields", () => {
+test("parse - missing required fields", () => {
 	const invalidKey = {
 		alg: "HS256",
 		kty: "oct",
@@ -117,43 +116,43 @@ test("load - missing required fields", () => {
 	const jwk = encodeJwk(invalidKey);
 
 	expect(() => {
-		load(jwk);
+		Key.parse(jwk);
 	}).toThrow();
 });
 
-test("load - missing key_ops defaults to sign and verify", async () => {
+test("parse - missing key_ops defaults to sign and verify", async () => {
 	const { key_ops: _ignored, ...keyWithoutOps } = testKey;
-	const key = load(encodeJwk(keyWithoutOps));
+	const key = Key.parse(encodeJwk(keyWithoutOps));
 
 	expect(key.key_ops).toEqual(["sign", "verify"]);
 
-	const token = await sign(key, testClaims);
-	const claims = await verify(key, token);
+	const token = await Key.sign(key, testClaims);
+	const claims = await Key.verify(key, token);
 	expect(claims.root).toBe(testClaims.root);
 });
 
-test("toPublicKey - defaulted key_ops yields exactly verify", async () => {
+test("public - defaulted key_ops yields exactly verify", async () => {
 	const { privateKey } = await generateKeyPair("EdDSA", { extractable: true });
 	const jwk = await exportJWK(privateKey);
-	const key = load(encodeJwk({ ...jwk, alg: "EdDSA", kid: "defaulted" }));
+	const key = Key.parse(encodeJwk({ ...jwk, alg: "EdDSA", kid: "defaulted" }));
 	expect(key.key_ops).toEqual(["sign", "verify"]);
 
-	const publicKey = toPublicKey(key);
+	const publicKey = Key.public(key);
 	expect(publicKey.key_ops).toEqual(["verify"]);
 });
 
-test("load - oct key without kty is refused", () => {
+test("parse - oct key without kty is refused", () => {
 	const { kty: _ignored, ...legacyKey } = testKey;
 	const jwk = encodeJwk(legacyKey);
 
 	expect(() => {
-		load(jwk);
+		Key.parse(jwk);
 	}).toThrow(/Failed to validate JWK/);
 });
 
 test("sign - successful signing", async () => {
-	const key = load(encodeJwk(testKey));
-	const token = await sign(key, testClaims);
+	const key = Key.parse(encodeJwk(testKey));
+	const token = await Key.sign(key, testClaims);
 
 	expect(typeof token === "string").toBeTruthy();
 	expect(token.length > 0).toBeTruthy();
@@ -165,19 +164,19 @@ test("sign - key doesn't support signing", async () => {
 		...testKey,
 		key_ops: ["verify"],
 	};
-	const key = load(encodeJwk(verifyOnlyKey));
+	const key = Key.parse(encodeJwk(verifyOnlyKey));
 
 	await expect(
 		(async () => {
-			await sign(key, testClaims);
+			await Key.sign(key, testClaims);
 		})(),
 	).rejects.toThrow();
 });
 
 test("verify - successful verification", async () => {
-	const key = load(encodeJwk(testKey));
-	const token = await sign(key, testClaims);
-	const claims = await verify(key, token);
+	const key = Key.parse(encodeJwk(testKey));
+	const token = await Key.sign(key, testClaims);
+	const claims = await Key.verify(key, token);
 
 	expect(claims.root).toBe(testClaims.root);
 	expect(claims.publish).toEqual(testClaims.publish);
@@ -189,21 +188,21 @@ test("verify - key doesn't support verification", async () => {
 		...testKey,
 		key_ops: ["sign"],
 	};
-	const key = load(encodeJwk(signOnlyKey));
+	const key = Key.parse(encodeJwk(signOnlyKey));
 
 	await expect(
 		(async () => {
-			await verify(key, "some.jwt.token");
+			await Key.verify(key, "some.jwt.token");
 		})(),
 	).rejects.toThrow();
 });
 
 test("verify - invalid token format", async () => {
-	const key = load(encodeJwk(testKey));
+	const key = Key.parse(encodeJwk(testKey));
 
 	await expect(
 		(async () => {
-			await verify(key, "invalid-token");
+			await Key.verify(key, "invalid-token");
 		})(),
 	).rejects.toThrow();
 });
@@ -214,12 +213,12 @@ test("verify - expired token", async () => {
 		exp: Math.floor((Date.now() - 60 * 1000) / 1000), // 1 minute ago in seconds
 	};
 
-	const key = load(encodeJwk(testKey));
-	const token = await sign(key, expiredClaims);
+	const key = Key.parse(encodeJwk(testKey));
+	const token = await Key.sign(key, expiredClaims);
 
 	await expect(
 		(async () => {
-			await verify(key, token);
+			await Key.verify(key, token);
 		})(),
 	).rejects.toThrow();
 });
@@ -230,9 +229,9 @@ test("verify - token without exp field", async () => {
 		publish: ["test-pub/**"],
 	};
 
-	const key = load(encodeJwk(testKey));
-	const token = await sign(key, claimsWithoutExp);
-	const claims = await verify(key, token);
+	const key = Key.parse(encodeJwk(testKey));
+	const token = await Key.sign(key, claimsWithoutExp);
+	const claims = await Key.verify(key, token);
 
 	expect(claims.root).toBe("test-path");
 	expect(claims.publish).toEqual(["test-pub/**"]);
@@ -245,17 +244,17 @@ test("claims validation - must have pub or sub", async () => {
 		// missing both pub and sub
 	};
 
-	const key = load(encodeJwk(testKey));
+	const key = Key.parse(encodeJwk(testKey));
 
 	await expect(
 		(async () => {
-			await sign(key, invalidClaims as Claims);
+			await Key.sign(key, invalidClaims as Claims);
 		})(),
 	).rejects.toThrow();
 });
 
 test("round-trip - sign and verify", async () => {
-	const key = load(encodeJwk(testKey));
+	const key = Key.parse(encodeJwk(testKey));
 	const originalClaims: Claims = {
 		root: "test-path",
 		publish: ["test-pub/**"],
@@ -264,8 +263,8 @@ test("round-trip - sign and verify", async () => {
 		iat: Math.floor(Date.now() / 1000),
 	};
 
-	const token = await sign(key, originalClaims);
-	const verifiedClaims = await verify(key, token);
+	const token = await Key.sign(key, originalClaims);
+	const verifiedClaims = await Key.verify(key, token);
 
 	expect(verifiedClaims.root).toBe(originalClaims.root);
 	expect(verifiedClaims.publish).toEqual(originalClaims.publish);
@@ -275,11 +274,11 @@ test("round-trip - sign and verify", async () => {
 });
 
 test("verify - ignores the path, which authorize() checks instead", async () => {
-	const key = load(encodeJwk(testKey));
-	const token = await sign(key, testClaims);
+	const key = Key.parse(encodeJwk(testKey));
+	const token = await Key.sign(key, testClaims);
 
 	// Verification is signature-only, so a token for an unrelated path still decodes...
-	const claims = await verify(key, token);
+	const claims = await Key.verify(key, token);
 	expect(claims.root).toBe(testClaims.root);
 
 	// ...and is rejected only once authorized against that path.
@@ -287,51 +286,51 @@ test("verify - ignores the path, which authorize() checks instead", async () => 
 });
 
 test("sign - invalid claims without pub or sub", async () => {
-	const key = load(encodeJwk(testKey));
+	const key = Key.parse(encodeJwk(testKey));
 	const invalidClaims = {
 		root: "test-path",
 	};
 
 	await expect(
 		(async () => {
-			await sign(key, invalidClaims as Claims);
+			await Key.sign(key, invalidClaims as Claims);
 		})(),
 	).rejects.toThrow();
 });
 
 test("sign - claims validation path not prefix absolute sub", async () => {
-	const key = load(encodeJwk(testKey));
+	const key = Key.parse(encodeJwk(testKey));
 	const validClaims: Claims = {
 		root: "test-path",
 		subscribe: ["absolute-sub/**"],
 	};
 
-	const token = await sign(key, validClaims);
+	const token = await Key.sign(key, validClaims);
 	expect(typeof token === "string").toBeTruthy();
 	expect(token.length > 0).toBeTruthy();
 });
 
 test("sign - claims validation path is prefix with relative paths", async () => {
-	const key = load(encodeJwk(testKey));
+	const key = Key.parse(encodeJwk(testKey));
 	const validClaims: Claims = {
 		root: "test-path",
 		publish: ["relative-pub/**"],
 		subscribe: ["relative-sub/**"],
 	};
 
-	const token = await sign(key, validClaims);
+	const token = await Key.sign(key, validClaims);
 	expect(typeof token === "string").toBeTruthy();
 	expect(token.length > 0).toBeTruthy();
 });
 
 test("sign - claims validation empty root", async () => {
-	const key = load(encodeJwk(testKey));
+	const key = Key.parse(encodeJwk(testKey));
 	const validClaims: Claims = {
 		root: "",
 		publish: ["test-pub/**"],
 	};
 
-	const token = await sign(key, validClaims);
+	const token = await Key.sign(key, validClaims);
 	expect(typeof token === "string").toBeTruthy();
 	expect(token.length > 0).toBeTruthy();
 });
@@ -345,9 +344,9 @@ test("different algorithms - HS384", async () => {
 		kid: "test-key-hs384",
 	} as const;
 
-	const key = load(encodeJwk(hs384Key));
-	const token = await sign(key, testClaims);
-	const verifiedClaims = await verify(key, token);
+	const key = Key.parse(encodeJwk(hs384Key));
+	const token = await Key.sign(key, testClaims);
+	const verifiedClaims = await Key.verify(key, token);
 
 	expect(verifiedClaims.root).toBe(testClaims.root);
 	expect(verifiedClaims.publish).toEqual(testClaims.publish);
@@ -362,17 +361,17 @@ test("different algorithms - HS512", async () => {
 		kid: "test-key-hs512",
 	} as const;
 
-	const key = load(encodeJwk(hs512Key));
-	const token = await sign(key, testClaims);
-	const verifiedClaims = await verify(key, token);
+	const key = Key.parse(encodeJwk(hs512Key));
+	const token = await Key.sign(key, testClaims);
+	const verifiedClaims = await Key.verify(key, token);
 
 	expect(verifiedClaims.root).toBe(testClaims.root);
 	expect(verifiedClaims.publish).toEqual(testClaims.publish);
 });
 
 test("verify - private to public key", async () => {
-	const key = load(INSECURE_TEST_RSA_KEYS.RS256.private);
-	const publicKey = toPublicKey(key);
+	const key = Key.parse(INSECURE_TEST_RSA_KEYS.RS256.private);
+	const publicKey = Key.public(key);
 
 	expect(publicKey.alg).toBe(key.alg);
 
@@ -384,62 +383,62 @@ test("verify - private to public key", async () => {
 
 test("RSA algorithms - sign and verify", async () => {
 	for (const alg of ["RS256", "RS384", "RS512"] as const) {
-		const key = load(INSECURE_TEST_RSA_KEYS[alg].private);
+		const key = Key.parse(INSECURE_TEST_RSA_KEYS[alg].private);
 		expect(key.alg).toBe(alg);
 
-		const token = await sign(key, testClaims);
-		const verifiedClaims = await verify(toPublicKey(key), token);
+		const token = await Key.sign(key, testClaims);
+		const verifiedClaims = await Key.verify(Key.public(key), token);
 		expect(verifiedClaims.root).toBe(testClaims.root);
 	}
 });
 
 test("RSA public keys verify but cannot sign", async () => {
-	const privateKey = load(INSECURE_TEST_RSA_KEYS.RS256.private);
-	const publicKey = loadPublic(INSECURE_TEST_RSA_KEYS.RS256.public);
+	const privateKey = Key.parse(INSECURE_TEST_RSA_KEYS.RS256.private);
+	const publicKey = Key.parse(INSECURE_TEST_RSA_KEYS.RS256.public);
 
-	const token = await sign(privateKey, testClaims);
-	const claims = await verify(publicKey, token);
+	const token = await Key.sign(privateKey, testClaims);
+	const claims = await Key.verify(publicKey, token);
 	expect(claims.root).toBe(testClaims.root);
 
 	await expect(
 		(async () => {
-			await sign(publicKey as Key, testClaims);
+			await Key.sign(publicKey as Key, testClaims);
 		})(),
 	).rejects.toThrow();
 });
 
 test("RSA-PSS algorithms - sign and verify", async () => {
 	for (const alg of ["PS256", "PS384", "PS512"] as const) {
-		const key = load(INSECURE_TEST_RSA_KEYS[alg].private);
+		const key = Key.parse(INSECURE_TEST_RSA_KEYS[alg].private);
 		expect(key.alg).toBe(alg);
 
-		const token = await sign(key, testClaims);
-		const verifiedClaims = await verify(toPublicKey(key), token);
+		const token = await Key.sign(key, testClaims);
+		const verifiedClaims = await Key.verify(Key.public(key), token);
 		expect(verifiedClaims.root).toBe(testClaims.root);
 	}
 });
 
 test("RSA verification rejects foreign keys and mangled tokens", async () => {
-	const key = load(INSECURE_TEST_RSA_KEYS.RS256.private);
-	const token = await sign(key, testClaims);
+	const key = Key.parse(INSECURE_TEST_RSA_KEYS.RS256.private);
+	const token = await Key.sign(key, testClaims);
 
 	// A different RS256 key is the same algorithm and the same shape, so only the
 	// signature check can reject it.
-	const foreign = loadPublic(INSECURE_TEST_RS256_OTHER.public);
-	await expect(verify(foreign, token)).rejects.toThrow();
+	const foreign = Key.parse(INSECURE_TEST_RS256_OTHER.public);
+	await expect(Key.verify(foreign, token)).rejects.toThrow();
 
-	const publicKey = loadPublic(INSECURE_TEST_RSA_KEYS.RS256.public);
+	const publicKey = Key.parse(INSECURE_TEST_RSA_KEYS.RS256.public);
 	const [header, payload, signature] = token.split(".");
 
 	// Truncated, over-segmented, and empty tokens are all malformed.
-	await expect(verify(publicKey, `${header}.${payload}`)).rejects.toThrow();
-	await expect(verify(publicKey, `${token}.${signature}`)).rejects.toThrow();
-	await expect(verify(publicKey, "")).rejects.toThrow();
+	await expect(Key.verify(publicKey, `${header}.${payload}`)).rejects.toThrow();
+	await expect(Key.verify(publicKey, `${token}.${signature}`)).rejects.toThrow();
+	await expect(Key.verify(publicKey, "")).rejects.toThrow();
 
 	// So is a well-formed token whose signature no longer covers the payload.
 	const tamperedPayload = encodeJwk({ ...testClaims, root: "somewhere-else" });
-	await expect(verify(publicKey, `${header}.${tamperedPayload}.${signature}`)).rejects.toThrow();
-	await expect(verify(publicKey, `${header}.${payload}.${signature.slice(0, -4)}AAAA`)).rejects.toThrow();
+	await expect(Key.verify(publicKey, `${header}.${tamperedPayload}.${signature}`)).rejects.toThrow();
+	await expect(Key.verify(publicKey, `${header}.${payload}.${signature.slice(0, -4)}AAAA`)).rejects.toThrow();
 });
 
 // RSA key generation searches for random primes, so its cost has a long tail:
@@ -450,35 +449,35 @@ test("RSA verification rejects foreign keys and mangled tokens", async () => {
 // below is local to this test rather than a suite-wide bump, and is roughly ten
 // times the slowest single generation measured under load.
 test("RSA key generation - a generated key signs and verifies", async () => {
-	const key = await generate("RS256", "generated");
+	const key = await Key.generate("RS256", "generated");
 	expect(key.alg).toBe("RS256");
 	expect(key.kty).toBe("RSA");
 
-	const token = await sign(key, testClaims);
-	const claims = await verify(toPublicKey(key), token);
+	const token = await Key.sign(key, testClaims);
+	const claims = await Key.verify(Key.public(key), token);
 	expect(claims.root).toBe(testClaims.root);
 
 	// A fresh key is genuinely fresh: it cannot verify a fixture's signature.
-	const fixtureToken = await sign(load(INSECURE_TEST_RSA_KEYS.RS256.private), testClaims);
-	await expect(verify(toPublicKey(key), fixtureToken)).rejects.toThrow();
+	const fixtureToken = await Key.sign(Key.parse(INSECURE_TEST_RSA_KEYS.RS256.private), testClaims);
+	await expect(Key.verify(Key.public(key), fixtureToken)).rejects.toThrow();
 }, 30_000);
 
 test("EC algorithms - sign and verify", async () => {
 	for (const alg of ["ES256", "ES384"] as const) {
 		const { privateEncoded } = await generateAsymmetricKeyPair(alg);
-		const key = load(privateEncoded);
-		const token = await sign(key, testClaims);
-		const verifiedClaims = await verify(toPublicKey(key), token);
+		const key = Key.parse(privateEncoded);
+		const token = await Key.sign(key, testClaims);
+		const verifiedClaims = await Key.verify(Key.public(key), token);
 		expect(verifiedClaims.root).toBe(testClaims.root);
 	}
 });
 
 test("EdDSA algorithm - sign and verify", async () => {
 	const { privateEncoded, publicEncoded } = await generateAsymmetricKeyPair("EdDSA");
-	const privateKey = load(privateEncoded);
-	const publicKey = loadPublic(publicEncoded);
-	const token = await sign(privateKey, testClaims);
-	const verifiedClaims = await verify(publicKey, token);
+	const privateKey = Key.parse(privateEncoded);
+	const publicKey = Key.parse(publicEncoded);
+	const token = await Key.sign(privateKey, testClaims);
+	const verifiedClaims = await Key.verify(publicKey, token);
 	expect(verifiedClaims.root).toBe(testClaims.root);
 });
 
@@ -486,9 +485,9 @@ test("EdDSA algorithm - static sign and verify", async () => {
 	// Key generated via `moq auth generate`
 	const privateKey =
 		"eyJhbGciOiJFZERTQSIsImtleV9vcHMiOlsidmVyaWZ5Iiwic2lnbiJdLCJrdHkiOiJPS1AiLCJjcnYiOiJFZDI1NTE5IiwieCI6Imd4cXVxMDlJUE4xVHl1TG1nTnNqZmo2NWtoa05OWndKVmp1MEEtUmQ0dkEiLCJkIjoiU1NFSHBIeTFUNHJaemhua3dpVVFlUGV1TUh2MWpLUGlxRzRsbFhyQV91cyJ9";
-	const key = load(privateKey);
-	const token = await sign(key, testClaims);
-	const verifiedClaims = await verify(toPublicKey(key), token);
+	const key = Key.parse(privateKey);
+	const token = await Key.sign(key, testClaims);
+	const verifiedClaims = await Key.verify(Key.public(key), token);
 	expect(verifiedClaims.root).toBe(testClaims.root);
 });
 
@@ -496,34 +495,34 @@ test("EdDSA algorithm - verify with private key fails", async () => {
 	// Key generated via `moq auth generate`
 	const privateKey =
 		"eyJhbGciOiJFZERTQSIsImtleV9vcHMiOlsidmVyaWZ5Iiwic2lnbiJdLCJrdHkiOiJPS1AiLCJjcnYiOiJFZDI1NTE5IiwieCI6Imd4cXVxMDlJUE4xVHl1TG1nTnNqZmo2NWtoa05OWndKVmp1MEEtUmQ0dkEiLCJkIjoiU1NFSHBIeTFUNHJaemhua3dpVVFlUGV1TUh2MWpLUGlxRzRsbFhyQV91cyJ9";
-	const key = load(privateKey);
-	const token = await sign(key, testClaims);
+	const key = Key.parse(privateKey);
+	const token = await Key.sign(key, testClaims);
 	await expect(
 		(async () => {
-			await verify(key, token);
+			await Key.verify(key, token);
 		})(),
 	).rejects.toThrow();
 });
 
 test("asymmetric cross-algorithm verification fails", async () => {
-	const rsKey = load(INSECURE_TEST_RSA_KEYS.RS256.private);
-	const rsPublicKey = loadPublic(INSECURE_TEST_RSA_KEYS.RS256.public);
-	const psPublicKey = loadPublic(INSECURE_TEST_RSA_KEYS.PS256.public);
-	const token = await sign(rsKey, testClaims);
+	const rsKey = Key.parse(INSECURE_TEST_RSA_KEYS.RS256.private);
+	const rsPublicKey = Key.parse(INSECURE_TEST_RSA_KEYS.RS256.public);
+	const psPublicKey = Key.parse(INSECURE_TEST_RSA_KEYS.PS256.public);
+	const token = await Key.sign(rsKey, testClaims);
 
-	const verifiedClaims = await verify(rsPublicKey, token);
+	const verifiedClaims = await Key.verify(rsPublicKey, token);
 	expect(verifiedClaims.root).toBe(testClaims.root);
 
 	await expect(
 		(async () => {
-			await verify(psPublicKey, token);
+			await Key.verify(psPublicKey, token);
 		})(),
 	).rejects.toThrow();
 });
 
 test("cross-algorithm verification fails", async () => {
-	const hs256Key = load(encodeJwk(testKey));
-	const hs384Key = load(
+	const hs256Key = Key.parse(encodeJwk(testKey));
+	const hs384Key = Key.parse(
 		encodeJwk({
 			alg: "HS384",
 			key_ops: ["sign", "verify"],
@@ -533,16 +532,16 @@ test("cross-algorithm verification fails", async () => {
 		}),
 	);
 
-	const token = await sign(hs256Key, testClaims);
+	const token = await Key.sign(hs256Key, testClaims);
 
 	await expect(
 		(async () => {
-			await verify(hs384Key, token);
+			await Key.verify(hs384Key, token);
 		})(),
 	).rejects.toThrow();
 });
 
-test("load - invalid algorithm", () => {
+test("parse - invalid algorithm", () => {
 	const invalidKey = {
 		...testKey,
 		alg: "ES512", // unsupported algorithm
@@ -550,11 +549,11 @@ test("load - invalid algorithm", () => {
 	const jwk = encodeJwk(invalidKey);
 
 	expect(() => {
-		load(jwk);
+		Key.parse(jwk);
 	}).toThrow();
 });
 
-test("load - mismatched algorithm", () => {
+test("parse - mismatched algorithm", () => {
 	const invalidKey = {
 		...testKey,
 		alg: "RS256", // mismatched algorithm for oct key
@@ -562,11 +561,11 @@ test("load - mismatched algorithm", () => {
 	const jwk = encodeJwk(invalidKey);
 
 	expect(() => {
-		load(jwk);
+		Key.parse(jwk);
 	}).toThrow();
 });
 
-test("load - invalid key_ops", () => {
+test("parse - invalid key_ops", () => {
 	const invalidKey = {
 		...testKey,
 		key_ops: ["invalid-operation"],
@@ -574,11 +573,11 @@ test("load - invalid key_ops", () => {
 	const jwk = encodeJwk(invalidKey);
 
 	expect(() => {
-		load(jwk);
+		Key.parse(jwk);
 	}).toThrow();
 });
 
-test("load - missing alg field", () => {
+test("parse - missing alg field", () => {
 	const invalidKey = {
 		key_ops: ["sign", "verify"],
 		kty: "oct",
@@ -587,13 +586,13 @@ test("load - missing alg field", () => {
 	const jwk = encodeJwk(invalidKey);
 
 	expect(() => {
-		load(jwk);
+		Key.parse(jwk);
 	}).toThrow();
 });
 
 test("sign - includes kid in header when present", async () => {
-	const key = load(encodeJwk(testKey));
-	const token = await sign(key, testClaims);
+	const key = Key.parse(encodeJwk(testKey));
+	const token = await Key.sign(key, testClaims);
 
 	// Decode the header to verify kid is present
 	const [headerB64] = token.split(".");
@@ -612,8 +611,8 @@ test("sign - no kid in header when not present", async () => {
 	};
 	delete keyWithoutKid.kid;
 
-	const key = load(encodeJwk(keyWithoutKid));
-	const token = await sign(key, testClaims);
+	const key = Key.parse(encodeJwk(keyWithoutKid));
+	const token = await Key.sign(key, testClaims);
 
 	// Decode the header to verify kid is not present
 	const [headerB64] = token.split(".");
@@ -626,7 +625,7 @@ test("sign - no kid in header when not present", async () => {
 });
 
 test("sign - writes iat only when the claims carry one", async () => {
-	const key = load(encodeJwk(testKey));
+	const key = Key.parse(encodeJwk(testKey));
 
 	const decodePayload = (token: string) => {
 		const [, payloadB64] = token.split(".");
@@ -635,38 +634,38 @@ test("sign - writes iat only when the claims carry one", async () => {
 	};
 
 	// Unset stays off the wire, matching the Rust crate rather than stamping now().
-	const withoutIat = await sign(key, { root: "test-path", publish: ["test-pub/**"] });
+	const withoutIat = await Key.sign(key, { root: "test-path", publish: ["test-pub/**"] });
 	expect(decodePayload(withoutIat).iat).toBeUndefined();
 
 	// A caller-supplied iat is preserved exactly.
-	const withIat = await sign(key, { root: "test-path", publish: ["test-pub/**"], iat: 1700000000 });
+	const withIat = await Key.sign(key, { root: "test-path", publish: ["test-pub/**"], iat: 1700000000 });
 	expect(decodePayload(withIat).iat).toBe(1700000000);
 });
 
 test("verify - malformed token parts", async () => {
-	const key = load(encodeJwk(testKey));
+	const key = Key.parse(encodeJwk(testKey));
 
 	await expect(
 		(async () => {
-			await verify(key, "invalid");
+			await Key.verify(key, "invalid");
 		})(),
 	).rejects.toThrow();
 
 	await expect(
 		(async () => {
-			await verify(key, "invalid.token");
+			await Key.verify(key, "invalid.token");
 		})(),
 	).rejects.toThrow();
 
 	await expect(
 		(async () => {
-			await verify(key, "invalid.token.signature.extra");
+			await Key.verify(key, "invalid.token.signature.extra");
 		})(),
 	).rejects.toThrow();
 });
 
 test("verify - invalid payload structure", async () => {
-	const key = load(encodeJwk(testKey));
+	const key = Key.parse(encodeJwk(testKey));
 
 	// Create a token with invalid payload structure
 	const headerData = new TextEncoder().encode(JSON.stringify({ alg: "HS256", typ: "JWT" }));
@@ -679,24 +678,24 @@ test("verify - invalid payload structure", async () => {
 
 	await expect(
 		(async () => {
-			await verify(key, invalidToken);
+			await Key.verify(key, invalidToken);
 		})(),
 	).rejects.toThrow();
 });
 
 test("verify - claims validation during verification", async () => {
-	const key = load(encodeJwk(testKey));
+	const key = Key.parse(encodeJwk(testKey));
 
-	// We need to create a token with valid claims since sign() would reject invalid ones
-	const token = await sign(key, { root: "test-path", publish: ["absolute-pub/**"] });
+	// We need to create a token with valid claims since Key.sign() would reject invalid ones
+	const token = await Key.sign(key, { root: "test-path", publish: ["absolute-pub/**"] });
 
 	// Test that valid tokens pass verification
-	const verifiedClaims = await verify(key, token);
+	const verifiedClaims = await Key.verify(key, token);
 	expect(verifiedClaims.root).toBe("test-path");
 });
 
 test("verify - a token carrying the retired put/get prefix fields is refused", async () => {
-	const key = load(encodeJwk(testKey));
+	const key = Key.parse(encodeJwk(testKey));
 	const secret = await crypto.subtle.importKey(
 		"raw",
 		Buffer.from(testKey.k, "base64url"),
@@ -708,11 +707,11 @@ test("verify - a token carrying the retired put/get prefix fields is refused", a
 	const legacy = await new SignJWT({ root: "test-path", put: ["alice"], get: [""] })
 		.setProtectedHeader({ alg: "HS256", kid: testKey.kid })
 		.sign(secret);
-	await expect(verify(key, legacy)).rejects.toThrow(/put|Unrecognized/);
+	await expect(Key.verify(key, legacy)).rejects.toThrow(/put|Unrecognized/);
 });
 
 test("key scope is enforced when signing and verifying", async () => {
-	const unrestricted = load(encodeJwk(testKey));
+	const unrestricted = Key.parse(encodeJwk(testKey));
 	const scoped: Key = {
 		...unrestricted,
 		scope: { root: "project", publish: ["live/**"] },
@@ -720,24 +719,24 @@ test("key scope is enforced when signing and verifying", async () => {
 	const allowed: Claims = { root: "project", publish: ["live/room/**"] };
 	const denied: Claims = { root: "project", publish: ["other/**"] };
 
-	await expect(sign(scoped, allowed)).resolves.toBeString();
-	await expect(sign(scoped, denied)).rejects.toThrow("exceed the key scope");
+	await expect(Key.sign(scoped, allowed)).resolves.toBeString();
+	await expect(Key.sign(scoped, denied)).rejects.toThrow("exceed the key scope");
 
 	// A token signed by an unscoped copy of the key must still be rejected on the
 	// way in, so a scope can't be stripped by re-signing elsewhere.
-	const forged = await sign(unrestricted, denied);
-	await expect(verify(scoped, forged)).rejects.toThrow("exceed the key scope");
+	const forged = await Key.sign(unrestricted, denied);
+	await expect(Key.verify(scoped, forged)).rejects.toThrow("exceed the key scope");
 });
 
 test("key scope treats absolute and rooted grants alike", async () => {
-	const scoped: Key = { ...load(encodeJwk(testKey)), scope: { root: "project", publish: ["live/**"] } };
+	const scoped: Key = { ...Key.parse(encodeJwk(testKey)), scope: { root: "project", publish: ["live/**"] } };
 
-	await expect(sign(scoped, { root: "", publish: ["project/live/room/**"] })).resolves.toBeString();
-	await expect(sign(scoped, { root: "/project/live/", publish: ["room/**"] })).resolves.toBeString();
+	await expect(Key.sign(scoped, { root: "", publish: ["project/live/room/**"] })).resolves.toBeString();
+	await expect(Key.sign(scoped, { root: "/project/live/", publish: ["room/**"] })).resolves.toBeString();
 	// Segment-aware: "live" must not cover "lively".
-	await expect(sign(scoped, { root: "project", publish: ["lively/**"] })).rejects.toThrow("exceed the key scope");
+	await expect(Key.sign(scoped, { root: "project", publish: ["lively/**"] })).rejects.toThrow("exceed the key scope");
 	// A root above the scope does not widen it.
-	await expect(sign(scoped, { root: "", publish: ["**"] })).rejects.toThrow("exceed the key scope");
+	await expect(Key.sign(scoped, { root: "", publish: ["**"] })).rejects.toThrow("exceed the key scope");
 	// Roles are independent: a publish-only scope grants no subscribe.
-	await expect(sign(scoped, { root: "project", subscribe: ["live/**"] })).rejects.toThrow("exceed the key scope");
+	await expect(Key.sign(scoped, { root: "project", subscribe: ["live/**"] })).rejects.toThrow("exceed the key scope");
 });
