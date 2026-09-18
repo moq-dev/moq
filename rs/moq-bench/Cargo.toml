@@ -28,7 +28,7 @@ path = "src/host.rs"
 doc = false
 
 [features]
-default = ["quinn", "websocket"]
+default = ["noq", "websocket"]
 iroh = ["moq-native/iroh"]
 noq = ["moq-native/noq"]
 quinn = ["moq-native/quinn"]

@@ -81,7 +81,7 @@ ends that track and the role picks a replacement. Playback is behind the
 `play` feature, since it pulls in windowing and audio-device dependencies:
 
 ```bash
-cargo install moq-cli --no-default-features --features "iroh,quinn,websocket,play"
+cargo install moq-cli --no-default-features --features "iroh,noq,websocket,play"
 ```
 
 ## Capture

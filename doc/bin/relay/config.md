@@ -32,7 +32,7 @@ bind = "/run/moq/internal.sock"
 allow.uid = [1001]
 ```
 
-The `quinn` (default), `quiche`, and `noq` QUIC backends are compile-time
+The `noq` (default), `quinn`, and `quiche` QUIC backends are compile-time
 features selected with `backend`. `"delay"` is BBR on all of them, but the
 generation differs: BBRv1 on quinn, BBRv2 on quiche, BBRv3 on noq and iroh.
 

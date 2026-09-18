@@ -698,7 +698,7 @@ pub unsafe extern "C" fn moq_client_set_versions(client: u32, versions: *const m
 
 /// Choose the QUIC backend: `"quinn"`, `"quiche"`, or `"noq"`.
 ///
-/// Defaults to whichever is compiled in, preferring quinn. A NULL or empty value
+/// Defaults to whichever is compiled in, preferring noq. A NULL or empty value
 /// restores that auto-detection.
 ///
 /// Returns zero on success, or a negative code if the handle is unknown or the backend
