@@ -46,13 +46,13 @@ or as a CLI
 
 ```bash
 # generate secret key
-moq-auth generate --key key.jwk
+moq-auth generate --out key.jwk
 ```
 
 The default is HS256, you can choose other algorithms with `--algorithm`:
 
 ```bash
-moq-auth generate --key key.jwk --algorithm ES256
+moq-auth generate --out key.jwk --algorithm ES256
 ```
 
 ### Signing
@@ -88,7 +88,7 @@ moq-auth sign --key "root.jwk" \
 
 ### Verifying
 
-You can also verify a token, then scope it to a connection path the way a relay does:
+You can also verify a token, then scope it to a connection path the way `moq auth serve` does:
 
 ```typescript
 import { authorize, verify } from "@moq/auth";
@@ -100,7 +100,7 @@ const permissions = authorize(claims, "rooms/meeting-123"); // patterns relative
 or as a CLI
 
 ```bash
-moq-auth verify --key root.jwk --root "rooms/meeting-123" < alice.jwt
+moq-auth verify --key root.jwk --in alice.jwt
 ```
 
 ### Answering a relay

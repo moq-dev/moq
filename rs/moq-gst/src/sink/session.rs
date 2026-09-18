@@ -91,14 +91,20 @@ impl Status {
 }
 
 /// Convert only transport metrics actually supplied by the active backend into the public property.
-fn connection_stats_structure(stats: moq_net::ConnectionStats) -> gst::Structure {
+fn connection_stats_structure(stats: moq_net::session::Stats) -> gst::Structure {
 	let mut structure = gst::Structure::new_empty("moq-connection-stats");
 	if let Some(rtt) = stats.rtt {
 		structure.set("rtt-us", u64::try_from(rtt.as_micros()).unwrap_or(u64::MAX));
 	}
 	for (name, value) in [
-		("estimated-send-rate-bps", stats.estimated_send_rate),
-		("estimated-recv-rate-bps", stats.estimated_recv_rate),
+		(
+			"estimated-send-rate-bps",
+			stats.estimated_send_rate.map(moq_net::bandwidth::Rate::as_bps),
+		),
+		(
+			"estimated-recv-rate-bps",
+			stats.estimated_recv_rate.map(moq_net::bandwidth::Rate::as_bps),
+		),
 		("bytes-sent", stats.bytes_sent),
 		("bytes-received", stats.bytes_received),
 		("bytes-lost", stats.bytes_lost),
@@ -491,7 +497,7 @@ mod tests {
 	#[test]
 	fn connection_stats_preserve_unavailable_separately_from_zero() {
 		gst::init().unwrap();
-		let mut stats = moq_net::ConnectionStats::default();
+		let mut stats = moq_net::session::Stats::default();
 		stats.rtt = Some(std::time::Duration::ZERO);
 		stats.bytes_sent = Some(0);
 		stats.packets_lost = Some(7);

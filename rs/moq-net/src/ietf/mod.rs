@@ -17,7 +17,6 @@ mod group;
 mod location;
 pub mod message;
 mod namespace;
-pub mod pattern;
 pub mod peer;
 mod priority;
 mod properties;

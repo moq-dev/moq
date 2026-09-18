@@ -147,9 +147,9 @@ mod linux {
 				});
 			});
 
-			let mut broadcast = pub_origin.create_broadcast("bench").expect("create broadcast");
+			let broadcast = pub_origin.create_broadcast("bench").expect("create broadcast");
 			broadcast.announce(Default::default()).expect("create broadcast");
-			let mut track = broadcast.create_track("data", None).expect("create track");
+			let track = broadcast.create_track("data", None).expect("create track");
 
 			let certs = support::certs().expect("certificates");
 			let mut server_config =

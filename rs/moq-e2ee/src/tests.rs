@@ -397,7 +397,7 @@ fn grouped_authentication_ends_track() {
 	let cred = test_credential();
 	let publication = cred.publish().unwrap();
 	let physical = cred.physical_name("video").unwrap();
-	let mut net = moq_net::broadcast::Info::new()
+	let net = moq_net::broadcast::Info::new()
 		.produce()
 		.create_track(physical.as_str(), None)
 		.unwrap();

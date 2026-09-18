@@ -17,7 +17,7 @@ Unplanned. The shape landed with the embedded mode, so this quest is the
 decision whether to fold the rest onto it:
 
 - `auth::Config::init` would spawn the decider: for `--auth-url`, a task that
-  takes each `Admission`, calls `Client::connect(request, bytes)`, and answers
+  takes each `Admission`, calls `Client::connect(request)`, and answers
   `grant(consumer)` or `refuse(err.into())`, one spawned task per admission so
   a slow server does not serialize connects; for `--auth-public`, a task
   answering `grant(lease::Consumer::fixed(grant))`. `Refuse` stays a mode, or becomes a
@@ -45,7 +45,7 @@ while let Some(admission) = admissions.next().await {
             Ok(grant) => {
                 let (producer, consumer) = lease::Producer::new(grant.clone());
                 admission.grant(consumer);
-                authorizer.drive(producer, admission.request, admission.bytes, grant).await;
+                authorizer.drive(producer, admission.request, grant).await;
             }
             Err(Error::Refused(why)) => admission.refuse(auth::Error::Refused),
             Err(Error::Unavailable(why)) => admission.refuse(auth::Error::Unavailable(why)),
@@ -56,13 +56,12 @@ while let Some(admission) = admissions.next().await {
 
 `drive` is the edge's re-check loop: sleep the cadence, `decide(.., true)`,
 `producer.update` or `producer.revoke`, and `producer.closed()` for the end
-event with `bytes.bytes()`. The unix socket, the axum router, and the JSON
+event with the totals the session reported through `lease::Consumer::close`. The unix socket, the axum router, and the JSON
 round trip go away; the gateways keep calling `auth.admit` and now reach the
 same loop.
 
 ## Related
 
-- [Auth contract](/quest/m1/auth-contract.md) - deletes `Counters`, so `Client::connect(request)` and `Admission` lose the `bytes` argument the sketch above passes
 - [Auth embedder](/quest/m2/auth-embedder.md) - the lease owns the re-check clock, so `drive` above becomes a loop over `producer.due()` instead of a second driver
 - [In-band auth](/quest/m2/auth/README.md) - a token presented in band is
   another admission on the same lease

@@ -219,9 +219,9 @@ fn lite_session_over_webtransport() {
 		rt.block_on(pub_driver.run(support::TokioTimers));
 	});
 
-	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let mut track = broadcast.create_track("data", None).expect("create track");
+	let track = broadcast.create_track("data", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, PAYLOAD)

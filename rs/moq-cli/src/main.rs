@@ -206,9 +206,8 @@ async fn serve_client(
 	origin: &moq_net::origin::Producer,
 	directions: Directions,
 ) -> anyhow::Result<()> {
-	let bytes = moq_auth::Counters::default();
 	let auth_request = moq_relay::auth::request_for(auth, &request);
-	let lease = match auth.admit(auth_request, bytes.clone()).await {
+	let lease = match auth.admit(auth_request).await {
 		Ok(lease) => lease,
 		Err(err) => {
 			let status = axum::http::StatusCode::from(&err);
@@ -241,7 +240,7 @@ async fn serve_client(
 		request = request.with_subscriber(subscribe);
 	}
 	let session = request.ok().await?;
-	moq_relay::supervise(session, lease, bytes, moq_relay::shutdown::Observer::disabled()).await
+	moq_relay::supervise(session, lease, moq_relay::shutdown::Observer::disabled(), None).await
 }
 
 /// Whether ordinary clients may use this transport on the shared LAN server.

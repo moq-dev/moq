@@ -574,7 +574,7 @@ impl Monitor {
 	}
 
 	/// Snapshot the current connection's stats, or `None` if not currently connected.
-	pub fn stats(&self) -> Option<moq_net::ConnectionStats> {
+	pub fn stats(&self) -> Option<moq_net::session::Stats> {
 		self.state.read().session.as_ref().map(moq_net::Session::stats)
 	}
 
@@ -593,7 +593,7 @@ impl Monitor {
 #[non_exhaustive]
 pub struct Snapshot {
 	/// Transport statistics at the time of the snapshot.
-	pub stats: moq_net::ConnectionStats,
+	pub stats: moq_net::session::Stats,
 	/// Protocol negotiated by the connection that supplied these statistics.
 	pub version: Version,
 }

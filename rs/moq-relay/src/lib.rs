@@ -21,6 +21,7 @@ mod listener;
 mod nodes;
 mod relay;
 pub mod runtime;
+pub mod session;
 mod settings;
 pub mod shutdown;
 pub mod stats;

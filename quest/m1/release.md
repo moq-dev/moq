@@ -50,8 +50,7 @@ with its PR and the replacement call:
   `--name`/`--latency-max` and `publish`/`subscribe` name `--hop`/`--broadcast`/
   `--max-age` and `import`/`export`. Unused `#[deprecated]` items are gone.
   JS `announced()` always drops reflected announces (`ignoreSelf` is gone);
-  an `oct` JWK without `kty` is refused once [Auth contract](/quest/m1/auth-contract.md)
-  deletes the Rust default (JS already refuses). The gstmoq properties
+  an `oct` JWK without `kty` is refused. The gstmoq properties
   `estimated-send-bitrate`/`estimated-recv-bitrate` are `estimated-*-rate`
   with no alias, a runtime failure for a `gst-launch` line.
 - bindings: the Go module is `moq.dev/moq` with `context.Context` on every
@@ -88,5 +87,4 @@ Public API: none beyond the required quests. Wire: none.
 - [JSON mutate](/quest/m2/json-mutate.md) - Rust and JS share the closure edit
 - [Binding parity](/quest/m2/binding-parity.md) - every wrapper reaches every moq-ffi method
 - [Binding docs](/quest/m2/binding-docs.md) - the binding pages compile against the wrappers
-- [Session revalidate](/quest/m1/session-revalidate.md) - the pushed re-check ships with the auth API moq.pro adopts
 - The merged relay has soaked on moq.pro staging and the maintainer has signed it off

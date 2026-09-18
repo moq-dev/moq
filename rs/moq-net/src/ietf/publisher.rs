@@ -1395,7 +1395,6 @@ where
 				request_id,
 				track_namespace: path.as_path(),
 				cluster,
-				pattern: None,
 			})
 			.await?;
 
@@ -1828,18 +1827,13 @@ where
 					return stream.writer.closed().await;
 				}
 				NamespaceEvent::Update(Some(update)) => {
-					let Some(path) = update.pattern.as_prefix() else {
-						// Decode-first: do not emit NAMESPACE_PATTERN until receivers
-						// that negotiated it also land it, and never as a literal prefix.
-						continue;
-					};
-					let path = crate::Path::new(path).to_owned();
+					let path = update.path;
 					let suffix = path
 						.strip_prefix(&prefix)
 						.expect("origin returned invalid prefix")
 						.to_owned();
 
-					if update.active {
+					if update.kind.is_active() {
 						// A repeat for a live suffix is a metadata update: keep the
 						// peer's refusal state and re-run the selection.
 						match ns.watched.get_mut(&suffix) {
@@ -2295,7 +2289,7 @@ mod group_priority_test {
 		let log = crate::lite::test_transport::Log::default();
 		let session = SinkSession::new(log.clone());
 
-		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
 		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 		group
 			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
@@ -2339,7 +2333,7 @@ mod group_priority_test {
 		let session = SinkSession::new(log.clone());
 
 		let info = track::Info::default().with_priority(hang_audio_priority());
-		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", info);
+		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", info);
 		let subscriber = track.subscribe(None);
 
 		let mut group = track.append_group().unwrap();
@@ -2388,7 +2382,7 @@ mod group_priority_test {
 
 		let gate = kio::Producer::new(false);
 		let session = SinkSession::gated_open_uni(gate.consume());
-		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_group().unwrap();
 		old.write_frame(crate::Timestamp::ZERO, b"old".as_slice()).unwrap();
@@ -2432,7 +2426,7 @@ mod group_priority_test {
 
 		let gate = kio::Producer::new(true);
 		let session = SinkSession::gated_uni(gate.consume());
-		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_group().unwrap();
 		let mut frame = old
@@ -2498,7 +2492,7 @@ mod subscribe_cursor_test {
 		let log = Log::default();
 		let session = SinkSession::new(log.clone());
 
-		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
 		for sequence in 0..4 {
 			let mut group = track.create_group(group::Info { sequence }).unwrap();
 			group
@@ -2555,7 +2549,7 @@ mod serve_tests {
 
 	fn serve(version: Version) -> Serve {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let mut broadcast = origin.create_broadcast("room").unwrap();
+		let broadcast = origin.create_broadcast("room").unwrap();
 		let track = broadcast.create_track("video", None).unwrap();
 
 		let session = ScriptedSession::per_stream(vec![Vec::new()]);
@@ -3104,7 +3098,7 @@ mod serve_tests {
 	#[tokio::test]
 	async fn a_joining_fetch_refuses_a_missing_prefix_before_fetch_ok() {
 		let version = Version::Draft17;
-		let mut h = serve(version);
+		let h = serve(version);
 		let mut group = h.track.create_group(group::Info { sequence: 5 }).unwrap();
 		group.start_at(1).unwrap();
 		group.write_frame(timestamp(), b"frame".as_slice()).unwrap();
@@ -3323,7 +3317,7 @@ mod serve_tests {
 		async fn serve_slice(slice: GroupSlice) -> Vec<u8> {
 			let log = Log::default();
 			let session = SinkSession::new(log.clone());
-			let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+			let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
 			let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 			for payload in [b"aa", b"bb", b"cc", b"dd"] {
 				group.write_frame(timestamp(), payload.as_slice()).unwrap();
@@ -3405,7 +3399,7 @@ mod tests {
 	/// subscription must preserve everything the producer still retains.
 	#[test]
 	fn serving_subscription_keeps_retained_backlog() {
-		let mut producer = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		let producer = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
 		for millis in [0, 1000] {
 			let mut group = producer.append_group().unwrap();
 			group
@@ -4186,7 +4180,6 @@ mod tests {
 				cost: None,
 			},
 			solicit,
-			..Default::default()
 		});
 		slot
 	}
@@ -4999,7 +4992,7 @@ mod range_tests {
 	/// Clamping it to the live edge would serve a group outside the requested range.
 	#[tokio::test]
 	async fn a_future_start_is_not_clamped_to_the_live_edge() {
-		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
 		track
 			.create_group(group::Info { sequence: 7 })
 			.unwrap()
@@ -5150,7 +5143,7 @@ mod range_tests {
 	/// one exists, so the earlier group is deliberately left unfinished here.
 	#[tokio::test]
 	async fn an_empty_newest_group_walks_back_for_the_largest() {
-		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
 		let mut first = track.create_group(group::Info { sequence: 0 }).unwrap();
 		for _ in 0..3 {
 			first
@@ -5177,7 +5170,7 @@ mod range_tests {
 	/// order rather than decrementing by one.
 	#[tokio::test]
 	async fn the_walkback_crosses_a_gap_in_the_numbering() {
-		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
 		let mut first = track.create_group(group::Info { sequence: 0 }).unwrap();
 		first
 			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"frame".as_slice())

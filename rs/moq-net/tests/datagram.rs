@@ -38,7 +38,7 @@ async fn connect_datagram_track() -> Fixture {
 	let publisher = produce_origin(1);
 	let consumer_origin = produce_origin(2);
 
-	let mut broadcast = publisher.create_broadcast("bench").unwrap();
+	let broadcast = publisher.create_broadcast("bench").unwrap();
 	let producer = broadcast.create_track("datagrams", None).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
@@ -117,7 +117,7 @@ async fn ietf_does_not_deliver_datagrams() {
 		let publisher = produce_origin(1);
 		let consumer_origin = produce_origin(2);
 
-		let mut broadcast = publisher.create_broadcast("bench").unwrap();
+		let broadcast = publisher.create_broadcast("bench").unwrap();
 		let mut producer = broadcast.create_track("datagrams", None).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 

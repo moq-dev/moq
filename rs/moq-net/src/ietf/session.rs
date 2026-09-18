@@ -504,7 +504,6 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 	Ok(peer::Peer {
 		cluster: cluster::peer_from_setup(params, version)?,
 		solicit: solicit::from_setup(params, version)?,
-		patterns: ietf::pattern::peer_from_setup(params, version)?.negotiated,
 	})
 }
 
@@ -536,7 +535,6 @@ async fn run_setup<S: crate::transport::poll::Session, R: crate::runtime::Runtim
 	}
 	cluster::peer_into_setup(&mut parameters, self_origin, cost, version);
 	solicit::into_setup(&mut parameters, version);
-	ietf::pattern::peer_into_setup(&mut parameters, version);
 	let parameters = parameters.encode_bytes(version)?;
 
 	writer.encode(&setup::Setup { parameters }).await?;
@@ -756,7 +754,6 @@ where
 	// From the same slot, so this costs nothing extra: it decides whether an unsolicited
 	// advertisement is the peer ignoring our own SETUP (MoQ Solicit).
 	let declared = subscriber.solicit().await;
-	let patterns = subscriber.patterns().await;
 
 	let mut tasks = TaskSet::owned();
 	let mut accept = session.clone();
@@ -811,7 +808,7 @@ where
 			}
 			// Subscriber handles: Publish, PublishNamespace
 			ietf::Publish::ID | ietf::PublishNamespace::ID => {
-				tasks.push(subscriber.handle_stream(id, data, stream, peer, declared, patterns)?);
+				tasks.push(subscriber.handle_stream(id, data, stream, peer, declared)?);
 			}
 			_ => {
 				tracing::warn!(id, "unexpected bidi stream type");
@@ -1289,8 +1286,6 @@ mod tests {
 				request_id: RequestId(1),
 				track_namespace: crate::Path::new("room/host"),
 				cluster: None,
-
-				pattern: None,
 			})
 			.await
 			.unwrap();

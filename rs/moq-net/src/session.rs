@@ -1,6 +1,8 @@
+//! A MoQ session handle and a snapshot of its connection statistics.
+
 use std::{sync::Arc, task::Poll, time::Duration};
 
-use web_transport_trait::Stats;
+use web_transport_trait::Stats as _;
 
 use crate::{Error, SessionError, Version, bandwidth, goaway};
 
@@ -14,7 +16,7 @@ struct Close {
 /// The stats cell shared between the machine's sampler and the handles.
 struct StatsState {
 	/// The latest sample the machine took (or the construction-time snapshot).
-	sample: ConnectionStats,
+	sample: Stats,
 	/// A handle read the stats since the last sample: keep sampling.
 	demanded: bool,
 }
@@ -27,17 +29,17 @@ struct StatsState {
 /// has a window). `None` means "not reported", not "zero".
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct ConnectionStats {
+pub struct Stats {
 	/// Smoothed round-trip time estimate.
 	pub rtt: Option<Duration>,
 
-	/// Estimated send bandwidth from the congestion controller, in bits per second.
-	pub estimated_send_rate: Option<u64>,
+	/// Estimated send bandwidth from the congestion controller.
+	pub estimated_send_rate: Option<bandwidth::Rate>,
 
-	/// Estimated receive bandwidth from MoQ PROBE, in bits per second.
+	/// Estimated receive bandwidth from MoQ PROBE.
 	///
 	/// `None` unless the negotiated version supports PROBE (moq-lite-03+).
-	pub estimated_recv_rate: Option<u64>,
+	pub estimated_recv_rate: Option<bandwidth::Rate>,
 
 	/// Total bytes sent over the connection, including retransmissions and overhead.
 	pub bytes_sent: Option<u64>,
@@ -111,9 +113,9 @@ impl Session {
 	///
 	/// Cheap and non-blocking: this reads the latest sample the session's
 	/// machine took, and schedules a refresh, so periodic polling observes
-	/// fresh counters (100ms cadence). See [`ConnectionStats`] for which
+	/// fresh counters (100ms cadence). See [`Stats`] for which
 	/// metrics each backend reports.
-	pub fn stats(&self) -> ConnectionStats {
+	pub fn stats(&self) -> Stats {
 		let mut stats = {
 			let mut state = self.stats.lock();
 			// A read is demand: wake the sampler, but only mutate (and so wake)
@@ -123,11 +125,7 @@ impl Session {
 			}
 			state.sample
 		};
-		stats.estimated_recv_rate = self
-			.recv_bandwidth
-			.as_ref()
-			.and_then(bandwidth::Consumer::peek)
-			.map(bandwidth::Rate::as_bps);
+		stats.estimated_recv_rate = self.recv_bandwidth.as_ref().and_then(bandwidth::Consumer::peek);
 		stats
 	}
 
@@ -359,10 +357,7 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Timers> Supervisor<S
 		if let Some(producer) = &self.send_bandwidth {
 			// An error means every consumer is gone for good; the stats cell
 			// still wants the sample.
-			if producer
-				.set(sample.estimated_send_rate.map(bandwidth::Rate::from_bps))
-				.is_err()
-			{
+			if producer.set(sample.estimated_send_rate).is_err() {
 				self.send_bandwidth = None;
 			}
 		}
@@ -421,15 +416,15 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Timers> Supervisor<S
 	}
 }
 
-/// A [`ConnectionStats`] snapshot of the transport's counters.
+/// A [`Stats`] snapshot of the transport's counters.
 ///
 /// `estimated_recv_rate` is filled in at the [`Session`] level (it comes from
 /// MoQ PROBE, not the transport), so it stays `None` here.
-fn snapshot<S: crate::transport::poll::Session>(session: &S) -> ConnectionStats {
+fn snapshot<S: crate::transport::poll::Session>(session: &S) -> Stats {
 	let stats = session.stats();
-	ConnectionStats {
+	Stats {
 		rtt: stats.rtt(),
-		estimated_send_rate: stats.estimated_send_rate(),
+		estimated_send_rate: stats.estimated_send_rate().map(bandwidth::Rate::from_bps),
 		bytes_sent: stats.bytes_sent(),
 		bytes_received: stats.bytes_received(),
 		bytes_lost: stats.bytes_lost(),

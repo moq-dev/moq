@@ -293,22 +293,23 @@ export class Connection {
 			const upstream = origin.announced(scope);
 			effect.cleanup(() => upstream.close());
 
-			// Track what this origin announced so a URL switch retracts it.
-			const active = new Set<string>();
+			// Track what this origin announced so a URL switch retracts it; the last
+			// event rides along for the retraction.
+			const active = new Map<Path.Valid, Announce.Update>();
 
 			effect.spawn(async () => {
 				try {
 					for (;;) {
 						const entry = await Promise.race([effect.cancel, upstream.next()]);
 						if (!entry) break;
-						if (entry.active) active.add(entry.pattern.text);
-						else active.delete(entry.pattern.text);
+						if (Announce.isActive(entry.kind)) active.set(entry.path, entry);
+						else active.delete(entry.path);
 						producer.append(entry);
 					}
 				} finally {
 					if (!closed) {
-						for (const path of active) {
-							producer.append({ pattern: Path.Pattern.parse(path), active: false });
+						for (const entry of active.values()) {
+							producer.append({ ...entry, kind: "retracted" });
 						}
 					}
 				}

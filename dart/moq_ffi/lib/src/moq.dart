@@ -4969,7 +4969,7 @@ class FfiConverterMoqAnnounceConsumer {
 
 abstract class MoqAnnounceUpdateInterface {
   bool active();
-  String pattern();
+  String path();
   MoqRoute route();
 }
 
@@ -5009,9 +5009,9 @@ class MoqAnnounceUpdate implements MoqAnnounceUpdateInterface {
     );
   }
 
-  String pattern() {
+  String path() {
     return rustCallWithLifter(
-      (status) => uniffi_moq_ffi_fn_method_moqannounceupdate_pattern(
+      (status) => uniffi_moq_ffi_fn_method_moqannounceupdate_path(
         uniffiClonePointer(),
         status,
       ),
@@ -5419,7 +5419,7 @@ class FfiConverterMoqOriginDynamic {
 abstract class MoqOriginProducerInterface {
   MoqOriginConsumer consume();
   MoqBroadcastProducer createBroadcast({required String path});
-  MoqOriginDynamic dynamic_({required String pattern, required MoqRoute route});
+  MoqOriginDynamic dynamic_({required String prefix, required MoqRoute route});
 }
 
 final _MoqOriginProducerFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -5480,14 +5480,11 @@ class MoqOriginProducer implements MoqOriginProducerInterface {
     );
   }
 
-  MoqOriginDynamic dynamic_({
-    required String pattern,
-    required MoqRoute route,
-  }) {
+  MoqOriginDynamic dynamic_({required String prefix, required MoqRoute route}) {
     return rustCallWithLifter(
       (status) => uniffi_moq_ffi_fn_method_moqoriginproducer_dynamic(
         uniffiClonePointer(),
-        FfiConverterString.lower(pattern),
+        FfiConverterString.lower(prefix),
         FfiConverterMoqRoute.lower(route),
         status,
       ),
@@ -9471,7 +9468,7 @@ external int uniffi_moq_ffi_fn_method_moqannounceupdate_active(
 @Native<RustBuffer Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
-external RustBuffer uniffi_moq_ffi_fn_method_moqannounceupdate_pattern(
+external RustBuffer uniffi_moq_ffi_fn_method_moqannounceupdate_path(
   Pointer<Void> ptr,
   Pointer<RustCallStatus> uniffiStatus,
 );
@@ -9690,7 +9687,7 @@ uniffi_moq_ffi_fn_method_moqoriginproducer_create_broadcast(
 >(assetId: _uniffiAssetId)
 external Pointer<Void> uniffi_moq_ffi_fn_method_moqoriginproducer_dynamic(
   Pointer<Void> ptr,
-  RustBuffer pattern,
+  RustBuffer prefix,
   RustBuffer route,
   Pointer<RustCallStatus> uniffiStatus,
 );
@@ -11306,7 +11303,7 @@ external int uniffi_moq_ffi_checksum_method_moqannounceconsumer_next();
 external int uniffi_moq_ffi_checksum_method_moqannounceupdate_active();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int uniffi_moq_ffi_checksum_method_moqannounceupdate_pattern();
+external int uniffi_moq_ffi_checksum_method_moqannounceupdate_path();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqannounceupdate_route();
@@ -11841,7 +11838,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqannounceupdate_active() != 49521) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqannounceupdate_pattern() != 19804) {
+  if (uniffi_moq_ffi_checksum_method_moqannounceupdate_path() != 7124) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqannounceupdate_route() != 8074) {
@@ -11878,10 +11875,10 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqorigindynamic_requested_broadcast() !=
-      55161) {
+      53391) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqorigindynamic_update() != 52212) {
+  if (uniffi_moq_ffi_checksum_method_moqorigindynamic_update() != 27700) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqoriginproducer_consume() != 52357) {
@@ -11891,7 +11888,7 @@ void _checkApiChecksums() {
       11806) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqoriginproducer_dynamic() != 51595) {
+  if (uniffi_moq_ffi_checksum_method_moqoriginproducer_dynamic() != 56233) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastdynamic_cancel() != 25875) {

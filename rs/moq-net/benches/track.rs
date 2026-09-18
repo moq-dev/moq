@@ -49,7 +49,7 @@ impl Fanout {
 			.with_capacity(CACHE_CAPACITY)
 			.with_expiry(cache::DEFAULT_EXPIRY);
 		info.origin.pool = cache::Pool::new(config);
-		let mut broadcast = broadcast::Producer::new(info);
+		let broadcast = broadcast::Producer::new(info);
 		let track = broadcast.create_track("bench", None).unwrap();
 		let mut subscribers: Vec<_> = (0..subscribers).map(|_| track.subscribe(None)).collect();
 		let waiters: Vec<_> = (0..subscribers.len()).map(|_| kio::Waiter::noop()).collect();
@@ -93,8 +93,8 @@ struct AbortedScan {
 
 impl AbortedScan {
 	fn new(aborted: usize) -> Self {
-		let mut broadcast = broadcast::Info::default().produce();
-		let mut track = broadcast.create_track("bench", None).unwrap();
+		let broadcast = broadcast::Info::default().produce();
+		let track = broadcast.create_track("bench", None).unwrap();
 		let mut stale = Vec::with_capacity(aborted);
 
 		for _ in 0..aborted {
@@ -151,8 +151,8 @@ fn parallel_write(pool: &cache::Pool, writers: usize, iterations: u64) -> Durati
 				scope.spawn(move || {
 					let mut info = broadcast::Info::default();
 					info.origin.pool = pool;
-					let mut broadcast = broadcast::Producer::new(info);
-					let mut track = broadcast.create_track("bench", None).unwrap();
+					let broadcast = broadcast::Producer::new(info);
+					let track = broadcast.create_track("bench", None).unwrap();
 					let payload = Bytes::from_static(&[0; PAYLOAD]);
 					// Arrive once setup is done, then park until the main thread has stamped the clock.
 					barrier.wait();

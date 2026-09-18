@@ -16,10 +16,10 @@ pub struct MoqOriginConfig {
 /// A path-prefix route: hops and costs for an advertisement.
 ///
 /// Pair one with `MoqBroadcastProducer::announce` for an exact path, or with
-/// `MoqOriginProducer::dynamic` for a pattern. Observe them with
+/// `MoqOriginProducer::dynamic` for a prefix. Observe them with
 /// `MoqOriginConsumer::announced`. A route claims capability, not inventory: by
 /// convention a publisher announces each broadcast's exact path, so subscribers
-/// can enumerate broadcasts, while a service advertises a pattern and answers
+/// can enumerate broadcasts, while a service advertises a prefix and answers
 /// whatever is requested beneath it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
 pub struct MoqRoute {
@@ -90,7 +90,7 @@ pub struct MoqAnnounceConsumer {
 }
 
 #[derive(uniffi::Object)]
-/// A served route: advertises a path pattern and yields the broadcast requests
+/// A served route: advertises a path prefix and yields the broadcast requests
 /// beneath it for the application to accept or reject.
 pub struct MoqOriginDynamic {
 	slot: Slot,
@@ -135,13 +135,9 @@ impl Announced {
 	async fn next(&mut self) -> Result<Option<Arc<MoqAnnounceUpdate>>, MoqError> {
 		match self.inner.next().await {
 			Some(update) => Ok(Some(Arc::new(MoqAnnounceUpdate {
-				pattern: update
-					.pattern
-					.as_prefix()
-					.unwrap_or_else(|| update.pattern.as_str())
-					.to_owned(),
+				path: update.path.to_string(),
 				route: update.route.into(),
-				active: update.active,
+				active: update.kind.is_active(),
 			}))),
 			None => Ok(None),
 		}
@@ -171,7 +167,7 @@ impl AnnouncedBroadcast {
 /// covered). The application decides which paths name broadcasts.
 #[derive(uniffi::Object)]
 pub struct MoqAnnounceUpdate {
-	pattern: String,
+	path: String,
 	route: MoqRoute,
 	active: bool,
 }
@@ -262,19 +258,18 @@ impl MoqOriginProducer {
 		})
 	}
 
-	/// Advertise `pattern` and serve the requests beneath it.
+	/// Advertise `prefix` and serve the requests beneath it.
 	///
-	/// `pattern` uses the `moq_net::Pattern` dialect; a prefix is literal
-	/// segments followed by a globstar (`foo` then `**`).
-	/// Wildcards are advertised, but only prefix-shaped patterns serve requests. Hold
+	/// A route claims `prefix` and every path beneath it (the empty prefix
+	/// claims every path). A service that only serves some of them advertises
+	/// the covering prefix and rejects the rest as they are requested. Hold
 	/// the returned handle while the route should stay advertised and missing
 	/// broadcasts should be served. Create, attach this for tracks served on
 	/// demand, populate, then announce.
-	pub fn dynamic(&self, pattern: String, route: MoqRoute) -> Result<Arc<MoqOriginDynamic>, MoqError> {
+	pub fn dynamic(&self, prefix: String, route: MoqRoute) -> Result<Arc<MoqOriginDynamic>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let pattern: moq_net::Pattern = pattern.parse()?;
 		let route: moq_net::origin::Route = route.try_into()?;
-		let dynamic = self.inner.dynamic(pattern, route)?;
+		let dynamic = self.inner.dynamic(prefix, route)?;
 		let slot = Arc::new(std::sync::Mutex::new(Some(dynamic)));
 		Ok(Arc::new(MoqOriginDynamic {
 			slot: slot.clone(),
@@ -359,7 +354,7 @@ impl MoqOriginConsumer {
 #[uniffi::export]
 impl MoqOriginDynamic {
 	/// Wait for the next requested broadcast no local broadcast resolves under
-	/// this handle's pattern.
+	/// this handle's prefix.
 	///
 	/// Returns a [`MoqBroadcastRequest`]: accept it with a broadcast producer or reject
 	/// it with an application error code. The requesting consumer stays pending until then.
@@ -369,7 +364,7 @@ impl MoqOriginDynamic {
 			.await
 	}
 
-	/// Re-price the route in place: replace its hops and costs. The pattern cannot
+	/// Re-price the route in place: replace its hops and costs. The prefix cannot
 	/// change; call `dynamic` again instead.
 	pub fn update(&self, route: MoqRoute) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
@@ -452,9 +447,9 @@ impl MoqAnnounceConsumer {
 
 #[uniffi::export]
 impl MoqAnnounceUpdate {
-	/// The covered pattern, relative to the `announced` call's prefix.
-	pub fn pattern(&self) -> String {
-		self.pattern.clone()
+	/// The covered prefix, relative to the `announced` call's prefix.
+	pub fn path(&self) -> String {
+		self.path.clone()
 	}
 
 	/// The route serving the prefix: its hops and costs.

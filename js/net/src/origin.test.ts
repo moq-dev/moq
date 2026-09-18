@@ -15,7 +15,7 @@ function publish(origin: Producer, path: Path.Valid) {
 
 /** Land a received prefix, served from `consume`, the way a session does. */
 function serve(origin: Producer, prefix: Path.Valid, consume: () => BroadcastConsumer) {
-	const handle = origin.receive(Path.Pattern.subtree(prefix), Route.default);
+	const handle = origin.receive(prefix, Route.default);
 	void (async () => {
 		try {
 			for await (const request of handle.requested()) {
@@ -197,16 +197,16 @@ test("announced streams the table under a scope with origin-relative paths", asy
 	const announced = consumer.announced(Path.Pattern.subtree(Path.from("room")));
 
 	// The initial state arrives first, named from the origin rather than the scope.
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room/a")), active: true });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room/a"), kind: "announced" });
 
 	// Additions under the scope stream in; paths outside it are invisible.
 	const b = publish(origin, Path.from("room/b"));
 	publish(origin, Path.from("lobby/c"));
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room/b")), active: true });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room/b"), kind: "announced" });
 
 	// Removals retract.
 	b.close();
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("room/b")), active: false });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room/b"), kind: "retracted" });
 
 	// The stream ends when the origin closes.
 	origin.close();
@@ -230,10 +230,10 @@ test("a remote entry resolves by path and retracts on dispose", async () => {
 
 	// Announced streams include remote entries.
 	const announced = consumer.announced();
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(path), active: true });
+	expect(await announced.next()).toMatchObject({ path: path, kind: "announced" });
 
 	dispose();
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(path), active: false });
+	expect(await announced.next()).toMatchObject({ path: path, kind: "retracted" });
 	expect(consumer.routes(path)).toBe(false);
 
 	announced.close();
@@ -252,10 +252,10 @@ test("announced reports a broader covering route at the root", async () => {
 	// to the scope, matching what request() resolves there.
 	const scope = Path.Pattern.subtree(Path.from("room/alice"));
 	const announced = consumer.announced(scope);
-	expect(await announced.next()).toMatchObject({ pattern: scope, active: true });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room/alice"), kind: "announced" });
 
 	dispose();
-	expect(await announced.next()).toMatchObject({ pattern: scope, active: false });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room/alice"), kind: "retracted" });
 
 	announced.close();
 	upstream.close();
@@ -283,7 +283,7 @@ test("a local publish shadows a remote entry", async () => {
 
 	// One path, one announcement, even though both tables route it.
 	const announced = consumer.announced();
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(path), active: true });
+	expect(await announced.next()).toMatchObject({ path: path, kind: "announced" });
 
 	// Dropping the local publish falls back to the remote entry without a retraction.
 	local.close();
@@ -407,12 +407,12 @@ test("disposing the newest remote route promotes the fallback", async () => {
 	const disposeNewer = serve(origin, path, provider(newer));
 
 	const announced = consumer.announced();
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(path), active: true });
+	expect(await announced.next()).toMatchObject({ path: path, kind: "announced" });
 
 	// The newer session dies: consumers see a retract then the promoted fallback.
 	disposeNewer();
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(path), active: false });
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(path), active: true });
+	expect(await announced.next()).toMatchObject({ path: path, kind: "retracted" });
+	expect(await announced.next()).toMatchObject({ path: path, kind: "announced" });
 
 	const handle = await routed(consumer, path);
 	const track = handle?.subscribe("chat");
@@ -480,7 +480,7 @@ test("requests never appear in announced or the table", async () => {
 
 	const announced = consumer.announced();
 	publish(origin, Path.from("real"));
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(Path.from("real")), active: true });
+	expect(await announced.next()).toMatchObject({ path: Path.from("real"), kind: "announced" });
 
 	announced.close();
 	request.close();
@@ -494,12 +494,12 @@ test("a republish retracts then re-announces the path", async () => {
 
 	publish(origin, path);
 	const announced = consumer.announced();
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(path), active: true });
+	expect(await announced.next()).toMatchObject({ path: path, kind: "announced" });
 
 	// A new broadcast takes the path: consumers must let go of the superseded one.
 	publish(origin, path);
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(path), active: false });
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(path), active: true });
+	expect(await announced.next()).toMatchObject({ path: path, kind: "retracted" });
+	expect(await announced.next()).toMatchObject({ path: path, kind: "announced" });
 
 	announced.close();
 	origin.close();
@@ -857,17 +857,17 @@ test("createBroadcast is unadvertised until announce", async () => {
 	const announced = consumer.announced();
 	const pending = announced.next();
 	broadcast.announce();
-	expect(await pending).toMatchObject({ pattern: Path.Pattern.subtree(path), active: true, route: Route.default });
+	expect(await pending).toMatchObject({ path, kind: "announced", route: Route.default });
 
 	broadcast.announce({ cost: 4n });
 	expect(await announced.next()).toMatchObject({
-		pattern: Path.Pattern.subtree(path),
-		active: true,
+		path,
+		kind: "updated",
 		route: { hops: [], cost: { warm: 4n, cold: 4n } },
 	});
 
 	broadcast.unannounce();
-	expect(await announced.next()).toMatchObject({ pattern: Path.Pattern.subtree(path), active: false });
+	expect(await announced.next()).toMatchObject({ path: path, kind: "retracted" });
 	expect(consumer.routes(path)).toBe(true);
 
 	announced.close();
@@ -875,15 +875,12 @@ test("createBroadcast is unadvertised until announce", async () => {
 	origin.close();
 });
 
-test("a handle serves a request under live/**", async () => {
+test("a handle serves a request under live", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
-	const handle = origin.dynamic("live/**");
+	const handle = origin.dynamic("live");
 
-	expect(await consumer.announced().next()).toMatchObject({
-		pattern: Path.Pattern.subtree(Path.from("live")),
-		active: true,
-	});
+	expect(await consumer.announced().next()).toMatchObject({ path: Path.from("live"), kind: "announced" });
 
 	const waiting = handle.requested().next();
 	const request = consumer.request(Path.from("live/cam"));
@@ -906,20 +903,22 @@ test("a handle serves a request under live/**", async () => {
 	origin.close();
 });
 
-test("a non-prefix pattern is advertised", async () => {
+test("a re-priced route is delivered as an update", async () => {
 	const origin = new Producer();
-	const handle = origin.dynamic("live/*");
-	expect(await origin.consume().announced().next()).toMatchObject({
-		pattern: Path.Pattern.parse("live/*"),
-		active: true,
-	});
+	const handle = origin.dynamic("live");
+	const announced = origin.consume().announced();
+	expect(await announced.next()).toMatchObject({ path: Path.from("live"), kind: "announced" });
+	handle.update({ cost: 5n });
+	expect(await announced.next()).toMatchObject({ path: Path.from("live"), kind: "updated" });
 	handle.close();
+	expect(await announced.next()).toMatchObject({ path: Path.from("live"), kind: "retracted" });
+	announced.close();
 	origin.close();
 });
 
 test("an accepted dynamic broadcast is retired when it closes", async () => {
 	const origin = new Producer();
-	const handle = origin.dynamic("live/**");
+	const handle = origin.dynamic("live");
 	const path = Path.from("live/cam");
 	const request = origin.request(path);
 	const it = handle.requested();
@@ -951,7 +950,7 @@ test("an accepted dynamic broadcast is retired when it closes", async () => {
 
 test("reject surfaces the error from demand", async () => {
 	const origin = new Producer();
-	const handle = origin.dynamic("live/**");
+	const handle = origin.dynamic("live");
 	const consumer = origin.consume();
 	const it = handle.requested();
 	const pending = consumer.demand(Path.from("live/cam"));
@@ -966,7 +965,7 @@ test("reject surfaces the error from demand", async () => {
 
 test("a shared reject still surfaces from demand", async () => {
 	const origin = new Producer();
-	const handle = origin.dynamic("live/**");
+	const handle = origin.dynamic("live");
 	const consumer = origin.consume();
 	const it = handle.requested();
 
@@ -988,7 +987,7 @@ test("a shared reject still surfaces from demand", async () => {
 
 test("a request refusal does not keep demand from asking again", async () => {
 	const origin = new Producer();
-	const handle = origin.dynamic("live/**");
+	const handle = origin.dynamic("live");
 	const consumer = origin.consume();
 	const it = handle.requested();
 
@@ -1012,7 +1011,7 @@ test("a request refusal does not keep demand from asking again", async () => {
 
 test("advancing requested without settling rejects the previous request", async () => {
 	const origin = new Producer();
-	const handle = origin.dynamic("live/**");
+	const handle = origin.dynamic("live");
 	const consumer = origin.consume();
 	const it = handle.requested();
 
@@ -1036,7 +1035,7 @@ test("advancing requested without settling rejects the previous request", async 
 
 test("a rejected request is not asked of the same route again", async () => {
 	const origin = new Producer();
-	const handle = origin.dynamic("live/**");
+	const handle = origin.dynamic("live");
 	const it = handle.requested();
 
 	const request = origin.request(Path.from("live/cam"));
@@ -1066,7 +1065,7 @@ test("a rejected request is not asked of the same route again", async () => {
 test("a rejected request falls through to the next-best route", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
-	const narrow = origin.dynamic("live/**");
+	const narrow = origin.dynamic("live");
 	const served = new BroadcastProducer();
 	served.createTrack("video");
 	const disposeWide = serve(origin, Path.from(""), provider(served));
@@ -1090,7 +1089,7 @@ test("a rejected request falls through to the next-best route", async () => {
 
 test("close rejects queued requests with NoCapacity", async () => {
 	const origin = new Producer();
-	const handle = origin.dynamic("live/**");
+	const handle = origin.dynamic("live");
 	const waiting = handle.requested().next();
 	const request = origin.request(Path.from("live/cam"));
 	const { value: req } = await waiting;
@@ -1107,23 +1106,6 @@ test("close rejects queued requests with NoCapacity", async () => {
 	expect(Number(new StreamError(StreamCode.NoCapacity).code)).toBe(0x30);
 
 	request.close();
-	origin.close();
-});
-
-test("literal and subtree claims keep distinct pattern identities", async () => {
-	const origin = new Producer();
-	const literal = origin.dynamic("room");
-	const subtree = origin.dynamic("room/**");
-	const announced = origin.consume().announced();
-	const first = await announced.next();
-	const second = await announced.next();
-	expect(new Set([first?.pattern.text, second?.pattern.text])).toEqual(new Set(["room", "room/**"]));
-	literal.close();
-	const ended = await announced.next();
-	expect(ended?.pattern.text).toBe("room");
-	expect(ended?.active).toBe(false);
-	subtree.close();
-	announced.close();
 	origin.close();
 });
 

@@ -34,10 +34,10 @@ void main() {
     final track = broadcast.publishTrack(name: 'events', info: null);
     broadcast.announce(route: MoqRoute());
     final announced = await announcement.timeout(timeout);
-    expect(announced.pattern(), 'live');
+    expect(announced.path(), 'live');
 
     final requested = await client
-        .requestBroadcast(announced.pattern())
+        .requestBroadcast(announced.path())
         .timeout(timeout);
     final consumer = await requested
         .subscribeTrack(name: 'events', subscription: null)
@@ -69,12 +69,12 @@ void main() {
 
     final announced = origin.consume().announced(prefix: '');
     final first = await announced.next().timeout(timeout);
-    expect(first?.pattern(), 'live');
+    expect(first?.path(), 'live');
     expect(first?.active(), isTrue);
 
     broadcast.unannounce();
     final retracted = await announced.next().timeout(timeout);
-    expect(retracted?.pattern(), 'live');
+    expect(retracted?.path(), 'live');
     expect(retracted?.active(), isFalse);
     await origin.consume().requestBroadcast(path: 'live').timeout(timeout);
     announced.cancel();
@@ -83,7 +83,7 @@ void main() {
 
   test('dynamic serves a request under a prefix', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
-    final dynamic = origin.dynamic_(pattern: 'live/**', route: MoqRoute());
+    final dynamic = origin.dynamic_(prefix: 'live', route: MoqRoute());
     final pending = origin.consume().requestBroadcast(path: 'live/cam');
     final request = await dynamic.requestedBroadcast().timeout(timeout);
     expect(request.path(), 'live/cam');
@@ -93,10 +93,5 @@ void main() {
     dynamic.cancel();
     dynamic.dispose();
     served.dispose();
-  });
-
-  test('dynamic accepts a non-prefix pattern', () {
-    final origin = MoqOriginProducer(config: MoqOriginConfig());
-    origin.dynamic_(pattern: 'live/*', route: MoqRoute());
   });
 }

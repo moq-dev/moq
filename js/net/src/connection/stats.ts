@@ -15,7 +15,7 @@ import * as Time from "../time.ts";
  * Every field is optional. The qmux/WebSocket fallback implements no `getStats()` at
  * all and reports nothing; see {@link Probe} for what the peer measures.
  *
- * The field names match Rust's `moq_net::ConnectionStats` but the counters keep each
+ * The field names match Rust's `moq_net::session::Stats` but the counters keep each
  * stack's own semantics rather than being normalized. Notably W3C excludes
  * retransmissions and QUIC overhead from the byte counts where quinn includes them,
  * and counts packets where quinn counts datagrams.

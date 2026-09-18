@@ -17,5 +17,4 @@ rather than holding the merge.
 ## Quests
 
 - [Re-check refusal](/quest/m0/auth-recheck-refusal.md) - moq-auth: a re-check that answers 4xx or an invalid grant ends the session instead of keeping it until `expires`
-- [Idle consumer](/quest/m0/origin-idle-consumer.md) - moq-net: an origin front drops the source's track when its last reader leaves, so upstream and producer demand end then, not 30 s later
 

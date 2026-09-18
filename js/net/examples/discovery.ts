@@ -8,16 +8,12 @@ async function main() {
 	const announced = connection.announced();
 
 	// Discover broadcasts announced by the server
-	for (;;) {
-		const announcement = await announced.next();
-		if (!announcement) break;
-
-		const prefix = announcement.pattern.asPrefix();
-		if (prefix === undefined) continue;
-		console.log("New stream available:", prefix);
+	for await (const announcement of announced) {
+		if (announcement.kind === "retracted") continue;
+		console.log("New stream available:", announcement.path);
 
 		// Subscribe to new streams
-		const _broadcast = connection.consume(Moq.Path.from(prefix));
+		const _broadcast = connection.consume(announcement.path);
 
 		// Do something with the broadcast
 	}

@@ -621,12 +621,12 @@ pub struct MoqConnectionStats {
 	pub packets_lost: Option<u64>,
 }
 
-impl From<moq_net::ConnectionStats> for MoqConnectionStats {
-	fn from(stats: moq_net::ConnectionStats) -> Self {
+impl From<moq_net::session::Stats> for MoqConnectionStats {
+	fn from(stats: moq_net::session::Stats) -> Self {
 		Self {
 			rtt_us: stats.rtt.map(|d| d.as_micros() as u64),
-			estimated_send_rate_bps: stats.estimated_send_rate,
-			estimated_recv_rate_bps: stats.estimated_recv_rate,
+			estimated_send_rate_bps: stats.estimated_send_rate.map(moq_net::bandwidth::Rate::as_bps),
+			estimated_recv_rate_bps: stats.estimated_recv_rate.map(moq_net::bandwidth::Rate::as_bps),
 			bytes_sent: stats.bytes_sent,
 			bytes_received: stats.bytes_received,
 			bytes_lost: stats.bytes_lost,

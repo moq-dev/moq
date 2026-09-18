@@ -94,7 +94,7 @@ impl Producer {
 	/// # Errors
 	///
 	/// A net error if the group is already closed.
-	pub fn finish(mut self) -> Result<()> {
+	pub fn finish(self) -> Result<()> {
 		self.inner.finish()?;
 		Ok(())
 	}

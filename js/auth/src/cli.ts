@@ -16,7 +16,7 @@ program.name("moq-auth").description("Generate, sign, and verify tokens for moq-
 program
 	.command("generate")
 	.description("Generate a new signing key")
-	.requiredOption("--key <path>", "Path to save the key")
+	.requiredOption("--out <path>", "Path to save the key")
 	.option("--algorithm <algorithm>", "Algorithm to use", "HS256")
 	.option("--id <id>", "Key ID (randomly generated if not provided)")
 	.option("--public <path>", "Path to save the public key (for asymmetric algorithms)")
@@ -47,8 +47,8 @@ program
 				return json;
 			};
 
-			writePrivateFileSync(options.key, encodeKey(key));
-			console.log(`Generated ${algorithm} key: ${options.key}`);
+			writePrivateFileSync(options.out, encodeKey(key));
+			console.log(`Generated ${algorithm} key: ${options.out}`);
 
 			if (options.public && key.kty !== "oct") {
 				const publicKey = toPublicKey(key);
@@ -97,6 +97,7 @@ program
 	.command("verify")
 	.description("Verify a token from stdin, writing the payload to stdout")
 	.requiredOption("--key <path>", "Path to the key file")
+	.option("--in <path>", "Path to read the token from. Use - for stdin.", "-")
 	.addOption(new Option("--root <root>", "Path to authorize the token against").hideHelp())
 	.action(async (options) => {
 		try {
@@ -110,8 +111,7 @@ program
 				key = load(keyEncoded);
 			}
 
-			// Read token from stdin
-			const token = readFileSync(0, "utf-8").trim();
+			const token = (options.in === "-" ? readFileSync(0, "utf-8") : readFileSync(options.in, "utf-8")).trim();
 
 			const claims = await verify(key, token);
 			if (options.root !== undefined) {

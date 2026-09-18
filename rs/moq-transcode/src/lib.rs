@@ -107,7 +107,7 @@ impl Transcoder {
 	pub async fn run(self) -> Result<(), Error> {
 		let Self {
 			source,
-			mut output,
+			output,
 			config,
 			mut derived,
 			mut dynamic,
@@ -351,7 +351,7 @@ mod tests {
 		catalog.modify().unwrap().video.insert("video", video).unwrap();
 
 		let info = hang::container::track_info(hang::catalog::PRIORITY.video);
-		let mut track = broadcast.create_track("video", info).unwrap();
+		let track = broadcast.create_track("video", info).unwrap();
 
 		let mut encoder = moq_video::encode::Encoder::new(&{
 			let mut config = moq_video::encode::Config::new(320, 240, 30);
@@ -408,7 +408,7 @@ mod tests {
 		catalog.modify().unwrap().video.insert("video", video).unwrap();
 
 		let info = hang::container::track_info(hang::catalog::PRIORITY.video);
-		let mut track = broadcast.create_track("video", info).unwrap();
+		let track = broadcast.create_track("video", info).unwrap();
 
 		let source = Source {
 			broadcast,
@@ -1137,7 +1137,7 @@ mod tests {
 		// wait until the live path has claimed group 0, so the fetch below can only
 		// resolve from the track cache and retirement finds that live group open.
 		let rung = consumer.track("video/120p").unwrap();
-		rung.info().await.unwrap();
+		rung.query().await.unwrap();
 		while rung.latest() != Some(0) {
 			tokio::task::yield_now().await;
 		}
@@ -1214,7 +1214,7 @@ mod tests {
 		// Resolving the info waits for the transcoder to accept the track, so the
 		// fetch below reaches a rung that is already serving.
 		let rung = consumer.track("video/120p").unwrap();
-		rung.info().await.unwrap();
+		rung.query().await.unwrap();
 		assert!(
 			source._track.subscription_changed().await.unwrap().is_some(),
 			"the rung never subscribed to the live source",

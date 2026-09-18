@@ -9,12 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- `serve` takes the node's `session::Registry`; `supervise` takes an optional `session::Registration` so a push can re-check the lease.
+- `Auth::admit(request)` no longer takes byte counters; `Admission` no longer carries them; `supervise(session, lease, shutdown)` and `Lease::close(reason, bytes)` take the totals at close.
 - Every session is admitted through a `moq_auth` lease: `--auth-url` asks an auth server per session event, `--auth-public` grants anonymous patterns, and exactly one must be set. `--auth-key`, `--auth-key-dir`, `--auth-public-api`, `--auth-domain`, `--auth-api`, `--auth-api-mode`, `--auth-mtls-tier`, and `--auth-tls-*` are gone, along with the `Cache-Control` driven cache and the unrestricted mTLS grant: a verified client certificate is reported in the request and admits what the server grants.
 - `--auth-public` and its `-subscribe`/`-publish` forms take patterns (`anon/**`), not prefixes.
 - Embedding: `Connection` holds a `Lease` per session and `supervise` follows it; `AuthToken` is built from a `moq_auth::Grant`; `MtlsPeer` carries the `PeerIdentity`.
 
 ### Added
 
+- `session::{Registry, Filter}` and `Relay::sessions()`: live sessions on this node, listed at `GET /sessions` and nudged at `POST /sessions/revalidate` on the internal listener. A push is a re-check, not an authority.
 - *(relay)* `ClusterOptions` so the origin is constructed with its cache settings
 - `[cluster.lan] app` / `--cluster-lan-app` names the DNS-SD application the LAN mesh advertises under
 - *(relay)* `Cluster::with_advertise` / `Cluster::with_connect` so a LAN mesh can advertise a generated certificate and pin it when dialing

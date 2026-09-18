@@ -65,7 +65,7 @@ fn create_track(broadcast: &mut moq_net::broadcast::Producer) -> anyhow::Result<
 	catalog.video.insert(video_track, video_config)?;
 
 	// Publish the catalog as a "catalog.json" track in the broadcast.
-	let mut catalog_track = broadcast.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())?;
+	let catalog_track = broadcast.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())?;
 	let mut group = catalog_track.append_group()?;
 	group.write_frame(moq_net::Timestamp::now(), catalog.to_json()?)?;
 	group.finish()?;

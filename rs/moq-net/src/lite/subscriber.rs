@@ -157,30 +157,21 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		match announce {
 			lite::AnnounceBroadcast::Active { suffix, hops, cost } => {
 				let path = prefix.join(&suffix);
-				let Ok(pattern) = crate::Pattern::subtree(path.as_str()) else {
-					if self.version.has_announce_id() {
-						run.announced_by_id
-							.insert(run.next_announce_id, TrackedAnnounce::Ignored);
-						run.next_announce_id += 1;
-					}
-					return Ok(());
-				};
 				if self.version.has_announce_id() {
 					// Every `active` assigns the next ordinal, even ones we drop locally.
-					run.announced_by_id
-						.insert(run.next_announce_id, TrackedAnnounce::Pattern(pattern.clone()));
+					run.announced_by_id.insert(run.next_announce_id, path.clone());
 					run.next_announce_id += 1;
 				}
 				if lite::restart_supported(self.version)
 					&& !self.version.has_announce_id()
-					&& run.announced.contains(&pattern)
+					&& run.announced.contains(&path)
 				{
 					// lite-05 only: a duplicate ANNOUNCE for an already-announced path is a RESTART;
 					// atomically replace the broadcast. Lite06+ restarts by announce id, and older
 					// versions never defined restarts, so both fall through to start_announce, which
 					// rejects the duplicate (Error::ProtocolViolation).
 					self.restart_announce(
-						pattern,
+						path,
 						hops,
 						cost,
 						run.link_cost,
@@ -189,7 +180,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 					)?;
 				} else {
 					self.start_announce(
-						pattern,
+						path,
 						hops,
 						cost,
 						run.link_cost,
@@ -201,57 +192,31 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			lite::AnnounceBroadcast::Ended { suffix, .. } => {
 				let path = prefix.join(&suffix);
 				tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
-				if let Ok(pattern) = crate::Pattern::subtree(path.as_str()) {
-					run.announced.retire(&pattern);
-				}
+				run.announced.retire(&path);
 			}
 			lite::AnnounceBroadcast::EndedId { id } => {
 				// Resolve and retire the id; an unknown or already-retired id is a
 				// protocol violation.
-				let Some(tracked) = run.announced_by_id.remove(&id) else {
+				let Some(path) = run.announced_by_id.remove(&id) else {
 					return Err(Error::ProtocolViolation);
 				};
-				if let TrackedAnnounce::Pattern(pattern) = tracked {
-					tracing::debug!(route = %pattern, "unannounced");
-					run.announced.retire(&pattern);
-				}
+				tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
+				run.announced.retire(&path);
 			}
 			lite::AnnounceBroadcast::Restart { id, hops, cost } => {
 				// Resolve the id; it stays live (the replacement reuses it). An unknown
 				// or retired id is a protocol violation.
-				let Some(TrackedAnnounce::Pattern(pattern)) = run.announced_by_id.get(&id).cloned() else {
-					if run.announced_by_id.contains_key(&id) {
-						return Ok(());
-					}
+				let Some(path) = run.announced_by_id.get(&id).cloned() else {
 					return Err(Error::ProtocolViolation);
 				};
 				self.restart_announce(
-					pattern,
+					path,
 					hops,
 					cost,
 					run.link_cost,
 					run.responder_origin,
 					&mut run.announced,
 				)?;
-			}
-			lite::AnnounceBroadcast::Pattern { pattern, hops, cost } => {
-				let pattern = pattern.rooted(prefix.as_str()).map_err(|_| Error::ProtocolViolation)?;
-				run.announced_by_id
-					.insert(run.next_announce_id, TrackedAnnounce::Pattern(pattern.clone()));
-				run.next_announce_id += 1;
-				self.start_announce(
-					pattern,
-					hops,
-					crate::origin::Cost::new(cost),
-					run.link_cost,
-					run.responder_origin,
-					&mut run.announced,
-				)?;
-			}
-			lite::AnnounceBroadcast::Ignored { .. } => {
-				run.announced_by_id
-					.insert(run.next_announce_id, TrackedAnnounce::Ignored);
-				run.next_announce_id += 1;
 			}
 			lite::AnnounceBroadcast::Skipped => {}
 		}
@@ -262,7 +227,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 	/// and attached a route, or `Ok(false)` if it was declined locally.
 	fn start_announce(
 		&mut self,
-		pattern: crate::Pattern,
+		path: PathOwned,
 		mut hops: crate::Hops,
 		// The route cost off the wire, i.e. as the peer advertised it.
 		// [`Cost::UNKNOWN`] before lite-06, leaving the hop chain as the only
@@ -277,15 +242,15 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		responder_origin: Option<crate::Hop>,
 		announced: &mut Announced,
 	) -> Result<bool, Error> {
-		// One current advertisement per pattern per stream. Test what the peer
+		// One current advertisement per prefix per stream. Test what the peer
 		// advertised, not only what we accepted locally.
-		if announced.contains(&pattern) {
+		if announced.contains(&path) {
 			return Err(Error::ProtocolViolation);
 		}
 
-		// The peer holds this pattern now. Everything below either accepts the announcement,
+		// The peer holds this prefix now. Everything below either accepts the announcement,
 		// replacing this, or declines it and leaves it exactly as reserved.
-		announced.reserve(pattern.clone());
+		announced.reserve(path.clone());
 
 		if let Some(responder) = responder_origin {
 			// A chain already naming the sender came back through it: a reflection, and
@@ -293,14 +258,14 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			// chain but a PROTOCOL_VIOLATION for an IETF peer we forward it to, so it
 			// must not enter the model at all. Zero names nobody, so it may repeat.
 			if responder != crate::Hop::UNKNOWN && hops.contains(&responder) {
-				tracing::debug!(route = %pattern, "dropping announce reflected by its sender");
+				tracing::debug!(route = %self.log_path(&path), "dropping announce reflected by its sender");
 				return Ok(false);
 			}
 			// If the chain is already full, drop the announce. This is the same decision
 			// the Lite04 sender makes at its push site.
 			if hops.push(responder).is_err() {
 				tracing::warn!(
-					route = %pattern,
+					route = %self.log_path(&path),
 					"dropping announce; hop chain at MAX_HOPS (possible loop)",
 				);
 				return Ok(false);
@@ -313,7 +278,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// this is the authoritative cluster-loop check, and the only one on
 		// every other version.
 		if hops.contains(&self.self_origin) {
-			tracing::debug!(route = %pattern, "dropping reflected announce");
+			tracing::debug!(route = %self.log_path(&path), "dropping reflected announce");
 			return Ok(false);
 		}
 
@@ -326,18 +291,18 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 				.expect("an empty hop chain always has room for one entry, and repeats nothing");
 		}
 
-		tracing::debug!(route = %pattern, hops = hops.len(), "announce");
+		tracing::debug!(route = %self.log_path(&path), hops = hops.len(), "announce");
 
 		// Announce this session's route into the origin: paths under the prefix
-		// resolve through this session on demand. An error means the pattern is
-		// not contained by our scope, so don't serve it. Reflections are already
+		// resolve through this session on demand. An error means the prefix is
+		// outside our scope, so don't serve it. Reflections are already
 		// filtered above.
 		let route = self.announced_route(hops, cost, link_cost, responder_origin);
-		let Ok(dynamic) = self.origin.dynamic(pattern.clone(), route.clone()) else {
+		let Ok(dynamic) = self.origin.dynamic(&path, route.clone()) else {
 			return Ok(false);
 		};
 
-		announced.attach(pattern, AnnouncedRoute::new(route, dynamic));
+		announced.attach(path, AnnouncedRoute::new(route, dynamic));
 
 		Ok(true)
 	}
@@ -393,7 +358,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 	/// route is now gone), `Ok(true)` otherwise.
 	fn restart_announce(
 		&mut self,
-		pattern: crate::Pattern,
+		path: PathOwned,
 		mut hops: crate::Hops,
 		// The route cost off the wire and this link's price. See `start_announce`.
 		cost: crate::origin::Cost,
@@ -415,8 +380,8 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			None => hops.contains(&self.self_origin),
 		};
 		if reflected {
-			tracing::debug!(route = %pattern, "dropping reflected restart");
-			announced.declined(pattern);
+			tracing::debug!(route = %self.log_path(&path), "dropping reflected restart");
+			announced.declined(path);
 			return Ok(false);
 		}
 
@@ -425,21 +390,21 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 				.expect("an empty hop chain always has room for one entry, and repeats nothing");
 		}
 
-		tracing::debug!(route = %pattern, hops = hops.len(), "restart");
+		tracing::debug!(route = %self.log_path(&path), hops = hops.len(), "restart");
 		let metadata = self.announced_route(hops, cost, link_cost, responder_origin);
 
 		// A restart is a metadata update: the route keeps its prefix (and its
 		// served paths) and re-prices in place. In-flight tracks keep flowing.
-		if let Some(entry) = announced.attached(&pattern) {
+		if let Some(entry) = announced.attached(&path) {
 			entry.update(metadata);
 			return Ok(true);
 		}
 
-		let Ok(dynamic) = self.origin.dynamic(pattern.clone(), metadata.clone()) else {
-			announced.declined(pattern);
+		let Ok(dynamic) = self.origin.dynamic(&path, metadata.clone()) else {
+			announced.declined(path);
 			return Ok(false);
 		};
-		announced.attach(pattern, AnnouncedRoute::new(metadata, dynamic));
+		announced.attach(path, AnnouncedRoute::new(metadata, dynamic));
 
 		Ok(true)
 	}
@@ -1128,14 +1093,7 @@ struct PrefixRun {
 	// the sender doesn't know we dropped them. We never send a restart ourselves,
 	// but a peer may.
 	next_announce_id: u64,
-	announced_by_id: HashMap<u64, TrackedAnnounce>,
-}
-
-/// What an announce id refers to on this stream.
-#[derive(Clone)]
-enum TrackedAnnounce {
-	Pattern(crate::Pattern),
-	Ignored,
+	announced_by_id: HashMap<u64, PathOwned>,
 }
 
 impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
@@ -1236,11 +1194,8 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 						// Lite01/02 don't carry hop information; the broadcast starts with
 						// an empty chain and an unpriced link. Stats are attributed in the
 						// model when this enters the origin via `create_broadcast`.
-						let Ok(pattern) = crate::Pattern::subtree(path.as_str()) else {
-							continue;
-						};
 						self.subscriber.start_announce(
-							pattern,
+							path,
 							crate::Hops::new(),
 							crate::origin::Cost::UNKNOWN,
 							0,
@@ -1368,10 +1323,6 @@ mod tests {
 
 	const VERSION: Version = Version::Lite05;
 
-	fn subtree(path: impl AsPath) -> crate::Pattern {
-		crate::Pattern::subtree(path.as_path().as_str()).unwrap()
-	}
-
 	/// Removing a subscription both stops delivery and releases the session's handle
 	/// on the producer, so the track (its cached groups, its stats subscription) ends
 	/// rather than outliving the subscription it belonged to.
@@ -1389,7 +1340,7 @@ mod tests {
 			going_away: Default::default(),
 		});
 
-		let mut broadcast = crate::broadcast::Info::new().produce();
+		let broadcast = crate::broadcast::Info::new().produce();
 		// The broadcast keeps only a weak handle, so the map below owns the only strong
 		// `track::Producer`: dropping it is what ends the track.
 		let producer = broadcast.create_track("datagrams", None).unwrap();
@@ -1467,7 +1418,7 @@ mod tests {
 			name: "catalog.json".to_string(),
 		};
 
-		let mut broadcast = crate::broadcast::Info::new().produce();
+		let broadcast = crate::broadcast::Info::new().produce();
 		let mut producer = broadcast.create_track("catalog.json", None).unwrap();
 		let mut sub = Sub::None;
 		let mut establish = std::pin::pin!(serve.establish(
@@ -1532,7 +1483,7 @@ mod tests {
 				cost: None,
 				going_away: Default::default(),
 			});
-			let mut broadcast = crate::broadcast::Info::new().produce();
+			let broadcast = crate::broadcast::Info::new().produce();
 			let producer = broadcast.create_track("catalog.json", None).unwrap();
 
 			Self {
@@ -1962,7 +1913,7 @@ mod tests {
 		assert!(
 			subscriber
 				.start_announce(
-					subtree(&path),
+					path.clone(),
 					crate::Hops::new(),
 					crate::origin::Cost::default(),
 					0,
@@ -1978,7 +1929,7 @@ mod tests {
 		assert!(
 			matches!(
 				subscriber.start_announce(
-					subtree(&path),
+					path.clone(),
 					reflected,
 					crate::origin::Cost::default(),
 					0,
@@ -2020,7 +1971,7 @@ mod tests {
 		assert!(
 			!subscriber
 				.start_announce(
-					subtree(&path),
+					path.clone(),
 					hops,
 					crate::origin::Cost::default(),
 					0,
@@ -2037,7 +1988,7 @@ mod tests {
 		assert!(
 			matches!(
 				subscriber.start_announce(
-					subtree(&path),
+					path.clone(),
 					fresh,
 					crate::origin::Cost::default(),
 					0,
@@ -2074,7 +2025,7 @@ mod tests {
 		assert!(
 			!subscriber
 				.start_announce(
-					subtree(&path),
+					path.clone(),
 					reflected,
 					crate::origin::Cost::default(),
 					0,
@@ -2090,7 +2041,7 @@ mod tests {
 		hops.push(crate::Hop::new(7).unwrap()).unwrap();
 		let err = subscriber
 			.start_announce(
-				subtree(&path),
+				path.clone(),
 				hops,
 				crate::origin::Cost::default(),
 				0,
@@ -2129,7 +2080,7 @@ mod tests {
 		let mut announced = Announced::default();
 		let accepted = subscriber
 			.start_announce(
-				subtree(Path::new("room/host")),
+				Path::new("room/host").to_owned(),
 				hops,
 				crate::origin::Cost::default(),
 				0,
@@ -2143,40 +2094,6 @@ mod tests {
 		assert!(consumer.get_broadcast("room/host").is_none());
 	}
 
-	/// The same reflected-sender drop applies to a non-prefix pattern.
-	#[tokio::test]
-	async fn a_wildcard_reflected_by_its_sender_is_dropped() {
-		let assigned = crate::Hop::new(777).unwrap();
-
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let mut subscriber = Subscriber::new(SubscriberConfig {
-			session: SinkSession::new(Default::default()),
-			origin,
-			recv_bandwidth: None,
-			version: VERSION,
-			peer_setup: Default::default(),
-			cost: None,
-			peer_hop: Some(assigned),
-			going_away: Default::default(),
-		});
-
-		let mut hops = crate::Hops::new();
-		hops.push(assigned).unwrap();
-
-		let mut announced = Announced::default();
-		let accepted = subscriber
-			.start_announce(
-				"live/*".parse().unwrap(),
-				hops,
-				crate::origin::Cost::default(),
-				0,
-				Some(assigned),
-				&mut announced,
-			)
-			.unwrap();
-		assert!(!accepted, "a reflected wildcard must not become a route");
-	}
-
 	/// A peer that was advertised a local path and announces it back with this
 	/// origin's hop in the chain is a reflection, not a new path. The announce
 	/// is dropped, the local front keeps serving, and the peer's own
@@ -2187,8 +2104,8 @@ mod tests {
 		let origin = origin::Config::new(relay).produce();
 		let assigned = crate::Hop::new(777).unwrap();
 
-		let mut local = origin.create_broadcast("room/host").unwrap();
-		let mut track = local.create_track("video", None).unwrap();
+		let local = origin.create_broadcast("room/host").unwrap();
+		let track = local.create_track("video", None).unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"local".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -2230,7 +2147,7 @@ mod tests {
 		let mut announced = Announced::default();
 		let accepted = subscriber
 			.start_announce(
-				subtree(Path::new("room/host")),
+				Path::new("room/host").to_owned(),
 				hops,
 				crate::origin::Cost::default(),
 				0,
@@ -2285,7 +2202,7 @@ mod tests {
 		let mut announced = Announced::default();
 		let accepted = subscriber
 			.start_announce(
-				subtree(Path::new("room/host")),
+				Path::new("room/host").to_owned(),
 				crate::Hops::new(),
 				crate::origin::Cost::UNKNOWN,
 				0,
@@ -2329,7 +2246,7 @@ mod tests {
 		assert!(
 			subscriber
 				.start_announce(
-					subtree(Path::new("room/host")),
+					Path::new("room/host").to_owned(),
 					hops,
 					crate::origin::Cost::UNKNOWN,
 					0,
@@ -2357,7 +2274,7 @@ mod tests {
 		let mut announced = Announced::default();
 		subscriber
 			.start_announce(
-				subtree(Path::new("room/host")),
+				Path::new("room/host").to_owned(),
 				crate::Hops::new(),
 				crate::origin::Cost::UNKNOWN,
 				0,
@@ -2398,7 +2315,7 @@ mod tests {
 		let path = Path::new("room/host").to_owned();
 		subscriber
 			.start_announce(
-				subtree(&path),
+				path.clone(),
 				crate::Hops::new(),
 				crate::origin::Cost::UNKNOWN,
 				0,
@@ -2412,7 +2329,7 @@ mod tests {
 
 		subscriber
 			.restart_announce(
-				subtree(&path),
+				path.clone(),
 				crate::Hops::new(),
 				crate::origin::Cost::new(5),
 				0,
@@ -2452,7 +2369,7 @@ mod tests {
 		let mut announced = Announced::default();
 		subscriber
 			.start_announce(
-				subtree(&path),
+				path.clone(),
 				hops,
 				crate::origin::Cost::default(),
 				1,
@@ -2473,7 +2390,7 @@ mod tests {
 		let mut announced = Announced::default();
 		subscriber
 			.start_announce(
-				subtree(&path),
+				path.clone(),
 				hops,
 				crate::origin::Cost::default(),
 				1,
@@ -2482,8 +2399,8 @@ mod tests {
 			)
 			.unwrap();
 		cursor.assert_next_active("room/host");
-		assert!(announced.contains(&subtree(&path)), "the announce was not recorded");
-		announced.retire(&subtree(&path));
+		assert!(announced.contains(&path.clone()), "the announce was not recorded");
+		announced.retire(&path.clone());
 		cursor.assert_next_ended("room/host");
 	}
 }
@@ -2557,44 +2474,44 @@ enum Sub<S: crate::transport::poll::Session> {
 /// A declined advertisement remains present with no route because the peer still
 /// owns its path and announce id until it retracts or restarts it.
 #[derive(Default)]
-struct Announced(HashMap<crate::Pattern, Option<AnnouncedRoute>>);
+struct Announced(HashMap<PathOwned, Option<AnnouncedRoute>>);
 
 impl Announced {
-	fn contains(&self, pattern: &crate::Pattern) -> bool {
-		self.0.contains_key(pattern)
+	fn contains(&self, path: &PathOwned) -> bool {
+		self.0.contains_key(path)
 	}
 
-	fn attach(&mut self, pattern: crate::Pattern, route: AnnouncedRoute) {
-		self.0.insert(pattern, Some(route));
+	fn attach(&mut self, path: PathOwned, route: AnnouncedRoute) {
+		self.0.insert(path, Some(route));
 	}
 
-	fn declined(&mut self, pattern: crate::Pattern) {
-		if let Some(Some(route)) = self.0.insert(pattern, None) {
+	fn declined(&mut self, path: PathOwned) {
+		if let Some(Some(route)) = self.0.insert(path, None) {
 			route.finish();
 		}
 	}
 
 	/// Record an advertisement before deciding what to do with it.
 	///
-	/// The peer owns the pattern from the moment it announces, whatever the receiver makes
+	/// The peer owns the prefix from the moment it announces, whatever the receiver makes
 	/// of it, so the record is taken up front and every way out of the decision leaves it
 	/// standing. Accepting replaces it via [`Self::attach`]. Doing it this way rather than
 	/// at each rejection is what stops the next early return from silently freeing a path
 	/// the peer still holds.
-	/// Only valid on a pattern the peer does not already hold, which the caller establishes
+	/// Only valid on a prefix the peer does not already hold, which the caller establishes
 	/// with [`Self::contains`]. Overwriting an attached route here would drop its source
 	/// without finishing it, which is [`Self::declined`]'s job.
-	fn reserve(&mut self, pattern: crate::Pattern) {
-		debug_assert!(!self.0.contains_key(&pattern), "reserved a pattern already advertised");
-		self.0.insert(pattern, None);
+	fn reserve(&mut self, path: PathOwned) {
+		debug_assert!(!self.0.contains_key(&path), "reserved a prefix already advertised");
+		self.0.insert(path, None);
 	}
 
-	fn attached(&mut self, pattern: &crate::Pattern) -> Option<&mut AnnouncedRoute> {
-		self.0.get_mut(pattern)?.as_mut()
+	fn attached(&mut self, path: &PathOwned) -> Option<&mut AnnouncedRoute> {
+		self.0.get_mut(path)?.as_mut()
 	}
 
-	fn retire(&mut self, pattern: &crate::Pattern) {
-		if let Some(Some(route)) = self.0.remove(pattern) {
+	fn retire(&mut self, path: &PathOwned) {
+		if let Some(Some(route)) = self.0.remove(path) {
 			route.finish();
 		}
 	}
@@ -3354,10 +3271,11 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 					// (2) In-flight fetches; completions just retire.
 					let _ = self.fetches.poll(waiter);
 
-					// (3) Nobody reads this copy anymore: the origin released it after its
-					// idle linger, so drop it instead of holding the track state (and its
-					// TRACK_INFO) for a reader that may never return. In-flight fetches
-					// keep it alive: work already accepted still gets finished.
+					// (3) Nobody reads this copy anymore: the origin dropped its source
+					// copy when demand ended, so drop it instead of holding the track
+					// state (and its TRACK_INFO) for a reader that may never return.
+					// In-flight fetches keep it alive: work already accepted still
+					// gets finished.
 					if self.fetches.is_empty() && self.serving.poll_unused(waiter).is_ready() {
 						return Poll::Ready(ServeEnd::Idle);
 					}
@@ -3454,10 +3372,10 @@ struct FetchServeRun<S: crate::transport::poll::Session> {
 
 enum FetchRunState<S: crate::transport::poll::Session> {
 	Open {
-		request: Option<track::GroupRequest>,
+		request: Option<group::Request>,
 	},
 	Send {
-		request: Option<track::GroupRequest>,
+		request: Option<group::Request>,
 		stream: Stream<S, Version>,
 		frame_start: u64,
 	},
@@ -3470,7 +3388,7 @@ enum FetchRunState<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> FetchServeRun<S> {
-	fn new(serve: TrackServe<S>, request: track::GroupRequest, timescale: Option<Timescale>) -> Self {
+	fn new(serve: TrackServe<S>, request: group::Request, timescale: Option<Timescale>) -> Self {
 		let session = serve.subscriber.session.clone();
 		let group = request.sequence();
 		Self {
@@ -3619,7 +3537,7 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 					};
 					match res {
 						Ok(()) => {
-							let mut producer = producer;
+							let producer = producer;
 							let _ = producer.finish();
 						}
 						Err(err) => {

@@ -22,7 +22,7 @@ use super::Cap;
 pub use super::subscription::{Position, Subscription};
 
 use std::{
-	collections::{BTreeMap, VecDeque},
+	collections::{BTreeMap, HashSet, VecDeque},
 	ops::{Bound, RangeBounds},
 	sync::Arc,
 	sync::OnceLock,
@@ -275,10 +275,10 @@ type Subscriptions = Vec<kio::Consumer<Subscription>>;
 /// [`kio::Shared`]: consumers enqueue (coalescing per sequence, so a relay opens one
 /// upstream FETCH per group) and [`Dynamic`] handlers drain under one lock, without
 /// write access to the track itself.
-type FetchState = Requests<u64, PendingFetch>;
+pub(crate) type FetchState = Requests<u64, PendingFetch>;
 
 /// One fetch attempt for a sequence, shared by every [`Fetching`] that joined it.
-struct PendingFetch {
+pub(crate) struct PendingFetch {
 	// The most demanding delivery priority across the joined fetches.
 	priority: u8,
 
@@ -297,8 +297,8 @@ struct PendingFetch {
 /// The result of a fetch attempt. Stays empty on success (the group lands in the
 /// track cache); a handler writes `rejected` to fail every joined fetch.
 #[derive(Default)]
-struct FetchOutcome {
-	rejected: Option<Error>,
+pub(crate) struct FetchOutcome {
+	pub(crate) rejected: Option<Error>,
 }
 
 impl TrackState {
@@ -1053,12 +1053,17 @@ impl TrackState {
 		producer.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 
-	/// Insert a group fetched for a [`GroupRequest`], setting the track's [`Info`]
+	/// Insert a group fetched for a [`group::Request`], setting the track's [`Info`]
 	/// if it isn't accepted yet. The group's timescale comes from that info, so a
 	/// fetch can serve an as-yet-unaccepted track (e.g. a relay with no live
 	/// subscription). The group lands in the cache so a waiting
 	/// [`Fetching`] resolves via [`Self::poll_fetch`].
-	fn insert_group_request(&mut self, sequence: u64, frame_start: u64, info: Option<Info>) -> Result<group::Producer> {
+	pub(crate) fn insert_group_request(
+		&mut self,
+		sequence: u64,
+		frame_start: u64,
+		info: Option<Info>,
+	) -> Result<group::Producer> {
 		if let Some(err) = &self.abort {
 			return Err(err.clone());
 		}
@@ -1169,8 +1174,26 @@ impl Producer {
 		&self.broadcast
 	}
 
+	/// Cache an already-produced group without rewriting its frames.
+	///
+	/// Used by an origin front to keep a warm copy of groups it already delivered
+	/// after dropping the source track that produced them.
+	pub(crate) fn adopt_group(&mut self, group: group::Producer, visible: bool) -> Result<()> {
+		let mut state = self.modify()?;
+		if let Some(fin) = state.final_sequence
+			&& group.sequence >= fin
+		{
+			return Err(Error::Closed);
+		}
+		if state.lookup.contains_key(&group.sequence) {
+			return Err(Error::Duplicate);
+		}
+		state.insert_group(&group, visible);
+		Ok(())
+	}
+
 	/// Create a new group with the given sequence number.
-	pub fn create_group(&mut self, group: group::Info) -> Result<group::Producer> {
+	pub fn create_group(&self, group: group::Info) -> Result<group::Producer> {
 		let mut state = self.modify()?;
 		if let Some(fin) = state.final_sequence
 			&& group.sequence >= fin
@@ -1189,7 +1212,7 @@ impl Producer {
 	}
 
 	/// Create a new group with the next sequence number.
-	pub fn append_group(&mut self) -> Result<group::Producer> {
+	pub fn append_group(&self) -> Result<group::Producer> {
 		let mut state = self.modify()?;
 		let sequence = match state.max_sequence {
 			Some(s) => s.checked_add(1).ok_or(coding::BoundsExceeded)?,
@@ -1313,7 +1336,7 @@ impl Producer {
 	/// Sets the final sequence to one past the current max_sequence.
 	/// No new groups at or above this sequence can be appended.
 	/// NOTE: Old groups with lower sequence numbers can still arrive.
-	pub fn finish(&mut self) -> Result<()> {
+	pub fn finish(&self) -> Result<()> {
 		let mut state = self.modify()?;
 		let final_sequence = match state.max_sequence {
 			Some(max) => max.checked_add(1).ok_or(coding::BoundsExceeded)?,
@@ -1355,7 +1378,8 @@ impl Producer {
 
 	/// The declared first sequence of the live feed, once [`Self::start_at`]
 	/// declared one. `None` while nothing was declared.
-	pub fn start_sequence(&self) -> Option<u64> {
+	#[cfg(test)]
+	pub(crate) fn start_sequence(&self) -> Option<u64> {
 		self.state.read().start_sequence
 	}
 
@@ -1592,8 +1616,11 @@ impl Producer {
 	}
 
 	/// Poll for the producer becoming unused (every consumer dropped).
-	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.state.poll_unused(waiter).map(|_| ())
+	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		self.state.poll_unused(waiter).map(|used| match used {
+			Some(()) => Ok(()),
+			None => Err(self.abort_reason()),
+		})
 	}
 
 	/// Create a [`Dynamic`] handle that serves on-demand fetches of uncached
@@ -1609,13 +1636,13 @@ impl Producer {
 }
 
 /// Pop the next queued group fetch off the fetch queue and wrap it in a
-/// [`GroupRequest`] bound to a fresh producer handle. Shared by every
+/// [`group::Request`] bound to a fresh producer handle. Shared by every
 /// [`Dynamic`] handle on the track.
 fn poll_requested_group(
 	state: &kio::Producer<TrackState>,
 	fetch: &kio::Shared<FetchState>,
 	waiter: &kio::Waiter,
-) -> Poll<Result<GroupRequest>> {
+) -> Poll<Result<group::Request>> {
 	// Prefer serving a queued fetch, even if the track has since aborted.
 	if let Poll::Ready(mut guard) = fetch.poll(waiter, |fetch| {
 		if fetch.has_queued() {
@@ -1627,13 +1654,13 @@ fn poll_requested_group(
 		let sequence = guard.pop().expect("predicate guaranteed a request");
 		// The popped attempt stays pending, so a fetch in the window between hand-off
 		// and accept joins it instead of queueing a duplicate.
-		// `GroupRequest::{accept, reject, drop}` removes the entry.
+		// `group::Request::{accept, reject, drop}` removes the entry.
 		let pending = guard.get(&sequence).expect("popped key must be pending");
 		let priority = pending.priority;
 		let frame_start = pending.frame_start;
 		let result = pending.result.clone();
 		drop(guard);
-		return Poll::Ready(Ok(GroupRequest {
+		return Poll::Ready(Ok(group::Request {
 			state: state.clone(),
 			fetch: fetch.clone(),
 			sequence,
@@ -1693,16 +1720,16 @@ impl Dynamic {
 	}
 
 	/// Block until a consumer fetches a group that isn't cached, returning a
-	/// [`GroupRequest`] to serve via [`GroupRequest::accept`].
+	/// [`group::Request`] to serve via [`group::Request::accept`].
 	///
 	/// A relay issues a wire FETCH first; an origin already has the group cached, so
 	/// the fetch resolves without ever reaching here. Errors once the track is aborted.
-	pub async fn requested_group(&self) -> Result<GroupRequest> {
+	pub async fn requested_group(&self) -> Result<group::Request> {
 		kio::wait(|waiter| self.poll_requested_group(waiter)).await
 	}
 
 	/// Poll counterpart to [`requested_group`](Self::requested_group).
-	pub fn poll_requested_group(&self, waiter: &kio::Waiter) -> Poll<Result<GroupRequest>> {
+	pub fn poll_requested_group(&self, waiter: &kio::Waiter) -> Poll<Result<group::Request>> {
 		poll_requested_group(&self.state, &self.fetch, waiter)
 	}
 
@@ -1731,7 +1758,7 @@ impl Drop for Dynamic {
 		// a live `Producer` may still be serving the subscription. It just stops fetch
 		// serving. Queued attempts no handler will ever pop are dropped, closing their
 		// result channels so every joined `Fetching` resolves NotFound; an attempt
-		// already handed to a handler stays, resolved by its `GroupRequest` instead.
+		// already handed to a handler stays, resolved by its `group::Request` instead.
 		let mut fetch = self.fetch.lock();
 		if fetch.remove_handler() {
 			fetch.drain_queued();
@@ -2048,8 +2075,24 @@ impl Demand {
 	}
 
 	/// Whether anyone is subscribed right now, without waiting.
-	pub(crate) fn is_used(&self) -> bool {
+	pub fn is_used(&self) -> bool {
 		self.state.is_used()
+	}
+
+	/// Poll-based variant of [`Self::used`].
+	pub fn poll_used(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		self.state.poll_used(waiter).map(|used| match used {
+			Some(()) => Ok(()),
+			None => Err(self.abort_reason()),
+		})
+	}
+
+	/// Poll-based variant of [`Self::unused`].
+	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		self.state.poll_unused(waiter).map(|used| match used {
+			Some(()) => Ok(()),
+			None => Err(self.abort_reason()),
+		})
 	}
 
 	/// Whether the track is gone, without waiting.
@@ -2161,6 +2204,45 @@ impl Consumer {
 	pub(crate) fn with_broadcast(mut self, broadcast: Arc<broadcast::Info>) -> Self {
 		self.broadcast = broadcast;
 		self
+	}
+
+	/// Groups this copy still holds, so an origin can keep them after dropping the source.
+	///
+	/// Publisher-produced groups come back in arrival order, matching what
+	/// `recv_group` would deliver; fetched backfill absent from arrival follows
+	/// in sequence order for sequence fetches.
+	pub(crate) fn cached_groups(&self) -> Vec<(group::Producer, bool)> {
+		match &self.inner {
+			ConsumerKind::Plain(state) => {
+				let state = state.read();
+				let mut out = Vec::with_capacity(state.lookup.len());
+				for (sequence, stamp) in state.arrival.iter() {
+					if let Some(slot) = state.lookup.get(sequence)
+						&& slot.stamp == *stamp
+						&& !slot.group.is_aborted()
+					{
+						out.push((slot.group.clone(), slot.visible));
+					}
+				}
+				// Fetched backfill never enters arrival; keep it for sequence fetches.
+				let mut copied: HashSet<u64> = out.iter().map(|(group, _)| group.sequence).collect();
+				for (sequence, slot) in state.lookup.iter() {
+					if !slot.group.is_aborted() && copied.insert(*sequence) {
+						out.push((slot.group.clone(), slot.visible));
+					}
+				}
+				out
+			}
+			ConsumerKind::Spliced(_) => Vec::new(),
+		}
+	}
+
+	/// Publisher properties already resolved on this copy, if any.
+	pub(crate) fn cached_info(&self) -> Option<Info> {
+		match &self.inner {
+			ConsumerKind::Plain(state) => state.read().info.clone(),
+			ConsumerKind::Spliced(_) => None,
+		}
 	}
 
 	/// The track name this handle is bound to.
@@ -2405,7 +2487,7 @@ impl Consumer {
 				// and widening its range if ours starts earlier.
 				//
 				// Widening only reaches the handler while the attempt is still queued;
-				// once popped, the `GroupRequest` holds an immutable copy and its range is
+				// once popped, the `group::Request` holds an immutable copy and its range is
 				// already on the wire. What protects the late caller either way is the
 				// coverage check above: it refuses a group starting above what it asked
 				// for, so it fails cleanly and its retry queues a fresh attempt.
@@ -2447,7 +2529,7 @@ impl Consumer {
 	/// for the producer to [`Request::accept`] the track (a wire TRACK_INFO round-trip
 	/// for a relay), and errors with the track's abort error if it closes first.
 	/// [`Subscriber::info`] is the already-resolved counterpart.
-	pub fn info(&self) -> kio::Pending<Querying> {
+	pub fn query(&self) -> kio::Pending<Querying> {
 		kio::Pending::new(Querying {
 			inner: match &self.inner {
 				ConsumerKind::Plain(state) => QueryingKind::Plain(state.clone()),
@@ -2584,7 +2666,7 @@ impl kio::Pollable for Subscribing {
 	}
 }
 
-/// The pollable state of a [`Consumer::info`]; awaited via the
+/// The pollable state of a [`Consumer::query`]; awaited via the
 /// [`kio::Pending`] wrapper.
 pub struct Querying {
 	inner: QueryingKind,
@@ -2618,27 +2700,7 @@ impl kio::Pollable for Querying {
 	}
 }
 
-/// A consumer's request for a single past group, handed to a handler via
-/// [`Dynamic::requested_group`].
-///
-/// The handler fulfills it by calling [`Self::accept`], which inserts the group
-/// into the track cache (resolving every [`Consumer::fetch_group`] that joined the
-/// attempt) and returns a [`group::Producer`] to fill. A relay typically opens a wire
-/// FETCH, reads FETCH_OK, then accepts. The request carries its own producer handle,
-/// so it works the same whether or not the track has been accepted yet.
-pub struct GroupRequest {
-	state: kio::Producer<TrackState>,
-	// To remove this attempt from the fetch state once it resolves.
-	fetch: kio::Shared<FetchState>,
-	sequence: u64,
-	priority: u8,
-	frame_start: u64,
-	// Rejections route back to every joined `Fetching`.
-	result: kio::Producer<FetchOutcome>,
-	done: bool,
-}
-
-impl GroupRequest {
+impl group::Request {
 	/// The group sequence the consumer wants.
 	pub fn sequence(&self) -> u64 {
 		self.sequence
@@ -2698,7 +2760,7 @@ impl GroupRequest {
 	}
 }
 
-impl Drop for GroupRequest {
+impl Drop for group::Request {
 	fn drop(&mut self) {
 		if self.done {
 			return;
@@ -3044,7 +3106,7 @@ impl PlainSubscriber {
 	///
 	/// `cap` bounds the anchor: the caller passes the same window it reads from, so a
 	/// group is only ever judged against content that could actually be served in its
-	/// place. Read fresh each poll, so a mid-stream [`SubscriberControl::update`] applies
+	/// place. Read fresh each poll, so a mid-stream [`Control::update`] applies
 	/// to the very next group, and shared across every candidate that poll walks off, so
 	/// discarding a backlog of N groups costs one scan rather than N. Only ever
 	/// [`Poll::Ready`]; the track ending surfaces as the error the caller was going to
@@ -3267,11 +3329,11 @@ impl PlainSubscriber {
 /// borrowing its read cursor, so callers can change delivery priority, the max age
 /// budget, or group bounds while another task is waiting for groups.
 #[derive(Clone)]
-pub struct SubscriberControl {
+pub struct Control {
 	subscription: kio::Producer<Subscription>,
 }
 
-impl SubscriberControl {
+impl Control {
 	/// This subscriber's current preferences.
 	pub fn subscription(&self) -> Subscription {
 		self.subscription.read().clone()
@@ -3291,7 +3353,7 @@ impl SubscriberControl {
 impl Subscriber {
 	/// The track's [`Info`], resolved when the subscription was established.
 	///
-	/// Free, unlike [`Consumer::info`]: subscribing already waited for the info
+	/// Free, unlike [`Consumer::query`]: subscribing already waited for the info
 	/// (SUBSCRIBE_OK on the wire), so a subscriber always has it.
 	pub fn info(&self) -> &Info {
 		&self.info
@@ -3395,8 +3457,8 @@ impl Subscriber {
 	}
 
 	/// Create a handle for updating this subscriber's delivery preferences.
-	pub fn control(&self) -> SubscriberControl {
-		SubscriberControl {
+	pub fn control(&self) -> Control {
+		Control {
 			subscription: match &self.inner {
 				SubscriberKind::Plain(plain) => plain.subscription.clone(),
 				SubscriberKind::Spliced(spliced) => spliced.prefs(),
@@ -3555,12 +3617,6 @@ impl Subscriber {
 	/// [`Ordered::next_group`]) until it yields `None` to observe the track fully drained.
 	pub async fn finished(&mut self) -> Result<u64> {
 		kio::wait(|waiter| self.poll_finished(waiter)).await
-	}
-
-	/// Limit subsequent reads to these group sequences, returning the reader for chaining.
-	pub fn with_groups(mut self, groups: impl RangeBounds<u64>) -> Self {
-		self.set_groups(groups);
-		self
 	}
 
 	/// Limit subsequent reads to these group sequences without rewinding read progress.
@@ -3742,12 +3798,6 @@ impl Ordered {
 		kio::wait(|waiter| self.poll_recv_datagram(waiter)).await
 	}
 
-	/// Limit subsequent reads to these group sequences, returning the reader for chaining.
-	pub fn with_groups(mut self, groups: impl RangeBounds<u64>) -> Self {
-		self.set_groups(groups);
-		self
-	}
-
 	/// Limit subsequent reads to these group sequences without rewinding read progress.
 	///
 	/// See [`Subscriber::set_groups`] for inclusive, exclusive, and omitted bounds.
@@ -3757,7 +3807,7 @@ impl Ordered {
 
 	/// Create a handle for updating this subscriber's delivery preferences without
 	/// borrowing the read cursor.
-	pub fn control(&self) -> SubscriberControl {
+	pub fn control(&self) -> Control {
 		self.inner.control()
 	}
 
@@ -4437,7 +4487,7 @@ mod test {
 
 	#[tokio::test]
 	async fn evict_expired_groups() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 
 		// Create 3 groups at time 0.
 		producer.append_group().unwrap(); // seq 0
@@ -4476,7 +4526,7 @@ mod test {
 	/// track with long groups (a per-minute rollup, say) fails its readers at every boundary.
 	#[tokio::test]
 	async fn aging_out_a_finished_group_keeps_the_clean_end() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let mut group = producer.create_group(group::Info { sequence: 0 }).unwrap();
 		let mut consumer = group.consume();
 
@@ -4498,7 +4548,7 @@ mod test {
 	/// schedule, so reclamation stays intact.
 	#[tokio::test]
 	async fn active_reader_survives_expiry() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let mut subscriber = producer.subscribe(None);
 
 		// A finished group with one frame per step of the read loop below.
@@ -4535,7 +4585,7 @@ mod test {
 	/// re-stamp on a time bound between refills.
 	#[tokio::test]
 	async fn slow_prefetch_reader_survives_expiry() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let mut subscriber = producer.subscribe(None);
 
 		let mut group = producer.create_group(0u64.into()).unwrap();
@@ -4563,7 +4613,7 @@ mod test {
 	/// window later.
 	#[tokio::test]
 	async fn delivery_restarts_the_expiry_clock() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let mut subscriber = producer.subscribe(replay());
 
 		let mut group = producer.create_group(0u64.into()).unwrap();
@@ -4590,7 +4640,7 @@ mod test {
 	/// retention windows must not be expired mid-write.
 	#[tokio::test]
 	async fn streaming_frame_writes_keep_the_group_alive() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let mut straggler = producer.create_group(0u64.into()).unwrap();
 		// The live edge moves on, so the straggler is demoted and expirable.
 		producer.create_group(1u64.into()).unwrap().finish().unwrap();
@@ -4624,7 +4674,7 @@ mod test {
 	/// not be expired by the next track write on its stale frame-open stamp.
 	#[tokio::test]
 	async fn coalesced_frame_completion_keeps_the_group_alive() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let mut straggler = producer.create_group(0u64.into()).unwrap();
 		// The live edge moves on, so the straggler is demoted and expirable.
 		producer.create_group(1u64.into()).unwrap().finish().unwrap();
@@ -4658,7 +4708,7 @@ mod test {
 	/// the expiry clock so the subscriber gets to read what it was just handed.
 	#[tokio::test]
 	async fn parked_reoffer_restarts_the_expiry_clock() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let mut subscriber = producer.subscribe(None);
 		subscriber.set_groups(..1);
 
@@ -4689,7 +4739,7 @@ mod test {
 
 	#[tokio::test]
 	async fn evict_keeps_max_sequence() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		producer.append_group().unwrap(); // seq 0
 
 		// Advance time past the LRU window.
@@ -4708,7 +4758,7 @@ mod test {
 
 	#[tokio::test]
 	async fn no_eviction_when_fresh() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		producer.append_group().unwrap(); // seq 0
 		producer.append_group().unwrap(); // seq 1
 		producer.append_group().unwrap(); // seq 2
@@ -4722,7 +4772,7 @@ mod test {
 
 	#[tokio::test]
 	async fn consumer_skips_evicted_groups() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		producer.append_group().unwrap(); // seq 0
 
 		let mut consumer = producer.subscribe(None);
@@ -4762,7 +4812,7 @@ mod test {
 	#[tokio::test]
 	async fn pool_sweep_expires_without_a_write() {
 		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(1)));
-		let mut producer = track_producer_pooled("test", pool.clone());
+		let producer = track_producer_pooled("test", pool.clone());
 		let mut stalled = producer.append_group().unwrap(); // seq 0, left open
 		stalled.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
 		producer.append_group().unwrap(); // seq 1, the live edge
@@ -4782,7 +4832,7 @@ mod test {
 	#[tokio::test]
 	async fn pool_sweep_drains_a_deep_backlog() {
 		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(1)));
-		let mut producer = track_producer_pooled("test", pool.clone());
+		let producer = track_producer_pooled("test", pool.clone());
 
 		// Comfortably more than one write-driven scan window (EVICT_SCAN).
 		let backlog = 4 * EVICT_SCAN;
@@ -4803,7 +4853,7 @@ mod test {
 	#[tokio::test]
 	async fn pool_expiry_controls_eviction() {
 		// A shorter LRU window on the pool evicts sooner than the default.
-		let mut producer = track_producer_expiring("test", Duration::from_secs(1));
+		let producer = track_producer_expiring("test", Duration::from_secs(1));
 		producer.append_group().unwrap(); // seq 0
 
 		// Past the pool's window but well within cache::DEFAULT_EXPIRY.
@@ -4818,7 +4868,7 @@ mod test {
 
 	#[tokio::test]
 	async fn small_frame_write_expires_idle_siblings() {
-		let mut producer = track_producer_expiring("test", Duration::from_secs(1));
+		let producer = track_producer_expiring("test", Duration::from_secs(1));
 		producer.append_group().unwrap().finish().unwrap(); // seq 0
 		let mut live = producer.append_group().unwrap(); // seq 1
 
@@ -4833,7 +4883,7 @@ mod test {
 	async fn fresh_expiry_scan_does_not_wake_track_consumers() {
 		use std::sync::atomic::{AtomicBool, Ordering};
 
-		let mut producer = track_producer_expiring("test", cache::DEFAULT_EXPIRY);
+		let producer = track_producer_expiring("test", cache::DEFAULT_EXPIRY);
 		producer.append_group().unwrap().finish().unwrap();
 		let mut live = producer.append_group().unwrap();
 		let mut consumer = producer.subscribe(None);
@@ -4853,7 +4903,7 @@ mod test {
 
 	#[tokio::test]
 	async fn streaming_frame_write_expires_idle_siblings() {
-		let mut producer = track_producer_expiring("test", Duration::from_secs(1));
+		let producer = track_producer_expiring("test", Duration::from_secs(1));
 		producer.append_group().unwrap().finish().unwrap(); // seq 0
 		let mut live = producer.append_group().unwrap(); // seq 1
 		let mut frame = live
@@ -4903,7 +4953,7 @@ mod test {
 	/// pool's LRU window can't age content out no matter how small the window is.
 	#[tokio::test]
 	async fn max_age_does_not_drive_wall_eviction() {
-		let mut producer = track_producer("test", Info::default().with_max_age(Duration::from_secs(1)));
+		let producer = track_producer("test", Info::default().with_max_age(Duration::from_secs(1)));
 		producer.append_group().unwrap(); // seq 0
 
 		// Far past max_age in wall time, but inside the pool's LRU window.
@@ -4917,7 +4967,7 @@ mod test {
 	/// Disabling the pool's expiry keeps idle groups until byte pressure reclaims them.
 	#[tokio::test]
 	async fn disabled_pool_expiry_never_reclaims() {
-		let mut producer = track_producer_expiring("test", None);
+		let producer = track_producer_expiring("test", None);
 		producer.append_group().unwrap(); // seq 0
 
 		crate::model::clock::advance(Duration::from_secs(3600));
@@ -4991,7 +5041,7 @@ mod test {
 	/// reclamation belongs to the pool's LRU window, not the ceiling.
 	#[tokio::test]
 	async fn origin_cache_duration_does_not_wall_evict() {
-		let mut producer = track_producer_capped(
+		let producer = track_producer_capped(
 			"test",
 			Info::default().with_max_age(Duration::from_secs(60)),
 			Duration::from_secs(1),
@@ -5230,7 +5280,7 @@ mod test {
 
 	#[test]
 	fn a_late_lower_group_within_the_budget_is_delivered() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		for (sequence, millis) in [(5, 0), (6, 1000), (7, 2000)] {
 			let mut group = producer.create_group(group::Info { sequence }).unwrap();
 			group
@@ -5353,7 +5403,7 @@ mod test {
 	/// frame are separate events and the wire does not order them.
 	#[tokio::test]
 	async fn real_time_reads_a_live_stream_without_truncating_it() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let mut subscriber = producer.subscribe(None);
 
 		let gop = |n: u64| {
@@ -5427,7 +5477,7 @@ mod test {
 	/// budget shorter than one GOP would drop the tail of every GOP.
 	#[tokio::test]
 	async fn a_budget_is_measured_from_the_readers_position() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(1)));
 
 		let mut open = producer.append_group().unwrap();
@@ -5855,7 +5905,7 @@ mod test {
 
 	#[tokio::test]
 	async fn a_lower_sequence_is_never_the_live_edge() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		// A high timestamp on a lower sequence is not a live edge: backfill served on
 		// demand sits there, and so does the tail of a timeline the publisher rewound.
 		// Only groups above the candidate anchor the measure, so neither can convict
@@ -6003,7 +6053,7 @@ mod test {
 
 	#[tokio::test]
 	async fn out_of_order_max_sequence_at_front() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 
 		// Arrive out of order: seq 5 first, then 3, then 4.
 		producer.create_group(group::Info { sequence: 5 }).unwrap();
@@ -6037,7 +6087,7 @@ mod test {
 
 	#[tokio::test]
 	async fn max_sequence_at_front_blocks_trim() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 
 		// Arrive: seq 5, then seq 3.
 		producer.create_group(group::Info { sequence: 5 }).unwrap();
@@ -6083,7 +6133,7 @@ mod test {
 
 	#[tokio::test]
 	async fn abort_clears_cached_groups() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		producer.append_group().unwrap();
 		producer.append_group().unwrap();
 
@@ -6108,7 +6158,7 @@ mod test {
 	#[tokio::test]
 	async fn drop_unfinished_clears_cached_groups() {
 		let producer = track_producer("test", None);
-		let mut writer = producer.clone();
+		let writer = producer.clone();
 		writer.append_group().unwrap();
 
 		// A stale consumer keeps the channel (and thus the cache) alive.
@@ -6130,8 +6180,8 @@ mod test {
 		let warns = count_drop_warnings("track::Producer dropped without finish", || {
 			let producer = track_producer("test", None);
 			let keep = producer.clone();
-			let mut writer = producer.clone();
-			let mut group = writer.append_group().unwrap();
+			let writer = producer.clone();
+			let group = writer.append_group().unwrap();
 			group.finish().unwrap();
 			let _consumer = producer.subscribe(None);
 			writer.abort(Error::Cancel).unwrap();
@@ -6144,7 +6194,7 @@ mod test {
 	async fn drop_unfinished_warns() {
 		let warns = count_drop_warnings("track::Producer dropped without finish", || {
 			let producer = track_producer("test", None);
-			let mut writer = producer.clone();
+			let writer = producer.clone();
 			writer.append_group().unwrap();
 			let _consumer = producer.subscribe(None);
 			drop(writer);
@@ -6155,7 +6205,7 @@ mod test {
 
 	#[tokio::test]
 	async fn drop_finished_keeps_cached_groups() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		producer.append_group().unwrap();
 		producer.finish().unwrap();
 
@@ -6168,9 +6218,24 @@ mod test {
 		assert!(done.is_none(), "consumer should drain then see clean finish");
 	}
 
+	#[tokio::test]
+	async fn cached_groups_preserve_arrival_order() {
+		let producer = track_producer("test", None);
+		producer.create_group(group::Info { sequence: 5 }).unwrap();
+		producer.create_group(group::Info { sequence: 3 }).unwrap();
+
+		let groups = producer.consume().cached_groups();
+		let sequences: Vec<u64> = groups.iter().map(|(group, _)| group.sequence).collect();
+		assert_eq!(
+			sequences,
+			vec![5, 3],
+			"warm snapshot must follow arrival, not sequence order"
+		);
+	}
+
 	#[test]
 	fn append_finish_cannot_be_rewritten() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 
 		// Finishing an empty track is valid (fin = 0, total groups = 0).
 		assert!(producer.finish().is_ok());
@@ -6180,7 +6245,7 @@ mod test {
 
 	#[test]
 	fn finish_after_groups() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 
 		producer.append_group().unwrap();
 		assert!(producer.finish().is_ok());
@@ -6227,7 +6292,7 @@ mod test {
 
 	#[test]
 	fn final_sequence_reports_the_live_edge_after_finish() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		producer.create_group(group::Info { sequence: 5 }).unwrap();
 		producer.finish().unwrap();
 		assert_eq!(producer.final_sequence(), Some(6));
@@ -6270,7 +6335,7 @@ mod test {
 
 	#[tokio::test]
 	async fn recv_group_finishes_without_waiting_for_gaps() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		producer.create_group(group::Info { sequence: 1 }).unwrap();
 		producer.finish().unwrap();
 
@@ -6287,7 +6352,7 @@ mod test {
 
 	#[tokio::test]
 	async fn next_group_skips_late_arrivals() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(None).ordered();
 
 		// Seq 5 arrives first.
@@ -6324,7 +6389,7 @@ mod test {
 
 	#[tokio::test]
 	async fn next_group_returns_arrivals_in_order() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(replay()).ordered();
 
 		// Seq 3 arrives first, then seq 5. Both should be returned in arrival order.
@@ -6350,7 +6415,7 @@ mod test {
 
 	#[tokio::test]
 	async fn ordered_and_arrival_cursors_are_independent() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let mut ordered = producer.subscribe(replay()).ordered();
 		let mut arrival = producer.subscribe(replay());
 
@@ -6374,7 +6439,7 @@ mod test {
 
 	#[tokio::test]
 	async fn end_at_caps_next_group() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(replay()).ordered();
 
 		for s in 0..6 {
@@ -6406,7 +6471,7 @@ mod test {
 
 	#[tokio::test]
 	async fn end_at_release_drains_cached_groups() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(replay()).ordered();
 
 		for s in 0..6 {
@@ -6451,7 +6516,7 @@ mod test {
 
 	#[tokio::test]
 	async fn end_at_lower_than_cursor_parks_consumer() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(replay()).ordered();
 
 		for s in 0..3 {
@@ -6495,7 +6560,7 @@ mod test {
 
 	#[tokio::test]
 	async fn end_at_toggling_around_late_arrivals() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(replay()).ordered();
 
 		consumer.set_groups(..6);
@@ -6541,7 +6606,7 @@ mod test {
 	/// re-offers them, even after the track finishes.
 	#[tokio::test]
 	async fn end_at_parks_recv_group() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(replay());
 
 		for s in 0..3 {
@@ -6581,7 +6646,7 @@ mod test {
 	/// it: a relay can ingest a burst micro-reordered (newest first).
 	#[tokio::test]
 	async fn recv_group_serves_arrivals_behind_the_cap() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(replay());
 
 		consumer.set_groups(..2);
@@ -6610,8 +6675,9 @@ mod test {
 
 	#[tokio::test]
 	async fn group_ranges_preserve_the_floor_when_the_cap_changes() {
-		let mut producer = track_producer("test", None);
-		let mut consumer = producer.subscribe(None).with_groups(2..=2);
+		let producer = track_producer("test", None);
+		let mut consumer = producer.subscribe(None);
+		consumer.set_groups(2..=2);
 		producer.create_group(group::Info { sequence: 2 }).unwrap();
 		assert_eq!(consumer.recv_group().await.unwrap().unwrap().sequence, 2);
 		consumer.set_groups(..4);
@@ -6628,7 +6694,7 @@ mod test {
 	/// them once the cap rises.
 	#[tokio::test]
 	async fn start_at_drops_parked_recv_groups() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(None);
 
 		consumer.set_groups(..1);
@@ -6653,7 +6719,7 @@ mod test {
 	/// after the track finishes. This is what bounds parking by the cache policy.
 	#[tokio::test]
 	async fn evicted_parked_recv_groups_are_dropped() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(None);
 
 		producer.create_group(group::Info { sequence: 0 }).unwrap();
@@ -6697,7 +6763,7 @@ mod test {
 			}
 		}
 
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(None);
 
 		producer.create_group(group::Info { sequence: 0 }).unwrap();
@@ -6728,7 +6794,7 @@ mod test {
 	/// An exclusive cap at 0 is the empty range: no group is delivered, even group 0.
 	#[tokio::test]
 	async fn end_at_zero_is_the_empty_range() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(replay());
 		producer.create_group(group::Info { sequence: 0 }).unwrap();
 		producer.create_group(group::Info { sequence: 1 }).unwrap();
@@ -6751,7 +6817,7 @@ mod test {
 	/// subscriber keeps aggregate demand unbounded.
 	#[tokio::test]
 	async fn empty_local_cap_holds_while_another_subscriber_requests_everything() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let mut everything = producer.subscribe(replay());
 		let mut empty = producer.subscribe(Subscription::default().with_end(Position::group(0)));
 		empty.set_groups((Bound::Unbounded, Position::group(0).group_end()));
@@ -6787,7 +6853,7 @@ mod test {
 	/// A frame-limited exclusive end includes the last group and stops before that frame.
 	#[tokio::test]
 	async fn end_at_frame_limited_last_group() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(replay()).ordered();
 		let end = Position::after(1, 1).unwrap();
 		consumer.set_groups((Bound::Unbounded, end.group_end()));
@@ -6828,7 +6894,7 @@ mod test {
 	/// An inclusive bound at the last group withholds nothing.
 	#[tokio::test]
 	async fn end_at_maximum_group_is_unbounded() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let mut consumer = producer.subscribe(replay()).ordered();
 		consumer.set_groups(..=u64::MAX);
 
@@ -6859,7 +6925,7 @@ mod test {
 
 	#[test]
 	fn append_group_returns_bounds_exceeded_on_sequence_overflow() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		{
 			let mut state = producer.state.write().ok().unwrap();
 			state.max_sequence = Some(u64::MAX);
@@ -6870,7 +6936,7 @@ mod test {
 
 	#[tokio::test]
 	async fn fetch_cache_hit() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 
 		// Produce a cached group.
 		let mut group = producer.append_group().unwrap(); // seq 0
@@ -6997,7 +7063,7 @@ mod test {
 	/// miss and the fetch goes upstream instead.
 	#[tokio::test]
 	async fn fetch_ignores_a_group_that_starts_too_late() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
 
@@ -7172,7 +7238,7 @@ mod test {
 	async fn fetch_miss_no_dynamic_not_found() {
 		// A track with no `Dynamic` can't serve old content, so a cache miss
 		// resolves to NotFound instead of blocking forever.
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		producer.append_group().unwrap(); // seq 0, but we miss on seq 5
 		let consumer = producer.consume();
 		assert!(matches!(consumer.fetch_group(5, None).await, Err(Error::NotFound)));
@@ -7180,7 +7246,7 @@ mod test {
 
 	#[tokio::test]
 	async fn fetch_past_final_not_found() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		producer.append_group().unwrap(); // seq 0
 		producer.finish().unwrap(); // final_sequence = 1
 
@@ -7404,7 +7470,7 @@ mod test {
 
 		// Accept with a fresh Info: the pre-accept group's writes must still be
 		// drained by this track's future charges.
-		let mut producer = request.accept(None);
+		let producer = request.accept(None);
 		producer.append_group().unwrap().finish().unwrap();
 		producer.append_group().unwrap().finish().unwrap();
 
@@ -7419,7 +7485,7 @@ mod test {
 	/// hints die on stamp mismatch and compaction reclaims them.
 	#[tokio::test]
 	async fn recreated_sequence_bounds_eviction_hints() {
-		let (mut producer, _pool) = pooled_producer(1 << 40);
+		let (producer, _pool) = pooled_producer(1 << 40);
 		producer.create_group(5u64.into()).unwrap().finish().unwrap();
 
 		for _ in 0..200 {
@@ -7461,7 +7527,7 @@ mod test {
 	/// group, still settles its eviction debt once enough bytes accumulate.
 	#[tokio::test]
 	async fn frame_only_writer_pays() {
-		let (mut producer, pool) = pooled_producer(2_000);
+		let (producer, pool) = pooled_producer(2_000);
 		let mut demoted = producer.append_group().unwrap(); // seq 0
 		producer.append_group().unwrap().finish().unwrap(); // seq 1 demotes seq 0
 
@@ -7591,7 +7657,7 @@ mod test {
 		pending.await.unwrap();
 
 		// Accept, then demote the backfill with a live group.
-		let mut producer = request.accept(None);
+		let producer = request.accept(None);
 		producer.append_group().unwrap().finish().unwrap();
 
 		// No further insert: the late write into the demoted backfill is the only
@@ -7612,7 +7678,7 @@ mod test {
 	/// idle mid-write.
 	#[tokio::test]
 	async fn write_restarts_retention_clock() {
-		let (mut producer, _pool) = pooled_producer(1 << 40);
+		let (producer, _pool) = pooled_producer(1 << 40);
 		let mut straggler = producer.append_group().unwrap(); // seq 0
 		producer.append_group().unwrap().finish().unwrap(); // seq 1 demotes seq 0
 
@@ -7636,7 +7702,7 @@ mod test {
 	/// starve expiry of entries behind them: the scan cursor rotates.
 	#[tokio::test]
 	async fn refreshed_front_does_not_starve_expiry() {
-		let (mut producer, _pool) = pooled_producer(1 << 40);
+		let (producer, _pool) = pooled_producer(1 << 40);
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
 
@@ -7675,7 +7741,7 @@ mod test {
 	/// its actual arrival position: the historical arrival entry is dead.
 	#[tokio::test]
 	async fn recreated_sequence_delivered_once() {
-		let (mut producer, _pool) = pooled_producer(1 << 40);
+		let (producer, _pool) = pooled_producer(1 << 40);
 
 		producer.create_group(0u64.into()).unwrap().finish().unwrap();
 		let aborted = producer.create_group(1u64.into()).unwrap();
@@ -7719,7 +7785,7 @@ mod test {
 	/// in the past and over-protect every live group.
 	#[tokio::test]
 	async fn aborted_group_leaves_no_ghost_sample() {
-		let (mut producer, pool) = pooled_producer(1 << 40);
+		let (producer, pool) = pooled_producer(1 << 40);
 		let group0 = producer.append_group().unwrap();
 		producer.append_group().unwrap(); // demotes seq 0 into the mean
 
@@ -7732,9 +7798,9 @@ mod test {
 	/// evicted rather than being unevictable freeloaders.
 	#[tokio::test]
 	async fn empty_groups_repay_overhead() {
-		let (mut producer, pool) = pooled_producer(1_000);
+		let (producer, pool) = pooled_producer(1_000);
 		for _ in 0..100 {
-			let mut group = producer.append_group().unwrap();
+			let group = producer.append_group().unwrap();
 			group.finish().unwrap();
 		}
 
@@ -7749,7 +7815,7 @@ mod test {
 	/// feeds debt on the next append, so a straggler can't grow unbounded.
 	#[tokio::test]
 	async fn growth_on_demoted_group_is_billed() {
-		let (mut producer, pool) = pooled_producer(2_000);
+		let (producer, pool) = pooled_producer(2_000);
 		let mut straggler = producer.append_group().unwrap(); // seq 0
 		producer.append_group().unwrap().finish().unwrap(); // seq 1 demotes seq 0
 
@@ -7770,7 +7836,7 @@ mod test {
 	/// must not leak the replacement into arrival-order subscriptions.
 	#[tokio::test]
 	async fn refilled_sequence_stays_out_of_subscriptions() {
-		let (mut producer, _pool) = pooled_producer(1 << 40);
+		let (producer, _pool) = pooled_producer(1 << 40);
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
 
@@ -7806,7 +7872,7 @@ mod test {
 	/// expiry scans a bounded prefix instead of stopping at the first fresh entry.
 	#[tokio::test]
 	async fn expired_backfill_behind_refreshed_reclaimed() {
-		let (mut producer, _pool) = pooled_producer(1 << 40);
+		let (producer, _pool) = pooled_producer(1 << 40);
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
 
@@ -7863,7 +7929,7 @@ mod test {
 	/// content.
 	#[tokio::test]
 	async fn refetched_latest_stays_protected() {
-		let (mut producer, _pool) = pooled_producer(10_000);
+		let (producer, _pool) = pooled_producer(10_000);
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
 
@@ -7943,7 +8009,7 @@ mod test {
 	/// pins the committed semantics it has to preserve.
 	#[test]
 	fn an_aborted_group_releases_its_sequence() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let consumer = producer.consume();
 
 		let mut group = producer.create_group(group::Info { sequence: 3 }).unwrap();
@@ -7972,7 +8038,7 @@ mod test {
 	/// arrival-order subscribers.
 	#[tokio::test]
 	async fn fetched_backfill_not_subscribed() {
-		let (mut producer, _pool) = pooled_producer(1 << 40);
+		let (producer, _pool) = pooled_producer(1 << 40);
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
 
@@ -8007,7 +8073,7 @@ mod test {
 	/// order instead of lingering until the track closes.
 	#[tokio::test]
 	async fn expired_backfill_reclaimed() {
-		let (mut producer, pool) = pooled_producer(1 << 40);
+		let (producer, pool) = pooled_producer(1 << 40);
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
 

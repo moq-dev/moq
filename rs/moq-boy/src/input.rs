@@ -70,13 +70,10 @@ pub async fn handle_viewers(
 			break;
 		};
 
-		let Some(prefix) = update.pattern.as_prefix() else {
-			continue;
-		};
-		let viewer_id = prefix.to_owned();
+		let viewer_id = update.path.to_string();
 
-		if update.active {
-			let Ok(broadcast) = viewer_origin.request_broadcast(moq_net::Path::new(prefix)).await else {
+		if update.kind.is_active() {
+			let Ok(broadcast) = viewer_origin.request_broadcast(&update.path).await else {
 				continue;
 			};
 			tracing::info!(%viewer_id, "viewer connected");

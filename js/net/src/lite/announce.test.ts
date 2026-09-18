@@ -65,17 +65,6 @@ test("AnnounceBroadcast round-trips on draft-06", async () => {
 
 	const gotRestart = await roundTrip({ status: "restart", id: 3n, hops, cost }, Version.DRAFT_06);
 	expect(gotRestart).toEqual({ status: "restart", id: 3n, hops, cost });
-
-	const gotPattern = await roundTrip(
-		{ status: "pattern", pattern: Path.Pattern.parse("live/*"), hops, cost: 9n },
-		Version.DRAFT_06,
-	);
-	expect(gotPattern).toEqual({
-		status: "pattern",
-		pattern: Path.Pattern.parse("live/*"),
-		hops,
-		cost: 9n,
-	});
 });
 
 test("AnnounceBroadcast skips an unknown type on draft-06", async () => {
