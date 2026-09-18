@@ -2,9 +2,12 @@ name: meta-review
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    # `closed` is here only so merging/closing a PR cancels its in-flight run
+    # via the concurrency group below; the job itself is skipped on close.
+    types: [opened, synchronize, reopened, closed, ready_for_review]
 
-# Cancel in-flight reviews when a new commit lands on the same PR.
+# Cancel in-flight reviews when a new commit lands on the same PR, or when the
+# PR is merged/closed (the close event shares this group and supersedes it).
 concurrency:
   group: meta-review-${{ github.ref }}
   cancel-in-progress: true
@@ -14,19 +17,24 @@ jobs:
     # Phase 1 experiment, read-only reviewer running side-by-side with Codex.
     # Uses `pull_request` (not `pull_request_target`) so fork PRs run with a
     # read-only token and cannot reach secrets for write access.
-    runs-on: ubuntu-latest
+    #
+    # Skipped on close/merge (cancel-only run), on drafts (review on ready,
+    # like Codex), and when the secret is missing (fork PRs get an empty
+    # secret, and failing there would turn every fork PR red).
+    if: github.event.action != 'closed' && github.event.pull_request.draft == false && secrets.META_MODEL_API_KEY != ''
+    runs-on: ubuntu-24.04-arm
+    # Backstop a hang instead of holding the runner for the 6-hour default.
+    timeout-minutes: 15
     permissions:
-      id-token: write
       contents: read
       pull-requests: write # to post the review comment
-      issues: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0 # full history so the agent can diff against base
           persist-credentials: false
 
-      - uses: anomalyco/opencode/github@latest
+      - uses: anomalyco/opencode/github@77fc88c8ade8e5a620ebbe1197f3a572d29ae91a # latest
         env:
           META_MODEL_API_KEY: ${{ secrets.META_MODEL_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

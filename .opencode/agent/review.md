@@ -71,7 +71,7 @@ print environment variables, secrets, or tokens. Never modify files under
 4. **Cross-Package Sync** - changes ripple across languages. Flag missing
    mirrors: `rs/moq-net` wire or API without `js/net`, `doc/concept`, and the
    `moq-lite` draft when the wire spec changes; `rs/hang` without `js/hang`,
-   docs, and the `hang` draft; likewise `rs/moq-auth` with `js/auth`,
+   docs, and the `hang` draft; likewise `rs/moq-token` with `js/token`,
    relay config or behavior with `doc/bin/relay/`, CLI changes with
    `doc/bin/cli.md` and every example invocation repo-wide. Any wire-format
    change needs its matching IETF draft update in the same PR.
