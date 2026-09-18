@@ -272,7 +272,8 @@ prepare_go() {
         go mod edit \
             -replace="github.com/moq-dev/moq-go=$wrapper_pkg" \
             -replace="github.com/moq-dev/moq-go-ffi=$ffi_pkg"
-        go build -o "$GO_SMOKE" .
+        # Scratch copy is outside the git tree; stamping VCS info fails in a worktree.
+        go build -buildvcs=false -o "$GO_SMOKE" .
     ) >"$HARNESS_RUN/go-build.log" 2>&1; then
         mark_broken go "go build failed"
         sed 's/^/        /' "$HARNESS_RUN/go-build.log" >&2 || true
