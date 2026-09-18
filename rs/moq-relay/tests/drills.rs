@@ -260,7 +260,7 @@ async fn cancel_under_backpressure_releases_the_reader() {
 	let url = relay.url();
 
 	let publisher = moq_tokio::origin::spawn(Hop::random());
-	let mut broadcast = publisher.create_broadcast("live").expect("create broadcast");
+	let broadcast = publisher.create_broadcast("live").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
 	let mut track = broadcast.create_track(TRACK, None).expect("create track");
 	let publish_session = tokio::time::timeout(
@@ -380,7 +380,7 @@ async fn relay_killed_mid_group_aborts_then_resumes() {
 	let url = relay.url();
 
 	let publisher = moq_tokio::origin::spawn(Hop::random());
-	let mut broadcast = publisher.create_broadcast("live").expect("create broadcast");
+	let broadcast = publisher.create_broadcast("live").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
 	let mut track = broadcast.create_track(TRACK, None).expect("create track");
 	let mut publish_loop = client(&url).publish(publisher.consume()).expect("no connect url");
@@ -496,7 +496,7 @@ async fn interrupted_publisher_republishes_new_content() {
 	let mut announced = subscribed.announced();
 
 	let first = moq_tokio::origin::spawn(Hop::random());
-	let mut broadcast = first.create_broadcast("live").expect("create broadcast");
+	let broadcast = first.create_broadcast("live").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
 	let mut track = broadcast.create_track(TRACK, None).expect("create track");
 	let first_session = tokio::time::timeout(
@@ -535,7 +535,7 @@ async fn interrupted_publisher_republishes_new_content() {
 
 	// Restore: the same name, a new publisher, different content.
 	let second = moq_tokio::origin::spawn(Hop::random());
-	let mut broadcast = second.create_broadcast("live").expect("re-create broadcast");
+	let broadcast = second.create_broadcast("live").expect("re-create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
 	let mut track = broadcast.create_track(TRACK, None).expect("re-create track");
 	let second_session = tokio::time::timeout(
@@ -574,7 +574,7 @@ async fn expect_announce(announced: &mut moq_net::announce::Consumer, path: &str
 			.await
 			.unwrap_or_else(|_| panic!("{who}: no announcement change within {TIMEOUT:?}"))
 			.unwrap_or_else(|| panic!("{who}: the announcement stream closed"));
-		if update.pattern.as_prefix().is_some_and(|prefix| prefix == path) && update.active == want {
+		if update.path.as_str() == path && update.kind.is_active() == want {
 			return;
 		}
 	}
@@ -611,7 +611,7 @@ async fn no_publisher_never_delivers() {
 
 	let mut announced = subscribed.announced();
 	if let Ok(update) = tokio::time::timeout(quiet, announced.next()).await {
-		let path = update.map(|update| update.pattern.to_string());
+		let path = update.map(|update| update.path.to_string());
 		panic!("the announcement stream reported {path:?} with no publisher");
 	}
 

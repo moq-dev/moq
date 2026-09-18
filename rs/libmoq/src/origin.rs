@@ -100,14 +100,10 @@ impl Origin {
 			};
 
 			// Hold the lock only to buffer the announcement; release it before the callback.
-			let announced_id = State::lock().origin.announced.insert((
-				update
-					.pattern
-					.as_prefix()
-					.unwrap_or_else(|| update.pattern.as_str())
-					.to_owned(),
-				update.active,
-			))?;
+			let announced_id = State::lock()
+				.origin
+				.announced
+				.insert((update.path.to_string(), update.kind.is_active()))?;
 			callback.call(announced_id);
 		}
 	}
@@ -115,8 +111,8 @@ impl Origin {
 	pub fn announced_info(&self, announced: Id, dst: &mut moq_announce_update) -> Result<(), Error> {
 		let announced = self.announced.get(announced).ok_or(Error::AnnouncementNotFound)?;
 		*dst = moq_announce_update {
-			pattern: announced.0.as_str().as_ptr() as *const c_char,
-			pattern_len: announced.0.len(),
+			path: announced.0.as_str().as_ptr() as *const c_char,
+			path_len: announced.0.len(),
 			active: announced.1,
 		};
 		Ok(())
@@ -283,17 +279,17 @@ impl Origin {
 		Ok(origin.create_broadcast(path)?)
 	}
 
-	/// Advertise `pattern` and serve requests beneath it, delivering each as a
+	/// Advertise `prefix` and serve requests beneath it, delivering each as a
 	/// broadcast-request handle via `on_request`.
 	pub fn dynamic(
 		&mut self,
 		origin: Id,
-		pattern: moq_net::Pattern,
+		prefix: &str,
 		route: moq_net::origin::Route,
 		on_request: OnStatus,
 	) -> Result<Id, Error> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
-		let inner = origin.dynamic(pattern, route)?;
+		let inner = origin.dynamic(prefix, route)?;
 		let channel = oneshot::channel();
 		let id = self.dynamic.insert(Some(DynamicEntry {
 			inner: Some(inner),

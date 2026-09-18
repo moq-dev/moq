@@ -51,9 +51,8 @@ let session = client.with_subscriber(origin.clone()).with_publisher(&origin).con
 let consumer = origin.consume();
 let mut announced = consumer.announced();
 while let Some(update) = announced.next().await {
-    if !update.active { continue }
-    let Some(prefix) = update.pattern.as_prefix() else { continue };
-    let broadcast = consumer.request_broadcast(prefix).await?;
+    if !update.kind.is_active() { continue }
+    let broadcast = consumer.request_broadcast(&update.path).await?;
     let catalog = broadcast
         .track(hang::Catalog::DEFAULT_NAME)?
         .subscribe(hang::Catalog::default_subscription())
@@ -68,7 +67,7 @@ let mut broadcast = origin.create_broadcast("my-stream.hang")?;
 // moq-mux (from a container) or moq-video / moq-audio (from a device) fill it.
 broadcast.announce(Default::default())?;
 // The route retracts on `unannounce()` or when the broadcast ends. To serve a whole
-// subtree on demand instead, `origin.dynamic("room/**".parse()?, Default::default())?` yields
+// subtree on demand instead, `origin.dynamic("room", Default::default())?` yields
 // each requested path for the application to accept or reject.
 ```
 

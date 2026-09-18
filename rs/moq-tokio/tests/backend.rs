@@ -119,11 +119,11 @@ async fn connect_test(config: ConnectTest<'_>) {
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = moq_tokio::origin::spawn(Hop::random());
-	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
 	broadcast
 		.announce(Default::default())
 		.expect("failed to create broadcast");
-	let mut track = broadcast.create_track("video", None).expect("failed to create track");
+	let track = broadcast.create_track("video", None).expect("failed to create track");
 
 	let mut group = track.append_group().expect("failed to append group");
 	group
@@ -192,8 +192,8 @@ async fn connect_test(config: ConnectTest<'_>) {
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
-	assert_eq!(update.pattern.as_prefix().expect("prefix announcement"), "test");
-	assert!(update.active, "expected announce, got retraction");
+	assert_eq!(update.path.as_str(), "test");
+	assert!(update.kind.is_active(), "expected announce, got retraction");
 	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
 		.await
 		.expect("request timed out")
@@ -710,11 +710,11 @@ async fn iroh_connect() {
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = moq_tokio::origin::spawn(Hop::random());
-	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
 	broadcast
 		.announce(Default::default())
 		.expect("failed to create broadcast");
-	let mut track = broadcast.create_track("video", None).expect("failed to create track");
+	let track = broadcast.create_track("video", None).expect("failed to create track");
 
 	let mut group = track.append_group().expect("failed to append group");
 	group
@@ -805,8 +805,8 @@ async fn iroh_connect() {
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
-	assert_eq!(update.pattern.as_prefix().expect("prefix announcement"), "test");
-	assert!(update.active, "expected announce, got retraction");
+	assert_eq!(update.path.as_str(), "test");
+	assert!(update.kind.is_active(), "expected announce, got retraction");
 	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
 		.await
 		.expect("request timed out")

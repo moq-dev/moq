@@ -304,7 +304,7 @@ pub(crate) fn produce_origin() -> moq_net::origin::Producer {
 #[cfg(test)]
 pub(crate) fn announced(broadcast: &moq_net::broadcast::Consumer) -> Source {
 	let origin = produce_origin();
-	let dynamic = origin.dynamic(moq_net::Pattern::all(), Default::default()).unwrap();
+	let dynamic = origin.dynamic("", Default::default()).unwrap();
 	let served = broadcast.clone();
 	tokio::spawn(async move {
 		while let Ok(request) = dynamic.requested_broadcast().await {
@@ -333,7 +333,7 @@ mod tests {
 	#[tokio::test]
 	async fn binding_retains_a_pending_request_across_cancelled_and_repeated_reads() {
 		let origin = produce_origin();
-		let dynamic = origin.dynamic(moq_net::Pattern::all(), Default::default()).unwrap();
+		let dynamic = origin.dynamic("", Default::default()).unwrap();
 		let source = Source::new(origin.consume(), "live");
 		let binding = source.bind(None).unwrap();
 		let request = dynamic.requested_broadcast().await.unwrap();
@@ -399,7 +399,7 @@ mod tests {
 	#[tokio::test]
 	async fn subscribe_track_resolves_catalog_broadcast() {
 		let origin = produce_origin();
-		let mut producer = origin.create_broadcast("a/pub").unwrap();
+		let producer = origin.create_broadcast("a/pub").unwrap();
 		producer.announce(Default::default()).unwrap();
 		// The track must exist for the subscription to resolve (SUBSCRIBE_OK).
 		let _video = producer.create_track("video", None).unwrap();
@@ -415,7 +415,7 @@ mod tests {
 	#[tokio::test]
 	async fn self_reference_targets_catalog_broadcast() {
 		let origin = produce_origin();
-		let mut producer = origin.create_broadcast("a/pub").unwrap();
+		let producer = origin.create_broadcast("a/pub").unwrap();
 		producer.announce(Default::default()).unwrap();
 		let _video = producer.create_track("video", None).unwrap();
 		settle().await;
@@ -434,12 +434,12 @@ mod tests {
 	async fn escaping_reference_is_rejected() {
 		let origin = produce_origin();
 
-		let mut catalog = origin.create_broadcast("a/pub").unwrap();
+		let catalog = origin.create_broadcast("a/pub").unwrap();
 		catalog.announce(Default::default()).unwrap();
 		let _catalog_video = catalog.create_track("video", None).unwrap();
 
 		// The broadcast an escaping reference would land on if it clamped at the root.
-		let mut clamped = origin.create_broadcast("elsewhere").unwrap();
+		let clamped = origin.create_broadcast("elsewhere").unwrap();
 		clamped.announce(Default::default()).unwrap();
 		let _clamped_video = clamped.create_track("video", None).unwrap();
 		settle().await;
@@ -524,7 +524,7 @@ mod tests {
 		let _catalog = origin.create_broadcast("a/pub").unwrap();
 		_catalog.announce(Default::default()).unwrap();
 
-		let mut referenced = origin.create_broadcast("a/source").unwrap();
+		let referenced = origin.create_broadcast("a/source").unwrap();
 		referenced.announce(Default::default()).unwrap();
 		let _video = referenced.create_track("video", None).unwrap();
 		settle().await;
@@ -546,7 +546,7 @@ mod tests {
 		let _catalog = origin.create_broadcast("a/source/transcode").unwrap();
 		_catalog.announce(Default::default()).unwrap();
 
-		let mut referenced = origin.create_broadcast("a/source").unwrap();
+		let referenced = origin.create_broadcast("a/source").unwrap();
 		referenced.announce(Default::default()).unwrap();
 		let _video = referenced.create_track("video", None).unwrap();
 		settle().await;
@@ -566,7 +566,7 @@ mod tests {
 		let _catalog = origin.create_broadcast("top").unwrap();
 		_catalog.announce(Default::default()).unwrap();
 
-		let mut root = origin.create_broadcast("").unwrap();
+		let root = origin.create_broadcast("").unwrap();
 		root.announce(Default::default()).unwrap();
 		let _video = root.create_track("video", None).unwrap();
 		settle().await;

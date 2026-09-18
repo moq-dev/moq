@@ -49,8 +49,8 @@ struct Ctx {
 
 /// Build a fresh, empty group via the public producer path.
 fn fresh_group() -> Ctx {
-	let mut broadcast = broadcast::Producer::new(broadcast::Info::default());
-	let mut track = broadcast.create_track("bench", None).unwrap();
+	let broadcast = broadcast::Producer::new(broadcast::Info::default());
+	let track = broadcast.create_track("bench", None).unwrap();
 	let group = track.append_group().unwrap();
 	Ctx {
 		_broadcast: broadcast,
@@ -197,8 +197,8 @@ struct TrackCtx {
 
 /// Build a track holding N cached groups, each with a single small frame.
 fn filled_track(n: usize, payload: &Bytes) -> TrackCtx {
-	let mut broadcast = broadcast::Producer::new(broadcast::Info::default());
-	let mut track = broadcast.create_track("bench", None).unwrap();
+	let broadcast = broadcast::Producer::new(broadcast::Info::default());
+	let track = broadcast.create_track("bench", None).unwrap();
 	for _ in 0..n {
 		let mut group = track.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
@@ -272,7 +272,7 @@ fn bench_track_recv(c: &mut Criterion) {
 					assert_eq!(edge.sequence, n as u64 - 1);
 					(ctx, subscriber)
 				},
-				|(mut ctx, mut subscriber)| {
+				|(ctx, mut subscriber)| {
 					for _ in 0..LIVE_BATCH {
 						let mut group = ctx.track.append_group().unwrap();
 						group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();

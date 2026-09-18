@@ -11,32 +11,37 @@ import type { Table as OriginTable } from "./origin.js";
 import * as Path from "./path.js";
 
 /**
- * A route announcement or retraction.
+ * What an {@link Update} reports about its path.
  *
- * A route claims that paths under {@link pattern} can be served; it carries no
- * broadcast. By convention a publisher announces each broadcast's exact path,
- * so enumerating routes enumerates broadcasts; resolve one with the origin's
- * `request(path)`.
+ * @public
+ */
+export type Kind = "announced" | "updated" | "retracted";
+
+/**
+ * A route announcement, update, or retraction.
+ *
+ * A route claims that {@link path} and every path beneath it can be served; it
+ * carries no broadcast. By convention a publisher announces each broadcast's exact
+ * path, so enumerating routes enumerates broadcasts; resolve one with the origin's
+ * `request(path)`. Narrow with a {@link Path.Pattern} locally to follow a subset.
  *
  * @public
  */
 export interface Update {
 	/**
-	 * What the route covers, relative to the origin (for a session, its URL path). A
-	 * route claimed above the scope passed to `announced()` is clamped to that scope.
+	 * The prefix the route covers, relative to the origin (for a session, its URL path).
+	 * A route claimed above the scope passed to `announced()` is clamped to that scope.
 	 */
-	pattern: Path.Pattern;
-	/** True while the route is advertised, false when it was retracted. */
-	active: boolean;
-	/** Hops and cost of an active advertisement; omitted on a retraction. */
-	route?: Route;
-	/**
-	 * Whether the route passed through an anonymous hop (id 0) at any depth.
-	 *
-	 * Present on active announcements from a session. An anonymous route ranks
-	 * below every fully identified one; this client does not rank routes itself.
-	 */
-	anonymous?: boolean;
+	path: Path.Valid;
+	/** Whether the path was announced, re-priced, or retracted. */
+	kind: Kind;
+	/** Hops and cost of the route; on a retraction, its last advertised values. */
+	route: Route;
+}
+
+/** Whether a route covers the path after an update of this {@link Kind}. */
+export function isActive(kind: Kind): boolean {
+	return kind !== "retracted";
 }
 
 /** Reactive backing state shared by announcement producers and consumers. */
@@ -115,6 +120,15 @@ export class Consumer {
 
 	static {
 		makeConsumer = (state) => new Consumer(state);
+	}
+
+	/** The announcements as they arrive, until the stream closes. */
+	async *[Symbol.asyncIterator](): AsyncGenerator<Update, void, undefined> {
+		for (;;) {
+			const update = await this.next();
+			if (!update) return;
+			yield update;
+		}
 	}
 
 	/** Returns the next announcement. */
@@ -296,11 +310,11 @@ export class Broadcast {
 						const event = await Promise.race([effect.cancel, announced.next()]);
 						if (!event) break;
 
-						// Prefix-shaped claims covering this path clamp to its subtree. A literal
-						// PATTERN ad at the same path is not prefix-shaped and is skipped.
-						if (!event.pattern.equals(scope)) continue;
+						// Routes covering this path clamp to it; one beneath it is a different
+						// broadcast and is skipped.
+						if (event.path !== path) continue;
 
-						if (event.active) {
+						if (isActive(event.kind)) {
 							// A live subscription survives a redundant (re-)announce; only replace a dead one.
 							if (current && current.closed.peek() === undefined) continue;
 							current?.close();
@@ -369,10 +383,10 @@ export class Broadcast {
 				const event = await Promise.race([effect.cancel, announced.next()]);
 				if (!event) break;
 
-				// Prefix-shaped claims covering this path clamp to its subtree. A literal
-				// PATTERN ad at the same path is not prefix-shaped and is skipped.
-				if (!event.pattern.equals(scope)) continue;
-				live.set(event.active);
+				// Routes covering this path clamp to it; one beneath it is a different
+				// broadcast and is skipped.
+				if (event.path !== this.path) continue;
+				live.set(isActive(event.kind));
 			}
 
 			// The origin closed, or this run was torn down. Either way nothing routes the path.

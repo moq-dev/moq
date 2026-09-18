@@ -35,14 +35,12 @@ pub use time::*;
 
 /// Publishing broadcasts, announcing routes, and consuming both through an origin.
 pub mod origin {
-	pub use super::origin_impl::{
-		Config, Consumer, Cost, DRAIN_COST, Driver, Dynamic, MAX_COST, Pending, Producer, Request, Route, Run,
-	};
+	pub use super::origin_impl::{Config, Consumer, Cost, Driver, Dynamic, Pending, Producer, Request, Route, Run};
 }
 
 /// Subscribing to route (un)announcements from an origin.
 pub mod announce {
-	pub use super::origin_impl::{AnnounceConsumer as Consumer, AnnounceUpdate as Update};
+	pub use super::origin_impl::{AnnounceConsumer as Consumer, AnnounceKind as Kind, AnnounceUpdate as Update};
 }
 
 // Hop identity and the `Consume` conversion trait aren't part of a role

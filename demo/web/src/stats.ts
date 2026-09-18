@@ -131,13 +131,11 @@ discovery.run((effect) => {
 		for (;;) {
 			const entry = await Promise.race([effect.cancel, announced.next()]);
 			if (!entry) break;
-			const covered = entry.pattern.asPrefix();
-			if (covered === undefined) continue;
-			const path = Net.Path.from(covered);
+			const path = entry.path;
 			const node = Net.Path.stripPrefix(prefix, path);
 			if (!node) continue;
 
-			if (entry.active) {
+			if (Net.Announce.isActive(entry.kind)) {
 				if (subs.has(node)) continue;
 				const ne = new Signals.Effect();
 				subs.set(node, ne);

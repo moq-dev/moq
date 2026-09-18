@@ -535,7 +535,7 @@ mod tests {
 		catalog_broadcast
 			.announce(Default::default())
 			.expect("announce catalog");
-		let mut media_broadcast = pair.pub_origin.create_broadcast("room/source").expect("media");
+		let media_broadcast = pair.pub_origin.create_broadcast("room/source").expect("media");
 		media_broadcast.announce(Default::default()).expect("announce media");
 
 		let mut catalog = moq_mux::catalog::Producer::new(&mut catalog_broadcast).unwrap();

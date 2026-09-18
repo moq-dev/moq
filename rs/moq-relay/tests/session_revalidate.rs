@@ -345,9 +345,11 @@ async fn path_and_cidr_select_a_subset() {
 
 	// Live tcp sessions all come from 127.0.0.1; the CIDR selector is proven
 	// with the request the server would have seen from other addresses.
-	let mut net = Request::new("net", "test-relay", moq_auth::Transport::Tcp, "/cidr");
+	let mut net = Request::new("test-relay", moq_auth::Transport::Tcp, "/cidr");
+	net.id = "net".into();
 	net.remote = Some("203.0.113.9:1".parse().unwrap());
-	let mut other_net = Request::new("out", "test-relay", moq_auth::Transport::Tcp, "/cidr");
+	let mut other_net = Request::new("test-relay", moq_auth::Transport::Tcp, "/cidr");
+	other_net.id = "out".into();
 	other_net.remote = Some("198.51.100.2:1".parse().unwrap());
 	let _net = fixture.sessions.register(net);
 	let _out = fixture.sessions.register(other_net);

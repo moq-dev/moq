@@ -30,14 +30,14 @@ func (o *OriginProducer) Consume() *OriginConsumer {
 	return &OriginConsumer{inner: o.inner.Consume()}
 }
 
-// Dynamic advertises pattern and serves the requests beneath it.
+// Dynamic advertises prefix and serves the requests beneath it.
 //
-// pattern is in the path Pattern dialect; a prefix is spelled "foo/**".
-// Until wildcard advertisements land, anything but a prefix-shaped pattern
-// is refused. Create, Dynamic if tracks are served on demand, populate, then
+// A route claims prefix and every path beneath it ("" claims every path). A
+// service that only serves some of them rejects the rest as they are requested.
+// Create, Dynamic if tracks are served on demand, populate, then
 // [BroadcastProducer.Announce].
-func (o *OriginProducer) Dynamic(pattern string, route Route) (*OriginDynamic, error) {
-	inner, err := o.inner.Dynamic(pattern, route)
+func (o *OriginProducer) Dynamic(prefix string, route Route) (*OriginDynamic, error) {
+	inner, err := o.inner.Dynamic(prefix, route)
 	if err != nil {
 		return nil, err
 	}
@@ -152,20 +152,20 @@ func (o *OriginConsumer) RequestBroadcast(ctx context.Context, path string) (*Br
 }
 
 // AnnounceUpdate is a route announcement or retraction. A route claims that
-// paths under Pattern can be served; it carries no broadcast. Resolve a specific
+// Path and every path beneath it can be served; it carries no broadcast. Resolve a specific
 // path with [OriginConsumer.RequestBroadcast]. By convention a publisher
 // announces each broadcast's exact path.
 type AnnounceUpdate struct {
 	inner *ffi.MoqAnnounceUpdate
 }
 
-// Pattern is the announced route's pattern, relative to the announced prefix.
-func (a *AnnounceUpdate) Pattern() string {
-	return a.inner.Pattern()
+// Path is the prefix the route covers, relative to the announced prefix.
+func (a *AnnounceUpdate) Path() string {
+	return a.inner.Path()
 }
 
 // Active reports whether the route is active (true) or was retracted (false).
-// A repeated active announcement for the same pattern is a metadata update.
+// A repeated active announcement for the same path is a metadata update.
 func (a *AnnounceUpdate) Active() bool {
 	return a.inner.Active()
 }

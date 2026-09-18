@@ -191,7 +191,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn rejects_malformed_records() {
-		let mut broadcast = broadcast::Info::new().produce();
+		let broadcast = broadcast::Info::new().produce();
 		let mut track = broadcast.create_track(TRACK, info()).unwrap();
 		let mut subscriber = Subscriber::subscribe(&broadcast.consume()).await.unwrap();
 		track

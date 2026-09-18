@@ -673,7 +673,6 @@ async fn serve_connection(
 		}
 	};
 	let path = if path.is_empty() { "/".to_string() } else { path };
-	let bytes = moq_auth::Counters::default();
 	let mut registration = None;
 	let lease = if cluster::Cluster::is_lan_path(&path) {
 		match cluster::Cluster::lan_credential(&path) {
@@ -712,12 +711,11 @@ async fn serve_connection(
 		}
 
 		let auth = serve.auth.clone();
-		let counters = bytes.clone();
 		let sessions = serve.sessions.clone();
 		match serve
 			.tokio
 			.spawn(async move {
-				let lease = auth.admit(auth_request.clone(), counters).await?;
+				let lease = auth.admit(auth_request.clone()).await?;
 				Ok::<_, crate::auth::Error>((lease, sessions.register(auth_request)))
 			})
 			.await
@@ -772,7 +770,7 @@ async fn serve_connection(
 	let shutdown = serve.shutdown.clone();
 	serve.tokio.spawn(async move {
 		let _node_connection = node_connection;
-		if let Err(err) = crate::connection::supervise(session, lease, bytes, shutdown, registration).await {
+		if let Err(err) = crate::connection::supervise(session, lease, shutdown, registration).await {
 			tracing::warn!(id, %err, "connection closed");
 		}
 	});

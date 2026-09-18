@@ -54,21 +54,16 @@ pub struct Request {
 }
 
 impl Request {
-	/// A `connect` for a fresh session with a random id.
+	/// A `connect` for a fresh session, minting a random 128-bit hex id.
 	///
 	/// Set the remaining fields on the returned value; the struct is
 	/// `#[non_exhaustive]`, so this stays the way to build one as fields are added.
-	#[cfg(feature = "client")]
-	pub fn connect(node: impl Into<String>, transport: Transport, path: impl Into<String>) -> Self {
-		use rand::RngExt;
-		let id = hex::encode(rand::rng().random::<[u8; 16]>());
-		Self::new(id, node, transport, path)
-	}
-
-	/// A `connect` for a session whose id the caller minted.
-	pub fn new(id: impl Into<String>, node: impl Into<String>, transport: Transport, path: impl Into<String>) -> Self {
+	pub fn new(node: impl Into<String>, transport: Transport, path: impl Into<String>) -> Self {
+		let mut bytes = [0u8; 16];
+		aws_lc_rs::rand::fill(&mut bytes).expect("failed to generate a session id");
+		let id: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
 		Self {
-			id: id.into(),
+			id,
 			event: Event::Connect,
 			node: node.into(),
 			transport,
@@ -162,6 +157,9 @@ pub enum Role {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Peer {
 	/// The first SAN DNS name, else the CN, else the fingerprint, so it is never empty.
+	///
+	/// Those three sources fold into one string a server cannot tell apart; match on
+	/// [`fingerprint`](Self::fingerprint) when identity must be exact.
 	pub name: String,
 	/// SHA-256 of the leaf certificate, hex.
 	pub fingerprint: String,
@@ -186,7 +184,8 @@ mod tests {
 	use super::*;
 
 	fn request() -> Request {
-		let mut request = Request::new("00ff", "relay-1", Transport::Quic, "/demo/room");
+		let mut request = Request::new("relay-1", Transport::Quic, "/demo/room");
+		request.id = "00ff".into();
 		request.remote = Some("203.0.113.9:4433".parse().unwrap());
 		request.local = Some("[::1]:443".parse().unwrap());
 		request.server_name = Some("relay.example".into());
@@ -235,7 +234,8 @@ mod tests {
 	/// one wire shape.
 	#[test]
 	fn end_serializes_to_the_cross_language_vector() {
-		let mut request = Request::new("00ff", "relay-1", Transport::WebSocket, "/demo/room");
+		let mut request = Request::new("relay-1", Transport::WebSocket, "/demo/room");
+		request.id = "00ff".into();
 		request.remote = Some("203.0.113.9:4433".parse().unwrap());
 		request.query = Some("jwt=abc".into());
 		request.event = Event::End {
@@ -251,10 +251,19 @@ mod tests {
 
 	#[test]
 	fn a_unix_session_has_no_addresses() {
-		let request = Request::new("00", "relay-1", Transport::Unix, "");
+		let request = Request::new("relay-1", Transport::Unix, "");
 		let json = serde_json::to_value(&request).unwrap();
 		assert!(json.get("remote").is_none());
 		assert_eq!(json["transport"], "unix");
 		assert_eq!(serde_json::from_value::<Request>(json).unwrap(), request);
+	}
+
+	#[test]
+	fn new_mints_a_128_bit_hex_id() {
+		let a = Request::new("relay-1", Transport::Quic, "/");
+		let b = Request::new("relay-1", Transport::Quic, "/");
+		assert_eq!(a.id.len(), 32);
+		assert!(a.id.chars().all(|c| c.is_ascii_hexdigit()), "{}", a.id);
+		assert_ne!(a.id, b.id);
 	}
 }

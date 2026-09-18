@@ -56,9 +56,8 @@ pub(crate) async fn serve_ws(
 	request.remote = Some(remote.0);
 	request.alpn = ws.selected_protocol().and_then(|p| p.to_str().ok()).map(str::to_owned);
 	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| auth::peer(&identity));
-	let bytes = moq_auth::Counters::default();
 	let session_id = request.id.clone();
-	let lease = state.auth.admit(request.clone(), bytes.clone()).await?;
+	let lease = state.auth.admit(request.clone()).await?;
 	let token = lease.token();
 	let publish = state.cluster.publisher(token);
 	let subscribe = state.cluster.subscriber(token);
@@ -91,7 +90,7 @@ pub(crate) async fn serve_ws(
 			shutdown: state.shutdown.clone(),
 			socket_stats: socket_stats.map(|Extension(s)| s),
 		};
-		let _ = handle_socket(socket, session, lease, bytes, Some((state.sessions.clone(), request))).await;
+		let _ = handle_socket(socket, session, lease, Some((state.sessions.clone(), request))).await;
 	}))
 }
 
@@ -121,7 +120,6 @@ async fn handle_socket<T>(
 	socket: T,
 	session: SessionInputs,
 	mut lease: auth::Lease,
-	bytes: moq_auth::Counters,
 	pending: Option<(crate::session::Registry, moq_auth::Request)>,
 ) -> anyhow::Result<()>
 where
@@ -190,11 +188,6 @@ where
 	// be serviced, and only now does the session appear in the live table.
 	let registration = pending.map(|(sessions, request)| sessions.register(request));
 
-	let meter = |session: &moq_net::Session| {
-		let stats = session.stats();
-		bytes.add_sent(stats.bytes_sent.unwrap_or_default());
-		bytes.add_received(stats.bytes_received.unwrap_or_default());
-	};
 	loop {
 		let nudged = async {
 			match &registration {
@@ -204,11 +197,13 @@ where
 		};
 		tokio::select! {
 			res = &mut driver => {
-				meter(&session);
-				lease.close(match &res {
-					Ok(()) => "closed".to_string(),
-					Err(err) => err.to_string(),
-				});
+				lease.close(
+					match &res {
+						Ok(()) => "closed".to_string(),
+						Err(err) => err.to_string(),
+					},
+					crate::connection::session_bytes(&session),
+				);
 				return res.map_err(Into::into);
 			}
 			why = lease.ended() => {
@@ -216,8 +211,7 @@ where
 				session.abort(moq_net::Error::Unauthorized);
 				// Drive the teardown so the close reaches the peer.
 				let res = driver.await.map_err(Into::into);
-				meter(&session);
-				lease.close(why);
+				lease.close(why, crate::connection::session_bytes(&session));
 				return res;
 			}
 			_ = shutdown.started() => {
@@ -231,8 +225,7 @@ where
 					res = &mut driver => res.map_err(Into::into),
 					_ = &mut drain => driver.await.map_err(Into::into),
 				};
-				meter(&session);
-				lease.close("shutdown");
+				lease.close("shutdown", crate::connection::session_bytes(&session));
 				return res;
 			}
 			() = nudged => lease.revalidate(),
@@ -959,7 +952,6 @@ mod tests {
 			Pipe::new(server_incoming, server_to_client, frozen.clone()),
 			session,
 			lease,
-			moq_auth::Counters::default(),
 			None,
 		));
 

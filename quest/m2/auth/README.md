@@ -16,7 +16,9 @@ This questline adds an AUTH exchange to both wires: one stream per token, a
 grant per token, the union of every accepted token as the session's scope,
 and a loud failure when a publish can never be honored. It ends with the
 credential able to travel in band, while the URL keeps working for every peer
-that predates the stream.
+that predates the stream. Direct peer sessions need a second credential: a
+relay-signed, hop-bound grant that a browser can verify without a signing
+key, which HMAC relay keys cannot provide.
 
 ## Plan
 
@@ -100,6 +102,8 @@ ALPN.
 - [Token in band](/quest/m2/auth/token-in-band.md) - the credential can leave
   the URL: a session starts on what the URL carried and its AUTH streams add
   the rest, with the URL kept for peers below lite-06
+- [Peer grants](/quest/m2/auth/peer-grant.md) - the relay issues a hop-bound,
+  asymmetrically signed grant a browser can verify; HS256 keys issue none
 
 ## Related
 
@@ -108,3 +112,4 @@ ALPN.
 - [Pattern interest](/quest/m2/path-patterns/interest.md) - moves AUTH's legacy wire prefixes to patterns along with ANNOUNCE_REQUEST
 - [Expiring media grants](/quest/m2/processor/grant-lease.md) - a worker's
   lease renewal is a new in-band token
+- [P2P](/quest/m2/p2p/README.md) - the first consumer of hop-bound peer grants

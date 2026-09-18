@@ -336,7 +336,7 @@ impl<C: Container> Producer<C> {
 		if let Some(group) = self.group.as_mut() {
 			self.container.finish_group(group, tail_end)?;
 		}
-		if let Some(mut group) = self.group.take() {
+		if let Some(group) = self.group.take() {
 			group.finish()?;
 		}
 		if let Some(end) = self.end {
@@ -646,7 +646,7 @@ mod tests {
 			.unwrap();
 
 		fn video_track() -> (moq_net::broadcast::Producer, moq_net::track::Producer) {
-			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let broadcast = moq_net::broadcast::Info::new().produce();
 			let track = broadcast
 				.create_track("t", hang::container::track_info(hang::catalog::PRIORITY.video))
 				.unwrap();

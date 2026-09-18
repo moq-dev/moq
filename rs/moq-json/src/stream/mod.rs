@@ -270,7 +270,7 @@ mod test {
 	/// this parks forever without the eager check. Written by hand because this producer never rolls.
 	#[test]
 	fn a_second_group_is_reported_while_the_first_is_open() {
-		let mut track = moq_net::broadcast::Info::new()
+		let track = moq_net::broadcast::Info::new()
 			.produce()
 			.create_track("test", None)
 			.unwrap();

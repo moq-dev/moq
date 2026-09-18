@@ -291,20 +291,12 @@ impl Producer {
 		}
 	}
 
-	/// Remove a track from the lookup.
-	///
-	/// Removing a track does not make its minted name available to [`Self::unique_name`] again.
-	pub fn remove_track(&mut self, name: &str) -> Result<(), Error> {
-		self.state.lock().tracks.remove(name).ok_or(Error::NotFound)?;
-		Ok(())
-	}
-
 	/// Produce a new track and insert it into the broadcast.
 	///
 	/// Pass a name and an optional [`track::Info`], so a bare name works:
 	/// `create_track("video", None)`.
 	pub fn create_track(
-		&mut self,
+		&self,
 		name: impl Into<Arc<str>>,
 		info: impl Into<Option<track::Info>>,
 	) -> Result<track::Producer, Error> {
@@ -342,7 +334,7 @@ impl Producer {
 	/// Subscribers wait on the name until it is accepted, so a reservation the producer
 	/// ends up never filling has to be dropped or rejected. Ending the broadcast
 	/// ([`Self::finish`] or [`Self::abort`]) resolves whatever is left.
-	pub fn reserve_track(&mut self, name: impl Into<Arc<str>>) -> Result<track::Request, Error> {
+	pub fn reserve_track(&self, name: impl Into<Arc<str>>) -> Result<track::Request, Error> {
 		let request = track::Request::new(self.info.clone(), name).with_stats(self.stats.clone());
 		self.state.lock().insert_track(request.weak())?;
 		Ok(request)
@@ -350,12 +342,8 @@ impl Producer {
 
 	/// Create a track with a unique name using the given suffix.
 	///
-	/// Uses [`Self::unique_name`]; minted names are never reused, even after removal or closure.
-	pub fn unique_track(
-		&mut self,
-		suffix: &str,
-		info: impl Into<Option<track::Info>>,
-	) -> Result<track::Producer, Error> {
+	/// Uses [`Self::unique_name`]; minted names are never reused, even after closure.
+	pub fn unique_track(&self, suffix: &str, info: impl Into<Option<track::Info>>) -> Result<track::Producer, Error> {
 		let name = self.unique_name(suffix);
 		self.create_track(name, info)
 	}
@@ -365,7 +353,7 @@ impl Producer {
 	/// Returns `{id}{suffix}` with an increasing ID shared across all suffixes and
 	/// producer clones in this broadcast, skipping names already in the lookup.
 	/// A digit-leading suffix gets a `-` separator so it cannot be confused with the ID.
-	/// Minted names are never reused, even if no track is created or it is removed or closed.
+	/// Minted names are never reused, even if no track is created or it is closed.
 	/// Explicit calls to [`Self::create_track`] can still reuse names.
 	///
 	/// # Panics
@@ -453,7 +441,7 @@ impl Producer {
 	/// Borrows rather than consumes, matching [`track::Producer::finish`]. Finishing
 	/// declares the end, so it must not depend on the caller also surrendering the
 	/// handle.
-	pub fn finish(&mut self) {
+	pub fn finish(&self) {
 		{
 			let mut state = self.state.lock();
 			state.closing = true;
@@ -590,7 +578,7 @@ impl SourceGuard {
 	/// End the source deliberately: the origin detaches it immediately,
 	/// unannouncing the path if it was the last.
 	pub fn finish(mut self) {
-		if let Some(mut producer) = self.producer.take() {
+		if let Some(producer) = self.producer.take() {
 			producer.finish();
 		}
 	}
@@ -1099,18 +1087,17 @@ mod test {
 
 	#[test]
 	fn unique_names_are_never_reused() {
-		let mut producer = Info::new().produce();
+		let producer = Info::new().produce();
 		let name = producer.unique_name(".opus");
 		assert_eq!(name, "0.opus");
 		let track = producer.create_track(name.clone(), None).unwrap();
-		producer.remove_track(&name).unwrap();
 		assert_eq!(producer.unique_name(".opus"), "1.opus");
 		drop(track);
 	}
 
 	#[test]
 	fn unique_names_survive_closed_track_pruning() {
-		let mut producer = Info::new().produce();
+		let producer = Info::new().produce();
 		let consumer = producer.consume();
 		let track = producer.unique_track(".opus", None).unwrap();
 		assert_eq!(track.name(), "0.opus");
@@ -1121,7 +1108,7 @@ mod test {
 
 	#[test]
 	fn unique_name_skips_a_live_collision() {
-		let mut producer = Info::new().produce();
+		let producer = Info::new().produce();
 		let track = producer.create_track("0.opus", None).unwrap();
 		assert_eq!(producer.unique_name(".opus"), "1.opus");
 		drop(track);
@@ -1163,7 +1150,7 @@ mod test {
 	async fn demand_ordinary() {
 		tokio::time::pause();
 
-		let mut producer = Info::new().produce();
+		let producer = Info::new().produce();
 		let consumer = producer.consume();
 		let demand = producer.demand();
 
@@ -1256,7 +1243,7 @@ mod test {
 		let mut producer = Info::new().produce();
 
 		// Create the track before any consumer exists.
-		let mut track1 = producer.assert_create_track("track1", None);
+		let track1 = producer.assert_create_track("track1", None);
 		track1.append_group().unwrap();
 
 		let consumer = producer.consume();
@@ -1265,7 +1252,7 @@ mod test {
 		let mut track1_sub = consumer.track("track1").unwrap().subscribe(None).await.unwrap();
 		track1_sub.assert_group();
 
-		let mut track2 = producer.assert_create_track("track2", None);
+		let track2 = producer.assert_create_track("track2", None);
 
 		let consumer2 = producer.consume();
 		let mut track2_consumer = consumer2.track("track2").unwrap().subscribe(None).await.unwrap();
@@ -1315,7 +1302,7 @@ mod test {
 		assert!(!consumer.is_finished());
 
 		// Finish: a deliberate clean end.
-		let mut producer = Info::new().produce();
+		let producer = Info::new().produce();
 		let consumer = producer.consume();
 		producer.finish();
 		assert!(matches!(consumer.closed().await, Error::Dropped));
@@ -1347,7 +1334,7 @@ mod test {
 		assert_eq!(request.name(), "track1");
 
 		// Accept it, which resolves both waiting subscribers.
-		let mut track3 = request.accept(None);
+		let track3 = request.accept(None);
 		let mut track1 = track1_fut.await.unwrap();
 		let mut track2 = track2_fut.await.unwrap();
 
@@ -1377,7 +1364,7 @@ mod test {
 
 		// Subscribe to a track and serve it.
 		let track1_fut = subscribe_pending!(consumer, "track1");
-		let mut producer1 = broadcast.assert_request().accept(None);
+		let producer1 = broadcast.assert_request().accept(None);
 		let mut track1 = track1_fut.await.unwrap();
 
 		// Close the producer (simulating publisher disconnect).
@@ -1390,7 +1377,7 @@ mod test {
 
 		// Subscribe again to the same track: should get a NEW producer, not the stale one.
 		let track2_fut = subscribe_pending!(consumer, "track1");
-		let mut producer2 = broadcast.assert_request().accept(None);
+		let producer2 = broadcast.assert_request().accept(None);
 		let mut track2 = track2_fut.await.unwrap();
 		track2.assert_not_closed();
 		track2.assert_not_clone(&track1);
@@ -1461,7 +1448,7 @@ mod test {
 	/// never be served under it.
 	#[tokio::test]
 	async fn create_track_fulfills_queued_request() {
-		let mut producer = Info::new().produce();
+		let producer = Info::new().produce();
 		let mut dynamic = producer.dynamic();
 		let bc = dynamic.consume();
 
@@ -1469,7 +1456,7 @@ mod test {
 		let subscribing = subscribe_pending!(bc, "video");
 
 		// The producer creates the track before any handler drains the queue.
-		let mut track = producer.create_track("video", None).unwrap();
+		let track = producer.create_track("video", None).unwrap();
 		let mut sub = subscribing.await.expect("fulfilled by create_track");
 
 		// The fulfilled subscription is live against this very producer.
@@ -1506,7 +1493,7 @@ mod test {
 	/// the same answer instead of waiting on info that can never arrive.
 	#[tokio::test]
 	async fn finish_resolves_a_reserved_name() {
-		let mut producer = Info::new().produce();
+		let producer = Info::new().produce();
 		let consumer = producer.consume();
 
 		let _request = producer.reserve_track("track1").unwrap();
@@ -1520,7 +1507,7 @@ mod test {
 	/// reason rather than a generic failure.
 	#[tokio::test]
 	async fn abort_resolves_a_reserved_name_with_its_reason() {
-		let mut producer = Info::new().produce();
+		let producer = Info::new().produce();
 		let consumer = producer.consume();
 
 		let request = producer.reserve_track("track1").unwrap();
@@ -1538,7 +1525,7 @@ mod test {
 	/// consumer side, so it ends the same way.
 	#[tokio::test]
 	async fn finish_resolves_a_queued_request() {
-		let mut producer = Info::new().produce();
+		let producer = Info::new().produce();
 		let dynamic = producer.dynamic();
 		let consumer = dynamic.consume();
 
@@ -1553,7 +1540,7 @@ mod test {
 	/// it, so the sweep has to reach that one too.
 	#[tokio::test]
 	async fn finish_resolves_a_request_a_handler_never_answered() {
-		let mut producer = Info::new().produce();
+		let producer = Info::new().produce();
 		let mut dynamic = producer.dynamic();
 		let consumer = dynamic.consume();
 
@@ -1571,7 +1558,7 @@ mod test {
 	/// backfill that is deliberately absent from its queue.
 	#[tokio::test]
 	async fn finish_resolves_an_unaccepted_track_with_fetched_info() {
-		let mut producer = Info::new().produce();
+		let producer = Info::new().produce();
 		let consumer = producer.consume();
 
 		let request = producer.reserve_track("track1").unwrap();
@@ -1579,7 +1566,7 @@ mod test {
 		let track = consumer.track("track1").unwrap();
 		let pending_fetch = track.fetch_group(0, None);
 		let fetch = dynamic.requested_group().await.unwrap();
-		let mut group = fetch.accept(None).unwrap();
+		let group = fetch.accept(None).unwrap();
 		group.finish().unwrap();
 		pending_fetch.await.unwrap();
 
@@ -1587,7 +1574,7 @@ mod test {
 		producer.finish();
 		assert!(matches!(subscriber.recv_group().await, Err(Error::NotFound)));
 
-		let mut stale = request.accept(None);
+		let stale = request.accept(None);
 		assert!(stale.append_group().is_err());
 	}
 
@@ -1595,10 +1582,10 @@ mod test {
 	/// its cache and its publisher decides when it ends.
 	#[tokio::test]
 	async fn finish_spares_a_served_track() {
-		let mut producer = Info::new().produce();
+		let producer = Info::new().produce();
 		let consumer = producer.consume();
 
-		let mut track = producer.create_track("track1", None).unwrap();
+		let track = producer.create_track("track1", None).unwrap();
 		let mut subscriber = consumer.track("track1").unwrap().subscribe(None).await.unwrap();
 
 		producer.finish();
@@ -1613,7 +1600,7 @@ mod test {
 	/// subscriber that was told `NotFound` could be contradicted by a later one.
 	#[tokio::test]
 	async fn finish_leaves_a_stale_reservation_inert() {
-		let mut producer = Info::new().produce();
+		let producer = Info::new().produce();
 		let consumer = producer.consume();
 
 		let request = producer.reserve_track("track1").unwrap();
@@ -1622,7 +1609,7 @@ mod test {
 		producer.finish();
 		assert!(matches!(pending.await, Err(Error::NotFound)));
 
-		let mut track = request.accept(None);
+		let track = request.accept(None);
 		assert!(track.append_group().is_err());
 		let mut subscriber = track.subscribe(None);
 		assert!(matches!(subscriber.recv_group().await, Err(Error::NotFound)));
@@ -1634,7 +1621,7 @@ mod test {
 	/// `NotFound`. Only an explicit rejection may claim the track is absent.
 	#[tokio::test]
 	async fn dropping_a_reserved_request_resolves_dropped() {
-		let mut producer = Info::new().produce();
+		let producer = Info::new().produce();
 		let consumer = producer.consume();
 
 		let request = producer.reserve_track("track1").unwrap();
@@ -1649,7 +1636,7 @@ mod test {
 	/// subscriber tell "no such track" from "the publisher went away".
 	#[tokio::test]
 	async fn rejecting_a_reserved_request_carries_the_reason() {
-		let mut producer = Info::new().produce();
+		let producer = Info::new().produce();
 		let consumer = producer.consume();
 
 		let request = producer.reserve_track("track1").unwrap();
@@ -1667,7 +1654,7 @@ mod test {
 	/// cancelled.
 	#[tokio::test]
 	async fn an_idle_teardown_yields_to_a_returning_viewer() {
-		let mut producer = Info::new().produce();
+		let producer = Info::new().produce();
 		let consumer = producer.consume();
 		let track = producer.create_track("video", None).unwrap();
 
@@ -1676,7 +1663,7 @@ mod test {
 
 		// Demand returns in the gap before it commits.
 		let viewer = consumer.track("video").unwrap();
-		let mut track = track
+		let track = track
 			.abort_unused(Error::Cancel)
 			.expect_err("viewer keeps the track alive");
 
@@ -1699,7 +1686,7 @@ mod test {
 
 	#[test]
 	fn abort_unused_accepts_an_already_closed_track_with_consumers() {
-		let mut producer = Info::new().produce();
+		let producer = Info::new().produce();
 		let consumer = producer.consume();
 		let track = producer.create_track("video", None).unwrap();
 		let _viewer = consumer.track("video").unwrap();

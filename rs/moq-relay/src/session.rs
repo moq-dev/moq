@@ -470,7 +470,8 @@ mod tests {
 	use std::time::Duration;
 
 	fn request(id: &str, path: &str, remote: &str) -> Request {
-		let mut request = Request::new(id, "relay-1", Transport::Quic, path);
+		let mut request = Request::new("relay-1", Transport::Quic, path);
+		request.id = id.to_owned();
 		request.remote = Some(remote.parse().unwrap());
 		request.query = Some("jwt=secret".into());
 		request

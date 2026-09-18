@@ -83,10 +83,8 @@ export class Room {
 			const update = await Promise.race([effect.cancel, announced.next()]);
 			if (!update) break;
 
-			const covered = update.pattern.isLiteral ? update.pattern.text : update.pattern.asPrefix();
-			if (covered === undefined) continue;
 			// Announcements name the whole path; participants are named beneath the prefix.
-			const suffix = Moq.Path.stripPrefix(prefix, Moq.Path.from(covered));
+			const suffix = Moq.Path.stripPrefix(prefix, update.path);
 			if (suffix === null) continue;
 			const parsed = parse(suffix);
 			if (!parsed) continue;
@@ -94,8 +92,8 @@ export class Room {
 			const local = this.identity.peek();
 			if (local && parsed.identity === local) continue;
 
-			if (update.active) {
-				this.#add(parsed.identity, parsed.kind, Moq.Path.from(covered));
+			if (Moq.Announce.isActive(update.kind)) {
+				this.#add(parsed.identity, parsed.kind, update.path);
 			} else {
 				this.#remove(parsed.identity, parsed.kind);
 			}

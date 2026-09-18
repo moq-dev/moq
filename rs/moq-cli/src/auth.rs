@@ -6,8 +6,8 @@ use anyhow::Context;
 use std::net::SocketAddr;
 use std::{io, path::PathBuf};
 
-use moq_auth::serve::{Keys, Policy, Rules};
-use moq_auth::{Algorithm, Pattern};
+use moq_auth::serve::{Keys, Policy};
+use moq_auth::{Algorithm, Pattern, Permissions};
 
 /// Generate, sign, and verify the JWT tokens a relay authenticates with.
 #[derive(usage::Args, Clone, Debug)]
@@ -412,7 +412,7 @@ impl Serve {
 			anyhow::bail!("--revalidate must be longer than 0s; every client would re-check in a tight loop");
 		}
 		let rules = |publish: &[Pattern], subscribe: &[Pattern]| {
-			Rules::new(publish.iter().cloned().collect(), subscribe.iter().cloned().collect())
+			Permissions::new(publish.iter().cloned().collect(), subscribe.iter().cloned().collect())
 		};
 		let mut policy = Policy::default();
 		policy.keys = match (&self.key, &self.key_dir) {
@@ -817,7 +817,8 @@ mod tests {
 	#[tokio::test]
 	async fn revalidate_posts_against_the_internal_listener() {
 		let sessions = moq_relay::session::Registry::new();
-		let mut request = moq_auth::Request::new("abc", "relay-1", moq_auth::Transport::Quic, "/demo/room");
+		let mut request = moq_auth::Request::new("relay-1", moq_auth::Transport::Quic, "/demo/room");
+		request.id = "abc".into();
 		request.remote = Some("203.0.113.9:4433".parse().unwrap());
 		request.query = Some("jwt=secret".into());
 		let _reg = sessions.register(request);

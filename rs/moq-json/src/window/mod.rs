@@ -418,7 +418,7 @@ mod test {
 			moq_net::Error::Evicted,
 			moq_net::Error::GroupTooLarge,
 		] {
-			let mut track = moq_net::broadcast::Info::new()
+			let track = moq_net::broadcast::Info::new()
 				.produce()
 				.create_track("test", None)
 				.unwrap();

@@ -163,8 +163,8 @@ mod test {
 	/// resolves against.
 	fn publish_catalog(published: Catalog<()>) -> Result<Option<Catalog>> {
 		let origin = crate::source::produce_origin();
-		let mut broadcast = origin.create_broadcast("a/pub").expect("broadcast should create");
-		let mut track = broadcast
+		let broadcast = origin.create_broadcast("a/pub").expect("broadcast should create");
+		let track = broadcast
 			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 			.expect("catalog track should create");
 		let mut consumer = Consumer::new(track.subscribe(None));
@@ -196,13 +196,13 @@ mod test {
 	/// origin cursor. That is the shape an FFI app takes when it answers an origin request
 	/// with a broadcast it built itself.
 	async fn publish_catalog_served(published: Catalog<()>) -> Result<Option<Catalog>> {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let mut track = broadcast
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
 			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 			.expect("catalog track should create");
 
 		let origin = crate::source::produce_origin();
-		let dynamic = origin.dynamic(moq_net::Pattern::all(), Default::default()).unwrap();
+		let dynamic = origin.dynamic("", Default::default()).unwrap();
 		let requesting = origin.consume().request_broadcast("a/pub");
 		let served = broadcast.consume();
 		tokio::spawn(async move {
@@ -364,7 +364,7 @@ mod test {
 
 	#[test]
 	fn waits_for_pending_catalog_group_payload() {
-		let mut track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
+		let track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.subscribe(None));
 		let mut group = track.append_group().expect("catalog group should append");
 
@@ -382,7 +382,7 @@ mod test {
 
 	#[test]
 	fn waits_for_pending_catalog_group_payload_after_track_finish() {
-		let mut track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
+		let track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.subscribe(None));
 		let mut group = track.append_group().expect("catalog group should append");
 
@@ -402,7 +402,7 @@ mod test {
 
 	#[test]
 	fn returns_latest_complete_catalog_group() {
-		let mut track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
+		let track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.subscribe(None));
 		let waiter = kio::Waiter::noop();
 
@@ -428,7 +428,7 @@ mod test {
 
 	#[test]
 	fn waits_for_newer_pending_group_instead_of_returning_older_ready_group() {
-		let mut track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
+		let track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.subscribe(None));
 		let waiter = kio::Waiter::noop();
 
@@ -455,7 +455,7 @@ mod test {
 
 	#[test]
 	fn retained_pending_group_is_superseded_by_newer_group() {
-		let mut track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
+		let track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
 		let mut consumer = Consumer::new(track.subscribe(None));
 		let waiter = kio::Waiter::noop();
 
@@ -485,7 +485,7 @@ mod test {
 
 	#[test]
 	fn returns_none_when_empty_track_finishes() {
-		let mut track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
+		let track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
 		let mut consumer: Consumer = Consumer::new(track.subscribe(None));
 		let waiter = kio::Waiter::noop();
 

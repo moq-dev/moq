@@ -27,7 +27,7 @@ import dev.moq.*
 Moq.connect("https://relay.example.com", tlsRoots = listOf("ca.pem")).use { moq ->
     moq.announcements("live/").collect { announcement ->
         // An announcement is a route; its path is relative to the prefix.
-        val broadcast = moq.requestBroadcast("live/" + announcement.pattern())
+        val broadcast = moq.requestBroadcast("live/" + announcement.path())
         println(broadcast.catalog())
     }
 }
@@ -53,11 +53,11 @@ Moq.connect("https://relay.example.com").use { moq ->
 The three advertising operations: `moq.createBroadcast(path)` (or
 `origin.createBroadcast`) returns an unadvertised producer;
 `broadcast.announce(route)` / `broadcast.unannounce()` own that exact-path
-advertisement; `origin.dynamic(pattern, route)` claims every matching path
-(`foo/**` for a prefix). Hold the returned `OriginDynamic` while the claim
-should stay advertised. A wildcard is a capability, not an inventory;
-`announcement.pattern()` is the covered prefix for a prefix-shaped claim and
-the pattern text otherwise.
+advertisement; `origin.dynamic(prefix, route)` claims `prefix` and every
+path beneath it (`""` for everything). Hold the returned `OriginDynamic`
+while the claim should stay advertised, and reject the requests you will not
+serve. A route is a capability, not an inventory; `announcement.path()` is
+the covered prefix.
 
 Sessions reconnect with backoff when the transport drops and re-announce local
 broadcasts. `moq.epoch()` counts the connections, 1 on the first, pairing with
@@ -71,7 +71,7 @@ inbound stream cap.
 in flight, or after cancel. JSON tracks take `@Serializable` types
 (`publishJsonSnapshot`, `publishJsonStream`, `valuesAs<T>()`), and the rest of
 the [shared feature list](/lib/#what-every-binding-can-do) maps one to one:
-`fetchGroup`/`fetchMediaGroup`, `dynamic()` for tracks and `dynamic(pattern)` for broadcasts, `appendDatagram`/`datagrams()`,
+`fetchGroup`/`fetchMediaGroup`, `dynamic()` for tracks and `dynamic(prefix)` for broadcasts, `appendDatagram`/`datagrams()`,
 `setCatalogSection`, `used()`/`unused()`. `session.bandwidth()` divides the
 connection's send estimate; pass it to `encodeVideo` / `encodeAudio` or
 `reserve` a share for an app-owned track. `MoqException.isAuth` and

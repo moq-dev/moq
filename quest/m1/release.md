@@ -50,8 +50,7 @@ with its PR and the replacement call:
   `--name`/`--latency-max` and `publish`/`subscribe` name `--hop`/`--broadcast`/
   `--max-age` and `import`/`export`. Unused `#[deprecated]` items are gone.
   JS `announced()` always drops reflected announces (`ignoreSelf` is gone);
-  an `oct` JWK without `kty` is refused once [Auth contract](/quest/m1/auth-contract.md)
-  deletes the Rust default (JS already refuses). The gstmoq properties
+  an `oct` JWK without `kty` is refused. The gstmoq properties
   `estimated-send-bitrate`/`estimated-recv-bitrate` are `estimated-*-rate`
   with no alias, a runtime failure for a `gst-launch` line.
 - bindings: the Go module is `moq.dev/moq` with `context.Context` on every

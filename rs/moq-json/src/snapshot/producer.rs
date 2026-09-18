@@ -323,7 +323,7 @@ struct Track {
 impl Track {
 	/// Finish the open group without opening a replacement.
 	fn cut(&mut self) -> Result<()> {
-		if let Some(mut group) = self.group.take() {
+		if let Some(group) = self.group.take() {
 			group.finish()?;
 		}
 		Ok(())
@@ -348,7 +348,7 @@ impl Track {
 	/// Close the open group and write a snapshot as the first frame of a new one.
 	fn write_snapshot(&mut self, payload: bytes::Bytes) -> Result<()> {
 		// The previous group is complete; no more frames will be appended to it.
-		if let Some(mut group) = self.group.take() {
+		if let Some(group) = self.group.take() {
 			group.finish()?;
 		}
 
@@ -381,7 +381,7 @@ impl Track {
 	}
 
 	fn finish(&mut self) -> Result<()> {
-		if let Some(mut group) = self.group.take() {
+		if let Some(group) = self.group.take() {
 			group.finish()?;
 		}
 		self.inner.finish()?;

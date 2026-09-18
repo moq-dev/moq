@@ -702,8 +702,7 @@ mod tests {
 		// with no origin; a protocol violation (or similar) is what an
 		// auto-created origin's first interaction with a Lite01 peer trips.
 		let (code, _) = fake.wait_for_first_close().await;
-		// Session closes encode through the session registry, so compare against that one:
-		// `Error::Version.to_code()` is the local table's value and would never match.
+		// Session closes encode through the session registry, so compare against that one.
 		assert_ne!(code, SessionError::Version.to_code(), "SessionInfo failed to decode");
 	}
 
@@ -771,7 +770,10 @@ mod tests {
 		// last handle going away and closes the transport.
 		drop(session);
 		runtime.tick();
-		assert_eq!(fake.state.close_events.lock().unwrap()[0].0, Error::Cancel.to_code());
+		assert_eq!(
+			fake.state.close_events.lock().unwrap()[0].0,
+			SessionError::Cancel.to_code()
+		);
 	}
 
 	// Clones share the connection: the transport closes on the LAST drop, and
@@ -793,7 +795,10 @@ mod tests {
 
 		clone.abort(Error::Cancel);
 		runtime.tick();
-		assert_eq!(fake.state.close_events.lock().unwrap()[0].0, Error::Cancel.to_code());
+		assert_eq!(
+			fake.state.close_events.lock().unwrap()[0].0,
+			SessionError::Cancel.to_code()
+		);
 
 		// And the machine publishes the transport's terminal error, which is
 		// what `closed()` reports.
@@ -987,7 +992,10 @@ mod tests {
 
 		session.abort(Error::Cancel);
 		runtime.tick();
-		assert_eq!(fake.state.close_events.lock().unwrap()[0].0, Error::Cancel.to_code());
+		assert_eq!(
+			fake.state.close_events.lock().unwrap()[0].0,
+			SessionError::Cancel.to_code()
+		);
 	}
 
 	// The server-side twin: a `!Send` transport accepts a lite session whose
@@ -1008,7 +1016,10 @@ mod tests {
 
 		drop(session);
 		runtime.tick();
-		assert_eq!(fake.state.close_events.lock().unwrap()[0].0, Error::Cancel.to_code());
+		assert_eq!(
+			fake.state.close_events.lock().unwrap()[0].0,
+			SessionError::Cancel.to_code()
+		);
 	}
 
 	// The lite-only entry refuses everything that still needs the boxed ietf
@@ -1041,12 +1052,15 @@ mod tests {
 			.unwrap();
 
 		// The construction-time snapshot, before the machine sampled anything.
-		assert_eq!(session.stats().estimated_send_rate, Some(1_000_000));
+		assert_eq!(
+			session.stats().estimated_send_rate,
+			Some(crate::bandwidth::Rate::from_bps(1_000_000))
+		);
 
 		// That read was demand: the machine keeps sampling while stats are read,
 		// so the new rate shows up within an interval (paused time auto-advances).
 		fake.set_send_rate(Some(2_000_000));
-		while session.stats().estimated_send_rate != Some(2_000_000) {
+		while session.stats().estimated_send_rate != Some(crate::bandwidth::Rate::from_bps(2_000_000)) {
 			tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 		}
 	}

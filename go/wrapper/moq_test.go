@@ -32,7 +32,7 @@ func opusHead() []byte {
 func TestOriginLifecycle(t *testing.T) {
 	origin := moq.NewOriginProducer()
 	_ = origin.Consume()
-	dynamic, err := origin.Dynamic("**", moq.Route{})
+	dynamic, err := origin.Dynamic("", moq.Route{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 	defer cancel()
 
 	origin := moq.NewOriginProducer()
-	dynamic, err := origin.Dynamic("**", moq.Route{})
+	dynamic, err := origin.Dynamic("", moq.Route{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,8 +320,8 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	if ann == nil {
 		t.Fatal("expected an announcement")
 	}
-	if ann.Pattern() != "live" {
-		t.Fatalf("pattern = %q, want %q", ann.Pattern(), "live")
+	if ann.Path() != "live" {
+		t.Fatalf("path = %q, want %q", ann.Path(), "live")
 	}
 	if !ann.Active() {
 		t.Fatal("expected an active announcement")
@@ -330,7 +330,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 		t.Fatalf("route hops = %v, want empty for local origin", route.Hops)
 	}
 
-	bc, err := consumer.RequestBroadcast(ctx, ann.Pattern())
+	bc, err := consumer.RequestBroadcast(ctx, ann.Path())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -811,7 +811,7 @@ func TestConsumerCancelConcurrent(t *testing.T) {
 // that one request rather than the consumer it was made on.
 func TestRequestBroadcastCancelKeepsTheOrigin(t *testing.T) {
 	origin := moq.NewOriginProducer()
-	dynamic, err := origin.Dynamic("**", moq.Route{})
+	dynamic, err := origin.Dynamic("", moq.Route{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1087,7 +1087,7 @@ func TestAnnounceThenUnannounceIsVisible(t *testing.T) {
 	defer announced.Cancel()
 
 	ann, err := announced.Next(ctx)
-	if err != nil || ann == nil || ann.Pattern() != "live" || !ann.Active() {
+	if err != nil || ann == nil || ann.Path() != "live" || !ann.Active() {
 		t.Fatalf("announce: ann=%+v err=%v", ann, err)
 	}
 
@@ -1095,7 +1095,7 @@ func TestAnnounceThenUnannounceIsVisible(t *testing.T) {
 		t.Fatal(err)
 	}
 	ann, err = announced.Next(ctx)
-	if err != nil || ann == nil || ann.Pattern() != "live" || ann.Active() {
+	if err != nil || ann == nil || ann.Path() != "live" || ann.Active() {
 		t.Fatalf("unannounce: ann=%+v err=%v", ann, err)
 	}
 	if _, err := consumer.RequestBroadcast(ctx, "live"); err != nil {
@@ -1108,7 +1108,7 @@ func TestDynamicServesARequestUnderAPrefix(t *testing.T) {
 	defer cancel()
 
 	origin := moq.NewOriginProducer()
-	dynamic, err := origin.Dynamic("live/**", moq.Route{})
+	dynamic, err := origin.Dynamic("live", moq.Route{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1141,9 +1141,3 @@ func TestDynamicServesARequestUnderAPrefix(t *testing.T) {
 	}
 }
 
-func TestDynamicAcceptsANonPrefixPattern(t *testing.T) {
-	origin := moq.NewOriginProducer()
-	if _, err := origin.Dynamic("live/*", moq.Route{}); err != nil {
-		t.Fatal(err)
-	}
-}

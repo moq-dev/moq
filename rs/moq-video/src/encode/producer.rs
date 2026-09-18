@@ -92,7 +92,7 @@ impl<E: CatalogExt> Producer<E> {
 	/// already says what the first keyframe says, that keyframe confirms the
 	/// catalog instead of correcting it.
 	pub fn new(
-		mut broadcast: moq_net::broadcast::Producer,
+		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer<E>,
 		rendition: hang::catalog::VideoConfig,
 	) -> Result<Self, Error> {
