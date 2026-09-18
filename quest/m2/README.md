@@ -46,7 +46,6 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 ## Quests
 
 - [Origin narrowing](/quest/m2/origin-narrowing.md) - a live origin grant narrows in place and ends the subscriptions it no longer covers, the deafen boundary #2714 asked for
-- [Session revalidate](/quest/m2/session-revalidate.md) - the internal listener re-checks sessions by id, path, or address now, so a kick lands in one round trip and the cadence stops carrying it
 - [Relay embedding](/quest/m2/relay-embed.md) - an embedder reads the resolved config, reuses the CLI merge, registers listener health, and spawns a test relay without TOML strings
 - [Auth embedder](/quest/m2/auth-embedder.md) - the lease owns its re-check clock, a gateway session holds a lease, and `Cluster::admit` scopes and tags origins in one call
 - [Binding parity](/quest/m2/binding-parity.md) - every wrapper reaches every moq-ffi method in its own idiom with moq-net's verbs

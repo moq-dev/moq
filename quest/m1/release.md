@@ -86,4 +86,5 @@ Public API: none beyond the required quests. Wire: none.
 - [JSON mutate](/quest/m2/json-mutate.md) - Rust and JS share the closure edit
 - [Binding parity](/quest/m2/binding-parity.md) - every wrapper reaches every moq-ffi method
 - [Binding docs](/quest/m2/binding-docs.md) - the binding pages compile against the wrappers
+- [Session revalidate](/quest/m1/session-revalidate.md) - the pushed re-check ships with the auth API moq.pro adopts
 - The merged relay has soaked on moq.pro staging and the maintainer has signed it off

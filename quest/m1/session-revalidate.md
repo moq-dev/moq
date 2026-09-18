@@ -14,7 +14,8 @@ the relay re-POSTs `revalidate` and the server's reply kicks, narrows,
 retiers, or keeps the session exactly as a scheduled re-check would. An
 embedder holding the `lease::Producer` sees the same nudge in process, and
 `moq auth revalidate` posts it from the command line. Additive on the
-lease and the relay dev already has, so it starts on `main` once dev merges.
+lease and the relay dev already has, and it lands on `dev` before the release
+so the lease's push surface ships with the auth API moq.pro adopts.
 
 Boundaries: one node, no cluster fan-out; the server knows each session's
 `node` from `connect` and calls that relay. The contract's JSON is untouched
@@ -96,11 +97,6 @@ Public API: additive, `lease::Consumer::revalidate`,
 `lease::Producer::{poll_revalidate, revalidate_requested}`,
 `moq_relay::session::{Registry, Filter}`, `Relay::sessions()`, two internal
 routes, and two `moq auth` subcommands. Wire: none.
-
-## Required
-
-- [Merge dev](/quest/m1/merge-dev.md) - builds on the moq-auth lease and
-  the relay admission path that only dev has
 
 ## Related
 
