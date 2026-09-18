@@ -25,7 +25,7 @@ Lands on `dev`, in `rs/moq-tokio`. See the
   origins attach and the front reselects to the newest route), call
   `shared.migrating()` then `shared.connected(&new)`, send
   `old.drain().send(Goaway::same().timeout(handover))` with the configured
-  `GoawayConfig` cap, and move the old session into `Draining`. A QUIC dial
+  `connection::Goaway` cap, and move the old session into `Draining`. A QUIC dial
   that fails after WebSocket won is logged at debug, leaves the memo untouched,
   and the session carries on over WebSocket. The pending dial is dropped when the WebSocket session ends
   first; the reconnect races again.

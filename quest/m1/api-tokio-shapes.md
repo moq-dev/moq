@@ -20,17 +20,16 @@ tombstone), so every break here is free.
   `(Server, Spawner)` tuples and `Spawner::serve(server, make)` accepts any
   server, so worker 1's driver on worker 0's thread compiles. `Workers::bind`
   takes `server::Config` plus `worker::Config`, not three configs.
-- `cli::merge` (six arguments, one a `keep` callback) becomes a `cli::Merge`
-  struct with `apply<T: cli::Keep>(self, parsed)`, where `Keep` replaces the
-  seven inherent `keep_parse_only` methods. This is what lets
-  [moq-tokio names](/quest/m1/api-tokio-names.md) make `keep_parse_only`
-  private. `pub use usage;` with the same one-line doc `notify` carries, since
-  `merge` and `answer` take and return `usage` types.
+- `cli::merge` (five arguments) becomes a `cli::Merge` struct with
+  `apply(self, parsed)`. The keep closure and `keep_parse_only` methods are
+  already gone. `pub use usage;` with the same one-line doc `notify` carries,
+  since `merge` and `answer` take and return `usage` types.
 - Every config duration field is `std::time::Duration`; the humantime
   newtype stays private to parsing. Embedders write `Duration::ZERO.into()`
   today (moq-gst, moq.pro). Then delete `Backoff::{initial, multiplier, max,
-  timeout}` and `GoawayConfig::redirect` (accessors that duplicate the field
-  or have no caller) and fold `handover(Option<Duration>)` into a `Resolved`.
+  timeout}` and `connection::Goaway::redirect` (accessors that duplicate the
+  field or have no caller) and fold `handover(Option<Duration>)` into a
+  `Resolved`.
 - One construction idiom: `connect::Config` and `listen::Config` are
   `#[non_exhaustive]` with public fields (no struct literal), while
   `client::Config` and `server::Config` add `with_*` builders. Drop the
@@ -49,18 +48,13 @@ tombstone), so every break here is free.
   caller) matches `tcp`/`unix` with `with_protocols`; `failover::Failure<E>`
   becomes crate-private or is renamed so it stops reading as
   `accept::Failure`; `moq_tokio::Transport` and `Request` live under
-  `server::`. The names quest keeps the adapter module's names saying
-  adapter; renaming them `Session`/`SendStream`/`RecvStream` puts a module
-  slated for deletion into moq-net's vocabulary.
+  `server::`. The adapter types are already `transport::{Session, SendStream,
+  RecvStream}`.
 - `moq_tokio::crypto::install_default()` so embedders stop copying the
   aws-lc-rs provider boilerplate (moq.pro has it in three binaries).
 
 Public API: breaking on moq-tokio, so on dev. Wire: none. Consumers:
 moq-relay, moq-cli, moq-ffi, moq-gst, libmoq tests, moq.pro's edge.
-
-## Required
-
-- [moq-tokio names](/quest/m1/api-tokio-names.md) - the renames land first so this touches settled names
 
 ## Related
 
