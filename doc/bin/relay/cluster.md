@@ -52,7 +52,8 @@ stall   = 1 - (1 - loss) ^ (group_bytes / 1200)
 A lost packet costs about a round trip to recover and holds every frame behind
 it in its group, so what loss does to a stream depends on how many packets a
 group spans: 1% loss stalls nearly every 300 KB video group and one in
-twenty-five 4 KB audio groups. The sender prices the link because only it sees
+twenty-five 4 KB audio groups. A link that has carried no group yet is priced
+against the largest group the relay carries on its other links. The sender prices the link because only it sees
 its own loss and the groups it sends, and it folds the price into every route
 it forwards, so nothing new crosses the wire. RTT is a median over the last 15
 samples; loss and the group size are ratios over the last 5000 packets sent,

@@ -2685,6 +2685,20 @@ impl Links {
 		}
 	}
 
+	/// The largest group any priced link is carrying, for a link that has served
+	/// none yet: the streams this relay forwards elsewhere are the ones a fresh
+	/// link would carry, so its loss is priced against them rather than against a
+	/// one-packet group nothing sends.
+	fn group_bytes_hint(&self) -> Option<u64> {
+		self.0
+			.state
+			.lock()
+			.expect("links poisoned")
+			.values()
+			.filter_map(|status| status.estimate.group_bytes)
+			.max()
+	}
+
 	async fn changed(&self) {
 		self.0.changed.notified().await
 	}
@@ -2741,9 +2755,12 @@ impl Link {
 			self.probing = Some(estimate);
 		}
 		let stats = session.stats();
-		let Some(estimate) = self.meter.observe(LinkSample::from(&stats)) else {
+		let Some(mut estimate) = self.meter.observe(LinkSample::from(&stats)) else {
 			return;
 		};
+		if estimate.group_bytes.is_none() {
+			estimate.group_bytes = self.links.group_bytes_hint();
+		}
 		let raw = link_price(&estimate, &self.pricing);
 		if let Some(price) = self.quantizer.update(raw) {
 			session.set_egress(price);
@@ -4565,6 +4582,28 @@ mod tests {
 			table.links.iter().map(|l| (l.peer, l.cost)).collect::<Vec<_>>(),
 			vec![(7, 60), (9, 90)]
 		);
+	}
+
+	/// A link that has served no group borrows the largest group another link
+	/// carries, so a lossy idle link is priced against the streams it would get.
+	#[test]
+	fn idle_links_borrow_the_group_size_of_busy_ones() {
+		let links = Links::default();
+		assert_eq!(links.group_bytes_hint(), None);
+		let status = |group_bytes: Option<u64>| LinkStatus {
+			peer: Some(1),
+			estimate: LinkEstimate {
+				rtt: Duration::from_millis(50),
+				loss: 0.0,
+				group_bytes,
+			},
+			cost: 58,
+		};
+		links.update(1, status(None));
+		assert_eq!(links.group_bytes_hint(), None);
+		links.update(2, status(Some(4_000)));
+		links.update(3, status(Some(320_000)));
+		assert_eq!(links.group_bytes_hint(), Some(320_000));
 	}
 
 	/// The defaults price by measurement; `measure = false` turns it off, and a
