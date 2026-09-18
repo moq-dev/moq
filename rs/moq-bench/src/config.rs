@@ -29,16 +29,16 @@ pub struct Config {
 
 	/// Spread connection and subscription startup over this duration to avoid a thundering herd.
 	#[usage(long, env = "MOQ_BENCH_STARTUP", default = "10s", setting = "startup")]
-	pub startup: moq_tokio::Duration,
+	pub startup: moq_tokio::cli::Duration,
 
 	/// Stop the benchmark after this duration. Runs until interrupted if unset.
 	#[usage(long, env = "MOQ_BENCH_DURATION", setting = "duration")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub duration: Option<moq_tokio::Duration>,
+	pub duration: Option<moq_tokio::cli::Duration>,
 
 	/// How often to log throughput stats.
 	#[usage(long, env = "MOQ_BENCH_REPORT", default = "1s", setting = "report")]
-	pub report: moq_tokio::Duration,
+	pub report: moq_tokio::cli::Duration,
 
 	/// Number of connections (A) to establish. Rolled once for the whole run.
 	#[usage(long, env = "MOQ_BENCH_CONNECTIONS", default = "1", setting = "connections")]

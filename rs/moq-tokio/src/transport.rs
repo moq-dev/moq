@@ -1,12 +1,12 @@
-//! Transitional adapter from the async transport interface to the poll one.
+//! Adapts the async transport interface to the poll one moq-net requires.
 //!
 //! moq-net only accepts the poll interface (`web_transport_trait::poll`).
-//! Backends that predate it (qmux, iroh, noq) are wrapped in [`Async`] here,
-//! at the edge where async already lives, until they implement the poll
-//! interface natively upstream. Delete this module backend by backend as that
-//! lands: the wrapping costs one allocation per operation and one copy per
-//! write, and its closed-watch emulation is weaker than a native
-//! implementation (see [`Async`]).
+//! A backend that offers only the async interface (qmux, iroh, noq) is wrapped
+//! in [`Session`] here, at the edge where async already lives. The wrapping
+//! costs one allocation per operation and one copy per write, and its
+//! closed-watch emulation is weaker than a native implementation (see
+//! [`Session`]), so a backend that implements the poll interface itself is
+//! handed to moq-net directly.
 
 use std::task::{Context, Poll, ready};
 
@@ -59,8 +59,8 @@ type OpBox<T> = futures::future::BoxFuture<'static, T>;
 ///   the closure only when the next write fails. The drivers' other arms keep
 ///   the session making progress; the stream itself lingers until then. A
 ///   native poll implementation observes closure without owning the stream,
-///   which is the real fix and the reason this adapter is transitional.
-pub struct Async<S: web_transport_trait::Session> {
+///   which is why a backend that has one is not wrapped.
+pub struct Session<S: web_transport_trait::Session> {
 	session: S,
 	accept_uni: OpSlot<Result<S::RecvStream, S::Error>>,
 	accept_bi: OpSlot<BiResult<S>>,
@@ -95,7 +95,7 @@ fn poll_op<T>(slot: &mut OpSlot<T>, cx: &mut Context<'_>, start: impl FnOnce() -
 	Poll::Ready(output)
 }
 
-impl<S: web_transport_trait::Session> Async<S> {
+impl<S: web_transport_trait::Session> Session<S> {
 	/// Wrap an async-interface transport session.
 	pub fn new(session: S) -> Self {
 		Self {
@@ -112,20 +112,20 @@ impl<S: web_transport_trait::Session> Async<S> {
 
 // Manual impl: a clone starts with no in-flight operations, since each handle
 // owns its own progress under the poll contract.
-impl<S: web_transport_trait::Session> Clone for Async<S> {
+impl<S: web_transport_trait::Session> Clone for Session<S> {
 	fn clone(&self) -> Self {
 		Self::new(self.session.clone())
 	}
 }
 
-impl<S> wt_poll::Session for Async<S>
+impl<S> wt_poll::Session for Session<S>
 where
 	S: web_transport_trait::Session,
 	S::SendStream: 'static,
 	S::RecvStream: 'static,
 {
-	type SendStream = AsyncSend<S::SendStream>;
-	type RecvStream = AsyncRecv<S::RecvStream>;
+	type SendStream = SendStream<S::SendStream>;
+	type RecvStream = RecvStream<S::RecvStream>;
 	type Error = S::Error;
 
 	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
@@ -134,7 +134,7 @@ where
 			let session = session.clone();
 			async move { session.accept_uni().await }.boxed()
 		})
-		.map(|res| res.map(AsyncRecv::new))
+		.map(|res| res.map(RecvStream::new))
 	}
 
 	fn poll_accept_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<wt_poll::BiStreams<Self>, Self::Error>> {
@@ -143,7 +143,7 @@ where
 			let session = session.clone();
 			async move { session.accept_bi().await }.boxed()
 		})
-		.map(|res| res.map(|(send, recv)| (AsyncSend::new(send), AsyncRecv::new(recv))))
+		.map(|res| res.map(|(send, recv)| (SendStream::new(send), RecvStream::new(recv))))
 	}
 
 	fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
@@ -152,7 +152,7 @@ where
 			let session = session.clone();
 			async move { session.open_uni().await }.boxed()
 		})
-		.map(|res| res.map(AsyncSend::new))
+		.map(|res| res.map(SendStream::new))
 	}
 
 	fn poll_open_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<wt_poll::BiStreams<Self>, Self::Error>> {
@@ -161,7 +161,7 @@ where
 			let session = session.clone();
 			async move { session.open_bi().await }.boxed()
 		})
-		.map(|res| res.map(|(send, recv)| (AsyncSend::new(send), AsyncRecv::new(recv))))
+		.map(|res| res.map(|(send, recv)| (SendStream::new(send), RecvStream::new(recv))))
 	}
 
 	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
@@ -203,10 +203,10 @@ where
 	}
 }
 
-/// The send half produced by [`Async`]: an async-interface stream adapted to the
-/// poll interface. See [`Async`] for the deferred `finish`/`reset` behavior.
-pub struct AsyncSend<S: web_transport_trait::SendStream + 'static> {
-	// Same never-locked Mutex as [`Async`]'s slots: `get_mut` is free on an
+/// The send half produced by [`Session`]: an async-interface stream adapted to the
+/// poll interface. See [`Session`] for the deferred `finish`/`reset` behavior.
+pub struct SendStream<S: web_transport_trait::SendStream + 'static> {
+	// Same never-locked Mutex as [`Session`]'s slots: `get_mut` is free on an
 	// exclusive borrow, and the wrapper keeps the boxed future from stripping
 	// `Sync` off the containing session types.
 	state: std::sync::Mutex<Option<SendState<S>>>,
@@ -235,18 +235,18 @@ enum SendState<S: web_transport_trait::SendStream + 'static> {
 	/// A write in flight; `chunk` is the copied bytes, kept (refcounted, no
 	/// extra copy) so a completion absorbed by `poll_closed` can verify the
 	/// retrying caller supplied the same bytes. A `None` result means the write
-	/// was interrupted by a reset (see [`AsyncSend::interrupt`]).
+	/// was interrupted by a reset (see [`SendStream::interrupt`]).
 	Writing {
 		#[allow(clippy::type_complexity)]
 		fut: OpBox<(S, Option<Result<(), S::Error>>)>,
 		chunk: Bytes,
 	},
 	/// The closed() acknowledgement watch; a `None` result means it was
-	/// interrupted by a late reset (see [`AsyncSend::interrupt`]).
+	/// interrupted by a late reset (see [`SendStream::interrupt`]).
 	Closing(#[allow(clippy::type_complexity)] OpBox<(S, Option<Result<(), S::Error>>)>),
 }
 
-impl<S: web_transport_trait::SendStream + 'static> AsyncSend<S> {
+impl<S: web_transport_trait::SendStream + 'static> SendStream<S> {
 	/// Wrap an async-interface send stream.
 	pub fn new(stream: S) -> Self {
 		Self {
@@ -277,7 +277,7 @@ impl<S: web_transport_trait::SendStream + 'static> AsyncSend<S> {
 	}
 }
 
-impl<S: web_transport_trait::SendStream + 'static> wt_poll::SendStream for AsyncSend<S> {
+impl<S: web_transport_trait::SendStream + 'static> wt_poll::SendStream for SendStream<S> {
 	type Error = S::Error;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
@@ -308,7 +308,7 @@ impl<S: web_transport_trait::SendStream + 'static> wt_poll::SendStream for Async
 					}
 					// write_chunk delivers the whole chunk, so the reported
 					// count is exact. The caller retries with the same bytes
-					// until this resolves (see [`Async`]).
+					// until this resolves (see [`Session`]).
 					let chunk = Bytes::copy_from_slice(buf);
 					let retained = chunk.clone();
 					let (tx, rx) = futures::channel::oneshot::channel::<()>();
@@ -484,7 +484,7 @@ impl<S: web_transport_trait::SendStream + 'static> wt_poll::SendStream for Async
 	}
 }
 
-impl<S: web_transport_trait::SendStream + 'static> Drop for AsyncSend<S> {
+impl<S: web_transport_trait::SendStream + 'static> Drop for SendStream<S> {
 	fn drop(&mut self) {
 		match self.state.get_mut().unwrap().take() {
 			// Apply a deferred reset if the stream is idle.
@@ -537,10 +537,10 @@ impl<S: web_transport_trait::SendStream + 'static> Drop for AsyncSend<S> {
 	}
 }
 
-/// The receive half produced by [`Async`]: an async-interface stream adapted to
-/// the poll interface. See [`Async`] for the deferred `stop` behavior.
-pub struct AsyncRecv<S: web_transport_trait::RecvStream + 'static> {
-	// See [`AsyncSend::state`] for why this Mutex exists; it is never locked.
+/// The receive half produced by [`Session`]: an async-interface stream adapted to
+/// the poll interface. See [`Session`] for the deferred `stop` behavior.
+pub struct RecvStream<S: web_transport_trait::RecvStream + 'static> {
+	// See [`SendStream::state`] for why this Mutex exists; it is never locked.
 	state: std::sync::Mutex<Option<RecvState<S>>>,
 	/// Bytes already read from the transport but not yet handed to the caller.
 	buffer: Bytes,
@@ -569,11 +569,11 @@ const READ_AHEAD_CAP: usize = 64 * 1024;
 enum RecvState<S: web_transport_trait::RecvStream + 'static> {
 	Idle(S),
 	/// A read in flight; a `None` result means it was interrupted by a stop
-	/// (see [`AsyncRecv::interrupt`]).
+	/// (see [`RecvStream::interrupt`]).
 	Reading(#[allow(clippy::type_complexity)] OpBox<(S, Option<Result<Option<Bytes>, S::Error>>)>),
 }
 
-impl<S: web_transport_trait::RecvStream + 'static> AsyncRecv<S> {
+impl<S: web_transport_trait::RecvStream + 'static> RecvStream<S> {
 	/// Wrap an async-interface receive stream.
 	pub fn new(stream: S) -> Self {
 		Self {
@@ -657,7 +657,7 @@ impl<S: web_transport_trait::RecvStream + 'static> AsyncRecv<S> {
 	}
 }
 
-impl<S: web_transport_trait::RecvStream + 'static> wt_poll::RecvStream for AsyncRecv<S> {
+impl<S: web_transport_trait::RecvStream + 'static> wt_poll::RecvStream for RecvStream<S> {
 	type Error = S::Error;
 
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
@@ -744,7 +744,7 @@ impl<S: web_transport_trait::RecvStream + 'static> wt_poll::RecvStream for Async
 	}
 }
 
-impl<S: web_transport_trait::RecvStream + 'static> Drop for AsyncRecv<S> {
+impl<S: web_transport_trait::RecvStream + 'static> Drop for RecvStream<S> {
 	fn drop(&mut self) {
 		match self.state.get_mut().unwrap().take() {
 			// Apply a deferred stop if the stream is idle.
@@ -901,7 +901,7 @@ mod tests {
 	#[test]
 	fn send_closed_watch_does_not_block_writes() {
 		let fake = FakeSend::default();
-		let mut send = AsyncSend::new(fake.clone());
+		let mut send = SendStream::new(fake.clone());
 		let mut cx = cx();
 
 		// A pre-terminal closed watch stays pending without consuming the stream.
@@ -916,7 +916,7 @@ mod tests {
 	#[test]
 	fn send_closed_resolves_after_finish() {
 		let fake = FakeSend::default();
-		let mut send = AsyncSend::new(fake.clone());
+		let mut send = SendStream::new(fake.clone());
 		let mut cx = cx();
 
 		assert_eq!(send.poll_write(&mut cx, b"bye"), Poll::Ready(Ok(3)));
@@ -930,7 +930,7 @@ mod tests {
 	fn send_defers_actions_across_an_inflight_write() {
 		let fake = FakeSend::default();
 		fake.blocked.store(true, Ordering::SeqCst);
-		let mut send = AsyncSend::new(fake.clone());
+		let mut send = SendStream::new(fake.clone());
 		let mut cx = cx();
 
 		assert!(send.poll_write(&mut cx, b"queued").is_pending());
@@ -950,7 +950,7 @@ mod tests {
 	fn a_write_completed_by_poll_closed_is_not_duplicated() {
 		let fake = FakeSend::default();
 		fake.blocked.store(true, Ordering::SeqCst);
-		let mut send = AsyncSend::new(fake.clone());
+		let mut send = SendStream::new(fake.clone());
 		let mut cx = cx();
 
 		// Backpressure: the write parks inside the adapter.
@@ -977,7 +977,7 @@ mod tests {
 	fn a_late_reset_interrupts_the_ack_watch() {
 		let fake = FakeSend::default();
 		fake.never_ack.store(true, Ordering::SeqCst);
-		let mut send = AsyncSend::new(fake.clone());
+		let mut send = SendStream::new(fake.clone());
 		let mut cx = cx();
 
 		assert_eq!(send.poll_write(&mut cx, b"bye"), Poll::Ready(Ok(3)));
@@ -1002,7 +1002,7 @@ mod tests {
 	fn a_completed_write_reconciles_against_a_shorter_retry() {
 		let fake = FakeSend::default();
 		fake.blocked.store(true, Ordering::SeqCst);
-		let mut send = AsyncSend::new(fake.clone());
+		let mut send = SendStream::new(fake.clone());
 		let mut cx = cx();
 
 		assert!(send.poll_write(&mut cx, b"header").is_pending());
@@ -1032,7 +1032,7 @@ mod tests {
 			stops: stops.clone(),
 			blocked: Default::default(),
 		};
-		let mut recv = AsyncRecv::new(fake);
+		let mut recv = RecvStream::new(fake);
 		let mut cx = cx();
 
 		let mut dst = [0u8; 4];
@@ -1058,7 +1058,7 @@ mod tests {
 			stops: stops.clone(),
 			blocked: Default::default(),
 		};
-		let mut recv = AsyncRecv::new(fake);
+		let mut recv = RecvStream::new(fake);
 
 		recv.stop(42);
 		assert_eq!(stops.lock().unwrap().as_slice(), &[42]);
@@ -1075,7 +1075,7 @@ mod tests {
 			stops: stops.clone(),
 			blocked: blocked.clone(),
 		};
-		let mut recv = AsyncRecv::new(fake);
+		let mut recv = RecvStream::new(fake);
 		let mut cx = cx();
 
 		let mut dst = [0u8; 4];
@@ -1096,7 +1096,7 @@ mod tests {
 	async fn a_deferred_reset_code_survives_a_drop_mid_write() {
 		let fake = FakeSend::default();
 		fake.blocked.store(true, Ordering::SeqCst);
-		let mut send = AsyncSend::new(fake.clone());
+		let mut send = SendStream::new(fake.clone());
 		let mut cx = cx();
 
 		assert!(send.poll_write(&mut cx, b"payload").is_pending());
@@ -1125,7 +1125,7 @@ mod tests {
 			stops: stops.clone(),
 			blocked: blocked.clone(),
 		};
-		let mut recv = AsyncRecv::new(fake);
+		let mut recv = RecvStream::new(fake);
 		let mut cx = cx();
 
 		let mut dst = [0u8; 4];
@@ -1154,7 +1154,7 @@ mod tests {
 			stops: stops.clone(),
 			blocked: Default::default(),
 		};
-		let mut recv = AsyncRecv::new(fake);
+		let mut recv = RecvStream::new(fake);
 		let mut cx = cx();
 
 		// The watch reads through the payload to the FIN.

@@ -661,7 +661,7 @@ impl Server {
 							// (like the stream bindings).
 							let Accepted { session, url, identity, authority, mut link } = super::noq::accept(_conn, alpns).await?;
 							link.local = local;
-							let request = server.accept_request(crate::runtime::Runtime::new(), crate::transport::Async::new(session)).await?;
+							let request = server.accept_request(crate::runtime::Runtime::new(), crate::transport::Session::new(session)).await?;
 							Ok(Request { transport: Transport::Quic, url, identity, authority, link, kind: RequestKind::Noq(Box::new(request)) })
 						}.boxed());
 					}
@@ -694,7 +694,7 @@ impl Server {
 					#[cfg(feature = "iroh")]
 					self.accept.push(async move {
 						let Accepted { session, url, identity, authority, link } = super::iroh::accept(_conn).await?;
-						let request = server.accept_request(crate::runtime::Runtime::new(), crate::transport::Async::new(session)).await?;
+						let request = server.accept_request(crate::runtime::Runtime::new(), crate::transport::Session::new(session)).await?;
 						Ok(Request { transport: Transport::Iroh, url, identity, authority, link, kind: RequestKind::Iroh(Box::new(request)) })
 					}.boxed());
 				}
@@ -706,7 +706,7 @@ impl Server {
 							// slow peer doesn't stall the accept loop (spawned like the others).
 							let local = self.websocket_local_addr();
 							self.accept.push(async move {
-								let request = server.accept_request(crate::runtime::Runtime::new(), crate::transport::Async::new(session)).await?;
+								let request = server.accept_request(crate::runtime::Runtime::new(), crate::transport::Session::new(session)).await?;
 								let authority = url.host_str().filter(|h| !h.is_empty()).map(str::to_owned);
 								let link = Link { remote: Some(accepted.remote), local, alpn: accepted.protocol, ..Default::default() };
 								Ok(Request { transport: Transport::WebSocket, url: Some(url), authority, identity: None, link, kind: RequestKind::Qmux(Box::new(request)) })
@@ -1120,7 +1120,7 @@ fn spawn_stream_request(
 ) {
 	tokio::spawn(async move {
 		match server
-			.accept_request(crate::runtime::Runtime::new(), crate::transport::Async::new(session))
+			.accept_request(crate::runtime::Runtime::new(), crate::transport::Session::new(session))
 			.await
 		{
 			Ok(request) => {
@@ -1150,15 +1150,15 @@ type PendingRequest<S> = moq_net::Request<S, crate::runtime::Runtime<S>>;
 
 pub(crate) enum RequestKind {
 	#[cfg(feature = "noq")]
-	Noq(Box<PendingRequest<crate::transport::Async<web_transport_noq::Session>>>),
+	Noq(Box<PendingRequest<crate::transport::Session<web_transport_noq::Session>>>),
 	#[cfg(feature = "quinn")]
 	Quinn(Box<PendingRequest<web_transport_quinn::Session>>),
 	#[cfg(feature = "quiche")]
 	Quiche(Box<PendingRequest<web_transport_quiche::Connection>>),
 	#[cfg(feature = "iroh")]
-	Iroh(Box<PendingRequest<crate::transport::Async<web_transport_iroh::Session>>>),
+	Iroh(Box<PendingRequest<crate::transport::Session<web_transport_iroh::Session>>>),
 	#[cfg(any(feature = "tcp", all(feature = "uds", unix), feature = "websocket"))]
-	Qmux(Box<PendingRequest<crate::transport::Async<qmux::Session>>>),
+	Qmux(Box<PendingRequest<crate::transport::Session<qmux::Session>>>),
 }
 
 /// The transport-level facts a backend captures while accepting a connection, before the

@@ -12,7 +12,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::{net, time};
 use url::Url;
 
-use crate::Duration as CliDuration;
+use crate::cli::Duration as CliDuration;
 /// Errors specific to the WebSocket fallback backend.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -138,7 +138,7 @@ pub struct Config {
 	)]
 	pub delay: CliDuration,
 
-	/// The released `MOQ_CLIENT_WEBSOCKET_*` env vars, folded in by [`Config::resolved`].
+	/// The released `MOQ_CLIENT_WEBSOCKET_*` env vars, named by [`Config::deprecated`].
 	#[usage(flatten)]
 	#[serde(skip)]
 	pub(crate) legacy: Legacy,
@@ -212,15 +212,26 @@ impl Config {
 		found
 	}
 
-	/// Whether the fallback runs at all, resolving the default.
-	pub fn resolved_enabled(&self) -> bool {
-		self.enabled.unwrap_or(true)
+	/// The fallback knobs with defaults applied, ready to run the race with.
+	pub fn resolve(&self) -> Resolved {
+		Resolved {
+			enabled: self.enabled.unwrap_or(true),
+			delay: self.delay.into_std(),
+		}
 	}
+}
 
-	/// The head start a QUIC dial gets, resolving the default.
-	pub fn resolved_delay(&self) -> time::Duration {
-		self.delay.into_std()
-	}
+/// The fallback knobs with defaults filled in, produced by [`Config::resolve`].
+///
+/// Non-exhaustive because it gains a field for every knob [`Config`] gains, so build
+/// it from [`Config::resolve`] rather than a struct literal.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Resolved {
+	/// Whether the fallback runs at all.
+	pub enabled: bool,
+	/// The head start a QUIC dial gets before the fallback joins the race.
+	pub delay: time::Duration,
 }
 
 /// The fallback arm of the QUIC-vs-WebSocket race, so only compiled when there is a
@@ -233,7 +244,7 @@ pub(crate) async fn race_handle(
 	addr: crate::connect::Addr,
 	alpns: &[&str],
 ) -> Option<Result<qmux::Session>> {
-	if !config.resolved_enabled() {
+	if !config.resolve().enabled {
 		return None;
 	}
 
@@ -260,7 +271,8 @@ pub(crate) async fn connect(
 	alpns: &[&str],
 ) -> Result<qmux::Session> {
 	let mut url = addr.url().clone();
-	if !config.resolved_enabled() {
+	let resolved = config.resolve();
+	if !resolved.enabled {
 		return Err(Error::Disabled);
 	}
 
@@ -275,7 +287,7 @@ pub(crate) async fn connect(
 	// Apply a small penalty to WebSocket to improve odds for QUIC to connect first,
 	// unless we've already had to fall back to WebSockets for this server.
 	// TODO if let chain
-	match config.resolved_delay() {
+	match resolved.delay {
 		delay if !delay.is_zero() && !WEBSOCKET_WON.lock().unwrap().contains(&key) => {
 			tokio::time::sleep(delay).await;
 			tracing::debug!(peer = %crate::connect::Endpoint(&url), delay_ms = %delay.as_millis(), "QUIC not yet connected, attempting WebSocket fallback");
@@ -811,8 +823,9 @@ mod legacy_tests {
 	#[test]
 	fn released_spellings_are_reported_not_applied() {
 		let config = parse(&["--websocket-enabled=false", "--websocket-delay", "1s"]);
-		assert!(config.resolved_enabled(), "the released spelling must not turn it off");
-		assert_eq!(config.resolved_delay(), DEFAULT_DELAY);
+		let resolved = config.resolve();
+		assert!(resolved.enabled, "the released spelling must not turn it off");
+		assert_eq!(resolved.delay, DEFAULT_DELAY);
 
 		let reported = config.deprecated().to_string();
 		assert!(
@@ -826,12 +839,13 @@ mod legacy_tests {
 	fn canonical_spellings_apply() {
 		let config = parse(&["--connect-websocket-enabled=false", "--connect-websocket-delay", "2s"]);
 		assert!(config.deprecated().is_empty());
-		assert!(!config.resolved_enabled());
-		assert_eq!(config.resolved_delay(), time::Duration::from_secs(2));
+		let resolved = config.resolve();
+		assert!(!resolved.enabled);
+		assert_eq!(resolved.delay, time::Duration::from_secs(2));
 
 		// Neither given: the typed defaults.
 		let config = parse(&[]);
 		assert_eq!(config.delay, DEFAULT_DELAY);
-		assert_eq!(config.resolved_delay(), DEFAULT_DELAY);
+		assert_eq!(config.resolve().delay, DEFAULT_DELAY);
 	}
 }

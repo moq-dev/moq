@@ -784,7 +784,7 @@ pub struct Config {
 		setting = "cluster.linger",
 		hide = true
 	)]
-	pub linger: Option<moq_tokio::Duration>,
+	pub linger: Option<moq_tokio::cli::Duration>,
 }
 
 impl Config {
@@ -1738,13 +1738,13 @@ impl Cluster {
 	}
 
 	/// Watch a local peer-list file, reconciling whenever it changes. Backed by
-	/// [`moq_tokio::watch::FileWatcher`] (OS notifications with a polling fallback).
+	/// [`moq_tokio::watch::Files`] (OS notifications with a polling fallback).
 	/// Fails static: a missing or malformed file keeps the current dials, and the
 	/// next change triggers a fresh attempt.
 	async fn run_connect_api_file(&self, path: PathBuf, node: Option<String>, token: String, dialed: DialMap) {
 		self.reload_connect_api_file(&path, &node, &token, &dialed);
 
-		let mut watcher = match moq_tokio::watch::FileWatcher::new(std::slice::from_ref(&path)) {
+		let mut watcher = match moq_tokio::watch::Files::new(std::slice::from_ref(&path)) {
 			Ok(watcher) => watcher,
 			Err(err) => {
 				tracing::error!(%err, ?path, "failed to watch cluster.connect_api file; updates disabled");
@@ -1759,7 +1759,7 @@ impl Cluster {
 	}
 
 	/// Re-read the peer-list file and reconcile. Any read/parse error keeps the
-	/// current dials; the [`FileWatcher`](moq_tokio::watch::FileWatcher) only
+	/// current dials; the [`Files`](moq_tokio::watch::Files) only
 	/// re-invokes this on a real change, so a malformed file isn't re-warned on a
 	/// loop.
 	fn reload_connect_api_file(&self, path: &std::path::Path, node: &Option<String>, token: &str, dialed: &DialMap) {
@@ -1954,7 +1954,7 @@ impl Cluster {
 			.context("internal: LAN dial without Cluster::with_connect")?;
 		connect.backoff.timeout = std::time::Duration::ZERO.into();
 		connect.once = Some(false);
-		let mut bind = connect.resolved_bind();
+		let mut bind = connect.resolve().bind;
 		bind.set_port(0);
 		connect.bind = Some(bind);
 		connect.version = connect

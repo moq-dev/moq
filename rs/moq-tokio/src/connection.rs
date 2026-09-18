@@ -3,7 +3,7 @@
 use std::task::{Poll, ready};
 use std::time::Duration;
 
-use crate::Duration as CliDuration;
+use crate::cli::Duration as CliDuration;
 
 use moq_net::Version;
 use moq_net::bandwidth::{Consumer as BandwidthConsumer, Producer as BandwidthProducer};
@@ -324,7 +324,7 @@ fn is_local_v4(ip: std::net::Ipv4Addr) -> bool {
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
-pub struct GoawayConfig {
+pub struct Goaway {
 	/// What to do with the URI a peer names in its GOAWAY. `same-host` (the
 	/// default) lets it move us between ports and schemes on the host we already
 	/// chose, `follow` also lets it name the host, and `ignore` redials the
@@ -353,7 +353,7 @@ pub struct GoawayConfig {
 	pub handover: CliDuration,
 }
 
-impl Default for GoawayConfig {
+impl Default for Goaway {
 	fn default() -> Self {
 		Self {
 			redirect: Redirect::SameHost,
@@ -411,7 +411,7 @@ impl Pacing {
 /// the config names none.
 const DEFAULT_HANDOVER: Duration = Duration::from_secs(10);
 
-impl GoawayConfig {
+impl Goaway {
 	/// The configured redirect policy, or the default.
 	pub fn redirect(&self) -> Redirect {
 		self.redirect
@@ -610,7 +610,7 @@ pub struct Snapshot {
 /// waits for the first session, [`connected`](Self::connected) reads the current state synchronously,
 /// [`epoch`](Self::epoch) counts the sessions so far, and [`status`](Self::status) waits for the
 /// next change. [`closed`](Self::closed) waits for the loop to stop. Clones share the loop; it
-/// stops when the last clone drops (or on an explicit [`close`](Self::close)).
+/// stops when the last clone drops (or on an explicit [`abort`](Self::abort)).
 #[derive(Clone)]
 #[must_use = "dropping the Connection stops the dial; hold it for as long as you want the session"]
 pub struct Connection {
@@ -711,14 +711,6 @@ impl Connection {
 			session.abort(err);
 		}
 		self.task.handle.abort();
-	}
-
-	/// Stop the loop now, for every clone. [`abort`](Self::abort) with no error code.
-	///
-	/// Prefer just dropping the last clone; this is for teardown paths that can't
-	/// control which clone drops last.
-	pub fn close(&self) {
-		self.abort(moq_net::Error::Cancel);
 	}
 
 	async fn run(shared: &Shared, client: Client, addrs: Addrs) -> crate::Result<()> {
@@ -1372,7 +1364,7 @@ mod tests {
 		#[usage(settings)]
 		struct Wrapper {
 			#[usage(flatten)]
-			goaway: GoawayConfig,
+			goaway: Goaway,
 		}
 
 		// No flags passed: the typed defaults are present.
@@ -1399,7 +1391,7 @@ mod tests {
 	/// dying session open for it.
 	#[test]
 	fn handover_takes_the_earlier_deadline() {
-		let config = GoawayConfig {
+		let config = Goaway {
 			handover: Duration::from_secs(10).into(),
 			..Default::default()
 		};
@@ -1417,7 +1409,7 @@ mod tests {
 		);
 
 		// The default is a cap too, not just a fallback for a silent peer.
-		let default = GoawayConfig::default();
+		let default = Goaway::default();
 		assert_eq!(default.handover(Some(Duration::from_secs(3600))), DEFAULT_HANDOVER);
 	}
 
@@ -1563,7 +1555,7 @@ mod tests {
 			"a peer-named host is refused without resolving it"
 		);
 		assert_eq!(
-			GoawayConfig::default().redirect(),
+			Goaway::default().redirect(),
 			Redirect::SameHost,
 			"and the shipped config carries that default"
 		);

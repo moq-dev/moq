@@ -355,7 +355,7 @@ async fn reload_test(backend: moq_tokio::QuicBackend) {
 	server_config.backend = Some(backend);
 
 	#[cfg(feature = "watch")]
-	if moq_tokio::watch::FileWatcher::new(std::slice::from_ref(&cert)).is_err() {
+	if moq_tokio::watch::Files::new(std::slice::from_ref(&cert)).is_err() {
 		eprintln!("skipping reload_test: host cannot start an inotify watcher");
 		return;
 	}
@@ -706,7 +706,7 @@ async fn quiche_webtransport() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn iroh_connect() {
-	use moq_tokio::iroh::EndpointConfig;
+	use moq_tokio::iroh::Config as IrohConfig;
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = moq_tokio::origin::spawn(Hop::random());
@@ -723,7 +723,7 @@ async fn iroh_connect() {
 	group.finish().expect("failed to finish group");
 
 	// Create server iroh endpoint
-	let mut server_iroh_config = EndpointConfig::default();
+	let mut server_iroh_config = IrohConfig::default();
 	server_iroh_config.enabled = Some(true);
 	let server_endpoint = server_iroh_config
 		.bind(&moq_tokio::quic::Config::default())
@@ -754,7 +754,7 @@ async fn iroh_connect() {
 	let mut announcements = sub_consumer.announced();
 
 	// Create client iroh endpoint
-	let mut client_iroh_config = EndpointConfig::default();
+	let mut client_iroh_config = IrohConfig::default();
 	client_iroh_config.enabled = Some(true);
 	let client_endpoint = client_iroh_config
 		.bind(&moq_tokio::quic::Config::default())

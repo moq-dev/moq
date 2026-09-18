@@ -37,7 +37,6 @@ pub mod connect;
 pub mod connection;
 mod crypto;
 mod deprecated;
-mod duration;
 mod error;
 #[cfg(any(
 	feature = "quinn",
@@ -90,9 +89,8 @@ pub mod websocket;
 // new `pub` item in these modules doesn't silently join it.
 pub use client::Client;
 pub use connect::{Addrs, ConnectError};
-pub use connection::{Backoff, Connection, GoawayConfig, Redirect, Status};
+pub use connection::{Backoff, Connection, Redirect, Status};
 pub use deprecated::Deprecated;
-pub use duration::Duration;
 pub use error::{Error, Result};
 pub use log::{Log, RedactedUrl};
 #[cfg(feature = "_transport")]
@@ -102,7 +100,7 @@ pub use server::{Listener, Request, Server, Transport};
 pub use moq_net;
 pub use rustls;
 
-/// Re-exported because [`watch::FileWatcher`] surfaces `notify::Result`/`notify::Error`
+/// Re-exported because [`watch::Files`] surfaces `notify::Result`/`notify::Error`
 /// in its API; a major `notify` bump is therefore a breaking change for this crate.
 #[cfg(feature = "watch")]
 pub use notify;

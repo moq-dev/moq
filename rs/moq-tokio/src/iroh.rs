@@ -131,7 +131,7 @@ type Result<T> = std::result::Result<T, Error>;
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
-pub struct EndpointConfig {
+pub struct Config {
 	/// Whether to enable iroh support.
 	#[usage(
 		name = "iroh-enabled",
@@ -187,7 +187,7 @@ pub struct EndpointConfig {
 	pub disable_relay: Option<bool>,
 }
 
-impl EndpointConfig {
+impl Config {
 	/// Bind the iroh endpoint, applying the per-connection [`crate::quic::Config`] knobs.
 	///
 	/// iroh is a single P2P endpoint shared by both roles, so it takes the client
@@ -448,7 +448,7 @@ mod tests {
 		let quic = Cli::parse_from(&[std::ffi::OsStr::new("--client-quic-gso=false")])
 			.unwrap()
 			.quic;
-		let config = EndpointConfig {
+		let config = Config {
 			enabled: Some(true),
 			..Default::default()
 		};
@@ -477,7 +477,7 @@ mod tests {
 				"send_window" => quic.send_window = Some(value),
 				_ => unreachable!(),
 			}
-			let config = EndpointConfig {
+			let config = Config {
 				enabled: Some(true),
 				// Reading a directory fails if validation lets the invalid config through.
 				secret: Some(dir.path().to_str().unwrap().to_owned()),

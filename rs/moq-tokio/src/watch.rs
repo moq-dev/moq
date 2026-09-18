@@ -17,13 +17,13 @@ use tokio::sync::mpsc;
 /// swap, which changes the inode (and, for the K8s `..data` symlink, fires on the
 /// directory without ever naming the file), so a watch set directly on the path
 /// would be missed.
-pub struct FileWatcher {
+pub struct Files {
 	// Holds the OS watcher alive; dropping it stops events.
 	_watcher: notify::RecommendedWatcher,
 	events: mpsc::Receiver<()>,
 }
 
-impl FileWatcher {
+impl Files {
 	/// Start watching the parent directories of `paths`. Errors if the OS watcher
 	/// can't be created or a directory can't be watched (e.g. the inotify
 	/// instance/watch limit is hit). `notify` already falls back to a built-in
@@ -128,7 +128,7 @@ mod tests {
 	// watcher, so `new` must fall back to the current directory rather than error.
 	#[test]
 	fn bare_filename_watches_current_dir() {
-		match FileWatcher::new(&[PathBuf::from("cert.pem"), PathBuf::from("key.pem")]) {
+		match Files::new(&[PathBuf::from("cert.pem"), PathBuf::from("key.pem")]) {
 			Ok(_) => {}
 			Err(err) if matches!(err.kind, notify::ErrorKind::MaxFilesWatch) => {
 				eprintln!("skipping bare_filename_watches_current_dir: {err}");

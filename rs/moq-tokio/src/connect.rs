@@ -3,7 +3,8 @@
 //! [`Addrs`] is the peer's address list, [`Config`] is how to reach it, and the
 //! accept side lives in [`crate::listen`].
 
-use crate::{Backoff, GoawayConfig, QuicBackend};
+use crate::connection::Goaway;
+use crate::{Backoff, QuicBackend};
 use std::net;
 use url::Url;
 
@@ -15,7 +16,7 @@ pub(crate) const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::fro
 ///
 /// Lives here rather than in [`crate::failover`], which is compiled only for the
 /// transports that dial an address themselves: the resolved default is config, so
-/// [`Config::resolved_race`] has to answer in every build.
+/// [`Config::resolve`] has to answer in every build.
 pub(crate) const DEFAULT_RACE: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// How long the first candidate waits for the full DNS answer before settling for
@@ -172,7 +173,7 @@ pub(crate) struct Legacy {
 		env = "MOQ_CLIENT_CONNECT_TIMEOUT",
 		hide = true
 	)]
-	timeout: Option<crate::Duration>,
+	timeout: Option<crate::cli::Duration>,
 
 	#[usage(
 		name = "client-failover-delay",
@@ -180,7 +181,7 @@ pub(crate) struct Legacy {
 		env = "MOQ_CLIENT_FAILOVER_DELAY",
 		hide = true
 	)]
-	race: Option<crate::Duration>,
+	race: Option<crate::cli::Duration>,
 
 	#[usage(
 		name = "client-resolution-delay",
@@ -188,7 +189,7 @@ pub(crate) struct Legacy {
 		env = "MOQ_CLIENT_RESOLUTION_DELAY",
 		hide = true
 	)]
-	resolution_delay: Option<crate::Duration>,
+	resolution_delay: Option<crate::cli::Duration>,
 
 	#[usage(
 		name = "client-reconnect",
@@ -394,7 +395,7 @@ failover_delay = "1s"
 		)
 		.expect("parse");
 		assert!(config.url.is_none());
-		assert_eq!(config.race, crate::Duration::from(DEFAULT_RACE));
+		assert_eq!(config.race, crate::cli::Duration::from(DEFAULT_RACE));
 		let reported = config.deprecated().to_string();
 		assert!(reported.contains("connect -> url"), "{reported}");
 		assert!(reported.contains("failover_delay -> race"), "{reported}");
@@ -543,12 +544,12 @@ pub struct Config {
 		default = "250ms",
 		setting = "connect.race"
 	)]
-	pub race: crate::Duration,
+	pub race: crate::cli::Duration,
 
 	/// The released `failover_delay` key, kept so [`deprecated`](Self::deprecated) can name [`race`](Self::race).
 	#[serde(default, skip_serializing)]
 	#[usage(skip)]
-	pub(crate) failover_delay: Option<crate::Duration>,
+	pub(crate) failover_delay: Option<crate::cli::Duration>,
 
 	/// Delay before dialing an IPv4 address while the full DNS answer is outstanding.
 	///
@@ -564,7 +565,7 @@ pub struct Config {
 		default = "50ms",
 		setting = "connect.resolution_delay"
 	)]
-	pub resolution_delay: crate::Duration,
+	pub resolution_delay: crate::cli::Duration,
 
 	/// Maximum time for one [`crate::Client::connect`], covering the dial and the MoQ
 	/// handshake. Defaults to 30 seconds; set to 0 to wait forever.
@@ -582,7 +583,7 @@ pub struct Config {
 		default = "30s",
 		setting = "connect.timeout"
 	)]
-	pub timeout: crate::Duration,
+	pub timeout: crate::cli::Duration,
 
 	/// Restrict the client to specific MoQ protocol version(s).
 	///
@@ -653,7 +654,7 @@ pub struct Config {
 	/// How [`crate::Client::connect`] reacts to a peer's GOAWAY (`--goaway-*`).
 	#[usage(flatten)]
 	#[serde(default)]
-	pub goaway: GoawayConfig,
+	pub goaway: Goaway,
 
 	/// WebSocket fallback settings (`--websocket-*`), used when QUIC is
 	/// blocked.
@@ -749,11 +750,6 @@ impl Config {
 			.init()
 	}
 
-	/// The local address a dial sends from, resolving the default.
-	pub fn resolved_bind(&self) -> net::SocketAddr {
-		self.bind.unwrap_or_else(default_bind)
-	}
-
 	/// Returns the configured versions, defaulting to all if none specified.
 	pub fn versions(&self) -> moq_net::Versions {
 		if self.version.is_empty() {
@@ -763,28 +759,36 @@ impl Config {
 		}
 	}
 
-	/// The Happy Eyeballs stagger a dial will actually use, resolving the default.
+	/// The dial knobs with defaults applied, ready to hand to a backend.
 	///
-	/// Every backend reads it from here so the four dial paths can't drift apart. The
-	/// [`race`](Self::race) field is the override; this is the value
-	/// it resolves to, so `Config::default().resolved_race()` is the
-	/// default itself.
-	pub fn resolved_race(&self) -> std::time::Duration {
-		self.race.into_std()
+	/// Every backend reads them from here so the four dial paths can't drift apart:
+	/// the fields on this config are the overrides, and `Config::default().resolve()`
+	/// is the defaults themselves.
+	pub fn resolve(&self) -> Resolved {
+		Resolved {
+			bind: self.bind.unwrap_or_else(default_bind),
+			race: self.race.into_std(),
+			resolution_delay: self.resolution_delay.into_std(),
+			timeout: self.timeout.into_std(),
+		}
 	}
+}
 
-	/// The Resolution Delay a dial will actually use, resolving the default from
-	/// the [`resolution_delay`](Self::resolution_delay) override. Read by every
-	/// backend, like [`resolved_race`](Self::resolved_race).
-	pub fn resolved_resolution_delay(&self) -> std::time::Duration {
-		self.resolution_delay.into_std()
-	}
-
-	/// The deadline one connection attempt will actually get, dial and handshake
-	/// together, resolving the default from the [`timeout`](Self::timeout) override.
-	pub fn resolved_timeout(&self) -> std::time::Duration {
-		self.timeout.into_std()
-	}
+/// The dial knobs with defaults filled in, produced by [`Config::resolve`].
+///
+/// Non-exhaustive because it gains a field for every knob [`Config`] gains, so build
+/// it from [`Config::resolve`] rather than a struct literal.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Resolved {
+	/// The local address a dial sends from.
+	pub bind: net::SocketAddr,
+	/// The Happy Eyeballs stagger between address attempts.
+	pub race: std::time::Duration,
+	/// How long the IPv4-only lookup waits for the full DNS answer.
+	pub resolution_delay: std::time::Duration,
+	/// The deadline one connection attempt gets, dial and handshake together.
+	pub timeout: std::time::Duration,
 }
 
 #[cfg(test)]

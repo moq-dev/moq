@@ -101,7 +101,7 @@ pub struct Config {
 		default = "10s",
 		setting = "drain_timeout"
 	)]
-	pub drain_timeout: moq_tokio::Duration,
+	pub drain_timeout: moq_tokio::cli::Duration,
 
 	/// If provided, load the configuration from this file.
 	#[serde(default)]
@@ -117,7 +117,7 @@ pub struct Config {
 	#[usage(flatten)]
 	#[serde(default)]
 	#[cfg(feature = "iroh")]
-	pub iroh: moq_tokio::iroh::EndpointConfig,
+	pub iroh: moq_tokio::iroh::Config,
 }
 
 impl Default for Config {

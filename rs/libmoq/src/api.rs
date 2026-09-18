@@ -1071,16 +1071,18 @@ pub extern "C" fn moq_client_defaults() -> moq_client_config {
 		let mut dst: moq_client_config = unsafe { std::mem::zeroed() };
 		let config = crate::client::Config::default();
 
-		dst.connect_timeout_ms = millis(config.connect.resolved_timeout());
+		let connect = config.connect.resolve();
+		dst.connect_timeout_ms = millis(connect.timeout);
 		dst.has_connect_timeout = true;
-		dst.failover_delay_ms = millis(config.connect.resolved_race());
+		dst.failover_delay_ms = millis(connect.race);
 		dst.has_failover_delay = true;
-		dst.resolution_delay_ms = millis(config.connect.resolved_resolution_delay());
+		dst.resolution_delay_ms = millis(connect.resolution_delay);
 		dst.has_resolution_delay = true;
 
-		dst.websocket_enabled = config.connect.websocket.resolved_enabled();
+		let websocket = config.connect.websocket.resolve();
+		dst.websocket_enabled = websocket.enabled;
 		dst.has_websocket_enabled = true;
-		dst.websocket_delay_ms = millis(config.connect.websocket.resolved_delay());
+		dst.websocket_delay_ms = millis(websocket.delay);
 		dst.has_websocket_delay = true;
 
 		dst.backoff_initial_us = micros(config.connect.backoff.initial());

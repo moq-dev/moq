@@ -28,7 +28,7 @@ pub struct Args {
 
 	/// SRT receive latency: the buffering delay traded for loss-recovery headroom.
 	#[usage(long, default = "500ms")]
-	pub latency: moq_tokio::Duration,
+	pub latency: moq_tokio::cli::Duration,
 }
 
 /// Accept incoming SRT publishes into the Origin as `target.name`; reject requests (import).

@@ -29,7 +29,7 @@ pub struct Args {
 	/// delay, with a 50ms floor under it, so a smaller value than that does not reach the
 	/// picture either.
 	#[usage(long, default = "100ms")]
-	pub delay: moq_tokio::Duration,
+	pub delay: moq_tokio::cli::Duration,
 
 	/// Rendition selection by track name or codec.
 	#[usage(flatten)]

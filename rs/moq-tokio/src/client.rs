@@ -6,7 +6,8 @@
 
 #[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 use crate::QuicBackend;
-use crate::{Addrs, Backoff, Connection, Error, GoawayConfig};
+use crate::connection::Goaway;
+use crate::{Addrs, Backoff, Connection, Error};
 #[cfg(all(feature = "websocket", any(feature = "noq", feature = "quinn", feature = "quiche")))]
 use std::future::Future;
 use url::Url;
@@ -76,7 +77,7 @@ pub struct Client {
 	timeout: std::time::Duration,
 	pub(crate) reconnect: bool,
 	pub(crate) backoff: Backoff,
-	pub(crate) goaway: GoawayConfig,
+	pub(crate) goaway: Goaway,
 	/// The resolved Happy Eyeballs timings, used by the `tcp://` dial here; the
 	/// QUIC backends capture their own copy from the config.
 	#[cfg(feature = "tcp")]
@@ -163,13 +164,14 @@ impl Client {
 
 		let versions = config.versions();
 		// Read before the struct literal below moves fields out of `config`.
+		let resolved = config.resolve();
 		#[cfg(feature = "tcp")]
-		let failover_delay = config.resolved_race();
+		let failover_delay = resolved.race;
 		#[cfg(feature = "tcp")]
-		let resolution_delay = config.resolved_resolution_delay();
+		let resolution_delay = resolved.resolution_delay;
 		#[cfg(feature = "websocket")]
 		let tls_host_name = config.tls.host_name.clone();
-		let timeout = config.resolved_timeout();
+		let timeout = resolved.timeout;
 
 		Ok(Self {
 			moq: moq_net::Client::new().with_versions(versions.clone()),
@@ -405,7 +407,7 @@ impl Client {
 			let session =
 				crate::tcp::connect(url, &self.versions.alpns(), self.failover_delay, self.resolution_delay).await?;
 			return Ok(moq
-				.connect(crate::runtime::Runtime::new(), crate::transport::Async::new(session))
+				.connect(crate::runtime::Runtime::new(), crate::transport::Session::new(session))
 				.await?);
 		}
 
@@ -415,7 +417,7 @@ impl Client {
 		if url.scheme() == "unix" {
 			let session = crate::unix::connect(url, &self.versions.alpns()).await?;
 			return Ok(moq
-				.connect(crate::runtime::Runtime::new(), crate::transport::Async::new(session))
+				.connect(crate::runtime::Runtime::new(), crate::transport::Session::new(session))
 				.await?);
 		}
 
@@ -442,7 +444,7 @@ impl Client {
 			};
 
 			return Ok(moq
-				.connect(crate::runtime::Runtime::new(), crate::transport::Async::new(session))
+				.connect(crate::runtime::Runtime::new(), crate::transport::Session::new(session))
 				.await?);
 		}
 
@@ -453,7 +455,7 @@ impl Client {
 			let quic_handle = async {
 				noq.connect(&tls, quic_addr, &self.versions)
 					.await
-					.map(crate::transport::Async::new)
+					.map(crate::transport::Session::new)
 					.map_err(Error::from)
 			};
 
@@ -525,7 +527,7 @@ impl Client {
 			crate::websocket::connect(&self.websocket, &self.tls, self.tls_host_name.as_deref(), addr, &alpns).await?;
 		Ok(self
 			.moq
-			.connect(crate::runtime::Runtime::new(), crate::transport::Async::new(session))
+			.connect(crate::runtime::Runtime::new(), crate::transport::Session::new(session))
 			.await?)
 	}
 
@@ -562,7 +564,10 @@ impl Client {
 			TransportRace::Quic(quic) => Ok(moq.connect(crate::runtime::Runtime::new(), quic).await?),
 			TransportRace::WebSocket(websocket) => Ok(self
 				.moq
-				.connect(crate::runtime::Runtime::new(), crate::transport::Async::new(websocket))
+				.connect(
+					crate::runtime::Runtime::new(),
+					crate::transport::Session::new(websocket),
+				)
 				.await?),
 		}
 	}
@@ -980,7 +985,7 @@ mod tests {
 		"#;
 
 		let config: crate::connect::Config = toml::from_str(toml).unwrap();
-		assert_eq!(config.race, crate::Duration::from(crate::connect::DEFAULT_RACE));
+		assert_eq!(config.race, crate::cli::Duration::from(crate::connect::DEFAULT_RACE));
 		assert!(
 			config.deprecated().to_string().contains("failover_delay -> race"),
 			"{}",
@@ -1013,14 +1018,14 @@ mod tests {
 	fn test_cli_resolution_delay() {
 		let config = Cli::config_from(["test", "--connect-resolution-delay", "0s"]);
 		assert_eq!(config.resolution_delay, std::time::Duration::ZERO);
-		assert_eq!(config.resolved_resolution_delay(), std::time::Duration::ZERO);
+		assert_eq!(config.resolve().resolution_delay, std::time::Duration::ZERO);
 	}
 
 	#[test]
 	fn resolution_delay_defaults_to_the_rfc_value() {
 		let config = Cli::config_from(["test"]);
 		assert_eq!(config.resolution_delay, std::time::Duration::from_millis(50));
-		assert_eq!(config.resolved_resolution_delay(), std::time::Duration::from_millis(50));
+		assert_eq!(config.resolve().resolution_delay, std::time::Duration::from_millis(50));
 	}
 
 	#[test]
@@ -1143,7 +1148,7 @@ mod tests {
 	fn test_cli_bind_prefers_canonical() {
 		let config = Cli::config_from(["test"]);
 		assert_eq!(config.bind, None, "unset means the default");
-		assert_eq!(config.resolved_bind(), "[::]:0".parse().unwrap());
+		assert_eq!(config.resolve().bind, "[::]:0".parse().unwrap());
 
 		let config = Cli::config_from(["test", "--connect-bind", "[::]:0"]);
 		assert_eq!(
@@ -1308,7 +1313,7 @@ mod tests {
 	fn race_defaults_to_the_rfc_8305_stagger() {
 		let config = crate::connect::Config::default();
 		assert_eq!(config.race, std::time::Duration::from_millis(250));
-		assert_eq!(config.resolved_race(), std::time::Duration::from_millis(250));
+		assert_eq!(config.resolve().race, std::time::Duration::from_millis(250));
 	}
 
 	/// Iroh carries no rustls state, so constructing its client must not require an
@@ -1326,7 +1331,7 @@ mod tests {
 	fn connect_timeout_defaults_to_thirty_seconds() {
 		let config = Cli::config_from(["test"]);
 		assert_eq!(config.timeout, crate::connect::DEFAULT_TIMEOUT);
-		assert_eq!(config.resolved_timeout(), crate::connect::DEFAULT_TIMEOUT);
+		assert_eq!(config.resolve().timeout, crate::connect::DEFAULT_TIMEOUT);
 	}
 
 	/// A peer that completes the TCP handshake and then never speaks: the QUIC arm

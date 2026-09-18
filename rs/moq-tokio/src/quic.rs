@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::Duration as CliDuration;
+use crate::cli::Duration as CliDuration;
 
 /// The routable server ID a QUIC-LB load balancer encodes into connection IDs.
 ///

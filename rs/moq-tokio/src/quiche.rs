@@ -281,7 +281,8 @@ impl QuicheClient {
 
 		// Warn once here rather than on every dial: the constraint is a property of
 		// the config, and a relay reconnecting to its peers would repeat it forever.
-		let bind = config.resolved_bind();
+		let resolved = config.resolve();
+		let bind = resolved.bind;
 		if bind.port() != 0 {
 			tracing::warn!(
 				bind = %bind,
@@ -295,8 +296,8 @@ impl QuicheClient {
 			http_bootstrap: config.tls.allows_http_bootstrap(),
 			quic,
 			host_name: config.tls.host_name.clone(),
-			failover_delay: config.resolved_race(),
-			resolution_delay: config.resolved_resolution_delay(),
+			failover_delay: resolved.race,
+			resolution_delay: resolved.resolution_delay,
 			identity,
 		})
 	}

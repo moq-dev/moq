@@ -500,7 +500,7 @@ fn broadcasts(_ctx: CompleteCtx<'_>) -> CompletionFuture<'static> {
 				false => live.remove(&path),
 			};
 		}
-		connection.close();
+		drop(connection);
 
 		live.into_iter().map(Candidate::new).collect()
 	})
@@ -572,7 +572,7 @@ async fn renditions(ctx: &CompleteCtx<'_>) -> Option<moq_mux::catalog::hang::Cat
 		.await
 		.ok()
 		.flatten();
-	connection.close();
+	drop(connection);
 	catalog
 }
 

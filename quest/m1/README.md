@@ -34,7 +34,6 @@ contract, so it gates [Release](/quest/m1/release.md) rather than the merge.
 - [moq-net surface](/quest/m1/api-net-surface.md) - dead exports go, compounds sit under their modules, creators take `&self`
 - [Bindings announce match](/quest/m1/api-origin-scopes.md) - every binding takes a pattern scope and reports the announce match with its captures
 - [PathPrefixes](/quest/m1/api-path-prefixes.md) - the unused moq_net::PathPrefixes type is deleted before the release
-- [moq-tokio names](/quest/m1/api-tokio-names.md) - moq-tokio's public names sit under their modules with no root compounds, adapter names, or forgettable close()
 - [moq-tokio shapes](/quest/m1/api-tokio-shapes.md) - a `Drop` on `Listener`, a worker `Member` that cannot be cross-wired, `std::time::Duration` fields, one construction idiom, no six-argument merge
 - [@moq/net API](/quest/m1/api-js-net.md) - one error namespace with Rust's names, one connect shape, one path-to-broadcast call, `Time.Milli` everywhere, wire-layer methods internal
 - [@moq/auth API](/quest/m1/api-js-auth.md) - `Key` and `KeySet` namespaces with moq-auth's verbs instead of `load`/`signWith`

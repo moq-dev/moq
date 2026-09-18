@@ -2215,7 +2215,7 @@ mod tests {
 	}
 
 	/// Dropping the listener has to stop its reload watcher. The watcher parks in
-	/// `FileWatcher::changed` and never returns on its own, so without the abort it
+	/// `Files::changed` and never returns on its own, so without the abort it
 	/// keeps its task, an OS directory watch, and the certificate keys alive for the
 	/// rest of the process. The `Arc` is the observable half: while the task lives it
 	/// holds one, so a `Weak` that still upgrades is a watcher that never stopped.
@@ -2246,7 +2246,7 @@ mod tests {
 		certs.load_certs(&config).unwrap();
 		let weak = Arc::downgrade(&certs);
 
-		if let Err(err) = crate::watch::FileWatcher::new(&config.cert) {
+		if let Err(err) = crate::watch::Files::new(&config.cert) {
 			// The host is out of inotify watches; Reload::spawn becomes inert and
 			// this test cannot observe the abort. CI still exercises the real path.
 			eprintln!("skipping dropping_the_reload_guard_stops_the_watcher: {err}");
@@ -3022,7 +3022,7 @@ impl rustls::server::ResolvesServerCert for ServeCerts {
 
 /// Holds the certificate reload watcher for as long as the listener that spawned it.
 ///
-/// The watcher parks in [`crate::watch::FileWatcher::changed`] and never returns on
+/// The watcher parks in [`crate::watch::Files::changed`] and never returns on
 /// its own, so a listener that goes away without this leaves the task, the keys it
 /// holds, and an OS directory watch behind. An embedder that builds listeners
 /// repeatedly in one process would accumulate all three.
@@ -3057,7 +3057,7 @@ impl Reload {
 			return Self::inert();
 		}
 
-		let watcher = match crate::watch::FileWatcher::new(&paths) {
+		let watcher = match crate::watch::Files::new(&paths) {
 			Ok(watcher) => watcher,
 			Err(err) => {
 				tracing::error!(%err, "failed to watch certificate files; hot reload disabled");
@@ -3086,7 +3086,7 @@ impl Reload {
 /// `mv`-into-place rotate certs with no external signal. [`Reload::spawn`] owns
 /// registering the watch and is the only caller.
 #[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
-async fn reload_certs(mut watcher: crate::watch::FileWatcher, certs: Arc<ServeCerts>, tls_config: Listen) {
+async fn reload_certs(mut watcher: crate::watch::Files, certs: Arc<ServeCerts>, tls_config: Listen) {
 	loop {
 		watcher.changed().await;
 		tracing::info!("reloading server certificates");

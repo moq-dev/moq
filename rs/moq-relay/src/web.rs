@@ -403,7 +403,7 @@ fn https_watch_paths(cert: &[PathBuf], key: &[PathBuf], root: &[PathBuf]) -> Vec
 async fn reload_https_config(config: RustlsConfig, cert: Vec<PathBuf>, key: Vec<PathBuf>, root: Vec<PathBuf>) {
 	let paths = https_watch_paths(&cert, &key, &root);
 
-	let mut watcher = match moq_tokio::watch::FileWatcher::new(&paths) {
+	let mut watcher = match moq_tokio::watch::Files::new(&paths) {
 		Ok(watcher) => watcher,
 		Err(err) => {
 			tracing::error!(%err, "failed to watch web certificate files; hot reload disabled");

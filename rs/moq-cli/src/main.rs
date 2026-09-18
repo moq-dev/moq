@@ -570,7 +570,7 @@ fn spawn_import(
 		reject_listener_cors(&rtc.cors, "import rtc")?;
 	}
 
-	let max_age = import.max_age.map(moq_tokio::Duration::into_std);
+	let max_age = import.max_age.map(moq_tokio::cli::Duration::into_std);
 	// The MoQ side every gateway publishes into, minted per source since each takes it
 	// by value onto its own task.
 	let target = |name: String| crate::moq::ImportTarget {

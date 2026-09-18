@@ -3491,8 +3491,8 @@ fn a_null_config_dials_with_the_defaults() {
 	let parsed = unsafe { crate::parse_client(None) }.expect("NULL is the defaults");
 	assert_eq!(parsed.connect.backoff.initial(), defaults.connect.backoff.initial());
 	assert_eq!(
-		parsed.connect.websocket.resolved_enabled(),
-		defaults.connect.websocket.resolved_enabled()
+		parsed.connect.websocket.resolve().enabled,
+		defaults.connect.websocket.resolve().enabled
 	);
 }
 
@@ -3512,12 +3512,12 @@ fn a_zeroed_config_is_the_defaults() {
 	assert_eq!(parsed.connect.backoff.max(), defaults.connect.backoff.max());
 	assert_eq!(parsed.connect.backoff.timeout(), defaults.connect.backoff.timeout());
 	assert_eq!(
-		parsed.connect.websocket.resolved_enabled(),
-		defaults.connect.websocket.resolved_enabled()
+		parsed.connect.websocket.resolve().enabled,
+		defaults.connect.websocket.resolve().enabled
 	);
 	assert_eq!(
-		parsed.connect.websocket.resolved_delay(),
-		defaults.connect.websocket.resolved_delay()
+		parsed.connect.websocket.resolve().delay,
+		defaults.connect.websocket.resolve().delay
 	);
 	assert_eq!(parsed.connect.version, defaults.connect.version);
 	assert_eq!(parsed.connect.bind, defaults.connect.bind);
@@ -3537,22 +3537,14 @@ fn defaults_report_what_a_zeroed_config_dials() {
 
 	let expected = crate::client::Config::default();
 	let quic = moq_tokio::quic::Resolved::default();
+	let connect = expected.connect.resolve();
 
 	assert!(config.has_connect_timeout);
-	assert_eq!(
-		config.connect_timeout_ms,
-		expected.connect.resolved_timeout().as_millis() as u64
-	);
+	assert_eq!(config.connect_timeout_ms, connect.timeout.as_millis() as u64);
 	assert!(config.has_failover_delay);
-	assert_eq!(
-		config.failover_delay_ms,
-		expected.connect.resolved_race().as_millis() as u64
-	);
+	assert_eq!(config.failover_delay_ms, connect.race.as_millis() as u64);
 	assert!(config.has_resolution_delay);
-	assert_eq!(
-		config.resolution_delay_ms,
-		expected.connect.resolved_resolution_delay().as_millis() as u64
-	);
+	assert_eq!(config.resolution_delay_ms, connect.resolution_delay.as_millis() as u64);
 
 	assert!(config.has_backoff_initial);
 	assert_eq!(
@@ -3569,13 +3561,11 @@ fn defaults_report_what_a_zeroed_config_dials() {
 		expected.connect.backoff.timeout().as_micros() as u64
 	);
 
+	let websocket = expected.connect.websocket.resolve();
 	assert!(config.has_websocket_enabled);
-	assert_eq!(config.websocket_enabled, expected.connect.websocket.resolved_enabled());
+	assert_eq!(config.websocket_enabled, websocket.enabled);
 	assert!(config.has_websocket_delay);
-	assert_eq!(
-		config.websocket_delay_ms,
-		expected.connect.websocket.resolved_delay().as_millis() as u64
-	);
+	assert_eq!(config.websocket_delay_ms, websocket.delay.as_millis() as u64);
 
 	assert!(config.has_quic_max_streams);
 	assert_eq!(config.quic_max_streams, quic.max_streams);
@@ -3598,8 +3588,8 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	let reparsed = parsed(&config);
 	assert_eq!(reparsed.connect.backoff.initial(), expected.connect.backoff.initial());
 	assert_eq!(
-		reparsed.connect.websocket.resolved_enabled(),
-		expected.connect.websocket.resolved_enabled()
+		reparsed.connect.websocket.resolve().enabled,
+		expected.connect.websocket.resolve().enabled
 	);
 }
 

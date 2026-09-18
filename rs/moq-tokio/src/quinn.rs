@@ -313,7 +313,8 @@ pub(crate) struct QuinnClient {
 
 impl QuinnClient {
 	pub fn new(config: &connect::Config, quic: &crate::quic::Config) -> Result<Self> {
-		let socket = crate::bind::udp(crate::bind::Udp::new(config.resolved_bind())).map_err(Error::BindSocket)?;
+		let resolved = config.resolve();
+		let socket = crate::bind::udp(crate::bind::Udp::new(resolved.bind)).map_err(Error::BindSocket)?;
 		let dual_stack = crate::bind::udp_is_dual_stack(&socket);
 
 		let quic = quic.resolve();
@@ -334,8 +335,8 @@ impl QuinnClient {
 			transport,
 			http_bootstrap: config.tls.allows_http_bootstrap(),
 			host_name: config.tls.host_name.clone(),
-			failover_delay: config.resolved_race(),
-			resolution_delay: config.resolved_resolution_delay(),
+			failover_delay: resolved.race,
+			resolution_delay: resolved.resolution_delay,
 			dual_stack,
 		})
 	}

@@ -52,7 +52,6 @@ accepted.
 ## Required
 
 - [API review gate](/quest/m1/api-review-gate.md) - every breaking review quest is landed or explicitly deferred
-- [moq-tokio names](/quest/m1/api-tokio-names.md) - moq-tokio's first release under this name has settled names
 - [m0](/quest/m0/README.md) - every release blocker lands or is punted before the merge
 
 ## Closes

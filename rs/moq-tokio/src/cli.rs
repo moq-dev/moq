@@ -5,7 +5,10 @@
 //! `parse()` is expected to take them first. A binary that parses more than once
 //! never reaches that code, so it has to answer them itself. Both shapes exist here:
 //! a TOML merge that layers CLI, env, and file with recorded provenance, and
-//! moq-cli's repeated `--` stage grammar.
+//! moq-cli's repeated `--` stage grammar. [`Duration`] is the human-readable
+//! duration those flags and TOML keys parse.
+
+mod duration;
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -17,6 +20,8 @@ use usage::config::{
 	CliLayer, EnvLayer, FileScope, Layer, LayerCtx, LayerError, LayerOutput, Layers, Origin, Registry, Resolved,
 	SourceKind, Value, resolve,
 };
+
+pub use duration::Duration;
 
 /// What a Usage parse result asks the process to do.
 #[non_exhaustive]

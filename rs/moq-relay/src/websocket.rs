@@ -176,7 +176,7 @@ where
 	// teardown stay tied to this handler task.
 	let runtime = moq_tokio::runtime::Inline::new();
 	let session = server
-		.accept(runtime.clone(), moq_tokio::transport::Async::new(ws))
+		.accept(runtime.clone(), moq_tokio::transport::Session::new(ws))
 		.await?;
 	let mut driver = runtime.take().expect("accept hands the machine to its runtime");
 

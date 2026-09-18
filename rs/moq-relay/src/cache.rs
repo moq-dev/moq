@@ -61,7 +61,7 @@ pub struct Config {
 	/// publisher that stops writing pays none of it down, so under memory pressure
 	/// it is repaid by the tracks that are still writing.
 	#[usage(long = "cache-duration", env = "MOQ_CACHE_DURATION", setting = "cache.duration")]
-	pub duration: Option<moq_tokio::Duration>,
+	pub duration: Option<moq_tokio::cli::Duration>,
 }
 
 /// The relay's resolved cache settings: the shared byte-budget pool plus the
@@ -98,7 +98,7 @@ impl Config {
 	/// point, say) leaves nothing sampling memory behind.
 	pub fn init(&self) -> anyhow::Result<Cache> {
 		let capacity = self.capacity.as_deref().map(parse_limit).transpose()?;
-		let duration = self.duration.map(moq_tokio::Duration::into_std);
+		let duration = self.duration.map(moq_tokio::cli::Duration::into_std);
 		let config = cache::Config::default()
 			.with_capacity(capacity)
 			.with_expiry(duration.unwrap_or(cache::DEFAULT_EXPIRY));

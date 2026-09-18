@@ -24,7 +24,9 @@ with its PR and the replacement call:
   reserved range moved to 0x36-0x39 in the draft's own range; subscriptions resume
   across routes sharing a first hop (#3312); the send estimate is split among
   JS publishers (#3616); @moq/net and @moq/pattern mirror Rust (`consume`, `Time.Milli`,
-  one `readFrame()`, `InvalidPattern`); the announce and request names; and [moq-tokio names](/quest/m1/api-tokio-names.md).
+  one `readFrame()`, `InvalidPattern`); the announce and request names; and
+  moq-tokio's names sit under their modules (`connection::Goaway`, `cli::Duration`,
+  `transport::Session`, `watch::Files`, `resolve()`).
 - hang and json: the catalog `timeline` is `archive` (#3612); `json` and
   `binary` catalog sections (#3109) take one options object (#3640); Rust
   `modify()` is fallible and a failed dropped edit aborts the track (#3644),
