@@ -410,7 +410,7 @@ impl Publish {
 		Ok(id)
 	}
 
-	async fn run_demand(
+	pub(crate) async fn run_demand(
 		callback: OnStatus,
 		demand: moq_net::track::Demand,
 		mut close: oneshot::Receiver<()>,
