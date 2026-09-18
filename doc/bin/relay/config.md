@@ -111,7 +111,7 @@ cert = "cert.pem"
 key = "key.pem"
 
 [internal]
-listen = "127.0.0.1:9101"            # Unauthenticated /health, /metrics, /nodes. Keep private.
+listen = "127.0.0.1:9101"            # Unauthenticated /health, /metrics, /nodes, /sessions, POST /sessions/revalidate. Keep private.
 ```
 
 See [HTTP endpoints](/bin/relay/http).

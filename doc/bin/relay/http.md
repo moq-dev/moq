@@ -22,9 +22,9 @@ curl http://localhost:4443/announced/demo
 curl http://localhost:4443/fetch/demo/bbb.hang/catalog.json
 ```
 
-The announcement listing includes prefix-shaped claims, using each covered prefix
-as the broadcast name. It omits arbitrary patterns such as `room/*`, which do
-not identify a concrete broadcast.
+The announcement listing names each announced route by the prefix it covers;
+by convention a publisher announces each broadcast's exact path, so the list
+reads as broadcast names.
 
 A relay configured with more than one certificate has no single fingerprint to
 publish, and this endpoint answers for the first. On the quinn and noq backends
@@ -60,6 +60,29 @@ exists for), buffer-pool backpressure (`rx_enobufs`, `rx_exhausted`,
 the moment the port is bound, so a dead one shows stuck zeros rather than
 disappearing. These describe the process, not the traffic, so they never appear
 on the `.stats` broadcast.
+
+### GET /sessions
+
+Live sessions on this node. The filter is query parameters: any subset of
+the fields the auth server already saw (`id`, `path` as a pattern, `remote`
+as an IP or CIDR, `transport`, `tls.name`, ...). Every given field must
+match; an empty filter is everyone. Each entry is the request plus start
+time, with `query` omitted. An unknown field, including `query`, is 400.
+
+```bash
+curl 'http://127.0.0.1:9101/sessions?path=demo/**'
+```
+
+### POST /sessions/revalidate
+
+The same filter, a re-check now. Matching sessions are nudged and the
+response is 202 with their ids; no match is 200 with an empty list. The
+relay re-POSTs `revalidate` and the auth server's reply is the verdict.
+One node, no cluster fan-out.
+
+```bash
+curl -X POST 'http://127.0.0.1:9101/sessions/revalidate?id=00ff'
+```
 
 ### GET /nodes
 

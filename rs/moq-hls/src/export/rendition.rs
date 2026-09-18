@@ -701,7 +701,7 @@ fn is_unservable(err: &moq_net::Error, broadcast: &moq_net::broadcast::Consumer)
 /// decodes to after [`StreamError::from_code`](moq_net::StreamError::from_code). IETF has
 /// no stream-reset value for a miss (`ietf::error::to_stream_code` sends INTERNAL_ERROR),
 /// so one arrives as `Error::Stream(StreamError::Internal)` and answers 500. Inspect the
-/// variant, not `Error::to_code`: session unauthorized and stream delivery-timeout are
+/// variant, not a collapsed integer: session unauthorized and stream delivery-timeout are
 /// also 2 in their own registries.
 fn is_cache_miss(err: &moq_net::Error) -> bool {
 	matches!(

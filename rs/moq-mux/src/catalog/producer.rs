@@ -923,7 +923,7 @@ mod test {
 			hang::timeline::DEFAULT_NAME,
 		] {
 			let track = consumer.track(name).expect("track");
-			let info = track.info().await.expect("info");
+			let info = track.query().await.expect("info");
 			assert_eq!(info.priority, PRIORITY.catalog, "{name} should rank with the catalog");
 		}
 	}

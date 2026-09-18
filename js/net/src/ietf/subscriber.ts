@@ -3,7 +3,7 @@ import * as broadcast from "../broadcast.ts";
 import { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation, reason } from "../error.ts";
 import * as netGroup from "../group.ts";
-import { UNKNOWN_HOP } from "../hop.ts";
+import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { scopePrefix } from "../internal.ts";
 import * as Path from "../path.ts";
 import type { Reader, Stream } from "../stream.ts";
@@ -105,7 +105,7 @@ export class Subscriber {
 	// two messages about one source, which the MoQ Solicit draft requires us to tolerate.
 	// Counting them is what keeps the second from duplicating the announce and the first
 	// to end from retracting what the other still holds.
-	#announced = new Map<Path.Valid, { count: number; anonymous: boolean }>();
+	#announced = new Map<Path.Valid, { count: number; route: Route }>();
 
 	// Any consumers that want each new announcement, keyed by the wire interest
 	// prefix their stream filters on.
@@ -141,14 +141,15 @@ export class Subscriber {
 		return advert !== undefined && this.#cluster !== undefined && Cluster.loops(advert, this.#cluster.self);
 	}
 
-	/** Whether the advertisement passed through an anonymous hop, or carried no path. */
-	#anonymous(advert: Cluster.Advert | undefined): boolean {
-		return advert === undefined || advert.hops.includes(UNKNOWN_HOP);
+	/** The route an advertisement carries; one without a path is anonymous and free. */
+	#route(advert: Cluster.Advert | undefined): Route {
+		if (advert === undefined) return { hops: [UNKNOWN_HOP], cost: Cost.zero };
+		return { hops: advert.hops, cost: { warm: advert.cost, cold: advert.cost } };
 	}
 
 	/**
 	 * Gets an announced reader for `scope`, a prefix-shaped pattern (`foo/**`, or `**`
-	 * for everything). Patterns are relative to the session, not the scope.
+	 * for everything). Paths are relative to the session, not the scope.
 	 *
 	 * The peer is asked with SUBSCRIBE_NAMESPACE regardless of what it declared, and an
 	 * unsolicited PUBLISH_NAMESPACE lands here too, so a peer that only tells and one
@@ -160,7 +161,7 @@ export class Subscriber {
 		const announced = new announce.Producer();
 		for (const [active, info] of this.#announced) {
 			if (!Path.hasPrefix(prefix, active)) continue;
-			announced.append({ pattern: Path.Pattern.subtree(active), active: true, anonymous: info.anonymous });
+			announced.append({ path: active, kind: "announced", route: info.route });
 		}
 		this.#announcedConsumers.set(announced, prefix);
 
@@ -176,18 +177,34 @@ export class Subscriber {
 	 * Record one more advertisement for a path, telling consumers only when it is the
 	 * first. A second one is the same namespace said twice, not news.
 	 */
-	#attachAnnounce(path: Path.Valid, anonymous: boolean) {
+	#attachAnnounce(path: Path.Valid, route: Route) {
 		const existing = this.#announced.get(path);
 		if (existing) {
 			existing.count += 1;
 			return;
 		}
-		this.#announced.set(path, { count: 1, anonymous });
+		this.#announced.set(path, { count: 1, route });
 
 		console.debug(`announced: broadcast=${path} active=true`);
 		for (const [consumer, prefix] of this.#announcedConsumers) {
 			if (!Path.hasPrefix(prefix, path)) continue;
-			consumer.append({ pattern: Path.Pattern.subtree(path), active: true, anonymous });
+			consumer.append({ path, kind: "announced", route });
+		}
+	}
+
+	/**
+	 * Replace the stored route for a path that is already announced. A no-op when the
+	 * hops and cost did not change; otherwise consumers hear `updated` so a forwarder
+	 * can reprice without retracting.
+	 */
+	#updateAnnounce(path: Path.Valid, route: Route) {
+		const existing = this.#announced.get(path);
+		if (existing === undefined || routesEqual(existing.route, route)) return;
+		existing.route = route;
+		console.debug(`announced: broadcast=${path} rerouted`);
+		for (const [consumer, prefix] of this.#announcedConsumers) {
+			if (!Path.hasPrefix(prefix, path)) continue;
+			consumer.append({ path, kind: "updated", route });
 		}
 	}
 
@@ -212,7 +229,7 @@ export class Subscriber {
 		for (const [consumer, prefix] of this.#announcedConsumers) {
 			if (!Path.hasPrefix(prefix, path)) continue;
 			try {
-				consumer.append({ pattern: Path.Pattern.subtree(path), active: false });
+				consumer.append({ path, kind: "retracted", route: existing.route });
 			} catch {
 				// Consumer already closed, will be cleaned up
 			}
@@ -300,10 +317,14 @@ export class Subscriber {
 								continue;
 							}
 
-							// A repeat updates the advertisement; only the first is news.
-							if (!live.has(path)) {
+							// A repeat replaces the advertisement in place: HOP_PATH / ROUTE_COST
+							// can change without a NAMESPACE_DONE. Only the first is a new path.
+							const route = this.#route(entry.cluster);
+							if (live.has(path)) {
+								this.#updateAnnounce(path, route);
+							} else {
 								live.add(path);
-								this.#attachAnnounce(path, this.#anonymous(entry.cluster));
+								this.#attachAnnounce(path, route);
 							}
 						} else if (msgType === SubscribeNamespaceEntryDone.id) {
 							const entry = await SubscribeNamespaceEntryDone.decode(stream.reader, version);
@@ -737,7 +758,7 @@ export class Subscriber {
 			// Only now is the advertisement ours to announce, for the reason above: a
 			// consumer reacting with a SUBSCRIBE must not interleave with that OK.
 			attached = true;
-			this.#attachAnnounce(path, this.#anonymous(msg.cluster));
+			this.#attachAnnounce(path, this.#route(msg.cluster));
 
 			// An advertisement is updated in place with REQUEST_UPDATE on the stream that
 			// already carries it, so read until the stream ends rather than waiting on the
@@ -800,11 +821,14 @@ export class Subscriber {
 				} else if (!attached) {
 					// Re-attach: a clean path replaced the reflected one we detached from.
 					attached = true;
-					this.#attachAnnounce(path, this.#anonymous(held));
+					this.#attachAnnounce(path, this.#route(held));
+				} else {
+					this.#updateAnnounce(path, this.#route(held));
 				}
 
 				// Nothing here can fail to apply, so every update is acknowledged. A leaf
-				// routes nothing, so a repricing changes nothing it holds.
+				// routes nothing, so a repricing changes nothing it holds; consumers still
+				// hear the new route so a forwarder can reprice.
 				await stream.writer.u53(RequestOk.id);
 				await new RequestOk({}).encode(stream.writer, version);
 			}

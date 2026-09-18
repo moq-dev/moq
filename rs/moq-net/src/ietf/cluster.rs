@@ -11,9 +11,7 @@
 //!   PRICED Setup Option that it already folds a (measured, moving) price into what
 //!   it forwards;
 //! - every advertisement carries the HOP_PATH it traversed and the accumulated
-//!   ROUTE_COST of that path, as Key-Value-Pair message parameters, and a
-//!   PUBLISH_NAMESPACE is repriced with the same parameters on a REQUEST_UPDATE
-//!   ([`PublishNamespaceUpdate`](super::PublishNamespaceUpdate)).
+//!   ROUTE_COST of that path, as Key-Value-Pair message parameters.
 //!
 //! The semantics are the same ones moq-lite carries natively (see
 //! [`crate::origin::Route`]); this module is only the moq-transport binding.
@@ -470,7 +468,7 @@ mod tests {
 			hops: hop_path(&[1]),
 			cost: u64::MAX,
 		};
-		assert_eq!(absurd.route(10).cost.warm, crate::origin::MAX_COST);
+		assert_eq!(absurd.route(10).cost.warm, crate::origin::Cost::MAX.warm);
 	}
 
 	/// Negotiating the extension and declaring an identity are separate questions, and a

@@ -1801,13 +1801,13 @@ fn announced_free_lifecycle() {
 
 	// Its info reports our path, active.
 	let mut info = moq_announce_update {
-		pattern: std::ptr::null(),
-		pattern_len: 0,
+		path: std::ptr::null(),
+		path_len: 0,
 		active: false,
 	};
 	assert_eq!(unsafe { moq_origin_announced_info(announced, &mut info) }, 0);
 	assert!(info.active, "broadcast should be active");
-	let got = unsafe { std::slice::from_raw_parts(info.pattern.cast::<u8>(), info.pattern_len) };
+	let got = unsafe { std::slice::from_raw_parts(info.path.cast::<u8>(), info.path_len) };
 	assert_eq!(got, path, "announced path should match");
 
 	// Freeing the record succeeds once; the handle is then unknown.
@@ -1954,16 +1954,15 @@ fn local_announce() {
 	let announced_id = id(cb.recv());
 
 	let mut info = moq_announce_update {
-		pattern: std::ptr::null(),
-		pattern_len: 0,
+		path: std::ptr::null(),
+		path_len: 0,
 		active: false,
 	};
 	assert_eq!(unsafe { moq_origin_announced_info(announced_id, &mut info) }, 0);
 	assert!(info.active, "broadcast should be active");
 
-	let announced_path = unsafe {
-		std::str::from_utf8(std::slice::from_raw_parts(info.pattern.cast::<u8>(), info.pattern_len)).unwrap()
-	};
+	let announced_path =
+		unsafe { std::str::from_utf8(std::slice::from_raw_parts(info.path.cast::<u8>(), info.path_len)).unwrap() };
 	assert_eq!(announced_path, "test/broadcast");
 
 	assert_eq!(moq_origin_announced_close(announced_task), 0);
@@ -1983,8 +1982,8 @@ fn announced_deactivation() {
 
 	let announced_id = id(cb.recv());
 	let mut info = moq_announce_update {
-		pattern: std::ptr::null(),
-		pattern_len: 0,
+		path: std::ptr::null(),
+		path_len: 0,
 		active: false,
 	};
 	assert_eq!(unsafe { moq_origin_announced_info(announced_id, &mut info) }, 0);
@@ -2018,8 +2017,8 @@ fn create_broadcast_does_not_announce() {
 	assert_eq!(unsafe { moq_publish_announce(broadcast, std::ptr::null()) }, 0);
 	let announced_id = id(cb.recv());
 	let mut info = moq_announce_update {
-		pattern: std::ptr::null(),
-		pattern_len: 0,
+		path: std::ptr::null(),
+		path_len: 0,
 		active: false,
 	};
 	assert_eq!(unsafe { moq_origin_announced_info(announced_id, &mut info) }, 0);
@@ -2053,12 +2052,12 @@ fn announce_accepts_an_anonymous_hop() {
 fn dynamic_serves_a_request_under_a_prefix() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
-	let pattern = b"live/**";
+	let prefix = b"live";
 	let dynamic = id(unsafe {
 		moq_origin_dynamic(
 			origin,
-			pattern.as_ptr() as *const c_char,
-			pattern.len(),
+			prefix.as_ptr() as *const c_char,
+			prefix.len(),
 			std::ptr::null(),
 			Some(channel_callback),
 			cb.ptr,
@@ -2098,35 +2097,14 @@ fn dynamic_serves_a_request_under_a_prefix() {
 }
 
 #[test]
-fn dynamic_accepts_a_non_prefix_pattern() {
-	let origin = id(moq_origin_create());
-	let cb = Callback::new();
-	let pattern = b"live/*";
-	let code = unsafe {
-		moq_origin_dynamic(
-			origin,
-			pattern.as_ptr() as *const c_char,
-			pattern.len(),
-			std::ptr::null(),
-			Some(channel_callback),
-			cb.ptr,
-		)
-	};
-	assert!(code > 0, "a non-prefix pattern must be advertised, got {code}");
-	assert_eq!(moq_origin_dynamic_close(id(code)), 0);
-	assert_eq!(cb.recv_terminal(), 0);
-	assert_eq!(moq_origin_close(origin), 0);
-}
-
-#[test]
 fn dynamic_refuses_a_missing_callback() {
 	let origin = id(moq_origin_create());
-	let pattern = b"live/**";
+	let prefix = b"live";
 	let code = unsafe {
 		moq_origin_dynamic(
 			origin,
-			pattern.as_ptr() as *const c_char,
-			pattern.len(),
+			prefix.as_ptr() as *const c_char,
+			prefix.len(),
 			std::ptr::null(),
 			None,
 			std::ptr::null_mut(),

@@ -26,7 +26,8 @@ const MAX_FRAME_MS: usize = 120;
 /// A track keeps its groups for a while after they are read, so a decoder does
 /// not always open on an empty one: a player rebuilding its decoder subscribes
 /// while its predecessor still holds groups, and a rendition switched away from
-/// and back to stays warm for the track's idle linger. What to do with that
+/// and back to stays warm on the origin for the track's idle linger (cached
+/// groups, not an upstream subscription). What to do with that
 /// backlog depends on the consumer, and the two answers are opposites, so it is
 /// asked rather than guessed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

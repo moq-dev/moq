@@ -111,7 +111,7 @@ impl MoqBroadcastProducer {
 	) -> Result<Arc<MoqJsonSnapshotProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
-			let mut broadcast = state.broadcast.clone();
+			let broadcast = state.broadcast.clone();
 			let track = broadcast.create_track(name, None)?;
 			let producer = moq_json::snapshot::Producer::<Value>::new(track, config.into());
 			Ok(Arc::new(MoqJsonSnapshotProducer {
@@ -128,7 +128,7 @@ impl MoqBroadcastProducer {
 	) -> Result<Arc<MoqJsonStreamProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
-			let mut broadcast = state.broadcast.clone();
+			let broadcast = state.broadcast.clone();
 			let track = broadcast.create_track(name, None)?;
 			let producer = moq_json::stream::Producer::<Value>::new(track, config.into());
 			Ok(Arc::new(MoqJsonStreamProducer {

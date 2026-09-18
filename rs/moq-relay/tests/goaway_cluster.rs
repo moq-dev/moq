@@ -25,7 +25,7 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 async fn next_user_announce(announced: &mut moq_net::announce::Consumer) -> Option<moq_net::announce::Update> {
 	loop {
 		let update = announced.next().await?;
-		if !update.pattern.as_str().starts_with(".internal/") {
+		if !update.path.as_str().starts_with(".internal/") {
 			return Some(update);
 		}
 	}
@@ -200,9 +200,9 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 	tokio::time::timeout(TEST_TIMEOUT, async {
 		// ── the shared "live" broadcast both siblings can serve ─────────
 		let upstream_origin = moq_tokio::origin::spawn(Hop::random());
-		let mut broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
+		let broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
 		broadcast.announce(Default::default()).expect("create broadcast");
-		let mut track = broadcast.create_track("video", None).expect("create track");
+		let track = broadcast.create_track("video", None).expect("create track");
 
 		let (port_a, mut accepted_a, _handle_a) = spawn_upstream(upstream_origin.clone());
 		let (port_b, mut accepted_b, _handle_b) = spawn_upstream(upstream_origin.clone());
@@ -259,7 +259,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		// re-prices the old route and the sibling announces its own).
 		let mut announcements = cluster.origin.consume().announced();
 		let first = next_user_announce(&mut announcements).await.expect("initial announce");
-		assert_eq!(first.pattern.as_prefix().expect("prefix announcement"), "cam");
+		assert_eq!(first.path.as_str(), "cam");
 
 		// ── sibling A drains with a redirect to sibling B ────────────────
 		session_a
@@ -298,7 +298,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		loop {
 			match tokio::time::timeout(Duration::from_millis(500), announcements.next()).await {
 				Err(_) => break,
-				Ok(Some(update)) if update.active => continue,
+				Ok(Some(update)) if update.kind.is_active() => continue,
 				Ok(event) => panic!("migration must not retract the path on the cluster origin: {event:?}"),
 			}
 		}
@@ -397,9 +397,9 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 
 	// ── TOP: origin server serving the same broadcast to both mids ──────
 	let top_origin = moq_tokio::origin::spawn(Hop::random());
-	let mut broadcast = top_origin.create_broadcast("diamond").expect("create broadcast");
+	let broadcast = top_origin.create_broadcast("diamond").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let mut track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", None).expect("create track");
 
 	let (top_port, mut top_accepted, _top_handle) = spawn_upstream(top_origin.clone());
 	wait_listening(top_port).await;
@@ -471,7 +471,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	)
 	.await
 	.expect("origin closed before the announce");
-	assert_eq!(first.pattern.as_prefix().expect("prefix announcement"), "diamond");
+	assert_eq!(first.path.as_str(), "diamond");
 
 	let bc = within("broadcast resolves on the subscriber origin", async {
 		let consumer = sub_origin.consume();
@@ -556,7 +556,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 		"every group must cross the failover exactly once"
 	);
 
-	let mut track = within("publisher task finishes", publisher)
+	let track = within("publisher task finishes", publisher)
 		.await
 		.expect("publisher task");
 
@@ -621,7 +621,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	loop {
 		match tokio::time::timeout(Duration::from_millis(500), announcements.next()).await {
 			Err(_) => break,
-			Ok(Some(update)) if update.active => continue,
+			Ok(Some(update)) if update.kind.is_active() => continue,
 			Ok(event) => panic!("failover must not retract the path under the subscriber: {event:?}"),
 		}
 	}
@@ -672,9 +672,9 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 	let upstream_origin = moq_tokio::origin::spawn(Hop::random());
-	let mut broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
+	let broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let mut track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", None).expect("create track");
 
 	let (port, mut accepted, _handle) = spawn_upstream(upstream_origin.clone());
 	wait_listening(port).await;

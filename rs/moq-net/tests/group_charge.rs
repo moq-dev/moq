@@ -66,8 +66,8 @@ fn measure() -> (usize, u64) {
 		origin
 	};
 
-	let mut broadcast = info.produce();
-	let mut track = broadcast.create_track("chat", None).unwrap();
+	let broadcast = info.produce();
+	let track = broadcast.create_track("chat", None).unwrap();
 
 	// Warm up outside the measurement so the track's own one-time allocations and
 	// any lazy statics aren't billed to the groups.

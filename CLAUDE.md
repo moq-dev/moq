@@ -51,6 +51,7 @@ The API is the most important thing to get right. A bad shape costs a breaking c
 - When a name or shape feels awkward, propose alternatives with a recommendation instead of shipping it.
 - Short names under a module namespace (`encode::Config`, not `EncoderConfig`). Mirror names across Rust, JS, and the bindings.
 - Document every exported symbol in one plain line, the way you'd say it out loud.
+- Prefer refactoring and simplification when working on the `dev` branch; many APIs have have not been published yet.
 
 # Required
 
@@ -82,6 +83,7 @@ The API is the most important thing to get right. A bad shape costs a breaking c
 - Suggest follow up sessions and quests when finished, interactively prompting the user.
 - Prefer the simple solution.
 - Say it once, in the fewest words that hold up.
+- Critically think, and decide if the complexity is worth it. Simple is better.
 
 # Development
 

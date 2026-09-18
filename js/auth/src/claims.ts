@@ -71,10 +71,10 @@ export const ClaimsSchema = z
 		publish: z.optional(PatternListSchema),
 		/** Patterns the holder may subscribe to, relative to `root`. */
 		subscribe: z.optional(PatternListSchema),
-		/** Expiration time, as a unix timestamp in seconds. */
-		exp: z.optional(z.number()),
-		/** Issued-at time, as a unix timestamp in seconds. */
-		iat: z.optional(z.number()),
+		/** Expiration time, as a whole unix timestamp in seconds. */
+		exp: z.optional(z.int()),
+		/** Issued-at time, as a whole unix timestamp in seconds. */
+		iat: z.optional(z.int()),
 	})
 	.check(
 		// Emptiness, not just presence: `publish: []` grants nothing, and the Rust crate

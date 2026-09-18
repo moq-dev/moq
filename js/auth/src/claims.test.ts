@@ -30,6 +30,12 @@ test("claims refuse the retired put/get prefix fields", () => {
 	expect(() => ScopeSchema.parse({ root: "demo", put: ["alice"] })).toThrow();
 });
 
+test("claims exp and iat are whole seconds", () => {
+	expect(() => ClaimsSchema.parse({ publish: ["**"], exp: 1.5 })).toThrow();
+	expect(() => ClaimsSchema.parse({ publish: ["**"], iat: 1.5 })).toThrow();
+	expect(ClaimsSchema.parse({ publish: ["**"], exp: 4102444800 }).exp).toBe(4102444800);
+});
+
 test("claims refuse a bad pattern", () => {
 	expect(() => ClaimsSchema.parse({ publish: ["a/**/b/**"] })).toThrow();
 	expect(() => ClaimsSchema.parse({ publish: ["/leading"] })).toThrow();

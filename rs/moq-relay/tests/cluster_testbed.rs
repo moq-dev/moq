@@ -306,9 +306,9 @@ impl Drop for Publisher {
 /// group, each stamped with the wall clock and a running sequence number.
 async fn publish(region: &Region) -> Publisher {
 	let origin = moq_tokio::origin::spawn(Hop::random());
-	let mut broadcast = origin.create_broadcast(PATH).expect("create broadcast");
+	let broadcast = origin.create_broadcast(PATH).expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce");
-	let mut track = broadcast.create_track(TRACK, None).expect("create track");
+	let track = broadcast.create_track(TRACK, None).expect("create track");
 
 	let published = Arc::new(std::sync::atomic::AtomicU64::new(0));
 	let streamer = tokio::spawn({
@@ -404,7 +404,7 @@ async fn subscribe(region: &Region) -> Subscriber {
 		let observed = observed.clone();
 		async move {
 			while let Some(update) = announced.next().await {
-				if update.pattern.as_prefix() == Some(PATH) && update.active {
+				if update.path.as_str() == PATH && update.kind.is_active() {
 					let hops = update.route.hops.iter().map(|hop| hop.id()).collect();
 					observed.lock().unwrap().routes.push((Instant::now(), hops));
 				}

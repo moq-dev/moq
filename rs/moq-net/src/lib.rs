@@ -17,7 +17,7 @@
 //! `announce`) that owns the short `Producer` / `Consumer` / `Info` names.
 //!
 //! Traffic counters for the levels above live in [`stats`]: build a [`stats::Registry`]
-//! and hand each session a [`stats::Handle`] via [`Client::with_stats`] /
+//! and hand each session a [`stats::Session`] via [`Client::with_stats`] /
 //! [`Server::with_stats`]. Publishing the counters as MoQ broadcasts lives in the
 //! `moq-stats` crate.
 //!
@@ -91,13 +91,13 @@ mod lite;
 mod model;
 pub mod path;
 mod recv;
-mod server;
-mod session;
 mod setup;
 mod util;
 mod version;
 
 pub mod runtime;
+pub mod server;
+pub mod session;
 pub mod stats;
 pub mod transport;
 
@@ -111,8 +111,8 @@ pub use path::{
 	AsPath, InvalidPattern, Path, PathOwned, PathPrefixes, PathRelative, PathRelativeOwned, Pattern, Patterns,
 };
 pub use runtime::{Runtime, Timers};
-pub use server::*;
-pub use session::*;
+pub use server::Server;
+pub use session::Session;
 pub use version::*;
 
 // Re-export the bytes crate

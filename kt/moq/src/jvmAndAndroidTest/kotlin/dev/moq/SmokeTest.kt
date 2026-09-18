@@ -72,7 +72,7 @@ class SmokeTest {
     fun `origin alias constructs and consumes`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             origin.consume().use { /* lifecycle smoke */ }
-            origin.dynamic("**", Route()).use { /* dynamic origin smoke */ }
+            origin.dynamic("", Route()).use { /* dynamic origin smoke */ }
         }
     }
 
@@ -233,11 +233,11 @@ class SmokeTest {
                 broadcast.announce(Route())
                 val announced = origin.consume().announced("")
                 val first = announced.next()!!
-                assertEquals("live", first.pattern())
+                assertEquals("live", first.path())
                 assertTrue(first.active())
                 broadcast.unannounce()
                 val retracted = announced.next()!!
-                assertEquals("live", retracted.pattern())
+                assertEquals("live", retracted.path())
                 assertTrue(!retracted.active())
             }
         }
@@ -246,7 +246,7 @@ class SmokeTest {
     @Test
     fun `dynamic serves a request under a prefix`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            origin.dynamic("live/**", Route()).use { dynamic ->
+            origin.dynamic("live", Route()).use { dynamic ->
                 val pending = async {
                     origin.consume().requestBroadcast("live/cam")
                 }
@@ -257,13 +257,6 @@ class SmokeTest {
                     pending.await()
                 }
             }
-        }
-    }
-
-    @Test
-    fun `dynamic accepts a non-prefix pattern`() {
-        OriginProducer(OriginConfig()).use { origin ->
-            origin.dynamic("live/*", Route()).close()
         }
     }
 

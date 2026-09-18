@@ -217,9 +217,9 @@ fn room_url(scheme: &str, port: u16) -> url::Url {
 /// round-trips. Returns both sessions so the caller can watch them close.
 async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_tokio::Connection) {
 	let pub_origin = moq_tokio::origin::spawn(Hop::random());
-	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let mut track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -257,8 +257,8 @@ async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_t
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	assert_eq!(update.pattern.as_prefix().expect("prefix announcement"), "test");
-	assert!(update.active, "expected announce, got retraction");
+	assert_eq!(update.path.as_str(), "test");
+	assert!(update.kind.is_active(), "expected announce, got retraction");
 	let bc = sub_consumer
 		.request_broadcast("test")
 		.await
@@ -470,9 +470,9 @@ async fn http_routes_hold_a_lease() {
 
 	// A publisher whose group stays open, so a fetch of it keeps streaming.
 	let pub_origin = moq_tokio::origin::spawn(Hop::random());
-	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce");
-	let mut track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -508,8 +508,8 @@ async fn http_routes_hold_a_lease() {
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	assert_eq!(update.pattern.as_prefix().expect("prefix announcement"), "test");
-	assert!(update.active, "expected announce, got retraction");
+	assert_eq!(update.path.as_str(), "test");
+	assert!(update.kind.is_active(), "expected announce, got retraction");
 
 	let http = reqwest::Client::new();
 	let announced = http
@@ -679,7 +679,7 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (root, client_cert, client_key) = signed_client(dir.path());
 
-	let policy = |rules: moq_auth::serve::Rules| {
+	let policy = |rules: moq_auth::Permissions| {
 		let mut policy = moq_auth::serve::Policy::default();
 		policy.mtls = rules;
 		policy
@@ -703,7 +703,7 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	};
 	// No grant for certificates: refused, over QUIC with a certificate and over
 	// WebSocket without one.
-	let none = serve(policy(moq_auth::serve::Rules::default())).await;
+	let none = serve(policy(moq_auth::Permissions::default())).await;
 	let (addr, relay) = spawn_quic_relay(build_auth(none.clone()), Some(root.clone())).await;
 	let url: url::Url = format!("moql://127.0.0.1:{}/room", addr.port()).parse().unwrap();
 	assert_refused_with(mtls_client(), &url).await;
@@ -713,7 +713,7 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	relay.abort();
 
 	// A narrow grant: the certificate publishes under `mine/**` and nothing else.
-	let narrow = serve(policy(moq_auth::serve::Rules::new(
+	let narrow = serve(policy(moq_auth::Permissions::new(
 		["mine/**".parse().unwrap()].into_iter().collect(),
 		Patterns::new(),
 	)))

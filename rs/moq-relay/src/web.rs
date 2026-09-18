@@ -170,6 +170,10 @@ pub(crate) struct WebState {
 	/// when it fires. Defaults to a handle that never fires.
 	#[cfg_attr(not(feature = "websocket"), allow(dead_code))]
 	pub(crate) shutdown: crate::shutdown::Observer,
+	/// Live sessions on this node, so a WebSocket session is listed and nudged
+	/// like a QUIC one.
+	#[cfg_attr(not(feature = "websocket"), allow(dead_code))]
+	pub(crate) sessions: crate::session::Registry,
 }
 
 /// Run a HTTP server using Axum
@@ -196,6 +200,7 @@ impl Web {
 			certificates,
 			conn_id: AtomicU64::new(0),
 			shutdown: crate::shutdown::Observer::disabled(),
+			sessions: crate::session::Registry::new(),
 		});
 		Self {
 			state,
@@ -237,6 +242,14 @@ impl Web {
 	pub fn with_shutdown(mut self, shutdown: crate::shutdown::Observer) -> Self {
 		let state = Arc::get_mut(&mut self.state).expect("with_shutdown called after routes were built");
 		state.shutdown = shutdown;
+		self
+	}
+
+	/// Register WebSocket sessions in the node's live table so they can be listed
+	/// and nudged. Without it they are served but do not appear.
+	pub fn with_sessions(mut self, sessions: crate::session::Registry) -> Self {
+		let state = Arc::get_mut(&mut self.state).expect("with_sessions called after routes were built");
+		state.sessions = sessions;
 		self
 	}
 
@@ -746,7 +759,7 @@ async fn admit_http(
 	request.server_name = request_host(uri, headers);
 	request.remote = Some(remote.0);
 	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| auth::peer(&identity));
-	state.auth.admit(request, moq_auth::Counters::default()).await
+	state.auth.admit(request).await
 }
 
 /// Serve the announced broadcasts for a given prefix.
@@ -773,14 +786,12 @@ async fn serve_announced(
 	let mut broadcasts = Vec::new();
 
 	while let Some(update) = announced.try_next() {
-		if update.active
-			&& let Some(prefix) = update.pattern.as_prefix()
-		{
-			broadcasts.push(prefix.to_owned());
+		if update.kind.is_active() {
+			broadcasts.push(update.path);
 		}
 	}
 
-	lease.close("done");
+	lease.close("done", moq_auth::Bytes::default());
 	Ok(broadcasts
 		.iter()
 		.map(ToString::to_string)
@@ -868,11 +879,11 @@ async fn serve_fetch(
 			lease: Some(lease),
 		}),
 		Ok(Err(status)) => {
-			lease.close(status.to_string());
+			lease.close(status.to_string(), moq_auth::Bytes::default());
 			Err(status.into())
 		}
 		Err(_) => {
-			lease.close("timeout");
+			lease.close("timeout", moq_auth::Bytes::default());
 			Err(StatusCode::GATEWAY_TIMEOUT.into())
 		}
 	}
@@ -908,7 +919,7 @@ impl ServeGroup {
 	/// End the lease with the body's outcome.
 	fn end(&mut self, reason: &str) {
 		if let Some(lease) = self.lease.take() {
-			lease.close(reason);
+			lease.close(reason, moq_auth::Bytes::default());
 		}
 	}
 }

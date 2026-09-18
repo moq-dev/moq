@@ -374,7 +374,7 @@ struct TrackPair<T> {
 }
 
 impl<T: Serialize> TrackPair<T> {
-	fn create(broadcast: &mut broadcast::Producer, name: &str) -> Result<Self, moq_net::Error> {
+	fn create(broadcast: &broadcast::Producer, name: &str) -> Result<Self, moq_net::Error> {
 		let plain_track = broadcast.create_track(name, None)?;
 		let compressed_track = broadcast.create_track(format!("{name}{COMPRESSED_SUFFIX}").as_str(), None)?;
 		Ok(Self::from_tracks(plain_track, compressed_track))
@@ -385,7 +385,7 @@ impl<T: Serialize> TrackPair<T> {
 	/// queued-request fulfillment cannot reach it; the caller collects both
 	/// flavors' popped requests and this serves each through its actual
 	/// request where one exists.
-	fn adopt(broadcast: &mut broadcast::Producer, name: &str, pending: PendingPair) -> Result<Self, moq_net::Error> {
+	fn adopt(broadcast: &broadcast::Producer, name: &str, pending: PendingPair) -> Result<Self, moq_net::Error> {
 		let PendingPair { plain, compressed } = pending;
 		let plain_track = match plain {
 			Some(request) => request.accept(None),
@@ -560,7 +560,7 @@ impl<T: Serialize + Default> TrackFamily<T> {
 	/// later drain, so a valid-shaped request is never terminally rejected
 	/// merely for arriving while the quota was full. Entries whose every
 	/// requester left are dropped instead of adopted.
-	fn adopt_parked(&mut self, broadcast: &mut broadcast::Producer, requested: &mut HashSet<String>) {
+	fn adopt_parked(&mut self, broadcast: &broadcast::Producer, requested: &mut HashSet<String>) {
 		let noop = kio::Waiter::noop();
 		let mut parked = std::mem::take(&mut self.parked);
 		parked.retain(|plain, pending| {
@@ -581,7 +581,7 @@ impl<T: Serialize + Default> TrackFamily<T> {
 	/// caller owns the quota decision; this only mints the pair.
 	fn adopt_pair(
 		&mut self,
-		broadcast: &mut broadcast::Producer,
+		broadcast: &broadcast::Producer,
 		requested: &mut HashSet<String>,
 		plain: String,
 		pending: PendingPair,
@@ -634,7 +634,7 @@ struct GroupPublisher {
 impl GroupPublisher {
 	fn create(origin: &origin::Producer, prefix: &Path, group: &Path, node: Option<&str>) -> Option<Self> {
 		let advertised = advertised_path(prefix, group, node);
-		let mut broadcast = match origin.create_broadcast(&advertised) {
+		let broadcast = match origin.create_broadcast(&advertised) {
 			Ok(broadcast) => broadcast,
 			Err(err) => {
 				tracing::warn!(advertised = %advertised, ?err, "stats: origin rejected stats broadcast");
@@ -654,7 +654,7 @@ impl GroupPublisher {
 		let tier = Tier::default();
 		for role in [Role::Publisher, Role::Subscriber] {
 			let name = traffic_track(&tier, role, false);
-			match TrackPair::create(&mut broadcast, &name) {
+			match TrackPair::create(&broadcast, &name) {
 				Ok(pair) => {
 					traffic.tracks.insert(name, pair);
 				}
@@ -665,7 +665,7 @@ impl GroupPublisher {
 			}
 		}
 		let name = sessions_track(&tier, false);
-		match TrackPair::create(&mut broadcast, &name) {
+		match TrackPair::create(&broadcast, &name) {
 			Ok(pair) => {
 				sessions.tracks.insert(name, pair);
 			}
@@ -721,8 +721,8 @@ impl GroupPublisher {
 			}
 		}
 
-		self.traffic.adopt_parked(&mut self.broadcast, &mut self.requested);
-		self.sessions.adopt_parked(&mut self.broadcast, &mut self.requested);
+		self.traffic.adopt_parked(&self.broadcast, &mut self.requested);
+		self.sessions.adopt_parked(&self.broadcast, &mut self.requested);
 	}
 
 	/// Deliberately end the broadcast: finish every pair, then the broadcast
@@ -941,12 +941,12 @@ mod tests {
 		let egress = origin.consume().with_stats(ctx);
 
 		let mut announced = egress.announced();
-		let mut source = origin.create_broadcast(path).expect("create_broadcast");
+		let source = origin.create_broadcast(path).expect("create_broadcast");
 		source.announce(origin::Route::default()).expect("announce");
-		let mut producer = source.create_track("video", None).expect("create_track");
+		let producer = source.create_track("video", None).expect("create_track");
 
 		let update = announced.next().await.expect("announce");
-		assert!(update.active);
+		assert!(update.kind.is_active());
 		let consumer = egress.request_broadcast(path).await.expect("resolve");
 
 		let sub = if subscribe {
@@ -987,18 +987,13 @@ mod tests {
 		let mut consumer = origin.consume().announced();
 		tokio::time::advance(Duration::from_millis(1)).await;
 		let update = consumer.next().await.expect("expected announce");
-		assert!(update.active);
+		assert!(update.kind.is_active());
 		let broadcast = origin
 			.consume()
-			.request_broadcast(moq_net::Path::new(
-				update.pattern.as_prefix().expect("prefix announcement"),
-			))
+			.request_broadcast(moq_net::Path::new(update.path.as_str()))
 			.await
 			.expect("resolve");
-		(
-			update.pattern.as_prefix().expect("prefix announcement").to_string(),
-			broadcast,
-		)
+		(update.path.as_str().to_string(), broadcast)
 	}
 
 	/// Advance past one publish interval so the task drains and writes frames.

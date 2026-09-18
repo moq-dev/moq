@@ -18,7 +18,7 @@ above ([hang](/lib/rs/hang)); relays and CDNs implement only this.
 - **Origins** scope what a session can see, and merge duplicate subscriptions so a broadcast is pulled upstream once no matter how many local readers.
 - **Broadcasts** are created unadvertised, then announced as a route, or claimed as a pattern with `dynamic`. Discovery is still by prefix; the events carry a `Pattern`.
 - **Patterns** (`Pattern`, `Patterns`) are re-exported from [`moq-pattern`](https://docs.rs/moq-pattern). Literal `Path` stays a coordinate.
-- **Tracks** carry groups with a priority, an ordering preference, a retention window, and a timescale. Subscribers set their own priority and max age and can change them live.
+- **Tracks** carry groups with a priority, a retention window, and a timescale. Subscribers set their own priority and max age and can change them live.
 - **Groups** are written frame by frame and delivered on independent streams. Old groups are cached for fetch-by-sequence; stale groups are skipped per the subscriber's budget.
 - **Datagrams** send a single small frame unreliably on moq-lite 05+.
 - **Routes** record the relay hops and a cost, which is what the relay [cluster](/bin/relay/cluster) routes on. A hop of 0 marks the chain anonymous: `Route::is_anonymous()` is true, and that route ranks below every fully identified one.
@@ -72,21 +72,23 @@ Three operations, on an origin:
 - `broadcast.announce(route)` / `broadcast.unannounce()` own that
   advertisement. Announcing again re-prices the standing route. The route
   retracts on `unannounce()`, `finish()`, or the last producer dropping.
-- `origin.dynamic(pattern, route)` claims every matching path. A prefix is
-  `foo/**`. Hold the returned `origin::Dynamic` while the claim should stay
-  advertised; drop it to retract. A request under a prefix-shaped claim with
-  no local broadcast is a `Request` to `accept` or `reject`.
+- `origin.dynamic(prefix, route)` claims `prefix` and every path beneath it
+  (`""` claims everything). Hold the returned `origin::Dynamic` while the
+  claim should stay advertised; drop it to retract. A request beneath it with
+  no local broadcast is a `Request` to `accept` or `reject`; reject what you
+  will not serve rather than narrowing the claim, since a route is always a
+  prefix on every wire.
 
-A wildcard is a capability, not an inventory. The advertised pattern must sit
+A route is a capability, not an inventory. The advertised prefix must sit
 inside one of the producer's `prefix/**` scopes; an over-wide claim is
 `Unauthorized`, not clamped. Token grants stay prefixes.
 
-`origin.consume().announced()` yields `announce::Update` values. `pattern` is
-the claim relative to the consumer's root, `active` is false on a retraction,
-and `route` carries hops and cost. A subtree is `room/**`; `room/*` is one
-child segment. Use `pattern.as_prefix()` when you need a prefix-shaped claim;
-an arbitrary pattern is not a broadcast name. Resolving a non-prefix pattern
-into a subscription is not implemented yet.
+`origin.consume().announced()` yields `announce::Update` values: `path` is the
+covered prefix relative to the consumer's root, `kind` is `Announced`,
+`Updated` (a reprice in place), or `Retracted`, and `route` carries hops and
+cost (on a retraction, its last values). The consumer is also a
+`futures::Stream`. A prefix is not a broadcast name; filter with a `Pattern`
+locally when you follow a subset.
 
 ## Limiting reads
 
@@ -95,11 +97,11 @@ through 5. `2..5` excludes group 5, and `..` leaves both ends unbounded.
 The range limits the data eligible under the subscription's max-age budget;
 it does not fetch historical data by itself.
 
-A reader's `with_groups(2..=5)` applies a local limit. Use `set_groups(...)`
-to update an existing reader. Both preserve read progress: a lower start does
-not rewind the reader, and an omitted start keeps its current floor. An
-omitted end removes the cap, making unread buffered groups available again.
-Local limits do not update the subscription's upstream request.
+A reader's `set_groups(2..=5)` applies a local limit. It preserves read
+progress: a lower start does not rewind the reader, and an omitted start
+keeps its current floor. An omitted end removes the cap, making unread
+buffered groups available again. Local limits do not update the
+subscription's upstream request.
 
-Inside a group, `with_frames(...)` and `set_frames(...)` apply the same range
-syntax to frame indices.
+Inside a group, `set_frames(...)` applies the same range syntax to frame
+indices.

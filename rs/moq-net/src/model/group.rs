@@ -10,7 +10,7 @@
 //! Frames are numbered from 0 in write order. A group can be short at its front or its
 //! back but never in the middle: [Producer::start_at] starts it later, so a handle can
 //! carry the tail of a group whose leading frames came from somewhere else, and
-//! [Producer::finish] ends it wherever writing stopped. [Consumer::set_frames] bound a reader to a sub-range the same way [`track::Subscriber`]
+//! [Producer::finish] ends it wherever writing stopped. [Consumer::set_frames] bounds a reader to a sub-range the same way [`track::Subscriber`]
 //! bounds group sequences.
 //!
 //! The stream is closed with [Error] when all writers or readers are dropped.
@@ -758,7 +758,7 @@ impl Producer {
 	///
 	/// Borrows rather than consumes, so a later failure can still be reported through
 	/// [`abort`](Self::abort). The handle also keeps the cached frames readable.
-	pub fn finish(&mut self) -> Result<()> {
+	pub fn finish(&self) -> Result<()> {
 		let mut state = modify(&self.state)?;
 		if state.partial.is_some() {
 			return Err(Error::FrameOpen);
@@ -1357,12 +1357,6 @@ impl Consumer {
 		}
 	}
 
-	/// Limit subsequent reads to these frame indices, returning the reader for chaining.
-	pub fn with_frames(mut self, frames: impl RangeBounds<u64>) -> Self {
-		self.set_frames(frames);
-		self
-	}
-
 	/// Limit subsequent reads to these frame indices without rewinding read progress.
 	///
 	/// `2..=5` includes frames 2 through 5; `2..5` excludes frame 5. An omitted
@@ -1805,6 +1799,24 @@ impl Fetch {
 	}
 }
 
+/// A consumer's request for a single past group, handed to a handler via
+/// [`track::Dynamic::requested_group`].
+///
+/// The handler fulfills it by calling [`Self::accept`], which inserts the group
+/// into the track cache (resolving every [`track::Consumer::fetch_group`] that joined the
+/// attempt) and returns a [`Producer`] to fill. A relay typically opens a wire
+/// FETCH, reads FETCH_OK, then accepts. The request carries its own producer handle,
+/// so it works the same whether or not the track has been accepted yet.
+pub struct Request {
+	pub(crate) state: kio::Producer<track::TrackState>,
+	pub(crate) fetch: kio::Shared<track::FetchState>,
+	pub(crate) sequence: u64,
+	pub(crate) priority: u8,
+	pub(crate) frame_start: u64,
+	pub(crate) result: kio::Producer<track::FetchOutcome>,
+	pub(crate) done: bool,
+}
+
 #[cfg(test)]
 mod test {
 	use super::*;
@@ -1927,7 +1939,7 @@ mod test {
 
 	#[test]
 	fn group_finish_returns_none() {
-		let mut producer = Info { sequence: 0 }.produce();
+		let producer = Info { sequence: 0 }.produce();
 		producer.finish().unwrap();
 
 		let mut consumer = producer.consume();
@@ -2459,7 +2471,8 @@ mod test {
 			producer.write_frame(Timestamp::ZERO, Bytes::from(vec![i])).unwrap();
 		}
 		producer.finish().unwrap();
-		let mut consumer = producer.consume().with_frames(1..=1);
+		let mut consumer = producer.consume();
+		consumer.set_frames(1..=1);
 		assert_eq!(
 			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
 			1

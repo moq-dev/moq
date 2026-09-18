@@ -16,8 +16,6 @@ import type { Probe, Stats } from "./stats.ts";
  * The delays carry jitter, so a fleet of tabs knocked offline together doesn't reconnect in
  * lockstep. Every failure is retried; {@link ReloadDelay.timeout} is what stops the current
  * URL. A new URL or a disable/re-enable starts another sequence.
- *
- * @internal
  */
 export type ReloadDelay = {
 	/** The delay before reconnecting (default: 1000ms). */
@@ -82,10 +80,7 @@ const DEFAULT_DELAY: Required<ReloadDelay> = {
 /** How often the send-rate estimate is sampled from the live transport. */
 const BANDWIDTH_POLL = 100;
 
-/** Current state of a reconnecting connection.
- *
- * @internal
- */
+/** Current state of a reconnecting connection. */
 export type ReloadStatus = "connecting" | "connected" | "disconnected";
 
 /**
@@ -443,7 +438,7 @@ export class Reload {
 	 * everything), spanning reconnects.
 	 *
 	 * The same {@link Announce.Consumer} stream as {@link Established.announced}, but everything active
-	 * is retracted (an `active: false` update) whenever the connection drops and re-announced on
+	 * is retracted (a `retracted` update) whenever the connection drops and re-announced on
 	 * reconnect, so a consumer draining `next()` never clings to a dead route across a reconnect.
 	 *
 	 * Stays empty while the relay lacks {@link Established.discovery}.
@@ -473,16 +468,17 @@ export class Reload {
 			const upstream = conn.announced(scope);
 			effect.cleanup(() => upstream.close());
 
-			// Track what this connection announced so we can retract it if the connection drops.
-			const active = new Set<string>();
+			// Track what this connection announced so we can retract it if the connection
+			// drops; the last event rides along for the retraction.
+			const active = new Map<Path.Valid, Announce.Update>();
 
 			effect.spawn(async () => {
 				try {
 					for (;;) {
 						const entry = await Promise.race([effect.cancel, upstream.next()]);
 						if (!entry) break;
-						if (entry.active) active.add(entry.pattern.text);
-						else active.delete(entry.pattern.text);
+						if (Announce.isActive(entry.kind)) active.set(entry.path, entry);
+						else active.delete(entry.path);
 						producer.append(entry);
 					}
 				} catch {
@@ -491,8 +487,8 @@ export class Reload {
 					// Retract everything from the connection that just went away, so a per-broadcast
 					// watcher tears down instead of clinging to the dead route.
 					if (consumer.closed.peek() === undefined) {
-						for (const pattern of active) {
-							producer.append({ pattern: Path.Pattern.parse(pattern), active: false });
+						for (const entry of active.values()) {
+							producer.append({ ...entry, kind: "retracted" });
 						}
 					}
 				}

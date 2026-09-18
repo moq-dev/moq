@@ -469,7 +469,7 @@ impl Consumer {
 	}
 
 	/// Subscribe with an externally-owned preferences channel, so a
-	/// [`track::SubscriberControl`]-style handle can update it.
+	/// [`track::Control`]-style handle can update it.
 	pub(crate) fn subscribe_shared(&self, prefs: kio::Producer<Subscription>) -> Subscriber {
 		let last_prefs = prefs.read().clone();
 		Subscriber {
@@ -516,7 +516,7 @@ impl Consumer {
 			},
 		};
 
-		track.info().poll_ok(waiter)
+		track.query().poll_ok(waiter)
 	}
 
 	/// Return the track's [`track::Info`], resolved from the first segment.
@@ -2091,7 +2091,7 @@ impl Subscriber {
 		}
 	}
 
-	/// The shared preferences channel, so `track::SubscriberControl` can wrap it.
+	/// The shared preferences channel, so `track::Control` can wrap it.
 	pub(crate) fn prefs(&self) -> kio::Producer<Subscription> {
 		self.prefs.clone()
 	}
@@ -3253,8 +3253,8 @@ mod test {
 	/// (a JSON append log's group may never roll).
 	#[tokio::test]
 	async fn takeover_splices_mid_group() {
-		let (mut track_a, consumer_a) = track_pair("a");
-		let (mut track_b, consumer_b) = track_pair("b");
+		let (track_a, consumer_a) = track_pair("a");
+		let (track_b, consumer_b) = track_pair("b");
 
 		let mut producer = Producer::new();
 		producer.takeover(&consumer_a).unwrap();
@@ -3296,7 +3296,7 @@ mod test {
 
 	#[tokio::test]
 	async fn a_replacement_copy_keeps_the_handed_out_group_latency_budget() {
-		let (mut track_a, consumer_a) = track_pair("a");
+		let (track_a, consumer_a) = track_pair("a");
 		let (mut track_b, consumer_b) = track_pair("b");
 
 		let mut producer = Producer::new();
@@ -3342,8 +3342,8 @@ mod test {
 	/// (see `TrackServe::widen_frame_bounds`), so the extra frames are filtered here.
 	#[tokio::test]
 	async fn takeover_splices_a_replacement_that_resends_the_head() {
-		let (mut track_a, consumer_a) = track_pair("a");
-		let (mut track_b, consumer_b) = track_pair("b");
+		let (track_a, consumer_a) = track_pair("a");
+		let (track_b, consumer_b) = track_pair("b");
 
 		let mut producer = Producer::new();
 		producer.takeover(&consumer_a).unwrap();
@@ -3381,8 +3381,8 @@ mod test {
 	/// downstream can use it.
 	#[tokio::test]
 	async fn takeover_redelivers_an_incomplete_frame() {
-		let (mut track_a, consumer_a) = track_pair("a");
-		let (mut track_b, consumer_b) = track_pair("b");
+		let (track_a, consumer_a) = track_pair("a");
+		let (track_b, consumer_b) = track_pair("b");
 
 		let mut producer = Producer::new();
 		producer.takeover(&consumer_a).unwrap();
@@ -3429,8 +3429,8 @@ mod test {
 	/// out-of-range group is.
 	#[tokio::test]
 	async fn mid_group_boundary_caps_the_old_route() {
-		let (mut track_a, consumer_a) = track_pair("a");
-		let (mut track_b, consumer_b) = track_pair("b");
+		let (track_a, consumer_a) = track_pair("a");
+		let (track_b, consumer_b) = track_pair("b");
 
 		let mut producer = Producer::new();
 		producer.takeover(&consumer_a).unwrap();
@@ -3486,8 +3486,8 @@ mod test {
 	/// way a dead segment stalls the track. The next takeover resumes them.
 	#[tokio::test]
 	async fn dead_copy_stalls_until_the_continuation() {
-		let (mut track_a, consumer_a) = track_pair("a");
-		let (mut track_b, consumer_b) = track_pair("b");
+		let (track_a, consumer_a) = track_pair("a");
+		let (track_b, consumer_b) = track_pair("b");
 
 		let mut producer = Producer::new();
 		producer.takeover(&consumer_a).unwrap();
@@ -3515,7 +3515,7 @@ mod test {
 	/// than park on it forever.
 	#[tokio::test]
 	async fn dead_copy_ends_once_the_track_aborts() {
-		let (mut track_a, consumer_a) = track_pair("a");
+		let (track_a, consumer_a) = track_pair("a");
 
 		let mut producer = Producer::new();
 		producer.takeover(&consumer_a).unwrap();
@@ -3551,7 +3551,7 @@ mod test {
 	/// forward, so no future takeover will ever ask anyone for frame 0 again.
 	#[tokio::test]
 	async fn copy_missing_the_head_is_lost() {
-		let (mut track_a, consumer_a) = track_pair("a");
+		let (track_a, consumer_a) = track_pair("a");
 
 		let mut producer = Producer::new();
 		producer.takeover(&consumer_a).unwrap();
@@ -3578,7 +3578,7 @@ mod test {
 	/// are gone. Only a route already declared dead strands the reader.
 	#[tokio::test]
 	async fn live_route_ahead_of_the_seam_still_parks() {
-		let (mut track_a, consumer_a) = track_pair("a");
+		let (track_a, consumer_a) = track_pair("a");
 		let (mut track_b, consumer_b) = track_pair("b");
 
 		let mut producer = Producer::new();
@@ -3860,7 +3860,7 @@ mod test {
 	/// is alive, so nothing else would ever mark the gap as permanent.
 	#[tokio::test]
 	async fn declared_start_fails_over_a_skipped_group() {
-		let (mut track_a, consumer_a) = track_pair("a");
+		let (track_a, consumer_a) = track_pair("a");
 		let (mut track_b, consumer_b) = track_pair("b");
 
 		let mut producer = Producer::new();
@@ -3905,9 +3905,9 @@ mod test {
 	/// copy would substitute (or duplicate) the replacement's frames.
 	#[tokio::test]
 	async fn latched_reader_follows_a_moved_boundary() {
-		let (mut track_a, consumer_a) = track_pair("a");
+		let (track_a, consumer_a) = track_pair("a");
 		let (track_b, consumer_b) = track_pair("b");
-		let (mut track_c, consumer_c) = track_pair("c");
+		let (track_c, consumer_c) = track_pair("c");
 
 		let mut producer = Producer::new();
 		producer.switch(&consumer_a, None).unwrap();
@@ -4019,7 +4019,7 @@ mod test {
 	/// un-guard this route by accident.
 	#[tokio::test]
 	async fn buried_route_revives_when_the_copy_lands() {
-		let (mut track_a, consumer_a) = track_pair("a");
+		let (track_a, consumer_a) = track_pair("a");
 		let (mut track_b, consumer_b) = track_pair("b");
 		let mut producer = Producer::new();
 		producer.takeover(&consumer_a).unwrap();
@@ -4063,7 +4063,7 @@ mod test {
 	/// as a TIMEOUT.
 	#[tokio::test]
 	async fn misaligned_copy_is_lost_without_spinning() {
-		let (mut track, consumer) = track_pair("t");
+		let (track, consumer) = track_pair("t");
 		let mut producer = Producer::new();
 		producer.takeover(&consumer).unwrap();
 		let mut sub = producer.consume().subscribe(None);
@@ -4135,7 +4135,7 @@ mod test {
 	/// frames the reader still holds.
 	#[tokio::test]
 	async fn seek_keeps_a_pruned_latch() {
-		let (mut track, consumer) = track_pair("t");
+		let (track, consumer) = track_pair("t");
 		let mut producer = Producer::new();
 		producer.takeover(&consumer).unwrap();
 		let mut sub = producer.consume().subscribe(None);
@@ -4233,7 +4233,7 @@ mod test {
 	/// park (and wake) rather than hang.
 	#[tokio::test]
 	async fn finished_resolves_for_a_pruned_bounded_group() {
-		let (mut track_a, consumer_a) = track_pair("a");
+		let (track_a, consumer_a) = track_pair("a");
 		let mut producer = Producer::new();
 		producer.takeover(&consumer_a).unwrap();
 		let mut sub = producer.consume().subscribe(None);
@@ -4324,7 +4324,7 @@ mod test {
 	/// seam probe parks on the peek), not just the segment list.
 	#[tokio::test]
 	async fn finished_resolves_when_the_successor_skips_the_seam() {
-		let (mut track_a, consumer_a) = track_pair("a");
+		let (track_a, consumer_a) = track_pair("a");
 		let (mut track_b, consumer_b) = track_pair("b");
 		let mut producer = Producer::new();
 		producer.takeover(&consumer_a).unwrap();
@@ -4366,7 +4366,7 @@ mod test {
 		let mut sub = producer.consume().subscribe(None);
 
 		// Group 0 has two frames; the reader consumes one, latching the copy.
-		let (mut track, consumer) = track_pair("t0");
+		let (track, consumer) = track_pair("t0");
 		producer.takeover(&consumer).unwrap();
 		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 		group.write_frame(Timestamp::ZERO, b"f0".to_vec()).unwrap();

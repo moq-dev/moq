@@ -37,22 +37,22 @@ bunx @moq/auth generate ...
 You would first generate a key as so:
 
 ```typescript
-import { generate } from "@moq/auth";
+import { Key } from "@moq/auth";
 // Use this for signing
-const key = await generate("HS256");
+const key = await Key.generate("HS256");
 ```
 
 or as a CLI
 
 ```bash
 # generate secret key
-moq-auth generate --key key.jwk
+moq-auth generate --out key.jwk
 ```
 
 The default is HS256, you can choose other algorithms with `--algorithm`:
 
 ```bash
-moq-auth generate --key key.jwk --algorithm ES256
+moq-auth generate --out key.jwk --algorithm ES256
 ```
 
 ### Signing
@@ -60,9 +60,9 @@ moq-auth generate --key key.jwk --algorithm ES256
 You can sign a token as shown below:
 
 ```typescript
-import { type Claims, load, sign } from "@moq/auth";
+import { type Claims, Key } from "@moq/auth";
 
-const key = load(keyString); // See generate example above
+const key = Key.parse(keyString); // See generate example above
 // Create claims
 const claims: Claims = {
   root: "demo",
@@ -73,7 +73,7 @@ const claims: Claims = {
 };
 
 // Sign a token
-const token = await sign(key, claims);
+const token = await Key.sign(key, claims);
 ```
 
 Or you can sign as a CLI
@@ -88,19 +88,19 @@ moq-auth sign --key "root.jwk" \
 
 ### Verifying
 
-You can also verify a token, then scope it to a connection path the way a relay does:
+You can also verify a token, then scope it to a connection path the way `moq auth serve` does:
 
 ```typescript
-import { authorize, verify } from "@moq/auth";
+import { authorize, Key } from "@moq/auth";
 
-const claims = await verify(key, token); // signature and expiry
+const claims = await Key.verify(key, token); // signature and expiry
 const permissions = authorize(claims, "rooms/meeting-123"); // patterns relative to the path
 ```
 
 or as a CLI
 
 ```bash
-moq-auth verify --key root.jwk --root "rooms/meeting-123" < alice.jwt
+moq-auth verify --key root.jwk --in alice.jwt
 ```
 
 ### Answering a relay

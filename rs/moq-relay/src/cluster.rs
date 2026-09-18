@@ -1600,8 +1600,7 @@ impl Cluster {
 			tokio::select! {
 				ann = announced.next() => {
 					let Some(update) = ann else { return; };
-					let Some(prefix) = update.pattern.as_prefix() else { continue; };
-					let relative = moq_net::Path::new(prefix);
+					let relative = update.path;
 					// The address to dial, which keeps its query: `run_remote` reads
 					// `?cost=` and `?jwt=` off it. The key is only its identity.
 					let peer = advertised_node_url(relative.as_str());
@@ -1618,7 +1617,7 @@ impl Cluster {
 						continue;
 					}
 					let advertisement = relative.as_str().to_owned();
-					match update.active {
+					match update.kind.is_active() {
 						true => {
 							let target = live.announce(advertisement, target);
 							let mut spawn = |target: DialTarget| {
@@ -2407,8 +2406,8 @@ struct LinkSample {
 	payload_sent: Option<u64>,
 }
 
-impl From<&moq_net::ConnectionStats> for LinkSample {
-	fn from(stats: &moq_net::ConnectionStats) -> Self {
+impl From<&moq_net::session::Stats> for LinkSample {
+	fn from(stats: &moq_net::session::Stats) -> Self {
 		Self {
 			rtt: stats.rtt,
 			packets_sent: stats.packets_sent,
@@ -2549,7 +2548,7 @@ fn link_price(estimate: &LinkEstimate, pricing: &Pricing) -> u64 {
 	let rtt = estimate.rtt.as_secs_f64() * 1000.0;
 	let penalty = pricing.hop_penalty.as_secs_f64() * 1000.0;
 	let price = rtt * (1.0 + estimate.stall()) + penalty;
-	(price.round() as u64).min(moq_net::origin::MAX_COST)
+	(price.round() as u64).min(moq_net::origin::Cost::MAX.warm)
 }
 
 /// Rounds a price to the configured step and moves the announced value only
@@ -2575,7 +2574,7 @@ impl Quantizer {
 
 	/// The price to announce for `raw`, or `None` when the announced one stands.
 	fn update(&mut self, raw: u64) -> Option<u64> {
-		let ceiling = moq_net::origin::MAX_COST;
+		let ceiling = moq_net::origin::Cost::MAX.warm;
 		let quantized = match raw {
 			raw if raw >= ceiling => ceiling,
 			raw => raw.saturating_add(self.step / 2) / self.step * self.step,
@@ -2891,7 +2890,7 @@ impl Cluster {
 		let Some(pricing) = self.pricing else { return };
 		let hop = self.origin.id();
 		let path = Path::new(LINKS_PREFIX).join(hop.to_string());
-		let mut broadcast = match self.origin.create_broadcast(&path) {
+		let broadcast = match self.origin.create_broadcast(&path) {
 			Ok(broadcast) => broadcast,
 			Err(err) => {
 				tracing::warn!(%err, %path, "cannot publish the cluster link table");
@@ -2933,13 +2932,13 @@ impl Cluster {
 				}
 				update = announced.next() => {
 					let Some(update) = update else { return };
-					let Some(peer) = update.pattern.as_prefix().and_then(|p| p.parse::<u64>().ok()) else {
+					let Some(peer) = update.path.as_str().parse::<u64>().ok() else {
 						continue;
 					};
 					if peer == hop {
 						continue;
 					}
-					if update.active {
+					if update.kind.is_active() {
 						if readers.contains_key(&peer) {
 							continue;
 						}
@@ -3779,7 +3778,7 @@ mod tests {
 		assert_eq!(cluster.origin.config().cache_duration, duration);
 		assert_eq!(cluster.origin.config().pool.expiry(), Some(duration));
 
-		let mut broadcast = origin.create_broadcast("cam").expect("create");
+		let broadcast = origin.create_broadcast("cam").expect("create");
 		broadcast.announce(Default::default()).expect("announce");
 		let mut track = broadcast.create_track("data", None).expect("track");
 		track.write_frame(moq_net::Timestamp::ZERO, b"hello").expect("write");
@@ -3803,7 +3802,7 @@ mod tests {
 			.await
 			.expect("node advertised")
 			.expect("announce");
-		assert!(update.active);
+		assert!(update.kind.is_active());
 		let snapshot = cluster.nodes.snapshot();
 		assert!(
 			snapshot.nodes.iter().any(|node| node.node.contains("peer.example")),
@@ -3857,11 +3856,8 @@ mod tests {
 
 		// The self-registration route must be visible on the origin.
 		let update = watcher.try_next().expect("self-registration must be published");
-		assert_eq!(
-			update.pattern.as_prefix().expect("prefix announcement"),
-			".internal/origins/rendezvous.example.com:4443"
-		);
-		assert!(update.active);
+		assert_eq!(update.path.as_str(), ".internal/origins/rendezvous.example.com:4443");
+		assert!(update.kind.is_active());
 
 		// run() must NOT have returned: dropping the broadcast (via run returning)
 		// would unannounce the registration immediately. Use a short timeout to
@@ -4416,8 +4412,11 @@ mod tests {
 		assert_eq!(q.update(226), None);
 		assert_eq!(q.update(235), Some(235));
 		// The ceiling is announced as is, and coming back from it is a move.
-		assert_eq!(q.update(moq_net::origin::MAX_COST), Some(moq_net::origin::MAX_COST));
-		assert_eq!(q.update(moq_net::origin::MAX_COST), None);
+		assert_eq!(
+			q.update(moq_net::origin::Cost::MAX.warm),
+			Some(moq_net::origin::Cost::MAX.warm)
+		);
+		assert_eq!(q.update(moq_net::origin::Cost::MAX.warm), None);
 		assert_eq!(q.update(60), Some(60));
 		// A sub-millisecond step still rounds to whole milliseconds.
 		let mut fine = Quantizer::new(Duration::from_micros(100));
@@ -4704,7 +4703,7 @@ mod tests {
 	async fn next_user_announce(announced: &mut moq_net::announce::Consumer) -> Option<moq_net::announce::Update> {
 		loop {
 			let update = announced.next().await?;
-			if !update.pattern.as_str().starts_with(".internal/") {
+			if !update.path.as_str().starts_with(".internal/") {
 				return Some(update);
 			}
 		}
@@ -4776,7 +4775,7 @@ mod tests {
 			.await
 			.expect("timed out waiting for from-node")
 			.expect("origin closed");
-		assert_eq!(update.pattern.as_prefix().expect("prefix announcement"), "from-node");
+		assert_eq!(update.path.as_str(), "from-node");
 
 		let _from_fp = fingerprint.origin.create_broadcast("from-fingerprint").expect("create");
 		_from_fp.announce(Default::default()).expect("announce");
@@ -4786,7 +4785,7 @@ mod tests {
 				.await
 				.expect("timed out waiting for from-fingerprint")
 				.expect("origin closed");
-			if update.pattern.as_prefix().expect("prefix announcement") == "from-fingerprint" {
+			if update.path.as_str() == "from-fingerprint" {
 				break;
 			}
 		}

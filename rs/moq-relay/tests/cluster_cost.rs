@@ -154,9 +154,9 @@ impl Drop for Publisher {
 /// with the wall clock, so a subscriber can age them.
 async fn publish(relay: &RelayHost) -> Publisher {
 	let origin = moq_tokio::origin::spawn(Hop::random());
-	let mut broadcast = origin.create_broadcast(PATH).expect("create broadcast");
+	let broadcast = origin.create_broadcast(PATH).expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce");
-	let mut track = broadcast.create_track(TRACK, None).expect("create track");
+	let track = broadcast.create_track(TRACK, None).expect("create track");
 
 	let streamer = tokio::spawn(async move {
 		let mut ticker = tokio::time::interval(FRAME_INTERVAL);
@@ -269,7 +269,7 @@ impl Subscriber {
 	async fn next_route(&mut self) -> Vec<u64> {
 		loop {
 			let update = self.announced.next().await.expect("subscriber origin closed");
-			if update.pattern.as_prefix() == Some(PATH) && update.active {
+			if update.path.as_str() == PATH && update.kind.is_active() {
 				return update.route.hops.iter().map(|hop| hop.id()).collect();
 			}
 		}

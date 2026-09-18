@@ -28,8 +28,6 @@ pub enum ParameterVarInt {
 	Priced = super::cluster::PRICED,
 	/// SOLICIT, from the MoQ Solicit extension.
 	Solicit = super::solicit::SOLICIT,
-	/// NAMESPACE_PATTERNS, from the MoQ Pattern extension.
-	NamespacePatterns = super::pattern::NAMESPACE_PATTERNS,
 	#[num_enum(catch_all)]
 	Unknown(u64),
 }
@@ -41,8 +39,6 @@ pub enum ParameterBytes {
 	AuthorizationToken = 3,
 	Authority = 5,
 	Implementation = 7,
-	/// NAMESPACE_PATTERN, from the MoQ Pattern extension.
-	NamespacePattern = super::pattern::NAMESPACE_PATTERN,
 	#[num_enum(catch_all)]
 	Unknown(u64),
 }

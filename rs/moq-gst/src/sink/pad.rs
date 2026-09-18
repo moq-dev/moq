@@ -257,7 +257,7 @@ impl Pad {
 			let name = requested
 				.context("an opaque data pad requires a track name")?
 				.to_owned();
-			let mut broadcast = broadcast.clone();
+			let broadcast = broadcast.clone();
 			let request = broadcast
 				.reserve_track(name.clone())
 				.with_context(|| format!("cannot reserve track {name}"))?;
@@ -694,7 +694,7 @@ impl Pad {
 		let closed = match track {
 			Sink::Media { mut track, .. } => track.finish().map_err(anyhow::Error::from),
 			Sink::Text(mut text) => text.producer.finish().map_err(anyhow::Error::from),
-			Sink::Opaque(mut producer) => producer.finish().map_err(anyhow::Error::from),
+			Sink::Opaque(producer) => producer.finish().map_err(anyhow::Error::from),
 		};
 		if let Err(err) = closed {
 			// The producer is gone either way, so the pad publishes nothing from here: mark it failed so

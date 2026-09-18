@@ -228,20 +228,16 @@ class OriginState {
 	 * retracted route's session subscription closes even when nothing reads it again.
 	 */
 	refreshPrefix(prefix: Path.Valid): void {
-		const parsed = Path.Pattern.parse(prefix);
-		const shaped = parsed.asPrefix();
-		const covers = (path: Path.Valid) =>
-			shaped !== undefined ? Path.hasPrefix(Path.from(shaped), path) : parsed.matches(path);
 		const requests = this.requests.peek();
 		for (const [path, cached] of [...this.materialized]) {
-			if (!covers(path)) continue;
+			if (!Path.hasPrefix(prefix, path)) continue;
 			if (cached.entry !== this.bestEntry(path, requests?.get(path)?.refused)) {
 				this.materialized.delete(path);
 				cached.front.close();
 			}
 		}
 		for (const [path, slot] of requests ?? []) {
-			if (covers(path)) slot.route.set(this.route(path, slot));
+			if (Path.hasPrefix(prefix, path)) slot.route.set(this.route(path, slot));
 		}
 	}
 
@@ -257,7 +253,7 @@ class OriginState {
 		const next = new Map<Path.Valid, Advertised>();
 		for (const [path, route] of advertised ?? []) {
 			const front = local?.get(path);
-			if (front) next.set(Path.from(Path.Pattern.subtree(path).text), { identity: front, route });
+			if (front) next.set(path, { identity: front, route });
 		}
 		for (const [prefix, entries] of routes ?? []) {
 			const mine = entries.find((entry) => entry.originated);
@@ -282,15 +278,12 @@ class OriginState {
 	bestEntry(path: Path.Valid, refused?: ReadonlySet<RouteEntry>): RouteEntry | undefined {
 		let bestPrefix: Path.Valid | undefined;
 		let best: RouteEntry | undefined;
-		for (const [key, entries] of this.routes.peek() ?? []) {
+		for (const [prefix, entries] of this.routes.peek() ?? []) {
 			const entry = entries.find((candidate) => !refused?.has(candidate));
 			if (!entry) continue;
-			const parsed = Path.Pattern.parse(key);
-			const prefix = parsed.asPrefix();
-			if (prefix === undefined) continue;
-			if (!Path.hasPrefix(Path.from(prefix), path)) continue;
+			if (!Path.hasPrefix(prefix, path)) continue;
 			if (bestPrefix === undefined || prefix.length > bestPrefix.length) {
-				bestPrefix = Path.from(prefix);
+				bestPrefix = prefix;
 				best = entry;
 			}
 		}
@@ -454,20 +447,21 @@ export class Producer implements Table {
 	}
 
 	/**
-	 * Advertise a path pattern and serve the requests beneath it.
+	 * Advertise `prefix` and serve the requests beneath it.
 	 *
-	 * A prefix is spelled `foo/**` (`**` for every path). A non-prefix pattern is
-	 * advertised as a covering claim; resolving one into a subscription is not
-	 * implemented yet. The advertisement is visible to {@link Consumer.announced}
-	 * and forwarded by sessions for as long as the returned {@link Dynamic} lives.
-	 * A consumer resolving a path under a prefix-shaped pattern that no local
-	 * broadcast covers is handed to the handle as a {@link BroadcastRequest}.
+	 * A route is always a prefix: it claims `prefix` and every path beneath it (the
+	 * empty prefix claims every path). A service that only serves some of them
+	 * advertises the covering prefix and rejects the rest as they are requested;
+	 * consumers narrow with a {@link Path.Pattern} locally. The advertisement is
+	 * visible to {@link Consumer.announced} and forwarded by sessions for as long as
+	 * the returned {@link Dynamic} lives. A consumer resolving a path under it that
+	 * no local broadcast covers is handed to the handle as a {@link BroadcastRequest}.
 	 */
 	dynamic(
-		pattern: Path.Pattern | string,
+		prefix: Path.Valid | string,
 		route: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint } = Route.default,
 	): Dynamic {
-		return this.#insertRoute(pattern, Route.normalize(route), true);
+		return this.#insertRoute(prefix, Route.normalize(route), true);
 	}
 
 	/**
@@ -477,14 +471,14 @@ export class Producer implements Table {
 	 * @internal
 	 */
 	receive(
-		pattern: Path.Pattern | string,
+		prefix: Path.Valid | string,
 		route: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint } = Route.default,
 	): Dynamic {
-		return this.#insertRoute(pattern, Route.normalize(route), false);
+		return this.#insertRoute(prefix, Route.normalize(route), false);
 	}
 
-	#insertRoute(pattern: Path.Pattern | string, route: Route, originated: boolean): Dynamic {
-		const { parsed, prefix } = prefixPattern(pattern);
+	#insertRoute(raw: Path.Valid | string, route: Route, originated: boolean): Dynamic {
+		const prefix = Path.from(raw);
 		const server = new ServeState();
 		server.onChange = (path) => this.#state.refresh(path);
 		const entry: RouteEntry = {
@@ -507,7 +501,7 @@ export class Producer implements Table {
 		});
 		if (closed) {
 			server.close();
-			return makeDynamic(parsed, prefix, entry, this.#state, () => {});
+			return makeDynamic(prefix, entry, this.#state, () => {});
 		}
 		this.#state.rebuildOriginated();
 		this.#state.refreshPrefix(prefix);
@@ -528,7 +522,7 @@ export class Producer implements Table {
 			this.#state.refreshPrefix(prefix);
 		};
 
-		return makeDynamic(parsed, prefix, entry, this.#state, retract);
+		return makeDynamic(prefix, entry, this.#state, retract);
 	}
 
 	/**
@@ -708,21 +702,10 @@ let makeRequest: (
 	dispose: Dispose,
 ) => Request;
 
-let makeDynamic: (
-	pattern: Path.Pattern,
-	prefix: Path.Valid,
-	entry: RouteEntry,
-	state: OriginState,
-	retract: Dispose,
-) => Dynamic;
+let makeDynamic: (prefix: Path.Valid, entry: RouteEntry, state: OriginState, retract: Dispose) => Dynamic;
 
 let makeBroadcastRequest: (path: Path.Valid, server: ServeState) => BroadcastRequest;
 let finishBroadcastRequest: (request: BroadcastRequest, err: Error) => void;
-
-function prefixPattern(pattern: Path.Pattern | string): { parsed: Path.Pattern; prefix: Path.Valid } {
-	const parsed = typeof pattern === "string" ? Path.Pattern.parse(pattern) : pattern;
-	return { parsed, prefix: Path.from(parsed.text) };
-}
 
 /**
  * An open request for a path nothing announced; see {@link Consumer.request}.
@@ -961,8 +944,8 @@ export class Consumer {
 	 * The scope must be prefix-shaped (`foo/**`, or `**` for everything); anything else
 	 * throws rather than narrowing or widening it. A local broadcast appears only after
 	 * {@link broadcast.Producer.announce}; a dynamic or received route announces the
-	 * prefix it covers, clamped to the scope. Patterns are relative to the origin, not
-	 * the scope. The stream ends when the origin closes or the consumer is closed.
+	 * prefix it covers, clamped to the scope. Paths are relative to the scope. The
+	 * stream ends when the origin closes or the consumer is closed.
 	 */
 	announced(scope: Path.Pattern = Path.Pattern.all()): announce.Consumer {
 		const prefix = scopePrefix(scope);
@@ -972,10 +955,11 @@ export class Consumer {
 	}
 
 	async #runAnnounced(producer: announce.Producer, prefix: Path.Valid): Promise<void> {
-		// Keyed by the presented pattern, valued by identity plus route. Diffing identity
-		// rather than mere presence means a republish emits a retraction then a fresh
-		// announcement; a re-price of the same identity emits another active (a restart).
-		let active = new Map<string, Advertised>();
+		// Keyed by the presented path (from the origin, not the scope), valued by identity
+		// plus route. Diffing identity rather than mere presence means a republish emits a
+		// retraction then a fresh announcement; a re-price of the same identity emits an
+		// update.
+		let active = new Map<Path.Valid, Advertised>();
 
 		try {
 			for (;;) {
@@ -984,43 +968,41 @@ export class Consumer {
 				const routes = this.#state.routes.peek();
 				if (local === undefined && advertisedLocal === undefined && routes === undefined) break;
 
-				const next = new Map<string, Advertised>();
+				const next = new Map<Path.Valid, Advertised>();
 				// Routes first, so an advertised local at the same path overwrites it: the
 				// announcement points at whatever request() would resolve.
-				// The most specific route covering the scope itself wins the root slot,
-				// matching request() resolution.
+				// A route above the scope clamps to the scope itself, and the most specific
+				// one wins that root slot, matching request() resolution.
 				let rootLen = -1;
-				for (const [key, entries] of routes ?? []) {
+				for (const [covered, entries] of routes ?? []) {
 					const entry = entries[0];
 					if (!entry) continue;
 					const snap: Advertised = { identity: entry.identity, route: entry.route.peek() };
-					const advertised = Path.Pattern.parse(key);
-					// Rebasing clamps the claim to the scope; rooting names the result from the origin.
-					for (const residual of advertised.rebase(prefix)) {
-						if (residual.asPrefix() === "") {
-							const spec = advertised.segments.length;
-							if (spec < rootLen) continue;
-							rootLen = spec;
-						}
-						next.set(residual.rooted(prefix).text, snap);
+					if (Path.hasPrefix(covered, prefix)) {
+						if (covered.length < rootLen) continue;
+						rootLen = covered.length;
+						next.set(prefix, snap);
+						continue;
 					}
+					if (Path.hasPrefix(prefix, covered)) next.set(covered, snap);
 				}
 				for (const [path, front] of local ?? []) {
 					const route = advertisedLocal?.get(path);
 					if (!route) continue;
-					if (Path.hasPrefix(prefix, path))
-						next.set(Path.Pattern.subtree(path).text, { identity: front, route });
+					if (Path.hasPrefix(prefix, path)) next.set(path, { identity: front, route });
 				}
 
 				for (const [path, snap] of active) {
 					const cur = next.get(path);
 					if (!cur || cur.identity !== snap.identity)
-						producer.append({ pattern: Path.Pattern.parse(path), active: false });
+						producer.append({ path, kind: "retracted", route: snap.route });
 				}
 				for (const [path, snap] of next) {
 					const prev = active.get(path);
-					if (!prev || prev.identity !== snap.identity || !routesEqual(prev.route, snap.route)) {
-						producer.append({ pattern: Path.Pattern.parse(path), active: true, route: snap.route });
+					if (!prev || prev.identity !== snap.identity) {
+						producer.append({ path, kind: "announced", route: snap.route });
+					} else if (!routesEqual(prev.route, snap.route)) {
+						producer.append({ path, kind: "updated", route: snap.route });
 					}
 				}
 				active = next;
@@ -1111,31 +1093,23 @@ export class Consumer {
  * @public
  */
 export class Dynamic {
-	/** The pattern this handle advertises. */
-	readonly pattern: Path.Pattern;
+	/** The prefix this handle advertises. */
+	readonly prefix: Path.Valid;
 
-	#prefix: Path.Valid;
 	#entry: RouteEntry;
 	#state: OriginState;
 	#retract: Dispose;
 	#closed = false;
 
-	private constructor(
-		pattern: Path.Pattern,
-		prefix: Path.Valid,
-		entry: RouteEntry,
-		state: OriginState,
-		retract: Dispose,
-	) {
-		this.pattern = pattern;
-		this.#prefix = prefix;
+	private constructor(prefix: Path.Valid, entry: RouteEntry, state: OriginState, retract: Dispose) {
+		this.prefix = prefix;
 		this.#entry = entry;
 		this.#state = state;
 		this.#retract = retract;
 	}
 
 	static {
-		makeDynamic = (pattern, prefix, entry, state, retract) => new Dynamic(pattern, prefix, entry, state, retract);
+		makeDynamic = (prefix, entry, state, retract) => new Dynamic(prefix, entry, state, retract);
 	}
 
 	/** Re-price the route in place. The prefix is fixed at announce time. */
@@ -1143,7 +1117,7 @@ export class Dynamic {
 		if (this.#closed) throw new Error("dynamic is closed");
 		this.#entry.route.set(Route.normalize(route));
 		this.#state.rebuildOriginated();
-		this.#state.refreshPrefix(this.#prefix);
+		this.#state.refreshPrefix(this.prefix);
 		this.#state.routes.mutate(() => {});
 	}
 

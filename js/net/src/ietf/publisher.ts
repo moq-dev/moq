@@ -714,10 +714,8 @@ export class Publisher {
 				}
 
 				const updated = new Map<Path.Valid, Advertised>();
-				for (const [name, snap] of advertised) {
-					const claim = Path.Pattern.parse(name).asPrefix();
-					if (claim === undefined) continue;
-					const suffix = Path.stripPrefix(prefix, Path.from(claim));
+				for (const [covered, snap] of advertised) {
+					const suffix = Path.stripPrefix(prefix, covered);
 					if (suffix === null) continue;
 					updated.set(suffix, snap);
 				}
@@ -846,9 +844,8 @@ export class Publisher {
 				}
 
 				const updated = new Map<Path.Valid, Advertised>();
-				for (const [name, snap] of advertised) {
-					const claim = Path.Pattern.parse(name).asPrefix();
-					if (claim !== undefined) updated.set(Path.from(claim), snap);
+				for (const [covered, snap] of advertised) {
+					updated.set(covered, snap);
 				}
 
 				// A namespace that is gone, or that a republish replaced, takes its refusal with

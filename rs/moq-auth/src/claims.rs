@@ -66,7 +66,8 @@ impl Scope {
 /// it is relative to that path.
 ///
 /// Produced by [`Claims::authorize`]. `**` grants the path itself and everything
-/// beneath it; the empty pattern grants exactly the path.
+/// beneath it; the empty pattern grants exactly the path. The reference server's
+/// policy uses the same pair for anonymous and mTLS grants.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Permissions {
 	/// Patterns the holder may subscribe to, relative to the authorized path.
@@ -74,6 +75,18 @@ pub struct Permissions {
 
 	/// Patterns the holder may publish to, relative to the authorized path.
 	pub publish: Patterns,
+}
+
+impl Permissions {
+	/// Access granted as these pattern unions.
+	pub fn new(publish: Patterns, subscribe: Patterns) -> Self {
+		Self { publish, subscribe }
+	}
+
+	/// Whether nothing is granted, which is a refusal.
+	pub fn is_empty(&self) -> bool {
+		self.publish.is_empty() && self.subscribe.is_empty()
+	}
 }
 
 /// The payload of a token: a root, plus the publish/subscribe patterns granted beneath it.

@@ -16,13 +16,10 @@ file is deleted on completion) or deletes the quest with a note in
 `quest/m1/README.md` naming the deferred break. When the list is empty this
 quest is deleted too. No code.
 
-The list: [Auth contract](/quest/m1/auth-contract.md),
-[Announce event](/quest/m1/api-net-announce.md),
+The list: [Announce event](/quest/m1/api-net-announce.md),
 [Origin scoping](/quest/m1/api-net-origin.md),
-[moq-net surface](/quest/m1/api-net-surface.md),
 [moq-tokio shapes](/quest/m1/api-tokio-shapes.md),
 [@moq/net API](/quest/m1/api-js-net.md),
-[@moq/auth API](/quest/m1/api-js-auth.md),
 [JSON configs](/quest/m1/api-json-config.md),
 [Catalog types](/quest/m1/api-hang-catalog.md),
 [Rendition ownership](/quest/m1/api-mux-rendition.md),

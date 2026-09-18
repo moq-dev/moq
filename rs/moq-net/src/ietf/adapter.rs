@@ -1420,8 +1420,6 @@ mod tests {
 			request_id,
 			track_namespace: crate::Path::new(namespace),
 			cluster: None,
-
-			pattern: None,
 		}
 	}
 

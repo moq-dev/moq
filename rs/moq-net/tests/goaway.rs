@@ -318,12 +318,12 @@ async fn goaway_gates_new_subscribes_moq_lite_04() {
 
 		// Server publishes a broadcast with one live track.
 		let pub_origin = produce_origin(Hop::random());
-		let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+		let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 		broadcast.announce(moq_net::origin::Route::default()).expect("announce");
-		let mut track = broadcast.create_track("video", None).expect("create track");
+		let track = broadcast.create_track("video", None).expect("create track");
 		// A second track with content ready, so the gated subscribe below would
 		// deliver immediately if it reached the wire.
-		let mut audio = broadcast.create_track("audio", None).expect("create track");
+		let audio = broadcast.create_track("audio", None).expect("create track");
 		let mut audio_group = audio.append_group().expect("append group");
 		audio_group
 			.write_frame(moq_net::Timestamp::ZERO, b"audio".as_ref())
@@ -442,8 +442,8 @@ async fn goaway_drains_routes(version: Version) {
 		let mut announced = sub.announced();
 		loop {
 			let update = announced.next().await.expect("update");
-			if update.active
-				&& update.pattern.as_prefix().expect("prefix announcement") == "test"
+			if update.kind.is_active()
+				&& update.path.as_str() == "test"
 				&& update.route.cost == moq_net::origin::Cost::DRAIN
 			{
 				break;

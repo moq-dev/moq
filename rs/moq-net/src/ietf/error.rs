@@ -507,8 +507,12 @@ mod tests {
 			));
 		}
 
-		assert_ne!(CANCELLED, Error::Cancel.to_code(), "the two spaces disagree about 0");
-		assert_eq!(Error::Cancel.to_code(), INTERNAL_ERROR);
+		assert_ne!(
+			CANCELLED,
+			SessionError::Cancel.to_code(),
+			"the two spaces disagree about 0"
+		);
+		assert_eq!(SessionError::Cancel.to_code(), INTERNAL_ERROR);
 	}
 
 	/// Every code we send must decode back to what we meant on the same draft, or two

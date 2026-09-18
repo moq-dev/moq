@@ -13,6 +13,6 @@ export {
 	type WebSocketOptions,
 	type WebTransportProps,
 } from "./connect.ts";
-export { Connection, type ConnectionProps, resetShared } from "./pool.ts";
+export { Connection, type ConnectionProps } from "./pool.ts";
 export type { Probe, Stats } from "./stats.ts";
 export type { Transport } from "./transport.ts";

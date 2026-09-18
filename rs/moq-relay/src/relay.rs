@@ -65,6 +65,8 @@ pub struct Relay {
 	web_routes: Option<Router>,
 	/// Replacement for the default ops router. `None` serves [`internal::Internal::routes`].
 	internal_routes: Option<Router>,
+	/// Live sessions on this node, listed and nudged from the internal listener.
+	sessions: crate::session::Registry,
 	/// The thread-per-core QUIC workers, already bound and waiting to be split
 	/// and run. `None` unless `runtime.workers` is configured, in which case
 	/// `server` carries no QUIC listener of its own.
@@ -229,9 +231,11 @@ impl Relay {
 		// GOAWAY; a second signal (or the drain window elapsing) exits.
 		let drain_timeout = config.drain_timeout.into_std();
 		let (shutdown_trigger, shutdown) = shutdown::Observer::new(drain_timeout);
+		let sessions = crate::session::Registry::new();
 		let web = web::Web::new(auth.clone(), cluster.clone(), certificates, config.web)
 			.with_shutdown(shutdown.clone())
-			.with_versions(server_versions);
+			.with_versions(server_versions)
+			.with_sessions(sessions.clone());
 
 		// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
 		// /metrics + /health + /nodes, separate from the customer-facing web server. No-op
@@ -240,6 +244,7 @@ impl Relay {
 		// point is that whichever socket goes quiet is the one a scrape can see.
 		let internal = internal::Internal::new(config.internal, cluster.stats.clone())
 			.with_cluster(&cluster)
+			.with_sessions(sessions.clone())
 			.with_listeners(web.accept_health())
 			.with_listeners(server.accept_health());
 		// Bound but not yet serving: registering here (rather than after the
@@ -272,6 +277,7 @@ impl Relay {
 			shutdown_trigger,
 			web_routes: None,
 			internal_routes: None,
+			sessions,
 			#[cfg(feature = "_quic")]
 			workers,
 			#[cfg(all(target_os = "linux", feature = "_uring"))]
@@ -334,10 +340,16 @@ impl Relay {
 		&self.web
 	}
 
-	/// The internal (ops) surface: `/metrics`, `/health`, `/nodes`. Call
-	/// [`internal::Internal::routes`] and hand extras to [`Self::with_internal`].
+	/// The internal (ops) surface: `/metrics`, `/health`, `/nodes`, `/sessions`.
+	/// Call [`internal::Internal::routes`] and hand extras to [`Self::with_internal`].
 	pub fn internal(&self) -> &internal::Internal {
 		&self.internal
+	}
+
+	/// Live sessions on this node. Clone it onto an embedder's own listeners so
+	/// they register too, and onto any extra ops routes that list or nudge them.
+	pub fn sessions(&self) -> &crate::session::Registry {
+		&self.sessions
 	}
 
 	/// Serve `routes` on the public HTTP/HTTPS listeners instead of the
@@ -359,7 +371,7 @@ impl Relay {
 	///
 	/// Build `routes` from [`internal::Internal::routes`] plus extras;
 	/// this replaces the router, so a bare `Router::new()` drops `/metrics`,
-	/// `/health`, and `/nodes`. [`Self::run`] still owns the listener.
+	/// `/health`, `/nodes`, and `/sessions`. [`Self::run`] still owns the listener.
 	#[must_use = "the relay with the extra routes is returned"]
 	pub fn with_internal(mut self, routes: Router) -> Self {
 		self.internal_routes = Some(routes);
@@ -386,6 +398,7 @@ impl Relay {
 			shutdown_trigger,
 			web_routes,
 			internal_routes,
+			sessions,
 			#[cfg(feature = "_quic")]
 			workers,
 			#[cfg(all(target_os = "linux", feature = "_uring"))]
@@ -418,7 +431,7 @@ impl Relay {
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
 		if let Some(uring) = uring.as_mut() {
 			uring
-				.serve(cluster.clone(), auth.clone(), shutdown.clone())
+				.serve(cluster.clone(), auth.clone(), shutdown.clone(), sessions.clone())
 				.context("failed to start the io_uring QUIC workers")?;
 		}
 
@@ -465,7 +478,10 @@ impl Relay {
 					let cluster = cluster.clone();
 					let auth = auth.clone();
 					let worker_shutdown = shutdown.clone();
-					let task = spawner.serve(server, move |server| serve(server, cluster, auth, worker_shutdown));
+					let sessions = sessions.clone();
+					let task = spawner.serve(server, move |server| {
+						serve(server, cluster, auth, worker_shutdown, sessions)
+					});
 					running.push(async move {
 						match task.await {
 							Ok(res) => res.with_context(|| format!("QUIC worker {index} failed")),
@@ -514,10 +530,11 @@ impl Relay {
 			let cluster = cluster.clone();
 			let auth = auth.clone();
 			let shutdown = shutdown.clone();
+			let sessions = sessions.clone();
 			async move {
 				match idle {
 					true => std::future::pending().await,
-					false => serve(server, cluster, auth, shutdown).await,
+					false => serve(server, cluster, auth, shutdown, sessions).await,
 				}
 			}
 		};
@@ -610,6 +627,7 @@ pub async fn serve(
 	cluster: cluster::Cluster,
 	auth: auth::Auth,
 	shutdown: shutdown::Observer,
+	sessions: crate::session::Registry,
 ) -> anyhow::Result<()> {
 	// Binds whatever is still unbound (the `tcp`/`unix` listeners), so a bind
 	// failure is reported here rather than as an immediate stop.
@@ -618,7 +636,8 @@ pub async fn serve(
 	while let Some(request) = server.accept().await {
 		let conn = Connection::new(request, cluster.clone(), auth.clone())
 			.with_id(cluster.next_connection_id())
-			.with_shutdown(shutdown.clone());
+			.with_shutdown(shutdown.clone())
+			.with_sessions(sessions.clone());
 
 		tokio::spawn(async move {
 			if let Err(err) = conn.run().await {

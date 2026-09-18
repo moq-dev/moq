@@ -10,7 +10,7 @@ use std::task::Poll;
 
 use serde::{Deserialize, Serialize};
 
-use crate::Grant;
+use crate::{Bytes, Grant};
 
 /// Why a lease ended, from whichever side ended it.
 ///
@@ -82,7 +82,10 @@ struct State {
 	/// Bumped on every update, so a consumer can tell a change from a spurious wake.
 	epoch: u64,
 	/// Set once by whichever side ends the lease first; the other side reads it.
-	closed: Option<Reason>,
+	closed: Option<(Reason, Bytes)>,
+	/// Bumped on each re-check ask; the producer observes and clears, so a burst
+	/// coalesces into one wake.
+	revalidate: u64,
 }
 
 /// The authorizing side of a lease: applies new grants and revokes.
@@ -100,6 +103,7 @@ impl Producer {
 			grant,
 			epoch: 0,
 			closed: None,
+			revalidate: 0,
 		});
 		(Self { state: state.clone() }, Consumer { state, seen: 0 })
 	}
@@ -117,28 +121,42 @@ impl Producer {
 	/// End the lease with `reason`, consuming the handle, and return the reason
 	/// the lease ended with: `reason`, or the consumer's if it closed first.
 	pub fn revoke(self, reason: Reason) -> Reason {
-		self.close(reason)
+		self.finish(reason, Bytes::default()).0
 	}
 
-	/// Poll for the lease ending, from either side.
-	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Reason> {
+	/// Poll for the lease ending, from either side: why it ended, and the totals
+	/// the session reported. A producer-side revoke, or a drop, reports zero bytes.
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<(Reason, Bytes)> {
 		let state = std::task::ready!(self.state.poll(waiter, |state| ready_if(state.closed.is_some())));
 		Poll::Ready(state.closed.clone().expect("waited for a close"))
 	}
 
 	/// Wait for the lease to end, from either side.
-	pub async fn closed(&self) -> Reason {
+	pub async fn closed(&self) -> (Reason, Bytes) {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
-	fn close(&self, reason: Reason) -> Reason {
-		self.state.lock().closed.get_or_insert(reason).clone()
+	/// Poll until at least one re-check has been asked since the last observation.
+	/// A burst of asks resolves once.
+	pub fn poll_revalidate(&self, waiter: &kio::Waiter) -> Poll<()> {
+		let mut state = std::task::ready!(self.state.poll(waiter, |state| ready_if(state.revalidate > 0)));
+		state.revalidate = 0;
+		Poll::Ready(())
+	}
+
+	/// Wait until a re-check has been asked since the last observation.
+	pub async fn revalidate_requested(&self) {
+		kio::wait(|waiter| self.poll_revalidate(waiter)).await
+	}
+
+	pub(crate) fn finish(&self, reason: Reason, bytes: Bytes) -> (Reason, Bytes) {
+		self.state.lock().closed.get_or_insert((reason, bytes)).clone()
 	}
 }
 
 impl Drop for Producer {
 	fn drop(&mut self) {
-		self.close(Reason::Dropped);
+		self.finish(Reason::Dropped, Bytes::default());
 	}
 }
 
@@ -159,6 +177,7 @@ impl Consumer {
 			grant,
 			epoch: 0,
 			closed: None,
+			revalidate: 0,
 		});
 		Self { state, seen: 0 }
 	}
@@ -175,7 +194,7 @@ impl Consumer {
 			self.state
 				.poll(waiter, |state| ready_if(state.epoch > seen || state.closed.is_some()))
 		);
-		if let Some(reason) = &state.closed {
+		if let Some((reason, _)) = &state.closed {
 			return Poll::Ready(Err(reason.clone()));
 		}
 		self.seen = state.epoch;
@@ -190,7 +209,7 @@ impl Consumer {
 	/// Poll for the lease ending.
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Reason> {
 		let state = std::task::ready!(self.state.poll(waiter, |state| ready_if(state.closed.is_some())));
-		Poll::Ready(state.closed.clone().expect("waited for a close"))
+		Poll::Ready(state.closed.as_ref().expect("waited for a close").0.clone())
 	}
 
 	/// Wait for the lease to end.
@@ -198,17 +217,26 @@ impl Consumer {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
-	/// End the lease with the session's own close classification, consuming the
-	/// handle, and return the reason the lease ended with: `reason`, or the
-	/// producer's if it revoked first.
-	pub fn close(self, reason: impl Into<Reason>) -> Reason {
-		self.state.lock().closed.get_or_insert(reason.into()).clone()
+	/// Ask the producer to re-check now. A no-op on a [`fixed`](Self::fixed)
+	/// lease, which has nobody to ask.
+	pub fn revalidate(&self) {
+		self.state.lock().revalidate += 1;
+	}
+
+	/// End the lease with the session's own close classification and the totals it
+	/// moved, consuming the handle, and return the reason the lease ended with:
+	/// `reason`, or the producer's if it revoked first. [`Drop`] reports zero bytes.
+	pub fn close(self, reason: impl Into<Reason>, bytes: Bytes) -> Reason {
+		self.state.lock().closed.get_or_insert((reason.into(), bytes)).0.clone()
 	}
 }
 
 impl Drop for Consumer {
 	fn drop(&mut self) {
-		self.state.lock().closed.get_or_insert(Reason::Dropped);
+		self.state
+			.lock()
+			.closed
+			.get_or_insert((Reason::Dropped, Bytes::default()));
 	}
 }
 
@@ -254,6 +282,16 @@ mod tests {
 	}
 
 	#[test]
+	fn the_session_close_hands_over_byte_totals() {
+		let (producer, consumer) = Producer::new(grant("a/**"));
+		consumer.close("done", Bytes { sent: 3, received: 5 });
+		assert_eq!(
+			poll(producer.closed()),
+			Poll::Ready((Reason::Session("done".into()), Bytes { sent: 3, received: 5 }))
+		);
+	}
+
+	#[test]
 	fn dropping_the_producer_revokes() {
 		let (producer, consumer) = Producer::new(grant("a/**"));
 		drop(producer);
@@ -261,15 +299,25 @@ mod tests {
 	}
 
 	#[test]
+	fn dropping_the_consumer_reports_zero_bytes() {
+		let (producer, consumer) = Producer::new(grant("a/**"));
+		drop(consumer);
+		assert_eq!(
+			poll(producer.closed()),
+			Poll::Ready((Reason::Dropped, Bytes::default()))
+		);
+	}
+
+	#[test]
 	fn the_session_close_reaches_the_producer_and_the_first_reason_wins() {
 		let (producer, consumer) = Producer::new(grant("a/**"));
 		assert!(poll(producer.closed()).is_pending());
 
-		let recorded = consumer.close("disconnected");
+		let recorded = consumer.close("disconnected", Bytes { sent: 1, received: 2 });
 		assert_eq!(recorded, Reason::Session("disconnected".into()));
 		assert_eq!(
 			poll(producer.closed()),
-			Poll::Ready(Reason::Session("disconnected".into()))
+			Poll::Ready((Reason::Session("disconnected".into()), Bytes { sent: 1, received: 2 }))
 		);
 
 		// A later revocation changes nothing, and says so.
@@ -282,14 +330,26 @@ mod tests {
 		assert_eq!(consumer.grant(), grant("a/**"));
 		assert!(poll(consumer.changed()).is_pending());
 		assert!(poll(consumer.closed()).is_pending());
-		assert_eq!(consumer.close("done"), Reason::Session("done".into()));
+		consumer.revalidate();
+		assert_eq!(consumer.grant(), grant("a/**"));
+		assert!(poll(consumer.changed()).is_pending());
+		assert!(poll(consumer.closed()).is_pending());
+		assert_eq!(consumer.close("done", Bytes::default()), Reason::Session("done".into()));
 	}
 
 	#[test]
-	fn dropping_the_consumer_reports_dropped() {
+	fn n_nudges_wake_the_producer_once() {
 		let (producer, consumer) = Producer::new(grant("a/**"));
-		drop(consumer);
-		assert_eq!(poll(producer.closed()), Poll::Ready(Reason::Dropped));
+		assert!(poll(producer.revalidate_requested()).is_pending());
+
+		for _ in 0..8 {
+			consumer.revalidate();
+		}
+		assert_eq!(poll(producer.revalidate_requested()), Poll::Ready(()));
+		assert!(poll(producer.revalidate_requested()).is_pending());
+
+		consumer.revalidate();
+		assert_eq!(poll(producer.revalidate_requested()), Poll::Ready(()));
 	}
 
 	#[test]
