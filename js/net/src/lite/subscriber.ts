@@ -6,7 +6,7 @@ import { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
-import { scopePrefix } from "../internal.ts";
+import { scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
 import * as Time from "../time.ts";
@@ -153,9 +153,8 @@ export class Subscriber {
 	}
 
 	/**
-	 * Subscribe to broadcast announcements under `scope`, a prefix-shaped pattern
-	 * (`foo/**`, or `**` for everything). Paths are relative to the session, not
-	 * the scope.
+	 * Subscribe to broadcast announcements matching `scope`. Paths are relative
+	 * to the session, not the scope.
 	 *
 	 * Reflected announces (those whose hop chain already includes this
 	 * connection) are always dropped: moq-lite-06 has none to keep, and older
@@ -164,11 +163,11 @@ export class Subscriber {
 	announced(scope: Path.Pattern = Path.Pattern.all()): announce.Consumer {
 		const announced = new announce.Producer();
 		// The wire speaks announce interest by prefix, and echoes suffixes beneath it.
-		void this.#runAnnounced(announced, scopePrefix(scope));
+		void this.#runAnnounced(announced, scopeHead(scope), scope);
 		return announced.consume();
 	}
 
-	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid): Promise<void> {
+	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid, scope: Path.Pattern): Promise<void> {
 		console.debug(`announced: prefix=${prefix}`);
 		// Lite04/05: send our own session-level Hop ID so the peer can skip announces
 		// whose hop chain already passed through us. Encoding drops it on every other
@@ -215,7 +214,12 @@ export class Subscriber {
 			// `publisher` is what lets a restart tell a route change (same publisher,
 			// subscriptions resume) from a replacement (a new generation took the path,
 			// nothing carries over).
-			type Advertisement = { publisher: Hop | undefined; live: boolean; route: Route };
+			type Advertisement = {
+				publisher: Hop | undefined;
+				live: boolean;
+				route: Route;
+				captures: Path.Pattern[] | undefined;
+			};
 			const advertised = new Map<Path.Valid, Advertisement>();
 
 			switch (this.version) {
@@ -235,9 +239,12 @@ export class Subscriber {
 							throw new ProtocolViolation(`duplicate announce for ${path}`);
 						}
 						const route = { hops: [UNKNOWN_HOP], cost: Cost.zero };
-						advertised.set(path, { publisher: undefined, live: true, route });
+						const live = scopeOverlaps(scope, path);
+						const captures = scopeCaptures(scope, path);
+						advertised.set(path, { publisher: undefined, live, route, captures });
+						if (!live) continue;
 						console.debug(`announced: broadcast=${path} active=true`);
-						announced.append({ path, kind: "announced", route });
+						announced.append({ path, captures, kind: "announced", route });
 					}
 					break;
 				}
@@ -335,7 +342,7 @@ export class Subscriber {
 					if (!previous?.live) return;
 					this.#consumes.evict(path);
 					console.debug(`announced: broadcast=${path} active=false`);
-					announced.append({ path, kind: "retracted", route: previous.route });
+					announced.append({ path, captures: previous.captures, kind: "retracted", route: previous.route });
 				};
 
 				// In Lite05+ the sender's origin arrives via AnnounceOk, not in each hop
@@ -352,6 +359,7 @@ export class Subscriber {
 							publisher: undefined,
 							live: false,
 							route: { hops: full, cost: Cost.zero },
+							captures: undefined,
 						});
 						continue;
 					}
@@ -381,10 +389,20 @@ export class Subscriber {
 				// drop Rust's Hops::push makes: do not expose an overlong chain.
 				if (fullHops.length > MAX_HOPS) {
 					console.debug(`announced: broadcast=${path} dropped (hop chain at MAX_HOPS)`);
-					advertised.set(path, { publisher: undefined, live: false, route: { hops: [], cost: Cost.zero } });
+					advertised.set(path, {
+						publisher: undefined,
+						live: false,
+						route: { hops: [], cost: Cost.zero },
+						captures: undefined,
+					});
 					continue;
 				}
 				const route: Route = { hops: fullHops, cost: cost ?? Cost.zero };
+				const captures = scopeCaptures(scope, path);
+				if (!scopeOverlaps(scope, path)) {
+					advertised.set(path, { publisher, live: false, route, captures });
+					continue;
+				}
 
 				// A second advertisement for a path we already carry is a restart: either an
 				// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE.
@@ -394,9 +412,9 @@ export class Subscriber {
 						// Same publisher, new route. In-flight subscriptions resume across it.
 						// Emit the route so a forwarder can re-price without retracting.
 						if (!routesEqual(previous.route, route)) {
-							advertised.set(path, { publisher, live: true, route });
+							advertised.set(path, { publisher, live: true, route, captures });
 							console.debug(`announced: broadcast=${path} rerouted`);
-							announced.append({ path, kind: "updated", route });
+							announced.append({ path, captures, kind: "updated", route });
 						} else {
 							console.debug(`announced: broadcast=${path} rerouted`);
 						}
@@ -411,10 +429,10 @@ export class Subscriber {
 				// After `retract()`, which clears the entry: the path is advertised again, by
 				// whoever just took it over. Recording it before would leave nothing behind, so
 				// the *next* takeover would read as a first announcement and skip its own end.
-				advertised.set(path, { publisher, live: true, route });
+				advertised.set(path, { publisher, live: true, route, captures });
 
 				console.debug(`announced: broadcast=${path} active=true`);
-				announced.append({ path, kind: "announced", route });
+				announced.append({ path, captures, kind: "announced", route });
 			}
 
 			announced.close();

@@ -26,10 +26,11 @@
  * ## Algebra
  *
  * {@link Pattern.matches}, {@link Pattern.overlaps}, {@link Pattern.contains},
- * {@link Pattern.head}, {@link Pattern.specificity}, and set-valued
- * {@link Pattern.rebase}. A rebase never picks one lossy residual: `** /a` at `a` is
- * both the empty pattern and `** /a`. A union reduces per member; a candidate covered
- * only jointly by several members is refused.
+ * {@link Pattern.head}, {@link Pattern.specificity}, set-valued {@link Pattern.rebase} and
+ * {@link Pattern.intersect}, and {@link Pattern.captures}. A rebase never picks one lossy
+ * residual: `** /a` at `a` is both the empty pattern and `** /a`, and an intersection never
+ * picks one lossy overlap: `a/**` with `** /a` is both `a` and `a/** /a`. A union reduces
+ * per member; a candidate covered only jointly by several members is refused.
  *
  * ## CAT / C4M
  *
@@ -93,6 +94,15 @@ export namespace InvalidPattern {
 		| "too-many-segments";
 }
 
+/** Thrown when an exact intersection would produce too many patterns safely. */
+export class IntersectionError extends Error {
+	/** Create an intersection complexity error. */
+	constructor() {
+		super("pattern intersection exceeds the complexity limit");
+		this.name = "IntersectionError";
+	}
+}
+
 /**
  * How much of a path a pattern pins down, for ranking the patterns that match one path.
  *
@@ -129,6 +139,7 @@ const WILDCARD: Segment = { kind: "wildcard" };
 const GLOBSTAR: Segment = { kind: "globstar" };
 const UTF8 = new TextEncoder();
 const MAX_PATTERN_SEGMENTS = 32;
+const MAX_INTERSECTION_PATTERNS = 1024;
 
 /** The non-empty segments of a path, normalized like a broadcast path. */
 function splitPath(path: string): string[] {
@@ -252,6 +263,48 @@ function reversed<T>(list: readonly T[]): T[] {
 	return [...list].reverse();
 }
 
+/** The segments matching exactly the parts both match. Same exclusion as {@link covers}. */
+function intersectSegment(a: Segment, b: Segment): Segment[] {
+	if (a.kind === "globstar" || b.kind === "globstar") return [];
+	if (a.kind === "wildcard") return [b];
+	if (b.kind === "wildcard") return [a];
+	if (a.kind === "literal") {
+		if (b.kind === "literal") return a.value === b.value ? [a] : [];
+		return matchesPart(b, a.value) ? [a] : [];
+	}
+	if (b.kind === "literal") return matchesPart(a, b.value) ? [b] : [];
+	if (!compatible(a, b)) return [];
+	// The longer prefix and the longer suffix pin every part long enough to hold both
+	// without overlapping. Shorter parts exist too, where the two runs share bytes:
+	// those are finitely many literals.
+	const prefix = a.prefix.length >= b.prefix.length ? a.prefix : b.prefix;
+	const suffix = a.suffix.length >= b.suffix.length ? a.suffix : b.suffix;
+	const out: Segment[] = [{ kind: "partial", prefix, suffix }];
+	for (let overlap = 1; overlap <= Math.min(prefix.length, suffix.length); overlap++) {
+		if (prefix.slice(prefix.length - overlap) !== suffix.slice(0, overlap)) continue;
+		const part = prefix + suffix.slice(overlap);
+		if (matchesPart(a, part) && matchesPart(b, part)) out.push({ kind: "literal", value: part });
+	}
+	return out;
+}
+
+/** Every segment-wise intersection of two runs of the same length, as a cartesian product. */
+function intersectRun(a: readonly Segment[], b: readonly Segment[], limit: number): Segment[][] {
+	let out: Segment[][] = [[]];
+	for (let i = 0; i < a.length; i++) {
+		const choices = intersectSegment(a[i], b[i]);
+		if (choices.length === 0) return [];
+		if (out.length * choices.length > limit) throw new IntersectionError();
+		out = out.flatMap((prefix) => choices.map((choice) => [...prefix, choice]));
+	}
+	return out;
+}
+
+/** `head`, then `**` stretched to `len` segments as `*`, then `tail`. */
+function expand(head: readonly Segment[], tail: readonly Segment[], len: number): Segment[] {
+	return [...head, ...Array<Segment>(len - head.length - tail.length).fill(WILDCARD), ...tail];
+}
+
 /**
  * A pattern over broadcast paths: literal segments, `*` for one segment, `prefix*suffix`
  * for one segment with a known start and end, and at most one `**` for any run of
@@ -270,6 +323,11 @@ export class Pattern {
 	/** The most segments a pattern may have, matching the path limit on the wire. */
 	static get MAX_SEGMENTS(): number {
 		return MAX_PATTERN_SEGMENTS;
+	}
+
+	/** The most patterns one exact intersection may produce. */
+	static get MAX_INTERSECTIONS(): number {
+		return MAX_INTERSECTION_PATTERNS;
 	}
 
 	/** The canonical text: segments joined by `/`, wildcards as `*` and `**`. */
@@ -560,6 +618,128 @@ export class Pattern {
 	}
 
 	/**
+	 * The patterns matching exactly the paths both patterns match.
+	 *
+	 * This is how a claim is clamped to a scope: the covered paths inside the grant, as
+	 * patterns of their own. It is a set because two partial segments or two `**` runs can
+	 * meet in more than one way: `ab*` and `*b` meet at `ab*b` and at `ab`, and `a/**` and
+	 * `** /a` meet at `a/** /a` and at `a`. Empty when the two do not {@link overlaps | overlap}.
+	 */
+	intersect(other: Pattern): Patterns {
+		// The contained pattern is the intersection as written, where the general case
+		// below could only spell the same set in more pieces.
+		if (this.contains(other)) return new Patterns([other]);
+		if (other.contains(this)) return new Patterns([this]);
+
+		const out = new Patterns();
+		let remaining = MAX_INTERSECTION_PATTERNS;
+		const emit = (segments: Segment[]) => {
+			if (remaining-- === 0) throw new IntersectionError();
+			try {
+				out.insert(new Pattern(segments));
+			} catch {
+				// Longer than a path can be: matches nothing.
+			}
+		};
+
+		if (this.#globstar === undefined) {
+			if (other.#globstar !== undefined) return other.intersect(this);
+			if (this.segments.length === other.segments.length) {
+				for (const run of intersectRun(this.segments, other.segments, remaining)) emit(run);
+			}
+			return out;
+		}
+
+		const [head, tail] = this.#split();
+		if (other.#globstar === undefined) {
+			if (other.segments.length >= head.length + tail.length) {
+				const stretched = expand(head, tail, other.segments.length);
+				for (const run of intersectRun(stretched, other.segments, remaining)) emit(run);
+			}
+			return out;
+		}
+
+		const [otherHead, otherTail] = other.#split();
+		const heads = Math.max(head.length, otherHead.length);
+		const tails = Math.max(tail.length, otherTail.length);
+		const shortest = Math.max(head.length + tail.length, otherHead.length + otherTail.length);
+
+		// Paths too short to keep the longer head and the longer tail apart constrain both
+		// from each end at once: enumerate each length. When the open form below would not
+		// fit, every length that fits is short.
+		const long = heads + tails;
+		const open = long < MAX_PATTERN_SEGMENTS;
+		const cap = open ? long : MAX_PATTERN_SEGMENTS + 1;
+		for (let len = shortest; len < cap; len++) {
+			for (const run of intersectRun(expand(head, tail, len), expand(otherHead, otherTail, len), remaining))
+				emit(run);
+		}
+
+		// Longer paths pin the heads and the tails independently and leave the run between
+		// them free.
+		if (open) {
+			const pad = (run: readonly Segment[], len: number, front: boolean): Segment[] => {
+				const fill = Array<Segment>(len - run.length).fill(WILDCARD);
+				return front ? [...run, ...fill] : [...fill, ...run];
+			};
+			const fronts = intersectRun(pad(head, heads, true), pad(otherHead, heads, true), remaining);
+			const backs = intersectRun(pad(tail, tails, false), pad(otherTail, tails, false), remaining);
+			if (fronts.length * backs.length > remaining) throw new IntersectionError();
+			for (const front of fronts) for (const back of backs) emit([...front, GLOBSTAR, ...back]);
+		}
+		return out;
+	}
+
+	/**
+	 * What each wildcard of this pattern stands for in `matched`, a pattern this one
+	 * {@link contains}; undefined when it does not.
+	 *
+	 * One capture per non-literal segment (`*`, `prefix*suffix`, `**`), in order, the way a
+	 * regex match exposes its groups: `foo/* /chat` against `foo/alice/chat` captures `alice`,
+	 * and `foo/**` against `foo/alice/chat` captures `alice/chat`. A capture is a pattern
+	 * because `matched` may be one: `foo/**` against `foo/alice/**` captures `alice/**`. When
+	 * `matched` has a `**` that this pattern's own segments straddle (`** /*` against `a/**`,
+	 * where the last segment is `a` or anything after it), the segments it straddles cannot
+	 * be pinned and capture themselves: `**` then `*`.
+	 */
+	captures(matched: Pattern): Pattern[] | undefined {
+		if (!this.contains(matched)) return undefined;
+		const out: Pattern[] = [];
+
+		if (this.#globstar === undefined) {
+			for (const [i, segment] of this.segments.entries()) {
+				if (segment.kind !== "literal") out.push(new Pattern([matched.segments[i]]));
+			}
+			return out;
+		}
+
+		const [head, tail] = this.#split();
+		const middle = matched.segments.length - tail.length;
+		// Our head aligns with `matched` from the front and our tail from the back. A
+		// segment of ours aligned at or beyond `matched`'s `**` (from its own side) has no
+		// fixed counterpart, so it captures itself.
+		const free = matched.#globstar;
+		const pinned = (at: number, fromFront: boolean) =>
+			free === undefined ? true : fromFront ? at < free : at > free;
+
+		for (const [i, segment] of head.entries()) {
+			if (segment.kind === "literal") continue;
+			out.push(new Pattern([pinned(i, true) ? matched.segments[i] : segment]));
+		}
+		if (free === undefined || (free >= head.length && free < middle)) {
+			out.push(new Pattern(matched.segments.slice(head.length, middle)));
+		} else {
+			out.push(Pattern.all());
+		}
+		for (const [j, segment] of tail.entries()) {
+			if (segment.kind === "literal") continue;
+			const at = middle + j;
+			out.push(new Pattern([pinned(at, false) ? matched.segments[at] : segment]));
+		}
+		return out;
+	}
+
+	/**
 	 * This pattern placed beneath a literal `root`: the same paths, named from the root's
 	 * parent. The inverse of {@link rebase} for a single pattern.
 	 *
@@ -634,6 +814,22 @@ export class Patterns implements Iterable<Pattern> {
 	/** Whether any member overlaps `pattern`. */
 	overlaps(pattern: Pattern): boolean {
 		return this.#members.some((member) => member.overlaps(pattern));
+	}
+
+	/**
+	 * The paths in both unions, as one union: every member of this one intersected with
+	 * every member of `other`. See {@link Pattern.intersect}.
+	 */
+	intersect(other: Patterns): Patterns {
+		const out = new Patterns();
+		for (const member of this.#members) {
+			for (const candidate of other.#members)
+				for (const pattern of member.intersect(candidate)) {
+					out.insert(pattern);
+					if (out.size > MAX_INTERSECTION_PATTERNS) throw new IntersectionError();
+				}
+		}
+		return out;
 	}
 
 	/** Every member rebased at `root`, as one union. See {@link Pattern.rebase}. */

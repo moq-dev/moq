@@ -1,9 +1,9 @@
 //! Checks the pattern algebra against brute-force matching over every small pattern
 //! and path.
 //!
-//! `contains`, `overlaps`, `rebase`, `specificity`, and union reduction all have a
-//! definition in terms of `matches`; this enumerates the small cases and holds each to
-//! it. Two alphabets: one exercises the segment structure (globstar head and tail
+//! `contains`, `overlaps`, `intersect`, `captures`, `rebase`, `specificity`, and union
+//! reduction all have a definition in terms of `matches`; this enumerates the small
+//! cases and holds each to it. Two alphabets: one exercises the segment structure (globstar head and tail
 //! interplay needs three-segment patterns and six-segment paths for every witness to
 //! fit), the other exercises partial segments against multi-byte parts.
 
@@ -135,6 +135,98 @@ fn overlaps_means_some_match_is_shared() {
 			for (j, b) in patterns.iter().enumerate() {
 				let expected = table[i].iter().zip(&table[j]).any(|(a, b)| *a && *b);
 				assert_eq!(a.overlaps(b), expected, "{a} overlaps {b}");
+			}
+		}
+	}
+}
+
+#[test]
+fn intersect_matches_exactly_what_both_match() {
+	for alphabet in alphabets() {
+		let (patterns, table) = match_table(&alphabet);
+		let paths = alphabet.paths(alphabet.max_path);
+		for (i, a) in patterns.iter().enumerate() {
+			for (j, b) in patterns.iter().enumerate() {
+				let both = a.intersect(b).unwrap();
+				for (k, path) in paths.iter().enumerate() {
+					assert_eq!(both.matches(path), table[i][k] && table[j][k], "{a} & {b} on {path:?}");
+				}
+				assert_eq!(both, b.intersect(a).unwrap(), "{a} & {b} commutes");
+				assert_eq!(both.is_empty(), !a.overlaps(b), "{a} & {b} empty iff disjoint");
+				if a.contains(b) {
+					assert_eq!(both, Patterns::from(b.clone()), "{a} & {b} is the contained one");
+				}
+				for x in both.iter() {
+					for y in both.iter() {
+						assert!(x == y || !x.contains(y), "{both:?} is not reduced");
+					}
+				}
+			}
+		}
+	}
+}
+
+#[test]
+fn captures_stand_for_the_matched_segments() {
+	for alphabet in alphabets() {
+		let all = alphabet.patterns();
+		let paths = alphabet.paths(alphabet.max_path);
+		for scope in &all {
+			let wildcards = scope
+				.segments()
+				.iter()
+				.filter(|s| !matches!(s, Segment::Literal(_)))
+				.count();
+			for matched in &all {
+				let Some(captures) = scope.captures(matched) else {
+					assert!(
+						!scope.contains(matched),
+						"{scope} contains {matched} but captures nothing"
+					);
+					continue;
+				};
+				assert!(scope.contains(matched));
+				assert_eq!(captures.len(), wildcards, "{scope} against {matched}");
+
+				// Splicing the captures back over the scope's wildcards must land on a
+				// pattern containing `matched`: a capture may be wider than what the
+				// path pins (an unpinned wildcard captures itself), never narrower.
+				let mut segments = Vec::new();
+				let mut next = captures.iter();
+				for segment in scope.segments() {
+					match segment {
+						Segment::Literal(_) => segments.push(segment.clone()),
+						_ => segments.extend(next.next().unwrap().segments().iter().cloned()),
+					}
+				}
+				let spliced = Pattern::new(segments).unwrap();
+				assert!(
+					spliced.contains(matched),
+					"{scope} against {matched}: {captures:?} splice to {spliced}"
+				);
+				assert!(
+					scope.contains(&spliced),
+					"{scope} against {matched}: {spliced} escapes the scope"
+				);
+
+				// A path match is always pinned exactly.
+				if matched.is_literal() {
+					assert_eq!(spliced, *matched, "{scope} against the path {matched}");
+				}
+			}
+			// The same holds for every path the scope matches, as literals.
+			for path in &paths {
+				if !scope.matches(path) {
+					continue;
+				}
+				let literal = Pattern::literal(path).unwrap();
+				let captures = scope
+					.captures(&literal)
+					.unwrap_or_else(|| panic!("{scope} matches {path:?}"));
+				assert!(
+					captures.iter().all(|c| c.is_literal()),
+					"{scope} against {path:?}: {captures:?}"
+				);
 			}
 		}
 	}

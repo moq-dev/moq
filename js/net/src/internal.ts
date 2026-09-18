@@ -14,18 +14,21 @@ import type { Timestamp } from "./time.ts";
 import type { Groups, Producer, Request, Subscriber } from "./track.ts";
 
 /**
- * The literal prefix a discovery scope covers: `foo` for `foo/**`, the empty path for `**`.
- *
- * Anything else (an exact `foo`, the empty pattern, a suffix, or any segment wildcard)
- * throws rather than narrowing or widening the scope. Until general pattern matching
- * lands, discovery filters by prefix.
+ * The announce-interest prefix a scope needs on a prefix-shaped wire: its literal head.
+ * The peer echoes every suffix beneath it, and the caller filters what arrives.
  */
-export function scopePrefix(scope: Path.Pattern): Path.Valid {
-	const prefix = scope.asPrefix();
-	if (prefix === undefined) {
-		throw new Error(`announced() only supports prefix-shaped patterns (foo/**), got "${scope.text}"`);
-	}
-	return Path.from(prefix);
+export function scopeHead(scope: Path.Pattern): Path.Valid {
+	return Path.from(scope.head);
+}
+
+/** Whether the announced prefix's subtree overlaps `scope`. */
+export function scopeOverlaps(scope: Path.Pattern, prefix: Path.Valid): boolean {
+	return scope.overlaps(Path.Pattern.subtree(prefix));
+}
+
+/** What `scope` captures from an exact announced prefix, if it pins every wildcard. */
+export function scopeCaptures(scope: Path.Pattern, prefix: Path.Valid): Path.Pattern[] | undefined {
+	return scope.captures(Path.Pattern.literal(prefix));
 }
 
 /**

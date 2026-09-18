@@ -2,7 +2,6 @@ import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals
 import * as Announce from "../announced.ts";
 import { Allocator } from "../bandwidth.ts";
 import { error, SessionCode, SessionError } from "../error.ts";
-import { scopePrefix } from "../internal.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import * as Time from "../time.ts";
@@ -434,8 +433,7 @@ export class Reload {
 	}
 
 	/**
-	 * Subscribe to broadcast announcements under `scope` (a prefix-shaped pattern, default
-	 * everything), spanning reconnects.
+	 * Subscribe to broadcast announcements matching `scope`, spanning reconnects.
 	 *
 	 * The same {@link Announce.Consumer} stream as {@link Established.announced}, but everything active
 	 * is retracted (a `retracted` update) whenever the connection drops and re-announced on
@@ -447,11 +445,6 @@ export class Reload {
 		// With a consume origin the table already spans reconnects (the forwarder retracts
 		// a dead session's entries), so its stream is the same thing with less machinery.
 		if (this.consume) return this.consume.announced(scope);
-
-		// Refuse an unsupported scope here, where the caller can see it; the pump below
-		// runs later inside an effect, which would only log the throw and leave the
-		// consumer waiting forever.
-		scopePrefix(scope);
 
 		const producer = new Announce.Producer();
 		const consumer = producer.consume();

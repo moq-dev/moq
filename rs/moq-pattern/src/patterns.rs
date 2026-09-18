@@ -1,4 +1,4 @@
-use super::{InvalidPattern, Pattern};
+use super::{IntersectionError, InvalidPattern, Pattern};
 
 /// A union of patterns, reduced so no member is contained by another.
 ///
@@ -52,6 +52,23 @@ impl Patterns {
 	/// Whether any member overlaps `pattern`.
 	pub fn overlaps(&self, pattern: &Pattern) -> bool {
 		self.0.iter().any(|member| member.overlaps(pattern))
+	}
+
+	/// The paths in both unions, as one union: every member of this one intersected
+	/// with every member of `other`. See [`Pattern::intersect`].
+	pub fn intersect(&self, other: &Self) -> Result<Self, IntersectionError> {
+		let mut out = Self::new();
+		for member in &self.0 {
+			for candidate in &other.0 {
+				for pattern in member.intersect(candidate)? {
+					out.insert(pattern);
+					if out.len() > Pattern::MAX_INTERSECTIONS {
+						return Err(IntersectionError::TooManyPatterns);
+					}
+				}
+			}
+		}
+		Ok(out)
 	}
 
 	/// Every member rebased at `root`, as one union. See [`Pattern::rebase`].
@@ -204,6 +221,15 @@ mod tests {
 	fn serde_round_trips_reduced() {
 		let set: Patterns = serde_json::from_str(r#"["a/b", "a/*", "**/c"]"#).unwrap();
 		assert_eq!(serde_json::to_string(&set).unwrap(), r#"["**/c","a/*"]"#);
+	}
+
+	#[test]
+	fn intersect_is_pairwise() {
+		let grant = patterns(&["a/*", "b/**"]);
+		let claim = patterns(&["*/c", "b/d/**"]);
+		assert_eq!(grant.intersect(&claim).unwrap(), patterns(&["a/c", "b/c", "b/d/**"]));
+		assert!(grant.intersect(&patterns(&["x"])).unwrap().is_empty());
+		assert!(Patterns::new().intersect(&grant).unwrap().is_empty());
 	}
 
 	#[test]

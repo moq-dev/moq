@@ -4,7 +4,7 @@ import { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation, reason } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
-import { scopePrefix } from "../internal.ts";
+import { scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import type { Reader, Stream } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
@@ -107,9 +107,8 @@ export class Subscriber {
 	// to end from retracting what the other still holds.
 	#announced = new Map<Path.Valid, { count: number; route: Route }>();
 
-	// Any consumers that want each new announcement, keyed by the wire interest
-	// prefix their stream filters on.
-	#announcedConsumers = new Map<announce.Producer, Path.Valid>();
+	// Any consumers that want each new announcement, keyed by their local filter.
+	#announcedConsumers = new Map<announce.Producer, Path.Pattern>();
 
 	/**
 	 * Creates a new Subscriber instance.
@@ -148,8 +147,8 @@ export class Subscriber {
 	}
 
 	/**
-	 * Gets an announced reader for `scope`, a prefix-shaped pattern (`foo/**`, or `**`
-	 * for everything). Paths are relative to the session, not the scope.
+	 * Gets an announced reader matching `scope`. Paths are relative to the session,
+	 * not the scope.
 	 *
 	 * The peer is asked with SUBSCRIBE_NAMESPACE regardless of what it declared, and an
 	 * unsolicited PUBLISH_NAMESPACE lands here too, so a peer that only tells and one
@@ -157,13 +156,18 @@ export class Subscriber {
 	 */
 	announced(scope: Path.Pattern = Path.Pattern.all()): announce.Consumer {
 		// The wire speaks announce interest by prefix.
-		const prefix = scopePrefix(scope);
+		const prefix = scopeHead(scope);
 		const announced = new announce.Producer();
 		for (const [active, info] of this.#announced) {
-			if (!Path.hasPrefix(prefix, active)) continue;
-			announced.append({ path: active, kind: "announced", route: info.route });
+			if (!scopeOverlaps(scope, active)) continue;
+			announced.append({
+				path: active,
+				captures: scopeCaptures(scope, active),
+				kind: "announced",
+				route: info.route,
+			});
 		}
-		this.#announcedConsumers.set(announced, prefix);
+		this.#announcedConsumers.set(announced, scope);
 
 		void this.#runAnnounced(announced, prefix).finally(() => {
 			this.#announcedConsumers.delete(announced);
@@ -186,9 +190,9 @@ export class Subscriber {
 		this.#announced.set(path, { count: 1, route });
 
 		console.debug(`announced: broadcast=${path} active=true`);
-		for (const [consumer, prefix] of this.#announcedConsumers) {
-			if (!Path.hasPrefix(prefix, path)) continue;
-			consumer.append({ path, kind: "announced", route });
+		for (const [consumer, scope] of this.#announcedConsumers) {
+			if (!scopeOverlaps(scope, path)) continue;
+			consumer.append({ path, captures: scopeCaptures(scope, path), kind: "announced", route });
 		}
 	}
 
@@ -202,9 +206,9 @@ export class Subscriber {
 		if (existing === undefined || routesEqual(existing.route, route)) return;
 		existing.route = route;
 		console.debug(`announced: broadcast=${path} rerouted`);
-		for (const [consumer, prefix] of this.#announcedConsumers) {
-			if (!Path.hasPrefix(prefix, path)) continue;
-			consumer.append({ path, kind: "updated", route });
+		for (const [consumer, scope] of this.#announcedConsumers) {
+			if (!scopeOverlaps(scope, path)) continue;
+			consumer.append({ path, captures: scopeCaptures(scope, path), kind: "updated", route });
 		}
 	}
 
@@ -226,10 +230,15 @@ export class Subscriber {
 		this.#consumes.evict(path);
 		console.debug(`announced: broadcast=${path} active=false`);
 
-		for (const [consumer, prefix] of this.#announcedConsumers) {
-			if (!Path.hasPrefix(prefix, path)) continue;
+		for (const [consumer, scope] of this.#announcedConsumers) {
+			if (!scopeOverlaps(scope, path)) continue;
 			try {
-				consumer.append({ path, kind: "retracted", route: existing.route });
+				consumer.append({
+					path,
+					captures: scopeCaptures(scope, path),
+					kind: "retracted",
+					route: existing.route,
+				});
 			} catch {
 				// Consumer already closed, will be cleaned up
 			}

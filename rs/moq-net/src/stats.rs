@@ -98,11 +98,11 @@
 //!
 //! # Cycles
 //!
-//! A [`Registry`] built with excluded prefixes ([`Config::exclude`]) returns
-//! empty handles (whose bumps no-op) for any path under one of them. The
-//! `moq-stats` publisher excludes its own top-level prefix this way, breaking
-//! the feedback loop where serving a stats broadcast would itself generate
-//! more stats traffic.
+//! A [`Registry`] built with excluded patterns ([`Config::exclude`]) returns
+//! empty handles (whose bumps no-op) for any path they match. The `moq-stats`
+//! publisher excludes its own top-level subtree this way, breaking the feedback
+//! loop where serving a stats broadcast would itself generate more stats
+//! traffic.
 
 use std::{
 	collections::HashMap,
@@ -116,7 +116,7 @@ use std::{
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use web_async::Lock;
 
-use crate::{AsPath, PathOwned};
+use crate::{AsPath, PathOwned, Pattern, Patterns};
 
 /// Cumulative atomic counters for a single `(tier, role)` on a broadcast.
 ///
@@ -755,23 +755,23 @@ pub struct SessionEntry {
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct Config {
-	/// Path prefixes whose broadcasts are not tracked: a matching path gets an
-	/// empty handle whose bumps no-op. A publisher excludes its own stats
-	/// prefix this way, breaking the stats-of-stats feedback loop. Empty (the
-	/// default) tracks everything.
-	pub exclude: Vec<PathOwned>,
+	/// Patterns whose broadcasts are not tracked: a matching path gets an empty
+	/// handle whose bumps no-op. A publisher excludes its own stats subtree
+	/// (`.stats/**`) this way, breaking the stats-of-stats feedback loop. Empty
+	/// (the default) tracks everything.
+	pub exclude: Patterns,
 }
 
 impl Config {
-	/// A config with default settings: no excluded prefixes.
+	/// A config with default settings: nothing excluded.
 	pub fn new() -> Self {
 		Self::default()
 	}
 
-	/// Add a path prefix to exclude from tracking. May be chained to exclude
-	/// several prefixes.
-	pub fn with_exclude(mut self, prefix: impl Into<PathOwned>) -> Self {
-		self.exclude.push(prefix.into());
+	/// Add a pattern to exclude from tracking. May be chained to exclude
+	/// several.
+	pub fn with_exclude(mut self, pattern: Pattern) -> Self {
+		self.exclude.insert(pattern);
 		self
 	}
 }
@@ -782,9 +782,9 @@ impl Config {
 /// [`Registry::report`] to publish the counters as MoQ broadcasts.
 #[derive(Clone)]
 pub struct Registry {
-	/// Paths under these prefixes get empty handles (bumps no-op); see
+	/// Paths these patterns match get empty handles (bumps no-op); see
 	/// [`Config::exclude`].
-	exclude: Vec<PathOwned>,
+	exclude: Patterns,
 	/// `None` for a disabled registry: bumps are dropped and nothing is tracked.
 	shared: Option<Arc<Shared>>,
 }
@@ -849,13 +849,13 @@ impl Registry {
 	/// Build a no-op registry: every handle is empty and all bumps are dropped.
 	pub fn disabled() -> Self {
 		Self {
-			exclude: Vec::new(),
+			exclude: Patterns::new(),
 			shared: None,
 		}
 	}
 
-	/// The excluded path prefixes. See [`Config::exclude`].
-	pub fn exclude(&self) -> &[PathOwned] {
+	/// The excluded patterns. See [`Config::exclude`].
+	pub fn exclude(&self) -> &Patterns {
 		&self.exclude
 	}
 
@@ -879,10 +879,10 @@ impl Registry {
 		// A disabled registry never allocates state.
 		let shared = self.shared.as_ref()?;
 		let path = path.as_path();
-		// Skip excluded prefixes (our own stats broadcasts and any sibling
-		// category under the same prefix) so serving a stats broadcast doesn't
-		// generate more stats.
-		if self.exclude.iter().any(|prefix| path.has_prefix(prefix)) {
+		// Skip excluded paths (our own stats broadcasts and any sibling category
+		// under the same prefix) so serving a stats broadcast doesn't generate
+		// more stats.
+		if self.exclude.matches(path.as_str()) {
 			return None;
 		}
 		let owned = path.to_owned();
@@ -1435,7 +1435,7 @@ mod tests {
 	}
 
 	fn test_stats() -> Registry {
-		Registry::new(Config::new().with_exclude(".stats"))
+		Registry::new(Config::new().with_exclude(Pattern::subtree(".stats").unwrap()))
 	}
 
 	#[test]

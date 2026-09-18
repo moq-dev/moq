@@ -640,11 +640,7 @@ where
 	/// advertise answers with an empty set, which costs one stream, while waiting to find
 	/// out costs a round trip on every session.
 	pub fn subscribe_prefixes(&self) -> Vec<PathOwned> {
-		self.origin
-			.allowed()
-			.iter()
-			.map(|pattern| Path::new(pattern.as_prefix().expect("allowed patterns are prefix-shaped")).to_owned())
-			.collect()
+		crate::model::interest_prefixes(&self.origin.allowed())
 	}
 
 	/// Send SUBSCRIBE_NAMESPACE for one prefix on a bidi stream.
@@ -794,8 +790,18 @@ where
 						// down merely because an update arrived.
 						self.update_announce(path, advert)?;
 					} else {
-						self.start_announce(path.clone(), advert)?;
-						live.insert(path);
+						match self.start_announce(path.clone(), advert) {
+							Ok(()) => {
+								live.insert(path);
+							}
+							// The interest names a pattern's literal head, so the peer
+							// legitimately advertises namespaces beneath it that the
+							// scope excludes; those are filtered here, not fatal.
+							Err(Error::Unauthorized) => {
+								tracing::debug!(%path, "namespace outside the subscribe scope; ignoring");
+							}
+							Err(err) => return Err(err),
+						}
 					}
 				}
 				ietf::NamespaceDone::ID => {

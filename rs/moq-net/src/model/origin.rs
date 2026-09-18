@@ -16,7 +16,7 @@ use web_transport_trait::{MaybeSend, MaybeSync};
 
 use super::{Requests, WeakCache, WeakEntry};
 use crate::{
-	AsPath, Error, InvalidPattern, Path, PathOwned, PathPrefixes, Pattern, Patterns,
+	AsPath, Error, InvalidPattern, Path, PathOwned, Pattern, Patterns,
 	coding::{BoundsExceeded, Decode, DecodeError, Encode, EncodeError},
 	runtime::{AnyTimers, Instant, Timers, TimersSlot},
 	util::{TaskSet, Tasks, TasksWeak},
@@ -617,10 +617,12 @@ type RouteMeta = (Hops, Cost);
 /// bounded by the number of distinct prefixes. A metadata change on a live route
 /// overwrites the pending `Announce` (or is delivered as another active update),
 /// while `UnannounceAnnounce` preserves a real retract-then-announce sequence.
+type AnnounceMeta = (RouteMeta, Option<Vec<Pattern>>);
+
 enum PendingUpdate {
-	Announce(RouteMeta),
-	Unannounce(RouteMeta),
-	UnannounceAnnounce { old: RouteMeta, new: RouteMeta },
+	Announce(AnnounceMeta),
+	Unannounce(AnnounceMeta),
+	UnannounceAnnounce { old: AnnounceMeta, new: AnnounceMeta },
 }
 
 /// Pending updates keyed by prefix. `BTreeMap` keeps memory strictly bounded by
@@ -641,7 +643,8 @@ struct OriginConsumerState {
 }
 
 impl OriginConsumerState {
-	fn apply_announce(&mut self, prefix: PathOwned, meta: RouteMeta) {
+	fn apply_announce(&mut self, prefix: PathOwned, meta: RouteMeta, captures: Option<Vec<Pattern>>) {
+		let meta = (meta, captures);
 		let new = match self.pending.remove(&prefix) {
 			// First announce, a stale announce being replaced, or a metadata update.
 			None | Some(PendingUpdate::Announce(_)) => PendingUpdate::Announce(meta),
@@ -653,7 +656,8 @@ impl OriginConsumerState {
 		self.pending.insert(prefix, new);
 	}
 
-	fn apply_unannounce(&mut self, prefix: PathOwned, last: RouteMeta) {
+	fn apply_unannounce(&mut self, prefix: PathOwned, last: RouteMeta, captures: Option<Vec<Pattern>>) {
+		let last = (last, captures);
 		match self.pending.remove(&prefix) {
 			// The pending announce was never delivered and neither was any earlier
 			// one, so the pair cancels entirely.
@@ -674,7 +678,7 @@ impl OriginConsumerState {
 	/// Take one update to deliver to the consumer, if any.
 	fn take(&mut self) -> Option<AnnounceUpdate> {
 		let prefix = self.pending.keys().next()?.clone();
-		let (meta, kind) = match self.pending.remove(&prefix).unwrap() {
+		let ((meta, captures), kind) = match self.pending.remove(&prefix).unwrap() {
 			PendingUpdate::Announce(meta) => {
 				// The consumer has seen this prefix before, so it is a metadata update.
 				let kind = match self.delivered.insert(prefix.clone()) {
@@ -697,6 +701,7 @@ impl OriginConsumerState {
 		};
 		Some(AnnounceUpdate {
 			path: prefix,
+			captures,
 			route: Route {
 				hops: meta.0,
 				cost: meta.1,
@@ -717,6 +722,9 @@ struct RouteEntry {
 	/// matches this as well as [`Self::hops`], so an anonymous hop 0 still
 	/// cannot echo back to the session it came from.
 	via: Hop,
+	/// Whether this is an origin-owned broadcast, which wins announcement ties
+	/// just as it wins exact request resolution.
+	local: bool,
 	/// The queue requests under this route are served from, when the announcer
 	/// serves content on demand (a [`Dynamic`]). `None` for an advertise-only
 	/// announcement (a broadcast's exact path, or [`Producer::announce`]), whose
@@ -792,14 +800,13 @@ impl WeakEntry for RemoteFront {
 	}
 }
 
-/// One registered announce cursor: which prefixes it may see, how they are
+/// One registered announce cursor: which patterns it may see, how prefixes are
 /// re-rooted, and the per-cursor delivery buffer.
 struct TableCursor {
 	/// The prefix stripped from every delivered path.
 	root: PathOwned,
-	/// The absolute prefixes this cursor is scoped to (its token / scope). A route
-	/// is visible where it intersects one of these, clamped to the intersection.
-	allowed: Vec<PathOwned>,
+	/// The absolute patterns this cursor is scoped to (its token / scope).
+	allowed: Patterns,
 	/// Skip routes whose hop chain or announcing session (`via`) is this peer
 	/// (control-plane split horizon).
 	exclude: Option<Hop>,
@@ -809,50 +816,38 @@ struct TableCursor {
 	/// detection: `(entry id, hops, cost)`.
 	// entry id, metadata, and whether the entry could serve requests: the last
 	// is part of the dedupe key (see `sync_cursor`) but never leaves the model.
-	current: HashMap<PathOwned, (u64, RouteMeta, bool)>,
+	current: HashMap<PathOwned, (u64, RouteMeta, bool, Option<Vec<Pattern>>)>,
 }
 
 impl TableCursor {
-	/// Where `prefix` presents on this cursor: its intersection with each allowed
-	/// scope, named relative to the cursor root. A scope nested inside another
-	/// presents nothing of its own.
-	fn presented(&self, prefix: &Path) -> Vec<PathOwned> {
-		let mut out: Vec<PathOwned> = Vec::new();
-		for allowed in &self.allowed {
-			if !allowed.has_prefix(&self.root) {
-				continue;
-			}
-			let Some(covered) = intersect_prefix(prefix, &allowed.as_path()) else {
-				continue;
-			};
-			let relative = covered
-				.strip_prefix(&self.root)
-				.expect("the intersection starts with the scope, which starts with the root")
-				.to_owned();
-			if out.iter().any(|seen| relative.has_prefix(seen)) {
-				continue;
-			}
-			out.retain(|seen| !seen.has_prefix(&relative));
-			out.push(relative);
+	/// Where `prefix` presents on this cursor, named relative to the cursor root.
+	/// The prefix stays a prefix; the pattern scope only decides visibility.
+	fn presented(&self, prefix: &Path) -> Option<PathOwned> {
+		let claim = Pattern::subtree(prefix.as_str()).ok()?;
+		if !self.allowed.overlaps(&claim) {
+			return None;
 		}
-		out
+
+		if let Some(relative) = prefix.strip_prefix(&self.root) {
+			return Some(relative.to_owned());
+		}
+		self.root.has_prefix(prefix).then(PathOwned::default)
+	}
+
+	/// What the cursor's most specific matching scope member captures from an
+	/// exact announced prefix. An overlap-only route does not pin every wildcard.
+	fn captures(&self, prefix: &Path) -> Option<Vec<Pattern>> {
+		let literal = Pattern::literal(prefix.as_str()).ok()?;
+		self.allowed
+			.iter()
+			.filter_map(|allowed| allowed.captures(&literal).map(|captures| (allowed.specificity(), captures)))
+			.max_by_key(|(specificity, _)| *specificity)
+			.map(|(_, captures)| captures)
 	}
 
 	/// Whether this cursor may observe `entry` at all (split horizon).
 	fn visible(&self, entry: &RouteEntry) -> bool {
 		entry.visible_to(self.exclude)
-	}
-}
-
-/// The intersection of two path prefixes: the longer one when one contains the
-/// other (segment-wise), `None` when they are disjoint.
-fn intersect_prefix(a: &Path, b: &Path) -> Option<PathOwned> {
-	if a.has_prefix(b) {
-		Some(a.to_owned())
-	} else if b.has_prefix(a) {
-		Some(b.to_owned())
-	} else {
-		None
 	}
 }
 
@@ -938,8 +933,8 @@ impl OriginNode {
 	}
 }
 
-/// A handle's view of an origin's path tree: the subtrees it may reach, named by
-/// path rather than by node handle.
+/// A handle's view of an origin's path tree: the tree itself plus the absolute
+/// patterns the handle may reach in it.
 ///
 /// Paths, because pruning removes empty nodes: a pinned `Lock<OriginNode>` outlives
 /// the prune as an orphan that publishes and resolves where no lookup can reach.
@@ -947,108 +942,69 @@ impl OriginNode {
 /// identity lives in exactly one place. Scoping a handle therefore creates nothing
 /// in the tree; only a broadcast does.
 #[derive(Clone)]
-struct OriginNodes {
+struct OriginScope {
 	// The tree root, shared by every handle derived from one origin. Never pruned:
 	// it hangs off no parent.
 	tree: Lock<OriginNode>,
 
-	// The reachable subtrees: the prefix relative to this handle's root (what
-	// `allowed()` advertises), paired with its absolute path under `tree`.
-	nodes: Vec<(PathOwned, PathOwned)>,
+	// The paths this handle may reach, absolute under `tree`.
+	allowed: Patterns,
 }
 
-impl OriginNodes {
-	/// A view over a fresh tree with no reachable subtrees: it resolves nothing and
-	/// publishes nothing.
+impl OriginScope {
+	/// A view over a fresh tree that reaches nothing.
 	fn empty() -> Self {
 		Self {
 			tree: Lock::new(OriginNode::new()),
-			nodes: Vec::new(),
+			allowed: Patterns::new(),
 		}
 	}
 
-	// Returns nested roots that match the patterns.
-	// PathPrefixes guarantees no duplicates or overlapping prefixes.
-	pub fn select(&self, patterns: &Patterns) -> Option<Self> {
-		let prefixes = PathPrefixes::from_patterns(patterns)?;
-		let mut roots = Vec::new();
-
-		for (root, absolute) in &self.nodes {
-			for prefix in &prefixes {
-				if root.has_prefix(prefix) {
-					// Keep the existing subtree if we're allowed to access it.
-					roots.push((root.to_owned(), absolute.clone()));
-					continue;
-				}
-
-				if let Some(suffix) = prefix.strip_prefix(root) {
-					// If the requested prefix is larger than the allowed prefix, then we further scope it.
-					roots.push((prefix.to_owned(), absolute.join(&suffix).to_owned()));
-				}
-			}
-		}
-
-		if roots.is_empty() {
+	/// This view narrowed to the absolute `patterns`: the paths in both.
+	fn narrow(&self, patterns: &Patterns) -> Option<Self> {
+		let allowed = self.allowed.intersect(patterns).ok()?;
+		if allowed.is_empty() {
 			None
 		} else {
-			Some(self.with_nodes(roots))
+			Some(Self {
+				tree: self.tree.clone(),
+				allowed,
+			})
 		}
 	}
 
-	pub fn root(&self, new_root: impl AsPath) -> Option<Self> {
-		let new_root = new_root.as_path();
-		let mut roots = Vec::new();
-
-		if new_root.is_empty() {
-			return Some(self.clone());
-		}
-
-		for (root, absolute) in &self.nodes {
-			if let Some(suffix) = root.strip_prefix(&new_root) {
-				// If the old root is longer than the new root, shorten the keys.
-				roots.push((suffix.to_owned(), absolute.clone()));
-			} else if let Some(suffix) = new_root.strip_prefix(root) {
-				// If the new root is longer than the old root, add a new root.
-				// NOTE: suffix can't be empty
-				roots.push(("".into(), absolute.join(&suffix).to_owned()));
-			}
-		}
-
-		if roots.is_empty() {
-			None
-		} else {
-			Some(self.with_nodes(roots))
-		}
+	/// Whether this view reaches the absolute `path`.
+	fn permits(&self, path: &Path) -> bool {
+		self.allowed.matches(path.as_str())
 	}
 
-	fn with_nodes(&self, nodes: Vec<(PathOwned, PathOwned)>) -> Self {
-		Self {
-			tree: self.tree.clone(),
-			nodes,
-		}
-	}
-
-	// Returns the absolute path under `tree`, if this handle is allowed to reach it.
-	pub fn get(&self, path: impl AsPath) -> Option<PathOwned> {
-		let path = path.as_path();
-
-		for (root, absolute) in &self.nodes {
-			if let Some(suffix) = path.strip_prefix(root) {
-				return Some(absolute.join(&suffix).to_owned());
-			}
-		}
-
-		None
+	/// What this view reaches, named from `root`.
+	fn relative(&self, root: &Path) -> Patterns {
+		self.allowed.rebase(root.as_str())
 	}
 }
 
-impl Default for OriginNodes {
+impl Default for OriginScope {
 	fn default() -> Self {
 		Self {
 			tree: Lock::new(OriginNode::new()),
-			nodes: vec![("".into(), "".into())],
+			allowed: Patterns::from(Pattern::all()),
 		}
 	}
+}
+
+/// The announce-interest prefixes that cover a pattern scope on a prefix-only
+/// wire: each member's literal head, minus heads another already covers.
+pub(crate) fn interest_prefixes(allowed: &Patterns) -> Vec<PathOwned> {
+	let mut heads: Vec<PathOwned> = allowed
+		.iter()
+		.map(|pattern| Path::new(pattern.head()).to_owned())
+		.collect();
+	heads.sort();
+	heads.dedup();
+	let covered = heads.clone();
+	heads.retain(|head| !covered.iter().any(|other| other != head && head.has_prefix(other)));
+	heads
 }
 
 /// What an [`AnnounceUpdate`] reports about its path.
@@ -1077,10 +1033,11 @@ impl AnnounceKind {
 /// broadcasts, and filters with a [`Pattern`] locally when it wants a subset.
 #[derive(Clone, Debug)]
 pub struct AnnounceUpdate {
-	/// The prefix the route covers, relative to the consuming cursor's root. A
-	/// route announced above the cursor's scope is clamped to that scope, which
-	/// is the exact set of covered paths the cursor may see.
+	/// The prefix the route covers, relative to the consuming cursor's root.
 	pub path: PathOwned,
+	/// What the scope's wildcards stood for when the announced prefix pins all of
+	/// them. `None` for an overlap-only route or a scope without a complete match.
+	pub captures: Option<Vec<Pattern>>,
 	/// The route serving the prefix. On a retraction this carries its last
 	/// advertised metadata.
 	pub route: Route,
@@ -1095,9 +1052,8 @@ pub struct Producer {
 	// downstream relays can detect loops and prefer the shortest path.
 	info: Hop,
 
-	// The roots of the tree that we are allowed to publish.
-	// A path of "" means we can publish anything.
-	nodes: OriginNodes,
+	// The tree and the absolute patterns this handle may publish under.
+	scope: OriginScope,
 
 	// The prefix that is automatically stripped from all paths.
 	root: PathOwned,
@@ -1151,13 +1107,13 @@ impl Producer {
 	/// `moq_tokio::origin::spawn` wraps this for tokio callers.
 	pub fn new(config: Config) -> (Self, Driver) {
 		let (tasks, set) = TaskSet::new();
-		let nodes = OriginNodes::default();
+		let scope = OriginScope::default();
 		let shared = kio::Shared::<OriginState>::default();
 		let timers = TimersSlot::default();
 		let pool = config.pool.clone();
 		let producer = Self {
 			info: config.id,
-			nodes: nodes.clone(),
+			scope: scope.clone(),
 			root: PathOwned::default(),
 			shared: shared.clone(),
 			pool: config.pool,
@@ -1170,7 +1126,7 @@ impl Producer {
 		let driver = Driver {
 			state: DriverState {
 				set,
-				nodes,
+				tree: scope.tree,
 				shared,
 				done: false,
 				sweep: None,
@@ -1216,7 +1172,7 @@ impl Producer {
 		let (tasks, _) = TaskSet::new();
 		Self {
 			info,
-			nodes: OriginNodes::empty(),
+			scope: OriginScope::empty(),
 			root: PathOwned::default(),
 			shared: kio::Shared::default(),
 			pool: cache::Pool::default(),
@@ -1274,8 +1230,11 @@ impl Producer {
 		// path the handle's own root produces: an allowed prefix is always stored
 		// alongside its absolute position. So one path serves both the front's
 		// identity and its position in the tree.
-		let full = self.nodes.get(&path).ok_or(Error::Unauthorized)?;
-		let tree = self.nodes.tree.clone();
+		let full = self.root.join(&path).to_owned();
+		if !self.scope.permits(&full) {
+			return Err(Error::Unauthorized);
+		}
+		let tree = self.scope.tree.clone();
 
 		// A decoded prefix and suffix are each within the wire limit, but their
 		// join might not be. Enforcing here bounds the tree depth and guarantees the path
@@ -1295,6 +1254,7 @@ impl Producer {
 				shared: self.shared.clone(),
 				requested: full.clone(),
 				prefixes: vec![full.clone()],
+				local: true,
 				stats: self.stats.clone(),
 			},
 			current: None,
@@ -1370,7 +1330,7 @@ impl Producer {
 	/// [`Dynamic`] handler, which serve what they claim.
 	#[cfg(test)]
 	pub(crate) fn announce(&self, prefix: impl AsPath, route: Route) -> Result<AnnounceProducer, Error> {
-		Announcing::clamped(self, prefix)?.announce(route, None)
+		Announcing::new(self, prefix)?.announce(route, None)
 	}
 
 	/// Advertise a route over `prefix` and serve the requests beneath it.
@@ -1392,11 +1352,8 @@ impl Producer {
 	/// [`broadcast::Producer::announce`] instead, so subscribers can enumerate
 	/// them.
 	///
-	/// `prefix` must be inside one of this producer's prefixes; an over-wide
-	/// claim is refused rather than clamped. Fails with [`Error::Unauthorized`]
-	/// when it is not, [`Error::BoundsExceeded`] if the rooted prefix exceeds
-	/// [`Path::MAX_PARTS`], and [`Error::Closed`] once the origin's [`Driver`]
-	/// has been dropped.
+	/// The prefix must overlap this producer's pattern scope. Individual requests
+	/// remain authoritative and are refused when they do not match the scope.
 	pub fn dynamic(&self, prefix: impl AsPath, route: Route) -> Result<Dynamic, Error> {
 		let announcing = Announcing::new(self, prefix)?;
 		let serve = kio::Shared::<ServeState>::default();
@@ -1408,40 +1365,13 @@ impl Producer {
 		})
 	}
 
-	/// Clamp an absolute `requested` prefix against each allowed root: the
-	/// intersection is exactly the set of covered paths this producer may claim,
-	/// one entry per intersecting root (a broad route through a multi-prefix
-	/// token covers each of them).
-	#[cfg(test)]
-	fn clamp_prefix(&self, requested: &PathOwned) -> Result<Vec<PathOwned>, Error> {
-		if requested.parts().count() > Path::MAX_PARTS {
-			return Err(BoundsExceeded.into());
-		}
-		let prefixes: Vec<PathOwned> = self
-			.nodes
-			.nodes
-			.iter()
-			.filter_map(|(allowed, _)| {
-				let allowed = self.root.join(allowed).to_owned();
-				intersect_prefix(&requested.as_path(), &allowed.as_path())
-			})
-			.collect();
-		if prefixes.is_empty() {
-			return Err(Error::Unauthorized);
-		}
-		Ok(prefixes)
-	}
-
-	/// Returns a new Producer restricted to publishing under one of `patterns`.
-	///
-	/// Each member must be prefix-shaped (`foo/**` for the old `foo` prefix, `**` for
-	/// the old empty prefix). Returns None when any member cannot be represented yet
-	/// (an exact `foo`, the empty pattern, a suffix, or any segment wildcard), or when
-	/// the requested patterns are disjoint from this producer's current scope.
+	/// Returns a new Producer restricted to publishing paths matching `patterns`,
+	/// relative to this producer's root.
 	pub fn scope(&self, patterns: &Patterns) -> Option<Producer> {
+		let rooted = patterns.rooted(self.root.as_str()).ok()?;
 		Some(Producer {
 			info: self.info,
-			nodes: self.nodes.select(patterns)?,
+			scope: self.scope.narrow(&rooted)?,
 			root: self.root.clone(),
 			shared: self.shared.clone(),
 			pool: self.pool.clone(),
@@ -1465,15 +1395,18 @@ impl Producer {
 
 	/// Returns a new Producer that automatically strips out the provided prefix.
 	///
-	/// Returns None if the provided root is not authorized; when [`Self::scope`]
-	/// was already used without a wildcard.
+	/// The scope is unchanged and merely renamed from the new root. Returns None
+	/// when nothing in scope lies under it.
 	pub fn with_root(&self, prefix: impl AsPath) -> Option<Self> {
-		let prefix = prefix.as_path();
+		let root = self.root.join(prefix).to_owned();
+		if self.scope.relative(&root).is_empty() {
+			return None;
+		}
 
 		Some(Self {
 			info: self.info,
-			root: self.root.join(&prefix).to_owned(),
-			nodes: self.nodes.root(&prefix)?,
+			root,
+			scope: self.scope.clone(),
 			shared: self.shared.clone(),
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
@@ -1489,14 +1422,9 @@ impl Producer {
 		&self.root
 	}
 
-	/// The granted scopes as prefix-shaped patterns: `foo/**` for the old `foo`
-	/// prefix, `**` for the old empty prefix.
+	/// The patterns this producer may publish under, relative to its root.
 	pub fn allowed(&self) -> Patterns {
-		self.nodes
-			.nodes
-			.iter()
-			.map(|(root, _)| Pattern::subtree(root.as_str()).expect("scope roots are literal paths"))
-			.collect()
+		self.scope.relative(&self.root)
 	}
 
 	/// Converts a relative path to an absolute path.
@@ -1507,7 +1435,7 @@ impl Producer {
 	/// Nodes in the whole path tree, counting the root. Test-only.
 	#[cfg(test)]
 	pub(crate) fn node_count(&self) -> usize {
-		self.nodes.tree.lock().count()
+		self.scope.tree.lock().count()
 	}
 }
 
@@ -1520,25 +1448,22 @@ struct Announcing {
 	/// The absolute prefix as requested, before clamping: what the ingress
 	/// announce counters are keyed by.
 	requested: PathOwned,
-	/// The prefixes inserted into the table: one per allowed scope the request
-	/// intersects when clamped, or the requested prefix itself.
+	/// The prefix inserted into the table. Pattern scopes decide visibility and
+	/// request authorization without changing the route's prefix shape.
 	prefixes: Vec<PathOwned>,
+	local: bool,
 	stats: stats::Session,
 }
 
 impl Announcing {
-	/// The requested prefix as-is, refused when it reaches outside every scope.
+	/// The requested prefix as-is, refused when its subtree does not overlap the scope.
 	fn new(producer: &Producer, prefix: impl AsPath) -> Result<Self, Error> {
 		let requested = producer.root.join(prefix.as_path()).to_owned();
 		if requested.parts().count() > Path::MAX_PARTS {
 			return Err(BoundsExceeded.into());
 		}
-		let contained = producer
-			.nodes
-			.nodes
-			.iter()
-			.any(|(allowed, _)| requested.has_prefix(producer.root.join(allowed)));
-		if !contained {
+		let claim = Pattern::subtree(requested.as_str()).map_err(|_| BoundsExceeded)?;
+		if !producer.scope.allowed.overlaps(&claim) {
 			return Err(Error::Unauthorized);
 		}
 		Ok(Self {
@@ -1546,20 +1471,7 @@ impl Announcing {
 			shared: producer.shared.clone(),
 			requested: requested.clone(),
 			prefixes: vec![requested],
-			stats: producer.stats.clone(),
-		})
-	}
-
-	/// The requested prefix clamped to each scope it intersects.
-	#[cfg(test)]
-	fn clamped(producer: &Producer, prefix: impl AsPath) -> Result<Self, Error> {
-		let requested = producer.root.join(prefix.as_path()).to_owned();
-		let prefixes = producer.clamp_prefix(&requested)?;
-		Ok(Self {
-			hop: producer.info,
-			shared: producer.shared.clone(),
-			requested,
-			prefixes,
+			local: false,
 			stats: producer.stats.clone(),
 		})
 	}
@@ -1589,6 +1501,7 @@ impl Announcing {
 				hops: meta.0.clone(),
 				cost: meta.1,
 				via,
+				local: self.local,
 				server: server.clone(),
 			});
 			shared.sync_route(prefix);
@@ -1746,7 +1659,7 @@ struct DriverState {
 	/// Source watchers, fronts, and serve tasks: producers submit, this polls.
 	set: TaskSet,
 	/// The whole broadcast tree, for the teardown walk on drop.
-	nodes: OriginNodes,
+	tree: Lock<OriginNode>,
 	/// The route table, announce cursors, and the remotely-served fronts, for
 	/// ending everything on drop.
 	shared: kio::Shared<OriginState>,
@@ -1909,7 +1822,7 @@ impl DriverState {
 			}
 		}
 
-		teardown_broadcasts(&self.nodes.tree);
+		teardown_broadcasts(&self.tree);
 	}
 }
 
@@ -3054,7 +2967,7 @@ impl OriginState {
 		// Split borrows: the recompute reads `routes` while mutating a cursor.
 		let routes = &self.routes;
 		for cursor in self.cursors.values_mut() {
-			for presented in cursor.presented(prefix) {
+			if let Some(presented) = cursor.presented(prefix) {
 				Self::sync_cursor(routes, cursor, &presented);
 			}
 		}
@@ -3069,23 +2982,24 @@ impl OriginState {
 		let candidates: Vec<&RouteEntry> = routes
 			.iter()
 			.filter(|entry| cursor.visible(entry))
-			.filter(|entry| cursor.presented(&entry.prefix).contains(presented))
+			.filter(|entry| cursor.presented(&entry.prefix).as_ref() == Some(presented))
 			.collect();
 		let most = candidates.iter().map(|entry| entry.prefix.len()).max();
 		let best = most.and_then(|most| {
 			candidates
 				.into_iter()
 				.filter(|entry| entry.prefix.len() == most)
-				.min_by_key(|entry| route_order(presented, entry))
+				.min_by_key(|entry| (!entry.local, route_order(&entry.prefix, entry)))
 		});
 
 		match best {
 			Some(entry) => {
 				let meta = (entry.hops.clone(), entry.cost);
 				let served = entry.server.is_some();
+				let captures = cursor.captures(&entry.prefix);
 				match cursor
 					.current
-					.insert(presented.clone(), (entry.id, meta.clone(), served))
+					.insert(presented.clone(), (entry.id, meta.clone(), served, captures.clone()))
 				{
 					// Unchanged metadata and servability: nothing the consumer could
 					// act on, even if the winning entry itself changed (a reconnect
@@ -3093,19 +3007,20 @@ impl OriginState {
 					// servability flip is delivered: a request that failed Unroutable
 					// under an advertise-only route retries on the update, and hiding
 					// it would park that waiter forever.
-					Some((_, prev, prev_served)) if prev == meta && prev_served == served => {}
+					Some((_, prev, prev_served, prev_captures))
+						if prev == meta && prev_served == served && prev_captures == captures => {}
 					_ => {
 						if let Ok(mut state) = cursor.state.write() {
-							state.apply_announce(presented.clone(), meta);
+							state.apply_announce(presented.clone(), meta, captures);
 						}
 					}
 				}
 			}
 			None => {
-				if let Some((_, last, _)) = cursor.current.remove(presented)
+				if let Some((_, last, _, captures)) = cursor.current.remove(presented)
 					&& let Ok(mut state) = cursor.state.write()
 				{
-					state.apply_unannounce(presented.clone(), last);
+					state.apply_unannounce(presented.clone(), last, captures);
 				}
 			}
 		}
@@ -3116,7 +3031,7 @@ impl OriginState {
 		let routes = &self.routes;
 		let mut presented: Vec<PathOwned> = Vec::new();
 		for entry in routes {
-			for p in cursor.presented(&entry.prefix) {
+			if let Some(p) = cursor.presented(&entry.prefix) {
 				if !presented.contains(&p) {
 					presented.push(p);
 				}
@@ -3534,7 +3449,7 @@ impl Consume<track::Consumer> for track::Consumer {
 pub struct Consumer {
 	// Identity of the origin this consumer was derived from.
 	info: Hop,
-	nodes: OriginNodes,
+	scope: OriginScope,
 
 	// A prefix that is automatically stripped from all paths.
 	root: PathOwned,
@@ -3580,7 +3495,7 @@ impl Consumer {
 	fn from_producer(producer: &Producer, stats: stats::Session) -> Self {
 		Self {
 			info: producer.info,
-			nodes: producer.nodes.clone(),
+			scope: producer.scope.clone(),
 			root: producer.root.clone(),
 			shared: producer.shared.clone(),
 			stats,
@@ -3626,7 +3541,7 @@ impl Consumer {
 	/// rather than tearing the stream down.
 	pub(crate) fn empty(&self) -> Self {
 		Self {
-			nodes: OriginNodes::empty(),
+			scope: OriginScope::empty(),
 			..self.clone()
 		}
 	}
@@ -3639,20 +3554,11 @@ impl Consumer {
 	pub fn announced(&self) -> AnnounceConsumer {
 		AnnounceConsumer::new(
 			self.root.clone(),
-			self.allowed_absolute(),
+			self.scope.allowed.clone(),
 			self.stats.clone(),
 			self.exclude,
 			&self.shared,
 		)
-	}
-
-	/// The absolute prefixes this handle is scoped to.
-	fn allowed_absolute(&self) -> Vec<PathOwned> {
-		self.nodes
-			.nodes
-			.iter()
-			.map(|(allowed, _)| self.root.join(allowed).to_owned())
-			.collect()
 	}
 
 	/// Returns a cheap duplicate of this read handle.
@@ -3662,10 +3568,11 @@ impl Consumer {
 
 	/// Internal synchronous lookup: the local broadcast at `path`, if any.
 	fn resolve(&self, path: impl AsPath) -> Option<broadcast::Consumer> {
-		let path = path.as_path();
-		let rest = self.nodes.get(&path)?;
-		let state = self.nodes.tree.lock();
-		state.resolve_broadcast(&rest)
+		let full = self.root.join(path).to_owned();
+		if !self.scope.permits(&full) {
+			return None;
+		}
+		self.scope.tree.lock().resolve_broadcast(&full)
 	}
 
 	/// [`Self::resolve`] as the peek the tests assert on.
@@ -3769,15 +3676,12 @@ impl Consumer {
 		}
 	}
 
-	/// Returns a new Consumer restricted to broadcasts under one of `patterns`.
-	///
-	/// Each member must be prefix-shaped (`foo/**` for the old `foo` prefix, `**` for
-	/// the old empty prefix). Returns None when any member cannot be represented yet
-	/// (an exact `foo`, the empty pattern, a suffix, or any segment wildcard), or when
-	/// the requested patterns are disjoint from this consumer's current scope.
+	/// Returns a new Consumer restricted to broadcasts matching `patterns`,
+	/// relative to this consumer's root.
 	pub fn scope(&self, patterns: &Patterns) -> Option<Consumer> {
+		let rooted = patterns.rooted(self.root.as_str()).ok()?;
 		Some(Consumer {
-			nodes: self.nodes.select(patterns)?,
+			scope: self.scope.narrow(&rooted)?,
 			..self.clone()
 		})
 	}
@@ -3824,7 +3728,7 @@ impl Consumer {
 		}
 
 		// Routes only cover paths within this consumer's scope.
-		if self.nodes.get(&path).is_none() {
+		if !self.scope.permits(&absolute) {
 			return kio::Pending::new(Pending::failed(Error::Unroutable));
 		}
 
@@ -3902,16 +3806,14 @@ impl Consumer {
 
 	/// Returns a new Consumer that automatically strips out the provided prefix.
 	///
-	/// Returns None if the provided root is not authorized; when [`Self::scope`] was
-	/// already used without a wildcard.
+	/// The scope is unchanged and merely renamed from the new root. Returns None
+	/// when nothing in scope lies under it.
 	pub fn with_root(&self, prefix: impl AsPath) -> Option<Self> {
-		let prefix = prefix.as_path();
-
-		Some(Self {
-			root: self.root.join(&prefix).to_owned(),
-			nodes: self.nodes.root(&prefix)?,
-			..self.clone()
-		})
+		let root = self.root.join(prefix).to_owned();
+		if self.scope.relative(&root).is_empty() {
+			return None;
+		}
+		Some(Self { root, ..self.clone() })
 	}
 
 	/// Returns the prefix that is automatically stripped from all paths.
@@ -3919,14 +3821,9 @@ impl Consumer {
 		&self.root
 	}
 
-	/// The granted scopes as prefix-shaped patterns: `foo/**` for the old `foo`
-	/// prefix, `**` for the old empty prefix.
+	/// The patterns this consumer may reach, relative to its root.
 	pub fn allowed(&self) -> Patterns {
-		self.nodes
-			.nodes
-			.iter()
-			.map(|(root, _)| Pattern::subtree(root.as_str()).expect("scope roots are literal paths"))
-			.collect()
+		self.scope.relative(&self.root)
 	}
 
 	/// Converts a relative path to an absolute path.
@@ -3965,7 +3862,7 @@ pub struct AnnounceConsumer {
 impl AnnounceConsumer {
 	fn new(
 		root: PathOwned,
-		allowed: Vec<PathOwned>,
+		allowed: Patterns,
 		stats: stats::Session,
 		exclude: Option<Hop>,
 		shared: &kio::Shared<OriginState>,

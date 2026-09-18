@@ -18,11 +18,11 @@ test("next streams every appended event in order", async () => {
 	const consumer = producer.consume();
 
 	const route = Route.default;
-	producer.append({ path: p("a"), kind: "announced", route });
-	producer.append({ path: p("a"), kind: "retracted", route });
+	producer.append({ path: p("a"), captures: undefined, kind: "announced", route });
+	producer.append({ path: p("a"), captures: undefined, kind: "retracted", route });
 
-	expect(await consumer.next()).toEqual({ path: p("a"), kind: "announced", route });
-	expect(await consumer.next()).toEqual({ path: p("a"), kind: "retracted", route });
+	expect(await consumer.next()).toEqual({ path: p("a"), captures: undefined, kind: "announced", route });
+	expect(await consumer.next()).toEqual({ path: p("a"), captures: undefined, kind: "retracted", route });
 });
 
 test("the consumer is an async iterable of the same events", async () => {
@@ -30,8 +30,8 @@ test("the consumer is an async iterable of the same events", async () => {
 	const consumer = producer.consume();
 
 	const route = Route.default;
-	producer.append({ path: p("a"), kind: "announced", route });
-	producer.append({ path: p("a"), kind: "retracted", route });
+	producer.append({ path: p("a"), captures: undefined, kind: "announced", route });
+	producer.append({ path: p("a"), captures: undefined, kind: "retracted", route });
 
 	const events = consumer[Symbol.asyncIterator]();
 	expect((await events.next()).value?.kind).toBe("announced");
@@ -49,11 +49,11 @@ test("a same-name re-announce is a distinct update", async () => {
 	// than collapsing it. Deciding what a repeat means belongs to the session layer, which resolves
 	// a restart into either nothing (a route change) or an end + start (a new publisher).
 	const route = Route.default;
-	producer.append({ path: p("a"), kind: "announced", route });
-	producer.append({ path: p("a"), kind: "announced", route });
+	producer.append({ path: p("a"), captures: undefined, kind: "announced", route });
+	producer.append({ path: p("a"), captures: undefined, kind: "announced", route });
 
-	expect(await consumer.next()).toEqual({ path: p("a"), kind: "announced", route });
-	expect(await consumer.next()).toEqual({ path: p("a"), kind: "announced", route });
+	expect(await consumer.next()).toEqual({ path: p("a"), captures: undefined, kind: "announced", route });
+	expect(await consumer.next()).toEqual({ path: p("a"), captures: undefined, kind: "announced", route });
 });
 
 test("closing resolves next with undefined", async () => {

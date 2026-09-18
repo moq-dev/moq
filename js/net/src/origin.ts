@@ -15,7 +15,7 @@ import * as announce from "./announced.ts";
 import * as broadcast from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { Route, routesEqual } from "./hop.ts";
-import { hooks, scopePrefix } from "./internal.ts";
+import { hooks, scopeCaptures, scopeHead, scopeOverlaps } from "./internal.ts";
 import * as Path from "./path.ts";
 
 export type { Cost, Hop, Route } from "./hop.ts";
@@ -156,6 +156,10 @@ export interface Advertised {
 	/** A republish is a different object; a re-price is the same object with a new route. */
 	readonly identity: object;
 	readonly route: Route;
+}
+
+interface Presented extends Advertised {
+	readonly captures: Path.Pattern[] | undefined;
 }
 
 /** Reactive backing state shared by origin producers and consumers. */
@@ -939,27 +943,26 @@ export class Consumer {
 	}
 
 	/**
-	 * The announced routes under `scope`, as a live stream: every currently advertised
-	 * route arrives first as `active`, then additions and retractions as they happen.
-	 * The scope must be prefix-shaped (`foo/**`, or `**` for everything); anything else
-	 * throws rather than narrowing or widening it. A local broadcast appears only after
+	 * The announced routes matching `scope`, as a live stream: every currently advertised
+	 * route arrives first as active, then additions and retractions as they happen.
+	 * Any pattern is accepted. A local broadcast appears only after
 	 * {@link broadcast.Producer.announce}; a dynamic or received route announces the
-	 * prefix it covers, clamped to the scope. Paths are relative to the scope. The
+	 * prefix it covers when its subtree overlaps the scope. The
 	 * stream ends when the origin closes or the consumer is closed.
 	 */
 	announced(scope: Path.Pattern = Path.Pattern.all()): announce.Consumer {
-		const prefix = scopePrefix(scope);
+		const prefix = scopeHead(scope);
 		const producer = new announce.Producer();
-		void this.#runAnnounced(producer, prefix);
+		void this.#runAnnounced(producer, prefix, scope);
 		return producer.consume();
 	}
 
-	async #runAnnounced(producer: announce.Producer, prefix: Path.Valid): Promise<void> {
+	async #runAnnounced(producer: announce.Producer, prefix: Path.Valid, scope: Path.Pattern): Promise<void> {
 		// Keyed by the presented path (from the origin, not the scope), valued by identity
 		// plus route. Diffing identity rather than mere presence means a republish emits a
 		// retraction then a fresh announcement; a re-price of the same identity emits an
 		// update.
-		let active = new Map<Path.Valid, Advertised>();
+		let active = new Map<Path.Valid, Presented>();
 
 		try {
 			for (;;) {
@@ -968,7 +971,7 @@ export class Consumer {
 				const routes = this.#state.routes.peek();
 				if (local === undefined && advertisedLocal === undefined && routes === undefined) break;
 
-				const next = new Map<Path.Valid, Advertised>();
+				const next = new Map<Path.Valid, Presented>();
 				// Routes first, so an advertised local at the same path overwrites it: the
 				// announcement points at whatever request() would resolve.
 				// A route above the scope clamps to the scope itself, and the most specific
@@ -977,7 +980,12 @@ export class Consumer {
 				for (const [covered, entries] of routes ?? []) {
 					const entry = entries[0];
 					if (!entry) continue;
-					const snap: Advertised = { identity: entry.identity, route: entry.route.peek() };
+					if (!scopeOverlaps(scope, covered)) continue;
+					const snap: Presented = {
+						identity: entry.identity,
+						route: entry.route.peek(),
+						captures: scopeCaptures(scope, covered),
+					};
 					if (Path.hasPrefix(covered, prefix)) {
 						if (covered.length < rootLen) continue;
 						rootLen = covered.length;
@@ -989,20 +997,20 @@ export class Consumer {
 				for (const [path, front] of local ?? []) {
 					const route = advertisedLocal?.get(path);
 					if (!route) continue;
-					if (Path.hasPrefix(prefix, path)) next.set(path, { identity: front, route });
+					if (scope.matches(path)) next.set(path, { identity: front, route, captures: scopeCaptures(scope, path) });
 				}
 
 				for (const [path, snap] of active) {
 					const cur = next.get(path);
 					if (!cur || cur.identity !== snap.identity)
-						producer.append({ path, kind: "retracted", route: snap.route });
+						producer.append({ path, captures: snap.captures, kind: "retracted", route: snap.route });
 				}
 				for (const [path, snap] of next) {
 					const prev = active.get(path);
 					if (!prev || prev.identity !== snap.identity) {
-						producer.append({ path, kind: "announced", route: snap.route });
+						producer.append({ path, captures: snap.captures, kind: "announced", route: snap.route });
 					} else if (!routesEqual(prev.route, snap.route)) {
-						producer.append({ path, kind: "updated", route: snap.route });
+						producer.append({ path, captures: snap.captures, kind: "updated", route: snap.route });
 					}
 				}
 				active = next;

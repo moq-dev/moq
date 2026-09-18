@@ -677,10 +677,7 @@ async fn serve_connection(
 	let lease = if cluster::Cluster::is_lan_path(&path) {
 		match cluster::Cluster::lan_credential(&path) {
 			Some(presented) => match serve.cluster.verify_lan_credential(presented) {
-				Some(true) => serve
-					.auth
-					.admit_fixed("/", serve.cluster.lan_peer_grant())
-					.context("LAN peer grant")?,
+				Some(true) => serve.auth.admit_fixed("/", serve.cluster.lan_peer_grant()),
 				Some(false) => {
 					request.close(moq_net::Error::Unauthorized);
 					anyhow::bail!("LAN peer did not present this listener's membership proof");

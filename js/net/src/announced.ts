@@ -30,9 +30,10 @@ export type Kind = "announced" | "updated" | "retracted";
 export interface Update {
 	/**
 	 * The prefix the route covers, relative to the origin (for a session, its URL path).
-	 * A route claimed above the scope passed to `announced()` is clamped to that scope.
 	 */
 	path: Path.Valid;
+	/** What the filter's wildcards stood for, when this prefix pins all of them. */
+	captures: Path.Pattern[] | undefined;
 	/** Whether the path was announced, re-priced, or retracted. */
 	kind: Kind;
 	/** Hops and cost of the route; on a retraction, its last advertised values. */

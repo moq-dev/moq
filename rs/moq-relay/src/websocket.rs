@@ -947,7 +947,7 @@ mod tests {
 			[moq_auth::Pattern::all()].into_iter().collect(),
 			[moq_auth::Pattern::all()].into_iter().collect(),
 		);
-		let lease = crate::auth::Lease::new("/", moq_auth::lease::Consumer::fixed(grant)).expect("lease");
+		let lease = crate::auth::Lease::new("/", moq_auth::lease::Consumer::fixed(grant));
 		let server = tokio::spawn(handle_socket(
 			Pipe::new(server_incoming, server_to_client, frozen.clone()),
 			session,

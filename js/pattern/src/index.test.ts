@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { compareSpecificity, InvalidPattern, Pattern, Patterns, type Segment } from "./index.ts";
+import { compareSpecificity, IntersectionError, InvalidPattern, Pattern, Patterns, type Segment } from "./index.ts";
 
 // The golden vectors live with the Rust crate, so both implementations replay one file.
 interface Vectors {
@@ -19,6 +19,8 @@ interface Vectors {
 	)[];
 	union: { input: string[]; reduced: string[] }[];
 	unionContains: { union: string[]; pattern: string; expect: boolean }[];
+	intersect: { a: string; b: string; expect: string[] }[];
+	captures: { scope: string; matched: string; expect: string[] | null }[];
 }
 const vectors = JSON.parse(
 	await Bun.file(join(import.meta.dir, "../../../rs/moq-pattern/tests/pattern.json")).text(),
@@ -122,6 +124,29 @@ describe("vectors", () => {
 			expect(texts(Pattern.parse(c.pattern).rebase(c.root)), `${c.pattern} at ${c.root}`).toEqual(
 				texts(new Patterns(c.expect.map((t) => Pattern.parse(t)))),
 			);
+		}
+	});
+
+	test("intersect", () => {
+		for (const c of vectors.intersect) {
+			const a = Pattern.parse(c.a);
+			const b = Pattern.parse(c.b);
+			const expected = texts(new Patterns(c.expect.map((t) => Pattern.parse(t))));
+			expect(texts(a.intersect(b)), `${c.a} & ${c.b}`).toEqual(expected);
+			expect(texts(b.intersect(a)), `${c.b} & ${c.a}`).toEqual(expected);
+		}
+	});
+
+	test("intersection complexity is bounded", () => {
+		const left = Pattern.parse(Array(11).fill("ab*").join("/"));
+		const right = Pattern.parse(Array(11).fill("*b").join("/"));
+		expect(() => left.intersect(right)).toThrow(IntersectionError);
+	});
+
+	test("captures", () => {
+		for (const c of vectors.captures) {
+			const got = Pattern.parse(c.scope).captures(Pattern.parse(c.matched));
+			expect(got === undefined ? null : texts(got), `${c.scope} against ${c.matched}`).toEqual(c.expect);
 		}
 	});
 
@@ -259,6 +284,56 @@ describe("exhaustive", () => {
 							`${a} ranks below ${b}`,
 						).toBeLessThan(0);
 					}
+				}
+			}
+		}
+	});
+
+	test("intersect matches exactly what both match", () => {
+		for (const alphabet of ALPHABETS) {
+			const patterns = allPatterns(alphabet);
+			const paths = allPaths(alphabet, alphabet.maxPath);
+			const table = patterns.map((pattern) => paths.map((p) => pattern.matches(p)));
+			for (const [i, a] of patterns.entries()) {
+				for (const [j, b] of patterns.entries()) {
+					const both = a.intersect(b);
+					const wrong = paths.findIndex((p, k) => both.matches(p) !== (table[i][k] && table[j][k]));
+					expect(wrong === -1 ? "" : paths[wrong], `${a} & ${b} disagrees on a path`).toBe("");
+					expect(both.equals(b.intersect(a)), `${a} & ${b} commutes`).toBe(true);
+					expect(both.size === 0, `${a} & ${b} empty iff disjoint`).toBe(!a.overlaps(b));
+					if (a.contains(b)) expect(texts(both), `${a} & ${b} is the contained one`).toEqual([b.text]);
+				}
+			}
+		}
+	});
+
+	test("captures stand for the matched segments", () => {
+		for (const alphabet of ALPHABETS) {
+			const patterns = allPatterns(alphabet);
+			for (const scope of patterns) {
+				const wildcards = scope.segments.filter((s) => s.kind !== "literal").length;
+				for (const matched of patterns) {
+					const captures = scope.captures(matched);
+					if (captures === undefined) {
+						expect(scope.contains(matched), `${scope} contains ${matched} but captures nothing`).toBe(
+							false,
+						);
+						continue;
+					}
+					expect(captures.length, `${scope} against ${matched}`).toBe(wildcards);
+					// Splicing the captures back over the scope's wildcards lands on a pattern
+					// containing `matched` and contained by the scope: a capture may be wider
+					// than what the path pins, never narrower.
+					const segments: Segment[] = [];
+					let next = 0;
+					for (const segment of scope.segments) {
+						if (segment.kind === "literal") segments.push(segment);
+						else segments.push(...captures[next++].segments);
+					}
+					const spliced = Pattern.from(segments);
+					expect(spliced.contains(matched), `${scope} against ${matched}: ${spliced}`).toBe(true);
+					expect(scope.contains(spliced), `${scope} against ${matched}: ${spliced}`).toBe(true);
+					if (matched.isLiteral) expect(spliced.equals(matched), `${scope} against ${matched}`).toBe(true);
 				}
 			}
 		}

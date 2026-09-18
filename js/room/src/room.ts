@@ -83,17 +83,20 @@ export class Room {
 			const update = await Promise.race([effect.cancel, announced.next()]);
 			if (!update) break;
 
-			// Announcements name the whole path; participants are named beneath the prefix.
-			const suffix = Moq.Path.stripPrefix(prefix, update.path);
-			if (suffix === null) continue;
-			const parsed = parse(suffix);
+			// The scope's `**` captures what lies beneath the prefix. A broad route
+			// that cannot pin that suffix names no participant to open.
+			const capture = update.captures?.[0];
+			const suffix = capture?.isLiteral ? capture.text : capture?.asPrefix();
+			if (suffix === undefined) continue;
+			const parsed = parse(Moq.Path.from(suffix));
 			if (!parsed) continue;
+			const covered = Moq.Path.join(prefix, Moq.Path.from(suffix));
 
 			const local = this.identity.peek();
 			if (local && parsed.identity === local) continue;
 
 			if (Moq.Announce.isActive(update.kind)) {
-				this.#add(parsed.identity, parsed.kind, update.path);
+				this.#add(parsed.identity, parsed.kind, Moq.Path.from(covered));
 			} else {
 				this.#remove(parsed.identity, parsed.kind);
 			}

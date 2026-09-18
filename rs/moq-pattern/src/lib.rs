@@ -25,9 +25,11 @@
 //! # Algebra
 //!
 //! [`Pattern::matches`], [`Pattern::overlaps`], [`Pattern::contains`], [`Pattern::head`],
-//! [`Pattern::specificity`], and set-valued [`Pattern::rebase`]. A rebase never picks one
-//! lossy residual: `**/a` at `a` is both the empty pattern and `**/a`. A union reduces
-//! per member; a candidate covered only jointly by several members is refused.
+//! [`Pattern::specificity`], set-valued [`Pattern::rebase`] and [`Pattern::intersect`],
+//! and [`Pattern::captures`]. A rebase never picks one lossy residual: `**/a` at `a` is
+//! both the empty pattern and `**/a`, and an intersection never picks one lossy
+//! overlap: `a/**` with `**/a` is both `a` and `a/**/a`. A union reduces per member; a
+//! candidate covered only jointly by several members is refused.
 //!
 //! # CAT / C4M
 //!
@@ -65,5 +67,5 @@
 mod pattern;
 mod patterns;
 
-pub use pattern::{InvalidPattern, Pattern, Segment, Specificity};
+pub use pattern::{IntersectionError, InvalidPattern, Pattern, Segment, Specificity};
 pub use patterns::Patterns;

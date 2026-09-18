@@ -817,21 +817,6 @@ impl PathPrefixes {
 	pub fn iter(&self) -> std::slice::Iter<'_, PathOwned> {
 		self.paths.iter()
 	}
-
-	/// Build from prefix-shaped patterns, refusing the whole union when any member is not one.
-	///
-	/// `foo/**` keeps the old `foo` prefix meaning and `**` keeps the old empty-prefix
-	/// meaning. An exact `foo`, the empty pattern, a suffix, or any segment wildcard is
-	/// not a prefix grant and refuses the whole union with `None`, so a supported member
-	/// cannot conceal an unsupported one. An empty union grants nothing.
-	pub fn from_patterns(patterns: &Patterns) -> Option<Self> {
-		let mut paths = Vec::with_capacity(patterns.len());
-		for pattern in patterns {
-			let prefix = pattern.as_prefix()?;
-			paths.push(Path::new(prefix).to_owned());
-		}
-		Some(Self::new(paths))
-	}
 }
 
 impl std::ops::Deref for PathPrefixes {
