@@ -142,9 +142,9 @@ final class SmokeTests: XCTestCase {
         }
 
         let broadcast = try BroadcastProducer()
-        let producer = try broadcast.publishJsonSnapshot(name: "status", of: Status.self, compression: true)
+        let producer = try broadcast.publishJsonSnapshot(name: "status", of: Status.self, compression: .deflate)
         let consumer = try await broadcast.consume().subscribeJsonSnapshot(
-            name: "status", as: Status.self, compression: true)
+            name: "status", as: Status.self, compression: .deflate)
 
         try producer.update(Status(state: "live", viewers: 42))
         let first = try await consumer.next()

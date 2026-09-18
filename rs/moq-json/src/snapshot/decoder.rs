@@ -182,7 +182,10 @@ mod test {
 	fn compressed_roundtrip_across_a_group_boundary() {
 		// A tight ratio guarantees at least one roll partway through.
 		let values: Vec<Value> = (0..=40).map(|n| json!({ "n": n })).collect();
-		let config = deflate().with_delta_ratio(2);
+		let config = Config {
+			delta_ratio: 2,
+			compression: Compression::Deflate,
+		};
 		assert_eq!(roundtrip(config, &values).last().unwrap(), &json!({ "n": 40 }));
 	}
 
@@ -203,7 +206,10 @@ mod test {
 	/// stale, and deserializing each one is exactly the cost the split exists to avoid.
 	#[test]
 	fn frames_apply_without_materializing() {
-		let mut encoder = Encoder::<Value>::new(Config::default().with_delta_ratio(100));
+		let mut encoder = Encoder::<Value>::new(Config {
+			delta_ratio: 100,
+			compression: Compression::None,
+		});
 		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
 
 		for n in 0..=20 {

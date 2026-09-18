@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{Encoded, Encoder, ProducerConfig};
+use super::{Config, Encoded, Encoder};
 use crate::Result;
 
 /// Publishes a sliding window of JSON records over a track.
@@ -31,7 +31,7 @@ impl<T> Clone for Producer<T> {
 
 impl<T> Producer<T> {
 	/// Create a producer that publishes to the given track.
-	pub fn new(track: moq_net::track::Producer, config: ProducerConfig) -> Self {
+	pub fn new(track: moq_net::track::Producer, config: Config) -> Self {
 		Self {
 			inner: Arc::new(Mutex::new(Inner {
 				track: Track {
@@ -52,7 +52,7 @@ impl<T> Producer<T> {
 
 	/// The retained checkpoint suffix, oldest first.
 	///
-	/// This is the complete window unless [`ProducerConfig::checkpoint_records`] is set.
+	/// This is the complete window unless [`Config::checkpoint_records`] is set.
 	pub fn window(&self) -> Vec<Value> {
 		self.inner.lock().unwrap().encoder.window()
 	}

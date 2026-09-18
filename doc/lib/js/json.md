@@ -13,10 +13,9 @@ JSON over [`@moq/net`](/lib/js/net) tracks, in three modes:
 - **Stream**: lossless append-log in a single group.
 - **Window**: a bounded run of records a reader can join at any point.
 
-On Snapshot and Stream, `Config` is the codec options. `Producer.Config` /
-`Consumer.Config` add the track. Compression is a shared `"none" | "deflate"`
-enum, not a boolean: both sides set the same field. Window still uses
-`ProducerConfig` / `ConsumerConfig` and a boolean `compression` flag.
+Each mode has one `Config`. `Producer.Config` / `Consumer.Config` add the
+track. Compression is a shared `"none" | "deflate"` enum, not a boolean: both
+sides set the same field.
 
 ```ts
 import { Snapshot } from "@moq/json";

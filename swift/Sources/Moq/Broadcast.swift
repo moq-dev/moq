@@ -97,11 +97,11 @@ public final class BroadcastConsumer: Sendable {
     /// Subscribe to a JSON snapshot track (lossy latest-value), decoding each value as `Value`.
     ///
     /// Yields only the newest value, collapsing the backlog for a reader that has fallen behind.
-    /// `compression` must match the flag the producer used.
+    /// `compression` must match the value the producer used.
     public func subscribeJsonSnapshot<Value: Decodable & Sendable>(
         name: String,
         as _: Value.Type,
-        compression: Bool = false
+        compression: Compression = .none
     ) async throws -> JsonSnapshotConsumer<Value> {
         // deltaRatio is producer-only, so leave it at its default here.
         JsonSnapshotConsumer(try await ffi.subscribeJsonSnapshot(name: name, config: MoqJsonSnapshotConfig(compression: compression)))
@@ -109,11 +109,11 @@ public final class BroadcastConsumer: Sendable {
 
     /// Subscribe to a JSON stream track (lossless append-log), decoding each record as `Value`.
     ///
-    /// Yields every record in order. `compression` must match the flag the producer used.
+    /// Yields every record in order. `compression` must match the value the producer used.
     public func subscribeJsonStream<Value: Decodable & Sendable>(
         name: String,
         as _: Value.Type,
-        compression: Bool = false
+        compression: Compression = .none
     ) async throws -> JsonStreamConsumer<Value> {
         JsonStreamConsumer(try await ffi.subscribeJsonStream(name: name, config: MoqJsonStreamConfig(compression: compression)))
     }
@@ -294,25 +294,25 @@ public final class BroadcastProducer: Sendable {
     ///
     /// Each `update` supersedes the last; a late joiner only sees the newest value. `deltaRatio`
     /// controls how aggressively merge-patch deltas replace full snapshots (`0` disables deltas).
-    /// Set `compression` to DEFLATE each group; the consumer must pass the same flag. Advertise
-    /// the track with `setCatalogSection` if consumers should discover it.
+    /// Set `compression` to `.deflate` to compress each group; the consumer must pass the same
+    /// value. Advertise the track with `setCatalogSection` if consumers should discover it.
     public func publishJsonSnapshot<Value: Encodable>(
         name: String,
         of _: Value.Type,
         deltaRatio: UInt32 = MoqJsonSnapshotConfig().deltaRatio,
-        compression: Bool = false
+        compression: Compression = .none
     ) throws -> JsonSnapshotProducer<Value> {
         JsonSnapshotProducer(try ffi.publishJsonSnapshot(name: name, config: MoqJsonSnapshotConfig(deltaRatio: deltaRatio, compression: compression)))
     }
 
     /// Open a JSON stream track (lossless append-log), encoding each record from `Value`.
     ///
-    /// Every appended record is preserved and delivered in order. Set `compression` to DEFLATE
-    /// the group; the consumer must pass the same flag.
+    /// Every appended record is preserved and delivered in order. Set `compression` to `.deflate`
+    /// to compress the group; the consumer must pass the same value.
     public func publishJsonStream<Value: Encodable>(
         name: String,
         of _: Value.Type,
-        compression: Bool = false
+        compression: Compression = .none
     ) throws -> JsonStreamProducer<Value> {
         JsonStreamProducer(try ffi.publishJsonStream(name: name, config: MoqJsonStreamConfig(compression: compression)))
     }

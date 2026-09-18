@@ -18,9 +18,9 @@
  * Trimming is therefore an op, not a group boundary, so dropping a record costs one small frame
  * inside the shared compression window instead of a roll that would throw that window away.
  *
- * The publisher rolls a group when the ops in it outgrow {@link ProducerConfig.opRatio} times the
+ * The publisher rolls a group when the ops in it outgrow {@link Config.opRatio} times the
  * header that opened it. That is purely a compression decision: there is no caller-driven cut and no
- * age bound, and a {@link Consumer} never surfaces it. `ProducerConfig.checkpointRecords` bounds the
+ * age bound, and a {@link Consumer} never surfaces it. {@link Config.checkpointRecords} bounds the
  * suffix repeated on each roll for a long-lived window.
  *
  * A reader gets a `push` event when a record arrives, `pop` when a contiguous span leaves, and
@@ -35,7 +35,7 @@
  * @module
  */
 
-export { Consumer, type ConsumerConfig } from "./consumer.ts";
+export { Consumer } from "./consumer.ts";
 export { Decoder, type Event, type Group, type Span } from "./decoder.ts";
 export { type Config, type Encoded, Encoder, type Pending } from "./encoder.ts";
-export { Producer, type ProducerConfig } from "./producer.ts";
+export { Producer } from "./producer.ts";

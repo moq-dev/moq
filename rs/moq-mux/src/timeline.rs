@@ -728,9 +728,9 @@ impl Output {
 		if self.sink.is_none() && !self.closed {
 			let info = moq_net::track::Info::default().with_priority(hang::catalog::PRIORITY.catalog);
 			let net = self.broadcast.create_track(DEFAULT_NAME, info)?;
-			let config = moq_json::window::ProducerConfig::default()
-				.with_compression(true)
-				.with_checkpoint_records(CHECKPOINT_RECORDS);
+			let mut config = moq_json::window::Config::default();
+			config.compression = moq_json::Compression::Deflate;
+			config.checkpoint_records = Some(CHECKPOINT_RECORDS);
 			self.sink = Some(moq_json::window::Producer::new(net, config));
 		}
 		Ok(())
@@ -1179,7 +1179,8 @@ impl<E: RecordExt> Consumer<E> {
 	pub async fn subscribe(broadcast: &moq_net::broadcast::Consumer, section: &Timeline) -> crate::Result<Self> {
 		let track = broadcast.track(&section.track)?.subscribe(None).await?;
 
-		let config = moq_json::window::ConsumerConfig::default().with_compression(true);
+		let mut config = moq_json::window::consumer::Config::default();
+		config.compression = moq_json::Compression::Deflate;
 
 		Ok(Self {
 			inner: moq_json::window::Consumer::new(track, config),
