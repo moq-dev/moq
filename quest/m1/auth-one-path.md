@@ -6,7 +6,7 @@
 `moq_auth::Client`, `Public` hands out a fixed lease, `Refuse` says no, and
 `Embedded` queues an `Admission` for whoever holds the `Admissions`. The
 embedder's path is the general one: a `connect` request goes out, a `Lease`
-or an an `auth::Error` comes back, and a `lease::Producer` somewhere drives the
+or an `auth::Error` comes back, and a `lease::Producer` somewhere drives the
 session for as long as it runs. The other three could be tasks answering the
 same queue, so a change to how a session is admitted, re-checked, or ended is
 made once.
