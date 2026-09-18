@@ -29,9 +29,10 @@ became `moq_client_config`), so this is the release to finish it.
   and a comment reserving the retired -1, -11, -12, -39.
 - One `typedef` for the status callback in place of fourteen inline
   signatures.
-- Decide the verb: C says `_close` for every task where the uniffi core says
-  `cancel`, and `moq_origin_consume_announced` is `announced_broadcast` in
-  the core. Aligning is a rename across fourteen functions and OBS.
+- Every task's `_close` becomes `_cancel`, the verb the uniffi core and
+  every wrapper use, and `moq_origin_consume_announced` becomes
+  `moq_origin_announced_broadcast` to match `announced_broadcast`; fourteen
+  functions plus `cpp/obs`. One break now instead of a second later.
 - `CHANGELOG.md` `[Unreleased]` names the setter deletion, the bandwidth
   functions, `create_broadcast`/`announce`/`dynamic`, the decoder output
   format, `moq_route`, the `estimated_*_rate` stats fields, and

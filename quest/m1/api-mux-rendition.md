@@ -13,7 +13,7 @@ does not retire the catalog entry.
 
 ## Plan
 
-Recommended: `container::Producer<C>` owns its `Rendition`.
+Decided 2026-09-18: `container::Producer<C>` owns its `Rendition`.
 `Reserved::video(&self, track, container, config) -> Result<container::Producer<C>>`
 (and `Producer::video(...)` for the unreserved path, audio and text alike)
 publishes the estimate on `cut`/`finish`, exposes `modify()` for
@@ -21,10 +21,6 @@ reconfiguration, and retires the entry on drop. `Rendition`, `VideoTrack`,
 `Reserved::producer()`, `Producer::media_producer`, and `Producer::enroll`
 go private; the fMP4 passthrough that writes groups by hand reaches
 `enroll` internally.
-
-Alternative: keep the split but `container::Producer::with_rendition`
-takes ownership so estimates flow automatically. Two handles, less churn,
-same drop-order trap.
 
 Either way `Rendition::update(&mut self, FnOnce(&mut C))` becomes a
 `modify() -> Result<Guard>` that errors with `NotPublished` before `set`

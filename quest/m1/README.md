@@ -26,7 +26,7 @@ does not require it.
 
 - [One auth path](/quest/m1/auth-one-path.md) - the server and public modes become clients of the same `Admissions` queue the embedder answers, a reshape of the unpublished auth API that is dev-line work by priority, not a gate
 - [Auth contract](/quest/m1/auth-contract.md) - moq-auth and @moq/auth ship one type per concept: no `Counters`, one publish/subscribe pair, a reference server that scopes like the library, no `kty` default
-- [Announce event](/quest/m1/api-net-announce.md) - an announce says the path it covers and whether it is new, updated, or retracted, with no `as_prefix().expect()` at 89 call sites
+- [Announce event](/quest/m1/api-net-announce.md) - publishers announce prefixes on every wire, consumers scoped by a pattern read the covered path already trimmed, with no `as_prefix().expect()` at 89 call sites
 - [Origin scoping](/quest/m1/api-net-origin.md) - `scope(root, patterns)` is one fallible call, a fresh origin has a random hop, and the handles stop derefing to `Hop`
 - [moq-net surface](/quest/m1/api-net-surface.md) - dead exports go, compounds sit under their modules, creators take `&self`
 - [Bindings announce match](/quest/m1/api-origin-scopes.md) - every binding takes a pattern scope and reports the announce match with its captures

@@ -37,11 +37,11 @@ the last release spelled differently instead of aliasing them silently.
   decoders; name the pair `text`/`textRenderer` (or `captions`/
   `captionsRenderer`). `<moq-publish>` wraps `sources` in `readonlys()` and
   drops `el.capture`, a duplicate of `el.video.capture`.
-- Decide two renames while spellings are still cheap: `reload` names the
-  mechanism and moq.pro reads it as retry, `announced` says what it gates;
-  and the watch decoders' `stalled` (viewer buffering) shares a word with
-  the catalog's `stalled` (publisher lagging), so `buffering` for the
-  viewer side.
+- `reload` becomes `announced` on `Broadcast`, the element attribute,
+  room's `Member`, and the docs; it gates on the announcement and moq.pro
+  reads the old name as retry. The released spelling refuses. `stalled`
+  stays on both the catalog (publisher lagging) and the watch decoders
+  (viewer waiting); the maintainer likes one word for both sides.
 - Bugs on the same files: a stalled rendition silently overrides a manual
   quality pick (`video/source.ts`); `delay = "instant"` underruns audio
   unless the owner remembers to disable it, so `Audio.Decoder` gates it.
