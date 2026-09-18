@@ -59,6 +59,37 @@ with jittered backoff and the session lives until `expires`, so an outage always
 has the bound the server chose. There is no `Cache-Control` and no cache on the
 relay.
 
+**Push.** An operator or the auth server can ask this node to re-check now,
+instead of waiting for the cadence, so a kick, a gate, or a retier lands in
+one round trip. The internal listener takes the same filter on
+`GET /sessions` and `POST /sessions/revalidate`: any subset of the fields the
+server already saw (`id`, `path` as a pattern, `remote` as an IP or CIDR,
+`transport`, `tls.name`, ...). Every given field must match. An empty filter
+is every session on this node, so a node under load is nudged through a
+selector. A push does not decide anything: the relay re-POSTs `revalidate`
+and the server's reply kicks, narrows, retiers, or keeps the session exactly
+as a scheduled re-check would. Closing a session with no server in the loop
+is not a route.
+
+```bash
+# Kick one session.
+curl -X POST 'http://127.0.0.1:9101/sessions/revalidate?id=00ff'
+
+# Re-check everyone under a path, then see who is still there.
+curl 'http://127.0.0.1:9101/sessions?path=demo/**'
+curl -X POST 'http://127.0.0.1:9101/sessions/revalidate?path=demo/**'
+
+moq auth revalidate --internal-url http://127.0.0.1:9101 --id 00ff
+moq auth sessions --internal-url http://127.0.0.1:9101 --path 'demo/**'
+```
+
+`GET /sessions` is the dry run: the same matches, each request plus start
+time, with `query` omitted so a jwt on the plane cannot be replayed. A
+matching POST returns 202 and the ids; no match is 200 with an empty list.
+An unknown field, including `query`, is 400. One node, no cluster fan-out:
+the server already knows each session's `node` from `connect` and calls that
+relay.
+
 **End.** Every close reports `end` with the reason: `expired`, `refused`, the
 session's own close classification, or `dropped`. The byte totals are what the
 transport reports; QUIC reports them, the qmux stream transports do not yet.
@@ -262,7 +293,16 @@ tokio::spawn(async move {
             Ok(grant) => {
                 let (producer, consumer) = moq_auth::lease::Producer::new(grant);
                 admission.grant(consumer);
-                tokio::spawn(revalidate(producer)); // update, revoke, await closed()
+                tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            reason = producer.closed() => break reason,
+                            () = producer.revalidate_requested() => {
+                                // Re-run the decision now: update, revoke, or keep.
+                            }
+                        }
+                    }
+                });
             }
             Err(err) => admission.refuse(err),
         }

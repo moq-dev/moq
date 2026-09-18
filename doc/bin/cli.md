@@ -215,6 +215,19 @@ rules, an explicit mTLS grant, tiers, and session limits; see
 moq auth serve --listen 127.0.0.1:4440 --key-dir keys/ --public-subscribe 'anon/**'
 ```
 
+`moq auth sessions` and `moq auth revalidate` talk to a relay's internal
+listener. A push is a re-check: the auth server's reply is what kicks. An
+empty filter is every session on that node.
+
+```bash
+# Kick one session by id.
+moq auth revalidate --internal-url http://127.0.0.1:9101 --id 00ff
+
+# Re-check everyone under a path.
+moq auth revalidate --internal-url http://127.0.0.1:9101 --path 'rooms/123/**'
+moq auth sessions --internal-url http://127.0.0.1:9101 --path 'rooms/123/**'
+```
+
 See [Authentication](/bin/relay/auth).
 
 ## Retention and latency

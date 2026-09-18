@@ -61,6 +61,29 @@ the moment the port is bound, so a dead one shows stuck zeros rather than
 disappearing. These describe the process, not the traffic, so they never appear
 on the `.stats` broadcast.
 
+### GET /sessions
+
+Live sessions on this node. The filter is query parameters: any subset of
+the fields the auth server already saw (`id`, `path` as a pattern, `remote`
+as an IP or CIDR, `transport`, `tls.name`, ...). Every given field must
+match; an empty filter is everyone. Each entry is the request plus start
+time, with `query` omitted. An unknown field, including `query`, is 400.
+
+```bash
+curl 'http://127.0.0.1:9101/sessions?path=demo/**'
+```
+
+### POST /sessions/revalidate
+
+The same filter, a re-check now. Matching sessions are nudged and the
+response is 202 with their ids; no match is 200 with an empty list. The
+relay re-POSTs `revalidate` and the auth server's reply is the verdict.
+One node, no cluster fan-out.
+
+```bash
+curl -X POST 'http://127.0.0.1:9101/sessions/revalidate?id=00ff'
+```
+
 ### GET /nodes
 
 This relay's view of the cluster: each visible node's URL, Hop ID, the route
