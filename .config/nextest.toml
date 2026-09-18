@@ -26,3 +26,11 @@ slow-timeout = { period = "60s", terminate-after = 2 }
 retries = 0
 # Repeat each failure at the end of the run, so it isn't buried in the log.
 failure-output = "immediate-final"
+
+# The cluster testbed (`just test cluster`) streams for `MOQ_TESTBED_SECS`
+# (60 s by default, 600 s for the ten-region proof) on purpose and is ignored
+# unless run by name, so it gets a budget of its own rather than a raised
+# ceiling for everything else.
+[[profile.default.overrides]]
+filter = 'binary(cluster_testbed)'
+slow-timeout = { period = "5m", terminate-after = 4 }
