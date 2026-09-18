@@ -4,7 +4,10 @@
 
 `moq-relay`'s listener accepts TLS-terminated HTTP, RTMP, and RTMPS on one
 TCP port and yields classified connections, so an embedder routes RTMP to
-`moq-rtmp` and everything else reaches the axum router as today.
+`moq-rtmp` and everything else reaches the axum router as today. The relay
+binary has no RTMP consumer and gains none here: it refuses a classified
+RTMP connection with a log line, and the embedder that carries RTMP today
+(moq.pro's edge) is the consumer.
 
 ## Plan
 

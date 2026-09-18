@@ -24,6 +24,7 @@ watcher tab re-serving to another watcher through
 ## Required
 
 - [Signaling and policy](/quest/m2/p2p/signal.md)
+- [moq-cli joins](/quest/m2/p2p/cli.md) - the native hop the second topology shows
 - [Transit in the JS origin](/quest/m2/p2p/transit.md)
 - [Route cost in the JS origin](/quest/m2/route-cost.md)
 - [Cost across scopes](/quest/m2/p2p/cost-scopes.md)

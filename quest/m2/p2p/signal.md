@@ -27,12 +27,17 @@ the moq ALPNs it accepts, `webrtc: true`, the application's `meta`, and for
 native peers an optional `webtransport: { url, fingerprint }` and `iroh`
 endpoint id. The schema is shared with [moq-cli](/quest/m2/p2p/cli.md).
 
-Pairing is sparse: broadcasts exist only for pairs `select` chose, so the
-cost is the dialed pairs, not the square of the roster. The lower id dials.
-The dialer publishes `<prefix><target>/<self>` with a `signal` stream track
-carrying the offer and then each ICE candidate as it arrives; the target
-answers on `<prefix><self>/<target>`. Every peer subscribes to its own
-`<prefix><self>/` prefix.
+Pairing is sparse: broadcasts exist only for pairs some `select` chose, so
+the cost is the dialed pairs, not the square of the roster. Whoever selects a
+pair dials it; `select` decides initiative, not admission, and an answerer
+accepts any offer from a roster peer because the token scope already decided
+who may be there. When both sides select the same pair and dial at once, the
+higher id abandons its own offer on seeing the lower id's, perfect
+negotiation with the higher id polite. The dialer publishes
+`<prefix><target>/<self>` with a `signal` stream track carrying the offer and
+then each ICE candidate as it arrives; the target answers on
+`<prefix><self>/<target>`. Every peer subscribes to its own `<prefix><self>/`
+prefix.
 
 The gate: a peer connection is built with `iceServers` when the roster holds
 `max` peers or fewer, and with an empty list otherwise. Host and mDNS
@@ -52,9 +57,18 @@ transport on the dialing side and `accept` on the answering side, both with
 publishes and, once [transit](/quest/m2/p2p/transit.md) lands, what it
 receives.
 
+Trust: publishing under the prefix proves only that the relay admitted the
+peer to the prefix, not that it may read everything this tab can. Tokens
+within one project carry different subscribe scopes, so a peer session is
+scoped like a relay session: each side presents its relay token in band and
+the other serves only the paths that token grants, which is what
+[in-band auth](/quest/m2/auth/README.md) provides. A peer session with no
+verifiable grant serves nothing; there is no equal-scope shortcut.
+
 ## Required
 
 - [Data channel transport](/quest/m2/p2p/transport.md)
+- [In-band auth](/quest/m2/auth/README.md) - the per-peer grant filtering a direct session needs
 
 ## Related
 

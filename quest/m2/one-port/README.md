@@ -2,13 +2,18 @@
 
 ## Goal
 
-A relay speaks everything it serves on one UDP port and one TCP port. UDP
-carries QUIC (WebTransport and raw moq), STUN Binding answers, the WebRTC
-media path (STUN, DTLS, SRTP) for WHIP and WHEP, and SRT. TCP carries
-TLS-terminated HTTP (WebSocket qmux, WHIP and WHEP signaling, HLS, ops),
-RTMP, and RTMPS. An operator opens 443 twice and is done; a client on a
-network that permits only 443 reaches every protocol; a P2P client names the
-relay as its STUN server and gets the lowest-RTT reflexive candidate there is.
+A relay, or a binary embedding the gateway crates beside one, speaks
+everything it serves on one UDP port and one TCP port. UDP carries QUIC
+(WebTransport and raw moq), STUN Binding answers, the WebRTC media path
+(STUN, DTLS, SRTP) for WHIP and WHEP, and SRT. TCP carries TLS-terminated
+HTTP (WebSocket qmux, WHIP and WHEP signaling, HLS, ops), RTMP, and RTMPS.
+Upstream delivers the demux, the responder, and stacks that accept a fed
+socket or stream; `moq-relay` itself serves QUIC, STUN, and HTTP on them,
+and an embedder such as moq.pro's edge wires RTMP and SRT, which the relay
+binary has never spoken. An operator opens 443 twice and is done; a client on
+a network that permits only 443 reaches every protocol; a P2P client names
+the relay as its STUN server and gets the lowest-RTT reflexive candidate
+there is.
 
 The demux is a `moq-sock` primitive over the tokio backends. `moq-uring`'s
 reuseport shard groups are a later consumer, not a blocker.
@@ -45,8 +50,10 @@ needs a `feed` entry beside its `recv_from` loop. `srt-tokio` accepts a
 ### STUN
 
 A Binding request is answered with a Binding success carrying
-XOR-MAPPED-ADDRESS, no authentication, no other methods. The response is the
-size of the request so there is nothing to amplify. Use str0m's
+XOR-MAPPED-ADDRESS, no authentication, no other methods. The response is
+larger than a minimal request (32 or 44 bytes against 20), so a spoofed
+source is a small amplifier; a per-source token bucket and a global responder
+budget bound it, and the drop counter makes it visible. Use str0m's
 `StunMessage`, already a dependency, or a maintained STUN crate; do not
 hand-roll the codec.
 

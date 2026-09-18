@@ -38,3 +38,4 @@ points.
 
 - [moq-cli joins](/quest/m2/p2p/cli.md)
 - [Signaling and policy](/quest/m2/p2p/signal.md)
+- [Transit in the JS origin](/quest/m2/p2p/transit.md) - the watcher-to-watcher row

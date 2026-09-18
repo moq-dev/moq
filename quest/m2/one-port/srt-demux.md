@@ -17,10 +17,14 @@ its `Listen` and `Connection` state machines directly on fed packets, which
 is more code but removes the dependency on `srt-tokio`'s socket handling.
 
 The demux side is the flow table from [UDP demux](/quest/m2/one-port/udp-demux.md):
-an unknown 4-tuple whose first byte is 0x80 with control type 0 pins to SRT,
-and a pinned 4-tuple routes there until it goes idle for the SRT peer idle
-timeout. Add the induction-packet check with a test vector from a real
-encoder.
+an unknown 4-tuple whose first byte is 0x80 with control type 0 pins to SRT
+provisionally: the provisional table is small and bounded, per-source rate
+limited, and an entry lives only a few seconds unless the SRT stack reports
+the conclusion handshake complete, at which point it is promoted and routes
+there until the SRT peer idle timeout. A spoofed flood therefore fills a
+fixed table for seconds, not the idle timeout. Add the induction-packet check
+with a test vector from a real encoder and a test that floods provisional
+entries without evicting an established one.
 
 Tests: `moq-srt`'s existing integration test runs against the shared socket
 with a QUIC client active on the same port; a QUIC short header from a new

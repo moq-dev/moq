@@ -29,8 +29,9 @@ packet and asserts the fixed bit.
 
 STUN: a `stun` virtual socket answered by a small responder in `moq-sock`,
 Binding request to Binding success with XOR-MAPPED-ADDRESS, str0m's
-`StunMessage` or a maintained crate for the codec. Off by default in
-`moq-relay`, on with `--stun`, following
+`StunMessage` or a maintained crate for the codec, behind a per-source token
+bucket and a global budget since the answer is up to 2.2 times the request.
+Off by default in `moq-relay`, on with `--stun`, following
 [cluster discovery flags](/quest/m2/cluster-flags.md) for shape.
 
 WebRTC: `moq_rtc::server::mux::Mux` gains `Mux::feed(src, bytes)` and a
