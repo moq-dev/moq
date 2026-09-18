@@ -75,6 +75,10 @@ class ServeState {
 	pending = new Map<Path.Valid, BroadcastRequest>();
 	served = new Map<Path.Valid, broadcast.Consumer>();
 	rejected = new Map<Path.Valid, Error>();
+	// demand() is the only reader of `rejected`. A Consumer.request refusal never
+	// re-enqueues, so storing the error without a waiter would pin every unique
+	// path until the route dies.
+	demanding = new Map<Path.Valid, number>();
 	closed = new Once<Error | null>();
 	settled = new Signal(0);
 	onChange: (path: Path.Valid) => void = () => {};
@@ -119,7 +123,7 @@ class ServeState {
 	reject(request: BroadcastRequest, err: Error): void {
 		if (this.pending.get(request.path) !== request) return;
 		this.pending.delete(request.path);
-		this.rejected.set(request.path, err);
+		if (this.demanding.has(request.path)) this.rejected.set(request.path, err);
 		this.onReject(request.path);
 		this.settled.update((n) => n + 1);
 	}
@@ -141,6 +145,8 @@ class ServeState {
 			this.onChange(path);
 		}
 		this.served.clear();
+		this.rejected.clear();
+		this.demanding.clear();
 		this.settled.update((n) => n + 1);
 	}
 }
@@ -1069,21 +1075,28 @@ export class Consumer {
 		if (live && live.closed.peek() === undefined) return live;
 
 		server.enqueue(path);
-		for (;;) {
-			const served = server.served.get(path);
-			if (served && served.closed.peek() === undefined) return served;
-			const rejected = server.rejected.get(path);
-			if (rejected) {
-				server.rejected.delete(path);
-				throw rejected;
+		server.demanding.set(path, (server.demanding.get(path) ?? 0) + 1);
+		try {
+			for (;;) {
+				const served = server.served.get(path);
+				if (served && served.closed.peek() === undefined) return served;
+				const rejected = server.rejected.get(path);
+				if (rejected) {
+					server.rejected.delete(path);
+					throw rejected;
+				}
+				const closed = server.closed.peek();
+				if (closed !== undefined) {
+					if (closed) throw closed;
+					return undefined;
+				}
+				if (!server.pending.has(path)) return undefined;
+				await Signal.race(server.settled, server.closed);
 			}
-			const closed = server.closed.peek();
-			if (closed !== undefined) {
-				if (closed) throw closed;
-				return undefined;
-			}
-			if (!server.pending.has(path)) return undefined;
-			await Signal.race(server.settled, server.closed);
+		} finally {
+			const n = (server.demanding.get(path) ?? 1) - 1;
+			if (n <= 0) server.demanding.delete(path);
+			else server.demanding.set(path, n);
 		}
 	}
 }
