@@ -60,10 +60,16 @@ receives.
 Trust: publishing under the prefix proves only that the relay admitted the
 peer to the prefix, not that it may read everything this tab can. Tokens
 within one project carry different subscribe scopes, so a peer session is
-scoped like a relay session: each side presents its relay token in band and
-the other serves only the paths that token grants, which is what
-[in-band auth](/quest/m2/auth/README.md) provides. A peer session with no
-verifiable grant serves nothing; there is no equal-scope shortcut.
+scoped like a relay session, but the relay token itself never crosses it: a
+`moq_auth` JWT is a bearer credential with no audience or proof of
+possession, so a peer that received one could replay it against the relay.
+Instead the relay issues each session a peer grant, a relay-signed statement
+of that session's path scopes bound to its hop id and short-lived, which the
+peer presents in band; the other side verifies the relay's signature, checks
+the hop id against the roster, and serves only the granted paths. The grant
+rides the [in-band auth](/quest/m2/auth/README.md) exchange and that line
+gains the issuing step. A peer session with no verifiable grant serves
+nothing; there is no equal-scope shortcut.
 
 ## Required
 

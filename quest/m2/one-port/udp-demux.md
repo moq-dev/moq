@@ -31,6 +31,11 @@ STUN: a `stun` virtual socket answered by a small responder in `moq-sock`,
 Binding request to Binding success with XOR-MAPPED-ADDRESS, str0m's
 `StunMessage` or a maintained crate for the codec, behind a per-source token
 bucket and a global budget since the answer is up to 2.2 times the request.
+An ICE connectivity check is also a Binding request, so the STUN class splits
+on the USERNAME attribute: a request carrying one belongs to a WebRTC session
+and goes to the mux, which reads the local ufrag from it; a request without
+one is a public query and goes to the responder. Public STUN clients never
+send USERNAME and ICE agents always do.
 Off by default in `moq-relay`, on with `--stun`, following
 [cluster discovery flags](/quest/m2/cluster-flags.md) for shape.
 
