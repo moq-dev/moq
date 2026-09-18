@@ -20,17 +20,17 @@ check open PRs before starting.
   claim rides moq-lite and moq-transport alike. `ANNOUNCE_PATTERN` leaves
   the lite-06-wip draft; PR #3746's non-prefix presented patterns go with
   it.
-- Consuming stays a pattern, and the pattern never reaches the wire. A
-  pattern lives in two places only: the token, which the relay enforces by
-  scoping its origin handle, and the client library, which filters and
-  trims. `announced(scope: Patterns)` takes the literal head of each member
-  (`room/*/chat` and `room/*/video` both head at `room`), drops heads
-  another member covers, opens one ANNOUNCED or SUBSCRIBE_NAMESPACE per
-  surviving head, and multiplexes every cursor over those. One wire
-  subscription per distinct head, never per pattern, on moq-lite and
-  moq-transport alike. `captures` (what each scope wildcard stood for) is
-  derived from the announced prefix against the scope member, so it stays
-  and is always empty until scopes are patterns.
+- Consuming is a prefix too, with an optional wildcard filter on the
+  consume side. `announced(prefix)` opens exactly one ANNOUNCED or
+  SUBSCRIBE_NAMESPACE for that prefix on moq-lite and moq-transport alike;
+  a caller wanting `room/*/chat` passes `room` and filters the cursor with
+  the pattern (`announced(prefix).matching(pattern)`, or a filter argument
+  with the same effect). The library never derives heads from a pattern
+  union or multiplexes members; two heads are two calls. The pattern lives
+  in two places only: the token, which the relay enforces by scoping its
+  origin handle, and that local filter. `captures` (what each filter
+  wildcard stood for) is derived from the announced prefix against the
+  filter, so it stays and is empty when no filter is set.
 - Announcements are hints; requests are the authority. A prefix route
   `room` that overlaps a grant of `room/*/chat` is forwarded as
   `ANNOUNCE_START room`, and a request for `room/bob/video` is refused by

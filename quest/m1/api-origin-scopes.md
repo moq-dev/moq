@@ -29,13 +29,13 @@ survives once route entries are prefixes and the wire carries no pattern:
   `captures` stay as library helpers.
 - The relay's `AuthToken::new` keeps any grant as written and
   `AuthError::UnsupportedPattern` goes; `moq_net::stats::Config::exclude`
-  is a `Patterns`. JS `announced(scope)` takes any `Path.Pattern` on
+  is a `Patterns`. JS `announced(prefix)` gains the same optional pattern filter on
   `Origin` and `Connection`; `@moq/room` reads the participant from the
   `**` capture.
-- Bindings, per the Cross-Package Sync checklist: `announced(scope)` takes
-  the moq-ffi `Pattern` type or its string form, sends literal heads
-  exactly as the Rust and JS libraries do, and delivers events relative to
-  the origin with `captures` on `MoqAnnounceUpdate`; `rs/libmoq`
+- Bindings, per the Cross-Package Sync checklist: `announced(prefix)`
+  keeps its prefix and takes an optional filter (the moq-ffi `Pattern`
+  type or its string form), and delivers events relative to the origin
+  with `captures` on `MoqAnnounceUpdate`; `rs/libmoq`
   (`moq_announce_update` gains the captures under the existing string-out
   convention), the `py`, `swift`, `kt`, `dart`, and `go` wrappers,
   `doc/lib/*` for each, and `just test smoke-full`.
