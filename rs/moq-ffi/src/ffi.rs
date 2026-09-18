@@ -8,29 +8,81 @@ use crate::error::MoqError;
 /// wasm32 has neither threads nor a tokio driver. uniffi's `RustFuture` is polled by the
 /// JS event loop instead, so [`Task::run`] awaits in place there.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) static RUNTIME: std::sync::LazyLock<tokio::runtime::Handle> = std::sync::LazyLock::new(|| {
-	let runtime = tokio::runtime::Builder::new_current_thread()
-		.enable_all()
-		.build()
-		.unwrap();
-	let handle = runtime.handle().clone();
+static RUNTIME: std::sync::OnceLock<Runtime> = std::sync::OnceLock::new();
 
-	std::thread::Builder::new()
-		.name("moq-ffi".into())
-		.spawn(move || {
-			runtime.block_on(std::future::pending::<()>());
-		})
-		.expect("failed to spawn runtime thread");
+/// The runtime thread and the handle every call spawns onto.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct Runtime {
+	handle: tokio::runtime::Handle,
+	/// Taken by [`shutdown`], so the thread is stopped and joined once.
+	thread: std::sync::Mutex<Option<Thread>>,
+}
 
-	handle
-});
+#[cfg(not(target_arch = "wasm32"))]
+struct Thread {
+	/// Resolves the `block_on` the thread parks in.
+	stop: tokio::sync::oneshot::Sender<()>,
+	join: std::thread::JoinHandle<()>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::ops::Deref for Runtime {
+	type Target = tokio::runtime::Handle;
+
+	fn deref(&self) -> &Self::Target {
+		&self.handle
+	}
+}
+
+/// The runtime, started on first use.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn runtime() -> &'static Runtime {
+	RUNTIME.get_or_init(|| {
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.unwrap();
+		let handle = runtime.handle().clone();
+		let (stop, stopped) = tokio::sync::oneshot::channel();
+
+		let join = std::thread::Builder::new()
+			.name("moq-ffi".into())
+			.spawn(move || {
+				// `Err` when the sender is dropped, which the shutdown never does; either way the
+				// runtime is torn down here, on the thread that ran its tasks.
+				let _ = runtime.block_on(stopped);
+				// Not `drop`: that would wait for any blocking pool thread, and a DNS lookup
+				// mid-flight at process exit is not worth waiting for.
+				runtime.shutdown_background();
+			})
+			.expect("failed to spawn runtime thread");
+
+		Runtime {
+			handle,
+			thread: std::sync::Mutex::new(Some(Thread { stop, join })),
+		}
+	})
+}
+
+/// Stop the runtime thread and wait for it to finish; a no-op when it never started.
+///
+/// See [`crate::moq_ffi_shutdown`] for what this is for.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn shutdown() {
+	let Some(runtime) = RUNTIME.get() else { return };
+	let Some(thread) = runtime.thread.lock().unwrap().take() else {
+		return;
+	};
+	let _ = thread.stop.send(());
+	let _ = thread.join.join();
+}
 
 /// Enter the runtime context, so a handle built outside [`Task::run`] can still spawn.
 ///
 /// A no-op on wasm32, where the JS event loop is the only runtime.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn enter() -> tokio::runtime::EnterGuard<'static> {
-	RUNTIME.enter()
+	runtime().enter()
 }
 
 /// Stands in for tokio's `EnterGuard` on wasm32, so callers bind a guard either way.
@@ -48,7 +100,7 @@ pub(crate) fn enter() -> EnterGuard {
 /// constructor is called from a foreign thread with no runtime entered.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn spawn<F: Future<Output = ()> + Send + 'static>(future: F) {
-	RUNTIME.spawn(future);
+	runtime().spawn(future);
 }
 
 /// Spawn onto the JS event loop: wasm32 has no other thread to hand it to.
@@ -79,7 +131,7 @@ where
 	T: Send + 'static,
 	E: Into<MoqError> + Send + 'static,
 {
-	let task = RUNTIME.spawn(future);
+	let task = runtime().spawn(future);
 	let _abort = AbortOnDrop(task.abort_handle());
 	match task.await {
 		Ok(result) => result.map_err(Into::into),
@@ -171,7 +223,7 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 		let cancel = self.cancel.subscribe();
 		let state = self.state.clone();
 
-		let handle = RUNTIME.spawn(async move { Self::drive(cancel, state, f).await });
+		let handle = runtime().spawn(async move { Self::drive(cancel, state, f).await });
 
 		// Dropping a JoinHandle detaches its task rather than stopping it, so a caller
 		// that gives up (an `asyncio.wait_for` timeout, a cancelled Swift/Kotlin task)

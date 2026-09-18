@@ -78,7 +78,7 @@ impl MoqServer {
 	/// Create a new MoQ server with default configuration.
 	#[uniffi::constructor]
 	pub fn new() -> Arc<Self> {
-		let _guard = crate::ffi::RUNTIME.enter();
+		let _guard = crate::ffi::runtime().enter();
 		Arc::new(Self {
 			task: Task::new(ServerState {
 				config: moq_tokio::listen::Config::default(),
