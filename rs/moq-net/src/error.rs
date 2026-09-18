@@ -6,9 +6,8 @@ use crate::coding;
 /// unchanged; 64+ are the application's. The stream registry is [`StreamError`] and the two
 /// are disjoint, so the same integer means different things in each.
 ///
-/// Variants above the shared codes encode into the draft's reserved 32-47 range. Those are
-/// placeholders, not assignments: we send them because there has to be *some* code, but a
-/// receiver must not read one back (see [`from_code`](Self::from_code)).
+/// Every variant is a registered code, so the registry round-trips: 32 through 47 is
+/// reserved, nothing is sent there, and a received one stays [`Unknown`](Self::Unknown).
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SessionError {
@@ -45,18 +44,6 @@ pub enum SessionError {
 	#[error("version negotiation failed")]
 	Version,
 
-	/// A required extension was not offered by the peer.
-	#[error("extension required")]
-	RequiredExtension,
-
-	/// The peer acted against the [`Role`](crate::Role) it advertised at SETUP.
-	#[error("invalid role")]
-	InvalidRole,
-
-	/// A stream was opened with an unknown or disallowed type.
-	#[error("unexpected stream type")]
-	UnexpectedStream,
-
 	/// An application-chosen code, offset into the 64+ range on the wire.
 	#[error("app code={0}")]
 	App(u16),
@@ -78,9 +65,6 @@ impl SessionError {
 			Self::GoawayTimeout => 0x10,
 			Self::Timeout => 0x11,
 			Self::Version => 0x15,
-			Self::RequiredExtension => 0x20,
-			Self::InvalidRole => 0x21,
-			Self::UnexpectedStream => 0x22,
 			Self::App(app) => *app as u32 + 64,
 			Self::Unknown(code) => *code,
 		}
@@ -90,10 +74,7 @@ impl SessionError {
 	///
 	/// Unlike a raw peer code, the registered ones are specified, so decoding them is a
 	/// wire contract rather than an assumption. Anything unregistered stays
-	/// [`Self::Unknown`], including 32-47: we emit placeholders there for conditions the
-	/// shared codes don't cover, but the draft assigns it no meaning, so a received one is
-	/// not read back as our own placeholder. `to_code` is deliberately not injective as a
-	/// result.
+	/// [`Self::Unknown`], including the reserved 32-47.
 	pub fn from_code(code: u32) -> Self {
 		match code {
 			0x0 => Self::Cancel,
@@ -279,11 +260,9 @@ pub enum Error {
 	#[error("unsupported versions")]
 	Version,
 
-	/// A required extension was not present
-	#[error("extension required")]
-	RequiredExtension,
-
-	/// An unexpected stream type was received
+	/// A known stream type arrived where this version or state does not allow it. Closes
+	/// the session as a protocol violation, or resets just the stream when it can be
+	/// refused on its own.
 	#[error("unexpected stream type")]
 	UnexpectedStream,
 
@@ -356,10 +335,6 @@ pub enum Error {
 	/// A message carried more parameters than this endpoint accepts.
 	#[error("too many parameters")]
 	TooManyParameters,
-
-	/// The peer acted against the [`Role`](crate::Role) it advertised at SETUP.
-	#[error("invalid role")]
-	InvalidRole,
 
 	/// The peer offered an ALPN this endpoint doesn't recognize, so no version could be
 	/// negotiated. A connect-time error.
@@ -460,7 +435,6 @@ impl Error {
 	pub fn to_code(&self) -> u32 {
 		match self {
 			Self::Cancel => 0,
-			Self::RequiredExtension => 1,
 			Self::Old => 2,
 			Self::Timeout => 3,
 			Self::Transport(_) => 4,
@@ -477,7 +451,6 @@ impl Error {
 			Self::Unsupported => 17,
 			Self::Encode(_) => 18,
 			Self::TooManyParameters => 19,
-			Self::InvalidRole => 20,
 			Self::UnknownAlpn(_) => 21,
 			Self::Dropped => 24,
 			Self::Closed => 25,
@@ -568,14 +541,12 @@ impl From<&Error> for SessionError {
 			Error::Cancel | Error::Closed | Error::GoingAway | Error::SessionClosed => Self::Cancel,
 			Error::Unauthorized => Self::Unauthorized,
 			Error::Version | Error::UnknownAlpn(_) => Self::Version,
-			Error::RequiredExtension => Self::RequiredExtension,
-			Error::InvalidRole => Self::InvalidRole,
-			Error::UnexpectedStream => Self::UnexpectedStream,
 			Error::TooManyParameters => Self::KeyValueFormatting,
 			Error::GoawayTimeout => Self::GoawayTimeout,
 			Error::Timeout => Self::Timeout,
 			Error::ProtocolViolation
 			| Error::UnexpectedMessage
+			| Error::UnexpectedStream
 			| Error::Duplicate
 			| Error::Decode(_)
 			| Error::Encode(_)
@@ -624,12 +595,12 @@ impl From<&Error> for StreamError {
 			// re-sending the number could mistranslate it.
 			Error::Remote(_) => Self::Internal,
 			// Session-scoped: the peer learns the detail from the session close.
+			// A stream refused on its own is not a session failure, so it does not claim
+			// SESSION_CLOSED; there is no stream-scoped PROTOCOL_VIOLATION to send instead.
+			Error::UnexpectedStream => Self::Internal,
 			Error::Unauthorized
 			| Error::Version
 			| Error::UnknownAlpn(_)
-			| Error::RequiredExtension
-			| Error::InvalidRole
-			| Error::UnexpectedStream
 			| Error::TooManyParameters
 			| Error::GoawayTimeout
 			| Error::ProtocolViolation
@@ -702,22 +673,19 @@ mod tests {
 		assert_eq!(SessionError::GoawayTimeout.to_code(), 0x10);
 		assert_eq!(SessionError::Version.to_code(), 0x15);
 
-		// The rest encode into 32-47, which the draft reserves rather than assigns. We
-		// send a placeholder because there has to be some code, but decoding one back
-		// would be reading a meaning the wire does not carry, so it stays Unknown. That
-		// makes to_code deliberately non-injective.
-		for err in [
-			SessionError::RequiredExtension,
-			SessionError::InvalidRole,
-			SessionError::UnexpectedStream,
-		] {
-			let code = err.to_code();
-			assert!((0x20..0x30).contains(&code), "{err:?} left the reserved range");
+		// The reserved 32-47 range, and anything else unregistered, keeps its value instead
+		// of being given a meaning. A peer on the old placeholders (0x20-0x22) lands here.
+		for code in [0x1f, 0x20, 0x21, 0x22, 0x2f] {
 			assert_eq!(SessionError::from_code(code), SessionError::Unknown(code));
 		}
 
-		// Unregistered codes keep their value instead of being given a meaning.
-		assert_eq!(SessionError::from_code(0x1f), SessionError::Unknown(0x1f));
+		// A disallowed stream fails the session as a protocol violation, and resets just
+		// the stream as an internal error rather than claiming the session closed.
+		assert_eq!(
+			SessionError::from(&Error::UnexpectedStream),
+			SessionError::ProtocolViolation
+		);
+		assert_eq!(StreamError::from(&Error::UnexpectedStream), StreamError::Internal);
 	}
 
 	#[test]

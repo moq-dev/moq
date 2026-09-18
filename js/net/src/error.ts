@@ -21,9 +21,8 @@ export type SessionCode = number & { readonly [SESSION_CODE]: true };
  * to construct an application code in the 64+ range. {@link StreamCode} is the other registry,
  * and the two are disjoint, so the same integer means different things in each.
  *
- * Codes 32-63 are reserved rather than assigned. A peer may send one for a condition with
- * no code here, but the draft gives it no meaning, so treat anything not listed below as an
- * unspecified error rather than guessing.
+ * Codes 32-47 are reserved: nothing is sent there, and the draft gives a received one no
+ * meaning, so treat anything not listed below as an unspecified error rather than guessing.
  *
  * @public
  */

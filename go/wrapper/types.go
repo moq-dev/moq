@@ -261,12 +261,6 @@ const (
 	ProtocolKindTimeout = ffi.MoqProtocolKindTimeout
 	// ProtocolKindVersion identifies version.
 	ProtocolKindVersion = ffi.MoqProtocolKindVersion
-	// ProtocolKindRequiredExtension identifies required extension.
-	ProtocolKindRequiredExtension = ffi.MoqProtocolKindRequiredExtension
-	// ProtocolKindInvalidRole identifies invalid role.
-	ProtocolKindInvalidRole = ffi.MoqProtocolKindInvalidRole
-	// ProtocolKindUnexpectedStream identifies unexpected stream.
-	ProtocolKindUnexpectedStream = ffi.MoqProtocolKindUnexpectedStream
 	// ProtocolKindDeliveryTimeout identifies delivery timeout.
 	ProtocolKindDeliveryTimeout = ffi.MoqProtocolKindDeliveryTimeout
 	// ProtocolKindSessionClosed identifies session closed.

@@ -35,12 +35,7 @@ pub enum moq_protocol_kind {
 	MOQ_PROTOCOL_KIND_TIMEOUT = 6,
 	/// Version.
 	MOQ_PROTOCOL_KIND_VERSION = 7,
-	/// Required extension.
-	MOQ_PROTOCOL_KIND_REQUIRED_EXTENSION = 8,
-	/// Invalid role.
-	MOQ_PROTOCOL_KIND_INVALID_ROLE = 9,
-	/// Unexpected stream.
-	MOQ_PROTOCOL_KIND_UNEXPECTED_STREAM = 10,
+	// 8 through 10 are unassigned; the values that follow stay put for compiled consumers.
 	/// Delivery timeout.
 	MOQ_PROTOCOL_KIND_DELIVERY_TIMEOUT = 11,
 	/// Session closed.
@@ -342,9 +337,6 @@ fn session_kind(err: &moq_net::SessionError) -> moq_protocol_kind {
 		moq_net::SessionError::GoawayTimeout => MOQ_PROTOCOL_KIND_GOAWAY_TIMEOUT,
 		moq_net::SessionError::Timeout => MOQ_PROTOCOL_KIND_TIMEOUT,
 		moq_net::SessionError::Version => MOQ_PROTOCOL_KIND_VERSION,
-		moq_net::SessionError::RequiredExtension => MOQ_PROTOCOL_KIND_REQUIRED_EXTENSION,
-		moq_net::SessionError::InvalidRole => MOQ_PROTOCOL_KIND_INVALID_ROLE,
-		moq_net::SessionError::UnexpectedStream => MOQ_PROTOCOL_KIND_UNEXPECTED_STREAM,
 		moq_net::SessionError::App(_) => MOQ_PROTOCOL_KIND_APP,
 		moq_net::SessionError::Unknown(_) => MOQ_PROTOCOL_KIND_UNKNOWN,
 		_ => MOQ_PROTOCOL_KIND_UNKNOWN,

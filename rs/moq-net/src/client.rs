@@ -699,7 +699,7 @@ mod tests {
 		// Any non-Version error here means SessionInfo decoded successfully
 		// after set_version(). This test cares about the SETUP framing
 		// fallback, not the specific close code. Cancel is what we'd see
-		// with no origin; RequiredExtension (or similar) is what an
+		// with no origin; a protocol violation (or similar) is what an
 		// auto-created origin's first interaction with a Lite01 peer trips.
 		let (code, _) = fake.wait_for_first_close().await;
 		// Session closes encode through the session registry, so compare against that one:
