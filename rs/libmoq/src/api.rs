@@ -515,6 +515,20 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 	}
 }
 
+/// Whether a published track has subscribers, as reported by a demand watcher.
+///
+/// The positive values an `on_demand` callback receives; `0` and negative codes are
+/// the terminal statuses every callback shares.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug)]
+pub enum moq_demand {
+	/// At least one subscriber is active.
+	MOQ_DEMAND_USED = 1,
+	/// No subscriber is active.
+	MOQ_DEMAND_UNUSED = 2,
+}
+
 /// Subscriber-side raw track delivery preferences.
 ///
 /// A null [moq_consume_track] or [moq_consume_track_update] `subscription`
@@ -1697,15 +1711,21 @@ pub extern "C" fn moq_publish_finish(broadcast: u32) -> i32 {
 pub unsafe extern "C" fn moq_publish_audio(broadcast: u32, config: *const moq_audio_init) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
-		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
-		let init = unsafe { ffi::parse_slice(config.init, config.init_len)? };
-		let label = unsafe { ffi::parse_str_optional(config.label, config.label_len)? };
-
-		let mut audio = moq_mux::import::AudioInit::new(audio_format_from_u32(config.format)?, init.to_vec());
-		audio.label = label.map(str::to_string);
-
+		let audio = unsafe { parse_audio_init(config)? };
 		State::lock().publish.audio(broadcast, audio)
 	})
+}
+
+/// # Safety
+/// - As [moq_publish_audio], for `config`.
+unsafe fn parse_audio_init(config: *const moq_audio_init) -> Result<moq_mux::import::AudioInit, Error> {
+	let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
+	let init = unsafe { ffi::parse_slice(config.init, config.init_len)? };
+	let label = unsafe { ffi::parse_str_optional(config.label, config.label_len)? };
+
+	let mut audio = moq_mux::import::AudioInit::new(audio_format_from_u32(config.format)?, init.to_vec());
+	audio.label = label.map(str::to_string);
+	Ok(audio)
 }
 
 /// Publish one video codec as a new media track.
@@ -1721,16 +1741,22 @@ pub unsafe extern "C" fn moq_publish_audio(broadcast: u32, config: *const moq_au
 pub unsafe extern "C" fn moq_publish_video(broadcast: u32, config: *const moq_video_init) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
-		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
-		let init = unsafe { ffi::parse_slice(config.init, config.init_len)? };
-		let label = unsafe { ffi::parse_str_optional(config.label, config.label_len)? };
-
-		let mut video = moq_mux::import::VideoInit::new(video_format_from_u32(config.format)?, init.to_vec());
-		video.label = label.map(str::to_string);
-		video.hint = config.hint.resolve();
-
+		let video = unsafe { parse_video_init(config)? };
 		State::lock().publish.video(broadcast, video)
 	})
+}
+
+/// # Safety
+/// - As [moq_publish_audio], for a [moq_video_init].
+unsafe fn parse_video_init(config: *const moq_video_init) -> Result<moq_mux::import::VideoInit, Error> {
+	let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
+	let init = unsafe { ffi::parse_slice(config.init, config.init_len)? };
+	let label = unsafe { ffi::parse_str_optional(config.label, config.label_len)? };
+
+	let mut video = moq_mux::import::VideoInit::new(video_format_from_u32(config.format)?, init.to_vec());
+	video.label = label.map(str::to_string);
+	video.hint = config.hint.resolve();
+	Ok(video)
 }
 
 /// Publish a container, which demuxes and publishes its own tracks.
@@ -1798,6 +1824,51 @@ pub extern "C" fn moq_publish_media_finish(export: u32) -> i32 {
 	ffi::enter(move || {
 		let export = ffi::parse_id(export)?;
 		State::lock().publish.media_finish(export)
+	})
+}
+
+/// Watch whether a media track has subscribers, so an encoder runs only while someone watches.
+///
+/// `on_demand` fires right away with the current [moq_demand] state, again on every
+/// change, then exactly once more with a terminal code: `0` (the track ended or the
+/// watcher was closed with [moq_publish_demand_close]) or a negative error. After the
+/// terminal (`<= 0`) callback, `user_data` is never touched again. Reporting the current
+/// state first means a track that went unused before the watcher existed still reports it.
+///
+/// A container handle is refused: it publishes several tracks and has no single demand.
+///
+/// Returns a non-zero watcher handle on success, or a negative code on failure.
+///
+/// # Safety
+/// - `on_demand` must be non-NULL.
+/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_demand` callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_media_demand(
+	media: u32,
+	on_demand: Option<extern "C" fn(user_data: *mut c_void, status: i32)>,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let media = ffi::parse_id(media)?;
+		let on_demand = on_demand.ok_or(Error::InvalidPointer)?;
+		let on_demand = unsafe { ffi::OnStatus::new(user_data, Some(on_demand)) };
+		let mut state = State::lock();
+		let demand = state.publish.media_demand(media)?;
+		state.publish.demand(demand, on_demand)
+	})
+}
+
+/// Stop a demand watcher from [moq_publish_track_demand], [moq_publish_media_demand],
+/// [`crate::moq_encode_video_demand`], or [`crate::moq_encode_audio_demand`].
+///
+/// Returns immediately: zero on success, or a negative code if already closed. The
+/// watcher's `on_demand` callback still fires once more with a terminal `0`, and
+/// that final callback is where `user_data` should be released.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_demand_close(watcher: u32) -> i32 {
+	ffi::enter(move || {
+		let watcher = ffi::parse_id(watcher)?;
+		State::lock().publish.demand_close(watcher)
 	})
 }
 
@@ -2118,13 +2189,21 @@ pub unsafe extern "C" fn moq_publish_track(
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? };
-		// Default raw tracks to a microsecond timescale even when no info is given.
-		let info = match unsafe { info.as_ref() } {
-			Some(info) => moq_net::track::Info::try_from(info)?,
-			None => moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO),
-		};
+		let info = unsafe { parse_track_info(info)? };
 		State::lock().publish.track(broadcast, name, Some(info))
 	})
+}
+
+/// Raw track info from an optional C struct, defaulting to a microsecond timescale.
+///
+/// # Safety
+/// - `info` must be NULL or a valid pointer to a [moq_track_info] struct.
+unsafe fn parse_track_info(info: *const moq_track_info) -> Result<moq_net::track::Info, Error> {
+	// Default raw tracks to a microsecond timescale even when no info is given.
+	match unsafe { info.as_ref() } {
+		Some(info) => moq_net::track::Info::try_from(info),
+		None => Ok(moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO)),
+	}
 }
 
 /// Append a new group to a raw track, returning a group producer.
@@ -2239,6 +2318,282 @@ pub extern "C" fn moq_publish_track_abort(track: u32, error_code: u16) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
 		State::lock().publish.track_abort(track, error_code)
+	})
+}
+
+/// Watch whether a raw track has subscribers. See [moq_publish_media_demand] for the
+/// callback contract.
+///
+/// Returns a non-zero watcher handle on success, or a negative code on failure.
+///
+/// # Safety
+/// - `on_demand` must be non-NULL.
+/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_demand` callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_track_demand(
+	track: u32,
+	on_demand: Option<extern "C" fn(user_data: *mut c_void, status: i32)>,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let track = ffi::parse_id(track)?;
+		let on_demand = on_demand.ok_or(Error::InvalidPointer)?;
+		let on_demand = unsafe { ffi::OnStatus::new(user_data, Some(on_demand)) };
+		let mut state = State::lock();
+		let demand = state.publish.track_demand(track)?;
+		state.publish.demand(demand, on_demand)
+	})
+}
+
+/// Serve subscriber requests for tracks the broadcast has not declared.
+///
+/// Without a live handler a subscription to an unknown track name is refused. While one
+/// is live, `on_request` is invoked with a positive request handle for each pending
+/// track, then exactly once more with a terminal code: `0` (the broadcast finished, or
+/// [moq_publish_dynamic_close] was called) or a negative error. After the terminal
+/// (`<= 0`) callback, `user_data` is never touched again. Answer each request with
+/// [moq_track_request_accept], [moq_track_request_video], [moq_track_request_audio],
+/// or [moq_track_request_abort]; the subscriber waits until you do.
+///
+/// Returns a non-zero handle on success, or a negative code on failure.
+///
+/// # Safety
+/// - `on_request` must be non-NULL.
+/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_request` callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_dynamic(
+	broadcast: u32,
+	on_request: Option<extern "C" fn(user_data: *mut c_void, request: i32)>,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let on_request = on_request.ok_or(Error::InvalidPointer)?;
+		let on_request = unsafe { ffi::OnStatus::new(user_data, Some(on_request)) };
+		State::lock().publish.dynamic(broadcast, on_request)
+	})
+}
+
+/// Serve fetches of groups a raw track no longer has cached.
+///
+/// Without a live handler a fetch that misses the cache fails as not found. While one is
+/// live, `on_group` is invoked with a positive group-request handle for each miss, then
+/// exactly once more with a terminal code: `0` (the track ended, or
+/// [moq_publish_dynamic_close] was called) or a negative error. After the terminal
+/// (`<= 0`) callback, `user_data` is never touched again. Cached groups never reach the
+/// handler. Answer each request with [moq_group_request_accept] or [moq_group_request_abort].
+///
+/// Returns a non-zero handle on success, or a negative code on failure.
+///
+/// # Safety
+/// - `on_group` must be non-NULL.
+/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_group` callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_track_dynamic(
+	track: u32,
+	on_group: Option<extern "C" fn(user_data: *mut c_void, request: i32)>,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let track = ffi::parse_id(track)?;
+		let on_group = on_group.ok_or(Error::InvalidPointer)?;
+		let on_group = unsafe { ffi::OnStatus::new(user_data, Some(on_group)) };
+		State::lock().publish.track_dynamic(track, on_group)
+	})
+}
+
+/// Stop a request handler from [moq_publish_dynamic], [moq_publish_track_dynamic], or
+/// [moq_track_request_dynamic]. Requests not yet delivered are rejected.
+///
+/// Returns immediately: zero on success, or a negative code if already closed. The
+/// handler's callback still fires once more with a terminal `0`, and that final
+/// callback is where `user_data` should be released.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_dynamic_close(dynamic: u32) -> i32 {
+	ffi::enter(move || {
+		let dynamic = ffi::parse_id(dynamic)?;
+		State::lock().publish.dynamic_close(dynamic)
+	})
+}
+
+/// The name of a track request delivered to a [moq_publish_dynamic] callback.
+///
+/// The destination borrows the request's storage: copy it out before accepting,
+/// aborting, or freeing the request.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - `dst` must point at a writable [moq_string].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_track_request_name(request: u32, dst: *mut moq_string) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		State::lock().publish.track_request_name(request, dst)
+	})
+}
+
+/// Serve fetches of uncached groups on a requested track, before accepting it.
+///
+/// A track requested by a fetch has that group pending from birth. Register the
+/// handler here, before [moq_track_request_accept], so the request survives the
+/// transition; the callback contract is that of [moq_publish_track_dynamic].
+///
+/// Returns a non-zero handle on success, or a negative code on failure.
+///
+/// # Safety
+/// - `on_group` must be non-NULL.
+/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_group` callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_track_request_dynamic(
+	request: u32,
+	on_group: Option<extern "C" fn(user_data: *mut c_void, request: i32)>,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		let on_group = on_group.ok_or(Error::InvalidPointer)?;
+		let on_group = unsafe { ffi::OnStatus::new(user_data, Some(on_group)) };
+		State::lock().publish.track_request_dynamic(request, on_group)
+	})
+}
+
+/// Accept a track request as a raw track, resolving the waiting subscribers.
+///
+/// Consumes the request handle. `info` is as in [moq_publish_track]: NULL for the
+/// microsecond default. Returns a non-zero track handle usable with every
+/// `moq_publish_track_*` function, or a negative code on failure.
+///
+/// # Safety
+/// - `info` must be NULL or a valid pointer to a [moq_track_info] struct.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_track_request_accept(request: u32, info: *const moq_track_info) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		let info = unsafe { parse_track_info(info)? };
+		State::lock().publish.track_request_accept(request, info)
+	})
+}
+
+/// Accept a track request as an audio track, the importer picking the timescale.
+///
+/// Consumes the request handle. Returns the same kind of media handle as
+/// [moq_publish_audio], or a negative code on failure.
+///
+/// # Safety
+/// - As [moq_publish_audio], for `config`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_track_request_audio(request: u32, config: *const moq_audio_init) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		let audio = unsafe { parse_audio_init(config)? };
+		State::lock().publish.track_request_audio(request, audio)
+	})
+}
+
+/// Accept a track request as a video track, the importer picking the timescale.
+///
+/// Consumes the request handle. Returns the same kind of media handle as
+/// [moq_publish_video], or a negative code on failure.
+///
+/// # Safety
+/// - As [moq_publish_audio], for a [moq_video_init].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_track_request_video(request: u32, config: *const moq_video_init) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		let video = unsafe { parse_video_init(config)? };
+		State::lock().publish.track_request_video(request, video)
+	})
+}
+
+/// Reject a track request with an application error code, failing the waiting subscribers.
+///
+/// Consumes the request handle. Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_track_request_abort(request: u32, error_code: u16) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		State::lock().publish.track_request_abort(request, error_code)
+	})
+}
+
+/// Free a track request without accepting it, which rejects it.
+///
+/// Returns a zero on success, or a negative code if the handle is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_track_request_free(request: u32) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		State::lock().publish.track_request_free(request)
+	})
+}
+
+/// The group sequence a group request asks for.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - `dst` must point at a writable `uint64_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_group_request_sequence(request: u32, dst: *mut u64) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		*dst = State::lock().publish.group_request_info(request)?.0;
+		Ok(())
+	})
+}
+
+/// The delivery priority the fetching consumer asked for.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - `dst` must point at a writable `uint8_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_group_request_priority(request: u32, dst: *mut u8) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		*dst = State::lock().publish.group_request_info(request)?.1;
+		Ok(())
+	})
+}
+
+/// Accept a group request, resolving the waiting fetches with the group you then fill.
+///
+/// Consumes the request handle. Returns a non-zero group handle usable with
+/// [moq_publish_group_frame] and [moq_publish_group_finish], or a negative code on
+/// failure, including when the group is already cached.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_group_request_accept(request: u32) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		State::lock().publish.group_request_accept(request)
+	})
+}
+
+/// Reject a group request with an application error code, failing the waiting fetches.
+///
+/// Consumes the request handle. Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_group_request_abort(request: u32, error_code: u16) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		State::lock().publish.group_request_abort(request, error_code)
+	})
+}
+
+/// Free a group request without accepting it, which rejects it.
+///
+/// Returns a zero on success, or a negative code if the handle is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_group_request_free(request: u32) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		State::lock().publish.group_request_free(request)
 	})
 }
 

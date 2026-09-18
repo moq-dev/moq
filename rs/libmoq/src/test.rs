@@ -2136,6 +2136,438 @@ fn dynamic_refuses_a_missing_callback() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// A callback that also captures `moq_error_protocol` on a negative code, which is only
+/// readable on the thread that delivered it.
+struct ProtocolCallback {
+	rx: mpsc::Receiver<(i32, Option<moq_protocol_error>)>,
+	ptr: *mut c_void,
+}
+
+impl ProtocolCallback {
+	fn new() -> Self {
+		let (tx, rx) = mpsc::channel();
+		let ptr = Box::into_raw(Box::new(tx)) as *mut c_void;
+		Self { rx, ptr }
+	}
+
+	fn recv(&self) -> (i32, Option<moq_protocol_error>) {
+		self.rx.recv_timeout(TIMEOUT).expect("callback timed out")
+	}
+}
+
+impl Drop for ProtocolCallback {
+	fn drop(&mut self) {
+		unsafe {
+			drop(Box::from_raw(
+				self.ptr as *mut mpsc::Sender<(i32, Option<moq_protocol_error>)>,
+			))
+		};
+	}
+}
+
+extern "C" fn protocol_callback(user_data: *mut c_void, code: i32) {
+	let tx = unsafe { &*(user_data as *const mpsc::Sender<(i32, Option<moq_protocol_error>)>) };
+	let mut out = moq_protocol_error {
+		scope: 0,
+		code: 0,
+		kind: 0,
+	};
+	let protocol = (code < 0 && unsafe { moq_error_protocol(&mut out) } == 0).then_some(out);
+	let _ = tx.send((code, protocol));
+}
+
+/// Consume a published broadcast directly, bypassing the origin.
+///
+/// An origin front keeps a warm copy of a source track for a linger after its last reader
+/// leaves, which the producer sees as demand. The demand tests want the producer's own edge,
+/// so they read the broadcast the way a local consumer does.
+fn consume_local(broadcast: u32) -> u32 {
+	let mut state = State::lock();
+	let consumer = state
+		.publish
+		.producer(Id::try_from(broadcast).unwrap())
+		.unwrap()
+		.consume();
+	i32::from(state.consume.start(consumer, None).unwrap()) as u32
+}
+
+/// Subscribe to a raw track by name with default delivery preferences.
+fn consume_track(consume: u32, name: &[u8], cb: &Callback) -> u32 {
+	id(unsafe {
+		moq_consume_track(
+			consume,
+			name.as_ptr() as *const c_char,
+			name.len(),
+			std::ptr::null(),
+			Some(channel_callback),
+			cb.ptr,
+		)
+	})
+}
+
+#[test]
+fn track_demand_follows_subscribers() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"track-demand");
+	let name = b"data";
+	let track =
+		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+
+	// Nobody is subscribed yet; the watcher seeds with the current state.
+	let demand_cb = Callback::new();
+	let watcher = id(unsafe { moq_publish_track_demand(track, Some(channel_callback), demand_cb.ptr) });
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNUSED as i32);
+
+	let consume = consume_local(broadcast);
+	let frame_cb = Callback::new();
+	let consumer = consume_track(consume, name, &frame_cb);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_USED as i32);
+
+	assert_eq!(moq_consume_track_close(consumer), 0);
+	assert_eq!(frame_cb.recv_terminal(), 0);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNUSED as i32);
+
+	// A watcher registered after the last subscriber left is told so first, not left waiting.
+	let late_cb = Callback::new();
+	let late = id(unsafe { moq_publish_track_demand(track, Some(channel_callback), late_cb.ptr) });
+	assert_eq!(late_cb.recv(), moq_demand::MOQ_DEMAND_UNUSED as i32);
+	assert_eq!(moq_publish_demand_close(late), 0);
+	assert_eq!(late_cb.recv_terminal(), 0);
+	assert!(moq_publish_demand_close(late) < 0, "double-close should fail");
+
+	// Finishing the track ends the remaining watcher cleanly.
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(demand_cb.recv_terminal(), 0);
+	assert!(
+		moq_publish_demand_close(watcher) < 0,
+		"the watcher is gone after its terminal"
+	);
+
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn track_demand_reports_an_abort() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"track-demand-abort");
+	let name = b"data";
+	let track =
+		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+
+	let demand_cb = ProtocolCallback::new();
+	let _watcher = id(unsafe { moq_publish_track_demand(track, Some(protocol_callback), demand_cb.ptr) });
+	assert_eq!(demand_cb.recv().0, moq_demand::MOQ_DEMAND_UNUSED as i32);
+
+	assert_eq!(moq_publish_track_abort(track, 7), 0);
+	let (code, protocol) = demand_cb.recv();
+	assert!(code < 0, "an aborted track is a negative terminal, got {code}");
+	let protocol = protocol.expect("an app abort carries its protocol code");
+	assert_eq!(protocol.kind, moq_protocol_kind::MOQ_PROTOCOL_KIND_APP as u32);
+	assert_eq!(protocol.code, 64 + 7);
+
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn media_demand_refuses_a_container() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"media-demand");
+
+	let container = id(publish_container(
+		broadcast,
+		moq_container_format::MOQ_CONTAINER_FORMAT_FMP4,
+		&[],
+	));
+	let media = id(publish_audio(
+		broadcast,
+		moq_audio_format::MOQ_AUDIO_FORMAT_OPUS,
+		&opus_head(),
+		None,
+	));
+
+	let cb = Callback::new();
+	assert!(
+		unsafe { moq_publish_media_demand(container, Some(channel_callback), cb.ptr) } < 0,
+		"a container has no single demand"
+	);
+	assert!(
+		unsafe { moq_publish_media_demand(media, None, cb.ptr) } < 0,
+		"a missing on_demand must be refused"
+	);
+
+	let _watcher = id(unsafe { moq_publish_media_demand(media, Some(channel_callback), cb.ptr) });
+	assert_eq!(cb.recv(), moq_demand::MOQ_DEMAND_UNUSED as i32);
+	assert_eq!(moq_publish_media_finish(media), 0);
+	assert_eq!(cb.recv_terminal(), 0);
+
+	assert_eq!(moq_publish_container_finish(container), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn dynamic_serves_track_requests() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"dynamic-tracks");
+
+	assert!(
+		unsafe { moq_publish_dynamic(broadcast, None, std::ptr::null_mut()) } < 0,
+		"a missing on_request must be refused"
+	);
+	let request_cb = Callback::new();
+	let dynamic = id(unsafe { moq_publish_dynamic(broadcast, Some(channel_callback), request_cb.ptr) });
+
+	// The subscribe stays pending until the request is answered.
+	let consume = consume_local(broadcast);
+	let name = b"events";
+	let frame_cb = Callback::new();
+	let consumer = consume_track(consume, name, &frame_cb);
+
+	let request = id(request_cb.recv());
+	let mut got = moq_string {
+		data: std::ptr::null(),
+		len: 0,
+	};
+	assert_eq!(unsafe { moq_track_request_name(request, &mut got) }, 0);
+	assert_eq!(borrowed_string(got.data, got.len).as_deref(), Some("events"));
+
+	// Accepted as a raw track: the handle publishes like any other, and its demand is watchable.
+	let track = id(unsafe { moq_track_request_accept(request, std::ptr::null()) });
+	assert!(
+		unsafe { moq_track_request_name(request, &mut got) } < 0,
+		"accept consumes the request"
+	);
+	let demand_cb = Callback::new();
+	let _watcher = id(unsafe { moq_publish_track_demand(track, Some(channel_callback), demand_cb.ptr) });
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_USED as i32);
+
+	let payload = b"hello dynamic track";
+	assert_eq!(
+		unsafe { moq_publish_track_frame(track, payload.as_ptr(), payload.len(), 42) },
+		0
+	);
+	let frame_id = id(frame_cb.recv());
+	let mut frame = moq_frame {
+		payload: std::ptr::null(),
+		payload_size: 0,
+		timestamp_us: 0,
+		keyframe: false,
+	};
+	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(
+		unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) },
+		payload
+	);
+	assert_eq!(frame.timestamp_us, 42);
+	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+
+	// A second request is aborted, and its subscriber sees the application code.
+	let denied_cb = ProtocolCallback::new();
+	let denied_name = b"denied";
+	let denied = id(unsafe {
+		moq_consume_track(
+			consume,
+			denied_name.as_ptr() as *const c_char,
+			denied_name.len(),
+			std::ptr::null(),
+			Some(protocol_callback),
+			denied_cb.ptr,
+		)
+	});
+	let request = id(request_cb.recv());
+	assert_eq!(moq_track_request_abort(request, 404), 0);
+	assert!(moq_track_request_free(request) < 0, "abort consumes the request");
+	let (code, protocol) = denied_cb.recv();
+	assert!(code < 0, "a rejected subscribe is a negative terminal, got {code}");
+	let protocol = protocol.expect("a rejection carries its protocol code");
+	assert_eq!(protocol.kind, moq_protocol_kind::MOQ_PROTOCOL_KIND_APP as u32);
+	assert_eq!(protocol.code, 64 + 404);
+	assert!(
+		moq_consume_track_close(denied) < 0,
+		"the subscriber is gone after its terminal"
+	);
+
+	// A third request is freed, which rejects it too.
+	let freed_cb = Callback::new();
+	let _freed = consume_track(consume, b"freed", &freed_cb);
+	let request = id(request_cb.recv());
+	assert_eq!(moq_track_request_free(request), 0);
+	assert!(freed_cb.recv_terminal() < 0, "a freed request fails its subscriber");
+
+	assert_eq!(moq_publish_dynamic_close(dynamic), 0);
+	assert_eq!(request_cb.recv_terminal(), 0);
+	assert!(moq_publish_dynamic_close(dynamic) < 0, "double-close should fail");
+
+	assert_eq!(moq_consume_track_close(consumer), 0);
+	assert_eq!(frame_cb.recv_terminal(), 0);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNUSED as i32);
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(demand_cb.recv_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn dynamic_track_request_publishes_media() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"dynamic-media");
+	let request_cb = Callback::new();
+	let _dynamic = id(unsafe { moq_publish_dynamic(broadcast, Some(channel_callback), request_cb.ptr) });
+
+	let consume = consume_local(broadcast);
+	let frame_cb = Callback::new();
+	let consumer = consume_track(consume, b"audio", &frame_cb);
+
+	let request = id(request_cb.recv());
+	let init = opus_head();
+	let config = moq_audio_init {
+		format: moq_audio_format::MOQ_AUDIO_FORMAT_OPUS as u32,
+		init: init.as_ptr(),
+		init_len: init.len(),
+		label: std::ptr::null(),
+		label_len: 0,
+	};
+	let media = id(unsafe { moq_track_request_audio(request, &config) });
+
+	// The media handle is the one moq_publish_audio returns: frames and demand work unchanged.
+	let demand_cb = Callback::new();
+	let _watcher = id(unsafe { moq_publish_media_demand(media, Some(channel_callback), demand_cb.ptr) });
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_USED as i32);
+
+	let payload = b"opus frame";
+	assert_eq!(
+		unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), 1000) },
+		0
+	);
+	let frame_id = id(frame_cb.recv());
+	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+
+	assert_eq!(moq_consume_track_close(consumer), 0);
+	assert_eq!(frame_cb.recv_terminal(), 0);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNUSED as i32);
+	assert_eq!(moq_publish_media_finish(media), 0);
+	assert_eq!(demand_cb.recv_terminal(), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(request_cb.recv_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Fetch one group of a published track from Rust, since the C ABI has no fetch consumer yet,
+/// delivering its first frame's payload or the fetch error.
+fn fetch_group(
+	broadcast: u32,
+	name: &str,
+	sequence: u64,
+	priority: u8,
+) -> mpsc::Receiver<Result<Vec<u8>, moq_net::Error>> {
+	let consumer = State::lock()
+		.publish
+		.producer(Id::try_from(broadcast).unwrap())
+		.unwrap()
+		.consume();
+	let name = name.to_string();
+	let (tx, rx) = mpsc::channel();
+	crate::ffi::RUNTIME.spawn(async move {
+		let res = async {
+			let track = consumer.track(&name)?;
+			let options = moq_net::group::Fetch::default().with_priority(priority);
+			let mut group = track.fetch_group(sequence, options).await?;
+			let frame = group.read_frame().await?.expect("expected a fetched frame");
+			Ok(frame.payload.to_vec())
+		}
+		.await;
+		let _ = tx.send(res);
+	});
+	rx
+}
+
+#[test]
+fn track_dynamic_serves_a_fetch_miss() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"track-dynamic");
+	let name = b"data";
+	let track =
+		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+
+	let group_cb = Callback::new();
+	let dynamic = id(unsafe { moq_publish_track_dynamic(track, Some(channel_callback), group_cb.ptr) });
+
+	let fetch = fetch_group(broadcast, "data", 5, 11);
+	let request = id(group_cb.recv());
+	let mut sequence = 0u64;
+	let mut priority = 0u8;
+	assert_eq!(unsafe { moq_group_request_sequence(request, &mut sequence) }, 0);
+	assert_eq!(unsafe { moq_group_request_priority(request, &mut priority) }, 0);
+	assert_eq!(sequence, 5);
+	assert_eq!(priority, 11);
+
+	let group = id(moq_group_request_accept(request));
+	assert!(moq_group_request_free(request) < 0, "accept consumes the request");
+	let payload = b"fetched";
+	assert_eq!(
+		unsafe { moq_publish_group_frame(group, payload.as_ptr(), payload.len(), 100_000) },
+		0
+	);
+	assert_eq!(moq_publish_group_finish(group), 0);
+	assert_eq!(fetch.recv_timeout(TIMEOUT).unwrap().unwrap(), payload);
+
+	// A rejected fetch fails with the application code.
+	let fetch = fetch_group(broadcast, "data", 6, 0);
+	let request = id(group_cb.recv());
+	assert_eq!(moq_group_request_abort(request, 9), 0);
+	let err = fetch
+		.recv_timeout(TIMEOUT)
+		.unwrap()
+		.expect_err("a rejected fetch fails");
+	assert!(matches!(err, moq_net::Error::App(9)), "got {err:?}");
+
+	assert_eq!(moq_publish_dynamic_close(dynamic), 0);
+	assert_eq!(group_cb.recv_terminal(), 0);
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn track_request_dynamic_survives_accept() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"request-dynamic");
+	let request_cb = Callback::new();
+	let _dynamic = id(unsafe { moq_publish_dynamic(broadcast, Some(channel_callback), request_cb.ptr) });
+
+	// A fetch of a track the broadcast has not declared requests the track first.
+	let fetch = fetch_group(broadcast, "archive", 9, 0);
+	let request = id(request_cb.recv());
+	let group_cb = Callback::new();
+	let track_dynamic = id(unsafe { moq_track_request_dynamic(request, Some(channel_callback), group_cb.ptr) });
+	let track = id(unsafe { moq_track_request_accept(request, std::ptr::null()) });
+
+	let group_request = id(group_cb.recv());
+	let mut sequence = 0u64;
+	assert_eq!(unsafe { moq_group_request_sequence(group_request, &mut sequence) }, 0);
+	assert_eq!(sequence, 9);
+	let group = id(moq_group_request_accept(group_request));
+	let payload = b"archive";
+	assert_eq!(
+		unsafe { moq_publish_group_frame(group, payload.as_ptr(), payload.len(), 180_000) },
+		0
+	);
+	assert_eq!(moq_publish_group_finish(group), 0);
+	assert_eq!(fetch.recv_timeout(TIMEOUT).unwrap().unwrap(), payload);
+
+	assert_eq!(moq_publish_dynamic_close(track_dynamic), 0);
+	assert_eq!(group_cb.recv_terminal(), 0);
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(request_cb.recv_terminal(), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 #[test]
 fn local_publish_consume() {
 	let origin = id(moq_origin_create());

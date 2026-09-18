@@ -45,7 +45,6 @@ contract, so it gates [Release](/quest/m1/release.md) rather than the merge.
 - [Gateway types](/quest/m1/api-gateways.md) - no `anyhow` in a gateway `Error`, `PathOwned` prefixes, `Duration` segments, `moq_rtc::Server::new(config)`, an SRT reject with a reason
 - [libmoq units](/quest/m1/api-libmoq-units.md) - `moq_client_config` is all microseconds, the header declares every enum and error code, NULL callbacks are refused
 - [Cluster -01](/quest/m1/cluster-01/README.md) - rs/moq-net and js/net speak the revised cluster extension (HOP_ID, REQUEST_UPDATE repricing) and -01 is published
-- [Track demand](/quest/m1/libmoq-track-demand.md) - a C publisher sees used/unused per track and serves dynamic track and group requests, so an encoder runs only while someone watches
 - [Python teardown panic](/quest/m1/py-smoke-teardown-panic.md) - the python smoke pair never aborts the moq-ffi thread on subscriber teardown
 - [API review gate](/quest/m1/api-review-gate.md) - each `api-*` quest above is landed or deferred by the maintainer before the merge PR opens
 - [Merge dev](/quest/m1/merge-dev.md) - dev lands on main with a closing keyword for every issue it fixed

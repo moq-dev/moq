@@ -438,6 +438,17 @@ impl Video {
 			.clone())
 	}
 
+	/// A watch-only handle to the encoded track's subscriber demand.
+	pub(crate) fn demand(&self, id: Id) -> Result<moq_net::track::Demand, Error> {
+		Ok(self
+			.producer(id)?
+			.lock()
+			.as_ref()
+			.ok_or(Error::MediaNotFound)?
+			.producer
+			.demand())
+	}
+
 	/// Resolve a producer handle, so the caller can encode with the global lock
 	/// released.
 	///
@@ -715,6 +726,31 @@ pub extern "C" fn moq_encode_video_reservation(producer: u32) -> i32 {
 			Some(reservation) => Ok(i32::from(state.bandwidth.hold(reservation)?)),
 			None => Ok(0),
 		}
+	})
+}
+
+/// Watch whether the encoded video track has subscribers, so the camera and encoder
+/// run only while someone watches. See [`crate::moq_publish_media_demand`] for the
+/// callback contract.
+///
+/// Returns a non-zero watcher handle on success, or a negative code on failure.
+///
+/// # Safety
+/// - `on_demand` must be non-NULL.
+/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_demand` callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_encode_video_demand(
+	producer: u32,
+	on_demand: Option<extern "C" fn(user_data: *mut c_void, status: i32)>,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let producer = ffi::parse_id(producer)?;
+		let on_demand = on_demand.ok_or(Error::InvalidPointer)?;
+		let on_demand = unsafe { OnStatus::new(user_data, Some(on_demand)) };
+		let mut state = State::lock();
+		let demand = state.video.demand(producer)?;
+		state.publish.demand(demand, on_demand)
 	})
 }
 

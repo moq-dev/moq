@@ -15,6 +15,7 @@ const ENUMS: &[&str] = &[
 	"moq_video_encoder_kind",
 	"moq_error_scope",
 	"moq_protocol_kind",
+	"moq_demand",
 ];
 
 fn main() {

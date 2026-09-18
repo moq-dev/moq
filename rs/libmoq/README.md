@@ -66,6 +66,30 @@ int32_t moq_publish_group_frame(uint32_t group, const uint8_t *payload, uintptr_
 int32_t moq_publish_group_finish(uint32_t group);
 int32_t moq_publish_track_finish(uint32_t track);
 
+// Publishing: Demand
+int32_t moq_publish_track_demand(uint32_t track, void (*on_demand)(void *user_data, int32_t status), void *user_data);
+int32_t moq_publish_media_demand(uint32_t media, void (*on_demand)(void *user_data, int32_t status), void *user_data);
+int32_t moq_encode_video_demand(uint32_t producer, void (*on_demand)(void *user_data, int32_t status), void *user_data);
+int32_t moq_encode_audio_demand(uint32_t producer, void (*on_demand)(void *user_data, int32_t status), void *user_data);
+int32_t moq_publish_demand_close(uint32_t watcher);
+
+// Publishing: Requests
+int32_t moq_publish_dynamic(uint32_t broadcast, void (*on_request)(void *user_data, int32_t request), void *user_data);
+int32_t moq_publish_track_dynamic(uint32_t track, void (*on_group)(void *user_data, int32_t request), void *user_data);
+int32_t moq_track_request_dynamic(uint32_t request, void (*on_group)(void *user_data, int32_t request), void *user_data);
+int32_t moq_publish_dynamic_close(uint32_t dynamic);
+int32_t moq_track_request_name(uint32_t request, moq_string *dst);
+int32_t moq_track_request_accept(uint32_t request, const moq_track_info *info);
+int32_t moq_track_request_video(uint32_t request, const moq_video_init *config);
+int32_t moq_track_request_audio(uint32_t request, const moq_audio_init *config);
+int32_t moq_track_request_abort(uint32_t request, uint16_t error_code);
+int32_t moq_track_request_free(uint32_t request);
+int32_t moq_group_request_sequence(uint32_t request, uint64_t *dst);
+int32_t moq_group_request_priority(uint32_t request, uint8_t *dst);
+int32_t moq_group_request_accept(uint32_t request);
+int32_t moq_group_request_abort(uint32_t request, uint16_t error_code);
+int32_t moq_group_request_free(uint32_t request);
+
 // Consuming
 int32_t moq_consume_close(uint32_t consume);
 

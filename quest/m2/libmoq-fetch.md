@@ -14,7 +14,9 @@ existing consume contracts. Test a hit, miss, and cancelled fetch from a C calle
 
 Regenerate `moq.h` and update `doc/lib/c/index.md`, whose capability list already
 claims group fetch. Decoder output configuration landed separately on the M1 line.
+The `moq_group_request_*` tests in `rs/libmoq/src/test.rs` fetch from Rust for
+lack of this entry point; switch them to it.
 
 ## Related
 
-- [#2152](/quest/m2/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - dynamic track serving and server-side accept
+- [#2152](/quest/m2/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - server-side accept

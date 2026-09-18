@@ -1,11 +1,39 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::task::{Poll, ready};
 
 use moq_mux::catalog::hang::Extra;
 use moq_mux::catalog::{Rendition, RenditionConfig};
 use moq_mux::import;
+use tokio::sync::oneshot;
 
-use crate::{Error, Id, NonZeroSlab};
+use crate::ffi::OnStatus;
+use crate::{Error, Id, NonZeroSlab, State, moq_demand};
+
+/// A spawned task entry: `close` signals shutdown, `callback` delivers status.
+///
+/// `close` is an `Option` so `*_close` can drop just the sender without
+/// removing the entry. The task delivers one final terminal callback and then
+/// removes itself, so `user_data` stays valid until that callback fires.
+struct TaskEntry {
+	close: Option<oneshot::Sender<()>>,
+	callback: OnStatus,
+}
+
+/// A subscriber's request for a track the broadcast has not declared, kept with the
+/// broadcast it was made on so media can be published onto it under that broadcast's catalog.
+struct TrackRequest {
+	broadcast: Id,
+	request: moq_net::track::Request,
+}
+
+/// What a request handler serves.
+enum Dynamic {
+	/// Track requests on a broadcast, remembered so media can be published onto them.
+	Broadcast(moq_net::broadcast::Dynamic, Id),
+	/// Group requests (fetches of uncached groups) on a track.
+	Track(moq_net::track::Dynamic),
+}
 
 /// A published broadcast: its producer, its catalog, and the renditions the caller authored by
 /// hand.
@@ -67,6 +95,19 @@ pub struct Publish {
 
 	/// JSON stream producers (lossless append-log tracks).
 	json_stream: NonZeroSlab<moq_json::stream::Producer<serde_json::Value>>,
+
+	/// Demand watchers. Close signals shutdown; the task delivers a final callback, then removes itself.
+	demand: NonZeroSlab<Option<TaskEntry>>,
+
+	/// Track and group request handlers. Close drops the handler, so pending requests
+	/// are rejected; the task delivers a final callback, then removes itself.
+	dynamic: NonZeroSlab<Option<TaskEntry>>,
+
+	/// Track requests delivered to a handler, freed on accept, abort, or free.
+	track_request: NonZeroSlab<TrackRequest>,
+
+	/// Group requests delivered to a handler, freed on accept, abort, or free.
+	group_request: NonZeroSlab<moq_net::track::GroupRequest>,
 }
 
 impl Publish {
@@ -327,6 +368,274 @@ impl Publish {
 	/// A watch-only handle to a raw track's subscriber demand.
 	pub fn track_demand(&self, track: Id) -> Result<moq_net::track::Demand, Error> {
 		Ok(self.tracks.get(track).ok_or(Error::TrackNotFound)?.demand())
+	}
+
+	/// A watch-only handle to a media importer's subscriber demand.
+	///
+	/// A container publishes several tracks and so has no single demand; its handle lives in
+	/// another slab and is refused here, as moq-ffi refuses it.
+	pub fn media_demand(&self, media: Id) -> Result<moq_net::track::Demand, Error> {
+		Ok(self.media.get(media).ok_or(Error::MediaNotFound)?.demand())
+	}
+
+	/// Watch a track's subscriber demand, reporting the current state and every change.
+	///
+	/// `on_demand` fires with a [`moq_demand`] value immediately and again on each change, then
+	/// once with a terminal code: `0` when the track ends or the watcher is closed, negative when
+	/// the track aborts. Seeding with the current state is what makes a late registration safe: a
+	/// track that went unused before the watcher existed still reports it.
+	pub fn demand(&mut self, demand: moq_net::track::Demand, on_demand: OnStatus) -> Result<Id, Error> {
+		let channel = oneshot::channel();
+		let id = self.demand.insert(Some(TaskEntry {
+			close: Some(channel.0),
+			callback: on_demand,
+		}))?;
+
+		tokio::spawn(async move {
+			let res = Self::run_demand(on_demand, demand, channel.1).await;
+
+			// Deliver one final terminal callback (code <= 0), then drop the entry.
+			// Pull it out from under the lock so the callback never runs while held.
+			let entry = State::lock().publish.demand.remove(id).flatten();
+			if let Some(entry) = entry {
+				entry.callback.call(res);
+			}
+		});
+
+		Ok(id)
+	}
+
+	async fn run_demand(
+		callback: OnStatus,
+		demand: moq_net::track::Demand,
+		mut close: oneshot::Receiver<()>,
+	) -> Result<(), Error> {
+		// Neither handle exposes the current state, only the level-triggered waits, and exactly
+		// one of them is ready at any instant: racing them is the read. A dropped track is its
+		// end, not a failure; the watcher does not keep it alive and reports the close as clean.
+		let mut used = tokio::select! {
+			biased;
+			_ = &mut close => return Ok(()),
+			res = demand.used() => match res {
+				Ok(()) => true,
+				Err(moq_net::Error::Dropped) => return Ok(()),
+				Err(err) => return Err(err.into()),
+			},
+			res = demand.unused() => match res {
+				Ok(()) => false,
+				Err(moq_net::Error::Dropped) => return Ok(()),
+				Err(err) => return Err(err.into()),
+			},
+		};
+
+		loop {
+			let state = if used {
+				moq_demand::MOQ_DEMAND_USED
+			} else {
+				moq_demand::MOQ_DEMAND_UNUSED
+			};
+			callback.call(state as i32);
+
+			// A flip between the report and this wait resolves it immediately, so no edge is
+			// lost; a double flip collapses into nothing, which is what a level signal means.
+			let flipped = async {
+				if used {
+					demand.unused().await
+				} else {
+					demand.used().await
+				}
+			};
+			tokio::select! {
+				biased;
+				_ = &mut close => return Ok(()),
+				res = flipped => match res {
+					Ok(()) => used = !used,
+					Err(moq_net::Error::Dropped) => return Ok(()),
+					Err(err) => return Err(err.into()),
+				},
+			}
+		}
+	}
+
+	/// Stop a demand watcher. The task still delivers its terminal callback.
+	pub fn demand_close(&mut self, watcher: Id) -> Result<(), Error> {
+		self.demand
+			.get_mut(watcher)
+			.and_then(|entry| entry.as_mut())
+			.ok_or(Error::NotFound)?
+			.close
+			.take()
+			.ok_or(Error::NotFound)?;
+		Ok(())
+	}
+
+	/// Serve subscriber requests for tracks the broadcast has not declared, delivering each as
+	/// a track-request handle via `on_request`.
+	///
+	/// Without a live handler an unknown track name is refused, as before.
+	pub fn dynamic(&mut self, broadcast: Id, on_request: OnStatus) -> Result<Id, Error> {
+		let dynamic = self.producer(broadcast)?.dynamic();
+		self.spawn_dynamic(Dynamic::Broadcast(dynamic, broadcast), on_request)
+	}
+
+	/// Serve fetches of uncached groups on a raw track, delivering each as a group-request
+	/// handle via `on_group`.
+	pub fn track_dynamic(&mut self, track: Id, on_group: OnStatus) -> Result<Id, Error> {
+		let dynamic = self.tracks.get(track).ok_or(Error::TrackNotFound)?.dynamic();
+		self.spawn_dynamic(Dynamic::Track(dynamic), on_group)
+	}
+
+	/// Serve fetches of uncached groups on a track that has not been accepted yet.
+	///
+	/// A track requested by a fetch has a group request pending from birth; a handler obtained
+	/// before [`Self::track_request_accept`] keeps it serviceable across the transition.
+	pub fn track_request_dynamic(&mut self, request: Id, on_group: OnStatus) -> Result<Id, Error> {
+		let dynamic = self
+			.track_request
+			.get(request)
+			.ok_or(Error::NotFound)?
+			.request
+			.dynamic();
+		self.spawn_dynamic(Dynamic::Track(dynamic), on_group)
+	}
+
+	fn spawn_dynamic(&mut self, dynamic: Dynamic, callback: OnStatus) -> Result<Id, Error> {
+		let channel = oneshot::channel();
+		let id = self.dynamic.insert(Some(TaskEntry {
+			close: Some(channel.0),
+			callback,
+		}))?;
+
+		tokio::spawn(async move {
+			let res = Self::run_dynamic(callback, dynamic, channel.1).await;
+
+			// Deliver one final terminal callback (code <= 0), then drop the entry.
+			// Pull it out from under the lock so the callback never runs while held.
+			let entry = State::lock().publish.dynamic.remove(id).flatten();
+			if let Some(entry) = entry {
+				entry.callback.call(res);
+			}
+		});
+
+		Ok(id)
+	}
+
+	async fn run_dynamic(
+		callback: OnStatus,
+		mut dynamic: Dynamic,
+		mut close: oneshot::Receiver<()>,
+	) -> Result<(), Error> {
+		loop {
+			// The handler is owned here, so returning drops it and rejects whatever is pending.
+			// `biased` so a pending close always wins over a ready request. The request is
+			// buffered under the lock, which is released before the callback.
+			let res = tokio::select! {
+				biased;
+				_ = &mut close => return Ok(()),
+				res = kio::wait(|waiter| match &mut dynamic {
+					Dynamic::Broadcast(dynamic, broadcast) => {
+						let request = ready!(dynamic.poll_requested_track(waiter));
+						let request = request.map(|request| TrackRequest { broadcast: *broadcast, request });
+						Poll::Ready(request.map_err(Error::from).and_then(|request| State::lock().publish.track_request.insert(request)))
+					}
+					Dynamic::Track(dynamic) => {
+						let request = ready!(dynamic.poll_requested_group(waiter));
+						Poll::Ready(request.map_err(Error::from).and_then(|request| State::lock().publish.group_request.insert(request)))
+					}
+				}) => res,
+			};
+
+			// A finished broadcast or track is the end of the requests, not a failure.
+			match res {
+				Ok(request) => callback.call(request),
+				Err(Error::Moq(moq_net::Error::Closed | moq_net::Error::Dropped)) => return Ok(()),
+				Err(err) => return Err(err),
+			}
+		}
+	}
+
+	/// Stop a track or group request handler. Pending requests are rejected, and the task
+	/// still delivers its terminal callback.
+	pub fn dynamic_close(&mut self, dynamic: Id) -> Result<(), Error> {
+		self.dynamic
+			.get_mut(dynamic)
+			.and_then(|entry| entry.as_mut())
+			.ok_or(Error::NotFound)?
+			.close
+			.take()
+			.ok_or(Error::NotFound)?;
+		Ok(())
+	}
+
+	/// The name of a requested track, borrowed from the request's storage.
+	pub fn track_request_name(&self, request: Id, dst: &mut crate::moq_string) -> Result<(), Error> {
+		let name = self.track_request.get(request).ok_or(Error::NotFound)?.request.name();
+		*dst = crate::moq_string {
+			data: name.as_ptr().cast::<std::ffi::c_char>(),
+			len: name.len(),
+		};
+		Ok(())
+	}
+
+	/// Accept a track request as a raw track, returning a track handle like [`Self::track`].
+	pub fn track_request_accept(&mut self, request: Id, info: moq_net::track::Info) -> Result<Id, Error> {
+		let request = self.track_request.remove(request).ok_or(Error::NotFound)?;
+		self.tracks.insert(request.request.accept(info))
+	}
+
+	/// Accept a track request as an audio track, returning a media handle like [`Self::audio`].
+	pub fn track_request_audio(&mut self, request: Id, init: import::AudioInit) -> Result<Id, Error> {
+		let TrackRequest { broadcast, request } = self.track_request.remove(request).ok_or(Error::NotFound)?;
+		let catalog = self.catalog(broadcast)?;
+		let track = import::Track::audio(request, catalog.reserve(), init)?;
+		self.media.insert(Box::new(track))
+	}
+
+	/// Accept a track request as a video track, returning a media handle like [`Self::video`].
+	pub fn track_request_video(&mut self, request: Id, init: import::VideoInit) -> Result<Id, Error> {
+		let TrackRequest { broadcast, request } = self.track_request.remove(request).ok_or(Error::NotFound)?;
+		let catalog = self.catalog(broadcast)?;
+		let track = import::Track::video(request, catalog.reserve(), init)?;
+		self.media.insert(Box::new(track))
+	}
+
+	/// Reject a track request, failing every subscriber waiting on it with `error_code`.
+	pub fn track_request_abort(&mut self, request: Id, error_code: u16) -> Result<(), Error> {
+		let request = self.track_request.remove(request).ok_or(Error::NotFound)?;
+		request.request.reject(moq_net::Error::App(error_code));
+		Ok(())
+	}
+
+	/// Drop a track request, which rejects it.
+	pub fn track_request_free(&mut self, request: Id) -> Result<(), Error> {
+		self.track_request.remove(request).ok_or(Error::NotFound)?;
+		Ok(())
+	}
+
+	/// The sequence and priority of a requested group.
+	pub fn group_request_info(&self, request: Id) -> Result<(u64, u8), Error> {
+		let request = self.group_request.get(request).ok_or(Error::NotFound)?;
+		Ok((request.sequence(), request.priority()))
+	}
+
+	/// Accept a group request, returning a group handle like [`Self::track_group`].
+	pub fn group_request_accept(&mut self, request: Id) -> Result<Id, Error> {
+		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
+		let group = request.accept(None)?;
+		self.groups.insert(group)
+	}
+
+	/// Reject a group request, failing every fetch waiting on it with `error_code`.
+	pub fn group_request_abort(&mut self, request: Id, error_code: u16) -> Result<(), Error> {
+		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
+		request.reject(moq_net::Error::App(error_code));
+		Ok(())
+	}
+
+	/// Drop a group request, which rejects it.
+	pub fn group_request_free(&mut self, request: Id) -> Result<(), Error> {
+		self.group_request.remove(request).ok_or(Error::NotFound)?;
+		Ok(())
 	}
 
 	/// Create a raw track on a broadcast for arbitrary byte payloads.

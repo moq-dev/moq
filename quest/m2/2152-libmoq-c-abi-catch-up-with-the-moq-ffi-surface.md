@@ -3,8 +3,7 @@
 ## Goal
 
 A C embedder accepts sessions itself through the same two-phase SETUP the
-FFI exposes. Dynamic track serving, the other `moq-ffi` capability
-`rs/libmoq` still lacks, moved to the track demand quest linked below.
+FFI exposes.
 
 ## Plan
 
@@ -36,5 +35,4 @@ C output-configuration layout change is owned by its separate M1 quest.
 
 ## Related
 
-- [Track demand](/quest/m1/libmoq-track-demand.md) - track requests and used/unused on the C ABI
 - [libmoq fetch](/quest/m2/libmoq-fetch.md) - additive group fetch, on main
