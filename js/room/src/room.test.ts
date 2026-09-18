@@ -21,6 +21,7 @@ test("room restores the announce prefix and reconciles local identity changes", 
 				streams.push(stream);
 				stream.append({
 					pattern: Net.Path.Pattern.subtree(Net.Path.from("room-a/bob/camera.hang")),
+					captures: [Net.Path.Pattern.subtree(Net.Path.from("bob/camera.hang"))],
 					active: true,
 				});
 				return stream.consume();

@@ -16,7 +16,7 @@ use web_transport_trait::{MaybeSend, MaybeSync};
 
 use super::{Requests, WeakCache, WeakEntry};
 use crate::{
-	AsPath, Error, InvalidPattern, Path, PathOwned, PathPrefixes, Pattern, Patterns,
+	AsPath, Error, InvalidPattern, Path, PathOwned, Pattern, Patterns,
 	coding::{BoundsExceeded, Decode, DecodeError, Encode, EncodeError},
 	runtime::{AnyTimers, Instant, Timers, TimersSlot},
 	util::{TaskSet, Tasks, TasksWeak},
@@ -653,13 +653,14 @@ enum PendingUpdate {
 	UnannounceAnnounce { old: RouteMeta, new: RouteMeta },
 }
 
-/// Pending updates keyed by prefix. `BTreeMap` keeps memory strictly bounded by
-/// the number of distinct prefixes with outstanding work (collapsed pairs are
-/// fully erased) and gives a deterministic lexicographic delivery order so
-/// tests can predict it.
+/// Pending updates keyed by presented pattern. `BTreeMap` keeps memory strictly
+/// bounded by the number of distinct patterns with outstanding work (collapsed
+/// pairs are fully erased) and gives a deterministic lexicographic delivery
+/// order so tests can predict it. Each entry carries the captures of its
+/// pattern, fixed for the cursor's life since they follow from its scope.
 #[derive(Default)]
 struct OriginConsumerState {
-	pending: BTreeMap<Pattern, PendingUpdate>,
+	pending: BTreeMap<Pattern, (Vec<Pattern>, PendingUpdate)>,
 	/// Patterns whose most recently delivered update was an announce. A pending
 	/// `Announce` is ambiguous on its own: it is an unseen initial announce (a
 	/// retraction cancels it entirely) or a metadata update on a route the
@@ -671,32 +672,33 @@ struct OriginConsumerState {
 }
 
 impl OriginConsumerState {
-	fn apply_announce(&mut self, pattern: Pattern, meta: RouteMeta) {
+	fn apply_announce(&mut self, pattern: Pattern, captures: Vec<Pattern>, meta: RouteMeta) {
 		let new = match self.pending.remove(&pattern) {
 			// First announce, a stale announce being replaced, or a metadata update.
-			None | Some(PendingUpdate::Announce(_)) => PendingUpdate::Announce(meta),
+			None | Some((_, PendingUpdate::Announce(_))) => PendingUpdate::Announce(meta),
 			// Consumer needs to observe the retraction before this announce.
-			Some(PendingUpdate::Unannounce(old) | PendingUpdate::UnannounceAnnounce { old, .. }) => {
+			Some((_, PendingUpdate::Unannounce(old) | PendingUpdate::UnannounceAnnounce { old, .. })) => {
 				PendingUpdate::UnannounceAnnounce { old, new: meta }
 			}
 		};
-		self.pending.insert(pattern, new);
+		self.pending.insert(pattern, (captures, new));
 	}
 
-	fn apply_unannounce(&mut self, pattern: Pattern, last: RouteMeta) {
+	fn apply_unannounce(&mut self, pattern: Pattern, captures: Vec<Pattern>, last: RouteMeta) {
 		match self.pending.remove(&pattern) {
 			// The pending announce was never delivered and neither was any earlier
 			// one, so the pair cancels entirely.
-			Some(PendingUpdate::Announce(_)) if !self.delivered.contains(&pattern) => {}
+			Some((_, PendingUpdate::Announce(_))) if !self.delivered.contains(&pattern) => {}
 			// Either nothing is pending or the pending announce was a metadata
 			// update on a delivered route; the consumer still owes a retraction.
-			None | Some(PendingUpdate::Announce(_) | PendingUpdate::Unannounce(_)) => {
-				self.pending.insert(pattern, PendingUpdate::Unannounce(last));
+			None | Some((_, PendingUpdate::Announce(_) | PendingUpdate::Unannounce(_))) => {
+				self.pending
+					.insert(pattern, (captures, PendingUpdate::Unannounce(last)));
 			}
 			// The embedded announce cancels with this retraction; the consumer still
 			// needs the leading one.
-			Some(PendingUpdate::UnannounceAnnounce { old, .. }) => {
-				self.pending.insert(pattern, PendingUpdate::Unannounce(old));
+			Some((_, PendingUpdate::UnannounceAnnounce { old, .. })) => {
+				self.pending.insert(pattern, (captures, PendingUpdate::Unannounce(old)));
 			}
 		}
 	}
@@ -704,7 +706,8 @@ impl OriginConsumerState {
 	/// Take one update to deliver to the consumer, if any.
 	fn take(&mut self) -> Option<AnnounceUpdate> {
 		let pattern = self.pending.keys().next()?.clone();
-		let (meta, active) = match self.pending.remove(&pattern).unwrap() {
+		let (captures, update) = self.pending.remove(&pattern).unwrap();
+		let (meta, active) = match update {
 			PendingUpdate::Announce(meta) => {
 				self.delivered.insert(pattern.clone());
 				(meta, true)
@@ -715,14 +718,16 @@ impl OriginConsumerState {
 			}
 			PendingUpdate::UnannounceAnnounce { old, new } => {
 				// Deliver the retraction now; leave the trailing announce pending so
-				// the next take returns it for the same prefix.
+				// the next take returns it for the same pattern.
 				self.delivered.remove(&pattern);
-				self.pending.insert(pattern.clone(), PendingUpdate::Announce(new));
+				self.pending
+					.insert(pattern.clone(), (captures.clone(), PendingUpdate::Announce(new)));
 				(old, false)
 			}
 		};
 		Some(AnnounceUpdate {
 			pattern,
+			captures,
 			route: Route {
 				hops: meta.0,
 				cost: meta.1,
@@ -818,61 +823,79 @@ impl WeakEntry for RemoteFront {
 	}
 }
 
-/// One registered announce cursor: which prefixes it may see, how they are
+/// The best route a cursor last delivered at one presented pattern, for change
+/// detection.
+struct Delivered {
+	meta: RouteMeta,
+	/// Whether the entry could serve requests: part of the dedupe key (see
+	/// `sync_cursor`) but never leaves the model.
+	served: bool,
+	/// The captures the presented pattern carries under the cursor's scope.
+	captures: Vec<Pattern>,
+}
+
+/// One registered announce cursor: which patterns it may see, how they are
 /// re-rooted, and the per-cursor delivery buffer.
 struct TableCursor {
-	/// The prefix stripped from every delivered path.
+	/// The prefix stripped from every delivered pattern.
 	root: PathOwned,
-	/// The absolute prefixes this cursor is scoped to (its token / scope). A route
-	/// is visible where it intersects one of these, clamped to the intersection.
-	allowed: Vec<PathOwned>,
+	/// The scope this cursor sees through, relative to `root`, most specific
+	/// member first. A route is visible where it intersects a member, clamped to
+	/// the intersection; where two members present the same pattern, the most
+	/// specific one names the captures.
+	allowed: Vec<Pattern>,
 	/// Skip routes whose hop chain or announcing session (`via`) is this peer
 	/// (control-plane split horizon).
 	exclude: Option<Hop>,
 	/// The delivery buffer, drained by the cursor's `poll_next`.
 	state: kio::Producer<OriginConsumerState>,
-	/// The last delivered best route per presented (relative) pattern, for change
-	/// detection: `(entry id, hops, cost)`.
-	// entry id, metadata, and whether the entry could serve requests: the last
-	// is part of the dedupe key (see `sync_cursor`) but never leaves the model.
-	current: HashMap<Pattern, (u64, RouteMeta, bool)>,
+	/// The last delivered best route per presented (relative) pattern.
+	current: HashMap<Pattern, Delivered>,
 }
 
 impl TableCursor {
-	/// Where `pattern` presents on this cursor: each residual of rebasing it
-	/// under an allowed scope, named relative to the cursor root.
-	fn presented(&self, pattern: &Pattern) -> Vec<Pattern> {
-		let mut out = Patterns::new();
-		for allowed in &self.allowed {
-			let Some(allowed_rel) = allowed.strip_prefix(&self.root) else {
-				continue;
-			};
-			for residual in pattern.rebase(allowed.as_str()) {
-				let Ok(relative) = residual.rooted(allowed_rel.as_str()) else {
-					continue;
-				};
-				out.insert(relative);
+	fn new(
+		root: PathOwned,
+		allowed: &Patterns,
+		exclude: Option<Hop>,
+		state: kio::Producer<OriginConsumerState>,
+	) -> Self {
+		let mut allowed: Vec<Pattern> = allowed.iter().cloned().collect();
+		// Stable: members tied on specificity keep their canonical order.
+		allowed.sort_by_key(|member| Reverse(member.specificity()));
+		Self {
+			root,
+			allowed,
+			exclude,
+			state,
+			current: HashMap::new(),
+		}
+	}
+
+	/// Where the absolute `pattern` presents on this cursor: each intersection of
+	/// its residual under the root with a scope member, named relative to the
+	/// cursor root, with the captures that member pins.
+	fn presented(&self, pattern: &Pattern) -> Vec<(Pattern, Vec<Pattern>)> {
+		let mut out: Vec<(Pattern, Vec<Pattern>)> = Vec::new();
+		for residual in pattern.rebase(self.root.as_str()) {
+			for member in &self.allowed {
+				for presented in residual.intersect(member) {
+					if out.iter().any(|(seen, _)| *seen == presented) {
+						continue;
+					}
+					let captures = member
+						.captures(&presented)
+						.expect("an intersection is contained by the member");
+					out.push((presented, captures));
+				}
 			}
 		}
-		out.iter().cloned().collect()
+		out
 	}
 
 	/// Whether this cursor may observe `entry` at all (split horizon).
 	fn visible(&self, entry: &RouteEntry) -> bool {
 		entry.visible_to(self.exclude)
-	}
-}
-
-/// The intersection of two path prefixes: the longer one when one contains the
-/// other (segment-wise), `None` when they are disjoint.
-#[cfg(test)]
-fn intersect_prefix(a: &Path, b: &Path) -> Option<PathOwned> {
-	if a.has_prefix(b) {
-		Some(a.to_owned())
-	} else if b.has_prefix(a) {
-		Some(b.to_owned())
-	} else {
-		None
 	}
 }
 
@@ -958,117 +981,85 @@ impl OriginNode {
 	}
 }
 
-/// A handle's view of an origin's path tree: the subtrees it may reach, named by
-/// path rather than by node handle.
+/// A handle's view of an origin's path tree: the tree itself plus the absolute
+/// patterns the handle may reach in it.
 ///
-/// Paths, because pruning removes empty nodes: a pinned `Lock<OriginNode>` outlives
-/// the prune as an orphan that publishes and resolves where no lookup can reach.
-/// Only [`Self::tree`] is stable, so every operation resolves against it and node
-/// identity lives in exactly one place. Scoping a handle therefore creates nothing
-/// in the tree; only a broadcast does.
+/// Patterns rather than node handles, because pruning removes empty nodes: a
+/// pinned `Lock<OriginNode>` outlives the prune as an orphan that publishes and
+/// resolves where no lookup can reach. Only [`Self::tree`] is stable, so every
+/// operation resolves against it and node identity lives in exactly one place.
+/// Scoping a handle therefore creates nothing in the tree; only a broadcast does.
 #[derive(Clone)]
-struct OriginNodes {
+struct OriginScope {
 	// The tree root, shared by every handle derived from one origin. Never pruned:
 	// it hangs off no parent.
 	tree: Lock<OriginNode>,
 
-	// The reachable subtrees: the prefix relative to this handle's root (what
-	// `allowed()` advertises), paired with its absolute path under `tree`.
-	nodes: Vec<(PathOwned, PathOwned)>,
+	// The paths this handle may reach, absolute under `tree`.
+	allowed: Patterns,
 }
 
-impl OriginNodes {
-	/// A view over a fresh tree with no reachable subtrees: it resolves nothing and
+impl OriginScope {
+	/// A view over a fresh tree that reaches nothing: it resolves nothing and
 	/// publishes nothing.
 	fn empty() -> Self {
 		Self {
 			tree: Lock::new(OriginNode::new()),
-			nodes: Vec::new(),
+			allowed: Patterns::new(),
 		}
 	}
 
-	// Returns nested roots that match the patterns.
-	// PathPrefixes guarantees no duplicates or overlapping prefixes.
-	pub fn select(&self, patterns: &Patterns) -> Option<Self> {
-		let prefixes = PathPrefixes::from_patterns(patterns)?;
-		let mut roots = Vec::new();
-
-		for (root, absolute) in &self.nodes {
-			for prefix in &prefixes {
-				if root.has_prefix(prefix) {
-					// Keep the existing subtree if we're allowed to access it.
-					roots.push((root.to_owned(), absolute.clone()));
-					continue;
-				}
-
-				if let Some(suffix) = prefix.strip_prefix(root) {
-					// If the requested prefix is larger than the allowed prefix, then we further scope it.
-					roots.push((prefix.to_owned(), absolute.join(&suffix).to_owned()));
-				}
-			}
+	/// This view narrowed to the absolute `patterns`: the paths in both. `None`
+	/// when nothing survives, so a handle never widens to the root by accident.
+	fn narrow(&self, patterns: &Patterns) -> Option<Self> {
+		let allowed = self.allowed.intersect(patterns);
+		if allowed.is_empty() {
+			return None;
 		}
-
-		if roots.is_empty() {
-			None
-		} else {
-			Some(self.with_nodes(roots))
-		}
-	}
-
-	pub fn root(&self, new_root: impl AsPath) -> Option<Self> {
-		let new_root = new_root.as_path();
-		let mut roots = Vec::new();
-
-		if new_root.is_empty() {
-			return Some(self.clone());
-		}
-
-		for (root, absolute) in &self.nodes {
-			if let Some(suffix) = root.strip_prefix(&new_root) {
-				// If the old root is longer than the new root, shorten the keys.
-				roots.push((suffix.to_owned(), absolute.clone()));
-			} else if let Some(suffix) = new_root.strip_prefix(root) {
-				// If the new root is longer than the old root, add a new root.
-				// NOTE: suffix can't be empty
-				roots.push(("".into(), absolute.join(&suffix).to_owned()));
-			}
-		}
-
-		if roots.is_empty() {
-			None
-		} else {
-			Some(self.with_nodes(roots))
-		}
-	}
-
-	fn with_nodes(&self, nodes: Vec<(PathOwned, PathOwned)>) -> Self {
-		Self {
+		Some(Self {
 			tree: self.tree.clone(),
-			nodes,
-		}
+			allowed,
+		})
 	}
 
-	// Returns the absolute path under `tree`, if this handle is allowed to reach it.
-	pub fn get(&self, path: impl AsPath) -> Option<PathOwned> {
-		let path = path.as_path();
+	/// Whether this view reaches the absolute `path`.
+	fn permits(&self, path: &Path) -> bool {
+		self.allowed.matches(path.as_str())
+	}
 
-		for (root, absolute) in &self.nodes {
-			if let Some(suffix) = path.strip_prefix(root) {
-				return Some(absolute.join(&suffix).to_owned());
-			}
-		}
-
-		None
+	/// What this view reaches, named from `root`. Set-valued: `**/a` under the
+	/// root `a` is both the root itself and every deeper `a`.
+	fn relative(&self, root: &Path) -> Patterns {
+		self.allowed.rebase(root.as_str())
 	}
 }
 
-impl Default for OriginNodes {
+impl Default for OriginScope {
 	fn default() -> Self {
 		Self {
 			tree: Lock::new(OriginNode::new()),
-			nodes: vec![("".into(), "".into())],
+			allowed: Patterns::from(Pattern::all()),
 		}
 	}
+}
+
+/// The announce-interest prefixes that cover a scope on a prefix-shaped wire:
+/// each member's literal head, minus any head another one already covers.
+///
+/// A peer answering `room` advertises everything beneath it, so a grant of
+/// `room/*/chat` over-asks and the origin's scope filters what lands. The wire
+/// keeps echoing only the suffix beneath the head; the match is assembled
+/// locally.
+pub(crate) fn interest_prefixes(allowed: &Patterns) -> Vec<PathOwned> {
+	let mut heads: Vec<PathOwned> = allowed
+		.iter()
+		.map(|pattern| Path::new(pattern.head()).to_owned())
+		.collect();
+	heads.sort();
+	heads.dedup();
+	let covered: Vec<PathOwned> = heads.clone();
+	heads.retain(|head| !covered.iter().any(|other| other != head && head.has_prefix(other)));
+	heads
 }
 
 /// A route announcement or retraction, delivered by [`AnnounceConsumer`].
@@ -1077,12 +1068,26 @@ impl Default for OriginNodes {
 /// [`pattern`](Self::pattern) are servable. Resolve a specific path with
 /// [`Consumer::request_broadcast`]; the application decides which paths name
 /// broadcasts.
+///
+/// The update is a match against the cursor's scope, the way a regex match
+/// exposes the whole match and then its groups: [`pattern`](Self::pattern) is
+/// the covered paths inside the scope and [`captures`](Self::captures) is what
+/// each scope wildcard stood for.
 #[derive(Clone, Debug)]
 pub struct AnnounceUpdate {
-	/// What the route covers, relative to the consuming cursor's root. A route
-	/// announced above the cursor's scope is clamped to that scope, which is the
-	/// exact set of covered paths the cursor may see.
+	/// What the route covers inside the cursor's scope, relative to the cursor's
+	/// root: the intersection of the claim with the scope member it matched, which
+	/// is the exact set of covered paths the cursor may see.
 	pub pattern: Pattern,
+	/// One capture per wildcard segment (`*`, `prefix*suffix`, `**`) of the scope
+	/// member that [`pattern`](Self::pattern) matched, in order. A scope of
+	/// `foo/*/chat` matched by a broadcast at `foo/alice/chat` captures `alice`. A
+	/// capture is a pattern because the claim may be one: a broadcast claims its
+	/// subtree, so the same broadcast under `foo/**` captures `alice/chat/**`, and
+	/// a wildcard the claim cannot pin captures itself (`foo/**` under `foo/*/chat`
+	/// captures `*`). When several members of a union scope present the same
+	/// pattern, the most specific one names the captures.
+	pub captures: Vec<Pattern>,
 	/// The route serving the pattern. On a retraction this carries its last
 	/// advertised metadata.
 	pub route: Route,
@@ -1098,9 +1103,8 @@ pub struct Producer {
 	// downstream relays can detect loops and prefer the shortest path.
 	info: Hop,
 
-	// The roots of the tree that we are allowed to publish.
-	// A path of "" means we can publish anything.
-	nodes: OriginNodes,
+	// The tree and the absolute patterns this handle may publish under.
+	scope: OriginScope,
 
 	// The prefix that is automatically stripped from all paths.
 	root: PathOwned,
@@ -1154,13 +1158,13 @@ impl Producer {
 	/// `moq_tokio::origin::spawn` wraps this for tokio callers.
 	pub fn new(config: Config) -> (Self, Driver) {
 		let (tasks, set) = TaskSet::new();
-		let nodes = OriginNodes::default();
+		let scope = OriginScope::default();
 		let shared = kio::Shared::<OriginState>::default();
 		let timers = TimersSlot::default();
 		let pool = config.pool.clone();
 		let producer = Self {
 			info: config.id,
-			nodes: nodes.clone(),
+			scope: scope.clone(),
 			root: PathOwned::default(),
 			shared: shared.clone(),
 			pool: config.pool,
@@ -1173,7 +1177,7 @@ impl Producer {
 		let driver = Driver {
 			state: DriverState {
 				set,
-				nodes,
+				tree: scope.tree,
 				shared,
 				done: false,
 				sweep: None,
@@ -1209,17 +1213,17 @@ impl Producer {
 		self.default_max_age
 	}
 
-	/// A producer with *no* allowed prefixes: it can't publish anything and
-	/// advertises no subscribe interest (its `allowed()` is empty, so the
-	/// subscriber issues no ANNOUNCE_PLEASE). Used to fill an unset session half
-	/// so both the publisher and subscriber loops still run.
+	/// A producer with an empty scope: it can't publish anything and advertises
+	/// no subscribe interest (its `allowed()` is empty, so the subscriber issues
+	/// no ANNOUNCE_PLEASE). Used to fill an unset session half so both the
+	/// publisher and subscriber loops still run.
 	pub(crate) fn empty(info: Hop) -> Self {
-		// No allowed prefixes means no broadcast is ever created, so nothing will
-		// ever be queued on the detached submission handle.
+		// An empty scope means no broadcast is ever created, so nothing will ever
+		// be queued on the detached submission handle.
 		let (tasks, _) = TaskSet::new();
 		Self {
 			info,
-			nodes: OriginNodes::empty(),
+			scope: OriginScope::empty(),
 			root: PathOwned::default(),
 			shared: kio::Shared::default(),
 			pool: cache::Pool::default(),
@@ -1257,7 +1261,7 @@ impl Producer {
 	/// the spliced tracks with an error, so consumers observe a failure rather
 	/// than a clean end.
 	///
-	/// Fails with [`Error::Unauthorized`] if `path` is outside the prefixes this
+	/// Fails with [`Error::Unauthorized`] if `path` is outside the patterns this
 	/// producer may publish under (after [`scope`](Self::scope) /
 	/// [`with_root`](Self::with_root)), [`Error::BoundsExceeded`] if the full
 	/// rooted subtree claim exceeds [`Pattern::MAX_SEGMENTS`],
@@ -1274,12 +1278,13 @@ impl Producer {
 			return Err(Error::Closed);
 		}
 
-		// `get` resolves the path against the tree root, which is the same absolute
-		// path the handle's own root produces: an allowed prefix is always stored
-		// alongside its absolute position. So one path serves both the front's
-		// identity and its position in the tree.
-		let full = self.nodes.get(&path).ok_or(Error::Unauthorized)?;
-		let tree = self.nodes.tree.clone();
+		// The scope holds absolute patterns, so the rooted path serves both the
+		// front's identity and its position in the tree.
+		let full = self.root.join(&path).to_owned();
+		if !self.scope.permits(&full) {
+			return Err(Error::Unauthorized);
+		}
+		let tree = self.scope.tree.clone();
 
 		// A decoded prefix and suffix are each within the wire limit, but their
 		// join might not be. Enforcing here bounds the tree depth and guarantees the path
@@ -1291,17 +1296,18 @@ impl Producer {
 		// Resolve the ingress counters once, keyed by the absolute broadcast path.
 		let ingress = self.stats.ingress(&full);
 
-		// The broadcast advertises its own exact path: the path is in scope (checked
-		// above), so it clamps to itself under every root that covers it.
+		// The broadcast advertises its own path as a subtree claim, the shape the
+		// wire carries; a scope that grants less than the subtree clamps it.
+		let subtree = Pattern::subtree(full.as_str()).map_err(|err| match err {
+			crate::InvalidPattern::TooManySegments => Error::from(BoundsExceeded),
+			_ => Error::Unsupported,
+		})?;
 		let announcer = Announcer {
 			announcing: Announcing {
 				hop: self.info,
 				shared: self.shared.clone(),
 				requested: full.clone(),
-				patterns: vec![Pattern::subtree(full.as_str()).map_err(|err| match err {
-					crate::InvalidPattern::TooManySegments => Error::from(BoundsExceeded),
-					_ => Error::Unsupported,
-				})?],
+				patterns: self.scope.allowed.intersect(&Patterns::from(subtree)),
 				stats: self.stats.clone(),
 			},
 			current: None,
@@ -1377,30 +1383,30 @@ impl Producer {
 	/// [`Dynamic`] handler, which serve what they claim.
 	#[cfg(test)]
 	pub(crate) fn announce(&self, prefix: impl AsPath, route: Route) -> Result<AnnounceProducer, Error> {
-		Announcing::new(self, prefix)?.announce(route, None)
+		let pattern = Pattern::subtree(prefix.as_path().as_str()).map_err(|_| Error::Unsupported)?;
+		Announcing::pattern(self, pattern)?.announce(route, None)
 	}
 
 	/// Advertise a route and serve the requests beneath it.
 	///
 	/// `pattern` is in the [`Pattern`] dialect; a prefix is spelled `foo/**`.
-	/// A non-prefix pattern is advertised as a covering claim; resolving one
-	/// into a subscription is not implemented yet, so only prefix-shaped
-	/// patterns currently serve [`Consumer::request_broadcast`].
+	/// A consumer resolving a path the pattern matches that no local broadcast
+	/// covers is handed to the handler as a [`Request`] to materialize on
+	/// demand. This is how a service answers a whole subtree without publishing
+	/// each path, and how sessions land the routes a peer announces to them; a
+	/// publisher that knows its broadcasts advertises each one's exact path with
+	/// [`broadcast::Producer::announce`] instead, so subscribers can enumerate
+	/// them.
 	///
 	/// The advertisement is visible to [`Consumer::announced`] and forwarded by
 	/// sessions for as long as the returned [`Dynamic`] (and every clone) lives.
-	/// A consumer resolving a path under a prefix-shaped pattern that no local
-	/// broadcast covers is handed to the handler as a [`Request`] to materialize
-	/// on demand. This is how a service answers a whole subtree without
-	/// publishing each path, and how sessions land the routes a peer announces
-	/// to them; a publisher that knows its broadcasts advertises each one's
-	/// exact path with [`broadcast::Producer::announce`] instead, so subscribers
-	/// can enumerate them.
 	///
-	/// The advertised pattern must be contained by `prefix/**` for one of this
-	/// producer's prefixes; an over-wide claim is refused rather than clamped.
-	/// Fails with [`Error::Unauthorized`] when it is not contained, and
-	/// [`Error::Closed`] once the origin's [`Driver`] has been dropped.
+	/// The claim is clamped to this producer's scope: what it advertises, and
+	/// what the handler is asked for, is the intersection of `pattern` with the
+	/// scope, so a peer announcing a whole subtree under a grant of `room/*/chat`
+	/// serves exactly the chats. Fails with [`Error::Unauthorized`] when nothing
+	/// of the claim is in scope, and [`Error::Closed`] once the origin's
+	/// [`Driver`] has been dropped.
 	pub fn dynamic(&self, pattern: Pattern, route: Route) -> Result<Dynamic, Error> {
 		let announcing = Announcing::pattern(self, pattern)?;
 		let serve = kio::Shared::<ServeState>::default();
@@ -1414,40 +1420,17 @@ impl Producer {
 		})
 	}
 
-	/// Clamp an absolute `requested` prefix against each allowed root: the
-	/// intersection is exactly the set of covered paths this producer may claim,
-	/// one entry per intersecting root (a broad route through a multi-prefix
-	/// token covers each of them).
-	#[cfg(test)]
-	fn clamp_prefix(&self, requested: &PathOwned) -> Result<Vec<PathOwned>, Error> {
-		if requested.parts().count() > Path::MAX_PARTS {
-			return Err(BoundsExceeded.into());
-		}
-		let prefixes: Vec<PathOwned> = self
-			.nodes
-			.nodes
-			.iter()
-			.filter_map(|(allowed, _)| {
-				let allowed = self.root.join(allowed).to_owned();
-				intersect_prefix(&requested.as_path(), &allowed.as_path())
-			})
-			.collect();
-		if prefixes.is_empty() {
-			return Err(Error::Unauthorized);
-		}
-		Ok(prefixes)
-	}
-
-	/// Returns a new Producer restricted to publishing under one of `patterns`.
+	/// Returns a new Producer restricted to publishing under `patterns`, relative
+	/// to this producer's root.
 	///
-	/// Each member must be prefix-shaped (`foo/**` for the old `foo` prefix, `**` for
-	/// the old empty prefix). Returns None when any member cannot be represented yet
-	/// (an exact `foo`, the empty pattern, a suffix, or any segment wildcard), or when
-	/// the requested patterns are disjoint from this producer's current scope.
+	/// The new scope is the intersection of the current one with `patterns`: a
+	/// grant never widens, and nesting narrows. Any pattern union works, so a
+	/// grant of `room/*/chat` publishes exactly the chats. Returns `None` when
+	/// nothing of `patterns` lies inside the current scope.
 	pub fn scope(&self, patterns: &Patterns) -> Option<Producer> {
 		Some(Producer {
 			info: self.info,
-			nodes: self.nodes.select(patterns)?,
+			scope: self.scope.narrow(&self.rooted(patterns))?,
 			root: self.root.clone(),
 			shared: self.shared.clone(),
 			pool: self.pool.clone(),
@@ -1457,6 +1440,15 @@ impl Producer {
 			tasks: self.tasks.clone(),
 			timers: self.timers.clone(),
 		})
+	}
+
+	/// The root-relative `patterns` as absolute patterns. A member too deep to
+	/// root is dropped: it could match no path the wire can carry.
+	fn rooted(&self, patterns: &Patterns) -> Patterns {
+		patterns
+			.iter()
+			.filter_map(|pattern| pattern.rooted(self.root.as_str()).ok())
+			.collect()
 	}
 
 	/// Cheap read handle over this origin's broadcast tree.
@@ -1471,15 +1463,19 @@ impl Producer {
 
 	/// Returns a new Producer that automatically strips out the provided prefix.
 	///
-	/// Returns None if the provided root is not authorized; when [`Self::scope`]
-	/// was already used without a wildcard.
+	/// The scope is unchanged and merely renamed from the new root, so an exact
+	/// grant stays exact. Returns `None` when nothing in scope lies under the
+	/// new root.
 	pub fn with_root(&self, prefix: impl AsPath) -> Option<Self> {
-		let prefix = prefix.as_path();
+		let root = self.root.join(prefix).to_owned();
+		if self.scope.relative(&root).is_empty() {
+			return None;
+		}
 
 		Some(Self {
 			info: self.info,
-			root: self.root.join(&prefix).to_owned(),
-			nodes: self.nodes.root(&prefix)?,
+			root,
+			scope: self.scope.clone(),
 			shared: self.shared.clone(),
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
@@ -1495,14 +1491,9 @@ impl Producer {
 		&self.root
 	}
 
-	/// The granted scopes as prefix-shaped patterns: `foo/**` for the old `foo`
-	/// prefix, `**` for the old empty prefix.
+	/// The patterns this producer may publish under, relative to its root.
 	pub fn allowed(&self) -> Patterns {
-		self.nodes
-			.nodes
-			.iter()
-			.map(|(root, _)| Pattern::subtree(root.as_str()).expect("scope roots are literal paths"))
-			.collect()
+		self.scope.relative(&self.root)
 	}
 
 	/// Converts a relative path to an absolute path.
@@ -1513,7 +1504,7 @@ impl Producer {
 	/// Nodes in the whole path tree, counting the root. Test-only.
 	#[cfg(test)]
 	pub(crate) fn node_count(&self) -> usize {
-		self.nodes.tree.lock().count()
+		self.scope.tree.lock().count()
 	}
 }
 
@@ -1523,45 +1514,23 @@ impl Producer {
 struct Announcing {
 	hop: Hop,
 	shared: kio::Shared<OriginState>,
-	/// The absolute prefix as requested, before clamping: what the ingress
+	/// The absolute claim as requested, before clamping: what the ingress
 	/// announce counters are keyed by.
 	requested: PathOwned,
-	/// The patterns inserted into the table: clamped prefix-shaped routes, or
-	/// one contained pattern advertisement.
-	patterns: Vec<Pattern>,
+	/// The patterns inserted into the table: the claim clamped to the producer's
+	/// scope, one entry per intersection.
+	patterns: Patterns,
 	stats: stats::Session,
 }
 
 impl Announcing {
-	#[cfg(test)]
-	fn new(producer: &Producer, prefix: impl AsPath) -> Result<Self, Error> {
-		let requested = producer.root.join(prefix.as_path()).to_owned();
-		let prefixes = producer.clamp_prefix(&requested)?;
-		let patterns = prefixes
-			.into_iter()
-			.map(|prefix| Pattern::subtree(prefix.as_str()).expect("a clamped prefix cannot contain '*'"))
-			.collect();
-		Ok(Self {
-			hop: producer.info,
-			shared: producer.shared.clone(),
-			requested,
-			patterns,
-			stats: producer.stats.clone(),
-		})
-	}
-
 	fn pattern(producer: &Producer, pattern: Pattern) -> Result<Self, Error> {
 		let advertised = pattern.rooted(producer.root.as_str()).map_err(|_| BoundsExceeded)?;
 		if advertised.segments().len() > Path::MAX_PARTS {
 			return Err(BoundsExceeded.into());
 		}
-		let contained = producer.nodes.nodes.iter().any(|(allowed, _)| {
-			let allowed = producer.root.join(allowed);
-			Pattern::subtree(allowed.as_str())
-				.map(|scope| scope.contains(&advertised))
-				.unwrap_or(false)
-		});
-		if !contained {
+		let patterns = producer.scope.allowed.intersect(&Patterns::from(advertised.clone()));
+		if patterns.is_empty() {
 			return Err(Error::Unauthorized);
 		}
 		let requested = Path::new(advertised.as_prefix().unwrap_or_else(|| advertised.as_str())).to_owned();
@@ -1569,7 +1538,7 @@ impl Announcing {
 			hop: producer.info,
 			shared: producer.shared.clone(),
 			requested,
-			patterns: vec![advertised],
+			patterns,
 			stats: producer.stats.clone(),
 		})
 	}
@@ -1655,8 +1624,8 @@ impl Announcer {
 #[must_use = "dropping an announcement retracts the route"]
 pub(crate) struct AnnounceProducer {
 	shared: kio::Shared<OriginState>,
-	/// The table entries this advertisement created: one per allowed root the
-	/// requested prefix intersected.
+	/// The table entries this advertisement created: one per intersection of
+	/// the claim with the producer's scope.
 	ids: Vec<u64>,
 	/// Ingress announce stats guard, held for the advertisement's lifetime.
 	_guard: stats::Announce,
@@ -1676,7 +1645,7 @@ impl AnnounceProducer {
 			return Err(Error::Closed);
 		}
 		for id in &self.ids {
-			// Each entry keeps its clamped prefix; only the metadata moves.
+			// Each entry keeps its clamped pattern; only the metadata moves.
 			let Some(entry) = shared.routes.iter_mut().find(|entry| entry.id == *id) else {
 				continue;
 			};
@@ -1756,7 +1725,7 @@ struct DriverState {
 	/// Source watchers, fronts, and serve tasks: producers submit, this polls.
 	set: TaskSet,
 	/// The whole broadcast tree, for the teardown walk on drop.
-	nodes: OriginNodes,
+	tree: Lock<OriginNode>,
 	/// The route table, announce cursors, and the remotely-served fronts, for
 	/// ending everything on drop.
 	shared: kio::Shared<OriginState>,
@@ -1919,7 +1888,7 @@ impl DriverState {
 			}
 		}
 
-		teardown_broadcasts(&self.nodes.tree);
+		teardown_broadcasts(&self.tree);
 	}
 }
 
@@ -3005,65 +2974,69 @@ struct OriginState {
 }
 
 impl OriginState {
-	/// Re-deliver the best route at every presented residual `pattern` maps to, on
+	/// Re-deliver the best route at every presented pattern `pattern` maps to, on
 	/// every cursor. Called after an entry covering `pattern` was added, updated,
 	/// or removed.
 	fn sync_route(&mut self, pattern: &Pattern) {
 		// Split borrows: the recompute reads `routes` while mutating a cursor.
 		let routes = &self.routes;
 		for cursor in self.cursors.values_mut() {
-			for presented in cursor.presented(pattern) {
-				Self::sync_cursor(routes, cursor, &presented);
+			for (presented, captures) in cursor.presented(pattern) {
+				Self::sync_cursor(routes, cursor, &presented, captures);
 			}
 		}
 	}
 
 	/// Recompute the best visible route presenting at `presented` (relative) for
 	/// one cursor and deliver the change, if any.
-	fn sync_cursor(routes: &[RouteEntry], cursor: &mut TableCursor, presented: &Pattern) {
+	fn sync_cursor(routes: &[RouteEntry], cursor: &mut TableCursor, presented: &Pattern, captures: Vec<Pattern>) {
 		// Among entries presenting here, the most specific pattern wins outright,
 		// so the metadata a cursor advertises matches what a request through it
-		// actually resolves. Prefix-shaped routes still shadow broader ones.
+		// actually resolves. Prefix-shaped routes still shadow broader ones. Ties
+		// break on the entry's own pattern, as `best_route` does: a narrow scope
+		// can collapse distinct claims onto one presented pattern.
 		let candidates: Vec<&RouteEntry> = routes
 			.iter()
 			.filter(|entry| cursor.visible(entry))
-			.filter(|entry| cursor.presented(&entry.pattern).contains(presented))
+			.filter(|entry| cursor.presented(&entry.pattern).iter().any(|(p, _)| p == presented))
 			.collect();
 		let most = candidates.iter().map(|entry| entry.pattern.specificity()).max();
 		let best = most.and_then(|most| {
 			candidates
 				.into_iter()
 				.filter(|entry| entry.pattern.specificity() == most)
-				.min_by_key(|entry| route_order(presented, entry))
+				.min_by_key(|entry| route_order(&entry.pattern, entry))
 		});
 
 		match best {
 			Some(entry) => {
 				let meta = (entry.hops.clone(), entry.cost);
 				let served = entry.server.is_some();
-				match cursor
-					.current
-					.insert(presented.clone(), (entry.id, meta.clone(), served))
-				{
+				let delivered = Delivered {
+					meta: meta.clone(),
+					served,
+					captures: captures.clone(),
+				};
+				match cursor.current.insert(presented.clone(), delivered) {
 					// Unchanged metadata and servability: nothing the consumer could
 					// act on, even if the winning entry itself changed (a reconnect
 					// under an identical route is invisible, which is the point). A
 					// servability flip is delivered: a request that failed Unroutable
 					// under an advertise-only route retries on the update, and hiding
 					// it would park that waiter forever.
-					Some((_, prev, prev_served)) if prev == meta && prev_served == served => {}
+					Some(prev) if prev.meta == meta && prev.served == served => {}
 					_ => {
 						if let Ok(mut state) = cursor.state.write() {
-							state.apply_announce(presented.clone(), meta);
+							state.apply_announce(presented.clone(), captures, meta);
 						}
 					}
 				}
 			}
 			None => {
-				if let Some((_, last, _)) = cursor.current.remove(presented)
+				if let Some(last) = cursor.current.remove(presented)
 					&& let Ok(mut state) = cursor.state.write()
 				{
-					state.apply_unannounce(presented.clone(), last);
+					state.apply_unannounce(presented.clone(), last.captures, last.meta);
 				}
 			}
 		}
@@ -3072,16 +3045,16 @@ impl OriginState {
 	/// Register a cursor and replay the current best route per presented pattern.
 	fn register_cursor(&mut self, id: ConsumerId, mut cursor: TableCursor) {
 		let routes = &self.routes;
-		let mut presented: Vec<Pattern> = Vec::new();
+		let mut presented: Vec<(Pattern, Vec<Pattern>)> = Vec::new();
 		for entry in routes {
-			for p in cursor.presented(&entry.pattern) {
-				if !presented.contains(&p) {
-					presented.push(p);
+			for (p, captures) in cursor.presented(&entry.pattern) {
+				if !presented.iter().any(|(seen, _)| *seen == p) {
+					presented.push((p, captures));
 				}
 			}
 		}
-		for p in &presented {
-			Self::sync_cursor(routes, &mut cursor, p);
+		for (p, captures) in presented {
+			Self::sync_cursor(routes, &mut cursor, &p, captures);
 		}
 		self.cursors.insert(id, cursor);
 	}
@@ -3089,10 +3062,10 @@ impl OriginState {
 	/// The best served route covering `path` (absolute) for a requester excluding
 	/// `exclude`, skipping the `refused` entry ids.
 	///
-	/// The most specific covering prefix wins outright, so a narrow advertise-only
+	/// The most specific covering pattern wins outright, so a narrow advertise-only
 	/// announcement shadows a broad served one: requests under it resolve
 	/// unroutable instead of being routed around it. Among routes at the winning
-	/// prefix, the cheapest served one is picked by [`route_order`].
+	/// specificity, the cheapest served one is picked by [`route_order`].
 	///
 	/// With `publisher` set, only routes originated by that first hop are
 	/// candidates: this is the identity a front resumes through, and a route from
@@ -3109,11 +3082,7 @@ impl OriginState {
 		let candidates: Vec<&RouteEntry> = self
 			.routes
 			.iter()
-			.filter(|entry| match entry.pattern.as_prefix() {
-				// Wildcard advertisements are not resolved into a subscription yet.
-				Some(prefix) => path.has_prefix(Path::new(prefix)),
-				None => false,
-			})
+			.filter(|entry| entry.pattern.matches(path.as_str()))
 			.filter(|entry| entry.visible_to(exclude))
 			.filter(|entry| match publisher {
 				Some(first) => entry.hops.iter().next() == Some(&first),
@@ -3122,16 +3091,10 @@ impl OriginState {
 			.filter(|entry| !refused.contains(&entry.id))
 			.collect();
 
-		// Covering prefixes of one path form a chain, so the longest is unique.
-		let most = candidates
-			.iter()
-			.filter_map(|entry| entry.pattern.as_prefix().map(|prefix| prefix.len()))
-			.max()?;
+		let most = candidates.iter().map(|entry| entry.pattern.specificity()).max()?;
 		candidates
 			.into_iter()
-			.filter(|entry| {
-				entry.pattern.as_prefix().map(|prefix| prefix.len()) == Some(most) && entry.server.is_some()
-			})
+			.filter(|entry| entry.pattern.specificity() == most && entry.server.is_some())
 			.min_by_key(|entry| route_order(&entry.pattern, entry))
 	}
 }
@@ -3513,7 +3476,9 @@ impl Consume<track::Consumer> for track::Consumer {
 pub struct Consumer {
 	// Identity of the origin this consumer was derived from.
 	info: Hop,
-	nodes: OriginNodes,
+
+	// The tree and the absolute patterns this handle may reach.
+	scope: OriginScope,
 
 	// A prefix that is automatically stripped from all paths.
 	root: PathOwned,
@@ -3559,7 +3524,7 @@ impl Consumer {
 	fn from_producer(producer: &Producer, stats: stats::Session) -> Self {
 		Self {
 			info: producer.info,
-			nodes: producer.nodes.clone(),
+			scope: producer.scope.clone(),
 			root: producer.root.clone(),
 			shared: producer.shared.clone(),
 			stats,
@@ -3605,7 +3570,7 @@ impl Consumer {
 	/// rather than tearing the stream down.
 	pub(crate) fn empty(&self) -> Self {
 		Self {
-			nodes: OriginNodes::empty(),
+			scope: OriginScope::empty(),
 			..self.clone()
 		}
 	}
@@ -3613,25 +3578,18 @@ impl Consumer {
 	/// Subscribe to route announcements for this consumer's scope.
 	///
 	/// Allocates a per-cursor coalescing buffer and replays the currently
-	/// announced routes as initial updates. A route announced above the scope is
-	/// clamped to it. Drop the returned [`AnnounceConsumer`] to unregister.
+	/// announced routes as initial updates. Each update is the route's claim
+	/// clamped to the scope, with the captures the matching scope member pins
+	/// (see [`AnnounceUpdate`]). Drop the returned [`AnnounceConsumer`] to
+	/// unregister.
 	pub fn announced(&self) -> AnnounceConsumer {
 		AnnounceConsumer::new(
 			self.root.clone(),
-			self.allowed_absolute(),
+			&self.allowed(),
 			self.stats.clone(),
 			self.exclude,
 			&self.shared,
 		)
-	}
-
-	/// The absolute prefixes this handle is scoped to.
-	fn allowed_absolute(&self) -> Vec<PathOwned> {
-		self.nodes
-			.nodes
-			.iter()
-			.map(|(allowed, _)| self.root.join(allowed).to_owned())
-			.collect()
 	}
 
 	/// Returns a cheap duplicate of this read handle.
@@ -3641,10 +3599,12 @@ impl Consumer {
 
 	/// Internal synchronous lookup: the local broadcast at `path`, if any.
 	fn resolve(&self, path: impl AsPath) -> Option<broadcast::Consumer> {
-		let path = path.as_path();
-		let rest = self.nodes.get(&path)?;
-		let state = self.nodes.tree.lock();
-		state.resolve_broadcast(&rest)
+		let full = self.root.join(path).to_owned();
+		if !self.scope.permits(&full) {
+			return None;
+		}
+		let state = self.scope.tree.lock();
+		state.resolve_broadcast(&full)
 	}
 
 	/// [`Self::resolve`] as the peek the tests assert on.
@@ -3751,15 +3711,21 @@ impl Consumer {
 		}
 	}
 
-	/// Returns a new Consumer restricted to broadcasts under one of `patterns`.
+	/// Returns a new Consumer restricted to broadcasts matching `patterns`,
+	/// relative to this consumer's root.
 	///
-	/// Each member must be prefix-shaped (`foo/**` for the old `foo` prefix, `**` for
-	/// the old empty prefix). Returns None when any member cannot be represented yet
-	/// (an exact `foo`, the empty pattern, a suffix, or any segment wildcard), or when
-	/// the requested patterns are disjoint from this consumer's current scope.
+	/// The new scope is the intersection of the current one with `patterns`: a
+	/// grant never widens, and nesting narrows. Any pattern union works, so a
+	/// grant of `room/*/chat` reaches exactly the chats, in announcements and in
+	/// [`request_broadcast`](Self::request_broadcast) alike. Returns `None` when
+	/// nothing of `patterns` lies inside the current scope.
 	pub fn scope(&self, patterns: &Patterns) -> Option<Consumer> {
+		let rooted: Patterns = patterns
+			.iter()
+			.filter_map(|pattern| pattern.rooted(self.root.as_str()).ok())
+			.collect();
 		Some(Consumer {
-			nodes: self.nodes.select(patterns)?,
+			scope: self.scope.narrow(&rooted)?,
 			..self.clone()
 		})
 	}
@@ -3806,7 +3772,7 @@ impl Consumer {
 		}
 
 		// Routes only cover paths within this consumer's scope.
-		if self.nodes.get(&path).is_none() {
+		if !self.scope.permits(&absolute) {
 			return kio::Pending::new(Pending::failed(Error::Unroutable));
 		}
 
@@ -3884,16 +3850,15 @@ impl Consumer {
 
 	/// Returns a new Consumer that automatically strips out the provided prefix.
 	///
-	/// Returns None if the provided root is not authorized; when [`Self::scope`] was
-	/// already used without a wildcard.
+	/// The scope is unchanged and merely renamed from the new root, so an exact
+	/// grant stays exact. Returns `None` when nothing in scope lies under the
+	/// new root.
 	pub fn with_root(&self, prefix: impl AsPath) -> Option<Self> {
-		let prefix = prefix.as_path();
-
-		Some(Self {
-			root: self.root.join(&prefix).to_owned(),
-			nodes: self.nodes.root(&prefix)?,
-			..self.clone()
-		})
+		let root = self.root.join(prefix).to_owned();
+		if self.scope.relative(&root).is_empty() {
+			return None;
+		}
+		Some(Self { root, ..self.clone() })
 	}
 
 	/// Returns the prefix that is automatically stripped from all paths.
@@ -3901,14 +3866,9 @@ impl Consumer {
 		&self.root
 	}
 
-	/// The granted scopes as prefix-shaped patterns: `foo/**` for the old `foo`
-	/// prefix, `**` for the old empty prefix.
+	/// The patterns this consumer may reach, relative to its root.
 	pub fn allowed(&self) -> Patterns {
-		self.nodes
-			.nodes
-			.iter()
-			.map(|(root, _)| Pattern::subtree(root.as_str()).expect("scope roots are literal paths"))
-			.collect()
+		self.scope.relative(&self.root)
 	}
 
 	/// Converts a relative path to an absolute path.
@@ -3943,7 +3903,7 @@ pub struct AnnounceConsumer {
 impl AnnounceConsumer {
 	fn new(
 		root: PathOwned,
-		allowed: Vec<PathOwned>,
+		allowed: &Patterns,
 		stats: stats::Session,
 		exclude: Option<Hop>,
 		shared: &kio::Shared<OriginState>,
@@ -3959,16 +3919,7 @@ impl AnnounceConsumer {
 					state.ended = true;
 				}
 			} else {
-				table.register_cursor(
-					id,
-					TableCursor {
-						root: root.clone(),
-						allowed,
-						exclude,
-						state: state.clone(),
-						current: HashMap::new(),
-					},
-				);
+				table.register_cursor(id, TableCursor::new(root.clone(), allowed, exclude, state.clone()));
 			}
 		}
 
@@ -4177,6 +4128,11 @@ mod tests {
 	}
 
 	/// The scope granting these prefixes: each spelled as its subtree pattern.
+	/// A union of patterns spelled as written.
+	fn scopes_of(texts: &[&str]) -> Patterns {
+		texts.iter().map(|text| text.parse::<Pattern>().unwrap()).collect()
+	}
+
 	fn scopes(prefixes: &[&str]) -> Patterns {
 		prefixes.iter().map(|prefix| subtree(prefix)).collect()
 	}
@@ -4753,19 +4709,29 @@ mod tests {
 		assert_eq!(texts, ["", "**/a"]);
 	}
 
-	#[test]
-	fn wildcard_scope_is_refused_not_clamped() {
+	#[tokio::test]
+	async fn wildcard_claim_clamps_to_scope() {
 		let producer = origin(1).produce();
 		let scoped = producer.scope(&scopes(&["room"])).unwrap();
-		let err = scoped
+		let mut announced = producer.consume().announced();
+
+		// An over-wide claim advertises only what the scope grants.
+		let _all = scoped
 			.dynamic("**".parse().unwrap(), Route::default())
-			.err()
-			.expect("an over-wide pattern is refused");
-		assert!(matches!(err, Error::Unauthorized));
+			.expect("an over-wide pattern is clamped");
+		announced.assert_next_active("room");
 
 		let _ok = scoped
 			.dynamic("room/*".parse().unwrap(), Route::default())
 			.expect("a contained pattern is accepted");
+		assert_eq!(announced.try_next().unwrap().pattern.as_str(), "room/*");
+
+		// A disjoint claim has nothing to clamp to.
+		let err = scoped
+			.dynamic("other/*".parse().unwrap(), Route::default())
+			.err()
+			.expect("a disjoint pattern is refused");
+		assert!(matches!(err, Error::Unauthorized));
 	}
 
 	#[tokio::test]
@@ -5723,53 +5689,346 @@ mod tests {
 	}
 
 	#[test]
-	fn scope_refuses_non_prefix_grants() {
+	fn scope_accepts_every_pattern_union() {
 		let producer = origin(1).produce();
-		let refused = |text: &str| {
+		for text in ["room", "", "*room", "room/*", "*", "**/room", "room/**/chat", "*.hang"] {
 			let pattern: Pattern = text.parse().unwrap();
 			let union = Patterns::from(pattern);
-			assert!(
-				producer.scope(&union).is_none(),
-				"{text} is not a prefix grant and must be refused"
-			);
-			assert!(
-				producer.consume().scope(&union).is_none(),
-				"{text} is not a prefix grant and must be refused"
-			);
-		};
+			assert_eq!(producer.scope(&union).expect(text).allowed(), union, "{text}");
+			assert_eq!(producer.consume().scope(&union).expect(text).allowed(), union, "{text}");
+		}
 
-		// An exact path is not a grant over its subtree.
-		refused("room");
-		// The empty pattern names only the root, not everything beneath it.
-		refused("");
-		// Suffixes and segment wildcards name sets a prefix cannot cover.
-		refused("*room");
-		refused("room/*");
-		refused("*");
-		// A `**` anywhere but the end is not a subtree.
-		refused("**/room");
-		refused("room/**/chat");
-	}
-
-	#[test]
-	fn scope_validates_the_whole_union() {
-		let producer = origin(1).produce();
-
-		// A supported member cannot conceal an unsupported one: neither member
-		// contains the other, so both survive reduction and the union is refused.
+		// A union keeps every member, prefix-shaped or not.
 		let mixed: Patterns = ["room/**".parse().unwrap(), "other".parse().unwrap()]
 			.into_iter()
 			.collect();
-		assert_eq!(mixed.len(), 2);
-		assert!(producer.scope(&mixed).is_none());
-		assert!(producer.consume().scope(&mixed).is_none());
+		assert_eq!(producer.scope(&mixed).unwrap().allowed(), mixed);
+	}
 
-		let mixed: Patterns = ["room/**".parse().unwrap(), "other/*.jpg".parse().unwrap()]
+	#[test]
+	fn interest_prefixes_are_minimal_heads() {
+		let allowed = scopes_of(&["room/*/chat", "room/lobby/**", "**/audio", "other/x"]);
+		assert_eq!(
+			interest_prefixes(&allowed),
+			vec![PathOwned::default()],
+			"a leading wildcard asks for everything"
+		);
+		let allowed = scopes_of(&["room/*/chat", "room/lobby/**", "other/x"]);
+		assert_eq!(
+			interest_prefixes(&allowed),
+			vec![Path::new("other/x").to_owned(), Path::new("room").to_owned()],
+			"a head another head covers is not asked for twice"
+		);
+		assert!(interest_prefixes(&Patterns::new()).is_empty());
+	}
+
+	#[test]
+	fn exact_grant_publishes_only_that_path() {
+		let producer = origin(1).produce();
+		let scoped = producer
+			.scope(&Patterns::from("room/alice".parse::<Pattern>().unwrap()))
+			.unwrap();
+
+		let mut ok = scoped.create_broadcast("room/alice").expect("the granted path");
+		assert!(matches!(
+			scoped.create_broadcast("room/alice/cam"),
+			Err(Error::Unauthorized)
+		));
+		assert!(matches!(scoped.create_broadcast("room/bob"), Err(Error::Unauthorized)));
+		assert!(matches!(scoped.create_broadcast("room"), Err(Error::Unauthorized)));
+
+		// The reader side enforces the same hole: an exact grant reaches nothing beneath it.
+		let consumer = producer.consume().scope(&scoped.allowed()).unwrap();
+		let mut deeper = producer.create_broadcast("room/alice/cam").unwrap();
+		assert!(consumer.get_broadcast("room/alice").is_some());
+		assert!(consumer.get_broadcast("room/alice/cam").is_none());
+		ok.finish();
+		deeper.finish();
+	}
+
+	#[test]
+	fn nested_scope_intersects_partial_overlaps() {
+		let producer = origin(1).produce();
+		let rooms = producer
+			.scope(&Patterns::from("room/*".parse::<Pattern>().unwrap()))
+			.unwrap();
+		let chats = rooms
+			.scope(&Patterns::from("*/chat".parse::<Pattern>().unwrap()))
+			.unwrap();
+		assert_eq!(chats.allowed(), Patterns::from("room/chat".parse::<Pattern>().unwrap()));
+
+		// Two `**` runs meet in more than one way; nothing is lost.
+		let both = producer
+			.scope(&Patterns::from("a/**".parse::<Pattern>().unwrap()))
+			.unwrap()
+			.scope(&Patterns::from("**/a".parse::<Pattern>().unwrap()))
+			.unwrap();
+		assert_eq!(both.allowed(), scopes_of(&["a", "a/**/a"]));
+	}
+
+	#[test]
+	fn with_root_keeps_exact_grants() {
+		let producer = origin(1).produce();
+		let exact = producer
+			.scope(&Patterns::from("room/alice".parse::<Pattern>().unwrap()))
+			.unwrap();
+
+		let rooted = exact.with_root("room").unwrap();
+		assert_eq!(rooted.allowed(), Patterns::from("alice".parse::<Pattern>().unwrap()));
+		let leaf = rooted.with_root("alice").unwrap();
+		assert_eq!(leaf.allowed(), Patterns::from(Pattern::default()));
+		assert!(leaf.with_root("cam").is_none(), "nothing lies beneath an exact grant");
+		assert!(
+			exact.with_root("room/bob").is_none(),
+			"a disjoint root is refused, not widened"
+		);
+
+		// A suffix grant rebases set-valued: the root itself and every deeper match.
+		let suffix = producer
+			.consume()
+			.scope(&Patterns::from("**/a".parse::<Pattern>().unwrap()))
+			.unwrap();
+		assert_eq!(suffix.with_root("a").unwrap().allowed(), scopes_of(&["", "**/a"]));
+	}
+
+	#[tokio::test]
+	async fn segment_wildcard_scope_filters_and_captures() {
+		let producer = origin(1).produce();
+		let consumer = producer
+			.consume()
+			.scope(&Patterns::from("room/*/chat".parse::<Pattern>().unwrap()))
+			.unwrap();
+		let mut announced = consumer.announced();
+
+		// Broadcasts announce their subtree; the scope clamps each to the chat it grants.
+		let mut alice = producer.create_broadcast("room/alice/chat").unwrap();
+		alice.announce(Route::default()).unwrap();
+		let update = announced.try_next().expect("alice's chat");
+		assert_eq!(update.pattern.as_str(), "room/alice/chat");
+		assert_eq!(update.captures, vec!["alice".parse::<Pattern>().unwrap()]);
+
+		// Neither a sibling track nor a stranger's room presents at all.
+		let mut audio = producer.create_broadcast("room/alice/audio").unwrap();
+		audio.announce(Route::default()).unwrap();
+		let mut lobby = producer.create_broadcast("lobby/alice/chat").unwrap();
+		lobby.announce(Route::default()).unwrap();
+		announced.assert_next_wait();
+
+		// A subtree claim the scope cannot pin presents the scope's own wildcard.
+		let broad = producer.dynamic("room/**".parse().unwrap(), Route::default()).unwrap();
+		let update = announced.try_next().expect("the broad claim, clamped");
+		assert_eq!(update.pattern.as_str(), "room/*/chat");
+		assert_eq!(update.captures, vec!["*".parse::<Pattern>().unwrap()]);
+		drop(broad);
+		let ended = announced.try_next().expect("retraction");
+		assert_eq!(ended.pattern.as_str(), "room/*/chat");
+		assert_eq!(ended.captures, vec!["*".parse::<Pattern>().unwrap()]);
+		assert!(!ended.active);
+
+		// Resolution enforces the same boundary: the audio path exists, and is refused.
+		assert!(consumer.get_broadcast("room/alice/chat").is_some());
+		assert!(consumer.get_broadcast("room/alice/audio").is_none());
+		assert!(matches!(
+			consumer.request_broadcast("room/alice/audio").now_or_never().unwrap(),
+			Err(Error::Unroutable)
+		));
+		alice.finish();
+		audio.finish();
+		lobby.finish();
+	}
+
+	#[tokio::test]
+	async fn suffix_scope_captures_the_leading_run() {
+		let producer = origin(1).produce();
+		let consumer = producer
+			.consume()
+			.scope(&Patterns::from("**/chat".parse::<Pattern>().unwrap()))
+			.unwrap();
+		let mut announced = consumer.announced();
+
+		let mut deep = producer.create_broadcast("room/alice/chat").unwrap();
+		deep.announce(Route::default()).unwrap();
+		let update = announced.try_next().expect("deep chat");
+		assert_eq!(update.pattern.as_str(), "room/alice/chat");
+		assert_eq!(update.captures, vec!["room/alice".parse::<Pattern>().unwrap()]);
+
+		let mut top = producer.create_broadcast("chat").unwrap();
+		top.announce(Route::default()).unwrap();
+		let update = announced.try_next().expect("top-level chat");
+		assert_eq!(update.pattern.as_str(), "chat");
+		assert_eq!(update.captures, vec![Pattern::default()]);
+		// Its subtree claim also covers deeper chats, which the scope presents apart.
+		let update = announced.try_next().expect("chats beneath the top-level one");
+		assert_eq!(update.pattern.as_str(), "chat/**/chat");
+		assert_eq!(update.captures, vec!["chat/**".parse::<Pattern>().unwrap()]);
+
+		// A subtree route presents every chat beneath it, with the run left open.
+		let _all = producer.dynamic("room/**".parse().unwrap(), Route::default()).unwrap();
+		let update = announced.try_next().expect("the subtree, clamped");
+		assert_eq!(update.pattern.as_str(), "room/**/chat");
+		assert_eq!(update.captures, vec!["room/**".parse::<Pattern>().unwrap()]);
+		deep.finish();
+		top.finish();
+	}
+
+	#[tokio::test]
+	async fn union_scope_names_captures_by_the_most_specific_member() {
+		let producer = origin(1).produce();
+		let scope: Patterns = ["room/*".parse().unwrap(), "**".parse().unwrap()].into_iter().collect();
+		// `**` swallows `room/*` in a union; build the tie the hard way.
+		let consumer = producer
+			.consume()
+			.scope(&Patterns::from("room/*".parse::<Pattern>().unwrap()))
+			.unwrap();
+		assert_eq!(scope.len(), 1);
+		let mut announced = consumer.announced();
+		let mut cam = producer.create_broadcast("room/cam").unwrap();
+		cam.announce(Route::default()).unwrap();
+		let update = announced.try_next().unwrap();
+		assert_eq!(update.captures, vec!["cam".parse::<Pattern>().unwrap()]);
+
+		// Two members that cannot reduce present the same pattern; the more
+		// specific one (more literals) names the captures.
+		let scope: Patterns = ["room/*/*".parse().unwrap(), "*/cam/**".parse().unwrap()]
 			.into_iter()
 			.collect();
-		assert_eq!(mixed.len(), 2);
-		assert!(producer.scope(&mixed).is_none());
-		assert!(producer.consume().scope(&mixed).is_none());
+		assert_eq!(scope.len(), 2);
+		let consumer = producer.consume().scope(&scope).unwrap();
+		let mut announced = consumer.announced();
+		let mut chat = producer.create_broadcast("room/cam/chat").unwrap();
+		chat.announce(Route::default()).unwrap();
+		let updates: Vec<_> = std::iter::from_fn(|| announced.try_next()).collect();
+		let chat_update = updates
+			.iter()
+			.find(|u| u.pattern.as_str() == "room/cam/chat")
+			.expect("the exact chat");
+		assert_eq!(
+			chat_update.captures,
+			vec!["cam".parse::<Pattern>().unwrap(), "chat".parse::<Pattern>().unwrap()],
+			"room/*/* has two literals to */cam/**'s one"
+		);
+		cam.finish();
+		chat.finish();
+	}
+
+	#[tokio::test]
+	async fn scoped_request_resolves_through_a_broader_route() {
+		let producer = origin(1).produce();
+		let dynamic = producer.dynamic("room/**".parse().unwrap(), Route::default()).unwrap();
+		let consumer = producer
+			.consume()
+			.scope(&Patterns::from("room/*/chat".parse::<Pattern>().unwrap()))
+			.unwrap();
+
+		// A granted path under the subtree route reaches the handler.
+		let pending = consumer.request_broadcast("room/alice/chat");
+		let request = queued(&dynamic).await;
+		assert_eq!(request.path().as_str(), "room/alice/chat");
+		request.reject(Error::NotFound);
+		assert!(matches!(pending.await, Err(Error::NotFound)));
+
+		// A path the grant excludes never reaches it, though the route covers it.
+		let refused = consumer
+			.request_broadcast("room/alice/audio")
+			.now_or_never()
+			.expect("refused synchronously");
+		assert!(matches!(refused, Err(Error::Unroutable)));
+		assert!(dynamic.requested_broadcast().now_or_never().is_none());
+	}
+
+	#[tokio::test]
+	async fn collapsed_claims_announce_the_route_that_serves() {
+		// An exact scope collapses two equally specific claims onto one presented
+		// pattern; the announced hops must name the route a request resolves through.
+		for ids in [[10, 20], [20, 10], [11, 12], [12, 11], [3, 7], [7, 3]] {
+			let producer = origin(1).produce();
+			let dynamics: Vec<_> = ["a*/x", "*a/x"]
+				.into_iter()
+				.zip(ids)
+				.map(|(claim, id)| {
+					producer
+						.dynamic(claim.parse().unwrap(), Route::default().with_hops(hops(&[id])))
+						.unwrap()
+				})
+				.collect();
+			let consumer = producer
+				.consume()
+				.scope(&Patterns::from("a/x".parse::<Pattern>().unwrap()))
+				.unwrap();
+			let mut announced = consumer.announced();
+			let update = announced.try_next().unwrap();
+			assert_eq!(update.pattern.as_str(), "a/x");
+			assert!(announced.try_next().is_none(), "one presented pattern");
+
+			let pending = consumer.request_broadcast("a/x");
+			let mut served = None;
+			settle(|| {
+				served = dynamics.iter().enumerate().find_map(|(i, dynamic)| {
+					match dynamic.poll_requested_broadcast(&kio::Waiter::noop()) {
+						Poll::Ready(Ok(request)) => Some((i, request)),
+						_ => None,
+					}
+				});
+				served.is_some()
+			})
+			.await;
+			let (served, request) = served.unwrap();
+			assert_eq!(update.route.hops, hops(&[ids[served]]), "hops {ids:?}");
+			request.reject(Error::NotFound);
+			assert!(matches!(pending.await, Err(Error::NotFound)));
+		}
+	}
+
+	#[tokio::test]
+	async fn concurrent_announcements_outside_the_grant_never_reach_a_scoped_cursor() {
+		let producer = origin(1).produce();
+		let consumer = producer
+			.consume()
+			.scope(&Patterns::from("room/*/chat".parse::<Pattern>().unwrap()))
+			.unwrap();
+		let mut announced = consumer.announced();
+
+		// Publishers race in from many places at once, most of them out of scope.
+		let mut broadcasts = Vec::new();
+		let paths = [
+			"room/alice/chat",
+			"room/alice/audio",
+			"room/bob/chat",
+			"room/bob/video",
+			"room/chat",
+			"lobby/alice/chat",
+			"room/alice/chat/extra",
+		];
+		for path in paths {
+			let broadcast = producer.create_broadcast(path).unwrap();
+			broadcast.announce(Route::default()).unwrap();
+			broadcasts.push(broadcast);
+		}
+		let _dynamics = [
+			producer.dynamic("lobby/**".parse().unwrap(), Route::default()).unwrap(),
+			producer
+				.dynamic("room/*/audio".parse().unwrap(), Route::default())
+				.unwrap(),
+		];
+
+		let mut seen: Vec<String> = std::iter::from_fn(|| announced.try_next())
+			.map(|update| {
+				assert!(update.active);
+				assert!(
+					consumer.allowed().contains(&update.pattern),
+					"{} escaped the scope",
+					update.pattern
+				);
+				update.pattern.to_string()
+			})
+			.collect();
+		seen.sort();
+		// `room/chat` claims its subtree, which the grant meets at `room/chat/chat`.
+		assert_eq!(seen, ["room/alice/chat", "room/bob/chat", "room/chat/chat"]);
+
+		for mut broadcast in broadcasts {
+			broadcast.finish();
+		}
 	}
 
 	/// Charging a link accumulates onto both halves, saturating rather than wrapping

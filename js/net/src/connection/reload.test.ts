@@ -558,7 +558,7 @@ test("closing an announce consumer during upstream teardown does not append retr
 	const consumer = reload.announced();
 	const errors = spyOn(console, "error").mockImplementation(() => {});
 	try {
-		upstream.append({ pattern: Path.Pattern.literal("alice/camera.hang"), active: true });
+		upstream.append({ pattern: Path.Pattern.literal("alice/camera.hang"), captures: [], active: true });
 		await consumer.next();
 		upstream.close();
 		// Let the upstream read settle, but close before the pump's finally callback runs.
@@ -570,16 +570,5 @@ test("closing an announce consumer during upstream teardown does not append retr
 		consumer.close();
 		reload.close();
 		errors.mockRestore();
-	}
-});
-
-test("announced refuses a non-prefix scope before any session exists", () => {
-	const reload = new Reload({ enabled: false });
-	try {
-		// The pump that would reach the session runs inside an effect, which only logs a
-		// throw; the refusal has to happen where the caller can see it.
-		expect(() => reload.announced(Path.Pattern.parse("room/*"))).toThrow(/prefix-shaped/);
-	} finally {
-		reload.close();
 	}
 });

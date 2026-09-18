@@ -15,7 +15,7 @@ import * as announce from "./announced.ts";
 import * as broadcast from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { Route, routesEqual } from "./hop.ts";
-import { hooks, scopePrefix } from "./internal.ts";
+import { hooks, scopeMatches } from "./internal.ts";
 import * as Path from "./path.ts";
 
 export type { Cost, Hop, Route } from "./hop.ts";
@@ -205,9 +205,7 @@ class OriginState {
 	 */
 	refreshPrefix(prefix: Path.Valid): void {
 		const parsed = Path.Pattern.parse(prefix);
-		const shaped = parsed.asPrefix();
-		const covers = (path: Path.Valid) =>
-			shaped !== undefined ? Path.hasPrefix(Path.from(shaped), path) : parsed.matches(path);
+		const covers = (path: Path.Valid) => parsed.matches(path);
 		for (const [path, cached] of [...this.materialized]) {
 			if (!covers(path)) continue;
 			if (cached.entry !== this.bestEntry(path)) {
@@ -253,18 +251,17 @@ class OriginState {
 		cached.front.close();
 	}
 
-	/** The newest entry on the most specific route covering `path`, if any. */
+	/** The newest entry on the most specific route matching `path`, if any. */
 	bestEntry(path: Path.Valid): RouteEntry | undefined {
-		let bestPrefix: Path.Valid | undefined;
+		let bestSpecificity: Path.Specificity | undefined;
 		let best: RouteEntry | undefined;
 		for (const [key, entries] of this.routes.peek() ?? []) {
 			if (!entries[0]) continue;
 			const parsed = Path.Pattern.parse(key);
-			const prefix = parsed.asPrefix();
-			if (prefix === undefined) continue;
-			if (!Path.hasPrefix(Path.from(prefix), path)) continue;
-			if (bestPrefix === undefined || prefix.length > bestPrefix.length) {
-				bestPrefix = Path.from(prefix);
+			if (!parsed.matches(path)) continue;
+			const specificity = parsed.specificity();
+			if (bestSpecificity === undefined || Path.compareSpecificity(specificity, bestSpecificity) > 0) {
+				bestSpecificity = specificity;
 				best = entries[0];
 			}
 		}
@@ -428,14 +425,14 @@ export class Producer implements Table {
 	}
 
 	/**
-	 * Advertise a path pattern and serve the requests beneath it.
+	 * Advertise a path pattern and serve the requests it matches.
 	 *
-	 * A prefix is spelled `foo/**` (`**` for every path). A non-prefix pattern is
-	 * advertised as a covering claim; resolving one into a subscription is not
-	 * implemented yet. The advertisement is visible to {@link Consumer.announced}
-	 * and forwarded by sessions for as long as the returned {@link Dynamic} lives.
-	 * A consumer resolving a path under a prefix-shaped pattern that no local
-	 * broadcast covers is handed to the handle as a {@link BroadcastRequest}.
+	 * A prefix is spelled `foo/**` (`**` for every path); any pattern is a covering
+	 * claim, and the most specific one matching a path serves it. The advertisement
+	 * is visible to {@link Consumer.announced} and forwarded by sessions for as long
+	 * as the returned {@link Dynamic} lives. A consumer resolving a matching path
+	 * that no local broadcast covers is handed to the handle as a
+	 * {@link BroadcastRequest}.
 	 */
 	dynamic(
 		pattern: Path.Pattern | string,
@@ -928,24 +925,26 @@ export class Consumer {
 	/**
 	 * The announced routes under `scope`, as a live stream: every currently advertised
 	 * route arrives first as `active`, then additions and retractions as they happen.
-	 * The scope must be prefix-shaped (`foo/**`, or `**` for everything); anything else
-	 * throws rather than narrowing or widening it. A local broadcast appears only after
+	 * The scope is any {@link Path.Pattern}: `foo/**` for a subtree, `**` for everything,
+	 * `room/* /chat` for each room's chat. A local broadcast appears only after
 	 * {@link broadcast.Producer.announce}; a dynamic or received route announces the
-	 * prefix it covers, clamped to the scope. Patterns are relative to the origin, not
-	 * the scope. The stream ends when the origin closes or the consumer is closed.
+	 * paths it covers, clamped to the scope. Each event is a match against the scope:
+	 * its `pattern` is relative to the origin, not the scope, and its `captures` are
+	 * what the scope's wildcards stood for. The stream ends when the origin closes or
+	 * the consumer is closed.
 	 */
 	announced(scope: Path.Pattern = Path.Pattern.all()): announce.Consumer {
-		const prefix = scopePrefix(scope);
 		const producer = new announce.Producer();
-		void this.#runAnnounced(producer, prefix);
+		void this.#runAnnounced(producer, scope);
 		return producer.consume();
 	}
 
-	async #runAnnounced(producer: announce.Producer, prefix: Path.Valid): Promise<void> {
+	async #runAnnounced(producer: announce.Producer, scope: Path.Pattern): Promise<void> {
 		// Keyed by the presented pattern, valued by identity plus route. Diffing identity
 		// rather than mere presence means a republish emits a retraction then a fresh
 		// announcement; a re-price of the same identity emits another active (a restart).
-		let active = new Map<string, Advertised>();
+		type Presented = Advertised & { captures: Path.Pattern[]; specificity: Path.Specificity };
+		let active = new Map<string, Presented>();
 
 		try {
 			for (;;) {
@@ -954,43 +953,46 @@ export class Consumer {
 				const routes = this.#state.routes.peek();
 				if (local === undefined && advertisedLocal === undefined && routes === undefined) break;
 
-				const next = new Map<string, Advertised>();
-				// Routes first, so an advertised local at the same path overwrites it: the
-				// announcement points at whatever request() would resolve.
-				// The most specific route covering the scope itself wins the root slot,
-				// matching request() resolution.
-				let rootLen = -1;
+				const next = new Map<string, Presented>();
+				// Where several claims present the same pattern, the most specific claim
+				// wins and a tie keeps the earlier route, matching request() resolution
+				// (`bestEntry` walks the same table in the same order).
+				const present = (claim: Path.Pattern, snap: Advertised, override = false) => {
+					const specificity = claim.specificity();
+					for (const { pattern, captures } of scopeMatches(scope, claim)) {
+						const held = next.get(pattern.text);
+						const order = held ? Path.compareSpecificity(held.specificity, specificity) : -1;
+						if (order > 0 || (order === 0 && !override)) continue;
+						next.set(pattern.text, { ...snap, captures, specificity });
+					}
+				};
 				for (const [key, entries] of routes ?? []) {
 					const entry = entries[0];
 					if (!entry) continue;
-					const snap: Advertised = { identity: entry.identity, route: entry.route.peek() };
-					const advertised = Path.Pattern.parse(key);
-					// Rebasing clamps the claim to the scope; rooting names the result from the origin.
-					for (const residual of advertised.rebase(prefix)) {
-						if (residual.asPrefix() === "") {
-							const spec = advertised.segments.length;
-							if (spec < rootLen) continue;
-							rootLen = spec;
-						}
-						next.set(residual.rooted(prefix).text, snap);
-					}
+					present(Path.Pattern.parse(key), { identity: entry.identity, route: entry.route.peek() });
 				}
+				// An advertised local at its own path is the most specific claim there, so it
+				// overwrites a route's: the announcement points at whatever request() resolves.
 				for (const [path, front] of local ?? []) {
 					const route = advertisedLocal?.get(path);
 					if (!route) continue;
-					if (Path.hasPrefix(prefix, path))
-						next.set(Path.Pattern.subtree(path).text, { identity: front, route });
+					present(Path.Pattern.subtree(path), { identity: front, route }, true);
 				}
 
 				for (const [path, snap] of active) {
 					const cur = next.get(path);
 					if (!cur || cur.identity !== snap.identity)
-						producer.append({ pattern: Path.Pattern.parse(path), active: false });
+						producer.append({ pattern: Path.Pattern.parse(path), captures: snap.captures, active: false });
 				}
 				for (const [path, snap] of next) {
 					const prev = active.get(path);
 					if (!prev || prev.identity !== snap.identity || !routesEqual(prev.route, snap.route)) {
-						producer.append({ pattern: Path.Pattern.parse(path), active: true, route: snap.route });
+						producer.append({
+							pattern: Path.Pattern.parse(path),
+							captures: snap.captures,
+							active: true,
+							route: snap.route,
+						});
 					}
 				}
 				active = next;

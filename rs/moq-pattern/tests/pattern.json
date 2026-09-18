@@ -1093,5 +1093,181 @@
 			"pattern": "",
 			"expect": false
 		}
+	],
+	"intersect": [
+		{
+			"a": "foo/*/chat",
+			"b": "foo/alice/chat/**",
+			"expect": [
+				"foo/alice/chat"
+			]
+		},
+		{
+			"a": "foo/*/chat",
+			"b": "foo/**",
+			"expect": [
+				"foo/*/chat"
+			]
+		},
+		{
+			"a": "foo/**",
+			"b": "foo/alice/**",
+			"expect": [
+				"foo/alice/**"
+			]
+		},
+		{
+			"a": "a/*",
+			"b": "*/b",
+			"expect": [
+				"a/b"
+			]
+		},
+		{
+			"a": "a/**",
+			"b": "**/a",
+			"expect": [
+				"a",
+				"a/**/a"
+			]
+		},
+		{
+			"a": "ab*",
+			"b": "*b",
+			"expect": [
+				"ab",
+				"ab*b"
+			]
+		},
+		{
+			"a": "a*",
+			"b": "*b",
+			"expect": [
+				"a*b"
+			]
+		},
+		{
+			"a": "**",
+			"b": "a/**/b",
+			"expect": [
+				"a/**/b"
+			]
+		},
+		{
+			"a": "a/**/b",
+			"b": "**/c/b",
+			"expect": [
+				"a/**/c/b"
+			]
+		},
+		{
+			"a": "a/**/b",
+			"b": "a/c/**",
+			"expect": [
+				"a/c/**/b"
+			]
+		},
+		{
+			"a": "*",
+			"b": "a/b",
+			"expect": []
+		},
+		{
+			"a": "a",
+			"b": "b",
+			"expect": []
+		},
+		{
+			"a": "a/*",
+			"b": "b/**",
+			"expect": []
+		},
+		{
+			"a": "",
+			"b": "**",
+			"expect": [
+				""
+			]
+		},
+		{
+			"a": "",
+			"b": "*",
+			"expect": []
+		}
+	],
+	"captures": [
+		{
+			"scope": "foo/*/chat",
+			"matched": "foo/alice/chat",
+			"expect": [
+				"alice"
+			]
+		},
+		{
+			"scope": "foo/**",
+			"matched": "foo/alice/chat",
+			"expect": [
+				"alice/chat"
+			]
+		},
+		{
+			"scope": "foo/**",
+			"matched": "foo",
+			"expect": [
+				""
+			]
+		},
+		{
+			"scope": "foo/**",
+			"matched": "foo/alice/**",
+			"expect": [
+				"alice/**"
+			]
+		},
+		{
+			"scope": "foo/*/chat",
+			"matched": "foo/*/chat",
+			"expect": [
+				"*"
+			]
+		},
+		{
+			"scope": "*.hang",
+			"matched": "a.hang",
+			"expect": [
+				"a.hang"
+			]
+		},
+		{
+			"scope": "**/*",
+			"matched": "a/**",
+			"expect": [
+				"**",
+				"*"
+			]
+		},
+		{
+			"scope": "**/*/b",
+			"matched": "a/**/c/b",
+			"expect": [
+				"a/**",
+				"c"
+			]
+		},
+		{
+			"scope": "a/b",
+			"matched": "a/b",
+			"expect": []
+		},
+		{
+			"scope": "foo/*",
+			"matched": "foo/**",
+			"expect": null
+		},
+		{
+			"scope": "a",
+			"matched": "b",
+			"expect": null
+		}
 	]
 }

@@ -74,19 +74,29 @@ Three operations, on an origin:
   retracts on `unannounce()`, `finish()`, or the last producer dropping.
 - `origin.dynamic(pattern, route)` claims every matching path. A prefix is
   `foo/**`. Hold the returned `origin::Dynamic` while the claim should stay
-  advertised; drop it to retract. A request under a prefix-shaped claim with
-  no local broadcast is a `Request` to `accept` or `reject`.
+  advertised; drop it to retract. A request under a claim with no local
+  broadcast is a `Request` to `accept` or `reject`.
 
-A wildcard is a capability, not an inventory. The advertised pattern must sit
-inside one of the producer's `prefix/**` scopes; an over-wide claim is
-`Unauthorized`, not clamped. Token grants stay prefixes.
+A wildcard is a capability, not an inventory. The advertised pattern is
+clamped to the producer's scope, so a claim of `**` through a scope of
+`room/*/chat` advertises and serves exactly the chats; a claim with nothing in
+scope is `Unauthorized`.
 
-`origin.consume().announced()` yields `announce::Update` values. `pattern` is
-the claim relative to the consumer's root, `active` is false on a retraction,
-and `route` carries hops and cost. A subtree is `room/**`; `room/*` is one
-child segment. Use `pattern.as_prefix()` when you need a prefix-shaped claim;
-an arbitrary pattern is not a broadcast name. Resolving a non-prefix pattern
-into a subscription is not implemented yet.
+`origin.scope(&patterns)` narrows a handle to any pattern union, relative to
+its root: `room/**` for a subtree, `room/alice` for one broadcast,
+`room/*/chat` for each room's chat. Nesting intersects, `with_root` renames
+without widening, and `allowed()` reports the grant. Publishing, resolving,
+and announcing all enforce it.
+
+`origin.consume().announced()` yields `announce::Update` values: a match
+against the scope. `pattern` is the claim clamped to the scope, relative to
+the consumer's root; `captures` is one pattern per wildcard segment of the
+scope member it matched (`alice` for a broadcast at `room/alice/chat` under
+`room/*/chat`, `alice/chat/**` under `room/**` since a broadcast claims its
+subtree, and the wildcard itself where a pattern claim cannot pin it); `active` is false on a retraction; and `route`
+carries hops and cost. A subtree is `room/**`; `room/*` is one child segment.
+Use `pattern.as_prefix()` when you need a prefix-shaped claim; an arbitrary
+pattern is not a broadcast name.
 
 ## Limiting reads
 

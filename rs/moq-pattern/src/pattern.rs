@@ -126,6 +126,97 @@ impl Segment {
 			Self::Globstar => false,
 		}
 	}
+
+	/// The segments matching exactly the parts both match. Same exclusion as
+	/// [`covers`](Self::covers). Empty when the two are incompatible.
+	fn intersect(&self, other: &Self) -> Vec<Self> {
+		match (self, other) {
+			(Self::Globstar, _) | (_, Self::Globstar) => Vec::new(),
+			(Self::Wildcard, other) => vec![other.clone()],
+			(this, Self::Wildcard) => vec![this.clone()],
+			(Self::Literal(a), Self::Literal(b)) => (a == b).then(|| self.clone()).into_iter().collect(),
+			(Self::Literal(literal), partial @ Self::Partial { .. })
+			| (partial @ Self::Partial { .. }, Self::Literal(literal)) => partial
+				.matches(literal)
+				.then(|| Self::Literal(literal.clone()))
+				.into_iter()
+				.collect(),
+			(
+				Self::Partial { prefix, suffix },
+				Self::Partial {
+					prefix: other_prefix,
+					suffix: other_suffix,
+				},
+			) => {
+				if !self.compatible(other) {
+					return Vec::new();
+				}
+				// The longer prefix and the longer suffix pin every part long enough to
+				// hold both without overlapping. Shorter parts exist too, where the two
+				// runs share bytes: those are finitely many literals.
+				let prefix = if prefix.len() >= other_prefix.len() {
+					prefix
+				} else {
+					other_prefix
+				};
+				let suffix = if suffix.len() >= other_suffix.len() {
+					suffix
+				} else {
+					other_suffix
+				};
+				let mut out = vec![Self::Partial {
+					prefix: prefix.clone(),
+					suffix: suffix.clone(),
+				}];
+				for overlap in 1..=prefix.len().min(suffix.len()) {
+					if !prefix.is_char_boundary(prefix.len() - overlap) || !suffix.is_char_boundary(overlap) {
+						continue;
+					}
+					if prefix[prefix.len() - overlap..] != suffix[..overlap] {
+						continue;
+					}
+					let part = format!("{prefix}{}", &suffix[overlap..]);
+					if self.matches(&part) && other.matches(&part) {
+						out.push(Self::Literal(part));
+					}
+				}
+				out
+			}
+		}
+	}
+}
+
+/// Every segment-wise intersection of two runs of the same length: the cartesian
+/// product of [`Segment::intersect`] per position. Empty when any position is
+/// incompatible.
+fn intersect_run(a: &[Segment], b: &[Segment]) -> Vec<Vec<Segment>> {
+	debug_assert_eq!(a.len(), b.len());
+	let mut out: Vec<Vec<Segment>> = vec![Vec::with_capacity(a.len())];
+	for (a, b) in a.iter().zip(b) {
+		let choices = a.intersect(b);
+		if choices.is_empty() {
+			return Vec::new();
+		}
+		out = out
+			.iter()
+			.flat_map(|prefix| {
+				choices.iter().map(move |choice| {
+					let mut next = prefix.clone();
+					next.push(choice.clone());
+					next
+				})
+			})
+			.collect();
+	}
+	out
+}
+
+/// `head`, then `**` stretched to `len` segments as `*`, then `tail`.
+fn expand(head: &[Segment], tail: &[Segment], len: usize) -> Vec<Segment> {
+	let mut out = head.to_vec();
+	out.extend(std::iter::repeat_n(Segment::Wildcard, len - head.len() - tail.len()));
+	out.extend_from_slice(tail);
+	out
 }
 
 impl fmt::Display for Segment {
@@ -479,6 +570,161 @@ impl Pattern {
 		}
 
 		out
+	}
+
+	/// The patterns matching exactly the paths both patterns match.
+	///
+	/// This is how a claim is clamped to a scope: the covered paths inside the
+	/// grant, as patterns of their own. It is a set because two partial segments or
+	/// two `**` runs can meet in more than one way: `ab*` and `*b` meet at `ab*b` and
+	/// at `ab`, and `a/**` and `**/a` meet at `a/**/a` and at `a`. Empty when the
+	/// two do not [overlap](Self::overlaps).
+	pub fn intersect(&self, other: &Self) -> Patterns {
+		// The contained pattern is the intersection as written, where the general
+		// case below could only spell the same set in more pieces.
+		if self.contains(other) {
+			return Patterns::from(other.clone());
+		}
+		if other.contains(self) {
+			return Patterns::from(self.clone());
+		}
+
+		let mut out = Patterns::new();
+		let mut emit = |segments: Vec<Segment>| {
+			if let Ok(pattern) = Pattern::new(segments) {
+				out.insert(pattern);
+			}
+		};
+
+		match (self.globstar, other.globstar) {
+			(None, None) => {
+				if self.segments.len() == other.segments.len() {
+					intersect_run(&self.segments, &other.segments)
+						.into_iter()
+						.for_each(&mut emit);
+				}
+			}
+			(Some(_), None) => {
+				let (head, tail) = self.split();
+				if other.segments.len() >= head.len() + tail.len() {
+					let stretched = expand(head, tail, other.segments.len());
+					intersect_run(&stretched, &other.segments)
+						.into_iter()
+						.for_each(&mut emit);
+				}
+			}
+			(None, Some(_)) => return other.intersect(self),
+			(Some(_), Some(_)) => {
+				let (head, tail) = self.split();
+				let (other_head, other_tail) = other.split();
+				let heads = head.len().max(other_head.len());
+				let tails = tail.len().max(other_tail.len());
+				let shortest = (head.len() + tail.len()).max(other_head.len() + other_tail.len());
+
+				// Paths too short to keep the longer head and the longer tail apart
+				// constrain both from each end at once: enumerate each length. When
+				// the open form below would not fit, every length that fits is short.
+				let long = heads + tails;
+				let open = long < Self::MAX_SEGMENTS;
+				let cap = if open { long } else { Self::MAX_SEGMENTS + 1 };
+				for len in shortest..cap {
+					let a = expand(head, tail, len);
+					let b = expand(other_head, other_tail, len);
+					intersect_run(&a, &b).into_iter().for_each(&mut emit);
+				}
+
+				// Longer paths pin the heads and the tails independently and leave the
+				// run between them free.
+				if open {
+					let pad = |run: &[Segment], len: usize, front: bool| -> Vec<Segment> {
+						let fill = std::iter::repeat_n(Segment::Wildcard, len - run.len());
+						if front {
+							run.iter().cloned().chain(fill).collect()
+						} else {
+							fill.chain(run.iter().cloned()).collect()
+						}
+					};
+					let fronts = intersect_run(&pad(head, heads, true), &pad(other_head, heads, true));
+					let backs = intersect_run(&pad(tail, tails, false), &pad(other_tail, tails, false));
+					for front in &fronts {
+						for back in &backs {
+							let mut segments = front.clone();
+							segments.push(Segment::Globstar);
+							segments.extend_from_slice(back);
+							emit(segments);
+						}
+					}
+				}
+			}
+		}
+
+		out
+	}
+
+	/// What each wildcard of this pattern stands for in `matched`, a pattern this
+	/// one [contains](Self::contains); `None` when it does not.
+	///
+	/// One capture per non-literal segment (`*`, `prefix*suffix`, `**`), in order,
+	/// the way a regex match exposes its groups: `foo/*/chat` against `foo/alice/chat`
+	/// captures `alice`, and `foo/**` against `foo/alice/chat` captures `alice/chat`.
+	/// A capture is a pattern because `matched` may be one: `foo/**` against
+	/// `foo/alice/**` captures `alice/**`. When `matched` has a `**` that this
+	/// pattern's own segments straddle (`**/*` against `a/**`, where the last
+	/// segment is `a` or anything after it), the segments it straddles cannot be
+	/// pinned and capture themselves: `**` then `*`.
+	pub fn captures(&self, matched: &Self) -> Option<Vec<Self>> {
+		if !self.contains(matched) {
+			return None;
+		}
+		// Construction cannot fail: every capture is a run of `matched`'s own valid
+		// segments or one of ours, never longer than either.
+		let build = |segments: &[Segment]| Pattern::new(segments.to_vec()).expect("a capture is valid");
+		let mut out = Vec::new();
+
+		if self.globstar.is_none() {
+			for (segment, theirs) in self.segments.iter().zip(&matched.segments) {
+				if !matches!(segment, Segment::Literal(_)) {
+					out.push(build(std::slice::from_ref(theirs)));
+				}
+			}
+			return Some(out);
+		}
+
+		let (head, tail) = self.split();
+		let middle = matched.segments.len() - tail.len();
+		// Our head aligns with `matched` from the front and our tail from the back.
+		// A segment of ours aligned at or beyond `matched`'s `**` (from its own
+		// side) has no fixed counterpart, so it captures itself.
+		let free = matched.globstar;
+		let pinned = |at: usize, from_front: bool| match free {
+			Some(free) if from_front => at < free,
+			Some(free) => at > free,
+			None => true,
+		};
+
+		for (i, segment) in head.iter().enumerate() {
+			if !matches!(segment, Segment::Literal(_)) {
+				let capture = if pinned(i, true) { &matched.segments[i] } else { segment };
+				out.push(build(std::slice::from_ref(capture)));
+			}
+		}
+		if free.is_none_or(|free| free >= head.len() && free < middle) {
+			out.push(build(&matched.segments[head.len()..middle]));
+		} else {
+			out.push(Pattern::all());
+		}
+		for (j, segment) in tail.iter().enumerate() {
+			if !matches!(segment, Segment::Literal(_)) {
+				let at = middle + j;
+				let capture = if pinned(at, false) {
+					&matched.segments[at]
+				} else {
+					segment
+				};
+				out.push(build(std::slice::from_ref(capture)));
+			}
+		}
+		Some(out)
 	}
 
 	/// This pattern placed beneath a literal `root`: the same paths, named from the

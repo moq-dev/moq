@@ -13,19 +13,32 @@ import * as Path from "./path.js";
 /**
  * A route announcement or retraction.
  *
- * A route claims that paths under {@link pattern} can be served; it carries no
+ * A route claims that paths matching {@link pattern} can be served; it carries no
  * broadcast. By convention a publisher announces each broadcast's exact path,
  * so enumerating routes enumerates broadcasts; resolve one with the origin's
  * `request(path)`.
+ *
+ * The update is a match against the scope passed to `announced()`, the way a regex
+ * match exposes the whole match and then its groups: {@link pattern} is the covered
+ * paths inside the scope and {@link captures} is what each scope wildcard stood for.
  *
  * @public
  */
 export interface Update {
 	/**
-	 * What the route covers, relative to the origin (for a session, its URL path). A
-	 * route claimed above the scope passed to `announced()` is clamped to that scope.
+	 * What the route covers inside the scope, relative to the origin (for a session, its
+	 * URL path): the intersection of the claim with the scope passed to `announced()`.
 	 */
 	pattern: Path.Pattern;
+	/**
+	 * One capture per wildcard segment (`*`, `prefix*suffix`, `**`) of the scope, in
+	 * order. A scope of `room/* /chat` matched by a broadcast at `room/alice/chat`
+	 * captures `alice`. A capture is a pattern because the claim may be one: a broadcast
+	 * claims its subtree, so the same broadcast under `room/**` captures `alice/chat/**`,
+	 * and a wildcard the claim cannot pin captures itself (`room/**` under `room/* /chat`
+	 * captures `*`).
+	 */
+	captures: Path.Pattern[];
 	/** True while the route is advertised, false when it was retracted. */
 	active: boolean;
 	/** Hops and cost of an active advertisement; omitted on a retraction. */
@@ -140,6 +153,11 @@ export class Consumer {
 // Connections already warned about missing broadcast discovery, so the fallback logs at most
 // once per connection instead of once per watched path.
 const warnedNoDiscovery = new WeakSet<Established>();
+
+/** Whether a presented claim names `path` itself: its subtree `scope`, or exactly the path. */
+function covers(pattern: Path.Pattern, scope: Path.Pattern, path: Path.Valid): boolean {
+	return pattern.equals(scope) || (pattern.isLiteral && pattern.text === path);
+}
 
 /**
  * What to watch, for {@link Broadcast}: a path on exactly one source, enforced by the
@@ -296,9 +314,10 @@ export class Broadcast {
 						const event = await Promise.race([effect.cancel, announced.next()]);
 						if (!event) break;
 
-						// Prefix-shaped claims covering this path clamp to its subtree. A literal
-						// PATTERN ad at the same path is not prefix-shaped and is skipped.
-						if (!event.pattern.equals(scope)) continue;
+						// Prefix-shaped claims covering this path clamp to its subtree, and a
+						// grant of exactly this path presents it as a literal. Any other
+						// wildcard claim is a capability, not an inventory, and is skipped.
+						if (!covers(event.pattern, scope, path)) continue;
 
 						if (event.active) {
 							// A live subscription survives a redundant (re-)announce; only replace a dead one.
@@ -369,9 +388,10 @@ export class Broadcast {
 				const event = await Promise.race([effect.cancel, announced.next()]);
 				if (!event) break;
 
-				// Prefix-shaped claims covering this path clamp to its subtree. A literal
-				// PATTERN ad at the same path is not prefix-shaped and is skipped.
-				if (!event.pattern.equals(scope)) continue;
+				// Prefix-shaped claims covering this path clamp to its subtree, and a grant
+				// of exactly this path presents it as a literal. Any other wildcard claim is
+				// a capability, not an inventory, and is skipped.
+				if (!covers(event.pattern, scope, this.path)) continue;
 				live.set(event.active);
 			}
 

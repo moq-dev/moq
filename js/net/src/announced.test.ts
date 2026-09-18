@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import * as Announce from "./announced.ts";
-import type { Producer as BroadcastProducer } from "./broadcast.ts";
+import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 
@@ -16,11 +16,11 @@ test("next streams every appended event in order", async () => {
 	const producer = new Announce.Producer();
 	const consumer = producer.consume();
 
-	producer.append({ pattern: Path.Pattern.subtree(p("a")), active: true });
-	producer.append({ pattern: Path.Pattern.subtree(p("a")), active: false });
+	producer.append({ pattern: Path.Pattern.subtree(p("a")), captures: [], active: true });
+	producer.append({ pattern: Path.Pattern.subtree(p("a")), captures: [], active: false });
 
-	expect(await consumer.next()).toEqual({ pattern: Path.Pattern.subtree(p("a")), active: true });
-	expect(await consumer.next()).toEqual({ pattern: Path.Pattern.subtree(p("a")), active: false });
+	expect(await consumer.next()).toEqual({ pattern: Path.Pattern.subtree(p("a")), captures: [], active: true });
+	expect(await consumer.next()).toEqual({ pattern: Path.Pattern.subtree(p("a")), captures: [], active: false });
 });
 
 test("a same-name re-announce is a distinct update", async () => {
@@ -30,11 +30,11 @@ test("a same-name re-announce is a distinct update", async () => {
 	// The stream is a log, not a set: it carries a redundant active:true as its own update rather
 	// than collapsing it. Deciding what a repeat means belongs to the session layer, which resolves
 	// a restart into either nothing (a route change) or an end + start (a new publisher).
-	producer.append({ pattern: Path.Pattern.subtree(p("a")), active: true });
-	producer.append({ pattern: Path.Pattern.subtree(p("a")), active: true });
+	producer.append({ pattern: Path.Pattern.subtree(p("a")), captures: [], active: true });
+	producer.append({ pattern: Path.Pattern.subtree(p("a")), captures: [], active: true });
 
-	expect(await consumer.next()).toEqual({ pattern: Path.Pattern.subtree(p("a")), active: true });
-	expect(await consumer.next()).toEqual({ pattern: Path.Pattern.subtree(p("a")), active: true });
+	expect(await consumer.next()).toEqual({ pattern: Path.Pattern.subtree(p("a")), captures: [], active: true });
+	expect(await consumer.next()).toEqual({ pattern: Path.Pattern.subtree(p("a")), captures: [], active: true });
 });
 
 test("closing resolves next with undefined", async () => {
@@ -84,6 +84,39 @@ test("an origin handle resolves a local publish with no session attached", async
 	first.close();
 	await settle();
 	expect(watch.active.peek()).toBeUndefined();
+
+	watch.close();
+	origin.close();
+});
+
+test("an origin handle follows a literal claim of exactly its path", async () => {
+	const origin = new OriginProducer();
+	const path = p("room/alice/chat");
+
+	const watch = new Announce.Broadcast({ origin, path });
+	await settle();
+	expect(watch.active.peek()).toBeUndefined();
+
+	// A grant of exactly this path presents the broadcast as a literal, not a subtree,
+	// and the literal route serves the request the handle stands.
+	const exact = origin.dynamic(Path.Pattern.literal(path));
+	const served = new BroadcastProducer();
+	void (async () => {
+		for await (const request of exact.requested()) request.accept(served);
+	})();
+	await settle();
+	await settle();
+	expect(watch.active.peek()).toBeDefined();
+	exact.close();
+	await settle();
+	expect(watch.active.peek()).toBeUndefined();
+	served.close();
+
+	// A wildcard covering the path is a capability, not an inventory: nothing to open.
+	const wildcard = origin.dynamic("room/*/chat");
+	await settle();
+	expect(watch.active.peek()).toBeUndefined();
+	wildcard.close();
 
 	watch.close();
 	origin.close();

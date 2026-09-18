@@ -144,7 +144,7 @@ impl Connection {
 		match self.cluster.verify_lan_credential(presented) {
 			Some(true) => {
 				tracing::info!("accepted LAN peer");
-				Ok(self.auth.admit_fixed("/", self.cluster.lan_peer_grant())?)
+				Ok(self.auth.admit_fixed("/", self.cluster.lan_peer_grant()))
 			}
 			Some(false) => Err(StatusError {
 				status: http::StatusCode::FORBIDDEN,

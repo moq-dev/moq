@@ -130,7 +130,9 @@ export default class MoqBoy extends HTMLElement {
 
 		// The origin's stream spans reconnects: entries retract when the session dies and
 		// return when the next one re-announces them, so this loop never needs to restart.
-		const announced = this.origin.consume().announced(Moq.Path.Pattern.subtree(prefix));
+		// One segment beneath the prefix is a game; the scope skips nested paths (e.g.
+		// "viewer/..." sub-broadcasts) and captures the id.
+		const announced = this.origin.consume().announced(Moq.Path.Pattern.parse("*").rooted(prefix));
 		effect.cleanup(() => announced.close());
 
 		effect.spawn(async () => {
@@ -138,13 +140,11 @@ export default class MoqBoy extends HTMLElement {
 				const entry = await Promise.race([effect.cancel, announced.next()]);
 				if (!entry) break;
 
-				// Skip nested paths (e.g. "viewer/..." sub-broadcasts).
-				const covered = entry.pattern.asPrefix();
-				if (covered === undefined) continue;
-				const suffix = Moq.Path.stripPrefix(prefix, Moq.Path.from(covered));
-				if (!suffix || suffix.includes("/")) continue;
+				// A claim that cannot pin the game (a relay's wildcard) names nothing to open.
+				const capture = entry.captures[0];
+				if (!capture?.isLiteral) continue;
 
-				const id = suffix;
+				const id = capture.text;
 				if (entry.active && !this.#sessions.has(id)) {
 					const config: GameConfig = {
 						sessionId: id,

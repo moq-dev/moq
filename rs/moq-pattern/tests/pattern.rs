@@ -168,6 +168,29 @@ fn rebase() {
 }
 
 #[test]
+fn intersect() {
+	for case in vectors()["intersect"].as_array().unwrap() {
+		let a = pattern(case["a"].as_str().unwrap());
+		let b = pattern(case["b"].as_str().unwrap());
+		let expect = patterns(&case["expect"]);
+		assert_eq!(a.intersect(&b), expect, "{a} & {b}");
+		assert_eq!(b.intersect(&a), expect, "{b} & {a}");
+	}
+}
+
+#[test]
+fn captures() {
+	for case in vectors()["captures"].as_array().unwrap() {
+		let scope = pattern(case["scope"].as_str().unwrap());
+		let matched = pattern(case["matched"].as_str().unwrap());
+		let expect = case["expect"]
+			.as_array()
+			.map(|list| list.iter().map(|v| pattern(v.as_str().unwrap())).collect::<Vec<_>>());
+		assert_eq!(scope.captures(&matched), expect, "{scope} against {matched}");
+	}
+}
+
+#[test]
 fn rooted() {
 	for case in vectors()["rooted"].as_array().unwrap() {
 		let p = pattern(case["pattern"].as_str().unwrap());

@@ -169,7 +169,9 @@ impl Producer {
 			};
 		};
 
-		let registry = Registry::new(moq_net::stats::Config::new().with_exclude(prefix.clone()));
+		// The prefix is a literal path, so its subtree claim cannot fail.
+		let exclude = moq_net::Pattern::subtree(prefix.as_str()).expect("the stats prefix is a literal path");
+		let registry = Registry::new(moq_net::stats::Config::new().with_exclude(exclude));
 		let keepalive = Arc::new(Keepalive);
 		let task = Task {
 			registry: registry.clone(),
