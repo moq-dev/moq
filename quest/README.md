@@ -7,7 +7,7 @@ grouped into milestones ordered by priority.
 
 ## Plan
 
-m0 blocks the release and m1 is the dev branch line. m2 is the next agent
+m1 is the dev branch line. m2 is the next agent
 wave across reliability, features, performance, and planning. Unsettled
 quests may stay in m2 for planning; their implementation waits for the
 required decisions. m3 holds later features, design studies, experiments,
@@ -22,8 +22,6 @@ room, and transport work stays in m2.
 
 ## Quests
 
-- [m0: release blockers](/quest/m0/README.md) - what must land before dev
-  merges and the release is cut
 - [m1: the dev line](/quest/m1/README.md) - the breaking API and wire
   changes, the merge gates, and the merge itself
 - [m2: next wave](/quest/m2/README.md) - implementation and planning across

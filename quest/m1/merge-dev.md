@@ -52,7 +52,6 @@ accepted.
 ## Required
 
 - [API review gate](/quest/m1/api-review-gate.md) - every breaking review quest is landed or explicitly deferred
-- [m0](/quest/m0/README.md) - every release blocker lands or is punted before the merge
 
 ## Closes
 
