@@ -63,10 +63,18 @@ than `hop_penalty`, so a path does not flap on one slow ack or on several links
 drifting at once. Costs ride moq-lite-06 and the MoQ Cluster extension; a link
 negotiated on an older version carries hop counts only, whatever it measures.
 
+Loss is only learned from packets, so a link that has carried nothing is priced
+on its RTT until a stream crosses it, and the first stream pays to discover a
+lossy edge. `probe` buys that knowledge up front: each relay asks its peers to
+pad every measured link up to that many bits per second whenever nothing else
+flows (the PROBE `Increase` level, moq-lite-06), so a 1% edge shows up within a
+minute at 100 kbit/s for about 12 KB/s per idle link.
+
 ```toml
 [cluster.cost]
 hop_penalty = "8ms"       # What one more relay costs a stream. Default.
 step = "5ms"              # Prices round to this and move by whole steps. Default.
+# probe = 100000          # Bits per second of padding on every idle link. Off by default.
 # measure = false         # Price every unpriced link at 1 instead (hop counting).
 ```
 

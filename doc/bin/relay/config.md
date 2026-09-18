@@ -151,6 +151,7 @@ enabled = true
 # interval = "1s"                                     # How often each link is sampled.
 # hop_penalty = "8ms"                                 # What one more relay costs a stream.
 # step = "5ms"                                        # Prices round to this and move by whole steps.
+# probe = 100000                                      # Bits per second of PROBE padding on idle links.
 ```
 
 See [Clustering](/bin/relay/cluster).

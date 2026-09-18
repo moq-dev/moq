@@ -112,6 +112,9 @@ struct ClusterCost {
 
 	#[usage(env = "MOQ_CLUSTER_COST_STEP", cli("--cluster-cost-step"))]
 	step: Option<String>,
+
+	#[usage(env = "MOQ_CLUSTER_COST_PROBE", cli("--cluster-cost-probe"))]
+	probe: Option<u64>,
 }
 
 #[cfg(feature = "cluster-lan")]

@@ -41,6 +41,9 @@ pub(super) struct PublisherConfig<S: crate::transport::poll::Session, R: crate::
 	pub egress: kio::Shared<u64>,
 	/// Where served groups and payload are counted for [`crate::Session::stats`].
 	pub served: Arc<crate::session::Served>,
+	/// Whether we advertised the Increase probe level on a wire with a Padding
+	/// Stream, so a probe target above our sending rate is answered with padding.
+	pub pads: bool,
 }
 
 /// Context shared by every control-stream child.
@@ -66,6 +69,7 @@ struct Shared<S: crate::transport::poll::Session> {
 	// This end's egress price; every announce stream re-prices when it moves.
 	egress: kio::Shared<u64>,
 	served: Arc<crate::session::Served>,
+	pads: bool,
 }
 
 /// Largest millisecond duration every implementation can carry losslessly.
@@ -166,6 +170,7 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> Publisher<S
 				goaway: config.goaway,
 				egress: config.egress,
 				served: config.served,
+				pads: config.pads,
 			}),
 			runtime: config.runtime,
 			accept,
@@ -361,13 +366,22 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> Control<S, 
 }
 
 /// Serves one PROBE stream: periodic bandwidth estimates until the peer closes
-/// its side.
+/// its side, and padding up to the peer's target when we advertised Increase.
 struct ProbeServe<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
 	shared: Arc<Shared<S>>,
 	runtime: R,
 	stream: Option<Stream<S, Version>>,
 	last_sent: Option<(lite::Probe, crate::runtime::Instant)>,
 	next_probe: crate::runtime::Deadline<R>,
+	/// The bitrate the peer last asked us to reach, in bits per second.
+	target: Option<u64>,
+	/// The transport's byte counter at the previous tick, for the sending rate.
+	sent: Option<u64>,
+	/// The padding stream still draining into the transport, if any, and whether
+	/// its FIN is sent. One at a time: a stream the congestion window has not let
+	/// out yet is the bound the draft asks for, so the next tick skips rather
+	/// than queues.
+	padding: Option<(Writer<S::SendStream, Version>, bool)>,
 }
 
 impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> ProbeServe<S, R> {
@@ -375,6 +389,11 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> ProbeServe<
 	const PROBE_MAX_AGE: Duration = Duration::from_secs(10);
 	const PROBE_MAX_DELTA: f64 = 0.25;
 	const PROBE_RTT_DELTA: f64 = 0.25;
+	/// The most padding one tick sends, so a target far above the link never
+	/// queues more than the window drains in a few round trips.
+	const PADDING_MAX_PER_TICK: usize = 256 * 1024;
+	/// Padding goes out behind every other stream.
+	const PADDING_SEND_ORDER: u8 = 0;
 
 	/// Whether a metric moved enough to be worth another report. Gaining or
 	/// losing a value always counts; both unknown never does.
@@ -409,7 +428,37 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> ProbeServe<
 			// Send the first probe immediately, then keep an anchored cadence.
 			next_probe: crate::runtime::Deadline::at(&runtime, runtime.now()),
 			runtime,
+			target: None,
+			sent: None,
+			padding: None,
 		}
+	}
+
+	/// The padding one tick should send to close the gap between what the
+	/// transport sent since the last tick and `target`, or `None` for no gap.
+	fn padding_bytes(target: u64, sent_since_tick: u64, interval: Duration) -> Option<usize> {
+		let wanted = target as f64 * interval.as_secs_f64() / 8.0;
+		let gap = wanted - sent_since_tick as f64;
+		(gap >= 1.0).then(|| (gap as usize).min(Self::PADDING_MAX_PER_TICK))
+	}
+
+	/// Open one padding stream carrying `bytes` of zeros behind every other
+	/// stream. Pending while the transport grants no stream credit.
+	fn poll_pad(
+		session: &mut S,
+		version: Version,
+		cx: &mut Context<'_>,
+		bytes: usize,
+	) -> Poll<Result<Writer<S::SendStream, Version>, Error>> {
+		let stream = match ready!(session.poll_open_uni(cx)) {
+			Ok(stream) => stream,
+			Err(err) => return Poll::Ready(Err(Error::from_transport(err))),
+		};
+		let mut writer = Writer::new(stream, version);
+		writer.set_priority(Self::PADDING_SEND_ORDER);
+		writer.buffer(&lite::DataType::Padding)?;
+		writer.buffer_raw(&vec![0u8; bytes]);
+		Poll::Ready(Ok(writer))
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -431,9 +480,38 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> ProbeServe<
 			// Deliver the previous estimate before ticking out the next one.
 			ready!(stream.writer.poll_flush(&mut cx))?;
 
-			// Tick the probe interval, bailing as soon as the peer closes its side.
-			if let Poll::Ready(res) = stream.reader.poll_closed(&mut cx) {
-				return Poll::Ready(res);
+			// Drain the padding in flight: flush, FIN, then wait for the transport to
+			// let go of it. A stream error there is the padding's alone, so drop it and
+			// carry on reporting.
+			if let Some((writer, finished)) = &mut self.padding {
+				let drained = match writer.poll_flush(&mut cx) {
+					Poll::Ready(Ok(())) => {
+						if !*finished {
+							*finished = writer.finish().is_ok();
+						}
+						writer.poll_closed(&mut cx)
+					}
+					other => other,
+				};
+				match drained {
+					Poll::Ready(Ok(())) => self.padding = None,
+					Poll::Ready(Err(err)) => {
+						tracing::debug!(%err, "padding stream ended early");
+						self.padding = None;
+					}
+					Poll::Pending => {}
+				}
+			}
+
+			// The peer's targets, and its close: a PROBE from the subscriber names the
+			// bitrate to reach, a FIN ends the stream.
+			loop {
+				match stream.reader.poll_decode_maybe::<lite::Probe>(&mut cx) {
+					Poll::Ready(Ok(Some(probe))) => self.target = probe.bitrate,
+					Poll::Ready(Ok(None)) => return Poll::Ready(Ok(())),
+					Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+					Poll::Pending => break,
+				}
 			}
 			ready!(self.next_probe.poll(waiter));
 			let next = self
@@ -441,6 +519,28 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> ProbeServe<
 				.deadline()
 				.and_then(|at| at.checked_add(Self::PROBE_INTERVAL));
 			self.next_probe.set(next);
+
+			// Pad toward the target with whatever the last tick's traffic left short,
+			// once the previous padding has drained. Bounded by the congestion window
+			// through the transport, and behind every other stream.
+			if self.shared.pads
+				&& let Some(target) = self.target
+			{
+				let sent_now = self.shared.session.stats().bytes_sent().unwrap_or(0);
+				let sent_since = self.sent.map(|prev| sent_now.saturating_sub(prev)).unwrap_or(0);
+				self.sent = Some(sent_now);
+				if self.padding.is_none()
+					&& let Some(bytes) = Self::padding_bytes(target, sent_since, Self::PROBE_INTERVAL)
+				{
+					let mut session = self.shared.session.clone();
+					match Self::poll_pad(&mut session, self.shared.version, &mut cx, bytes) {
+						Poll::Ready(Ok(writer)) => self.padding = Some((writer, false)),
+						Poll::Ready(Err(err)) => tracing::debug!(%err, "could not open a padding stream"),
+						// No stream credit this tick: the window is the bound.
+						Poll::Pending => {}
+					}
+				}
+			}
 
 			// The two fields are independent on the wire, each using 0 for unknown,
 			// so a transport that exposes only one still has something to report.
@@ -3401,6 +3501,7 @@ mod tests {
 			goaway,
 			peer_hop: Some(assigned),
 			egress: kio::Shared::new(0),
+			pads: false,
 			served: Default::default(),
 		});
 
@@ -3505,6 +3606,7 @@ mod tests {
 			goaway,
 			peer_hop: None,
 			egress: kio::Shared::new(0),
+			pads: false,
 			served: Default::default(),
 		});
 		ProbeServe::new(publisher.shared.clone(), publisher.runtime.clone(), stream)
@@ -3548,6 +3650,61 @@ mod tests {
 		assert_eq!(probes.len(), 1, "expected exactly one report");
 		assert_eq!(probes[0].rtt, Some(40));
 		assert_eq!(probes[0].bitrate, None, "unknown bitrate, not a measured zero");
+	}
+
+	/// A subscriber's target above what the transport sent gets padding streams
+	/// behind every other stream on a wire that has them, and nothing on one that
+	/// does not, or when we advertised Report alone.
+	#[tokio::test(start_paused = true)]
+	async fn pads_toward_the_subscribers_target() {
+		async fn padding_after_two_ticks(version: Version, pads: bool) -> (Vec<u8>, usize) {
+			// The subscriber asks for 800 kbit/s: 10 KB a tick.
+			let mut script = Vec::new();
+			lite::Probe {
+				bitrate: Some(800_000),
+				rtt: None,
+			}
+			.encode(&mut script, version)
+			.unwrap();
+			let mut session = crate::lite::test_transport::ScriptedSession::new(script);
+			let log = session.log.clone();
+			let stream = Stream::open(&mut session, version).await.unwrap();
+
+			let origin = Hop::random().produce();
+			let (_, goaway) = crate::goaway::Handle::new(true);
+			let publisher = Publisher::new(PublisherConfig {
+				runtime: TestRuntime::new(),
+				session,
+				origin: origin.consume(),
+				version,
+				peer_setup: crate::lite::PeerSetup::default(),
+				goaway,
+				peer_hop: None,
+				egress: kio::Shared::new(0),
+				served: Default::default(),
+				pads,
+			});
+			let mut server = ProbeServe::new(publisher.shared.clone(), TestRuntime::new(), stream);
+			let mut run = std::pin::pin!(kio::wait(|waiter| server.poll_probe(waiter)));
+			for _ in 0..3 {
+				assert!(futures::poll!(run.as_mut()).is_pending());
+				tokio::time::sleep(Duration::from_millis(100)).await;
+			}
+			let priorities = log.priorities();
+			let written = log.writes.lock().unwrap().len();
+			(priorities, written)
+		}
+
+		let (priorities, written) = padding_after_two_ticks(Version::Lite06Wip, true).await;
+		assert!(
+			priorities.contains(&0),
+			"padding goes out at the lowest send order: {priorities:?}"
+		);
+		assert!(written >= 10_000, "a tick's worth of padding was written: {written}");
+
+		let (priorities, written) = padding_after_two_ticks(Version::Lite06Wip, false).await;
+		assert!(!priorities.contains(&0), "Report alone never pads: {priorities:?}");
+		assert!(written < 1_000, "only reports were written: {written}");
 	}
 
 	/// The mirror case: a send rate with no RTT still reports.

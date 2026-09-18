@@ -167,6 +167,18 @@ impl Version {
 		}
 	}
 
+	/// Whether the wire has a Padding Stream, which a publisher that advertised
+	/// the Increase probe level pads the connection with up to the subscriber's
+	/// target. Added in lite-06.
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_padding(self) -> bool {
+		// Match form so future versions default forward (CLAUDE.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether announcements carry the route cost: the marginal cost of pulling
 	/// the broadcast via this route, accumulated per link. Added in lite-06.
 	/// Older versions carry nothing, so a received route stays at zero and ranks

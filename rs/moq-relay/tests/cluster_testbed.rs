@@ -15,6 +15,7 @@
 //! MOQ_TESTBED_LOG=debug ...          # relay log level in those logs
 //! MOQ_TESTBED_MEASURE=false ...      # the control: hop counting, no measured prices
 //! MOQ_TESTBED_SETTLE=5 ...           # seconds the cluster gets to form before the clients attach
+//! MOQ_TESTBED_PROBE=100000 ...       # bits per second of PROBE padding on every idle link
 //! ```
 
 mod support;
@@ -214,6 +215,8 @@ impl Testbed {
 			config.cluster.node = Some(format!("https://{name}.testbed/"));
 			// `MOQ_TESTBED_MEASURE=false` is the control: hop counting, no pricing.
 			config.cluster.cost.measure = std::env::var("MOQ_TESTBED_MEASURE").as_deref() != Ok("false");
+			// `MOQ_TESTBED_PROBE=<bps>` keeps that much padding on every idle link.
+			config.cluster.cost.probe = std::env::var("MOQ_TESTBED_PROBE").ok().and_then(|s| s.parse().ok());
 			config.cluster.connect = dials
 				.get(name)
 				.into_iter()

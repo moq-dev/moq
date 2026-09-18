@@ -2332,6 +2332,21 @@ pub struct CostConfig {
 		setting = "cluster.cost.step"
 	)]
 	pub step: Option<moq_tokio::Duration>,
+
+	/// Bits per second to keep flowing on every measured link, as PROBE padding
+	/// the peer sends when nothing else does, so a link learns its loss before a
+	/// stream pays to discover it. Unset sends nothing and prices an idle link on
+	/// its RTT alone. At 1% loss a few hundred packets show it: 100000 (100 kbit/s)
+	/// is about ten packets a second, so a lossy idle link is found in under a
+	/// minute for 12 KB/s per link.
+	#[usage(
+		name = "cluster-cost-probe",
+		long = "cluster-cost-probe",
+		env = "MOQ_CLUSTER_COST_PROBE",
+		value_name = "BPS",
+		setting = "cluster.cost.probe"
+	)]
+	pub probe: Option<u64>,
 }
 
 impl Default for CostConfig {
@@ -2341,6 +2356,7 @@ impl Default for CostConfig {
 			interval: None,
 			hop_penalty: None,
 			step: None,
+			probe: None,
 		}
 	}
 }
@@ -2362,6 +2378,7 @@ impl CostConfig {
 			interval,
 			hop_penalty: self.hop_penalty.map(|d| *d).unwrap_or(DEFAULT_HOP_PENALTY),
 			step,
+			probe: self.probe.filter(|bps| *bps > 0),
 		}))
 	}
 }
@@ -2372,6 +2389,8 @@ struct Pricing {
 	interval: Duration,
 	hop_penalty: Duration,
 	step: Duration,
+	/// Bits per second of PROBE padding to ask each peer for, if any.
+	probe: Option<u64>,
 }
 
 /// One reading of a link's counters, from the sending side.
@@ -2681,6 +2700,9 @@ struct Link {
 	meter: LinkMeter,
 	quantizer: Quantizer,
 	links: Links,
+	/// Keeps the session's probe stream open while a probe target is set; the
+	/// peer pads toward the target only while we consume its estimate.
+	probing: Option<moq_net::bandwidth::Consumer>,
 }
 
 impl Link {
@@ -2692,6 +2714,7 @@ impl Link {
 			meter: LinkMeter::default(),
 			quantizer: Quantizer::new(pricing.step),
 			links,
+			probing: None,
 		}
 	}
 
@@ -2703,10 +2726,20 @@ impl Link {
 		self.meter = LinkMeter::default();
 		self.quantizer = Quantizer::new(self.pricing.step);
 		self.peer = None;
+		self.probing = None;
 		self.links.remove(self.id);
 	}
 
 	fn sample(&mut self, session: &moq_net::Session) {
+		// Ask for padding once per session: the peer pads only while the probe
+		// stream this consumer keeps open is up, and the target rides on it.
+		if self.probing.is_none()
+			&& let Some(probe) = self.pricing.probe
+			&& let Some(estimate) = session.recv_bandwidth()
+		{
+			session.set_probe_target(Some(probe));
+			self.probing = Some(estimate);
+		}
 		let stats = session.stats();
 		let Some(estimate) = self.meter.observe(LinkSample::from(&stats)) else {
 			return;
@@ -4314,6 +4347,7 @@ mod tests {
 			interval: Duration::from_secs(1),
 			hop_penalty: Duration::from_millis(hop_penalty_ms),
 			step: Duration::from_millis(step_ms),
+			probe: None,
 		}
 	}
 
@@ -4541,6 +4575,17 @@ mod tests {
 		assert_eq!(pricing.interval, DEFAULT_COST_INTERVAL);
 		assert_eq!(pricing.hop_penalty, DEFAULT_HOP_PENALTY);
 		assert_eq!(pricing.step, DEFAULT_COST_STEP);
+		assert_eq!(pricing.probe, None);
+		let probing = CostConfig {
+			probe: Some(100_000),
+			..Default::default()
+		};
+		assert_eq!(probing.pricing().unwrap().unwrap().probe, Some(100_000));
+		let zero = CostConfig {
+			probe: Some(0),
+			..Default::default()
+		};
+		assert_eq!(zero.pricing().unwrap().unwrap().probe, None, "0 is off");
 
 		let off = CostConfig {
 			measure: false,
@@ -4565,7 +4610,7 @@ mod tests {
 	fn cluster_cost_survives_toml_merge() {
 		let _env = crate::test_env::EnvGuard::lock();
 
-		let toml = "[cluster.cost]\nmeasure = false\nhop_penalty = \"12ms\"\nstep = \"10ms\"\n";
+		let toml = "[cluster.cost]\nmeasure = false\nhop_penalty = \"12ms\"\nstep = \"10ms\"\nprobe = 100000\n";
 		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
 		std::fs::create_dir_all(&dir).unwrap();
 		let path = dir.join("cluster-cost-toml.toml");
@@ -4577,6 +4622,7 @@ mod tests {
 		assert!(!cost.measure, "TOML's measure = false must survive the CLI re-parse");
 		assert_eq!(cost.hop_penalty.map(|d| *d), Some(Duration::from_millis(12)));
 		assert_eq!(cost.step.map(|d| *d), Some(Duration::from_millis(10)));
+		assert_eq!(cost.probe, Some(100_000));
 
 		// And a flag wins over the file.
 		let args = vec![

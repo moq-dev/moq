@@ -30,6 +30,10 @@ pub(crate) struct Link {
 	pub peer: PeerSlot,
 	/// Groups and payload served to the peer, on the wires this crate counts.
 	pub served: Option<Arc<Served>>,
+	/// The bitrate this end asks the peer to pad the connection up to, in bits
+	/// per second, while it holds a receive-bandwidth consumer. See
+	/// [`Session::set_probe_target`].
+	pub probe_target: kio::Shared<Option<u64>>,
 }
 
 impl Link {
@@ -38,6 +42,7 @@ impl Link {
 			egress: kio::Shared::new(0),
 			peer,
 			served,
+			probe_target: kio::Shared::new(None),
 		}
 	}
 }
@@ -286,6 +291,21 @@ impl Session {
 		let mut egress = self.link.egress.lock();
 		if *egress != cost {
 			*egress = cost;
+		}
+	}
+
+	/// Ask the peer to pad the connection up to `bits_per_second` while this end
+	/// consumes [`recv_bandwidth`](Self::recv_bandwidth), or `None` to stop.
+	///
+	/// A publisher that advertised the Increase probe level (moq-lite-06+) sends
+	/// padding streams, bounded by its congestion window and behind every other
+	/// stream, until its sending rate reaches the target; one that advertised less,
+	/// or an older wire, keeps reporting and sends nothing. What a relay uses to
+	/// learn a link's loss before a stream crosses it, at a cost it chooses.
+	pub fn set_probe_target(&self, bits_per_second: Option<u64>) {
+		let mut target = self.link.probe_target.lock();
+		if *target != bits_per_second {
+			*target = bits_per_second;
 		}
 	}
 
