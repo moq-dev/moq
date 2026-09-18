@@ -59,7 +59,6 @@ pub(crate) async fn serve_ws(
 	let bytes = moq_auth::Counters::default();
 	let session_id = request.id.clone();
 	let lease = state.auth.admit(request.clone(), bytes.clone()).await?;
-	let registration = Some(state.sessions.register(request));
 	let token = lease.token();
 	let publish = state.cluster.publisher(token);
 	let subscribe = state.cluster.subscriber(token);
@@ -92,7 +91,7 @@ pub(crate) async fn serve_ws(
 			shutdown: state.shutdown.clone(),
 			socket_stats: socket_stats.map(|Extension(s)| s),
 		};
-		let _ = handle_socket(socket, session, lease, bytes, registration).await;
+		let _ = handle_socket(socket, session, lease, bytes, Some((state.sessions.clone(), request))).await;
 	}))
 }
 
@@ -112,13 +111,18 @@ struct SessionInputs {
 }
 
 /// Serve one upgraded WebSocket until it closes or its lease ends.
+///
+/// The session registers in the live table only once the MoQ handshake
+/// completes: listing it earlier would answer 202 for a push this handler
+/// cannot service until SETUP. `pending` carries what to register with, or
+/// `None` for a session that is served but not listed.
 #[tracing::instrument("ws", err, skip_all, fields(id = session.id, remote = %session.remote, session = %session.session))]
 async fn handle_socket<T>(
 	socket: T,
 	session: SessionInputs,
 	mut lease: auth::Lease,
 	bytes: moq_auth::Counters,
-	registration: Option<crate::session::Registration>,
+	pending: Option<(crate::session::Registry, moq_auth::Request)>,
 ) -> anyhow::Result<()>
 where
 	T: futures::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
@@ -181,6 +185,10 @@ where
 		.accept(runtime.clone(), moq_tokio::transport::Session::new(ws))
 		.await?;
 	let mut driver = runtime.take().expect("accept hands the machine to its runtime");
+
+	// The handshake is done, so this is a MoQ session now: only now can a push
+	// be serviced, and only now does the session appear in the live table.
+	let registration = pending.map(|(sessions, request)| sessions.register(request));
 
 	let meter = |session: &moq_net::Session| {
 		let stats = session.stats();

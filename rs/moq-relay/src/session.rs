@@ -376,6 +376,7 @@ fn parse_role(value: &str) -> Option<Role> {
 
 /// Why a filter could not be built from a query string.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
 	/// A field the routes do not filter on, including `query`.
 	Unknown(String),
