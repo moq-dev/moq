@@ -12,8 +12,12 @@ advertising `game/*` serves it and a Rust client at the same path plays.
 ## Plan
 
 Replace the `covers` check with the Rust rule: the event's pattern is a
-prefix of the path or `matches` it. Keep the redundant-re-announce handling
-and the blind-consume fallback. Add the wildcard case to the announced tests
+prefix of the path or `matches` it. More than one claim can now match
+(`game/*` and `game/**` both cover `game/alice`), so both paths in
+`Broadcast` keep the set of active matching patterns instead of one flag,
+and go offline only when a retraction empties it. Keep the
+redundant-re-announce handling and the blind-consume fallback. Add the
+wildcard case and the two-claims-one-retraction case to the announced tests
 beside the subtree and literal ones, and note the rule in `doc/lib/js/net.md`
 where `Announce.Broadcast` is described. Public API: none. Wire: none.
 

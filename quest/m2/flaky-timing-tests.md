@@ -16,7 +16,9 @@ passes alone and fails on a busy scheduler:
 
 Fix each at the cause, not by widening a sleep: the relay test runs under a
 paused tokio clock or asserts on the lease's own expiry event; the clock test
-constructs the copies from one `new_at` instant so equality is exact; the HLS
-test drives the cache miss deterministically (evict, then request) instead
-of polling. Run each 50 times under `nice -n -5 cargo build` load to show
+stops sampling `elapsed()` twice (each `micros()` call reads the monotonic
+clock anew, so a shared epoch still crosses a boundary) and instead compares
+what the copies store, the epoch and wall anchor a `new_at` clock reports
+through `section()`; the HLS test drives the cache miss deterministically
+(evict, then request) instead of polling. Run each 50 times under `nice -n -5 cargo build` load to show
 the flake is gone.

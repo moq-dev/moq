@@ -18,10 +18,11 @@ asked for; the scope and match half already landed in #3672 and #3746.
   is not a subset of the current one is refused; widening is never a
   narrowing.
 - The origin tracks the broadcasts each scoped handle handed out, weakly, and
-  narrowing aborts those outside the new grant with `Unauthorized` at the
-  next group boundary. Enforcement stays in the model so the proof needs no
-  session, and a transport that never learns about the change still cannot
-  keep reading.
+  narrowing aborts those outside the new grant with `Unauthorized` at once,
+  the group in flight included: a group is a live stream that may stay open
+  for as long as the track does, so waiting for its boundary is no boundary
+  at all. Enforcement stays in the model so the proof needs no session, and a
+  transport that never learns about the change still cannot keep reading.
 - Relay revalidation uses it: a re-checked grant with the same root narrows
   the session's origin handles instead of closing the session
   (`Recheck::Closed("grant narrowed")` in `rs/moq-relay/src/connection.rs`),
