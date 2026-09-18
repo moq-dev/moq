@@ -26,14 +26,16 @@ Lands on `dev`, in `rs/moq-tokio`. See the
   `shared.migrating()` then `shared.connected(&new)`, send
   `old.drain().send(Goaway::same().timeout(handover))` with the configured
   `GoawayConfig` cap, and move the old session into `Draining`. A QUIC dial
-  that fails after WebSocket won is logged at debug and the session carries on
-  over WebSocket. The pending dial is dropped when the WebSocket session ends
+  that fails after WebSocket won is logged at debug, leaves the memo untouched,
+  and the session carries on over WebSocket. The pending dial is dropped when the WebSocket session ends
   first; the reconnect races again.
 - On a successful upgrade remove the URL from `WEBSOCKET_WON`
   (`rs/moq-tokio/src/websocket.rs`).
-- Add a `transport` accessor on `moq_net::Session` or the `Connection` status
-  naming the wire transport (QUIC, WebTransport, WebSocket, TCP, Unix), so
-  telemetry can see the swap; `js/net` already has `transportOf`.
+- Add `moq_tokio::Transport` (QUIC, WebTransport, WebSocket, TCP, Unix) and
+  `Connection::transport()` returning it for the live session, so telemetry can
+  see the swap. It lives in `moq-tokio`, not `moq_net`: the session is generic
+  over the transport trait and cannot know what it runs on, only the dial
+  does. Mirrors `js/net`'s `transportOf`.
 - Regression test against the in-tree relay: the QUIC path goes through an
   in-process UDP forwarder that delays packets past the WebSocket head start so
   WebSocket wins deterministically; a subscribed track keeps every group across

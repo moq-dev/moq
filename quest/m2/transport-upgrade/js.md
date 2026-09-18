@@ -26,9 +26,10 @@ session to close on its own or at the handover cap. See the
 - The reconnecting `Connection` awaits the pending WebTransport `ready`, runs
   the same `connectTransport` handshake on it, and feeds it into the GOAWAY
   handover as if the WebSocket session had been told to migrate with an empty
-  URI: origins swap, the old session sends a lite GOAWAY (the IETF wire has no
-  client GOAWAY; the old session simply drains) and closes at the configured
-  cap. A WebTransport attempt that fails after WebSocket won is logged at
+  URI: origins swap, the old session sends an empty-URI GOAWAY on every wire that
+  carries the message (lite 04+ and every IETF draft; a moq-transport client
+  may not name a redirect URI, and an empty one is legal) and closes at the
+  configured cap. A WebTransport attempt that fails after WebSocket won is logged at
   debug and the session stays on WebSocket.
 - On a successful upgrade delete the URL from `websocketWon`.
 - Tests in the browser harness against the in-tree relay: with the
