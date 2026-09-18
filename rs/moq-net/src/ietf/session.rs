@@ -50,6 +50,11 @@ pub struct Config<S: crate::transport::poll::Session, R: crate::runtime::Runtime
 	/// cost at all, so nothing is charged and their routes rank on hop count alone.
 	pub cost: Option<u64>,
 
+	/// Declare PRICED: we fold our own egress price ([`crate::Session::set_egress`])
+	/// into every ROUTE_COST we forward, so the peer charges nothing more for this
+	/// direction. Ignored where `cost` is declared.
+	pub priced: bool,
+
 	pub version: Version,
 
 	/// The request path we advertise in our SETUP (draft-17+ clients on URL-less
@@ -90,6 +95,7 @@ where
 		subscribe,
 		peer_hop,
 		cost,
+		priced,
 		version,
 		path,
 		peer_setup_stream,
@@ -285,7 +291,9 @@ where
 					let session = session.clone();
 					let goaway = goaway.clone();
 					async move {
-						if let Err(err) = run_setup(runtime, session, version, path, self_origin, cost, goaway).await {
+						if let Err(err) =
+							run_setup(runtime, session, version, path, self_origin, cost, priced, goaway).await
+						{
 							tracing::warn!(%err, "setup send error");
 						}
 						std::future::pending::<()>().await;
@@ -522,9 +530,10 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 /// also our GOAWAY channel, so a fired drain trigger encodes the GOAWAY here.
 ///
 /// `path` is the request path we advertise (clients on URL-less transports); a
-/// server passes `None`. `self_origin` and `cost` are the MoQ Cluster options, which
-/// declare our identity and (client-only) what this link costs to cross. The MoQ Solicit
-/// declaration is unconditional, so it takes no argument.
+/// server passes `None`. `self_origin`, `cost`, and `priced` are the MoQ Cluster options,
+/// which declare our identity and how this link is priced. The MoQ Solicit declaration
+/// is unconditional, so it takes no argument.
+#[allow(clippy::too_many_arguments)]
 async fn run_setup<S: crate::transport::poll::Session, R: crate::runtime::Runtime>(
 	runtime: R,
 	mut session: S,
@@ -532,6 +541,7 @@ async fn run_setup<S: crate::transport::poll::Session, R: crate::runtime::Runtim
 	path: Option<String>,
 	self_origin: Hop,
 	cost: Option<u64>,
+	priced: bool,
 	goaway: crate::goaway::Protocol,
 ) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
@@ -544,7 +554,7 @@ async fn run_setup<S: crate::transport::poll::Session, R: crate::runtime::Runtim
 	if let Some(path) = path {
 		parameters.set_bytes(ietf::ParameterBytes::Path, path.into_bytes());
 	}
-	cluster::peer_into_setup(&mut parameters, self_origin, cost, version);
+	cluster::peer_into_setup(&mut parameters, self_origin, cost, priced, version);
 	solicit::into_setup(&mut parameters, version);
 	ietf::pattern::peer_into_setup(&mut parameters, version);
 	let parameters = parameters.encode_bytes(version)?;
@@ -956,6 +966,7 @@ mod tests {
 			subscribe: Some(origin),
 			peer_hop: None,
 			cost: None,
+			priced: false,
 			version: VERSION,
 			path: None,
 			peer_setup_stream: None,
@@ -965,6 +976,7 @@ mod tests {
 				cluster: cluster::Peer {
 					hop: Some(crate::Hop::new(2).unwrap()),
 					cost: None,
+					priced: false,
 				},
 				..Default::default()
 			}),
@@ -1015,6 +1027,7 @@ mod tests {
 			subscribe: Some(scoped),
 			peer_hop: None,
 			cost: None,
+			priced: false,
 			version: Version::Draft18,
 			path: None,
 			peer_setup_stream: None,
@@ -1065,6 +1078,7 @@ mod tests {
 			subscribe: None,
 			peer_hop: None,
 			cost: None,
+			priced: false,
 			version: Version::Draft18,
 			path: None,
 			peer_setup_stream: None,
@@ -1172,6 +1186,7 @@ mod tests {
 			subscribe: Some(origin),
 			peer_hop: None,
 			cost: None,
+			priced: false,
 			version: VERSION,
 			path: None,
 			peer_setup_stream: None,
@@ -1366,6 +1381,7 @@ mod tests {
 			subscribe: Some(origin),
 			peer_hop: None,
 			cost: None,
+			priced: false,
 			version: VERSION,
 			path: None,
 			peer_setup_stream: None,

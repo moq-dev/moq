@@ -51,8 +51,8 @@ impl Server {
 		self
 	}
 
-	/// Declare that this end prices its own egress into the routes it forwards
-	/// (moq-lite-06+); see [`Client::with_priced`](crate::Client::with_priced).
+	/// Declare that this end prices its own egress into the routes it forwards;
+	/// see [`Client::with_priced`](crate::Client::with_priced).
 	pub fn with_priced(mut self) -> Self {
 		self.priced = true;
 		self
@@ -533,6 +533,7 @@ where
 				peer_hop,
 				// Only the dialing side prices a link.
 				cost: None,
+				priced: server.priced,
 				version,
 				path: None,
 				peer_setup_stream: Some(peer_setup.stream),
@@ -648,6 +649,7 @@ where
 						subscribe,
 						peer_hop,
 						cost: None,
+						priced: server.priced,
 						version: v,
 						path: None,
 						peer_setup_stream: None,
@@ -757,7 +759,7 @@ where
 	}
 
 	/// Declare that this end prices its own egress into the routes it forwards on
-	/// this session (moq-lite-06+); see [`Client::with_priced`](crate::Client::with_priced).
+	/// this session; see [`Client::with_priced`](crate::Client::with_priced).
 	pub fn with_priced(mut self) -> Self {
 		self.inner_mut().server.priced = true;
 		self

@@ -14,6 +14,8 @@ export const SetupOption = {
 	HopId: 0x40b54n,
 	/** RELAY_COST, from the MoQ Cluster extension. See `cluster.ts`. */
 	RelayCost: 0x40b56n,
+	/** PRICED, from the MoQ Cluster extension: the peer folds its egress price into what it forwards. */
+	Priced: 0x40b5en,
 	/** SOLICIT, from the MoQ Solicit extension. See `solicit.ts`. */
 	Solicit: 0x40b5an,
 } as const;

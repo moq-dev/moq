@@ -3894,6 +3894,7 @@ mod tests {
 		let peer = cluster::Peer {
 			hop: Some(crate::Hop::new(9).unwrap()),
 			cost: Some(3),
+			priced: false,
 		};
 		let advert = cluster::Advert {
 			hops: hop_path(&[7, 9]),
@@ -3927,6 +3928,7 @@ mod tests {
 		let peer = cluster::Peer {
 			hop: Some(crate::Hop::new(9).unwrap()),
 			cost: None,
+			priced: false,
 		};
 
 		let looped = cluster::Advert {
@@ -3950,6 +3952,7 @@ mod tests {
 		let peer = cluster::Peer {
 			hop: Some(crate::Hop::new(9).unwrap()),
 			cost: None,
+			priced: false,
 		};
 		let advert = cluster::Advert {
 			hops: hop_path(&[7, 9]),
@@ -3961,6 +3964,7 @@ mod tests {
 		let free = cluster::Peer {
 			hop: Some(crate::Hop::new(9).unwrap()),
 			cost: Some(0),
+			priced: false,
 		};
 		assert_eq!(subscriber.route(Some(&advert), &free).unwrap().route.cost.warm, 2);
 	}
@@ -4057,6 +4061,7 @@ mod tests {
 			cluster: cluster::Peer {
 				hop: Some(crate::Hop::new(9).unwrap()),
 				cost: Some(0),
+				priced: false,
 			},
 			..Default::default()
 		});
@@ -4282,6 +4287,7 @@ mod tests {
 		let priced_peer = cluster::Peer {
 			hop: None,
 			cost: Some(4),
+			priced: false,
 		};
 		assert_eq!(unpriced.route(None, &priced_peer).unwrap().route.cost.warm, 4);
 
@@ -4289,6 +4295,14 @@ mod tests {
 		let (mut priced, _origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		priced.cost = Some(6);
 		assert_eq!(priced.route(None, &priced_peer).unwrap().route.cost.warm, 6);
+
+		// A peer that folds its egress into what it forwards is charged nothing more.
+		let folded = cluster::Peer {
+			hop: None,
+			cost: None,
+			priced: true,
+		};
+		assert_eq!(unpriced.route(None, &folded).unwrap().route.cost.warm, 0);
 	}
 
 	/// An update replaces the advertisement in place: the route moves, the refcount does
@@ -4342,6 +4356,7 @@ mod tests {
 		let peer = cluster::Peer {
 			hop: Some(crate::Hop::new(9).unwrap()),
 			cost: Some(0),
+			priced: false,
 		};
 		let hops = cluster::HopPath::new(
 			crate::Hops::try_from(vec![crate::Hop::UNKNOWN, crate::Hop::new(9).unwrap()]).unwrap(),
@@ -4390,6 +4405,7 @@ mod tests {
 		let peer = cluster::Peer {
 			hop: Some(crate::Hop::new(9).unwrap()),
 			cost: None,
+			priced: false,
 		};
 		let hops = cluster::HopPath::new(
 			crate::Hops::try_from(vec![crate::Hop::UNKNOWN, crate::Hop::new(9).unwrap()]).unwrap(),
@@ -4452,6 +4468,7 @@ mod tests {
 		let peer = cluster::Peer {
 			hop: Some(crate::Hop::new(9).unwrap()),
 			cost: None,
+			priced: false,
 		};
 
 		let clean = cluster::Advert {
@@ -4593,6 +4610,7 @@ mod tests {
 		cluster::Peer {
 			hop: Some(crate::Hop::new(9).unwrap()),
 			cost: None,
+			priced: false,
 		}
 	}
 
@@ -4709,6 +4727,7 @@ mod tests {
 		let peer = cluster::Peer {
 			hop: Some(crate::Hop::new(9).unwrap()),
 			cost: Some(0),
+			priced: false,
 		};
 		let held = cluster::Advert {
 			hops: hop_path(&[7, 9]),

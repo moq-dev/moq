@@ -104,8 +104,8 @@ impl Client {
 	}
 
 	/// Declare that this end prices its own egress into the routes it forwards
-	/// (moq-lite-06+), so the peer charges nothing more on arrival instead of its
-	/// default of 1. What a relay pricing its links by measurement sets; the price
+	/// (moq-lite-06+, and moqt-17+ with the Cluster extension), so the peer charges
+	/// nothing more on arrival instead of its default of 1. What a relay pricing its links by measurement sets; the price
 	/// itself is applied with [`crate::Session::set_egress`]. A configured
 	/// [`cost`](Self::with_cost) still prices the link outright.
 	pub fn with_priced(mut self) -> Self {
@@ -276,6 +276,7 @@ impl Client {
 					subscribe: subscribe.clone(),
 					peer_hop: self.peer_hop,
 					cost: self.cost,
+					priced: self.priced,
 					version: draft,
 					path: self.setup_path.clone(),
 					peer_setup_stream: None,
@@ -419,6 +420,7 @@ impl Client {
 					subscribe: subscribe.clone(),
 					peer_hop: self.peer_hop,
 					cost: self.cost,
+					priced: self.priced,
 					version: v,
 					path: None,
 					peer_setup_stream: None,

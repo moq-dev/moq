@@ -24,6 +24,8 @@ pub enum ParameterVarInt {
 	HopId = super::cluster::HOP_ID,
 	/// RELAY_COST, from the MoQ Cluster extension.
 	RelayCost = super::cluster::RELAY_COST,
+	/// PRICED, from the MoQ Cluster extension.
+	Priced = super::cluster::PRICED,
 	/// SOLICIT, from the MoQ Solicit extension.
 	Solicit = super::solicit::SOLICIT,
 	/// NAMESPACE_PATTERNS, from the MoQ Pattern extension.

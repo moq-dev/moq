@@ -84,6 +84,7 @@ mod tests {
 			cluster: cluster::Peer {
 				hop: Some(crate::Hop::new(42).unwrap()),
 				cost: Some(3),
+				priced: false,
 			},
 			solicit: None,
 			patterns: false,
@@ -95,6 +96,7 @@ mod tests {
 			cluster: cluster::Peer {
 				hop: Some(crate::Hop::new(99).unwrap()),
 				cost: Some(0),
+				priced: false,
 			},
 			solicit: Some(true),
 			patterns: true,

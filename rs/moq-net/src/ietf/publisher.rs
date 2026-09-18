@@ -3564,6 +3564,7 @@ mod tests {
 		let peer = cluster::Peer {
 			hop: Some(r1),
 			cost: None,
+			priced: false,
 		};
 		let mut announced = consumer.excluding(publisher.exclude(&peer)).announced();
 		announced.assert_next_wait();
@@ -3588,6 +3589,7 @@ mod tests {
 		let withheld = cluster::Peer {
 			hop: Some(crate::Hop::UNKNOWN),
 			cost: None,
+			priced: false,
 		};
 		assert!(withheld.negotiated(), "the extension is on");
 		assert_eq!(publisher.exclude(&withheld), assigned, "0 names nobody, so we do");
@@ -3598,6 +3600,7 @@ mod tests {
 		let named = cluster::Peer {
 			hop: Some(declared),
 			cost: None,
+			priced: false,
 		};
 		assert_eq!(publisher.exclude(&named), declared, "a declared identity wins");
 	}
@@ -3637,6 +3640,7 @@ mod tests {
 		let peer = cluster::Peer {
 			hop: Some(crate::Hop::UNKNOWN),
 			cost: None,
+			priced: false,
 		};
 		let mut announced = consumer.excluding(publisher.exclude(&peer)).announced();
 		announced.assert_next_wait();
@@ -4226,6 +4230,7 @@ mod tests {
 			cluster: cluster::Peer {
 				hop: Some(crate::Hop::new(9).unwrap()),
 				cost: None,
+				priced: false,
 			},
 			solicit,
 			..Default::default()
