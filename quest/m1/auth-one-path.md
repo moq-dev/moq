@@ -29,7 +29,8 @@ Fold Server, Public, and Refuse onto the queue Embedded already uses.
 - `--auth-public`: a loop that answers `grant(lease::Consumer::fixed(grant))`.
 - Refuse (`Auth::refuse`, LAN-only with no listener): a loop that answers
   `auth::Error::Refused`. A dropped `Admissions` stays an outage (502), not a
-  policy.
+  policy. `Auth::refuse` also requires a Tokio runtime; cover synchronous
+  construction with the same runtime-requirement tests as `Config::init`.
 - Dropping every `Auth` clone ends `next()` with `None` and the decider
   exits. Dropping the decider first makes later `admit()` fail unavailable,
   the same as dropping `Admissions` today.
@@ -66,7 +67,7 @@ The unix socket, the axum router, and the JSON round trip go away; the
 gateways keep not calling `admit`, and relay/CLI `--listen` keep calling it.
 
 Public API: breaking on moq-relay's unpublished auth module (`Mode` gone,
-`init` requires a runtime). Wire: none.
+`Config::init` and `Auth::refuse` require a runtime). Wire: none.
 
 ## Related
 
