@@ -790,6 +790,9 @@ struct RemoteFront {
 	broadcast: broadcast::WeakConsumer,
 }
 
+/// The last route a cursor observed: entry id, metadata, servability, and captures.
+type CursorRoute = (u64, RouteMeta, bool, Option<Vec<Pattern>>);
+
 impl WeakEntry for RemoteFront {
 	fn is_closed(&self) -> bool {
 		self.broadcast.is_closed()
@@ -816,7 +819,7 @@ struct TableCursor {
 	/// detection: `(entry id, hops, cost)`.
 	// entry id, metadata, and whether the entry could serve requests: the last
 	// is part of the dedupe key (see `sync_cursor`) but never leaves the model.
-	current: HashMap<PathOwned, (u64, RouteMeta, bool, Option<Vec<Pattern>>)>,
+	current: HashMap<PathOwned, CursorRoute>,
 }
 
 impl TableCursor {
@@ -3035,10 +3038,10 @@ impl OriginState {
 		let routes = &self.routes;
 		let mut presented: Vec<PathOwned> = Vec::new();
 		for entry in routes {
-			if let Some(p) = cursor.presented(&entry.prefix) {
-				if !presented.contains(&p) {
-					presented.push(p);
-				}
+			if let Some(p) = cursor.presented(&entry.prefix)
+				&& !presented.contains(&p)
+			{
+				presented.push(p);
 			}
 		}
 		for p in &presented {
@@ -4604,12 +4607,17 @@ mod tests {
 	fn dynamic_may_cover_a_scope_but_disjoint_prefixes_are_refused() {
 		let producer = origin(1).produce();
 		let scoped = producer.scope(&scopes(&["room"])).unwrap();
-		let _broad = scoped.dynamic("", Route::default()).expect("an overlapping prefix is accepted");
+		let _broad = scoped
+			.dynamic("", Route::default())
+			.expect("an overlapping prefix is accepted");
 
 		let _ok = scoped
 			.dynamic("room/alice", Route::default())
 			.expect("a contained prefix is accepted");
-		assert!(matches!(scoped.dynamic("other", Route::default()), Err(Error::Unauthorized)));
+		assert!(matches!(
+			scoped.dynamic("other", Route::default()),
+			Err(Error::Unauthorized)
+		));
 	}
 
 	#[tokio::test]
