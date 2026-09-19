@@ -29,7 +29,6 @@ This file is split into nested `CLAUDE.md` files based on the language/situation
 - Any AI comments may be challenged, and not confused with human maintainers.
 - Prompt the user to decide when unsure, but always provide recommendations.
 
-
 # Guidelines
 
 - Prefer a maintained crate over hand-rolling non-core functionality.
@@ -91,17 +90,23 @@ These diff the branch against its base and only run the affected packages.
 
 # Cross-Package Sync
 
-**Rust** and **Typescript** are the two primary languages.
+| Change in | Also update |
+|---|---|
+| `rs/moq-ffi` | `rs/libmoq`, `{py,swift,kt,dart}/`, `go/wrapper/moq/*.go` (the `go/ffi` and `dart/moq_ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs` or `dart/moq`), `doc/lib/{py,swift,kt,go,dart,c}` |
+| `rs/moq-net` wire/API | `js/net`, `doc/concept`, `drafts/draft-lcurley-moq-lite.md` (if the wire spec changes) |
+| `rs/hang` catalog/container | `js/hang`, `doc/concept`, `drafts/draft-lcurley-moq-hang.md` (if the format spec changes) |
+| `rs/moq-token` | `js/token` |
+| `rs/moq-stats` wire (track names, frame shapes) | `doc/bin/relay/config.md` (stats section) |
+| `rs/moq-relay` config/behavior | `doc/bin/relay/` |
+| `rs/moq-cli` | `doc/bin/cli.md` |
+| `rs/moq-token-cli` | `doc/bin/relay/auth.md`, `doc/lib/rs/moq-token.md`, `doc/lib/rs/index.md` |
+| `rs/moq-gst` | `doc/bin/gstreamer.md` |
+| `rs/libmoq` C ABI (`moq.h`) | `cpp/obs/src`, `doc/bin/obs.md` |
+| `js/{watch,publish}` UI/API | `demo/web` if it consumes the API |
+| a kramdown-rfc construct new to `drafts/` | `doc/.vitepress/drafts.ts`, which translates the drafts into `/draft/` site pages |
 
-We maintain support for Python, Swift, Kotlin, Dart, Go, etc via `uniffi` and `moq-ffi`.
-Each language has an ergonomic wrapper to avoid using the generated types directly.
-C is supported through a separate `libmoq` package.
+Any wire-format change updates its matching IETF draft in the same PR, including framing, message fields, enum values, and version negotiation. Use the feature-specific draft for extensions and validate with `just drafts check`. See `drafts/CLAUDE.md`.
 
-Make sure all languages have similar APIs, functionality, and terminology.
-Prefer using language best-practices and conventions; ex. cancel via `Drop` in Rust but `context.Context` in Go.
+For wire, `moq-ffi`, or gateway changes, also run `just test smoke-full` for cross-language interop; plain `smoke` is Rust-only.
 
-The `drafts/` folder must contain a full description of the non-IETF wire protocols.
-See the datatracker for any IETF protocols: https://datatracker.ietf.org/wg/moq/about/
-
-Make sure `doc/` folders are up-to-date and kept in sync.
-Same with CLI help messages and any documentation strings.
+When a CLI interface changes, search the whole repo for the binary name and update every example invocation, including docs and demo recipes. Check examples against `--help`.

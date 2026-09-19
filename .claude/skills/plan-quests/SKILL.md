@@ -34,6 +34,8 @@ The result may be one quest or multiple quests and questlines, split based on wh
 Prefix each quest title with `[XS]`, `[S]`, `[M]`, `[L]`, or `[XL]`, including implementation, verification, and landing work.
 Once complete, create, update, or delete the relevant quests and questlines.
 
-If any quests are trivial and unblocked, you can make the changes now.
+When done, commit and create a draft PR following `CONTRIBUTING.md`.
+After local checks pass, mark it ready and monitor CI and the automatic reviews.
+Address one review round, then stop and report if the next review still has findings.
 
-When done, commit and make a PR.
+Merge the PR when ready.

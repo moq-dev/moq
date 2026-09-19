@@ -37,7 +37,7 @@ Prefer poll. New logic is a `poll_*` with an `async` helper, not the other way a
 - Typed units only: `std::time::Duration`, `moq_net::Timestamp`, never `f64` seconds or bare `u64` millis. `serde_as` converts at the edge.
 - `if let` / `let else` over a `match` whose only job is to bind. Keep `match` when both arms do work.
 - Public modules with short names: `broadcast::Consumer`, not `BroadcastConsumer`. Keep `mod encoder` private and re-export flat as `encode::Encoder`.
-- Workspace members and shared dependency versions live in the root `Cargo.toml`; crates reference deps via `{ workspace = true }`.:
+- Workspace members and shared dependency versions live in the root `Cargo.toml`; crates reference deps via `{ workspace = true }`.
 - Use newtypes and enums instead of untyped strings.
 - Have the language make misuse impossible: terminal operations consume `self`, cleanup in `Drop`, etc.
 

@@ -2,7 +2,7 @@ Read this before indirectly instructing agents.
 
 LLMs are not trained on how to write prompts.
 They're trained on the outputs, not the inputs, and thus generate slop when chained.
-So when you're drafting instructions for a future agent, please keep thse rules in mind.
+So when you're drafting instructions for a future agent, please keep these rules in mind.
 
 # General
 
@@ -30,7 +30,7 @@ If you think a slight tweak to the base prompt would help, propose it.
 Focus on best practices and conventions.
 Don't document the repository; the code and documentation can handle that.
 
-Before making **any** changes to `CLAUDE.md`, check the official Claude/Codex guidance:
+Before changing agent-instruction files, check the relevant official Claude/Codex guidance:
 
 - <https://code.claude.com/docs/en/memory>
 - <https://code.claude.com/docs/en/best-practices>

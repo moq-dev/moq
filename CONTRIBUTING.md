@@ -44,7 +44,6 @@ For each finding:
 
 - If you don't agree with it, reply to the finding and move on.
 - If it's a relatively easy improvement, fix it and push. Update the summary if needed.
-- If you disagree with the finding, reply and move on.
 
 # Follow-ups
 
