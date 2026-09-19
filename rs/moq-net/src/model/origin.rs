@@ -716,6 +716,9 @@ impl OriginConsumerState {
 struct RouteEntry {
 	id: u64,
 	prefix: PathOwned,
+	/// The absolute patterns the announcing producer may serve. The prefix is
+	/// only the wire-visible covering claim; this scope remains authoritative.
+	scope: Patterns,
 	hops: Hops,
 	cost: Cost,
 	/// The announcing session's declared or assigned identity. Split-horizon
@@ -746,6 +749,27 @@ impl RouteEntry {
 			Some(peer) if peer != Hop::UNKNOWN => self.via != peer && !self.hops.contains(&peer),
 			_ => true,
 		}
+	}
+
+	/// Whether this route and `allowed` share any path beneath the advertised prefix.
+	fn overlaps(&self, allowed: &Patterns) -> bool {
+		let Ok(claim) = prefix_claim(&self.prefix) else {
+			return false;
+		};
+		self.scope.iter().any(|scope| {
+			scope
+				.intersect(&claim)
+				.is_ok_and(|scoped| scoped.iter().any(|restriction| allowed.overlaps(restriction)))
+		})
+	}
+}
+
+/// The paths a prefix can cover, using an exact pattern at the path depth limit.
+fn prefix_claim(prefix: &Path) -> Result<Pattern, InvalidPattern> {
+	if prefix.parts().count() == Path::MAX_PARTS {
+		Pattern::literal(prefix.as_str())
+	} else {
+		Pattern::subtree(prefix.as_str())
 	}
 }
 
@@ -826,7 +850,7 @@ impl TableCursor {
 	/// Where `prefix` presents on this cursor, named relative to the cursor root.
 	/// The prefix stays a prefix; the pattern scope only decides visibility.
 	fn presented(&self, prefix: &Path) -> Option<PathOwned> {
-		let claim = Pattern::subtree(prefix.as_str()).ok()?;
+		let claim = prefix_claim(prefix).ok()?;
 		if !self.allowed.overlaps(&claim) {
 			return None;
 		}
@@ -854,7 +878,7 @@ impl TableCursor {
 
 	/// Whether this cursor may observe `entry` at all (split horizon).
 	fn visible(&self, entry: &RouteEntry) -> bool {
-		entry.visible_to(self.exclude)
+		entry.visible_to(self.exclude) && entry.overlaps(&self.allowed)
 	}
 }
 
@@ -1260,6 +1284,7 @@ impl Producer {
 				shared: self.shared.clone(),
 				requested: full.clone(),
 				prefixes: vec![full.clone()],
+				scope: self.scope.allowed.clone(),
 				local: true,
 				stats: self.stats.clone(),
 			},
@@ -1456,6 +1481,8 @@ struct Announcing {
 	/// The prefix inserted into the table. Pattern scopes decide visibility and
 	/// request authorization without changing the route's prefix shape.
 	prefixes: Vec<PathOwned>,
+	/// The absolute paths the producer is authorized to serve.
+	scope: Patterns,
 	local: bool,
 	stats: stats::Session,
 }
@@ -1467,7 +1494,7 @@ impl Announcing {
 		if requested.parts().count() > Path::MAX_PARTS {
 			return Err(BoundsExceeded.into());
 		}
-		let claim = Pattern::subtree(requested.as_str()).map_err(|_| BoundsExceeded)?;
+		let claim = prefix_claim(&requested).map_err(|_| BoundsExceeded)?;
 		if !producer.scope.allowed.overlaps(&claim) {
 			return Err(Error::Unauthorized);
 		}
@@ -1476,6 +1503,7 @@ impl Announcing {
 			shared: producer.shared.clone(),
 			requested: requested.clone(),
 			prefixes: vec![requested],
+			scope: producer.scope.allowed.clone(),
 			local: false,
 			stats: producer.stats.clone(),
 		})
@@ -1503,6 +1531,7 @@ impl Announcing {
 			shared.routes.push(RouteEntry {
 				id,
 				prefix: prefix.clone(),
+				scope: self.scope.clone(),
 				hops: meta.0.clone(),
 				cost: meta.1,
 				via,
@@ -3072,6 +3101,7 @@ impl OriginState {
 			.routes
 			.iter()
 			.filter(|entry| path.has_prefix(&entry.prefix))
+			.filter(|entry| entry.scope.matches(path.as_str()))
 			.filter(|entry| entry.visible_to(exclude))
 			.filter(|entry| match publisher {
 				Some(first) => entry.hops.iter().next() == Some(&first),
@@ -4617,6 +4647,48 @@ mod tests {
 			scoped.dynamic("other", Route::default()),
 			Err(Error::Unauthorized)
 		));
+	}
+
+	#[tokio::test]
+	async fn dynamic_route_keeps_its_producer_scope() {
+		let producer = origin(1).produce();
+		let scope = Patterns::from("*/chat".parse::<Pattern>().unwrap());
+		let scoped = producer.scope(&scope).unwrap();
+		let dynamic = scoped.dynamic("", Route::default()).unwrap();
+
+		let mut matching = producer.consume().scope(&scopes(&["room/chat"])).unwrap().announced();
+		matching.assert_next_active("");
+		let mut outside = producer.consume().scope(&scopes(&["room/video"])).unwrap().announced();
+		outside.assert_next_wait();
+
+		let refused = producer
+			.consume()
+			.request_broadcast("room/video")
+			.now_or_never()
+			.expect("an out-of-scope request must be refused synchronously");
+		assert!(matches!(refused, Err(Error::Unroutable)));
+		assert!(dynamic.requested_broadcast().now_or_never().is_none());
+
+		let _pending = producer.consume().request_broadcast("room/chat");
+		let request = queued(&dynamic).await;
+		assert_eq!(request.path().as_str(), "room/chat");
+	}
+
+	#[tokio::test]
+	async fn dynamic_accepts_a_max_depth_prefix() {
+		let producer = origin(1).produce();
+		let path = (0..Path::MAX_PARTS)
+			.map(|i| format!("s{i}"))
+			.collect::<Vec<_>>()
+			.join("/");
+		let mut announced = producer.consume().announced();
+
+		let dynamic = producer.dynamic(&path, Route::default()).expect("max depth is allowed");
+		announced.assert_next_active(&path);
+
+		let _pending = producer.consume().request_broadcast(&path);
+		let request = queued(&dynamic).await;
+		assert_eq!(request.path().as_str(), path);
 	}
 
 	#[tokio::test]
