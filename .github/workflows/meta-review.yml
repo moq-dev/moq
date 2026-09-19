@@ -19,9 +19,11 @@ jobs:
     # read-only token and cannot reach secrets for write access.
     #
     # Skipped on close/merge (cancel-only run), on drafts (review on ready,
-    # like Codex), and when the secret is missing (fork PRs get an empty
-    # secret, and failing there would turn every fork PR red).
-    if: github.event.action != 'closed' && github.event.pull_request.draft == false && secrets.META_MODEL_API_KEY != ''
+    # like Codex), and on fork PRs (they get empty secrets under the
+    # `pull_request` trigger; failing there would turn every fork PR red).
+    # Same-repo runs must have secrets; a missing one fails loud so the
+    # misconfiguration surfaces instead of silently disabling review.
+    if: github.event.action != 'closed' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04-arm
     # Backstop a hang instead of holding the runner for the 6-hour default.
     timeout-minutes: 15
@@ -34,10 +36,23 @@ jobs:
           fetch-depth: 0 # full history so the agent can diff against base
           persist-credentials: false
 
+      # Reviews post as moq-bot so they are distinct from github-actions noise.
+      - name: Generate moq-bot token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        id: token
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: moq-dev
+          repositories: moq
+          # Narrow the minted token to only what posting a review needs.
+          permission-contents: read
+          permission-pull-requests: write
+
       - uses: anomalyco/opencode/github@77fc88c8ade8e5a620ebbe1197f3a572d29ae91a # latest
         env:
           META_MODEL_API_KEY: ${{ secrets.META_MODEL_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
         with:
           model: model_api/muse-spark-1.3-contributor
           agent: review
