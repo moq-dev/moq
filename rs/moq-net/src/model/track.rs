@@ -6068,7 +6068,8 @@ mod test {
 		assert!(producer.poll_subscription_changed(&waiter).is_pending());
 		assert!(!woken.load(Ordering::SeqCst), "nothing happened yet");
 
-		wide.update(Subscription::default().with_end(Position::after_group(5))).unwrap();
+		wide.update(Subscription::default().with_end(Position::after_group(5)))
+			.unwrap();
 		assert!(
 			woken.load(Ordering::SeqCst),
 			"the widest subscriber changing must wake the aggregate watcher",
