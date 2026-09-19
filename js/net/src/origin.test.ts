@@ -14,8 +14,8 @@ function publish(origin: Producer, path: Path.Valid) {
 }
 
 /** Land a received prefix, served from `consume`, the way a session does. */
-function serve(origin: Producer, prefix: Path.Valid, consume: () => BroadcastConsumer) {
-	const handle = origin.receive(prefix, Route.default);
+function serve(origin: Producer, prefix: Path.Valid, consume: () => BroadcastConsumer, route: Route = Route.default) {
+	const handle = origin.receive(prefix, route);
 	void (async () => {
 		try {
 			for await (const request of handle.requested()) {
@@ -230,7 +230,7 @@ test("a remote entry resolves by path and retracts on dispose", async () => {
 
 	// Announced streams include remote entries.
 	const announced = consumer.announced();
-	expect(await announced.next()).toMatchObject({ path: path, kind: "announced" });
+	expect(await announced.next()).toMatchObject({ path: path, kind: "announced", route: Route.default });
 
 	dispose();
 	expect(await announced.next()).toMatchObject({ path: path, kind: "retracted" });
@@ -241,21 +241,20 @@ test("a remote entry resolves by path and retracts on dispose", async () => {
 	origin.close();
 });
 
-test("announced reports a broader covering route at the root", async () => {
+test("announced keeps a broader covering route at its prefix", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 
 	const upstream = new BroadcastProducer();
 	const dispose = serve(origin, Path.from("room"), provider(upstream));
 
-	// A route above the requested scope covers everything under it, so it clamps
-	// to the scope, matching what request() resolves there.
+	// The scope filters the route without changing the prefix it claims.
 	const scope = Path.Pattern.subtree(Path.from("room/alice"));
 	const announced = consumer.announced(scope);
-	expect(await announced.next()).toMatchObject({ path: Path.from("room/alice"), kind: "announced" });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room"), kind: "announced" });
 
 	dispose();
-	expect(await announced.next()).toMatchObject({ path: Path.from("room/alice"), kind: "retracted" });
+	expect(await announced.next()).toMatchObject({ path: Path.from("room"), kind: "retracted" });
 
 	announced.close();
 	upstream.close();
@@ -269,7 +268,7 @@ test("a local publish shadows a remote entry", async () => {
 
 	const upstream = new BroadcastProducer();
 	upstream.createTrack("remote-track");
-	const dispose = serve(origin, path, provider(upstream));
+	const dispose = serve(origin, path, provider(upstream), { hops: [], cost: { warm: 9n, cold: 9n } });
 
 	const local = publish(origin, path);
 	local.createTrack("local-track");
@@ -283,7 +282,7 @@ test("a local publish shadows a remote entry", async () => {
 
 	// One path, one announcement, even though both tables route it.
 	const announced = consumer.announced();
-	expect(await announced.next()).toMatchObject({ path: path, kind: "announced" });
+	expect(await announced.next()).toMatchObject({ path: path, kind: "announced", route: Route.default });
 
 	// Dropping the local publish falls back to the remote entry without a retraction.
 	local.close();
@@ -1109,25 +1108,17 @@ test("close rejects queued requests with NoCapacity", async () => {
 	origin.close();
 });
 
-test("announced refuses a scope that is not prefix-shaped", () => {
+test("announced filters by arbitrary patterns and reports captures", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
+	const broadcast = publish(origin, Path.from("room/alice"));
+	const announced = consumer.announced(Path.Pattern.parse("room/*"));
 
-	const refused = (text: string) => {
-		expect(() => consumer.announced(Path.Pattern.parse(text))).toThrow();
-	};
+	const update = await announced.next();
+	expect(update?.path).toBe(Path.from("room/alice"));
+	expect(update?.captures?.map((capture) => capture.text)).toEqual(["alice"]);
 
-	// An exact path is not a scope over its subtree.
-	refused("room");
-	// The empty pattern names only the root, not everything beneath it.
-	refused("");
-	// Suffixes and segment wildcards name sets a prefix cannot cover.
-	refused("*room");
-	refused("room/*");
-	refused("*");
-	// A `**` anywhere but the end is not a subtree.
-	refused("**/room");
-	refused("room/**/chat");
-
+	announced.close();
+	broadcast.close();
 	origin.close();
 });

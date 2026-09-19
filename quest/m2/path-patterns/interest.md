@@ -1,33 +1,26 @@
-# [L] Carry pattern interest in moq-lite-06
+# [M] Carry pattern grants in moq-lite-06 AUTH
 
 ## Goal
 
-AUTH grants and ANNOUNCE_REQUEST interest on moq-lite-06 carry the shared
-pattern semantics together, without changing older protocol versions.
+AUTH grants on moq-lite-06 carry the shared pattern semantics, without
+changing older protocol versions. Interest stays a prefix: the 2026-09-18
+decision keeps patterns off the announce wire, so ANNOUNCE_REQUEST and
+SUBSCRIBE_NAMESPACE carry the prefix the caller asked for and a wildcard is
+an optional filter on the consume side (see [announce event](/quest/m1/api-net-announce.md)).
 
 ## Plan
 
-Replace lite-06 AUTH grant prefixes and the ANNOUNCE_REQUEST prefix with
-patterns in Rust and JavaScript in the same change. Update the lite draft and
-version-gated fixtures together; a peer must not interpret one field as a
-pattern and the other as a prefix.
-Authorize it by exact containment in the subscriber's v1 grant, derive its
-literal head for traversal, and filter announcements with the shared matcher.
-Preserve exact set-valued rebasing through rooted views.
+Replace lite-06 AUTH grant prefixes with patterns in Rust and JavaScript in
+the same change. Update the lite draft and version-gated fixtures together.
+Authorize by exact containment in the subscriber's v1 grant. Older moq-lite
+versions keep their existing prefix wire and behavior; a grant they cannot
+represent is refused, not narrowed. Cluster peers adopt nothing as a side
+effect of this wire work.
 
-Older moq-lite versions keep their existing prefix wire and behavior. For IETF
-MoQ interop, request the longest literal head expressible by that protocol and
-filter the received announcements locally. An empty literal head requests the
-root.
-
-This quest supplies a filter primitive only. Cluster peers adopt scoped
-interest only if relay-memory measurements justify it; they do not change as a
-side effect of this wire work.
-
-Test Rust and JavaScript interop, leading wildcards, `**` zero-segment matches,
-root matches after rebasing, containment refusal, old-version behavior, and the
-IETF over-request plus local-filter fallback.
+Test Rust and JavaScript interop, leading wildcards, `**` zero-segment
+matches, containment refusal, and old-version behavior.
 
 ## Required
 
 - [Lite auth](/quest/m2/auth/lite.md) - establish the AUTH exchange before upgrading its grants to patterns
+- [Origin scopes](/quest/m1/api-origin-scopes.md) - the scopes this wire carries are enforced there first

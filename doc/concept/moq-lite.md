@@ -90,7 +90,7 @@ clamped to the requested scope. A route claimed above the scope is presented as
 the scope itself: `room` advertised cluster-wide and consumed at `room/alice`
 arrives as `room/alice`. Announce events carry the covered path and what
 happened to it: Rust `announce::Update { path, route, kind }` and TypeScript
-`Announce.Update { path, route, kind }`, where the kind is announced, updated
+`Announce.Update { path, captures, route, kind }`, where the kind is announced, updated
 (a reprice in place), or retracted. The Rust consumer is a `Stream` and the
 TypeScript one an async iterable.
 

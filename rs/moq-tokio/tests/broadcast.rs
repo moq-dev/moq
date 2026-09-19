@@ -2788,9 +2788,9 @@ async fn wildcard_scope_test(version: &str, server_scope: &str) {
 		"room/bob/chat",
 		"lobby/alice/chat",
 	] {
-		let mut broadcast = pub_origin.create_broadcast(path).expect("create broadcast");
+		let broadcast = pub_origin.create_broadcast(path).expect("create broadcast");
 		broadcast.announce(Default::default()).expect("announce");
-		let mut track = broadcast.create_track("data", None).expect("create track");
+		let track = broadcast.create_track("data", None).expect("create track");
 		let mut group = track.append_group().expect("append group");
 		group
 			.write_frame(moq_net::Timestamp::ZERO, path.as_bytes())
@@ -2842,7 +2842,10 @@ async fn wildcard_scope_test(version: &str, server_scope: &str) {
 	// lobby are outside the client's. The match pins the room.
 	let update = next_announce(&mut announcements).await;
 	assert_eq!(update.path.as_str(), "room/alice/chat");
-	assert_eq!(update.captures, Some(vec!["alice".parse::<moq_net::Pattern>().unwrap()]));
+	assert_eq!(
+		update.captures,
+		Some(vec!["alice".parse::<moq_net::Pattern>().unwrap()])
+	);
 	assert!(update.kind.is_active());
 	assert!(
 		tokio::time::timeout(Duration::from_millis(200), announcements.next())

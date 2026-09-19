@@ -16,7 +16,7 @@ above ([hang](/lib/rs/hang)); relays and CDNs implement only this.
 ## What it gives you
 
 - **Origins** scope what a session can see, and merge duplicate subscriptions so a broadcast is pulled upstream once no matter how many local readers.
-- **Broadcasts** are created unadvertised, then announced as a route, or claimed as a pattern with `dynamic`. Discovery is still by prefix; the events carry a `Pattern`.
+- **Broadcasts** are created unadvertised, then announced as an exact route, or served below a prefix with `dynamic`. Discovery accepts pattern unions; events carry the advertised prefix and captures for a complete match.
 - **Patterns** (`Pattern`, `Patterns`) are re-exported from [`moq-pattern`](https://docs.rs/moq-pattern). Literal `Path` stays a coordinate.
 - **Tracks** carry groups with a priority, a retention window, and a timescale. Subscribers set their own priority and max age and can change them live.
 - **Groups** are written frame by frame and delivered on independent streams. Old groups are cached for fetch-by-sequence; stale groups are skipped per the subscriber's budget.
@@ -44,6 +44,8 @@ containment. `contains` is the authorization check (every path the other
 matches, this one matches too). `overlaps` asks whether they share any path.
 `rooted` places a pattern under a literal root; `rebase` is the inverse, and
 can return several residuals (`**/a` at `a` is both `""` and `**/a`).
+`intersect` returns the exact overlap as a union, and `captures` reports what
+one pattern's wildcards stand for in a contained pattern.
 
 ```rust
 use moq_net::Pattern;
@@ -52,6 +54,11 @@ let scope: Pattern = "room/**".parse()?;
 assert!(scope.matches("room/alice"));
 assert!(scope.contains(&"room/camera-*".parse()?));
 assert!(scope.overlaps(&"*/alice".parse()?));
+assert_eq!(
+    scope.intersect(&"*/alice".parse()?)?
+        .iter().map(Pattern::as_str).collect::<Vec<_>>(),
+    ["room/alice"]
+);
 assert_eq!(
     scope.rebase("room").iter().map(Pattern::as_str).collect::<Vec<_>>(),
     ["**"]
@@ -79,16 +86,20 @@ Three operations, on an origin:
   will not serve rather than narrowing the claim, since a route is always a
   prefix on every wire.
 
-A route is a capability, not an inventory. The advertised prefix must sit
-inside one of the producer's `prefix/**` scopes; an over-wide claim is
-`Unauthorized`, not clamped. Token grants stay prefixes.
+A route is a capability, not an inventory. Producer and consumer handles are
+scoped by any `Patterns` union. A prefix route is allowed when its subtree
+overlaps that scope; exact creates and requests must match it, so a broad
+route can advertise the wire-compatible prefix while excluded requests are
+refused locally. A disjoint route is `Unauthorized`.
 
 `origin.consume().announced()` yields `announce::Update` values: `path` is the
 covered prefix relative to the consumer's root, `kind` is `Announced`,
-`Updated` (a reprice in place), or `Retracted`, and `route` carries hops and
-cost (on a retraction, its last values). The consumer is also a
-`futures::Stream`. A prefix is not a broadcast name; filter with a `Pattern`
-locally when you follow a subset.
+`Updated` (a reprice in place), or `Retracted`, `captures` reports what the
+most specific matching scope member's wildcards stood for when the prefix
+pins them, and `route` carries hops and cost (on a retraction, its last
+values). The consumer is also a `futures::Stream`. A prefix is not a
+broadcast name; sessions request each scope member's literal head and filter
+locally.
 
 ## Limiting reads
 

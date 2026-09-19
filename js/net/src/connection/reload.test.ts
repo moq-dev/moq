@@ -579,12 +579,11 @@ test("closing an announce consumer during upstream teardown does not append retr
 	}
 });
 
-test("announced refuses a non-prefix scope before any session exists", () => {
+test("announced accepts a non-prefix scope before any session exists", () => {
 	const reload = new Reload({ enabled: false });
 	try {
-		// The pump that would reach the session runs inside an effect, which only logs a
-		// throw; the refusal has to happen where the caller can see it.
-		expect(() => reload.announced(Path.Pattern.parse("room/*"))).toThrow(/prefix-shaped/);
+		const announced = reload.announced(Path.Pattern.parse("room/*"));
+		announced.close();
 	} finally {
 		reload.close();
 	}

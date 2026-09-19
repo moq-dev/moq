@@ -840,7 +840,11 @@ impl TableCursor {
 		let literal = Pattern::literal(prefix.as_str()).ok()?;
 		self.allowed
 			.iter()
-			.filter_map(|allowed| allowed.captures(&literal).map(|captures| (allowed.specificity(), captures)))
+			.filter_map(|allowed| {
+				allowed
+					.captures(&literal)
+					.map(|captures| (allowed.specificity(), captures))
+			})
 			.max_by_key(|(specificity, _)| *specificity)
 			.map(|(_, captures)| captures)
 	}
@@ -4267,14 +4271,14 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn announce_clamps_to_producer_scope() {
+	async fn announce_keeps_its_prefix_under_a_producer_scope() {
 		let producer = origin(1).produce();
 		let scoped = producer.scope(&scopes(&["room"])).unwrap();
 
-		// A broad claim through a narrow scope advertises only the intersection.
+		// Prefix advertisements stay prefixes. The scope filters requests locally.
 		let _a = scoped.announce("", Route::default()).unwrap();
 		let mut announced = producer.consume().announced();
-		announced.assert_next_active("room");
+		announced.assert_next_active("");
 
 		// Disjoint prefixes cannot be claimed at all.
 		assert!(matches!(
@@ -4284,13 +4288,13 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn cursor_clamps_above_its_scope() {
+	async fn cursor_keeps_an_overlapping_prefix_above_its_scope() {
 		let producer = origin(1).produce();
 		let _a = producer.announce("", Route::default()).unwrap();
 
 		let consumer = producer.consume().scope(&scopes(&["room"])).unwrap();
 		let mut announced = consumer.announced();
-		announced.assert_next_active("room");
+		announced.assert_next_active("");
 	}
 
 	#[tokio::test]
@@ -4597,18 +4601,15 @@ mod tests {
 	}
 
 	#[test]
-	fn dynamic_outside_scope_is_refused_not_clamped() {
+	fn dynamic_may_cover_a_scope_but_disjoint_prefixes_are_refused() {
 		let producer = origin(1).produce();
 		let scoped = producer.scope(&scopes(&["room"])).unwrap();
-		let err = scoped
-			.dynamic("", Route::default())
-			.err()
-			.expect("an over-wide prefix is refused");
-		assert!(matches!(err, Error::Unauthorized));
+		let _broad = scoped.dynamic("", Route::default()).expect("an overlapping prefix is accepted");
 
 		let _ok = scoped
 			.dynamic("room/alice", Route::default())
 			.expect("a contained prefix is accepted");
+		assert!(matches!(scoped.dynamic("other", Route::default()), Err(Error::Unauthorized)));
 	}
 
 	#[tokio::test]
@@ -5636,19 +5637,18 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn multiple_scopes_present_a_broad_route_at_each() {
+	async fn multiple_scopes_present_one_broad_prefix() {
 		let producer = origin(1).produce();
 		let _a = producer.announce("", Route::default()).unwrap();
 
 		let consumer = producer.consume().scope(&scopes(&["alpha", "beta"])).unwrap();
 		let mut announced = consumer.announced();
-		announced.assert_next_active("alpha");
-		announced.assert_next_active("beta");
+		announced.assert_next_active("");
 		announced.assert_next_wait();
 	}
 
 	#[test]
-	fn scope_reports_prefix_shaped_grants() {
+	fn scope_accepts_every_pattern_union() {
 		let producer = origin(1).produce();
 
 		// The root grant is `**`, the old empty prefix.
@@ -5666,6 +5666,17 @@ mod tests {
 		// The consumer side reports the same way.
 		let consumer = producer.consume().scope(&scopes(&["room"])).unwrap();
 		assert_eq!(consumer.allowed(), scopes(&["room"]));
+
+		for text in ["room", "", "*room", "room/*", "*", "**/room", "room/**/chat", "*.hang"] {
+			let union = Patterns::from(text.parse::<Pattern>().unwrap());
+			assert_eq!(producer.scope(&union).expect(text).allowed(), union, "{text}");
+			assert_eq!(producer.consume().scope(&union).expect(text).allowed(), union, "{text}");
+		}
+
+		let mixed: Patterns = ["room/**".parse().unwrap(), "other".parse().unwrap()]
+			.into_iter()
+			.collect();
+		assert_eq!(producer.scope(&mixed).unwrap().allowed(), mixed);
 	}
 
 	#[test]
@@ -5700,53 +5711,76 @@ mod tests {
 	}
 
 	#[test]
-	fn scope_refuses_non_prefix_grants() {
+	fn scope_intersects_and_rebases_arbitrary_grants() {
 		let producer = origin(1).produce();
-		let refused = |text: &str| {
-			let pattern: Pattern = text.parse().unwrap();
-			let union = Patterns::from(pattern);
-			assert!(
-				producer.scope(&union).is_none(),
-				"{text} is not a prefix grant and must be refused"
-			);
-			assert!(
-				producer.consume().scope(&union).is_none(),
-				"{text} is not a prefix grant and must be refused"
-			);
-		};
+		let rooms = producer
+			.scope(&Patterns::from("room/*".parse::<Pattern>().unwrap()))
+			.unwrap();
+		let chats = rooms
+			.scope(&Patterns::from("*/chat".parse::<Pattern>().unwrap()))
+			.unwrap();
+		assert_eq!(chats.allowed(), Patterns::from("room/chat".parse::<Pattern>().unwrap()));
 
-		// An exact path is not a grant over its subtree.
-		refused("room");
-		// The empty pattern names only the root, not everything beneath it.
-		refused("");
-		// Suffixes and segment wildcards name sets a prefix cannot cover.
-		refused("*room");
-		refused("room/*");
-		refused("*");
-		// A `**` anywhere but the end is not a subtree.
-		refused("**/room");
-		refused("room/**/chat");
+		let exact = producer
+			.scope(&Patterns::from("room/alice".parse::<Pattern>().unwrap()))
+			.unwrap();
+		let rooted = exact.with_root("room").unwrap();
+		assert_eq!(rooted.allowed(), Patterns::from("alice".parse::<Pattern>().unwrap()));
+		assert!(exact.with_root("room/bob").is_none());
+
+		let broadcast = exact.create_broadcast("room/alice").unwrap();
+		assert!(matches!(
+			exact.create_broadcast("room/alice/cam"),
+			Err(Error::Unauthorized)
+		));
+		assert!(producer.consume().get_broadcast("room/alice").is_some());
+		drop(broadcast);
 	}
 
-	#[test]
-	fn scope_validates_the_whole_union() {
+	#[tokio::test]
+	async fn wildcard_scope_filters_announcements_and_reports_captures() {
 		let producer = origin(1).produce();
+		let consumer = producer
+			.consume()
+			.scope(&Patterns::from("room/*/chat".parse::<Pattern>().unwrap()))
+			.unwrap();
+		let mut announced = consumer.announced();
 
-		// A supported member cannot conceal an unsupported one: neither member
-		// contains the other, so both survive reduction and the union is refused.
-		let mixed: Patterns = ["room/**".parse().unwrap(), "other".parse().unwrap()]
-			.into_iter()
-			.collect();
-		assert_eq!(mixed.len(), 2);
-		assert!(producer.scope(&mixed).is_none());
-		assert!(producer.consume().scope(&mixed).is_none());
+		let alice = producer.create_broadcast("room/alice/chat").unwrap();
+		alice.announce(Route::default()).unwrap();
+		let update = announced.try_next().expect("alice's chat");
+		assert_eq!(update.path.as_str(), "room/alice/chat");
+		assert_eq!(update.captures, Some(vec!["alice".parse::<Pattern>().unwrap()]));
 
-		let mixed: Patterns = ["room/**".parse().unwrap(), "other/*.jpg".parse().unwrap()]
-			.into_iter()
-			.collect();
-		assert_eq!(mixed.len(), 2);
-		assert!(producer.scope(&mixed).is_none());
-		assert!(producer.consume().scope(&mixed).is_none());
+		let audio = producer.create_broadcast("room/alice/audio").unwrap();
+		audio.announce(Route::default()).unwrap();
+		announced.assert_next_wait();
+
+		let broad = producer.announce("room", Route::default()).unwrap();
+		let update = announced.try_next().expect("overlapping broad route");
+		assert_eq!(update.path.as_str(), "room");
+		assert_eq!(update.captures, None, "an overlap does not pin the wildcard");
+
+		drop(broad);
+		drop(audio);
+		drop(alice);
+	}
+
+	#[tokio::test]
+	async fn local_broadcast_wins_announcement_ties() {
+		let producer = origin(1).produce();
+		let remote = producer.announce("room/alice", Route::default().with_cost(9)).unwrap();
+		let local = producer.create_broadcast("room/alice").unwrap();
+		local.announce(Route::default()).unwrap();
+
+		let mut announced = producer.consume().announced();
+		let update = announced.try_next().expect("one winning route");
+		assert_eq!(update.path.as_str(), "room/alice");
+		assert_eq!(update.route.cost, Cost::default());
+		announced.assert_next_wait();
+
+		drop(local);
+		drop(remote);
 	}
 
 	/// Charging a link accumulates onto both halves, saturating rather than wrapping

@@ -590,9 +590,6 @@ mod tests {
 		// The same alias still names the same root.
 		assert_eq!(token.recheck(&aliased).root, token.root);
 		// A grant without the alias is relative to what was dialed, not to the old root.
-		assert_eq!(
-			token.recheck(&everything()).root,
-			Path::new("vanity/room").to_owned()
-		);
+		assert_eq!(token.recheck(&everything()).root, Path::new("vanity/room").to_owned());
 	}
 }

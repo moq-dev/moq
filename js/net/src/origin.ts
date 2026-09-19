@@ -15,7 +15,7 @@ import * as announce from "./announced.ts";
 import * as broadcast from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { Route, routesEqual } from "./hop.ts";
-import { hooks, scopeCaptures, scopeHead, scopeOverlaps } from "./internal.ts";
+import { hooks, scopeCaptures, scopeOverlaps } from "./internal.ts";
 import * as Path from "./path.ts";
 
 export type { Cost, Hop, Route } from "./hop.ts";
@@ -951,13 +951,12 @@ export class Consumer {
 	 * stream ends when the origin closes or the consumer is closed.
 	 */
 	announced(scope: Path.Pattern = Path.Pattern.all()): announce.Consumer {
-		const prefix = scopeHead(scope);
 		const producer = new announce.Producer();
-		void this.#runAnnounced(producer, prefix, scope);
+		void this.#runAnnounced(producer, scope);
 		return producer.consume();
 	}
 
-	async #runAnnounced(producer: announce.Producer, prefix: Path.Valid, scope: Path.Pattern): Promise<void> {
+	async #runAnnounced(producer: announce.Producer, scope: Path.Pattern): Promise<void> {
 		// Keyed by the presented path (from the origin, not the scope), valued by identity
 		// plus route. Diffing identity rather than mere presence means a republish emits a
 		// retraction then a fresh announcement; a re-price of the same identity emits an
@@ -973,10 +972,8 @@ export class Consumer {
 
 				const next = new Map<Path.Valid, Presented>();
 				// Routes first, so an advertised local at the same path overwrites it: the
-				// announcement points at whatever request() would resolve.
-				// A route above the scope clamps to the scope itself, and the most specific
-				// one wins that root slot, matching request() resolution.
-				let rootLen = -1;
+				// announcement points at whatever request() would resolve. A route remains
+				// the prefix it advertised; the pattern is a local filter, not a new claim.
 				for (const [covered, entries] of routes ?? []) {
 					const entry = entries[0];
 					if (!entry) continue;
@@ -986,18 +983,13 @@ export class Consumer {
 						route: entry.route.peek(),
 						captures: scopeCaptures(scope, covered),
 					};
-					if (Path.hasPrefix(covered, prefix)) {
-						if (covered.length < rootLen) continue;
-						rootLen = covered.length;
-						next.set(prefix, snap);
-						continue;
-					}
-					if (Path.hasPrefix(prefix, covered)) next.set(covered, snap);
+					next.set(covered, snap);
 				}
 				for (const [path, front] of local ?? []) {
 					const route = advertisedLocal?.get(path);
 					if (!route) continue;
-					if (scope.matches(path)) next.set(path, { identity: front, route, captures: scopeCaptures(scope, path) });
+					if (scope.matches(path))
+						next.set(path, { identity: front, route, captures: scopeCaptures(scope, path) });
 				}
 
 				for (const [path, snap] of active) {
