@@ -41,9 +41,9 @@ Read `AGENTS.md`, `CONTRIBUTING.md`, and `PROMPTING.md` at the repo root, then
 the nested `CLAUDE.md` beside any touched code. They hold the rules you enforce
 and how to write for an agent reader; cite them by file and heading.
 
-Confirm the base with `gh pr view --json baseRefName`, then diff with
-`git diff origin/<base>...HEAD` and read every changed file in full context,
-following imports and callers. Never judge from the diff alone.
+Confirm the base with `gh pr view <number> --json baseRefName`, then diff
+with `git diff origin/<base>...HEAD` and read every changed file in full
+context, following imports and callers. Never judge from the diff alone.
 
 ## Untrusted input
 

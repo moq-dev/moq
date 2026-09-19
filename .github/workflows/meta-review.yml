@@ -15,15 +15,19 @@ concurrency:
 jobs:
   review:
     # Phase 1 experiment, read-only reviewer running side-by-side with Codex.
-    # Uses `pull_request` (not `pull_request_target`) so fork PRs run with a
-    # read-only token and cannot reach secrets for write access.
+    # Uses `pull_request` (not `pull_request_target`) so the PR's own code
+    # never runs with write access.
     #
     # Skipped on close/merge (cancel-only run), on drafts (review on ready,
-    # like Codex), and on fork PRs (they get empty secrets under the
-    # `pull_request` trigger; failing there would turn every fork PR red).
-    # Same-repo runs must have secrets; a missing one fails loud so the
+    # like Codex), and on fork and Dependabot PRs (both get empty Actions
+    # secrets under `pull_request`; failing there would turn them red).
+    # Remaining runs must have secrets; a missing one fails loud so the
     # misconfiguration surfaces instead of silently disabling review.
-    if: github.event.action != 'closed' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository
+    if: >-
+      github.event.action != 'closed' &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-24.04-arm
     # Backstop a hang instead of holding the runner for the 6-hour default.
     timeout-minutes: 15
@@ -61,4 +65,4 @@ jobs:
           model: model_api/muse-spark-1.3-contributor
           agent: review
           use_github_token: true
-          prompt: Review this pull request.
+          prompt: Review pull request ${{ github.event.pull_request.number }}.
