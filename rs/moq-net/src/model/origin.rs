@@ -3031,10 +3031,10 @@ impl OriginState {
 				let meta = (entry.hops.clone(), entry.cost);
 				let served = entry.server.is_some();
 				let captures = cursor.captures(&entry.prefix);
-				match cursor
+				let previous = cursor
 					.current
-					.insert(presented.clone(), (entry.id, meta.clone(), served, captures.clone()))
-				{
+					.insert(presented.clone(), (entry.id, meta.clone(), served, captures.clone()));
+				match previous {
 					// Unchanged metadata and servability: nothing the consumer could
 					// act on, even if the winning entry itself changed (a reconnect
 					// under an identical route is invisible, which is the point). A
@@ -3043,6 +3043,14 @@ impl OriginState {
 					// it would park that waiter forever.
 					Some((_, prev, prev_served, prev_captures))
 						if prev == meta && prev_served == served && prev_captures == captures => {}
+					// Captures are consumer identity, not route metadata. Replace the
+					// old identity explicitly so capture-keyed consumers can remove it.
+					Some((_, prev, _, prev_captures)) if prev_captures != captures => {
+						if let Ok(mut state) = cursor.state.write() {
+							state.apply_unannounce(presented.clone(), prev, prev_captures);
+							state.apply_announce(presented.clone(), meta, captures);
+						}
+					}
 					_ => {
 						if let Ok(mut state) = cursor.state.write() {
 							state.apply_announce(presented.clone(), meta, captures);
@@ -4551,6 +4559,35 @@ mod tests {
 		let route = announced.assert_next_active("");
 		assert_eq!(route.cost, Cost::new(9));
 		announced.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn capture_change_retracts_before_reannouncing_a_presented_prefix() {
+		let producer = origin(1).produce();
+		let _broad = producer.announce("room", Route::default()).unwrap();
+		let exact = producer.announce("room/alice", Route::default()).unwrap();
+		let consumer = producer
+			.consume()
+			.scope(&Patterns::from("room/*".parse::<Pattern>().unwrap()))
+			.unwrap()
+			.with_root("room/alice")
+			.unwrap();
+		let mut announced = consumer.announced();
+
+		let first = announced.next().now_or_never().expect("next").expect("announce");
+		assert_eq!(first.path.as_str(), "");
+		assert_eq!(first.kind, AnnounceKind::Announced);
+		assert_eq!(first.captures, Some(vec!["alice".parse::<Pattern>().unwrap()]));
+
+		drop(exact);
+		let retracted = announced.next().now_or_never().expect("next").expect("retract");
+		assert_eq!(retracted.path.as_str(), "");
+		assert_eq!(retracted.kind, AnnounceKind::Retracted);
+		assert_eq!(retracted.captures, Some(vec!["alice".parse::<Pattern>().unwrap()]));
+		let replacement = announced.next().now_or_never().expect("next").expect("announce");
+		assert_eq!(replacement.path.as_str(), "");
+		assert_eq!(replacement.kind, AnnounceKind::Announced);
+		assert_eq!(replacement.captures, None);
 	}
 
 	#[tokio::test]
