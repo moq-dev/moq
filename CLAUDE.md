@@ -29,10 +29,11 @@ This file is split into nested `CLAUDE.md` files based on the language/situation
 - Any AI comments may be challenged, and not confused with human maintainers.
 - Prompt the user to decide when unsure, but always provide recommendations.
 
+
 # Guidelines
 
 - Prefer a maintained crate over hand-rolling non-core functionality.
-- New dependencies use the newest stable version.
+- New dependencies should use the newest, stable version.
 - Do not bump package versions unless asked. Releases are cut separately.
 - Comments should explain the non-obvious why, and never the history.
 - Inline simple helpers.
@@ -45,6 +46,8 @@ This file is split into nested `CLAUDE.md` files based on the language/situation
 - Prefer a quest over a GitHub issue for work needing durable scope.
 - Use interactive prompts when possible.
 - Try to do stuff asynchronously. ex. ask about follow-ups while tests run.
+- Try to recognize when you're stuck, or making minimal progress, and stop early.
+- If the core problem is addressed, ship it instead of spinning your wheels on meaningless revisions.
 
 # Public API
 
