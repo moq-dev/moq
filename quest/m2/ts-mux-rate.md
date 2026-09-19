@@ -50,11 +50,12 @@ there.
   to fit, so a source that sustains more than the recorded rate simply overruns
   it, and the exporter logs once per overrun run rather than growing the debt
   without bound (cap it at one second of packets). Pad only when the field is
-  present; `moq export ts --mux-rate <bps>` overrides or supplies it for a
-  catalog without one.
-- Docs: `doc/bin/cli.md` gains the flag and a sentence on padding;
-  `doc/draft/moq-hang.md` describes the field if the `mpegts` section is
-  documented there, otherwise the crate docs carry it.
+  present. Add `Export::with_mux_rate(u64) -> Self` as an explicit override of
+  the catalog value; `moq export ts --mux-rate <bps>` calls it when provided,
+  including for a catalog without the field.
+- Docs: `doc/bin/cli.md` gains the flag and a sentence on padding. Document the
+  field in the `rs/moq-mux/src/container/ts/catalog.rs` module docs; `mpegts` is
+  a `moq-mux` application extension and is not part of the Hang draft.
 - Tests: an import fixture with a known CBR rate and stuffing (the existing
   `test_data` sources, or a synthesized one) yields the expected `muxRate`
   within tolerance; a VBR fixture yields none; a transition test covers
@@ -62,11 +63,12 @@ there.
   stable rate; export with the field emits a stream whose measured rate matches
   and whose PCR intervals stay under 40 ms; a non-integral packet rate such as
   1,000,000 bps verifies the cumulative packet count and retained fractional
-  remainder over many slots; export without the field is unchanged.
+  remainder over many slots; the builder and CLI override beat a catalog value
+  and supply an absent one; export without a field or override is unchanged.
 
-Public API: one additive field on the `Mpegts` catalog section and one CLI
-flag. Wire: an additive catalog field; no draft change, the `mpegts` section
-is an extension.
+Public API: one additive field on the `Mpegts` catalog section, one
+`Export::with_mux_rate` builder, and one CLI flag. Wire: an additive catalog
+field; no draft change, the `mpegts` section is an application extension.
 
 ## Related
 
