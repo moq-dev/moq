@@ -53,6 +53,10 @@ jobs:
         env:
           META_MODEL_API_KEY: ${{ secrets.META_MODEL_API_KEY }}
           GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+          # `opencode github run` ignores the `agent` input and uses the config's
+          # default_agent, so set it here rather than in opencode.json where it
+          # would change the default for local runs too.
+          OPENCODE_CONFIG_CONTENT: '{"default_agent":"review"}'
         with:
           model: model_api/muse-spark-1.3-contributor
           agent: review
