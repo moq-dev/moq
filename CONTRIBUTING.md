@@ -34,8 +34,8 @@ Prefer a quest for work needing durable scope or coordination.
 
 # Reviews
 
-Codex and CodeRabbit review every push on their own.
-Never request a review from @codex or @coderabbitai.
+AI agents review every push on their own.
+Never explicitly request a review.
 
 Codex reacts with thumbs up if there are no findings.
 CodeRabbit may be rate-limited, treat it as optional.
@@ -49,5 +49,5 @@ For each finding:
 # Follow-ups
 
 If you encounter issues, or findings that are out of scope, create follow-up quests.
-They should be unplanned and just a summary of the problem, maybe with a potential solution.
-The user will need to run `/plan-quests` to fully scope them.
+Focus on the core problem, offering a potential solution only if its obvious.
+For non-trivial tasks, file an issue or offer to run `/plan-quests`.
