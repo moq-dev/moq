@@ -1,22 +1,36 @@
-Read this before editing any `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md`, or `SKILL.md`. These files are prompts.
+Read this before indirectly instructing agents.
 
-Agents are not trained to write prompts for themselves.
-They're (currently) trained on the outputs, not the inputs.
+LLMs are not trained on how to write prompts.
+They're trained on the outputs, not the inputs, and thus generate slop when chained.
+So when you're drafting instructions for a future agent, please keep thse rules in mind.
+
+# General
+
+**Do not over-prescribe**.
+The facts will evolve over time.
+
+Focus on articulating the goal and/or root problems.
+Keep things flexible so an agent can adjust as it digs deeper into the possible problems or solutions.
+
+You can (and should) include recommendations.
+But focus on best-practices and things to look out for, not specific lines of code.
+Mocking up an API makes a lot of sense but again, it should be flexible enough to adjust with the implementation.
 
 # Context
+
+This includes editing any `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md`, etc.
+
+These files need to be light because they're loaded into every prompt.
+More specific context (ex. per language or project) should exist in optional files/folders.
+
+These base prompts are meant to fix regular agent mistakes.
+If there is a history of bad practices, or sub-optimal behavior, update `CLAUDE.md` to steer away from them.
+If you think a slight tweak to the base prompt would help, propose it.
 
 Focus on best practices and conventions.
 Don't document the repository; the code and documentation can handle that.
 
-These files need to be light because they're loaded into every prompt.
-More specific context (ex. per language or project) should exist in respective folders.
-
-These base prompts are meant to keep agents from constantly drifting in the wrong direction.
-There needs to be a history of misuse to justify a change to `CLAUDE.md` and friends.
-If you think a slight tweak to the base prompt would help, propose it.
-A limit is a number, not a judgment call: "one fix round, then stop" holds, "abort if not making progress" does not.
-
-Check the official Claude/Codex guidance when making any changes:
+Before making **any** changes to `CLAUDE.md`, check the official Claude/Codex guidance:
 
 - <https://code.claude.com/docs/en/memory>
 - <https://code.claude.com/docs/en/best-practices>
@@ -28,4 +42,4 @@ Check the official Claude/Codex guidance when making any changes:
 # Skills
 
 Skills are meant to avoid repeated duplicate prompts.
-Read transcripts to determine the user's repeated intent.
+If the usage of a skill is unclear, offer to update to skill to reduce the ambiguity.
