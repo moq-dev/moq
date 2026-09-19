@@ -74,8 +74,8 @@ pub struct Export<E: catalog::Catalog = ()> {
 	tracks: HashMap<String, Track>,
 	/// Continuity counter per PID (PAT, PMT, and each elementary stream).
 	counters: HashMap<u16, ContinuityCounter>,
-	/// Counter state before the uncommitted span, restored if a rewind discards it.
-	span_counters: Option<HashMap<u16, ContinuityCounter>>,
+	/// Muxer state before the uncommitted span, restored if a rewind discards it.
+	span_state: Option<SpanState>,
 	/// PMT program-level descriptors captured on import, re-emitted in the PMT.
 	program_descriptors: Vec<catalog::Descriptor>,
 	/// Transport/service identity captured on import, used to rebuild a consistent
@@ -135,6 +135,11 @@ pub struct Export<E: catalog::Catalog = ()> {
 struct Pending {
 	frame: Frame,
 	discontinuity: u64,
+}
+
+struct SpanState {
+	counters: HashMap<u16, ContinuityCounter>,
+	last_dts: HashMap<String, Option<u64>>,
 }
 
 struct Track {
@@ -289,7 +294,7 @@ impl<E: catalog::Catalog> Export<E> {
 			latency: Duration::ZERO,
 			tracks: HashMap::new(),
 			counters: HashMap::new(),
-			span_counters: None,
+			span_state: None,
 			program_descriptors: Vec::new(),
 			program: None,
 			si: BTreeMap::new(),
@@ -496,6 +501,9 @@ impl<E: catalog::Catalog> Export<E> {
 						// on the same timeline stays behind the earliest park.
 						if track.pending.is_some() {
 							if discontinuity == track.pending.as_ref().unwrap().discontinuity {
+								// The source may have returned buffered data without registering
+								// the waiter. Schedule another bounded pass before parking.
+								waiter.waker().wake_by_ref();
 								break;
 							}
 							track.pending = None;
@@ -705,8 +713,13 @@ impl<E: catalog::Catalog> Export<E> {
 	/// clock passes their pending frame (see [`Track::admit`]).
 	fn rewind(&mut self, backwards: bool) {
 		self.epoch += 1;
-		if let Some(counters) = self.span_counters.take() {
-			self.counters = counters;
+		if let Some(state) = self.span_state.take() {
+			self.counters = state.counters;
+			for (name, last_dts) in state.last_dts {
+				if let Some(track) = self.tracks.get_mut(&name) {
+					track.last_dts = last_dts;
+				}
+			}
 		}
 		self.pending.clear();
 		self.keyframes.clear();
@@ -720,9 +733,9 @@ impl<E: catalog::Catalog> Export<E> {
 		self.video_start = None;
 		self.pcr_discontinuity = true;
 		for track in self.tracks.values_mut() {
-			track.last_dts = None;
 			if !backwards || track.timeline.is_none() {
 				track.epoch = self.epoch;
+				track.last_dts = None;
 			}
 			if let Some(pending) = track.pending.take() {
 				track.pending = track.admit(pending, self.epoch, None);
@@ -942,12 +955,7 @@ impl<E: catalog::Catalog> Export<E> {
 			})
 			.map(|(_, _, name)| name.clone())
 			.or_else(|| {
-				if self
-					.tracks
-					.values()
-					.filter(|t| t.epoch == self.epoch)
-					.all(|t| t.finished)
-				{
+				if self.tracks.values().all(|t| t.finished) {
 					self.tracks
 						.iter()
 						.filter_map(|(n, t)| t.pending.as_ref().map(|p| (p.frame.timestamp, t.pid, n)))
@@ -966,8 +974,15 @@ impl<E: catalog::Catalog> Export<E> {
 	/// to isn't known until a later timestamp measures the span (see
 	/// [`Self::advance`]).
 	fn mux(&mut self, name: &str, frame: Frame) -> anyhow::Result<()> {
-		if self.span_counters.is_none() {
-			self.span_counters = Some(self.counters.clone());
+		if self.span_state.is_none() {
+			self.span_state = Some(SpanState {
+				counters: self.counters.clone(),
+				last_dts: self
+					.tracks
+					.iter()
+					.map(|(name, track)| (name.clone(), track.last_dts))
+					.collect(),
+			});
 		}
 		let track = self.tracks.get(name).context("missing track")?;
 		let pid = track.pid;
@@ -1136,7 +1151,7 @@ impl<E: catalog::Catalog> Export<E> {
 	/// decode-clock reserve of any track so every PES unit, whichever rendition it
 	/// belongs to, decodes at or after the clock that precedes it.
 	fn emit(&mut self, span: Option<u128>) -> anyhow::Result<()> {
-		self.span_counters = None;
+		self.span_state = None;
 		let bytes = std::mem::take(&mut self.pending);
 		let keyframes = std::mem::take(&mut self.keyframes);
 		let Some(to) = self.low.take() else { return Ok(()) };
