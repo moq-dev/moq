@@ -8,6 +8,7 @@ import { Reader, Stream } from "../stream.ts";
 import type * as track from "../track.ts";
 import { ControlStreamAdapter, NativeSession } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
+import { Connection } from "./connection.ts";
 import { type GroupFlags, Group as GroupMessage } from "./object.ts";
 import { PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
@@ -464,6 +465,47 @@ test("a NAMESPACE missing its hop path closes the session", async () => {
 		pair.server.closed,
 		new Promise((_resolve, reject) => setTimeout(() => reject(new Error("session stayed up")), STREAM_WAIT)),
 	]);
+});
+
+test("a malformed PUBLISH_NAMESPACE update closes the session", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const control = await Stream.open(pair.server, { version: VERSION });
+	const connection = new Connection({
+		url: new URL("https://example.com"),
+		quic: pair.server,
+		control,
+		maxRequestId: 100n,
+		version: VERSION,
+		client: false,
+		cluster: { self: SELF, peer: PEER },
+	});
+	const logged = spyOn(console, "error").mockImplementation(() => void 0);
+
+	try {
+		const request = await Stream.open(pair.client, { version: VERSION });
+		await request.writer.u53(PublishNamespace.id);
+		await new PublishNamespace({
+			requestId: 0n,
+			trackNamespace: Path.from("theirs"),
+			cluster: { hops: [PEER], cost: 0n },
+		}).encode(request.writer, VERSION);
+
+		expect(await request.reader.u53()).toBe(RequestOk.id);
+		await RequestOk.decode(request.reader, VERSION);
+
+		// The body promises a parameter block after the request ID but ends first.
+		await request.writer.u53(PublishNamespaceUpdate.id);
+		await request.writer.u16(1);
+		await request.writer.u8(3);
+
+		await Promise.race([
+			pair.server.closed,
+			new Promise((_resolve, reject) => setTimeout(() => reject(new Error("session stayed up")), STREAM_WAIT)),
+		]);
+	} finally {
+		logged.mockRestore();
+		connection.close();
+	}
 });
 
 /**

@@ -1,4 +1,4 @@
-import { ProtocolViolation, reason } from "../error.ts";
+import { ProtocolViolation, reason, SessionError, StreamError } from "../error.ts";
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Cluster from "./cluster.ts";
@@ -104,15 +104,20 @@ export class PublishNamespaceUpdate {
 	}
 
 	/**
-	 * Decode the message. Every way this fails is the peer's violation: a truncated or
-	 * trailing body, a draft with no such message, or a malformed parameter block. They
-	 * surface as one {@link ProtocolViolation}, which the session dispatch closes over.
+	 * Decode the message. A truncated or trailing body, a draft with no such message, or a
+	 * malformed parameter block surfaces as a {@link ProtocolViolation}, which the session
+	 * dispatch closes over. A stream reset or session ending remains transport-local.
 	 */
 	static async decode(r: Reader, version: IetfVersion): Promise<PublishNamespaceUpdate> {
 		try {
 			return await Message.decode(r, (rd) => PublishNamespaceUpdate.#decode(rd, version));
 		} catch (err) {
-			if (err instanceof ProtocolViolation) throw err;
+			if (err instanceof ProtocolViolation || err instanceof SessionError || err instanceof StreamError)
+				throw err;
+			if (typeof err === "object" && err !== null) {
+				const source = (err as { source?: unknown }).source;
+				if (source === "session" || source === "stream") throw err;
+			}
 			throw new ProtocolViolation(reason(err), { cause: err });
 		}
 	}

@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
-import { ProtocolViolation } from "../error.ts";
+import { ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import { type Hop, HopSchema, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import * as Cluster from "./cluster.ts";
 import { Parameters, SetupOption, SetupOptions } from "./parameters.ts";
-import { PublishNamespace } from "./publish_namespace.ts";
+import { PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
 import { SubscribeNamespaceEntry } from "./subscribe_namespace.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -227,6 +227,64 @@ test("Cluster: PUBLISH_NAMESPACE carries the parameters only once negotiated", a
 	// dispatch closes over rather than losing only the stream.
 	const bare = new PublishNamespace({ requestId: 1n, trackNamespace: Path.from("alice.hang") });
 	await expect(PublishNamespace.decode(reader(await encode(bare)), VERSION, true)).rejects.toThrow(ProtocolViolation);
+});
+
+test("Cluster: every malformed PUBLISH_NAMESPACE update is a protocol violation", async () => {
+	const valid = await encode(new PublishNamespaceUpdate({ requestId: 1n, update: { cost: 2n } }));
+	const trailing = new Uint8Array(valid.byteLength + 1);
+	trailing.set(valid);
+	trailing[1] += 1; // Include the extra byte in the message body's declared size.
+
+	const malformed = [
+		valid.slice(0, 1), // Truncated size prefix.
+		valid.slice(0, -1), // Truncated body.
+		new Uint8Array([0, 1, 0xff]), // Truncated request ID.
+		trailing,
+	];
+
+	for (const bytes of malformed) {
+		await expect(PublishNamespaceUpdate.decode(reader(bytes), VERSION)).rejects.toThrow(ProtocolViolation);
+	}
+
+	// The message did not exist before draft-17.
+	await expect(
+		PublishNamespaceUpdate.decode(reader(new Uint8Array([0, 0]), Version.DRAFT_16), Version.DRAFT_16),
+	).rejects.toThrow(ProtocolViolation);
+});
+
+test("Cluster: a reset while decoding an update stays stream-local", async () => {
+	const reset = Object.assign(new Error("reset"), {
+		source: "stream" as const,
+		streamErrorCode: StreamCode.Cancel,
+	});
+	const stream = new ReadableStream<Uint8Array>({
+		start(controller) {
+			controller.error(reset);
+		},
+	});
+
+	const err = await PublishNamespaceUpdate.decode(new Reader(stream, undefined, VERSION), VERSION).catch(
+		(err: unknown) => err,
+	);
+	expect(err).toBeInstanceOf(StreamError);
+	expect((err as StreamError).code).toBe(StreamCode.Cancel);
+});
+
+test("Cluster: a transport ending while decoding an update stays transport-local", async () => {
+	const ended = Object.assign(new Error("session ended"), {
+		source: "session" as const,
+		streamErrorCode: null,
+	});
+	const stream = new ReadableStream<Uint8Array>({
+		start(controller) {
+			controller.error(ended);
+		},
+	});
+
+	const err = await PublishNamespaceUpdate.decode(new Reader(stream, undefined, VERSION), VERSION).catch(
+		(err: unknown) => err,
+	);
+	expect(err).toBe(ended);
 });
 
 test("Cluster: NAMESPACE grows a parameters field only once negotiated", async () => {
