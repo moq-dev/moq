@@ -26,8 +26,10 @@ waits on a review there.
 - Carry a `PARENT` file naming the upstream commit, and a CI job that
   attempts the rebase onto upstream main weekly and opens a PR with the
   result, so drift is visible before it is expensive.
-- Publish the first release with no carried changes beyond the rename, and
-  switch `web-transport-noq` in moq-dev/web-transport to it.
+- Publish the first release with two carried changes: the rename, and BBR3
+  as the default congestion controller (MoQ's default already; offering it
+  upstream is [the first proposal](/quest/m2/quic/upstream.md)). Switch
+  `web-transport-noq` in moq-dev/web-transport to it.
 - Pin the fork releases in this workspace's `Cargo.toml`. `dev` may point at a
   git tag between releases; `main` and every published crate pin crates.io
   versions, and the [release quest](/quest/m2/quic/release.md) owns that rule.

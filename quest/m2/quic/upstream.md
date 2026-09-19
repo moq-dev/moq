@@ -18,6 +18,11 @@ the tests it landed with.
 Proposal order, most general first, each linked to the quest that produced
 it:
 
+0. BBR3 as `TransportConfig`'s default controller (noq-proto 1.2.0 defaults
+   to Cubic, `config/transport.rs:586`, while MoQ has run BBR3 by default
+   since it adopted noq): a one-line change whose point is that every noq
+   and iroh user, the maintainers included, runs the controller MoQ depends
+   on, so its regressions are found upstream and not only here;
 1. per-stream acknowledgment progress ([ACK progress](/quest/m2/quic/ack-progress.md));
 2. `RESET_STREAM_AT` ([reliable reset](/quest/m2/quic/reliable-reset.md));
 3. keep-alive by deadline ([keep-alive](/quest/m2/quic/keep-alive.md));
