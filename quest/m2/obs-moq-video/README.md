@@ -35,5 +35,5 @@ The quests separate portable decoding, platform GPU delivery, audio, and publish
 - [OBS migration](/quest/m2/cpp/obs.md) - every quest here starts from the plugin on the generated C++, so codec surface is designed in moq-ffi and reaches libmoq and the other wrappers through the Cross-Package Sync table, not as OBS-only C symbols
 - [Linux GPU input](/quest/m3/obs-linux-gpu.md) - allocation-export feasibility and its dependent implementation are deferred
 - [VAAPI encode and decode](/quest/m2/video-vaapi.md) - owns Linux backend decode/import capabilities; reconcile its older dependency assumptions against current code
-- [Video hardware validation](/quest/m3/video-hardware.md) - physical hardware evidence is required for each claimed GPU path
+- [Video hardware validation](/quest/m4/video-hardware.md) - physical hardware evidence is required for each claimed GPU path
 - [Audio codecs](/quest/m2/audio-codecs/README.md) - HE-AAC, multichannel, and native AAC encode reach the OBS source and encoder adapters through moq-ffi

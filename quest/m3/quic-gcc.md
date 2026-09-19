@@ -9,9 +9,13 @@ without collapsing throughput. A written abandonment is a successful outcome.
 
 ## Plan
 
-Implement the candidate in noq and expose it under
-moq's backend-neutral `delay` congestion family. Egress only: relay ingest
-keeps the production controller.
+Implement the candidate in the fork as a `congestion::Controller`, driven by
+the per-packet receive timestamps the receive-timestamps spike delivers; the
+sender-side inter-arrival filter is what makes it GCC rather than another
+RTT-based controller. If it ships, it joins MoQ's backend-neutral congestion
+family as `CongestionControl::RealTime`, beside `Loss` (Cubic) and `Delay`
+(BBR3); MoQ owns which algorithm each name means, and the config never
+exposes algorithm names. Egress only: relay ingest keeps BBR3.
 
 Use the moq-bench media profiles under reproducible netem delay, loss, and
 bottleneck rates. Decide on p95 queueing delay, delivered-rate variation,
@@ -24,5 +28,5 @@ behavior against production cross traffic or real wifi and cellular loss.
 
 ## Required
 
-- [noq parity gate](/quest/m2/quic/noq-parity.md) - experiment on the
-  backend intended for production
+- [Receive timestamps](/quest/m3/quic-receive-ts.md) - the per-packet
+  arrival times the delay filter runs on

@@ -27,7 +27,7 @@ and custom transforms use the same worker lifecycle.
 
 ## Related
 
-- [Reference vision worker](/quest/m3/processor-vision.md) - a runnable worker
+- [Reference vision worker](/quest/m4/processor-vision.md) - a runnable worker
   publishes frame-correlated detections and proves demand, reconnect,
   failover, and teardown end to end
 - [Wildcard advertisements](/quest/m2/wildcard/README.md) - lets a dormant

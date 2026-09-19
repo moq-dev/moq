@@ -24,9 +24,9 @@ reuseport shard groups are a later consumer, not a blocker.
 
 RFC 7983 already partitions the first byte: STUN is 0 to 3, DTLS 20 to 63,
 RTP and RTCP 128 to 191. QUIC fills the gaps: a long header is 192 to 255 and
-a short header 64 to 127, as long as the fixed bit is set, so every backend
-config disables QUIC-bit greasing (RFC 9287) explicitly; quinn and quiche
-turn it on by default and nothing here disables it today. SRT does not fit:
+a short header 64 to 127, as long as the fixed bit is set, so the QUIC
+config disables QUIC-bit greasing (RFC 9287) explicitly; noq turns it on by
+default and nothing here disables it today. SRT does not fit:
 its data packets start with a 0 bit and its control packets with a 1, so both
 overlap. SRT is demuxed by flow instead. A 4-tuple ICE has succeeded on is pinned
 to WebRTC in the outer table before any SRT test, because an RTP v2 packet
@@ -44,10 +44,8 @@ unknown tuple is not SRT; it is dropped or given to the WebRTC mux.
 One OS socket, or one shard of a reuseport group, is read by the demux and
 fanned into virtual sockets, one per stack, each with the `AsyncUdpSocket`
 shape. Sends go straight to the shared socket, so every stack answers from
-the same address and port. quinn and noq accept the virtual socket through
-`new_with_abstract_socket`; our quiche server driver takes a socket through
-`with_socket` and gains the trait or stays on a dedicated socket until it
-does. `moq-rtc`'s `Mux` already demuxes STUN by ufrag internally and only
+the same address and port. noq accepts the virtual socket through
+`new_with_abstract_socket`. `moq-rtc`'s `Mux` already demuxes STUN by ufrag internally and only
 needs a `feed` entry beside its `recv_from` loop. `srt-tokio` accepts a
 `tokio::net::UdpSocket` but no abstraction; that is its own quest.
 

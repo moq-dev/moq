@@ -1,0 +1,57 @@
+# [M] Upstream the fork
+
+## Goal
+
+Every general change the fork carries has been offered to n0-computer/noq as
+a reviewable pull request, and the fork's carried set is only what upstream
+declined or what is MoQ-specific. The noq maintainers have seen this roadmap
+before the first proposal lands, so nothing arrives as a surprise.
+
+## Plan
+
+Fork now, upstream opportunistically: this quest is the "opportunistically"
+half, and it completes the line rather than gating it. Each feature quest
+lands in the fork on MoQ's schedule; once a feature has shipped in a MoQ
+release and its shape has stopped moving, split it into an upstream PR with
+the tests it landed with.
+
+Proposal order, most general first, each linked to the quest that produced
+it:
+
+1. per-stream acknowledgment progress ([ACK progress](/quest/m2/quic/ack-progress.md));
+2. `RESET_STREAM_AT` ([reliable reset](/quest/m2/quic/reliable-reset.md));
+3. keep-alive by deadline ([keep-alive](/quest/m2/quic/keep-alive.md));
+4. hierarchical send groups ([scheduler](/quest/m2/quic/scheduler.md));
+5. careful resume as a `Controller` wrapper ([careful resume](/quest/m2/quic/careful-resume.md));
+6. ECN validation and marking ([ECN](/quest/m2/quic/ecn.md));
+7. per-stream deadlines ([deadlines](/quest/m2/quic/deadline.md));
+8. capacity probing by early retransmission ([probe](/quest/m2/quic/probe.md));
+9. the qmux crate over the shared stream state machine ([qmux](/quest/m2/quic/qmux.md)).
+
+The m3 experiments (receive timestamps, GCC, FEC, kernel pacing, send
+batching, buffer pools, the BBR3 app-limited check) join the list only with
+a positive verdict.
+
+Record in this quest what upstream accepted, what it asked to see as an
+extension crate, and what it declined; a declined change stays in the fork
+with the link beside it. The quest completes when the list above has been
+offered and answered.
+
+## Required
+
+- [Fork noq](/quest/m2/quic/fork.md) - the fork the proposals split from
+- [Per-stream ACK progress](/quest/m2/quic/ack-progress.md)
+- [Reliable stream reset](/quest/m2/quic/reliable-reset.md)
+- [Keep-alive by deadline](/quest/m2/quic/keep-alive.md)
+- [Hierarchical stream scheduling](/quest/m2/quic/scheduler.md)
+- [Careful resume on reconnect](/quest/m2/quic/careful-resume.md)
+- [ECN on the backbone](/quest/m2/quic/ecn.md)
+- [Per-stream deadlines](/quest/m2/quic/deadline.md)
+- [Probe by early retransmission](/quest/m2/quic/probe.md)
+- [qmux on the QUIC stream state machine](/quest/m2/quic/qmux.md)
+
+## Related
+
+- [Receive timestamps](/quest/m3/quic-receive-ts.md), [GCC](/quest/m3/quic-gcc.md),
+  [FEC](/quest/m3/quic-fec.md), [BBR3 app-limited](/quest/m3/quic-bbr-app-limited.md) -
+  experiments that join the list with a positive verdict

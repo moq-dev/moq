@@ -20,11 +20,9 @@ the shared socket with GSO and ECN passed along, `local_addr` is the shared
 one. Bound queues per stack with a per-source drop rather than unbounded
 growth; report drops as a counter.
 
-QUIC: `moq-tokio`'s quinn and noq servers take the virtual socket through
-`new_with_abstract_socket`. The quiche server driver gets the same trait if
-its `with_socket` seam allows it in a small patch, else quiche keeps a
-dedicated socket and the config says so. Set the grease-QUIC-bit transport
-parameter off on all three, with a test that decodes a sent short-header
+QUIC: `moq-tokio`'s noq server takes the virtual socket through
+`new_with_abstract_socket`. Set the grease-QUIC-bit transport parameter off,
+with a test that decodes a sent short-header
 packet and asserts the fixed bit.
 
 STUN: a `stun` virtual socket answered by a small responder in `moq-sock`,

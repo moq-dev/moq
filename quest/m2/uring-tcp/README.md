@@ -31,7 +31,7 @@ runtime-agnostic, so implementing `hyper::rt::{Read, Write, Executor}` over
 ring TCP streams keeps axum's routers, extractors, CORS, and its WebSocket
 upgrade working unchanged.
 
-Measure before porting, the same way `echo_quiche`
+Measure before porting, the same way the echo bench
 (rs/moq-uring/benches/session_lite.rs) gated the UDP path. The ablation's
 number is what justifies the rest of the line.
 

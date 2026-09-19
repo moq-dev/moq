@@ -28,4 +28,4 @@ and decoded-frame ownership.
 - [Android capture](/quest/m3/mobile-capture-android.md) - deferred platform capture and codecs
 
 - [#933](/quest/m2/933-video-rotation-metadata-not-propagated-from-mobile-camera.md) - rotation metadata from a mobile camera
-- [Video hardware validation](/quest/m3/video-hardware.md) - physical hardware evidence for each claimed GPU path
+- [Video hardware validation](/quest/m4/video-hardware.md) - physical hardware evidence for each claimed GPU path

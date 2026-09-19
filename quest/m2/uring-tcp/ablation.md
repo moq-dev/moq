@@ -8,7 +8,7 @@ this line is worth building and what shape the port should take.
 
 ## Plan
 
-Follow `echo_quiche` (rs/moq-uring/benches/session_lite.rs): a bench over the
+Follow the echo bench (rs/moq-uring/benches/session_lite.rs): a bench over the
 real worker, toggling one thing at a time, not a synthetic microbenchmark
 alone. Drive it with the `moq-bench` shapes the UDP path was measured on,
 including the `F=0` chat shape where the cost is per message rather than per

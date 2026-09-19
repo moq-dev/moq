@@ -18,16 +18,14 @@ Implementations start after the dev merge, on main; planning quests can settle
 their contracts independently. Facts from the 2026-09
 hot-path survey, so quests don't re-litigate them:
 
-- The default `moq-uring` backend is noq, compiled through the `quinn/`
-  module: `quic/mod.rs` selects `quinn/mod.rs` for the `noq` feature
-  (rs/moq-uring/src/quic/mod.rs:49-51) and that module aliases `noq_proto as
-  quinn_proto` (quinn/mod.rs:26). The relay's `io-uring` feature is that
-  backend; `io-uring-quinn` and `io-uring-quiche` are the explicit
-  alternatives (rs/moq-relay/Cargo.toml:55-57). Every profile names its
-  backend. The quiche-only citations in
+- `moq-uring`'s only backend is noq once
+  [One QUIC backend](/quest/m1/quic-one-backend.md) lands; until then it is
+  compiled through the `quinn/` module, which aliases `noq_proto as
+  quinn_proto` (rs/moq-uring/src/quic/quinn/mod.rs:26). Every profile names
+  its backend. The quiche-flavor numbers cited in
   [Egress requeue](/quest/m2/perf/egress-requeue.md) and
   [#3122](/quest/m2/perf/3122-moq-uring-2-5-of-relay-cpu-is-vdso-clock-reads-the-drive.md)
-  describe the non-default path.
+  are re-measured on noq.
 - Cross-thread wakeups are already cheap: one futex word per worker, at most
   one `futex(FUTEX_WAKE)` per park cycle, wake bursts coalesce through the
   `kio::Tasks` bitset. No eventfd, no MSG_RING, by design (`SINGLE_ISSUER`).
@@ -43,10 +41,7 @@ hot-path survey, so quests don't re-litigate them:
 
 The relay's `/metrics` endpoint already carries the ring-level counters
 (enters, park/wake, batch effectiveness) several quests want as evidence, one
-row per io_uring worker. The
-[noq parity gate](/quest/m2/quic/noq-parity.md) benchmarks noq against the
-quiche backend; the zero-copy quests here stay independently measured on the
-default backend.
+row per io_uring worker.
 
 ## Quests
 
@@ -70,6 +65,6 @@ default backend.
 
 ## Related
 
-- [noq parity gate](/quest/m2/quic/noq-parity.md) - the benchmark that
-  decides whether quiche can go, run on these worker primitives
+- [Send buffer pools](/quest/m3/quic-buffer-pool.md) - the stream-send
+  allocation question, measured on the same shapes
 - [Origin lookup CPU](/quest/m2/origin-cpu/README.md) - announce/subscribe table, not uring

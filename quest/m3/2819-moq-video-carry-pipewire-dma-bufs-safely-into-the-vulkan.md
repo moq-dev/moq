@@ -75,4 +75,4 @@ into VAAPI or NVENC.
 
 ## Related
 
-- [#2893: video: validate PipeWire DMA-BUF capture on KDE hardware](/quest/m3/2893-video-validate-pipewire-dma-buf-capture-on-kde-hardware.md) - related open work
+- [#2893: video: validate PipeWire DMA-BUF capture on KDE hardware](/quest/m4/2893-video-validate-pipewire-dma-buf-capture-on-kde-hardware.md) - related open work

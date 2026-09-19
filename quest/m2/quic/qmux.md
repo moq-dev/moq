@@ -40,14 +40,15 @@ the TypeScript qmux/WebSocket peer used by `js/net`. Preserve rejection of
 prohibited QUIC frames, params-first setup, record-size validation, close and
 reset semantics, keep-alive behavior, and bounded flow-control tests.
 
-Move the released implementation into `moq-dev/web-transport` as the canonical
-qmux crate or make that crate a thin transport adapter over noq-proto.
-There must be one stream state machine in the dependency graph.
+The crate lives in the fork's workspace as `moq-noq-qmux`, so the stream
+state machine internals it drives stay crate-private there; `moq-dev/web-transport`'s
+`qmux` becomes a thin re-export or is retired. There must be one stream
+state machine in the dependency graph, and the accessors qmux needs are
+`pub(crate)` to that workspace, never part of `moq-noq-proto`'s public API.
 
 ## Required
 
-- [Establish the noq relationship](/quest/m2/quic/parent.md) - port the
-  prototype onto noq once the maintainers have seen the plan
+- [Fork noq](/quest/m2/quic/fork.md) - the workspace the crate lives in
 - [Reliable stream reset](/quest/m2/quic/reliable-reset.md) - qmux reuses the
   extension's stream state rather than implementing reset locally
 - [Hierarchical stream scheduling](/quest/m2/quic/scheduler.md) - qmux must

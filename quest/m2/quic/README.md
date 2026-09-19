@@ -1,83 +1,95 @@
-# Custom QUIC: noq as the upstream
+# Own the QUIC stack
 
 ## Goal
 
-Own the QUIC features MoQ needs without owning a transport. noq, the
-Quinn-derived stack n0 maintains for Iroh, is the parent: MoQ-specific work
-lands there as general QUIC or qmux primitives, and the same core serves the
-ordinary async backend and the thread-per-core `moq-uring` backend. The
+MoQ owns the QUIC features it needs. noq, the Quinn-derived stack n0
+maintains for Iroh, is the parent; the moq-dev fork carries what MoQ needs on
+MoQ's schedule and offers it upstream when it is general. One core serves the
+tokio backend, the thread-per-core `moq-uring` backend, iroh, and qmux. The
 features are per-stream acknowledgment progress, reliable stream resets,
-hierarchical stream scheduling, the shared stream state machine used by qmux,
-and future media experiments.
-
-Quiche remains a supported backend until noq passes the parity gate. A
-moq-dev fork of noq exists only if a change MoQ needs is rejected upstream.
+hierarchical stream scheduling with per-broadcast fairness, the shared stream
+state machine used by qmux, capacity probing by retransmission, per-stream
+deadlines, deadline-based keep-alive, wider limits for relay peers, careful
+resume, and ECN. The experiments that may join them (GCC, FEC, receive
+timestamps, kernel pacing, buffer pools) live in m3.
 
 ## Plan
 
-noq is already the default backend on `dev`: `moq-tokio` and `moq-uring` both
-compile noq-proto by default, with Quinn and quiche as explicit features. The
-[parent quest](/quest/m2/quic/parent.md) turns that dependency into a working
-relationship with the noq maintainers rather than a choice.
+[One QUIC backend](/quest/m1/quic-one-backend.md) deletes quinn and quiche
+on `dev` first; everything here assumes a single stack. The
+[fork](/quest/m2/quic/fork.md) is the first quest in the line and most
+others require it.
 
-Keep every carried change reviewable against its parent:
+Rules the line keeps:
 
-- clean fixes go to noq first, and to Quinn when the code is shared;
-- MoQ-specific work is designed as a general QUIC or qmux primitive and
-  proposed upstream before any fork exists;
-- a rejected change may live in a moq-dev fork, with the rejection and rebase
-  cost recorded beside it;
-- published MoQ crates never depend on a workspace-only Cargo patch or a
-  mutable branch.
+- a carried change lists its upstream PR or the reason it has none;
+- the fork's packages are `moq-noq-proto`, `moq-noq`, and `moq-noq-udp`,
+  never a crate that impersonates the parent;
+- published MoQ crates depend on crates.io releases of the fork, never a
+  workspace-only Cargo patch or a mutable branch;
+- MoQ's config names congestion families (`Loss`, `Delay`, and `RealTime`
+  once GCC ships), never algorithms; noq's public `Controller` trait is the
+  seam experiments plug into, and MoQ owns which algorithm each family means.
 
 The scheduling contract has three levels: strict subscription priority,
-byte-fair service between subscriptions at the same priority, then the
-subscription's chosen group order within its own bucket. The default MoQ order
-is newest group first; an ordered subscription keeps oldest first. This is a
-transport API change, not a MoQ wire change.
+byte-fair service between send groups at the same priority, then the
+subscription's chosen group order within its own bucket. On a relay-to-relay
+session with fairness enabled, the send group is the broadcast. The default
+MoQ order is newest group first; an ordered subscription keeps oldest first.
+This is a transport API change, not a MoQ wire change.
 
 ## Quests
 
+- [Fork noq](/quest/m2/quic/fork.md) - moq-dev/noq publishes `moq-noq-proto`,
+  `moq-noq`, and `moq-noq-udp`, tracks its parent, and the sync procedure is
+  written down
 - [Deliver the application close before io_uring teardown](/quest/m2/quic/uring-close.md) -
   the peer receives the final close when the client immediately stops its worker
-- [Establish the noq relationship](/quest/m2/quic/parent.md) - who reviews
-  MoQ's proposals, how releases and advisories reach this repo, when a fork is
-  warranted
-- [Per-stream ACK progress in noq](/quest/m2/quic/ack-progress.md) - noq-proto
-  reports how far a send stream has been acknowledged and when
+- [Per-stream ACK progress](/quest/m2/quic/ack-progress.md) - the fork reports
+  how far a send stream has been acknowledged and when
 - [poll_acked in web-transport](/quest/m2/quic/ack-hook.md) - the
   backend-neutral hook that awaits an acknowledged stream offset, implemented
   for noq and released
-- [Land the Quinn maintenance backlog](/quest/m2/quic/quinn-maintenance.md) -
-  finish the two green stream-allocation and GSO fixes already in review
-- [Reliable stream reset](/quest/m2/quic/reliable-reset.md) - guarantee the
-  WebTransport stream header reaches the receiver before a reset is surfaced
+- [Reliable stream reset](/quest/m2/quic/reliable-reset.md) - `RESET_STREAM_AT`,
+  so a reset WebTransport stream still delivers its header
 - [Hierarchical stream scheduling](/quest/m2/quic/scheduler.md) - strict
   subscription priority, fair buckets, and newest-first group order replace
-  the lossy scalar
-- [qmux on the QUIC stream state machine](/quest/m2/quic/qmux.md) - replace the
-  parallel stream and flow-control implementation with noq-proto
-- [Release the fork stack](/quest/m2/quic/release.md) - publish immutable,
-  consumable versions of anything noq does not release itself
-- [noq parity gate](/quest/m2/quic/noq-parity.md) - benchmark noq against
-  quiche on the relay workloads, record the browser gaps, retire the quiche
-  fork
-- [#2296](/quest/m2/quic/2296-moq-native-bring-the-quiche-backend-to-quinn-noq-feature.md) -
-  the quiche backend honors every listen/connect setting quinn and noq do, or
-  refuses it by name, and can serve a worker group
-- [#2853](/quest/m2/quic/2853-quiche-with-a-pinned-source-port-can-dial-only-a-broken.md) -
-  a quiche dial with a pinned source port waits for the all-family DNS answer
-  before taking its one candidate
+  the lossy scalar; retransmits follow the same order
+- [Keep-alive by deadline](/quest/m2/quic/keep-alive.md) - a PING only when
+  the idle deadline nears, no fixed timer
+- [Relay peers get wider limits](/quest/m2/quic/peer-limits.md) - MAX_STREAMS
+  and MAX_DATA are raised after SETUP identifies a cluster peer
+- [Per-stream deadlines](/quest/m2/quic/deadline.md) - hopeless retransmits
+  become resets, and a tail loss probe fires early while there is still time
+- [Probe by early retransmission](/quest/m2/quic/probe.md) - measure capacity
+  with useful retransmissions instead of padding
+- [qmux on the QUIC stream state machine](/quest/m2/quic/qmux.md) - qmux is a
+  first-class crate in the fork over the shared stream state machine
+- [Careful resume on reconnect](/quest/m2/quic/careful-resume.md) - a redial
+  starts at the previous connection's rate
+- [ECN on the backbone](/quest/m2/quic/ecn.md) - relay peers validate and
+  react to ECN marks
+- [Release the stack](/quest/m2/quic/release.md) - publish immutable,
+  consumable versions of the fork and its adapters
+- [Upstream the fork](/quest/m2/quic/upstream.md) - every general carried
+  change is offered to n0-computer/noq once its shape has settled
 
 ## Related
 
-- [Capacity probing](/quest/m3/quic-probe.md) - deferred early-retransmission experiment
-
+- [One QUIC backend](/quest/m1/quic-one-backend.md) - the deletion this line
+  builds on
+- [Scope track priority](/quest/m2/track-priority-scope.md) - the
+  per-broadcast fairness policy on cluster sessions
 - [Starvation](/quest/m2/qos/starvation.md) - the first consumer of ACK
   progress: how far behind viewers are, from the relay's point of view
+- [Receive timestamps](/quest/m3/quic-receive-ts.md) - per-packet arrival
+  times for GCC and deadlines
 - [GCC egress experiment](/quest/m3/quic-gcc.md) - a measured verdict on
-  WebRTC-style delay control in noq
+  WebRTC-style delay control
 - [FEC experiment](/quest/m3/quic-fec.md) - a measured verdict on transport
-  redundancy in noq
+  redundancy
+- [Kernel pacing](/quest/m3/quic-kernel-pacing.md), [Send batching](/quest/m3/quic-send-batching.md),
+  [Send buffer pools](/quest/m3/quic-buffer-pool.md), [BBR3 app-limited](/quest/m3/quic-bbr-app-limited.md) -
+  the syscall, allocation, and controller spikes
 - [Multipath spike](/quest/m3/multipath-spike.md) - a noq capability that
   MoQ does not use yet

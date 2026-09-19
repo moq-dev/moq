@@ -40,4 +40,4 @@ codes as 1088 rows and the compose rectangle crops it back, and the other
 
 ## Related
 
-- [Video hardware validation](/quest/m3/video-hardware.md) - the other unproven encoder backend, VAAPI
+- [Video hardware validation](/quest/m4/video-hardware.md) - the other unproven encoder backend, VAAPI

@@ -18,7 +18,7 @@ Try the cheapest bounded shapes first: parity across a group's tail packets,
 datagram-level parity, then stream-data FEC frames. Keep all framing in the
 selected QUIC fork; the MoQ wire does not change.
 
-Compare against [early retransmission](/quest/m3/quic-probe.md), not only plain
+Compare against [early retransmission](/quest/m2/quic/probe.md), not only plain
 ARQ. Both spend the same spare-bandwidth budget on redundancy. Use the same
 netem and real-NIC limits as the
 [GCC experiment](/quest/m3/quic-gcc.md), and report delivery latency, goodput,
@@ -26,5 +26,5 @@ redundancy cost, and unrecovered group loss.
 
 ## Required
 
-- [Probe capacity by early retransmission](/quest/m3/quic-probe.md) - supplies
+- [Probe capacity by early retransmission](/quest/m2/quic/probe.md) - supplies
   the baseline this experiment must beat

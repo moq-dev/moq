@@ -21,4 +21,4 @@ A supported Linux OBS graphics/encoder combination publishes composited video wi
 
 ## Related
 
-- [Video hardware validation](/quest/m3/video-hardware.md) - native input and encoder acceptance need hardware evidence
+- [Video hardware validation](/quest/m4/video-hardware.md) - native input and encoder acceptance need hardware evidence

@@ -38,8 +38,8 @@ the return one-way delay and that a backend without the hook leaves the
 histogram absent, never zero.
 
 Backends that return unsupported from `poll_acked` keep the group-granularity
-sampling from the parent quest, so the histogram never disappears when the
-relay is built on quinn or quiche; document which resolution a node offers.
+sampling from the parent quest, so the histogram never disappears over qmux or
+a browser transport; document which resolution a node offers.
 
 Tests: the frontier tracking frame ends under a peer that acknowledges in
 bursts, with interval samples landing one bucket lower than group-granularity

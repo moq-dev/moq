@@ -20,7 +20,7 @@ the feature it shares code with instead of holding a rank in m0 that nothing
 can act on. Each still carries its own plan and regression test.
 
 Work that builds on dev-only code but breaks nothing and gates nothing (the
-io_uring stream sessions, the perf line, the QUIC worker and quiche quests)
+io_uring stream sessions, the perf line, the QUIC worker quests)
 also sits here and starts on `main` after the dev merge, as does anything
 targeting a `0.0.x` crate. The token SDK default switch explicitly targets a
 subsequent breaking dev cycle after v1 readers exist; it is not additive M2
@@ -63,7 +63,7 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 - [0.0.x crate names](/quest/m2/api-unreleased-crate-names.md) - moq-sock, moq-uring, moq-archive, and moq-e2ee follow the naming rules after the merge
 - [Publisher clocks](/quest/m2/publisher-clock.md) - wire the shared clock through native and browser publisher restarts
 - [Broadcast route](/quest/m2/js-broadcast-route.md) - JS Announce.Broadcast goes live on any claim matching its path, like Rust routed()
-- [io_uring check](/quest/m2/check-uring-feature.md) - a moq-relay diff compiles the io-uring-quinn feature in `just check`, not only nightly
+- [io_uring check](/quest/m2/check-uring-feature.md) - a moq-relay diff compiles the io-uring feature in `just check`, not only nightly
 - [Flaky timing tests](/quest/m2/flaky-timing-tests.md) - three real-clock tests become deterministic instead of failing under load
 - [Binding stats docs](/quest/m2/binding-stats-docs.md) - every binding's doc page lists its connection stats fields with units
 
@@ -100,8 +100,9 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 - [QoS](/quest/m2/qos/README.md) - broadcast health: relay starvation and timeliness histograms, and client stats broadcasts from publishers and viewers
 - [Drain](/quest/m2/drain/README.md) - relay restarts drain sessions over GOAWAY instead of hard-dropping them
 - [Transport upgrade](/quest/m2/transport-upgrade/README.md) - a session that came up over WebSocket moves to QUIC once the QUIC dial lands, handing over at a group boundary
-- [Custom QUIC](/quest/m2/quic/README.md) - noq as the upstream for per-stream
-  ACK progress, reliable reset, hierarchical scheduling, and qmux
+- [Own the QUIC stack](/quest/m2/quic/README.md) - the moq-noq fork carries
+  ACK progress, reliable reset, hierarchical scheduling, deadlines, probing,
+  keep-alive, peer limits, careful resume, ECN, and qmux
 - [P2P](/quest/m2/p2p/README.md) - opted-in clients serve each other over data channels and iroh while the relay stays the rendezvous and the fallback, under application policy
 - [One port](/quest/m2/one-port/README.md) - a relay speaks QUIC, STUN, WebRTC media, and SRT on one UDP port and HTTP, RTMP, and RTMPS on one TCP port
 - [Scope track priority](/quest/m2/track-priority-scope.md) - priority orders one owner's streams, and a shared cluster session is fair across tenants
@@ -111,8 +112,6 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 - [#2924](/quest/m2/2924-moq-relay-tls-rotation-is-not-atomic-across-thread-per.md) - every QUIC worker shares one reloadable served identity, so rotation is atomic and generate works with workers
 - [#2964](/quest/m2/2964-quic-workers-dropping-one-split-server-resizes-the.md) - integrate the M1 worker owner with hardened socket-group formation
 - [Reuseport group](/quest/m2/reuseport-group.md) - `moq_sock::shard::Group` exposes no socket before the filter is attached and retains all of them
-- [Bandwidth estimate release](/quest/m2/web-transport-bandwidth-estimate.md) - web-transport-quinn reports quinn's BBR bandwidth estimate and ships a release carrying it
-- [#2847](/quest/m2/2847-the-quinn-backends-send-bandwidth-estimate-is-cwnd-rtt.md) - quinn backend: bump to the releases that report the controller bandwidth estimate instead of cwnd/rtt
 - [Safari WebTransport](/quest/m2/safari-webtransport.md) - WebKit browsers return to WebTransport once WebKit 319818 ships fixed
 - [Audio quality harness](/quest/m2/audio-quality-harness/README.md) - a playout latency regression fails a run instead of arriving as a bug report
 - [Latency ledger](/quest/m2/latency-ledger.md) - a session reports where its end-to-end audio delay went, stage by stage

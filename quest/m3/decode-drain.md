@@ -30,4 +30,4 @@ a group boundary.
 
 ## Related
 
-- [Embedded video](/quest/m3/video-embedded.md) - the V4L2 decoder this drains
+- [Embedded video](/quest/m4/video-embedded.md) - the V4L2 decoder this drains

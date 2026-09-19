@@ -1,40 +1,33 @@
-# [M] Release the custom QUIC stack
+# [M] Release the QUIC stack
 
 ## Goal
 
-Immutable releases of the protocol core, async adapter, WebTransport
-adapter, and qmux implementation are available to every published MoQ crate.
-The workspace lockfile identifies exact released sources, with no root-only
-Cargo patch or mutable git branch.
+Immutable releases of `moq-noq-proto`, `moq-noq`, `moq-noq-udp`,
+`web-transport-noq`, and the qmux crate are available to every published MoQ
+crate. The workspace lockfile identifies exact released sources, with no
+root-only Cargo patch or mutable git branch, and a consumer can tell from any
+release which parent commit it carries.
 
 ## Plan
 
-Prefer parent releases for every accepted upstream patch. For carried fork
-changes, publish uniquely named moq-dev packages and make package renaming
-explicit in Cargo manifests so downstream consumers resolve the same core.
-Do not publish a crate that silently impersonates `quinn`, `quinn-proto`,
-`noq`, or `noq-proto`.
+Release the dependency chain from the bottom up: the fork's three crates,
+then `web-transport-trait` if its surface moved, then `web-transport-noq` and
+qmux. Pin each released version in this repository's workspace dependencies
+and regenerate `Cargo.lock`. Verify minimal, default, and all-feature builds so
+enabling iroh, qmux, or the uring runtime cannot unify two incompatible copies
+of the protocol state.
 
-Release the dependency chain from the bottom up, including the matching
-`web-transport-trait` scheduling surface and qmux adapter. Pin each released
-version in this repository's workspace dependencies and regenerate
-`Cargo.lock`. Verify minimal/default/all feature builds so enabling Quinn,
-noq, qmux, or the uring runtime cannot unify two incompatible copies of the
-protocol state.
-
-Document the parent commit, carried patches, upstream PRs, and security-update
-procedure in the fork release. A release is incomplete if consumers cannot
-tell whether an advisory against the parent applies.
+Each fork release documents the parent commit, the carried patches with their
+upstream PR or the reason there is none, and the security-update procedure. A
+release is incomplete if a consumer cannot tell whether an advisory against
+the parent applies.
 
 ## Required
 
-- [Establish the noq relationship](/quest/m2/quic/parent.md) - decides which
-  changes noq releases itself and which need a moq-dev package
-- [Land the Quinn maintenance backlog](/quest/m2/quic/quinn-maintenance.md) -
-  avoid carrying already-reviewed fixes as unexplained private patches
-- [Reliable stream reset](/quest/m2/quic/reliable-reset.md) - provides the
+- [Fork noq](/quest/m2/quic/fork.md) - the packages this releases
+- [Reliable stream reset](/quest/m2/quic/reliable-reset.md) - the
   WebTransport-required transport extension
-- [Hierarchical stream scheduling](/quest/m2/quic/scheduler.md) - provides the
-  new transport API
-- [qmux on the QUIC stream state machine](/quest/m2/quic/qmux.md) - provides
-  the shared qmux implementation
+- [Hierarchical stream scheduling](/quest/m2/quic/scheduler.md) - the new
+  transport API
+- [qmux on the QUIC stream state machine](/quest/m2/quic/qmux.md) - the
+  shared qmux implementation

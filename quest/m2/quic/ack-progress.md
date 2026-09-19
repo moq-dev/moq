@@ -8,7 +8,7 @@ peer's reported ACK delay. Nothing MoQ builds on top needs private state.
 
 ## Plan
 
-The work lives in n0-computer/noq. This quest exists so the release it
+The work lives in the moq-dev/noq fork. This quest exists so the release it
 produces is one condition dependents wait on.
 
 noq-proto already tracks everything needed in `SendBuffer`: the acknowledged
@@ -33,16 +33,13 @@ stream teardown: the accessor must not return a prefix that includes bytes the
 peer will never acknowledge, and a waiter for an offset beyond the final
 size must resolve with the reset instead of hanging.
 
-Propose the API on the noq tracking thread first and record the maintainers'
-shape preferences in this quest. If the change is declined, this quest
-creates the moq-dev fork per the [parent quest](/quest/m2/quic/parent.md)
-and the release rules. The quest completes when a noq-proto release carries
-the accessor and `Cargo.lock` here can name it.
+Land it in the fork and offer it upstream once it is stable. The quest
+completes when a `moq-noq-proto` release carries the accessor and
+`Cargo.lock` here can name it.
 
 ## Required
 
-- [Establish the noq relationship](/quest/m2/quic/parent.md) - creates the
-  tracking thread this proposal goes to and names its reviewer
+- [Fork noq](/quest/m2/quic/fork.md) - the accessor lives there
 
 ## Related
 

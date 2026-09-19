@@ -30,9 +30,8 @@ use. A default body cannot construct a backend's own `Self::Error`, so
 unsupported has to live in the return type rather than the error, and a
 consumer must treat `None` as unknown, never as delivered.
 
-Implement it in `web-transport-noq` over the noq-proto accessor. Leave
-`web-transport-quinn`, `web-transport-quiche`, and `web-transport-wasm` on
-the default; the browser's `WebTransportSendStream.getStats()` is
+Implement it in `web-transport-noq` over the fork's accessor. Leave
+`web-transport-wasm` on the default; the browser's `WebTransportSendStream.getStats()` is
 unimplemented in shipping Chrome and its `bytesAcknowledged` is at risk in the
 W3C draft. qmux over a reliable transport may treat serialization as
 acknowledgment only if the qmux quest decides that is honest; until then it

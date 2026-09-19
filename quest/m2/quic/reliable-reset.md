@@ -59,12 +59,12 @@ provisional codepoints if the document changes before release.
 
 ## Required
 
-- [Establish the noq relationship](/quest/m2/quic/parent.md) - the frame and
-  stream-state implementation is proposed to noq first
+- [Fork noq](/quest/m2/quic/fork.md) - the frame and stream-state
+  implementation lives there
 
 ## Related
 
 - [qmux on the QUIC stream state machine](/quest/m2/quic/qmux.md) - consumes
   the same reset state without a parallel implementation
-- [noq parity gate](/quest/m2/quic/noq-parity.md) - cannot claim
-  WebTransport parity without reliable reset
+- [One QUIC backend](/quest/m1/quic-one-backend.md) - dropped quiche, the
+  one backend that had this, so it is the known browser-compliance gap

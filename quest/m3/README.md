@@ -2,9 +2,9 @@
 
 ## Goal
 
-Deferred features, design studies, experiments, and hardware validation.
-Exploratory quests may end with a measured no-go verdict; implementation
-quests retain their stated completion criteria.
+Deferred features, design studies, and experiments; hardware- and
+partner-gated work sits in m4. Exploratory quests may end with a measured
+no-go verdict; implementation quests retain their stated completion criteria.
 
 ## Plan
 
@@ -25,18 +25,20 @@ worth settling now. Deferral does not by itself abandon a feature.
 - [Mobile completion](/quest/m3/mobile-completion.md) - verify the selected native/mobile path before closing #700
 - [Linux OBS GPU input](/quest/m3/obs-linux-gpu.md) - publish OBS compositor frames without CPU readback on a validated Linux graphics/encoder combination
 - [LiveKit client shim](/quest/m3/livekit-shim.md) - a media compatibility facade over the room SDK
-- [QUIC capacity probing](/quest/m3/quic-probe.md) - compare useful early retransmissions with padding and no probing
 
-- [Embedded video](/quest/m3/video-embedded.md) - EGL import in the renderer, so moq-video presents on a Pi
 - [Decoder drain](/quest/m3/decode-drain.md) - flush and finish for pipelined decoders, so no picture is lost at a track end or crosses a group boundary
 - [#2819](/quest/m3/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - moq-video: carry PipeWire DMA-BUFs safely into the Vulkan renderer
-- [#2893](/quest/m3/2893-video-validate-pipewire-dma-buf-capture-on-kde-hardware.md) - video: validate PipeWire DMA-BUF capture on KDE hardware
-- [Video hardware validation](/quest/m3/video-hardware.md) - run the encode, capture, and zero-copy paths that were written but never run on real machines
 - [Unreal prototype](/quest/m3/unreal.md) - a UE5 module on the C++ package with exceptions disabled, rendering a subscribed broadcast to a texture
 - [Unity prototype](/quest/m3/unity.md) - the C# package under IL2CPP, playing subscribed audio
 - [Multipath spike](/quest/m3/multipath-spike.md) - whether bonded contribution over multipath QUIC is worth building, given it needs noq on both ends
-- [QUIC GCC](/quest/m3/quic-gcc.md) - a measured verdict on delay-based congestion control for media egress
+- [Receive timestamps](/quest/m3/quic-receive-ts.md) - per-packet arrival times in ACKs, the feedback GCC and deadlines need
+- [QUIC GCC](/quest/m3/quic-gcc.md) - a measured verdict on delay-based congestion control for media egress, shipping as `RealTime`
 - [QUIC FEC](/quest/m3/quic-fec.md) - a measured verdict on transport-level FEC vs retransmission
+- [BBR3 app-limited](/quest/m3/quic-bbr-app-limited.md) - whether ProbeRTT and the bandwidth model behave for a sender at the encoder's rate
+- [Kernel pacing](/quest/m3/quic-kernel-pacing.md) - whether SO_TXTIME pacing beats a userspace pacer the io_uring driver ignores today
+- [Send batching](/quest/m3/quic-send-batching.md) - whether sendmmsg across connections pays on the tokio path
+- [Send buffer pools](/quest/m3/quic-buffer-pool.md) - whether pooled send buffers beat Bytes in the stream send path
+- [AF_XDP UDP path](/quest/m3/af-xdp.md) - the kernel-bypass verdict on today's virtio hosts that gates DPDK
 - [GOP overhead](/quest/m3/gop-overhead.md) - price the I-frames a short GOP pays for, deciding whether a long GOP plus a keyframe request is worth designing
 - [#703](/quest/m3/703-experimental-webgpu-renderer.md) - Experimental WebGPU renderer
 - [#823](/quest/m3/823-svc-support.md) - SVC support?
@@ -45,5 +47,4 @@ worth settling now. Deferral does not by itself abandon a feature.
 - [SIP media stack](/quest/m3/sip-stack.md) - terminate one inbound SIP audio call leg and expose it as Opus frames
 - [Carrier voice](/quest/m3/carrier-voice/README.md) - determine whether MoQ should be the call fabric for programmable carrier voice
 - [LiveKit WebRTC bridge](/quest/m3/livekit-webrtc-bridge.md) - a go/no-go verdict, backed by a spike, on per-track LiveKit-to-MoQ bridging
-- [Vision worker](/quest/m3/processor-vision.md) - a documented customer-run vision worker proves the processor contract
 - [Common Access Tokens](/quest/m3/cat/README.md) - a moq-transport client presents a CAT in SETUP and `moq auth serve` admits it with the scope its `moqt` claim names

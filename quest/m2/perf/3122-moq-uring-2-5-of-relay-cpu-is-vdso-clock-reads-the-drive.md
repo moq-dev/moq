@@ -20,18 +20,15 @@ the tokio worker path:
 | **`[vdso]`** | **2.95%** | **0.72%** | **2.55%** |
 
 That is `clock_gettime`. Roughly 2.5% of relay CPU spent reading the clock.
-The profile is the quiche flavor; re-measure on the default backend (noq
-through the `quinn/` module) before and after.
+The profile is the since-deleted quiche driver's; re-measure on noq before
+and after.
 
 Where the reads are:
 
 - The drive loop reads once per turn to fire timers
   (`self.shared.timers.borrow_mut().fire(Instant::now())`,
   rs/moq-uring/src/worker.rs:183).
-- The quiche driver reads again on the same turn in `arm_keep_alive`
-  (rs/moq-uring/src/quic/quiche/connection.rs:850-855), plus quiche's own
-  `Instant::now()` inside `on_timeout` / `timeout`.
-- The default backend has no `arm_keep_alive`; it reads the clock for
+- The noq driver reads the clock for
   `close` (rs/moq-uring/src/quic/quinn/connection.rs:239), `handle_timeout`
   (:671), and `poll_transmit` (:786). The last one runs once per GSO train,
   since `flush` stages one train per turn (see
@@ -48,8 +45,7 @@ connection counts, but it is on the same hot path and grows with it.
 `moq_net::runtime::Runtime::now` (rs/moq-net/src/runtime.rs:128) is the
 natural place to hand the current turn's instant down instead of having each
 layer re-read it. Sample once per drive turn and pass it through `fire`, the
-keep-alive arming, `handle_timeout`, `poll_transmit`, and the quiche timeout
-calls.
+`handle_timeout`, and `poll_transmit`.
 
 Acceptance: `[vdso]` share in the `perf` profile on both flavors, relay CPU
 via `just bench BASE` on Linux, and the existing keep-alive and idle-timeout

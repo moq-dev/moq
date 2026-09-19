@@ -114,5 +114,5 @@ stating plainly because it is what a builder is comparing against.
 - [Client stats](/quest/m2/qos/stats/schema.md) - publisher-reported stats
   as a `.stats` broadcast (moq#2734); teleop's latency instrumentation
   extends that extension rather than adding a second stats surface
-- [Video hardware validation](/quest/m3/video-hardware.md) - the VAAPI run
+- [Video hardware validation](/quest/m4/video-hardware.md) - the VAAPI run
   that covers Intel ground robots and NUC companions

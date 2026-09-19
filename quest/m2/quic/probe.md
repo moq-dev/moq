@@ -10,8 +10,10 @@ and publisher rate adaptation.
 
 ## Plan
 
-Implement the opt-in mechanism in noq's recovery and pacing layer, proposed
-upstream first. Enable it only while the application consumes bandwidth estimates, so
+Implement the opt-in mechanism in the fork's recovery and pacing layer.
+Mark probe packets for an `IMMEDIATE_ACK` (the ACK-frequency extension noq
+already implements) so a capacity sample is not delayed by the peer's ACK
+timer. Enable it only while the application consumes bandwidth estimates, so
 idle connections never probe. Exclude streams or packets that have already
 expired under MoQ's group lifetime.
 
@@ -29,8 +31,8 @@ option through the backend-neutral estimate.
 
 ## Required
 
-- [noq parity gate](/quest/m2/quic/noq-parity.md) - noq must be the only
-  default core before its recovery and pacing layer gains an opt-in probe
+- [Fork noq](/quest/m2/quic/fork.md) - the recovery and pacing change lives
+  there
 
 ## Related
 
@@ -38,3 +40,5 @@ option through the backend-neutral estimate.
   repetition code competing for the same redundancy budget
 - [GCC egress experiment](/quest/m3/quic-gcc.md) - a delay-based controller
   changes what headroom means
+- [BBR3 app-limited](/quest/m3/quic-bbr-app-limited.md) - whether the
+  estimate an app-limited sender already has is trustworthy

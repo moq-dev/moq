@@ -11,10 +11,9 @@ only the negotiated protocol.
 ## Plan
 
 Unplanned. `moq_uring::quic::Connection` exposes `peer_chain()` and
-`protocol()` but no peer address or handshake data. quinn's
-`quinn_proto::Connection` has `remote_address()` and `handshake_data()`;
-quiche has `server_name()` and the peer address from the datagram path. Add
-the accessors to both backends and the facade, then fill the request in
+`protocol()` but no peer address or handshake data. noq's
+`Connection` has `remote_address()` and `handshake_data()`. Add
+the accessors to the backend and the facade, then fill the request in
 `rs/moq-relay/src/uring.rs` where the comment names this quest. Run
 `/plan-quests` on this file.
 

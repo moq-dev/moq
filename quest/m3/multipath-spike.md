@@ -28,11 +28,9 @@ browser WebTransport backend could never implement it.
 **What the spike is really for is the constraint nobody has written down.**
 `max_concurrent_multipath_paths` maps to the `initial_max_path_id` transport
 parameter, which both peers negotiate, so a multipath session needs noq on
-*both* ends. noq is the default backend on `dev` (`moq-tokio`, `moq-uring`,
-and `moq-relay` all default to it) but `main` still defaults to quinn, and no
-other backend has the extension: quinn 0.11 lacks it, quiche's
-`probe_path`/`migrate` is RFC 9000 single-path migration, and iroh's path
-logic is its own. So bonded contribution is not an opt-in client feature; it
+*both* ends. noq is the only backend on `dev` (`main` still
+defaults to quinn until the merge, and the browser and qmux transports have
+no such thing). So bonded contribution is not an opt-in client feature; it
 constrains every relay and client on the path to run noq. Establish what that
 actually costs before anyone builds a fan-out socket.
 
@@ -65,5 +63,5 @@ Target `dev`, where the crate is `moq-tokio`; the rename has not reached
 
 ## Related
 
-- [Establish the noq relationship](/quest/m2/quic/parent.md) - noq's
-  multipath support is one reason to invest in the upstream relationship
+- [Fork noq](/quest/m2/quic/fork.md) - noq's multipath support is one
+  reason it is the parent

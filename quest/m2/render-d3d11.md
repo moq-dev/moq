@@ -29,5 +29,5 @@ common case.
 
 ## Related
 
-- [Video hardware validation](/quest/m3/video-hardware.md) - needs the same
+- [Video hardware validation](/quest/m4/video-hardware.md) - needs the same
   Windows machine

@@ -55,8 +55,7 @@ the tier and the weighting.
 
 The delivered API is hierarchical send groups. Do not require a separately
 published scalar-widening API or drop fairness as an intermediate release.
-Prototype the byte-accounted scheduler in the upstream transport path and use
-the result as evidence for the noq proposal. An existing Quinn prototype can
+Prototype the byte-accounted scheduler in the fork. An existing Quinn prototype can
 supply a workload baseline, but a recency field alone does not prove byte
 fairness: differently sized writes must spend the group's byte credit, and
 requeueing or adding streams must not reset that credit.
@@ -82,6 +81,13 @@ sheds its own old backlog. Measure the full scope of trait and adapter changes
 before publishing the API; any published break targets dev under the normal
 release policy.
 
+Retransmissions follow the same hierarchy. noq already re-queues a lost
+range through the stream's priority (`StreamsState::retransmit`), so a lost
+video range waits behind new audio at a higher priority; keep that, and add
+a test proving it, plus one proving a retransmission is never starved
+indefinitely by an equal-priority group's new data (the fair tier's byte
+credit covers retransmits too).
+
 Tests saturate the sender with differently sized audio and video groups and
 prove byte fairness over a bounded window, strict preemption by a higher
 priority, newest-first backlog shedding, dynamic priority updates,
@@ -96,8 +102,7 @@ where the new implementation makes it redundant.
 ## Required
 
 - [Merge dev](/quest/m1/merge-dev.md) - supplies the native transport code this implementation builds on
-- [Establish the noq relationship](/quest/m2/quic/parent.md) - the scheduler
-  is proposed to noq first
+- [Fork noq](/quest/m2/quic/fork.md) - the scheduler lives there
 
 ## Closes
 

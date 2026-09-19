@@ -31,4 +31,4 @@ come from plain `cuMemAlloc`. That is not a bug any amount of review finds.
 
 ## Related
 
-- [PipeWire DMA-BUF on KDE](/quest/m3/2893-video-validate-pipewire-dma-buf-capture-on-kde-hardware.md) - the same kind of gate, for the capture side
+- [PipeWire DMA-BUF on KDE](/quest/m4/2893-video-validate-pipewire-dma-buf-capture-on-kde-hardware.md) - the same kind of gate, for the capture side
