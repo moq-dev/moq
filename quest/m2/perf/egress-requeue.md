@@ -26,6 +26,10 @@ the budget.
 Acceptance: CPU per Gbps and throughput ceiling via `just bench BASE` on
 Linux. Latency must not regress at the chosen budget. A no-win keeps 1.
 
+The [quiescence quest](/quest/m2/perf/uring-quiescence.md) sweeps this
+budget together with its pass budget; land whichever runs first and fold the
+other's sweep in.
+
 ## Required
 
 - [Merge dev](/quest/m1/merge-dev.md) - builds on dev-only code that reaches `main` with the merge

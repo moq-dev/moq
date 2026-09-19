@@ -47,6 +47,9 @@ row per io_uring worker.
 
 - [Open contract](/quest/m2/perf/uring-open-contract.md) - plan concurrent WebTransport opening and cancellation
 
+- [One enter per turn](/quest/m2/perf/uring-one-enter.md) - a parking turn pays one io_uring_enter, submits flush deferred completions, and SQEs per enter is a counter
+- [Run to quiescence](/quest/m2/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass budget that keeps the fairness rule
+- [Lock wait](/quest/m2/perf/lock-wait.md) - each worker reports time blocked on cross-worker locks, deciding whether the shared model needs work
 - [Ingest batch](/quest/m2/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per chunk burst instead of per chunk
 - [Egress cache refresh](/quest/m2/perf/egress-keepalive.md) - measure refresh costs while preserving slow-reader retention
 - [Owned decoding copies](/quest/m2/perf/coding-decode.md) - measure and reduce owned decode allocations and copies
