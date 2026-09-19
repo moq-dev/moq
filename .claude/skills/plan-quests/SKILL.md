@@ -8,10 +8,9 @@ Before you begin, read `quest/CLAUDE.md` completely.
 Interview the user until you reach a shared understanding.
 
 Work the tree in **rounds**.
-The **frontier** is every decision whose prerequisites are already settled: the questions you can ask *now* without guessing at answers you haven't heard yet.
+The **frontier** is every decision whose prerequisites are already settled.
 Ask the whole frontier in one round, interactively if supported.
-Select at least one answer as (recommended).
-Wait for the user's answers before the next round.
+Select at least one answer as (recommended) and wait for the user's answers (never guess) before the next round.
 
 Each round the user answers reshapes the tree: settled decisions push the frontier outward and unblock questions that depended on them.
 Recompute the frontier and ask the next round.
@@ -35,9 +34,6 @@ The result may be one quest or multiple quests and questlines, split based on wh
 Prefix each quest title with `[XS]`, `[S]`, `[M]`, `[L]`, or `[XL]`, including implementation, verification, and landing work.
 Once complete, create, update, or delete the relevant quests and questlines.
 
-Commit and make a PR then:
+If any quests are trivial and unblocked, you can make the changes now.
 
-- Monitor it for CI failures and the automatic reviews. Never request a review.
-- Address any findings you agree with, turn down the rest with a comment, and push once. If the next review still has findings, stop and report.
-
-Merge the PR when ready.
+When done, commit and make a PR.
