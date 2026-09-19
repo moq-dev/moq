@@ -1253,8 +1253,7 @@ impl Producer {
 		// Resolve the ingress counters once, keyed by the absolute broadcast path.
 		let ingress = self.stats.ingress(&full);
 
-		// The broadcast advertises its own exact path: the path is in scope (checked
-		// above), so it clamps to itself under every root that covers it.
+		// The broadcast advertises its own exact path, already checked against the scope.
 		let announcer = Announcer {
 			announcing: Announcing {
 				hop: self.info,
@@ -1452,8 +1451,7 @@ impl Producer {
 struct Announcing {
 	hop: Hop,
 	shared: kio::Shared<OriginState>,
-	/// The absolute prefix as requested, before clamping: what the ingress
-	/// announce counters are keyed by.
+	/// The absolute advertised prefix, which also keys the ingress announce counters.
 	requested: PathOwned,
 	/// The prefix inserted into the table. Pattern scopes decide visibility and
 	/// request authorization without changing the route's prefix shape.
@@ -1565,8 +1563,8 @@ impl Announcer {
 #[must_use = "dropping an announcement retracts the route"]
 pub(crate) struct AnnounceProducer {
 	shared: kio::Shared<OriginState>,
-	/// The table entries this advertisement created: one per allowed root the
-	/// requested prefix intersected.
+	/// The table entries this advertisement created. A prefix remains unchanged;
+	/// pattern scopes only filter its visibility and requests.
 	ids: Vec<u64>,
 	/// Ingress announce stats guard, held for the advertisement's lifetime.
 	_guard: stats::Announce,
@@ -1586,7 +1584,7 @@ impl AnnounceProducer {
 			return Err(Error::Closed);
 		}
 		for id in &self.ids {
-			// Each entry keeps its clamped prefix; only the metadata moves.
+			// Each entry keeps its advertised prefix; only the metadata moves.
 			let Some(entry) = shared.routes.iter_mut().find(|entry| entry.id == *id) else {
 				continue;
 			};
@@ -3556,8 +3554,9 @@ impl Consumer {
 	/// Subscribe to route announcements for this consumer's scope.
 	///
 	/// Allocates a per-cursor coalescing buffer and replays the currently
-	/// announced routes as initial updates. A route announced above the scope is
-	/// clamped to it. Drop the returned [`AnnounceConsumer`] to unregister.
+	/// announced routes as initial updates. Routes stay prefixes and are named
+	/// relative to this consumer's root; its patterns only filter visibility.
+	/// Drop the returned [`AnnounceConsumer`] to unregister.
 	pub fn announced(&self) -> AnnounceConsumer {
 		AnnounceConsumer::new(
 			self.root.clone(),
@@ -3601,8 +3600,8 @@ impl Consumer {
 	pub async fn routed(&self, path: impl AsPath) -> Option<Route> {
 		let path = path.as_path();
 
-		// Scope a fresh consumer down to this path's subtree: any covering route then
-		// clamps to exactly the path, so we only wake for relevant announcements.
+		// Scope a fresh consumer down to this path's subtree, so we only wake for
+		// announcements that overlap the requested path.
 		// A max-depth path cannot be spelled as `path/**` (`**` would be a 33rd
 		// segment), so watch the existing stream and match covering claims instead.
 		let consumer = match Pattern::subtree(path.as_str()) {
@@ -3612,8 +3611,8 @@ impl Consumer {
 		};
 
 		// `scope` keeps narrower permissions intact: if we ask for `foo` on a
-		// consumer limited to `foo/specific`, no route can ever clamp to exactly
-		// `foo`. Bail rather than loop forever.
+		// consumer limited to `foo/specific`, `foo` itself is unauthorized. Bail
+		// rather than loop forever.
 		if !consumer.allowed().matches(path.as_str()) {
 			return None;
 		}
@@ -4512,8 +4511,8 @@ mod tests {
 	#[tokio::test]
 	async fn scoped_cursor_advertises_most_specific_covering_route() {
 		let producer = origin(1).produce();
-		// Broad and cheap; narrow and expensive. Both clamp to a cursor rooted
-		// below them, and the narrow one is what a request there resolves.
+		// Broad and cheap; narrow and expensive. Both present relative to a cursor
+		// rooted below them, and the narrow one is what a request there resolves.
 		let _broad = producer.announce("room", Route::default().with_cost(1)).unwrap();
 		let _narrow = producer.announce("room/alice", Route::default().with_cost(9)).unwrap();
 
@@ -5015,7 +5014,7 @@ mod tests {
 		let mut fut = consumer.routed("room/alice").boxed();
 		assert!((&mut fut).now_or_never().is_none());
 
-		// A covering prefix resolves the wait, clamped to the requested path.
+		// A covering prefix resolves the wait.
 		let _a = producer.announce("room", Route::default().with_cost(3)).unwrap();
 		let route = fut.now_or_never().expect("covered").expect("routed");
 		assert_eq!(route.cost, Cost::new(3));

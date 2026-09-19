@@ -85,19 +85,21 @@ serve. A pattern lives in two places: the token, which scopes what a session
 may publish and subscribe to, and a local filter a consumer applies to the
 prefixes it is told about.
 
-A subscriber watching under a prefix sees advertisements named from the origin,
-clamped to the requested scope. A route claimed above the scope is presented as
-the scope itself: `room` advertised cluster-wide and consumed at `room/alice`
-arrives as `room/alice`. Announce events carry the covered path and what
-happened to it: Rust `announce::Update { path, route, kind }` and TypeScript
-`Announce.Update { path, captures, route, kind }`, where the kind is announced, updated
-(a reprice in place), or retracted. The Rust consumer is a `Stream` and the
-TypeScript one an async iterable.
+A subscriber watching under a root sees advertisements named relative to that
+root. The pattern scope filters which prefixes are visible without changing a
+route's prefix. Announce events carry the covered path, captures, and what
+happened to it: Rust
+`announce::Update { path, captures: Option<Vec<Pattern>>, route, kind }` and
+TypeScript `Announce.Update { path, captures, route, kind }`, where the kind is
+announced, updated (a reprice in place), or retracted. Captures are present when
+the announced prefix pins every wildcard in the most-specific matching scope
+member. The Rust consumer is a `Stream` and the TypeScript one an async iterable.
 
 Announcements are hints; requests are the authority. When a subscriber asks
 for a covered path the advertiser will not serve, the advertiser refuses that
 request rather than narrowing the claim, and no message narrows a route. Token
-scope stays prefix-based until origin grants become a pattern set.
+scope is any pattern union; the session asks for each member's literal head on
+the prefix-only wire and filters locally.
 
 ```typescript
 import { Path } from "@moq/net";

@@ -108,8 +108,8 @@ only. There is no shared secret.
 broadcast one segment under `live`, and `room/*/chat` is each room's chat and
 nothing beside it. The relay announces, publishes, and resolves only the paths
 inside the grant. Announcements travel by literal head on the wire, so a
-non-prefix grant is filtered on each side; a grant with wildcards presents its
-matches as pattern announcements, which need moq-lite-06 to reach a client.
+non-prefix grant is filtered locally on each side while the announced route
+stays a prefix on every protocol version.
 
 ```toml
 [auth]
@@ -157,13 +157,11 @@ A token carrying the retired `put` and `get` prefix lists fails verification.
 Grants are [patterns](https://docs.rs/moq-pattern) relative to `root`: `foo`
 is exactly `foo`, `foo/**` is `foo` and everything beneath it, and `**` is
 everything. Matching is on path boundaries (`foo/**` covers `foo/bar` but not
-`foobar`). The relay scopes a session by prefix until origin grants become a
-pattern set, so only `foo/**` and `**` admit today: a token naming `live/*`,
-or a bare literal, is refused at connect naming the pattern. `moq auth serve`
-authorizes the token at the dialed path: the path may equal the root, extend
-it (which narrows the grant), or be a parent of it (the grant still applies
-at the root). An unrelated path is rejected. The relay forwards the raw path
-and enforces the grant it gets.
+`foobar`). The relay scopes a session by the exact union, including literals,
+segment wildcards, suffixes, and subtrees. `moq auth serve` authorizes the token
+at the dialed path: the path may equal the root, extend it (which narrows the
+grant), or be a parent of it (the grant still applies at the root). An unrelated
+path is rejected. The relay forwards the raw path and enforces the grant it gets.
 
 | root | publish | subscribe | Publish | Subscribe |
 | --- | --- | --- | --- | --- |
