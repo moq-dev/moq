@@ -20,9 +20,8 @@
 //! #     jpeg: bytes::Bytes,
 //! # ) -> moq_mux::Result<()> {
 //! let track = broadcast.create_track("thumbnail", None)?;
-//! let mut entry = hang::catalog::BinaryConfig::new(hang::catalog::Mode::Snapshot);
-//! entry.mime = Some("image/jpeg".into());
-//! let mut thumbnail = catalog.binary_snapshot(track, entry)?;
+//! let config = moq_mux::binary::Config::default().with_mime("image/jpeg");
+//! let mut thumbnail = catalog.binary_snapshot(track, config)?;
 //! thumbnail.update(jpeg)?;
 //! # Ok(())
 //! # }
@@ -49,24 +48,47 @@
 
 use bytes::Bytes;
 
-use hang::catalog::{BinaryConfig, Mode};
+use hang::catalog::{BinaryConfig, Compression, Mode};
 
 use crate::catalog::Rendition;
 use crate::catalog::hang::CatalogExt;
 
-fn binary_compression(entry: &BinaryConfig) -> crate::Result<moq_binary::Compression> {
-	Ok(if crate::compression(entry.compression.as_ref())? {
-		moq_binary::Compression::Deflate
-	} else {
-		moq_binary::Compression::None
-	})
+/// Everything a binary track declares about itself, beyond its mode and name.
+///
+/// Start from [`default`](Default::default) and chain the setters. The mode is not in here: it is
+/// fixed by which producer you create.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct Config {
+	/// DEFLATE-compress the track's frames, advertised as
+	/// [`Compression::Deflate`].
+	///
+	/// The catalog flag is what a consumer reads, so the track name needs no `.z` suffix.
+	pub compression: bool,
+
+	/// An optional media type for each payload (e.g. `image/jpeg`).
+	pub mime: Option<String>,
 }
 
-fn require_mode(entry: &BinaryConfig, expected: Mode) -> crate::Result<()> {
-	if entry.mode == expected {
-		Ok(())
-	} else {
-		Err(crate::Error::UnsupportedMode(entry.mode.to_string()))
+impl Config {
+	/// Set [`compression`](Self::compression) (a builder, since the struct is `#[non_exhaustive]`).
+	pub fn with_compression(mut self, compression: bool) -> Self {
+		self.compression = compression;
+		self
+	}
+
+	/// Set [`mime`](Self::mime) (a builder, since the struct is `#[non_exhaustive]`).
+	pub fn with_mime(mut self, mime: impl Into<String>) -> Self {
+		self.mime = Some(mime.into());
+		self
+	}
+
+	/// The catalog entry describing a track published under this config in `mode`.
+	pub(crate) fn entry(&self, mode: Mode) -> BinaryConfig {
+		let mut entry = BinaryConfig::new(mode);
+		entry.compression = self.compression.then_some(Compression::Deflate);
+		entry.mime = self.mime.clone();
+		entry
 	}
 }
 
@@ -84,13 +106,14 @@ impl<E: CatalogExt> Snapshot<E> {
 	pub(crate) fn new(
 		track: moq_net::track::Producer,
 		mut rendition: Rendition<E, BinaryConfig>,
-		entry: BinaryConfig,
+		config: &Config,
 	) -> crate::Result<Self> {
-		require_mode(&entry, Mode::Snapshot)?;
 		let mut binary = moq_binary::snapshot::Config::default();
-		binary.compression = binary_compression(&entry)?;
+		if config.compression {
+			binary.compression = moq_binary::Compression::Deflate;
+		}
 		let inner = moq_binary::snapshot::Producer::new(track, binary);
-		rendition.set(entry)?;
+		rendition.set(config.entry(Mode::Snapshot))?;
 		Ok(Self { inner, rendition })
 	}
 
@@ -137,13 +160,14 @@ impl<E: CatalogExt> Stream<E> {
 	pub(crate) fn new(
 		track: moq_net::track::Producer,
 		mut rendition: Rendition<E, BinaryConfig>,
-		entry: BinaryConfig,
+		config: &Config,
 	) -> crate::Result<Self> {
-		require_mode(&entry, Mode::Stream)?;
 		let mut binary = moq_binary::stream::Config::default();
-		binary.compression = binary_compression(&entry)?;
+		if config.compression {
+			binary.compression = moq_binary::Compression::Deflate;
+		}
 		let inner = moq_binary::stream::Producer::new(track, binary);
-		rendition.set(entry)?;
+		rendition.set(config.entry(Mode::Stream))?;
 		Ok(Self {
 			inner,
 			name: rendition.name().to_string(),
@@ -218,17 +242,21 @@ impl Consumer {
 	/// Errors if the entry declares a mode or compression this build doesn't implement, which is a
 	/// track a consumer must skip rather than guess at.
 	pub fn from_track(track: moq_net::track::Subscriber, config: &BinaryConfig) -> crate::Result<Self> {
-		let compression = binary_compression(config)?;
+		let compression = crate::compression(config.compression.as_ref())?;
 
 		let inner = match &config.mode {
 			Mode::Snapshot => {
 				let mut binary = moq_binary::snapshot::Config::default();
-				binary.compression = compression;
+				if compression {
+					binary.compression = moq_binary::Compression::Deflate;
+				}
 				Inner::Snapshot(moq_binary::snapshot::Consumer::new(track, binary))
 			}
 			Mode::Stream => {
 				let mut binary = moq_binary::stream::Config::default();
-				binary.compression = compression;
+				if compression {
+					binary.compression = moq_binary::Compression::Deflate;
+				}
 				Inner::Stream(moq_binary::stream::Consumer::new(track, binary))
 			}
 			other => return Err(crate::Error::UnsupportedMode(other.to_string())),
@@ -287,8 +315,6 @@ impl crate::catalog::Entry<'_, BinaryConfig> {
 mod test {
 	use std::task::Poll;
 
-	use hang::catalog::Compression;
-
 	use super::*;
 
 	fn catalog() -> (moq_net::broadcast::Producer, crate::catalog::Producer) {
@@ -324,27 +350,14 @@ mod test {
 		out
 	}
 
-	fn snapshot() -> BinaryConfig {
-		BinaryConfig::new(Mode::Snapshot)
-	}
-
-	fn stream_z() -> BinaryConfig {
-		let mut entry = BinaryConfig::new(Mode::Stream);
-		entry.compression = Some(Compression::Deflate);
-		entry
-	}
-
-	fn jpeg() -> BinaryConfig {
-		let mut entry = BinaryConfig::new(Mode::Snapshot);
-		entry.mime = Some("image/jpeg".into());
-		entry
-	}
-
 	#[test]
 	fn a_stream_track_roundtrips() {
 		let (mut broadcast, catalog) = catalog();
 		let mut samples = catalog
-			.binary_stream(track(&mut broadcast, "samples"), stream_z())
+			.binary_stream(
+				track(&mut broadcast, "samples"),
+				Config::default().with_compression(true),
+			)
 			.unwrap();
 
 		let track = samples.consume();
@@ -365,7 +378,10 @@ mod test {
 	fn a_snapshot_track_roundtrips() {
 		let (mut broadcast, catalog) = catalog();
 		let mut thumbnail = catalog
-			.binary_snapshot(track(&mut broadcast, "thumbnail"), jpeg())
+			.binary_snapshot(
+				track(&mut broadcast, "thumbnail"),
+				Config::default().with_mime("image/jpeg"),
+			)
 			.unwrap();
 
 		let track = thumbnail.consume();
@@ -385,7 +401,7 @@ mod test {
 	fn dropping_the_producer_retires_the_entry() {
 		let (mut broadcast, catalog) = catalog();
 		let thumbnail = catalog
-			.binary_snapshot(track(&mut broadcast, "thumbnail"), snapshot())
+			.binary_snapshot(track(&mut broadcast, "thumbnail"), Config::default())
 			.unwrap();
 		assert!(catalog.snapshot().binary.tracks.contains_key("thumbnail"));
 
@@ -403,7 +419,7 @@ mod test {
 	fn a_name_taken_by_another_track_is_refused() {
 		let (mut broadcast, catalog) = catalog();
 		let _first = catalog
-			.binary_snapshot(track(&mut broadcast, "data"), snapshot())
+			.binary_snapshot(track(&mut broadcast, "data"), Config::default())
 			.unwrap();
 
 		assert!(broadcast.create_track("data", None).is_err());

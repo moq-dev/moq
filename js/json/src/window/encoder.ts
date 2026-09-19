@@ -1,8 +1,6 @@
 import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "@moq/flate";
 import { Group } from "@moq/net";
 
-import { type Compression, isDeflate } from "../compression.ts";
-
 /** Frames (header included) in one group before a new group is forced, matching the Snapshot cap. Kept well below the net per-group cap so a roll always precedes GroupTooLarge. */
 const MAX_GROUP_FRAMES = 1024;
 
@@ -26,10 +24,10 @@ export interface Config {
 
 	/**
 	 * Compress each group as one sync-flushed `deflate-raw` stream, so every op reuses the header and
-	 * the ops before it as context. A {@link Decoder} reading the frames must set the same
-	 * {@link compression}. Defaults to `"none"`.
+	 * the ops before it as context. A {@link Decoder} reading the frames must set the same flag.
+	 * Defaults to `false`.
 	 */
-	compression?: Compression;
+	compression?: boolean;
 
 	/**
 	 * Maximum records retained and repeated in a group checkpoint.
@@ -106,7 +104,7 @@ export class Encoder<T> {
 		if (!Number.isSafeInteger(this.#opRatio) || this.#opRatio < 0 || this.#opRatio > 0xffffffff) {
 			throw new Error("opRatio must be an unsigned 32-bit integer");
 		}
-		this.#compress = isDeflate(config.compression);
+		this.#compress = config.compression ?? false;
 		this.#checkpointRecords = config.checkpointRecords;
 		if (
 			this.#checkpointRecords !== undefined &&

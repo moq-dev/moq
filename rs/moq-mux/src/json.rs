@@ -21,9 +21,8 @@
 //! #     catalog: &moq_mux::catalog::Producer,
 //! # ) -> moq_mux::Result<()> {
 //! let track = broadcast.create_track("chat", None)?;
-//! let mut entry = hang::catalog::JsonConfig::new(hang::catalog::Mode::Stream);
-//! entry.compression = Some(hang::catalog::Compression::Deflate);
-//! let mut chat = catalog.json_stream::<Message>(track, entry)?;
+//! let config = moq_mux::json::Config::default().with_compression(true);
+//! let mut chat = catalog.json_stream::<Message>(track, config)?;
 //! chat.append(&Message { text: "hello".to_string() })?;
 //! # Ok(())
 //! # }
@@ -54,24 +53,47 @@
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use hang::catalog::{JsonConfig, Mode};
+use hang::catalog::{Compression, JsonConfig, Mode};
 
 use crate::catalog::Rendition;
 use crate::catalog::hang::CatalogExt;
 
-fn json_compression(entry: &JsonConfig) -> crate::Result<moq_json::Compression> {
-	Ok(if crate::compression(entry.compression.as_ref())? {
-		moq_json::Compression::Deflate
-	} else {
-		moq_json::Compression::None
-	})
+/// Everything a JSON track declares about itself, beyond its mode and name.
+///
+/// Start from [`default`](Default::default) and chain the setters. The mode is not in here: it is
+/// fixed by which producer you create.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct Config {
+	/// DEFLATE-compress the track's frames, advertised as
+	/// [`Compression::Deflate`].
+	///
+	/// The catalog flag is what a consumer reads, so the track name needs no `.z` suffix.
+	pub compression: bool,
+
+	/// An optional identifier for the shape of each value, typically a JSON Schema URL.
+	pub schema: Option<String>,
 }
 
-fn require_mode(entry: &JsonConfig, expected: Mode) -> crate::Result<()> {
-	if entry.mode == expected {
-		Ok(())
-	} else {
-		Err(crate::Error::UnsupportedMode(entry.mode.to_string()))
+impl Config {
+	/// Set [`compression`](Self::compression) (a builder, since the struct is `#[non_exhaustive]`).
+	pub fn with_compression(mut self, compression: bool) -> Self {
+		self.compression = compression;
+		self
+	}
+
+	/// Set [`schema`](Self::schema) (a builder, since the struct is `#[non_exhaustive]`).
+	pub fn with_schema(mut self, schema: impl Into<String>) -> Self {
+		self.schema = Some(schema.into());
+		self
+	}
+
+	/// The catalog entry describing a track published under this config in `mode`.
+	pub(crate) fn entry(&self, mode: Mode) -> JsonConfig {
+		let mut entry = JsonConfig::new(mode);
+		entry.compression = self.compression.then_some(Compression::Deflate);
+		entry.schema = self.schema.clone();
+		entry
 	}
 }
 
@@ -88,13 +110,14 @@ impl<T: Serialize, E: CatalogExt> Snapshot<T, E> {
 	pub(crate) fn new(
 		track: moq_net::track::Producer,
 		mut rendition: Rendition<E, JsonConfig>,
-		entry: JsonConfig,
+		config: &Config,
 	) -> crate::Result<Self> {
-		require_mode(&entry, Mode::Snapshot)?;
 		let mut json = moq_json::snapshot::Config::default();
-		json.compression = json_compression(&entry)?;
+		if config.compression {
+			json.compression = moq_json::Compression::Deflate;
+		}
 		let inner = moq_json::snapshot::Producer::new(track, json);
-		rendition.set(entry)?;
+		rendition.set(config.entry(Mode::Snapshot))?;
 		Ok(Self { inner, rendition })
 	}
 
@@ -141,13 +164,14 @@ impl<T: Serialize, E: CatalogExt> Stream<T, E> {
 	pub(crate) fn new(
 		track: moq_net::track::Producer,
 		mut rendition: Rendition<E, JsonConfig>,
-		entry: JsonConfig,
+		config: &Config,
 	) -> crate::Result<Self> {
-		require_mode(&entry, Mode::Stream)?;
 		let mut json = moq_json::stream::Config::default();
-		json.compression = json_compression(&entry)?;
+		if config.compression {
+			json.compression = moq_json::Compression::Deflate;
+		}
 		let inner = moq_json::stream::Producer::new(track, json);
-		rendition.set(entry)?;
+		rendition.set(config.entry(Mode::Stream))?;
 		Ok(Self {
 			inner,
 			name: rendition.name().to_string(),
@@ -222,17 +246,21 @@ impl<T: DeserializeOwned> Consumer<T> {
 	/// Errors if the entry declares a mode or compression this build doesn't implement, which is a
 	/// track a consumer must skip rather than guess at.
 	pub fn from_track(track: moq_net::track::Subscriber, config: &JsonConfig) -> crate::Result<Self> {
-		let compression = json_compression(config)?;
+		let compression = crate::compression(config.compression.as_ref())?;
 
 		let inner = match &config.mode {
 			Mode::Snapshot => {
 				let mut json = moq_json::snapshot::consumer::Config::default();
-				json.compression = compression;
+				if compression {
+					json.compression = moq_json::Compression::Deflate;
+				}
 				Inner::Snapshot(moq_json::snapshot::Consumer::new(track, json))
 			}
 			Mode::Stream => {
 				let mut json = moq_json::stream::Config::default();
-				json.compression = compression;
+				if compression {
+					json.compression = moq_json::Compression::Deflate;
+				}
 				Inner::Stream(moq_json::stream::Consumer::new(track, json))
 			}
 			other => return Err(crate::Error::UnsupportedMode(other.to_string())),
@@ -291,7 +319,6 @@ impl crate::catalog::Entry<'_, JsonConfig> {
 mod test {
 	use std::task::Poll;
 
-	use hang::catalog::Compression;
 	use serde_json::{Value, json};
 
 	use super::*;
@@ -329,25 +356,11 @@ mod test {
 		out
 	}
 
-	fn stream() -> JsonConfig {
-		JsonConfig::new(Mode::Stream)
-	}
-
-	fn snapshot() -> JsonConfig {
-		JsonConfig::new(Mode::Snapshot)
-	}
-
-	fn stream_z() -> JsonConfig {
-		let mut entry = JsonConfig::new(Mode::Stream);
-		entry.compression = Some(Compression::Deflate);
-		entry
-	}
-
 	#[test]
 	fn a_stream_track_roundtrips() {
 		let (mut broadcast, catalog) = catalog();
 		let mut chat = catalog
-			.json_stream::<Value>(track(&mut broadcast, "chat"), stream_z())
+			.json_stream::<Value>(track(&mut broadcast, "chat"), Config::default().with_compression(true))
 			.unwrap();
 
 		let track = chat.consume();
@@ -369,7 +382,7 @@ mod test {
 	fn a_snapshot_track_roundtrips() {
 		let (mut broadcast, catalog) = catalog();
 		let mut status = catalog
-			.json_snapshot::<Value>(track(&mut broadcast, "status"), snapshot())
+			.json_snapshot::<Value>(track(&mut broadcast, "status"), Config::default())
 			.unwrap();
 
 		let track = status.consume();
@@ -388,11 +401,12 @@ mod test {
 	fn the_entry_describes_how_to_read_the_track() {
 		let (mut broadcast, catalog) = catalog();
 		let _chat = catalog
-			.json_stream::<Value>(track(&mut broadcast, "chat"), {
-				let mut entry = stream_z();
-				entry.schema = Some("https://example.com/chat.schema.json".into());
-				entry
-			})
+			.json_stream::<Value>(
+				track(&mut broadcast, "chat"),
+				Config::default()
+					.with_compression(true)
+					.with_schema("https://example.com/chat.schema.json"),
+			)
 			.unwrap();
 
 		let entry = entry(&catalog, "chat");
@@ -407,7 +421,7 @@ mod test {
 	fn dropping_the_producer_retires_the_entry() {
 		let (mut broadcast, catalog) = catalog();
 		let chat = catalog
-			.json_stream::<Value>(track(&mut broadcast, "chat"), stream())
+			.json_stream::<Value>(track(&mut broadcast, "chat"), Config::default())
 			.unwrap();
 		assert!(catalog.snapshot().json.tracks.contains_key("chat"));
 
@@ -424,7 +438,7 @@ mod test {
 	fn finishing_retires_the_entry_too() {
 		let (mut broadcast, catalog) = catalog();
 		let chat = catalog
-			.json_stream::<Value>(track(&mut broadcast, "chat"), stream())
+			.json_stream::<Value>(track(&mut broadcast, "chat"), Config::default())
 			.unwrap();
 		assert!(catalog.snapshot().json.tracks.contains_key("chat"));
 
@@ -448,7 +462,7 @@ mod test {
 
 		// Nothing local holds the track name, so `create_track` alone would have let this through.
 		assert!(matches!(
-			catalog.json_stream::<Value>(track(&mut broadcast, "chat"), stream()),
+			catalog.json_stream::<Value>(track(&mut broadcast, "chat"), Config::default()),
 			Err(crate::Error::Hang(hang::Error::Duplicate(_)))
 		));
 		assert_eq!(catalog.snapshot().json.tracks.get("chat"), Some(&existing));
@@ -460,10 +474,10 @@ mod test {
 	fn the_catalog_enumerates_its_tracks() {
 		let (mut broadcast, catalog) = catalog();
 		let _chat = catalog
-			.json_stream::<Value>(track(&mut broadcast, "chat"), stream())
+			.json_stream::<Value>(track(&mut broadcast, "chat"), Config::default())
 			.unwrap();
 		let _status = catalog
-			.json_snapshot::<Value>(track(&mut broadcast, "status"), snapshot())
+			.json_snapshot::<Value>(track(&mut broadcast, "status"), Config::default())
 			.unwrap();
 
 		let snapshot = catalog.snapshot();
@@ -488,7 +502,7 @@ mod test {
 		let source = crate::source::announced(&broadcast.consume());
 
 		let mut chat = catalog
-			.json_stream::<Value>(track(&mut broadcast, "chat"), stream())
+			.json_stream::<Value>(track(&mut broadcast, "chat"), Config::default())
 			.unwrap();
 		chat.append(&json!({ "text": "hello" })).unwrap();
 
@@ -520,7 +534,7 @@ mod test {
 
 		let (mut broadcast, catalog) = catalog();
 		let mut chat = catalog
-			.json_stream::<Record>(track(&mut broadcast, "chat"), stream())
+			.json_stream::<Record>(track(&mut broadcast, "chat"), Config::default())
 			.unwrap();
 		let mut track = chat.consume();
 
@@ -556,19 +570,6 @@ mod test {
 		assert!(matches!(
 			Consumer::<Value>::from_track(track.subscribe(None), &config),
 			Err(crate::Error::UnsupportedCompression(_))
-		));
-	}
-
-	#[test]
-	fn a_mismatched_mode_is_refused() {
-		let (mut broadcast, catalog) = catalog();
-		assert!(matches!(
-			catalog.json_stream::<Value>(track(&mut broadcast, "chat"), snapshot()),
-			Err(crate::Error::UnsupportedMode(_))
-		));
-		assert!(matches!(
-			catalog.json_snapshot::<Value>(track(&mut broadcast, "status"), stream()),
-			Err(crate::Error::UnsupportedMode(_))
 		));
 	}
 }

@@ -2,6 +2,7 @@ import * as z from "zod/mini";
 import { CompressionSchema } from "./compression";
 import { ModeSchema } from "./mode";
 import { RelativeBroadcastSchema } from "./path";
+import { TimelineSchema } from "./timeline";
 
 /**
  * Schema for a single JSON track: application data published as a live JSON document or log.
@@ -18,7 +19,7 @@ export const JsonConfigSchema = z.looseObject({
 	// If unset, the track lives in the same broadcast as the catalog.
 	broadcast: z.optional(RelativeBroadcastSchema),
 
-	// Whether the track is a latest-value document, an append log, or a bounded window. Always stated.
+	// Whether the track is a latest-value document or an append log. Always stated.
 	mode: ModeSchema,
 
 	// The compression applied to each frame, or absent when they are plaintext.
@@ -27,6 +28,9 @@ export const JsonConfigSchema = z.looseObject({
 	// An optional identifier for the shape of each value, typically a JSON Schema URL.
 	// Purely descriptive: a consumer that doesn't recognize it can still read the track.
 	schema: z.optional(z.string()),
+
+	// The companion timeline track indexing this track's groups, if the publisher offers one.
+	timeline: z.optional(TimelineSchema),
 });
 
 /**

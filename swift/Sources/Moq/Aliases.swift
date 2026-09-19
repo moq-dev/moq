@@ -95,9 +95,6 @@ public typealias Backoff = MoqFFI.MoqBackoff
 /// A connection lifecycle transition reported by `Session.status()`.
 public typealias ConnectionStatus = MoqFFI.MoqConnectionStatus
 
-/// How a JSON track compresses its frames.
-public typealias Compression = MoqFFI.MoqCompression
-
 /// The error thrown by every throwing call in this package. Already conforms to
 /// `Swift.Error` and `LocalizedError`; see `Errors.swift` for conveniences.
 public typealias MoqError = MoqFFI.MoqError

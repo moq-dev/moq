@@ -2,6 +2,7 @@ import * as z from "zod/mini";
 import { CompressionSchema } from "./compression";
 import { ModeSchema } from "./mode";
 import { RelativeBroadcastSchema } from "./path";
+import { TimelineSchema } from "./timeline";
 
 /**
  * Schema for a single binary track: application data published as opaque payloads.
@@ -19,7 +20,7 @@ export const BinaryConfigSchema = z.looseObject({
 	// If unset, the track lives in the same broadcast as the catalog.
 	broadcast: z.optional(RelativeBroadcastSchema),
 
-	// Whether the track is a latest-value blob, an append log, or a bounded window. Always stated.
+	// Whether the track is a latest-value blob or an append log. Always stated.
 	mode: ModeSchema,
 
 	// The compression applied to each frame, or absent when they are written through untouched.
@@ -28,6 +29,9 @@ export const BinaryConfigSchema = z.looseObject({
 	// An optional media type for each payload (e.g. "image/jpeg"). Purely descriptive:
 	// a consumer that doesn't recognize it can still read the track.
 	mime: z.optional(z.string()),
+
+	// The companion timeline track indexing this track's groups, if the publisher offers one.
+	timeline: z.optional(TimelineSchema),
 });
 
 /**

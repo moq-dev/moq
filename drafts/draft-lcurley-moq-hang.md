@@ -388,6 +388,7 @@ type JsonSchema = {
   "compression": Compression | undefined,
   "schema": string | undefined,
   "broadcast": string | undefined,
+  "timeline": TimelineSchema | undefined,
 }
 ~~~
 
@@ -401,6 +402,7 @@ type BinarySchema = {
   "compression": Compression | undefined,
   "mime": string | undefined,
   "broadcast": string | undefined,
+  "timeline": TimelineSchema | undefined,
 }
 ~~~
 
@@ -409,7 +411,7 @@ It is descriptive, the same as `schema` above.
 
 ### mode {#field-mode}
 ~~~
-type Mode = "snapshot" | "stream" | "window"
+type Mode = "snapshot" | "stream"
 ~~~
 
 The `mode` field says how a track's groups compose its frames into what a consumer sees.
@@ -441,11 +443,6 @@ A consumer that has not kept up, or that subscribes later, then cannot read the 
 That is the intended behaviour, since a partial log presented as a whole one is exactly what this mode exists to prevent, and under compression ({{compression}}) the retained frames are undecodable anyway without the evicted prefix as context.
 A publisher SHOULD therefore keep a `stream` track's log within what its groups retain, and split anything unbounded across successive tracks; a consumer that needs the whole log SHOULD subscribe before the publisher exceeds that.
 
-A `window` track is a bounded run of records: the publisher appends to the back and drops from the front, and a reader can join at any point.
-The first frame of every group restates the retained suffix; later frames are positional push and pop ops against that header.
-A publisher MAY roll a group for compression, and a header that restates records a reader already has yields nothing, so group boundaries are not part of the application's event stream.
-A reader that kept up sees pushes and pops; one that falls a group behind learns from the header which records it will never get, rather than silently missing them.
-
 ### compression {#field-compression}
 ~~~
 type Compression = "deflate"
@@ -456,10 +453,11 @@ If absent, the frames are uncompressed.
 A consumer MUST ignore a track whose `compression` it does not recognize, since it cannot decode the frames.
 
 The `deflate` value is the group-scoped DEFLATE of {{compression}}.
-A `snapshot` group covers a single value (plus any deltas), so its window spans that group alone; a `stream` group's frames compress against the earlier ones in the log; a `window` group compresses its header and ops the same way.
+A `snapshot` group covers a single value (plus any deltas), so its window spans that group alone; a `stream` group's frames compress against the earlier ones in the log.
 
-### broadcast {#data-shared}
+### broadcast and timeline {#data-shared}
 The `broadcast` field carries the same meaning here as it does for a media rendition ({{field-broadcast}}).
+The `timeline` field advertises a companion timeline track indexing this track's groups, with the same `track` / `timescale` / `durationMax` fields as the catalog's root `archive` entry ({{archive-catalog}}).
 
 ## Binary Fields {#binary}
 A decoder config field carrying raw bytes, notably `description` (an `AllowSharedBufferSource` in WebCodecs), is carried in the catalog as a hex string ({{!RFC4648, Section 8}}).
@@ -1084,8 +1082,6 @@ A publisher MAY estimate an unknown final duration from the frame cadence, but M
 - Replaced the catalog root `timeline` field with `archive`, carrying the timeline track plus optional `replay`, `store`, and recording `version`.
 - A marker group of one empty frame declares a discontinuity. Empty groups mean nothing. Timestamps only move forward; a group below the live edge is malformed. A delivered sequence hole is a playhead event unless contiguous within 1 ms.
 - Replaced the archive timeline `wall` field with a root `clock` section (`wall` plus `timescale`): one fixed broadcast mapping every track and the archive index convert into, independent of any archive. Zero timescales and walls past the JSON-safe integer range are refused.
-- Removed the unused per-track `timeline` field from `json` and `binary` catalog entries.
-- Added `window` as a data-track `mode`.
 
 # Acknowledgments
 {:numbered="false"}

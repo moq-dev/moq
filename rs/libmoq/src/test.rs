@@ -1657,7 +1657,7 @@ fn json_snapshot_publish_consume() {
 	let track_name = b"meta";
 	let config = moq_json_snapshot_config {
 		delta_ratio: 8,
-		compression: moq_compression::MOQ_COMPRESSION_DEFLATE as u32,
+		compression: true,
 	};
 	let producer = id(unsafe {
 		moq_publish_json_snapshot(
@@ -1721,9 +1721,7 @@ fn json_stream_publish_consume() {
 	let broadcast = publish_broadcast(origin, path);
 
 	let track_name = b"events";
-	let config = moq_json_stream_config {
-		compression: moq_compression::MOQ_COMPRESSION_DEFLATE as u32,
-	};
+	let config = moq_json_stream_config { compression: true };
 	let producer = id(unsafe {
 		moq_publish_json_stream(
 			broadcast,

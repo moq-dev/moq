@@ -605,11 +605,7 @@ mod tests {
 			source.announce(origin::Route::default()).expect("announce");
 			let name = traffic_track(&Tier::default(), Role::Publisher, false);
 			let track = source.create_track(name, None).expect("create track");
-			let config = {
-				let mut c = moq_json::snapshot::Config::default();
-				c.delta_ratio = 0;
-				c
-			};
+			let config = moq_json::snapshot::Config::default().with_delta_ratio(0);
 			Self {
 				traffic: moq_json::snapshot::Producer::new(track.clone(), config),
 				track,

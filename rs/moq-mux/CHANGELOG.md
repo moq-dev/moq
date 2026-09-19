@@ -9,10 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- [**breaking**] `catalog::Producer::json_snapshot` / `json_stream` / `binary_snapshot` /
-  `binary_stream` take the hang catalog entry (`JsonConfig` / `BinaryConfig`) and refuse an
-  entry whose `mode` disagrees. `json::Config` and `binary::Config` are gone.
-
 - [**breaking**] `catalog::Producer::lock` is now `modify` and returns a `Result`, refusing a
   finished catalog. A guard that fails to publish on drop aborts the catalog tracks with the error
   instead of logging a warning, so consumers and the next `modify` both see it. `Guard::commit` is

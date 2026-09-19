@@ -65,7 +65,6 @@ test("an unrecognized mode or compression survives verbatim", () => {
 test("the known modes and compressions are recognized", () => {
 	expect(modeSupported("snapshot")).toBe(true);
 	expect(modeSupported("stream")).toBe(true);
-	expect(modeSupported("window")).toBe(true);
 	expect(compressionSupported("deflate")).toBe(true);
 });
 

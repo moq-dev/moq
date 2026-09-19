@@ -363,8 +363,8 @@ async def test_fetch_group_and_serve_dynamic_miss():
 
 async def test_json_snapshot_roundtrip():
     broadcast = moq.BroadcastProducer()
-    producer = broadcast.publish_json_snapshot("status", compression=moq.Compression.DEFLATE)
-    consumer = await broadcast.consume().subscribe_json_snapshot("status", compression=moq.Compression.DEFLATE)
+    producer = broadcast.publish_json_snapshot("status", compression=True)
+    consumer = await broadcast.consume().subscribe_json_snapshot("status", compression=True)
 
     producer.update({"state": "live", "viewers": 1})
     value = await asyncio.wait_for(anext(consumer), timeout=5.0)

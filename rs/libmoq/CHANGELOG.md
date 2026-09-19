@@ -26,9 +26,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- [**breaking**] JSON `compression` is a `moq_compression` discriminant (`MOQ_COMPRESSION_NONE` /
-  `MOQ_COMPRESSION_DEFLATE`) stored as `u32`, not a bool.
-
 - Bare-integer durations are microseconds: `max_age_us` on decoder outputs,
   track info, subscriptions, and `moq_consume_video` / `moq_consume_audio`;
   reconnect backoff is `backoff_initial_us` / `backoff_max_us` /

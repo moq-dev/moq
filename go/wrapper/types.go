@@ -63,8 +63,6 @@ type (
 	VideoFormat = ffi.MoqVideoFormat
 	// ContainerFormat is a container that publishes its own tracks.
 	ContainerFormat = ffi.MoqContainerFormat
-	// Compression is how a JSON track compresses its frames.
-	Compression = ffi.MoqCompression
 	// VideoProperties holds catalog properties shared by every video rendition; nil fields clear those properties.
 	VideoProperties = ffi.MoqVideoProperties
 	// VideoCodec identifies a published video track's codec: H.264 or H.265.
@@ -126,14 +124,6 @@ const (
 	AudioFormatFlac = ffi.MoqAudioFormatFlac
 	// AudioFormatMp3 is MPEG-1/2 Audio Layer III.
 	AudioFormatMp3 = ffi.MoqAudioFormatMp3
-)
-
-// Compression values: how a JSON track compresses its frames.
-const (
-	// CompressionNone is uncompressed JSON.
-	CompressionNone = ffi.MoqCompressionNone
-	// CompressionDeflate is group-scoped raw DEFLATE.
-	CompressionDeflate = ffi.MoqCompressionDeflate
 )
 
 // VideoFormat values: a single video codec an importer can parse. The two H.26x pairs

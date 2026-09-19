@@ -14,10 +14,11 @@ JSON over [`moq-net`](/lib/rs/moq-net) tracks, in three modes:
 - **stream**: lossless append-log in a single group.
 - **window**: a bounded run of records a reader can join at any point.
 
-Each mode has one `Config`. The track-owning pair is `producer::Config` /
-`consumer::Config` where those differ from the codec options. Compression is a
-shared `Compression` enum (`None` or `Deflate`), not a bool: both sides set the
-same field.
+On snapshot and stream, `Config` is the codec options. The track-owning pair is
+`producer::Config` / `consumer::Config`. Compression is a shared `Compression`
+enum (`None` or `Deflate`), not a bool: both sides set the same field. Window
+still uses `ProducerConfig` / `ConsumerConfig` and a boolean `compression`
+flag.
 
 ```rust
 let mut config = moq_json::snapshot::Config::default();

@@ -97,20 +97,19 @@ document would silently discard everything but the last payload:
 
 - `snapshot` is lossy. Each group supersedes the previous one, so a consumer reads only the newest. A JSON track may follow the first frame with merge-patch deltas.
 - `stream` is an ordered log: one payload per frame, all in a single group that is never rolled. Retention is still bounded by the group cache, and a consumer that falls behind fails the read rather than silently resuming mid-log.
-- `window` is a bounded run of records: append at the back, drop from the front, join at any point. Each group restates the retained suffix so a late joiner and a reader that kept up see the same window.
 
 The rest is descriptive: `compression` (`deflate`, the same group-scoped
 `deflate-raw` the catalog uses), `schema` on a JSON track, `mime` on a binary
-one, plus the `broadcast` field a media rendition takes. A
+one, plus the `broadcast` and `timeline` fields a media rendition takes. A
 consumer that doesn't recognize a `mode` or `compression` ignores that track and
 round-trips it verbatim.
 
-In Rust the catalog owns the lifetime: `catalog.json_stream(track, entry)` (or
-`json_snapshot` / `binary_snapshot` / `binary_stream`) takes the hang catalog
-entry, writes it, and retracts it when the producer drops, and
-`catalog.json_track(name)` returns an entry that subscribes itself. In the
-browser, read the entry from `catalog.json.tracks`, subscribe by name, and hand
-the track to `@moq/json` or `@moq/binary`.
+In Rust the catalog owns the lifetime: `catalog.json_stream(track, config)` (or
+`json_snapshot` / `binary_snapshot` / `binary_stream`) writes the entry and
+retracts it when the producer drops, and `catalog.json_track(name)` returns an
+entry that subscribes itself. In the browser, read the entry from
+`catalog.json.tracks`, subscribe by name, and hand the track to `@moq/json` or
+`@moq/binary`.
 
 ## Container
 

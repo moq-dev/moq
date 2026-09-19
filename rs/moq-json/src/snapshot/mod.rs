@@ -59,10 +59,7 @@ mod test {
 
 	/// An uncompressed config with the given delta ratio.
 	fn cfg(delta_ratio: u32) -> Config {
-		Config {
-			delta_ratio,
-			compression: Compression::None,
-		}
+		Config::default().with_delta_ratio(delta_ratio)
 	}
 
 	/// A DEFLATE-compressed config with the given delta ratio.

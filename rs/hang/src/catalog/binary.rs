@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, btree_map};
 
 use serde::{Deserialize, Serialize};
 
-use crate::catalog::{Compression, Mode};
+use crate::catalog::{Compression, Mode, Timeline};
 
 /// The binary tracks a broadcast publishes, keyed by track name.
 ///
@@ -72,8 +72,7 @@ pub struct BinaryConfig {
 	#[serde(default)]
 	pub broadcast: Option<moq_net::PathRelativeOwned>,
 
-	/// Whether the track is a latest-value blob, an append log, or a bounded window. Always stated:
-	/// see [`Mode`].
+	/// Whether the track is a latest-value blob or an append log. Always stated: see [`Mode`].
 	#[serde_as(as = "serde_with::DisplayFromStr")]
 	pub mode: Mode,
 
@@ -86,6 +85,10 @@ pub struct BinaryConfig {
 	/// that doesn't recognize it can still read the track.
 	#[serde(default)]
 	pub mime: Option<String>,
+
+	/// The companion timeline track indexing this track's groups, if the publisher offers one.
+	#[serde(default)]
+	pub timeline: Option<Timeline>,
 
 	/// Fields this build doesn't recognize, kept so the entry round-trips.
 	///
@@ -105,6 +108,7 @@ impl BinaryConfig {
 			mode,
 			compression: None,
 			mime: None,
+			timeline: None,
 			extra: Default::default(),
 		}
 	}

@@ -31,9 +31,6 @@ from moq_ffi import (
     MoqCatalog as Catalog,
 )
 from moq_ffi import (
-    MoqCompression as Compression,
-)
-from moq_ffi import (
     MoqConnectionStats as ConnectionStats,
 )
 from moq_ffi import (
@@ -131,7 +128,6 @@ __all__ = [
     "AudioFrame",
     "Backoff",
     "Catalog",
-    "Compression",
     "ConnectionStats",
     "ConnectionStatus",
     "Container",

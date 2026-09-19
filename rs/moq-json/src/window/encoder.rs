@@ -8,7 +8,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::op::{Header, Op};
-use crate::{Compression, Error, Result};
+use crate::{Error, Result};
 
 /// Frames (header included) in one group before a new group is forced, matching
 /// [`snapshot`](crate::snapshot)'s cap. Kept well below moq-net's per-group frame cap so a late
@@ -19,13 +19,13 @@ pub(super) const MAX_GROUP_FRAMES: usize = 1024;
 /// Largest index represented exactly by both Rust and JavaScript implementations.
 pub(super) const MAX_INDEX: u64 = (1 << 53) - 1;
 
-/// Codec options for an [`Encoder`], and so for the [`Producer`](super::Producer) wrapping one.
+/// Configuration for an [`Encoder`] and the [`Producer`](super::Producer) wrapping one.
 ///
 /// Build from [`Default`] and override fields (the struct is `#[non_exhaustive]`, so new options
-/// stay additive).
+/// stay additive), or chain the `with_*` setters.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct Config {
+pub struct ProducerConfig {
 	/// How much the ops in a group may cost before a fresh group is emitted.
 	///
 	/// A new group opens once the pushes and pops *already written* exceed `op_ratio` times the
@@ -43,9 +43,9 @@ pub struct Config {
 	/// Compress each group as one sync-flushed DEFLATE stream, so every op reuses the header and the
 	/// ops before it as context.
 	///
-	/// [`Compression::None`] (the default) emits plaintext JSON frames. A [`Decoder`](super::Decoder)
-	/// reading them must set the same [`compression`](Self::compression).
-	pub compression: Compression,
+	/// `false` (the default) emits plaintext JSON frames. A [`Decoder`](super::Decoder) reading them
+	/// must set [`ConsumerConfig::compression`](super::ConsumerConfig::compression) to match.
+	pub compression: bool,
 
 	/// Maximum records retained and repeated in a group checkpoint.
 	///
@@ -55,13 +55,34 @@ pub struct Config {
 	pub checkpoint_records: Option<usize>,
 }
 
-impl Default for Config {
+impl Default for ProducerConfig {
 	fn default() -> Self {
 		Self {
 			op_ratio: 8,
-			compression: Compression::None,
+			compression: false,
 			checkpoint_records: None,
 		}
+	}
+}
+
+impl ProducerConfig {
+	/// Set [`op_ratio`](Self::op_ratio) (a builder, since the struct is `#[non_exhaustive]`).
+	pub fn with_op_ratio(mut self, op_ratio: u32) -> Self {
+		self.op_ratio = op_ratio;
+		self
+	}
+
+	/// Set [`compression`](Self::compression) (a builder, since the struct is `#[non_exhaustive]`).
+	pub fn with_compression(mut self, compression: bool) -> Self {
+		self.compression = compression;
+		self
+	}
+
+	/// Set [`checkpoint_records`](Self::checkpoint_records). Must be at least one.
+	pub fn with_checkpoint_records(mut self, checkpoint_records: usize) -> Self {
+		assert!(checkpoint_records > 0, "checkpoint_records must be positive");
+		self.checkpoint_records = Some(checkpoint_records);
+		self
 	}
 }
 
@@ -69,7 +90,7 @@ impl Default for Config {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Encoded {
-	/// The frame payload, DEFLATE-compressed when [`Config::compression`] is [`Compression::Deflate`].
+	/// The frame payload, DEFLATE-compressed when [`ProducerConfig::compression`] is set.
 	pub payload: Bytes,
 
 	/// Whether this frame is a group header, which must open a new group.
@@ -132,7 +153,7 @@ impl<T> Drop for Pending<'_, T> {
 /// [`keyframe`](Encoded::keyframe) set must open a new group: both the positional indices and the
 /// group-scoped DEFLATE window depend on it.
 pub struct Encoder<T> {
-	config: Config,
+	config: ProducerConfig,
 
 	/// The decodable checkpoint suffix. With no checkpoint bound this is the complete window.
 	window: VecDeque<Value>,
@@ -164,7 +185,7 @@ pub struct Encoder<T> {
 
 impl<T> Encoder<T> {
 	/// Create an encoder with an empty window, so the first edit opens a group.
-	pub fn new(config: Config) -> Self {
+	pub fn new(config: ProducerConfig) -> Self {
 		assert!(
 			config.checkpoint_records != Some(0),
 			"checkpoint_records must be positive"
@@ -185,7 +206,7 @@ impl<T> Encoder<T> {
 
 	/// The retained checkpoint suffix, oldest first.
 	///
-	/// This is the complete window unless [`Config::checkpoint_records`] is set.
+	/// This is the complete window unless [`ProducerConfig::checkpoint_records`] is set.
 	pub fn window(&self) -> Vec<Value> {
 		self.window.iter().cloned().collect()
 	}
@@ -276,7 +297,7 @@ impl<T> Encoder<T> {
 
 	/// Serialize a bounded suffix before mutably borrowing the compression state.
 	fn header<'a>(
-		config: &Config,
+		config: &ProducerConfig,
 		offset: u64,
 		start: u64,
 		len: usize,
@@ -304,12 +325,12 @@ impl<T> Encoder<T> {
 		// Open a fresh per-group encoder (cold window) and compress the header as frame 0, recording
 		// its wire size as the op budget's anchor.
 		let (payload, flate) = match self.config.compression {
-			Compression::Deflate => {
+			true => {
 				let mut flate = moq_flate::Encoder::new();
 				let payload = flate.frame(&bytes);
 				(payload, Some(flate))
 			}
-			Compression::None => (Bytes::from(bytes), None),
+			false => (Bytes::from(bytes), None),
 		};
 		if payload.len() as u64 > moq_net::group::MAX_CACHE_BYTES {
 			return Err(Error::Json("window header exceeds the group cache limit".into()));
@@ -436,10 +457,7 @@ mod test {
 
 	#[test]
 	fn an_op_that_would_evict_the_header_rolls_first() {
-		let mut encoder = Encoder::<String>::new(Config {
-			op_ratio: u32::MAX,
-			..Default::default()
-		});
+		let mut encoder = Encoder::<String>::new(ProducerConfig::default().with_op_ratio(u32::MAX));
 		let first = "a".repeat(16 * 1024 * 1024);
 		let next = "b".repeat(15 * 1024 * 1024);
 
@@ -463,7 +481,7 @@ mod test {
 
 	#[test]
 	fn an_uncommitted_edit_leaves_the_window_unchanged() {
-		let mut encoder = Encoder::<u64>::new(Config::default());
+		let mut encoder = Encoder::<u64>::new(ProducerConfig::default());
 
 		drop(encoder.push(&1).unwrap());
 		assert!(encoder.window().is_empty());
@@ -479,7 +497,7 @@ mod test {
 
 	#[test]
 	fn a_header_larger_than_the_group_cache_is_rejected() {
-		let mut encoder = Encoder::<String>::new(Config::default());
+		let mut encoder = Encoder::<String>::new(ProducerConfig::default());
 		let record = "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize);
 
 		let err = encoder.push(&record).err().expect("oversized header should fail");

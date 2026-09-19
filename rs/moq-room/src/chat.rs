@@ -75,11 +75,10 @@ impl Publisher {
 	/// Publish a chat window over an existing track.
 	pub fn new(track: track::Producer) -> Self {
 		Self {
-			producer: moq_json::window::Producer::new(track, {
-				let mut config = moq_json::window::Config::default();
-				config.op_ratio = 0;
-				config
-			}),
+			producer: moq_json::window::Producer::new(
+				track,
+				moq_json::window::ProducerConfig::default().with_op_ratio(0),
+			),
 			expires: VecDeque::new(),
 			deadline: Deadline::new(),
 		}

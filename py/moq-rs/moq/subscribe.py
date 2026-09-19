@@ -26,7 +26,6 @@ from .types import (
     AudioDecoderOutput,
     AudioFrame,
     Catalog,
-    Compression,
     Container,
     Datagram,
     FetchGroupOptions,
@@ -398,9 +397,7 @@ class BroadcastConsumer:
         """
         return TrackConsumer(await self._inner.subscribe_track(name, subscription))
 
-    async def subscribe_json_snapshot(
-        self, name: str, *, compression: Compression = Compression.NONE
-    ) -> JsonSnapshotConsumer:
+    async def subscribe_json_snapshot(self, name: str, *, compression: bool = False) -> JsonSnapshotConsumer:
         """Subscribe to a JSON snapshot track (lossy latest-value).
 
         Yields parsed Python objects. Pass the same ``compression`` the producer used.
@@ -409,9 +406,7 @@ class BroadcastConsumer:
         config = MoqJsonSnapshotConfig(compression=compression)
         return JsonSnapshotConsumer(await self._inner.subscribe_json_snapshot(name, config))
 
-    async def subscribe_json_stream(
-        self, name: str, *, compression: Compression = Compression.NONE
-    ) -> JsonStreamConsumer:
+    async def subscribe_json_stream(self, name: str, *, compression: bool = False) -> JsonStreamConsumer:
         """Subscribe to a JSON stream track (lossless append-log).
 
         Yields parsed Python objects in order. Pass the same ``compression`` the producer used.

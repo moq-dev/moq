@@ -17,7 +17,7 @@ pub(super) const MAX_DELTA_FRAMES: usize = 256;
 /// Codec options for an [`Encoder`], and so for the [`Producer`](super::Producer) wrapping one.
 ///
 /// Build from [`Default`] and override fields (the struct is `#[non_exhaustive]`, so new
-/// options stay additive).
+/// options stay additive), or chain [`with_delta_ratio`](Self::with_delta_ratio).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Config {
@@ -44,6 +44,14 @@ pub struct Config {
 	/// uncompressed track. A [`Decoder`](super::Decoder) reading them must set the same
 	/// [`compression`](Self::compression).
 	pub compression: Compression,
+}
+
+impl Config {
+	/// Set [`delta_ratio`](Self::delta_ratio) (a builder, since the struct is `#[non_exhaustive]`).
+	pub fn with_delta_ratio(mut self, delta_ratio: u32) -> Self {
+		self.delta_ratio = delta_ratio;
+		self
+	}
 }
 
 impl Default for Config {
@@ -415,10 +423,7 @@ mod test {
 	#[test]
 	fn changes_ride_as_deltas() {
 		let frames = encode(
-			Config {
-				delta_ratio: 100,
-				compression: Compression::None,
-			},
+			Config::default().with_delta_ratio(100),
 			&[
 				json!({ "a": 1, "b": 1 }),
 				json!({ "a": 1, "b": 2 }),
@@ -431,10 +436,7 @@ mod test {
 	#[test]
 	fn deltas_off_forces_a_keyframe_per_change() {
 		let frames = encode(
-			Config {
-				delta_ratio: 0,
-				compression: Compression::None,
-			},
+			Config::default().with_delta_ratio(0),
 			&[json!({ "a": 1 }), json!({ "a": 2 })],
 		);
 		assert_eq!(frames.iter().map(|f| f.0).collect::<Vec<_>>(), vec![true, true]);
@@ -446,10 +448,7 @@ mod test {
 	#[test]
 	fn a_null_field_forces_a_keyframe() {
 		let frames = encode(
-			Config {
-				delta_ratio: 100,
-				compression: Compression::None,
-			},
+			Config::default().with_delta_ratio(100),
 			&[json!({ "a": 1, "b": 1 }), json!({ "a": 1, "b": null })],
 		);
 		assert_eq!(frames.iter().map(|f| f.0).collect::<Vec<_>>(), vec![true, true]);
@@ -459,10 +458,7 @@ mod test {
 	#[test]
 	fn a_non_object_root_forces_a_keyframe() {
 		let frames = encode(
-			Config {
-				delta_ratio: 100,
-				compression: Compression::None,
-			},
+			Config::default().with_delta_ratio(100),
 			&[json!({ "a": 1 }), json!([1, 2, 3])],
 		);
 		assert_eq!(frames.iter().map(|f| f.0).collect::<Vec<_>>(), vec![true, true]);
@@ -471,13 +467,7 @@ mod test {
 	#[test]
 	fn frame_cap_forces_a_keyframe() {
 		let values: Vec<Value> = (0..=MAX_DELTA_FRAMES).map(|n| json!({ "n": n })).collect();
-		let frames = encode(
-			Config {
-				delta_ratio: 1_000_000,
-				compression: Compression::None,
-			},
-			&values,
-		);
+		let frames = encode(Config::default().with_delta_ratio(1_000_000), &values);
 
 		// The snapshot plus MAX_DELTA_FRAMES - 1 deltas fill the group, then the cap rolls it.
 		assert_eq!(frames.len(), MAX_DELTA_FRAMES + 1);
@@ -489,10 +479,7 @@ mod test {
 	/// be a delta against a window and a baseline the new group never carried.
 	#[test]
 	fn reset_forces_the_next_update_to_be_a_keyframe() {
-		let mut encoder = Encoder::<Value>::new(Config {
-			delta_ratio: 100,
-			compression: Compression::None,
-		});
+		let mut encoder = Encoder::<Value>::new(Config::default().with_delta_ratio(100));
 		assert!(commit(&mut encoder, &json!({ "a": 1 })).unwrap().keyframe);
 		assert!(!commit(&mut encoder, &json!({ "a": 2 })).unwrap().keyframe);
 
@@ -505,10 +492,7 @@ mod test {
 	/// and it has to resynchronize on its own: a caller cannot be relied on to remember.
 	#[test]
 	fn an_uncommitted_frame_resynchronizes_the_encoder() {
-		let mut encoder = Encoder::<Value>::new(Config {
-			delta_ratio: 100,
-			compression: Compression::None,
-		});
+		let mut encoder = Encoder::<Value>::new(Config::default().with_delta_ratio(100));
 		commit(&mut encoder, &json!({ "a": 1 })).unwrap();
 
 		// The caller wrote this one and said so, so the next value can still ride as a delta.
@@ -615,10 +599,7 @@ mod test {
 
 	#[test]
 	fn value_tracks_the_baseline() {
-		let mut encoder = Encoder::<Value>::new(Config {
-			delta_ratio: 100,
-			compression: Compression::None,
-		});
+		let mut encoder = Encoder::<Value>::new(Config::default().with_delta_ratio(100));
 		assert_eq!(encoder.value(), None);
 
 		commit(&mut encoder, &json!({ "a": 1, "b": 1 }));

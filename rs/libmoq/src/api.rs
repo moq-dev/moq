@@ -409,28 +409,6 @@ pub struct moq_audio_config {
 	pub label_len: usize,
 }
 
-/// How a JSON track compresses its frames.
-///
-/// Stored as a `u32` on the config structs: C can put any integer there, and matching an
-/// out-of-range discriminant as a Rust enum is UB.
-#[repr(C)]
-#[allow(non_camel_case_types)]
-#[derive(Clone, Copy, Debug)]
-pub enum moq_compression {
-	/// Uncompressed JSON frames.
-	MOQ_COMPRESSION_NONE = 0,
-	/// Group-scoped raw DEFLATE, sync-flushed at each frame boundary.
-	MOQ_COMPRESSION_DEFLATE = 1,
-}
-
-fn json_compression_from_u32(value: u32) -> Result<moq_json::Compression, Error> {
-	Ok(match value {
-		v if v == moq_compression::MOQ_COMPRESSION_NONE as u32 => moq_json::Compression::None,
-		v if v == moq_compression::MOQ_COMPRESSION_DEFLATE as u32 => moq_json::Compression::Deflate,
-		_ => return Err(Error::InvalidCode),
-	})
-}
-
 /// Options for a JSON snapshot track (lossy latest-value mode).
 ///
 /// The same config is passed to a producer and its consumers, but the consumer reads only
@@ -443,16 +421,16 @@ pub struct moq_json_snapshot_config {
 	/// deltas before rolling. Ignored by the consumer.
 	pub delta_ratio: u32,
 
-	/// `moq_compression` discriminant. Must match on the producer and consumer.
-	pub compression: u32,
+	/// DEFLATE-compress each group. Must match on the producer and consumer.
+	pub compression: bool,
 }
 
 /// Options for a JSON stream track (lossless append-log mode).
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_json_stream_config {
-	/// `moq_compression` discriminant. Must match on the producer and consumer.
-	pub compression: u32,
+	/// DEFLATE-compress the group. Must match on the producer and consumer.
+	pub compression: bool,
 }
 
 /// A JSON value delivered by a consumer callback.
@@ -2712,7 +2690,11 @@ pub unsafe extern "C" fn moq_publish_json_snapshot(
 		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
 		let mut producer = moq_json::snapshot::Config::default();
 		producer.delta_ratio = config.delta_ratio;
-		producer.compression = json_compression_from_u32(config.compression)?;
+		producer.compression = if config.compression {
+			moq_json::Compression::Deflate
+		} else {
+			moq_json::Compression::None
+		};
 		State::lock().publish.json_snapshot(broadcast, name, producer)
 	})
 }
@@ -2765,7 +2747,9 @@ pub unsafe extern "C" fn moq_publish_json_stream(
 		let name = unsafe { ffi::parse_str(name, name_len)? };
 		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
 		let mut producer = moq_json::stream::Config::default();
-		producer.compression = json_compression_from_u32(config.compression)?;
+		if config.compression {
+			producer.compression = moq_json::Compression::Deflate;
+		}
 		State::lock().publish.json_stream(broadcast, name, producer)
 	})
 }
@@ -3332,7 +3316,11 @@ pub unsafe extern "C" fn moq_consume_json_snapshot(
 		let name = unsafe { ffi::parse_str(name, name_len)? };
 		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
 		let mut consumer = moq_json::snapshot::consumer::Config::default();
-		consumer.compression = json_compression_from_u32(config.compression)?;
+		consumer.compression = if config.compression {
+			moq_json::Compression::Deflate
+		} else {
+			moq_json::Compression::None
+		};
 		let on_value = unsafe { ffi::OnStatus::new(user_data, on_value) };
 		State::lock().consume.json_snapshot(broadcast, name, consumer, on_value)
 	})
@@ -3363,7 +3351,9 @@ pub unsafe extern "C" fn moq_consume_json_stream(
 		let name = unsafe { ffi::parse_str(name, name_len)? };
 		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
 		let mut consumer = moq_json::stream::Config::default();
-		consumer.compression = json_compression_from_u32(config.compression)?;
+		if config.compression {
+			consumer.compression = moq_json::Compression::Deflate;
+		}
 		let on_value = unsafe { ffi::OnStatus::new(user_data, on_value) };
 		State::lock().consume.json_stream(broadcast, name, consumer, on_value)
 	})

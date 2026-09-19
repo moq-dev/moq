@@ -399,11 +399,7 @@ impl<T: Serialize> TrackPair<T> {
 	}
 
 	fn from_tracks(plain_track: track::Producer, compressed_track: track::Producer) -> Self {
-		let plain_config = {
-			let mut c = moq_json::snapshot::Config::default();
-			c.delta_ratio = 0;
-			c
-		};
+		let plain_config = moq_json::snapshot::Config::default().with_delta_ratio(0);
 		let mut compressed_config = moq_json::snapshot::Config::default();
 		compressed_config.compression = moq_json::Compression::Deflate;
 

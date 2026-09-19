@@ -25,8 +25,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- [**breaking**] JSON `compression` is `MoqCompression` (`None` / `Deflate`) instead of a bool.
-
 - Bare-integer durations are microseconds: `max_age_us` on decoder outputs,
   track info, and subscriptions; `MoqBackoff` is `initial_us` / `max_us` /
   `timeout_us`. `MoqSession::publish()` / `consume()` match `set_publish` /

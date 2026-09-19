@@ -174,8 +174,6 @@ typealias ProtocolError = uniffi.moq.MoqProtocolError
 typealias JsonSnapshotConfig = uniffi.moq.MoqJsonSnapshotConfig
 /** Configures a lossless JSON stream track. */
 typealias JsonStreamConfig = uniffi.moq.MoqJsonStreamConfig
-/** How a JSON track compresses its frames. */
-typealias Compression = uniffi.moq.MoqCompression
 
 // NOTE: a few types are intentionally NOT aliased. `MoqContainer` (sealed) and
 // `MoqException` (sealed) need subtype access (`MoqContainer.Loc`,

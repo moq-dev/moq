@@ -9,10 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- [**breaking**] Drop the unused per-track `timeline` field from `JsonConfig` and `BinaryConfig`.
-  The timeline lives under the root `archive` entry.
-- [**breaking**] Add `Mode::Window` for JSON and binary data tracks.
-
 - [**breaking**] Replace the catalog root `timeline` entry with `archive`. The
   flattened timeline fields (`track`, `timescale`, `durationMax`, `wall`) stay;
   optional `replay`, `store`, and `version` advertise a durable recording.

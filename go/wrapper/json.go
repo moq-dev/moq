@@ -18,8 +18,8 @@ type JSONSnapshotOptions struct {
 	// DeltaRatio controls how aggressively deltas replace full snapshots. Nil uses
 	// [DefaultDeltaRatio]; a pointer to zero disables deltas entirely.
 	DeltaRatio *uint32
-	// Compression is how each group is compressed and must match on the consumer.
-	Compression Compression
+	// Compression enables group-scoped DEFLATE and must match on the consumer.
+	Compression bool
 }
 
 // deltaRatio resolves the configured ratio, falling back to the shared default.
@@ -32,8 +32,8 @@ func (o JSONSnapshotOptions) deltaRatio() uint32 {
 
 // JSONStreamOptions configures publishing a lossless append-log JSON track.
 type JSONStreamOptions struct {
-	// Compression is how the group is compressed and must match on the consumer.
-	Compression Compression
+	// Compression enables group-scoped DEFLATE and must match on the consumer.
+	Compression bool
 }
 
 // JSONSubscribeOptions configures subscribing to either kind of JSON track.
@@ -41,8 +41,8 @@ type JSONStreamOptions struct {
 // Delta encoding is a producer-side choice the consumer reconstructs automatically,
 // so only the compression setting has to match.
 type JSONSubscribeOptions struct {
-	// Compression is how the group is compressed and must match the producer.
-	Compression Compression
+	// Compression enables group-scoped DEFLATE and must match the producer.
+	Compression bool
 }
 
 // JSONSnapshotProducer publishes a JSON value as lossy latest state.

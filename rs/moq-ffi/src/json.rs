@@ -14,25 +14,6 @@ use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::producer::MoqBroadcastProducer;
 
-/// How a JSON track compresses its frames.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]
-pub enum MoqCompression {
-	/// Uncompressed JSON frames.
-	#[default]
-	None,
-	/// Group-scoped raw DEFLATE, sync-flushed at each frame boundary.
-	Deflate,
-}
-
-impl From<MoqCompression> for moq_json::Compression {
-	fn from(compression: MoqCompression) -> Self {
-		match compression {
-			MoqCompression::None => Self::None,
-			MoqCompression::Deflate => Self::Deflate,
-		}
-	}
-}
-
 /// Options for a JSON snapshot track (lossy latest-value mode).
 ///
 /// The same config is passed to both the producer and the consumer, but the consumer reads only
@@ -45,15 +26,24 @@ pub struct MoqJsonSnapshotConfig {
 	#[uniffi(default = 8)]
 	pub delta_ratio: u32,
 
-	/// How each group is compressed. Must match on the producer and consumer.
-	pub compression: MoqCompression,
+	/// DEFLATE-compress each group. Must match on the producer and consumer.
+	#[uniffi(default = false)]
+	pub compression: bool,
+}
+
+fn compression(on: bool) -> moq_json::Compression {
+	if on {
+		moq_json::Compression::Deflate
+	} else {
+		moq_json::Compression::None
+	}
 }
 
 impl From<MoqJsonSnapshotConfig> for moq_json::snapshot::Config {
 	fn from(config: MoqJsonSnapshotConfig) -> Self {
 		let mut out = moq_json::snapshot::Config::default();
 		out.delta_ratio = config.delta_ratio;
-		out.compression = config.compression.into();
+		out.compression = compression(config.compression);
 		out
 	}
 }
@@ -61,7 +51,7 @@ impl From<MoqJsonSnapshotConfig> for moq_json::snapshot::Config {
 impl From<MoqJsonSnapshotConfig> for moq_json::snapshot::consumer::Config {
 	fn from(config: MoqJsonSnapshotConfig) -> Self {
 		let mut out = moq_json::snapshot::consumer::Config::default();
-		out.compression = config.compression.into();
+		out.compression = compression(config.compression);
 		out
 	}
 }
@@ -71,22 +61,21 @@ impl From<MoqJsonSnapshotConfig> for moq_json::snapshot::consumer::Config {
 /// The same config is passed to both the producer and the consumer.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqJsonStreamConfig {
-	/// How the group is compressed. Must match on the producer and consumer.
-	pub compression: MoqCompression,
+	/// DEFLATE-compress the group. Must match on the producer and consumer.
+	#[uniffi(default = false)]
+	pub compression: bool,
 }
 
 impl From<MoqJsonStreamConfig> for moq_json::stream::Config {
 	fn from(config: MoqJsonStreamConfig) -> Self {
 		let mut out = moq_json::stream::Config::default();
-		out.compression = config.compression.into();
+		out.compression = compression(config.compression);
 		out
 	}
 }
 
 #[cfg(test)]
 mod tests {
-	use super::MoqCompression;
-
 	// The `#[uniffi(default = ...)]` attributes have to be literals, so they restate moq-json's
 	// own defaults. Every binding inherits those literals, so a drift here would silently give
 	// each wrapper different behavior than the Rust API.
@@ -97,14 +86,13 @@ mod tests {
 		assert_eq!(
 			snapshot.compression,
 			moq_json::Compression::None,
-			"MoqCompression::None must stay the uncompressed default"
+			"update #[uniffi(default)] on compression"
 		);
 		assert_eq!(
 			moq_json::stream::Config::default().compression,
 			moq_json::Compression::None,
-			"MoqCompression::None must stay the uncompressed default"
+			"update #[uniffi(default)] on MoqJsonStreamConfig::compression"
 		);
-		assert_eq!(MoqCompression::default(), MoqCompression::None);
 	}
 }
 

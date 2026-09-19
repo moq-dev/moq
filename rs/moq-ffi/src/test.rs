@@ -7,7 +7,7 @@ use crate::consumer::MoqFetchGroupOptions;
 use crate::consumer::MoqSubscription;
 use crate::consumer::MoqTrackConsumer;
 use crate::error::MoqError;
-use crate::json::{MoqCompression, MoqJsonSnapshotConfig, MoqJsonStreamConfig};
+use crate::json::{MoqJsonSnapshotConfig, MoqJsonStreamConfig};
 use crate::media::{MoqAudio, MoqAudioFormat, MoqAudioInit, MoqContainer, MoqFrame, MoqVideoFormat, MoqVideoInit};
 use crate::session::{MoqBackoff, MoqConnectionStatus};
 
@@ -596,7 +596,7 @@ async fn json_snapshot_roundtrip() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let config = MoqJsonSnapshotConfig {
 		delta_ratio: 8,
-		compression: MoqCompression::Deflate,
+		compression: true,
 	};
 	let producer = broadcast.publish_json_snapshot("meta".into(), config.clone()).unwrap();
 	let consumer = broadcast
@@ -636,9 +636,7 @@ async fn json_snapshot_roundtrip() {
 #[tokio::test]
 async fn json_stream_roundtrip() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let config = MoqJsonStreamConfig {
-		compression: MoqCompression::Deflate,
-	};
+	let config = MoqJsonStreamConfig { compression: true };
 	let producer = broadcast.publish_json_stream("events".into(), config.clone()).unwrap();
 	let consumer = broadcast
 		.consume()
