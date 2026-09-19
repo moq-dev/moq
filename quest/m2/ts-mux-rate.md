@@ -19,9 +19,11 @@ there.
 ## Plan
 
 - `rs/moq-mux/src/container/ts/catalog.rs`: add `mux_rate: Option<u64>` to
-  `Mpegts` (serialized `muxRate`, bits per second) and include it in
-  `is_empty`. Document it as the rate the PCR clock paces the multiplex at,
-  not a sum of elementary streams.
+  `Mpegts` (serialized `muxRate`, bits per second), mark it with
+  `#[serde(default, skip_serializing_if = "Option::is_none")]`, and include it
+  in `is_empty`. Document it as the rate the PCR clock paces the multiplex at,
+  not a sum of elementary streams. An absent rate stays omitted from the
+  serialized catalog rather than becoming `null`.
 - Import (`rs/moq-mux/src/container/ts/import.rs`): the PCR PID already parses
   its adaptation field. Between two PCRs on that PID, the rate is
   `packets * 188 * 8 / (delta PCR / 27 MHz)`; count every packet of the stream
@@ -29,28 +31,38 @@ there.
   counting. Publish the rate once it is stable across a window (a few seconds
   of PCR intervals within a small tolerance) and republish the catalog only
   when the stable value moves more than 1 % from the published one, so
-  measurement noise never churns the catalog; leave it absent when intervals
-  disagree, which is what a VBR or file-paced source looks like. Reset on a
-  PCR discontinuity.
+  measurement noise never churns the catalog. Model measurement as collecting
+  or published: a full window of disagreeing intervals transitions published
+  back to collecting, republishes the catalog once with `muxRate` omitted, and
+  discards the window; a PCR discontinuity does the same immediately. Publish
+  again only after a fresh stable window. The 1 % threshold applies only to
+  stable-to-stable updates, not clearing an invalid rate. A VBR or file-paced
+  source therefore leaves the field absent.
 - Export (`rs/moq-mux/src/container/ts/export.rs`): the exporter already emits
-  one `Frame` per 25 ms PCR grid slot. When `mux_rate` is present, each slot
-  owes `mux_rate * 25 ms / (188 * 8)` packets; after the slot's media, PSI, and
-  SI packets, fill the remainder with null packets (PID `0x1fff`, no
-  adaptation, payload of `0xff`). A slot that already exceeds its budget emits
-  no nulls and carries the debt forward so the long-run rate holds; media is
-  never delayed or dropped to fit, so a source that sustains more than the
-  recorded rate simply overruns it, and the exporter logs once per overrun
-  run rather than growing the debt without bound (cap it at one second of
-  packets). Pad only when the field is present; `moq export ts --mux-rate <bps>` overrides or
-  supplies it for a catalog without one.
+  one `Frame` per 25 ms PCR grid slot. When `mux_rate` is present, maintain a
+  signed fixed-point packet balance: add the exact fractional allowance
+  `mux_rate * 25 ms / (188 * 8)` each slot, subtract every emitted media, PSI,
+  and SI packet, then emit and subtract `floor(max(balance, 0))` null packets
+  (PID `0x1fff`, no adaptation, payload of `0xff`). Retain the fractional
+  remainder across slots instead of rounding each slot independently. A slot
+  that already exceeds its allowance emits no nulls and carries the negative
+  balance forward so the long-run rate holds; media is never delayed or dropped
+  to fit, so a source that sustains more than the recorded rate simply overruns
+  it, and the exporter logs once per overrun run rather than growing the debt
+  without bound (cap it at one second of packets). Pad only when the field is
+  present; `moq export ts --mux-rate <bps>` overrides or supplies it for a
+  catalog without one.
 - Docs: `doc/bin/cli.md` gains the flag and a sentence on padding;
   `doc/draft/moq-hang.md` describes the field if the `mpegts` section is
   documented there, otherwise the crate docs carry it.
 - Tests: an import fixture with a known CBR rate and stuffing (the existing
   `test_data` sources, or a synthesized one) yields the expected `muxRate`
-  within tolerance; a VBR fixture yields none; export with the field emits a
-  stream whose measured rate matches and whose PCR intervals stay under 40 ms;
-  export without it is unchanged.
+  within tolerance; a VBR fixture yields none; a transition test covers
+  published rate to instability or discontinuity, omitted field, and a newly
+  stable rate; export with the field emits a stream whose measured rate matches
+  and whose PCR intervals stay under 40 ms; a non-integral packet rate such as
+  1,000,000 bps verifies the cumulative packet count and retained fractional
+  remainder over many slots; export without the field is unchanged.
 
 Public API: one additive field on the `Mpegts` catalog section and one CLI
 flag. Wire: an additive catalog field; no draft change, the `mpegts` section
