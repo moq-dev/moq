@@ -8,7 +8,7 @@ use crate::consumer::MoqSubscription;
 use crate::consumer::MoqTrackConsumer;
 use crate::error::MoqError;
 use crate::json::{MoqJsonSnapshotConfig, MoqJsonStreamConfig};
-use crate::media::{MoqAudio, MoqAudioFormat, MoqAudioInit, MoqContainer, MoqFrame, MoqVideoFormat, MoqVideoInit};
+use crate::media::{MoqAudioFormat, MoqAudioInit, MoqFrame, MoqVideoFormat, MoqVideoInit};
 use crate::session::{MoqBackoff, MoqConnectionStatus};
 
 use std::future::Future;
@@ -189,7 +189,10 @@ fn create_announced(origin: &MoqOriginProducer, path: &str) -> Arc<MoqBroadcastP
 }
 
 /// An Opus rendition whose catalog `broadcast` field names `reference`.
-fn sibling_audio(reference: &str) -> MoqAudio {
+#[cfg(feature = "audio")]
+fn sibling_audio(reference: &str) -> crate::media::MoqAudio {
+	use crate::media::{MoqAudio, MoqContainer};
+
 	MoqAudio {
 		label: None,
 		broadcast: Some(reference.to_string()),
@@ -466,6 +469,7 @@ async fn raw_audio_activity() {
 
 /// `frame_duration_us` is microseconds so Opus' 2.5 ms frame survives the trip, where
 /// the old integer millisecond field truncated it to 2 ms and libopus refused to encode.
+#[cfg(feature = "audio")]
 #[tokio::test]
 async fn raw_audio_frame_durations() {
 	use crate::audio::*;
@@ -1341,6 +1345,7 @@ async fn announced_broadcast_keeps_the_requested_path() {
 /// A catalog rendition may name a sibling broadcast (`./source`), and the track then lives
 /// there, not on the broadcast the catalog came from. Dropping the reference either fails to
 /// find the track or silently decodes a same-named local one with mismatched metadata.
+#[cfg(feature = "audio")]
 #[tokio::test]
 async fn decode_audio_follows_a_sibling_broadcast_reference() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());

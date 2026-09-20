@@ -19,15 +19,16 @@ jobs:
     # never runs with write access.
     #
     # Skipped on close/merge (cancel-only run), on drafts (review on ready,
-    # like Codex), and on fork and Dependabot PRs (both get empty Actions
-    # secrets under `pull_request`; failing there would turn them red).
+    # like Codex), and on fork and bot PRs (forks get empty Actions
+    # secrets under `pull_request`, and bots such as release-plz fail the
+    # reviewer's write-permission check; failing there would turn them red).
     # Remaining runs must have secrets; a missing one fails loud so the
     # misconfiguration surfaces instead of silently disabling review.
     if: >-
       github.event.action != 'closed' &&
       github.event.pull_request.draft == false &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.user.login != 'dependabot[bot]'
+      github.event.pull_request.user.type != 'Bot'
     runs-on: ubuntu-24.04-arm
     # Backstop a hang instead of holding the runner for the 6-hour default.
     timeout-minutes: 15

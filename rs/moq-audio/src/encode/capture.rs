@@ -366,7 +366,7 @@ impl<E: CatalogExt> Driver<E> {
 
 	async fn run_with<S: CaptureSource>(mut self, mut source: S) -> Result<(), Error> {
 		let result = self.drive(&mut source).await;
-		let track = self.track.take().expect("driver always owns its track");
+		let mut track = self.track.take().expect("driver always owns its track");
 
 		match &result {
 			Ok(()) => {

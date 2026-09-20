@@ -90,7 +90,6 @@ impl MoqReservation {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use std::sync::atomic::Ordering;
 
 	use crate::producer::MoqBroadcastProducer;
 
@@ -203,8 +202,11 @@ mod tests {
 		assert_eq!(reserved.grant(), Some(1_000_000));
 	}
 
+	#[cfg(all(feature = "video", not(target_arch = "wasm32")))]
 	#[test]
 	fn a_share_wakes_a_parked_thread() {
+		use std::sync::atomic::Ordering;
+
 		let estimate = moq_net::bandwidth::Producer::new();
 		let bandwidth = bandwidth(&estimate);
 		let broadcast = MoqBroadcastProducer::new().unwrap();
