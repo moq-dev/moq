@@ -8,22 +8,16 @@
 /** Re-export of {@link https://jsr.io/@moq/signals | @moq/signals}, the reactive primitives used throughout this package. */
 export * as Signals from "@moq/signals";
 /** Broadcast announcement streams. */
-export * as Announce from "./announced.ts";
+export * as Announce from "./announce.ts";
 /** Send-side bandwidth estimates split among the tracks sharing a connection. */
-export * as Bandwidth from "./bandwidth.ts";
+export * as Bandwidth from "./bandwidth_api.ts";
 /** Broadcast role handles. */
 export * as Broadcast from "./broadcast.ts";
 /** A reconnecting, shareable handle on a MoQ session. */
 export { Connection } from "./connection/index.ts";
+export { SessionCode, StreamCode } from "./error.ts";
 /** Session and stream errors, each carrying a code from its own registry. */
-export {
-	NotFound,
-	SessionCode,
-	SessionError,
-	StreamCode,
-	StreamError,
-	type StreamErrorOptions,
-} from "./error.ts";
+export * as Error from "./errors.ts";
 /** Group role handles and frame helpers. */
 export * as Group from "./group.ts";
 /** Broadcast routing tables, independent of any connection. */

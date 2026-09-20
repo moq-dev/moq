@@ -4,11 +4,12 @@ import { error, NotFound, reason, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
 import { type Hop, type Route, routesEqual } from "../hop.ts";
 import { hooks } from "../internal.ts";
-import type { Advertised, Consumer as OriginConsumer } from "../origin.ts";
+import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, type Stream, Writer } from "../stream.ts";
-import { Timescale } from "../time.ts";
+import { Milli, Timescale } from "../time.ts";
 import type * as track from "../track.ts";
+import { type Advertised, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import * as DatagramStream from "./datagram_stream.ts";
@@ -372,8 +373,9 @@ export class Publisher {
 		this.#quic = quic;
 		this.version = version;
 		this.hop = hop;
-		this.#broadcasts = publish?.broadcasts ?? new Signal(new Map());
-		this.#advertised = publish?.advertised ?? new Signal(new Map());
+		const origin = publish && wireOf(publish);
+		this.#broadcasts = origin?.broadcasts ?? new Signal(new Map());
+		this.#advertised = origin?.advertised ?? new Signal(new Map());
 		this.#publish = publish;
 
 		// Grab the datagram writer up front when the transport carries datagrams (no group
@@ -544,7 +546,9 @@ export class Publisher {
 	async runSubscribe(msg: Subscribe, stream: Stream) {
 		let front: broadcast.Consumer | undefined;
 		try {
-			front = this.#broadcasts.peek()?.get(msg.broadcast) ?? (await this.#publish?.demand(msg.broadcast));
+			front =
+				this.#broadcasts.peek()?.get(msg.broadcast) ??
+				(this.#publish && (await wireOf(this.#publish).demand(msg.broadcast)));
 		} catch (err: unknown) {
 			stream.writer.reset(error(err));
 			return;
@@ -556,11 +560,13 @@ export class Publisher {
 		}
 
 		const endGroup = exclusiveGroupEnd(msg.endGroup);
-		const track = front.subscribe(msg.track, {
+		const track = wireOf(front).subscribe(msg.track, {
 			priority: msg.priority,
-			maxAge: servingMaxAge(this.version, msg.maxAge),
-			startGroup: msg.startGroup,
-			endGroup,
+			maxAge: Milli(servingMaxAge(this.version, msg.maxAge)),
+			groups: {
+				start: msg.startGroup === undefined ? undefined : { included: msg.startGroup },
+				end: endGroup === undefined ? undefined : { excluded: endGroup },
+			},
 		});
 		positionCursor(track, this.version, msg.startGroup);
 		hooks.replaceGroups(track, { end: endGroup === undefined ? undefined : { excluded: endGroup } });
@@ -610,11 +616,14 @@ export class Publisher {
 				writer: stream.writer,
 				version: this.version,
 				apply: (update) => {
+					const end = exclusiveGroupEnd(update.endGroup);
 					track.update({
 						priority: update.priority,
-						maxAge: servingMaxAge(this.version, update.maxAge),
-						startGroup: update.startGroup,
-						endGroup: exclusiveGroupEnd(update.endGroup),
+						maxAge: Milli(servingMaxAge(this.version, update.maxAge)),
+						groups: {
+							start: update.startGroup === undefined ? undefined : { included: update.startGroup },
+							end: end === undefined ? undefined : { excluded: end },
+						},
 					});
 				},
 			});
@@ -657,7 +666,9 @@ export class Publisher {
 
 		let front: broadcast.Consumer | undefined;
 		try {
-			front = this.#broadcasts.peek()?.get(msg.broadcast) ?? (await this.#publish?.demand(msg.broadcast));
+			front =
+				this.#broadcasts.peek()?.get(msg.broadcast) ??
+				(this.#publish && (await wireOf(this.#publish).demand(msg.broadcast)));
 		} catch (err: unknown) {
 			stream.writer.reset(error(err));
 			return;
@@ -677,7 +688,7 @@ export class Publisher {
 			// The timescale is immutable, so serve exactly what TRACK_INFO advertised. Both
 			// come off the same front, so the metadata and the frames are one generation.
 			const info = await this.#resolveTrackInfo(front, msg.track);
-			group = await front.fetchGroup(msg.track, msg.group, { priority: msg.priority });
+			group = await wireOf(front).fetchGroup(msg.track, msg.group, { priority: msg.priority });
 			await this.#runFetchGroup(group, stream.writer, {
 				timescale: Timescale(info.timescale),
 				start: msg.startFrame,
@@ -855,7 +866,9 @@ export class Publisher {
 	 */
 	async runTrackInfo(msg: TrackMessage, stream: Stream) {
 		try {
-			const front = this.#broadcasts.peek()?.get(msg.broadcast) ?? (await this.#publish?.demand(msg.broadcast));
+			const front =
+				this.#broadcasts.peek()?.get(msg.broadcast) ??
+				(this.#publish && (await wireOf(this.#publish).demand(msg.broadcast)));
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
 
 			const info = await this.#resolveTrackInfo(front, msg.track);
@@ -883,7 +896,7 @@ export class Publisher {
 		if (cached) return cached;
 
 		const pending = (async () => {
-			const info = await front.resolveTrackInfo(track);
+			const info = await wireOf(front).resolveTrackInfo(track);
 			return new TrackInfoMessage({
 				priority: info.priority,
 				// Publisher Max Age: the publisher's retention bound, advertised so

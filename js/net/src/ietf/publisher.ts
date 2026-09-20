@@ -4,13 +4,14 @@ import { error, reason, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
 import { type Route, routesEqual } from "../hop.ts";
 import { hooks } from "../internal.ts";
-import type { Advertised, Consumer as OriginConsumer } from "../origin.ts";
+import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
-import type { Timescale } from "../time.ts";
+import { Milli, type Timescale } from "../time.ts";
 import type { Subscriber as TrackSubscriber } from "../track.ts";
 import { withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
+import { type Advertised, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
 import * as Cluster from "./cluster.ts";
 import { requestReason, toRequestCode } from "./error.ts";
@@ -192,8 +193,9 @@ export class Publisher {
 	}) {
 		this.#quic = quic;
 		this.#session = session;
-		this.#broadcasts = publish?.broadcasts ?? new Signal(new Map());
-		this.#advertised = publish?.advertised ?? new Signal(new Map());
+		const origin = publish && wireOf(publish);
+		this.#broadcasts = origin?.broadcasts ?? new Signal(new Map());
+		this.#advertised = origin?.advertised ?? new Signal(new Map());
 		this.#publish = publish;
 		this.#requiresSolicitation = requiresSolicitation;
 		this.#advert = Cluster.advertise(cluster);
@@ -211,7 +213,8 @@ export class Publisher {
 		let broadcast: broadcast.Consumer | undefined;
 		let refusal: { errorCode: number; reasonPhrase: string } | undefined;
 		try {
-			broadcast = this.#broadcasts.peek()?.get(name) ?? (await this.#publish?.demand(name));
+			broadcast =
+				this.#broadcasts.peek()?.get(name) ?? (this.#publish && (await wireOf(this.#publish).demand(name)));
 			if (!broadcast) {
 				refusal = {
 					errorCode: toRequestCode("does_not_exist", "subscribe", version),
@@ -249,13 +252,13 @@ export class Publisher {
 		if (!broadcast) return;
 
 		const priority = fromWire(msg.subscriberPriority);
-		const track = broadcast.subscribe(msg.trackName, {
+		const track = wireOf(broadcast).subscribe(msg.trackName, {
 			priority,
 			// moq-transport has no subscriber latency parameter. Keep everything the
 			// producer retained and let the receiving subscriber enforce its own budget.
 			// Keep the sentinel encodable if this demand crosses a Lite hop before the
 			// producer's retention bound is known.
-			maxAge: Varint.MAX_U53,
+			maxAge: Milli(Varint.MAX_U53),
 		});
 
 		let cache: TrackSubscriber | undefined;
@@ -285,9 +288,11 @@ export class Publisher {
 			// group; the model's `endGroup` is exclusive.
 			track.update({
 				priority,
-				maxAge: Varint.MAX_U53,
-				startGroup: range.start && Number(range.start.group),
-				endGroup: range.end && Number(range.end.group) + 1,
+				maxAge: Milli(Varint.MAX_U53),
+				groups: {
+					start: range.start ? { included: Number(range.start.group) } : undefined,
+					end: range.end ? { included: Number(range.end.group) } : undefined,
+				},
 			});
 			const startGroup = range.start ? Number(range.start.group) : track.latest();
 			if (startGroup !== undefined) track.setGroups({ start: { included: startGroup } });
@@ -298,7 +303,7 @@ export class Publisher {
 			// asking the broadcast would mint a second producer nobody has accepted.
 			const fill =
 				msg.fill && Filter.isDraft20(version) ? fillRange(msg.fill, msg.filter, edge.largest) : undefined;
-			cache = fill && fill.kind !== "empty" ? track.fork({ priority, maxAge: Varint.MAX_U53 }) : undefined;
+			cache = fill && fill.kind !== "empty" ? track.fork({ priority, maxAge: Milli(Varint.MAX_U53) }) : undefined;
 
 			// Send SUBSCRIBE_OK
 			await stream.writer.u53(SubscribeOk.id);

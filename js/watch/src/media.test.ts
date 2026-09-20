@@ -32,20 +32,20 @@ test("media max age is present on the initial subscription and later updates", a
 		priority: 7,
 		maxAge,
 	});
-	expect(initial).toEqual({ priority: 7, maxAge: 250 });
+	expect(initial).toEqual({ priority: 7, maxAge: Time.Milli(250) });
 
 	maxAge.set(Time.Milli(500));
 	await flush();
-	expect(updates.at(-1)).toEqual({ priority: 7, maxAge: 500 });
+	expect(updates.at(-1)).toEqual({ priority: 7, maxAge: Time.Milli(500) });
 
 	effect.close();
 });
 
 for (const end of [
-	new Moq.StreamError(Moq.StreamCode.Cancel),
-	new Moq.StreamError(Moq.StreamCode.Internal),
-	new Moq.StreamError(Moq.StreamCode(1234)),
-	new Moq.SessionError(Moq.SessionCode.Internal),
+	new Moq.Error.Stream(Moq.StreamCode.Cancel),
+	new Moq.Error.Stream(Moq.StreamCode.Internal),
+	new Moq.Error.Stream(Moq.StreamCode(1234)),
+	new Moq.Error.Session(Moq.SessionCode.Internal),
 	new Error("decoder failed"),
 ]) {
 	test(`media subscription end: ${end}`, async () => {
@@ -54,7 +54,7 @@ for (const end of [
 		try {
 			const pending = nextMedia(consumer);
 			track.close(end);
-			if (end instanceof Moq.StreamError) expect(await pending).toBeUndefined();
+			if (end instanceof Moq.Error.Stream) expect(await pending).toBeUndefined();
 			else await expect(pending).rejects.toBe(end);
 		} finally {
 			consumer.close();

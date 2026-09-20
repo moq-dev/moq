@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Decoder } from "@moq/flate";
-import { Track } from "@moq/net";
+import { Time, Track } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Producer } from "./producer.ts";
 
@@ -8,7 +8,7 @@ type Value = Record<string, unknown>;
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-const REPLAY_LATENCY = 30_000;
+const REPLAY_LATENCY = Time.Milli(30_000);
 
 // Reconstruct every value a compressed consumer yields, in order.
 async function drainCompressed(track: Track.Subscriber): Promise<Value[]> {

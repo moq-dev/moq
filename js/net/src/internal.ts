@@ -13,6 +13,22 @@ import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
 import type { Groups, Producer, Request, Subscriber } from "./track.ts";
 
+/** Normalize public group bounds into an inclusive start and exclusive end. */
+export function groupBounds(groups: Groups = {}): { start: number; end?: number } {
+	const bound = (value: Groups["start"] | undefined, start: boolean): number | undefined => {
+		if (value === undefined) return undefined;
+		if ((value.included === undefined) === (value.excluded === undefined)) {
+			throw new Error("a group bound must be either included or excluded");
+		}
+		const sequence = value.included ?? value.excluded;
+		if (sequence === undefined || !Number.isSafeInteger(sequence) || sequence < 0) {
+			throw new Error("a group bound must be a non-negative safe integer");
+		}
+		return sequence + (start ? Number(value.excluded !== undefined) : Number(value.included !== undefined));
+	};
+	return { start: bound(groups.start, true) ?? 0, end: bound(groups.end, false) };
+}
+
 /**
  * The announce-interest prefix a scope needs on a prefix-shaped wire: its literal head.
  * The peer echoes every suffix beneath it, and the caller filters what arrives.

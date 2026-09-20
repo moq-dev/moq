@@ -1,6 +1,6 @@
 import type { Container } from "@moq/hang";
 import type * as Moq from "@moq/net";
-import { StreamError, type Time } from "@moq/net";
+import { Error as NetError, type Time } from "@moq/net";
 import type { Effect, Getter } from "@moq/signals";
 
 /**
@@ -34,7 +34,7 @@ export async function nextMedia(consumer: Container.Consumer) {
 	try {
 		return await consumer.next();
 	} catch (err) {
-		if (!(err instanceof StreamError)) throw err;
+		if (!(err instanceof NetError.Stream)) throw err;
 		// The subscription is over, even when other tracks on the session are still live.
 		console.debug("media subscription ended", err);
 		return undefined;

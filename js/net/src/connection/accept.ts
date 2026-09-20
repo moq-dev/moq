@@ -8,6 +8,11 @@ import { exchangeSetup } from "./handshake.ts";
 
 /** Options for {@link accept}. */
 export interface AcceptProps {
+	/** The accepted transport. */
+	transport: WebTransport;
+	/** The request URL associated with the transport. */
+	url: URL;
+
 	/** Version to select during SETUP negotiation (for non-ALPN paths). */
 	version?: number;
 
@@ -44,19 +49,23 @@ type SessionProps = {
  * @param props - Optional configuration
  * @returns A promise that resolves to a Connection instance
  */
-export async function accept(transport: WebTransport, url: URL, props?: AcceptProps): Promise<Established> {
+export async function accept({ transport, url, ...props }: AcceptProps): Promise<Established> {
 	const connection = await acceptInner(transport, url, props);
-	if (props?.consume) forwardAnnounced(connection, props.consume);
+	if (props.consume) forwardAnnounced(connection, props.consume);
 	return connection;
 }
 
-async function acceptInner(transport: WebTransport, url: URL, props?: AcceptProps): Promise<Established> {
+async function acceptInner(
+	transport: WebTransport,
+	url: URL,
+	props: Omit<AcceptProps, "transport" | "url">,
+): Promise<Established> {
 	// @ts-expect-error - TODO: add protocol to WebTransport
 	const protocol: string | undefined = transport.protocol;
 
 	const wiring: SessionProps = {
-		discovery: props?.discovery ?? true,
-		publish: props?.publish,
+		discovery: props.discovery ?? true,
+		publish: props.publish,
 	};
 
 	if (protocol === Ietf.ALPN.DRAFT_21) {
@@ -84,7 +93,7 @@ async function acceptInner(transport: WebTransport, url: URL, props?: AcceptProp
 	} else if (protocol === Lite.ALPN_03) {
 		return new Lite.Connection({ url, quic: transport, version: Lite.Version.DRAFT_03, ...wiring });
 	} else if (protocol === Lite.ALPN || protocol === "" || protocol === undefined) {
-		return acceptNegotiated(transport, url, wiring, props?.version);
+		return acceptNegotiated(transport, url, wiring, props.version);
 	} else {
 		throw new Error(`unsupported WebTransport protocol: ${protocol}`);
 	}

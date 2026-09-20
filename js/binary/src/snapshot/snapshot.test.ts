@@ -6,7 +6,7 @@ const bytes = (...values: number[]) => new Uint8Array(values);
 
 // Walking a finished track's groups inspects a complete timeline, so request a replay window
 // instead of the transport's live-edge default, which skips every superseded group.
-const REPLAY_LATENCY = 30_000;
+const REPLAY_LATENCY = Time.Milli(30_000);
 
 // Drain every value currently available from a fresh consumer over the (finished) track.
 async function drain(track: Track.Subscriber, compression: boolean): Promise<Uint8Array[]> {

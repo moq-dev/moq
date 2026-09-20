@@ -207,10 +207,13 @@ describe("blind resolution", () => {
 
 		await settle();
 
-		// Stand in for a session's serving loop answering the request.
+		// Stand in for a dynamic route answering the request.
 		const upstream = new Moq.Broadcast.Producer();
-		const withdraw = owner.answer(Path.from("blind.hang"), upstream.consume());
-		expect(withdraw).toBeDefined();
+		const route = owner.dynamic(Path.from("blind.hang"));
+		const requests = route.requested();
+		const next = await requests.next();
+		expect(next.done).toBe(false);
+		next.value?.accept(upstream);
 
 		await settle();
 		const active = source.out.active.peek();
@@ -223,6 +226,7 @@ describe("blind resolution", () => {
 		expect(upstream.closed.peek()).toBeUndefined();
 
 		source.close();
+		route.close();
 		owner.close();
 		await settle();
 	});

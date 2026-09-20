@@ -3,10 +3,14 @@ import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Time from "../time.ts";
 import { Producer as TrackProducer } from "../track.ts";
-import { accept } from "./index.ts";
+import { type AcceptProps, accept as acceptSession } from "./index.ts";
 import { Connection, resetShared } from "./pool.ts";
 
 const url = new URL("https://example.com/bandwidth");
+
+function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "transport" | "url"> = {}) {
+	return acceptSession({ transport, url, ...props });
+}
 
 async function settle() {
 	await new Promise((resolve) => setTimeout(resolve, 0));

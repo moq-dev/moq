@@ -6,12 +6,13 @@ import { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
-import { scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
+import { groupBounds, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
 import * as Time from "../time.ts";
 import type * as track from "../track.ts";
 import { withTimeout } from "../util/timeout.ts";
+import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, AnnounceRequest, decodeAnnounceBroadcastMaybe } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import * as DatagramStream from "./datagram_stream.ts";
@@ -475,7 +476,7 @@ export class Subscriber {
 
 		void (async () => {
 			for (;;) {
-				const request = await consumer.requested();
+				const request = await wireOf(consumer).requested();
 				if (!request) break;
 				void this.#runSubscribe(path, request);
 			}
@@ -487,7 +488,8 @@ export class Subscriber {
 	async #runSubscribe(broadcast: Path.Valid, request: track.Request) {
 		const id = this.#subscribeNext++;
 		const subscription = request.subscription;
-		if (emptyRange(subscription)) {
+		const initialBounds = groupBounds(subscription.groups);
+		if (emptyRange({ startGroup: initialBounds.start, endGroup: initialBounds.end })) {
 			request.reject(new Error(EMPTY_RANGE));
 			return;
 		}
@@ -497,6 +499,7 @@ export class Subscriber {
 		const timescale = new Signal<number | undefined>(undefined);
 
 		console.debug(`subscribe start: id=${id} broadcast=${broadcast} track=${request.name}`);
+		const bounds = groupBounds(subscription.groups);
 
 		const msg = new Subscribe({
 			id,
@@ -504,8 +507,8 @@ export class Subscriber {
 			track: request.name,
 			priority: subscription.priority ?? 0,
 			maxAge: subscription.maxAge,
-			startGroup: subscription.startGroup,
-			endGroup: inclusiveGroupEnd(subscription.endGroup),
+			startGroup: subscription.groups?.start === undefined ? undefined : bounds.start,
+			endGroup: inclusiveGroupEnd(bounds.end),
 		});
 
 		// Open the stream under a timeout. The stream handle flows back via `state`
@@ -651,7 +654,7 @@ export class Subscriber {
 			timescale: Time.Timescale(info.timescale),
 			// Publisher Max Age rides on the wire, so the local retention window
 			// matches what the upstream advertises (relays re-serve with the same bound).
-			maxAge: info.maxAge,
+			maxAge: Time.Milli(info.maxAge),
 			priority: info.priority,
 		};
 	}
@@ -809,9 +812,11 @@ export class Subscriber {
 		const stopped: Promise<null> = Promise.race([track.closed, stream.reader.closed]).then(() => null);
 		let lastSent: track.Subscription = {
 			priority: msg.priority,
-			maxAge: msg.maxAge,
-			startGroup: msg.startGroup,
-			endGroup: exclusiveGroupEnd(msg.endGroup),
+			maxAge: Time.Milli(msg.maxAge),
+			groups: {
+				start: msg.startGroup === undefined ? undefined : { included: msg.startGroup },
+				end: msg.endGroup === undefined ? undefined : { excluded: exclusiveGroupEnd(msg.endGroup) ?? 0 },
+			},
 		};
 
 		for (;;) {
@@ -825,15 +830,16 @@ export class Subscriber {
 
 			// Demand collapsing to nothing is refused the same way an initial empty
 			// request is: the error closes the track, so every local subscriber sees it.
-			if (emptyRange(current)) throw new Error(EMPTY_RANGE);
+			const bounds = groupBounds(current.groups);
+			if (emptyRange({ startGroup: bounds.start, endGroup: bounds.end })) throw new Error(EMPTY_RANGE);
 
 			// Round-trip the other Subscribe parameters so the publisher doesn't
 			// interpret SUBSCRIBE_UPDATE as a reset of ordered/maxAge/etc.
 			const update = new SubscribeUpdate({
 				priority: current.priority ?? 0,
 				maxAge: current.maxAge,
-				startGroup: current.startGroup,
-				endGroup: inclusiveGroupEnd(current.endGroup),
+				startGroup: current.groups?.start === undefined ? undefined : bounds.start,
+				endGroup: inclusiveGroupEnd(bounds.end),
 			});
 			await update.encode(stream.writer, this.version);
 			lastSent = { ...current };
@@ -842,11 +848,13 @@ export class Subscriber {
 	}
 
 	#sameSubscription(a: track.Subscription, b: track.Subscription): boolean {
+		const ag = groupBounds(a.groups);
+		const bg = groupBounds(b.groups);
 		return (
 			(a.priority ?? 0) === (b.priority ?? 0) &&
 			(a.maxAge ?? 0) === (b.maxAge ?? 0) &&
-			a.startGroup === b.startGroup &&
-			a.endGroup === b.endGroup
+			ag.start === bg.start &&
+			ag.end === bg.end
 		);
 	}
 
@@ -1069,6 +1077,10 @@ class ConsumeBroadcast extends broadcast.Consumer {
 
 	constructor(subscriber: Subscriber, path: Path.Valid, state?: never) {
 		super(state);
+		overrideBroadcastWire(this, {
+			resolveTrackInfo: (name) => subscriber.resolveTrackInfo(path, name),
+			fetchGroup: (name, sequence, options) => subscriber.fetchGroup(path, name, sequence, options),
+		});
 		this.#subscriber = subscriber;
 		this.#path = path;
 	}
@@ -1077,13 +1089,5 @@ class ConsumeBroadcast extends broadcast.Consumer {
 	// this broadcast across callers.
 	override clone(): ConsumeBroadcast {
 		return new ConsumeBroadcast(this.#subscriber, this.#path, this.shareState());
-	}
-
-	override resolveTrackInfo(name: string): Promise<track.Info> {
-		return this.#subscriber.resolveTrackInfo(this.#path, name);
-	}
-
-	override fetchGroup(name: string, sequence: number, options?: track.FetchGroupOptions): Promise<netGroup.Consumer> {
-		return this.#subscriber.fetchGroup(this.#path, name, sequence, options);
 	}
 }

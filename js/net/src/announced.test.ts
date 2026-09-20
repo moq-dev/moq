@@ -4,6 +4,7 @@ import type { Producer as BroadcastProducer } from "./broadcast.ts";
 import { Route } from "./hop.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
+import { wireOf } from "./wire.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid): BroadcastProducer {
 	const broadcast = origin.createBroadcast(path);
@@ -80,7 +81,7 @@ test("an origin handle resolves a local publish with no session attached", async
 	const origin = new OriginProducer();
 	const path = p("loopback");
 
-	const watch = new Announce.Broadcast({ origin, path });
+	const watch = origin.request(path, { announced: true });
 	await settle();
 	expect(watch.active.peek()).toBeUndefined();
 
@@ -114,10 +115,10 @@ test("the local route wins over a blind request on a no-discovery origin", async
 
 	// A session without discovery is attached, so the handle stands a request; but the
 	// local publish must still resolve through the table, not wait on an answer.
-	const detach = origin.attach(false);
+	const detach = wireOf(origin).attach(false);
 	const broadcast = publish(origin, path);
 
-	const watch = new Announce.Broadcast({ origin, path });
+	const watch = origin.request(path, { announced: true });
 	await settle();
 	expect(watch.active.peek()).toBeDefined();
 
@@ -125,10 +126,4 @@ test("the local route wins over a blind request on a no-discovery origin", async
 	detach();
 	broadcast.close();
 	origin.close();
-});
-
-test("BroadcastProps requires a source", () => {
-	// @ts-expect-error neither source is a compile error; the union demands exactly one.
-	const neither: Announce.BroadcastProps = { path: p("x") };
-	expect(neither.path).toBeDefined();
 });

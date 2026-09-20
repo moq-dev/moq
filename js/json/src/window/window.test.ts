@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Group, StreamCode, StreamError, Time, Track } from "@moq/net";
+import { Group, Error as NetError, StreamCode, Time, Track } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Decoder, Encoder, type Event, Producer, type Span } from "./index.ts";
 
@@ -256,12 +256,12 @@ test("a lagging consumer is told what it missed", async () => {
 
 test("consumer resumes at a checkpoint after losing a group", async () => {
 	for (const error of [
-		new Group.Lagged(),
-		new Group.GroupTooLarge(),
-		new StreamError(StreamCode.TooFarBehind),
-		new StreamError(StreamCode.GroupTooLarge),
-		new StreamError(StreamCode.Old),
-		new StreamError(StreamCode.Evicted),
+		new NetError.TooFarBehind(),
+		new NetError.GroupTooLarge(),
+		new NetError.Stream(StreamCode.TooFarBehind),
+		new NetError.Stream(StreamCode.GroupTooLarge),
+		new NetError.Stream(StreamCode.Old),
+		new NetError.Stream(StreamCode.Evicted),
 	]) {
 		const track = new Track.Producer("test");
 		const consumer = new Consumer<Rec>({ track: track.subscribe() });

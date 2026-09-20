@@ -167,7 +167,7 @@ function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Table, path: N
 	if (!consumer) return;
 
 	const sub = <K extends keyof NodeStats>(trackName: string, key: K) => {
-		const track = consumer.subscribe(trackName).ordered();
+		const track = consumer.track(trackName).subscribe().ordered();
 		effect.cleanup(() => track.close());
 		effect.spawn(async () => {
 			for (;;) {

@@ -707,7 +707,7 @@ test("a legacy cancel reaches the control stream", async () => {
 
 	// Ask for a track, which writes SUBSCRIBE, then drop the only consumer.
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.subscribe("video");
+	const track = broadcast.track("video").subscribe();
 
 	// Let the SUBSCRIBE reach the control stream before walking away.
 	await new Promise((resolve) => setTimeout(resolve, 50));
@@ -756,7 +756,7 @@ test("a rejected subscribe is not unsubscribed", async () => {
 	const wire = peer!;
 
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.subscribe("video");
+	const track = broadcast.track("video").subscribe();
 
 	// Read the SUBSCRIBE, then reject it the way a publisher that cannot serve it would.
 	const subscribeType = await wire.reader.u53();
@@ -827,7 +827,7 @@ async function subscribeTrack(): Promise<{ subscriber: Subscriber; track: track.
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
 
-	const track = subscriber.consume(Path.from("room")).subscribe("video");
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
 
 	const peer = await nextStream(pair.client);
 	if (!peer) throw new Error("the subscriber never opened a subscribe stream");
@@ -924,7 +924,7 @@ test("returning demand survives a blocked unsubscribe", async () => {
 	});
 
 	const broadcast = subscriber.consume(Path.from("room"));
-	const first = broadcast.subscribe("video");
+	const first = broadcast.track("video").subscribe();
 	expect(await peer.reader.u53()).toBe(Subscribe.id);
 	const request = await Subscribe.decode(peer.reader, version);
 	await peer.writer.u53(SubscribeOk.id);
@@ -946,7 +946,7 @@ test("returning demand survives a blocked unsubscribe", async () => {
 	ordered.close();
 	first.close();
 	await cancelStarted.promise;
-	const returned = broadcast.subscribe("video");
+	const returned = broadcast.track("video").subscribe();
 	releaseCancel.resolve();
 	await oldClosed.promise;
 	expect(returned.closed.peek()).toBeUndefined();

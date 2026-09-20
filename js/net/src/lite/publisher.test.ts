@@ -7,7 +7,7 @@ import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
-import { Timestamp } from "../time.ts";
+import { Milli, Timestamp } from "../time.ts";
 import { DEFAULT_MAX_AGE_MS } from "../track.ts";
 import { AnnounceRequest } from "./announce.ts";
 import { Fetch } from "./fetch.ts";
@@ -25,7 +25,7 @@ function publish(origin: OriginProducer, path: Path.Valid) {
 }
 
 // Scheduling tests intentionally stall groups, so keep latency enforcement out of their scope.
-const TEST_MAX_AGE_MS = 30_000;
+const TEST_MAX_AGE_MS = Milli(30_000);
 
 function replaySubscribe(props: ConstructorParameters<typeof Subscribe>[0]) {
 	return new Subscribe({ ...props, maxAge: TEST_MAX_AGE_MS });
@@ -492,7 +492,7 @@ async function servedSubscription(
 		endGroup?: number;
 		endFrame?: number;
 		gated?: boolean;
-		maxAge?: number;
+		maxAge?: Milli;
 		// Frame payloads written into every served group. Frame bounds need draft-06.
 		frames?: string[];
 		version?: Version;
@@ -888,8 +888,7 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 		expect(sub.track.subscription.peek()).toEqual({
 			priority: 9,
 			maxAge: DEFAULT_MAX_AGE_MS,
-			startGroup: undefined,
-			endGroup: 6,
+			groups: { end: { excluded: 6 } },
 		});
 		expect(ranges).not.toHaveBeenCalled();
 
@@ -1369,11 +1368,11 @@ test("runProbe rounds a fractional smoothedRtt instead of killing the stream", a
 
 test("a version without the latency field serves a non-dropping budget", async () => {
 	for (const version of [Version.DRAFT_01, Version.DRAFT_02]) {
-		const sub = await servedSubscription({ version, maxAge: Number.MAX_SAFE_INTEGER });
+		const sub = await servedSubscription({ version, maxAge: Milli(Number.MAX_SAFE_INTEGER) });
 		try {
 			// These drafts decode the absent field as zero. The publisher must not turn
 			// that into a live-edge request the peer never made.
-			expect(sub.track.subscription.peek()?.maxAge).toBe(Number.MAX_SAFE_INTEGER);
+			expect(sub.track.subscription.peek()?.maxAge).toBe(Milli(Number.MAX_SAFE_INTEGER));
 		} finally {
 			await sub.close();
 		}

@@ -3,9 +3,17 @@ import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Time from "../time.ts";
-import { accept, connect } from "./index.ts";
+import { type AcceptProps, accept as acceptSession, type ConnectProps, connect as connectSession } from "./index.ts";
 import { Reload } from "./reload.ts";
 import { type TransportStats, transportStats } from "./stats.ts";
+
+function connect(url: URL, props: Omit<ConnectProps, "url"> = {}) {
+	return connectSession({ url, ...props });
+}
+
+function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "transport" | "url"> = {}) {
+	return acceptSession({ transport, url, ...props });
+}
 
 function fakeQuic(stats: TransportStats): WebTransport {
 	return { getStats: () => Promise.resolve(stats) } as unknown as WebTransport;

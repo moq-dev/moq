@@ -1,6 +1,5 @@
 import { type Getter, Signal } from "@moq/signals";
-import * as announce from "../announced.ts";
-import type * as broadcast from "../broadcast.ts";
+import type * as announce from "../announced.ts";
 import type { Established } from "../connection/established.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
@@ -9,6 +8,7 @@ import { type Hop, randomHop } from "../hop.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import type * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
+import { registerWire } from "../wire.ts";
 import { AnnounceRequest } from "./announce.ts";
 import { Fetch } from "./fetch.ts";
 import { Goaway } from "./goaway.ts";
@@ -126,6 +126,7 @@ export class Connection implements Established {
 		this.hop = randomHop();
 		this.#publisher = new Publisher(this.#quic, this.#version, this.hop, publish);
 		this.#subscriber = new Subscriber(this.#quic, this.#version, this.hop, this.#probe, this.#peerSetup);
+		registerWire(this, { consume: (path) => this.#subscriber.consume(path) });
 
 		void this.#run();
 	}
@@ -171,20 +172,6 @@ export class Connection implements Established {
 
 	announced(scope?: Path.Pattern): announce.Consumer {
 		return this.#subscriber.announced(scope);
-	}
-
-	consume(path: Path.Valid): broadcast.Consumer {
-		return this.#subscriber.consume(path);
-	}
-
-	/**
-	 * Watches a broadcast, live only while it is announced.
-	 *
-	 * @param path - The path of the broadcast to watch
-	 * @returns A reactive handle to the broadcast
-	 */
-	announcedBroadcast(path: Path.Valid): announce.Broadcast {
-		return new announce.Broadcast({ connection: this, path });
 	}
 
 	async #runSession() {

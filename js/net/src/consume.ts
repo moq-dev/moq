@@ -5,7 +5,7 @@ import type * as Path from "./path.ts";
  * Per-path dedup cache for consumed broadcasts, shared by the moq-lite and moq-ietf
  * subscribers.
  *
- * `Connection.consume(path)` must not mint a fresh subscription per call: repeat requests
+ * Resolving the same path must not mint a fresh subscription per call: repeat requests
  * for the same path (e.g. several renditions referencing one `broadcast: "./source"`) should
  * share a single upstream subscription. This mirrors the Rust `origin::Consumer` weak-cache:
  * a still-live path resolves to a shared {@link broadcast.Consumer.clone}, a closed one is

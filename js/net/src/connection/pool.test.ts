@@ -6,7 +6,7 @@ import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import * as Time from "../time.ts";
-import { accept } from "./index.ts";
+import { type AcceptProps, accept as acceptSession } from "./index.ts";
 import { Connection, resetShared } from "./pool.ts";
 
 function publish(origin: { createBroadcast(path: Path.Valid): BroadcastProducer }, path: Path.Valid) {
@@ -16,6 +16,10 @@ function publish(origin: { createBroadcast(path: Path.Valid): BroadcastProducer 
 }
 
 const url = new URL("https://example.com/pool");
+
+function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "transport" | "url"> = {}) {
+	return acceptSession({ transport, url, ...props });
+}
 
 async function settle() {
 	await new Promise((resolve) => setTimeout(resolve, 0));

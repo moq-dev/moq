@@ -1,6 +1,5 @@
 import { type Getter, Signal } from "@moq/signals";
-import * as announce from "../announced.ts";
-import type * as broadcast from "../broadcast.ts";
+import type * as announce from "../announced.ts";
 import type { Established } from "../connection/established.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
@@ -8,6 +7,7 @@ import { error, fromClose, ProtocolViolation, StreamCode, StreamError } from "..
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import type * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
+import { registerWire } from "../wire.ts";
 import { ControlStreamAdapter, NativeSession, type Session } from "./adapter.ts";
 import * as Cluster from "./cluster.ts";
 import { GoAway } from "./goaway.ts";
@@ -139,6 +139,7 @@ export class Connection implements Established {
 		this.#solicit = solicit;
 		this.#cluster = cluster;
 		this.#subscriber = new Subscriber({ session: this.#session, cluster });
+		registerWire(this, { consume: (path) => this.#subscriber.consume(path) });
 
 		void this.#run();
 	}
@@ -180,29 +181,6 @@ export class Connection implements Established {
 	/** Gets an announced reader for `scope`; see {@link Established.announced}. */
 	announced(scope?: Path.Pattern): announce.Consumer {
 		return this.#subscriber.announced(scope);
-	}
-
-	/**
-	 * Consumes a broadcast from the connection.
-	 *
-	 * @remarks
-	 * If the broadcast is not found, a "not found" error will be thrown when requesting any tracks.
-	 *
-	 * @param broadcast - The path of the broadcast to consume
-	 * @returns A Broadcast instance
-	 */
-	consume(path: Path.Valid): broadcast.Consumer {
-		return this.#subscriber.consume(path);
-	}
-
-	/**
-	 * Watches a broadcast, live only while it is announced.
-	 *
-	 * @param path - The path of the broadcast to watch
-	 * @returns A reactive handle to the broadcast
-	 */
-	announcedBroadcast(path: Path.Valid): announce.Broadcast {
-		return new announce.Broadcast({ connection: this, path });
 	}
 
 	/**

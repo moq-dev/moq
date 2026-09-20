@@ -256,7 +256,7 @@ export class Game {
 		const active = effect.get(this.broadcast.out.active);
 		if (!active) return;
 
-		const statusTrack = active.subscribe("status", { priority: 10 });
+		const statusTrack = active.track("status").subscribe({ priority: 10 });
 		effect.cleanup(() => statusTrack.close());
 
 		// Reconstruct each status from snapshots and deltas, validated against the schema.
@@ -308,20 +308,10 @@ export class Game {
 			this.viewerId.set(undefined);
 		});
 
-		effect.spawn(async () => {
-			for (;;) {
-				const req = await Promise.race([effect.cancel, viewerBroadcast.requested()]);
-				if (!req) break;
-
-				if (req.name === "command") {
-					// accept() commits the track's immutable properties and returns the producer.
-					const track = req.accept();
-					const producer = new Json.Snapshot.Producer<Record<string, unknown>>({ track });
-					effect.cleanup(() => producer.finish());
-					effect.run(this.#runCommandTrack.bind(this, track, producer));
-				}
-			}
-		});
+		const track = viewerBroadcast.createTrack("command");
+		const producer = new Json.Snapshot.Producer<Record<string, unknown>>({ track });
+		effect.cleanup(() => producer.finish());
+		effect.run(this.#runCommandTrack.bind(this, track, producer));
 	}
 
 	#runCommandTrack(

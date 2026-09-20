@@ -1,6 +1,6 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
-import { StreamError, Time } from "@moq/net";
+import { Error as NetError, Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys } from "@moq/signals";
 import { CaptionsRenderer, parseText, VTTCue, type VTTRegion } from "media-captions";
 // media-captions positions and styles cues purely through these stylesheets (via `[part]`
@@ -274,7 +274,7 @@ export class Renderer {
 		effect.spawn(async () => {
 			for (;;) {
 				const group = await sub.recvGroup().catch((err) => {
-					if (!(err instanceof StreamError)) throw err;
+					if (!(err instanceof NetError.Stream)) throw err;
 					console.debug("captions subscription ended", err);
 					return undefined;
 				});
@@ -290,7 +290,7 @@ export class Renderer {
 							}
 						}
 					} catch (err) {
-						if (!(err instanceof StreamError)) throw err;
+						if (!(err instanceof NetError.Stream)) throw err;
 					} finally {
 						group.close();
 					}

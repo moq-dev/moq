@@ -1,10 +1,15 @@
 import { expect, test } from "bun:test";
 import type { Getter } from "@moq/signals";
-import * as Announce from "./announced.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import { accept, Connection, connect } from "./connection/index.ts";
-import { StreamCode, StreamError } from "./error.ts";
-import * as Group from "./group.ts";
+import {
+	type AcceptProps,
+	accept as acceptSession,
+	Connection,
+	type ConnectProps,
+	connect as connectSession,
+	type Established,
+} from "./connection/index.ts";
+import { StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import * as Ietf from "./ietf/index.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
@@ -14,6 +19,7 @@ import * as Path from "./path.ts";
 import { Milli, Timescale, Timestamp } from "./time.ts";
 import type { Producer as TrackProducer } from "./track.ts";
 import { withTimeout } from "./util/timeout.ts";
+import { wireOf } from "./wire.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
 	const broadcast = origin.createBroadcast(path);
@@ -22,6 +28,18 @@ function publish(origin: OriginProducer, path: Path.Valid) {
 }
 
 const url = new URL("https://localhost:4443/test");
+
+function connect(url: URL, props: Omit<ConnectProps, "url"> = {}): Promise<Established> {
+	return connectSession({ url, ...props });
+}
+
+function accept(
+	transport: WebTransport,
+	url: URL,
+	props: Omit<AcceptProps, "transport" | "url"> = {},
+): Promise<Established> {
+	return acceptSession({ transport, url, ...props });
+}
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -58,7 +76,7 @@ async function runPublishSubscribeFlow(protocol: string, version?: number) {
 	let served = 0;
 	const serving = (async () => {
 		for (;;) {
-			const req = await broadcast.requested();
+			const req = await wireOf(broadcast).requested();
 			if (!req) break;
 			if (req.name !== "video") {
 				req.reject(new Error(`unexpected track: ${req.name}`));
@@ -84,7 +102,7 @@ async function runPublishSubscribeFlow(protocol: string, version?: number) {
 	expect(prefixedEntry.kind).toBe("announced");
 
 	// Client consumes the broadcast and subscribes to a track
-	const remote = client.consume(Path.from("test"));
+	const remote = wireOf(client).consume(Path.from("test"));
 	const track = remote.track("video").subscribe().ordered();
 
 	// Client reads data
@@ -137,37 +155,38 @@ test("integration: lite subscription options and updates reach the publisher", a
 	});
 	const serving = (async () => {
 		for (;;) {
-			const request = await broadcast.requested();
+			const request = await wireOf(broadcast).requested();
 			if (!request) return;
 			const producer = request.accept();
-			if (request.subscription.startGroup === 1) resolveProducer?.(producer);
+			if (request.subscription.groups?.start?.included === 1) resolveProducer?.(producer);
 		}
 	})();
 
-	const remote = client.consume(Path.from("test"));
+	const remote = wireOf(client).consume(Path.from("test"));
 	// A floor of 1, not 0: a pre-06 wire folds a vacuous floor of 0 back to absent, since
 	// its encoding of group 0 means "replay from the beginning" instead.
 	const subscriber = remote.track("video").subscribe({
 		priority: 3,
-		maxAge: 250,
-		startGroup: 1,
-		endGroup: 9,
+		maxAge: Milli(250),
+		groups: { start: { included: 1 }, end: { excluded: 9 } },
 	});
 	const producer = await accepted;
 	expect(producer.subscription.peek()).toEqual({
 		priority: 3,
-		maxAge: 250,
-		startGroup: 1,
-		endGroup: 9,
+		maxAge: Milli(250),
+		groups: { start: { included: 1 }, end: { excluded: 9 } },
 	});
 
 	const updated = producer.subscription.changed();
-	subscriber.update({ priority: 8, maxAge: 500, startGroup: 2, endGroup: 12 });
+	subscriber.update({
+		priority: 8,
+		maxAge: Milli(500),
+		groups: { start: { included: 2 }, end: { excluded: 12 } },
+	});
 	expect(await updated).toEqual({
 		priority: 8,
-		maxAge: 500,
-		startGroup: 2,
-		endGroup: 12,
+		maxAge: Milli(500),
+		groups: { start: { included: 2 }, end: { excluded: 12 } },
 	});
 
 	subscriber.close();
@@ -194,18 +213,18 @@ test("integration: lite carries a fractional maxAge as a whole millisecond", asy
 	});
 	const serving = (async () => {
 		for (;;) {
-			const request = await broadcast.requested();
+			const request = await wireOf(broadcast).requested();
 			if (!request) return;
 			const producer = request.accept();
-			if (request.subscription.startGroup === 1) resolveProducer?.(producer);
+			if (request.subscription.groups?.start?.included === 1) resolveProducer?.(producer);
 		}
 	})();
 
-	const remote = client.consume(Path.from("test"));
+	const remote = wireOf(client).consume(Path.from("test"));
 	// A varint cannot encode 38.75, so an unrounded value fails the SUBSCRIBE outright and
 	// nothing resubscribes. The publisher must see the budget rounded up instead. A floor
 	// of 1, not 0: a pre-06 wire folds a vacuous floor of 0 back to absent.
-	const subscriber = remote.track("video").subscribe({ maxAge: 38.75, startGroup: 1 });
+	const subscriber = remote.track("video").subscribe({ maxAge: Milli(38.75), groups: { start: { included: 1 } } });
 
 	// A failed subscribe never reaches the publisher, so race its closure to report the
 	// encode error rather than block until the suite times out.
@@ -214,11 +233,11 @@ test("integration: lite carries a fractional maxAge as a whole millisecond", asy
 	});
 
 	const producer = await Promise.race([accepted, failed]);
-	expect(producer.subscription.peek()?.maxAge).toBe(39);
+	expect(producer.subscription.peek()?.maxAge).toBe(Milli(39));
 
 	const updated = producer.subscription.changed();
-	subscriber.update({ maxAge: 500.25, startGroup: 1 });
-	expect((await Promise.race([updated, failed]))?.maxAge).toBe(501);
+	subscriber.update({ maxAge: Milli(500.25), groups: { start: { included: 1 } } });
+	expect((await Promise.race([updated, failed]))?.maxAge).toBe(Milli(501));
 
 	subscriber.close();
 	remote.close();
@@ -250,13 +269,12 @@ test("integration: lite applies initial and updated group bounds", async () => {
 	const producer = broadcast.createTrack("video");
 	for (let sequence = 0; sequence < GROUP_COUNT; sequence++) producer.appendGroup().close();
 
-	const remote = client.consume(Path.from("test"));
+	const remote = wireOf(client).consume(Path.from("test"));
 	const subscriber = remote
 		.track("video")
 		.subscribe({
-			maxAge: REPLAY_LATENCY_MS,
-			startGroup: INITIAL_START_GROUP,
-			endGroup: INITIAL_END_GROUP,
+			maxAge: Milli(REPLAY_LATENCY_MS),
+			groups: { start: { included: INITIAL_START_GROUP }, end: { excluded: INITIAL_END_GROUP } },
 		})
 		.ordered();
 	try {
@@ -267,9 +285,8 @@ test("integration: lite applies initial and updated group bounds", async () => {
 		expect(await Promise.race([pending, sleep(PENDING_ASSERT_MS).then(() => "pending")])).toBe("pending");
 
 		subscriber.update({
-			maxAge: REPLAY_LATENCY_MS,
-			startGroup: UPDATED_GROUP,
-			endGroup: UPDATED_END_GROUP,
+			maxAge: Milli(REPLAY_LATENCY_MS),
+			groups: { start: { included: UPDATED_GROUP }, end: { excluded: UPDATED_END_GROUP } },
 		});
 		expect((await withTimeout(pending, UPDATE_TIMEOUT_MS, "updated group bound timed out"))?.sequence).toBe(
 			UPDATED_GROUP,
@@ -302,20 +319,31 @@ test("integration: lite refuses an empty requested range on open and on update",
 	const producer = broadcast.createTrack("video");
 	for (let sequence = 0; sequence < GROUP_COUNT; sequence++) producer.appendGroup().close();
 
-	const remote = client.consume(Path.from("test"));
+	const remote = wireOf(client).consume(Path.from("test"));
 	const video = remote.track("video");
 	try {
 		// Bounds that meet cannot go on the wire: the nearest encoding inverts the range.
-		const empty = video.subscribe({ maxAge: REPLAY_LATENCY_MS, startGroup: 2, endGroup: 2 });
+		const empty = video.subscribe({
+			maxAge: Milli(REPLAY_LATENCY_MS),
+			groups: { start: { included: 2 }, end: { excluded: 2 } },
+		});
 		await expect(withTimeout(empty.recvGroup(), TIMEOUT_MS, "empty open never settled")).rejects.toThrow(
 			"empty subscription range cannot be encoded",
 		);
 		empty.close();
 
 		// A live subscription whose demand later collapses to nothing fails the same way.
-		const live = video.subscribe({ maxAge: REPLAY_LATENCY_MS, startGroup: 1, endGroup: 2 }).ordered();
+		const live = video
+			.subscribe({
+				maxAge: Milli(REPLAY_LATENCY_MS),
+				groups: { start: { included: 1 }, end: { excluded: 2 } },
+			})
+			.ordered();
 		expect((await live.nextGroup())?.sequence).toBe(1);
-		live.update({ maxAge: REPLAY_LATENCY_MS, startGroup: 3, endGroup: 3 });
+		live.update({
+			maxAge: Milli(REPLAY_LATENCY_MS),
+			groups: { start: { included: 3 }, end: { excluded: 3 } },
+		});
 		await expect(withTimeout(live.nextGroup(), TIMEOUT_MS, "empty update never settled")).rejects.toThrow(
 			"empty subscription range cannot be encoded",
 		);
@@ -394,7 +422,7 @@ test("integration: lite draft-05 datagram delivery", async () => {
 	const broadcast = publish(origin, Path.from("test"));
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
-	const remote = client.consume(Path.from("test"));
+	const remote = wireOf(client).consume(Path.from("test"));
 	const track = remote.track("video").subscribe();
 
 	// Datagrams aren't cached, so the first few may race the subscription setup. Pump until
@@ -436,7 +464,7 @@ test("integration: lite draft-05 datagrams not sent on a non-datagram transport"
 	const broadcast = publish(origin, Path.from("test"));
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
-	const remote = client.consume(Path.from("test"));
+	const remote = wireOf(client).consume(Path.from("test"));
 	const track = remote.track("video").subscribe().ordered();
 	const datagrams = remote.track("video").subscribe();
 
@@ -484,7 +512,7 @@ test("integration: lite draft-05 datagrams sent with standards-track createWrita
 	const broadcast = publish(origin, Path.from("test"));
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
-	const remote = client.consume(Path.from("test"));
+	const remote = wireOf(client).consume(Path.from("test"));
 	const track = remote.track("video").subscribe();
 
 	const received = track.recvDatagram();
@@ -522,7 +550,7 @@ test("integration: lite draft-05 missing datagram writer does not close streams"
 	const broadcast = publish(origin, Path.from("test"));
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
-	const remote = client.consume(Path.from("test"));
+	const remote = wireOf(client).consume(Path.from("test"));
 	const track = remote.track("video").subscribe().ordered();
 
 	producer.appendDatagram(Timestamp.fromMillis(0), enc.encode("dgram"));
@@ -549,7 +577,7 @@ test("integration: ietf does not deliver datagrams", async () => {
 	const broadcast = publish(origin, Path.from("test"));
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
-	const remote = client.consume(Path.from("test"));
+	const remote = wireOf(client).consume(Path.from("test"));
 	const track = remote.track("video").subscribe().ordered();
 	const datagrams = remote.track("video").subscribe();
 
@@ -582,7 +610,7 @@ test("integration: lite draft-05 missing datagram reader does not close streams"
 	const broadcast = publish(origin, Path.from("test"));
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
-	const remote = client.consume(Path.from("test"));
+	const remote = wireOf(client).consume(Path.from("test"));
 	const track = remote.track("video").subscribe().ordered();
 
 	producer.appendDatagram(Timestamp.fromMillis(0), enc.encode("dgram"));
@@ -619,7 +647,7 @@ test("integration: a group reset carries the peer's code to the subscriber", asy
 	const broadcast = publish(origin, Path.from("test"));
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
-	const remote = client.consume(Path.from("test"));
+	const remote = wireOf(client).consume(Path.from("test"));
 	const track = remote.track("video").subscribe().ordered();
 
 	const group = producer.appendGroup();
@@ -659,7 +687,7 @@ test("integration: a locally raised group error reaches the peer as its own code
 	const broadcast = publish(origin, Path.from("test"));
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
-	const remote = client.consume(Path.from("test"));
+	const remote = wireOf(client).consume(Path.from("test"));
 	const track = remote.track("video").subscribe().ordered();
 
 	const group = producer.appendGroup();
@@ -671,7 +699,7 @@ test("integration: a locally raised group error reaches the peer as its own code
 
 	// The publisher's own cache dropped the rest of the group. Nothing hand-builds a transport
 	// error here, which is the point: the condition is raised the way the library raises it.
-	group.close(new Group.Lagged());
+	group.close(new TooFarBehind());
 
 	const err = await consumer.readFrame().then(
 		() => undefined,
@@ -682,7 +710,7 @@ test("integration: a locally raised group error reaches the peer as its own code
 	expect(err).toBeInstanceOf(StreamError);
 	expect((err as StreamError).code).toBe(StreamCode.TooFarBehind);
 	// And the reverse direction agrees, so a gap is one class whichever side it happened on.
-	expect(err).toBeInstanceOf(Group.Lagged);
+	expect(err).toBeInstanceOf(TooFarBehind);
 
 	broadcast.close();
 	remote.close();
@@ -702,7 +730,7 @@ test("integration: subscribing to an unserved broadcast is refused as NotFound",
 	// Announced, so the subscribe is attempted, but the publisher drops it before the subscribe
 	// arrives and answers with a reset instead of a track.
 	const broadcast = publish(origin, Path.from("test"));
-	const remote = client.consume(Path.from("test"));
+	const remote = wireOf(client).consume(Path.from("test"));
 	broadcast.close();
 
 	const track = remote.track("video").subscribe();
@@ -739,7 +767,7 @@ test("integration: lite draft-05 fetches a cached group", async () => {
 	group1.close();
 
 	// Fetch group 0 without holding a live subscription; the timestamps round-trip.
-	const remote = client.consume(Path.from("test"));
+	const remote = wireOf(client).consume(Path.from("test"));
 	const fetched = await remote.track("video").fetchGroup(0);
 
 	const first = await fetched.readFrame();
@@ -777,7 +805,7 @@ test("integration: lite draft-05 coalesces concurrent fetches of one group", asy
 	group0.writeFrame({ payload: enc.encode("beta"), timestamp: Timestamp.fromMillis(15) });
 	group0.close();
 
-	const remote = client.consume(Path.from("test"));
+	const remote = wireOf(client).consume(Path.from("test"));
 	const trackConsumer = remote.track("video");
 
 	// Two concurrent fetches of the same group coalesce onto one FETCH stream; each reads an
@@ -820,7 +848,7 @@ test("integration: lite draft-05 fetches an in-progress group", async () => {
 	const group0 = producer.appendGroup();
 	group0.writeFrame({ payload: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
 
-	const remote = client.consume(Path.from("test"));
+	const remote = wireOf(client).consume(Path.from("test"));
 	const fetched = await remote.track("video").fetchGroup(0);
 
 	const first = await fetched.readFrame();
@@ -855,23 +883,23 @@ test("integration: lite draft-05 track info follows a republished broadcast", as
 
 	const path = Path.from("test");
 	const first = publish(origin, path);
-	first.createTrack("video", { priority: 1, timescale: Timescale.MILLI, maxAge: 1000 });
+	first.createTrack("video", { priority: 1, timescale: Timescale.MILLI, maxAge: Milli(1000) });
 
-	const remote = client.consume(path);
+	const remote = wireOf(client).consume(path);
 	const before = await remote.track("video").info();
 	expect(before.priority).toBe(1);
 	expect(before.timescale).toBe(Timescale.MILLI);
-	expect(before.maxAge).toBe(1000);
+	expect(before.maxAge).toBe(Milli(1000));
 
 	// Replace the broadcast on the same path with one whose track declares different
 	// immutable properties.
 	const second = publish(origin, path);
-	second.createTrack("video", { priority: 7, timescale: Timescale.MICRO, maxAge: 5000 });
+	second.createTrack("video", { priority: 7, timescale: Timescale.MICRO, maxAge: Milli(5000) });
 
 	const after = await remote.track("video").info();
 	expect(after.priority).toBe(7);
 	expect(after.timescale).toBe(Timescale.MICRO);
-	expect(after.maxAge).toBe(5000);
+	expect(after.maxAge).toBe(Milli(5000));
 
 	first.close();
 	second.close();
@@ -900,7 +928,7 @@ test("integration: lite draft-05 fetch uses the republished track's timescale", 
 	firstGroup.close();
 
 	// Prime the publisher's TRACK_INFO cache against the predecessor.
-	const remote = client.consume(path);
+	const remote = wireOf(client).consume(path);
 	expect((await remote.track("video").info()).timescale).toBe(Timescale.MILLI);
 
 	const second = publish(origin, path);
@@ -930,7 +958,7 @@ test("integration: ietf fetch group is unsupported", async () => {
 		accept(pair.server, url, { publish: origin.consume() }),
 	]);
 
-	const remote = client.consume(Path.from("test"));
+	const remote = wireOf(client).consume(Path.from("test"));
 	await expect(remote.track("video").fetchGroup(0)).rejects.toThrow("fetch group is not supported for moq-transport");
 
 	remote.close();
@@ -973,8 +1001,8 @@ async function runConsumeDedup(protocol: string, version?: number) {
 	]);
 
 	// Two handles to the same path share one broadcast: closing the first leaves it live...
-	const first = client.consume(Path.from("shared"));
-	const second = client.consume(Path.from("shared"));
+	const first = wireOf(client).consume(Path.from("shared"));
+	const second = wireOf(client).consume(Path.from("shared"));
 	first.close();
 	expect(first.closed.peek()).toBeUndefined();
 	expect(second.closed.peek()).toBeUndefined();
@@ -985,12 +1013,12 @@ async function runConsumeDedup(protocol: string, version?: number) {
 	expect(second.closed.peek()).toBeDefined();
 
 	// A different path is independent: a lone handle closes the broadcast immediately.
-	const other = client.consume(Path.from("other"));
+	const other = wireOf(client).consume(Path.from("other"));
 	other.close();
 	expect(other.closed.peek()).toBeDefined();
 
 	// Once closed, the path re-consumes fresh (a new live handle).
-	const third = client.consume(Path.from("shared"));
+	const third = wireOf(client).consume(Path.from("shared"));
 	expect(third.closed.peek()).toBeUndefined();
 	third.close();
 
@@ -1020,7 +1048,7 @@ async function runSubscriberTeardown(protocol: string, version?: number) {
 	const video = broadcast.createTrack("video");
 	video.writeString("hello");
 
-	const remote = client.consume(Path.from("test"));
+	const remote = wireOf(client).consume(Path.from("test"));
 	const sub = remote.track("video").subscribe().ordered();
 	expect(await sub.readString()).toBe("hello");
 
@@ -1062,7 +1090,7 @@ test("integration: ietf draft-14 subscriber teardown on last unsubscribe", async
 	let served: TrackProducer | undefined;
 	const serving = (async () => {
 		for (;;) {
-			const req = await broadcast.requested();
+			const req = await wireOf(broadcast).requested();
 			if (!req) break;
 			served = req.accept();
 			served.writeString("hello");
@@ -1073,7 +1101,7 @@ test("integration: ietf draft-14 subscriber teardown on last unsubscribe", async
 	const announced = client.announced();
 	await announced.next();
 
-	const remote = client.consume(Path.from("test"));
+	const remote = wireOf(client).consume(Path.from("test"));
 	const sub = remote.track("video").subscribe().ordered();
 	expect(await sub.readString()).toBe("hello");
 	await waitUntil(() => served?.used.peek() === true);
@@ -1105,7 +1133,7 @@ test("integration: lite fetch teardown when the reader abandons an open group", 
 	const group = video.appendGroup(); // deliberately left open: an indefinite group.
 	group.writeString("hello");
 
-	const remote = client.consume(Path.from("test"));
+	const remote = wireOf(client).consume(Path.from("test"));
 	const fetched = await remote.track("video").fetchGroup(group.sequence);
 	expect(await fetched.readString()).toBe("hello");
 
@@ -1144,7 +1172,7 @@ test("integration: lite fan-out keeps the upstream until the last subscriber lea
 	const video = broadcast.createTrack("video");
 	video.writeString("hello");
 
-	const remote = client.consume(Path.from("test"));
+	const remote = wireOf(client).consume(Path.from("test"));
 	const a = remote.track("video").subscribe().ordered();
 	const b = remote.track("video").subscribe().ordered();
 	expect(await a.readString()).toBe("hello");
@@ -1180,7 +1208,7 @@ test("integration: lite re-subscribe re-opens the upstream after each teardown",
 	const broadcast = publish(origin, Path.from("test"));
 	const video = broadcast.createTrack("video");
 
-	const remote = client.consume(Path.from("test"));
+	const remote = wireOf(client).consume(Path.from("test"));
 
 	for (let i = 0; i < 8; i++) {
 		video.writeString(`hello-${i}`);
@@ -1213,7 +1241,7 @@ test("integration: lite coalesced fetch stays until every reader abandons the op
 	const group = video.appendGroup(); // open
 	group.writeString("hello");
 
-	const remote = client.consume(Path.from("test"));
+	const remote = wireOf(client).consume(Path.from("test"));
 	const f1 = await remote.track("video").fetchGroup(group.sequence);
 	const f2 = await remote.track("video").fetchGroup(group.sequence);
 	expect(await f1.readString()).toBe("hello");
@@ -1254,7 +1282,7 @@ test("integration: lite fetch delivers every frame of a finite multi-frame group
 	for (let i = 0; i < count; i++) group.writeString(`f${i}`);
 	group.close(); // finite
 
-	const remote = client.consume(Path.from("test"));
+	const remote = wireOf(client).consume(Path.from("test"));
 	const fetched = await remote.track("video").fetchGroup(group.sequence);
 	for (let i = 0; i < count; i++) {
 		expect(await fetched.readString()).toBe(`f${i}`);
@@ -1288,11 +1316,11 @@ async function runSubscribeWithoutWarmup(version: number) {
 
 	const broadcast = publish(origin, Path.from("test"));
 	const serving = (async () => {
-		const req = await broadcast.requested();
+		const req = await wireOf(broadcast).requested();
 		if (req) req.accept().writeString("hello");
 	})();
 
-	const remote = client.consume(Path.from("test"));
+	const remote = wireOf(client).consume(Path.from("test"));
 	const track = remote.track("video").subscribe().ordered();
 	const data = await Promise.race([
 		track.readString(),
@@ -1331,8 +1359,8 @@ test("integration: subscribe to non-existent broadcast", async () => {
 	]);
 
 	// Client tries to consume a broadcast that nobody is publishing
-	const remote = client.consume(Path.from("nonexistent"));
-	const track = remote.subscribe("video").ordered();
+	const remote = wireOf(client).consume(Path.from("nonexistent"));
+	const track = remote.track("video").subscribe().ordered();
 
 	// Reading should eventually error since the broadcast doesn't exist
 	await expect(
@@ -1354,18 +1382,19 @@ async function waitFor<T>(signal: Getter<T>, pred: (value: T) => boolean): Promi
 	}
 }
 
-test("integration: announcedBroadcast waits for a late publisher", async () => {
+test("integration: an announced request waits for a late publisher", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
 	const origin = new OriginProducer();
+	const clientOrigin = new OriginProducer();
 	const [client, server] = await Promise.all([
-		connect(url, { transport: pair.client }),
+		connect(url, { transport: pair.client, consume: clientOrigin }),
 		accept(pair.server, url, { publish: origin.consume() }),
 	]);
 
 	// Serves every requested track with `payload`, until the broadcast closes.
 	const serve = async (broadcast: BroadcastProducer, payload: string) => {
 		for (;;) {
-			const req = await broadcast.requested();
+			const req = await wireOf(broadcast).requested();
 			if (!req) break;
 			req.accept().writeString(payload);
 		}
@@ -1373,7 +1402,7 @@ test("integration: announcedBroadcast waits for a late publisher", async () => {
 
 	// Nobody publishes this path yet. A blind consume would be reset (see the
 	// "subscribe to non-existent broadcast" test); the handle just stays offline.
-	const watched = client.announcedBroadcast(Path.from("late"));
+	const watched = clientOrigin.request(Path.from("late"), { announced: true });
 	await sleep(50);
 	expect(watched.active.peek()).toBeUndefined();
 
@@ -1383,7 +1412,7 @@ test("integration: announcedBroadcast waits for a late publisher", async () => {
 
 	const active = await waitFor(watched.active, (b) => b !== undefined);
 	if (!active) throw new Error("expected an active broadcast");
-	expect(await active.subscribe("video").ordered().readString()).toBe("hello");
+	expect(await active.track("video").subscribe().ordered().readString()).toBe("hello");
 
 	// It goes away.
 	first.close();
@@ -1397,60 +1426,63 @@ test("integration: announcedBroadcast waits for a late publisher", async () => {
 	const republished = await waitFor(watched.active, (b) => b !== undefined);
 	if (!republished) throw new Error("expected a republished broadcast");
 	expect(republished).not.toBe(active);
-	expect(await republished.subscribe("video").ordered().readString()).toBe("world");
+	expect(await republished.track("video").subscribe().ordered().readString()).toBe("world");
 
 	// Closing the handle releases the broadcast it held.
 	watched.close();
 	expect(watched.active.peek()).toBeUndefined();
-	expect(republished.closed.peek()).not.toBeUndefined();
 
 	second.close();
 	await servingSecond;
 	client.close();
 	server.close();
+	clientOrigin.close();
 });
 
-test("integration: announcedBroadcast consumes blind without discovery", async () => {
+test("integration: an announced request consumes blind without discovery", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
 	const origin = new OriginProducer();
+	const clientOrigin = new OriginProducer();
 	const [client, server] = await Promise.all([
-		connect(url, { transport: pair.client, discovery: false }),
+		connect(url, { transport: pair.client, discovery: false, consume: clientOrigin }),
 		accept(pair.server, url, { publish: origin.consume() }),
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
 	const serving = (async () => {
 		for (;;) {
-			const req = await broadcast.requested();
+			const req = await wireOf(broadcast).requested();
 			if (!req) break;
 			req.accept().writeString("blind");
 		}
 	})();
 
 	// No announcement ever arrives, so waiting for one would hang. Subscribe anyway.
-	const watched = client.announcedBroadcast(Path.from("test"));
+	const watched = clientOrigin.request(Path.from("test"), { announced: true });
 	const active = await waitFor(watched.active, (b) => b !== undefined);
 	if (!active) throw new Error("expected an active broadcast");
-	expect(await active.subscribe("video").ordered().readString()).toBe("blind");
+	expect(await active.track("video").subscribe().ordered().readString()).toBe("blind");
 
 	watched.close();
 	broadcast.close();
 	await serving;
 	client.close();
 	server.close();
+	clientOrigin.close();
 });
 
 test("integration: a republish is not served from the previous generation's cache", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
 	const origin = new OriginProducer();
+	const clientOrigin = new OriginProducer();
 	const [client, server] = await Promise.all([
-		connect(url, { transport: pair.client }),
+		connect(url, { transport: pair.client, consume: clientOrigin }),
 		accept(pair.server, url, { publish: origin.consume() }),
 	]);
 
 	const serve = async (broadcast: BroadcastProducer, payload: string) => {
 		for (;;) {
-			const req = await broadcast.requested();
+			const req = await wireOf(broadcast).requested();
 			if (!req) break;
 			req.accept().writeString(payload);
 		}
@@ -1459,15 +1491,15 @@ test("integration: a republish is not served from the previous generation's cach
 	const first = publish(origin, Path.from("shared"));
 	const servingFirst = serve(first, "old");
 
-	const watched = client.announcedBroadcast(Path.from("shared"));
+	const watched = clientOrigin.request(Path.from("shared"), { announced: true });
 	const active = await waitFor(watched.active, (b) => b !== undefined);
 	if (!active) throw new Error("expected an active broadcast");
-	expect(await active.subscribe("video").ordered().readString()).toBe("old");
+	expect(await active.track("video").subscribe().ordered().readString()).toBe("old");
 
 	// A second holder of the same path, which is what makes the cache reachable: consumed
 	// broadcasts are reference-counted, so the handle closing its own copy below does not
 	// release the shared one.
-	const bystander = client.consume(Path.from("shared"));
+	const bystander = wireOf(client).consume(Path.from("shared"));
 
 	first.close();
 	await servingFirst;
@@ -1480,7 +1512,7 @@ test("integration: a republish is not served from the previous generation's cach
 
 	const republished = await waitFor(watched.active, (b) => b !== undefined);
 	if (!republished) throw new Error("expected a republished broadcast");
-	expect(await republished.subscribe("video").ordered().readString()).toBe("new");
+	expect(await republished.track("video").subscribe().ordered().readString()).toBe("new");
 
 	bystander.close();
 	watched.close();
@@ -1488,6 +1520,7 @@ test("integration: a republish is not served from the previous generation's cach
 	await servingSecond;
 	client.close();
 	server.close();
+	clientOrigin.close();
 });
 
 // #3363: an `invisible muted` <moq-publish> unpublishes and republishes the same path on one
@@ -1497,8 +1530,9 @@ test("integration: a republish is not served from the previous generation's cach
 async function runRepublishCycle(protocol: string, version?: number) {
 	const pair = createMockTransportPair(protocol);
 	const origin = new OriginProducer();
+	const clientOrigin = new OriginProducer();
 	const [client, server] = await Promise.all([
-		connect(url, { transport: pair.client }),
+		connect(url, { transport: pair.client, consume: clientOrigin }),
 		accept(
 			pair.server,
 			url,
@@ -1508,13 +1542,13 @@ async function runRepublishCycle(protocol: string, version?: number) {
 
 	const serve = async (broadcast: BroadcastProducer, payload: string) => {
 		for (;;) {
-			const req = await broadcast.requested();
+			const req = await wireOf(broadcast).requested();
 			if (!req) break;
 			req.accept().writeString(payload);
 		}
 	};
 
-	const watched = client.announcedBroadcast(Path.from("toggle"));
+	const watched = clientOrigin.request(Path.from("toggle"), { announced: true });
 
 	let previous: BroadcastConsumer | undefined;
 	for (let generation = 0; generation < 3; generation++) {
@@ -1530,7 +1564,7 @@ async function runRepublishCycle(protocol: string, version?: number) {
 		);
 		if (!active) throw new Error("expected an active broadcast");
 		const frame = withTimeout(
-			active.subscribe("audio").ordered().readString(),
+			active.track("audio").subscribe().ordered().readString(),
 			1000,
 			`generation ${generation} never served a frame`,
 		);
@@ -1544,6 +1578,7 @@ async function runRepublishCycle(protocol: string, version?: number) {
 
 	watched.close();
 	origin.close();
+	clientOrigin.close();
 	client.close();
 	server.close();
 }
@@ -1559,49 +1594,52 @@ test("integration: ietf republish on one session swaps the handle every generati
 test("integration: a blind handle picks up a publisher that arrives late", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
 	const origin = new OriginProducer();
+	const clientOrigin = new OriginProducer();
 	const [client, server] = await Promise.all([
-		connect(url, { transport: pair.client, discovery: false }),
+		connect(url, { transport: pair.client, discovery: false, consume: clientOrigin }),
 		accept(pair.server, url, { publish: origin.consume() }),
 	]);
 
 	// Without discovery there is no announcement to wait for, so the handle consumes blind.
-	const watched = client.announcedBroadcast(Path.from("later"));
+	const watched = clientOrigin.request(Path.from("later"), { announced: true });
 	const blind = await waitFor(watched.active, (b) => b !== undefined);
 	if (!blind) throw new Error("expected a blind consumer");
 
 	// Nobody publishes the path yet, so a subscribe is how the caller finds out. That kills the
 	// track, not the handle: a consumed broadcast is scoped to the path, not to one publisher.
-	await expect(blind.subscribe("video").ordered().readString()).rejects.toThrow();
+	await expect(blind.track("video").subscribe().ordered().readString()).rejects.toThrow();
 	expect(watched.active.peek()).toBe(blind);
 
 	// So a subscribe made after the publisher finally shows up still works, on the same handle.
 	const producer = publish(origin, Path.from("later"));
 	const serving = (async () => {
 		for (;;) {
-			const req = await producer.requested();
+			const req = await wireOf(producer).requested();
 			if (!req) break;
 			req.accept().writeString("late");
 		}
 	})();
 
-	expect(await blind.subscribe("video").ordered().readString()).toBe("late");
+	expect(await blind.track("video").subscribe().ordered().readString()).toBe("late");
 
 	watched.close();
 	producer.close();
 	await serving;
 	client.close();
 	server.close();
+	clientOrigin.close();
 });
 
 test("integration: a blind handle goes offline when the session dies", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
 	const origin = new OriginProducer();
+	const clientOrigin = new OriginProducer();
 	const [client, server] = await Promise.all([
-		connect(url, { transport: pair.client, discovery: false }),
+		connect(url, { transport: pair.client, discovery: false, consume: clientOrigin }),
 		accept(pair.server, url, { publish: origin.consume() }),
 	]);
 
-	const watched = client.announcedBroadcast(Path.from("whatever"));
+	const watched = clientOrigin.request(Path.from("whatever"), { announced: true });
 	await waitFor(watched.active, (b) => b !== undefined);
 
 	// The gated path goes offline when the announcement stream ends with the session. There is
@@ -1611,6 +1649,7 @@ test("integration: a blind handle goes offline when the session dies", async () 
 	await waitFor(watched.active, (b) => b === undefined);
 
 	watched.close();
+	clientOrigin.close();
 });
 
 // The handle and the consume-cache eviction are protocol-agnostic, but their implementations
@@ -1618,35 +1657,37 @@ test("integration: a blind handle goes offline when the session dies", async () 
 test("integration: ietf blind handle picks up a publisher that arrives late", async () => {
 	const pair = createMockTransportPair("");
 	const origin = new OriginProducer();
+	const clientOrigin = new OriginProducer();
 	const [client, server] = await Promise.all([
-		connect(url, { transport: pair.client, discovery: false }),
+		connect(url, { transport: pair.client, discovery: false, consume: clientOrigin }),
 		accept(pair.server, url, { version: Ietf.Version.DRAFT_14, publish: origin.consume() }),
 	]);
 
-	const watched = client.announcedBroadcast(Path.from("later"));
+	const watched = clientOrigin.request(Path.from("later"), { announced: true });
 	const blind = await waitFor(watched.active, (b) => b !== undefined);
 	if (!blind) throw new Error("expected a blind consumer");
 
 	// Rejects with 404 rather than resetting the whole handle.
-	await expect(blind.subscribe("video").ordered().readString()).rejects.toThrow();
+	await expect(blind.track("video").subscribe().ordered().readString()).rejects.toThrow();
 	expect(watched.active.peek()).toBe(blind);
 
 	const producer = publish(origin, Path.from("later"));
 	const serving = (async () => {
 		for (;;) {
-			const req = await producer.requested();
+			const req = await wireOf(producer).requested();
 			if (!req) break;
 			req.accept().writeString("ietf-late");
 		}
 	})();
 
-	expect(await blind.subscribe("video").ordered().readString()).toBe("ietf-late");
+	expect(await blind.track("video").subscribe().ordered().readString()).toBe("ietf-late");
 
 	watched.close();
 	producer.close();
 	await serving;
 	client.close();
 	server.close();
+	clientOrigin.close();
 });
 
 // ---------------------------------------------------------------------------
@@ -1676,7 +1717,7 @@ async function runOriginFlow(protocol: string, version?: number) {
 	const broadcast = publish(serverOrigin, Path.from("test"));
 	const serving = (async () => {
 		for (;;) {
-			const req = await broadcast.requested();
+			const req = await wireOf(broadcast).requested();
 			if (!req) break;
 			if (req.name !== "video") {
 				req.reject(new Error(`unexpected track: ${req.name}`));
@@ -1700,7 +1741,7 @@ async function runOriginFlow(protocol: string, version?: number) {
 	// Unpublishing retracts the entry over the wire and out of the origin.
 	broadcast.close();
 	expect(await announced.next()).toMatchObject({ path: Path.from("test"), kind: "retracted" });
-	await until(() => !reader.routes(Path.from("test")));
+	await until(() => !wireOf(reader).routes(Path.from("test")));
 
 	await serving;
 	track.close();
@@ -1734,13 +1775,13 @@ test("origin: remote entries retract when the session dies, local ones survive",
 	const mine = publish(clientOrigin, Path.from("mine"));
 
 	const reader = clientOrigin.consume();
-	await until(() => reader.routes(Path.from("remote")));
+	await until(() => wireOf(reader).routes(Path.from("remote")));
 
 	client.close();
 	server.close();
 
 	// The session that fed the entry is gone, so the entry goes with it.
-	await until(() => !reader.routes(Path.from("remote")));
+	await until(() => !wireOf(reader).routes(Path.from("remote")));
 
 	// The local publish is not the session's to take.
 	const local = await routed(reader, Path.from("mine"));
@@ -1769,7 +1810,7 @@ test("origin: one origin on both directions consumes locally and never echoes", 
 	{
 		const remote = publish(serverSees, Path.from("from-server"));
 		const reader = shared.consume();
-		await until(() => reader.routes(Path.from("from-server")));
+		await until(() => wireOf(reader).routes(Path.from("from-server")));
 		remote.close();
 	}
 
@@ -1779,20 +1820,20 @@ test("origin: one origin on both directions consumes locally and never echoes", 
 	const reader = shared.consume();
 	const loopback = await routed(reader, Path.from("from-client"));
 	if (!loopback) throw new Error("expected a local route");
-	const track = loopback.subscribe("chat");
+	const track = loopback.track("chat").subscribe();
 	expect(track).toBeDefined();
 	track.close();
 	loopback.close();
 
 	// The server sees the client's broadcast once, as its own remote entry.
 	const serverReader = serverSees.consume();
-	await until(() => serverReader.routes(Path.from("from-client")));
+	await until(() => wireOf(serverReader).routes(Path.from("from-client")));
 
 	// The critical part: the client must NOT re-announce "from-server" back. If it did, the
 	// server's forwarder would insert it as a remote entry in serverSees. Give the wire a
 	// moment, then check the only remote entry the server has is the client's own broadcast.
 	await sleep(50);
-	expect(serverReader.routes(Path.from("from-server"))).toBe(false);
+	expect(wireOf(serverReader).routes(Path.from("from-server"))).toBe(false);
 
 	mine.close();
 	client.close();
@@ -1815,7 +1856,7 @@ test("origin: a request resolves blind on a relay without discovery", async () =
 	const broadcast = publish(serverOrigin, Path.from("blind"));
 	const serving = (async () => {
 		for (;;) {
-			const req = await broadcast.requested();
+			const req = await wireOf(broadcast).requested();
 			if (!req) break;
 			req.accept().writeString("found you");
 		}
@@ -1825,7 +1866,7 @@ test("origin: a request resolves blind on a relay without discovery", async () =
 	expect(reader.discovery.peek()).toBe(false);
 
 	// Nothing announced, so the table stays empty; a request is the only way through.
-	expect(reader.routes(Path.from("blind"))).toBe(false);
+	expect(wireOf(reader).routes(Path.from("blind"))).toBe(false);
 
 	const request = reader.request(Path.from("blind"));
 	await until(() => request.active.peek() !== undefined);
@@ -1901,7 +1942,7 @@ test("origin: a reactive handle follows announcements, republishes, and reconnec
 		accept(pair.server, url, { publish: serverOrigin.consume() }),
 	]);
 
-	const watch = new Announce.Broadcast({ origin: clientOrigin, path: Path.from("show") });
+	const watch = clientOrigin.request(Path.from("show"), { announced: true });
 
 	// Nothing published yet: the handle waits instead of subscribing blind.
 	for (let i = 0; i < 5; i++) await sleep(1);
@@ -1943,7 +1984,7 @@ test("origin: overlapping sessions carrying one path fail over", async () => {
 		const broadcast = publish(serverOrigin, Path.from("redundant"));
 		const serving = (async () => {
 			for (;;) {
-				const req = await broadcast.requested();
+				const req = await wireOf(broadcast).requested();
 				if (!req) break;
 				req.accept().writeString("still here");
 			}
@@ -1955,7 +1996,7 @@ test("origin: overlapping sessions carrying one path fail over", async () => {
 	const second = await setup();
 
 	const reader = clientOrigin.consume();
-	await until(() => reader.routes(Path.from("redundant")));
+	await until(() => wireOf(reader).routes(Path.from("redundant")));
 
 	// The newer session dies; the older one still carries the path and must keep serving.
 	second.client.close();
@@ -1993,7 +2034,7 @@ test("origin: a standby session re-answers a request when the answerer dies", as
 		const broadcast = publish(serverOrigin, Path.from("blind"));
 		const serving = (async () => {
 			for (;;) {
-				const req = await broadcast.requested();
+				const req = await wireOf(broadcast).requested();
 				if (!req) break;
 				req.accept().writeString(payload);
 			}
@@ -2062,7 +2103,7 @@ test("create then announce is discoverable on the wire", async () => {
 test("a handle serves a request under live/** over the wire", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
 	const origin = new OriginProducer();
-	const handle = origin.dynamic("live");
+	const handle = origin.dynamic(Path.from("live"));
 
 	const serving = (async () => {
 		for await (const request of handle.requested()) {
@@ -2082,7 +2123,7 @@ test("a handle serves a request under live/** over the wire", async () => {
 	expect(entry?.path).toBe("live" as Path.Valid);
 	expect(entry?.kind).toBe("announced");
 
-	const remote = client.consume(Path.from("live/cam"));
+	const remote = wireOf(client).consume(Path.from("live/cam"));
 	const track = remote.track("chat").subscribe().ordered();
 	expect(await track.readString()).toBe("hello");
 

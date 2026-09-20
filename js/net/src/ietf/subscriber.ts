@@ -10,6 +10,7 @@ import type { Reader, Stream } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { withTimeout } from "../util/timeout.ts";
+import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
 import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.ts";
 import * as Cluster from "./cluster.ts";
@@ -428,7 +429,7 @@ export class Subscriber {
 
 		void (async () => {
 			for (;;) {
-				const request = await consumer.requested();
+				const request = await wireOf(consumer).requested();
 				if (!request) break;
 				void this.#runSubscribe(path, request);
 			}
@@ -958,17 +959,15 @@ export class Subscriber {
  * group fetch, so `track.Consumer.fetchGroup()` is rejected.
  */
 class ConsumeBroadcast extends broadcast.Consumer {
-	// biome-ignore lint/complexity/noUselessConstructor: widens the protected base constructor to public
 	constructor(state?: never) {
 		super(state);
+		overrideBroadcastWire(this, {
+			fetchGroup: () => Promise.reject(new Error("fetch group is not supported for moq-transport")),
+		});
 	}
 
 	// Preserve the subclass when the consume cache shares this broadcast across callers.
 	override clone(): ConsumeBroadcast {
 		return new ConsumeBroadcast(this.shareState());
-	}
-
-	override fetchGroup(): Promise<netGroup.Consumer> {
-		return Promise.reject(new Error("fetch group is not supported for moq-transport"));
 	}
 }

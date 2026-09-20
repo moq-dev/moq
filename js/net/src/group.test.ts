@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { FrameTooLarge, GroupTooLarge, MAX_GROUP_CACHE_BYTES, MAX_GROUP_FRAMES, Producer } from "./group.ts";
+import { FrameTooLarge, GroupTooLarge } from "./error.ts";
+import { MAX_GROUP_CACHE_BYTES, MAX_GROUP_FRAMES, Producer } from "./group.ts";
 import { Timestamp } from "./time.ts";
 
 const dec = new TextDecoder();

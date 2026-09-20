@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Format as LocFormat, Producer as LocProducer } from "@moq/loc";
-import { Group, SessionCode, SessionError, StreamCode, StreamError, Time, Track, Varint } from "@moq/net";
+import { Group, Error as NetError, SessionCode, StreamCode, Time, Track, Varint } from "@moq/net";
 import { AudioConfigSchema } from "../catalog/audio.ts";
 import { decodeInitSegment, type InitSegment } from "./cmaf/decode.ts";
 import { createAudioInitSegment, encodeDataSegment } from "./cmaf/encode.ts";
@@ -50,7 +50,7 @@ function settle(ms = 20): Promise<void> {
 // These tests write every group up front and only then read, so they ask for history
 // rather than the live edge.
 function replay(track: Track.Producer): Track.Subscriber {
-	return track.subscribe({ maxAge: 30_000 });
+	return track.subscribe({ maxAge: Time.Milli(30_000) });
 }
 
 // --- LegacyFormat ---
@@ -130,7 +130,7 @@ test("Legacy Producer accepts open-GOP leading pictures above the previous group
 
 test("Legacy Producer writes a duration marker at the next keyframe", async () => {
 	const track = new Track.Producer("test");
-	const subscriber = track.subscribe({ maxAge: 30_000 });
+	const subscriber = track.subscribe({ maxAge: Time.Milli(30_000) });
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	producer.encode(new Uint8Array([0xde, 0xad]), 0 as Time.Micro, true);
 	producer.encode(new Uint8Array([0xbe, 0xef]), 10_000 as Time.Micro, false);
@@ -155,7 +155,7 @@ test("Legacy Producer writes a duration marker at the next keyframe", async () =
 
 test("Legacy Producer omits a reordered group's presentation endpoint marker", async () => {
 	const track = new Track.Producer("test");
-	const subscriber = track.subscribe({ maxAge: 30_000 });
+	const subscriber = track.subscribe({ maxAge: Time.Milli(30_000) });
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	for (const [index, timestamp] of [0, 120_000, 40_000, 80_000].entries()) {
 		producer.encode(new Uint8Array([1]), timestamp as Time.Micro, index === 0);
@@ -180,7 +180,7 @@ test("Legacy Producer omits a reordered group's presentation endpoint marker", a
 
 test("Legacy Producer estimates the tail from the current cadence", async () => {
 	const track = new Track.Producer("test");
-	const subscriber = track.subscribe({ maxAge: 30_000 });
+	const subscriber = track.subscribe({ maxAge: Time.Milli(30_000) });
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	for (const [index, timestamp] of [0, 16_000, 32_000, 65_000, 98_000].entries()) {
 		producer.encode(new Uint8Array([1]), timestamp as Time.Micro, index === 0);
@@ -200,7 +200,7 @@ test("Legacy Producer estimates the tail from the current cadence", async () => 
 
 test("Legacy Producer rejects a backwards cut without closing the group", async () => {
 	const track = new Track.Producer("test");
-	const subscriber = track.subscribe({ maxAge: 30_000 });
+	const subscriber = track.subscribe({ maxAge: Time.Milli(30_000) });
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	producer.encode(new Uint8Array([1]), 20_000 as Time.Micro, true);
 	expect(() => producer.cut(10_000 as Time.Micro)).toThrow();
@@ -1445,7 +1445,7 @@ for (const code of [StreamCode.Cancel, StreamCode.Internal, StreamCode.Old, Stre
 				timestamp: Time.Timestamp.now(),
 			});
 			await settle();
-			group.close(new StreamError(code));
+			group.close(new NetError.Stream(code));
 			await settle();
 			expect((await consumer.next())?.frame?.payload).toEqual(new Uint8Array([1]));
 			expect((await consumer.next())?.frame).toBeUndefined();
@@ -1470,9 +1470,9 @@ for (const code of [StreamCode.Cancel, StreamCode.Internal, StreamCode.Old, Stre
 
 for (const end of [
 	null,
-	new StreamError(StreamCode.Cancel),
-	new StreamError(StreamCode.Internal),
-	new SessionError(SessionCode.ProtocolViolation),
+	new NetError.Stream(StreamCode.Cancel),
+	new NetError.Stream(StreamCode.Internal),
+	new NetError.Session(SessionCode.ProtocolViolation),
 ]) {
 	test(`Consumer settles a pending read when the track ends: ${end}`, async () => {
 		const track = new Track.Producer("test");
@@ -1495,7 +1495,7 @@ test("a group reset does not hide a later container decode failure", async () =>
 	try {
 		const reset = track.appendGroup();
 		await settle();
-		reset.close(new StreamError(StreamCode.Cancel));
+		reset.close(new NetError.Stream(StreamCode.Cancel));
 		await settle();
 		const malformed = track.appendGroup();
 		malformed.writeFrame({ payload: new Uint8Array(), timestamp: Time.Timestamp.now() });
@@ -1509,7 +1509,11 @@ test("a group reset does not hide a later container decode failure", async () =>
 	}
 });
 
-for (const end of [null, new StreamError(StreamCode.Internal), new SessionError(SessionCode.ProtocolViolation)]) {
+for (const end of [
+	null,
+	new NetError.Stream(StreamCode.Internal),
+	new NetError.Session(SessionCode.ProtocolViolation),
+]) {
 	test(`Consumer drains a permanent buffered gap after track termination: ${end}`, async () => {
 		const track = new Track.Producer("test");
 		const consumer = new Consumer(replay(track), {

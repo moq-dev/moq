@@ -5,7 +5,7 @@ import { Consumer, Producer, Rolled } from "./index.ts";
 
 // Ask for a replay window, so the superseded first group is delivered rather than skipped by the
 // subscriber's default max-age budget. A rolled log is exactly the case where both groups matter.
-const REPLAY_LATENCY = 30_000;
+const REPLAY_LATENCY = Time.Milli(30_000);
 
 const payloads = (count: number) => Array.from({ length: count }, (_, n) => new Uint8Array(8).fill(n));
 

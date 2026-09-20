@@ -2,7 +2,7 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import * as Msf from "@moq/msf";
 import type * as Moq from "@moq/net";
-import { Announce, Path, StreamError } from "@moq/net";
+import { Announce, Error as NetError, Path } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
 import { toHang } from "./msf";
@@ -256,7 +256,7 @@ export class Broadcast {
 			return;
 		}
 
-		const announced = new Announce.Broadcast({ origin: this.in.origin, path: name });
+		const announced = origin.request(name, { announced: true });
 		effect.cleanup(() => announced.close());
 
 		effect.run((nested) => {
@@ -332,7 +332,8 @@ export class Broadcast {
 					this.#out.status.set("live");
 				}
 			} catch (err) {
-				if (err instanceof StreamError) console.debug("catalog subscription ended", this.in.name.peek(), err);
+				if (err instanceof NetError.Stream)
+					console.debug("catalog subscription ended", this.in.name.peek(), err);
 				else console.error("error fetching catalog", this.in.name.peek(), err);
 			} finally {
 				this.#raw.set(undefined);

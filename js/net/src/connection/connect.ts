@@ -4,6 +4,7 @@ import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import { Stream } from "../stream.ts";
+import * as Time from "../time.ts";
 import * as Hex from "../util/hex.ts";
 import { dev, redact } from "../util/log.ts";
 import { isWebTransportSupported } from "./browser.ts";
@@ -12,14 +13,14 @@ import { forwardAnnounced } from "./forward.ts";
 import { exchangeSetup } from "./handshake.ts";
 
 // Default head start for WebTransport before attempting the WebSocket fallback.
-const DEFAULT_WEBSOCKET_DELAY_MS = 500;
+const DEFAULT_WEBSOCKET_DELAY_MS = Time.Milli(500);
 
 // RESET_STREAM and CONNECTION_CLOSE are separate transport notifications. Give the latter
 // time to surface its authoritative code without letting a reset-only peer stall SETUP forever.
 const SETUP_CLOSE_GRACE_MS = 100;
 
 /** Tuning for the WebSocket fallback used when WebTransport is unavailable or loses the connect race. */
-export interface WebSocketOptions {
+export interface WebSocketProps {
 	/** Enable the WebSocket fallback. Defaults to `true`. */
 	enabled?: boolean;
 
@@ -30,7 +31,7 @@ export interface WebSocketOptions {
 	 * The delay in milliseconds before attempting the WebSocket fallback (default: 500).
 	 * If WebSocket won the previous race for a given URL, this is 0.
 	 */
-	delay?: DOMHighResTimeStamp;
+	delay?: Time.Milli;
 }
 
 /**
@@ -63,11 +64,14 @@ export interface WebTransportProps extends Omit<WebTransportOptions, "serverCert
 
 /** Options for {@link connect}. */
 export interface ConnectProps {
+	/** The relay URL. */
+	url: URL;
+
 	/** WebTransport options. */
 	webtransport?: WebTransportProps;
 
 	/** WebSocket (fallback) options. */
-	websocket?: WebSocketOptions;
+	websocket?: WebSocketProps;
 
 	/**
 	 * Use a pre-existing WebTransport session instead of connecting; skips the
@@ -80,7 +84,7 @@ export interface ConnectProps {
 
 	/**
 	 * Whether the relay supports broadcast discovery; see {@link Established.discovery}.
-	 * Defaults to true, except for relays known to lack it.
+	 * Defaults to true.
 	 */
 	discovery?: boolean;
 
@@ -120,16 +124,6 @@ type SessionProps = {
 	publish?: OriginConsumer;
 };
 
-// Relays that don't implement broadcast discovery (SUBSCRIBE_NAMESPACE), so `announced()` would
-// never yield and a consumer waiting on an announcement would hang forever. Override with the
-// `discovery` option. Drop a host once its relay ships discovery.
-const NO_DISCOVERY_HOSTS = ["mediaoverquic.com"];
-
-/** Whether the relay at `url` is expected to support broadcast discovery. */
-function defaultDiscovery(url: URL): boolean {
-	return !NO_DISCOVERY_HOSTS.some((host) => url.hostname.endsWith(host));
-}
-
 // Save if WebSocket won the last race, so we won't give QUIC a head start next time.
 const websocketWon = new Set<string>();
 
@@ -143,8 +137,8 @@ const NEVER_ABORTED = new AbortController().signal;
  * @param props - Connection options
  * @returns A promise that resolves to an established session
  */
-export async function connect(url: URL, props?: ConnectProps): Promise<Established> {
-	const signal = props?.signal ?? NEVER_ABORTED;
+export async function connect({ url, ...props }: ConnectProps): Promise<Established> {
+	const signal = props.signal ?? NEVER_ABORTED;
 	signal.throwIfAborted();
 
 	// Resolves on abort so every in-flight transport tears itself down.
@@ -157,7 +151,7 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 		// A `pending` rejection propagates unless the abort beat it to the finish line.
 		const connection = await Promise.race([pending, abort.then(() => undefined)]);
 		if (connection && !signal.aborted) {
-			if (props?.consume) forwardAnnounced(connection, props.consume);
+			if (props.consume) forwardAnnounced(connection, props.consume);
 			return connection;
 		}
 
@@ -169,13 +163,13 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	}
 }
 
-async function connectInner(url: URL, props: ConnectProps | undefined, abort: Promise<void>): Promise<Established> {
+async function connectInner(url: URL, props: Omit<ConnectProps, "url">, abort: Promise<void>): Promise<Established> {
 	const wiring: SessionProps = {
-		discovery: props?.discovery ?? defaultDiscovery(url),
-		publish: props?.publish,
+		discovery: props.discovery ?? true,
+		publish: props.publish,
 	};
 
-	if (props?.transport) {
+	if (props.transport) {
 		const transport = props.transport;
 		void abort.then(() => transport.close());
 		return connectTransport(url, transport, wiring);
@@ -185,15 +179,15 @@ async function connectInner(url: URL, props: ConnectProps | undefined, abort: Pr
 	const { promise: raced, resolve: done } = Promise.withResolvers<void>();
 	const cancel = Promise.race([raced, abort]);
 
-	const webtransport = isWebTransportSupported() ? connectWebTransport(url, cancel, props?.webtransport) : undefined;
+	const webtransport = isWebTransportSupported() ? connectWebTransport(url, cancel, props.webtransport) : undefined;
 
 	// Give QUIC a head start to connect before trying WebSocket, unless WebSocket has won in the past.
 	// NOTE that QUIC should be faster because it involves 1/2 fewer RTTs.
 	const headstart =
-		!webtransport || websocketWon.has(url.toString()) ? 0 : (props?.websocket?.delay ?? DEFAULT_WEBSOCKET_DELAY_MS);
+		!webtransport || websocketWon.has(url.toString()) ? 0 : (props.websocket?.delay ?? DEFAULT_WEBSOCKET_DELAY_MS);
 	const websocket =
-		props?.websocket?.enabled !== false
-			? connectWebSocket(props?.websocket?.url ?? url, headstart, cancel)
+		props.websocket?.enabled !== false
+			? connectWebSocket(props.websocket?.url ?? url, headstart, cancel)
 			: undefined;
 
 	if (!websocket && !webtransport) {
