@@ -56,8 +56,8 @@ pub(crate) struct Row {
 	/// This rendition's group ranges within the segment. Empty means the rendition has no
 	/// content for the span (`EXT-X-GAP`).
 	pub ranges: Vec<Range>,
-	/// Presentation duration in seconds.
-	pub duration: f64,
+	/// Presentation duration.
+	pub duration: Duration,
 	/// The segment's starting presentation timestamp.
 	pub pts: moq_net::Timestamp,
 	/// The segment's ending presentation timestamp (`pts + duration`), for window eviction
@@ -289,8 +289,8 @@ pub struct Segment {
 	pub segment: u64,
 	/// The transmuxed CMAF fragment (`moof`+`mdat`), fetched on demand by [`Consumer::next`].
 	pub media: Bytes,
-	/// Presentation duration in seconds.
-	pub duration: f64,
+	/// Presentation duration.
+	pub duration: Duration,
 	/// Wall-clock start time, when the timeline advertises an anchor.
 	pub program_date_time: Option<SystemTime>,
 	/// The media timeline is broken before this segment: one or more segments were skipped
@@ -397,7 +397,7 @@ mod tests {
 			index: segment,
 			segment,
 			ranges: vec![Range::new(group, group)],
-			duration: duration_ms as f64 / 1000.0,
+			duration: Duration::from_millis(duration_ms),
 			pts,
 			end: Duration::from(pts) + Duration::from_millis(duration_ms),
 		}
@@ -414,7 +414,7 @@ mod tests {
 		assert!(!window.ended);
 		assert_eq!(window.segments.len(), 2, "rows are complete segments; all are listed");
 		assert_eq!(window.segments[0].segment, 0);
-		assert_eq!(window.segments[0].duration, 2.0);
+		assert_eq!(window.segments[0].duration, Duration::from_secs(2));
 
 		live.end();
 		assert!(live.window().ended);
@@ -432,8 +432,8 @@ mod tests {
 		// Segments still cover >= 4s after eviction, and the sequence is the first listed
 		// segment's aligned number.
 		assert!(snapshot.sequence > 0);
-		let span: f64 = snapshot.segments.iter().map(|s| s.duration).sum();
-		assert!(span >= 4.0);
+		let span: Duration = snapshot.segments.iter().map(|s| s.duration).sum();
+		assert!(span >= Duration::from_secs(4));
 		assert_eq!(snapshot.segments.first().unwrap().segment, snapshot.sequence);
 	}
 
@@ -491,7 +491,7 @@ mod tests {
 				index: 1,
 				segment: 1,
 				ranges: Vec::new(),
-				duration: 1.0,
+				duration: Duration::from_secs(1),
 				pts: moq_net::Timestamp::from_millis(1_000).unwrap(),
 				end: Duration::from_millis(2_000),
 			},

@@ -107,11 +107,7 @@ impl EgressSource {
 	/// which takes the receiver via [`Self::take_writes`].
 	pub async fn new(source: moq_mux::Source) -> Result<Self> {
 		let mut consumer = source.catalog::<()>(moq_mux::catalog::CatalogFormat::Hang).await?;
-		let catalog = consumer
-			.next()
-			.await
-			.map_err(|err| Error::Other(anyhow::anyhow!("catalog subscribe: {err}")))?
-			.ok_or_else(|| Error::Other(anyhow::anyhow!("catalog closed before first snapshot")))?;
+		let catalog = consumer.next().await?.ok_or(Error::CatalogClosed)?;
 
 		let (tx, rx) = mpsc::channel(64);
 		Ok(Self {

@@ -61,8 +61,8 @@ pub async fn listen_import(target: ImportTarget, listen: Listen) -> anyhow::Resu
 	let mut config = server_config(&listen);
 	config.max_age = target.max_age;
 	config.bandwidth = target.bandwidth;
-	let server = moq_rtc::Server::new(config, publisher, target.origin.consume());
-	serve(server.publish_router(), "WHIP", listen).await
+	let server = moq_rtc::Server::new(config);
+	serve(server.publish_router(publisher), "WHIP", listen).await
 }
 
 /// WHEP server: serve WebRTC plays of `name` from the Origin (export).
@@ -73,11 +73,8 @@ pub async fn listen_export(origin: moq_net::origin::Consumer, name: String, list
 	let subscriber = origin
 		.scope("", &scope)
 		.with_context(|| format!("failed to scope origin to broadcast `{name}`"))?;
-	// A WHEP server only reads; it still needs a publisher handle for the shared
-	// glue, so hand it an unused, empty Origin producer.
-	let publisher = moq_tokio::origin::spawn();
-	let server = moq_rtc::Server::new(server_config(&listen), publisher, subscriber);
-	serve(server.subscribe_router(), "WHEP", listen).await
+	let server = moq_rtc::Server::new(server_config(&listen));
+	serve(server.subscribe_router(subscriber), "WHEP", listen).await
 }
 
 /// Restrict a producer to the single broadcast `name` so a WHIP peer can only publish it.

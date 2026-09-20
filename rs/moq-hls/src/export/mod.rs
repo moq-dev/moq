@@ -740,7 +740,7 @@ mod tests {
 		let playlist = rendition.playlist();
 		assert_eq!(playlist.segments.len(), 2, "the live-edge group is not listed");
 		assert_eq!(playlist.segments[0].segment, 0);
-		assert_eq!(playlist.segments[0].duration, 2.0);
+		assert_eq!(playlist.segments[0].duration, Duration::from_secs(2));
 		assert_eq!(playlist.segments[1].segment, 1);
 		assert_eq!(
 			playlist.target_duration, 2,
@@ -1107,7 +1107,7 @@ mod tests {
 		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
 
 		let playlist = rendition.playlist();
-		assert_eq!(playlist.segments[0].duration, 3.0);
+		assert_eq!(playlist.segments[0].duration, Duration::from_secs(3));
 		assert_eq!(
 			playlist.target_duration, 3,
 			"no bound was declared, so the target duration must still cover the 3s segment"
@@ -1179,7 +1179,11 @@ mod tests {
 		let audio_segments: Vec<u64> = audio_playlist.segments.iter().map(|s| s.segment).collect();
 		assert_eq!(video_segments, vec![0, 1]);
 		assert_eq!(audio_segments, vec![0, 1], "audio lists the same aligned segments");
-		assert_eq!(audio_playlist.segments[0].duration, 2.0, "cut at the video boundary");
+		assert_eq!(
+			audio_playlist.segments[0].duration,
+			Duration::from_secs(2),
+			"cut at the video boundary"
+		);
 
 		// The same URI names the same span of content time on either rendition.
 		let rendered = audio_rendition.media_playlist(None).expect("playable");
@@ -1926,7 +1930,7 @@ mod tests {
 			.expect("a segment, not end");
 		assert_eq!(first.segment, 0);
 		assert_eq!(&first.media[4..8], b"moof", "the segment carries its transmuxed media");
-		assert_eq!(first.duration, 2.0);
+		assert_eq!(first.duration, Duration::from_secs(2));
 		assert!(!first.discontinuity, "a clean start is not a discontinuity");
 
 		let second = segments.next().await.unwrap().expect("second segment");

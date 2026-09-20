@@ -20,10 +20,10 @@ what a subscriber received and played, per audio and video. The relay is
   `[<tier>/]sessions.json[.z]`, a `BTreeMap<String, Presence>` keyed by auth
   root, read through `Consumer::sessions` whatever `E` is; a client publishes
   it only when it holds sessions worth counting.
-- An exact-path mode. `ProducerConfig` treats its path as a prefix and
+- An exact-path mode. `produce::Config` treats its path as a prefix and
   advertises `<prefix>/node[/<node>]`, so a client asking for
   `room/alice.stats` would publish `room/alice.stats/node`, which no longer
-  ends in `.stats`. `ProducerConfig::at(path)` publishes the broadcast at
+  ends in `.stats`. `produce::Config::at(path)` publishes the broadcast at
   exactly that path with no category segment, refusing a path that does not
   end in `.stats`; the relay keeps the prefix layout. Test the advertised
   path for both modes.

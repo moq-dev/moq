@@ -18,21 +18,27 @@ use crate::{Error, Result, ingest::IngestSink, sdp, server::Server, session};
 
 pub use crate::server::Response;
 
+#[derive(Clone)]
+struct RouterState {
+	server: Server,
+	publisher: moq_net::origin::Producer,
+}
+
 /// Build the WHIP axum router.
-pub fn router(server: Server) -> Router {
+pub fn router(server: Server, publisher: moq_net::origin::Producer) -> Router {
 	Router::new()
-		.route("/{*path}", post(handle).delete(crate::server::delete))
-		.with_state(server)
+		.route("/{*path}", post(handle).delete(delete))
+		.with_state(RouterState { server, publisher })
 }
 
 async fn handle(
-	State(server): State<Server>,
+	State(state): State<RouterState>,
 	Path(path): Path<String>,
 	OriginalUri(uri): OriginalUri,
 	headers: HeaderMap,
 	body: Bytes,
 ) -> HttpResponse {
-	match accept_offer(&server, &path, &headers, body).await {
+	match accept_offer(&state.server, &state.publisher, &path, &headers, body).await {
 		Ok(response) => {
 			let Response {
 				resource_id,
@@ -58,12 +64,22 @@ async fn handle(
 
 /// Router glue: enforce the WHIP `Content-Type` then hand the raw offer to
 /// [`accept`], using the request path as the (unauthenticated) broadcast name.
-async fn accept_offer(server: &Server, path: &str, headers: &HeaderMap, body: Bytes) -> Result<Response> {
+async fn accept_offer(
+	server: &Server,
+	publisher: &moq_net::origin::Producer,
+	path: &str,
+	headers: &HeaderMap,
+	body: Bytes,
+) -> Result<Response> {
 	if !is_sdp(headers) {
 		return Err(Error::InvalidSdp("expected Content-Type: application/sdp".into()));
 	}
 	let offer = std::str::from_utf8(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
-	accept(server, server.publisher(), path, offer).await
+	accept(server, publisher, path, offer).await
+}
+
+async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> StatusCode {
+	crate::server::delete(&state.server, &path)
 }
 
 /// Accept a WHIP SDP offer and publish the negotiated WebRTC media into
@@ -85,7 +101,7 @@ async fn accept_offer(server: &Server, path: &str, headers: &HeaderMap, body: By
 /// `offer` is the raw SDP body; the caller is responsible for checking the
 /// `Content-Type: application/sdp` request header. Fails with
 /// [`Error::InvalidSdp`] on a malformed offer and surfaces
-/// [`moq_net::Error::Unauthorized`] (as [`Error::Other`]) if `broadcast` is
+/// [`moq_net::Error::Unauthorized`] if `broadcast` is
 /// outside `publisher`'s scope.
 pub async fn accept(
 	server: &Server,
@@ -99,12 +115,8 @@ pub async fn accept(
 	// Create the broadcast on the publish origin before negotiating, so a
 	// fast subscriber doesn't see a 404 in the gap between the SDP answer
 	// and the first RTP packet.
-	let producer = publisher
-		.create_broadcast(&broadcast)
-		.map_err(|err| Error::Other(anyhow::anyhow!("failed to create broadcast: {err}")))?;
-	producer
-		.announce(moq_net::origin::Route::default())
-		.map_err(|err| Error::Other(anyhow::anyhow!("failed to announce broadcast: {err}")))?;
+	let producer = publisher.create_broadcast(&broadcast)?;
+	producer.announce(moq_net::origin::Route::default())?;
 
 	let handle = producer.clone();
 	let config = moq_mux::catalog::Config::default()
@@ -161,6 +173,7 @@ fn status_for(err: &Error) -> StatusCode {
 		Error::InvalidSdp(_) => StatusCode::BAD_REQUEST,
 		Error::UnsupportedCodec(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
 		Error::SessionNotFound => StatusCode::NOT_FOUND,
+		Error::Moq(moq_net::Error::Unauthorized) => StatusCode::UNAUTHORIZED,
 		_ => StatusCode::INTERNAL_SERVER_ERROR,
 	}
 }

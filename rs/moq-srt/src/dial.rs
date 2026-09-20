@@ -4,10 +4,10 @@
 //! callers, this *dials* a remote `srt://host:port` as an SRT caller and bridges
 //! MPEG-TS in one of two directions, selected by the stream-id `m=` mode it sends:
 //!
-//! - **[`publish`] (push / restream)**: call with `m=publish`, read a MoQ
+//! - **[`Client::publish`] (push / restream)**: call with `m=publish`, read a MoQ
 //!   broadcast from an origin, re-mux it to MPEG-TS with [`moq_mux`], and send it
 //!   to the remote listener. This restreams MoQ out to a remote SRT ingest.
-//! - **[`pull`] (ingest)**: call with `m=request`, receive the remote's
+//! - **[`Client::pull`] (ingest)**: call with `m=request`, receive the remote's
 //!   MPEG-TS, demux it with [`moq_mux`], and publish the result into an origin as
 //!   an ordinary MoQ broadcast. This ingests a remote SRT source.
 //!
@@ -26,13 +26,12 @@ use srt_tokio::SrtSocket;
 use crate::Result;
 use crate::server::{DEFAULT_LATENCY, configure_buffers, serve_publish, serve_subscribe};
 
-/// Where to dial and how, shared by [`publish`] and [`pull`].
+/// An SRT caller that can publish a MoQ broadcast or pull a remote stream.
 ///
-/// Construct via [`Config::new`] and set the fields you need, so new options stay
-/// additive.
+/// Construct via [`Client::new`] and chain the `with_*` setters.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct Config {
+pub struct Client {
 	/// The remote SRT listener to call.
 	pub addr: SocketAddr,
 
@@ -42,7 +41,7 @@ pub struct Config {
 
 	/// SRT receive latency, negotiated at handshake time: the buffer that trades delay
 	/// for loss recovery. It doubles as [`publish`]'s egress skip threshold.
-	pub latency: Duration,
+	latency: Duration,
 
 	/// How long relays keep a non-latest group of an ingested media track fetchable, or
 	/// `None` for hang's own default.
@@ -53,14 +52,14 @@ pub struct Config {
 	/// advertise segments that are still fetchable. Lower it when nothing reads history
 	/// and the memory matters. [`pull`] only; [`publish`] reads a broadcast someone else
 	/// declared.
-	pub max_age: Option<Duration>,
+	max_age: Option<Duration>,
 
 	/// Connection allocator each ingested track claims its peak-hold bitrate on.
 	/// [`pull`] only; [`publish`] reads a broadcast someone else declared.
-	pub bandwidth: moq_net::bandwidth::Allocator,
+	bandwidth: moq_net::bandwidth::Allocator,
 }
 
-impl Config {
+impl Client {
 	/// Dial `addr` for `resource`, with the default SRT latency (500ms) and the
 	/// publisher's own media retention.
 	pub fn new(addr: SocketAddr, resource: impl Into<String>) -> Self {
@@ -72,56 +71,55 @@ impl Config {
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 		}
 	}
-}
 
-/// Push a MoQ broadcast out to the remote: connect as an SRT caller requesting the
-/// remote receive on [`Config::resource`] (`m=publish`), re-mux `path` from `origin`
-/// to MPEG-TS, and send it until the broadcast ends.
-///
-/// This future resolves when the broadcast ends, so callers usually run it on its own
-/// task.
-pub async fn publish(config: &Config, origin: &origin::Consumer, path: impl moq_net::AsPath) -> Result<()> {
-	let path = path.as_path();
-	let socket = call(config, Mode::Publish).await?;
-	serve_subscribe(origin, path.as_str(), socket, config.latency).await
-}
-
-/// Pull a remote stream into `origin`: connect as an SRT caller requesting the remote
-/// send on [`Config::resource`] (`m=request`), demux its MPEG-TS, and publish the
-/// result at `path` until the remote ends.
-///
-/// This future resolves when the remote stream ends, so callers usually run it on its
-/// own task.
-pub async fn pull(config: &Config, origin: &origin::Producer, path: impl moq_net::AsPath) -> Result<()> {
-	let path = path.as_path();
-	let socket = call(config, Mode::Request).await?;
-	let catalog = moq_mux::catalog::Config::default()
-		.with_max_age(config.max_age)
-		.with_bandwidth(config.bandwidth.clone());
-	serve_publish(origin, path.as_str(), socket, catalog).await
-}
-
-/// Dial as an SRT caller, sending the standard `#!::r=<resource>,m=<mode>` stream id
-/// and returning the connected socket.
-///
-/// `mode` is the *remote's* role, the inverse of the local direction (the remote
-/// receives on `m=publish`, sends on `m=request`).
-async fn call(config: &Config, mode: Mode) -> Result<SrtSocket> {
-	let Config { addr, resource, .. } = config;
-	// `,` and `=` delimit the `#!::r=<resource>,m=<mode>` stream id, so a resource
-	// carrying either would corrupt it and misroute at the listener. Reject rather
-	// than silently produce a broken id (MoQ paths never contain these).
-	if resource.contains([',', '=']) {
-		return Err(anyhow::anyhow!("srt resource must not contain ',' or '=': {resource:?}").into());
+	/// Override the SRT receive latency negotiated at handshake time.
+	pub fn with_latency(mut self, latency: Duration) -> Self {
+		self.latency = latency;
+		self
 	}
-	let stream_id = format!("#!::r={resource},m={}", mode.as_str());
-	let socket = SrtSocket::builder()
-		.latency(config.latency)
-		.set(configure_buffers)
-		.call(*addr, Some(&stream_id))
-		.await?;
-	tracing::info!(%addr, %resource, mode = mode.as_str(), "SRT caller connected");
-	Ok(socket)
+
+	/// Set how long non-latest groups created by [`pull`](Self::pull) remain fetchable.
+	pub fn with_max_age(mut self, max_age: Option<Duration>) -> Self {
+		self.max_age = max_age;
+		self
+	}
+
+	/// Claim each track ingested by [`pull`](Self::pull) on `bandwidth`.
+	pub fn with_bandwidth(mut self, bandwidth: moq_net::bandwidth::Allocator) -> Self {
+		self.bandwidth = bandwidth;
+		self
+	}
+
+	/// Push a MoQ broadcast out to the remote as MPEG-TS until the broadcast ends.
+	pub async fn publish(&self, origin: &origin::Consumer, path: impl moq_net::AsPath) -> Result<()> {
+		let path = path.as_path();
+		let socket = self.call(Mode::Publish).await?;
+		serve_subscribe(origin, path.as_str(), socket, self.latency).await
+	}
+
+	/// Pull a remote MPEG-TS stream into `origin` at `path` until the remote ends.
+	pub async fn pull(&self, origin: &origin::Producer, path: impl moq_net::AsPath) -> Result<()> {
+		let path = path.as_path();
+		let socket = self.call(Mode::Request).await?;
+		let catalog = moq_mux::catalog::Config::default()
+			.with_max_age(self.max_age)
+			.with_bandwidth(self.bandwidth.clone());
+		serve_publish(origin, path.as_str(), socket, catalog).await
+	}
+
+	async fn call(&self, mode: Mode) -> Result<SrtSocket> {
+		if self.resource.contains([',', '=']) {
+			return Err(crate::Error::InvalidResource(self.resource.clone()));
+		}
+		let stream_id = format!("#!::r={},m={}", self.resource, mode.as_str());
+		let socket = SrtSocket::builder()
+			.latency(self.latency)
+			.set(configure_buffers)
+			.call(self.addr, Some(&stream_id))
+			.await?;
+		tracing::info!(addr = %self.addr, resource = %self.resource, mode = mode.as_str(), "SRT caller connected");
+		Ok(socket)
+	}
 }
 
 /// The SRT stream-id `m=` mode sent to the remote, i.e. the remote's role.
@@ -157,11 +155,15 @@ mod tests {
 		producer
 	}
 
+	use std::io;
 	use std::net::SocketAddr;
 	use std::time::Duration;
 
+	use srt_protocol::protocol::pending_connection::ConnectionReject;
+	use srt_tokio::access::RejectReason;
+
 	use super::*;
-	use crate::server::{Request, Server};
+	use crate::server::{Reject, Request, Server};
 
 	/// Grab a free UDP port by binding `:0` and releasing it. Racy in principle, but
 	/// the window before the SRT server rebinds it is tiny; good enough for a test.
@@ -195,7 +197,7 @@ mod tests {
 		});
 
 		// Caller: dial with m=publish, then drop (we only assert connect + routing).
-		let caller = tokio::spawn(async move { call(&Config::new(addr, "cam0"), Mode::Publish).await });
+		let caller = tokio::spawn(async move { Client::new(addr, "cam0").call(Mode::Publish).await });
 
 		let socket = tokio::time::timeout(Duration::from_secs(10), caller)
 			.await
@@ -234,7 +236,7 @@ mod tests {
 			(resource, is_subscribe)
 		});
 
-		let caller = tokio::spawn(async move { call(&Config::new(addr, "cam0"), Mode::Request).await });
+		let caller = tokio::spawn(async move { Client::new(addr, "cam0").call(Mode::Request).await });
 
 		let socket = tokio::time::timeout(Duration::from_secs(10), caller)
 			.await
@@ -249,5 +251,41 @@ mod tests {
 			.expect("server task");
 		assert_eq!(resource, "cam0");
 		assert!(is_subscribe, "m=request should route to a server Subscribe request");
+	}
+
+	async fn rejected(mode: Mode, reason: Reject, code: i32) {
+		let addr = free_udp_addr().await;
+		let mut server = Server::bind(addr, None).await.unwrap();
+		let server_task = tokio::spawn(async move {
+			match (mode, server.accept().await.expect("a request")) {
+				(Mode::Publish, Request::Publish(request)) => request.reject(reason).await.unwrap(),
+				(Mode::Request, Request::Subscribe(request)) => request.reject(reason).await.unwrap(),
+				_ => panic!("request routed in the wrong direction"),
+			}
+		});
+
+		let err = match Client::new(addr, "cam0").call(mode).await {
+			Ok(_) => panic!("rejected SRT caller connected"),
+			Err(err) => err,
+		};
+		server_task.await.unwrap();
+		let crate::Error::Io(err) = err else {
+			panic!("SRT rejection was not an I/O error: {err}");
+		};
+		assert_eq!(err.kind(), io::ErrorKind::ConnectionRefused);
+		assert_eq!(
+			err.get_ref().and_then(|err| err.downcast_ref::<ConnectionReject>()),
+			Some(&ConnectionReject::Rejected(RejectReason::CoreUnrecognized(code)))
+		);
+	}
+
+	#[tokio::test]
+	async fn publish_rejection_carries_unauthorized_code() {
+		rejected(Mode::Publish, Reject::Unauthorized, 1401).await;
+	}
+
+	#[tokio::test]
+	async fn subscribe_rejection_carries_unavailable_code() {
+		rejected(Mode::Request, Reject::Unavailable, 1503).await;
 	}
 }

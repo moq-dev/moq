@@ -58,13 +58,13 @@ impl Publisher {
 	/// `decode` drains `data` fully, buffering any partial trailing packet in
 	/// its own internal scratch, so there's nothing to retain here.
 	pub fn feed(&mut self, data: Bytes) -> Result<()> {
-		Ok(self.importer.decode(&data)?)
+		Ok(self.importer.decode(&data).map_err(moq_mux::Error::from)?)
 	}
 
 	/// Flush any buffered media, close out the broadcast's open groups, and end
 	/// the broadcast so the origin unannounces it immediately.
 	pub fn finish(&mut self) -> Result<()> {
-		self.importer.finish()?;
+		self.importer.finish().map_err(moq_mux::Error::from)?;
 		self.broadcast.finish();
 		Ok(())
 	}

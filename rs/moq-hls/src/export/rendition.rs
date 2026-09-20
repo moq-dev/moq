@@ -44,23 +44,20 @@ pub enum Kind {
 }
 
 impl Kind {
+	/// Parse a rendition URL path component.
+	pub fn parse(value: &str) -> Option<Self> {
+		match value {
+			"video" => Some(Self::Video),
+			"audio" => Some(Self::Audio),
+			_ => None,
+		}
+	}
+
 	/// The URL path component for this kind (`"video"` / `"audio"`).
 	pub fn as_str(self) -> &'static str {
 		match self {
 			Kind::Video => "video",
 			Kind::Audio => "audio",
-		}
-	}
-}
-
-impl std::str::FromStr for Kind {
-	type Err = ();
-
-	fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-		match s {
-			"video" => Ok(Kind::Video),
-			"audio" => Ok(Kind::Audio),
-			_ => Err(()),
 		}
 	}
 }
@@ -318,7 +315,7 @@ impl Rendition {
 			index,
 			segment: entry.segment,
 			ranges: entry.tracks.get(&self.name).cloned().unwrap_or_default(),
-			duration: entry.duration.as_secs_f64(),
+			duration: entry.duration,
 			pts: entry.pts,
 			end: Duration::from(entry.pts) + entry.duration,
 		};
@@ -403,7 +400,7 @@ impl Rendition {
 		let observed = window
 			.segments
 			.iter()
-			.map(|s| s.duration.ceil().max(0.0) as u64)
+			.map(|s| s.duration.as_secs_f64().ceil() as u64)
 			.max()
 			.unwrap_or(0);
 		let target_duration = declared.max(observed).max(1);

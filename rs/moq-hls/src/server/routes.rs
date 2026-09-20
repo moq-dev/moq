@@ -214,7 +214,7 @@ async fn segment(server: &Server, broadcast: &str, kind: &str, rendition: &str, 
 
 /// Resolve a rendition, waiting for the catalog to populate.
 async fn rendition_for(server: &Server, broadcast: &str, kind: &str, rendition: &str) -> Option<Arc<Rendition>> {
-	let kind = kind.parse::<Kind>().ok()?;
+	let kind = Kind::parse(kind)?;
 	let broadcaster = server.broadcaster(broadcast).await?;
 	let _ = tokio::time::timeout(READY_TIMEOUT, broadcaster.ready()).await;
 	broadcaster.rendition(kind, rendition)

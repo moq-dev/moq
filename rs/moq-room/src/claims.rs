@@ -9,13 +9,15 @@
 /// and `publish` is `<identity>/**` so a participant cannot publish at anyone
 /// else's paths. An identity that is empty after normalization or contains `*` is
 /// refused, since a wildcard would let the participant publish as someone else.
-pub fn claims(room: impl Into<String>, identity: &str) -> Result<moq_auth::Claims, crate::Error> {
-	if moq_net::Path::new(identity).is_empty() {
+pub fn claims(room: impl moq_net::AsPath, identity: impl moq_net::AsPath) -> Result<moq_auth::Claims, crate::Error> {
+	let room = room.as_path();
+	let identity = identity.as_path();
+	if identity.is_empty() {
 		return Err(crate::Error::EmptyIdentity);
 	}
-	let publish = moq_auth::Pattern::subtree(identity)?;
+	let publish = moq_auth::Pattern::subtree(identity.as_str())?;
 	Ok(moq_auth::Claims::default()
-		.with_root(room)
+		.with_root(room.as_str())
 		.with_subscribe([moq_auth::Pattern::all()])
 		.with_publish([publish]))
 }

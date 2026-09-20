@@ -534,8 +534,8 @@ impl<S: Stream> Publish<S> {
 	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
 	/// advertise segments that are still fetchable. Lower it when nothing reads history
 	/// and the memory matters.
-	pub fn with_max_age(mut self, max_age: impl Into<Option<Duration>>) -> Self {
-		self.max_age = max_age.into();
+	pub fn with_max_age(mut self, max_age: Option<Duration>) -> Self {
+		self.max_age = max_age;
 		self
 	}
 

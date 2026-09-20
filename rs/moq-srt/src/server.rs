@@ -25,13 +25,37 @@ use std::time::{Duration, Instant};
 use futures::{SinkExt, StreamExt};
 use moq_mux::container::Frame;
 use moq_net::origin;
-use srt_tokio::access::{
-	AccessControlList, ConnectionMode, RejectReason, ServerRejectReason, StandardAccessControlEntry,
-};
+use srt_tokio::access::{AccessControlList, ConnectionMode, RejectReason, StandardAccessControlEntry};
 use srt_tokio::options::{PacketCount, SocketOptions, StreamId};
 use srt_tokio::{ConnectionRequest, SrtIncoming, SrtListener, SrtSocket};
 
 use crate::Result;
+
+/// Why an SRT publish or subscribe was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Reject {
+	/// Authentication failed.
+	Unauthorized,
+	/// The authenticated caller is not allowed to access the resource.
+	Forbidden,
+	/// The service or resource is temporarily unavailable.
+	Unavailable,
+	/// The request or stream-id is malformed.
+	BadRequest,
+}
+
+impl Reject {
+	fn reason(self) -> RejectReason {
+		let code = match self {
+			Self::Unauthorized => 1401,
+			Self::Forbidden => 1403,
+			Self::Unavailable => 1503,
+			Self::BadRequest => 1400,
+		};
+		RejectReason::CoreUnrecognized(code)
+	}
+}
 
 /// Default SRT receive latency: the negotiated buffer that trades delay for loss
 /// recovery. Override per-server with [`Server::bind`]'s `latency` argument.
@@ -194,7 +218,7 @@ impl Server {
 			let peer = request.remote();
 			let Some((resource, mode)) = parse_stream_id(request.stream_id()) else {
 				tracing::warn!(%peer, stream_id = ?request.stream_id(), "rejecting SRT: no usable stream id");
-				reject_log(request, ServerRejectReason::BadRequest, peer).await;
+				reject_log(request, Reject::BadRequest, peer).await;
 				continue;
 			};
 
@@ -354,13 +378,9 @@ impl Publish {
 		serve_publish(origin, path.as_str(), socket, config).await
 	}
 
-	/// Reject the publish, sending the client a `Forbidden` rejection.
-	pub async fn reject(self) -> Result<()> {
-		Ok(self
-			.0
-			.request
-			.reject(RejectReason::Server(ServerRejectReason::Forbidden))
-			.await?)
+	/// Reject the publish with a verdict the client can distinguish on the wire.
+	pub async fn reject(self, reason: Reject) -> Result<()> {
+		Ok(self.0.request.reject(reason.reason()).await?)
 	}
 }
 
@@ -405,20 +425,16 @@ impl Subscribe {
 		serve_subscribe(origin, path.as_str(), socket, self.0.latency).await
 	}
 
-	/// Reject the subscribe, sending the client a `Forbidden` rejection.
-	pub async fn reject(self) -> Result<()> {
-		Ok(self
-			.0
-			.request
-			.reject(RejectReason::Server(ServerRejectReason::Forbidden))
-			.await?)
+	/// Reject the subscribe with a verdict the client can distinguish on the wire.
+	pub async fn reject(self, reason: Reject) -> Result<()> {
+		Ok(self.0.request.reject(reason.reason()).await?)
 	}
 }
 
 /// Reject a connection request, logging (but not propagating) a send failure.
 /// Used for connections the server drops itself, before they reach the caller.
-async fn reject_log(request: ConnectionRequest, reason: ServerRejectReason, peer: SocketAddr) {
-	if let Err(err) = request.reject(RejectReason::Server(reason)).await {
+async fn reject_log(request: ConnectionRequest, reason: Reject, peer: SocketAddr) {
+	if let Err(err) = request.reject(reason.reason()).await {
 		tracing::debug!(%peer, %err, "failed to send SRT rejection");
 	}
 }

@@ -18,21 +18,18 @@ pub enum Error {
 	#[error("io: {0}")]
 	Io(Arc<std::io::Error>),
 
-	/// Catch-all for ingest logic that reports via `anyhow` (the moq-mux
-	/// demuxer surfaces its errors this way).
-	#[error("{0}")]
-	Other(Arc<anyhow::Error>),
+	/// The remote resource contains delimiters reserved by the SRT stream-id syntax.
+	#[error("invalid SRT resource: {0}")]
+	InvalidResource(String),
+
+	/// The listener stopped accepting connections.
+	#[error("SRT listener stopped accepting connections")]
+	ListenerClosed,
 }
 
 impl From<std::io::Error> for Error {
 	fn from(err: std::io::Error) -> Self {
 		Error::Io(Arc::new(err))
-	}
-}
-
-impl From<anyhow::Error> for Error {
-	fn from(err: anyhow::Error) -> Self {
-		Error::Other(Arc::new(err))
 	}
 }
 

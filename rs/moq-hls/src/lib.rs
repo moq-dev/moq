@@ -37,13 +37,3 @@ pub use server::Server;
 /// breaking change for this crate.
 #[cfg(feature = "server")]
 pub use axum;
-
-/// Re-export of the HTTP client used by [`import`], so consumers can name the
-/// [`reqwest::Error`] carried by [`Error::Reqwest`] without adding their own reqwest
-/// dependency. A major reqwest bump is therefore a breaking change for this crate.
-pub use reqwest;
-
-/// Re-export of the URL parser, so consumers can name the [`url::Url`] and
-/// [`url::ParseError`] carried by [`Error`] without adding their own url dependency.
-/// A major url bump is therefore a breaking change for this crate.
-pub use url;

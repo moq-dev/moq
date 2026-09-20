@@ -17,7 +17,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{Path, State};
 use axum::http::{HeaderValue, StatusCode, Uri};
 use tokio::sync::{OnceCell, oneshot};
 
@@ -175,11 +174,7 @@ impl Default for Config {
 	}
 }
 
-/// Glue that owns the moq-net origin pair and hands axum routers to the caller.
-///
-/// `publisher` is where `server publish` (WHIP) writes ingested broadcasts;
-/// `subscriber` is what `server subscribe` (WHEP) reads from. They're
-/// typically the two halves of the same upstream [`moq_net::Session`].
+/// Shared WebRTC media state that hands axum routers to the caller.
 #[derive(Clone)]
 pub struct Server {
 	inner: Arc<Inner>,
@@ -187,9 +182,6 @@ pub struct Server {
 
 struct Inner {
 	config: Config,
-	publisher: moq_net::origin::Producer,
-	/// Source for `server subscribe` (WHEP) egress.
-	subscriber: moq_net::origin::Consumer,
 	/// The shared media socket + demux, bound lazily on the first accept so
 	/// `Server::new` can stay synchronous (and an idle server binds no port).
 	mux: OnceCell<Mux>,
@@ -200,14 +192,11 @@ struct Inner {
 }
 
 impl Server {
-	/// Build a server. `publisher` receives WHIP broadcasts; `subscriber`
-	/// is the source for WHEP egress.
-	pub fn new(config: Config, publisher: moq_net::origin::Producer, subscriber: moq_net::origin::Consumer) -> Self {
+	/// Build a server with shared ICE and media settings.
+	pub fn new(config: Config) -> Self {
 		Self {
 			inner: Arc::new(Inner {
 				config,
-				publisher,
-				subscriber,
 				mux: OnceCell::new(),
 				sessions: Mutex::new(HashMap::new()),
 			}),
@@ -229,8 +218,8 @@ impl Server {
 	/// no authentication. To own the route and authorize requests yourself
 	/// (resolving the broadcast name from a verified token), skip the router and
 	/// call [`whip::accept`] directly from your own handler.
-	pub fn publish_router(&self) -> Router {
-		whip::router(self.clone())
+	pub fn publish_router(&self, publisher: moq_net::origin::Producer) -> Router {
+		whip::router(self.clone(), publisher)
 	}
 
 	/// Router for `server subscribe` (WHEP). Mount under whichever HTTP path
@@ -240,20 +229,12 @@ impl Server {
 	/// no authentication. To own the route and authorize requests yourself
 	/// (resolving the broadcast name from a verified token), skip the router and
 	/// call [`whep::accept`] directly from your own handler.
-	pub fn subscribe_router(&self) -> Router {
-		whep::router(self.clone())
+	pub fn subscribe_router(&self, subscriber: moq_net::origin::Consumer) -> Router {
+		whep::router(self.clone(), subscriber)
 	}
 
 	pub(crate) fn config(&self) -> &Config {
 		&self.inner.config
-	}
-
-	pub(crate) fn publisher(&self) -> &moq_net::origin::Producer {
-		&self.inner.publisher
-	}
-
-	pub(crate) fn subscriber(&self) -> &moq_net::origin::Consumer {
-		&self.inner.subscriber
 	}
 
 	/// Register a session under its resource id, returning the cancel receiver.
@@ -288,8 +269,8 @@ impl Server {
 
 /// Shared `DELETE` handler for both bundled routers: parse the resource id from
 /// the trailing path segment and terminate the matching session.
-pub(crate) async fn delete(State(server): State<Server>, Path(path): Path<String>) -> StatusCode {
-	match crate::sdp::parse_resource_id(&path) {
+pub(crate) fn delete(server: &Server, path: &str) -> StatusCode {
+	match crate::sdp::parse_resource_id(path) {
 		Ok(id) if server.terminate(&id.to_string()) => StatusCode::OK,
 		Ok(_) => StatusCode::NOT_FOUND,
 		Err(_) => StatusCode::BAD_REQUEST,
@@ -298,25 +279,10 @@ pub(crate) async fn delete(State(server): State<Server>, Path(path): Path<String
 
 #[cfg(test)]
 mod tests {
-	/// Build an origin producer, spawning its driver on the ambient runtime.
-	fn produce_origin() -> moq_net::origin::Producer {
-		let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
-		if tokio::runtime::Handle::try_current().is_ok() {
-			tokio::spawn(driver.run(moq_tokio::runtime::Runtime::<()>::new()));
-		} else {
-			// A sync test: nothing polls the driver, and dropping it would tear
-			// the origin down, so leak it and rely on the synchronous half.
-			std::mem::forget(driver);
-		}
-		producer
-	}
-
 	use super::*;
 
 	fn server() -> Server {
-		let publisher = produce_origin();
-		let subscriber = produce_origin().consume();
-		Server::new(Config::default(), publisher, subscriber)
+		Server::new(Config::default())
 	}
 
 	#[test]

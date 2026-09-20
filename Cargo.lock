@@ -4967,7 +4967,6 @@ dependencies = [
 name = "moq-hls"
 version = "0.4.16"
 dependencies = [
- "anyhow",
  "axum",
  "bytes",
  "hang",
@@ -5172,7 +5171,6 @@ dependencies = [
 name = "moq-rtc"
 version = "0.2.11"
 dependencies = [
- "anyhow",
  "aws-lc-rs",
  "axum",
  "bytes",
@@ -5230,13 +5228,13 @@ dependencies = [
 name = "moq-srt"
 version = "0.2.11"
 dependencies = [
- "anyhow",
  "bytes",
  "futures",
  "hang",
  "moq-mux",
  "moq-net",
  "moq-tokio",
+ "srt-protocol",
  "srt-tokio",
  "thiserror 2.0.20",
  "tokio",

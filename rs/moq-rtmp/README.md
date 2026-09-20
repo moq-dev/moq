@@ -34,7 +34,7 @@ local with no extra hop:
 ```rust
 let mut rtmp = moq_rtmp::Config::default();
 rtmp.listen = Some("0.0.0.0:1935".parse()?);
-rtmp.prefix = "live/".to_string();
+rtmp.prefix = "live".into();
 
 // `origin` is your relay's local origin (e.g. `cluster.origin.clone()`).
 tokio::select! {

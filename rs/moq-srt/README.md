@@ -25,7 +25,7 @@ directly (see [Auth](#auth) below).
 ```rust
 let mut srt = moq_srt::Config::default();
 srt.listen = Some("0.0.0.0:9000".parse()?);
-srt.prefix = "live/".to_string();
+srt.prefix = "live".into();
 
 // `origin` is your relay's local origin (e.g. `cluster.origin.clone()`).
 tokio::select! {
@@ -86,8 +86,8 @@ while let Some(request) = server.accept().await {
             tokio::spawn(subscribe.accept(&consumer, "live/cam0"));
         }
     }
-    // ...or call `.reject()` on the `Publish` / `Subscribe` instead of `.accept()`
-    // to deny it.
+    // ...or call `.reject(moq_srt::Reject::Forbidden)` on the `Publish` /
+    // `Subscribe` instead of `.accept()` to deny it.
 }
 ```
 

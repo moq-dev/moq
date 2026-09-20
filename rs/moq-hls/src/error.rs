@@ -39,14 +39,6 @@ pub enum Error {
 	#[error("mux: {0}")]
 	Mux(#[from] moq_mux::Error),
 
-	/// The playlist argument looked like an HTTP(S) URL but failed to parse.
-	#[error("invalid playlist URL")]
-	InvalidPlaylistUrl,
-
-	/// The playlist argument was a local path that could not be made into a `file://` URL.
-	#[error("invalid file path")]
-	InvalidFilePath,
-
 	/// A `file://` URL could not be turned back into a filesystem path.
 	#[error("invalid file URL")]
 	InvalidFileUrl,
@@ -127,10 +119,6 @@ pub enum Error {
 	/// I/O error while reading a local playlist or segment.
 	#[error("io: {0}")]
 	Io(std::sync::Arc<std::io::Error>),
-
-	/// Catch-all for gateway logic that reports via `anyhow`.
-	#[error("{0}")]
-	Other(std::sync::Arc<anyhow::Error>),
 }
 
 impl Error {
@@ -156,12 +144,6 @@ impl From<reqwest::Error> for Error {
 impl From<std::io::Error> for Error {
 	fn from(err: std::io::Error) -> Self {
 		Error::Io(std::sync::Arc::new(err))
-	}
-}
-
-impl From<anyhow::Error> for Error {
-	fn from(err: anyhow::Error) -> Self {
-		Error::Other(std::sync::Arc::new(err))
 	}
 }
 
