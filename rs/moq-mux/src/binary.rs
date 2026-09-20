@@ -37,7 +37,8 @@
 //! #     source: &moq_mux::Source,
 //! #     catalog: &moq_mux::catalog::hang::Catalog,
 //! # ) -> moq_mux::Result<()> {
-//! let entry = catalog.binary_track("thumbnail").expect("no thumbnail track");
+//! let config = catalog.binary.tracks.get("thumbnail").expect("no thumbnail track");
+//! let entry = moq_mux::catalog::Entry::new("thumbnail", config);
 //! let mut thumbnail = entry.subscribe(source).await?;
 //! while let Some(jpeg) = thumbnail.next().await? {
 //!     // ...
@@ -319,7 +320,7 @@ mod test {
 
 	fn catalog() -> (moq_net::broadcast::Producer, crate::catalog::Producer) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		(broadcast, catalog)
 	}
 

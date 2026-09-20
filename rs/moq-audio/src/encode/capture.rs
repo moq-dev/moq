@@ -1441,7 +1441,7 @@ mod tests {
 	) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let mut options = PublicationOptions::default();
 		options.capture.source = capture::Source::Microphone(Some("first".into()));
 		options.encode.track = Some("audio".into());
@@ -1464,7 +1464,7 @@ mod tests {
 	) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let mut options = PublicationOptions::default();
 		options.capture.source = capture::Source::Microphone(Some("first".into()));
 		options.encode.track = Some("audio".into());

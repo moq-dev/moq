@@ -22,6 +22,5 @@ export * from "./priority";
 export * from "./root";
 export * as Stalled from "./stalled";
 export * from "./text";
-export * from "./timeline";
 export * from "./track";
 export * from "./video";

@@ -370,7 +370,7 @@ impl<E: catalog::Catalog> Capture<E> {
 	/// the host clock ([`DEBOUNCE`]), and a first snapshot is never delayed. `force`
 	/// overrides the debounce, for end of stream.
 	pub fn flush(&mut self, pts: Timestamp, force: bool) -> anyhow::Result<()> {
-		let now = u128::from(self.clock.micros());
+		let now = self.clock.now().as_micros();
 		for entry in self.entries.values_mut() {
 			if !entry.dirty {
 				continue;
@@ -386,7 +386,7 @@ impl<E: catalog::Catalog> Capture<E> {
 
 		if self.entries.values().any(|e| !e.advertised && e.last_cut.is_some()) {
 			let mut guard = self.catalog.modify()?;
-			let Some(mpegts) = guard.mpegts_mut() else {
+			let Some(mpegts) = guard.ext.mpegts_mut() else {
 				anyhow::bail!("catalog extension no longer carries an mpegts section");
 			};
 			for ((pid, table_id), entry) in self.entries.iter_mut() {
@@ -436,7 +436,7 @@ impl<E: catalog::Catalog> Capture<E> {
 		let Ok(mut guard) = self.catalog.modify() else {
 			return;
 		};
-		let Some(mpegts) = guard.mpegts_mut() else {
+		let Some(mpegts) = guard.ext.mpegts_mut() else {
 			return;
 		};
 		for ((pid, table_id), entry) in self.entries.iter_mut() {

@@ -30,10 +30,6 @@ Public API: breaking on moq-mux and the crates that publish through it
 (moq-audio, moq-video, moq-ffi, libmoq, moq-cli, moq-gst, the gateways),
 so on dev. Wire: none. Consumers here plus moq.pro's recorder and overlay.
 
-## Required
-
-- [Catalog types](/quest/m1/api-hang-catalog.md) - the producer constructors and clock this builds on
-
 ## Related
 
 - [Rendition ownership #2869](/quest/m1/merge-dev.md) - the earlier decision that made `Rendition` the sole catalog writer, which this keeps

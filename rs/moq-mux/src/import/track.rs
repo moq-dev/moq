@@ -780,7 +780,7 @@ mod tests {
 
 	fn new_broadcast() -> (moq_net::broadcast::Producer, crate::catalog::Producer) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		(broadcast, catalog)
 	}
 

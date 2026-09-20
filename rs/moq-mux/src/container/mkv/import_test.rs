@@ -180,7 +180,7 @@ fn track_entry_video_vp9(number: u64, width: u64, height: u64) -> MatroskaSpec {
 
 fn run(data: &[u8]) -> crate::catalog::hang::Catalog {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
 	let buf = bytes::BytesMut::from(data);
 	mkv.decode(&buf).expect("decode");
@@ -248,7 +248,7 @@ async fn public_container_preserves_loc_for_mkv() {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let reserved = catalog.reserve();
 	let mut import = super::Import::new(broadcast, reserved).with_container(hang::catalog::Container::Loc);
 	import.decode(&data).unwrap();
@@ -348,7 +348,7 @@ fn test_chunked_decode_dedup() {
 		.build();
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
 
 	// Feed in 16-byte chunks to stress the chunked-restart code path.
@@ -432,7 +432,7 @@ fn rendition_is_not_published_when_the_media_producer_fails() {
 	assert_eq!(run(&data).video.renditions.len(), 1, "fixture must publish a rendition");
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
 	// Squat the broadcast's timeline track, so building the media producer (which creates it
 	// on first use) fails. The handle must stay alive: the broadcast tracks names weakly, so

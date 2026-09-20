@@ -28,7 +28,7 @@ fn drain_group_sequences(consumer: &mut moq_net::track::Subscriber) -> Vec<u64> 
 
 fn run_fmp4(data: &[u8]) -> crate::catalog::hang::Catalog {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 
@@ -41,7 +41,7 @@ fn run_fmp4(data: &[u8]) -> crate::catalog::hang::Catalog {
 
 fn run_fmp4_select(data: &[u8], select: crate::select::Broadcast) -> crate::catalog::hang::Catalog {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_select(select);
 
@@ -98,7 +98,7 @@ fn every_rendition_is_cmaf() {
 	mp4_atom::Moov::decode(&mut cursor).unwrap();
 	let init = &data[..cursor.position() as usize];
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = super::Import::new(broadcast, catalog.reserve());
 	import.decode(init).unwrap();
 	import.finish().unwrap();
@@ -130,7 +130,7 @@ fn aac_without_decoder_specific_info_is_rejected() {
 	moov.encode(&mut init).unwrap();
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 	let err = fmp4.decode(&init).unwrap_err();
 
@@ -169,7 +169,7 @@ fn aac_decoder_specific_info_is_preserved() {
 fn dropping_import_retires_catalog_renditions() {
 	let data = include_bytes!("test_data/bbb.mp4");
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
 	{
 		let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
@@ -313,7 +313,7 @@ async fn test_seek_sets_initial_sequence() {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let broadcast_consumer = broadcast.consume();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 
 	let data = include_bytes!("test_data/bbb.mp4");
@@ -379,7 +379,7 @@ async fn test_msf_catalog_roundtrip() {
 	// Take the consumer before adding tracks; track() is called after the
 	// MSF catalog track has been created by `catalog::Producer::new`.
 	let consumer = broadcast.consume();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 
 	let data = include_bytes!("test_data/bbb.mp4");
@@ -427,7 +427,7 @@ async fn test_msf_catalog_roundtrip() {
 async fn import_populates_the_broadcast_timeline() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 
 	let data = include_bytes!("test_data/bbb.mp4");
@@ -664,7 +664,7 @@ async fn segmented_source_groups_per_segment() {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 	fmp4.decode(&init).unwrap();
 
@@ -715,7 +715,7 @@ async fn segmented_source_indexes_one_group_range_per_track() {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 	fmp4.decode(&init).unwrap();
 
@@ -797,7 +797,7 @@ async fn segment_ranges_with_skew(
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 	fmp4.decode(&init).unwrap();
 
@@ -904,7 +904,7 @@ async fn a_single_leading_styp_still_segments_on_keyframes() {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 	fmp4.decode(&init).unwrap();
 
@@ -991,7 +991,7 @@ fn non_advancing_fragment_decode_time_is_rejected() {
 	moov.encode(&mut init).unwrap();
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 	fmp4.decode(&init).unwrap();
 
@@ -1023,7 +1023,7 @@ fn seek_resets_fragment_decode_time() {
 	ftyp.encode(&mut init).unwrap();
 	moov.encode(&mut init).unwrap();
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 	fmp4.decode(&init).unwrap();
 	fmp4.decode(&audio_fragment(4096, 1024, 327)).unwrap();
@@ -1039,7 +1039,7 @@ fn rejected_fragment_preserves_decode_time() {
 	ftyp.encode(&mut init).unwrap();
 	moov.encode(&mut init).unwrap();
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 	fmp4.decode(&init).unwrap();
 	fmp4.decode(&audio_fragment(4096, 1024, 327)).unwrap();
@@ -1094,7 +1094,7 @@ fn fragment_jitter_never_shrinks() {
 	moov.encode(&mut init).unwrap();
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 	fmp4.decode(&init).unwrap();
 
@@ -1151,7 +1151,7 @@ fn fragment_jitter_uses_sample_endpoints() {
 		ftyp.encode(&mut init).unwrap();
 		moov.encode(&mut init).unwrap();
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 		import.decode(&init).unwrap();
 		let moof = mp4_atom::Moof {

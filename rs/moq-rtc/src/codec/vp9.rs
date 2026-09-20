@@ -45,7 +45,7 @@ mod tests {
 	#[test]
 	fn keyframe_publishes_catalog_dimensions() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let mut bridge = super::Bridge::new(broadcast, catalog.clone()).unwrap();
 
 		assert!(catalog.snapshot().video.renditions.is_empty());

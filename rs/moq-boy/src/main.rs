@@ -257,7 +257,7 @@ async fn run(config: &Config) -> Result<()> {
 		.connect(url);
 
 	// Set up catalog and encoders.
-	let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
+	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default())?;
 	let video_encoder = video::VideoEncoder::spawn(broadcast.clone(), catalog.clone()).await;
 
 	let audio_encoder = audio::AudioEncoder::new(broadcast.clone(), catalog.clone(), 44100)?;

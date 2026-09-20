@@ -162,7 +162,8 @@ mod tests {
 	async fn reads_cmaf_container_declared_by_catalog() {
 		let mut source_broadcast = moq_net::broadcast::Info::new().produce();
 		let source_subscriber = source_broadcast.consume();
-		let source_catalog = moq_mux::catalog::Producer::new(&mut source_broadcast).unwrap();
+		let source_catalog =
+			moq_mux::catalog::Producer::new(&mut source_broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let config = EncodeConfig {
 			kind: EncodeKind::Software,
 			..EncodeConfig::new(320, 240, 30)
@@ -201,7 +202,7 @@ mod tests {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let subscriber = broadcast.consume();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let mut import = moq_mux::container::fmp4::Import::new(broadcast, catalog.reserve());
 		import.decode(&init).unwrap();
 		import.decode(&fragment).unwrap();

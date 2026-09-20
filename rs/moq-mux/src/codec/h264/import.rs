@@ -321,7 +321,7 @@ mod tests {
 
 	fn setup(name: &str) -> (moq_net::track::Producer, crate::catalog::Producer) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let track = broadcast
 			.create_track(name, hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();

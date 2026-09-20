@@ -55,7 +55,7 @@ pub async fn import(target: ImportTarget, playlist: String) -> anyhow::Result<()
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(max_age)
 		.with_bandwidth(bandwidth);
-	let catalog = moq_mux::catalog::Producer::with_config(&mut producer, config)?;
+	let catalog = moq_mux::catalog::Producer::new(&mut producer, config)?;
 	producer
 		.announce(Default::default())
 		.context("failed to announce broadcast")?;

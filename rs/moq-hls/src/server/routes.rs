@@ -453,7 +453,7 @@ mod tests {
 		moq_net::track::Producer,
 		moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
 	) {
-		let mut catalog = moq_mux::catalog::Producer::new(broadcast).unwrap();
+		let mut catalog = moq_mux::catalog::Producer::new(broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let reserved = catalog.reserve();
 		let mut registration = reserved.video("video0").unwrap();
 		registration.set(config).unwrap();
@@ -538,7 +538,8 @@ mod tests {
 		let media_broadcast = pair.pub_origin.create_broadcast("room/source").expect("media");
 		media_broadcast.announce(Default::default()).expect("announce media");
 
-		let mut catalog = moq_mux::catalog::Producer::new(&mut catalog_broadcast).unwrap();
+		let mut catalog =
+			moq_mux::catalog::Producer::new(&mut catalog_broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let reserved = catalog.reserve();
 		let mut registration = reserved.video("video0").unwrap();
 		let mut config = video_config();

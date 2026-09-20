@@ -4,8 +4,8 @@ import { Time } from "@moq/net";
 export type { BufferedRange, BufferedRanges, Frame } from "./types";
 
 import type { AudioConfig, VideoConfig } from "../catalog";
+import type { Recorder as TimelineRecorder } from "../timeline";
 import type { Format as ContainerFormat } from "./format";
-import type { Recorder as TimelineRecorder } from "./timeline";
 import type { Frame } from "./types";
 
 /** The legacy hang container: a microsecond timestamp varint followed by the raw codec payload. */

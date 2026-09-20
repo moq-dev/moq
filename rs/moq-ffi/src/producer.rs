@@ -154,8 +154,9 @@ impl MoqBroadcastProducer {
 	/// Wrap a `moq_net::broadcast::Producer` (standalone or origin-created), attaching
 	/// the catalog track every FFI broadcast carries.
 	pub(crate) fn from_inner(mut broadcast: moq_net::broadcast::Producer) -> Result<Self, MoqError> {
-		let catalog =
-			moq_mux::catalog::Producer::with_catalog(&mut broadcast, moq_mux::catalog::hang::Catalog::default())?;
+		let config =
+			moq_mux::catalog::Config::default().with_catalog(moq_mux::catalog::hang::Catalog::<Extra>::default());
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 		Ok(Self {
 			state: std::sync::Mutex::new(Some(BroadcastProducer { broadcast, catalog })),
 		})

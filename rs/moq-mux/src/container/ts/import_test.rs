@@ -16,7 +16,7 @@ const RECORDING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30
 /// Decode a whole TS buffer into a fresh broadcast and return the catalog.
 fn import_ts(data: &[u8]) -> crate::catalog::hang::Catalog {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	let buf = BytesMut::from(data);
@@ -58,7 +58,7 @@ async fn public_container_preserves_loc_for_ts() {
 	let data = include_bytes!("test_data/bbb.ts");
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let reserved = catalog.reserve();
 	let mut import = super::Import::new(broadcast, reserved).with_container(hang::catalog::Container::Loc);
 	import.decode(data).unwrap();
@@ -165,7 +165,7 @@ async fn import_opus_frames() {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();
@@ -292,7 +292,7 @@ fn resyncs_across_chunk_boundaries() {
 	misaligned.extend_from_slice(data);
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	for chunk in misaligned.chunks(100) {
 		import.decode(&BytesMut::from(chunk)).unwrap();
@@ -319,7 +319,7 @@ async fn import_export_import_roundtrip() {
 	// Import the fixture into a broadcast.
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	let buf = BytesMut::from(&data[..]);
 	import.decode(&buf).unwrap();
@@ -369,7 +369,7 @@ async fn survives_midstream_join() {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import
 		.decode(&BytesMut::from(&buf[..]))
@@ -412,9 +412,10 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 	let data = include_bytes!("test_data/scte35/kyrion_dirtystart.ts");
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let catalog = crate::catalog::Producer::with_catalog(
+	let catalog = crate::catalog::Producer::new(
 		&mut broadcast,
-		crate::catalog::hang::Catalog::<crate::container::ts::catalog::Ext>::default(),
+		crate::catalog::Config::default()
+			.with_catalog(crate::catalog::hang::Catalog::<crate::container::ts::catalog::Ext>::default()),
 	)
 	.unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
@@ -428,6 +429,7 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 	// Select the SCTE-35 stream by its verbatim stream_type; media tracks also appear
 	// in mpegts.tracks now (with their PID + descriptors).
 	let name = snap
+		.ext
 		.mpegts
 		.tracks
 		.iter()
@@ -472,7 +474,7 @@ fn import_handles_unaligned_chunks() {
 	let data = include_bytes!("test_data/bbb.ts");
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 
 	for chunk in data.chunks(100) {

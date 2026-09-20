@@ -41,7 +41,8 @@
 //! #     source: &moq_mux::Source,
 //! #     catalog: &moq_mux::catalog::hang::Catalog,
 //! # ) -> moq_mux::Result<()> {
-//! let entry = catalog.json_track("chat").expect("no chat track");
+//! let config = catalog.json.tracks.get("chat").expect("no chat track");
+//! let entry = moq_mux::catalog::Entry::new("chat", config);
 //! let mut chat = entry.subscribe::<Message>(source).await?;
 //! while let Some(message) = chat.next().await? {
 //!     // ...
@@ -325,7 +326,7 @@ mod test {
 
 	fn catalog() -> (moq_net::broadcast::Producer, crate::catalog::Producer) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		(broadcast, catalog)
 	}
 
@@ -458,7 +459,8 @@ mod test {
 
 		let mut seed = crate::catalog::hang::Catalog::<()>::default();
 		seed.json.tracks.insert("chat".to_string(), existing.clone());
-		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, seed).unwrap();
+		let config = crate::catalog::Config::default().with_catalog(seed);
+		let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
 
 		// Nothing local holds the track name, so `create_track` alone would have let this through.
 		assert!(matches!(
@@ -481,14 +483,19 @@ mod test {
 			.unwrap();
 
 		let snapshot = catalog.snapshot();
-		let found: Vec<(&str, &Mode)> = snapshot.json_tracks().map(|t| (t.name(), &t.config().mode)).collect();
+		let found: Vec<(&str, &Mode)> = snapshot
+			.json
+			.tracks
+			.iter()
+			.map(|(name, config)| (name.as_str(), &config.mode))
+			.collect();
 		assert_eq!(found, vec![("chat", &Mode::Stream), ("status", &Mode::Snapshot)]);
 
 		// A name the catalog doesn't list has no entry, rather than a config to misread.
-		assert!(snapshot.json_track("nope").is_none());
+		assert!(!snapshot.json.tracks.contains_key("nope"));
 
-		// The entry derefs to its config, so the fields read directly.
-		let chat = snapshot.json_track("chat").expect("missing entry");
+		// Pairing the map key with its config gives consumers one subscription handle.
+		let chat = crate::catalog::Entry::new("chat", snapshot.json.tracks.get("chat").expect("missing entry"));
 		assert_eq!(chat.name(), "chat");
 		assert_eq!(chat.mode, Mode::Stream);
 	}
@@ -498,7 +505,7 @@ mod test {
 	#[tokio::test]
 	async fn an_entry_subscribes_and_reads() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let source = crate::source::announced(&broadcast.consume());
 
 		let mut chat = catalog
@@ -507,7 +514,7 @@ mod test {
 		chat.append(&json!({ "text": "hello" })).unwrap();
 
 		let snapshot = catalog.snapshot();
-		let entry = snapshot.json_track("chat").expect("missing entry");
+		let entry = crate::catalog::Entry::new("chat", snapshot.json.tracks.get("chat").expect("missing entry"));
 		let mut consumer = entry.subscribe::<Value>(&source).await.unwrap();
 		chat.finish().unwrap();
 

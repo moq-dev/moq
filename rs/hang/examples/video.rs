@@ -61,7 +61,7 @@ fn create_track(broadcast: &mut moq_net::broadcast::Producer) -> anyhow::Result<
 
 	// Create the catalog describing our video track.
 	// Multiple renditions allow the viewer to choose based on their capabilities.
-	let mut catalog = hang::catalog::Catalog::default();
+	let mut catalog = hang::catalog::Catalog::<()>::default();
 	catalog.video.insert(video_track, video_config)?;
 
 	// Publish the catalog as a "catalog.json" track in the broadcast.

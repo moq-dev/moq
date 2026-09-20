@@ -1,8 +1,7 @@
 import { expect, test } from "bun:test";
 import * as Json from "@moq/json";
-import type { Time } from "@moq/net";
-import { Track } from "@moq/net";
-import { u53 } from "../catalog";
+import { Time, Track } from "@moq/net";
+import { u53 } from "./catalog";
 import { Producer, type Record } from "./timeline.ts";
 
 const us = (ms: number): Time.Micro => (ms * 1000) as Time.Micro;
@@ -105,7 +104,7 @@ test("a GOP longer than the minimum is one segment", async () => {
 
 // Groups shorter than the minimum pack into one segment rather than each becoming one.
 test("short groups pack up to the minimum", async () => {
-	const { timeline, records } = capture({ durationMin: 1500 });
+	const { timeline, records } = capture({ durationMin: Time.Milli(1500) });
 	const audio = timeline.pacingTrack("audio0");
 
 	for (let seq = 0; seq < 8; seq++) {
@@ -191,7 +190,7 @@ test("a cut below the minimum is ignored", async () => {
 // segment that breaks it fails the timeline rather than publishing a record that contradicts
 // the catalog.
 test("exceeding the declared maximum fails the timeline", async () => {
-	const { timeline, records } = capture({ durationMin: 1000, durationMax: 3000 });
+	const { timeline, records } = capture({ durationMin: Time.Milli(1000), durationMax: Time.Milli(3000) });
 	const video = timeline.pacingTrack("video0");
 
 	video.record(0, us(0));
@@ -211,7 +210,7 @@ test("exceeding the declared maximum fails the timeline", async () => {
 
 test("an undeclared maximum is omitted from the catalog", () => {
 	expect(capture().timeline.section().durationMax).toBeUndefined();
-	expect(capture({ durationMax: 2500 }).timeline.section().durationMax).toBe(u53(2500));
+	expect(capture({ durationMax: Time.Milli(2500) }).timeline.section().durationMax).toBe(u53(2500));
 });
 
 // The last group of a broadcast has no successor to bound it, so without a reported end the

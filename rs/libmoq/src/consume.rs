@@ -213,7 +213,8 @@ impl Consume {
 			// Serialize the untyped application sections to owned strings so the
 			// C section APIs can borrow stable pointers from the snapshot.
 			let sections = update
-				.sections()
+				.ext
+				.iter()
 				.map(|(name, value)| (name.clone(), value.to_string()))
 				.collect();
 

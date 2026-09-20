@@ -32,13 +32,13 @@ use super::hang::{Catalog, CatalogExt};
 ///
 /// impl RenditionConfig<MyExt> for Telemetry {
 ///     fn insert(self, catalog: &mut Catalog<MyExt>, name: &str) {
-///         catalog.telemetry.insert(name.to_string(), self);
+///         catalog.ext.telemetry.insert(name.to_string(), self);
 ///     }
 ///     fn get_mut<'a>(catalog: &'a mut Catalog<MyExt>, name: &str) -> Option<&'a mut Self> {
-///         catalog.telemetry.get_mut(name)
+///         catalog.ext.telemetry.get_mut(name)
 ///     }
 ///     fn remove(catalog: &mut Catalog<MyExt>, name: &str) {
-///         catalog.telemetry.remove(name);
+///         catalog.ext.telemetry.remove(name);
 ///     }
 ///
 ///     // Opt into bitrate detection; jitter is left undetected.
@@ -539,7 +539,7 @@ mod tests {
 
 	fn video_track() -> (moq_net::broadcast::Producer, super::super::Producer, VideoTrack) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = super::super::Producer::new(&mut broadcast).unwrap();
+		let catalog = super::super::Producer::new(&mut broadcast, super::super::Config::default()).unwrap();
 		let reserved = catalog.reserve();
 		let rendition = reserved.video("v").unwrap();
 		// Drop the standalone reservation so only the rendition's own gate remains, which `set`
@@ -573,7 +573,7 @@ mod tests {
 	#[test]
 	fn importer_returns_rejected_jitter() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = super::super::Producer::new(&mut broadcast).unwrap();
+		let catalog = super::super::Producer::new(&mut broadcast, super::super::Config::default()).unwrap();
 		let reserved = catalog.reserve();
 		let track = broadcast
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
@@ -826,7 +826,7 @@ mod tests {
 	#[test]
 	fn an_existing_entry_owns_its_name() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let mut catalog = super::super::Producer::new(&mut broadcast).unwrap();
+		let mut catalog = super::super::Producer::new(&mut broadcast, super::super::Config::default()).unwrap();
 		catalog.modify().unwrap().video.insert("v", config(None, None)).unwrap();
 
 		assert!(catalog.reserve().video("v").is_err(), "the catalog already carries it");
@@ -837,7 +837,7 @@ mod tests {
 	#[test]
 	fn renditions_share_the_broadcast_timeline() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let mut catalog = super::super::Producer::new(&mut broadcast).unwrap();
+		let mut catalog = super::super::Producer::new(&mut broadcast, super::super::Config::default()).unwrap();
 
 		let _recorder = catalog.enroll("video0").unwrap();
 		let timeline = catalog.timeline();
@@ -877,13 +877,13 @@ mod tests {
 
 		impl RenditionConfig<TelemetryExt> for Telemetry {
 			fn insert(self, catalog: &mut Catalog<TelemetryExt>, name: &str) {
-				catalog.telemetry.insert(name.to_string(), self);
+				catalog.ext.telemetry.insert(name.to_string(), self);
 			}
 			fn get_mut<'a>(catalog: &'a mut Catalog<TelemetryExt>, name: &str) -> Option<&'a mut Self> {
-				catalog.telemetry.get_mut(name)
+				catalog.ext.telemetry.get_mut(name)
 			}
 			fn remove(catalog: &mut Catalog<TelemetryExt>, name: &str) {
-				catalog.telemetry.remove(name);
+				catalog.ext.telemetry.remove(name);
 			}
 
 			// Opts into bitrate detection only; jitter is left undetected.
@@ -904,7 +904,8 @@ mod tests {
 
 		fn produce() -> (moq_net::broadcast::Producer, crate::catalog::Producer<TelemetryExt>) {
 			let mut broadcast = moq_net::broadcast::Info::new().produce();
-			let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::default()).unwrap();
+			let config = crate::catalog::Config::default().with_catalog(Catalog::<TelemetryExt>::default());
+			let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
 			(broadcast, catalog)
 		}
 
@@ -919,15 +920,15 @@ mod tests {
 		impl RenditionConfig<TelemetryExt> for Exploding {
 			fn insert(self, catalog: &mut Catalog<TelemetryExt>, name: &str) {
 				if self.wrote {
-					catalog.exploding.insert(name.to_string(), self);
+					catalog.ext.exploding.insert(name.to_string(), self);
 				}
 				panic!("insert exploded");
 			}
 			fn get_mut<'a>(catalog: &'a mut Catalog<TelemetryExt>, name: &str) -> Option<&'a mut Self> {
-				catalog.exploding.get_mut(name)
+				catalog.ext.exploding.get_mut(name)
 			}
 			fn remove(catalog: &mut Catalog<TelemetryExt>, name: &str) {
-				catalog.exploding.remove(name);
+				catalog.ext.exploding.remove(name);
 			}
 		}
 
@@ -951,7 +952,7 @@ mod tests {
 			);
 
 			// The rendition unwound, so it released its name and the catalog is still usable.
-			assert!(catalog.snapshot().telemetry.is_empty());
+			assert!(catalog.snapshot().ext.telemetry.is_empty());
 			reserved
 				.init::<Exploding>("gps")
 				.expect("the unwound rendition released its name");
@@ -964,13 +965,13 @@ mod tests {
 
 		impl RenditionConfig<TelemetryExt> for Stubborn {
 			fn insert(self, catalog: &mut Catalog<TelemetryExt>, name: &str) {
-				catalog.stubborn.insert(name.to_string(), self);
+				catalog.ext.stubborn.insert(name.to_string(), self);
 			}
 			fn get_mut<'a>(catalog: &'a mut Catalog<TelemetryExt>, name: &str) -> Option<&'a mut Self> {
-				catalog.stubborn.get_mut(name)
+				catalog.ext.stubborn.get_mut(name)
 			}
 			fn remove(catalog: &mut Catalog<TelemetryExt>, name: &str) {
-				catalog.stubborn.remove(name);
+				catalog.ext.stubborn.remove(name);
 				panic!("remove exploded");
 			}
 		}
@@ -1007,7 +1008,7 @@ mod tests {
 			.expect_err("the config's insert panics after writing");
 
 			assert!(
-				catalog.snapshot().exploding.is_empty(),
+				catalog.snapshot().ext.exploding.is_empty(),
 				"the entry the panicking insert wrote is retired with its owner"
 			);
 			reserved
@@ -1027,12 +1028,12 @@ mod tests {
 			feed(&mut rendition);
 
 			let snapshot = catalog.snapshot();
-			let config = snapshot.telemetry.get("gps").unwrap();
+			let config = snapshot.ext.telemetry.get("gps").unwrap();
 			assert!(config.bitrate.is_some(), "absent bitrate should be auto-detected");
 
 			drop(rendition);
 			assert!(
-				!catalog.snapshot().telemetry.contains_key("gps"),
+				!catalog.snapshot().ext.telemetry.contains_key("gps"),
 				"the rendition should be removed on drop"
 			);
 		}
@@ -1070,7 +1071,7 @@ mod tests {
 			}
 
 			let snapshot = catalog.snapshot();
-			let config = snapshot.telemetry.get("gps").unwrap();
+			let config = snapshot.ext.telemetry.get("gps").unwrap();
 			assert_eq!(config.bitrate, Some(1_000_000));
 		}
 
@@ -1086,7 +1087,7 @@ mod tests {
 			feed(&mut rendition);
 
 			let snapshot = catalog.snapshot();
-			assert_eq!(snapshot.telemetry.get("gps").unwrap().bitrate, Some(4_200));
+			assert_eq!(snapshot.ext.telemetry.get("gps").unwrap().bitrate, Some(4_200));
 		}
 
 		/// Custom and media renditions share one reservation gate, so the first snapshot carries both.
@@ -1115,7 +1116,7 @@ mod tests {
 			}
 			let published = latest.expect("catalog published");
 			assert!(published.video.renditions.contains_key("v"));
-			assert!(published.telemetry.contains_key("gps"));
+			assert!(published.ext.telemetry.contains_key("gps"));
 		}
 	}
 }

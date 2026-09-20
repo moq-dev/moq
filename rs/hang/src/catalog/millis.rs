@@ -87,7 +87,7 @@ mod test {
 
 		let json =
 			r#"{"audio":{"renditions":{"audio":{"codec":"opus","sampleRate":48000,"numberOfChannels":2,"jitter":0}}}}"#;
-		let catalog = Catalog::from_str(json).unwrap();
+		let catalog = Catalog::<()>::from_str(json).unwrap();
 		assert_eq!(catalog.audio.renditions["audio"].jitter, None);
 
 		// So it round-trips as an omission rather than failing to re-encode.

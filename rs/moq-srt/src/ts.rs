@@ -43,7 +43,7 @@ impl Publisher {
 		let mut broadcast = origin.create_broadcast(path)?;
 		broadcast.announce(moq_net::origin::Route::default())?;
 		let config = config.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
-		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 		let handle = broadcast.clone();
 		let importer = ts::Import::new(broadcast, catalog.reserve());
 		tracing::info!(%path, "publishing ingest broadcast");
@@ -253,7 +253,7 @@ mod tests {
 				.expect("no catalog snapshot carried the cue track")
 				.unwrap()
 				.expect("the catalog ended without the cue track");
-			if let Some((name, track)) = snapshot.mpegts.tracks.iter().find(|(_, track)| {
+			if let Some((name, track)) = snapshot.ext.mpegts.tracks.iter().find(|(_, track)| {
 				track
 					.verbatim
 					.as_ref()
@@ -296,9 +296,9 @@ mod tests {
 
 		let mut roundtrip = moq_net::broadcast::Info::new().produce();
 		let roundtrip_consumer = roundtrip.consume();
-		let roundtrip_catalog = moq_mux::catalog::Producer::with_catalog(
+		let roundtrip_catalog = moq_mux::catalog::Producer::new(
 			&mut roundtrip,
-			moq_mux::catalog::hang::Catalog::<ts::Ext>::default(),
+			moq_mux::catalog::Config::default().with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default()),
 		)
 		.unwrap();
 		let mut roundtrip_import = ts::Import::new(roundtrip, roundtrip_catalog.reserve());
@@ -307,6 +307,7 @@ mod tests {
 
 		let snapshot = roundtrip_catalog.snapshot();
 		let (name, _) = snapshot
+			.ext
 			.mpegts
 			.tracks
 			.iter()

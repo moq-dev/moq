@@ -388,7 +388,6 @@ type JsonSchema = {
   "compression": Compression | undefined,
   "schema": string | undefined,
   "broadcast": string | undefined,
-  "timeline": TimelineSchema | undefined,
 }
 ~~~
 
@@ -402,7 +401,6 @@ type BinarySchema = {
   "compression": Compression | undefined,
   "mime": string | undefined,
   "broadcast": string | undefined,
-  "timeline": TimelineSchema | undefined,
 }
 ~~~
 
@@ -455,9 +453,8 @@ A consumer MUST ignore a track whose `compression` it does not recognize, since 
 The `deflate` value is the group-scoped DEFLATE of {{compression}}.
 A `snapshot` group covers a single value (plus any deltas), so its window spans that group alone; a `stream` group's frames compress against the earlier ones in the log.
 
-### broadcast and timeline {#data-shared}
+### broadcast {#data-shared}
 The `broadcast` field carries the same meaning here as it does for a media rendition ({{field-broadcast}}).
-The `timeline` field advertises a companion timeline track indexing this track's groups, with the same `track` / `timescale` / `durationMax` fields as the catalog's root `archive` entry ({{archive-catalog}}).
 
 ## Binary Fields {#binary}
 A decoder config field carrying raw bytes, notably `description` (an `AllowSharedBufferSource` in WebCodecs), is carried in the catalog as a hex string ({{!RFC4648, Section 8}}).
@@ -619,12 +616,6 @@ A broadcast that does not need aligned segments simply omits it.
 The catalog's root `archive` field is the one name for the segment index, and for any durable recording of those ranges:
 
 ~~~
-type TimelineSchema = {
-  "track": string,
-  "timescale": number | undefined,
-  "durationMax": number | undefined,
-}
-
 type ArchiveSchema = {
   "track": string,
   "timescale": number | undefined,

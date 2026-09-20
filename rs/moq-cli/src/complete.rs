@@ -900,7 +900,8 @@ mod tests {
 		for (path, video, audio) in [("wanted", "hd", "stereo"), ("other", "sd", "mono")] {
 			let mut broadcast = origin.create_broadcast(path).expect("broadcast");
 			broadcast.announce(Default::default()).expect("broadcast");
-			let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).expect("catalog");
+			let mut catalog =
+				moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).expect("catalog");
 			let mut edit = catalog.modify().unwrap();
 			edit.video.renditions.insert(
 				video.to_string(),

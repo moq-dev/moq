@@ -144,7 +144,7 @@ mod tests {
 	#[test]
 	fn quiet_startup_tracks_demand() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let reserved = catalog.reserve();
 		let mut rendition = reserved.video("video").unwrap();
 		let mut state = Catalog::new(VideoHint::default());

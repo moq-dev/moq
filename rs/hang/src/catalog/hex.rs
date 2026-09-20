@@ -38,7 +38,7 @@ mod test {
 	fn base64_description() {
 		let json = r#"{"video":{"renditions":{"video/0":{"codec":"avc1.42e02a","container":{"kind":"legacy"},"description":"AUIAKv/hABtnQgAq"}}}}"#;
 
-		let err = Catalog::from_str(json).unwrap_err().to_string();
+		let err = Catalog::<()>::from_str(json).unwrap_err().to_string();
 		assert!(err.contains("expected hex"), "{err}");
 
 		// Also from an already-parsed Value, which is what a consumer deserializes: moq-json
@@ -52,7 +52,7 @@ mod test {
 	#[test]
 	fn hex_description() {
 		let json = r#"{"video":{"renditions":{"video/0":{"codec":"avc1.42e02a","container":{"kind":"legacy"},"description":"0142002a"}}}}"#;
-		let catalog = Catalog::from_str(json).unwrap();
+		let catalog = Catalog::<()>::from_str(json).unwrap();
 		let rendition = catalog.video.renditions.get("video/0").unwrap();
 		assert_eq!(rendition.description.as_deref(), Some(&[0x01, 0x42, 0x00, 0x2a][..]));
 

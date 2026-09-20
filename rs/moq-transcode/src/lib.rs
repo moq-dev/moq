@@ -81,7 +81,7 @@ impl Transcoder {
 	) -> Result<Self, Error> {
 		// The catalog starts empty and fills in during `run`, exactly like a
 		// media importer that hasn't seen parameter sets yet.
-		let derived = moq_mux::catalog::Producer::new(&mut output)?;
+		let derived = moq_mux::catalog::Producer::new(&mut output, moq_mux::catalog::Config::default())?;
 		let dynamic = output.dynamic();
 
 		Ok(Self {
@@ -248,7 +248,7 @@ mod tests {
 	/// resolve a ladder, since no rung encodes until someone asks.
 	fn source_catalog(width: u32, height: u32) -> Source {
 		let mut broadcast = moq_net::broadcast::Info::default().produce();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let track = broadcast
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
@@ -336,7 +336,7 @@ mod tests {
 	/// `groups` groups of `frames` gray frames each, encoded with openh264.
 	fn source_broadcast(groups: u64, frames: u64) -> Source {
 		let mut broadcast = moq_net::broadcast::Info::default().produce();
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
 		let mut video = hang::catalog::VideoConfig::new(hang::catalog::H264 {
 			inline: true,
@@ -393,7 +393,7 @@ mod tests {
 	/// producing task's handle (the track producer lives inside it).
 	fn source_broadcast_live(groups: u64, frames: u64) -> (Source, tokio::task::JoinHandle<()>) {
 		let mut broadcast = moq_net::broadcast::Info::default().produce();
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
 		let mut video = hang::catalog::VideoConfig::new(hang::catalog::H264 {
 			inline: true,

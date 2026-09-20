@@ -17,8 +17,8 @@
 import * as Json from "@moq/json";
 import type * as Moq from "@moq/net";
 import type { Time } from "@moq/net";
-import type * as Catalog from "../catalog";
-import { u53 } from "../catalog";
+import type * as Catalog from "./catalog";
+import { u53 } from "./catalog";
 
 /**
  * A contiguous run of groups a track contributes to a segment, `start` through `end`
@@ -55,7 +55,7 @@ export const DEFAULT_TIMESCALE = 1000;
  * The conventional {@link ProducerProps.durationMin} (1 second), in milliseconds, for callers
  * with no opinion of their own.
  */
-export const DEFAULT_DURATION_MIN_MS = 1000;
+export const DEFAULT_DURATION_MIN_MS = 1000 as Time.Milli;
 
 /** Recent segment records repeated when the Window track rolls to a new group. */
 const CHECKPOINT_RECORDS = 256;
@@ -80,7 +80,7 @@ export interface ProducerProps {
 	 * always satisfiable (wait longer), while a ceiling is not. Defaults to
 	 * {@link DEFAULT_DURATION_MIN_MS}.
 	 */
-	durationMin?: number;
+	durationMin?: Time.Milli;
 
 	/**
 	 * The longest a segment may be, in milliseconds of media time, advertised in the catalog
@@ -93,7 +93,7 @@ export interface ProducerProps {
 	 * it unset when the media decides, which is the common case for real-time and for anything
 	 * importing a source the publisher doesn't control.
 	 */
-	durationMax?: number;
+	durationMax?: Time.Milli;
 }
 
 /** One enrolled track's report state. */

@@ -110,10 +110,8 @@ impl<E: CatalogExt> From<moq_net::track::Subscriber> for Consumer<E> {
 /// `render_group`, `alt_group`, `max_grp_sap_starting_type`, `max_obj_sap_starting_type`) are
 /// dropped.
 pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>) -> Result<Catalog<E>> {
-	let mut catalog = Catalog {
-		ext: msf.ext.clone(),
-		..Default::default()
-	};
+	let mut catalog = Catalog::default();
+	catalog.ext = msf.ext.clone();
 
 	for track in &msf.tracks {
 		let Some(role) = track.role.as_ref() else {

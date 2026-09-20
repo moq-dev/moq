@@ -16,7 +16,7 @@ pub struct IngestSink {
 
 impl IngestSink {
 	pub fn new(mut broadcast: moq_net::broadcast::Producer, config: moq_mux::catalog::Config) -> Result<Self> {
-		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 		Ok(Self {
 			broadcast,
 			catalog,

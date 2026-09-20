@@ -100,16 +100,16 @@ document would silently discard everything but the last payload:
 
 The rest is descriptive: `compression` (`deflate`, the same group-scoped
 `deflate-raw` the catalog uses), `schema` on a JSON track, `mime` on a binary
-one, plus the `broadcast` and `timeline` fields a media rendition takes. A
+one, plus the optional `broadcast` reference. A
 consumer that doesn't recognize a `mode` or `compression` ignores that track and
 round-trips it verbatim.
 
 In Rust the catalog owns the lifetime: `catalog.json_stream(track, config)` (or
 `json_snapshot` / `binary_snapshot` / `binary_stream`) writes the entry and
-retracts it when the producer drops, and `catalog.json_track(name)` returns an
-entry that subscribes itself. In the browser, read the entry from
-`catalog.json.tracks`, subscribe by name, and hand the track to `@moq/json` or
-`@moq/binary`.
+retracts it when the producer drops. Read the config from `catalog.json.tracks`
+or `catalog.binary.tracks`, then pair its name and config with
+`moq_mux::catalog::Entry::new` to subscribe. In the browser, read the same map,
+subscribe by name, and hand the track to `@moq/json` or `@moq/binary`.
 
 ## Container
 

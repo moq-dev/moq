@@ -822,9 +822,9 @@ mod tests {
 		tokio::spawn(driver.run(moq_tokio::runtime::Runtime::<()>::new()));
 		let mut broadcast = origin.create_broadcast("rewind").unwrap();
 		broadcast.announce(moq_net::origin::Route::default()).unwrap();
-		let mut catalog = moq_mux::catalog::Producer::with_catalog(
+		let mut catalog = moq_mux::catalog::Producer::new(
 			&mut broadcast,
-			moq_mux::catalog::hang::Catalog::<ts::Ext>::default(),
+			moq_mux::catalog::Config::default().with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default()),
 		)
 		.unwrap();
 		let track = broadcast

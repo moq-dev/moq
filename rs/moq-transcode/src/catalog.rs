@@ -551,7 +551,7 @@ mod tests {
 		archive.replay = Some(PathRelativeOwned::from("./recordings/clip".to_string()));
 		archive.version = Some(hang::catalog::Archive::VERSION);
 		child.archive = Some(archive.clone());
-		let clock = hang::catalog::Clock::new(1_751_846_400_000_000).unwrap();
+		let clock = hang::catalog::Clock::new(moq_net::Timestamp::from_micros(1_751_846_400_000_000).unwrap()).unwrap();
 		child.clock = Some(clock);
 
 		let mut out = moq_mux::catalog::hang::Catalog::<()>::default();

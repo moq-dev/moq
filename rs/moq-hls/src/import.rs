@@ -1053,7 +1053,7 @@ mod tests {
 		std::fs::write(&playlist_path, playlist).unwrap();
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = CatalogProducer::new(&mut broadcast).unwrap();
+		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let cfg = Config::new(playlist_path.to_string_lossy().into_owned());
 		let import = Import::new(broadcast, catalog.clone(), cfg).unwrap();
 		(import, catalog)
@@ -1126,7 +1126,7 @@ mod tests {
 
 	fn sink() -> Sink {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = CatalogProducer::new(&mut broadcast).unwrap();
+		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 		Sink { broadcast, catalog }
 	}
 
@@ -1193,7 +1193,7 @@ mod tests {
 	#[test]
 	fn hls_import_starts_without_tracks() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = CatalogProducer::new(&mut broadcast).unwrap();
+		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let url = "https://example.com/master.m3u8".to_string();
 		let cfg = Config::new(url);
 		let hls = Import::new(broadcast, catalog, cfg).unwrap();
@@ -1255,7 +1255,7 @@ mod tests {
 		.unwrap();
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = CatalogProducer::new(&mut broadcast).unwrap();
+		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let cfg = Config::new(path.to_string_lossy().into_owned());
 		let mut import = Import::new(broadcast, catalog, cfg).unwrap();
 
@@ -1542,7 +1542,7 @@ mod tests {
 		std::fs::write(&path, master_body).unwrap();
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = CatalogProducer::new(&mut broadcast).unwrap();
+		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 		// `Config` takes a filesystem path for non-http inputs.
 		let cfg = Config::new(path.to_str().unwrap().to_string());
 		let mut hls = Import::new(broadcast, catalog, cfg).unwrap();

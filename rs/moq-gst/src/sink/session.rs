@@ -282,7 +282,7 @@ impl Session {
 		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 		let mut broadcast = origin.create_broadcast(&settings.broadcast)?;
 		broadcast.announce(moq_net::origin::Route::default())?;
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default())?;
 
 		let status = Arc::new(Status::default());
 		let completion = CompletionState::new();

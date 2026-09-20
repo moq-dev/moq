@@ -775,7 +775,7 @@ mod tests {
 	/// Local producers, no network: a broadcast plus its catalog, exactly what the element holds.
 	fn producers() -> (moq_net::broadcast::Producer, moq_mux::catalog::Producer) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 		(broadcast, catalog)
 	}
 
