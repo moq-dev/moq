@@ -12,13 +12,13 @@ use std::{
 
 use rand::RngExt;
 use web_async::Lock;
-use web_transport_trait::{MaybeSend, MaybeSync};
 
 use super::{Requests, WeakCache, WeakEntry};
 use crate::{
 	AsPath, Error, InvalidPattern, Path, PathOwned, Pattern, Patterns,
 	coding::{BoundsExceeded, Decode, DecodeError, Encode, EncodeError},
-	runtime::{AnyTimers, Instant, Timers, TimersSlot},
+	runtime::{Instant, Timers},
+	time::Clock,
 	util::{TaskSet, Tasks, TasksWeak},
 };
 
@@ -1115,8 +1115,8 @@ pub struct Producer {
 	// driver drops, which is what makes later mutations fail with `Closed`.
 	tasks: Tasks,
 
-	// The driver's clock and timers, installed by [`Driver::run`].
-	timers: TimersSlot,
+	// The clock advanced by the origin driver.
+	timers: Clock,
 }
 
 impl std::ops::Deref for Producer {
@@ -1132,15 +1132,13 @@ impl Producer {
 	/// prefix and no pre-existing broadcasts, paired with the [`Driver`] that runs
 	/// the origin's lifecycle work.
 	///
-	/// Hand the driver a [`crate::Timers`] via [`Driver::run`] and poll the
-	/// returned [`Run`] (spawn it, await it, or step [`Run::poll`]) for the
-	/// origin to make progress; see the [`Driver`] docs for the exact contract.
+	/// Poll the driver with caller-supplied time for the origin to make progress.
 	/// `moq_tokio::origin::spawn` wraps this for tokio callers.
 	pub fn new(config: Config) -> (Self, Driver) {
 		let (tasks, set) = TaskSet::new();
 		let scope = OriginScope::default();
 		let shared = kio::Shared::<OriginState>::default();
-		let timers = TimersSlot::default();
+		let timers = Clock::default();
 		let pool = config.pool.clone();
 		let producer = Self {
 			info: config.id,
@@ -1160,10 +1158,10 @@ impl Producer {
 				tree: scope.tree,
 				shared,
 				done: false,
-				sweep: None,
 			},
 			timers,
 			pool,
+			gc: None,
 		};
 		(producer, driver)
 	}
@@ -1211,7 +1209,7 @@ impl Producer {
 			default_max_age: track::DEFAULT_MAX_AGE,
 			stats: stats::Session::default(),
 			tasks,
-			timers: TimersSlot::default(),
+			timers: Clock::default(),
 		}
 	}
 
@@ -1659,36 +1657,29 @@ impl Drop for AnnounceProducer {
 	}
 }
 
-/// The origin's lifecycle work, waiting for the [`crate::Timers`] it runs on.
+/// Drives origin lifecycle work and cache expiration with caller-supplied time.
 ///
-/// Returned by [`Producer::new`] alongside the producer. Call
-/// [`run`](Self::run) with the timers that arm its deadlines (linger, handover
-/// holds) and poll the returned [`Run`] for the life of the origin. Route
-/// changes, track serving, linger timers, failover, and teardown all run there:
-/// exact lookups and eligible announcements still update synchronously in
-/// [`Producer::create_broadcast`], but nothing else makes progress without
-/// polling.
+/// Returned by [`Producer::new`]. Poll on external activity or at [`Self::timeout`],
+/// supplying nondecreasing instants. Route changes, track serving, linger,
+/// failover, and teardown run here; exact lookups and eligible announcements
+/// update synchronously in [`Producer::create_broadcast`].
 ///
-/// It holds no [`Producer`] clone, so it never keeps the origin alive.
-/// Dropping it (before or after `run`) tears the origin down immediately:
-/// active fronts abort with [`Error::Dropped`], pending dynamic requests are
-/// rejected, announced paths unannounce and announcement cursors end, and later
-/// producer mutations fail with [`Error::Closed`].
-///
-/// `moq_tokio::origin::spawn` wraps construction, `run`, and spawning for
-/// tokio callers.
-#[must_use = "call Driver::run and poll the result or the origin makes no progress"]
+/// It holds no [`Producer`] clone, so it never keeps the origin alive. Dropping
+/// it aborts active fronts, rejects pending requests, ends announcements, and
+/// makes subsequent producer mutations fail with [`Error::Closed`].
+/// `moq_tokio::origin::spawn` handles construction and driving for Tokio callers.
+#[must_use = "poll the driver or the origin makes no progress"]
 pub struct Driver {
 	state: DriverState,
-	// The producer's slot, filled by `run` so lifecycle work can mint deadlines.
-	timers: TimersSlot,
+	// Shared by this origin's lifecycle tasks; advanced only when polled.
+	timers: Clock,
 	// The cache pool this origin's groups charge into, swept on a wall-clock
 	// cadence so its idle window binds a track whose publisher stopped writing.
 	pool: cache::Pool,
+	gc: Option<Instant>,
 }
 
-/// Everything the driver polls and tears down, split from the park so the two
-/// borrow disjointly.
+/// Lifecycle work and the state it tears down.
 struct DriverState {
 	/// Source watchers, fronts, and serve tasks: producers submit, this polls.
 	set: TaskSet,
@@ -1699,96 +1690,30 @@ struct DriverState {
 	shared: kio::Shared<OriginState>,
 	/// Cached completion so a poll after `Ready` doesn't re-poll the drained set.
 	done: bool,
-	/// The cache pool's idle sweep, installed by [`Driver::run`] (which is where the
-	/// timers arrive) and absent when the pool never expires content.
-	sweep: Option<Sweep>,
 }
 
 impl Driver {
-	/// Install the timers and return the runnable driver.
-	///
-	/// The origin's lifecycle work stamps instants and arms deadlines against
-	/// `timers`; nothing runs until the returned [`Run`] is polled.
-	pub fn run<T>(self, timers: T) -> Run
-	where
-		T: crate::runtime::Timers + MaybeSend + MaybeSync + 'static,
-		T::Timer: MaybeSend + 'static,
-	{
-		let timers = AnyTimers::new(timers);
-		self.timers.install(timers.clone());
-		let mut state = self.state;
-		state.sweep = Sweep::new(&timers, self.pool);
-		Run {
-			state,
-			park: kio::Park::default(),
-		}
+	/// Process ready origin work using caller-supplied monotonic time.
+	pub fn poll(&mut self, now: Instant, waiter: &kio::Waiter) -> Poll<()> {
+		self.timers.advance(now);
+		let result = self.state.poll(waiter);
+		self.gc = self.pool.gc(now);
+		result
+	}
+
+	/// The next instant to poll, or none when only external activity can make progress.
+	pub fn timeout(&self) -> Option<Instant> {
+		self.timers.timeout().into_iter().chain(self.gc).min()
 	}
 }
 
-/// The wall-clock half of the cache pool's idle window.
-///
-/// A track settles its own expiry as it writes, which covers every track that is
-/// still producing. A publisher that stalls with a group open stops writing, so this
-/// is what still reclaims that group (and unblocks whoever is parked inside it): a
-/// periodic [`cache::Pool::sweep`] on the origin's own timers.
-///
-/// Disarmed, and never allocated, when the pool has no expiry window.
-struct Sweep {
-	timers: AnyTimers,
-	pool: cache::Pool,
-	interval: Duration,
-	deadline: crate::runtime::Deadline<AnyTimers>,
-}
-
-impl Sweep {
-	fn new(timers: &AnyTimers, pool: cache::Pool) -> Option<Self> {
-		let interval = pool.sweep_interval()?;
-		Some(Self {
-			timers: timers.clone(),
-			pool,
-			interval,
-			deadline: crate::runtime::Deadline::after(timers, interval),
-		})
+impl crate::time::Driver for Driver {
+	type Output = ();
+	fn poll(&mut self, now: Instant, waiter: &kio::Waiter) -> Poll<()> {
+		self.poll(now, waiter)
 	}
-
-	fn poll(&mut self, waiter: &kio::Waiter) {
-		// A `Deadline` stays ready until it is re-armed, so re-arm before sweeping
-		// again; a clock that has not moved lands the next one in the future and
-		// this returns after one pass.
-		while self.deadline.poll(waiter).is_ready() {
-			self.deadline.set(self.timers.now().checked_add(self.interval));
-			self.pool.sweep();
-		}
-	}
-}
-
-/// The future running an origin's lifecycle work, from [`Driver::run`].
-///
-/// Poll it for the life of the origin, either by `.await`ing it (typically
-/// spawned on an executor) or by stepping [`poll`](Self::poll) from inside
-/// another [`kio`]-style poll function.
-///
-/// It holds no [`Producer`] clone, so it never keeps the origin alive: it
-/// resolves once every producer handle has dropped and the already-submitted
-/// lifecycle work has drained, and keeps returning `Ready` if polled again.
-/// Dropping it tears the origin down immediately, exactly like dropping the
-/// [`Driver`] it came from.
-#[must_use = "poll the driver (spawn or await it) or the origin makes no progress"]
-pub struct Run {
-	state: DriverState,
-	// Retains the waiter across `Future` polls so its kio registrations stay live.
-	// Kept out of `DriverState` so the borrow `hold` hands back doesn't collide
-	// with the `&mut` that polling the state needs.
-	park: kio::Park,
-}
-
-impl Run {
-	/// Drive the origin one step, registering `waiter` for the next wakeup.
-	///
-	/// The `poll_*` counterpart of `.await`ing, for callers composing the driver
-	/// into their own [`kio`]-style poll functions.
-	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		self.state.poll(waiter)
+	fn timeout(&self) -> Option<Instant> {
+		self.timeout()
 	}
 }
 
@@ -1797,9 +1722,6 @@ impl DriverState {
 		// Never gates completion: the pool outlives this origin (a relay shares one
 		// across every origin), so a sweep that is still due must not keep the driver
 		// alive after its lifecycle work has drained.
-		if let Some(sweep) = &mut self.sweep {
-			sweep.poll(waiter);
-		}
 		if !self.done {
 			ready!(self.set.poll(waiter));
 			self.done = true;
@@ -1863,18 +1785,6 @@ impl DriverState {
 impl Drop for DriverState {
 	fn drop(&mut self) {
 		self.teardown();
-	}
-}
-
-impl Future for Run {
-	type Output = ();
-
-	fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<()> {
-		let this = &mut *self;
-		// Disjoint field borrows: `hold` borrows the park for as long as the
-		// waiter lives, while the state is polled through its own `&mut`.
-		let waiter = this.park.hold(cx);
-		this.state.poll(waiter)
 	}
 }
 
@@ -2028,7 +1938,7 @@ fn detach_source(state: &kio::Producer<FrontState>, broadcast: &broadcast::Produ
 struct SourceTask {
 	/// The source broadcast, watched for its end.
 	source: broadcast::Consumer,
-	timers: TimersSlot,
+	timers: Clock,
 	/// The leaf the attach landed on.
 	leaf: Lock<OriginNode>,
 	/// The front's source table.
@@ -2074,7 +1984,7 @@ struct AttachContext<'a> {
 	/// Driver submission handle, for queueing a fresh front's task.
 	tasks: &'a Tasks,
 	/// The driver's clock, threaded into fronts for the track idle linger.
-	timers: &'a TimersSlot,
+	timers: &'a Clock,
 }
 
 /// Attach a source to the broadcast at `leaf`, creating (and publishing) the
@@ -2171,7 +2081,7 @@ async fn run_front(
 	tree: Lock<OriginNode>,
 	full: PathOwned,
 	tasks: Tasks,
-	slot: TimersSlot,
+	slot: Clock,
 ) {
 	enum Step {
 		Serve(Arc<str>, super::resume::Producer),
@@ -2264,7 +2174,7 @@ async fn serve_track(
 	state: kio::Producer<FrontState>,
 	name: Arc<str>,
 	mut resume: super::resume::Producer,
-	slot: TimersSlot,
+	slot: Clock,
 ) {
 	enum Step {
 		Closed,
@@ -2307,9 +2217,8 @@ async fn serve_track(
 	let mut dead: HashSet<u64> = HashSet::new();
 	// When the spliced segment stopped being read, starting the release countdown.
 	let mut idle_since: Option<Instant> = None;
-	// Only the driver polls this body, and `Driver::run` installs the slot
-	// before the driver can poll anything (see `run_front`).
-	let timers = slot.get();
+	// Only the driver polls this body, after advancing the shared clock.
+	let timers = slot.clone();
 	let mut deadline = crate::runtime::Deadline::new(&timers);
 
 	loop {
@@ -2642,7 +2551,7 @@ struct RemoteFrontTask {
 	/// Resolves the requesters parked on the front's channel.
 	request: kio::Producer<PendingBroadcast>,
 	tasks: TasksWeak,
-	timers: TimersSlot,
+	timers: Clock,
 }
 
 /// Owns a remotely-served front: materializes the path from the best covering
@@ -3531,7 +3440,7 @@ pub struct Consumer {
 
 	// The driver's clock and timers, threaded into fronts for the track idle
 	// linger.
-	timers: TimersSlot,
+	timers: Clock,
 }
 
 impl std::ops::Deref for Consumer {
@@ -4104,7 +4013,7 @@ impl ProduceTest for Config {
 	fn produce(self) -> Producer {
 		let (producer, driver) = Producer::new(self);
 		if tokio::runtime::Handle::try_current().is_ok() {
-			web_async::spawn(driver.run(crate::runtime::tokio_test::Tokio::new()));
+			web_async::spawn(crate::time::test::run(driver));
 		} else {
 			// A sync test: nothing polls the driver, and dropping it would tear
 			// the origin down, so leak it and rely on the synchronous half.
@@ -5314,7 +5223,7 @@ mod tests {
 	async fn driver_resolves_with_live_consumers() {
 		let (producer, driver) = Producer::new(Config::new(origin(1)));
 		let consumer = producer.consume();
-		let run = driver.run(crate::runtime::tokio_test::Tokio::new());
+		let run = crate::time::test::run(driver);
 		drop(producer);
 		tokio::time::timeout(Duration::from_secs(5), run)
 			.await

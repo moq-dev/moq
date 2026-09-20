@@ -7,60 +7,14 @@
 
 #![allow(dead_code)]
 
-use std::{pin::Pin, task::Poll};
-
 use moq_net::{Client, Server, Session, Version, origin};
 
 use super::mock::create_mock_session_pair;
 
-/// Tokio's clock and timers for these tests.
-#[derive(Clone, Default)]
-pub struct TokioRuntime;
+pub use moq_net::time::test::run;
 
-impl TokioRuntime {
-	pub fn new() -> Self {
-		Self
-	}
-}
-
-impl moq_net::runtime::Timers for TokioRuntime {
-	type Timer = TokioTimer;
-
-	fn timer(&self) -> Self::Timer {
-		TokioTimer { at: None, sleep: None }
-	}
-
-	fn now(&self) -> moq_net::runtime::Instant {
-		tokio::time::Instant::now().into_std()
-	}
-}
-
-/// The [`moq_net::runtime::Timer`] handed out by [`TokioRuntime`].
-pub struct TokioTimer {
-	at: Option<moq_net::runtime::Instant>,
-	// Allocated on the first poll after arming, then re-armed in place via
-	// `Sleep::reset`; construction panics without a live tokio time driver.
-	sleep: Option<Pin<Box<tokio::time::Sleep>>>,
-}
-
-impl moq_net::runtime::Timer for TokioTimer {
-	fn set(&mut self, at: Option<moq_net::runtime::Instant>) {
-		self.at = at;
-		if let (Some(at), Some(sleep)) = (at, &mut self.sleep) {
-			sleep.as_mut().reset(tokio::time::Instant::from_std(at));
-		}
-	}
-
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		let Some(at) = self.at else { return Poll::Pending };
-		let sleep = self
-			.sleep
-			.get_or_insert_with(|| Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(at))));
-		if sleep.is_elapsed() {
-			return Poll::Ready(());
-		}
-		waiter.poll_future(sleep.as_mut())
-	}
+pub fn now() -> moq_net::time::Instant {
+	tokio::time::Instant::now().into_std()
 }
 
 /// Options for [`connect_mock`].
@@ -132,18 +86,18 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	// machine is polled (and vice versa for the server's own SETUP).
 	let client_fut = async {
 		let (session, driver) = client
-			.connect(TokioRuntime::new(), client_transport)
+			.connect(now(), client_transport)
 			.await
 			.expect("client handshake failed");
-		tokio::spawn(driver);
+		tokio::spawn(run(driver));
 		session
 	};
 	let server_fut = async {
 		let (session, driver) = server
-			.accept(TokioRuntime::new(), server_transport)
+			.accept(now(), server_transport)
 			.await
 			.expect("server handshake failed");
-		tokio::spawn(driver);
+		tokio::spawn(run(driver));
 		session
 	};
 	let (client_session, server_session) = tokio::join!(client_fut, server_fut);

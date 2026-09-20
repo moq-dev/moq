@@ -704,9 +704,11 @@ async fn connect_session<S: moq_net::transport::poll::Boxable>(
 	client: &moq_net::Client,
 	transport: S,
 ) -> Result<moq_net::Session, moq_net::Error> {
-	let (session, driver) = client.connect(crate::runtime::Runtime::new(), transport).await?;
+	let (session, driver) = client
+		.connect(tokio::time::Instant::now().into_std(), transport)
+		.await?;
 	use tracing::Instrument;
-	tokio::spawn(driver.instrument(tracing::Span::current()));
+	tokio::spawn(crate::runtime::run(driver).instrument(tracing::Span::current()));
 	Ok(session)
 }
 

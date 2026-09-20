@@ -478,8 +478,8 @@ impl std::fmt::Debug for Worker {
 /// A worker's cloneable, thread-local handle.
 ///
 /// Everything that is not the drive loop goes through this:
-/// [`spawn`](Self::spawn), [`udp`](Self::udp), and the [`moq_net::Timers`]
-/// impl for deadlines. `!Send`, like everything the worker owns.
+/// [`spawn`](Self::spawn), [`udp`](Self::udp), [`timer`](Self::timer), and
+/// [`run`](Self::run) for MoQ drivers. `!Send`, like everything the worker owns.
 pub struct Handle {
 	shared: Rc<Shared>,
 }
@@ -536,11 +536,27 @@ impl std::fmt::Debug for Handle {
 	}
 }
 
-impl moq_net::Timers for Handle {
-	type Timer = crate::Timer;
+impl Handle {
+	/// Allocate a disarmed timer on this worker.
+	pub fn timer(&self) -> crate::Timer {
+		crate::Timer::from_heap(self.shared.timers.clone())
+	}
 
-	fn timer(&self) -> Self::Timer {
-		crate::Timer::new(self.shared.timers.clone())
+	/// Run a MoQ driver with this worker's timer and monotonic clock.
+	pub async fn run<D: moq_net::time::Driver>(&self, mut driver: D) -> D::Output {
+		let mut timer = self.timer();
+		kio::wait(|waiter| {
+			loop {
+				if let Poll::Ready(result) = driver.poll(Instant::now(), waiter) {
+					return Poll::Ready(result);
+				}
+				timer.set(driver.timeout());
+				if timer.poll(waiter).is_pending() {
+					return Poll::Pending;
+				}
+			}
+		})
+		.await
 	}
 }
 
@@ -586,8 +602,8 @@ fn retry_teardown_submit(interruptions: &mut usize, err: std::io::Error) -> std:
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use moq_net::Timers;
-	use moq_net::runtime::Deadline;
+
+	use crate::Timer as Deadline;
 	use std::time::Duration;
 
 	/// Kernel-gated: `None` (with a loud skip) below the 6.12 floor, so these
@@ -665,7 +681,6 @@ mod tests {
 
 	#[test]
 	fn timer_rearm_and_disarm() {
-		use moq_net::runtime::Timer as _;
 		let Some(mut worker) = worker() else { return };
 		let handle = worker.handle();
 		let mut timer = handle.timer();
@@ -1157,7 +1172,6 @@ mod tests {
 	/// derived heap depth has to come back to zero.
 	#[test]
 	fn metrics_count_timer_churn() {
-		use moq_net::runtime::Timer as _;
 		let metrics = Metrics::default();
 		let config = Config {
 			metrics: metrics.clone(),

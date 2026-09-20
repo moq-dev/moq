@@ -694,7 +694,11 @@ impl Publish {
 	pub fn track_datagram(&mut self, track: Id, timestamp_us: u64, payload: &[u8]) -> Result<u64, Error> {
 		let track = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
 		let timestamp = moq_net::Timestamp::from_micros(timestamp_us)?;
-		Ok(track.append_datagram(timestamp, bytes::Bytes::copy_from_slice(payload))?)
+		Ok(track.append_datagram(
+			moq_net::time::Instant::now(),
+			timestamp,
+			bytes::Bytes::copy_from_slice(payload),
+		)?)
 	}
 
 	/// Finish a raw track. No more groups or frames can be written.

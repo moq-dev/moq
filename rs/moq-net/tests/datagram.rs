@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use futures::FutureExt as _;
 use moq_net::{Hop, Timestamp, Version};
-use support::harness::{MockConnectOptions, MockPair, TokioRuntime, connect_mock};
+use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// Maximum time any single test may run before being treated as a deadlock.
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -21,7 +21,7 @@ const PAYLOAD: &[u8] = b"datagram payload";
 /// Build an origin producer, spawning its driver on the ambient runtime.
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
-	tokio::spawn(driver.run(TokioRuntime::new()));
+	tokio::spawn(support::harness::run(driver));
 	producer
 }
 
@@ -77,9 +77,12 @@ async fn datagrams_reach_the_subscriber_in_order() {
 			fixture
 				.producer
 				.insert_datagram(
-					sequence,
-					Timestamp::from_millis(sequence).unwrap(),
-					bytes::Bytes::from_static(PAYLOAD),
+					std::time::Instant::now(),
+					moq_net::Datagram {
+						sequence,
+						timestamp: Timestamp::from_millis(sequence).unwrap(),
+						payload: moq_net::IntoBytes::into_bytes(bytes::Bytes::from_static(PAYLOAD)),
+					},
 				)
 				.unwrap();
 		}
@@ -139,9 +142,12 @@ async fn ietf_does_not_deliver_datagrams() {
 
 		producer
 			.insert_datagram(
-				0,
-				Timestamp::from_millis(7).unwrap(),
-				bytes::Bytes::from_static(PAYLOAD),
+				std::time::Instant::now(),
+				moq_net::Datagram {
+					sequence: 0,
+					timestamp: Timestamp::from_millis(7).unwrap(),
+					payload: moq_net::IntoBytes::into_bytes(bytes::Bytes::from_static(PAYLOAD)),
+				},
 			)
 			.unwrap();
 		producer
@@ -168,17 +174,23 @@ async fn inserted_sequences_survive_the_lite_wire() {
 		fixture
 			.producer
 			.insert_datagram(
-				5,
-				Timestamp::from_millis(5).unwrap(),
-				bytes::Bytes::from_static(PAYLOAD),
+				std::time::Instant::now(),
+				moq_net::Datagram {
+					sequence: 5,
+					timestamp: Timestamp::from_millis(5).unwrap(),
+					payload: moq_net::IntoBytes::into_bytes(bytes::Bytes::from_static(PAYLOAD)),
+				},
 			)
 			.unwrap();
 		fixture
 			.producer
 			.insert_datagram(
-				2,
-				Timestamp::from_millis(2).unwrap(),
-				bytes::Bytes::from_static(PAYLOAD),
+				std::time::Instant::now(),
+				moq_net::Datagram {
+					sequence: 2,
+					timestamp: Timestamp::from_millis(2).unwrap(),
+					payload: moq_net::IntoBytes::into_bytes(bytes::Bytes::from_static(PAYLOAD)),
+				},
 			)
 			.unwrap();
 

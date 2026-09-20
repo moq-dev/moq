@@ -874,8 +874,8 @@ impl Producer {
 	}
 
 	/// Coarse clock tick of the group's last cache access, used by age expiry.
-	pub(crate) fn cache_accessed_tick(&self) -> u64 {
-		self.alive.access.tick()
+	pub(crate) fn cache_accessed_tick(&self, now: Option<u64>) -> Option<u64> {
+		self.alive.access.tick(now)
 	}
 
 	/// Enter the group into the evictable population: demoted from the live edge,
@@ -905,8 +905,9 @@ impl Producer {
 				index: 0,
 				end: None,
 				prefetch: Prefetch::default(),
-				last_refresh: crate::model::clock::now(),
-				refresh_interval: self.cache.pool().refresh_interval().min(self.track.max_age / 2),
+				cache: self.cache.clone(),
+				access: self.alive.access.clone(),
+				refreshed: self.cache.pool().now(),
 			}),
 			// Untagged: a tagged track attaches the egress meter via `with_meter`
 			// when it hands the consumer to a subscriber/fetch.
@@ -1109,15 +1110,10 @@ struct Plain {
 	// A batch of completed frames drained ahead under one lock (whole-frame reads only).
 	prefetch: Prefetch,
 
-	// When this consumer last stamped the group's access time. The prefetch bounds
-	// a batch by frame count, not elapsed time, so pops re-stamp on a time bound
-	// (see [`Self::refresh_if_stale`]) or a slow reader could go a full LRU
-	// window without an access and be expired mid-read.
-	last_refresh: crate::runtime::Instant,
-
-	// The shorter of half the immutable pool expiry and half the publisher's
-	// media-retention window.
-	refresh_interval: std::time::Duration,
+	// Record prefetched reads without entering the group's state on every frame.
+	cache: Arc<cache::Track>,
+	access: Arc<cache::Access>,
+	refreshed: u64,
 }
 
 impl Clone for Plain {
@@ -1129,8 +1125,9 @@ impl Clone for Plain {
 			index: self.index,
 			end: self.end,
 			prefetch: Prefetch::default(),
-			last_refresh: self.last_refresh,
-			refresh_interval: self.refresh_interval,
+			cache: self.cache.clone(),
+			access: self.access.clone(),
+			refreshed: self.refreshed,
 		}
 	}
 }
@@ -1608,18 +1605,16 @@ impl Plain {
 		self.state.read().content_range(start, end)
 	}
 
-	/// Re-stamp the group's access time from the lock-free prefetch path once half
-	/// the shorter of its track retention or the pool's idle window has passed. The
-	/// batch bounds frames, not elapsed time, so without this a reader pacing
-	/// through a batch could be expired or evicted while demonstrably active.
+	/// Record prefetched reads, updating the eviction rank once per sampled tick.
 	fn refresh_if_stale(&mut self) {
-		let now = crate::model::clock::now();
-		if now.duration_since(self.last_refresh) < self.refresh_interval {
-			return;
+		self.access.touch();
+		let tick = self.cache.pool().now();
+		if tick != self.refreshed {
+			self.state.read().charge.refresh();
+			self.refreshed = tick;
 		}
-		self.state.read().charge.refresh();
-		self.last_refresh = now;
 	}
+
 	// A helper to automatically apply Dropped if the state is closed without an error.
 	fn poll<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R>>
 	where
@@ -1749,9 +1744,8 @@ impl Plain {
 			Err(state) => return Poll::Ready(Err(state.abort.clone().unwrap_or(Error::Dropped))),
 		}
 
-		// The refill stamped the group under its lock; restart the staleness clock
-		// so the pops that follow don't immediately re-stamp.
-		self.last_refresh = crate::model::clock::now();
+		// The refill already updated the eviction rank under the group lock.
+		self.refreshed = self.cache.pool().now();
 
 		// A fresh batch was just filled (empty only on a clean end). Count the whole
 		// batch once here, under no lock, so the drained pops that follow stay free.

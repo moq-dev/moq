@@ -1,3 +1,4 @@
+use crate::runtime::Timers as _;
 use crate::{frame, group, origin, track};
 use std::{
 	collections::HashMap,
@@ -18,6 +19,7 @@ use super::Version;
 use web_async::Lock;
 
 pub(super) struct SubscriberConfig<S: crate::transport::poll::Session> {
+	pub runtime: crate::time::Clock,
 	pub session: S,
 	/// The origin into which remote broadcasts are inserted. Traffic stats are
 	/// attributed through this handle: tag it with [`origin::Producer::with_stats`]
@@ -43,6 +45,7 @@ pub(super) struct SubscriberConfig<S: crate::transport::poll::Session> {
 
 #[derive(Clone)]
 pub(super) struct Subscriber<S: crate::transport::poll::Session> {
+	runtime: crate::time::Clock,
 	session: S,
 
 	origin: origin::Producer,
@@ -95,6 +98,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		let self_origin = *config.origin;
 		Self {
 			session: config.session,
+			runtime: config.runtime,
 			origin: config.origin,
 			recv_bandwidth: config.recv_bandwidth,
 			self_origin,
@@ -434,7 +438,14 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		let timestamp =
 			Timestamp::new(dg.timestamp, scale).map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 
-		entry.producer.insert_datagram(dg.sequence, timestamp, dg.payload)?;
+		entry.producer.insert_datagram(
+			self.runtime.now(),
+			crate::Datagram {
+				sequence: dg.sequence,
+				timestamp,
+				payload: crate::IntoBytes::into_bytes(dg.payload),
+			},
+		)?;
 		Ok(())
 	}
 
@@ -733,7 +744,7 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 					self.state = GroupRecvState::Serve {
 						group: crate::recv::Group::new(group),
 						track,
-						ingest: FrameIngest::new(timescale),
+						ingest: FrameIngest::new(self.subscriber.runtime.clone(), timescale),
 					};
 				}
 				GroupRecvState::Serve { group, track, ingest } => {
@@ -780,6 +791,7 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 /// Pumps bare FRAME messages from a reader into a group producer: the wire
 /// format shared by GROUP streams and FETCH responses.
 struct FrameIngest {
+	runtime: crate::time::Clock,
 	/// `Some` decodes the lite-05 zigzag-delta timestamp prefix; `None` stamps
 	/// local receive time (pre-lite-05).
 	timescale: Option<Timescale>,
@@ -801,11 +813,12 @@ enum IngestPhase {
 }
 
 impl FrameIngest {
-	fn new(timescale: Option<Timescale>) -> Self {
+	fn new(runtime: crate::time::Clock, timescale: Option<Timescale>) -> Self {
 		Self {
 			timescale,
 			prev_ts: 0,
 			phase: IngestPhase::Timing,
+			runtime,
 		}
 	}
 
@@ -847,7 +860,7 @@ impl FrameIngest {
 					// `create_frame_owned` is the allocation chokepoint and rejects an
 					// oversized `size` before allocating, so no pre-check is needed. No
 					// wire timestamp (pre-lite-05) means local receive time.
-					let timestamp = timestamp.unwrap_or_else(Timestamp::now);
+					let timestamp = timestamp.unwrap_or_else(|| Timestamp::from(self.runtime.now()));
 					let frame = group.create_frame_owned(frame::Info { size, timestamp })?;
 					self.phase = IngestPhase::Payload { frame };
 				}
@@ -1325,6 +1338,7 @@ mod tests {
 	fn unsubscribe_drops_the_datagram_and_releases_the_producer() {
 		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::Clock::tokio(),
 			session: SinkSession::default(),
 			origin,
 			recv_bandwidth: None,
@@ -1397,6 +1411,7 @@ mod tests {
 
 		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::Clock::tokio(),
 			session: session.clone(),
 			origin,
 			recv_bandwidth: None,
@@ -1469,6 +1484,7 @@ mod tests {
 			let session = SinkSession::gated_bi(gate.consume());
 			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 			let subscriber = Subscriber::new(SubscriberConfig {
+				runtime: crate::time::Clock::tokio(),
 				session: session.clone(),
 				origin,
 				recv_bandwidth: None,
@@ -1893,6 +1909,7 @@ mod tests {
 		let assigned = crate::Hop::new(777).unwrap();
 		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::Clock::tokio(),
 			session: SinkSession::new(Default::default()),
 			origin,
 			recv_bandwidth: None,
@@ -1948,6 +1965,7 @@ mod tests {
 		let assigned = crate::Hop::new(777).unwrap();
 		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::Clock::tokio(),
 			session: SinkSession::new(Default::default()),
 			origin,
 			recv_bandwidth: None,
@@ -2003,6 +2021,7 @@ mod tests {
 		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::Clock::tokio(),
 			session: SinkSession::new(Default::default()),
 			origin,
 			recv_bandwidth: None,
@@ -2058,6 +2077,7 @@ mod tests {
 		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::Clock::tokio(),
 			session: SinkSession::new(Default::default()),
 			origin,
 			recv_bandwidth: None,
@@ -2126,6 +2146,7 @@ mod tests {
 		);
 
 		let mut subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::Clock::tokio(),
 			session: SinkSession::new(Default::default()),
 			origin: origin.clone(),
 			recv_bandwidth: None,
@@ -2182,6 +2203,7 @@ mod tests {
 		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::Clock::tokio(),
 			session,
 			origin,
 			recv_bandwidth: None,
@@ -2226,6 +2248,7 @@ mod tests {
 		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::Clock::tokio(),
 			session: SinkSession::new(Default::default()),
 			origin,
 			recv_bandwidth: None,
@@ -2288,6 +2311,7 @@ mod tests {
 		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::Clock::tokio(),
 			session,
 			origin,
 			recv_bandwidth: None,
@@ -2349,6 +2373,7 @@ mod tests {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::Clock::tokio(),
 			session: SinkSession::new(Default::default()),
 			origin,
 			recv_bandwidth: None,
@@ -3516,7 +3541,7 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 					self.state = FetchRunState::Ingest {
 						stream,
 						producer,
-						ingest: FrameIngest::new(self.timescale),
+						ingest: FrameIngest::new(self.serve.subscriber.runtime.clone(), self.timescale),
 					};
 				}
 				FetchRunState::Ingest {

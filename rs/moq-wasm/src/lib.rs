@@ -9,7 +9,7 @@
 //! which is the highest-value target (the `@moq/watch` use case). The publish
 //! path follows the same shape and is left as the obvious next step.
 //!
-//! `runtime::Runtime` supplies browser timers to moq-net. This crate spawns
+//! `runtime::run` drives moq-net with the browser clock and timer. This crate spawns
 //! the returned session drivers on the browser's microtask queue.
 
 // Browser-only crate. Empty on native so `cargo check --workspace` stays green.
@@ -72,14 +72,17 @@ impl Session {
 		// Wire a subscribe origin so the session has somewhere to insert the
 		// broadcasts the remote announces; keep a consumer to read them.
 		let (origin, origin_driver) = moq_net::origin::Producer::new(moq_net::Hop::random().into());
-		web_async::spawn(origin_driver.run(runtime::Runtime));
+		web_async::spawn(crate::runtime::run(origin_driver));
 		let consumer = origin.consume();
 		let client = moq_net::Client::new().with_subscriber(origin);
 		// The driver holds no session clone, so dropping this `Session` still
 		// closes the transport and ends the spawned task.
-		let (inner, driver) = client.connect(runtime::Runtime, transport).await.map_err(js_err)?;
+		let (inner, driver) = client
+			.connect(web_async::time::Instant::now(), transport)
+			.await
+			.map_err(js_err)?;
 		web_async::spawn(async move {
-			let _ = driver.await;
+			let _ = crate::runtime::run(driver).await;
 		});
 		Ok(Session { inner, consumer })
 	}

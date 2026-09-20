@@ -16,8 +16,6 @@ mod support;
 #[cfg(all(target_os = "linux", any(feature = "noq", feature = "quiche", feature = "quinn")))]
 mod linux {
 	use std::net::UdpSocket;
-	use std::pin::Pin;
-	use std::task::Poll;
 	use std::time::Instant;
 
 	use criterion::{BenchmarkId, Criterion, Throughput};
@@ -32,48 +30,6 @@ mod linux {
 	const FRAME_SIZE: usize = 32 * 1024;
 
 	const ALPN: &str = "moq-lite-05";
-
-	/// A `Send` timers impl over tokio for the origin drivers, which cannot
-	/// take the worker's `!Send` handle (see `tests/session.rs`).
-	#[derive(Clone, Default)]
-	struct TokioTimers;
-
-	impl moq_net::runtime::Timers for TokioTimers {
-		type Timer = TokioTimer;
-
-		fn timer(&self) -> Self::Timer {
-			TokioTimer { at: None, sleep: None }
-		}
-
-		fn now(&self) -> moq_net::runtime::Instant {
-			tokio::time::Instant::now().into_std()
-		}
-	}
-
-	struct TokioTimer {
-		at: Option<moq_net::runtime::Instant>,
-		sleep: Option<Pin<Box<tokio::time::Sleep>>>,
-	}
-
-	impl moq_net::runtime::Timer for TokioTimer {
-		fn set(&mut self, at: Option<moq_net::runtime::Instant>) {
-			self.at = at;
-			if let (Some(at), Some(sleep)) = (at, &mut self.sleep) {
-				sleep.as_mut().reset(tokio::time::Instant::from_std(at));
-			}
-		}
-
-		fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-			let Some(at) = self.at else { return Poll::Pending };
-			let sleep = self
-				.sleep
-				.get_or_insert_with(|| Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(at))));
-			if sleep.is_elapsed() {
-				return Poll::Ready(());
-			}
-			waiter.poll_future(sleep.as_mut())
-		}
-	}
 
 	struct Ablation {
 		name: &'static str,
@@ -143,7 +99,7 @@ mod linux {
 					.build()
 					.expect("tokio runtime");
 				rt.block_on(async move {
-					tokio::join!(pub_driver.run(TokioTimers), sub_driver.run(TokioTimers));
+					tokio::join!(moq_tokio::runtime::run(pub_driver), moq_tokio::runtime::run(sub_driver));
 				});
 			});
 
@@ -174,10 +130,10 @@ mod linux {
 					.expect("quic accept");
 				let (session, driver) = moq_net::Server::new()
 					.with_publisher(&pub_origin)
-					.accept_lite(server_handle.clone(), quic::web::Session::raw(conn))
+					.accept_lite(std::time::Instant::now(), quic::web::Session::raw(conn))
 					.await
 					.expect("accept_lite");
-				let _ = driver.await;
+				let _ = server_handle.run(driver).await;
 				session.closed().await;
 			});
 
@@ -189,11 +145,12 @@ mod linux {
 						.expect("quic connect");
 					let (session, driver) = moq_net::Client::new()
 						.with_subscriber(sub_origin.clone())
-						.connect_lite(handle.clone(), quic::web::Session::raw(conn))
+						.connect_lite(std::time::Instant::now(), quic::web::Session::raw(conn))
 						.await
 						.expect("connect_lite");
+					let task_handle = handle.clone();
 					handle.spawn(async move {
-						let _ = driver.await;
+						let _ = task_handle.run(driver).await;
 					});
 					let bc = {
 						let consumer = sub_origin.consume();

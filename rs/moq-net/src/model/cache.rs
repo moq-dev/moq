@@ -7,7 +7,7 @@
 //! sized proportionally to what it wrote, and pays that debt by aborting its own oldest
 //! groups with [`Error::Evicted`](crate::Error::Evicted). Reclamation is therefore
 //! distributed across every writing track and converges on the capacity without any
-//! global lock, registry, or background task.
+//! global eviction task.
 //!
 //! Cross-track ordering comes from one statistic: the mean last-access time of the
 //! evictable population (every cached group except each track's protected latest).
@@ -25,16 +25,11 @@
 //! congestion stall can't age content out; the pool's expiry is the orthogonal
 //! wall-clock bound that keeps unwatched content from pinning RAM.
 //!
-//! Expiry runs from two places. A track's own writes settle it inline, which keeps a
-//! busy track's backlog draining without any wakeup. That alone is not a bound: a
-//! publisher that stalls with a group still open stops writing, so nothing reclaims
-//! its buffer and a reader parked in that group waits forever. So a pool with an
-//! expiry window also keeps a registry of its live track accounts and sweeps them on
-//! a wall-clock cadence, driven by [`origin::Driver`](crate::origin::Driver). A pool
-//! whose origin driver is never run therefore keeps the write-driven half only, which
-//! is what a standalone [`broadcast`](crate::broadcast::Info) built without an origin
-//! gets. The byte budget deliberately has no such machinery: it is repaid by writes,
-//! and a track that never writes never grows the pool.
+//! Expiry is driven by [`Pool::gc`], also called by each origin driver.
+//! Reads and writes clear the expiration timestamp without reading a clock.
+//! The next cleanup pass dates that activity at its supplied instant. Delayed
+//! cleanup extends retention; standalone pools must call `gc` too.
+//! Byte-pressure eviction still runs inline on writes.
 //!
 //! A bare pool is inert by default ([`Pool::unbounded`]): publishers and subscribers
 //! that never set a capacity or expiry pay only a couple of atomic counters, and
@@ -43,7 +38,7 @@
 //! every origin so the whole process caches into a single policy.
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use super::group;
@@ -111,9 +106,8 @@ impl Config {
 	/// [`Error::Old`](crate::Error::Old). This is independent of track retention:
 	/// [`max_age`](crate::track::Info::max_age) uses media timestamps, while this
 	/// window keeps idle content from pinning memory. Reclaiming without a write behind
-	/// it needs the [`origin::Driver`](crate::origin::Driver) running, which every
-	/// session-backed origin has; a standalone broadcast keeps only the write-driven
-	/// half. The value is fixed when the
+	/// it needs [`Pool::gc`] called periodically (origins do this automatically).
+	/// The value is fixed when the
 	/// pool is created. Values are rounded up to the pool's 100 ms clock tick, with
 	/// 100 ms as the minimum effective window.
 	pub fn with_expiry(mut self, expiry: impl Into<Option<Duration>>) -> Self {
@@ -127,7 +121,7 @@ impl Config {
 /// The pool tracks how many payload bytes are cached across every registered group,
 /// plus the mean last-access time of the evictable ones. It never evicts on its own:
 /// tracks accrue eviction debt as they write and evict their own oldest groups to
-/// pay it, so every operation here is a few atomics with no lock. The capacity is
+/// pay it. Idle expiration runs during [`Self::gc`]. The capacity is
 /// therefore a target usage converges toward, not a hard limit: carried debt, capped
 /// payments, and the always-protected live edge all let usage transiently exceed it.
 #[derive(Clone)]
@@ -149,7 +143,8 @@ struct Inner {
 	// Wall-clock LRU window in milliseconds; u64::MAX means never expire by idleness.
 	expiry: u64,
 	// Reference point for the coarse tick clock.
-	epoch: crate::runtime::Instant,
+	clock: Mutex<Option<Clock>>,
+	tick: AtomicU64,
 	// Sum and count of last-access ticks across the evictable population, giving a
 	// count-weighted mean. Tracks add a group when it becomes evictable (demoted
 	// from the live edge, or inserted behind it) and remove it when it leaves.
@@ -160,6 +155,12 @@ struct Inner {
 	// budget needs no registry, since a track that never writes never grows the pool.
 	// Weak, because a track owns its account and the account must not outlive it.
 	tracks: kio::Lock<slab::Slab<Weak<Track>>>,
+}
+
+struct Clock {
+	epoch: crate::time::Instant,
+	now: crate::time::Instant,
+	sweep: Option<crate::time::Instant>,
 }
 
 impl Pool {
@@ -178,17 +179,21 @@ impl Pool {
 			}
 			ms.max(1).div_ceil(TICK_MS).saturating_mul(TICK_MS)
 		});
-		Self {
+		let pool = Self {
 			inner: Arc::new(Inner {
 				used: AtomicU64::new(0),
 				capacity: AtomicU64::new(config.capacity.unwrap_or(u64::MAX)),
 				expiry,
-				epoch: crate::model::clock::now(),
+				clock: Mutex::new(None),
+				tick: AtomicU64::new(0),
 				access_sum: AtomicU64::new(0),
 				access_count: AtomicU64::new(0),
 				tracks: kio::Lock::new(slab::Slab::new()),
 			}),
-		}
+		};
+		#[cfg(test)]
+		crate::model::clock::register(&pool);
+		pool
 	}
 
 	/// Create a pool that never evicts. This is the [`Default`].
@@ -234,51 +239,81 @@ impl Pool {
 		}
 	}
 
-	/// How often a reader on a lock-free path should re-stamp its group's access
-	/// time: half the LRU window keeps the stamp comfortably inside it while staying
-	/// rare on the hot path. Bounded even when expiry is disabled, since the stamp
-	/// also protects the group from byte-budget eviction.
-	pub(crate) fn refresh_interval(&self) -> Duration {
-		self.expiry().unwrap_or(DEFAULT_EXPIRY) / 2
-	}
-
-	/// How often [`Self::sweep`] should run, or `None` when idle reclamation is off.
+	/// Sample recency periodically while either cache policy is enabled.
 	///
-	/// Half the window, so a group is reclaimed within 1.5 windows of its last access
-	/// rather than 2, and each track's pass drains from its oldest entry so that bound
-	/// holds however deep the backlog is. A shorter cadence buys nothing: the
-	/// same per-track gate the write path uses ([`EXPIRY_SCAN_TICKS`]) floors an
-	/// actual scan at one per second, which is also why a window under two seconds
-	/// reclaims within two windows instead of 1.5.
+	/// Expiry is approximate: activity is dated on the following cleanup pass,
+	/// and passes run at half the idle window.
 	pub(crate) fn sweep_interval(&self) -> Option<Duration> {
-		self.expiry().map(|expiry| expiry / 2)
+		self.expiry()
+			.or_else(|| self.capacity().map(|_| DEFAULT_EXPIRY))
+			.map(|window| window / 2)
 	}
 
-	/// Expire idle groups in every track holding an account against this pool.
-	///
-	/// This is the write-independent half of the LRU window: a track whose publisher
-	/// has stalled runs no write path, so nothing else would ever reclaim the group it
-	/// left open, and a reader parked inside that group would never be told. Each track
-	/// drains from its oldest entry rather than a rotating window, since nothing else
-	/// will, but stops as soon as the front stops yielding victims: a sweep over a pool
-	/// with nothing due costs a clock read and a few entries per track, not a walk of
-	/// everything cached.
-	///
-	/// A no-op when idle reclamation is disabled: nothing registers.
+	/// Expire idle groups across the registered tracks.
 	pub(crate) fn sweep(&self) {
-		// Upgraded under the lock but settled outside it: settling takes the track's
-		// own state lock, and dropping the last handle to a dead account would
-		// re-enter this lock through `Track::drop`.
-		let tracks: Vec<Arc<Track>> = self
+		// Upgrade outside each track's lock: dropping its last account unregisters it.
+		let tracks: Vec<_> = self
 			.inner
 			.tracks
 			.lock()
 			.iter()
 			.filter_map(|(_, track)| track.upgrade())
 			.collect();
-
 		for track in tracks {
 			track.sweep();
+		}
+	}
+
+	/// Collect idle cache entries and return the next cleanup time.
+	///
+	/// Call after polling and at the returned deadline, including when idle.
+	/// Calls before that deadline only advance the pool's sampled clock. A due
+	/// pass visits every cached group, dating accesses since the last pass and
+	/// reclaiming idle groups except each track's latest. Delayed calls extend
+	/// retention. Shared pools use the latest supplied instant.
+	///
+	/// `None` means both cache policies are disabled. After enabling a capacity
+	/// with [`Self::resize`], call this again to resume periodic clock sampling.
+	pub fn gc(&self, now: crate::time::Instant) -> Option<crate::time::Instant> {
+		self.advance(now, true)
+	}
+
+	fn advance(&self, now: crate::time::Instant, sweep: bool) -> Option<crate::time::Instant> {
+		// Shared origins must not run overlapping collection passes.
+		let mut clock = self.inner.clock.lock().unwrap();
+		let clock = clock.get_or_insert(Clock {
+			epoch: now,
+			now,
+			sweep: None,
+		});
+		let now = now.max(clock.now);
+		let tick = u64::try_from(now.duration_since(clock.epoch).as_millis() / u128::from(TICK_MS))
+			.expect("cache clock overflow");
+		self.inner.tick.store(tick, Ordering::Relaxed);
+		clock.now = now;
+		if self.sweep_interval().is_none() {
+			clock.sweep = None;
+		} else if sweep && clock.sweep.is_none_or(|at| at <= now) {
+			self.sweep();
+			clock.sweep = self.sweep_interval().and_then(|interval| now.checked_add(interval));
+		}
+		clock.sweep
+	}
+
+	#[cfg(test)]
+	pub(crate) fn advance_test(&self, now: crate::time::Instant) {
+		self.advance(now, false);
+		let tracks: Vec<_> = self
+			.inner
+			.tracks
+			.lock()
+			.iter()
+			.filter_map(|(_, track)| track.upgrade())
+			.collect();
+		for track in tracks {
+			if let Some(state) = track.state.upgrade() {
+				state.read().date_cache_accesses(self.now());
+			}
 		}
 	}
 
@@ -317,10 +352,9 @@ impl Pool {
 		self.inner.used.fetch_sub(n, Ordering::Relaxed);
 	}
 
-	/// Coarse ticks since the pool was created: the clock access timestamps use.
+	/// Coarse ticks since the first cleanup call.
 	pub(crate) fn now(&self) -> u64 {
-		let elapsed = crate::model::clock::now().duration_since(self.inner.epoch);
-		elapsed.as_millis() as u64 / TICK_MS
+		self.inner.tick.load(Ordering::Relaxed)
 	}
 
 	/// Encode the current clock tick and an access-priority tie breaker.
@@ -484,10 +518,11 @@ impl Track {
 	pub(crate) fn charge(self: &Arc<Self>) -> Charge {
 		self.pool.add(ENTRY_OVERHEAD);
 		self.written.fetch_add(ENTRY_OVERHEAD, Ordering::Relaxed);
+		let access = Arc::new(Access::new(self.pool.stamp(0)));
 		Charge {
 			track: Some(self.clone()),
 			bytes: ENTRY_OVERHEAD,
-			access: Arc::new(Access::new(self.pool.stamp(0))),
+			access,
 			counted: false,
 		}
 	}
@@ -512,21 +547,18 @@ impl Track {
 		self.settle_inner(now, false);
 	}
 
-	/// Settle from [`Pool::sweep`], draining the stale front of the eviction order.
-	///
-	/// The write path's rotating window is fine while writes keep coming, because the
-	/// next one revisits the rest. Nothing follows on a track that stopped writing, so
-	/// the sweep starts at the oldest entry and keeps going while it finds victims: a
-	/// backlog otherwise needs its own length in windows before the oldest entry is
-	/// even examined. A track with nothing due costs a handful of entries, not its
-	/// depth, and this is gated to the same interval a write is.
+	/// Settle from [`Pool::sweep`], dating activity and expiring every idle candidate.
 	pub(crate) fn sweep(&self) {
 		self.settle_inner(None, true);
 	}
 
 	fn settle_inner(&self, now: Option<u64>, full: bool) {
 		let settle_debt = self.written.load(Ordering::Relaxed) >= WRITE_CHARGE_THRESHOLD;
-		let scan_expiry = self.expiry_due(now);
+		let scan_expiry = if full {
+			self.pool.expiry().is_some()
+		} else {
+			self.expiry_due(now)
+		};
 		if !settle_debt && !scan_expiry {
 			return;
 		}
@@ -629,28 +661,49 @@ pub(crate) struct Charge {
 /// every parked consumer, and a mere cache access must not wake anyone, so [`Charge`]
 /// stamps this through a shared guard.
 #[derive(Default)]
-pub(crate) struct Access(AtomicU64);
+pub(crate) struct Access {
+	stamp: AtomicU64,
+	expires: AtomicU64,
+}
 
 impl Access {
 	fn new(stamp: u64) -> Self {
-		Self(AtomicU64::new(stamp))
+		Self {
+			stamp: AtomicU64::new(stamp),
+			expires: AtomicU64::new(u64::MAX),
+		}
 	}
 
 	/// The stamp, tie-breaking bits included.
 	pub(crate) fn get(&self) -> u64 {
-		self.0.load(Ordering::Relaxed)
+		self.stamp.load(Ordering::Relaxed)
 	}
 
-	/// The coarse clock tick alone, without the priority bits.
-	pub(crate) fn tick(&self) -> u64 {
-		self.get() >> ACCESS_SHIFT
+	/// Clear the expiration timestamp until a cleanup pass observes this access.
+	pub(crate) fn touch(&self) {
+		self.expires.store(u64::MAX, Ordering::Relaxed);
+	}
+
+	/// The last access tick, assigning undated activity only during cleanup.
+	pub(crate) fn tick(&self, now: Option<u64>) -> Option<u64> {
+		let tick = match now {
+			Some(now) => match self
+				.expires
+				.compare_exchange(u64::MAX, now, Ordering::Relaxed, Ordering::Relaxed)
+			{
+				Ok(_) => now,
+				Err(tick) => tick,
+			},
+			None => self.expires.load(Ordering::Relaxed),
+		};
+		(tick != u64::MAX).then_some(tick)
 	}
 
 	/// Advance to `target` if it is newer, returning the previous stamp.
 	fn bump(&self, target: u64) -> u64 {
 		// `fetch_max` keeps the stamp monotone, and its prior value makes the
 		// paired mean update exact even for back-to-back accesses.
-		self.0.fetch_max(target, Ordering::Relaxed)
+		self.stamp.fetch_max(target, Ordering::Relaxed)
 	}
 }
 
@@ -728,6 +781,8 @@ impl Charge {
 	/// Returns the tick it read, or `None` when the charge is detached.
 	fn touch(&self, boost: u64) -> Option<u64> {
 		let track = self.track.as_ref()?;
+		// Cleanup assigns the next supplied timestamp to this access.
+		self.access.touch();
 		let target = track.pool.stamp(boost);
 		let prev = self.access.bump(target);
 		if target > prev && self.counted {
@@ -923,7 +978,12 @@ mod test {
 		// A refresh in the same coarse tick still lifts the group above the mean.
 		c.refresh();
 		assert!(c.accessed() > average);
-		assert_eq!(c.access().tick(), pool.now(), "priority does not advance expiry time");
+		assert_eq!(c.access().tick(None), None, "undated access is protected until cleanup");
+		assert_eq!(
+			c.access().tick(Some(pool.now())),
+			Some(pool.now()),
+			"cleanup dates the access"
+		);
 		// Repeated same-tick refreshes are idempotent, not runaway.
 		let stamped = c.accessed();
 		c.refresh();
@@ -935,12 +995,10 @@ mod test {
 		// A bare pool preserves the unbounded contract in both dimensions.
 		let pool = Pool::unbounded();
 		assert_eq!(pool.expiry(), None);
-		assert_eq!(pool.refresh_interval(), DEFAULT_EXPIRY / 2);
 
 		let pool = Pool::new(Config::default().with_expiry(Duration::from_secs(1)));
 		assert_eq!(pool.expiry(), Some(Duration::from_secs(1)));
 		assert_eq!(pool.expiry_ticks(), 10);
-		assert_eq!(pool.refresh_interval(), Duration::from_millis(500));
 
 		let pool = Pool::new(Config::default().with_expiry(Duration::from_millis(1)));
 		assert_eq!(pool.expiry(), Some(Duration::from_millis(TICK_MS)));
@@ -951,7 +1009,6 @@ mod test {
 		let pool = Pool::new(Config::default());
 		assert_eq!(pool.expiry(), None);
 		assert_eq!(pool.expiry_ticks(), u64::MAX);
-		assert_eq!(pool.refresh_interval(), DEFAULT_EXPIRY / 2);
 	}
 
 	#[test]
@@ -1011,6 +1068,27 @@ mod test {
 	#[test]
 	fn standalone_origin_enables_default_expiry() {
 		assert_eq!(crate::origin::Config::default().pool.expiry(), Some(DEFAULT_EXPIRY));
+	}
+
+	#[test]
+	fn collecting_before_the_deadline_does_not_postpone_it() {
+		let pool = Pool::new(Config::default().with_expiry(Duration::from_secs(2)));
+		let now = crate::model::clock::now();
+		let deadline = pool.gc(now);
+		assert_eq!(pool.gc(now + Duration::from_millis(500)), deadline);
+	}
+
+	#[test]
+	fn bounded_pools_sample_recency_without_expiration() {
+		let pool = Pool::unbounded();
+		let now = crate::model::clock::now();
+		assert_eq!(pool.gc(now), None);
+		pool.resize(1024);
+		assert_eq!(pool.gc(now), Some(now + DEFAULT_EXPIRY / 2));
+		pool.gc(now + DEFAULT_EXPIRY);
+		assert!(pool.now() > 0);
+		pool.resize(None);
+		assert_eq!(pool.gc(now + DEFAULT_EXPIRY), None);
 	}
 
 	#[test]

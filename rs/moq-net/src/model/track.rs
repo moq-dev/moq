@@ -55,12 +55,12 @@ const EVICT_SCAN: usize = 4;
 pub(super) struct ExpiryScan {
 	start: usize,
 	// Ceiling on how many entries this pass examines. `EVICT_SCAN` from the write
-	// path, the whole queue from the pool's sweep. Either way the pass stops once it
-	// has retained `EVICT_SCAN` entries, so its cost tracks what it reclaims rather
-	// than how much the track has cached.
+	// path, the whole queue from the pool's cleanup pass.
 	width: usize,
 	now: u64,
 	max_ticks: u64,
+	// Cleanup dates pending activity; write-driven scans only check dated entries.
+	gc: bool,
 }
 
 /// Publisher-side properties of a track.
@@ -373,8 +373,7 @@ impl TrackState {
 	}
 
 	/// Push a datagram onto the buffer, dropping any that have aged past [`MAX_DATAGRAM_AGE`].
-	fn push_datagram(&mut self, datagram: Datagram) {
-		let now = crate::model::clock::now();
+	fn push_datagram(&mut self, now: crate::time::Instant, datagram: Datagram) {
 		self.datagrams.push_back((datagram, now));
 		while let Some((_, at)) = self.datagrams.front() {
 			if now.duration_since(*at) <= MAX_DATAGRAM_AGE {
@@ -601,7 +600,7 @@ impl TrackState {
 	/// fetched, or written) entries in front of them: every position is revisited
 	/// within a few writes. Expiry throughput is therefore EVICT_SCAN groups per write; the
 	/// byte budget reclaims the remainder under memory pressure, and the pool's sweep
-	/// ([`Self::expiry_scan_full`]) covers a track that stopped writing entirely.
+	/// ([`Self::expiry_scan_drain`]) covers a track that stopped writing entirely.
 	pub(super) fn evict_expired(&mut self) {
 		let scan = self.expiry_scan();
 		self.evict_expired_scan(scan);
@@ -614,25 +613,26 @@ impl TrackState {
 			width: EVICT_SCAN,
 			now: self.cache.pool().now(),
 			max_ticks: self.cache.pool().expiry_ticks(),
+			gc: false,
 		}
 	}
 
-	/// Describe a scan that drains the stale front of the eviction order, for the
-	/// pool's sweep.
-	///
-	/// A write's rotating window is fine while writes keep coming, because the next
-	/// one revisits the rest. The sweep is the only thing running on a track nobody
-	/// writes, so that window would take a backlog's length in sweeps to reach the
-	/// oldest entry. This starts at the front, where the oldest entries are, and the
-	/// shared stop rule ends it once the front stops yielding victims. A track that
-	/// went quiet has its whole backlog stale and contiguous there, so one sweep takes
-	/// all of it; a track with nothing due costs `EVICT_SCAN` entries, not its depth.
+	/// Scan every cached candidate so undated accesses and old entries cannot hide
+	/// behind fresh entries at the front of the eviction order.
 	pub(super) fn expiry_scan_drain(&self) -> ExpiryScan {
 		ExpiryScan {
 			start: 0,
 			width: self.evict.len(),
 			now: self.cache.pool().now(),
 			max_ticks: self.cache.pool().expiry_ticks(),
+			gc: true,
+		}
+	}
+
+	#[cfg(test)]
+	pub(super) fn date_cache_accesses(&self, now: u64) {
+		for slot in self.lookup.values() {
+			slot.group.cache_accessed_tick(Some(now));
 		}
 	}
 
@@ -655,12 +655,15 @@ impl TrackState {
 				}
 				if slot.group.is_aborted()
 					|| (Some(sequence) != self.latest_group
-						&& scan.now.saturating_sub(slot.group.cache_accessed_tick()) > scan.max_ticks)
+						&& slot
+							.group
+							.cache_accessed_tick(scan.gc.then_some(scan.now))
+							.is_some_and(|tick| scan.now.saturating_sub(tick) > scan.max_ticks))
 				{
 					return true;
 				}
 				retained += 1;
-				if retained >= EVICT_SCAN {
+				if !scan.gc && retained >= EVICT_SCAN {
 					break;
 				}
 			}
@@ -699,13 +702,15 @@ impl TrackState {
 					continue;
 				}
 				if Some(sequence) == self.latest_group
-					|| scan.now.saturating_sub(slot.group.cache_accessed_tick()) <= scan.max_ticks
+					|| slot
+						.group
+						.cache_accessed_tick(scan.gc.then_some(scan.now))
+						.is_none_or(|tick| scan.now.saturating_sub(tick) <= scan.max_ticks)
 				{
-					// Nothing to reclaim here. The front of the queue is the oldest
-					// content, so a run of these means the rest is fresher still: stop
-					// rather than walk a whole cache to find nothing.
+					// Writes keep their scan bounded. Cleanup visits the entire
+					// queue to date pending accesses and find idle entries behind them.
 					retained += 1;
-					if retained >= EVICT_SCAN {
+					if !scan.gc && retained >= EVICT_SCAN {
 						break;
 					}
 					continue;
@@ -1244,7 +1249,12 @@ impl Producer {
 	/// deliver them. Keep payloads well under the 1200-byte minimum path MTU. An origin
 	/// publisher uses this; a relay preserving upstream numbering uses
 	/// [`Self::insert_datagram`].
-	pub fn append_datagram<B: crate::IntoBytes>(&mut self, timestamp: Timestamp, payload: B) -> Result<u64> {
+	pub fn append_datagram<B: crate::IntoBytes>(
+		&mut self,
+		now: crate::time::Instant,
+		timestamp: Timestamp,
+		payload: B,
+	) -> Result<u64> {
 		let payload = payload.into_bytes();
 		if payload.len() > super::datagram::MAX_DATAGRAM_PAYLOAD {
 			return Err(Error::FrameTooLarge);
@@ -1266,11 +1276,14 @@ impl Producer {
 		}
 		state.max_sequence = Some(sequence);
 		meter.datagram(payload.len() as u64);
-		state.push_datagram(Datagram {
-			sequence,
-			timestamp,
-			payload,
-		});
+		state.push_datagram(
+			now,
+			Datagram {
+				sequence,
+				timestamp,
+				payload,
+			},
+		);
 		let cache = state.cache.clone();
 		drop(state);
 		cache.settle(None);
@@ -1282,13 +1295,12 @@ impl Producer {
 	/// Preserves the supplied sequence (bumping the shared `max_sequence` if needed), so a
 	/// relay can forward a datagram without renumbering it. Most origin publishers want
 	/// [`Self::append_datagram`] instead.
-	pub fn insert_datagram<B: crate::IntoBytes>(
-		&mut self,
-		sequence: u64,
-		timestamp: Timestamp,
-		payload: B,
-	) -> Result<()> {
-		let payload = payload.into_bytes();
+	pub fn insert_datagram(&mut self, now: crate::time::Instant, datagram: Datagram) -> Result<()> {
+		let Datagram {
+			sequence,
+			timestamp,
+			payload,
+		} = datagram;
 		if payload.len() > super::datagram::MAX_DATAGRAM_PAYLOAD {
 			return Err(Error::FrameTooLarge);
 		}
@@ -1305,11 +1317,14 @@ impl Producer {
 		}
 		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(sequence));
 		meter.datagram(payload.len() as u64);
-		state.push_datagram(Datagram {
-			sequence,
-			timestamp,
-			payload,
-		});
+		state.push_datagram(
+			now,
+			Datagram {
+				sequence,
+				timestamp,
+				payload,
+			},
+		);
 		let cache = state.cache.clone();
 		drop(state);
 		cache.settle(None);
@@ -4155,9 +4170,19 @@ mod test {
 
 		// Interleave groups and datagrams: they draw from one monotonic counter.
 		assert_eq!(producer.append_group().unwrap().sequence, 0);
-		assert_eq!(producer.append_datagram(ts, &b"a"[..]).unwrap(), 1);
+		assert_eq!(
+			producer
+				.append_datagram(crate::model::clock::now(), ts, &b"a"[..])
+				.unwrap(),
+			1
+		);
 		assert_eq!(producer.append_group().unwrap().sequence, 2);
-		assert_eq!(producer.append_datagram(ts, &b"b"[..]).unwrap(), 3);
+		assert_eq!(
+			producer
+				.append_datagram(crate::model::clock::now(), ts, &b"b"[..])
+				.unwrap(),
+			3
+		);
 		assert_eq!(producer.latest(), Some(3));
 	}
 
@@ -4167,7 +4192,9 @@ mod test {
 		let mut dg = producer.subscribe(None);
 
 		let ts = Timestamp::from_millis(42).unwrap();
-		let seq = producer.append_datagram(ts, &b"hello"[..]).unwrap();
+		let seq = producer
+			.append_datagram(crate::model::clock::now(), ts, &b"hello"[..])
+			.unwrap();
 
 		let got = recv_datagram(&mut dg);
 		assert_eq!(got.sequence, seq);
@@ -4183,7 +4210,14 @@ mod test {
 		let ts = Timestamp::from_millis(5).unwrap();
 		// A relay forwarding an upstream datagram keeps its sequence number.
 		producer
-			.insert_datagram(100, ts, bytes::Bytes::from_static(b"x"))
+			.insert_datagram(
+				crate::model::clock::now(),
+				crate::Datagram {
+					sequence: 100,
+					timestamp: ts,
+					payload: crate::IntoBytes::into_bytes(bytes::Bytes::from_static(b"x")),
+				},
+			)
 			.unwrap();
 
 		assert_eq!(recv_datagram(&mut dg).sequence, 100);
@@ -4198,10 +4232,22 @@ mod test {
 		let ts = Timestamp::from_millis(0).unwrap();
 
 		producer
-			.insert_datagram(10, ts, bytes::Bytes::from_static(b"gap"))
+			.insert_datagram(
+				crate::model::clock::now(),
+				crate::Datagram {
+					sequence: 10,
+					timestamp: ts,
+					payload: crate::IntoBytes::into_bytes(bytes::Bytes::from_static(b"gap")),
+				},
+			)
 			.unwrap();
 		assert_eq!(recv_datagram(&mut dg).sequence, 10);
-		assert_eq!(producer.append_datagram(ts, &b"next"[..]).unwrap(), 11);
+		assert_eq!(
+			producer
+				.append_datagram(crate::model::clock::now(), ts, &b"next"[..])
+				.unwrap(),
+			11
+		);
 		assert_eq!(producer.append_group().unwrap().sequence, 12);
 	}
 
@@ -4212,15 +4258,34 @@ mod test {
 		let ts = Timestamp::from_millis(0).unwrap();
 
 		producer
-			.insert_datagram(10, ts, bytes::Bytes::from_static(b"high"))
+			.insert_datagram(
+				crate::model::clock::now(),
+				crate::Datagram {
+					sequence: 10,
+					timestamp: ts,
+					payload: crate::IntoBytes::into_bytes(bytes::Bytes::from_static(b"high")),
+				},
+			)
 			.unwrap();
 		producer
-			.insert_datagram(5, ts, bytes::Bytes::from_static(b"low"))
+			.insert_datagram(
+				crate::model::clock::now(),
+				crate::Datagram {
+					sequence: 5,
+					timestamp: ts,
+					payload: crate::IntoBytes::into_bytes(bytes::Bytes::from_static(b"low")),
+				},
+			)
 			.unwrap();
 
 		assert_eq!(recv_datagram(&mut dg).sequence, 10);
 		assert_eq!(recv_datagram(&mut dg).sequence, 5);
-		assert_eq!(producer.append_datagram(ts, &b"next"[..]).unwrap(), 11);
+		assert_eq!(
+			producer
+				.append_datagram(crate::model::clock::now(), ts, &b"next"[..])
+				.unwrap(),
+			11
+		);
 	}
 
 	#[tokio::test]
@@ -4230,15 +4295,34 @@ mod test {
 		let ts = Timestamp::from_millis(0).unwrap();
 
 		producer
-			.insert_datagram(3, ts, bytes::Bytes::from_static(b"first"))
+			.insert_datagram(
+				crate::model::clock::now(),
+				crate::Datagram {
+					sequence: 3,
+					timestamp: ts,
+					payload: crate::IntoBytes::into_bytes(bytes::Bytes::from_static(b"first")),
+				},
+			)
 			.unwrap();
 		producer
-			.insert_datagram(3, ts, bytes::Bytes::from_static(b"again"))
+			.insert_datagram(
+				crate::model::clock::now(),
+				crate::Datagram {
+					sequence: 3,
+					timestamp: ts,
+					payload: crate::IntoBytes::into_bytes(bytes::Bytes::from_static(b"again")),
+				},
+			)
 			.unwrap();
 
 		assert_eq!(&recv_datagram(&mut dg).payload[..], b"first");
 		assert_eq!(&recv_datagram(&mut dg).payload[..], b"again");
-		assert_eq!(producer.append_datagram(ts, &b"next"[..]).unwrap(), 4);
+		assert_eq!(
+			producer
+				.append_datagram(crate::model::clock::now(), ts, &b"next"[..])
+				.unwrap(),
+			4
+		);
 	}
 
 	#[tokio::test]
@@ -4247,16 +4331,38 @@ mod test {
 		let mut dg = producer.subscribe(None);
 		let ts = Timestamp::from_millis(0).unwrap();
 
-		assert_eq!(producer.append_datagram(ts, &b"0"[..]).unwrap(), 0);
-		assert_eq!(producer.append_datagram(ts, &b"1"[..]).unwrap(), 1);
+		assert_eq!(
+			producer
+				.append_datagram(crate::model::clock::now(), ts, &b"0"[..])
+				.unwrap(),
+			0
+		);
+		assert_eq!(
+			producer
+				.append_datagram(crate::model::clock::now(), ts, &b"1"[..])
+				.unwrap(),
+			1
+		);
 		producer
-			.insert_datagram(0, ts, bytes::Bytes::from_static(b"stale"))
+			.insert_datagram(
+				crate::model::clock::now(),
+				crate::Datagram {
+					sequence: 0,
+					timestamp: ts,
+					payload: crate::IntoBytes::into_bytes(bytes::Bytes::from_static(b"stale")),
+				},
+			)
 			.unwrap();
 
 		assert_eq!(recv_datagram(&mut dg).sequence, 0);
 		assert_eq!(recv_datagram(&mut dg).sequence, 1);
 		assert_eq!(recv_datagram(&mut dg).sequence, 0);
-		assert_eq!(producer.append_datagram(ts, &b"2"[..]).unwrap(), 2);
+		assert_eq!(
+			producer
+				.append_datagram(crate::model::clock::now(), ts, &b"2"[..])
+				.unwrap(),
+			2
+		);
 		assert_eq!(producer.append_group().unwrap().sequence, 3);
 	}
 
@@ -4268,10 +4374,31 @@ mod test {
 		let ts = Timestamp::from_millis(0).unwrap();
 
 		producer
-			.insert_datagram(4, ts, bytes::Bytes::from_static(b"a"))
+			.insert_datagram(
+				crate::model::clock::now(),
+				crate::Datagram {
+					sequence: 4,
+					timestamp: ts,
+					payload: crate::IntoBytes::into_bytes(bytes::Bytes::from_static(b"a")),
+				},
+			)
 			.unwrap();
-		assert_eq!(other.append_datagram(ts, &b"b"[..]).unwrap(), 5);
-		other.insert_datagram(8, ts, bytes::Bytes::from_static(b"c")).unwrap();
+		assert_eq!(
+			other
+				.append_datagram(crate::model::clock::now(), ts, &b"b"[..])
+				.unwrap(),
+			5
+		);
+		other
+			.insert_datagram(
+				crate::model::clock::now(),
+				crate::Datagram {
+					sequence: 8,
+					timestamp: ts,
+					payload: crate::IntoBytes::into_bytes(bytes::Bytes::from_static(b"c")),
+				},
+			)
+			.unwrap();
 		assert_eq!(producer.append_group().unwrap().sequence, 9);
 
 		assert_eq!(recv_datagram(&mut dg).sequence, 4);
@@ -4285,10 +4412,20 @@ mod test {
 		let ts = Timestamp::from_millis(0).unwrap();
 		producer.finish().unwrap();
 		assert!(matches!(
-			producer.insert_datagram(0, ts, bytes::Bytes::from_static(b"x")),
+			producer.insert_datagram(
+				crate::model::clock::now(),
+				crate::Datagram {
+					sequence: 0,
+					timestamp: ts,
+					payload: crate::IntoBytes::into_bytes(bytes::Bytes::from_static(b"x"))
+				}
+			),
 			Err(Error::Closed)
 		));
-		assert!(matches!(producer.append_datagram(ts, &b"x"[..]), Err(Error::Closed)));
+		assert!(matches!(
+			producer.append_datagram(crate::model::clock::now(), ts, &b"x"[..]),
+			Err(Error::Closed)
+		));
 	}
 
 	#[test]
@@ -4297,7 +4434,18 @@ mod test {
 		let mut other = producer.clone();
 		let ts = Timestamp::from_millis(0).unwrap();
 		producer.abort(Error::Cancel).unwrap();
-		assert!(other.insert_datagram(0, ts, bytes::Bytes::from_static(b"x")).is_err());
+		assert!(
+			other
+				.insert_datagram(
+					crate::model::clock::now(),
+					crate::Datagram {
+						sequence: 0,
+						timestamp: ts,
+						payload: crate::IntoBytes::into_bytes(bytes::Bytes::from_static(b"x"))
+					}
+				)
+				.is_err()
+		);
 	}
 
 	#[test]
@@ -4306,10 +4454,24 @@ mod test {
 		let ts = Timestamp::from_millis(0).unwrap();
 		producer.finish_at(10).unwrap();
 		producer
-			.insert_datagram(5, ts, bytes::Bytes::from_static(b"ok"))
+			.insert_datagram(
+				crate::model::clock::now(),
+				crate::Datagram {
+					sequence: 5,
+					timestamp: ts,
+					payload: crate::IntoBytes::into_bytes(bytes::Bytes::from_static(b"ok")),
+				},
+			)
 			.unwrap();
 		assert!(matches!(
-			producer.insert_datagram(10, ts, bytes::Bytes::from_static(b"late")),
+			producer.insert_datagram(
+				crate::model::clock::now(),
+				crate::Datagram {
+					sequence: 10,
+					timestamp: ts,
+					payload: crate::IntoBytes::into_bytes(bytes::Bytes::from_static(b"late"))
+				}
+			),
 			Err(Error::Closed)
 		));
 		assert_eq!(producer.append_group().unwrap().sequence, 6);
@@ -4321,7 +4483,14 @@ mod test {
 		let mut datagram_only = track_producer("datagram-only", None);
 		let datagram_only_consumer = datagram_only.consume();
 		datagram_only
-			.insert_datagram(8, Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
+			.insert_datagram(
+				crate::model::clock::now(),
+				crate::Datagram {
+					sequence: 8,
+					timestamp: Timestamp::ZERO,
+					payload: crate::IntoBytes::into_bytes(bytes::Bytes::from_static(b"x")),
+				},
+			)
 			.unwrap();
 		assert_eq!(
 			datagram_only_consumer.resume_position(),
@@ -4336,7 +4505,14 @@ mod test {
 			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
 			.unwrap();
 		producer
-			.insert_datagram(8, Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
+			.insert_datagram(
+				crate::model::clock::now(),
+				crate::Datagram {
+					sequence: 8,
+					timestamp: Timestamp::ZERO,
+					payload: crate::IntoBytes::into_bytes(bytes::Bytes::from_static(b"x")),
+				},
+			)
 			.unwrap();
 
 		assert_eq!(
@@ -4357,7 +4533,14 @@ mod test {
 		let ts = Timestamp::from_millis(5).unwrap();
 
 		producer
-			.insert_datagram(5, ts, bytes::Bytes::from_static(b"x"))
+			.insert_datagram(
+				crate::model::clock::now(),
+				crate::Datagram {
+					sequence: 5,
+					timestamp: ts,
+					payload: crate::IntoBytes::into_bytes(bytes::Bytes::from_static(b"x")),
+				},
+			)
 			.unwrap();
 		assert_eq!(recv_datagram(&mut datagrams).sequence, 5);
 
@@ -4385,7 +4568,11 @@ mod test {
 
 		// Supplied at millis; stored/emitted at the track's micro timescale.
 		producer
-			.append_datagram(Timestamp::from_millis(2).unwrap(), &b"z"[..])
+			.append_datagram(
+				crate::model::clock::now(),
+				Timestamp::from_millis(2).unwrap(),
+				&b"z"[..],
+			)
 			.unwrap();
 		let got = recv_datagram(&mut dg);
 		assert_eq!(got.timestamp.scale(), Timescale::MICRO);
@@ -4398,11 +4585,18 @@ mod test {
 		let big = bytes::Bytes::from(vec![0u8; crate::model::datagram::MAX_DATAGRAM_PAYLOAD + 1]);
 		let ts = Timestamp::from_millis(0).unwrap();
 		assert!(matches!(
-			producer.append_datagram(ts, big.clone()),
+			producer.append_datagram(crate::model::clock::now(), ts, big.clone()),
 			Err(Error::FrameTooLarge)
 		));
 		assert!(matches!(
-			producer.insert_datagram(0, ts, big),
+			producer.insert_datagram(
+				crate::model::clock::now(),
+				crate::Datagram {
+					sequence: 0,
+					timestamp: ts,
+					payload: crate::IntoBytes::into_bytes(big)
+				}
+			),
 			Err(Error::FrameTooLarge)
 		));
 	}
@@ -4415,8 +4609,12 @@ mod test {
 		let mut b = producer.subscribe(None);
 		let ts = Timestamp::from_millis(1).unwrap();
 
-		producer.append_datagram(ts, &b"first"[..]).unwrap();
-		producer.append_datagram(ts, &b"second"[..]).unwrap();
+		producer
+			.append_datagram(crate::model::clock::now(), ts, &b"first"[..])
+			.unwrap();
+		producer
+			.append_datagram(crate::model::clock::now(), ts, &b"second"[..])
+			.unwrap();
 
 		// Both receive every datagram in order, independently.
 		assert_eq!(&recv_datagram(&mut a).payload[..], b"first");
@@ -4431,11 +4629,15 @@ mod test {
 		let mut dg = producer.subscribe(None);
 		let ts = Timestamp::from_millis(0).unwrap();
 
-		producer.append_datagram(ts, &b"old"[..]).unwrap(); // sequence 0
+		producer
+			.append_datagram(crate::model::clock::now(), ts, &b"old"[..])
+			.unwrap(); // sequence 0
 
 		// Age past the send-buffer window, then push a fresh datagram: the stale one is evicted.
 		crate::model::clock::advance(MAX_DATAGRAM_AGE + Duration::from_millis(10));
-		producer.append_datagram(ts, &b"new"[..]).unwrap(); // sequence 1
+		producer
+			.append_datagram(crate::model::clock::now(), ts, &b"new"[..])
+			.unwrap(); // sequence 1
 
 		// A lagging consumer resumes at the oldest still-buffered datagram (the fresh one).
 		let got = recv_datagram(&mut dg);
@@ -4454,7 +4656,11 @@ mod test {
 		);
 
 		producer
-			.append_datagram(Timestamp::from_millis(0).unwrap(), &b"go"[..])
+			.append_datagram(
+				crate::model::clock::now(),
+				Timestamp::from_millis(0).unwrap(),
+				&b"go"[..],
+			)
 			.unwrap();
 		assert_eq!(&recv_datagram(&mut dg).payload[..], b"go");
 	}
@@ -4473,7 +4679,9 @@ mod test {
 		let mut origin = track_producer("test", None);
 		let mut origin_dg = origin.subscribe(None);
 		let ts = Timestamp::from_millis(7).unwrap();
-		let seq = origin.append_datagram(ts, &b"payload"[..]).unwrap();
+		let seq = origin
+			.append_datagram(crate::model::clock::now(), ts, &b"payload"[..])
+			.unwrap();
 
 		let d = recv_datagram(&mut origin_dg);
 		let body = lite::Datagram {
@@ -4492,9 +4700,12 @@ mod test {
 		let mut downstream_dg = downstream.subscribe(None);
 		downstream
 			.insert_datagram(
-				wire.sequence,
-				Timestamp::new(wire.timestamp, Timescale::MILLI).unwrap(),
-				wire.payload,
+				crate::model::clock::now(),
+				crate::Datagram {
+					sequence: wire.sequence,
+					timestamp: Timestamp::new(wire.timestamp, Timescale::MILLI).unwrap(),
+					payload: crate::IntoBytes::into_bytes(wire.payload),
+				},
 			)
 			.unwrap();
 
@@ -4845,6 +5056,46 @@ mod test {
 		);
 	}
 
+	#[test]
+	fn cache_gc_dates_activity_before_expiring_it() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(1)));
+		let now = crate::model::clock::now();
+		assert_eq!(pool.gc(now), Some(now + Duration::from_millis(500)));
+		let producer = track_producer_pooled("test", pool.clone());
+		let mut group = producer.append_group().unwrap();
+		group.write_frame(Timestamp::ZERO, b"first".as_slice()).unwrap();
+		producer.append_group().unwrap();
+		// Activity written while cleanup was idle gets the new supplied time.
+		let later = now + Duration::from_secs(60);
+		pool.gc(later);
+		assert!(producer.state.read().lookup.contains_key(&0));
+		pool.gc(later + Duration::from_secs(2));
+		assert!(!producer.state.read().lookup.contains_key(&0));
+	}
+
+	#[test]
+	fn cache_gc_reaches_old_entries_behind_a_fresh_front() {
+		let expiry = Duration::from_secs(1);
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(expiry));
+		let producer = track_producer_pooled("test", pool.clone());
+		let now = crate::model::clock::now();
+		let groups: Vec<_> = (0..EVICT_SCAN * 3).map(|_| producer.append_group().unwrap()).collect();
+		producer.append_group().unwrap();
+		pool.gc(now);
+		// Keep more than a write scan's worth of leading entries fresh.
+		for group in &groups[..EVICT_SCAN * 2] {
+			group.cache_refresh();
+		}
+		pool.gc(now + expiry * 2);
+		let state = producer.state.read();
+		for sequence in 0..EVICT_SCAN * 2 {
+			assert!(state.lookup.contains_key(&(sequence as u64)), "fresh front survives");
+		}
+		for sequence in EVICT_SCAN * 2..EVICT_SCAN * 3 {
+			assert!(!state.lookup.contains_key(&(sequence as u64)), "old tail is reclaimed");
+		}
+	}
+
 	/// One sweep drains a whole idle backlog, not a rotating window of it: a quiet
 	/// track has no writes left to revisit the rest of the queue with, so a bounded
 	/// pass would leave the oldest groups parked for a backlog's length in windows.
@@ -4946,7 +5197,9 @@ mod test {
 		producer.append_group().unwrap().finish().unwrap(); // seq 1
 
 		crate::model::clock::advance(Duration::from_secs(2));
-		producer.append_datagram(Timestamp::ZERO, b"x".as_slice()).unwrap();
+		producer
+			.append_datagram(crate::model::clock::now(), Timestamp::ZERO, b"x".as_slice())
+			.unwrap();
 
 		let expired = !producer.state.read().lookup.contains_key(&0);
 		assert!(expired, "an appended datagram runs expiry");
@@ -4960,7 +5213,14 @@ mod test {
 
 		crate::model::clock::advance(Duration::from_secs(2));
 		producer
-			.insert_datagram(2, Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
+			.insert_datagram(
+				crate::model::clock::now(),
+				crate::Datagram {
+					sequence: 2,
+					timestamp: Timestamp::ZERO,
+					payload: crate::IntoBytes::into_bytes(bytes::Bytes::from_static(b"x")),
+				},
+			)
 			.unwrap();
 
 		let expired = !producer.state.read().lookup.contains_key(&0);
@@ -5750,7 +6010,14 @@ mod test {
 		let mut sub = producer.subscribe(None).ordered();
 
 		producer
-			.insert_datagram(5, Timestamp::from_millis(5).unwrap(), bytes::Bytes::from_static(b"x"))
+			.insert_datagram(
+				crate::model::clock::now(),
+				crate::Datagram {
+					sequence: 5,
+					timestamp: Timestamp::from_millis(5).unwrap(),
+					payload: crate::IntoBytes::into_bytes(bytes::Bytes::from_static(b"x")),
+				},
+			)
 			.unwrap();
 		producer.create_group(group::Info { sequence: 3 }).unwrap();
 
@@ -7822,7 +8089,9 @@ mod test {
 		let (mut producer, pool) = pooled_producer(1_000);
 		for _ in 0..10 {
 			finished_group(&mut producer, 1_000);
-			producer.append_datagram(Timestamp::ZERO, &b"beat"[..]).unwrap();
+			producer
+				.append_datagram(crate::model::clock::now(), Timestamp::ZERO, &b"beat"[..])
+				.unwrap();
 		}
 
 		let consumer = producer.consume();

@@ -246,7 +246,7 @@ fn unsupported_version_is_negotiated_only_by_servers() {
 
 /// Await `future`, failing loudly rather than hanging if it never resolves.
 async fn within<T>(handle: &moq_uring::Handle, what: &str, future: impl Future<Output = T>) -> T {
-	let mut deadline = moq_net::runtime::Deadline::after(handle, Duration::from_secs(5));
+	let mut deadline = moq_uring::Timer::after(handle, Duration::from_secs(5));
 	let mut future = std::pin::pin!(future);
 	kio::wait(|waiter| {
 		let mut cx = std::task::Context::from_waker(waiter.waker());

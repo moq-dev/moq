@@ -5,14 +5,8 @@
 //! `moq_net::Server::accept_lite` / `Client::connect_lite`, with a broadcast,
 //! a track, and a frame flowing through the model.
 //!
-//! The origin drivers demand `Send` timers (`origin::Driver::run` erases them
-//! into the model's shared state), which the worker's `!Send` handle cannot
-//! provide yet, so they run on a tokio thread here: the model is `Send + Sync`
-//! by design, and this mirrors the relay topology where a main runtime owns
-//! the origins while workers run sessions.
-//!
-//! Kernel-gated: skips loudly below the Linux 6.12 floor (GitHub-hosted CI),
-//! and runs everywhere else.
+//! Origin drivers run through Tokio's explicit-time adapter while session
+//! drivers use the worker's clock and timer.
 
 #![cfg(all(target_os = "linux", any(feature = "noq", feature = "quiche", feature = "quinn")))]
 
@@ -52,10 +46,7 @@ fn lite_session_over_the_worker() {
 			.build()
 			.expect("tokio runtime");
 		rt.block_on(async move {
-			tokio::join!(
-				pub_driver.run(support::TokioTimers),
-				sub_driver.run(support::TokioTimers)
-			);
+			tokio::join!(moq_tokio::runtime::run(pub_driver), moq_tokio::runtime::run(sub_driver));
 		});
 	});
 
@@ -94,10 +85,10 @@ fn lite_session_over_the_worker() {
 			.expect("quic accept");
 		let (session, driver) = moq_net::Server::new()
 			.with_publisher(&pub_origin)
-			.accept_lite(server_handle.clone(), quic::web::Session::raw(conn))
+			.accept_lite(std::time::Instant::now(), quic::web::Session::raw(conn))
 			.await
 			.expect("accept_lite");
-		let _ = driver.await;
+		let _ = server_handle.run(driver).await;
 		// Serve until the client walks away.
 		session.closed().await;
 	});
@@ -116,11 +107,12 @@ fn lite_session_over_the_worker() {
 
 			let (session, driver) = moq_net::Client::new()
 				.with_subscriber(sub.clone())
-				.connect_lite(handle.clone(), quic::web::Session::raw(conn))
+				.connect_lite(std::time::Instant::now(), quic::web::Session::raw(conn))
 				.await
 				.expect("connect_lite");
+			let task_handle = handle.clone();
 			handle.spawn(async move {
-				let _ = driver.await;
+				let _ = task_handle.run(driver).await;
 			});
 
 			let bc = {
@@ -175,9 +167,9 @@ fn two_lite_sessions_share_the_server_socket() {
 			.expect("tokio runtime");
 		rt.block_on(async move {
 			tokio::join!(
-				pub_driver.run(support::TokioTimers),
-				sub_a_driver.run(support::TokioTimers),
-				sub_b_driver.run(support::TokioTimers),
+				moq_tokio::runtime::run(pub_driver),
+				moq_tokio::runtime::run(sub_a_driver),
+				moq_tokio::runtime::run(sub_b_driver),
 			);
 		});
 	});
@@ -215,10 +207,10 @@ fn two_lite_sessions_share_the_server_socket() {
 			server_handle.spawn(async move {
 				let (session, driver) = moq_net::Server::new()
 					.with_publisher(&pub_origin)
-					.accept_lite(session_handle, quic::web::Session::raw(conn))
+					.accept_lite(std::time::Instant::now(), quic::web::Session::raw(conn))
 					.await
 					.expect("accept_lite");
-				let _ = driver.await;
+				let _ = session_handle.run(driver).await;
 				session.closed().await;
 			});
 		}
@@ -240,11 +232,12 @@ fn two_lite_sessions_share_the_server_socket() {
 					.expect("quic connect");
 				let (session, driver) = moq_net::Client::new()
 					.with_subscriber(sub.clone())
-					.connect_lite(handle.clone(), quic::web::Session::raw(conn))
+					.connect_lite(std::time::Instant::now(), quic::web::Session::raw(conn))
 					.await
 					.expect("connect_lite");
+				let task_handle = handle.clone();
 				handle.spawn(async move {
-					let _ = driver.await;
+					let _ = task_handle.run(driver).await;
 				});
 
 				let bc = {

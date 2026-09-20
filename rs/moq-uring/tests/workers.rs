@@ -161,7 +161,7 @@ fn a_steered_group_serves_a_shared_port() {
 					std::time::Instant::now() < deadline,
 					"only {total} of {DIALS} dials were accepted"
 				);
-				moq_net::runtime::Deadline::after(&handle, std::time::Duration::from_millis(10))
+				moq_uring::Timer::after(&handle, std::time::Duration::from_millis(10))
 					.wait()
 					.await;
 			}

@@ -819,7 +819,7 @@ mod tests {
 		const OFFSET: u64 = 600_000_000;
 
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::Hop::random().into());
-		tokio::spawn(driver.run(moq_tokio::runtime::Runtime::new()));
+		tokio::spawn(moq_tokio::runtime::run(driver));
 		let mut broadcast = origin.create_broadcast("rewind").unwrap();
 		broadcast.announce(moq_net::origin::Route::default()).unwrap();
 		let mut catalog = moq_mux::catalog::Producer::with_catalog(

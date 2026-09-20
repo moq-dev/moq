@@ -340,10 +340,10 @@ pub(crate) fn launch(
 	let mut driver = Driver {
 		shared: shared.clone(),
 		socket,
-		deadline: moq_net::runtime::Deadline::new(handle),
+		deadline: crate::Timer::new(handle),
 		keep_alive: match keep_alive {
-			Some(every) => moq_net::runtime::Deadline::after(handle, every),
-			None => moq_net::runtime::Deadline::new(handle),
+			Some(every) => crate::Timer::after(handle, every),
+			None => crate::Timer::new(handle),
 		},
 		keep_alive_every: keep_alive,
 		carry: None,
@@ -612,11 +612,11 @@ impl web_transport_trait::Stats for Stats {
 struct Driver {
 	shared: Shared,
 	socket: Rc<udp::Socket>,
-	deadline: moq_net::runtime::Deadline<Handle>,
+	deadline: crate::Timer,
 	/// Fires when the connection owes the peer an ack-eliciting packet, so an
 	/// idle path (and whatever NAT sits on it) stays open. Disarmed when the
 	/// caller asked for no keep-alive.
-	keep_alive: moq_net::runtime::Deadline<Handle>,
+	keep_alive: crate::Timer,
 	keep_alive_every: Option<std::time::Duration>,
 	/// A packet quiche handed us for a different path than the train being
 	/// packed; it opens the next one.

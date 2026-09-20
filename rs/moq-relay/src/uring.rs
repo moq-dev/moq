@@ -655,7 +655,7 @@ async fn serve_connection(
 
 	let request = moq_net::Server::new()
 		.with_versions(serve.versions.clone())
-		.accept_request_lite(handle.clone(), transport)
+		.accept_request_lite(std::time::Instant::now(), transport)
 		.await
 		.context("moq handshake failed")?;
 
@@ -757,8 +757,9 @@ async fn serve_connection(
 		request = request.with_subscriber(publish);
 	}
 	let (session, driver) = request.ok().await?;
+	let driver_handle = handle.clone();
 	handle.spawn(async move {
-		if let Err(err) = driver.await {
+		if let Err(err) = driver_handle.run(driver).await {
 			tracing::debug!(%err, "session driver ended");
 		}
 	});

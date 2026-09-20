@@ -15,7 +15,7 @@ use support::mock::create_mock_session_pair;
 /// Build an origin producer, spawning its driver on the ambient runtime.
 fn produce_origin(hop: Hop) -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(hop));
-	tokio::spawn(driver.run(support::harness::TokioRuntime::new()));
+	tokio::spawn(support::harness::run(driver));
 	producer
 }
 
@@ -274,13 +274,13 @@ async fn duplicate_goaway_keeps_first_payload_moq_lite_04() {
 		let client = moq_net::Client::new().with_versions(version.into());
 		let server = moq_net::Server::new().with_versions(version.into());
 		let (client_result, server_result) = tokio::join!(
-			client.connect(support::harness::TokioRuntime::new(), client_transport),
-			server.accept(support::harness::TokioRuntime::new(), server_transport)
+			client.connect(support::harness::now(), client_transport),
+			server.accept(support::harness::now(), server_transport)
 		);
 		let (client_session, client_driver) = client_result.expect("client handshake failed");
-		tokio::spawn(client_driver);
+		tokio::spawn(support::harness::run(client_driver));
 		let (_server_session, server_driver) = server_result.expect("server handshake failed");
-		tokio::spawn(server_driver);
+		tokio::spawn(support::harness::run(server_driver));
 
 		// First GOAWAY: observed with its URI. Waiting for the peer to close the
 		// stream guarantees the control message was fully processed.

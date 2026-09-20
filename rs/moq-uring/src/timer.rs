@@ -3,8 +3,7 @@
 //! Every armed deadline lives in one ordered map. The worker fires the due
 //! prefix each turn and parks with the earliest remaining instant as the
 //! absolute `io_uring_enter` timeout, so timers cost zero submissions and
-//! re-arming is a pure memory operation (what `moq_net::runtime::Timer`
-//! demands).
+//! re-arming is a pure memory operation.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -88,18 +87,18 @@ impl Heap {
 
 /// A single re-armable timer slot in a worker's heap.
 ///
-/// Implements [`moq_net::runtime::Timer`]: arm with
-/// [`set`](moq_net::runtime::Timer::set), poll from any `poll_*` function on
-/// this worker's thread. Minted by [`moq_net::Timers::timer`] on a
-/// [`crate::Handle`].
+/// Arm with [`Self::set`] and poll from this worker's thread.
+/// Created by [`crate::Handle::timer`].
 pub struct Timer {
+	at: Option<Instant>,
 	heap: Rc<RefCell<Heap>>,
 	slot: Rc<Slot>,
 }
 
 impl Timer {
-	pub(crate) fn new(heap: Rc<RefCell<Heap>>) -> Self {
+	pub(crate) fn from_heap(heap: Rc<RefCell<Heap>>) -> Self {
 		Self {
+			at: None,
 			heap,
 			slot: Rc::new(Slot {
 				key: Cell::new(None),
@@ -110,8 +109,13 @@ impl Timer {
 	}
 }
 
-impl moq_net::runtime::Timer for Timer {
-	fn set(&mut self, at: Option<Instant>) {
+impl Timer {
+	/// Arm or disarm the timer.
+	pub fn set(&mut self, at: Option<Instant>) {
+		if self.at == at {
+			return;
+		}
+		self.at = at;
 		let mut heap = self.heap.borrow_mut();
 		if let Some(key) = self.slot.key.take() {
 			heap.cancel(key);
@@ -126,7 +130,8 @@ impl moq_net::runtime::Timer for Timer {
 		}
 	}
 
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+	/// Poll for expiration and register for wakeups.
+	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		if self.slot.elapsed.get() {
 			return Poll::Ready(());
 		}
@@ -159,5 +164,22 @@ impl std::fmt::Debug for Timer {
 			.field("at", &self.slot.key.get().map(|key| key.0))
 			.field("elapsed", &self.slot.elapsed.get())
 			.finish()
+	}
+}
+
+impl Timer {
+	/// Create a disarmed timer on this worker.
+	pub fn new(handle: &crate::Handle) -> Self {
+		handle.timer()
+	}
+	/// Create a timer that expires after the given duration.
+	pub fn after(handle: &crate::Handle, duration: std::time::Duration) -> Self {
+		let mut timer = handle.timer();
+		timer.set(Instant::now().checked_add(duration));
+		timer
+	}
+	/// Wait for this timer to expire.
+	pub async fn wait(&mut self) {
+		kio::wait(|waiter| self.poll(waiter)).await
 	}
 }

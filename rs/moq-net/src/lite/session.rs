@@ -11,11 +11,11 @@ use super::{
 	DataType, PeerSetup, Publisher, PublisherConfig, Setup, Subscriber, SubscriberConfig, SubscriberDriver, Version,
 };
 
-pub(crate) struct SessionStart<S: crate::transport::poll::Session, R: crate::runtime::Timers> {
+pub(crate) struct SessionStart<S: crate::transport::poll::Session> {
 	pub recv_bandwidth: Option<bandwidth::Consumer>,
 	/// The session's protocol machine, named so its `Send`-ness stays inferred
 	/// from the transport instead of being fixed by a box.
-	pub driver: Driver<S, R>,
+	pub driver: Driver<S>,
 	/// The session-side GOAWAY halves, stored on the public [`crate::Session`].
 	pub goaway: crate::goaway::Handle,
 }
@@ -50,9 +50,9 @@ pub async fn accept_setup<S: crate::transport::poll::Session>(
 }
 
 /// Everything one moq-lite session needs to start.
-pub struct Config<S: crate::transport::poll::Session, R: crate::runtime::Timers> {
+pub struct Config<S: crate::transport::poll::Session> {
 	/// The runtime that arms the session's timers.
-	pub runtime: R,
+	pub runtime: crate::time::Clock,
 
 	/// The transport carrying the session. Cloned into every loop that outlives
 	/// [`start`], so the connection closes when the last of them drops.
@@ -91,10 +91,9 @@ pub struct Config<S: crate::transport::poll::Session, R: crate::runtime::Timers>
 /// Start a lite session.
 ///
 /// Returns the receive-bandwidth consumer (if any) plus the driver that runs the session.
-pub fn start<S, R>(config: Config<S, R>) -> Result<SessionStart<S, R>, Error>
+pub fn start<S>(config: Config<S>) -> Result<SessionStart<S>, Error>
 where
 	S: crate::transport::poll::Session,
-	R: crate::runtime::Timers,
 {
 	let Config {
 		runtime,
@@ -175,6 +174,7 @@ where
 		peer_hop,
 	});
 	let subscriber = Subscriber::new(SubscriberConfig {
+		runtime: runtime.clone(),
 		session: session.clone(),
 		origin: subscribe,
 		recv_bandwidth: recv_bw_for_sub,
@@ -208,26 +208,25 @@ where
 
 /// The lite session driver: one poll function racing every protocol arm, in
 /// place of a task set of boxed futures.
-pub(crate) struct Driver<S: crate::transport::poll::Session, R: crate::runtime::Timers> {
+pub(crate) struct Driver<S: crate::transport::poll::Session> {
 	/// Advertising our capabilities, or `None` once sent (or on a version with no
 	/// Setup Stream).
 	setup: Option<SendSetup<S>>,
 	/// Sending our single GOAWAY if the drain trigger fires, or `None` once done.
-	goaway: Option<SendGoaway<S, R>>,
+	goaway: Option<SendGoaway<S>>,
 	/// The legacy session stream (pre-lite-03). Only its *error* ends the race, so
 	/// the publisher and subscriber keep running while it sits idle.
 	session_stream: Option<Stream<S, Version>>,
-	publisher: Publisher<S, R>,
+	publisher: Publisher<S>,
 	subscriber: SubscriberDriver<S>,
 	/// For the terminal close: the machine's last act reports the outcome to
 	/// the peer through the transport.
 	session: S,
 }
 
-impl<S, R> Driver<S, R>
+impl<S> Driver<S>
 where
 	S: crate::transport::poll::Session,
-	R: crate::runtime::Timers,
 {
 	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let res = std::task::ready!(self.poll_protocol(waiter));
@@ -371,18 +370,18 @@ impl<S: crate::transport::poll::Session> SendSetup<S> {
 /// Runs on every version, including those with no GOAWAY message: the deadline is
 /// the sender's own timer, so a caller draining a lite-03 peer still gets the
 /// session closed on schedule; the peer just never learns why.
-struct SendGoaway<S: crate::transport::poll::Session, R: crate::runtime::Timers> {
+struct SendGoaway<S: crate::transport::poll::Session> {
 	version: Version,
-	runtime: R,
+	runtime: crate::time::Clock,
 	goaway: crate::goaway::Protocol,
 	/// A dedicated handle for the trigger-phase close watch, since `session` opens
 	/// the Goaway stream and each pending operation needs its own handle.
 	closed: S,
 	session: S,
-	state: SendGoawayState<S, R>,
+	state: SendGoawayState<S>,
 }
 
-enum SendGoawayState<S: crate::transport::poll::Session, R: crate::runtime::Timers> {
+enum SendGoawayState<S: crate::transport::poll::Session> {
 	/// Parked on the send trigger, racing the transport close so a parked trigger
 	/// never blocks the driver. The trigger fires at most once.
 	Waiting,
@@ -398,11 +397,11 @@ enum SendGoawayState<S: crate::transport::poll::Session, R: crate::runtime::Time
 		finished: bool,
 	},
 	/// The message is on the wire (or failed); enforce the local deadline.
-	Enforce(crate::goaway::Enforce<S, R>),
+	Enforce(crate::goaway::Enforce<S>),
 }
 
-impl<S: crate::transport::poll::Session, R: crate::runtime::Timers> SendGoaway<S, R> {
-	fn new(runtime: R, session: S, goaway: crate::goaway::Protocol, version: Version) -> Self {
+impl<S: crate::transport::poll::Session> SendGoaway<S> {
+	fn new(runtime: crate::time::Clock, session: S, goaway: crate::goaway::Protocol, version: Version) -> Self {
 		Self {
 			version,
 			runtime,

@@ -270,15 +270,15 @@ impl Protocol {
 /// The draft makes the deadline the sender's promise, not the peer's, so the
 /// driver arms this after the message hits the wire rather than making the
 /// caller hold a handle and await it.
-pub(crate) struct Enforce<S: crate::transport::poll::Session, R: crate::runtime::Timers> {
+pub(crate) struct Enforce<S: crate::transport::poll::Session> {
 	session: S,
 	/// The armed deadline, or `None` when the GOAWAY carried no timeout (ready
 	/// immediately: there is nothing to enforce).
-	deadline: Option<(crate::runtime::Deadline<R>, Duration)>,
+	deadline: Option<(crate::runtime::Deadline<crate::time::Clock>, Duration)>,
 }
 
-impl<S: crate::transport::poll::Session, R: crate::runtime::Timers> Enforce<S, R> {
-	pub fn new(runtime: &R, session: S, timeout: Option<Duration>) -> Self {
+impl<S: crate::transport::poll::Session> Enforce<S> {
+	pub fn new(runtime: &crate::time::Clock, session: S, timeout: Option<Duration>) -> Self {
 		Self {
 			session,
 			deadline: timeout.map(|timeout| (crate::runtime::Deadline::after(runtime, timeout), timeout)),
@@ -307,8 +307,8 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Timers> Enforce<S, R
 /// Enforce a sent GOAWAY's deadline: close the session once it passes.
 ///
 /// The async form of [`Enforce`], for drivers that are still `async` themselves.
-pub(crate) async fn enforce<S: crate::transport::poll::Session, R: crate::runtime::Timers>(
-	runtime: &R,
+pub(crate) async fn enforce<S: crate::transport::poll::Session>(
+	runtime: &crate::time::Clock,
 	session: &mut S,
 	timeout: Option<Duration>,
 ) {

@@ -446,16 +446,21 @@ mod clock {
 	});
 
 	pub(super) fn now() -> Timestamp {
-		let (anchor_instant, anchor_duration) = *TIME_ANCHOR;
-		let instant = crate::model::clock::now();
-		let duration = match instant.checked_duration_since(anchor_instant) {
-			Some(forward) => anchor_duration + forward,
-			None => anchor_duration
-				.checked_sub(anchor_instant.duration_since(instant))
-				.unwrap_or(std::time::Duration::ZERO),
-		};
+		crate::model::clock::now().into()
+	}
 
-		Timestamp::from_millis(duration.as_millis() as u64).expect("clock is somehow past the year 2300")
+	impl From<crate::time::Instant> for Timestamp {
+		fn from(instant: crate::time::Instant) -> Timestamp {
+			let (anchor_instant, anchor_duration) = *TIME_ANCHOR;
+			let duration = match instant.checked_duration_since(anchor_instant) {
+				Some(forward) => anchor_duration + forward,
+				None => anchor_duration
+					.checked_sub(anchor_instant.duration_since(instant))
+					.unwrap_or(std::time::Duration::ZERO),
+			};
+
+			Timestamp::from_millis(duration.as_millis() as u64).expect("clock is somehow past the year 2300")
+		}
 	}
 }
 

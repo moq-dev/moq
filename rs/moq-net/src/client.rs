@@ -1,12 +1,13 @@
 use crate::origin;
+#[cfg(test)]
+use crate::runtime::Timers;
+use crate::time::{Clock, Instant};
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_20, ALPN_21, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04,
 	ALPN_LITE_05, ALPN_LITE_06_WIP, Consume, Error, NEGOTIATED, Session, Version, Versions,
 	coding::{self, Decode, Encode, Stream},
 	ietf, lite, setup, stats,
 };
-
-use web_transport_trait::{MaybeSend, MaybeSync};
 
 /// A MoQ client session builder.
 #[derive(Default, Clone)]
@@ -152,15 +153,14 @@ impl Client {
 
 	/// Start a lite session on an already-negotiated version: build our SETUP,
 	/// wire the origins, and return the session and its driver.
-	fn start_lite<S, R>(
+	fn start_lite<S>(
 		&self,
-		runtime: R,
+		runtime: Clock,
 		session: S,
 		version: lite::Version,
-	) -> Result<(Session, crate::Driver<S, R>), Error>
+	) -> Result<(Session, crate::Driver<S>), Error>
 	where
 		S: crate::transport::poll::Session,
-		R: crate::runtime::Timers + 'static,
 	{
 		let (publish, subscribe) = self.origins();
 
@@ -213,11 +213,11 @@ impl Client {
 	/// [`Boxable`](crate::transport::poll::Boxable) transport. An ietf ALPN, an
 	/// unknown one, or the legacy no-ALPN SETUP negotiation is refused with
 	/// [`Error::Version`].
-	pub async fn connect_lite<S, R>(&self, runtime: R, session: S) -> Result<(Session, crate::Driver<S, R>), Error>
+	pub async fn connect_lite<S>(&self, now: Instant, session: S) -> Result<(Session, crate::Driver<S>), Error>
 	where
 		S: crate::transport::poll::Session,
-		R: crate::runtime::Timers + 'static,
 	{
+		let runtime = Clock::new(now);
 		let version = match session.protocol() {
 			Some(ALPN_LITE_06_WIP) => lite::Version::Lite06Wip,
 			Some(ALPN_LITE_05) => lite::Version::Lite05,
@@ -231,14 +231,12 @@ impl Client {
 
 	/// Perform the MoQ handshake, returning the [`Session`] and its [`Driver`](crate::Driver).
 	///
-	/// Poll or spawn the returned driver to run the session. `runtime` supplies
-	/// only its clock and timers.
-	pub async fn connect<S, R>(&self, runtime: R, mut session: S) -> Result<(Session, crate::Driver<S, R>), Error>
+	/// Poll the returned driver with nondecreasing time, starting at `now`.
+	pub async fn connect<S>(&self, now: Instant, mut session: S) -> Result<(Session, crate::Driver<S>), Error>
 	where
 		S: crate::transport::poll::Boxable,
-		R: crate::runtime::Timers + MaybeSend + MaybeSync + 'static,
-		R::Timer: MaybeSend,
 	{
+		let runtime = Clock::new(now);
 		let (publish, subscribe) = self.origins();
 
 		// If ALPN was used to negotiate the version, use the appropriate encoding.
@@ -681,10 +679,10 @@ mod tests {
 
 		// Start the returned driver after the handshake completes.
 		let (_session, driver) = client
-			.connect(crate::runtime::tokio_test::Tokio::new(), fake.clone())
+			.connect(tokio::time::Instant::now().into_std(), fake.clone())
 			.await
 			.unwrap();
-		tokio::spawn(driver);
+		tokio::spawn(crate::time::test::run(driver));
 
 		// Verify the client setup was encoded using Draft14 framing (ALPN_LITE fallback path).
 		let mut setup_bytes = Bytes::from(fake.control_writes());
@@ -732,7 +730,7 @@ mod tests {
 		// on the silent peer trips this rather than hanging the suite.
 		let (_session, _driver) = tokio::time::timeout(
 			std::time::Duration::from_secs(30),
-			client.connect(crate::runtime::tokio_test::Tokio::new(), transport),
+			client.connect(tokio::time::Instant::now().into_std(), transport),
 		)
 		.await
 		.expect("connect waited on a peer that never announced")
@@ -757,17 +755,17 @@ mod tests {
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 
 		let runtime = crate::runtime::Test::new();
-		let (session, mut driver) = futures::executor::block_on(client.connect(runtime.clone(), fake.clone())).unwrap();
+		let (session, mut driver) = futures::executor::block_on(client.connect(runtime.now(), fake.clone())).unwrap();
 		assert_eq!(session.version(), Version::Lite(lite::Version::Lite04));
 
 		// Construction leaves the driver idle until the caller polls it.
-		assert!(driver.poll(&kio::Waiter::noop()).is_pending());
+		assert!(driver.poll(runtime.now(), &kio::Waiter::noop()).is_pending());
 
 		// The caller drops their only session clone; the machine observes the
 		// last handle going away and closes the transport.
 		drop(session);
 		assert!(fake.state.close_events.lock().unwrap().is_empty());
-		let _ = driver.poll(&kio::Waiter::noop());
+		let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
 		assert_eq!(
 			fake.state.close_events.lock().unwrap()[0].0,
 			SessionError::Cancel.to_code()
@@ -783,17 +781,17 @@ mod tests {
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 
 		let runtime = crate::runtime::Test::new();
-		let (session, mut driver) = futures::executor::block_on(client.connect(runtime.clone(), fake.clone())).unwrap();
+		let (session, mut driver) = futures::executor::block_on(client.connect(runtime.now(), fake.clone())).unwrap();
 		let clone = session.clone();
 
 		// One clone dropping does nothing while another is alive.
 		drop(session);
 		assert!(fake.state.close_events.lock().unwrap().is_empty());
-		let _ = driver.poll(&kio::Waiter::noop());
+		let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
 		assert!(fake.state.close_events.lock().unwrap().is_empty());
 
 		clone.abort(Error::Cancel);
-		let _ = driver.poll(&kio::Waiter::noop());
+		let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
 		assert_eq!(
 			fake.state.close_events.lock().unwrap()[0].0,
 			SessionError::Cancel.to_code()
@@ -801,13 +799,13 @@ mod tests {
 
 		// And the machine publishes the transport's terminal error, which is
 		// what `closed()` reports.
-		let _ = driver.poll(&kio::Waiter::noop());
+		let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
 		futures::executor::block_on(clone.closed());
 
 		// The final drop requests no second close: the handle-side close is once.
 		let closes = fake.state.close_events.lock().unwrap().len();
 		drop(clone);
-		let _ = driver.poll(&kio::Waiter::noop());
+		let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
 		assert_eq!(fake.state.close_events.lock().unwrap().len(), closes);
 	}
 
@@ -820,7 +818,7 @@ mod tests {
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 
 		let runtime = crate::runtime::Test::new();
-		let (session, driver) = futures::executor::block_on(client.connect(runtime.clone(), fake.clone())).unwrap();
+		let (session, driver) = futures::executor::block_on(client.connect(runtime.now(), fake.clone())).unwrap();
 
 		drop(driver);
 		assert!(matches!(futures::executor::block_on(session.closed()), Error::Cancel));
@@ -983,14 +981,14 @@ mod tests {
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 
 		let runtime = crate::runtime::Test::new();
-		let (session, mut driver) = futures::executor::block_on(client.connect_lite(runtime.clone(), local)).unwrap();
-		assert!(driver.poll(&kio::Waiter::noop()).is_pending());
+		let (session, mut driver) = futures::executor::block_on(client.connect_lite(runtime.now(), local)).unwrap();
+		assert!(driver.poll(runtime.now(), &kio::Waiter::noop()).is_pending());
 
 		fn assert_send_sync<T: Send + Sync>(_: &T) {}
 		assert_send_sync(&session);
 
 		session.abort(Error::Cancel);
-		let _ = driver.poll(&kio::Waiter::noop());
+		let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
 		assert_eq!(
 			fake.state.close_events.lock().unwrap()[0].0,
 			SessionError::Cancel.to_code()
@@ -1009,13 +1007,13 @@ mod tests {
 		let server = crate::Server::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 
 		let runtime = crate::runtime::Test::new();
-		let (session, mut driver) = futures::executor::block_on(server.accept_lite(runtime.clone(), local)).unwrap();
+		let (session, mut driver) = futures::executor::block_on(server.accept_lite(runtime.now(), local)).unwrap();
 		assert_eq!(session.version(), Version::Lite(lite::Version::Lite04));
-		assert!(driver.poll(&kio::Waiter::noop()).is_pending());
+		assert!(driver.poll(runtime.now(), &kio::Waiter::noop()).is_pending());
 
 		drop(session);
 		assert!(fake.state.close_events.lock().unwrap().is_empty());
-		let _ = driver.poll(&kio::Waiter::noop());
+		let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
 		assert_eq!(
 			fake.state.close_events.lock().unwrap()[0].0,
 			SessionError::Cancel.to_code()
@@ -1033,7 +1031,7 @@ mod tests {
 		};
 		let client = Client::new();
 		let runtime = crate::runtime::Test::new();
-		let result = futures::executor::block_on(client.connect_lite(runtime, local));
+		let result = futures::executor::block_on(client.connect_lite(runtime.now(), local));
 		assert!(matches!(result, Err(Error::Version)));
 	}
 
@@ -1047,10 +1045,10 @@ mod tests {
 
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 		let (session, driver) = client
-			.connect(crate::runtime::tokio_test::Tokio::new(), fake.clone())
+			.connect(tokio::time::Instant::now().into_std(), fake.clone())
 			.await
 			.unwrap();
-		tokio::spawn(driver);
+		tokio::spawn(crate::time::test::run(driver));
 
 		// The construction-time snapshot, before the machine sampled anything.
 		assert_eq!(
@@ -1080,10 +1078,10 @@ mod tests {
 
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 		let (session, driver) = client
-			.connect(crate::runtime::tokio_test::Tokio::new(), fake.clone())
+			.connect(tokio::time::Instant::now().into_std(), fake.clone())
 			.await
 			.unwrap();
-		tokio::spawn(driver);
+		tokio::spawn(crate::time::test::run(driver));
 		assert!(
 			session.send_bandwidth().is_none(),
 			"no send-rate estimate, so nothing samples on its own"
@@ -1111,10 +1109,10 @@ mod tests {
 
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 		let (session, driver) = client
-			.connect(crate::runtime::tokio_test::Tokio::new(), fake.clone())
+			.connect(tokio::time::Instant::now().into_std(), fake.clone())
 			.await
 			.unwrap();
-		tokio::spawn(driver);
+		tokio::spawn(crate::time::test::run(driver));
 
 		let mut bandwidth = session.send_bandwidth().expect("backend reports an estimate");
 		assert_eq!(

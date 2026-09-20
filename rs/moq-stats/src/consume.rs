@@ -108,7 +108,7 @@ mod tests {
 	fn produce_origin() -> moq_net::origin::Producer {
 		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Hop::random().into());
 		if tokio::runtime::Handle::try_current().is_ok() {
-			tokio::spawn(driver.run(moq_tokio::runtime::Runtime::new()));
+			tokio::spawn(moq_tokio::runtime::run(driver));
 		} else {
 			// A sync test: nothing polls the driver, and dropping it would tear
 			// the origin down, so leak it and rely on the synchronous half.

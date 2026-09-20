@@ -1,3 +1,4 @@
+use crate::runtime::Timers as _;
 use crate::{SessionError, announce, frame, group, origin, track};
 use std::{
 	collections::HashMap,
@@ -20,9 +21,9 @@ use crate::{
 
 use super::Version;
 
-pub(super) struct PublisherConfig<S: crate::transport::poll::Session, R: crate::runtime::Timers> {
+pub(super) struct PublisherConfig<S: crate::transport::poll::Session> {
 	/// The runtime that arms the publisher's timers.
-	pub runtime: R,
+	pub runtime: crate::time::Clock,
 	pub session: S,
 	/// The origin we read local broadcasts from. Traffic stats are attributed
 	/// through this handle: tag it with [`origin::Consumer::with_stats`] first.
@@ -128,18 +129,18 @@ impl<S: crate::transport::poll::Session> Shared<S> {
 
 /// The publisher half: accepts control streams and drives each as a child state
 /// machine. Resolves only on a transport error; children never end the session.
-pub(super) struct Publisher<S: crate::transport::poll::Session, R: crate::runtime::Timers> {
+pub(super) struct Publisher<S: crate::transport::poll::Session> {
 	shared: Arc<Shared<S>>,
 	// Cloned into each control-stream child that arms timers (PROBE, announce linger).
-	runtime: R,
+	runtime: crate::time::Clock,
 	// A dedicated accept handle: the poll interface takes `&mut self`, and the
 	// shared context stays behind the Arc for the per-stream children.
 	accept: S,
-	children: kio::Tasks<Control<S, R>>,
+	children: kio::Tasks<Control<S>>,
 }
 
-impl<S: crate::transport::poll::Session, R: crate::runtime::Timers> Publisher<S, R> {
-	pub fn new(config: PublisherConfig<S, R>) -> Self {
+impl<S: crate::transport::poll::Session> Publisher<S> {
+	pub fn new(config: PublisherConfig<S>) -> Self {
 		// Identity stamped onto outbound announce hops. Derived from the
 		// origin we're consuming so it matches the local relay identity
 		// across every session, required for cross-session loop detection.
@@ -164,10 +165,9 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Timers> Publisher<S,
 	}
 }
 
-impl<S, R> Publisher<S, R>
+impl<S> Publisher<S>
 where
 	S: crate::transport::poll::Session,
-	R: crate::runtime::Timers,
 {
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let _ = self.children.poll(waiter);
@@ -194,7 +194,7 @@ where
 }
 
 #[cfg(test)]
-impl<S: crate::transport::poll::Session, R: crate::runtime::Timers> Publisher<S, R> {
+impl<S: crate::transport::poll::Session> Publisher<S> {
 	/// Test shim: drive one announce-interest stream like the old `run_announce`.
 	async fn run_announce(
 		stream: &mut Stream<S, Version>,
@@ -210,17 +210,17 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Timers> Publisher<S,
 }
 
 /// One accepted control stream, dispatched on its first varint.
-struct Control<S: crate::transport::poll::Session, R: crate::runtime::Timers> {
+struct Control<S: crate::transport::poll::Session> {
 	shared: Arc<Shared<S>>,
 	// Handed to the children that arm timers (PROBE, announce linger).
-	runtime: R,
-	state: ControlState<S, R>,
+	runtime: crate::time::Clock,
+	state: ControlState<S>,
 }
 
 // A state machine's enum is its storage: one transient instance per stream, so the
 // big variant is the working state, not padding held in bulk.
 #[allow(clippy::large_enum_variant)]
-enum ControlState<S: crate::transport::poll::Session, R: crate::runtime::Timers> {
+enum ControlState<S: crate::transport::poll::Session> {
 	/// Reading the stream's type.
 	Start {
 		stream: Stream<S, Version>,
@@ -229,7 +229,7 @@ enum ControlState<S: crate::transport::poll::Session, R: crate::runtime::Timers>
 	Subscribe(SubscribeServe<S>),
 	Fetch(FetchServe<S>),
 	TrackInfo(TrackInfoServe<S>),
-	Probe(ProbeServe<S, R>),
+	Probe(ProbeServe<S>),
 	/// Decoding the peer's GOAWAY, surfaced through [`crate::Session::draining`].
 	Goaway {
 		stream: Stream<S, Version>,
@@ -237,7 +237,7 @@ enum ControlState<S: crate::transport::poll::Session, R: crate::runtime::Timers>
 	Done,
 }
 
-impl<S: crate::transport::poll::Session, R: crate::runtime::Timers> kio::Task for Control<S, R> {
+impl<S: crate::transport::poll::Session> kio::Task for Control<S> {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		if let Err(err) = ready!(self.poll_serve(waiter)) {
 			tracing::warn!(%err, "control stream error");
@@ -246,7 +246,7 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Timers> kio::Task fo
 	}
 }
 
-impl<S: crate::transport::poll::Session, R: crate::runtime::Timers> Control<S, R> {
+impl<S: crate::transport::poll::Session> Control<S> {
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		loop {
 			match &mut self.state {
@@ -315,15 +315,15 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Timers> Control<S, R
 
 /// Serves one PROBE stream: periodic bandwidth estimates until the peer closes
 /// its side.
-struct ProbeServe<S: crate::transport::poll::Session, R: crate::runtime::Timers> {
+struct ProbeServe<S: crate::transport::poll::Session> {
 	shared: Arc<Shared<S>>,
-	runtime: R,
+	runtime: crate::time::Clock,
 	stream: Option<Stream<S, Version>>,
 	last_sent: Option<(lite::Probe, crate::runtime::Instant)>,
-	next_probe: crate::runtime::Deadline<R>,
+	next_probe: crate::runtime::Deadline<crate::time::Clock>,
 }
 
-impl<S: crate::transport::poll::Session, R: crate::runtime::Timers> ProbeServe<S, R> {
+impl<S: crate::transport::poll::Session> ProbeServe<S> {
 	const PROBE_INTERVAL: Duration = Duration::from_millis(100);
 	const PROBE_MAX_AGE: Duration = Duration::from_secs(10);
 	const PROBE_MAX_DELTA: f64 = 0.25;
@@ -354,7 +354,7 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Timers> ProbeServe<S
 		Self::PROBE_MAX_DELTA * (Self::PROBE_MAX_AGE.as_secs_f64() - t) / range
 	}
 
-	fn new(shared: Arc<Shared<S>>, runtime: R, stream: Stream<S, Version>) -> Self {
+	fn new(shared: Arc<Shared<S>>, runtime: crate::time::Clock, stream: Stream<S, Version>) -> Self {
 		Self {
 			shared,
 			stream: Some(stream),
@@ -1546,7 +1546,11 @@ mod test {
 		let mut subscriber = producer.subscribe(None);
 
 		producer
-			.append_datagram(Timestamp::from_millis(1).unwrap(), &b"last"[..])
+			.append_datagram(
+				crate::model::clock::now(),
+				Timestamp::from_millis(1).unwrap(),
+				&b"last"[..],
+			)
 			.unwrap();
 		producer.finish().unwrap();
 
@@ -1640,9 +1644,7 @@ mod announce_test {
 	use crate::model::ProduceTest;
 	use std::sync::Mutex;
 
-	/// The tokio-backed test runtime, matching the fake transport.
-	type TestRuntime = crate::runtime::tokio_test::Tokio;
-	type TestPublisher = Publisher<SinkSession, TestRuntime>;
+	type TestPublisher = Publisher<SinkSession>;
 
 	const VERSION: Version = Version::Lite06Wip;
 
@@ -3013,9 +3015,6 @@ mod tests {
 	use crate::lite::test_transport::SinkSession;
 	use crate::model::ProduceTest;
 
-	/// The tokio-backed test runtime, matching the fake transport.
-	type TestRuntime = crate::runtime::tokio_test::Tokio;
-
 	/// A peer that declares no origin in its SETUP is split-horizoned by the identity
 	/// the caller assigned it, on the data plane and not just the announce filter.
 	/// Otherwise it can subscribe its way back to content that already flowed through
@@ -3049,7 +3048,7 @@ mod tests {
 		let (_, goaway) = crate::goaway::Handle::new(true);
 
 		let publisher = Publisher::new(PublisherConfig {
-			runtime: TestRuntime::new(),
+			runtime: crate::time::Clock::tokio(),
 			session: SinkSession::new(Default::default()),
 			origin: origin.consume(),
 			version: Version::Lite06Wip,
@@ -3105,7 +3104,7 @@ mod tests {
 
 		let consumer = origin.consume().excluding(assigned);
 		let mut announced = consumer.announced();
-		let mut run = std::pin::pin!(Publisher::<SinkSession, TestRuntime>::run_announce(
+		let mut run = std::pin::pin!(Publisher::<SinkSession>::run_announce(
 			&mut stream,
 			&consumer,
 			&mut announced,
@@ -3147,11 +3146,11 @@ mod tests {
 		session: SinkSession,
 		stream: Stream<SinkSession, Version>,
 		version: Version,
-	) -> ProbeServe<SinkSession, TestRuntime> {
+	) -> ProbeServe<SinkSession> {
 		let origin = Hop::random().produce();
 		let (_, goaway) = crate::goaway::Handle::new(true);
 		let publisher = Publisher::new(PublisherConfig {
-			runtime: TestRuntime::new(),
+			runtime: crate::time::Clock::tokio(),
 			session,
 			origin: origin.consume(),
 			version,

@@ -176,12 +176,15 @@ where
 		server = server.with_subscriber(publish);
 	}
 	// Keep the driver in this task so cancellation tears down the transport.
-	let (session, mut driver) = server
+	let (session, driver) = server
 		.accept(
-			moq_tokio::runtime::Runtime::new(),
+			tokio::time::Instant::now().into_std(),
 			moq_tokio::transport::Session::new(ws),
 		)
 		.await?;
+
+	let driver = moq_tokio::runtime::run(driver);
+	tokio::pin!(driver);
 
 	// The handshake is done, so this is a MoQ session now: only now can a push
 	// be serviced, and only now does the session appear in the live table.

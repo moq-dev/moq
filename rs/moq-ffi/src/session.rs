@@ -297,11 +297,11 @@ impl Client {
 		let (session, driver) = moq_net::Client::new()
 			.with_publisher(&publish)
 			.with_subscriber(subscribe.clone())
-			.connect(crate::runtime::Runtime, transport)
+			.connect(web_async::time::Instant::now(), transport)
 			.await?;
 
 		crate::ffi::spawn(async move {
-			let _ = driver.await;
+			let _ = crate::runtime::run(driver).await;
 		});
 
 		Ok(Arc::new(MoqSession::accepted(session, publish, subscribe)))

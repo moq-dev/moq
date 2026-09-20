@@ -14,7 +14,7 @@
 /// [`Hop`](moq_net::Hop) id (which uses the default config).
 pub fn spawn(config: impl Into<moq_net::origin::Config>) -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(config.into());
-	tokio::spawn(driver.run(crate::runtime::Runtime::new()));
+	tokio::spawn(crate::runtime::run(driver));
 	producer
 }
 

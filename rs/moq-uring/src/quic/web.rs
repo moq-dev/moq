@@ -311,7 +311,7 @@ impl Request {
 		// The guard stays armed across the wait below. Cancelling this future
 		// mid-grace would otherwise skip the deliberate close and leak the
 		// connection, which is the very thing the guard is here to prevent.
-		let mut deadline = moq_net::runtime::Deadline::after(&self.handle, CLOSE_GRACE);
+		let mut deadline = crate::Timer::after(&self.handle, CLOSE_GRACE);
 		let send = &mut self.send;
 		kio::wait(|waiter| {
 			let mut cx = Context::from_waker(waiter.waker());
@@ -735,7 +735,7 @@ impl web_transport_trait::poll::Session for Session {
 		// the task rather than here because flow control can take it in
 		// pieces, and abandoning a partial frame would leave the browser with
 		// neither the code nor the reason.
-		let mut deadline = moq_net::runtime::Deadline::after(&web.handle, CLOSE_GRACE);
+		let mut deadline = crate::Timer::after(&web.handle, CLOSE_GRACE);
 		let reason = reason.to_string();
 		let mut conn = self.conn.clone();
 		web.handle.spawn(async move {

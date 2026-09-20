@@ -1,12 +1,4 @@
-//! Timer integration for session and origin drivers.
-//!
-//! [`crate::Client::connect`] and [`crate::Server::accept`] take [`Timers`] and
-//! return a [`crate::Driver`] for the caller to poll or spawn. This crate never
-//! spawns tasks. Timer providers supply a clock and re-armable registrations,
-//! without choosing a transport or executor.
-//!
-//! `Test` (behind `test-runtime`) provides a virtual clock that advances only
-//! when the test requests it.
+//! Private deadlines driven by the owning driver's supplied clock.
 
 use std::task::Poll;
 
@@ -51,136 +43,8 @@ pub trait Timers: Clone {
 	/// A new, disarmed timer.
 	fn timer(&self) -> Self::Timer;
 
-	/// The current instant.
-	///
-	/// Defaults to the real clock, which every production runtime should keep.
-	/// It exists so `Test` can substitute a virtual clock: code that arms
-	/// relative deadlines (`now + interval`) or compares against armed instants
-	/// must read *this* clock, or a test that advances virtual time leaves those
-	/// instants in the past. Pure annotations (activity stamps, logs) may read
-	/// [`Instant::now`] directly.
-	fn now(&self) -> Instant {
-		Instant::now()
-	}
-}
-
-/// A boxed [`Timer`], minted by [`AnyTimers`].
-pub(crate) struct BoxTimer(MaybeSendTimer);
-
-#[cfg(not(target_family = "wasm"))]
-type MaybeSendTimer = Box<dyn Timer + Send>;
-#[cfg(target_family = "wasm")]
-type MaybeSendTimer = Box<dyn Timer>;
-
-impl Timer for BoxTimer {
-	fn set(&mut self, at: Option<Instant>) {
-		self.0.set(at);
-	}
-
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		self.0.poll(waiter)
-	}
-}
-
-/// A type-erased [`Timers`], for shared state that cannot be generic over the
-/// runtime (the origin's task machinery). One allocation per minted timer.
-pub(crate) struct AnyTimers(MaybeSendErased);
-
-#[cfg(not(target_family = "wasm"))]
-type MaybeSendErased = std::sync::Arc<dyn ErasedTimers + Send + Sync>;
-#[cfg(target_family = "wasm")]
-type MaybeSendErased = std::sync::Arc<dyn ErasedTimers>;
-
-trait ErasedTimers {
+	/// The latest instant supplied by the owner.
 	fn now(&self) -> Instant;
-	fn timer(&self) -> BoxTimer;
-}
-
-#[cfg(not(target_family = "wasm"))]
-impl<T> ErasedTimers for T
-where
-	T: Timers,
-	T::Timer: Send + 'static,
-{
-	fn now(&self) -> Instant {
-		Timers::now(self)
-	}
-
-	fn timer(&self) -> BoxTimer {
-		BoxTimer(Box::new(Timers::timer(self)))
-	}
-}
-
-#[cfg(target_family = "wasm")]
-impl<T> ErasedTimers for T
-where
-	T: Timers,
-	T::Timer: 'static,
-{
-	fn now(&self) -> Instant {
-		Timers::now(self)
-	}
-
-	fn timer(&self) -> BoxTimer {
-		BoxTimer(Box::new(Timers::timer(self)))
-	}
-}
-
-impl AnyTimers {
-	#[cfg(not(target_family = "wasm"))]
-	pub(crate) fn new<T>(timers: T) -> Self
-	where
-		T: Timers + Send + Sync + 'static,
-		T::Timer: Send + 'static,
-	{
-		Self(std::sync::Arc::new(timers))
-	}
-
-	#[cfg(target_family = "wasm")]
-	pub(crate) fn new<T>(timers: T) -> Self
-	where
-		T: Timers + 'static,
-		T::Timer: 'static,
-	{
-		Self(std::sync::Arc::new(timers))
-	}
-}
-
-impl Clone for AnyTimers {
-	fn clone(&self) -> Self {
-		Self(self.0.clone())
-	}
-}
-
-impl Timers for AnyTimers {
-	type Timer = BoxTimer;
-
-	fn timer(&self) -> Self::Timer {
-		self.0.timer()
-	}
-
-	fn now(&self) -> Instant {
-		self.0.now()
-	}
-}
-
-/// A late-bound [`AnyTimers`]: shared state created before the runtime is known
-/// (the origin's, at [`crate::origin::Producer::new`]) holds this, and
-/// [`crate::origin::Driver::run`] fills it in.
-#[derive(Clone, Default)]
-pub(crate) struct TimersSlot(std::sync::Arc<std::sync::OnceLock<AnyTimers>>);
-
-impl TimersSlot {
-	/// Install the timers, ignoring a second install (clones share one slot).
-	pub(crate) fn install(&self, timers: AnyTimers) {
-		let _ = self.0.set(timers);
-	}
-
-	/// The installed timers. Panics before install, so only call from work that
-	/// the driver polls (it installs before it can poll anything).
-	pub(crate) fn get(&self) -> AnyTimers {
-		self.0.get().expect("origin driver is not running").clone()
-	}
 }
 
 /// A wall-clock deadline: the ergonomic layer over [`Timer`].
@@ -244,11 +108,6 @@ impl<R: Timers> Deadline<R> {
 		}
 		self.timer.poll(waiter)
 	}
-
-	/// Wait for the deadline to elapse. Parks forever while disarmed.
-	pub async fn wait(&mut self) {
-		kio::wait(|waiter| self.poll(waiter)).await
-	}
 }
 
 impl<R: Timers> std::fmt::Debug for Deadline<R> {
@@ -257,15 +116,15 @@ impl<R: Timers> std::fmt::Debug for Deadline<R> {
 	}
 }
 
-#[cfg(feature = "test-runtime")]
+#[cfg(test)]
 mod test;
-#[cfg(feature = "test-runtime")]
+#[cfg(test)]
 pub use test::Test;
 
 /// A tokio-backed runtime for this crate's own unit tests, so the existing
 /// `tokio::time::pause`/`advance` tests keep their semantics: `now` reads
 /// tokio's (pausable) clock and timers are tokio sleeps, which paused tests
-/// auto-advance. Production code uses `moq_tokio::runtime::Runtime` instead; this one is
+/// auto-advance. Production adapters live outside this crate; this one is
 /// compiled only into the test harness (integration tests carry their own copy
 /// in `tests/support`).
 #[cfg(all(test, not(target_family = "wasm")))]

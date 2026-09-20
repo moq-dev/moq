@@ -17,7 +17,7 @@ the UDP sockets bound through it.
   (the shape a later `SENDMSG_ZC` needs).
 - **Timers**: a heap the worker sweeps; the earliest deadline rides
   `io_uring_enter` as an absolute timeout. Zero timeout SQEs. The worker's
-  `Handle` implements `moq_net::Timers`.
+  `Handle::run` drives MoQ with the worker clock and a single timer.
 - **Parking**: a futex word per worker. Remote wakes are an atomic store, plus
   one `futex(2)` wake only while the worker is actually parked (a `FUTEX_WAIT`
   SQE armed on the word).

@@ -216,7 +216,7 @@ fn lite_session_over_webtransport() {
 			.enable_time()
 			.build()
 			.expect("tokio runtime");
-		rt.block_on(pub_driver.run(support::TokioTimers));
+		rt.block_on(moq_tokio::runtime::run(pub_driver));
 	});
 
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
@@ -235,14 +235,14 @@ fn lite_session_over_webtransport() {
 		Box::pin(async move {
 			assert_eq!(session.protocol(), Some(PROTO), "negotiated subprotocol");
 			let (sub_origin, sub_driver) = origin::Producer::new(origin::Config::new(moq_net::Hop::random()));
-			let driver = tokio::spawn(sub_driver.run(moq_tokio::runtime::Runtime::new()));
+			let driver = tokio::spawn(moq_tokio::runtime::run(sub_driver));
 
 			let (moq, session_driver) = moq_net::Client::new()
 				.with_subscriber(sub_origin.clone())
-				.connect_lite(moq_tokio::runtime::Runtime::new(), session)
+				.connect_lite(std::time::Instant::now(), session)
 				.await
 				.expect("connect_lite");
-			tokio::spawn(session_driver);
+			tokio::spawn(moq_tokio::runtime::run(session_driver));
 
 			let bc = {
 				let consumer = sub_origin.consume();
@@ -284,11 +284,12 @@ fn lite_session_over_webtransport() {
 
 			let (session, driver) = moq_net::Server::new()
 				.with_publisher(&serve_origin)
-				.accept_lite(handle.clone(), session)
+				.accept_lite(std::time::Instant::now(), session)
 				.await
 				.expect("accept_lite");
+			let task_handle = handle.clone();
 			handle.spawn(async move {
-				let _ = driver.await;
+				let _ = task_handle.run(driver).await;
 			});
 			session.closed().await;
 		})
@@ -410,7 +411,7 @@ fn h3_request(peer: &mut support::Peer, control: u64, url: &str) {
 /// Everything here is a stall or a leak, so the failure mode without the fix
 /// is a test that never finishes.
 async fn within<T>(handle: &moq_uring::Handle, what: &str, future: impl Future<Output = T>) -> T {
-	let mut deadline = moq_net::runtime::Deadline::after(handle, std::time::Duration::from_secs(5));
+	let mut deadline = moq_uring::Timer::after(handle, std::time::Duration::from_secs(5));
 	let mut future = std::pin::pin!(future);
 	kio::wait(|waiter| {
 		let mut cx = std::task::Context::from_waker(waiter.waker());

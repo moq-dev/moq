@@ -1,3 +1,4 @@
+use crate::runtime::Timers as _;
 use crate::{frame, group, origin, track};
 use std::{
 	collections::HashMap,
@@ -6,7 +7,7 @@ use std::{
 	time::Duration,
 };
 
-use web_transport_trait::{MaybeSend, MaybeSync, poll::SendStream as _};
+use web_transport_trait::poll::SendStream as _;
 
 use crate::{
 	AsPath, Error, Timescale, Timestamp,
@@ -220,9 +221,9 @@ enum NamespaceEvent {
 }
 
 #[derive(Clone)]
-pub(super) struct Publisher<S: crate::transport::poll::Session, R: crate::runtime::Timers> {
+pub(super) struct Publisher<S: crate::transport::poll::Session> {
 	// Arms the advertise, retry, and linger timers.
-	runtime: R,
+	runtime: crate::time::Clock,
 	session: S,
 	// Traffic stats are attributed through this tagged origin handle.
 	origin: origin::Consumer,
@@ -273,14 +274,12 @@ impl Drop for Join {
 	}
 }
 
-impl<S, R> Publisher<S, R>
+impl<S> Publisher<S>
 where
 	S: crate::transport::poll::Boxable,
-	R: crate::runtime::Timers + MaybeSend + MaybeSync + 'static,
-	R::Timer: MaybeSend,
 {
 	pub fn new(
-		runtime: R,
+		runtime: crate::time::Clock,
 		session: S,
 		origin: origin::Consumer,
 		control: Control,
@@ -2526,8 +2525,6 @@ mod serve_tests {
 	use crate::lite::test_transport::{Log, ScriptedSession, SinkSession};
 	use crate::model::ProduceTest;
 
-	type TestRuntime = crate::runtime::tokio_test::Tokio;
-
 	fn occurrences(log: &Log, needle: &[u8]) -> usize {
 		let writes = log.writes.lock().unwrap();
 		writes.windows(needle.len()).filter(|window| *window == needle).count()
@@ -2539,7 +2536,7 @@ mod serve_tests {
 
 	/// A publisher whose origin serves one broadcast ("room") with one track ("video").
 	struct Serve {
-		publisher: Publisher<ScriptedSession, TestRuntime>,
+		publisher: Publisher<ScriptedSession>,
 		session: ScriptedSession,
 		log: Log,
 		track: track::Producer,
@@ -2559,7 +2556,7 @@ mod serve_tests {
 		peer_setup.set(peer::Peer::default());
 
 		let publisher = Publisher::new(
-			TestRuntime::new(),
+			crate::time::Clock::tokio(),
 			session.clone(),
 			origin.consume(),
 			Control::new(None, false),
@@ -3371,10 +3368,6 @@ mod tests {
 	use crate::model::ProduceTest;
 	use futures::FutureExt;
 
-	/// The tokio-backed test runtime. Its transport parameter is phantom, so one
-	/// type serves every fake session in this module.
-	type TestRuntime = crate::runtime::tokio_test::Tokio;
-
 	async fn settle() {
 		tokio::time::sleep(Duration::from_millis(1)).await;
 	}
@@ -3435,7 +3428,7 @@ mod tests {
 	async fn echo_harness(
 		assigned: crate::Hop,
 	) -> (
-		Publisher<SinkSession, TestRuntime>,
+		Publisher<SinkSession>,
 		origin::Consumer,
 		Vec<crate::model::AnnounceProducer>,
 	) {
@@ -3445,7 +3438,7 @@ mod tests {
 
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
 		let publisher = Publisher::new(
-			TestRuntime::new(),
+			crate::time::Clock::tokio(),
 			session,
 			origin.consume(),
 			Control::new(None, false),
@@ -3503,7 +3496,7 @@ mod tests {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let publisher = Publisher::new(
-			TestRuntime::new(),
+			crate::time::Clock::tokio(),
 			crate::lite::test_transport::SinkSession::new(Default::default()),
 			origin.consume(),
 			Control::new(None, false),
@@ -3574,7 +3567,7 @@ mod tests {
 		let consumer = origin.consume();
 
 		let publisher = Publisher::new(
-			TestRuntime::new(),
+			crate::time::Clock::tokio(),
 			crate::lite::test_transport::SinkSession::new(Default::default()),
 			origin.consume(),
 			Control::new(None, false),
@@ -3616,7 +3609,7 @@ mod tests {
 		let session = SinkSession::gated_bi(gate.consume());
 		let log = session.log.clone();
 		let publisher = Publisher::new(
-			TestRuntime::new(),
+			crate::time::Clock::tokio(),
 			session.clone(),
 			origin.consume(),
 			Control::new(None, false),
@@ -3720,7 +3713,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let publisher = Publisher::new(
-			TestRuntime::new(),
+			crate::time::Clock::tokio(),
 			session,
 			origin.consume(),
 			Control::new(None, false),
@@ -3808,7 +3801,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let publisher = Publisher::new(
-			TestRuntime::new(),
+			crate::time::Clock::tokio(),
 			session.clone(),
 			consumer,
 			Control::new(None, false),
@@ -3893,7 +3886,7 @@ mod tests {
 		peer_setup.set(peer::Peer::default());
 
 		let publisher = Publisher::new(
-			TestRuntime::new(),
+			crate::time::Clock::tokio(),
 			session,
 			origin.consume(),
 			Control::new(None, false),
@@ -3939,7 +3932,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let publisher = Publisher::new(
-			TestRuntime::new(),
+			crate::time::Clock::tokio(),
 			session.clone(),
 			origin.consume(),
 			Control::new(None, false),
@@ -4009,7 +4002,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let publisher = Publisher::new(
-			TestRuntime::new(),
+			crate::time::Clock::tokio(),
 			session,
 			origin.consume(),
 			Control::new(None, false),
@@ -4087,7 +4080,7 @@ mod tests {
 
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
 		let publisher = Publisher::new(
-			TestRuntime::new(),
+			crate::time::Clock::tokio(),
 			session,
 			origin.consume(),
 			Control::new(None, false),
@@ -4131,7 +4124,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let publisher = Publisher::new(
-			TestRuntime::new(),
+			crate::time::Clock::tokio(),
 			session,
 			origin.consume(),
 			Control::new(None, false),
@@ -4213,7 +4206,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let publisher = Publisher::new(
-			TestRuntime::new(),
+			crate::time::Clock::tokio(),
 			session,
 			origin.consume(),
 			Control::new(None, false),
@@ -4285,7 +4278,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let publisher = Publisher::new(
-			TestRuntime::new(),
+			crate::time::Clock::tokio(),
 			session,
 			origin.consume(),
 			Control::new(None, false),
@@ -4358,7 +4351,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let publisher = Publisher::new(
-			TestRuntime::new(),
+			crate::time::Clock::tokio(),
 			session,
 			origin.consume(),
 			Control::new(None, false),
@@ -4423,7 +4416,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let publisher = Publisher::new(
-			TestRuntime::new(),
+			crate::time::Clock::tokio(),
 			session,
 			origin.consume(),
 			Control::new(None, false),
@@ -4478,7 +4471,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let publisher = Publisher::new(
-			TestRuntime::new(),
+			crate::time::Clock::tokio(),
 			session,
 			origin.consume(),
 			Control::new(None, false),
@@ -4526,7 +4519,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let publisher = Publisher::new(
-			TestRuntime::new(),
+			crate::time::Clock::tokio(),
 			session,
 			origin.consume(),
 			Control::new(None, false),
@@ -4572,7 +4565,7 @@ mod tests {
 
 	/// A publisher talking to a scripted peer that never answers, over one bidi stream.
 	struct Harness {
-		publisher: Publisher<crate::lite::test_transport::ScriptedSession, TestRuntime>,
+		publisher: Publisher<crate::lite::test_transport::ScriptedSession>,
 		session: crate::lite::test_transport::ScriptedSession,
 		log: crate::lite::test_transport::Log,
 		/// Keeps the origin alive; the publisher only holds a consumer.
@@ -4589,7 +4582,7 @@ mod tests {
 		peer_setup.set(peer::Peer::default());
 
 		let publisher = Publisher::new(
-			TestRuntime::new(),
+			crate::time::Clock::tokio(),
 			session.clone(),
 			origin.consume(),
 			Control::new(None, false),

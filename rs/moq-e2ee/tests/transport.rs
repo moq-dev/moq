@@ -6,13 +6,13 @@ use std::time::Duration;
 
 use moq_e2ee::{Credential, PROFILE};
 use moq_net::{Hop, Timestamp, Version};
-use support::harness::{MockConnectOptions, MockPair, TokioRuntime, connect_mock};
+use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
-	tokio::spawn(driver.run(TokioRuntime::new()));
+	tokio::spawn(support::harness::run(driver));
 	producer
 }
 

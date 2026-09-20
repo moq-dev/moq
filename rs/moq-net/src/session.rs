@@ -199,17 +199,16 @@ impl Session {
 }
 
 impl Session {
-	pub(super) fn new<S, R>(
-		runtime: R,
+	pub(super) fn new<S>(
+		runtime: crate::time::Clock,
 		session: S,
 		version: Version,
 		recv_bandwidth: Option<bandwidth::Consumer>,
-		protocol: crate::driver::Protocol<S, R>,
+		protocol: crate::driver::Protocol<S>,
 		goaway: goaway::Handle,
-	) -> (Self, crate::Driver<S, R>)
+	) -> (Self, crate::Driver<S>)
 	where
 		S: crate::transport::poll::Session,
-		R: crate::runtime::Timers + 'static,
 	{
 		let sample = snapshot(&session);
 
@@ -230,7 +229,7 @@ impl Session {
 		});
 
 		let supervisor = Supervisor {
-			runtime,
+			runtime: runtime.clone(),
 			closed_watch: session.clone(),
 			session,
 			close: Some(close.consume()),
@@ -249,11 +248,14 @@ impl Session {
 			recv_bandwidth,
 			goaway: Arc::new(goaway),
 		};
-		let driver = crate::Driver::new(crate::driver::State {
-			protocol,
-			supervisor: Some(supervisor),
-			result: None,
-		});
+		let driver = crate::Driver::new(
+			runtime.clone(),
+			crate::driver::State {
+				protocol,
+				supervisor: Some(supervisor),
+				result: None,
+			},
+		);
 
 		(session, driver)
 	}
@@ -265,8 +267,8 @@ impl Session {
 /// anyone is consuming them.
 ///
 /// Finishes once the transport reports closed; everything else is moot then.
-pub(crate) struct Supervisor<S, R: crate::runtime::Timers> {
-	runtime: R,
+pub(crate) struct Supervisor<S> {
+	runtime: crate::time::Clock,
 	session: S,
 	// A dedicated clone for the close watch, since each pending poll operation
 	// needs its own handle.
@@ -281,17 +283,19 @@ pub(crate) struct Supervisor<S, R: crate::runtime::Timers> {
 	/// The send-rate estimate channel, when the backend reports one. `None`
 	/// also once every consumer is gone for good.
 	send_bandwidth: Option<bandwidth::Producer>,
-	mode: SamplerMode<R>,
+	mode: SamplerMode,
 }
 
-enum SamplerMode<R: crate::runtime::Timers> {
+enum SamplerMode {
 	/// Nobody wants stats; sampling is paused.
 	Idle,
 	/// Someone does; sample when the deadline elapses.
-	Polling { deadline: crate::runtime::Deadline<R> },
+	Polling {
+		deadline: crate::runtime::Deadline<crate::time::Clock>,
+	},
 }
 
-impl<S: crate::transport::poll::Session, R: crate::runtime::Timers> Supervisor<S, R> {
+impl<S: crate::transport::poll::Session> Supervisor<S> {
 	const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
