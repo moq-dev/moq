@@ -3,6 +3,7 @@ import { Path } from "@moq/net";
 import { Signal } from "@moq/signals";
 
 const sources: FakeSource[] = [];
+const encoders: Record<string, unknown>[] = [];
 class FakeSource {
 	out = { source: new Signal<unknown>(undefined) };
 	constructor() {
@@ -12,6 +13,9 @@ class FakeSource {
 }
 class FakePipeline {
 	out = { display: new Signal(undefined), frame: new Signal(undefined) };
+	constructor(name?: unknown, props?: Record<string, unknown>) {
+		if (typeof name === "string" && props) encoders.push(props);
+	}
 	close() {}
 }
 class FakeBroadcast {
@@ -32,9 +36,18 @@ async function flush() {
 }
 
 test("screen capture stays enabled while pending and resets after a live share ends", async () => {
-	const local = new Local({ origin: undefined, identity: Path.from("alice") });
+	const bandwidth = new Signal(undefined);
+	const local = new Local({
+		connection: {
+			origin: new Signal(undefined),
+			bandwidth,
+		} as never,
+		identity: Path.from("alice"),
+	});
 	try {
 		await flush();
+		expect(encoders).toHaveLength(6);
+		expect(encoders.every((props) => props.bandwidth === bandwidth)).toBe(true);
 		local.screenEnabled.set(true);
 		await flush();
 		expect(local.screenEnabled.peek()).toBe(true);

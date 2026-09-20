@@ -200,7 +200,7 @@ describe("Source stalled rendition selection", () => {
 		source.close();
 	});
 
-	it("skips a stalled manual target while an unstalled rendition exists", async () => {
+	it("keeps a stalled manual target while an unstalled rendition exists", async () => {
 		const source = new Source({
 			broadcast: mockBroadcast({
 				low: config("avc1.64001e", { bitrate: 1_000_000 }),
@@ -211,7 +211,7 @@ describe("Source stalled rendition selection", () => {
 		});
 
 		await settle();
-		expect(source.out.track.peek()).toBe("low");
+		expect(source.out.track.peek()).toBe("high");
 		expect(Object.keys(source.out.available.peek())).toEqual(["low", "high"]);
 		source.close();
 	});

@@ -36,7 +36,6 @@ the transport line in m2 assumes a single stack.
 - [moq-tokio shapes](/quest/m1/api-tokio-shapes.md) - a `Drop` on `Listener`, a worker `Member` that cannot be cross-wired, `std::time::Duration` fields, one construction idiom, no six-argument merge
 - [Catalog types](/quest/m1/api-hang-catalog.md) - `hang::Catalog<E>` is the one section list, `Clock` holds a `Timestamp`, `Timeline` folds into `Archive`
 - [Rendition ownership](/quest/m1/api-mux-rendition.md) - one handle publishes a media track and reports its estimate, instead of five
-- [Watch and publish shapes](/quest/m1/api-watch-publish.md) - props objects everywhere, silent `latency`/`jitter` aliases refuse, `Sync` stops needing a jitter bridge, rooms get bandwidth
 - [Gateway types](/quest/m1/api-gateways.md) - no `anyhow` in a gateway `Error`, `PathOwned` prefixes, `Duration` segments, `moq_rtc::Server::new(config)`, an SRT reject with a reason
 - [libmoq units](/quest/m1/api-libmoq-units.md) - `moq_client_config` is all microseconds, the header declares every enum and error code, NULL callbacks are refused
 - [Cluster -01](/quest/m1/cluster-01/README.md) - rs/moq-net and js/net speak the revised cluster extension (HOP_ID, REQUEST_UPDATE repricing) and -01 is published

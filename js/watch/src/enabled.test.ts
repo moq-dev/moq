@@ -20,9 +20,9 @@ function enabled(mode: Mode): boolean[] {
 	const props = inputs(mode);
 	const components = [
 		new Watch.Broadcast(props),
-		new Watch.Audio.Decoder(audioSource, sync, props),
-		new Watch.Video.Decoder(videoSource, sync, props),
-		new Watch.Text.Renderer(textSource, sync, props),
+		new Watch.Audio.Decoder({ source: audioSource, sync, ...props }),
+		new Watch.Video.Decoder({ source: videoSource, sync, ...props }),
+		new Watch.Text.Renderer({ source: textSource, sync, ...props }),
 	];
 
 	try {

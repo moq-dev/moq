@@ -12,7 +12,7 @@ function publish(origin: Origin.Producer, path: Path.Valid) {
 }
 
 // A real origin with local broadcasts at the given paths. Resolution is proven by
-// discrimination: `relativeBroadcast` resolves blind against the table (reload: false), so
+// discrimination: `relativeBroadcast` resolves blind against the table (announced: false), so
 // a defined result means the reference resolved to a published path and nothing else.
 function origin(paths: string[]): Origin.Producer {
 	const producer = new Origin.Producer();
@@ -26,7 +26,7 @@ function broadcast(name: string, paths: string[] = [name]): { source: Broadcast;
 		origin: owner,
 		name: Path.from(name),
 		enabled: true,
-		reload: false,
+		announced: false,
 		catalogFormat: "manual",
 	});
 	return { source, owner };
@@ -51,6 +51,10 @@ const videoRenditions = (source: Broadcast): string[] =>
 
 const video = (codec: string, broadcast?: string): Catalog.VideoConfig =>
 	({ codec, container: { kind: "legacy" }, broadcast }) as Catalog.VideoConfig;
+
+it("refuses the released reload input", () => {
+	expect(() => new Broadcast({ reload: true } as never)).toThrow("renamed to `announced`");
+});
 
 describe("relativeBroadcast", () => {
 	it("resolves a legal reference against the origin", () => {
@@ -96,7 +100,7 @@ describe("relativeBroadcast", () => {
 			origin: owner,
 			name: Path.from("a/b"),
 			enabled: true,
-			reload: false,
+			announced: false,
 			catalogFormat: "manual",
 			catalog,
 		});
@@ -193,7 +197,7 @@ describe("relativeBroadcast", () => {
 
 describe("blind resolution", () => {
 	it("holds a resolved request steady instead of flapping", async () => {
-		// reload: false with nothing routed stands a request; when a session answers, the
+		// announced: false with nothing routed stands a request; when a session answers, the
 		// effect that read `request.active` reruns. That rerun must re-acquire the same
 		// answer, not close the request and re-dial forever.
 		const owner = new Origin.Producer();
@@ -201,7 +205,7 @@ describe("blind resolution", () => {
 			origin: owner,
 			name: Path.from("blind.hang"),
 			enabled: true,
-			reload: false,
+			announced: false,
 			catalogFormat: "manual",
 		});
 

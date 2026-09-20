@@ -6,7 +6,7 @@
  * @module
  */
 import * as Moq from "@moq/net";
-import { Effect, Signal } from "@moq/signals";
+import { Effect, readonlys, Signal } from "@moq/signals";
 import * as Audio from "./audio";
 import { Broadcast } from "./broadcast";
 import * as Preview from "./preview";
@@ -89,8 +89,7 @@ export default class MoqPublish extends HTMLElement {
 	 * page and URL resolves it locally with no round trip.
 	 */
 	connection: Moq.Connection;
-	/** The video capture, shared by every video rendition. Also reachable as `video.capture`. */
-	capture: Video.Capture;
+	#capture: Video.Capture;
 	broadcast: Broadcast;
 
 	// The single video and audio encoders. For multiple renditions (e.g. simulcast), drop the element
@@ -101,11 +100,12 @@ export default class MoqPublish extends HTMLElement {
 
 	// The selected input sources: the Camera/Screen, Microphone/Screen, and File holders driving capture.
 	// Read by the UI (device pickers) and written by #runSource.
-	sources = {
+	readonly #sources = {
 		video: new Signal<Source.Camera | Source.Screen | undefined>(undefined),
 		audio: new Signal<Source.Microphone | Source.Screen | undefined>(undefined),
 		file: new Signal<Source.File | undefined>(undefined),
 	};
+	readonly sources = readonlys(this.#sources);
 
 	// The captured media tracks, written by #runSource. Fed to the video and audio captures, so
 	// consumers read them back via `capture.in.source` / `audio.capture.in.source` rather than here.
@@ -174,8 +174,8 @@ export default class MoqPublish extends HTMLElement {
 			this.#announcing.set(announce === "always" || (announce === "source" && hasMedia));
 		});
 
-		this.capture = new Video.Capture({ source: this.#videoSource });
-		this.signals.cleanup(() => this.capture.close());
+		this.#capture = new Video.Capture({ source: this.#videoSource });
+		this.signals.cleanup(() => this.#capture.close());
 
 		// Reached as `audio.capture` rather than a field of its own, so audio and video read alike.
 		const audioCapture = new Audio.Capture({
@@ -189,14 +189,14 @@ export default class MoqPublish extends HTMLElement {
 			enabled: this.#enabled,
 			announce: this.#announcing,
 			name: this.#name,
-			display: this.capture.out.display,
+			display: this.#capture.out.display,
 			flip: this.#flip,
 		});
 		this.signals.cleanup(() => this.broadcast.close());
 
 		this.video = new Video.Encoder("video", {
 			broadcast: this.broadcast,
-			capture: this.capture,
+			capture: this.#capture,
 			enabled: this.#videoEnabled,
 			bandwidth: this.connection.bandwidth,
 		});
@@ -227,8 +227,8 @@ export default class MoqPublish extends HTMLElement {
 			if (preview instanceof HTMLCanvasElement) {
 				const renderer = new Preview.Renderer({
 					canvas: preview,
-					frames: this.capture.out.frames,
-					display: this.capture.out.display,
+					frames: this.#capture.out.frames,
+					display: this.#capture.out.display,
 					flip: this.#flip,
 					encoder: this.video,
 					mode: this.controls.preview,
@@ -314,19 +314,14 @@ export default class MoqPublish extends HTMLElement {
 
 		if (source === "camera") {
 			const video = new Source.Camera({ enabled: this.#videoEnabled });
-			this.signals.run((effect) => {
-				const source = effect.get(video.out.source);
-				this.#videoSource.set(source);
-			});
-
 			const audio = new Source.Microphone({ enabled: this.#audioEnabled });
-			this.signals.run((effect) => {
-				const source = effect.get(audio.out.source);
-				this.#audioSource.set(source);
-			});
 
-			effect.set(this.sources.video, video);
-			effect.set(this.sources.audio, audio);
+			effect.set(this.#sources.video, video);
+			effect.set(this.#sources.audio, audio);
+			effect.run((nested) => {
+				nested.set(this.#videoSource, nested.get(video.out.source)?.video);
+				nested.set(this.#audioSource, nested.get(audio.out.source)?.audio);
+			});
 
 			effect.cleanup(() => {
 				video.close();
@@ -341,16 +336,14 @@ export default class MoqPublish extends HTMLElement {
 				enabled: this.#eitherEnabled,
 			});
 
-			this.signals.run((effect) => {
-				const source = effect.get(screen.out.source);
-				if (!source) return;
-
-				effect.set(this.#videoSource, source.video);
-				effect.set(this.#audioSource, source.audio);
+			effect.run((nested) => {
+				const media = nested.get(screen.out.source);
+				nested.set(this.#videoSource, media?.video);
+				nested.set(this.#audioSource, media?.audio);
 			});
 
-			effect.set(this.sources.video, screen);
-			effect.set(this.sources.audio, screen);
+			effect.set(this.#sources.video, screen);
+			effect.set(this.#sources.audio, screen);
 
 			effect.cleanup(() => {
 				screen.close();
@@ -372,12 +365,12 @@ export default class MoqPublish extends HTMLElement {
 				fileSource.prompt();
 			}
 
-			effect.set(this.sources.file, fileSource);
+			effect.set(this.#sources.file, fileSource);
 
-			this.signals.run((effect) => {
-				const source = effect.get(fileSource.out.source);
-				this.#videoSource.set(source.video);
-				this.#audioSource.set(source.audio);
+			effect.run((nested) => {
+				const media = nested.get(fileSource.out.source);
+				nested.set(this.#videoSource, media?.video);
+				nested.set(this.#audioSource, media?.audio);
 			});
 
 			effect.cleanup(() => {

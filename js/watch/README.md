@@ -69,10 +69,10 @@ The simplest way to watch a stream:
 | `muted`          | boolean                    | false         | Mute audio                               |
 | `visible`        | never, distance, or always | `20%`         | When to download video (see below)       |
 | `volume`         | number                     | 0.5           | Audio volume (0-1)                       |
-| `reload`         | boolean                    | true          | Wait for (re)announcement before subscribing. Ignored when the relay does not support broadcast discovery. |
-| `latency`        | `real-time`, ms, `instant` | `real-time`   | Target latency. `instant` paints frames as they decode and disables audio. |
-| `latency-min`    | `real-time` or ms          | `real-time`   | The latency floor, opening a range instead of a single target. |
-| `latency-max`    | `real-time` or ms          | `real-time`   | The latency ceiling: buffer freely below it, skip ahead past it. |
+| `announced`      | boolean                    | true          | Wait for (re)announcement before subscribing. Ignored when the relay does not support broadcast discovery. |
+| `delay`          | `auto`, duration, `instant` | `auto`       | Distance from the live edge. `instant` paints frames as they decode and disables audio. |
+| `buffer`         | duration                   | `0ms`         | Future-dated media held before playback skips ahead. |
+| `captions`       | string                     | off           | Text rendition to render. |
 | `catalog-format` | hang, hangz, msf, manual   | auto-detected | The catalog format; detected from the name suffix unless set. `hangz` (compressed) is opt-in. |
 
 The `visible` attribute controls when the video track is downloaded, based on the canvas
@@ -112,10 +112,10 @@ const broadcast = new Watch.Broadcast({
 
 const source = new Watch.Video.Source({ broadcast, supported: Watch.Video.Decoder.supported, probe: connection.probe });
 const sync = new Watch.Sync({ probe: connection.probe });
-const decoder = new Watch.Video.Decoder(source, sync, { enabled: true });
+const decoder = new Watch.Video.Decoder({ source, sync, enabled: true });
 
 // Video renders to a <canvas>; there is no MediaStream to assign.
-const renderer = new Watch.Video.Renderer(decoder, { canvas });
+const renderer = new Watch.Video.Renderer({ decoder, canvas });
 ```
 
 Audio is the same shape: `Audio.Source` into `Audio.Decoder` into
@@ -144,7 +144,7 @@ The `<moq-watch-ui>` element automatically discovers the nested `<moq-watch>` el
 
 - **WebCodecs decoding**: Hardware-accelerated video and audio decoding
 - **Reactive state**: All properties are signals from `@moq/signals`
-- **Latency control**: A single target, or a range that buffers future-dated frames
+- **Latency control**: A delay target plus optional buffering for future-dated frames
 - **Quality selection**: Switch between available renditions
 - **Custom tracks**: Unknown catalog sections pass through, and `broadcast.out.active` subscribes your own tracks
 

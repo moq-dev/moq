@@ -12,18 +12,18 @@ import { broadcastPath, KIND } from "./path.ts";
 
 /** Constructor options for {@link Local}. */
 export interface LocalProps {
-	/** Origin to publish into, usually a `Connection`'s `origin`. */
-	origin: GetterInit<Moq.Origin.Table | undefined>;
+	/** Reconnecting connection to publish through. */
+	connection: Moq.Connection;
 	/** Participant identity; broadcast names are `{identity}/camera.hang` and `{identity}/screen.hang`. */
 	identity: GetterInit<Moq.Path.Valid>;
 	/** When true, announce the camera broadcast (joining the room). Defaults to false. */
-	enabled?: boolean | Signal<boolean>;
+	enabled?: GetterInit<boolean>;
 	/** Capture the camera. Pass a Signal to share it with the app (hang.live Settings). */
-	cameraEnabled?: boolean | Signal<boolean>;
+	cameraEnabled?: GetterInit<boolean>;
 	/** Capture the microphone. Pass a Signal to share it with the app. */
-	microphoneEnabled?: boolean | Signal<boolean>;
+	microphoneEnabled?: GetterInit<boolean>;
 	/** Prompt for and capture a screen. Pass a Signal to share it with the app. */
-	screenEnabled?: boolean | Signal<boolean>;
+	screenEnabled?: GetterInit<boolean>;
 	/** Seed the published user.json fields. */
 	user?: UserProps;
 }
@@ -73,43 +73,36 @@ export class Local {
 	readonly cameraCapture: Publish.Video.Capture;
 	/** Shared capture feeding the screen renditions. */
 	readonly screenCapture: Publish.Video.Capture;
-	/** Shared capture feeding the camera microphone encoder. */
-	readonly cameraAudioCapture: Publish.Audio.Capture;
-	/** Shared capture feeding the screen audio encoder. */
-	readonly screenAudioCapture: Publish.Audio.Capture;
-
-	/** Camera HD encoder. */
-	readonly cameraHd: Publish.Video.Encoder;
-	/** Camera SD encoder. */
-	readonly cameraSd: Publish.Video.Encoder;
-	/** Camera microphone encoder. */
-	readonly cameraAudio: Publish.Audio.Encoder;
-
-	/** Screen HD encoder. */
-	readonly screenHd: Publish.Video.Encoder;
-	/** Screen SD encoder. */
-	readonly screenSd: Publish.Video.Encoder;
-	/** Screen audio encoder (tab/system audio when the share includes it). */
-	readonly screenAudio: Publish.Audio.Encoder;
-
 	#preview = new Signal<Preview>({});
+	#cameraVideo = new Signal<Publish.Video.Source | undefined>(undefined);
+	#cameraAudio = new Signal<Publish.Audio.Source | undefined>(undefined);
 	#screenVideo = new Signal<Publish.Video.Source | undefined>(undefined);
 	#screenAudioSource = new Signal<Publish.Audio.Source | undefined>(undefined);
 	#screenLive = new Signal(false);
 
 	#signals = new Effect();
 
+	#control(value: GetterInit<boolean> | undefined): Signal<boolean> {
+		const input = getter(value ?? false);
+		if (input instanceof Signal) return input;
+
+		const output = new Signal(input.peek());
+		this.#signals.proxy(output, input);
+		return output;
+	}
+
 	constructor(props: LocalProps) {
 		this.identity = getter(props.identity);
-		this.enabled = Signal.from(props.enabled ?? false);
-		this.cameraEnabled = Signal.from(props.cameraEnabled ?? false);
-		this.microphoneEnabled = Signal.from(props.microphoneEnabled ?? false);
-		this.screenEnabled = Signal.from(props.screenEnabled ?? false);
+		this.enabled = this.#control(props.enabled);
+		this.cameraEnabled = this.#control(props.cameraEnabled);
+		this.microphoneEnabled = this.#control(props.microphoneEnabled);
+		this.screenEnabled = this.#control(props.screenEnabled);
 		this.typing = new Signal(false);
 		this.chatting = new Signal(false);
 		this.user = userFields(props.user);
 
-		const origin = getter(props.origin);
+		const origin = props.connection.origin;
+		const bandwidth = props.connection.bandwidth;
 
 		this.webcam = new Publish.Source.Camera({
 			enabled: this.cameraEnabled,
@@ -148,8 +141,12 @@ export class Local {
 			},
 		});
 		this.#signals.cleanup(() => this.share.close());
+		this.#signals.run((effect) => {
+			effect.set(this.#cameraVideo, effect.get(this.webcam.out.source)?.video);
+			effect.set(this.#cameraAudio, effect.get(this.microphone.out.source)?.audio);
+		});
 
-		this.cameraCapture = new Publish.Video.Capture({ source: this.webcam.out.source });
+		this.cameraCapture = new Publish.Video.Capture({ source: this.#cameraVideo });
 		this.#signals.cleanup(() => this.cameraCapture.close());
 
 		this.screenCapture = new Publish.Video.Capture({ source: this.#screenVideo });
@@ -180,68 +177,74 @@ export class Local {
 		});
 		this.#signals.cleanup(() => this.screen.close());
 
-		this.cameraHd = new Publish.Video.Encoder("video/hd", {
+		const cameraHd = new Publish.Video.Encoder("video/hd", {
 			broadcast: this.camera,
 			capture: this.cameraCapture,
 			enabled: this.cameraEnabled,
+			bandwidth,
 			config: { maxPixels: 1280 * 720 },
 		});
-		this.#signals.cleanup(() => this.cameraHd.close());
+		this.#signals.cleanup(() => cameraHd.close());
 
-		this.cameraSd = new Publish.Video.Encoder("video/sd", {
+		const cameraSd = new Publish.Video.Encoder("video/sd", {
 			broadcast: this.camera,
 			capture: this.cameraCapture,
 			enabled: this.cameraEnabled,
+			bandwidth,
 			config: { maxPixels: 640 * 360 },
 		});
-		this.#signals.cleanup(() => this.cameraSd.close());
+		this.#signals.cleanup(() => cameraSd.close());
 
-		this.cameraAudioCapture = new Publish.Audio.Capture({
-			source: this.microphone.out.source,
+		const cameraAudioCapture = new Publish.Audio.Capture({
+			source: this.#cameraAudio,
 			enabled: this.microphoneEnabled,
 		});
-		this.#signals.cleanup(() => this.cameraAudioCapture.close());
+		this.#signals.cleanup(() => cameraAudioCapture.close());
 
-		this.cameraAudio = new Publish.Audio.Encoder("audio", {
+		const cameraAudio = new Publish.Audio.Encoder("audio", {
 			broadcast: this.camera,
-			capture: this.cameraAudioCapture,
+			capture: cameraAudioCapture,
 			enabled: this.microphoneEnabled,
+			bandwidth,
 		});
-		this.#signals.cleanup(() => this.cameraAudio.close());
+		this.#signals.cleanup(() => cameraAudio.close());
 
-		this.screenHd = new Publish.Video.Encoder("video/hd", {
+		const screenHd = new Publish.Video.Encoder("video/hd", {
 			broadcast: this.screen,
 			capture: this.screenCapture,
 			enabled: this.#screenLive,
+			bandwidth,
 			config: { maxPixels: 1920 * 1080 },
 		});
-		this.#signals.cleanup(() => this.screenHd.close());
+		this.#signals.cleanup(() => screenHd.close());
 
-		this.screenSd = new Publish.Video.Encoder("video/sd", {
+		const screenSd = new Publish.Video.Encoder("video/sd", {
 			broadcast: this.screen,
 			capture: this.screenCapture,
 			enabled: this.#screenLive,
+			bandwidth,
 			config: { maxPixels: 960 * 540 },
 		});
-		this.#signals.cleanup(() => this.screenSd.close());
+		this.#signals.cleanup(() => screenSd.close());
 
-		this.screenAudioCapture = new Publish.Audio.Capture({
+		const screenAudioCapture = new Publish.Audio.Capture({
 			source: this.#screenAudioSource,
 			enabled: this.#screenLive,
 		});
-		this.#signals.cleanup(() => this.screenAudioCapture.close());
+		this.#signals.cleanup(() => screenAudioCapture.close());
 
-		this.screenAudio = new Publish.Audio.Encoder("audio", {
+		const screenAudio = new Publish.Audio.Encoder("audio", {
 			broadcast: this.screen,
-			capture: this.screenAudioCapture,
+			capture: screenAudioCapture,
 			enabled: this.#screenLive,
+			bandwidth,
 		});
-		this.#signals.cleanup(() => this.screenAudio.close());
+		this.#signals.cleanup(() => screenAudio.close());
 
 		this.#signals.run((effect) => {
 			const source = effect.get(this.share.out.source);
-			this.#screenVideo.set(source?.video);
-			this.#screenAudioSource.set(source?.audio);
+			effect.set(this.#screenVideo, source?.video);
+			effect.set(this.#screenAudioSource, source?.audio);
 			const live = !!source?.video || !!source?.audio;
 			const wasLive = this.#screenLive.peek();
 			this.#screenLive.set(live);
@@ -252,8 +255,8 @@ export class Local {
 
 		this.#signals.run((effect) => {
 			this.#preview.set({
-				video: !!effect.get(this.webcam.out.source),
-				audio: !!effect.get(this.microphone.out.source),
+				video: !!effect.get(this.webcam.out.source)?.video,
+				audio: !!effect.get(this.microphone.out.source)?.audio,
 				screen: effect.get(this.#screenLive),
 				name: effect.get(this.user.name),
 				avatar: effect.get(this.user.avatar),

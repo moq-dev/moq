@@ -100,7 +100,8 @@ const broadcast = new Publish.Broadcast({
 // Capture, then encode. Each encoder registers its rendition on the broadcast
 // and encodes only while someone is subscribed.
 const camera = new Publish.Source.Camera({ enabled: true });
-const capture = new Publish.Video.Capture({ source: camera.out.source });
+const video = new Publish.Signals.Computed((effect) => effect.get(camera.out.source)?.video);
+const capture = new Publish.Video.Capture({ source: video });
 
 const hd = new Publish.Video.Encoder("video/hd", { broadcast, capture, enabled: true });
 const sd = new Publish.Video.Encoder("video/sd", { broadcast, capture, enabled: true, config: { maxScale: 0.25 } });
@@ -109,7 +110,8 @@ const sd = new Publish.Video.Encoder("video/sd", { broadcast, capture, enabled: 
 hd.config.set({ codec: "vp09.00.10.08", maxBitrate: 4_000_000 });
 
 const microphone = new Publish.Source.Microphone({ enabled: true });
-const audioCapture = new Publish.Audio.Capture({ source: microphone.out.source });
+const audioSource = new Publish.Signals.Computed((effect) => effect.get(microphone.out.source)?.audio);
+const audioCapture = new Publish.Audio.Capture({ source: audioSource });
 const audio = new Publish.Audio.Encoder("audio", { broadcast, capture: audioCapture, enabled: true });
 audio.volume.set(0.8);
 ```

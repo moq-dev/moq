@@ -22,7 +22,6 @@ The list: [Announce event](/quest/m1/api-net-announce.md),
 [moq-tokio shapes](/quest/m1/api-tokio-shapes.md),
 [Catalog types](/quest/m1/api-hang-catalog.md),
 [Rendition ownership](/quest/m1/api-mux-rendition.md),
-[Watch and publish shapes](/quest/m1/api-watch-publish.md),
 [Gateway types](/quest/m1/api-gateways.md),
 [libmoq units](/quest/m1/api-libmoq-units.md).
 

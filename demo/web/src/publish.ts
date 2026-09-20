@@ -456,7 +456,8 @@ $("publish-graphs").append(captureGraph.el, uploadGraph.el, rttGraph.el);
 // a signal coalesces a burst into one notification, which undercounts the rate.
 let frames = 0;
 viz.run((effect) => {
-	const fanout = effect.get(publish.capture.out.frames);
+	const capture = effect.get(publish.video.in.capture);
+	const fanout = capture ? effect.get(capture.out.frames) : undefined;
 	if (!fanout) return;
 
 	const reader = fanout.subscribe(effect).getReader();

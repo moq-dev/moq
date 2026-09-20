@@ -22,7 +22,6 @@ Public API: additive on @moq/watch and @moq/room. Wire: none.
 
 ## Required
 
-- [Watch and publish shapes](/quest/m1/api-watch-publish.md) - the pieces settle before the assembly is named
 - [Merge dev](/quest/m1/merge-dev.md) - starts on main
 
 ## Related

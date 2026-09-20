@@ -165,6 +165,14 @@ export type RendererInput = {
 	enabled: Getter<boolean>;
 };
 
+/** Constructor properties for {@link Renderer}. */
+export type RendererProps = Inputs<RendererInput> & {
+	/** Caption rendition selector. */
+	source: Source;
+	/** Shared playback clock. */
+	sync: Sync;
+};
+
 /**
  * Subscribes to the selected caption track, parses each cue, and renders it into an overlay element
  * via [media-captions](https://github.com/vidstack/captions).
@@ -184,9 +192,9 @@ export class Renderer {
 	// publisher costs one line instead of one per cue.
 	#skewWarned = false;
 
-	constructor(source: Source, sync: Sync, props?: Inputs<RendererInput>) {
-		this.source = source;
-		this.sync = sync;
+	constructor(props: RendererProps) {
+		this.source = props.source;
+		this.sync = props.sync;
 		this.in = {
 			container: getter(props?.container),
 			enabled: getter(props?.enabled ?? true),

@@ -1,6 +1,15 @@
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
-import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
+import {
+	type Dispose,
+	Effect,
+	type Getter,
+	getter,
+	type Inputs,
+	type Readonlys,
+	readonlys,
+	Signal,
+} from "@moq/signals";
 
 /**
  * How far playback trails the live edge.
@@ -37,12 +46,6 @@ export type SyncInput = {
 	 * from a `Connection`'s `probe`.
 	 */
 	probe: Getter<Moq.Connection.Probe | undefined>;
-
-	/** Any additional delay required for audio (wired from the per-rendition source). */
-	audio: Getter<Time.Milli | undefined>;
-
-	/** Any additional delay required for video (wired from the per-rendition source). */
-	video: Getter<Time.Milli | undefined>;
 };
 
 type SyncOutput = {
@@ -94,6 +97,7 @@ export class Sync {
 	// Minimum RTT seen, used as the baseline for jitter calculation.
 	// Avoids inflating jitter due to bufferbloat.
 	#minRtt: number | undefined;
+	#media = new Signal<{ jitter: Getter<Time.Milli | undefined> }[]>([]);
 
 	#signals = new Effect();
 
@@ -102,8 +106,6 @@ export class Sync {
 			delay: getter(props?.delay ?? ("auto" as Delay)),
 			buffer: getter(props?.buffer ?? Time.Milli.zero),
 			probe: getter(props?.probe),
-			audio: getter(props?.audio),
-			video: getter(props?.video),
 		};
 
 		this.#update = Promise.withResolvers();
@@ -111,6 +113,13 @@ export class Sync {
 		this.#signals.run(this.#runJitter.bind(this));
 		this.#signals.run(this.#runDelay.bind(this));
 		this.#signals.run(this.#runMaxAge.bind(this));
+	}
+
+	/** Include a decoder's rendition delay in the shared playback clock until disposed. */
+	register(jitter: Getter<Time.Milli | undefined>): Dispose {
+		const registered = { jitter };
+		this.#media.update((media) => [...media, registered]);
+		return () => this.#media.update((media) => media.filter((candidate) => candidate !== registered));
 	}
 
 	// Derive `buffered` / `maxAge` from the resolved delay and the configured lookahead.
@@ -159,13 +168,15 @@ export class Sync {
 
 	#runDelay(effect: Effect): void {
 		const jitter = effect.get(this.#out.jitter);
-		const video = effect.get(this.in.video) ?? Time.Milli.zero;
-		const audio = effect.get(this.in.audio) ?? Time.Milli.zero;
+		let media = Time.Milli.zero;
+		for (const registered of effect.get(this.#media)) {
+			media = Time.Milli.max(media, effect.get(registered.jitter) ?? Time.Milli.zero);
+		}
 
 		// A zero delay still holds the rendition's own delay, which is a frame interval at 60fps.
 		// "instant" holds nothing at all.
 		const instant = effect.get(this.in.delay) === "instant";
-		const delay = instant ? Time.Milli.zero : Time.Milli.add(Time.Milli.max(video, audio), jitter);
+		const delay = instant ? Time.Milli.zero : Time.Milli.add(media, jitter);
 		this.#out.delay.set(delay);
 
 		this.#update.resolve();

@@ -34,7 +34,8 @@ export function statusBadge(parent: Effect, publish: MoqPublish): HTMLElement {
 		const status = effect.get(publish.connection.status);
 		const audioCapture = effect.get(publish.audio.in.capture);
 		const audioSource = audioCapture ? effect.get(audioCapture.in.source) : undefined;
-		const videoSource = effect.get(publish.capture.in.source);
+		const videoCapture = effect.get(publish.video.in.capture);
+		const videoSource = videoCapture ? effect.get(videoCapture.in.source) : undefined;
 		const muted = effect.get(publish.controls.muted);
 		const invisible = effect.get(publish.controls.invisible);
 

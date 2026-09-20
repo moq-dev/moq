@@ -136,26 +136,24 @@ export class Game {
 		});
 		this.#signals.cleanup(() => this.audioSource.close());
 
-		// The decoder owns rendition handoffs but also needs Sync. Bridge its jitter output through a
-		// local signal so Sync can be constructed first.
-		const videoJitter = new Moq.Signals.Signal<Moq.Time.Milli | undefined>(undefined);
 		this.sync = new Watch.Sync({
 			delay: this.delay,
 			probe: connection.probe,
-			video: videoJitter,
-			audio: this.audioSource.out.jitter,
 		});
 		this.#signals.cleanup(() => this.sync.close());
 
 		this.#signals.run(this.#runPixelBudget.bind(this));
 
 		const videoEnabled = new Moq.Signals.Signal(true);
-		this.videoDecoder = new Watch.Video.Decoder(this.videoSource, this.sync, { enabled: videoEnabled });
-		this.#signals.proxy(videoJitter, this.videoDecoder.out.jitter);
+		this.videoDecoder = new Watch.Video.Decoder({
+			source: this.videoSource,
+			sync: this.sync,
+			enabled: videoEnabled,
+		});
 		this.#signals.cleanup(() => this.videoDecoder.close());
 
 		// Renderer needs a canvas created by the UI layer, set via `canvas`.
-		this.videoRenderer = new Watch.Video.Renderer(this.videoDecoder, { canvas: this.canvas });
+		this.videoRenderer = new Watch.Video.Renderer({ decoder: this.videoDecoder, canvas: this.canvas });
 		this.#signals.cleanup(() => this.videoRenderer.close());
 
 		// Download on the grid or when expanded, but only while the tile is on-screen.
@@ -164,13 +162,18 @@ export class Game {
 
 		// Audio pipeline. The emitter stops the download when muted or paused.
 		const audioEnabled = new Moq.Signals.Signal(false);
-		this.audioDecoder = new Watch.Audio.Decoder(this.audioSource, this.sync, { enabled: audioEnabled });
+		this.audioDecoder = new Watch.Audio.Decoder({
+			source: this.audioSource,
+			sync: this.sync,
+			enabled: audioEnabled,
+		});
 		this.#signals.cleanup(() => this.audioDecoder.close());
 
 		const audioPaused = new Moq.Signals.Signal(true);
 		this.#signals.run(this.#runAudioPaused.bind(this, audioPaused));
 
-		this.audioEmitter = new Watch.Audio.Emitter(this.audioDecoder, {
+		this.audioEmitter = new Watch.Audio.Emitter({
+			source: this.audioDecoder,
 			volume: this.volume,
 			muted: this.userMuted,
 			paused: audioPaused,

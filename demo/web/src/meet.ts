@@ -127,7 +127,7 @@ function join(): void {
 		enabled: true,
 	});
 	local = new Local({
-		origin: connection.origin,
+		connection,
 		identity,
 		enabled: true,
 		user: { id: name, name },

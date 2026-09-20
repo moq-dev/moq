@@ -70,7 +70,8 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 
 	// Resolution/codec from the live capture (display) + catalog; card hides when not capturing video.
 	parent.run((effect) => {
-		const display = effect.get(publish.capture.out.display);
+		const capture = effect.get(publish.video.in.capture);
+		const display = capture ? effect.get(capture.out.display) : undefined;
 		const cfg = effect.get(publish.video.out.catalog);
 		videoCard.el.style.display = display ? "" : "none";
 		vRes.textContent = display ? `${display.width}×${display.height}` : "—";
@@ -103,7 +104,8 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 	// one notification and undercount the rate.
 	let frames = 0;
 	parent.run((effect) => {
-		const fanout = effect.get(publish.capture.out.frames);
+		const capture = effect.get(publish.video.in.capture);
+		const fanout = capture ? effect.get(capture.out.frames) : undefined;
 		if (!fanout) return;
 
 		const reader = fanout.subscribe(effect).getReader();

@@ -2,6 +2,7 @@ import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Si
 import type * as Audio from "../audio";
 import { Device, type DeviceProps } from "./device";
 import { Retry } from "./retry";
+import type { Media } from "./types";
 
 // Signals the microphone reads.
 export type MicrophoneInput = {
@@ -19,7 +20,7 @@ export interface MicrophoneProps extends Inputs<MicrophoneInput> {
 
 type MicrophoneOutput = {
 	// The live microphone track, or undefined while disabled or denied.
-	source: Signal<Audio.Source | undefined>;
+	source: Signal<Media | undefined>;
 };
 
 /** Captures audio from a microphone, tracking the available devices. */
@@ -33,7 +34,7 @@ export class Microphone {
 	constraints: Signal<Audio.Constraints | undefined>;
 
 	readonly #out: MicrophoneOutput = {
-		source: new Signal<Audio.Source | undefined>(undefined),
+		source: new Signal<Media | undefined>(undefined),
 	};
 	readonly out = readonlys(this.#out);
 
@@ -109,7 +110,7 @@ export class Microphone {
 			if (!track || track.readyState === "ended") return this.#retry.failed();
 
 			this.#retry.succeeded(effect, track);
-			effect.set(this.#out.source, { track, kind: "voice" });
+			effect.set(this.#out.source, { audio: { track, kind: "voice" } });
 		});
 	}
 

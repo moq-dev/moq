@@ -15,6 +15,12 @@ export type EmitterInput = {
 	paused: Getter<boolean>;
 };
 
+/** Constructor properties for {@link Emitter}. */
+export type EmitterProps = Inputs<EmitterInput> & {
+	/** Decoder supplying PCM. */
+	source: Decoder;
+};
+
 type EmitterOutput = {
 	// Whether audio should be downloaded. Wired into the decoder's `enabled` input by the owner.
 	enabled: Signal<boolean>;
@@ -36,8 +42,8 @@ export class Emitter {
 	// The gain node used to adjust the volume.
 	#gain = new Signal<GainNode | undefined>(undefined);
 
-	constructor(source: Decoder, props?: Inputs<EmitterInput>) {
-		this.source = source;
+	constructor(props: EmitterProps) {
+		this.source = props.source;
 		this.in = {
 			volume: getter(props?.volume ?? 0.5),
 			muted: getter(props?.muted ?? false),

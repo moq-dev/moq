@@ -338,18 +338,20 @@ export class Source {
 	}
 
 	#runSelected(effect: Effect): void {
-		const available = selectableRenditions(effect.get(this.#out.available));
-		if (Object.keys(available).length === 0) return;
-
+		const supported = effect.get(this.#out.available);
 		const target = effect.get(this.in.target);
 
-		// Manual selection by name skips all ABR logic.
-		if (target?.name && target.name in available) {
-			const config = available[target.name];
+		// A manual choice stays selected while stalled. `stalled` steers automatic adaptation; it
+		// must not silently override an explicit user selection.
+		if (target?.name && target.name in supported) {
+			const config = supported[target.name];
 			effect.set(this.#out.track, target.name);
 			effect.set(this.#out.config, config);
 			return;
 		}
+
+		const available = selectableRenditions(supported);
+		if (Object.keys(available).length === 0) return;
 
 		// Auto-select: use recv bandwidth if no explicit bitrate target.
 		let effectiveTarget = target;
