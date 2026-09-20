@@ -270,15 +270,18 @@ impl Fanout {
 }
 
 impl Producer {
-	/// Resolve once at least one rendition has been discovered. Bounding how long to wait is
-	/// the caller's policy, so wrap this in a timeout rather than passing one in.
+	/// Resolve once at least one rendition has a playable media playlist. Bounding how long to
+	/// wait is the caller's policy, so wrap this in a timeout rather than passing one in.
 	pub async fn ready(&self) {
 		let _ = kio::wait(|waiter| {
 			self.state.poll_ref(waiter, |current| {
-				if current.is_empty() {
-					Poll::Pending
-				} else {
+				if current
+					.values()
+					.any(|rendition| rendition.poll_playable(waiter).is_ready())
+				{
 					Poll::Ready(())
+				} else {
+					Poll::Pending
 				}
 			})
 		})

@@ -138,8 +138,8 @@ impl Broadcaster {
 		self.renditions.subscribe()
 	}
 
-	/// Resolve once at least one rendition has been discovered. How long to wait is the
-	/// caller's policy: wrap this in a timeout (or select against it) as needed.
+	/// Resolve once at least one rendition has a playable media playlist. How long to wait is
+	/// the caller's policy: wrap this in a timeout (or select against it) as needed.
 	pub async fn ready(&self) {
 		self.renditions.ready().await;
 	}
@@ -156,6 +156,9 @@ impl Broadcaster {
 		let mut video = Vec::new();
 		let mut audio = Vec::new();
 		for rendition in self.renditions.snapshot() {
+			if !rendition.is_playable() {
+				continue;
+			}
 			match rendition.kind {
 				Kind::Video => video.push(master::VideoVariant {
 					name: rendition.name.clone(),
@@ -634,6 +637,66 @@ mod tests {
 	// The whole fetch-on-demand path in process: a broadcast publishes media through the
 	// catalog (which records the timeline), the Broadcaster renders playlists from the
 	// timeline alone, and a segment request fetches and transmuxes exactly its groups.
+	#[tokio::test]
+	async fn master_lists_only_playable_renditions() {
+		let origin = produce_origin();
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		broadcast.announce(Default::default()).expect("publish allowed");
+		settle().await;
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+
+		let reserved = catalog.reserve();
+		let mut registration = reserved.video("video0").unwrap();
+		registration.set(video_config()).unwrap();
+		drop(reserved);
+
+		let track = broadcast.create_track("video0", None).unwrap();
+		let mut media = catalog
+			.media_producer(
+				track,
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+			)
+			.unwrap();
+
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let rendition = tokio::time::timeout(Duration::from_secs(5), async {
+			loop {
+				if let Some(rendition) = broadcaster.rendition(Kind::Video, "video0") {
+					break rendition;
+				}
+				tokio::task::yield_now().await;
+			}
+		})
+		.await
+		.expect("rendition discovered from the catalog");
+
+		assert!(
+			rendition.media_playlist(None).is_none(),
+			"rendition is not playable yet"
+		);
+		assert!(
+			!broadcaster.master_playlist(None).contains("video/video0/media.m3u8"),
+			"master advertised a media playlist that would return 404"
+		);
+		assert!(
+			tokio::time::timeout(Duration::from_millis(10), broadcaster.ready())
+				.await
+				.is_err(),
+			"broadcaster became ready before it had a playable rendition"
+		);
+
+		media.write(vp8_frame(0, true)).unwrap();
+		media.write(vp8_frame(2_000_000, true)).unwrap();
+		media.write(vp8_frame(4_000_000, true)).unwrap();
+		tokio::time::timeout(Duration::from_secs(5), broadcaster.ready())
+			.await
+			.expect("broadcaster becomes ready with a complete segment");
+		assert!(broadcaster.master_playlist(None).contains("video/video0/media.m3u8"));
+
+		drop((media, registration, broadcast));
+	}
+
 	#[tokio::test]
 	async fn serves_playlist_and_segments_from_the_timeline() {
 		let origin = produce_origin();
