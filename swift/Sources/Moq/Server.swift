@@ -116,7 +116,7 @@ public final class Request: Sendable {
         Session(try await ffi.accept())
     }
 
-    /// Reject the session with the given HTTP status code.
+    /// Reject the session with an application error code; 401 and 403 map to unauthorized.
     public func reject(code: UInt16) async throws {
         try await ffi.reject(code: code)
     }

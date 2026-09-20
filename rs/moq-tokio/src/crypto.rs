@@ -1,8 +1,12 @@
+//! Rustls crypto-provider selection shared by applications using moq-tokio.
+
 use rustls::crypto::hash::{self, HashAlgorithm};
 use std::sync::Arc;
 
+/// A shared rustls crypto provider.
 pub type Provider = Arc<rustls::crypto::CryptoProvider>;
 
+/// Return the installed provider, or the provider selected by crate features.
 pub fn provider() -> Provider {
 	if let Some(provider) = rustls::crypto::CryptoProvider::get_default().cloned() {
 		return provider;
@@ -17,12 +21,17 @@ pub fn provider() -> Provider {
 	}
 }
 
+/// Install the provider selected by crate features as rustls' process default.
+pub fn install_default() -> Result<(), Provider> {
+	Arc::unwrap_or_clone(provider()).install_default()
+}
+
 /// Helper function to compute SHA256 hash using the crypto provider
 ///
 /// This function tries to find a SHA256 hash implementation in the provided
 /// crypto provider's cipher suites. If not found, it falls back to direct
 /// implementations based on enabled features.
-pub fn sha256(provider: &Provider, data: &[u8]) -> hash::Output {
+pub(crate) fn sha256(provider: &Provider, data: &[u8]) -> hash::Output {
 	// Try to find a SHA-256 hash provider from the cipher suites
 	let hash_provider = provider.cipher_suites.iter().find_map(|suite| {
 		let hash_provider = suite.tls13()?.common.hash_provider;

@@ -19,7 +19,6 @@ mod priority;
 mod root;
 pub mod stalled;
 mod text;
-mod timeline;
 mod video;
 
 pub use archive::*;
@@ -33,8 +32,19 @@ pub use mode::*;
 pub use priority::*;
 pub use root::*;
 pub use text::*;
-pub use timeline::*;
 pub use video::*;
+
+pub(crate) fn deserialize_timescale_or_default<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+	D: serde::Deserializer<'de>,
+{
+	use serde::Deserialize;
+	let value = u32::deserialize(deserializer)?;
+	if value == 0 {
+		return Err(serde::de::Error::custom("invalid timescale: 0"));
+	}
+	Ok(value)
+}
 
 /// A catalog section: a map of track name to config, published under one well-known root key.
 ///

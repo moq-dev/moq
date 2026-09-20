@@ -27,14 +27,11 @@ the transport line in m2 assumes a single stack.
 ## Quests
 
 - [One QUIC backend](/quest/m1/quic-one-backend.md) - quinn and quiche are deleted; noq (and iroh on it) is the only QUIC stack, with the qmux fallbacks untouched
-- [One auth path](/quest/m1/auth-one-path.md) - Server, Public, and Refuse become tasks on the `Admissions` queue; `admit()` stays send-plus-await; `Mode` is gone
 - [Announce event](/quest/m1/api-net-announce.md) - publishers announce prefixes on every wire, consumers scoped by a pattern read the covered path already trimmed, with no `as_prefix().expect()` at 89 call sites
 - [Origin scoping](/quest/m1/api-net-origin.md) - `scope(root, patterns)` is one fallible call, a fresh origin has a random hop, and the handles stop derefing to `Hop`
 - [Bindings announce match](/quest/m1/api-origin-scopes.md) - every binding takes a pattern scope and reports the announce match with its captures
 - [PathPrefixes](/quest/m1/api-path-prefixes.md) - the unused moq_net::PathPrefixes type is deleted before the release
 - [Route cost](/quest/m1/api-route-cost.md) - `Route::with_hop` and `Cost: From<(u64, u64)>` go; ffi and libmoq build `Hops` and `Cost::from_warm_cold`
-- [moq-tokio shapes](/quest/m1/api-tokio-shapes.md) - a `Drop` on `Listener`, a worker `Member` that cannot be cross-wired, `std::time::Duration` fields, one construction idiom, no six-argument merge
-- [Catalog types](/quest/m1/api-hang-catalog.md) - `hang::Catalog<E>` is the one section list, `Clock` holds a `Timestamp`, `Timeline` folds into `Archive`
 - [Rendition ownership](/quest/m1/api-mux-rendition.md) - one handle publishes a media track and reports its estimate, instead of five
 - [Gateway types](/quest/m1/api-gateways.md) - no `anyhow` in a gateway `Error`, `PathOwned` prefixes, `Duration` segments, `moq_rtc::Server::new(config)`, an SRT reject with a reason
 - [libmoq units](/quest/m1/api-libmoq-units.md) - `moq_client_config` is all microseconds, the header declares every enum and error code, NULL callbacks are refused

@@ -41,7 +41,7 @@ pub enum Error {
 	/// The QUIC config was parsed from released spellings that no longer work. The
 	/// payload is the migration to print.
 	#[error("{0}")]
-	Deprecated(crate::Deprecated),
+	Deprecated(crate::cli::Deprecated),
 
 	/// The configured secret was neither a valid hex key nor a readable key file.
 	#[error("invalid iroh secret key: {0}")]

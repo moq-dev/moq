@@ -26,7 +26,7 @@ async fn moq_import_cluster_lan_beside_a_relay() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 	let mut listen = moq_tokio::listen::Config::default();
-	listen.bind = Some("127.0.0.1:0".to_string());
+	listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	listen.tls.generate = vec!["localhost".into()];
 	let server = listen.init(Default::default()).expect("bind");
 	let port = server.local_addr().expect("addr").port();

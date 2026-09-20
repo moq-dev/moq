@@ -708,7 +708,7 @@ impl<E: catalog::Catalog> Export<E> {
 		// The MPEG-TS section lives in the extension. The trait only exposes
 		// `mpegts_mut`, and this snapshot is owned, so clone it out (`()` yields the
 		// empty default: no verbatim streams, no preserved PIDs/descriptors).
-		let mpegts = catalog.mpegts_mut().cloned().unwrap_or_default();
+		let mpegts = catalog.ext.mpegts_mut().cloned().unwrap_or_default();
 		self.program_descriptors = mpegts.program_descriptors.clone();
 		self.program = mpegts.program.clone();
 

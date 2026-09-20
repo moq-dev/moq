@@ -12,7 +12,7 @@
 //! holds back for the full answer is [`crate::connect::Config::resolution_delay`].
 //!
 //! Nothing here needs calling: every client dial goes through it. The one type
-//! a consumer sees is [`Failure`], which the backend `Error` types carry when
+//! a consumer sees is [`Attempt`], which the backend `Error` types carry when
 //! the race loses every attempt.
 
 use std::fmt;
@@ -31,7 +31,7 @@ use crate::resolve::Candidates;
 /// the address race loses all of them. A dial that had only one address to try
 /// reports that error directly instead, so this never stands alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Failure<E> {
+pub struct Attempt<E> {
 	/// The address that was dialed.
 	pub addr: SocketAddr,
 
@@ -39,13 +39,13 @@ pub struct Failure<E> {
 	pub error: E,
 }
 
-impl<E: fmt::Display> fmt::Display for Failure<E> {
+impl<E: fmt::Display> fmt::Display for Attempt<E> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		write!(f, "{}: {}", self.addr, self.error)
 	}
 }
 
-impl<E: std::error::Error + 'static> std::error::Error for Failure<E> {
+impl<E: std::error::Error + 'static> std::error::Error for Attempt<E> {
 	fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
 		Some(&self.error)
 	}
@@ -60,7 +60,7 @@ pub(crate) trait Aggregate: Sized {
 	///
 	/// Never called with fewer than two: a lone attempt is no race, so [`race`]
 	/// hands that error back untouched rather than burying it in an aggregate.
-	fn aggregate(failures: Vec<Failure<Self>>) -> Self;
+	fn aggregate(failures: Vec<Attempt<Self>>) -> Self;
 
 	/// The error for a dial that never had an address to try: the DNS failure
 	/// when there was one, and the backend's empty-answer error when both queries
@@ -69,7 +69,7 @@ pub(crate) trait Aggregate: Sized {
 }
 
 /// Render each failed attempt as `addr: error`, joined by `; `.
-pub(crate) fn describe<E: fmt::Display>(failures: &[Failure<E>]) -> String {
+pub(crate) fn describe<E: fmt::Display>(failures: &[Attempt<E>]) -> String {
 	failures.iter().map(|f| f.to_string()).collect::<Vec<_>>().join("; ")
 }
 
@@ -103,7 +103,7 @@ where
 	E: Aggregate + fmt::Display,
 {
 	let mut attempts = FuturesUnordered::new();
-	let mut failures: Vec<(usize, Failure<E>)> = Vec::new();
+	let mut failures: Vec<(usize, Attempt<E>)> = Vec::new();
 	let mut exhausted = false;
 
 	// When the next attempt may start: the first as soon as an address resolves,
@@ -148,7 +148,7 @@ where
 						// interesting when the whole race fails. Then it comes back in
 						// the returned error, which the caller logs.
 						tracing::debug!(%addr, index, %err, "connection attempt failed");
-						failures.push((index, Failure { addr, error: err }));
+						failures.push((index, Attempt { addr, error: err }));
 						// A failure starts the next candidate immediately (RFC 8305
 						// section 5) rather than waiting out the stagger delay.
 						ready = tokio::time::Instant::now();
@@ -182,7 +182,7 @@ async fn pull(candidates: &mut Candidates, ready: tokio::time::Instant) -> Optio
 
 /// Fold the failed attempts into one error, leaving a lone attempt's error
 /// exactly as the backend produced it.
-fn collapse<E: Aggregate>(mut failures: Vec<Failure<E>>) -> E {
+fn collapse<E: Aggregate>(mut failures: Vec<Attempt<E>>) -> E {
 	match failures.len() {
 		1 => failures.pop().expect("checked len").error,
 		_ => E::aggregate(failures),
@@ -205,7 +205,7 @@ mod tests {
 	#[derive(Debug, PartialEq, Eq)]
 	enum TestError {
 		Dial(&'static str),
-		All(Vec<Failure<TestError>>),
+		All(Vec<Attempt<TestError>>),
 	}
 
 	impl fmt::Display for TestError {
@@ -218,7 +218,7 @@ mod tests {
 	}
 
 	impl Aggregate for TestError {
-		fn aggregate(failures: Vec<Failure<Self>>) -> Self {
+		fn aggregate(failures: Vec<Attempt<Self>>) -> Self {
 			Self::All(failures)
 		}
 
@@ -230,8 +230,8 @@ mod tests {
 		}
 	}
 
-	fn failed(dest: &str, err: &'static str) -> Failure<TestError> {
-		Failure {
+	fn failed(dest: &str, err: &'static str) -> Attempt<TestError> {
+		Attempt {
 			addr: addr(dest),
 			error: TestError::Dial(err),
 		}

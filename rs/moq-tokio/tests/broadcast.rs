@@ -38,7 +38,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 	group.finish().expect("failed to finish group");
 
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".to_string());
+	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 	if let Some(v) = server_version {
 		server_config.version = vec![v];
@@ -165,7 +165,7 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 	group.finish().expect("failed to finish group");
 
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".to_string());
+	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.version = vec!["moq-lite-05".parse().unwrap()];
 	let server = server_config.init(Default::default()).expect("failed to init server");
@@ -288,7 +288,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 	group.finish().expect("failed to finish group");
 
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".to_string());
+	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.version = vec!["moq-lite-05".parse().unwrap()];
 	let server = server_config.init(Default::default()).expect("failed to init server");
@@ -418,7 +418,7 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 	group1.finish().expect("finish group 1");
 
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".to_string());
+	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.version = vec!["moq-lite-05".parse().unwrap()];
 	let server = server_config.init(Default::default()).expect("failed to init server");
@@ -529,7 +529,7 @@ async fn broadcast_moq_lite_05_default_timescale() {
 	group.finish().expect("finish group");
 
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".to_string());
+	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.version = vec!["moq-lite-05".parse().unwrap()];
 	let server = server_config.init(Default::default()).expect("init server");
@@ -629,7 +629,7 @@ async fn broadcast_moq_transport_20_current_group_join() {
 	}
 
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".to_string());
+	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.version = vec!["moq-transport-20".parse().unwrap()];
 	let server = server_config.init(Default::default()).expect("init server");
@@ -731,7 +731,7 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 	first.announce(Default::default()).expect("create broadcast");
 
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".to_string());
+	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.version = vec!["moq-lite-06-wip".parse().unwrap()];
 	let server = server_config.init(Default::default()).expect("init server");
@@ -893,13 +893,13 @@ async fn broadcast_route_migration() {
 	}
 	let server_a = {
 		let mut config = moq_tokio::listen::Config::default();
-		config.bind = Some("[::]:0".to_string());
+		config.bind = Some("[::]:0".parse().unwrap());
 		config.tls.generate = vec!["localhost".into()];
 		config.init(Default::default()).expect("init server a")
 	};
 	let server_b = {
 		let mut config = moq_tokio::listen::Config::default();
-		config.bind = Some("[::]:0".to_string());
+		config.bind = Some("[::]:0".parse().unwrap());
 		config.tls.generate = vec!["localhost".into()];
 		config.init(Default::default()).expect("init server b")
 	};
@@ -1025,7 +1025,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 		group.finish().expect("finish group");
 	}
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".to_string());
+	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 	if let Some(v) = version {
 		server_config.version = vec![v];
@@ -1335,7 +1335,7 @@ async fn max_age_test(version: &str) -> Duration {
 	let track = broadcast.create_track("video", info).expect("create track");
 
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".to_string());
+	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.version = vec![version];
 	let server = server_config.init(Default::default()).expect("init server");
@@ -1642,7 +1642,7 @@ async fn broadcast_websocket() {
 
 	// Server with both QUIC (required) and WebSocket listeners.
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".to_string());
+	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 
 	let ws_listener = moq_tokio::websocket::Listener::bind("[::]:0".parse().unwrap())
@@ -1650,10 +1650,10 @@ async fn broadcast_websocket() {
 		.expect("failed to bind WebSocket listener");
 	let ws_addr = ws_listener.local_addr().expect("failed to get ws addr");
 
-	let server = server_config
-		.init(Default::default())
-		.expect("failed to init server")
-		.with_websocket(ws_listener);
+	let mut config = moq_tokio::server::Config::default();
+	config.listen = server_config;
+	config.websocket = Some(ws_listener);
+	let server = config.init().expect("failed to init server");
 	let mut server = server.listen().await.expect("failed to listen");
 
 	// ── subscriber (client) ─────────────────────────────────────────
@@ -1664,7 +1664,7 @@ async fn broadcast_websocket() {
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	// Disable WebSocket delay so client connects immediately via ws://
-	client_config.websocket.delay = Duration::ZERO.into();
+	client_config.websocket.delay = Duration::ZERO;
 
 	let client = client_config.init(Default::default()).expect("failed to init client");
 	let url: url::Url = format!("ws://localhost:{}", ws_addr.port()).parse().unwrap();
@@ -1672,7 +1672,7 @@ async fn broadcast_websocket() {
 	// ── run server and client concurrently ──────────────────────────
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		assert_eq!(request.transport(), moq_tokio::Transport::WebSocket);
+		assert_eq!(request.transport(), moq_tokio::server::Transport::WebSocket);
 		assert_eq!(request.path(), "");
 		// The dialed host reaches the server as the authority, like the QUIC transports.
 		assert_eq!(request.authority(), Some("localhost"));
@@ -1761,7 +1761,7 @@ async fn broadcast_websocket_fallback() {
 
 	// QUIC binds on its own port; WebSocket on a different port.
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".to_string());
+	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 
 	let ws_listener = moq_tokio::websocket::Listener::bind("[::]:0".parse().unwrap())
@@ -1769,10 +1769,10 @@ async fn broadcast_websocket_fallback() {
 		.expect("failed to bind WebSocket listener");
 	let ws_addr = ws_listener.local_addr().expect("failed to get ws addr");
 
-	let server = server_config
-		.init(Default::default())
-		.expect("failed to init server")
-		.with_websocket(ws_listener);
+	let mut config = moq_tokio::server::Config::default();
+	config.listen = server_config;
+	config.websocket = Some(ws_listener);
+	let server = config.init().expect("failed to init server");
 	let mut server = server.listen().await.expect("failed to listen");
 
 	// ── subscriber (client) ─────────────────────────────────────────
@@ -1783,7 +1783,7 @@ async fn broadcast_websocket_fallback() {
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	// No delay. Race QUIC and WebSocket simultaneously.
-	client_config.websocket.delay = Duration::ZERO.into();
+	client_config.websocket.delay = Duration::ZERO;
 
 	let client = client_config.init(Default::default()).expect("failed to init client");
 
@@ -1796,7 +1796,7 @@ async fn broadcast_websocket_fallback() {
 	// ── run server and client concurrently ──────────────────────────
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		assert_eq!(request.transport(), moq_tokio::Transport::WebSocket);
+		assert_eq!(request.transport(), moq_tokio::server::Transport::WebSocket);
 		assert_eq!(request.path(), "/admin");
 		assert_eq!(request.query(), Some("jwt=test"));
 		assert_eq!(request.url().and_then(url::Url::query), Some("jwt=test"));
@@ -1887,7 +1887,7 @@ async fn broadcast_websocket_uses_newest_version() {
 	group.finish().expect("failed to finish group");
 
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".to_string());
+	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 
 	let ws_listener = moq_tokio::websocket::Listener::bind("[::]:0".parse().unwrap())
@@ -1895,16 +1895,16 @@ async fn broadcast_websocket_uses_newest_version() {
 		.expect("failed to bind WebSocket listener");
 	let ws_addr = ws_listener.local_addr().expect("failed to get ws addr");
 
-	let server = server_config
-		.init(Default::default())
-		.expect("failed to init server")
-		.with_websocket(ws_listener);
+	let mut config = moq_tokio::server::Config::default();
+	config.listen = server_config;
+	config.websocket = Some(ws_listener);
+	let server = config.init().expect("failed to init server");
 	let mut server = server.listen().await.expect("failed to listen");
 
 	let sub_origin = moq_tokio::origin::spawn(Hop::random());
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
-	client_config.websocket.delay = Duration::ZERO.into();
+	client_config.websocket.delay = Duration::ZERO;
 
 	let client = client_config.init(Default::default()).expect("failed to init client");
 	let url: url::Url = format!("ws://localhost:{}", ws_addr.port()).parse().unwrap();
@@ -1913,7 +1913,7 @@ async fn broadcast_websocket_uses_newest_version() {
 
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		assert_eq!(request.transport(), moq_tokio::Transport::WebSocket);
+		assert_eq!(request.transport(), moq_tokio::server::Transport::WebSocket);
 		let session = request.with_publisher(&pub_origin).ok().await?;
 		assert_eq!(session.version(), expected_version, "server negotiated stale version");
 		let _broadcast = broadcast;
@@ -1967,20 +1967,20 @@ async fn broadcast_race_quic_wins() {
 	let port = ws_listener.local_addr().expect("failed to get ws addr").port();
 
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some(format!("[::]:{port}"));
+	server_config.bind = Some(format!("[::]:{port}").parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 
-	let server = server_config
-		.init(Default::default())
-		.expect("failed to init server")
-		.with_websocket(ws_listener);
+	let mut config = moq_tokio::server::Config::default();
+	config.listen = server_config;
+	config.websocket = Some(ws_listener);
+	let server = config.init().expect("failed to init server");
 	let mut server = server.listen().await.expect("failed to listen");
 
 	let sub_origin = moq_tokio::origin::spawn(Hop::random());
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	// Zero head start: QUIC has to win on its own merit, not by penalising WS.
-	client_config.websocket.delay = Duration::ZERO.into();
+	client_config.websocket.delay = Duration::ZERO;
 
 	let client = client_config.init(Default::default()).expect("failed to init client");
 	let url: url::Url = format!("https://localhost:{port}").parse().unwrap();
@@ -1991,7 +1991,7 @@ async fn broadcast_race_quic_wins() {
 		let request = server.accept().await.expect("no incoming connection");
 		assert_eq!(
 			request.transport(),
-			moq_tokio::Transport::Quic,
+			moq_tokio::server::Transport::Quic,
 			"QUIC lost the race to WebSocket with both reachable",
 		);
 		let session = request.with_publisher(&pub_origin).ok().await?;
@@ -2045,7 +2045,7 @@ async fn quic_driver_task_inherits_connection_span() {
 	group.finish().expect("failed to finish group");
 
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".to_string());
+	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 
 	let server = server_config.init(Default::default()).expect("failed to init server");
@@ -2173,7 +2173,7 @@ async fn resubscribe_keeps_flowing_moq_lite_03() {
 	group0.finish().expect("finish group 0");
 
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".to_string());
+	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.version = vec!["moq-lite-03".parse().unwrap()];
 	let server = server_config.init(Default::default()).expect("init server");
@@ -2308,7 +2308,7 @@ async fn idle_subscription_releases_the_viewer_count() {
 	group.finish().expect("finish group");
 
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".to_string());
+	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 	let server = server_config.init(Default::default()).expect("init server");
 	let mut server = server.listen().await.expect("failed to listen");
@@ -2414,7 +2414,7 @@ async fn websocket_unauthorized_handshake_is_explicit() {
 	});
 
 	let mut client_config = moq_tokio::connect::Config::default();
-	client_config.websocket.delay = Duration::ZERO.into();
+	client_config.websocket.delay = Duration::ZERO;
 	let client = client_config.init(Default::default()).expect("failed to init client");
 	let url: url::Url = format!("ws://{addr}").parse().unwrap();
 
@@ -2451,7 +2451,7 @@ async fn reconnect_stops_on_websocket_unauthorized() {
 	});
 
 	let mut client_config = moq_tokio::connect::Config::default();
-	client_config.websocket.delay = Duration::ZERO.into();
+	client_config.websocket.delay = Duration::ZERO;
 	let client = client_config.init(Default::default()).expect("failed to init client");
 	let url: url::Url = format!("ws://{addr}").parse().unwrap();
 
@@ -2503,7 +2503,7 @@ async fn websocket_forbidden_does_not_end_a_quic_connect() {
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	// No head start, so the 403 lands before the QUIC handshake completes.
-	client_config.websocket.delay = Duration::ZERO.into();
+	client_config.websocket.delay = Duration::ZERO;
 	let client = client_config.init(Default::default()).expect("failed to init client");
 	// http:// dials QUIC as https:// and the fallback as plain ws://, which the listener
 	// above can answer without TLS.
@@ -2596,7 +2596,7 @@ async fn one_shot_connect_surfaces_the_session_close() {
 	client_config.tls.insecure = Some(true);
 	client_config.once = Some(true);
 	// A tiny backoff so a buggy redial happens well within the sleep below.
-	client_config.backoff.initial = Duration::from_millis(10).into();
+	client_config.backoff.initial = Duration::from_millis(10);
 	let client = client_config.init(Default::default()).expect("failed to init client");
 
 	let connection = tokio::time::timeout(TIMEOUT, client.connect(url).established())
@@ -2658,8 +2658,8 @@ async fn a_dead_session_unannounces_while_the_reconnect_retries() {
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	// Retry forever with a fast cadence: the worst case for a stale announce.
-	client_config.backoff.initial = Duration::from_millis(10).into();
-	client_config.backoff.timeout = Duration::ZERO.into();
+	client_config.backoff.initial = Duration::from_millis(10);
+	client_config.backoff.timeout = Duration::ZERO;
 	let client = client_config.init(Default::default()).expect("failed to init client");
 
 	let connection = tokio::time::timeout(TIMEOUT, client.with_subscriber(sub_origin).connect(url).established())
@@ -2805,7 +2805,7 @@ async fn wildcard_scope_test(version: &str, server_scope: &str) {
 		.expect("scope publish origin");
 
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".to_string());
+	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.version = vec![version.parse().unwrap()];
 	let server = server_config.init(Default::default()).expect("init server");
@@ -3026,7 +3026,7 @@ async fn publish_only_client_to_subscribe_only_server() {
 /// A test server bound to a free port with a generated localhost certificate.
 async fn test_server() -> (moq_tokio::Listener, std::net::SocketAddr) {
 	let mut config = moq_tokio::listen::Config::default();
-	config.bind = Some("[::]:0".to_string());
+	config.bind = Some("[::]:0".parse().unwrap());
 	config.tls.generate = vec!["localhost".into()];
 	let server = config.init(Default::default()).expect("failed to init server");
 	let server = server.listen().await.expect("failed to listen");
@@ -3079,7 +3079,7 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 	group.finish().expect("failed to finish group");
 
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".to_string());
+	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.version = vec![version];
 
@@ -3222,7 +3222,7 @@ async fn goaway_timeout_force_close_moq_transport_19_quic() {
 	let pub_origin = moq_tokio::origin::spawn(Hop::random());
 
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".to_string());
+	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.version = vec![version];
 	let server = server_config.init(Default::default()).expect("failed to init server");
@@ -3318,8 +3318,8 @@ async fn zero_initial_backoff_still_gives_up_on_a_flapping_peer() {
 
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
-	client_config.backoff.initial = Duration::ZERO.into();
-	client_config.backoff.timeout = Duration::from_millis(500).into();
+	client_config.backoff.initial = Duration::ZERO;
+	client_config.backoff.timeout = Duration::from_millis(500);
 	let client = client_config.init(Default::default()).expect("failed to init client");
 
 	let connection = client.connect(url);
@@ -3344,7 +3344,7 @@ async fn session_close_surfaces_a_rejection_code() {
 
 	let server_handle = tokio::spawn(async move {
 		while let Some(request) = server.accept().await {
-			request.close(403).await?;
+			request.reject(moq_tokio::server::Reject::Forbidden).await?;
 		}
 		Ok::<_, anyhow::Error>(())
 	});
@@ -3357,7 +3357,7 @@ async fn session_close_surfaces_a_rejection_code() {
 		.await
 		.expect("close timed out")
 		.expect_err("a rejected session must surface as an error");
-	// `Request::close` maps both 401 and 403 onto the wire's single UNAUTHORIZED.
+	// `Request::reject` maps both 401 and 403 onto the wire's single UNAUTHORIZED.
 	assert_connect_error(&err, moq_tokio::ConnectError::Unauthorized);
 
 	server_handle.abort();
@@ -3374,7 +3374,7 @@ async fn reconnect_stops_on_a_session_level_rejection() {
 
 	let server_handle = tokio::spawn(async move {
 		while let Some(request) = server.accept().await {
-			request.close(401).await?;
+			request.reject(moq_tokio::server::Reject::Unauthorized).await?;
 		}
 		Ok::<_, anyhow::Error>(())
 	});
@@ -3402,7 +3402,7 @@ async fn one_shot_surfaces_a_session_level_rejection() {
 
 	let server_handle = tokio::spawn(async move {
 		while let Some(request) = server.accept().await {
-			request.close(403).await?;
+			request.reject(moq_tokio::server::Reject::Forbidden).await?;
 		}
 		Ok::<_, anyhow::Error>(())
 	});

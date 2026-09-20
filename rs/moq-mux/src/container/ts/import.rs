@@ -142,7 +142,7 @@ impl<E: catalog::Catalog> Import<E> {
 		// Sample the real catalog once at construction, not E::default(): an extension
 		// may carry the section by value, and a snapshot clones under the mutex (no publish).
 		let mut snapshot = catalog.snapshot();
-		let supports_mpegts = snapshot.mpegts_mut().is_some();
+		let supports_mpegts = snapshot.ext.mpegts_mut().is_some();
 		let si = super::si::Capture::new(broadcast.clone(), catalog.clone());
 		Self {
 			broadcast,
@@ -366,7 +366,7 @@ impl<E: catalog::Catalog> Import<E> {
 				// export re-emits them verbatim, including the original CUEI.
 				if self.supports_mpegts && !self.program_recorded && !pmt.program_info.is_empty() {
 					let program = to_descriptors(&pmt.program_info);
-					if let Some(mpegts) = self.catalog.modify()?.mpegts_mut() {
+					if let Some(mpegts) = self.catalog.modify()?.ext.mpegts_mut() {
 						mpegts.program_descriptors = program;
 					}
 					self.program_recorded = true;
@@ -741,7 +741,7 @@ impl<E: catalog::Catalog> Import<E> {
 				self.es_descriptors.get(&pid.as_u16()).cloned().unwrap_or_default(),
 			)
 		};
-		if let Some(mpegts) = self.catalog.modify()?.mpegts_mut() {
+		if let Some(mpegts) = self.catalog.modify()?.ext.mpegts_mut() {
 			let entry = mpegts
 				.tracks
 				.entry(name)
@@ -763,7 +763,7 @@ impl<E: catalog::Catalog> Import<E> {
 		let Some(entry) = pat.table.iter().find(|entry| entry.program_num != 0) else {
 			return Ok(());
 		};
-		if let Some(mpegts) = self.catalog.modify()?.mpegts_mut() {
+		if let Some(mpegts) = self.catalog.modify()?.ext.mpegts_mut() {
 			let program = mpegts.program.get_or_insert_with(Default::default);
 			program.transport_stream_id = pat.transport_stream_id;
 			program.program_number = entry.program_num;
@@ -974,7 +974,7 @@ fn register_verbatim<E: catalog::Catalog>(
 	)?;
 
 	let mut guard = catalog.modify()?;
-	let Some(mpegts) = guard.mpegts_mut() else {
+	let Some(mpegts) = guard.ext.mpegts_mut() else {
 		// supports_mpegts was true when sampled at construction; None here means the
 		// catalog dropped the section since.
 		anyhow::bail!("catalog extension no longer carries an mpegts section");
@@ -998,7 +998,7 @@ fn unregister_verbatim<E: catalog::Catalog>(catalog: &mut crate::catalog::Produc
 	let Ok(mut catalog) = catalog.modify() else {
 		return;
 	};
-	if let Some(mpegts) = catalog.mpegts_mut() {
+	if let Some(mpegts) = catalog.ext.mpegts_mut() {
 		mpegts.tracks.remove(name);
 	}
 }
@@ -1155,7 +1155,7 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 		// re-emits the stream under its real id (e.g. 0xBD for teletext/DVB AC-3).
 		if !self.stream_id_recorded {
 			let name = self.track.name().to_string();
-			if let Some(mpegts) = self.entry.catalog.modify()?.mpegts_mut()
+			if let Some(mpegts) = self.entry.catalog.modify()?.ext.mpegts_mut()
 				&& let Some(verbatim) = mpegts.tracks.get_mut(&name).and_then(|t| t.verbatim.as_mut())
 			{
 				verbatim.stream_id = Some(pending.stream_id);
@@ -2752,7 +2752,7 @@ mod test {
 	#[test]
 	fn remapping_a_pid_keeps_its_retired_resync_stats() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		let pid = mpeg2ts::ts::Pid::new(0x61).unwrap();
 		let mut stream = import.legacy_stream(pid, &super::mp2::DESCRIPTOR);
@@ -3011,7 +3011,11 @@ mod test {
 		use crate::container::ts::catalog::Ext;
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Ext>::default()).unwrap();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
+		)
+		.unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let mut bytes = bytes::BytesMut::new();
@@ -3021,7 +3025,7 @@ mod test {
 		import.finish().unwrap();
 
 		assert_eq!(
-			catalog.snapshot().mpegts.tracks.len(),
+			catalog.snapshot().ext.mpegts.tracks.len(),
 			1,
 			"expected one scte35 rendition"
 		);
@@ -3033,7 +3037,7 @@ mod test {
 	#[tokio::test(start_paused = true)]
 	async fn base_catalog_routes_cue_pid_to_ignored() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut updates = catalog.consume().unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
@@ -3078,7 +3082,11 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Ext>::default()).unwrap();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
+		)
+		.unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		// First PMT lacks CUEI: the 0x86 PID is ambiguous and routes to Ignored.
@@ -3104,14 +3112,14 @@ mod test {
 			"upgrade drops the stale Ignored route"
 		);
 		assert_eq!(
-			catalog.snapshot().mpegts.tracks.len(),
+			catalog.snapshot().ext.mpegts.tracks.len(),
 			1,
 			"upgrade advertises the cue track"
 		);
 
 		// The importer clears its verbatim entries from the catalog when it drops, so read the
 		// track name while it is still registered.
-		let name = catalog.snapshot().mpegts.tracks.keys().next().unwrap().clone();
+		let name = catalog.snapshot().ext.mpegts.tracks.keys().next().unwrap().clone();
 		import.finish().unwrap();
 		let track = consumer
 			.track(&name)
@@ -3167,7 +3175,7 @@ mod test {
 		const PRIVATE_PID: u16 = 0x0051;
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let mut bytes = bytes::BytesMut::new();
@@ -3239,7 +3247,7 @@ mod test {
 		const VIDEO: u16 = 0x61;
 		const OTHER: u16 = 0x62;
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		import
 			.decode(&synth_pmt(
@@ -3289,7 +3297,7 @@ mod test {
 	fn aac_pes_jitter_survives_bitrate_updates() {
 		const PID: u16 = 0x60;
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		import.decode(&synth_pmt(&[(StreamType::AdtsAac, PID)], false)).unwrap();
 		let mut frame = super::adts::write_header(2, 44_100, 2, 8).unwrap().to_vec();
@@ -3328,7 +3336,7 @@ mod test {
 	fn aac_pes_jitter_counts_completed_split_frames() {
 		const PID: u16 = 0x60;
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		import.decode(&synth_pmt(&[(StreamType::AdtsAac, PID)], false)).unwrap();
 		let mut frame = super::adts::write_header(2, 44_100, 2, 8).unwrap().to_vec();
@@ -3406,7 +3414,7 @@ mod test {
 		const PER_PES: u64 = 7;
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let mut bytes = bytes::BytesMut::new();
@@ -3456,7 +3464,7 @@ mod test {
 		const MP2_PID: u16 = 0x0061;
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let mut bytes = bytes::BytesMut::new();
@@ -3550,7 +3558,7 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		import
 			.decode(&bytes::BytesMut::from(&looped[..]))
@@ -3569,7 +3577,7 @@ mod test {
 		let pristine = {
 			let mut broadcast = moq_net::broadcast::Info::new().produce();
 			let consumer = broadcast.consume();
-			let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+			let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 			let mut import = super::Import::new(broadcast, catalog.reserve());
 			import.decode(&bytes::BytesMut::from(&data[..])).unwrap();
 			import.finish().unwrap();
@@ -3643,7 +3651,7 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::H264, VIDEO_PID)], false);
@@ -3695,7 +3703,7 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false);
@@ -3736,7 +3744,7 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false);
@@ -3769,7 +3777,7 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false);
@@ -3829,7 +3837,7 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false);
@@ -3875,7 +3883,7 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false);
@@ -3924,7 +3932,7 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
@@ -3962,7 +3970,7 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
@@ -4021,7 +4029,7 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
@@ -4076,7 +4084,7 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
@@ -4123,7 +4131,7 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
@@ -4170,7 +4178,7 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
@@ -4223,7 +4231,7 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
@@ -4271,7 +4279,7 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
@@ -4314,7 +4322,7 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
@@ -4362,7 +4370,7 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
@@ -4406,7 +4414,7 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(
@@ -4459,7 +4467,7 @@ mod test {
 		const MP2_PID: u16 = 0x0061;
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
@@ -4495,7 +4503,7 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
@@ -4545,7 +4553,7 @@ mod test {
 		const AAC_PID: u16 = 0x0060;
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false);
@@ -4580,7 +4588,7 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
@@ -4626,7 +4634,7 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
@@ -4674,7 +4682,11 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Ext>::default()).unwrap();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
+		)
+		.unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let mut bytes = bytes::BytesMut::new();
@@ -4691,7 +4703,7 @@ mod test {
 		let clock = import.last_pts.expect("video set the media clock");
 		import.finish().unwrap();
 
-		let name = catalog.snapshot().mpegts.tracks.keys().next().unwrap().clone();
+		let name = catalog.snapshot().ext.mpegts.tracks.keys().next().unwrap().clone();
 		let track = consumer
 			.track(&name)
 			.unwrap()
@@ -4730,7 +4742,11 @@ mod test {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		// catalog::Ext (not the base catalog) makes a wrong ensure_scte() observable: it
 		// would create a rendition, which the base catalog silently drops.
-		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Ext>::default()).unwrap();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
+		)
+		.unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let mut bytes = bytes::BytesMut::new();
@@ -4751,7 +4767,7 @@ mod test {
 			"video kept importing past the dropped section PID"
 		);
 		assert!(
-			catalog.snapshot().mpegts.tracks.is_empty(),
+			catalog.snapshot().ext.mpegts.tracks.is_empty(),
 			"a 0x86 PID without CUEI must not be cataloged"
 		);
 	}
@@ -4839,7 +4855,11 @@ mod test {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Ext>::default()).unwrap();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
+		)
+		.unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 
 		let mut bytes = bytes::BytesMut::new();
@@ -4857,8 +4877,12 @@ mod test {
 		import.finish().unwrap();
 
 		let snap = catalog.snapshot();
-		assert_eq!(snap.mpegts.tracks.len(), 1, "the private PES PID is carried verbatim");
-		let (name, track) = snap.mpegts.tracks.iter().next().unwrap();
+		assert_eq!(
+			snap.ext.mpegts.tracks.len(),
+			1,
+			"the private PES PID is carried verbatim"
+		);
+		let (name, track) = snap.ext.mpegts.tracks.iter().next().unwrap();
 		let verbatim = track.verbatim.as_ref().expect("a verbatim carriage record");
 		assert_eq!(verbatim.stream_type, 0x06, "recorded the PMT stream_type");
 		assert_eq!(verbatim.framing, Framing::Pes, "private PES is PES-framed");
@@ -4955,7 +4979,7 @@ mod test {
 	fn two_stream_import() -> (moq_net::broadcast::Consumer, crate::catalog::Producer, super::Import) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		let pmt = synth_pmt(
 			&[(StreamType::Mpeg1Audio, PCR_PID), (StreamType::Mpeg1Audio, PEER_PID)],
@@ -4993,7 +5017,11 @@ mod test {
 		use crate::container::ts::catalog::Ext;
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::<Ext>::default()).unwrap();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
+		)
+		.unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		import
 			.decode(
@@ -5013,7 +5041,7 @@ mod test {
 		import.decode(clock_break_packet(PCR_PID).as_slice()).unwrap();
 		import.decode(packet(true, 2, 0, &CUE).as_slice()).unwrap();
 		import.finish().unwrap();
-		let name = catalog.snapshot().mpegts.tracks.keys().next().unwrap().clone();
+		let name = catalog.snapshot().ext.mpegts.tracks.keys().next().unwrap().clone();
 		let (frames, breaks) = read_breaks(&consumer, &name).await;
 		assert_eq!(frames.len(), 3);
 		assert_eq!(
@@ -5271,7 +5299,7 @@ mod test {
 	async fn export_discontinuities(data: &[u8]) -> usize {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		import.decode(&bytes::BytesMut::from(data)).unwrap();
 		import.finish().unwrap();

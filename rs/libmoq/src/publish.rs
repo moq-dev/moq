@@ -119,8 +119,9 @@ impl Publish {
 	/// Store an origin-created broadcast producer, attaching the catalog track
 	/// every libmoq broadcast carries.
 	pub fn create(&mut self, mut broadcast: moq_net::broadcast::Producer) -> Result<Id, Error> {
-		let catalog =
-			moq_mux::catalog::Producer::with_catalog(&mut broadcast, moq_mux::catalog::hang::Catalog::default())?;
+		let config = moq_mux::catalog::Config::default()
+			.with_catalog(moq_mux::catalog::hang::Catalog::<moq_mux::catalog::hang::Extra>::default());
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 
 		let id = self.broadcasts.insert(Broadcast {
 			producer: broadcast,
@@ -349,8 +350,10 @@ impl Publish {
 
 	/// Insert or replace a top-level application catalog section by name.
 	///
-	/// `value` is any JSON document. Errors if `name` is reserved (`video`/`audio`).
-	/// The catalog is republished automatically.
+	/// `value` is any JSON document. Errors if `name` is a HANG root (`video`, `audio`, `text`,
+	/// `archive`, `clock`, `json`, `binary`, or retired `timeline`) or an MSF root (`version`,
+	/// `generatedAt`, `isComplete`, `tracks`, or `initDataList`). The catalog is republished
+	/// automatically.
 	pub fn catalog_section_set(&mut self, broadcast: Id, name: &str, value: serde_json::Value) -> Result<(), Error> {
 		let catalog = self.catalog(broadcast)?;
 		let mut guard = catalog.modify()?;

@@ -149,7 +149,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_loc_reservation_reaches_the_wire_and_the_catalog() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let track = broadcast
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();

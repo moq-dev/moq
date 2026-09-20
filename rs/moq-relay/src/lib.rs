@@ -15,6 +15,7 @@ pub mod cache;
 pub mod cluster;
 mod config;
 mod connection;
+mod duration;
 mod http_client;
 pub mod internal;
 mod listener;

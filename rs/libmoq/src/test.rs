@@ -3974,7 +3974,7 @@ fn parsed(config: &moq_client_config) -> crate::client::Config {
 fn a_null_config_dials_with_the_defaults() {
 	let defaults = crate::client::Config::default();
 	let parsed = unsafe { crate::parse_client(None) }.expect("NULL is the defaults");
-	assert_eq!(parsed.connect.backoff.initial(), defaults.connect.backoff.initial());
+	assert_eq!(parsed.connect.backoff.initial, defaults.connect.backoff.initial);
 	assert_eq!(
 		parsed.connect.websocket.resolve().enabled,
 		defaults.connect.websocket.resolve().enabled
@@ -3989,13 +3989,10 @@ fn a_zeroed_config_is_the_defaults() {
 	let defaults = crate::client::Config::default();
 	let parsed = parsed(&client_config());
 
-	assert_eq!(parsed.connect.backoff.initial(), defaults.connect.backoff.initial());
-	assert_eq!(
-		parsed.connect.backoff.multiplier(),
-		defaults.connect.backoff.multiplier()
-	);
-	assert_eq!(parsed.connect.backoff.max(), defaults.connect.backoff.max());
-	assert_eq!(parsed.connect.backoff.timeout(), defaults.connect.backoff.timeout());
+	assert_eq!(parsed.connect.backoff.initial, defaults.connect.backoff.initial);
+	assert_eq!(parsed.connect.backoff.multiplier, defaults.connect.backoff.multiplier);
+	assert_eq!(parsed.connect.backoff.max, defaults.connect.backoff.max);
+	assert_eq!(parsed.connect.backoff.timeout, defaults.connect.backoff.timeout);
 	assert_eq!(
 		parsed.connect.websocket.resolve().enabled,
 		defaults.connect.websocket.resolve().enabled
@@ -4034,16 +4031,16 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	assert!(config.has_backoff_initial);
 	assert_eq!(
 		config.backoff_initial_us,
-		expected.connect.backoff.initial().as_micros() as u64
+		expected.connect.backoff.initial.as_micros() as u64
 	);
 	assert!(config.has_backoff_multiplier);
-	assert_eq!(config.backoff_multiplier, expected.connect.backoff.multiplier());
+	assert_eq!(config.backoff_multiplier, expected.connect.backoff.multiplier);
 	assert!(config.has_backoff_max);
-	assert_eq!(config.backoff_max_us, expected.connect.backoff.max().as_micros() as u64);
+	assert_eq!(config.backoff_max_us, expected.connect.backoff.max.as_micros() as u64);
 	assert!(config.has_backoff_timeout);
 	assert_eq!(
 		config.backoff_timeout_us,
-		expected.connect.backoff.timeout().as_micros() as u64
+		expected.connect.backoff.timeout.as_micros() as u64
 	);
 
 	let websocket = expected.connect.websocket.resolve();
@@ -4071,7 +4068,7 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	// And what it reports must round-trip: dialing with it is dialing with the defaults.
 	let expected = crate::client::Config::default();
 	let reparsed = parsed(&config);
-	assert_eq!(reparsed.connect.backoff.initial(), expected.connect.backoff.initial());
+	assert_eq!(reparsed.connect.backoff.initial, expected.connect.backoff.initial);
 	assert_eq!(
 		reparsed.connect.websocket.resolve().enabled,
 		expected.connect.websocket.resolve().enabled
@@ -4089,12 +4086,12 @@ fn zero_with_a_flag_set_is_a_real_value() {
 	config.has_quic_keep_alive = true;
 
 	let explicit = parsed(&config);
-	assert_eq!(explicit.connect.backoff.timeout(), std::time::Duration::ZERO);
+	assert_eq!(explicit.connect.backoff.timeout, std::time::Duration::ZERO);
 	assert_eq!(explicit.quic.keep_alive, std::time::Duration::ZERO);
 
 	// Without the flags the same zeroes mean nothing at all.
 	let defaults = parsed(&client_config());
-	assert_ne!(defaults.connect.backoff.timeout(), std::time::Duration::ZERO);
+	assert_ne!(defaults.connect.backoff.timeout, std::time::Duration::ZERO);
 	assert_eq!(defaults.quic.keep_alive, std::time::Duration::from_secs(5));
 }
 
@@ -4221,14 +4218,11 @@ fn config_quic_and_backoff_knobs_apply() {
 
 	let parsed = parsed(&config);
 	assert_eq!(
-		parsed.connect.backoff.initial(),
+		parsed.connect.backoff.initial,
 		std::time::Duration::from_micros(500_000)
 	);
-	assert_eq!(parsed.connect.backoff.multiplier(), 3);
-	assert_eq!(
-		parsed.connect.backoff.max(),
-		std::time::Duration::from_micros(10_000_000)
-	);
+	assert_eq!(parsed.connect.backoff.multiplier, 3);
+	assert_eq!(parsed.connect.backoff.max, std::time::Duration::from_micros(10_000_000));
 	assert_eq!(parsed.quic.max_streams, Some(4096));
 	assert_eq!(parsed.quic.idle_timeout, std::time::Duration::from_millis(15_000));
 	assert_eq!(parsed.quic.gso, Some(false));

@@ -25,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
 		.expect("failed to install default crypto provider");
 
 	let mut config = Config::default();
-	config.listen.bind = Some("127.0.0.1:0".into());
+	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.generate = vec!["localhost".into()];
 	config.web.http.listen = Some("127.0.0.1:0".parse()?);
 	config.auth.public = vec![moq_auth::Pattern::all()];

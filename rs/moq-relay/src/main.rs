@@ -6,11 +6,7 @@ static ALLOC: moq_tokio::jemalloc::tikv_jemallocator::Jemalloc = moq_tokio::jema
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-	// TODO: It would be nice to remove this and rely on feature flags only.
-	// However, some dependency is pulling in `ring` and I don't know why, so meh for now.
-	rustls::crypto::aws_lc_rs::default_provider()
-		.install_default()
-		.expect("failed to install default crypto provider");
+	moq_tokio::crypto::install_default().expect("failed to install default crypto provider");
 
 	// The whole startup sequence lives in `Relay::load` rather than here, so an
 	// embedder gets it by calling one function instead of copying this file.

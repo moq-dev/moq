@@ -96,9 +96,9 @@ pub(crate) struct Legacy {
 impl Config {
 	/// The released spellings in use, each paired with what replaced it. Reached
 	/// through [`crate::listen::Config::deprecated`].
-	pub(crate) fn deprecated(&self) -> crate::Deprecated {
+	pub(crate) fn deprecated(&self) -> crate::cli::Deprecated {
 		let legacy = &self.legacy;
-		let mut found = crate::Deprecated::default();
+		let mut found = crate::cli::Deprecated::default();
 
 		for (used, old, env, new) in [
 			(

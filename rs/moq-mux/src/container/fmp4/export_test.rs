@@ -408,7 +408,7 @@ async fn cmaf_source_to_cmaf_export_passthrough() {
 	let mut producer = broadcast.produce();
 	let consumer = producer.consume();
 
-	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 	let mut importer = crate::container::fmp4::Import::new(producer, catalog.reserve());
 	let buf = BytesMut::from(data.as_slice());
 	let _ = importer.decode(&buf);
@@ -466,7 +466,7 @@ async fn single_track_export_init_matches_fragment_track_id() {
 	let mut producer = moq_net::broadcast::Info::new().produce();
 	let consumer = producer.consume();
 
-	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 	let mut importer = crate::container::fmp4::Import::new(producer, catalog.reserve());
 	let buf = BytesMut::from(data.as_slice());
 	let _ = importer.decode(&buf);

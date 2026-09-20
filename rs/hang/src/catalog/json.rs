@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, btree_map};
 
 use serde::{Deserialize, Serialize};
 
-use crate::catalog::{Compression, Mode, Timeline};
+use crate::catalog::{Compression, Mode};
 
 /// The JSON tracks a broadcast publishes, keyed by track name.
 ///
@@ -84,10 +84,6 @@ pub struct JsonConfig {
 	#[serde(default)]
 	pub schema: Option<String>,
 
-	/// The companion timeline track indexing this track's groups, if the publisher offers one.
-	#[serde(default)]
-	pub timeline: Option<Timeline>,
-
 	/// Fields this build doesn't recognize, kept so the entry round-trips.
 	///
 	/// A future [`Mode`] or [`Compression`] almost certainly comes with fields describing it, and
@@ -106,7 +102,6 @@ impl JsonConfig {
 			mode,
 			compression: None,
 			schema: None,
-			timeline: None,
 			extra: Default::default(),
 		}
 	}

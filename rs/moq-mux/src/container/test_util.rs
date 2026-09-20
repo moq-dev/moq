@@ -18,7 +18,7 @@ impl Live {
 	pub(crate) fn new(name: &str, insert: impl FnOnce(&mut crate::catalog::Producer, String)) -> Self {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let track = broadcast
 			.create_track(
 				broadcast.unique_name(name),

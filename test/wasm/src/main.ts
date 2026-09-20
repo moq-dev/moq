@@ -133,57 +133,53 @@ async function connect(wasm: Wasm, relay: RelayFixture): Promise<Session> {
  * It keeps publishing rather than writing a fixed number of groups and closing:
  * a track that ends before the subscriber's stream is wired up is only reachable
  * through the relay's cache, so the test would be measuring retention, and would
- * race. A live edge that keeps moving has neither problem. Every track name
- * other than {@link TRACK} is rejected, which is what the refusal case reads.
+ * race. A live edge that keeps moving has neither problem. The `missing` track
+ * is rejected when subscribed, which is what the refusal case reads.
  */
 async function withPublisher<T>(relay: RelayFixture, path: string, run: () => Promise<T>): Promise<T> {
 	// The session serves an origin rather than individual broadcasts, so the path is
 	// published into the origin and the session announces the table.
 	const origin = new Moq.Origin.Producer();
 	const broadcast = origin.createBroadcast(Moq.Path.from(path));
+	const track = broadcast.createTrack(TRACK);
+	const missing = broadcast.createTrack("missing");
 	broadcast.announce();
-	const connection = await Moq.Connection.connect(new URL(relay.url), { publish: origin.consume() });
+	const connection = await Moq.Connection.connect({ url: new URL(relay.url), publish: origin.consume() });
 
 	let stopped = false;
-	const writers: Promise<void>[] = [];
-
-	// lite-05 looks a track's info up before subscribing, so the same name can be
-	// requested more than once. Each request gets its own producer writing the same
-	// groups; the subscriber only ever reads the one it asked for.
-	const serving = (async () => {
-		for (;;) {
-			const request = await broadcast.requested();
-			if (!request) break;
-			if (request.name !== TRACK) {
-				request.reject(new Error(`no such track: ${request.name}`));
+	const writer = (async () => {
+		while (!stopped && track.closed.peek() === undefined) {
+			if (!track.used.peek()) {
+				await Promise.race([track.used.changed(), track.closed]);
 				continue;
 			}
-			const track = request.accept();
-			writers.push(
-				(async () => {
-					while (!stopped && track.closed.peek() === undefined) {
-						const group = track.appendGroup();
-						for (const frame of FIXTURE) {
-							group.writeFrame({ payload: frame, timestamp: Moq.Time.Timestamp.now() });
-						}
-						group.close();
-						await sleep(GROUP_INTERVAL_MS);
-					}
-					track.close();
-				})(),
-			);
+			const group = track.appendGroup();
+			for (const frame of FIXTURE) {
+				group.writeFrame({ payload: frame, timestamp: Moq.Time.Timestamp.now() });
+			}
+			group.close();
+			await Promise.race([sleep(GROUP_INTERVAL_MS), track.used.changed(), track.closed]);
 		}
+		track.close();
+	})();
+	const rejecting = (async () => {
+		while (!missing.used.peek() && missing.closed.peek() === undefined) {
+			await Promise.race([missing.used.changed(), missing.closed]);
+		}
+		if (missing.used.peek()) missing.close(new Error("no such track: missing"));
 	})();
 
 	try {
 		return await run();
 	} finally {
 		stopped = true;
+		track.close();
+		missing.close();
 		broadcast.close();
 		connection.close();
 		origin.close();
-		await serving;
-		await Promise.all(writers);
+		await writer;
+		await rejecting;
 	}
 }
 

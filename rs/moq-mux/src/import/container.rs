@@ -216,7 +216,7 @@ mod tests {
 		let (head, tail) = data.split_at(100);
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
 		let mut stream: ContainerStream =
 			ContainerStream::new(broadcast, catalog.reserve(), ContainerFormat::Fmp4).unwrap();

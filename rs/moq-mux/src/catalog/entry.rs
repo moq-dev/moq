@@ -9,8 +9,8 @@ use std::ops::Deref;
 /// a caller can't accidentally subscribe to one track with another's config, and it only has to
 /// name the track once.
 ///
-/// Get one from [`Catalog`](super::hang::Catalog), by name or by iterating a section. It derefs to
-/// the config, so the config's fields are reachable directly (`entry.mode`, `entry.compression`).
+/// Create one from a catalog section's map entry with [`Entry::new`]. It derefs to the config, so
+/// the config's fields are reachable directly (`entry.mode`, `entry.compression`).
 ///
 /// The entry is what a consumer is built from: see
 /// [`json::Consumer`](crate::json::Consumer) and [`binary::Consumer`](crate::binary::Consumer),
@@ -22,7 +22,8 @@ pub struct Entry<'a, C> {
 }
 
 impl<'a, C> Entry<'a, C> {
-	pub(crate) fn new(name: &'a str, config: &'a C) -> Self {
+	/// Pair a catalog map key with the config stored under it.
+	pub fn new(name: &'a str, config: &'a C) -> Self {
 		Self { name, config }
 	}
 

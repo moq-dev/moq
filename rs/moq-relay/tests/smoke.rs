@@ -55,7 +55,7 @@ async fn build_web_with(web_config: web::Config) -> web::Web {
 	// expose HTTPS or QUIC in this test. Binding QUIC to `[::]:0` picks an
 	// unused UDP port that we ignore.
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".to_string());
+	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 	let server = server_config.init(Default::default()).expect("server init");
 
@@ -118,7 +118,7 @@ async fn spawn_relay() -> (u16, tokio::task::JoinHandle<()>) {
 async fn spawn_versioned_relay(versions: Vec<moq_net::Version>) -> (u16, tokio::task::JoinHandle<()>) {
 	let port = free_tcp_port();
 	let mut config = Config::default();
-	config.listen.bind = Some("127.0.0.1:0".to_string());
+	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.generate = vec!["localhost".into()];
 	config.listen.version = versions;
 	config.web.ws = true;
@@ -148,7 +148,7 @@ fn client_version(version: Option<moq_net::Version>) -> moq_tokio::Client {
 	// redial would re-register with the relay behind the assertions' back.
 	config.once = Some(true);
 	// Zero head start so the WebSocket path runs immediately.
-	config.websocket.delay = std::time::Duration::ZERO.into();
+	config.websocket.delay = std::time::Duration::ZERO;
 	// Every relay in this file listens on IPv4 loopback, so bind the same family
 	// rather than egressing a QUIC dial from a dual-stack IPv6 socket.
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
@@ -890,7 +890,7 @@ async fn internal_unix_path_reaches_server() {
 /// address and an abort handle.
 async fn spawn_quic_relay() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
 	let mut config = moq_tokio::listen::Config::default();
-	config.bind = Some("127.0.0.1:0".to_string());
+	config.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.tls.generate = vec!["localhost".into()];
 
 	let mut auth_config = auth::Config::default();

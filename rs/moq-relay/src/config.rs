@@ -94,14 +94,18 @@ pub struct Config {
 	/// this long for clients to reconnect elsewhere before force-closing them; a
 	/// second signal exits immediately. Zero closes them at once, with no GOAWAY
 	/// they would have no time to act on. Defaults to 10 seconds.
+	#[usage(skip)]
+	#[serde(with = "crate::duration::serde_duration")]
+	pub drain_timeout: std::time::Duration,
+
 	#[usage(
 		name = "drain-timeout",
 		long = "drain-timeout",
 		env = "MOQ_DRAIN_TIMEOUT",
-		default = "10s",
 		setting = "drain_timeout"
 	)]
-	pub drain_timeout: moq_tokio::cli::Duration,
+	#[serde(default, rename = "__cli_drain_timeout", skip_serializing_if = "Option::is_none")]
+	drain_timeout_arg: Option<crate::duration::Duration>,
 
 	/// If provided, load the configuration from this file.
 	#[serde(default)]
@@ -136,7 +140,8 @@ impl Default for Config {
 			stats: Default::default(),
 			cache: Default::default(),
 			internal: Default::default(),
-			drain_timeout: crate::DEFAULT_DRAIN_TIMEOUT.into(),
+			drain_timeout: crate::DEFAULT_DRAIN_TIMEOUT,
+			drain_timeout_arg: None,
 			file: None,
 			origins: None,
 			#[cfg(feature = "iroh")]
@@ -179,6 +184,13 @@ pub fn spec() -> &'static usage::spec::Spec<'static> {
 }
 
 impl Config {
+	/// Resolve the shutdown grace period after command-line overrides.
+	pub(crate) fn drain_timeout(&self) -> std::time::Duration {
+		self.drain_timeout_arg
+			.map(crate::duration::Duration::into_std)
+			.unwrap_or(self.drain_timeout)
+	}
+
 	/// Parses configuration from CLI arguments, optionally merging with a
 	/// TOML file specified via the positional `file` argument. Also initializes
 	/// the logger.
@@ -204,7 +216,7 @@ impl Config {
 	/// Merge CLI, environment, then TOML, then declared defaults.
 	///
 	/// Precedence is CLI > env > file > defaults, declared in
-	/// [`moq_tokio::cli::merge`]. Presence comes from what the parser and the
+	/// [`moq_tokio::cli::Merge`]. Presence comes from what the parser and the
 	/// environment actually supplied, so a file that sets a list to empty or a
 	/// bool to false survives.
 	pub(crate) fn parse_and_merge<I, T>(args: I) -> anyhow::Result<Self>
@@ -253,13 +265,13 @@ impl Config {
 		// drops, so they are collected from the parse and reported with the file's
 		// own released keys in one message.
 		let mut deprecated = cli.config.deprecated();
-		let (mut config, resolved) = moq_tokio::cli::merge(
-			crate::settings::Settings::SETTINGS_REGISTRY,
-			cli.config,
-			&cli_layer,
-			&env,
+		let (mut config, resolved) = moq_tokio::cli::Merge {
+			registry: crate::settings::Settings::SETTINGS_REGISTRY,
+			cli: &cli_layer,
+			env: &env,
 			file,
-		)
+		}
+		.apply(cli.config)
 		.map_err(|err| anyhow::anyhow!("{err}"))?;
 		deprecated.extend(config.deprecated());
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
@@ -280,7 +292,7 @@ impl Config {
 impl Config {
 	/// The released spellings in use across every section, each paired with what
 	/// replaced it.
-	fn deprecated(&self) -> moq_tokio::Deprecated {
+	fn deprecated(&self) -> moq_tokio::cli::Deprecated {
 		let mut deprecated = self.quic.deprecated();
 		deprecated.extend(self.listen.deprecated());
 		deprecated.extend(self.connect.deprecated());
@@ -569,7 +581,7 @@ duration = "30s"
 		assert_eq!(config.cache.headroom.as_deref(), Some("10%"));
 		assert_eq!(
 			config.cache.duration,
-			Some(std::time::Duration::from_secs(30).into()),
+			Some(std::time::Duration::from_secs(30)),
 			"TOML's cache.duration must not be clobbered by the CLI re-parse"
 		);
 	}
@@ -580,7 +592,7 @@ duration = "30s"
 	#[test]
 	fn cache_duration_serde_round_trip() {
 		let set: cache::Config = toml::from_str(r#"duration = "30s""#).expect("deserialize Some");
-		assert_eq!(set.duration, Some(std::time::Duration::from_secs(30).into()));
+		assert_eq!(set.duration, Some(std::time::Duration::from_secs(30)));
 
 		let unset: cache::Config = toml::from_str("").expect("deserialize absent");
 		assert_eq!(unset.duration, None);
@@ -924,7 +936,10 @@ uid = [1001]
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = Config::parse_and_merge(args).expect("config load");
 
-		assert_eq!(config.listen.bind.as_deref(), Some("[::]:443"));
+		assert_eq!(
+			config.listen.bind.as_ref().map(ToString::to_string).as_deref(),
+			Some("[::]:443")
+		);
 		assert_eq!(
 			config.listen.unix.bind.as_deref(),
 			Some(std::path::Path::new("/run/moq/internal.sock")),

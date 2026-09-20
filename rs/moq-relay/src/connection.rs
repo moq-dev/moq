@@ -1,7 +1,7 @@
 use crate::{auth, cluster};
 
 use axum::http;
-use moq_tokio::Request;
+use moq_tokio::server::Request;
 
 /// An error carrying the HTTP status to send when closing the request.
 ///
@@ -83,7 +83,12 @@ impl Connection {
 		let (lease, registration) = match self.admit().await {
 			Ok(admitted) => admitted,
 			Err(err) => {
-				let _ = self.request.close(err.status.as_u16()).await;
+				let reject = match err.status {
+					http::StatusCode::UNAUTHORIZED => moq_tokio::server::Reject::Unauthorized,
+					http::StatusCode::FORBIDDEN => moq_tokio::server::Reject::Forbidden,
+					status => moq_tokio::server::Reject::App(status.as_u16()),
+				};
+				let _ = self.request.reject(reject).await;
 				return Err(err.source);
 			}
 		};
@@ -93,7 +98,7 @@ impl Connection {
 		let grants = match authorize(&self.cluster, lease.token(), role, &transport) {
 			Ok(grants) => grants,
 			Err(err) => {
-				let _ = self.request.close(http::StatusCode::FORBIDDEN.as_u16()).await;
+				let _ = self.request.reject(moq_tokio::server::Reject::Forbidden).await;
 				return Err(err);
 			}
 		};

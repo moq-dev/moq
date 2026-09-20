@@ -135,7 +135,7 @@ async fn drain_export(mut exporter: Export, mut importer: Import) -> Vec<u8> {
 async fn export_roundtrips_through_import() {
 	let mut producer = moq_net::broadcast::Info::new().produce();
 	let consumer = producer.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(synth_flv().as_slice())).unwrap();
@@ -149,7 +149,7 @@ async fn export_roundtrips_through_import() {
 
 	// Re-import the exported bytes and confirm the catalog rebuilds identically.
 	let mut bcast2 = moq_net::broadcast::Info::new().produce();
-	let cat2 = crate::catalog::Producer::new(&mut bcast2).unwrap();
+	let cat2 = crate::catalog::Producer::new(&mut bcast2, crate::catalog::Config::default()).unwrap();
 	let mut imp2 = Import::new(bcast2, cat2.reserve());
 	imp2.decode(&bytes::BytesMut::from(exported.as_slice())).unwrap();
 	imp2.finish().unwrap();
@@ -172,7 +172,7 @@ async fn export_roundtrips_through_import() {
 async fn export_emits_sequence_headers_and_frames() {
 	let mut producer = moq_net::broadcast::Info::new().produce();
 	let consumer = producer.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(synth_flv().as_slice())).unwrap();
@@ -252,7 +252,7 @@ fn synth_enhanced_flv() -> Vec<u8> {
 async fn export_roundtrips_enhanced() {
 	let mut producer = moq_net::broadcast::Info::new().produce();
 	let consumer = producer.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer
@@ -281,7 +281,7 @@ async fn export_roundtrips_enhanced() {
 
 	// Re-import the exported bytes and confirm the codecs rebuild.
 	let mut bcast2 = moq_net::broadcast::Info::new().produce();
-	let cat2 = crate::catalog::Producer::new(&mut bcast2).unwrap();
+	let cat2 = crate::catalog::Producer::new(&mut bcast2, crate::catalog::Config::default()).unwrap();
 	let mut imp2 = Import::new(bcast2, cat2.reserve());
 	imp2.decode(&bytes::BytesMut::from(exported.as_slice())).unwrap();
 	imp2.finish().unwrap();
@@ -317,7 +317,7 @@ async fn export_roundtrips_mp3() {
 
 	let mut producer = moq_net::broadcast::Info::new().produce();
 	let consumer = producer.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(flv.as_slice())).unwrap();
@@ -336,7 +336,7 @@ async fn export_roundtrips_mp3() {
 
 	// Re-import and confirm the codec rebuilds.
 	let mut bcast2 = moq_net::broadcast::Info::new().produce();
-	let cat2 = crate::catalog::Producer::new(&mut bcast2).unwrap();
+	let cat2 = crate::catalog::Producer::new(&mut bcast2, crate::catalog::Config::default()).unwrap();
 	let mut imp2 = Import::new(bcast2, cat2.reserve());
 	imp2.decode(&bytes::BytesMut::from(exported.as_slice())).unwrap();
 	imp2.finish().unwrap();
@@ -368,7 +368,7 @@ fn synth_av1_flv() -> Vec<u8> {
 async fn export_roundtrips_av1() {
 	let mut producer = moq_net::broadcast::Info::new().produce();
 	let consumer = producer.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer
@@ -396,7 +396,7 @@ async fn export_roundtrips_av1() {
 	);
 
 	let mut bcast2 = moq_net::broadcast::Info::new().produce();
-	let cat2 = crate::catalog::Producer::new(&mut bcast2).unwrap();
+	let cat2 = crate::catalog::Producer::new(&mut bcast2, crate::catalog::Config::default()).unwrap();
 	let mut imp2 = Import::new(bcast2, cat2.reserve());
 	imp2.decode(&bytes::BytesMut::from(exported.as_slice())).unwrap();
 	imp2.finish().unwrap();
@@ -421,7 +421,7 @@ fn synth_enhanced_audio_flv(fourcc: &[u8; 4], frame: &[u8]) -> Vec<u8> {
 async fn export_roundtrips_ac3() {
 	let mut producer = moq_net::broadcast::Info::new().produce();
 	let consumer = producer.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer
@@ -441,7 +441,7 @@ async fn export_roundtrips_ac3() {
 	);
 
 	let mut bcast2 = moq_net::broadcast::Info::new().produce();
-	let cat2 = crate::catalog::Producer::new(&mut bcast2).unwrap();
+	let cat2 = crate::catalog::Producer::new(&mut bcast2, crate::catalog::Config::default()).unwrap();
 	let mut imp2 = Import::new(bcast2, cat2.reserve());
 	imp2.decode(&bytes::BytesMut::from(exported.as_slice())).unwrap();
 	imp2.finish().unwrap();
@@ -455,7 +455,7 @@ async fn export_roundtrips_ac3() {
 async fn export_roundtrips_eac3() {
 	let mut producer = moq_net::broadcast::Info::new().produce();
 	let consumer = producer.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer
@@ -475,7 +475,7 @@ async fn export_roundtrips_eac3() {
 	);
 
 	let mut bcast2 = moq_net::broadcast::Info::new().produce();
-	let cat2 = crate::catalog::Producer::new(&mut bcast2).unwrap();
+	let cat2 = crate::catalog::Producer::new(&mut bcast2, crate::catalog::Config::default()).unwrap();
 	let mut imp2 = Import::new(bcast2, cat2.reserve());
 	imp2.decode(&bytes::BytesMut::from(exported.as_slice())).unwrap();
 	imp2.finish().unwrap();
@@ -513,7 +513,7 @@ fn build_multitrack_broadcast() -> (moq_net::broadcast::Consumer, Vec<Vec<u8>>, 
 
 	let mut producer = moq_net::broadcast::Info::new().produce();
 	let consumer = producer.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 	// A finished track stays subscribable only while its producer is alive, so keep
 	// each one until the exporter has drained.
 	let mut tracks = Vec::new();
@@ -635,7 +635,7 @@ async fn export_multitrack_roundtrips_all_renditions() {
 
 	// Re-import and confirm both video renditions plus the audio rebuild.
 	let mut bcast2 = moq_net::broadcast::Info::new().produce();
-	let cat2 = crate::catalog::Producer::new(&mut bcast2).unwrap();
+	let cat2 = crate::catalog::Producer::new(&mut bcast2, crate::catalog::Config::default()).unwrap();
 	let mut imp2 = Import::new(bcast2, cat2.reserve());
 	imp2.decode(&bytes::BytesMut::from(exported.as_slice())).unwrap();
 	imp2.finish().unwrap();
@@ -679,7 +679,7 @@ async fn export_without_multitrack_keeps_first_rendition() {
 	);
 
 	let mut bcast2 = moq_net::broadcast::Info::new().produce();
-	let cat2 = crate::catalog::Producer::new(&mut bcast2).unwrap();
+	let cat2 = crate::catalog::Producer::new(&mut bcast2, crate::catalog::Config::default()).unwrap();
 	let mut imp2 = Import::new(bcast2, cat2.reserve());
 	imp2.decode(&bytes::BytesMut::from(exported.as_slice())).unwrap();
 	imp2.finish().unwrap();
@@ -725,7 +725,7 @@ fn parse_tags(flv: &[u8]) -> Vec<ParsedTag> {
 async fn export_preserves_timestamps() {
 	let mut producer = moq_net::broadcast::Info::new().produce();
 	let consumer = producer.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(synth_flv().as_slice())).unwrap();
@@ -751,7 +751,7 @@ async fn export_authors_dts_and_composition_time_for_reordered_avc() {
 	let mut producer = moq_net::broadcast::Info::new().produce();
 	let consumer = producer.consume();
 
-	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 	let video_track = producer.create_track(producer.unique_name(".avc1"), None).unwrap();
 	let audio_track = producer.create_track(producer.unique_name(".aac"), None).unwrap();
 

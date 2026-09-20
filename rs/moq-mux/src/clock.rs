@@ -20,8 +20,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use hang::catalog::{MAX_SAFE_INTEGER, MOQ_EPOCH_UNIX_MILLIS};
 
-/// The wall-clock time of PTS zero, in [`Clock::TIMESCALE`] units since the moq epoch.
-fn wall_units(wall: SystemTime) -> crate::Result<u64> {
+/// The catalog clock for PTS zero at `wall`.
+fn wall_clock(wall: SystemTime) -> crate::Result<hang::catalog::Clock> {
 	let unix_micros = wall
 		.duration_since(SystemTime::UNIX_EPOCH)
 		.map(|d| d.as_micros())
@@ -35,7 +35,7 @@ fn wall_units(wall: SystemTime) -> crate::Result<u64> {
 	if wall > MAX_SAFE_INTEGER {
 		return Err(hang::Error::InvalidWall(wall).into());
 	}
-	Ok(wall)
+	Ok(hang::catalog::Clock::new(moq_net::Timestamp::from_micros(wall)?)?)
 }
 
 /// A monotonic clock for stamping media frames so that tracks produced
@@ -49,7 +49,7 @@ fn wall_units(wall: SystemTime) -> crate::Result<u64> {
 #[derive(Clone, Copy, Debug)]
 pub struct Clock {
 	epoch: Instant,
-	wall: u64,
+	wall: hang::catalog::Clock,
 }
 
 impl Clock {
@@ -61,37 +61,26 @@ impl Clock {
 
 	/// Start a clock anchored at the current instant, with PTS zero at the current wall time.
 	pub fn new() -> Self {
-		Self::new_at(Instant::now(), SystemTime::now())
+		Self::at(Instant::now(), SystemTime::now())
 			.expect("the current wall time is representable as a broadcast clock")
-	}
-
-	/// Start a clock anchored at the current instant, with PTS zero at `wall`.
-	///
-	/// For an import whose content carries its own start (a recording): the media keeps its
-	/// relative spacing and that start names the wall epoch. Refuses a wall before the moq
-	/// epoch or outside the JSON-safe integer range rather than publishing a fabricated mapping.
-	pub fn with_wall(wall: SystemTime) -> crate::Result<Self> {
-		Ok(Self {
-			epoch: Instant::now(),
-			wall: wall_units(wall)?,
-		})
 	}
 
 	/// Start a clock at an explicit monotonic epoch and wall time.
 	///
 	/// The deterministic constructor: synthetic sources and fixtures pin both ends instead of
-	/// sampling. Refuses an unrepresentable wall like [`with_wall`](Self::with_wall).
-	pub fn new_at(epoch: Instant, wall: SystemTime) -> crate::Result<Self> {
+	/// sampling. Refuses an unrepresentable wall.
+	pub fn at(epoch: Instant, wall: SystemTime) -> crate::Result<Self> {
 		Ok(Self {
 			epoch,
-			wall: wall_units(wall)?,
+			wall: wall_clock(wall)?,
 		})
 	}
 
-	/// Microseconds elapsed since the clock's epoch.
-	pub fn micros(&self) -> u64 {
+	/// The current timestamp since the clock's epoch.
+	pub fn now(&self) -> moq_net::Timestamp {
 		// u128 -> u64 truncation is unreachable: u64 microseconds is ~584,000 years.
-		self.epoch.elapsed().as_micros() as u64
+		moq_net::Timestamp::from_micros(self.epoch.elapsed().as_micros() as u64)
+			.expect("an instant elapsed duration fits in a timestamp")
 	}
 
 	/// Units per second for [`wall`](Self::wall): [`TIMESCALE`](Self::TIMESCALE).
@@ -99,15 +88,9 @@ impl Clock {
 		Self::TIMESCALE
 	}
 
-	/// The wall-clock time of PTS zero, in [`TIMESCALE`](Self::TIMESCALE) units since the moq epoch.
-	pub fn wall(&self) -> u64 {
+	/// The catalog root section advertising this clock.
+	pub fn wall(&self) -> hang::catalog::Clock {
 		self.wall
-	}
-
-	/// The catalog root section advertising this clock: `clock: { wall, timescale }`.
-	pub fn section(&self) -> hang::catalog::Clock {
-		hang::catalog::Clock::with_timescale(self.wall, Self::TIMESCALE.as_u64() as u32)
-			.expect("a constructed clock is always representable")
 	}
 
 	/// The wall-clock time of `pts` under this broadcast's fixed mapping.
@@ -115,11 +98,7 @@ impl Clock {
 	/// Pure in the stored epoch: a system-clock adjustment after construction changes nothing.
 	/// Refuses an unrepresentable result rather than truncating it.
 	pub fn wall_clock(&self, pts: moq_net::Timestamp) -> crate::Result<SystemTime> {
-		let scale = u32::try_from(pts.scale().as_u64())
-			.map_err(|_| crate::Error::UnmappableTimestamp(format!("timescale {} exceeds u32", pts.scale())))?;
-		self.section()
-			.wall_clock(pts.value(), scale)
-			.map_err(crate::Error::from)
+		self.wall.wall_clock(pts).map_err(crate::Error::from)
 	}
 
 	/// Translate a source with its own zero onto this broadcast's mapping.
@@ -157,7 +136,7 @@ pub struct SourceMap {
 	offset: Option<i128>,
 	last_source: Option<u128>,
 	last_broadcast: Option<u64>,
-	/// `clock.micros()` when the last frame was translated: the idle gap's start.
+	/// `clock.now()` when the last frame was translated: the idle gap's start.
 	last_arrival: Option<u64>,
 }
 
@@ -188,7 +167,7 @@ impl SourceMap {
 
 	/// Translate `pts` onto the broadcast clock, sampling the arrival time.
 	pub fn translate(&mut self, pts: moq_net::Timestamp) -> crate::Result<moq_net::Timestamp> {
-		self.translate_at(pts, self.clock.micros())
+		self.translate_at(pts, self.clock.now().value())
 	}
 
 	/// Translate `pts` onto the broadcast clock, arriving at monotonic `now` micros.
@@ -239,7 +218,7 @@ impl SourceMap {
 	/// the next frame continues after everything published so far plus the downtime since the
 	/// previous frame, instead of rewinding the broadcast.
 	pub fn reset(&mut self, pts: moq_net::Timestamp) -> crate::Result<moq_net::Timestamp> {
-		self.reset_at(pts, self.clock.micros())
+		self.reset_at(pts, self.clock.now().value())
 	}
 
 	/// [`reset`](Self::reset) with an explicit arrival instant, for synthetic sources.
@@ -287,9 +266,9 @@ mod tests {
 
 	#[test]
 	fn copies_share_one_epoch() {
-		let clock = Clock::new_at(epoch(), moq_epoch() + Duration::from_secs(1)).unwrap();
+		let clock = Clock::at(epoch(), moq_epoch() + Duration::from_secs(1)).unwrap();
 		let shared = clock;
-		// Compare the anchors, not live readings: two `micros()` calls race the clock.
+		// Compare the anchors, not live readings: two `now()` calls race the clock.
 		assert_eq!(clock.epoch, shared.epoch);
 		assert_eq!(clock.wall(), shared.wall());
 	}
@@ -297,14 +276,13 @@ mod tests {
 	#[test]
 	fn section_advertises_wall_in_clock_timescale() {
 		// PTS zero at exactly the moq epoch advertises 0.
-		let clock = Clock::new_at(epoch(), moq_epoch()).unwrap();
-		assert_eq!(clock.section().wall, 0);
-		assert_eq!(clock.wall(), 0);
-		assert_eq!(clock.section().timescale, Clock::TIMESCALE.as_u64() as u32);
+		let clock = Clock::at(epoch(), moq_epoch()).unwrap();
+		assert_eq!(clock.wall().wall.value(), 0);
+		assert_eq!(clock.wall().wall.scale(), Clock::TIMESCALE);
 
 		// A second later is a second's worth of clock units.
-		let clock = Clock::new_at(epoch(), moq_epoch() + Duration::from_secs(1)).unwrap();
-		assert_eq!(clock.wall(), 1_000_000);
+		let clock = Clock::at(epoch(), moq_epoch() + Duration::from_secs(1)).unwrap();
+		assert_eq!(clock.wall().wall.value(), 1_000_000);
 	}
 
 	#[test]
@@ -312,19 +290,17 @@ mod tests {
 		// One micro past the JSON-safe integer range: browsers would read a different number.
 		let past_safe = MOQ_EPOCH_UNIX_MILLIS * 1000 + MAX_SAFE_INTEGER + 1;
 		let far = SystemTime::UNIX_EPOCH + Duration::from_micros(past_safe);
-		assert!(Clock::with_wall(far).is_err());
-		assert!(Clock::new_at(epoch(), far).is_err());
+		assert!(Clock::at(epoch(), far).is_err());
 
 		// Before 2020 cannot be named on the wire; saturating to the epoch would lie.
-		assert!(Clock::with_wall(SystemTime::UNIX_EPOCH).is_err());
-		assert!(Clock::new_at(epoch(), SystemTime::UNIX_EPOCH).is_err());
-		assert!(Clock::with_wall(moq_epoch() - Duration::from_micros(1)).is_err());
-		assert_eq!(Clock::new_at(epoch(), moq_epoch()).unwrap().wall(), 0);
+		assert!(Clock::at(epoch(), SystemTime::UNIX_EPOCH).is_err());
+		assert!(Clock::at(epoch(), moq_epoch() - Duration::from_micros(1)).is_err());
+		assert_eq!(Clock::at(epoch(), moq_epoch()).unwrap().wall().wall.value(), 0);
 	}
 
 	#[test]
 	fn delayed_first_frame_anchors_live() {
-		let clock = Clock::new_at(epoch(), moq_epoch()).unwrap();
+		let clock = Clock::at(epoch(), moq_epoch()).unwrap();
 		let mut source = clock.source();
 
 		// The source's first frame already carries 5s of PTS; it is live now, not now + 5s.
@@ -344,7 +320,7 @@ mod tests {
 
 	#[test]
 	fn multiple_timescales_share_one_mapping() {
-		let clock = Clock::new_at(epoch(), moq_epoch()).unwrap();
+		let clock = Clock::at(epoch(), moq_epoch()).unwrap();
 
 		// Two sources, 90kHz video and 48kHz audio, anchored at the same arrival instant.
 		let mut video = clock.source();
@@ -386,7 +362,7 @@ mod tests {
 
 	#[test]
 	fn reset_translation_preserves_the_idle_gap() {
-		let clock = Clock::new_at(epoch(), moq_epoch()).unwrap();
+		let clock = Clock::at(epoch(), moq_epoch()).unwrap();
 		let mut source = clock.source();
 
 		assert_eq!(source.translate_at(us(0), 1_000_000).unwrap().as_micros(), 1_000_000);
@@ -409,7 +385,7 @@ mod tests {
 
 	#[test]
 	fn explicit_reset_marks_a_detected_restart() {
-		let clock = Clock::new_at(epoch(), moq_epoch()).unwrap();
+		let clock = Clock::at(epoch(), moq_epoch()).unwrap();
 		let mut source = clock.source();
 
 		assert_eq!(source.translate_at(us(0), 1_000_000).unwrap().as_micros(), 1_000_000);
@@ -421,7 +397,7 @@ mod tests {
 
 	#[test]
 	fn bframe_reordering_within_a_group_survives() {
-		let clock = Clock::new_at(epoch(), moq_epoch()).unwrap();
+		let clock = Clock::at(epoch(), moq_epoch()).unwrap();
 		let mut source = clock.source();
 
 		assert_eq!(source.translate_at(us(0), 1_000_000).unwrap().as_micros(), 1_000_000);
@@ -439,7 +415,7 @@ mod tests {
 
 	#[test]
 	fn mapping_past_u64_micros_is_refused() {
-		let clock = Clock::new_at(epoch(), moq_epoch()).unwrap();
+		let clock = Clock::at(epoch(), moq_epoch()).unwrap();
 		let mut source = clock.source();
 
 		assert_eq!(source.translate_at(us(0), 0).unwrap().as_micros(), 0);
@@ -453,7 +429,7 @@ mod tests {
 
 	#[test]
 	fn mapping_before_the_broadcast_began_is_refused() {
-		let clock = Clock::new_at(epoch(), moq_epoch()).unwrap();
+		let clock = Clock::at(epoch(), moq_epoch()).unwrap();
 		let mut source = clock.source();
 
 		// The first frame carries 100ms of PTS but arrives 50ms in: the offset is negative.
@@ -467,7 +443,7 @@ mod tests {
 
 	#[test]
 	fn wall_mapping_survives_a_system_clock_adjustment() {
-		let clock = Clock::new_at(epoch(), moq_epoch()).unwrap();
+		let clock = Clock::at(epoch(), moq_epoch()).unwrap();
 		let before = clock.wall_clock(us(2_000_000)).unwrap();
 
 		// The mapping is a stored epoch, not a sampled clock: reading it again (after whatever
@@ -482,7 +458,7 @@ mod tests {
 
 	#[test]
 	fn wall_clock_validates_bounds() {
-		let clock = Clock::new_at(epoch(), moq_epoch()).unwrap();
+		let clock = Clock::at(epoch(), moq_epoch()).unwrap();
 		// The largest representable broadcast timestamp still maps.
 		let max = moq_net::Timestamp::from_micros((1u64 << 62) - 1).unwrap();
 		assert!(clock.wall_clock(max).is_err(), "past the JSON-safe range is refused");

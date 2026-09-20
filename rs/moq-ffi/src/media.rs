@@ -406,7 +406,8 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 	});
 
 	let sections = catalog
-		.sections()
+		.ext
+		.iter()
 		.map(|(name, value)| (name.clone(), value.to_string()))
 		.collect();
 

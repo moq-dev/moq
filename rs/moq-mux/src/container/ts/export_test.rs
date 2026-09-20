@@ -106,7 +106,7 @@ fn assert_packet_aligned(ts: &[u8]) {
 async fn export_aac_roundtrip() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
 	let track = broadcast
 		.create_track(
@@ -221,7 +221,7 @@ fn collect_pes_pts(ts: &[u8]) -> (Vec<u64>, Vec<u64>) {
 async fn export_lead_audio() -> BytesMut {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
 	// In-band avc3 video (SPS/PPS inline on keyframes; no out-of-band description).
 	let vtrack = broadcast
@@ -372,7 +372,7 @@ fn reassemble_video(ts: &[u8], expected_stream_type: StreamType) -> Vec<u8> {
 async fn export_avc3_in_band_reassembles() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
 	let track = broadcast
 		.create_track(
@@ -423,7 +423,7 @@ async fn export_avc3_in_band_reassembles() {
 async fn export_avc3_preserves_multiple_pps() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
 	let track = broadcast
 		.create_track(
@@ -474,7 +474,7 @@ async fn export_avc3_preserves_multiple_pps() {
 async fn export_avc1_out_of_band_reassembles() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
 	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
 
@@ -549,7 +549,7 @@ async fn export_import_h265_keeps_suffix_sei_on_its_picture() {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
 	let track = broadcast
 		.create_track(
@@ -591,7 +591,7 @@ async fn export_import_h265_keeps_suffix_sei_on_its_picture() {
 	// Import: the same TS back through the demuxer must rebuild the same access units.
 	let mut imported = moq_net::broadcast::Info::new().produce();
 	let imported_consumer = imported.consume();
-	let import_catalog = crate::catalog::Producer::new(&mut imported).unwrap();
+	let import_catalog = crate::catalog::Producer::new(&mut imported, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(imported, import_catalog.reserve());
 	import.decode(&ts).unwrap();
 	import.finish().unwrap();
@@ -618,7 +618,7 @@ async fn export_bframe_video_authors_dts() {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();
@@ -685,7 +685,7 @@ async fn export_pcr_is_a_uniform_ramp() {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();
@@ -744,7 +744,7 @@ async fn export_pcr_is_a_uniform_ramp() {
 async fn export_pcr_wraps_below_the_reserve_at_start() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
 	let track = broadcast
 		.create_track(
@@ -835,7 +835,7 @@ async fn export_pcr_wraps_below_the_reserve_at_start() {
 async fn export_pcr_respects_every_renditions_reserve() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
 	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
 	let mut make = |name: &str, jitter: Option<Duration>| {
@@ -908,7 +908,7 @@ async fn export_pcr_respects_every_renditions_reserve() {
 async fn export_pcr_backfills_a_coarse_cadence() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
 	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
 	let track = broadcast
@@ -980,9 +980,11 @@ async fn export_scte35_roundtrip() {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog =
-		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
-			.unwrap();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
 
 	// Create and write the SCTE-35 cue track BEFORE moving `broadcast` into
 	// `Import` (which consumes it); the producer stays alive so the exporter can
@@ -997,7 +999,13 @@ async fn export_scte35_roundtrip() {
 			descriptors: Vec::new(),
 			verbatim: Some(tscat::Verbatim::new(0x86, tscat::Framing::Section)),
 		};
-		catalog.modify().unwrap().mpegts.tracks.insert(scte_name.clone(), track);
+		catalog
+			.modify()
+			.unwrap()
+			.ext
+			.mpegts
+			.tracks
+			.insert(scte_name.clone(), track);
 	}
 	let mut scte_producer = Producer::new(scte, HangContainer::Legacy(crate::container::Kind::Data));
 	// bbb's first video keyframe is at 1.4 s; stamp the cue just after it so it survives
@@ -1053,15 +1061,23 @@ async fn export_scte35_roundtrip() {
 	// Re-import the exported TS and read the .scte35 frame back.
 	let mut broadcast2 = moq_net::broadcast::Info::new().produce();
 	let consumer2 = broadcast2.consume();
-	let catalog2 =
-		crate::catalog::Producer::with_catalog(&mut broadcast2, crate::catalog::hang::Catalog::<tscat::Ext>::default())
-			.unwrap();
+	let catalog2 = crate::catalog::Producer::new(
+		&mut broadcast2,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
 	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	import2.finish().unwrap();
 
 	let snapshot = catalog2.snapshot();
-	let verbatim = snapshot.mpegts.tracks.values().filter(|t| t.verbatim.is_some()).count();
+	let verbatim = snapshot
+		.ext
+		.mpegts
+		.tracks
+		.values()
+		.filter(|t| t.verbatim.is_some())
+		.count();
 	assert_eq!(verbatim, 1, "round-trip lost the SCTE-35 track");
 	let name = scte_track(&snapshot).expect("a scte35 track");
 
@@ -1099,9 +1115,11 @@ async fn export_pes_verbatim_roundtrip() {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog =
-		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
-			.unwrap();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
 
 	// Build the verbatim PES track BEFORE moving `broadcast` into `Import`; the
 	// producer stays alive so the exporter can subscribe to the retained track.
@@ -1114,7 +1132,13 @@ async fn export_pes_verbatim_roundtrip() {
 		verbatim.stream_id = Some(STREAM_ID);
 		let mut track = tscat::Track::new(DATA_PID);
 		track.verbatim = Some(verbatim);
-		catalog.modify().unwrap().mpegts.tracks.insert(data_name.clone(), track);
+		catalog
+			.modify()
+			.unwrap()
+			.ext
+			.mpegts
+			.tracks
+			.insert(data_name.clone(), track);
 	}
 	let mut data_producer = Producer::new(data_track, HangContainer::Legacy(crate::container::Kind::Data));
 	// bbb's first video keyframe is at 1.4 s; stamp the PES just after it so it survives
@@ -1147,15 +1171,18 @@ async fn export_pes_verbatim_roundtrip() {
 	// Re-import the exported TS and recover the verbatim PES stream.
 	let mut broadcast2 = moq_net::broadcast::Info::new().produce();
 	let consumer2 = broadcast2.consume();
-	let catalog2 =
-		crate::catalog::Producer::with_catalog(&mut broadcast2, crate::catalog::hang::Catalog::<tscat::Ext>::default())
-			.unwrap();
+	let catalog2 = crate::catalog::Producer::new(
+		&mut broadcast2,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
 	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	import2.finish().unwrap();
 
 	let snapshot = catalog2.snapshot();
 	let (name, track) = snapshot
+		.ext
 		.mpegts
 		.tracks
 		.iter()
@@ -1192,9 +1219,11 @@ async fn export_pes_verbatim_roundtrip() {
 async fn scte35_without_video_export_is_rejected() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog =
-		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
-			.unwrap();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
 
 	// A SCTE-35 cue track and nothing else.
 	let scte = broadcast
@@ -1207,7 +1236,7 @@ async fn scte35_without_video_export_is_rejected() {
 			descriptors: Vec::new(),
 			verbatim: Some(tscat::Verbatim::new(0x86, tscat::Framing::Section)),
 		};
-		catalog.modify().unwrap().mpegts.tracks.insert(scte_name, track);
+		catalog.modify().unwrap().ext.mpegts.tracks.insert(scte_name, track);
 	}
 	let mut producer = Producer::new(scte, HangContainer::Legacy(crate::container::Kind::Data));
 	producer
@@ -1266,7 +1295,7 @@ async fn mp2_kyrion_roundtrip_byte_exact() {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();
@@ -1302,7 +1331,7 @@ async fn mp2_kyrion_roundtrip_byte_exact() {
 
 	let mut broadcast2 = moq_net::broadcast::Info::new().produce();
 	let consumer2 = broadcast2.consume();
-	let catalog2 = crate::catalog::Producer::new(&mut broadcast2).unwrap();
+	let catalog2 = crate::catalog::Producer::new(&mut broadcast2, crate::catalog::Config::default()).unwrap();
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
 	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	import2.finish().unwrap();
@@ -1335,7 +1364,7 @@ async fn ac3_roundtrip_byte_exact() {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();
@@ -1379,7 +1408,7 @@ async fn ac3_roundtrip_byte_exact() {
 
 	let mut broadcast2 = moq_net::broadcast::Info::new().produce();
 	let consumer2 = broadcast2.consume();
-	let catalog2 = crate::catalog::Producer::new(&mut broadcast2).unwrap();
+	let catalog2 = crate::catalog::Producer::new(&mut broadcast2, crate::catalog::Config::default()).unwrap();
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
 	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	import2.finish().unwrap();
@@ -1405,7 +1434,7 @@ async fn eac3_roundtrip_byte_exact() {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();
@@ -1452,7 +1481,7 @@ async fn eac3_roundtrip_byte_exact() {
 
 	let mut broadcast2 = moq_net::broadcast::Info::new().produce();
 	let consumer2 = broadcast2.consume();
-	let catalog2 = crate::catalog::Producer::new(&mut broadcast2).unwrap();
+	let catalog2 = crate::catalog::Producer::new(&mut broadcast2, crate::catalog::Config::default()).unwrap();
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
 	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	import2.finish().unwrap();
@@ -1492,7 +1521,7 @@ async fn kyrion_ac3_mp2_roundtrip_byte_exact() {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();
@@ -1540,7 +1569,7 @@ async fn kyrion_ac3_mp2_roundtrip_byte_exact() {
 
 	let mut broadcast2 = moq_net::broadcast::Info::new().produce();
 	let consumer2 = broadcast2.consume();
-	let catalog2 = crate::catalog::Producer::new(&mut broadcast2).unwrap();
+	let catalog2 = crate::catalog::Producer::new(&mut broadcast2, crate::catalog::Config::default()).unwrap();
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
 	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	import2.finish().unwrap();
@@ -1552,7 +1581,8 @@ async fn kyrion_ac3_mp2_roundtrip_byte_exact() {
 /// Find the SCTE-35 verbatim stream (stream_type 0x86) in a catalog snapshot. A
 /// clip may carry other undecoded streams verbatim, so select by type, not order.
 fn scte_track(snap: &crate::catalog::hang::Catalog<tscat::Ext>) -> Option<String> {
-	snap.mpegts
+	snap.ext
+		.mpegts
 		.tracks
 		.iter()
 		.find(|(_, t)| t.verbatim.as_ref().is_some_and(|v| v.stream_type == 0x86))
@@ -1634,9 +1664,9 @@ async fn scte35_fixtures_survive_roundtrip() {
 		// Ingest the fixture.
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::with_catalog(
+		let catalog = crate::catalog::Producer::new(
 			&mut broadcast,
-			crate::catalog::hang::Catalog::<tscat::Ext>::default(),
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
 		)
 		.unwrap();
 		let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
@@ -1690,9 +1720,9 @@ async fn scte35_fixtures_survive_roundtrip() {
 
 		let mut broadcast2 = moq_net::broadcast::Info::new().produce();
 		let consumer2 = broadcast2.consume();
-		let catalog2 = crate::catalog::Producer::with_catalog(
+		let catalog2 = crate::catalog::Producer::new(
 			&mut broadcast2,
-			crate::catalog::hang::Catalog::<tscat::Ext>::default(),
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
 		)
 		.unwrap();
 		let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
@@ -1869,19 +1899,21 @@ async fn service_layer_survives_roundtrip() {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let catalog =
-		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
-			.unwrap();
+	let catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import.decode(&BytesMut::from(&input[..])).unwrap();
 	import.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
-	let program = snapshot.mpegts.program.clone().expect("a program record");
+	let program = snapshot.ext.mpegts.program.clone().expect("a program record");
 	assert_eq!(program.transport_stream_id, 1, "TSID captured from the PAT");
 	assert_eq!(program.program_number, 1, "program number captured from the PAT");
 	assert_eq!(program.pmt_pid, 0x1000, "original PMT PID captured from the PAT");
-	let si = snapshot.mpegts.si.clone();
+	let si = snapshot.ext.mpegts.si.clone();
 	let entry = |pid: u16, table_id: u8| {
 		si.get(&pid)
 			.and_then(|tables| tables.get(&table_id))
@@ -1949,15 +1981,18 @@ async fn service_layer_survives_roundtrip() {
 	// Re-import: the SDT and NIT must come back byte-for-byte.
 	let mut broadcast2 = moq_net::broadcast::Info::new().produce();
 	let consumer2 = broadcast2.consume();
-	let catalog2 =
-		crate::catalog::Producer::with_catalog(&mut broadcast2, crate::catalog::hang::Catalog::<tscat::Ext>::default())
-			.unwrap();
+	let catalog2 = crate::catalog::Producer::new(
+		&mut broadcast2,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
 	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	import2.finish().unwrap();
 
 	let snapshot2 = catalog2.snapshot();
 	let program2 = snapshot2
+		.ext
 		.mpegts
 		.program
 		.clone()
@@ -1971,14 +2006,14 @@ async fn service_layer_survives_roundtrip() {
 		"program number survived"
 	);
 	assert_eq!(program2.pmt_pid, program.pmt_pid, "PMT PID survived");
-	assert_eq!(snapshot2.mpegts.si, si, "every SI entry survived the round-trip");
+	assert_eq!(snapshot2.ext.mpegts.si, si, "every SI entry survived the round-trip");
 	assert_eq!(
-		read_si_sections(&consumer2, &snapshot2.mpegts.si[&0x0011][&0x42].track).await,
+		read_si_sections(&consumer2, &snapshot2.ext.mpegts.si[&0x0011][&0x42].track).await,
 		vec![sdt],
 		"the SDT survived byte-for-byte"
 	);
 	assert_eq!(
-		read_si_sections(&consumer2, &snapshot2.mpegts.si[&0x0010][&0x40].track).await,
+		read_si_sections(&consumer2, &snapshot2.ext.mpegts.si[&0x0010][&0x40].track).await,
 		vec![Bytes::from(nit)],
 		"the NIT survived byte-for-byte"
 	);
@@ -1993,9 +2028,11 @@ async fn service_layer_survives_roundtrip() {
 async fn si_pids_are_re_emitted_on_their_own_interval() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog =
-		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
-			.unwrap();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
 
 	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
 	let track = broadcast
@@ -2035,7 +2072,7 @@ async fn si_pids_are_re_emitted_on_their_own_interval() {
 		guard.video.renditions.insert(name.clone(), cfg);
 
 		// SDT every 2s, NIT every 10s: the DVB maxima import fills in.
-		guard.mpegts.si.entry(0x0011).or_default().insert(
+		guard.ext.mpegts.si.entry(0x0011).or_default().insert(
 			0x42,
 			tscat::SiEntry {
 				track: "0x0011-0x42.si".to_string(),
@@ -2043,7 +2080,7 @@ async fn si_pids_are_re_emitted_on_their_own_interval() {
 				..Default::default()
 			},
 		);
-		guard.mpegts.si.entry(0x0010).or_default().insert(
+		guard.ext.mpegts.si.entry(0x0010).or_default().insert(
 			0x40,
 			tscat::SiEntry {
 				track: "0x0010-0x40.si".to_string(),
@@ -2116,9 +2153,11 @@ fn count_discontinuity(frames: &[Frame]) -> usize {
 async fn export_rejects_si_pid_on_the_pmt() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog =
-		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
-			.unwrap();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
 
 	let track = broadcast
 		.create_track(
@@ -2132,13 +2171,13 @@ async fn export_rejects_si_pid_on_the_pmt() {
 		cfg.container = Container::Legacy;
 		let mut guard = catalog.modify().unwrap();
 		guard.audio.renditions.insert(name, cfg);
-		guard.mpegts.program = Some(tscat::Program {
+		guard.ext.mpegts.program = Some(tscat::Program {
 			transport_stream_id: 1,
 			program_number: 1,
 			pmt_pid: 0x1000,
 			..Default::default()
 		});
-		guard.mpegts.si.entry(0x1000).or_default().insert(
+		guard.ext.mpegts.si.entry(0x1000).or_default().insert(
 			0x42,
 			tscat::SiEntry {
 				track: "si".to_string(),
@@ -2168,9 +2207,11 @@ async fn export_rejects_si_pid_on_the_pmt() {
 async fn export_rejects_si_pid_on_an_elementary_stream() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog =
-		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
-			.unwrap();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
 
 	let track = broadcast
 		.create_track(
@@ -2184,8 +2225,8 @@ async fn export_rejects_si_pid_on_an_elementary_stream() {
 		cfg.container = Container::Legacy;
 		let mut guard = catalog.modify().unwrap();
 		guard.audio.renditions.insert(name.clone(), cfg);
-		guard.mpegts.tracks.insert(name, tscat::Track::new(0x101));
-		guard.mpegts.si.entry(0x101).or_default().insert(
+		guard.ext.mpegts.tracks.insert(name, tscat::Track::new(0x101));
+		guard.ext.mpegts.si.entry(0x101).or_default().insert(
 			0x42,
 			tscat::SiEntry {
 				track: "si".to_string(),
@@ -2229,14 +2270,22 @@ fn publish_sdt(
 			Bytes::from(make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 8])),
 		)
 		.unwrap();
-	catalog.modify().unwrap().mpegts.si.entry(0x0011).or_default().insert(
-		0x42,
-		tscat::SiEntry {
-			track: track.name().to_string(),
-			interval: Some(Duration::from_secs(2)),
-			..Default::default()
-		},
-	);
+	catalog
+		.modify()
+		.unwrap()
+		.ext
+		.mpegts
+		.si
+		.entry(0x0011)
+		.or_default()
+		.insert(
+			0x42,
+			tscat::SiEntry {
+				track: track.name().to_string(),
+				interval: Some(Duration::from_secs(2)),
+				..Default::default()
+			},
+		);
 	track
 }
 
@@ -2247,9 +2296,11 @@ fn publish_sdt(
 async fn discontinuity_re_emits_tables_and_resumes_the_clock() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog =
-		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
-			.unwrap();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
 
 	let track = broadcast
 		.create_track(
@@ -2352,9 +2403,11 @@ async fn discontinuity_re_emits_tables_and_resumes_the_clock() {
 async fn reordered_video_keeps_the_table_cadence() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog =
-		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
-			.unwrap();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
 
 	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
 	let track = broadcast
@@ -2421,9 +2474,11 @@ async fn reordered_video_keeps_the_table_cadence() {
 async fn discontinuity_flags_the_break_once_across_tracks() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog =
-		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
-			.unwrap();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
 
 	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
 	let video_track = broadcast
@@ -2600,14 +2655,16 @@ async fn multi_packet_si_section_is_captured() {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let catalog =
-		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
-			.unwrap();
+	let catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import.decode(&BytesMut::from(&input[..])).unwrap();
 	import.finish().unwrap();
 
-	let si = catalog.snapshot().mpegts.si.clone();
+	let si = catalog.snapshot().ext.mpegts.si.clone();
 	let entry = si
 		.get(&0x0011)
 		.and_then(|tables| tables.get(&0x42))
@@ -2630,9 +2687,11 @@ struct SiRig {
 fn si_rig() -> SiRig {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let catalog =
-		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
-			.unwrap();
+	let catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
 	let import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	SiRig {
 		import,
@@ -2663,7 +2722,7 @@ async fn torn_transition_is_never_published() {
 		.unwrap();
 	rig.import.finish().unwrap();
 
-	let si = rig.catalog.snapshot().mpegts.si.clone();
+	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
 	let track = &si[&0x0011][&0x42].track;
 	let groups = read_si_groups(&rig.consumer, track).await;
 	assert!(!groups.is_empty(), "at least one snapshot group");
@@ -2705,7 +2764,7 @@ async fn eit_now_next_and_schedule_are_captured() {
 	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
 	rig.import.finish().unwrap();
 
-	let si = rig.catalog.snapshot().mpegts.si.clone();
+	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
 	let eit = si.get(&0x0012).expect("EIT entries");
 
 	let pf = eit.get(&0x4E).expect("a now/next entry");
@@ -2743,7 +2802,7 @@ async fn sdt_other_networks_do_not_collide() {
 	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
 	rig.import.finish().unwrap();
 
-	let si = rig.catalog.snapshot().mpegts.si.clone();
+	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
 	let entry = &si[&0x0011][&0x46];
 	assert_eq!(
 		read_si_sections(&rig.consumer, &entry.track).await,
@@ -2770,7 +2829,7 @@ async fn next_version_sections_are_dropped() {
 	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
 	rig.import.finish().unwrap();
 
-	let si = rig.catalog.snapshot().mpegts.si.clone();
+	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
 	assert!(si.contains_key(&0x0010), "the current NIT was captured (control)");
 	assert!(!si.contains_key(&0x0011), "a next-version section creates no entry");
 }
@@ -2796,7 +2855,7 @@ async fn tdt_round_trips_as_latest_value() {
 		.unwrap();
 	rig.import.finish().unwrap();
 
-	let si = rig.catalog.snapshot().mpegts.si.clone();
+	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
 	assert!(si.contains_key(&0x0011), "the SDT was captured (control)");
 	let entry = si
 		.get(&0x0014)
@@ -2836,13 +2895,13 @@ async fn abort_removes_si_catalog_entries() {
 	let mut rig = si_rig();
 	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
 	assert!(
-		!rig.catalog.snapshot().mpegts.si.is_empty(),
+		!rig.catalog.snapshot().ext.mpegts.si.is_empty(),
 		"the SDT entry was advertised"
 	);
 
 	rig.import.abort(moq_net::Error::Cancel);
 	assert!(
-		rig.catalog.snapshot().mpegts.si.is_empty(),
+		rig.catalog.snapshot().ext.mpegts.si.is_empty(),
 		"abort removed the advertised entries"
 	);
 }
@@ -2862,7 +2921,7 @@ async fn short_form_repetition_cuts_no_group() {
 		.unwrap();
 	rig.import.finish().unwrap();
 
-	let si = rig.catalog.snapshot().mpegts.si.clone();
+	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
 	let groups = read_si_groups(&rig.consumer, &si[&0x0014][&0x70].track).await;
 	assert_eq!(groups.len(), 1, "a repetition cut no further group");
 }
@@ -2874,9 +2933,11 @@ async fn short_form_repetition_cuts_no_group() {
 async fn stale_si_entry_does_not_block_output() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog =
-		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
-			.unwrap();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
 
 	// A track that exists (the subscription resolves) but never produces a group.
 	let ghost = broadcast.create_track("ghost.si", None).unwrap();
@@ -2900,7 +2961,7 @@ async fn stale_si_entry_does_not_block_output() {
 		cfg.container = Container::Legacy;
 		cfg.description = Some(avcc);
 		guard.video.renditions.insert(name.clone(), cfg);
-		guard.mpegts.si.entry(0x0011).or_default().insert(
+		guard.ext.mpegts.si.entry(0x0011).or_default().insert(
 			0x42,
 			tscat::SiEntry {
 				track: "ghost.si".to_string(),
@@ -2984,7 +3045,7 @@ fn strip_opus_control(mut data: &[u8]) -> Vec<Vec<u8>> {
 async fn export_opus_roundtrip() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
 	let track = broadcast
 		.create_track(
@@ -3064,7 +3125,7 @@ async fn export_opus_roundtrip() {
 async fn opus_export_import_roundtrip() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
 	let track = broadcast
 		.create_track(
@@ -3099,7 +3160,7 @@ async fn opus_export_import_roundtrip() {
 	// Re-import the TS we just produced.
 	let mut imported = moq_net::broadcast::Info::new().produce();
 	let imported_consumer = imported.consume();
-	let import_catalog = crate::catalog::Producer::new(&mut imported).unwrap();
+	let import_catalog = crate::catalog::Producer::new(&mut imported, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(imported, import_catalog.reserve());
 	import.decode(&ts).unwrap();
 	import.finish().unwrap();
@@ -3147,7 +3208,7 @@ const JOIN: u64 = 75;
 async fn export_twice(with_video: bool) -> (Vec<Frame>, Vec<Frame>) {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
 	let mut video = with_video.then(|| {
 		let track = broadcast
@@ -3348,7 +3409,7 @@ async fn lost_dense_section_recovers_on_the_next_cycle() {
 	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
 	rig.import.finish().unwrap();
 
-	let si = rig.catalog.snapshot().mpegts.si.clone();
+	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
 	assert_eq!(
 		read_si_sections(&rig.consumer, &si[&0x0011][&0x42].track).await,
 		vec![Bytes::from(s0), Bytes::from(s1), Bytes::from(s2)],
@@ -3366,9 +3427,11 @@ async fn repointed_si_entry_resubscribes() {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog =
-		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
-			.unwrap();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
 
 	let mut track_a = broadcast.create_track("a.si", None).unwrap();
 	track_a
@@ -3398,7 +3461,7 @@ async fn repointed_si_entry_resubscribes() {
 		cfg.container = Container::Legacy;
 		cfg.description = Some(avcc);
 		guard.video.renditions.insert(name.clone(), cfg);
-		guard.mpegts.si.entry(0x0011).or_default().insert(
+		guard.ext.mpegts.si.entry(0x0011).or_default().insert(
 			0x42,
 			tscat::SiEntry {
 				track: "a.si".to_string(),
@@ -3437,14 +3500,22 @@ async fn repointed_si_entry_resubscribes() {
 	}
 
 	// Repoint the entry at the replacement track.
-	catalog.modify().unwrap().mpegts.si.get_mut(&0x0011).unwrap().insert(
-		0x42,
-		tscat::SiEntry {
-			track: "b.si".to_string(),
-			interval: Some(Duration::from_secs(2)),
-			..Default::default()
-		},
-	);
+	catalog
+		.modify()
+		.unwrap()
+		.ext
+		.mpegts
+		.si
+		.get_mut(&0x0011)
+		.unwrap()
+		.insert(
+			0x42,
+			tscat::SiEntry {
+				track: "b.si".to_string(),
+				interval: Some(Duration::from_secs(2)),
+				..Default::default()
+			},
+		);
 
 	// The repointed entry resubscribes through the origin, whose driver mints and
 	// splices the new track between polls: give it the scheduler before the frames
@@ -3489,9 +3560,11 @@ async fn si_revision_after_final_media_frame_is_flushed() {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog =
-		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
-			.unwrap();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
 
 	let mut si_track = broadcast.create_track("0x0011-0x42.si", None).unwrap();
 	si_track
@@ -3517,7 +3590,7 @@ async fn si_revision_after_final_media_frame_is_flushed() {
 		cfg.container = Container::Legacy;
 		cfg.description = Some(avcc);
 		guard.video.renditions.insert(name.clone(), cfg);
-		guard.mpegts.si.entry(0x0011).or_default().insert(
+		guard.ext.mpegts.si.entry(0x0011).or_default().insert(
 			0x42,
 			tscat::SiEntry {
 				track: "0x0011-0x42.si".to_string(),
@@ -3595,9 +3668,11 @@ struct SiCadenceRig {
 async fn si_cadence_rig(pid: u16, table_id: u8, interval: Duration) -> SiCadenceRig {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog =
-		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
-			.unwrap();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
 
 	let si_name = format!("{pid:#06x}-{table_id:#04x}.si");
 	let si_track = broadcast.create_track(si_name.as_str(), None).unwrap();
@@ -3621,7 +3696,7 @@ async fn si_cadence_rig(pid: u16, table_id: u8, interval: Duration) -> SiCadence
 		cfg.container = Container::Legacy;
 		cfg.description = Some(avcc);
 		guard.video.renditions.insert(name, cfg);
-		guard.mpegts.si.entry(pid).or_default().insert(
+		guard.ext.mpegts.si.entry(pid).or_default().insert(
 			table_id,
 			tscat::SiEntry {
 				track: si_name,
@@ -3800,6 +3875,7 @@ async fn si_anchor_survives_a_zero_interval_reorder() {
 	rig.catalog
 		.modify()
 		.unwrap()
+		.ext
 		.mpegts
 		.si
 		.get_mut(&0x0011)
@@ -3864,9 +3940,11 @@ async fn overlapping_capture_teardown_keeps_the_survivors_mapping() {
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let _consumer = broadcast.consume();
-	let catalog =
-		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
-			.unwrap();
+	let catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
 	let mut old = crate::container::ts::Import::new(broadcast.clone(), catalog.reserve());
 	old.decode(&BytesMut::from(&input[..])).unwrap();
 
@@ -3874,12 +3952,12 @@ async fn overlapping_capture_teardown_keeps_the_survivors_mapping() {
 	// name is taken, so it advertises under a fallback name, overwriting the key.
 	let mut new = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	new.decode(&BytesMut::from(&input[..])).unwrap();
-	let survivor = catalog.snapshot().mpegts.si[&0x0011][&0x42].track.clone();
+	let survivor = catalog.snapshot().ext.mpegts.si[&0x0011][&0x42].track.clone();
 	assert_ne!(survivor, "0x0011-0x42.si", "the replacement fell back to a unique name");
 
 	drop(old);
 	assert_eq!(
-		catalog.snapshot().mpegts.si[&0x0011][&0x42].track,
+		catalog.snapshot().ext.mpegts.si[&0x0011][&0x42].track,
 		survivor,
 		"the old capture's teardown left the survivor's mapping in place"
 	);
@@ -3905,7 +3983,7 @@ async fn contiguous_same_version_commit_replaces_stale_sections() {
 	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
 	rig.import.finish().unwrap();
 
-	let si = rig.catalog.snapshot().mpegts.si.clone();
+	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
 	assert_eq!(
 		read_si_sections(&rig.consumer, &si[&0x0011][&0x42].track).await,
 		vec![Bytes::from(b0), Bytes::from(b1)],
@@ -3926,7 +4004,7 @@ async fn debounce_opens_without_a_media_clock() {
 	input.extend_from_slice(&si_packet_cc(0x0011, &sdt(0, 0xaa), 1));
 	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
 
-	let name = rig.catalog.snapshot().mpegts.si[&0x0011][&0x42].track.clone();
+	let name = rig.catalog.snapshot().ext.mpegts.si[&0x0011][&0x42].track.clone();
 	let track = rig.consumer.track(&name).unwrap().subscribe(None).await.unwrap();
 	assert_eq!(track.latest(), Some(0), "the first snapshot cut immediately");
 
@@ -3971,7 +4049,7 @@ fn collect_pcrs(frames: &[Frame]) -> Vec<(usize, u64, u128)> {
 async fn export_cbr_video() -> Vec<Frame> {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
 	let track = broadcast
 		.create_track(
@@ -4094,7 +4172,7 @@ async fn pcr_stays_among_the_bytes_across_reordered_tracks() {
 	let data = include_bytes!("test_data/scte35/kyrion_dirtystart.ts");
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();

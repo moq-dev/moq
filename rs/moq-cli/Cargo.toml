@@ -94,6 +94,7 @@ axum = { workspace = true }
 axum-server = { workspace = true }
 bytes = { workspace = true }
 hang = { workspace = true }
+humantime = { workspace = true }
 moq-audio = { workspace = true, optional = true, features = ["aac"] }
 moq-auth = { workspace = true, features = ["serve"] }
 # `server` enables the HTTP egress server for `moq export hls`; the importer is always available.
@@ -112,6 +113,7 @@ moq-video = { workspace = true, optional = true }
 pollster = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["rustls", "json"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tower-http = { workspace = true }

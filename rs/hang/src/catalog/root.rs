@@ -1,6 +1,7 @@
 //! This module contains the structs and functions for the MoQ catalog format
 use crate::Result;
 use crate::catalog::{Audio, Binary, Json, PRIORITY, Text, Video};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
@@ -9,10 +10,9 @@ use serde::{Deserialize, Serialize};
 /// `archive` (the segment index and any durable recording), the optional `clock` (the
 /// broadcast's one wall-clock mapping), and the data sections
 /// (`json`, `binary`) for application tracks that aren't media.
-/// Applications extend it with their own root sections (e.g. `scte35`) by flattening
-/// this struct into their own with `#[serde(flatten)]`. The catalog does not deny unknown fields,
-/// so a base consumer ignores the extra sections and an extended catalog stays wire-compatible.
-/// See the `extension_roundtrip` test.
+/// Applications extend it with their own root sections (e.g. `scte35`) through `E`. The catalog
+/// does not deny unknown fields, so a base consumer ignores the extra sections and an extended
+/// catalog stays wire-compatible. See the `extension_roundtrip` test.
 ///
 /// Marked `#[non_exhaustive]` so a future base section can be added without bumping the major
 /// version. External callers start from [`Catalog::default`] and fill in the sections they
@@ -22,8 +22,9 @@ use serde::{Deserialize, Serialize};
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[serde(default, rename_all = "camelCase")]
+#[serde(bound(serialize = "E: Serialize", deserialize = "E: DeserializeOwned + Default"))]
 #[non_exhaustive]
-pub struct Catalog {
+pub struct Catalog<E = ()> {
 	/// Video track information with multiple renditions.
 	///
 	/// Contains a map of video track renditions that the viewer can choose from
@@ -63,7 +64,7 @@ pub struct Catalog {
 	#[serde(
 		default,
 		skip_serializing_if = "Text::is_empty",
-		deserialize_with = "crate::catalog::deserialize_text"
+		deserialize_with = "crate::catalog::deserialize_section"
 	)]
 	pub text: Text,
 
@@ -92,9 +93,13 @@ pub struct Catalog {
 		deserialize_with = "crate::catalog::deserialize_section"
 	)]
 	pub binary: Binary,
+
+	/// Application-defined root sections, flattened alongside the base catalog sections.
+	#[serde(flatten)]
+	pub ext: E,
 }
 
-impl Catalog {
+impl Catalog<()> {
 	/// The default name for the catalog track.
 	pub const DEFAULT_NAME: &str = "catalog.json";
 
@@ -104,6 +109,38 @@ impl Catalog {
 	/// both tracks; a consumer reads whichever it prefers.
 	pub const COMPRESSED_NAME: &str = "catalog.json.z";
 
+	/// Track properties for creating the catalog track via
+	/// [`create_track`](moq_net::broadcast::Producer::create_track) at
+	/// [`DEFAULT_NAME`](Self::DEFAULT_NAME).
+	///
+	/// Keeps the bare `moq_net` retention rather than the media one: the catalog is
+	/// snapshot mode, so the useful value is the live edge, which is always kept.
+	pub fn default_track_info() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_priority(PRIORITY.catalog)
+	}
+
+	/// The subscription preferences used for the catalog track (high priority so
+	/// it preempts media tracks).
+	pub fn default_subscription() -> moq_net::track::Subscription {
+		moq_net::track::Subscription::default().with_priority(PRIORITY.catalog)
+	}
+}
+
+impl<E> Catalog<E> {
+	/// Copy the media sections into a catalog with no application extension.
+	pub fn media(&self) -> Catalog<()> {
+		Catalog {
+			video: self.video.clone(),
+			audio: self.audio.clone(),
+			archive: self.archive.clone(),
+			clock: self.clock,
+			text: self.text.clone(),
+			..Default::default()
+		}
+	}
+}
+
+impl<E: DeserializeOwned + Default> Catalog<E> {
 	/// Parse a catalog from a string.
 	#[allow(clippy::should_implement_trait)]
 	pub fn from_str(s: &str) -> Result<Self> {
@@ -119,7 +156,9 @@ impl Catalog {
 	pub fn from_reader(reader: impl std::io::Read) -> Result<Self> {
 		Ok(serde_json::from_reader(reader)?)
 	}
+}
 
+impl<E: Serialize> Catalog<E> {
 	/// Serialize the catalog to a JSON string.
 	pub fn to_json(&self) -> Result<String> {
 		Ok(serde_json::to_string(self)?)
@@ -138,22 +177,6 @@ impl Catalog {
 	/// Serialize the catalog to a writer.
 	pub fn to_writer(&self, writer: impl std::io::Write) -> Result<()> {
 		Ok(serde_json::to_writer(writer, self)?)
-	}
-
-	/// Track properties for creating the catalog track via
-	/// [`create_track`](moq_net::broadcast::Producer::create_track) at
-	/// [`DEFAULT_NAME`](Self::DEFAULT_NAME).
-	///
-	/// Keeps the bare `moq_net` retention rather than the media one: the catalog is
-	/// snapshot mode, so the useful value is the live edge, which is always kept.
-	pub fn default_track_info() -> moq_net::track::Info {
-		moq_net::track::Info::default().with_priority(PRIORITY.catalog)
-	}
-
-	/// The subscription preferences used for the catalog track (high priority so
-	/// it preempts media tracks).
-	pub fn default_subscription() -> moq_net::track::Subscription {
-		moq_net::track::Subscription::default().with_priority(PRIORITY.catalog)
 	}
 }
 
@@ -220,11 +243,11 @@ mod test {
 		let mut audio_renditions = BTreeMap::new();
 		audio_renditions.insert("audio".to_string(), audio_config);
 
-		let mut decoded = Catalog::default();
+		let mut decoded = Catalog::<()>::default();
 		decoded.video.renditions = video_renditions;
 		decoded.audio.renditions = audio_renditions;
 
-		let output = Catalog::from_str(&encoded).expect("failed to decode");
+		let output = Catalog::<()>::from_str(&encoded).expect("failed to decode");
 		assert_eq!(decoded, output, "wrong decoded output");
 
 		let output = decoded.to_json().expect("failed to encode");
@@ -304,11 +327,11 @@ mod test {
 			},
 		);
 
-		let mut catalog = Catalog::default();
+		let mut catalog = Catalog::<()>::default();
 		catalog.video.renditions = video_renditions;
 		catalog.audio.renditions = audio_renditions;
 
-		let decoded = Catalog::from_str(&encoded).expect("failed to decode");
+		let decoded = Catalog::<()>::from_str(&encoded).expect("failed to decode");
 		assert_eq!(catalog, decoded, "decode mismatch");
 
 		let output = catalog.to_json().expect("failed to encode");
@@ -333,7 +356,7 @@ mod test {
 			}
 		}"#;
 
-		let parsed = Catalog::from_str(encoded).expect("failed to decode");
+		let parsed = Catalog::<()>::from_str(encoded).expect("failed to decode");
 		let rendition = parsed.video.renditions.get("video").expect("missing rendition");
 		assert_eq!(
 			rendition.broadcast.as_ref().map(|p| p.as_str()),
@@ -344,7 +367,7 @@ mod test {
 		// Full encode -> decode -> equality, so the test catches any encoder regression
 		// (e.g. wrong key, double-emission, or `null` instead of skip).
 		let output = parsed.to_json().expect("failed to encode");
-		let reparsed = Catalog::from_str(&output).expect("failed to re-decode");
+		let reparsed = Catalog::<()>::from_str(&output).expect("failed to re-decode");
 		assert_eq!(parsed, reparsed, "re-encoded catalog did not round-trip");
 	}
 
@@ -363,7 +386,7 @@ mod test {
 		let mut renditions = BTreeMap::new();
 		renditions.insert("video".to_string(), video_config);
 
-		let catalog = Catalog {
+		let catalog = Catalog::<()> {
 			video: Video {
 				renditions,
 				..Default::default()
@@ -394,7 +417,7 @@ mod test {
 			}
 		}"#;
 
-		let parsed = Catalog::from_str(encoded).expect("failed to decode");
+		let parsed = Catalog::<()>::from_str(encoded).expect("failed to decode");
 		let rendition = parsed.video.renditions.get("video").expect("missing rendition");
 		assert_eq!(
 			rendition.broadcast.as_ref().map(|p| p.is_empty()),
@@ -417,7 +440,7 @@ mod test {
 			}
 		}"#;
 
-		let parsed = Catalog::from_str(encoded).expect("failed to decode");
+		let parsed = Catalog::<()>::from_str(encoded).expect("failed to decode");
 		let rendition = parsed.video.renditions.get("video").expect("missing rendition");
 		assert_eq!(
 			rendition.broadcast.as_ref().map(|p| p.as_str()),
@@ -446,7 +469,7 @@ mod test {
 			}
 		}"#;
 
-		let parsed = Catalog::from_str(encoded).expect("failed to decode");
+		let parsed = Catalog::<()>::from_str(encoded).expect("failed to decode");
 
 		let known = parsed.video.renditions.get("legacy").expect("missing rendition");
 		assert_eq!(known.container, Container::Legacy);
@@ -460,7 +483,7 @@ mod test {
 
 		// The unknown rendition survives a republish intact.
 		let output = parsed.to_json().expect("failed to encode");
-		let reparsed = Catalog::from_str(&output).expect("failed to re-decode");
+		let reparsed = Catalog::<()>::from_str(&output).expect("failed to re-decode");
 		assert_eq!(parsed, reparsed, "re-encoded catalog did not round-trip");
 		assert!(output.contains(r#""magic":7"#), "unknown fields dropped: {output}");
 	}
@@ -469,7 +492,7 @@ mod test {
 	fn empty_text_section_omitted() {
 		// A catalog without captions must stay byte-identical to before the text section existed:
 		// the empty section is skipped, unlike the always-present video/audio sections.
-		let catalog = Catalog::default();
+		let catalog = Catalog::<()>::default();
 		let output = catalog.to_json().expect("failed to encode");
 		assert!(!output.contains("text"), "empty text section leaked: {output}");
 	}
@@ -485,7 +508,7 @@ mod test {
 		let mut text = Text::default();
 		text.insert("captions.en", config).expect("insert");
 
-		let catalog = Catalog {
+		let catalog = Catalog::<()> {
 			text,
 			..Default::default()
 		};
@@ -493,7 +516,7 @@ mod test {
 		let json = catalog.to_json().expect("failed to encode");
 		assert!(json.contains("\"text\""), "text section missing: {json}");
 
-		let decoded = Catalog::from_str(&json).expect("failed to decode");
+		let decoded = Catalog::<()>::from_str(&json).expect("failed to decode");
 		assert_eq!(catalog, decoded, "text section did not round-trip");
 	}
 
@@ -508,7 +531,8 @@ mod test {
 			r#"{"renditions":42}"#,
 		] {
 			let json = format!(r#"{{"video":{{"renditions":{{}}}},"audio":{{"renditions":{{}}}},"text":{legacy}}}"#);
-			let catalog = Catalog::from_str(&json).unwrap_or_else(|e| panic!("legacy text {legacy} broke it: {e}"));
+			let catalog =
+				Catalog::<()>::from_str(&json).unwrap_or_else(|e| panic!("legacy text {legacy} broke it: {e}"));
 			assert!(catalog.text.is_empty(), "legacy text {legacy} decoded as captions");
 		}
 	}
@@ -520,7 +544,7 @@ mod test {
 	fn a_malformed_text_section_still_fails() {
 		let json = r#"{"text":{"renditions":{"captions":{"container":{"kind":"legacy"}}}}}"#;
 		assert!(
-			Catalog::from_str(json).is_err(),
+			Catalog::<()>::from_str(json).is_err(),
 			"a format-less text rendition decoded instead of failing"
 		);
 	}
@@ -531,7 +555,7 @@ mod test {
 		// playing even when a caption rendition is classified with a vocabulary we don't know yet.
 		let json = r#"{"video":{"renditions":{}},"audio":{"renditions":{}},"text":{"renditions":{"subs":{"format":"vtt","role":"commentary"}}}}"#;
 
-		let catalog = Catalog::from_str(json).expect("unknown role rejected the catalog");
+		let catalog = Catalog::<()>::from_str(json).expect("unknown role rejected the catalog");
 		assert_eq!(catalog.text.renditions.len(), 1);
 		let encoded = catalog.to_json().expect("failed to encode unknown role");
 		assert!(
@@ -548,7 +572,7 @@ mod test {
 		for section in ["json", "binary"] {
 			let wire = format!(r#"{{"video":{{"renditions":{{}}}},"{section}":{{"messages":"chat"}}}}"#);
 			let catalog =
-				Catalog::from_str(&wire).unwrap_or_else(|err| panic!("{section} took the catalog down: {err}"));
+				Catalog::<()>::from_str(&wire).unwrap_or_else(|err| panic!("{section} took the catalog down: {err}"));
 			assert!(catalog.json.is_empty(), "{section}");
 			assert!(catalog.binary.is_empty(), "{section}");
 		}
@@ -562,7 +586,7 @@ mod test {
 		for section in ["json", "binary"] {
 			let wire = format!(r#"{{"{section}":{{"tracks":{{"chat":{{"compression":"deflate"}}}}}}}}"#);
 			assert!(
-				Catalog::from_str(&wire).is_err(),
+				Catalog::<()>::from_str(&wire).is_err(),
 				"a mode-less {section} track decoded instead of failing"
 			);
 		}
@@ -572,27 +596,31 @@ mod test {
 	fn data_sections_stay_off_the_wire_when_empty() {
 		// A media-only catalog must serialize exactly as it did before the data sections existed,
 		// or every existing publisher's bytes change.
-		let output = Catalog::default().to_json().expect("failed to encode");
+		let output = Catalog::<()>::default().to_json().expect("failed to encode");
 		assert_eq!(output, r#"{"video":{"renditions":{}},"audio":{"renditions":{}}}"#);
 	}
 
 	#[test]
 	fn clock_roundtrips_at_the_root() {
-		let clock = crate::catalog::Clock::new(1_751_846_400_000_000).unwrap();
-		let catalog = Catalog {
+		let clock =
+			crate::catalog::Clock::new(moq_net::Timestamp::from_micros(1_751_846_400_000_000).unwrap()).unwrap();
+		let catalog = Catalog::<()> {
 			clock: Some(clock),
 			..Default::default()
 		};
 
 		let json = catalog.to_json().expect("failed to encode");
 		assert!(json.contains(r#""clock":{"wall":1751846400000000"#), "{json}");
-		assert_eq!(Catalog::from_str(&json).expect("failed to decode").clock, Some(clock));
+		assert_eq!(
+			Catalog::<()>::from_str(&json).expect("failed to decode").clock,
+			Some(clock)
+		);
 	}
 
 	#[test]
 	fn clock_stays_off_the_wire_when_absent() {
 		// A catalog without a clock serializes exactly as before the section existed.
-		let output = Catalog::default().to_json().expect("failed to encode");
+		let output = Catalog::<()>::default().to_json().expect("failed to encode");
 		assert_eq!(output, r#"{"video":{"renditions":{}},"audio":{"renditions":{}}}"#);
 	}
 
@@ -601,10 +629,10 @@ mod test {
 		// The canonical new shape: the root clock plus an archive without a wall field.
 		// A reader maps archive timestamps through the root clock after timescale conversion.
 		let json = include_str!("../../fixtures/catalog-clock.json");
-		let catalog = Catalog::from_str(json).expect("the packaged fixture must decode");
+		let catalog = Catalog::<()>::from_str(json).expect("the packaged fixture must decode");
 
 		let clock = catalog.clock.expect("the fixture carries a root clock");
-		assert_eq!(clock.timescale, 1_000_000);
+		assert_eq!(clock.wall.scale().as_u64(), 1_000_000);
 
 		let archive = catalog.archive.expect("the fixture carries an archive");
 		assert_eq!(archive.track, "timeline.z");
@@ -613,7 +641,12 @@ mod test {
 		// Archive PTS 2000 (ms) lands 2s after the wall epoch, whatever the track timescale.
 		let expected = std::time::UNIX_EPOCH
 			+ std::time::Duration::from_millis(crate::catalog::MOQ_EPOCH_UNIX_MILLIS + 1_751_846_402_000);
-		assert_eq!(clock.wall_clock(2000, archive.timescale).unwrap(), expected);
+		assert_eq!(
+			clock
+				.wall_clock(moq_net::Timestamp::from_scale(2000, archive.timescale as u64).unwrap())
+				.unwrap(),
+			expected
+		);
 	}
 
 	#[test]
@@ -623,7 +656,7 @@ mod test {
 		archive.replay = Some(moq_net::PathRelativeOwned::new("recordings/clip"));
 		archive.version = Some(crate::catalog::Archive::VERSION);
 
-		let catalog = Catalog {
+		let catalog = Catalog::<()> {
 			archive: Some(archive.clone()),
 			..Default::default()
 		};
@@ -635,7 +668,7 @@ mod test {
 			"the old root key must not appear: {json}"
 		);
 		assert_eq!(
-			Catalog::from_str(&json).expect("failed to decode").archive,
+			Catalog::<()>::from_str(&json).expect("failed to decode").archive,
 			Some(archive)
 		);
 	}
@@ -644,7 +677,7 @@ mod test {
 	fn a_legacy_root_timeline_is_not_an_archive() {
 		// No alias or fallback: a catalog that still names `timeline` at the root has no archive.
 		let catalog =
-			Catalog::from_str(r#"{"timeline":{"track":"timeline.z"}}"#).expect("legacy timeline broke decode");
+			Catalog::<()>::from_str(r#"{"timeline":{"track":"timeline.z"}}"#).expect("legacy timeline broke decode");
 		assert_eq!(catalog.archive, None);
 	}
 
@@ -688,12 +721,12 @@ mod test {
 		let mut thumbnail = BinaryConfig::new(Mode::Snapshot);
 		thumbnail.mime = Some("image/jpeg".to_string());
 
-		let mut catalog = Catalog::default();
+		let mut catalog = Catalog::<()>::default();
 		catalog.json.insert("chat", chat).unwrap();
 		catalog.json.insert("status", status).unwrap();
 		catalog.binary.insert("thumbnail", thumbnail).unwrap();
 
-		let decoded = Catalog::from_str(&encoded).expect("failed to decode");
+		let decoded = Catalog::<()>::from_str(&encoded).expect("failed to decode");
 		assert_eq!(decoded, catalog, "decode mismatch");
 
 		let output = catalog.to_json().expect("failed to encode");
@@ -713,7 +746,7 @@ mod test {
 			}
 		}"#;
 
-		let parsed = Catalog::from_str(encoded).expect("failed to decode");
+		let parsed = Catalog::<()>::from_str(encoded).expect("failed to decode");
 
 		let known = parsed.json.tracks.get("known").expect("missing track");
 		assert_eq!(known.mode, Mode::Stream);
@@ -728,7 +761,7 @@ mod test {
 			output.contains(r#""mode":"windowed""#),
 			"unknown mode dropped: {output}"
 		);
-		let reparsed = Catalog::from_str(&output).expect("failed to re-decode");
+		let reparsed = Catalog::<()>::from_str(&output).expect("failed to re-decode");
 		assert_eq!(parsed, reparsed, "re-encoded catalog did not round-trip");
 	}
 
@@ -739,27 +772,27 @@ mod test {
 	fn unknown_mode_fields_round_trip() {
 		let encoded = r#"{"json":{"tracks":{"future":{"mode":"windowed","window":10}}}}"#;
 
-		let parsed = Catalog::from_str(encoded).expect("failed to decode");
+		let parsed = Catalog::<()>::from_str(encoded).expect("failed to decode");
 		let future = parsed.json.tracks.get("future").expect("missing track");
 		assert_eq!(future.mode, Mode::Unknown("windowed".to_string()));
 		assert_eq!(future.extra.get("window"), Some(&serde_json::json!(10)));
 
 		let output = parsed.to_json().expect("failed to encode");
 		assert!(output.contains(r#""window":10"#), "unknown fields dropped: {output}");
-		assert_eq!(Catalog::from_str(&output).expect("re-decode"), parsed);
+		assert_eq!(Catalog::<()>::from_str(&output).expect("re-decode"), parsed);
 	}
 
 	/// There is no safe default: reading a stream as a snapshot silently drops every record but the
 	/// last, so an entry without a mode is malformed rather than assumed.
 	#[test]
 	fn a_track_without_a_mode_is_rejected() {
-		Catalog::from_str(r#"{"json":{"tracks":{"chat":{"compression":"deflate"}}}}"#)
+		Catalog::<()>::from_str(r#"{"json":{"tracks":{"chat":{"compression":"deflate"}}}}"#)
 			.expect_err("a mode-less track must not decode");
 	}
 
 	#[test]
 	fn duplicate_data_track_names_are_rejected() {
-		let mut catalog = Catalog::default();
+		let mut catalog = Catalog::<()>::default();
 		catalog.json.insert("chat", JsonConfig::new(Mode::Stream)).unwrap();
 		assert!(matches!(
 			catalog.json.insert("chat", JsonConfig::new(Mode::Snapshot)),
@@ -787,15 +820,15 @@ mod test {
 		}
 
 		let app = AppCatalog {
-			base: Catalog::default(),
+			base: Catalog::<()>::default(),
 			scte35: Some(Scte35 { splice_id: 42 }),
 		};
 
 		let json = serde_json::to_string(&app).expect("failed to encode");
 
 		// A base consumer ignores the unknown section.
-		let base = Catalog::from_str(&json).expect("failed to decode base");
-		assert_eq!(base, Catalog::default());
+		let base = Catalog::<()>::from_str(&json).expect("failed to decode base");
+		assert_eq!(base, Catalog::<()>::default());
 
 		// The extended consumer round-trips its own section.
 		let decoded: AppCatalog = serde_json::from_str(&json).expect("failed to decode app");

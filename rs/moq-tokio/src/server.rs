@@ -33,7 +33,12 @@ use futures::stream::StreamExt;
 impl crate::listen::Config {
 	/// Build the [`Server`] this config describes, binding its listeners.
 	pub fn init(self, quic: crate::quic::Config) -> crate::Result<Server> {
-		Config::default().with_listen(self).with_quic(quic).init()
+		Config {
+			listen: self,
+			quic,
+			..Default::default()
+		}
+		.init()
 	}
 
 	/// Build a server with only the `tcp`/`unix` listeners, leaving the QUIC
@@ -48,7 +53,11 @@ impl crate::listen::Config {
 	/// Distinct from clearing [`bind`](crate::listen::Config::bind), which still
 	/// opens the default QUIC listener when nothing else is configured.
 	pub fn init_streams(self) -> crate::Result<Server> {
-		Server::build(Config::default().with_listen(self), Parts::Streams)
+		Config {
+			listen: self,
+			..Default::default()
+		}
+		.init_streams()
 	}
 
 	/// Returns the configured versions, defaulting to all if none specified.
@@ -86,7 +95,8 @@ impl crate::listen::Config {
 
 /// Default bind address used when [`crate::listen::Config::bind`] is not set.
 #[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
-pub(crate) const DEFAULT_BIND: &str = "[::]:443";
+pub(crate) const DEFAULT_BIND: net::SocketAddr =
+	net::SocketAddr::V6(net::SocketAddrV6::new(net::Ipv6Addr::UNSPECIFIED, 443, 0, 0));
 
 /// Which listeners a [`Server`] opens, out of the ones its config describes.
 ///
@@ -153,7 +163,7 @@ impl Parts {
 /// another [`Server::new`] parameter. The mirror of [`crate::client::Config`].
 ///
 /// Most callers want the [`crate::listen::Config::init`] shorthand instead.
-#[derive(Clone, Debug, Default)]
+#[derive(Default)]
 #[non_exhaustive]
 pub struct Config {
 	/// The accept side of the endpoint: what to listen on and how to be trusted.
@@ -161,24 +171,50 @@ pub struct Config {
 
 	/// QUIC socket and transport settings, shared with [`crate::Client`].
 	pub quic: crate::quic::Config,
+
+	/// A standalone WebSocket listener on a separate TCP port.
+	#[cfg(feature = "websocket")]
+	pub websocket: Option<crate::websocket::Listener>,
+
+	/// An Iroh endpoint to accept sessions from.
+	#[cfg(feature = "iroh")]
+	pub iroh: Option<iroh::Endpoint>,
+
+	/// The origin published to every accepted session.
+	pub publisher: Option<moq_net::origin::Consumer>,
+
+	/// The origin that receives every accepted session's publications.
+	pub subscriber: Option<moq_net::origin::Producer>,
+
+	/// Per-connection statistics context.
+	pub stats: moq_net::stats::Session,
 }
 
 impl Config {
-	/// Set the accept side, returning `self` for chaining.
-	pub fn with_listen(mut self, listen: crate::listen::Config) -> Self {
-		self.listen = listen;
-		self
-	}
-
-	/// Set the QUIC settings, returning `self` for chaining.
-	pub fn with_quic(mut self, quic: crate::quic::Config) -> Self {
-		self.quic = quic;
-		self
-	}
-
 	/// Build the [`Server`] this config describes.
 	pub fn init(self) -> crate::Result<Server> {
 		Server::new(self)
+	}
+
+	/// Build a server with only its TCP and Unix listeners.
+	pub fn init_streams(self) -> crate::Result<Server> {
+		Server::build(self, Parts::Streams)
+	}
+
+	/// Copy the settings one QUIC worker owns.
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	pub(crate) fn worker(&self) -> Self {
+		Self {
+			listen: self.listen.clone(),
+			quic: self.quic.clone(),
+			#[cfg(feature = "websocket")]
+			websocket: None,
+			#[cfg(feature = "iroh")]
+			iroh: None,
+			publisher: self.publisher.clone(),
+			subscriber: self.subscriber.clone(),
+			stats: self.stats.clone(),
+		}
 	}
 }
 
@@ -237,7 +273,15 @@ impl Server {
 	/// [`Self::new`], for a caller that opens only some of the config's listeners.
 	pub(crate) fn build(config: Config, parts: Parts) -> crate::Result<Self> {
 		let Config {
-			listen: config, quic, ..
+			listen: config,
+			quic,
+			#[cfg(feature = "websocket")]
+			websocket,
+			#[cfg(feature = "iroh")]
+			iroh,
+			publisher,
+			subscriber,
+			stats,
 		} = config;
 
 		// Refuse here rather than in `init`, so a caller that skipped its own check
@@ -351,14 +395,22 @@ impl Server {
 			unix_allow,
 		);
 
+		let mut moq = moq_net::Server::new().with_versions(versions.clone()).with_stats(stats);
+		if let Some(publisher) = publisher {
+			moq = moq.with_publisher(publisher);
+		}
+		if let Some(subscriber) = subscriber {
+			moq = moq.with_subscriber(subscriber);
+		}
+
 		Ok(Server {
 			accept: Default::default(),
-			moq: moq_net::Server::new().with_versions(versions.clone()),
+			moq,
 			versions,
 			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 			streams,
 			#[cfg(feature = "iroh")]
-			iroh: None,
+			iroh,
 			#[cfg(feature = "noq")]
 			noq,
 			#[cfg(feature = "quinn")]
@@ -366,45 +418,8 @@ impl Server {
 			#[cfg(feature = "quiche")]
 			quiche,
 			#[cfg(feature = "websocket")]
-			websocket: None,
+			websocket,
 		})
-	}
-
-	/// Add a standalone WebSocket listener on a separate TCP port.
-	///
-	/// This is useful for simple applications that want WebSocket on a dedicated port.
-	/// For applications that need WebSocket on the same HTTP port (e.g. moq-relay),
-	/// use `qmux::Session::accept()` with your own HTTP framework instead.
-	#[cfg(feature = "websocket")]
-	pub fn with_websocket(mut self, websocket: crate::websocket::Listener) -> Self {
-		self.websocket = Some(websocket);
-		self
-	}
-
-	/// Also accept sessions over the given Iroh endpoint.
-	#[cfg(feature = "iroh")]
-	pub fn with_iroh(mut self, iroh: iroh::Endpoint) -> Self {
-		self.iroh = Some(iroh);
-		self
-	}
-
-	/// Publish the given origin to every session this server accepts.
-	pub fn with_publisher(mut self, publish: impl moq_net::Consume<moq_net::origin::Consumer>) -> Self {
-		self.moq = self.moq.with_publisher(publish);
-		self
-	}
-
-	/// Subscribe to every session's broadcasts, ingesting them into the given origin.
-	pub fn with_subscriber(mut self, subscribe: moq_net::origin::Producer) -> Self {
-		self.moq = self.moq.with_subscriber(subscribe);
-		self
-	}
-
-	/// Attach a per-connection [`moq_net::stats::Session`] context to all sessions
-	/// accepted by this server.
-	pub fn with_stats(mut self, stats: moq_net::stats::Session) -> Self {
-		self.moq = self.moq.with_stats(stats);
-		self
 	}
 
 	/// Accept sessions until the listener stops, serving `origin` to each subscriber.
@@ -416,14 +431,18 @@ impl Server {
 	/// auth or routing, [`listen`](Self::listen) and drive [`Listener::accept`]
 	/// yourself instead.
 	pub async fn serve_publish(self, origin: moq_net::origin::Consumer) -> crate::Result<()> {
-		self.with_publisher(origin).serve().await
+		let mut server = self;
+		server.moq = server.moq.with_publisher(origin);
+		server.serve().await
 	}
 
 	/// Accept sessions until the listener stops, ingesting each publisher into `origin`.
 	///
 	/// The mirror of [`serve_publish`](Self::serve_publish) for the consume direction.
 	pub async fn serve_consume(self, origin: moq_net::origin::Producer) -> crate::Result<()> {
-		self.with_subscriber(origin).serve().await
+		let mut server = self;
+		server.moq = server.moq.with_subscriber(origin);
+		server.serve().await
 	}
 
 	/// Accept sessions until the listener stops, serving `publish` to each subscriber
@@ -437,7 +456,9 @@ impl Server {
 		publish: moq_net::origin::Consumer,
 		subscribe: moq_net::origin::Producer,
 	) -> crate::Result<()> {
-		self.with_publisher(publish).with_subscriber(subscribe).serve().await
+		let mut server = self;
+		server.moq = server.moq.with_publisher(publish).with_subscriber(subscribe);
+		server.serve().await
 	}
 
 	/// Shared accept loop for the `serve_*` entry points; the origin is already
@@ -516,7 +537,7 @@ impl Server {
 
 	/// The accept-loop health of every listener this server owns that performs a real
 	/// `accept(2)`: the `tcp`/`unix` stream listeners and, if one was set,
-	/// [`with_websocket`](Self::with_websocket).
+	/// [`Config::websocket`].
 	///
 	/// Empty on a QUIC-only server, which is the honest answer rather than a
 	/// convenient one: a QUIC backend multiplexes every session over one UDP socket,
@@ -733,7 +754,7 @@ impl Server {
 		}
 	}
 
-	/// The Iroh endpoint from [`with_iroh`](Self::with_iroh), if one was set.
+	/// The Iroh endpoint from [`Config::iroh`], if one was set.
 	#[cfg(feature = "iroh")]
 	pub fn iroh_endpoint(&self) -> Option<&iroh::Endpoint> {
 		self.iroh.as_ref()
@@ -761,8 +782,7 @@ impl Server {
 		Err(Error::NoBackend("no QUIC listener configured"))
 	}
 
-	/// The address the WebSocket listener from
-	/// [`with_websocket`](Self::with_websocket) bound to, if one was set.
+	/// The address the WebSocket listener from [`Config::websocket`] bound to, if one was set.
 	#[cfg(feature = "websocket")]
 	pub fn websocket_local_addr(&self) -> Option<net::SocketAddr> {
 		self.websocket.as_ref().and_then(|ws| ws.local_addr().ok())
@@ -773,19 +793,18 @@ impl Server {
 		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 		self.streams.shutdown().await;
 
+		self.close();
+
 		#[cfg(feature = "noq")]
-		if let Some(noq) = self.noq.as_mut() {
-			noq.close();
+		if self.noq.is_some() {
 			tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 		}
 		#[cfg(feature = "quinn")]
-		if let Some(quinn) = self.quinn.as_mut() {
-			quinn.close();
+		if self.quinn.is_some() {
 			tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 		}
 		#[cfg(feature = "quiche")]
-		if let Some(quiche) = self.quiche.as_mut() {
-			quiche.close();
+		if self.quiche.is_some() {
 			tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 		}
 		#[cfg(feature = "iroh")]
@@ -795,6 +814,22 @@ impl Server {
 		#[cfg(feature = "websocket")]
 		{
 			let _ = self.websocket.take();
+		}
+	}
+
+	/// Start the synchronous half of listener shutdown.
+	fn close(&mut self) {
+		#[cfg(feature = "noq")]
+		if let Some(noq) = self.noq.as_mut() {
+			noq.close();
+		}
+		#[cfg(feature = "quinn")]
+		if let Some(quinn) = self.quinn.as_mut() {
+			quinn.close();
+		}
+		#[cfg(feature = "quiche")]
+		if let Some(quiche) = self.quiche.as_mut() {
+			quiche.close();
 		}
 	}
 }
@@ -813,7 +848,7 @@ impl Listener {
 	///
 	/// This returns a [Request] instead of a session so the connection can be
 	/// rejected early on an invalid path or missing auth. Call [Request::ok] or
-	/// [Request::close] to complete the handshake.
+	/// [Request::reject] to complete the handshake.
 	///
 	/// `None` means every configured listener has stopped and no handshake is still
 	/// in flight, so nothing can arrive again. Everything is already bound, so a bind
@@ -840,8 +875,7 @@ impl Listener {
 		self.server.local_addr()
 	}
 
-	/// The address the WebSocket listener from
-	/// [`Server::with_websocket`] bound to, if one was set.
+	/// The address the WebSocket listener from [`Config::websocket`] bound to, if one was set.
 	#[cfg(feature = "websocket")]
 	pub fn websocket_local_addr(&self) -> Option<net::SocketAddr> {
 		self.server.websocket_local_addr()
@@ -861,10 +895,16 @@ impl Listener {
 		self.server.accept_health()
 	}
 
-	/// The Iroh endpoint from [`Server::with_iroh`], if one was set.
+	/// The Iroh endpoint from [`Config::iroh`], if one was set.
 	#[cfg(feature = "iroh")]
 	pub fn iroh_endpoint(&self) -> Option<&iroh::Endpoint> {
 		self.server.iroh_endpoint()
+	}
+}
+
+impl Drop for Listener {
+	fn drop(&mut self) {
+		self.server.close();
 	}
 }
 
@@ -1235,7 +1275,7 @@ impl std::fmt::Display for Transport {
 /// all populated consistently regardless of transport. [Self::with_publisher] and
 /// [Self::with_subscriber] configure what is published and subscribed to on the session;
 /// otherwise the Server's configuration is used by default. Call [Self::ok] to start the
-/// session, or [Self::close] to reject it (which closes the just-established session).
+/// session, or [Self::reject] to reject it (which closes the just-established session).
 pub struct Request {
 	transport: Transport,
 	/// The request URL, for transports that carry one (QUIC/WebTransport/WebSocket). `None` for the
@@ -1250,6 +1290,18 @@ pub struct Request {
 	/// The link facts the transport could see.
 	link: Link,
 	kind: RequestKind,
+}
+
+/// Why an incoming session was rejected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum Reject {
+	/// The request supplied no acceptable credentials.
+	Unauthorized,
+	/// The credentials do not grant the requested operation.
+	Forbidden,
+	/// An application-defined HTTP-style status code.
+	App(u16),
 }
 
 /// Delegate a read-only call to the inner [`moq_net::server::Handshake`], whatever the transport.
@@ -1310,10 +1362,10 @@ impl Request {
 	/// Reject the session. The transport is already accepted, so this closes the
 	/// just-established MoQ session rather than answering the transport handshake:
 	/// the `code` (an HTTP-style status the caller passes) maps to a MoQ close reason.
-	pub async fn close(self, code: u16) -> crate::Result<()> {
-		let err = match code {
-			401 | 403 => moq_net::Error::Unauthorized,
-			other => moq_net::Error::App(other),
+	pub async fn reject(self, reject: Reject) -> crate::Result<()> {
+		let err = match reject {
+			Reject::Unauthorized | Reject::Forbidden => moq_net::Error::Unauthorized,
+			Reject::App(code) => moq_net::Error::App(code),
 		};
 		request_into!(self.kind, request => request.close(err));
 		Ok(())
@@ -1555,10 +1607,12 @@ mod tests {
 	fn accept_health_covers_stream_listeners_before_they_bind() {
 		let mut config = crate::listen::Config::default();
 		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
-		let server = Config::default()
-			.with_listen(config)
-			.init()
-			.expect("stream-only server");
+		let server = Config {
+			listen: config,
+			..Default::default()
+		}
+		.init()
+		.expect("stream-only server");
 
 		let names: Vec<_> = server.accept_health().iter().map(|h| h.listener()).collect();
 		assert_eq!(names, vec!["tcp"], "the tcp listener must report before it binds");
@@ -1588,10 +1642,12 @@ mod tests {
 		let mut config = crate::listen::Config::default();
 		config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
 		config.unix.bind = Some(occupied);
-		let server = Config::default()
-			.with_listen(config)
-			.init()
-			.expect("stream-only server");
+		let server = Config {
+			listen: config,
+			..Default::default()
+		}
+		.init()
+		.expect("stream-only server");
 
 		assert!(server.listen().await.is_err(), "the unix bind must fail");
 		std::net::TcpListener::bind(("127.0.0.1", port)).expect("the tcp port must be free again");
@@ -1607,13 +1663,15 @@ mod tests {
 
 		let mut config = crate::listen::Config::default();
 		config.tcp.bind = Some(addr);
-		let listener = Config::default()
-			.with_listen(config)
-			.init()
-			.expect("stream-only server")
-			.listen()
-			.await
-			.expect("listen");
+		let listener = Config {
+			listen: config,
+			..Default::default()
+		}
+		.init()
+		.expect("stream-only server")
+		.listen()
+		.await
+		.expect("listen");
 
 		listener.close().await;
 		std::net::TcpListener::bind(addr).expect("close must release the tcp port");
@@ -1727,10 +1785,12 @@ mod tests {
 
 		let mut config = crate::listen::Config::default();
 		config.tcp.bind = Some(addr);
-		let server = Config::default()
-			.with_listen(config)
-			.init()
-			.expect("stream-only server");
+		let server = Config {
+			listen: config,
+			..Default::default()
+		}
+		.init()
+		.expect("stream-only server");
 		let listener = server.listen().await.expect("listen");
 		assert!(tokio::net::TcpListener::bind(addr).await.is_err(), "listener is bound");
 
@@ -1745,12 +1805,16 @@ mod tests {
 	#[test]
 	fn quic_bind_without_a_quic_backend_is_rejected() {
 		let config = crate::listen::Config {
-			bind: Some("127.0.0.1:0".to_string()),
+			bind: Some("127.0.0.1:0".parse().unwrap()),
 			..Default::default()
 		};
 
 		assert!(matches!(
-			Config::default().with_listen(config).init(),
+			Config {
+				listen: config,
+				..Default::default()
+			}
+			.init(),
 			Err(Error::NoBackend(_))
 		));
 	}
@@ -1781,7 +1845,7 @@ mod tests {
 	#[tokio::test]
 	async fn certificates_expose_generated_fingerprints() {
 		let mut config = crate::listen::Config {
-			bind: Some("[::]:0".to_string()),
+			bind: Some("[::]:0".parse().unwrap()),
 			..Default::default()
 		};
 		config.tls.generate = vec!["localhost".into()];
@@ -1834,8 +1898,14 @@ mod tests {
 	#[test]
 	fn bind_string_or_listen_alias() {
 		let bind: crate::listen::Config = toml::from_str(r#"bind = "[::]:443""#).unwrap();
-		assert_eq!(bind.bind.as_deref(), Some("[::]:443"));
+		assert_eq!(bind.bind.as_ref().map(ToString::to_string).as_deref(), Some("[::]:443"));
 		assert!(bind.deprecated().is_empty());
+
+		let bind: crate::listen::Config = toml::from_str(r#"bind = "fly-global-services:443""#).unwrap();
+		assert_eq!(
+			bind.bind,
+			Some(crate::listen::Bind::Host("fly-global-services".to_string(), 443))
+		);
 
 		// The released key still parses so the process can name `bind`, but it
 		// configures nothing.
@@ -1863,7 +1933,10 @@ uid = [1001, 1002]
 "#,
 		)
 		.unwrap();
-		assert_eq!(config.bind.as_deref(), Some("[::]:443"));
+		assert_eq!(
+			config.bind.as_ref().map(ToString::to_string).as_deref(),
+			Some("[::]:443")
+		);
 		assert_eq!(config.unix.bind.as_deref(), Some(std::path::Path::new("/run/moq.sock")));
 		assert_eq!(config.unix.allow.uid, vec![1001, 1002]);
 		assert!(config.has_stream_listener());

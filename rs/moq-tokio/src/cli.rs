@@ -5,10 +5,12 @@
 //! `parse()` is expected to take them first. A binary that parses more than once
 //! never reaches that code, so it has to answer them itself. Both shapes exist here:
 //! a TOML merge that layers CLI, env, and file with recorded provenance, and
-//! moq-cli's repeated `--` stage grammar. [`Duration`] is the human-readable
-//! duration those flags and TOML keys parse.
+//! moq-cli's repeated `--` stage grammar. A private duration adapter parses the
+//! human-readable values used by those flags and TOML keys.
 
-mod duration;
+#[path = "deprecated.rs"]
+mod deprecated;
+pub(crate) mod duration;
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -21,7 +23,11 @@ use usage::config::{
 	SourceKind, Value, resolve,
 };
 
-pub use duration::Duration;
+pub use deprecated::Deprecated;
+pub(crate) use duration::Duration;
+
+/// Re-exported because [`Merge`] and [`answer`] use Usage types in their APIs.
+pub use usage;
 
 /// What a Usage parse result asks the process to do.
 #[non_exhaustive]
@@ -110,35 +116,43 @@ pub fn answer(
 ///
 /// The merge is a TOML round-trip, so a `#[serde(skip)]` field comes back as its
 /// default. The released CLI spellings live on such fields: collect
-/// [`Deprecated`](crate::Deprecated) from `parsed` before calling this, and from
+/// [`Deprecated`] from `parsed` before calling this, and from
 /// the result for the file's own released keys.
-pub fn merge<T>(
-	registry: Registry,
-	parsed: T,
-	cli: &CliLayer,
-	env: &EnvLayer,
-	file: Option<FileSource<'_>>,
-) -> Result<(T, Resolved), String>
-where
-	T: Serialize + DeserializeOwned,
-{
-	let file_layer = file.map(|source| TomlLayer {
-		path: source.path,
-		value: source.value,
-	});
-	let mut layers = Layers::new().then(cli).then(env);
-	if let Some(ref file) = file_layer {
-		layers = layers.then(file);
-	}
-	let resolved = resolve(registry, layers).map_err(|err| err.to_string())?;
+pub struct Merge<'a> {
+	/// The settings declared by the root CLI.
+	pub registry: Registry,
+	/// Values explicitly supplied on the command line.
+	pub cli: &'a CliLayer,
+	/// Values explicitly supplied through the environment.
+	pub env: &'a EnvLayer,
+	/// An optional TOML document and its provenance.
+	pub file: Option<FileSource<'a>>,
+}
 
-	let occupied = occupied_keys(registry, &resolved);
-	let mut merged = toml::Value::try_from(&parsed).map_err(|err| err.to_string())?;
-	if let Some(source) = file {
-		overlay_unoccupied(&mut merged, source.value, "", &occupied);
+impl Merge<'_> {
+	/// Apply CLI, environment, file, and default precedence to `parsed`.
+	pub fn apply<T>(self, parsed: T) -> Result<(T, Resolved), String>
+	where
+		T: Serialize + DeserializeOwned,
+	{
+		let file_layer = self.file.map(|source| TomlLayer {
+			path: source.path,
+			value: source.value,
+		});
+		let mut layers = Layers::new().then(self.cli).then(self.env);
+		if let Some(ref file) = file_layer {
+			layers = layers.then(file);
+		}
+		let resolved = resolve(self.registry, layers).map_err(|err| err.to_string())?;
+
+		let occupied = occupied_keys(self.registry, &resolved);
+		let mut merged = toml::Value::try_from(&parsed).map_err(|err| err.to_string())?;
+		if let Some(source) = self.file {
+			overlay_unoccupied(&mut merged, source.value, "", &occupied);
+		}
+		let config: T = merged.try_into().map_err(|err: toml::de::Error| err.to_string())?;
+		Ok((config, resolved))
 	}
-	let config: T = merged.try_into().map_err(|err: toml::de::Error| err.to_string())?;
-	Ok((config, resolved))
 }
 
 /// A TOML document to merge, named for provenance.
@@ -202,6 +216,9 @@ fn overlay_unoccupied(base: &mut toml::Value, overlay: &toml::Value, path: &str,
 				} else {
 					format!("{path}.{key}")
 				};
+				if !occupied.contains(child.as_str()) {
+					base.remove(&format!("__cli_{key}"));
+				}
 				match base.get_mut(key) {
 					Some(existing) => overlay_unoccupied(existing, value, &child, occupied),
 					None if occupied.contains(child.as_str()) => {}

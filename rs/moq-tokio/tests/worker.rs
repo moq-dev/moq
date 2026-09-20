@@ -37,10 +37,21 @@ fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf
 
 fn listen_config(cert: &std::path::Path, key: &std::path::Path, port: u16) -> moq_tokio::listen::Config {
 	let mut config = moq_tokio::listen::Config::default();
-	config.bind = Some(format!("127.0.0.1:{port}"));
+	config.bind = Some(format!("127.0.0.1:{port}").parse().unwrap());
 	config.tls.cert = vec![cert.to_path_buf()];
 	config.tls.key = vec![key.to_path_buf()];
 	config
+}
+
+fn bind_workers(
+	listen: moq_tokio::listen::Config,
+	quic: moq_tokio::quic::Config,
+	worker: worker::Config,
+) -> moq_tokio::Result<Workers> {
+	let mut server = moq_tokio::server::Config::default();
+	server.listen = listen;
+	server.quic = quic;
+	Workers::bind(server, worker)
 }
 
 /// Pinning is off throughout: a CI container may restrict which cores it may run
@@ -62,14 +73,14 @@ async fn dropping_the_workers_releases_the_port() {
 	let port = free_udp_port();
 
 	let workers =
-		Workers::bind(listen_config(&cert, &key, port), Default::default(), config(WORKERS)).expect("bind workers");
+		bind_workers(listen_config(&cert, &key, port), Default::default(), config(WORKERS)).expect("bind workers");
 	assert_eq!(workers.len(), usize::from(WORKERS));
 
 	// Serving first is the case that used to strand the threads. The accept
 	// loops never return: ending them is the group's job, via shutdown below.
 	let mut group = workers.split();
-	for (server, spawner) in group.members() {
-		spawner.serve(server, |server| async move {
+	for member in group.members() {
+		member.serve(|server| async move {
 			let _listener = server.listen().await.expect("bind stream listeners");
 			std::future::pending::<()>().await;
 		});
@@ -91,13 +102,13 @@ async fn spawner_runs_a_send_less_future() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let workers = Workers::bind(listen_config(&cert, &key, 0), Default::default(), config(1)).expect("bind worker");
+	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(1)).expect("bind worker");
 
 	let mut group = workers.split();
 	let task = {
 		let mut split = group.members();
-		let (_server, spawner) = split.pop().expect("one worker");
-		spawner.run(|| async move {
+		let member = split.pop().expect("one worker");
+		member.run(|| async move {
 			let value = std::rc::Rc::new(std::cell::Cell::new(1));
 			tokio::task::yield_now().await;
 			value.set(value.get() + 1);
@@ -124,14 +135,14 @@ async fn spawner_contains_a_factory_panic() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let workers = Workers::bind(listen_config(&cert, &key, 0), Default::default(), config(1)).expect("bind worker");
+	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(1)).expect("bind worker");
 
 	let mut group = workers.split();
 	let (panicked, survived) = {
 		let mut split = group.members();
-		let (_server, spawner) = split.pop().expect("one worker");
-		let panicked = spawner.run(|| -> std::future::Pending<()> { panic!("factory") });
-		let survived = spawner.run(|| async { "still here" });
+		let member = split.pop().expect("one worker");
+		let panicked = member.run(|| -> std::future::Pending<()> { panic!("factory") });
+		let survived = member.run(|| async { "still here" });
 		(panicked, survived)
 	};
 
@@ -148,7 +159,7 @@ async fn spawner_abort_reaches_the_worker() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let workers = Workers::bind(listen_config(&cert, &key, 0), Default::default(), config(1)).expect("bind worker");
+	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(1)).expect("bind worker");
 
 	// Dropped when the future is, so it reports the cancellation from the worker.
 	let (dropped, was_dropped) = tokio::sync::oneshot::channel::<()>();
@@ -157,8 +168,8 @@ async fn spawner_abort_reaches_the_worker() {
 	let mut group = workers.split();
 	let task = {
 		let mut split = group.members();
-		let (_server, spawner) = split.pop().expect("one worker");
-		spawner.run(move || async move {
+		let member = split.pop().expect("one worker");
+		member.run(move || async move {
 			let _dropped = dropped;
 			let _ = started.send(());
 			std::future::pending::<()>().await;
@@ -182,7 +193,7 @@ async fn spawner_abort_races_the_handoff() {
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
-	let workers = Workers::bind(listen_config(&cert, &key, 0), Default::default(), config(1)).expect("bind worker");
+	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(1)).expect("bind worker");
 
 	// Dropped with the future, whether or not it was ever polled.
 	let (dropped, was_dropped) = tokio::sync::oneshot::channel::<()>();
@@ -190,8 +201,8 @@ async fn spawner_abort_races_the_handoff() {
 	let mut group = workers.split();
 	let task = {
 		let mut split = group.members();
-		let (_server, spawner) = split.pop().expect("one worker");
-		spawner.run(move || async move {
+		let member = split.pop().expect("one worker");
+		member.run(move || async move {
 			let _dropped = dropped;
 			std::future::pending::<()>().await;
 		})
@@ -218,7 +229,7 @@ async fn dropping_unserved_workers_releases_the_port() {
 	let port = free_udp_port();
 
 	let workers =
-		Workers::bind(listen_config(&cert, &key, port), Default::default(), config(WORKERS)).expect("bind workers");
+		bind_workers(listen_config(&cert, &key, port), Default::default(), config(WORKERS)).expect("bind workers");
 	drop(workers);
 
 	let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
@@ -235,7 +246,7 @@ async fn an_ephemeral_port_is_shared_by_the_group() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
 
-	let workers = Workers::bind(listen_config(&cert, &key, 0), Default::default(), config(WORKERS))
+	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(WORKERS))
 		.expect("a group may take an ephemeral port");
 	assert_eq!(workers.len(), usize::from(WORKERS));
 
@@ -264,9 +275,9 @@ async fn an_occupied_port_is_refused() {
 	let port = free_udp_port();
 
 	let workers =
-		Workers::bind(listen_config(&cert, &key, port), Default::default(), config(WORKERS)).expect("bind workers");
+		bind_workers(listen_config(&cert, &key, port), Default::default(), config(WORKERS)).expect("bind workers");
 
-	let err = Workers::bind(listen_config(&cert, &key, port), Default::default(), config(WORKERS))
+	let err = bind_workers(listen_config(&cert, &key, port), Default::default(), config(WORKERS))
 		.expect_err("a second group must not join the first");
 	assert!(
 		matches!(err, moq_tokio::Error::WorkerOverlap { .. }),
@@ -276,7 +287,7 @@ async fn an_occupied_port_is_refused() {
 	// The lock and the probe must be gone with the group: a second group takes
 	// the same address cleanly once the first shuts down.
 	workers.shutdown().await;
-	let again = Workers::bind(listen_config(&cert, &key, port), Default::default(), config(WORKERS))
+	let again = bind_workers(listen_config(&cert, &key, port), Default::default(), config(WORKERS))
 		.expect("the released address must be bindable again");
 	drop(again);
 }
@@ -294,12 +305,12 @@ async fn the_other_wildcard_spelling_is_refused() {
 	let port = free_udp_port();
 
 	let mut v4 = listen_config(&cert, &key, port);
-	v4.bind = Some(format!("0.0.0.0:{port}"));
-	let workers = Workers::bind(v4, Default::default(), config(WORKERS)).expect("bind v4 wildcard workers");
+	v4.bind = Some(format!("0.0.0.0:{port}").parse().unwrap());
+	let workers = bind_workers(v4, Default::default(), config(WORKERS)).expect("bind v4 wildcard workers");
 
 	let mut v6 = listen_config(&cert, &key, port);
-	v6.bind = Some(format!("[::]:{port}"));
-	let err = Workers::bind(v6, Default::default(), config(WORKERS))
+	v6.bind = Some(format!("[::]:{port}").parse().unwrap());
+	let err = bind_workers(v6, Default::default(), config(WORKERS))
 		.expect_err("the overlapping wildcard spelling must be refused");
 	assert!(
 		matches!(err, moq_tokio::Error::WorkerOverlap { .. }),
@@ -324,13 +335,13 @@ async fn a_shared_port_is_refused_across_addresses() {
 	let port = free_udp_port();
 
 	let workers =
-		Workers::bind(listen_config(&cert, &key, port), Default::default(), config(WORKERS)).expect("bind workers");
+		bind_workers(listen_config(&cert, &key, port), Default::default(), config(WORKERS)).expect("bind workers");
 
 	// A distinct loopback address: no bind conflict with 127.0.0.1, only the
 	// shared port.
 	let mut other = listen_config(&cert, &key, port);
-	other.bind = Some(format!("127.0.0.2:{port}"));
-	let err = Workers::bind(other, Default::default(), config(WORKERS))
+	other.bind = Some(format!("127.0.0.2:{port}").parse().unwrap());
+	let err = bind_workers(other, Default::default(), config(WORKERS))
 		.expect_err("a second group sharing the port must be refused");
 	assert!(
 		matches!(err, moq_tokio::Error::WorkerOverlap { .. }),
@@ -356,7 +367,7 @@ async fn a_foreign_reuseport_group_is_refused() {
 		.expect("bind foreign reuseport socket");
 	let port = foreign.local_addr().expect("local addr").port();
 
-	Workers::bind(listen_config(&cert, &key, port), Default::default(), config(WORKERS))
+	bind_workers(listen_config(&cert, &key, port), Default::default(), config(WORKERS))
 		.expect_err("a group must not join a foreign reuseport member");
 }
 
@@ -371,7 +382,7 @@ async fn an_unaddressable_group_is_refused() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
 
-	let err = Workers::bind(listen_config(&cert, &key, 0), Default::default(), config(257))
+	let err = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(257))
 		.expect_err("a group larger than the prefix can name");
 	assert!(
 		matches!(err, moq_tokio::Error::WorkerCount { count: 257, max: 256 }),
@@ -386,11 +397,11 @@ async fn generated_certificates_are_refused() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 	let mut listen = moq_tokio::listen::Config::default();
-	listen.bind = Some(format!("127.0.0.1:{}", free_udp_port()));
+	listen.bind = Some(format!("127.0.0.1:{}", free_udp_port()).parse().unwrap());
 	listen.tls.generate = vec!["localhost".to_string()];
 
-	let err = Workers::bind(listen, Default::default(), config(WORKERS))
-		.expect_err("generated certificates cannot be shared");
+	let err =
+		bind_workers(listen, Default::default(), config(WORKERS)).expect_err("generated certificates cannot be shared");
 	assert!(
 		matches!(err, moq_tokio::Error::WorkerTlsGenerate),
 		"unexpected error: {err}"
@@ -399,10 +410,11 @@ async fn generated_certificates_are_refused() {
 
 /// How many UDP sockets this process holds on `port`, via procfs.
 ///
-/// Each worker member is one reuseport socket. The group retains every socket
-/// until serving has stopped, so dropping a server handle must not change this
-/// count while the group is alive: without the retainer the kernel would close
-/// the socket and renumber every member after it.
+/// The group retains every reuseport socket until serving has stopped, so
+/// dropping a server handle must not change this count while the group is
+/// alive: without the retainer the kernel would close the socket and renumber
+/// every member after it. A backend may own more than one descriptor per
+/// member, so the invariant is the stable count rather than its exact value.
 #[cfg(target_os = "linux")]
 fn udp_sockets_on(port: u16) -> usize {
 	let want = format!(":{port:04X}");
@@ -436,31 +448,32 @@ async fn dropping_a_server_keeps_its_socket() {
 	let (cert, key) = certificate(dir.path());
 	let port = free_udp_port();
 
-	let workers = Workers::bind(listen_config(&cert, &key, port), Default::default(), config(2)).expect("bind workers");
+	let workers = bind_workers(listen_config(&cert, &key, port), Default::default(), config(2)).expect("bind workers");
 	let mut group = workers.split();
-	assert_eq!(udp_sockets_on(port), 2, "every member holds a socket");
+	let sockets = udp_sockets_on(port);
+	assert!(sockets >= 2, "every member holds at least one socket");
 	assert_eq!(group.local_addr().port(), port);
 
 	let mut members = group.members();
 	assert_eq!(members.len(), 2);
 
 	// An unused handle: never served, just dropped.
-	let (dropped, _) = members.pop().expect("two members");
+	let dropped = members.pop().expect("two members");
 	drop(dropped);
 
 	assert_eq!(
 		udp_sockets_on(port),
-		2,
+		sockets,
 		"dropping a server must not lose its socket while the group lives"
 	);
 
 	// The survivor still owns its address, and the port is still held.
 	// `members` is in index order and `pop` takes the last, so this drops
 	// member 1 and keeps member 0.
-	let (_server, spawner) = members.pop().expect("one member");
-	assert_eq!(spawner.index(), 0);
-	drop(_server);
-	assert_eq!(udp_sockets_on(port), 2, "the retainer outlives both handles");
+	let member = members.pop().expect("one member");
+	assert_eq!(member.index(), 0);
+	drop(member);
+	assert_eq!(udp_sockets_on(port), sockets, "the retainer outlives both handles");
 
 	group.shutdown().await;
 	assert_eq!(udp_sockets_on(port), 0, "stopping the group releases every socket");
@@ -478,7 +491,7 @@ async fn completing_a_member_stops_its_siblings() {
 	let (cert, key) = certificate(dir.path());
 	let port = free_udp_port();
 
-	let workers = Workers::bind(listen_config(&cert, &key, port), Default::default(), config(2)).expect("bind workers");
+	let workers = bind_workers(listen_config(&cert, &key, port), Default::default(), config(2)).expect("bind workers");
 	let mut group = workers.split();
 	let mut members = group.members();
 	assert_eq!(members.len(), 2);
@@ -486,14 +499,14 @@ async fn completing_a_member_stops_its_siblings() {
 	// The sibling signals once its serving future is running, so the completion
 	// below cannot win the race before it has started.
 	let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
-	let (server_sibling, spawner_sibling) = members.pop().expect("sibling");
-	let sibling = spawner_sibling.serve(server_sibling, |server| async move {
+	let member_sibling = members.pop().expect("sibling");
+	let sibling = member_sibling.serve(|server| async move {
 		let _listener = server.listen().await.expect("bind stream listeners");
 		let _ = started_tx.send(());
 		std::future::pending::<()>().await;
 	});
-	let (server_done, spawner_done) = members.pop().expect("completing member");
-	let done = spawner_done.serve(server_done, |server| async move {
+	let member_done = members.pop().expect("completing member");
+	let done = member_done.serve(|server| async move {
 		let _listener = server.listen().await.expect("bind stream listeners");
 		started_rx.await.expect("sibling started");
 		"done"
@@ -529,19 +542,19 @@ async fn cancelling_a_member_stops_its_siblings() {
 	let (cert, key) = certificate(dir.path());
 	let port = free_udp_port();
 
-	let workers = Workers::bind(listen_config(&cert, &key, port), Default::default(), config(2)).expect("bind workers");
+	let workers = bind_workers(listen_config(&cert, &key, port), Default::default(), config(2)).expect("bind workers");
 	let mut group = workers.split();
 	let mut members = group.members();
 
 	let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
-	let (server_a, spawner_a) = members.pop().expect("member a");
-	let task_a = spawner_a.serve(server_a, |server| async move {
+	let member_a = members.pop().expect("member a");
+	let task_a = member_a.serve(|server| async move {
 		let _listener = server.listen().await.expect("bind stream listeners");
 		let _ = started_tx.send(());
 		std::future::pending::<()>().await;
 	});
-	let (server_b, spawner_b) = members.pop().expect("member b");
-	let task_b = spawner_b.serve(server_b, |server| async move {
+	let member_b = members.pop().expect("member b");
+	let task_b = member_b.serve(|server| async move {
 		let _listener = server.listen().await.expect("bind stream listeners");
 		started_rx.await.expect("sibling started");
 		std::future::pending::<()>().await;
@@ -575,19 +588,19 @@ async fn a_panicking_member_stops_its_siblings() {
 	let (cert, key) = certificate(dir.path());
 	let port = free_udp_port();
 
-	let workers = Workers::bind(listen_config(&cert, &key, port), Default::default(), config(2)).expect("bind workers");
+	let workers = bind_workers(listen_config(&cert, &key, port), Default::default(), config(2)).expect("bind workers");
 	let mut group = workers.split();
 	let mut members = group.members();
 
 	let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
-	let (server_sibling, spawner_sibling) = members.pop().expect("sibling");
-	let sibling = spawner_sibling.serve(server_sibling, |server| async move {
+	let member_sibling = members.pop().expect("sibling");
+	let sibling = member_sibling.serve(|server| async move {
 		let _listener = server.listen().await.expect("bind stream listeners");
 		let _ = started_tx.send(());
 		std::future::pending::<()>().await;
 	});
-	let (server_panics, spawner_panics) = members.pop().expect("panicking member");
-	let panics = spawner_panics.serve(server_panics, |server| async move {
+	let member_panics = members.pop().expect("panicking member");
+	let panics = member_panics.serve(|server| async move {
 		let _listener = server.listen().await.expect("bind stream listeners");
 		started_rx.await.expect("sibling started");
 		panic!("serving panicked");
@@ -620,11 +633,11 @@ async fn shutdown_with_work_in_flight_joins() {
 	let (cert, key) = certificate(dir.path());
 	let port = free_udp_port();
 
-	let workers = Workers::bind(listen_config(&cert, &key, port), Default::default(), config(2)).expect("bind workers");
+	let workers = bind_workers(listen_config(&cert, &key, port), Default::default(), config(2)).expect("bind workers");
 	let mut group = workers.split();
 	let mut tasks = Vec::new();
-	for (server, spawner) in group.members() {
-		tasks.push(spawner.serve(server, |server| async move {
+	for member in group.members() {
+		tasks.push(member.serve(|server| async move {
 			let _listener = server.listen().await.expect("bind stream listeners");
 			std::future::pending::<()>().await;
 		}));
@@ -651,13 +664,13 @@ async fn dropping_the_group_with_work_in_flight_stops() {
 	let (cert, key) = certificate(dir.path());
 	let port = free_udp_port();
 
-	let workers = Workers::bind(listen_config(&cert, &key, port), Default::default(), config(2)).expect("bind workers");
+	let workers = bind_workers(listen_config(&cert, &key, port), Default::default(), config(2)).expect("bind workers");
 	let mut group = workers.split();
 	let mut tasks = Vec::new();
 	{
 		let mut members = group.members();
-		for (server, spawner) in members.drain(..) {
-			tasks.push(spawner.serve(server, |server| async move {
+		for member in members.drain(..) {
+			tasks.push(member.serve(|server| async move {
 				let _listener = server.listen().await.expect("bind stream listeners");
 				std::future::pending::<()>().await;
 			}));

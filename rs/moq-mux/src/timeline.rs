@@ -55,7 +55,7 @@ use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::Duration;
 
-use hang::catalog::{Archive, Timeline};
+use hang::catalog::Archive;
 use hang::timeline::{DEFAULT_NAME, Range, Record, RecordExt};
 
 use moq_net::{Timescale, Timestamp};
@@ -439,8 +439,8 @@ impl State {
 	///
 	/// Carries the track name, timescale, and duration bound. Wall-clock mapping is the
 	/// catalog root clock's job ([`Clock`](crate::Clock)), not this section's.
-	fn section(&self) -> Timeline {
-		let mut section = Timeline::new(DEFAULT_NAME);
+	fn section(&self) -> Archive {
+		let mut section = Archive::new(DEFAULT_NAME);
 		section.timescale = self.timescale.as_u64() as u32;
 		section.duration_max = self.config.duration_max.map(|max| self.units(max));
 		section
@@ -556,7 +556,7 @@ impl Segmenter {
 	}
 
 	/// The catalog section describing records built by this segmenter.
-	pub fn section(&self) -> Timeline {
+	pub fn section(&self) -> Archive {
 		self.state.lock().unwrap().section()
 	}
 
@@ -623,7 +623,7 @@ impl Deferred {
 
 	/// The catalog's root `archive` entry describing records built by this segmenter.
 	pub fn section(&self) -> Archive {
-		self.segmenter.section().into()
+		self.segmenter.section()
 	}
 
 	/// Flush the final open segment and return a handle that can only drain pending records.
@@ -885,7 +885,7 @@ impl Producer {
 
 	/// The catalog's root `archive` entry advertising this timeline.
 	pub fn section(&self) -> Archive {
-		self.segmenter.section().into()
+		self.segmenter.section()
 	}
 
 	/// Create a handle that closes segments without publishing them automatically.
@@ -1176,7 +1176,7 @@ impl<E: RecordExt> Consumer<E> {
 	/// The section supplies both the track name and the timescale, so a reader can't pair the
 	/// wrong scale with the track. Errors if the section declares a timescale that isn't
 	/// representable.
-	pub async fn subscribe(broadcast: &moq_net::broadcast::Consumer, section: &Timeline) -> crate::Result<Self> {
+	pub async fn subscribe(broadcast: &moq_net::broadcast::Consumer, section: &Archive) -> crate::Result<Self> {
 		let track = broadcast.track(&section.track)?.subscribe(None).await?;
 
 		let config = moq_json::window::ConsumerConfig::default().with_compression(true);
@@ -2073,7 +2073,7 @@ mod test {
 	#[tokio::test]
 	async fn the_built_in_catalog_is_recorded_without_pacing() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let timeline = catalog.timeline();
 		let mut video = catalog.enroll("video0").unwrap();
 

@@ -6,7 +6,7 @@ use std::task::Poll;
 use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
-use hang::catalog::{AudioConfig, Clock, Timeline, VideoConfig};
+use hang::catalog::{Archive, AudioConfig, Clock, VideoConfig};
 use moq_mux::container::fmp4::Muxer;
 use moq_mux::timeline::Entry;
 
@@ -200,7 +200,7 @@ pub struct Rendition {
 
 	config: Config,
 	/// The catalog's root archive timeline: the timescale timings decode with.
-	section: Timeline,
+	section: Archive,
 	/// The catalog's root broadcast clock: the wall anchor timings map through, after
 	/// timescale conversion. Absent when the publisher exposes none.
 	clock: Option<Clock>,
@@ -264,7 +264,7 @@ impl Rendition {
 		name: String,
 		config: &VideoConfig,
 		upstream: &Upstream,
-		section: Timeline,
+		section: Archive,
 		clock: Option<Clock>,
 	) -> moq_mux::Result<Self> {
 		Ok(Self {
@@ -289,7 +289,7 @@ impl Rendition {
 		name: String,
 		config: &AudioConfig,
 		upstream: &Upstream,
-		section: Timeline,
+		section: Archive,
 		clock: Option<Clock>,
 	) -> moq_mux::Result<Self> {
 		Ok(Self {
@@ -359,8 +359,13 @@ impl Rendition {
 	/// would return `Some`. Bounding the wait is the caller's policy (the serve path wraps this
 	/// in its own timeout).
 	pub async fn playable(&self) {
+		kio::wait(|waiter| self.poll_playable(waiter)).await;
+	}
+
+	/// Poll until this rendition has a renderable media playlist.
+	pub(crate) fn poll_playable(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.media.sync(&self.live);
-		kio::wait(|waiter| self.live.poll_playable(waiter)).await;
+		self.live.poll_playable(waiter)
 	}
 
 	/// Render this rendition's media playlist from the current timeline window, or `None` when
@@ -508,8 +513,7 @@ impl Rendition {
 	/// the root mapping; an unrepresentable result maps to no time rather than a truncated one.
 	pub(crate) fn wall_clock(&self, pts: moq_net::Timestamp) -> Option<SystemTime> {
 		let clock = self.clock.as_ref()?;
-		let scale = u32::try_from(pts.scale().as_u64()).ok()?;
-		clock.wall_clock(pts.value(), scale).ok()
+		clock.wall_clock(pts).ok()
 	}
 
 	fn muxer(&self) -> Result<Muxer> {

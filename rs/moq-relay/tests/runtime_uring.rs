@@ -80,7 +80,7 @@ fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf
 /// CI container may restrict which cores it may run on.
 fn uring_config(cert: &std::path::Path, key: &std::path::Path, port: u16) -> Config {
 	let mut config = Config::default();
-	config.listen.bind = Some(format!("127.0.0.1:{port}"));
+	config.listen.bind = Some(format!("127.0.0.1:{port}").parse().unwrap());
 	config.listen.tls.cert = vec![cert.to_path_buf()];
 	config.listen.tls.key = vec![key.to_path_buf()];
 	config.runtime.workers = Some(WORKERS);

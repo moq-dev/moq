@@ -609,7 +609,7 @@ mod tests {
 	/// Linux CI would try the NVENC backend and panic in cudarc on a GPU-less runner.
 	async fn roundtrip_rendition(codec: Codec, kind: encoder::Kind) -> (String, hang::catalog::VideoConfig) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
 		let mut config = Config::new(320, 240, 30);
 		config.codec = codec;
@@ -666,7 +666,7 @@ mod tests {
 	#[tokio::test]
 	async fn idle_capture_publishes_a_discontinuity_before_resume() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 		// The synthetic clock jumps ten seconds. Keep every fixture group readable until the
 		// assertion instead of letting the default five-second publisher window evict the marker.
 		let replay = std::time::Duration::from_secs(11);
@@ -701,7 +701,7 @@ mod tests {
 	#[tokio::test]
 	async fn source_resize_updates_the_published_rendition() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let mut initial = Config::new(320, 240, 30);
 		initial.kind = encoder::Kind::Software;
 		let mut producer = Producer::new(broadcast, catalog.clone(), initial.probe().await.unwrap()).unwrap();
@@ -731,7 +731,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_selected_container_survives_the_rendition_hint() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
 		let mut config = Config::new(320, 240, 30);
 		// Software (openh264) so the test is deterministic and never touches a hardware backend.
@@ -756,7 +756,7 @@ mod tests {
 	async fn the_rendition_reaches_the_wire_before_the_first_frame() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
 		let mut config = Config::new(1920, 1080, 30);
 		config.bitrate = Some(moq_net::bandwidth::Rate::from_mbps(6));
@@ -795,7 +795,7 @@ mod tests {
 	#[tokio::test]
 	async fn abort_after_finish() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let mut config = Config::new(320, 240, 30);
 		config.kind = encoder::Kind::Software;
 		let track = broadcast

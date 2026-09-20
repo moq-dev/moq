@@ -40,11 +40,11 @@ pub struct ExportArgs {
 	/// How stale a group may get before it is skipped. RTMP is unpaced, so this
 	/// bounds buffering, not the wire rate.
 	#[usage(long, default = "500ms")]
-	pub max_age: moq_tokio::cli::Duration,
+	pub max_age: crate::duration::Duration,
 
 	/// The released spelling of [`Self::max_age`].
 	#[usage(long = "latency-max", hide = true)]
-	pub(crate) latency_max: Option<moq_tokio::cli::Duration>,
+	pub(crate) latency_max: Option<crate::duration::Duration>,
 }
 
 /// Accept incoming RTMP publishes into the Origin as `target.name`; reject plays (import).

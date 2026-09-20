@@ -265,7 +265,7 @@ impl Publish {
 		// gets exactly one; TS builds its `Ext` catalog here instead of the shared `()` below.
 		if let PublishFormat::Ts = format {
 			let config = config.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
-			let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 			let ts = ts::Import::new(broadcast.clone(), catalog.reserve());
 			return Ok(Self {
 				source: Source::Stream(PublishDecoder::Ts(Box::new(ts))),
@@ -273,7 +273,7 @@ impl Publish {
 			});
 		}
 
-		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 		let source = match format {
 			PublishFormat::Avc3 => {
 				let track = broadcast.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video))?;
@@ -315,7 +315,7 @@ impl Publish {
 		max_age: Option<std::time::Duration>,
 	) -> anyhow::Result<Self> {
 		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
-		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 
 		let video = (!args.no_video).then(|| (args.video_config(), args.video_encode(bandwidth.clone())));
 		let audio = (!args.no_audio).then(|| (args.audio_config(), args.audio_encode(bandwidth)));
@@ -562,8 +562,8 @@ mod tests {
 		let mut broadcast = origin.create_broadcast("cli").unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		settle().await;
-		let mut catalog =
-			moq_mux::catalog::Producer::with_catalog(&mut broadcast, Catalog::<tscat::Ext>::default()).unwrap();
+		let config = moq_mux::catalog::Config::default().with_catalog(Catalog::<tscat::Ext>::default());
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
 
 		// Section-framed verbatim stream (SCTE-35, stream_type 0x86).
 		let section = broadcast
@@ -574,6 +574,7 @@ mod tests {
 		catalog
 			.modify()
 			.unwrap()
+			.ext
 			.mpegts
 			.tracks
 			.insert(section.name().to_string(), section_track);
@@ -604,6 +605,7 @@ mod tests {
 		catalog
 			.modify()
 			.unwrap()
+			.ext
 			.mpegts
 			.tracks
 			.insert(pes.name().to_string(), pes_track);
@@ -690,14 +692,15 @@ mod tests {
 		// Re-import the round-tripped TS and inspect the recovered `mpegts` section.
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let catalog =
-			moq_mux::catalog::Producer::with_catalog(&mut broadcast, Catalog::<tscat::Ext>::default()).unwrap();
+		let config = moq_mux::catalog::Config::default().with_catalog(Catalog::<tscat::Ext>::default());
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
 		let mut import = Import::new(broadcast, catalog.reserve());
 		import.decode(&BytesMut::from(&output[..])).unwrap();
 		import.finish().unwrap();
 		let snapshot = catalog.snapshot();
 
 		let (section_name, section) = snapshot
+			.ext
 			.mpegts
 			.tracks
 			.iter()
@@ -712,6 +715,7 @@ mod tests {
 		let section_name = section_name.clone();
 
 		let (pes_name, pes) = snapshot
+			.ext
 			.mpegts
 			.tracks
 			.iter()

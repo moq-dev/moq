@@ -1,6 +1,6 @@
 import * as z from "@zod/mini";
+import { MOQ_EPOCH_UNIX_MILLIS } from "./archive";
 import { u53Schema } from "./integers";
-import { MOQ_EPOCH_UNIX_MILLIS } from "./timeline";
 
 /** Units per second for a catalog clock. Matches Rust `u32`; zero is refused. */
 const clockTimescaleSchema = z.number().check(z.int(), z.positive(), z.lte(4_294_967_295));

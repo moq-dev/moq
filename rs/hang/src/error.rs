@@ -55,7 +55,7 @@ pub enum Error {
 
 	/// A catalog timescale is zero, so no timestamp can be expressed in it.
 	#[error("invalid timescale: {0}")]
-	InvalidTimescale(u32),
+	InvalidTimescale(u64),
 
 	/// A catalog wall-clock value is outside the JSON-safe integer range.
 	#[error("invalid wall clock: {0}")]

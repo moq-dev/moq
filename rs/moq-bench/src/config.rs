@@ -29,16 +29,16 @@ pub struct Config {
 
 	/// Spread connection and subscription startup over this duration to avoid a thundering herd.
 	#[usage(long, env = "MOQ_BENCH_STARTUP", default = "10s", setting = "startup")]
-	pub startup: moq_tokio::cli::Duration,
+	pub(crate) startup: crate::duration::Duration,
 
 	/// Stop the benchmark after this duration. Runs until interrupted if unset.
 	#[usage(long, env = "MOQ_BENCH_DURATION", setting = "duration")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub duration: Option<moq_tokio::cli::Duration>,
+	pub(crate) duration: Option<crate::duration::Duration>,
 
 	/// How often to log throughput stats.
 	#[usage(long, env = "MOQ_BENCH_REPORT", default = "1s", setting = "report")]
-	pub report: moq_tokio::cli::Duration,
+	pub(crate) report: crate::duration::Duration,
 
 	/// Number of connections (A) to establish. Rolled once for the whole run.
 	#[usage(long, env = "MOQ_BENCH_CONNECTIONS", default = "1", setting = "connections")]
@@ -150,7 +150,7 @@ impl Config {
 	/// Refused in `parse_and_merge`, before anything reads the config: those
 	/// spellings land on hidden fields that nothing honors, so continuing would dial
 	/// with settings the command line never asked for.
-	fn deprecated(&self) -> moq_tokio::Deprecated {
+	fn deprecated(&self) -> moq_tokio::cli::Deprecated {
 		let mut deprecated = self.client.deprecated();
 		deprecated.extend(self.quic.deprecated());
 		deprecated
@@ -203,8 +203,14 @@ impl Config {
 		// drops, so they are collected from the parse and reported with the file's
 		// own released keys in one message.
 		let mut deprecated = config.deprecated();
-		let (mut config, resolved) = moq_tokio::cli::merge(Settings::SETTINGS_REGISTRY, config, &cli_layer, &env, file)
-			.map_err(|err| anyhow::anyhow!("{err}"))?;
+		let (mut config, resolved) = moq_tokio::cli::Merge {
+			registry: Settings::SETTINGS_REGISTRY,
+			cli: &cli_layer,
+			env: &env,
+			file,
+		}
+		.apply(config)
+		.map_err(|err| anyhow::anyhow!("{err}"))?;
 		deprecated.extend(config.deprecated());
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
 		config.origins = Some(resolved);

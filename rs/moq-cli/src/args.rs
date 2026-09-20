@@ -367,7 +367,7 @@ pub struct MoqSide {
 
 impl MoqSide {
 	/// Every released spelling this invocation used, across all three sections.
-	fn deprecated(&self) -> moq_tokio::Deprecated {
+	fn deprecated(&self) -> moq_tokio::cli::Deprecated {
 		let mut found = self.client.deprecated();
 		found.extend(self.quic.deprecated());
 		found.extend(self.server.deprecated());
@@ -413,7 +413,9 @@ impl MoqSide {
 	pub fn server_config(&self) -> moq_tokio::listen::Config {
 		let mut config = self.server.clone();
 		if self.lan() {
-			config.bind.get_or_insert_with(|| "[::]:0".to_string());
+			config
+				.bind
+				.get_or_insert_with(|| moq_tokio::listen::Bind::Addr("[::]:0".parse().unwrap()));
 			if config.tls.generate.is_empty() && config.tls.cert.is_empty() {
 				config.tls.generate = vec!["moq-cluster-lan".to_string()];
 			}
@@ -594,7 +596,7 @@ impl Command {
 	/// sharp case, because the listener decides whether to serve TLS at all from the
 	/// canonical `cert`/`generate` fields, so a released `--tls-cert` would leave it
 	/// serving plaintext rather than reaching the builder that refuses.
-	fn deprecated(&self) -> moq_tokio::Deprecated {
+	fn deprecated(&self) -> moq_tokio::cli::Deprecated {
 		match self {
 			Self::Import(import) => import.deprecated(),
 			Self::Publish(import) => {
@@ -608,7 +610,7 @@ impl Command {
 				found.flag("subscribe", None, "export");
 				found
 			}
-			_ => moq_tokio::Deprecated::default(),
+			_ => moq_tokio::cli::Deprecated::default(),
 		}
 	}
 
@@ -689,11 +691,11 @@ pub struct Import {
 	/// memory matters. Media tracks only -- the catalog and timeline are read at the live edge,
 	/// which is retained unconditionally.
 	#[usage(long)]
-	pub max_age: Option<moq_tokio::cli::Duration>,
+	pub max_age: Option<crate::duration::Duration>,
 
 	/// The released spelling of [`Self::max_age`].
 	#[usage(long = "latency-max", hide = true)]
-	latency_max: Option<moq_tokio::cli::Duration>,
+	latency_max: Option<crate::duration::Duration>,
 
 	/// The single source feeding the Origin.
 	#[usage(subcommand)]
@@ -701,8 +703,8 @@ pub struct Import {
 }
 
 impl Import {
-	fn deprecated(&self) -> moq_tokio::Deprecated {
-		let mut found = moq_tokio::Deprecated::default();
+	fn deprecated(&self) -> moq_tokio::cli::Deprecated {
+		let mut found = moq_tokio::cli::Deprecated::default();
 		if self.name.is_some() {
 			found.flag("--name", None, "--broadcast");
 		}
@@ -783,8 +785,8 @@ pub struct Export {
 }
 
 impl Export {
-	fn deprecated(&self) -> moq_tokio::Deprecated {
-		let mut found = moq_tokio::Deprecated::default();
+	fn deprecated(&self) -> moq_tokio::cli::Deprecated {
+		let mut found = moq_tokio::cli::Deprecated::default();
 		if self.name.is_some() {
 			found.flag("--name", None, "--broadcast");
 		}
@@ -838,12 +840,12 @@ impl ExportSink {
 			Self::Fmp4(args) => (
 				SubscribeFormat::Fmp4,
 				args.container.max_age.into_std(),
-				args.fragment_duration.map(moq_tokio::cli::Duration::into_std),
+				args.fragment_duration.map(crate::duration::Duration::into_std),
 			),
 			Self::Mkv(args) => (
 				SubscribeFormat::Mkv,
 				args.container.max_age.into_std(),
-				args.fragment_duration.map(moq_tokio::cli::Duration::into_std),
+				args.fragment_duration.map(crate::duration::Duration::into_std),
 			),
 			Self::Ts(args) => (SubscribeFormat::Ts, args.max_age.into_std(), None),
 			Self::Flv(args) => (SubscribeFormat::Flv, args.max_age.into_std(), None),
@@ -860,16 +862,16 @@ impl ExportSink {
 pub struct Container {
 	/// How stale a group may get before it is skipped (e.g. `500ms`, `1s`).
 	#[usage(long, default = "500ms")]
-	pub max_age: moq_tokio::cli::Duration,
+	pub max_age: crate::duration::Duration,
 
 	/// The released spelling of [`Self::max_age`].
 	#[usage(long = "latency-max", hide = true)]
-	latency_max: Option<moq_tokio::cli::Duration>,
+	latency_max: Option<crate::duration::Duration>,
 }
 
 impl Container {
-	fn deprecated(&self) -> moq_tokio::Deprecated {
-		let mut found = moq_tokio::Deprecated::default();
+	fn deprecated(&self) -> moq_tokio::cli::Deprecated {
+		let mut found = moq_tokio::cli::Deprecated::default();
 		if self.latency_max.is_some() {
 			found.flag("--latency-max", None, "--max-age");
 		}
@@ -887,7 +889,7 @@ pub struct Fragmented {
 	/// Cap the output fragment/cluster duration (e.g. `2s`).
 	/// Defaults to publisher groups for fMP4 and video GOPs for MKV.
 	#[usage(long)]
-	pub fragment_duration: Option<moq_tokio::cli::Duration>,
+	pub fragment_duration: Option<crate::duration::Duration>,
 }
 
 #[cfg(test)]
@@ -1522,7 +1524,11 @@ mod tests {
 		assert!(cli.moq.validate().is_ok(), "the LAN mesh is a MoQ side on its own");
 
 		let server = cli.moq.server_config();
-		assert_eq!(server.bind.as_deref(), Some("[::]:0"), "an ephemeral port");
+		assert_eq!(
+			server.bind.as_ref().map(ToString::to_string).as_deref(),
+			Some("[::]:0"),
+			"an ephemeral port"
+		);
 		assert_eq!(server.tls.generate, ["moq-cluster-lan"], "a generated certificate");
 
 		// An explicit listener wins, so the mesh shares one port and certificate
@@ -1539,7 +1545,10 @@ mod tests {
 		])
 		.expect("parse");
 		let server = cli.moq.server_config();
-		assert_eq!(server.bind.as_deref(), Some("[::]:4443"));
+		assert_eq!(
+			server.bind.as_ref().map(ToString::to_string).as_deref(),
+			Some("[::]:4443")
+		);
 		assert_eq!(server.tls.generate, ["localhost"]);
 
 		// Without the mesh, nothing is filled in.

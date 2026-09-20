@@ -24,7 +24,7 @@ struct ConnectTest<'a> {
 	path: &'a str,
 	/// The request path the server must observe, when the test cares.
 	expect_path: Option<&'a str>,
-	/// The authority the server must observe via [`moq_tokio::Request::authority`], when the
+	/// The authority the server must observe via [`moq_tokio::server::Request::authority`], when the
 	/// test cares. `None` skips the check; `Some(None)` asserts no authority (a bare-IP dial that
 	/// sends no SNI); `Some(Some(host))` asserts that host.
 	expect_authority: Option<Option<&'a str>>,
@@ -61,7 +61,7 @@ async fn backend_test(scheme: &str, backend: moq_tokio::QuicBackend) {
 ///
 /// Raw QUIC (`moqt`/`moql`) has no request URI, so the whole request target has to
 /// ride the SETUP; WebTransport carries it in the CONNECT URL instead. Either way the
-/// server reports the same route and query through [`moq_tokio::Request`].
+/// server reports the same route and query through [`moq_tokio::server::Request`].
 #[cfg(any(feature = "quinn", feature = "quiche", feature = "noq"))]
 async fn path_test(scheme: &str, backend: moq_tokio::QuicBackend) {
 	connect_test(ConnectTest {
@@ -132,7 +132,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 	group.finish().expect("failed to finish group");
 
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some(bind.to_string());
+	server_config.bind = Some(bind.parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.backend = Some(backend.clone());
 	let server = server_config.init(quic.clone()).expect("failed to init server");
@@ -265,7 +265,7 @@ async fn sni_test(backend: moq_tokio::QuicBackend) {
 	let (second_cert, second_key) = write_self_signed(dir.path(), "second", "alt.localhost");
 
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("127.0.0.1:0".to_string());
+	server_config.bind = Some("127.0.0.1:0".parse().unwrap());
 	server_config.tls.cert = vec![first_cert, second_cert];
 	server_config.tls.key = vec![first_key, second_key];
 	server_config.backend = Some(backend.clone());
@@ -323,7 +323,7 @@ async fn cert_sources_test(backend: moq_tokio::QuicBackend) {
 	let (cert, key) = write_self_signed(dir.path(), "server", "localhost");
 
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("127.0.0.1:0".to_string());
+	server_config.bind = Some("127.0.0.1:0".parse().unwrap());
 	server_config.tls.cert = vec![cert];
 	server_config.tls.key = vec![key];
 	server_config.tls.generate = vec!["generated.localhost".into()];
@@ -349,7 +349,7 @@ async fn reload_test(backend: moq_tokio::QuicBackend) {
 	let (cert, key) = write_self_signed(dir.path(), "server", "localhost");
 
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("127.0.0.1:0".to_string());
+	server_config.bind = Some("127.0.0.1:0".parse().unwrap());
 	server_config.tls.cert = vec![cert.clone()];
 	server_config.tls.key = vec![key.clone()];
 	server_config.backend = Some(backend);
@@ -478,7 +478,7 @@ async fn mtls_test(scheme: &str, backend: moq_tokio::QuicBackend, reject: bool) 
 	let pub_origin = moq_tokio::origin::spawn(Hop::random());
 
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("127.0.0.1:0".to_string());
+	server_config.bind = Some("127.0.0.1:0".parse().unwrap());
 	server_config.tls.cert = vec![paths.server_cert.clone()];
 	server_config.tls.key = vec![paths.server_key.clone()];
 	server_config.tls.root = vec![paths.ca.clone()];
@@ -486,7 +486,7 @@ async fn mtls_test(scheme: &str, backend: moq_tokio::QuicBackend, reject: bool) 
 	// One shared tuning, handed to both roles the way a binary would.
 	let mut quic = moq_tokio::quic::Config::default();
 	quic.gso = Some(false);
-	quic.keep_alive = Duration::from_secs(1).into();
+	quic.keep_alive = Duration::from_secs(1);
 
 	let server = server_config.init(quic.clone()).expect("failed to init server");
 	let mut server = server.listen().await.expect("failed to listen");
@@ -512,7 +512,7 @@ async fn mtls_test(scheme: &str, backend: moq_tokio::QuicBackend, reject: bool) 
 		let has_cert = request.peer_identity().is_some();
 		let _ = identity_tx.send(has_cert);
 		if reject {
-			request.close(403).await?;
+			request.reject(moq_tokio::server::Reject::Forbidden).await?;
 			return Ok::<_, anyhow::Error>(has_cert);
 		}
 		let session = request.with_publisher(pub_origin.consume()).ok().await?;
@@ -739,13 +739,13 @@ async fn iroh_connect() {
 
 	// Server still needs a QUIC bind for init, but we'll connect via iroh
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".to_string());
+	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 
-	let server = server_config
-		.init(Default::default())
-		.expect("failed to init server")
-		.with_iroh(server_endpoint);
+	let mut config = moq_tokio::server::Config::default();
+	config.listen = server_config;
+	config.iroh = Some(server_endpoint);
+	let server = config.init().expect("failed to init server");
 	let mut server = server.listen().await.expect("failed to listen");
 
 	// ── subscriber (client) ─────────────────────────────────────────
@@ -782,7 +782,7 @@ async fn iroh_connect() {
 		assert_eq!(request.role(), Some(moq_tokio::moq_net::Role::Subscriber));
 		// iroh offers the moq ALPNs ahead of H3, so this lands on raw QUIC: no request
 		// URL, leaving the SETUP as the only place for the request target.
-		assert_eq!(request.transport(), moq_tokio::Transport::Iroh);
+		assert_eq!(request.transport(), moq_tokio::server::Transport::Iroh);
 		assert_eq!(request.url(), None);
 		assert_eq!(request.path(), "/room");
 		assert_eq!(request.query(), Some("jwt=abc"));

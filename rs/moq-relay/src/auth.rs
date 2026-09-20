@@ -15,9 +15,9 @@ use serde_with::{OneOrMany, serde_as};
 use tokio::sync::{mpsc, oneshot};
 use url::Url;
 
-/// The longest an embedder may take to answer an admission, the bound
+/// The longest a decider may take to answer an admission, the bound
 /// `moq_auth::Client` puts on a server, so a stalled decider refuses rather
-/// than parks the sessions behind it.
+/// than parks the session behind it.
 const ADMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Where every session's grant comes from. Exactly one of `url` and the public
@@ -101,21 +101,21 @@ impl Config {
 
 	/// Build the [`Auth`] this configuration describes. `tls` is the client
 	/// identity an `https://` server is dialed with; `node` names this relay in
-	/// every request.
+	/// every request. Must be called within a Tokio runtime, which drives the
+	/// admission decider.
 	pub fn init(&self, node: impl Into<String>, tls: &moq_tokio::tls::Connect) -> anyhow::Result<Auth> {
 		self.validate()?;
-		let mode = match (&self.url, self.public_grant()) {
+		let decider = match (&self.url, self.public_grant()) {
 			(Some(url), _) => {
 				let tls = tls.build()?;
-				Mode::Server(moq_auth::Client::new(url.clone(), Some(tls))?)
+				Decider::Server(moq_auth::Client::new(url.clone(), Some(tls))?)
 			}
-			(None, Some(grant)) => Mode::Public(grant),
+			(None, Some(grant)) => Decider::Public(grant),
 			(None, None) => unreachable!("validated above"),
 		};
-		Ok(Auth {
-			mode: Arc::new(mode),
-			node: Arc::from(node.into()),
-		})
+		let (auth, admissions) = Auth::embedded(node);
+		decider.spawn(admissions);
+		Ok(auth)
 	}
 }
 
@@ -140,7 +140,7 @@ pub enum Error {
 impl From<moq_auth::Error> for Error {
 	fn from(err: moq_auth::Error) -> Self {
 		match err {
-			moq_auth::Error::Refused => Self::Refused,
+			moq_auth::Error::Refused | moq_auth::Error::UselessGrant => Self::Refused,
 			other => Self::Unavailable(other.to_string()),
 		}
 	}
@@ -301,23 +301,38 @@ impl Lease {
 	}
 }
 
-enum Mode {
+enum Decider {
 	Server(moq_auth::Client),
 	Public(Grant),
-	/// The embedding process decides: every session is queued for whoever holds
-	/// the [`Admissions`], and admits nothing once they are gone.
-	Embedded(mpsc::UnboundedSender<Admission>),
-	/// Nothing admits an ordinary session; only a locally decided grant (the LAN
-	/// mesh credential) gets through. What a `--cluster-lan` process with no
-	/// listener of its own runs.
 	Refuse,
 }
 
-/// Admits sessions: asks the server, hands out the static public grant, or queues
-/// the session for the embedder.
+impl Decider {
+	fn spawn(self, mut admissions: Admissions) {
+		tokio::spawn(async move {
+			while let Some(admission) = admissions.next().await {
+				match &self {
+					Self::Server(client) => {
+						let client = client.clone();
+						tokio::spawn(async move {
+							match client.connect(admission.request.clone()).await {
+								Ok(lease) => admission.grant(lease),
+								Err(err) => admission.refuse(err.into()),
+							}
+						});
+					}
+					Self::Public(grant) => admission.grant(lease::Consumer::fixed(grant.clone())),
+					Self::Refuse => admission.refuse(Error::Refused),
+				}
+			}
+		});
+	}
+}
+
+/// Admits sessions by queueing every request for one admission decider.
 #[derive(Clone)]
 pub struct Auth {
-	mode: Arc<Mode>,
+	admissions: mpsc::UnboundedSender<Admission>,
 	node: Arc<str>,
 }
 
@@ -328,7 +343,7 @@ impl Auth {
 	pub fn embedded(node: impl Into<String>) -> (Self, Admissions) {
 		let (sender, receiver) = mpsc::unbounded_channel();
 		let auth = Self {
-			mode: Arc::new(Mode::Embedded(sender)),
+			admissions: sender,
 			node: Arc::from(node.into()),
 		};
 		(auth, Admissions(receiver))
@@ -336,11 +351,11 @@ impl Auth {
 
 	/// An `Auth` that refuses every session a server or a public grant would have
 	/// decided, admitting only what the relay decides for itself (a LAN peer).
+	/// Must be called within a Tokio runtime, which drives the refusal decider.
 	pub fn refuse(node: impl Into<String>) -> Self {
-		Self {
-			mode: Arc::new(Mode::Refuse),
-			node: Arc::from(node.into()),
-		}
+		let (auth, admissions) = Self::embedded(node);
+		Decider::Refuse.spawn(admissions);
+		auth
 	}
 
 	/// The name this relay puts in every request.
@@ -356,27 +371,17 @@ impl Auth {
 	/// Admit a session: the lease it holds, carrying the scope the origin applies.
 	pub async fn admit(&self, request: Request) -> Result<Lease, Error> {
 		let path = request.path.clone();
-		let consumer = match self.mode.as_ref() {
-			Mode::Server(client) => client.connect(request).await?,
-			// A certificate is a fact for a server to weigh; with no server it admits
-			// nothing on its own, so the peer gets what any anonymous session gets.
-			Mode::Public(grant) => lease::Consumer::fixed(grant.clone()),
-			Mode::Embedded(admissions) => {
-				let (reply, answer) = oneshot::channel();
-				admissions
-					.send(Admission { request, reply })
-					.map_err(|_| Error::Unavailable("nobody is answering admissions".into()))?;
-				let consumer = tokio::time::timeout(ADMIT_TIMEOUT, answer)
-					.await
-					.map_err(|_| Error::Unavailable("the admission timed out".into()))?
-					.map_err(|_| Error::Unavailable("the admission went unanswered".into()))??;
-				// Held to what a server's answer is held to: a grant that admits nothing
-				// or asks for a re-check without a bound is the decider's bug, not a refusal.
-				consumer.grant().validate()?;
-				consumer
-			}
-			Mode::Refuse => return Err(Error::Refused),
-		};
+		let (reply, answer) = oneshot::channel();
+		self.admissions
+			.send(Admission { request, reply })
+			.map_err(|_| Error::Unavailable("nobody is answering admissions".into()))?;
+		let consumer = tokio::time::timeout(ADMIT_TIMEOUT, answer)
+			.await
+			.map_err(|_| Error::Unavailable("the admission timed out".into()))?
+			.map_err(|_| Error::Unavailable("the admission went unanswered".into()))??;
+		// Every decider is held to the same answer contract: a grant that admits
+		// nothing or asks for a re-check without a bound is a bug, not a refusal.
+		consumer.grant().validate()?;
 		Ok(Lease::new(&path, consumer))
 	}
 
@@ -429,13 +434,13 @@ impl Admission {
 
 /// The `moq_auth::Request` for an accepted transport request: every fact the
 /// transport knows, nothing parsed on the server's behalf.
-pub fn request_for(auth: &Auth, request: &moq_tokio::Request) -> Request {
+pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request {
 	let transport = match request.transport() {
-		moq_tokio::Transport::Quic => moq_auth::Transport::Quic,
-		moq_tokio::Transport::Iroh => moq_auth::Transport::Iroh,
-		moq_tokio::Transport::WebSocket => moq_auth::Transport::WebSocket,
-		moq_tokio::Transport::Tcp => moq_auth::Transport::Tcp,
-		moq_tokio::Transport::Unix => moq_auth::Transport::Unix,
+		moq_tokio::server::Transport::Quic => moq_auth::Transport::Quic,
+		moq_tokio::server::Transport::Iroh => moq_auth::Transport::Iroh,
+		moq_tokio::server::Transport::WebSocket => moq_auth::Transport::WebSocket,
+		moq_tokio::server::Transport::Tcp => moq_auth::Transport::Tcp,
+		moq_tokio::server::Transport::Unix => moq_auth::Transport::Unix,
 		// A transport this build does not know is still a session on the wire; the
 		// server sees the same facts either way.
 		other => unreachable!("unknown transport {other}"),
@@ -506,16 +511,32 @@ mod tests {
 		assert!(grant.publish.is_empty());
 	}
 
-	#[test]
-	fn a_public_config_admits_anonymous_and_certificate_alike() {
+	#[tokio::test]
+	async fn a_public_config_admits_anonymous_and_certificate_alike() {
 		let auth = config(None, &["anon/**"])
 			.init("relay-1", &moq_tokio::tls::Connect::default())
 			.unwrap();
 		let request = auth.request(moq_auth::Transport::Quic, "/anon/room");
-		let lease = futures::executor::block_on(auth.admit(request)).unwrap();
+		let lease = auth.admit(request).await.unwrap();
 		assert_eq!(lease.token().root, Path::new("anon/room").to_owned());
 		assert_eq!(lease.token().subscribe, patterns(&["anon/**"]));
 		assert_eq!(lease.token().tier, Tier::default());
+	}
+
+	#[test]
+	fn config_init_requires_a_runtime() {
+		let result = std::panic::catch_unwind(|| {
+			let _ = config(None, &["anon/**"])
+				.init("relay-1", &moq_tokio::tls::Connect::default())
+				.unwrap();
+		});
+		assert!(result.is_err());
+	}
+
+	#[test]
+	fn refuse_requires_a_runtime() {
+		let result = std::panic::catch_unwind(|| Auth::refuse("relay-1"));
+		assert!(result.is_err());
 	}
 
 	/// The embedder's answer is the session's verdict; an answer that never comes,
@@ -542,14 +563,34 @@ mod tests {
 			let lease = auth.admit(request()).await.expect("granted");
 			assert_eq!(lease.token().root, Path::new("anon/room").to_owned());
 			assert!(matches!(auth.admit(request()).await, Err(Error::Refused)));
-			for _ in 0..2 {
-				assert!(matches!(auth.admit(request()).await, Err(Error::Unavailable(_))));
-			}
+			assert!(matches!(auth.admit(request()).await, Err(Error::Refused)));
+			assert!(matches!(auth.admit(request()).await, Err(Error::Unavailable(_))));
 		};
 		let (admissions, ()) = tokio::join!(decide, admit);
 
 		drop(admissions);
 		assert!(matches!(auth.admit(request()).await, Err(Error::Unavailable(_))));
+	}
+
+	#[tokio::test]
+	async fn dropping_the_last_auth_ends_admissions() {
+		let (auth, mut admissions) = Auth::embedded("relay-1");
+		let clone = auth.clone();
+		drop(auth);
+		assert!(
+			tokio::time::timeout(std::time::Duration::ZERO, admissions.next())
+				.await
+				.is_err()
+		);
+		drop(clone);
+		assert!(admissions.next().await.is_none());
+	}
+
+	#[tokio::test]
+	async fn refuse_answers_the_admission_queue() {
+		let auth = Auth::refuse("relay-1");
+		let request = auth.request(moq_auth::Transport::Quic, "/anon/room");
+		assert!(matches!(auth.admit(request).await, Err(Error::Refused)));
 	}
 
 	#[test]

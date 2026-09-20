@@ -1044,7 +1044,7 @@ mod session_tests {
 		// A live handler is what makes an unserved name park rather than resolve `NotFound`,
 		// which is how it behaves over the wire: the publisher just never answers.
 		let mut dynamic = broadcast.dynamic();
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
 		// First update announces audio only, and no producer ever answers for it.
 		{
@@ -1087,7 +1087,7 @@ mod session_tests {
 		let element = element();
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
 		// Both renditions in one snapshot, so the result can't hinge on which update the
 		// session read: with no handler alive, `audio` resolves `NotFound` rather than parking,
@@ -1121,7 +1121,7 @@ mod session_tests {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut dynamic = broadcast.dynamic();
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
 		{
 			let mut guard = catalog.modify().unwrap();
@@ -1162,7 +1162,7 @@ mod session_tests {
 		let element = element();
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
 		let _video = broadcast.create_track("video", None).unwrap();
 		{
@@ -1192,7 +1192,7 @@ mod session_tests {
 		let element = element();
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
 		// One rendition that streams, and one reserved by name that nobody ever accepts.
 		let video = broadcast
@@ -1248,7 +1248,7 @@ mod session_tests {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let _dynamic = broadcast.dynamic();
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
 		// A video rendition nobody serves, alongside an audio one that arrives. The audio pad
 		// is the signal that this update was reconciled, so the second update below is a

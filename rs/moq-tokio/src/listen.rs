@@ -5,6 +5,77 @@
 
 use crate::QuicBackend;
 
+/// A QUIC listen address.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum Bind {
+	/// A resolved socket address.
+	Addr(std::net::SocketAddr),
+	/// A host and port to resolve when the listener binds.
+	Host(String, u16),
+}
+
+impl Bind {
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	pub(crate) fn resolve(&self) -> std::io::Result<std::net::SocketAddr> {
+		match self {
+			Self::Addr(addr) => Ok(*addr),
+			Self::Host(host, port) => crate::util::resolve(Some(&format!("{host}:{port}")), ""),
+		}
+	}
+}
+
+impl std::str::FromStr for Bind {
+	type Err = std::net::AddrParseError;
+
+	fn from_str(value: &str) -> Result<Self, Self::Err> {
+		let socket_error = match value.parse() {
+			Ok(addr) => return Ok(Self::Addr(addr)),
+			Err(err) => err,
+		};
+
+		let Some((host, port)) = value.rsplit_once(':') else {
+			return Err(socket_error);
+		};
+		if host.is_empty() || host.contains(':') {
+			return Err(socket_error);
+		}
+		let Ok(port) = port.parse() else {
+			return Err(socket_error);
+		};
+		Ok(Self::Host(host.to_owned(), port))
+	}
+}
+
+impl std::fmt::Display for Bind {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Self::Addr(addr) => addr.fmt(f),
+			Self::Host(host, port) => write!(f, "{host}:{port}"),
+		}
+	}
+}
+
+impl serde::Serialize for Bind {
+	fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+	where
+		S: serde::Serializer,
+	{
+		serializer.collect_str(self)
+	}
+}
+
+impl<'de> serde::Deserialize<'de> for Bind {
+	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+	where
+		D: serde::Deserializer<'de>,
+	{
+		String::deserialize(deserializer)?
+			.parse()
+			.map_err(serde::de::Error::custom)
+	}
+}
+
 /// The accept side of an endpoint: what to listen on and how to be trusted.
 ///
 /// Derives [`usage::Args`], so flatten it into a binary's own parser with
@@ -16,13 +87,12 @@ use crate::QuicBackend;
 pub struct Config {
 	/// Listen for QUIC (UDP) on the given address. Defaults to `[::]:443`.
 	///
-	/// Accepts standard socket address syntax (e.g. `[::]:443`) or a DNS
-	/// `host:port` pair (e.g. `fly-global-services:443`), resolved at bind time
-	/// (first address only; Quinn cannot bind multiple). Leave unset while a
+	/// Text configuration accepts socket addresses and `host:port` names. Hostnames
+	/// are resolved when the listener binds. Leave unset while a
 	/// `tcp`/`unix` listener is configured to run a stream-only server with no
 	/// QUIC.
 	#[usage(name = "listen", long = "listen", env = "MOQ_LISTEN", setting = "listen.bind")]
-	pub bind: Option<String>,
+	pub bind: Option<Bind>,
 
 	/// The released `listen` key, kept so [`deprecated`](Self::deprecated) can name [`bind`](Self::bind).
 	#[serde(default, skip_serializing)]
@@ -124,8 +194,8 @@ pub struct Config {
 		env = "MOQ_LISTEN_QUIC_LB_ID",
 		setting = "listen.lb_id"
 	)]
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub lb_id: Option<crate::quic::ServerId>,
+	#[serde(default, rename = "__cli_lb_id", skip_serializing_if = "Option::is_none")]
+	pub(crate) lb_id: Option<crate::quic::ServerId>,
 
 	/// Number of random nonce bytes in QUIC-LB connection IDs.
 	/// Must be at least 4, and server_id + nonce + 1 must not exceed 20.
@@ -133,10 +203,16 @@ pub struct Config {
 		name = "listen-quic-lb-nonce",
 		long = "listen-quic-lb-nonce",
 		env = "MOQ_LISTEN_QUIC_LB_NONCE",
-		setting = "listen.lb_nonce"
+		setting = "listen.lb_nonce",
+		requires = "--listen-quic-lb-id"
 	)]
+	#[serde(default, rename = "__cli_lb_nonce", skip_serializing_if = "Option::is_none")]
+	pub(crate) lb_nonce: Option<usize>,
+
+	/// QUIC-LB connection-ID encoding.
+	#[usage(skip)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub lb_nonce: Option<usize>,
+	pub load_balancer: Option<crate::quic::LoadBalancer>,
 
 	/// The released `--server-*` spellings and their env vars, kept parsing but
 	/// hidden. Never read as settings: [`Config::deprecated`] names what replaced
@@ -245,8 +321,8 @@ pub(crate) struct Legacy {
 
 impl Legacy {
 	/// The released spellings in use, each paired with what replaced it.
-	fn deprecated(&self) -> crate::Deprecated {
-		let mut found = crate::Deprecated::default();
+	fn deprecated(&self) -> crate::cli::Deprecated {
+		let mut found = crate::cli::Deprecated::default();
 		if self.bind.is_some() {
 			found.flag("--server-bind", Some("MOQ_SERVER_BIND"), "--listen / MOQ_LISTEN");
 		}
@@ -304,7 +380,7 @@ impl Config {
 	/// old spellings are parsed so the process can name their replacement, not so it
 	/// can honor them: [`crate::Server::new`] rejects them too, so a config that
 	/// skipped the check can't reach a listener that quietly ignored half of it.
-	pub fn deprecated(&self) -> crate::Deprecated {
+	pub fn deprecated(&self) -> crate::cli::Deprecated {
 		let mut found = self.legacy.deprecated();
 		if self.listen.is_some() {
 			found.toml("listen", "bind", None);
@@ -320,16 +396,20 @@ impl Config {
 		found
 	}
 
-	/// Reject a QUIC-LB nonce with no server id to pair it with.
-	///
-	/// Checked here rather than with Usage's `requires`, which can only name one arg
-	/// id, and the nonce reaches this config from a TOML file as well as the flag.
 	#[cfg(feature = "_transport")]
 	pub(crate) fn validate(&self) -> crate::Result<()> {
-		match (self.lb_id.is_some(), self.lb_nonce.is_some()) {
-			(false, true) => Err(crate::Error::LbNonceWithoutId),
-			_ => Ok(()),
-		}
+		Ok(())
+	}
+
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	pub(crate) fn load_balancer(&self) -> Option<crate::quic::LoadBalancer> {
+		self.lb_id
+			.clone()
+			.map(|id| crate::quic::LoadBalancer {
+				id,
+				nonce: self.lb_nonce.unwrap_or(8),
+			})
+			.or_else(|| self.load_balancer.clone())
 	}
 }
 
@@ -406,7 +486,10 @@ mod tests {
 	#[test]
 	fn a_canonical_spelling_does_not_excuse_a_released_one() {
 		let config = config_from(["test", "--listen", "[::]:443", "--server-bind", "[::]:4443"]);
-		assert_eq!(config.bind.as_deref(), Some("[::]:443"));
+		assert_eq!(
+			config.bind.as_ref().map(ToString::to_string).as_deref(),
+			Some("[::]:443")
+		);
 		assert!(config.deprecated().to_string().contains("--server-bind"));
 
 		let config = config_from(["test", "--listen", "[::]:443"]);
@@ -426,16 +509,53 @@ mod tests {
 		);
 	}
 
-	/// A nonce with no server id is meaningless. Checked here rather than with a
-	/// Usage `requires`, which can only name one arg id and never sees a TOML file.
-	#[cfg(feature = "_transport")]
 	#[test]
-	fn lb_nonce_needs_an_id() {
-		let config = config_from(["test", "--listen-quic-lb-nonce", "8"]);
-		assert!(matches!(config.validate(), Err(crate::Error::LbNonceWithoutId)));
+	fn bind_host_round_trips_as_text() {
+		#[derive(serde::Serialize, serde::Deserialize)]
+		struct Wrapper {
+			bind: Bind,
+		}
 
-		let config = config_from(["test", "--listen-quic-lb-id", "ab", "--listen-quic-lb-nonce", "8"]);
-		assert!(config.validate().is_ok());
+		let expected = Bind::Host("relay.example.com".to_string(), 443);
+		let encoded = toml::to_string(&Wrapper { bind: expected.clone() }).expect("serialize");
+		let decoded: Wrapper = toml::from_str(&encoded).expect("deserialize");
+		assert_eq!(decoded.bind, expected);
+
+		assert!("relay.example.com:443:8443".parse::<Bind>().is_err());
+	}
+
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	#[test]
+	fn cli_load_balancer_survives_the_merge_round_trip() {
+		let config = config_from(["test", "--listen-quic-lb-id", "ab", "--listen-quic-lb-nonce", "9"]);
+		let encoded = toml::Value::try_from(config).expect("serialize");
+		let decoded: Config = encoded.try_into().expect("deserialize");
+		assert_eq!(
+			decoded.load_balancer(),
+			Some(crate::quic::LoadBalancer {
+				id: "ab".parse().unwrap(),
+				nonce: 9,
+			})
+		);
+	}
+
+	/// Programmatic configuration keeps the QUIC-LB id and nonce paired.
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	#[test]
+	fn load_balancer_is_a_single_typed_value() {
+		let config: Config = toml::from_str(
+			r#"
+load_balancer = { id = "ab", nonce = 8 }
+"#,
+		)
+		.unwrap();
+		assert_eq!(
+			config.load_balancer(),
+			Some(crate::quic::LoadBalancer {
+				id: "ab".parse().unwrap(),
+				nonce: 8,
+			})
+		);
 	}
 
 	/// A stream-only server opens no QUIC listener even with a bind configured,
@@ -443,7 +563,7 @@ mod tests {
 	#[tokio::test]
 	async fn init_streams_leaves_quic_alone() {
 		let config = Config {
-			bind: Some("127.0.0.1:0".to_string()),
+			bind: Some("127.0.0.1:0".parse().unwrap()),
 			..Default::default()
 		};
 
@@ -457,7 +577,7 @@ mod tests {
 	#[tokio::test]
 	async fn init_still_defaults_to_quic() {
 		let mut config = Config {
-			bind: Some("127.0.0.1:0".to_string()),
+			bind: Some("127.0.0.1:0".parse().unwrap()),
 			..Default::default()
 		};
 		config.tls.generate = vec!["localhost".to_string()];
@@ -470,7 +590,10 @@ mod tests {
 	#[test]
 	fn canonical_spellings_parse() {
 		let config = config_from(["test", "--listen", "[::]:443", "--listen-version", "moq-lite-03"]);
-		assert_eq!(config.bind.as_deref(), Some("[::]:443"));
+		assert_eq!(
+			config.bind.as_ref().map(ToString::to_string).as_deref(),
+			Some("[::]:443")
+		);
 		assert_eq!(config.version, vec!["moq-lite-03".parse::<moq_net::Version>().unwrap()]);
 	}
 }

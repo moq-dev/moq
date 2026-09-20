@@ -13,8 +13,7 @@ name and runs its own read loop.
 
 - `hang::Catalog::subscribe(&broadcast::Consumer) -> catalog::Consumer<E>`
   in Rust; `Catalog.watch(broadcast): AsyncIterable<Root>` in `@moq/hang`.
-- JS `Hang.Timeline` (moved there by [catalog types](/quest/m1/api-hang-catalog.md))
-  gains a `Consumer` yielding `{ push } | { pop } | { skip }` to mirror the
+- JS `Hang.Timeline` gains a `Consumer` yielding `{ push } | { pop } | { skip }` to mirror the
   Rust `Event`; nothing in JS reads `archive`, `clock`, or `wallClockTime`
   today.
 - `hang::container::MAX_AGE` is public; moq.pro's fleet config cites it by
@@ -28,7 +27,6 @@ Public API: additive on hang, @moq/hang, @moq/json. Wire: none.
 
 ## Required
 
-- [Catalog types](/quest/m1/api-hang-catalog.md) - the types the reader yields
 - [Merge dev](/quest/m1/merge-dev.md) - starts on main
 
 ## Related

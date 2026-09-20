@@ -429,18 +429,20 @@ mod test {
 		use crate::catalog::Stream as _;
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let mut producer =
-			crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<Ext>::default())
-				.unwrap();
+		let mut producer = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+		)
+		.unwrap();
 
 		let mut guard = producer.modify().unwrap();
-		guard.mpegts.program = Some(Program {
+		guard.ext.mpegts.program = Some(Program {
 			transport_stream_id: 0x1234,
 			program_number: 1,
 			pmt_pid: 0x0064,
 			..Default::default()
 		});
-		guard.mpegts.tracks.insert(
+		guard.ext.mpegts.tracks.insert(
 			".ts".to_string(),
 			Track {
 				pid: 0x0102,
@@ -451,7 +453,7 @@ mod test {
 				verbatim: Some(Verbatim::new(0x86, Framing::Section)),
 			},
 		);
-		let expected = guard.mpegts.clone();
+		let expected = guard.ext.mpegts.clone();
 		drop(guard);
 
 		let mut consumer =
@@ -460,6 +462,9 @@ mod test {
 				.unwrap();
 
 		let catalog = consumer.next().await.unwrap().expect("catalog published");
-		assert_eq!(catalog.mpegts, expected, "the mpegts section survives the MSF track");
+		assert_eq!(
+			catalog.ext.mpegts, expected,
+			"the mpegts section survives the MSF track"
+		);
 	}
 }

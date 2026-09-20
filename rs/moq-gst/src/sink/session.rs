@@ -146,7 +146,7 @@ pub struct ResolvedSettings {
 pub(super) fn connect_config(settings: &ResolvedSettings) -> moq_tokio::connect::Config {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(settings.tls_disable_verify);
-	config.backoff.timeout = std::time::Duration::ZERO.into();
+	config.backoff.timeout = std::time::Duration::ZERO;
 	config
 }
 
@@ -156,10 +156,10 @@ pub(super) fn quic_config(settings: &ResolvedSettings) -> moq_tokio::quic::Confi
 	// The properties are optional and the config fields are not: an unset property
 	// leaves the library default rather than overriding it with one of its own.
 	if let Some(idle_timeout) = settings.quic_idle_timeout {
-		config.idle_timeout = idle_timeout.into();
+		config.idle_timeout = idle_timeout;
 	}
 	if let Some(keep_alive) = settings.quic_keep_alive {
-		config.keep_alive = keep_alive.into();
+		config.keep_alive = keep_alive;
 	}
 	config
 }
@@ -282,7 +282,7 @@ impl Session {
 		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
 		let mut broadcast = origin.create_broadcast(&settings.broadcast)?;
 		broadcast.announce(moq_net::origin::Route::default())?;
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default())?;
 
 		let status = Arc::new(Status::default());
 		let completion = CompletionState::new();

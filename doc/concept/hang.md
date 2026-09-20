@@ -54,6 +54,7 @@ A few things the catalog can express beyond decoder config:
 - **Jitter.** A rendition can say how long the publisher holds a frame before flushing it, in whole milliseconds rounded up: one frame for a track flushed immediately, the B-frame depth for a reordered one, the fragment for a segmented one. It describes the publisher, never the network, only grows over the life of a stream, and a player sizes its buffer to at least this much. A `0` is read as absent.
 - **Stalled renditions.** A publisher can flag a rendition as temporarily bad so players prefer another one without the track disappearing. First-party video publishers set this flag after more than three frame intervals of source silence or encoding lag while subscribed, and clear it after three on-time completed frames or when idle. Browser and native capture poll while waiting; FLV and MPEG-TS importers observe video silence as container data arrives. The shared detector is `hang::catalog::stalled::Detector` in Rust and `Catalog.Stalled.Detector` in JavaScript. It is a playback diagnostic, not an authorization or routing signal.
 - **Archive.** A broadcast may advertise an `archive` entry naming its timeline track (a small index of each complete aligned segment) and, if recorded, the replay MoQ path, object-store URL, and format version. The timeline is what lets the [HLS gateway](/bin/hls) build playlists without subscribing to media.
+- **Clock.** The optional root `clock` maps PTS zero to wall time so every media track and the archive index share one fixed epoch after timescale conversion. It is independent of `archive`, so a live-only publisher can expose wall-clock timing without creating a segment index.
 - **Extensions.** The root is a loose object. Applications add their own sections (`scte35`, for example) next to the ones hang defines, optionally naming a track that carries the data. Every library exposes a way to write your section without clobbering the built-in ones, and readers ignore what they don't know.
 
 ## Text
@@ -100,16 +101,16 @@ document would silently discard everything but the last payload:
 
 The rest is descriptive: `compression` (`deflate`, the same group-scoped
 `deflate-raw` the catalog uses), `schema` on a JSON track, `mime` on a binary
-one, plus the `broadcast` and `timeline` fields a media rendition takes. A
+one, plus the optional `broadcast` reference. A
 consumer that doesn't recognize a `mode` or `compression` ignores that track and
 round-trips it verbatim.
 
 In Rust the catalog owns the lifetime: `catalog.json_stream(track, config)` (or
 `json_snapshot` / `binary_snapshot` / `binary_stream`) writes the entry and
-retracts it when the producer drops, and `catalog.json_track(name)` returns an
-entry that subscribes itself. In the browser, read the entry from
-`catalog.json.tracks`, subscribe by name, and hand the track to `@moq/json` or
-`@moq/binary`.
+retracts it when the producer drops. Read the config from `catalog.json.tracks`
+or `catalog.binary.tracks`, then pair its name and config with
+`moq_mux::catalog::Entry::new` to subscribe. In the browser, read the same map,
+subscribe by name, and hand the track to `@moq/json` or `@moq/binary`.
 
 ## Container
 

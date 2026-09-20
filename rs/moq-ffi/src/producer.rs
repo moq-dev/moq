@@ -154,8 +154,9 @@ impl MoqBroadcastProducer {
 	/// Wrap a `moq_net::broadcast::Producer` (standalone or origin-created), attaching
 	/// the catalog track every FFI broadcast carries.
 	pub(crate) fn from_inner(mut broadcast: moq_net::broadcast::Producer) -> Result<Self, MoqError> {
-		let catalog =
-			moq_mux::catalog::Producer::with_catalog(&mut broadcast, moq_mux::catalog::hang::Catalog::default())?;
+		let config =
+			moq_mux::catalog::Config::default().with_catalog(moq_mux::catalog::hang::Catalog::<Extra>::default());
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 		Ok(Self {
 			state: std::sync::Mutex::new(Some(BroadcastProducer { broadcast, catalog })),
 		})
@@ -286,8 +287,9 @@ impl MoqBroadcastProducer {
 	///
 	/// `json` is any JSON document (object, array, string, ...) serialized as a UTF-8 string.
 	/// Errors with [`MoqError::Json`] if `json` doesn't parse, or with the reserved-section
-	/// error if `name` is `video`/`audio` (owned by the media pipeline). The section is
-	/// republished on the catalog track immediately.
+	/// error if `name` is a HANG root (`video`, `audio`, `text`, `archive`, `clock`, `json`,
+	/// `binary`, or retired `timeline`) or an MSF root (`version`, `generatedAt`, `isComplete`,
+	/// `tracks`, or `initDataList`). The section is republished on the catalog track immediately.
 	pub fn set_catalog_section(&self, name: String, json: String) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let value: serde_json::Value = serde_json::from_str(&json)?;

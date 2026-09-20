@@ -20,10 +20,10 @@ class Request:
     """Wraps MoqRequest, an incoming session that can be accepted or rejected.
 
     Use `await request.accept()` to complete the handshake, or
-    `await request.reject(code)` to reject with an HTTP status code.
+    `await request.reject(code)` to reject with an application error code.
 
     Dropping a Request without responding closes the underlying connection
-    silently; call `reject(code)` to send an explicit HTTP status.
+    silently; call `reject(code)` to send an explicit MoQ error.
     """
 
     def __init__(self, inner: MoqRequest) -> None:
@@ -75,7 +75,9 @@ class Request:
         return Session(await self._inner.accept())
 
     async def reject(self, code: int) -> None:
-        """Reject the session with the given HTTP status code.
+        """Reject the session with the given application error code.
+
+        Codes 401 and 403 map to the protocol's unauthorized error.
 
         Raises `Error.AlreadyResponded` if `accept()` or `reject()` has already
         been called.

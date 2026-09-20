@@ -3088,6 +3088,10 @@ async fn server_set_bind_validates() {
 	assert!(server.set_bind("[::]:443".into()).is_ok());
 	assert!(server.set_bind("localhost:4443".into()).is_ok());
 	assert!(matches!(
+		server.set_bind("localhost:443:8443".into()),
+		Err(crate::error::MoqError::Bind(_))
+	));
+	assert!(matches!(
 		server.set_bind("not-an-address".into()),
 		Err(crate::error::MoqError::Bind(_))
 	));

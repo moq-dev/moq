@@ -954,9 +954,9 @@ mod tests {
 		moq_net::track::Subscriber,
 	) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog =
-			moq_mux::catalog::Producer::with_catalog(&mut broadcast, moq_mux::catalog::hang::Catalog::default())
-				.unwrap();
+		let config = moq_mux::catalog::Config::default()
+			.with_catalog(moq_mux::catalog::hang::Catalog::<moq_mux::catalog::hang::Extra>::default());
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
 		let consumer = broadcast.consume();
 		// Probed rather than hand-built, so the test track carries what a real one would.
 		let rendition = moq_video::encode::Config::new(320, 240, 30).probe().await.unwrap();

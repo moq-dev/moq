@@ -35,8 +35,7 @@ pub mod cli;
 pub mod client;
 pub mod connect;
 pub mod connection;
-mod crypto;
-mod deprecated;
+pub mod crypto;
 mod error;
 #[cfg(any(
 	feature = "quinn",
@@ -90,11 +89,10 @@ pub mod websocket;
 pub use client::Client;
 pub use connect::{Addrs, ConnectError};
 pub use connection::{Backoff, Connection, Redirect, Status};
-pub use deprecated::Deprecated;
 pub use error::{Error, Result};
 pub use log::{Log, RedactedUrl};
 #[cfg(feature = "_transport")]
-pub use server::{Listener, Request, Server, Transport};
+pub use server::{Listener, Server};
 
 // Re-export these crates.
 pub use moq_net;

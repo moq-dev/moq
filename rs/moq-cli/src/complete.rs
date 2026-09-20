@@ -649,10 +649,10 @@ mod tests {
 	/// point: the completer builds its client from the same flags the invocation would
 	/// have, so a line that can connect completes and one that cannot does not.
 	fn relay(origin: &moq_net::origin::Producer) -> String {
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let _ = moq_tokio::crypto::install_default();
 
 		let mut config = moq_tokio::listen::Config::default();
-		config.bind = Some("127.0.0.1:0".to_string());
+		config.bind = Some("127.0.0.1:0".parse().unwrap());
 		config.tls.generate = vec!["localhost".to_string()];
 
 		let server = config.init(Default::default()).expect("failed to bind listener");
@@ -900,7 +900,8 @@ mod tests {
 		for (path, video, audio) in [("wanted", "hd", "stereo"), ("other", "sd", "mono")] {
 			let mut broadcast = origin.create_broadcast(path).expect("broadcast");
 			broadcast.announce(Default::default()).expect("broadcast");
-			let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).expect("catalog");
+			let mut catalog =
+				moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).expect("catalog");
 			let mut edit = catalog.modify().unwrap();
 			edit.video.renditions.insert(
 				video.to_string(),

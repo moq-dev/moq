@@ -777,6 +777,10 @@ pub struct Config {
 	pub tier: Option<String>,
 	/// Released spelling, kept so [`Self::deprecated`] can name that linger is gone.
 	#[doc(hidden)]
+	#[usage(skip)]
+	#[serde(with = "crate::duration::serde_option")]
+	pub linger: Option<std::time::Duration>,
+
 	#[usage(
 		name = "cluster-linger",
 		long = "cluster-linger",
@@ -784,14 +788,15 @@ pub struct Config {
 		setting = "cluster.linger",
 		hide = true
 	)]
-	pub linger: Option<moq_tokio::cli::Duration>,
+	#[serde(default, rename = "__cli_linger", skip_serializing_if = "Option::is_none")]
+	linger_arg: Option<crate::duration::Duration>,
 }
 
 impl Config {
 	/// Released spellings this config was parsed from, each paired with what replaced it.
-	pub fn deprecated(&self) -> moq_tokio::Deprecated {
-		let mut found = moq_tokio::Deprecated::default();
-		if self.linger.is_some() {
+	pub fn deprecated(&self) -> moq_tokio::cli::Deprecated {
+		let mut found = moq_tokio::cli::Deprecated::default();
+		if self.linger.is_some() || self.linger_arg.is_some() {
 			found.changed(
 				"--cluster-linger",
 				Some("MOQ_CLUSTER_LINGER"),
@@ -1951,7 +1956,7 @@ impl Cluster {
 			.connect
 			.clone()
 			.context("internal: LAN dial without Cluster::with_connect")?;
-		connect.backoff.timeout = std::time::Duration::ZERO.into();
+		connect.backoff.timeout = std::time::Duration::ZERO;
 		connect.once = Some(false);
 		let mut bind = connect.resolve().bind;
 		bind.set_port(0);
@@ -2888,12 +2893,9 @@ mod tests {
 	#[tokio::test]
 	async fn constructed_origin_keeps_cache_and_handles() {
 		let duration = Duration::from_secs(5);
-		let cache = crate::cache::Config {
-			duration: Some(duration.into()),
-			..Default::default()
-		}
-		.init()
-		.expect("cache");
+		let mut cache = crate::cache::Config::default();
+		cache.duration = Some(duration);
+		let cache = cache.init().expect("cache");
 		let pool = cache.pool.clone();
 
 		let cluster = Cluster::new(
@@ -3112,7 +3114,7 @@ mod tests {
 	#[test]
 	fn released_cluster_spellings_are_reported_not_applied() {
 		let config = Config {
-			linger: Some(std::time::Duration::from_secs(5).into()),
+			linger: Some(std::time::Duration::from_secs(5)),
 			connect: vec![Peer::new("root.example.com:4443")],
 			..Default::default()
 		};
@@ -3528,7 +3530,7 @@ mod tests {
 	#[tokio::test]
 	async fn lan_cluster_path_carries_broadcasts_both_ways() {
 		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let _ = moq_tokio::crypto::install_default();
 
 		let node = new_cluster(Config::default()).expect("node cluster");
 		let fingerprint = new_cluster(Config::default()).expect("fingerprint cluster");
@@ -3537,7 +3539,7 @@ mod tests {
 		_from_node.announce(Default::default()).expect("announce");
 
 		let mut listen = moq_tokio::listen::Config::default();
-		listen.bind = Some("127.0.0.1:0".to_string());
+		listen.bind = Some("127.0.0.1:0".parse().unwrap());
 		listen.tls.generate = vec!["moq-cluster-lan".to_string()];
 		let server = listen.init(Default::default()).expect("bind");
 		let port = server.local_addr().expect("local addr").port();
