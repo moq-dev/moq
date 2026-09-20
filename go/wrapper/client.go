@@ -202,7 +202,7 @@ func Dial(ctx context.Context, url string, opts ...ClientOption) (*Client, error
 	inner := ffi.NewMoqClient()
 	var err error
 	if !cfg.tlsVerify {
-		err = inner.SetTlsDisableVerify(true)
+		err = inner.SetTlsVerify(false)
 	}
 	if err == nil && cfg.tlsRootsSet {
 		err = inner.SetTlsRoots(cfg.tlsRoots)

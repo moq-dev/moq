@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `MoqClient::set_tls_disable_verify(bool)` is `set_tls_verify(bool)`, so the
+  argument's polarity matches every ergonomic wrapper.
+- `MoqRequest::transport()` returns the closed `MoqTransport` enum instead of a string.
 - Bare-integer durations are microseconds: `max_age_us` on decoder outputs,
   track info, and subscriptions; `MoqBackoff` is `initial_us` / `max_us` /
   `timeout_us`. `MoqSession::publish()` / `consume()` match `set_publish` /

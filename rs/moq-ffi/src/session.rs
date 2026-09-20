@@ -232,9 +232,9 @@ mod tests {
 	#[test]
 	fn setters_fail_after_cancel() {
 		let client = MoqClient::new();
-		client.set_tls_disable_verify(true).unwrap();
+		client.set_tls_verify(false).unwrap();
 		client.cancel();
-		assert!(matches!(client.set_tls_disable_verify(false), Err(MoqError::Cancelled)));
+		assert!(matches!(client.set_tls_verify(true), Err(MoqError::Cancelled)));
 		assert!(matches!(
 			client.set_bind("127.0.0.1:0".into()),
 			Err(MoqError::Cancelled)
@@ -436,10 +436,10 @@ impl MoqClient {
 		})
 	}
 
-	/// Disable TLS certificate verification (for development only).
-	pub fn set_tls_disable_verify(&self, disable: bool) -> Result<(), MoqError> {
+	/// Enable or disable TLS certificate verification.
+	pub fn set_tls_verify(&self, verify: bool) -> Result<(), MoqError> {
 		self.configure(|state| {
-			state.config.tls.insecure = Some(disable);
+			state.config.tls.insecure = Some(!verify);
 		})
 	}
 

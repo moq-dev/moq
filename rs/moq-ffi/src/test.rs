@@ -2893,7 +2893,7 @@ fn without_runtime() {
 		let _bc = pollster::block_on(consumer.request_broadcast("test".into())).unwrap();
 
 		let client = MoqClient::new();
-		client.set_tls_disable_verify(true).unwrap();
+		client.set_tls_verify(false).unwrap();
 		client.set_consume(Some(origin)).unwrap();
 
 		announced.cancel();
@@ -2939,7 +2939,7 @@ async fn server_client_roundtrip() {
 	// Client side: connect, subscribe via a consume origin.
 	let client_origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let client = MoqClient::new();
-	client.set_tls_disable_verify(true).unwrap();
+	client.set_tls_verify(false).unwrap();
 	client.set_bind("127.0.0.1:0".into()).unwrap();
 	client.set_consume(Some(client_origin.clone())).unwrap();
 	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
@@ -3035,7 +3035,7 @@ async fn server_client_roundtrip_auto_origin() {
 
 	// No set_publish / set_consume, so this uses the auto-origin path.
 	let client = MoqClient::new();
-	client.set_tls_disable_verify(true).unwrap();
+	client.set_tls_verify(false).unwrap();
 	client.set_bind("127.0.0.1:0".into()).unwrap();
 	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
@@ -3177,7 +3177,7 @@ async fn request_double_respond_returns_already_responded() {
 	});
 
 	let client = MoqClient::new();
-	client.set_tls_disable_verify(true).unwrap();
+	client.set_tls_verify(false).unwrap();
 	client.set_bind("127.0.0.1:0".into()).unwrap();
 	let _session = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
@@ -3220,7 +3220,7 @@ async fn request_per_session_publish_override() {
 
 	let client_origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let client = MoqClient::new();
-	client.set_tls_disable_verify(true).unwrap();
+	client.set_tls_verify(false).unwrap();
 	client.set_bind("127.0.0.1:0".into()).unwrap();
 	client.set_consume(Some(client_origin.clone())).unwrap();
 	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
@@ -3298,7 +3298,7 @@ async fn client_reconnects_and_resumes_announcements() {
 
 	let client_origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let client = MoqClient::new();
-	client.set_tls_disable_verify(true).unwrap();
+	client.set_tls_verify(false).unwrap();
 	client.set_bind("127.0.0.1:0".into()).unwrap();
 	client.set_consume(Some(client_origin.clone())).unwrap();
 	// Fast retries so the test doesn't wait out the default 1s backoff.
@@ -3404,7 +3404,7 @@ async fn one_shot_client_close_surfaces_through_closed() {
 	});
 
 	let client = MoqClient::new();
-	client.set_tls_disable_verify(true).unwrap();
+	client.set_tls_verify(false).unwrap();
 	client.set_bind("127.0.0.1:0".into()).unwrap();
 	client.set_reconnect(false).unwrap();
 
@@ -3454,7 +3454,7 @@ async fn rejected_session_surfaces_through_closed() {
 	});
 
 	let client = MoqClient::new();
-	client.set_tls_disable_verify(true).unwrap();
+	client.set_tls_verify(false).unwrap();
 	client.set_bind("127.0.0.1:0".into()).unwrap();
 	client.set_reconnect(false).unwrap();
 
@@ -3480,7 +3480,7 @@ async fn rejected_session_surfaces_through_closed() {
 #[tokio::test]
 async fn cancel_before_connect_fails_fast() {
 	let client = MoqClient::new();
-	client.set_tls_disable_verify(true).unwrap();
+	client.set_tls_verify(false).unwrap();
 	client.cancel();
 	let result = tokio::time::timeout(
 		Duration::from_secs(5),
@@ -3525,7 +3525,7 @@ async fn cancelled_status_does_not_swallow_the_next_transition() {
 	});
 
 	let client = MoqClient::new();
-	client.set_tls_disable_verify(true).unwrap();
+	client.set_tls_verify(false).unwrap();
 	client.set_bind("127.0.0.1:0".into()).unwrap();
 	client
 		.set_backoff(MoqBackoff {
@@ -3738,7 +3738,7 @@ async fn one_shot_peers() -> (Arc<MoqSession>, Arc<MoqSession>, Arc<MoqServer>) 
 	});
 
 	let client = MoqClient::new();
-	client.set_tls_disable_verify(true).unwrap();
+	client.set_tls_verify(false).unwrap();
 	client.set_bind("127.0.0.1:0".into()).unwrap();
 	client.set_reconnect(false).unwrap();
 	let client_session = tokio::time::timeout(TIMEOUT, client.connect(url))
@@ -3794,7 +3794,7 @@ async fn client_setters_busy_during_connect_and_cancelled_after() {
 	let addr = server.listen().await.expect("listen failed");
 
 	let client = MoqClient::new();
-	client.set_tls_disable_verify(true).unwrap();
+	client.set_tls_verify(false).unwrap();
 	client.set_bind("127.0.0.1:0".into()).unwrap();
 	client.set_reconnect(false).unwrap();
 
@@ -3803,18 +3803,14 @@ async fn client_setters_busy_during_connect_and_cancelled_after() {
 	let connect = tokio::spawn(async move { connecting.connect(format!("https://{addr}")).await });
 
 	assert!(matches!(
-		wait_for_config_error(
-			|| client.set_tls_disable_verify(true),
-			|err| matches!(err, MoqError::Busy)
-		)
-		.await,
+		wait_for_config_error(|| client.set_tls_verify(false), |err| matches!(err, MoqError::Busy)).await,
 		MoqError::Busy
 	));
 	assert!(matches!(client.set_publish(None), Err(MoqError::Busy)));
 	assert!(matches!(client.set_bind("127.0.0.1:0".into()), Err(MoqError::Busy)));
 
 	client.cancel();
-	assert!(matches!(client.set_tls_disable_verify(false), Err(MoqError::Cancelled)));
+	assert!(matches!(client.set_tls_verify(true), Err(MoqError::Cancelled)));
 	assert!(matches!(client.set_publish(None), Err(MoqError::Cancelled)));
 
 	let connect_err = tokio::time::timeout(TIMEOUT, connect)
@@ -3843,7 +3839,7 @@ async fn client_setters_apply_after_connect_returns() {
 	});
 
 	let client = MoqClient::new();
-	client.set_tls_disable_verify(true).unwrap();
+	client.set_tls_verify(false).unwrap();
 	client.set_bind("127.0.0.1:0".into()).unwrap();
 	let session = tokio::time::timeout(TIMEOUT, client.connect(format!("https://{addr}")))
 		.await
@@ -3921,7 +3917,7 @@ async fn request_origin_setters_apply_or_error() {
 	let addr = server.listen().await.expect("listen failed");
 
 	let client = MoqClient::new();
-	client.set_tls_disable_verify(true).unwrap();
+	client.set_tls_verify(false).unwrap();
 	client.set_bind("127.0.0.1:0".into()).unwrap();
 	client.set_reconnect(false).unwrap();
 
@@ -3988,7 +3984,7 @@ async fn request_origin_setters_cancelled_after_cancel() {
 	let addr = server.listen().await.expect("listen failed");
 
 	let client = MoqClient::new();
-	client.set_tls_disable_verify(true).unwrap();
+	client.set_tls_verify(false).unwrap();
 	client.set_bind("127.0.0.1:0".into()).unwrap();
 	client.set_reconnect(false).unwrap();
 
@@ -4044,7 +4040,7 @@ async fn shutdown_cancels_and_drops_cleanly() {
 
 	let client_origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let client = MoqClient::new();
-	client.set_tls_disable_verify(true).unwrap();
+	client.set_tls_verify(false).unwrap();
 	client.set_consume(Some(client_origin.clone())).unwrap();
 	let session = tokio::time::timeout(TIMEOUT, client.connect(format!("https://{addr}")))
 		.await

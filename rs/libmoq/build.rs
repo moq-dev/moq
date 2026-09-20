@@ -8,6 +8,7 @@ const LIB_NAME: &str = "moq";
 const ENUMS: &[&str] = &[
 	"moq_container_kind",
 	"moq_audio_format",
+	"moq_audio_sample_format",
 	"moq_video_format",
 	"moq_container_format",
 	"moq_video_pixel_format",
@@ -35,12 +36,13 @@ fn main() {
 	fs::create_dir_all(&include_dir).expect("Failed to create include directory");
 	let header = include_dir.join(format!("{}.h", LIB_NAME));
 	let config = cbindgen::Config {
+		header: Some("/* Error codes -1, -11, -12, and -39 are retired and reserved. */".into()),
 		// cbindgen.toml is never loaded (see its header comment), so the generated
 		// header has no include guard unless we ask for one here. Without it a
 		// project reaching moq.h down two include paths gets redefinition errors.
 		pragma_once: true,
 		export: cbindgen::ExportConfig {
-			// The codec enums cross the ABI as plain `uint32_t`, so that an unknown
+			// These enums cross the ABI as plain `uint32_t`, so that an unknown
 			// discriminant from C is an error rather than UB. That leaves no signature
 			// referencing them, and cbindgen emits only what a signature reaches, so
 			// name them here: without this a C caller has to hardcode the integers.

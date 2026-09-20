@@ -191,6 +191,34 @@ struct RequestState {
 	consume: Option<Arc<MoqOriginProducer>>,
 }
 
+/// The network transport carrying an incoming session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum MoqTransport {
+	/// QUIC, either directly or through WebTransport over HTTP/3.
+	Quic,
+	/// An Iroh QUIC connection.
+	Iroh,
+	/// A WebSocket connection using qmux framing.
+	WebSocket,
+	/// A plaintext TCP connection using qmux framing.
+	Tcp,
+	/// A Unix domain socket using qmux framing.
+	Unix,
+}
+
+impl From<moq_tokio::server::Transport> for MoqTransport {
+	fn from(value: moq_tokio::server::Transport) -> Self {
+		match value {
+			moq_tokio::server::Transport::Quic => Self::Quic,
+			moq_tokio::server::Transport::Iroh => Self::Iroh,
+			moq_tokio::server::Transport::WebSocket => Self::WebSocket,
+			moq_tokio::server::Transport::Tcp => Self::Tcp,
+			moq_tokio::server::Transport::Unix => Self::Unix,
+			_ => unreachable!("unsupported transport"),
+		}
+	}
+}
+
 /// An incoming MoQ session that can be accepted or rejected.
 ///
 /// Origin overrides are captured at [`accept`](Self::accept). Setters fail with
@@ -199,7 +227,7 @@ struct RequestState {
 #[derive(uniffi::Object)]
 pub struct MoqRequest {
 	task: Task<RequestState>,
-	transport: String,
+	transport: MoqTransport,
 	url: Option<String>,
 	path: String,
 	query: Option<String>,
@@ -211,7 +239,7 @@ impl MoqRequest {
 		publish: Option<Arc<MoqOriginProducer>>,
 		consume: Option<Arc<MoqOriginProducer>>,
 	) -> Arc<Self> {
-		let transport = request.transport().to_string();
+		let transport = request.transport().into();
 		let url = request.url().map(|u| u.to_string());
 		let path = request.path().to_string();
 		let query = request.query().map(str::to_string);
@@ -276,9 +304,9 @@ impl MoqRequest {
 		self.query.clone()
 	}
 
-	/// The transport type, e.g. `"quic"`, `"iroh"`, or `"websocket"`.
-	pub fn transport(&self) -> String {
-		self.transport.clone()
+	/// The network transport carrying this session.
+	pub fn transport(&self) -> MoqTransport {
+		self.transport
 	}
 
 	/// Override the publish origin for this session. Falls back to the server's

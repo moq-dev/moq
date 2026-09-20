@@ -79,7 +79,7 @@ class Client:
         self._inner = MoqClient()
 
         if not self._tls_verify:
-            self._inner.set_tls_disable_verify(True)
+            self._inner.set_tls_verify(False)
         if self._tls_roots:
             self._inner.set_tls_roots(self._tls_roots)
         if self._tls_system_roots is not None:

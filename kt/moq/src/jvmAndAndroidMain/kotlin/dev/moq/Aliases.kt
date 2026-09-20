@@ -15,6 +15,8 @@ typealias Client = uniffi.moq.MoqClient
 typealias Session = uniffi.moq.MoqSession
 /** An incoming session awaiting a decision: accept it to handshake, or reject it. */
 typealias Request = uniffi.moq.MoqRequest
+/** The network transport carrying an incoming session. */
+typealias Transport = uniffi.moq.MoqTransport
 
 // Origin (broadcast discovery / announcement).
 /** The publish side of an origin: create broadcasts so subscribers can discover them. */

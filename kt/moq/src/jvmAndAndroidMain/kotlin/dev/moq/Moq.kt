@@ -125,7 +125,7 @@ class Moq internal constructor(
         ): Moq {
             val client = MoqClient()
             try {
-                if (!tlsVerify) client.setTlsDisableVerify(true)
+				if (!tlsVerify) client.setTlsVerify(false)
                 if (tlsRoots != null) client.setTlsRoots(tlsRoots)
                 if (tlsSystemRoots != null) client.setTlsSystemRoots(tlsSystemRoots)
                 if (tlsFingerprints != null) client.setTlsFingerprints(tlsFingerprints)

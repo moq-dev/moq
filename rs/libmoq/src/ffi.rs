@@ -8,6 +8,10 @@ use url::Url;
 
 use crate::{Error, Id, moq_protocol_error};
 
+/// A callback receiving a positive handle/value, zero on clean completion, or a negative error.
+#[allow(non_camel_case_types)]
+pub type moq_status_callback = Option<extern "C" fn(user_data: *mut c_void, code: i32)>;
+
 pub static RUNTIME: LazyLock<tokio::runtime::Handle> = LazyLock::new(|| {
 	let runtime = tokio::runtime::Builder::new_current_thread()
 		.enable_all()
@@ -54,7 +58,7 @@ pub fn enter<C: ReturnCode, F: FnOnce() -> C>(f: F) -> i32 {
 #[derive(Clone, Copy)]
 pub struct OnStatus {
 	user_data: *mut c_void,
-	on_status: Option<extern "C" fn(user_data: *mut c_void, code: i32)>,
+	on_status: extern "C" fn(user_data: *mut c_void, code: i32),
 }
 
 impl OnStatus {
@@ -63,11 +67,11 @@ impl OnStatus {
 	/// # Safety
 	/// - The caller must ensure user_data remains valid for the callback's lifetime.
 	/// - The callback function pointer must be valid if provided.
-	pub unsafe fn new(
-		user_data: *mut c_void,
-		on_status: Option<extern "C" fn(user_data: *mut c_void, code: i32)>,
-	) -> Self {
-		Self { user_data, on_status }
+	pub unsafe fn new(user_data: *mut c_void, on_status: moq_status_callback) -> Result<Self, Error> {
+		Ok(Self {
+			user_data,
+			on_status: on_status.ok_or(Error::InvalidPointer)?,
+		})
 	}
 
 	/// Invoke the callback with a result code.
@@ -77,9 +81,7 @@ impl OnStatus {
 	pub fn call<C: ReturnCode>(&self, ret: C) {
 		record_error(&ret);
 		let code = ret.code();
-		if let Some(on_status) = &self.on_status {
-			on_status(self.user_data, code);
-		}
+		(self.on_status)(self.user_data, code);
 	}
 }
 

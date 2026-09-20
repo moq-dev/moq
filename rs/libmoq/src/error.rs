@@ -2,6 +2,46 @@ use std::sync::Arc;
 
 use crate::ffi;
 
+// Keep these public constants as the single source for both Rust's return mapping and the
+// generated C header. -1, -11, -12, and -39 are retired and remain reserved.
+pub const MOQ_ERROR_MOQ: i32 = -2;
+pub const MOQ_ERROR_URL: i32 = -3;
+pub const MOQ_ERROR_UTF8: i32 = -4;
+pub const MOQ_ERROR_CONNECT: i32 = -5;
+pub const MOQ_ERROR_INVALID_POINTER: i32 = -6;
+pub const MOQ_ERROR_INVALID_ID: i32 = -7;
+pub const MOQ_ERROR_NOT_FOUND: i32 = -8;
+pub const MOQ_ERROR_UNKNOWN_FORMAT: i32 = -9;
+pub const MOQ_ERROR_INIT_FAILED: i32 = -10;
+pub const MOQ_ERROR_TIMESTAMP_OVERFLOW: i32 = -13;
+pub const MOQ_ERROR_LEVEL: i32 = -14;
+pub const MOQ_ERROR_INVALID_CODE: i32 = -15;
+pub const MOQ_ERROR_PANIC: i32 = -16;
+pub const MOQ_ERROR_OFFLINE: i32 = -17;
+pub const MOQ_ERROR_HANG: i32 = -18;
+pub const MOQ_ERROR_NO_INDEX: i32 = -19;
+pub const MOQ_ERROR_NUL: i32 = -20;
+pub const MOQ_ERROR_SESSION_NOT_FOUND: i32 = -21;
+pub const MOQ_ERROR_ORIGIN_NOT_FOUND: i32 = -22;
+pub const MOQ_ERROR_ANNOUNCEMENT_NOT_FOUND: i32 = -23;
+pub const MOQ_ERROR_BROADCAST_NOT_FOUND: i32 = -24;
+pub const MOQ_ERROR_CATALOG_NOT_FOUND: i32 = -25;
+pub const MOQ_ERROR_MEDIA_NOT_FOUND: i32 = -26;
+pub const MOQ_ERROR_TRACK_NOT_FOUND: i32 = -27;
+pub const MOQ_ERROR_FRAME_NOT_FOUND: i32 = -28;
+pub const MOQ_ERROR_MUX: i32 = -29;
+pub const MOQ_ERROR_AUDIO: i32 = -30;
+pub const MOQ_ERROR_BUFFER_NOT_CONSUMED: i32 = -31;
+pub const MOQ_ERROR_GROUP_NOT_FOUND: i32 = -32;
+pub const MOQ_ERROR_NATIVE: i32 = -33;
+pub const MOQ_ERROR_UNAUTHORIZED: i32 = -34;
+pub const MOQ_ERROR_FORBIDDEN: i32 = -35;
+pub const MOQ_ERROR_VIDEO: i32 = -36;
+pub const MOQ_ERROR_JSON: i32 = -37;
+pub const MOQ_ERROR_JSON_TRACK: i32 = -38;
+pub const MOQ_ERROR_INVALID_CONFIG: i32 = -40;
+pub const MOQ_ERROR_UNRESOLVABLE_BROADCAST: i32 = -41;
+
 /// Whether a protocol code is from the session or stream registry.
 #[repr(C)]
 #[allow(non_camel_case_types)]
@@ -373,43 +413,43 @@ impl ffi::ReturnCode for Error {
 
 	fn code(&self) -> i32 {
 		match self {
-			Error::Moq(_) => -2,
-			Error::Url(_) => -3,
-			Error::Utf8(_) => -4,
-			Error::Connect(_) => -5,
-			Error::InvalidPointer => -6,
-			Error::InvalidId => -7,
-			Error::NotFound => -8,
-			Error::UnknownFormat(_) => -9,
-			Error::InitFailed(_) => -10,
-			Error::TimestampOverflow(_) => -13,
-			Error::Level(_) => -14,
-			Error::InvalidCode => -15,
-			Error::Panic => -16,
-			Error::Offline => -17,
-			Error::Hang(_) => -18,
-			Error::NoIndex => -19,
-			Error::NulError(_) => -20,
-			Error::SessionNotFound => -21,
-			Error::OriginNotFound => -22,
-			Error::AnnouncementNotFound => -23,
-			Error::BroadcastNotFound => -24,
-			Error::CatalogNotFound => -25,
-			Error::MediaNotFound => -26,
-			Error::TrackNotFound => -27,
-			Error::FrameNotFound => -28,
-			Error::Mux(_) => -29,
-			Error::Audio(_) => -30,
-			Error::BufferNotConsumed => -31,
-			Error::GroupNotFound => -32,
-			Error::Native(_) => -33,
-			Error::Unauthorized => -34,
-			Error::Forbidden => -35,
-			Error::Video(_) => -36,
-			Error::Json(_) => -37,
-			Error::JsonTrack(_) => -38,
-			Error::InvalidConfig(_) => -40,
-			Error::UnresolvableBroadcast(_) => -41,
+			Error::Moq(_) => MOQ_ERROR_MOQ,
+			Error::Url(_) => MOQ_ERROR_URL,
+			Error::Utf8(_) => MOQ_ERROR_UTF8,
+			Error::Connect(_) => MOQ_ERROR_CONNECT,
+			Error::InvalidPointer => MOQ_ERROR_INVALID_POINTER,
+			Error::InvalidId => MOQ_ERROR_INVALID_ID,
+			Error::NotFound => MOQ_ERROR_NOT_FOUND,
+			Error::UnknownFormat(_) => MOQ_ERROR_UNKNOWN_FORMAT,
+			Error::InitFailed(_) => MOQ_ERROR_INIT_FAILED,
+			Error::TimestampOverflow(_) => MOQ_ERROR_TIMESTAMP_OVERFLOW,
+			Error::Level(_) => MOQ_ERROR_LEVEL,
+			Error::InvalidCode => MOQ_ERROR_INVALID_CODE,
+			Error::Panic => MOQ_ERROR_PANIC,
+			Error::Offline => MOQ_ERROR_OFFLINE,
+			Error::Hang(_) => MOQ_ERROR_HANG,
+			Error::NoIndex => MOQ_ERROR_NO_INDEX,
+			Error::NulError(_) => MOQ_ERROR_NUL,
+			Error::SessionNotFound => MOQ_ERROR_SESSION_NOT_FOUND,
+			Error::OriginNotFound => MOQ_ERROR_ORIGIN_NOT_FOUND,
+			Error::AnnouncementNotFound => MOQ_ERROR_ANNOUNCEMENT_NOT_FOUND,
+			Error::BroadcastNotFound => MOQ_ERROR_BROADCAST_NOT_FOUND,
+			Error::CatalogNotFound => MOQ_ERROR_CATALOG_NOT_FOUND,
+			Error::MediaNotFound => MOQ_ERROR_MEDIA_NOT_FOUND,
+			Error::TrackNotFound => MOQ_ERROR_TRACK_NOT_FOUND,
+			Error::FrameNotFound => MOQ_ERROR_FRAME_NOT_FOUND,
+			Error::Mux(_) => MOQ_ERROR_MUX,
+			Error::Audio(_) => MOQ_ERROR_AUDIO,
+			Error::BufferNotConsumed => MOQ_ERROR_BUFFER_NOT_CONSUMED,
+			Error::GroupNotFound => MOQ_ERROR_GROUP_NOT_FOUND,
+			Error::Native(_) => MOQ_ERROR_NATIVE,
+			Error::Unauthorized => MOQ_ERROR_UNAUTHORIZED,
+			Error::Forbidden => MOQ_ERROR_FORBIDDEN,
+			Error::Video(_) => MOQ_ERROR_VIDEO,
+			Error::Json(_) => MOQ_ERROR_JSON,
+			Error::JsonTrack(_) => MOQ_ERROR_JSON_TRACK,
+			Error::InvalidConfig(_) => MOQ_ERROR_INVALID_CONFIG,
+			Error::UnresolvableBroadcast(_) => MOQ_ERROR_UNRESOLVABLE_BROADCAST,
 		}
 	}
 }

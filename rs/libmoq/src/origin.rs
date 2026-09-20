@@ -356,7 +356,7 @@ impl Origin {
 			.get_mut(dynamic)
 			.and_then(|entry| entry.as_mut())
 			.ok_or(Error::NotFound)?;
-		let inner = entry.inner.take();
+		let inner = entry.inner.take().ok_or(Error::NotFound)?;
 		entry.close.take();
 		drop(inner);
 		Ok(())

@@ -73,7 +73,7 @@ with `session.status()` to log each reconnect; `client.setBackoff` tunes the
 pacing; and `client.setQuicMaxStreams` raises the peer's inbound stream cap.
 
 `Server` binds, generates or loads TLS, and hands you each request to
-`accept()` or `reject(code:)`. JSON tracks take `Codable` types
+`accept()` or `reject(code:)`; `request.transport` is a `Transport` enum. JSON tracks take `Codable` types
 (`publishJsonSnapshot(name:of:)`, `subscribeJsonStream(name:as:)`), and the
 rest of the [shared feature list](/lib/#what-every-binding-can-do) maps one
 to one: `fetchGroup`/`fetchMediaGroup`, `dynamic()` for tracks and `dynamic(prefix:)` for broadcasts, `appendDatagram`/

@@ -27,8 +27,8 @@ Gaps found method by method against `rs/moq-ffi/src`:
 - Verbs: `announced` is `announcements` in Kotlin and Dart; `next` is
   `All`/`Requests`/`Updates`/`Frames`/`Values` in Go; `set_consume` is
   `subscribe=` in four. The wrappers move to the core's spelling; the two
-  core changes (`set_tls_verify`, the transport enum) land on dev in
-  [libmoq units](/quest/m1/api-libmoq-units.md).
+  core changes (`set_tls_verify`, the transport enum) land on main in the
+  libmoq release cleanup.
 - `rtt_us` and the other microsecond fields are raw integers in every
   wrapper; a `Duration`/`timedelta` at the boundary where the language has
   one.

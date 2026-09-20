@@ -196,16 +196,16 @@ const DefaultValues &LibraryDefaults()
 			return d;
 		}
 
-		d.connect_timeout_ms = (long long)config.connect_timeout_ms;
-		d.failover_delay_ms = (long long)config.failover_delay_ms;
+		d.connect_timeout_ms = (long long)(config.connect_timeout_us / 1000);
+		d.failover_delay_ms = (long long)(config.failover_delay_us / 1000);
 		d.backoff_initial_ms = (long long)(config.backoff_initial_us / 1000);
 		d.backoff_max_ms = (long long)(config.backoff_max_us / 1000);
 		d.backoff_timeout_ms = (long long)(config.backoff_timeout_us / 1000);
 		d.quic_max_streams = (long long)config.quic_max_streams;
-		d.quic_idle_timeout_ms = (long long)config.quic_idle_timeout_ms;
+		d.quic_idle_timeout_ms = (long long)(config.quic_idle_timeout_us / 1000);
 		// Absent means "no keep-alive", which the UI shows as zero.
-		d.quic_keep_alive_ms = config.has_quic_keep_alive ? (long long)config.quic_keep_alive_ms : 0;
-		d.websocket_delay_ms = config.has_websocket_delay ? (long long)config.websocket_delay_ms : 0;
+		d.quic_keep_alive_ms = config.has_quic_keep_alive ? (long long)(config.quic_keep_alive_us / 1000) : 0;
+		d.websocket_delay_ms = config.has_websocket_delay ? (long long)(config.websocket_delay_us / 1000) : 0;
 		d.websocket_enabled = config.websocket_enabled;
 		d.loaded = true;
 		return d;
@@ -403,9 +403,9 @@ bool BuildConfig(obs_data_t *settings, Config *out)
 	borrow(OptionalString(settings, BACKEND), &out->backend, &config.backend, &config.backend_len);
 	borrow(OptionalString(settings, BIND), &out->bind, &config.bind, &config.bind_len);
 
-	config.connect_timeout_ms = (uint64_t)Amount(settings, CONNECT_TIMEOUT);
+	config.connect_timeout_us = (uint64_t)Amount(settings, CONNECT_TIMEOUT) * 1000;
 	config.has_connect_timeout = true;
-	config.failover_delay_ms = (uint64_t)Amount(settings, FAILOVER_DELAY);
+	config.failover_delay_us = (uint64_t)Amount(settings, FAILOVER_DELAY) * 1000;
 	config.has_failover_delay = true;
 
 	config.tls_disable_verify = obs_data_get_bool(settings, TLS_DISABLE_VERIFY);
@@ -436,9 +436,9 @@ bool BuildConfig(obs_data_t *settings, Config *out)
 
 	config.quic_max_streams = (uint64_t)Amount(settings, QUIC_MAX_STREAMS);
 	config.has_quic_max_streams = true;
-	config.quic_idle_timeout_ms = (uint64_t)Amount(settings, QUIC_IDLE_TIMEOUT);
+	config.quic_idle_timeout_us = (uint64_t)Amount(settings, QUIC_IDLE_TIMEOUT) * 1000;
 	config.has_quic_idle_timeout = true;
-	config.quic_keep_alive_ms = (uint64_t)Amount(settings, QUIC_KEEP_ALIVE);
+	config.quic_keep_alive_us = (uint64_t)Amount(settings, QUIC_KEEP_ALIVE) * 1000;
 	config.has_quic_keep_alive = true;
 
 	// The tri-states stay unset when the user left them on Automatic, which is what
@@ -465,7 +465,7 @@ bool BuildConfig(obs_data_t *settings, Config *out)
 
 	config.websocket_enabled = obs_data_get_bool(settings, WEBSOCKET_ENABLED);
 	config.has_websocket_enabled = true;
-	config.websocket_delay_ms = (uint64_t)Amount(settings, WEBSOCKET_DELAY);
+	config.websocket_delay_us = (uint64_t)Amount(settings, WEBSOCKET_DELAY) * 1000;
 	config.has_websocket_delay = true;
 
 	return true;

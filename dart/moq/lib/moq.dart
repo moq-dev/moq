@@ -30,7 +30,7 @@ final class Moq {
   }) async {
     final client = MoqClient();
     try {
-      if (!tlsVerify) client.setTlsDisableVerify(disable: true);
+      if (!tlsVerify) client.setTlsVerify(verify: false);
       if (tlsRoots != null) client.setTlsRoots(paths: tlsRoots);
       if (tlsSystemRoots != null) {
         client.setTlsSystemRoots(systemRoots: tlsSystemRoots);

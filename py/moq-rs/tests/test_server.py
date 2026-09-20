@@ -146,7 +146,7 @@ async def test_server_request_close():
         reject_task = asyncio.create_task(reject_loop())
         try:
             client = moq_ffi.MoqClient()
-            client.set_tls_disable_verify(True)
+            client.set_tls_verify(False)
             client.set_bind("127.0.0.1:0")
             # One-shot, so this dial's outcome is what surfaces here rather than
             # whatever the reconnect loop eventually reports.
@@ -173,10 +173,10 @@ async def test_server_request_close():
 async def test_client_setters_fail_after_cancel():
     """A cancelled client refuses further configuration rather than ignoring it."""
     client = moq_ffi.MoqClient()
-    client.set_tls_disable_verify(True)
+    client.set_tls_verify(False)
     client.cancel()
     with pytest.raises(moq_ffi.MoqError.Cancelled):  # type: ignore[misc]
-        client.set_tls_disable_verify(False)
+        client.set_tls_verify(True)
     with pytest.raises(moq_ffi.MoqError.Cancelled):  # type: ignore[misc]
         client.set_bind("127.0.0.1:0")
 
