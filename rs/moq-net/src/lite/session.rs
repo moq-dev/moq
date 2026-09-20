@@ -128,9 +128,9 @@ where
 	// (they share it in practice).
 	if our_setup.hop.is_none() {
 		our_setup.hop = publish
-			.as_deref()
-			.or(subscribe.as_deref())
-			.copied()
+			.as_ref()
+			.map(|origin| origin.hop())
+			.or_else(|| subscribe.as_ref().map(|origin| origin.hop()))
 			.filter(|hop| hop.id() != 0);
 	}
 

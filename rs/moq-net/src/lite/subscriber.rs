@@ -92,7 +92,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// origin we publish into so it matches the relay identity across
 		// every session sharing that origin, required for cross-session
 		// loop detection.
-		let self_origin = *config.origin;
+		let self_origin = config.origin.hop();
 		Self {
 			session: config.session,
 			origin: config.origin,

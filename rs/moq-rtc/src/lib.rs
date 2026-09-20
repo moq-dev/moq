@@ -85,7 +85,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn whip_and_whep_round_trip_opus() {
-		let source_origin = moq_tokio::origin::spawn(moq_net::Hop::random());
+		let source_origin = moq_tokio::origin::spawn();
 		let source_consumer = source_origin.consume();
 		let mut announcements = source_consumer.announced();
 		let mut source = source_origin
@@ -113,7 +113,7 @@ mod tests {
 		assert!(announcement.kind.is_active(), "source was unannounced");
 		drop(announcements);
 
-		let server_origin = moq_tokio::origin::spawn(moq_net::Hop::random());
+		let server_origin = moq_tokio::origin::spawn();
 		let server = Server::new(
 			server::Config::default(),
 			server_origin.clone(),
@@ -135,7 +135,7 @@ mod tests {
 			.expect("WHIP negotiation timed out")
 			.expect("WHIP negotiation failed");
 
-		let output_origin = moq_tokio::origin::spawn(moq_net::Hop::random());
+		let output_origin = moq_tokio::origin::spawn();
 		let output = output_origin
 			.create_broadcast("output")
 			.expect("create output broadcast");

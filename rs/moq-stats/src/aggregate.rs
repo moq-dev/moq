@@ -206,7 +206,7 @@ enum Reader<V: Mergeable> {
 	/// retracting (the table has already changed), while an unqueued
 	/// `Unroutable` means nothing serves the path at all.
 	Resolving {
-		pending: Pending<origin::Pending>,
+		pending: Pending<origin::Requesting>,
 		queued: bool,
 	},
 	/// Awaiting the subscription handshake.
@@ -478,7 +478,7 @@ fn resolve<V: Mergeable>(origin: &origin::Consumer, path: &PathOwned) -> Reader<
 mod tests {
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
-		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Hop::random().into());
+		let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		if tokio::runtime::Handle::try_current().is_ok() {
 			tokio::spawn(driver.run(moq_tokio::runtime::Runtime::<()>::new()));
 		} else {

@@ -23,11 +23,11 @@ cargo add moq-room
 ```
 
 ```rust
-use moq_net::{Hop, Path};
+use moq_net::Path;
 use moq_room::{Kind, Room, claims};
 
 let token = key.sign(&claims("meet/demo", "alice")?, None)?;
-let origin = moq_tokio::origin::spawn(Hop::random());
+let origin = moq_tokio::origin::spawn();
 let mut room = Room::new(&origin.consume(), Some(Path::new("alice").to_owned()));
 while let Some(event) = room.next().await {
     if event.kind == Kind::Camera {

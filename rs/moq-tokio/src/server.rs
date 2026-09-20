@@ -1683,7 +1683,7 @@ mod tests {
 		let path = PathBuf::from(format!("/tmp/moq-tokio-publish-{}.sock", std::process::id()));
 		let _ = std::fs::remove_file(&path);
 
-		let origin = crate::origin::spawn(moq_net::Hop::random());
+		let origin = crate::origin::spawn();
 		let broadcast = origin.create_broadcast("test").expect("create broadcast");
 		broadcast.announce(Default::default()).expect("announce broadcast");
 		let track = broadcast.create_track("video", None).expect("create track");
@@ -1720,7 +1720,7 @@ mod tests {
 		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 		let url: Url = format!("unix://{}", path.display()).parse().expect("parse url");
-		let subscriber = crate::origin::spawn(moq_net::Hop::random());
+		let subscriber = crate::origin::spawn();
 		let consumer = subscriber.consume();
 		let mut announced = consumer.announced();
 		let client = crate::connect::Config::default()

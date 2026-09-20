@@ -77,7 +77,7 @@ pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: S
 		moq_net::Pattern::subtree(&name).with_context(|| format!("invalid broadcast name `{name}`"))?,
 	);
 	let scoped = origin
-		.scope(&scope)
+		.scope("", &scope)
 		.with_context(|| format!("failed to scope origin to broadcast `{name}`"))?;
 
 	let mut config = moq_hls::export::Config::default();

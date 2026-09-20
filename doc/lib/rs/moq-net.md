@@ -73,6 +73,7 @@ assert_eq!(
 
 Three operations, on an origin:
 
+- `origin.publish(path, route)` creates and advertises a broadcast in one call.
 - `origin.create_broadcast(path)` returns a producer. The broadcast is
   reachable by exact path immediately and invisible to discovery until
   advertised.

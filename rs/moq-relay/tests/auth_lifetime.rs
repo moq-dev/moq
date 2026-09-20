@@ -20,7 +20,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use moq_auth::{Event, Grant, Pattern, Patterns, Request};
 use moq_relay::{Config, Connection, Relay, auth, cluster, web};
-use moq_tokio::moq_net::{self, Hop};
+use moq_tokio::moq_net;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -216,7 +216,7 @@ fn room_url(scheme: &str, port: u16) -> url::Url {
 /// Connect a publisher and a subscriber to `url` and prove one frame
 /// round-trips. Returns both sessions so the caller can watch them close.
 async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_tokio::Connection) {
-	let pub_origin = moq_tokio::origin::spawn(Hop::random());
+	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
 	let track = broadcast.create_track("video", None).expect("create track");
@@ -238,7 +238,7 @@ async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_t
 	.expect("publisher connect timeout")
 	.expect("publisher connect failed");
 
-	let sub_origin = moq_tokio::origin::spawn(Hop::random());
+	let sub_origin = moq_tokio::origin::spawn();
 	let sub_consumer = sub_origin.consume();
 	let mut announcements = sub_consumer.announced();
 	let sub_session = tokio::time::timeout(
@@ -291,7 +291,7 @@ async fn assert_refused(url: &url::Url) {
 }
 
 async fn assert_refused_with(client: moq_tokio::Client, url: &url::Url) {
-	let origin = moq_tokio::origin::spawn(Hop::random());
+	let origin = moq_tokio::origin::spawn();
 	let result = tokio::time::timeout(
 		TIMEOUT,
 		client
@@ -476,7 +476,7 @@ async fn http_routes_hold_a_lease() {
 	let (port, relay) = spawn_ws_relay(build_auth(script.spawn().await)).await;
 
 	// A publisher whose group stays open, so a fetch of it keeps streaming.
-	let pub_origin = moq_tokio::origin::spawn(Hop::random());
+	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce");
 	let track = broadcast.create_track("video", None).expect("create track");
@@ -498,7 +498,7 @@ async fn http_routes_hold_a_lease() {
 
 	// Wait until the announcement reaches the relay before asking over HTTP:
 	// the /announced handler only reports what has arrived so far.
-	let sub_origin = moq_tokio::origin::spawn(Hop::random());
+	let sub_origin = moq_tokio::origin::spawn();
 	let mut announcements = sub_origin.consume().announced();
 	let _sub_session = tokio::time::timeout(
 		TIMEOUT,
@@ -727,7 +727,7 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	.await;
 	let (addr, relay) = spawn_quic_relay(build_auth(narrow), Some(root.clone())).await;
 	let url: url::Url = format!("moql://127.0.0.1:{}/room", addr.port()).parse().unwrap();
-	let origin = moq_tokio::origin::spawn(Hop::random());
+	let origin = moq_tokio::origin::spawn();
 	let session = tokio::time::timeout(
 		TIMEOUT,
 		mtls_client()

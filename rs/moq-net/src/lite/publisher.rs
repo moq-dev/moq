@@ -143,7 +143,7 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> Publisher<S
 		// Identity stamped onto outbound announce hops. Derived from the
 		// origin we're consuming so it matches the local relay identity
 		// across every session, required for cross-session loop detection.
-		let self_origin = *config.origin;
+		let self_origin = config.origin.hop();
 		let accept = config.session.clone();
 		Self {
 			shared: Arc::new(Shared {
@@ -550,8 +550,8 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 		let origin = self
 			.shared
 			.origin
-			.scope(&scope)
-			.unwrap_or_else(|| self.shared.origin.empty());
+			.scope("", &scope)
+			.unwrap_or_else(|_| self.shared.origin.empty());
 		// Register the split-horizon peer on the announce cursor too. The origin
 		// model uses this exposure to park a reflected copy before it can replace
 		// the source we are currently advertising to that peer.
@@ -858,7 +858,7 @@ enum TrackInfoState {
 	/// Resolving the broadcast (may wait on a dynamic handler).
 	Request {
 		msg: lite::Track<'static>,
-		requesting: origin::Pending,
+		requesting: origin::Requesting,
 	},
 	/// Waiting for the track's info.
 	Query {
@@ -987,7 +987,7 @@ enum SubscribeState<S: crate::transport::poll::Session> {
 	/// Resolving the broadcast (may wait on a dynamic handler).
 	Request {
 		msg: lite::Subscribe<'static>,
-		requesting: origin::Pending,
+		requesting: origin::Requesting,
 	},
 	/// Waiting for the model subscription to be confirmed.
 	Confirm {
@@ -1213,7 +1213,7 @@ enum FetchState {
 	/// Resolving the broadcast (may wait on a dynamic handler).
 	Request {
 		msg: lite::Fetch<'static>,
-		requesting: origin::Pending,
+		requesting: origin::Requesting,
 	},
 	/// Waiting for the fetched group.
 	Fetch {
@@ -1754,7 +1754,7 @@ mod announce_test {
 		};
 		let task = tokio::spawn(async move {
 			let mut announced = consumer.announced();
-			let self_origin = *consumer;
+			let self_origin = consumer.hop();
 			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, "", self_origin, VERSION).await
 		});
 		settle().await;
@@ -1858,7 +1858,7 @@ mod announce_test {
 		};
 		let task = tokio::spawn(async move {
 			let mut announced = consumer.announced();
-			let self_origin = *consumer;
+			let self_origin = consumer.hop();
 			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, "", self_origin, VERSION).await
 		});
 		settle().await;

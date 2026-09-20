@@ -32,7 +32,7 @@ mod tests {
 	async fn subscribe_waits_for_the_announcement() {
 		tokio::time::pause();
 
-		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
+		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume();
 
 		// Direct resolution has no route before the announcement.

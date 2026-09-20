@@ -15,7 +15,7 @@ use std::net::{SocketAddr, TcpListener};
 use std::time::Duration;
 
 use moq_relay::{Config, Relay};
-use moq_tokio::moq_net::{self, Hop};
+use moq_tokio::moq_net;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -147,7 +147,7 @@ async fn embed_and_stop(mut config: Config) {
 	group.finish().expect("finish group");
 
 	let url: url::Url = format!("https://{quic}/").parse().expect("parse url");
-	let subscriber_origin = moq_tokio::origin::spawn(Hop::random());
+	let subscriber_origin = moq_tokio::origin::spawn();
 	let consumer = subscriber_origin.consume();
 	let mut announced = consumer.announced();
 	let subscriber = tokio::time::timeout(

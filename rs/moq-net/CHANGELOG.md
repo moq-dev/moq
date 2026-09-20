@@ -22,7 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [**breaking**] `create_track`, `reserve_track`, `unique_track`, `finish`, `create_group`, and `append_group` take `&self`. `track::Consumer::info()` is `query()`. `track::Demand` gains `is_used` / `poll_used` / `poll_unused`. `track::Producer::poll_unused` returns `Poll<Result<()>>`. `bandwidth::Producer::closed()` returns the cause.
 - [**breaking**] `stats::Presence` and `stats::Traffic` name both edges of each cumulative pair `*_started` / `*_ended` (`sessions_started` / `sessions_ended`, `announces_started` / `announces_ended`, `broadcasts_*`, `subscriptions_*`). Serialize still writes the previous `announced` / `*_closed` names beside the new ones; deserialize accepts either spelling, with the canonical name winning.
 - `origin::Info` is `origin::Config` with public fields and no `with_*` builders. `Producer::info()` is `config()`.
-- `origin::Requesting` is `origin::Pending`, the consumer-side wait for a request to resolve.
+- [**breaking**] `origin::Config::default()` mints a random hop, `Config::id` is `hop`, and origin handles expose `hop()` instead of dereferencing to `Hop`.
+- [**breaking**] `origin::Producer::scope(root, patterns)` and `origin::Consumer::scope(root, patterns)` replace the separate `with_root` / `scope` calls and return `Result` with `Unauthorized` for an empty grant.
+- [**breaking**] `origin::Pending` is `origin::Requesting`, the consumer-side wait for a request to resolve.
+- `origin::Producer::publish(path, route)` creates and advertises a broadcast together.
 - `track::Producer::write_datagram(Datagram)` is now `insert_datagram(sequence, timestamp, payload)`, matching TypeScript `insertDatagram`. The supplied sequence is preserved; `append_datagram` remains the next-sequence convenience.
 - `Timescale` no longer implements `From<NonZero<u64>>`. Use `Timescale::new` or `TryFrom` so values above the QUIC varint range are refused at construction.
 - Register moq-lite stream codes NOT_FOUND 0x33, OLD 0x34, and EVICTED 0x35 so a cache miss round-trips as the named variant instead of an opaque reserved-range placeholder.

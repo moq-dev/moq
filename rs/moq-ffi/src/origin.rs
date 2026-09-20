@@ -191,7 +191,7 @@ impl MoqOriginProducer {
 	}
 
 	fn from_config(config: MoqOriginConfig) -> Self {
-		let mut origin = moq_net::origin::Config::new(moq_net::Hop::random());
+		let mut origin = moq_net::origin::Config::default();
 		if let Some(capacity) = config.cache_capacity_bytes {
 			let cache = moq_net::cache::Config::default()
 				.with_capacity(capacity)
@@ -230,14 +230,14 @@ pub(crate) fn resolve_pair(
 ) -> (moq_net::origin::Producer, moq_net::origin::Producer) {
 	if publish.is_none() && consume.is_none() {
 		// Clones of a Producer share the underlying origin, so this is one origin, not two.
-		let shared = spawn(moq_net::Hop::random().into());
+		let shared = spawn(moq_net::origin::Config::default());
 		return (shared.clone(), shared);
 	}
 
 	let resolve = |origin: Option<&Arc<MoqOriginProducer>>| {
 		origin
 			.map(|o| o.inner().clone())
-			.unwrap_or_else(|| spawn(moq_net::Hop::random().into()))
+			.unwrap_or_else(|| spawn(moq_net::origin::Config::default()))
 	};
 	(resolve(publish), resolve(consume))
 }
@@ -302,7 +302,9 @@ impl MoqOriginConsumer {
 	/// Subscribe to routes under a requested prefix; updates return covered prefixes relative to it.
 	pub fn announced(&self, prefix: String) -> Result<Arc<MoqAnnounceConsumer>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let origin = self.inner.with_root(prefix).ok_or(MoqError::Unauthorized)?;
+		let origin = self
+			.inner
+			.scope(prefix, &moq_net::Patterns::from(moq_net::Pattern::all()))?;
 		Ok(Arc::new(MoqAnnounceConsumer {
 			task: Task::new(Announced {
 				inner: origin.announced(),
@@ -320,7 +322,8 @@ impl MoqOriginConsumer {
 
 		// Probe the permission eagerly so an unreachable path fails here, rather than
 		// surfacing later as a `Closed` the caller can't tell from the origin ending.
-		self.inner.with_root(&path).ok_or(MoqError::Unauthorized)?;
+		self.inner
+			.scope(&path, &moq_net::Patterns::from(moq_net::Pattern::all()))?;
 
 		Ok(Arc::new(MoqAnnouncedBroadcast {
 			task: Task::new(AnnouncedBroadcast {

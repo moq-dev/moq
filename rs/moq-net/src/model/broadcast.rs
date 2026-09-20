@@ -6,7 +6,7 @@
 //! [`Producer::finish`] or when the last producer drops.
 //!
 //! [Info] is the broadcast's static metadata, fixed for its lifetime.
-use crate::{stats, track};
+use crate::{cache, stats, track};
 use std::{
 	collections::{HashMap, VecDeque},
 	sync::Arc,
@@ -23,15 +23,14 @@ use super::{Requests, WeakCache};
 ///
 /// Create via [`Info::produce`] to obtain both [`Producer`] and [`Consumer`] pair.
 /// This is the broadcast's static identity, fixed for its lifetime.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Info {
-	/// The origin this broadcast belongs to (its identity, and the cache pool its
-	/// tracks and groups inherit). A track reaches its pool by walking up this link,
-	/// so the pool has a single home on the origin rather than being copied per
-	/// broadcast. Defaults to an unknown origin with an unbounded pool (a standalone
-	/// broadcast with no relay origin).
-	pub origin: super::origin::Config,
+	/// The cache pool this broadcast's tracks and groups inherit.
+	pub pool: cache::Pool,
+
+	/// Ceiling on each track's media-timestamp retention window.
+	pub cache_duration: std::time::Duration,
 
 	/// The path this broadcast is named by, which relative references in a catalog it
 	/// serves (hang's `broadcast` field) resolve against.
@@ -47,6 +46,16 @@ pub struct Info {
 	/// Empty (the default) for a standalone broadcast with no origin, which is then its own
 	/// root: any `..` reference escapes.
 	pub path: crate::PathOwned,
+}
+
+impl Default for Info {
+	fn default() -> Self {
+		Self {
+			pool: cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY)),
+			cache_duration: std::time::Duration::MAX,
+			path: crate::PathOwned::default(),
+		}
+	}
 }
 
 impl Info {

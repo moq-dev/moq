@@ -757,7 +757,7 @@ mod tests {
 	}
 
 	fn produce_origin() -> moq_net::origin::Producer {
-		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Hop::random().into());
+		let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		std::mem::forget(driver);
 		producer
 	}

@@ -226,6 +226,12 @@ impl Client {
 		self
 	}
 
+	/// Publish and subscribe through one shared origin.
+	pub fn with_origin(mut self, origin: moq_net::origin::Producer) -> Self {
+		self.moq = self.moq.with_origin(origin);
+		self
+	}
+
 	/// Subscribe to the peer's broadcasts, ingesting them into the given origin.
 	pub fn with_subscriber(mut self, subscribe: moq_net::origin::Producer) -> Self {
 		self.moq = self.moq.with_subscriber(subscribe);
@@ -724,7 +730,7 @@ mod tests {
 		let server = listen.init(Default::default()).unwrap();
 		let mut server = server.listen().await.unwrap();
 		let peer = server.local_addr().unwrap();
-		let origin = crate::origin::spawn(moq_net::Hop::random());
+		let origin = crate::origin::spawn();
 		let server_origin = origin.clone();
 		let accepted = tokio::spawn(async move {
 			let request = server.accept().await.unwrap();

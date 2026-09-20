@@ -40,12 +40,12 @@ The reference implementation. Every crate is on
 ```rust
 // The Origin is the local hub: the session fills it with remote broadcasts
 // and serves your local broadcasts out of it.
-let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
+let origin = moq_tokio::origin::spawn();
 
 let client = moq_tokio::connect::Config::default().init(Default::default())?;
 let url = url::Url::parse("https://cdn.moq.dev/anon")?;
 // Reconnects on its own; `closed()` resolves when it gives up.
-let session = client.with_subscriber(origin.clone()).with_publisher(&origin).connect(url);
+let session = client.with_origin(origin.clone()).connect(url);
 
 // Subscribe: wait for a route, resolve the broadcast at its path, read the catalog.
 let consumer = origin.consume();
@@ -62,10 +62,9 @@ while let Some(update) = announced.next().await {
 ```
 
 ```rust
-// Publish: create a broadcast on the origin, fill it, then announce its path.
-let mut broadcast = origin.create_broadcast("my-stream.hang")?;
+// Publish: create and announce a broadcast on the origin, then fill it.
+let mut broadcast = origin.publish("my-stream.hang", Default::default())?;
 // moq-mux (from a container) or moq-video / moq-audio (from a device) fill it.
-broadcast.announce(Default::default())?;
 // The route retracts on `unannounce()` or when the broadcast ends. To serve a whole
 // subtree on demand instead, `origin.dynamic("room", Default::default())?` yields
 // each requested path for the application to accept or reject.

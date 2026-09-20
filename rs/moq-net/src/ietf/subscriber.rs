@@ -2873,10 +2873,7 @@ mod tests {
 	async fn a_rooted_subscriber_asks_for_its_scope_not_its_root() {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let scope = crate::Patterns::from(crate::Pattern::subtree("cam").unwrap());
-		let scoped = origin
-			.with_root("rootns")
-			.and_then(|rooted| rooted.scope(&scope))
-			.expect("scope the origin");
+		let scoped = origin.scope("rootns", &scope).expect("scope the origin");
 
 		let gate = kio::Producer::new(true);
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
@@ -2946,10 +2943,7 @@ mod tests {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let scope = crate::Patterns::from(crate::Pattern::subtree("cam").unwrap());
-		let scoped = origin
-			.with_root("rootns")
-			.and_then(|rooted| rooted.scope(&scope))
-			.expect("scope the origin");
+		let scoped = origin.scope("rootns", &scope).expect("scope the origin");
 
 		let session = crate::lite::test_transport::ScriptedSession::new(namespace_response(VERSION, "x.hang").await);
 		let (tasks, _task_set) = crate::util::TaskSet::new();

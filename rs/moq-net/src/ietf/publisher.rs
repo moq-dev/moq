@@ -291,7 +291,7 @@ where
 		Self {
 			runtime,
 			session,
-			self_origin: *origin,
+			self_origin: origin.hop(),
 			origin,
 			control,
 			peer_hop,
@@ -1684,7 +1684,7 @@ where
 		let scope = crate::Pattern::subtree(prefix.as_str())
 			.map(crate::Patterns::from)
 			.unwrap_or_default();
-		let origin = self.origin.scope(&scope).unwrap_or_else(|| self.origin.empty());
+		let origin = self.origin.scope("", &scope).unwrap_or_else(|_| self.origin.empty());
 
 		// Send OK response
 		match self.version {

@@ -71,11 +71,11 @@ pub async fn listen_export(origin: moq_net::origin::Consumer, name: String, list
 		moq_net::Pattern::subtree(&name).with_context(|| format!("invalid broadcast name `{name}`"))?,
 	);
 	let subscriber = origin
-		.scope(&scope)
+		.scope("", &scope)
 		.with_context(|| format!("failed to scope origin to broadcast `{name}`"))?;
 	// A WHEP server only reads; it still needs a publisher handle for the shared
 	// glue, so hand it an unused, empty Origin producer.
-	let publisher = moq_tokio::origin::spawn(moq_net::Hop::random());
+	let publisher = moq_tokio::origin::spawn();
 	let server = moq_rtc::Server::new(server_config(&listen), publisher, subscriber);
 	serve(server.subscribe_router(), "WHEP", listen).await
 }
@@ -86,7 +86,7 @@ fn scope_producer(origin: &moq_net::origin::Producer, name: &str) -> anyhow::Res
 		moq_net::Pattern::subtree(name).with_context(|| format!("invalid broadcast name `{name}`"))?,
 	);
 	origin
-		.scope(&scope)
+		.scope("", &scope)
 		.with_context(|| format!("failed to scope origin to broadcast `{name}`"))
 }
 

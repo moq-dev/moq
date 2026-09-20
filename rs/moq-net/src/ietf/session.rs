@@ -442,8 +442,8 @@ pub struct PeerSetup<S: crate::transport::poll::Session> {
 /// has no content to route, so a throwaway id is all it can offer.
 fn self_origin(publish: Option<&origin::Consumer>, subscribe: Option<&origin::Producer>) -> Hop {
 	publish
-		.map(|origin| **origin)
-		.or_else(|| subscribe.map(|origin| **origin))
+		.map(|origin| origin.hop())
+		.or_else(|| subscribe.map(|origin| origin.hop()))
 		.unwrap_or_else(Hop::random)
 }
 
@@ -984,8 +984,7 @@ mod tests {
 			.map(|prefix| crate::Pattern::subtree(prefix).unwrap())
 			.collect();
 		let scoped = origin
-			.with_root("rootns")
-			.and_then(|rooted| rooted.scope(&scope))
+			.scope("rootns", &scope)
 			.expect("scope the origin to two prefixes");
 
 		let gate = kio::Producer::new(true);

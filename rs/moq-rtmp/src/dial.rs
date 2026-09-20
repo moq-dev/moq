@@ -496,11 +496,8 @@ struct Publisher {
 impl Publisher {
 	fn new(origin: &origin::Producer, path: &str, config: moq_mux::catalog::Config) -> anyhow::Result<Self> {
 		let mut broadcast = origin
-			.create_broadcast(path)
+			.publish(path, moq_net::origin::Route::default())
 			.map_err(|err| anyhow::anyhow!("broadcast '{path}' could not be published: {err}"))?;
-		broadcast
-			.announce(moq_net::origin::Route::default())
-			.map_err(|err| anyhow::anyhow!("broadcast '{path}' could not be announced: {err}"))?;
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 		let handle = broadcast.clone();
 		let mut importer = FlvImport::new(broadcast, catalog.reserve());
@@ -564,7 +561,7 @@ mod tests {
 		let mut vframe = vec![0x17, 0x01, 0x00, 0x00, 0x00];
 		vframe.extend_from_slice(&[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
 
-		let server_origin = moq_tokio::origin::spawn(moq_net::Hop::random());
+		let server_origin = moq_tokio::origin::spawn();
 		let mut broadcast = server_origin.create_broadcast("live/cam0").unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
@@ -587,7 +584,7 @@ mod tests {
 		});
 
 		// Client: dial, connect(`live`), play(`cam0`), republish into our own origin.
-		let client_origin = moq_tokio::origin::spawn(moq_net::Hop::random());
+		let client_origin = moq_tokio::origin::spawn();
 		let announced = client_origin.consume();
 		let pull_origin = client_origin.clone();
 		let pull = tokio::spawn(async move {

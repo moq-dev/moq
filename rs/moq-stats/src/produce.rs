@@ -636,17 +636,13 @@ struct GroupPublisher {
 impl GroupPublisher {
 	fn create(origin: &origin::Producer, prefix: &Path, group: &Path, node: Option<&str>) -> Option<Self> {
 		let advertised = advertised_path(prefix, group, node);
-		let broadcast = match origin.create_broadcast(&advertised) {
+		let broadcast = match origin.publish(&advertised, origin::Route::default()) {
 			Ok(broadcast) => broadcast,
 			Err(err) => {
 				tracing::warn!(advertised = %advertised, ?err, "stats: origin rejected stats broadcast");
 				return None;
 			}
 		};
-		if let Err(err) = broadcast.announce(origin::Route::default()) {
-			tracing::warn!(advertised = %advertised, ?err, "stats: origin rejected stats announce");
-			return None;
-		}
 		tracing::debug!(advertised = %advertised, "stats: publishing broadcast");
 
 		let mut traffic = TrackFamily::new();
@@ -885,7 +881,7 @@ fn advertised_path(prefix: &Path, group: &Path, node: Option<&str>) -> PathOwned
 mod tests {
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
-		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Hop::random().into());
+		let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		if tokio::runtime::Handle::try_current().is_ok() {
 			tokio::spawn(driver.run(moq_tokio::runtime::Runtime::<()>::new()));
 		} else {

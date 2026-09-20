@@ -60,7 +60,7 @@ impl Source {
 	}
 
 	/// Begin resolving the catalog broadcast (the one at this source's path).
-	pub(crate) fn request_catalog(&self) -> kio::Pending<moq_net::origin::Pending> {
+	pub(crate) fn request_catalog(&self) -> kio::Pending<moq_net::origin::Requesting> {
 		self.origin.request_broadcast(&self.path)
 	}
 
@@ -100,7 +100,7 @@ impl Source {
 	pub(crate) fn request(
 		&self,
 		rel: Option<&moq_net::PathRelative<'_>>,
-	) -> crate::Result<kio::Pending<moq_net::origin::Pending>> {
+	) -> crate::Result<kio::Pending<moq_net::origin::Requesting>> {
 		Ok(self.origin.request_broadcast(&self.target(rel)?))
 	}
 
@@ -113,7 +113,7 @@ impl Source {
 	pub(crate) fn try_request(
 		&self,
 		rel: Option<&moq_net::PathRelative<'_>>,
-	) -> Option<kio::Pending<moq_net::origin::Pending>> {
+	) -> Option<kio::Pending<moq_net::origin::Requesting>> {
 		Some(self.origin.request_broadcast(&self.resolve_reference(rel)?))
 	}
 
@@ -222,7 +222,7 @@ enum Bound {
 	/// A broadcast the caller already holds.
 	Ready(moq_net::broadcast::Consumer),
 	/// A request issued when the binding was made.
-	Requested(moq_net::origin::Pending),
+	Requested(moq_net::origin::Requesting),
 }
 
 impl Binding {
@@ -286,7 +286,7 @@ impl BroadcastConfig for hang::catalog::BinaryConfig {
 /// Test helper: build an origin producer, spawning its driver on the ambient runtime.
 #[cfg(test)]
 pub(crate) fn produce_origin() -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::Hop::random().into());
+	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 	if tokio::runtime::Handle::try_current().is_ok() {
 		tokio::spawn(driver.run(moq_tokio::runtime::Runtime::<()>::new()));
 	} else {

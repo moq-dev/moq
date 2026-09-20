@@ -361,8 +361,8 @@ mod tests {
 		use std::net::TcpListener;
 
 		let lite: moq_net::Version = "moq-lite-05".parse().expect("lite version");
-		let pub_origin = moq_tokio::origin::spawn(config);
-		let sub_origin = moq_tokio::origin::spawn(moq_net::Hop::random());
+		let pub_origin = moq_tokio::origin::spawn_config(config.into());
+		let sub_origin = moq_tokio::origin::spawn();
 
 		for _ in 0..20 {
 			let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
@@ -481,7 +481,7 @@ mod tests {
 	async fn a_session_crossed_cache_miss_answers_404() {
 		let pool = moq_net::cache::Pool::new(moq_net::cache::Config::default().with_capacity(1));
 		let pair = lite_pair_pub({
-			let mut config = moq_net::origin::Config::new(moq_net::Hop::random());
+			let mut config = moq_net::origin::Config::default();
 			config.pool = pool;
 			config
 		})

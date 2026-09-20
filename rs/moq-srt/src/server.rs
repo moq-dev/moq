@@ -818,7 +818,7 @@ mod tests {
 		// Ten minutes in, the span from the controlled-rewind evidence on #2833.
 		const OFFSET: u64 = 600_000_000;
 
-		let (origin, driver) = moq_net::origin::Producer::new(moq_net::Hop::random().into());
+		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		tokio::spawn(driver.run(moq_tokio::runtime::Runtime::<()>::new()));
 		let mut broadcast = origin.create_broadcast("rewind").unwrap();
 		broadcast.announce(moq_net::origin::Route::default()).unwrap();

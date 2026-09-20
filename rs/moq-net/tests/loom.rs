@@ -22,7 +22,7 @@
 
 use bytes::Bytes;
 use loom::{future::block_on, thread};
-use moq_net::{Error, Timestamp, broadcast, cache, origin};
+use moq_net::{Error, Timestamp, broadcast, cache};
 
 /// A frame written on the publisher thread must reach a subscriber parked on
 /// `next_frame`, however the write interleaves with the reader's parking.
@@ -182,11 +182,7 @@ fn concurrent_tracks_drain_a_shared_pool() {
 			.with_expiry(cache::DEFAULT_EXPIRY);
 		let pool = cache::Pool::new(config);
 		let mut info = broadcast::Info::new();
-		info.origin = {
-			let mut origin = origin::Config::default();
-			origin.pool = pool.clone();
-			origin
-		};
+		info.pool = pool.clone();
 		let mut broadcast = info.produce();
 
 		let handles: Vec<_> = ["video", "audio"]

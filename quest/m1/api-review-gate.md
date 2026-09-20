@@ -17,7 +17,6 @@ file is deleted on completion) or deletes the quest with a note in
 quest is deleted too. No code.
 
 The list: [Announce event](/quest/m1/api-net-announce.md),
-[Origin scoping](/quest/m1/api-net-origin.md),
 [Rendition ownership](/quest/m1/api-mux-rendition.md),
 [Gateway types](/quest/m1/api-gateways.md).
 

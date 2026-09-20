@@ -40,8 +40,7 @@ impl Publisher {
 	/// (`with_max_age`) and the connection allocator passthrough tracks claim on
 	/// (`with_bandwidth`).
 	pub fn new(origin: &origin::Producer, path: &str, config: moq_mux::catalog::Config) -> Result<Self> {
-		let mut broadcast = origin.create_broadcast(path)?;
-		broadcast.announce(moq_net::origin::Route::default())?;
+		let mut broadcast = origin.publish(path, moq_net::origin::Route::default())?;
 		let config = config.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 		let handle = broadcast.clone();
@@ -144,7 +143,7 @@ mod tests {
 
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
-		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Hop::random().into());
+		let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		if tokio::runtime::Handle::try_current().is_ok() {
 			tokio::spawn(driver.run(moq_tokio::runtime::Runtime::<()>::new()));
 		} else {
