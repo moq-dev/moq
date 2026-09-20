@@ -16,7 +16,7 @@ file is deleted on completion) or deletes the quest with a note in
 `quest/m1/README.md` naming the deferred break. When the list is empty this
 quest is deleted too. No code.
 
-The list: [Announce event](/quest/m1/api-net-announce.md),
+The list: [Bindings announce match](/quest/m1/api-origin-scopes.md),
 [Rendition ownership](/quest/m1/api-mux-rendition.md).
 
 ## Related

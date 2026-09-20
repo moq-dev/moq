@@ -108,5 +108,4 @@ Tests, at the process level with real sessions rather than an in-process stand-i
 
 ## Required
 
-- [Announce event](/quest/m1/api-net-announce.md) - advertisements are prefixes and the request is the authority before resolution builds on them
 - [Merge dev](/quest/m1/merge-dev.md) - the required M1 APIs must be available on main before this implementation starts

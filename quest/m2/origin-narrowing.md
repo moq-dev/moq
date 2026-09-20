@@ -46,5 +46,5 @@ path; starts on main after the merge. Wire: none.
 
 ## Related
 
-- [Bindings announce match](/quest/m1/api-origin-scopes.md) - the binding half of the same line
+- [Origin scopes](https://github.com/moq-dev/moq/pull/3746) - the scope and match half of the same line
 - [In-band auth](/quest/m2/auth/README.md) - the token union that a narrowing later revalidates
