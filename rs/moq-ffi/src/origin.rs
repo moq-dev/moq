@@ -59,18 +59,18 @@ impl TryFrom<MoqRoute> for moq_net::origin::Route {
 
 	fn try_from(route: MoqRoute) -> Result<Self, MoqError> {
 		let cold = route.cold.unwrap_or(route.cost);
-		let mut out = moq_net::origin::Route::default().with_cost((route.cost, cold));
+		let mut hops = moq_net::Hops::new();
 		for id in route.hops {
 			let origin = if id == 0 {
 				moq_net::Hop::UNKNOWN
 			} else {
 				moq_net::Hop::new(id).map_err(|e| MoqError::InvalidRoute(e.to_string()))?
 			};
-			out = out
-				.with_hop(origin)
-				.map_err(|e| MoqError::InvalidRoute(e.to_string()))?;
+			hops.push(origin).map_err(|e| MoqError::InvalidRoute(e.to_string()))?;
 		}
-		Ok(out)
+		Ok(moq_net::origin::Route::default()
+			.with_cost(moq_net::origin::Cost::from_warm_cold(route.cost, cold))
+			.with_hops(hops))
 	}
 }
 

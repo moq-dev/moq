@@ -400,6 +400,11 @@ impl Cost {
 		Self { warm: cost, cold: cost }
 	}
 
+	/// A discounted warm cost alongside the same route's undiscounted cold cost.
+	pub const fn from_warm_cold(warm: u64, cold: u64) -> Self {
+		Self { warm, cold }
+	}
+
 	/// The highest cost either half can take, and where accumulation saturates.
 	///
 	/// A draining session stamps this on its routes so every other candidate outranks
@@ -442,17 +447,6 @@ impl Cost {
 impl From<u64> for Cost {
 	fn from(cost: u64) -> Self {
 		Self::new(cost)
-	}
-}
-
-impl From<(u64, u64)> for Cost {
-	/// Both magnitudes explicitly: `(warm, cold)`.
-	///
-	/// Unlike [`new`](Self::new), which prices the route undiscounted, this keeps a
-	/// discounted `warm` alongside its undiscounted `cold`, which is what an
-	/// application re-announcing an observed route means.
-	fn from((warm, cold): (u64, u64)) -> Self {
-		Self { warm, cold }
 	}
 }
 
@@ -499,15 +493,6 @@ impl Default for Route {
 }
 
 impl Route {
-	/// Append a hop to the chain, oldest first.
-	///
-	/// Fails with [`crate::InvalidHop`] for a hop the wire would reject: one past the
-	/// chain's length cap, or one already in it, which is a loop.
-	pub fn with_hop(mut self, hop: Hop) -> Result<Self, InvalidHop> {
-		self.hops.push(hop)?;
-		Ok(self)
-	}
-
 	/// Replace the hop chain.
 	pub fn with_hops(mut self, hops: Hops) -> Self {
 		self.hops = hops;

@@ -658,7 +658,7 @@ unsafe fn parse_route(route: *const moq_route) -> Result<moq_net::origin::Route,
 		return Ok(moq_net::origin::Route::default());
 	};
 	let cold = if route.has_cold { route.cold } else { route.cost };
-	let mut out = moq_net::origin::Route::default().with_cost((route.cost, cold));
+	let mut route_hops = moq_net::Hops::new();
 	if route.hops_len > 0 {
 		if route.hops.is_null() {
 			return Err(Error::InvalidPointer);
@@ -670,10 +670,12 @@ unsafe fn parse_route(route: *const moq_route) -> Result<moq_net::origin::Route,
 			} else {
 				moq_net::Hop::new(*id).map_err(|e| Error::InvalidConfig(e.to_string()))?
 			};
-			out = out.with_hop(hop).map_err(|e| Error::InvalidConfig(e.to_string()))?;
+			route_hops.push(hop).map_err(|e| Error::InvalidConfig(e.to_string()))?;
 		}
 	}
-	Ok(out)
+	Ok(moq_net::origin::Route::default()
+		.with_cost(moq_net::origin::Cost::from_warm_cold(route.cost, cold))
+		.with_hops(route_hops))
 }
 
 /// A route announcement or retraction from an origin.
