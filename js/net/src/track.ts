@@ -1280,7 +1280,7 @@ export class Subscriber {
 	 * so frames never run backwards: a late lower-sequence group is skipped, and so is
 	 * one every frame of which `maxAge` proves is too old. A group the budget abandons
 	 * mid-stall ends cleanly and the cursor resyncs from the next group; a gap inside a
-	 * group still surfaces as {@link Lagged} or {@link GroupTooLarge}.
+	 * group still surfaces as {@link TooFarBehind} or {@link GroupTooLarge}.
 	 */
 	async #readFrame(): Promise<({ group: number; frame: number } & Frame) | undefined> {
 		for (;;) {

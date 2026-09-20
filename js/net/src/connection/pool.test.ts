@@ -119,6 +119,21 @@ test("a handle taken within the linger window reuses the warm connection", async
 	second.close();
 });
 
+test("the longest requested linger keeps the shared connection warm", async () => {
+	stubTransports();
+
+	const first = new Connection({ url, linger: Time.Milli(1) });
+	const second = new Connection({ url, linger: Time.Milli(500) });
+	await waitUntil(() => second.status.peek() === "connected");
+	const origin = first.origin.peek();
+
+	first.close();
+	second.close();
+	await new Promise((resolve) => setTimeout(resolve, 50));
+
+	expect(origin?.closed.peek()).toBeUndefined();
+});
+
 test("disabling a handle releases its share", async () => {
 	stubTransports();
 
@@ -341,6 +356,34 @@ test("exhausted retries then a new URL recovers a private handle", async () => {
 		expect(handle.closed.peek()).toBeUndefined();
 	} finally {
 		handle.close();
+	}
+});
+
+test("a private partial delay keeps the unlimited retry timeout", async () => {
+	let attempts = 0;
+	const stub = function StubWebTransport() {
+		attempts++;
+		throw new Error("relay is down");
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	const real = performance.now.bind(performance);
+	const start = real();
+	performance.now = () => start + (real() - start) * 1_000_000;
+
+	const handle = new Connection({
+		url,
+		share: false,
+		websocket: { enabled: false },
+		delay: { initial: Time.Milli(1), multiplier: 1, max: Time.Milli(1) },
+	});
+	try {
+		await waitUntil(() => attempts >= 3 || handle.error.peek() !== undefined);
+		expect(attempts).toBeGreaterThanOrEqual(3);
+		expect(handle.error.peek()).toBeUndefined();
+	} finally {
+		handle.close();
+		performance.now = real;
 	}
 });
 
