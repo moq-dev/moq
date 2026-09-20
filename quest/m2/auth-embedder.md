@@ -17,8 +17,7 @@ Additive on `moq-auth` and `moq-relay`, so on main after the merge:
   `producer.due().await -> Due::{Revalidate, Expired}`, `update(grant)`
   reschedules, `failed()` applies the backoff. `moq_auth::Client` becomes a
   ten-line loop over it, and an embedder answering `Admissions` writes the
-  same ten lines instead of a second driver. [One auth path](/quest/m1/auth-one-path.md)
-  should reference this so its fold does not ship a third.
+  same ten lines instead of a second driver.
 - `Cluster::admit(&self, auth: &Auth, request: moq_auth::Request) ->
   Result<Admitted, auth::Error>` with
   `Admitted { lease: Lease, publisher: Option<origin::Producer>, subscriber: Option<origin::Consumer>, stats: stats::Session }`
