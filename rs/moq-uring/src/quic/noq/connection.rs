@@ -777,8 +777,13 @@ impl Driver {
 		tx[..transmit.size].copy_from_slice(&self.scratch[..transmit.size]);
 		// A lone datagram is its own segment size, and the socket's GSO
 		// stride has to match what noq actually packed.
-		let segment = transmit.segment_size.unwrap_or(transmit.size);
-		if let Err(err) = tx.send(transmit.size, transmit.destination, segment) {
+		let transmit = udp::Transmit {
+			to: transmit.destination,
+			len: transmit.size,
+			segment: transmit.segment_size.unwrap_or(transmit.size),
+			ecn: transmit.ecn.map(Into::into),
+		};
+		if let Err(err) = tx.send(transmit) {
 			return Poll::Ready(Err(Error::Io(err.to_string())));
 		}
 		// A flush frees datagram-send queue space.

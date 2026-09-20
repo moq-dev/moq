@@ -14,7 +14,10 @@
 //! Send stages datagrams in a pool of buffers owned by id and released
 //! explicitly on completion, the shape `SENDMSG_ZC`'s deferred-reclaim NOTIF
 //! model needs later. Every GSO `sendmsg` carries its `UDP_SEGMENT` control
-//! message explicitly; the socket default is never relied on.
+//! message explicitly; the socket default is never relied on. The ECN mark
+//! rides beside it as `IP_TOS` or `IPV6_TCLASS`, and receives read the mark
+//! back through `IP_RECVTOS` and `IPV6_RECVTCLASS`, so a QUIC stack's ECN
+//! validation sees what the network did to its packets.
 //!
 //! Both pools are queues of concurrent operations, not byte budgets: one send
 //! buffer holds one GSO train and one receive buffer holds one completion,
@@ -31,7 +34,7 @@ use std::alloc::{Layout, alloc_zeroed, dealloc, handle_alloc_error};
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::io;
-use std::net::{SocketAddr, SocketAddrV6, UdpSocket};
+use std::net::{IpAddr, SocketAddr, SocketAddrV6, UdpSocket};
 use std::os::fd::AsRawFd;
 use std::ptr::NonNull;
 use std::rc::{Rc, Weak};
@@ -44,7 +47,8 @@ use crate::Error;
 use crate::metrics::Counters;
 use crate::shared::{Cqe, Op, Shared};
 
-/// Space reserved for received control messages (`UDP_GRO` needs one int).
+/// Space reserved for received control messages: `UDP_GRO` plus the packet's
+/// `IP_TOS` or `IPV6_TCLASS` (the kernel emits one or the other), two ints.
 const CONTROL_LEN: usize = 64;
 /// Space reserved for the source address of each received datagram.
 const NAME_LEN: usize = std::mem::size_of::<libc::sockaddr_storage>();
@@ -140,6 +144,45 @@ struct Queued {
 	len: usize,
 	from: SocketAddr,
 	stride: usize,
+	ecn: Option<Ecn>,
+}
+
+/// The ECN codepoint carried in the IP header's TOS or traffic class byte.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ecn {
+	/// ECN-capable transport, the codepoint classic ECN marks with.
+	Ect0 = 0b10,
+	/// ECN-capable transport, the codepoint L4S marks with.
+	Ect1 = 0b01,
+	/// Congestion experienced: a queue on the path marked the packet.
+	Ce = 0b11,
+}
+
+impl Ecn {
+	/// The codepoint in the low two bits of a TOS byte, if any.
+	pub fn from_bits(bits: u8) -> Option<Self> {
+		match bits & 0b11 {
+			0b10 => Some(Self::Ect0),
+			0b01 => Some(Self::Ect1),
+			0b11 => Some(Self::Ce),
+			_ => None,
+		}
+	}
+}
+
+/// What one [`TxBuf::send`] puts on the wire.
+#[derive(Debug, Clone, Copy)]
+pub struct Transmit {
+	/// The destination.
+	pub to: SocketAddr,
+	/// How many bytes of the buffer to send.
+	pub len: usize,
+	/// The datagram size; the buffer is sent as `len / segment` datagrams,
+	/// the last possibly short.
+	pub segment: usize,
+	/// The ECN codepoint every datagram carries, if any.
+	pub ecn: Option<Ecn>,
 }
 
 /// Free `bid` back to its pool if nothing borrows it any more. Returns whether
@@ -460,21 +503,14 @@ impl Socket {
 		}
 
 		if config.gro {
-			let on: libc::c_int = 1;
-			// SAFETY: valid fd, valid option buffer.
-			let ret = unsafe {
-				libc::setsockopt(
-					io.as_raw_fd(),
-					libc::SOL_UDP,
-					libc::UDP_GRO,
-					(&raw const on).cast(),
-					std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-				)
-			};
-			if ret != 0 {
-				return Err(io::Error::last_os_error().into());
-			}
+			set_option(&io, libc::SOL_UDP, libc::UDP_GRO)?;
 		}
+		// Receive the ECN codepoint with each datagram. A v6 socket takes
+		// both: Linux reports a v4-mapped datagram's mark as `IP_TOS`.
+		if io.local_addr()?.is_ipv6() {
+			set_option(&io, libc::IPPROTO_IPV6, libc::IPV6_RECVTCLASS)?;
+		}
+		set_option(&io, libc::IPPROTO_IP, libc::IP_RECVTOS)?;
 
 		// The ring's entry count is fixed at registration, so it is sized for
 		// the ceiling; the buffers behind it are allocated as the pool grows.
@@ -581,6 +617,7 @@ impl Socket {
 				len: queued.len,
 				stride: queued.stride,
 				from: queued.from,
+				ecn: queued.ecn,
 			}));
 		}
 		if let Some(code) = rx.error {
@@ -673,12 +710,19 @@ pub struct Packet {
 	len: usize,
 	stride: usize,
 	from: SocketAddr,
+	ecn: Option<Ecn>,
 }
 
 impl Packet {
 	/// The datagrams' source address.
 	pub fn from(&self) -> SocketAddr {
 		self.from
+	}
+
+	/// The ECN codepoint the datagrams arrived with; GRO only coalesces
+	/// datagrams that share one.
+	pub fn ecn(&self) -> Option<Ecn> {
+		self.ecn
 	}
 
 	/// The datagram size GRO coalesced with; the final datagram may be short.
@@ -718,6 +762,7 @@ impl std::fmt::Debug for Packet {
 			.field("from", &self.from)
 			.field("len", &self.len)
 			.field("stride", &self.stride)
+			.field("ecn", &self.ecn)
 			.finish()
 	}
 }
@@ -735,16 +780,17 @@ pub struct TxBuf {
 }
 
 impl TxBuf {
-	/// Send `self[..len]` on the owning socket, to `to`, as datagrams of
-	/// `segment` bytes (the last may be short). Fire-and-forget: the buffer
-	/// returns to the pool when the kernel completes, and a failed send
-	/// surfaces on the next pool acquire.
+	/// Send `self[..len]` on the owning socket as datagrams of `segment`
+	/// bytes (the last may be short), marked with `ecn`. Fire-and-forget:
+	/// the buffer returns to the pool when the kernel completes, and a
+	/// failed send surfaces on the next pool acquire.
 	///
 	/// This only stages an SQE, so the datagram reaches the kernel when the
 	/// worker next enters the ring. Dropping the worker makes a bounded attempt
 	/// to submit staged datagrams and drain their completions, but does not
 	/// guarantee kernel completion or delivery.
-	pub fn send(mut self, len: usize, to: SocketAddr, segment: usize) -> io::Result<()> {
+	pub fn send(mut self, transmit: Transmit) -> io::Result<()> {
+		let Transmit { to, len, segment, ecn } = transmit;
 		// `UDP_SEGMENT` is a u16, so an oversized segment would silently
 		// truncate into a tiny stride and explode the implied segment count.
 		if len == 0 || len > self.cap || segment == 0 || segment > usize::from(u16::MAX) {
@@ -798,14 +844,19 @@ impl TxBuf {
 			headers,
 		};
 
+		let one = SendOne {
+			to,
+			ecn,
+			segment: sock.config.gso.then_some(segment as u16),
+		};
 		if sock.config.gso {
-			send_one(&shared, &staging, 0, base, len, to, Some(segment as u16))?;
+			send_one(&shared, &staging, 0, base, len, &one)?;
 		} else {
 			for index in 0..segments {
 				let offset = index * segment;
 				let chunk = segment.min(len - offset);
 				// SAFETY: offset stays within the leased buffer.
-				send_one(&shared, &staging, index, unsafe { base.add(offset) }, chunk, to, None)?;
+				send_one(&shared, &staging, index, unsafe { base.add(offset) }, chunk, &one)?;
 			}
 		}
 		sock.metrics.tx_datagrams.add(segments as u64);
@@ -884,15 +935,23 @@ impl Drop for SendOp {
 	}
 }
 
+/// What every datagram of one [`TxBuf::send`] shares.
+struct SendOne {
+	to: SocketAddr,
+	ecn: Option<Ecn>,
+	/// The `UDP_SEGMENT` size, when the call is one GSO train.
+	segment: Option<u16>,
+}
+
 fn send_one(
 	shared: &Rc<Shared>,
 	staging: &Staging,
 	index: usize,
 	base: *mut u8,
 	len: usize,
-	to: SocketAddr,
-	segment: Option<u16>,
+	one: &SendOne,
 ) -> io::Result<()> {
+	let SendOne { to, ecn, segment } = *one;
 	// SAFETY: `index` is within the headers `TxBuf::send` reserved, and every
 	// operation gets its own.
 	let hdr = unsafe { &mut *staging.headers.as_ptr().add(index) };
@@ -907,17 +966,44 @@ fn send_one(
 	hdr.hdr.msg_iov = &raw mut hdr.iov;
 	hdr.hdr.msg_iovlen = 1;
 
-	if let Some(segment) = segment {
-		hdr.hdr.msg_control = hdr.control.0.as_mut_ptr().cast();
-		// SAFETY: the control buffer is zeroed, aligned, and large enough for
-		// one u16 control message.
-		unsafe {
-			hdr.hdr.msg_controllen = libc::CMSG_SPACE(std::mem::size_of::<u16>() as _) as usize;
-			let cmsg = libc::CMSG_FIRSTHDR(&hdr.hdr);
+	// SAFETY: the control buffer is zeroed, aligned, and holds both messages
+	// (`CMSG_SPACE` of a u16 and of an int fit twice over in `CONTROL_LEN`);
+	// `msg_controllen` is set to the total first so `CMSG_NXTHDR` walks it.
+	unsafe {
+		let mut space = 0;
+		if segment.is_some() {
+			space += libc::CMSG_SPACE(std::mem::size_of::<u16>() as _) as usize;
+		}
+		if ecn.is_some() {
+			space += libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as _) as usize;
+		}
+		if space > 0 {
+			hdr.hdr.msg_control = hdr.control.0.as_mut_ptr().cast();
+			hdr.hdr.msg_controllen = space;
+		}
+		let mut cmsg = libc::CMSG_FIRSTHDR(&hdr.hdr);
+		if let Some(segment) = segment {
 			(*cmsg).cmsg_level = libc::SOL_UDP;
 			(*cmsg).cmsg_type = libc::UDP_SEGMENT;
 			(*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<u16>() as _) as usize;
 			std::ptr::write_unaligned(libc::CMSG_DATA(cmsg).cast::<u16>(), segment);
+			cmsg = libc::CMSG_NXTHDR(&hdr.hdr, cmsg);
+		}
+		if let Some(ecn) = ecn {
+			// A v4-mapped destination on a v6 socket leaves as IPv4, so the
+			// mark rides `IP_TOS`; a native v6 destination takes `IPV6_TCLASS`.
+			let is_ipv4 = match to.ip() {
+				IpAddr::V4(_) => true,
+				IpAddr::V6(v6) => v6.to_ipv4_mapped().is_some(),
+			};
+			let (level, kind) = match is_ipv4 {
+				true => (libc::IPPROTO_IP, libc::IP_TOS),
+				false => (libc::IPPROTO_IPV6, libc::IPV6_TCLASS),
+			};
+			(*cmsg).cmsg_level = level;
+			(*cmsg).cmsg_type = kind;
+			(*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as _) as usize;
+			std::ptr::write_unaligned(libc::CMSG_DATA(cmsg).cast::<libc::c_int>(), ecn as libc::c_int);
 		}
 	}
 	let hdr_ptr = &raw const hdr.hdr;
@@ -1135,7 +1221,7 @@ fn on_recv_multi(sock: &Rc<SockShared>, cqe: Cqe) -> Result<(u16, Option<Queued>
 	if payload.is_empty() {
 		return Ok((bid, None));
 	}
-	let stride = gro_stride(out.control_data()).unwrap_or(payload.len());
+	let meta = RecvMeta::parse(out.control_data());
 	let payload_start = payload.as_ptr() as usize - buf.data.as_ptr() as usize;
 	Ok((
 		bid,
@@ -1144,7 +1230,8 @@ fn on_recv_multi(sock: &Rc<SockShared>, cqe: Cqe) -> Result<(u16, Option<Queued>
 			start: payload_start,
 			len: payload.len(),
 			from,
-			stride,
+			stride: meta.stride.unwrap_or(payload.len()),
+			ecn: meta.ecn,
 		}),
 	))
 }
@@ -1173,7 +1260,7 @@ fn on_recv_oneshot(one: OneshotRecv, cqe: Cqe) -> Result<(u16, Option<Queued>), 
 		return Ok((bid, None));
 	}
 	let control = &one.control.0[..one.hdr.msg_controllen.min(CONTROL_LEN)];
-	let stride = gro_stride(control).unwrap_or(len);
+	let meta = RecvMeta::parse(control);
 	// `claimed` stays set: the packet owns the buffer until released.
 	Ok((
 		bid,
@@ -1182,7 +1269,8 @@ fn on_recv_oneshot(one: OneshotRecv, cqe: Cqe) -> Result<(u16, Option<Queued>), 
 			start: 0,
 			len,
 			from,
-			stride,
+			stride: meta.stride.unwrap_or(len),
+			ecn: meta.ecn,
 		}),
 	))
 }
@@ -1206,38 +1294,76 @@ pub(crate) fn on_send(op: SendOp, cqe: Cqe) {
 	}
 }
 
-/// The `UDP_GRO` segment size in a received control buffer, if present.
-fn gro_stride(control: &[u8]) -> Option<usize> {
-	let header_len = unsafe { libc::CMSG_LEN(0) as usize };
-	let mut offset = 0;
+/// What the kernel said about one receive, from its control buffer.
+#[derive(Default)]
+struct RecvMeta {
+	/// The `UDP_GRO` segment size, if the receive was coalesced.
+	stride: Option<usize>,
+	/// The ECN codepoint from `IP_TOS` or `IPV6_TCLASS`, if marked.
+	ecn: Option<Ecn>,
+}
 
-	while offset + header_len <= control.len() {
-		// SAFETY: bounds-checked read of a cmsghdr-sized prefix.
-		let header = unsafe { control.as_ptr().add(offset).cast::<libc::cmsghdr>().read_unaligned() };
-		let message_len = header.cmsg_len;
-		if message_len < header_len || offset + message_len > control.len() {
-			return None;
-		}
-		if header.cmsg_level == libc::SOL_UDP && header.cmsg_type == libc::UDP_GRO {
-			if message_len < header_len + std::mem::size_of::<libc::c_int>() {
-				return None;
+impl RecvMeta {
+	/// Walk the control messages; a malformed buffer ends the walk with what
+	/// was read so far.
+	fn parse(control: &[u8]) -> Self {
+		let mut meta = Self::default();
+		let header_len = unsafe { libc::CMSG_LEN(0) as usize };
+		let mut offset = 0;
+
+		while offset + header_len <= control.len() {
+			// SAFETY: bounds-checked read of a cmsghdr-sized prefix.
+			let header = unsafe { control.as_ptr().add(offset).cast::<libc::cmsghdr>().read_unaligned() };
+			let message_len = header.cmsg_len;
+			if message_len < header_len || offset + message_len > control.len() {
+				return meta;
 			}
-			// SAFETY: length-checked just above.
-			let value = unsafe {
-				control
-					.as_ptr()
-					.add(offset + header_len)
-					.cast::<libc::c_int>()
-					.read_unaligned()
-			};
-			return usize::try_from(value).ok();
+			let data = &control[offset + header_len..offset + message_len];
+			match (header.cmsg_level, header.cmsg_type) {
+				(libc::SOL_UDP, libc::UDP_GRO) => {
+					meta.stride = read_int(data).and_then(|value| usize::try_from(value).ok());
+				}
+				// Linux reports the TOS byte itself, but the traffic class as an int.
+				(libc::IPPROTO_IP, libc::IP_TOS) => {
+					meta.ecn = data.first().and_then(|bits| Ecn::from_bits(*bits));
+				}
+				(libc::IPPROTO_IPV6, libc::IPV6_TCLASS) => {
+					meta.ecn = read_int(data).and_then(|value| Ecn::from_bits(value as u8));
+				}
+				_ => {}
+			}
+			// SAFETY: CMSG_SPACE is a pure size computation.
+			let aligned = unsafe { libc::CMSG_SPACE((message_len - header_len) as _) as usize };
+			offset = offset.saturating_add(aligned.max(header_len));
 		}
-		// SAFETY: CMSG_SPACE is a pure size computation.
-		let aligned = unsafe { libc::CMSG_SPACE((message_len - header_len) as _) as usize };
-		offset = offset.saturating_add(aligned.max(header_len));
-	}
 
-	None
+		meta
+	}
+}
+
+/// A control message's payload as the int the kernel wrote, if it is one.
+fn read_int(data: &[u8]) -> Option<libc::c_int> {
+	let bytes = data.get(..std::mem::size_of::<libc::c_int>())?;
+	Some(libc::c_int::from_ne_bytes(bytes.try_into().ok()?))
+}
+
+/// Turn a boolean socket option on.
+fn set_option(io: &UdpSocket, level: libc::c_int, name: libc::c_int) -> io::Result<()> {
+	let on: libc::c_int = 1;
+	// SAFETY: valid fd, valid option buffer.
+	let ret = unsafe {
+		libc::setsockopt(
+			io.as_raw_fd(),
+			level,
+			name,
+			(&raw const on).cast(),
+			std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+		)
+	};
+	match ret {
+		0 => Ok(()),
+		_ => Err(io::Error::last_os_error()),
+	}
 }
 
 /// Write `addr` into `out`, returning the length the kernel wants.

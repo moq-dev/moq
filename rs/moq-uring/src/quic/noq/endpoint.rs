@@ -218,6 +218,7 @@ impl Inner {
 	/// Route every datagram in one receive, then kick the connections fed.
 	fn demux(self: &Rc<Self>, packet: &mut udp::Packet) {
 		let from = packet.from();
+		let ecn = packet.ecn().map(Into::into);
 		// Where the endpoint writes its own answers (version negotiation,
 		// retry, a refusal), reused across the whole receive.
 		let mut buf = Vec::new();
@@ -234,7 +235,7 @@ impl Inner {
 			let event = self.endpoint.borrow_mut().handle(
 				Instant::now(),
 				from.into(),
-				None,
+				ecn,
 				BytesMut::from(&segment[..]),
 				&mut buf,
 			);
@@ -358,8 +359,13 @@ impl Inner {
 			return;
 		}
 		tx[..transmit.size].copy_from_slice(&buf[..transmit.size]);
-		let segment = transmit.segment_size.unwrap_or(transmit.size);
-		if let Err(err) = tx.send(transmit.size, transmit.destination, segment) {
+		let transmit = udp::Transmit {
+			to: transmit.destination,
+			len: transmit.size,
+			segment: transmit.segment_size.unwrap_or(transmit.size),
+			ecn: transmit.ecn.map(Into::into),
+		};
+		if let Err(err) = tx.send(transmit) {
 			tracing::debug!(%err, "failed to send an endpoint response");
 		}
 	}
