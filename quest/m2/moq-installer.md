@@ -2,8 +2,9 @@
 
 ## Goal
 
-A canonical Bash installer installs the released `moq` binary on supported macOS and Linux machines without Rust or sudo. Running
-it again upgrades the same installation; selecting a version supports
+A canonical Bash installer installs the released `moq` binary on supported
+macOS and Linux machines without Rust or sudo. Running it again upgrades
+the same installation; selecting a version supports
 reproducible installs and deliberate downgrades.
 
 Install only `moq` from the `moq-cli` release. Token and relay functionality
@@ -32,7 +33,11 @@ service setup, Windows support, or new release targets.
   `moq` on PATH would take precedence so success does not imply the wrong
   binary will run. Do not follow an existing destination symlink into a
   package manager's installation or overwrite a conflicting unmanaged file.
-  Repeated installs must recognize and replace their own installation.
+  Keep a durable ownership record bound to the destination and installed
+  binary digest. Refuse replacement when the record is missing, malformed,
+  or mismatched, including a record copied from another destination. A valid
+  prior installation can be replaced; failed upgrades must preserve both its
+  binary and usable ownership record.
 - Keep the canonical script and its tests in this repository. Publish a
   usable HTTPS source for the dependent website quest; that quest exposes
   `https://moq.dev/install.sh` without duplicating installer logic.
