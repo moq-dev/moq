@@ -1892,9 +1892,11 @@ mod tests {
 		let bind: crate::listen::Config = toml::from_str(r#"bind = "[::]:443""#).unwrap();
 		assert_eq!(bind.bind.as_ref().map(ToString::to_string).as_deref(), Some("[::]:443"));
 		assert!(bind.deprecated().is_empty());
-		assert!(
-			toml::from_str::<crate::listen::Config>(r#"bind = "fly-global-services:443""#).is_err(),
-			"text configuration must not defer DNS failures until bind time"
+
+		let bind: crate::listen::Config = toml::from_str(r#"bind = "fly-global-services:443""#).unwrap();
+		assert_eq!(
+			bind.bind,
+			Some(crate::listen::Bind::Host("fly-global-services".to_string(), 443))
 		);
 
 		// The released key still parses so the process can name `bind`, but it

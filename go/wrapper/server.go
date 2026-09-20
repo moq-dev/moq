@@ -76,7 +76,7 @@ func (r *Request) Accept(ctx context.Context) (*Session, error) {
 	return &Session{inner: inner}, nil
 }
 
-// Reject refuses the session with an HTTP status code (default convention: 404).
+// Reject refuses the session with an application error code; 401 and 403 map to unauthorized.
 func (r *Request) Reject(ctx context.Context, code uint16) error {
 	return runErr(ctx, r.inner.Cancel, func(ctx context.Context) error {
 		return r.inner.Reject(ctx, code)

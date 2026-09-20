@@ -93,6 +93,20 @@ async fn dropping_the_workers_releases_the_port() {
 	moq_tokio::bind::udp(moq_tokio::bind::Udp::new(addr)).expect("workers left the port bound");
 }
 
+#[test]
+fn stream_bind_does_not_suppress_worker_quic() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+	let mut listen = listen_config(&cert, &key, 0);
+	listen.bind = None;
+	listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+
+	let workers = bind_workers(listen, Default::default(), config(1)).expect("bind worker");
+	assert_eq!(workers.len(), 1);
+}
+
 /// The future factory runs on the worker, so the future may hold local state
 /// across an await without making that state thread-safe, and spawn more of it
 /// onto the same task set.

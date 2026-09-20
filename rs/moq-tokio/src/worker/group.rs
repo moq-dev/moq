@@ -80,17 +80,13 @@ impl Workers {
 		// One resolution for the whole group. Each worker resolves its own config
 		// otherwise, so a DNS answer that rotates between queries would hand
 		// members different addresses and fail the bind on whichever member drew a
-		// fresh one. An unset `bind` stays unset: the backends fall back to the
-		// default literal, and `Some` here would flip a stream-only config into
-		// opening a QUIC listener.
+		// fresh one. A worker group always opens QUIC, including when the source
+		// server config also names a stream listener.
 		let requested = match server.listen.bind.as_ref() {
-			Some(bind) => {
-				let addr = bind.resolve().map_err(|err| Error::WorkerResolve(Arc::new(err)))?;
-				server.listen.bind = Some(crate::listen::Bind::Addr(addr));
-				addr
-			}
+			Some(bind) => bind.resolve().map_err(|err| Error::WorkerResolve(Arc::new(err)))?,
 			None => crate::server::DEFAULT_BIND,
 		};
+		server.listen.bind = Some(crate::listen::Bind::Addr(requested));
 
 		// The group owns everything a reuseport group has to get right: it takes
 		// the port before the first member binds and holds it until the group is

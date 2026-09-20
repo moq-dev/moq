@@ -94,24 +94,9 @@ impl MoqServer {
 	/// Validated syntactically up-front. DNS hostnames are accepted and resolved
 	/// at `listen()` time. Captured at [`listen`](Self::listen); fails afterwards.
 	pub fn set_bind(&self, addr: String) -> Result<(), MoqError> {
-		// Mirrors `MoqClient::set_bind` by surfacing parse errors here rather
-		// than at listen() time. The server takes a String (not SocketAddr) so
-		// DNS hostnames are allowed; we only check syntactic structure here.
-		let bind = match addr.parse::<std::net::SocketAddr>() {
-			Ok(addr) => moq_tokio::listen::Bind::Addr(addr),
-			Err(_) => {
-				let (host, port) = addr
-					.rsplit_once(':')
-					.ok_or_else(|| MoqError::Bind(format!("invalid bind address: {addr}")))?;
-				let port = port
-					.parse::<u16>()
-					.map_err(|_| MoqError::Bind(format!("invalid bind address: {addr}")))?;
-				if host.is_empty() {
-					return Err(MoqError::Bind(format!("invalid bind address: {addr}")));
-				}
-				moq_tokio::listen::Bind::Host(host.to_owned(), port)
-			}
-		};
+		let bind = addr
+			.parse()
+			.map_err(|_| MoqError::Bind(format!("invalid bind address: {addr}")))?;
 		self.configure_listen(|state| {
 			state.config.bind = Some(bind);
 		})
@@ -333,15 +318,23 @@ impl MoqRequest {
 			.await
 	}
 
-	/// Reject the session with the given HTTP status code.
+	/// Reject the established MoQ session with an application error code.
+	///
+	/// Codes 401 and 403 map to the protocol's unauthorized error; every other
+	/// code is sent as an application error.
 	///
 	/// Returns `AlreadyResponded` if `accept()` or `reject()` has already been called.
 	pub async fn reject(&self, code: u16) -> Result<(), MoqError> {
 		self.task
 			.run(move |mut state| async move {
 				let request = state.request.take().ok_or(MoqError::AlreadyResponded)?;
+				let reject = match code {
+					401 => moq_tokio::server::Reject::Unauthorized,
+					403 => moq_tokio::server::Reject::Forbidden,
+					code => moq_tokio::server::Reject::App(code),
+				};
 				request
-					.reject(moq_tokio::server::Reject::App(code))
+					.reject(reject)
 					.await
 					.map_err(|err| MoqError::Reject(format!("{err}")))?;
 				Ok(())

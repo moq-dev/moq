@@ -29,7 +29,21 @@ impl std::str::FromStr for Bind {
 	type Err = std::net::AddrParseError;
 
 	fn from_str(value: &str) -> Result<Self, Self::Err> {
-		value.parse().map(Self::Addr)
+		let socket_error = match value.parse() {
+			Ok(addr) => return Ok(Self::Addr(addr)),
+			Err(err) => err,
+		};
+
+		let Some((host, port)) = value.rsplit_once(':') else {
+			return Err(socket_error);
+		};
+		if host.is_empty() || host.contains(':') {
+			return Err(socket_error);
+		}
+		let Ok(port) = port.parse() else {
+			return Err(socket_error);
+		};
+		Ok(Self::Host(host.to_owned(), port))
 	}
 }
 
@@ -73,9 +87,8 @@ impl<'de> serde::Deserialize<'de> for Bind {
 pub struct Config {
 	/// Listen for QUIC (UDP) on the given address. Defaults to `[::]:443`.
 	///
-	/// Text configuration accepts standard socket address syntax (e.g. `[::]:443`).
-	/// Embedders that deliberately want runtime DNS resolution can assign
-	/// [`Bind::Host`]. Leave unset while a
+	/// Text configuration accepts socket addresses and `host:port` names. Hostnames
+	/// are resolved when the listener binds. Leave unset while a
 	/// `tcp`/`unix` listener is configured to run a stream-only server with no
 	/// QUIC.
 	#[usage(name = "listen", long = "listen", env = "MOQ_LISTEN", setting = "listen.bind")]
@@ -181,8 +194,7 @@ pub struct Config {
 		env = "MOQ_LISTEN_QUIC_LB_ID",
 		setting = "listen.lb_id"
 	)]
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	#[serde(skip)]
+	#[serde(default, rename = "__cli_lb_id", skip_serializing_if = "Option::is_none")]
 	pub(crate) lb_id: Option<crate::quic::ServerId>,
 
 	/// Number of random nonce bytes in QUIC-LB connection IDs.
@@ -194,7 +206,7 @@ pub struct Config {
 		setting = "listen.lb_nonce",
 		requires = "--listen-quic-lb-id"
 	)]
-	#[serde(skip)]
+	#[serde(default, rename = "__cli_lb_nonce", skip_serializing_if = "Option::is_none")]
 	pub(crate) lb_nonce: Option<usize>,
 
 	/// QUIC-LB connection-ID encoding.
@@ -391,12 +403,13 @@ impl Config {
 
 	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 	pub(crate) fn load_balancer(&self) -> Option<crate::quic::LoadBalancer> {
-		self.load_balancer.clone().or_else(|| {
-			self.lb_id.clone().map(|id| crate::quic::LoadBalancer {
+		self.lb_id
+			.clone()
+			.map(|id| crate::quic::LoadBalancer {
 				id,
 				nonce: self.lb_nonce.unwrap_or(8),
 			})
-		})
+			.or_else(|| self.load_balancer.clone())
 	}
 }
 
@@ -493,6 +506,36 @@ mod tests {
 			config.deprecated().to_string().contains("listen -> bind"),
 			"{}",
 			config.deprecated()
+		);
+	}
+
+	#[test]
+	fn bind_host_round_trips_as_text() {
+		#[derive(serde::Serialize, serde::Deserialize)]
+		struct Wrapper {
+			bind: Bind,
+		}
+
+		let expected = Bind::Host("relay.example.com".to_string(), 443);
+		let encoded = toml::to_string(&Wrapper { bind: expected.clone() }).expect("serialize");
+		let decoded: Wrapper = toml::from_str(&encoded).expect("deserialize");
+		assert_eq!(decoded.bind, expected);
+
+		assert!("relay.example.com:443:8443".parse::<Bind>().is_err());
+	}
+
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	#[test]
+	fn cli_load_balancer_survives_the_merge_round_trip() {
+		let config = config_from(["test", "--listen-quic-lb-id", "ab", "--listen-quic-lb-nonce", "9"]);
+		let encoded = toml::Value::try_from(config).expect("serialize");
+		let decoded: Config = encoded.try_into().expect("deserialize");
+		assert_eq!(
+			decoded.load_balancer(),
+			Some(crate::quic::LoadBalancer {
+				id: "ab".parse().unwrap(),
+				nonce: 9,
+			})
 		);
 	}
 
