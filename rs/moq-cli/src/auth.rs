@@ -389,11 +389,11 @@ pub struct Serve {
 
 	/// How often the relay re-checks each grant.
 	#[usage(long, default = "1m")]
-	revalidate: moq_tokio::cli::Duration,
+	revalidate: crate::duration::Duration,
 
 	/// How long a grant with no bound of its own lasts: anonymous sessions, tokens without `exp`, certificates without one.
 	#[usage(long, default = "1d")]
-	expires: moq_tokio::cli::Duration,
+	expires: crate::duration::Duration,
 
 	/// The most live sessions presenting one token.
 	#[usage(long)]

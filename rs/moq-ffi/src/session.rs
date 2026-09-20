@@ -540,10 +540,10 @@ impl MoqClient {
 	pub fn set_backoff(&self, backoff: MoqBackoff) -> Result<(), MoqError> {
 		self.configure(|state| {
 			let mut out = moq_tokio::Backoff::default();
-			out.initial = std::time::Duration::from_micros(backoff.initial_us).into();
+			out.initial = std::time::Duration::from_micros(backoff.initial_us);
 			out.multiplier = backoff.multiplier;
-			out.max = std::time::Duration::from_micros(backoff.max_us).into();
-			out.timeout = std::time::Duration::from_micros(backoff.timeout_us).into();
+			out.max = std::time::Duration::from_micros(backoff.max_us);
+			out.timeout = std::time::Duration::from_micros(backoff.timeout_us);
 			state.config.backoff = out;
 		})
 	}

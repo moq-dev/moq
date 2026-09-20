@@ -19,8 +19,7 @@ All additive on `moq-relay` and `moq-tokio`, so on main after the merge:
 - `Config::parse_and_merge` and the `settings` registry become public
   (`moq_relay::settings()` plus a `merge_into` that composes an embedder's
   registry), so the edge's `config.rs` merge and its six clone-and-restore
-  fields go. This waits on the `cli::Merge` shape from
-  [moq-tokio shapes](/quest/m1/api-tokio-shapes.md).
+  fields go.
 - `auth::Config::public_grant()` and `is_empty()` are public; the edge
   `mem::take`s the two pattern lists to rebuild the union.
 - `Relay::with_listeners(self, impl IntoIterator<Item = accept::Health>)` so
@@ -53,6 +52,5 @@ Public API: additive. Wire: none.
 
 ## Related
 
-- [moq-tokio shapes](/quest/m1/api-tokio-shapes.md) - the merge shape this reuses
 - [Auth embedder](/quest/m2/auth-embedder.md) - the admission half of the same surface
 - [Server close](/quest/m2/moq-server-close.md) - the listener lifetime that sits beside `with_listeners`

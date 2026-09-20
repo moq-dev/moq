@@ -57,8 +57,8 @@ pub async fn serve(
 
 /// Serve the `/certificate.sha256` self-signed fingerprint over HTTP, so an
 /// `http://` client can pin a `--listen` server's generated cert.
-pub async fn run_web(bind: &str, certificates: moq_tokio::tls::Certificates) -> anyhow::Result<()> {
-	let listen = tokio::net::lookup_host(bind)
+pub async fn run_web(bind: moq_tokio::listen::Bind, certificates: moq_tokio::tls::Certificates) -> anyhow::Result<()> {
+	let listen = tokio::net::lookup_host(bind.to_string())
 		.await
 		.context("invalid listen address")?
 		.next()

@@ -434,13 +434,13 @@ impl Admission {
 
 /// The `moq_auth::Request` for an accepted transport request: every fact the
 /// transport knows, nothing parsed on the server's behalf.
-pub fn request_for(auth: &Auth, request: &moq_tokio::Request) -> Request {
+pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request {
 	let transport = match request.transport() {
-		moq_tokio::Transport::Quic => moq_auth::Transport::Quic,
-		moq_tokio::Transport::Iroh => moq_auth::Transport::Iroh,
-		moq_tokio::Transport::WebSocket => moq_auth::Transport::WebSocket,
-		moq_tokio::Transport::Tcp => moq_auth::Transport::Tcp,
-		moq_tokio::Transport::Unix => moq_auth::Transport::Unix,
+		moq_tokio::server::Transport::Quic => moq_auth::Transport::Quic,
+		moq_tokio::server::Transport::Iroh => moq_auth::Transport::Iroh,
+		moq_tokio::server::Transport::WebSocket => moq_auth::Transport::WebSocket,
+		moq_tokio::server::Transport::Tcp => moq_auth::Transport::Tcp,
+		moq_tokio::server::Transport::Unix => moq_auth::Transport::Unix,
 		// A transport this build does not know is still a session on the wire; the
 		// server sees the same facts either way.
 		other => unreachable!("unknown transport {other}"),

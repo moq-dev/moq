@@ -9,6 +9,7 @@ mod auth;
 mod complete;
 #[cfg(feature = "capture")]
 mod devices;
+mod duration;
 mod hls;
 mod moq;
 mod play;
@@ -57,13 +58,14 @@ impl Net {
 	}
 
 	fn server(&self, config: moq_tokio::listen::Config) -> anyhow::Result<moq_tokio::Server> {
-		let server = config.init(self.quic.clone())?;
+		let mut server = moq_tokio::server::Config::default();
+		server.listen = config;
+		server.quic = self.quic.clone();
 		#[cfg(feature = "iroh")]
-		let server = match self.iroh.clone() {
-			Some(iroh) => server.with_iroh(iroh),
-			None => server,
-		};
-		Ok(server)
+		{
+			server.iroh = self.iroh.clone();
+		}
+		Ok(server.init()?)
 	}
 }
 
@@ -120,7 +122,7 @@ async fn spawn_server(
 	// The certificate endpoint is for clients dialing a URL, so it follows the
 	// explicit listener rather than the mesh's ephemeral one.
 	if let Some(web_bind) = moq.server.bind.clone() {
-		tasks.spawn(async move { web::run_web(&web_bind, certificates).await });
+		tasks.spawn(async move { web::run_web(web_bind, certificates).await });
 	}
 
 	Ok(started)
@@ -180,7 +182,7 @@ fn spawn_cluster_serve(
 			}
 			if !is_public_transport(request.transport(), public_quic) {
 				tracing::debug!(path = %request.path(), "refusing a non-peer request on the LAN mesh listener");
-				request.close(404).await.ok();
+				request.reject(moq_tokio::server::Reject::App(404)).await.ok();
 				continue;
 			}
 			let auth = auth.clone();
@@ -201,7 +203,7 @@ fn spawn_cluster_serve(
 /// stage's directions prune the side it does not use, so a subscribe-only export
 /// never announces what a viewer could not have had anyway.
 async fn serve_client(
-	request: moq_tokio::Request,
+	request: moq_tokio::server::Request,
 	auth: &moq_relay::auth::Auth,
 	origin: &moq_net::origin::Producer,
 	directions: Directions,
@@ -211,7 +213,12 @@ async fn serve_client(
 		Ok(lease) => lease,
 		Err(err) => {
 			let status = axum::http::StatusCode::from(&err);
-			request.close(status.as_u16()).await.ok();
+			let reject = match status {
+				axum::http::StatusCode::UNAUTHORIZED => moq_tokio::server::Reject::Unauthorized,
+				axum::http::StatusCode::FORBIDDEN => moq_tokio::server::Reject::Forbidden,
+				status => moq_tokio::server::Reject::App(status.as_u16()),
+			};
+			request.reject(reject).await.ok();
 			return Err(anyhow::Error::new(err).context("session refused"));
 		}
 	};
@@ -228,7 +235,7 @@ async fn serve_client(
 		.then(|| rooted.as_ref().and_then(|o| o.scope(&token.publish)))
 		.flatten();
 	if publish.is_none() && subscribe.is_none() {
-		request.close(403).await.ok();
+		request.reject(moq_tokio::server::Reject::Forbidden).await.ok();
 		anyhow::bail!("grant allows nothing this endpoint serves at {}", token.root);
 	}
 
@@ -244,9 +251,9 @@ async fn serve_client(
 }
 
 /// Whether ordinary clients may use this transport on the shared LAN server.
-fn is_public_transport(transport: moq_tokio::Transport, public_quic: bool) -> bool {
+fn is_public_transport(transport: moq_tokio::server::Transport, public_quic: bool) -> bool {
 	match transport {
-		moq_tokio::Transport::Tcp | moq_tokio::Transport::Unix => true,
+		moq_tokio::server::Transport::Tcp | moq_tokio::server::Transport::Unix => true,
 		_ => public_quic,
 	}
 }
@@ -278,11 +285,7 @@ fn spawn_serve(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-	// TODO: It would be nice to remove this and rely on feature flags only.
-	// However, some dependency is pulling in `ring` and I don't know why, so meh for now.
-	rustls::crypto::aws_lc_rs::default_provider()
-		.install_default()
-		.expect("failed to install default crypto provider");
+	moq_tokio::crypto::install_default().expect("failed to install default crypto provider");
 
 	let mut cli = Invocation::parse().await;
 	cli.log.init()?;
@@ -569,7 +572,7 @@ fn spawn_import(
 		reject_listener_cors(&rtc.cors, "import rtc")?;
 	}
 
-	let max_age = import.max_age.map(moq_tokio::cli::Duration::into_std);
+	let max_age = import.max_age.map(crate::duration::Duration::into_std);
 	// The MoQ side every gateway publishes into, minted per source since each takes it
 	// by value onto its own task.
 	let target = |name: String| crate::moq::ImportTarget {
@@ -899,7 +902,7 @@ mod tests {
 	/// client TLS the way the relay does rather than refuse after validate.
 	#[tokio::test]
 	async fn cluster_connect_api_http_attaches_client_tls() {
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let _ = moq_tokio::crypto::install_default();
 		let invocation = Invocation::try_parse_from([
 			"moq",
 			"--cluster-connect-api",
@@ -938,9 +941,9 @@ mod tests {
 
 	#[test]
 	fn explicit_stream_listeners_are_public_without_exposing_mesh_quic() {
-		assert!(is_public_transport(moq_tokio::Transport::Tcp, false));
-		assert!(is_public_transport(moq_tokio::Transport::Unix, false));
-		assert!(!is_public_transport(moq_tokio::Transport::Quic, false));
-		assert!(is_public_transport(moq_tokio::Transport::Quic, true));
+		assert!(is_public_transport(moq_tokio::server::Transport::Tcp, false));
+		assert!(is_public_transport(moq_tokio::server::Transport::Unix, false));
+		assert!(!is_public_transport(moq_tokio::server::Transport::Quic, false));
+		assert!(is_public_transport(moq_tokio::server::Transport::Quic, true));
 	}
 }

@@ -97,16 +97,23 @@ impl MoqServer {
 		// Mirrors `MoqClient::set_bind` by surfacing parse errors here rather
 		// than at listen() time. The server takes a String (not SocketAddr) so
 		// DNS hostnames are allowed; we only check syntactic structure here.
-		if addr.parse::<std::net::SocketAddr>().is_err() {
-			let port_ok = addr
-				.rsplit_once(':')
-				.is_some_and(|(_, port)| port.parse::<u16>().is_ok());
-			if !port_ok {
-				return Err(MoqError::Bind(format!("invalid bind address: {addr}")));
+		let bind = match addr.parse::<std::net::SocketAddr>() {
+			Ok(addr) => moq_tokio::listen::Bind::Addr(addr),
+			Err(_) => {
+				let (host, port) = addr
+					.rsplit_once(':')
+					.ok_or_else(|| MoqError::Bind(format!("invalid bind address: {addr}")))?;
+				let port = port
+					.parse::<u16>()
+					.map_err(|_| MoqError::Bind(format!("invalid bind address: {addr}")))?;
+				if host.is_empty() {
+					return Err(MoqError::Bind(format!("invalid bind address: {addr}")));
+				}
+				moq_tokio::listen::Bind::Host(host.to_owned(), port)
 			}
-		}
+		};
 		self.configure_listen(|state| {
-			state.config.bind = Some(addr);
+			state.config.bind = Some(bind);
 		})
 	}
 
@@ -194,7 +201,7 @@ impl MoqServer {
 }
 
 struct RequestState {
-	request: Option<moq_tokio::Request>,
+	request: Option<moq_tokio::server::Request>,
 	publish: Option<Arc<MoqOriginProducer>>,
 	consume: Option<Arc<MoqOriginProducer>>,
 }
@@ -215,7 +222,7 @@ pub struct MoqRequest {
 
 impl MoqRequest {
 	fn new(
-		request: moq_tokio::Request,
+		request: moq_tokio::server::Request,
 		publish: Option<Arc<MoqOriginProducer>>,
 		consume: Option<Arc<MoqOriginProducer>>,
 	) -> Arc<Self> {
@@ -334,7 +341,7 @@ impl MoqRequest {
 			.run(move |mut state| async move {
 				let request = state.request.take().ok_or(MoqError::AlreadyResponded)?;
 				request
-					.close(code)
+					.reject(moq_tokio::server::Reject::App(code))
 					.await
 					.map_err(|err| MoqError::Reject(format!("{err}")))?;
 				Ok(())

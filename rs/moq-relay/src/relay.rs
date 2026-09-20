@@ -90,6 +90,7 @@ impl Relay {
 	/// it.
 	pub async fn load(mut config: Config) -> anyhow::Result<Self> {
 		config.resolve()?;
+		let drain_timeout = config.drain_timeout();
 		// The name this relay reports in every auth request: the stats node label,
 		// else the cluster node URL, else nothing.
 		let node = config
@@ -140,10 +141,12 @@ impl Relay {
 
 		#[cfg(feature = "_quic")]
 		let workers = match config.runtime.workers() {
-			Some(worker) if !io_uring => Some(
-				moq_tokio::worker::Workers::bind(config.listen.clone(), config.quic.clone(), worker)
-					.context("failed to start the QUIC workers")?,
-			),
+			Some(worker) if !io_uring => {
+				let mut server = moq_tokio::server::Config::default();
+				server.listen = config.listen.clone();
+				server.quic = config.quic.clone();
+				Some(moq_tokio::worker::Workers::bind(server, worker).context("failed to start the QUIC workers")?)
+			}
 			_ => None,
 		};
 
@@ -172,10 +175,20 @@ impl Relay {
 		#[cfg(not(all(target_os = "linux", feature = "_uring")))]
 		let quic_owned_elsewhere = workers_addr.is_some();
 
+		#[cfg(feature = "iroh")]
+		let iroh = config.iroh.bind(&config.quic).await?;
+
 		#[allow(unused_mut)]
-		let mut server = match quic_owned_elsewhere {
-			true => config.listen.clone().init_streams()?,
-			false => config.listen.clone().init(config.quic.clone())?,
+		let mut server_config = moq_tokio::server::Config::default();
+		server_config.listen = config.listen.clone();
+		server_config.quic = config.quic.clone();
+		#[cfg(feature = "iroh")]
+		{
+			server_config.iroh = iroh.clone();
+		}
+		let server = match quic_owned_elsewhere {
+			true => server_config.init_streams()?,
+			false => server_config.init()?,
 		};
 		let client = config.connect.clone().init(config.quic.clone())?;
 
@@ -195,9 +208,9 @@ impl Relay {
 		};
 
 		#[cfg(feature = "iroh")]
-		let (server, client) = match config.iroh.bind(&config.quic).await? {
-			Some(iroh) => (server.with_iroh(iroh.clone()), client.with_iroh(iroh)),
-			None => (server, client),
+		let client = match iroh {
+			Some(iroh) => client.with_iroh(iroh),
+			None => client,
 		};
 
 		let cache = config.cache.init()?;
@@ -229,7 +242,6 @@ impl Relay {
 
 		// Graceful shutdown: the first signal drains every accepted session with a
 		// GOAWAY; a second signal (or the drain window elapsing) exits.
-		let drain_timeout = config.drain_timeout.into_std();
 		let (shutdown_trigger, shutdown) = shutdown::Observer::new(drain_timeout);
 		let sessions = crate::session::Registry::new();
 		let web = web::Web::new(auth.clone(), cluster.clone(), certificates, config.web)
@@ -473,15 +485,13 @@ impl Relay {
 		let quic_workers = {
 			let mut running = futures::stream::FuturesUnordered::new();
 			if let Some(workers) = workers.as_mut() {
-				for (server, spawner) in workers.members() {
-					let index = spawner.index();
+				for member in workers.members() {
+					let index = member.index();
 					let cluster = cluster.clone();
 					let auth = auth.clone();
 					let worker_shutdown = shutdown.clone();
 					let sessions = sessions.clone();
-					let task = spawner.serve(server, move |server| {
-						serve(server, cluster, auth, worker_shutdown, sessions)
-					});
+					let task = member.serve(move |server| serve(server, cluster, auth, worker_shutdown, sessions));
 					running.push(async move {
 						match task.await {
 							Ok(res) => res.with_context(|| format!("QUIC worker {index} failed")),

@@ -147,11 +147,11 @@ pub enum Error {
 	/// whichever address happened to be unroutable or to blackhole until its
 	/// timeout. A host with a single address reports that error directly instead.
 	#[error("all {} connection attempts failed: {}", .0.len(), crate::failover::describe(.0))]
-	Failover(Vec<crate::failover::Failure<Error>>),
+	Failover(Vec<crate::failover::Attempt<Error>>),
 }
 
 impl crate::failover::Aggregate for Error {
-	fn aggregate(failures: Vec<crate::failover::Failure<Self>>) -> Self {
+	fn aggregate(failures: Vec<crate::failover::Attempt<Self>>) -> Self {
 		Self::Failover(failures)
 	}
 
@@ -623,7 +623,7 @@ impl web_transport_quiche::ez::CertResolver for ServeCerts {
 
 impl QuicheServer {
 	pub fn new(config: listen::Config, quic: &crate::quic::Config, member: Option<listen::Member>) -> Result<Self> {
-		if config.lb_id.is_some() {
+		if config.load_balancer().is_some() {
 			tracing::warn!("QUIC-LB is not supported with the quiche backend; ignoring server ID");
 		}
 
@@ -637,8 +637,13 @@ impl QuicheServer {
 
 		let quic = quic.resolve();
 
-		let listen =
-			crate::util::resolve(config.bind.as_deref(), crate::server::DEFAULT_BIND).map_err(Error::ResolveBind)?;
+		let listen = config
+			.bind
+			.as_ref()
+			.map(crate::listen::Bind::resolve)
+			.transpose()
+			.map_err(Error::ResolveBind)?
+			.unwrap_or(crate::server::DEFAULT_BIND);
 		let socket = crate::bind::udp(crate::bind::Udp::new(listen))?;
 
 		// Pinning client fingerprints needs a verifier that runs per handshake, which
@@ -848,11 +853,9 @@ mod tests {
 	/// Both halves have to land for the window to be what was asked for.
 	#[test]
 	fn apply_settings_pins_both_halves_of_each_window() {
-		let quic = crate::quic::Config {
-			receive_window: Some(64 << 20),
-			stream_receive_window: Some(8 << 20),
-			..Default::default()
-		};
+		let mut quic = crate::quic::Config::default();
+		quic.receive_window = Some(64 << 20);
+		quic.stream_receive_window = Some(8 << 20);
 
 		let mut settings = web_transport_quiche::Settings::default();
 		apply_settings(&mut settings, &quic.resolve()).unwrap();
@@ -881,10 +884,8 @@ mod tests {
 	/// dropped: an operator must not believe a ceiling is in force that is not.
 	#[test]
 	fn send_window_is_refused() {
-		let quic = crate::quic::Config {
-			send_window: Some(32 << 20),
-			..Default::default()
-		};
+		let mut quic = crate::quic::Config::default();
+		quic.send_window = Some(32 << 20);
 
 		let mut settings = web_transport_quiche::Settings::default();
 		assert!(matches!(

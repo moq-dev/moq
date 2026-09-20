@@ -33,7 +33,7 @@ pub struct ExportArgs {
 	/// Minimum media listed in each rendition's playlist window. Keep it within the
 	/// relay's group-cache retention, since segments are fetched from there on request.
 	#[usage(long, default = "16s")]
-	pub window: moq_tokio::cli::Duration,
+	pub window: crate::duration::Duration,
 
 	/// Browser CORS policy for the HLS listener.
 	#[usage(flatten)]

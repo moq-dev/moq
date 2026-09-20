@@ -160,7 +160,7 @@ pub enum Error {
 	/// The section was parsed from released spellings that no longer work. The
 	/// payload is the migration to print.
 	#[error("{0}")]
-	Deprecated(crate::Deprecated),
+	Deprecated(crate::cli::Deprecated),
 }
 
 #[cfg(feature = "_certs")]
@@ -349,7 +349,7 @@ impl rustls::client::ResolvesClientCert for IdentityResolver {
 ///
 /// A peer whose fingerprint is absent fails the TLS handshake, so a session that
 /// reaches the application is always one of these. Which one is
-/// [`crate::Request::peer_identity`] plus [`PeerIdentity::fingerprint`].
+/// [`crate::server::Request::peer_identity`] plus [`PeerIdentity::fingerprint`].
 #[derive(Clone, Debug, Default)]
 pub struct Peers {
 	allowed: Arc<RwLock<std::collections::HashSet<[u8; 32]>>>,
@@ -829,9 +829,9 @@ impl Connect {
 	/// while it still can; [`build`](Self::build) refuses either way, since a
 	/// released `--client-tls-root` silently falling back to the system store is a
 	/// downgrade of exactly the setting that was meant to restrict trust.
-	pub fn deprecated(&self) -> crate::Deprecated {
+	pub fn deprecated(&self) -> crate::cli::Deprecated {
 		let old = &self.deprecated;
-		let mut found = crate::Deprecated::default();
+		let mut found = crate::cli::Deprecated::default();
 		if self.disable_verify.is_some() {
 			found.toml("disable_verify", "insecure", None);
 		}
@@ -1277,7 +1277,7 @@ pub struct Listen {
 	/// The peer-mesh counterpart to `root`: membership is a set of fingerprints
 	/// that changes as peers are discovered, rather than an authority that issues
 	/// certificates. A client whose certificate isn't in the set fails the
-	/// handshake, and one that is arrives with a [`crate::Request::peer_identity`]
+	/// handshake, and one that is arrives with a [`crate::server::Request::peer_identity`]
 	/// naming which peer it is.
 	///
 	/// Combining this with `root` is an error: pinning bypasses the chain, so one
@@ -1290,7 +1290,7 @@ pub struct Listen {
 	/// PEM file(s) of root CAs for validating optional client certificates (mTLS).
 	///
 	/// When set, clients *may* present a certificate during the TLS handshake.
-	/// Valid presentations are reported via [`crate::Request::peer_identity`]
+	/// Valid presentations are reported via [`crate::server::Request::peer_identity`]
 	/// and can be used by the application to grant elevated access. Clients that
 	/// do not present a certificate are unaffected.
 	///
@@ -1372,9 +1372,9 @@ impl Listen {
 	/// [`crate::listen::Config`]. The methods that build a server config refuse
 	/// anyway, since a dropped `--server-tls-root` would take the mTLS client CAs
 	/// with it and leave the listener accepting unauthenticated peers.
-	pub fn deprecated(&self) -> crate::Deprecated {
+	pub fn deprecated(&self) -> crate::cli::Deprecated {
 		let old = &self.deprecated;
-		let mut found = crate::Deprecated::default();
+		let mut found = crate::cli::Deprecated::default();
 
 		for (used, flag, env, new) in [
 			(
@@ -1542,7 +1542,7 @@ fn server_config(config: &Listen, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::Serv
 
 /// A peer's validated client-certificate chain from the mTLS handshake.
 ///
-/// Returned by [`crate::Request::peer_identity`] when the peer presented a
+/// Returned by [`crate::server::Request::peer_identity`] when the peer presented a
 /// certificate that chained to a configured [`Listen::root`]. Owns the chain
 /// (leaf first) so callers can inspect it, e.g. [`expiry`](Self::expiry),
 /// without re-parsing the type-erased QUIC identity.

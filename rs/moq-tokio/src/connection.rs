@@ -91,14 +91,20 @@ pub struct Backoff {
 	/// Doubles as the bar a session must stay up to count as healthy, so it is
 	/// floored at 50ms: at zero every session would look healthy and the retry
 	/// pacing would collapse.
+	#[usage(skip)]
+	#[serde(with = "crate::cli::duration::serde_duration")]
+	pub initial: Duration,
+
 	#[usage(
 		name = "backoff-initial",
 		long,
 		env = "MOQ_BACKOFF_INITIAL",
+		default_value_t = CliDuration::fallback(DEFAULT_INITIAL),
 		default = "1s",
 		setting = "connect.backoff.initial"
 	)]
-	pub initial: CliDuration,
+	#[serde(default, rename = "__cli_initial", skip_serializing_if = "Option::is_none")]
+	initial_arg: Option<CliDuration>,
 
 	/// Multiplier applied to delay after each failure. Defaults to 2.
 	#[usage(
@@ -111,60 +117,53 @@ pub struct Backoff {
 	pub multiplier: u32,
 
 	/// Maximum delay between reconnect attempts. Defaults to 5s.
+	#[usage(skip)]
+	#[serde(with = "crate::cli::duration::serde_duration")]
+	pub max: Duration,
+
 	#[usage(
 		name = "backoff-max",
 		long,
 		env = "MOQ_BACKOFF_MAX",
+		default_value_t = CliDuration::fallback(DEFAULT_MAX),
 		default = "5s",
 		setting = "connect.backoff.max"
 	)]
-	pub max: CliDuration,
+	#[serde(default, rename = "__cli_max", skip_serializing_if = "Option::is_none")]
+	max_arg: Option<CliDuration>,
 
 	/// Maximum time to spend retrying before giving up. Defaults to 10s.
 	///
 	/// Resets after a stable connection (one that outlives the initial backoff), so a flapping
 	/// session that reconnects then immediately drops still counts toward the timeout. Set to 0 for
 	/// unlimited retries.
+	#[usage(skip)]
+	#[serde(with = "crate::cli::duration::serde_duration")]
+	pub timeout: Duration,
+
 	#[usage(
 		name = "backoff-timeout",
 		long,
 		env = "MOQ_BACKOFF_TIMEOUT",
+		default_value_t = CliDuration::fallback(DEFAULT_TIMEOUT),
 		default = "10s",
 		setting = "connect.backoff.timeout"
 	)]
-	pub timeout: CliDuration,
+	#[serde(default, rename = "__cli_timeout", skip_serializing_if = "Option::is_none")]
+	timeout_arg: Option<CliDuration>,
 }
 
 impl Default for Backoff {
 	fn default() -> Self {
 		Self {
-			initial: DEFAULT_INITIAL.into(),
+			initial: DEFAULT_INITIAL,
+			initial_arg: None,
 			multiplier: DEFAULT_MULTIPLIER,
-			max: DEFAULT_MAX.into(),
-			timeout: DEFAULT_TIMEOUT.into(),
+			max: DEFAULT_MAX,
+			max_arg: None,
+			timeout: DEFAULT_TIMEOUT,
+			timeout_arg: None,
 		}
-	}
-}
-
-impl Backoff {
-	/// The configured initial delay, or the default.
-	pub fn initial(&self) -> Duration {
-		self.initial.into_std()
-	}
-
-	/// The configured multiplier, or the default.
-	pub fn multiplier(&self) -> u32 {
-		self.multiplier
-	}
-
-	/// The configured delay ceiling, or the default.
-	pub fn max(&self) -> Duration {
-		self.max.into_std()
-	}
-
-	/// The configured give-up window, or the default. Zero retries forever.
-	pub fn timeout(&self) -> Duration {
-		self.timeout.into_std()
 	}
 }
 
@@ -343,21 +342,28 @@ pub struct Goaway {
 	/// "10s" or "500ms". This is a cap: a GOAWAY naming a shorter deadline wins,
 	/// since the peer force-closes at its own deadline regardless, but a longer one
 	/// does not extend it. Defaults to 10 seconds.
+	#[usage(skip)]
+	#[serde(with = "crate::cli::duration::serde_duration")]
+	pub handover: Duration,
+
 	#[usage(
 		name = "goaway-handover",
 		long,
 		env = "MOQ_GOAWAY_HANDOVER",
+		default_value_t = CliDuration::fallback(DEFAULT_HANDOVER),
 		default = "10s",
 		setting = "connect.goaway.handover"
 	)]
-	pub handover: CliDuration,
+	#[serde(default, rename = "__cli_handover", skip_serializing_if = "Option::is_none")]
+	handover_arg: Option<CliDuration>,
 }
 
 impl Default for Goaway {
 	fn default() -> Self {
 		Self {
 			redirect: Redirect::SameHost,
-			handover: DEFAULT_HANDOVER.into(),
+			handover: DEFAULT_HANDOVER,
+			handover_arg: None,
 		}
 	}
 }
@@ -393,11 +399,12 @@ struct Pacing {
 
 impl Pacing {
 	fn new(backoff: &Backoff) -> Self {
-		let initial = backoff.initial().max(MIN_BACKOFF);
+		let initial = CliDuration::resolve(backoff.initial_arg, backoff.initial).max(MIN_BACKOFF);
+		let max = CliDuration::resolve(backoff.max_arg, backoff.max);
 		Self {
 			initial,
-			max: backoff.max().max(initial),
-			multiplier: backoff.multiplier().max(1),
+			max: max.max(initial),
+			multiplier: backoff.multiplier.max(1),
 		}
 	}
 
@@ -412,20 +419,23 @@ impl Pacing {
 const DEFAULT_HANDOVER: Duration = Duration::from_secs(10);
 
 impl Goaway {
-	/// The configured redirect policy, or the default.
-	pub fn redirect(&self) -> Redirect {
-		self.redirect
+	fn resolve(&self) -> Resolved {
+		Resolved {
+			redirect: self.redirect,
+			handover: CliDuration::resolve(self.handover_arg, self.handover),
+		}
 	}
+}
 
-	/// How long the old session keeps serving, given the deadline the peer's GOAWAY
-	/// named (`None` when it named none).
-	///
-	/// Whichever comes first. The peer's deadline is a promise about when it
-	/// force-closes, so waiting past it just holds a dead session; ours is the cap
-	/// on how long we keep one around at all, so a peer naming an hour cannot talk
-	/// us into honoring it.
-	pub fn handover(&self, timeout: Option<Duration>) -> Duration {
-		std::cmp::min(self.handover.into_std(), timeout.unwrap_or(Duration::MAX))
+#[derive(Clone, Copy)]
+struct Resolved {
+	redirect: Redirect,
+	handover: Duration,
+}
+
+impl Resolved {
+	fn handover(self, timeout: Option<Duration>) -> Duration {
+		std::cmp::min(self.handover, timeout.unwrap_or(Duration::MAX))
 	}
 }
 
@@ -715,8 +725,9 @@ impl Connection {
 
 	async fn run(shared: &Shared, client: Client, addrs: Addrs) -> crate::Result<()> {
 		let backoff = client.backoff.clone();
-		let goaway = client.goaway.clone();
+		let goaway = client.goaway.resolve();
 		let pacing = Pacing::new(&backoff);
+		let timeout = CliDuration::resolve(backoff.timeout_arg, backoff.timeout);
 		let initial = pacing.initial;
 		let mut delay = initial;
 		let mut retry_start = tokio::time::Instant::now();
@@ -729,7 +740,6 @@ impl Connection {
 		let mut draining: Option<Draining> = None;
 
 		loop {
-			let timeout = backoff.timeout();
 			if !timeout.is_zero() && retry_start.elapsed() >= timeout {
 				return Err(timeout_error(timeout, last_error.as_ref()));
 			}
@@ -755,7 +765,7 @@ impl Connection {
 					// The connected target owns the policy, including in one-shot mode.
 					if let Ended::Goaway(msg) = &ended
 						&& addr.addresses().is_some()
-						&& goaway.redirect().target(&msg.uri, &url).is_some()
+						&& goaway.redirect.target(&msg.uri, &url).is_some()
 					{
 						return Err(Error::PinnedRedirect);
 					}
@@ -774,7 +784,7 @@ impl Connection {
 						// An accepted redirect is an assignment: keep dialing it from here on, and
 						// only it. The peer named exactly one place to go, which retires
 						// whatever other addresses got us to this session.
-						let url = if let Some(target) = goaway.redirect().target(&msg.uri, &url) {
+						let url = if let Some(target) = goaway.redirect.target(&msg.uri, &url) {
 							addrs = Addrs::new(target.clone());
 							target
 						} else {
@@ -862,7 +872,7 @@ impl Connection {
 							Ended::Goaway(_) => None,
 						};
 						// NOTE: only UNAUTHORIZED is specified, and it is handled above. Any
-						// other MoQ-layer rejection (Request::close after the transport is
+						// other MoQ-layer rejection (Request::reject after the transport is
 						// accepted) lands here as an untyped transport close, so it cannot be
 						// told apart from a network blip and is retried until the give-up
 						// timeout. Classifying the rest needs the transport to surface the
@@ -1331,10 +1341,10 @@ mod tests {
 
 		// Stand in for the TOML layer, then re-apply the CLI with none of the flags set.
 		let mut parsed = Wrapper::parse_from(&[]).unwrap();
-		parsed.backoff.initial = Duration::from_secs(7).into();
+		parsed.backoff.initial = Duration::from_secs(7);
 		parsed.backoff.multiplier = 5;
-		parsed.backoff.max = Duration::from_secs(11).into();
-		parsed.backoff.timeout = Duration::ZERO.into();
+		parsed.backoff.max = Duration::from_secs(11);
+		parsed.backoff.timeout = Duration::ZERO;
 		parsed.update_from(&[]);
 
 		assert_eq!(parsed.backoff.initial, Duration::from_secs(7));
@@ -1342,18 +1352,21 @@ mod tests {
 		assert_eq!(parsed.backoff.max, Duration::from_secs(11));
 		assert_eq!(parsed.backoff.timeout, Duration::ZERO, "0 means retry forever");
 
-		// With no flags, the typed defaults are materialized directly.
+		// With no flags, the parser defaults resolve to the typed defaults.
 		let parsed = Wrapper::parse_from(&[]).unwrap();
-		assert_eq!(parsed.backoff.initial, DEFAULT_INITIAL);
-		assert_eq!(parsed.backoff.initial(), DEFAULT_INITIAL);
-		assert_eq!(parsed.backoff.multiplier(), DEFAULT_MULTIPLIER);
-		assert_eq!(parsed.backoff.max(), DEFAULT_MAX);
-		assert_eq!(parsed.backoff.timeout(), DEFAULT_TIMEOUT);
+		assert_eq!(parsed.backoff.multiplier, DEFAULT_MULTIPLIER);
+		let pacing = Pacing::new(&parsed.backoff);
+		assert_eq!(pacing.initial, DEFAULT_INITIAL);
+		assert_eq!(pacing.max, DEFAULT_MAX);
+		assert_eq!(
+			CliDuration::resolve(parsed.backoff.timeout_arg, parsed.backoff.timeout),
+			DEFAULT_TIMEOUT
+		);
 
 		// And a flag still lands where the merge can see it.
 		let parsed =
 			Wrapper::parse_from(&[std::ffi::OsStr::new("--backoff-initial"), std::ffi::OsStr::new("3s")]).unwrap();
-		assert_eq!(parsed.backoff.initial, Duration::from_secs(3));
+		assert_eq!(Pacing::new(&parsed.backoff).initial, Duration::from_secs(3));
 	}
 
 	/// GOAWAY typed defaults remain overrideable by a standing TOML layer.
@@ -1370,9 +1383,9 @@ mod tests {
 		// No flags passed: the typed defaults are present.
 		let parsed = Wrapper::parse_from(&[]).unwrap();
 		assert_eq!(parsed.goaway.redirect, Redirect::SameHost);
-		assert_eq!(parsed.goaway.handover, Duration::from_secs(10));
-		assert_eq!(parsed.goaway.redirect(), Redirect::SameHost);
-		assert_eq!(parsed.goaway.handover(None), Duration::from_secs(10));
+		let resolved = parsed.goaway.resolve();
+		assert_eq!(resolved.redirect, Redirect::SameHost);
+		assert_eq!(resolved.handover(None), Duration::from_secs(10));
 
 		// Flags passed: they land where the merge can see them.
 		let parsed = Wrapper::parse_from(&[
@@ -1383,7 +1396,7 @@ mod tests {
 		])
 		.unwrap();
 		assert_eq!(parsed.goaway.redirect, Redirect::Ignore);
-		assert_eq!(parsed.goaway.handover, Duration::from_secs(3));
+		assert_eq!(parsed.goaway.resolve().handover(None), Duration::from_secs(3));
 	}
 
 	/// Our own window caps the peer's. A GOAWAY deadline shortens the handover but
@@ -1392,10 +1405,11 @@ mod tests {
 	#[test]
 	fn handover_takes_the_earlier_deadline() {
 		let config = Goaway {
-			handover: Duration::from_secs(10).into(),
+			handover: Duration::from_secs(10),
 			..Default::default()
 		};
 
+		let config = config.resolve();
 		assert_eq!(config.handover(None), Duration::from_secs(10), "no deadline: ours");
 		assert_eq!(
 			config.handover(Some(Duration::from_secs(3))),
@@ -1409,7 +1423,7 @@ mod tests {
 		);
 
 		// The default is a cap too, not just a fallback for a silent peer.
-		let default = Goaway::default();
+		let default = Goaway::default().resolve();
 		assert_eq!(default.handover(Some(Duration::from_secs(3600))), DEFAULT_HANDOVER);
 	}
 
@@ -1555,7 +1569,7 @@ mod tests {
 			"a peer-named host is refused without resolving it"
 		);
 		assert_eq!(
-			Goaway::default().redirect(),
+			Goaway::default().resolve().redirect,
 			Redirect::SameHost,
 			"and the shipped config carries that default"
 		);
@@ -1611,7 +1625,7 @@ mod tests {
 		// A zero initial would also make every session look healthy, resetting the
 		// give-up window forever.
 		let pacing = Pacing::new(&Backoff {
-			initial: Duration::ZERO.into(),
+			initial: Duration::ZERO,
 			..Default::default()
 		});
 		assert_eq!(pacing.initial, MIN_BACKOFF);
@@ -1619,7 +1633,7 @@ mod tests {
 
 		// A cap below the floor would clamp the delay straight back down.
 		let pacing = Pacing::new(&Backoff {
-			max: Duration::ZERO.into(),
+			max: Duration::ZERO,
 			..Default::default()
 		});
 		assert_eq!(pacing.max, pacing.initial);
@@ -1634,8 +1648,8 @@ mod tests {
 
 		// All at once: still paced.
 		let pacing = Pacing::new(&Backoff {
-			initial: Duration::ZERO.into(),
-			max: Duration::ZERO.into(),
+			initial: Duration::ZERO,
+			max: Duration::ZERO,
 			multiplier: 0,
 			..Default::default()
 		});
@@ -1650,9 +1664,9 @@ mod tests {
 	#[test]
 	fn pacing_grows_to_the_cap() {
 		let pacing = Pacing::new(&Backoff {
-			initial: Duration::from_millis(100).into(),
+			initial: Duration::from_millis(100),
 			multiplier: 2,
-			max: Duration::from_millis(400).into(),
+			max: Duration::from_millis(400),
 			..Default::default()
 		});
 
@@ -1665,10 +1679,10 @@ mod tests {
 	#[test]
 	fn test_backoff_default() {
 		let backoff = Backoff::default();
-		assert_eq!(backoff.initial(), Duration::from_secs(1));
-		assert_eq!(backoff.multiplier(), 2);
-		assert_eq!(backoff.max(), Duration::from_secs(5));
-		assert_eq!(backoff.timeout(), Duration::from_secs(10));
+		assert_eq!(backoff.initial, Duration::from_secs(1));
+		assert_eq!(backoff.multiplier, 2);
+		assert_eq!(backoff.max, Duration::from_secs(5));
+		assert_eq!(backoff.timeout, Duration::from_secs(10));
 	}
 
 	#[test]

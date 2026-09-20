@@ -54,7 +54,11 @@ impl RelayHost {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 		let mut config = Config::default();
-		config.listen.bind = Some(format!("127.0.0.1:{}", requested_port.unwrap_or_default()));
+		config.listen.bind = Some(
+			format!("127.0.0.1:{}", requested_port.unwrap_or_default())
+				.parse()
+				.unwrap(),
+		);
 		config.listen.tls.generate = vec!["localhost".into()];
 		config.auth.public = vec![moq_auth::Pattern::all()];
 
@@ -141,15 +145,15 @@ fn client(url: &url::Url) -> moq_tokio::Client {
 	// busy runner has to stall eight times over before a live session is mistaken
 	// for a dead one.
 	let mut quic = moq_tokio::quic::Config::default();
-	quic.idle_timeout = Duration::from_secs(2).into();
-	quic.keep_alive = Duration::from_millis(250).into();
+	quic.idle_timeout = Duration::from_secs(2);
+	quic.keep_alive = Duration::from_millis(250);
 
 	// Fast enough to keep a relay bounce inside the drill's budget, paced enough
 	// that the loop is still a backoff. `linger` is derived from `timeout`, so
 	// the give-up budget also sets how long a broadcast survives the gap.
-	config.backoff.initial = Duration::from_millis(50).into();
-	config.backoff.max = Duration::from_millis(200).into();
-	config.backoff.timeout = Duration::from_secs(5).into();
+	config.backoff.initial = Duration::from_millis(50);
+	config.backoff.max = Duration::from_millis(200);
+	config.backoff.timeout = Duration::from_secs(5);
 
 	config.init(quic).expect("client init")
 }

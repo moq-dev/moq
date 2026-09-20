@@ -89,7 +89,7 @@ pub enum Error {
 	/// The config was parsed from released spellings that no longer work. The
 	/// payload is the migration to print.
 	#[error("{0}")]
-	Deprecated(crate::Deprecated),
+	Deprecated(crate::cli::Deprecated),
 
 	/// The idle timeout is longer than QUIC's millisecond varint can carry.
 	#[error("idle timeout must be under 2^62 milliseconds")]
@@ -136,10 +136,6 @@ pub enum Error {
 	/// A client certificate was configured, but this QUIC backend can't do mTLS.
 	#[error("tls.root (mTLS) is not supported by the selected QUIC backend")]
 	MtlsUnsupported,
-
-	/// A QUIC-LB nonce length was set without the server id it encodes alongside.
-	#[error("--listen-quic-lb-nonce needs --listen-quic-lb-id")]
-	LbNonceWithoutId,
 
 	/// A worker group was asked for more members than the connection ID's one-byte
 	/// steering prefix can name.

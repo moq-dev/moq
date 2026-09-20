@@ -19,7 +19,6 @@ quest is deleted too. No code.
 The list: [Announce event](/quest/m1/api-net-announce.md),
 [Origin scoping](/quest/m1/api-net-origin.md),
 [Route cost](/quest/m1/api-route-cost.md),
-[moq-tokio shapes](/quest/m1/api-tokio-shapes.md),
 [Catalog types](/quest/m1/api-hang-catalog.md),
 [Rendition ownership](/quest/m1/api-mux-rendition.md),
 [Gateway types](/quest/m1/api-gateways.md),

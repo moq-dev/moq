@@ -19,7 +19,7 @@ use crate::cli::Duration as CliDuration;
 pub enum Error {
 	/// Every candidate failed its TCP, TLS, or WebSocket handshake.
 	#[error("all {} connection attempts failed: {}", .0.len(), crate::failover::describe(.0))]
-	Failover(Vec<crate::failover::Failure<Error>>),
+	Failover(Vec<crate::failover::Attempt<Error>>),
 
 	/// The TCP socket failed to bind or connect. Not accept: a failed `accept(2)` is
 	/// the listener's own to classify and retry (see [`crate::accept`]).
@@ -73,7 +73,7 @@ pub enum Error {
 }
 
 impl crate::failover::Aggregate for Error {
-	fn aggregate(failures: Vec<crate::failover::Failure<Self>>) -> Self {
+	fn aggregate(failures: Vec<crate::failover::Attempt<Self>>) -> Self {
 		Self::Failover(failures)
 	}
 	fn resolve(error: Option<std::io::Error>) -> Self {
@@ -129,14 +129,20 @@ pub struct Config {
 
 	/// Head start given to the QUIC dial before the WebSocket fallback joins the
 	/// race. Defaults to 200ms, and drops to zero for a server WebSocket already won.
+	#[usage(skip)]
+	#[serde(with = "crate::cli::duration::serde_duration")]
+	pub delay: time::Duration,
+
 	#[usage(
 		name = "connect-websocket-delay",
 		long = "connect-websocket-delay",
 		env = "MOQ_CONNECT_WEBSOCKET_DELAY",
+		default_value_t = CliDuration::fallback(DEFAULT_DELAY),
 		default = "200ms",
 		setting = "connect.websocket.delay"
 	)]
-	pub delay: CliDuration,
+	#[serde(default, rename = "__cli_delay", skip_serializing_if = "Option::is_none")]
+	delay_arg: Option<CliDuration>,
 
 	/// The released `MOQ_CLIENT_WEBSOCKET_*` env vars, named by [`Config::deprecated`].
 	#[usage(flatten)]
@@ -148,7 +154,8 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			enabled: None,
-			delay: DEFAULT_DELAY.into(),
+			delay: DEFAULT_DELAY,
+			delay_arg: None,
 			legacy: Default::default(),
 		}
 	}
@@ -188,8 +195,8 @@ const DEFAULT_DELAY: time::Duration = time::Duration::from_millis(200);
 impl Config {
 	/// The released spellings in use, each paired with what replaced it. Reached
 	/// through [`crate::connect::Config::deprecated`].
-	pub(crate) fn deprecated(&self) -> crate::Deprecated {
-		let mut found = crate::Deprecated::default();
+	pub(crate) fn deprecated(&self) -> crate::cli::Deprecated {
+		let mut found = crate::cli::Deprecated::default();
 		if self.legacy.enabled.is_some() {
 			found.flag(
 				"--websocket-enabled",
@@ -211,7 +218,7 @@ impl Config {
 	pub fn resolve(&self) -> Resolved {
 		Resolved {
 			enabled: self.enabled.unwrap_or(true),
-			delay: self.delay.into_std(),
+			delay: CliDuration::resolve(self.delay_arg, self.delay),
 		}
 	}
 }
@@ -459,7 +466,7 @@ impl Error {
 
 /// Listens for incoming WebSocket connections on a TCP port.
 ///
-/// Use with [`crate::Server::with_websocket`] to accept WebSocket connections
+/// Assign to [`crate::server::Config::websocket`] to accept WebSocket connections
 /// alongside QUIC connections on a separate port.
 pub struct Listener {
 	listener: tokio::net::TcpListener,
@@ -470,21 +477,32 @@ pub struct Listener {
 impl Listener {
 	/// Bind a listener to the given address, accepting every moq ALPN we know about.
 	pub async fn bind(addr: net::SocketAddr) -> Result<Self> {
-		Self::bind_with_alpns(addr, moq_net::ALPNS).await
-	}
-
-	/// Bind a listener that only accepts the given moq ALPNs, in preference order.
-	pub async fn bind_with_alpns(addr: net::SocketAddr, alpns: &[&str]) -> Result<Self> {
 		let listener = tokio::net::TcpListener::bind(addr).await?;
-		let protocols = supported_subprotocols(alpns);
-		for protocol in &protocols {
-			http::HeaderValue::from_str(protocol).map_err(|err| Error::ProtocolHeader(crate::error::message(err)))?;
-		}
+		let protocols = supported_subprotocols(moq_net::ALPNS);
 		Ok(Self {
 			listener,
 			protocols,
 			health: crate::accept::Health::new("websocket"),
 		})
+	}
+
+	/// Accept only the given moq ALPNs, in preference order.
+	pub fn with_protocols<I, S>(mut self, protocols: I) -> Result<Self>
+	where
+		I: IntoIterator<Item = S>,
+		S: AsRef<str>,
+	{
+		let alpns: Vec<String> = protocols
+			.into_iter()
+			.map(|protocol| protocol.as_ref().to_owned())
+			.collect();
+		let refs: Vec<&str> = alpns.iter().map(String::as_str).collect();
+		let protocols = supported_subprotocols(&refs);
+		for protocol in &protocols {
+			http::HeaderValue::from_str(protocol).map_err(|err| Error::ProtocolHeader(crate::error::message(err)))?;
+		}
+		self.protocols = protocols;
+		Ok(self)
 	}
 
 	/// The local address the listener is bound to.
@@ -838,9 +856,8 @@ mod legacy_tests {
 		assert!(!resolved.enabled);
 		assert_eq!(resolved.delay, time::Duration::from_secs(2));
 
-		// Neither given: the typed defaults.
+		// Neither given: the parser resolves to the typed defaults.
 		let config = parse(&[]);
-		assert_eq!(config.delay, DEFAULT_DELAY);
 		assert_eq!(config.resolve().delay, DEFAULT_DELAY);
 	}
 }

@@ -32,18 +32,6 @@ pub struct Config {
 }
 
 impl Config {
-	/// Set the dial side, returning `self` for chaining.
-	pub fn with_connect(mut self, connect: crate::connect::Config) -> Self {
-		self.connect = connect;
-		self
-	}
-
-	/// Set the QUIC settings, returning `self` for chaining.
-	pub fn with_quic(mut self, quic: crate::quic::Config) -> Self {
-		self.quic = quic;
-		self
-	}
-
 	/// Build the [`Client`] this config describes.
 	pub fn init(self) -> crate::Result<Client> {
 		Client::new(self)
@@ -729,7 +717,7 @@ mod tests {
 	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 	async fn check_fixed_redirect(once: bool, pinned: bool) {
 		let mut listen = crate::listen::Config {
-			bind: Some("127.0.0.1:0".into()),
+			bind: Some("127.0.0.1:0".parse().unwrap()),
 			..Default::default()
 		};
 		listen.tls.generate = vec!["relay.invalid".into()];
@@ -965,7 +953,11 @@ mod tests {
 	#[test]
 	fn building_a_client_refuses_a_released_spelling() {
 		let config = Cli::config_from(["test", "--client-connect", "https://relay.example.com/anon"]);
-		let Err(err) = crate::client::Config::default().with_connect(config).init() else {
+		let Err(err) = crate::client::Config {
+			connect: config,
+			..Default::default()
+		}
+		.init() else {
 			panic!("building a client must refuse a released spelling");
 		};
 		assert!(matches!(err, Error::Deprecated(_)), "{err}");
@@ -985,7 +977,7 @@ mod tests {
 		"#;
 
 		let config: crate::connect::Config = toml::from_str(toml).unwrap();
-		assert_eq!(config.race, crate::cli::Duration::from(crate::connect::DEFAULT_RACE));
+		assert_eq!(config.race, crate::connect::DEFAULT_RACE);
 		assert!(
 			config.deprecated().to_string().contains("failover_delay -> race"),
 			"{}",
@@ -996,7 +988,7 @@ mod tests {
 	#[test]
 	fn test_cli_failover_delay() {
 		let config = Cli::config_from(["test", "--connect-race", "50ms"]);
-		assert_eq!(config.race, std::time::Duration::from_millis(50));
+		assert_eq!(config.resolve().race, std::time::Duration::from_millis(50));
 	}
 
 	#[test]
@@ -1024,7 +1016,6 @@ mod tests {
 	#[test]
 	fn resolution_delay_defaults_to_the_rfc_value() {
 		let config = Cli::config_from(["test"]);
-		assert_eq!(config.resolution_delay, std::time::Duration::from_millis(50));
 		assert_eq!(config.resolve().resolution_delay, std::time::Duration::from_millis(50));
 	}
 
@@ -1330,7 +1321,6 @@ mod tests {
 	#[test]
 	fn connect_timeout_defaults_to_thirty_seconds() {
 		let config = Cli::config_from(["test"]);
-		assert_eq!(config.timeout, crate::connect::DEFAULT_TIMEOUT);
 		assert_eq!(config.resolve().timeout, crate::connect::DEFAULT_TIMEOUT);
 	}
 
@@ -1349,10 +1339,10 @@ mod tests {
 
 		let timeout = crate::connect::DEFAULT_TIMEOUT;
 		let mut config = crate::connect::Config {
-			timeout: timeout.into(),
+			timeout,
 			..Default::default()
 		};
-		config.websocket.delay = std::time::Duration::ZERO.into();
+		config.websocket.delay = std::time::Duration::ZERO;
 		let client = config.init(Default::default()).unwrap();
 
 		// Nothing is listening on UDP, so the QUIC arm fails and leaves the WebSocket

@@ -67,6 +67,7 @@ bytes = { workspace = true }
 bytesize = "2.4.2"
 futures = { workspace = true }
 http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "reqwest-middleware", "url-standard"], default-features = false }
+humantime = { workspace = true }
 moq-auth = { workspace = true, features = ["client"] }
 moq-net = { workspace = true }
 moq-stats = { workspace = true }

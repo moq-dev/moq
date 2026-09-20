@@ -6,7 +6,7 @@ use std::sync::{
 };
 
 use super::Config;
-use crate::{Error, Result, Server, abort::AbortOnDrop, listen::Member, server::SocketRetainer};
+use crate::{Error, Result, Server, abort::AbortOnDrop, listen::Member as ShardMember, server::SocketRetainer};
 
 /// A bound group of QUIC workers sharing one port.
 ///
@@ -19,15 +19,17 @@ use crate::{Error, Result, Server, abort::AbortOnDrop, listen::Member, server::S
 /// # async fn example(listen: moq_tokio::listen::Config) -> anyhow::Result<()> {
 /// use moq_tokio::worker;
 ///
-/// let workers = worker::Workers::bind(listen, Default::default(), worker::Config::new(8))?;
+/// let mut server = moq_tokio::server::Config::default();
+/// server.listen = listen;
+/// let workers = worker::Workers::bind(server, worker::Config::new(8))?;
 /// println!("listening on {}", workers.local_addr());
 ///
 /// // The group owns the threads, so keep it alive as long as you want the
 /// // port served.
 /// let mut group = workers.split();
 /// let mut tasks = Vec::new();
-/// for (server, spawner) in group.members() {
-///     tasks.push(spawner.serve(server, |server| async move {
+/// for member in group.members() {
+///     tasks.push(member.serve(|server| async move {
 ///         let _ = server.listen().await;
 ///     }));
 /// }
@@ -65,11 +67,11 @@ impl Workers {
 	/// bound more than once. Serve those from a
 	/// [`init_streams`](crate::listen::Config::init_streams) server on the
 	/// caller's own runtime.
-	pub fn bind(listen: crate::listen::Config, quic: crate::quic::Config, config: Config) -> Result<Self> {
+	pub fn bind(mut server: crate::server::Config, config: Config) -> Result<Self> {
 		// Each worker loads the certificate files itself, so generating would give
 		// every member a certificate of its own and clients a different one per
 		// connection.
-		if !listen.tls.generate.is_empty() {
+		if !server.listen.tls.generate.is_empty() {
 			return Err(Error::WorkerTlsGenerate);
 		}
 
@@ -81,16 +83,13 @@ impl Workers {
 		// fresh one. An unset `bind` stays unset: the backends fall back to the
 		// default literal, and `Some` here would flip a stream-only config into
 		// opening a QUIC listener.
-		let mut listen = listen;
-		let requested = match listen.bind.as_deref() {
+		let requested = match server.listen.bind.as_ref() {
 			Some(bind) => {
-				let addr = crate::util::resolve(Some(bind), bind).map_err(|err| Error::WorkerResolve(Arc::new(err)))?;
-				listen.bind = Some(addr.to_string());
+				let addr = bind.resolve().map_err(|err| Error::WorkerResolve(Arc::new(err)))?;
+				server.listen.bind = Some(crate::listen::Bind::Addr(addr));
 				addr
 			}
-			None => crate::server::DEFAULT_BIND
-				.parse()
-				.expect("the default bind is a literal"),
+			None => crate::server::DEFAULT_BIND,
 		};
 
 		// The group owns everything a reuseport group has to get right: it takes
@@ -116,7 +115,7 @@ impl Workers {
 			// there are no workers.
 			let core = cores.get(index as usize % cores.len().max(1)).copied();
 
-			let worker = Worker::spawn(listen.clone(), quic.clone(), member, core, shared.clone())?;
+			let worker = Worker::spawn(server.worker(), member, core, shared.clone())?;
 
 			certificates.get_or_insert_with(|| {
 				worker
@@ -174,7 +173,7 @@ impl Workers {
 	/// and retains every socket until serving has stopped, so dropping a
 	/// returned server or letting one member's future return cannot resize the
 	/// reuseport array out from under its siblings. Serve each member with
-	/// [`Spawner::serve`]: the first member to complete, fail, or cancel ends
+	/// [`Member::serve`]: the first member to complete, fail, or cancel ends
 	/// serving for the group.
 	pub fn split(self) -> Group {
 		let shared = match self.workers.first() {
@@ -231,7 +230,7 @@ impl Workers {
 /// or letting one serving future return cannot take one socket out of the
 /// reuseport group while its siblings keep serving.
 ///
-/// Serve each member with [`Spawner::serve`]. The first member whose serving
+/// Serve each member with [`Member::serve`]. The first member whose serving
 /// future completes, panics, or is cancelled ends serving for the group: its
 /// siblings are stopped and the group is ready to join. Join with
 /// [`Group::shutdown`] (off the caller's runtime) or by dropping the group.
@@ -281,39 +280,38 @@ impl Group {
 		self.workers.is_empty()
 	}
 
-	/// Each worker's bound server, paired with a handle onto the thread that
-	/// has to drive it.
+	/// Each worker's bound server paired with the thread that has to drive it.
 	///
-	/// Serve each pair with [`Spawner::serve`], not [`Spawner::run`]: `serve`
+	/// Serve each member with [`Member::serve`], not [`Member::run`]: `serve`
 	/// builds the future on the worker's thread from the server and ends the
 	/// group when the first member finishes, while `run` is for auxiliary
 	/// tasks that must not end serving. Empty after the first call, since a
 	/// worker serves one server.
 	///
-	/// Dropping a returned server is safe but leaves its slot unserved: the
+	/// Dropping a returned member is safe but leaves its slot unserved: the
 	/// group retains the socket, so the survivors keep their steering, but
 	/// nothing accepts the dropped member's share until the group stops.
-	pub fn members(&mut self) -> Vec<(Server, Spawner<'_>)> {
+	pub fn members(&mut self) -> Vec<Member<'_>> {
 		self.workers
 			.iter_mut()
 			.filter_map(|worker| {
 				let server = worker.server.take()?;
-				Some((
+				Some(Member {
 					server,
-					Spawner {
+					spawner: Spawner {
 						index: worker.index,
 						handle: &worker.handle,
 						spawn: &worker.spawn,
 						shared: &worker.shared,
 					},
-				))
+				})
 			})
 			.collect()
 	}
 
 	/// Resolve once any serving member has ended the group.
 	///
-	/// The output itself travels through the [`Spawner::serve`] handle that ran
+	/// The output itself travels through the [`Member::serve`] handle that ran
 	/// it; this is the owner's signal that serving is over and
 	/// [`Group::shutdown`] will join cleanly. Pends forever while every member
 	/// still serves.
@@ -465,6 +463,39 @@ pub struct Spawner<'a> {
 	shared: &'a Arc<Shared>,
 }
 
+/// One bound server paired with the only worker thread that may drive it.
+pub struct Member<'a> {
+	server: Server,
+	spawner: Spawner<'a>,
+}
+
+impl Member<'_> {
+	/// This member's position in the reuseport group.
+	pub fn index(&self) -> u16 {
+		self.spawner.index()
+	}
+
+	/// Build and drive an auxiliary future on this member's worker thread.
+	pub fn run<M, F>(&self, make: M) -> tokio::task::JoinHandle<F::Output>
+	where
+		M: FnOnce() -> F + Send + 'static,
+		F: Future + 'static,
+		F::Output: Send + 'static,
+	{
+		self.spawner.run(make)
+	}
+
+	/// Build and drive this member's serving future on its worker thread.
+	pub fn serve<M, F>(self, make: M) -> tokio::task::JoinHandle<F::Output>
+	where
+		M: FnOnce(Server) -> F + Send + 'static,
+		F: Future + 'static,
+		F::Output: Send + 'static,
+	{
+		self.spawner.serve(self.server, make)
+	}
+}
+
 impl Spawner<'_> {
 	/// Serve this worker's server, ending the group when the future ends.
 	///
@@ -478,7 +509,7 @@ impl Spawner<'_> {
 	/// serve is the end of serving, not a resized reuseport group. The returned
 	/// handle reports what the future returned; dropping it without aborting
 	/// leaves the task running.
-	pub fn serve<M, F>(&self, server: Server, make: M) -> tokio::task::JoinHandle<F::Output>
+	fn serve<M, F>(&self, server: Server, make: M) -> tokio::task::JoinHandle<F::Output>
 	where
 		M: FnOnce(Server) -> F + Send + 'static,
 		F: Future + 'static,
@@ -522,7 +553,7 @@ impl Spawner<'_> {
 	/// builder rather than a hook: it runs once, to make the future, and nothing
 	/// calls back into it afterwards.
 	///
-	/// Auxiliary tasks only: unlike [`serve`](Self::serve) this does not own a
+	/// Auxiliary tasks only: unlike [`Member::serve`] this does not own a
 	/// server and ending it does not end the group. The returned handle reports
 	/// what the future returned, so a caller can end the process on a worker
 	/// that fails, and stands in for the worker-local task itself: a panic in
@@ -585,9 +616,8 @@ impl Worker {
 	/// Bind this worker's socket on a thread of its own, returning once it is
 	/// listening.
 	fn spawn(
-		listen: crate::listen::Config,
-		quic: crate::quic::Config,
-		member: Member,
+		server: crate::server::Config,
+		member: ShardMember,
 		core: Option<CoreId>,
 		shared: Arc<Shared>,
 	) -> Result<Self> {
@@ -600,7 +630,7 @@ impl Worker {
 			.name(format!("moq-quic-{index}"))
 			.spawn({
 				let shared = shared.clone();
-				move || run(member, core, listen, quic, ready_tx, stop_rx, spawn_rx, shared)
+				move || run(member, core, server, ready_tx, stop_rx, spawn_rx, shared)
 			})
 			.map_err(|err| Error::WorkerStart {
 				index,
@@ -683,10 +713,9 @@ type Spawn = Box<dyn FnOnce() + Send + 'static>;
 /// [`Spawner::serve`] spawns onto this same runtime.
 #[allow(clippy::too_many_arguments)]
 fn run(
-	member: Member,
+	member: ShardMember,
 	core: Option<CoreId>,
-	listen: crate::listen::Config,
-	quic: crate::quic::Config,
+	server: crate::server::Config,
 	ready: std::sync::mpsc::Sender<Result<Ready>>,
 	stop: tokio::sync::oneshot::Receiver<()>,
 	mut spawn: tokio::sync::mpsc::UnboundedReceiver<Spawn>,
@@ -710,11 +739,8 @@ fn run(
 
 	let built = {
 		let _guard = runtime.enter();
-		Server::build(
-			crate::server::Config::default().with_listen(listen).with_quic(quic),
-			crate::server::Parts::Member(member),
-		)
-		.and_then(|server| server.local_addr().map(|addr| (server, addr)))
+		Server::build(server, crate::server::Parts::Member(member))
+			.and_then(|server| server.local_addr().map(|addr| (server, addr)))
 	};
 
 	let (server, addr) = match built {

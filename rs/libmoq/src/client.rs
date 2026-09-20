@@ -53,19 +53,19 @@ pub unsafe fn parse_client(config: Option<&moq_client_config>) -> Result<Config,
 		out.connect.bind = Some(addr);
 	}
 	if config.has_connect_timeout {
-		out.connect.timeout = std::time::Duration::from_millis(config.connect_timeout_ms).into();
+		out.connect.timeout = std::time::Duration::from_millis(config.connect_timeout_ms);
 	}
 	if config.has_failover_delay {
-		out.connect.race = std::time::Duration::from_millis(config.failover_delay_ms).into();
+		out.connect.race = std::time::Duration::from_millis(config.failover_delay_ms);
 	}
 	if config.has_resolution_delay {
-		out.connect.resolution_delay = std::time::Duration::from_millis(config.resolution_delay_ms).into();
+		out.connect.resolution_delay = std::time::Duration::from_millis(config.resolution_delay_ms);
 	}
 	if config.has_websocket_enabled {
 		out.connect.websocket.enabled = Some(config.websocket_enabled);
 	}
 	if config.has_websocket_delay {
-		out.connect.websocket.delay = std::time::Duration::from_millis(config.websocket_delay_ms).into();
+		out.connect.websocket.delay = std::time::Duration::from_millis(config.websocket_delay_ms);
 	}
 
 	// TLS. `insecure` needs no flag: false is both "unset" and "verify".
@@ -90,16 +90,16 @@ pub unsafe fn parse_client(config: Option<&moq_client_config>) -> Result<Config,
 
 	// Reconnect backoff
 	if config.has_backoff_initial {
-		out.connect.backoff.initial = std::time::Duration::from_micros(config.backoff_initial_us).into();
+		out.connect.backoff.initial = std::time::Duration::from_micros(config.backoff_initial_us);
 	}
 	if config.has_backoff_multiplier {
 		out.connect.backoff.multiplier = config.backoff_multiplier;
 	}
 	if config.has_backoff_max {
-		out.connect.backoff.max = std::time::Duration::from_micros(config.backoff_max_us).into();
+		out.connect.backoff.max = std::time::Duration::from_micros(config.backoff_max_us);
 	}
 	if config.has_backoff_timeout {
-		out.connect.backoff.timeout = std::time::Duration::from_micros(config.backoff_timeout_us).into();
+		out.connect.backoff.timeout = std::time::Duration::from_micros(config.backoff_timeout_us);
 	}
 
 	// QUIC
@@ -107,10 +107,10 @@ pub unsafe fn parse_client(config: Option<&moq_client_config>) -> Result<Config,
 		out.quic.max_streams = Some(config.quic_max_streams);
 	}
 	if config.has_quic_idle_timeout {
-		out.quic.idle_timeout = std::time::Duration::from_millis(config.quic_idle_timeout_ms).into();
+		out.quic.idle_timeout = std::time::Duration::from_millis(config.quic_idle_timeout_ms);
 	}
 	if config.has_quic_keep_alive {
-		out.quic.keep_alive = std::time::Duration::from_millis(config.quic_keep_alive_ms).into();
+		out.quic.keep_alive = std::time::Duration::from_millis(config.quic_keep_alive_ms);
 	}
 	if config.has_quic_gso {
 		out.quic.gso = Some(config.quic_gso);

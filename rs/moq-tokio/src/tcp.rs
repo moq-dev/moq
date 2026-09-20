@@ -63,8 +63,8 @@ pub(crate) struct Legacy {
 impl Config {
 	/// The released spelling, if in use, paired with what replaced it. Reached
 	/// through [`crate::listen::Config::deprecated`].
-	pub(crate) fn deprecated(&self) -> crate::Deprecated {
-		let mut found = crate::Deprecated::default();
+	pub(crate) fn deprecated(&self) -> crate::cli::Deprecated {
+		let mut found = crate::cli::Deprecated::default();
 		if self.legacy.bind.is_some() {
 			found.flag(
 				"--server-tcp-bind",
@@ -112,11 +112,11 @@ pub enum Error {
 	/// unroutable or to blackhole until its timeout. A host with a single address
 	/// reports that error directly instead.
 	#[error("all {} connection attempts failed: {}", .0.len(), crate::failover::describe(.0))]
-	Failover(Vec<crate::failover::Failure<Error>>),
+	Failover(Vec<crate::failover::Attempt<Error>>),
 }
 
 impl crate::failover::Aggregate for Error {
-	fn aggregate(failures: Vec<crate::failover::Failure<Self>>) -> Self {
+	fn aggregate(failures: Vec<crate::failover::Attempt<Self>>) -> Self {
 		Self::Failover(failures)
 	}
 

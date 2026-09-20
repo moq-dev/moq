@@ -740,13 +740,14 @@ async fn serve_connection(
 	};
 
 	let role = request.role();
-	let grants = match crate::connection::authorize(&serve.cluster, lease.token(), role, &moq_tokio::Transport::Quic) {
-		Ok(grants) => grants,
-		Err(err) => {
-			request.close(moq_net::Error::Unauthorized);
-			return Err(err);
-		}
-	};
+	let grants =
+		match crate::connection::authorize(&serve.cluster, lease.token(), role, &moq_tokio::server::Transport::Quic) {
+			Ok(grants) => grants,
+			Err(err) => {
+				request.close(moq_net::Error::Unauthorized);
+				return Err(err);
+			}
+		};
 
 	let peer_hop = request.peer_hop();
 	let mut request = request.with_stats(grants.stats);
@@ -759,7 +760,7 @@ async fn serve_connection(
 	let session = request.ok().await?;
 	let node_connection = peer_hop.map(|origin| serve.cluster.nodes.connect_inbound(id, origin));
 
-	tracing::info!(id, version = %session.version(), transport = %moq_tokio::Transport::Quic, "negotiated");
+	tracing::info!(id, version = %session.version(), transport = %moq_tokio::server::Transport::Quic, "negotiated");
 
 	// The session handle is Send + Sync however its transport is driven, so
 	// its lifecycle (credential expiry, GOAWAY drain) lives with the timers

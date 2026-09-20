@@ -178,7 +178,7 @@ async fn spawn_ws_relay(auth: moq_relay::auth::Auth) -> (u16, tokio::task::JoinH
 	// Stream listeners bind lazily, so this server never opens a socket; only
 	// its certificate handle is used.
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".to_string());
+	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 	let certificates = server_config
 		.init(Default::default())
@@ -202,7 +202,7 @@ fn client() -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
 	config.once = Some(true);
-	config.websocket.delay = Duration::ZERO.into();
+	config.websocket.delay = Duration::ZERO;
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 	config.init(Default::default()).expect("client init")
 }
@@ -317,7 +317,7 @@ async fn spawn_quic_relay(
 ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let mut config = moq_tokio::listen::Config::default();
-	config.bind = Some("127.0.0.1:0".to_string());
+	config.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.tls.generate = vec!["localhost".into()];
 	config.tls.root = root.into_iter().collect();
 	let server = config.init(Default::default()).expect("server init");
@@ -886,7 +886,7 @@ async fn a_relay_without_an_auth_source_is_decided_by_the_embedder() {
 		let mut config = Config::default();
 		config.listen.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
 		// The sessions are gone by the time the trigger fires; no need to wait out the default window.
-		config.drain_timeout = Duration::from_millis(100).into();
+		config.drain_timeout = Duration::from_millis(100);
 		config
 	};
 

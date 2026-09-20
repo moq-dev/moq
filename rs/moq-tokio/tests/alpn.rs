@@ -15,7 +15,7 @@ async fn connect_with_version(version: &str) {
 
 	// ── server ──────────────────────────────────────────────────────
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".to_string());
+	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.version = vec![version];
 
@@ -38,15 +38,14 @@ async fn connect_with_version(version: &str) {
 
 	// Run server accept and client connect concurrently.
 	let server_origin = origin.clone();
-	let server_handle = tokio::spawn(async move {
+	let server_connect = async {
 		let request = server.accept().await.expect("no incoming connection");
 		request.with_publisher(&server_origin).ok().await
-	});
+	};
 
 	let client = client.with_publisher(&origin);
-	let client_result = client.with_reconnect(false).connect(url).established().await;
-
-	let server_result = server_handle.await.expect("server task panicked");
+	let client_connect = client.with_reconnect(false).connect(url).established();
+	let (server_result, client_result) = tokio::join!(server_connect, client_connect);
 
 	// Both sides should succeed.
 	if let Err(err) = &client_result {
@@ -65,7 +64,7 @@ async fn connect_with_webtransport(version: Option<&str>) {
 
 	// ── server ──────────────────────────────────────────────────────
 	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".to_string());
+	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 	if let Some(v) = version {
 		server_config.version = vec![v];
@@ -90,15 +89,14 @@ async fn connect_with_webtransport(version: Option<&str>) {
 	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
 
 	let server_origin = origin.clone();
-	let server_handle = tokio::spawn(async move {
+	let server_connect = async {
 		let request = server.accept().await.expect("no incoming connection");
 		request.with_publisher(&server_origin).ok().await
-	});
+	};
 
 	let client = client.with_publisher(&origin);
-	let client_result = client.with_reconnect(false).connect(url).established().await;
-
-	let server_result = server_handle.await.expect("server task panicked");
+	let client_connect = client.with_reconnect(false).connect(url).established();
+	let (server_result, client_result) = tokio::join!(server_connect, client_connect);
 
 	let label = version.map_or("default".to_string(), |v| v.to_string());
 	if let Err(err) = &client_result {
