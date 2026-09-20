@@ -44,6 +44,7 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 
 ## Quests
 
+- [Receive failure](/quest/m2/e2ee/receiver-failure.md) - failed opens consume the key budget and a bad grouped frame wakes and terminates every pending read
 - [Opaque broadcast path](/quest/m2/e2ee/path.md) - the draft, vectors,
   and questline publish at `<opaque>/<epoch>` with no `.e2ee` suffix
 - [Rust E2EE core on moq-e2ee-00](/quest/m2/e2ee/rust.md) - reshape the merged

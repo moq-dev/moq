@@ -66,6 +66,7 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 - [Publisher clocks](/quest/m2/publisher-clock.md) - wire the shared clock through native and browser publisher restarts
 - [Broadcast route](/quest/m2/js-broadcast-route.md) - JS Announce.Broadcast goes live on any claim matching its path, like Rust routed()
 - [io_uring check](/quest/m2/check-uring-feature.md) - a moq-relay diff compiles the io-uring feature in `just check`, not only nightly
+- [io_uring handshake cancellation](/quest/m2/uring-handshake-cancel.md) - dropping a pending handshake releases its connection while the worker keeps running
 - [Flaky timing tests](/quest/m2/flaky-timing-tests.md) - three real-clock tests become deterministic instead of failing under load
 - [Binding stats docs](/quest/m2/binding-stats-docs.md) - every binding's doc page lists its connection stats fields with units
 
