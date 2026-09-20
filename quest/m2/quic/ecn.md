@@ -9,8 +9,7 @@ marks fall back to no ECN, and a viewer's session is unaffected.
 
 ## Plan
 
-Classic ECN is already end to end once the
-[io_uring path marks](/quest/m2/quic/ecn-uring.md); this quest is the
+Classic ECN is already end to end on both runtimes; this quest is the
 fork-side half. noq-proto has no ECN knob: `sending_ecn` is hardcoded on
 per path and only an ACK without counts turns it off, so both `off` and
 `ect1` need the fork.
@@ -36,7 +35,5 @@ per path and only an ACK without counts turns it off, so both `off` and
 
 - [Fork noq](/quest/m2/quic/fork.md) - the `Ect1` option and the `off` knob
   live there
-- [ECN on the io_uring UDP path](/quest/m2/quic/ecn-uring.md) - the relays
-  must mark before a response can be measured
 - [Measure ECN on the backbone](/quest/m2/quic/ecn-measure.md) - the
   provider verdict this quest acts on

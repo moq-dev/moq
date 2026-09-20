@@ -43,8 +43,6 @@ This is a transport API change, not a MoQ wire change.
   written down
 - [Deliver the application close before io_uring teardown](/quest/m2/quic/uring-close.md) -
   the peer receives the final close when the client immediately stops its worker
-- [ECN on the io_uring UDP path](/quest/m2/quic/ecn-uring.md) - the ring's
-  sends carry ECT(0) and its receives read the mark, matching `noq-udp`
 - [Measure ECN on the backbone](/quest/m2/quic/ecn-measure.md) - a written
   verdict on marking versus dropping, and whether Linode and OVH keep marks
 - [Per-stream ACK progress](/quest/m2/quic/ack-progress.md) - the fork reports

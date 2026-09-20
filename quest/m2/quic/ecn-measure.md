@@ -30,8 +30,3 @@ repeat it.
   and the tcpdump summaries beside the numbers in the L4S quest's Plan.
   If neither provider preserves the marks, say so there: L4S stays off and
   the marking response is only a lab result.
-
-## Required
-
-- [ECN on the io_uring UDP path](/quest/m2/quic/ecn-uring.md) - the relays
-  under test must mark
