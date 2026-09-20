@@ -29,9 +29,9 @@ carry no counts, and noq turns ECN off within the first ACK.
   and quinn adapter passes `Transmit::ecn` at both call sites,
   `rs/moq-uring/src/quic/quinn/endpoint.rs:377` and
   `rs/moq-uring/src/quic/quinn/connection.rs:797`. quiche has no ECN send
-  API, so its three callers (`quiche/endpoint.rs:476`,
-  `quiche/connection.rs:843`) pass no codepoint and change only to match
-  the signature.
+  API, so its two callers (`rs/moq-uring/src/quic/quiche/endpoint.rs:476`
+  and `rs/moq-uring/src/quic/quiche/connection.rs:843`) pass no codepoint
+  and change only to match the signature.
 - Receive: enable `IP_RECVTOS` and `IPV6_RECVTCLASS` on the socket and parse
   the TOS or TCLASS control message next to `UDP_GRO`. `udp::Packet` gains
   an `ecn` accessor (one mark per completion; a GRO batch shares it), and
