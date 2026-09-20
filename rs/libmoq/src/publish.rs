@@ -350,8 +350,10 @@ impl Publish {
 
 	/// Insert or replace a top-level application catalog section by name.
 	///
-	/// `value` is any JSON document. Errors if `name` is reserved (`video`/`audio`).
-	/// The catalog is republished automatically.
+	/// `value` is any JSON document. Errors if `name` is a HANG root (`video`, `audio`, `text`,
+	/// `archive`, `clock`, `json`, `binary`, or retired `timeline`) or an MSF root (`version`,
+	/// `generatedAt`, `isComplete`, `tracks`, or `initDataList`). The catalog is republished
+	/// automatically.
 	pub fn catalog_section_set(&mut self, broadcast: Id, name: &str, value: serde_json::Value) -> Result<(), Error> {
 		let catalog = self.catalog(broadcast)?;
 		let mut guard = catalog.modify()?;
