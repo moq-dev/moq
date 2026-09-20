@@ -2236,7 +2236,23 @@ impl Consumer {
 				}
 				out
 			}
-			ConsumerKind::Spliced(_) => Vec::new(),
+			ConsumerKind::Spliced(resume) => resume.cached_groups(),
+		}
+	}
+
+	/// A cached group that contains every frame from `frame_start` onward.
+	///
+	/// Unlike [`Self::peek_group`], this is suitable for satisfying a FETCH: a
+	/// partial cached copy is a miss so the caller can ask upstream for its head.
+	pub(crate) fn cached_group(&self, sequence: u64, frame_start: u64) -> Option<group::Consumer> {
+		match &self.inner {
+			ConsumerKind::Plain(state) => {
+				let state = state.read();
+				let group = state.covering_group(sequence, frame_start)?;
+				group.cache_refresh();
+				Some(group.consume())
+			}
+			ConsumerKind::Spliced(resume) => resume.cached_group(sequence, frame_start),
 		}
 	}
 
@@ -2244,7 +2260,7 @@ impl Consumer {
 	pub(crate) fn cached_info(&self) -> Option<Info> {
 		match &self.inner {
 			ConsumerKind::Plain(state) => state.read().info.clone(),
-			ConsumerKind::Spliced(_) => None,
+			ConsumerKind::Spliced(resume) => resume.cached_info(),
 		}
 	}
 

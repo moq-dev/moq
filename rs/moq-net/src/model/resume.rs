@@ -22,7 +22,7 @@
 //! change at all. That is the one boundary a live-edge subscriber does demand, since
 //! only demand carries the frame offset the continuation has to start from.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::ops::Bound;
 use std::task::{Poll, ready};
 
@@ -456,6 +456,52 @@ pub struct Consumer {
 }
 
 impl Consumer {
+	/// Complete groups retained across segments, clipped to the ranges that belong
+	/// to each segment. A frame-aligned switch splits one group across two tracks;
+	/// that seam group is skipped while complete groups on either side are kept.
+	pub(crate) fn cached_groups(&self) -> Vec<(group::Producer, bool)> {
+		let segments = self.state.read().segments.clone();
+		let mut seen = HashSet::new();
+		let mut groups = Vec::new();
+		for segment in segments {
+			let start = segment
+				.start
+				.map(|start| start.group.saturating_add(u64::from(start.frame != 0)));
+			let end = segment.end.map(|end| end.group);
+			for (group, visible) in segment.track.cached_groups() {
+				if start.is_some_and(|start| group.sequence < start)
+					|| end.is_some_and(|end| group.sequence >= end)
+					|| !seen.insert(group.sequence)
+				{
+					continue;
+				}
+				groups.push((group, visible));
+			}
+		}
+		groups
+	}
+
+	/// Publisher properties resolved by the first segment. Every takeover is
+	/// validated against the front's accepted track info before it is spliced in.
+	pub(crate) fn cached_info(&self) -> Option<track::Info> {
+		self.state.read().segments.first()?.track.cached_info()
+	}
+
+	/// A complete cached copy of `sequence`, newest segment first.
+	///
+	/// A segment can answer a FETCH only when it owns the requested head and the
+	/// rest of the group. A frame boundary inside the group therefore falls
+	/// through to another segment or to the live route's upstream FETCH.
+	pub(crate) fn cached_group(&self, sequence: u64, frame_start: u64) -> Option<group::Consumer> {
+		let segments = self.state.read().segments.clone();
+		segments.iter().rev().find_map(|segment| {
+			let (start, end) = frames(segment.start, segment.end, sequence)?;
+			(start <= frame_start && end.is_none())
+				.then(|| segment.track.cached_group(sequence, frame_start))
+				.flatten()
+		})
+	}
+
 	/// Open a live subscription across every segment.
 	///
 	/// The subscription's preferences are forwarded to each underlying track
@@ -590,11 +636,12 @@ impl Consumer {
 /// [`kio::Pending`] wrapper.
 ///
 /// Waits for a segment to exist (no route may have served the track yet), then
-/// issues the fetch against the newest segment's track and resolves with it. A
-/// fetch whose copy dies fails over: it re-latches onto a newer segment if one
-/// already spliced in, or parks for the next takeover like a live subscription
-/// (the front aborting the track ends the wait). An error from a copy that is
-/// still live (e.g. the group is gone upstream) is authoritative and surfaces.
+/// first resolves from any segment that still caches a complete copy, then
+/// issues the fetch against the newest segment's track. A fetch whose copy dies
+/// fails over: it re-latches onto a newer segment if one already spliced in, or
+/// parks for the next takeover like a live subscription (the front aborting the
+/// track ends the wait). An error from a copy that is still live (e.g. the group
+/// is gone upstream) is authoritative and surfaces.
 pub struct Fetching {
 	state: kio::Consumer<ResumeState>,
 	sequence: u64,
@@ -640,6 +687,14 @@ impl kio::Pollable for Fetching {
 	type Output = Result<group::Consumer>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
+		if let Some(group) = (Consumer {
+			state: self.state.clone(),
+		})
+		.cached_group(self.sequence, self.options.frame_start)
+		{
+			return Poll::Ready(Ok(group));
+		}
+
 		let mut inner = self.inner.lock();
 
 		loop {
@@ -658,9 +713,23 @@ impl kio::Pollable for Fetching {
 			let err = match kio::Pollable::poll(&**fetch, waiter) {
 				Poll::Ready(Err(err)) => err,
 				Poll::Ready(Ok(group)) => return Poll::Ready(Ok(group)),
-				// Park on the resume state too: the front aborting must end an
-				// in-flight fetch even when the latched copy never answers it.
 				Poll::Pending => {
+					// A warm cache deliberately parks misses while demand re-splices
+					// upstream. Follow that newer segment without waiting for the warm
+					// copy to reject its queued request.
+					let latched = *latched;
+					match self.poll_latch(waiter, Some(latched)) {
+						Poll::Ready(Ok(Some((id, track)))) => {
+							let fetch = track.fetch_group(self.sequence, self.options.clone());
+							*inner = Some((id, track, fetch));
+							continue;
+						}
+						Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+						Poll::Ready(Ok(None)) | Poll::Pending => {}
+					}
+
+					// Park on the resume state too: the front aborting must end an
+					// in-flight fetch even when the latched copy never answers it.
 					return match self.state.poll(waiter, |s| match &s.abort {
 						Some(err) => Poll::Ready(err.clone()),
 						None => Poll::Pending,
@@ -2534,27 +2603,36 @@ mod test {
 	}
 
 	#[tokio::test]
-	async fn fetch_routes_to_newest_segment() {
-		let (track_a, consumer_a) = track_pair("a");
+	async fn fetch_uses_an_older_complete_cache_before_the_newest_segment() {
+		let (mut track_a, consumer_a) = track_pair("a");
 		let (mut track_b, consumer_b) = track_pair("b");
 
 		let mut producer = Producer::new();
 		producer.switch(&consumer_a, None).unwrap();
 		producer.switch(&consumer_b, Position::group(10)).unwrap();
 
-		// A cached group on the newest segment resolves immediately, even below
-		// its subscribe boundary: bounds slice demand, not access.
-		write_group(&mut track_b, 3, "b3");
+		// The older segment owns this range and still has a complete cached copy.
+		// Prefer it over asking the newest live route, which may have already
+		// evicted the group upstream.
+		write_group(&mut track_a, 3, "a3");
 		let consumer = producer.consume();
-		let group = consumer
+		let mut group = consumer
 			.fetch_group(3, None)
 			.now_or_never()
 			.expect("cached fetch should resolve")
 			.unwrap();
 		assert_eq!(group.sequence, 3);
+		assert_eq!(read(&mut group), b"a3");
 
-		// Fetches never touch the old segment.
-		drop(track_a);
+		// A cached group on the newest segment still resolves immediately, even
+		// below its subscribe boundary: bounds slice demand, not access.
+		write_group(&mut track_b, 4, "b4");
+		let mut group = consumer
+			.fetch_group(4, None)
+			.now_or_never()
+			.expect("newest cached fetch should resolve")
+			.unwrap();
+		assert_eq!(read(&mut group), b"b4");
 	}
 
 	#[tokio::test]
@@ -2575,6 +2653,66 @@ mod test {
 		producer.switch(&consumer_a, None).unwrap();
 		let group = fetch.await.expect("fetch should resolve");
 		assert_eq!(group.sequence, 0);
+	}
+
+	#[tokio::test]
+	async fn pending_fetch_follows_a_newer_segment() {
+		let (track_a, consumer_a) = track_pair("a");
+		let dynamic_a = track_a.dynamic();
+		let (track_b, consumer_b) = track_pair("b");
+		let dynamic_b = track_b.dynamic();
+
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let consumer = producer.consume();
+		let fetch = tokio::spawn(async move { consumer.fetch_group(0, None).await });
+
+		let _request_a = tokio::time::timeout(Duration::from_secs(1), dynamic_a.requested_group())
+			.await
+			.expect("first segment should receive the fetch")
+			.unwrap();
+
+		producer.takeover(&consumer_b).unwrap();
+		let request_b = tokio::time::timeout(Duration::from_secs(1), dynamic_b.requested_group())
+			.await
+			.expect("pending fetch should follow the takeover")
+			.unwrap();
+		let mut served = request_b.accept(None).unwrap();
+		served.write_frame(Timestamp::ZERO, b"b0".to_vec()).unwrap();
+		served.finish().unwrap();
+
+		let mut group = tokio::time::timeout(Duration::from_secs(1), fetch)
+			.await
+			.expect("replacement should answer the fetch")
+			.unwrap()
+			.unwrap();
+		assert_eq!(read(&mut group), b"b0");
+	}
+
+	#[test]
+	fn warm_snapshot_skips_only_the_frame_seam() {
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		write_group(&mut track_a, 0, "a0");
+		let mut seam = track_a.create_group(group::Info { sequence: 1 }).unwrap();
+		seam.write_frame(Timestamp::ZERO, b"a1".to_vec()).unwrap();
+
+		producer.takeover(&consumer_b).unwrap();
+		let mut seam = track_b.create_group(group::Info { sequence: 1 }).unwrap();
+		seam.start_at(1).unwrap();
+		seam.write_frame(Timestamp::ZERO, b"b1".to_vec()).unwrap();
+		seam.finish().unwrap();
+		write_group(&mut track_b, 2, "b2");
+
+		let cached = producer.consume().cached_groups();
+		assert_eq!(
+			cached.iter().map(|(group, _)| group.sequence).collect::<Vec<_>>(),
+			vec![0, 2],
+			"only the group split across both segments is unsafe to snapshot"
+		);
 	}
 
 	#[tokio::test]

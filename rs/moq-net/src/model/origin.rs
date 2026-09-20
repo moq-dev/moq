@@ -2220,24 +2220,32 @@ async fn run_front(
 }
 
 /// A local copy of groups the front already delivered, so resume stays spliced
-/// after the source track is dropped. Finished on drop so an idle linger does
-/// not warn about an abandoned producer.
-struct WarmCopy(track::Producer);
+/// after the source track is dropped. Cache misses stay pending while demand
+/// re-splices the upstream source. Finished on drop so an idle linger does not
+/// warn about an abandoned producer.
+struct WarmCopy {
+	track: track::Producer,
+	_dynamic: track::Dynamic,
+}
 
 impl Drop for WarmCopy {
 	fn drop(&mut self) {
-		let _ = self.0.finish();
+		let _ = self.track.finish();
 	}
 }
 
 /// Cache `source`'s groups on a new local track the origin owns.
-fn warm_copy(source: &track::Consumer) -> Option<track::Producer> {
+fn warm_copy(source: &track::Consumer) -> Option<WarmCopy> {
 	let info = source.cached_info()?;
-	let mut local = track::Producer::new(Arc::new(source.broadcast().clone()), source.name(), info);
+	let mut track = track::Producer::new(Arc::new(source.broadcast().clone()), source.name(), info);
 	for (group, visible) in source.cached_groups() {
-		let _ = local.adopt_group(group, visible);
+		let _ = track.adopt_group(group, visible);
 	}
-	Some(local)
+	let dynamic = track.dynamic();
+	Some(WarmCopy {
+		track,
+		_dynamic: dynamic,
+	})
 }
 
 /// Serves one spliced logical track: splices in the best source's copy of the
@@ -2277,7 +2285,8 @@ async fn serve_track(
 	let mut serving: Option<(u64, track::Consumer)> = None;
 	// Local cache of groups the front already delivered, held after the source
 	// copy is dropped so resume stays spliced for the linger without pinning
-	// the source as a reader. Finished on drop so an idle linger is quiet.
+	// the source as a reader. Cache misses wait for demand to re-splice the
+	// source, and the copy is finished on drop so an idle linger is quiet.
 	let mut warm: Option<WarmCopy> = None;
 	// The delivered edge when that copy spliced in. A copy that dies without
 	// advancing it never delivered anything, which is what [`Step::Failed`]
@@ -2463,12 +2472,11 @@ async fn serve_track(
 						return;
 					}
 					if let Some(local) = local {
-						if let Err(err) = resume.takeover(&local) {
-							let _ = WarmCopy(local);
+						if let Err(err) = resume.takeover(&local.track) {
 							let _ = resume.abort(err);
 							return;
 						}
-						warm = Some(WarmCopy(local));
+						warm = Some(local);
 					}
 				}
 			}
@@ -5701,6 +5709,62 @@ mod tests {
 			.await
 			.expect("chained unused should resolve far below TRACK_IDLE_LINGER")
 			.expect("source closed");
+
+		let cached = edge_resolved.track("video").unwrap().cached_groups();
+		assert_eq!(
+			cached.iter().map(|(group, _)| group.sequence).collect::<Vec<_>>(),
+			vec![0],
+			"every front keeps the delivered groups after releasing its source"
+		);
+
+		let mut subscription = edge_resolved
+			.track("video")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.expect("resubscribe");
+		tokio::time::timeout(Duration::from_secs(5), track.used())
+			.await
+			.expect("resubscribe should reach the leaf")
+			.expect("source open");
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"live".as_ref()).unwrap();
+		group.finish().unwrap();
+		let mut group = subscription.recv_group().await.unwrap().unwrap();
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"cached");
+		drop(group);
+		let mut group = subscription.recv_group().await.unwrap().unwrap();
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"live");
+		drop(group);
+		drop(subscription);
+
+		tokio::time::timeout(Duration::from_secs(5), track.unused())
+			.await
+			.expect("second chained unused should resolve far below TRACK_IDLE_LINGER")
+			.expect("source closed");
+
+		let cached = edge_resolved.track("video").unwrap().cached_groups();
+		assert_eq!(
+			cached.iter().map(|(group, _)| group.sequence).collect::<Vec<_>>(),
+			vec![0, 1],
+			"repeated demand keeps every complete group while releasing its source"
+		);
+
+		let fetch = edge_resolved.track("video").unwrap().fetch_group(2, None);
+		let mut fetch = std::pin::pin!(fetch);
+		assert!(futures::poll!(fetch.as_mut()).is_pending(), "fetch should re-splice");
+		tokio::time::timeout(Duration::from_secs(5), track.used())
+			.await
+			.expect("fetch should reach the leaf")
+			.expect("source open");
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"fetched".as_ref()).unwrap();
+		group.finish().unwrap();
+		let mut group = tokio::time::timeout(Duration::from_secs(5), fetch)
+			.await
+			.expect("re-spliced source should answer the fetch")
+			.expect("fetch succeeds");
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"fetched");
 	}
 
 	/// A newer local source wins dispatch the moment it attaches, but one whose copy
