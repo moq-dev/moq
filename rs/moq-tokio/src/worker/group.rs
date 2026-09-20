@@ -82,11 +82,7 @@ impl Workers {
 		// members different addresses and fail the bind on whichever member drew a
 		// fresh one. A worker group always opens QUIC, including when the source
 		// server config also names a stream listener.
-		let requested = match server.listen.bind.as_ref() {
-			Some(bind) => bind.resolve().map_err(|err| Error::WorkerResolve(Arc::new(err)))?,
-			None => crate::server::DEFAULT_BIND,
-		};
-		server.listen.bind = Some(crate::listen::Bind::Addr(requested));
+		let requested = materialize_bind(&mut server.listen)?;
 
 		// The group owns everything a reuseport group has to get right: it takes
 		// the port before the first member binds and holds it until the group is
@@ -215,6 +211,34 @@ impl Workers {
 		// Joining blocks, so it goes to the pool that exists for that rather than
 		// stalling whichever executor thread happened to run this.
 		let _ = tokio::task::spawn_blocking(move || join(threads)).await;
+	}
+}
+
+/// Resolve the one QUIC address shared by every worker and write it back into
+/// the per-worker config so a separately configured stream listener cannot
+/// make [`Server::build`] treat the worker as stream-only.
+fn materialize_bind(listen: &mut crate::listen::Config) -> Result<SocketAddr> {
+	let requested = match listen.bind.as_ref() {
+		Some(bind) => bind.resolve().map_err(|err| Error::WorkerResolve(Arc::new(err)))?,
+		None => crate::server::DEFAULT_BIND,
+	};
+	listen.bind = Some(crate::listen::Bind::Addr(requested));
+	Ok(requested)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	#[cfg(feature = "tcp")]
+	fn stream_bind_does_not_suppress_worker_quic() {
+		let mut listen = crate::listen::Config::default();
+		listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+
+		let requested = materialize_bind(&mut listen).unwrap();
+		assert_eq!(requested, crate::server::DEFAULT_BIND);
+		assert_eq!(listen.bind, Some(crate::listen::Bind::Addr(requested)));
 	}
 }
 
