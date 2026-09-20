@@ -76,8 +76,10 @@ enum Repr<'a> {
 /// delimiter boundaries, preventing issues like "foo" matching "foobar".
 ///
 /// Paths are automatically trimmed of leading and trailing slashes on creation,
-/// making all slashes implicit at boundaries.
-/// All paths are RELATIVE; you cannot join with a leading slash to make an absolute path.
+/// making all slashes implicit at boundaries. A path names a point in the origin's
+/// tree from its root; a leading slash never escapes that root. The same type names
+/// an exact broadcast and the prefix a route or announcement covers, so a broadcast's
+/// own path is the prefix it announces. See [`Relative`] for `..`-style references.
 ///
 /// Owned paths ([`PathOwned`]) share one reference-counted allocation: cloning, converting
 /// a shared path with [`Path::to_owned`], and suffix operations like [`Path::strip_prefix`]
@@ -345,26 +347,26 @@ impl<'a> Path<'a> {
 		}
 	}
 
-	/// Resolve a [`PathRelative`] against this path.
+	/// Resolve a [`Relative`] against this path.
 	///
 	/// A non-empty reference replaces the last segment of the base, matching relative URL
 	/// resolution. `..` segments then pop another segment; other segments are appended.
 	/// Excess `..` is a no-op once the base is empty (subsequent named segments still append).
 	/// An empty `rel` returns this path as an owned copy.
 	///
-	/// [`PathRelative::new`] strips empty and redundant `.` segments, but preserves a lone `.`
+	/// [`Relative::new`] strips empty and redundant `.` segments, but preserves a lone `.`
 	/// so it can reference the base's parent.
 	///
 	/// # Examples
 	/// ```
-	/// use moq_net::{Path, PathRelative};
+	/// use moq_net::{Path, path::Relative};
 	///
 	/// let base = Path::new("a/b/c");
-	/// assert_eq!(base.resolve(&PathRelative::new("./d")).as_str(), "a/b/d");
-	/// assert_eq!(base.resolve(&PathRelative::new(".")).as_str(), "a/b");
-	/// assert_eq!(base.resolve(&PathRelative::new("../d")).as_str(), "a/d");
+	/// assert_eq!(base.resolve(&Relative::new("./d")).as_str(), "a/b/d");
+	/// assert_eq!(base.resolve(&Relative::new(".")).as_str(), "a/b");
+	/// assert_eq!(base.resolve(&Relative::new("../d")).as_str(), "a/d");
 	/// ```
-	pub fn resolve(&self, rel: &PathRelative<'_>) -> PathOwned {
+	pub fn resolve(&self, rel: &Relative<'_>) -> PathOwned {
 		if rel.is_empty() {
 			return self.to_owned();
 		}
@@ -393,12 +395,12 @@ impl<'a> Path<'a> {
 		}
 	}
 
-	/// Resolve a [`PathRelative`], returning `None` if it escapes above the root.
+	/// Resolve a [`Relative`], returning `None` if it escapes above the root.
 	///
 	/// Unlike [`Path::resolve`], this distinguishes a valid reference to the empty root
 	/// path from excess `..` segments. Use it when an untrusted relative reference must
 	/// not be clamped to the root.
-	pub fn try_resolve(&self, rel: &PathRelative<'_>) -> Option<PathOwned> {
+	pub fn try_resolve(&self, rel: &Relative<'_>) -> Option<PathOwned> {
 		if rel.is_empty() {
 			return Some(self.to_owned());
 		}
@@ -460,13 +462,13 @@ impl<'a> Path<'a> {
 	/// // A segment named `..` is a legal path component but an unnameable target.
 	/// assert!(Path::new("a/..").relative(&base).is_none());
 	/// ```
-	pub fn relative(&self, base: impl AsPath) -> Option<PathRelativeOwned> {
+	pub fn relative(&self, base: impl AsPath) -> Option<RelativeOwned> {
 		let base = base.as_path();
 
 		// Only the empty reference can name a base whose last segment is itself `.` or `..`,
 		// since resolution replaces that segment rather than emitting it.
 		if *self == base {
-			return Some(PathRelative::empty());
+			return Some(Relative::empty());
 		}
 
 		// Resolution replaces the base's last segment, so walk from its parent.
@@ -487,10 +489,10 @@ impl<'a> Path<'a> {
 
 		if rel.is_empty() {
 			// An empty reference resolves to the base itself, so name the parent explicitly.
-			return Some(PathRelative::new("."));
+			return Some(Relative::new("."));
 		}
 
-		Some(PathRelativeOwned::from(rel.join("/")))
+		Some(RelativeOwned::from(rel.join("/")))
 	}
 }
 
@@ -597,17 +599,17 @@ where
 	}
 }
 
-/// An owned version of [`PathRelative`] with a `'static` lifetime.
-pub type PathRelativeOwned = PathRelative<'static>;
+/// An owned version of [`Relative`] with a `'static` lifetime.
+pub type RelativeOwned = Relative<'static>;
 
 /// A relative broadcast path, used to reference one broadcast from another broadcast's content.
 ///
 /// Unlike [`Path`] (which is a complete reference within the broadcast namespace),
-/// `PathRelative` may contain `.` and `..` segments to walk the namespace and is meaningful
+/// `Relative` may contain `.` and `..` segments to walk the namespace and is meaningful
 /// only when resolved against a base [`Path`] via [`Path::resolve`]. The hang catalog uses it
 /// to point a rendition at a track published in a sibling broadcast (e.g. `./source`).
 ///
-/// `PathRelative` has no `Encode`/`Decode` impl, so it never appears in announce/subscribe
+/// `Relative` has no `Encode`/`Decode` impl, so it never appears in announce/subscribe
 /// frames. It does serialize via serde for off-wire use (e.g. as a field inside a catalog
 /// JSON payload, which itself travels as a track).
 ///
@@ -618,20 +620,20 @@ pub type PathRelativeOwned = PathRelative<'static>;
 ///
 /// # Examples
 /// ```
-/// use moq_net::{Path, PathRelative};
+/// use moq_net::{Path, path::Relative};
 ///
-/// let rel = PathRelative::new("./source");
+/// let rel = Relative::new("./source");
 /// assert_eq!(Path::new("a/b").resolve(&rel).as_str(), "a/source");
 ///
 /// // Redundant `.` segments are stripped on creation.
-/// assert_eq!(PathRelative::new("./a/./b").as_str(), "a/b");
-/// assert_eq!(PathRelative::new(".").as_str(), ".");
+/// assert_eq!(Relative::new("./a/./b").as_str(), "a/b");
+/// assert_eq!(Relative::new(".").as_str(), ".");
 /// ```
 #[derive(Debug, PartialEq, Eq, Hash, Clone, serde::Serialize)]
-pub struct PathRelative<'a>(Cow<'a, str>);
+pub struct Relative<'a>(Cow<'a, str>);
 
-impl<'a> PathRelative<'a> {
-	/// Create a new `PathRelative` from a string slice.
+impl<'a> Relative<'a> {
+	/// Create a new `Relative` from a string slice.
 	///
 	/// Leading and trailing slashes are trimmed, consecutive internal slashes collapse to one,
 	/// and redundant `.` segments are stripped. See the type-level doc for the full rules.
@@ -651,8 +653,8 @@ impl<'a> PathRelative<'a> {
 	}
 
 	/// The empty relative path, which resolves to the base path itself.
-	pub fn empty() -> PathRelative<'static> {
-		PathRelative(Cow::Borrowed(""))
+	pub fn empty() -> Relative<'static> {
+		Relative(Cow::Borrowed(""))
 	}
 
 	/// True if the path is empty (resolves to the base path itself).
@@ -666,34 +668,34 @@ impl<'a> PathRelative<'a> {
 	}
 
 	/// Copy into an owned version with a `'static` lifetime.
-	pub fn to_owned(&self) -> PathRelativeOwned {
-		PathRelative(Cow::Owned(self.0.to_string()))
+	pub fn to_owned(&self) -> RelativeOwned {
+		Relative(Cow::Owned(self.0.to_string()))
 	}
 
 	/// Convert into an owned version with a `'static` lifetime.
-	pub fn into_owned(self) -> PathRelativeOwned {
-		PathRelative(Cow::Owned(self.0.into_owned()))
+	pub fn into_owned(self) -> RelativeOwned {
+		Relative(Cow::Owned(self.0.into_owned()))
 	}
 
 	/// Reborrow without copying.
-	pub fn borrow(&'a self) -> PathRelative<'a> {
-		PathRelative(Cow::Borrowed(&self.0))
+	pub fn borrow(&'a self) -> Relative<'a> {
+		Relative(Cow::Borrowed(&self.0))
 	}
 }
 
-impl<'a> From<&'a str> for PathRelative<'a> {
+impl<'a> From<&'a str> for Relative<'a> {
 	fn from(s: &'a str) -> Self {
 		Self::new(s)
 	}
 }
 
-impl<'a> From<&'a String> for PathRelative<'a> {
+impl<'a> From<&'a String> for Relative<'a> {
 	fn from(s: &'a String) -> Self {
 		Self::new(s)
 	}
 }
 
-impl From<String> for PathRelative<'_> {
+impl From<String> for Relative<'_> {
 	fn from(s: String) -> Self {
 		let trimmed = s.trim_start_matches('/').trim_end_matches('/');
 
@@ -725,19 +727,19 @@ fn normalize_relative_segments(trimmed: &str) -> String {
 	}
 }
 
-impl Default for PathRelative<'_> {
+impl Default for Relative<'_> {
 	fn default() -> Self {
 		Self(Cow::Borrowed(""))
 	}
 }
 
-impl AsRef<str> for PathRelative<'_> {
+impl AsRef<str> for Relative<'_> {
 	fn as_ref(&self) -> &str {
 		&self.0
 	}
 }
 
-impl Display for PathRelative<'_> {
+impl Display for Relative<'_> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		write!(f, "{}", self.0)
 	}
@@ -746,132 +748,13 @@ impl Display for PathRelative<'_> {
 // Owned-only deserialization. We use `String::deserialize` so that owned deserializers
 // (e.g. `serde_json::from_slice`) work. The borrowed form `<&str>::deserialize` requires
 // `'de: 'a`, which is unsatisfiable when `'a = 'static`.
-impl<'de> serde::Deserialize<'de> for PathRelative<'static> {
+impl<'de> serde::Deserialize<'de> for Relative<'static> {
 	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
 	where
 		D: serde::Deserializer<'de>,
 	{
 		let s = String::deserialize(deserializer)?;
-		Ok(PathRelative::from(s))
-	}
-}
-
-/// A deduplicated list of path prefixes.
-///
-/// Automatically removes exact duplicates and overlapping prefixes on construction.
-/// For example, `["demo", "demo/foo", "anon"]` becomes `["demo", "anon"]` since
-/// `"demo"` already covers `"demo/foo"`.
-#[derive(Debug, Clone, Default, Eq)]
-pub struct PathPrefixes {
-	paths: Vec<PathOwned>,
-}
-
-impl PathPrefixes {
-	/// Create a new PathPrefixes, deduplicating and removing overlapping prefixes.
-	///
-	/// Shorter prefixes subsume longer ones: `"demo"` covers `"demo/foo"`.
-	///
-	/// Accepts anything iterable over path-like items:
-	/// ```
-	/// use moq_net::PathPrefixes;
-	///
-	/// let list = PathPrefixes::new(["demo", "demo/foo", "anon"]);
-	/// assert_eq!(list.len(), 2); // "demo/foo" subsumed by "demo"
-	/// ```
-	pub fn new(paths: impl IntoIterator<Item = impl AsPath>) -> Self {
-		let mut paths: Vec<PathOwned> = paths.into_iter().map(|p| p.as_path().to_owned()).collect();
-
-		if paths.len() <= 1 {
-			return Self { paths };
-		}
-
-		// Sort by length so shorter (more permissive) prefixes come first.
-		// Tie-break lexicographically for canonical ordering.
-		paths.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.as_str().cmp(b.as_str())));
-		paths.dedup();
-
-		let mut result: Vec<PathOwned> = Vec::new();
-		'outer: for path in paths {
-			for existing in &result {
-				if path.has_prefix(existing) {
-					continue 'outer;
-				}
-			}
-			result.push(path);
-		}
-
-		Self { paths: result }
-	}
-
-	/// Returns `true` if the set contains no prefixes, so it matches nothing.
-	pub fn is_empty(&self) -> bool {
-		self.paths.is_empty()
-	}
-
-	/// The number of prefixes, after redundant ones were collapsed.
-	pub fn len(&self) -> usize {
-		self.paths.len()
-	}
-
-	/// Iterate the prefixes in the set.
-	pub fn iter(&self) -> std::slice::Iter<'_, PathOwned> {
-		self.paths.iter()
-	}
-}
-
-impl std::ops::Deref for PathPrefixes {
-	type Target = [PathOwned];
-
-	fn deref(&self) -> &[PathOwned] {
-		&self.paths
-	}
-}
-
-impl FromIterator<PathOwned> for PathPrefixes {
-	fn from_iter<I: IntoIterator<Item = PathOwned>>(iter: I) -> Self {
-		Self::new(iter)
-	}
-}
-
-impl From<Vec<PathOwned>> for PathPrefixes {
-	fn from(paths: Vec<PathOwned>) -> Self {
-		Self::new(paths)
-	}
-}
-
-impl<'a> PartialEq<Vec<Path<'a>>> for PathPrefixes {
-	fn eq(&self, other: &Vec<Path<'a>>) -> bool {
-		self.paths == *other
-	}
-}
-
-impl<'a> PartialEq<PathPrefixes> for Vec<Path<'a>> {
-	fn eq(&self, other: &PathPrefixes) -> bool {
-		*self == other.paths
-	}
-}
-
-impl PartialEq for PathPrefixes {
-	fn eq(&self, other: &Self) -> bool {
-		self.paths == other.paths
-	}
-}
-
-impl IntoIterator for PathPrefixes {
-	type Item = PathOwned;
-	type IntoIter = std::vec::IntoIter<PathOwned>;
-
-	fn into_iter(self) -> Self::IntoIter {
-		self.paths.into_iter()
-	}
-}
-
-impl<'a> IntoIterator for &'a PathPrefixes {
-	type Item = &'a PathOwned;
-	type IntoIter = std::slice::Iter<'a, PathOwned>;
-
-	fn into_iter(self) -> Self::IntoIter {
-		self.paths.iter()
+		Ok(Relative::from(s))
 	}
 }
 
@@ -1312,89 +1195,6 @@ mod tests {
 		assert_eq!(prefix.strip_prefix("foo/bar/").unwrap().as_str(), "");
 	}
 
-	#[test]
-	fn test_prefix_list_dedup() {
-		// Exact duplicates are removed
-		let list = PathPrefixes::new(["demo", "demo"]);
-		assert_eq!(list.len(), 1);
-		assert_eq!(list[0], Path::new("demo"));
-	}
-
-	#[test]
-	fn test_prefix_list_overlap() {
-		// "demo/foo" is redundant when "demo" exists
-		let list = PathPrefixes::new(["demo", "demo/foo", "anon"]);
-		assert_eq!(list.len(), 2);
-		assert!(list.iter().any(|p| p == &Path::new("demo")));
-		assert!(list.iter().any(|p| p == &Path::new("anon")));
-	}
-
-	#[test]
-	fn test_prefix_list_overlap_reverse_order() {
-		// Order shouldn't matter
-		let list = PathPrefixes::new(["demo/foo", "demo"]);
-		assert_eq!(list.len(), 1);
-		assert_eq!(list[0], Path::new("demo"));
-	}
-
-	#[test]
-	fn test_prefix_list_empty_covers_all() {
-		// Empty prefix covers everything
-		let list = PathPrefixes::new(["", "demo", "anon"]);
-		assert_eq!(list.len(), 1);
-		assert_eq!(list[0], Path::new(""));
-	}
-
-	#[test]
-	fn test_prefix_list_no_overlap() {
-		// Unrelated prefixes are all kept
-		let list = PathPrefixes::new(["demo", "anon", "secret"]);
-		assert_eq!(list.len(), 3);
-	}
-
-	#[test]
-	fn test_prefix_list_single() {
-		let list = PathPrefixes::new(["demo"]);
-		assert_eq!(list.len(), 1);
-	}
-
-	#[test]
-	fn test_prefix_list_empty() {
-		let list = PathPrefixes::new(std::iter::empty::<&str>());
-		assert!(list.is_empty());
-		assert_eq!(list.len(), 0);
-	}
-
-	#[test]
-	fn test_prefix_list_deep_overlap() {
-		// "a/b/c" is covered by "a/b" which is covered by "a"
-		let list = PathPrefixes::new(["a/b/c", "a/b", "a"]);
-		assert_eq!(list.len(), 1);
-		assert_eq!(list[0], Path::new("a"));
-	}
-
-	#[test]
-	fn test_prefix_list_partial_name_not_overlap() {
-		// "demo" should NOT cover "demonstration" (different path component)
-		let list = PathPrefixes::new(["demo", "demonstration"]);
-		assert_eq!(list.len(), 2);
-	}
-
-	#[test]
-	fn test_prefix_list_collect() {
-		let paths: Vec<PathOwned> = vec!["demo".into(), "demo/foo".into()];
-		let list: PathPrefixes = paths.into_iter().collect();
-		assert_eq!(list.len(), 1);
-		assert_eq!(list[0], Path::new("demo"));
-	}
-
-	#[test]
-	fn test_prefix_list_eq_vec() {
-		let list = PathPrefixes::new(["demo", "anon"]);
-		// Canonical order: sorted by length, then lexicographically
-		assert_eq!(list, vec!["anon".as_path(), "demo".as_path()]);
-	}
-
 	// Pointer-equality checks that owned paths share one allocation through the
 	// clone / to_owned / strip_prefix flow used by origin announce fan-out.
 	#[test]
@@ -1478,43 +1278,35 @@ mod tests {
 	}
 
 	#[test]
-	fn test_prefix_list_canonical_order() {
-		// Same inputs in different order produce identical results
-		let a = PathPrefixes::new(["foo", "bar"]);
-		let b = PathPrefixes::new(["bar", "foo"]);
-		assert_eq!(a, b);
-	}
-
-	#[test]
 	fn test_path_relative_normalize() {
-		assert_eq!(PathRelative::new("foo").as_str(), "foo");
-		assert_eq!(PathRelative::new("/foo/").as_str(), "foo");
-		assert_eq!(PathRelative::new("foo//bar").as_str(), "foo/bar");
-		assert_eq!(PathRelative::new("../foo").as_str(), "../foo");
-		assert_eq!(PathRelative::new("../../a/b").as_str(), "../../a/b");
-		assert!(PathRelative::new("").is_empty());
+		assert_eq!(Relative::new("foo").as_str(), "foo");
+		assert_eq!(Relative::new("/foo/").as_str(), "foo");
+		assert_eq!(Relative::new("foo//bar").as_str(), "foo/bar");
+		assert_eq!(Relative::new("../foo").as_str(), "../foo");
+		assert_eq!(Relative::new("../../a/b").as_str(), "../../a/b");
+		assert!(Relative::new("").is_empty());
 	}
 
 	#[test]
 	fn test_path_relative_normalizes_dot_segments() {
-		assert_eq!(PathRelative::new(".").as_str(), ".");
-		assert_eq!(PathRelative::new("././").as_str(), ".");
-		assert_eq!(PathRelative::new("./foo").as_str(), "foo");
-		assert_eq!(PathRelative::new("foo/./bar").as_str(), "foo/bar");
-		assert_eq!(PathRelative::new("./../foo").as_str(), "../foo");
+		assert_eq!(Relative::new(".").as_str(), ".");
+		assert_eq!(Relative::new("././").as_str(), ".");
+		assert_eq!(Relative::new("./foo").as_str(), "foo");
+		assert_eq!(Relative::new("foo/./bar").as_str(), "foo/bar");
+		assert_eq!(Relative::new("./../foo").as_str(), "../foo");
 		// From<String> takes the same normalization.
-		assert_eq!(PathRelative::from("./foo".to_string()).as_str(), "foo");
-		assert_eq!(PathRelative::from(".".to_string()).as_str(), ".");
+		assert_eq!(Relative::from("./foo".to_string()).as_str(), "foo");
+		assert_eq!(Relative::from(".".to_string()).as_str(), ".");
 	}
 
 	#[test]
 	fn test_resolve_replaces_base_name() {
 		let base = Path::new("a/b");
-		assert_eq!(base.resolve(&PathRelative::new("c")).as_str(), "a/c");
-		assert_eq!(base.resolve(&PathRelative::new("c/d")).as_str(), "a/c/d");
+		assert_eq!(base.resolve(&Relative::new("c")).as_str(), "a/c");
+		assert_eq!(base.resolve(&Relative::new("c/d")).as_str(), "a/c/d");
 		assert_eq!(
 			Path::new("foo.hang/catalog.pro")
-				.resolve(&PathRelative::new("./transcode.pro"))
+				.resolve(&Relative::new("./transcode.pro"))
 				.as_str(),
 			"foo.hang/transcode.pro"
 		);
@@ -1523,44 +1315,44 @@ mod tests {
 	#[test]
 	fn test_resolve_empty_rel_returns_base() {
 		let base = Path::new("a/b");
-		assert_eq!(base.resolve(&PathRelative::new("")).as_str(), "a/b");
+		assert_eq!(base.resolve(&Relative::new("")).as_str(), "a/b");
 	}
 
 	#[test]
 	fn test_resolve_single_dotdot() {
 		let base = Path::new("a/b/c");
-		assert_eq!(base.resolve(&PathRelative::new("../d")).as_str(), "a/d");
-		assert_eq!(base.resolve(&PathRelative::new("..")).as_str(), "a");
+		assert_eq!(base.resolve(&Relative::new("../d")).as_str(), "a/d");
+		assert_eq!(base.resolve(&Relative::new("..")).as_str(), "a");
 	}
 
 	#[test]
 	fn test_resolve_multiple_dotdot() {
 		let base = Path::new("a/b/c");
-		assert_eq!(base.resolve(&PathRelative::new("../../x")).as_str(), "x");
-		assert_eq!(base.resolve(&PathRelative::new("../../../x")).as_str(), "x");
+		assert_eq!(base.resolve(&Relative::new("../../x")).as_str(), "x");
+		assert_eq!(base.resolve(&Relative::new("../../../x")).as_str(), "x");
 	}
 
 	#[test]
 	fn test_resolve_dotdot_clamps_at_root() {
 		let base = Path::new("a");
 		// Excess `..` clamps at the root instead of escaping it.
-		assert_eq!(base.resolve(&PathRelative::new("../../../foo")).as_str(), "foo");
-		assert_eq!(base.resolve(&PathRelative::new("..")).as_str(), "");
+		assert_eq!(base.resolve(&Relative::new("../../../foo")).as_str(), "foo");
+		assert_eq!(base.resolve(&Relative::new("..")).as_str(), "");
 	}
 
 	#[test]
 	fn test_resolve_empty_base() {
 		let base = Path::empty();
-		assert_eq!(base.resolve(&PathRelative::new("foo")).as_str(), "foo");
-		assert_eq!(base.resolve(&PathRelative::new("..")).as_str(), "");
+		assert_eq!(base.resolve(&Relative::new("foo")).as_str(), "foo");
+		assert_eq!(base.resolve(&Relative::new("..")).as_str(), "");
 	}
 
 	#[test]
 	fn test_resolve_dot_names_parent() {
 		let base = Path::new("a/b");
-		assert_eq!(base.resolve(&PathRelative::new(".")).as_str(), "a");
-		assert_eq!(base.resolve(&PathRelative::new("./c")).as_str(), "a/c");
-		assert_eq!(base.resolve(&PathRelative::new("./../c")).as_str(), "c");
+		assert_eq!(base.resolve(&Relative::new(".")).as_str(), "a");
+		assert_eq!(base.resolve(&Relative::new("./c")).as_str(), "a/c");
+		assert_eq!(base.resolve(&Relative::new("./../c")).as_str(), "c");
 	}
 
 	#[test]
@@ -1568,18 +1360,18 @@ mod tests {
 		// Naming the base within its parent yields the base unchanged, which lets the
 		// caller compare resolved == base to detect a self-reference.
 		let base = Path::new("a/b");
-		assert_eq!(base.resolve(&PathRelative::new("./b")).as_str(), "a/b");
+		assert_eq!(base.resolve(&Relative::new("./b")).as_str(), "a/b");
 	}
 
 	#[test]
 	fn test_try_resolve_distinguishes_root_from_escape() {
 		let base = Path::new("top");
-		assert_eq!(base.try_resolve(&PathRelative::new(".")).unwrap().as_str(), "");
-		assert!(base.try_resolve(&PathRelative::new("..")).is_none());
+		assert_eq!(base.try_resolve(&Relative::new(".")).unwrap().as_str(), "");
+		assert!(base.try_resolve(&Relative::new("..")).is_none());
 
 		let nested = Path::new("a/b");
-		assert_eq!(nested.try_resolve(&PathRelative::new("..")).unwrap().as_str(), "");
-		assert!(nested.try_resolve(&PathRelative::new("../..")).is_none());
+		assert_eq!(nested.try_resolve(&Relative::new("..")).unwrap().as_str(), "");
+		assert!(nested.try_resolve(&Relative::new("../..")).is_none());
 	}
 
 	#[test]

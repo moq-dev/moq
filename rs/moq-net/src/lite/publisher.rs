@@ -602,11 +602,11 @@ impl AnnounceRun {
 		}
 	}
 
-	/// Where an update travels on this stream: its path relative to the requested
+	/// Where an update travels on this stream: its prefix relative to the requested
 	/// prefix, which the origin's scope guarantees it sits under.
 	fn suffix(&self, update: &announce::Update) -> crate::PathOwned {
 		update
-			.path
+			.prefix
 			.strip_prefix(&self.prefix)
 			.expect("origin returned a route outside the requested prefix")
 			.to_owned()
@@ -689,7 +689,7 @@ impl AnnounceRun {
 				// Send ANNOUNCE_INIT as the first message with all currently active routes.
 				// We use `try_next()` to synchronously get the initial updates.
 				while let Some(update) = announced.try_next() {
-					let absolute = origin.absolute(&update.path);
+					let absolute = origin.absolute(&update.prefix);
 					let suffix = self.suffix(&update);
 
 					if update.kind.is_active() {
@@ -717,7 +717,7 @@ impl AnnounceRun {
 				// forward the stored chain as-is (no self push here).
 				let mut initial: Vec<(crate::PathOwned, Hops, crate::origin::Cost)> = Vec::new();
 				while let Some(update) = announced.try_next() {
-					let absolute = origin.absolute(&update.path);
+					let absolute = origin.absolute(&update.prefix);
 					let suffix = self.suffix(&update);
 
 					if update.kind.is_active() {
@@ -796,7 +796,7 @@ impl AnnounceRun {
 				continue;
 			};
 
-			let absolute = origin.absolute(&update.path);
+			let absolute = origin.absolute(&update.prefix);
 			let suffix = self.suffix(&update);
 
 			if !update.kind.is_active() {

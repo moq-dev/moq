@@ -1581,7 +1581,7 @@ impl Cluster {
 			tokio::select! {
 				ann = announced.next() => {
 					let Some(update) = ann else { return; };
-					let relative = update.path;
+					let relative = update.prefix;
 					// The address to dial, which keeps its query: `run_remote` reads
 					// `?cost=` and `?jwt=` off it. The key is only its identity.
 					let peer = advertised_node_url(relative.as_str());
@@ -3004,7 +3004,7 @@ mod tests {
 
 		// The self-registration route must be visible on the origin.
 		let update = watcher.try_next().expect("self-registration must be published");
-		assert_eq!(update.path.as_str(), ".internal/origins/rendezvous.example.com:4443");
+		assert_eq!(update.prefix.as_str(), ".internal/origins/rendezvous.example.com:4443");
 		assert!(update.kind.is_active());
 
 		// run() must NOT have returned: dropping the broadcast (via run returning)
@@ -3588,7 +3588,7 @@ mod tests {
 			.await
 			.expect("timed out waiting for from-node")
 			.expect("origin closed");
-		assert_eq!(update.path.as_str(), "from-node");
+		assert_eq!(update.prefix.as_str(), "from-node");
 
 		let _from_fp = fingerprint.origin.create_broadcast("from-fingerprint").expect("create");
 		_from_fp.announce(Default::default()).expect("announce");
@@ -3598,7 +3598,7 @@ mod tests {
 				.await
 				.expect("timed out waiting for from-fingerprint")
 				.expect("origin closed");
-			if update.path.as_str() == "from-fingerprint" {
+			if update.prefix.as_str() == "from-fingerprint" {
 				break;
 			}
 		}

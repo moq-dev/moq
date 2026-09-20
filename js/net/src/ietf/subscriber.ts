@@ -162,7 +162,7 @@ export class Subscriber {
 		for (const [active, info] of this.#announced) {
 			if (!scopeOverlaps(scope, active)) continue;
 			announced.append({
-				path: active,
+				prefix: active,
 				captures: scopeCaptures(scope, active),
 				kind: "announced",
 				route: info.route,
@@ -193,7 +193,7 @@ export class Subscriber {
 		console.debug(`announced: broadcast=${path} active=true`);
 		for (const [consumer, scope] of this.#announcedConsumers) {
 			if (!scopeOverlaps(scope, path)) continue;
-			consumer.append({ path, captures: scopeCaptures(scope, path), kind: "announced", route });
+			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "announced", route });
 		}
 	}
 
@@ -209,7 +209,7 @@ export class Subscriber {
 		console.debug(`announced: broadcast=${path} rerouted`);
 		for (const [consumer, scope] of this.#announcedConsumers) {
 			if (!scopeOverlaps(scope, path)) continue;
-			consumer.append({ path, captures: scopeCaptures(scope, path), kind: "updated", route });
+			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "updated", route });
 		}
 	}
 
@@ -235,7 +235,7 @@ export class Subscriber {
 			if (!scopeOverlaps(scope, path)) continue;
 			try {
 				consumer.append({
-					path,
+					prefix: path,
 					captures: scopeCaptures(scope, path),
 					kind: "retracted",
 					route: existing.route,

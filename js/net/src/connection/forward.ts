@@ -62,17 +62,17 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 				if (!event) break;
 
 				if (isActive(event.kind)) {
-					const existing = inserted.get(event.path);
+					const existing = inserted.get(event.prefix);
 					if (existing) {
 						existing.update(event.route);
 					} else {
-						const handle = originWire.receive(event.path, event.route);
-						inserted.set(event.path, handle);
+						const handle = originWire.receive(event.prefix, event.route);
+						inserted.set(event.prefix, handle);
 						void drive(handle, conn);
 					}
 				} else {
-					const handle = inserted.get(event.path);
-					inserted.delete(event.path);
+					const handle = inserted.get(event.prefix);
+					inserted.delete(event.prefix);
 					handle?.close();
 				}
 			}

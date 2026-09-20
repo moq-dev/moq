@@ -135,7 +135,7 @@ impl Announced {
 	async fn next(&mut self) -> Result<Option<Arc<MoqAnnounceUpdate>>, MoqError> {
 		match self.inner.next().await {
 			Some(update) => Ok(Some(Arc::new(MoqAnnounceUpdate {
-				prefix: update.path.to_string(),
+				prefix: update.prefix.to_string(),
 				route: update.route.into(),
 				active: update.kind.is_active(),
 			}))),

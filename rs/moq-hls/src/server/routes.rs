@@ -543,7 +543,7 @@ mod tests {
 		let reserved = catalog.reserve();
 		let mut registration = reserved.video("video0").unwrap();
 		let mut config = video_config();
-		config.broadcast = Some(moq_net::PathRelative::new("../source").to_owned());
+		config.broadcast = Some(moq_net::path::Relative::new("../source").to_owned());
 		registration.set(config).unwrap();
 		drop(reserved);
 		let recorder = catalog.enroll("video0").unwrap();

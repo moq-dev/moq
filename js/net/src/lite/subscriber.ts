@@ -245,7 +245,7 @@ export class Subscriber {
 						advertised.set(path, { publisher: undefined, live, route, captures });
 						if (!live) continue;
 						console.debug(`announced: broadcast=${path} active=true`);
-						announced.append({ path, captures, kind: "announced", route });
+						announced.append({ prefix: path, captures, kind: "announced", route });
 					}
 					break;
 				}
@@ -343,7 +343,12 @@ export class Subscriber {
 					if (!previous?.live) return;
 					this.#consumes.evict(path);
 					console.debug(`announced: broadcast=${path} active=false`);
-					announced.append({ path, captures: previous.captures, kind: "retracted", route: previous.route });
+					announced.append({
+						prefix: path,
+						captures: previous.captures,
+						kind: "retracted",
+						route: previous.route,
+					});
 				};
 
 				// In Lite05+ the sender's origin arrives via AnnounceOk, not in each hop
@@ -415,7 +420,7 @@ export class Subscriber {
 						if (!routesEqual(previous.route, route)) {
 							advertised.set(path, { publisher, live: true, route, captures });
 							console.debug(`announced: broadcast=${path} rerouted`);
-							announced.append({ path, captures, kind: "updated", route });
+							announced.append({ prefix: path, captures, kind: "updated", route });
 						} else {
 							console.debug(`announced: broadcast=${path} rerouted`);
 						}
@@ -433,7 +438,7 @@ export class Subscriber {
 				advertised.set(path, { publisher, live: true, route, captures });
 
 				console.debug(`announced: broadcast=${path} active=true`);
-				announced.append({ path, captures, kind: "announced", route });
+				announced.append({ prefix: path, captures, kind: "announced", route });
 			}
 
 			announced.close();

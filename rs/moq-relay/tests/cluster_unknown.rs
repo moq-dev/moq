@@ -191,7 +191,7 @@ async fn watch_announces(port: u16, window: Duration) -> Vec<(String, bool)> {
 	let mut updates = Vec::new();
 	let deadline = tokio::time::Instant::now() + window;
 	while let Ok(Some(update)) = tokio::time::timeout_at(deadline, announced.next()).await {
-		updates.push((update.path.as_str().to_string(), update.kind.is_active()));
+		updates.push((update.prefix.as_str().to_string(), update.kind.is_active()));
 	}
 	updates
 }

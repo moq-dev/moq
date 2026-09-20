@@ -668,7 +668,7 @@ impl OriginConsumerState {
 			}
 		};
 		Some(AnnounceUpdate {
-			path: prefix,
+			prefix,
 			captures,
 			route: Route {
 				hops: meta.0,
@@ -1026,21 +1026,22 @@ impl AnnounceKind {
 
 /// A route announcement, update, or retraction, delivered by [`AnnounceConsumer`].
 ///
-/// An announcement carries no broadcast: it advertises that [`path`](Self::path)
-/// and every path beneath it are servable. Resolve a specific path with
+/// An announcement is always a prefix, never a broadcast: it advertises that
+/// [`prefix`](Self::prefix) and every path beneath it are servable. A broadcast
+/// announces its own path, so the prefix usually names one, but resolve it with
 /// [`Consumer::request_broadcast`]; the application decides which paths name
 /// broadcasts, and filters with a [`Pattern`] locally when it wants a subset.
 #[derive(Clone, Debug)]
 pub struct AnnounceUpdate {
 	/// The prefix the route covers, relative to the consuming cursor's root.
-	pub path: PathOwned,
+	pub prefix: PathOwned,
 	/// What the scope's wildcards stood for when the announced prefix pins all of
 	/// them. `None` for an overlap-only route or a scope without a complete match.
 	pub captures: Option<Vec<Pattern>>,
 	/// The route serving the prefix. On a retraction this carries its last
 	/// advertised metadata.
 	pub route: Route,
-	/// Whether the path was announced, re-priced, or retracted.
+	/// Whether the prefix was announced, re-priced, or retracted.
 	pub kind: AnnounceKind,
 }
 
@@ -3532,7 +3533,7 @@ impl Consumer {
 		let mut announced = consumer.untagged().announced();
 		loop {
 			let update = announced.next().await?;
-			if update.kind.is_active() && path.has_prefix(&update.path) {
+			if update.kind.is_active() && path.has_prefix(&update.prefix) {
 				return Some(update.route);
 			}
 		}
@@ -3816,14 +3817,14 @@ impl AnnounceConsumer {
 
 	/// Drive the egress announce guards for one update.
 	fn hand_out(&mut self, update: AnnounceUpdate) -> AnnounceUpdate {
-		let absolute = self.root.join(&update.path).to_owned();
+		let absolute = self.root.join(&update.prefix).to_owned();
 		if update.kind.is_active() {
 			let scope = self.stats.egress(&absolute);
 			self.guards
-				.entry(update.path.clone())
+				.entry(update.prefix.clone())
 				.or_insert_with(|| scope.announce());
 		} else {
-			self.guards.remove(&update.path);
+			self.guards.remove(&update.prefix);
 		}
 		update
 	}
@@ -3885,14 +3886,14 @@ impl AnnounceConsumer {
 		state.is_closed() || state.ended
 	}
 
-	/// Returns the prefix that is automatically stripped from emitted paths.
+	/// Returns the root that is automatically stripped from emitted prefixes.
 	pub fn root(&self) -> &Path<'_> {
 		&self.root
 	}
 
-	/// Converts a relative path to an absolute path.
-	pub fn absolute(&self, path: impl AsPath) -> Path<'_> {
-		self.root.join(path)
+	/// Converts an emitted prefix back to one rooted at the origin.
+	pub fn absolute(&self, prefix: impl AsPath) -> Path<'_> {
+		self.root.join(prefix)
 	}
 }
 
@@ -3922,7 +3923,7 @@ impl AnnounceConsumer {
 	pub fn assert_next_active(&mut self, expected: impl AsPath) -> Route {
 		let expected = expected.as_path();
 		let update = self.next().now_or_never().expect("next blocked").expect("no next");
-		assert_eq!(update.path, expected, "wrong prefix");
+		assert_eq!(update.prefix, expected, "wrong prefix");
 		assert!(update.kind.is_active(), "should be an active route");
 		update.route
 	}
@@ -3931,7 +3932,7 @@ impl AnnounceConsumer {
 	pub fn assert_try_next_active(&mut self, expected: impl AsPath) -> Route {
 		let expected = expected.as_path();
 		let update = self.try_next().expect("no next");
-		assert_eq!(update.path, expected, "wrong prefix");
+		assert_eq!(update.prefix, expected, "wrong prefix");
 		assert!(update.kind.is_active(), "should be an active route");
 		update.route
 	}
@@ -3940,13 +3941,13 @@ impl AnnounceConsumer {
 	pub fn assert_next_ended(&mut self, expected: impl AsPath) {
 		let expected = expected.as_path();
 		let update = self.next().now_or_never().expect("next blocked").expect("no next");
-		assert_eq!(update.path, expected, "wrong prefix");
+		assert_eq!(update.prefix, expected, "wrong prefix");
 		assert_eq!(update.kind, AnnounceKind::Retracted, "should be a retraction");
 	}
 
 	pub fn assert_next_wait(&mut self) {
 		if let Some(res) = self.next().now_or_never() {
-			panic!("next should block: got {:?}", res.map(|u| u.path));
+			panic!("next should block: got {:?}", res.map(|u| u.prefix));
 		}
 	}
 }
@@ -4471,17 +4472,17 @@ mod tests {
 		let mut announced = consumer.announced();
 
 		let first = announced.next().now_or_never().expect("next").expect("announce");
-		assert_eq!(first.path.as_str(), "");
+		assert_eq!(first.prefix.as_str(), "");
 		assert_eq!(first.kind, AnnounceKind::Announced);
 		assert_eq!(first.captures, Some(Vec::new()));
 
 		drop(exact);
 		let retracted = announced.next().now_or_never().expect("next").expect("retract");
-		assert_eq!(retracted.path.as_str(), "");
+		assert_eq!(retracted.prefix.as_str(), "");
 		assert_eq!(retracted.kind, AnnounceKind::Retracted);
 		assert_eq!(retracted.captures, Some(Vec::new()));
 		let replacement = announced.next().now_or_never().expect("next").expect("announce");
-		assert_eq!(replacement.path.as_str(), "");
+		assert_eq!(replacement.prefix.as_str(), "");
 		assert_eq!(replacement.kind, AnnounceKind::Announced);
 		assert_eq!(replacement.captures, None);
 	}
@@ -4549,14 +4550,14 @@ mod tests {
 
 		let mut announced = producer.consume().announced();
 		let update = announced.next().now_or_never().expect("next").expect("no next");
-		assert_eq!(update.path.as_str(), "live");
+		assert_eq!(update.prefix.as_str(), "live");
 		assert_eq!(update.kind, AnnounceKind::Announced);
 		assert_eq!(update.route.cost, Cost::new(1));
 		announced.assert_next_wait();
 
 		drop(second);
 		let update = announced.next().now_or_never().expect("next").expect("no next");
-		assert_eq!(update.path.as_str(), "live");
+		assert_eq!(update.prefix.as_str(), "live");
 		assert_eq!(update.kind, AnnounceKind::Updated);
 		assert_eq!(update.route.cost, Cost::new(3));
 
@@ -4657,7 +4658,7 @@ mod tests {
 			.now_or_never()
 			.expect("next")
 			.expect("no next");
-		assert_eq!(update.path.as_str(), "live");
+		assert_eq!(update.prefix.as_str(), "live");
 		assert_eq!(update.kind, AnnounceKind::Announced);
 		assert!(StreamExt::next(&mut announced).now_or_never().is_none());
 		drop(server);
@@ -5838,7 +5839,7 @@ mod tests {
 		let alice = producer.create_broadcast("room/alice/chat").unwrap();
 		alice.announce(Route::default()).unwrap();
 		let update = announced.try_next().expect("alice's chat");
-		assert_eq!(update.path.as_str(), "room/alice/chat");
+		assert_eq!(update.prefix.as_str(), "room/alice/chat");
 		assert_eq!(update.captures, Some(vec!["alice".parse::<Pattern>().unwrap()]));
 
 		let audio = producer.create_broadcast("room/alice/audio").unwrap();
@@ -5847,7 +5848,7 @@ mod tests {
 
 		let broad = producer.announce("room", Route::default()).unwrap();
 		let update = announced.try_next().expect("overlapping broad route");
-		assert_eq!(update.path.as_str(), "room");
+		assert_eq!(update.prefix.as_str(), "room");
 		assert_eq!(update.captures, None, "an overlap does not pin the wildcard");
 
 		drop(broad);
@@ -5864,7 +5865,7 @@ mod tests {
 
 		let mut announced = producer.consume().announced();
 		let update = announced.try_next().expect("one winning route");
-		assert_eq!(update.path.as_str(), "room/alice");
+		assert_eq!(update.prefix.as_str(), "room/alice");
 		assert_eq!(update.route.cost, Cost::default());
 		announced.assert_next_wait();
 

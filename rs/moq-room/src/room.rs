@@ -81,7 +81,7 @@ impl Room {
 			let Some(update) = ready!(self.announced.poll_next(waiter)) else {
 				return Poll::Ready(None);
 			};
-			let path = update.path;
+			let path = update.prefix;
 			let Some(parsed) = parse(&path) else {
 				continue;
 			};

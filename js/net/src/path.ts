@@ -5,8 +5,10 @@
  * preventing issues like "foo" matching "foobar".
  *
  * Paths are automatically trimmed of leading and trailing slashes on creation,
- * making all slashes implicit at boundaries.
- * All paths are RELATIVE; you cannot join with a leading slash to make an absolute path.
+ * making all slashes implicit at boundaries. A path names a point in the origin's
+ * tree from its root; a leading slash never escapes that root. The same type names
+ * an exact broadcast and the prefix a route or announcement covers, so a broadcast's
+ * own path is the prefix it announces. See {@link Relative} for `..`-style references.
  *
  * {@link Pattern} and {@link Patterns} are re-exported from `@moq/pattern`, the owner of
  * the v1 grammar and algebra. Literal path construction and wire decoding retain
@@ -33,6 +35,15 @@
  * ```
  */
 export type Valid = string & { __brand: "Name" };
+
+/**
+ * A relative reference from one broadcast to another, as a hang catalog carries it.
+ *
+ * It may contain `..` and is meaningful only once {@link resolve}d against a base
+ * {@link Valid} path. It never crosses the wire on its own. Build one with
+ * {@link normalizeRelative} or {@link relative}.
+ */
+export type Relative = string & { __brand: "Relative" };
 
 /**
  * Maximum number of slash-separated parts in a path.
@@ -184,15 +195,15 @@ export function empty(): Valid {
  * normalizes to `.` because it names the base's parent, while empty names the base.
  * `..` is preserved and only interpreted by {@link resolve}.
  *
- * Mirrors the Rust `PathRelative::new` normalization, so JS and Rust agree
+ * Mirrors the Rust `path::Relative::new` normalization, so JS and Rust agree
  * byte-for-byte on the stored form. Two callers comparing normalized strings can
  * detect equivalent references while preserving the distinction between `""` and `"."`.
  */
-export function normalizeRelative(rel: string): string {
+export function normalizeRelative(rel: string): Relative {
 	const raw = rel.split("/");
 	const normalized = raw.filter((s) => s !== "" && s !== ".").join("/");
 
-	return normalized === "" && raw.includes(".") ? "." : normalized;
+	return (normalized === "" && raw.includes(".") ? "." : normalized) as Relative;
 }
 
 /**
@@ -213,7 +224,7 @@ export function normalizeRelative(rel: string): string {
  * Path.resolve(Path.from("a/b/c"), "../source"); // "a/source"
  * ```
  */
-export function resolve(base: Valid, rel: string): Valid {
+export function resolve(base: Valid, rel: Relative): Valid {
 	if (rel === "") return base;
 
 	const segments = base === "" ? [] : base.split("/");
@@ -240,7 +251,7 @@ export function resolve(base: Valid, rel: string): Valid {
  * path from excess `..` segments. Use it for untrusted catalog references that
  * must not be clamped to the root.
  */
-export function tryResolve(base: Valid, rel: string): Valid | undefined {
+export function tryResolve(base: Valid, rel: Relative): Valid | undefined {
 	if (rel === "") return base;
 
 	const segments = base === "" ? [] : base.split("/");
@@ -288,10 +299,10 @@ export function tryResolve(base: Valid, rel: string): Valid | undefined {
  * Path.relative(Path.from("a/.."), Path.from("a/b"));  // undefined
  * ```
  */
-export function relative(target: Valid, base: Valid): string | undefined {
+export function relative(target: Valid, base: Valid): Relative | undefined {
 	// Only the empty reference can name a base whose last segment is itself `.` or `..`,
 	// since resolution replaces that segment rather than emitting it.
-	if (target === base) return "";
+	if (target === base) return "" as Relative;
 
 	// Resolution replaces the base's last segment, so walk from its parent.
 	const dir = base === "" ? [] : base.split("/");
@@ -313,7 +324,7 @@ export function relative(target: Valid, base: Valid): string | undefined {
 		.concat(down);
 
 	// An empty reference resolves to the base itself, so name the parent explicitly.
-	return rel.length === 0 ? "." : rel.join("/");
+	return (rel.length === 0 ? "." : rel.join("/")) as Relative;
 }
 
 /** Path patterns: grammar and algebra owned by `@moq/pattern`. */

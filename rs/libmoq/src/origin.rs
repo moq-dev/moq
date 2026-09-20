@@ -103,7 +103,7 @@ impl Origin {
 			let announced_id = State::lock()
 				.origin
 				.announced
-				.insert((update.path.to_string(), update.kind.is_active()))?;
+				.insert((update.prefix.to_string(), update.kind.is_active()))?;
 			callback.call(announced_id);
 		}
 	}

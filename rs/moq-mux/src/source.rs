@@ -69,7 +69,7 @@ impl Source {
 	/// A missing or empty reference returns the catalog broadcast path. A valid reference
 	/// may return the empty root path, which still names a broadcast. `None` means the
 	/// reference walked above the root and names nothing.
-	pub fn resolve_reference(&self, rel: Option<&moq_net::PathRelative<'_>>) -> Option<moq_net::PathOwned> {
+	pub fn resolve_reference(&self, rel: Option<&moq_net::path::Relative<'_>>) -> Option<moq_net::PathOwned> {
 		match rel.filter(|rel| !rel.is_empty()) {
 			Some(rel) => self.path.try_resolve(rel),
 			None => Some(self.path.clone()),
@@ -80,7 +80,7 @@ impl Source {
 	///
 	/// The erroring counterpart to [`Self::resolve_reference`], for the consumer side, where
 	/// an escaping reference is a fault to report rather than a rendition to drop.
-	fn target(&self, rel: Option<&moq_net::PathRelative<'_>>) -> crate::Result<moq_net::PathOwned> {
+	fn target(&self, rel: Option<&moq_net::path::Relative<'_>>) -> crate::Result<moq_net::PathOwned> {
 		self.resolve_reference(rel).ok_or_else(|| {
 			let rel = rel.map_or("", |rel| rel.as_str());
 			tracing::error!(rel, catalog = %self.path, "broadcast reference escapes the root");
@@ -99,7 +99,7 @@ impl Source {
 	/// above the origin root, naming no broadcast.
 	pub(crate) fn request(
 		&self,
-		rel: Option<&moq_net::PathRelative<'_>>,
+		rel: Option<&moq_net::path::Relative<'_>>,
 	) -> crate::Result<kio::Pending<moq_net::origin::Requesting>> {
 		Ok(self.origin.request_broadcast(&self.target(rel)?))
 	}
@@ -112,7 +112,7 @@ impl Source {
 	/// the same policy rather than a different one.
 	pub(crate) fn try_request(
 		&self,
-		rel: Option<&moq_net::PathRelative<'_>>,
+		rel: Option<&moq_net::path::Relative<'_>>,
 	) -> Option<kio::Pending<moq_net::origin::Requesting>> {
 		Some(self.origin.request_broadcast(&self.resolve_reference(rel)?))
 	}
@@ -169,7 +169,7 @@ impl Source {
 	/// no broadcast, so there is nothing to resolve.
 	pub async fn resolve(
 		&self,
-		rel: Option<&moq_net::PathRelative<'_>>,
+		rel: Option<&moq_net::path::Relative<'_>>,
 	) -> crate::Result<moq_net::broadcast::Consumer> {
 		Ok(self.request(rel)?.await?)
 	}
@@ -184,7 +184,7 @@ impl Source {
 	/// when the intended broadcast is already in hand.
 	///
 	/// Rejects an escaping reference exactly as [`resolve`](Self::resolve) does.
-	pub fn bind(&self, rel: Option<&moq_net::PathRelative<'_>>) -> crate::Result<Binding> {
+	pub fn bind(&self, rel: Option<&moq_net::path::Relative<'_>>) -> crate::Result<Binding> {
 		Ok(Binding(Bound::Requested(self.request(rel)?.into_inner())))
 	}
 
@@ -201,7 +201,7 @@ impl Source {
 	/// use it to honor cross-broadcast renditions without reimplementing the path math.
 	pub async fn subscribe_track(
 		&self,
-		rel: Option<&moq_net::PathRelative<'_>>,
+		rel: Option<&moq_net::path::Relative<'_>>,
 		name: &str,
 	) -> crate::Result<moq_net::track::Subscriber> {
 		let broadcast = self.request(rel)?.await?;
@@ -250,35 +250,35 @@ impl Binding {
 }
 
 trait BroadcastConfig {
-	fn broadcast(&self) -> Option<&moq_net::PathRelativeOwned>;
+	fn broadcast(&self) -> Option<&moq_net::path::RelativeOwned>;
 }
 
 impl BroadcastConfig for hang::catalog::VideoConfig {
-	fn broadcast(&self) -> Option<&moq_net::PathRelativeOwned> {
+	fn broadcast(&self) -> Option<&moq_net::path::RelativeOwned> {
 		self.broadcast.as_ref()
 	}
 }
 
 impl BroadcastConfig for hang::catalog::AudioConfig {
-	fn broadcast(&self) -> Option<&moq_net::PathRelativeOwned> {
+	fn broadcast(&self) -> Option<&moq_net::path::RelativeOwned> {
 		self.broadcast.as_ref()
 	}
 }
 
 impl BroadcastConfig for hang::catalog::TextConfig {
-	fn broadcast(&self) -> Option<&moq_net::PathRelativeOwned> {
+	fn broadcast(&self) -> Option<&moq_net::path::RelativeOwned> {
 		self.broadcast.as_ref()
 	}
 }
 
 impl BroadcastConfig for hang::catalog::JsonConfig {
-	fn broadcast(&self) -> Option<&moq_net::PathRelativeOwned> {
+	fn broadcast(&self) -> Option<&moq_net::path::RelativeOwned> {
 		self.broadcast.as_ref()
 	}
 }
 
 impl BroadcastConfig for hang::catalog::BinaryConfig {
-	fn broadcast(&self) -> Option<&moq_net::PathRelativeOwned> {
+	fn broadcast(&self) -> Option<&moq_net::path::RelativeOwned> {
 		self.broadcast.as_ref()
 	}
 }
@@ -320,7 +320,7 @@ pub(crate) fn announced(broadcast: &moq_net::broadcast::Consumer) -> Source {
 mod tests {
 	use super::*;
 	use hang::catalog::{H264, VideoConfig};
-	use moq_net::PathRelative;
+	use moq_net::path::Relative;
 
 	/// Let the origin's spawned attach task run: a created broadcast becomes
 	/// routable asynchronously, shortly after `create_broadcast` returns.
@@ -388,7 +388,7 @@ mod tests {
 			.expect("no reference is always resolvable")
 			.await
 			.expect("catalog broadcast should resolve");
-		let empty = PathRelative::empty();
+		let empty = Relative::empty();
 		source
 			.request(Some(&empty))
 			.expect("empty reference is always resolvable")
@@ -423,7 +423,7 @@ mod tests {
 		let source = Source::new(origin.consume(), "a/pub");
 
 		// Names the catalog within its own parent.
-		let rel = PathRelative::new("./pub");
+		let rel = Relative::new("./pub");
 		source
 			.subscribe_track(Some(&rel), "video")
 			.await
@@ -450,7 +450,7 @@ mod tests {
 		// above the root. A lone `..` stops at the root, which still names a broadcast, so
 		// it is not in this set.
 		for reference in ["../../elsewhere", "../..", "../../.."] {
-			let rel = PathRelative::new(reference);
+			let rel = Relative::new(reference);
 			assert!(
 				source.resolve_reference(Some(&rel)).is_none(),
 				"{reference} should escape"
@@ -482,9 +482,9 @@ mod tests {
 			level: 0x1e,
 			inline: false,
 		});
-		escaped.broadcast = Some(PathRelative::new("../../source").to_owned());
+		escaped.broadcast = Some(Relative::new("../../source").to_owned());
 		let mut sibling = escaped.clone();
-		sibling.broadcast = Some(PathRelative::new("./source").to_owned());
+		sibling.broadcast = Some(Relative::new("./source").to_owned());
 
 		let mut catalog = hang::Catalog::default();
 		catalog.video.renditions.insert("escaped".to_string(), escaped);
@@ -504,9 +504,9 @@ mod tests {
 		let source = Source::new(origin.consume(), "a/pub");
 
 		let mut escaped = hang::catalog::TextConfig::new(hang::catalog::TextFormat::Vtt);
-		escaped.broadcast = Some(PathRelative::new("../../source").to_owned());
+		escaped.broadcast = Some(Relative::new("../../source").to_owned());
 		let mut sibling = escaped.clone();
-		sibling.broadcast = Some(PathRelative::new("./source").to_owned());
+		sibling.broadcast = Some(Relative::new("./source").to_owned());
 
 		let mut catalog = hang::Catalog::default();
 		catalog.text.renditions.insert("escaped".to_string(), escaped);
@@ -532,7 +532,7 @@ mod tests {
 		let source = Source::new(origin.consume(), "a/pub");
 
 		// The reference resolves to `a/source`, whose "video" track answers the subscribe.
-		let rel = PathRelative::new("./source");
+		let rel = Relative::new("./source");
 		source
 			.subscribe_track(Some(&rel), "video")
 			.await
@@ -552,7 +552,7 @@ mod tests {
 		settle().await;
 
 		let source = Source::new(origin.consume(), "a/source/transcode");
-		let rel = PathRelative::new(".");
+		let rel = Relative::new(".");
 		source
 			.subscribe_track(Some(&rel), "video")
 			.await
@@ -572,7 +572,7 @@ mod tests {
 		settle().await;
 
 		let source = Source::new(origin.consume(), "top");
-		let rel = PathRelative::new(".");
+		let rel = Relative::new(".");
 		source
 			.subscribe_track(Some(&rel), "video")
 			.await

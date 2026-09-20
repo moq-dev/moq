@@ -428,7 +428,7 @@ mod tests {
 			source,
 		};
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
-		config.broadcast = Some(moq_net::PathRelative::new("../../source").to_owned());
+		config.broadcast = Some(moq_net::path::Relative::new("../../source").to_owned());
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
 		catalog.archive = Some(hang::catalog::Archive::new(hang::timeline::DEFAULT_NAME));
 		catalog.video.renditions.insert("video".to_string(), config);
@@ -1448,7 +1448,7 @@ mod tests {
 		// A relative reference replaces the base's last segment, so "media" is a sibling of the
 		// catalog broadcast "live".
 		let mut config = video_config();
-		config.broadcast = Some(moq_net::PathRelative::new("media").to_owned());
+		config.broadcast = Some(moq_net::path::Relative::new("media").to_owned());
 
 		let (rendition, watcher) = export(&upstream, &config);
 		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
@@ -1587,7 +1587,7 @@ mod tests {
 			source,
 		};
 		let mut config = video_config();
-		config.broadcast = Some(moq_net::PathRelative::new("media").to_owned());
+		config.broadcast = Some(moq_net::path::Relative::new("media").to_owned());
 
 		let (rendition, watcher) = export(&upstream, &config);
 		accept_sibling(&old_server, &old_media).await;
@@ -1681,7 +1681,7 @@ mod tests {
 			source,
 		};
 		let mut config = video_config();
-		config.broadcast = Some(moq_net::PathRelative::new("media").to_owned());
+		config.broadcast = Some(moq_net::path::Relative::new("media").to_owned());
 
 		let (rendition, watcher) = export(&upstream, &config);
 		accept_sibling(&server, &media).await;
@@ -1723,7 +1723,7 @@ mod tests {
 			source,
 		};
 		let mut config = video_config();
-		config.broadcast = Some(moq_net::PathRelative::new("media").to_owned());
+		config.broadcast = Some(moq_net::path::Relative::new("media").to_owned());
 
 		let (rendition, watcher) = export(&upstream, &config);
 		accept_sibling(&old_server, &old_media).await;

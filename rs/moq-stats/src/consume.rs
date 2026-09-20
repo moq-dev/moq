@@ -188,7 +188,7 @@ mod tests {
 		assert!(update.kind.is_active());
 		origin
 			.consume()
-			.request_broadcast(moq_net::Path::new(update.path.as_str()))
+			.request_broadcast(moq_net::Path::new(update.prefix.as_str()))
 			.await
 			.expect("resolve")
 	}

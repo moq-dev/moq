@@ -38,7 +38,7 @@ broadcast.
 let mut config = moq_transcode::Config::default();
 // The derivative is announced at `<source>/transcode.hang`, so the source
 // renditions are referenced through its parent.
-config.source = Some(moq_net::PathRelativeOwned::from(".".to_string()));
+config.source = Some(moq_net::path::RelativeOwned::from(".".to_string()));
 
 let output = origin.create_broadcast(
     format!("{path}/transcode.hang"),

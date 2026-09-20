@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { compressionSupported } from "./compression.ts";
 import { modeSupported } from "./mode.ts";
+import type { RelativeBroadcast } from "./path.ts";
 import { RootSchema } from "./root.ts";
 
 // The `json` and `binary` sections list application data tracks. Each entry says how to read the
@@ -28,8 +29,8 @@ test("data tracks parse with their mode and compression", () => {
 	expect(parsed.json?.tracks.chat?.schema).toBe("https://example.com/chat.schema.json");
 
 	expect(parsed.json?.tracks.status?.mode).toBe("snapshot");
-	// Normalized like Rust PathRelative, the same as a media rendition's reference.
-	expect(parsed.json?.tracks.status?.broadcast).toBe("source");
+	// Normalized like Rust path::Relative, the same as a media rendition's reference.
+	expect(parsed.json?.tracks.status?.broadcast).toBe("source" as RelativeBroadcast);
 	expect(parsed.json?.tracks.status?.compression).toBeUndefined();
 
 	expect(parsed.binary?.tracks.thumbnail?.mode).toBe("snapshot");

@@ -1031,14 +1031,24 @@ export class Consumer {
 				for (const [path, snap] of active) {
 					const cur = next.get(path);
 					if (!cur || cur.identity !== snap.identity)
-						producer.append({ path, captures: snap.captures, kind: "retracted", route: snap.route });
+						producer.append({
+							prefix: path,
+							captures: snap.captures,
+							kind: "retracted",
+							route: snap.route,
+						});
 				}
 				for (const [path, snap] of next) {
 					const prev = active.get(path);
 					if (!prev || prev.identity !== snap.identity) {
-						producer.append({ path, captures: snap.captures, kind: "announced", route: snap.route });
+						producer.append({
+							prefix: path,
+							captures: snap.captures,
+							kind: "announced",
+							route: snap.route,
+						});
 					} else if (!routesEqual(prev.route, snap.route)) {
-						producer.append({ path, captures: snap.captures, kind: "updated", route: snap.route });
+						producer.append({ prefix: path, captures: snap.captures, kind: "updated", route: snap.route });
 					}
 				}
 				active = next;

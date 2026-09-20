@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import * as z from "@zod/mini";
 import { ARCHIVE_VERSION } from "./archive.ts";
+import type { RelativeBroadcast } from "./path.ts";
 import { RootSchema } from "./root.ts";
 
 // The base catalog carries the media sections (`video`/`audio`) and the data track sections
@@ -38,8 +39,8 @@ test("rendition broadcast reference is parsed and normalized", () => {
 	};
 	const parsed = RootSchema.parse(catalog);
 	if (!parsed.video || !("renditions" in parsed.video)) throw new Error("missing video section");
-	// Normalized like Rust PathRelative: redundant `.` and empty segments are dropped.
-	expect(parsed.video.renditions.video?.broadcast).toBe("source");
+	// Normalized like Rust path::Relative: redundant `.` and empty segments are dropped.
+	expect(parsed.video.renditions.video?.broadcast).toBe("source" as RelativeBroadcast);
 });
 
 test("rendition parent broadcast reference stays distinct from empty", () => {
@@ -56,7 +57,7 @@ test("rendition parent broadcast reference stays distinct from empty", () => {
 	};
 	const parsed = RootSchema.parse(catalog);
 	if (!parsed.video || !("renditions" in parsed.video)) throw new Error("missing video section");
-	expect(parsed.video.renditions.video?.broadcast).toBe(".");
+	expect(parsed.video.renditions.video?.broadcast).toBe("." as RelativeBroadcast);
 });
 
 test("rendition without broadcast reference stays undefined", () => {

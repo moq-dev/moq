@@ -152,7 +152,7 @@ mod test {
 
 	fn referencing(rel: &str) -> hang::catalog::AudioConfig {
 		let mut config = opus();
-		config.broadcast = Some(moq_net::PathRelative::new(rel).into_owned());
+		config.broadcast = Some(moq_net::path::Relative::new(rel).into_owned());
 		config
 	}
 
@@ -321,7 +321,7 @@ mod test {
 		published.audio.renditions.insert("here".to_string(), opus());
 
 		let mut text = hang::catalog::TextConfig::new(hang::catalog::TextFormat::Vtt);
-		text.broadcast = Some(moq_net::PathRelative::new("../../../elsewhere").into_owned());
+		text.broadcast = Some(moq_net::path::Relative::new("../../../elsewhere").into_owned());
 		published.text.renditions.insert("captions".to_string(), text);
 
 		match publish_catalog(published) {
@@ -340,7 +340,7 @@ mod test {
 			let mut published = Catalog::<()>::default();
 			published.audio.renditions.insert("here".to_string(), opus());
 
-			let escaping = moq_net::PathRelative::new("../../../elsewhere").into_owned();
+			let escaping = moq_net::path::Relative::new("../../../elsewhere").into_owned();
 			match section {
 				"json" => {
 					let mut config = hang::catalog::JsonConfig::new(hang::catalog::Mode::Stream);

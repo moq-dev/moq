@@ -70,10 +70,10 @@ pub async fn handle_viewers(
 			break;
 		};
 
-		let viewer_id = update.path.to_string();
+		let viewer_id = update.prefix.to_string();
 
 		if update.kind.is_active() {
-			let Ok(broadcast) = viewer_origin.request_broadcast(&update.path).await else {
+			let Ok(broadcast) = viewer_origin.request_broadcast(&update.prefix).await else {
 				continue;
 			};
 			tracing::info!(%viewer_id, "viewer connected");

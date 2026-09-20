@@ -75,7 +75,7 @@ pub struct TextConfig {
 	/// broadcast that served this catalog (e.g. `../source`). If unset, the track lives in the same
 	/// broadcast as the catalog.
 	#[serde(default)]
-	pub broadcast: Option<moq_net::PathRelativeOwned>,
+	pub broadcast: Option<moq_net::path::RelativeOwned>,
 
 	/// The serialization format of each cue payload.
 	#[serde_as(as = "DisplayFromStr")]

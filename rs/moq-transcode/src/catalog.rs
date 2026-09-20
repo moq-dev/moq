@@ -2,7 +2,7 @@
 //! against it, and fill the output catalog with rung + passthrough entries.
 
 use hang::catalog::{AV1, Video, VideoCodec, VideoConfig};
-use moq_net::PathRelativeOwned;
+use moq_net::path::RelativeOwned;
 
 use crate::{Error, Ladder};
 
@@ -220,7 +220,7 @@ pub(crate) fn populate(
 	out: &mut moq_mux::catalog::hang::Catalog,
 	source: &moq_mux::catalog::hang::Catalog,
 	rungs: &[Published],
-	source_rel: Option<&PathRelativeOwned>,
+	source_rel: Option<&RelativeOwned>,
 ) -> Result<(), Error> {
 	out.video = Video::default();
 	out.audio = hang::catalog::Audio::default();
@@ -502,7 +502,7 @@ mod tests {
 		video.insert("low", source(640, 360, None)).unwrap();
 		video.insert("high", source(1920, 1080, None)).unwrap();
 		let mut remote = source(3840, 2160, None);
-		remote.broadcast = Some(PathRelativeOwned::from("./other".to_string()));
+		remote.broadcast = Some(RelativeOwned::from("./other".to_string()));
 		video.insert("remote", remote).unwrap();
 
 		let (name, config) = choose_source(&video).unwrap();
@@ -548,7 +548,7 @@ mod tests {
 			.insert("video", source(1920, 1080, Some(6_000_000)))
 			.unwrap();
 		let mut archive = hang::catalog::Archive::new("timeline.z");
-		archive.replay = Some(PathRelativeOwned::from("./recordings/clip".to_string()));
+		archive.replay = Some(RelativeOwned::from("./recordings/clip".to_string()));
 		archive.version = Some(hang::catalog::Archive::VERSION);
 		child.archive = Some(archive.clone());
 		let clock = hang::catalog::Clock::new(moq_net::Timestamp::from_micros(1_751_846_400_000_000).unwrap()).unwrap();

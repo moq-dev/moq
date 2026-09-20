@@ -198,16 +198,16 @@ test("announced streams the table under a scope with origin-relative paths", asy
 	const announced = consumer.announced(Path.Pattern.subtree(Path.from("room")));
 
 	// The initial state arrives first, named from the origin rather than the scope.
-	expect(await announced.next()).toMatchObject({ path: Path.from("room/a"), kind: "announced" });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("room/a"), kind: "announced" });
 
 	// Additions under the scope stream in; paths outside it are invisible.
 	const b = publish(origin, Path.from("room/b"));
 	publish(origin, Path.from("lobby/c"));
-	expect(await announced.next()).toMatchObject({ path: Path.from("room/b"), kind: "announced" });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("room/b"), kind: "announced" });
 
 	// Removals retract.
 	b.close();
-	expect(await announced.next()).toMatchObject({ path: Path.from("room/b"), kind: "retracted" });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("room/b"), kind: "retracted" });
 
 	// The stream ends when the origin closes.
 	origin.close();
@@ -231,10 +231,10 @@ test("a remote entry resolves by path and retracts on dispose", async () => {
 
 	// Announced streams include remote entries.
 	const announced = consumer.announced();
-	expect(await announced.next()).toMatchObject({ path: path, kind: "announced", route: Route.default });
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "announced", route: Route.default });
 
 	dispose();
-	expect(await announced.next()).toMatchObject({ path: path, kind: "retracted" });
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "retracted" });
 	expect(wireOf(consumer).routes(path)).toBe(false);
 
 	announced.close();
@@ -252,10 +252,10 @@ test("announced keeps a broader covering route at its prefix", async () => {
 	// The scope filters the route without changing the prefix it claims.
 	const scope = Path.Pattern.subtree(Path.from("room/alice"));
 	const announced = consumer.announced(scope);
-	expect(await announced.next()).toMatchObject({ path: Path.from("room"), kind: "announced" });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "announced" });
 
 	dispose();
-	expect(await announced.next()).toMatchObject({ path: Path.from("room"), kind: "retracted" });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "retracted" });
 
 	announced.close();
 	upstream.close();
@@ -283,7 +283,7 @@ test("a local publish shadows a remote entry", async () => {
 
 	// One path, one announcement, even though both tables route it.
 	const announced = consumer.announced();
-	expect(await announced.next()).toMatchObject({ path: path, kind: "announced", route: Route.default });
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "announced", route: Route.default });
 
 	// Dropping the local publish falls back to the remote entry without a retraction.
 	local.close();
@@ -407,12 +407,12 @@ test("disposing the newest remote route promotes the fallback", async () => {
 	const disposeNewer = serve(origin, path, provider(newer));
 
 	const announced = consumer.announced();
-	expect(await announced.next()).toMatchObject({ path: path, kind: "announced" });
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "announced" });
 
 	// The newer session dies: consumers see a retract then the promoted fallback.
 	disposeNewer();
-	expect(await announced.next()).toMatchObject({ path: path, kind: "retracted" });
-	expect(await announced.next()).toMatchObject({ path: path, kind: "announced" });
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "retracted" });
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "announced" });
 
 	const handle = await routed(consumer, path);
 	const track = handle?.track("chat").subscribe();
@@ -480,7 +480,7 @@ test("requests never appear in announced or the table", async () => {
 
 	const announced = consumer.announced();
 	publish(origin, Path.from("real"));
-	expect(await announced.next()).toMatchObject({ path: Path.from("real"), kind: "announced" });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("real"), kind: "announced" });
 
 	announced.close();
 	request.close();
@@ -494,12 +494,12 @@ test("a republish retracts then re-announces the path", async () => {
 
 	publish(origin, path);
 	const announced = consumer.announced();
-	expect(await announced.next()).toMatchObject({ path: path, kind: "announced" });
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "announced" });
 
 	// A new broadcast takes the path: consumers must let go of the superseded one.
 	publish(origin, path);
-	expect(await announced.next()).toMatchObject({ path: path, kind: "retracted" });
-	expect(await announced.next()).toMatchObject({ path: path, kind: "announced" });
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "retracted" });
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "announced" });
 
 	announced.close();
 	origin.close();
@@ -857,17 +857,17 @@ test("createBroadcast is unadvertised until announce", async () => {
 	const announced = consumer.announced();
 	const pending = announced.next();
 	broadcast.announce();
-	expect(await pending).toMatchObject({ path, kind: "announced", route: Route.default });
+	expect(await pending).toMatchObject({ prefix: path, kind: "announced", route: Route.default });
 
 	broadcast.announce({ cost: 4n });
 	expect(await announced.next()).toMatchObject({
-		path,
+		prefix: path,
 		kind: "updated",
 		route: { hops: [], cost: { warm: 4n, cold: 4n } },
 	});
 
 	broadcast.unannounce();
-	expect(await announced.next()).toMatchObject({ path: path, kind: "retracted" });
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "retracted" });
 	expect(wireOf(consumer).routes(path)).toBe(true);
 
 	announced.close();
@@ -880,7 +880,7 @@ test("a handle serves a request under live", async () => {
 	const consumer = origin.consume();
 	const handle = origin.dynamic(Path.from("live"));
 
-	expect(await consumer.announced().next()).toMatchObject({ path: Path.from("live"), kind: "announced" });
+	expect(await consumer.announced().next()).toMatchObject({ prefix: Path.from("live"), kind: "announced" });
 
 	const waiting = handle.requested().next();
 	const request = consumer.request(Path.from("live/cam"));
@@ -907,11 +907,11 @@ test("a re-priced route is delivered as an update", async () => {
 	const origin = new Producer();
 	const handle = origin.dynamic(Path.from("live"));
 	const announced = origin.consume().announced();
-	expect(await announced.next()).toMatchObject({ path: Path.from("live"), kind: "announced" });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("live"), kind: "announced" });
 	handle.update({ cost: 5n });
-	expect(await announced.next()).toMatchObject({ path: Path.from("live"), kind: "updated" });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("live"), kind: "updated" });
 	handle.close();
-	expect(await announced.next()).toMatchObject({ path: Path.from("live"), kind: "retracted" });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("live"), kind: "retracted" });
 	announced.close();
 	origin.close();
 });
@@ -1116,7 +1116,7 @@ test("announced filters by arbitrary patterns and reports captures", async () =>
 	const announced = consumer.announced(Path.Pattern.parse("room/*"));
 
 	const update = await announced.next();
-	expect(update?.path).toBe(Path.from("room/alice"));
+	expect(update?.prefix).toBe(Path.from("room/alice"));
 	expect(update?.captures?.map((capture) => capture.text)).toEqual(["alice"]);
 
 	announced.close();

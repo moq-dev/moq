@@ -28,7 +28,7 @@ pub struct Archive {
 
 	/// The MoQ broadcast the archive is served back from, relative to this catalog, if any.
 	#[serde(default)]
-	pub replay: Option<moq_net::PathRelativeOwned>,
+	pub replay: Option<moq_net::path::RelativeOwned>,
 
 	/// The object-store URL the recording objects live under, if exposed by the publisher.
 	#[serde(default)]
@@ -78,7 +78,7 @@ mod test {
 	#[test]
 	fn recording_roundtrips_replay_store_and_version() {
 		let mut archive = Archive::new("timeline.z");
-		archive.replay = Some(moq_net::PathRelativeOwned::new("./recordings/clip"));
+		archive.replay = Some(moq_net::path::RelativeOwned::new("./recordings/clip"));
 		archive.store = Some("https://objects.example/rec/".parse().unwrap());
 		archive.version = Some(Archive::VERSION);
 

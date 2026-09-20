@@ -568,7 +568,7 @@ test("closing an announce consumer during upstream teardown does not append retr
 	const errors = spyOn(console, "error").mockImplementation(() => {});
 	try {
 		upstream.append({
-			path: Path.from("alice/camera.hang"),
+			prefix: Path.from("alice/camera.hang"),
 			captures: undefined,
 			kind: "announced",
 			route: Route.default,

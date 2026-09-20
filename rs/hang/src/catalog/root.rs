@@ -403,7 +403,7 @@ mod test {
 
 	#[test]
 	fn rendition_with_empty_broadcast_normalizes() {
-		// An empty-string broadcast field should normalize to an empty PathRelative so the
+		// An empty-string broadcast field should normalize to an empty `path::Relative` so the
 		// consumer can treat it identically to a missing field.
 		let encoded = r#"{
 			"video": {
@@ -653,7 +653,7 @@ mod test {
 	fn archive_roundtrips_at_the_root() {
 		let mut archive = crate::catalog::Archive::new("timeline.z");
 		archive.duration_max = Some(2000);
-		archive.replay = Some(moq_net::PathRelativeOwned::new("recordings/clip"));
+		archive.replay = Some(moq_net::path::RelativeOwned::new("recordings/clip"));
 		archive.version = Some(crate::catalog::Archive::VERSION);
 
 		let catalog = Catalog::<()> {
@@ -716,7 +716,7 @@ mod test {
 		chat.schema = Some("https://example.com/chat.schema.json".to_string());
 
 		let mut status = JsonConfig::new(Mode::Snapshot);
-		status.broadcast = Some(moq_net::PathRelativeOwned::new("source"));
+		status.broadcast = Some(moq_net::path::RelativeOwned::new("source"));
 
 		let mut thumbnail = BinaryConfig::new(Mode::Snapshot);
 		thumbnail.mime = Some("image/jpeg".to_string());

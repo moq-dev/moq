@@ -73,7 +73,7 @@ struct Media {
 	handle: Mutex<Handle>,
 	/// When set, a Dropped sibling is rebound through this source rather than keeping the
 	/// replaced publisher's rows listed.
-	sibling: Option<(moq_mux::Source, moq_net::PathRelativeOwned)>,
+	sibling: Option<(moq_mux::Source, moq_net::path::RelativeOwned)>,
 }
 
 struct Handle {
@@ -83,7 +83,7 @@ struct Handle {
 }
 
 impl Media {
-	fn bind(upstream: &Upstream, rel: Option<&moq_net::PathRelativeOwned>) -> moq_mux::Result<Self> {
+	fn bind(upstream: &Upstream, rel: Option<&moq_net::path::RelativeOwned>) -> moq_mux::Result<Self> {
 		Ok(Self {
 			handle: Mutex::new(Handle {
 				binding: Arc::new(upstream.bind(rel)?),
@@ -139,15 +139,15 @@ impl Media {
 /// A catalog `broadcast` reference that names a different path than the catalog itself.
 fn sibling(
 	upstream: &Upstream,
-	rel: Option<&moq_net::PathRelativeOwned>,
-) -> Option<(moq_mux::Source, moq_net::PathRelativeOwned)> {
+	rel: Option<&moq_net::path::RelativeOwned>,
+) -> Option<(moq_mux::Source, moq_net::path::RelativeOwned)> {
 	let target = upstream.source.resolve_reference(rel)?;
 	if upstream.source.resolve_reference(None).as_ref() == Some(&target) {
 		return None;
 	}
 	Some((
 		upstream.source.clone(),
-		rel.cloned().unwrap_or_else(moq_net::PathRelative::empty),
+		rel.cloned().unwrap_or_else(moq_net::path::Relative::empty),
 	))
 }
 

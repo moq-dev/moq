@@ -76,7 +76,7 @@ pub struct AudioConfig {
 	/// Resolve it with [`Path::resolve`](moq_net::Path::resolve): a reference that walks
 	/// above the root names no broadcast, so the catalog is rejected.
 	#[serde(default)]
-	pub broadcast: Option<moq_net::PathRelativeOwned>,
+	pub broadcast: Option<moq_net::path::RelativeOwned>,
 
 	/// Human-readable rendition name for track pickers.
 	#[serde(default)]

@@ -75,7 +75,7 @@ test("a discovery failure under a live session downgrades the origin", async () 
 	forwardAnnounced(session.session, origin);
 
 	// The relay announces a broadcast, which lands in the table.
-	session.announces.append({ path, captures: undefined, kind: "announced", route: Route.default });
+	session.announces.append({ prefix: path, captures: undefined, kind: "announced", route: Route.default });
 	await settle();
 	expect(origin.discovery.peek()).toBe(true);
 	expect(wireOf(origin).routes(path)).toBe(true);
@@ -116,7 +116,7 @@ test("a request outlives the discovery failure that fed it", async () => {
 	forwardAnnounced(session.session, origin);
 
 	// Announced, so the table routes it and no blind answer is needed.
-	session.announces.append({ path, captures: undefined, kind: "announced", route: Route.default });
+	session.announces.append({ prefix: path, captures: undefined, kind: "announced", route: Route.default });
 	await settle();
 
 	const request = origin.request(path);

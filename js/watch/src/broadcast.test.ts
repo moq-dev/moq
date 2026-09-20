@@ -61,10 +61,10 @@ describe("relativeBroadcast", () => {
 		const { source, owner } = broadcast("a/b", ["a/b", "a/source", "a/sub"]);
 		const effect = new Effect();
 		try {
-			expect(source.relativeBroadcast(effect, "./source")).toBeDefined();
-			expect(source.relativeBroadcast(effect, "sub")).toBeDefined();
+			expect(source.relativeBroadcast(effect, Path.normalizeRelative("./source"))).toBeDefined();
+			expect(source.relativeBroadcast(effect, Path.normalizeRelative("sub"))).toBeDefined();
 			// Nothing routes an unpublished sibling, so the reference stays pending.
-			expect(source.relativeBroadcast(effect, "./missing")).toBeUndefined();
+			expect(source.relativeBroadcast(effect, Path.normalizeRelative("./missing"))).toBeUndefined();
 		} finally {
 			effect.close();
 			source.close();
@@ -79,11 +79,11 @@ describe("relativeBroadcast", () => {
 			// Clamping would subscribe to an unrelated `x` instead of dropping the rendition;
 			// `x` is published, so a defined result here would prove the clamp bug.
 			withoutWarnings(() => {
-				expect(source.relativeBroadcast(effect, "../../x")).toBeUndefined();
-				expect(source.relativeBroadcast(effect, "../..")).toBeUndefined();
+				expect(source.relativeBroadcast(effect, Path.normalizeRelative("../../x"))).toBeUndefined();
+				expect(source.relativeBroadcast(effect, Path.normalizeRelative("../.."))).toBeUndefined();
 			});
 			// Popping to exactly the root stops at it, and the root still names a broadcast.
-			expect(source.relativeBroadcast(effect, "..")).toBeDefined();
+			expect(source.relativeBroadcast(effect, Path.normalizeRelative(".."))).toBeDefined();
 		} finally {
 			effect.close();
 			source.close();
@@ -185,8 +185,8 @@ describe("relativeBroadcast", () => {
 			const own = source.out.active.peek();
 			expect(own).toBeDefined();
 			expect(source.relativeBroadcast(effect, undefined)).toBe(own);
-			expect(source.relativeBroadcast(effect, "")).toBe(own);
-			expect(source.relativeBroadcast(effect, "./b")).toBe(own);
+			expect(source.relativeBroadcast(effect, Path.normalizeRelative(""))).toBe(own);
+			expect(source.relativeBroadcast(effect, Path.normalizeRelative("./b"))).toBe(own);
 		} finally {
 			effect.close();
 			source.close();

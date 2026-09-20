@@ -13,9 +13,10 @@
 use bytes::Buf;
 
 use crate::{
-	Path, PathRelative, Pattern,
+	Path, Pattern,
 	coding::{Decode, Encode, VarInt},
 	ietf, lite,
+	path::Relative,
 };
 
 /// One fuzz target body: it returns whether the input decoded, which is what
@@ -307,7 +308,7 @@ pub fn path(data: &[u8]) -> bool {
 	// Resolving arbitrary references must stay inside the clamped/unclamped contract:
 	// `try_resolve` only refuses by walking above the root, so whenever it answers, it
 	// answers the same as `resolve`.
-	let rel = PathRelative::new(base.as_str());
+	let rel = Relative::new(base.as_str());
 	if let Some(resolved) = target.try_resolve(&rel) {
 		assert_eq!(resolved, target.resolve(&rel), "try_resolve disagreed with resolve");
 	}

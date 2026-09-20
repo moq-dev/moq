@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import * as Path from "./path.ts";
 
+/** Brand a literal as a relative reference; the tests feed raw strings on purpose. */
+const asRel = (s: string) => s as Path.Relative;
+
 test("Path constructor trims leading and trailing slashes", () => {
 	expect(Path.from("/foo/bar/")).toBe("foo/bar" as Path.Valid);
 	expect(Path.from("///foo/bar///")).toBe("foo/bar" as Path.Valid);
@@ -191,48 +194,48 @@ test("from sanitizes multiple arguments with slashes", () => {
 });
 
 test("resolve replaces the base name", () => {
-	expect(Path.resolve(Path.from("a/b"), "c")).toBe(Path.from("a/c"));
-	expect(Path.resolve(Path.from("a/b"), "c/d")).toBe(Path.from("a/c/d"));
-	expect(Path.resolve(Path.from("foo.hang/catalog.pro"), "./transcode.pro")).toBe(
+	expect(Path.resolve(Path.from("a/b"), asRel("c"))).toBe(Path.from("a/c"));
+	expect(Path.resolve(Path.from("a/b"), asRel("c/d"))).toBe(Path.from("a/c/d"));
+	expect(Path.resolve(Path.from("foo.hang/catalog.pro"), asRel("./transcode.pro"))).toBe(
 		Path.from("foo.hang/transcode.pro"),
 	);
 });
 
 test("resolve with empty rel returns base", () => {
-	expect(Path.resolve(Path.from("a/b"), "")).toBe(Path.from("a/b"));
+	expect(Path.resolve(Path.from("a/b"), asRel(""))).toBe(Path.from("a/b"));
 });
 
 test("resolve single dotdot pops one segment", () => {
-	expect(Path.resolve(Path.from("a/b/c"), "../d")).toBe(Path.from("a/d"));
-	expect(Path.resolve(Path.from("a/b/c"), "..")).toBe(Path.from("a"));
+	expect(Path.resolve(Path.from("a/b/c"), asRel("../d"))).toBe(Path.from("a/d"));
+	expect(Path.resolve(Path.from("a/b/c"), asRel(".."))).toBe(Path.from("a"));
 });
 
 test("resolve multiple dotdot pops multiple segments", () => {
-	expect(Path.resolve(Path.from("a/b/c"), "../../x")).toBe(Path.from("x"));
-	expect(Path.resolve(Path.from("a/b/c"), "../../../x")).toBe(Path.from("x"));
+	expect(Path.resolve(Path.from("a/b/c"), asRel("../../x"))).toBe(Path.from("x"));
+	expect(Path.resolve(Path.from("a/b/c"), asRel("../../../x"))).toBe(Path.from("x"));
 });
 
 test("resolve excess dotdot clamps at empty", () => {
-	expect(Path.resolve(Path.from("a"), "../../../foo")).toBe(Path.from("foo"));
-	expect(Path.resolve(Path.from("a"), "..")).toBe(Path.from(""));
+	expect(Path.resolve(Path.from("a"), asRel("../../../foo"))).toBe(Path.from("foo"));
+	expect(Path.resolve(Path.from("a"), asRel(".."))).toBe(Path.from(""));
 });
 
 test("relative inverts resolve", () => {
 	// Nested under the base: the base's own last segment is replaced, so it repeats.
-	expect(Path.relative(Path.from("foo/bar/baz"), Path.from("foo/bar"))).toBe("bar/baz");
+	expect(Path.relative(Path.from("foo/bar/baz"), Path.from("foo/bar"))).toBe(asRel("bar/baz"));
 	// Sibling.
-	expect(Path.relative(Path.from("foo/baz"), Path.from("foo/bar"))).toBe("baz");
+	expect(Path.relative(Path.from("foo/baz"), Path.from("foo/bar"))).toBe(asRel("baz"));
 	// Different subtree.
-	expect(Path.relative(Path.from("foo/baz/bar"), Path.from("foo/bar/baz"))).toBe("../baz/bar");
+	expect(Path.relative(Path.from("foo/baz/bar"), Path.from("foo/bar/baz"))).toBe(asRel("../baz/bar"));
 	// The base's parent, which only `.` can name.
-	expect(Path.relative(Path.from("a/b"), Path.from("a/b/transcode.hang"))).toBe(".");
-	expect(Path.relative(Path.from("a/b"), Path.from("a/b/one/two/transcode.hang"))).toBe("../..");
+	expect(Path.relative(Path.from("a/b"), Path.from("a/b/transcode.hang"))).toBe(asRel("."));
+	expect(Path.relative(Path.from("a/b"), Path.from("a/b/one/two/transcode.hang"))).toBe(asRel("../.."));
 	// Roots.
-	expect(Path.relative(Path.from("foo/bar"), Path.empty())).toBe("foo/bar");
-	expect(Path.relative(Path.empty(), Path.from("foo"))).toBe(".");
+	expect(Path.relative(Path.from("foo/bar"), Path.empty())).toBe(asRel("foo/bar"));
+	expect(Path.relative(Path.empty(), Path.from("foo"))).toBe(asRel("."));
 	// The base itself, which only the empty reference names.
-	expect(Path.relative(Path.from("a/b"), Path.from("a/b"))).toBe("");
-	expect(Path.relative(Path.empty(), Path.empty())).toBe("");
+	expect(Path.relative(Path.from("a/b"), Path.from("a/b"))).toBe(asRel(""));
+	expect(Path.relative(Path.empty(), Path.empty())).toBe(asRel(""));
 });
 
 test("relative rejects unnameable targets", () => {
@@ -243,12 +246,12 @@ test("relative rejects unnameable targets", () => {
 	expect(Path.relative(Path.from("a/.."), Path.from("a/b"))).toBeUndefined();
 
 	// A base is always nameable by itself, however its last segment is spelled.
-	expect(Path.relative(Path.from("a/.."), Path.from("a/.."))).toBe("");
+	expect(Path.relative(Path.from("a/.."), Path.from("a/.."))).toBe(asRel(""));
 
 	// Dot segments inside the shared prefix are never emitted, so they are fine.
 	const rel = Path.relative(Path.from("a/../b/x"), Path.from("a/../b/c"));
-	expect(rel).toBe("x");
-	expect(Path.resolve(Path.from("a/../b/c"), rel as string)).toBe(Path.from("a/../b/x"));
+	expect(rel).toBe(asRel("x"));
+	expect(Path.resolve(Path.from("a/../b/c"), rel as Path.Relative)).toBe(Path.from("a/../b/x"));
 });
 
 test("relative round trips through resolve", () => {
@@ -273,37 +276,37 @@ test("relative round trips through resolve", () => {
 });
 
 test("resolve with empty base", () => {
-	expect(Path.resolve(Path.empty(), "foo")).toBe(Path.from("foo"));
-	expect(Path.resolve(Path.empty(), "..")).toBe(Path.from(""));
+	expect(Path.resolve(Path.empty(), asRel("foo"))).toBe(Path.from("foo"));
+	expect(Path.resolve(Path.empty(), asRel(".."))).toBe(Path.from(""));
 });
 
 test("resolve dot names the base parent", () => {
-	expect(Path.resolve(Path.from("a/b"), ".")).toBe(Path.from("a"));
-	expect(Path.resolve(Path.from("a/b"), "./c")).toBe(Path.from("a/c"));
-	expect(Path.resolve(Path.from("a/b"), "./../c")).toBe(Path.from("c"));
-	expect(Path.resolve(Path.from("a/b"), "foo/./bar")).toBe(Path.from("a/foo/bar"));
+	expect(Path.resolve(Path.from("a/b"), asRel("."))).toBe(Path.from("a"));
+	expect(Path.resolve(Path.from("a/b"), asRel("./c"))).toBe(Path.from("a/c"));
+	expect(Path.resolve(Path.from("a/b"), asRel("./../c"))).toBe(Path.from("c"));
+	expect(Path.resolve(Path.from("a/b"), asRel("foo/./bar"))).toBe(Path.from("a/foo/bar"));
 });
 
 test("resolve self-reference via sibling name equals base", () => {
-	expect(Path.resolve(Path.from("a/b"), "./b")).toBe(Path.from("a/b"));
+	expect(Path.resolve(Path.from("a/b"), asRel("./b"))).toBe(Path.from("a/b"));
 });
 
 test("tryResolve distinguishes the root from an escape", () => {
-	expect(Path.tryResolve(Path.from("top"), ".")).toBe(Path.empty());
-	expect(Path.tryResolve(Path.from("top"), "..")).toBeUndefined();
-	expect(Path.tryResolve(Path.from("a/b"), "..")).toBe(Path.empty());
-	expect(Path.tryResolve(Path.from("a/b"), "../..")).toBeUndefined();
+	expect(Path.tryResolve(Path.from("top"), asRel("."))).toBe(Path.empty());
+	expect(Path.tryResolve(Path.from("top"), asRel(".."))).toBeUndefined();
+	expect(Path.tryResolve(Path.from("a/b"), asRel(".."))).toBe(Path.empty());
+	expect(Path.tryResolve(Path.from("a/b"), asRel("../.."))).toBeUndefined();
 });
 
 test("normalizeRelative preserves an all-dot reference", () => {
-	expect(Path.normalizeRelative("")).toBe("");
-	expect(Path.normalizeRelative(".")).toBe(".");
-	expect(Path.normalizeRelative("././")).toBe(".");
-	expect(Path.normalizeRelative("./foo")).toBe("foo");
-	expect(Path.normalizeRelative("foo//bar")).toBe("foo/bar");
-	expect(Path.normalizeRelative("foo/./bar")).toBe("foo/bar");
-	expect(Path.normalizeRelative("/foo/")).toBe("foo");
-	expect(Path.normalizeRelative("../foo")).toBe("../foo");
+	expect(Path.normalizeRelative("")).toBe(asRel(""));
+	expect(Path.normalizeRelative(".")).toBe(asRel("."));
+	expect(Path.normalizeRelative("././")).toBe(asRel("."));
+	expect(Path.normalizeRelative("./foo")).toBe(asRel("foo"));
+	expect(Path.normalizeRelative("foo//bar")).toBe(asRel("foo/bar"));
+	expect(Path.normalizeRelative("foo/./bar")).toBe(asRel("foo/bar"));
+	expect(Path.normalizeRelative("/foo/")).toBe(asRel("foo"));
+	expect(Path.normalizeRelative("../foo")).toBe(asRel("../foo"));
 });
 
 test("parts splits a path into its components", () => {

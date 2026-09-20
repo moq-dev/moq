@@ -91,14 +91,14 @@ async function runPublishSubscribeFlow(protocol: string, version?: number) {
 	const announced = client.announced();
 	const entry = await announced.next();
 	if (!entry) throw new Error("expected entry");
-	expect(entry.path).toBe("test" as Path.Valid);
+	expect(entry.prefix).toBe("test" as Path.Valid);
 	expect(entry.kind).toBe("announced");
 
 	// Scoped discovery only echoes the suffix on the wire, but presents the whole path.
 	const prefixed = client.announced(Path.Pattern.subtree(Path.from("root")));
 	const prefixedEntry = await prefixed.next();
 	if (!prefixedEntry) throw new Error("expected prefixed entry");
-	expect(prefixedEntry.path).toBe("root/child" as Path.Valid);
+	expect(prefixedEntry.prefix).toBe("root/child" as Path.Valid);
 	expect(prefixedEntry.kind).toBe("announced");
 
 	// Client consumes the broadcast and subscribes to a track
@@ -375,28 +375,28 @@ test("integration: lite draft-06 announce lifecycle", async () => {
 	const announced = client.announced();
 	let entry = await announced.next();
 	if (!entry) throw new Error("expected announce");
-	expect(entry.path).toBe("first" as Path.Valid);
+	expect(entry.prefix).toBe("first" as Path.Valid);
 	expect(entry.kind).toBe("announced");
 
 	// A live announce.
 	const second = publish(origin, Path.from("second"));
 	entry = await announced.next();
 	if (!entry) throw new Error("expected announce");
-	expect(entry.path).toBe("second" as Path.Valid);
+	expect(entry.prefix).toBe("second" as Path.Valid);
 	expect(entry.kind).toBe("announced");
 
 	// Unannounce: retracted by announce id on the wire.
 	second.close();
 	entry = await announced.next();
 	if (!entry) throw new Error("expected unannounce");
-	expect(entry.path).toBe("second" as Path.Valid);
+	expect(entry.prefix).toBe("second" as Path.Valid);
 	expect(entry.kind).toBe("retracted");
 
 	// Re-announce the same path: a fresh announce assigning a fresh id.
 	const secondAgain = publish(origin, Path.from("second"));
 	entry = await announced.next();
 	if (!entry) throw new Error("expected re-announce");
-	expect(entry.path).toBe("second" as Path.Valid);
+	expect(entry.prefix).toBe("second" as Path.Valid);
 	expect(entry.kind).toBe("announced");
 
 	// Cleanup
@@ -1730,7 +1730,7 @@ async function runOriginFlow(protocol: string, version?: number) {
 	// The announcement lands in the client's origin.
 	const reader = clientOrigin.consume();
 	const announced = reader.announced();
-	expect(await announced.next()).toMatchObject({ path: Path.from("test"), kind: "announced" });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("test"), kind: "announced" });
 
 	// Consuming through the origin reaches the wire.
 	const remote = await routed(reader, Path.from("test"));
@@ -1740,7 +1740,7 @@ async function runOriginFlow(protocol: string, version?: number) {
 
 	// Unpublishing retracts the entry over the wire and out of the origin.
 	broadcast.close();
-	expect(await announced.next()).toMatchObject({ path: Path.from("test"), kind: "retracted" });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("test"), kind: "retracted" });
 	await until(() => !wireOf(reader).routes(Path.from("test")));
 
 	await serving;
@@ -2090,7 +2090,7 @@ test("create then announce is discoverable on the wire", async () => {
 	const pending = announced.next();
 	broadcast.announce();
 	const entry = await pending;
-	expect(entry?.path).toBe("later" as Path.Valid);
+	expect(entry?.prefix).toBe("later" as Path.Valid);
 	expect(entry?.kind).toBe("announced");
 
 	announced.close();
@@ -2120,7 +2120,7 @@ test("a handle serves a request under live/** over the wire", async () => {
 
 	const announced = client.announced();
 	const entry = await announced.next();
-	expect(entry?.path).toBe("live" as Path.Valid);
+	expect(entry?.prefix).toBe("live" as Path.Valid);
 	expect(entry?.kind).toBe("announced");
 
 	const remote = wireOf(client).consume(Path.from("live/cam"));

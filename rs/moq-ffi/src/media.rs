@@ -447,19 +447,19 @@ mod test {
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
 
 		let mut video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
-		video.broadcast = Some(moq_net::PathRelative::new("./source").into_owned());
+		video.broadcast = Some(moq_net::path::Relative::new("./source").into_owned());
 		catalog.video.renditions.insert("video".to_string(), video);
 		let local = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		catalog.video.renditions.insert("local".to_string(), local);
 
 		let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
-		audio.broadcast = Some(moq_net::PathRelative::new("../elsewhere").into_owned());
+		audio.broadcast = Some(moq_net::path::Relative::new("../elsewhere").into_owned());
 		catalog.audio.renditions.insert("audio".to_string(), audio);
 
 		let converted = convert_catalog(&catalog);
-		// `PathRelative` strips redundant `.` segments on creation, so the reference crosses as
+		// `path::Relative` strips redundant `.` segments on creation, so the reference crosses as
 		// the normalized form the catalog itself holds. It round-trips: rebuilding a
-		// `PathRelative` from it is a no-op.
+		// `path::Relative` from it is a no-op.
 		assert_eq!(converted.video["video"].broadcast.as_deref(), Some("source"));
 		assert_eq!(converted.video["local"].broadcast, None);
 		assert_eq!(converted.audio["audio"].broadcast.as_deref(), Some("../elsewhere"));

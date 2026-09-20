@@ -988,10 +988,10 @@ mod tests {
 		assert!(update.kind.is_active());
 		let broadcast = origin
 			.consume()
-			.request_broadcast(moq_net::Path::new(update.path.as_str()))
+			.request_broadcast(moq_net::Path::new(update.prefix.as_str()))
 			.await
 			.expect("resolve");
-		(update.path.as_str().to_string(), broadcast)
+		(update.prefix.as_str().to_string(), broadcast)
 	}
 
 	/// Advance past one publish interval so the task drains and writes frames.

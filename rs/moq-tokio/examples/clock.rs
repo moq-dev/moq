@@ -112,14 +112,14 @@ async fn main() -> anyhow::Result<()> {
 				tokio::select! {
 					Some(update) = announced.next() => match update.kind.is_active() {
 						true => {
-							tracing::info!(broadcast = %update.path, "broadcast is online, subscribing to track");
-							let broadcast = consumer.request_broadcast(&update.path).await?;
+							tracing::info!(broadcast = %update.prefix, "broadcast is online, subscribing to track");
+							let broadcast = consumer.request_broadcast(&update.prefix).await?;
 							let track = broadcast
 								.track(&track)?.subscribe(None).await?;
 							clock = Some(Subscriber::new(track));
 						}
 						false => {
-							tracing::warn!(broadcast = %update.path, "broadcast is offline, waiting...");
+							tracing::warn!(broadcast = %update.prefix, "broadcast is offline, waiting...");
 						}
 					},
 					res = reconnect.closed() => return Ok(res?),

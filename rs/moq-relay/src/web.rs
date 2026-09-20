@@ -786,7 +786,7 @@ async fn serve_announced(
 
 	while let Some(update) = announced.try_next() {
 		if update.kind.is_active() {
-			broadcasts.push(update.path);
+			broadcasts.push(update.prefix);
 		}
 	}
 

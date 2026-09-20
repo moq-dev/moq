@@ -132,7 +132,7 @@ impl MoqBroadcastConsumer {
 	) -> Result<moq_net::broadcast::Consumer, MoqError> {
 		// Normalize before testing emptiness: this is a caller-supplied string, and one made only
 		// of slashes normalizes to the empty reference, which names this broadcast.
-		let reference = reference.map(moq_net::PathRelative::new);
+		let reference = reference.map(moq_net::path::Relative::new);
 
 		// An absent or empty reference names the catalog's own broadcast, which we already hold.
 		// Short-circuiting also keeps a standalone broadcast usable: the common case needs no origin.

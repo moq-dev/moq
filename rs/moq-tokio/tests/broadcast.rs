@@ -88,7 +88,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 		.expect("announce timed out")
 		.expect("origin closed");
 
-	assert_eq!(update.path.as_str(), "test");
+	assert_eq!(update.prefix.as_str(), "test");
 	assert!(update.kind.is_active(), "expected announce, got retraction");
 	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
 		.await
@@ -201,7 +201,7 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
-	assert_eq!(update.path.as_str(), "test");
+	assert_eq!(update.prefix.as_str(), "test");
 	assert!(update.kind.is_active(), "expected announce, got retraction");
 	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
 		.await
@@ -324,7 +324,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
-	assert_eq!(update.path.as_str(), "test");
+	assert_eq!(update.prefix.as_str(), "test");
 	assert!(update.kind.is_active(), "expected announce, got retraction");
 	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
 		.await
@@ -454,7 +454,7 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
-	assert_eq!(update.path.as_str(), "test");
+	assert_eq!(update.prefix.as_str(), "test");
 	assert!(update.kind.is_active(), "expected announce, got retraction");
 	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
 		.await
@@ -568,7 +568,7 @@ async fn broadcast_moq_lite_05_default_timescale() {
 	assert!(update.kind.is_active(), "expected announce");
 	let bc = tokio::time::timeout(
 		TIMEOUT,
-		sub_consumer.request_broadcast(moq_net::Path::new(update.path.as_str())),
+		sub_consumer.request_broadcast(moq_net::Path::new(update.prefix.as_str())),
 	)
 	.await
 	.expect("request timed out")
@@ -662,11 +662,11 @@ async fn broadcast_moq_transport_20_current_group_join() {
 		.expect("connect failed");
 
 	let announced = next_announce(&mut announcements).await;
-	assert_eq!(announced.path.as_str(), "test");
+	assert_eq!(announced.prefix.as_str(), "test");
 	assert!(announced.kind.is_active(), "expected an announce");
 	let remote = tokio::time::timeout(
 		TIMEOUT,
-		sub_consumer.request_broadcast(moq_net::Path::new(announced.path.as_str())),
+		sub_consumer.request_broadcast(moq_net::Path::new(announced.prefix.as_str())),
 	)
 	.await
 	.expect("request timed out")
@@ -764,28 +764,28 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 
 	// The initial set: "first" was announced before the session existed.
 	let update = next_announce(&mut announcements).await;
-	assert_eq!(update.path.as_str(), "first");
+	assert_eq!(update.prefix.as_str(), "first");
 	assert!(update.kind.is_active(), "expected initial announce");
 
 	// A live announce after the initial set.
 	let second = pub_origin.create_broadcast("second").expect("create broadcast");
 	second.announce(Default::default()).expect("create broadcast");
 	let update = next_announce(&mut announcements).await;
-	assert_eq!(update.path.as_str(), "second");
+	assert_eq!(update.prefix.as_str(), "second");
 	assert!(update.kind.is_active(), "expected live announce");
 
 	// Unannounce: retracted by announce id on the wire. Dropping the announcement
 	// retracts the route; the broadcast's own end is independent.
 	second.finish();
 	let update = next_announce(&mut announcements).await;
-	assert_eq!(update.path.as_str(), "second");
+	assert_eq!(update.prefix.as_str(), "second");
 	assert!(!update.kind.is_active(), "expected retraction");
 
 	// Re-announce the same path: a fresh announce assigning a fresh id.
 	let _second = pub_origin.create_broadcast("second").expect("create broadcast");
 	_second.announce(Default::default()).expect("create broadcast");
 	let update = next_announce(&mut announcements).await;
-	assert_eq!(update.path.as_str(), "second");
+	assert_eq!(update.prefix.as_str(), "second");
 	assert!(update.kind.is_active(), "expected re-announce");
 
 	// Replace the route at "first": retract the original (retiring its announce
@@ -793,19 +793,19 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 	// Await the retraction first so the events cannot coalesce away.
 	first.finish();
 	let update = next_announce(&mut announcements).await;
-	assert_eq!(update.path.as_str(), "first");
+	assert_eq!(update.prefix.as_str(), "first");
 	assert!(!update.kind.is_active(), "expected the replaced retraction");
 	let _replacement = pub_origin.create_broadcast("first").expect("create replacement");
 	_replacement.announce(Default::default()).expect("create replacement");
 	let update = next_announce(&mut announcements).await;
-	assert_eq!(update.path.as_str(), "first");
+	assert_eq!(update.prefix.as_str(), "first");
 	assert!(update.kind.is_active(), "expected the replacement announce");
 
 	// A sentinel proves no stray event for "first" snuck in behind the replacement.
 	let _sentinel = pub_origin.create_broadcast("sentinel").expect("create broadcast");
 	_sentinel.announce(Default::default()).expect("create broadcast");
 	let update = next_announce(&mut announcements).await;
-	assert_eq!(update.path.as_str(), "sentinel");
+	assert_eq!(update.prefix.as_str(), "sentinel");
 	assert!(update.kind.is_active(), "expected sentinel announce");
 
 	drop(connection);
@@ -948,7 +948,7 @@ async fn broadcast_route_migration() {
 	// One path, announced once even though two sessions route it (the cheaper
 	// route wins the advertisement).
 	let update = next_announce(&mut announcements).await;
-	assert_eq!(update.path.as_str(), "test");
+	assert_eq!(update.prefix.as_str(), "test");
 	assert!(update.kind.is_active(), "expected announce");
 
 	// Resolve and subscribe: the cheaper route (A) serves the track.
@@ -1063,7 +1063,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 		.expect("connect failed");
 
 	let update = next_announce(&mut announcements).await;
-	assert_eq!(update.path.as_str(), "test");
+	assert_eq!(update.prefix.as_str(), "test");
 	assert!(update.kind.is_active(), "expected announce");
 	let initial = update.route;
 
@@ -1090,7 +1090,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 
 	// The subscriber sees the new chain as another active update for the prefix...
 	let update = next_announce(&mut announcements).await;
-	assert_eq!(update.path.as_str(), "test");
+	assert_eq!(update.prefix.as_str(), "test");
 	assert!(update.kind.is_active(), "a restart must not retract the route");
 	assert_ne!(initial.hops, update.route.hops, "route must change");
 	assert!(
@@ -1382,7 +1382,7 @@ async fn max_age_test(version: &str) -> Duration {
 	.expect("connect failed");
 
 	let update = next_announce(&mut announcements).await;
-	assert_eq!(update.path.as_str(), "test");
+	assert_eq!(update.prefix.as_str(), "test");
 	assert!(update.kind.is_active(), "expected announce");
 	let broadcast = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
 		.await
@@ -1695,7 +1695,7 @@ async fn broadcast_websocket() {
 		.expect("announce timed out")
 		.expect("origin closed");
 
-	assert_eq!(update.path.as_str(), "test");
+	assert_eq!(update.prefix.as_str(), "test");
 	assert!(update.kind.is_active(), "expected announce, got retraction");
 	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
 		.await
@@ -1817,7 +1817,7 @@ async fn broadcast_websocket_fallback() {
 		.expect("announce timed out")
 		.expect("origin closed");
 
-	assert_eq!(update.path.as_str(), "test");
+	assert_eq!(update.prefix.as_str(), "test");
 	assert!(update.kind.is_active(), "expected announce, got retraction");
 	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
 		.await
@@ -2088,7 +2088,7 @@ async fn quic_driver_task_inherits_connection_span() {
 	assert!(update.kind.is_active(), "expected announce, got retraction");
 	let bc = tokio::time::timeout(
 		TIMEOUT,
-		sub_consumer.request_broadcast(moq_net::Path::new(update.path.as_str())),
+		sub_consumer.request_broadcast(moq_net::Path::new(update.prefix.as_str())),
 	)
 	.await
 	.expect("request timed out")
@@ -2203,7 +2203,7 @@ async fn resubscribe_keeps_flowing_moq_lite_03() {
 		.await
 		.expect("announce timeout")
 		.expect("origin closed");
-	assert_eq!(update.path.as_str(), "test");
+	assert_eq!(update.prefix.as_str(), "test");
 	assert!(update.kind.is_active(), "expected announce");
 	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
 		.await
@@ -2345,7 +2345,7 @@ async fn idle_subscription_releases_the_viewer_count() {
 	assert!(update.kind.is_active(), "expected announce");
 	let bc = tokio::time::timeout(
 		TIMEOUT,
-		sub_consumer.request_broadcast(moq_net::Path::new(update.path.as_str())),
+		sub_consumer.request_broadcast(moq_net::Path::new(update.prefix.as_str())),
 	)
 	.await
 	.expect("request timed out")
@@ -2664,7 +2664,7 @@ async fn a_dead_session_unannounces_while_the_reconnect_retries() {
 		.expect("connect failed");
 
 	let update = next_announce(&mut announcements).await;
-	assert_eq!(update.path.as_str(), "live");
+	assert_eq!(update.prefix.as_str(), "live");
 	assert!(update.kind.is_active(), "expected the initial announce");
 
 	// The server kills the session; the loop starts redialing into the void.
@@ -2676,7 +2676,7 @@ async fn a_dead_session_unannounces_while_the_reconnect_retries() {
 
 	// The retraction lands promptly, while the connection is still retrying.
 	let update = next_announce(&mut announcements).await;
-	assert_eq!(update.path.as_str(), "live");
+	assert_eq!(update.prefix.as_str(), "live");
 	assert!(!update.kind.is_active(), "a dead session must retract, not linger");
 
 	drop(connection);
@@ -2752,7 +2752,7 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
-	assert_eq!(update.path.as_str(), "allowed/test");
+	assert_eq!(update.prefix.as_str(), "allowed/test");
 	assert!(update.kind.is_active(), "expected announce, got retraction");
 
 	// The unauthorized "denied" interest must not have torn down the session.
@@ -2841,7 +2841,7 @@ async fn wildcard_scope_test(version: &str, server_scope: &str) {
 	// Exactly alice's chat: bob's is outside the server's grant, alice's audio and the
 	// lobby are outside the client's. The match pins the room.
 	let update = next_announce(&mut announcements).await;
-	assert_eq!(update.path.as_str(), "room/alice/chat");
+	assert_eq!(update.prefix.as_str(), "room/alice/chat");
 	assert_eq!(
 		update.captures,
 		Some(vec!["alice".parse::<moq_net::Pattern>().unwrap()])
@@ -2955,7 +2955,7 @@ async fn publish_only_client_to_subscribe_only_server() {
 			.await
 			.expect("announce timed out")
 			.expect("origin closed");
-		assert_eq!(update.path.as_str(), "allowed/test");
+		assert_eq!(update.prefix.as_str(), "allowed/test");
 		assert!(update.kind.is_active(), "expected announce, got retraction");
 		let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("allowed/test"))
 			.await
@@ -3136,7 +3136,7 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
-	assert_eq!(update.path.as_str(), "test");
+	assert_eq!(update.prefix.as_str(), "test");
 	assert!(update.kind.is_active(), "expected announce, got retraction");
 	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test"))
 		.await

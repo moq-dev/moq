@@ -133,8 +133,8 @@ describe("Source error signal", () => {
 	// and selecting the fallback would leave a publisher bug to surface later as a track
 	// that never fills.
 	it("selects nothing when an escaping rendition rejects the catalog", async () => {
-		const invalidVideo = { ...config("avc1.640028"), broadcast: "../../source" };
-		const validVideo = { ...config("avc1.640028"), broadcast: "./source" };
+		const invalidVideo = { ...config("avc1.640028"), broadcast: Path.normalizeRelative("../../source") };
+		const validVideo = { ...config("avc1.640028"), broadcast: Path.normalizeRelative("./source") };
 		const audioConfig = Catalog.AudioConfigSchema.parse({
 			codec: "opus",
 			container: { kind: "legacy" },
@@ -149,8 +149,8 @@ describe("Source error signal", () => {
 				video: { renditions: { invalid: invalidVideo, fallback: validVideo } },
 				audio: {
 					renditions: {
-						invalid: { ...audioConfig, broadcast: "../../source" },
-						fallback: { ...audioConfig, broadcast: "./source" },
+						invalid: { ...audioConfig, broadcast: Path.normalizeRelative("../../source") },
+						fallback: { ...audioConfig, broadcast: Path.normalizeRelative("./source") },
 					},
 				},
 			},

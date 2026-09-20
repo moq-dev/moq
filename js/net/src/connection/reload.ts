@@ -472,8 +472,8 @@ export class Reload {
 					for (;;) {
 						const entry = await Promise.race([effect.cancel, upstream.next()]);
 						if (!entry) break;
-						if (Announce.isActive(entry.kind)) active.set(entry.path, entry);
-						else active.delete(entry.path);
+						if (Announce.isActive(entry.kind)) active.set(entry.prefix, entry);
+						else active.delete(entry.prefix);
 						producer.append(entry);
 					}
 				} catch {

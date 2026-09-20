@@ -578,7 +578,7 @@ async fn expect_announce(announced: &mut moq_net::announce::Consumer, path: &str
 			.await
 			.unwrap_or_else(|_| panic!("{who}: no announcement change within {TIMEOUT:?}"))
 			.unwrap_or_else(|| panic!("{who}: the announcement stream closed"));
-		if update.path.as_str() == path && update.kind.is_active() == want {
+		if update.prefix.as_str() == path && update.kind.is_active() == want {
 			return;
 		}
 	}
@@ -615,7 +615,7 @@ async fn no_publisher_never_delivers() {
 
 	let mut announced = subscribed.announced();
 	if let Ok(update) = tokio::time::timeout(quiet, announced.next()).await {
-		let path = update.map(|update| update.path.to_string());
+		let path = update.map(|update| update.prefix.to_string());
 		panic!("the announcement stream reported {path:?} with no publisher");
 	}
 

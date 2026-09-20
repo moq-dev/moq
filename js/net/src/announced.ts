@@ -8,7 +8,7 @@ import type { Route } from "./hop.js";
 import type * as Path from "./path.js";
 
 /**
- * What an {@link Update} reports about its path.
+ * What an {@link Update} reports about its prefix.
  *
  * @public
  */
@@ -17,10 +17,11 @@ export type Kind = "announced" | "updated" | "retracted";
 /**
  * A route announcement, update, or retraction.
  *
- * A route claims that {@link path} and every path beneath it can be served; it
- * carries no broadcast. By convention a publisher announces each broadcast's exact
- * path, so enumerating routes enumerates broadcasts; resolve one with the origin's
- * `request(path)`. Narrow with a {@link Path.Pattern} locally to follow a subset.
+ * An announcement is always a prefix, never a broadcast: a route claims that
+ * {@link prefix} and every path beneath it can be served. By convention a publisher
+ * announces each broadcast's exact path, so enumerating routes enumerates broadcasts;
+ * resolve one with the origin's `request(path)`. Narrow with a {@link Path.Pattern}
+ * locally to follow a subset.
  *
  * @public
  */
@@ -28,10 +29,10 @@ export interface Update {
 	/**
 	 * The prefix the route covers, relative to the origin (for a session, its URL path).
 	 */
-	path: Path.Valid;
+	prefix: Path.Valid;
 	/** What the filter's wildcards stood for, when this prefix pins all of them. */
 	captures: Path.Pattern[] | undefined;
-	/** Whether the path was announced, re-priced, or retracted. */
+	/** Whether the prefix was announced, re-priced, or retracted. */
 	kind: Kind;
 	/** Hops and cost of the route; on a retraction, its last advertised values. */
 	route: Route;

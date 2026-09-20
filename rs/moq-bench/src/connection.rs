@@ -339,7 +339,7 @@ async fn subscribe(
 				if !update.kind.is_active() {
 					continue;
 				}
-				let path = update.path.to_string();
+				let path = update.prefix.to_string();
 				if own.contains(&path) || !seen.insert(path.clone()) {
 					continue;
 				}
@@ -366,7 +366,7 @@ async fn subscribe(
 		if !update.kind.is_active() {
 			continue;
 		}
-		let path = update.path.to_string();
+		let path = update.prefix.to_string();
 		if own.contains(&path) || !seen.insert(path.clone()) {
 			continue;
 		}

@@ -188,7 +188,7 @@ impl EgressSource {
 	}
 }
 
-fn valid_reference(source: &moq_mux::Source, broadcast: Option<&moq_net::PathRelative<'_>>) -> bool {
+fn valid_reference(source: &moq_mux::Source, broadcast: Option<&moq_net::path::Relative<'_>>) -> bool {
 	source.resolve_reference(broadcast).is_some()
 }
 
@@ -309,7 +309,7 @@ mod tests {
 
 	use super::*;
 	use hang::catalog::{AudioConfig, H264, VideoCodec, VideoConfig};
-	use moq_net::PathRelative;
+	use moq_net::path::Relative;
 
 	#[test]
 	fn catalog_codecs_ignores_codecs_available_only_via_escaping_references() {
@@ -318,7 +318,7 @@ mod tests {
 		let mut catalog = Catalog::default();
 
 		let mut escaped_audio = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
-		escaped_audio.broadcast = Some(PathRelative::new("../../source").to_owned());
+		escaped_audio.broadcast = Some(Relative::new("../../source").to_owned());
 		catalog.audio.renditions.insert("opus".to_string(), escaped_audio);
 
 		let mut escaped_video = VideoConfig::new(H264 {
@@ -327,11 +327,11 @@ mod tests {
 			level: 0x1e,
 			inline: false,
 		});
-		escaped_video.broadcast = Some(PathRelative::new("../../source").to_owned());
+		escaped_video.broadcast = Some(Relative::new("../../source").to_owned());
 		catalog.video.renditions.insert("h264".to_string(), escaped_video);
 
 		let mut valid_video = VideoConfig::new(VideoCodec::VP8);
-		valid_video.broadcast = Some(PathRelative::new("./source").to_owned());
+		valid_video.broadcast = Some(Relative::new("./source").to_owned());
 		catalog.video.renditions.insert("vp8".to_string(), valid_video);
 
 		let (writes_tx, writes_rx) = mpsc::channel(1);

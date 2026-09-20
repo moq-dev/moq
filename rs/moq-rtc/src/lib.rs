@@ -107,7 +107,7 @@ mod tests {
 			.await
 			.expect("source announcement timed out")
 			.expect("source origin closed");
-		assert_eq!(announcement.path.as_str(), "source");
+		assert_eq!(announcement.prefix.as_str(), "source");
 		assert!(announcement.kind.is_active(), "source was unannounced");
 		drop(announcements);
 

@@ -1587,7 +1587,7 @@ mod tests {
 			.await
 			.expect("announce timeout")
 			.expect("origin closed");
-		assert_eq!(update.path.as_str(), "test");
+		assert_eq!(update.prefix.as_str(), "test");
 		assert!(update.kind.is_active());
 		let broadcast = consumer.request_broadcast("test").await.expect("resolve");
 
