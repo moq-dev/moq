@@ -140,7 +140,7 @@ pub enum Error {
 impl From<moq_auth::Error> for Error {
 	fn from(err: moq_auth::Error) -> Self {
 		match err {
-			moq_auth::Error::Refused => Self::Refused,
+			moq_auth::Error::Refused | moq_auth::Error::UselessGrant => Self::Refused,
 			other => Self::Unavailable(other.to_string()),
 		}
 	}
@@ -563,9 +563,8 @@ mod tests {
 			let lease = auth.admit(request()).await.expect("granted");
 			assert_eq!(lease.token().root, Path::new("anon/room").to_owned());
 			assert!(matches!(auth.admit(request()).await, Err(Error::Refused)));
-			for _ in 0..2 {
-				assert!(matches!(auth.admit(request()).await, Err(Error::Unavailable(_))));
-			}
+			assert!(matches!(auth.admit(request()).await, Err(Error::Refused)));
+			assert!(matches!(auth.admit(request()).await, Err(Error::Unavailable(_))));
 		};
 		let (admissions, ()) = tokio::join!(decide, admit);
 
