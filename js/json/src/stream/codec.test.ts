@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Group, Track } from "@moq/net";
+import { Group, Error as NetError, Track } from "@moq/net";
 import { Decoder } from "./decoder.ts";
 import { Encoder } from "./encoder.ts";
 import { Producer } from "./producer.ts";
@@ -175,11 +175,11 @@ test("a failed write on the very first record still ends the track", async () =>
 
 	// Serializes past the group cache limit, so `appendGroup` succeeds and `writeFrame` rejects it.
 	const oversized = "x".repeat(Group.MAX_GROUP_CACHE_BYTES + 1);
-	expect(() => producer.append(oversized)).toThrow(Group.FrameTooLarge);
+	expect(() => producer.append(oversized)).toThrow(NetError.FrameTooLarge);
 
 	// The consumer is handed the group that was already published, and reading it surfaces the
 	// abort. Without ending the track that group stays open and empty, so this read hangs instead.
 	const group = await subscriber.nextGroup();
 	expect(group).toBeDefined();
-	await expect(group?.readFrame()).rejects.toThrow(Group.FrameTooLarge);
+	await expect(group?.readFrame()).rejects.toThrow(NetError.FrameTooLarge);
 });

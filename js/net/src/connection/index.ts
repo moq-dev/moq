@@ -10,9 +10,10 @@ export {
 	type ConnectProps,
 	certificateHash,
 	connect,
-	type WebSocketOptions,
+	type WebSocketProps,
 	type WebTransportProps,
 } from "./connect.ts";
+export type { Established } from "./established.ts";
 export { Connection, type ConnectionProps } from "./pool.ts";
 export type { Probe, Stats } from "./stats.ts";
 export type { Transport } from "./transport.ts";

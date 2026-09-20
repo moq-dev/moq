@@ -8,8 +8,13 @@ import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import * as Time from "../time.ts";
-import { accept } from "./index.ts";
+import { wireOf } from "../wire.ts";
+import { type AcceptProps, accept as acceptSession } from "./index.ts";
 import { Reload, type ReloadProps } from "./reload.ts";
+
+function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "transport" | "url"> = {}) {
+	return acceptSession({ transport, url, ...props });
+}
 
 function publish(origin: OriginProducer, path: Path.Valid) {
 	const broadcast = origin.createBroadcast(path);
@@ -208,7 +213,7 @@ async function waitUntil(pred: () => boolean): Promise<void> {
 	throw new Error("timed out waiting for condition");
 }
 
-test("announcedBroadcast follows the reconnect loop", async () => {
+test("an announced request follows the reconnect loop", async () => {
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 
@@ -216,6 +221,7 @@ test("announcedBroadcast follows the reconnect loop", async () => {
 	// handshake finishes. The client therefore always asks before the broadcast exists.
 	const sessions: { close: () => void }[] = [];
 	const published: BroadcastProducer[] = [];
+	const clientOrigin = new OriginProducer();
 	const stub = function StubWebTransport() {
 		const pair = createMockTransportPair(Lite.ALPN_06_WIP);
 		const origin = new OriginProducer();
@@ -232,8 +238,9 @@ test("announcedBroadcast follows the reconnect loop", async () => {
 		url,
 		websocket: { enabled: false },
 		delay: { initial: Time.Milli(10), multiplier: 1, max: Time.Milli(10) },
+		consume: clientOrigin,
 	});
-	const watched = reload.announcedBroadcast(Path.from("late"));
+	const watched = clientOrigin.request(Path.from("late"), { announced: true });
 
 	try {
 		await waitUntil(() => watched.active.peek() !== undefined);
@@ -249,6 +256,7 @@ test("announcedBroadcast follows the reconnect loop", async () => {
 	} finally {
 		watched.close();
 		reload.close();
+		clientOrigin.close();
 		for (const broadcast of published) broadcast.close();
 		for (const session of sessions) session.close();
 		globalThis.WebTransport = original;
@@ -527,17 +535,17 @@ test("origins span reconnects: local re-announces, remote re-populates", async (
 	try {
 		// First session: the server's broadcast lands in the client origin, and the client's
 		// publish lands in the server's.
-		await waitUntil(() => reader.routes(Path.from("remote")));
-		await waitUntil(() => servers[0]?.saw.routes(Path.from("mine")));
+		await waitUntil(() => wireOf(reader).routes(Path.from("remote")));
+		await waitUntil(() => (servers[0] ? wireOf(servers[0].saw).routes(Path.from("mine")) : false));
 
 		// Kill the session: the remote entry retracts, the local publish stays put.
 		servers[0]?.session.close();
-		await waitUntil(() => !reader.routes(Path.from("remote")));
+		await waitUntil(() => !wireOf(reader).routes(Path.from("remote")));
 
 		// The reconnect re-announces the (untouched) publish and re-populates the table.
 		await waitUntil(() => servers.length > 1);
-		await waitUntil(() => reader.routes(Path.from("remote")));
-		await waitUntil(() => servers[1]?.saw.routes(Path.from("mine")));
+		await waitUntil(() => wireOf(reader).routes(Path.from("remote")));
+		await waitUntil(() => (servers[1] ? wireOf(servers[1].saw).routes(Path.from("mine")) : false));
 	} finally {
 		reload.close();
 		publishOrigin.close();

@@ -249,7 +249,7 @@ export class Consumer {
 			// frames decoded before the error are still valid and playable.
 			// The tail is gone though, so the next group does not continue this one.
 			group.truncated = true;
-			if (!(err instanceof Moq.StreamError)) throw err;
+			if (!(err instanceof Moq.Error.Stream)) throw err;
 		} finally {
 			group.done = true;
 

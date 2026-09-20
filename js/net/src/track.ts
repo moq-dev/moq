@@ -5,15 +5,18 @@
  */
 import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type { Datagram } from "./datagram.ts";
+import { GroupTooLarge, TooFarBehind } from "./error.ts";
+import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import {
-	type Frame,
-	type Consumer as GroupConsumer,
-	Producer as GroupProducer,
-	GroupTooLarge,
-	Lagged,
-} from "./group.ts";
-import { hooks, type Recv, type TrackRequestOptions, type TrackSequence, type TrackSequences } from "./internal.ts";
-import { Timescale, type Timestamp } from "./time.ts";
+	groupBounds,
+	hooks,
+	type Recv,
+	type TrackRequestOptions,
+	type TrackSequence,
+	type TrackSequences,
+} from "./internal.ts";
+import { Milli, Timescale, type Timestamp } from "./time.ts";
+import { type Broadcast as BroadcastWire, registerTrackConsumer } from "./wire.ts";
 
 export type { Datagram } from "./datagram.ts";
 
@@ -22,7 +25,7 @@ export type { Datagram } from "./datagram.ts";
 const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 
 /** Default {@link Info.maxAge} window (milliseconds) when the publisher does not set one. */
-export const DEFAULT_MAX_AGE_MS = 5000;
+export const DEFAULT_MAX_AGE_MS = Milli(5000);
 
 /**
  * How long (milliseconds) a datagram stays in the per-subscriber buffer before it is dropped.
@@ -72,7 +75,7 @@ export interface Info {
 	 * Rounded up to a whole millisecond by {@link infoDefaults}, which refuses a negative
 	 * or non-finite value and a result past `Number.MAX_SAFE_INTEGER`.
 	 */
-	maxAge: number;
+	maxAge: Milli;
 	/** Tie-break priority between subscriptions of equal subscriber priority (`0..=255`). */
 	priority: number;
 }
@@ -83,7 +86,7 @@ export interface Info {
 // millisecond is expected; ceil rather than round, because a budget shortened by rounding
 // skips a group the subscriber still wants. Anything that is not a duration is refused
 // here, where the field is named, rather than deep in the encoder.
-function maxAgeMillis(value: number): number {
+function maxAgeMillis(value: Milli): Milli {
 	if (!Number.isFinite(value) || value < 0) {
 		throw new RangeError(`maxAge must be a non-negative number of milliseconds: ${value}`);
 	}
@@ -91,7 +94,7 @@ function maxAgeMillis(value: number): number {
 	if (!Number.isSafeInteger(millis)) {
 		throw new RangeError(`maxAge exceeds the safe integer millisecond range: ${value}`);
 	}
-	return millis;
+	return Milli(millis);
 }
 
 function priorityByte(value: number): number {
@@ -121,22 +124,6 @@ export interface Groups {
 	end?: Bound;
 }
 
-// Validate before changing a cursor so a malformed end cannot partly advance it.
-function groupBounds(groups: Groups): { start: number; end?: number } {
-	const bound = (value: Bound | undefined, start: boolean): number | undefined => {
-		if (value === undefined) return undefined;
-		if ((value.included === undefined) === (value.excluded === undefined)) {
-			throw new Error("a group bound must be either included or excluded");
-		}
-		const sequence = value.included ?? value.excluded;
-		if (sequence === undefined || !Number.isSafeInteger(sequence) || sequence < 0) {
-			throw new Error("a group bound must be a non-negative safe integer");
-		}
-		return sequence + (start ? Number(value.excluded !== undefined) : Number(value.included !== undefined));
-	};
-	return { start: bound(groups.start, true) ?? 0, end: bound(groups.end, false) };
-}
-
 /**
  * Per-subscription options, requested when a subscription opens and adjustable later via
  * {@link Subscriber.update}. Mirrors the Rust `Subscription`.
@@ -150,7 +137,7 @@ export interface Subscription {
 	 * shortened. A negative or non-finite value, or one past `Number.MAX_SAFE_INTEGER`
 	 * after rounding, is refused.
 	 */
-	maxAge?: number;
+	maxAge?: Milli;
 	/**
 	 * The lowest group the publisher may deliver (a floor), or omit for none.
 	 *
@@ -159,22 +146,20 @@ export interface Subscription {
 	 * above the live edge simply waits there (a resumed subscription naming where it left
 	 * off).
 	 */
-	startGroup?: number;
-	/**
-	 * First group the publisher should not deliver (exclusive), or omit for no end.
-	 * `0` is the empty range.
-	 */
-	endGroup?: number;
+	groups?: Groups;
 }
 
 // Materialize the defaults at the model boundary so every layer observes a complete
 // subscription rather than interpreting an omitted field differently.
 function subscriptionDefaults(subscription: Subscription = {}): Subscription {
+	const bounds = groupBounds(subscription.groups ?? {});
 	return {
 		priority: priorityByte(subscription.priority ?? 0),
-		maxAge: maxAgeMillis(subscription.maxAge ?? 0),
-		startGroup: subscription.startGroup,
-		endGroup: subscription.endGroup,
+		maxAge: maxAgeMillis(subscription.maxAge ?? Milli.zero),
+		groups: {
+			start: subscription.groups?.start === undefined ? undefined : { included: bounds.start },
+			end: bounds.end === undefined ? undefined : { excluded: bounds.end },
+		},
 	};
 }
 
@@ -190,27 +175,25 @@ function combineSubscriptions(states: Iterable<TrackState>): Subscription | unde
 		}
 
 		combined.priority = Math.max(combined.priority ?? 0, subscription.priority ?? 0);
-		combined.maxAge = Math.max(combined.maxAge ?? 0, subscription.maxAge ?? 0);
+		combined.maxAge = Milli(Math.max(combined.maxAge ?? Milli.zero, subscription.maxAge ?? Milli.zero));
 
 		// A floor only restricts, so a subscriber without one clears the aggregate:
 		// its budget may reach below any floor the others set.
-		if (combined.startGroup === undefined || subscription.startGroup === undefined) {
-			combined.startGroup = undefined;
-		} else {
-			combined.startGroup = Math.min(combined.startGroup, subscription.startGroup);
-		}
-
-		if (combined.endGroup === undefined || subscription.endGroup === undefined) {
-			combined.endGroup = undefined;
-		} else {
-			combined.endGroup = Math.max(combined.endGroup, subscription.endGroup);
-		}
+		const a = groupBounds(combined.groups ?? {});
+		const b = groupBounds(subscription.groups ?? {});
+		combined.groups = {
+			start:
+				combined.groups?.start === undefined || subscription.groups?.start === undefined
+					? undefined
+					: { included: Math.min(a.start, b.start) },
+			end: a.end === undefined || b.end === undefined ? undefined : { excluded: Math.max(a.end, b.end) },
+		};
 	}
 	return combined;
 }
 
 /**
- * A request for a track the peer wants, yielded by `Broadcast.Producer.requested`.
+ * A request for a track the peer wants, delivered to the publishing wire layer.
  *
  * Created internally by the broadcast when a subscription (or info lookup) needs a track
  * served; answer it with {@link accept} or {@link reject}.
@@ -268,22 +251,6 @@ export interface FetchGroupOptions {
 }
 
 /**
- * The per-track operations a lazy {@link Consumer} delegates to the broadcast it came from.
- *
- * Implemented by `broadcast.Producer` / `broadcast.Consumer` (and the wire-layer subclasses
- * that resolve them over the network), so a track handle holds a reference to its broadcast
- * and calls methods on it rather than capturing a bag of callbacks.
- */
-export interface Broadcast {
-	/** Open a live subscription to the named track. */
-	subscribe(name: string, options?: Subscription): Subscriber;
-	/** Resolve the named track's immutable info. */
-	resolveTrackInfo(name: string): Promise<Info>;
-	/** Fetch a single group of the named track by sequence. */
-	fetchGroup(name: string, sequence: number, options?: FetchGroupOptions): Promise<GroupConsumer>;
-}
-
-/**
  * A lazy handle to a track on a consumed broadcast.
  *
  * @public
@@ -292,11 +259,15 @@ export class Consumer {
 	/** The track name. */
 	readonly name: string;
 
-	#broadcast: Broadcast;
+	#broadcast: BroadcastWire;
 
-	constructor(name: string, broadcast: Broadcast) {
+	private constructor(name: string, broadcast: BroadcastWire) {
 		this.name = name;
 		this.#broadcast = broadcast;
+	}
+
+	static {
+		registerTrackConsumer((name, broadcast) => new Consumer(name, broadcast));
 	}
 
 	/**
@@ -597,7 +568,7 @@ export class Producer {
 	#updateSubscription(): void {
 		const combined = combineSubscriptions(this.#sinks);
 		const retained = this.#state.info.peek()?.maxAge;
-		if (combined && retained !== undefined) combined.maxAge = Math.min(combined.maxAge ?? 0, retained);
+		if (combined && retained !== undefined) combined.maxAge = Milli.min(combined.maxAge ?? Milli.zero, retained);
 		this.#state.update.set(combined);
 	}
 
@@ -622,7 +593,7 @@ export class Producer {
 		// the mirrors below would otherwise report a clean finish to a reader that had
 		// drained it. The usual case, an already-closed group aging out, keeps its own
 		// terminal state.
-		if (!entry.group.isClosed) entry.group.close(new Lagged());
+		if (!entry.group.isClosed) entry.group.close(new TooFarBehind());
 		for (const [sink, mirror] of entry.mirrors) {
 			hooks.evictGroup(mirror);
 			sink.groups.mutate((groups) => {
@@ -982,7 +953,7 @@ export class Subscriber {
 		// The cursor's floor is the group the subscription named, or 0. A floor is the
 		// only thing a start contributes; {@link Subscription.maxAge} is what asks for
 		// data, and delivery skips everything above the floor that the budget convicts.
-		this.#cursor.set({ start: state.update.peek()?.startGroup ?? 0 });
+		this.#cursor.set({ start: groupBounds(state.update.peek()?.groups ?? {}).start });
 	}
 
 	static {
@@ -1309,7 +1280,7 @@ export class Subscriber {
 	 * so frames never run backwards: a late lower-sequence group is skipped, and so is
 	 * one every frame of which `maxAge` proves is too old. A group the budget abandons
 	 * mid-stall ends cleanly and the cursor resyncs from the next group; a gap inside a
-	 * group still surfaces as {@link Lagged} or {@link GroupTooLarge}.
+	 * group still surfaces as {@link TooFarBehind} or {@link GroupTooLarge}.
 	 */
 	async #readFrame(): Promise<({ group: number; frame: number } & Frame) | undefined> {
 		for (;;) {
@@ -1327,7 +1298,7 @@ export class Subscriber {
 				// only what the caller can act on (a gap, or the track's own abort).
 				this.#frameGroup = undefined;
 				group.close();
-				if (err instanceof Lagged || err instanceof GroupTooLarge) throw err;
+				if (err instanceof TooFarBehind || err instanceof GroupTooLarge) throw err;
 				const closed = this.#state.closed.peek();
 				if (closed instanceof Error) throw closed;
 				continue;

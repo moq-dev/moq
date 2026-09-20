@@ -53,7 +53,7 @@ export class Producer {
 		// Check before opening a group. `appendGroup` publishes immediately, so letting `writeFrame`
 		// reject the frame would leave an empty newest group behind: a snapshot consumer jumps to the
 		// newest, so the previous value would be lost even though this update threw.
-		if (encoded.byteLength > Moq.Group.MAX_GROUP_CACHE_BYTES) throw new Moq.Group.FrameTooLarge();
+		if (encoded.byteLength > Moq.Group.MAX_GROUP_CACHE_BYTES) throw new Moq.Error.FrameTooLarge();
 
 		const group = this.#track.appendGroup();
 		try {

@@ -88,7 +88,7 @@ describe("Renderer", () => {
 			},
 			source: { out: { catalog } },
 		} as unknown as Decoder;
-		const renderer = new Renderer(decoder, { canvas, visible: "never" });
+		const renderer = new Renderer({ decoder, canvas, visible: "never" });
 
 		try {
 			await settle();

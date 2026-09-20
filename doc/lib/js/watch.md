@@ -33,9 +33,8 @@ in sync at the latency you ask for.
 | `delay` | How far playback trails the live edge: `"auto"` (derived from RTT, the default), a duration like `"300ms"`, or `"instant"` to paint frames as they decode with no pacing at all. |
 | `buffer` | Future-dated media held beyond the live edge before playback skips ahead, e.g. `"30s"`. Defaults to none. |
 | `captions` | The caption track to show, or absent for off. `el.text.out.available` lists the renditions for a picker. |
-| `jitter` | The jitter buffer in ms. |
 | `visible` | Only subscribe to video while the element is on screen: a margin (`"20%"` default, `"200px"`), `"always"`, or `"never"`. |
-| `reload` | Wait for the broadcast to be announced before subscribing (default on), so a player can be mounted before the stream exists. |
+| `announced` | Wait for the broadcast to be announced before subscribing (default on), so a player can be mounted before the stream exists. |
 | `catalog-format` | `hang` (default, from the `.hang` suffix), `hangz` (compressed), `msf`, or `manual` to supply the catalog yourself. |
 
 The overlay adds play/pause, volume, fullscreen, a quality selector, a
@@ -143,7 +142,8 @@ const broadcast = new Watch.Broadcast({ origin: connection.origin, name: Moq.Pat
 ```
 
 `Watch.Broadcast`, `Video.Decoder`, `Video.Renderer`, `Audio.Decoder`, and
-`Audio.Emitter` are the pieces the element assembles; every input and output
+`Audio.Emitter` are the pieces the element assembles. Their constructors take
+one properties object, and every input and output
 is a signal from [`@moq/signals`](/lib/js/signals). Load from a CDN
 (`https://esm.sh/@moq/watch/element`) for a no-build embed.
 

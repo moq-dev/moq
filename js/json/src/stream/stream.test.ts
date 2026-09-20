@@ -83,7 +83,7 @@ test("a second group is reported while the first is still open", async () => {
 
 	// Ask for a replay window, so the first group is delivered rather than skipped by the
 	// subscriber's default max-age budget once a newer group exists.
-	const consumer = new Consumer<Rec>({ track: track.subscribe({ maxAge: 30_000 }) });
+	const consumer = new Consumer<Rec>({ track: track.subscribe({ maxAge: Time.Milli(30_000) }) });
 	expect(await consumer.next()).toEqual({ n: 0 });
 	await expect(consumer.next()).rejects.toThrow(Rolled);
 

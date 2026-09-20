@@ -103,7 +103,7 @@ test("rendition.close() unregisters the name and drops it from the catalog", asy
 	broadcast.close();
 });
 
-test("serving a subscription hands the producer to the rendition and clears it when the track closes", async () => {
+test("subscriber demand hands the producer to the rendition and clears it when the track closes", async () => {
 	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("test.hang") });
 	await settle();
 
@@ -111,7 +111,8 @@ test("serving a subscription hands the producer to the rendition and clears it w
 	if (!net) throw new Error("expected a network producer once connected");
 
 	const rendition = broadcast.video("video");
-	const subscriber = net.subscribe("video");
+	await settle();
+	const subscriber = net.track("video").subscribe();
 	await settle();
 
 	// The request loop accepted the subscription and handed the producer to the rendition.
@@ -128,7 +129,7 @@ test("serving a subscription hands the producer to the rendition and clears it w
 	broadcast.close();
 });
 
-test("serves the catalog through the request loop and releases the scope when the subscriber leaves", async () => {
+test("serves the catalog through a shared static track", async () => {
 	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("test.hang") });
 	broadcast.video("video").config.set(videoConfig);
 	await settle();
@@ -136,8 +137,7 @@ test("serves the catalog through the request loop and releases the scope when th
 	const net = broadcast.net.peek();
 	if (!net) throw new Error("expected a network producer once connected");
 
-	// Subscribing to the catalog track drives the per-subscription serving scope.
-	const subscriber = net.subscribe(Broadcast.CATALOG_TRACK);
+	const subscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
 	const catalog = await new Json.Snapshot.Consumer<Catalog.Root>({ track: subscriber }).next();
 	expect(catalog?.video?.renditions.video?.codec).toBe("avc1.640028");
 

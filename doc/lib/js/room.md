@@ -26,7 +26,7 @@ const connection = new Connection({
 });
 
 const local = new Local({
-    origin: connection.origin,
+	connection,
     identity: Path.from("alice"),
     user: { name: "Alice" },
 });

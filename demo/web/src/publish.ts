@@ -404,7 +404,7 @@ meta.run((effect) => {
 	if (!net) return;
 
 	// A day-long cache so a viewer joining long after the last edit still replays the value.
-	const track = net.createTrack(META_TRACK, { maxAge: 86_400_000 });
+	const track = net.createTrack(META_TRACK, { maxAge: Net.Time.Milli(86_400_000) });
 	effect.cleanup(() => track.close());
 
 	const producer = new Json.Snapshot.Producer<unknown>({ track });
@@ -456,7 +456,8 @@ $("publish-graphs").append(captureGraph.el, uploadGraph.el, rttGraph.el);
 // a signal coalesces a burst into one notification, which undercounts the rate.
 let frames = 0;
 viz.run((effect) => {
-	const fanout = effect.get(publish.capture.out.frames);
+	const capture = effect.get(publish.video.in.capture);
+	const fanout = capture ? effect.get(capture.out.frames) : undefined;
 	if (!fanout) return;
 
 	const reader = fanout.subscribe(effect).getReader();

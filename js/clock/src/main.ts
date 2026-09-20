@@ -74,7 +74,7 @@ ENVIRONMENT VARIABLES:
 async function publish(config: Config) {
 	// The origin holds what we publish; the connection announces and serves it.
 	const origin = new Moq.Origin.Producer();
-	await Moq.Connection.connect(new URL(config.url), { publish: origin.consume() });
+	const connection = await Moq.Connection.connect({ url: new URL(config.url), publish: origin.consume() });
 	console.log("✅ Connected to relay:", config.url);
 
 	// Create a new "broadcast", which is a collection of tracks.
@@ -83,19 +83,8 @@ async function publish(config: Config) {
 
 	console.log("✅ Published broadcast:", config.broadcast);
 
-	// Wait until we get a subscription for the track
-	for (;;) {
-		const request = await broadcast.requested();
-		if (!request) break;
-
-		if (request.name === config.track) {
-			// Accept to commit the track's immutable properties (so a lite-05 TRACK
-			// request resolves) and obtain the Track to produce into.
-			void publishTrack(request.accept());
-		} else {
-			request.reject(new Error("not found"));
-		}
-	}
+	void publishTrack(broadcast.createTrack(config.track));
+	await connection.closed;
 }
 
 async function publishTrack(track: Moq.Track.Producer) {
@@ -141,10 +130,16 @@ async function publishTrack(track: Moq.Track.Producer) {
 }
 
 async function subscribe(config: Config) {
-	const connection = await Moq.Connection.connect(new URL(config.url));
+	const origin = new Moq.Origin.Producer();
+	const connection = await Moq.Connection.connect({ url: new URL(config.url), consume: origin });
 	console.log("✅ Connected to relay:", config.url);
 
-	const broadcast = connection.consume(Moq.Path.from(config.broadcast));
+	const request = origin.request(Moq.Path.from(config.broadcast));
+	let broadcast = request.active.peek();
+	while (!broadcast) {
+		await request.active.changed();
+		broadcast = request.active.peek();
+	}
 	const track = broadcast.track(config.track).subscribe({ priority: 0 });
 
 	console.log("✅ Subscribed to track:", config.track);
@@ -185,6 +180,9 @@ async function subscribe(config: Config) {
 			console.log(clockEmoji, base + seconds);
 		}
 	}
+
+	connection.close();
+	origin.close();
 }
 
 // Wait for the WebTransport polyfill to be ready

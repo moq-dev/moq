@@ -62,4 +62,37 @@ describe("delay and buffer", () => {
 		expect(sync.out.maxAge.peek()).toBe(0 as Time.Milli);
 		sync.close();
 	});
+
+	it("includes registered decoder jitter until the decoder unregisters", async () => {
+		const media = new Signal<Time.Milli | undefined>(20 as Time.Milli);
+		const sync = new Sync({ delay: 100 as Time.Milli });
+		const unregister = sync.register(media);
+		await flush();
+		expect(sync.out.delay.peek()).toBe(120 as Time.Milli);
+
+		media.set(80 as Time.Milli);
+		await flush();
+		expect(sync.out.delay.peek()).toBe(180 as Time.Milli);
+
+		unregister();
+		await flush();
+		expect(sync.out.delay.peek()).toBe(100 as Time.Milli);
+		sync.close();
+	});
+
+	it("unregisters duplicate jitter inputs independently", async () => {
+		const media = new Signal<Time.Milli | undefined>(20 as Time.Milli);
+		const sync = new Sync({ delay: 100 as Time.Milli });
+		const unregisterFirst = sync.register(media);
+		const unregisterSecond = sync.register(media);
+
+		unregisterFirst();
+		await flush();
+		expect(sync.out.delay.peek()).toBe(120 as Time.Milli);
+
+		unregisterSecond();
+		await flush();
+		expect(sync.out.delay.peek()).toBe(100 as Time.Milli);
+		sync.close();
+	});
 });

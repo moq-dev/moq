@@ -6,6 +6,7 @@ import { Route } from "./hop.ts";
 import type { Consumer } from "./origin.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
+import { wireOf } from "./wire.ts";
 
 function publish(origin: Producer, path: Path.Valid) {
 	const broadcast = origin.createBroadcast(path);
@@ -15,7 +16,7 @@ function publish(origin: Producer, path: Path.Valid) {
 
 /** Land a received prefix, served from `consume`, the way a session does. */
 function serve(origin: Producer, prefix: Path.Valid, consume: () => BroadcastConsumer, route: Route = Route.default) {
-	const handle = origin.receive(prefix, route);
+	const handle = wireOf(origin).receive(prefix, route);
 	void (async () => {
 		try {
 			for await (const request of handle.requested()) {
@@ -58,7 +59,7 @@ test("a published broadcast resolves by path", async () => {
 	const consumer = origin.consume();
 
 	const path = Path.from("room");
-	expect(consumer.routes(path)).toBe(false);
+	expect(wireOf(consumer).routes(path)).toBe(false);
 
 	const broadcast = publish(origin, path);
 	broadcast.createTrack("video");
@@ -67,7 +68,7 @@ test("a published broadcast resolves by path", async () => {
 	expect(handle).toBeDefined();
 
 	// The handle reaches the published tracks.
-	const track = handle?.subscribe("video");
+	const track = handle?.track("video").subscribe();
 	expect(track).toBeDefined();
 	track?.close();
 
@@ -82,11 +83,11 @@ test("closing the producer unpublishes the path", async () => {
 	const path = Path.from("room");
 
 	const broadcast = publish(origin, path);
-	expect(consumer.routes(path)).toBe(true);
+	expect(wireOf(consumer).routes(path)).toBe(true);
 
 	broadcast.close();
 	await settle();
-	expect(consumer.routes(path)).toBe(false);
+	expect(wireOf(consumer).routes(path)).toBe(false);
 
 	origin.close();
 });
@@ -109,7 +110,7 @@ test("a stale broadcast closing does not unpublish a republished path", async ()
 
 	second.close();
 	await settle();
-	expect(consumer.routes(path)).toBe(false);
+	expect(wireOf(consumer).routes(path)).toBe(false);
 
 	origin.close();
 });
@@ -165,7 +166,7 @@ test("closing the origin closes every routed broadcast", async () => {
 	expect(a.closed.peek()).toBe(abort);
 	expect(b.closed.peek()).toBe(abort);
 
-	expect(consumer.routes(Path.from("a"))).toBe(false);
+	expect(wireOf(consumer).routes(Path.from("a"))).toBe(false);
 	expect(() => publish(origin, Path.from("late"))).toThrow();
 
 	// Idempotent: the first close wins.
@@ -178,7 +179,7 @@ test("the table is reactive", async () => {
 	const consumer = origin.consume();
 	const path = Path.from("room");
 
-	const changed = consumer.broadcasts.changed();
+	const changed = wireOf(consumer).broadcasts.changed();
 	const broadcast = publish(origin, path);
 
 	const table = await changed;
@@ -234,7 +235,7 @@ test("a remote entry resolves by path and retracts on dispose", async () => {
 
 	dispose();
 	expect(await announced.next()).toMatchObject({ path: path, kind: "retracted" });
-	expect(consumer.routes(path)).toBe(false);
+	expect(wireOf(consumer).routes(path)).toBe(false);
 
 	announced.close();
 	upstream.close();
@@ -275,7 +276,7 @@ test("a local publish shadows a remote entry", async () => {
 
 	// Local wins: the handle reaches the local track, not the remote one.
 	const handle = await routed(consumer, path);
-	const track = handle?.subscribe("local-track");
+	const track = handle?.track("local-track").subscribe();
 	expect(track).toBeDefined();
 	track?.close();
 	handle?.close();
@@ -305,7 +306,7 @@ test("the publisher-facing table excludes remote entries", async () => {
 	serve(origin, Path.from("theirs"), provider(upstream));
 
 	// What a session announces to a peer: local only, so a shared origin cannot echo.
-	const table = consumer.broadcasts.peek();
+	const table = wireOf(consumer).broadcasts.peek();
 	expect(table?.has(Path.from("mine"))).toBe(true);
 	expect(table?.has(Path.from("theirs"))).toBe(false);
 
@@ -337,9 +338,9 @@ test("a request resolves once a front answers, and survives its withdrawal", asy
 
 	// A session answers (simulated): the slot's front resolves the request.
 	const upstream = new BroadcastProducer();
-	const slot = origin.requests.peek()?.get(path);
+	const slot = wireOf(origin).requests.peek()?.get(path);
 	expect(slot).toBeDefined();
-	expect(origin.answer(path, upstream.consume())).toBeDefined();
+	expect(wireOf(origin).answer(path, upstream.consume())).toBeDefined();
 	expect(request.active.peek()).toBeDefined();
 
 	// A second request for the same path shares the answer, each through a handle of its
@@ -354,7 +355,7 @@ test("a request resolves once a front answers, and survives its withdrawal", asy
 	// effect rerun can re-acquire the slot without dropping the answer.
 	request.close();
 	await settle();
-	expect(origin.requests.peek()?.has(path)).toBe(false);
+	expect(wireOf(origin).requests.peek()?.has(path)).toBe(false);
 	expect(upstream.closed.peek()).not.toBeUndefined();
 
 	origin.close();
@@ -367,7 +368,7 @@ test("a request closed and retaken in the same tick keeps its answer", async () 
 
 	const first = consumer.request(path);
 	const upstream = new BroadcastProducer();
-	const withdraw = origin.answer(path, upstream.consume());
+	const withdraw = wireOf(origin).answer(path, upstream.consume());
 	expect(withdraw).toBeDefined();
 	const front = first.active.peek();
 	expect(front).toBeDefined();
@@ -414,7 +415,7 @@ test("disposing the newest remote route promotes the fallback", async () => {
 	expect(await announced.next()).toMatchObject({ path: path, kind: "announced" });
 
 	const handle = await routed(consumer, path);
-	const track = handle?.subscribe("chat");
+	const track = handle?.track("chat").subscribe();
 	expect(track).toBeDefined();
 	track?.close();
 	handle?.close();
@@ -424,7 +425,7 @@ test("disposing the newest remote route promotes the fallback", async () => {
 
 	disposeOlder();
 	await settle();
-	expect(consumer.routes(path)).toBe(false);
+	expect(wireOf(consumer).routes(path)).toBe(false);
 
 	keepOlder.close();
 	keepNewer.close();
@@ -440,22 +441,22 @@ test("withdrawing an answer wakes the requests table", async () => {
 	const request = consumer.request(path);
 
 	const first = new BroadcastProducer();
-	const withdraw = origin.answer(path, first.consume());
+	const withdraw = wireOf(origin).answer(path, first.consume());
 	expect(withdraw).toBeDefined();
 
 	// A second answer while one stands must lose and stay eligible.
 	const second = new BroadcastProducer();
-	expect(origin.answer(path, second.consume())).toBeUndefined();
+	expect(wireOf(origin).answer(path, second.consume())).toBeUndefined();
 
 	// Withdrawing pokes the requests map, which is what a standby serving loop sleeps on.
-	const woken = origin.requests.changed();
+	const woken = wireOf(origin).requests.changed();
 	withdraw?.();
 	await woken;
 	expect(request.active.peek()).toBeUndefined();
 
 	// The slot is vacant again, so a standby answers.
 	const third = new BroadcastProducer();
-	expect(origin.answer(path, third.consume())).toBeDefined();
+	expect(wireOf(origin).answer(path, third.consume())).toBeDefined();
 	expect(request.active.peek()).toBeDefined();
 
 	request.close();
@@ -469,13 +470,13 @@ test("requests never appear in announced or the table", async () => {
 
 	const request = consumer.request(path);
 	const upstream = new BroadcastProducer();
-	origin.answer(path, upstream.consume());
+	wireOf(origin).answer(path, upstream.consume());
 
 	// An answered request is assumed present, not known live, so it is not availability: it
 	// stays out of the table, and out of the announcements the table drives.
 	expect(request.active.peek()).toBeDefined();
-	expect(origin.routes(path)).toBe(false);
-	expect(consumer.broadcasts.peek()?.has(path)).toBe(false);
+	expect(wireOf(origin).routes(path)).toBe(false);
+	expect(wireOf(consumer).broadcasts.peek()?.has(path)).toBe(false);
 
 	const announced = consumer.announced();
 	publish(origin, Path.from("real"));
@@ -529,15 +530,15 @@ test("a routed path needs no blind answer", async () => {
 
 	const request = consumer.request(path);
 	await settle();
-	expect(origin.routes(path)).toBe(true);
+	expect(wireOf(origin).routes(path)).toBe(true);
 	expect(request.active.peek()).toBeDefined();
 
 	// The route going away is what makes the request need an answer, so the serving loop has
 	// to wake on the table, not just on the requests map.
-	const woken = origin.changed();
+	const woken = wireOf(origin).changed();
 	dispose();
 	await woken;
-	expect(origin.routes(path)).toBe(false);
+	expect(wireOf(origin).routes(path)).toBe(false);
 	expect(request.active.peek()).toBeUndefined();
 
 	request.close();
@@ -551,12 +552,12 @@ test("discovery reflects the attached sessions", async () => {
 
 	expect(consumer.discovery.peek()).toBeUndefined();
 
-	const blind = origin.attach(false);
+	const blind = wireOf(origin).attach(false);
 	expect(consumer.discovery.peek()).toBe(false);
 
 	// Mixed: the table cannot be complete while one session announces nothing, so a consumer
 	// gated on this has to keep asking rather than trusting the announcements.
-	const seeing = origin.attach(true);
+	const seeing = wireOf(origin).attach(true);
 	expect(consumer.discovery.peek()).toBe(false);
 
 	blind();
@@ -629,7 +630,7 @@ test("closing a request releases the handle it was holding", async () => {
 	// handle belongs to the table, carries on.
 	expect(request.active.peek()).toBeUndefined();
 	expect(producer.closed.peek()).toBeUndefined();
-	expect(origin.consume().routes(path)).toBe(true);
+	expect(wireOf(origin.consume()).routes(path)).toBe(true);
 
 	producer.close();
 	origin.close();
@@ -717,7 +718,7 @@ test("a request is unroutable only when nothing can answer it", async () => {
 	expect(request.unroutable.peek()).toBe(true);
 
 	// A session attaches: now the path is merely unanswered.
-	const detach = origin.attach(false);
+	const detach = wireOf(origin).attach(false);
 	await settle();
 	expect(request.unroutable.peek()).toBe(false);
 
@@ -737,13 +738,13 @@ test("a reconnecting connection keeps requests pending across the gap", async ()
 
 	// What a reconnecting connection holds: no session yet, but one is coming. This is the
 	// page-load window, and it must not read as a missing broadcast.
-	const release = origin.expect();
+	const release = wireOf(origin).expect();
 
 	const request = consumer.request(path);
 	expect(request.unroutable.peek()).toBe(false);
 
 	// A session comes and goes; the expectation still covers the gap.
-	const detach = origin.attach(true);
+	const detach = wireOf(origin).attach(true);
 	await settle();
 	detach();
 	await settle();
@@ -826,7 +827,7 @@ test("closing the origin makes an existing request unroutable", async () => {
 	const origin = new Producer();
 	const path = Path.from("doomed");
 
-	const detach = origin.attach(true);
+	const detach = wireOf(origin).attach(true);
 	const request = origin.consume().request(path);
 	expect(request.unroutable.peek()).toBe(false);
 
@@ -850,8 +851,8 @@ test("createBroadcast is unadvertised until announce", async () => {
 	const path = Path.from("room");
 
 	const broadcast = origin.createBroadcast(path);
-	expect(consumer.routes(path)).toBe(true);
-	expect(consumer.advertised.peek()?.has(path)).toBe(false);
+	expect(wireOf(consumer).routes(path)).toBe(true);
+	expect(wireOf(consumer).advertised.peek()?.has(path)).toBe(false);
 
 	const announced = consumer.announced();
 	const pending = announced.next();
@@ -867,7 +868,7 @@ test("createBroadcast is unadvertised until announce", async () => {
 
 	broadcast.unannounce();
 	expect(await announced.next()).toMatchObject({ path: path, kind: "retracted" });
-	expect(consumer.routes(path)).toBe(true);
+	expect(wireOf(consumer).routes(path)).toBe(true);
 
 	announced.close();
 	broadcast.close();
@@ -877,7 +878,7 @@ test("createBroadcast is unadvertised until announce", async () => {
 test("a handle serves a request under live", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
-	const handle = origin.dynamic("live");
+	const handle = origin.dynamic(Path.from("live"));
 
 	expect(await consumer.announced().next()).toMatchObject({ path: Path.from("live"), kind: "announced" });
 
@@ -892,7 +893,7 @@ test("a handle serves a request under live", async () => {
 	await settle();
 
 	expect(request.active.peek()).toBeDefined();
-	const track = request.active.peek()?.subscribe("video");
+	const track = request.active.peek()?.track("video").subscribe();
 	expect(track).toBeDefined();
 	track?.close();
 
@@ -904,7 +905,7 @@ test("a handle serves a request under live", async () => {
 
 test("a re-priced route is delivered as an update", async () => {
 	const origin = new Producer();
-	const handle = origin.dynamic("live");
+	const handle = origin.dynamic(Path.from("live"));
 	const announced = origin.consume().announced();
 	expect(await announced.next()).toMatchObject({ path: Path.from("live"), kind: "announced" });
 	handle.update({ cost: 5n });
@@ -917,7 +918,7 @@ test("a re-priced route is delivered as an update", async () => {
 
 test("an accepted dynamic broadcast is retired when it closes", async () => {
 	const origin = new Producer();
-	const handle = origin.dynamic("live");
+	const handle = origin.dynamic(Path.from("live"));
 	const path = Path.from("live/cam");
 	const request = origin.request(path);
 	const it = handle.requested();
@@ -927,7 +928,7 @@ test("an accepted dynamic broadcast is retired when it closes", async () => {
 	produced.createTrack("video");
 	first.value?.accept(produced);
 	await settle();
-	expect(request.active.peek()?.subscribe("video")).toBeDefined();
+	expect(request.active.peek()?.track("video").subscribe()).toBeDefined();
 
 	produced.close();
 	await settle();
@@ -939,7 +940,7 @@ test("an accepted dynamic broadcast is retired when it closes", async () => {
 	replacement.createTrack("video");
 	second.value?.accept(replacement);
 	await settle();
-	expect(request.active.peek()?.subscribe("video")).toBeDefined();
+	expect(request.active.peek()?.track("video").subscribe()).toBeDefined();
 
 	request.close();
 	handle.close();
@@ -949,10 +950,10 @@ test("an accepted dynamic broadcast is retired when it closes", async () => {
 
 test("reject surfaces the error from demand", async () => {
 	const origin = new Producer();
-	const handle = origin.dynamic("live");
+	const handle = origin.dynamic(Path.from("live"));
 	const consumer = origin.consume();
 	const it = handle.requested();
-	const pending = consumer.demand(Path.from("live/cam"));
+	const pending = wireOf(consumer).demand(Path.from("live/cam"));
 	const { value: req } = await it.next();
 	const err = new StreamError(StreamCode.NoCapacity, { message: "full" });
 	req?.reject(err);
@@ -964,12 +965,12 @@ test("reject surfaces the error from demand", async () => {
 
 test("a shared reject still surfaces from demand", async () => {
 	const origin = new Producer();
-	const handle = origin.dynamic("live");
+	const handle = origin.dynamic(Path.from("live"));
 	const consumer = origin.consume();
 	const it = handle.requested();
 
 	const request = origin.request(Path.from("live/cam"));
-	const pending = consumer.demand(Path.from("live/cam"));
+	const pending = wireOf(consumer).demand(Path.from("live/cam"));
 	const { value: req } = await it.next();
 	const err = new Error("unserved");
 	req?.reject(err);
@@ -986,7 +987,7 @@ test("a shared reject still surfaces from demand", async () => {
 
 test("a request refusal does not keep demand from asking again", async () => {
 	const origin = new Producer();
-	const handle = origin.dynamic("live");
+	const handle = origin.dynamic(Path.from("live"));
 	const consumer = origin.consume();
 	const it = handle.requested();
 
@@ -996,7 +997,7 @@ test("a request refusal does not keep demand from asking again", async () => {
 	request.close();
 	await settle();
 
-	const pending = consumer.demand(Path.from("live/cam"));
+	const pending = wireOf(consumer).demand(Path.from("live/cam"));
 	const { value: second } = await it.next();
 	expect(second?.path).toBe(Path.from("live/cam"));
 	const produced = new BroadcastProducer();
@@ -1010,15 +1011,15 @@ test("a request refusal does not keep demand from asking again", async () => {
 
 test("advancing requested without settling rejects the previous request", async () => {
 	const origin = new Producer();
-	const handle = origin.dynamic("live");
+	const handle = origin.dynamic(Path.from("live"));
 	const consumer = origin.consume();
 	const it = handle.requested();
 
-	const firstDemand = consumer.demand(Path.from("live/cam"));
+	const firstDemand = wireOf(consumer).demand(Path.from("live/cam"));
 	const first = await it.next();
 	expect(first.value?.path).toBe(Path.from("live/cam"));
 
-	const secondDemand = consumer.demand(Path.from("live/other"));
+	const secondDemand = wireOf(consumer).demand(Path.from("live/other"));
 	const second = await it.next();
 	expect(second.value?.path).toBe(Path.from("live/other"));
 
@@ -1034,7 +1035,7 @@ test("advancing requested without settling rejects the previous request", async 
 
 test("a rejected request is not asked of the same route again", async () => {
 	const origin = new Producer();
-	const handle = origin.dynamic("live");
+	const handle = origin.dynamic(Path.from("live"));
 	const it = handle.requested();
 
 	const request = origin.request(Path.from("live/cam"));
@@ -1064,7 +1065,7 @@ test("a rejected request is not asked of the same route again", async () => {
 test("a rejected request falls through to the next-best route", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
-	const narrow = origin.dynamic("live");
+	const narrow = origin.dynamic(Path.from("live"));
 	const served = new BroadcastProducer();
 	served.createTrack("video");
 	const disposeWide = serve(origin, Path.from(""), provider(served));
@@ -1075,7 +1076,7 @@ test("a rejected request falls through to the next-best route", async () => {
 	await settle();
 
 	// The narrow route refused, so the broader one answers instead of the path black-holing.
-	const track = request.active.peek()?.subscribe("video");
+	const track = request.active.peek()?.track("video").subscribe();
 	expect(track).toBeDefined();
 	track?.close();
 
@@ -1088,7 +1089,7 @@ test("a rejected request falls through to the next-best route", async () => {
 
 test("close rejects queued requests with NoCapacity", async () => {
 	const origin = new Producer();
-	const handle = origin.dynamic("live");
+	const handle = origin.dynamic(Path.from("live"));
 	const waiting = handle.requested().next();
 	const request = origin.request(Path.from("live/cam"));
 	const { value: req } = await waiting;

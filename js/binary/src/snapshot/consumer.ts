@@ -51,7 +51,7 @@ export class Consumer {
 				// Anything else is the track's terminal error, which every later read would throw
 				// again; swallowing it would spin here instead of telling the caller the
 				// subscription died.
-				if (!(err instanceof Moq.Group.Lagged)) throw err;
+				if (!(err instanceof Moq.Error.TooFarBehind)) throw err;
 				continue;
 			}
 

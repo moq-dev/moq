@@ -10,7 +10,7 @@ import type { Time } from "@moq/net";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
-import { Broadcast, type CatalogFormat, parseCatalogFormat } from "./broadcast";
+import { Broadcast, CATALOG_FORMATS, type CatalogFormat } from "./broadcast";
 import { formatDuration, parseDuration } from "./duration";
 import { type Delay, Sync } from "./sync";
 import * as Text from "./text";
@@ -23,12 +23,11 @@ const OBSERVED = [
 	"volume",
 	"muted",
 	"visible",
-	"reload",
+	"announced",
 	"delay",
 	"buffer",
-	// Released spellings, kept parsing but off the documented surface. `latency-max` is absent
-	// deliberately: its old ceiling included the floor, so translating it faithfully would mean
-	// tracking the resolved delay reactively, which is the coupling `buffer` exists to remove.
+	// Released spellings are observed only so assigning them can fail loudly instead of being ignored.
+	"reload",
 	"latency",
 	"latency-min",
 	"jitter",
@@ -71,32 +70,16 @@ function parseBuffer(value: string | null): Time.Milli {
 	return Moq.Time.Milli.zero;
 }
 
-// The released `latency` / `latencyMin` property spellings, translated onto `delay`. The range
-// object is refused rather than half-applied: its ceiling included the floor, so it has no faithful
-// `buffer` without tracking the resolved delay, which is the coupling `buffer` exists to remove.
-function coerceLegacyDelay(value: unknown): Delay {
-	if (value === "instant") return "instant";
-	if (value === undefined || value === "auto" || value === "real-time") return "auto";
-	if (typeof value === "number" && Number.isFinite(value)) return Moq.Time.Milli(value);
-	throw new Error(
-		"moq-watch: the latency range is gone. Set `delay` (how far playback trails the live edge) and `buffer` (media held beyond it).",
-	);
-}
-
-// The released spellings of `delay`, in bare milliseconds. Kept unitless so pages still on them
-// behave exactly as they did; `delay` is the current surface and does require a unit.
-function parseLegacyDelay(value: string | null): Delay {
-	const trimmed = value?.trim();
-	if (!trimmed || trimmed === "real-time") return "auto";
-	if (trimmed === "instant") return "instant";
-	const parsed = Number.parseFloat(trimmed);
-	return Moq.Time.Milli(Number.isFinite(parsed) ? parsed : 100);
+/** Parse the element's catalog-format attribute. */
+export function parseCatalogFormat(value: string | null): CatalogFormat | undefined {
+	if (value === null) return undefined;
+	return CATALOG_FORMATS.find((format) => format === value);
 }
 
 /**
  * Parse a boolean attribute: absent uses `defaultValue`, bare presence is true, and an explicit
  * `"false"`/`"0"` is false. Presence alone can't express false, and attributes that default to
- * true (`reload`) need to, so every boolean attribute accepts the explicit form.
+ * true (`announced`) need to, so every boolean attribute accepts the explicit form.
  */
 function parseBoolean(value: string | null, defaultValue: boolean): boolean {
 	if (value === null) return defaultValue;
@@ -138,8 +121,8 @@ export default class MoqWatch extends HTMLElement {
 	/** Selects the caption track. `text.out.available` lists the renditions for a picker. */
 	text: Text.Source;
 
-	/** Renders caption cues into an overlay above the canvas. */
-	captionsRenderer: Text.Renderer;
+	/** Renders the selected text cues into an overlay above the canvas. */
+	textRenderer: Text.Renderer;
 
 	/** Keeps audio and video playing at the configured delay. */
 	sync: Sync;
@@ -165,7 +148,7 @@ export default class MoqWatch extends HTMLElement {
 
 	// Broadcast configuration owned here and wired into `broadcast` as inputs.
 	#name = new Signal<Moq.Path.Valid>(Moq.Path.empty());
-	#reload = new Signal(true);
+	#announced = new Signal(true);
 	#catalogFormat = new Signal<CatalogFormat | undefined>(undefined);
 	#catalog = new Signal<Catalog.Root | undefined>(undefined);
 
@@ -210,7 +193,7 @@ export default class MoqWatch extends HTMLElement {
 			origin: this.connection.origin,
 			enabled: this.#enabled,
 			name: this.#name,
-			reload: this.#reload,
+			announced: this.#announced,
 			catalogFormat: this.#catalogFormat,
 			catalog: this.#catalog,
 		});
@@ -238,33 +221,28 @@ export default class MoqWatch extends HTMLElement {
 		});
 		this.signals.cleanup(() => this.text.close());
 
-		// The video decoder owns rendition handoffs but also needs Sync. Bridge its output through a
-		// parent-owned signal so Sync can be constructed first without exposing mutable wiring.
-		const videoJitter = new Signal<Time.Milli | undefined>(undefined);
-
 		this.sync = new Sync({
 			delay: this.controls.delay,
 			buffer: this.controls.buffer,
 			probe: this.connection.probe,
-			video: videoJitter,
-			audio: audioSource.out.jitter,
 		});
 		this.signals.cleanup(() => this.sync.close());
 
-		this.video = new Video.Decoder(videoSource, this.sync, { enabled: this.#videoEnabled });
-		this.signals.proxy(videoJitter, this.video.out.jitter);
-		this.audio = new Audio.Decoder(audioSource, this.sync, { enabled: this.#audioEnabled });
+		this.video = new Video.Decoder({ source: videoSource, sync: this.sync, enabled: this.#videoEnabled });
+		this.audio = new Audio.Decoder({ source: audioSource, sync: this.sync, enabled: this.#audioEnabled });
 		this.signals.cleanup(() => {
 			this.video.close();
 			this.audio.close();
 		});
 
-		this.emitter = new Audio.Emitter(this.audio, {
+		this.emitter = new Audio.Emitter({
+			source: this.audio,
 			volume: this.controls.volume,
 			muted: this.controls.muted,
 			paused: this.controls.paused,
 		});
-		this.renderer = new Video.Renderer(this.video, {
+		this.renderer = new Video.Renderer({
+			decoder: this.video,
 			canvas: this.#canvas,
 			visible: this.controls.visible,
 		});
@@ -273,11 +251,13 @@ export default class MoqWatch extends HTMLElement {
 			this.renderer.close();
 		});
 
-		this.captionsRenderer = new Text.Renderer(this.text, this.sync, {
+		this.textRenderer = new Text.Renderer({
+			source: this.text,
+			sync: this.sync,
 			container: this.#captionsOverlay,
 			enabled: this.#captionsEnabled,
 		});
-		this.signals.cleanup(() => this.captionsRenderer.close());
+		this.signals.cleanup(() => this.textRenderer.close());
 
 		// Captions follow playback, like audio and video. The caption clock runs off wall time, so
 		// leaving them on while paused scrolls text over a frozen frame.
@@ -285,20 +265,10 @@ export default class MoqWatch extends HTMLElement {
 			this.#captionsEnabled.set(effect.get(this.#enabled) && !effect.get(this.controls.paused));
 		});
 
-		// Audio download follows the emitter's enable policy (paused/muted), except an instant
-		// delay turns it off outright: the ring needs a target depth to avoid underrunning, and
-		// unpaced video has nothing pulling it back toward the audio clock.
+		// Audio download follows the emitter's enable policy (paused/muted). The decoder itself
+		// refuses instant mode because an unpaced clock cannot keep an audio ring filled.
 		this.signals.run((effect) => {
-			const enabled = effect.get(this.emitter.out.enabled);
-			this.#audioEnabled.set(enabled && effect.get(this.controls.delay) !== "instant");
-		});
-
-		// Stopping the download leaves the ring holding a floor's worth of PCM, and the emitter
-		// stays connected to drain it. Flush on the way in so audio stops now instead of playing
-		// against video that just jumped to the live edge.
-		this.signals.run((effect) => {
-			if (effect.get(this.controls.delay) !== "instant") return;
-			this.audio.reset();
+			this.#audioEnabled.set(effect.get(this.emitter.out.enabled));
 		});
 
 		// Video downloads while playing and on-screen. When paused, keep downloading only
@@ -477,14 +447,16 @@ export default class MoqWatch extends HTMLElement {
 			this.controls.muted.set(parseBoolean(newValue, false));
 		} else if (name === "visible") {
 			this.controls.visible.set(parseVisible(newValue));
-		} else if (name === "reload") {
-			this.#reload.set(parseBoolean(newValue, true));
+		} else if (name === "announced") {
+			this.#announced.set(parseBoolean(newValue, true));
 		} else if (name === "delay") {
 			this.controls.delay.set(parseDelay(newValue));
 		} else if (name === "buffer") {
 			this.controls.buffer.set(parseBuffer(newValue));
+		} else if (name === "reload") {
+			console.warn("moq-watch: `reload` was renamed to `announced`");
 		} else if (name === "latency" || name === "latency-min" || name === "jitter") {
-			this.controls.delay.set(parseLegacyDelay(newValue));
+			console.warn(`moq-watch: \`${name}\` is gone; use \`delay\` and \`buffer\``);
 		} else if (name === "catalog-format") {
 			this.#catalogFormat.set(parseCatalogFormat(newValue));
 		} else if (name === "captions") {
@@ -544,12 +516,17 @@ export default class MoqWatch extends HTMLElement {
 		this.controls.visible.set(value);
 	}
 
-	get reload(): boolean {
-		return this.#reload.peek();
+	get announced(): boolean {
+		return this.#announced.peek();
 	}
 
-	set reload(value: boolean) {
-		this.#reload.set(value);
+	set announced(value: boolean) {
+		this.#announced.set(value);
+	}
+
+	/** @internal */
+	set reload(_value: unknown) {
+		throw new Error("moq-watch: `reload` was renamed to `announced`");
 	}
 
 	/**
@@ -587,8 +564,8 @@ export default class MoqWatch extends HTMLElement {
 		return this.controls.delay.peek();
 	}
 
-	set latency(value: unknown) {
-		this.controls.delay.set(coerceLegacyDelay(value));
+	set latency(_value: unknown) {
+		throw new Error("moq-watch: `latency` is gone; use `delay` and `buffer`");
 	}
 
 	/** @internal */
@@ -596,8 +573,8 @@ export default class MoqWatch extends HTMLElement {
 		return this.controls.delay.peek();
 	}
 
-	set latencyMin(value: unknown) {
-		this.controls.delay.set(coerceLegacyDelay(value));
+	set latencyMin(_value: unknown) {
+		throw new Error("moq-watch: `latencyMin` is gone; use `delay` and `buffer`");
 	}
 
 	/** @internal */
@@ -610,6 +587,10 @@ export default class MoqWatch extends HTMLElement {
 	/** The jitter buffer in milliseconds. */
 	get jitter(): Time.Milli {
 		return this.sync.out.jitter.peek();
+	}
+
+	set jitter(_value: unknown) {
+		throw new Error("moq-watch: `jitter` is a readout; set `delay` instead");
 	}
 
 	/**

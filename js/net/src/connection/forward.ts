@@ -7,6 +7,7 @@ import type { Dispose } from "@moq/signals";
 import { isActive } from "../announced.ts";
 import type { Dynamic, Producer as OriginProducer, RequestSlot } from "../origin.ts";
 import type * as Path from "../path.ts";
+import { wireOf } from "../wire.ts";
 import type { Established } from "./established.ts";
 
 /**
@@ -27,10 +28,11 @@ import type { Established } from "./established.ts";
  * @internal
  */
 export function forwardAnnounced(conn: Established, origin: OriginProducer): void {
+	const originWire = wireOf(origin);
 	// Reassigned if discovery dies under a live session, so the origin stops counting this
 	// one as a discovering session. Called through a closure so the session's death always
 	// detaches whichever attachment is current.
-	let detach = origin.attach(conn.discovery);
+	let detach = originWire.attach(conn.discovery);
 
 	let dead = false;
 	void conn.closed.then(() => {
@@ -64,7 +66,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 					if (existing) {
 						existing.update(event.route);
 					} else {
-						const handle = origin.receive(event.path, event.route);
+						const handle = originWire.receive(event.path, event.route);
 						inserted.set(event.path, handle);
 						void drive(handle, conn);
 					}
@@ -91,7 +93,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 			if (!dead) {
 				console.warn("broadcast discovery failed; broadcasts resolve on request only.", failure);
 				detach();
-				detach = origin.attach(false);
+				detach = originWire.attach(false);
 			}
 		}
 	})();
@@ -109,9 +111,10 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
  * any blind answer, so answering one would only park a handle nothing reads.
  */
 async function drive(handle: Dynamic, conn: Established): Promise<void> {
+	const session = wireOf(conn);
 	try {
 		for await (const request of handle.requested()) {
-			request.accept(conn.consume(request.path));
+			request.accept(session.consume(request.path));
 		}
 	} catch {
 		handle.close();
@@ -119,6 +122,8 @@ async function drive(handle: Dynamic, conn: Established): Promise<void> {
 }
 
 async function serveRequests(conn: Established, origin: OriginProducer): Promise<void> {
+	const table = wireOf(origin);
+	const session = wireOf(conn);
 	// The withdraws for the answers this session provided, so a dead session only takes
 	// back its own. Keyed by path but remembering the slot, because a path outlives its
 	// slot: the last handle closing tears the slot down and a new request installs a fresh
@@ -132,13 +137,14 @@ async function serveRequests(conn: Established, origin: OriginProducer): Promise
 	});
 
 	for (;;) {
-		const map = origin.requests.peek();
+		const map = table.requests.peek();
 		if (!map || dead) break;
 
 		for (const [path, slot] of map) {
+			if (slot.blind === 0) continue;
 			if (answered.get(path)?.slot === slot || slot.answer !== undefined) continue;
-			if (origin.routes(path)) continue;
-			const withdraw = origin.answer(path, conn.consume(path));
+			if (table.routes(path)) continue;
+			const withdraw = table.answer(path, session.consume(path));
 			if (withdraw) answered.set(path, { slot, withdraw });
 		}
 
@@ -146,14 +152,14 @@ async function serveRequests(conn: Established, origin: OriginProducer): Promise
 		// A replaced slot counts as withdrawn: the answer we hold belongs to the slot that
 		// went away, not to whatever now occupies the path.
 		for (const [path, entry] of [...answered]) {
-			if (map.get(path) === entry.slot) continue;
+			if (map.get(path) === entry.slot && entry.slot.blind > 0) continue;
 			answered.delete(path);
 			entry.withdraw();
 		}
 
 		// Woken by the table too, not just the requests: a path that stops being routed needs
 		// the blind answer this loop skipped while it was.
-		await Promise.race([origin.changed(), closed]);
+		await Promise.race([table.changed(), closed]);
 	}
 
 	// Session gone: withdraw our answers, waking a standby session to provide fresh ones.

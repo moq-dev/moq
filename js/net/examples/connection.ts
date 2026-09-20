@@ -2,7 +2,7 @@ import * as Moq from "@moq/net";
 
 async function main() {
 	const url = new URL("https://cdn.moq.dev/anon");
-	const connection = await Moq.Connection.connect(url);
+	const connection = await Moq.Connection.connect({ url });
 
 	console.log("Connected to MoQ relay!");
 

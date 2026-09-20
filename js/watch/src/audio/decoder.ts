@@ -39,6 +39,14 @@ export type DecoderInput = {
 	enabled: Getter<boolean>;
 };
 
+/** Constructor properties for {@link Decoder}. */
+export type DecoderProps = Inputs<DecoderInput> & {
+	/** Rendition selector supplying encoded audio. */
+	source: Source;
+	/** Shared playback clock. */
+	sync: Sync;
+};
+
 type DecoderOutput = {
 	context: Signal<AudioContext | undefined>;
 
@@ -117,13 +125,14 @@ export class Decoder {
 	// context, worklet, and ring alone.
 	readonly #config: Computed<DecoderConfig | undefined>;
 
-	constructor(source: Source, sync: Sync, props?: Inputs<DecoderInput>) {
+	constructor(props: DecoderProps) {
 		this.in = {
 			enabled: getter(props?.enabled ?? true),
 		};
 
-		this.source = source;
-		this.sync = sync;
+		this.source = props.source;
+		this.sync = props.sync;
+		this.#signals.cleanup(this.sync.register(this.source.out.jitter));
 		this.#identity = this.#signals.computed((effect) => {
 			const config = effect.get(this.source.out.config);
 			return config ? playbackIdentity(config) : undefined;
@@ -219,6 +228,10 @@ export class Decoder {
 	#runEnabled(effect: Effect): void {
 		const enabled = effect.get(this.in.enabled);
 		if (!enabled) return;
+		if (effect.get(this.sync.in.delay) === "instant") {
+			this.reset();
+			return;
+		}
 
 		const context = effect.get(this.#out.context);
 		if (!context) return;
@@ -251,10 +264,11 @@ export class Decoder {
 	// RTT jitter, and debounce so a slider drag coalesces into one re-anchor. Decreases are left to
 	// natural catch-up.
 	#runLatencyReanchor(effect: Effect): void {
+		const delay = effect.get(this.sync.out.delay);
+		const jitter = effect.get(this.sync.out.jitter);
 		const floor = reanchorFloor({
 			delay: effect.get(this.sync.in.delay),
-			audio: effect.get(this.sync.in.audio),
-			video: effect.get(this.sync.in.video),
+			media: Time.Milli.sub(delay, jitter),
 		});
 		if (this.#prevFloor === undefined) {
 			// Startup: the initial fill already builds the cushion; just record the baseline.
@@ -273,6 +287,7 @@ export class Decoder {
 	#runDecoder(effect: Effect): void {
 		const enabled = effect.get(this.in.enabled);
 		if (!enabled) return;
+		if (effect.get(this.sync.in.delay) === "instant") return;
 
 		const broadcast = effect.get(this.source.in.broadcast);
 		if (!broadcast) return;

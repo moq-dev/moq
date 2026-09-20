@@ -4,7 +4,7 @@
  * @module
  */
 import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
-import { FrameTooLarge, GroupTooLarge, Lagged } from "./error.ts";
+import { FrameTooLarge, GroupTooLarge, TooFarBehind } from "./error.ts";
 import { hooks, type ReadGroupFrame } from "./internal.ts";
 import { Timestamp } from "./time.ts";
 
@@ -46,15 +46,6 @@ export interface Info {
 	/** Sequence number of this group within its track. */
 	sequence: number;
 }
-
-/**
- * Thrown by a frame read when the reader asked for a frame the group never held, and by a
- * frame write when the frame or the group exceeds its cache budget.
- *
- * All three carry a moq-lite stream code, and a peer's reset with one decodes back into the
- * same class.
- */
-export { FrameTooLarge, GroupTooLarge, Lagged } from "./error.ts";
 
 /** Reactive backing state shared by the group producer and one consumer. */
 class GroupState {
@@ -467,7 +458,7 @@ export class Consumer {
 			// the reader simply lagged behind the cache.
 			this.#expire(true);
 			if (!this.#terminal && !this.#ended) {
-				this.#terminal = new Lagged();
+				this.#terminal = new TooFarBehind();
 				if (this.#verdict.peek() === undefined) this.#verdict.set(this.#terminal);
 			}
 		}

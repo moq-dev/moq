@@ -4,7 +4,7 @@ import type * as Moq from "@moq/net";
 import type { Effect } from "@moq/signals";
 
 /**
- * A stable catalog producer that fans out to on-demand subscription tracks.
+ * A stable catalog producer that fans out to one or more network tracks.
  *
  * Unlike a raw track producer, this exists independently of any subscription: edit it at any time
  * with {@link mutate}, and each subscriber (including a relay that reconnects) is seeded with the
@@ -34,7 +34,7 @@ export class CatalogProducer {
 	}
 
 	/**
-	 * Serve a subscription request: seed it with the current catalog, then forward updates.
+	 * Serve a track: seed it with the current catalog, then forward updates.
 	 *
 	 * Pass `opts.compression` to DEFLATE-compress this subscriber's frames, so the same catalog can be
 	 * served both plaintext and compressed (e.g. `catalog.json` and `catalog.json.z`).

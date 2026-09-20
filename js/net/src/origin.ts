@@ -17,6 +17,7 @@ import { StreamCode, StreamError } from "./error.ts";
 import { Route, routesEqual } from "./hop.ts";
 import { hooks, scopeCaptures, scopeOverlaps } from "./internal.ts";
 import * as Path from "./path.ts";
+import { type Advertised, registerWire, wireOf } from "./wire.ts";
 
 export type { Cost, Hop, Route } from "./hop.ts";
 export { isAnonymous } from "./hop.ts";
@@ -43,6 +44,7 @@ export { isAnonymous } from "./hop.ts";
  */
 export interface RequestSlot {
 	count: number;
+	blind: number;
 	answer?: broadcast.Consumer;
 	readonly refused: Set<RouteEntry>;
 	readonly route: Signal<broadcast.Consumer | undefined>;
@@ -71,8 +73,8 @@ function noCapacity(): StreamError {
 
 /** A served route from {@link Producer.dynamic}: the queue a handler drains. */
 class ServeState {
-	queue = new Signal<BroadcastRequest[]>([]);
-	pending = new Map<Path.Valid, BroadcastRequest>();
+	queue = new Signal<Request[]>([]);
+	pending = new Map<Path.Valid, Request>();
 	served = new Map<Path.Valid, broadcast.Consumer>();
 	rejected = new Map<Path.Valid, Error>();
 	// demand() is the only reader of `rejected`. A Consumer.request refusal never
@@ -90,14 +92,14 @@ class ServeState {
 		if (this.pending.has(path)) return;
 		const live = this.served.get(path);
 		if (live && live.closed.peek() === undefined) return;
-		const request = makeBroadcastRequest(path, this);
+		const request = makeRequest(path, this);
 		this.pending.set(path, request);
 		this.queue.mutate((queue) => {
 			queue.push(request);
 		});
 	}
 
-	accept(request: BroadcastRequest, front: broadcast.Consumer): void {
+	accept(request: Request, front: broadcast.Consumer): void {
 		if (this.closed.peek() !== undefined || this.pending.get(request.path) !== request) {
 			front.close();
 			return;
@@ -120,7 +122,7 @@ class ServeState {
 		this.settled.update((n) => n + 1);
 	}
 
-	reject(request: BroadcastRequest, err: Error): void {
+	reject(request: Request, err: Error): void {
 		if (this.pending.get(request.path) !== request) return;
 		this.pending.delete(request.path);
 		if (this.demanding.has(request.path)) this.rejected.set(request.path, err);
@@ -138,7 +140,7 @@ class ServeState {
 			queue.length = 0;
 		});
 		for (const request of queued) {
-			finishBroadcastRequest(request, err);
+			finishRequest(request, err);
 		}
 		for (const [path, front] of this.served) {
 			front.close(abort);
@@ -149,13 +151,6 @@ class ServeState {
 		this.demanding.clear();
 		this.settled.update((n) => n + 1);
 	}
-}
-
-/** Publisher-facing advertisement: object identity plus the current route. */
-export interface Advertised {
-	/** A republish is a different object; a re-price is the same object with a new route. */
-	readonly identity: object;
-	readonly route: Route;
 }
 
 interface Presented extends Advertised {
@@ -347,11 +342,17 @@ export interface Table {
 	/** Create an unadvertised broadcast at `path`; see {@link Producer.createBroadcast}. */
 	createBroadcast(path: Path.Valid): broadcast.Producer;
 
-	/** Resolve `path`, without waiting for an announcement; see {@link Consumer.request}. */
-	request(path: Path.Valid): Request;
+	/** Resolve `path`, optionally waiting for an announcement; see {@link Consumer.request}. */
+	request(path: Path.Valid, options?: RequestOptions): Requesting;
 
 	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
 	announced(scope?: Path.Pattern): announce.Consumer;
+}
+
+/** Options for resolving a broadcast path. */
+export interface RequestOptions {
+	/** Wait for a routed announcement when discovery is supported; otherwise subscribe blindly. */
+	announced?: boolean;
 }
 
 /**
@@ -376,6 +377,21 @@ export class Producer implements Table {
 	// consume().x() stutter for everyday reads. One instance, so `discovery` keeps its
 	// identity across reads.
 	#reader = makeConsumer(this.#state);
+
+	constructor() {
+		const thisProducer = this;
+		registerWire(this, {
+			receive: (prefix, route) => this.#receive(prefix, route),
+			attach: (discovery) => this.#attach(discovery),
+			expect: () => this.#expect(),
+			get requests() {
+				return thisProducer.#state.requests;
+			},
+			changed: () => this.#changed(),
+			answer: (path, front) => this.#answer(path, front),
+			routes: (path) => wireOf(this.#reader).routes(path),
+		});
+	}
 
 	/**
 	 * Settles once the origin closes: `null` on a clean close, or the abort {@link Error}.
@@ -459,10 +475,10 @@ export class Producer implements Table {
 	 * consumers narrow with a {@link Path.Pattern} locally. The advertisement is
 	 * visible to {@link Consumer.announced} and forwarded by sessions for as long as
 	 * the returned {@link Dynamic} lives. A consumer resolving a path under it that
-	 * no local broadcast covers is handed to the handle as a {@link BroadcastRequest}.
+	 * no local broadcast covers is handed to the handle as a {@link Request}.
 	 */
 	dynamic(
-		prefix: Path.Valid | string,
+		prefix: Path.Valid,
 		route: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint } = Route.default,
 	): Dynamic {
 		return this.#insertRoute(prefix, Route.normalize(route), true);
@@ -474,15 +490,14 @@ export class Producer implements Table {
 	 *
 	 * @internal
 	 */
-	receive(
-		prefix: Path.Valid | string,
+	#receive(
+		prefix: Path.Valid,
 		route: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint } = Route.default,
 	): Dynamic {
 		return this.#insertRoute(prefix, Route.normalize(route), false);
 	}
 
-	#insertRoute(raw: Path.Valid | string, route: Route, originated: boolean): Dynamic {
-		const prefix = Path.from(raw);
+	#insertRoute(prefix: Path.Valid, route: Route, originated: boolean): Dynamic {
 		const server = new ServeState();
 		server.onChange = (path) => this.#state.refresh(path);
 		const entry: RouteEntry = {
@@ -535,9 +550,9 @@ export class Producer implements Table {
 	 *
 	 * @internal
 	 */
-	attach(discovery: boolean): Dispose {
+	#attach(discovery: boolean): Dispose {
 		this.#sessions(1, discovery);
-		const release = this.expect();
+		const release = this.#expect();
 		let detached = false;
 		return () => {
 			if (detached) return;
@@ -566,7 +581,7 @@ export class Producer implements Table {
 	 *
 	 * @internal
 	 */
-	expect(): Dispose {
+	#expect(): Dispose {
 		this.#state.answerers.update((count) => count + 1);
 		let released = false;
 		return () => {
@@ -579,22 +594,12 @@ export class Producer implements Table {
 	}
 
 	/**
-	 * The open requests, watched by attached sessions to answer them; see
-	 * {@link Consumer.request}. Undefined once the origin closes.
-	 *
-	 * @internal
-	 */
-	get requests(): Getter<ReadonlyMap<Path.Valid, RequestSlot> | undefined> {
-		return this.#state.requests;
-	}
-
-	/**
 	 * Resolves once anything a serving session scans changes: the open requests, or either
 	 * side of the routing table.
 	 *
 	 * @internal
 	 */
-	changed(): Promise<unknown> {
+	#changed(): Promise<unknown> {
 		return Signal.race(this.#state.requests, this.#state.local, this.#state.routes, this.#state.advertisedLocal);
 	}
 
@@ -609,7 +614,7 @@ export class Producer implements Table {
 	 *
 	 * @internal
 	 */
-	answer(path: Path.Valid, front: broadcast.Consumer): Dispose | undefined {
+	#answer(path: Path.Valid, front: broadcast.Consumer): Dispose | undefined {
 		const slot = this.#state.requests.peek()?.get(path);
 		if (!slot || slot.answer !== undefined) {
 			front.close();
@@ -640,14 +645,9 @@ export class Producer implements Table {
 		return this.#reader.discovery;
 	}
 
-	/** Resolve `path`, without waiting for an announcement; see {@link Consumer.request}. */
-	request(path: Path.Valid): Request {
-		return this.#reader.request(path);
-	}
-
-	/** Whether the table routes `path` itself; see {@link Consumer.routes}. @internal */
-	routes(path: Path.Valid): boolean {
-		return this.#reader.routes(path);
+	/** Resolve `path`, optionally waiting for an announcement; see {@link Consumer.request}. */
+	request(path: Path.Valid, options?: RequestOptions): Requesting {
+		return this.#reader.request(path, options);
 	}
 
 	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
@@ -696,27 +696,27 @@ export class Producer implements Table {
 // that would leak the unexported OriginState. Assigned in the class's static block.
 let makeConsumer: (state: OriginState) => Consumer;
 
-// Same for Request: a public constructor would let a caller forge a handle that no origin
+// Same for Requesting: a public constructor would let a caller forge a handle that no origin
 // ever registered, whose lifecycle guarantees are then false. `@internal` alone would not
 // stop it, since the declaration emit keeps the constructor.
-let makeRequest: (
+let makeRequesting: (
 	path: Path.Valid,
 	active: Getter<broadcast.Consumer | undefined>,
 	unroutable: Getter<boolean>,
 	dispose: Dispose,
-) => Request;
+) => Requesting;
 
 let makeDynamic: (prefix: Path.Valid, entry: RouteEntry, state: OriginState, retract: Dispose) => Dynamic;
 
-let makeBroadcastRequest: (path: Path.Valid, server: ServeState) => BroadcastRequest;
-let finishBroadcastRequest: (request: BroadcastRequest, err: Error) => void;
+let makeRequest: (path: Path.Valid, server: ServeState) => Request;
+let finishRequest: (request: Request, err: Error) => void;
 
 /**
  * An open request for a path nothing announced; see {@link Consumer.request}.
  *
  * @public
  */
-export class Request {
+export class Requesting {
 	/** The requested path. */
 	readonly path: Path.Valid;
 
@@ -763,7 +763,7 @@ export class Request {
 	}
 
 	static {
-		makeRequest = (path, active, unroutable, dispose) => new Request(path, active, unroutable, dispose);
+		makeRequesting = (path, active, unroutable, dispose) => new Requesting(path, active, unroutable, dispose);
 	}
 
 	/** Withdraw the request. The path stays routed for any other open request. Idempotent. */
@@ -794,6 +794,16 @@ export class Consumer {
 		this.#discovery = new Derived([state.sessions], ({ total, discovery }) =>
 			total === 0 ? undefined : discovery === total,
 		);
+		registerWire(this, {
+			routes: (path) => this.#routes(path),
+			get broadcasts() {
+				return state.local;
+			},
+			get advertised() {
+				return state.originated;
+			},
+			demand: (path) => this.#demand(path),
+		});
 	}
 
 	static {
@@ -832,19 +842,21 @@ export class Consumer {
 	 *
 	 * @internal
 	 */
-	routes(path: Path.Valid): boolean {
+	#routes(path: Path.Valid): boolean {
 		if (this.#state.local.peek()?.has(path)) return true;
 		return this.#state.bestEntry(path) !== undefined;
 	}
 
 	/**
-	 * Resolve `path`, without waiting for an announcement.
+	 * Resolve `path`, optionally waiting for an announcement.
 	 *
-	 * The one way to consume by path. {@link Request.active} follows whatever the table
+	 * The one way to consume by path. {@link Requesting.active} follows whatever the table
 	 * routes (a local publish, or any feeding session's announcement, swapping on a
 	 * republish); when nothing does, the request stands and whichever attached session
 	 * answers first provides a blind subscription instead, re-answered across reconnects.
-	 * Close the request when done. On a closed origin it never resolves.
+	 * With `announced: true`, an unrouted request waits while discovery is supported and
+	 * falls back to that blind behavior only when discovery is unavailable. Close the request
+	 * when done. On a closed origin it never resolves.
 	 *
 	 * With several sessions on one origin the first to answer wins, and it may be one that
 	 * does not carry the path. Nothing corrects that: a missing broadcast surfaces as a reset
@@ -855,11 +867,11 @@ export class Consumer {
 	 * answer. Prefer {@link unroutable} and announcements over blind requests when the origin
 	 * feeds from more than one connection.
 	 */
-	request(path: Path.Valid): Request {
+	request(path: Path.Valid, options: RequestOptions = {}): Requesting {
 		const requests = this.#state.requests.peek();
 		if (!requests) {
 			// Closed origin: a request that can never resolve, and says so.
-			return makeRequest(path, new Signal<broadcast.Consumer | undefined>(undefined), getter(true), () => {});
+			return makeRequesting(path, new Signal<broadcast.Consumer | undefined>(undefined), getter(true), () => {});
 		}
 
 		let slot = requests.get(path);
@@ -870,13 +882,34 @@ export class Consumer {
 			// clear it, so a seeded route retracting to undefined would look like no change and
 			// notify nobody.
 			const refused = new Set<RouteEntry>();
-			const created: RequestSlot = { count: 0, refused, route: new Signal(this.#state.route(path, { refused })) };
+			const created: RequestSlot = {
+				count: 0,
+				blind: 0,
+				refused,
+				route: new Signal(this.#state.route(path, { refused })),
+			};
 			slot = created;
 			this.#state.requests.mutate((map) => {
 				map?.set(path, created);
 			});
 		}
 		slot.count += 1;
+		let blind = !options.announced || this.#discovery.peek() === false;
+		if (blind) slot.blind += 1;
+		this.#state.requests.mutate(() => {});
+
+		// An announcement-gated request falls back to a blind subscription only while at
+		// least one attached session cannot announce. It returns to the gate if discovery
+		// becomes complete again, and remains gated with no session attached.
+		const unsubscribeDiscovery = options.announced
+			? this.#discovery.subscribe((discovery) => {
+					const next = discovery === false;
+					if (next === blind) return;
+					blind = next;
+					slot.blind += next ? 1 : -1;
+					this.#state.requests.mutate(() => {});
+				})
+			: () => {};
 
 		// Hand out a handle of the request's own rather than the table's. Closing a consumer
 		// closes the broadcast once it was the last one, and the table often holds the only
@@ -915,15 +948,18 @@ export class Consumer {
 		// answer.
 		const unroutable = new Derived([route, this.#state.answerers], (front, answerers) => !front && answerers === 0);
 
-		return makeRequest(path, active, unroutable, () => {
+		return makeRequesting(path, active, unroutable, () => {
 			// Releases this request's handle; the route itself belongs to the table.
 			released = true;
+			unsubscribeDiscovery();
 			unsubscribe();
 			handle?.close();
 			handle = undefined;
 			source = undefined;
 
 			taken.count -= 1;
+			if (blind) taken.blind -= 1;
+			this.#state.requests.mutate(() => {});
 			if (taken.count > 0) return;
 
 			// Defer the teardown a microtask: an effect whose rerun was triggered by the
@@ -1025,27 +1061,19 @@ export class Consumer {
 	 *
 	 * @internal
 	 */
-	get broadcasts(): Getter<ReadonlyMap<Path.Valid, broadcast.Consumer> | undefined> {
-		return this.#state.local;
-	}
-
 	/**
 	 * Originated advertisements a session should forward: exact-path announces plus
 	 * originated dynamics. Undefined once the origin closes.
 	 *
 	 * @internal
 	 */
-	get advertised(): Getter<ReadonlyMap<Path.Valid, Advertised> | undefined> {
-		return this.#state.originated;
-	}
-
 	/**
 	 * Resolve `path` for serving: a local broadcast, or wait for an originated dynamic
 	 * to accept it. Undefined when nothing here can serve the path.
 	 *
 	 * @internal
 	 */
-	async demand(path: Path.Valid): Promise<broadcast.Consumer | undefined> {
+	async #demand(path: Path.Valid): Promise<broadcast.Consumer | undefined> {
 		const local = this.#state.local.peek()?.get(path);
 		if (local) return local;
 
@@ -1128,11 +1156,11 @@ export class Dynamic {
 		this.#retract();
 	}
 
-	/** Requests under this prefix, as they arrive, each to {@link BroadcastRequest.accept} or reject. */
-	async *requested(): AsyncIterableIterator<BroadcastRequest> {
+	/** Requests under this prefix, as they arrive, each to {@link Request.accept} or reject. */
+	async *requested(): AsyncIterableIterator<Request> {
 		const server = this.#entry.server;
 		if (!server) return;
-		let current: BroadcastRequest | undefined;
+		let current: Request | undefined;
 		const drop = () => {
 			current?.reject(noCapacity());
 			current = undefined;
@@ -1167,7 +1195,7 @@ export class Dynamic {
  *
  * @public
  */
-export class BroadcastRequest {
+export class Request {
 	/** The path that was requested. */
 	readonly path: Path.Valid;
 
@@ -1180,8 +1208,8 @@ export class BroadcastRequest {
 	}
 
 	static {
-		makeBroadcastRequest = (path, server) => new BroadcastRequest(path, server);
-		finishBroadcastRequest = (request, err) => {
+		makeRequest = (path, server) => new Request(path, server);
+		finishRequest = (request, err) => {
 			request.#done = true;
 			void err;
 		};

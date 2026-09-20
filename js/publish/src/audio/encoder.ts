@@ -84,7 +84,6 @@ export type EncoderInput = {
 /** Constructor options: the wired inputs plus the live-editable tuning knobs. */
 export type EncoderProps = Inputs<EncoderInput> & {
 	// User tuning knobs. Seed a value or wire a Signal; also live-editable via the matching field.
-	muted?: boolean | Signal<boolean>;
 	volume?: number | Signal<number>;
 
 	// Codec selection plus encoder settings. Defaults to "opus".
@@ -123,8 +122,6 @@ export class Encoder {
 
 	readonly in: Readonlys<EncoderInput>;
 
-	/** Silence the encoded audio without tearing down the capture graph. */
-	muted: Signal<boolean>;
 	/** Linear gain applied before encoding, where 1 is unity. */
 	volume: Signal<number>;
 	/** The live-editable codec selection plus its encoder settings. */
@@ -179,7 +176,6 @@ export class Encoder {
 			capture: getter(props?.capture),
 			bandwidth: getter(props?.bandwidth),
 		};
-		this.muted = Signal.from(props?.muted ?? false);
 		this.volume = Signal.from(props?.volume ?? 1);
 		this.codec = Signal.from<Codec>(props?.codec ?? "opus");
 
@@ -198,7 +194,7 @@ export class Encoder {
 
 	// Pump PCM off the capture into whatever is currently publishing, applying the volume knobs on
 	// the way through. Tied to the capture's lifetime rather than the encoder's, so reconfiguring
-	// (or muting) never has to reacquire the stream, which for a decoded file would be fatal.
+	// never has to reacquire the stream, which for a decoded file would be fatal.
 	#runCapture(effect: Effect): void {
 		const capture = effect.get(this.in.capture);
 		if (!capture) return;
@@ -213,7 +209,7 @@ export class Encoder {
 			reader.cancel().catch(() => {});
 		});
 
-		const gain = new Gain(this.muted.peek() ? 0 : this.volume.peek());
+		const gain = new Gain(this.volume.peek());
 
 		effect.spawn(async () => {
 			for (;;) {
@@ -225,7 +221,7 @@ export class Encoder {
 
 				// Every rendition shares the captured frame, so gain returns a copy rather than
 				// scaling in place; muting one rendition must not silence the rest.
-				gain.set(this.muted.peek() ? 0 : this.volume.peek());
+				gain.set(this.volume.peek());
 				const frame = gain.apply(next.value, format.sampleRate);
 
 				// The config rebuilds when the channel count moves, so skip anything that arrives

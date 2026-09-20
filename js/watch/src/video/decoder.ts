@@ -36,6 +36,14 @@ export type DecoderInput = {
 	enabled: Getter<boolean>;
 };
 
+/** Constructor properties for {@link Decoder}. */
+export type DecoderProps = Inputs<DecoderInput> & {
+	/** Rendition selector supplying encoded video. */
+	source: Source;
+	/** Shared playback clock. */
+	sync: Sync;
+};
+
 /** Cumulative video statistics since the decoder started. */
 export interface Stats {
 	/** Number of decoded frames. */
@@ -97,13 +105,14 @@ export class Decoder {
 		this.#out.timestamp.set(undefined);
 	}
 
-	constructor(source: Source, sync: Sync, props?: Inputs<DecoderInput>) {
+	constructor(props: DecoderProps) {
 		this.in = {
 			enabled: getter(props?.enabled ?? true),
 		};
 
-		this.source = source;
-		this.sync = sync;
+		this.source = props.source;
+		this.sync = props.sync;
+		this.#signals.cleanup(this.sync.register(this.out.jitter));
 		this.#identity = this.#signals.computed((effect) => {
 			const config = effect.get(this.source.out.config);
 			return config ? playbackIdentity(config) : undefined;

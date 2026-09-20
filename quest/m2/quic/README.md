@@ -45,6 +45,10 @@ This is a transport API change, not a MoQ wire change.
   written down
 - [Deliver the application close before io_uring teardown](/quest/m2/quic/uring-close.md) -
   the peer receives the final close when the client immediately stops its worker
+- [ECN on the io_uring UDP path](/quest/m2/quic/ecn-uring.md) - the ring's
+  sends carry ECT(0) and its receives read the mark, matching `noq-udp`
+- [Measure ECN on the backbone](/quest/m2/quic/ecn-measure.md) - a written
+  verdict on marking versus dropping, and whether Linode and OVH keep marks
 - [Per-stream ACK progress](/quest/m2/quic/ack-progress.md) - the fork reports
   how far a send stream has been acknowledged and when
 - [poll_acked in web-transport](/quest/m2/quic/ack-hook.md) - the
@@ -67,8 +71,8 @@ This is a transport API change, not a MoQ wire change.
   first-class crate in the fork over the shared stream state machine
 - [Careful resume on reconnect](/quest/m2/quic/careful-resume.md) - a redial
   starts at the previous connection's rate
-- [ECN on the backbone](/quest/m2/quic/ecn.md) - relay peers validate and
-  react to ECN marks
+- [L4S on the backbone](/quest/m2/quic/ecn.md) - an ECT(1) option in the
+  fork, an `ecn` config knob, and a dualpi2 measurement
 - [Release the stack](/quest/m2/quic/release.md) - publish immutable,
   consumable versions of the fork and its adapters
 - [Upstream the fork](/quest/m2/quic/upstream.md) - every general carried

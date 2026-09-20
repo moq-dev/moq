@@ -26,5 +26,4 @@ Public API: additive on @moq/net. Wire: none.
 
 ## Required
 
-- [@moq/net API](/quest/m1/api-js-net.md) - the shapes these extend
 - [Merge dev](/quest/m1/merge-dev.md) - starts on main

@@ -49,7 +49,7 @@ const connection = new Connection({
 
 const identity = Path.from("alice");
 const local = new Local({
-	origin: connection.origin,
+	connection,
 	identity,
 	user: { name: "Alice" },
 });

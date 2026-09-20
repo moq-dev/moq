@@ -1,6 +1,6 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
-import { StreamError, Time } from "@moq/net";
+import { Error as NetError, Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys } from "@moq/signals";
 import { CaptionsRenderer, parseText, VTTCue, type VTTRegion } from "media-captions";
 // media-captions positions and styles cues purely through these stylesheets (via `[part]`
@@ -165,6 +165,14 @@ export type RendererInput = {
 	enabled: Getter<boolean>;
 };
 
+/** Constructor properties for {@link Renderer}. */
+export type RendererProps = Inputs<RendererInput> & {
+	/** Caption rendition selector. */
+	source: Source;
+	/** Shared playback clock. */
+	sync: Sync;
+};
+
 /**
  * Subscribes to the selected caption track, parses each cue, and renders it into an overlay element
  * via [media-captions](https://github.com/vidstack/captions).
@@ -184,9 +192,9 @@ export class Renderer {
 	// publisher costs one line instead of one per cue.
 	#skewWarned = false;
 
-	constructor(source: Source, sync: Sync, props?: Inputs<RendererInput>) {
-		this.source = source;
-		this.sync = sync;
+	constructor(props: RendererProps) {
+		this.source = props.source;
+		this.sync = props.sync;
 		this.in = {
 			container: getter(props?.container),
 			enabled: getter(props?.enabled ?? true),
@@ -274,7 +282,7 @@ export class Renderer {
 		effect.spawn(async () => {
 			for (;;) {
 				const group = await sub.recvGroup().catch((err) => {
-					if (!(err instanceof StreamError)) throw err;
+					if (!(err instanceof NetError.Stream)) throw err;
 					console.debug("captions subscription ended", err);
 					return undefined;
 				});
@@ -290,7 +298,7 @@ export class Renderer {
 							}
 						}
 					} catch (err) {
-						if (!(err instanceof StreamError)) throw err;
+						if (!(err instanceof NetError.Stream)) throw err;
 					} finally {
 						group.close();
 					}

@@ -38,12 +38,11 @@ export type BroadcastInput = {
 	 * A retention budget, not a delivery one, so lowering it does not reduce latency: it only
 	 * shortens how far back a fetch can reach.
 	 */
-	maxAge: Getter<number | undefined>;
+	maxAge: Getter<Moq.Time.Milli | undefined>;
 };
 
 /**
- * A published broadcast: the network broadcast plus a catalog producer, minting per-rendition track
- * handles on demand.
+ * A published broadcast: the network broadcast plus a catalog producer and its rendition tracks.
  *
  * Register renditions with {@link video} / {@link audio}; each returns a {@link Rendition} whose
  * producer (usually an encoder) fills the catalog config and encodes into the demand-gated track.
@@ -75,7 +74,7 @@ export class Broadcast {
 	readonly #renditions = new Signal<Record<string, Rendition<unknown>>>({});
 
 	// The writable track producer signals backing each Rendition's read-only `track`, keyed by name.
-	// The request loop sets these on accept; teardown and unregister clear them.
+	// A static network track is exposed here only while at least one subscriber uses it.
 	readonly #tracks = new Map<string, Signal<Moq.Track.Producer | undefined>>();
 
 	#signals = new Effect();
@@ -222,76 +221,42 @@ export class Broadcast {
 			else broadcast.unannounce();
 		});
 
-		// Close every active rendition track when the broadcast tears down (disable/rename), so an
-		// encoder stops encoding into a dead producer. The Rendition handles themselves stay registered.
-		effect.cleanup(() => {
-			for (const track of this.#tracks.values()) {
-				track.peek()?.close();
-				track.set(undefined);
-			}
-		});
-
 		// Expose it before serving so an application reacting to `net` can insert its own tracks.
 		this.net.set(broadcast);
 		effect.cleanup(() => {
 			if (this.net.peek() === broadcast) this.net.set(undefined);
 		});
 
-		effect.spawn(this.#runBroadcast.bind(this, broadcast, effect));
-	}
-
-	async #runBroadcast(broadcast: Moq.Broadcast.Producer, effect: Effect) {
-		for (;;) {
-			const request = await broadcast.requested();
-			if (!request) break;
-
-			if (request.name === Broadcast.CATALOG_TRACK || request.name === Broadcast.CATALOG_TRACK_COMPRESSED) {
-				const compression = request.name === Broadcast.CATALOG_TRACK_COMPRESSED;
-				// The catalog keeps the bare retention defaults (it is read at the live edge, which
-				// is always retained) but still declares its priority, so a relay forwards it ahead
-				// of the media it describes. Matches `hang::Catalog::default_track_info`.
-				const track = request.accept({ priority: Catalog.PRIORITY.catalog });
-
-				// Serve from a per-subscription child scope. Releasing it when this subscriber leaves keeps
-				// serving state from piling up on the connection-lifetime effect as viewers come and go.
-				const dispose = effect.run((effect) => {
-					effect.cleanup(() => track.close());
-					this.catalog.serve(track, effect, { compression });
-				});
-				void track.closed.then(dispose);
-				continue;
-			}
-
-			const signal = this.#tracks.get(request.name);
-			if (!signal) {
-				console.error("received subscription for unknown track", request.name);
-				request.reject(new Error(`Unknown track: ${request.name}`));
-				continue;
-			}
-
-			// Media, so declare the retention a FETCH-based consumer needs (the catalog above
-			// keeps the bare defaults: it is read at the live edge, which is always retained),
-			// plus the priority for what this rendition carries. Matches what a Rust publisher
-			// declares via `hang::container::track_info`; `Kind` and `PRIORITY` share their names,
-			// so a new kind can't be added on one side without the other noticing.
-			const kind = this.#renditions.peek()[request.name]?.kind;
-			const track = request.accept(
-				Container.trackInfo({
-					maxAge: this.in.maxAge.peek(),
-					priority: kind ? Catalog.PRIORITY[kind] : Catalog.PRIORITY.video,
-				}),
-			);
-
-			// A second subscription for the same name supersedes the first: close the old producer.
-			signal.peek()?.close();
-			signal.set(track);
-
-			// Clear the signal when this track closes on its own, unless it's already been replaced. A
-			// plain promise callback (no child effect) so nothing lingers on the connection effect.
-			void track.closed.then(() => {
-				if (signal.peek() === track) signal.set(undefined);
-			});
+		// Catalog tracks are shared across every subscriber and always hold the latest value.
+		for (const [name, compression] of [
+			[Broadcast.CATALOG_TRACK, false],
+			[Broadcast.CATALOG_TRACK_COMPRESSED, true],
+		] as const) {
+			const track = broadcast.createTrack(name, { priority: Catalog.PRIORITY.catalog });
+			effect.cleanup(() => track.close());
+			this.catalog.serve(track, effect, { compression });
 		}
+
+		// Static tracks fan out to every subscriber. Keep the encoder-facing handle demand-gated
+		// so capture and encoding still stop when the final subscriber leaves.
+		effect.run((tracks) => {
+			const renditions = tracks.get(this.#renditions);
+			const maxAge = tracks.get(this.in.maxAge);
+
+			for (const rendition of Object.values(renditions)) {
+				const signal = this.#tracks.get(rendition.name);
+				if (!signal) continue;
+
+				const track = broadcast.createTrack(
+					rendition.name,
+					Container.trackInfo({ maxAge, priority: Catalog.PRIORITY[rendition.kind] }),
+				);
+				tracks.cleanup(() => track.close());
+				tracks.run((demand) => {
+					demand.set(signal, demand.get(track.used) ? track : undefined);
+				});
+			}
+		});
 	}
 
 	close() {

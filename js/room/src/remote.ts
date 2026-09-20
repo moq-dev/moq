@@ -53,7 +53,7 @@ export class Member {
 			origin: connection.origin,
 			enabled: true,
 			name: path,
-			reload: true,
+			announced: true,
 		});
 		this.#signals.cleanup(() => this.broadcast.close());
 
@@ -71,27 +71,25 @@ export class Member {
 			audioSource.close();
 		});
 
-		const videoJitter = new Signal<Moq.Time.Milli | undefined>(undefined);
 		const sync = new Watch.Sync({
 			delay: "auto",
 			probe: connection.probe,
-			video: videoJitter,
-			audio: audioSource.out.jitter,
 		});
 		this.#signals.cleanup(() => sync.close());
 
-		this.video = new Watch.Video.Decoder(videoSource, sync, { enabled: this.#videoEnabled });
-		this.#signals.proxy(videoJitter, this.video.out.jitter);
-		this.audio = new Watch.Audio.Decoder(audioSource, sync, { enabled: this.#audioEnabled });
+		this.video = new Watch.Video.Decoder({ source: videoSource, sync, enabled: this.#videoEnabled });
+		this.audio = new Watch.Audio.Decoder({ source: audioSource, sync, enabled: this.#audioEnabled });
 		this.#signals.cleanup(() => {
 			this.video.close();
 			this.audio.close();
 		});
 
-		this.renderer = new Watch.Video.Renderer(this.video, {
+		this.renderer = new Watch.Video.Renderer({
+			decoder: this.video,
 			canvas: this.canvas,
 		});
-		this.emitter = new Watch.Audio.Emitter(this.audio, {
+		this.emitter = new Watch.Audio.Emitter({
+			source: this.audio,
 			volume: this.volume,
 			muted: this.muted,
 		});

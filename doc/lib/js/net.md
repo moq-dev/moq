@@ -19,7 +19,11 @@ const url = new URL("https://cdn.moq.dev/anon?jwt=...");
 // Publish. The origin is the routing table the connection announces and serves,
 // so a broadcast survives a reconnect.
 const origin = new Moq.Origin.Producer();
-const connection = await Moq.Connection.connect(url, { publish: origin.consume() });
+const connection = await Moq.Connection.connect({
+    url,
+    publish: origin.consume(),
+    consume: origin,
+});
 
 const broadcast = origin.createBroadcast(Moq.Path.from("chat.room"));
 const track = broadcast.createTrack("messages");
@@ -29,7 +33,13 @@ group.close();
 broadcast.announce();
 
 // Subscribe
-const consumer = connection.consume(Moq.Path.from("chat.room")).track("messages").subscribe({ priority: 0 });
+const request = origin.request(Moq.Path.from("chat.room"));
+let active = request.active.peek();
+while (!active) {
+    await request.active.changed();
+    active = request.active.peek();
+}
+const consumer = active.track("messages").subscribe({ priority: 0 });
 for (;;) {
     const group = await consumer.recvGroup();
     if (!group) break;
@@ -41,9 +51,9 @@ for (;;) {
 - **Connections** race WebTransport against WebSocket. `new Connection({ url })` pools one connection per relay URL and reconnects with backoff, which the elements use. `closed` settles when the handle is released (`null` on a clean close); the failure that stopped retrying the current URL is `error`, and a new URL recovers the same handle. A connection owns one send-rate sampler and one `Bandwidth.Allocator`; publishers reserve against it so their encoder targets sum to the estimate instead of each matching it.
 - **Bandwidth** (`Bandwidth.Allocator`) divides the connection's send-rate estimate by track priority, max-min fair within a tier. An idle track claims nothing. The receive side is untouched.
 - **Discovery** by any pattern scope (`origin.announced(scope)`, such as `room/*/chat`; default everything). Each event's `path` is the covered prefix relative to the origin, `captures` reports what the scope's wildcards matched when the prefix pins them, and `kind` says whether it was announced, updated, or retracted. The consumer is an async iterable. `origin.dynamic(prefix, route)` advertises a prefix.
-- **Subscriptions** carry a priority and max age; groups arrive out of order and are read frame by frame, with `Lagged` when a reader asks for a frame the group never held and `GroupTooLarge` when a write exceeds the cache budget and aborts the group.
+- **Subscriptions** carry a priority, a `Time.Milli` max age, and optional `groups` bounds. Groups arrive out of order and are read frame by frame, with `Error.TooFarBehind` when a reader asks for a frame the group never held and `Error.GroupTooLarge` when a write exceeds the cache budget and aborts the group.
 - **Datagrams** on moq-lite 05+ and fetch-by-sequence for history.
-- **Errors** split by scope: a stream reset throws `StreamError` with a `StreamCode`, a session close gives `SessionError` with a `SessionCode`. The registries are disjoint, so the same number means different things in each, and 64+ is yours. Same on either transport. Named conditions like `Lagged` subclass `StreamError`, so one `code` check catches a gap whether it happened here or at the peer, and resetting a moq-lite stream with one sends that code rather than a bare internal error. IETF streams use their own mapping: cancellation sends CANCELLED, other local failures send INTERNAL\_ERROR, and received codes remain opaque.
+- **Errors** live under one namespace: a stream reset throws `Error.Stream` with a `StreamCode`, while a session close gives `Error.Session` with a `SessionCode`. The registries are disjoint, so the same number means different things in each, and 64+ is yours. Named conditions such as `Error.TooFarBehind`, `Error.FrameTooLarge`, and `Error.GroupTooLarge` subclass `Error.Stream`, so one `code` check handles a condition raised here or reported by the peer. IETF streams use their own mapping: cancellation sends CANCELLED, other local failures send INTERNAL\_ERROR, and received codes remain opaque.
 - **Paths** with `Path.relative` for the cross-broadcast catalog references hang uses. Path patterns (`Path.Pattern`, `Path.Patterns`) are re-exported from [`@moq/pattern`](https://www.npmjs.com/package/@moq/pattern). Literal `Path` stays a coordinate.
 
 The [path pattern](/concept/moq-lite#path-patterns) grammar lives on the
@@ -83,7 +93,7 @@ Three operations, on an origin:
 - `origin.dynamic(prefix, route)` claims `prefix` and every path beneath it
   (`""` claims everything). Hold the returned `Origin.Dynamic` while the
   claim should stay advertised; `close()` retracts it. A request beneath it
-  with no local broadcast is a `BroadcastRequest` to `accept` or `reject`;
+  with no local broadcast is an `Origin.Request` to `accept` or `reject`;
   reject what you will not serve rather than narrowing the claim, since a
   route is always a prefix on every wire.
 

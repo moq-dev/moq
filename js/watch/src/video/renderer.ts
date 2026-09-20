@@ -26,6 +26,12 @@ export type RendererInput = {
 	visible: Getter<Visible>;
 };
 
+/** Constructor properties for {@link Renderer}. */
+export type RendererProps = Inputs<RendererInput> & {
+	/** Decoder supplying video frames. */
+	decoder: Decoder;
+};
+
 type RendererOutput = {
 	// The most recently rendered frame, updated after each rAF paint.
 	frame: Signal<VideoFrame | undefined>;
@@ -54,8 +60,8 @@ export class Renderer {
 	#ctx = new Signal<CanvasRenderingContext2D | undefined>(undefined);
 	#signals = new Effect();
 
-	constructor(decoder: Decoder, props?: Inputs<RendererInput>) {
-		this.decoder = decoder;
+	constructor(props: RendererProps) {
+		this.decoder = props.decoder;
 		this.in = {
 			canvas: getter(props?.canvas),
 			visible: getter(props?.visible ?? "20%"),

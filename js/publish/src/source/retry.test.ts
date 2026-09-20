@@ -1,11 +1,10 @@
 import { expect, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
-import type * as Audio from "../audio";
-import type * as Video from "../video";
 import { Camera } from "./camera";
 import { Microphone } from "./microphone";
 import { Retry } from "./retry";
 import { Screen } from "./screen";
+import type { Media } from "./types";
 
 // A MediaStreamTrack ends on its own when the device disappears or the OS revokes it. Only the bits
 // the sources touch, plus end() to fire it.
@@ -170,7 +169,8 @@ const QUIET_MARGIN = 100;
 const SPENT_TIMEOUT = 30_000;
 
 /** The track a source published, or undefined. */
-function published(source: Audio.Source | Video.Source | undefined): unknown {
+function published(media: Media | undefined): unknown {
+	const source = media?.audio ?? media?.video;
 	if (!source) return undefined;
 	return "track" in source ? source.track : source;
 }

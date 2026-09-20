@@ -16,10 +16,10 @@ import {
 	type ConnectProps as ConnectPropsType,
 	certificateHash,
 	connect,
-	type WebSocketOptions as WebSocketOptionsType,
+	type WebSocketProps as WebSocketPropsType,
 	type WebTransportProps as WebTransportPropsType,
 } from "./connect.ts";
-import type { Established } from "./established.ts";
+import type { Established as EstablishedType } from "./established.ts";
 import { Reload, type ReloadDelay, type ReloadStatus } from "./reload.ts";
 import type { Probe as ProbeType, Stats as StatsType } from "./stats.ts";
 import type { Transport as TransportType } from "./transport.ts";
@@ -39,8 +39,8 @@ export interface ConnectionProps {
 	 * How long the underlying connection outlives its last handle (default: 2000ms).
 	 *
 	 * The window is what makes moving an element around the DOM free: the connection and
-	 * everything it discovered are still warm when the new owner asks for them. Applied by
-	 * whoever dials first, so a later handle sharing the connection inherits it.
+	 * everything it discovered are still warm when the new owner asks for them. The longest
+	 * linger requested by any handle sharing the connection wins.
 	 */
 	linger?: Time.Milli;
 
@@ -57,7 +57,7 @@ export interface ConnectionProps {
 	webtransport?: WebTransportPropsType;
 
 	/** WebSocket fallback options applied to each connection attempt (not reactive). */
-	websocket?: WebSocketOptionsType;
+	websocket?: WebSocketPropsType;
 
 	/** Whether the relay supports broadcast discovery. */
 	discovery?: boolean;
@@ -174,7 +174,7 @@ export class Connection {
 
 	#closed = new Once<Error | null>();
 	readonly #status = new Signal<ReloadStatus>("disconnected");
-	readonly #established = new Signal<Established | undefined>(undefined);
+	readonly #established = new Signal<EstablishedType | undefined>(undefined);
 	readonly #probe = new Signal<ProbeType | undefined>(undefined);
 	readonly #origin = new Signal<Origin.Producer | undefined>(undefined);
 	readonly #bandwidth = new Signal<Handle | undefined>(undefined);
@@ -246,7 +246,7 @@ export class Connection {
 			discovery: props.discovery,
 			// A handle nobody watches wants unlimited retries; an auth rejection still
 			// stops this URL, and a new one starts another sequence.
-			delay: props.delay ?? { timeout: Time.Milli(0) },
+			delay: { timeout: Time.Milli(0), ...props.delay },
 		});
 		this.#signals.cleanup(() => loop.close());
 
@@ -315,16 +315,6 @@ export class Connection {
 		return consumer;
 	}
 
-	/**
-	 * A reactive handle to one broadcast on the connection's origin; see `Announce.Broadcast`.
-	 * Close the handle when done.
-	 */
-	announcedBroadcast(path: Path.Valid): Announce.Broadcast {
-		// The signal is handed out directly: Producer implements the non-owning Table, so
-		// the handle can read the origin but never close it.
-		return new Announce.Broadcast({ origin: this.#origin, path });
-	}
-
 	/** Snapshot the live connection's transport counters, or undefined while disconnected. */
 	async stats(): Promise<StatsType | undefined> {
 		return this.#established.peek()?.stats();
@@ -349,7 +339,7 @@ export namespace Connection {
 	/** Options for {@link Connection.accept}. */
 	export type AcceptProps = AcceptPropsType;
 	/** Backoff settings for a private reconnect loop. */
-	export type Delay = ReloadDelay;
+	export type Backoff = ReloadDelay;
 	/** Current state of a {@link Connection}. */
 	export type Status = ReloadStatus;
 	/** The current connection's PROBE estimates. */
@@ -359,11 +349,13 @@ export namespace Connection {
 	/** The wire transport a session runs over. */
 	export type Transport = TransportType;
 	/** Tuning for the WebSocket fallback. */
-	export type WebSocketOptions = WebSocketOptionsType;
+	export type WebSocketProps = WebSocketPropsType;
 	/** WebTransport options, including friendlier certificate pinning. */
 	export type WebTransportProps = WebTransportPropsType;
 	/** A server certificate hash used to pin a self-signed server. */
 	export type CertificateHash = CertificateHashType;
+	/** An established one-shot session. */
+	export type Established = EstablishedType;
 }
 
 /** Throw if `props` cannot be honored, rather than silently dropping them. */
@@ -443,6 +435,7 @@ function acquire(key: string, linger?: Time.Milli): Entry & { release: () => voi
 	}
 
 	const taken = entry;
+	taken.linger = Time.Milli(Math.max(taken.linger, linger ?? LINGER_MS));
 	taken.refs += 1;
 	if (taken.timer !== undefined) {
 		clearTimeout(taken.timer);

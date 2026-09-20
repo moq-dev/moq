@@ -5,7 +5,8 @@ import { error, SessionCode, SessionError } from "../error.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import * as Time from "../time.ts";
-import { type ConnectProps, connect, type WebSocketOptions, type WebTransportProps } from "./connect.ts";
+import { wireOf } from "../wire.ts";
+import { type ConnectProps, connect, type WebSocketProps, type WebTransportProps } from "./connect.ts";
 import type { Established } from "./established.ts";
 import type { Probe, Stats } from "./stats.ts";
 
@@ -43,7 +44,7 @@ export type ReloadDelay = {
  *
  * @internal
  */
-export type ReloadProps = Omit<ConnectProps, "signal" | "transport"> & {
+export type ReloadProps = Omit<ConnectProps, "url" | "signal" | "transport"> & {
 	/** A reload owns the abort signal for each connection attempt. */
 	signal?: never;
 
@@ -131,7 +132,7 @@ export class Reload {
 	webtransport?: WebTransportProps;
 
 	/** WebSocket fallback options applied to each connection attempt (not reactive). */
-	websocket: WebSocketOptions | undefined;
+	websocket: WebSocketProps | undefined;
 
 	/**
 	 * Whether the relay supports broadcast discovery, applied to each connection attempt (not
@@ -218,7 +219,7 @@ export class Reload {
 		// is recoverable (a new URL or a disable/re-enable starts another sequence), so a
 		// request must keep waiting rather than go unroutable in the gap.
 		if (this.consume) {
-			this.#signals.cleanup(this.consume.expect());
+			this.#signals.cleanup(wireOf(this.consume).expect());
 		}
 
 		this.error = this.#error;
@@ -318,7 +319,8 @@ export class Reload {
 			let connected: DOMHighResTimeStamp | undefined;
 
 			try {
-				const connection = await connect(url, {
+				const connection = await connect({
+					url,
 					websocket: this.websocket,
 					webtransport: this.webtransport,
 					discovery: this.discovery,
@@ -492,23 +494,6 @@ export class Reload {
 		void consumer.closed.then(() => pump.close());
 
 		return consumer;
-	}
-
-	/**
-	 * A reactive handle to one broadcast, spanning reconnects.
-	 *
-	 * The same {@link Announce.Broadcast} as {@link Established.announcedBroadcast}, but it
-	 * follows the reconnect loop: the broadcast drops to `undefined` when the connection dies
-	 * and resolves again once the new connection announces the path. Use it instead of
-	 * consuming off {@link Reload.established} whenever the broadcast may come online after you
-	 * do, which is exactly the case a blind `consume` loses.
-	 *
-	 * Close the handle when done; {@link Reload.close} only drops it to `undefined`.
-	 */
-	announcedBroadcast(path: Path.Valid): Announce.Broadcast {
-		// Same delegation as announced(): the origin's table is the reconnect-spanning view.
-		if (this.consume) return new Announce.Broadcast({ origin: this.consume, path });
-		return new Announce.Broadcast({ connection: this.established, path });
 	}
 
 	/**

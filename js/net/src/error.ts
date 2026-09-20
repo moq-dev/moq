@@ -15,7 +15,7 @@ declare const SESSION_CODE: unique symbol;
 export type SessionCode = number & { readonly [SESSION_CODE]: true };
 
 /**
- * Codes a peer sends when terminating the session, mirroring the Rust `SessionError`.
+ * Codes a peer sends when terminating the session, mirroring the Rust `Session`.
  *
  * Specified by moq-lite, which reuses moq-transport's codes unchanged. Call `SessionCode(code)`
  * to construct an application code in the 64+ range. {@link StreamCode} is the other registry,
@@ -54,7 +54,7 @@ declare const STREAM_CODE: unique symbol;
 export type StreamCode = number & { readonly [STREAM_CODE]: true };
 
 /**
- * Codes a peer sends when resetting a stream, mirroring the Rust `StreamError`.
+ * Codes a peer sends when resetting a stream, mirroring the Rust `Stream`.
  *
  * The counterpart to {@link SessionCode}, and a disjoint space: a stream reset of 0 is
  * {@link StreamCode.Internal}, not a cancellation ({@link StreamCode.Cancel} is 1). Call
@@ -113,7 +113,7 @@ function applicationCode(code: number): number {
  *
  * ```ts
  * connection.error.subscribe((err) => {
- *   if (err instanceof SessionError && err.code === SessionCode.Unauthorized) {
+ *   if (err instanceof Session && err.code === SessionCode.Unauthorized) {
  *     console.warn("server rejected the session");
  *   }
  * });
@@ -121,19 +121,19 @@ function applicationCode(code: number): number {
  *
  * @public
  */
-export class SessionError extends Error {
+export class Session extends Error {
 	/** The session code the peer sent, verbatim. */
 	readonly code: SessionCode;
 
 	constructor(code: SessionCode, options?: { cause?: unknown; reason?: string }) {
 		super(options?.reason ? `remote error: ${code} (${options.reason})` : `remote error: ${code}`, options);
-		this.name = "SessionError";
+		this.name = "Session";
 		this.code = code;
 	}
 }
 
-/** Options for a {@link StreamError}. */
-export interface StreamErrorOptions {
+/** Options for a {@link Stream}. */
+export interface StreamOptions {
 	/** The failure this one wraps. */
 	cause?: unknown;
 	/** The peer's human-readable reason, appended to the default message. */
@@ -148,7 +148,7 @@ export interface StreamErrorOptions {
  *
  * This surfaces on every transport, so catch this type rather than feature-detecting
  * `WebTransportError`, which a non-browser runtime never defines and the WebSocket fallback
- * never throws. Local conditions with a code of their own subclass it ({@link Lagged},
+ * never throws. Local conditions with a code of their own subclass it ({@link TooFarBehind},
  * {@link FrameTooLarge}, {@link GroupTooLarge}, {@link NotFound}), so the same `code` check catches a condition
  * whether it was raised here or reported by the peer.
  *
@@ -156,24 +156,24 @@ export interface StreamErrorOptions {
  * try {
  *   frame = await group.readFrame();
  * } catch (err) {
- *   if (err instanceof StreamError && err.code === StreamCode.Cancel) return;
+ *   if (err instanceof Stream && err.code === StreamCode.Cancel) return;
  *   throw err;
  * }
  * ```
  *
  * @public
  */
-export class StreamError extends Error {
+export class Stream extends Error {
 	/** The stream code; moq-lite resets forward it verbatim. */
 	readonly code: StreamCode;
 
-	constructor(code: StreamCode, options?: StreamErrorOptions) {
+	constructor(code: StreamCode, options?: StreamOptions) {
 		super(
 			options?.message ??
 				(options?.reason ? `remote error: ${code} (${options.reason})` : `remote error: ${code}`),
 			options,
 		);
-		this.name = "StreamError";
+		this.name = "Stream";
 		this.code = code;
 	}
 }
@@ -186,13 +186,13 @@ export class StreamError extends Error {
  *
  * @public
  */
-export class Lagged extends StreamError {
+export class TooFarBehind extends Stream {
 	constructor(options?: { cause?: unknown }) {
 		super(StreamCode.TooFarBehind, {
 			...options,
 			message: "lagged: frames were evicted before being read",
 		});
-		this.name = "Lagged";
+		this.name = "TooFarBehind";
 	}
 }
 
@@ -204,7 +204,7 @@ export class Lagged extends StreamError {
  *
  * @public
  */
-export class FrameTooLarge extends StreamError {
+export class FrameTooLarge extends Stream {
 	constructor(options?: { cause?: unknown }) {
 		super(StreamCode.FrameTooLarge, {
 			...options,
@@ -222,7 +222,7 @@ export class FrameTooLarge extends StreamError {
  *
  * @public
  */
-export class GroupTooLarge extends StreamError {
+export class GroupTooLarge extends Stream {
 	constructor(options?: { cause?: unknown }) {
 		super(StreamCode.GroupTooLarge, {
 			...options,
@@ -237,7 +237,7 @@ export class GroupTooLarge extends StreamError {
  *
  * @public
  */
-export class NotFound extends StreamError {
+export class NotFound extends Stream {
 	constructor(what: string, options?: { cause?: unknown }) {
 		super(StreamCode.NotFound, { ...options, message: `not found: ${what}` });
 		this.name = "NotFound";
@@ -251,7 +251,7 @@ export class NotFound extends StreamError {
  * to close. The dispatch that owns the session watches for it and closes, so a nonconforming
  * peer cannot repeat the violation on the next stream.
  *
- * @internal
+ * @public
  */
 export class ProtocolViolation extends Error {
 	constructor(message: string, options?: { cause?: unknown }) {
@@ -259,6 +259,11 @@ export class ProtocolViolation extends Error {
 		this.name = "ProtocolViolation";
 	}
 }
+
+/** Package-internal compatibility names used by the wire implementation. */
+export { Session as SessionError, Stream as StreamError, TooFarBehind as Lagged };
+/** Package-internal compatibility name used by the wire implementation. */
+export type StreamErrorOptions = StreamOptions;
 
 /** The WebTransport-shaped fields a stream reset code arrives in. */
 type StreamErrorLike = { source?: unknown; streamErrorCode?: unknown };
@@ -283,11 +288,11 @@ interface TransportErrorOptions {
  *
  * The counterpart to {@link fromTransport}, and the pair has to agree: a code we send for a
  * condition is the code we read that condition back from, or two peers disagree about what it
- * means. Mirrors the Rust `From<&Error> for StreamError`.
+ * means. Mirrors the Rust `From<&Error> for Stream`.
  *
  * Lossy on purpose. An error describes what went wrong here, while the registry is what the peer
  * can act on, so anything without a code of its own degrades to {@link StreamCode.Internal}
- * rather than inventing one. A {@link SessionError} lands there too: the two registries are
+ * rather than inventing one. A {@link Session} lands there too: the two registries are
  * disjoint, so forwarding its code onto a stream would mistranslate it.
  *
  * On an IETF stream the code has to be one the negotiated draft assigns the same meaning to,
@@ -304,7 +309,7 @@ export function toStreamCode(err: unknown, options?: TransportErrorOptions): Str
 
 /** The moq-lite code for a local failure, before any draft has a say. */
 function localStreamCode(err: unknown): StreamCode {
-	if (err instanceof StreamError) return err.code;
+	if (err instanceof Stream) return err.code;
 	if (err instanceof TimeoutError) return StreamCode.DeliveryTimeout;
 	// Session-scoped: the peer learns which rule it broke from the session close, not from here.
 	if (err instanceof ProtocolViolation) return StreamCode.SessionClosed;
@@ -312,7 +317,7 @@ function localStreamCode(err: unknown): StreamCode {
 }
 
 /**
- * Decode a transport failure into a {@link StreamError} when it carries a stream reset code,
+ * Decode a transport failure into a {@link Stream} when it carries a stream reset code,
  * otherwise pass it through.
  *
  * Native WebTransport rejects with a `WebTransportError`; the WebSocket fallback mints an error
@@ -335,12 +340,12 @@ export function fromTransport(err: unknown, options?: TransportErrorOptions): Er
 	const code = streamCode(err);
 	if (code === undefined) return error(err);
 	if (options?.version !== undefined && !sharedStreamCode(code, options.version) && claimedLocally(code)) {
-		return new StreamError(StreamCode.Internal, { cause: err, message: `remote error: ${code}` });
+		return new Stream(StreamCode.Internal, { cause: err, message: `remote error: ${code}` });
 	}
-	if (code === StreamCode.TooFarBehind) return new Lagged({ cause: err });
+	if (code === StreamCode.TooFarBehind) return new TooFarBehind({ cause: err });
 	if (code === StreamCode.FrameTooLarge) return new FrameTooLarge({ cause: err });
 	if (code === StreamCode.GroupTooLarge) return new GroupTooLarge({ cause: err });
-	return new StreamError(code, { cause: err });
+	return new Stream(code, { cause: err });
 }
 
 /** The codes moq-lite names, which a foreign one must not borrow. */
@@ -393,14 +398,14 @@ export function toTransport(code: StreamCode, message: string): Error {
 
 /**
  * Decode a session close into its terminal error: `null` for a clean close
- * ({@link SessionCode.Cancel}), otherwise a {@link SessionError} carrying the peer's code.
+ * ({@link SessionCode.Cancel}), otherwise a {@link Session} carrying the peer's code.
  *
  * @internal Applied to the transport's `closed` info so the code survives to the application.
  */
-export function fromClose(info: WebTransportCloseInfo): SessionError | null {
+export function fromClose(info: WebTransportCloseInfo): Session | null {
 	const code = (info.closeCode ?? SessionCode.Cancel) as SessionCode;
 	if (code === SessionCode.Cancel) return null;
-	return new SessionError(code, { reason: info.reason });
+	return new Session(code, { reason: info.reason });
 }
 
 /**

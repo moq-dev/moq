@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Group, Track } from "@moq/net";
+import { Group, Error as NetError, Time, Track } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Producer } from "./producer.ts";
 
@@ -7,7 +7,7 @@ type Value = Record<string, unknown>;
 
 // These tests inspect complete finished timelines, so request a replay window
 // instead of the transport's live-edge default.
-const REPLAY_LATENCY = 30_000;
+const REPLAY_LATENCY = Time.Milli(30_000);
 
 // Reconstruct every value a consumer yields, in order.
 async function drain(track: Track.Subscriber): Promise<Value[]> {
@@ -323,7 +323,7 @@ test("a rejected update leaves the previous value readable", async () => {
 
 	// Serializes past the group cache limit, so the frame cannot be published.
 	const oversized = { big: "x".repeat(Group.MAX_GROUP_CACHE_BYTES + 1) };
-	expect(() => producer.update(oversized)).toThrow(Group.FrameTooLarge);
+	expect(() => producer.update(oversized)).toThrow(NetError.FrameTooLarge);
 	producer.finish();
 
 	// A reader arriving now still finds the last good value, not an empty superseding group.

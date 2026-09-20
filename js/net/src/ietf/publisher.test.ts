@@ -10,6 +10,7 @@ import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
 import { Timestamp } from "../time.ts";
 import type { Producer as TrackProducer } from "../track.ts";
+import { wireOf } from "../wire.ts";
 import { NativeSession, type Session } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
 import { FetchHeader } from "./fetch.ts";
@@ -930,7 +931,9 @@ test("draft-20: an absolute filter trims the range it serves", async () => {
 	try {
 		// The request forwarded upstream carries the model's exclusive end, one past the
 		// filter's inclusive last group.
-		expect(track.subscription.peek()).toMatchObject({ startGroup: 1, endGroup: 3 });
+		expect(track.subscription.peek()).toMatchObject({
+			groups: { start: { included: 1 }, end: { excluded: 3 } },
+		});
 
 		const first = await nextUni(fx.uni);
 		if (!first) throw new Error("the filter's start group was never served");
@@ -1363,7 +1366,7 @@ test("draft-20: a fill works on a dynamically requested track", async () => {
 	// Answer the request the subscription raises, the way an application serving on demand
 	// does, rather than inserting the track up front.
 	const serving = (async () => {
-		const request = await fx.broadcast.requested();
+		const request = await wireOf(fx.broadcast).requested();
 		if (!request) throw new Error("no track was requested");
 		const track = request.accept();
 		const group = track.appendGroup();

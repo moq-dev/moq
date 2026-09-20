@@ -14,6 +14,7 @@ import {
 import type * as Audio from "../audio";
 import type * as Video from "../video";
 import { Timeline } from "./timeline";
+import type { Media } from "./types";
 
 // Signals the file source reads.
 export type FileInput = {
@@ -28,8 +29,8 @@ export interface FileProps extends Inputs<FileInput> {
 }
 
 type FileOutput = {
-	// The sources decoded from the file, empty while disabled or undecodable.
-	source: Signal<{ video?: Video.Source; audio?: Audio.Source }>;
+	// The sources decoded from the file, undefined while disabled or undecodable.
+	source: Signal<Media | undefined>;
 };
 
 // Image, video, and audio files we know how to decode (see #decode).
@@ -56,7 +57,7 @@ export class File {
 	file: Signal<globalThis.File | undefined>;
 
 	readonly #out: FileOutput = {
-		source: new Signal<{ video?: Video.Source; audio?: Audio.Source }>({}),
+		source: new Signal<Media | undefined>(undefined),
 	};
 	readonly out = readonlys(this.#out);
 
@@ -132,7 +133,7 @@ export class File {
 			},
 		});
 
-		effect.set(this.#out.source, { video: { frames, frameRate: IMAGE_FRAME_RATE } }, {});
+		effect.set(this.#out.source, { video: { frames, frameRate: IMAGE_FRAME_RATE } }, undefined);
 	}
 
 	async #decodeMedia(file: globalThis.File, effect: Effect) {
@@ -180,7 +181,7 @@ export class File {
 		};
 
 		if (signal.aborted) return;
-		effect.set(this.#out.source, source, {});
+		effect.set(this.#out.source, source, undefined);
 	}
 
 	/** Stop decoding and release the file. */

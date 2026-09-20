@@ -72,7 +72,7 @@ export class Consumer<T> {
 				frame = await this.#group.readFrame();
 			} catch (err) {
 				// A locally raised gap carries its code too, so this catches both sides.
-				if (!(err instanceof Moq.StreamError && GAPS.includes(err.code))) throw err;
+				if (!(err instanceof Moq.Error.Stream && GAPS.includes(err.code))) throw err;
 
 				// The next group starts with a checkpoint that accounts for everything missed.
 				this.#group = undefined;

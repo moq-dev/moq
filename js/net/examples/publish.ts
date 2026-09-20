@@ -5,7 +5,7 @@ async function main() {
 
 	// The origin holds what we publish; the connection announces and serves it.
 	const origin = new Moq.Origin.Producer();
-	await Moq.Connection.connect(url, { publish: origin.consume() });
+	const connection = await Moq.Connection.connect({ url, publish: origin.consume() });
 
 	// Create a broadcast (a collection of tracks) at a path on the origin
 	const broadcast = origin.createBroadcast(Moq.Path.from("my-broadcast"));
@@ -16,15 +16,7 @@ async function main() {
 	void publishTrack(broadcast.createTrack("chat"));
 	console.log("Published broadcast: my-broadcast");
 
-	// Tracks created on demand (instead of up front) are still supported: handle any
-	// subscribe for a track that wasn't statically inserted.
-	for (;;) {
-		const request = await broadcast.requested();
-		if (!request) break;
-
-		// Reject anything we didn't insert above.
-		request.reject(new Error("track not found"));
-	}
+	await connection.closed;
 }
 
 async function publishTrack(track: Moq.Track.Producer) {

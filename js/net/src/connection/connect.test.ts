@@ -1,9 +1,13 @@
 import { expect, test } from "bun:test";
 import { ALPN_05 } from "../lite/version.ts";
 import { createMockTransportPair } from "../mock.ts";
-import { connect } from "./connect.ts";
+import { type ConnectProps, connect as connectSession } from "./connect.ts";
 
 const url = new URL("https://example.com/test");
+
+function connect(url: URL, props: Omit<ConnectProps, "url"> = {}) {
+	return connectSession({ url, ...props });
+}
 
 // A relay URL as the token flow hands it to us.
 const SECRET = "super-secret-jwt";

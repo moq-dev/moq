@@ -60,7 +60,7 @@ signals.run((effect) => {
     if (!net) return;
 
     // A day-long retention so a late viewer still replays the last value.
-    const track = net.createTrack("meta.json", { latencyMax: 86_400_000 });
+    const track = net.createTrack("meta.json", { maxAge: 86_400_000 });
     effect.cleanup(() => track.close());
 
     const meta = new Json.Snapshot.Producer<Meta>({ track });
@@ -97,13 +97,15 @@ const broadcast = new Publish.Broadcast({
 
 const camera = new Publish.Source.Camera({ enabled: true });
 const microphone = new Publish.Source.Microphone({ enabled: true });
-const capture = new Publish.Video.Capture({ source: camera.out.source });
+const video = new Publish.Signals.Computed((effect) => effect.get(camera.out.source)?.video);
+const capture = new Publish.Video.Capture({ source: video });
 
 // Each encoder registers a rendition on the broadcast (`broadcast.video(name)`) and
 // encodes only while someone is subscribed.
 new Publish.Video.Encoder("video/hd", { broadcast, capture, enabled: true });
 new Publish.Video.Encoder("video/sd", { broadcast, capture, enabled: true, config: { maxScale: 0.25 } });
-const audioCapture = new Publish.Audio.Capture({ source: microphone.out.source });
+const audioSource = new Publish.Signals.Computed((effect) => effect.get(microphone.out.source)?.audio);
+const audioCapture = new Publish.Audio.Capture({ source: audioSource });
 new Publish.Audio.Encoder("audio", { broadcast, capture: audioCapture, enabled: true });
 ```
 

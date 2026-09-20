@@ -1,6 +1,7 @@
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type * as Audio from "../audio";
 import type * as Video from "../video";
+import type { Media } from "./types";
 
 // Signals the screen capture reads.
 export type ScreenInput = {
@@ -19,7 +20,7 @@ export interface ScreenProps extends Inputs<ScreenInput> {
 
 type ScreenOutput = {
 	// The captured surface, or undefined while disabled or dismissed.
-	source: Signal<{ audio?: Audio.Source; video?: Video.Source } | undefined>;
+	source: Signal<Media | undefined>;
 };
 
 /** Captures a screen, window, or tab that the user picks. */
@@ -32,7 +33,7 @@ export class Screen {
 	audio: Signal<Audio.Constraints | boolean | undefined>;
 
 	readonly #out: ScreenOutput = {
-		source: new Signal<{ audio?: Audio.Source; video?: Video.Source } | undefined>(undefined),
+		source: new Signal<Media | undefined>(undefined),
 	};
 	readonly out = readonlys(this.#out);
 
