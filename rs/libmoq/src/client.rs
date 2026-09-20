@@ -43,9 +43,6 @@ pub unsafe fn parse_client(config: Option<&moq_client_config>) -> Result<Config,
 	}
 
 	// Transport
-	if let Some(backend) = unsafe { ffi::parse_str_optional(config.backend, config.backend_len)? } {
-		out.connect.backend = Some(moq_tokio::QuicBackend::from_str(backend).map_err(Error::InvalidConfig)?);
-	}
 	if let Some(bind) = unsafe { ffi::parse_str_optional(config.bind, config.bind_len)? } {
 		let addr: std::net::SocketAddr = bind
 			.parse()

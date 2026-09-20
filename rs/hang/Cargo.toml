@@ -31,7 +31,7 @@ features = ["from", "display", "debug"]
 [dev-dependencies]
 anyhow = { workspace = true }
 moq-mux = { path = "../moq-mux" }
-moq-tokio = { workspace = true, features = ["quinn", "aws-lc-rs", "websocket"] }
+moq-tokio = { workspace = true, features = ["noq", "aws-lc-rs", "websocket"] }
 tokio = { workspace = true, features = ["macros", "fs"] }
 tracing = { workspace = true }
 url = { workspace = true }

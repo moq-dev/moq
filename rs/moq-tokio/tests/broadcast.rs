@@ -2118,7 +2118,7 @@ async fn quic_driver_task_inherits_connection_span() {
 		.expect("group closed prematurely");
 	assert_eq!(&frame.payload[..], b"hello");
 
-	// Other tasks (e.g. quinn's own internal per-connection IO loop) legitimately
+	// Other tasks (e.g. noq's own internal per-connection IO loop) legitimately
 	// carry the "conn" span too, since they're spawned while it's entered. So it's
 	// not enough for the marker to appear *somewhere* in the logs; it must be on
 	// the exact line moq-net emits from inside the driver task the runtime

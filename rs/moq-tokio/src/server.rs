@@ -9,8 +9,6 @@ use std::net;
 use std::path::PathBuf;
 
 use crate::Error;
-#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
-use crate::QuicBackend;
 #[cfg(feature = "iroh")]
 use crate::iroh;
 use moq_net::Session;
@@ -18,13 +16,7 @@ use url::Url;
 
 // Only the transports that finish their handshake in a spawned future need `.boxed()`;
 // the stream listeners hand back an already-built `Request`.
-#[cfg(any(
-	feature = "noq",
-	feature = "quinn",
-	feature = "quiche",
-	feature = "iroh",
-	feature = "websocket"
-))]
+#[cfg(any(feature = "noq", feature = "iroh", feature = "websocket"))]
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
@@ -94,7 +86,7 @@ impl crate::listen::Config {
 }
 
 /// Default bind address used when [`crate::listen::Config::bind`] is not set.
-#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+#[cfg(feature = "noq")]
 pub(crate) const DEFAULT_BIND: net::SocketAddr =
 	net::SocketAddr::V6(net::SocketAddrV6::new(net::Ipv6Addr::UNSPECIFIED, 443, 0, 0));
 
@@ -117,10 +109,7 @@ pub(crate) enum Parts {
 	/// The QUIC listener only, as one member of a `SO_REUSEPORT` group. Folding
 	/// the member in here is what stops a group member and a stream-only server
 	/// from being asked for at once.
-	#[cfg_attr(
-		not(any(feature = "noq", feature = "quinn", feature = "quiche")),
-		expect(dead_code, reason = "no QUIC backend is compiled in")
-	)]
+	#[cfg_attr(not(feature = "noq"), expect(dead_code, reason = "no QUIC backend is compiled in"))]
 	Member(crate::listen::Member),
 }
 
@@ -142,10 +131,7 @@ impl Parts {
 	/// This server's claim on a slot in the group, when it is a member of one.
 	/// Consuming, because binding it is what joins the group and only one
 	/// backend does that.
-	#[cfg_attr(
-		not(any(feature = "noq", feature = "quinn", feature = "quiche")),
-		expect(dead_code, reason = "no QUIC backend is compiled in")
-	)]
+	#[cfg_attr(not(feature = "noq"), expect(dead_code, reason = "no QUIC backend is compiled in"))]
 	fn member(self) -> Option<crate::listen::Member> {
 		match self {
 			Self::Member(member) => Some(member),
@@ -202,7 +188,7 @@ impl Config {
 	}
 
 	/// Copy the settings one QUIC worker owns.
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	#[cfg(feature = "noq")]
 	pub(crate) fn worker(&self) -> Self {
 		Self {
 			listen: self.listen.clone(),
@@ -233,10 +219,6 @@ pub struct Server {
 	iroh: Option<iroh::Endpoint>,
 	#[cfg(feature = "noq")]
 	noq: Option<crate::noq::NoqServer>,
-	#[cfg(feature = "quinn")]
-	quinn: Option<crate::quinn::QuinnServer>,
-	#[cfg(feature = "quiche")]
-	quiche: Option<crate::quiche::QuicheServer>,
 	#[cfg(feature = "websocket")]
 	websocket: Option<crate::websocket::Listener>,
 }
@@ -253,12 +235,10 @@ pub struct Server {
 /// only caller.
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
-#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+#[cfg(feature = "noq")]
 pub(crate) struct SocketRetainer {
 	#[cfg(feature = "noq")]
 	noq: Option<web_transport_noq::noq::Endpoint>,
-	#[cfg(feature = "quinn")]
-	quinn: Option<quinn::Endpoint>,
 }
 
 impl Server {
@@ -296,11 +276,6 @@ impl Server {
 		// gets the released spellings folded in too.
 		config.validate()?;
 
-		// `default_quic_backend` panics when no backend is compiled, so a WebSocket- or
-		// stream-only build must not ask it.
-		#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
-		let backend = config.backend.clone().unwrap_or_else(crate::default_quic_backend);
-
 		let versions = config.versions();
 
 		// Build a QUIC backend when `--listen` is set, or when nothing else
@@ -315,28 +290,17 @@ impl Server {
 		// `parts.quic()` and not `build_quic`: a caller that asked for streams only
 		// is not asking for a backend, while leaving everything else configured is
 		// still the error it always was.
-		#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche")))]
+		#[cfg(not(feature = "noq"))]
 		if config.bind.is_some() && parts.quic() {
-			return Err(Error::NoBackend(
-				"--listen requires a noq, quinn, or quiche backend feature",
-			));
+			return Err(Error::NoBackend("--listen requires the noq feature"));
 		}
 
 		if build_quic && !config.tls.root.is_empty() {
-			// Only a QUIC backend validates client certificates; the qmux listeners
+			// Only the QUIC backend validates client certificates; the qmux listeners
 			// (tcp/unix/websocket) carry no TLS of their own.
-			#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
-			let mtls_supported = match backend {
-				#[cfg(feature = "quinn")]
-				QuicBackend::Quinn => true,
-				#[cfg(feature = "noq")]
-				QuicBackend::Noq => true,
-				#[cfg(feature = "quiche")]
-				QuicBackend::Quiche => true,
-				#[allow(unreachable_patterns)]
-				_ => false,
-			};
-			#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche")))]
+			#[cfg(feature = "noq")]
+			let mtls_supported = true;
+			#[cfg(not(feature = "noq"))]
 			let mtls_supported = false;
 
 			if !mtls_supported {
@@ -345,33 +309,14 @@ impl Server {
 		}
 
 		// The member is a claim on a slot in a reuseport group, which binding
-		// spends, so exactly one backend may take it.
-		#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
-		let mut member = parts.member();
+		// spends, so the backend may take it only once.
+		#[cfg(feature = "noq")]
+		let member = parts.member();
 
 		#[cfg(feature = "noq")]
-		#[allow(unreachable_patterns)]
-		let noq = match backend {
-			QuicBackend::Noq if build_quic => Some(crate::noq::NoqServer::new(config.clone(), &quic, member.take())?),
-			_ => None,
-		};
-
-		#[cfg(feature = "quinn")]
-		#[allow(unreachable_patterns)]
-		let quinn = match backend {
-			QuicBackend::Quinn if build_quic => {
-				Some(crate::quinn::QuinnServer::new(config.clone(), &quic, member.take())?)
-			}
-			_ => None,
-		};
-
-		#[cfg(feature = "quiche")]
-		let quiche = match backend {
-			QuicBackend::Quiche if build_quic => {
-				Some(crate::quiche::QuicheServer::new(config.clone(), &quic, member.take())?)
-			}
-			_ => None,
-		};
+		let noq = build_quic
+			.then(|| crate::noq::NoqServer::new(config.clone(), &quic, member))
+			.transpose()?;
 
 		// Collect the configured stream listeners (at most one TCP, one Unix).
 		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
@@ -413,10 +358,6 @@ impl Server {
 			iroh,
 			#[cfg(feature = "noq")]
 			noq,
-			#[cfg(feature = "quinn")]
-			quinn,
-			#[cfg(feature = "quiche")]
-			quiche,
 			#[cfg(feature = "websocket")]
 			websocket,
 		})
@@ -492,14 +433,6 @@ impl Server {
 		if let Some(noq) = self.noq.as_ref() {
 			return noq.certificates();
 		}
-		#[cfg(feature = "quinn")]
-		if let Some(quinn) = self.quinn.as_ref() {
-			return quinn.certificates();
-		}
-		#[cfg(feature = "quiche")]
-		if let Some(quiche) = self.quiche.as_ref() {
-			return quiche.certificates();
-		}
 		// No QUIC backend (e.g. a stream-only `--listen-tcp-bind`): no certificates.
 		crate::tls::Certificates::empty()
 	}
@@ -508,21 +441,17 @@ impl Server {
 	/// group after this server is gone.
 	///
 	/// Crate-private: only the worker group retains sockets this way. A worker
-	/// member never serves quiche, so there is nothing to retain there.
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	/// member serves the same noq backend as the tokio listener.
+	#[cfg(feature = "noq")]
 	pub(crate) fn retain(&self) -> SocketRetainer {
 		SocketRetainer {
 			#[cfg(feature = "noq")]
 			noq: self.noq.as_ref().map(|server| server.quic.clone()),
-			#[cfg(feature = "quinn")]
-			quinn: self.quinn.as_ref().map(|server| server.quic.clone()),
 		}
 	}
 
 	#[cfg(not(any(
 		feature = "noq",
-		feature = "quinn",
-		feature = "quiche",
 		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
@@ -584,8 +513,6 @@ impl Server {
 	/// The body of [`Listener::accept`]; the listeners are already running.
 	#[cfg(any(
 		feature = "noq",
-		feature = "quinn",
-		feature = "quiche",
 		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
@@ -594,7 +521,7 @@ impl Server {
 	async fn accept_next(&mut self) -> Option<Request> {
 		loop {
 			// The QUIC endpoint address, reported as a QUIC session's local side.
-			#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+			#[cfg(feature = "noq")]
 			let local = self.local_addr().ok();
 
 			// tokio::select! does not support cfg directives on arms, so we need to create the futures here.
@@ -619,28 +546,6 @@ impl Server {
 			};
 			#[cfg(not(feature = "iroh"))]
 			let iroh_accept = async { None::<()> };
-
-			#[cfg(feature = "quinn")]
-			let quinn_accept = async {
-				#[cfg(feature = "quinn")]
-				if let Some(quinn) = self.quinn.as_mut() {
-					return quinn.accept().await;
-				}
-				None
-			};
-			#[cfg(not(feature = "quinn"))]
-			let quinn_accept = async { None::<()> };
-
-			#[cfg(feature = "quiche")]
-			let quiche_accept = async {
-				#[cfg(feature = "quiche")]
-				if let Some(quiche) = self.quiche.as_mut() {
-					return quiche.accept().await;
-				}
-				None
-			};
-			#[cfg(not(feature = "quiche"))]
-			let quiche_accept = async { None::<()> };
 
 			#[cfg(feature = "websocket")]
 			let ws_ref = self.websocket.as_ref();
@@ -684,30 +589,6 @@ impl Server {
 							link.local = local;
 							let request = server.accept_request(crate::runtime::Runtime::new(), crate::transport::Session::new(session)).await?;
 							Ok(Request { transport: Transport::Quic, url, identity, authority, link, kind: RequestKind::Noq(Box::new(request)) })
-						}.boxed());
-					}
-				}
-				Some(_conn) = quinn_accept => {
-					#[cfg(feature = "quinn")]
-					{
-						let alpns = versions.alpns();
-						self.accept.push(async move {
-							let Accepted { session, url, identity, authority, mut link } = super::quinn::accept(_conn, alpns).await?;
-							link.local = local;
-							let request = server.accept_request(crate::runtime::Runtime::new(), session).await?;
-							Ok(Request { transport: Transport::Quic, url, identity, authority, link, kind: RequestKind::Quinn(Box::new(request)) })
-						}.boxed());
-					}
-				}
-				Some(_conn) = quiche_accept => {
-					#[cfg(feature = "quiche")]
-					{
-						let alpns = versions.alpns();
-						self.accept.push(async move {
-							let Accepted { session, url, identity, authority, mut link } = super::quiche::accept(_conn, alpns).await?;
-							link.local = local;
-							let request = server.accept_request(crate::runtime::Runtime::new(), session).await?;
-							Ok(Request { transport: Transport::Quic, url, identity, authority, link, kind: RequestKind::Quiche(Box::new(request)) })
 						}.boxed());
 					}
 				}
@@ -770,14 +651,6 @@ impl Server {
 		if let Some(noq) = self.noq.as_ref() {
 			return Ok(noq.local_addr()?);
 		}
-		#[cfg(feature = "quinn")]
-		if let Some(quinn) = self.quinn.as_ref() {
-			return Ok(quinn.local_addr()?);
-		}
-		#[cfg(feature = "quiche")]
-		if let Some(quiche) = self.quiche.as_ref() {
-			return Ok(quiche.local_addr()?);
-		}
 		// No QUIC backend (e.g. a stream-only `--listen-tcp-bind`).
 		Err(Error::NoBackend("no QUIC listener configured"))
 	}
@@ -799,14 +672,6 @@ impl Server {
 		if self.noq.is_some() {
 			tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 		}
-		#[cfg(feature = "quinn")]
-		if self.quinn.is_some() {
-			tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-		}
-		#[cfg(feature = "quiche")]
-		if self.quiche.is_some() {
-			tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-		}
 		#[cfg(feature = "iroh")]
 		if let Some(iroh) = self.iroh.take() {
 			iroh.close().await;
@@ -822,14 +687,6 @@ impl Server {
 		#[cfg(feature = "noq")]
 		if let Some(noq) = self.noq.as_mut() {
 			noq.close();
-		}
-		#[cfg(feature = "quinn")]
-		if let Some(quinn) = self.quinn.as_mut() {
-			quinn.close();
-		}
-		#[cfg(feature = "quiche")]
-		if let Some(quiche) = self.quiche.as_mut() {
-			quiche.close();
 		}
 	}
 }
@@ -1191,10 +1048,6 @@ type PendingRequest<S> = moq_net::server::Handshake<S, crate::runtime::Runtime<S
 pub(crate) enum RequestKind {
 	#[cfg(feature = "noq")]
 	Noq(Box<PendingRequest<crate::transport::Session<web_transport_noq::Session>>>),
-	#[cfg(feature = "quinn")]
-	Quinn(Box<PendingRequest<web_transport_quinn::Session>>),
-	#[cfg(feature = "quiche")]
-	Quiche(Box<PendingRequest<web_transport_quiche::Connection>>),
 	#[cfg(feature = "iroh")]
 	Iroh(Box<PendingRequest<crate::transport::Session<web_transport_iroh::Session>>>),
 	#[cfg(any(feature = "tcp", all(feature = "uds", unix), feature = "websocket"))]
@@ -1204,7 +1057,7 @@ pub(crate) enum RequestKind {
 /// The transport-level facts a backend captures while accepting a connection, before the
 /// MoQ SETUP. Grouped so the shared accept loop builds a [`Request`] from named fields
 /// rather than a wide tuple.
-#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "iroh"))]
+#[cfg(any(feature = "noq", feature = "iroh"))]
 pub(crate) struct Accepted<S> {
 	pub session: S,
 	pub url: Option<Url>,
@@ -1307,10 +1160,6 @@ macro_rules! request_ref {
 		match &$self.kind {
 			#[cfg(feature = "noq")]
 			RequestKind::Noq($r) => $body,
-			#[cfg(feature = "quinn")]
-			RequestKind::Quinn($r) => $body,
-			#[cfg(feature = "quiche")]
-			RequestKind::Quiche($r) => $body,
 			#[cfg(feature = "iroh")]
 			RequestKind::Iroh($r) => $body,
 			#[cfg(any(feature = "tcp", all(feature = "uds", unix), feature = "websocket"))]
@@ -1325,10 +1174,6 @@ macro_rules! request_into {
 		match $kind {
 			#[cfg(feature = "noq")]
 			RequestKind::Noq($r) => $body,
-			#[cfg(feature = "quinn")]
-			RequestKind::Quinn($r) => $body,
-			#[cfg(feature = "quiche")]
-			RequestKind::Quiche($r) => $body,
 			#[cfg(feature = "iroh")]
 			RequestKind::Iroh($r) => $body,
 			#[cfg(any(feature = "tcp", all(feature = "uds", unix), feature = "websocket"))]
@@ -1343,10 +1188,6 @@ macro_rules! request_map {
 		match $kind {
 			#[cfg(feature = "noq")]
 			RequestKind::Noq($r) => RequestKind::Noq(Box::new($body)),
-			#[cfg(feature = "quinn")]
-			RequestKind::Quinn($r) => RequestKind::Quinn(Box::new($body)),
-			#[cfg(feature = "quiche")]
-			RequestKind::Quiche($r) => RequestKind::Quiche(Box::new($body)),
 			#[cfg(feature = "iroh")]
 			RequestKind::Iroh($r) => RequestKind::Iroh(Box::new($body)),
 			#[cfg(any(feature = "tcp", all(feature = "uds", unix), feature = "websocket"))]
@@ -1475,8 +1316,8 @@ impl Request {
 	/// The host authority the client dialed, or `None` when the client offered none or the
 	/// transport carries no host (iroh, stream bindings).
 	///
-	/// Reported as offered: rustls clients send no SNI for an IP-literal dial (RFC 6066), so
-	/// quinn/noq see `None`, while BoringSSL clients do send one, so quiche sees the IP.
+	/// Reported as offered: rustls sends no SNI for an IP-literal dial (RFC 6066),
+	/// so noq reports `None`.
 	///
 	/// Not the moq-net IETF SETUP `Authority` parameter. Client-asserted and not authenticated,
 	/// so authorize on the token or [`Self::peer_identity`] rather than on this value.
@@ -1558,8 +1399,8 @@ impl Request {
 	/// The client certificate chain the peer presented, if any, validated
 	/// against a configured [`crate::tls::Listen::root`] during the handshake.
 	///
-	/// Captured at the transport handshake (before the SETUP). Only the Quinn and noq
-	/// backends support mTLS; other transports always return `None`. Use it to grant
+	/// Captured at the transport handshake (before the SETUP). Noq supports mTLS;
+	/// other transports always return `None`. Use it to grant
 	/// elevated access or to close the session once the certificate expires (see
 	/// [`crate::tls::PeerIdentity::expiry`]).
 	pub fn peer_identity(&self) -> Option<crate::tls::PeerIdentity> {
@@ -1793,7 +1634,7 @@ mod tests {
 	}
 
 	/// An explicit QUIC bind cannot be honored without a QUIC backend.
-	#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche")))]
+	#[cfg(not(feature = "noq"))]
 	#[test]
 	fn quic_bind_without_a_quic_backend_is_rejected() {
 		let config = crate::listen::Config {
@@ -1813,7 +1654,7 @@ mod tests {
 
 	/// A QUIC-only server reports nothing. It multiplexes over one UDP socket and
 	/// never calls `accept`, so a zero counter would be a watch that cannot fire.
-	#[cfg(all(feature = "quinn", not(feature = "tcp")))]
+	#[cfg(all(feature = "noq", not(feature = "tcp")))]
 	#[test]
 	fn accept_health_is_empty_without_a_stream_listener() {
 		let server = crate::listen::Config::default()
@@ -1833,7 +1674,7 @@ mod tests {
 
 	/// Building the endpoint needs a runtime, and `certificates()` must stay
 	/// readable without one (no guard escapes to the caller).
-	#[cfg(feature = "quinn")]
+	#[cfg(feature = "noq")]
 	#[tokio::test]
 	async fn certificates_expose_generated_fingerprints() {
 		let mut config = crate::listen::Config {

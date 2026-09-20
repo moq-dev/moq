@@ -18,8 +18,6 @@ ignore = [
     "RUSTSEC-2023-0071",
 
     # foundations (Cloudflare) pins serde_yaml 0.8 which uses yaml-rust 0.4.
-    # Reachable via tokio-quiche -> web-transport-quiche -> moq-tokio
-    # (quiche feature). Awaits upstream migration to serde_yaml 0.9+.
     "RUSTSEC-2024-0320",
 
     # gstreamer 0.23 pulls paste (proc-macro). gstreamer 0.25 drops it but

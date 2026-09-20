@@ -97,7 +97,7 @@ struct Config {
 
 	// Backing storage for the pointers in `value`. Held by value so a settings
 	// object released after BuildConfig can't dangle them.
-	std::string version, backend, bind, fingerprint, root, host_name, congestion, qlog;
+	std::string version, bind, fingerprint, root, host_name, congestion, qlog;
 	moq_string version_item{}, fingerprint_item{}, root_item{};
 };
 

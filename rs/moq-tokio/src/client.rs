@@ -4,11 +4,9 @@
 //! QUIC settings ([`crate::quic::Config`]) a binary shares with its accept half. The
 //! accept side is [`crate::server`].
 
-#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
-use crate::QuicBackend;
 use crate::connection::Goaway;
 use crate::{Addrs, Backoff, Connection, Error};
-#[cfg(all(feature = "websocket", any(feature = "noq", feature = "quinn", feature = "quiche")))]
+#[cfg(all(feature = "websocket", feature = "noq"))]
 use std::future::Future;
 use url::Url;
 
@@ -45,18 +43,11 @@ impl Config {
 pub struct Client {
 	moq: moq_net::Client,
 	/// The single resolved set of protocol versions, used to advertise moq ALPNs across
-	/// every transport (passed into the QUIC backends' `connect` and used directly for
+	/// every transport (passed into the QUIC backend's `connect` and used directly for
 	/// raw TCP/UDS qmux and WebSocket). Resolved once in [`Client::new`] so the ALPN list
 	/// can't diverge between transports. iroh is the exception: it negotiates over the
 	/// full `moq_net::ALPNS` rather than the configured subset, so it reads nothing here.
-	#[cfg(any(
-		feature = "noq",
-		feature = "quinn",
-		feature = "quiche",
-		feature = "websocket",
-		feature = "tcp",
-		feature = "uds"
-	))]
+	#[cfg(any(feature = "noq", feature = "websocket", feature = "tcp", feature = "uds"))]
 	versions: moq_net::Versions,
 	/// The URL from [`connect.url`](crate::connect::Config::url), dialed by [`Client::publish`] / [`Client::consume`].
 	connect: Option<Url>,
@@ -67,7 +58,7 @@ pub struct Client {
 	pub(crate) backoff: Backoff,
 	pub(crate) goaway: Goaway,
 	/// The resolved Happy Eyeballs timings, used by the `tcp://` dial here; the
-	/// QUIC backends capture their own copy from the config.
+	/// QUIC backend captures its own copy from the config.
 	#[cfg(feature = "tcp")]
 	failover_delay: std::time::Duration,
 	#[cfg(feature = "tcp")]
@@ -77,16 +68,11 @@ pub struct Client {
 	/// The TLS server name override used by the WebSocket fallback.
 	#[cfg(feature = "websocket")]
 	tls_host_name: Option<String>,
-	/// Only the rustls-based dials read this. quiche builds its own TLS stack, and the
-	/// plaintext qmux transports have none.
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "websocket"))]
+	/// Only the TLS-based dials read this; the plaintext qmux transports have none.
+	#[cfg(any(feature = "noq", feature = "websocket"))]
 	tls: rustls::ClientConfig,
 	#[cfg(feature = "noq")]
 	noq: Option<crate::noq::NoqClient>,
-	#[cfg(feature = "quinn")]
-	quinn: Option<crate::quinn::QuinnClient>,
-	#[cfg(feature = "quiche")]
-	quiche: Option<crate::quiche::QuicheClient>,
 	#[cfg(feature = "iroh")]
 	iroh: Option<crate::iroh::Endpoint>,
 	#[cfg(feature = "iroh")]
@@ -100,7 +86,7 @@ impl Client {
 	#[cfg(not(feature = "_transport"))]
 	pub fn new(_config: Config) -> crate::Result<Self> {
 		Err(Error::NoBackend(
-			"no backend compiled; enable noq, quinn, quiche, iroh, websocket, tcp, or uds feature",
+			"no backend compiled; enable noq, iroh, websocket, tcp, or uds feature",
 		))
 	}
 
@@ -119,36 +105,15 @@ impl Client {
 			return Err(Error::Deprecated(deprecated));
 		}
 
-		#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
-		let backend = config.backend.clone().unwrap_or_else(crate::default_quic_backend);
-
 		quic.validate()?;
 
-		// Only the rustls-backed transports use this. Iroh, quiche, and the plaintext
+		// Only the rustls-backed transports use this. Iroh and the plaintext
 		// qmux transports must not require a rustls crypto provider.
-		#[cfg(any(feature = "noq", feature = "quinn", feature = "websocket"))]
+		#[cfg(any(feature = "noq", feature = "websocket"))]
 		let tls = config.tls.build()?;
 
 		#[cfg(feature = "noq")]
-		#[allow(unreachable_patterns)]
-		let noq = match backend {
-			QuicBackend::Noq => Some(crate::noq::NoqClient::new(&config, &quic)?),
-			_ => None,
-		};
-
-		#[cfg(feature = "quinn")]
-		#[allow(unreachable_patterns)]
-		let quinn = match backend {
-			QuicBackend::Quinn => Some(crate::quinn::QuinnClient::new(&config, &quic)?),
-			_ => None,
-		};
-
-		#[cfg(feature = "quiche")]
-		#[allow(unreachable_patterns)]
-		let quiche = match backend {
-			QuicBackend::Quiche => Some(crate::quiche::QuicheClient::new(&config, &quic)?),
-			_ => None,
-		};
+		let noq = Some(crate::noq::NoqClient::new(&config, &quic)?);
 
 		let versions = config.versions();
 		// Read before the struct literal below moves fields out of `config`.
@@ -163,14 +128,7 @@ impl Client {
 
 		Ok(Self {
 			moq: moq_net::Client::new().with_versions(versions.clone()),
-			#[cfg(any(
-				feature = "noq",
-				feature = "quinn",
-				feature = "quiche",
-				feature = "websocket",
-				feature = "tcp",
-				feature = "uds"
-			))]
+			#[cfg(any(feature = "noq", feature = "websocket", feature = "tcp", feature = "uds"))]
 			versions,
 			connect: config.url,
 			timeout,
@@ -185,14 +143,10 @@ impl Client {
 			websocket: config.websocket,
 			#[cfg(feature = "websocket")]
 			tls_host_name,
-			#[cfg(any(feature = "noq", feature = "quinn", feature = "websocket"))]
+			#[cfg(any(feature = "noq", feature = "websocket"))]
 			tls,
 			#[cfg(feature = "noq")]
 			noq,
-			#[cfg(feature = "quinn")]
-			quinn,
-			#[cfg(feature = "quiche")]
-			quiche,
 			#[cfg(feature = "iroh")]
 			iroh: None,
 			#[cfg(feature = "iroh")]
@@ -311,8 +265,6 @@ impl Client {
 	/// Errors if no transport feature is compiled in.
 	#[cfg(not(any(
 		feature = "noq",
-		feature = "quinn",
-		feature = "quiche",
 		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
@@ -320,7 +272,7 @@ impl Client {
 	)))]
 	pub(crate) async fn dial(&self, _addr: crate::connect::Addr) -> crate::Result<moq_net::Session> {
 		Err(Error::NoBackend(
-			"no backend compiled; enable noq, quinn, quiche, iroh, websocket, tcp, or uds feature",
+			"no backend compiled; enable noq, iroh, websocket, tcp, or uds feature",
 		))
 	}
 
@@ -332,8 +284,6 @@ impl Client {
 	/// closes once the last returned handle drops.
 	#[cfg(any(
 		feature = "noq",
-		feature = "quinn",
-		feature = "quiche",
 		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
@@ -362,8 +312,6 @@ impl Client {
 	/// The moq client builder, advertising `path` in the SETUP when there is one.
 	#[cfg(any(
 		feature = "noq",
-		feature = "quinn",
-		feature = "quiche",
 		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
@@ -378,8 +326,6 @@ impl Client {
 
 	#[cfg(any(
 		feature = "noq",
-		feature = "quinn",
-		feature = "quiche",
 		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
@@ -465,46 +411,6 @@ impl Client {
 			}
 		}
 
-		#[cfg(feature = "quinn")]
-		if let Some(quinn) = self.quinn.as_ref() {
-			let tls = self.tls.clone();
-			let quic_addr = addr.clone();
-			let quic_handle = async {
-				quinn
-					.connect(&tls, quic_addr, &self.versions)
-					.await
-					.map_err(Error::from)
-			};
-
-			#[cfg(feature = "websocket")]
-			{
-				return self.race_moq_connect(&moq, addr, quic_handle).await;
-			}
-
-			#[cfg(not(feature = "websocket"))]
-			{
-				let session = quic_handle.await?;
-				return Ok(moq.connect(crate::runtime::Runtime::new(), session).await?);
-			}
-		}
-
-		#[cfg(feature = "quiche")]
-		if let Some(quiche) = self.quiche.as_ref() {
-			let quic_addr = addr.clone();
-			let quic_handle = async { quiche.connect(quic_addr, &self.versions).await.map_err(Error::from) };
-
-			#[cfg(feature = "websocket")]
-			{
-				return self.race_moq_connect(&moq, addr, quic_handle).await;
-			}
-
-			#[cfg(not(feature = "websocket"))]
-			{
-				let session = quic_handle.await?;
-				return Ok(moq.connect(crate::runtime::Runtime::new(), session).await?);
-			}
-		}
-
 		#[cfg(feature = "websocket")]
 		return self.connect_websocket(addr).await;
 
@@ -533,7 +439,7 @@ impl Client {
 	///
 	/// Only compiled when there is a QUIC dial to race: a WebSocket-only build connects
 	/// over the fallback directly.
-	#[cfg(all(feature = "websocket", any(feature = "noq", feature = "quinn", feature = "quiche")))]
+	#[cfg(all(feature = "websocket", feature = "noq"))]
 	async fn race_moq_connect<Q, S>(
 		&self,
 		moq: &moq_net::Client,
@@ -575,8 +481,6 @@ impl Client {
 /// server's default path. A peer on published lite-05 rejects an empty value outright.
 #[cfg(any(
 	feature = "noq",
-	feature = "quinn",
-	feature = "quiche",
 	feature = "iroh",
 	feature = "websocket",
 	feature = "tcp",
@@ -603,8 +507,6 @@ fn request_target(url: &Url) -> Option<String> {
 /// [`crate::iroh::Binding`] and calls [`request_target`] itself.
 #[cfg(any(
 	feature = "noq",
-	feature = "quinn",
-	feature = "quiche",
 	feature = "iroh",
 	feature = "websocket",
 	feature = "tcp",
@@ -627,14 +529,14 @@ fn setup_path(url: &Url) -> Option<String> {
 	}
 }
 
-#[cfg(all(feature = "websocket", any(feature = "noq", feature = "quinn", feature = "quiche")))]
+#[cfg(all(feature = "websocket", feature = "noq"))]
 #[derive(Debug, PartialEq, Eq)]
 enum TransportRace<Q, W> {
 	Quic(Q),
 	WebSocket(W),
 }
 
-#[cfg(all(feature = "websocket", any(feature = "noq", feature = "quinn", feature = "quiche")))]
+#[cfg(all(feature = "websocket", feature = "noq"))]
 async fn race_transport_connect<Q, W, QT, WT>(quic: Q, websocket: W) -> crate::Result<TransportRace<QT, WT>>
 where
 	Q: Future<Output = crate::Result<QT>>,
@@ -702,25 +604,25 @@ where
 mod tests {
 	use super::*;
 
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	#[cfg(feature = "noq")]
 	#[tokio::test]
 	async fn fixed_target_preserves_request_and_refuses_redirect() {
 		check_fixed_redirect(false, true).await;
 	}
 
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	#[cfg(feature = "noq")]
 	#[tokio::test]
 	async fn one_shot_fixed_target_refuses_redirect() {
 		check_fixed_redirect(true, true).await;
 	}
 
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	#[cfg(feature = "noq")]
 	#[tokio::test]
 	async fn unused_fixed_fallback_does_not_restrict_connected_target() {
 		check_fixed_redirect(true, false).await;
 	}
 
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	#[cfg(feature = "noq")]
 	async fn check_fixed_redirect(once: bool, pinned: bool) {
 		let mut listen = crate::listen::Config {
 			bind: Some("127.0.0.1:0".parse().unwrap()),
@@ -798,8 +700,6 @@ mod tests {
 
 	#[cfg(any(
 		feature = "noq",
-		feature = "quinn",
-		feature = "quiche",
 		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
@@ -851,8 +751,6 @@ mod tests {
 	/// only the negotiated binding says whether to send one.
 	#[cfg(any(
 		feature = "noq",
-		feature = "quinn",
-		feature = "quiche",
 		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
@@ -1227,7 +1125,7 @@ mod tests {
 		assert_eq!(config.versions().alpns().len(), moq_net::ALPNS.len());
 	}
 
-	#[cfg(all(feature = "websocket", any(feature = "noq", feature = "quinn", feature = "quiche")))]
+	#[cfg(all(feature = "websocket", feature = "noq"))]
 	#[tokio::test]
 	async fn race_transport_connect_keeps_websocket_after_quic_auth_error() {
 		let quic = async { Err::<usize, _>(crate::ConnectError::Unauthorized.into()) };
@@ -1241,7 +1139,7 @@ mod tests {
 		assert_eq!(value, super::TransportRace::WebSocket(1));
 	}
 
-	#[cfg(all(feature = "websocket", any(feature = "noq", feature = "quinn", feature = "quiche")))]
+	#[cfg(all(feature = "websocket", feature = "noq"))]
 	#[tokio::test]
 	async fn race_transport_connect_keeps_quic_after_websocket_forbidden() {
 		let quic = async {
@@ -1254,7 +1152,7 @@ mod tests {
 		assert_eq!(value, super::TransportRace::Quic(3));
 	}
 
-	#[cfg(all(feature = "websocket", any(feature = "noq", feature = "quinn", feature = "quiche")))]
+	#[cfg(all(feature = "websocket", feature = "noq"))]
 	#[tokio::test]
 	async fn race_transport_connect_reports_auth_when_both_refuse() {
 		let quic = async { Err::<usize, _>(crate::ConnectError::Unauthorized.into()) };
@@ -1264,7 +1162,7 @@ mod tests {
 		assert!(err.is_auth(), "unexpected error: {err}");
 	}
 
-	#[cfg(all(feature = "websocket", any(feature = "noq", feature = "quinn", feature = "quiche")))]
+	#[cfg(all(feature = "websocket", feature = "noq"))]
 	#[tokio::test]
 	async fn race_transport_connect_reports_quic_error_when_websocket_forbidden() {
 		let quic = async {
@@ -1278,7 +1176,7 @@ mod tests {
 		assert!(!err.is_auth(), "mixed auth/non-auth must stay retryable: {err}");
 	}
 
-	#[cfg(all(feature = "websocket", any(feature = "noq", feature = "quinn", feature = "quiche")))]
+	#[cfg(all(feature = "websocket", feature = "noq"))]
 	#[tokio::test]
 	async fn race_transport_connect_keeps_websocket_after_quic_non_auth_error() {
 		let quic = async { Err::<usize, _>(Error::ConnectFailed) };
@@ -1288,7 +1186,7 @@ mod tests {
 		assert_eq!(value, super::TransportRace::WebSocket(7));
 	}
 
-	#[cfg(all(feature = "websocket", any(feature = "noq", feature = "quinn", feature = "quiche")))]
+	#[cfg(all(feature = "websocket", feature = "noq"))]
 	#[tokio::test]
 	async fn race_transport_connect_returns_when_quic_transport_connects() {
 		let quic = async { Ok("quic") };
@@ -1315,10 +1213,7 @@ mod tests {
 
 	/// Iroh carries no rustls state, so constructing its client must not require an
 	/// application-installed crypto provider.
-	#[cfg(all(
-		feature = "iroh",
-		not(any(feature = "noq", feature = "quinn", feature = "websocket"))
-	))]
+	#[cfg(all(feature = "iroh", not(any(feature = "noq", feature = "websocket"))))]
 	#[test]
 	fn iroh_only_client_does_not_require_a_tls_provider() {
 		crate::connect::Config::default().init().expect("iroh-only client");

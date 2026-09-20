@@ -3,8 +3,8 @@
 //! [`Addrs`] is the peer's address list, [`Config`] is how to reach it, and the
 //! accept side lives in [`crate::listen`].
 
+use crate::Backoff;
 use crate::connection::Goaway;
-use crate::{Backoff, QuicBackend};
 use std::net;
 use url::Url;
 
@@ -160,14 +160,6 @@ pub(crate) struct Legacy {
 	bind: Option<net::SocketAddr>,
 
 	#[usage(
-		name = "client-backend",
-		long = "client-backend",
-		env = "MOQ_CLIENT_BACKEND",
-		hide = true
-	)]
-	backend: Option<QuicBackend>,
-
-	#[usage(
 		name = "client-connect-timeout",
 		long = "client-connect-timeout",
 		env = "MOQ_CLIENT_CONNECT_TIMEOUT",
@@ -243,13 +235,6 @@ impl Legacy {
 				"--client-bind",
 				Some("MOQ_CLIENT_BIND"),
 				"--connect-bind / MOQ_CONNECT_BIND",
-			);
-		}
-		if self.backend.is_some() {
-			found.flag(
-				"--client-backend",
-				Some("MOQ_CLIENT_BACKEND"),
-				"--connect-backend / MOQ_CONNECT_BACKEND",
 			);
 		}
 		if self.timeout.is_some() {
@@ -354,7 +339,7 @@ pub enum ConnectError {
 impl ConnectError {
 	/// Only the transports that carry an HTTP status (WebTransport, WebSocket) can
 	/// classify one; qmux over tcp/unix has no such response.
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "websocket"))]
+	#[cfg(any(feature = "noq", feature = "websocket"))]
 	pub(crate) fn from_status_u16(status: u16) -> Option<Self> {
 		match status {
 			401 => Some(Self::Unauthorized),
@@ -370,10 +355,7 @@ impl ConnectError {
 	}
 }
 
-#[cfg(all(
-	test,
-	any(feature = "noq", feature = "quinn", feature = "quiche", feature = "websocket")
-))]
+#[cfg(all(test, any(feature = "noq", feature = "websocket")))]
 mod tests {
 	use super::*;
 
@@ -517,16 +499,6 @@ pub struct Config {
 		setting = "connect.bind"
 	)]
 	pub bind: Option<net::SocketAddr>,
-
-	/// The QUIC backend to use.
-	/// Auto-detected from compiled features if not specified.
-	#[usage(
-		name = "connect-backend",
-		long = "connect-backend",
-		env = "MOQ_CONNECT_BACKEND",
-		setting = "connect.backend"
-	)]
-	pub backend: Option<QuicBackend>,
 
 	/// Delay before also dialing the next resolved address (Happy Eyeballs).
 	///
@@ -703,7 +675,6 @@ impl Default for Config {
 			url: None,
 			connect: None,
 			bind: None,
-			backend: None,
 			race: DEFAULT_RACE,
 			race_arg: None,
 			failover_delay: None,

@@ -18,7 +18,6 @@ namespace {
 // Keys. These are stable: they land in scene collections and in the dock's settings
 // file, so renaming one silently drops whatever the user had configured.
 constexpr const char *VERSION = "version";
-constexpr const char *BACKEND = "backend";
 constexpr const char *BIND = "bind";
 constexpr const char *CONNECT_TIMEOUT = "connect_timeout_ms";
 constexpr const char *FAILOVER_DELAY = "failover_delay_ms";
@@ -110,15 +109,6 @@ std::vector<Option> VersionOptions()
 	return CapabilityOptions(moq_versions, "Automatic (offer all)", names);
 }
 
-// The QUIC backends this build of libmoq compiled in, so the menu can't offer one the
-// setter rejects. The backends are feature-gated, so listing the three names would put
-// dead options in front of the user on a release build.
-std::vector<Option> BackendOptions()
-{
-	static std::vector<std::string> names;
-	return CapabilityOptions(moq_backends, "Automatic", names);
-}
-
 // Shorthands so the table below reads as data rather than aggregate initializers.
 Field Toggle(const char *key, const char *label, bool value, const char *tooltip = nullptr)
 {
@@ -152,7 +142,7 @@ Field Directory(const char *key, const char *label, const char *tooltip = nullpt
 	return Field{key, label, tooltip, Kind::Directory, 0, 0, 0, false, 0, "", {}, false, nullptr};
 }
 
-// The tri-state used wherever the library default depends on the backend.
+// The tri-state used wherever the library default depends on the transport.
 std::vector<Option> AutoOnOff()
 {
 	return {{"Automatic", AUTO}, {"Enabled", "on"}, {"Disabled", "off"}};
@@ -226,9 +216,6 @@ const std::vector<Field> &Fields()
 		// default and so never listed, can still be typed in.
 		f.push_back(Choose(VERSION, "Protocol version", VersionOptions(), true,
 				   "Pin the handshake to one draft instead of offering every supported version."));
-		f.push_back(Choose(BACKEND, "QUIC backend", BackendOptions(), false,
-				   "Which QUIC implementation this session uses. Automatic picks the "
-				   "default compiled into this libmoq."));
 		f.push_back(Text(BIND, "Bind address",
 				 "Local UDP address to send from, e.g. 192.0.2.7:0 to pin the outgoing "
 				 "interface. Leave empty for any."));
@@ -400,7 +387,6 @@ bool BuildConfig(obs_data_t *settings, Config *out)
 		config.versions_len = 1;
 	}
 
-	borrow(OptionalString(settings, BACKEND), &out->backend, &config.backend, &config.backend_len);
 	borrow(OptionalString(settings, BIND), &out->bind, &config.bind, &config.bind_len);
 
 	config.connect_timeout_us = (uint64_t)Amount(settings, CONNECT_TIMEOUT) * 1000;
@@ -442,7 +428,7 @@ bool BuildConfig(obs_data_t *settings, Config *out)
 	config.has_quic_keep_alive = true;
 
 	// The tri-states stay unset when the user left them on Automatic, which is what
-	// keeps the backend free to pick. That is exactly what the has_* flag carries.
+	// keeps the transport free to pick. That is exactly what the has_* flag carries.
 	bool toggle = false;
 	if (TriState(settings, QUIC_GSO, &toggle)) {
 		config.quic_gso = toggle;

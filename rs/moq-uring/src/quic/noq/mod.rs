@@ -1,14 +1,13 @@
-//! The rustls backends: sans-IO noq-proto or quinn-proto on the worker's UDP path.
+//! The rustls-backed noq-proto stack on the worker's UDP path.
 //!
 //! TLS goes through rustls, which is what the rest of this workspace speaks,
 //! so a build selecting this backend links one TLS stack instead of two.
 //!
-//! quinn-proto owns more than quiche does: its [`quinn_proto::Endpoint`] holds
+//! [`noq_proto::Endpoint`] holds
 //! the connection-id routing table, mints and retires ids, answers unsupported
 //! versions, and buffers half-open handshakes. So [`Endpoint`] here is mostly
 //! the socket plumbing around it, and the parts that are ours (the accept
-//! backlog, shard steering, the driver task per connection) are the same
-//! shapes the quiche backend uses.
+//! backlog, shard steering, and the driver task per connection.
 
 mod connection;
 mod endpoint;
@@ -22,9 +21,7 @@ pub(crate) use connection::{End, Shared};
 
 use std::sync::Arc;
 
-#[cfg(feature = "noq")]
-use noq_proto as quinn_proto;
-use quinn_proto::crypto::rustls::{QuicClientConfig, QuicServerConfig};
+use noq_proto::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
@@ -32,17 +29,16 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use super::qlog;
 use super::{Congestion, Error, Identity, SEGMENT, Transport, client, endpoint::CID_LEN, server};
 
-/// Per-stream flow control credit, matching the quiche backend.
+/// Per-stream flow control credit.
 const STREAM_WINDOW: u32 = 4 * 1024 * 1024;
-/// Per-connection flow control credit, matching the quiche backend.
+/// Per-connection flow control credit.
 const CONNECTION_WINDOW: u32 = 16 * 1024 * 1024;
-/// How many datagrams to buffer in each direction, matching the quiche
-/// backend's 64.
+/// How many datagrams to buffer in each direction.
 const DATAGRAM_WINDOW: usize = 64 * SEGMENT;
 
-impl From<quinn_proto::ConnectionError> for Error {
-	fn from(err: quinn_proto::ConnectionError) -> Self {
-		use quinn_proto::ConnectionError;
+impl From<noq_proto::ConnectionError> for Error {
+	fn from(err: noq_proto::ConnectionError) -> Self {
+		use noq_proto::ConnectionError;
 		match err {
 			ConnectionError::ApplicationClosed(close) => Self::App {
 				code: close.error_code.into_inner(),
@@ -78,14 +74,9 @@ fn provider() -> Arc<rustls::crypto::CryptoProvider> {
 
 /// The endpoint-wide configuration: how connection ids are minted, and the
 /// largest datagram we tell peers we can receive.
-pub(crate) fn endpoint_config(
-	shard: Option<moq_sock::shard::Shard>,
-) -> Result<Arc<quinn_proto::EndpointConfig>, Error> {
-	let mut config = quinn_proto::EndpointConfig::default();
-	#[cfg(feature = "noq")]
+pub(crate) fn endpoint_config(shard: Option<moq_sock::shard::Shard>) -> Result<Arc<noq_proto::EndpointConfig>, Error> {
+	let mut config = noq_proto::EndpointConfig::default();
 	config.cid_generator(Arc::new(move || Box::new(Cids { shard })));
-	#[cfg(not(feature = "noq"))]
-	config.cid_generator(move || Box::new(Cids { shard }));
 	config
 		.max_udp_payload_size(SEGMENT as u16)
 		.map_err(|err| Error::Quic(err.to_string()))?;
@@ -94,7 +85,7 @@ pub(crate) fn endpoint_config(
 
 /// Mints the endpoint's connection ids, steering prefix included.
 ///
-/// quinn-proto asks its generator for every id it issues, dials and rotations
+/// noq-proto asks its generator for every id it issues, dials and rotations
 /// alike, so this is the one place the reuseport group's byte has to be
 /// stamped.
 #[derive(Debug)]
@@ -102,9 +93,9 @@ struct Cids {
 	shard: Option<moq_sock::shard::Shard>,
 }
 
-impl quinn_proto::ConnectionIdGenerator for Cids {
-	fn generate_cid(&mut self) -> quinn_proto::ConnectionId {
-		quinn_proto::ConnectionId::new(&super::endpoint::cid(self.shard))
+impl noq_proto::ConnectionIdGenerator for Cids {
+	fn generate_cid(&mut self) -> noq_proto::ConnectionId {
+		noq_proto::ConnectionId::new(&super::endpoint::cid(self.shard))
 	}
 
 	fn cid_len(&self) -> usize {
@@ -117,7 +108,7 @@ impl quinn_proto::ConnectionIdGenerator for Cids {
 }
 
 /// Dial as `config` says.
-pub(crate) fn client_config(config: &client::Config) -> Result<quinn_proto::ClientConfig, Error> {
+pub(crate) fn client_config(config: &client::Config) -> Result<noq_proto::ClientConfig, Error> {
 	let provider = provider();
 	let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
 		.with_protocol_versions(&[&rustls::version::TLS13])
@@ -160,7 +151,7 @@ pub(crate) fn client_config(config: &client::Config) -> Result<quinn_proto::Clie
 	tls.alpn_protocols = alpn(&config.alpn);
 
 	let crypto = QuicClientConfig::try_from(tls).map_err(|err| Error::Tls(err.to_string()))?;
-	let mut client = quinn_proto::ClientConfig::new(Arc::new(crypto));
+	let mut client = noq_proto::ClientConfig::new(Arc::new(crypto));
 	let transport = transport_config(&config.transport)?;
 	#[cfg(feature = "qlog")]
 	let transport = with_qlog(transport, &config.transport, qlog::Side::Client);
@@ -169,7 +160,7 @@ pub(crate) fn client_config(config: &client::Config) -> Result<quinn_proto::Clie
 }
 
 /// Serve as `config` says.
-pub(crate) fn server_config(config: &server::Config) -> Result<quinn_proto::ServerConfig, Error> {
+pub(crate) fn server_config(config: &server::Config) -> Result<noq_proto::ServerConfig, Error> {
 	config.check()?;
 	let provider = provider();
 	let builder = rustls::ServerConfig::builder_with_provider(provider.clone())
@@ -199,7 +190,7 @@ pub(crate) fn server_config(config: &server::Config) -> Result<quinn_proto::Serv
 	tls.alpn_protocols = alpn(&config.alpn);
 
 	let crypto = QuicServerConfig::try_from(tls).map_err(|err| Error::Tls(err.to_string()))?;
-	let mut server = quinn_proto::ServerConfig::with_crypto(Arc::new(crypto));
+	let mut server = noq_proto::ServerConfig::with_crypto(Arc::new(crypto));
 	let transport = transport_config(&config.transport)?;
 	#[cfg(feature = "qlog")]
 	let transport = with_qlog(transport, &config.transport, qlog::Side::Server);
@@ -209,73 +200,60 @@ pub(crate) fn server_config(config: &server::Config) -> Result<quinn_proto::Serv
 
 /// Attach the configured qlog sink, if any.
 ///
-/// noq-proto asks a factory per connection, so each gets a file of its own.
-/// quinn-proto holds one sink per transport config instead, which is per
-/// endpoint on the accept side and per dial on the connect side; its events
-/// carry the connection's qlog `group_id` either way.
+/// Noq asks a factory per connection, so each gets a file of its own.
 #[cfg(feature = "qlog")]
 fn with_qlog(
-	mut transport: quinn_proto::TransportConfig,
+	mut transport: noq_proto::TransportConfig,
 	config: &Transport,
 	side: qlog::Side,
-) -> quinn_proto::TransportConfig {
+) -> noq_proto::TransportConfig {
 	let Some(sink) = config.qlog.clone() else {
 		return transport;
 	};
 
-	#[cfg(feature = "noq")]
-	{
-		// The factory is told each connection's own side, so the config's is
-		// not needed here.
-		let _ = side;
-		transport.qlog_factory(Arc::new(Traces { sink }));
-	}
-
-	#[cfg(not(feature = "noq"))]
-	{
-		let mut qlog = quinn_proto::QlogConfig::default();
-		qlog.writer(sink.endpoint_trace(side));
-		transport.qlog_stream(qlog.into_stream());
-	}
+	// The factory is told each connection's own side, so the config's is
+	// not needed here.
+	let _ = side;
+	transport.qlog_factory(Arc::new(Traces { sink }));
 
 	transport
 }
 
 /// Opens one trace per connection, which is what noq-proto's factory hook is
 /// for.
-#[cfg(all(feature = "qlog", feature = "noq"))]
+#[cfg(feature = "qlog")]
 #[derive(Debug)]
 struct Traces {
 	sink: qlog::Sink,
 }
 
-#[cfg(all(feature = "qlog", feature = "noq"))]
-impl quinn_proto::QlogFactory for Traces {
+#[cfg(feature = "qlog")]
+impl noq_proto::QlogFactory for Traces {
 	fn for_connection(
 		&self,
-		side: quinn_proto::Side,
+		side: noq_proto::Side,
 		_remote: std::net::SocketAddr,
-		initial_dst_cid: quinn_proto::ConnectionId,
+		initial_dst_cid: noq_proto::ConnectionId,
 		_now: std::time::Instant,
-	) -> Option<quinn_proto::QlogConfig> {
+	) -> Option<noq_proto::QlogConfig> {
 		let side = match side {
-			quinn_proto::Side::Client => qlog::Side::Client,
-			quinn_proto::Side::Server => qlog::Side::Server,
+			noq_proto::Side::Client => qlog::Side::Client,
+			noq_proto::Side::Server => qlog::Side::Server,
 		};
-		Some(quinn_proto::QlogConfig::new(self.sink.trace(&initial_dst_cid, side)))
+		Some(noq_proto::QlogConfig::new(self.sink.trace(&initial_dst_cid, side)))
 	}
 }
 
 /// The per-connection knobs both roles share.
-fn transport_config(config: &Transport) -> Result<quinn_proto::TransportConfig, Error> {
-	use quinn_proto::VarInt;
+fn transport_config(config: &Transport) -> Result<noq_proto::TransportConfig, Error> {
+	use noq_proto::VarInt;
 
-	let idle = quinn_proto::IdleTimeout::try_from(config.idle_timeout)
+	let idle = noq_proto::IdleTimeout::try_from(config.idle_timeout)
 		.map_err(|_| Error::Quic(format!("idle timeout out of range: {:?}", config.idle_timeout)))?;
 	let streams = VarInt::from_u64(config.max_streams)
 		.map_err(|_| Error::Quic(format!("stream limit out of range: {}", config.max_streams)))?;
 
-	let mut transport = quinn_proto::TransportConfig::default();
+	let mut transport = noq_proto::TransportConfig::default();
 	transport.max_idle_timeout(Some(idle));
 	transport.keep_alive_interval(config.keep_alive);
 	transport.max_concurrent_bidi_streams(streams);
@@ -286,17 +264,14 @@ fn transport_config(config: &Transport) -> Result<quinn_proto::TransportConfig, 
 	transport.datagram_receive_buffer_size(Some(DATAGRAM_WINDOW));
 	transport.datagram_send_buffer_size(DATAGRAM_WINDOW);
 	// Every datagram in a GSO train is one SEGMENT, so the packet size is not
-	// quinn's to discover: pin it and turn the probing off.
+	// noq's to discover: pin it and turn the probing off.
 	transport.initial_mtu(SEGMENT as u16);
 	transport.min_mtu(SEGMENT as u16);
 	transport.mtu_discovery_config(None);
 	transport.congestion_controller_factory(match config.congestion {
-		Congestion::Loss => Arc::new(quinn_proto::congestion::CubicConfig::default())
-			as Arc<dyn quinn_proto::congestion::ControllerFactory + Send + Sync>,
-		#[cfg(feature = "noq")]
-		Congestion::Delay => Arc::new(quinn_proto::congestion::Bbr3Config::default()),
-		#[cfg(not(feature = "noq"))]
-		Congestion::Delay => Arc::new(quinn_proto::congestion::BbrConfig::default()),
+		Congestion::Loss => Arc::new(noq_proto::congestion::CubicConfig::default())
+			as Arc<dyn noq_proto::congestion::ControllerFactory + Send + Sync>,
+		Congestion::Delay => Arc::new(noq_proto::congestion::Bbr3Config::default()),
 	});
 	Ok(transport)
 }

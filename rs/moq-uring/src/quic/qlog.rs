@@ -118,16 +118,14 @@ impl Sink {
 	}
 
 	/// A writer for one connection's trace, named from its connection id.
-	#[cfg_attr(all(feature = "quinn", not(feature = "noq")), allow(dead_code))]
 	pub(crate) fn trace(&self, cid: &[u8], side: Side) -> Box<dyn io::Write + Send + Sync> {
 		self.open(Some(cid), side)
 	}
 
 	/// A writer for a trace covering a whole endpoint rather than one
-	/// connection, which is all quinn-proto's single per-config sink can
+	/// connection, which is all noq-proto's single per-config sink can
 	/// express. Each event carries the qlog `group_id` of the connection it
 	/// belongs to.
-	#[cfg_attr(any(not(feature = "quinn"), feature = "noq"), allow(dead_code))]
 	pub(crate) fn endpoint_trace(&self, side: Side) -> Box<dyn io::Write + Send + Sync> {
 		self.open(None, side)
 	}

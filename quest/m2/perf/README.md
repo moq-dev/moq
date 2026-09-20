@@ -18,11 +18,8 @@ Implementations start after the dev merge, on main; planning quests can settle
 their contracts independently. Facts from the 2026-09
 hot-path survey, so quests don't re-litigate them:
 
-- `moq-uring`'s only backend is noq once
-  [One QUIC backend](/quest/m1/quic-one-backend.md) lands; until then it is
-  compiled through the `quinn/` module, which aliases `noq_proto as
-  quinn_proto` (rs/moq-uring/src/quic/quinn/mod.rs:26). Every profile names
-  its backend. The quiche-flavor numbers cited in
+- `moq-uring`'s only backend is noq. Every profile names its backend. The
+  historical quiche-flavor numbers cited in
   [Egress requeue](/quest/m2/perf/egress-requeue.md) and
   [#3122](/quest/m2/perf/3122-moq-uring-2-5-of-relay-cpu-is-vdso-clock-reads-the-drive.md)
   are re-measured on noq.

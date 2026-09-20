@@ -4243,49 +4243,18 @@ fn config_quic_and_backoff_knobs_apply() {
 	assert_eq!(parsed.quic.qlog.as_deref(), Some(std::path::Path::new(dir)));
 }
 
-/// The backend variants are feature-gated, so a hardcoded menu offers options this
-/// build rejects. Every name reported must be one a dial takes, same contract as
-/// `moq_versions`.
+/// An idle timeout outside QUIC's millisecond varint is an ordinary configuration
+/// error, and later calls remain usable.
 #[test]
-fn backends_lists_only_what_a_dial_accepts() {
-	let count = unsafe { moq_backends(std::ptr::null_mut(), 0) };
-	assert!(count > 0, "expected at least one compiled backend, got {count}");
+fn dial_rejects_an_unrepresentable_idle_timeout() {
+	let mut config = client_config();
+	config.quic_idle_timeout_ms = u64::MAX;
+	config.has_quic_idle_timeout = true;
 
-	let mut names = vec![
-		moq_string {
-			data: std::ptr::null(),
-			len: 0
-		};
-		count as usize
-	];
-	assert_eq!(unsafe { moq_backends(names.as_mut_ptr(), names.len()) }, count);
+	assert_eq!(dial(Some(&config)), Error::InvalidConfig(String::new()).code());
 
-	let accepts = |name: &str| {
-		let mut config = client_config();
-		config.backend = name.as_ptr() as *const c_char;
-		config.backend_len = name.len();
-		unsafe { crate::parse_client(Some(&config)) }.is_ok()
-	};
-
-	for name in &names {
-		let name = unsafe { ffi::parse_str(name.data, name.len) }.expect("backend name is UTF-8");
-		assert!(accepts(name), "listed backend {name} must be settable");
-	}
-
-	// And the converse: a backend this build lacks is not listed, so the menu can't
-	// offer a dead option.
-	for candidate in ["quinn", "quiche", "noq"] {
-		let listed = names.iter().any(|n| {
-			unsafe { ffi::parse_str(n.data, n.len) }
-				.map(|s| s == candidate)
-				.unwrap_or(false)
-		});
-		assert_eq!(
-			listed,
-			accepts(candidate),
-			"{candidate}: listed and accepted must agree"
-		);
-	}
+	// A rejected dial leaves the library usable.
+	assert!(moq_client_defaults().has_connect_timeout);
 }
 
 /// Whether a qlog directory works at all is a compile-time feature, so the capability

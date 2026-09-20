@@ -394,10 +394,10 @@ run_runtime_comparison() {
         return 1
     fi
 
-    printf 'Building one relay binary with the Tokio and io_uring Quinn paths...\n'
+    printf 'Building one relay binary with the Tokio and io_uring paths...\n'
     CARGO_TARGET_DIR=$CURRENT_TARGET cargo build --locked --release \
         -p moq-relay -p moq-bench \
-        --features moq-relay/io-uring-quinn,moq-bench/uring
+        --features moq-relay/io-uring,moq-bench/uring
     LOAD_BIN=$CURRENT_TARGET/release/moq-bench
     HOST_BIN=$CURRENT_TARGET/release/moq-bench-host
 

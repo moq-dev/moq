@@ -17,9 +17,8 @@
 //! included), each a [`quic::Connection`] implementing the transport traits,
 //! so `moq_net::Client::connect_lite` and `Server::accept_lite` run real
 //! moq-lite sessions on the worker ([`Handle`] is their
-//! [`moq_net::Runtime`]). The stack underneath is the `noq` (default),
-//! `quinn`, or `quiche` feature; the module is the same either way, and a build with
-//! neither leaves it out.
+//! [`moq_net::Runtime`]). The stack underneath is enabled by the `noq` feature;
+//! a build without it leaves the module out.
 //!
 //! [`metrics::Metrics`] is how the worker's own health leaves its thread:
 //! relaxed counters for the buffer pools, the batching mechanisms, the ring,
@@ -36,7 +35,7 @@
 mod error;
 pub mod metrics;
 mod park;
-#[cfg(any(feature = "noq", feature = "quiche", feature = "quinn"))]
+#[cfg(feature = "noq")]
 pub mod quic;
 mod shared;
 mod timer;

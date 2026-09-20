@@ -12,7 +12,7 @@ section tunes both worker runtimes.
 `moq_uring::quic::Transport` carries the per-connection knobs the relay maps
 its `[quic]` section onto, and today it has no window fields: the backend
 hardcodes them (`STREAM_WINDOW` / `CONNECTION_WINDOW` in
-`rs/moq-uring/src/quic/quinn/mod.rs`). `transport()` in
+`rs/moq-uring/src/quic/noq/mod.rs`). `transport()` in
 `rs/moq-relay/src/uring.rs` therefore refuses all three rather than dropping
 them.
 

@@ -14,9 +14,9 @@
 //! Kernel-gated: skips loudly below the Linux 6.12 floor (GitHub-hosted CI),
 //! and runs everywhere else.
 
-#![cfg(all(target_os = "linux", any(feature = "noq", feature = "quiche", feature = "quinn")))]
+#![cfg(all(target_os = "linux", feature = "noq"))]
 
-#[path = "support/quiche.rs"]
+#[path = "support.rs"]
 mod support;
 
 use std::net::UdpSocket;
@@ -272,7 +272,7 @@ fn two_lite_sessions_share_the_server_socket() {
 }
 
 /// The client verifies for real, trusting only the certificate the server
-/// presents: nothing handshakes unless the configured roots reach quiche.
+/// presents: nothing handshakes unless the configured roots reach noq.
 #[test]
 fn configured_roots_verify_the_server() {
 	let Some(mut worker) = worker() else { return };

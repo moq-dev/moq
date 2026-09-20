@@ -28,8 +28,8 @@ async fn within<T>(step: &str, fut: impl std::future::Future<Output = T>) -> T {
 
 /// Run an integration-test future on a dedicated thread with a large stack.
 ///
-/// Under `--all-features`, `moq-tokio` compiles every transport backend
-/// (quinn, quiche, noq, iroh, websocket) into its `Session`/`Client` types.
+/// Under `--all-features`, `moq-tokio` compiles every transport
+/// (noq, iroh, websocket, and qmux) into its `Session`/`Client` types.
 /// These multi-relay tests hold several such values live across await points,
 /// so the single test future's state machine is large, and in an unoptimized
 /// build it overflows libtest's default 2 MiB per-test thread stack (a SIGABRT

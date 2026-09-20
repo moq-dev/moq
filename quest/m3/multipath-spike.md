@@ -28,9 +28,8 @@ browser WebTransport backend could never implement it.
 **What the spike is really for is the constraint nobody has written down.**
 `max_concurrent_multipath_paths` maps to the `initial_max_path_id` transport
 parameter, which both peers negotiate, so a multipath session needs noq on
-*both* ends. noq is the only backend on `dev` (`main` still
-defaults to quinn until the merge, and the browser and qmux transports have
-no such thing). So bonded contribution is not an opt-in client feature; it
+*both* ends. noq is the only native QUIC backend, while browser and qmux
+transports have no such thing. So bonded contribution is not an opt-in client feature; it
 constrains every relay and client on the path to run noq. Establish what that
 actually costs before anyone builds a fan-out socket.
 

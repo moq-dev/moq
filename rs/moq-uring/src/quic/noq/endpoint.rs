@@ -1,12 +1,12 @@
-//! The quinn endpoint: one socket, many quinn-proto connections.
+//! The noq endpoint: one socket, many noq-proto connections.
 //!
-//! quinn-proto's own [`quinn_proto::Endpoint`] is the routing table: it parses
+//! noq-proto's own [`noq_proto::Endpoint`] is the routing table: it parses
 //! each datagram, hands it to the connection its destination id names, mints
 //! and retires ids as peers consume them, and answers an unsupported version
 //! itself. What is left for us is the socket, the accept backlog, and a driver
 //! task per connection. Everything policy-shaped (the backlog, the shard
 //! steering, the id length) lives in [`super::super::endpoint`], which is
-//! shared with the other backend.
+//! shared with the rest of the endpoint implementation.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -17,9 +17,7 @@ use std::task::Poll;
 use std::time::Instant;
 
 use bytes::BytesMut;
-#[cfg(feature = "noq")]
-use noq_proto as quinn_proto;
-use quinn_proto::{ConnectionHandle, DatagramEvent, Incoming, Transmit};
+use noq_proto::{ConnectionHandle, DatagramEvent, Incoming, Transmit};
 use rustc_hash::FxHashMap;
 
 use super::super::{Error, endpoint::Config};
@@ -40,11 +38,11 @@ pub(crate) struct Inner {
 	socket: Rc<udp::Socket>,
 	local: SocketAddr,
 	/// The routing table, and the server configuration it accepts with.
-	endpoint: RefCell<quinn_proto::Endpoint>,
+	endpoint: RefCell<noq_proto::Endpoint>,
 	accepting: RefCell<Option<Accepting>>,
 	/// Every live connection, looked up per received datagram.
 	///
-	/// FxHash rather than SipHash: quinn-proto hands out the handle, and it
+	/// FxHash rather than SipHash: noq-proto hands out the handle, and it
 	/// owns connection-id routing (and its hasher choices) itself, so nothing
 	/// a peer picks reaches this map.
 	conns: RefCell<FxHashMap<ConnectionHandle, connection::Shared>>,
@@ -79,7 +77,7 @@ impl Endpoint {
 		let server = match &config.server {
 			Some(server) => {
 				let mut server = super::server_config(server)?;
-				// quinn buffers half-open handshakes itself, so it enforces
+				// noq buffers half-open handshakes itself, so it enforces
 				// the same bound the accept queue does.
 				server.max_incoming(config.backlog);
 				Some(Arc::new(server))
@@ -89,10 +87,7 @@ impl Endpoint {
 		let accepting = server.is_some().then(|| Accepting { queue: VecDeque::new() });
 		// MTU discovery is off (the GSO pool sends fixed SEGMENT datagrams),
 		// so the endpoint has no reason to allow it either.
-		#[cfg(feature = "noq")]
-		let endpoint = quinn_proto::Endpoint::new(super::endpoint_config(config.shard)?, server, false);
-		#[cfg(not(feature = "noq"))]
-		let endpoint = quinn_proto::Endpoint::new(super::endpoint_config(config.shard)?, server, false, None);
+		let endpoint = noq_proto::Endpoint::new(super::endpoint_config(config.shard)?, server, false);
 
 		let inner = Rc::new(Inner {
 			handle: handle.clone(),
@@ -236,19 +231,9 @@ impl Inner {
 			// The socket does not report which local address a datagram
 			// arrived on, so the four-tuple stays half known, exactly as it
 			// does on a platform without `IP_PKTINFO`.
-			#[cfg(feature = "noq")]
 			let event = self.endpoint.borrow_mut().handle(
 				Instant::now(),
 				from.into(),
-				None,
-				BytesMut::from(&segment[..]),
-				&mut buf,
-			);
-			#[cfg(not(feature = "noq"))]
-			let event = self.endpoint.borrow_mut().handle(
-				Instant::now(),
-				from,
-				None,
 				None,
 				BytesMut::from(&segment[..]),
 				&mut buf,
@@ -380,7 +365,7 @@ impl Inner {
 	}
 
 	/// Register `conn`, spawn its driver, and arrange its teardown.
-	fn launch(self: &Rc<Self>, key: ConnectionHandle, conn: quinn_proto::Connection) -> connection::Shared {
+	fn launch(self: &Rc<Self>, key: ConnectionHandle, conn: noq_proto::Connection) -> connection::Shared {
 		let (shared, driver) = connection::launch(&self.handle, self.socket.clone(), Rc::downgrade(self), key, conn);
 		self.conns.borrow_mut().insert(key, shared.clone());
 
@@ -397,8 +382,8 @@ impl Inner {
 	pub(crate) fn on_connection_event(
 		&self,
 		key: ConnectionHandle,
-		event: quinn_proto::EndpointEvent,
-	) -> Option<quinn_proto::ConnectionEvent> {
+		event: noq_proto::EndpointEvent,
+	) -> Option<noq_proto::ConnectionEvent> {
 		self.endpoint.borrow_mut().handle_event(key, event)
 	}
 

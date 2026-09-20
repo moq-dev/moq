@@ -11,7 +11,7 @@
 //! See [`Client`] for connecting to relays and [`Server`] for accepting
 //! connections. The `mdns` feature finds peers to connect to on the local network.
 //!
-//! With `default-features = false`, the `quinn` and `noq` backends must be paired
+//! With `default-features = false`, the `noq` backend must be paired
 //! with the `aws-lc-rs` or `ring` crypto-provider feature. Every other subset
 //! compiles, including no transport at all: such a build cannot connect to
 //! anything, though a crypto provider on its own is still enough to configure TLS
@@ -22,10 +22,7 @@
 
 // The protocol crates need a compiled provider for reset and retry-token keys. A rustls provider
 // installed at runtime cannot supply constructors removed by their compile-time feature gates.
-#[cfg(all(
-	any(feature = "quinn", feature = "noq"),
-	not(any(feature = "aws-lc-rs", feature = "ring"))
-))]
+#[cfg(all(feature = "noq", not(any(feature = "aws-lc-rs", feature = "ring"))))]
 compile_error!("a rustls QUIC backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature");
 
 mod abort;
@@ -37,13 +34,7 @@ pub mod connect;
 pub mod connection;
 pub mod crypto;
 mod error;
-#[cfg(any(
-	feature = "quinn",
-	feature = "noq",
-	feature = "quiche",
-	feature = "tcp",
-	feature = "websocket"
-))]
+#[cfg(any(feature = "noq", feature = "tcp", feature = "websocket"))]
 pub mod failover;
 #[cfg(feature = "jemalloc")]
 pub mod jemalloc;
@@ -53,15 +44,7 @@ mod log;
 pub mod noq;
 pub mod origin;
 pub mod quic;
-#[cfg(feature = "quinn")]
-pub mod quinn;
-#[cfg(any(
-	feature = "quinn",
-	feature = "noq",
-	feature = "quiche",
-	feature = "tcp",
-	feature = "websocket"
-))]
+#[cfg(any(feature = "noq", feature = "tcp", feature = "websocket"))]
 mod resolve;
 pub mod runtime;
 #[cfg(feature = "_transport")]
@@ -77,7 +60,7 @@ pub mod unix;
 pub mod worker;
 // Resolving a `host:port` bind string is a QUIC-listener concern; the stream
 // listeners take a `SocketAddr`/path straight from their config.
-#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+#[cfg(feature = "noq")]
 mod util;
 #[cfg(feature = "watch")]
 pub mod watch;
@@ -108,91 +91,11 @@ pub use notify;
 #[cfg(target_os = "android")]
 pub use jni;
 
-#[cfg(feature = "quiche")]
-pub mod quiche;
-
 #[cfg(feature = "iroh")]
 pub mod iroh;
 
 #[cfg(feature = "mdns")]
 pub mod mdns;
-
-/// The QUIC backend to use for connections.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[cfg_attr(
-	any(feature = "quinn", feature = "quiche", feature = "noq"),
-	derive(usage::ValueEnum)
-)]
-#[cfg_attr(any(feature = "quinn", feature = "quiche", feature = "noq"), usage(ignore_case))]
-#[serde(rename_all = "lowercase")]
-#[non_exhaustive]
-pub enum QuicBackend {
-	/// [web-transport-quinn](https://crates.io/crates/web-transport-quinn)
-	#[cfg(feature = "quinn")]
-	Quinn,
-
-	/// [web-transport-quiche](https://crates.io/crates/web-transport-quiche)
-	#[cfg(feature = "quiche")]
-	Quiche,
-
-	/// [web-transport-noq](https://crates.io/crates/web-transport-noq)
-	#[cfg(feature = "noq")]
-	Noq,
-}
-
-#[cfg(not(any(feature = "quinn", feature = "quiche", feature = "noq")))]
-impl usage::argv::spec::ValueEnum for QuicBackend {
-	const CHOICES: &'static [&'static str] = &[];
-
-	fn from_choice(_value: &str) -> Option<Self> {
-		None
-	}
-}
-
-/// Parses the same spellings the CLI and TOML accept (`quinn`, `quiche`, `noq`),
-/// case-insensitively. A backend this build was compiled without is an error, since
-/// its variant doesn't exist.
-impl std::str::FromStr for QuicBackend {
-	type Err = String;
-
-	fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-		<Self as usage::argv::spec::ValueEnum>::from_choice(s).ok_or_else(|| format!("unknown QUIC backend: {s}"))
-	}
-}
-
-impl QuicBackend {
-	/// Every backend this build was compiled with, spelled the way [`FromStr`] accepts.
-	///
-	/// The variants are feature-gated, so this is the only honest answer to "what can I
-	/// pass here". A caller building a menu should read it rather than listing the three
-	/// names, which would offer options that cannot parse.
-	///
-	/// [`FromStr`]: std::str::FromStr
-	pub fn compiled() -> &'static [Self] {
-		&[
-			#[cfg(feature = "quinn")]
-			Self::Quinn,
-			#[cfg(feature = "quiche")]
-			Self::Quiche,
-			#[cfg(feature = "noq")]
-			Self::Noq,
-		]
-	}
-
-	/// The name [`FromStr`] accepts for this backend.
-	///
-	/// [`FromStr`]: std::str::FromStr
-	pub fn as_str(&self) -> &'static str {
-		match *self {
-			#[cfg(feature = "quinn")]
-			Self::Quinn => "quinn",
-			#[cfg(feature = "quiche")]
-			Self::Quiche => "quiche",
-			#[cfg(feature = "noq")]
-			Self::Noq => "noq",
-		}
-	}
-}
 
 /// Whether this build can capture qlog traces, which the `qlog` feature gates.
 ///
@@ -200,33 +103,4 @@ impl QuicBackend {
 /// the knob should check here rather than surfacing an option that cannot work.
 pub fn qlog_supported() -> bool {
 	cfg!(feature = "qlog")
-}
-
-/// The backend a config without an explicit `--*-backend` gets.
-///
-/// Only compiled when there is one to pick: a build with no QUIC backend never
-/// reaches for a default, since `QuicBackend` has no variants there.
-#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
-fn default_quic_backend() -> QuicBackend {
-	#[cfg(feature = "noq")]
-	{
-		QuicBackend::Noq
-	}
-	#[cfg(all(feature = "quinn", not(feature = "noq")))]
-	{
-		QuicBackend::Quinn
-	}
-	#[cfg(all(feature = "quiche", not(feature = "noq"), not(feature = "quinn")))]
-	{
-		QuicBackend::Quiche
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	#[cfg(feature = "noq")]
-	#[test]
-	fn noq_is_the_default_backend() {
-		assert!(matches!(super::default_quic_backend(), super::QuicBackend::Noq));
-	}
 }

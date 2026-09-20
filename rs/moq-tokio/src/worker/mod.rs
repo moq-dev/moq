@@ -20,10 +20,10 @@
 
 // Everything but the knobs: a group binds and serves QUIC, so it needs a backend
 // to bind with.
-#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+#[cfg(feature = "noq")]
 mod group;
 
-#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+#[cfg(feature = "noq")]
 pub use group::{Group, Member, Spawner, Workers};
 
 /// How many QUIC workers to run, and whether to pin them.

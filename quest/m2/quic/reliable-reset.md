@@ -66,5 +66,5 @@ provisional codepoints if the document changes before release.
 
 - [qmux on the QUIC stream state machine](/quest/m2/quic/qmux.md) - consumes
   the same reset state without a parallel implementation
-- [One QUIC backend](/quest/m1/quic-one-backend.md) - dropped quiche, the
-  one backend that had this, so it is the known browser-compliance gap
+- The removed quiche backend was the one stack that had this, so it is the
+  known browser-compliance gap.

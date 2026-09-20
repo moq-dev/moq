@@ -1,6 +1,6 @@
-//! Stream handles: thin, direct calls into the shared quinn-proto connection.
+//! Stream handles: thin, direct calls into the shared noq-proto connection.
 //!
-//! Single-threaded sans-IO means a write goes straight into quinn's send
+//! Single-threaded sans-IO means a write goes straight into noq's send
 //! queue (no staging copy) and a read comes straight out of its reassembly
 //! buffer; the handles just kick the driver so egress reaches the wire and
 //! park on the per-stream waiter lists the driver wakes.
@@ -8,9 +8,7 @@
 use std::task::{Context, Poll};
 
 use bytes::{Buf, Bytes, BytesMut};
-#[cfg(feature = "noq")]
-use noq_proto as quinn_proto;
-use quinn_proto::{StreamId, VarInt};
+use noq_proto::{StreamId, VarInt};
 
 use super::super::Error;
 use super::{End, Shared};
@@ -53,7 +51,7 @@ impl SendStream {
 		self.fin || self.reset
 	}
 
-	/// Queue as much of `buf` as quinn will take right now, without parking.
+	/// Queue as much of `buf` as noq will take right now, without parking.
 	/// Best-effort, for the close path where nobody is left to poll.
 	pub(crate) fn try_write(&mut self, buf: &[u8]) -> usize {
 		if self.fin || self.reset {
@@ -107,14 +105,14 @@ impl web_transport_trait::poll::SendStream for SendStream {
 				self.shared.kick();
 				Poll::Ready(Ok(n))
 			}
-			// No capacity right now; the driver wakes us when quinn reports
+			// No capacity right now; the driver wakes us when noq reports
 			// the stream writable.
-			Err(quinn_proto::WriteError::Blocked) => {
+			Err(noq_proto::WriteError::Blocked) => {
 				self.shared.park_writable(self.id, waiter);
 				Poll::Pending
 			}
-			Err(quinn_proto::WriteError::Stopped(code)) => Poll::Ready(Err(Error::Stop(code.into_inner()))),
-			Err(quinn_proto::WriteError::ClosedStream) => {
+			Err(noq_proto::WriteError::Stopped(code)) => Poll::Ready(Err(Error::Stop(code.into_inner()))),
+			Err(noq_proto::WriteError::ClosedStream) => {
 				Poll::Ready(Err(Error::Quic("stream already finished".to_string())))
 			}
 		}
@@ -122,7 +120,7 @@ impl web_transport_trait::poll::SendStream for SendStream {
 
 	fn set_priority(&mut self, order: u8) {
 		// The trait (like W3C sendOrder) sends HIGHER values first, and so
-		// does quinn.
+		// does noq.
 		let _ = self
 			.shared
 			.conn
@@ -140,12 +138,12 @@ impl web_transport_trait::poll::SendStream for SendStream {
 			// A STOP_SENDING beat us here. Carry the code like `poll_write`
 			// does, or `moq_net::Error::from_transport` cannot decode a
 			// routine cancellation.
-			Err(quinn_proto::FinishError::Stopped(code)) => {
+			Err(noq_proto::FinishError::Stopped(code)) => {
 				self.reset = true;
 				return Err(Error::Stop(code.into_inner()));
 			}
 			// Already finished or reset, so the FIN it wanted is out.
-			Err(quinn_proto::FinishError::ClosedStream) => {}
+			Err(noq_proto::FinishError::ClosedStream) => {}
 		}
 		self.fin = true;
 		self.shared.kick();
@@ -161,7 +159,7 @@ impl web_transport_trait::poll::SendStream for SendStream {
 		if self.reset {
 			return Poll::Ready(Ok(()));
 		}
-		// quinn reports a send stream's end as an event, which the driver
+		// noq reports a send stream's end as an event, which the driver
 		// records: an acknowledged FIN, or the peer's STOP_SENDING.
 		match self.shared.ended(self.id) {
 			Some(End::Stopped(code)) => Poll::Ready(Err(Error::Stop(code))),
@@ -206,7 +204,7 @@ const READ_AHEAD: usize = 64 * 1024;
 /// How much to ask for per read-ahead chunk.
 const READ_CHUNK: usize = 8 * 1024;
 
-/// One read out of quinn's reassembly buffer.
+/// One read out of noq's reassembly buffer.
 enum Read {
 	/// Bytes, at most as many as were asked for.
 	Chunk(Bytes),
@@ -223,12 +221,12 @@ pub struct RecvStream {
 	shared: Shared,
 	id: StreamId,
 	park: kio::Park,
-	/// Every byte up to the FIN was read out of quinn; reads report the end
+	/// Every byte up to the FIN was read out of noq; reads report the end
 	/// once `backlog` is drained too.
 	finished: bool,
 	/// We stopped the stream; no more reads matter.
 	stopped: bool,
-	/// Bytes `poll_closed` read ahead, handed to `poll_read` before quinn's.
+	/// Bytes `poll_closed` read ahead, handed to `poll_read` before noq's.
 	backlog: BytesMut,
 }
 
@@ -268,7 +266,7 @@ impl RecvStream {
 		self.shared.kick();
 	}
 
-	/// Take up to `max` bytes out of quinn's reassembly buffer.
+	/// Take up to `max` bytes out of noq's reassembly buffer.
 	///
 	/// Reading is what returns the peer's flow control credit, so a read that
 	/// owes it a frame kicks the driver.
@@ -286,8 +284,8 @@ impl RecvStream {
 		let read = match chunks.next(max) {
 			Ok(Some(chunk)) => Read::Chunk(chunk.bytes),
 			Ok(None) => Read::Finished,
-			Err(quinn_proto::ReadError::Blocked) => Read::Blocked,
-			Err(quinn_proto::ReadError::Reset(code)) => Read::Reset(code.into_inner()),
+			Err(noq_proto::ReadError::Blocked) => Read::Blocked,
+			Err(noq_proto::ReadError::Reset(code)) => Read::Reset(code.into_inner()),
 		};
 		let transmit = chunks.finalize().should_transmit();
 		drop(conn);
@@ -358,7 +356,7 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 		if self.finished || self.stopped {
 			return Poll::Ready(Ok(()));
 		}
-		// The FIN sits behind whatever the peer sent before it, and quinn only
+		// The FIN sits behind whatever the peer sent before it, and noq only
 		// reports the stream finished once that is read out. Waiting on
 		// readability alone would park behind bytes nobody is reading, so read
 		// ahead into the backlog `poll_read` serves first: this watch resolves

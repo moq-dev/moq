@@ -27,7 +27,7 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 /// UDP socket buffer size requested in each direction, in bytes.
 ///
 /// A QUIC stack absorbs bursts in the kernel socket buffer: whatever doesn't fit
-/// while the process is off the CPU is dropped before quinn ever sees it, and
+/// while the process is off the CPU is dropped before noq ever sees it, and
 /// congestion control reads those drops as congestion. The OS defaults are sized
 /// for a chatty TCP-era socket (208 KiB on Linux), which a single relay socket
 /// carrying every connection blows through in milliseconds. 8 MiB is roughly 64ms

@@ -6,9 +6,7 @@ use std::task::{Context, Poll};
 use std::time::Instant;
 
 use bytes::Bytes;
-#[cfg(feature = "noq")]
-use noq_proto as quinn_proto;
-use quinn_proto::{ConnectionHandle, Dir, StreamId, VarInt};
+use noq_proto::{ConnectionHandle, Dir, StreamId, VarInt};
 use rustc_hash::FxHashMap;
 
 use super::super::{Error, SEGMENT};
@@ -28,7 +26,7 @@ const TRAIN_SEGMENTS: usize = 63;
 /// operation can mutate the connection, drop that borrow, and then register a
 /// waiter without ever holding both.
 pub(crate) struct Inner {
-	pub(crate) conn: RefCell<quinn_proto::Connection>,
+	pub(crate) conn: RefCell<noq_proto::Connection>,
 	pub(crate) state: RefCell<State>,
 }
 
@@ -40,7 +38,7 @@ pub(crate) struct State {
 	established: bool,
 	establish_waiters: kio::WaiterList,
 
-	/// Whoever is waiting for a peer-initiated stream. quinn-proto hands the
+	/// Whoever is waiting for a peer-initiated stream. noq-proto hands the
 	/// ids out in order, so the queue is its own.
 	accept_bi_waiters: kio::WaiterList,
 	accept_uni_waiters: kio::WaiterList,
@@ -51,7 +49,7 @@ pub(crate) struct State {
 	/// Per-stream read/write parking, keyed by stream id.
 	///
 	/// FxHash rather than SipHash on all four of these: they sit on the
-	/// driver's per-event path, and quinn-proto assigns the ids.
+	/// driver's per-event path, and noq-proto assigns the ids.
 	readable: FxHashMap<StreamId, kio::WaiterList>,
 	writable: FxHashMap<StreamId, kio::WaiterList>,
 	/// Send streams waiting for their end: a FIN the peer acknowledged, or a
@@ -79,7 +77,7 @@ pub(crate) struct State {
 	dead: bool,
 
 	/// The close this side asked for, until the driver has put it on the wire.
-	/// quinn raises no event for it, so this is what the terminal error is
+	/// noq raises no event for it, so this is what the terminal error is
 	/// built from.
 	local_close: Option<(u64, String)>,
 }
@@ -185,13 +183,13 @@ impl Inner {
 
 	/// Start tracking send stream `id`, which a handle now owns.
 	///
-	/// Seeded from quinn rather than empty: a peer can open a bidirectional
+	/// Seeded from noq rather than empty: a peer can open a bidirectional
 	/// stream and stop it before the application ever accepts it, and that
-	/// event arrives with no handle to record it against. quinn still knows,
+	/// event arrives with no handle to record it against. noq still knows,
 	/// so a `poll_closed` on the fresh handle reports the stop instead of
 	/// waiting for an event that has already been and gone.
 	pub(crate) fn track(&self, id: StreamId) {
-		// Err means quinn has no send half for the id, which is nothing to
+		// Err means noq has no send half for the id, which is nothing to
 		// report either way.
 		let stopped = self.conn.borrow_mut().send_stream(id).stopped().ok().flatten();
 		self.state
@@ -240,7 +238,7 @@ impl Inner {
 			VarInt::from_u64(code).unwrap_or(VarInt::MAX),
 			Bytes::copy_from_slice(reason.as_bytes()),
 		);
-		// quinn raises no event for a close the application asked for, so the
+		// noq raises no event for a close the application asked for, so the
 		// terminal error is ours to publish. Not here though: the driver
 		// publishes it once it has staged the CONNECTION_CLOSE, so a caller
 		// that stops driving the worker the moment `poll_closed` resolves has
@@ -318,7 +316,7 @@ impl Clone for Connection {
 /// Build a connection's shared state and its driver.
 ///
 /// The driver future does timers, event sweeps, and egress; ingress arrives
-/// from the endpoint's demux task, which feeds quinn-proto directly and
+/// from the endpoint's demux task, which feeds noq-proto directly and
 /// [kicks](Inner::kick) the driver. The caller spawns the future and reclaims
 /// the connection's bookkeeping once it resolves.
 pub(crate) fn launch(
@@ -326,7 +324,7 @@ pub(crate) fn launch(
 	socket: Rc<udp::Socket>,
 	endpoint: Weak<endpoint::Inner>,
 	key: ConnectionHandle,
-	conn: quinn_proto::Connection,
+	conn: noq_proto::Connection,
 ) -> (Shared, impl Future<Output = ()> + use<>) {
 	let shared = Rc::new(Inner {
 		conn: RefCell::new(conn),
@@ -365,7 +363,7 @@ pub(crate) async fn establish(shared: Shared) -> Result<Connection, Error> {
 		let conn = shared.conn.borrow();
 		conn.crypto_session()
 			.handshake_data()
-			.and_then(|data| data.downcast::<quinn_proto::crypto::rustls::HandshakeData>().ok())
+			.and_then(|data| data.downcast::<noq_proto::crypto::rustls::HandshakeData>().ok())
 			.and_then(|data| data.protocol)
 			.map(|proto| String::from_utf8_lossy(&proto).into_owned())
 	};
@@ -469,7 +467,7 @@ impl web_transport_trait::poll::Session for Connection {
 				Poll::Ready(Ok(()))
 			}
 			// The send queue is full; a flush frees space.
-			Err(quinn_proto::SendDatagramError::Blocked(_)) => {
+			Err(noq_proto::SendDatagramError::Blocked(_)) => {
 				let mut state = self.shared.state.borrow_mut();
 				waiter.register(&mut state.datagram_send_waiters);
 				Poll::Pending
@@ -514,32 +512,20 @@ impl web_transport_trait::poll::Session for Connection {
 	}
 
 	fn stats(&self) -> impl web_transport_trait::Stats {
-		#[cfg(feature = "noq")]
 		let (stats, path) = {
 			let mut conn = self.shared.conn.borrow_mut();
 			let stats = conn.stats();
-			let path = conn.path_stats(quinn_proto::PathId::ZERO).unwrap_or_default();
+			let path = conn.path_stats(noq_proto::PathId::ZERO).unwrap_or_default();
 			(stats, path)
 		};
-		#[cfg(not(feature = "noq"))]
-		let stats = self.shared.conn.borrow().stats();
 		Stats {
 			bytes_sent: stats.udp_tx.bytes,
 			bytes_received: stats.udp_rx.bytes,
-			#[cfg(feature = "noq")]
 			bytes_lost: stats.lost_bytes,
-			#[cfg(not(feature = "noq"))]
-			bytes_lost: stats.path.lost_bytes,
 			packets_sent: stats.udp_tx.datagrams,
 			packets_received: stats.udp_rx.datagrams,
-			#[cfg(feature = "noq")]
 			packets_lost: stats.lost_packets,
-			#[cfg(not(feature = "noq"))]
-			packets_lost: stats.path.lost_packets,
-			#[cfg(feature = "noq")]
 			rtt: path.rtt,
-			#[cfg(not(feature = "noq"))]
-			rtt: stats.path.rtt,
 		}
 	}
 }
@@ -550,7 +536,7 @@ impl std::fmt::Debug for Connection {
 	}
 }
 
-/// A snapshot of quinn-proto's counters in [`web_transport_trait::Stats`]
+/// A snapshot of noq-proto's counters in [`web_transport_trait::Stats`]
 /// shape.
 struct Stats {
 	bytes_sent: u64,
@@ -591,7 +577,7 @@ impl web_transport_trait::Stats for Stats {
 		Some(self.rtt)
 	}
 
-	/// Nothing, because quinn-proto exposes no delivery or pacing rate.
+	/// Nothing, because noq-proto exposes no delivery or pacing rate.
 	///
 	/// The congestion window over the RTT is not a stand-in for one: BBR
 	/// deliberately holds about twice the bandwidth-delay product (nearly
@@ -608,7 +594,7 @@ impl web_transport_trait::Stats for Stats {
 
 /// The per-connection task: endpoint events, application events, timers, and
 /// packets out. Packets in come from the endpoint's demux task, which feeds
-/// quinn-proto directly and kicks this driver.
+/// noq-proto directly and kicks this driver.
 struct Driver {
 	shared: Shared,
 	socket: Rc<udp::Socket>,
@@ -618,7 +604,7 @@ struct Driver {
 	endpoint: Weak<endpoint::Inner>,
 	key: ConnectionHandle,
 	deadline: moq_net::runtime::Deadline<Handle>,
-	/// Egress staging: quinn-proto writes into a `Vec`, so a train is built
+	/// Egress staging: noq-proto writes into a `Vec`, so a train is built
 	/// here and copied into the socket's registered buffer.
 	scratch: Vec<u8>,
 	/// The last flush found the transmit pool drained, so nothing it owed the
@@ -649,7 +635,7 @@ impl Driver {
 			}
 			// A closed connection still owes the peer its CONNECTION_CLOSE
 			// (and a retransmit for each packet that arrives after), so the
-			// driver runs until quinn says the drain is over.
+			// driver runs until noq says the drain is over.
 			if self.shared.conn.borrow().is_drained() {
 				return Poll::Ready(());
 			}
@@ -703,26 +689,25 @@ impl Driver {
 
 			let mut state = self.shared.state.borrow_mut();
 			match event {
-				quinn_proto::Event::Connected => {
+				noq_proto::Event::Connected => {
 					state.established = true;
 					state.establish_waiters.wake();
 				}
-				quinn_proto::Event::ConnectionLost { reason } => state.fail(reason.into()),
-				quinn_proto::Event::DatagramReceived => state.datagram_recv_waiters.wake(),
-				quinn_proto::Event::DatagramsUnblocked => state.datagram_send_waiters.wake(),
-				quinn_proto::Event::HandshakeDataReady => {}
-				quinn_proto::Event::Stream(event) => sweep_stream(&mut state, event),
-				#[cfg(feature = "noq")]
-				quinn_proto::Event::HandshakeConfirmed
-				| quinn_proto::Event::Path(_)
-				| quinn_proto::Event::NatTraversal(_) => {}
+				noq_proto::Event::ConnectionLost { reason } => state.fail(reason.into()),
+				noq_proto::Event::DatagramReceived => state.datagram_recv_waiters.wake(),
+				noq_proto::Event::DatagramsUnblocked => state.datagram_send_waiters.wake(),
+				noq_proto::Event::HandshakeDataReady => {}
+				noq_proto::Event::Stream(event) => sweep_stream(&mut state, event),
+				noq_proto::Event::HandshakeConfirmed
+				| noq_proto::Event::Path(_)
+				| noq_proto::Event::NatTraversal(_) => {}
 			}
 		}
 	}
 
 	/// Publish the terminal error for a close this side asked for.
 	///
-	/// quinn raises no event for it, so the driver is what reports it, and
+	/// noq raises no event for it, so the driver is what reports it, and
 	/// only once the flush above has staged the CONNECTION_CLOSE, since an
 	/// application is free to stop driving the worker the moment
 	/// `poll_closed` resolves. Staged is not delivered: the send is
@@ -748,13 +733,13 @@ impl Driver {
 			// Backpressure, or nothing left to stage.
 			Poll::Pending => return Poll::Pending,
 		}
-		// Requeue behind the other ready tasks. If quinn is drained, the next
+		// Requeue behind the other ready tasks. If noq is drained, the next
 		// poll costs one empty acquire and then parks normally.
 		waiter.waker().wake_by_ref();
 		Poll::Pending
 	}
 
-	/// Fill one transmit buffer and stage it. Ignores quinn's pacing hint;
+	/// Fill one transmit buffer and stage it. Ignores noq's pacing hint;
 	/// the congestion controller still bounds each train.
 	fn flush_one(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let mut tx = match self.socket.poll_acquire(waiter) {
@@ -775,7 +760,6 @@ impl Driver {
 				tx.len()
 			))));
 		}
-		#[cfg(feature = "noq")]
 		let segments = std::num::NonZeroUsize::new(segments).expect("segments was checked above");
 
 		self.scratch.clear();
@@ -792,7 +776,7 @@ impl Driver {
 
 		tx[..transmit.size].copy_from_slice(&self.scratch[..transmit.size]);
 		// A lone datagram is its own segment size, and the socket's GSO
-		// stride has to match what quinn actually packed.
+		// stride has to match what noq actually packed.
 		let segment = transmit.segment_size.unwrap_or(transmit.size);
 		if let Err(err) = tx.send(transmit.size, transmit.destination, segment) {
 			return Poll::Ready(Err(Error::Io(err.to_string())));
@@ -826,25 +810,25 @@ fn end(state: &mut State, id: StreamId, end: End) {
 }
 
 /// Apply one stream event to the parking tables.
-fn sweep_stream(state: &mut State, event: quinn_proto::StreamEvent) {
+fn sweep_stream(state: &mut State, event: noq_proto::StreamEvent) {
 	// Waking removes the entry: a still-interested poller re-registers on its
 	// next poll, so the maps only hold streams somebody is parked on.
 	match event {
-		quinn_proto::StreamEvent::Opened { dir: Dir::Bi } => state.accept_bi_waiters.wake(),
-		quinn_proto::StreamEvent::Opened { dir: Dir::Uni } => state.accept_uni_waiters.wake(),
-		quinn_proto::StreamEvent::Available { .. } => state.open_waiters.wake(),
-		quinn_proto::StreamEvent::Readable { id } => {
+		noq_proto::StreamEvent::Opened { dir: Dir::Bi } => state.accept_bi_waiters.wake(),
+		noq_proto::StreamEvent::Opened { dir: Dir::Uni } => state.accept_uni_waiters.wake(),
+		noq_proto::StreamEvent::Available { .. } => state.open_waiters.wake(),
+		noq_proto::StreamEvent::Readable { id } => {
 			if let Some(mut waiters) = state.readable.remove(&id) {
 				waiters.wake();
 			}
 		}
-		quinn_proto::StreamEvent::Writable { id } => {
+		noq_proto::StreamEvent::Writable { id } => {
 			if let Some(mut waiters) = state.writable.remove(&id) {
 				waiters.wake();
 			}
 		}
-		quinn_proto::StreamEvent::Finished { id } => end(state, id, End::Delivered),
-		quinn_proto::StreamEvent::Stopped { id, error_code } => {
+		noq_proto::StreamEvent::Finished { id } => end(state, id, End::Delivered),
+		noq_proto::StreamEvent::Stopped { id, error_code } => {
 			end(state, id, End::Stopped(error_code.into_inner()));
 			// A writer blocked on capacity has to learn it will never come.
 			if let Some(mut waiters) = state.writable.remove(&id) {
@@ -856,12 +840,7 @@ fn sweep_stream(state: &mut State, event: quinn_proto::StreamEvent) {
 
 #[cfg(test)]
 mod tests {
-	// The parent's alias arrives through the glob below, which a build with both
-	// backend features on cannot tell apart from the quinn-proto crate itself.
-	#[cfg(feature = "noq")]
 	use noq_proto::Side;
-	#[cfg(not(feature = "noq"))]
-	use quinn_proto::Side;
 
 	use super::*;
 

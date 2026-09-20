@@ -16,4 +16,4 @@ runtime $ROUNDS="3" $WORKERS="":
 # Compile every binary and feature used by the repository-level harness.
 check:
     cargo check --locked --package moq-relay --package moq-bench \
-        --features moq-relay/io-uring-quinn
+        --features moq-relay/io-uring

@@ -14,7 +14,7 @@ The reference implementation. Every crate is on
 | --- | --- |
 | [moq-net](/lib/rs/moq-net) | The pub/sub layer: sessions, origins, broadcasts, tracks, groups, frames. Transport-agnostic. |
 | [moq-pattern](https://docs.rs/moq-pattern) | Exact path patterns: grammar, matching, and set algebra. Re-exported by moq-net and moq-auth. |
-| [moq-tokio](https://docs.rs/moq-tokio) | Stands up QUIC (quinn, quiche, or noq), TLS, WebSocket fallback, and iroh, from config or CLI flags. |
+| [moq-tokio](https://docs.rs/moq-tokio) | Stands up QUIC with noq, TLS, WebSocket fallback, and iroh, from config or CLI flags. |
 | [hang](/lib/rs/hang) | The media layer: catalog, containers, ordered frame delivery. |
 | [moq-mux](/lib/rs/moq-mux) | Import and export fMP4/CMAF, MPEG-TS, Matroska, FLV, and Annex-B. |
 | [moq-video](/lib/rs/moq-video) | Native capture, hardware encode/decode (Apple, Windows, NVIDIA, VAAPI, V4L2, Android), and GPU rendering. |
@@ -94,9 +94,9 @@ quic.send_window = Some(32 << 20);          // unacknowledged data we may hold
 let client = moq_tokio::connect::Config::default().init(quic)?;
 ```
 
-Unset flow-control windows keep the selected backend defaults, and `init` errors on
-a knob that backend cannot honor rather than dropping it: quiche has no local
-send cap, and iroh cannot disable GSO. `quic::Resolved::default()` is what an
+Unset flow-control windows keep the transport defaults, and `init` errors on a
+knob the transport cannot honor rather than dropping it: iroh cannot disable
+GSO. `quic::Resolved::default()` is what an
 untouched config resolves to, so read the defaults from there. The
 [relay reference](/bin/relay/config#quic) documents each field.
 

@@ -382,7 +382,7 @@ check-changed $FILES:
     	just rs wasm
     fi
 
-# Compile moq-tokio by itself at the feature extremes and with each QUIC backend.
+# Compile moq-tokio by itself at the feature extremes and with each crypto provider.
 # Its default-feature build is already part of the ordinary clippy pass above.
 tokio-features:
     #!/usr/bin/env bash
@@ -390,9 +390,6 @@ tokio-features:
 
     cargo clippy --locked -p moq-tokio --no-default-features -- -D warnings
     cargo clippy --locked -p moq-tokio --all-features -- -D warnings
-    cargo clippy --locked -p moq-tokio --no-default-features --features quiche -- -D warnings
-    cargo clippy --locked -p moq-tokio --no-default-features --features quinn,aws-lc-rs -- -D warnings
-    cargo clippy --locked -p moq-tokio --no-default-features --features quinn,ring -- -D warnings
     cargo clippy --locked -p moq-tokio --no-default-features --features noq,aws-lc-rs -- -D warnings
     cargo clippy --locked -p moq-tokio --no-default-features --features noq,ring -- -D warnings
 
@@ -401,17 +398,15 @@ tokio-features:
     done
 
     want='a rustls QUIC backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature'
-    for backend in quinn noq; do
-        if output=$(cargo check --locked -p moq-tokio --no-default-features --features "$backend" 2>&1); then
-            echo "rs: moq-tokio with only $backend should reject its missing crypto provider" >&2
-            exit 1
-        fi
-        if ! grep -qF "$want" <<< "$output"; then
-            echo "rs: moq-tokio with only $backend should fail on: $want" >&2
-            echo "$output" | grep -E '^error' >&2 || true
-            exit 1
-        fi
-    done
+    if output=$(cargo check --locked -p moq-tokio --no-default-features --features noq 2>&1); then
+        echo "rs: moq-tokio with only noq should reject its missing crypto provider" >&2
+        exit 1
+    fi
+    if ! grep -qF "$want" <<< "$output"; then
+        echo "rs: moq-tokio with only noq should fail on: $want" >&2
+        echo "$output" | grep -E '^error' >&2 || true
+        exit 1
+    fi
 
 # Same as `fix`, but scoped the same way as `check-changed`.
 fix-changed $FILES:
@@ -440,8 +435,8 @@ fix-changed $FILES:
 # this once a day instead. A break there lands on main rather than being caught
 # in review, which is the same trade the other nightly gates make.
 #
-# Default features rather than `--all-features`: jemalloc and the quiche
-# backend don't build on MSVC, while moq-video's Linux-only `nvidia` default
+# Default features rather than `--all-features`: jemalloc doesn't build on
+# MSVC, while moq-video's Linux-only `nvidia` default
 # are already no-ops off Linux. moq-gst is excluded because it links
 # GStreamer via pkg-config, which the Windows runner doesn't have.
 #
@@ -456,25 +451,13 @@ windows *args:
 # Compile and test the io_uring relay path, which is off the default feature set.
 # Linux-only, and the tests below the 6.12 kernel floor skip themselves.
 #
-# The remaining pairs run the same suite over the alternative QUIC backends.
-# moq-uring compiles exactly one, so each gets its own invocation: feature
-# unification would otherwise fold the builds back together.
-#
-# `qlog` is a fourth axis on top of that, and the traces are what a debugging
-# run depends on, so each backend also gets a pass with it on.
+# `qlog` is a second axis, and the traces are what a debugging run depends on,
+# so it gets a separate pass.
 uring *args:
     cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets {{ args }} -- -D warnings
     cargo nextest run --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets {{ args }}
     cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring,moq-relay/qlog --all-targets {{ args }} -- -D warnings
     cargo nextest run --locked -p moq-uring --features qlog --all-targets {{ args }}
-    cargo clippy --locked -p moq-uring --no-default-features --features quinn --all-targets {{ args }} -- -D warnings
-    cargo nextest run --locked -p moq-uring --no-default-features --features quinn --all-targets {{ args }}
-    cargo nextest run --locked -p moq-uring --no-default-features --features quinn,qlog --all-targets {{ args }}
-    cargo clippy --locked -p moq-relay --features io-uring-quinn --all-targets {{ args }} -- -D warnings
-    cargo clippy --locked -p moq-uring --no-default-features --features quiche --all-targets {{ args }} -- -D warnings
-    cargo nextest run --locked -p moq-uring --no-default-features --features quiche --all-targets {{ args }}
-    cargo nextest run --locked -p moq-uring --no-default-features --features quiche,qlog --all-targets {{ args }}
-    cargo clippy --locked -p moq-relay --features io-uring-quiche --all-targets {{ args }} -- -D warnings
 
 # Runs the `#[cfg(target_os = "macos")]` code past the compiler: moq-video's
 # VideoToolbox encode/decode and its ScreenCaptureKit / AVFoundation capture,
@@ -640,7 +623,7 @@ c-tests:
 #
 # `--all-features` is the only thing that compiles moq-cli's play/capture, the
 # moq-video and moq-audio device features, the Linux bindgen codecs (vaapi,
-# v4l2), PipeWire, quiche, and jemalloc. `--no-default-features` is
+# v4l2), PipeWire, and jemalloc. `--no-default-features` is
 # the only thing that compiles the `#[cfg(not(feature = ...))]` arms.
 #
 # Cargo unifies features across a workspace selection. Check each package alone
@@ -808,10 +791,10 @@ bench-udp *args:
     cargo bench -p moq-uring --bench udp_tokio -- {{ args }}
     cargo bench -p moq-uring --bench udp_uring -- {{ args }}
 
-# Measure a raw-quiche echo through the io_uring worker, ablating receive
+# Measure a noq echo through the io_uring worker, ablating receive
 # batching, GRO, and GSO one at a time. Linux 6.12+ (skips loudly otherwise).
 bench-echo *args:
-    cargo bench -p moq-uring --bench echo_quiche -- {{ args }}
+    cargo bench -p moq-uring --bench echo_noq -- {{ args }}
 
 # Measure a full moq-lite session (publisher to subscriber) through the
 # io_uring worker, same ablations and per-iteration unit as bench-echo.

@@ -24,8 +24,8 @@ above ([hang](/lib/rs/hang)); relays and CDNs implement only this.
 - **Routes** record the relay hops and a cost, which is what the relay [cluster](/bin/relay/cluster) routes on. A hop of 0 marks the chain anonymous: `Route::is_anonymous()` is true, and that route ranks below every fully identified one.
 - **Stats** counters per broadcast and session, drained by [`moq-stats`](https://docs.rs/moq-stats).
 
-It runs over anything implementing `web_transport_trait::Session`: quinn,
-quiche, noq, the browser, iroh, or qmux over TCP, Unix sockets, and
+It runs over anything implementing `web_transport_trait::Session`: noq, the
+browser, iroh, or qmux over TCP, Unix sockets, and
 WebSockets. [`moq-tokio`](https://docs.rs/moq-tokio) wires those up.
 
 ```bash

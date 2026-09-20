@@ -138,9 +138,6 @@ impl Workers {
 				 QUIC-LB server id (listen.lb_id)"
 			);
 		}
-		if let Some(backend) = listen.backend.as_ref() {
-			anyhow::bail!("io_uring workers serve their own QUIC stack; listen.backend={backend:?} cannot apply");
-		}
 		let (cert, key) = match (listen.tls.cert.as_slice(), listen.tls.key.as_slice()) {
 			([cert], [key]) => (cert.clone(), key.clone()),
 			([], []) => anyhow::bail!("io_uring workers need a certificate (listen.tls.cert/key)"),
@@ -241,7 +238,7 @@ impl Workers {
 		server.transport = transport(&quic)?;
 
 		// GSO is a property of the socket, not the connection, so it rides the
-		// worker's UDP config rather than quiche's.
+		// worker's UDP config rather than the connection's.
 		let mut udp = moq_uring::udp::Config::default();
 		udp.gso = quic.gso.unwrap_or(true);
 

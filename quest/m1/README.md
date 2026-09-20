@@ -20,13 +20,11 @@ quest here and merged main into dev. The auth API line is here for its
 request-side break (`mtls=<identity>` and the now-required fields) and ranks
 first because moq.pro adopts the release only once that contract is settled;
 it is priority, not a merge gate, and [Merge dev](/quest/m1/merge-dev.md)
-does not require it. [One QUIC backend](/quest/m1/quic-one-backend.md) ranks
-above it: it removes public features, so it cannot land after the merge, and
-the transport line in m2 assumes a single stack.
+does not require it. The transport line in m2 assumes the single noq stack.
 
 ## Quests
 
-- [One QUIC backend](/quest/m1/quic-one-backend.md) - quinn and quiche are deleted; noq (and iroh on it) is the only QUIC stack, with the qmux fallbacks untouched
+- [One auth path](/quest/m1/auth-one-path.md) - Server, Public, and Refuse become tasks on the `Admissions` queue; `admit()` stays send-plus-await; `Mode` is gone
 - [Announce event](/quest/m1/api-net-announce.md) - publishers announce prefixes on every wire, consumers scoped by a pattern read the covered path already trimmed, with no `as_prefix().expect()` at 89 call sites
 - [Bindings announce match](/quest/m1/api-origin-scopes.md) - every binding takes a pattern scope and reports the announce match with its captures
 - [PathPrefixes](/quest/m1/api-path-prefixes.md) - the unused moq_net::PathPrefixes type is deleted before the release

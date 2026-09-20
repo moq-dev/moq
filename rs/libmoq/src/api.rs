@@ -892,43 +892,6 @@ pub unsafe extern "C" fn moq_versions(dst: *mut moq_string, count: usize) -> i32
 	})
 }
 
-/// The QUIC backend names this build offers, spelled the way [moq_client_config]'s `backend`
-/// expects. Built once; the slices are valid for the life of the process.
-static BACKEND_NAMES: std::sync::LazyLock<Vec<&'static str>> =
-	std::sync::LazyLock::new(|| moq_tokio::QuicBackend::compiled().iter().map(|b| b.as_str()).collect());
-
-/// List the QUIC backends this build was compiled with.
-///
-/// Writes up to `count` names into `dst` and returns the total number available, which
-/// may be larger than `count`. Pass a NULL `dst` with a zero `count` to size the array
-/// first. Each name borrows a static string valid for the life of the process.
-///
-/// The backends are compile-time optional, so a caller building a menu must read this
-/// rather than listing names: an option this build lacks is rejected by
-/// a dial, which would leave a menu entry that can only fail.
-///
-/// Returns the total count on success, or a negative code on failure.
-///
-/// # Safety
-/// - The caller must ensure that `dst` is either NULL with a zero `count`, or a valid
-///   pointer to `count` writable [moq_string] values.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_backends(dst: *mut moq_string, count: usize) -> i32 {
-	ffi::enter(move || {
-		if !dst.is_null() {
-			let dst = unsafe { std::slice::from_raw_parts_mut(dst, count) };
-			for (slot, name) in dst.iter_mut().zip(BACKEND_NAMES.iter()) {
-				slot.data = name.as_ptr().cast::<c_char>();
-				slot.len = name.len();
-			}
-		} else if count != 0 {
-			return Err(Error::InvalidPointer);
-		}
-
-		Ok(BACKEND_NAMES.len())
-	})
-}
-
 /// Whether this build can capture qlog traces.
 ///
 /// Capture is compile-time optional. [moq_client_config]'s `quic_qlog` accepts a directory
@@ -964,11 +927,6 @@ pub struct moq_client_config {
 	/// lists what is on offer.
 	pub versions: *const moq_string,
 	pub versions_len: usize,
-
-	/// QUIC backend name, or NULL for this build's choice. [moq_backends] lists
-	/// the names this build accepts, which are compile-time dependent.
-	pub backend: *const c_char,
-	pub backend_len: usize,
 
 	/// Local socket address to bind, or NULL for the wildcard address.
 	pub bind: *const c_char,
