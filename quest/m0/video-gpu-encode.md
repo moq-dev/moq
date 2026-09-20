@@ -37,6 +37,8 @@ unsupported and never selects a CPU conversion, upload or software encoder.
 
 ## Required
 
+- [NVENC registration rollback](/quest/m0/nvenc-registration.md) - safe cleanup when input mapping fails
+
 - [Vulkan/CUDA surfaces](/quest/m0/video-vulkan-cuda.md) - owned input and GPU synchronization
 
 ## Related
