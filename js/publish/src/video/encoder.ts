@@ -235,7 +235,12 @@ export class Encoder {
 		this.#lastCaptureWall = performance.now();
 
 		const producer = new Container.Legacy.Producer(track, new Container.Legacy.Format("video"));
-		effect.cleanup(() => producer.close());
+		// The broadcast owns this static track across demand gaps. End only the current
+		// group when demand disappears so a later subscriber can resume on the same track.
+		// A fatal encoder error still aborts the track through producer.close(err) below.
+		effect.cleanup(() => {
+			if (track.closed.peek() === undefined) producer.cut();
+		});
 
 		let lastKeyframe: Time.Micro | undefined;
 		let lastEncoded: Time.Micro | undefined;

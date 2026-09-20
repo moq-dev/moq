@@ -232,7 +232,13 @@ export class Broadcast {
 			[Broadcast.CATALOG_TRACK, false],
 			[Broadcast.CATALOG_TRACK_COMPRESSED, true],
 		] as const) {
-			const track = broadcast.createTrack(name, { priority: Catalog.PRIORITY.catalog });
+			// A catalog may publish once and stay unchanged for the broadcast's whole life. Keep
+			// that sole closed snapshot replayable so a viewer arriving after the ordinary media
+			// retention window can still bootstrap.
+			const track = broadcast.createTrack(name, {
+				maxAge: Moq.Time.Milli(Number.MAX_SAFE_INTEGER),
+				priority: Catalog.PRIORITY.catalog,
+			});
 			effect.cleanup(() => track.close());
 			this.catalog.serve(track, effect, { compression });
 		}
