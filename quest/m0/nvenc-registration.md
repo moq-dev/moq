@@ -13,11 +13,15 @@ behind or prevent subsequent encoder work from reclaiming its resources.
   resource, then returns on a mapping error before constructing the cleanup
   guard. The successful path already unmaps and unregisters on drop.
 - Make registration and mapping transactional, retaining the input owner
-  through cleanup. Preserve the original failure and surface any cleanup
-  failure without losing ownership silently.
+  through cleanup. If mapping and unregister both fail, the returned
+  EncodeError retains the mapping failure as the primary error and exposes
+  the unregister failure as cleanup context; neither error is discarded.
+  Preserve allocation ownership until it can be released safely.
 - Add an injectable failure regression through the normal test commands:
   registration succeeds, mapping fails, unregister runs exactly once and the
-  input owner remains valid until cleanup finishes. Also check successful
+  input owner remains valid until cleanup finishes. Inject unregister failure
+  too, asserting both errors are observable, the owner remains valid through
+  cleanup and unregister is attempted exactly once. Also check successful
   mapping and destruction so rollback does not introduce double cleanup.
 
 ## Related
