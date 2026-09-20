@@ -127,7 +127,7 @@ linux-raw-sys = { version = "0.12.1", features = ["ioctl"] }
 loom = { version = "0.7.2", features = ["futures"] }
 # DNS-SD advertisement and browsing for LAN peer discovery (moq-tokio's `mdns` feature).
 # `async` awaits the event channel instead of blocking a thread on it.
-mdns-sd = { version = "0.20", features = ["async"] }
+mdns-sd = { version = "0.21", features = ["async"] }
 moq-audio = { version = "0.0.25", path = "rs/moq-audio", default-features = false }
 moq-auth = { version = "0.1.0", path = "rs/moq-auth" }
 moq-binary = { version = "0.1.0", path = "rs/moq-binary" }
@@ -169,7 +169,7 @@ moq-vaapi = "0.0.4"
 # whole device graph into every one of them. The NVIDIA codecs are not part of
 # that argument, so moq-ffi and libmoq opt them back in by name.
 moq-video = { version = "0.0.25", path = "rs/moq-video", default-features = false }
-nix = { version = "0.30.1", features = ["net", "socket", "uio"] }
+nix = { version = "0.31.3", features = ["net", "socket", "uio"] }
 noq-proto = { version = "1.2", default-features = false }
 noq-udp = "1.1.1"
 num_enum = "0.7"
