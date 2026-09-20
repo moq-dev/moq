@@ -53,6 +53,11 @@ static _Noreturn void fail(const char *fmt, ...) {
     _exit(1);
 }
 
+static void ignore_status(void *user_data, int32_t status) {
+    (void)user_data;
+    (void)status;
+}
+
 static void check_refusals(void) {
     // Unknown pixel format.
     moq_video_decoder_output bad_format = {0, 999, 0, 0};
@@ -74,7 +79,7 @@ static void check_refusals(void) {
 
     // A valid request gets past validation and fails on the bogus catalog.
     moq_video_decoder_output valid = {0, MOQ_VIDEO_PIXEL_FORMAT_RGBA, 160, 120};
-    if (moq_decode_video(INT32_MAX, 0, &valid, NULL, NULL) != MOQ_ERR_CATALOG_NOT_FOUND)
+    if (moq_decode_video(INT32_MAX, 0, &valid, ignore_status, NULL) != MOQ_ERR_CATALOG_NOT_FOUND)
         fail("error: valid request did not reach catalog lookup: %s\n", moq_error());
 
     fprintf(stderr, "decoder output refusals ok\n");

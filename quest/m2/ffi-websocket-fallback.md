@@ -28,10 +28,10 @@ with `enabled: Option<bool>` (131, `None` means on) and `delay: CliDuration`
 Shape, two options:
 
 - Two setters beside the tls ones, `set_websocket_enabled(bool)` and
-  `set_websocket_delay(delay_ms: u64)`, mirroring the libmoq fields and the
-  `_ms` convention `MoqBackoff` uses. Recommended: smallest surface, and
+  `set_websocket_delay(delay_us: u64)`, mirroring the libmoq fields and the
+  `_us` convention `MoqBackoff` uses. Recommended: smallest surface, and
   every wrapper already has a one-line pattern for a boolean setter.
-- One `set_websocket(MoqWebsocket { enabled, delay_ms })` record like
+- One `set_websocket(MoqWebsocket { enabled, delay_us })` record like
   `set_backoff`. Only worth it if a third knob appears.
 
 Cross-package sync from the root CLAUDE.md table, with the lines that mirror

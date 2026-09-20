@@ -41,36 +41,22 @@ if (role !== "subscribe" || !url || !broadcast || !Number.isFinite(timeoutMs) ||
 }
 
 async function run(): Promise<void> {
-	const connection = await Moq.Connection.connect(new URL(url as string));
+	const origin = new Moq.Origin.Producer();
+	const connection = await Moq.Connection.connect({ url: new URL(url as string), consume: origin });
+	let requested: Moq.Origin.Requesting | undefined;
 	try {
 		const path = Moq.Path.from(broadcast as string);
-
-		// Wait for the broadcast to be announced before subscribing. Subscribing to a
-		// track on a broadcast the publisher hasn't announced yet races the relay,
-		// which resets the catalog stream (RESET_STREAM). The Rust API folds this
-		// wait into consume(); the JS API leaves it to the caller. The outer timeout
-		// below bounds how long we wait.
-		//
-		// The scope is the subtree at `path`, so each entry's pattern is relative to the
-		// connection (`path` itself for the broadcast there). Any active entry means a
-		// matching broadcast is up, so wait for one.
-		const announced = connection.announced(Moq.Path.Pattern.subtree(path));
-		try {
-			for (;;) {
-				const entry = await announced.next();
-				if (!entry) throw new Error("connection closed before broadcast was announced");
-				if (entry.active) break;
-			}
-		} finally {
-			announced.close();
+		requested = origin.request(path, { announced: true });
+		let bc = requested.active.peek();
+		while (!bc) {
+			await requested.active.changed();
+			bc = requested.active.peek();
 		}
-
-		const bc = connection.consume(path);
 
 		// The .hang catalog lives on the "catalog.json" track. It's a @moq/json
 		// snapshot+delta value, reconstructed by Json.Snapshot.Consumer. A lazy publisher may
 		// announce video in a later update, so keep reading until one has it.
-		const track = bc.subscribe("catalog.json", { priority: Catalog.PRIORITY.catalog });
+		const track = bc.track("catalog.json").subscribe({ priority: Catalog.PRIORITY.catalog });
 		const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track, schema: Catalog.RootSchema });
 		let videoTrack: string | undefined;
 		while (!videoTrack) {
@@ -80,7 +66,7 @@ async function run(): Promise<void> {
 			if (renditions) videoTrack = Object.keys(renditions)[0];
 		}
 
-		const video = bc.subscribe(videoTrack, { priority: 0 });
+		const video = bc.track(videoTrack).subscribe({ priority: 0 });
 		let total = 0;
 		for (;;) {
 			const group = await video.recvGroup();
@@ -101,7 +87,9 @@ async function run(): Promise<void> {
 		}
 		throw new Error("no frame data received");
 	} finally {
+		requested?.close();
 		connection.close(); // returns void, not a promise
+		origin.close();
 	}
 }
 

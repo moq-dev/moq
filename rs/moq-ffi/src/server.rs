@@ -42,7 +42,7 @@ impl ServerState {
 		let publish = self.publish.clone();
 		let consume = self.consume.clone();
 		match server.accept().await {
-			Some(request) => Ok(Some(MoqRequest::new(request, publish, consume))),
+			Some(request) => Ok(Some(MoqRequest::new(request, publish, consume)?)),
 			None => Ok(None),
 		}
 	}
@@ -206,16 +206,36 @@ pub enum MoqTransport {
 	Unix,
 }
 
-impl From<moq_tokio::server::Transport> for MoqTransport {
-	fn from(value: moq_tokio::server::Transport) -> Self {
-		match value {
+impl TryFrom<moq_tokio::server::Transport> for MoqTransport {
+	type Error = MoqError;
+
+	fn try_from(value: moq_tokio::server::Transport) -> Result<Self, Self::Error> {
+		Ok(match value {
 			moq_tokio::server::Transport::Quic => Self::Quic,
 			moq_tokio::server::Transport::Iroh => Self::Iroh,
 			moq_tokio::server::Transport::WebSocket => Self::WebSocket,
 			moq_tokio::server::Transport::Tcp => Self::Tcp,
 			moq_tokio::server::Transport::Unix => Self::Unix,
-			_ => unreachable!("unsupported transport"),
-		}
+			_ => return Err(MoqError::Unsupported),
+		})
+	}
+}
+
+#[cfg(test)]
+mod transport_tests {
+	use super::MoqTransport;
+	use moq_tokio::server::Transport;
+
+	#[test]
+	fn converts_supported_transports() {
+		assert_eq!(MoqTransport::try_from(Transport::Quic).unwrap(), MoqTransport::Quic);
+		assert_eq!(MoqTransport::try_from(Transport::Iroh).unwrap(), MoqTransport::Iroh);
+		assert_eq!(
+			MoqTransport::try_from(Transport::WebSocket).unwrap(),
+			MoqTransport::WebSocket
+		);
+		assert_eq!(MoqTransport::try_from(Transport::Tcp).unwrap(), MoqTransport::Tcp);
+		assert_eq!(MoqTransport::try_from(Transport::Unix).unwrap(), MoqTransport::Unix);
 	}
 }
 
@@ -238,12 +258,12 @@ impl MoqRequest {
 		request: moq_tokio::server::Request,
 		publish: Option<Arc<MoqOriginProducer>>,
 		consume: Option<Arc<MoqOriginProducer>>,
-	) -> Arc<Self> {
-		let transport = request.transport().into();
+	) -> Result<Arc<Self>, MoqError> {
+		let transport = request.transport().try_into()?;
 		let url = request.url().map(|u| u.to_string());
 		let path = request.path().to_string();
 		let query = request.query().map(str::to_string);
-		Arc::new(Self {
+		Ok(Arc::new(Self {
 			task: Task::new(RequestState {
 				request: Some(request),
 				publish,
@@ -253,7 +273,7 @@ impl MoqRequest {
 			url,
 			path,
 			query,
-		})
+		}))
 	}
 
 	fn configure_origin(&self, f: impl FnOnce(&mut RequestState)) -> Result<(), MoqError> {
