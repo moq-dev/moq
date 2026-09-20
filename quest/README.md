@@ -7,7 +7,7 @@ grouped into milestones ordered by priority.
 
 ## Plan
 
-m1 is the dev branch line. m2 is the next agent
+m0 supplies the GPU video path for the Pronto desktop. m1 is the dev branch line. m2 is the next agent
 wave across reliability, features, performance, and planning. Unsettled
 quests may stay in m2 for planning; their implementation waits for the
 required decisions. m3 holds later features, design studies, experiments,
@@ -24,6 +24,9 @@ settled one QUIC stack (a moq-dev fork of noq), moved capacity probing back
 into m2, and opened m4 for the hardware- and partner-gated quests.
 
 ## Quests
+
+- [m0: Pronto GPU video](/quest/m0/README.md) - reusable Vulkan/CUDA ownership,
+  GPU conversion and NVENC for the desktop demo
 
 - [m1: the dev line](/quest/m1/README.md) - the breaking API and wire
   changes, the merge gates, and the merge itself
