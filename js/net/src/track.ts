@@ -27,17 +27,8 @@ const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 /** Default {@link Info.maxAge} window (milliseconds) when the publisher does not set one. */
 export const DEFAULT_MAX_AGE_MS = Milli(5000);
 
-/**
- * How long (milliseconds) a datagram stays in the per-subscriber buffer before it is dropped.
- *
- * Datagrams are a best-effort send buffer, not a replay cache (unlike groups): only the last few
- * tens of milliseconds are kept, so a consumer that stalls loses stale datagrams instead of
- * replaying them. Mirrors the Rust `MAX_DATAGRAM_AGE`.
- */
-const MAX_DATAGRAM_AGE_MS = 50;
-
-/** A datagram buffered with its arrival time, so the send buffer can evict by age. */
-type BufferedDatagram = { datagram: Datagram; time: number };
+/** Maximum buffered datagrams per subscriber; mirrors Rust's bounded send buffer. */
+const MAX_DATAGRAMS = 64;
 
 /**
  * Sanity cap on a datagram payload: the QUIC DATAGRAM frame ceiling. The real limit is
@@ -306,8 +297,8 @@ class TrackState {
 	// First timestamps mutate group state rather than track state, so held groups
 	// watch this revision as well as arrivals when enforcing latency after handoff.
 	timelineChanged = new Signal(0);
-	/** Best-effort datagram channel, parallel to {@link groups}; an age-evicted send buffer per subscriber. */
-	datagrams = new Signal<BufferedDatagram[]>([]);
+	/** Best-effort datagram channel, parallel to {@link groups}; a bounded send buffer per subscriber. */
+	datagrams = new Signal<Datagram[]>([]);
 	latest?: number;
 	/**
 	 * The exclusive final boundary, stamped when the producer closes cleanly: one past the
@@ -722,12 +713,10 @@ export class Producer {
 	// Fan a datagram out to every live subscriber, dropping the oldest once the ring is full.
 	// Late subscribers do NOT replay old datagrams (best-effort, unlike the group cache).
 	#publishDatagram(datagram: Datagram): void {
-		const now = performance.now();
 		for (const sink of this.#sinks) {
 			sink.datagrams.mutate((list) => {
-				list.push({ datagram, time: now });
-				// Drop anything older than the send-buffer window.
-				while (list.length > 0 && now - list[0].time > MAX_DATAGRAM_AGE_MS) list.shift();
+				if (list.length === MAX_DATAGRAMS) list.shift();
+				list.push(datagram);
 			});
 		}
 	}
@@ -1214,13 +1203,8 @@ export class Subscriber {
 		for (;;) {
 			const datagrams = this.#state.datagrams.peek();
 
-			// Evict datagrams older than the send-buffer window (also enforced on write), so a
-			// reader that stalled skips stale datagrams instead of replaying them.
-			const cutoff = performance.now() - MAX_DATAGRAM_AGE_MS;
-			while (datagrams.length > 0 && datagrams[0].time < cutoff) datagrams.shift();
-
 			if (datagrams.length > 0) {
-				return datagrams.shift()?.datagram;
+				return datagrams.shift();
 			}
 
 			const closed = this.#state.closed.peek();

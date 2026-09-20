@@ -72,10 +72,11 @@ Cache reads and writes clear their expiration timestamp without reading the
 system clock. A due cleanup pass scans cached groups, dates undated activity,
 and expires idle groups except each track's latest. Calls before the cleanup
 deadline only advance the sampled clock, so calling after every poll is cheap.
-Expiration is approximate: delayed cleanup extends retention. Frame APIs need
-no time argument. Datagram insertion takes an explicit arrival instant:
-`append_datagram(now, timestamp, payload)` or
-`insert_datagram(now, Datagram { sequence, timestamp, payload })`.
+Expiration is approximate: delayed cleanup extends retention. Model read/write
+APIs take no wall-clock time. Datagram writes keep their existing signatures:
+`append_datagram(timestamp, payload)` and
+`insert_datagram(sequence, timestamp, payload)`. Datagram send buffers retain
+the newest 64 entries, dropping the oldest at capacity without reading a clock.
 This changes Rust APIs, with no wire-format or TypeScript API changes.
 
 ## Patterns

@@ -56,8 +56,8 @@
 //! [`origin::Producer::new`] also returns a producer and driver. Its driver runs
 //! route changes, serving, linger, teardown, and the origin's cache expiration.
 //! Standalone caches expose [`cache::Pool::gc`]. Frame read/write methods
-//! clear their expiration timestamp for the next cleanup pass; datagram insertion takes an
-//! explicit arrival instant.
+//! clear their expiration timestamp for the next cleanup pass. Datagrams use a bounded
+//! FIFO; model read/write APIs take no wall-clock time.
 //!
 //! Both drivers implement [`time::Driver`]. `moq-tokio` and `moq-wasm`
 //! supply runtime adapters, and `moq-uring` can drive thread-local transports.

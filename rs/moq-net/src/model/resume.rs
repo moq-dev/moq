@@ -2773,9 +2773,7 @@ mod test {
 				.is_none(),
 			"no datagram yet"
 		);
-		track_a
-			.append_datagram(crate::model::clock::now(), Timestamp::ZERO, b"d0".as_ref())
-			.unwrap();
+		track_a.append_datagram(Timestamp::ZERO, b"d0".as_ref()).unwrap();
 		let datagram = kio::wait(|waiter| sub.poll_recv_datagram(waiter))
 			.now_or_never()
 			.expect("datagram should be ready")
@@ -4947,18 +4945,14 @@ mod test {
 
 		// Datagrams are a live best-effort channel: one from a replaced segment
 		// is stale and never surfaces, only the live route's flow does.
-		track_a
-			.append_datagram(crate::model::clock::now(), Timestamp::ZERO, b"old".as_ref())
-			.unwrap();
+		track_a.append_datagram(Timestamp::ZERO, b"old".as_ref()).unwrap();
 		assert!(
 			kio::wait(|waiter| sub.poll_recv_datagram(waiter))
 				.now_or_never()
 				.is_none(),
 			"stale datagram must not surface"
 		);
-		track_b
-			.append_datagram(crate::model::clock::now(), Timestamp::ZERO, b"new".as_ref())
-			.unwrap();
+		track_b.append_datagram(Timestamp::ZERO, b"new".as_ref()).unwrap();
 		let datagram = kio::wait(|waiter| sub.poll_recv_datagram(waiter))
 			.now_or_never()
 			.expect("datagram should be ready")

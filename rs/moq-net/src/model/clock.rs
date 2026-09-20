@@ -1,9 +1,8 @@
 //! Clock access for the explicit `Timestamp::now` convenience API and model tests.
 //!
-//! Production cache maintenance and datagram arrival times use caller-supplied
-//! instants. Tests share a frozen thread-local clock so advancing one test never
+//! Production cache maintenance uses caller-supplied instants at the GC boundary. Tests share a frozen thread-local clock so advancing one test never
 //! affects another. Advancing it also dates pending cache activity; expiration
-//! remains a separate operation, driven by writes or an explicit cache-driver poll.
+//! remains a separate operation, driven by writes or an explicit cleanup call.
 
 /// The current instant on the model's clock.
 #[cfg(not(test))]

@@ -120,6 +120,22 @@ test("appendDatagram delivers to a subscriber", async () => {
 	expect(got && dec.decode(got.payload)).toBe("hello");
 });
 
+test("datagram buffers drop oldest at capacity without delaying active subscribers", async () => {
+	const producer = new TrackProducer("test");
+	const slow = producer.subscribe();
+	const fast = producer.subscribe();
+	const count = 192;
+	for (let sequence = 0; sequence < count; sequence++) {
+		producer.appendDatagram(Timestamp.fromMillis(0), enc.encode("x"));
+		expect((await fast.recvDatagram())?.sequence).toBe(sequence);
+	}
+	producer.close();
+	for (let sequence = count - 64; sequence < count; sequence++) {
+		expect((await slow.recvDatagram())?.sequence).toBe(sequence);
+	}
+	expect(await slow.recvDatagram()).toBeUndefined();
+});
+
 test("insertDatagram preserves an explicit sequence", async () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe();

@@ -438,14 +438,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		let timestamp =
 			Timestamp::new(dg.timestamp, scale).map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 
-		entry.producer.insert_datagram(
-			self.runtime.now(),
-			crate::Datagram {
-				sequence: dg.sequence,
-				timestamp,
-				payload: crate::IntoBytes::into_bytes(dg.payload),
-			},
-		)?;
+		entry.producer.insert_datagram(dg.sequence, timestamp, dg.payload)?;
 		Ok(())
 	}
 

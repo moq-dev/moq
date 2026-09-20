@@ -474,15 +474,8 @@ fn bad_datagram_is_event() {
 	};
 	payload[0] ^= 1;
 	let payload = bytes::Bytes::from(payload);
-	net.insert_datagram(
-		std::time::Instant::now(),
-		moq_net::Datagram {
-			sequence: 1,
-			timestamp: moq_net::Timestamp::from_millis(2).unwrap(),
-			payload: moq_net::IntoBytes::into_bytes(payload),
-		},
-	)
-	.unwrap();
+	net.insert_datagram(1, moq_net::Timestamp::from_millis(2).unwrap(), payload)
+		.unwrap();
 	producer
 		.insert_datagram(2, moq_net::Timestamp::from_millis(3).unwrap(), b"three")
 		.unwrap();
@@ -616,12 +609,9 @@ fn forged_datagram_does_not_burn_identity() {
 	};
 	forged[0] ^= 1;
 	net.insert_datagram(
-		std::time::Instant::now(),
-		moq_net::Datagram {
-			sequence: 1,
-			timestamp: moq_net::Timestamp::from_millis(2).unwrap(),
-			payload: moq_net::IntoBytes::into_bytes(bytes::Bytes::from(forged)),
-		},
+		1,
+		moq_net::Timestamp::from_millis(2).unwrap(),
+		bytes::Bytes::from(forged),
 	)
 	.unwrap();
 	// Real seq 1 after the forgery.

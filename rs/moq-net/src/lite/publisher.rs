@@ -1546,11 +1546,7 @@ mod test {
 		let mut subscriber = producer.subscribe(None);
 
 		producer
-			.append_datagram(
-				crate::model::clock::now(),
-				Timestamp::from_millis(1).unwrap(),
-				&b"last"[..],
-			)
+			.append_datagram(Timestamp::from_millis(1).unwrap(), &b"last"[..])
 			.unwrap();
 		producer.finish().unwrap();
 

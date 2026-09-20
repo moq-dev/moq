@@ -765,7 +765,7 @@ impl MoqTrackProducer {
 		let timestamp = moq_net::Timestamp::from_micros(frame.timestamp_us)?;
 		let mut guard = self.inner.lock().unwrap();
 		let track = guard.as_mut().ok_or(MoqError::Closed)?;
-		Ok(track.append_datagram(moq_net::time::Instant::now(), timestamp, frame.payload)?)
+		Ok(track.append_datagram(timestamp, frame.payload)?)
 	}
 
 	/// Abort this track with an application error code.

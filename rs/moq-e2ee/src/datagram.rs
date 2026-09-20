@@ -40,14 +40,7 @@ pub(crate) fn insert_ciphertext(
 	timestamp: moq_net::Timestamp,
 	payload: Bytes,
 ) -> moq_net::Result<()> {
-	track.insert_datagram(
-		moq_net::time::Instant::now(),
-		moq_net::Datagram {
-			sequence,
-			timestamp,
-			payload: moq_net::IntoBytes::into_bytes(payload),
-		},
-	)
+	track.insert_datagram(sequence, timestamp, payload)
 }
 
 /// Ciphertext budget for a datagram that will encode these fields.
