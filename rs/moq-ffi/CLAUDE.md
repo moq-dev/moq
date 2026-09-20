@@ -7,7 +7,7 @@ Mirror every change in the same PR:
 - `rs/libmoq`: the C staticlib (`cbindgen` emits `moq.h`). If the C ABI moved, also `cpp/obs`.
 - Hand-written wrappers: `py/moq-rs`, `go/wrapper/moq`, `dart/moq`, `swift/Sources`, `kt/moq`. The `go/ffi` and `dart/moq_ffi` layers regenerate, but a new method still needs its ergonomic wrapper.
 - Docs under `doc/lib/{py,go,dart,swift,kt,c}`.
-- Then `just test smoke-full` for the interop matrix.
+- Then `just test smoke --all` for the interop matrix.
 
 Keep the wrappers thin and their names aligned with the Rust API. Swift and Python extend additively through labeled/keyword args with defaults; Go, Kotlin, and Dart take an options struct like Rust.
 

@@ -69,7 +69,7 @@ Playwright's Chromium, which
 just test smoke
 
 # Full matrix: rust/python/go/browser publish; everyone subscribes.
-just test smoke-full
+just test smoke --all
 
 # Pick your own axes:
 just test smoke --publishers rust,python --subscribers rust,c,js-native-bun

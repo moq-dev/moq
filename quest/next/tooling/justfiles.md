@@ -47,7 +47,7 @@ Dispatch:
 - Passing a path instead of the list kills the argv budget:
   `changed_max`, `_changed-cap`, `_changed-test`, `_echo`, and the E2BIG
   commentary go.
-- `check-all`, `fix-all`, and `test all` keep their names; cache.yml,
+- `check --all`, `fix --all`, and `test all` keep their names; cache.yml,
   nightly.yml, and the docs call them.
 
 Delete:
@@ -90,7 +90,7 @@ and `preset` bodies.
 
 Docs: `doc/setup/dev.md`, `CONTRIBUTING.md`, `test/README.md`, and the
 `CLAUDE.md` mentions of `just wasm` follow the survivors. Verify with `just
-check`, `just test`, and `just check-all`, and confirm every recipe name
+check`, `just test`, and `just check --all`, and confirm every recipe name
 check.yml, cache.yml, nightly.yml, smoke.yml, wasm.yml, obs.yml, swift.yml,
 and release-*.yml invoke still resolves.
 
