@@ -16,9 +16,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `Request::remote_addr`, `local_addr`, `server_name`, and `alpn` report what the transport saw; `PeerIdentity::name` and `issuer` read the leaf certificate.
 - `Client::with_origin` and `Server::with_origin` publish and subscribe through one shared origin.
-
-### Added
-
 - *(tokio)* [**breaking**] partition LAN discovery by a DNS-SD application (`mdns::App`)
 
 ### Fixed

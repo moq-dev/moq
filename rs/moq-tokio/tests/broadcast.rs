@@ -2871,10 +2871,14 @@ async fn wildcard_scope_test(version: &str, server_scope: &str) {
 		.expect("read_frame failed")
 		.expect("group closed");
 	assert_eq!(frame.payload.as_ref(), b"room/alice/chat");
-	for path in ["room/alice/audio", "room/bob/chat", "lobby/alice/chat"] {
+	// The server grant excludes bob's chat, so that otherwise-authorized request is
+	// unroutable. Audio and lobby never pass the client's own scope and are unauthorized.
+	let refused = sub_consumer.request_broadcast("room/bob/chat").await.err();
+	assert!(matches!(refused, Some(moq_net::Error::Unroutable)), "{refused:?}");
+	for path in ["room/alice/audio", "lobby/alice/chat"] {
 		let refused = sub_consumer.request_broadcast(path).await.err();
 		assert!(
-			matches!(refused, Some(moq_net::Error::Unroutable)),
+			matches!(refused, Some(moq_net::Error::Unauthorized)),
 			"{path}: {refused:?}"
 		);
 	}
