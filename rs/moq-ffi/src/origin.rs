@@ -69,7 +69,7 @@ impl TryFrom<MoqRoute> for moq_net::origin::Route {
 			hops.push(origin).map_err(|e| MoqError::InvalidRoute(e.to_string()))?;
 		}
 		Ok(moq_net::origin::Route::default()
-			.with_cost(moq_net::origin::Cost::from_warm_cold(route.cost, cold))
+			.with_cost(moq_net::origin::Cost { warm: route.cost, cold })
 			.with_hops(hops))
 	}
 }

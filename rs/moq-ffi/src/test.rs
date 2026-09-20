@@ -265,7 +265,7 @@ fn origin_config_set_cache_capacity() {
 #[test]
 fn route_cold_cost_conversions_are_lossless() {
 	// An explicit cold half survives the round trip in both directions.
-	let route = moq_net::origin::Route::default().with_cost(moq_net::origin::Cost::from_warm_cold(0, 9));
+	let route = moq_net::origin::Route::default().with_cost(moq_net::origin::Cost { warm: 0, cold: 9 });
 	let ffi = MoqRoute::from(route.clone());
 	assert_eq!(ffi.cost, 0);
 	assert_eq!(ffi.cold, Some(9));
@@ -281,7 +281,7 @@ fn route_cold_cost_conversions_are_lossless() {
 		anonymous: false,
 	})
 	.unwrap();
-	assert_eq!(seeded.cost, moq_net::origin::Cost::from_warm_cold(5, 5));
+	assert_eq!(seeded.cost, moq_net::origin::Cost { warm: 5, cold: 5 });
 
 	let anonymous = MoqRoute::from(
 		moq_net::origin::Route::default().with_hops(moq_net::Hops::try_from(vec![moq_net::Hop::UNKNOWN]).unwrap()),
@@ -326,7 +326,7 @@ async fn announced_route_keeps_cold_cost_on_reannounce() {
 	// the conversion rather than waiting for a second update.)
 	broadcast.announce(route.clone()).unwrap();
 	let back = moq_net::origin::Route::try_from(route.clone()).unwrap();
-	assert_eq!(back.cost, moq_net::origin::Cost::from_warm_cold(0, 9));
+	assert_eq!(back.cost, moq_net::origin::Cost { warm: 0, cold: 9 });
 	assert_eq!(MoqRoute::from(back), route);
 
 	broadcast.finish().unwrap();

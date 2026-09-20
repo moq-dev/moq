@@ -674,7 +674,7 @@ unsafe fn parse_route(route: *const moq_route) -> Result<moq_net::origin::Route,
 		}
 	}
 	Ok(moq_net::origin::Route::default()
-		.with_cost(moq_net::origin::Cost::from_warm_cold(route.cost, cold))
+		.with_cost(moq_net::origin::Cost { warm: route.cost, cold })
 		.with_hops(route_hops))
 }
 

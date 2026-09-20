@@ -372,7 +372,6 @@ const MAX_COST: u64 = (1 << 62) - 1;
 /// path as if nothing were cached, so it stays meaningful once discounts have
 /// flattened `warm`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-#[non_exhaustive]
 pub struct Cost {
 	/// The cost of pulling content via this route as the mesh stands today,
 	/// accumulated per link. Lower wins.
@@ -398,11 +397,6 @@ impl Cost {
 	/// seeding its production cost means.
 	pub const fn new(cost: u64) -> Self {
 		Self { warm: cost, cold: cost }
-	}
-
-	/// A discounted warm cost alongside the same route's undiscounted cold cost.
-	pub const fn from_warm_cold(warm: u64, cold: u64) -> Self {
-		Self { warm, cold }
 	}
 
 	/// The highest cost either half can take, and where accumulation saturates.
