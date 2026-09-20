@@ -26,17 +26,23 @@ carry no counts, and noq turns ECN off within the first ACK.
 - Send: `TxBuf::send` takes the codepoint beside the segment size and writes
   `IP_TOS` (v4) or `IPV6_TCLASS` (v6) into the same control buffer as
   `UDP_SEGMENT`, so a GSO train carries the mark on every segment. The noq
-  and quinn adapter in `src/quic/quinn/endpoint.rs` passes `Transmit::ecn`
-  through. quiche has no ECN send API and stays untouched.
-- Receive: enable `IP_RECVTOS` and `IPV6_RECVTCLASS` on the socket, parse
-  the TOS or TCLASS control message next to `UDP_GRO`, and fill
-  `RecvMeta::ecn` for every segment of a GRO batch.
+  and quinn adapter passes `Transmit::ecn` at both call sites,
+  `rs/moq-uring/src/quic/quinn/endpoint.rs:377` and
+  `rs/moq-uring/src/quic/quinn/connection.rs:797`. quiche has no ECN send
+  API, so its three callers (`quiche/endpoint.rs:476`,
+  `quiche/connection.rs:843`) pass no codepoint and change only to match
+  the signature.
+- Receive: enable `IP_RECVTOS` and `IPV6_RECVTCLASS` on the socket and parse
+  the TOS or TCLASS control message next to `UDP_GRO`. `udp::Packet` gains
+  an `ecn` accessor (one mark per completion; a GRO batch shares it), and
+  the noq and quinn adapter threads it into both `Endpoint::handle` calls at
+  `quinn/endpoint.rs:240-252`, which pass `None` today.
 - `moq-uring` is 0.0.1 and unpublished, so the `udp` module's signature
   changes on `main`. No config, wire, or doc changes.
 - Regression, in `rs/moq-uring/tests`: a socket pair through the worker
-  sends with ECT(0) and the receiver reads the codepoint back, over v4 and
-  v6, for a single datagram and for a GSO train; and a packet arriving with
-  CE reaches `RecvMeta::ecn` as CE. Fails today. noq-proto 1.2 exposes no
+  sends with ECT(0) and the receiving `Packet::ecn` reads it back, over v4
+  and v6, for a single datagram and for a GSO train; and a datagram sent
+  with CE arrives as CE. Fails today. noq-proto 1.2 exposes no
   ECN state, so the session-level check waits for the fork; the `rs uring`
   nightly lane already runs this crate and gates on the kernel floor.
 
