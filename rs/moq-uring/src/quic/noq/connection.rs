@@ -781,7 +781,7 @@ impl Driver {
 			to: transmit.destination,
 			len: transmit.size,
 			segment: transmit.segment_size.unwrap_or(transmit.size),
-			ecn: transmit.ecn.map(Into::into),
+			ecn: transmit.ecn.map(super::ecn_from_noq),
 		};
 		if let Err(err) = tx.send(transmit) {
 			return Poll::Ready(Err(Error::Io(err.to_string())));

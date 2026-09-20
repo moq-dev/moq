@@ -37,23 +37,19 @@ const CONNECTION_WINDOW: u32 = 16 * 1024 * 1024;
 /// How many datagrams to buffer in each direction.
 const DATAGRAM_WINDOW: usize = 64 * SEGMENT;
 
-impl From<udp::Ecn> for noq_proto::EcnCodepoint {
-	fn from(ecn: udp::Ecn) -> Self {
-		match ecn {
-			udp::Ecn::Ect0 => Self::Ect0,
-			udp::Ecn::Ect1 => Self::Ect1,
-			udp::Ecn::Ce => Self::Ce,
-		}
+fn ecn_to_noq(ecn: udp::Ecn) -> noq_proto::EcnCodepoint {
+	match ecn {
+		udp::Ecn::Ect0 => noq_proto::EcnCodepoint::Ect0,
+		udp::Ecn::Ect1 => noq_proto::EcnCodepoint::Ect1,
+		udp::Ecn::Ce => noq_proto::EcnCodepoint::Ce,
 	}
 }
 
-impl From<noq_proto::EcnCodepoint> for udp::Ecn {
-	fn from(ecn: noq_proto::EcnCodepoint) -> Self {
-		match ecn {
-			noq_proto::EcnCodepoint::Ect0 => Self::Ect0,
-			noq_proto::EcnCodepoint::Ect1 => Self::Ect1,
-			noq_proto::EcnCodepoint::Ce => Self::Ce,
-		}
+fn ecn_from_noq(ecn: noq_proto::EcnCodepoint) -> udp::Ecn {
+	match ecn {
+		noq_proto::EcnCodepoint::Ect0 => udp::Ecn::Ect0,
+		noq_proto::EcnCodepoint::Ect1 => udp::Ecn::Ect1,
+		noq_proto::EcnCodepoint::Ce => udp::Ecn::Ce,
 	}
 }
 

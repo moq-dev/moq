@@ -161,7 +161,7 @@ pub enum Ecn {
 
 impl Ecn {
 	/// The codepoint in the low two bits of a TOS byte, if any.
-	pub fn from_bits(bits: u8) -> Option<Self> {
+	fn from_bits(bits: u8) -> Option<Self> {
 		match bits & 0b11 {
 			0b10 => Some(Self::Ect0),
 			0b01 => Some(Self::Ect1),
