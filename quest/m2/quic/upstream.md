@@ -28,7 +28,7 @@ it:
 3. keep-alive by deadline ([keep-alive](/quest/m2/quic/keep-alive.md));
 4. hierarchical send groups ([scheduler](/quest/m2/quic/scheduler.md));
 5. careful resume as a `Controller` wrapper ([careful resume](/quest/m2/quic/careful-resume.md));
-6. ECN validation and marking ([ECN](/quest/m2/quic/ecn.md));
+6. ECT(1) marking and its accounting ([L4S](/quest/m2/quic/ecn.md));
 7. per-stream deadlines ([deadlines](/quest/m2/quic/deadline.md));
 8. capacity probing by early retransmission ([probe](/quest/m2/quic/probe.md));
 9. the qmux crate over the shared stream state machine ([qmux](/quest/m2/quic/qmux.md)).
@@ -50,7 +50,7 @@ offered and answered.
 - [Keep-alive by deadline](/quest/m2/quic/keep-alive.md)
 - [Hierarchical stream scheduling](/quest/m2/quic/scheduler.md)
 - [Careful resume on reconnect](/quest/m2/quic/careful-resume.md)
-- [ECN on the backbone](/quest/m2/quic/ecn.md)
+- [L4S on the backbone](/quest/m2/quic/ecn.md)
 - [Per-stream deadlines](/quest/m2/quic/deadline.md)
 - [Probe by early retransmission](/quest/m2/quic/probe.md)
 - [qmux on the QUIC stream state machine](/quest/m2/quic/qmux.md)
