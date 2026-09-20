@@ -5009,7 +5009,7 @@ class FfiConverterMoqAnnounceConsumer {
 
 abstract class MoqAnnounceUpdateInterface {
   bool active();
-  String path();
+  String prefix();
   MoqRoute route();
 }
 
@@ -5049,9 +5049,9 @@ class MoqAnnounceUpdate implements MoqAnnounceUpdateInterface {
     );
   }
 
-  String path() {
+  String prefix() {
     return rustCallWithLifter(
-      (status) => uniffi_moq_ffi_fn_method_moqannounceupdate_path(
+      (status) => uniffi_moq_ffi_fn_method_moqannounceupdate_prefix(
         uniffiClonePointer(),
         status,
       ),
@@ -9508,7 +9508,7 @@ external int uniffi_moq_ffi_fn_method_moqannounceupdate_active(
 @Native<RustBuffer Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
-external RustBuffer uniffi_moq_ffi_fn_method_moqannounceupdate_path(
+external RustBuffer uniffi_moq_ffi_fn_method_moqannounceupdate_prefix(
   Pointer<Void> ptr,
   Pointer<RustCallStatus> uniffiStatus,
 );
@@ -11343,7 +11343,7 @@ external int uniffi_moq_ffi_checksum_method_moqannounceconsumer_next();
 external int uniffi_moq_ffi_checksum_method_moqannounceupdate_active();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int uniffi_moq_ffi_checksum_method_moqannounceupdate_path();
+external int uniffi_moq_ffi_checksum_method_moqannounceupdate_prefix();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqannounceupdate_route();
@@ -11878,7 +11878,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqannounceupdate_active() != 49521) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqannounceupdate_path() != 7124) {
+  if (uniffi_moq_ffi_checksum_method_moqannounceupdate_prefix() != 10019) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqannounceupdate_route() != 8074) {
@@ -11900,7 +11900,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqbroadcastrequest_reject() != 9727) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqoriginconsumer_announced() != 45144) {
+  if (uniffi_moq_ffi_checksum_method_moqoriginconsumer_announced() != 36171) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqoriginconsumer_announced_broadcast() !=

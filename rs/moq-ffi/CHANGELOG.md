@@ -32,7 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   track info, and subscriptions; `MoqBackoff` is `initial_us` / `max_us` /
   `timeout_us`. `MoqSession::publish()` / `consume()` match `set_publish` /
   `set_consume`.
-- `MoqAnnounced` is `MoqAnnounceConsumer`, `MoqAnnouncement` is `MoqAnnounceUpdate` with `pattern()` instead of `path()`, `MoqBroadcastRequest::abort` is `reject`, and `MoqOriginOptions` is `MoqOriginConfig`.
+- `MoqAnnounced` is `MoqAnnounceConsumer`, `MoqAnnouncement` is
+  `MoqAnnounceUpdate` with `prefix()` instead of `path()`; the returned covered
+  prefix is relative to the prefix passed to `announced`. `MoqBroadcastRequest::abort`
+  is `reject`, and `MoqOriginOptions` is `MoqOriginConfig`.
 
 - [**breaking**] `MoqTrackProducer::finish` and `MoqGroupProducer::finish` keep the handle open so a
   later `abort` can still run. Broadcast, audio, video, and JSON producers still close on finish.

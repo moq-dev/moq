@@ -111,8 +111,8 @@ impl Origin {
 	pub fn announced_info(&self, announced: Id, dst: &mut moq_announce_update) -> Result<(), Error> {
 		let announced = self.announced.get(announced).ok_or(Error::AnnouncementNotFound)?;
 		*dst = moq_announce_update {
-			path: announced.0.as_str().as_ptr() as *const c_char,
-			path_len: announced.0.len(),
+			prefix: announced.0.as_str().as_ptr() as *const c_char,
+			prefix_len: announced.0.len(),
 			active: announced.1,
 		};
 		Ok(())

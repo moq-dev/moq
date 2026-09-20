@@ -682,9 +682,9 @@ unsafe fn parse_route(route: *const moq_route) -> Result<moq_net::origin::Route,
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_announce_update {
-	/// The covered path prefix, NOT NULL terminated
-	pub path: *const c_char,
-	pub path_len: usize,
+	/// The covered prefix, relative to the requested announcements prefix, NOT NULL terminated
+	pub prefix: *const c_char,
+	pub prefix_len: usize,
 
 	/// Whether the route is active or was retracted
 	/// This MUST toggle between true and false over the lifetime of the route
@@ -1491,7 +1491,7 @@ pub unsafe extern "C" fn moq_origin_announced(
 
 /// Query information about a broadcast discovered by [moq_origin_announced].
 ///
-/// The destination is filled with the broadcast information. The `pattern` pointer borrows
+/// The destination is filled with the route information. The `prefix` pointer borrows
 /// the announcement's storage: copy it out before calling [moq_origin_announced_free], which
 /// invalidates it.
 ///
@@ -1513,7 +1513,7 @@ pub unsafe extern "C" fn moq_origin_announced_info(announced: u32, dst: *mut moq
 /// Each announce / unannounce event hands the callback a distinct announcement handle (read
 /// with [moq_origin_announced_info]); release it here once done to avoid leaking one per event
 /// over the life of the listener. This is per-announcement and distinct from
-/// [moq_origin_announced_cancel], which stops the listener itself. After freeing, any `pattern`
+/// [moq_origin_announced_cancel], which stops the listener itself. After freeing, any `prefix`
 /// pointer obtained from [moq_origin_announced_info] for this handle is dangling.
 ///
 /// Returns zero on success, or a negative code if the handle is unknown.

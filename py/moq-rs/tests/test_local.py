@@ -176,9 +176,9 @@ async def test_local_publish_consume_audio():
     consumer = origin.consume()
 
     async for announcement in consumer.announced():
-        assert announcement.path == "live"
+        assert announcement.prefix == "live"
 
-        broadcast_consumer = await consumer.request_broadcast(announcement.path)
+        broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
         catalog = await broadcast_consumer.catalog()
 
         assert len(catalog.audio) == 1
@@ -211,7 +211,7 @@ async def test_video_publish_consume():
     consumer = origin.consume()
 
     async for announcement in consumer.announced():
-        broadcast_consumer = await consumer.request_broadcast(announcement.path)
+        broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
         catalog = await broadcast_consumer.catalog()
 
         assert len(catalog.video) == 1
@@ -245,7 +245,7 @@ async def test_multiple_frames_ordering():
     consumer = origin.consume()
 
     async for announcement in consumer.announced():
-        broadcast_consumer = await consumer.request_broadcast(announcement.path)
+        broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
         catalog = await broadcast_consumer.catalog()
         track_name = list(catalog.audio.keys())[0]
         audio = catalog.audio[track_name]
@@ -272,7 +272,7 @@ async def test_catalog_update_on_new_track():
     consumer = origin.consume()
 
     async for announcement in consumer.announced():
-        broadcast_consumer = await consumer.request_broadcast(announcement.path)
+        broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
         cat_consumer = await broadcast_consumer.subscribe_catalog()
 
         # First catalog: 1 audio track.
@@ -304,8 +304,8 @@ async def test_announced_broadcast():
     consumer = origin.consume()
 
     async for announcement in consumer.announced():
-        assert announcement.path == "test/broadcast"
-        broadcast_consumer = await consumer.request_broadcast(announcement.path)
+        assert announcement.prefix == "test/broadcast"
+        broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
         _catalog = await broadcast_consumer.subscribe_catalog()
         break
 
@@ -633,7 +633,7 @@ async def test_subscribe_media_default_latency_and_context_manager():
     consumer = origin.consume()
 
     async for announcement in consumer.announced():
-        broadcast_consumer = await consumer.request_broadcast(announcement.path)
+        broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
         catalog = await broadcast_consumer.catalog()
         track_name, audio = next(iter(catalog.audio.items()))
 
@@ -657,9 +657,9 @@ async def test_raw_publish_consume():
     consumer = origin.consume()
 
     async for announcement in consumer.announced():
-        assert announcement.path == "robot/arm"
+        assert announcement.prefix == "robot/arm"
 
-        broadcast_consumer = await consumer.request_broadcast(announcement.path)
+        broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
         raw_consumer = await broadcast_consumer.subscribe_track("events")
 
         payload = b'{"cmd": "button_changed", "arm": "left", "button": "THUMB", "state": "PRESSED"}'
@@ -682,7 +682,7 @@ async def test_raw_multiple_frames():
     consumer = origin.consume()
 
     async for announcement in consumer.announced():
-        broadcast_consumer = await consumer.request_broadcast(announcement.path)
+        broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
         raw_consumer = await broadcast_consumer.subscribe_track("commands", moq.Subscription(max_age_us=1_000_000))
 
         messages = [
@@ -764,7 +764,7 @@ async def test_raw_group_sequence():
     consumer = origin.consume()
 
     async for announcement in consumer.announced():
-        broadcast_consumer = await consumer.request_broadcast(announcement.path)
+        broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
         raw_consumer = await broadcast_consumer.subscribe_track("seq", moq.Subscription(max_age_us=1_000_000))
 
         sent_sequences = []
@@ -831,7 +831,7 @@ async def test_raw_multi_frame_group():
     consumer = origin.consume()
 
     async for announcement in consumer.announced():
-        broadcast_consumer = await consumer.request_broadcast(announcement.path)
+        broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
         raw_consumer = await broadcast_consumer.subscribe_track("chunks")
 
         group_producer = raw.append_group()
@@ -1046,12 +1046,12 @@ async def test_announce_then_unannounce_is_visible():
     consumer = origin.consume()
     announced = consumer.announced()
     first = await asyncio.wait_for(anext(announced), timeout=5.0)
-    assert first.path == "live"
+    assert first.prefix == "live"
     assert first.active
 
     broadcast.unannounce()
     retracted = await asyncio.wait_for(anext(announced), timeout=5.0)
-    assert retracted.path == "live"
+    assert retracted.prefix == "live"
     assert not retracted.active
 
     await asyncio.wait_for(consumer.request_broadcast("live"), timeout=5.0)

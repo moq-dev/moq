@@ -26,8 +26,8 @@ import dev.moq.*
 // Subscribe. The Flow is live, so run it in its own coroutine.
 Moq.connect("https://relay.example.com", tlsRoots = listOf("ca.pem")).use { moq ->
     moq.announcements("live/").collect { announcement ->
-        // An announcement is a route; its path is relative to the prefix.
-        val broadcast = moq.requestBroadcast("live/" + announcement.path())
+        // The requested prefix scopes discovery; each update's prefix is relative to it.
+        val broadcast = moq.requestBroadcast("live/" + announcement.prefix())
         println(broadcast.catalog())
     }
 }
@@ -56,8 +56,9 @@ The three advertising operations: `moq.createBroadcast(path)` (or
 advertisement; `origin.dynamic(prefix, route)` claims `prefix` and every
 path beneath it (`""` for everything). Hold the returned `OriginDynamic`
 while the claim should stay advertised, and reject the requests you will not
-serve. A route is a capability, not an inventory; `announcement.path()` is
-the covered prefix.
+serve. A route is a capability, not an inventory. `announcements(prefix)` is
+the requested discovery scope; `announcement.prefix()` is the concrete covered
+prefix relative to it.
 
 Sessions reconnect with backoff when the transport drops and re-announce local
 broadcasts. `moq.epoch()` counts the connections, 1 on the first, pairing with

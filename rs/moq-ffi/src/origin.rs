@@ -135,7 +135,7 @@ impl Announced {
 	async fn next(&mut self) -> Result<Option<Arc<MoqAnnounceUpdate>>, MoqError> {
 		match self.inner.next().await {
 			Some(update) => Ok(Some(Arc::new(MoqAnnounceUpdate {
-				path: update.path.to_string(),
+				prefix: update.path.to_string(),
 				route: update.route.into(),
 				active: update.kind.is_active(),
 			}))),
@@ -164,10 +164,11 @@ impl AnnouncedBroadcast {
 ///
 /// Carries no broadcast: resolve a specific path with
 /// `MoqOriginConsumer::request_broadcast` (after this update proves it is
-/// covered). The application decides which paths name broadcasts.
+/// covered). Its prefix is relative to the prefix requested from
+/// `MoqOriginConsumer::announced`. The application decides which paths name broadcasts.
 #[derive(uniffi::Object)]
 pub struct MoqAnnounceUpdate {
-	path: String,
+	prefix: String,
 	route: MoqRoute,
 	active: bool,
 }
@@ -298,7 +299,7 @@ impl MoqOriginProducer {
 
 #[uniffi::export]
 impl MoqOriginConsumer {
-	/// Subscribe to all route announcements under a prefix.
+	/// Subscribe to routes under a requested prefix; updates return covered prefixes relative to it.
 	pub fn announced(&self, prefix: String) -> Result<Arc<MoqAnnounceConsumer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let origin = self.inner.with_root(prefix).ok_or(MoqError::Unauthorized)?;
@@ -447,9 +448,9 @@ impl MoqAnnounceConsumer {
 
 #[uniffi::export]
 impl MoqAnnounceUpdate {
-	/// The covered prefix, relative to the `announced` call's prefix.
-	pub fn path(&self) -> String {
-		self.path.clone()
+	/// The covered prefix, relative to the requested announcements prefix.
+	pub fn prefix(&self) -> String {
+		self.prefix.clone()
 	}
 
 	/// The route serving the prefix: its hops and costs.

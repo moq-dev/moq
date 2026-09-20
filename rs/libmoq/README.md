@@ -47,6 +47,7 @@ int32_t moq_origin_announced(uint32_t origin, moq_status_callback on_announce, v
 int32_t moq_origin_announced_info(uint32_t announced, moq_announce_update *dst);
 int32_t moq_origin_announced_free(uint32_t announced);
 int32_t moq_origin_announced_cancel(uint32_t announced);
+// The request is rooted at the origin; each moq_announce_update.prefix is relative to that root.
 
 // Publishing
 int32_t moq_publish_announce(uint32_t broadcast, const moq_route *route);
@@ -59,7 +60,7 @@ int32_t moq_publish_container_write(uint32_t container, const uint8_t *payload, 
 int32_t moq_publish_container_finish(uint32_t container);
 int32_t moq_publish_media_finish(uint32_t media);
 int32_t moq_publish_media_frame(uint32_t media, const uint8_t *payload, uintptr_t payload_size, uint64_t timestamp_us);
-int32_t moq_publish_track(uint32_t broadcast, const char *name, uintptr_t name_len);
+int32_t moq_publish_track(uint32_t broadcast, const char *name, uintptr_t name_len, const moq_track_info *info);
 int32_t moq_publish_track_group(uint32_t track);
 int32_t moq_publish_track_frame(uint32_t track, const uint8_t *payload, uintptr_t payload_size, uint64_t timestamp_us);
 int32_t moq_publish_group_frame(uint32_t group, const uint8_t *payload, uintptr_t payload_size, uint64_t timestamp_us);
@@ -113,7 +114,7 @@ int32_t moq_consume_audio_cancel(uint32_t track);
 // Consuming: Frames
 int32_t moq_consume_frame(uint32_t frame, moq_frame *dst);
 int32_t moq_consume_frame_free(uint32_t frame);
-int32_t moq_consume_track(uint32_t broadcast, const char *name, uintptr_t name_len, moq_status_callback on_frame, void *user_data);
+int32_t moq_consume_track(uint32_t broadcast, const char *name, uintptr_t name_len, const moq_subscription *subscription, moq_status_callback on_frame, void *user_data);
 int32_t moq_consume_track_frame(uint32_t frame, moq_frame *dst);
 int32_t moq_consume_track_frame_free(uint32_t frame);
 int32_t moq_consume_track_cancel(uint32_t track);

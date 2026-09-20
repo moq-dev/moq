@@ -1810,14 +1810,14 @@ fn announced_free_lifecycle() {
 
 	// Its info reports our path, active.
 	let mut info = moq_announce_update {
-		path: std::ptr::null(),
-		path_len: 0,
+		prefix: std::ptr::null(),
+		prefix_len: 0,
 		active: false,
 	};
 	assert_eq!(unsafe { moq_origin_announced_info(announced, &mut info) }, 0);
 	assert!(info.active, "broadcast should be active");
-	let got = unsafe { std::slice::from_raw_parts(info.path.cast::<u8>(), info.path_len) };
-	assert_eq!(got, path, "announced path should match");
+	let got = unsafe { std::slice::from_raw_parts(info.prefix.cast::<u8>(), info.prefix_len) };
+	assert_eq!(got, path, "announced prefix should match");
 
 	// Freeing the record succeeds once; the handle is then unknown.
 	assert_eq!(moq_origin_announced_free(announced), 0);
@@ -1963,16 +1963,16 @@ fn local_announce() {
 	let announced_id = id(cb.recv());
 
 	let mut info = moq_announce_update {
-		path: std::ptr::null(),
-		path_len: 0,
+		prefix: std::ptr::null(),
+		prefix_len: 0,
 		active: false,
 	};
 	assert_eq!(unsafe { moq_origin_announced_info(announced_id, &mut info) }, 0);
 	assert!(info.active, "broadcast should be active");
 
-	let announced_path =
-		unsafe { std::str::from_utf8(std::slice::from_raw_parts(info.path.cast::<u8>(), info.path_len)).unwrap() };
-	assert_eq!(announced_path, "test/broadcast");
+	let announced_prefix =
+		unsafe { std::str::from_utf8(std::slice::from_raw_parts(info.prefix.cast::<u8>(), info.prefix_len)).unwrap() };
+	assert_eq!(announced_prefix, "test/broadcast");
 
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "announced close delivers terminal 0");
@@ -1991,8 +1991,8 @@ fn announced_deactivation() {
 
 	let announced_id = id(cb.recv());
 	let mut info = moq_announce_update {
-		path: std::ptr::null(),
-		path_len: 0,
+		prefix: std::ptr::null(),
+		prefix_len: 0,
 		active: false,
 	};
 	assert_eq!(unsafe { moq_origin_announced_info(announced_id, &mut info) }, 0);
@@ -2026,8 +2026,8 @@ fn create_broadcast_does_not_announce() {
 	assert_eq!(unsafe { moq_publish_announce(broadcast, std::ptr::null()) }, 0);
 	let announced_id = id(cb.recv());
 	let mut info = moq_announce_update {
-		path: std::ptr::null(),
-		path_len: 0,
+		prefix: std::ptr::null(),
+		prefix_len: 0,
 		active: false,
 	};
 	assert_eq!(unsafe { moq_origin_announced_info(announced_id, &mut info) }, 0);

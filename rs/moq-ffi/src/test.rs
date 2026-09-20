@@ -314,7 +314,7 @@ async fn announced_route_keeps_cold_cost_on_reannounce() {
 			.expect("timed out waiting for an announce update")
 			.unwrap()
 			.expect("origin ended while waiting for an announce update");
-		if announcement.path() == "cold-route" && announcement.active() {
+		if announcement.prefix() == "cold-route" && announcement.active() {
 			break announcement.route();
 		}
 	};
@@ -1404,7 +1404,12 @@ async fn announced_broadcasts_resolve_siblings_under_the_prefix() {
 			.expect("timed out waiting for the announcement")
 			.unwrap()
 			.expect("the origin should keep announcing");
-		if announcement.path() == "pub" {
+		let prefix = announcement.prefix();
+		assert!(
+			matches!(prefix.as_str(), "pub" | "source"),
+			"covered prefix should be relative to the requested a/ prefix: {prefix}"
+		);
+		if prefix == "pub" {
 			break await_announced(&consumer, "a/pub").await;
 		}
 	};
@@ -1501,7 +1506,7 @@ async fn announce_and_unannounce_toggles_discovery() {
 				.expect("timed out waiting for an announce update")
 				.unwrap()
 				.expect("origin ended while waiting for an announce update");
-			if announcement.path() == "live" && announcement.active() == announce {
+			if announcement.prefix() == "live" && announcement.active() == announce {
 				return;
 			}
 		}
@@ -1563,9 +1568,9 @@ async fn local_publish_consume_audio() {
 		.unwrap()
 		.expect("expected an announcement");
 
-	assert_eq!(announcement.path(), "live");
+	assert_eq!(announcement.prefix(), "live");
 
-	let broadcast_consumer = await_announced(&consumer, &announcement.path()).await;
+	let broadcast_consumer = await_announced(&consumer, &announcement.prefix()).await;
 	let catalog_consumer = broadcast_consumer.subscribe_catalog().await.unwrap();
 
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
@@ -1622,7 +1627,7 @@ async fn video_publish_consume() {
 		.unwrap()
 		.expect("expected announcement");
 
-	let broadcast_consumer = await_announced(&consumer, &announcement.path()).await;
+	let broadcast_consumer = await_announced(&consumer, &announcement.prefix()).await;
 	let catalog_consumer = broadcast_consumer.subscribe_catalog().await.unwrap();
 
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
@@ -1733,7 +1738,7 @@ async fn video_raw_publish_consume() {
 		.unwrap()
 		.expect("expected announcement");
 
-	let broadcast_consumer = await_announced(&consumer, &announcement.path()).await;
+	let broadcast_consumer = await_announced(&consumer, &announcement.prefix()).await;
 	let catalog_consumer = broadcast_consumer.subscribe_catalog().await.unwrap();
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -1848,7 +1853,7 @@ async fn video_raw_publish_from_many_threads() {
 		.expect("timed out")
 		.unwrap()
 		.expect("expected announcement");
-	let catalog_consumer = await_announced(&consumer, &announcement.path())
+	let catalog_consumer = await_announced(&consumer, &announcement.prefix())
 		.await
 		.subscribe_catalog()
 		.await
@@ -1946,7 +1951,7 @@ async fn multiple_frames_ordering() {
 		.unwrap()
 		.unwrap();
 
-	let broadcast_consumer = await_announced(&consumer, &announcement.path()).await;
+	let broadcast_consumer = await_announced(&consumer, &announcement.prefix()).await;
 	let catalog_consumer = broadcast_consumer.subscribe_catalog().await.unwrap();
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -2003,7 +2008,7 @@ async fn catalog_update_on_new_track() {
 		.unwrap()
 		.unwrap();
 
-	let broadcast_consumer = await_announced(&consumer, &announcement.path()).await;
+	let broadcast_consumer = await_announced(&consumer, &announcement.prefix()).await;
 	let catalog_consumer = broadcast_consumer.subscribe_catalog().await.unwrap();
 
 	let catalog1 = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
@@ -2056,8 +2061,8 @@ async fn announced_broadcast() {
 		.unwrap()
 		.expect("expected announcement");
 
-	assert_eq!(announcement.path(), "test/broadcast");
-	let _catalog = await_announced(&consumer, &announcement.path())
+	assert_eq!(announcement.prefix(), "test/broadcast");
+	let _catalog = await_announced(&consumer, &announcement.prefix())
 		.await
 		.subscribe_catalog()
 		.await
@@ -2889,7 +2894,7 @@ fn without_runtime() {
 
 		let announced = consumer.announced("".into()).unwrap();
 		let announcement = pollster::block_on(announced.next()).unwrap().unwrap();
-		assert_eq!(announcement.path(), "test");
+		assert_eq!(announcement.prefix(), "test");
 		let _bc = pollster::block_on(consumer.request_broadcast("test".into())).unwrap();
 
 		let client = MoqClient::new();
@@ -2965,7 +2970,7 @@ async fn server_client_roundtrip() {
 		.expect("timed out waiting for announcement over the wire")
 		.unwrap()
 		.expect("expected an announcement");
-	assert_eq!(announcement.path(), "hello");
+	assert_eq!(announcement.prefix(), "hello");
 
 	// Subscribe to the audio track and verify a frame round-trips.
 	let bc = await_announced(&consumer, "hello").await;
@@ -3061,7 +3066,7 @@ async fn server_client_roundtrip_auto_origin() {
 		.expect("timed out waiting for announcement over the wire")
 		.unwrap()
 		.expect("expected an announcement");
-	assert_eq!(announcement.path(), "hello");
+	assert_eq!(announcement.prefix(), "hello");
 
 	// With neither side wired, both share one origin, so a broadcast announced on this
 	// session's publisher is discoverable through its own consumer.
@@ -3243,7 +3248,7 @@ async fn request_per_session_publish_override() {
 		.expect("timed out waiting for override announcement")
 		.unwrap()
 		.expect("expected an announcement");
-	assert_eq!(announcement.path(), "override-only");
+	assert_eq!(announcement.prefix(), "override-only");
 
 	broadcast.finish().unwrap();
 	cs.cancel(0);
@@ -3371,7 +3376,7 @@ async fn client_reconnects_and_resumes_announcements() {
 		.expect("timed out waiting for the post-reconnect announcement")
 		.unwrap()
 		.expect("expected an announcement");
-	assert_eq!(announcement.path(), "after-reconnect");
+	assert_eq!(announcement.prefix(), "after-reconnect");
 
 	broadcast.finish().unwrap();
 	cs.cancel(0);

@@ -35,7 +35,8 @@ let session = try await client.connect(to: "https://relay.example.com")
 // origin between both sides.
 let announced = try session.consume.announced(prefix: "demos/")
 for try await announcement in announced {
-    print("got broadcast \(announcement.path)")
+    // The returned covered prefix is relative to the requested "demos/" prefix.
+    print("got broadcast \(announcement.prefix)")
 
     let catalog = try announcement.broadcast.subscribeCatalog()
     for try await update in catalog {

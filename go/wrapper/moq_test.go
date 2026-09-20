@@ -320,8 +320,8 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	if ann == nil {
 		t.Fatal("expected an announcement")
 	}
-	if ann.Path() != "live" {
-		t.Fatalf("path = %q, want %q", ann.Path(), "live")
+	if ann.Prefix() != "live" {
+		t.Fatalf("prefix = %q, want %q", ann.Prefix(), "live")
 	}
 	if !ann.Active() {
 		t.Fatal("expected an active announcement")
@@ -330,7 +330,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 		t.Fatalf("route hops = %v, want empty for local origin", route.Hops)
 	}
 
-	bc, err := consumer.RequestBroadcast(ctx, ann.Path())
+	bc, err := consumer.RequestBroadcast(ctx, ann.Prefix())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1087,7 +1087,7 @@ func TestAnnounceThenUnannounceIsVisible(t *testing.T) {
 	defer announced.Cancel()
 
 	ann, err := announced.Next(ctx)
-	if err != nil || ann == nil || ann.Path() != "live" || !ann.Active() {
+	if err != nil || ann == nil || ann.Prefix() != "live" || !ann.Active() {
 		t.Fatalf("announce: ann=%+v err=%v", ann, err)
 	}
 
@@ -1095,7 +1095,7 @@ func TestAnnounceThenUnannounceIsVisible(t *testing.T) {
 		t.Fatal(err)
 	}
 	ann, err = announced.Next(ctx)
-	if err != nil || ann == nil || ann.Path() != "live" || ann.Active() {
+	if err != nil || ann == nil || ann.Prefix() != "live" || ann.Active() {
 		t.Fatalf("unannounce: ann=%+v err=%v", ann, err)
 	}
 	if _, err := consumer.RequestBroadcast(ctx, "live"); err != nil {
@@ -1140,4 +1140,3 @@ func TestDynamicServesARequestUnderAPrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 }
-

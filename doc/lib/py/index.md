@@ -22,9 +22,9 @@ import asyncio, moq
 
 async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
-        # Subscribe to media. An announcement is a route; resolve the broadcast at its path.
+        # The requested prefix scopes discovery; each update's prefix is relative to it.
         async for announcement in client.announced("live/"):
-            broadcast = await client.request_broadcast(announcement.path)
+            broadcast = await client.request_broadcast("live/" + announcement.prefix)
             catalog = await broadcast.catalog()
             name, track = next(iter(catalog.audio.items()))
             async for frame in await broadcast.subscribe_media(name, track):
@@ -71,7 +71,8 @@ an unadvertised producer; `broadcast.announce(route)` /
 `origin.dynamic(prefix, route)` claims `prefix` and every path beneath it
 (`""` for everything). Hold the returned handle while the claim should stay
 advertised, and reject the requests you will not serve. A route is a
-capability, not an inventory; announcement `.path` is the covered prefix.
+capability, not an inventory. `announced(prefix)` is the requested discovery
+scope; each announcement `.prefix` is the concrete covered prefix relative to it.
 
 Sessions reconnect with backoff when the transport drops and re-announce local
 broadcasts. `session.epoch()` counts the connections, 1 on the first, pairing

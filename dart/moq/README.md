@@ -7,7 +7,8 @@ import 'package:moq/moq.dart';
 
 final connection = await Moq.connect('https://relay.example.com');
 await for (final announcement in connection.announcements()) {
-  print(announcement.path());
+  // The covered prefix is relative to the requested announcements prefix.
+  print(announcement.prefix());
 }
 ```
 

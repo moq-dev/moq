@@ -48,7 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `moq_publish_media` splits into `moq_publish_audio`, `moq_publish_video`, and
   `moq_publish_container`, taking `moq_audio_init`, `moq_video_init`, and `moq_container_init`.
   Each carries only the fields its kind can honor, so a label on a container no longer compiles.
-- `moq_announced` is `moq_announce_update` with `pattern` / `pattern_len` instead of `path` / `path_len`. `moq_broadcast_request_abort` is `moq_broadcast_request_reject`; `_free` is unchanged.
+- `moq_announced` is `moq_announce_update` with `prefix` / `prefix_len` instead
+  of `path` / `path_len`. The prefix is relative to the requested announcements
+  scope. `moq_broadcast_request_abort` is `moq_broadcast_request_reject`; `_free`
+  is unchanged.
 - Formats are enums (`moq_audio_format`, `moq_video_format`, `moq_container_format`) rather than
   strings. As with `moq_audio_sample_format`, the struct field is a `u32` and an out-of-range code
   is rejected, since matching an invalid discriminant as a Rust enum would be undefined behavior.

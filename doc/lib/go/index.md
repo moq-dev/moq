@@ -36,8 +36,8 @@ for ann, err := range announced.All(ctx) {
         if moq.IsShutdown(err) { break }
         log.Fatal(err)
     }
-    // An announcement is a route; resolve the broadcast at its path.
-    broadcast, err := client.RequestBroadcast(ctx, "live/" + ann.Path())
+    // The requested prefix scopes discovery; each update's prefix is relative to it.
+    broadcast, err := client.RequestBroadcast(ctx, "live/" + ann.Prefix())
     if err != nil {
         log.Fatal(err)
     }
@@ -73,8 +73,9 @@ The three advertising operations: `client.CreateBroadcast(path)` (or
 advertisement; `origin.Dynamic(prefix, route)` claims `prefix` and every
 path beneath it (`""` for everything). Hold the returned `OriginDynamic`
 while the claim should stay advertised, and reject the requests you will not
-serve. A route is a capability, not an inventory; `ann.Path()` is the covered
-prefix.
+serve. A route is a capability, not an inventory. `Announced(prefix)` is the
+requested discovery scope; `ann.Prefix()` is the concrete covered prefix
+relative to it.
 
 Every call that can block takes a `context.Context` first. Cancelling it
 returns `ctx.Err()` promptly and tears the in-flight native work down, so a

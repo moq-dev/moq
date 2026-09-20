@@ -16,7 +16,7 @@ Additive, on main.
 each lock the task state and write one field: `set_tls_verify` at
 line 389 writes the inverse to `config.tls.insecure`, `set_reconnect` at
 469 writes `config.once`, `set_backoff` at 476 unpacks a `MoqBackoff` record
-of `_ms` fields into `config.backoff`. The fallback knobs live at
+of `_us` fields into `config.backoff`. The fallback knobs live at
 `config.websocket`: `websocket::Config` (`rs/moq-tokio/src/websocket.rs:114`)
 with `enabled: Option<bool>` (131, `None` means on) and `delay: CliDuration`
 (141, default 200 ms). libmoq already maps both: `moq_client_config`

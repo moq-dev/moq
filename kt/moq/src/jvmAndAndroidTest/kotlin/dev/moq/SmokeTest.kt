@@ -233,11 +233,11 @@ class SmokeTest {
                 broadcast.announce(Route())
                 val announced = origin.consume().announced("")
                 val first = announced.next()!!
-                assertEquals("live", first.path())
+                assertEquals("live", first.prefix())
                 assertTrue(first.active())
                 broadcast.unannounce()
                 val retracted = announced.next()!!
-                assertEquals("live", retracted.path())
+                assertEquals("live", retracted.prefix())
                 assertTrue(!retracted.active())
             }
         }
