@@ -29,4 +29,4 @@ do not add exported test hooks.
 
 ## Related
 
-- [Rust E2EE core](/quest/m2/e2ee/rust.md) - API and profile alignment must preserve these receive invariants
+- [Rust E2EE core](/quest/m0/e2ee-api.md) - API and profile alignment must preserve these receive invariants

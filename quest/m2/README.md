@@ -62,7 +62,6 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 - [Binding audio tests](/quest/m2/binding-audio-tests.md) - every binding proves the Opus frame duration and throwing setters it exposes, and smoke-full publishes audio with an explicit config
 - [Decode format](/quest/m2/ffi-decode-format.md) - the C-only decode pixel format knob reaches every uniffi binding
 - [JSON mutate](/quest/m2/json-mutate.md) - Rust gains the closure edit JS already has, beside the guard
-- [0.0.x crate names](/quest/m2/api-unreleased-crate-names.md) - moq-sock, moq-uring, moq-archive, and moq-e2ee follow the naming rules after the merge
 - [Publisher clocks](/quest/m2/publisher-clock.md) - wire the shared clock through native and browser publisher restarts
 - [Broadcast route](/quest/m2/js-broadcast-route.md) - JS Announce.Broadcast goes live on any claim matching its path, like Rust routed()
 - [io_uring check](/quest/m2/check-uring-feature.md) - a moq-relay diff compiles the io-uring feature in `just check`, not only nightly
@@ -118,7 +117,6 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 - [Perf](/quest/m2/perf/README.md) - eliminate measured hot-path costs across moq-uring, kio, and the moq-net model
 - [#2924](/quest/m2/2924-moq-relay-tls-rotation-is-not-atomic-across-thread-per.md) - every QUIC worker shares one reloadable served identity, so rotation is atomic and generate works with workers
 - [#2964](/quest/m2/2964-quic-workers-dropping-one-split-server-resizes-the.md) - integrate the M1 worker owner with hardened socket-group formation
-- [Reuseport group](/quest/m2/reuseport-group.md) - `moq_sock::shard::Group` exposes no socket before the filter is attached and retains all of them
 - [Safari WebTransport](/quest/m2/safari-webtransport.md) - WebKit browsers return to WebTransport once WebKit 319818 ships fixed
 - [Audio quality harness](/quest/m2/audio-quality-harness/README.md) - a playout latency regression fails a run instead of arriving as a bug report
 - [Latency ledger](/quest/m2/latency-ledger.md) - a session reports where its end-to-end audio delay went, stage by stage

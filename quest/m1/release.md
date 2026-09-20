@@ -69,8 +69,10 @@ expiry (#3647); publish robustness (Firefox hardware encoding, file demux,
 relay embedding and the LAN mesh (#3638, #3648, #3621, #3587); one auth
 contract with leases (#3688, #3739); data tracks and captions (#3109, #3640); one `Connection` with URL
 replacement (#3614, #3636); first-hop resume and the shared send estimate
-(#3312, #3616). moq-e2ee ships as it is on dev; the
-[E2EE](/quest/m2/e2ee/README.md) questline owns its twin and interop.
+(#3312, #3616). The [0.0.x API gate](/quest/m0/README.md) settles archive,
+E2EE, sock, and uring before release. Its E2EE reshape changes the implemented
+profile and derived names/keys; report that interoperability change explicitly.
+The [E2EE](/quest/m2/e2ee/README.md) questline owns its twin and interop.
 
 The soak bullet below is cleared by hand: the merged relay serves moq.pro
 staging with `/metrics` watched and a fresh viewer joining a days-old
@@ -81,6 +83,7 @@ Public API: none beyond the required quests. Wire: none.
 
 ## Required
 
+- [0.0.x API gate](/quest/m0/README.md) - the four audited crates expose the intended release contracts
 - [Merge dev](/quest/m1/merge-dev.md) - the tree the release is cut from
 - [Binding audio tests](/quest/m2/binding-audio-tests.md) - every binding proves the audio config it exposes
 - [Decode format](/quest/m2/ffi-decode-format.md) - the C-only decode knob reaches every uniffi binding
