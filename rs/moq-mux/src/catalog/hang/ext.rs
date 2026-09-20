@@ -40,12 +40,30 @@ impl CatalogExt for () {}
 /// The default extension stays `()` (unknown sections dropped); opt into `Extra` explicitly.
 ///
 /// `video`, `audio`, `text`, `archive`, `clock`, `json`, `binary`, and the retired `timeline`
-/// key are reserved, so [`set`](Self::set) rejects them to keep the wire JSON free of duplicate keys.
-#[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
+/// key are reserved, so decoding and [`set`](Self::set) reject them to keep the wire JSON free of
+/// duplicate or retired keys.
+#[derive(Serialize, Clone, Default, Debug, PartialEq)]
 #[serde(transparent)]
 pub struct Extra(serde_json::Map<String, serde_json::Value>);
 
 impl CatalogExt for Extra {}
+
+impl<'de> Deserialize<'de> for Extra {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let sections = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+		if let Some(name) = sections.keys().find(|name| reserved(name)) {
+			return Err(serde::de::Error::custom(format!("reserved catalog section: {name}")));
+		}
+		Ok(Self(sections))
+	}
+}
+
+fn reserved(name: &str) -> bool {
+	matches!(
+		name,
+		"video" | "audio" | "text" | "archive" | "clock" | "json" | "binary" | "timeline"
+	) || moq_msf::reserved_root(name)
+}
 
 impl Extra {
 	/// Look up a section by name.
@@ -78,11 +96,7 @@ impl Extra {
 	/// which serde emits without complaint.
 	pub fn set(&mut self, name: impl Into<String>, value: serde_json::Value) -> crate::Result<()> {
 		let name = name.into();
-		if matches!(
-			name.as_str(),
-			"video" | "audio" | "text" | "archive" | "clock" | "json" | "binary" | "timeline"
-		) || moq_msf::reserved_root(&name)
-		{
+		if reserved(&name) {
 			return Err(crate::Error::ReservedSection(name));
 		}
 		self.0.insert(name, value);
@@ -128,6 +142,14 @@ mod test {
 		let catalog: Catalog<Extra> = serde_json::from_str(json).expect("legacy text section broke the catalog");
 		assert!(catalog.text.is_empty());
 		assert!(catalog.ext.get("scte35").is_some(), "unrelated sections still decode");
+	}
+
+	#[test]
+	fn retired_timeline_section_is_rejected() {
+		let json = r#"{"timeline":{"track":"timeline.json"}}"#;
+
+		let error = serde_json::from_str::<Catalog<Extra>>(json).expect_err("retired timeline section was accepted");
+		assert!(error.to_string().contains("reserved catalog section: timeline"));
 	}
 
 	#[test]

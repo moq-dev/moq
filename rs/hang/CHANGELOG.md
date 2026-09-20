@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - [**breaking**] Replace the catalog root `timeline` entry with `archive`. The
-  flattened timeline fields (`track`, `timescale`, `durationMax`, `wall`) stay;
+  flattened timeline fields (`track`, `timescale`, `durationMax`) stay;
   optional `replay`, `store`, and `version` advertise a durable recording.
 - [**breaking**] Replace the archive timeline `wall` field with a root `clock`
   section (`{wall, timescale}`). Wall time is one fixed broadcast mapping: PTS zero in the
