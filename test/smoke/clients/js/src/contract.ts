@@ -46,6 +46,9 @@ export type FixtureState = {
 /** Rate the tone is generated and captured at. Stated rather than probed, so the catalog is fixed. */
 export const SAMPLE_RATE = 48000;
 
+/** Maximum distance between video keyframes in the deterministic fixture. */
+export const KEYFRAME_INTERVAL_MS = 500;
+
 // ── the subscriber's measurements ───────────────────────────────────────────
 
 /** How often the page takes a sample. Fast enough to see a 200ms tone step, cheap enough to sustain. */

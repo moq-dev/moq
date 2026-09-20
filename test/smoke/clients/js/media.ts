@@ -39,7 +39,7 @@ import {
 	waitForState,
 	waitForWatch,
 } from "./harness";
-import { FAULTS, leakedPlayerStarted, SAMPLE_MS, SAMPLE_RATE } from "./src/contract";
+import { FAULTS, KEYFRAME_INTERVAL_MS, leakedPlayerStarted, SAMPLE_MS, SAMPLE_RATE } from "./src/contract";
 import * as Pattern from "./src/pattern";
 
 /** Cases beyond the mandatory capability probe, publisher readiness, and cold start. */
@@ -102,6 +102,9 @@ const MIN_RATE = 0.5;
  * step off some of the time. Two steps is not boundary noise.
  */
 const MAX_SKEW_STEPS = 1;
+
+/** The first decodable frame may start at the current GOP's keyframe, but never in older history. */
+const MAX_LATE_JOIN_LAG_FRAMES = Math.ceil((Pattern.FPS * KEYFRAME_INTERVAL_MS) / 1000);
 
 const percentile = (values: number[], p: number) => {
 	if (values.length === 0) return Number.NaN;
@@ -541,10 +544,15 @@ try {
 			description: "the latecomer to present the fixture",
 			predicate: (state) => state.frameId !== undefined && state.audioContext === "running",
 		});
+		// The fixture sample names the frame painted immediately before the page opens. The first
+		// decodable frame can be the keyframe at the start of the current GOP, so require it to be
+		// within that GOP rather than requiring an impossible zero-frame capture/encode delay.
+		const lag = live.frameId - (joined.frameId ?? 0);
 		check(
-			(joined.frameId ?? 0) >= live.frameId,
+			lag <= MAX_LATE_JOIN_LAG_FRAMES,
 			"late join starts live",
-			() => `joined at frame ${joined.frameId}, behind the ${live.frameId} already published when it opened`,
+			() =>
+				`joined at frame ${joined.frameId}, ${lag} frames behind the ${live.frameId} already published when it opened (one GOP is ${MAX_LATE_JOIN_LAG_FRAMES})`,
 		);
 		console.error(`  joined at frame ${joined.frameId}, live edge was ${live.frameId}`);
 		assertMedia(await collect(player, playerErrors, WINDOW_MS), "late join");

@@ -17,14 +17,14 @@ import { Time } from "@moq/net";
 import * as Publish from "@moq/publish";
 import { Effect, Signal } from "@moq/signals";
 import type { Fault, FixtureState } from "./contract";
-import { OFFSET_STEPS, SAMPLE_RATE } from "./contract";
+import { KEYFRAME_INTERVAL_MS, OFFSET_STEPS, SAMPLE_RATE } from "./contract";
 import * as Pattern from "./pattern";
 
 /** Cap the encoder rather than letting it track a bandwidth estimate, so runs are comparable. */
 const MAX_BITRATE = 1_000_000;
 
 /** Short GOP so a late subscriber tunes in quickly and a rejoin is not dominated by keyframe wait. */
-const KEYFRAME_INTERVAL = Time.Milli.fromSecond(0.5 as Time.Second);
+const KEYFRAME_INTERVAL = Time.Milli(KEYFRAME_INTERVAL_MS);
 
 /** How far ahead the tone table is scheduled on the audio clock. */
 const SCHEDULE_AHEAD = 2; // seconds
