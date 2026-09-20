@@ -133,7 +133,7 @@ export class File {
 			},
 		});
 
-		effect.set(this.#out.source, { video: { frames, frameRate: IMAGE_FRAME_RATE } }, {});
+		effect.set(this.#out.source, { video: { frames, frameRate: IMAGE_FRAME_RATE } }, undefined);
 	}
 
 	async #decodeMedia(file: globalThis.File, effect: Effect) {
@@ -181,7 +181,7 @@ export class File {
 		};
 
 		if (signal.aborted) return;
-		effect.set(this.#out.source, source, {});
+		effect.set(this.#out.source, source, undefined);
 	}
 
 	/** Stop decoding and release the file. */

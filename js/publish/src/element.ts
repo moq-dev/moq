@@ -11,6 +11,7 @@ import * as Audio from "./audio";
 import { Broadcast } from "./broadcast";
 import * as Preview from "./preview";
 import * as Source from "./source";
+import { clearSourceState } from "./source-state";
 import * as Video from "./video";
 
 const OBSERVED = ["url", "name", "muted", "invisible", "source", "preview", "announce"] as const;
@@ -108,7 +109,7 @@ export default class MoqPublish extends HTMLElement {
 	readonly sources = readonlys(this.#sources);
 
 	// The captured media tracks, written by #runSource. Fed to the video and audio captures, so
-	// consumers read them back via `capture.in.source` / `audio.capture.in.source` rather than here.
+	// consumers read them back via `video.capture` / `audio.capture` rather than here.
 	#videoSource = new Signal<Video.Source | undefined>(undefined);
 	#audioSource = new Signal<Audio.Source | undefined>(undefined);
 
@@ -310,6 +311,15 @@ export default class MoqPublish extends HTMLElement {
 
 	#runSource(effect: Effect) {
 		const source = effect.get(this.controls.source);
+
+		// Every selection owns the complete source state. Explicitly clear every inactive slot so a
+		// switch cannot leave a holder or captured track from the previous selection observable.
+		clearSourceState(effect, {
+			holders: this.#sources,
+			video: this.#videoSource,
+			audio: this.#audioSource,
+		});
+
 		if (!source) return;
 
 		if (source === "camera") {
