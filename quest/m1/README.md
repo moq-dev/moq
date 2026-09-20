@@ -15,7 +15,9 @@ stays here only if it breaks a published API or wire, or gates the merge;
 names what gates the release after it. Work that is identical
 on `main`, additive, or targets a `0.0.x` crate lives in
 [m2](/quest/m2/README.md) even when it builds on dev-only code; it starts on
-`main` after the merge. The 2026-09-12 grooming applied that rule to every
+`main` after the merge. The four 0.0.x media crates are the explicit exception:
+their pre-0.1 contracts live in [m0](/quest/m0/README.md) and can land on main
+without the dev merge. The 2026-09-12 grooming applied that rule to every
 quest here and merged main into dev. The auth API line is here for its
 request-side break (`mtls=<identity>` and the now-required fields) and ranks
 first because moq.pro adopts the release only once that contract is settled;

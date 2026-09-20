@@ -21,8 +21,10 @@ can act on. Each still carries its own plan and regression test.
 
 Work that builds on dev-only code but breaks nothing and gates nothing (the
 io_uring stream sessions, the perf line, the QUIC worker quests)
-also sits here and starts on `main` after the dev merge, as does anything
-targeting a `0.0.x` crate. The token SDK default switch explicitly targets a
+also sits here and starts on `main` after the dev merge. The four media crates'
+pre-0.1 contracts are the explicit exception in [m0](/quest/m0/README.md);
+their API-preserving implementation and performance follow-ups remain here.
+Other `0.0.x` work stays here. The token SDK default switch explicitly targets a
 subsequent breaking dev cycle after v1 readers exist; it is not additive M2
 work for main.
 
@@ -96,6 +98,10 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 - [C# through moq-ffi](/quest/m2/cs/README.md) - generated C# over moq-ffi as a NuGet package with native runtimes
 - [OBS native codecs](/quest/m2/obs-moq-video/README.md) - remove FFmpeg decoding dependencies, deliver GPU frames, and use native audio/video encoders
 - [Audio codecs](/quest/m2/audio-codecs/README.md) - platform audio codecs, explicit unsupported cases, and channel layouts up to 7.1
+- [Opus descriptions](/quest/m2/audio-opus-input.md) - validate headers and honor codec clock, pre-skip, and gain
+- [Capture formats](/quest/m2/audio-capture-format.md) - unsupported overrides refuse before device open and channel counts cannot wrap
+- [NVENC recovery](/quest/m2/nvenc-recovery.md) - partial initialization and rejected rate changes preserve valid state
+- [Transcode source](/quest/m2/transcode-source.md) - select a rendition the chosen backend can actually decode
 - [Keyframe trigger](/quest/m2/keyframe-trigger.md) - an application can ask the built-in capture encoder for a keyframe
 - [QoS](/quest/m2/qos/README.md) - broadcast health: relay starvation and timeliness histograms, and client stats broadcasts from publishers and viewers
 - [Drain](/quest/m2/drain/README.md) - relay restarts drain sessions over GOAWAY instead of hard-dropping them
@@ -116,6 +122,10 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 - [Audio quality harness](/quest/m2/audio-quality-harness/README.md) - a playout latency regression fails a run instead of arriving as a bug report
 - [Latency ledger](/quest/m2/latency-ledger.md) - a session reports where its end-to-end audio delay went, stage by stage
 - [Benchmark comparisons](/quest/m2/performance-comparisons.md) - retained evidence, repeated paired runs, and uncertainty for performance claims
+- [Audio buffers](/quest/m2/audio-buffers.md) - measure and reduce packetization movement and decoding allocations
+- [NVENC reuse](/quest/m2/nvenc-reuse.md) - reuse completed codec resources without weakening ownership
+- [Transcode resources](/quest/m2/transcode-resources.md) - measure aggregate threads, codec sessions, retained frames, and probe costs
+- [Renderer resources](/quest/m2/video-render-resources.md) - bound surface retention and validate output resources
 - [#3126](/quest/m2/3126-moq-bench-every-readme-example-fails-to-parse-and.md) - moq-bench reports per-interval latency percentiles so the ramp leaves the steady state
 - [Relay profiling](/quest/m2/performance-profiles.md) - reproducible CPU and allocation captures under the existing workloads
 - [Browser benchmarks](/quest/m2/browser-benchmarks.md) - measure JS transport, container, decode, and render costs in an identified browser
@@ -143,7 +153,7 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 - [#3056](/quest/m2/3056-watch-video-decoder-captures-the-rewind-generation-at.md) - watch: the video decoder resets on a declared discontinuity
 - [#933](/quest/m2/933-video-rotation-metadata-not-propagated-from-mobile-camera.md) - the catalog rotation follows the live camera's orientation
 - [#2075](/quest/m2/2075-mirror-catalog-reservation-gating-in-moq-hang-js-hang.md) - @moq/publish gates the first catalog snapshot until every reserved track is described
-- [#2848](/quest/m2/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - the Opus producer follows its bandwidth grant through `moq_mux::rate::Control`, moved out of moq-video
+- [#2848](/quest/m2/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - the Opus producer follows its bandwidth grant through the settled `moq_mux::rate::Control`
 - [Ladder](/quest/m2/ladder/README.md) - a transcode ladder adapts to the uplink it publishes over, instead of encoding every live rung at its ceiling
 - [LOC duration marker](/quest/m2/loc-duration-marker.md) - LOC producers write the marker once released consumers skip it
 - [#2278](/quest/m2/2278-watch-absolute-wall-clock-latency-target-for-synchronized.md) - hang: expose the fixed catalog-root broadcast clock without synchronizing library playback to wall time
@@ -199,7 +209,7 @@ before format-specific metadata. Unrelated areas can proceed in parallel.
 - [Ship capture and playback](/quest/m2/cli-packaging.md) - a released moq binary can capture and play, which no distribution currently enables
 - [Windows capture parity](/quest/m2/capture-windows.md) - system audio and screen cursor capture with a settled app-capture policy
 - [Linux capture parity](/quest/m2/capture-linux.md) - Wayland window/system-audio capture with explicit display-selection and app-capture limits
-- [Plan capture ergonomics](/quest/m2/capture-ergonomics.md) - scope independent crop, audio mixing, and format-validation quests
+- [Plan capture ergonomics](/quest/m2/capture-ergonomics.md) - scope independent crop and audio mixing quests
 - [X11 capture transport](/quest/m2/x11-capture-shm.md) - move X11 capture to shared memory and RandR events instead of a per-frame socket copy
 - [io_uring flow control](/quest/m2/uring-flow-control-windows.md) - the relay's io_uring workers honor the QUIC flow-control windows instead of refusing them
 - [Capture frame buffers](/quest/m2/capture-frame-buffers.md) - stop rebuilding a full-frame buffer every tick in the X11 and Windows backends

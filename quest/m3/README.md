@@ -21,12 +21,14 @@ worth settling now. Deferral does not by itself abandon a feature.
 - [Catalog track identity](/quest/m3/catalog-tracks.md) - compare immutable track definitions with explicit catalog-to-group binding
 - [Mobile ownership](/quest/m3/mobile-ownership.md) - decide whether Rust or platform code owns mobile capture, codecs, and rendering
 - [iOS capture](/quest/m3/mobile-capture-ios.md) - camera and screen capture if the mobile ownership decision selects Rust
-- [Android capture](/quest/m3/mobile-capture-android.md) - NDK/JNI capture and codec backends if the mobile ownership decision selects Rust
+- [Android capture](/quest/m3/mobile-capture-android.md) - NDK/JNI capture using the existing codecs if mobile ownership selects Rust
 - [Mobile completion](/quest/m3/mobile-completion.md) - verify the selected native/mobile path before closing #700
 - [Linux OBS GPU input](/quest/m3/obs-linux-gpu.md) - publish OBS compositor frames without CPU readback on a validated Linux graphics/encoder combination
 - [LiveKit client shim](/quest/m3/livekit-shim.md) - a media compatibility facade over the room SDK
 
-- [Decoder drain](/quest/m3/decode-drain.md) - flush and finish for pipelined decoders, so no picture is lost at a track end or crosses a group boundary
+- [Audio loss recovery](/quest/m3/audio-loss-recovery.md) - prove a useful Opus recovery policy before exposing another option
+- [Opus implementation](/quest/m3/audio-opus-backend.md) - compare current codec quality, CPU, and optional build costs
+- [Video codec coverage](/quest/m3/video-codec-coverage.md) - prioritize remaining native AV1 and portable decoder gaps
 - [#2819](/quest/m3/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - moq-video: carry PipeWire DMA-BUFs safely into the Vulkan renderer
 - [Unreal prototype](/quest/m3/unreal.md) - a UE5 module on the C++ package with exceptions disabled, rendering a subscribed broadcast to a texture
 - [Unity prototype](/quest/m3/unity.md) - the C# package under IL2CPP, playing subscribed audio

@@ -21,17 +21,12 @@ grant; `Options::bandwidth` documents that
 (`rs/moq-audio/src/encode/producer.rs:49-62`). Video already follows through
 `rate::Control` (`rs/moq-video/src/encode/producer.rs:467-476`).
 
-- Move `rs/moq-video/src/encode/rate.rs` (`Policy`, `Control`) to
-  `moq_mux::rate::Control`. moq-mux is a dependency of both crates
-  (`rs/moq-audio/Cargo.toml:82`, `rs/moq-video/Cargo.toml:110`); its `pace.rs`
-  is wall-clock delivery of export frames, a different concern. moq-video is
-  0.0.23, so deleting `moq_video::encode::rate` ships on main. Update
-  moq-video's import (`producer.rs:32`) and the `Options::bandwidth` doc
-  (`producer.rs:237`).
+- Consume `moq_mux::rate` after the m0 namespace move. Keep one shared policy;
+  this quest adds audio adaptation without removing a stabilized video API.
 - The follow loop lives in `moq_audio::encode::Producer`, not the capture
   driver: `Producer::new` (`producer.rs:255`) already takes `Options` with the
   allocator (`:62`), so it reserves the configured bitrate against
-  `self.track().demand()`, holds a `Reservation::consumer()` plus a
+  `self.demand()`, holds a `Reservation::consumer()` plus a
   `rate::Control`, and feeds each grant to `Encoder::set_bitrate`
   (`rs/moq-audio/src/encode/encoder.rs:411`). Capture and moq-ffi
   (`rs/moq-ffi/src/audio.rs:254`) build the Producer, so both adapt without
@@ -55,16 +50,20 @@ grant; `Options::bandwidth` documents that
   reservation before video sees a bit and audio is squeezed only once the link
   cannot carry audio alone. Worth doing for that tail, not worth blocking on.
 
-Tests: the `Control` unit tests move with the module; an Opus Producer whose
+Tests: retain the shared `Control` tests; an Opus Producer whose
 grant drops below its configured bitrate reports the lower `bitrate()` after
 one policy step, holds it on a `None` grant, and ramps back when the grant
 returns; a grant below the Opus floor clamps at the floor; a PCM Producer
 ignores every grant.
 
-This targets 0.0.x crates and needs the allocator on main, so it starts after
+This needs the allocator on main, so it starts after
 the dev merge.
 
 ## Required
+
+- [Shared rate policy](/quest/m0/media-rate-policy.md) - namespace relocation is already complete
+- [Audio configuration](/quest/m0/audio-config.md) - the settled codec settings
+- [Audio publication](/quest/m0/audio-publication.md) - demand access without transport write authority
 
 - [Merge dev](/quest/m1/merge-dev.md) - builds on dev-only code that reaches `main` with the merge
 

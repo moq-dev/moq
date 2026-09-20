@@ -9,6 +9,12 @@ instead of guessing or reparsing the bitstream.
 
 ## Plan
 
+Use the settled m0 frame contract and the existing extensible Color metadata;
+do not introduce a second native-frame hierarchy. Fix encoding paths that
+warn about a known color mismatch and then label unchanged pixels as the
+requested color: convert correctly or refuse. Preserve color information
+through CUDA, D3D, and Android paths and test the signaled VUI against pixels.
+
 `rs/hang/src/catalog/video/mod.rs` has carried a bare `// TODO color space` since
 the config was written. Two codecs already expose colour per their own syntax:
 `VP9` carries primaries, transfer characteristics, matrix coefficients, and
@@ -46,6 +52,10 @@ Test each source of truth in isolation, a source that signals nothing, a
 conflict between VUI and container resolving to the bitstream, a container box
 that fills a gap the bitstream left unspecified, and an SDR round trip that
 stays byte-identical.
+
+## Required
+
+- [Video frames](/quest/m0/video-frames.md) - the extensible frame contract
 
 ## Related
 

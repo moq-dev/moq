@@ -1,4 +1,4 @@
-# [M] Encode config: a Gop enum, cut(), and refresh-mode groups
+# [M] Implement refresh-mode groups on the settled GOP contract
 
 ## Goal
 
@@ -6,23 +6,19 @@
 caller picks keyframes at an interval or intra refresh with a cycle length and
 cannot ask for both. A forced cut starts a new group in either mode: an IDR
 with keyframes, a fresh sweep with refresh. In refresh mode the producer opens
-a group at every sweep start and publishes `warmup` equal to the cycle. Every
+a group at every sweep start and publishes `warmup` as the actual sweep
+duration, which can be shorter than the cycle. Every
 backend that cannot encode refresh mode refuses it when configured, and the
-CLI and transcoder expose the choice. moq-video and moq-transcode are `0.0.x`,
-so this lands on `main`.
+CLI and transcoder expose the choice. This extends the settled m0 contract
+without replacing an API after 0.1.
 
 ## Plan
 
-- `rs/moq-video/src/encode/encoder.rs`: replace `gop: u32` with `gop: Gop`,
-  `enum Gop { Keyframe(u32), Refresh(u32) }`, both in frames as today, default
-  `Keyframe(framerate * 2)`. Keeping the `gop` name and frame unit means every
-  backend's wiring changes by one match. If `Refresh` reads wrong beside
-  "keyframe", `Sweep` is the alternative; keep the field name.
-- Rename `Encoder::keyframe()` to `cut()` to match the ffi and producer
-  vocabulary; in `Keyframe` mode it forces an IDR as now, in `Refresh` mode it
-  asks the backend to restart the sweep. The producer's forced cut on every
-  (re)open (`rs/moq-video/src/encode/producer.rs`) goes through the same
-  path.
+- Extend the non-exhaustive `Gop` contract from m0 with refresh mode. Keep
+  the settled frame-count units and `cut()` operation; do not replace the
+  public config or rename the operation again. A cut in refresh mode asks
+  the backend to restart the sweep, including the producer's forced cut on
+  every reopen.
 - `Backend::encode(frame, keyframe)` in `rs/moq-video/src/encode/backend/mod.rs`
   becomes `encode(frame, cut)`, and each backend gets the mode at construction.
   VideoToolbox, openh264, VAAPI, Media Foundation, and MediaCodec return an
@@ -45,5 +41,7 @@ so this lands on `main`.
   count; a backend without refresh support refuses the config.
 
 ## Required
+
+- [Video GOP](/quest/m0/video-gop.md) - the extensible group contract and cut operation
 
 - [Catalog warmup](/quest/m2/intra-refresh/catalog-warmup.md) - the field the producer publishes

@@ -1,38 +1,42 @@
-# [M] moq-video: 10-bit HEVC and AV1 support in the NVIDIA codec path
+# [L] Complete NVIDIA Main10 and AV1 encoding support
 
 ## Goal
 
-Implement and verify the behavior tracked in [#2147](https://github.com/moq-dev/moq/issues/2147)
-within the issue's stated scope and boundaries.
+Implement and verify the remaining 10-bit HEVC and AV1 encoding work tracked
+in [#2147](https://github.com/moq-dev/moq/issues/2147). NVDEC AV1 decoding and
+catalog AV1 types already exist; do not reimplement them.
 
 ## Plan
 
-Rescoped during the 2026-08 grooming: AV1 8-bit decode landed on dev (#2178).
-Remaining: 10-bit Main10 decode and encode (P016 surfaces, profile plumbing),
-and AV1 encode/transcode once Ada+ hardware is available.
+Extend the settled frame and NVENC contracts with Main10 surfaces, profile
+selection, and accurate codec metadata. Audit byte pitch, plane layout, CPU
+download, and P016 input/output together; a codec enum alone does not establish
+10-bit support. Preserve color metadata and refuse unsupported conversions.
+Do not imply that OpenH264 can decode HEVC or tonemap HDR.
 
-### Issue context
+Add AV1 encoding only where the queried NVIDIA device/driver supports it.
+Preserve OBU framing and accurate catalog configuration through transcode.
+Use existing extensible codec enums; no replacement of the 0.1 core API is
+planned. Keep the NVIDIA backend optional and loaded at runtime.
 
-Follow-up to #2145 (NVDEC hardware decode + zero-copy NVDEC -> NVENC transcode). The GPU pipeline currently supports 8-bit 4:2:0 H.264/H.265 only. Two extensions worth doing, probably as separate PRs:
+Split Main10 and AV1 implementation into independent PRs if hardware or review
+scope warrants it. Validate decoded pixels, bit depth, profile, framing,
+resource lifetime, drain, and refusal on unsupported devices. Wire fixtures
+and contract tests into CI, and record actual hardware execution separately.
+Lack of suitable hardware leaves that implementation unverified, not complete.
 
-#### 10-bit HEVC (Main10)
+Public API: additive capabilities on the m0 extension points. Wire: existing
+codec signaling, with cross-language fixtures for any metadata change.
 
-- The NVDEC backend rejects `bit_depth_luma_minus8 != 0` today (clean error in the sequence callback). Supporting it means decoding to P016 output surfaces and threading a pixel-format dimension through `frame::cuda::Frame` (pitch is in bytes, but plane layout and the CPU download path assume 8-bit NV12).
-- NVENC needs the matching Main10 profile + `NV_ENC_BUFFER_FORMAT_YUV420_10BIT` input, and the catalog codec string must advertise the right profile/level.
-- The CPU fallback story needs deciding: openh264 is 8-bit only, so a 10-bit source either has no software fallback (like H.265 already) or gets tonemapped down to 8-bit.
+## Required
 
-#### AV1
-
-- Decode: NVDEC supports AV1 on Ampere+ (`cudaVideoCodec_AV1` is already in the vendored bindings). Needs a `Codec::Av1` in the decode backend seam, the catalog/container plumbing for AV1 tracks, and AV1 has no Annex-B: the parser takes OBUs directly, so the access-unit prep differs from H.264/H.265.
-- Encode: NVENC AV1 exists only on Ada+ (the RTX 3070 Ti dev box can decode AV1 but not encode it), so the first useful shape is AV1 *source* -> H.264/H.265 rungs in `moq-transcode`, not AV1 output.
-- The `hang` catalog and `moq-mux` need an AV1 codec entry (`av01.*` codec string, OBU framing) if they don't have one by then; that part rows through the js side per the cross-package sync table.
-
-Both are additive to the decode/encode `Codec` enums (`#[non_exhaustive]` already), so no breaking changes expected.
-
-AV1 encode belongs here too: it was waiting on a hardware backend, and the
-NVIDIA codec path is that backend. No software AV1 encode, since rav1e is too
-slow for real time.
+- [Video frames](/quest/m0/video-frames.md) - extensible pixels and frame metadata
+- [NVENC resources](/quest/m0/nvenc-resources.md) - safe input and completion ownership
 
 ## Closes
 
 - [#2147](https://github.com/moq-dev/moq/issues/2147) - close this issue when the quest finishes
+
+## Related
+
+- [Codec coverage study](/quest/m3/video-codec-coverage.md) - measure optional software and other native backends separately

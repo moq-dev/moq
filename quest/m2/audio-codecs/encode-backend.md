@@ -11,10 +11,9 @@ host with no AAC encoder refuses it at construction.
 
 Mirror the decode seam: `encode::backend` with a crate-private `Backend`
 trait (`encode`, `flush`, `set_bitrate`, `name`), an `open(codec, config)`
-that walks platform candidates before software ones, and `encode::Kind` on
-`encode::Config`. Opus and PCM move behind the trait unchanged and remain the
-only software backends: no Rust AAC encoder exists, which is why the platform
-quests follow.
+that walks platform candidates before software ones, using the public settings
+and selection contract settled in m0. Opus and PCM retain their behavior. This
+quest adds AAC through platform encoders; no software AAC dependency is selected.
 
 - `encode::Codec` gains `Aac`, meaning `mp4a.40.2`, and `as_str` / `FromStr`
   accept `"aac"`, which is what libmoq's codec string carries. moq-ffi's
@@ -38,6 +37,7 @@ quests follow.
 
 ## Required
 
+- [Audio configuration](/quest/m0/audio-config.md) - stable PCM/codec settings and selection entry points
 - [Merge dev](/quest/m1/merge-dev.md) - the required M1 APIs must be available on main before this implementation starts
 
 - [Decode seam](/quest/m2/audio-codecs/decode-backend.md) - the naming and shape this mirrors

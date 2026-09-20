@@ -8,9 +8,9 @@ through ReplayKit.
 ## Plan
 
 Not a new codec backend. VideoToolbox already encodes and decodes as the macOS
-backend and works on iOS unchanged, and `Surface::PixelBuffer` already carries
-a `CVPixelBuffer` zero-copy, so this is capture wiring plus the lifecycle iOS
-imposes and macOS does not.
+backend. Reuse its native PixelBuffer surface and verify the iOS build and
+runtime path rather than assuming desktop behavior. The new work is capture
+wiring plus the lifecycle iOS imposes and macOS does not.
 
 That lifecycle is the work. Camera and screen access are permission-gated and
 revocable, an app is suspended and resumed on foreground changes, and
@@ -23,6 +23,8 @@ an iOS-specific entry point, so device enumeration and selection behave the
 same everywhere.
 
 ## Required
+
+- [Video timing](/quest/m0/video-timing.md) - timestamped capture and rational rates
 
 - [Ownership boundary](/quest/m3/mobile-ownership.md) - decides whether Rust owns capture on mobile at all
 

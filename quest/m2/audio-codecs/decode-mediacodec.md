@@ -9,7 +9,7 @@ device's codec list opens.
 ## Plan
 
 The audio counterpart of `rs/moq-video/src/decode/backend/mediacodec.rs`,
-behind the existing `mediacodec` feature and the decode seam, on `target_os
+behind a new optional audio `mediacodec` feature and the decode seam, on `target_os
 = "android"`.
 
 - `audio/mp4a-latm` with the catalog description as `csd-0`; the output format
@@ -18,7 +18,8 @@ behind the existing `mediacodec` feature and the decode seam, on `target_os
 - Optional codecs are probed through `AMediaCodecList` at open and advertised
   only where present.
 - Fixtures and layout-order tests as in the AudioToolbox quest; runtime proof
-  on a device or emulator, since no CI runs Android.
+  on a device or emulator, recorded separately from the existing Android
+  compile lane. Add the audio feature to that lane.
 - The binding ships in the moq-ffi Android slice, which is how Kotlin and Dart
   reach it.
 

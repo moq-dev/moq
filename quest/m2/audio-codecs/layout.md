@@ -9,16 +9,18 @@ Proven with multichannel PCM, the one codec that needs no new decoder.
 
 ## Plan
 
-A closed `Layout` enum (mono, stereo, 2.1, quad, 5.0, 5.1, 6.1, 7.1, and the
-other AAC channelConfiguration and Opus mapping family 1 entries) in one
-canonical order, the SMPTE/WAVE order. Each codec module maps its native
+Extend the Layout contract settled in m0 with supported surround layouts
+(2.1, quad, 5.0, 5.1, 6.1, 7.1, and the other AAC channelConfiguration and
+Opus mapping family 1 entries) in one canonical order, the SMPTE/WAVE order.
+Keep the representation extensible. Each codec module maps its native
 order into it: AAC's `C L R Ls Rs LFE` and Opus's Vorbis `L C R Ls Rs LFE`
-both become `L R C LFE Ls Rs`. A count with no standard layout is refused at
-construction, so a `Layout` always downmixes.
+both become `L R C LFE Ls Rs`. An unspecified discrete PCM layout remains
+valid for passthrough but is refused for spatial remixing; never invent speaker
+positions from an arbitrary channel count.
 
-- `decode::Config` and the encoder input take a `Layout` where they take a
-  channel count today; `Frame` stays layout-free since the consumer fixed it
-  at construction. `Layout::channels()` gives the count.
+- Reuse the settled PCM descriptors and codec/consumer settings. This quest
+  adds supported layout behavior rather than replacing public field types.
+  Frame stays layout-free since the consumer fixed it at construction.
 - `resample::remix` becomes a generic remix over layouts: ITU-R BS.775
   coefficients for downmix, silence in the extra speakers for upmix, and the
   existing mono/stereo paths as the two-channel special cases. The resampler is
@@ -42,6 +44,10 @@ construction, so a `Layout` always downmixes.
   device chooser picking six channels when offered.
 
 Capture stays mono/stereo, and Opus encode stays mapping family 0.
+
+## Required
+
+- [Audio configuration](/quest/m0/audio-config.md) - extensible layout and current-mode compatibility
 
 ## Related
 

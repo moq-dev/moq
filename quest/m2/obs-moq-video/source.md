@@ -14,7 +14,7 @@ The MoQ source loads and plays supported video without directly linking FFmpeg l
 - Remove FFmpeg includes, CMake discovery/linkage, unit stubs, compile recipe requirements, and unused swresample linkage. Update OBS build/install docs and `doc/lib/cpp` together. libobs/Qt and native OS/GPU dependencies remain.
 - Validate new code with decoded pixels and moving timestamps, GPU copy/readback traces, and p50/p95 decode-to-presentation delay. Exercise CPU fallback, unsupported codec, GPU import failure, device loss, repeated start/stop, rendition change, and delayed terminal completion. Verify no AVCodec/AVUtil/SWScale/SWResample imports using platform binary inspection. Load the artifact against the oldest supported OBS release and current stable release, using the repo's supported version policy at implementation time.
 
-<## Required
+## Required
 
 - [OBS migration](/quest/m2/cpp/obs.md) - the plugin is on the generated C++ before decode changes
 - [Decoded frame ownership](/quest/m2/decoded-frames.md) - retains the existing frame and defines native-view lifetime before OBS imports it

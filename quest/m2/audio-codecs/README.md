@@ -22,19 +22,22 @@ codec its framework opens, so AC-3, E-AC-3, MP3, and FLAC ride along on the
 hosts that have them; each still needs a fixture before the backend advertises
 it.
 
-Channels are a `Layout`, not a count: a closed set of well-known layouts in one
+Use the extensible `Layout` contract settled in m0, with well-known layouts in one
 canonical order, derived from the codec description (AAC channelConfiguration,
 OpusHead mapping) so the catalog and wire do not change. Every decoder reorders
 from its codec's native order into that one, so the mixer, the FFI, and OBS
 never guess where the LFE is. Playback downmixes to whatever the output device
-opened. Counts with no standard layout are refused.
+opened. Preserve the existing arbitrary-channel PCM passthrough through an
+unspecified discrete layout; refuse spatial remixing when speaker positions
+are unknown instead of guessing them.
 
 Encode mirrors decode: an `encode::backend` seam, `Codec::Aac` meaning AAC-LC
 at the input's layout, and platform encoders behind it. Opus encode stays
 mono/stereo.
 
-The layout and seam quests are independent and come first; each platform then
-lands as its own decode and encode quest so verification stays per host. The
+The core configuration and layout contracts land in m0. These quests implement
+surround and backend dispatch on that contract; each platform then lands as
+its own decode and encode quest so verification stays per host. The
 HE-AAC refusal and the PCE parse are defects in what ships today and are
 ready now.
 
@@ -42,7 +45,7 @@ ready now.
 
 - [HE-AAC refusal](/quest/m2/audio-codecs/he-aac-refusal.md) - implicit-SBR HE-AAC over TS is refused instead of half-decoded as the LC core
 - [AAC PCE](/quest/m2/audio-codecs/aac-pce.md) - a channel_config of 0 parses the program config element instead of guessing stereo
-- [Layout](/quest/m2/audio-codecs/layout.md) - a `Layout` type in one canonical order carries up to 7.1 through decode, resample, playback, and the FFI
+- [Layout](/quest/m2/audio-codecs/layout.md) - the settled `Layout` carries up to 7.1 through decode, resample, playback, and the FFI
 - [Decode seam](/quest/m2/audio-codecs/decode-backend.md) - `decode::backend` selects a platform decoder before symphonia, mirroring moq-video
 - [AudioToolbox decode](/quest/m2/audio-codecs/decode-audiotoolbox.md) - macOS and iOS decode HE-AAC, multichannel AAC, and what else the framework offers
 - [Opus surround](/quest/m2/audio-codecs/opus-surround.md) - mapping family 1 decodes on every host through the multistream decoder

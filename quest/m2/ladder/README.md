@@ -56,9 +56,8 @@ is successfully applied. Catalog state follows the last target the encoder
 failure retains the last applied target rather than lying.
 
 Start with the shared rate policy's five percent hysteresis, immediate
-decreases, and gradual upward ramp (`rate::Control`, moving to
-`moq_mux::rate` with
-[#2848](/quest/m2/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md)).
+decreases, and gradual upward ramp (`moq_mux::rate::Control`, moved before 0.1
+by [Shared rate policy](/quest/m0/media-rate-policy.md)).
 No second re-entry threshold and no dwell timer until measurements show the
 catalog state flaps.
 

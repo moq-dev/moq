@@ -39,5 +39,4 @@ This quest must not require Dart artifact enablement, which would create a cycle
 
 ## Related
 
-- [Decoder drain](/quest/m3/decode-drain.md) - flush and finish for pipelined decoders this will lean on
 - [Dart codec parity](/quest/m2/dart-codecs.md) - the one binding that cannot decode until it lands

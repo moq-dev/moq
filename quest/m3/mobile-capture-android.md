@@ -7,10 +7,9 @@ camera, MediaProjection for the screen, and MediaCodec for encode and decode.
 
 ## Plan
 
-A whole backend family, not a port. Every other platform backend is objc2 or a
-C API; this one is NDK and JNI against the Android framework, and MediaCodec's
-Surface-in/Surface-out model is natively zero-copy in a shape none of the
-existing backends share.
+MediaCodec encode/decode already exist in moq-video. Reuse them rather than
+planning a second backend family. The remaining capture and native Surface
+integration needs NDK/JNI lifecycle, synchronization, and actual device proof.
 
 Weigh the cost honestly before starting. `moq-kit` already does this in Kotlin
 over `moq-ffi`, and raw frames cannot cross the FFI boundary zero-copy, so a
@@ -23,6 +22,8 @@ decides whether XL is worth spending.
 so the mechanism exists.
 
 ## Required
+
+- [Video timing](/quest/m0/video-timing.md) - timestamped capture and rational rates
 
 - [Ownership boundary](/quest/m3/mobile-ownership.md) - decides whether an NDK/JNI backend family is worth building
 
