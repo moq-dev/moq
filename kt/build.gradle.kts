@@ -16,8 +16,8 @@
 // `just kt check`.
 
 plugins {
-    kotlin("multiplatform") version "2.4.10" apply false
-    kotlin("plugin.serialization") version "2.4.10" apply false
+    kotlin("multiplatform") version "2.4.20" apply false
+    kotlin("plugin.serialization") version "2.4.20" apply false
     id("com.android.library") apply false
     id("com.vanniktech.maven.publish") version "0.37.0" apply false
     // Generates the KDoc HTML that `:moq` ships as its Maven Central javadoc jar,
