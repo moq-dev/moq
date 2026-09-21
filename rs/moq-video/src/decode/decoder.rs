@@ -348,6 +348,7 @@ mod tests {
 		}
 	}
 
+	#[cfg(feature = "openh264")]
 	/// An openh264 (software H.264) encoder for a `size` test stream at 30fps.
 	fn h264_software_encoder(size: crate::Size) -> Encoder {
 		Encoder::new(&EncodeConfig {
@@ -441,7 +442,7 @@ mod tests {
 		assert!(matches!(err, crate::Error::UnsupportedCodec(_)));
 	}
 
-	#[cfg(target_os = "macos")]
+	#[cfg(all(target_os = "macos", feature = "openh264"))]
 	#[test]
 	fn videotoolbox_round_trip() {
 		let decoder = backend::open(Codec::H264, &decode_config(super::Kind::Named("videotoolbox".into())))
@@ -451,7 +452,7 @@ mod tests {
 
 	/// Encode `count` gray frames and decode them, returning the decoded pictures.
 	/// The shared setup for the residency and re-encode tests below.
-	#[cfg(target_os = "macos")]
+	#[cfg(all(target_os = "macos", feature = "openh264"))]
 	fn decode_gray(count: u64) -> Vec<Frame> {
 		let mut encoder = h264_software_encoder(gray_size());
 		let mut decoder = backend::open(Codec::H264, &decode_config(super::Kind::Named("videotoolbox".into())))
@@ -476,7 +477,7 @@ mod tests {
 	/// the output callback, which is what leaves a render or re-encode path free of
 	/// a CPU round trip. `round_trip` above only checks the pixels, so it passes
 	/// either way: this is the test that pins the frame's residency.
-	#[cfg(target_os = "macos")]
+	#[cfg(all(target_os = "macos", feature = "openh264"))]
 	#[test]
 	fn videotoolbox_decode_stays_gpu_resident() {
 		for out in &decode_gray(3) {
@@ -490,7 +491,7 @@ mod tests {
 	/// The multi-rung transcode path stays on hardware through decode, resize, and
 	/// encode. The residency assertion catches a CPU fallback even when the pixels
 	/// and dimensions still look right.
-	#[cfg(target_os = "macos")]
+	#[cfg(all(target_os = "macos", feature = "openh264"))]
 	#[test]
 	fn videotoolbox_resized_surface_reencodes_in_place() {
 		let decoded = decode_gray(3);
@@ -548,7 +549,7 @@ mod tests {
 		round_trip(encoder, decoder, "videotoolbox");
 	}
 
-	#[cfg(target_os = "windows")]
+	#[cfg(all(target_os = "windows", feature = "openh264"))]
 	#[test]
 	fn mediafoundation_round_trip() {
 		// Requires a hardware decoder MFT (GPU). Skip on machines without one
@@ -567,13 +568,13 @@ mod tests {
 	/// pictures at once can tell them apart. Spaced far enough apart that lossy
 	/// coding can't blur two of them together, which caps how long a stream this
 	/// builds.
-	#[cfg(target_os = "windows")]
+	#[cfg(all(target_os = "windows", feature = "openh264"))]
 	fn level(index: u64) -> u8 {
 		u8::try_from(0x20 + index * 0x10).expect("test stream is short enough to keep its levels distinct")
 	}
 
 	/// The limited-range BT.601 luma a flat [`level`] frame decodes to.
-	#[cfg(target_os = "windows")]
+	#[cfg(all(target_os = "windows", feature = "openh264"))]
 	fn expected_luma(level: u8) -> u32 {
 		16 + (219 * level as u32) / 255
 	}
@@ -581,7 +582,7 @@ mod tests {
 	/// Decode `count` frames of a `size` [`level`] stream through the Media
 	/// Foundation hardware decoder, holding every picture rather than consuming it
 	/// as it arrives. `None` when this machine has no hardware decoder.
-	#[cfg(target_os = "windows")]
+	#[cfg(all(target_os = "windows", feature = "openh264"))]
 	fn decode_levels(count: u64, size: crate::Size) -> Option<(Vec<Frame>, Box<dyn backend::Backend>)> {
 		let mut encoder = h264_software_encoder(size);
 		let decoder = backend::open(
@@ -616,7 +617,7 @@ mod tests {
 	/// V, which stay neutral because the source is gray. Chroma is the half that
 	/// catches a bad plane split, since the UV plane sits after the *texture's* luma
 	/// rows rather than the frame's.
-	#[cfg(target_os = "windows")]
+	#[cfg(all(target_os = "windows", feature = "openh264"))]
 	fn plane_averages(frame: &Frame) -> (u32, u32, u32) {
 		let i420 = frame.surface.to_i420().unwrap();
 		let average = |plane: &[u8]| plane.iter().map(|&b| b as u32).sum::<u32>() / plane.len() as u32;
@@ -627,7 +628,7 @@ mod tests {
 	/// which is what leaves a render or re-encode path free of a CPU round trip.
 	/// `round_trip` above only checks the pixels, so it passes either way: this is
 	/// the test that pins the frame's residency.
-	#[cfg(target_os = "windows")]
+	#[cfg(all(target_os = "windows", feature = "openh264"))]
 	#[test]
 	fn mediafoundation_decode_stays_gpu_resident() {
 		let Some((decoded, _decoder)) = decode_levels(3, gray_size()) else {
@@ -649,7 +650,7 @@ mod tests {
 	///
 	/// A distinct level per frame is what makes that visible; a fixed test picture
 	/// looks identical either way.
-	#[cfg(target_os = "windows")]
+	#[cfg(all(target_os = "windows", feature = "openh264"))]
 	#[test]
 	fn mediafoundation_held_frames_keep_their_pixels() {
 		// More frames than the decoder's pool has slices (8 on the hardware this
@@ -677,7 +678,7 @@ mod tests {
 	/// Chroma is the assertion that bites: the interleaved UV plane starts after
 	/// the *texture's* luma rows, so reading a padded texture as if it were the
 	/// frame lands in the last luma rows and colors the picture with them.
-	#[cfg(target_os = "windows")]
+	#[cfg(all(target_os = "windows", feature = "openh264"))]
 	#[test]
 	fn mediafoundation_decode_crops_coded_padding() {
 		let size = crate::Size::new(320, 180);
@@ -708,7 +709,7 @@ mod tests {
 	/// Decoding what comes back is the other half, and the one that pins the blit:
 	/// the encoder reads the texture on its own timeline, so a copy that never
 	/// landed still produces packets, just of the wrong picture.
-	#[cfg(target_os = "windows")]
+	#[cfg(all(target_os = "windows", feature = "openh264"))]
 	#[test]
 	fn mediafoundation_decoded_texture_reencodes_in_place() {
 		let size = gray_size();
@@ -776,7 +777,7 @@ mod tests {
 	/// device and the encoder MFT reads the result in place. The residency
 	/// assertion catches a CPU fallback even when the pixels and dimensions still
 	/// look right, which is what a ladder pays for once per rung.
-	#[cfg(target_os = "windows")]
+	#[cfg(all(target_os = "windows", feature = "openh264"))]
 	#[test]
 	#[ignore = "explicit live-DXVA GPU probe; VideoProcessorBlt can hang on affected drivers"]
 	fn mediafoundation_resized_texture_reencodes_in_place() {

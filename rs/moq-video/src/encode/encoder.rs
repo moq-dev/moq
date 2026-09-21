@@ -682,7 +682,7 @@ mod tests {
 
 	/// A software encoder must download a GPU surface to I420 first. Exercises
 	/// the NV12 -> I420 fallback path.
-	#[cfg(target_os = "macos")]
+	#[cfg(all(target_os = "macos", feature = "openh264"))]
 	#[test]
 	fn openh264_downloads_surface() {
 		let config = Config {
