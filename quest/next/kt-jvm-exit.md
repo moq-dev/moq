@@ -11,9 +11,6 @@ out of scope: it kills the process rather than destroying the VM.
 
 ## Plan
 
-Start on `main` after the dev merge: `moq_ffi_shutdown` (the C symbol the
-Python binding calls from `atexit`) is dev-only until then.
-
 - Audit first. uniffi delivers async continuations as JNA callbacks
   (`UniffiRustFutureContinuationCallback` in
   `kt/moq-ffi/src/jvmAndAndroidMain/kotlin/uniffi/moq/moq.kt`, bound with

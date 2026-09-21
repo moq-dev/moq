@@ -10,7 +10,7 @@ memo forgets the URL. When QUIC wins the race nothing changes.
 
 ## Plan
 
-Lands on `dev`, in `rs/moq-tokio`. See the
+Lands in `rs/moq-tokio`. See the
 [questline](/quest/next/transport-upgrade/README.md) for the shared decisions.
 
 - `race_moq_connect` (`rs/moq-tokio/src/client.rs`) currently drops the losing

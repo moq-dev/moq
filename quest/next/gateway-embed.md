@@ -11,7 +11,7 @@ and its `ActivePaths` dedup.
 
 ## Plan
 
-Additive, so on main after the merge:
+Additive, so on main:
 
 - `moq_hls::Server::new(config)` with `router(origin)` for the convenience
   path and `broadcaster(&self, source: moq_mux::Source)` keyed by the
@@ -21,8 +21,8 @@ Additive, so on main after the merge:
   dance; `master::{VideoVariant, AudioVariant, render}` public with a `uri`
   per variant (the recorder forked 160 lines of `export/master.rs` for a
   different layout). [HLS generation](/quest/next/hls-generation.md) lands on
-  whatever layout hook this becomes, and its text claims there is no DASH
-  renderer; `Broadcaster::manifest` and `export/mpd.rs` exist on dev.
+  whatever layout hook this becomes, for the DASH renderer
+  (`Broadcaster::manifest`, `export/mpd.rs`) as well.
 - `moq_rtmp::listen::Config.tls: Option<Arc<ServerConfig>>` meaning sniff
   and serve both on one port, and `ActivePaths` public or folded into
   `Publish::accept`.

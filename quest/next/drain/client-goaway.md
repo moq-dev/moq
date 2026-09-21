@@ -21,7 +21,7 @@ once into `Connection` and its pool.
 
 ### Rust policy and proof
 
-On `dev`, `moq_tokio::Connection` already handles GOAWAY: the session loop returns the
+`moq_tokio::Connection` already handles GOAWAY: the session loop returns the
 message, `Redirect::resolve` guards the URI (scheme tier never drops, the host
 is pinned to the configured one by default, and `follow` is the opt-in that
 lets a peer name another), the loop redials while a
@@ -38,7 +38,7 @@ and the old session closes within the handover cap.
 
 ### JavaScript is greenfield
 
-On `dev`, `js/net` logs the lite GOAWAY URI and keeps that session open,
+`js/net` logs the lite GOAWAY URI and keeps that session open,
 logs the IETF draft-17+ URI and then closes the session when its control
 loop ends, and on the draft-14 to -16 shared control stream reads the message
 body but returns without decoding it. Nothing migrates: `Connection`

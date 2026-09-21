@@ -44,7 +44,7 @@ Decisions settled while planning:
   broadcast is published over, replacing the connection-scoped channel the
   QoS line planned. Self-reports are diagnostics: never billing,
   authorization, or route-selection input.
-- **On dev**, because `moq-stats` is a published crate and the generic
+- **A published break goes through dev**, because `moq-stats` is a published crate and the generic
   producer is a breaking change, and the moq-json rework there is what the
   producers build on.
 

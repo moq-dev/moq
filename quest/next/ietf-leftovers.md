@@ -95,7 +95,7 @@ the `None` arm (`publisher.rs:1057`, "no such subscription") and the
   version. js/net does not send joining FETCH, so it only needs the decode
   side if it reads FETCH_ERROR codes.
 
-Additive, on main after the dev merge lands. No draft change: all three are
+Additive, on main. No draft change: all three are
 IETF-registered values and moq-lite already specifies the priority field.
 
 ## Closes

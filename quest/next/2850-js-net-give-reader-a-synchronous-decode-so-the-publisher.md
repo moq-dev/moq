@@ -4,7 +4,7 @@
 
 The lite publisher applies every buffered control before it pops a group,
 with no read-ahead queue: bounded memory and exact control-first ordering at
-once. Start on main after the dev merge brings over the queue.
+once.
 
 ## Plan
 
@@ -12,7 +12,7 @@ The serving loop must apply every buffered `SUBSCRIBE_UPDATE` before it pops a
 group, or a group goes out under a range the peer already superseded. Rust gets
 that from `poll_decode_maybe` in `rs/moq-net/src/lite/publisher.rs`, which
 decodes straight out of the reader's buffer and so drains controls to
-exhaustion in one poll. On dev, `js/net/src/lite/publisher.ts` works around
+exhaustion in one poll. `js/net/src/lite/publisher.ts` works around
 the async `Reader` by decoding ahead into `SubscriptionControls`, which the
 loop drains synchronously. That queue is unbounded: it grows while the loop is
 blocked in a control-stream write, so a peer flooding updates during a stalled

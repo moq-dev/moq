@@ -11,7 +11,6 @@ Specificity before cost is an explicit routing policy: a catch-all must not
 silently take over a path still claimed by a concrete service, even when that
 service refuses the request. Keep the draft and regressions aligned with it.
 
-
 [moq#3225](https://github.com/moq-dev/moq/pull/3225) built the table this quest
 needs. `Consumer::request_broadcast` resolves a local broadcast first, then
 `best_server`, which filters routes to those covering the path, drops any whose
@@ -104,3 +103,4 @@ Tests, at the process level with real sessions rather than an in-process stand-i
 - A refused subscribe resets rather than hanging, and leaves no state behind.
 - A wildcard retracted mid-serve does not disturb the subscription already
   running.
+

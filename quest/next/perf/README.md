@@ -5,7 +5,7 @@
 Reduce relay CPU per session, raise the per-worker throughput ceiling, and
 hold tail latency on the dev thread-per-core stack by eliminating measured
 hot-path costs: redundant copies, locks, atomics, clock reads, allocations,
-and syscalls. Not io_uring specific: anything on dev's hot path qualifies,
+and syscalls. Not io_uring specific: anything on the relay's hot path qualifies,
 including the shared moq-net model layer and kio.
 
 Every implementation quest lands with a measured before/after (`just bench BASE` on Linux,
@@ -14,8 +14,7 @@ outcome that abandons the quest.
 
 ## Plan
 
-Implementations start after the dev merge, on main; planning quests can settle
-their contracts independently. Facts from the 2026-09
+Planning quests can settle their contracts independently. Facts from the 2026-09
 hot-path survey, so quests don't re-litigate them:
 
 - `moq-uring`'s only backend is noq. Every profile names its backend. The

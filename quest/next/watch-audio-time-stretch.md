@@ -15,8 +15,6 @@ dev; the clock the stretch converges toward is
 
 ## Plan
 
-Branch from main after the dev merge.
-
 - Implement WSOLA-style stretch and compress in `render-worklet.ts` on the
   PCM the ring hands out, bounded to a few percent per quantum, driven by the
   distance between buffered audio and the target. Skip-ahead remains only

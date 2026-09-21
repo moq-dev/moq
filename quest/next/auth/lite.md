@@ -19,7 +19,6 @@ unions explicitly and refuse every unrepresentable grant. Never widen an
 exact or suffix pattern into a prefix. The pattern-interest quest changes wire
 encoding without another public grant-type migration.
 
-
 ### Wire
 
 Add stream type `0x7` AUTH, creator either, to the bidirectional stream table

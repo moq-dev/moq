@@ -28,7 +28,7 @@ language to expose every platform surface.
 
 Define and implement the shared binding contract here. OBS owns graphics
 imports and presentation; the FFI video consumer owns rendition subscription
-and portable delivery. The C decoder output layout has landed on dev; consume its
+and portable delivery. The C decoder output layout has landed; consume its
 format and size controls without another struct layout change. Adding
 fields to a published C struct is not automatically additive.
 

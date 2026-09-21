@@ -8,8 +8,7 @@ edge, and a browser consumer can await that boundary, matching Rust's
 
 ## Plan
 
-Additive on `@moq/net`, so it belongs on main; main gains `final()` with the
-dev merge, so start after that.
+Additive on `@moq/net`, so it belongs on main.
 
 - Add `Track.Producer.finishAt(final)`, mirroring `finish_at`
   (`rs/moq-net/src/model/track.rs:1322`): the boundary must exceed the highest

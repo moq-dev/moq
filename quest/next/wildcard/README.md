@@ -37,7 +37,7 @@ widest prefix that covers it (`**` is the root) and the request is the
 authority, so the advertise half of this questline is re-scoped to prefix
 claims resolved against pattern interest. The three workloads above still
 hold: the transcoder claims the root and refuses what it will not serve.
-Resolve and Demand are additive and land on main after the merge.
+Resolve and Demand are additive and land on main.
 
 ### What already exists, and what does not
 

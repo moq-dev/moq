@@ -34,9 +34,6 @@ decode, and render stack.
 - Test: `rs/moq-relay/tests/released_cli.rs` drives the binary; add a case
   that runs the same smoke through `moq relay`.
 
-Starts on `main` after the merge: the CLI's verbs live on `usage`, which only
-`dev` has.
-
 ## Related
 
 - [`moq` serves like a relay](/quest/next/cli-serve.md) - the end state where the relay is `moq` with listening on by default

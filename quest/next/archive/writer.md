@@ -18,7 +18,7 @@ create fails, enrollment fails and no range for the track can enter the
 timeline. On `AlreadyExists`, validate the immutable `.info` and accept only matching
 parsed `version`, `priority`, and `timescale` values; a priority or timescale mismatch fails enrollment.
 
-Feed the segmenter already on dev (`rs/moq-mux/src/timeline.rs`): take
+Feed the existing segmenter (`rs/moq-mux/src/timeline.rs`): take
 `Producer::deferred` (:917), enroll each registration through
 `Deferred::track` or `pacing_track` (:625-631), and report every complete
 group read from the consumer through its `Recorder` (:1096). The application

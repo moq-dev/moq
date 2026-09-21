@@ -165,7 +165,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Direct3D11 render import](/quest/next/render-d3d11.md) - Windows presents without downloading every frame to system memory
 - [#2147](/quest/next/2147-moq-video-10-bit-hevc-and-av1-support-in-the-nvidia-codec.md) - moq-video: 10-bit HEVC and AV1 support in the NVIDIA codec path
 - [#2907](/quest/next/2907-bind-the-browser-through-moq-ffi-uniffi-instead-of-a.md) - Bind the browser through moq-ffi/UniFFI instead of a second hand-written wasm API
-- [#2850](/quest/next/2850-js-net-give-reader-a-synchronous-decode-so-the-publisher.md) - js/net: decode messages synchronously from buffered bytes and delete the publisher read-ahead queue (dev)
+- [#2850](/quest/next/2850-js-net-give-reader-a-synchronous-decode-so-the-publisher.md) - js/net: decode messages synchronously from buffered bytes and delete the publisher read-ahead queue
 - [Cluster flags](/quest/next/cluster-flags.md) - a discovery mechanism carries its own prerequisites, so an incomplete cluster config cannot be expressed
 - [Install moq](/quest/next/moq-installer.md) - one command installs or upgrades the released CLI on macOS and Linux
 - [Install URL](/quest/next/moq-install-url.md) - moq.dev serves the canonical installer at /install.sh

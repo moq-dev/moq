@@ -22,3 +22,4 @@ during an in-flight connect throws and the client is cancelled, mirroring
 audio by design ([Dart codecs](/quest/next/dart-codecs.md)).
 
 Public API: none. Wire: none.
+

@@ -11,7 +11,7 @@ preserve connection-ID steering through partial startup and member teardown.
 The published `Workers::split` ownership change and functional group shutdown
 have landed. Do not repeat
 that API redesign here. This follow-up replaces the worker's private lifetime
-bookkeeping with the hardened socket-group primitive after dev merges.
+bookkeeping with the hardened socket-group primitive.
 
 Adopt moq-sock's claims and complete-group ownership. No member serves before
 the final bind and filter attachment, and every socket stays owned until

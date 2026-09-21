@@ -7,7 +7,7 @@ FFI exposes.
 
 ## Plan
 
-Most of the catch-up #2152 lists has landed in dev's `rs/libmoq/src/api.rs`:
+Most of the catch-up #2152 lists has landed in `rs/libmoq/src/api.rs`:
 subscription options, track info, abort codes, client TLS roots, datagrams
 (`moq_datagram` :462-468, `moq_publish_track_datagram` :1948, and
 `moq_consume_datagrams` with its read, free, and close :2599-2650), and raw
@@ -22,8 +22,7 @@ not add a separate path here.
 The addition regenerates `moq.h`, touches `cpp/obs/src` only if used, and
 updates `doc/lib/c/index.md`.
 
-Branch from main after the dev merge. The new entry point is additive. The
-C output-configuration layout change is owned by its separate dev quest.
+The new entry point is additive.
 
 ## Closes
 

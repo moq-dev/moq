@@ -80,7 +80,7 @@ Preserve the existing static identity and combined certificate-source
 semantics. Any new accepted configuration must be implemented in this quest,
 not reserved as an ignored option for later wiring. If implementation shows
 an existing published signature or field must change, identify that exact
-break and split its functional groundwork into dev before proceeding.
+break and split it into a dev quest before proceeding.
 
 Sized XL because this shares certificate and inbound trust state across both
 worker runtimes, removes per-worker watchers, and needs runtime rotation

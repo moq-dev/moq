@@ -11,7 +11,7 @@ nothing changes.
 
 ## Plan
 
-Lands on `dev`, in `js/net`, after the [client goaway](/quest/next/drain/client-goaway.md)
+Lands in `js/net`, after the [client goaway](/quest/next/drain/client-goaway.md)
 quest ships the handover it reuses: dial the replacement while the old session
 keeps serving, swap the origin wiring once it is established, leave the old
 session to close on its own or at the handover cap. See the

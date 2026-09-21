@@ -15,8 +15,6 @@ supervision. This line moves the media path, not the control plane.
 
 ## Plan
 
-This line starts after the dev merge, on main.
-
 The three quests below ship together as one capability, in order.
 
 The prerequisite that shapes the middle quest: **qmux sessions arrive through

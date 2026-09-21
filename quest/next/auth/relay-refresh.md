@@ -56,12 +56,12 @@ expiry, an expiry that leaves the union intact ends only that token, and
   `AUTH_ERROR { Unauthorized }` and recomputes the union, while a failed
   re-check (timeout or `5xx`) keeps the token until its `expires`, never a
   close on its own.
-- The client side names dev's API: `moq_tokio::Connection` gains `auth()`
+- The client side: `moq_tokio::Connection` gains `auth()`
   returning a handle the connection owns, not the current session's. It
   stores every token added through it, presents them on each new session as
   it attaches, unions the live session's grant, and its `add` resolves against
   the session that is up at the time; a token the app drops is withdrawn from
-  the live session and forgotten. Branch from main.
+  the live session and forgotten.
 - Docs: `doc/bin/relay/auth.md` gains an "in-band tokens" section beside
   revalidation stating that grants union, that a token needs the admitted
   root, what an expiry does to the union today, and that the grant's expiry

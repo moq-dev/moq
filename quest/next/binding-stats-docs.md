@@ -15,3 +15,4 @@ One section per page, generated from the same source of truth
 casing, with the validity flags the C ABI carries and the estimate names
 settled in #3744. A doc check greps each page for every field name in the
 Rust struct so a future field cannot land undocumented.
+

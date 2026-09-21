@@ -204,7 +204,7 @@ fall, startup and re-anchoring, and the clamp. Specifically:
   dial, so it gets a justification rather than a number.
 - The clamp reads the rendition's advertised flush span from [Jitter
   clock](/quest/next/jitter-flush-clock.md), which #3513 landed as the
-  structural flush span on `dev`. That field is a
+  structural flush span. That field is a
   publisher-declared floor and the estimate is a measurement of the network:
   say plainly which is which, because the shared word "jitter" invites
   confusion. The #3517 branch combines them with a max on the grounds they describe the

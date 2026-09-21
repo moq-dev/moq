@@ -19,9 +19,7 @@ IETF AUTH initially carries only prefix-representable grants. Propagate its
 token through the URL, widen it, or leave token admission pending. Lite pattern
 AUTH can carry the full grant once the pattern-interest prerequisite lands.
 
-
-- Client configuration separates the credential from the address on dev's
-  API: `moq_tokio::connect::Config` gains `tokens`, repeatable as
+- Client configuration separates the credential from the address: `moq_tokio::connect::Config` gains `tokens`, repeatable as
   `--connect-token` and `MOQ_CONNECT_TOKEN`, the default set for every dial
   the client makes. A `?jwt=` in the URL stays a member of the union, which is
   how cluster dial targets keep their per-peer credential, and per-dial
@@ -62,7 +60,7 @@ AUTH can carry the full grant once the pattern-interest prerequisite lands.
   nothing is refused at the deadline; the cross-language harness runs with
   tokens configured.
 
-Branch from main. Additive.
+Additive.
 
 ## Required
 

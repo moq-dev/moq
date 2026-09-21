@@ -35,7 +35,7 @@ Run the supported-draft matrix and `just test smoke --all` through CI.
 Public API: a producer-side on-demand group request surface in `@moq/net`,
 matching Rust's lifecycle. Wire: implement the existing supported IETF FETCH
 formats; update relevant documentation and any MoQ draft claims that change.
-Target published API breaks at dev if the chosen shape requires them.
+A published API break, if the chosen shape requires one, goes through dev.
 
 ## Required
 

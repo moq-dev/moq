@@ -10,7 +10,7 @@ edge is the reference: `rs/edge/src/{config.rs, main.rs, ops.rs}` and
 
 ## Plan
 
-All additive on `moq-relay` and `moq-tokio`, so on main after the merge:
+All additive on `moq-relay` and `moq-tokio`, so on main:
 
 - `Relay::config(&self) -> &Config` (the resolved one) and
   `cluster::Cluster::id()`; the edge clones `listen.tls`, `cluster.id`, and

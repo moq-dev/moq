@@ -56,9 +56,6 @@ one policy step, holds it on a `None` grant, and ramps back when the grant
 returns; a grant below the Opus floor clamps at the floor; a PCM Producer
 ignores every grant.
 
-This needs the allocator on main, so it starts after
-the dev merge.
-
 ## Closes
 
 - [#2848](https://github.com/moq-dev/moq/issues/2848) - close this issue when the quest finishes

@@ -31,7 +31,7 @@ Settle the design, then implement:
   complete-first-snapshot for one producer.
 
 Additive on `@moq/publish`, so it lands on main. If the chosen shape changes
-`mutate` or `serve`, it is breaking and returns to dev on dev.
+`mutate` or `serve`, it is breaking and goes through dev.
 `demo/web/src/publish.ts:418` drives `catalog.mutate` directly and follows any
 change.
 

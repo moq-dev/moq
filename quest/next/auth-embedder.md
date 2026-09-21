@@ -11,7 +11,7 @@ and stats-tier step for four gateways and holds no lease for any of them.
 
 ## Plan
 
-Additive on `moq-auth` and `moq-relay`, so on main after the merge:
+Additive on `moq-auth` and `moq-relay`, so on main:
 
 - `lease::Producer::new(grant)` records `revalidate`/`expires`;
   `producer.due().await -> Due::{Revalidate, Expired}`, `update(grant)`

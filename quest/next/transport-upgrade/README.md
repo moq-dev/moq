@@ -24,12 +24,8 @@ backoff, which races again.
 
 ## Plan
 
-Everything below describes `dev`, which is where both quests land: `main`
-still has `moq-native`'s close-only `Reconnect` and no origin routing table in
-`js/net`.
-
 The upgrade is a self-initiated migration, so it reuses the peer-GOAWAY
-machinery rather than adding a second handover path. On `dev`,
+machinery rather than adding a second handover path.
 `moq_tokio::Connection` already dials a replacement while a `Draining` handle
 keeps the old session serving until it closes or overstays the handover cap,
 reports `Status::Migrating`, and `moq_net::Session::drain()` sends a GOAWAY on

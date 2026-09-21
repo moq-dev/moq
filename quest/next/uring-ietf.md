@@ -26,7 +26,7 @@ gap is in the worker's accept path, not in moq-net.
 - `doc/bin/relay/config.md` and the `moq-uring` README drop the lite-only
   caveat.
 
-Additive, so it lands on main after the merge. moq.pro's fleet deploy of the
+Additive, so it lands on main. moq.pro's fleet deploy of the
 ring requires the release carrying it.
 
 ## Related
