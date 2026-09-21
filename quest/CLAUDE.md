@@ -11,14 +11,14 @@ durable scope or coordination.
 - A quest is a Markdown file, completed in one PR. A questline is a directory
   whose `README.md` is its quest: its `Quests` section lists the children, and
   it completes when its own work is done and every child has merged.
-- The tree mirrors the branches. The top-level lines `main` and `dev` are those
-  branches; `next` and `future` are the roadmap and have none. Starting a
-  roadmap quest moves it under the branch it targets, in the same PR: `dev` for a published
-  API or wire break, `main` otherwise.
-- Any other document's branch is its path without `.md`: `quest/dev/foo/bar.md`
-  is branch `quest/dev/foo/bar`, and its line is `quest/dev/foo/README`. A
-  quest merges into its line's branch, a line into its parent's, and `dev` into
-  `main` once its questline is empty.
+- The tree mirrors the branches. A top-level line named after a long-lived
+  branch is that branch; every other top-level line is roadmap and has none.
+  [README.md](README.md) says what each line holds. Starting a roadmap quest
+  moves it under the branch it targets, in the same PR.
+- Any other document's branch is its path without `.md`: `quest/foo/bar.md` is
+  branch `quest/foo/bar`, and its line is `quest/foo/README`. A quest merges
+  into its line's branch, a line into its parent's, and a long-lived branch into
+  its own base once its line is empty.
 - Every `Quests` list is ordered by priority. Insert at rank, never append.
 - Link with root-absolute paths. Finished documents are deleted; git history
   keeps them. Merge conflicts are expected; resolve them by aligning quests.
@@ -38,12 +38,12 @@ Current decisions, open questions, or implementation guidance.
 
 ## Quests
 
-- [Child quest](/quest/dev/foo/bar.md) - the outcome, so the list reads without opening it
-- [Nested questline](/quest/dev/foo/baz/README.md) - what the whole line delivers
+- [Child quest](/quest/foo/bar.md) - the outcome, so the list reads without opening it
+- [Nested questline](/quest/foo/baz/README.md) - what the whole line delivers
 
 ## Required
 
-- [Blocker](/quest/main/bar.md) - work that must finish before this can start
+- [Blocker](/quest/bar.md) - work that must finish before this can start
 
 ## Closes
 
@@ -51,7 +51,7 @@ Current decisions, open questions, or implementation guidance.
 
 ## Related
 
-- [Other](/quest/next/other.md) - similar work that is not a blocker
+- [Other](/quest/other.md) - similar work that is not a blocker
 ```
 
 - `Goal` is required; everything else is optional. Use these exact headings.
@@ -76,8 +76,8 @@ Current decisions, open questions, or implementation guidance.
 - Split independently completable work into separate quests. Group them in a
   questline only when they ship together, and give the README the work no
   child owns: the end-to-end test, the docs page.
-- New work starts under `next`, or `future` when nothing near-term depends
-  on it, unless it is being started now.
+- New work starts in a roadmap line, at its rank, unless it is being started
+  now.
 - Every issue under `Closes` carries the `quest` GitHub label
   (`gh issue edit <n> --add-label quest`), applied when the quest lands.
   `Related` is context and gets none.
