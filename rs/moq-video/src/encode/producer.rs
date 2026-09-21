@@ -430,7 +430,7 @@ fn log_track_ended(err: moq_net::Error) {
 	}
 }
 
-#[cfg(any(feature = "capture", test))]
+#[cfg(any(feature = "capture", all(test, feature = "openh264")))]
 fn capture_stopped<E: CatalogExt>(producer: &mut Producer<E>) -> Result<(), Error> {
 	// The shared clock keeps advancing while capture is stopped. Mark the break before waiting
 	// for demand again so the next timestamp does not stretch the previous frame across the gap.
@@ -593,6 +593,8 @@ async fn capture_loop<E: CatalogExt>(
 
 #[cfg(test)]
 mod tests {
+	#![cfg_attr(not(feature = "openh264"), allow(dead_code, unused_imports))]
+
 	use moq_mux::catalog::Stream as _;
 
 	use super::*;
@@ -664,6 +666,7 @@ mod tests {
 	/// so the idle transition must publish a marker group between the two runs. This uses synthetic
 	/// frames and the software encoder to exercise the transition without capture hardware.
 	#[tokio::test]
+	#[cfg(feature = "openh264")]
 	async fn idle_capture_publishes_a_discontinuity_before_resume() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
@@ -699,6 +702,7 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[cfg(feature = "openh264")]
 	async fn source_resize_updates_the_published_rendition() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
@@ -729,6 +733,7 @@ mod tests {
 	/// track writer and the published rendition, so a conversion that drops it silently downgrades
 	/// the caller's selection to Legacy while the catalog still claims whatever it defaulted to.
 	#[tokio::test]
+	#[cfg(feature = "openh264")]
 	async fn a_selected_container_survives_the_rendition_hint() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
@@ -753,6 +758,7 @@ mod tests {
 	/// subscriber waits on the catalog. Nothing errors on either side; the publisher simply serves
 	/// nothing, forever.
 	#[tokio::test]
+	#[cfg(feature = "openh264")]
 	async fn the_rendition_reaches_the_wire_before_the_first_frame() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
@@ -793,6 +799,7 @@ mod tests {
 
 	/// Finish leaves the handle, so abort can still run.
 	#[tokio::test]
+	#[cfg(feature = "openh264")]
 	async fn abort_after_finish() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
@@ -815,6 +822,7 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[cfg(feature = "openh264")]
 	async fn h264_roundtrip_publishes_avc3() {
 		// Software (openh264) so the test is deterministic and never touches a
 		// hardware backend.

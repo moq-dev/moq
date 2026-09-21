@@ -35,13 +35,13 @@ pub enum Codec {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Kind {
-	/// Prefer a platform hardware encoder, falling back to the openh264 software
-	/// encoder when none is available.
+	/// Prefer a platform hardware encoder, falling back to OpenH264 when the
+	/// `openh264` feature is enabled.
 	#[default]
 	Auto,
 	/// Hardware only; error if none is available.
 	Hardware,
-	/// Software only (openh264 for H.264).
+	/// Software only (OpenH264 for H.264 when its feature is enabled).
 	Software,
 	/// A specific backend by name, e.g. `"videotoolbox"`, `"mediacodec"`,
 	/// `"nvenc"`, `"vaapi"`, `"v4l2"`, or `"openh264"`.
@@ -382,6 +382,8 @@ impl Encoder {
 
 #[cfg(test)]
 mod tests {
+	#![cfg_attr(not(feature = "openh264"), allow(dead_code, unused_imports))]
+
 	use super::*;
 
 	use crate::{I420, Surface};
@@ -409,6 +411,7 @@ mod tests {
 	}
 
 	#[test]
+	#[cfg(feature = "openh264")]
 	fn software_encoder_emits_annexb() {
 		let config = Config {
 			kind: Kind::Software,
@@ -454,6 +457,7 @@ mod tests {
 
 	/// The bring-your-own-pixels path: RGBA in through `Surface::rgba`, Annex-B out.
 	#[test]
+	#[cfg(feature = "openh264")]
 	fn encode_rgba_surface_emits_annexb() {
 		let config = Config {
 			kind: Kind::Software,
@@ -470,6 +474,7 @@ mod tests {
 
 	/// The same path starting from planar I420 the caller already has.
 	#[test]
+	#[cfg(feature = "openh264")]
 	fn encode_i420_surface_emits_annexb() {
 		let config = Config {
 			kind: Kind::Software,
@@ -843,6 +848,7 @@ mod tests {
 	/// both that the call is accepted and that the encoder keeps producing after
 	/// it. A wrong option id or a bad `SBitrateInfo` layout would fail here.
 	#[test]
+	#[cfg(feature = "openh264")]
 	fn set_bitrate_retunes_software_encoder() {
 		let config = Config {
 			kind: Kind::Software,
@@ -871,6 +877,7 @@ mod tests {
 	/// rejects `SetOption` with `cmInitExpected` until then. A retune before any
 	/// frame must be deferred to the first encode, not reported as a failure.
 	#[test]
+	#[cfg(feature = "openh264")]
 	fn set_bitrate_before_the_first_frame_is_deferred() {
 		let config = Config {
 			kind: Kind::Software,
@@ -894,6 +901,7 @@ mod tests {
 	/// Setting the current rate must not reach the backend at all: the control
 	/// loop is allowed to be chatty, and the encoder shouldn't pay for it.
 	#[test]
+	#[cfg(feature = "openh264")]
 	fn set_bitrate_to_current_is_a_noop() {
 		let config = Config {
 			kind: Kind::Software,
@@ -1016,6 +1024,7 @@ mod tests {
 	/// a mid-stream request proves the plumbing works. Runs on openh264, so this
 	/// holds on every platform rather than only where hardware exists.
 	#[test]
+	#[cfg(feature = "openh264")]
 	fn a_mid_stream_keyframe_request_emits_an_idr() {
 		let config = Config {
 			kind: Kind::Software,
@@ -1210,6 +1219,7 @@ mod tests {
 	/// pixels under a BT.601 label. `Config::color` pins the real space, and the
 	/// bitstream then says so.
 	#[test]
+	#[cfg(feature = "openh264")]
 	fn config_color_pins_the_space_a_resize_carried() {
 		use crate::Color;
 

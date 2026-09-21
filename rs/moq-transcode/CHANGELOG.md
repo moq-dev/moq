@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- [**breaking**] Forward OpenH264 through the default `openh264` feature and
+  remove the deprecated `nvenc` and `nvdec` feature aliases.
 - Preserve a source catalog's `archive` entry on the derivative instead of
   synthesizing a timeline for the transcode output.
 

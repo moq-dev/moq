@@ -31,12 +31,12 @@ use crate::{Error, Frame, Size};
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Kind {
-	/// Prefer a platform hardware decoder, fall back to software.
+	/// Prefer a platform hardware decoder, falling back to enabled software.
 	#[default]
 	Auto,
 	/// Hardware only; error if none is available.
 	Hardware,
-	/// Software (openh264) only.
+	/// Software only (OpenH264 when its feature is enabled).
 	Software,
 	/// A specific backend by name, e.g. `"videotoolbox"`, `"mediacodec"`,
 	/// `"nvdec"`, `"vaapi"`, `"v4l2"`, or `"openh264"`.
@@ -260,6 +260,8 @@ fn is_supported_av1(av1: &AV1) -> bool {
 
 #[cfg(test)]
 mod tests {
+	#![cfg_attr(not(feature = "openh264"), allow(dead_code, unused_imports))]
+
 	use moq_net::Timestamp;
 
 	use super::backend::{self, Codec};
@@ -361,6 +363,7 @@ mod tests {
 	}
 
 	#[test]
+	#[cfg(feature = "openh264")]
 	fn openh264_round_trip() {
 		let decoder = backend::open(Codec::H264, &decode_config(super::Kind::Software)).expect("openh264 decoder");
 		round_trip(h264_software_encoder(gray_size()), decoder, "openh264");
@@ -369,6 +372,7 @@ mod tests {
 	/// A description-less avc1 track from WebCodecs carries Annex-B payloads with
 	/// its parameter sets in band, the only framing that can decode without avcC.
 	#[test]
+	#[cfg(feature = "openh264")]
 	fn avc1_without_avcc_decodes_as_annexb() {
 		// The catalog shape observed from @moq/publish: `"codec": "avc1.640028"`
 		// and no `description`.

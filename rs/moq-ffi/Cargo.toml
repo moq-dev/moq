@@ -54,7 +54,7 @@ url = { workspace = true }
 # Codecs only: the language wrappers do their own device I/O.
 moq-audio = { workspace = true, optional = true, features = ["aac"] }
 moq-tokio = { workspace = true, default-features = true }
-# `nvidia` and `vaapi` back on, matching rs/libmoq: the workspace turns
+# `openh264`, `nvidia`, and `vaapi` back on, matching rs/libmoq: the workspace turns
 # moq-video's defaults off for `capture` (V4L2, libclang), and the codecs are
 # collateral rather than the goal. Nothing is paid for them off Linux, since
 # cudarc / moq-nvenc / libloading / moq-vaapi sit behind
@@ -62,7 +62,7 @@ moq-tokio = { workspace = true, default-features = true }
 # both dlopen the driver, so the wrappers still link GPU-less and start
 # driverless; `vaapi` alone costs the build something, since moq-vaapi's bindgen
 # needs libclang (the dev shell carries it).
-moq-video = { workspace = true, optional = true, features = ["nvidia", "vaapi"] }
+moq-video = { workspace = true, optional = true, features = ["nvidia", "openh264", "vaapi"] }
 # Blocking on `encode::Sink` from the synchronous producer exports; see
 # `video::block_on` for why not a tokio helper.
 pollster = { workspace = true, optional = true }

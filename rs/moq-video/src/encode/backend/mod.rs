@@ -14,13 +14,14 @@
 //!
 //! [`open`] picks the best backend for a [`Codec`](super::Codec) +
 //! [`Kind`](super::Kind): only candidates that support the requested codec are
-//! considered, hardware (platform-gated) before the always-available openh264
-//! software fallback.
+//! considered, hardware (platform-gated) before the OpenH264 software fallback
+//! when this build enables it.
 
 use super::encoder::{Codec, Config, Kind};
 use crate::encode::Encoded;
 use crate::{Error, Frame};
 
+#[cfg(feature = "openh264")]
 mod openh264;
 
 #[cfg(test)]
@@ -155,14 +156,17 @@ const HARDWARE: &[Candidate] = &[
 	},
 ];
 
-/// Software fallbacks, all platforms, always available so a box with no usable
-/// hardware encoder can still encode. Only H.264 (openh264) has one; H.265 is
-/// hardware-only. A slice so future software codecs slot in.
-const SOFTWARE: &[Candidate] = &[Candidate {
-	name: openh264::NAME,
-	codecs: &[Codec::H264],
-	open: openh264::Openh264::open,
-}];
+/// Software fallbacks compiled into this build. Only H.264 (OpenH264) has one;
+/// H.265 is hardware-only. A slice so a build can omit it entirely and future
+/// software codecs can slot in.
+const SOFTWARE: &[Candidate] = &[
+	#[cfg(feature = "openh264")]
+	Candidate {
+		name: openh264::NAME,
+		codecs: &[Codec::H264],
+		open: openh264::Openh264::open,
+	},
+];
 
 /// Test-only backends. Deliberately in neither list above, so `Auto` /
 /// `Hardware` / `Software` can never select one: they exist to be asked for by
@@ -308,6 +312,7 @@ fn available_names(codec: Codec) -> Vec<&'static str> {
 }
 
 #[cfg(test)]
+#[cfg_attr(not(feature = "openh264"), allow(dead_code))]
 pub(crate) mod test_util {
 	use h264_reader::nal::sps::SeqParameterSet;
 	use h264_reader::nal::{Nal, RefNal, UnitType};
@@ -388,6 +393,8 @@ pub(crate) mod test_util {
 
 #[cfg(test)]
 mod tests {
+	#![cfg_attr(not(feature = "openh264"), allow(dead_code, unused_imports))]
+
 	use super::*;
 
 	/// A backend that opens and encodes nothing. Stands in for a real candidate so
@@ -491,12 +498,25 @@ mod tests {
 			Err(Error::UnknownEncoder { name, codec, available }) => {
 				assert_eq!(name, "vappi");
 				assert_eq!(codec, config.codec);
-				// openh264 is unconditional, so every build has one to offer.
+				#[cfg(feature = "openh264")]
 				assert!(available.contains(openh264::NAME), "nothing offered: {available}");
+				#[cfg(not(feature = "openh264"))]
+				assert!(!available.contains("openh264"), "disabled backend offered: {available}");
 			}
 			Err(other) => panic!("expected UnknownEncoder, got {other:?}"),
 			Ok(backend) => panic!("expected UnknownEncoder, opened {}", backend.name()),
 		}
+	}
+
+	#[cfg(not(feature = "openh264"))]
+	#[test]
+	fn disabled_software_backend_is_not_selected() {
+		let mut config = config();
+		config.kind = Kind::Software;
+		assert!(matches!(open(&config), Err(Error::NoEncoder(_))));
+
+		config.kind = Kind::Named("openh264".to_owned());
+		assert!(matches!(open(&config), Err(Error::UnknownEncoder { .. })));
 	}
 
 	/// The reason each candidate refused belongs in the error. Only the DEBUG

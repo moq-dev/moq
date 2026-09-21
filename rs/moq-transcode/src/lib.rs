@@ -16,8 +16,8 @@
 //!   1:1, so group N of every rung is the same content as source group N.
 //!
 //! The codec work is `moq-video`: hardware where available (NVDEC + NVENC on
-//! Linux, VideoToolbox on macOS, Media Foundation on Windows) with openh264 as
-//! the H.264 software fallback. On an NVIDIA GPU the whole pipeline is
+//! Linux, VideoToolbox on macOS, Media Foundation on Windows), with the default
+//! `openh264` feature providing H.264 software fallback. On an NVIDIA GPU the whole pipeline is
 //! GPU-resident: NVDEC decodes and scales in hardware and NVENC encodes the
 //! CUDA frame in place, with no CPU copies. Other decoders scale on the CPU.
 

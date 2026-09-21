@@ -27,8 +27,8 @@ moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
-# Enable the NVIDIA hardware codecs (default-off at the workspace level).
-moq-video = { workspace = true, features = ["nvidia", "vaapi"] }
+# Select software H.264 plus the Linux NVIDIA and VAAPI codecs explicitly.
+moq-video = { workspace = true, features = ["nvidia", "openh264", "vaapi"] }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }

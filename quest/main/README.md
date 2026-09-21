@@ -92,7 +92,6 @@ do not add another media abstraction or a renderer crate during stabilization.
 - [uring identity](/quest/main/uring-identity.md) - sockets and connections carry their worker and steering identity
 - [GPU conversion and NVENC](/quest/main/video-gpu-encode.md) - convert, resize and
   encode imported frames without CPU pixel transfers or fallback
-- [Media features](/quest/main/media-features.md) - OpenH264 can be excluded, rendering is opt-in, and feature aliases disappear
 - [Audio configuration](/quest/main/audio-config.md) - PCM layout, codec settings, and subscription policy have distinct contracts
 - [Audio publication](/quest/main/audio-publication.md) - callers get demand authority and supported options, not internal transport or resampler machinery
 - [AEC ownership](/quest/main/audio-aec.md) - one microphone owns an adaptive canceller and controls remain shareable

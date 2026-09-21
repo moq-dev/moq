@@ -144,6 +144,8 @@ impl Consumer {
 
 #[cfg(test)]
 mod tests {
+	#![cfg_attr(not(feature = "openh264"), allow(dead_code, unused_imports))]
+
 	use bytes::Bytes;
 	use moq_net::Timestamp;
 
@@ -165,6 +167,7 @@ mod tests {
 	use crate::encode::{Config as EncodeConfig, Encoder, Kind as EncodeKind, Producer as EncodeProducer};
 
 	#[tokio::test]
+	#[cfg(feature = "openh264")]
 	async fn reads_cmaf_container_declared_by_catalog() {
 		let mut source_broadcast = moq_net::broadcast::Info::new().produce();
 		let source_subscriber = source_broadcast.consume();
