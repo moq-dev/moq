@@ -333,17 +333,37 @@ enum SiState {
 }
 
 impl SiTrack {
-	fn new(source: &crate::Source, track: &str, interval: Option<Duration>, max_age: Duration) -> Self {
+	fn new(source: &crate::Source, entry: &catalog::SiEntry, max_age: Duration) -> Self {
+		// An entry read from the inline catalog form has its sections in hand and
+		// no track to subscribe to: it starts (and stays) where an ended track ends
+		// up, re-emitting a fixed snapshot on its interval.
+		let (state, active) = if entry.sections.is_empty() {
+			(
+				SiState::Requesting(source.request_catalog(), entry.track.clone()),
+				Default::default(),
+			)
+		} else {
+			(SiState::Done, Self::inline(entry))
+		};
 		Self {
-			track: track.to_string(),
-			interval,
-			state: SiState::Requesting(source.request_catalog(), track.to_string()),
-			active: Default::default(),
+			track: entry.track.clone(),
+			interval: entry.interval,
+			state,
+			active,
 			pending: None,
 			dirty: false,
 			last_emit: None,
 			max_age,
 		}
+	}
+
+	/// The snapshot an inline-form entry's sections reduce to.
+	fn inline(entry: &catalog::SiEntry) -> super::si::Snapshot {
+		let mut snapshot = super::si::Snapshot::default();
+		for section in &entry.sections {
+			snapshot.apply(section);
+		}
+		snapshot
 	}
 
 	/// Drive the subscription and fold arrived groups into `active`. Never returns
@@ -813,18 +833,33 @@ impl<E: catalog::Catalog> Export<E> {
 					// staying attached would repeat its stale sections forever. The last
 					// snapshot carries across so emission never goes dark mid-swap.
 					Some(existing) if existing.track != entry.track => {
-						let mut replacement = SiTrack::new(&self.source, &entry.track, entry.interval, self.max_age);
-						replacement.active = std::mem::take(&mut existing.active);
-						replacement.dirty = existing.dirty;
+						let mut replacement = SiTrack::new(&self.source, entry, self.max_age);
+						// An inline entry already holds its snapshot; only a track entry
+						// has nothing to emit until its first group lands.
+						if replacement.active.is_empty() {
+							replacement.active = std::mem::take(&mut existing.active);
+							replacement.dirty = existing.dirty;
+						} else {
+							replacement.dirty = replacement.active != existing.active;
+						}
 						replacement.last_emit = existing.last_emit;
 						*existing = replacement;
 					}
-					Some(existing) => existing.interval = entry.interval,
+					Some(existing) => {
+						existing.interval = entry.interval;
+						// Inline sections arrive with the catalog itself, so a revised
+						// table shows up here rather than on a track.
+						if !entry.sections.is_empty() {
+							let snapshot = SiTrack::inline(entry);
+							if existing.active != snapshot {
+								existing.active = snapshot;
+								existing.dirty = true;
+							}
+						}
+					}
 					None => {
-						self.si.insert(
-							(*pid, *table_id),
-							SiTrack::new(&self.source, &entry.track, entry.interval, self.max_age),
-						);
+						self.si
+							.insert((*pid, *table_id), SiTrack::new(&self.source, entry, self.max_age));
 					}
 				}
 			}

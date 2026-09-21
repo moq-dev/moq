@@ -2130,6 +2130,95 @@ async fn si_pids_are_re_emitted_on_their_own_interval() {
 	assert_eq!(count(0x0010), 2, "NIT re-emitted on its 10s interval");
 }
 
+/// The catalog form every published moq-cli through 0.11 writes carries the SI
+/// sections inline under the PID, with no snapshot track. Export must carry them
+/// the same way it carries a track's snapshot, on the PID's interval, or every one
+/// of those publishers loses its service layer (and, before the inline form was
+/// read at all, the whole export).
+#[tokio::test(start_paused = true)]
+async fn inline_si_form_is_re_emitted() {
+	use base64::Engine;
+
+	let broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+
+	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
+	let track = broadcast
+		.create_track(
+			broadcast.unique_name(".avc1"),
+			hang::container::track_info(hang::catalog::PRIORITY.video),
+		)
+		.unwrap();
+	let name = track.name().to_string();
+
+	// Hand-written rather than produced, since nothing writes this form any more.
+	let mut catalog = crate::catalog::hang::Catalog::<tscat::Ext>::default();
+	let mut cfg = VideoConfig::new(H264 {
+		profile: 0x64,
+		constraints: 0,
+		level: 0x1f,
+		inline: false,
+	});
+	cfg.container = Container::Legacy;
+	cfg.description = Some(avcc);
+	catalog.video.renditions.insert(name.clone(), cfg);
+	let mut json = serde_json::to_value(&catalog).unwrap();
+	let sdt = make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 8]);
+	let inline = base64::engine::general_purpose::STANDARD.encode(&sdt);
+	json["mpegts"] = serde_json::json!({"si": {"17": {"interval": 2000, "sections": [inline]}}});
+	// Held open: dropping the producer ends the track before export subscribes.
+	let mut catalog_track = broadcast
+		.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
+		.unwrap();
+	catalog_track
+		.write_frame(Timestamp::ZERO, Bytes::from(serde_json::to_vec(&json).unwrap()))
+		.unwrap();
+
+	// One keyframe per second across 12s, as in the snapshot-track test above.
+	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+	let mut idr = vec![0x65u8];
+	idr.extend(std::iter::repeat_n(0xAB, 300));
+	for sec in 0..=12u64 {
+		producer
+			.write(Frame {
+				timestamp: Timestamp::from_micros(sec * 1_000_000).unwrap(),
+				duration: None,
+				payload: length_prefixed(&[&idr]),
+				keyframe: true,
+			})
+			.unwrap();
+		producer.cut(None).unwrap();
+	}
+	producer.finish().unwrap();
+
+	let ts = drain_with(
+		Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
+			.await
+			.unwrap(),
+	)
+	.await;
+	assert_packet_aligned(&ts);
+
+	let count = |pid: u16| {
+		ts.chunks_exact(188)
+			.filter(|p| ((((p[1] & 0x1f) as u16) << 8) | p[2] as u16) == pid)
+			.count()
+	};
+	assert_eq!(count(0x0000), 13, "PAT on every frame");
+	// SDT at 0,2,4,6,8,10,12s, byte-for-byte the inline section.
+	assert_eq!(count(0x0011), 7, "inline SDT re-emitted on its 2s interval");
+	let packet = ts
+		.chunks_exact(188)
+		.find(|p| ((((p[1] & 0x1f) as u16) << 8) | p[2] as u16) == 0x0011)
+		.unwrap();
+	// The section is stuffed to the packet's tail, byte-for-byte the inline one.
+	assert_eq!(
+		&packet[188 - sdt.len()..],
+		&sdt[..],
+		"the inline SDT rides its PID: {packet:02x?}"
+	);
+}
+
 /// Count payload-bearing TS packets on `pid`, excluding its standalone clock packets.
 fn count_pid(frames: &[Frame], pid: u16) -> usize {
 	frames
