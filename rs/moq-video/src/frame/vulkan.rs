@@ -475,7 +475,10 @@ impl Imported {
 	fn new(backend: Arc<Backend>, handles: Handles, image: Image) -> Result<Self, Error> {
 		backend.ctx.bind_to_thread().map_err(cuda("bind CUDA context"))?;
 		let actual = backend.ctx.uuid().map_err(cuda("read CUDA device UUID"))?;
-		let actual = actual.bytes;
+		// `CUuuid.bytes` is `[c_char; 16]`, which is `i8` on x86_64 and `u8` on
+		// aarch64. Reinterpret per element: an `as u8` cast fails clippy's
+		// `unnecessary_cast` where `c_char` is already `u8`.
+		let actual = actual.bytes.map(|b| u8::from_ne_bytes(b.to_ne_bytes()));
 		if actual != image.device_uuid {
 			return Err(Error::Unsupported(format!(
 				"Vulkan device UUID {} does not match CUDA device UUID {}",

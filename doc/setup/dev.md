@@ -16,7 +16,7 @@ match CI.
 | `just fix` | Format and lint the packages this branch changed. |
 | `just check` | Compile and lint the same scope. This is what CI runs. |
 | `just test` | Run tests for the same scope. |
-| `just fix-all`, `just check-all`, `just test all` | The same, over every package. |
+| `just fix --all`, `just check --all`, `just test all` | The same, over every package. |
 | `just pub bbb <url>` | Publish Big Buck Bunny (also `tos`, `clock`, `gst`, `hls`). |
 | `just sub gst bbb <url>` | Play a broadcast through GStreamer. |
 | `just relay` | Run a local relay on its own. |

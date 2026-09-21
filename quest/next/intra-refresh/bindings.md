@@ -20,7 +20,7 @@ and changes the libmoq C struct layout, so it targets `dev`.
 - Hand-written wrappers and docs per the cross-package table: `py/moq-rs`,
   `swift/`, `kt/`, `dart/moq`, `go/wrapper/moq`, and `doc/lib/{py,swift,kt,go,dart,c}`.
   Go gets no uniffi default, so its zero value must read as keyframe mode.
-- Run `just test smoke-full` for the cross-language check.
+- Run `just test smoke --all` for the cross-language check.
 
 ## Required
 

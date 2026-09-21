@@ -47,8 +47,8 @@ when the four crates are ready for a separately requested 0.1 release.
 Their package boundaries are explicit:
 
 - `moq-audio` owns the PCM/layout and codec configuration split, decoder entry
-  point, publication authority, FEC removal, AEC attachment, playback outcome,
-  and extensible audio frame and packet construction.
+  point, publication authority, AEC attachment, playback outcome, and
+  extensible audio frame and packet construction.
 - `moq-video` owns frame conversion and construction, decoder output policy,
   synchronous codec thread confinement, capture timestamps and rational rates,
   extensible group configuration and `cut` naming, and its feature defaults.
@@ -89,15 +89,12 @@ do not add another media abstraction or a renderer crate during stabilization.
 ## Quests
 
 - [E2EE API](/quest/main/e2ee-api.md) - epoch-scoped ownership replaces raw crypto, catalog helpers, and process-global claims
-- [NVENC registration rollback](/quest/main/nvenc-registration.md) - release resources when mapping fails after registration
 - [GPU conversion and NVENC](/quest/main/video-gpu-encode.md) - convert, resize and
   encode imported frames without CPU pixel transfers or fallback
-- [NVENC loading](/quest/main/nvenc-loading.md) - unavailable or incompatible drivers return errors instead of panicking
 - [Media features](/quest/main/media-features.md) - OpenH264 can be excluded, rendering is opt-in, and feature aliases disappear
 - [Shared rate policy](/quest/main/media-rate-policy.md) - the planned public namespace move happens before 0.1
 - [Audio configuration](/quest/main/audio-config.md) - PCM layout, codec settings, and subscription policy have distinct contracts
 - [Audio publication](/quest/main/audio-publication.md) - callers get demand authority and supported options, not internal transport or resampler machinery
-- [Remove ineffective FEC](/quest/main/audio-fec.md) - no public flag promises redundancy the encoder never emits
 - [AEC ownership](/quest/main/audio-aec.md) - one microphone owns an adaptive canceller and controls remain shareable
 - [Playback outcome](/quest/main/audio-playback.md) - nonblocking writes report accepted and dropped audio
 - [Video output](/quest/main/video-output.md) - codec output and subscription policy are separate, with native or CPU frames

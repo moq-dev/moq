@@ -36,7 +36,7 @@ world states the condition as a plain-text `Required` bullet and waits here.
 - [QUIC GCC](/quest/future/quic-gcc.md) - a measured verdict on delay-based congestion control for media egress, shipping as `RealTime`
 - [QUIC FEC](/quest/future/quic-fec.md) - a measured verdict on transport-level FEC vs retransmission
 - [Google BBR comparison](/quest/future/quic-bbr-google.md) - measure growth detection and precautionary probing after the correctness fixes
-- [BBR3 app-limited](/quest/future/quic-bbr-app-limited.md) - whether ProbeRTT and the bandwidth model behave for a sender at the encoder's rate
+- [Natural media drains](/quest/future/quic-bbr-app-limited.md) - whether bounded drain credit avoids ProbeRTT deadline interference
 - [Kernel pacing](/quest/future/quic-kernel-pacing.md) - whether SO_TXTIME pacing beats a userspace pacer the io_uring driver ignores today
 - [Send batching](/quest/future/quic-send-batching.md) - whether sendmmsg across connections pays on the tokio path
 - [Send buffer pools](/quest/future/quic-buffer-pool.md) - whether pooled send buffers beat Bytes in the stream send path

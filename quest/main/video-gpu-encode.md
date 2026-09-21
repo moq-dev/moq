@@ -35,10 +35,6 @@ unsupported and never selects a CPU conversion, upload or software encoder.
   without numeric performance acceptance thresholds. Wire regression and
   opt-in hardware tests into the repository's normal test commands.
 
-## Required
-
-- [NVENC registration rollback](/quest/main/nvenc-registration.md) - safe cleanup when input mapping fails
-
 ## Related
 
 - [Video hardware validation](/quest/future/video-hardware.md) - prior NVENC allocation findings and separate hardware coverage

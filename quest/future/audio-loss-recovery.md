@@ -24,5 +24,4 @@ audio settings. Existing wire compatibility must be demonstrated.
 
 ## Related
 
-- [Remove ineffective FEC](/quest/main/audio-fec.md) - removes the unsupported promise before 0.1
 - [Audio quality](/quest/next/audio-quality-harness/README.md) - quality and latency measurements

@@ -10,8 +10,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use unsafe_libopus::{
 	OPUS_APPLICATION_AUDIO, OPUS_GET_BITRATE_REQUEST, OPUS_GET_LOOKAHEAD_REQUEST, OPUS_OK, OPUS_RESET_STATE,
-	OPUS_SET_BITRATE_REQUEST, OPUS_SET_DTX_REQUEST, OPUS_SET_INBAND_FEC_REQUEST, OpusEncoder, opus_encode_float,
-	opus_encoder_create, opus_encoder_ctl_impl, opus_encoder_destroy, varargs,
+	OPUS_SET_BITRATE_REQUEST, OPUS_SET_DTX_REQUEST, OpusEncoder, opus_encode_float, opus_encoder_create,
+	opus_encoder_ctl_impl, opus_encoder_destroy, varargs,
 };
 
 use super::Encoded;
@@ -118,8 +118,6 @@ pub struct Config {
 	/// bps at the default 20 ms, rises for shorter frames, and is 2400 bps for
 	/// frames of 10 ms and longer.
 	pub bitrate: Option<moq_net::bandwidth::Rate>,
-	/// Enable Opus in-band forward error correction.
-	pub fec: bool,
 	/// Enable Opus discontinuous transmission during silence.
 	pub dtx: bool,
 	/// Encoded frame duration. Opus accepts 2.5 / 5 / 10 / 20 / 40 / 60 ms.
@@ -136,7 +134,6 @@ impl Config {
 			sample_rate: None,
 			channels: None,
 			bitrate: None,
-			fec: false,
 			dtx: false,
 			frame_duration: Duration::from_millis(20),
 		}
@@ -314,12 +311,6 @@ impl Encoder {
 		if let Some(bitrate) = config.bitrate {
 			Self::set_opus_bitrate(inner, codec_channels, bitrate.as_bps(), codec_rate, frame_size)?;
 		}
-		Self::set_opus_ctl(
-			inner,
-			OPUS_SET_INBAND_FEC_REQUEST,
-			i32::from(config.fec),
-			"OPUS_SET_INBAND_FEC",
-		)?;
 		Self::set_opus_ctl(inner, OPUS_SET_DTX_REQUEST, i32::from(config.dtx), "OPUS_SET_DTX")?;
 
 		let bitrate = Self::get_opus_ctl(inner, OPUS_GET_BITRATE_REQUEST, "OPUS_GET_BITRATE")?;
@@ -802,23 +793,13 @@ mod tests {
 	}
 
 	#[test]
-	fn opus_applies_fec_and_dtx_controls() {
+	fn opus_applies_dtx_control() {
 		let enc = Encoder::new(&Config {
-			fec: true,
 			dtx: true,
 			..Config::new(stereo_48k())
 		})
 		.unwrap();
 
-		assert_eq!(
-			Encoder::get_opus_ctl(
-				opus_inner(&enc),
-				unsafe_libopus::OPUS_GET_INBAND_FEC_REQUEST,
-				"OPUS_GET_INBAND_FEC"
-			)
-			.unwrap(),
-			1
-		);
 		assert_eq!(
 			Encoder::get_opus_ctl(opus_inner(&enc), unsafe_libopus::OPUS_GET_DTX_REQUEST, "OPUS_GET_DTX").unwrap(),
 			1

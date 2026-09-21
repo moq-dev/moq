@@ -8,7 +8,7 @@ MoQ's schedule and offers it upstream when it is general. One core serves the
 tokio backend, the thread-per-core `moq-uring` backend, iroh, and qmux. The
 features are per-stream acknowledgment progress, reliable stream resets,
 hierarchical stream scheduling with per-broadcast fairness, the shared stream
-state machine used by qmux, capacity probing by retransmission, per-stream
+state machine used by qmux, capacity probing for media, per-stream
 deadlines, deadline-based keep-alive, wider limits for relay peers, careful
 resume, and ECN. The experiments that may join them (GCC, FEC, receive
 timestamps, kernel pacing, buffer pools) live in next.
@@ -18,7 +18,7 @@ timestamps, kernel pacing, buffer pools) live in next.
 Everything here assumes the single noq stack. The [fork](/quest/next/quic/fork.md)
 is the first quest in the line and most others require it.
 
-The six BBR correctness fixes follow the fork bootstrap. They are separate
+The seven BBR correctness fixes follow the fork bootstrap. They are separate
 PRs, but one owner should work in the shared controller code at a time.
 The [BBR release](/quest/next/quic/bbr-release.md) delivers them without waiting
 for the remaining transport features. The
@@ -49,6 +49,7 @@ This is a transport API change, not a MoQ wire change.
   written down
 - [Preserve QUIC packet identity in BBR](/quest/next/quic/bbr-packet-identity.md) - ACKs and losses identify the right packet across QUIC spaces
 - [Finish each BBR ACK sample before using it](/quest/next/quic/bbr-ack-sampling.md) - current delivery samples reach the model once with consistent metadata
+- [Mark application starvation before the next BBR send](/quest/next/quic/bbr-app-limited.md) - resumed bursts retain correct sample labels
 - [Finish BBR bandwidth-probe feedback once](/quest/next/quic/bbr-probe-feedback.md) - cruise rounds neither age probe history repeatedly nor retain probe-loss classification
 - [Recalibrate BBR startup pacing from measured RTT](/quest/next/quic/bbr-startup-pacing.md) - measured RTT replaces the nominal startup rate for media senders
 - [Protect bandwidth samples during BBR ProbeRTT](/quest/next/quic/bbr-probe-rtt.md) - intentionally reduced sending cannot masquerade as reduced capacity
@@ -74,8 +75,7 @@ This is a transport API change, not a MoQ wire change.
   and MAX_DATA are raised after SETUP identifies a cluster peer
 - [Per-stream deadlines](/quest/next/quic/deadline.md) - hopeless retransmits
   become resets, and a tail loss probe fires early while there is still time
-- [Probe by early retransmission](/quest/next/quic/probe.md) - measure capacity
-  with useful retransmissions instead of padding
+- [Discover media headroom](/quest/next/quic/probe.md) - test useful-media pacing before adding redundant probe traffic
 - [qmux on the QUIC stream state machine](/quest/next/quic/qmux.md) - qmux is a
   first-class crate in the fork over the shared stream state machine
 - [Careful resume on reconnect](/quest/next/quic/careful-resume.md) - a redial

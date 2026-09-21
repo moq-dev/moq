@@ -11,8 +11,8 @@ adopts.
 ## Plan
 
 main is merged into dev as of 2026-09-12, so the merge PR opens from dev with
-the list below as closing keywords once the gates clear. Run `just check-all`,
-`just test all`, `just test smoke-full`, and `just bench origin/main` on the
+the list below as closing keywords once the gates clear. Run `just check --all`,
+`just test all`, `just test smoke --all`, and `just bench origin/main` on the
 merged tree, and record the revision the proof ran on.
 
 Resolve by behavior, never by side. The traps the last main-into-dev merge

@@ -132,9 +132,9 @@ just test
 just fix
 
 # Same as the above, over every package
-just check-all
+just check --all
 just test all
-just fix-all
+just fix --all
 ```
 
 CI runs these same two recipes, so they cover the same ground locally. It sets two things you don't: `MOQ_STRICT=1`, which turns a missing tool into an error instead of a skipped check, and `NEXTEST_PROFILE=ci`, which allows a longer hang timeout.

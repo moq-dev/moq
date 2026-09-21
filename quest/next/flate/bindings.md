@@ -46,7 +46,7 @@ sibling. Document in `doc/lib/{c,py,swift,kt,go,dart}` beside the JSON entry.
 Tests: a moq-ffi round trip next to `json_snapshot_roundtrip`, a libmoq C
 round trip in `src/test.rs`, and one cross-language check that a C-published
 group decodes with the shared vector from the track quest. Run
-`just test smoke-full`.
+`just test smoke --all`.
 
 Public API impact: additive on moq-ffi, libmoq, and every wrapper; `main`.
 Wire impact: none.

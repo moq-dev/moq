@@ -15,7 +15,7 @@ lands in the fork on MoQ's schedule; once a feature has shipped in a MoQ
 release and its shape has stopped moving, split it into an upstream PR with
 the tests it landed with.
 
-Offer the six [BBR correctness fixes](/quest/next/quic/bbr-release.md) with
+Offer the seven [BBR correctness fixes](/quest/next/quic/bbr-release.md) with
 their regressions before promoting BBR as the default. Reuse existing
 upstream work, particularly [PR #802](https://github.com/n0-computer/noq/pull/802),
 and preserve attribution. Fixes can be offered as their shapes settle;
@@ -35,7 +35,7 @@ Then the feature proposal order, each linked to its producing quest:
 5. careful resume as a `Controller` wrapper ([careful resume](/quest/next/quic/careful-resume.md));
 6. ECT(1) marking and its accounting ([L4S](/quest/next/quic/ecn.md));
 7. per-stream deadlines ([deadlines](/quest/next/quic/deadline.md));
-8. capacity probing by early retransmission ([probe](/quest/next/quic/probe.md));
+8. the measured media-headroom mechanism ([probe](/quest/next/quic/probe.md));
 9. the qmux crate over the shared stream state machine ([qmux](/quest/next/quic/qmux.md)).
 
 The next experiments (receive timestamps, GCC, FEC, kernel pacing, send
@@ -59,7 +59,7 @@ offered and answered.
 - [Careful resume on reconnect](/quest/next/quic/careful-resume.md)
 - [L4S on the backbone](/quest/next/quic/ecn.md)
 - [Per-stream deadlines](/quest/next/quic/deadline.md)
-- [Probe by early retransmission](/quest/next/quic/probe.md)
+- [Discover media headroom](/quest/next/quic/probe.md)
 - [qmux on the QUIC stream state machine](/quest/next/quic/qmux.md)
 
 ## Related

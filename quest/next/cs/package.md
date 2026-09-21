@@ -6,7 +6,7 @@
 with the mocking library on NuGet) gives a .NET 8 program the full moq-ffi
 surface as `await`-able classes, with `runtimes/<rid>/native` libraries for
 the release matrix. A `test/smoke/clients/cs` client joins `just test
-smoke-full` and `doc/lib/cs` documents the package.
+smoke --all` and `doc/lib/cs` documents the package.
 
 ## Plan
 
