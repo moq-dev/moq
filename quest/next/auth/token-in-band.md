@@ -62,12 +62,9 @@ AUTH can carry the full grant once the pattern-interest prerequisite lands.
   nothing is refused at the deadline; the cross-language harness runs with
   tokens configured.
 
-Branch from main once [merge-dev](/quest/dev/merge-dev.md) lands.
-Additive.
+Branch from main. Additive.
 
 ## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - release the origin scope and connection surfaces used by AUTH
 
 - [Relay tokens](/quest/next/auth/relay-refresh.md) - supplies the verify and
   widen path the configured tokens reuse

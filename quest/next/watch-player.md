@@ -20,10 +20,6 @@ exported for composition but stop being the front door.
 
 Public API: additive on @moq/watch and @moq/room. Wire: none.
 
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - starts on main
-
 ## Related
 
 - [A/V clock](/quest/next/plan-av-clock.md) - per-track sync handles the Player would own

@@ -89,7 +89,7 @@ struct Camera {
 	device: Option<ID3D11Device>,
 	width: u32,
 	height: u32,
-	framerate: Option<u32>,
+	framerate: Option<crate::Rate>,
 	device_name: String,
 	// Keep the DXGI manager alive for the reader's lifetime (the reader holds its
 	// own ref, but we own the pairing). Drops before `_com`.
@@ -154,7 +154,7 @@ impl Camera {
 					.map_err(|e| mf_err("set frame size", e))?;
 			}
 			if let Some(fps) = config.framerate {
-				want.SetUINT64(&MF_MT_FRAME_RATE, pack_2x32(fps, 1))
+				want.SetUINT64(&MF_MT_FRAME_RATE, pack_2x32(fps.numerator(), fps.denominator()))
 					.map_err(|e| mf_err("set frame rate", e))?;
 			}
 			reader
@@ -182,7 +182,7 @@ impl Camera {
 		}
 		let framerate = unsafe { current.GetUINT64(&MF_MT_FRAME_RATE).ok() }.and_then(|packed| {
 			let (num, den) = unpack_2x32(packed);
-			(den != 0).then(|| (num / den).max(1))
+			crate::Rate::new(num, den).ok()
 		});
 
 		let (device, manager) = match gpu {
@@ -298,7 +298,13 @@ impl Camera {
 				Some(device) => self.sample_to_texture(device, &sample)?,
 				None => self.sample_to_i420(&sample)?,
 			};
-			return Ok(pump::Read::Frame(frame));
+			let timestamp = unsafe { sample.GetSampleTime().ok() }
+				.and_then(|ticks| u64::try_from(ticks).ok())
+				.and_then(|ticks| moq_net::Timestamp::from_micros(ticks / 10).ok());
+			return Ok(match timestamp {
+				Some(timestamp) => pump::Read::FrameAt(frame, timestamp),
+				None => pump::Read::Frame(frame),
+			});
 		}
 	}
 }

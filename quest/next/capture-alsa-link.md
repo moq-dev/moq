@@ -34,4 +34,3 @@ libasound. The PR 3850 capture gate keeps the coverage.
 ## Related
 
 - [Ship capture and playback](/quest/next/cli-packaging.md) - the shippable capture milestone this work supports
-- [Optional native compilation and opt-in rendering](/quest/main/media-features.md) - the host-flag rule this aligns with

@@ -172,7 +172,7 @@ struct Capture {
 	width: u32,
 	height: u32,
 	format: PixelFormat,
-	framerate: u32,
+	framerate: crate::Rate,
 	interval: Duration,
 	next: Instant,
 	name: String,
@@ -275,8 +275,8 @@ impl Capture {
 			return Err(Error::SourceUnavailable(format!("{name} has no capturable area")));
 		}
 		let format = PixelFormat::new(connection.setup(), depth, visual)?;
-		let framerate = config.framerate.unwrap_or(DEFAULT_FRAMERATE).max(1);
-		let interval = Duration::from_micros(1_000_000 / u64::from(framerate));
+		let framerate = config.framerate.unwrap_or(crate::Rate::integer(DEFAULT_FRAMERATE));
+		let interval = Duration::from_secs_f64(1.0 / framerate.as_f64());
 		let cursor = config.cursor
 			&& connection
 				.xfixes_query_version(5, 0)

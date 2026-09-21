@@ -39,10 +39,6 @@ already buffered. All 23 `static async decode` message decoders under
   and pops the group under the new range, so incomplete is never read as "no
   control pending"; the flood case stays bounded.
 
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - the dev-only API must be released on main before this implementation starts
-
 ## Closes
 
 - [#2850](https://github.com/moq-dev/moq/issues/2850) - close this issue when the quest finishes

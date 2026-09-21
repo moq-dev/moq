@@ -105,14 +105,14 @@ impl Rung {
 	/// worker's initialization and uninitialize COM on one that never initialized
 	/// it. The sink owns a thread and stays on it.
 	async fn encode(&self, color: Option<moq_video::Color>) -> Result<moq_video::encode::Sink, Error> {
-		let mut config =
-			moq_video::encode::Config::new(self.info.size.width, self.info.size.height, self.info.framerate);
+		let framerate = self.info.framerate.unwrap_or(moq_video::Rate::new(30, 1).unwrap());
+		let mut config = moq_video::encode::Config::new(self.info.size.width, self.info.size.height, framerate);
 		config.bitrate = Some(self.info.bitrate);
 		config.kind = self.encoder.clone();
 		config.color = color;
 		// Keyframes are forced at every group boundary; the GOP is only a
 		// backstop against pathologically long source groups.
-		config.gop = self.info.framerate.saturating_mul(8).max(1);
+		config.gop = framerate.frames(std::time::Duration::from_secs(8)).max(1);
 		Ok(moq_video::encode::Sink::open(&config).await?)
 	}
 }
@@ -729,7 +729,7 @@ mod tests {
 			height: 120,
 			size: moq_video::Size::new(160, 120),
 			bitrate: moq_net::bandwidth::Rate::from_bps(100_000),
-			framerate: 30,
+			framerate: Some(moq_video::Rate::new(30, 1).unwrap()),
 		};
 
 		let active = crate::active::Producer::default();

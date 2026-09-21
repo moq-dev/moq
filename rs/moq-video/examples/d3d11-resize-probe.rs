@@ -833,7 +833,8 @@ mod probe {
 	/// `FRAMES` access units of a gradient, encoded by openh264 (Annex-B with
 	/// inline parameter sets, which is what the MFT wants).
 	fn stream() -> Result<Vec<Vec<u8>>> {
-		let mut config = moq_video::encode::Config::new(SOURCE.width, SOURCE.height, 30);
+		let mut config =
+			moq_video::encode::Config::new(SOURCE.width, SOURCE.height, moq_video::Rate::new(30, 1).unwrap());
 		config.kind = moq_video::encode::Kind::Software;
 		let mut encoder = moq_video::encode::Encoder::new(&config).context("openh264 encoder")?;
 
@@ -1136,7 +1137,11 @@ mod probe {
 			for (rung, target) in SIZES.into_iter().enumerate() {
 				workers.push(scope.spawn(move || -> Result<()> {
 					let _com = ComGuard::new().with_context(|| format!("ladder rung {rung} COM"))?;
-					let mut config = moq_video::encode::Config::new(target.width, target.height, 30);
+					let mut config = moq_video::encode::Config::new(
+						target.width,
+						target.height,
+						moq_video::Rate::new(30, 1).unwrap(),
+					);
 					config.kind = moq_video::encode::Kind::Named("mediafoundation".into());
 					let mut encoder = moq_video::encode::Encoder::new(&config)
 						.with_context(|| format!("ladder rung {rung} hardware encoder"))?;

@@ -28,11 +28,8 @@ Public API/wire impact: review only.
 
 ## Required
 
-- [Media features](/quest/main/media-features.md) - independent build choices work
 - [Audio configuration](/quest/main/audio-config.md) - PCM and codec contracts are settled
-- [Audio publication](/quest/main/audio-publication.md) - only intended authority is public
 - [AEC ownership](/quest/main/audio-aec.md) - microphone attachment is exclusive
 - [Playback outcome](/quest/main/audio-playback.md) - drops are observable
 - [Video output](/quest/main/video-output.md) - output and subscription contracts are distinct
-- [Video timing](/quest/main/video-timing.md) - timestamps and rates retain their meaning
 - [Video GOP](/quest/main/video-gop.md) - deferred refresh does not replace the group API

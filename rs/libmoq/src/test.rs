@@ -3779,7 +3779,7 @@ fn video_raw_publish_rejects_invalid_config() {
 #[test]
 fn video_raw_decode() {
 	// Encode a few gray frames to Annex-B (avc3, SPS/PPS inline on the keyframe).
-	let mut config = moq_video::encode::Config::new(320, 240, 30);
+	let mut config = moq_video::encode::Config::new(320, 240, moq_video::Rate::new(30, 1).unwrap());
 	config.kind = moq_video::encode::Kind::Software;
 	let mut encoder = moq_video::encode::Encoder::new(&config).expect("openh264 encoder");
 	let gray = vec![0x80u8; 320 * 240 * 4];

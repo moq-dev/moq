@@ -35,8 +35,6 @@ Worth confirming the trade too: making `open` block on credit moves the backpres
 
 - [Open contract](/quest/next/perf/uring-open-contract.md) - settle concurrent ownership and backpressure before implementation
 
-- [Merge dev](/quest/dev/merge-dev.md) - builds on dev-only code that reaches `main` with the merge
-
 ## Closes
 
 - [#3129](https://github.com/moq-dev/moq/issues/3129) - close this issue when the quest finishes

@@ -207,7 +207,7 @@ fn video_ceiling(
 		.or_else(|| rendition.bitrate.map(moq_net::bandwidth::Rate::from_bps))
 		.unwrap_or_else(|| {
 			moq_net::bandwidth::Rate::from_bps(
-				((config.size().pixels() * config.framerate as u64) as f64 * 0.07) as u64,
+				(config.size().pixels() as f64 * config.framerate.as_f64() * 0.07) as u64,
 			)
 		})
 }
@@ -681,7 +681,9 @@ pub unsafe extern "C" fn moq_encode_video(
 
 		let format = pixel_format_from_u32(raw_input.format)?;
 
-		let mut config = moq_video::encode::Config::new(raw_input.width, raw_input.height, raw_input.framerate);
+		let framerate = moq_video::Rate::new(raw_input.framerate, 1)
+			.map_err(|_| Error::Video(moq_video::Error::InvalidFramerate(raw_input.framerate).into()))?;
+		let mut config = moq_video::encode::Config::new(raw_input.width, raw_input.height, framerate);
 		config.codec = codec_from_u32(raw_output.codec)?;
 		config.kind = unsafe { encoder_kind(raw_output)? };
 		// The C ABI spells an unset knob as 0, which neither field accepts as a real
@@ -963,7 +965,10 @@ mod tests {
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
 		let consumer = broadcast.consume();
 		// Probed rather than hand-built, so the test track carries what a real one would.
-		let rendition = moq_video::encode::Config::new(320, 240, 30).probe().await.unwrap();
+		let rendition = moq_video::encode::Config::new(320, 240, moq_video::Rate::new(30, 1).unwrap())
+			.probe()
+			.await
+			.unwrap();
 		let producer = moq_video::encode::Producer::new(broadcast, catalog, rendition).unwrap();
 
 		let name = producer.demand().name().to_string();

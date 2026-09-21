@@ -9,9 +9,10 @@
 //! [`open`] picks the best backend for a [`Codec`] and [`Config`], trying
 //! hardware candidates (platform-gated: VideoToolbox on macOS, Media Foundation
 //! / DXVA on Windows, MediaCodec on Android, NVDEC, VAAPI, then V4L2 on Linux) before
-//! the openh264 software fallback, exactly like the encode side. Only backends
-//! that support the requested codec are considered: there is no software H.265
-//! or AV1 decoder, so those tracks have no fallback below the hardware path.
+//! the OpenH264 software fallback when this build enables it, exactly like the
+//! encode side. Only backends that support the requested codec are considered:
+//! there is no software H.265 or AV1 decoder, so those tracks have no fallback
+//! below the hardware path.
 
 use bytes::Bytes;
 use moq_net::Timestamp;
@@ -19,6 +20,7 @@ use moq_net::Timestamp;
 use super::decoder::{Config, Kind};
 use crate::{Error, Frame};
 
+#[cfg(feature = "openh264")]
 mod openh264;
 
 #[cfg(test)]
@@ -157,11 +159,14 @@ const HARDWARE: &[Candidate] = &[
 	},
 ];
 
-const SOFTWARE: Candidate = Candidate {
-	name: openh264::NAME,
-	supports: |c| matches!(c, Codec::H264),
-	open: openh264::Openh264::open,
-};
+const SOFTWARE: &[Candidate] = &[
+	#[cfg(feature = "openh264")]
+	Candidate {
+		name: openh264::NAME,
+		supports: |c| matches!(c, Codec::H264),
+		open: openh264::Openh264::open,
+	},
+];
 
 /// Test-only backends. Deliberately in neither list above, so `Auto` /
 /// `Hardware` / `Software` can never select one: they exist to be asked for by
@@ -221,18 +226,14 @@ pub(crate) fn open(codec: Codec, config: &Config) -> Result<Box<dyn Backend>, Er
 		Kind::Auto => HARDWARE
 			.iter()
 			.map(Attempt::hardware)
-			.chain(std::iter::once(Attempt::software(&SOFTWARE)))
+			.chain(SOFTWARE.iter().map(Attempt::software))
 			.collect(),
 		Kind::Hardware => HARDWARE.iter().map(Attempt::hardware).collect(),
-		Kind::Software => vec![Attempt::software(&SOFTWARE)],
+		Kind::Software => SOFTWARE.iter().map(Attempt::software).collect(),
 		Kind::Named(name) => HARDWARE
 			.iter()
 			.map(Attempt::hardware)
-			.chain(
-				std::iter::once(&SOFTWARE)
-					.chain(NAMED_ONLY.iter())
-					.map(Attempt::software),
-			)
+			.chain(SOFTWARE.iter().chain(NAMED_ONLY.iter()).map(Attempt::software))
 			.filter(|a| a.candidate.name == name)
 			.collect(),
 	};
@@ -313,7 +314,7 @@ fn select(codec: Codec, attempts: Vec<Attempt>, config: &Config) -> Result<Box<d
 fn available_names(codec: Codec) -> Vec<&'static str> {
 	HARDWARE
 		.iter()
-		.chain(std::iter::once(&SOFTWARE))
+		.chain(SOFTWARE.iter())
 		.filter(|candidate| (candidate.supports)(codec))
 		.map(|candidate| candidate.name)
 		.collect()
@@ -408,12 +409,25 @@ mod tests {
 			Err(Error::UnknownDecoder { name, codec, available }) => {
 				assert_eq!(name, "vappi");
 				assert_eq!(codec, crate::decode::Codec::H264);
-				// openh264 is unconditional, so every build has one to offer.
+				#[cfg(feature = "openh264")]
 				assert!(available.contains(openh264::NAME), "nothing offered: {available}");
+				#[cfg(not(feature = "openh264"))]
+				assert!(!available.contains("openh264"), "disabled backend offered: {available}");
 			}
 			Err(other) => panic!("expected UnknownDecoder, got {other:?}"),
 			Ok(backend) => panic!("expected UnknownDecoder, opened {}", backend.name()),
 		}
+	}
+
+	#[cfg(not(feature = "openh264"))]
+	#[test]
+	fn disabled_software_backend_is_not_selected() {
+		let mut config = Config::new();
+		config.kind = Kind::Software;
+		assert!(matches!(open(Codec::H264, &config), Err(Error::NoDecoder(_))));
+
+		config.kind = Kind::Named("openh264".to_owned());
+		assert!(matches!(open(Codec::H264, &config), Err(Error::UnknownDecoder { .. })));
 	}
 
 	/// The reason each candidate refused belongs in the error. Only the DEBUG
@@ -439,7 +453,7 @@ mod tests {
 	/// The decode half of the same guarantee the encode side keeps.
 	#[test]
 	fn every_compiled_backend_is_named_publicly() {
-		for candidate in HARDWARE.iter().chain(std::iter::once(&SOFTWARE)) {
+		for candidate in HARDWARE.iter().chain(SOFTWARE.iter()) {
 			assert!(
 				NAMES.contains(&candidate.name),
 				"{} is compiled in but missing from NAMES",

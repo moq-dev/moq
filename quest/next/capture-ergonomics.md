@@ -30,4 +30,3 @@ validation already has its own quest.
 
 - [Capture format validation](/quest/next/audio-capture-format.md) - independent validation work already scoped
 - [AEC ownership](/quest/main/audio-aec.md) - one microphone per adaptive canceller
-- [Video timing](/quest/main/video-timing.md) - the capture clock contract

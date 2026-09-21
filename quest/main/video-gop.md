@@ -37,10 +37,6 @@ documentation and leave the deferred refresh quest owning warmup/wire behavior.
 Public API: typed GOP and cut naming in Rust video/transcode callers. Wire: no
 change to current keyframe grouping.
 
-## Required
-
-- [Video timing](/quest/main/video-timing.md) - interval defaults derive from the settled rate type
-
 ## Related
 
 - [Refresh groups](/quest/next/intra-refresh/encode-config.md) - later refresh variant and grouping implementation

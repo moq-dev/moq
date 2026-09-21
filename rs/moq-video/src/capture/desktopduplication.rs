@@ -87,7 +87,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 			let geometry = Geometry {
 				width: cap.width,
 				height: cap.height,
-				framerate: Some(cap.framerate),
+				framerate: Some(crate::Rate::integer(cap.framerate)),
 				label: cap.device_name.clone(),
 			};
 			Ok((cap, geometry))
@@ -155,7 +155,10 @@ impl Duplicator {
 			)));
 		}
 
-		let framerate = config.framerate.unwrap_or(DEFAULT_FRAMERATE).max(1);
+		let framerate = config
+			.framerate
+			.unwrap_or(crate::Rate::integer(DEFAULT_FRAMERATE))
+			.rounded();
 		let mut cap = Self {
 			device,
 			context,

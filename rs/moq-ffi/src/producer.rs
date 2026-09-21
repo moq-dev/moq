@@ -81,7 +81,7 @@ pub(crate) struct BroadcastProducer {
 /// arm silently dropped.
 struct MediaProducer {
 	// Boxed because the codec splitters/imports make this much larger than the container one.
-	import: Box<moq_mux::import::Track<Extra>>,
+	import: Box<moq_mux::import::Track>,
 	/// Subscriber demand (name/used/unused) for the one track this publishes.
 	demand: moq_net::track::Demand,
 }
@@ -93,7 +93,7 @@ struct ContainerProducer {
 
 /// A byte-stream importer for one codec track, where frame boundaries are inferred.
 struct MediaStreamProducer {
-	import: Box<moq_mux::import::TrackStream<Extra>>,
+	import: Box<moq_mux::import::TrackStream>,
 }
 
 /// A byte-stream importer for a container, which recovers its own framing.
@@ -873,7 +873,7 @@ impl MoqGroupProducer {
 
 impl MoqMediaProducer {
 	/// Wrap a single-codec importer, capturing the demand handle its track exposes.
-	fn new(import: moq_mux::import::Track<Extra>) -> Arc<Self> {
+	fn new(import: moq_mux::import::Track) -> Arc<Self> {
 		let demand = import.demand();
 		Arc::new(Self {
 			inner: std::sync::Mutex::new(Some(MediaProducer {

@@ -106,8 +106,8 @@ moq-rtmp = { workspace = true }
 moq-srt = { workspace = true }
 # Raw qmux listeners are part of the CLI surface. `uds` compiles only on Unix.
 moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "tcp", "uds"] }
-moq-transcode = { workspace = true, optional = true }
-moq-video = { workspace = true, optional = true }
+moq-transcode = { workspace = true, optional = true, features = ["openh264"] }
+moq-video = { workspace = true, optional = true, features = ["openh264"] }
 pollster = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["rustls", "json"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }

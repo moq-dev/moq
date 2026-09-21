@@ -36,10 +36,6 @@ Gaps found method by method against `rs/moq-ffi/src`:
 Public API: additive on the wrappers. Wire: none. Binding parity gates
 the release, not the merge.
 
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - the surface is final after it
-
 ## Related
 
 - [Release](/quest/dev/release.md) - names this as a release gate

@@ -10,37 +10,30 @@ use super::FrameHeader;
 /// key frame's header supplies the catalog config, so the rendition isn't published
 /// until then. Build it with [`new`](Self::new), passing the track producer and the
 /// [`catalog::Reserved`](crate::catalog::Reserved) it reserves its rendition from.
-pub struct Import<E: CatalogExt = ()> {
+pub struct Import {
 	// The track being produced.
-	track: crate::container::Producer<crate::catalog::hang::Container>,
-
-	// This importer's catalog rendition, published on the first key frame.
-	rendition: crate::catalog::VideoTrack<E>,
+	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig>,
 
 	catalog: crate::codec::video::Catalog,
 }
 
-impl<E: CatalogExt> Import<E> {
+impl Import {
 	/// Publish on an existing track producer, seeding the rendition from `hint` (pass
 	/// [`VideoHint::default`](crate::catalog::VideoHint) for none).
 	///
 	/// VP9 carries no out-of-band config, so a hint carrying a codec publishes the catalog rendition
 	/// up front instead of waiting for the first key frame.
-	pub fn new(
+	pub fn new<E: CatalogExt>(
 		track: moq_net::track::Producer,
 		reserved: crate::catalog::Reserved<E>,
 		hint: crate::catalog::VideoHint,
 	) -> crate::Result<Self> {
-		let rendition = reserved.video(track.name())?;
 		// The hint names the container; the writer is built from that same value so the wire
 		// cannot disagree with what the rendition advertises.
 		let wire = crate::catalog::hang::Container::try_from(&hint)?;
 		let catalog = crate::codec::video::Catalog::new(hint);
-		let mut import = Self {
-			track: reserved.producer().media_producer(track, wire)?,
-			rendition,
-			catalog,
-		};
+		let track = reserved.video(track, wire, None)?;
+		let mut import = Self { track, catalog };
 		if let Some(config) = import.catalog.initial_config() {
 			import.apply_config(config)?;
 		}
@@ -74,7 +67,7 @@ impl<E: CatalogExt> Import<E> {
 	/// A changed config just re-mirrors the rendition; there are no fixed tracks to reject a
 	/// reconfiguration.
 	fn apply_config(&mut self, config: hang::catalog::VideoConfig) -> crate::Result<()> {
-		self.catalog.publish(&mut self.rendition, config)
+		self.catalog.publish(&mut self.track, config)
 	}
 
 	/// Decode a single VP9 frame (or superframe).
@@ -88,34 +81,34 @@ impl<E: CatalogExt> Import<E> {
 			self.init(key.to_catalog(), key.width, key.height)?;
 		}
 
-		let pts = self.rendition.timestamp(pts)?;
+		let pts = self.track.timestamp(pts)?;
 		self.track.write(Frame {
 			timestamp: pts,
 			payload: frame.into_bytes(),
 			keyframe: header.keyframe,
 			duration: None,
 		})?;
-		self.catalog
-			.on_frame(&mut self.rendition, self.track.track().is_used())?;
-		self.estimate()?;
+		let demand = self.track.track().is_used();
+		self.catalog.on_frame(&mut self.track, demand)?;
 
 		Ok(())
 	}
 
 	/// Re-evaluate stall from source silence.
 	pub fn tick(&mut self) -> crate::Result<()> {
-		self.catalog.tick(&mut self.rendition, self.track.track().is_used())
+		let demand = self.track.track().is_used();
+		self.catalog.tick(&mut self.track, demand)
 	}
 
 	/// The source is gone; this rendition is never stalled while idle.
 	pub fn idle(&mut self) -> crate::Result<()> {
-		self.catalog.idle(&mut self.rendition)
+		self.catalog.idle(&mut self.track)
 	}
 
 	/// Record the encode duration before publishing its frames so the catalog can report a stall.
 	pub fn observe_lag(&mut self, lag: std::time::Duration) -> crate::Result<()> {
-		self.catalog
-			.observe_lag(&mut self.rendition, self.track.track().is_used(), lag)
+		let demand = self.track.track().is_used();
+		self.catalog.observe_lag(&mut self.track, demand, lag)
 	}
 
 	/// A watch-only handle to this track's subscriber demand.
@@ -126,7 +119,6 @@ impl<E: CatalogExt> Import<E> {
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
 		self.track.finish()?;
-		self.estimate()?;
 		Ok(())
 	}
 
@@ -138,21 +130,15 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Publish what the track measured (bitrate, jitter) into the catalog rendition, filling only
 	/// the fields its config didn't supply.
-	fn estimate(&mut self) -> crate::Result<()> {
-		self.rendition.estimate(self.track.estimate())
-	}
-
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		self.track.cut(end)?;
-		self.estimate()?;
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
 		self.track.seek(sequence)?;
-		self.estimate()?;
 		Ok(())
 	}
 }

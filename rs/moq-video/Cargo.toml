@@ -22,11 +22,11 @@ categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 # on. The features exist so a consumer can pick what it wants, not to hide code
 # from the default compile (`just check` lints default features only, so the
 # opt-in ones are compiled by nightly's `just rs features` and `just rs macos`).
-# Openh264 stays as the always-compiled software fallback. Workspace consumers
-# opt out at the root manifest (`default-features = false`) and pick per crate,
-# so the relay and the language bindings never build the device or render
-# stacks.
-default = ["mediacodec", "nvidia", "render"]
+# OpenH264 remains the default software fallback, but is optional so a hardware-
+# only consumer does not compile its vendored C++. Workspace consumers opt out
+# at the root manifest (`default-features = false`) and pick per crate, so the
+# relay and the language bindings never build device or rendering stacks.
+default = ["mediacodec", "nvidia", "openh264"]
 # Native camera and screen capture. Off by default because the Linux camera path
 # (the `v4l` crate) runs bindgen over the kernel's videodev2.h, so the build host
 # needs libclang and the Linux headers; macOS and Windows use OS frameworks and
@@ -44,11 +44,9 @@ mediacodec = ["dep:ndk"]
 # this on still links GPU-less and starts driverless, falling back to the next
 # encoder or decoder.
 nvidia = ["dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
-# Compatibility aliases for the pre-consolidation names, kept so a manifest that
-# already asks for the old split still resolves. Undocumented on purpose: the
-# feature tables name only `nvidia`.
-nvenc = ["nvidia"]
-nvdec = ["nvidia"]
+# Vendored, statically linked software H.264 encode/decode. Enabled by default,
+# but separable from native codecs for hardware-only and minimal builds.
+openh264 = ["dep:openh264", "dep:openh264-sys2"]
 # Intel/AMD VAAPI hardware codecs (Linux): the H.264 encoder and decoder. Off by
 # default because moq-vaapi's build script runs bindgen over its vendored libva
 # headers, so the build host needs libclang. At runtime libva is dlopen'd: the
@@ -109,17 +107,16 @@ fast_image_resize = "6"
 hang = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
-# Vendored, statically-linked software H.264 fallback (no system dependency).
-# Always compiled in: hardware encoders (VideoToolbox / Media Foundation /
-# NVENC / VAAPI) are preferred, but openh264 is the fallback when none is usable
-# (GPU-less box, or a resolution a hardware encoder rejects).
-openh264 = "0.9.8"
+# Vendored, statically linked software H.264 fallback (no system dependency).
+# Hardware encoders are preferred, but an OpenH264-enabled build falls back when
+# none is usable (a GPU-less box, or a resolution a hardware encoder rejects).
+openh264 = { version = "0.9.8", optional = true }
 # For the raw `ENCODER_OPTION_BITRATE` set_option: openh264 takes a bitrate only
 # at construction and re-exports none of the sys types needed to retune a live
 # encoder. `default-features = false` because openh264 already turns on the
 # features it needs; cargo unifies this on the same version it depends on, so the
 # raw API types stay identical.
-openh264-sys2 = { version = "0.9.8", default-features = false }
+openh264-sys2 = { version = "0.9.8", default-features = false, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tracing = { workspace = true }

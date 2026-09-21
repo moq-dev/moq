@@ -391,7 +391,9 @@ impl MoqBroadcastProducer {
 	) -> Result<Arc<MoqVideoProducer>, MoqError> {
 		let _guard = crate::ffi::runtime().enter();
 
-		let mut config = moq_video::encode::Config::new(input.width, input.height, input.framerate);
+		let framerate = moq_video::Rate::new(input.framerate, 1)
+			.map_err(|_| MoqError::from(moq_video::Error::InvalidFramerate(input.framerate)))?;
+		let mut config = moq_video::encode::Config::new(input.width, input.height, framerate);
 		config.codec = output.codec.into();
 		config.kind = output.kind.into();
 		config.bitrate = output.bitrate.map(moq_net::bandwidth::Rate::from_bps);
@@ -466,7 +468,7 @@ fn video_ceiling(
 		.unwrap_or_else(|| {
 			// Same 0.07 bits/pixel/s default moq-video uses when neither is set.
 			moq_net::bandwidth::Rate::from_bps(
-				((config.size().pixels() * config.framerate as u64) as f64 * 0.07) as u64,
+				(config.size().pixels() as f64 * config.framerate.as_f64() * 0.07) as u64,
 			)
 		})
 }

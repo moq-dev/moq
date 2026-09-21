@@ -222,14 +222,8 @@ fn framerates(device: &Device, fourcc: FourCC, size: Size) -> Result<Vec<Rate>, 
 }
 
 fn rate(interval: v4l::Fraction) -> Result<Rate, Error> {
-	let frames = std::num::NonZeroU32::new(interval.denominator);
-	let seconds = std::num::NonZeroU32::new(interval.numerator);
-	match (frames, seconds) {
-		(Some(frames), Some(seconds)) => Ok(Rate { frames, seconds }),
-		_ => Err(Error::Codec(anyhow::anyhow!(
-			"V4L2 reported a zero frame interval component"
-		))),
-	}
+	Rate::new(interval.denominator, interval.numerator)
+		.map_err(|error| Error::Codec(anyhow::anyhow!("invalid V4L2 frame interval: {error}")))
 }
 
 /// Open a V4L2 camera and stream its frames over a pump thread.
@@ -313,7 +307,7 @@ pub(crate) struct Camera {
 	height: u32,
 	/// Bytes per row of the YUYV buffer (`bytesperline`); unused for MJPEG.
 	stride: u32,
-	framerate: Option<u32>,
+	framerate: Option<Rate>,
 	name: String,
 }
 
@@ -335,7 +329,7 @@ impl Camera {
 		let (width, height, stride) = (format.width, format.height, format.stride);
 		Size::new(width, height).validate("camera resolution")?;
 
-		let framerate = rate.map(|rate| rate.rounded());
+		let framerate = rate;
 
 		// The stream owns a clone of the device's `Arc<Handle>`, so the fd stays
 		// open after `device` drops here; the mmap'd buffers live with the stream.
@@ -386,7 +380,19 @@ impl Camera {
 				I420::from_rgb(&rgb, crate::Size::new(self.width, self.height))?
 			}
 		};
-		Ok(pump::Read::Frame(Surface::I420(i420)))
+		let timestamp = u64::try_from(meta.timestamp.sec)
+			.ok()
+			.and_then(|seconds| seconds.checked_mul(1_000_000))
+			.and_then(|micros| {
+				u64::try_from(meta.timestamp.usec)
+					.ok()
+					.and_then(|part| micros.checked_add(part))
+			})
+			.and_then(|micros| moq_net::Timestamp::from_micros(micros).ok());
+		Ok(match timestamp {
+			Some(timestamp) => pump::Read::FrameAt(Surface::I420(i420), timestamp),
+			None => pump::Read::Frame(Surface::I420(i420)),
+		})
 	}
 }
 
@@ -421,7 +427,7 @@ fn open_error(device: &str, error: std::io::Error) -> Error {
 
 struct Request {
 	size: Size,
-	framerate: Option<u32>,
+	framerate: Option<Rate>,
 }
 
 /// Negotiate the format we can convert to I420 that lands closest to `want`.
@@ -442,7 +448,8 @@ fn negotiate(device: &Device, name: &str, want: Request) -> Result<(Format, Sour
 	negotiate_with(name, want, |format| {
 		let format = set_format(device, format)?;
 		if let Some(fps) = framerate {
-			match Capture::set_params(device, &Parameters::with_fps(fps)) {
+			let interval = v4l::Fraction::new(fps.denominator(), fps.numerator());
+			match Capture::set_params(device, &Parameters::new(interval)) {
 				Ok(_) => {}
 				Err(error) if matches!(error.raw_os_error(), Some(libc::EINVAL | libc::ENOTTY)) => {}
 				Err(error) => return Err(open_error(name, error)),
@@ -532,17 +539,14 @@ fn closest(
 		})
 }
 
-fn rate_distance(left: Option<Rate>, right: Option<Rate>, want: Option<u32>) -> std::cmp::Ordering {
+fn rate_distance(left: Option<Rate>, right: Option<Rate>, want: Option<Rate>) -> std::cmp::Ordering {
 	let Some(want) = want else {
 		return std::cmp::Ordering::Equal;
 	};
 	match (left, right) {
-		(Some(left), Some(right)) => {
-			let delta =
-				|rate: Rate| u64::from(rate.frames.get()).abs_diff(u64::from(want) * u64::from(rate.seconds.get()));
-			(u128::from(delta(left)) * u128::from(right.seconds.get()))
-				.cmp(&(u128::from(delta(right)) * u128::from(left.seconds.get())))
-		}
+		(Some(left), Some(right)) => (left.as_f64() - want.as_f64())
+			.abs()
+			.total_cmp(&(right.as_f64() - want.as_f64()).abs()),
 		(Some(_), None) => std::cmp::Ordering::Less,
 		(None, Some(_)) => std::cmp::Ordering::Greater,
 		(None, None) => std::cmp::Ordering::Equal,
@@ -607,14 +611,13 @@ mod tests {
 	#[test]
 	fn rates_preserve_fractional_and_sub_one_fps_intervals() {
 		let ntsc = rate(v4l::Fraction::new(1001, 30000)).unwrap();
-		assert_eq!(ntsc.frames().get(), 30000);
+		assert_eq!(ntsc.numerator(), 30000);
 		assert_eq!(ntsc.rounded(), 30);
-		assert_eq!(ntsc.interval(), std::time::Duration::from_secs(1001));
+		assert_eq!(ntsc.denominator(), 1001);
 		let slow = rate(v4l::Fraction::new(2, 1)).unwrap();
-		assert_eq!(slow.frames().get(), 1);
+		assert_eq!(slow.numerator(), 1);
 		assert_eq!(slow.rounded(), 1);
-		assert_eq!(rate(v4l::Fraction::new(1, u32::MAX)).unwrap().rounded(), u32::MAX);
-		assert_eq!(slow.interval(), std::time::Duration::from_secs(2));
+		assert_eq!(slow.denominator(), 2);
 		assert!(slow < ntsc);
 		assert!(rate(v4l::Fraction::new(0, 30)).is_err());
 		assert!(rate(v4l::Fraction::new(1, 0)).is_err());
@@ -649,7 +652,7 @@ mod tests {
 		let mut formats = Vec::new();
 		let want = Request {
 			size: Size::new(1280, 720),
-			framerate: Some(60),
+			framerate: Some(Rate::new(60, 1).unwrap()),
 		};
 		let (_, source, accepted) = negotiate_with("camera", want, |format| {
 			formats.push(format.fourcc);
@@ -669,13 +672,10 @@ mod tests {
 	fn rate_scoring_preserves_fractional_precision_and_handles_unknown_rates() {
 		let ntsc = Some(rate(v4l::Fraction::new(1001, 60000)).unwrap());
 		let thirty = Some(rate(v4l::Fraction::new(1, 30)).unwrap());
-		assert!(rate_distance(ntsc, thirty, Some(60)).is_lt());
-		assert!(rate_distance(thirty, ntsc, Some(30)).is_lt());
-		assert!(rate_distance(ntsc, None, Some(60)).is_lt());
+		assert!(rate_distance(ntsc, thirty, Some(Rate::new(60, 1).unwrap())).is_lt());
+		assert!(rate_distance(thirty, ntsc, Some(Rate::new(30, 1).unwrap())).is_lt());
+		assert!(rate_distance(ntsc, None, Some(Rate::new(60, 1).unwrap())).is_lt());
 		assert!(rate_distance(ntsc, thirty, None).is_eq());
-		let tiny = Some(rate(v4l::Fraction::new(u32::MAX, 1)).unwrap());
-		let huge = Some(rate(v4l::Fraction::new(1, u32::MAX)).unwrap());
-		assert!(rate_distance(tiny, huge, Some(u32::MAX)).is_gt());
 	}
 
 	/// A one-pixel step over a 4K range is 8 million modes, and reporting them

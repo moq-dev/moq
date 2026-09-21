@@ -55,10 +55,10 @@ capture = [
 # as `capture`.
 playback = ["dep:cpal", "dep:fixed-resample", "dep:tokio", "dep:tracing"]
 # Reach devices through the Linux sound server rather than its ALSA plugin, for
-# the server's own device names and routing. cpal picks the host at runtime, so
-# these only cost a link against the client library.
-pipewire = ["cpal/pipewire"]
-pulseaudio = ["cpal/pulseaudio"]
+# the server's own device names and routing. These customize cpal only when
+# `capture` or `playback` activates it, so a host flag alone pulls no audio I/O.
+pipewire = ["cpal?/pipewire"]
+pulseaudio = ["cpal?/pulseaudio"]
 # Acoustic echo cancellation: subtract what `playback` is playing from what
 # `capture` hears, so a speakerphone doesn't send its own output back. Needs
 # both halves, since the canceller taps the output mix as its reference.

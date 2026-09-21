@@ -161,13 +161,7 @@ impl Audio {
 		reserve: bool,
 	) -> Result<Id, Error> {
 		let producer = moq_audio::encode::Producer::new(broadcast, catalog, input, &options)?;
-		let reservation = reserve.then(|| {
-			Arc::new(
-				options
-					.bandwidth
-					.reserve(&producer.track().demand(), producer.bitrate()),
-			)
-		});
+		let reservation = reserve.then(|| Arc::new(options.bandwidth.reserve(&producer.demand(), producer.bitrate())));
 		self.producers
 			.insert(Shared::new(AudioEncoder { producer, reservation }))
 	}
@@ -190,7 +184,6 @@ impl Audio {
 			.as_ref()
 			.ok_or(Error::MediaNotFound)?
 			.producer
-			.track()
 			.demand())
 	}
 

@@ -52,7 +52,8 @@ use crate::{Color, Error, Size};
 pub struct Frame {
 	/// Presentation timestamp. It rides through the encoder with the picture, so a
 	/// backend that buffers or reorders still stamps each packet with the time of
-	/// the frame it actually encoded.
+	/// the frame it actually encoded. Capture streams use a monotonic timeline
+	/// private to that stream; turnkey publishing maps it to the broadcast clock.
 	pub timestamp: Timestamp,
 	/// The pixels, and where they currently live.
 	pub surface: Surface,
@@ -792,6 +793,7 @@ impl I420 {
 	/// strides, which a decoder may pad wider than the visible width. Used by the
 	/// software H.264 decode backend, whose `DecodedYUV` exposes strided planes.
 	/// Width and height must be even (4:2:0 chroma).
+	#[cfg_attr(not(feature = "openh264"), allow(dead_code))]
 	pub(crate) fn from_planes(
 		y: &[u8],
 		u: &[u8],

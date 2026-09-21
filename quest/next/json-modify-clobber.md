@@ -13,10 +13,6 @@ own doc says it prevents.
 with a regression that publishes one shape, modifies as another, and
 expects an error. Public API: none. Wire: none.
 
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - the dev-only guard this fixes
-
 ## Related
 
 - [JSON mutate](/quest/next/json-mutate.md) - the closure form beside the guard

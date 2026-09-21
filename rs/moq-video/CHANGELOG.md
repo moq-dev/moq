@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- [**breaking**] OpenH264 is now the default `openh264` feature, rendering is
+  opt-in, and the deprecated `nvenc` and `nvdec` feature aliases are removed.
 - [**breaking**] `encode::Producer::finish` borrows (`&mut self`) instead of consuming, so a later
   `abort(self)` can still run after a clean end.
 - [**breaking**] Frame resize and RGB/BGRA conversion each have one configured
