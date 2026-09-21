@@ -68,7 +68,9 @@ public final class VideoProducer: Sendable {
     /// Optional: the encoder keyframes every `gop` frames on its own, and each
     /// of those cuts a group, so a subscriber can always join without this.
     /// Reach for it only to place the boundaries yourself, aligning groups with
-    /// something the encoder can't see such as a scene change.
+    /// something the encoder can't see such as a scene change. Throws if the
+    /// selected encoder cannot force a keyframe; nothing is queued then and
+    /// groups keep their interval.
     public func cut() throws {
         try ffi.cut()
     }

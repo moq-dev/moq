@@ -182,7 +182,7 @@ mod tests {
 		let mut encoder = Encoder::new(&config).unwrap();
 		let rgba = vec![0x80u8; 320 * 240 * 4];
 		for index in 0..2 {
-			encoder.keyframe();
+			encoder.cut().unwrap();
 			let surface = crate::Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
 			let frame = crate::Frame::new(surface, moq_net::Timestamp::from_micros(index * 33_333).unwrap());
 			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
@@ -585,7 +585,7 @@ mod tests {
 		let rgba = vec![0x80u8; 320 * 240 * 4];
 		for index in 0..FRAMES {
 			if index == 0 {
-				encoder.keyframe();
+				encoder.cut().unwrap();
 			}
 			let surface = crate::Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
 			let frame = crate::Frame::new(surface, moq_net::Timestamp::from_micros(index * 33_333).unwrap());

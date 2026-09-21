@@ -312,7 +312,7 @@ mod tests {
 		for i in 0..10u64 {
 			let keyframe = i == 0;
 			if keyframe {
-				encoder.keyframe();
+				encoder.cut().unwrap();
 			}
 			// Distinct, spread-apart timestamps so a round-tripped value is unambiguous.
 			for encoded in encoder.encode(&gray_frame(i)).unwrap() {
@@ -401,7 +401,7 @@ mod tests {
 		for i in 0..5u64 {
 			let keyframe = i == 0;
 			if keyframe {
-				encoder.keyframe();
+				encoder.cut().unwrap();
 			}
 			for encoded in encoder.encode(&gray_frame(i)).unwrap() {
 				assert!(
@@ -462,7 +462,7 @@ mod tests {
 		for i in 0..count {
 			let keyframe = i == 0;
 			if keyframe {
-				encoder.keyframe();
+				encoder.cut().unwrap();
 			}
 			for encoded in encoder.encode(&gray_frame(i)).unwrap() {
 				decoded.extend(decoder.decode(encoded.payload, encoded.timestamp, keyframe).unwrap());
@@ -523,7 +523,7 @@ mod tests {
 		let mut packets = 0;
 		for (i, out) in resized.iter().enumerate() {
 			if i == 0 {
-				encoder.keyframe();
+				encoder.cut().unwrap();
 			}
 			packets += encoder.encode(out).unwrap().len();
 		}
@@ -602,7 +602,7 @@ mod tests {
 		for i in 0..count {
 			let keyframe = i == 0;
 			if keyframe {
-				encoder.keyframe();
+				encoder.cut().unwrap();
 			}
 			for encoded in encoder.encode(&flat_frame(i, level(i), size)).unwrap() {
 				decoded.extend(decoder.decode(encoded.payload, encoded.timestamp, keyframe).unwrap());
@@ -739,7 +739,7 @@ mod tests {
 		let mut reencoded = Vec::new();
 		for (i, out) in decoded.iter().enumerate() {
 			if i == 0 {
-				encoder.keyframe();
+				encoder.cut().unwrap();
 			}
 			reencoded.extend(encoder.encode(out).unwrap());
 		}
@@ -827,7 +827,7 @@ mod tests {
 		let mut packets = 0;
 		for (i, out) in resized.iter().enumerate() {
 			if i == 0 {
-				encoder.keyframe();
+				encoder.cut().unwrap();
 			}
 			packets += encoder.encode(out).unwrap().len();
 		}

@@ -146,9 +146,13 @@ fn encoder_thread(
 		// Asked for before the conversion below, which can fail: the encoder holds the
 		// request until a frame actually arrives, so dropping this frame delays the
 		// keyframe rather than losing it. A viewer needs a decodable starting point;
-		// otherwise the encoder's own GOP keys the stream.
-		if force_keyframe.swap(false, Ordering::AcqRel) {
-			enc.keyframe();
+		// otherwise the encoder's own GOP keys the stream. A refusal is terminal:
+		// only a backend that cannot cut at all gives one, and this never selects one.
+		if force_keyframe.swap(false, Ordering::AcqRel)
+			&& let Err(e) = enc.cut()
+		{
+			tracing::error!(error = %e, "H.264 encoder cannot cut a group; stopping encoder");
+			return;
 		}
 		let start = Instant::now();
 		let surface = match moq_video::Surface::rgba(&rgba, moq_video::Size::new(WIDTH, HEIGHT)) {

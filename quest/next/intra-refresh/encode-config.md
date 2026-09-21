@@ -19,8 +19,8 @@ without replacing an API after 0.1.
   public config or rename the operation again. A cut in refresh mode asks
   the backend to restart the sweep, including the producer's forced cut on
   every reopen.
-- `Backend::encode(frame, keyframe)` in `rs/moq-video/src/encode/backend/mod.rs`
-  becomes `encode(frame, cut)`, and each backend gets the mode at construction.
+- `Backend::encode(frame, cut)` in `rs/moq-video/src/encode/backend/mod.rs`
+  keeps its flag, and each backend gets the mode at construction.
   VideoToolbox, openh264, VAAPI, Media Foundation, and MediaCodec return an
   error for `Refresh` (supported or refused, never a silent fallback to
   keyframes). The test-only probe backend accepts it so the producer logic is
@@ -41,7 +41,5 @@ without replacing an API after 0.1.
   count; a backend without refresh support refuses the config.
 
 ## Required
-
-- [Video GOP](/quest/main/video-gop.md) - the extensible group contract and cut operation
 
 - [Catalog warmup](/quest/next/intra-refresh/catalog-warmup.md) - the field the producer publishes

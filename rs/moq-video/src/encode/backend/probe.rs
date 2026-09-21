@@ -16,6 +16,11 @@ use crate::{Error, Frame};
 
 pub(crate) const NAME: &str = "probe";
 
+/// The same probe, refusing cuts: stands in for a backend whose groups fall
+/// only on its own interval, so the sink's refusal can be tested without the
+/// V4L2 driver that actually behaves that way.
+pub(crate) const NO_CUT: &str = "probe-nocut";
+
 /// What happened to the codec, and where. `open` and `drop` are the pair that
 /// matters: the Windows backend opens a COM apartment in one and closes it in
 /// the other, so they have to land on the same thread.
@@ -26,11 +31,9 @@ static LOG: Mutex<Vec<Event>> = Mutex::new(Vec::new());
 /// Serializes the tests that read [`LOG`], which is process-wide. nextest gives
 /// each test its own process, but `cargo test` does not, and a shared log that
 /// only holds up under one runner is a trap for whoever adds the next test.
-#[cfg(not(target_os = "macos"))]
 static EXCLUSIVE: Mutex<()> = Mutex::new(());
 
 /// Take the probe for one test, clearing whatever a previous one left behind.
-#[cfg(not(target_os = "macos"))]
 pub(crate) fn exclusive() -> std::sync::MutexGuard<'static, ()> {
 	let guard = EXCLUSIVE.lock().unwrap_or_else(|err| err.into_inner());
 	let _ = take();
@@ -54,27 +57,43 @@ fn record(what: &'static str) {
 }
 
 /// Empty the log and hand back what was in it.
-#[cfg(not(target_os = "macos"))]
 pub(crate) fn take() -> Vec<Event> {
 	std::mem::take(&mut LOG.lock().unwrap())
 }
 
 pub(crate) struct Probe {
 	pending: Option<Encoded>,
+	cuts: bool,
 }
 
 impl Probe {
 	pub(crate) fn open(_config: &Config) -> Result<Box<dyn Backend>, Error> {
 		record("open");
-		Ok(Box::new(Self { pending: None }))
+		Ok(Box::new(Self {
+			pending: None,
+			cuts: true,
+		}))
+	}
+
+	pub(crate) fn open_no_cut(_config: &Config) -> Result<Box<dyn Backend>, Error> {
+		record("open");
+		Ok(Box::new(Self {
+			pending: None,
+			cuts: false,
+		}))
 	}
 }
 
 impl Backend for Probe {
-	fn encode(&mut self, frame: &Frame, _keyframe: bool) -> Result<Vec<Encoded>, Error> {
+	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
 		// Uncontended unless a test is holding the codec here on purpose.
 		drop(GATE.lock().unwrap_or_else(|err| err.into_inner()));
 		record("encode");
+		// Recorded as its own event so a test can see the cut reach the codec on
+		// the frame it was meant for.
+		if cut {
+			record("cut");
+		}
 		// The payload is the frame's timestamp, so a test can tell which frame a
 		// packet came from independently of what it's stamped with.
 		let payload = bytes::Bytes::from(frame.timestamp.as_micros().to_string());
@@ -97,8 +116,15 @@ impl Backend for Probe {
 		Ok(())
 	}
 
-	fn name(&self) -> &str {
-		NAME
+	fn can_cut(&self) -> bool {
+		self.cuts
+	}
+
+	fn name(&self) -> &'static str {
+		match self.cuts {
+			true => NAME,
+			false => NO_CUT,
+		}
 	}
 }
 

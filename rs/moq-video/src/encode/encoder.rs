@@ -48,6 +48,44 @@ pub enum Kind {
 	Named(String),
 }
 
+/// How the encoded stream is divided into groups.
+///
+/// Every mode opens a group at a point a subscriber can start decoding, and
+/// [`Encoder::cut`] opens one on demand in any of them. `#[non_exhaustive]`: a
+/// later mode adds a variant here rather than replacing the field, so match
+/// with a fallback arm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Gop {
+	/// A keyframe (an IDR with its parameter sets in band) every `interval`
+	/// frames, each opening a group. A subscriber joining mid-stream waits at
+	/// most that many frames for a picture it can decode.
+	Keyframe {
+		/// Frames per group. Must be at least 1; [`Encoder::new`] refuses 0.
+		interval: u32,
+	},
+}
+
+impl Gop {
+	/// Keyframes every `interval` of wall time at `framerate`, rounded down to
+	/// whole frames and never below one.
+	pub fn keyframe_every(interval: std::time::Duration, framerate: Rate) -> Self {
+		Self::Keyframe {
+			interval: framerate.frames(interval).max(1),
+		}
+	}
+
+	/// Refuse a configuration no backend can honor, before one is opened.
+	pub(crate) fn validate(&self) -> Result<(), Error> {
+		match *self {
+			Self::Keyframe { interval: 0 } => Err(Error::InvalidGop(
+				"a keyframe interval of 0 frames opens no group".to_owned(),
+			)),
+			Self::Keyframe { .. } => Ok(()),
+		}
+	}
+}
+
 /// Encoder configuration. `width` / `height` / `framerate` are the encoded
 /// output; input frames must already be at this resolution.
 ///
@@ -62,9 +100,9 @@ pub struct Config {
 	/// Target bitrate. `None` derives a sane default
 	/// from resolution and framerate (~0.07 bits per pixel per second).
 	pub bitrate: Option<moq_net::bandwidth::Rate>,
-	/// Keyframe interval in frames. Subscribers joining mid-stream wait at
-	/// most this many frames before they can start decoding.
-	pub gop: u32,
+	/// How the stream is divided into groups. Defaults to a keyframe every two
+	/// seconds at `framerate`.
+	pub gop: Gop,
 	/// Output codec. Defaults to [`Codec::H264`].
 	pub codec: Codec,
 	pub kind: Kind,
@@ -87,8 +125,7 @@ impl Config {
 			height,
 			framerate,
 			bitrate: None,
-			// ~2 seconds at the configured framerate.
-			gop: framerate.frames(std::time::Duration::from_secs(2)).max(1),
+			gop: Gop::keyframe_every(std::time::Duration::from_secs(2), framerate),
 			codec: Codec::default(),
 			kind: Kind::Auto,
 			color: None,
@@ -130,7 +167,8 @@ impl Config {
 		let i420 = crate::I420::new(size, vec![0x80u8; crate::I420::len(size)?])?;
 		let frame = Frame::new(crate::Surface::I420(i420), moq_net::Timestamp::from_micros(0)?);
 
-		sink.keyframe();
+		// No cut: the first picture out of a fresh encoder is a keyframe on every backend, which
+		// is what carries the parameter sets, and a backend that cannot cut still probes.
 		let mut encoded = sink.encode(frame).await?;
 		// A backend that pipelines holds the first frame, so drain it rather than reading nothing.
 		if encoded.is_empty() {
@@ -197,10 +235,10 @@ pub struct Encoder {
 	/// What the backend wrote into the bitstream's VUI, kept so a frame declaring
 	/// a different space is caught rather than silently mislabeled.
 	color: Color,
-	/// A keyframe asked for by [`Encoder::keyframe`], applied to the next frame.
-	/// Held rather than applied immediately because the caller decides a group
+	/// A cut asked for by [`Encoder::cut`], applied to the next frame. Held
+	/// rather than applied immediately because the caller decides a group
 	/// boundary before it has the frame that opens it.
-	pending_keyframe: bool,
+	pending_cut: bool,
 	/// Keeps direct use bound to the constructing thread, regardless of backend.
 	_thread_bound: PhantomData<Rc<()>>,
 }
@@ -212,6 +250,7 @@ impl Encoder {
 		let size = config.size();
 		size.validate("encoder")?;
 		size.validate_encodable("encoder", config.framerate)?;
+		config.gop.validate()?;
 
 		let backend = backend::open(config)?;
 		Ok(Self {
@@ -220,7 +259,7 @@ impl Encoder {
 			size,
 			bitrate: config.resolved_bitrate(),
 			color: config.resolved_color(),
-			pending_keyframe: false,
+			pending_cut: false,
 			_thread_bound: PhantomData,
 		})
 	}
@@ -273,19 +312,32 @@ impl Encoder {
 		self.codec
 	}
 
-	/// Ask for the next frame to be encoded as a keyframe (an IDR), on top of the
-	/// ones [`Config::gop`] already inserts on its own.
+	/// Cut a new group at the next frame, on top of the boundaries
+	/// [`Config::gop`] places on its own. Today that means encoding it as a
+	/// keyframe (an IDR), so a subscriber can start decoding there.
 	///
-	/// Rarely needed: the encoder keys frames automatically, so reach for this only
-	/// when something outside the encoder needs a decodable starting point at a
-	/// specific frame. Opening a new group is the usual reason (a subscriber has to
-	/// be able to start there); resuming after an idle gap is another.
+	/// Rarely needed: the encoder opens groups automatically, so reach for this
+	/// only when something outside the encoder needs a boundary at a specific
+	/// frame. A source group boundary (transcode mirrors the source's groups) is
+	/// the usual reason; a scene change or a source switch is another.
 	///
 	/// The request waits for the next [`encode`](Self::encode) rather than applying
 	/// at once, so it is safe to call before the frame exists. Calling it repeatedly
-	/// before a frame arrives asks for one keyframe, not several.
-	pub fn keyframe(&mut self) {
-		self.pending_keyframe = true;
+	/// before a frame arrives cuts once, not several times.
+	///
+	/// # Errors
+	///
+	/// Returns [`Error::CutUnsupported`] when this backend cannot force a group
+	/// boundary (a V4L2 driver without the force-keyframe control), in which case
+	/// nothing is queued: groups keep falling where [`Config::gop`] puts them, and
+	/// the caller decides whether that layout is acceptable rather than finding
+	/// out from the stream.
+	pub fn cut(&mut self) -> Result<(), Error> {
+		if !self.backend.can_cut() {
+			return Err(Error::CutUnsupported(self.backend.name()));
+		}
+		self.pending_cut = true;
+		Ok(())
 	}
 
 	/// Encode one raw [`Frame`], whether it came from capture, a decoder (the
@@ -333,11 +385,11 @@ impl Encoder {
 				);
 			});
 		}
-		let encoded = self.backend.encode(frame, self.pending_keyframe)?;
+		let encoded = self.backend.encode(frame, self.pending_cut)?;
 		// Cleared only once the frame is through: a failed encode produced no
 		// picture, so the request still belongs to whatever comes next rather than
 		// being swallowed. The size check above returns early for the same reason.
-		self.pending_keyframe = false;
+		self.pending_cut = false;
 		Ok(encoded)
 	}
 
@@ -413,7 +465,7 @@ mod tests {
 		let mut frames = Vec::new();
 		for i in 0..30 {
 			if i == 0 {
-				encoder.keyframe();
+				encoder.cut().unwrap();
 			}
 			frames.extend(encoder.encode(&gray_frame(320, 240, i)).unwrap());
 		}
@@ -543,7 +595,7 @@ mod tests {
 		let mut frames = Vec::new();
 		for i in 0..10 {
 			if i == 0 {
-				encoder.keyframe();
+				encoder.cut().unwrap();
 			}
 			frames.extend(encoder.encode(&gray_frame(320, 240, i)).unwrap());
 		}
@@ -591,7 +643,7 @@ mod tests {
 		let mut frames = Vec::new();
 		for i in 0..10 {
 			if i == 0 {
-				encoder.keyframe();
+				encoder.cut().unwrap();
 			}
 			frames.extend(encoder.encode(&gray_frame(320, 240, i)).unwrap());
 		}
@@ -647,7 +699,7 @@ mod tests {
 		let mut frames = Vec::new();
 		for i in 0..10 {
 			if i == 0 {
-				encoder.keyframe();
+				encoder.cut().unwrap();
 			}
 			let frame = Frame::new(Surface::PixelBuffer(nv12_surface(320, 240)), at(i));
 			frames.extend(encoder.encode(&frame).unwrap());
@@ -674,7 +726,7 @@ mod tests {
 		};
 		let mut encoder = Encoder::new(&config).unwrap();
 
-		encoder.keyframe();
+		encoder.cut().unwrap();
 		let frame = Frame::new(Surface::PixelBuffer(nv12_surface(320, 240)), at(0));
 		let mut frames = encoder.encode(&frame).unwrap();
 		frames.extend(encoder.finish().unwrap());
@@ -756,7 +808,7 @@ mod tests {
 		let mut frames = Vec::new();
 		for i in 0..30 {
 			if i == 0 {
-				encoder.keyframe();
+				encoder.cut().unwrap();
 			}
 			frames.extend(encoder.encode(&gray_frame(640, 480, i)).unwrap());
 		}
@@ -808,7 +860,7 @@ mod tests {
 				textures += 1;
 			}
 			if i == 0 {
-				encoder.keyframe();
+				encoder.cut().unwrap();
 			}
 			let surface = surface.expect("frame, not end of stream");
 			frames.extend(encoder.encode(&Frame::new(surface, at(i))).unwrap());
@@ -914,7 +966,7 @@ mod tests {
 	}
 
 	impl Backend for Delayed {
-		fn encode(&mut self, frame: &Frame, _keyframe: bool) -> Result<Vec<Encoded>, Error> {
+		fn encode(&mut self, frame: &Frame, _cut: bool) -> Result<Vec<Encoded>, Error> {
 			let payload = bytes::Bytes::from(frame.timestamp.as_micros().to_string());
 			let previous = self.pending.replace(Encoded::new(payload, frame.timestamp));
 			Ok(previous.into_iter().collect())
@@ -932,7 +984,11 @@ mod tests {
 			Ok(())
 		}
 
-		fn name(&self) -> &str {
+		fn can_cut(&self) -> bool {
+			true
+		}
+
+		fn name(&self) -> &'static str {
 			"delayed"
 		}
 	}
@@ -946,18 +1002,23 @@ mod tests {
 			size: config.size(),
 			bitrate: config.resolved_bitrate(),
 			color: config.resolved_color(),
-			pending_keyframe: false,
+			pending_cut: false,
 			_thread_bound: PhantomData,
 		}
 	}
 
-	/// Records the keyframe flag each frame reached the codec with, so a test can
-	/// check what the encoder actually asked for.
-	struct Recorder(std::sync::Arc<std::sync::Mutex<Vec<bool>>>);
+	/// Records the cut flag each frame reached the codec with, so a test can
+	/// check what the encoder actually asked for. `cuts` is whether it claims to
+	/// honor one, the way a V4L2 driver without the force-keyframe control does
+	/// not.
+	struct Recorder {
+		log: std::sync::Arc<std::sync::Mutex<Vec<bool>>>,
+		cuts: bool,
+	}
 
 	impl Backend for Recorder {
-		fn encode(&mut self, _frame: &Frame, keyframe: bool) -> Result<Vec<Encoded>, Error> {
-			self.0.lock().unwrap().push(keyframe);
+		fn encode(&mut self, _frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
+			self.log.lock().unwrap().push(cut);
 			Ok(Vec::new())
 		}
 
@@ -973,27 +1034,35 @@ mod tests {
 			Ok(())
 		}
 
-		fn name(&self) -> &str {
+		fn can_cut(&self) -> bool {
+			self.cuts
+		}
+
+		fn name(&self) -> &'static str {
 			"recorder"
 		}
 	}
 
-	/// Keyframes are automatic, so an untouched encoder forces none. A request is
-	/// held until a frame arrives (callers decide a group boundary before they have
-	/// the frame that opens it), collapses if made twice, and clears afterwards
-	/// rather than keying every frame from then on.
+	/// Group boundaries are automatic, so an untouched encoder forces none. A cut
+	/// is held until a frame arrives (callers decide a group boundary before they
+	/// have the frame that opens it), collapses if made twice, and clears
+	/// afterwards rather than cutting every frame from then on.
 	#[test]
-	fn a_keyframe_request_waits_for_the_next_frame_then_clears() {
+	fn a_cut_waits_for_the_next_frame_then_clears() {
 		let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 		let config = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
-		let mut encoder = encoder_with(Box::new(Recorder(log.clone())), &config);
+		let backend = Recorder {
+			log: log.clone(),
+			cuts: true,
+		};
+		let mut encoder = encoder_with(Box::new(backend), &config);
 
-		// Nothing asked for: `Config::gop` keys the stream on its own.
+		// Nothing asked for: `Config::gop` places the boundaries on its own.
 		encoder.encode(&gray_frame(320, 240, 0)).unwrap();
 
-		// Asked twice before a frame exists: one keyframe, on the next frame.
-		encoder.keyframe();
-		encoder.keyframe();
+		// Asked twice before a frame exists: one cut, on the next frame.
+		encoder.cut().unwrap();
+		encoder.cut().unwrap();
 		encoder.encode(&gray_frame(320, 240, 1)).unwrap();
 
 		// And it does not carry into the frame after.
@@ -1002,26 +1071,121 @@ mod tests {
 		assert_eq!(*log.lock().unwrap(), vec![false, true, false]);
 	}
 
-	/// `keyframe()` has to reach the codec on a *warm* encoder, which is the case
-	/// that matters: a fresh one emits an IDR on its first frame regardless, so only
-	/// a mid-stream request proves the plumbing works. Runs on openh264, so this
+	/// Repeated boundaries each reach the codec: a cut per group is what a
+	/// transcode rung asks for, and a request that only worked once would leave
+	/// every later group opening on a delta frame.
+	#[test]
+	fn every_cut_reaches_the_codec() {
+		let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+		let config = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
+		let backend = Recorder {
+			log: log.clone(),
+			cuts: true,
+		};
+		let mut encoder = encoder_with(Box::new(backend), &config);
+
+		for i in 0..6 {
+			if i % 3 == 0 {
+				encoder.cut().unwrap();
+			}
+			encoder.encode(&gray_frame(320, 240, i)).unwrap();
+		}
+
+		assert_eq!(*log.lock().unwrap(), vec![true, false, false, true, false, false]);
+	}
+
+	/// A backend that cannot force a boundary refuses the cut itself, up front,
+	/// rather than queueing a request its codec would ignore. The V4L2 backend
+	/// used to disable the request quietly and let groups fall on the driver's
+	/// own interval, which only the subscriber could tell apart from a cut that
+	/// worked.
+	#[test]
+	fn a_backend_that_cannot_cut_refuses_up_front() {
+		let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+		let config = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
+		let backend = Recorder {
+			log: log.clone(),
+			cuts: false,
+		};
+		let mut encoder = encoder_with(Box::new(backend), &config);
+
+		let err = encoder.cut().expect_err("the backend cannot cut");
+		assert!(
+			matches!(err, Error::CutUnsupported("recorder")),
+			"unexpected error: {err:?}"
+		);
+		assert!(!encoder.pending_cut, "a refused cut must not be queued");
+
+		// The refusal names the backend, so a log line says which one to blame.
+		assert!(err.to_string().contains("recorder"), "{err}");
+
+		// Encoding carries on at the backend's own boundaries; the refusal is the
+		// caller's to act on, not a broken encoder.
+		encoder.encode(&gray_frame(320, 240, 0)).unwrap();
+		assert_eq!(*log.lock().unwrap(), vec![false]);
+	}
+
+	/// An interval of zero opens no group, so it is refused at open rather than
+	/// handed to a backend, each of which would do something different with it
+	/// (openh264 keys every frame, V4L2 rejects the control, VideoToolbox reads
+	/// it as unlimited).
+	#[test]
+	fn a_zero_keyframe_interval_is_refused() {
+		let config = Config {
+			gop: Gop::Keyframe { interval: 0 },
+			..Config::new(320, 240, crate::Rate::new(30, 1).unwrap())
+		};
+		let Err(err) = Encoder::new(&config) else {
+			panic!("an empty group cannot open");
+		};
+		assert!(matches!(err, Error::InvalidGop(_)), "unexpected error: {err:?}");
+	}
+
+	/// The wall-time constructor never produces the interval `Encoder::new`
+	/// refuses: a window shorter than a frame rounds up to one frame, not down
+	/// to none.
+	#[test]
+	fn a_sub_frame_keyframe_window_rounds_up_to_one_frame() {
+		let framerate = crate::Rate::new(30, 1).unwrap();
+		assert_eq!(
+			Gop::keyframe_every(std::time::Duration::from_millis(1), framerate),
+			Gop::Keyframe { interval: 1 }
+		);
+		assert_eq!(
+			Gop::keyframe_every(std::time::Duration::from_secs(2), framerate),
+			Gop::Keyframe { interval: 60 }
+		);
+		assert!(
+			Gop::keyframe_every(std::time::Duration::ZERO, framerate)
+				.validate()
+				.is_ok()
+		);
+	}
+
+	/// `cut()` has to reach the codec on a *warm* encoder, which is the case that
+	/// matters: a fresh one emits an IDR on its first frame regardless, so only a
+	/// mid-stream request proves the plumbing works. Runs on openh264, so this
 	/// holds on every platform rather than only where hardware exists.
 	#[test]
 	#[cfg(feature = "openh264")]
-	fn a_mid_stream_keyframe_request_emits_an_idr() {
+	fn a_mid_stream_cut_emits_an_idr() {
 		let config = Config {
 			kind: Kind::Software,
 			..Config::new(320, 240, crate::Rate::new(30, 1).unwrap())
 		};
 		// A GOP far longer than the run, so any IDR here was asked for rather than
 		// inserted on schedule.
-		let mut encoder = Encoder::new(&Config { gop: 1000, ..config }).unwrap();
+		let mut encoder = Encoder::new(&Config {
+			gop: Gop::Keyframe { interval: 1000 },
+			..config
+		})
+		.unwrap();
 
 		let mut per_frame = Vec::new();
 		for i in 0..6 {
 			// Frame 0 opens the stream; ask again at frame 3, mid-stream.
 			if i == 3 {
-				encoder.keyframe();
+				encoder.cut().unwrap();
 			}
 			let encoded = encoder.encode(&gray_frame(320, 240, i)).unwrap();
 			let joined: Vec<u8> = encoded.iter().flat_map(|f| f.payload.iter()).copied().collect();
@@ -1051,7 +1215,7 @@ mod tests {
 	struct Failing;
 
 	impl Backend for Failing {
-		fn encode(&mut self, _frame: &Frame, _keyframe: bool) -> Result<Vec<Encoded>, Error> {
+		fn encode(&mut self, _frame: &Frame, _cut: bool) -> Result<Vec<Encoded>, Error> {
 			Err(Error::Codec(anyhow::anyhow!("no")))
 		}
 
@@ -1067,33 +1231,37 @@ mod tests {
 			Ok(())
 		}
 
-		fn name(&self) -> &str {
+		fn can_cut(&self) -> bool {
+			true
+		}
+
+		fn name(&self) -> &'static str {
 			"failing"
 		}
 	}
 
-	/// A request outlives an encode that produced no picture, whether it was
-	/// rejected up front (wrong size) or failed in the backend. Dropping it would
-	/// leave the next frame unkeyed, so a subscriber waits out a whole GOP for a
-	/// starting point the caller already asked for.
+	/// A cut outlives an encode that produced no picture, whether it was rejected
+	/// up front (wrong size) or failed in the backend. Dropping it would leave the
+	/// next frame unkeyed, so a subscriber waits out a whole GOP for a starting
+	/// point the caller already asked for.
 	#[test]
-	fn a_failed_encode_keeps_the_keyframe_request() {
+	fn a_failed_encode_keeps_the_cut() {
 		let config = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
 
 		let mut encoder = encoder_with(Box::new(Failing), &config);
-		encoder.keyframe();
+		encoder.cut().unwrap();
 		assert!(encoder.encode(&gray_frame(320, 240, 0)).is_err());
-		assert!(encoder.pending_keyframe, "the backend error swallowed the request");
+		assert!(encoder.pending_cut, "the backend error swallowed the request");
 
 		// Rejected before the backend ever sees it, for the same reason.
 		let mut encoder = encoder_with(Box::new(Delayed { pending: None }), &config);
-		encoder.keyframe();
+		encoder.cut().unwrap();
 		assert!(encoder.encode(&gray_frame(640, 480, 0)).is_err());
-		assert!(encoder.pending_keyframe, "the size check swallowed the request");
+		assert!(encoder.pending_cut, "the size check swallowed the request");
 
 		// ...and the next frame that does go through claims it.
 		encoder.encode(&gray_frame(320, 240, 1)).unwrap();
-		assert!(!encoder.pending_keyframe);
+		assert!(!encoder.pending_cut);
 	}
 
 	/// Regression: a backend that buffers hands back an earlier frame's access
@@ -1187,7 +1355,7 @@ mod tests {
 
 			let rgba = [255u8, 0, 0, 255].repeat(size.pixels() as usize);
 			let surface = crate::frame::Surface::rgba(&rgba, size).unwrap();
-			encoder.keyframe();
+			encoder.cut().unwrap();
 			let frames = encoder
 				.encode(&Frame::new(surface, moq_net::Timestamp::from_micros(0).unwrap()))
 				.unwrap();
@@ -1230,7 +1398,7 @@ mod tests {
 			..Config::new(small.width, small.height, crate::Rate::new(30, 1).unwrap())
 		};
 		let mut encoder = Encoder::new(&config).unwrap();
-		encoder.keyframe();
+		encoder.cut().unwrap();
 		let frames = encoder.encode(&scaled).expect("a mismatch warns rather than fails");
 		use super::backend::test_util::{BT601_DESCRIBED, BT709_DESCRIBED, declared_color};
 		assert_eq!(
@@ -1246,7 +1414,7 @@ mod tests {
 			..Config::new(small.width, small.height, crate::Rate::new(30, 1).unwrap())
 		};
 		let mut encoder = Encoder::new(&config).unwrap();
-		encoder.keyframe();
+		encoder.cut().unwrap();
 		let frames = encoder.encode(&scaled).expect("a declared space encodes");
 
 		let keyframe = frames.first().expect("a keyframe");

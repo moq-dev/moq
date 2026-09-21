@@ -3786,7 +3786,7 @@ fn video_raw_decode() {
 	let mut frames: Vec<moq_video::encode::Encoded> = Vec::new();
 	for i in 0..5u64 {
 		if i == 0 {
-			encoder.keyframe();
+			encoder.cut().unwrap();
 		}
 		let surface = moq_video::Surface::rgba(&gray, moq_video::Size::new(320, 240)).unwrap();
 		let frame = moq_video::Frame::new(surface, moq_net::Timestamp::from_micros(i * 33_333).unwrap());

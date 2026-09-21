@@ -34,7 +34,7 @@ mod sink;
 
 pub use backend::NAMES;
 pub use encoded::Encoded;
-pub use encoder::{Codec, Config, Encoder, Kind};
+pub use encoder::{Codec, Config, Encoder, Gop, Kind};
 pub use producer::Producer;
 #[cfg(feature = "capture")]
 pub use producer::{Options, publish_capture};
