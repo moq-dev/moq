@@ -78,7 +78,8 @@ is at least 1, and a rate is the delta over any window you sample. Unlike
 Pads are named by kind and appear as the catalog announces renditions:
 `video_0`, `video_1`, `audio_0`. Link the pad you want by name; the terse
 `moqsrc ! decodebin3` form links only the first pad offered, which may be
-audio. Each pad sends EOS when its rendition ends. Properties: `url`,
-`broadcast`, `tls-disable-verify`.
+audio. Each pad sends EOS when its rendition ends. A rendition that leaves the
+catalog keeps its pad until its track ends, while one whose format changes is
+replaced by a new pad. Properties: `url`, `broadcast`, `tls-disable-verify`.
 
 Debug with `GST_DEBUG=*:4` for GStreamer and `RUST_LOG=debug` for the plugin.

@@ -324,7 +324,7 @@ struct ActiveTrack {
 	/// Identity we diff against on each catalog update; a change recreates the pad.
 	shape: Shape,
 	/// Tells the pump to drop its pad and exit (set on shutdown or when reconcile
-	/// removes/replaces the rendition).
+	/// replaces the rendition).
 	cancel: watch::Sender<bool>,
 	/// Handle to the pump task in the session's `JoinSet`. We only read
 	/// `is_finished()` to prune this entry once the pump ends (the `JoinSet` owns
@@ -454,7 +454,8 @@ async fn follow_catalog(
 }
 
 /// Bring the live set of pumps in line with `catalog`: spawn pumps for newly announced
-/// renditions, tear down ones that vanished, and recreate any whose caps or container changed.
+/// renditions, recreate any whose caps or container changed, and leave ones that vanished to end
+/// with their track.
 ///
 /// Infallible by design: every way a single rendition can be unusable (unsupported codec,
 /// malformed init, a name the broadcast refuses) skips just that rendition, so one bad entry in
@@ -504,9 +505,17 @@ fn reconcile(
 		&active.iter().map(|(name, t)| (name.clone(), t.shape.clone())).collect(),
 	);
 
-	// Drop anything that disappeared or changed shape; each cancelled pump drops its own pad.
-	// Changed renditions also land in `plan.add`, so they respawn below under a fresh pad id.
+	// Drop anything that changed shape; each cancelled pump drops its own pad. Changed renditions
+	// also land in `plan.add`, so they respawn below under a fresh pad id.
+	//
+	// A rendition that vanished is only no longer selectable: a publisher retires one by
+	// delisting it and finishing its track, and the two arrive in either order. A pump that owns
+	// a pad stays in `active` and ends with its track (EOS, or a pad drop on error), where
+	// `follow_catalog` prunes it. One that never took a pad is stopped.
 	for name in plan.remove {
+		if !desired.contains_key(&name) && active.get(&name).is_some_and(|track| !track.state.cancel_before_live()) {
+			continue;
+		}
 		if let Some(track) = active.remove(&name) {
 			track.cancel();
 		}
@@ -1236,6 +1245,244 @@ mod session_tests {
 			.unwrap();
 		assert!(eos.load(Ordering::Relaxed), "the served rendition never emitted EOS");
 		drop(shutdown);
+	}
+
+	/// A publisher that ends one rendition finishes its track and retires it from the catalog,
+	/// which is what `moqsink` does on EOS. The two travel on different tracks, so the catalog
+	/// update can reach the subscriber before the tail of the media does. It must not cut the pump
+	/// short: the pad owes downstream every frame of the track and an EOS.
+	///
+	/// The subscriber's view of that arrival order is reproduced exactly: the head of the track,
+	/// then the catalog update, then the tail and the clean end.
+	#[test]
+	fn a_retired_rendition_drains_to_eos() {
+		const HEAD: u64 = 3;
+		const TAIL: u64 = 2;
+
+		let _pad_ids = pad_ids();
+		let element = element();
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let video = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		{
+			let mut guard = catalog.modify().unwrap();
+			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
+		}
+
+		let (shutdown, mut shutdown_rx) = watch::channel(false);
+		let consumer = broadcast.consume();
+		let weak = element.downgrade();
+		let session = super::RUNTIME.spawn(async move { follow_catalog(consumer, weak, &mut shutdown_rx).await });
+
+		// Count what reaches the pad. The pad has no peer, so the probe swallows each buffer, which
+		// reports the push as OK.
+		let pad = await_pad(&element, "video_");
+		let buffers = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+		let eos = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let (counted, seen) = (buffers.clone(), eos.clone());
+		pad.add_probe(
+			gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM,
+			move |_, info| match &info.data {
+				Some(gst::PadProbeData::Buffer(_)) => {
+					counted.fetch_add(1, Ordering::Relaxed);
+					gst::PadProbeReturn::Drop
+				}
+				Some(gst::PadProbeData::Event(event)) if event.type_() == gst::EventType::Eos => {
+					seen.store(true, Ordering::Relaxed);
+					gst::PadProbeReturn::Ok
+				}
+				_ => gst::PadProbeReturn::Ok,
+			},
+		);
+
+		let mut producer = moq_mux::container::Producer::new(
+			video,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+		);
+		let mut write = |i: u64| {
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: moq_net::Timestamp::from_micros(i * 33_000).unwrap(),
+					payload: bytes::Bytes::from(vec![i as u8; 64]),
+					keyframe: i == 0,
+					duration: None,
+				})
+				.unwrap();
+		};
+
+		// The head of the track arrives and is delivered.
+		for i in 0..HEAD {
+			write(i);
+		}
+		for _ in 0..100 {
+			if buffers.load(Ordering::Relaxed) == HEAD {
+				break;
+			}
+			std::thread::sleep(Duration::from_millis(50));
+		}
+		assert_eq!(
+			buffers.load(Ordering::Relaxed),
+			HEAD,
+			"the head of the track never arrived"
+		);
+
+		// The catalog update retiring the rendition arrives next. The catalog and the broadcast
+		// stay open, so nothing else can end the pump.
+		catalog.modify().unwrap().video.renditions.clear();
+
+		// Give the session time to act on it. A pump that gives up here takes its pad with it, so
+		// the wait is only ever served in full by one that is still reading.
+		for _ in 0..10 {
+			if pads(&element, "video_").is_empty() {
+				break;
+			}
+			std::thread::sleep(Duration::from_millis(50));
+		}
+
+		// The tail of the track and its clean end arrive last.
+		for i in HEAD..HEAD + TAIL {
+			write(i);
+		}
+		producer.finish().unwrap();
+
+		// The pump removes its pad on the way out, whichever way it goes.
+		for _ in 0..100 {
+			if pads(&element, "video_").is_empty() {
+				break;
+			}
+			std::thread::sleep(Duration::from_millis(50));
+		}
+		assert!(pads(&element, "video_").is_empty(), "the pump never ended");
+
+		let _ = shutdown.send(true);
+		super::RUNTIME.block_on(session).unwrap().unwrap();
+
+		assert_eq!(
+			buffers.load(Ordering::Relaxed),
+			HEAD + TAIL,
+			"the retired rendition lost the tail of its track"
+		);
+		assert!(eos.load(Ordering::Relaxed), "the retired rendition never emitted EOS");
+	}
+
+	/// A publisher that delists a rendition without finishing its track and lists it again later
+	/// (the browser toggling a source) is resuming the same track. The pump that is still reading
+	/// it carries on under the same pad.
+	#[test]
+	fn a_relisted_rendition_keeps_its_pad() {
+		const HEAD: u64 = 3;
+		const TAIL: u64 = 2;
+
+		let _pad_ids = pad_ids();
+		let element = element();
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let video = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		{
+			let mut guard = catalog.modify().unwrap();
+			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
+		}
+
+		let added = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+		let count = added.clone();
+		element.connect_pad_added(move |_, _| {
+			count.fetch_add(1, Ordering::Relaxed);
+		});
+
+		let (shutdown, mut shutdown_rx) = watch::channel(false);
+		let consumer = broadcast.consume();
+		let weak = element.downgrade();
+		let session = super::RUNTIME.spawn(async move { follow_catalog(consumer, weak, &mut shutdown_rx).await });
+
+		let pad = await_pad(&element, "video_");
+		let buffers = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+		let eos = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let (counted, seen) = (buffers.clone(), eos.clone());
+		pad.add_probe(
+			gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM,
+			move |_, info| match &info.data {
+				Some(gst::PadProbeData::Buffer(_)) => {
+					counted.fetch_add(1, Ordering::Relaxed);
+					gst::PadProbeReturn::Drop
+				}
+				Some(gst::PadProbeData::Event(event)) if event.type_() == gst::EventType::Eos => {
+					seen.store(true, Ordering::Relaxed);
+					gst::PadProbeReturn::Ok
+				}
+				_ => gst::PadProbeReturn::Ok,
+			},
+		);
+
+		let mut producer = moq_mux::container::Producer::new(
+			video,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+		);
+		let mut write = |i: u64| {
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: moq_net::Timestamp::from_micros(i * 33_000).unwrap(),
+					payload: bytes::Bytes::from(vec![i as u8; 64]),
+					keyframe: i == 0 || i == HEAD,
+					duration: None,
+				})
+				.unwrap();
+		};
+		let wait_for = |n: u64| {
+			for _ in 0..100 {
+				if buffers.load(Ordering::Relaxed) == n {
+					break;
+				}
+				std::thread::sleep(Duration::from_millis(50));
+			}
+		};
+
+		for i in 0..HEAD {
+			write(i);
+		}
+		wait_for(HEAD);
+
+		// Delist, give the session time to act on it, then list it again unchanged.
+		catalog.modify().unwrap().video.renditions.clear();
+		std::thread::sleep(Duration::from_millis(300));
+		{
+			let mut guard = catalog.modify().unwrap();
+			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
+		}
+		std::thread::sleep(Duration::from_millis(300));
+
+		// The same track resumes with a new group, then ends.
+		for i in HEAD..HEAD + TAIL {
+			write(i);
+		}
+		wait_for(HEAD + TAIL);
+		producer.finish().unwrap();
+		for _ in 0..100 {
+			if pads(&element, "video_").is_empty() {
+				break;
+			}
+			std::thread::sleep(Duration::from_millis(50));
+		}
+
+		let _ = shutdown.send(true);
+		super::RUNTIME.block_on(session).unwrap().unwrap();
+
+		assert_eq!(
+			added.load(Ordering::Relaxed),
+			1,
+			"the relisted rendition took a second pad"
+		);
+		assert_eq!(
+			buffers.load(Ordering::Relaxed),
+			HEAD + TAIL,
+			"the first pad lost frames"
+		);
+		assert!(eos.load(Ordering::Relaxed), "the track's end never reached the pad");
 	}
 
 	/// Pipelines link `moqsrc`'s pads by name, so the first video rendition that actually
