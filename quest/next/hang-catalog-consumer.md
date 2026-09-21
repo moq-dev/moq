@@ -24,7 +24,3 @@ name and runs its own read loop.
   a failure counter because a dead track and a bad frame reject alike.
 
 Public API: additive on hang, @moq/hang, @moq/json. Wire: none.
-
-## Related
-
-- [JSON merge](/quest/next/json-merge.md) - the snapshot patch consumer

@@ -45,5 +45,4 @@ verify current supported versions and pin any newly installed tools.
 ## Related
 
 - [Benchmark comparisons](/quest/next/performance-comparisons.md) - repeatable results and artifact metadata
-- [Traffic counter contention](/quest/next/stats-contention.md) - a concrete CPU attribution experiment
 - [Relay memory](/quest/next/relay-memory.md) - retained route and announcement memory

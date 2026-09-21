@@ -151,6 +151,5 @@ re-derived.
 - [Route cost in the JS origin](/quest/next/route-cost.md) - the watcher-side route pick this line needs
 - [One port](/quest/next/one-port/README.md) - the relay answers STUN on its QUIC port
 - [E2EE](/quest/next/e2ee/README.md) - what a peer would need if the token scope stopped being the trust boundary
-- [Cluster discovery flags](/quest/next/cluster-flags.md) - the flag shape `--p2p` follows
 - [qmux on the QUIC core](/quest/next/quic/qmux.md) - the stream core the unordered follow-up rides
 - [Carrier voice](/quest/future/carrier-voice/README.md) - signaling as an application protocol over moq, the pattern reused here

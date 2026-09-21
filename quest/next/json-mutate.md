@@ -17,4 +17,3 @@ producer exposes the same call; otherwise leave the catalog guard alone.
 Document the pairing in one line on each method and in the upgrade page.
 
 Public API: one additive method per producer. Wire: none.
-

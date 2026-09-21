@@ -36,8 +36,7 @@ on the USERNAME attribute: a request carrying one belongs to a WebRTC session
 and goes to the mux, which reads the local ufrag from it; a request without
 one is a public query and goes to the responder. Public STUN clients never
 send USERNAME and ICE agents always do.
-Off by default in `moq-relay`, on with `--stun`, following
-[cluster discovery flags](/quest/next/cluster-flags.md) for shape.
+Off by default in `moq-relay`, on with `--stun`.
 
 WebRTC: `moq_rtc::server::mux::Mux` gains `Mux::feed(src, bytes)` and a
 constructor over a virtual socket, so it stops binding its own port; its

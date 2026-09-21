@@ -11,8 +11,7 @@ them and the relay. Its policy knobs mirror `@moq/p2p`.
 
 `--p2p` (`MOQ_P2P`) needs a relay session (`--connect`) and a listener
 (`--listen`); shape the flag so the value carries those prerequisites rather
-than adding startup checks, per
-[cluster discovery flags](/quest/next/cluster-flags.md). `--p2p-ice-server`,
+than adding startup checks. `--p2p-ice-server`,
 `--p2p-max`, `--p2p-prefix`, and `--p2p-meta` carry the same knobs the JS
 `Peers` takes; `select` is the CLI's built-in default of dialing everyone.
 

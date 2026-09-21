@@ -103,4 +103,3 @@ Tests, at the process level with real sessions rather than an in-process stand-i
 - A refused subscribe resets rather than hanging, and leaves no state behind.
 - A wildcard retracted mid-serve does not disturb the subscription already
   running.
-

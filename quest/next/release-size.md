@@ -53,4 +53,3 @@ uses regex-automata, so check the table rather than assume).
 ## Related
 
 - [Bindgen CLI split](/quest/next/uniffi-cli-feature.md) - the staticlib half of the same hygiene
-- [Network-only bindings](/quest/next/slim-bindings/README.md) - decides on the numbers this quest's report produces

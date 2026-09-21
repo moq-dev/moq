@@ -81,4 +81,3 @@ pre-accepted streams can stand behind.
 
 - [P2P](/quest/next/p2p/README.md) - the client that names the relay as its STUN server
 - [Stream sessions](/quest/next/uring-tcp/README.md) - the io_uring workers that would host the same demux later
-- [Cluster discovery flags](/quest/next/cluster-flags.md) - the flag shape for anything the demux adds

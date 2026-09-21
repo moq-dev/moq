@@ -14,4 +14,3 @@ contract: cut the open group, write a single empty frame at the exclusive end
 of the previous epoch, finish that group, and let the next keyframe open the
 resume group. Wire encoder restart in js/publish to it. Data tracks skip a
 sequence with no marker.
-

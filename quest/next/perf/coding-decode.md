@@ -28,5 +28,4 @@ fuzz targets with `just rs fuzz path` and commit any regression inputs.
 
 ## Related
 
-- [Reader buffering](/quest/next/stream-buffering.md) - JS receive assembly
 - [Benchmark comparisons](/quest/next/performance-comparisons.md) - measurement conventions

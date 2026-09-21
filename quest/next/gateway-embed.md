@@ -34,4 +34,3 @@ Public API: additive. Wire: none.
 ## Related
 
 - [HLS generation](/quest/next/hls-generation.md) - the URL hook that depends on the master layout
-- [CMAF passthrough](/quest/next/mux-copies/cmaf-passthrough.md) - the same export path

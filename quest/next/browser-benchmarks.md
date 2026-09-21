@@ -34,7 +34,4 @@ an identified browser version on a real WebTransport connection.
 
 ## Related
 
-- [Reader buffering](/quest/next/stream-buffering.md) - fragmented receive workloads
-- [CMAF copies](/quest/next/cmaf-copy-budget.md) - container workload and ownership checks
-- [JS publish and watch hot paths](/quest/next/js-hotpath/README.md) - first optimization consumers of this harness
 - [Benchmark comparisons](/quest/next/performance-comparisons.md) - reporting conventions
