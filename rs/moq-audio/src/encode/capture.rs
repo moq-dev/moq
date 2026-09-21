@@ -12,8 +12,8 @@ use moq_mux::catalog::hang::CatalogExt;
 use super::producer::Reserved;
 use super::{Input, Options, Producer};
 use crate::capture;
-use crate::resample::{Resampler, remix, validate_channels};
-use crate::{Error, Format, Frame};
+use crate::resample::{Resampler, remix, validate_remix};
+use crate::{Error, Format, Frame, Layout as PcmLayout};
 
 /// Backoff bounds for reopening a capture source. The quick first retry covers
 /// a USB device re-enumerating; the ceiling keeps a missing device from spinning.
@@ -445,6 +445,13 @@ impl<E: CatalogExt> Driver<E> {
 					None => continue,
 				},
 			};
+			let pcm_layout = match PcmLayout::from_channels(layout.channels) {
+				Ok(layout) => layout,
+				Err(err) => match self.failed(err, track, desired.revision).await {
+					Some(result) => return Some(result),
+					None => continue,
+				},
+			};
 
 			let Some(Track::Reserved(mut reserved)) = self.track.take() else {
 				unreachable!("the track stays reserved until discovery succeeds")
@@ -452,7 +459,7 @@ impl<E: CatalogExt> Driver<E> {
 			let input = Input {
 				format: Format::F32,
 				sample_rate: layout.sample_rate,
-				channels: layout.channels,
+				layout: pcm_layout,
 			};
 			let registered = match reserved.register(input, &self.encode) {
 				Ok(registered) => registered,
@@ -896,8 +903,10 @@ struct Converter {
 impl Converter {
 	fn new(input: capture::Layout, output: capture::Layout) -> Result<Self, Error> {
 		if input.channels != output.channels {
-			validate_channels(input.channels)?;
-			validate_channels(output.channels)?;
+			validate_remix(
+				PcmLayout::from_channels(input.channels)?,
+				PcmLayout::from_channels(output.channels)?,
+			)?;
 		}
 
 		let resampler = if input.sample_rate == output.sample_rate {
@@ -948,7 +957,9 @@ impl Converter {
 			samples.replace(data);
 		}
 		if self.input.channels != self.output.channels {
-			let data = remix(&samples.data, self.input.channels, self.output.channels)?;
+			let input = PcmLayout::from_channels(self.input.channels)?;
+			let output = PcmLayout::from_channels(self.output.channels)?;
+			let data = remix(&samples.data, input, output)?;
 			samples.replace(data);
 		}
 		if samples.data.is_empty() {
@@ -1459,7 +1470,7 @@ mod tests {
 		let mut options = PublicationOptions::default();
 		options.capture.source = capture::Source::Microphone(Some("first".into()));
 		options.encode.track = Some("audio".into());
-		options.encode.channels = Some(channels);
+		options.encode.settings.layout = PcmLayout::from_channels(channels).unwrap();
 		let (publication, driver) =
 			Publication::build(broadcast, catalog.clone(), options, Supervisor::exact()).unwrap();
 		let subscription = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
@@ -1736,10 +1747,10 @@ mod tests {
 	#[tokio::test]
 	async fn a_rejected_layout_parks_the_publication() {
 		let (_events, input) = stream(None);
-		// Opus does not remap channels, so a stereo codec rejects a mono input.
+		// A discrete source cannot be assigned stereo speaker positions implicitly.
 		let (mut publication, driver, mut source, _subscription, catalog) =
 			setup_encoding(2, [Open::Stream(input)]).await;
-		source.formats = [Discovery::Format(48_000, 1), Discovery::Format(48_000, 2)]
+		source.formats = [Discovery::Format(48_000, 6), Discovery::Format(48_000, 2)]
 			.into_iter()
 			.collect();
 		let task = tokio::spawn(driver.run_with(source));

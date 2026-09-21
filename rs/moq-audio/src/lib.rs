@@ -43,7 +43,7 @@
 //! [`Activity`] it was decoded from, which is how a caller tells coded audio
 //! from the frames an Opus sender withholds while its input is silent. PCM
 //! layout lives on the producer / consumer via [`encode::Input`] /
-//! [`decode::Config`], not on each frame, so callers can't drift between calls.
+//! [`decode::Output`], not on each frame, so callers can't drift between calls.
 
 #[cfg(feature = "aac")]
 mod aac;
@@ -51,6 +51,7 @@ mod activity;
 mod error;
 mod format;
 mod frame;
+mod layout;
 mod opus;
 mod pcm;
 mod resample;
@@ -69,3 +70,4 @@ pub use activity::Activity;
 pub use error::Error;
 pub use format::Format;
 pub use frame::Frame;
+pub use layout::Layout;

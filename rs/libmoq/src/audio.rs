@@ -207,7 +207,7 @@ impl Audio {
 		broadcast: &moq_net::broadcast::Consumer,
 		catalog: &hang::catalog::AudioConfig,
 		name: &str,
-		config: moq_audio::decode::Config,
+		config: moq_audio::decode::Options,
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let broadcast = broadcast.clone();
@@ -335,24 +335,28 @@ pub unsafe extern "C" fn moq_encode_audio(
 		let raw_output = unsafe { output.as_ref() }.ok_or(Error::InvalidPointer)?;
 		let codec_str = unsafe { ffi::parse_str(raw_output.codec, raw_output.codec_len)? };
 
-		let encoder_input = moq_audio::encode::Input {
-			format: audio_format_from_u32(raw_input.format)?,
-			sample_rate: raw_input.sample_rate,
-			channels: raw_input.channels,
-		};
+		let layout = moq_audio::Layout::from_channels(raw_input.channels)?;
+		let mut encoder_input = moq_audio::encode::Input::new(raw_input.sample_rate, layout);
+		encoder_input.format = audio_format_from_u32(raw_input.format)?;
 
 		// The C ABI takes an explicit track name and spells "unset" as 0, so map
 		// both onto the Rust options here rather than leaking either convention.
 		let mut options = moq_audio::encode::Options::default();
 		options.track = Some(name);
-		options.codec = codec_str
+		let codec = codec_str
 			.parse()
 			.map_err(|_| Error::UnknownFormat(codec_str.to_string()))?;
-		options.sample_rate = zeroable(raw_output.sample_rate);
-		options.channels = zeroable(raw_output.channels);
-		options.bitrate = zeroable(raw_output.bitrate).map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
+		options.settings = moq_audio::encode::Settings::from_input(codec, &encoder_input);
+		if let Some(sample_rate) = zeroable(raw_output.sample_rate) {
+			options.settings.sample_rate = sample_rate;
+		}
+		if let Some(channels) = zeroable(raw_output.channels) {
+			options.settings.layout = moq_audio::Layout::from_channels(channels)?;
+		}
+		options.settings.bitrate =
+			zeroable(raw_output.bitrate).map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
 		if let Some(micros) = zeroable(raw_output.frame_duration_us) {
-			options.frame_duration = Duration::from_micros(micros.into());
+			options.settings.frame_duration = Duration::from_micros(micros.into());
 		}
 
 		let bandwidth = ffi::parse_id_optional(bandwidth)?;
@@ -498,11 +502,13 @@ pub unsafe extern "C" fn moq_decode_audio(
 		let catalog = ffi::parse_id(catalog)?;
 		let raw = unsafe { output.as_ref() }.ok_or(Error::InvalidPointer)?;
 
-		let mut config = moq_audio::decode::Config::default();
+		let mut config = moq_audio::decode::Options::default();
 		config.start = moq_audio::decode::Start::Latest;
-		config.format = audio_format_from_u32(raw.format)?;
-		config.sample_rate = zeroable(raw.sample_rate);
-		config.channels = zeroable(raw.channels);
+		config.output.format = audio_format_from_u32(raw.format)?;
+		config.output.sample_rate = zeroable(raw.sample_rate);
+		config.output.layout = zeroable(raw.channels)
+			.map(moq_audio::Layout::from_channels)
+			.transpose()?;
 		config.max_age = Duration::from_micros(raw.max_age_us);
 
 		let on_frame = unsafe { OnStatus::new(user_data, on_frame)? };

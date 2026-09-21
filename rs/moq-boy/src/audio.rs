@@ -12,7 +12,6 @@ use anyhow::Result;
 use bytes::Bytes;
 
 /// The Game Boy APU outputs stereo audio.
-const CHANNELS: u32 = 2;
 /// 64 kbps is reasonable for stereo Game Boy audio (simple waveforms).
 const OPUS_BITRATE: moq_net::bandwidth::Rate = moq_net::bandwidth::Rate::from_kbps(64);
 
@@ -26,14 +25,12 @@ impl AudioEncoder {
 		catalog: moq_mux::catalog::Producer,
 		input_sample_rate: u32,
 	) -> Result<Self> {
-		let input = moq_audio::encode::Input {
-			format: moq_audio::Format::S16,
-			sample_rate: input_sample_rate,
-			channels: CHANNELS,
-		};
+		let mut input = moq_audio::encode::Input::new(input_sample_rate, moq_audio::Layout::Stereo);
+		input.format = moq_audio::Format::S16;
 		let mut options = moq_audio::encode::Options::default();
 		options.track = Some("audio".to_string());
-		options.bitrate = Some(OPUS_BITRATE);
+		options.settings = moq_audio::encode::Settings::from_input(moq_audio::encode::Codec::Opus, &input);
+		options.settings.bitrate = Some(OPUS_BITRATE);
 
 		let producer = moq_audio::encode::Producer::new(&mut broadcast, catalog, input, &options)?;
 		Ok(Self { producer })

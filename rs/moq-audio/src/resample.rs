@@ -10,7 +10,7 @@ use rubato::{
 	Async, FixedAsync, Resampler as RubatoTrait, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 
-use crate::Error;
+use crate::{Error, Layout};
 
 #[derive(Debug, thiserror::Error)]
 enum BackendError {
@@ -301,33 +301,39 @@ impl Resampler {
 	}
 }
 
-/// Whether [`remix`] can produce this channel count, checked up front so a
-/// consumer fails at construction rather than on its first frame.
-pub(crate) fn validate_channels(count: u32) -> Result<(), Error> {
-	match count {
-		1 | 2 => Ok(()),
-		other => Err(Error::Unsupported(format!(
-			"channel remix only supports mono and stereo (got {other})"
-		))),
-	}
-}
-
-/// Remix interleaved mono/stereo PCM into the requested channel count.
-pub(crate) fn remix(samples: &[f32], input_channels: u32, output_channels: u32) -> Result<Vec<f32>, Error> {
-	match (input_channels, output_channels) {
-		(1, 1) | (2, 2) => Ok(samples.to_vec()),
-		(1, 2) => {
+/// Convert between known layouts without assigning positions to discrete channels.
+pub(crate) fn remix(samples: &[f32], input: Layout, output: Layout) -> Result<Vec<f32>, Error> {
+	validate_remix(input, output)?;
+	match (input, output) {
+		(input, output) if input == output => Ok(samples.to_vec()),
+		(Layout::Mono, Layout::Stereo) => {
 			let mut output = Vec::with_capacity(samples.len() * 2);
 			for &sample in samples {
 				output.extend_from_slice(&[sample, sample]);
 			}
 			Ok(output)
 		}
-		(2, 1) => Ok(samples.chunks_exact(2).map(|pair| (pair[0] + pair[1]) * 0.5).collect()),
+		(Layout::Stereo, Layout::Mono) => Ok(samples.chunks_exact(2).map(|pair| (pair[0] + pair[1]) * 0.5).collect()),
 		_ => Err(Error::Unsupported(format!(
-			"channel remix only supports mono and stereo (got {input_channels} to {output_channels})"
+			"cannot convert audio layout {input:?} to {output:?} without speaker positions"
 		))),
 	}
+}
+
+/// Check that [`remix`] can convert between two layouts.
+pub(crate) fn validate_remix(input: Layout, output: Layout) -> Result<(), Error> {
+	input.validate()?;
+	output.validate()?;
+	if input == output
+		|| matches!(
+			(input, output),
+			(Layout::Mono, Layout::Stereo) | (Layout::Stereo, Layout::Mono)
+		) {
+		return Ok(());
+	}
+	Err(Error::Unsupported(format!(
+		"cannot convert audio layout {input:?} to {output:?} without speaker positions"
+	)))
 }
 
 #[cfg(test)]
@@ -524,11 +530,17 @@ mod tests {
 
 	#[test]
 	fn remix_mono_to_stereo_duplicates_samples() {
-		assert_eq!(remix(&[1.0, 2.0], 1, 2).unwrap(), [1.0, 1.0, 2.0, 2.0]);
+		assert_eq!(
+			remix(&[1.0, 2.0], Layout::Mono, Layout::Stereo).unwrap(),
+			[1.0, 1.0, 2.0, 2.0]
+		);
 	}
 
 	#[test]
 	fn remix_stereo_to_mono_averages_channels() {
-		assert_eq!(remix(&[1.0, 3.0, 2.0, 4.0], 2, 1).unwrap(), [2.0, 3.0]);
+		assert_eq!(
+			remix(&[1.0, 3.0, 2.0, 4.0], Layout::Stereo, Layout::Mono).unwrap(),
+			[2.0, 3.0]
+		);
 	}
 }
