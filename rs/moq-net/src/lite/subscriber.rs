@@ -16,7 +16,7 @@ use crate::{
 
 use super::Version;
 
-use web_async::Lock;
+use kio::Lock;
 
 pub(super) struct SubscriberConfig<S: crate::transport::poll::Session> {
 	pub runtime: crate::time::Clock,

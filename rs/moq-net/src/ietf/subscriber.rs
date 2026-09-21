@@ -16,7 +16,7 @@ use crate::{
 
 use super::{Message, Version, cluster, error::request, peer};
 
-use web_async::Lock;
+use kio::Lock;
 
 const TRACK_ALIAS_TIMEOUT: Duration = Duration::from_secs(1);
 

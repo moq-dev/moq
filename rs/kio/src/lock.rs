@@ -95,6 +95,12 @@ impl<T> Clone for Lock<T> {
 	}
 }
 
+impl<T: Default> Default for Lock<T> {
+	fn default() -> Self {
+		Self::new(T::default())
+	}
+}
+
 impl<T: fmt::Debug> fmt::Debug for Lock<T> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self.inner.try_lock() {

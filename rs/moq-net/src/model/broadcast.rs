@@ -512,7 +512,7 @@ struct Alive {
 	// The advertisement of the broadcast's exact path, owned here so it retracts
 	// with the broadcast: on finish, abort, or the last producer-side handle
 	// dropping. `None` for a standalone broadcast.
-	announcer: web_async::Lock<Option<Announcer>>,
+	announcer: kio::Lock<Option<Announcer>>,
 }
 
 impl Alive {
@@ -520,7 +520,7 @@ impl Alive {
 		Arc::new(Self {
 			token: kio::Producer::default(),
 			state,
-			announcer: web_async::Lock::new(None),
+			announcer: kio::Lock::new(None),
 		})
 	}
 

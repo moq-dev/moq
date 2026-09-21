@@ -113,8 +113,8 @@ use std::{
 	},
 };
 
+use kio::Lock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use web_async::Lock;
 
 use crate::{AsPath, PathOwned, Pattern, Patterns};
 

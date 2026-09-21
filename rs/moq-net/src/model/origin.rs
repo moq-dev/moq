@@ -10,8 +10,8 @@ use std::{
 	time::Duration,
 };
 
+use kio::Lock;
 use rand::RngExt;
-use web_async::Lock;
 
 use super::{Requests, WeakCache, WeakEntry};
 use crate::{
@@ -3960,9 +3960,7 @@ impl ProduceTest for Config {
 	fn produce(self) -> Producer {
 		let (producer, driver) = Producer::new(self);
 		if tokio::runtime::Handle::try_current().is_ok() {
-			web_async::spawn(async move {
-				crate::time::run(driver).await;
-			});
+			tokio::spawn(crate::time::run(driver));
 		} else {
 			// A sync test: nothing polls the driver, and dropping it would tear
 			// the origin down, so leak it and rely on the synchronous half.

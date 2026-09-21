@@ -11,10 +11,10 @@
 //! asserted directly.
 //!
 //! Know the boundary before trusting a pass: only kio's primitives are swapped for
-//! loom's (see `kio/src/sync.rs`). moq-net's own `web_async::Lock`s and bare
-//! `std::sync::atomic` counters, like the ones in `model/cache.rs`, still execute
-//! under loom (its threads are cooperative) but loom does not permute around them.
-//! So these models cover the kio handoff every handle is built on, not every
+//! loom's (see `kio/src/sync.rs`). moq-net's bare `std::sync::atomic` counters and
+//! `std::sync::Mutex`es, like the ones in `model/cache.rs`, still execute under
+//! loom (its threads are cooperative) but loom does not permute around them. So
+//! these models cover the kio handoff every handle is built on, not every
 //! critical section moq-net owns.
 //!
 //! Run with `just rs loom`; the whole file compiles away without `cfg(loom)`.

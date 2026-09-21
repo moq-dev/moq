@@ -583,7 +583,7 @@ impl Consumer {
 			state: self.state.clone(),
 			sequence,
 			options: options.into().unwrap_or_default(),
-			inner: web_async::Lock::new(None),
+			inner: kio::Lock::new(None),
 		})
 	}
 
@@ -651,7 +651,7 @@ pub struct Fetching {
 	// break the type recursion with `track::Fetching` (which can wrap a resume
 	// [`Fetching`]).
 	#[allow(clippy::type_complexity)]
-	inner: web_async::Lock<Option<(u64, track::Consumer, kio::Pending<track::Fetching>)>>,
+	inner: kio::Lock<Option<(u64, track::Consumer, kio::Pending<track::Fetching>)>>,
 }
 
 impl Fetching {

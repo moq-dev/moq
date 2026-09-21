@@ -53,10 +53,9 @@ What works today:
 
 ### Timestamp fallback
 
-`model/time.rs` uses `web_async::time::{Instant, SystemTime}` for timestamp
-generation. Native keeps the Tokio-backed instant so paused-time tests still
-work; browser wasm uses wasmtimer-backed clocks, avoiding the `std::time` and
-Tokio paths that panic or lack a driver on `wasm32-unknown-unknown`.
+`moq_net::time::Instant` is `std::time::Instant` on native and the
+wasmtimer-backed instant from `web_async::time` in the browser, where
+`std::time::Instant` panics. `model/time.rs` anchors its timestamps on it.
 
 ### Out of scope here: moq-mux
 
