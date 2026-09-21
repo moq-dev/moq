@@ -253,7 +253,7 @@ impl Encoder {
 
 	/// Retune the live encoder to `bitrate`, taking effect from roughly the next frame. No IDR is forced, so this is cheap enough to
 	/// drive from a congestion controller: pair it with
-	/// [`rate::Control`](super::rate::Control), which decides *when* the target
+	/// [`moq_mux::rate::Control`], which decides *when* the target
 	/// is worth moving.
 	///
 	/// Setting the rate the encoder is already at does nothing and succeeds.

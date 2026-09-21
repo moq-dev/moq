@@ -19,6 +19,8 @@
 //! - [`Pacer`] maps each exported frame's media timestamp to the wall-clock
 //!   instant it should be delivered at, for byte streams whose spacing is
 //!   part of the format (MPEG-TS).
+//! - [`rate`] turns bandwidth grants into stable media bitrate targets shared
+//!   by audio, video, and transcode senders.
 //! - [`timeline`](mod@timeline) publishes the broadcast's segment index: one
 //!   record per aligned segment, mapping a span of content time to the group
 //!   ranges that carry it on each track, so consumers can seek or build
@@ -33,6 +35,7 @@ mod error;
 pub mod import;
 pub mod json;
 mod pace;
+pub mod rate;
 pub mod select;
 mod source;
 pub mod timeline;
