@@ -2,7 +2,7 @@ use std::ffi::c_char;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
-use crate::{Error, Id, NonZeroSlab, State, moq_announce_update};
+use crate::{Error, Id, NonZeroSlab, State, moq_announce_update, moq_string};
 
 /// A spawned task entry: `close` signals shutdown, `callback` delivers status.
 ///
@@ -26,7 +26,7 @@ pub struct Origin {
 	active: NonZeroSlab<moq_net::origin::Producer>,
 
 	/// Broadcast announcement information (path, active status).
-	announced: NonZeroSlab<(String, bool)>,
+	announced: NonZeroSlab<AnnouncedRecord>,
 
 	/// Announcement listener tasks. Close signals shutdown; the task delivers a final callback, then removes itself.
 	announced_task: NonZeroSlab<Option<TaskEntry>>,
@@ -39,6 +39,45 @@ pub struct Origin {
 
 	/// Broadcast requests delivered to a dynamic handler, freed after accept/reject.
 	broadcast_request: NonZeroSlab<Option<moq_net::origin::Request>>,
+}
+
+/// One announcement and the C string views borrowed from it.
+struct AnnouncedRecord {
+	prefix: String,
+	captures: Option<Vec<String>>,
+	capture_views: Vec<moq_string>,
+	active: bool,
+}
+
+// The raw pointers only borrow immutable String allocations owned by this record.
+// Moving the record does not move those allocations, and the record is never mutated.
+unsafe impl Send for AnnouncedRecord {}
+
+impl AnnouncedRecord {
+	fn new(update: moq_net::announce::Update) -> Self {
+		let captures = update.captures.map(|captures| {
+			captures
+				.into_iter()
+				.map(|capture| capture.to_string())
+				.collect::<Vec<_>>()
+		});
+		let capture_views = captures
+			.as_deref()
+			.unwrap_or_default()
+			.iter()
+			.map(|capture| moq_string {
+				data: capture.as_ptr().cast(),
+				len: capture.len(),
+			})
+			.collect();
+
+		Self {
+			prefix: update.prefix.to_string(),
+			captures,
+			capture_views,
+			active: update.kind.is_active(),
+		}
+	}
 }
 
 struct DynamicEntry {
@@ -58,9 +97,23 @@ impl Origin {
 		self.active.get(id).ok_or(Error::OriginNotFound)
 	}
 
-	pub fn announced(&mut self, origin: Id, on_announce: OnStatus) -> Result<Id, Error> {
+	pub fn announced(
+		&mut self,
+		origin: Id,
+		prefix: String,
+		filter: Option<String>,
+		on_announce: OnStatus,
+	) -> Result<Id, Error> {
 		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
-		let consumer = origin.consume().announced();
+		let filter = match filter {
+			Some(filter) => filter.parse::<moq_net::Pattern>()?,
+			None => moq_net::Pattern::all(),
+		};
+		let filter = filter.rooted(&prefix)?;
+		let consumer = origin
+			.consume()
+			.scope("", &moq_net::Patterns::from(filter))?
+			.announced();
 		let channel = oneshot::channel();
 
 		let entry = TaskEntry {
@@ -100,10 +153,7 @@ impl Origin {
 			};
 
 			// Hold the lock only to buffer the announcement; release it before the callback.
-			let announced_id = State::lock()
-				.origin
-				.announced
-				.insert((update.prefix.to_string(), update.kind.is_active()))?;
+			let announced_id = State::lock().origin.announced.insert(AnnouncedRecord::new(update))?;
 			callback.call(announced_id);
 		}
 	}
@@ -111,9 +161,12 @@ impl Origin {
 	pub fn announced_info(&self, announced: Id, dst: &mut moq_announce_update) -> Result<(), Error> {
 		let announced = self.announced.get(announced).ok_or(Error::AnnouncementNotFound)?;
 		*dst = moq_announce_update {
-			prefix: announced.0.as_str().as_ptr() as *const c_char,
-			prefix_len: announced.0.len(),
-			active: announced.1,
+			prefix: announced.prefix.as_ptr().cast::<c_char>(),
+			prefix_len: announced.prefix.len(),
+			captures: announced.capture_views.as_ptr(),
+			captures_len: announced.capture_views.len(),
+			has_captures: announced.captures.is_some(),
+			active: announced.active,
 		};
 		Ok(())
 	}

@@ -18,7 +18,6 @@ gate.
 
 ## Quests
 
-- [Bindings announce match](/quest/dev/api-origin-scopes.md) - every binding takes a pattern scope and reports the announce match with its captures
 - [Rendition ownership](/quest/dev/api-mux-rendition.md) - one handle publishes a media track and reports its estimate, instead of five
 - [Cluster -01](/quest/dev/cluster-01/README.md) - rs/moq-net and js/net speak the revised cluster extension (HOP_ID, REQUEST_UPDATE repricing) and -01 is published
 - [API review gate](/quest/dev/api-review-gate.md) - each `api-*` quest above is landed or deferred by the maintainer before the merge PR opens

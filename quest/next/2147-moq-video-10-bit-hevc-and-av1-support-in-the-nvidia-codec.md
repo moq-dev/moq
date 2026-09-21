@@ -28,10 +28,6 @@ Lack of suitable hardware leaves that implementation unverified, not complete.
 Public API: additive capabilities on the extension points settled on main. Wire: existing
 codec signaling, with cross-language fixtures for any metadata change.
 
-## Required
-
-- [Video frames](/quest/main/video-frames.md) - extensible pixels and frame metadata
-
 ## Closes
 
 - [#2147](https://github.com/moq-dev/moq/issues/2147) - close this issue when the quest finishes

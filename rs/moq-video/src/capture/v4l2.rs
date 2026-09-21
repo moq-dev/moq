@@ -361,7 +361,7 @@ impl Camera {
 			.map_err(|error| Error::SourceUnavailable(format!("V4L2 camera {}: {error}", self.name)))?;
 
 		let i420 = match self.source {
-			Source::Yuyv => I420::from_yuyv(buf, self.stride, self.width, self.height)?,
+			Source::Yuyv => I420::from_yuyv(buf, self.stride, crate::Size::new(self.width, self.height))?,
 			Source::Mjpeg => {
 				// Only `bytesused` of the buffer holds the JPEG; the rest is stale.
 				let jpeg = buf.get(..meta.bytesused as usize).unwrap_or(buf);
@@ -383,7 +383,7 @@ impl Camera {
 						self.height
 					)));
 				}
-				I420::from_rgb(&rgb, self.width, self.height)?
+				I420::from_rgb(&rgb, crate::Size::new(self.width, self.height))?
 			}
 		};
 		Ok(pump::Read::Frame(Surface::I420(i420)))

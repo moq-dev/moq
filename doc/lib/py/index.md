@@ -22,9 +22,10 @@ import asyncio, moq
 
 async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
-        # The requested prefix scopes discovery; each update's prefix is relative to it.
-        async for announcement in client.announced("live/"):
-            broadcast = await client.request_broadcast("live/" + announcement.prefix)
+        # The filter is relative to the literal prefix; updates stay origin-relative.
+        async for announcement in client.announced("live/", filter="*/camera"):
+            print(announcement.captures)  # what * matched, or None for a partial overlap
+            broadcast = await client.request_broadcast(announcement.prefix)
             catalog = await broadcast.catalog()
             name, track = next(iter(catalog.audio.items()))
             async for frame in await broadcast.subscribe_media(name, track):
@@ -71,8 +72,9 @@ an unadvertised producer; `broadcast.announce(route)` /
 `origin.dynamic(prefix, route)` claims `prefix` and every path beneath it
 (`""` for everything). Hold the returned handle while the claim should stay
 advertised, and reject the requests you will not serve. A route is a
-capability, not an inventory. `announced(prefix)` is the requested discovery
-scope; each announcement `.prefix` is the concrete covered prefix relative to it.
+capability, not an inventory. `announced(prefix, filter=...)` combines a literal
+root with an optional relative pattern; each announcement `.prefix` stays
+relative to the origin and `.captures` reports what the pattern wildcards matched.
 
 Sessions reconnect with backoff when the transport drops and re-announce local
 broadcasts. `session.epoch()` counts the connections, 1 on the first, pairing

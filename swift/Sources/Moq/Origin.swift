@@ -112,9 +112,9 @@ public final class OriginConsumer: Sendable {
         self.ffi = ffi
     }
 
-    /// Stream routes under the requested prefix; each update returns a relative covered prefix.
-    public func announced(prefix: String) throws -> AnnounceConsumer {
-        AnnounceConsumer(try ffi.announced(prefix: prefix))
+    /// Stream routes under a literal prefix matching an optional pattern filter.
+    public func announced(prefix: String = "", filter: String? = nil) throws -> AnnounceConsumer {
+        AnnounceConsumer(try ffi.announced(config: MoqAnnounceConfig(prefix: prefix, filter: filter)))
     }
 
     /// Wait for a route covering an exact path, then resolve the broadcast there.
@@ -175,9 +175,14 @@ public final class AnnounceUpdate: Sendable {
         self.ffi = ffi
     }
 
-    /// The covered prefix, relative to the requested announcements prefix.
+    /// The covered prefix, relative to the origin.
     public var prefix: String {
         ffi.prefix()
+    }
+
+    /// What each filter wildcard matched, or `nil` for a partial overlap.
+    public var captures: [String]? {
+        ffi.captures()
     }
 
     /// Whether the route is active (`true`) or was retracted (`false`). A

@@ -1,7 +1,7 @@
 //! CPU conversion of native video surfaces to packed pixels.
 //!
 //! [`Surface::to_rgba`](crate::Surface::to_rgba) and
-//! [`to_bgra`](crate::Surface::to_bgra) are the portable rendering exits: they
+//! [`Surface::to_bgra`](crate::Surface::to_bgra) are the portable rendering exits: they
 //! download a GPU surface when necessary, apply the surface's color space, and
 //! return owned pixels for an image or UI toolkit.
 //!
@@ -38,21 +38,25 @@ impl Config {
 /// Owned, tightly packed RGBA8 pixels in row-major order.
 #[derive(Clone)]
 pub struct Rgba {
-	width: u32,
-	height: u32,
+	size: Size,
 	stride: usize,
 	data: Vec<u8>,
 }
 
 impl Rgba {
+	/// Image dimensions in pixels.
+	pub fn size(&self) -> Size {
+		self.size
+	}
+
 	/// Image width in pixels.
 	pub fn width(&self) -> u32 {
-		self.width
+		self.size.width
 	}
 
 	/// Image height in pixels.
 	pub fn height(&self) -> u32 {
-		self.height
+		self.size.height
 	}
 
 	/// Bytes between adjacent rows, always `width * 4`.
@@ -78,21 +82,25 @@ impl Rgba {
 /// to something expecting the other.
 #[derive(Clone)]
 pub struct Bgra {
-	width: u32,
-	height: u32,
+	size: Size,
 	stride: usize,
 	data: Vec<u8>,
 }
 
 impl Bgra {
+	/// Image dimensions in pixels.
+	pub fn size(&self) -> Size {
+		self.size
+	}
+
 	/// Image width in pixels.
 	pub fn width(&self) -> u32 {
-		self.width
+		self.size.width
 	}
 
 	/// Image height in pixels.
 	pub fn height(&self) -> u32 {
-		self.height
+		self.size.height
 	}
 
 	/// Bytes between adjacent rows, always `width * 4`.
@@ -113,8 +121,7 @@ impl Bgra {
 
 /// The geometry and pixels shared by both channel orders.
 struct Packed {
-	width: u32,
-	height: u32,
+	size: Size,
 	stride: usize,
 	data: Vec<u8>,
 }
@@ -175,8 +182,7 @@ fn packed(surface: &Surface, config: &Config, convert: Convert, name: &str) -> R
 		.map_err(|e| Error::Codec(anyhow::anyhow!("{name} conversion failed for {size}: {e}")))?;
 
 	Ok(Packed {
-		width: size.width,
-		height: size.height,
+		size,
 		stride: stride_usize,
 		data,
 	})
@@ -185,8 +191,7 @@ fn packed(surface: &Surface, config: &Config, convert: Convert, name: &str) -> R
 pub(crate) fn rgba(surface: &Surface, config: &Config) -> Result<Rgba, Error> {
 	let packed = packed(surface, config, yuv420_to_rgba, "RGBA")?;
 	Ok(Rgba {
-		width: packed.width,
-		height: packed.height,
+		size: packed.size,
 		stride: packed.stride,
 		data: packed.data,
 	})
@@ -195,8 +200,7 @@ pub(crate) fn rgba(surface: &Surface, config: &Config) -> Result<Rgba, Error> {
 pub(crate) fn bgra(surface: &Surface, config: &Config) -> Result<Bgra, Error> {
 	let packed = packed(surface, config, yuv420_to_bgra, "BGRA")?;
 	Ok(Bgra {
-		width: packed.width,
-		height: packed.height,
+		size: packed.size,
 		stride: packed.stride,
 		data: packed.data,
 	})
@@ -214,13 +218,13 @@ mod tests {
 	fn conversion_uses_the_surface_color() {
 		let source_size = Size::new(64, 64);
 		let red = [255u8, 0, 0, 255].repeat(source_size.pixels() as usize);
-		let source = I420::from_rgba(&red, source_size.width * 4, source_size.width, source_size.height).unwrap();
-		let source = source.resize(1280, 720).unwrap();
+		let source = I420::from_rgba(&red, source_size.width * 4, source_size).unwrap();
+		let source = source.resize(Size::new(1280, 720)).unwrap();
 		assert_eq!(source.color(), Some(Color::Bt601Limited));
 		assert_eq!(Color::infer(Size::new(1280, 720)), Color::Bt709Limited);
 
 		let image = rgba(&Surface::I420(source), &Config::default()).unwrap();
-		let center = (image.height as usize / 2 * image.stride) + image.width as usize / 2 * 4;
+		let center = (image.height() as usize / 2 * image.stride) + image.width() as usize / 2 * 4;
 		let pixel = &image.data[center..center + 4];
 		assert!(pixel[0] >= 250, "red channel drifted: {pixel:?}");
 		assert!(pixel[1] <= 2 && pixel[2] <= 2, "surface matrix was ignored: {pixel:?}");
@@ -230,9 +234,10 @@ mod tests {
 	#[test]
 	fn conversion_reports_a_tightly_packed_layout() {
 		let size = Size::new(64, 32);
-		let surface = Surface::I420(I420::new(size.width, size.height, vec![128; I420::len(64, 32)]).unwrap());
+		let surface = Surface::I420(I420::new(size, vec![128; I420::len(size).unwrap()]).unwrap());
 
 		let image = rgba(&surface, &Config::default()).unwrap();
+		assert_eq!(image.size(), size);
 		assert_eq!(image.width(), size.width);
 		assert_eq!(image.height(), size.height);
 		assert_eq!(image.stride(), size.width as usize * 4);
@@ -249,14 +254,13 @@ mod tests {
 		let size = Size::new(64, 64);
 		// Saturated rather than gray, or a transposed matrix would still pass.
 		let source = [200u8, 40, 90, 255].repeat(size.pixels() as usize);
-		let i420 = I420::from_rgba(&source, size.width * 4, size.width, size.height).unwrap();
+		let i420 = I420::from_rgba(&source, size.width * 4, size).unwrap();
 		let surface = Surface::I420(i420);
 
 		let as_rgba = rgba(&surface, &Config::default()).unwrap();
 		let as_bgra = bgra(&surface, &Config::default()).unwrap();
 
-		assert_eq!(as_bgra.width(), as_rgba.width());
-		assert_eq!(as_bgra.height(), as_rgba.height());
+		assert_eq!(as_bgra.size(), as_rgba.size());
 		assert_eq!(as_bgra.stride(), as_rgba.stride());
 		for (index, (rgba, bgra)) in as_rgba
 			.data()
@@ -282,7 +286,7 @@ mod tests {
 	#[test]
 	fn conversion_leaves_the_surface_alone() {
 		let size = Size::new(32, 32);
-		let surface = Surface::I420(I420::new(size.width, size.height, vec![128; I420::len(32, 32)]).unwrap());
+		let surface = Surface::I420(I420::new(size, vec![128; I420::len(size).unwrap()]).unwrap());
 
 		let first = rgba(&surface, &Config::default()).unwrap();
 		let second = bgra(&surface, &Config::default()).unwrap();

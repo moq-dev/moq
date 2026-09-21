@@ -1,31 +1,29 @@
-//! Rate control: turning a congestion-control bandwidth estimate into the
-//! bitrate the encoder should actually produce at.
+//! Shared rate control for media senders.
 //!
-//! [`Control`] is the one place this policy lives, so every sender backs off the
-//! same way. It's a pure function of the estimate: feed it every value from a
-//! [`bandwidth::Consumer`] and hand what it
-//! returns to [`Encoder::set_bitrate`](super::Encoder::set_bitrate).
+//! [`Control`] turns each grant from a [`bandwidth::Consumer`] into the target
+//! rate a sender should produce, so audio, video, and transcode back off the
+//! same way.
 
 use std::time::Instant;
 
 use moq_net::bandwidth;
 
 /// Ignore moves smaller than this fraction of the current target, so a jittering
-/// estimate doesn't reconfigure the encoder on every 100ms sample.
+/// estimate doesn't reconfigure the sender on every 100ms sample.
 const HYSTERESIS: f64 = 0.05;
 
 /// How fast the target may climb back, as a fraction of the current target per second
 /// (~3s from the floor back to a 2x higher rate).
 ///
-/// Drops ignore this and apply at once. Overshooting a closing uplink costs a stalled
-/// picture, while undershooting an opening one costs a few seconds of lower quality,
+/// Drops ignore this and apply at once. Overshooting a closing uplink stalls media,
+/// while undershooting an opening one costs a few seconds of lower quality,
 /// so the response is deliberately asymmetric.
 const RAMP: f64 = 0.25;
 
 /// How a bandwidth estimate maps onto the bitrate a sender should produce at.
 ///
 /// Build one with [`Policy::new`]. The behaviour is tuned for a live contribution
-/// encoder on a cellular uplink: give back bandwidth immediately when the pipe closes,
+/// sender on a cellular uplink: give back bandwidth immediately when the pipe closes,
 /// take it back slowly when it opens, and don't twitch at every jitter in the estimate.
 /// The deadband and ramp that implement that are deliberately not knobs; they are
 /// properties of how congestion control behaves, not of any one sender.
@@ -45,7 +43,7 @@ pub struct Policy {
 	/// to send more than was configured.
 	pub max: bandwidth::Rate,
 
-	/// Lower bound. Below some rate the picture isn't worth sending, so the target
+	/// Lower bound. Below some rate the media isn't worth sending, so the target
 	/// holds here and the transport's priority queue sheds the excess instead.
 	/// Defaults to a tenth of `max`.
 	pub min: bandwidth::Rate,
@@ -68,10 +66,10 @@ impl Policy {
 /// Feed it every estimate from a
 /// [`bandwidth::Consumer`]; it returns a new
 /// target only when one is worth applying, so a caller can hand the result
-/// straight to an encoder without rate-limiting it further:
+/// straight to a sender without rate-limiting it further:
 ///
 /// ```
-/// # use moq_video::encode::rate::{Control, Policy};
+/// # use moq_mux::rate::{Control, Policy};
 /// # use moq_net::bandwidth;
 /// # use std::time::Instant;
 /// let mut control = Control::new(Policy::new(bandwidth::Rate::from_mbps(4)));
@@ -98,7 +96,7 @@ impl Control {
 	/// otherwise, send what the caller configured.
 	pub fn new(policy: Policy) -> Self {
 		Self {
-			target: policy.max.max(policy.min),
+			target: policy.max,
 			policy,
 			applied: None,
 		}
@@ -148,12 +146,12 @@ impl Control {
 		// A raise landing exactly on [`Policy::max`] is exempt: that's the last step
 		// of a recovery, not a twitch. `next` stops growing once it reaches the
 		// ceiling, so a target arriving within `hysteresis` of it has no move left
-		// that could ever clear the threshold, and the encoder would sit a few
+		// that could ever clear the threshold, and the sender would sit a few
 		// percent under its configured rate for good after one congestion event.
 		//
 		// Scoped to the *configured* ceiling, not to any `desired`. Every raise
 		// eventually lands on `desired`, so exempting all of them would let a
-		// slowly-rising estimate reconfigure the encoder on every tick, which is
+		// slowly-rising estimate reconfigure the sender on every tick, which is
 		// precisely what the deadband exists to prevent. Stalling a few percent
 		// below a merely estimate-limited ceiling is the deadband working; stalling
 		// below the rate the caller asked for is not.
@@ -288,7 +286,7 @@ mod tests {
 	/// Regression: the ramp stops growing `next` once it reaches the ceiling, so a
 	/// target that lands within the 5% deadband of it has no move left that can
 	/// clear hysteresis. Without the exemption for a raise that reaches `desired`,
-	/// the walk above stalls at 3_866_256 and the encoder never returns to the
+	/// the walk above stalls at 3_866_256 and the sender never returns to the
 	/// bitrate it was configured with.
 	#[test]
 	fn a_raise_reaching_the_ceiling_beats_hysteresis() {
@@ -314,7 +312,7 @@ mod tests {
 
 	/// Regression: the ceiling exemption above must not swallow the deadband. Every
 	/// raise eventually lands on `desired`, so keying it on that rather than on the
-	/// configured ceiling let a slowly-rising estimate retune the encoder on every
+	/// configured ceiling let a slowly-rising estimate retune the sender on every
 	/// single tick, which is the exact behavior `hysteresis` exists to prevent.
 	#[test]
 	fn upward_jitter_stays_inside_the_deadband() {
@@ -365,14 +363,15 @@ mod tests {
 		);
 	}
 
-	/// `min > max` is a caller error, but it must clamp rather than panic: the
-	/// bound is fed straight to `clamp`, which panics on an inverted range.
+	/// `min > max` is normalized to the ceiling at construction and update.
 	#[test]
-	fn inverted_bounds_do_not_panic() {
+	fn inverted_bounds_use_the_ceiling() {
 		let mut policy = Policy::new(bps(1_000_000));
 		policy.min = bps(5_000_000);
 		let mut control = Control::new(policy);
-		control.update(Some(bps(2_000_000)), Instant::now());
-		assert!(control.target() <= bps(5_000_000));
+
+		assert_eq!(control.target(), bps(1_000_000));
+		assert_eq!(control.update(Some(bps(2_000_000)), Instant::now()), None);
+		assert_eq!(control.target(), bps(1_000_000));
 	}
 }

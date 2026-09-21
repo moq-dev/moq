@@ -13,6 +13,17 @@ pub struct MoqOriginConfig {
 	pub cache_capacity_bytes: Option<u64>,
 }
 
+/// Scope for an announcement stream.
+#[derive(Clone, Debug, Default, uniffi::Record)]
+pub struct MoqAnnounceConfig {
+	/// Literal path prefix beneath the origin.
+	#[uniffi(default = "")]
+	pub prefix: String,
+	/// Pattern relative to `prefix`, or `None` for every path beneath it.
+	#[uniffi(default = None)]
+	pub filter: Option<String>,
+}
+
 /// A path-prefix route: hops and costs for an advertisement.
 ///
 /// Pair one with `MoqBroadcastProducer::announce` for an exact path, or with
@@ -136,6 +147,9 @@ impl Announced {
 		match self.inner.next().await {
 			Some(update) => Ok(Some(Arc::new(MoqAnnounceUpdate {
 				prefix: update.prefix.to_string(),
+				captures: update
+					.captures
+					.map(|captures| captures.into_iter().map(|capture| capture.to_string()).collect()),
 				route: update.route.into(),
 				active: update.kind.is_active(),
 			}))),
@@ -164,11 +178,12 @@ impl AnnouncedBroadcast {
 ///
 /// Carries no broadcast: resolve a specific path with
 /// `MoqOriginConsumer::request_broadcast` (after this update proves it is
-/// covered). Its prefix is relative to the prefix requested from
-/// `MoqOriginConsumer::announced`. The application decides which paths name broadcasts.
+/// covered). Its prefix is relative to the origin. The application decides
+/// which paths name broadcasts.
 #[derive(uniffi::Object)]
 pub struct MoqAnnounceUpdate {
 	prefix: String,
+	captures: Option<Vec<String>>,
 	route: MoqRoute,
 	active: bool,
 }
@@ -298,12 +313,15 @@ impl MoqOriginProducer {
 
 #[uniffi::export]
 impl MoqOriginConsumer {
-	/// Subscribe to routes under a requested prefix; updates return covered prefixes relative to it.
-	pub fn announced(&self, prefix: String) -> Result<Arc<MoqAnnounceConsumer>, MoqError> {
+	/// Subscribe to routes matching a pattern scope; updates stay relative to the origin.
+	pub fn announced(&self, config: MoqAnnounceConfig) -> Result<Arc<MoqAnnounceConsumer>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let origin = self
-			.inner
-			.scope(prefix, &moq_net::Patterns::from(moq_net::Pattern::all()))?;
+		let filter = match config.filter {
+			Some(filter) => filter.parse::<moq_net::Pattern>()?,
+			None => moq_net::Pattern::all(),
+		};
+		let filter = filter.rooted(&config.prefix)?;
+		let origin = self.inner.scope("", &moq_net::Patterns::from(filter))?;
 		Ok(Arc::new(MoqAnnounceConsumer {
 			task: Task::new(Announced {
 				inner: origin.announced(),
@@ -450,9 +468,14 @@ impl MoqAnnounceConsumer {
 
 #[uniffi::export]
 impl MoqAnnounceUpdate {
-	/// The covered prefix, relative to the requested announcements prefix.
+	/// The covered prefix, relative to the origin.
 	pub fn prefix(&self) -> String {
 		self.prefix.clone()
+	}
+
+	/// What each wildcard matched, or `None` when the route only overlaps the scope.
+	pub fn captures(&self) -> Option<Vec<String>> {
+		self.captures.clone()
 	}
 
 	/// The route serving the prefix: its hops and costs.

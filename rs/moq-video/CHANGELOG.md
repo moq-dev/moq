@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - [**breaking**] `encode::Producer::finish` borrows (`&mut self`) instead of consuming, so a later
   `abort(self)` can still run after a clean end.
+- [**breaking**] Frame resize and RGB/BGRA conversion each have one configured
+  operation: `resize(size, config)`, `to_rgba(config)`, and `to_bgra(config)`.
+- [**breaking**] `Surface::into_i420` returns typed `I420`, preserving its size,
+  color, and allocation. Use `I420::into_data` to extract packed bytes.
+- [**breaking**] `I420::new` and `I420::len` take `Size`; `Frame` and
+  `encode::Encoded` are non-exhaustive and remain constructible through `new`.
 
 ## [0.0.25](https://github.com/moq-dev/moq/compare/moq-video-v0.0.24...moq-video-v0.0.25) - 2026-09-17
 

@@ -119,9 +119,20 @@ type OriginConsumer struct {
 	inner *ffi.MoqOriginConsumer
 }
 
-// Announced streams routes under the requested prefix. Each update returns a covered prefix relative to it.
-func (o *OriginConsumer) Announced(prefix string) (*AnnounceConsumer, error) {
-	inner, err := o.inner.Announced(prefix)
+// AnnounceOptions scopes an announcement stream.
+type AnnounceOptions struct {
+	// Prefix is a literal path root beneath the origin.
+	Prefix string
+	// Filter is a pattern relative to Prefix. Nil matches every path beneath it.
+	Filter *string
+}
+
+// Announced streams routes under a literal prefix matching an optional pattern filter.
+func (o *OriginConsumer) Announced(options AnnounceOptions) (*AnnounceConsumer, error) {
+	inner, err := o.inner.Announced(ffi.MoqAnnounceConfig{
+		Prefix: options.Prefix,
+		Filter: options.Filter,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -159,9 +170,21 @@ type AnnounceUpdate struct {
 	inner *ffi.MoqAnnounceUpdate
 }
 
-// Prefix is the covered prefix, relative to the requested announcements prefix.
+// Prefix is the covered prefix, relative to the origin.
 func (a *AnnounceUpdate) Prefix() string {
 	return a.inner.Prefix()
+}
+
+// Captures reports what each filter wildcard matched. Nil means the route only
+// overlaps the scope without pinning every wildcard.
+func (a *AnnounceUpdate) Captures() []string {
+	captures := a.inner.Captures()
+	if captures == nil {
+		return nil
+	}
+	result := make([]string, len(*captures))
+	copy(result, *captures)
+	return result
 }
 
 // Active reports whether the route is active (true) or was retracted (false).

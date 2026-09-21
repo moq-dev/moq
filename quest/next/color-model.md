@@ -53,10 +53,6 @@ conflict between VUI and container resolving to the bitstream, a container box
 that fills a gap the bitstream left unspecified, and an SDR round trip that
 stays byte-identical.
 
-## Required
-
-- [Video frames](/quest/main/video-frames.md) - the extensible frame contract
-
 ## Related
 
 - [SEI sidecars](/quest/future/sei/README.md) - moves SEI out of the video track;

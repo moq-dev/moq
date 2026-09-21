@@ -294,7 +294,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 					// this rung's size.
 					let frame: Arc<moq_video::Frame> = match frame.size() == rung.info.size {
 						true => frame,
-						false => Arc::new(frame.resize_with(rung.info.size, &rung.resize)?),
+						false => Arc::new(frame.resize(rung.info.size, &rung.resize)?),
 					};
 					let encoder = match &mut encoder {
 						Some(encoder) => encoder,
@@ -607,7 +607,7 @@ fn write(
 /// rung's resolution (`decode::Config::resize`). A decoder with a hardware
 /// scaler (NVDEC) does, and its GPU frames feed the encoder in place: the NVDEC
 /// -> NVENC path never touches the CPU. Frames that come back at any other size
-/// get `Frame::resize_with` instead.
+/// get `Frame::resize` instead.
 struct Pipeline {
 	decoder: moq_video::decode::Sink,
 	/// Opened from the first decoded frame, whose color space it has to declare.
@@ -668,7 +668,7 @@ impl Pipeline {
 		// as-is, keeping a GPU frame on the GPU.
 		let raw = match raw.size() == self.size {
 			true => raw,
-			false => raw.resize_with(self.size, &self.rung.resize)?,
+			false => raw.resize(self.size, &self.rung.resize)?,
 		};
 		if self.encoder.is_none() {
 			let mut opened = self.rung.encode(raw.surface.color()).await?;
@@ -708,7 +708,7 @@ mod tests {
 	use super::*;
 	use moq_video::resize::Acceleration;
 
-	/// A fetched NVDEC group reaches `Frame::resize_with` at native size when
+	/// A fetched NVDEC group reaches `Frame::resize` at native size when
 	/// CPU scaling is forced, rather than being resized in the decoder first.
 	#[test]
 	fn forced_cpu_skips_the_decoder_scaler() {

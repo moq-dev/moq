@@ -187,7 +187,7 @@ fn convert(decoded: Vec<moq_vaapi::decode::Frame>) -> Result<Vec<Frame>, Error> 
 	decoded
 		.into_iter()
 		.map(|frame| {
-			let i420 = I420::from_nv12(&frame.data, frame.width, frame.height)?;
+			let i420 = I420::from_nv12(&frame.data, crate::Size::new(frame.width, frame.height))?;
 			let timestamp = Timestamp::from_micros(frame.timestamp).unwrap_or(Timestamp::ZERO);
 			Ok(Frame::new(Surface::I420(i420), timestamp))
 		})
@@ -313,7 +313,7 @@ impl DmaBufFrame for Exported {
 		let nv12 = frame
 			.download()
 			.map_err(|e| Error::Codec(anyhow::anyhow!("read a VA-API decode surface back: {e:?}")))?;
-		I420::from_nv12(&nv12.data, nv12.width, nv12.height)
+		I420::from_nv12(&nv12.data, crate::Size::new(nv12.width, nv12.height))
 	}
 }
 
@@ -388,7 +388,7 @@ mod tests {
 		}
 		let (w, h) = (320u32, 240u32);
 		let rgba = gradient_rgba(w, h);
-		let expected = I420::from_rgba(&rgba, w * 4, w, h).unwrap();
+		let expected = I420::from_rgba(&rgba, w * 4, crate::Size::new(w, h)).unwrap();
 
 		let mut encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Software,

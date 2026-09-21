@@ -581,7 +581,7 @@ mod tests {
 		.unwrap();
 		let decoder = Nvdec::open(Codec::H264, &decode_config(None)).expect("NVDEC H.264 decoder");
 
-		let expected = I420::from_rgba(&gradient_rgba(w, h), w * 4, w, h).unwrap();
+		let expected = I420::from_rgba(&gradient_rgba(w, h), w * 4, crate::Size::new(w, h)).unwrap();
 		let decoded = round_trip(encoder, decoder, w, h);
 
 		for (i, (timestamp, i420)) in decoded.iter().enumerate() {
@@ -612,7 +612,7 @@ mod tests {
 			Nvdec::open(Codec::H264, &decode_config(Some(crate::Size::new(160, 120)))).expect("NVDEC H.264 decoder");
 
 		// Nearest-neighbor reference downscale of the expected picture.
-		let full = I420::from_rgba(&gradient_rgba(w, h), w * 4, w, h).unwrap();
+		let full = I420::from_rgba(&gradient_rgba(w, h), w * 4, crate::Size::new(w, h)).unwrap();
 		let sample = |plane: &[u8], pw: usize, x: usize, y: usize| plane[y * 2 * pw + x * 2];
 		let mut expected_y = vec![0u8; 160 * 120];
 		for y in 0..120 {
@@ -646,7 +646,7 @@ mod tests {
 		};
 		let decoder = Nvdec::open(Codec::H265, &decode_config(None)).expect("NVDEC H.265 decoder");
 
-		let expected = I420::from_rgba(&gradient_rgba(w, h), w * 4, w, h).unwrap();
+		let expected = I420::from_rgba(&gradient_rgba(w, h), w * 4, crate::Size::new(w, h)).unwrap();
 		let decoded = round_trip(encoder, decoder, w, h);
 		for (_, i420) in &decoded {
 			assert_eq!((i420.width, i420.height), (w, h));
@@ -716,7 +716,7 @@ mod tests {
 
 		// Decode the re-encoded stream in software and compare to the source.
 		let expected = {
-			let full = I420::from_rgba(&gradient_rgba(w, h), w * 4, w, h).unwrap();
+			let full = I420::from_rgba(&gradient_rgba(w, h), w * 4, crate::Size::new(w, h)).unwrap();
 			let mut y = vec![0u8; 160 * 120];
 			for row in 0..120 {
 				for col in 0..160 {

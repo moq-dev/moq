@@ -219,7 +219,7 @@ impl MediaCodec {
 		}
 
 		let i420 = frame.surface.to_i420()?;
-		let size = I420::len(self.width as u32, self.height as u32);
+		let size = I420::len(crate::Size::new(self.width as u32, self.height as u32))?;
 		let sample_time = self.sample_time();
 
 		let submitted = match self
@@ -667,7 +667,7 @@ mod tests {
 		let mut backend = MediaCodec::open(&config).expect("a MediaCodec encoder");
 
 		let size = config.size();
-		let i420 = I420::new(size.width, size.height, vec![0x80; I420::len(size.width, size.height)]).unwrap();
+		let i420 = I420::new(size, vec![0x80; I420::len(size).unwrap()]).unwrap();
 		let frame = Frame::new(crate::Surface::I420(i420), timestamp(0));
 
 		let mut encoded = backend.encode(&frame, true).unwrap();

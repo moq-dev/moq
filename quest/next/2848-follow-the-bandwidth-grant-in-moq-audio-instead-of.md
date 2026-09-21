@@ -21,8 +21,8 @@ grant; `Options::bandwidth` documents that
 (`rs/moq-audio/src/encode/producer.rs:49-62`). Video already follows through
 `rate::Control` (`rs/moq-video/src/encode/producer.rs:467-476`).
 
-- Consume `moq_mux::rate` after the main namespace move. Keep one shared policy;
-  this quest adds audio adaptation without removing a stabilized video API.
+- Consume `moq_mux::rate`, keeping one shared policy; this quest adds audio
+  adaptation without growing a second implementation.
 - The follow loop lives in `moq_audio::encode::Producer`, not the capture
   driver: `Producer::new` (`producer.rs:255`) already takes `Options` with the
   allocator (`:62`), so it reserves the configured bitrate against
@@ -37,9 +37,9 @@ grant; `Options::bandwidth` documents that
   `opus::bitrate_floor(codec_rate, frame_size).max(500)` to
   `300_000 * channels` (`encoder.rs:345-346`,
   `rs/moq-audio/src/opus.rs:137-143`). `Policy::min` defaults to a tenth of
-  the ceiling (`rate.rs:55-60`); for Opus it is the codec floor, so a grant
-  below it clamps there and never errors. The reservation's ceiling is the
-  configured bitrate; only the policy target moves.
+  the ceiling (`rs/moq-mux/src/rate.rs`); for Opus it is the codec floor, so a
+  grant below it clamps there and never errors. The reservation's ceiling is
+  the configured bitrate; only the policy target moves.
 - PCM: `pcm::bitrate(sample_rate, channels)` is `pub(crate)`
   (`rs/moq-audio/src/pcm.rs:9`), `Config::bitrate` is refused for it
   (`encoder.rs:269-272`) and so is `set_bitrate` (`encoder.rs:412-414`). A PCM
@@ -61,7 +61,6 @@ the dev merge.
 
 ## Required
 
-- [Shared rate policy](/quest/main/media-rate-policy.md) - namespace relocation is already complete
 - [Audio configuration](/quest/main/audio-config.md) - the settled codec settings
 - [Audio publication](/quest/main/audio-publication.md) - demand access without transport write authority
 

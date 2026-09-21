@@ -349,7 +349,8 @@ fn check(vector: &Vector) {
 					}
 				}
 				Expect::Reference(reference) => {
-					let len = I420::len(vector.width, vector.height);
+					let size = crate::Size::new(vector.width, vector.height);
+					let len = I420::len(size).expect("reference size");
 					assert_eq!(
 						reference.len(),
 						len * vector.pictures,
@@ -359,8 +360,7 @@ fn check(vector: &Vector) {
 						vector.width,
 						vector.height
 					);
-					let want = I420::new(vector.width, vector.height, reference[i * len..(i + 1) * len].to_vec())
-						.expect("reference picture");
+					let want = I420::new(size, reference[i * len..(i + 1) * len].to_vec()).expect("reference picture");
 					assert!(
 						got.data() == want.data(),
 						"{name}: {} picture {i} differs from the reference decode ({})",

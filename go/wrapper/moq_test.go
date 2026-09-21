@@ -307,7 +307,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	}
 
 	consumer := origin.Consume()
-	announced, err := consumer.Announced("")
+	announced, err := consumer.Announced(moq.AnnounceOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1080,7 +1080,7 @@ func TestAnnounceThenUnannounceIsVisible(t *testing.T) {
 	}
 
 	consumer := origin.Consume()
-	announced, err := consumer.Announced("")
+	announced, err := consumer.Announced(moq.AnnounceOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1100,6 +1100,80 @@ func TestAnnounceThenUnannounceIsVisible(t *testing.T) {
 	}
 	if _, err := consumer.RequestBroadcast(ctx, "live"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAnnouncedPatternCaptures(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	origin := moq.NewOriginProducer()
+	filter := "*/chat"
+	announced, err := origin.Consume().Announced(moq.AnnounceOptions{Prefix: "room", Filter: &filter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer announced.Cancel()
+
+	audio, err := origin.CreateBroadcast("room/alice/audio")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := audio.Announce(moq.Route{}); err != nil {
+		t.Fatal(err)
+	}
+	chat, err := origin.CreateBroadcast("room/alice/chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := chat.Announce(moq.Route{}); err != nil {
+		t.Fatal(err)
+	}
+
+	update, err := announced.Next(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if update == nil || update.Prefix() != "room/alice/chat" {
+		t.Fatalf("update = %+v, want room/alice/chat", update)
+	}
+	captures := update.Captures()
+	if len(captures) != 1 || captures[0] != "alice" {
+		t.Fatalf("captures = %v, want [alice]", captures)
+	}
+}
+
+// An exact filter with no wildcards still reports a full match: captures is
+// empty but not nil, which is what tells it apart from a partial overlap.
+func TestAnnouncedExactFilterCapturesEmpty(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	origin := moq.NewOriginProducer()
+	filter := ""
+	announced, err := origin.Consume().Announced(moq.AnnounceOptions{Prefix: "room/alice/chat", Filter: &filter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer announced.Cancel()
+
+	chat, err := origin.CreateBroadcast("room/alice/chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := chat.Announce(moq.Route{}); err != nil {
+		t.Fatal(err)
+	}
+
+	update, err := announced.Next(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if update == nil || update.Prefix() != "room/alice/chat" {
+		t.Fatalf("update = %+v, want room/alice/chat", update)
+	}
+	if captures := update.Captures(); captures == nil || len(captures) != 0 {
+		t.Fatalf("captures = %#v, want a non-nil empty slice", captures)
 	}
 }
 

@@ -42,7 +42,6 @@ none. Consume the settled main frame/output contracts without replacing them.
 
 ## Required
 
-- [Video frames](/quest/main/video-frames.md) - typed pixels and extensible owned frames
 - [Video output](/quest/main/video-output.md) - explicit native or CPU output
 
 - [Merge dev](/quest/dev/merge-dev.md) - the required dev APIs must be available on main before this implementation starts

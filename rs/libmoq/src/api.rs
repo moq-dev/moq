@@ -682,9 +682,16 @@ unsafe fn parse_route(route: *const moq_route) -> Result<moq_net::origin::Route,
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_announce_update {
-	/// The covered prefix, relative to the requested announcements prefix, NOT NULL terminated
+	/// The covered prefix, relative to the origin, NOT NULL terminated
 	pub prefix: *const c_char,
 	pub prefix_len: usize,
+
+	/// What each requested filter wildcard matched. Each string is NOT NULL terminated.
+	/// Meaningful only when `has_captures` is true; false means the route overlaps
+	/// the filter without pinning every wildcard.
+	pub captures: *const moq_string,
+	pub captures_len: usize,
+	pub has_captures: bool,
 
 	/// Whether the route is active or was retracted
 	/// This MUST toggle between true and false over the lifetime of the route
@@ -1418,7 +1425,11 @@ pub extern "C" fn moq_broadcast_request_free(request: u32) -> i32 {
 	})
 }
 
-/// Learn about all broadcasts published to an origin.
+/// Learn about broadcasts matching a pattern scope under an origin.
+///
+/// `prefix` is a literal path root. `filter` is a pattern relative to that
+/// prefix, or NULL for every path beneath it. Empty is a valid exact filter.
+/// Delivered [moq_announce_update] prefixes remain relative to the origin.
 ///
 /// `on_announce` is invoked with a positive announced ID for each broadcast,
 /// then exactly once more with a terminal code: `0` (stopped cleanly) or a
@@ -1437,21 +1448,31 @@ pub extern "C" fn moq_broadcast_request_free(request: u32) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_origin_announced(
 	origin: u32,
+	prefix: *const c_char,
+	prefix_len: usize,
+	filter: *const c_char,
+	filter_len: usize,
 	on_announce: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
+		let prefix = unsafe { ffi::parse_str(prefix, prefix_len)? }.to_string();
+		let filter = if filter.is_null() {
+			None
+		} else {
+			Some(unsafe { ffi::parse_str(filter, filter_len)? }.to_string())
+		};
 		let on_announce = unsafe { ffi::OnStatus::new(user_data, on_announce)? };
-		State::lock().origin.announced(origin, on_announce)
+		State::lock().origin.announced(origin, prefix, filter, on_announce)
 	})
 }
 
 /// Query information about a broadcast discovered by [moq_origin_announced].
 ///
-/// The destination is filled with the route information. The `prefix` pointer borrows
-/// the announcement's storage: copy it out before calling [moq_origin_announced_free], which
-/// invalidates it.
+/// The destination is filled with the route information. The `prefix`, `captures`,
+/// and capture string pointers borrow the announcement's storage: copy them out
+/// before calling [moq_origin_announced_free], which invalidates them.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -1471,8 +1492,8 @@ pub unsafe extern "C" fn moq_origin_announced_info(announced: u32, dst: *mut moq
 /// Each announce / unannounce event hands the callback a distinct announcement handle (read
 /// with [moq_origin_announced_info]); release it here once done to avoid leaking one per event
 /// over the life of the listener. This is per-announcement and distinct from
-/// [moq_origin_announced_cancel], which stops the listener itself. After freeing, any `prefix`
-/// pointer obtained from [moq_origin_announced_info] for this handle is dangling.
+/// [moq_origin_announced_cancel], which stops the listener itself. After freeing,
+/// any pointer obtained from [moq_origin_announced_info] for this handle is dangling.
 ///
 /// Returns zero on success, or a negative code if the handle is unknown.
 #[unsafe(no_mangle)]

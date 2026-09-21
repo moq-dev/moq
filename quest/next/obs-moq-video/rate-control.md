@@ -23,6 +23,4 @@ whether a second binding wants it. Verify against a shaped uplink and with
 
 ## Required
 
-- [Shared rate policy](/quest/main/media-rate-policy.md) - use its settled shared namespace
-
 - [OBS migration](/quest/next/cpp/obs.md) - the plugin is on the generated C++ first

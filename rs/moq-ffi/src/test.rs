@@ -307,7 +307,7 @@ async fn announced_route_keeps_cold_cost_on_reannounce() {
 	// The route observed through the announcement stream carries both halves:
 	// a truthful `{warm: 0, cold: 9}` is never rewritten to the publisher's
 	// own `{warm: 0, cold: 0}`.
-	let announced = consumer.announced("".into()).unwrap();
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let route = loop {
 		let announcement = tokio::time::timeout(TIMEOUT, announced.next())
 			.await
@@ -1384,14 +1384,18 @@ async fn decode_audio_follows_a_sibling_broadcast_reference() {
 	source.finish().unwrap();
 }
 
-/// An announcement stream is drawn from a cursor rooted at the prefix, and the broadcast it hands
-/// out is named relative to that root. Resolving against a differently-rooted origin would read a
-/// legal reference as escaping, or land on the wrong broadcast entirely.
+/// Announcement filters do not re-root the origin, so relative broadcast references
+/// keep the same meaning as they have on the unfiltered consumer.
 #[tokio::test]
 async fn announced_broadcasts_resolve_siblings_under_the_prefix() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
-	let announced = consumer.announced("a/".into()).unwrap();
+	let announced = consumer
+		.announced(MoqAnnounceConfig {
+			prefix: "a/".into(),
+			filter: None,
+		})
+		.unwrap();
 
 	let catalog = create_announced(&origin, "a/pub");
 	let source = create_announced(&origin, "a/source");
@@ -1406,10 +1410,15 @@ async fn announced_broadcasts_resolve_siblings_under_the_prefix() {
 			.expect("the origin should keep announcing");
 		let prefix = announcement.prefix();
 		assert!(
-			matches!(prefix.as_str(), "pub" | "source"),
-			"covered prefix should be relative to the requested a/ prefix: {prefix}"
+			matches!(prefix.as_str(), "a/pub" | "a/source"),
+			"covered prefix should stay relative to the origin: {prefix}"
 		);
-		if prefix == "pub" {
+		assert_eq!(
+			announcement.captures(),
+			Some(vec![prefix.strip_prefix("a/").unwrap().to_string()]),
+			"the implicit trailing glob captures the suffix beneath the literal prefix"
+		);
+		if prefix == "a/pub" {
 			break await_announced(&consumer, "a/pub").await;
 		}
 	};
@@ -1427,6 +1436,41 @@ async fn announced_broadcasts_resolve_siblings_under_the_prefix() {
 
 	catalog.finish().unwrap();
 	source.finish().unwrap();
+}
+
+#[tokio::test]
+async fn announced_filters_patterns_and_reports_captures() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let consumer = origin.consume();
+	let announced = consumer
+		.announced(MoqAnnounceConfig {
+			prefix: "room".into(),
+			filter: Some("*/chat".into()),
+		})
+		.unwrap();
+
+	let _broad = origin.dynamic("room".into(), MoqRoute::default()).unwrap();
+	let overlap = tokio::time::timeout(TIMEOUT, announced.next())
+		.await
+		.expect("timed out waiting for the overlapping announcement")
+		.unwrap()
+		.expect("the origin should keep announcing");
+	assert_eq!(overlap.prefix(), "room");
+	assert_eq!(overlap.captures(), None, "an overlap does not pin the wildcard");
+
+	let chat = create_announced(&origin, "room/alice/chat");
+	let _audio = create_announced(&origin, "room/alice/audio");
+	let update = tokio::time::timeout(TIMEOUT, announced.next())
+		.await
+		.expect("timed out waiting for the matching announcement")
+		.unwrap()
+		.expect("the origin should keep announcing");
+
+	assert_eq!(update.prefix(), "room/alice/chat");
+	assert_eq!(update.captures(), Some(vec!["alice".into()]));
+	assert!(update.active());
+
+	chat.finish().unwrap();
 }
 
 /// A broadcast consumed straight from a local producer has no origin, so a rendition naming a
@@ -1498,7 +1542,7 @@ async fn announce_and_unannounce_toggles_discovery() {
 
 	// The consumer observes the flag through the announce stream: an active
 	// announcement, then its retraction.
-	let announced = consumer.announced("".into()).unwrap();
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	async fn wait_live(announced: &MoqAnnounceConsumer, announce: bool) {
 		loop {
 			let announcement = tokio::time::timeout(TIMEOUT, announced.next())
@@ -1560,7 +1604,7 @@ async fn local_publish_consume_audio() {
 	let media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
 
 	let consumer = origin.consume();
-	let announced = consumer.announced("".into()).unwrap();
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 
 	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
 		.await
@@ -1619,7 +1663,7 @@ async fn video_publish_consume() {
 	let media = broadcast.publish_video(video_init(MoqVideoFormat::Avc3, init)).unwrap();
 
 	let consumer = origin.consume();
-	let announced = consumer.announced("".into()).unwrap();
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 
 	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
 		.await
@@ -1731,7 +1775,7 @@ async fn video_raw_publish_consume() {
 	}
 
 	let consumer = origin.consume();
-	let announced = consumer.announced("".into()).unwrap();
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
 		.await
 		.expect("timed out")
@@ -1847,7 +1891,7 @@ async fn video_raw_publish_from_many_threads() {
 	// an encoded keyframe, so this is what says the frames really were encoded.
 	// Checked before finishing, which withdraws it again.
 	let consumer = origin.consume();
-	let announced = consumer.announced("".into()).unwrap();
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
 		.await
 		.expect("timed out")
@@ -1944,7 +1988,7 @@ async fn multiple_frames_ordering() {
 	let media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
 
 	let consumer = origin.consume();
-	let announced = consumer.announced("".into()).unwrap();
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
 		.await
 		.unwrap()
@@ -2001,7 +2045,7 @@ async fn catalog_update_on_new_track() {
 	let _media1 = broadcast.publish_audio(first).unwrap();
 
 	let consumer = origin.consume();
-	let announced = consumer.announced("".into()).unwrap();
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
 		.await
 		.unwrap()
@@ -2053,7 +2097,7 @@ async fn announced_broadcast() {
 	let _broadcast = create_announced(&origin, "test/broadcast");
 
 	let consumer = origin.consume();
-	let announced = consumer.announced("".into()).unwrap();
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 
 	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
 		.await
@@ -2892,7 +2936,7 @@ fn without_runtime() {
 			})
 			.unwrap();
 
-		let announced = consumer.announced("".into()).unwrap();
+		let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 		let announcement = pollster::block_on(announced.next()).unwrap().unwrap();
 		assert_eq!(announcement.prefix(), "test");
 		let _bc = pollster::block_on(consumer.request_broadcast("test".into())).unwrap();
@@ -2964,7 +3008,7 @@ async fn server_client_roundtrip() {
 
 	// Receive the announcement on the client side via the consume origin.
 	let consumer = client_origin.consume();
-	let announced = consumer.announced("".into()).unwrap();
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
 		.await
 		.expect("timed out waiting for announcement over the wire")
@@ -3060,7 +3104,7 @@ async fn server_client_roundtrip_auto_origin() {
 	let init = opus_head();
 	let media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
 
-	let announced = consumer.announced("".into()).unwrap();
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
 		.await
 		.expect("timed out waiting for announcement over the wire")
@@ -3242,7 +3286,7 @@ async fn request_per_session_publish_override() {
 	let broadcast = create_announced(&override_origin, "override-only");
 
 	let consumer = client_origin.consume();
-	let announced = consumer.announced("".into()).unwrap();
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
 		.await
 		.expect("timed out waiting for override announcement")
@@ -3370,7 +3414,7 @@ async fn client_reconnects_and_resumes_announcements() {
 	let broadcast = create_announced(&server_origin, "after-reconnect");
 
 	let consumer = client_origin.consume();
-	let announced = consumer.announced("".into()).unwrap();
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
 		.await
 		.expect("timed out waiting for the post-reconnect announcement")

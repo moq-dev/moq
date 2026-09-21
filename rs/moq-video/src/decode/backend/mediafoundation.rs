@@ -415,7 +415,10 @@ impl MediaFoundation {
 				.ContiguousCopyTo(&mut nv12)
 				.map_err(|e| mf_err("contiguous copy", e))?;
 		}
-		Ok(Surface::I420(I420::from_nv12(&nv12, self.width, self.height)?))
+		Ok(Surface::I420(I420::from_nv12(
+			&nv12,
+			crate::Size::new(self.width, self.height),
+		)?))
 	}
 }
 

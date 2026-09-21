@@ -36,7 +36,7 @@ if err != nil {
 }
 defer client.Close()
 
-announced, err := client.Announced("demos/")
+announced, err := client.Announced(moq.AnnounceOptions{Prefix: "demos/"})
 if err != nil {
 	log.Fatal(err)
 }
@@ -47,8 +47,9 @@ for ann, err := range announced.All(ctx) {
 		}
 		log.Fatal(err)
 	}
-	// The covered prefix is relative to the requested "demos/" prefix.
+	// Prefix stays origin-relative; Captures reports wildcard matches.
 	fmt.Println("got broadcast", ann.Prefix())
+	fmt.Println("captures", ann.Captures())
 }
 ```
 
