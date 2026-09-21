@@ -112,11 +112,8 @@ fn synth_flv() -> Vec<u8> {
 	out
 }
 
-/// Drive the exporter to completion, dropping the importer to signal EOS.
-async fn drain_export(mut exporter: Export, mut importer: Import) -> Vec<u8> {
-	// Finish the tracks cleanly so the exporter can reach end-of-stream instead of
-	// seeing the producer dropped out from under it.
-	importer.finish().unwrap();
+/// Drive the exporter to completion, dropping an already-finished importer to signal EOS.
+async fn drain_export(mut exporter: Export, importer: Import) -> Vec<u8> {
 	let mut exported = Vec::new();
 	let mut importer = Some(importer);
 	for _ in 0..64 {
@@ -139,6 +136,7 @@ async fn export_roundtrips_through_import() {
 
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(synth_flv().as_slice())).unwrap();
+	importer.finish().unwrap();
 	catalog.finish().unwrap();
 
 	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
@@ -176,6 +174,7 @@ async fn export_emits_sequence_headers_and_frames() {
 
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(synth_flv().as_slice())).unwrap();
+	importer.finish().unwrap();
 	catalog.finish().unwrap();
 
 	let exporter = Export::new(crate::source::announced(&consumer))
@@ -258,6 +257,7 @@ async fn export_roundtrips_enhanced() {
 	importer
 		.decode(&bytes::BytesMut::from(synth_enhanced_flv().as_slice()))
 		.unwrap();
+	importer.finish().unwrap();
 	catalog.finish().unwrap();
 
 	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
@@ -321,6 +321,7 @@ async fn export_roundtrips_mp3() {
 
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(flv.as_slice())).unwrap();
+	importer.finish().unwrap();
 	catalog.finish().unwrap();
 
 	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
@@ -374,6 +375,7 @@ async fn export_roundtrips_av1() {
 	importer
 		.decode(&bytes::BytesMut::from(synth_av1_flv().as_slice()))
 		.unwrap();
+	importer.finish().unwrap();
 	catalog.finish().unwrap();
 
 	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
@@ -429,6 +431,7 @@ async fn export_roundtrips_ac3() {
 			synth_enhanced_audio_flv(b"ac-3", &AC3_FRAME).as_slice(),
 		))
 		.unwrap();
+	importer.finish().unwrap();
 	catalog.finish().unwrap();
 
 	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
@@ -463,6 +466,7 @@ async fn export_roundtrips_eac3() {
 			synth_enhanced_audio_flv(b"ec-3", &EAC3_FRAME).as_slice(),
 		))
 		.unwrap();
+	importer.finish().unwrap();
 	catalog.finish().unwrap();
 
 	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
@@ -729,6 +733,7 @@ async fn export_preserves_timestamps() {
 
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(synth_flv().as_slice())).unwrap();
+	importer.finish().unwrap();
 	catalog.finish().unwrap();
 
 	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();

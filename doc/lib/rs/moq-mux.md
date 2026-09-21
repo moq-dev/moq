@@ -34,10 +34,15 @@ immediate. CMAF audio
 samples are always encoded as sync samples; the decoded `Frame::keyframe` marks
 only the first audio sample of a MoQ group.
 
-`catalog::Rendition::set`, `update`, and `estimate` return errors when a catalog
-edit cannot be serialized or published. Invalid jitter is rejected before the
-edit is retained, including while the initial catalog is reserved. Codec importers
-propagate these errors through their configuration and frame-writing methods.
+Each catalog track constructor returns one `container::Producer` that owns the
+media stream and its catalog entry. `set` publishes or replaces its config,
+`modify` edits the published config through a guard, and dropping the producer
+retires the entry. Calling `modify` before the first `set` returns
+`Error::NotPublished`. Container writes measure bitrate and jitter and publish
+the estimate automatically when groups are cut or finished. Invalid jitter is
+rejected before the edit is retained, including while the initial catalog is
+reserved. Codec importers propagate catalog and media errors through their
+configuration and frame-writing methods.
 
 ```bash
 cargo add moq-mux

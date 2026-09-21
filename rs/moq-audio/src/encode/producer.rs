@@ -102,9 +102,8 @@ impl Options {
 pub struct Producer<E: CatalogExt = ()> {
 	encoder: Encoder,
 	resampler: Option<Resampler>,
-	track: moq_mux::container::Producer<moq_mux::container::legacy::Wire>,
-	/// Owns the catalog rendition, retiring it when this producer goes away.
-	rendition: moq_mux::catalog::AudioTrack<E>,
+	track: moq_mux::container::Producer<moq_mux::container::legacy::Wire, hang::catalog::AudioConfig>,
+	_ext: std::marker::PhantomData<fn() -> E>,
 	pending: Vec<f32>,
 	/// Samples emitted since the current epoch (reset by [`reset_epoch`](Self::reset_epoch)).
 	frames_produced: u64,
@@ -139,14 +138,14 @@ struct Terminal {
 /// [`Reserved`](moq_mux::catalog::Reserved) this does not withhold the catalog:
 /// subscribers see the broadcast without this rendition until it resolves.
 pub(crate) struct Reserved<E: CatalogExt = ()> {
-	track: moq_mux::container::Producer<moq_mux::container::legacy::Wire>,
-	rendition: moq_mux::catalog::AudioTrack<E>,
+	track: moq_mux::container::Producer<moq_mux::container::legacy::Wire, hang::catalog::AudioConfig>,
+	_ext: std::marker::PhantomData<fn() -> E>,
 }
 
 impl<E: CatalogExt> Reserved<E> {
 	pub(crate) fn new(
 		broadcast: &mut moq_net::broadcast::Producer,
-		mut catalog: moq_mux::catalog::Producer<E>,
+		catalog: moq_mux::catalog::Producer<E>,
 		options: &Options,
 	) -> Result<Self, Error> {
 		let track = match &options.track {
@@ -161,11 +160,16 @@ impl<E: CatalogExt> Reserved<E> {
 				catalog.track_info(hang::catalog::PRIORITY.audio),
 			)?,
 		};
-		let name = track.name().to_string();
-		let track = catalog.media_producer(track, moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio))?;
-		let rendition = catalog.rendition(&name)?;
+		let track = catalog.audio(
+			track,
+			moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio),
+			None,
+		)?;
 
-		Ok(Self { track, rendition })
+		Ok(Self {
+			track,
+			_ext: std::marker::PhantomData,
+		})
 	}
 
 	/// Build the encoder for `input` and register the rendition describing it.
@@ -192,7 +196,7 @@ impl<E: CatalogExt> Reserved<E> {
 			)?)
 		};
 
-		self.rendition.set(encoder.catalog())?;
+		self.track.set(encoder.catalog())?;
 
 		Ok(Registered { encoder, resampler })
 	}
@@ -203,7 +207,7 @@ impl<E: CatalogExt> Reserved<E> {
 			encoder: registered.encoder,
 			resampler: registered.resampler,
 			track: self.track,
-			rendition: self.rendition,
+			_ext: self._ext,
 			pending: Vec::new(),
 			frames_produced: 0,
 			epoch_us: None,
@@ -229,7 +233,7 @@ pub(crate) struct Registered {
 impl<E: CatalogExt> Reserved<E> {
 	/// The resolved track name, available before the layout is.
 	pub(crate) fn name(&self) -> &str {
-		self.rendition.name()
+		self.track.name()
 	}
 
 	/// The underlying track producer, e.g. to watch subscriber state.
@@ -265,7 +269,7 @@ impl<E: CatalogExt> Producer<E> {
 
 	/// The name of the published track, which is [`Options::track`] resolved.
 	pub fn track_name(&self) -> &str {
-		self.rendition.name()
+		self.track.name()
 	}
 
 	/// The underlying track producer, e.g. to watch subscriber state via
@@ -394,7 +398,7 @@ impl<E: CatalogExt> Producer<E> {
 	}
 
 	fn publish(
-		track: &mut moq_mux::container::Producer<moq_mux::container::legacy::Wire>,
+		track: &mut moq_mux::container::Producer<moq_mux::container::legacy::Wire, hang::catalog::AudioConfig>,
 		encoded: Encoded,
 		timestamp: Timestamp,
 	) -> Result<(), Error> {
@@ -416,7 +420,7 @@ impl<E: CatalogExt> Producer<E> {
 
 	/// Publish terminal packets after an empty frame that carries their logical endpoint.
 	fn publish_terminal(
-		track: &mut moq_mux::container::Producer<moq_mux::container::legacy::Wire>,
+		track: &mut moq_mux::container::Producer<moq_mux::container::legacy::Wire, hang::catalog::AudioConfig>,
 		terminal: Terminal,
 	) -> Result<(), Error> {
 		track.write(MuxFrame {

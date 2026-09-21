@@ -118,16 +118,15 @@ pub(crate) struct Config {
 /// Publishes each whole frame as one hang frame in its own group, so the relay
 /// forwards it immediately. The audio is never decoded; the catalog carries the
 /// codec, sample rate and channel count read from the frame header.
-pub(crate) struct Import<E: CatalogExt = ()> {
-	track: crate::container::Producer<crate::catalog::hang::Container>,
-	rendition: crate::catalog::AudioTrack<E>,
+pub(crate) struct Import {
+	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::AudioConfig>,
 }
 
-impl<E: CatalogExt> Import<E> {
+impl Import {
 	/// Publish on an existing track, reserving the rendition from `reserved`. Mint the track at
 	/// the descriptor's suffix with the catalog's
 	/// [`track_info`](crate::catalog::Producer::track_info).
-	pub fn new(
+	pub fn new<E: CatalogExt>(
 		descriptor: &'static Descriptor,
 		track: moq_net::track::Producer,
 		reserved: crate::catalog::Reserved<E>,
@@ -145,18 +144,12 @@ impl<E: CatalogExt> Import<E> {
 		// The caller's config names the container; the writer is built from that same value so the
 		// wire cannot disagree with what the rendition advertises.
 		let wire = crate::catalog::hang::Container::try_from(&audio_config)?;
-		let name = track.name().to_string();
 		// Build the writer before advertising the rendition: it is fallible (enrolling the track in
 		// the broadcast timeline can collide), and a rendition published for a track we then fail to
 		// produce would be advertised to consumers but never served.
-		let media = reserved.producer().media_producer(track, wire)?;
-		let mut rendition = reserved.audio(name)?;
-		rendition.set(audio_config)?;
+		let track = reserved.audio(track, wire, audio_config)?;
 
-		Ok(Self {
-			track: media,
-			rendition,
-		})
+		Ok(Self { track })
 	}
 
 	/// The MoQ track name.
@@ -172,7 +165,6 @@ impl<E: CatalogExt> Import<E> {
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
 		self.track.finish()?;
-		self.estimate()?;
 		Ok(())
 	}
 
@@ -184,14 +176,9 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Publish what the track measured (bitrate, jitter) into the catalog rendition, filling only
 	/// the fields its config didn't supply.
-	fn estimate(&mut self) -> crate::Result<()> {
-		self.rendition.estimate(self.track.estimate())
-	}
-
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		self.track.cut(end)?;
-		self.estimate()?;
 		Ok(())
 	}
 
@@ -200,14 +187,12 @@ impl<E: CatalogExt> Import<E> {
 	/// [`Producer::discontinuity`](crate::container::Producer::discontinuity).
 	pub fn discontinuity(&mut self) -> crate::Result<()> {
 		self.track.discontinuity()?;
-		self.estimate()?;
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
 		self.track.seek(sequence)?;
-		self.estimate()?;
 		Ok(())
 	}
 
@@ -218,7 +203,7 @@ impl<E: CatalogExt> Import<E> {
 	/// [`Producer::needs_keyframe`](crate::container::Producer::needs_keyframe)); otherwise it extends
 	/// the current group. The caller bounds groups via [`cut`](Self::cut) / [`seek`](Self::seek).
 	pub fn decode<B: moq_net::IntoBytes>(&mut self, frame: B, pts: Option<Timestamp>) -> crate::Result<()> {
-		let timestamp = self.rendition.timestamp(pts)?;
+		let timestamp = self.track.timestamp(pts)?;
 		// Only the first frame of each group is a keyframe, so the group spans until the caller cuts
 		// instead of opening one group (one QUIC stream) per packet.
 		let keyframe = self.track.needs_keyframe();
@@ -228,7 +213,6 @@ impl<E: CatalogExt> Import<E> {
 			payload: frame.into_bytes(),
 			keyframe,
 		})?;
-		self.estimate()?;
 		Ok(())
 	}
 }

@@ -93,8 +93,8 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 
 /// The catalog entry for one imported track, whichever section it lives in.
 ///
-/// Both arms are the same [`Rendition`](crate::catalog::Rendition) guard, so publishing what the
-/// estimator measured (and retiring the entry on drop) is the same code either way.
+/// Both arms own the private catalog entry, so publishing what the estimator measured and retiring
+/// the entry on drop is the same code either way.
 enum Rendition<E: crate::catalog::hang::CatalogExt> {
 	Video(crate::catalog::VideoTrack<E>),
 	Audio(crate::catalog::AudioTrack<E>),
@@ -323,13 +323,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let rendition = match kind {
 				Kind::Video => {
 					let config = self.init_video(trak, &moov)?;
-					let mut rendition = reserved.video(track.name())?;
+					let mut rendition = reserved.init(track.name())?;
 					rendition.set(config)?;
 					Rendition::Video(rendition)
 				}
 				Kind::Audio => {
 					let config = self.init_audio(trak, &moov)?;
-					let mut rendition = reserved.audio(track.name())?;
+					let mut rendition = reserved.init(track.name())?;
 					rendition.set(config)?;
 					Rendition::Audio(rendition)
 				}

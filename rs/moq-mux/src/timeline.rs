@@ -38,7 +38,7 @@
 //!
 //! [`catalog::Producer`](crate::catalog::Producer) owns the broadcast's timeline (the catalog
 //! is what owns the broadcast's shape) and wires all of this up:
-//! [`media_producer`](crate::catalog::Producer::media_producer) enrolls the track, which
+//! The catalog's role-specific track constructors enroll the track, which
 //! creates the timeline track on first use and advertises it in the catalog's root
 //! [`hang::catalog::Archive`] entry. A broadcast that never enrolls a track publishes no
 //! timeline at all: segmentation is opt-in per broadcast, never per track.

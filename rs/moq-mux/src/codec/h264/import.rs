@@ -26,36 +26,34 @@ use crate::container::Frame;
 /// Feed it frames a [`Split`](super::Split) produced via [`decode`](Self::decode).
 /// The catalog rendition fills in lazily once the codec config is known (avcC via
 /// [`initialize`](Self::initialize) for avc1, the first SPS for avc3).
-pub struct Import<E: CatalogExt = ()> {
+pub struct Import {
 	/// True for the avc1 shape: the codec config is out-of-band (avcC), so
 	/// keyframes are not scanned for an inline SPS.
 	avc1: bool,
-	track: crate::container::Producer<crate::catalog::hang::Container>,
-	rendition: crate::catalog::VideoTrack<E>,
+	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig>,
 	catalog: crate::codec::video::Catalog,
 	last_sps: Option<Bytes>,
 }
 
-impl<E: CatalogExt> Import<E> {
+impl Import {
 	/// Publish on an existing track producer, seeding the rendition from `hint` (pass
 	/// [`VideoHint::default`](crate::catalog::VideoHint) for none).
 	///
 	/// A hint carrying a codec publishes the catalog rendition up front (the SPS/PPS still refine it
 	/// in band on the first keyframe), so subscribers see the track without waiting for that frame.
-	pub fn new(
+	pub fn new<E: CatalogExt>(
 		track: moq_net::track::Producer,
 		reserved: crate::catalog::Reserved<E>,
 		hint: crate::catalog::VideoHint,
 	) -> crate::Result<Self> {
-		let rendition = reserved.video(track.name())?;
 		// The hint names the container; the writer is built from that same value so the wire
 		// cannot disagree with what the rendition advertises.
 		let wire = crate::catalog::hang::Container::try_from(&hint)?;
 		let catalog = crate::codec::video::Catalog::new(hint);
+		let track = reserved.video(track, wire, None)?;
 		let mut import = Self {
 			avc1: false,
-			track: reserved.producer().media_producer(track, wire)?,
-			rendition,
+			track,
 			catalog,
 			last_sps: None,
 		};
@@ -124,7 +122,6 @@ impl<E: CatalogExt> Import<E> {
 	/// Finish the track, flushing any buffered data.
 	pub fn finish(&mut self) -> Result<()> {
 		self.track.finish()?;
-		self.estimate()?;
 		Ok(())
 	}
 
@@ -134,16 +131,9 @@ impl<E: CatalogExt> Import<E> {
 		self.track.abort(err);
 	}
 
-	/// Publish what the track measured (bitrate, jitter) into the catalog rendition, filling only
-	/// the fields its config didn't supply.
-	fn estimate(&mut self) -> crate::Result<()> {
-		self.rendition.estimate(self.track.estimate())
-	}
-
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> Result<()> {
 		self.track.cut(end)?;
-		self.estimate()?;
 		Ok(())
 	}
 
@@ -152,14 +142,12 @@ impl<E: CatalogExt> Import<E> {
 	/// [`Producer::discontinuity`](crate::container::Producer::discontinuity).
 	pub fn discontinuity(&mut self) -> Result<()> {
 		self.track.discontinuity()?;
-		self.estimate()?;
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.track.seek(sequence)?;
-		self.estimate()?;
 		Ok(())
 	}
 
@@ -168,7 +156,6 @@ impl<E: CatalogExt> Import<E> {
 	/// container supplies this since the elementary stream alone carries no decode time.
 	pub fn observe_reorder(&mut self, reorder: moq_net::Timestamp) -> crate::Result<()> {
 		self.track.reorder(reorder);
-		self.estimate()?;
 		Ok(())
 	}
 
@@ -191,7 +178,7 @@ impl<E: CatalogExt> Import<E> {
 	/// A changed config (new avcC, or a new inline SPS) just re-mirrors the
 	/// rendition; there are no fixed tracks to reject a reconfiguration.
 	fn apply_config(&mut self, config: hang::catalog::VideoConfig) -> crate::Result<()> {
-		self.catalog.publish(&mut self.rendition, config)
+		self.catalog.publish(&mut self.track, config)
 	}
 
 	/// Write split frames to the track, resolving the avc3 config from the first
@@ -218,11 +205,9 @@ impl<E: CatalogExt> Import<E> {
 			}
 
 			self.track.write(frame)?;
-			self.catalog
-				.on_frame(&mut self.rendition, self.track.track().is_used())?;
+			let demand = self.track.track().is_used();
+			self.catalog.on_frame(&mut self.track, demand)?;
 		}
-
-		self.estimate()?;
 		Ok(())
 	}
 
@@ -234,18 +219,19 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Re-evaluate stall from source silence.
 	pub fn tick(&mut self) -> crate::Result<()> {
-		self.catalog.tick(&mut self.rendition, self.track.track().is_used())
+		let demand = self.track.track().is_used();
+		self.catalog.tick(&mut self.track, demand)
 	}
 
 	/// The source is gone; this rendition is never stalled while idle.
 	pub fn idle(&mut self) -> crate::Result<()> {
-		self.catalog.idle(&mut self.rendition)
+		self.catalog.idle(&mut self.track)
 	}
 
 	/// Record the encode duration before publishing its frames so the catalog can report a stall.
 	pub fn observe_lag(&mut self, lag: std::time::Duration) -> crate::Result<()> {
-		self.catalog
-			.observe_lag(&mut self.rendition, self.track.track().is_used(), lag)
+		let demand = self.track.track().is_used();
+		self.catalog.observe_lag(&mut self.track, demand, lag)
 	}
 }
 

@@ -31,7 +31,7 @@ mod format;
 mod producer;
 mod select;
 mod stream;
-mod tracks;
+pub(crate) mod tracks;
 
 pub(crate) use claim::Claim;
 pub use consumer::Consumer;
@@ -41,4 +41,5 @@ pub use format::*;
 pub use producer::{Config, Guard, Producer};
 pub use select::Select;
 pub use stream::Stream;
-pub use tracks::{AudioTrack, Rendition, RenditionConfig, Reserved, TextTrack, VideoHint, VideoTrack};
+pub(crate) use tracks::{AudioTrack, Rendition, VideoTrack};
+pub use tracks::{RenditionConfig, Reserved, VideoHint};

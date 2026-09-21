@@ -11,9 +11,8 @@
 //! Each importer's `new` takes a format string (e.g. `"avc3"`, `"fmp4"`) and
 //! errors on a format it doesn't handle — `TrackStream` / `ContainerStream`
 //! accept only the self-delimiting formats. The concrete importers live with
-//! their format under [`crate::container`] or [`crate::codec`] and publish their
-//! own catalog rendition (see [`crate::catalog::VideoTrack`] /
-//! [`crate::catalog::AudioTrack`]).
+//! their format under [`crate::container`] or [`crate::codec`] and own their
+//! catalog rendition through their container producer.
 //!
 //! A single-codec importer takes a track the caller mints, typically
 //! `broadcast.unique_track(suffix, catalog.track_info())`, so the retention the catalog
