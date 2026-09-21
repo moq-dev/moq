@@ -28,5 +28,4 @@ Public API/wire impact: review only.
 
 ## Required
 
-- [Playback outcome](/quest/main/audio-playback.md) - drops are observable
 - [Video output](/quest/main/video-output.md) - output and subscription contracts are distinct

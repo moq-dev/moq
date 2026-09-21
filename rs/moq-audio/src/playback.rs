@@ -18,7 +18,10 @@
 //! let mut sink = engine.sink(input)?;
 //!
 //! while let Some(frame) = audio.read().await? {
-//!     sink.write(&frame.data)?;
+//!     let write = sink.write(&frame.data)?;
+//!     if write.dropped_sample_frames > 0 {
+//!         eprintln!("dropped {} live audio frames", write.dropped_sample_frames);
+//!     }
 //! }
 //! # Ok(())
 //! # }
@@ -42,7 +45,7 @@ mod sink;
 use std::sync::Arc;
 
 pub use device::{Device, devices};
-pub use sink::{Control, Input, Sink};
+pub use sink::{Control, Input, Sink, Write};
 
 #[cfg(feature = "aec")]
 pub(crate) use driver::Shared;
