@@ -161,6 +161,14 @@ libloading = { workspace = true, optional = true }
 # Architecture-correct DMA_BUF_IOCTL_SYNC request values for CPU access.
 linux-raw-sys = { workspace = true, optional = true }
 moq-nvenc = { workspace = true, optional = true }
+# Native V4L2 webcam capture and, behind the `v4l2` feature, the M2M hardware
+# codecs. An in-tree fork of `v4l` (see rs/moq-v4l) with the videodev2.h
+# bindings checked in, so the build needs no libclang or kernel headers. It
+# streams MMAP buffers; MJPEG cameras are decoded with the pure-Rust `zune-jpeg`
+# (no libjpeg/IJG). The codec backends use its raw layer (`moq_v4l::sys` for the
+# videodev2.h structs, `moq_v4l::v4l2::vidioc` for the request codes) rather
+# than a second V4L2 crate, so no ioctl struct is hand-rolled.
+moq-v4l = { workspace = true, optional = true }
 # Intel/AMD VAAPI hardware H.264 encoder and decoder, behind the opt-in `vaapi`
 # feature. As of moq-vaapi 0.0.3 libva is dlopen'd at runtime, so the binary carries
 # no NEEDED libva: the build needs no libva-dev (its build script's bindgen still
@@ -171,14 +179,6 @@ moq-vaapi = { workspace = true, optional = true }
 # PipeWire video stream for the portal's node, behind the `pipewire` feature.
 # Links libpipewire-0.3 via pkg-config at build time; bindgen needs libclang.
 pipewire = { version = "0.10", optional = true }
-# Native V4L2 webcam capture and, behind the `v4l2` feature, the M2M hardware
-# codecs. An in-tree fork of `v4l` (see rs/moq-v4l) with the videodev2.h
-# bindings checked in, so the build needs no libclang or kernel headers. It
-# streams MMAP buffers; MJPEG cameras are decoded with the pure-Rust `zune-jpeg`
-# (no libjpeg/IJG). The codec backends use its raw layer (`moq_v4l::sys` for the
-# videodev2.h structs, `moq_v4l::v4l2::vidioc` for the request codes) rather
-# than a second V4L2 crate, so no ioctl struct is hand-rolled.
-moq-v4l = { workspace = true, optional = true }
 # X11 display/window enumeration and capture. Pure Rust and used when no
 # Wayland session is active, so Linux screen capture still works without a
 # portal and callers can select a stable monitor or window id.
