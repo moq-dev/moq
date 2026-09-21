@@ -10,9 +10,8 @@ grouped by the branch they land on and ordered by priority.
 `main` and `dev` mirror those branches: work under either merges there,
 directly or through its questline's branch. `next` and `future` are the
 roadmap and have no branch; starting a quest moves it under the branch it
-targets. Published API
-and wire breaks go under `dev`, everything else under `main`. `dev` merges
-into `main` once its questline is empty.
+targets. Published API and wire breaks go under `dev`, everything else under
+`main`. `dev` merges into `main` once its questline is empty.
 
 ## Quests
 
