@@ -35,7 +35,7 @@ Then the feature proposal order, each linked to its producing quest:
 5. careful resume as a `Controller` wrapper ([careful resume](/quest/next/quic/careful-resume.md));
 6. ECT(1) marking and its accounting ([L4S](/quest/next/quic/ecn.md));
 7. per-stream deadlines ([deadlines](/quest/next/quic/deadline.md));
-8. capacity probing by early retransmission ([probe](/quest/next/quic/probe.md));
+8. the measured media-headroom mechanism ([probe](/quest/next/quic/probe.md));
 9. the qmux crate over the shared stream state machine ([qmux](/quest/next/quic/qmux.md)).
 
 The next experiments (receive timestamps, GCC, FEC, kernel pacing, send
