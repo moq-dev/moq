@@ -20,7 +20,3 @@ redundant-re-announce handling and the blind-consume fallback. Add the
 wildcard case and the two-claims-one-retraction case to the announced tests
 beside the subtree and literal ones, and note the rule in `doc/lib/js/net.md`
 where `Announce.Broadcast` is described. Public API: none. Wire: none.
-
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - the pattern-valued announce events only dev has

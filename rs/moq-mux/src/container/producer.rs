@@ -46,7 +46,7 @@ fn timestamp_lt(left: moq_net::Timestamp, right: moq_net::Timestamp) -> bool {
 /// - `finish()` is called.
 ///
 /// This is useful for CMAF where multiple samples should be packed into one moof+mdat.
-pub struct Producer<C: Container> {
+pub struct Producer<C: Container, R = ()> {
 	inner: moq_net::track::Producer,
 	container: C,
 	group: Option<moq_net::group::Producer>,
@@ -88,6 +88,48 @@ pub struct Producer<C: Container> {
 	/// Peak-hold claim on the connection allocator, when one was supplied.
 	/// Named `bandwidth` so it is not confused with the catalog-gate [`Reserved`].
 	bandwidth: Option<crate::catalog::Claim>,
+
+	/// The catalog rendition this media producer owns, when it was created through a catalog.
+	rendition: Option<Box<dyn Rendition<R>>>,
+}
+
+trait Rendition<R>: Send {
+	fn name(&self) -> &str;
+	fn timestamp(&self, hint: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp>;
+	fn set(&mut self, config: R) -> crate::Result<()>;
+	fn config(&self) -> crate::Result<R>;
+	fn replace(&mut self, config: R) -> crate::Result<()>;
+	fn estimate(&mut self, estimate: crate::catalog::Estimate) -> crate::Result<()>;
+}
+
+impl<E, R> Rendition<R> for crate::catalog::tracks::Rendition<E, R>
+where
+	E: crate::catalog::hang::CatalogExt,
+	R: crate::catalog::RenditionConfig<E>,
+{
+	fn name(&self) -> &str {
+		self.name()
+	}
+
+	fn timestamp(&self, hint: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp> {
+		self.timestamp(hint)
+	}
+
+	fn set(&mut self, config: R) -> crate::Result<()> {
+		self.set(config)
+	}
+
+	fn config(&self) -> crate::Result<R> {
+		self.config()
+	}
+
+	fn replace(&mut self, config: R) -> crate::Result<()> {
+		self.replace(config)
+	}
+
+	fn estimate(&mut self, estimate: crate::catalog::Estimate) -> crate::Result<()> {
+		self.estimate(estimate)
+	}
 }
 
 impl<C: Container> Producer<C> {
@@ -95,7 +137,7 @@ impl<C: Container> Producer<C> {
 	///
 	/// A plain media track by default: no buffering, no timeline. Add buffering with
 	/// [`with_buffer`](Self::with_buffer); the timeline recorder is wired by the catalog (see
-	/// [`catalog::Producer::media_producer`](crate::catalog::Producer::media_producer)).
+	/// [`catalog::Producer::video`](crate::catalog::Producer::video) and its sibling APIs.
 	pub fn new(track: moq_net::track::Producer, container: C) -> Self {
 		Self {
 			inner: track,
@@ -113,9 +155,134 @@ impl<C: Container> Producer<C> {
 			reordered: false,
 			estimator: crate::catalog::Estimator::new(),
 			bandwidth: None,
+			rendition: None,
+		}
+	}
+}
+
+impl<C: Container, R: Clone + Send + 'static> Producer<C, R>
+where
+	crate::Error: From<C::Error>,
+{
+	pub(crate) fn with_rendition<E>(
+		track: moq_net::track::Producer,
+		container: C,
+		rendition: crate::catalog::tracks::Rendition<E, R>,
+	) -> Self
+	where
+		E: crate::catalog::hang::CatalogExt,
+		R: crate::catalog::RenditionConfig<E>,
+	{
+		Self {
+			inner: track,
+			container,
+			group: None,
+			buffer: Vec::new(),
+			buffer_duration: std::time::Duration::ZERO,
+			pending_sequence: None,
+			recorder: None,
+			end: None,
+			live_edge: None,
+			last_duration: None,
+			previous_timestamp: None,
+			cadence: None,
+			reordered: false,
+			estimator: crate::catalog::Estimator::new(),
+			bandwidth: None,
+			rendition: Some(Box::new(rendition)),
 		}
 	}
 
+	/// Publish or replace this track's catalog config.
+	pub fn set(&mut self, config: R) -> crate::Result<()> {
+		self.rendition.as_mut().ok_or(crate::Error::NotPublished)?.set(config)
+	}
+
+	/// Modify the published catalog config.
+	///
+	/// Estimate fields the config left to detection at [`set`](Self::set) stay owned by detection:
+	/// an edit to them here is published but replaced by the next measurement. Call `set` with the
+	/// field filled in to pin it.
+	pub fn modify(&mut self) -> crate::Result<Guard<'_, R>> {
+		let rendition = self.rendition.as_mut().ok_or(crate::Error::NotPublished)?;
+		let config = rendition.config()?;
+		Ok(Guard {
+			rendition: rendition.as_mut(),
+			config: Some(config),
+		})
+	}
+
+	/// Resolve a timestamp on the broadcast's shared clock.
+	pub fn timestamp(&self, hint: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp> {
+		self.rendition
+			.as_ref()
+			.ok_or(crate::Error::NotPublished)?
+			.timestamp(hint)
+	}
+
+	fn publish_estimate(&mut self) -> crate::Result<()> {
+		if let Some(rendition) = self.rendition.as_mut() {
+			rendition.estimate(self.estimator.estimate())?;
+		}
+		Ok(())
+	}
+
+	/// The catalog key owned by this producer.
+	pub fn name(&self) -> &str {
+		self.rendition
+			.as_ref()
+			.map_or(self.inner.name(), |rendition| rendition.name())
+	}
+
+	/// A watch-only handle to this track's subscriber demand.
+	pub fn demand(&self) -> moq_net::track::Demand {
+		self.inner.demand()
+	}
+}
+
+/// A published rendition config edited in place.
+pub struct Guard<'a, R> {
+	rendition: &'a mut dyn Rendition<R>,
+	config: Option<R>,
+}
+
+impl<R> Guard<'_, R> {
+	/// Publish the edited config and return any error.
+	pub fn commit(mut self) -> crate::Result<()> {
+		let config = self.config.take().expect("config is present until commit");
+		self.rendition.replace(config)
+	}
+}
+
+impl<R> std::ops::Deref for Guard<'_, R> {
+	type Target = R;
+
+	fn deref(&self) -> &Self::Target {
+		self.config.as_ref().expect("config is present until commit")
+	}
+}
+
+impl<R> std::ops::DerefMut for Guard<'_, R> {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		self.config.as_mut().expect("config is present until commit")
+	}
+}
+
+impl<R> Drop for Guard<'_, R> {
+	fn drop(&mut self) {
+		let Some(config) = self.config.take() else {
+			return;
+		};
+		if let Err(err) = self.rendition.replace(config) {
+			tracing::error!(%err, "failed to publish modified rendition");
+		}
+	}
+}
+
+impl<C: Container, R: Clone + Send + 'static> Producer<C, R>
+where
+	crate::Error: From<C::Error>,
+{
 	#[cfg(test)]
 	fn bandwidth_ceiling(&self) -> Option<moq_net::bandwidth::Rate> {
 		self.bandwidth.as_ref().and_then(|claim| claim.ceiling())
@@ -123,9 +290,8 @@ impl<C: Container> Producer<C> {
 
 	/// The jitter and bitrate measured from the frames written so far.
 	///
-	/// Hand it to [`Rendition::estimate`](crate::catalog::Rendition::estimate) after writing
-	/// (`rendition.estimate(track.estimate())`) to advertise it, which fills only the fields the
-	/// rendition's config didn't already supply. See [`Estimator`](crate::catalog::Estimator).
+	/// A catalog-owned producer publishes this automatically. See
+	/// [`Estimator`](crate::catalog::Estimator).
 	pub fn estimate(&self) -> crate::catalog::Estimate {
 		self.estimator.estimate()
 	}
@@ -139,8 +305,9 @@ impl<C: Container> Producer<C> {
 	}
 
 	/// Record the media duration emitted together by a container importer.
-	pub(crate) fn burst(&mut self, duration: std::time::Duration) {
+	pub(crate) fn burst(&mut self, duration: std::time::Duration) -> crate::Result<()> {
 		self.estimator.burst(duration);
+		self.publish_estimate()
 	}
 
 	/// Whether the next [`write`](Self::write) has to be a keyframe, i.e. no group is currently open
@@ -170,8 +337,7 @@ impl<C: Container> Producer<C> {
 	/// this track in the broadcast's timeline so consumers can index the media without
 	/// downloading it.
 	///
-	/// Mint the recorder from the broadcast's [`timeline::Producer`](crate::timeline::Producer);
-	/// [`media_producer`](crate::catalog::Producer::media_producer) wires it for you.
+	/// Mint the recorder from the broadcast's [`timeline::Producer`](crate::timeline::Producer).
 	pub fn with_recorder(mut self, recorder: crate::timeline::Recorder) -> Self {
 		self.recorder = Some(recorder);
 		self
@@ -222,7 +388,7 @@ impl<C: Container> Producer<C> {
 	/// [`TimestampRewind`](super::TimestampRewind) without writing, the way an oversized
 	/// frame is refused. B-frames and open-GOP leading pictures still qualify when they sit
 	/// above that edge.
-	pub fn write(&mut self, frame: Frame) -> Result<(), C::Error> {
+	pub fn write(&mut self, frame: Frame) -> crate::Result<()> {
 		// A keyframe cuts the previous group, using its timestamp as the boundary
 		// where the previous group's content ends. Cut first so this group's live
 		// edge includes what we just closed, then refuse a rewind against that.
@@ -307,7 +473,7 @@ impl<C: Container> Producer<C> {
 	/// does not bound the last frame in decode order. The next [`write`](Self::write)
 	/// must be a keyframe. An explicit bound before the last ordered video frame
 	/// returns [`InvalidEnd`](super::InvalidEnd) without flushing or closing the group.
-	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> Result<(), C::Error> {
+	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		if self.container.kind() == Kind::Video
 			&& !self.reordered
 			&& let Some((end, previous)) = end.zip(self.previous_timestamp)
@@ -346,6 +512,7 @@ impl<C: Container> Producer<C> {
 		self.last_duration = None;
 		self.previous_timestamp = None;
 		self.reordered = false;
+		self.publish_estimate()?;
 		Ok(())
 	}
 
@@ -392,7 +559,7 @@ impl<C: Container> Producer<C> {
 	///
 	/// The next [`write`](Self::write) must be a keyframe and will land in a group with
 	/// `sequence`. Useful for joining mid-stream.
-	pub fn seek(&mut self, sequence: u64) -> Result<(), C::Error> {
+	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
 		self.cut(None)?;
 		self.pending_sequence = Some(sequence);
 		Ok(())
@@ -423,7 +590,7 @@ impl<C: Container> Producer<C> {
 	/// To bound the closing group's final frame, [`cut(end)`](Self::cut) before calling this;
 	/// the open group is closed either way (an unbounded [`cut`](Self::cut) here is a no-op
 	/// after yours).
-	pub fn discontinuity(&mut self) -> Result<(), C::Error> {
+	pub fn discontinuity(&mut self) -> crate::Result<()> {
 		self.cut(None)?;
 		// Nothing is measured across the break: the frames still open on this side have no end, and
 		// the gap to the far side is not a frame duration.
@@ -471,7 +638,7 @@ impl<C: Container> Producer<C> {
 	/// latency. Frames that already carry a duration (e.g. fMP4 passthrough) keep it,
 	/// and a backwards gap (a B-frame whose successor presents earlier) is left unset.
 	/// Containers that don't use per-frame durations (Legacy, LOC) ignore the field.
-	fn flush(&mut self, next: Option<moq_net::Timestamp>) -> Result<(), C::Error> {
+	fn flush(&mut self, next: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		if self.buffer.is_empty() {
 			return Ok(());
 		}
@@ -500,9 +667,10 @@ impl<C: Container> Producer<C> {
 	}
 
 	/// Finish the track, flushing any buffered frames and closing any open group.
-	pub fn finish(&mut self) -> Result<(), C::Error> {
+	pub fn finish(&mut self) -> crate::Result<()> {
 		self.cut(None)?;
 		self.inner.finish()?;
+		self.publish_estimate()?;
 		Ok(())
 	}
 
@@ -526,7 +694,7 @@ impl<C: Container> Producer<C> {
 	}
 }
 
-impl<C: Container> std::ops::Deref for Producer<C> {
+impl<C: Container, R> std::ops::Deref for Producer<C, R> {
 	type Target = moq_net::track::Producer;
 
 	fn deref(&self) -> &Self::Target {
@@ -1073,7 +1241,7 @@ mod tests {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = track.subscribe(replay());
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
-		producer.burst(std::time::Duration::from_secs(1));
+		producer.burst(std::time::Duration::from_secs(1)).unwrap();
 		producer.write(frame(0, true)).unwrap();
 		producer.write(frame(20_000, false)).unwrap();
 		producer.write(frame(40_000, false)).unwrap();

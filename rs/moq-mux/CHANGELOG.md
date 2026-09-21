@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- [**breaking**] One handle publishes a rendition. `catalog::Producer::{video,audio,text,track}` and
+  their `Reserved` counterparts take the media track, container, and an optional config and return
+  a `container::Producer<C, R>` that owns the catalog entry: `set` publishes or replaces the config,
+  `modify` edits it through a guard (`Error::NotPublished` before the first `set`), `cut`/`finish`
+  publish the measured estimate, and dropping the producer retires the entry. `catalog::Rendition`,
+  `VideoTrack`, `AudioTrack`, `Reserved::producer`, `Producer::media_producer`, and `Producer::enroll`
+  are private; `import::Track` and `import::TrackStream` drop their catalog-extension parameter.
+  `RenditionConfig` requires `Clone + Send` and opts into estimate detection with `detects()`.
 - [**breaking**] `catalog::Producer::lock` is now `modify` and returns a `Result`, refusing a
   finished catalog. A guard that fails to publish on drop aborts the catalog tracks with the error
   instead of logging a warning, so consumers and the next `modify` both see it. `Guard::commit` is

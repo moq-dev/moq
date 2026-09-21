@@ -54,14 +54,14 @@ fn rendition_hint(rendition: hang::catalog::VideoConfig) -> moq_mux::catalog::Vi
 
 /// Per-codec splitter + importer pair. Each codec frames its packets and resolves
 /// its catalog rendition differently, so the producer holds one of these.
-enum Codecs<E: CatalogExt> {
+enum Codecs {
 	H264 {
 		split: moq_mux::codec::h264::Split,
-		import: moq_mux::codec::h264::Import<E>,
+		import: moq_mux::codec::h264::Import,
 	},
 	H265 {
 		split: moq_mux::codec::h265::Split,
-		import: moq_mux::codec::h265::Import<E>,
+		import: moq_mux::codec::h265::Import,
 	},
 }
 
@@ -76,7 +76,8 @@ enum Codecs<E: CatalogExt> {
 /// carrying its own catalog sections (the FFI bindings use `hang::Extra`)
 /// publishes into a catalog of the same shape.
 pub struct Producer<E: CatalogExt = ()> {
-	codecs: Codecs<E>,
+	codecs: Codecs,
+	_ext: std::marker::PhantomData<fn() -> E>,
 }
 
 impl<E: CatalogExt> Producer<E> {
@@ -134,7 +135,10 @@ impl<E: CatalogExt> Producer<E> {
 				)));
 			}
 		};
-		Ok(Self { codecs })
+		Ok(Self {
+			codecs,
+			_ext: std::marker::PhantomData,
+		})
 	}
 
 	/// A watch-only handle to the track's subscriber demand, created eagerly so

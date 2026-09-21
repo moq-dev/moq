@@ -93,7 +93,6 @@ do not add another media abstraction or a renderer crate during stabilization.
 - [GPU conversion and NVENC](/quest/main/video-gpu-encode.md) - convert, resize and
   encode imported frames without CPU pixel transfers or fallback
 - [Audio configuration](/quest/main/audio-config.md) - PCM layout, codec settings, and subscription policy have distinct contracts
-- [Audio publication](/quest/main/audio-publication.md) - callers get demand authority and supported options, not internal transport or resampler machinery
 - [AEC ownership](/quest/main/audio-aec.md) - one microphone owns an adaptive canceller and controls remain shareable
 - [Playback outcome](/quest/main/audio-playback.md) - nonblocking writes report accepted and dropped audio
 - [Video output](/quest/main/video-output.md) - codec output and subscription policy are separate, with native or CPU frames

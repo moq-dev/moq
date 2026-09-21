@@ -61,8 +61,7 @@ expiry, an expiry that leaves the union intact ends only that token, and
   stores every token added through it, presents them on each new session as
   it attaches, unions the live session's grant, and its `add` resolves against
   the session that is up at the time; a token the app drops is withdrawn from
-  the live session and forgotten. Branch from dev, or from main once
-  [merge-dev](/quest/dev/merge-dev.md) lands.
+  the live session and forgotten. Branch from main.
 - Docs: `doc/bin/relay/auth.md` gains an "in-band tokens" section beside
   revalidation stating that grants union, that a token needs the admitted
   root, what an expiry does to the union today, and that the grant's expiry
@@ -79,7 +78,6 @@ Additive.
 
 ## Required
 
-- [Merge dev](/quest/dev/merge-dev.md) - release the origin scope and connection surfaces used by AUTH
 - [Origin narrowing](/quest/next/origin-narrowing.md) - the live re-scope a shrinking token union needs, so no temporary close-on-shrink policy ships
 - [Pattern interest](/quest/next/path-patterns/interest.md) - AUTH can represent the complete grants relay revalidation returns
 - [Lite stream](/quest/next/auth/lite.md) - supplies the AUTH stream and

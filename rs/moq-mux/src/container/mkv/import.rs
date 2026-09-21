@@ -80,11 +80,53 @@ impl TrackKind {
 
 struct MkvTrack {
 	kind: TrackKind,
-	track: crate::container::Producer<crate::catalog::hang::Container>,
+	track: Media,
 	group: Option<moq_net::group::Producer>,
 	/// Highest block timestamp (Matroska ticks: cluster_ts + block_relative) already emitted.
 	/// Used to dedup re-parsed blocks across decode() calls.
 	last_emitted_ticks: Option<i64>,
+}
+
+enum Media {
+	Video(crate::container::Producer<crate::catalog::hang::Container, VideoConfig>),
+	Audio(crate::container::Producer<crate::catalog::hang::Container, AudioConfig>),
+}
+
+impl Media {
+	fn write(&mut self, frame: crate::container::Frame) -> crate::Result<()> {
+		match self {
+			Self::Video(track) => track.write(frame),
+			Self::Audio(track) => track.write(frame),
+		}
+	}
+
+	fn cut(&mut self, timestamp: Option<Timestamp>) -> crate::Result<()> {
+		match self {
+			Self::Video(track) => track.cut(timestamp),
+			Self::Audio(track) => track.cut(timestamp),
+		}
+	}
+
+	fn seek(&mut self, sequence: u64) -> crate::Result<()> {
+		match self {
+			Self::Video(track) => track.seek(sequence),
+			Self::Audio(track) => track.seek(sequence),
+		}
+	}
+
+	fn finish(&mut self) -> crate::Result<()> {
+		match self {
+			Self::Video(track) => track.finish(),
+			Self::Audio(track) => track.finish(),
+		}
+	}
+
+	fn abort(self, err: moq_net::Error) {
+		match self {
+			Self::Video(track) => track.abort(err),
+			Self::Audio(track) => track.abort(err),
+		}
+	}
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
@@ -297,8 +339,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			self.broadcast.unique_name(suffix),
 			self.catalog.track_info(kind.priority()),
 		)?;
-		let name = track.name().to_string();
-
 		// Build the media producer before publishing the rendition. It is fallible (its
 		// timeline track can collide), and a rendition published for a track we then fail
 		// to produce would be advertised to consumers but never served.
@@ -309,25 +349,24 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				TrackKind::Audio => crate::container::Kind::Audio,
 			},
 		)?;
-		let media = self.catalog.media_producer(track, wire)?;
-
-		let mut catalog = self.catalog.clone();
-		let mut catalog = catalog.modify()?;
-
-		match kind {
+		let media = match kind {
 			TrackKind::Video => {
 				let mut config = build_video_config(&codec_id, codec_private.as_ref(), video_children.as_deref())?;
 				config.container = self.container.clone();
-				catalog.video.renditions.insert(name, config);
+				Media::Video(match &self.initial_reservation {
+					Some(reserved) => reserved.video(track, wire, config)?,
+					None => self.catalog.video(track, wire, config)?,
+				})
 			}
 			TrackKind::Audio => {
 				let mut config = build_audio_config(&codec_id, codec_private.as_ref(), audio_children.as_deref())?;
 				config.container = self.container.clone();
-				catalog.audio.renditions.insert(name, config);
+				Media::Audio(match &self.initial_reservation {
+					Some(reserved) => reserved.audio(track, wire, config)?,
+					None => self.catalog.audio(track, wire, config)?,
+				})
 			}
-		}
-
-		drop(catalog);
+		};
 
 		self.tracks.insert(
 			track_number,
@@ -445,37 +484,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Abort all tracks with `err` instead of finishing, so subscribers see the real
 	/// cause rather than [`moq_net::Error::Dropped`]. Consumes the importer.
 	pub fn abort(mut self, err: moq_net::Error) {
-		self.unregister();
 		for mut track in std::mem::take(&mut self.tracks).into_values() {
 			if let Some(g) = track.group.take() {
 				let _ = g.abort(err.clone());
 			}
 			track.track.abort(err.clone());
 		}
-	}
-
-	/// Drop every rendition this importer registered from the catalog.
-	fn unregister(&mut self) {
-		// A closed catalog has nothing left to unregister from.
-		let Ok(mut catalog) = self.catalog.modify() else {
-			return;
-		};
-		for track in self.tracks.values() {
-			match track.kind {
-				TrackKind::Video => {
-					catalog.video.renditions.remove(track.track.name());
-				}
-				TrackKind::Audio => {
-					catalog.audio.renditions.remove(track.track.name());
-				}
-			}
-		}
-	}
-}
-
-impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
-	fn drop(&mut self) {
-		self.unregister();
 	}
 }
 

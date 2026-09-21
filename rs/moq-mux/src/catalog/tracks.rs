@@ -7,8 +7,8 @@ use super::hang::{Catalog, CatalogExt};
 
 /// A catalog config that can be published as a named rendition.
 ///
-/// Implement it on your own config type to get the full [`Rendition`] lifecycle for a custom
-/// track: reservation gating, removal on drop, and optional jitter/bitrate detection.
+/// Implement it on your own config type to get the full catalog lifecycle through
+/// [`Reserved::track`]: reservation gating, removal on drop, and optional jitter/bitrate detection.
 /// [`VideoConfig`](hang::catalog::VideoConfig) and [`AudioConfig`](hang::catalog::AudioConfig)
 /// implement it for every extension; a custom config implements it for the one [`CatalogExt`] that
 /// holds it:
@@ -31,6 +31,10 @@ use super::hang::{Catalog, CatalogExt};
 /// }
 ///
 /// impl RenditionConfig<MyExt> for Telemetry {
+///     fn detects() -> bool {
+///         true
+///     }
+///
 ///     fn insert(self, catalog: &mut Catalog<MyExt>, name: &str) {
 ///         catalog.ext.telemetry.insert(name.to_string(), self);
 ///     }
@@ -55,15 +59,14 @@ use super::hang::{Catalog, CatalogExt};
 /// configs use the same trait. Writing to `catalog.video` / `catalog.audio` / `catalog.text` from a
 /// custom config fights the media pipeline for those sections; stay in your own.
 ///
-/// To index a custom track in the broadcast's timeline, enroll it via
-/// [`catalog::Producer::enroll`](crate::catalog::Producer::enroll) (or build it through
-/// [`media_producer`](crate::catalog::Producer::media_producer), which does so for you).
-///
-/// Opting into detection is only half of it: something has to measure. Write the track through a
-/// [`container::Producer`](crate::container::Producer) and hand its
-/// [`estimate`](crate::container::Producer::estimate) to [`Rendition::estimate`], or drive a
-/// [`Estimator`](super::Estimator) yourself.
-pub trait RenditionConfig<E: CatalogExt>: Sized + 'static {
+/// [`Reserved::track`] and [`Producer::track`](super::Producer::track) enroll the track in the
+/// broadcast timeline, measure it, and keep its estimate current automatically.
+pub trait RenditionConfig<E: CatalogExt>: Clone + Send + 'static {
+	/// Whether container writes should update this config's estimate fields.
+	fn detects() -> bool {
+		false
+	}
+
 	/// Insert or replace this config under `name`.
 	fn insert(self, catalog: &mut Catalog<E>, name: &str);
 
@@ -187,8 +190,9 @@ impl VideoHint {
 	///
 	/// Only the gaps: a value the stream detects (e.g. the dimensions from an SPS) is left untouched,
 	/// so a resolution change updates the catalog instead of conflicting with the hint. An importer
-	/// calls this on every config it publishes, before handing it to [`Rendition::set`], so a hinted
-	/// field counts as supplied and is never overwritten by detection.
+	/// calls this on every config it publishes, before handing it to
+	/// [`container::Producer::set`](crate::container::Producer::set), so a hinted field counts as
+	/// supplied and is never overwritten by detection.
 	pub fn apply(&self, config: &mut hang::catalog::VideoConfig) {
 		fill(&mut config.label, self.label.clone());
 		fill(&mut config.coded_width, self.coded_width);
@@ -213,6 +217,10 @@ impl VideoHint {
 }
 
 impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::VideoConfig {
+	fn detects() -> bool {
+		true
+	}
+
 	fn insert(self, catalog: &mut Catalog<E>, name: &str) {
 		catalog.video.renditions.insert(name.to_string(), self);
 	}
@@ -233,6 +241,10 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::VideoConfig {
 }
 
 impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::AudioConfig {
+	fn detects() -> bool {
+		true
+	}
+
 	fn insert(self, catalog: &mut Catalog<E>, name: &str) {
 		catalog.audio.renditions.insert(name.to_string(), self);
 	}
@@ -262,24 +274,16 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::TextConfig {
 	fn remove(catalog: &mut Catalog<E>, name: &str) {
 		catalog.text.renditions.remove(name);
 	}
-
-	// Only jitter: a cue track has no bitrate field, so there is nothing to fill from a measurement.
-	fn estimate(&self) -> Estimate {
-		Estimate::default().with_jitter(self.jitter)
-	}
-	fn set_estimate(&mut self, estimate: Estimate) {
-		self.jitter = estimate.jitter;
-	}
 }
 
 /// A clonable reservation context handed to importers so they declare their tracks up front.
 ///
 /// Made via [`Producer::reserve`]. While any `Reserved` clone is alive the track set may still
-/// grow, so the catalog is withheld from the broadcast. Each [`init`](Self::init) reserves a
-/// rendition by name (config filled in later via the returned [`Rendition`] guard) and counts as
-/// outstanding until that guard is fulfilled or dropped. Once every clone is dropped *and* every
-/// reservation resolves, the first catalog snapshot is published atomically with the complete
-/// track list, so a one-shot muxer (fMP4, MPEG-TS) never sees a half-converged catalog.
+/// grow, so the catalog is withheld from the broadcast. Each track constructor reserves a
+/// rendition by name and counts as outstanding until its returned producer publishes a config or
+/// is dropped. Once every clone is dropped *and* every reservation resolves, the first catalog
+/// snapshot is published atomically with the complete track list, so a one-shot muxer (fMP4,
+/// MPEG-TS) never sees a half-converged catalog.
 pub struct Reserved<E: CatalogExt = ()> {
 	catalog: Producer<E>,
 }
@@ -296,35 +300,72 @@ impl<E: CatalogExt> Reserved<E> {
 		self.catalog.track_info(priority)
 	}
 
-	/// Reserve a rendition of config type `C` under `name`, returning the handle that owns it.
+	/// Reserve a rendition of config type `C` under `name`, returning its internal owner.
 	///
-	/// The handle holds its own `Reserved` clone, so the catalog stays withheld until the returned
-	/// [`Rendition`] is [`set`](Rendition::set) (or dropped). Prefer [`video`](Self::video) /
-	/// [`audio`](Self::audio) for the built-in media configs.
+	/// The owner holds its own `Reserved` clone, so the catalog stays withheld until its config is
+	/// published (or it is dropped). Prefer [`video`](Self::video) / [`audio`](Self::audio) for the
+	/// built-in media configs.
 	///
 	/// Errors if the name is already taken in this section, whether by a live rendition or by an
 	/// entry in the catalog. Sections are independent, so the same name in `video` and `audio` is
 	/// two unrelated renditions.
-	pub fn init<C: RenditionConfig<E>>(&self, name: impl Into<String>) -> crate::Result<Rendition<E, C>> {
+	pub(crate) fn init<C: RenditionConfig<E>>(&self, name: impl Into<String>) -> crate::Result<Rendition<E, C>> {
 		Rendition::new(self.clone(), name.into())
 	}
 
-	/// Reserve a video rendition; shorthand for [`init`](Self::init).
-	pub fn video(&self, name: impl Into<String>) -> crate::Result<VideoTrack<E>> {
-		self.init(name)
+	/// Publish a reserved video track and own its catalog rendition.
+	pub fn video<C: crate::container::Container>(
+		&self,
+		track: moq_net::track::Producer,
+		container: C,
+		config: impl Into<Option<hang::catalog::VideoConfig>>,
+	) -> crate::Result<crate::container::Producer<C, hang::catalog::VideoConfig>>
+	where
+		crate::Error: From<C::Error>,
+	{
+		self.track(track, container, config)
 	}
 
-	/// Reserve an audio rendition; shorthand for [`init`](Self::init).
-	pub fn audio(&self, name: impl Into<String>) -> crate::Result<AudioTrack<E>> {
-		self.init(name)
+	/// Publish a reserved audio track and own its catalog rendition.
+	pub fn audio<C: crate::container::Container>(
+		&self,
+		track: moq_net::track::Producer,
+		container: C,
+		config: impl Into<Option<hang::catalog::AudioConfig>>,
+	) -> crate::Result<crate::container::Producer<C, hang::catalog::AudioConfig>>
+	where
+		crate::Error: From<C::Error>,
+	{
+		self.track(track, container, config)
 	}
 
-	/// Reserve a text (caption/subtitle) rendition; shorthand for [`init`](Self::init).
-	///
-	/// Nothing about a cue track is detected from its payload, so the caller [`set`](Rendition::set)s
-	/// a complete config up front rather than waiting on a bitstream.
-	pub fn text(&self, name: impl Into<String>) -> crate::Result<TextTrack<E>> {
-		self.init(name)
+	/// Publish a reserved text track and own its catalog rendition.
+	pub fn text<C: crate::container::Container>(
+		&self,
+		track: moq_net::track::Producer,
+		container: C,
+		config: impl Into<Option<hang::catalog::TextConfig>>,
+	) -> crate::Result<crate::container::Producer<C, hang::catalog::TextConfig>>
+	where
+		crate::Error: From<C::Error>,
+	{
+		self.track(track, container, config)
+	}
+
+	/// Publish a reserved track using a custom catalog config.
+	pub fn track<C, R>(
+		&self,
+		track: moq_net::track::Producer,
+		container: C,
+		config: impl Into<Option<R>>,
+	) -> crate::Result<crate::container::Producer<C, R>>
+	where
+		C: crate::container::Container,
+		R: RenditionConfig<E>,
+		crate::Error: From<C::Error>,
+	{
+		let rendition = self.init(track.name())?;
+		self.catalog.media(track, container, rendition, config.into())
 	}
 
 	/// Resolve a timestamp on the broadcast's shared clock (see [`Producer::timestamp`]).
@@ -337,7 +378,7 @@ impl<E: CatalogExt> Reserved<E> {
 	/// A container importer holds one to edit the catalog directly (e.g. its per-frame reconcile, or
 	/// track removals after its initial set is declared) while the reservation itself is dropped to
 	/// open the gate. The returned handle does not gate: only live `Reserved`s do.
-	pub fn producer(&self) -> Producer<E> {
+	pub(crate) fn producer(&self) -> Producer<E> {
 		self.catalog.clone()
 	}
 }
@@ -371,7 +412,7 @@ impl<E: CatalogExt> Drop for Reserved<E> {
 /// deleted by this `Drop`. Author a rendition by holding one of these, not by writing to
 /// `catalog.video` / `catalog.audio` through a [`Guard`](super::Guard), which is raw access to the
 /// catalog document and enforces nothing.
-pub struct Rendition<E: CatalogExt, C: RenditionConfig<E>> {
+pub(crate) struct Rendition<E: CatalogExt, C: RenditionConfig<E>> {
 	catalog: Producer<E>,
 	name: String,
 	/// The reservation this rendition holds until its config is set (or it's dropped unfulfilled).
@@ -392,12 +433,10 @@ pub struct Rendition<E: CatalogExt, C: RenditionConfig<E>> {
 }
 
 /// A single video track's catalog rendition. See [`Rendition`].
-pub type VideoTrack<E = ()> = Rendition<E, hang::catalog::VideoConfig>;
+pub(crate) type VideoTrack<E = ()> = Rendition<E, hang::catalog::VideoConfig>;
 /// A single audio track's catalog rendition. See [`Rendition`].
-pub type AudioTrack<E = ()> = Rendition<E, hang::catalog::AudioConfig>;
+pub(crate) type AudioTrack<E = ()> = Rendition<E, hang::catalog::AudioConfig>;
 /// A single text (caption/subtitle) track's catalog rendition. See [`Rendition`].
-pub type TextTrack<E = ()> = Rendition<E, hang::catalog::TextConfig>;
-
 impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	fn new(reserved: Reserved<E>, name: String) -> crate::Result<Self> {
 		Self::owned(reserved.catalog.clone(), Some(reserved), name)
@@ -441,7 +480,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	/// the rendition existed (a dirty start or a B-frame reorder). A caller who wants to pre-empt
 	/// detection sets the field on the config, or (for a config an importer builds out of the
 	/// bitstream) hands the importer a hint like [`VideoHint`].
-	pub fn set(&mut self, mut config: C) -> crate::Result<()> {
+	pub(crate) fn set(&mut self, mut config: C) -> crate::Result<()> {
 		let supplied = config.estimate();
 		let resolved = Self::resolved(&supplied, &self.detected);
 		config.set_estimate(resolved.clone());
@@ -476,33 +515,48 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	/// Publish a measured [`Estimate`], filling only the fields the config didn't supply at
 	/// [`set`](Self::set).
 	///
-	/// Mint the estimate from an [`Estimator`](super::Estimator), usually the one a
-	/// [`container::Producer`](crate::container::Producer) keeps for you:
-	/// `rendition.estimate(track.estimate())`. Cheap to call after every write, since an estimate
-	/// that resolves to what the catalog already carries doesn't republish it.
+	/// Mint the estimate from an [`Estimator`](super::Estimator), usually the one owned by a
+	/// [`container::Producer`](crate::container::Producer). Cheap to call after every write, since an
+	/// estimate that resolves to what the catalog already carries doesn't republish it.
 	///
 	/// Calling this before [`set`](Self::set) is not wasted: the measurement is remembered and seeds
 	/// the config once it lands.
-	pub fn estimate(&mut self, estimate: Estimate) -> crate::Result<()> {
+	pub(crate) fn estimate(&mut self, estimate: Estimate) -> crate::Result<()> {
+		if !C::detects() {
+			return Ok(());
+		}
+		self.detected = estimate.clone();
+		if !self.present {
+			return Ok(());
+		}
 		let resolved = Self::resolved(&self.supplied, &estimate);
 		if self.published.as_ref() != Some(&resolved) {
-			self.update(|config| config.set_estimate(resolved.clone()))?;
+			let mut config = self.config()?;
+			config.set_estimate(resolved.clone());
+			self.replace(config)?;
 			self.published = Some(resolved);
 		}
-		self.detected = estimate;
 		Ok(())
 	}
 
 	/// Refine the rendition, refusing an unserializable edit before retaining it.
-	pub fn update(&mut self, f: impl FnOnce(&mut C)) -> crate::Result<()> {
+	pub(crate) fn config(&self) -> crate::Result<C> {
 		if !self.present {
-			return Ok(());
+			return Err(crate::Error::NotPublished);
+		}
+		let mut catalog = self.catalog.snapshot();
+		C::get_mut(&mut catalog, &self.name)
+			.cloned()
+			.ok_or(crate::Error::NotPublished)
+	}
+
+	pub(crate) fn replace(&mut self, config: C) -> crate::Result<()> {
+		if !self.present {
+			return Err(crate::Error::NotPublished);
 		}
 		let mut guard = self.catalog.modify()?;
 		let mut next = (*guard).clone();
-		if let Some(config) = C::get_mut(&mut next, &self.name) {
-			f(config);
-		}
+		config.insert(&mut next, &self.name);
 		serde_json::to_writer(std::io::sink(), &next).map_err(moq_json::Error::from)?;
 		*guard = next;
 		guard.commit()
@@ -541,7 +595,7 @@ mod tests {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = super::super::Producer::new(&mut broadcast, super::super::Config::default()).unwrap();
 		let reserved = catalog.reserve();
-		let rendition = reserved.video("v").unwrap();
+		let rendition = reserved.init::<hang::catalog::VideoConfig>("v").unwrap();
 		// Drop the standalone reservation so only the rendition's own gate remains, which `set`
 		// clears; the broadcast handle is returned so the produced tracks outlive the catalog.
 		drop(reserved);
@@ -563,7 +617,9 @@ mod tests {
 			assert!(catalog.snapshot().video.renditions.is_empty());
 		}
 		rendition.set(config(None, Some(Duration::from_millis(100)))).unwrap();
-		assert!(rendition.update(|config| config.jitter = Some(Duration::ZERO)).is_err());
+		let mut invalid = rendition.config().unwrap();
+		invalid.jitter = Some(Duration::ZERO);
+		assert!(rendition.replace(invalid).is_err());
 		assert_eq!(
 			catalog.snapshot().video.renditions.values().next().unwrap().jitter,
 			Some(Duration::from_millis(100))
@@ -763,7 +819,7 @@ mod tests {
 
 		let err = catalog
 			.reserve()
-			.video("v")
+			.init::<hang::catalog::VideoConfig>("v")
 			.expect_err("an unresolved rendition still owns its name");
 		assert!(matches!(err, crate::Error::Hang(hang::Error::Duplicate(name)) if name == "v"));
 
@@ -782,7 +838,10 @@ mod tests {
 		let (_broadcast, catalog, mut rendition) = video_track();
 		rendition.set(config(Some(789), None)).unwrap();
 
-		assert!(catalog.reserve().video("v").is_err(), "owned by the live rendition");
+		assert!(
+			catalog.reserve().init::<hang::catalog::VideoConfig>("v").is_err(),
+			"owned by the live rendition"
+		);
 		assert_eq!(
 			catalog.snapshot().video.renditions.get("v").unwrap().bitrate,
 			Some(789),
@@ -804,7 +863,7 @@ mod tests {
 
 		let mut replacement = catalog
 			.reserve()
-			.video("v")
+			.init::<hang::catalog::VideoConfig>("v")
 			.expect("the name is free once the rendition drops");
 		replacement.set(config(Some(456), None)).unwrap();
 		assert_eq!(catalog.snapshot().video.renditions.get("v").unwrap().bitrate, Some(456));
@@ -817,7 +876,7 @@ mod tests {
 		let (_broadcast, catalog, _video) = video_track();
 		catalog
 			.reserve()
-			.audio("v")
+			.init::<hang::catalog::AudioConfig>("v")
 			.expect("an audio rendition is a different section from a video one");
 	}
 
@@ -829,7 +888,10 @@ mod tests {
 		let mut catalog = super::super::Producer::new(&mut broadcast, super::super::Config::default()).unwrap();
 		catalog.modify().unwrap().video.insert("v", config(None, None)).unwrap();
 
-		assert!(catalog.reserve().video("v").is_err(), "the catalog already carries it");
+		assert!(
+			catalog.reserve().init::<hang::catalog::VideoConfig>("v").is_err(),
+			"the catalog already carries it"
+		);
 	}
 
 	/// The broadcast has one timeline: every rendition's groups index into the same track, so
@@ -876,6 +938,10 @@ mod tests {
 		}
 
 		impl RenditionConfig<TelemetryExt> for Telemetry {
+			fn detects() -> bool {
+				true
+			}
+
 			fn insert(self, catalog: &mut Catalog<TelemetryExt>, name: &str) {
 				catalog.ext.telemetry.insert(name.to_string(), self);
 			}
@@ -1043,19 +1109,19 @@ mod tests {
 		/// themselves current, with no per-frame bookkeeping in the caller.
 		#[test]
 		fn measures_a_custom_track() {
-			let (broadcast, mut catalog) = produce();
+			let (broadcast, catalog) = produce();
 			let reserved = catalog.reserve();
-			let mut rendition = reserved.init::<Telemetry>("gps").unwrap();
-			drop(reserved);
-			rendition.set(telemetry(None)).unwrap();
-
 			let net = broadcast.create_track("gps", None).unwrap();
-			let mut track = catalog
-				.media_producer(
+			let mut track = reserved
+				.track(
 					net,
 					crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+					None,
 				)
 				.unwrap();
+			drop(reserved);
+			assert!(matches!(track.modify(), Err(crate::Error::NotPublished)));
+			track.set(telemetry(None)).unwrap();
 
 			// 40ms records of 5 kB: 1 Mbps, over more than the bitrate window.
 			for i in 0..60u64 {
@@ -1067,7 +1133,6 @@ mod tests {
 						keyframe: true,
 					})
 					.unwrap();
-				rendition.estimate(track.estimate()).unwrap();
 			}
 
 			let snapshot = catalog.snapshot();
@@ -1097,7 +1162,7 @@ mod tests {
 			let mut consumer = catalog.consume().unwrap();
 
 			let reserved = catalog.reserve();
-			let mut video = reserved.video("v").unwrap();
+			let mut video = reserved.init::<hang::catalog::VideoConfig>("v").unwrap();
 			let mut gps = reserved.init::<Telemetry>("gps").unwrap();
 			drop(reserved);
 

@@ -30,10 +30,6 @@ The [quiescence quest](/quest/next/perf/uring-quiescence.md) sweeps this
 budget together with its pass budget; land whichever runs first and fold the
 other's sweep in.
 
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - builds on dev-only code that reaches `main` with the merge
-
 ## Closes
 
 - [#3120](https://github.com/moq-dev/moq/issues/3120) - close this issue when the quest finishes

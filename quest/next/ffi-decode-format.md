@@ -21,7 +21,3 @@ hand-written Python and Dart wrappers gain the field, and each
 Test one RGBA decode per binding smoke suite.
 
 Public API: additive field on a uniffi record and its wrappers. Wire: none.
-
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - the decoder record lives on dev

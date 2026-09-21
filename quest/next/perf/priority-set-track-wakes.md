@@ -37,10 +37,6 @@ Acceptance: a test that parks each handle on its own waiter, calls `set_track`
 on the front entry within a range where it stays first, and asserts no other
 handle woke. No regression on the `priority_queue_insert_front` benches.
 
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - builds on dev-only code that reaches `main` with the merge
-
 ## Related
 
 - [Hierarchical scheduling](/quest/next/quic/scheduler.md) - removes this queue where the new scheduler replaces it

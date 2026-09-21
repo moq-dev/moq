@@ -29,10 +29,6 @@ Public API: no further `moq-tokio` ownership change. The prerequisite may
 change `moq-sock`'s 0.0.x API. Wire: no format change. Close #2964 only when
 both the dev ownership proof and this integration are complete.
 
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - the released ownership surface is available on main
-
 ## Closes
 
 - [#2964](https://github.com/moq-dev/moq/issues/2964) - close this issue when the quest finishes

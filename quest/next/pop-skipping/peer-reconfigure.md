@@ -68,7 +68,3 @@ deduplicate while differing policies for one identity conflict; an unknown
 field, or an object whose `url` carries `?cost=` or `?jwt=`, keeps the
 previous list. Update `doc/bin/relay/cluster.md` and
 `doc/bin/relay/config.md` with the object form.
-
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - the required dev APIs must be available on main before this implementation starts

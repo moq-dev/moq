@@ -8,8 +8,8 @@ const BITRATE_WINDOW: Duration = Duration::from_secs(1);
 /// The catalog fields an [`Estimator`] can measure from the frames fed to it.
 ///
 /// An absent field is one to measure: whatever the config already carries when it reaches
-/// [`Rendition::set`](super::Rendition::set) is authoritative and left alone, and the rest is
-/// detected and kept current.
+/// [`container::Producer::set`](crate::container::Producer::set) is authoritative and left alone,
+/// and the rest is detected and kept current.
 #[derive(Clone, Default, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct Estimate {
@@ -35,12 +35,12 @@ impl Estimate {
 
 /// Measures the catalog jitter and bitrate of one track from the frames written to it.
 ///
-/// A [`container::Producer`](crate::container::Producer) owns one and feeds it as you write, so
-/// reading the result is all a publisher does:
+/// A [`container::Producer`](crate::container::Producer) created through the catalog owns one,
+/// feeds it as you write, and publishes the result automatically:
 ///
 /// ```no_run
 /// # fn example<E: moq_mux::catalog::hang::CatalogExt>(
-/// #     mut catalog: moq_mux::catalog::Producer<E>,
+/// #     catalog: moq_mux::catalog::Producer<E>,
 /// #     reserved: moq_mux::catalog::Reserved<E>,
 /// #     net: moq_net::track::Producer,
 /// #     config: hang::catalog::VideoConfig,
@@ -48,12 +48,8 @@ impl Estimate {
 /// # ) -> moq_mux::Result<()> {
 /// use moq_mux::catalog::hang::Container;
 /// use moq_mux::container::Kind;
-/// let mut track = catalog.media_producer(net, Container::Legacy(Kind::Video))?;
-/// let mut rendition = reserved.video(track.name())?;
-/// rendition.set(config)?;
-///
+/// let mut track = reserved.video(net, Container::Legacy(Kind::Video), config)?;
 /// track.write(frame)?;
-/// rendition.estimate(track.estimate())?;
 /// # Ok(())
 /// # }
 /// ```
@@ -122,8 +118,10 @@ impl Estimator {
 		self.jitter.max = self.jitter.max.max(duration);
 	}
 
-	/// Everything measured so far. Hand it to
-	/// [`Rendition::estimate`](super::Rendition::estimate) to publish it.
+	/// Everything measured so far.
+	///
+	/// Catalog-owned [`container::Producer`](crate::container::Producer) handles publish this
+	/// automatically when they cut or finish a group.
 	pub fn estimate(&self) -> Estimate {
 		Estimate {
 			jitter: self.jitter.current(),

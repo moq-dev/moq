@@ -411,7 +411,11 @@ impl Publish {
 					async move {
 						match audio {
 							Some((config, encode)) => {
-								moq_audio::encode::publish_capture(broadcast, catalog, config, encode, clock)
+								let mut options = moq_audio::encode::PublicationOptions::default();
+								options.capture = config;
+								options.encode = encode;
+								options.clock = clock;
+								moq_audio::encode::publish_capture(broadcast, catalog, options)
 									.await
 									.map_err(anyhow::Error::from)
 							}

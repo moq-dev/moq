@@ -30,8 +30,6 @@ a live-only broadcast with no archive timeline.
 
 ## Required
 
-- [Merge dev](/quest/dev/merge-dev.md) - the required dev APIs must be available on main before this implementation starts
-
 - [Publisher clocks](/quest/next/publisher-clock.md) - built-in publishers populate the mapping applications read
 
 ## Closes
