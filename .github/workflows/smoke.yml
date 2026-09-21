@@ -81,7 +81,7 @@ jobs:
         shell: bash -leo pipefail {0}
 
       - name: Smoke (full matrix)
-        run: nix develop --command just test smoke-full
+        run: nix develop --command just test smoke --all
         shell: bash -leo pipefail {0}
 
       - name: Negative control

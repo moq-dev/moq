@@ -13,7 +13,7 @@ feature for days (fixed in #3749) with every PR green.
 
 In `rs/justfile`, `check-changed` runs the feature clippy from the nightly
 `uring` recipe (`--features io-uring`, `-D warnings`, no tests) when
-`_select` includes moq-relay; `check-all` already covers it through `bench
+`_select` includes moq-relay; `check --all` already covers it through `bench
 check`. Keep the nightly `uring` matrix for the tests. Verify by breaking the
 feature on a scratch branch and watching `just check` fail on an
 `rs/moq-relay` diff, and by timing the added compile on a warm cache.

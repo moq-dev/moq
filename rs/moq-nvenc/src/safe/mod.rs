@@ -10,6 +10,7 @@ mod encoder;
 mod result;
 mod session;
 
+pub use api::LoadError;
 pub use buffer::{Bitstream, BitstreamLock, Buffer, BufferLock, EncoderInput, RegisteredResource};
 pub use encoder::{Encoder, EncoderInitParams};
 pub use result::{EncodeError, ErrorKind};

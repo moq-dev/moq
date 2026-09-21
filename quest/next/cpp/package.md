@@ -5,7 +5,7 @@
 `find_package(moq)` or the tarball's `moq.pc` gives a C++17 program
 `<moq/moq.hpp>`, and the program publishes and subscribes through the full
 moq-ffi surface with futures and `moq::expected`, `co_await`-able on C++20.
-A `test/smoke/clients/cpp` client joins `just test smoke-full`, and
+A `test/smoke/clients/cpp` client joins `just test smoke --all`, and
 `doc/lib/cpp` documents the package the way `doc/lib/go` does Go.
 
 ## Plan

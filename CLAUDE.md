@@ -107,6 +107,6 @@ These diff the branch against its base and only run the affected packages.
 
 Any wire-format change updates its matching IETF draft in the same PR, including framing, message fields, enum values, and version negotiation. Use the feature-specific draft for extensions and validate with `just drafts check`. See `drafts/CLAUDE.md`.
 
-For wire, `moq-ffi`, or gateway changes, also run `just test smoke-full` for cross-language interop; plain `smoke` is Rust-only.
+For wire, `moq-ffi`, or gateway changes, also run `just test smoke --all` for cross-language interop; plain `smoke` is Rust-only.
 
 When a CLI interface changes, search the whole repo for the binary name and update every example invocation, including docs and demo recipes. Check examples against `--help`.

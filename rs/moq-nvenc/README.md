@@ -12,6 +12,11 @@ the NVIDIA driver still links on a GPU-less builder and starts on machines that
 lack the driver (falling back to another encoder); the build needs no CUDA
 toolkit or driver libs present.
 
+Call `Encoder::load` to validate NVENC before creating a CUDA context. Missing
+libraries and entry points, rejected loader calls, and drivers older than the
+vendored SDK are reported as `LoadError` values. The safe encoder facade never
+panics while loading its driver function table.
+
 The crate compiles on any platform, macOS included: the `sys` bindings are plain
 C-ABI definitions and nothing links at build time. It only actually loads NVENC
 on Linux (that is the only place `moq-video` calls it); elsewhere it is a

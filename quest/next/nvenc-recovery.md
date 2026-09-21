@@ -21,7 +21,3 @@ Drop without disguising a live operational failure as success.
 
 Run the failure-injection suite in CI. Do not duplicate cleanup guarantees
 already delivered by the ownership quest. Public API and wire: unchanged.
-
-## Required
-
-- [NVENC loading](/quest/main/nvenc-loading.md) - driver failures reach the caller as errors

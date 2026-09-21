@@ -13,7 +13,7 @@ set working-directory := '..'
 # needs a nightly toolchain and sanitizer flags, so `just rs fuzz` is the one recipe
 # that may compile it. Every `--workspace` below therefore carries this, and a new
 # one that forgets it pays a vendored C++ libFuzzer build for nothing. The root
-# justfile's `check-all` and `fix-all` spell it out, since a module cannot read this.
+# justfile's `check --all` and `fix --all` spell it out, since a module cannot read this.
 no_fuzz := "--exclude moq-net-fuzz"
 
 default:

@@ -19,7 +19,7 @@ cross-language binding mirror that PR explicitly left unfinished.
   with `captures` on `MoqAnnounceUpdate`; `rs/libmoq`
   (`moq_announce_update` gains the captures under the existing string-out
   convention), the `py`, `swift`, `kt`, `dart`, and `go` wrappers,
-  `doc/lib/*` for each, and `just test smoke-full`.
+  `doc/lib/*` for each, and `just test smoke --all`.
 - `announced_broadcast(path)` keeps its shape; it is the literal case.
 
 Public API: breaking on moq-ffi, libmoq, and every binding, so on dev.
