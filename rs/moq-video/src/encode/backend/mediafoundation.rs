@@ -101,12 +101,6 @@ pub(crate) struct MediaFoundation {
 	_com: ComGuard,
 }
 
-// The MFT and its COM handles are created, driven, and dropped only on the
-// dedicated encode thread (see `encode::sink`), so the per-thread COM apartment
-// this opens in `ComGuard::new` stays balanced. `Send` lets the boxed trait
-// object satisfy `Backend: Send`.
-unsafe impl Send for MediaFoundation {}
-
 impl MediaFoundation {
 	pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
 		let format = OutputFormat::for_codec(config.codec);

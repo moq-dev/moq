@@ -99,10 +99,6 @@ pub(crate) struct MediaFoundation {
 	_com: ComGuard,
 }
 
-// The MFT and its COM handles are only ever touched from the one decode task (the
-// consumer's single-threaded `read` loop).
-unsafe impl Send for MediaFoundation {}
-
 impl MediaFoundation {
 	/// `config` is accepted for signature parity; the decoder MFT emits frames
 	/// at the stream's native size (callers scale the frames themselves).

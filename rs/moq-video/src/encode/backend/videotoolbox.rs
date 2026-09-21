@@ -65,12 +65,6 @@ pub(crate) struct VideoToolbox {
 	frame_index: i64,
 }
 
-// The capture loop drives this inline (macOS skips the dedicated encode thread),
-// always sequentially. Core Foundation handles are safe to use from a different
-// thread as long as never concurrently, so `Send` (which just lets the encoder
-// move between tokio workers between frames) is sound.
-unsafe impl Send for VideoToolbox {}
-
 impl VideoToolbox {
 	pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
 		// backend::open only routes codecs this backend advertises, so the match is

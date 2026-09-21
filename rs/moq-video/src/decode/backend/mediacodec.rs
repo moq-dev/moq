@@ -149,13 +149,6 @@ impl ImageSignal {
 	}
 }
 
-// SAFETY: `AMediaCodec` and `AImageReader` are owned handles with no thread
-// affinity; the NDK only requires that calls on one of them are serialized,
-// which they are because every method here takes `&mut self` and one decode task
-// owns the backend outright. `Send` is what lets the boxed trait object satisfy
-// `Backend: Send`.
-unsafe impl Send for MediaCodec {}
-
 impl MediaCodec {
 	/// Open a decoder for `codec`.
 	///

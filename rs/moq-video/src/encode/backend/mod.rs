@@ -47,7 +47,7 @@ mod vaapi;
 /// An opened video encoder. Feed it frames at the configured resolution; get
 /// back zero or more access units in the codec's wire framing, each stamped with
 /// the timestamp of the frame it came from.
-pub(crate) trait Backend: Send {
+pub(crate) trait Backend {
 	/// Encode one frame, forcing an IDR when `keyframe` is set. Backends key frames
 	/// automatically per [`Config::gop`], so this is only the caller's extra
 	/// request, arriving via [`Encoder::keyframe`](super::Encoder::keyframe).

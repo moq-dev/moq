@@ -193,6 +193,11 @@ mod inline {
 	/// A [`Decoder`] driven inline on the calling thread (see the module docs).
 	pub struct Inner(Decoder);
 
+	// SAFETY: VideoToolbox and Core Foundation handles may move between threads
+	// when calls remain serialized. `Sink` provides that serialization; the
+	// synchronous `Decoder` remains thread-bound.
+	unsafe impl Send for Inner {}
+
 	impl Inner {
 		pub async fn open(catalog: &VideoConfig, config: &Config) -> Result<Self, Error> {
 			Ok(Self(Decoder::new(catalog, config)?))

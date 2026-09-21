@@ -60,9 +60,6 @@ pub(crate) struct Nvenc {
 	timestamp: u64,
 }
 
-// Used only from the single capture/encode thread (see `publish_capture`).
-unsafe impl Send for Nvenc {}
-
 impl Nvenc {
 	pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
 		// cudarc and the NVENC SDK dlopen their driver libraries lazily and

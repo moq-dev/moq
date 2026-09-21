@@ -15,6 +15,9 @@
 //! sets could not be decoded anyway, so the lenient reading only ever turns an
 //! error into a picture.
 
+use std::marker::PhantomData;
+use std::rc::Rc;
+
 use bytes::Bytes;
 use hang::catalog::{AV1, VideoCodec, VideoConfig};
 use moq_mux::codec::{annexb, h264, h265};
@@ -134,10 +137,21 @@ enum Conversion {
 /// serving individually fetched groups. Feed it the payload of each container
 /// frame in decode order; it handles avc1/hvc1 -> Annex-B conversion, passes
 /// AV1 OBU temporal units through, and gates output until the first keyframe.
+///
+/// A decoder is bound to the thread that opens it. Use [`Sink`](super::Sink)
+/// when the owner can move between threads.
+///
+/// ```compile_fail
+/// fn move_to_another_thread(decoder: moq_video::decode::Decoder) {
+///     std::thread::spawn(move || drop(decoder));
+/// }
+/// ```
 pub struct Decoder {
 	backend: Box<dyn Backend>,
 	conversion: Conversion,
 	got_keyframe: bool,
+	/// Keeps direct use bound to the constructing thread, regardless of backend.
+	_thread_bound: PhantomData<Rc<()>>,
 }
 
 impl Decoder {
@@ -190,6 +204,7 @@ impl Decoder {
 			backend,
 			conversion,
 			got_keyframe: false,
+			_thread_bound: PhantomData,
 		})
 	}
 

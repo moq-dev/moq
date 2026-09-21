@@ -91,10 +91,6 @@ pub(crate) struct VideoToolbox {
 	sink: Box<Sink>,
 }
 
-// The session and its CoreFoundation handles are only ever touched from the one
-// decode task (the consumer's `read` loop, single-threaded per consumer).
-unsafe impl Send for VideoToolbox {}
-
 impl VideoToolbox {
 	/// Open a decoder for `codec` (H.264 or H.265). The session is built lazily
 	/// once the first keyframe's parameter sets arrive.

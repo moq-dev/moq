@@ -15,7 +15,6 @@ One opt-in Use MoQ encoders choice publishes OBS video and audio through moq-vid
 
 ## Required
 
-- [Codec threads](/quest/main/video-thread-ownership.md) - encoder execution ownership
 - [Video frames](/quest/main/video-frames.md) - owned frame and packet contracts
 - [Video timing](/quest/main/video-timing.md) - rational rates and timestamps
 

@@ -41,6 +41,7 @@ mod tests {
 		fn assert_sync<T: Sync>() {}
 		assert_send::<crate::Frame>();
 		assert_sync::<crate::Frame>();
+		assert_send::<super::Sink>();
 		assert_send::<super::Consumer>();
 	}
 }

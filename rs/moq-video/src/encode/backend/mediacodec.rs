@@ -149,12 +149,6 @@ pub(crate) struct MediaCodec {
 	ended: bool,
 }
 
-// SAFETY: `AMediaCodec` is an owned handle with no thread affinity; the NDK only
-// requires that calls on one codec are serialized, which they are because every
-// method here takes `&mut self` and the encode thread owns the backend outright.
-// `Send` is what lets the boxed trait object satisfy `Backend: Send`.
-unsafe impl Send for MediaCodec {}
-
 impl MediaCodec {
 	pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
 		// backend::open only routes codecs this backend advertises, so the match is

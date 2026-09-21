@@ -5,6 +5,9 @@
 //! the framing the catalog importer for [`Config::codec`] expects: H.264
 //! (`moq_mux::codec::h264`) or H.265 (`moq_mux::codec::h265`).
 
+use std::marker::PhantomData;
+use std::rc::Rc;
+
 use super::Encoded;
 use super::backend::{self, Backend};
 use crate::{Color, Error, Frame, Size};
@@ -181,6 +184,15 @@ pub(crate) fn default_bitrate(size: Size, framerate: u32) -> moq_net::bandwidth:
 /// Video encoder. Build one with [`Encoder::new`], feed it raw [`Frame`]s via
 /// [`encode`](Self::encode), and publish the resulting [`Encoded`] access units
 /// through a [`Producer`](super::Producer) built for the same [`Codec`].
+///
+/// An encoder is bound to the thread that opens it. Use [`Sink`](super::Sink)
+/// when the owner can move between threads.
+///
+/// ```compile_fail
+/// fn move_to_another_thread(encoder: moq_video::encode::Encoder) {
+///     std::thread::spawn(move || drop(encoder));
+/// }
+/// ```
 pub struct Encoder {
 	backend: Box<dyn Backend>,
 	codec: Codec,
@@ -193,6 +205,8 @@ pub struct Encoder {
 	/// Held rather than applied immediately because the caller decides a group
 	/// boundary before it has the frame that opens it.
 	pending_keyframe: bool,
+	/// Keeps direct use bound to the constructing thread, regardless of backend.
+	_thread_bound: PhantomData<Rc<()>>,
 }
 
 impl Encoder {
@@ -217,6 +231,7 @@ impl Encoder {
 			bitrate: config.resolved_bitrate(),
 			color: config.resolved_color(),
 			pending_keyframe: false,
+			_thread_bound: PhantomData,
 		})
 	}
 
@@ -941,6 +956,7 @@ mod tests {
 			bitrate: config.resolved_bitrate(),
 			color: config.resolved_color(),
 			pending_keyframe: false,
+			_thread_bound: PhantomData,
 		}
 	}
 
