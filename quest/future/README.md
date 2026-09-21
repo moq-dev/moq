@@ -15,6 +15,7 @@ world states the condition as a plain-text `Required` bullet and waits here.
 
 ## Quests
 
+- [Go vanity docs](/quest/future/go-vanity-docs.md) - the Go page names only `moq.dev/moq` once the republished mirrors declare it
 - [AV1 metadata separation](/quest/future/av1-metadata.md) - retain metadata OBUs inline while evaluating separate delivery
 - [SEI separation](/quest/future/sei/README.md) - retain inline SEI until measured savings or a metadata-only consumer justify a split
 - [Catalog track identity](/quest/future/catalog-tracks.md) - compare immutable track definitions with explicit catalog-to-group binding
