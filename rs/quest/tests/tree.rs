@@ -845,3 +845,31 @@ fn permanent_line_may_be_empty() {
 	assert!(tree.ready().is_empty(), "{:?}", tree.ready());
 	assert_eq!(tree.branch("quest/dev/README.md"), ["dev", "main"]);
 }
+
+/// Lines nest to any depth: every branch ends in a leaf component (the quest
+/// or `README`), so no line's branch is a path prefix of its children's, which
+/// is the one shape git refuses.
+#[test]
+fn branch_chain_of_a_nested_line() {
+	let tree = Tree::new();
+	tree.write(
+		"quest/dev/line/sub/README.md",
+		"# Sub\n\n## Goal\n\nA nested line.\n\n## Quests\n\n- [Three](/quest/dev/line/sub/three.md)\n",
+	);
+	tree.write(
+		"quest/dev/line/sub/three.md",
+		"# [S] Three\n\n## Goal\n\nA nested quest.\n",
+	);
+	tree.append("quest/dev/line/README.md", "- [Sub](/quest/dev/line/sub/README.md)\n");
+	tree.accepts();
+	assert_eq!(
+		tree.branch("quest/dev/line/sub/three.md"),
+		[
+			"quest/dev/line/sub/three",
+			"quest/dev/line/sub/README",
+			"quest/dev/line/README",
+			"dev",
+			"main"
+		]
+	);
+}
