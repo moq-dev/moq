@@ -19,6 +19,6 @@ gate keeps the coverage.
 
 ## Related
 
-- [Ship capture and playback](/quest/m2/cli-packaging.md) - shippable capture needs this first
+- [Ship capture and playback](/quest/m2/cli-packaging.md) - the shippable capture milestone this work supports
 - [VAAPI encode and decode](/quest/m2/video-vaapi.md) - same pre-generated bindings pattern for libva
 - [Linux capture parity](/quest/m2/capture-linux.md) - the capture surface this unblocks
