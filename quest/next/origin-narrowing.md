@@ -42,5 +42,4 @@ path. Wire: none.
 
 ## Related
 
-- [Bindings announce match](/quest/dev/api-origin-scopes.md) - the binding half of the same line
 - [In-band auth](/quest/next/auth/README.md) - the token union that a narrowing later revalidates

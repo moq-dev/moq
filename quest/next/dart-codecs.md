@@ -32,7 +32,3 @@ This quest owns Dart integration of the already-landed `MoqVideoConsumer`:
 expose it through the Dart wrapper, ship codec-enabled artifacts, and test
 subscribed video decoding from Dart in CI. Update the capability docs in the
 same change. Do not finish with codecs enabled but the consumer unexposed.
-
-## Required
-
-- [FFI video consumer](/quest/next/mobile/ffi-video-consumer.md) - land the shared decoder API before integrating it into Dart

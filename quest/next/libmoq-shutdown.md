@@ -1,4 +1,4 @@
-# [M] OBS exits cleanly with the moq plugin loaded
+# [M] libmoq can be stopped before its host unloads it
 
 ## Goal
 
@@ -26,21 +26,22 @@ both branches and the change is additive.
   called from a host thread, never from a libmoq callback. Native codec and
   capture threads belong to their handles and end with them; this call does
   not reach into them.
-- Wire it: define `obs_module_unload` in `cpp/obs/src/obs-moq.cpp` and call
-  `moq_shutdown()` there, after OBS has destroyed the outputs and sources.
-  Add the corresponding `MOQ_LOG` line so a hung shutdown is visible.
+- The OBS wiring (`obs_module_unload` calling the shutdown after the outputs
+  and sources are destroyed) belongs to [OBS migration](/quest/next/cpp/obs.md),
+  where the plugin reaches moq-ffi through the generated C++ and calls
+  `moq_ffi_shutdown`; this quest gives the plain-C ABI the same call for the
+  hosts that stay on libmoq.
 - Regression tests: a `rs/libmoq/c-tests` fixture that builds libmoq as a
   cdylib, `dlopen`s it, opens a session, and `dlclose`s once without
   `moq_shutdown` (must fail, proving the hazard) and once with it (clean
   exit, thread gone); a `rs/libmoq` unit test that pending and later calls
   resolve cancelled and open handles close without panicking afterwards
   (mirror `rs/moq-ffi/src/test.rs::shutdown_cancels_and_drops_cleanly`,
-  in a child process since the stop is process-wide); and a `cpp/obs/test`
-  stub test that `obs_module_unload` calls it. Wire the new fixture into
-  `just rs c-tests`.
+  in a child process since the stop is process-wide). Wire the new fixture
+  into `just rs c-tests`.
 - Cross-package sync: `moq.h` is cbindgen-generated from the Rust doc
   comment; update `doc/lib/c` (the handle and callback contract) and
-  `doc/bin/obs.md`. The Go bindings regenerate from `moq.h` and need no
+  the Go bindings regenerate from `moq.h` and need no
   wrapper: `os.Exit` ends the process without tearing a host runtime down
   under the thread.
 

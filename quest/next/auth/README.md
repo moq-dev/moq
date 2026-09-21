@@ -47,7 +47,7 @@ Decisions settled while planning, recorded so review does not relitigate them:
   root, and every token in a union shares the connection's root. Unscoped
   permission is `**`; an empty union grants nothing. Legacy AUTH wire codecs
   explicitly convert representable prefix unions, where `[""]` means all,
-  and refuse patterns they cannot represent. [Pattern interest](/quest/next/path-patterns/interest.md)
+  and refuse patterns they cannot represent. [Pattern interest](/quest/next/path-patterns.md)
   upgrades AUTH and ANNOUNCE_REQUEST wire fields together without changing
   the public pattern-valued grant type.
 - **Fail loud by aborting the session.** A publisher whose origin announces a
@@ -108,7 +108,7 @@ ALPN.
 
 - [Origin narrowing](/quest/next/origin-narrowing.md) - resizes a live session
   when the union shrinks, for revalidation and token expiry alike
-- [Pattern interest](/quest/next/path-patterns/interest.md) - moves AUTH's legacy wire prefixes to patterns along with ANNOUNCE_REQUEST
+- [Pattern interest](/quest/next/path-patterns.md) - moves AUTH's legacy wire prefixes to patterns along with ANNOUNCE_REQUEST
 - [Expiring media grants](/quest/next/processor/grant-lease.md) - a worker's
   lease renewal is a new in-band token
 - [P2P](/quest/next/p2p/README.md) - the first consumer of hop-bound peer grants

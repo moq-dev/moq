@@ -28,4 +28,4 @@ capture quests in this questline start only once this is settled.
 ## Related
 
 - [Decoded frame ownership](/quest/next/decoded-frames.md) - established shared frame lifetime; reuse it for any later native mobile views
-- [FFI video consumer](/quest/next/mobile/ffi-video-consumer.md) - independently supplies portable pixels from Rust decoding
+- [Decoded frame ownership](/quest/next/decoded-frames.md) - independently supplies portable pixels from Rust decoding

@@ -55,7 +55,6 @@ ready now.
 ## Related
 
 - [OBS native codecs](/quest/next/obs-moq-video/README.md) - the OBS source and encoder adapters consume this through moq-ffi; #3498 narrowed OBS to what moq-audio decodes today
-- [Mobile](/quest/next/mobile/README.md) - the iOS and Android slices ship these backends through moq-ffi
 - [Runtime QA hosts](/quest/future/runtime-qa-hosts.md) - Windows and Android verification needs a host; the Windows and macOS CI gates run nightly, not per PR
 - [Dart codec parity](/quest/next/dart-codecs.md) - Dart gains these once it builds with the `audio` feature
 - [Media Foundation decode](/quest/future/audio-decode-mediafoundation.md) - Windows decodes HE-AAC, multichannel AAC, and what else the MFTs offer

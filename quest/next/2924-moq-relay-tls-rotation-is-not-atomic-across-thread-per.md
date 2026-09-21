@@ -1,99 +1,57 @@
-# [XL] moq-relay: TLS rotation is not atomic across thread-per-core QUIC workers
+# [M] One served identity shared by every listener
 
 ## Goal
 
-Every QUIC worker resolves new handshakes through the same served-identity
-snapshot. A successful rotation replaces that snapshot once for the group,
-`/certificate.sha256` reads the same state, and `--listen-tls-generate` works
-with `runtime.workers`.
+Every listener the relay runs, tokio QUIC workers and io_uring workers alike,
+resolves handshakes through one served-identity handle. A rotation replaces
+that handle's snapshot once for the whole group, a watcher failure is one
+failure, `/certificate.sha256` reads the same state every worker serves, and
+`--listen-tls-generate` works with `runtime.workers` because the certificate
+is generated once and shared. The io_uring workers gain the reload they lack
+today (they read the certificate once at bind), which is what lets ACME
+promise renewal on that runtime.
 
 ## Plan
 
 Follow-up from #2921 (part 1 of #2875), which added `runtime.workers` and
-documented this rather than fixing it.
+documented the split rather than fixing it: each tokio worker builds its own
+listener with `listen::Config::init`, so each loads the PEM files, spawns its
+own `tls::reload_certs` watcher, and snapshots its own mTLS roots.
+`Workers` keeps the first worker's `Certificates` handle for the fingerprint
+endpoint. `uring::Workers::bind` reads one pair once and never reloads.
 
-### Mechanism
+The primitive already exists: `ServeCerts` implements
+`rustls::server::ResolvesServerCert` (`rs/moq-tokio/src/tls.rs:2857`) and
+`reload_certs` (`:2931`) swaps its contents from the file watcher. What is
+missing is sharing it.
 
-Each tokio QUIC worker builds its own listener with `listen::Config::init`,
-so each independently:
+- Build the `ServeCerts` and its watcher once, on the shared runtime, in
+  `Relay::load`; hand every listener an `Arc` of it. A listener's
+  `ServerConfig` is built around the shared resolver, so a swap is visible on
+  the next handshake on every worker with no per-worker state.
+- The mTLS client roots ride the same handle.
+- `--listen-tls-generate` generates once into the shared handle; drop the
+  #2921 refusal with workers.
+- io_uring: `uring::Workers::bind` takes the shared resolver instead of a
+  loaded pair. If the ring's TLS path cannot take a resolver, that is the
+  finding to record and the refusal to keep, stated per backend rather than
+  claimed.
+- Atomicity is defined at the snapshot boundary: a handshake already holding
+  the previous snapshot finishes with it; every resolution after a swap sees
+  the new one.
+- Tests: rotate the PEM pair under a multi-worker relay and assert every
+  worker's next handshake and `/certificate.sha256` agree; a half-written
+  pair keeps the old one serving; generate-with-workers serves one
+  fingerprint. Run under the io_uring lane where the kernel allows.
 
-- loads the `listen.tls.cert` / `listen.tls.key` files,
-- spawns its own `tls::reload_certs` watcher,
-- snapshots its own mTLS client roots.
-
-`Workers` keeps the *first* worker's `Certificates` handle, and that is the
-one `/certificate.sha256` publishes.
-
-Three consequences:
-
-1. **Rotation is not atomic.** During a reload, workers can be serving
-   different certificates. Both are valid, so TLS still completes, but the
-   group is briefly inconsistent and the published fingerprint may match only
-   some of them.
-2. **A failed watcher diverges permanently.** `tls::reload_certs` logs and
-   continues when it cannot watch; that worker then serves the old
-   certificate indefinitely while its siblings rotate, and nothing surfaces
-   the split.
-3. **N redundant watchers** on the same files, one per worker.
-
-The mTLS roots have the same shape: `--listen-tls-root` is snapshotted per
-worker.
-
-#2921 rejects `--listen-tls-generate` with workers, since that case is not
-merely inconsistent but broken: each worker would generate a *different*
-self-signed certificate while the fingerprint endpoint advertises one of
-them.
-
-### What exists
-
-`tls::Listen::identity: Option<Identity>` (rs/moq-tokio/src/tls.rs:1281) is
-the in-memory served identity, but it is not the handle this needs:
-
-- Its only constructor is `Identity::generate` (:294). Nothing builds one
-  from on-disk PEM, so the relay cannot load once and hand the result to N
-  listeners.
-- It is static. An `Identity` has no reload; the watcher only follows
-  `cert`/`key` paths.
-- It is additive. `ServeCerts::load_certs` (tls.rs:2867) pushes it onto
-  the same list as the `cert`/`key` files and the `generate` hostnames
-  (:2896-2899), so it is served *alongside* disk material, not instead of it.
-
-The io_uring path is the prior art: `uring::Workers::bind` reads exactly one
-certificate/key pair once, on the shared runtime, and hands every worker the
-same material (rs/moq-relay/src/uring.rs:118-120). It refuses `tls.generate`
-for the same reason the tokio group does (:126-128), and it does not reload.
-
-### Direction
-
-Give `moq-tokio` one served-identity handle that is loadable from PEM or
-generated, hot-reloadable, and shared by reference: the relay loads and
-watches once on the shared runtime and every listener (tokio workers and
-io_uring workers alike) resolves certificates through the same handle.
-Rotations replace the shared snapshot once, a watcher failure is one failure,
-and `--listen-tls-generate` with workers is "generate once, share it". The
-mTLS roots ride the same handle.
-
-Prefer an additive ownership boundary: `tls::Listen` is non-exhaustive and
-`ServeCerts` is private, so shared initialized listener state does not by
-itself require replacing `Listen::identity` or changing `Connect::identity`.
-Preserve the existing static identity and combined certificate-source
-semantics. Any new accepted configuration must be implemented in this quest,
-not reserved as an ignored option for later wiring. If implementation shows
-an existing published signature or field must change, identify that exact
-break and split it into a dev quest before proceeding.
-
-Sized XL because this shares certificate and inbound trust state across both
-worker runtimes, removes per-worker watchers, and needs runtime rotation
-proof. Define atomicity at the shared snapshot boundary: handshakes already
-using the previous snapshot may finish with it; a new resolution after a
-successful replacement sees the new snapshot. Backend limitations must be
-implemented or refused explicitly rather than claiming identical reload
-support without evidence.
-
-Public API: preserve existing published callers through additive integration
-unless an exact necessary break is separately approved. Wire: no MoQ format
-change.
+Public API: additive on `moq-tokio` (a constructor taking the shared
+resolver); `tls::Listen` is non-exhaustive, so no published signature
+changes. Wire: none.
 
 ## Closes
 
 - [#2924](https://github.com/moq-dev/moq/issues/2924) - close this issue when the quest finishes
+
+## Related
+
+- [Automatic ACME certificates](/quest/next/709-automatic-letsencrypt-support.md) - feeds the shared resolver

@@ -7,9 +7,6 @@ FLV script tags survive RTMP and FLV import instead of being discarded, so
 
 ## Plan
 
-The shared metadata contract owns timestamp encoding and placement. Adopt it
-before implementation; deferred SEI extraction is not a prerequisite.
-
 `rs/moq-mux/src/container/flv/import.rs` matches `TAG_SCRIPT => {}` and moves
 on, which drops every AMF data message an encoder sends. `onMetaData` is the
 one every RTMP publisher emits, and applications routinely push their own cues
@@ -17,8 +14,8 @@ through the same channel.
 
 Carry raw tag payloads without decoding AMF into a fixed vocabulary. Publish
 when received on independently sequenced metadata groups, with event time on
-the broadcast clock and source placement per
-[Metadata association](/quest/next/metadata-association.md). Tags before media
+the broadcast clock and source placement per the contract
+[emsg](/quest/next/emsg.md) settles. Tags before media
 are delivered immediately and retain explicit pre-media placement; audio-only
 and script-only input do not require a dummy video rendition.
 Where `onMetaData` duplicates something the catalog already models (dimensions,
@@ -31,7 +28,7 @@ media tag, and a byte-identical round trip.
 
 ## Required
 
-- [Metadata association contract](/quest/next/metadata-association.md) - settles the shared framing and missing-data semantics before this section adopts them
+- [fMP4 emsg](/quest/next/emsg.md) - settles the shared framing and missing-data semantics before this section adopts them
 
 ## Related
 

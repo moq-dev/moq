@@ -9,8 +9,7 @@ exporter understands. Server-side ad insertion is a separate future quest.
 
 ## Plan
 
-Use [Metadata association](/quest/next/metadata-association.md)'s shared event
-contract. Deliver cues immediately, including when splice_time is in the
+Use the shared event contract [emsg](/quest/next/emsg.md) settles. Deliver cues immediately, including when splice_time is in the
 future; consumers need advance notification. Metadata group sequences are
 independent of media GOPs.
 
@@ -43,7 +42,7 @@ be in it the day it ships. Cross-package sync: `rs/hang`, `js/hang`,
 
 ## Required
 
-- [Metadata association contract](/quest/next/metadata-association.md) - settles the shared framing and missing-data semantics before this section adopts them
+- [fMP4 emsg](/quest/next/emsg.md) - settles the shared framing and missing-data semantics before this section adopts them
 
 ## Closes
 
@@ -51,5 +50,4 @@ be in it the day it ships. Cross-package sync: `rs/hang`, `js/hang`,
 
 ## Related
 
-- [Metadata association](/quest/next/metadata-association.md) - defines the sidecar rule this follows
 - [ID3 catalog section](/quest/next/id3.md) - the other typed timed-metadata section, same rule

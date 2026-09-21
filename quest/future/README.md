@@ -44,7 +44,6 @@ world states the condition as a plain-text `Required` bullet and waits here.
 - [vcpkg registry](/quest/future/cpp-vcpkg.md) - a registry we own serves the prebuilt package to `vcpkg` manifests
 - [Conan remote](/quest/future/cpp-conan.md) - a remote we own serves the same tarball to `conan install`
 - [Compressed tracks](/quest/future/flate/README.md) - any track compresses per group from every language, not only the JSON modes
-- [`moq` serves like a relay](/quest/future/cli-serve.md) - a `moq --listen` session is authenticated, scoped, counted, and drained like a relay's; the relay is `moq` listening by default
 - [#3115](/quest/future/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink: a flushing restart after EOS opens a new publication generation
 - [Safari WebTransport](/quest/future/safari-webtransport.md) - WebKit browsers return to WebTransport once WebKit 319818 ships fixed
 - [Multipath spike](/quest/future/multipath-spike.md) - whether bonded contribution over multipath QUIC is worth building, given it needs noq on both ends

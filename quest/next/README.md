@@ -43,7 +43,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Binding stats docs](/quest/next/binding-stats-docs.md) - every binding's doc page lists its connection stats fields with units
 
 - [Audio jitter target](/quest/next/audio-jitter-target/README.md) - the audio playout target is a measured estimate of arrival timing in both languages, not a round-trip guess
-- [A/V clock](/quest/next/plan-av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
 - [Jitter clock](/quest/next/jitter-flush-clock.md) - moq-mux: catalog jitter measures how far behind the media clock an encoder flushes, fed by encoders only, and never decreases
 - [Capture denial](/quest/next/browser-permission-qa.md) - moq-publish surfaces a refused camera or microphone instead of retrying forever, and recovers on grant
 - [Publisher audio unlock](/quest/next/publish-audio-unlock.md) - the publisher's capture AudioContext is resumed on a gesture or the source is refused, so no silent audio track is announced
@@ -62,7 +61,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Impaired path](/quest/next/transport-impairment-profile.md) - the transport drills run over a seeded, impaired UDP path on any host
 - [Tooling](/quest/next/tooling/README.md) - justfiles become a one-line menu over `sh/`, one impact map scopes CI, and every workflow step runs a recipe
 - [Generation](/quest/next/hls-generation.md) - init URLs follow the rendition config and segment URLs carry an embedder-supplied generation, so caching can be re-enabled
-- [Path patterns](/quest/next/path-patterns/README.md) - one matcher for every predicate over broadcast paths: tokens, origins, interest
+- [Path patterns](/quest/next/path-patterns.md) - one matcher for every predicate over broadcast paths: tokens, origins, interest
 - [In-band auth](/quest/next/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish
 - [Stats retier](/quest/next/stats-retier.md) - a re-checked tier retags a live session's stats in place instead of waiting for its next connection
 - [io_uring link facts](/quest/next/uring-link-facts.md) - the io_uring workers report a session's peer address and SNI to the auth server like the tokio listener does
@@ -87,7 +86,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Stream sessions](/quest/next/uring-tcp/README.md) - serve WebSocket and HTTP from the io_uring workers, where io_uring pays off most
 - [IETF on the ring](/quest/next/uring-ietf.md) - the io_uring workers serve moq-transport sessions too, so a uring relay drops no client protocol
 - [Perf](/quest/next/perf/README.md) - eliminate measured hot-path costs across moq-uring, kio, and the moq-net model
-- [#2924](/quest/next/2924-moq-relay-tls-rotation-is-not-atomic-across-thread-per.md) - every QUIC worker shares one reloadable served identity, so rotation is atomic and generate works with workers
+- [#2924](/quest/next/2924-moq-relay-tls-rotation-is-not-atomic-across-thread-per.md) - every listener on both runtimes shares one reloadable served identity, so rotation is atomic and generate works with workers
 - [#2964](/quest/next/2964-quic-workers-dropping-one-split-server-resizes-the.md) - integrate the dev worker owner with hardened socket-group formation
 - [Audio quality harness](/quest/next/audio-quality-harness/README.md) - a playout latency regression fails a run instead of arriving as a bug report
 - [Benchmark comparisons](/quest/next/performance-comparisons.md) - retained evidence, repeated paired runs, and uncertainty for performance claims
@@ -115,7 +114,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [LOC duration marker](/quest/next/loc-duration-marker.md) - LOC producers write the marker once released consumers skip it
 - [#2278](/quest/next/2278-watch-absolute-wall-clock-latency-target-for-synchronized.md) - hang: expose the fixed catalog-root broadcast clock without synchronizing library playback to wall time
 - [Time stretch](/quest/next/watch-audio-time-stretch.md) - js/watch: the audio ring converges by time-stretching instead of skipping or going silent
-- [Metadata association](/quest/next/metadata-association.md) - settle timing and grouping for ID3, SCTE-35, emsg, and FLV independently of SEI separation
 - [#2279](/quest/next/2279-hang-typed-scte-35-ad-cue-signaling-carried-opaquely.md) - hang: SCTE-35 cues arrive immediately on an independent metadata track, optionally associated with a rendition
 - [Caption import](/quest/next/captions-import.md) - fMP4 and MKV subtitle tracks import as text renditions instead of erroring or being dropped
 - [MSF caption roles](/quest/next/captions-msf.md) - an MSF caption, subtitle, or sign-language track survives conversion to a hang catalog
@@ -133,11 +131,11 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Text availability](/quest/next/text-schema.md) - a text track publishes its own coverage index instead of copying the media timeline
 - [SRT metadata parity](/quest/next/srt-metadata.md) - the SRT publisher preserves MPEG-TS metadata byte-faithfully like the CLI importer
 - [ID3 catalog section](/quest/next/id3.md) - timed ID3 as a first-class container-neutral catalog section
-- [fMP4 emsg](/quest/next/emsg.md) - event messages survive fMP4 import instead of being silently discarded
+- [fMP4 emsg](/quest/next/emsg.md) - event messages survive fMP4 import, and the timed-metadata contract ID3, SCTE-35, and FLV script tags share is settled with them
 - [FLV script tags](/quest/next/flv-script.md) - onMetaData and AMF data messages survive RTMP and FLV import
 - [Release size](/quest/next/release-size.md) - the release scripts' LTO exports become the workspace release profile, and a nightly report shows what each moq-ffi build ships
 - [Bindgen CLI split](/quest/next/uniffi-cli-feature.md) - a library build of moq-ffi stops compiling uniffi_bindgen and its 46 crates
-- [Mobile bindings](/quest/next/mobile/README.md) - preserve the FFI video consumer and Dart device proof while mobile capture is deferred
+- [Dart on iOS](/quest/next/dart-ios.md) - prove the shipped iOS native asset actually loads on a device, which no CI can
 - [libmoq shutdown](/quest/next/libmoq-shutdown.md) - OBS exits cleanly with the plugin loaded: a C ABI `moq_shutdown` stops the libmoq thread before the module is unloaded
 - [Kotlin JVM exit](/quest/next/kt-jvm-exit.md) - a Kotlin/JVM program exits cleanly whatever the moq-ffi runtime thread is doing, like Python does since #3766
 - [Dart leaks](/quest/next/dart-leak.md) - the generated Dart bindings leak native memory on every call
@@ -149,8 +147,8 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Install moq](/quest/next/moq-installer.md) - one command installs or upgrades the released CLI on macOS and Linux
 - [Install URL](/quest/next/moq-install-url.md) - moq.dev serves the canonical installer at /install.sh
 - [`moq relay`](/quest/next/moq-relay-subcommand.md) - the relay runs under a `moq` verb with its own flags and TOML, while `moq-relay` stays a minimal binary
-- [#3137](/quest/next/3137-moqsrc-bound-the-pending-rendition-subscriptions-a.md) - moqsrc: bound the pending rendition subscriptions a catalog can open
-- [#709](/quest/next/709-automatic-letsencrypt-support.md) - the relay provisions and renews its own ACME certificate over HTTP-01, persisted on disk
+- [`moq --listen` admission](/quest/next/cli-serve.md) - a listening CLI session is authenticated, scoped, counted, and drained like a relay's instead of accepting everything
+- [#709](/quest/next/709-automatic-letsencrypt-support.md) - the relay provisions and renews its own ACME certificate through rustls-acme over TLS-ALPN-01, persisted on disk
 - [Capture without V4L2 bindgen](/quest/next/capture-v4l-bindings.md) - moq-video capture builds on Linux without libclang or kernel headers
 - [Audio capture without ALSA link](/quest/next/capture-alsa-link.md) - moq-audio capture and playback build on Linux without linking libasound
 - [Ship capture and playback](/quest/next/cli-packaging.md) - a released moq binary can capture and play, which no distribution currently enables

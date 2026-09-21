@@ -2,9 +2,10 @@
 
 ## Goal
 
-A service can advertise a path pattern it could
-serve rather than enumerating every broadcast matching it. A wildcard is priced
-at what starting the work would cost. Specificity wins first: a concrete
+A service claims the prefix it could serve rather than enumerating every
+broadcast under it; the client library filters that claim against the
+pattern interest the caller asked for, so nothing on the wire spells a
+wildcard. A claim is priced at what starting the work would cost. Specificity wins first: a concrete
 claim shadows a wildcard regardless of cost, and prices compete within the
 same specificity tier. A terminal concrete refusal does not fall through to
 a catch-all; its claim must be withdrawn. Retracting a wildcard stops new
@@ -46,7 +47,7 @@ production cost: zero for a live publish, something large for a standby that
 would have to start working (a cold transcoder)"
 (`drafts/draft-lcurley-moq-lite.md`). `moq_auth::Claims.publish` and
 `origin::Producer` gain versioned patterns through
-[Path patterns](/quest/next/path-patterns/README.md), so advertisements reuse the
+[Path patterns](/quest/next/path-patterns.md), so advertisements reuse the
 same exact containment check. `Cost { warm, cold }`
 (`rs/moq-net/src/model/origin.rs:426`) is the route cost since
 [#2925](https://github.com/moq-dev/moq/pull/2925).
@@ -83,7 +84,7 @@ field.
 ### Decisions
 
 - **One prefix on the wire, one pattern in the token and the filter.** An
-  advertisement is a path prefix; the [path-patterns](/quest/next/path-patterns/README.md)
+  advertisement is a path prefix; the [path-patterns](/quest/next/path-patterns.md)
   dialect is what tokens and the consume-side filter use, matched by the
   shared matcher, so nothing resembles a second grammar and nothing on the
   wire spells a wildcard.
@@ -190,15 +191,9 @@ field.
   routing.
 - **Patterns are independent of clustering.** `draft-lcurley-moq-pattern`
   owns the matching and authorization semantics tokens and filters share;
-  no wire message carries a pattern on either protocol. moq-cluster adds hop
+  no announce message carries a pattern on either protocol (AUTH grants on
+  lite-06 do, per [Path patterns](/quest/next/path-patterns.md)). moq-cluster adds hop
   lists, costs, and pool selection to prefix advertisements.
-- **A pattern travels as typed segments, not text.** Each wire segment is a
-  kind (0 literal, 1 wildcard, 2 globstar, 3 partial = prefix + suffix) plus a
-  length-prefixed value, so no glob syntax reaches the wire, an unknown kind
-  is skipped by its length and the advertisement ignored rather than the
-  stream killed, and a later revision can add kinds (multi-star segments,
-  regexes) without a new message. The `*` and `**` spellings exist only in
-  `moq_net::path` and `@moq/net`.
 
 ### Where derived output lives
 
@@ -270,7 +265,7 @@ than announce state.
 
 ## Related
 
-- [path-patterns](/quest/next/path-patterns/README.md) - owns the pattern dialect
+- [path-patterns](/quest/next/path-patterns.md) - owns the pattern dialect
   and the shared matcher advertisements reuse
 - [archive](/quest/next/archive/README.md) - an archive advertises the catch-all
   pattern, and its catalog names the generations a wildcard cannot

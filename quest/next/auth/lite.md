@@ -147,5 +147,5 @@ On main, additive.
 
 ## Related
 
-- [Pattern interest](/quest/next/path-patterns/interest.md) - moves the prefix
+- [Pattern interest](/quest/next/path-patterns.md) - moves the prefix
   fields here and in ANNOUNCE_REQUEST to patterns together

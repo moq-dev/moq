@@ -70,6 +70,7 @@ change.
 
 ## Required
 
+- [IETF leftovers](/quest/next/ietf-leftovers.md) - lands the 0x21 priority property in the same code first
 - [Hierarchical stream scheduling](/quest/next/quic/scheduler.md) - the fair
   tier the per-broadcast send groups ride on
 

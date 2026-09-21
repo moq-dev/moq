@@ -28,6 +28,6 @@ metadata is handled; do not promise byte-faithful export after a deadline miss.
 
 ## Related
 
-- [Metadata association](/quest/next/metadata-association.md) - independently plans carriage for metadata already outside video
+- [fMP4 emsg](/quest/next/emsg.md) - independently settles carriage for metadata already outside video
 - [Colour model](/quest/next/color-model.md) - preserves display metadata semantics
 - [CEA-608/708](/quest/next/captions-cea.md) - can read inline caption SEI without waiting for this experiment

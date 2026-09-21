@@ -26,4 +26,4 @@ editor stability across a play-stop-play cycle.
 ## Required
 
 - [Package](/quest/next/cpp/package.md) - the tarball the module links
-- [FFI video consumer](/quest/next/mobile/ffi-video-consumer.md) - the decoded frames the texture needs
+- [Decoded frame ownership](/quest/next/decoded-frames.md) - the decoded frames the texture needs

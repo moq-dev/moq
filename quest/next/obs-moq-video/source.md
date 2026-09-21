@@ -18,7 +18,7 @@ The MoQ source loads and plays supported video without directly linking FFmpeg l
 
 - [OBS migration](/quest/next/cpp/obs.md) - the plugin is on the generated C++ before decode changes
 - [Decoded frame ownership](/quest/next/decoded-frames.md) - retains the existing frame and defines native-view lifetime before OBS imports it
-- [FFI video consumer](/quest/next/mobile/ffi-video-consumer.md) - the decoded-frame consumer moq-ffi does not have yet
+- [Decoded frame ownership](/quest/next/decoded-frames.md) - the decoded-frame consumer moq-ffi does not have yet
 ## Related
 
 - [VP8/VP9 decoding](/quest/next/obs-moq-video/vpx.md) - restores deferred codec coverage independently

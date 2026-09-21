@@ -34,6 +34,12 @@ unchanged: same settings, same dock, same reconnect and teardown timing.
   (in-tree `cpp/` for `MOQ_LOCAL`, the release tarball otherwise); `obs.yml`
   rides `release-cpp.yml` instead of `libmoq.yml`. `doc/bin/obs.md` says the
   plugin is C++ over the generated bindings.
+- Shutdown: define `obs_module_unload` and call `moq_ffi_shutdown` there,
+  after OBS has destroyed the outputs and sources, so the runtime thread is
+  joined before the module is unmapped; log it so a hung shutdown is visible.
+  A `cpp/obs/test` stub test asserts the unload calls it. Reproduce the crash
+  first (exit with an output running, right after stopping one, and with a
+  source whose destroy hit its backstop) and record which cases crashed.
 - Verification: `just obs compile` and `just obs test` on all three
   platforms; a manual publish and watch round trip against a relay with
   reconnect and mid-stream source deletion.

@@ -22,4 +22,4 @@ Public API: additive on @moq/watch and @moq/room. Wire: none.
 
 ## Related
 
-- [A/V clock](/quest/next/plan-av-clock.md) - per-track sync handles the Player would own
+- [A/V clock](/quest/dev/plan-av-clock.md) - per-track sync handles the Player would own

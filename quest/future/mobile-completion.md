@@ -22,7 +22,7 @@ Do not close #700 merely because its next subset or a design decision finished.
 
 ## Required
 
-- [Mobile bindings](/quest/next/mobile/README.md) - the independent FFI consumer and Dart iOS asset proof
+- [Dart on iOS](/quest/next/dart-ios.md) - the Dart iOS asset proof
 - [Dart codec parity](/quest/next/dart-codecs.md) - codec-enabled artifacts and Dart video consumer integration
 - [Mobile ownership](/quest/future/mobile-ownership.md) - select and scope the mobile media architecture
 - [iOS capture](/quest/future/mobile-capture-ios.md) - deliver the selected iOS capture path

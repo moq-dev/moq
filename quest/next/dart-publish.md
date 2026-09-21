@@ -47,4 +47,4 @@ but retraction does not erase it.
 ## Required
 
 - [Dart binding memory leaks](/quest/next/dart-leak.md) - publishing a leaking runtime is worse than not publishing
-- [Dart on iOS](/quest/next/mobile/dart-ios.md) - the package advertises iOS, which nobody has run
+- [Dart on iOS](/quest/next/dart-ios.md) - the package advertises iOS, which nobody has run

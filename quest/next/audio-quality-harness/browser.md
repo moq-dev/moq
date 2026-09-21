@@ -47,12 +47,11 @@ budget, or a schedule.
     network, jitter buffer, decode, render). The ledger's sum-to-end-to-end
     identity is unimplementable if two stages can claim the same milliseconds,
     and an unaccounted remainder is the finding, so give it a name too.
-- Extract the seeded shaper from [Impaired
-  path](/quest/next/transport-impairment-profile.md) into something that runs as
-  its own process in front of a relay, so this harness and the drills share one
-  impairment implementation. Assert the shaper actually treated traffic: a
-  profile that silently did nothing turns an impaired run into an unimpaired
-  pass.
+- Run the seeded shaper binary from [Impaired
+  path](/quest/next/transport-impairment-profile.md) in front of the relay, so
+  this harness and the drills share one impairment implementation. Assert the
+  shaper actually treated traffic: a profile that silently did nothing turns
+  an impaired run into an unimpaired pass.
 - Profiles: near-zero, mild, bursty (the flush-span shape from #3477), and a
   step change that forces the target to move mid-run. Fixed seeds, recorded
   with the results.

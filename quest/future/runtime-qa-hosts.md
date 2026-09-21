@@ -9,7 +9,7 @@ Unsupported or inaccessible environments remain explicit verification gaps.
 ## Plan
 
 Hosted Windows/macOS recipes compile platform code, while
-`quest/future/video-hardware.md` and `quest/next/mobile/dart-ios.md` already own physical
+`quest/future/video-hardware.md` and `quest/next/dart-ios.md` already own physical
 validation work. This quest supplies the reusable access and execution contract,
 not another list of codec or device bugs.
 
@@ -40,4 +40,4 @@ is available, split that rollout into an explicit externally blocked follow-up.
 ## Related
 
 - [Video hardware validation](/quest/future/video-hardware.md) - owns real encoder/capture/zero-copy verdicts
-- [Dart on iOS](/quest/next/mobile/dart-ios.md) - owns simulator/device packaging validation
+- [Dart on iOS](/quest/next/dart-ios.md) - owns simulator/device packaging validation

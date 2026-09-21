@@ -24,10 +24,11 @@ the references and should be clean.
   clip with x264 `open-gop=1` and a recovery-point SEI. The generated clip in
   `test/ts/run.sh` is closed-GOP IDR today, so add the open-GOP source as a
   second round-trip rather than replacing it.
-- Characterization: there is no browser playback harness (`test/wasm` is
-  transport-only), so measure by hand through `<moq-watch>` in Chrome:
-  continuous playback across recovery points, cold tune-in at one, and a
-  hardware decoder if available. Record the numbers in the PR and in the
+- Characterization: drive `<moq-watch>` through the media harness
+  (`just test smoke-media`, `test/smoke/clients/js/media.ts`) with the
+  open-GOP fixture: continuous playback across recovery points and a cold
+  tune-in at one, counting dropped and corrupt frames and decoder errors; a
+  hardware decoder by hand if available. Record the numbers in the PR and in the
   leading-picture quest.
 - The consumer-side fix is
   [Open-GOP leading pictures](/quest/next/open-gop-leading-pictures.md), which

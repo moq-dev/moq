@@ -10,11 +10,8 @@ stream.
 
 ## Plan
 
-The shared metadata contract owns timestamp encoding and placement. Adopt it
-before implementation; deferred SEI extraction is not a prerequisite.
-
-Define the catalog section and frame contract for complete ID3 tags using
-[Metadata association](/quest/next/metadata-association.md). Publish tags when
+Define the catalog section and frame contract for complete ID3 tags on the
+shared event contract [emsg](/quest/next/emsg.md) settles. Publish tags when
 received on independently sequenced groups, with their presentation time on
 the broadcast clock and an optional association to the program's rendition.
 ID3-only programs need no artificial media owner. Carry original tag bytes,
@@ -40,7 +37,7 @@ generic.
 
 ## Required
 
-- [Metadata association contract](/quest/next/metadata-association.md) - settles the shared framing and missing-data semantics before this section adopts them
+- [fMP4 emsg](/quest/next/emsg.md) - settles the shared framing and missing-data semantics before this section adopts them
 
 ## Related
 

@@ -79,6 +79,6 @@ Additive.
 ## Required
 
 - [Origin narrowing](/quest/next/origin-narrowing.md) - the live re-scope a shrinking token union needs, so no temporary close-on-shrink policy ships
-- [Pattern interest](/quest/next/path-patterns/interest.md) - AUTH can represent the complete grants relay revalidation returns
+- [Pattern interest](/quest/next/path-patterns.md) - AUTH can represent the complete grants relay revalidation returns
 - [Lite stream](/quest/next/auth/lite.md) - supplies the AUTH stream and
   `auth::Request` this consumes

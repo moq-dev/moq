@@ -19,8 +19,8 @@ spread, and one is nominated as the clock source. `SyncInput`
 The measured spread per track comes from
 [Watch](/quest/next/audio-jitter-target/watch.md); its branch carries flat
 `audioSpread` and `videoSpread` inputs in place of `probe`, which this quest
-folds into the handles. This is a published `@moq/watch` break that is not a
-merge gate, so it lives in next and starts on `main` after the merge.
+folds into the handles. `SyncInput` is a published `@moq/watch` shape, so
+the break lands on dev.
 
 Recommendations for the implementation:
 
