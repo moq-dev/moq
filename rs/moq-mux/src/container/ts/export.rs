@@ -87,6 +87,19 @@ const _: () = assert!(
 /// one slot at `mux_rate` bits per second is exactly `mux_rate` units and no slot
 /// rounds on its own. The remainder carries across slots instead.
 const STUFFING_UNIT: i64 = TsPacket::SIZE as i64 * 8 * SLOTS_PER_SECOND;
+/// Upper bound on an accepted multiplex rate, in bits per second: far above any
+/// broadcast contribution multiplex, while bounding one slot's null allocation
+/// to a few megabytes. Zero and anything past it are refused where they enter,
+/// leaving the output unpadded.
+const MAX_MUX_RATE: u64 = 1_000_000_000;
+
+/// A multiplex rate from the builder override or the (untrusted) catalog is only
+/// worth padding to when it is a real rate: zero pads nothing, and anything past
+/// [`MAX_MUX_RATE`] would allocate unbounded nulls per slot. Invalid rates are
+/// refused, leaving the output unpadded.
+fn sanitize_mux_rate(rate: u64) -> Option<u64> {
+	(1..=MAX_MUX_RATE).contains(&rate).then_some(rate)
+}
 
 /// Subscribe to a broadcast and produce an MPEG-TS byte stream.
 ///
@@ -507,9 +520,15 @@ impl<E: catalog::Catalog> Export<E> {
 	/// Pad the output with null packets to `mux_rate` bits per second, whatever the
 	/// catalog records. Without this the catalog's `mpegts.muxRate` decides, and a
 	/// catalog without one leaves the output unpadded.
+	///
+	/// Zero and absurd rates are refused with a warning, leaving the output
+	/// unpadded rather than allocating unbounded nulls.
 	pub fn with_mux_rate(mut self, mux_rate: u64) -> Self {
+		if sanitize_mux_rate(mux_rate).is_none() {
+			tracing::warn!(mux_rate, "ignoring invalid MPEG-TS multiplex rate override");
+		}
 		self.mux_rate_override = Some(mux_rate);
-		self.mux_rate = Some(mux_rate);
+		self.mux_rate = sanitize_mux_rate(mux_rate);
 		self
 	}
 
@@ -763,7 +782,17 @@ impl<E: catalog::Catalog> Export<E> {
 		let mpegts = catalog.ext.mpegts_mut().cloned().unwrap_or_default();
 		self.program_descriptors = mpegts.program_descriptors.clone();
 		self.program = mpegts.program.clone();
-		let mux_rate = self.mux_rate_override.or(mpegts.mux_rate);
+		// An explicit override wins even when it is refused (leaving the output
+		// unpadded), so a bad flag cannot silently fall back to the catalog rate.
+		let mux_rate = match self.mux_rate_override {
+			Some(override_rate) => sanitize_mux_rate(override_rate),
+			None => mpegts.mux_rate.and_then(|rate| {
+				sanitize_mux_rate(rate).or_else(|| {
+					tracing::warn!(mux_rate = rate, "ignoring invalid MPEG-TS multiplex rate in catalog");
+					None
+				})
+			}),
+		};
 		if self.mux_rate != mux_rate {
 			self.mux_rate = mux_rate;
 			self.stuffing = Stuffing::default();
@@ -1498,8 +1527,12 @@ impl<E: catalog::Catalog> Export<E> {
 		let (Some(rate), Some(last)) = (self.mux_rate, self.last_pcr) else {
 			return;
 		};
+		// The rate is sanitized where it enters (the builder and the catalog), so
+		// this holds; refuse to pad rather than wrap if it ever does not.
+		let Ok(rate) = i64::try_from(rate) else {
+			return;
+		};
 		let slots = index.saturating_sub(last).min(PCR_BACKFILL) as i64;
-		let rate = rate as i64;
 		let stuffing = &mut self.stuffing;
 		stuffing.balance = stuffing
 			.balance
@@ -1515,6 +1548,13 @@ impl<E: catalog::Catalog> Export<E> {
 			stuffing.overrun = false;
 		}
 		let nulls = (stuffing.balance / STUFFING_UNIT).max(0);
+		// Never emit more than the slots just credited could allow: a bound on one
+		// call's allocation whatever the balance holds. A no-op on a rate that came
+		// through [`sanitize_mux_rate`], whose balance carries less than one packet.
+		// (A manual `div_ceil`: all terms are non-negative, and the toolchain's
+		// signed `div_ceil` is still unstable.)
+		let ceiling = slots.saturating_mul(rate).saturating_add(STUFFING_UNIT - 1) / STUFFING_UNIT;
+		let nulls = nulls.min(ceiling);
 		stuffing.balance -= nulls * STUFFING_UNIT;
 		payload.reserve(nulls as usize * TsPacket::SIZE);
 		for _ in 0..nulls {

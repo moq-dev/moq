@@ -4345,6 +4345,70 @@ async fn export_mux_rate_override_beats_the_catalog() {
 	);
 }
 
+/// Zero and absurd override rates are refused, leaving the output unpadded: zero
+/// pads nothing, and an unbounded rate would allocate unbounded nulls per slot.
+/// An explicit override wins even when refused, so the catalog rate is not used.
+#[tokio::test(start_paused = true)]
+async fn export_mux_rate_override_is_bounded() {
+	for rate in [0, i64::MAX as u64] {
+		let ts = export_fixture(include_bytes!("test_data/bbb_cbr.ts"), Some(rate)).await;
+		assert_eq!(
+			Clocked::of(&ts).nulls,
+			0,
+			"null packets in an export with a refused override rate {rate}"
+		);
+	}
+}
+
+/// An absurd catalog multiplex rate is refused, not padded to: the catalog is
+/// untrusted input, and padding to it would allocate unbounded nulls per slot.
+#[tokio::test(start_paused = true)]
+async fn export_refuses_an_absurd_catalog_mux_rate() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
+
+	let track = broadcast
+		.create_track(
+			broadcast.unique_name(".aac"),
+			hang::container::track_info(hang::catalog::PRIORITY.audio),
+		)
+		.unwrap();
+	let name = track.name().to_string();
+	catalog.modify().unwrap().audio.renditions.insert(name.clone(), {
+		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.container = Container::Legacy;
+		cfg
+	});
+	catalog.modify().unwrap().ext.mpegts.mux_rate = Some(i64::MAX as u64);
+
+	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+	// Ten seconds of small frames: the media alone never approaches the refused rate.
+	for i in 0..500u64 {
+		producer
+			.write(Frame {
+				timestamp: Timestamp::from_micros(i * 20_000).unwrap(),
+				duration: None,
+				payload: Bytes::from(vec![i as u8; 16]),
+				keyframe: i % 50 == 0,
+			})
+			.unwrap();
+	}
+	producer.finish().unwrap();
+
+	let ts = drain_with(export_of(&consumer).await).await;
+	assert_packet_aligned(&ts);
+	assert_eq!(
+		Clocked::of(&ts).nulls,
+		0,
+		"null packets in an export with a refused catalog mux rate"
+	);
+}
+
 /// A VBR source records no rate, and without one nothing is padded.
 #[tokio::test(start_paused = true)]
 async fn export_without_a_mux_rate_is_unpadded() {
