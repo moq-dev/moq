@@ -59,7 +59,7 @@ const MALFORMED_TRACK: u32 = 0x12;
 fn has_going_away(version: Version) -> bool {
 	matches!(
 		version,
-		Version::Draft18 | Version::Draft19 | Version::Draft20 | Version::Draft21
+		Version::Draft18 | Version::Draft19 | Version::Draft20 | Version::Draft21 | Version::Draft22
 	)
 }
 
@@ -299,7 +299,7 @@ pub(crate) mod request {
 	mod tests {
 		use super::*;
 
-		const ALL: [Version; 8] = [
+		const ALL: [Version; 9] = [
 			Version::Draft14,
 			Version::Draft15,
 			Version::Draft16,
@@ -308,6 +308,7 @@ pub(crate) mod request {
 			Version::Draft19,
 			Version::Draft20,
 			Version::Draft21,
+			Version::Draft22,
 		];
 
 		const KINDS: [Kind; 5] = [
@@ -391,6 +392,7 @@ pub(crate) mod request {
 					Version::Draft19,
 					Version::Draft20,
 					Version::Draft21,
+					Version::Draft22,
 				] {
 					assert_eq!(to_code(&Error::GoingAway, kind, version), GOING_AWAY);
 					assert!(matches!(from_code(GOING_AWAY, kind, version), Error::GoingAway));
@@ -482,7 +484,7 @@ mod tests {
 	use super::*;
 	use crate::Error;
 
-	const ALL: [Version; 8] = [
+	const ALL: [Version; 9] = [
 		Version::Draft14,
 		Version::Draft15,
 		Version::Draft16,
@@ -491,6 +493,7 @@ mod tests {
 		Version::Draft19,
 		Version::Draft20,
 		Version::Draft21,
+		Version::Draft22,
 	];
 
 	/// A routine unsubscribe must not read as a fault on our side. moq-lite's own error
@@ -565,7 +568,13 @@ mod tests {
 			assert_eq!(from_stream_code(GOING_AWAY, version), StreamError::Unknown(GOING_AWAY));
 		}
 
-		for version in [Version::Draft18, Version::Draft19, Version::Draft20, Version::Draft21] {
+		for version in [
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
 			assert_eq!(to_stream_code(&StreamError::GoingAway, version), GOING_AWAY);
 			assert_eq!(from_stream_code(GOING_AWAY, version), StreamError::GoingAway);
 		}

@@ -22,7 +22,7 @@ Highlights:
 
 - **Automatic backend selection**, hardware first. Linux GPU libraries are `dlopen`ed at runtime, so one binary starts anywhere and warns when it falls back to software. openh264 is statically linked as the H.264 fallback; H.265 is hardware-only; AV1 decodes via NVDEC. The VAAPI encoder is compile-verified but not yet validated on hardware.
 - **Publish on demand.** `encode::publish_capture` advertises the track up front and opens the camera only while someone subscribes.
-- **Zero-copy where the platform allows.** Matching codec backends consume their native GPU surfaces directly. The renderer imports `CVPixelBuffer` and supported DMA-BUF formats; other combinations use the universal `Surface::into_i420()` and `into_rgba()` CPU exits.
+- **GPU ownership where the platform allows.** Matching codec backends consume their native GPU surfaces directly. The renderer imports `CVPixelBuffer` and supported DMA-BUF formats. Linux/NVIDIA producers can import dedicated Vulkan RGBA8 slots into CUDA with timeline-semaphore ordering and completion-driven slot return. Vulkan/CUDA surfaces deliberately have no CPU pixel fallback; other surfaces use `Surface::into_i420()` and `into_rgba()` when needed.
 - **Live bitrate control** where the selected backend supports it, without forcing a keyframe. An unsupported backend keeps its opening rate.
 - **Device enumeration** for cameras, displays, windows, and apps, matching `moq devices`.
 
@@ -66,3 +66,15 @@ API: [docs.rs/moq-video](https://docs.rs/moq-video). Pair with
 VAAPI downloads to CPU I420 by default. Set `decode::Config::gpu_frames` before
 opening the consumer to receive DMA-BUF surfaces for zero-copy rendering. These
 surfaces still support `Surface::into_i420()` for consumers that need bytes.
+
+Linux/NVIDIA applications with a native Vulkan producer use
+`frame::vulkan::Importer`. Each reusable image is a dedicated, optimal-tiling
+`VK_FORMAT_R8G8B8A8_UNORM` allocation exported with an opaque memory FD, plus an
+opaque-FD timeline semaphore and the physical-device UUID. Publishing consumes
+the producer-owned slot; awaiting its completion returns that slot only after
+CUDA readers finish. Import capacity bounds retained images. Unsupported
+devices, formats, layouts, and synchronization are errors, with no CPU mapping
+or staging fallback. A non-exportable application image needs one Vulkan GPU
+copy into an exportable slot.
+
+`just rs vulkan-cuda` runs the opt-in native Vulkan/CUDA hardware exercise.

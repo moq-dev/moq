@@ -5,21 +5,18 @@
 //! frames. The [`Session`] also stores some information such as the encode
 //! width and height so that you do not have to keep repeating it each time.
 
-use std::fmt::Debug;
+use std::{fmt::Debug, sync::Arc};
 
 use super::{
-	api::ENCODE_API,
 	encoder::Encoder,
 	result::{EncodeError, ErrorKind},
 };
 use crate::{
 	sys::nvEncodeAPI::{
-		GUID, NV_ENC_BUFFER_FORMAT, NV_ENC_CODEC_AV1_GUID, NV_ENC_CODEC_H264_GUID, NV_ENC_CODEC_HEVC_GUID,
-		NV_ENC_CODEC_PIC_PARAMS, NV_ENC_CONFIG, NV_ENC_INITIALIZE_PARAMS, NV_ENC_PIC_FLAGS, NV_ENC_PIC_PARAMS,
-		NV_ENC_PIC_PARAMS_AV1, NV_ENC_PIC_PARAMS_H264, NV_ENC_PIC_PARAMS_HEVC, NV_ENC_PIC_PARAMS_VER,
-		NV_ENC_PIC_STRUCT, NV_ENC_PIC_TYPE, NV_ENC_RECONFIGURE_PARAMS, NV_ENC_RECONFIGURE_PARAMS_VER,
+		GUID, NV_ENC_BUFFER_FORMAT, NV_ENC_CONFIG, NV_ENC_INITIALIZE_PARAMS, NV_ENC_PIC_FLAGS, NV_ENC_PIC_PARAMS,
+		NV_ENC_PIC_PARAMS_VER, NV_ENC_PIC_STRUCT, NV_ENC_RECONFIGURE_PARAMS, NV_ENC_RECONFIGURE_PARAMS_VER,
 	},
-	EncoderInput, EncoderOutput,
+	Bitstream, EncoderInput,
 };
 
 /// An encoding session to create input/output buffers and encode frames.
@@ -28,7 +25,7 @@ use crate::{
 /// encode frames using the session. On drop, the session will automatically
 /// send an empty EOS frame to flush the encoder.
 pub struct Session {
-	pub(crate) encoder: Encoder,
+	pub(crate) encoder: Arc<Encoder>,
 	pub(crate) width: u32,
 	pub(crate) height: u32,
 	pub(crate) buffer_format: NV_ENC_BUFFER_FORMAT,
@@ -152,7 +149,7 @@ impl Session {
 		params.set_resetEncoder(0);
 		params.set_forceIDR(0);
 
-		unsafe { (ENCODE_API.reconfigure_encoder)(self.encoder.ptr, &mut params) }.result(&self.encoder)
+		unsafe { (self.encoder.api.reconfigure_encoder)(self.encoder.ptr, &mut params) }.result(&self.encoder)
 	}
 
 	/// Encode a frame.
@@ -164,20 +161,30 @@ impl Session {
 	/// Could error if the encode picture parameters were invalid or otherwise
 	/// incorrect, or if we run out memory.
 	///
-	/// There are two recoverable errors:
+	/// An encoder-busy result is returned as an error so the caller can retry.
+	/// A need-more-input result is instead represented by the returned
+	/// [`Submission`], which retains both buffers until completion. The facade
+	/// does not reorder B-frames, so configure the session without them
+	/// (`frameIntervalP = 1`, as `moq-video` does); completing such a
+	/// submission waits without sending end-of-stream, leaving the session
+	/// usable for further frames.
+	///
+	/// Safe code cannot release the input while it is in flight because the
+	/// submission owns it:
+	///
+	/// ```compile_fail
+	/// # use moq_nvenc::{Bitstream, Buffer, EncodePictureParams, Session};
+	/// fn submit(session: &Session, input: Buffer, output: Bitstream) {
+	///     let pending = session.encode_picture(input, output, EncodePictureParams::default()).unwrap();
+	///     drop(input);
+	///     drop(pending);
+	/// }
+	/// ```
+	///
+	/// There is one recoverable error:
 	/// - If this returns an error with
 	///   [`ErrorKind::EncoderBusy`](super::ErrorKind::EncoderBusy) then you
 	///   should retry after a few milliseconds.
-	/// - If this returns an error with
-	///   [`ErrorKind::NeedMoreInput`](super::ErrorKind::NeedMoreInput), the
-	///   client should not lock the output bitstream yet. They should continue
-	///   encoding until this function returns `Ok`, and then lock the
-	///   bitstreams in the order in which they were originally used.
-	///
-	/// # Panics
-	///
-	/// Panics if codec specific parameters are provided for a different codec
-	/// than the one used in the session.
 	///
 	/// # Examples
 	///
@@ -222,14 +229,14 @@ impl Session {
 	/// # let mut input_buffer = session
 	/// #     .create_input_buffer()
 	/// #     .unwrap();
-	/// # let mut output_bitstream = session.create_output_bitstream().unwrap();
+	/// # let output_bitstream = session.create_output_bitstream().unwrap();
 	///
 	/// // Encode frame.
 	/// unsafe { input_buffer.lock().unwrap().write(&[0; DATA_LEN]) };
-	/// session
+	/// let submission = session
 	///     .encode_picture(
-	///         &mut input_buffer,
-	///         &mut output_bitstream,
+	///         input_buffer,
+	///         output_bitstream,
 	///         // Optional picture parameters
 	///         EncodePictureParams {
 	///             input_timestamp: 42,
@@ -237,21 +244,19 @@ impl Session {
 	///         }
 	///     )
 	///     .unwrap();
-	/// # // TODO: check that output is correct.
-	/// let _data = output_bitstream.lock().unwrap().data();
+	/// let (data, _input_buffer, _output_bitstream) = submission.finish().unwrap();
 	/// ```
-	pub fn encode_picture<I: EncoderInput, O: EncoderOutput>(
+	pub fn encode_picture<I: EncoderInput>(
 		&self,
-		input_buffer: &mut I,
-		output_bitstream: &mut O,
+		mut input_buffer: I,
+		output_bitstream: Bitstream,
 		params: EncodePictureParams,
-	) -> Result<(), EncodeError> {
-		if let Some(codec_params) = &params.codec_params {
-			assert_eq!(
-				codec_params.get_codec_guid(),
-				self.encode_guid,
-				"The provided codec specific params must match the codec used"
-			);
+	) -> Result<Submission<I>, EncodeError> {
+		if !same_session(input_buffer.encoder(), &output_bitstream.encoder, &self.encoder) {
+			return Err(EncodeError::new(
+				ErrorKind::InvalidParam,
+				Some("input and output must belong to this session".into()),
+			));
 		}
 		let mut encode_pic_params = NV_ENC_PIC_PARAMS {
 			version: NV_ENC_PIC_PARAMS_VER,
@@ -259,12 +264,10 @@ impl Session {
 			inputHeight: self.height,
 			inputPitch: input_buffer.pitch(),
 			inputBuffer: input_buffer.handle(),
-			outputBitstream: output_bitstream.handle(),
+			outputBitstream: output_bitstream.ptr,
 			bufferFmt: self.buffer_format,
 			pictureStruct: NV_ENC_PIC_STRUCT::NV_ENC_PIC_STRUCT_FRAME,
 			inputTimeStamp: params.input_timestamp,
-			codecPicParams: params.codec_params.map(Into::into).unwrap_or_default(),
-			pictureType: params.picture_type,
 			// Force an IDR at this frame regardless of the encoder's own GOP /
 			// picture-type decision. Unlike `pictureType` (honored only when
 			// picture-type decision is disabled), `NV_ENC_PIC_FLAG_FORCEIDR`
@@ -277,7 +280,15 @@ impl Session {
 			},
 			..Default::default()
 		};
-		unsafe { (ENCODE_API.encode_picture)(self.encoder.ptr, &mut encode_pic_params) }.result(&self.encoder)
+		let result = unsafe { (self.encoder.api.encode_picture)(self.encoder.ptr, &mut encode_pic_params) }
+			.result(&self.encoder);
+		match result {
+			Ok(()) => Ok(Submission::new(input_buffer, output_bitstream)),
+			Err(error) if error.kind() == ErrorKind::NeedMoreInput => {
+				Ok(Submission::new(input_buffer, output_bitstream))
+			}
+			Err(error) => Err(error),
+		}
 	}
 
 	/// Send an EOS notifications to flush the encoder.
@@ -294,76 +305,171 @@ impl Session {
 	/// should retry after a few milliseconds.
 	pub fn end_of_stream(&self) -> Result<(), EncodeError> {
 		let mut encode_pic_params = NV_ENC_PIC_PARAMS::end_of_stream();
-		unsafe { (ENCODE_API.encode_picture)(self.encoder.ptr, &mut encode_pic_params) }.result(&self.encoder)
+		unsafe { (self.encoder.api.encode_picture)(self.encoder.ptr, &mut encode_pic_params) }.result(&self.encoder)
 	}
 }
 
 /// Send an EOS notifications on drop to flush the encoder.
 impl Drop for Session {
 	fn drop(&mut self) {
-		if !std::thread::panicking() {
-			self.end_of_stream().expect("The encoder should not be busy.");
-		}
+		let _ = self.end_of_stream();
 	}
 }
 
 /// Optional parameters for [`Session::encode_picture`].
-#[allow(missing_debug_implementations)] // CodecPictureParams doesn't implement Debug
+#[derive(Debug, Default)]
 pub struct EncodePictureParams {
 	/// Opaque data used for identifying the corresponding encoded frame
 	pub input_timestamp: u64,
-	/// The picture type to use, if picture type decision is disabled in the
-	/// encoder
-	pub picture_type: NV_ENC_PIC_TYPE,
 	/// Force this frame to be an IDR (`NV_ENC_PIC_FLAG_FORCEIDR`). Works with
 	/// picture-type decision enabled, so it is the way to request an
 	/// out-of-cadence keyframe.
 	pub force_idr: bool,
-	/// Codec-specific parameters
-	pub codec_params: Option<CodecPictureParams>,
 }
 
-impl Default for EncodePictureParams {
-	fn default() -> Self {
+/// Resources retained until NVENC has completed a submitted picture.
+#[derive(Debug)]
+#[must_use = "dropping a submission waits for completion before releasing its resources"]
+pub struct Submission<I> {
+	pending: Pending<SdkDriver, I>,
+}
+
+impl<I> Submission<I> {
+	fn new(input: I, output: Bitstream) -> Self {
 		Self {
-			input_timestamp: 0,
-			picture_type: NV_ENC_PIC_TYPE::NV_ENC_PIC_TYPE_UNKNOWN,
-			force_idr: false,
-			codec_params: None,
+			pending: Pending::new(SdkDriver, input, output),
+		}
+	}
+
+	/// Wait for completion, copy the encoded bytes, and return reusable buffers.
+	pub fn finish(mut self) -> Result<(Vec<u8>, I, Bitstream), EncodeError> {
+		self.pending.finish()
+	}
+}
+
+fn same_session<T>(input: &Arc<T>, output: &Arc<T>, session: &Arc<T>) -> bool {
+	Arc::ptr_eq(input, session) && Arc::ptr_eq(output, session)
+}
+
+trait CompletionDriver {
+	type Output;
+
+	fn wait(&self, output: &mut Self::Output) -> Result<Vec<u8>, EncodeError>;
+}
+
+#[derive(Debug)]
+struct SdkDriver;
+
+impl CompletionDriver for SdkDriver {
+	type Output = Bitstream;
+
+	fn wait(&self, output: &mut Self::Output) -> Result<Vec<u8>, EncodeError> {
+		Ok(output.lock()?.data().to_vec())
+	}
+}
+
+#[derive(Debug)]
+struct Pending<D: CompletionDriver, I> {
+	driver: D,
+	input: Option<I>,
+	output: Option<D::Output>,
+}
+
+impl<D: CompletionDriver, I> Pending<D, I> {
+	fn new(driver: D, input: I, output: D::Output) -> Self {
+		Self {
+			driver,
+			input: Some(input),
+			output: Some(output),
+		}
+	}
+
+	fn finish(&mut self) -> Result<(Vec<u8>, I, D::Output), EncodeError> {
+		// Wait without sending end-of-stream: flushing here would end the
+		// session, while the caller may still submit further frames.
+		let data = self.driver.wait(self.output.as_mut().expect("submission output"))?;
+		let input = self.input.take().expect("submission input");
+		let output = self.output.take().expect("submission output");
+		Ok((data, input, output))
+	}
+}
+
+impl<D: CompletionDriver, I> Drop for Pending<D, I> {
+	fn drop(&mut self) {
+		if self.input.is_none() {
+			return;
+		}
+		let completed = self
+			.driver
+			.wait(self.output.as_mut().expect("submission output"))
+			.is_ok();
+		if !completed {
+			// A failed wait cannot prove the driver released either handle. Leak
+			// them and their encoder rather than permit a use-after-free.
+			std::mem::forget(self.input.take());
+			std::mem::forget(self.output.take());
 		}
 	}
 }
 
-/// Codec specific picture parameters
-#[allow(missing_debug_implementations)] // NV_ENC_PIC_PARAMS_H264 contains a union, thus doesn't derive Debug
-pub enum CodecPictureParams {
-	/// Parameters for H.264
-	H264(NV_ENC_PIC_PARAMS_H264),
-	/// Parameters for HEVC or H.265
-	Hevc(NV_ENC_PIC_PARAMS_HEVC),
-	/// Parameters for AV1
-	Av1(NV_ENC_PIC_PARAMS_AV1),
-}
+#[cfg(test)]
+mod tests {
+	use std::sync::{Arc, Mutex};
 
-impl CodecPictureParams {
-	/// Returns the GUID representing the codec for which the parameters are
-	/// specified.
-	#[must_use]
-	pub fn get_codec_guid(&self) -> GUID {
-		match self {
-			Self::H264(_) => NV_ENC_CODEC_H264_GUID,
-			Self::Hevc(_) => NV_ENC_CODEC_HEVC_GUID,
-			Self::Av1(_) => NV_ENC_CODEC_AV1_GUID,
+	use super::*;
+
+	#[derive(Debug)]
+	struct Resource(&'static str, Arc<Mutex<Vec<&'static str>>>);
+
+	impl Drop for Resource {
+		fn drop(&mut self) {
+			self.1.lock().unwrap().push(self.0);
 		}
 	}
-}
 
-impl From<CodecPictureParams> for NV_ENC_CODEC_PIC_PARAMS {
-	fn from(value: CodecPictureParams) -> Self {
-		match value {
-			CodecPictureParams::H264(params) => Self { h264PicParams: params },
-			CodecPictureParams::Hevc(params) => Self { hevcPicParams: params },
-			CodecPictureParams::Av1(params) => Self { av1PicParams: params },
+	#[derive(Debug)]
+	struct FakeDriver(Arc<Mutex<Vec<&'static str>>>);
+
+	impl CompletionDriver for FakeDriver {
+		type Output = Resource;
+
+		fn wait(&self, _: &mut Self::Output) -> Result<Vec<u8>, EncodeError> {
+			self.0.lock().unwrap().push("wait");
+			Ok(vec![1, 2, 3])
 		}
+	}
+
+	#[test]
+	fn delayed_completion_retains_resources_until_wait() {
+		let events = Arc::new(Mutex::new(Vec::new()));
+		let mut pending = Pending::new(
+			FakeDriver(events.clone()),
+			Resource("input", events.clone()),
+			Resource("output", events.clone()),
+		);
+		let (data, input, output) = pending.finish().unwrap();
+		assert_eq!(data, [1, 2, 3]);
+		assert_eq!(*events.lock().unwrap(), ["wait"]);
+		drop((input, output));
+		assert_eq!(*events.lock().unwrap(), ["wait", "input", "output"]);
+	}
+
+	#[test]
+	fn cancellation_completes_before_releasing_resources() {
+		let events = Arc::new(Mutex::new(Vec::new()));
+		drop(Pending::new(
+			FakeDriver(events.clone()),
+			Resource("input", events.clone()),
+			Resource("output", events.clone()),
+		));
+		assert_eq!(*events.lock().unwrap(), ["wait", "input", "output"]);
+	}
+
+	#[test]
+	fn session_identity_rejects_cross_session_resources() {
+		let first = Arc::new(());
+		let second = Arc::new(());
+		assert!(same_session(&first, &first, &first));
+		assert!(!same_session(&first, &second, &first));
 	}
 }

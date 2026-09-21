@@ -9,11 +9,12 @@ hang is the media format on top of [moq-lite](/concept/moq-lite): a catalog
 track that describes the media tracks, and a container that gives each frame a
 timestamp. It is modeled on [WebCodecs](https://www.w3.org/TR/webcodecs/) so a
 browser can decode it directly. The spec is
-[draft-lcurley-moq-hang](/draft/moq-hang). Broadcast names end in `.hang` so
-a player knows which catalog to expect. End-to-end encrypted broadcasts live
-under `foo.hang.e2ee/<epoch>`, one epoch per publisher run; the `.e2ee` suffix
-is an untrusted discovery convention that keeps players off the ciphertext, and
-the payloads follow [moq-e2ee](/draft/moq-e2ee).
+[draft-lcurley-moq-hang](/draft/moq-hang). Plaintext broadcast names end in
+`.hang` so a player knows which catalog to expect. End-to-end encrypted
+broadcasts live under `<opaque>/<epoch>`, where `<opaque>` is derived from the
+credential and a semantic name such as `foo.hang`, and one epoch identifies
+each publisher run. The path exposes no format or protection marker; the
+payloads follow [moq-e2ee](/draft/moq-e2ee).
 
 ## Catalog
 

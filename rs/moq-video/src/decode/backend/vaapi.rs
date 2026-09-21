@@ -70,13 +70,6 @@ pub(crate) struct Vaapi {
 	has_exported: bool,
 }
 
-// SAFETY: the decoder is `!Send` (libva uses `Rc` internally) but is created,
-// used, and dropped only on the dedicated decode thread (see `decode::sink`);
-// the `Send` impl just lets the boxed trait object satisfy `Backend: Send`.
-// None of the `Rc`s escape with a picture either: an exported one holds its own
-// `Arc<Display>` and a surface id, and is `Send` and `Sync` on its own terms.
-unsafe impl Send for Vaapi {}
-
 impl Vaapi {
 	/// VA-API H.265 and AV1 decode exist but are not wired up in `moq-vaapi`, so
 	/// this handles H.264 only. `config` carries no hardware scaler request we can

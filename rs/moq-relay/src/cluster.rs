@@ -103,7 +103,7 @@ impl Peer {
 	}
 
 	/// What this relay declares in SETUP as its own price toward the peer.
-	/// Defaults to [`Self::cost`]; anything else is rejected until m2.
+	/// Defaults to [`Self::cost`]; anything else is rejected for now.
 	pub fn egress(&self) -> Option<u64> {
 		self.egress
 	}

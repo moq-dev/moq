@@ -17,6 +17,6 @@ categories = ["multimedia::encoding", "hardware-support"]
 # `fallback-dynamic-loading` loads libcuda, and `cuda-12020` pins the CUDA API
 # version so the build needs no CUDA toolkit or driver present.
 cudarc = { workspace = true }
-lazy_static = { workspace = true }
 # dlopen libnvidia-encode at runtime (the two NVENC bootstrap symbols).
 libloading = { workspace = true }
+thiserror = { workspace = true }

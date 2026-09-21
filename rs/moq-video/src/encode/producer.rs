@@ -12,7 +12,7 @@
 use std::time::Instant;
 
 use moq_mux::catalog::hang::CatalogExt;
-#[cfg(any(feature = "capture", test))]
+#[cfg(test)]
 use moq_net::Timestamp;
 
 use crate::Error;
@@ -568,7 +568,7 @@ async fn capture_loop<E: CatalogExt>(
 
 			// Stamp at capture, so a backend that buffers still publishes each
 			// access unit at the time the picture was grabbed.
-			let frame = Frame::new(surface, Timestamp::from_micros(clock.micros())?);
+			let frame = Frame::new(surface, clock.now());
 			if force_keyframe {
 				encoder.keyframe();
 				force_keyframe = false;

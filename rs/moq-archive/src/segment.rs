@@ -1,7 +1,9 @@
+use std::ops::RangeInclusive;
+
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use moq_net::VarInt;
 
-use crate::path::check_id;
+use crate::path::{check_id, check_range};
 use crate::{Error, Result, VERSION};
 
 /// One complete group in a segment object, in sequence order.
@@ -30,10 +32,10 @@ pub struct Object {
 }
 
 impl Object {
-	/// Inclusive first and last group sequences.
-	pub fn bounds(&self) -> Result<(u64, u64)> {
+	/// Inclusive group sequences from first to last.
+	pub fn bounds(&self) -> Result<RangeInclusive<u64>> {
 		validate(&self.groups)?;
-		Ok((self.groups[0].sequence, self.groups.last().unwrap().sequence))
+		Ok(self.groups[0].sequence..=self.groups.last().unwrap().sequence)
 	}
 
 	/// Encode the binary envelope. The first sequence is absolute; later ones are `current - previous - 1`.
@@ -158,20 +160,22 @@ impl Object {
 		Ok(Self { groups })
 	}
 
-	/// Decode and require the table's first and last sequences to match `smallest` and `largest`.
-	pub fn decode_groups(buf: impl Buf, largest: u64, smallest: u64) -> Result<Self> {
+	/// Decode and require the table's sequences to match `range`.
+	pub fn decode_groups(buf: impl Buf, range: RangeInclusive<u64>) -> Result<Self> {
+		check_range(&range)?;
 		let object = Self::decode(buf)?;
-		object.check_bounds(largest, smallest)?;
+		object.check_bounds(range)?;
 		Ok(object)
 	}
 
 	/// Require this object's sequences to match a range-named key.
-	pub fn check_bounds(&self, largest: u64, smallest: u64) -> Result<()> {
-		let (got_smallest, got_largest) = self.bounds()?;
-		if got_smallest != smallest || got_largest != largest {
+	pub fn check_bounds(&self, range: RangeInclusive<u64>) -> Result<()> {
+		check_range(&range)?;
+		let got = self.bounds()?;
+		if got != range {
 			return Err(Error::Bounds {
-				smallest: got_smallest,
-				largest: got_largest,
+				smallest: *got.start(),
+				largest: *got.end(),
 			});
 		}
 		Ok(())
@@ -250,7 +254,8 @@ mod tests {
 		]);
 		let bytes = original.encode().unwrap();
 		assert_eq!(Object::decode(&bytes[..]).unwrap(), original);
-		original.check_bounds(4, 0).unwrap();
+		assert_eq!(original.bounds().unwrap(), 0..=4);
+		original.check_bounds(0..=4).unwrap();
 	}
 
 	#[test]
@@ -421,12 +426,20 @@ mod tests {
 			},
 		]);
 		let bytes = object.encode().unwrap();
-		assert!(Object::decode_groups(&bytes[..], 7, 5).is_ok());
+		assert!(Object::decode_groups(&bytes[..], 5..=7).is_ok());
 		assert!(matches!(
-			Object::decode_groups(&bytes[..], 7, 6),
+			Object::decode_groups(&bytes[..], 6..=7),
 			Err(Error::Bounds {
 				smallest: 5,
 				largest: 7
+			})
+		));
+		let (smallest, largest) = (7, 5);
+		assert!(matches!(
+			Object::decode_groups(&bytes[..], smallest..=largest),
+			Err(Error::Bounds {
+				smallest: 7,
+				largest: 5
 			})
 		));
 	}

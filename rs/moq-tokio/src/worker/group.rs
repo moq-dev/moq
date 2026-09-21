@@ -6,7 +6,7 @@ use std::sync::{
 };
 
 use super::Config;
-use crate::{Error, Result, Server, abort::AbortOnDrop, listen::Member as ShardMember, server::SocketRetainer};
+use crate::{Error, Result, Server, abort::AbortOnDrop, listen::Socket as ShardSocket, server::SocketRetainer};
 
 /// A bound group of QUIC workers sharing one port.
 ///
@@ -45,7 +45,7 @@ pub struct Workers {
 	/// The reuseport group the workers bound into. Held for the group's
 	/// lifetime, because it is what holds the listen port against a second
 	/// group.
-	_group: moq_sock::shard::Group,
+	_group: moq_sock::shard::Bound,
 }
 
 impl std::fmt::Debug for Workers {
@@ -88,20 +88,25 @@ impl Workers {
 		// the port before the first member binds and holds it until the group is
 		// dropped, refuses a size the steering filter could not address, and
 		// hands out one member per slot in the order the kernel numbers them by.
-		let mut group = moq_sock::shard::Group::acquire(requested, config.count).map_err(|err| match err {
+		let mut forming = moq_sock::shard::Group::acquire(requested, config.count).map_err(|err| match err {
 			moq_sock::shard::Error::Count { count, max } => Error::WorkerCount { count, max },
 			// The port lock is the only other way to lose the address, and it is
 			// held by exactly one thing: another group of this UID.
 			_ => Error::WorkerOverlap { addr: requested },
 		})?;
-		let count = group.count();
+		let count = forming.count();
+		let mut claims = Vec::with_capacity(count as usize);
+		while let Some(member) = forming.member() {
+			claims.push(member.bind().map_err(crate::noq::Error::BindSocket)?);
+		}
+		let mut group = forming.complete(claims).map_err(crate::noq::Error::BindSocket)?;
 
 		let shared = Arc::new(Shared::default());
 
 		let mut workers = Vec::with_capacity(count as usize);
 		let mut certificates = None;
 
-		while let Some(member) = group.member() {
+		while let Some(member) = group.member().map_err(crate::noq::Error::BindSocket)? {
 			let index = member.shard().index();
 			// `max(1)` because an empty core list means pinning is off, not that
 			// there are no workers.
@@ -263,7 +268,7 @@ pub struct Group {
 	/// The reuseport group the workers bound into. Held for the group's
 	/// lifetime, because it is what holds the listen port against a second
 	/// group.
-	_group: moq_sock::shard::Group,
+	_group: moq_sock::shard::Bound,
 }
 
 impl std::fmt::Debug for Group {
@@ -633,11 +638,10 @@ struct Worker {
 }
 
 impl Worker {
-	/// Bind this worker's socket on a thread of its own, returning once it is
-	/// listening.
+	/// Build this worker's server around its socket on the worker thread.
 	fn spawn(
 		server: crate::server::Config,
-		member: ShardMember,
+		member: ShardSocket,
 		core: Option<CoreId>,
 		shared: Arc<Shared>,
 	) -> Result<Self> {
@@ -657,15 +661,15 @@ impl Worker {
 				source: Arc::new(err),
 			})?;
 
-		// A worker that fails to bind drops its sender, so a recv error and a bind
-		// error are the same event; report the bind error when there is one.
+		// A worker that fails to build drops its sender, so report its concrete
+		// error when it got far enough to send one.
 		let ready = match ready_rx.recv() {
 			Ok(ready) => ready,
 			Err(_) => {
 				let _ = thread.join();
 				return Err(Error::WorkerStart {
 					index,
-					source: Arc::new(std::io::Error::other("worker exited before binding")),
+					source: Arc::new(std::io::Error::other("worker exited before starting")),
 				});
 			}
 		};
@@ -724,7 +728,7 @@ struct Ready {
 /// A future factory that is sent to and invoked by its worker thread.
 type Spawn = Box<dyn FnOnce() + Send + 'static>;
 
-/// One worker thread: pin, bind, report, then park until it is stopped.
+/// One worker thread: pin, build the endpoint, report, then park until stopped.
 ///
 /// The runtime is built and entered here, and the [`Server`] is constructed
 /// inside it on purpose: the QUIC backend spawns its socket driver where it is
@@ -733,7 +737,7 @@ type Spawn = Box<dyn FnOnce() + Send + 'static>;
 /// [`Spawner::serve`] spawns onto this same runtime.
 #[allow(clippy::too_many_arguments)]
 fn run(
-	member: ShardMember,
+	member: ShardSocket,
 	core: Option<CoreId>,
 	server: crate::server::Config,
 	ready: std::sync::mpsc::Sender<Result<Ready>>,

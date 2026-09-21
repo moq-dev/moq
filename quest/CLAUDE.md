@@ -2,36 +2,28 @@
 
 Read this file whenever work mentions a quest or questline.
 
-Quests are optional, versioned plans for work that needs durable scope, memory,
-or coordination. Think GitHub issues checked into the repository. GitHub issues
-remain the public front door, but prefer making a quest.
+Quests are versioned plans checked into the repository under `quest/`. GitHub
+issues remain the public front door; prefer a quest for work that needs
+durable scope or coordination.
 
 ## Model
 
-- A quest is a task that should be completed independently in a single PR. It
-  is a Markdown file such as `archive.md`.
-- A questline is an ordered collection of quests and/or other questlines. It is
-  a directory whose entrypoint is `README.md`. Questlines are never executed
-  directly; a questline is complete when all of its quests are complete.
-- Everything lives under `quest/`. [README.md](README.md) is the permanent root
-  questline.
-- The root's entries are milestones: questlines in directories named `m0`,
-  `m1`, ... that group work by priority horizon. Lower numbers matter more, and
-  a completed milestone's number is not reshuffled onto the survivors. A
-  milestone may open with a gate quest (the release rule under Creation) that
-  its later work requires.
-- Every `Quests` list is ordered by priority, most important first; ready
-  quests are taken in list order. Insert a new quest or questline at its rank
-  rather than appending - including the root, where new work joins the
-  milestone matching its priority.
-- Quests and questlines reference each other with root-absolute links.
-- Finished quests and questlines are deleted and remain accessible through git
-  history.
-- Merge conflicts are expected. Resolve them by aligning quests.
+- A quest is a Markdown file, completed in one PR. A questline is a directory
+  whose `README.md` is its quest: its `Quests` section lists the children, and
+  it completes when its own work is done and every child has merged.
+- The tree mirrors the branches. A top-level line named after a long-lived
+  branch is that branch; every other top-level line is roadmap and has none.
+  [README.md](README.md) says what each line holds. Starting a roadmap quest
+  moves it under the branch it targets, in the same PR.
+- Any other document's branch is its path without `.md`: `quest/foo/bar.md` is
+  branch `quest/foo/bar`, and its line is `quest/foo/README`. A quest merges
+  into its line's branch, a line into its parent's, and a long-lived branch into
+  its own base once its line is empty.
+- Every `Quests` list is ordered by priority. Insert at rank, never append.
+- Link with root-absolute paths. Finished documents are deleted; git history
+  keeps them. Merge conflicts are expected; resolve them by aligning quests.
 
 ## Format
-
-A quest:
 
 ```markdown
 # [S] Short title
@@ -44,9 +36,14 @@ The observable outcome and important boundaries.
 
 Current decisions, open questions, or implementation guidance.
 
+## Quests
+
+- [Child quest](/quest/foo/bar.md) - the outcome, so the list reads without opening it
+- [Nested questline](/quest/foo/baz/README.md) - what the whole line delivers
+
 ## Required
 
-- [Blocker](/quest/foo/bar.md) - work that must finish before this can start
+- [Blocker](/quest/bar.md) - work that must finish before this can start
 
 ## Closes
 
@@ -54,90 +51,64 @@ Current decisions, open questions, or implementation guidance.
 
 ## Related
 
-- [Other](/quest/other/quest.md) - similar work that is not a blocker
+- [Other](/quest/other.md) - similar work that is not a blocker
 ```
 
-`Goal` is required. Prefix the title with `[XS]`, `[S]`, `[M]`, `[L]`, or
-`[XL]`, estimating implementation, verification, and landing work. Every other
-section is optional. Use these exact headings: readiness checks grep for
-`## Required` literally.
-
-A questline uses `Quests` instead of `Required`, listing at least one entry in
-priority order, each with a one-line summary:
-
-```markdown
-## Quests
-
-- [Child quest](/quest/foo/bar.md) - the outcome, so the list reads without opening it
-- [Nested questline](/quest/foo/baz/README.md) - what the whole line delivers
-```
-
-- A quest's `Required` section lists its blockers. Its absence means the quest
-  is ready to start.
-- A quest may require a questline; that blocker clears only when the whole
-  questline is complete.
-- A `Required` bullet may be plain text naming a condition outside the
-  repository; remove it when the condition clears.
-- `Required` relationships must be acyclic. Before adding one, follow links
-  from the target and ensure they cannot reach the current file.
-- `quest check` (the `rs/quest` binary) enforces this section mechanically -
-  links resolve, the index matches the file tree, headings stay inside the set
-  above, and `Required` stays acyclic. `just check` runs it on any branch
-  touching `quest/`.
-- `quest ready <quest>` reads the same section the other way: it prints what
-  blocks that quest, one per line, expanding a required questline into the
-  quests it still holds. `quest ready` with no path lists every ready quest in
-  tree order. Both exit 0, so the printed list is the answer: no output means
-  ready. Run it as `cargo run --quiet --locked --package quest -- ready ...`.
-  It reads the tree and nothing else, so a quest an unrelated PR already
-  finished still reports ready; that question is GitHub's.
+- `Goal` is required; everything else is optional. Use these exact headings.
+- Size the title `[XS]` to `[XL]` for implementation, verification, and
+  landing. A README with children carries no size; one without is a plain
+  quest and needs one.
+- Only a README has `Quests`. `Required` lists what must finish before the
+  work starts; no section means ready. A required questline clears when the
+  whole line has merged. A plain-text bullet names a condition outside the
+  repository; remove it when it clears. `Required` must be acyclic.
+- `quest check` enforces this structure; `just check` runs it on any branch
+  touching `quest/`. `quest ready [<path>]` prints what blocks a quest, or
+  every ready quest. `quest branch <path>` prints the branch and every branch
+  it merges through, nearest first. Run them as
+  `cargo run --quiet --locked --package quest -- ...`. They read the tree
+  alone: whether a PR already claims a quest is GitHub's question.
 
 ## Creation
 
-- Quests are created in PRs and reviewed.
-- Size every quest in its title. Re-estimate it when scope changes materially.
-- Search the living tree and git history before creating a quest.
+- Quests are created in PRs and reviewed. Search the tree and git history
+  first.
 - Split independently completable work into separate quests. Group them in a
-  questline only when they ship together; a one-off sits directly in its parent.
-- Every issue a quest or questline lists under `Closes` carries the `quest`
-  GitHub label (`gh issue edit <n> --add-label quest`). Apply it when the
-  quest lands; a `Related` link is context, not tracking, and gets no label.
-- Represent a release or pin bump that unblocks repository work as its own
-  quest, holding the external condition as a plain-text `Required` bullet, and
-  make every dependent quest require it. When the condition clears, remove the
-  bullet, do the work, and complete the quest; one completion unblocks every
-  dependent.
+  questline only when they ship together, and give the README the work no
+  child owns: the end-to-end test, the docs page.
+- New work starts in a roadmap line, at its rank, unless it is being started
+  now.
+- Every issue under `Closes` carries the `quest` GitHub label
+  (`gh issue edit <n> --add-label quest`), applied when the quest lands.
+  `Related` is context and gets none.
+- A release or pin bump that unblocks work is its own quest holding the
+  condition as a plain-text `Required` bullet; every dependent requires it.
 
 ## Execution
 
-- Only quests are executed, and only when ready: no `Required` section means no
-  blockers.
-- The branch name is the quest path without the trailing `.md`, e.g.
-  `quest/foo/bar.md` becomes branch `quest/foo/bar`.
-- If a local or remote branch for the quest already exists, someone may be
-  working on it; continue only if it is stale (old, no open PR).
-- Push the branch immediately with an empty placeholder commit: the remote
-  branch is the claim that prevents duplicate work. Skip the push when you
-  lack write access to the repository.
-- Quests may be updated over time as the plan changes.
-- A quest is completed when the plan is executed and no further work is needed.
-  Suggest follow-up work as a new quest.
-- Run `just check` before completing the change.
-- When the quest is complete, open a PR per
-  [CONTRIBUTING.md](../CONTRIBUTING.md), with a GitHub closing keyword for every
-  issue listed under `Closes` by the quest AND by any questline the same PR
-  completes - a parent's issues are usually where a line's tracking lives, and
-  its last child is the only PR that can close them.
+- Start only ready quests. `quest branch` names the branch and its bases: push
+  each missing line branch from the one after it and open its draft PR against
+  that base, then push the quest's branch with an empty commit. The remote
+  branch is the claim; continue only if an existing one is stale (old, no open
+  PR).
+- Set the upstream to the base so `just check` and `just test` scope against
+  it. Keep a line current by merging its base in; never rebase a shared branch.
+- Update the quest as the plan changes. Complete it when no work remains, and
+  suggest follow-ups as new quests.
+- Open the PR per [CONTRIBUTING.md](../CONTRIBUTING.md) against the base, with
+  a closing keyword for every issue under `Closes`, including those of any
+  questline the same PR completes.
+- A line's PR stays a draft until its `Quests` list is empty. The PR that
+  removes the last child sizes the README's title; the README is then a ready
+  quest whose completion marks the line's PR ready and merges it.
 
 ## Deletion
 
 - A quest that is no longer needed or cannot be completed is abandoned: delete
-  it and explain why in the PR.
-- Abandoning a quest removes the `quest` label from any issue it listed under
-  `Closes` that no other quest tracks.
-- The quest is deleted in the same PR that completes or abandons it.
-- When deleting a quest or questline, grep its absolute path and remove every
-  reference; this reveals every quest the finished work unblocks. If the
-  removed link was the last entry in a section, remove the heading too.
-- Deleting a questline's last quest deletes the questline directory in the
-  same change. The root questline is never deleted.
+  it and explain why in the PR. Remove the `quest` label from issues no other
+  quest tracks.
+- Delete a quest in the PR that completes or abandons it. Grep its absolute
+  path and remove every reference; that reveals what it unblocks. Remove a
+  heading with its last entry.
+- Deleting a README deletes its directory. The root and the top-level lines are
+  permanent.

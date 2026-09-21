@@ -1,3 +1,5 @@
+use std::ops::RangeInclusive;
+
 use object_store::path::{Path, PathPart};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 
@@ -7,7 +9,7 @@ use crate::{Error, ID_MAX, ID_WIDTH, Result};
 const TRACK: &AsciiSet = &NON_ALPHANUMERIC.remove(b'_').remove(b'-');
 
 /// Percent-encode a track name as one object-store path segment.
-pub fn encode_track(name: &str) -> Result<String> {
+pub(crate) fn encode_track(name: &str) -> Result<String> {
 	if name.is_empty() {
 		return Err(Error::Track);
 	}
@@ -15,7 +17,7 @@ pub fn encode_track(name: &str) -> Result<String> {
 }
 
 /// Decode a percent-encoded track name, refusing anything that is not canonical.
-pub fn decode_track(encoded: &str) -> Result<String> {
+pub(crate) fn decode_track(encoded: &str) -> Result<String> {
 	if encoded.is_empty() || encoded.starts_with('.') || encoded.contains('/') {
 		return Err(Error::Track);
 	}
@@ -27,13 +29,13 @@ pub fn decode_track(encoded: &str) -> Result<String> {
 }
 
 /// Write a group or segment ID as 19 zero-padded decimal digits.
-pub fn format_id(id: u64) -> Result<String> {
+pub(crate) fn format_id(id: u64) -> Result<String> {
 	check_id(id)?;
 	Ok(format!("{id:0width$}", width = ID_WIDTH))
 }
 
 /// Parse a 19-digit decimal ID field, refusing values outside the recording range.
-pub fn parse_id(field: &str) -> Result<u64> {
+pub(crate) fn parse_id(field: &str) -> Result<u64> {
 	if field.len() != ID_WIDTH || !field.bytes().all(|b| b.is_ascii_digit()) {
 		return Err(Error::Path(field.to_string()));
 	}
@@ -42,7 +44,7 @@ pub fn parse_id(field: &str) -> Result<u64> {
 }
 
 /// Refuse an ID outside 0 through 2^53 - 1.
-pub fn check_id(id: u64) -> Result<u64> {
+pub(crate) fn check_id(id: u64) -> Result<u64> {
 	if id > ID_MAX { Err(Error::Id(id)) } else { Ok(id) }
 }
 
@@ -58,10 +60,8 @@ pub enum Key {
 	Groups {
 		/// The unencoded track name.
 		track: String,
-		/// Inclusive last group sequence in the object.
-		largest: u64,
-		/// Inclusive first group sequence in the object.
-		smallest: u64,
+		/// Inclusive group sequences in the object, from first to last.
+		range: RangeInclusive<u64>,
 	},
 	/// `<encoded-track>/segments/<segment>`
 	Segments {
@@ -80,20 +80,12 @@ impl Key {
 		Ok(Self::Info { track })
 	}
 
-	/// A range-named groups object. `largest` is the last sequence, `smallest` the first.
-	pub fn groups(track: impl Into<String>, largest: u64, smallest: u64) -> Result<Self> {
+	/// A groups object named by its inclusive first-to-last sequence range.
+	pub fn groups(track: impl Into<String>, range: RangeInclusive<u64>) -> Result<Self> {
 		let track = track.into();
 		encode_track(&track)?;
-		check_id(largest)?;
-		check_id(smallest)?;
-		if largest < smallest {
-			return Err(Error::Bounds { smallest, largest });
-		}
-		Ok(Self::Groups {
-			track,
-			largest,
-			smallest,
-		})
+		check_range(&range)?;
+		Ok(Self::Groups { track, range })
 	}
 
 	/// A timeline object at `segments/<segment>`.
@@ -112,13 +104,13 @@ impl Key {
 	}
 
 	/// Encode this key under `prefix`.
-	pub fn path(&self, prefix: &Path) -> Result<Path> {
+	pub(crate) fn path(&self, prefix: &Path) -> Result<Path> {
 		let path = push(prefix, &encode_track(self.track())?)?;
 		match self {
 			Self::Info { .. } => push(&path, ".info"),
-			Self::Groups { largest, smallest, .. } => {
+			Self::Groups { range, .. } => {
 				let path = push(&path, "groups")?;
-				push(&path, &range_name(*largest, *smallest)?)
+				push(&path, &range_name(range)?)
 			}
 			Self::Segments { segment, .. } => {
 				let path = push(&path, "segments")?;
@@ -128,7 +120,7 @@ impl Key {
 	}
 
 	/// Parse a store location relative to `prefix`.
-	pub fn parse(prefix: &Path, location: &Path) -> Result<Self> {
+	pub(crate) fn parse(prefix: &Path, location: &Path) -> Result<Self> {
 		if prefix.as_ref().is_empty() {
 			return parse_parts(location.parts(), location);
 		}
@@ -155,12 +147,8 @@ fn parse_parts<'a>(mut parts: impl Iterator<Item = PathPart<'a>>, location: &Pat
 			if parts.next().is_some() {
 				return Err(Error::Path(location.to_string()));
 			}
-			let (largest, smallest) = parse_range(name.as_ref())?;
-			Ok(Key::Groups {
-				track,
-				largest,
-				smallest,
-			})
+			let range = parse_range(name.as_ref())?;
+			Ok(Key::Groups { track, range })
 		}
 		"segments" => {
 			let name = parts.next().ok_or_else(|| Error::Path(location.to_string()))?;
@@ -176,22 +164,29 @@ fn parse_parts<'a>(mut parts: impl Iterator<Item = PathPart<'a>>, location: &Pat
 	}
 }
 
-/// `<prefix>/<encoded-track>/groups`
-pub fn groups_prefix(prefix: &Path, track: &str) -> Result<Path> {
-	let path = push(prefix, &encode_track(track)?)?;
+pub(crate) fn track_prefix(track: &str) -> Result<Path> {
+	push(&Path::ROOT, &encode_track(track)?)
+}
+
+pub(crate) fn groups_prefix(prefix: &Path, track: &str) -> Result<Path> {
+	let path = append(prefix, &track_prefix(track)?);
 	push(&path, "groups")
 }
 
-/// `<prefix>/<encoded-track>/segments`
-pub fn segments_prefix(prefix: &Path, track: &str) -> Result<Path> {
-	let path = push(prefix, &encode_track(track)?)?;
+pub(crate) fn segments_prefix(prefix: &Path, track: &str) -> Result<Path> {
+	let path = append(prefix, &track_prefix(track)?);
 	push(&path, "segments")
 }
 
-/// Exclusive listing offset `groups/<group>` (19 digits, no dot) for a FETCH of `group`.
-pub fn groups_offset(prefix: &Path, track: &str, group: u64) -> Result<Path> {
+pub(crate) fn groups_offset(prefix: &Path, track: &str, group: u64) -> Result<Path> {
 	let path = groups_prefix(prefix, track)?;
 	push(&path, &format_id(group)?)
+}
+
+fn append(base: &Path, relative: &Path) -> Path {
+	let mut path = base.clone();
+	path.extend(relative.parts());
+	path
 }
 
 pub(crate) fn push(base: &Path, segment: &str) -> Result<Path> {
@@ -199,11 +194,13 @@ pub(crate) fn push(base: &Path, segment: &str) -> Result<Path> {
 	Ok(base.clone().join(part))
 }
 
-fn range_name(largest: u64, smallest: u64) -> Result<String> {
+fn range_name(range: &RangeInclusive<u64>) -> Result<String> {
+	check_range(range)?;
+	let (smallest, largest) = (*range.start(), *range.end());
 	Ok(format!("{}.{}", format_id(largest)?, format_id(smallest)?))
 }
 
-fn parse_range(name: &str) -> Result<(u64, u64)> {
+fn parse_range(name: &str) -> Result<RangeInclusive<u64>> {
 	let (largest, smallest) = name.split_once('.').ok_or_else(|| Error::Path(name.to_string()))?;
 	if smallest.contains('.') {
 		return Err(Error::Path(name.to_string()));
@@ -213,7 +210,17 @@ fn parse_range(name: &str) -> Result<(u64, u64)> {
 	if largest < smallest {
 		return Err(Error::Bounds { smallest, largest });
 	}
-	Ok((largest, smallest))
+	Ok(smallest..=largest)
+}
+
+pub(crate) fn check_range(range: &RangeInclusive<u64>) -> Result<()> {
+	let (smallest, largest) = (*range.start(), *range.end());
+	check_id(smallest)?;
+	check_id(largest)?;
+	if range.is_empty() {
+		return Err(Error::Bounds { smallest, largest });
+	}
+	Ok(())
 }
 
 #[cfg(test)]
@@ -282,7 +289,7 @@ mod tests {
 		let prefix = Path::from("rec/1");
 		for key in [
 			Key::info("catalog.json").unwrap(),
-			Key::groups("video", 10, 5).unwrap(),
+			Key::groups("video", 5..=10).unwrap(),
 			Key::segments("timeline.z", 0).unwrap(),
 			Key::segments("timeline.z", ID_MAX).unwrap(),
 		] {
@@ -299,13 +306,54 @@ mod tests {
 
 	#[test]
 	fn inverted_range_is_rejected() {
+		let (smallest, largest) = (2, 1);
 		assert!(matches!(
-			Key::groups("v", 1, 2),
+			Key::groups("v", smallest..=largest),
 			Err(Error::Bounds {
 				smallest: 2,
 				largest: 1
 			})
 		));
+	}
+
+	#[test]
+	fn exhausted_range_is_rejected() {
+		let mut range = 1..=1;
+		assert_eq!(range.next(), Some(1));
+		assert!(matches!(Key::groups("v", range), Err(Error::Bounds { .. })));
+	}
+
+	#[test]
+	fn range_id_endpoints_are_valid() {
+		let key = Key::groups("v", 0..=ID_MAX).unwrap();
+		assert_eq!(
+			key.path(&Path::from("rec")).unwrap().as_ref(),
+			"rec/v/groups/0009007199254740991.0000000000000000000"
+		);
+		assert!(matches!(Key::groups("v", 0..=ID_MAX + 1), Err(Error::Id(_))));
+		assert!(matches!(Key::groups("v", ID_MAX + 1..=ID_MAX + 1), Err(Error::Id(_))));
+	}
+
+	#[test]
+	fn direct_inverted_range_is_rejected_when_serialized() {
+		let (smallest, largest) = (2, 1);
+		let key = Key::Groups {
+			track: "v".to_string(),
+			range: smallest..=largest,
+		};
+		assert!(matches!(
+			key.path(&Path::from("rec")),
+			Err(Error::Bounds {
+				smallest: 2,
+				largest: 1
+			})
+		));
+
+		let key = Key::Groups {
+			track: "v".to_string(),
+			range: 0..=ID_MAX + 1,
+		};
+		assert!(matches!(key.path(&Path::from("rec")), Err(Error::Id(_))));
 	}
 
 	#[test]

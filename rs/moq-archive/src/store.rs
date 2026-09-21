@@ -1,49 +1,135 @@
+use std::num::NonZeroUsize;
+use std::ops::RangeInclusive;
+
 use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use object_store::list::{PaginatedListOptions, PaginatedListResult, PaginatedListStore};
 use object_store::path::Path;
-use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt, PutMode, PutPayload};
+use object_store::{ListResult, ObjectMeta, ObjectStore, ObjectStoreExt, PutMode, PutPayload};
 
 use crate::info::Info;
-use crate::path::{self, Key};
+use crate::path::Key;
 use crate::segment::Object;
 use crate::{Error, Result};
+
+/// Recording object listing types.
+///
+/// Listing scopes and offsets are relative to the recording prefix supplied to
+/// [`super::Store::new`]. The same [`Query`] can drive streaming and paginated
+/// listing. A page's [`Page::next`] query retains the opaque backend token and
+/// must be passed to [`super::Store::list_paginated`], not [`super::Store::list`].
+///
+/// ```
+/// use std::num::NonZeroUsize;
+///
+/// use moq_archive::store::list::Query;
+///
+/// let query = Query::segments("timeline.z")?
+///     .page_size(NonZeroUsize::new(100).unwrap());
+/// # Ok::<(), moq_archive::Error>(())
+/// ```
+pub mod list {
+	use std::num::NonZeroUsize;
+
+	use object_store::path::Path;
+
+	use crate::path;
+	use crate::{Key, Result};
+
+	/// A recording-relative object listing query.
+	#[derive(Debug, Clone, Default, PartialEq, Eq)]
+	pub struct Query {
+		pub(crate) prefix: Option<Path>,
+		pub(crate) offset: Option<Path>,
+		pub(crate) max_keys: Option<NonZeroUsize>,
+		pub(crate) page_token: Option<String>,
+	}
+
+	impl Query {
+		/// List every object in the recording.
+		pub fn new() -> Self {
+			Self::default()
+		}
+
+		fn prefix(mut self, prefix: impl Into<Path>) -> Self {
+			self.prefix = Some(prefix.into());
+			self.page_token = None;
+			self
+		}
+
+		fn offset(mut self, offset: impl Into<Path>) -> Self {
+			self.offset = Some(offset.into());
+			self.page_token = None;
+			self
+		}
+
+		/// Request at most this many entries per page.
+		pub fn page_size(mut self, max_keys: NonZeroUsize) -> Self {
+			self.max_keys = Some(max_keys);
+			self.page_token = None;
+			self
+		}
+
+		/// List every object for one track.
+		pub fn track(track: &str) -> Result<Self> {
+			Ok(Self::new().prefix(path::track_prefix(track)?))
+		}
+
+		/// List group objects for one track.
+		pub fn groups(track: &str) -> Result<Self> {
+			Ok(Self::new().prefix(path::groups_prefix(&Path::ROOT, track)?))
+		}
+
+		/// List timeline segment objects for one track.
+		pub fn segments(track: &str) -> Result<Self> {
+			Ok(Self::new().prefix(path::segments_prefix(&Path::ROOT, track)?))
+		}
+
+		/// Start strictly after this recording object.
+		pub fn after(self, key: &Key) -> Result<Self> {
+			Ok(self.offset(key.path(&Path::ROOT)?))
+		}
+
+		/// List group objects beginning at the exclusive lexical offset for `group`.
+		pub fn groups_from(track: &str, group: u64) -> Result<Self> {
+			Ok(Self::groups(track)?.offset(path::groups_offset(&Path::ROOT, track, group)?))
+		}
+
+		pub(crate) fn next(&self, page_token: String) -> Self {
+			let mut next = self.clone();
+			next.page_token = Some(page_token);
+			next
+		}
+	}
+
+	/// One recording object returned by a listing.
+	#[derive(Debug, Clone, PartialEq, Eq)]
+	pub struct Entry {
+		/// Parsed recording key.
+		pub key: Key,
+		/// Object size in bytes.
+		pub size: u64,
+	}
+
+	/// One page of recording objects.
+	#[derive(Debug, Clone)]
+	pub struct Page {
+		/// Entries in the backend's order.
+		pub entries: Vec<Entry>,
+		/// The same query advanced to the next page, if any.
+		/// Pass it to `Store::list_paginated`; `Store::list` rejects it.
+		pub next: Option<Query>,
+	}
+}
+
+use list::{Entry, Page, Query};
 
 /// Versioned recording objects on a generic [`ObjectStore`].
 #[derive(Clone, Debug)]
 pub struct Store<T> {
 	inner: T,
 	prefix: Path,
-}
-
-/// How to enumerate objects. Collect the stream before sorting or advancing a cursor.
-#[derive(Debug, Clone, Default)]
-pub struct List<'a> {
-	/// Restrict to this prefix (already under the store prefix). `None` lists the whole recording.
-	pub prefix: Option<&'a Path>,
-	/// Exclusive start location. `None` starts from the beginning.
-	pub offset: Option<&'a Path>,
-}
-
-/// An object name from a listing, without its payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Listed {
-	/// Parsed recording key.
-	pub key: Key,
-	/// Exact store location, including the recording prefix.
-	pub location: Path,
-	/// Object size in bytes.
-	pub size: u64,
-}
-
-/// One page from a [`PaginatedListStore`] backend.
-#[derive(Debug, Clone)]
-pub struct Page {
-	/// Objects in this page, in the backend's order.
-	pub objects: Vec<Listed>,
-	/// Continuation token for the next page, if any.
-	pub page_token: Option<String>,
 }
 
 impl<T: ObjectStore> Store<T> {
@@ -68,21 +154,6 @@ impl<T: ObjectStore> Store<T> {
 	/// Encode `key` under this store's prefix.
 	pub fn path(&self, key: &Key) -> Result<Path> {
 		key.path(&self.prefix)
-	}
-
-	/// `<prefix>/<encoded-track>/groups`
-	pub fn groups_prefix(&self, track: &str) -> Result<Path> {
-		path::groups_prefix(&self.prefix, track)
-	}
-
-	/// `<prefix>/<encoded-track>/segments`
-	pub fn segments_prefix(&self, track: &str) -> Result<Path> {
-		path::segments_prefix(&self.prefix, track)
-	}
-
-	/// Exclusive listing offset `groups/<group>` for a FETCH of `group`.
-	pub fn groups_offset(&self, track: &str, group: u64) -> Result<Path> {
-		path::groups_offset(&self.prefix, track, group)
 	}
 
 	/// Create `.info`, or accept an existing object with the same parsed properties.
@@ -120,16 +191,15 @@ impl<T: ObjectStore> Store<T> {
 
 	/// Create a range-named groups object. A collision is accepted only when the bytes match.
 	pub async fn put_groups(&self, track: &str, object: &Object) -> Result<Key> {
-		let (smallest, largest) = object.bounds()?;
-		let key = Key::groups(track, largest, smallest)?;
+		let key = Key::groups(track, object.bounds()?)?;
 		self.put_segment(&key, object.encode()?).await?;
 		Ok(key)
 	}
 
 	/// Fetch a groups object and require its table to match the filename bounds.
-	pub async fn get_groups(&self, track: &str, largest: u64, smallest: u64) -> Result<Object> {
-		let path = self.path(&Key::groups(track, largest, smallest)?)?;
-		Object::decode_groups(self.get_bytes(&path).await?, largest, smallest)
+	pub async fn get_groups(&self, track: &str, range: RangeInclusive<u64>) -> Result<Object> {
+		let path = self.path(&Key::groups(track, range.clone())?)?;
+		Object::decode_groups(self.get_bytes(&path).await?, range)
 	}
 
 	/// Create a timeline object at `segments/<segment>`. A collision is accepted only when the bytes match.
@@ -152,18 +222,20 @@ impl<T: ObjectStore> Store<T> {
 		Ok(())
 	}
 
-	/// List object names. The order is not guaranteed and listing may traverse the filesystem.
-	pub fn list(&self, spec: List<'_>) -> BoxStream<'static, Result<Listed>> {
-		let prefix = match self.list_prefix(spec.prefix) {
-			Ok(prefix) => prefix,
-			Err(err) => return futures::stream::once(async move { Err(err) }).boxed(),
-		};
+	/// Stream matching entries. Order is unspecified and `max_keys` is ignored.
+	/// Continuation queries from `Page::next` fail; pass them to `list_paginated`.
+	pub fn list(&self, query: &Query) -> BoxStream<'static, Result<Entry>> {
+		if query.page_token.is_some() {
+			return futures::stream::once(async { Err(Error::Pagination) }).boxed();
+		}
+		let prefix = self.list_path(query.prefix.as_ref());
+		let offset = query.offset.as_ref().map(|offset| self.recording_path(offset));
 		let store_prefix = self.prefix.clone();
-		let stream = match spec.offset {
+		let stream = match offset.as_ref() {
 			Some(offset) => self.inner.list_with_offset(prefix.as_ref(), offset),
 			None => self.inner.list(prefix.as_ref()),
 		};
-		stream.map(move |item| Listed::from_meta(&store_prefix, item?)).boxed()
+		stream.map(move |item| Entry::from_meta(&store_prefix, item?)).boxed()
 	}
 
 	async fn put_segment(&self, key: &Key, bytes: Bytes) -> Result<()> {
@@ -197,43 +269,66 @@ impl<T: ObjectStore> Store<T> {
 		Ok(self.inner.get(path).await?.bytes().await?)
 	}
 
-	fn list_prefix(&self, prefix: Option<&Path>) -> Result<Option<Path>> {
-		match prefix {
-			Some(prefix) if prefix == &self.prefix || prefix.prefix_matches(&self.prefix) => Ok(Some(prefix.clone())),
-			Some(prefix) => Err(Error::Path(prefix.to_string())),
-			None if self.prefix.as_ref().is_empty() => Ok(None),
-			None => Ok(Some(self.prefix.clone())),
+	fn recording_path(&self, relative: &Path) -> Path {
+		let mut path = self.prefix.clone();
+		path.extend(relative.parts());
+		path
+	}
+
+	fn list_path(&self, relative: Option<&Path>) -> Option<Path> {
+		let path = relative.map_or_else(|| self.prefix.clone(), |relative| self.recording_path(relative));
+		(!path.as_ref().is_empty()).then_some(path)
+	}
+
+	fn paginated_prefix(&self, relative: Option<&Path>) -> Option<String> {
+		self.list_path(relative).map(|path| format!("{path}/"))
+	}
+
+	fn paginated_options(&self, query: &Query) -> PaginatedListOptions {
+		PaginatedListOptions {
+			offset: query
+				.offset
+				.as_ref()
+				.map(|offset| self.recording_path(offset).to_string()),
+			max_keys: query.max_keys.map(NonZeroUsize::get),
+			page_token: query.page_token.clone(),
+			..Default::default()
 		}
+	}
+
+	fn page(&self, query: &Query, result: PaginatedListResult) -> Result<Page> {
+		let PaginatedListResult { result, page_token } = result;
+		let entries = self.entries(result)?;
+		let next = page_token.map(|token| query.next(token));
+		Ok(Page { entries, next })
+	}
+
+	fn entries(&self, result: ListResult) -> Result<Vec<Entry>> {
+		if let Some(prefix) = result.common_prefixes.first() {
+			return Err(Error::Directory(prefix.to_string()));
+		}
+		result
+			.objects
+			.into_iter()
+			.map(|meta| Entry::from_meta(&self.prefix, meta))
+			.collect()
 	}
 }
 
 impl<T: ObjectStore + PaginatedListStore> Store<T> {
-	/// Seek with `offset` and `max_keys` on a backend that has verified lexical listing.
-	pub async fn list_paginated(&self, prefix: Option<&str>, opts: PaginatedListOptions) -> Result<Page> {
-		let joined = match prefix {
-			None => self.prefix.as_ref().to_string(),
-			Some(prefix) if self.prefix.as_ref().is_empty() => prefix.to_string(),
-			Some(prefix) => format!("{}/{prefix}", self.prefix.as_ref()),
-		};
-		let prefix = (!joined.is_empty()).then_some(joined.as_str());
-		let PaginatedListResult { result, page_token } = self.inner.list_paginated(prefix, opts).await?;
-		let objects = result
-			.objects
-			.into_iter()
-			.map(|meta| Listed::from_meta(&self.prefix, meta))
-			.collect::<Result<Vec<_>>>()?;
-		Ok(Page { objects, page_token })
+	/// List one page while keeping the backend continuation token inside the returned query.
+	pub async fn list_paginated(&self, query: &Query) -> Result<Page> {
+		let prefix = self.paginated_prefix(query.prefix.as_ref());
+		let opts = self.paginated_options(query);
+		let result = self.inner.list_paginated(prefix.as_deref(), opts).await?;
+		self.page(query, result)
 	}
 }
 
-impl Listed {
+impl Entry {
 	fn from_meta(prefix: &Path, meta: ObjectMeta) -> Result<Self> {
 		let key = Key::parse(prefix, &meta.location)?;
-		Ok(Self {
-			key,
-			location: meta.location,
-			size: meta.size,
-		})
+		Ok(Self { key, size: meta.size })
 	}
 }
 
@@ -245,14 +340,115 @@ enum Create {
 #[cfg(test)]
 mod tests {
 	use std::collections::BTreeSet;
+	use std::num::NonZeroUsize;
 
 	use futures::TryStreamExt;
+	use object_store::list::{PaginatedListOptions, PaginatedListResult, PaginatedListStore};
 	use object_store::memory::InMemory;
 	use object_store::path::Path;
+	use object_store::{
+		CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutMultipartOptions,
+		PutOptions, PutPayload, PutResult,
+	};
 
 	use super::*;
+	use crate::ID_MAX;
+	use crate::path::encode_track;
 	use crate::segment::{Frame, Group};
-	use crate::{ID_MAX, encode_track};
+
+	/// In-memory store with a trivial offset-based paginated listing implementation.
+	/// Page tokens are decimal indexes into the filtered, sorted key list.
+	#[derive(Debug, Clone)]
+	struct PaginatedMemory {
+		inner: InMemory,
+	}
+
+	impl std::fmt::Display for PaginatedMemory {
+		fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+			write!(f, "PaginatedMemory")
+		}
+	}
+
+	#[async_trait::async_trait]
+	impl ObjectStore for PaginatedMemory {
+		async fn put_opts(
+			&self,
+			location: &Path,
+			payload: PutPayload,
+			opts: PutOptions,
+		) -> object_store::Result<PutResult> {
+			self.inner.put_opts(location, payload, opts).await
+		}
+
+		async fn put_multipart_opts(
+			&self,
+			location: &Path,
+			opts: PutMultipartOptions,
+		) -> object_store::Result<Box<dyn MultipartUpload>> {
+			self.inner.put_multipart_opts(location, opts).await
+		}
+
+		async fn get_opts(&self, location: &Path, options: GetOptions) -> object_store::Result<GetResult> {
+			self.inner.get_opts(location, options).await
+		}
+
+		fn delete_stream(
+			&self,
+			locations: BoxStream<'static, object_store::Result<Path>>,
+		) -> BoxStream<'static, object_store::Result<Path>> {
+			self.inner.delete_stream(locations)
+		}
+
+		fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+			self.inner.list(prefix)
+		}
+
+		async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
+			self.inner.list_with_delimiter(prefix).await
+		}
+
+		async fn copy_opts(&self, from: &Path, to: &Path, options: CopyOptions) -> object_store::Result<()> {
+			self.inner.copy_opts(from, to, options).await
+		}
+	}
+
+	#[async_trait::async_trait]
+	impl PaginatedListStore for PaginatedMemory {
+		async fn list_paginated(
+			&self,
+			prefix: Option<&str>,
+			opts: PaginatedListOptions,
+		) -> object_store::Result<PaginatedListResult> {
+			let mut metas: Vec<ObjectMeta> = self.inner.list(None).try_collect().await?;
+			metas.sort_by(|a, b| a.location.as_ref().cmp(b.location.as_ref()));
+			if let Some(prefix) = prefix {
+				metas.retain(|meta| meta.location.as_ref().starts_with(prefix));
+			}
+			if let Some(offset) = opts.offset.as_deref() {
+				metas.retain(|meta| meta.location.as_ref() > offset);
+			}
+			let start: usize = match opts.page_token {
+				Some(token) => token.parse().map_err(|err| object_store::Error::Generic {
+					store: "PaginatedMemory",
+					source: Box::new(err),
+				})?,
+				None => 0,
+			};
+			let remaining = &metas[start.min(metas.len())..];
+			let take = opts.max_keys.unwrap_or(remaining.len()).min(remaining.len());
+			let objects = remaining[..take].to_vec();
+			let next = start.saturating_add(take);
+			let page_token = (next < metas.len()).then(|| next.to_string());
+			Ok(PaginatedListResult {
+				result: ListResult {
+					objects,
+					common_prefixes: Vec::new(),
+					extensions: Default::default(),
+				},
+				page_token,
+			})
+		}
+	}
 
 	fn memory() -> Store<InMemory> {
 		Store::new(InMemory::new(), "rec")
@@ -289,10 +485,10 @@ mod tests {
 		}
 	}
 
-	async fn names(store: &Store<InMemory>, spec: List<'_>) -> BTreeSet<String> {
+	async fn names(store: &Store<InMemory>, query: &Query) -> BTreeSet<String> {
 		store
-			.list(spec)
-			.map_ok(|listed| listed.location.to_string())
+			.list(query)
+			.map_ok(|entry| entry.key.path(&Path::ROOT).unwrap().to_string())
 			.try_collect()
 			.await
 			.unwrap()
@@ -349,13 +545,14 @@ mod tests {
 	async fn groups_put_get_and_identical_collision() {
 		let store = memory();
 		let object = two_groups();
+		let range = object.bounds().unwrap();
 		let key = store.put_groups("video", &object).await.unwrap();
-		assert_eq!(key, Key::groups("video", 7, 5).unwrap());
+		assert_eq!(key, Key::groups("video", range.clone()).unwrap());
 		assert_eq!(
 			store.path(&key).unwrap().as_ref(),
 			"rec/video/groups/0000000000000000007.0000000000000000005"
 		);
-		assert_eq!(store.get_groups("video", 7, 5).await.unwrap(), object);
+		assert_eq!(store.get_groups("video", range).await.unwrap(), object);
 		store.put_groups("video", &object).await.unwrap();
 	}
 
@@ -402,7 +599,7 @@ mod tests {
 		store.put_groups("video", &one_group(3, b"b")).await.unwrap();
 		store.put_segments("timeline.z", 2, &one_group(0, b"t")).await.unwrap();
 
-		let listed: Vec<_> = store.list(List::default()).try_collect().await.unwrap();
+		let listed: Vec<_> = store.list(&Query::new()).try_collect().await.unwrap();
 		let mut keys: Vec<_> = listed.into_iter().map(|listed| listed.key).collect();
 		keys.sort_by(|a, b| store.path(a).unwrap().as_ref().cmp(store.path(b).unwrap().as_ref()));
 		assert_eq!(
@@ -410,14 +607,14 @@ mod tests {
 			vec![
 				Key::segments("timeline.z", 2).unwrap(),
 				Key::info("video").unwrap(),
-				Key::groups("video", 1, 1).unwrap(),
-				Key::groups("video", 3, 3).unwrap(),
+				Key::groups("video", 1..=1).unwrap(),
+				Key::groups("video", 3..=3).unwrap(),
 			]
 		);
 	}
 
 	#[tokio::test]
-	async fn list_with_offset_finishes_before_the_caller_sorts() {
+	async fn list_with_offset_finishes_before_the_caller_sorts() -> Result<()> {
 		let store = memory();
 		for segment in [0u64, 2, 1] {
 			store
@@ -425,30 +622,291 @@ mod tests {
 				.await
 				.unwrap();
 		}
-		let offset = store.path(&Key::segments("timeline.z", 0).unwrap()).unwrap();
-		let prefix = store.segments_prefix("timeline.z").unwrap();
+		let query = Query::segments("timeline.z")?.after(&Key::segments("timeline.z", 0)?)?;
 		let mut rest: Vec<_> = store
-			.list(List {
-				prefix: Some(&prefix),
-				offset: Some(&offset),
-			})
-			.map_ok(|listed| match listed.key {
+			.list(&query)
+			.map_ok(|entry| match entry.key {
 				Key::Segments { segment, .. } => segment,
 				_ => panic!("expected a segment key"),
 			})
 			.try_collect()
-			.await
-			.unwrap();
+			.await?;
 		rest.sort();
 		assert_eq!(rest, vec![1, 2]);
+		Ok(())
 	}
 
 	#[tokio::test]
 	async fn percent_encoded_track_listing() {
 		let store = memory();
 		store.put_info("catalog.json", &Info::new(0, 1).unwrap()).await.unwrap();
-		let locations = names(&store, List::default()).await;
-		assert!(locations.contains(&format!("rec/{}/.info", encode_track("catalog.json").unwrap())));
+		let locations = names(&store, &Query::new()).await;
+		assert!(locations.contains(&format!("{}/.info", encode_track("catalog.json").unwrap())));
+	}
+
+	#[tokio::test]
+	async fn listing_query_is_recording_relative() {
+		let store = memory();
+		store.put_info("video", &Info::new(0, 1).unwrap()).await.unwrap();
+		store.put_groups("video", &one_group(1, b"a")).await.unwrap();
+		store.put_info("video-alt", &Info::new(0, 1).unwrap()).await.unwrap();
+
+		let query = Query::track("video").unwrap();
+		let paths = names(&store, &query).await;
+		assert_eq!(
+			paths,
+			BTreeSet::from([
+				"video/.info".to_string(),
+				"video/groups/0000000000000000001.0000000000000000001".to_string(),
+			])
+		);
+		assert_eq!(
+			store.paginated_prefix(query.prefix.as_ref()).as_deref(),
+			Some("rec/video/")
+		);
+	}
+
+	#[tokio::test]
+	async fn paginated_recording_prefix_excludes_siblings() {
+		let store = memory();
+		store.put_info("video", &Info::new(0, 1).unwrap()).await.unwrap();
+		store
+			.inner()
+			.put(
+				&Path::from("rec-other/video/.info"),
+				Bytes::from_static(b"sibling").into(),
+			)
+			.await
+			.unwrap();
+
+		let prefix = store.paginated_prefix(None).unwrap();
+		assert_eq!(prefix, "rec/");
+		let objects = store
+			.inner()
+			.list(None)
+			.try_filter(|meta| futures::future::ready(meta.location.as_ref().starts_with(&prefix)))
+			.try_collect()
+			.await
+			.unwrap();
+		let entries = store
+			.entries(ListResult {
+				objects,
+				common_prefixes: Vec::new(),
+				extensions: Default::default(),
+			})
+			.unwrap();
+		assert_eq!(entries.len(), 1);
+		assert_eq!(entries[0].key, Key::info("video").unwrap());
+	}
+
+	#[tokio::test]
+	async fn paginated_query_preserves_every_supported_option() {
+		let store = memory();
+		let groups = Query::groups_from("video", 5).unwrap();
+		assert_eq!(
+			store.paginated_prefix(groups.prefix.as_ref()).as_deref(),
+			Some("rec/video/groups/")
+		);
+		assert_eq!(
+			store.paginated_options(&groups).offset.as_deref(),
+			Some("rec/video/groups/0000000000000000005")
+		);
+
+		let query = Query::segments("timeline.z")
+			.unwrap()
+			.after(&Key::segments("timeline.z", 1).unwrap())
+			.unwrap()
+			.page_size(NonZeroUsize::new(2).unwrap());
+		let options = store.paginated_options(&query);
+		assert_eq!(
+			store.paginated_prefix(query.prefix.as_ref()).as_deref(),
+			Some("rec/timeline%2Ez/segments/")
+		);
+		assert_eq!(
+			options.offset.as_deref(),
+			Some("rec/timeline%2Ez/segments/0000000000000000001")
+		);
+		assert_eq!(options.max_keys, Some(2));
+		assert_eq!(options.page_token, None);
+
+		let page = store
+			.page(
+				&query,
+				PaginatedListResult {
+					result: ListResult {
+						objects: Vec::new(),
+						common_prefixes: Vec::new(),
+						extensions: Default::default(),
+					},
+					page_token: Some("opaque".to_string()),
+				},
+			)
+			.unwrap();
+		let next = page.next.unwrap();
+		assert_eq!(next.prefix, query.prefix);
+		assert_eq!(next.offset, query.offset);
+		assert_eq!(next.max_keys, query.max_keys);
+		assert_eq!(store.paginated_options(&next).page_token.as_deref(), Some("opaque"));
+
+		let changed = next.page_size(NonZeroUsize::new(3).unwrap());
+		assert_eq!(store.paginated_options(&changed).page_token, None);
+	}
+
+	#[tokio::test]
+	async fn paginated_pages_match_streaming_results() {
+		let store = memory();
+		for segment in 0..3 {
+			store
+				.put_segments("timeline.z", segment, &one_group(segment, b"t"))
+				.await
+				.unwrap();
+		}
+		let query = Query::segments("timeline.z")
+			.unwrap()
+			.after(&Key::segments("timeline.z", 0).unwrap())
+			.unwrap()
+			.page_size(NonZeroUsize::new(1).unwrap());
+		let streamed = names(&store, &query).await;
+		let mut metas: Vec<_> = store
+			.inner()
+			.list(store.list_path(query.prefix.as_ref()).as_ref())
+			.try_collect()
+			.await
+			.unwrap();
+		metas.sort_by(|a, b| a.location.cmp(&b.location));
+		metas.retain(|meta| meta.location > store.recording_path(query.offset.as_ref().unwrap()));
+
+		let mut paged = BTreeSet::new();
+		let mut current = query;
+		for (index, meta) in metas.iter().cloned().enumerate() {
+			let page = store
+				.page(
+					&current,
+					PaginatedListResult {
+						result: ListResult {
+							objects: vec![meta],
+							common_prefixes: Vec::new(),
+							extensions: Default::default(),
+						},
+						page_token: (index + 1 < metas.len()).then(|| format!("page-{index}")),
+					},
+				)
+				.unwrap();
+			paged.extend(
+				page.entries
+					.into_iter()
+					.map(|entry| entry.key.path(&Path::ROOT).unwrap().to_string()),
+			);
+			if let Some(next) = page.next {
+				current = next;
+			}
+		}
+		assert_eq!(paged, streamed);
+	}
+
+	#[tokio::test]
+	async fn streaming_rejects_continuation_queries() {
+		let store = memory();
+		store.put_segments("timeline.z", 0, &one_group(0, b"t")).await.unwrap();
+		let query = Query::segments("timeline.z")
+			.unwrap()
+			.page_size(NonZeroUsize::new(1).unwrap());
+		let next = query.next("0".to_string());
+		let err = store.list(&next).try_collect::<Vec<_>>().await.unwrap_err();
+		assert_eq!(err, Error::Pagination);
+	}
+
+	#[tokio::test]
+	async fn paginated_listing_walks_pages_and_excludes_siblings() {
+		let store = Store::new(PaginatedMemory { inner: InMemory::new() }, "rec");
+		for segment in 0..3 {
+			store
+				.put_segments("timeline.z", segment, &one_group(segment, b"t"))
+				.await
+				.unwrap();
+		}
+		store
+			.inner()
+			.inner
+			.put(
+				&Path::from("rec-other/video/.info"),
+				Bytes::from_static(b"sibling").into(),
+			)
+			.await
+			.unwrap();
+
+		let query = Query::segments("timeline.z")
+			.unwrap()
+			.after(&Key::segments("timeline.z", 0).unwrap())
+			.unwrap()
+			.page_size(NonZeroUsize::new(1).unwrap());
+		let streamed: BTreeSet<String> = store
+			.list(&query)
+			.map_ok(|entry| entry.key.path(&Path::ROOT).unwrap().to_string())
+			.try_collect()
+			.await
+			.unwrap();
+		assert_eq!(streamed.len(), 2);
+
+		let mut paged = BTreeSet::new();
+		let mut current = Some(query);
+		let mut pages = 0;
+		while let Some(query) = current {
+			let page = store.list_paginated(&query).await.unwrap();
+			assert_eq!(page.entries.len(), 1);
+			paged.extend(
+				page.entries
+					.into_iter()
+					.map(|entry| entry.key.path(&Path::ROOT).unwrap().to_string()),
+			);
+			current = page.next;
+			pages += 1;
+			assert!(pages <= 2, "pagination did not terminate");
+		}
+		assert_eq!(pages, 2);
+		assert_eq!(paged, streamed);
+
+		// A recording-wide walk uses the trailing-slash scope, so the
+		// `rec-other` sibling must not appear in any page.
+		let query = Query::new().page_size(NonZeroUsize::new(1).unwrap());
+		let streamed: BTreeSet<String> = store
+			.list(&query)
+			.map_ok(|entry| entry.key.path(&Path::ROOT).unwrap().to_string())
+			.try_collect()
+			.await
+			.unwrap();
+		assert_eq!(streamed.len(), 3);
+
+		let mut paged = BTreeSet::new();
+		let mut current = Some(query);
+		let mut pages = 0;
+		while let Some(query) = current {
+			let page = store.list_paginated(&query).await.unwrap();
+			assert_eq!(page.entries.len(), 1);
+			paged.extend(
+				page.entries
+					.into_iter()
+					.map(|entry| entry.key.path(&Path::ROOT).unwrap().to_string()),
+			);
+			current = page.next;
+			pages += 1;
+			assert!(pages <= 3, "pagination did not terminate");
+		}
+		assert_eq!(pages, 3);
+		assert_eq!(paged, streamed);
+	}
+
+	#[test]
+	fn directory_results_are_not_silently_dropped() {
+		let store = memory();
+		let err = store
+			.entries(ListResult {
+				objects: Vec::new(),
+				common_prefixes: vec![Path::from("rec/video")],
+				extensions: Default::default(),
+			})
+			.unwrap_err();
+		assert_eq!(err, Error::Directory("rec/video".to_string()));
 	}
 
 	#[tokio::test]
@@ -457,7 +915,7 @@ mod tests {
 		let object = one_group(ID_MAX, b"z");
 		store.put_groups("v", &object).await.unwrap();
 		store.put_segments("t", ID_MAX, &object).await.unwrap();
-		assert_eq!(store.get_groups("v", ID_MAX, ID_MAX).await.unwrap(), object);
+		assert_eq!(store.get_groups("v", ID_MAX..=ID_MAX).await.unwrap(), object);
 		assert_eq!(store.get_segments("t", ID_MAX).await.unwrap(), object);
 	}
 
@@ -471,6 +929,6 @@ mod tests {
 		let object = two_groups();
 		store.put_groups("audio", &object).await.unwrap();
 		assert_eq!(store.get_info("audio").await.unwrap(), info);
-		assert_eq!(store.get_groups("audio", 7, 5).await.unwrap(), object);
+		assert_eq!(store.get_groups("audio", 5..=7).await.unwrap(), object);
 	}
 }

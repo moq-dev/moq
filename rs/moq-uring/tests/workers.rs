@@ -80,10 +80,14 @@ fn a_steered_group_serves_a_shared_port() {
 	// guarantees it. The group is held for as long as the sockets are served,
 	// since it is what holds the port.
 	let mut group = Group::acquire("127.0.0.1:0".parse().expect("addr"), WORKERS).expect("group");
-	let mut members = Vec::new();
+	let mut claims = Vec::new();
 	while let Some(member) = group.member() {
-		let shard = member.shard();
-		members.push((shard, member.bind().expect("bind group member")));
+		claims.push(member.bind().expect("bind group member"));
+	}
+	let mut group = group.complete(claims).expect("complete group");
+	let mut members = Vec::new();
+	while let Some(member) = group.member().expect("clone retained socket") {
+		members.push((member.shard(), member.into_inner()));
 	}
 	let addr = group.addr();
 

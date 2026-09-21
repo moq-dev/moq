@@ -420,11 +420,12 @@ mod tests {
 		};
 
 		let task = tokio::spawn(async move {
-			let mut encoder = moq_video::encode::Encoder::new(&{
+			let mut encoder = moq_video::encode::Sink::open(&{
 				let mut config = moq_video::encode::Config::new(320, 240, 30);
 				config.kind = moq_video::encode::Kind::Software;
 				config
 			})
+			.await
 			.unwrap();
 			let gray = vec![0x80u8; 320 * 240 * 4];
 
@@ -439,7 +440,7 @@ mod tests {
 					if index == 0 {
 						encoder.keyframe();
 					}
-					for encoded in encoder.encode(&gray_frame(&gray, timestamp)).unwrap() {
+					for encoded in encoder.encode(gray_frame(&gray, timestamp)).await.unwrap() {
 						let frame = hang::container::Frame {
 							timestamp: encoded.timestamp,
 							payload: encoded.payload,

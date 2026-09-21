@@ -4237,3 +4237,236 @@ async fn payload_less_clock_packets_repeat_the_counter() {
 	assert_eq!(advanced, 0, "payload-less packets must repeat the counter");
 	assert_eq!(discontinuities, 0, "the counter must be continuous on every PID");
 }
+
+/// What a constant-rate receiver would measure of `ts`: the packets between its
+/// first and last clock packet over the PCR ticks they span, how much of that was
+/// null stuffing, and the widest PCR gap.
+struct Clocked {
+	packets: usize,
+	ticks: u64,
+	nulls: usize,
+	max_gap: u64,
+}
+
+impl Clocked {
+	fn of(ts: &[u8]) -> Self {
+		const WRAP: u64 = (1 << 33) * 300;
+		let mut first = None;
+		let mut last = None;
+		let mut nulls = 0;
+		let mut max_gap = 0;
+		let mut span = 0;
+		for (index, packet) in ts.chunks(188).enumerate() {
+			let pid = (u16::from(packet[1] & 0x1f) << 8) | u16::from(packet[2]);
+			if pid == 0x1fff {
+				nulls += 1;
+			}
+			if packet[3] & 0x20 != 0 && packet[4] >= 7 && packet[5] & 0x10 != 0 {
+				let base = (u64::from(packet[6]) << 25)
+					| (u64::from(packet[7]) << 17)
+					| (u64::from(packet[8]) << 9)
+					| (u64::from(packet[9]) << 1)
+					| (u64::from(packet[10]) >> 7);
+				let ticks = base * 300 + ((u64::from(packet[10] & 1) << 8) | u64::from(packet[11]));
+				// The exporter backs the clock off through the 33-bit wrap at the start.
+				if let Some(prev) = last.replace((index, ticks)) {
+					let gap = (ticks + WRAP - prev.1) % WRAP;
+					max_gap = max_gap.max(gap);
+					span += gap;
+				}
+				first.get_or_insert(index);
+			}
+		}
+		let (first, last) = (first.expect("no PCR"), last.expect("no PCR"));
+		Self {
+			packets: last.0 - first,
+			ticks: span,
+			nulls,
+			max_gap,
+		}
+	}
+
+	/// The multiplex rate in bits per second.
+	fn rate(&self) -> u64 {
+		(self.packets as u128 * 188 * 8 * 27_000_000 / u128::from(self.ticks)) as u64
+	}
+}
+
+/// Import a fixture into a broadcast whose catalog carries the `mpegts` section,
+/// then export it. The producers live until the export drains.
+async fn export_fixture(data: &[u8], mux_rate: Option<u64>) -> BytesMut {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+	import.decode(data).unwrap();
+	import.finish().unwrap();
+
+	let mut export = export_of(&consumer).await;
+	if let Some(mux_rate) = mux_rate {
+		export = export.with_mux_rate(mux_rate);
+	}
+	let ts = drain_with(export).await;
+	assert_packet_aligned(&ts);
+	ts
+}
+
+/// `bbb_cbr.ts` is a 400 kb/s multiplex carrying 167 kb/s of media, which import
+/// records as such, so export pads the media back to the recorded rate.
+#[tokio::test(start_paused = true)]
+async fn export_pads_to_the_recorded_mux_rate() {
+	let ts = export_fixture(include_bytes!("test_data/bbb_cbr.ts"), None).await;
+	let clocked = Clocked::of(&ts);
+	assert!(clocked.nulls > 0, "no null stuffing was emitted");
+	let rate = clocked.rate();
+	assert!(
+		rate.abs_diff(400_000) * 100 <= 400_000,
+		"output runs at {rate} b/s, not the recorded 400 kb/s"
+	);
+	assert!(
+		clocked.max_gap <= 40 * 27_000,
+		"PCR gap of {} ticks exceeds 40 ms",
+		clocked.max_gap
+	);
+}
+
+/// The builder override wins over the catalog's recorded rate.
+#[tokio::test(start_paused = true)]
+async fn export_mux_rate_override_beats_the_catalog() {
+	let ts = export_fixture(include_bytes!("test_data/bbb_cbr.ts"), Some(1_000_000)).await;
+	let rate = Clocked::of(&ts).rate();
+	assert!(
+		rate.abs_diff(1_000_000) * 100 <= 1_000_000,
+		"output runs at {rate} b/s, not the 1 Mb/s override"
+	);
+}
+
+/// Zero and absurd override rates are refused, leaving the output unpadded: zero
+/// pads nothing, and an unbounded rate would allocate unbounded nulls per slot.
+/// An explicit override wins even when refused, so the catalog rate is not used.
+#[tokio::test(start_paused = true)]
+async fn export_mux_rate_override_is_bounded() {
+	for rate in [0, i64::MAX as u64] {
+		let ts = export_fixture(include_bytes!("test_data/bbb_cbr.ts"), Some(rate)).await;
+		assert_eq!(
+			Clocked::of(&ts).nulls,
+			0,
+			"null packets in an export with a refused override rate {rate}"
+		);
+	}
+}
+
+/// An absurd catalog multiplex rate is refused, not padded to: the catalog is
+/// untrusted input, and padding to it would allocate unbounded nulls per slot.
+#[tokio::test(start_paused = true)]
+async fn export_refuses_an_absurd_catalog_mux_rate() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
+
+	let track = broadcast
+		.create_track(
+			broadcast.unique_name(".aac"),
+			hang::container::track_info(hang::catalog::PRIORITY.audio),
+		)
+		.unwrap();
+	let name = track.name().to_string();
+	catalog.modify().unwrap().audio.renditions.insert(name.clone(), {
+		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.container = Container::Legacy;
+		cfg
+	});
+	catalog.modify().unwrap().ext.mpegts.mux_rate = Some(i64::MAX as u64);
+
+	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+	// Ten seconds of small frames: the media alone never approaches the refused rate.
+	for i in 0..500u64 {
+		producer
+			.write(Frame {
+				timestamp: Timestamp::from_micros(i * 20_000).unwrap(),
+				duration: None,
+				payload: Bytes::from(vec![i as u8; 16]),
+				keyframe: i % 50 == 0,
+			})
+			.unwrap();
+	}
+	producer.finish().unwrap();
+
+	let ts = drain_with(export_of(&consumer).await).await;
+	assert_packet_aligned(&ts);
+	assert_eq!(
+		Clocked::of(&ts).nulls,
+		0,
+		"null packets in an export with a refused catalog mux rate"
+	);
+}
+
+/// A VBR source records no rate, and without one nothing is padded.
+#[tokio::test(start_paused = true)]
+async fn export_without_a_mux_rate_is_unpadded() {
+	let ts = export_fixture(include_bytes!("test_data/scte35/bbb5s.ts"), None).await;
+	assert_eq!(Clocked::of(&ts).nulls, 0, "null packets in an unpadded export");
+}
+
+/// 1 Mb/s is 16.62 packets per 25 ms slot. The count between the first and last
+/// clock packet must be the floor of the exact allowance, which only holds when
+/// the fractional remainder carries across slots instead of rounding each one.
+/// Also the override supplying a rate to a catalog that has none.
+#[tokio::test(start_paused = true)]
+async fn export_stuffing_keeps_the_fractional_remainder() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+
+	let track = broadcast
+		.create_track(
+			broadcast.unique_name(".aac"),
+			hang::container::track_info(hang::catalog::PRIORITY.audio),
+		)
+		.unwrap();
+	let name = track.name().to_string();
+	{
+		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.container = Container::Legacy;
+		catalog.modify().unwrap().audio.renditions.insert(name.clone(), cfg);
+	}
+	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+	// Ten seconds of small frames: a few kb/s of media under a 1 Mb/s rate.
+	for i in 0..500u64 {
+		producer
+			.write(Frame {
+				timestamp: Timestamp::from_micros(i * 20_000).unwrap(),
+				duration: None,
+				payload: Bytes::from(vec![i as u8; 16]),
+				keyframe: i % 50 == 0,
+			})
+			.unwrap();
+	}
+	producer.finish().unwrap();
+
+	let export = Export::new(crate::source::announced(&consumer))
+		.await
+		.unwrap()
+		.with_mux_rate(1_000_000);
+	let ts = drain_with(export).await;
+	assert_packet_aligned(&ts);
+
+	let clocked = Clocked::of(&ts);
+	let slots = clocked.ticks / (PCR_INTERVAL.as_nanos() as u64 * 27 / 1000);
+	assert!(slots > 300, "expected a long run of slots, got {slots}");
+	// Bits allowed over the run, in whole packets.
+	let expected = (slots as u128 * 1_000_000 * PCR_INTERVAL.as_nanos() / (1_000_000_000 * 188 * 8)) as u64;
+	assert_eq!(
+		clocked.packets as u64, expected,
+		"{slots} slots at 1 Mb/s carry {expected} packets"
+	);
+	assert!(clocked.nulls > 0, "no null stuffing was emitted");
+}

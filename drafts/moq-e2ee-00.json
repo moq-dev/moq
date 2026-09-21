@@ -2,6 +2,7 @@
 	"profile": "moq-e2ee-00",
 	"constants": {
 		"salt": "6d6f712d653265652d3030",
+		"path_label": "6d6f712d653265652d30302070617468",
 		"name_label": "6d6f712d653265652d3030206e616d65",
 		"key_label": "6d6f712d653265652d3030206b6579",
 		"domain_group": 0,
@@ -26,6 +27,20 @@
 		"kid": 7,
 		"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121"
 	},
+	"paths": [
+		{
+			"id": "broadcast-meeting-hang",
+			"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
+			"kid": 7,
+			"secret": "6d6f712d653265652d3030207465737420736563726574212121212121212121",
+			"semantic_name": "meeting.hang",
+			"semantic_name_bytes": "6d656574696e672e68616e67",
+			"prk": "a8230410bf77bc88af14260a5ed0ec320e3b174d5a8f4f76780b27df2230f080",
+			"path_info": "6d6f712d653265652d3030207061746800176578616d706c652e636f6d2f6d656574696e672d3132330000000000000007000c6d656574696e672e68616e67",
+			"path_material": "a8d326b2e0bd8f7813a35028fb448421",
+			"opaque": "qNMmsuC9j3gTo1Ao-0SEIQ"
+		}
+	],
 	"derivation": [
 		{
 			"id": "group-video",

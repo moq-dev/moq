@@ -1,7 +1,9 @@
-//! Defines `ENCODE_API`, which is a lazy static of [`EncodeAPI`].
+//! Fallible loading for the private NVENC function table.
 
 use core::ffi::{c_int, c_void};
+use std::sync::OnceLock;
 
+use super::result::EncodeError;
 use crate::sys::nvEncodeAPI::{
 	GUID, NVENCAPI_MAJOR_VERSION, NVENCAPI_MINOR_VERSION, NVENCSTATUS, NV_ENCODE_API_FUNCTION_LIST,
 	NV_ENCODE_API_FUNCTION_LIST_VER, NV_ENC_BUFFER_FORMAT, NV_ENC_CAPS_PARAM, NV_ENC_CREATE_BITSTREAM_BUFFER,
@@ -13,13 +15,51 @@ use crate::sys::nvEncodeAPI::{
 	NV_ENC_TUNING_INFO,
 };
 
-lazy_static! {
-	/// A lazy static for the Encoder API.
-	///
-	/// You should not interact with this directly.
-	/// [`Encoder`](crate::Encoder) exposes much of the functionality and provides a nicer API.
-	pub static ref ENCODE_API: EncodeAPI =
-		EncodeAPI::new();
+#[cfg(target_os = "linux")]
+const CANDIDATES: &[&str] = &["libnvidia-encode.so.1", "libnvidia-encode.so"];
+#[cfg(target_os = "windows")]
+const CANDIDATES: &[&str] = &["nvEncodeAPI64.dll", "nvEncodeAPI.dll"];
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+const CANDIDATES: &[&str] = &[];
+
+/// An error while loading the NVENC driver API.
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
+pub enum LoadError {
+	/// None of the platform's NVIDIA encode libraries could be loaded.
+	#[error("NVIDIA encode library unavailable ({reason})")]
+	Library {
+		/// The attempted libraries and loader failure.
+		reason: String,
+	},
+
+	/// A required entry point was absent.
+	#[error("NVENC entry point {name} unavailable ({reason})")]
+	Symbol {
+		/// The required entry point.
+		name: &'static str,
+		/// The loader or driver-table failure.
+		reason: String,
+	},
+
+	/// The installed driver implements an older NVENC API.
+	#[error(
+		"NVIDIA driver supports NVENC {supported_major}.{supported_minor}, but {required_major}.{required_minor} is required"
+	)]
+	UnsupportedVersion {
+		/// Required major version.
+		required_major: u32,
+		/// Required minor version.
+		required_minor: u32,
+		/// Driver-supported major version.
+		supported_major: u32,
+		/// Driver-supported minor version.
+		supported_minor: u32,
+	},
+
+	/// The NVIDIA loader rejected an initialization call.
+	#[error("NVENC loader call failed: {0}")]
+	Api(#[from] EncodeError),
 }
 
 // Function type aliases to shorten later definitions.
@@ -68,12 +108,75 @@ type GetSequenceParamEx =
 	unsafe extern "C" fn(*mut c_void, *mut NV_ENC_INITIALIZE_PARAMS, *mut NV_ENC_SEQUENCE_PARAM_PAYLOAD) -> NVENCSTATUS;
 type RestoreEncoderState = unsafe extern "C" fn(*mut c_void, *mut NV_ENC_RESTORE_ENCODER_STATE_PARAMS) -> NVENCSTATUS;
 type LookaheadPicture = unsafe extern "C" fn(*mut c_void, *mut NV_ENC_LOOKAHEAD_PIC_PARAMS) -> NVENCSTATUS;
+type GetMaxVersion = unsafe extern "C" fn(*mut u32) -> NVENCSTATUS;
+type CreateInstance = unsafe extern "C" fn(*mut NV_ENCODE_API_FUNCTION_LIST) -> NVENCSTATUS;
 
-/// An instance of the `NvEncodeAPI` interface, containing function pointers
-/// which should be used to interface with the rest of the Encoder API.
+#[derive(Clone, Copy)]
+struct EntryPoints {
+	get_max_version: GetMaxVersion,
+	create_instance: CreateInstance,
+}
+
+trait Loader {
+	fn entry_points(&self) -> Result<EntryPoints, LoadError>;
+}
+
+struct DynamicLoader;
+
+impl Loader for DynamicLoader {
+	fn entry_points(&self) -> Result<EntryPoints, LoadError> {
+		// SAFETY: loading the NVIDIA driver library runs its initializers, which
+		// is sound for driver libraries. The handle is intentionally leaked so
+		// every resolved function pointer remains valid for the process lifetime.
+		unsafe {
+			let mut failures = Vec::new();
+			let library = CANDIDATES
+				.iter()
+				.find_map(|name| match libloading::Library::new(*name) {
+					Ok(library) => Some(library),
+					Err(error) => {
+						failures.push(format!("{name}: {error}"));
+						None
+					}
+				});
+			let library = library.ok_or_else(|| LoadError::Library {
+				reason: if failures.is_empty() {
+					"no library exists for this platform".to_owned()
+				} else {
+					failures.join(", ")
+				},
+			})?;
+			let library: &'static libloading::Library = Box::leak(Box::new(library));
+
+			unsafe fn symbol<T: Copy>(
+				library: &'static libloading::Library,
+				name: &'static str,
+				bytes: &'static [u8],
+			) -> Result<T, LoadError> {
+				let symbol: libloading::Symbol<T> =
+					unsafe { library.get(bytes) }.map_err(|error| LoadError::Symbol {
+						name,
+						reason: error.to_string(),
+					})?;
+				Ok(*symbol)
+			}
+
+			Ok(EntryPoints {
+				get_max_version: symbol(
+					library,
+					"NvEncodeAPIGetMaxSupportedVersion",
+					b"NvEncodeAPIGetMaxSupportedVersion\0",
+				)?,
+				create_instance: symbol(library, "NvEncodeAPICreateInstance", b"NvEncodeAPICreateInstance\0")?,
+			})
+		}
+	}
+}
+
+/// The private `NvEncodeAPI` function table.
 #[allow(dead_code, missing_docs)]
 #[derive(Debug, Clone)]
-pub struct EncodeAPI {
+pub(crate) struct EncodeAPI {
 	#[doc(alias = "NvEncOpenEncodeSession")]
 	pub open_encode_session: OpenEncodeSession,
 	#[doc(alias = "NvEncOpenEncodeSessionEx")]
@@ -160,124 +263,254 @@ pub struct EncodeAPI {
 	pub lookahead_picture: LookaheadPicture,
 }
 
-fn assert_versions_match(max_supported_version: u32) {
-	let major_version = max_supported_version >> 4;
-	let minor_version = max_supported_version & 0b1111;
-	assert!(
-		(major_version, minor_version) >= (NVENCAPI_MAJOR_VERSION, NVENCAPI_MINOR_VERSION),
-		"The maximum supported version should be greater or equal than the header version."
-	);
+pub(crate) fn get() -> Result<&'static EncodeAPI, LoadError> {
+	static API: OnceLock<Result<EncodeAPI, LoadError>> = OnceLock::new();
+	API.get_or_init(|| EncodeAPI::load_with(&DynamicLoader))
+		.as_ref()
+		.map_err(Clone::clone)
 }
 
 impl EncodeAPI {
-	fn new() -> Self {
-		const MSG: &str = "The API instance should populate the whole function list.";
-
-		// Resolve the two NVENC entry points by dlopen'ing libnvidia-encode, so the
-		// binary links on a GPU-less builder and starts (and can fall back) on
-		// machines without the NVIDIA driver.
-		type GetMaxVersion = unsafe extern "C" fn(*mut u32) -> NVENCSTATUS;
-		type CreateInstance = unsafe extern "C" fn(*mut NV_ENCODE_API_FUNCTION_LIST) -> NVENCSTATUS;
-
-		let (get_max_version, create_instance): (GetMaxVersion, CreateInstance) = {
-			// The NVENC entry points live in the NVIDIA driver library, under
-			// different names per platform. `.so.1` is the versioned SONAME present
-			// at runtime; `.so` is the dev symlink. On Windows the 64-bit name is
-			// preferred, with the legacy name as a fallback.
-			#[cfg(target_os = "linux")]
-			const CANDIDATES: &[&str] = &["libnvidia-encode.so.1", "libnvidia-encode.so"];
-			#[cfg(target_os = "windows")]
-			const CANDIDATES: &[&str] = &["nvEncodeAPI64.dll", "nvEncodeAPI.dll"];
-			// No NVIDIA encode library exists on other platforms (e.g. macOS). The
-			// crate still compiles there (nothing calls this off Linux/Windows); if it
-			// ever were reached, the dlopen below finds nothing and panics clearly.
-			#[cfg(not(any(target_os = "linux", target_os = "windows")))]
-			const CANDIDATES: &[&str] = &[];
-
-			// SAFETY: loading the NVIDIA driver library runs its initializers,
-			// which is sound here. The handle is leaked to `'static` and never
-			// unloaded, so the resolved function pointers stay valid for the
-			// process lifetime (this is a `'static` lazy static).
-			unsafe {
-				let library = CANDIDATES
-					.iter()
-					.find_map(|name| libloading::Library::new(*name).ok())
-					.unwrap_or_else(|| {
-						panic!("failed to dlopen the NVIDIA encode library (tried {CANDIDATES:?}); is the NVIDIA driver installed?")
-					});
-				let library: &'static libloading::Library = Box::leak(Box::new(library));
-
-				let get_max: libloading::Symbol<GetMaxVersion> = library
-					.get(b"NvEncodeAPIGetMaxSupportedVersion\0")
-					.expect("symbol NvEncodeAPIGetMaxSupportedVersion missing from the NVIDIA encode library");
-				let create: libloading::Symbol<CreateInstance> = library
-					.get(b"NvEncodeAPICreateInstance\0")
-					.expect("symbol NvEncodeAPICreateInstance missing from the NVIDIA encode library");
-				(*get_max, *create)
-			}
-		};
-
-		// Check that the driver max supported version matches the version
-		// from the header files. If they do not match, the bindings should be updated.
+	fn load_with(loader: &dyn Loader) -> Result<Self, LoadError> {
+		let entry_points = loader.entry_points()?;
 		let mut version = 0;
-		unsafe { get_max_version(&mut version) }
-			.result_without_string()
-			.expect("The pointer to the version should be valid.");
-		assert_versions_match(version);
+		unsafe { (entry_points.get_max_version)(&mut version) }.result_without_string()?;
+		let supported = (version >> 4, version & 0b1111);
+		let required = (NVENCAPI_MAJOR_VERSION, NVENCAPI_MINOR_VERSION);
+		if supported < required {
+			return Err(LoadError::UnsupportedVersion {
+				required_major: required.0,
+				required_minor: required.1,
+				supported_major: supported.0,
+				supported_minor: supported.1,
+			});
+		}
 
-		// Create empty function buffer.
 		let mut function_list = NV_ENCODE_API_FUNCTION_LIST {
 			version: NV_ENCODE_API_FUNCTION_LIST_VER,
 			..Default::default()
 		};
-		// Create Encode API Instance (populate function buffer).
-		unsafe { create_instance(&mut function_list) }
-			.result_without_string()
-			.expect("The pointer to the function list should be valid.");
+		unsafe { (entry_points.create_instance)(&mut function_list) }.result_without_string()?;
 
-		Self {
-			open_encode_session: function_list.nvEncOpenEncodeSession.expect(MSG),
-			open_encode_session_ex: function_list.nvEncOpenEncodeSessionEx.expect(MSG),
-			initialize_encoder: function_list.nvEncInitializeEncoder.expect(MSG),
-			reconfigure_encoder: function_list.nvEncReconfigureEncoder.expect(MSG),
-			destroy_encoder: function_list.nvEncDestroyEncoder.expect(MSG),
-			get_encode_guid_count: function_list.nvEncGetEncodeGUIDCount.expect(MSG),
-			get_encode_guids: function_list.nvEncGetEncodeGUIDs.expect(MSG),
-			get_encode_profile_guid_count: function_list.nvEncGetEncodeProfileGUIDCount.expect(MSG),
-			get_encode_profile_guids: function_list.nvEncGetEncodeProfileGUIDs.expect(MSG),
-			get_input_format_count: function_list.nvEncGetInputFormatCount.expect(MSG),
-			get_input_formats: function_list.nvEncGetInputFormats.expect(MSG),
-			get_encode_preset_count: function_list.nvEncGetEncodePresetCount.expect(MSG),
-			get_encode_preset_guids: function_list.nvEncGetEncodePresetGUIDs.expect(MSG),
-			get_encode_preset_config: function_list.nvEncGetEncodePresetConfig.expect(MSG),
-			get_encode_preset_config_ex: function_list.nvEncGetEncodePresetConfigEx.expect(MSG),
-			get_encode_caps: function_list.nvEncGetEncodeCaps.expect(MSG),
-			create_input_buffer: function_list.nvEncCreateInputBuffer.expect(MSG),
-			destroy_input_buffer: function_list.nvEncDestroyInputBuffer.expect(MSG),
-			lock_input_buffer: function_list.nvEncLockInputBuffer.expect(MSG),
-			unlock_input_buffer: function_list.nvEncUnlockInputBuffer.expect(MSG),
-			create_bitstream_buffer: function_list.nvEncCreateBitstreamBuffer.expect(MSG),
-			destroy_bitstream_buffer: function_list.nvEncDestroyBitstreamBuffer.expect(MSG),
-			lock_bitstream: function_list.nvEncLockBitstream.expect(MSG),
-			unlock_bitstream: function_list.nvEncUnlockBitstream.expect(MSG),
-			map_input_resource: function_list.nvEncMapInputResource.expect(MSG),
-			unmap_input_resource: function_list.nvEncUnmapInputResource.expect(MSG),
-			register_resource: function_list.nvEncRegisterResource.expect(MSG),
-			unregister_resource: function_list.nvEncUnregisterResource.expect(MSG),
-			create_mv_buffer: function_list.nvEncCreateMVBuffer.expect(MSG),
-			destroy_mv_buffer: function_list.nvEncDestroyMVBuffer.expect(MSG),
-			encode_picture: function_list.nvEncEncodePicture.expect(MSG),
-			get_encode_stats: function_list.nvEncGetEncodeStats.expect(MSG),
-			get_sequence_params: function_list.nvEncGetSequenceParams.expect(MSG),
-			get_sequence_param_ex: function_list.nvEncGetSequenceParamEx.expect(MSG),
-			register_async_event: function_list.nvEncRegisterAsyncEvent.expect(MSG),
-			unregister_async_event: function_list.nvEncUnregisterAsyncEvent.expect(MSG),
-			invalidate_ref_frames: function_list.nvEncInvalidateRefFrames.expect(MSG),
-			run_motion_estimation_only: function_list.nvEncRunMotionEstimationOnly.expect(MSG),
-			get_last_error_string: function_list.nvEncGetLastErrorString.expect(MSG),
-			set_io_cuda_streams: function_list.nvEncSetIOCudaStreams.expect(MSG),
-			restore_encoder_state: function_list.nvEncRestoreEncoderState.expect(MSG),
-			lookahead_picture: function_list.nvEncLookaheadPicture.expect(MSG),
+		Self::from_function_list(function_list)
+	}
+
+	fn from_function_list(function_list: NV_ENCODE_API_FUNCTION_LIST) -> Result<Self, LoadError> {
+		macro_rules! required {
+			($field:ident) => {
+				function_list.$field.ok_or_else(|| LoadError::Symbol {
+					name: stringify!($field),
+					reason: "driver returned an incomplete function table".to_owned(),
+				})?
+			};
 		}
+
+		Ok(Self {
+			open_encode_session: required!(nvEncOpenEncodeSession),
+			open_encode_session_ex: required!(nvEncOpenEncodeSessionEx),
+			initialize_encoder: required!(nvEncInitializeEncoder),
+			reconfigure_encoder: required!(nvEncReconfigureEncoder),
+			destroy_encoder: required!(nvEncDestroyEncoder),
+			get_encode_guid_count: required!(nvEncGetEncodeGUIDCount),
+			get_encode_guids: required!(nvEncGetEncodeGUIDs),
+			get_encode_profile_guid_count: required!(nvEncGetEncodeProfileGUIDCount),
+			get_encode_profile_guids: required!(nvEncGetEncodeProfileGUIDs),
+			get_input_format_count: required!(nvEncGetInputFormatCount),
+			get_input_formats: required!(nvEncGetInputFormats),
+			get_encode_preset_count: required!(nvEncGetEncodePresetCount),
+			get_encode_preset_guids: required!(nvEncGetEncodePresetGUIDs),
+			get_encode_preset_config: required!(nvEncGetEncodePresetConfig),
+			get_encode_preset_config_ex: required!(nvEncGetEncodePresetConfigEx),
+			get_encode_caps: required!(nvEncGetEncodeCaps),
+			create_input_buffer: required!(nvEncCreateInputBuffer),
+			destroy_input_buffer: required!(nvEncDestroyInputBuffer),
+			lock_input_buffer: required!(nvEncLockInputBuffer),
+			unlock_input_buffer: required!(nvEncUnlockInputBuffer),
+			create_bitstream_buffer: required!(nvEncCreateBitstreamBuffer),
+			destroy_bitstream_buffer: required!(nvEncDestroyBitstreamBuffer),
+			lock_bitstream: required!(nvEncLockBitstream),
+			unlock_bitstream: required!(nvEncUnlockBitstream),
+			map_input_resource: required!(nvEncMapInputResource),
+			unmap_input_resource: required!(nvEncUnmapInputResource),
+			register_resource: required!(nvEncRegisterResource),
+			unregister_resource: required!(nvEncUnregisterResource),
+			create_mv_buffer: required!(nvEncCreateMVBuffer),
+			destroy_mv_buffer: required!(nvEncDestroyMVBuffer),
+			encode_picture: required!(nvEncEncodePicture),
+			get_encode_stats: required!(nvEncGetEncodeStats),
+			get_sequence_params: required!(nvEncGetSequenceParams),
+			get_sequence_param_ex: required!(nvEncGetSequenceParamEx),
+			register_async_event: required!(nvEncRegisterAsyncEvent),
+			unregister_async_event: required!(nvEncUnregisterAsyncEvent),
+			invalidate_ref_frames: required!(nvEncInvalidateRefFrames),
+			run_motion_estimation_only: required!(nvEncRunMotionEstimationOnly),
+			get_last_error_string: required!(nvEncGetLastErrorString),
+			set_io_cuda_streams: required!(nvEncSetIOCudaStreams),
+			restore_encoder_state: required!(nvEncRestoreEncoderState),
+			lookahead_picture: required!(nvEncLookaheadPicture),
+		})
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::mem::{size_of, transmute_copy};
+
+	use super::*;
+
+	#[derive(Clone)]
+	struct TestLoader(Result<EntryPoints, LoadError>);
+
+	impl Loader for TestLoader {
+		fn entry_points(&self) -> Result<EntryPoints, LoadError> {
+			self.0.clone()
+		}
+	}
+
+	unsafe extern "C" fn unused_function() {}
+
+	unsafe extern "C" fn create_complete(functions: *mut NV_ENCODE_API_FUNCTION_LIST) -> NVENCSTATUS {
+		unsafe { *functions = complete_function_list() };
+		NVENCSTATUS::NV_ENC_SUCCESS
+	}
+
+	unsafe extern "C" fn create_unexpected(_functions: *mut NV_ENCODE_API_FUNCTION_LIST) -> NVENCSTATUS {
+		panic!("create_instance must not be called after an unsupported version");
+	}
+
+	fn fake_function<T: Copy>() -> T {
+		assert_eq!(size_of::<T>(), size_of::<unsafe extern "C" fn()>());
+		// SAFETY: every function pointer has the same representation on the
+		// supported targets. Tests only verify table construction and never call
+		// these deliberately signature-erased pointers.
+		unsafe { transmute_copy(&(unused_function as unsafe extern "C" fn())) }
+	}
+
+	fn complete_function_list() -> NV_ENCODE_API_FUNCTION_LIST {
+		let mut functions = NV_ENCODE_API_FUNCTION_LIST {
+			version: NV_ENCODE_API_FUNCTION_LIST_VER,
+			..Default::default()
+		};
+		macro_rules! provide {
+			($($field:ident),+ $(,)?) => {
+				$(functions.$field = Some(fake_function());)+
+			};
+		}
+		provide!(
+			nvEncOpenEncodeSession,
+			nvEncOpenEncodeSessionEx,
+			nvEncInitializeEncoder,
+			nvEncReconfigureEncoder,
+			nvEncDestroyEncoder,
+			nvEncGetEncodeGUIDCount,
+			nvEncGetEncodeGUIDs,
+			nvEncGetEncodeProfileGUIDCount,
+			nvEncGetEncodeProfileGUIDs,
+			nvEncGetInputFormatCount,
+			nvEncGetInputFormats,
+			nvEncGetEncodePresetCount,
+			nvEncGetEncodePresetGUIDs,
+			nvEncGetEncodePresetConfig,
+			nvEncGetEncodePresetConfigEx,
+			nvEncGetEncodeCaps,
+			nvEncCreateInputBuffer,
+			nvEncDestroyInputBuffer,
+			nvEncLockInputBuffer,
+			nvEncUnlockInputBuffer,
+			nvEncCreateBitstreamBuffer,
+			nvEncDestroyBitstreamBuffer,
+			nvEncLockBitstream,
+			nvEncUnlockBitstream,
+			nvEncMapInputResource,
+			nvEncUnmapInputResource,
+			nvEncRegisterResource,
+			nvEncUnregisterResource,
+			nvEncCreateMVBuffer,
+			nvEncDestroyMVBuffer,
+			nvEncEncodePicture,
+			nvEncGetEncodeStats,
+			nvEncGetSequenceParams,
+			nvEncGetSequenceParamEx,
+			nvEncRegisterAsyncEvent,
+			nvEncUnregisterAsyncEvent,
+			nvEncInvalidateRefFrames,
+			nvEncRunMotionEstimationOnly,
+			nvEncGetLastErrorString,
+			nvEncSetIOCudaStreams,
+			nvEncRestoreEncoderState,
+			nvEncLookaheadPicture,
+		);
+		functions
+	}
+
+	unsafe extern "C" fn current_version(version: *mut u32) -> NVENCSTATUS {
+		unsafe { *version = (NVENCAPI_MAJOR_VERSION << 4) | NVENCAPI_MINOR_VERSION };
+		NVENCSTATUS::NV_ENC_SUCCESS
+	}
+
+	unsafe extern "C" fn old_version(version: *mut u32) -> NVENCSTATUS {
+		unsafe { *version = (NVENCAPI_MAJOR_VERSION - 1) << 4 };
+		NVENCSTATUS::NV_ENC_SUCCESS
+	}
+
+	unsafe extern "C" fn create_incomplete(_functions: *mut NV_ENCODE_API_FUNCTION_LIST) -> NVENCSTATUS {
+		NVENCSTATUS::NV_ENC_SUCCESS
+	}
+
+	#[test]
+	fn missing_library_is_an_error() {
+		let error = EncodeAPI::load_with(&TestLoader(Err(LoadError::Library {
+			reason: "not installed".to_owned(),
+		})))
+		.unwrap_err();
+		assert!(matches!(error, LoadError::Library { reason } if reason == "not installed"));
+	}
+
+	#[test]
+	fn missing_bootstrap_symbol_is_an_error() {
+		let error = EncodeAPI::load_with(&TestLoader(Err(LoadError::Symbol {
+			name: "NvEncodeAPICreateInstance",
+			reason: "not exported".to_owned(),
+		})))
+		.unwrap_err();
+		assert!(matches!(
+			error,
+			LoadError::Symbol { name: "NvEncodeAPICreateInstance", reason } if reason == "not exported"
+		));
+	}
+
+	#[test]
+	fn old_driver_is_rejected_before_table_creation() {
+		let error = EncodeAPI::load_with(&TestLoader(Ok(EntryPoints {
+			get_max_version: old_version,
+			create_instance: create_unexpected,
+		})))
+		.unwrap_err();
+		assert!(matches!(error, LoadError::UnsupportedVersion { .. }));
+	}
+
+	#[test]
+	fn incomplete_driver_table_is_an_error() {
+		let error = EncodeAPI::load_with(&TestLoader(Ok(EntryPoints {
+			get_max_version: current_version,
+			create_instance: create_incomplete,
+		})))
+		.unwrap_err();
+		assert!(matches!(
+			error,
+			LoadError::Symbol {
+				name: "nvEncOpenEncodeSession",
+				..
+			}
+		));
+	}
+
+	#[test]
+	fn complete_driver_table_loads() {
+		EncodeAPI::load_with(&TestLoader(Ok(EntryPoints {
+			get_max_version: current_version,
+			create_instance: create_complete,
+		})))
+		.unwrap();
 	}
 }

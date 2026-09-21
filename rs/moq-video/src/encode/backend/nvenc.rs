@@ -60,20 +60,15 @@ pub(crate) struct Nvenc {
 	timestamp: u64,
 }
 
-// Used only from the single capture/encode thread (see `publish_capture`).
-unsafe impl Send for Nvenc {}
-
 impl Nvenc {
 	pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
-		// cudarc and the NVENC SDK dlopen their driver libraries lazily and
-		// *panic* (which aborts the process, since release builds set
-		// `panic = "abort"`) when a library is missing, e.g. on a host with no
-		// NVIDIA driver. With hardware encoders always-on, `Kind::Auto` (the
-		// default) hits this on every GPU-less Linux box, so probe the libraries
-		// up front and return an error to fall back to the next encoder.
-		if !driver_libs_present() {
+		Encoder::load().map_err(|error| Error::Codec(anyhow::anyhow!("NVENC unavailable: {error}")))?;
+
+		// cudarc still panics while loading a missing CUDA driver. Probe it before
+		// creating the context so automatic codec selection can fall through.
+		if !cuda_driver_present() {
 			return Err(Error::Codec(anyhow::anyhow!(
-				"NVIDIA driver libraries not found (libcuda / libnvidia-encode); NVENC unavailable"
+				"CUDA driver library not found (libcuda); NVENC unavailable"
 			)));
 		}
 
@@ -182,8 +177,10 @@ impl Nvenc {
 		init.preset_guid(NV_ENC_PRESET_P4_GUID)
 			.tuning_info(NV_ENC_TUNING_INFO::NV_ENC_TUNING_INFO_LOW_LATENCY)
 			.framerate(config.framerate, 1)
-			.enable_picture_type_decision()
-			.encode_config(cfg);
+			.enable_picture_type_decision();
+		// SAFETY: this preset-derived config contains no borrowed extension
+		// pointers and is moved into the session.
+		unsafe { init.encode_config(*cfg) };
 
 		// NV12 is NVENC's native input layout and what NVDEC emits, so a CUDA
 		// frame registers directly; the CPU path interleaves I420 chroma on write.
@@ -208,7 +205,7 @@ impl Nvenc {
 
 impl Backend for Nvenc {
 	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Encoded>, Error> {
-		let mut output = self
+		let output = self
 			.session
 			.create_output_bitstream()
 			.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC output bitstream: {e}")))?;
@@ -216,7 +213,6 @@ impl Backend for Nvenc {
 		let params = moq_nvenc::EncodePictureParams {
 			input_timestamp: self.timestamp,
 			force_idr: keyframe,
-			..Default::default()
 		};
 		self.timestamp += 1;
 
@@ -231,21 +227,23 @@ impl Backend for Nvenc {
 			Surface::Cuda(cuda) => {
 				// Registration keeps a raw pointer into the frame; the frame
 				// (borrowed) outlives the registration.
-				let mut resource = self
-					.session
-					.register_generic_resource(
-						(),
+				// SAFETY: the cloned CUDA frame owns the allocation addressed by the
+				// pointer and the registration retains that clone through completion.
+				let resource = unsafe {
+					self.session.register_generic_resource(
+						cuda.clone(),
 						NV_ENC_INPUT_RESOURCE_TYPE::NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR,
 						cuda.device_ptr() as *mut std::ffi::c_void,
 						cuda.pitch,
 					)
-					.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC register CUDA frame: {e}")))?;
+				}
+				.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC register CUDA frame: {e}")))?;
 
-				self.session
-					.encode_picture(&mut resource, &mut output, params)
+				let submission = self
+					.session
+					.encode_picture(resource, output, params)
 					.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC encode: {e}")))?;
-
-				drain_output(&mut output)?
+				drain_output(submission)?
 			}
 			// Everything else goes through a CPU NV12 input buffer.
 			frame => {
@@ -277,11 +275,11 @@ impl Backend for Nvenc {
 				}
 				drop(lock);
 
-				self.session
-					.encode_picture(&mut input, &mut output, params)
+				let submission = self
+					.session
+					.encode_picture(input, output, params)
 					.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC encode: {e}")))?;
-
-				drain_output(&mut output)?
+				drain_output(submission)?
 			}
 		};
 
@@ -319,33 +317,28 @@ impl Backend for Nvenc {
 /// Block on the output bitstream and copy it out. The lock returning is also
 /// what guarantees NVENC finished reading the frame's input resource, so call
 /// this while that input is still alive.
-fn drain_output(output: &mut moq_nvenc::Bitstream) -> Result<Vec<u8>, Error> {
-	Ok(output
-		.lock()
-		.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC lock output: {e}")))?
-		.data()
-		.to_vec())
+fn drain_output<I>(submission: moq_nvenc::Submission<I>) -> Result<Vec<u8>, Error> {
+	let (data, _input, _output) = submission
+		.finish()
+		.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC lock output: {e}")))?;
+	Ok(data)
 }
 
-/// Whether both NVIDIA driver libraries NVENC needs can be dlopen'd: libcuda
-/// (used by cudarc) and libnvidia-encode (the NVENC API). Each crate loads its
-/// library lazily and panics if it's absent, so we probe the same names here
-/// first and turn a missing driver into a recoverable `Err`.
-fn driver_libs_present() -> bool {
+/// Whether cudarc's CUDA driver library can be opened without panicking.
+fn cuda_driver_present() -> bool {
 	// libcuda is the CUDA driver API; matches cudarc's "cuda" search.
 	const CUDA: &[&str] = &["libcuda.so.1", "libcuda.so"];
-	// Matches the NVENC SDK's own dynamic-loading candidate list.
-	const NVENC: &[&str] = &["libnvidia-encode.so.1", "libnvidia-encode.so"];
 
 	// SAFETY: we only open the library to test presence and immediately drop the
 	// handle; we never call into it. Loading runs the library's initializers,
-	// which is sound for these driver libs.
-	let loadable = |names: &[&str]| {
-		names
-			.iter()
-			.any(|name| unsafe { libloading::Library::new(*name) }.is_ok())
-	};
-	loadable(CUDA) && loadable(NVENC)
+	// which is sound for this driver library.
+	CUDA.iter()
+		.any(|name| unsafe { libloading::Library::new(*name) }.is_ok())
+}
+
+#[cfg(test)]
+fn driver_available() -> bool {
+	cuda_driver_present() && Encoder::load().is_ok()
 }
 
 #[cfg(test)]
@@ -358,11 +351,33 @@ mod tests {
 	/// SDK loader. On a box that does have the driver this is a no-op.
 	#[test]
 	fn missing_driver_errors_instead_of_panicking() {
-		if driver_libs_present() {
+		if driver_available() {
 			return; // real driver present: open() would legitimately try to run
 		}
 		let config = Config::new(1920, 1080, 30);
-		assert!(Nvenc::open(&config).is_err());
+		let error = Nvenc::open(&config).err().expect("missing driver must be refused");
+		assert!(
+			error.to_string().contains("NVENC unavailable"),
+			"unexpected error: {error}"
+		);
+	}
+
+	#[test]
+	fn named_nvenc_reports_the_loader_reason() {
+		if driver_available() {
+			return;
+		}
+		let mut config = Config::new(1920, 1080, 30);
+		config.kind = crate::encode::Kind::Named(NAME.into());
+		let error = crate::encode::backend::open(&config)
+			.err()
+			.expect("an unavailable named backend must be refused");
+		let message = error.to_string();
+		assert!(message.contains(NAME), "backend missing from error: {message}");
+		assert!(
+			message.contains("NVENC unavailable"),
+			"loader reason missing: {message}"
+		);
 	}
 
 	/// A mid-gray RGBA frame, encodable without a camera.
@@ -415,7 +430,7 @@ mod tests {
 	/// NVENC only does with `repeatSPSPPS` enabled.
 	#[test]
 	fn nvenc_h264_keyframes_carry_param_sets() {
-		if !driver_libs_present() {
+		if !driver_available() {
 			return;
 		}
 		let config = crate::encode::Config {
@@ -462,7 +477,7 @@ mod tests {
 	/// which the hev1 importer relies on.
 	#[test]
 	fn nvenc_h265_keyframes_carry_param_sets() {
-		if !driver_libs_present() {
+		if !driver_available() {
 			return;
 		}
 		let config = crate::encode::Config {
@@ -512,7 +527,7 @@ mod tests {
 	/// mid-stream subscriber can join at any GOP boundary.
 	#[test]
 	fn nvenc_h264_periodic_idr_at_gop() {
-		if !driver_libs_present() {
+		if !driver_available() {
 			return;
 		}
 		let mut config = crate::encode::Config::new(320, 240, 30);
@@ -564,7 +579,7 @@ mod tests {
 	/// of 64 so pitch != width is actually exercised.
 	#[test]
 	fn nvenc_h264_pitched_write_roundtrips() {
-		if !driver_libs_present() {
+		if !driver_available() {
 			return;
 		}
 		let (w, h) = (300u32, 240u32);
@@ -633,7 +648,7 @@ mod tests {
 	/// GOP and return the periodic IDR sizes with the mean P-frame size, so a
 	/// rate-control change can be judged by the burst it puts on the wire.
 	fn idr_burst(frames: u64) -> Option<(Vec<usize>, usize)> {
-		if !driver_libs_present() {
+		if !driver_available() {
 			return None;
 		}
 		let (w, h) = (1280u32, 720u32);

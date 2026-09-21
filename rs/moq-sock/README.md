@@ -9,12 +9,12 @@ runtimes (`moq-tokio` and `moq-uring`).
 - **`shard`**: forming and steering a reuseport group by QUIC connection id.
   A `shard::Group` holds the port (probing and locking against a second
   same-UID group), fixes the member count, and hands out one `Member` per slot
-  in index order; binding a member joins the group, and the last one attaches a
-  classic-BPF filter that steers each packet by the first byte of its
-  destination connection id. A `Shard` names the slot a member ended up in, and
-  `cid_prefix` is the byte its issued ids lead with. Keep every bound socket for
-  as long as the group is served: the kernel numbers the group by what is in it,
-  so closing one renumbers the members after it.
+  in index order. Binding a member yields an opaque claim, and completing the
+  group with every claim attaches a classic-BPF filter before any socket is
+  released for serving. The completed group retains every member socket, so
+  dropping one serving handle cannot renumber the survivors. A `Shard` names
+  the slot a member ended up in, and `cid_prefix` is the byte its issued ids
+  lead with.
 - **`cpu`**: pinning worker threads to cores.
 
 This is infrastructure, not an entry point: build against `moq-tokio` or

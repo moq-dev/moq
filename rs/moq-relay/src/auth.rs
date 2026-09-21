@@ -260,7 +260,7 @@ impl Lease {
 	/// revoked, or was re-checked into one that no longer covers the token.
 	///
 	/// A changed root or a narrower grant ends it: origin handles cannot yet narrow
-	/// a live scope in place (tracked by `quest/m2/origin-narrowing.md`). A changed
+	/// a live scope in place (tracked by `quest/next/origin-narrowing.md`). A changed
 	/// tier is kept for this session and applies to its next connection, since the
 	/// stats carriers resolved their counters at admission.
 	pub async fn ended(&mut self) -> lease::Reason {

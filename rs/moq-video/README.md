@@ -99,6 +99,29 @@ host (plus the kernel headers for `v4l2`). None of them link a vendor library,
 so a binary carrying them still links on a GPU-less builder and still starts on
 a machine without the hardware, falling back to software.
 
+### Vulkan producers on NVIDIA
+
+`frame::vulkan::Importer` accepts dedicated optimal-tiling
+`VK_FORMAT_R8G8B8A8_UNORM` images exported as opaque memory FDs. The producer
+also exports a timeline semaphore and supplies the Vulkan physical-device UUID;
+imports with another CUDA device, format, layout, allocation shape, or sync
+mechanism are refused. Vulkan signals `Timeline::ready` after writes and the
+transition to `VK_IMAGE_LAYOUT_GENERAL`. CUDA waits on that value and signals
+`Timeline::complete` after all readers queued on the frame stream.
+
+An imported `Slot<T>` owns the producer's `T`. `Slot::publish` consumes it and
+`Completion::wait` returns the same slot only after CUDA completion, so a pool
+cannot overwrite an in-flight image. Importer capacity bounds retained slots,
+and a dedicated worker drains completion after capture stops or a receiver is
+cancelled without blocking the producer thread. If the original application
+image is not exportable, copy it on Vulkan into a dedicated exportable slot;
+that is one GPU image copy, not zero-copy. There is no CPU mapping, download, or
+staging fallback for `Surface::Vulkan`.
+
+Run `just rs vulkan-cuda` for the opt-in native hardware exercise. It creates a
+Vulkan image independently of Unreal, imports it once into CUDA, checks repeated
+slot reuse and held-reader ordering, and tears down through cancellation.
+
 ## Decode
 
 `decode::Consumer` (the mirror of `moq_audio::decode::Consumer`) subscribes to an
@@ -108,9 +131,11 @@ same device keeps it there (the transcode path), while `into_i420()` downloads
 it. An encoder that can't take that surface (openh264, or a different device)
 downloads it through I420 for you. Every frame carries a `Surface`, a
 `#[non_exhaustive]` enum naming where the pixels live (`PixelBuffer` on macOS,
-`Texture` on Windows, `Cuda` on Linux, `HardwareBuffer` on Android, or CPU
-`I420`). Match it to take a zero-copy path for a representation you recognize, and fall back to
-`Surface::into_i420()`, which always works. On macOS `Surface::into_pixel_buffer()`
+`Texture` on Windows, `Vulkan` and `Cuda` on Linux, `HardwareBuffer` on Android,
+or CPU `I420`). Match
+it to take a GPU path for a representation you recognize, and fall back to
+`Surface::into_i420()` for readback-capable surfaces. GPU-only
+`Surface::Vulkan` refuses CPU conversion. On macOS `Surface::into_pixel_buffer()`
 is the mirror: free for a hardware-decoded frame, an upload for a CPU one.
 `Surface::to_rgba()` and `Surface::to_bgra()` are the portable exits for CPU
 image and UI toolkits, returning owned, tightly packed pixels with the surface's

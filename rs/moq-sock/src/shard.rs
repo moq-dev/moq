@@ -13,20 +13,23 @@
 //! # The group
 //!
 //! [`Group`] is the whole entry point. It takes the port, fixes the member
-//! count, and hands out one [`Member`] per slot in index order; binding a member
-//! is the only way to join the group, and the last one to bind attaches the
-//! steering filter. Hold the group for as long as its sockets are served, and
-//! the sockets with it: the kernel numbers the group by what is still in it, so
-//! closing one renumbers every member after it.
+//! count, and hands out one [`Member`] per slot in index order. Binding yields
+//! an opaque [`Claim`], so no socket can be served while the group is partial.
+//! [`Group::complete`] accepts every claim, attaches the steering filter, and
+//! returns a [`Bound`] group that hands out sockets while retaining every
+//! underlying member for its own lifetime.
 //!
 //! ```no_run
 //! # fn example(addr: std::net::SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
 //! let mut group = moq_sock::shard::Group::acquire(addr, 4)?;
-//! let mut members = Vec::new();
+//! let mut claims = Vec::new();
 //! while let Some(member) = group.member() {
-//!     let shard = member.shard();
-//!     // Kept, not dropped: a socket leaving the group renumbers the rest.
-//!     members.push((shard, member.bind()?));
+//!     claims.push(member.bind()?);
+//! }
+//! let mut group = group.complete(claims)?;
+//! let mut members = Vec::new();
+//! while let Some(member) = group.member()? {
+//!     members.push((member.shard(), member.into_inner()));
 //! }
 //! // Serve each socket, issuing connection IDs led by `cid_prefix(shard)`.
 //! # Ok(())
@@ -128,8 +131,7 @@ pub enum Error {
 	},
 }
 
-/// A `SO_REUSEPORT` group being formed: the port it holds, how many members it
-/// has, and the order they bind in.
+/// A `SO_REUSEPORT` group being formed.
 ///
 /// Everything a steered group has to get right lives here rather than in its
 /// caller, because none of it is visible in a socket afterwards:
@@ -144,12 +146,11 @@ pub enum Error {
 ///   is the only thing that can bind into the group. The kernel numbers the
 ///   group by bind order, so a member that binds out of turn is refused rather
 ///   than silently taking a sibling's slot.
-///
-/// The one rule left to the caller is keeping every bound socket: the kernel
-/// numbers the group by what is *in* it, so closing one renumbers every member
-/// after it and the filter steers their traffic to the wrong sockets. Nothing
-/// here can enforce that while the caller owns the sockets, which is what
-/// handing them back from the group would fix.
+/// - [`complete`](Self::complete) accepts only every claim from this group and
+///   attaches the filter before returning a [`Bound`] group. A claim exposes no
+///   socket, so a partial group cannot serve.
+/// - [`Bound`] retains every underlying socket. A serving handle may be dropped
+///   without removing its member and renumbering the survivors.
 ///
 /// Members may be bound wherever their sockets are served, a worker's own thread
 /// included, as long as each one binds before the next takes its turn.
@@ -217,6 +218,42 @@ impl Group {
 			state: self.state.clone(),
 		})
 	}
+
+	/// Complete the group and make its sockets available for serving.
+	///
+	/// Every member must have bound successfully, and the claims must belong to
+	/// this group in slot order. Failure closes the partial group as a whole.
+	pub fn complete(self, claims: Vec<Claim>) -> io::Result<Bound> {
+		if claims.len() != usize::from(self.count) {
+			return Err(io::Error::new(
+				io::ErrorKind::InvalidInput,
+				format!(
+					"reuseport group needs {} bound members; {} were provided",
+					self.count,
+					claims.len()
+				),
+			));
+		}
+
+		for (index, claim) in claims.iter().enumerate() {
+			if !Arc::ptr_eq(&self.state, &claim.state) || usize::from(claim.shard.index()) != index {
+				return Err(io::Error::new(
+					io::ErrorKind::InvalidInput,
+					"reuseport claims must belong to this group in slot order",
+				));
+			}
+		}
+
+		let sockets: Vec<_> = claims.into_iter().map(|claim| (claim.shard, claim.socket)).collect();
+		let (_, last) = sockets.last().expect("a group always has at least one member");
+		attach(last, self.count)?;
+
+		Ok(Bound {
+			sockets,
+			next: 0,
+			state: self.state,
+		})
+	}
 }
 
 /// One member's claim on a slot in a [`Group`], which binding spends.
@@ -239,17 +276,15 @@ impl Member {
 		self.shard
 	}
 
-	/// Bind this member's socket into the group, steering the whole group once
-	/// the last member has joined.
+	/// Bind this member into the group and return its opaque claim.
 	///
 	/// Fails when a sibling has not bound yet: the kernel numbers a reuseport
 	/// group by bind order, so a member joining out of turn would take another's
 	/// slot and steer its traffic, with no error to show for it.
 	///
-	/// Keep the socket for as long as the group is served. Closing one takes it
-	/// out of the group, which renumbers every member that joined after it, and
-	/// the steering filter goes on pointing at the positions they used to hold.
-	pub fn bind(self) -> io::Result<UdpSocket> {
+	/// The claim exposes no socket. Pass every claim to [`Group::complete`],
+	/// which attaches the filter before releasing serving handles.
+	pub fn bind(self) -> io::Result<Claim> {
 		let mut progress = self.state.progress();
 		if progress.bound != self.shard.index() {
 			return Err(io::Error::other(format!(
@@ -268,8 +303,83 @@ impl Member {
 			progress.addr = socket.local_addr()?;
 		}
 		progress.bound += 1;
+		drop(progress);
 
-		Ok(socket)
+		Ok(Claim {
+			shard: self.shard,
+			socket,
+			state: self.state,
+		})
+	}
+}
+
+/// One successfully bound member of a forming [`Group`].
+///
+/// Opaque so a socket cannot be served before every member has joined and the
+/// steering filter is attached. Pass all claims to [`Group::complete`].
+#[derive(Debug)]
+pub struct Claim {
+	shard: Shard,
+	socket: UdpSocket,
+	state: Arc<State>,
+}
+
+/// A complete steered group that retains every member socket.
+///
+/// [`member`](Self::member) returns duplicate handles to the retained sockets.
+/// Dropping one handle stops serving that slot without removing it from the
+/// kernel group or renumbering any survivor. Dropping this group closes every
+/// retained member together.
+#[derive(Debug)]
+pub struct Bound {
+	sockets: Vec<(Shard, UdpSocket)>,
+	next: usize,
+
+	/// Holds the port lock for exactly as long as the complete socket group.
+	state: Arc<State>,
+}
+
+impl Bound {
+	/// How many sockets share the port.
+	pub fn count(&self) -> u16 {
+		self.sockets.len().try_into().expect("group count fits u16")
+	}
+
+	/// The address every member holds.
+	pub fn addr(&self) -> SocketAddr {
+		self.state.progress().addr
+	}
+
+	/// The next socket to serve, or `None` once every member was handed out.
+	///
+	/// The group retains the underlying socket, so dropping the returned handle
+	/// cannot resize the kernel's reuseport array.
+	pub fn member(&mut self) -> io::Result<Option<Socket>> {
+		let Some((shard, socket)) = self.sockets.get(self.next) else {
+			return Ok(None);
+		};
+		let socket = socket.try_clone()?;
+		self.next += 1;
+		Ok(Some(Socket { shard: *shard, socket }))
+	}
+}
+
+/// One serving handle released by a complete [`Bound`] group.
+#[derive(Debug)]
+pub struct Socket {
+	shard: Shard,
+	socket: UdpSocket,
+}
+
+impl Socket {
+	/// This socket's position in the group.
+	pub fn shard(&self) -> Shard {
+		self.shard
+	}
+
+	/// Release the UDP handle while the [`Bound`] group retains its member.
+	pub fn into_inner(self) -> UdpSocket {
+		self.socket
 	}
 }
 
@@ -339,16 +449,7 @@ fn bind(addr: SocketAddr, shard: Shard) -> io::Result<UdpSocket> {
 		drop(crate::bind::udp(crate::bind::Udp::new(addr))?);
 	}
 
-	let socket = crate::bind::udp(crate::bind::Udp::new(addr).with_reuse_port(true))?;
-
-	// The filter covers the group, not the socket, so it goes on once everyone is
-	// in. Attaching earlier would steer by an index range that is still growing,
-	// and the members that joined later would be unreachable until it was redone.
-	if shard.index() + 1 == shard.count() {
-		attach(&socket, shard.count())?;
-	}
-
-	Ok(socket)
+	crate::bind::udp(crate::bind::Udp::new(addr).with_reuse_port(true))
 }
 
 /// Holds a listen port for one group's lifetime.
@@ -762,8 +863,12 @@ mod tests {
 		const COUNT: u16 = 3;
 
 		let mut group = Group::acquire("127.0.0.1:0".parse().unwrap(), COUNT).unwrap();
-		let sockets: Vec<UdpSocket> = (0..COUNT)
+		let claims: Vec<Claim> = (0..COUNT)
 			.map(|_| group.member().expect("a slot per member").bind().expect("bind member"))
+			.collect();
+		let mut group = group.complete(claims).expect("complete group");
+		let sockets: Vec<UdpSocket> = (0..COUNT)
+			.map(|_| group.member().unwrap().expect("a socket per member").into_inner())
 			.collect();
 
 		let addr = group.addr();
@@ -792,8 +897,21 @@ mod tests {
 
 		// Refused, not deferred: nothing joined the group, so the slot the
 		// kernel would have handed the second member is still the first's.
-		let socket = first.bind().expect("bind the first member");
-		assert_eq!(socket.local_addr().unwrap(), group.addr());
+		first.bind().expect("bind the first member");
+		assert_ne!(group.addr().port(), 0);
+	}
+
+	/// A forming group exposes claims, not sockets, and refuses completion until
+	/// every declared member is bound.
+	#[test]
+	#[cfg(target_os = "linux")]
+	fn a_partial_group_cannot_serve() {
+		let mut group = Group::acquire("127.0.0.1:0".parse().unwrap(), 2).unwrap();
+		let claim = group.member().unwrap().bind().expect("bind first member");
+
+		group
+			.complete(vec![claim])
+			.expect_err("a partial group must not complete");
 	}
 
 	/// The whole point, end to end against a real kernel: a packet carrying a
@@ -808,11 +926,16 @@ mod tests {
 		const COUNT: u16 = 4;
 
 		let mut group = Group::acquire("127.0.0.1:0".parse().unwrap(), COUNT).unwrap();
+		let mut claims = Vec::new();
+		while let Some(member) = group.member() {
+			claims.push(member.bind().expect("bind group member"));
+		}
+		let mut group = group.complete(claims).expect("complete group");
 		let mut sockets = Vec::new();
 		let mut shards = Vec::new();
-		while let Some(member) = group.member() {
+		while let Some(member) = group.member().expect("clone retained socket") {
 			shards.push(member.shard());
-			let socket = member.bind().expect("bind group member");
+			let socket = member.into_inner();
 			socket.set_nonblocking(true).unwrap();
 			sockets.push(socket);
 		}
@@ -850,6 +973,34 @@ mod tests {
 		}
 	}
 
+	/// Dropping one serving handle leaves its retained member in the kernel
+	/// array, so every later slot keeps the position its connection IDs encode.
+	#[test]
+	#[cfg(target_os = "linux")]
+	fn dropping_a_serving_handle_does_not_resize_the_group() {
+		let mut group = Group::acquire("127.0.0.1:0".parse().unwrap(), 2).unwrap();
+		let mut claims = Vec::new();
+		while let Some(member) = group.member() {
+			claims.push(member.bind().expect("bind group member"));
+		}
+		let mut group = group.complete(claims).expect("complete group");
+		let first = group.member().unwrap().expect("first serving socket");
+		let second = group.member().unwrap().expect("second serving socket");
+		let shard = second.shard();
+		let socket = second.into_inner();
+		socket
+			.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+			.unwrap();
+		drop(first);
+
+		let packet = [0x40, cid_prefix(shard), 1, 2, 3, 4, 5, 6, 7, 8];
+		let sender = crate::bind::udp(crate::bind::Udp::new("127.0.0.1:0".parse().unwrap())).unwrap();
+		sender.send_to(&packet, group.addr()).unwrap();
+
+		let mut buf = [0; 16];
+		assert_eq!(socket.recv_from(&mut buf).unwrap().0, packet.len());
+	}
+
 	/// A second group on a named port must lose it while the first is alive: two
 	/// groups constructing at once would each pass the bind probe before either
 	/// held the port, then interleave into one group whose filter steers each
@@ -865,7 +1016,8 @@ mod tests {
 		};
 
 		let mut first = Group::acquire(addr, 1).unwrap();
-		let socket = first.member().unwrap().bind().expect("bind the first group");
+		let claim = first.member().unwrap().bind().expect("bind the first group");
+		let first = first.complete(vec![claim]).expect("complete the first group");
 
 		assert!(
 			matches!(Group::acquire(addr, 1), Err(Error::Overlap { .. })),
@@ -874,7 +1026,6 @@ mod tests {
 
 		// The lock dies with the group, so the port is takeable again.
 		drop(first);
-		drop(socket);
 		Group::acquire(addr, 1).expect("the released port must be takeable again");
 	}
 
@@ -899,10 +1050,9 @@ mod tests {
 			"a second group took a port an unbound member still holds"
 		);
 
-		let socket = member.bind().expect("bind the outstanding member");
-		assert_eq!(socket.local_addr().unwrap(), addr);
+		let claim = member.bind().expect("bind the outstanding member");
 
-		drop(socket);
+		drop(claim);
 		Group::acquire(addr, 1).expect("the released port must be takeable again");
 	}
 

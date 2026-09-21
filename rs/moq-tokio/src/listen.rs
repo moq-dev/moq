@@ -136,7 +136,8 @@ pub struct Config {
 			"moq-transport-18",
 			"moq-transport-19",
 			"moq-transport-20",
-			"moq-transport-21"
+			"moq-transport-21",
+			"moq-transport-22"
 		)
 	)]
 	pub version: Vec<moq_net::Version>,
@@ -220,16 +221,14 @@ pub struct Config {
 	pub quic: Option<crate::quic::Config>,
 }
 
-/// One server's claim on a slot in a `SO_REUSEPORT` group, and the slot it
-/// names once bound.
-///
-/// Crate-private on purpose: [`crate::worker::Workers`] is the only thing that
-/// forms a group here, and a member a caller could mint for itself would bind
-/// outside one.
-#[cfg(feature = "_transport")]
-pub(crate) use moq_sock::shard::Member;
 #[cfg(feature = "noq")]
 pub(crate) use moq_sock::shard::Shard;
+/// One server's socket in a complete `SO_REUSEPORT` group.
+///
+/// Crate-private on purpose: [`crate::worker::Workers`] is the only thing that
+/// forms a group here, and callers do not need its raw serving handles.
+#[cfg(feature = "_transport")]
+pub(crate) use moq_sock::shard::Socket;
 
 /// The `--server-*` flags from before the accept side was named `listen`.
 ///
@@ -260,7 +259,8 @@ pub(crate) struct Legacy {
 			"moq-transport-18",
 			"moq-transport-19",
 			"moq-transport-20",
-			"moq-transport-21"
+			"moq-transport-21",
+			"moq-transport-22"
 		),
 		hide = true
 	)]

@@ -271,6 +271,11 @@ mod inline {
 	/// An [`Encoder`] driven inline on the calling thread (see the module docs).
 	pub struct Inner(Encoder);
 
+	// SAFETY: VideoToolbox and Core Foundation handles may move between threads
+	// when calls remain serialized. `Sink` provides that serialization; the
+	// synchronous `Encoder` remains thread-bound.
+	unsafe impl Send for Inner {}
+
 	impl Inner {
 		pub async fn open(config: &Config) -> Result<Self, Error> {
 			Ok(Self(Encoder::new(config)?))

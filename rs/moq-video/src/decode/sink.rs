@@ -4,10 +4,11 @@
 //! The decode-side mirror of [`encode::Sink`](crate::encode::Sink), for the same
 //! reason: the Windows backend is a Media Foundation transform whose COM handles
 //! must be created, driven, and dropped all on one thread (COM apartments are
-//! per-thread). `unsafe impl Send for MediaFoundation` holds only while that is
-//! true, and a decoder held across `.await` in a plain task does not keep it: the
-//! future migrates between executor workers, so the apartment is opened on one
-//! and closed on another.
+//! per-thread). Backends are `!Send` and the synchronous `Decoder` inherits it;
+//! confinement is enforced by that plus the `Worker` below, which keeps the
+//! whole codec lifetime on one thread. A decoder held across `.await` in a
+//! plain task does not keep it: the future migrates between executor workers,
+//! so the apartment is opened on one and closed on another.
 //!
 //! macOS keeps decoding inline: VideoToolbox has no COM apartment to balance, so
 //! a thread would only add a hop, and its zero-copy `CVPixelBuffer` surface is
@@ -192,6 +193,11 @@ mod inline {
 
 	/// A [`Decoder`] driven inline on the calling thread (see the module docs).
 	pub struct Inner(Decoder);
+
+	// SAFETY: VideoToolbox and Core Foundation handles may move between threads
+	// when calls remain serialized. `Sink` provides that serialization; the
+	// synchronous `Decoder` remains thread-bound.
+	unsafe impl Send for Inner {}
 
 	impl Inner {
 		pub async fn open(catalog: &VideoConfig, config: &Config) -> Result<Self, Error> {

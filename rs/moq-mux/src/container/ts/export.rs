@@ -65,6 +65,41 @@ pub(super) const PCR_INTERVAL: Duration = Duration::from_millis(25);
 /// clock history for a span that carried no bytes only stalls anything pacing on
 /// the asserted values.
 const PCR_BACKFILL: u128 = 40;
+/// A null packet: PID 0x1FFF, payload only, all stuffing. Its continuity counter
+/// is don't-care (ISO 13818-1), so one template serves every one.
+pub(super) const NULL_PACKET: [u8; TsPacket::SIZE] = {
+	let mut packet = [0xff; TsPacket::SIZE];
+	packet[0] = 0x47;
+	packet[1] = 0x1f;
+	packet[2] = 0xff;
+	packet[3] = 0x10;
+	packet
+};
+/// Grid slots per second, so the multiplex rate in bits per second is also the
+/// per-slot allowance in [`STUFFING_UNIT`]s.
+const SLOTS_PER_SECOND: i64 = (Duration::from_secs(1).as_nanos() / PCR_INTERVAL.as_nanos()) as i64;
+const _: () = assert!(
+	Duration::from_secs(1)
+		.as_nanos()
+		.is_multiple_of(PCR_INTERVAL.as_nanos())
+);
+/// Fixed-point unit of the stuffing balance: one packet is this many units, so that
+/// one slot at `mux_rate` bits per second is exactly `mux_rate` units and no slot
+/// rounds on its own. The remainder carries across slots instead.
+const STUFFING_UNIT: i64 = TsPacket::SIZE as i64 * 8 * SLOTS_PER_SECOND;
+/// Upper bound on an accepted multiplex rate, in bits per second: far above any
+/// broadcast contribution multiplex, while bounding one slot's null allocation
+/// to a few megabytes. Zero and anything past it are refused where they enter,
+/// leaving the output unpadded.
+const MAX_MUX_RATE: u64 = 1_000_000_000;
+
+/// A multiplex rate from the builder override or the (untrusted) catalog is only
+/// worth padding to when it is a real rate: zero pads nothing, and anything past
+/// [`MAX_MUX_RATE`] would allocate unbounded nulls per slot. Invalid rates are
+/// refused, leaving the output unpadded.
+fn sanitize_mux_rate(rate: u64) -> Option<u64> {
+	(1..=MAX_MUX_RATE).contains(&rate).then_some(rate)
+}
 
 /// Subscribe to a broadcast and produce an MPEG-TS byte stream.
 ///
@@ -129,6 +164,12 @@ pub struct Export<E: catalog::Catalog = ()> {
 	/// step backwards all the time, so a span closes on a timestamp passing this
 	/// high-water mark rather than on every frame.
 	watermark: Option<Timestamp>,
+	/// The rate to pad the output to with null packets, in bits per second: the
+	/// builder override when set, else the catalog's recorded multiplex rate, else
+	/// none and the output is unpadded ([`Self::stuff`]).
+	mux_rate: Option<u64>,
+	mux_rate_override: Option<u64>,
+	stuffing: Stuffing,
 	/// Tune-in point: the first video keyframe's timestamp, captured when the program
 	/// tables are built. Non-video frames before it are dropped so the keyframe leads
 	/// the stream.
@@ -208,6 +249,18 @@ enum Kind {
 		framing: catalog::Framing,
 		stream_id: Option<u8>,
 	},
+}
+
+/// The null stuffing owed to the multiplex rate ([`Export::stuff`]).
+#[derive(Default)]
+struct Stuffing {
+	/// Packets the rate has allowed minus packets sent, in [`STUFFING_UNIT`]s.
+	/// Negative while the media alone exceeds the rate.
+	balance: i64,
+	/// Packets sent since the last clock packet, that packet included.
+	since_pcr: u64,
+	/// Whether the debt cap has been hit and reported in the current overrun.
+	overrun: bool,
 }
 
 /// The program tables plus the resolved PID layout.
@@ -458,7 +511,25 @@ impl<E: catalog::Catalog> Export<E> {
 			low: None,
 			watermark: None,
 			video_start: None,
+			mux_rate: None,
+			mux_rate_override: None,
+			stuffing: Stuffing::default(),
 		})
+	}
+
+	/// Pad the output with null packets to `mux_rate` bits per second, whatever the
+	/// catalog records. Without this the catalog's `mpegts.muxRate` decides, and a
+	/// catalog without one leaves the output unpadded.
+	///
+	/// Zero and absurd rates are refused with a warning, leaving the output
+	/// unpadded rather than allocating unbounded nulls.
+	pub fn with_mux_rate(mut self, mux_rate: u64) -> Self {
+		if sanitize_mux_rate(mux_rate).is_none() {
+			tracing::warn!(mux_rate, "ignoring invalid MPEG-TS multiplex rate override");
+		}
+		self.mux_rate_override = Some(mux_rate);
+		self.mux_rate = sanitize_mux_rate(mux_rate);
+		self
 	}
 
 	/// Set the max age for each per-track source.
@@ -711,6 +782,21 @@ impl<E: catalog::Catalog> Export<E> {
 		let mpegts = catalog.ext.mpegts_mut().cloned().unwrap_or_default();
 		self.program_descriptors = mpegts.program_descriptors.clone();
 		self.program = mpegts.program.clone();
+		// An explicit override wins even when it is refused (leaving the output
+		// unpadded), so a bad flag cannot silently fall back to the catalog rate.
+		let mux_rate = match self.mux_rate_override {
+			Some(override_rate) => sanitize_mux_rate(override_rate),
+			None => mpegts.mux_rate.and_then(|rate| {
+				sanitize_mux_rate(rate).or_else(|| {
+					tracing::warn!(mux_rate = rate, "ignoring invalid MPEG-TS multiplex rate in catalog");
+					None
+				})
+			}),
+		};
+		if self.mux_rate != mux_rate {
+			self.mux_rate = mux_rate;
+			self.stuffing = Stuffing::default();
+		}
 
 		// Reconcile the SI subscriptions with the catalog's map. Entries may appear
 		// after the PAT/PMT is built (a table acquired late): they ride standalone
@@ -932,6 +1018,7 @@ impl<E: catalog::Catalog> Export<E> {
 		}
 		self.video_start = None;
 		self.pcr_discontinuity = true;
+		self.stuffing = Stuffing::default();
 		for track in self.tracks.values_mut() {
 			track.last_dts = None;
 			track.epoch = self.epoch;
@@ -1379,8 +1466,10 @@ impl<E: catalog::Catalog> Export<E> {
 		let pcr_pid = self.psi.as_ref().context("PSI not built")?.pcr_pid;
 		let mut payload = Vec::new();
 		for index in first..=open {
+			self.stuff(index, &mut payload);
 			let before = counter_before(&bytes, 0, pcr_pid, self.pcr_cc);
-			payload.extend_from_slice(&self.pcr_at(index, before)?);
+			let clock = self.pcr_at(index, before)?;
+			self.send(&mut payload, &clock);
 		}
 		let mut cut = 0;
 		let mut at = from;
@@ -1395,20 +1484,82 @@ impl<E: catalog::Catalog> Export<E> {
 			} else {
 				packets
 			};
-			payload.extend_from_slice(&bytes[cut * TsPacket::SIZE..next * TsPacket::SIZE]);
+			self.send(&mut payload, &bytes[cut * TsPacket::SIZE..next * TsPacket::SIZE]);
+			self.stuff(index, &mut payload);
 			self.push(at, payload, &keyframes, cut, next);
 			cut = next;
 			at = boundary;
 			let before = counter_before(&bytes, cut * TsPacket::SIZE, pcr_pid, self.pcr_cc);
-			payload = self.pcr_at(index, before)?;
+			let clock = self.pcr_at(index, before)?;
+			payload = Vec::new();
+			self.send(&mut payload, &clock);
 		}
 
-		payload.extend_from_slice(&bytes[cut * TsPacket::SIZE..]);
+		self.send(&mut payload, &bytes[cut * TsPacket::SIZE..]);
 		self.push(at, payload, &keyframes, cut, packets);
 		if let Some(cc) = counter_before(&bytes, bytes.len(), pcr_pid, None) {
 			self.pcr_cc = Some(cc);
 		}
 		Ok(())
+	}
+
+	/// Append packets to the open output frame, counting them against the rate.
+	fn send(&mut self, payload: &mut Vec<u8>, packets: &[u8]) {
+		payload.extend_from_slice(packets);
+		self.stuffing.since_pcr += (packets.len() / TsPacket::SIZE) as u64;
+	}
+
+	/// Settle the interval that closes at grid slot `index`, the one the clock packet
+	/// about to be written for it ends, appending the null packets that bring it up
+	/// to the multiplex rate. Nothing without a rate.
+	///
+	/// The rate credits each slot its exact fractional allowance and every packet
+	/// sent debits one, so the remainder carries across slots and the long-run count
+	/// is exact. Media is never delayed or dropped to fit: a slot that already
+	/// exceeds its allowance gets no nulls and carries the debt forward, and a source
+	/// that sustains more than the rate simply overruns it. The debt is capped at one
+	/// second of packets and reported once per overrun, or the rate would never
+	/// recover after a long burst. Credit is capped the same way, matching the clock
+	/// backfill: past it the media gapped, and a second of stuffing marks that without
+	/// filling the whole gap.
+	fn stuff(&mut self, index: u128, payload: &mut Vec<u8>) {
+		let since = std::mem::take(&mut self.stuffing.since_pcr);
+		let (Some(rate), Some(last)) = (self.mux_rate, self.last_pcr) else {
+			return;
+		};
+		// The rate is sanitized where it enters (the builder and the catalog), so
+		// this holds; refuse to pad rather than wrap if it ever does not.
+		let Ok(rate) = i64::try_from(rate) else {
+			return;
+		};
+		let slots = index.saturating_sub(last).min(PCR_BACKFILL) as i64;
+		let stuffing = &mut self.stuffing;
+		stuffing.balance = stuffing
+			.balance
+			.saturating_add(slots.saturating_mul(rate))
+			.saturating_sub((since as i64).saturating_mul(STUFFING_UNIT));
+		let floor = rate.saturating_mul(-SLOTS_PER_SECOND);
+		if stuffing.balance < floor {
+			if !std::mem::replace(&mut stuffing.overrun, true) {
+				tracing::warn!(mux_rate = rate, "MPEG-TS output exceeds the multiplex rate");
+			}
+			stuffing.balance = floor;
+		} else if stuffing.balance >= 0 {
+			stuffing.overrun = false;
+		}
+		let nulls = (stuffing.balance / STUFFING_UNIT).max(0);
+		// Never emit more than the slots just credited could allow: a bound on one
+		// call's allocation whatever the balance holds. A no-op on a rate that came
+		// through [`sanitize_mux_rate`], whose balance carries less than one packet.
+		// (A manual `div_ceil`: all terms are non-negative, and the toolchain's
+		// signed `div_ceil` is still unstable.)
+		let ceiling = slots.saturating_mul(rate).saturating_add(STUFFING_UNIT - 1) / STUFFING_UNIT;
+		let nulls = nulls.min(ceiling);
+		stuffing.balance -= nulls * STUFFING_UNIT;
+		payload.reserve(nulls as usize * TsPacket::SIZE);
+		for _ in 0..nulls {
+			payload.extend_from_slice(&NULL_PACKET);
+		}
 	}
 
 	/// Queue one output frame, unless it would be empty. `from`..`to` are the packet

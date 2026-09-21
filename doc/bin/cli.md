@@ -64,6 +64,14 @@ discarding the old mux buffer. The first new clock packet signals the break and
 stdout pacing re-anchors. Every rendition joins the new program generation;
 no track is fenced across the marker.
 
+A constant-rate MPEG-TS source records its multiplex rate in the catalog
+(`mpegts.muxRate`, measured off the PCR clock, null stuffing included), and
+`export ts` pads its output with null packets back to that rate so an IRD or
+groomer receives a constant-rate stream. `--mux-rate 5000000` pads to an explicit
+rate instead, including for a broadcast that recorded none. Media is never delayed
+or dropped to fit: a source that sustains more than the rate overruns it, and a
+VBR source records nothing, so export without either stays unpadded.
+
 fMP4 export writes one fragment per publisher group on each track. Audio follows
 the publisher's cuts; video normally follows GOPs. Closing a group flushes it
 even when the live publisher pauses. `--fragment-duration 2s` caps

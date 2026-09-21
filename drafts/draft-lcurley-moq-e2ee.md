@@ -34,7 +34,7 @@ informative:
 
 This document specifies moq-e2ee-00, a versioned profile for end-to-end encryption of MoQ application payloads.
 Authorized publishers and subscribers share a 32-byte broadcast secret out of band.
-Each publisher instance mints an epoch and publishes under a broadcast path ending in it.
+Each publisher instance mints an epoch and publishes under an opaque broadcast path ending in it.
 HKDF-SHA-256 derives opaque physical track names and per-track AES-128-GCM keys from the secret and the epoch; grouped frames and datagrams use separate key domains.
 Media frames and datagrams carry only ciphertext plus a 16-byte tag.
 The profile binds object identity through derivation and the nonce, not an on-wire header.
@@ -52,7 +52,7 @@ Submit an [issue](https://github.com/moq-dev/moq/issues) or [PR](https://github.
 
 # Introduction
 MoQ relays forward named tracks of groups and frames ({{moql}}, {{moqt}}) without parsing application payloads.
-This profile encrypts those payloads and the semantic track names that would otherwise describe them, so a relay cannot recover content.
+This profile encrypts those payloads and hides the semantic broadcast and track names that would otherwise describe them, so a relay cannot recover content.
 It reuses AES-128-GCM and the 96-bit group/frame nonce shape of {{secure}} where those identities map, and specifies the moq-lite and datagram bindings that draft does not cover.
 
 The profile does not distribute keys, sign senders, pad payloads, or rotate a key inside an epoch.
@@ -113,7 +113,7 @@ Exactly 32 bytes from a cryptographically secure random generator.
 It MUST NOT be a password, passphrase, or other guessable input.
 
 `kid` MUST be in `0..=2^53-1` inclusive, the largest integer TypeScript can represent exactly.
-`context`, every `epoch`, and every `semantic_name` MUST be at most 65535 bytes, the `bytes` encoding width.
+`context`, every `epoch`, and every semantic broadcast or track name MUST be at most 65535 bytes, the `bytes` encoding width.
 An implementation MUST refuse a credential outside those ranges (`identity`) or whose secret is not 32 bytes (`invalid_secret`).
 
 Applications distribute credentials over their own authenticated channel.
@@ -131,10 +131,11 @@ Each instance of a broadcast MUST mint an epoch that no other instance under the
 Two instances MUST NOT share an epoch: they would derive the same keys and collide on nonces.
 The RECOMMENDED epoch is the lowercase text of a UUID version 7 ({{RFC9562}}): its leading 48-bit timestamp makes epochs sort by creation time and its random bits make collisions negligible.
 
-A protected broadcast is published at `<name>.e2ee/<epoch>`, where `<name>.e2ee` is the application's broadcast name with an `.e2ee` suffix and `<epoch>` is the epoch text.
-The `.e2ee` suffix marks every path beneath it as ciphertext.
-A protected path never ends in a plaintext format suffix such as `.hang`; the format an authorized client finds after decryption may appear inside the name, as in `meeting.hang.e2ee/<epoch>`.
-Subscribers discover instances by the `<name>.e2ee/` prefix and select the greatest epoch when epochs are UUID version 7 text, where greatest is newest.
+A protected broadcast is published at `<opaque>/<epoch>`, where `<opaque>` is the 22-character base64url segment derived from the credential and the application's semantic broadcast name according to {{derive}}, and `<epoch>` is the epoch text.
+The opaque derivation does not include the epoch, so every instance of the same semantic broadcast shares a discovery prefix.
+The path carries no format or protection marker; for example, the semantic name `meeting.hang` appears only as an input to the opaque derivation.
+A plaintext consumer that opens the protected broadcast fails because it cannot find the plaintext catalog it expects, not because of a path naming rule.
+Subscribers discover instances by the `<opaque>/` prefix and select the greatest epoch when epochs are UUID version 7 text, where greatest is newest.
 Opaque epochs carry no creation order, so any other epoch form needs an application rule for which instance is current.
 A subscriber that already knows the full path takes the epoch from its last segment.
 
@@ -165,7 +166,21 @@ Let `salt` be the ASCII bytes of `"moq-e2ee-00"`.
 prk = HKDF-Extract(salt, secret)
 ~~~
 
-Physical name material is 16 bytes:
+Opaque broadcast path material is 16 bytes:
+
+~~~
+path_info = "moq-e2ee-00 path"
+            || bytes(context)
+            || u64(kid)
+            || bytes(semantic_broadcast)
+opaque    = HKDF-Expand(prk, path_info, 16)
+~~~
+
+`semantic_broadcast` is the UTF-8 bytes of the application's semantic broadcast name.
+The opaque path segment is the unpadded base64url encoding of `opaque` ({{RFC4648}} Section 5): 22 ASCII characters.
+The epoch is deliberately absent from this derivation, so a subscriber can derive the prefix before discovering an instance.
+
+Physical track name material is 16 bytes:
 
 ~~~
 name_info = "moq-e2ee-00 name"
@@ -178,7 +193,7 @@ physical  = HKDF-Expand(prk, name_info, 16)
 
 `semantic_name` is the UTF-8 bytes of the application's track name (`catalog.json`, `video`, and so on).
 The physical track name is the unpadded base64url encoding of `physical` ({{RFC4648}} Section 5): 22 ASCII characters, which is a valid moq-lite track name.
-The same function hides any name the application wants a relay not to read; it is not limited to tracks.
+This function may hide any track-shaped name the application wants a relay not to read; it is not limited to media tracks.
 
 AEAD keys are 16 bytes, one per physical name and domain:
 
@@ -305,7 +320,7 @@ Each negative row specifies an `operation`, its inputs, and its expected typed e
 Non-finite frame inputs use the strings `NaN`, `Infinity`, and `-Infinity`; group inputs in identity tests are decimal strings.
 Implementations whose types cannot represent an invalid input MUST reject it at their input boundary.
 
-The file covers derivation, physical naming, grouped frames, a datagram at the fixed budget, the same identity under two epochs, relocation across every identity dimension, tag failure, malformed physical names, identity bounds, and oversize plaintext.
+The file covers opaque path derivation, key derivation, physical naming, grouped frames, a datagram at the fixed budget, the same identity under two epochs, relocation across every identity dimension, tag failure, malformed physical names, identity bounds, and oversize plaintext.
 
 The shared verifier is stateless.
 It does not verify `reuse`, `exhausted`, `duplicate`, or failure propagation.
@@ -318,8 +333,11 @@ Relays, caches, recorders, and control planes are untrusted for content.
 Authorized endpoints that hold the broadcast secret are trusted.
 Sender authenticity against another endpoint that also holds the secret is not a goal of `moq-e2ee-00`.
 
-A relay can still observe the outer broadcast path including the epoch, opaque physical names, group and frame structure, timestamps, sizes, and traffic patterns.
+A relay can still observe the outer broadcast path including the opaque segment and epoch, opaque physical names, group and frame structure, timestamps, sizes, and traffic patterns.
 Padding and metadata-flow confidentiality are out of scope.
+
+The opaque segment hides the application's semantic broadcast name from a relay only while the application does not publish or otherwise expose the same name in plaintext.
+The epoch remains visible to every relay on the path.
 
 Nonce reuse under one key is catastrophic for AES-GCM.
 The profile prevents it by deriving every key from an epoch that only one publisher instance ever uses, allocating identities monotonically within that instance, separating datagram and grouped domains, and capping invocations and plaintext bytes per key.
@@ -328,7 +346,7 @@ No state survives an instance: nothing needs to be persisted across restarts to 
 Empty AAD does not weaken the binding: every immutable end-to-end field is in the HKDF info or the nonce.
 Timestamps are excluded because relays rewrite them; a relay can therefore shift or reorder authentic objects in time within a receiver's tolerance.
 
-Physical names are deterministic functions of the secret and epoch.
+The opaque path segment is a deterministic function of the secret and semantic broadcast name; physical track names are deterministic functions of the secret and epoch.
 An attacker without the secret cannot predict them; an attacker with the secret can derive every name, which is intended.
 
 
@@ -344,7 +362,7 @@ This document requests no registrations.
 ## draft-lcurley-moq-e2ee-00
 {:numbered="false"}
 
-- Initial `moq-e2ee-00` profile: out-of-band credential, publisher-minted epoch as the last broadcast path segment under `.e2ee`, HKDF physical names and keys, AES-128-GCM payloads, identity bounds, typed failures, and shared primitive vectors.
+- Initial `moq-e2ee-00` profile: out-of-band credential, opaque broadcast path with a publisher-minted epoch as its last segment, HKDF physical names and keys, AES-128-GCM payloads, identity bounds, typed failures, and shared primitive vectors.
 
 
 # Acknowledgments

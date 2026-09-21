@@ -759,6 +759,7 @@ const ALPNS: Record<IetfVersion, string> = {
 	[Version.DRAFT_19]: ALPN.DRAFT_19,
 	[Version.DRAFT_20]: ALPN.DRAFT_20,
 	[Version.DRAFT_21]: ALPN.DRAFT_21,
+	[Version.DRAFT_22]: ALPN.DRAFT_22,
 };
 
 /**

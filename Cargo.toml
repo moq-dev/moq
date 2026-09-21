@@ -95,6 +95,7 @@ rust-version = "1.91"
 
 [workspace.dependencies]
 anyhow = "1"
+ash = "0.38"
 aws-lc-rs = "1"
 axum = { version = "0.8", features = ["tokio"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }

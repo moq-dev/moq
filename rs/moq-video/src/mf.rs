@@ -56,7 +56,9 @@ pub(crate) fn create_d3d_device() -> Result<(ID3D11Device, IMFDXGIDeviceManager)
 /// `MFShutdown` + `CoUninitialize` on drop. Both calls are refcounted, so a
 /// capture source and an encoder backend can each hold one on the same blocking
 /// thread without stepping on each other.
-pub(crate) struct ComGuard;
+pub(crate) struct ComGuard {
+	started: bool,
+}
 
 impl ComGuard {
 	pub(crate) fn new() -> Result<Self, Error> {
@@ -66,16 +68,20 @@ impl ComGuard {
 			CoInitializeEx(None, COINIT_MULTITHREADED)
 				.ok()
 				.map_err(|e| mf_err("CoInitializeEx", e))?;
+			let mut guard = Self { started: false };
 			MFStartup(MF_VERSION, MFSTARTUP_FULL).map_err(|e| mf_err("MFStartup", e))?;
+			guard.started = true;
+			Ok(guard)
 		}
-		Ok(Self)
 	}
 }
 
 impl Drop for ComGuard {
 	fn drop(&mut self) {
 		unsafe {
-			let _ = MFShutdown();
+			if self.started {
+				let _ = MFShutdown();
+			}
 			CoUninitialize();
 		}
 	}

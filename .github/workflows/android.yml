@@ -1,0 +1,81 @@
+name: Android
+
+# Compiles moq-video for Android, which nothing else on a pull request does.
+# Its MediaCodec encoder and decoder, the `Surface::HardwareBuffer` variant and
+# the `frame::android` module are all `#[cfg(target_os = "android")]`, so every
+# Linux job compiles them to nothing, and a moq-net change that breaks them
+# (a bitrate turning into a `bandwidth::Rate`, say) lands on main unnoticed.
+#
+# Outside Nix, unlike check.yml: the dev shell has no NDK, and the GitHub
+# ubuntu image ships one that cargo-ndk finds through `ANDROID_NDK_HOME`. The
+# recipe is still `just rs android`, so a local run and this one compile the
+# same thing, and rust-toolchain.toml still pins the compiler.
+#
+# Narrow trigger, like wasm.yml. The filter is moq-video's in-repo dependency
+# graph (`cargo metadata`, normal dependencies), plus the files that decide how
+# it is built. A crate added to that graph has to be added here too.
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    # `closed` is here only so merging/closing a PR cancels its in-flight run
+    # via the concurrency group below; the job itself is skipped on close.
+    types: [opened, synchronize, reopened, closed]
+    paths:
+      - "rs/moq-video/**"
+      - "rs/moq-mux/**"
+      - "rs/moq-net/**"
+      - "rs/moq-nvenc/**"
+      - "rs/moq-loc/**"
+      - "rs/moq-msf/**"
+      - "rs/moq-json/**"
+      - "rs/moq-binary/**"
+      - "rs/moq-flate/**"
+      - "rs/moq-pattern/**"
+      - "rs/hang/**"
+      - "rs/kio/**"
+      - "rs/justfile"
+      - "justfile"
+      - ".cargo/config.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/android.yml"
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_NDK_VERSION: 4.1.2
+  JUST_VERSION: 1.52.0
+
+jobs:
+  android:
+    name: Android
+    if: github.event.action != 'closed'
+    # x86_64 rather than the arm runners check.yml uses: GitHub documents the
+    # Android SDK and NDK as preinstalled on this image.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Run from the checkout, so rustup installs the toolchain rust-toolchain.toml
+      # pins and adds the target to that one rather than to the image's default.
+      - name: Add the Android target
+        run: rustup target add aarch64-linux-android
+
+      # No Rust cache: this workflow only runs on pull requests, which may not
+      # save one, so it would have nothing to restore.
+      - name: Install just and cargo-ndk
+        run: cargo install --locked "just@$JUST_VERSION" "cargo-ndk@$CARGO_NDK_VERSION"
+
+      - name: Check
+        run: just rs android

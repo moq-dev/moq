@@ -1,0 +1,4 @@
+interface:
+  display_name: "Takeover"
+  short_description: "Adopt someone else's PR and drive it to landable"
+  default_prompt: "Use $takeover to adopt this pull request and make it landable."

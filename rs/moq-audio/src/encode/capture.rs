@@ -867,7 +867,7 @@ impl<E: CatalogExt> Output for EncoderOutput<'_, E> {
 	}
 
 	fn now(&self) -> u64 {
-		self.clock.micros()
+		self.clock.now().as_micros() as u64
 	}
 
 	fn write(&mut self, samples: capture::Samples, timestamp_us: u64) -> Result<(), Error> {

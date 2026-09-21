@@ -13,7 +13,7 @@ set working-directory := '..'
 # needs a nightly toolchain and sanitizer flags, so `just rs fuzz` is the one recipe
 # that may compile it. Every `--workspace` below therefore carries this, and a new
 # one that forgets it pays a vendored C++ libFuzzer build for nothing. The root
-# justfile's `check-all` and `fix-all` spell it out, since a module cannot read this.
+# justfile's `check --all` and `fix --all` spell it out, since a module cannot read this.
 no_fuzz := "--exclude moq-net-fuzz"
 
 default:
@@ -259,6 +259,15 @@ _wants-tokio-features $PACKAGES:
     set -euo pipefail
     grep -qw 'moq-tokio' <<< "$(just rs _names "$PACKAGES")"
 
+# True when the selection includes a crate with a `capture` feature. Selection
+# pulls in dependents, so a diff to moq-mux or moq-net lands here too, which is
+# how a rename in either reaches the device code that calls it.
+[private]
+_wants-capture $PACKAGES:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    grep -qwE '(moq-video|moq-audio)' <<< "$(just rs _names "$PACKAGES")"
+
 # Print the crate names behind a list of `--package` flags.
 [private]
 _names $PACKAGES:
@@ -298,6 +307,15 @@ _select-test:
     relay=$(just rs _select "rs/moq-relay/src/web.rs")
     if just rs _wants-wasm "$relay"; then
     	fail "a moq-relay diff must not drive it: $(just rs _names "$relay")"
+    fi
+
+    # The break the capture gate was added for: a moq-mux API change that missed
+    # its callers behind `capture`. A moq-mux diff has to reach it.
+    mux=$(just rs _select "rs/moq-mux/src/clock.rs")
+    just rs _wants-capture "$mux" \
+        || fail "a moq-mux diff must drive the capture gate: $(just rs _names "$mux")"
+    if just rs _wants-capture "$relay"; then
+        fail "a moq-relay diff must not drive the capture gate: $(just rs _names "$relay")"
     fi
 
     tokio=$(just rs _select "rs/moq-tokio/src/lib.rs")
@@ -380,6 +398,13 @@ check-changed $FILES:
     # is selected by its dependents, none of which are moq-wasm.
     if [[ "$packages" == "ALL" ]] || just rs _wants-wasm "$packages"; then
     	just rs wasm
+    fi
+
+    # moq-video's and moq-audio's device code is behind `capture`, which is off
+    # by default, so the pass above never compiles it. Only nightly's
+    # `--all-features` did, and a break there lands on main.
+    if [[ "$packages" == "ALL" ]] || just rs _wants-capture "$packages"; then
+    	just rs capture
     fi
 
 # Compile moq-tokio by itself at the feature extremes and with each crypto provider.
@@ -479,15 +504,27 @@ uring *args:
 macos *args:
     cargo check --locked -p moq-video -p moq-audio --all-targets --all-features {{ args }}
 
+# The Linux device code: moq-video's V4L2 and X11 capture and moq-audio's cpal
+# capture, all behind the off-by-default `capture` feature. `check-changed` runs
+# this whenever either crate is selected. The per-crate `--features` spelling
+# keeps it to those two instead of widening what their dependencies compile.
+# `--all-features` would also build the bindgen codecs, which nightly covers.
+
+# Compile and lint the capture feature, which the default check skips.
+capture *args:
+    cargo clippy --locked -p moq-video -p moq-audio --all-targets --features moq-video/capture,moq-audio/capture {{ args }} -- -D warnings
+
 # Same idea as `windows`/`macos`, for Android: moq-video's MediaCodec encoder and
 # decoder, its `Surface::HardwareBuffer` variant, and the `frame::android` module
 # are all `#[cfg(target_os = "android")]`, so a host-target check compiles none of
 # them and every error in them stays invisible.
 #
 # Unlike `windows` and `macos` this needs no special host: the Android targets
-# cross-compile from the Linux dev shell in about half a minute. It needs an NDK,
-# which `cargo-ndk` finds through `ANDROID_NDK_HOME` or the standard SDK layout,
-# so it is a manual gate rather than a CI one until the shell provides one.
+# cross-compile from Linux in about half a minute. It needs an NDK, which
+# `cargo-ndk` finds through `ANDROID_NDK_HOME` or the standard SDK layout. The
+# dev shell provides neither, so android.yml runs this outside Nix on a GitHub
+# runner, whose image ships an NDK, for every PR that touches moq-video or
+# anything it is built from.
 #
 # arm64-v8a alone: it is the only ABI anything here ships, and the code is not
 # ABI-specific, so the other two would compile the same source twice more.
@@ -680,6 +717,21 @@ features:
 # Run the test suite, reporting clippy findings from the same compile.
 test *args:
     RUSTC_WORKSPACE_WRAPPER="$(command -v clippy-driver || true)" cargo nextest run --locked --all-targets {{ args }}
+
+# Exercise the Vulkan producer -> CUDA image contract on Linux/NVIDIA hardware.
+# The driver directory is added explicitly because the Nix shell's dynamic
+# loader path does not include Ubuntu's host driver directory.
+vulkan-cuda:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    driver=$(/usr/sbin/ldconfig -p | awk '/libcuda\.so\.1/{print $NF; exit}')
+    if [[ -z "$driver" ]]; then
+        echo "libcuda.so.1 is not installed" >&2
+        exit 1
+    fi
+    driver_dir=$(dirname "$driver")
+    export LD_LIBRARY_PATH="$driver_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    cargo nextest run --locked -p moq-video --run-ignored only frame::vulkan::tests::vulkan_cuda_slot_reuse_and_teardown
 
 # Same selection as `check-changed`: compiling a crate's test binaries is the
 # expensive half of a test run, so scoping matters more here than anywhere else.

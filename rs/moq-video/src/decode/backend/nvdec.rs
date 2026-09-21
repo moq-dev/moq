@@ -56,10 +56,6 @@ pub(crate) struct Nvdec {
 	discontinuity: bool,
 }
 
-// Used from one thread at a time (the decode loop); the CUDA context is rebound
-// to the current thread on every call.
-unsafe impl Send for Nvdec {}
-
 /// State shared with the parser's C callbacks via the user-data pointer.
 struct State {
 	api: &'static cuvid::Api,

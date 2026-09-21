@@ -38,8 +38,8 @@ pub enum Error {
 	#[error("group sequences are not strictly ascending")]
 	Sequence,
 
-	/// A range object's table does not match its filename bounds.
-	#[error("table bounds {smallest}..={largest} do not match the key")]
+	/// A group range is empty, reversed, or does not match an object's table.
+	#[error("invalid or mismatched group bounds {smallest}..={largest}")]
 	Bounds { smallest: u64, largest: u64 },
 
 	/// The binary table is truncated, overlapping, gapped, or out of range.
@@ -57,6 +57,14 @@ pub enum Error {
 	/// An object path is not a recording key.
 	#[error("invalid path: {0}")]
 	Path(String),
+
+	/// A backend returned a directory from the flat object listing API.
+	#[error("directory listing is unsupported: {0}")]
+	Directory(String),
+
+	/// A pagination continuation was passed to streaming list.
+	#[error("continuation query requires list_paginated")]
+	Pagination,
 
 	/// A create collided with different object bytes.
 	#[error("conflicting object: {0}")]

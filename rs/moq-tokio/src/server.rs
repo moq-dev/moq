@@ -110,7 +110,7 @@ pub(crate) enum Parts {
 	/// the member in here is what stops a group member and a stream-only server
 	/// from being asked for at once.
 	#[cfg_attr(not(feature = "noq"), expect(dead_code, reason = "no QUIC backend is compiled in"))]
-	Member(crate::listen::Member),
+	Member(crate::listen::Socket),
 }
 
 impl Parts {
@@ -128,11 +128,10 @@ impl Parts {
 		matches!(self, Self::All | Self::Streams)
 	}
 
-	/// This server's claim on a slot in the group, when it is a member of one.
-	/// Consuming, because binding it is what joins the group and only one
-	/// backend does that.
+	/// This server's socket in a complete group, when it is a member of one.
+	/// Consuming, because only one backend may own the serving handle.
 	#[cfg_attr(not(feature = "noq"), expect(dead_code, reason = "no QUIC backend is compiled in"))]
-	fn member(self) -> Option<crate::listen::Member> {
+	fn member(self) -> Option<crate::listen::Socket> {
 		match self {
 			Self::Member(member) => Some(member),
 			_ => None,
@@ -308,8 +307,8 @@ impl Server {
 			}
 		}
 
-		// The member is a claim on a slot in a reuseport group, which binding
-		// spends, so the backend may take it only once.
+		// The member is a serving handle released by a complete reuseport group,
+		// so the backend may take it only once.
 		#[cfg(feature = "noq")]
 		let member = parts.member();
 

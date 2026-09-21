@@ -69,7 +69,7 @@ impl Codec {
 /// An opened decoder. Feed it prepared access units in decode order; get back
 /// zero or more decoded frames (zero while the decoder is still buffering, e.g.
 /// before the first keyframe's parameter sets).
-pub(crate) trait Backend: Send {
+pub(crate) trait Backend {
 	/// Decode one access unit stamped with its presentation `timestamp`.
 	/// `keyframe` marks a random-access frame. Takes an owned [`Bytes`] so a
 	/// backend can split codec units without copying.

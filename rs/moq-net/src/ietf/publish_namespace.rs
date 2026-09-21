@@ -528,7 +528,7 @@ mod tests {
 		assert_eq!(msg.hops, None, "an unchanged path is omitted");
 		assert_eq!(msg.cost, Some(0), "a cost of 0 is sent explicitly");
 
-		for version in [Version::Draft17, Version::Draft18, Version::Draft21] {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
 			let encoded = encode_message(&msg, version);
 			let decoded: PublishNamespaceUpdate = decode_message(&encoded, version).unwrap();
 			assert_eq!(decoded, msg, "{version}");

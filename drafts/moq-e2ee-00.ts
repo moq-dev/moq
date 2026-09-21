@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 
 export const PROFILE = "moq-e2ee-00";
 export const SALT = utf8("moq-e2ee-00");
+export const PATH_LABEL = utf8("moq-e2ee-00 path");
 export const NAME_LABEL = utf8("moq-e2ee-00 name");
 export const KEY_LABEL = utf8("moq-e2ee-00 key");
 export const DOMAIN_GROUP = 0x00;
@@ -191,6 +192,16 @@ export function nameInfo(generation: Generation, semanticName: Uint8Array<ArrayB
 	);
 }
 
+/** Canonical path bytes for a credential and semantic name, excluding the epoch. */
+export function pathInfo(credential: Credential, semanticName: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
+	return concat(
+		PATH_LABEL,
+		encodeBytes(credential.context),
+		encodeU64(credential.kid),
+		encodeBytes(semanticName),
+	);
+}
+
 export function keyInfo(generation: Generation, physicalName: string, domain: Domain): Uint8Array<ArrayBuffer> {
 	return concat(
 		KEY_LABEL,
@@ -217,6 +228,24 @@ export async function deriveName(
 	const info = nameInfo(credential, semanticName);
 	const material = await hkdfExpand(extracted, info, NAME_LEN);
 	return { prk: extracted, info, material, physicalName: base64url(material) };
+}
+
+/** Derive the opaque broadcast prefix for a semantic name, independent of epoch. */
+export async function derivePath(
+	credential: Credential,
+	semanticName: Uint8Array<ArrayBuffer>,
+	prk?: Uint8Array<ArrayBuffer>,
+): Promise<{
+	prk: Uint8Array<ArrayBuffer>;
+	info: Uint8Array<ArrayBuffer>;
+	material: Uint8Array<ArrayBuffer>;
+	opaque: string;
+}> {
+	checkCredential(credential);
+	const extracted = prk ?? (await extract(credential));
+	const info = pathInfo(credential, semanticName);
+	const material = await hkdfExpand(extracted, info, NAME_LEN);
+	return { prk: extracted, info, material, opaque: base64url(material) };
 }
 
 export async function deriveKey(
@@ -297,6 +326,28 @@ function generationJson(generation: Generation) {
 	};
 }
 
+function credentialJson(credential: Credential) {
+	return {
+		context: hex(credential.context),
+		kid: Number(credential.kid),
+		secret: hex(credential.secret),
+	};
+}
+
+async function pathVector(id: string, credential: Credential, semanticName: string) {
+	const path = await derivePath(credential, utf8(semanticName));
+	return {
+		id,
+		...credentialJson(credential),
+		semantic_name: semanticName,
+		semantic_name_bytes: hex(utf8(semanticName)),
+		prk: hex(path.prk),
+		path_info: hex(path.info),
+		path_material: hex(path.material),
+		opaque: path.opaque,
+	};
+}
+
 async function derivationVector(id: string, generation: Generation, semanticName: string, domain: Domain) {
 	const named = await deriveName(generation, utf8(semanticName));
 	const keyed = await deriveKey(generation, named.physicalName, domain, named.prk);
@@ -348,6 +399,7 @@ async function payloadVector(
 async function generate() {
 	const base = gen();
 	const video = await deriveName(base, utf8("video"));
+	const paths = [await pathVector("broadcast-meeting-hang", base, "meeting.hang")];
 
 	const derivation = [
 		await derivationVector("group-video", base, "video", DOMAIN_GROUP),
@@ -501,6 +553,7 @@ async function generate() {
 		profile: PROFILE,
 		constants: {
 			salt: hex(SALT),
+			path_label: hex(PATH_LABEL),
 			name_label: hex(NAME_LABEL),
 			key_label: hex(KEY_LABEL),
 			domain_group: DOMAIN_GROUP,
@@ -520,6 +573,7 @@ async function generate() {
 			max_datagram_plaintext: MAX_DATAGRAM_PLAINTEXT,
 		},
 		generation: generationJson(base),
+		paths,
 		derivation,
 		naming,
 		groups,
@@ -574,6 +628,19 @@ function pathFor(file: string): string {
 
 async function verify(doc: Awaited<ReturnType<typeof generate>>): Promise<void> {
 	if (doc.profile !== PROFILE) throw new Error(`profile ${doc.profile}`);
+
+	for (const row of doc.paths) {
+		const credential: Credential = {
+			context: unhex(row.context),
+			kid: BigInt(row.kid),
+			secret: unhex(row.secret),
+		};
+		const path = await derivePath(credential, utf8(row.semantic_name));
+		assertEqual("path prk", hex(path.prk), row.prk);
+		assertEqual("path info", hex(path.info), row.path_info);
+		assertEqual("path material", hex(path.material), row.path_material);
+		assertEqual("opaque path", path.opaque, row.opaque);
+	}
 
 	for (const row of doc.derivation) {
 		const generation = parseGeneration(row);
@@ -700,7 +767,7 @@ async function main(): Promise<void> {
 		throw new Error("drafts/moq-e2ee-00.json is stale; run bun drafts/moq-e2ee-00.ts --write");
 	}
 	console.log(
-		`moq-e2ee-00: ${onDisk.derivation.length} derivation, ${onDisk.groups.length} group, ${onDisk.datagrams.length} datagram, ${onDisk.negative.length} negative vectors`,
+		`moq-e2ee-00: ${onDisk.paths.length} path, ${onDisk.derivation.length} derivation, ${onDisk.groups.length} group, ${onDisk.datagrams.length} datagram, ${onDisk.negative.length} negative vectors`,
 	);
 }
 
