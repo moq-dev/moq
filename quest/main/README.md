@@ -47,8 +47,8 @@ when the four crates are ready for a separately requested 0.1 release.
 Their package boundaries are explicit:
 
 - `moq-audio` owns the PCM/layout and codec configuration split, decoder entry
-  point, publication authority, AEC attachment, playback outcome, and
-  extensible audio frame and packet construction.
+  point, publication authority, playback outcome, and extensible audio frame
+  and packet construction.
 - `moq-video` owns frame conversion and construction, decoder output policy,
   synchronous codec thread confinement, capture timestamps and rational rates,
   extensible group configuration and `cut` naming, and its feature defaults.
@@ -91,7 +91,6 @@ do not add another media abstraction or a renderer crate during stabilization.
 - [uring identity](/quest/main/uring-identity.md) - sockets and connections carry their worker and steering identity
 - [GPU conversion and NVENC](/quest/main/video-gpu-encode.md) - convert, resize and
   encode imported frames without CPU pixel transfers or fallback
-- [AEC ownership](/quest/main/audio-aec.md) - one microphone owns an adaptive canceller and controls remain shareable
 - [Playback outcome](/quest/main/audio-playback.md) - nonblocking writes report accepted and dropped audio
 - [Video output](/quest/main/video-output.md) - codec output and subscription policy are separate, with native or CPU frames
 - [Video GOP](/quest/main/video-gop.md) - the group contract is extensible before intra-refresh implementation

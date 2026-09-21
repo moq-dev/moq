@@ -46,6 +46,26 @@ while let Some(frame) = audio.read().await? {
 }
 ```
 
+For a speakerphone, build one echo-cancellation control set from the playback
+engine and give a clone to the microphone configuration. Other clones are safe
+for UI toggles, but only one live microphone can attach the adaptive state:
+
+```rust
+let aec = engine.canceller(moq_audio::aec::Config::default())?;
+let controls = aec.clone();
+
+let mut microphone = moq_audio::capture::Config::default();
+microphone.aec = Some(aec);
+
+controls.set_enabled(false); // passthrough without reopening the device
+```
+
+A second `Engine::canceller` call, or a second microphone using the same
+controls while the first is live, returns `Error::Busy`. Dropping the live
+capture frees the microphone slot. The engine slot frees only once every
+`Control` clone and the live capture have dropped, since a capture holds the
+controls alive.
+
 ```bash
 cargo add moq-audio --features playback                # decode and play the example above
 cargo add moq-audio --features capture,playback,aec    # microphone, speaker, echo cancellation (Linux: cpal links libasound)
