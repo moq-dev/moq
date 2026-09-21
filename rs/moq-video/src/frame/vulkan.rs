@@ -475,7 +475,7 @@ impl Imported {
 	fn new(backend: Arc<Backend>, handles: Handles, image: Image) -> Result<Self, Error> {
 		backend.ctx.bind_to_thread().map_err(cuda("bind CUDA context"))?;
 		let actual = backend.ctx.uuid().map_err(cuda("read CUDA device UUID"))?;
-		let actual = actual.bytes.map(|byte| byte as u8);
+		let actual = actual.bytes;
 		if actual != image.device_uuid {
 			return Err(Error::Unsupported(format!(
 				"Vulkan device UUID {} does not match CUDA device UUID {}",
