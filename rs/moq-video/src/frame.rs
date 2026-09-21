@@ -488,7 +488,6 @@ impl Surface {
 		// Counts as a use on builds where every GPU arm is compiled out.
 		let _ = config;
 		size.validate("resize to")?;
-		let Size { width, height } = size;
 
 		Ok(match self {
 			Surface::I420(i420) => Surface::I420(i420.resize(size)?),
@@ -497,7 +496,7 @@ impl Surface {
 				Surface::I420(pixels.download_i420()?.resize(size)?)
 			}
 			#[cfg(target_os = "macos")]
-			Surface::PixelBuffer(pixels) => match pixels.resize(width, height) {
+			Surface::PixelBuffer(pixels) => match pixels.resize(size.width, size.height) {
 				Ok(scaled) => Surface::PixelBuffer(scaled),
 				// A transfer session or pool can fail on older hardware. Keep the
 				// stream alive with the universal CPU path.
@@ -512,7 +511,7 @@ impl Surface {
 				Surface::I420(cuda.download_i420()?.resize(size)?)
 			}
 			#[cfg(all(target_os = "linux", feature = "nvidia"))]
-			Surface::Cuda(cuda) => match cuda.resize(width, height) {
+			Surface::Cuda(cuda) => match cuda.resize(size.width, size.height) {
 				Ok(scaled) => Surface::Cuda(scaled),
 				// E.g. the driver rejected the vendored PTX: degrade to a CPU
 				// resize (download once) instead of killing the stream.
@@ -533,7 +532,7 @@ impl Surface {
 				Surface::I420(texture.download_i420()?.resize(size)?)
 			}
 			#[cfg(target_os = "windows")]
-			Surface::Texture(texture) => match texture.resize(width, height) {
+			Surface::Texture(texture) => match texture.resize(size.width, size.height) {
 				Ok(scaled) => Surface::Texture(scaled),
 				// A driver that won't render to NV12 has no video-processor path
 				// at all: degrade to a CPU resize (download once) instead of
@@ -1449,7 +1448,7 @@ pub mod macos {
 	use objc2_video_toolbox::VTPixelTransferSession;
 
 	use super::{Cache, I420};
-	use crate::{Color, Error};
+	use crate::{Color, Error, Size};
 
 	/// Read-only lock flag (`kCVPixelBufferLock_ReadOnly`).
 	const LOCK_READ_ONLY: CVPixelBufferLockFlags = CVPixelBufferLockFlags(1);
@@ -1533,7 +1532,7 @@ pub mod macos {
 		/// The range is not in this attachment; the caller pairs it with the one the
 		/// pixel format names.
 		fn matrix(&self) -> Color {
-			let inferred = Color::infer(crate::Size::new(self.width, self.height));
+			let inferred = Color::infer(Size::new(self.width, self.height));
 			// SAFETY: a null attachment mode is documented as "don't report it".
 			let Some(value) = (unsafe { self.buffer.attachment(kCVImageBufferYCbCrMatrixKey, ptr::null_mut()) }) else {
 				return inferred;
