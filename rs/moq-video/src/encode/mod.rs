@@ -23,16 +23,14 @@
 //! counterpart (mirror of `moq-audio`'s consumer) lives in the sibling
 //! [`decode`](crate::decode) module.
 //!
-//! [`rate`] holds the policy mapping a congestion-control bandwidth estimate
-//! onto the encoder's bitrate, which `publish_capture` drives for you.
+//! The shared [`moq_mux::rate`] policy maps a congestion-control bandwidth
+//! estimate onto the encoder's bitrate, which `publish_capture` drives for you.
 
 mod backend;
 mod encoded;
 mod encoder;
 mod producer;
 mod sink;
-
-pub mod rate;
 
 pub use backend::NAMES;
 pub use encoded::Encoded;

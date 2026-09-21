@@ -32,7 +32,7 @@ fn gradient(size: Size, channels: Channels, shift: usize) -> Vec<u8> {
 fn reference(rgba: &[u8], size: Size, color: Color) -> I420 {
 	let (w, h) = (size.width as usize, size.height as usize);
 	let weights = color.coefficients();
-	let mut data = vec![0u8; I420::len(size.width, size.height)];
+	let mut data = vec![0u8; I420::len(size).unwrap()];
 	let (y_plane, chroma) = data.split_at_mut(w * h);
 	let (u_plane, v_plane) = chroma.split_at_mut(w * h / 4);
 	let rgb = |x: usize, y: usize| {
@@ -62,7 +62,7 @@ fn reference(rgba: &[u8], size: Size, color: Color) -> I420 {
 			v_plane[cy * w / 2 + cx] = dot(weights.v, sum);
 		}
 	}
-	I420::new(size.width, size.height, data).unwrap().with_color(color)
+	I420::new(size, data).unwrap().with_color(color)
 }
 
 fn mae(a: &[u8], b: &[u8]) -> u64 {
@@ -91,7 +91,7 @@ fn nal_types(annexb: &[u8]) -> Vec<u8> {
 }
 
 fn nvenc(size: Size, color: Color) -> crate::encode::Encoder {
-	let mut config = crate::encode::Config::new(size.width, size.height, 30);
+	let mut config = crate::encode::Config::new(size.width, size.height, crate::Rate::new(30, 1).unwrap());
 	config.kind = crate::encode::Kind::Named("nvenc".into());
 	config.color = Some(color);
 	config.gop = 30;
@@ -152,7 +152,7 @@ async fn vulkan_cuda_convert_resize_encode() {
 	assert_eq!(scaled.size(), sd);
 	assert_eq!(scaled.color(), Some(color));
 	let actual = scaled.download_i420().unwrap();
-	let expected_sd = expected.resize(sd.width, sd.height).unwrap();
+	let expected_sd = expected.resize(sd).unwrap();
 	eprintln!(
 		"resize mae y={} u={} v={}",
 		mae(actual.y(), expected_sd.y()),

@@ -181,7 +181,7 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 	subscriber := dialWorker(t, ctx, url)
 	defer subscriber.Close()
 
-	announced, err := subscriber.Announced("")
+	announced, err := subscriber.Announced(moq.AnnounceOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -144,7 +144,11 @@ async fn ensure_screen_access() -> Result<(), Error> {
 /// Start a stream for `filter`. `size` is the source's native pixel size, used
 /// unless the caller overrode width/height.
 async fn open(config: &Config, filter: &SCContentFilter, size: (u32, u32)) -> Result<Stream, Error> {
-	let fps = config.framerate.map(|f| f as i32).unwrap_or(DEFAULT_FRAMERATE).max(1);
+	let fps = config
+		.framerate
+		.map(|rate| rate.rounded() as i32)
+		.unwrap_or(DEFAULT_FRAMERATE)
+		.max(1);
 	let configuration = unsafe { SCStreamConfiguration::new() };
 	// `size` is already even; an override might not be.
 	let width = config.width.map(|w| even(w as f64)).unwrap_or(size.0);

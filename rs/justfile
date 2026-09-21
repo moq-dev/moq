@@ -685,6 +685,11 @@ features:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace {{ no_fuzz }} --all-features --no-deps
     cargo nextest run --locked --workspace {{ no_fuzz }} --all-targets --all-features
 
+# Compile the media crates at supported feature boundaries and prove expensive
+# native/render dependencies are absent when their features are excluded.
+media-features:
+    rs/scripts/media-features.sh
+
 # nextest, not `cargo test`, so a wedged test is killed instead of pinning a core
 # until someone notices (`.config/nextest.toml` sets the timeout). The trade is
 # doctests, which nextest does not execute; `just rs doctest` covers those.

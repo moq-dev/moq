@@ -55,7 +55,7 @@ impl Openh264 {
 			.bitrate(BitRate::from_bps(
 				config.resolved_bitrate().as_bps().min(u32::MAX as u64) as u32,
 			))
-			.max_frame_rate(FrameRate::from_hz(config.framerate as f32))
+			.max_frame_rate(FrameRate::from_hz(config.framerate.as_f64() as f32))
 			.rate_control_mode(RateControlMode::Bitrate)
 			// Real-time camera: prioritize latency over compression.
 			.usage_type(UsageType::CameraVideoRealTime)
@@ -195,14 +195,15 @@ mod tests {
 	fn config() -> Config {
 		Config {
 			kind: Kind::Software,
-			..Config::new(320, 240, 30)
+			..Config::new(320, 240, crate::Rate::new(30, 1).unwrap())
 		}
 	}
 
 	/// A mid-gray frame at an arbitrary time; these tests only exercise the rate
 	/// controls, so the timestamp is never read back.
 	fn gray() -> Frame {
-		let i420 = I420::new(320, 240, vec![0x80u8; I420::len(320, 240)]).unwrap();
+		let size = crate::Size::new(320, 240);
+		let i420 = I420::new(size, vec![0x80u8; I420::len(size).unwrap()]).unwrap();
 		Frame::new(Surface::I420(i420), moq_net::Timestamp::from_micros(0).unwrap())
 	}
 
@@ -280,7 +281,7 @@ mod tests {
 		] {
 			let config = Config {
 				kind: Kind::Software,
-				..Config::new(size.width, size.height, 30)
+				..Config::new(size.width, size.height, crate::Rate::new(30, 1).unwrap())
 			};
 			let mut enc = Openh264::new(&config).unwrap();
 

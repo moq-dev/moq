@@ -71,7 +71,10 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 	let (node_id, fd, session) = portal_negotiate(config.cursor).await?;
 
 	let chan = FrameChannel::new();
-	let framerate = config.framerate.unwrap_or(DEFAULT_FRAMERATE).max(1);
+	let framerate = config
+		.framerate
+		.unwrap_or(crate::Rate::integer(DEFAULT_FRAMERATE))
+		.rounded();
 	let (geo_tx, geo_rx) = tokio::sync::oneshot::channel();
 	let (quit_tx, quit_rx) = pw::channel::channel::<()>();
 	let (return_tx, return_rx) = pw::channel::channel::<Lease>();
@@ -360,12 +363,16 @@ impl DmaBufFrame for PipeWireDmaBuf {
 						None => frame,
 					})
 				}
-				DrmFormat::XRGB8888 | DrmFormat::ARGB8888 => {
-					I420::from_bgra(data, self.layout.stride, self.layout.width, self.layout.height)
-				}
-				DrmFormat::XBGR8888 | DrmFormat::ABGR8888 => {
-					I420::from_rgba(data, self.layout.stride, self.layout.width, self.layout.height)
-				}
+				DrmFormat::XRGB8888 | DrmFormat::ARGB8888 => I420::from_bgra(
+					data,
+					self.layout.stride,
+					crate::Size::new(self.layout.width, self.layout.height),
+				),
+				DrmFormat::XBGR8888 | DrmFormat::ABGR8888 => I420::from_rgba(
+					data,
+					self.layout.stride,
+					crate::Size::new(self.layout.width, self.layout.height),
+				),
 				other => Err(Error::Codec(anyhow::anyhow!(
 					"cannot download DMA-BUF format {:#x}",
 					other.as_raw()
@@ -569,7 +576,7 @@ fn nv12_to_i420(data: &[u8], layout: FrameLayout) -> Result<I420, Error> {
 		packed[packed_uv + row * width..packed_uv + (row + 1) * width]
 			.copy_from_slice(&uv[row * stride..row * stride + width]);
 	}
-	I420::from_nv12(&packed, width as u32, height as u32)
+	I420::from_nv12(&packed, crate::Size::new(width as u32, height as u32))
 }
 
 /// Queues a raw PipeWire buffer unless ownership is transferred to a DMA-BUF
@@ -852,7 +859,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					// The compositor reports 0/1 for a variable rate; only a real
 					// rate is worth forwarding to the encoder.
 					let fr = state.format.framerate();
-					let framerate = (fr.num > 0 && fr.denom > 0).then(|| (fr.num / fr.denom).max(1));
+					let framerate = crate::Rate::new(fr.num, fr.denom).ok();
 					let _ = tx.send(Ok(Geometry {
 						width,
 						height,
@@ -1330,8 +1337,12 @@ fn convert(format: VideoFormat, bytes: &[u8], layout: FrameLayout, color: Option
 				None => frame,
 			})
 		}
-		VideoFormat::BGRx | VideoFormat::BGRA => I420::from_bgra(bytes, layout.stride, layout.width, layout.height),
-		VideoFormat::RGBx | VideoFormat::RGBA => I420::from_rgba(bytes, layout.stride, layout.width, layout.height),
+		VideoFormat::BGRx | VideoFormat::BGRA => {
+			I420::from_bgra(bytes, layout.stride, crate::Size::new(layout.width, layout.height))
+		}
+		VideoFormat::RGBx | VideoFormat::RGBA => {
+			I420::from_rgba(bytes, layout.stride, crate::Size::new(layout.width, layout.height))
+		}
 		other => Err(Error::Codec(anyhow::anyhow!(
 			"pipewire negotiated an unsupported video format {other:?}"
 		))),

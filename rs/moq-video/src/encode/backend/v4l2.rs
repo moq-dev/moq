@@ -828,7 +828,8 @@ const LEVELS: &[Level] = &[
 fn h264_level(config: &Config) -> Result<i32, Error> {
 	let size = config.size();
 	let per_frame = size.width.div_ceil(16) * size.height.div_ceil(16);
-	let per_second = per_frame as u64 * config.framerate as u64;
+	let per_second = (u64::from(per_frame) * u64::from(config.framerate.numerator()))
+		.div_ceil(u64::from(config.framerate.denominator()));
 	let kbps = config.resolved_bitrate().as_bps().div_ceil(1_000);
 	LEVELS
 		.iter()
@@ -877,7 +878,7 @@ mod tests {
 	use super::*;
 
 	fn config(width: u32, height: u32, framerate: u32) -> Config {
-		Config::new(width, height, framerate)
+		Config::new(width, height, crate::Rate::new(framerate, 1).unwrap())
 	}
 
 	fn micros(micros: u64) -> Timestamp {

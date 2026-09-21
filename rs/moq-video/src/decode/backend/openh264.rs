@@ -229,9 +229,8 @@ fn picture(yuv: &impl YUVSource, timestamp: Timestamp) -> Result<Frame, Error> {
 		yuv.v(),
 		y_stride,
 		uv_stride,
-		width as u32,
-		height as u32,
-	);
+		crate::Size::new(width as u32, height as u32),
+	)?;
 	Ok(Frame::new(Surface::I420(frame), timestamp))
 }
 

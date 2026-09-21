@@ -92,15 +92,11 @@ do not add another media abstraction or a renderer crate during stabilization.
 - [uring identity](/quest/main/uring-identity.md) - sockets and connections carry their worker and steering identity
 - [GPU conversion and NVENC](/quest/main/video-gpu-encode.md) - validate the GPU
   conversion, resize and NVENC path for imported frames on NVIDIA hardware
-- [Media features](/quest/main/media-features.md) - OpenH264 can be excluded, rendering is opt-in, and feature aliases disappear
-- [Shared rate policy](/quest/main/media-rate-policy.md) - the planned public namespace move happens before 0.1
 - [Audio configuration](/quest/main/audio-config.md) - PCM layout, codec settings, and subscription policy have distinct contracts
 - [Audio publication](/quest/main/audio-publication.md) - callers get demand authority and supported options, not internal transport or resampler machinery
 - [AEC ownership](/quest/main/audio-aec.md) - one microphone owns an adaptive canceller and controls remain shareable
 - [Playback outcome](/quest/main/audio-playback.md) - nonblocking writes report accepted and dropped audio
 - [Video output](/quest/main/video-output.md) - codec output and subscription policy are separate, with native or CPU frames
-- [Video frames](/quest/main/video-frames.md) - conversions preserve typed pixels and frame records can grow
-- [Video timing](/quest/main/video-timing.md) - capture time and fractional frame rates survive capture, encoding, and transcode
 - [Video GOP](/quest/main/video-gop.md) - the group contract is extensible before intra-refresh implementation
 - [Media release review](/quest/main/media-release-review.md) - verify the settled contracts before separately authorizing 0.1 releases
 

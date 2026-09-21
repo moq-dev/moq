@@ -27,7 +27,8 @@ if err != nil {
 }
 defer client.Close()
 
-announced, err := client.Announced("live/")
+filter := "*/camera"
+announced, err := client.Announced(moq.AnnounceOptions{Prefix: "live/", Filter: &filter})
 if err != nil {
     log.Fatal(err)
 }
@@ -36,8 +37,9 @@ for ann, err := range announced.All(ctx) {
         if moq.IsShutdown(err) { break }
         log.Fatal(err)
     }
-    // The requested prefix scopes discovery; each update's prefix is relative to it.
-    broadcast, err := client.RequestBroadcast(ctx, "live/" + ann.Prefix())
+    // Updates stay origin-relative; Captures reports what each wildcard matched.
+    fmt.Printf("captures: %v\n", ann.Captures())
+    broadcast, err := client.RequestBroadcast(ctx, ann.Prefix())
     if err != nil {
         log.Fatal(err)
     }
@@ -73,9 +75,9 @@ The three advertising operations: `client.CreateBroadcast(path)` (or
 advertisement; `origin.Dynamic(prefix, route)` claims `prefix` and every
 path beneath it (`""` for everything). Hold the returned `OriginDynamic`
 while the claim should stay advertised, and reject the requests you will not
-serve. A route is a capability, not an inventory. `Announced(prefix)` is the
-requested discovery scope; `ann.Prefix()` is the concrete covered prefix
-relative to it.
+serve. A route is a capability, not an inventory. `Announced(options)` combines
+a literal prefix with an optional relative pattern; `ann.Prefix()` stays
+relative to the origin and `ann.Captures()` reports the wildcard matches.
 
 Every call that can block takes a `context.Context` first. Cancelling it
 returns `ctx.Err()` promptly and tears the in-flight native work down, so a

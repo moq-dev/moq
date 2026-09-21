@@ -73,6 +73,17 @@ final class SmokeTests: XCTestCase {
         _ = try await origin.consume().requestBroadcast(path: "live")
     }
 
+    func testAnnouncedPatternCaptures() async throws {
+        let origin = OriginProducer()
+        let announced = try origin.consume().announced(prefix: "room", filter: "*/chat")
+        let chat = try origin.createBroadcast(path: "room/alice/chat")
+        try chat.announce()
+
+        let update = try await announced.next()
+        XCTAssertEqual(update?.prefix, "room/alice/chat")
+        XCTAssertEqual(update?.captures, ["alice"])
+    }
+
     func testDynamicServesARequestUnderAPrefix() async throws {
         let origin = OriginProducer()
         let dynamic = try origin.dynamic(prefix: "live")

@@ -250,7 +250,7 @@ impl Frame {
 		let (cw, ch) = (w / 2, h / 2);
 		let pitch = self.pitch as usize;
 
-		let mut data = vec![0u8; I420::len(self.width, self.height)];
+		let mut data = vec![0u8; I420::len(self.size())?];
 		let (luma, chroma) = data.split_at_mut(w * h);
 		let (u_dst, v_dst) = chroma.split_at_mut(cw * ch);
 

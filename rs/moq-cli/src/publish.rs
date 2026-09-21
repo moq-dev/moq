@@ -317,7 +317,11 @@ impl Publish {
 		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 
-		let video = (!args.no_video).then(|| (args.video_config(), args.video_encode(bandwidth.clone())));
+		let video = if args.no_video {
+			None
+		} else {
+			Some((args.video_config()?, args.video_encode(bandwidth.clone())))
+		};
 		let audio = (!args.no_audio).then(|| (args.audio_config(), args.audio_encode(bandwidth)));
 		anyhow::ensure!(video.is_some() || audio.is_some(), "nothing to capture");
 
@@ -442,14 +446,18 @@ impl CaptureArgs {
 		}
 	}
 
-	fn video_config(&self) -> moq_video::capture::Config {
+	fn video_config(&self) -> anyhow::Result<moq_video::capture::Config> {
 		let mut config = moq_video::capture::Config::default();
 		config.source = self.video_source();
 		config.width = self.width;
 		config.height = self.height;
-		config.framerate = self.fps;
+		config.framerate = self
+			.fps
+			.map(|fps| moq_video::Rate::new(fps, 1))
+			.transpose()
+			.map_err(anyhow::Error::from)?;
 		config.cursor = !self.no_cursor;
-		config
+		Ok(config)
 	}
 
 	fn video_encode(&self, bandwidth: moq_net::bandwidth::Allocator) -> moq_video::encode::Options {

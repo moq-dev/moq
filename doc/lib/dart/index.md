@@ -27,8 +27,11 @@ import 'package:moq/moq.dart';
 final moq = await Moq.connect('https://relay.example.com');
 
 // Subscribe. The stream is live, so listen to it rather than awaiting its end.
-moq.announcements(prefix: 'live/').listen((announcement) {
+moq.announcements(
+  options: const AnnounceOptions(prefix: 'live/', filter: '*/camera'),
+).listen((announcement) {
   print(announcement.prefix());
+  print(announcement.captures());
 });
 final broadcast = await moq.requestBroadcast('live/camera');
 ```
@@ -50,9 +53,9 @@ advertisement; `origin.dynamic_(prefix:, route:)` claims `prefix` and
 every path beneath it (`''` for everything; Dart spells the origin method
 `dynamic_` because `dynamic` is reserved). Hold the returned handle while the
 claim should stay advertised, and reject the requests you will not serve. A
-route is a capability, not an inventory. `announcements(prefix:)` is the
-requested discovery scope; `announcement.prefix()` is the concrete covered
-prefix relative to it.
+route is a capability, not an inventory. `announcements(options:)` takes a
+literal prefix plus an optional relative pattern; `announcement.prefix()`
+stays origin-relative and `captures()` reports the wildcard matches.
 
 Sessions reconnect with backoff when the transport drops and re-announce local
 broadcasts. `moq.epoch` counts the connections, 1 on the first, pairing with
