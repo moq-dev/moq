@@ -29,8 +29,9 @@
 //! its own conversion, so a kernel that writes NV12 straight from the image is
 //! the one pass this path needs: no staging copy in either direction.
 
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use cudarc::driver::{CudaContext, CudaFunction, LaunchConfig, PushKernelArg, result};
 
@@ -42,30 +43,39 @@ use crate::{Color, Error, Size};
 /// and JIT-compiled by the driver, so building needs no CUDA toolkit.
 const RESIZE_PTX: &str = include_str!("nv12_resize.ptx");
 
-/// The loaded resize kernels, one per process (everything runs in the
-/// device's primary context, so one module serves every frame).
+/// The loaded resize kernels, one set per device: a module belongs to the
+/// context that loaded it, and every frame on a device shares that device's
+/// primary context.
 struct Kernels {
 	luma: CudaFunction,
 	chroma: CudaFunction,
 }
 
-fn kernels(ctx: &Arc<CudaContext>) -> Result<&'static Kernels, Error> {
-	static KERNELS: OnceLock<Result<Kernels, String>> = OnceLock::new();
-	KERNELS
-		.get_or_init(|| {
+/// Resize kernels by device ordinal, or why loading them failed there.
+type Loaded = HashMap<usize, Result<Arc<Kernels>, String>>;
+
+fn kernels(ctx: &Arc<CudaContext>) -> Result<Arc<Kernels>, Error> {
+	static KERNELS: OnceLock<Mutex<Loaded>> = OnceLock::new();
+	let mut loaded = KERNELS
+		.get_or_init(Default::default)
+		.lock()
+		.expect("CUDA resize kernels poisoned");
+	loaded
+		.entry(ctx.ordinal())
+		.or_insert_with(|| {
 			let module = ctx
 				.load_module(cudarc::nvrtc::Ptx::from_src(RESIZE_PTX))
 				.map_err(|e| format!("load nv12_resize PTX: {e:?}"))?;
-			Ok(Kernels {
+			Ok(Arc::new(Kernels {
 				luma: module
 					.load_function("resize_luma")
 					.map_err(|e| format!("load resize_luma: {e:?}"))?,
 				chroma: module
 					.load_function("resize_chroma")
 					.map_err(|e| format!("load resize_chroma: {e:?}"))?,
-			})
+			}))
 		})
-		.as_ref()
+		.clone()
 		.map_err(|e| Error::Codec(anyhow::anyhow!("CUDA resize unavailable: {e}")))
 }
 
@@ -180,9 +190,20 @@ impl std::fmt::Debug for Frame {
 	}
 }
 
-/// NV12 bytes for `height` rows at `pitch`.
+/// NV12 bytes for `height` rows at `pitch`. Cannot overflow: two `u32`
+/// factors fit a `u64`, and 64-bit `usize` is the only target with CUDA.
 fn nv12_len(height: u32, pitch: u32) -> usize {
 	pitch as usize * height as usize * 3 / 2
+}
+
+/// The row pitch for frames this module allocates: 256-byte aligned for
+/// comfortable coalescing, and a multiple of 4 as NVENC registration requires.
+/// A width whose pitch does not fit `u32` is refused rather than wrapped into
+/// an allocation the kernels would overrun.
+fn aligned_pitch(width: u32) -> Result<u32, Error> {
+	width
+		.checked_next_multiple_of(256)
+		.ok_or_else(|| Error::Codec(anyhow::anyhow!("frame width {width} is too wide for a CUDA NV12 pitch")))
 }
 
 impl Frame {
@@ -203,10 +224,9 @@ impl Frame {
 		})
 	}
 
-	/// An uninitialized frame from `pool`, at a 256-byte row pitch: comfortable
-	/// coalescing, and a multiple of 4 as NVENC registration requires.
+	/// An uninitialized frame from `pool` at the aligned pitch.
 	fn pooled(pool: &Arc<Pool<Device>>, size: Size, color: Option<Color>) -> Result<Self, Error> {
-		let pitch = size.width.next_multiple_of(256);
+		let pitch = aligned_pitch(size.width)?;
 		Ok(Self {
 			buf: Arc::new(Buffer::take(pool, nv12_len(size.height, pitch))?),
 			width: size.width,
@@ -293,9 +313,7 @@ impl Frame {
 		let dst = match &self.buf.pool {
 			Some(pool) => Self::pooled(pool, size, self.color)?,
 			None => {
-				// Destination row pitch aligned to 256 bytes: comfortable
-				// coalescing and a multiple of 4 as NVENC registration requires.
-				let mut dst = Self::alloc(ctx, width, height, width.next_multiple_of(256))?;
+				let mut dst = Self::alloc(ctx, width, height, aligned_pitch(width)?)?;
 				dst.color = self.color;
 				dst
 			}
