@@ -71,11 +71,15 @@ impl Color {
 	/// The 8-bit RGB to Y'CbCr coefficients of this space, for a conversion the
 	/// crate runs itself (the GPU kernels).
 	///
+	/// Compiled for every test build so the cross-check against the `yuv` crate
+	/// runs without a GPU.
+	///
 	/// Display-referred RGB in: the samples are taken as already gamma-encoded,
 	/// which is what an 8-bit render target holds, so no transfer function is
 	/// applied on the way through. The offsets put chroma at 128 and, for limited
 	/// range, luma at 16; the scales fit the range (219/224 of 255 for limited,
 	/// all of it for full).
+	#[cfg(any(test, all(target_os = "linux", feature = "nvidia")))]
 	pub(crate) fn coefficients(self) -> Coefficients {
 		let (kr, kb) = match self {
 			Color::Bt601Limited | Color::Bt601Full => (0.299, 0.114),
@@ -113,6 +117,7 @@ impl Color {
 
 /// The weights of one RGB to Y'CbCr conversion: each output sample is
 /// `[r, g, b, offset]` dotted with `(R, G, B, 1)`, all on the 0..255 scale.
+#[cfg(any(test, all(target_os = "linux", feature = "nvidia")))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Coefficients {
 	pub y: [f32; 4],
@@ -120,6 +125,7 @@ pub(crate) struct Coefficients {
 	pub v: [f32; 4],
 }
 
+#[cfg(any(test, all(target_os = "linux", feature = "nvidia")))]
 impl Coefficients {
 	/// One pixel through the matrix, rounded and clamped the way the kernels do
 	/// it. The CPU reference for a GPU conversion, and what the tests compare

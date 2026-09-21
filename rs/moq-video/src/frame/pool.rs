@@ -126,6 +126,7 @@ mod tests {
 	#[test]
 	fn a_full_pool_refuses_rather_than_grows() {
 		let pool = pool(2);
+		assert_eq!(pool.capacity(), 2);
 		let a = pool.take(100).unwrap();
 		let _b = pool.take(100).unwrap();
 		let err = pool.take(100).unwrap_err();
