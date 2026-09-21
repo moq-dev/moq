@@ -731,7 +731,7 @@ vulkan-cuda:
     fi
     driver_dir=$(dirname "$driver")
     export LD_LIBRARY_PATH="$driver_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-    cargo test --locked -p moq-video frame::vulkan::tests::vulkan_cuda_slot_reuse_and_teardown -- --ignored --nocapture
+    cargo nextest run --locked -p moq-video --run-ignored only frame::vulkan::tests::vulkan_cuda_slot_reuse_and_teardown
 
 # Same selection as `check-changed`: compiling a crate's test binaries is the
 # expensive half of a test run, so scoping matters more here than anywhere else.
