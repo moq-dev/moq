@@ -5,7 +5,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 /// The quest tree, the interlinked Markdown plans under quest/ whose contract is
-/// quest/CLAUDE.md: validate its structure, or report what blocks a quest.
+/// quest/CLAUDE.md: validate its structure, report what blocks a quest, or name
+/// the branches a quest lands on.
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
@@ -30,6 +31,16 @@ enum Command {
 	Ready {
 		/// Quest to explain. Omit to list every ready quest in tree order.
 		path: Option<PathBuf>,
+	},
+
+	/// Print the branch carrying a quest, then every branch it merges through.
+	///
+	/// One per line, nearest first, ending at `main`: a quest merges into its
+	/// questline's branch, and a questline into its parent's. A line missing
+	/// from the remote is created from the one printed after it.
+	Branch {
+		/// Quest or questline to locate.
+		path: PathBuf,
 	},
 }
 
@@ -66,6 +77,12 @@ fn main() -> Result<ExitCode> {
 		Command::Ready { path: None } => {
 			for path in quest::ready::quests(&cli.root)? {
 				println!("{}", path.display());
+			}
+			Ok(ExitCode::SUCCESS)
+		}
+		Command::Branch { path } => {
+			for branch in quest::branch::chain(&cli.root, &path)? {
+				println!("{branch}");
 			}
 			Ok(ExitCode::SUCCESS)
 		}

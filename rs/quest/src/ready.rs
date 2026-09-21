@@ -60,8 +60,8 @@ impl fmt::Display for Blocker {
 /// What blocks `path`, a required questline expanded into the quests it still
 /// holds. Empty means ready.
 ///
-/// `path` is the quest as the tree writes it (`/quest/m0/one.md`), as the shell
-/// completes it (`quest/m0/one.md`), or as an absolute filesystem path.
+/// `path` is the quest as the tree writes it (`/quest/dev/one.md`), as the shell
+/// completes it (`quest/dev/one.md`), or as an absolute filesystem path.
 pub fn blockers(root: &Path, path: &Path) -> Result<Vec<Blocker>> {
 	let docs = crate::load(root)?;
 	let by_path: BTreeMap<&Path, &Doc> = docs.iter().map(|d| (d.path.as_path(), d)).collect();
@@ -71,8 +71,10 @@ pub fn blockers(root: &Path, path: &Path) -> Result<Vec<Blocker>> {
 
 /// Every quest that can be started now, in tree order.
 ///
-/// Questlines are never executed, so they are not listed; the absence of a
-/// `## Required` heading is what quest/CLAUDE.md defines as ready.
+/// A questline is not listed while it still indexes children; a README with
+/// no `## Quests` left is the line's own remaining work and lists like any
+/// other quest. The absence of a `## Required` heading is what quest/CLAUDE.md
+/// defines as ready.
 pub fn quests(root: &Path) -> Result<Vec<PathBuf>> {
 	let docs = crate::load(root)?;
 	let mut remaining: BTreeMap<PathBuf, &Doc> = docs.iter().map(|doc| (doc.path.clone(), doc)).collect();
@@ -154,7 +156,7 @@ fn blocker(by_path: &BTreeMap<&Path, &Doc>, entry: &crate::doc::Entry, stack: &m
 
 /// Resolve a quest path the way a caller is likely to have it to the
 /// repository-relative one the tree is keyed on.
-fn locate(root: &Path, path: &Path, by_path: &BTreeMap<&Path, &Doc>) -> Result<PathBuf> {
+pub(crate) fn locate(root: &Path, path: &Path, by_path: &BTreeMap<&Path, &Doc>) -> Result<PathBuf> {
 	let mut candidates = vec![rules::normalize(path)];
 	if let Some(rooted) = path.to_str().and_then(|p| p.strip_prefix('/')) {
 		candidates.push(rules::normalize(Path::new(rooted)));

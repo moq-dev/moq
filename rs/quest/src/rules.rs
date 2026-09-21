@@ -124,13 +124,10 @@ fn headings(found: &mut Findings, doc: &Doc) {
 		}
 	}
 
-	// A questline is a README with `## Quests`; a quest is everything else and
-	// must not have one. Only quests are executed, so the distinction decides
-	// what a reader is allowed to pick up.
-	match (doc.is_questline(), doc.has("Quests")) {
-		(true, false) => found.on(&doc.path, "a questline needs '## Quests'"),
-		(false, true) => found.on(&doc.path, "only a questline README may have '## Quests'"),
-		_ => {}
+	// Only a README indexes children; a quest is a leaf and must not, since the
+	// index is what makes a file a questline and questlines are not picked up.
+	if doc.has("Quests") && !doc.is_questline() {
+		found.on(&doc.path, "only a README may have '## Quests'");
 	}
 	for heading in &doc.headings {
 		if LIST_SECTIONS.contains(&heading.text.as_str()) && doc.entries(&heading.text).next().is_none() {
@@ -227,7 +224,7 @@ fn links(found: &mut Findings, root: &Path, known: &BTreeSet<&Path>, doc: &Doc) 
 		// a plain-text external condition (no quest link at all).
 		// moq-dev/moq.pro#1170 shipped the third shape: a customer-gate sentence
 		// mentioning a questline mid-line, which reads as context but IS a
-		// blocker, and so silently required all of m2.
+		// blocker, and so silently required all of the roadmap.
 		if link.section.as_deref() == Some("Required")
 			&& known.contains(path.as_path())
 			&& link.position != Position::Entry
@@ -258,7 +255,7 @@ fn index<'a>(found: &mut Findings, known: &BTreeSet<&Path>, docs: &'a [Doc]) -> 
 				continue;
 			}
 			// The index is a list of entries, not prose that happens to link:
-			// `See [One](/quest/m0/one.md)` must not make One look indexed.
+			// `See [One](/quest/dev/one.md)` must not make One look indexed.
 			if link.position != Position::Entry {
 				found.at(
 					&doc.path,

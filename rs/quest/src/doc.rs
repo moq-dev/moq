@@ -72,7 +72,7 @@ pub struct Heading {
 /// One parsed quest document: the structure the rules read, nothing else.
 #[derive(Clone, Debug)]
 pub struct Doc {
-	/// Repository-relative, e.g. `quest/m0/one.md`.
+	/// Repository-relative, e.g. `quest/dev/one.md`.
 	pub path: PathBuf,
 	/// The document's `# ` title, used for a quest's t-shirt size.
 	pub title: Option<Heading>,
@@ -99,14 +99,26 @@ impl Doc {
 			.filter(move |e| e.section.as_deref() == Some(section))
 	}
 
-	/// A questline is a `README.md`; everything else is an executable quest.
+	/// A questline is a `README.md` with a `Quests` section. Any other README is
+	/// what a line becomes when its last child merges: the line's own remaining
+	/// work, executed like any other quest. The permanent lines are the exception.
 	pub fn is_questline(&self) -> bool {
+		self.is_readme() && (self.has("Quests") || self.is_permanent())
+	}
+
+	/// The root and the top-level lines outlive their quests: `main` and `dev`
+	/// are branches and `next` is the roadmap, so an empty one is not a leaf.
+	pub fn is_permanent(&self) -> bool {
+		self.is_readme() && self.path.components().count() <= 3
+	}
+
+	fn is_readme(&self) -> bool {
 		self.path.file_name().is_some_and(|n| n == "README.md")
 	}
 
 	/// The questline directory this document belongs to. A questline is a
 	/// DIRECTORY, so its own entry sits one level further out than a quest's:
-	/// `quest/m2/drain/README.md` belongs to `quest/m2`, not to `quest/m2/drain`.
+	/// `quest/next/drain/README.md` belongs to `quest/next`, not to `quest/next/drain`.
 	pub fn owner(path: &Path) -> PathBuf {
 		let parent = path.parent().unwrap_or(Path::new(""));
 		if path.file_name().is_some_and(|n| n == "README.md") {

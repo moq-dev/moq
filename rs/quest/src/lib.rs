@@ -1,5 +1,5 @@
 //! The quest tree, whose contract is quest/CLAUDE.md: structural validation of
-//! it, and whether a given quest can be started.
+//! it, whether a given quest can be started, and which branches carry it.
 //!
 //! The whole tree is validated on every run, never just the changed files: the
 //! link graph and the questline index are global, so completing one quest
@@ -7,6 +7,7 @@
 //! the index entry for a completed quest survived a rebase that produced no
 //! conflict at all.
 
+pub mod branch;
 pub mod doc;
 pub mod ready;
 pub mod rules;
