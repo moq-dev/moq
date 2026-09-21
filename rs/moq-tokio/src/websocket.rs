@@ -418,7 +418,7 @@ async fn connect_tls_override(
 /// moq-transport-18 and newer require qmux-01, so we never pair them with qmux-00.
 /// This mirrors the policy in `js/net`'s `connect.ts`. Every other ALPN returns
 /// `&[]`, which qmux expands to every draft it knows about.
-const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-19", "moqt-20", "moqt-21"];
+const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-19", "moqt-20", "moqt-21", "moqt-22"];
 
 fn qmux_versions_for(alpn: &str) -> &'static [qmux::Version] {
 	if QMUX01_ONLY_ALPNS.contains(&alpn) {
@@ -800,7 +800,13 @@ mod tests {
 				.iter()
 				.map(|&a| moq_net::Version::from_alpn(a).map(|v| v.code()))
 				.collect::<Vec<_>>(),
-			vec![Some(0xff000012), Some(0xff000013), Some(0xff000014), Some(0xff000015)]
+			vec![
+				Some(0xff000012),
+				Some(0xff000013),
+				Some(0xff000014),
+				Some(0xff000015),
+				Some(0xff000016)
+			]
 		);
 		for &alpn in QMUX01_ONLY_ALPNS {
 			assert_eq!(qmux_versions_for(alpn), &[qmux::Version::QMux01]);

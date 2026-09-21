@@ -12,6 +12,7 @@ pub enum Version {
 	Draft19,
 	Draft20,
 	Draft21,
+	Draft22,
 }
 
 impl fmt::Display for Version {
@@ -25,6 +26,7 @@ impl fmt::Display for Version {
 			Self::Draft19 => write!(f, "moq-transport-19"),
 			Self::Draft20 => write!(f, "moq-transport-20"),
 			Self::Draft21 => write!(f, "moq-transport-21"),
+			Self::Draft22 => write!(f, "moq-transport-22"),
 		}
 	}
 }
@@ -68,12 +70,12 @@ mod tests {
 		buf
 	}
 
-	/// Draft-21 is editorial: it restructures the document and drops the Connection URL,
-	/// Stream Cancellation, and Examples sections, leaving every codepoint and field
-	/// layout as draft-20 defined them. So it has to encode byte for byte the same, and
-	/// this pins that rather than trusting each version branch to fall forward.
+	/// Draft-21 and draft-22 are editorial: they restructure the document and drop the
+	/// Connection URL, Stream Cancellation, and Examples sections, leaving every codepoint
+	/// and field layout as draft-20 defined them. So they have to encode byte for byte the
+	/// same, and this pins that rather than trusting each version branch to fall forward.
 	#[test]
-	fn draft21_matches_draft20_on_the_wire() {
+	fn draft21_and_draft22_match_draft20_on_the_wire() {
 		let properties = Properties {
 			timescale: Some(Timescale::new(90_000).unwrap()),
 			group_order: Some(GroupOrder::Descending),
@@ -131,30 +133,32 @@ mod tests {
 			flags: GroupFlags::default(),
 		};
 
-		assert_eq!(
-			message(&subscribe, Version::Draft20),
-			message(&subscribe, Version::Draft21),
-			"SUBSCRIBE"
-		);
-		assert_eq!(
-			message(&subscribe_ok, Version::Draft20),
-			message(&subscribe_ok, Version::Draft21),
-			"SUBSCRIBE_OK"
-		);
-		assert_eq!(
-			message(&publish, Version::Draft20),
-			message(&publish, Version::Draft21),
-			"PUBLISH"
-		);
-		assert_eq!(
-			message(&fetch, Version::Draft20),
-			message(&fetch, Version::Draft21),
-			"FETCH"
-		);
-		assert_eq!(
-			field(&group, Version::Draft20),
-			field(&group, Version::Draft21),
-			"SUBGROUP_HEADER"
-		);
+		for version in [Version::Draft21, Version::Draft22] {
+			assert_eq!(
+				message(&subscribe, Version::Draft20),
+				message(&subscribe, version),
+				"SUBSCRIBE {version}"
+			);
+			assert_eq!(
+				message(&subscribe_ok, Version::Draft20),
+				message(&subscribe_ok, version),
+				"SUBSCRIBE_OK {version}"
+			);
+			assert_eq!(
+				message(&publish, Version::Draft20),
+				message(&publish, version),
+				"PUBLISH {version}"
+			);
+			assert_eq!(
+				message(&fetch, Version::Draft20),
+				message(&fetch, version),
+				"FETCH {version}"
+			);
+			assert_eq!(
+				field(&group, Version::Draft20),
+				field(&group, version),
+				"SUBGROUP_HEADER {version}"
+			);
+		}
 	}
 }

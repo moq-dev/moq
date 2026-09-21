@@ -68,6 +68,9 @@ async function acceptInner(
 		publish: props.publish,
 	};
 
+	if (protocol === Ietf.ALPN.DRAFT_22) {
+		return acceptAlpn(transport, url, Ietf.Version.DRAFT_22, wiring);
+	}
 	if (protocol === Ietf.ALPN.DRAFT_21) {
 		return acceptAlpn(transport, url, Ietf.Version.DRAFT_21, wiring);
 	}

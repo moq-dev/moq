@@ -1198,6 +1198,12 @@ async fn broadcast_moq_transport_21() {
 	broadcast_test("moqt", Some("moq-transport-21"), Some("moq-transport-21")).await;
 }
 
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_moq_transport_22() {
+	broadcast_test("moqt", Some("moq-transport-22"), Some("moq-transport-22")).await;
+}
+
 // ── Raw QUIC – server supports all versions, client pins one ─────────
 
 #[tracing_test::traced_test]
@@ -1501,6 +1507,12 @@ async fn broadcast_webtransport_moq_transport_20() {
 #[tokio::test]
 async fn broadcast_webtransport_moq_transport_21() {
 	broadcast_test("https", Some("moq-transport-21"), Some("moq-transport-21")).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_webtransport_moq_transport_22() {
+	broadcast_test("https", Some("moq-transport-22"), Some("moq-transport-22")).await;
 }
 
 // ── WebTransport – server supports all, client pins one ─────────────

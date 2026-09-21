@@ -6,8 +6,9 @@ use web_transport_trait::{MaybeSend, MaybeSync};
 use crate::origin;
 use crate::time::{Clock, Instant};
 use crate::{
-	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_20, ALPN_21, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04,
-	ALPN_LITE_05, ALPN_LITE_06_WIP, Consume, Error, NEGOTIATED, Role, Session, SessionError, Version, Versions,
+	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_20, ALPN_21, ALPN_22, ALPN_LITE, ALPN_LITE_03,
+	ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06_WIP, Consume, Error, NEGOTIATED, Role, Session, SessionError, Version,
+	Versions,
 	coding::{Decode, Encode, Stream},
 	ietf, lite, setup, stats,
 };
@@ -256,8 +257,9 @@ impl Server {
 	{
 		let runtime = Clock::new(now);
 		let (encoding, supported) = match session.protocol() {
-			Some(alpn @ (ALPN_21 | ALPN_20 | ALPN_19 | ALPN_18 | ALPN_17)) => {
+			Some(alpn @ (ALPN_22 | ALPN_21 | ALPN_20 | ALPN_19 | ALPN_18 | ALPN_17)) => {
 				let draft = match alpn {
+					ALPN_22 => ietf::Version::Draft22,
 					ALPN_21 => ietf::Version::Draft21,
 					ALPN_20 => ietf::Version::Draft20,
 					ALPN_19 => ietf::Version::Draft19,

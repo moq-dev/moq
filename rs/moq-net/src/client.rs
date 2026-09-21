@@ -3,8 +3,8 @@ use crate::origin;
 use crate::runtime::Timers;
 use crate::time::{Clock, Instant};
 use crate::{
-	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_20, ALPN_21, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04,
-	ALPN_LITE_05, ALPN_LITE_06_WIP, Consume, Error, NEGOTIATED, Session, Version, Versions,
+	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_20, ALPN_21, ALPN_22, ALPN_LITE, ALPN_LITE_03,
+	ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06_WIP, Consume, Error, NEGOTIATED, Session, Version, Versions,
 	coding::{self, Decode, Encode, Stream},
 	ietf, lite, setup, stats,
 };
@@ -242,8 +242,9 @@ impl Client {
 		// If ALPN was used to negotiate the version, use the appropriate encoding.
 		// Default to IETF 14 if no ALPN was used and we'll negotiate the version later.
 		let (encoding, supported) = match session.protocol() {
-			Some(alpn @ (ALPN_21 | ALPN_20 | ALPN_19 | ALPN_18 | ALPN_17)) => {
+			Some(alpn @ (ALPN_22 | ALPN_21 | ALPN_20 | ALPN_19 | ALPN_18 | ALPN_17)) => {
 				let draft = match alpn {
+					ALPN_22 => ietf::Version::Draft22,
 					ALPN_21 => ietf::Version::Draft21,
 					ALPN_20 => ietf::Version::Draft20,
 					ALPN_19 => ietf::Version::Draft19,
