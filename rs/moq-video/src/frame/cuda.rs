@@ -5,7 +5,7 @@
 //!
 //! A producer that must keep raw pixels off the CPU (a game engine publishing
 //! its render target) stays inside this module and `frame::vulkan`: import the
-//! image ([`vulkan::Importer`](super::vulkan::Importer)), convert it
+//! image ([`vulkan::Importer`]), convert it
 //! ([`Converter::convert`]), scale it ([`Frame::resize`]), and encode it with an
 //! [`encode::Encoder`](crate::encode::Encoder) opened as
 //! `Kind::Named("nvenc")`, which registers a `Surface::Cuda` with NVENC in
