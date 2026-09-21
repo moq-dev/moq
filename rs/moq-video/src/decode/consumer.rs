@@ -455,8 +455,11 @@ mod tests {
 	/// The age budget is the subscription's and not the decoder's: it reaches
 	/// the publisher through the track subscription, while the decoder opens
 	/// with exactly the config it was handed.
-	#[tokio::test]
-	async fn max_age_reaches_the_subscription_and_not_the_decoder() {
+	///
+	/// Driven by `pollster` rather than tokio: the probe's guard is a plain
+	/// mutex, and holding one across an `.await` is what clippy rightly flags.
+	#[test]
+	fn max_age_reaches_the_subscription_and_not_the_decoder() {
 		let _probe = probe::native_exclusive();
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
@@ -490,7 +493,7 @@ mod tests {
 			scale_hint: Some(crate::Size::new(160, 120)),
 		};
 		let max_age = std::time::Duration::from_secs(10);
-		let mut consumer = Consumer::new(
+		let mut consumer = pollster::block_on(Consumer::new(
 			&subscriber,
 			&catalog,
 			"video",
@@ -499,8 +502,7 @@ mod tests {
 				max_age,
 				..Options::new()
 			},
-		)
-		.await
+		))
 		.unwrap();
 
 		let subscription = published.subscription().expect("the consumer subscribed");
@@ -510,7 +512,7 @@ mod tests {
 		assert_eq!(opened.output, decoder.output);
 		assert_eq!(opened.scale_hint, decoder.scale_hint);
 
-		let frame = consumer.read().await.unwrap().expect("a decoded frame");
+		let frame = pollster::block_on(consumer.read()).unwrap().expect("a decoded frame");
 		assert!(matches!(frame.surface, crate::Surface::I420(_)), "CPU output was not enforced");
 	}
 
