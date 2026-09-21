@@ -118,11 +118,7 @@ impl BlockingFlush {
 }
 
 fn frame(timestamp: Timestamp) -> Result<Frame, Error> {
-	let i420 = I420::new(
-		SIZE.width,
-		SIZE.height,
-		vec![0x80u8; I420::len(SIZE.width, SIZE.height)],
-	)?;
+	let i420 = I420::new(SIZE, vec![0x80u8; I420::len(SIZE)?])?;
 	Ok(Frame::new(Surface::I420(i420), timestamp))
 }
 

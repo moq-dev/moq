@@ -34,6 +34,5 @@ Public API/wire impact: review only.
 - [AEC ownership](/quest/main/audio-aec.md) - microphone attachment is exclusive
 - [Playback outcome](/quest/main/audio-playback.md) - drops are observable
 - [Video output](/quest/main/video-output.md) - output and subscription contracts are distinct
-- [Video frames](/quest/main/video-frames.md) - pixels and extension points are typed
 - [Video timing](/quest/main/video-timing.md) - timestamps and rates retain their meaning
 - [Video GOP](/quest/main/video-gop.md) - deferred refresh does not replace the group API

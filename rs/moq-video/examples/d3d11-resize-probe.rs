@@ -549,7 +549,7 @@ mod probe {
 		let pitch = mapped.RowPitch as usize;
 		let base = mapped.pData as *const u8;
 
-		let mut data = vec![0u8; I420::len(size.width, size.height)];
+		let mut data = vec![0u8; I420::len(size)?];
 		let (luma, chroma) = data.split_at_mut(w * h);
 		let (u_plane, v_plane) = chroma.split_at_mut(cw * ch);
 		for row in 0..h {
@@ -566,7 +566,7 @@ mod probe {
 			}
 		}
 
-		I420::new(size.width, size.height, data).context("I420::new")
+		I420::new(size, data).context("I420::new")
 	}
 
 	struct UnmapGuard<'a> {
@@ -857,13 +857,13 @@ mod probe {
 	/// and two frames are never identical.
 	fn gradient(index: u64) -> I420 {
 		let (w, h) = (SOURCE.width as usize, SOURCE.height as usize);
-		let mut data = vec![128u8; I420::len(SOURCE.width, SOURCE.height)];
+		let mut data = vec![128u8; I420::len(SOURCE).expect("source size")];
 		for y in 0..h {
 			for x in 0..w {
 				data[y * w + x] = ((x * 255 / w + y * 255 / h) / 2 + index as usize * 4) as u8;
 			}
 		}
-		I420::new(SOURCE.width, SOURCE.height, data).expect("gradient")
+		I420::new(SOURCE, data).expect("gradient")
 	}
 
 	/// Mean absolute error between two planes, the same check the CUDA and
@@ -877,7 +877,7 @@ mod probe {
 	fn report(device: &ID3D11Device, scaled: &ID3D11Texture2D, source: &I420) -> Result<()> {
 		let got = download_i420(device, scaled, TARGET)?;
 		let expected = Frame::new(Surface::I420(source.clone()), moq_net::Timestamp::ZERO)
-			.resize(TARGET)
+			.resize(TARGET, &moq_video::resize::Config::default())
 			.context("cpu resize")?
 			.surface
 			.into_i420()
@@ -888,9 +888,7 @@ mod probe {
 			SOURCE.height,
 			TARGET.width,
 			TARGET.height,
-			// `into_i420` hands back one packed buffer, so its luma is the leading
-			// `width * height` bytes rather than a plane accessor.
-			mae(got.y(), &expected[..TARGET.pixels() as usize])
+			mae(got.y(), expected.y())
 		);
 		Ok(())
 	}
@@ -1148,7 +1146,7 @@ mod probe {
 								return Ok(());
 							}
 							let resized = frame
-								.resize(target)
+								.resize(target, &moq_video::resize::Config::default())
 								.with_context(|| format!("ladder rung {rung} resize"))?;
 							if !matches!(&resized.surface, Surface::Texture(_)) {
 								bail!("ladder rung {rung} resize left the GPU");

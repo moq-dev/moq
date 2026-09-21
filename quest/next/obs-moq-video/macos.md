@@ -13,6 +13,4 @@ An OBS compositor frame reaches moq-video's VideoToolbox encoder without a GPU-t
 
 ## Required
 
-- [Video frames](/quest/main/video-frames.md) - settled native ownership and conversion contract
-
 - [Encoder adapter](/quest/next/obs-moq-video/adapter.md) - frame ownership, queue policy, packet output, and comparison baseline

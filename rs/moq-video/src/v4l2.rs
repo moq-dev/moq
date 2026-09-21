@@ -1224,7 +1224,7 @@ impl Planes {
 		let (width, height) = (self.size.width as usize, self.size.height as usize);
 		let (chroma_width, chroma_rows) = (width / 2, height / 2);
 
-		let mut data = vec![0u8; I420::len(self.size.width, self.size.height)];
+		let mut data = vec![0u8; I420::len(self.size)?];
 		let (luma, chroma) = data.split_at_mut(width * height);
 		let (u, v) = chroma.split_at_mut(chroma_width * chroma_rows);
 
@@ -1250,7 +1250,7 @@ impl Planes {
 			)?,
 		}
 
-		I420::new(self.size.width, self.size.height, data)
+		I420::new(self.size, data)
 	}
 }
 

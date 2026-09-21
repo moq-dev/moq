@@ -127,11 +127,7 @@ impl Config {
 
 		// Mid-gray, since the picture only has to make the encoder emit its parameter sets.
 		let size = self.size();
-		let i420 = crate::I420::new(
-			size.width,
-			size.height,
-			vec![0x80u8; crate::I420::len(size.width, size.height)],
-		)?;
+		let i420 = crate::I420::new(size, vec![0x80u8; crate::I420::len(size)?])?;
 		let frame = Frame::new(crate::Surface::I420(i420), moq_net::Timestamp::from_micros(0)?);
 
 		sink.keyframe();
@@ -478,7 +474,8 @@ mod tests {
 		let mut encoder = Encoder::new(&config).unwrap();
 
 		// A mid-gray I420 frame: flat 0x80 across all three planes.
-		let i420 = I420::new(320, 240, vec![0x80u8; I420::len(320, 240)]).unwrap();
+		let size = Size::new(320, 240);
+		let i420 = I420::new(size, vec![0x80u8; I420::len(size).unwrap()]).unwrap();
 		let frame = Frame::new(Surface::I420(i420), at(0));
 		let mut frames = encoder.encode(&frame).unwrap();
 		frames.extend(encoder.finish().unwrap());
@@ -1222,7 +1219,7 @@ mod tests {
 			crate::frame::Surface::rgba(&rgba, big).unwrap(),
 			moq_net::Timestamp::from_micros(0).unwrap(),
 		);
-		let scaled = frame.resize(small).unwrap();
+		let scaled = frame.resize(small, &crate::resize::Config::default()).unwrap();
 		assert_eq!(
 			scaled.surface.color(),
 			Some(Color::Bt709Limited),

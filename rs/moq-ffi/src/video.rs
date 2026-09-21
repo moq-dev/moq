@@ -205,9 +205,7 @@ impl VideoProducer {
 		// A buffer that isn't one picture at the configured size is rejected here,
 		// by the surface constructors, rather than reinterpreted.
 		let surface = match self.format {
-			MoqVideoPixelFormat::I420 => {
-				moq_video::Surface::I420(moq_video::I420::new(self.size.width, self.size.height, frame.data)?)
-			}
+			MoqVideoPixelFormat::I420 => moq_video::Surface::I420(moq_video::I420::new(self.size, frame.data)?),
 			MoqVideoPixelFormat::Rgba => moq_video::Surface::rgba(&frame.data, self.size)?,
 		};
 
@@ -608,13 +606,14 @@ impl VideoConsumerInner {
 		let data = frame
 			.surface
 			.into_i420()
-			.map_err(|err| MoqError::Codec(err.to_string()))?;
+			.map_err(|err| MoqError::Codec(err.to_string()))?
+			.into_data();
 
 		Ok(Some(MoqVideoDecodedFrame {
 			timestamp_us: frame.timestamp.as_micros() as u64,
 			width: size.width,
 			height: size.height,
-			data: data.to_vec(),
+			data,
 		}))
 	}
 }

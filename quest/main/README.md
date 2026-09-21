@@ -98,7 +98,6 @@ do not add another media abstraction or a renderer crate during stabilization.
 - [AEC ownership](/quest/main/audio-aec.md) - one microphone owns an adaptive canceller and controls remain shareable
 - [Playback outcome](/quest/main/audio-playback.md) - nonblocking writes report accepted and dropped audio
 - [Video output](/quest/main/video-output.md) - codec output and subscription policy are separate, with native or CPU frames
-- [Video frames](/quest/main/video-frames.md) - conversions preserve typed pixels and frame records can grow
 - [Video timing](/quest/main/video-timing.md) - capture time and fractional frame rates survive capture, encoding, and transcode
 - [Video GOP](/quest/main/video-gop.md) - the group contract is extensible before intra-refresh implementation
 - [Media release review](/quest/main/media-release-review.md) - verify the settled contracts before separately authorizing 0.1 releases

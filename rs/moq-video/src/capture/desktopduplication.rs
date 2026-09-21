@@ -258,7 +258,7 @@ impl Duplicator {
 		let pitch = mapped.RowPitch;
 		let len = pitch as usize * self.height as usize;
 		let bgra = unsafe { std::slice::from_raw_parts(mapped.pData as *const u8, len) };
-		self.last = Some(I420::from_bgra(bgra, pitch, self.width, self.height)?);
+		self.last = Some(I420::from_bgra(bgra, pitch, crate::Size::new(self.width, self.height))?);
 		Ok(())
 	}
 
@@ -405,7 +405,10 @@ mod tests {
 			};
 			assert_eq!(i420.width, cap.width);
 			assert_eq!(i420.height, cap.height);
-			assert_eq!(i420.data.len(), I420::len(cap.width, cap.height));
+			assert_eq!(
+				i420.data.len(),
+				I420::len(crate::Size::new(cap.width, cap.height)).unwrap()
+			);
 		}
 		eprintln!("captured 5 frames at {}x{}", cap.width, cap.height);
 	}

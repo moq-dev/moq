@@ -492,7 +492,11 @@ mod tests {
 		let decoded = decode_gray(3);
 		let resized: Vec<_> = decoded
 			.iter()
-			.map(|frame| frame.resize(crate::Size::new(160, 120)).unwrap())
+			.map(|frame| {
+				frame
+					.resize(crate::Size::new(160, 120), &crate::resize::Config::default())
+					.unwrap()
+			})
 			.collect();
 		for frame in &resized {
 			assert_eq!(frame.size(), crate::Size::new(160, 120));
@@ -796,7 +800,7 @@ mod tests {
 		}
 		let resized: Vec<_> = decoded
 			.iter()
-			.map(|frame| frame.resize_with(target, &resize).unwrap())
+			.map(|frame| frame.resize(target, &resize).unwrap())
 			.collect();
 		for frame in &resized {
 			assert_eq!(frame.size(), target);

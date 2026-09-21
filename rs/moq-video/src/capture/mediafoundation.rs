@@ -261,7 +261,10 @@ impl Camera {
 			data
 		};
 
-		Ok(Surface::I420(I420::from_nv12(&nv12, self.width, self.height)?))
+		Ok(Surface::I420(I420::from_nv12(
+			&nv12,
+			crate::Size::new(self.width, self.height),
+		)?))
 	}
 
 	/// Pull the next frame. Blocks per frame; the pump thread calls this in a loop

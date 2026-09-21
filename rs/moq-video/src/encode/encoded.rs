@@ -15,6 +15,7 @@ use moq_net::Timestamp;
 /// drains a tail from [`Encoder::finish`](super::Encoder::finish) still stamps
 /// each access unit with the time of the picture it encoded.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Encoded {
 	/// Presentation timestamp, from the raw frame this was encoded from.
 	pub timestamp: Timestamp,

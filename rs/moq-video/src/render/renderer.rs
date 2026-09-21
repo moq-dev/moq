@@ -759,7 +759,9 @@ mod tests {
 			// BT.709, so rendering by size alone skews this back.
 			let sd = solid(Size::new(640, 480), rgba);
 			assert_eq!(sd.surface.color(), Some(crate::Color::Bt601Limited));
-			let scaled = sd.resize(size).expect("scale past 576 lines");
+			let scaled = sd
+				.resize(size, &crate::resize::Config::default())
+				.expect("scale past 576 lines");
 			assert_eq!(
 				scaled.surface.color(),
 				Some(crate::Color::Bt601Limited),
@@ -1014,7 +1016,7 @@ mod tests {
 		// checking.
 		let uploaded = {
 			let nv12 = pattern(crate::DrmFormat::NV12, size, color);
-			let i420 = crate::frame::I420::from_nv12(&nv12, size.width, size.height).expect("deinterleave NV12");
+			let i420 = crate::frame::I420::from_nv12(&nv12, size).expect("deinterleave NV12");
 			let frame = Frame::new(Surface::I420(i420), Timestamp::ZERO);
 			let mut renderer = Renderer::new(device, queue, config.clone()).expect("a renderer");
 			let texture = renderer.render(&frame).expect("a rendered frame");
@@ -1294,7 +1296,9 @@ mod tests {
 			crate::Surface::PixelBuffer(crate::frame::macos::PixelBuffer::new(uploaded, size.width, size.height));
 		// The transfer session's pool is NV12 and IOSurface-backed, which is what
 		// makes the result importable; a plain upload is neither.
-		planar.resize(size).expect("a transfer into the NV12 pool")
+		planar
+			.resize(size, &crate::resize::Config::default())
+			.expect("a transfer into the NV12 pool")
 	}
 
 	/// Rendering must survive the decoder recycling its buffers underneath us.

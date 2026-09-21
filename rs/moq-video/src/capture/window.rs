@@ -233,8 +233,7 @@ impl Capture {
 		Ok(pump::Read::Frame(Surface::I420(I420::from_bgra(
 			&bgra,
 			self.width * 4,
-			self.width,
-			self.height,
+			crate::Size::new(self.width, self.height),
 		)?)))
 	}
 }

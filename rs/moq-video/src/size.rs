@@ -24,6 +24,13 @@ impl Size {
 		self.width as u64 * self.height as u64
 	}
 
+	pub(crate) fn byte_len(&self, bytes_per_pixel: usize, what: &str) -> Result<usize, Error> {
+		usize::try_from(self.pixels())
+			.ok()
+			.and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
+			.ok_or_else(|| Error::Codec(anyhow::anyhow!("{what} {self}: byte length is too large to represent")))
+	}
+
 	/// Reject anything the I420 pipeline can't represent.
 	///
 	/// I420 chroma is subsampled 2x2, so every stage (encode, decode, resize)

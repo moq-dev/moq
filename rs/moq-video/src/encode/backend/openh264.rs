@@ -202,7 +202,8 @@ mod tests {
 	/// A mid-gray frame at an arbitrary time; these tests only exercise the rate
 	/// controls, so the timestamp is never read back.
 	fn gray() -> Frame {
-		let i420 = I420::new(320, 240, vec![0x80u8; I420::len(320, 240)]).unwrap();
+		let size = crate::Size::new(320, 240);
+		let i420 = I420::new(size, vec![0x80u8; I420::len(size).unwrap()]).unwrap();
 		Frame::new(Surface::I420(i420), moq_net::Timestamp::from_micros(0).unwrap())
 	}
 

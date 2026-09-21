@@ -328,7 +328,7 @@ impl VideoEncoder {
 		let size = self.size;
 		let surface = match self.format {
 			moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 => {
-				moq_video::Surface::I420(moq_video::I420::new(size.width, size.height, data.to_vec())?)
+				moq_video::Surface::I420(moq_video::I420::new(size, data.to_vec())?)
 			}
 			moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA => moq_video::Surface::rgba(data, size)?,
 		};
@@ -530,14 +530,19 @@ impl Video {
 			if let Some(size) = output.size
 				&& frame.size() != size
 			{
-				frame = frame.resize(size)?;
+				frame = frame.resize(size, &moq_video::resize::Config::default())?;
 			}
 			let size = frame.size();
 			let data = match output.format {
-				moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 => frame.surface.into_i420()?,
-				moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA => {
-					bytes::Bytes::from(frame.surface.to_rgba()?.into_data())
+				moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 => {
+					bytes::Bytes::from(frame.surface.into_i420()?.into_data())
 				}
+				moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA => bytes::Bytes::from(
+					frame
+						.surface
+						.to_rgba(&moq_video::convert::Config::default())?
+						.into_data(),
+				),
 			};
 			let frame = VideoFrame {
 				// The C ABI carries microseconds; the decoded frame's Timestamp is

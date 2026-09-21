@@ -137,7 +137,9 @@ it to take a GPU path for a representation you recognize, and fall back to
 `Surface::into_i420()` for readback-capable surfaces. GPU-only
 `Surface::Vulkan` refuses CPU conversion. On macOS `Surface::into_pixel_buffer()`
 is the mirror: free for a hardware-decoded frame, an upload for a CPU one.
-`Surface::to_rgba()` and `Surface::to_bgra()` are the portable exits for CPU
+`Surface::into_i420()` returns typed pixels with size and color intact;
+`I420::into_data()` explicitly extracts the packed bytes. `Surface::to_rgba(config)`
+and `Surface::to_bgra(config)` are the portable exits for CPU
 image and UI toolkits, returning owned, tightly packed pixels with the surface's
 color metadata applied. Both orders are there because toolkits disagree and the
 conversion is a full pass over the frame: producing the order the caller wants
