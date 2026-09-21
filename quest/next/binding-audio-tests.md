@@ -7,7 +7,7 @@ consumer's. Today only Python asserts a sub-millisecond Opus frame duration
 (`py/moq-rs/tests/test_local.py`), Go pins only the 20 ms default, Kotlin and
 Swift never set one, no Kotlin test proves the fallible configuration setters
 throw (#3642 added the Python and Swift cases and skipped `kt/`), and
-`smoke` publishes audio from no binding with an explicit codec config.
+`smoke --all` publishes audio from no binding with an explicit codec config.
 
 ## Plan
 
