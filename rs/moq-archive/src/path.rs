@@ -9,7 +9,7 @@ use crate::{Error, ID_MAX, ID_WIDTH, Result};
 const TRACK: &AsciiSet = &NON_ALPHANUMERIC.remove(b'_').remove(b'-');
 
 /// Percent-encode a track name as one object-store path segment.
-pub fn encode_track(name: &str) -> Result<String> {
+pub(crate) fn encode_track(name: &str) -> Result<String> {
 	if name.is_empty() {
 		return Err(Error::Track);
 	}
@@ -17,7 +17,7 @@ pub fn encode_track(name: &str) -> Result<String> {
 }
 
 /// Decode a percent-encoded track name, refusing anything that is not canonical.
-pub fn decode_track(encoded: &str) -> Result<String> {
+pub(crate) fn decode_track(encoded: &str) -> Result<String> {
 	if encoded.is_empty() || encoded.starts_with('.') || encoded.contains('/') {
 		return Err(Error::Track);
 	}
@@ -29,13 +29,13 @@ pub fn decode_track(encoded: &str) -> Result<String> {
 }
 
 /// Write a group or segment ID as 19 zero-padded decimal digits.
-pub fn format_id(id: u64) -> Result<String> {
+pub(crate) fn format_id(id: u64) -> Result<String> {
 	check_id(id)?;
 	Ok(format!("{id:0width$}", width = ID_WIDTH))
 }
 
 /// Parse a 19-digit decimal ID field, refusing values outside the recording range.
-pub fn parse_id(field: &str) -> Result<u64> {
+pub(crate) fn parse_id(field: &str) -> Result<u64> {
 	if field.len() != ID_WIDTH || !field.bytes().all(|b| b.is_ascii_digit()) {
 		return Err(Error::Path(field.to_string()));
 	}
@@ -44,7 +44,7 @@ pub fn parse_id(field: &str) -> Result<u64> {
 }
 
 /// Refuse an ID outside 0 through 2^53 - 1.
-pub fn check_id(id: u64) -> Result<u64> {
+pub(crate) fn check_id(id: u64) -> Result<u64> {
 	if id > ID_MAX { Err(Error::Id(id)) } else { Ok(id) }
 }
 
@@ -104,7 +104,7 @@ impl Key {
 	}
 
 	/// Encode this key under `prefix`.
-	pub fn path(&self, prefix: &Path) -> Result<Path> {
+	pub(crate) fn path(&self, prefix: &Path) -> Result<Path> {
 		let path = push(prefix, &encode_track(self.track())?)?;
 		match self {
 			Self::Info { .. } => push(&path, ".info"),
@@ -120,7 +120,7 @@ impl Key {
 	}
 
 	/// Parse a store location relative to `prefix`.
-	pub fn parse(prefix: &Path, location: &Path) -> Result<Self> {
+	pub(crate) fn parse(prefix: &Path, location: &Path) -> Result<Self> {
 		if prefix.as_ref().is_empty() {
 			return parse_parts(location.parts(), location);
 		}
@@ -164,22 +164,29 @@ fn parse_parts<'a>(mut parts: impl Iterator<Item = PathPart<'a>>, location: &Pat
 	}
 }
 
-/// `<prefix>/<encoded-track>/groups`
-pub fn groups_prefix(prefix: &Path, track: &str) -> Result<Path> {
-	let path = push(prefix, &encode_track(track)?)?;
+pub(crate) fn track_prefix(track: &str) -> Result<Path> {
+	push(&Path::ROOT, &encode_track(track)?)
+}
+
+pub(crate) fn groups_prefix(prefix: &Path, track: &str) -> Result<Path> {
+	let path = append(prefix, &track_prefix(track)?);
 	push(&path, "groups")
 }
 
-/// `<prefix>/<encoded-track>/segments`
-pub fn segments_prefix(prefix: &Path, track: &str) -> Result<Path> {
-	let path = push(prefix, &encode_track(track)?)?;
+pub(crate) fn segments_prefix(prefix: &Path, track: &str) -> Result<Path> {
+	let path = append(prefix, &track_prefix(track)?);
 	push(&path, "segments")
 }
 
-/// Exclusive listing offset `groups/<group>` (19 digits, no dot) for a FETCH of `group`.
-pub fn groups_offset(prefix: &Path, track: &str, group: u64) -> Result<Path> {
+pub(crate) fn groups_offset(prefix: &Path, track: &str, group: u64) -> Result<Path> {
 	let path = groups_prefix(prefix, track)?;
 	push(&path, &format_id(group)?)
+}
+
+fn append(base: &Path, relative: &Path) -> Path {
+	let mut path = base.clone();
+	path.extend(relative.parts());
+	path
 }
 
 pub(crate) fn push(base: &Path, segment: &str) -> Result<Path> {

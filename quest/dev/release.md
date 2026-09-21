@@ -86,7 +86,6 @@ Public API: none beyond the required quests. Wire: none.
 
 - [E2EE API](/quest/main/e2ee-api.md) - expose epoch-scoped ownership and align the implemented profile
 - [uring identity](/quest/main/uring-identity.md) - bind sockets, connections, workers, and steering identity together
-- [Archive listing](/quest/main/archive-listing.md) - expose one recording-scoped listing query
 - [Merge dev](/quest/dev/merge-dev.md) - the tree the release is cut from
 - [Binding audio tests](/quest/next/binding-audio-tests.md) - every binding proves the audio config it exposes
 - [Decode format](/quest/next/ffi-decode-format.md) - the C-only decode knob reaches every uniffi binding

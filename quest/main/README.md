@@ -90,7 +90,6 @@ do not add another media abstraction or a renderer crate during stabilization.
 
 - [E2EE API](/quest/main/e2ee-api.md) - epoch-scoped ownership replaces raw crypto, catalog helpers, and process-global claims
 - [uring identity](/quest/main/uring-identity.md) - sockets and connections carry their worker and steering identity
-- [Archive listing](/quest/main/archive-listing.md) - one recording-scoped query exposes only supported listing behavior
 - [Vulkan/CUDA surfaces](/quest/main/video-vulkan-cuda.md) - retain producer slots
   and synchronize GPU access safely across Vulkan and CUDA
 - [NVENC registration rollback](/quest/main/nvenc-registration.md) - release resources when mapping fails after registration
