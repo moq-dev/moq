@@ -42,18 +42,19 @@ grammar lives on the concept page.
 `Client::connect(now, transport)`, `Server::accept(now, transport)`, and
 `server::Handshake::ok()` return `(Session, Driver)`. `moq-net` never spawns
 tasks or reads the clock: the caller polls the driver and supplies the time.
+`moq_net::time::run` does that on tokio or in the browser.
 
 ```rust
 let now = tokio::time::Instant::now().into_std();
 let (session, driver) = client.connect(now, transport).await?;
-tokio::spawn(moq_tokio::runtime::run(driver));
+tokio::spawn(moq_net::time::run(driver));
 ```
 
 A custom event loop calls `driver.poll(now, waiter)` with a nondecreasing
-`moq_net::time::Instant`. After `Pending`, wait for external activity or the
-instant returned by `driver.timeout()` (`None` means no timer is armed), then
-poll again with fresh time. Tests drive the same interface with explicitly
-advanced instants.
+`moq_net::time::Instant`. `Ok(Some(at))` asks to be polled again by `at` or
+on external activity, `Ok(None)` only on external activity, and `Err` is the
+terminal error (`Error::Closed` for a clean finish): stop polling. Tests drive
+the same interface with explicitly advanced instants.
 
 Dropping the last session handle requests closure on the next poll. Dropping
 the driver cancels the session. `moq-tokio` and `moq-wasm` drive sessions for
@@ -61,7 +62,7 @@ their callers.
 
 `origin::Producer::new` returns a driver with the same `time::Driver`
 interface. It calls `cache::Pool::gc(now)` after each poll and folds the next
-cleanup time into its own `timeout()`. A standalone pool needs `gc(now)`
+cleanup time into its returned deadline. A standalone pool needs `gc(now)`
 called by its owner, at least by the returned deadline; `None` means expiry is
 disabled.
 

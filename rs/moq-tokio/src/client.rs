@@ -602,7 +602,7 @@ async fn connect_session<S: moq_net::transport::poll::Boxable>(
 		.connect(tokio::time::Instant::now().into_std(), transport)
 		.await?;
 	use tracing::Instrument;
-	tokio::spawn(crate::runtime::run(driver).instrument(tracing::Span::current()));
+	tokio::spawn(moq_net::time::run(driver).instrument(tracing::Span::current()));
 	Ok(session)
 }
 

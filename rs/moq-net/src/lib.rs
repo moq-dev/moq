@@ -47,11 +47,12 @@
 //! last producer signals consumers that no more updates are coming.
 //!
 //! ## Driving and time
-//! This library never spawns tasks or schedules runtime timers. [`Client::connect`]
-//! and [`Server::accept`] take an initial [`time::Instant`] and return
+//! This library never spawns tasks or reads the clock. [`Client::connect`] and
+//! [`Server::accept`] take an initial [`time::Instant`] and return
 //! `(Session, Driver)`. Poll the [`Driver`] with the current instant and a
-//! [`kio::Waiter`], then wake on external activity or at [`Driver::timeout`].
-//! The last [`Session`] drop requests closure; dropping the driver cancels it.
+//! [`kio::Waiter`], then wake on external activity or at the deadline it
+//! returns; [`time::run`] does exactly that on tokio or the browser. The last
+//! [`Session`] drop requests closure; dropping the driver cancels it.
 //!
 //! [`origin::Producer::new`] also returns a producer and driver. Its driver runs
 //! route changes, serving, linger, teardown, and the origin's cache expiration.
@@ -59,9 +60,9 @@
 //! clear their expiration timestamp for the next cleanup pass. Datagrams use a bounded
 //! FIFO; model read/write APIs take no wall-clock time.
 //!
-//! Both drivers implement [`time::Driver`]. `moq-tokio` and `moq-wasm`
-//! supply runtime adapters, and `moq-uring` can drive thread-local transports.
-//! Tests can advance time simply by supplying a later instant.
+//! Both drivers implement [`time::Driver`]. `moq-uring` drives thread-local
+//! transports on its own timer heap. Tests advance time by supplying a later
+//! instant.
 
 #![warn(missing_docs)]
 // The browser transport is `!Send`, so on wasm the shared state behind these `Arc`s is

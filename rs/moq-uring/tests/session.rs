@@ -46,7 +46,7 @@ fn lite_session_over_the_worker() {
 			.build()
 			.expect("tokio runtime");
 		rt.block_on(async move {
-			tokio::join!(moq_tokio::runtime::run(pub_driver), moq_tokio::runtime::run(sub_driver));
+			tokio::join!(moq_net::time::run(pub_driver), moq_net::time::run(sub_driver));
 		});
 	});
 
@@ -167,9 +167,9 @@ fn two_lite_sessions_share_the_server_socket() {
 			.expect("tokio runtime");
 		rt.block_on(async move {
 			tokio::join!(
-				moq_tokio::runtime::run(pub_driver),
-				moq_tokio::runtime::run(sub_a_driver),
-				moq_tokio::runtime::run(sub_b_driver),
+				moq_net::time::run(pub_driver),
+				moq_net::time::run(sub_a_driver),
+				moq_net::time::run(sub_b_driver),
 			);
 		});
 	});

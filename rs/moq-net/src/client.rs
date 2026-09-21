@@ -682,7 +682,7 @@ mod tests {
 			.connect(tokio::time::Instant::now().into_std(), fake.clone())
 			.await
 			.unwrap();
-		tokio::spawn(crate::time::test::run(driver));
+		tokio::spawn(crate::time::run(driver));
 
 		// Verify the client setup was encoded using Draft14 framing (ALPN_LITE fallback path).
 		let mut setup_bytes = Bytes::from(fake.control_writes());
@@ -759,7 +759,7 @@ mod tests {
 		assert_eq!(session.version(), Version::Lite(lite::Version::Lite04));
 
 		// Construction leaves the driver idle until the caller polls it.
-		assert!(driver.poll(runtime.now(), &kio::Waiter::noop()).is_pending());
+		assert!(driver.poll(runtime.now(), &kio::Waiter::noop()).is_ok());
 
 		// The caller drops their only session clone; the machine observes the
 		// last handle going away and closes the transport.
@@ -982,7 +982,7 @@ mod tests {
 
 		let runtime = crate::runtime::Test::new();
 		let (session, mut driver) = futures::executor::block_on(client.connect_lite(runtime.now(), local)).unwrap();
-		assert!(driver.poll(runtime.now(), &kio::Waiter::noop()).is_pending());
+		assert!(driver.poll(runtime.now(), &kio::Waiter::noop()).is_ok());
 
 		fn assert_send_sync<T: Send + Sync>(_: &T) {}
 		assert_send_sync(&session);
@@ -1009,7 +1009,7 @@ mod tests {
 		let runtime = crate::runtime::Test::new();
 		let (session, mut driver) = futures::executor::block_on(server.accept_lite(runtime.now(), local)).unwrap();
 		assert_eq!(session.version(), Version::Lite(lite::Version::Lite04));
-		assert!(driver.poll(runtime.now(), &kio::Waiter::noop()).is_pending());
+		assert!(driver.poll(runtime.now(), &kio::Waiter::noop()).is_ok());
 
 		drop(session);
 		assert!(fake.state.close_events.lock().unwrap().is_empty());
@@ -1048,7 +1048,7 @@ mod tests {
 			.connect(tokio::time::Instant::now().into_std(), fake.clone())
 			.await
 			.unwrap();
-		tokio::spawn(crate::time::test::run(driver));
+		tokio::spawn(crate::time::run(driver));
 
 		// The construction-time snapshot, before the machine sampled anything.
 		assert_eq!(
@@ -1081,7 +1081,7 @@ mod tests {
 			.connect(tokio::time::Instant::now().into_std(), fake.clone())
 			.await
 			.unwrap();
-		tokio::spawn(crate::time::test::run(driver));
+		tokio::spawn(crate::time::run(driver));
 		assert!(
 			session.send_bandwidth().is_none(),
 			"no send-rate estimate, so nothing samples on its own"
@@ -1112,7 +1112,7 @@ mod tests {
 			.connect(tokio::time::Instant::now().into_std(), fake.clone())
 			.await
 			.unwrap();
-		tokio::spawn(crate::time::test::run(driver));
+		tokio::spawn(crate::time::run(driver));
 
 		let mut bandwidth = session.send_bandwidth().expect("backend reports an estimate");
 		assert_eq!(

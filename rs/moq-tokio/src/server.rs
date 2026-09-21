@@ -1303,7 +1303,7 @@ impl Request {
 		Ok(request_into!(self.kind, request => {
 			let (session, driver) = request.ok().await?;
 			use tracing::Instrument;
-			tokio::spawn(crate::runtime::run(driver).instrument(tracing::Span::current()));
+			tokio::spawn(moq_net::time::run(driver).instrument(tracing::Span::current()));
 			session
 		}))
 	}

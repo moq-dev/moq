@@ -1121,7 +1121,6 @@ impl Producer {
 			},
 			timers,
 			pool,
-			gc: None,
 		};
 		(producer, driver)
 	}
@@ -1614,8 +1613,8 @@ impl Drop for AnnounceProducer {
 
 /// Drives origin lifecycle work and cache expiration with caller-supplied time.
 ///
-/// Returned by [`Producer::new`]. Poll on external activity or at [`Self::timeout`],
-/// supplying nondecreasing instants. Route changes, track serving, linger,
+/// Returned by [`Producer::new`]. Poll on external activity or at the deadline
+/// it returns, supplying nondecreasing instants. Route changes, track serving, linger,
 /// failover, and teardown run here; exact lookups and eligible announcements
 /// update synchronously in [`Producer::create_broadcast`].
 ///
@@ -1631,7 +1630,6 @@ pub struct Driver {
 	// The cache pool this origin's groups charge into, swept on a wall-clock
 	// cadence so its idle window binds a track whose publisher stopped writing.
 	pool: cache::Pool,
-	gc: Option<Instant>,
 }
 
 /// Lifecycle work and the state it tears down.
@@ -1649,26 +1647,24 @@ struct DriverState {
 
 impl Driver {
 	/// Process ready origin work using caller-supplied monotonic time.
-	pub fn poll(&mut self, now: Instant, waiter: &kio::Waiter) -> Poll<()> {
+	///
+	/// See [`crate::time::Driver`] for the contract. Finishes with
+	/// [`Error::Closed`] once every producer handle has dropped and the
+	/// remaining lifecycle work has drained.
+	pub fn poll(&mut self, now: Instant, waiter: &kio::Waiter) -> Result<Option<Instant>, Error> {
 		self.timers.advance(now);
 		let result = self.state.poll(waiter);
-		self.gc = self.pool.gc(now);
-		result
-	}
-
-	/// The next instant to poll, or none when only external activity can make progress.
-	pub fn timeout(&self) -> Option<Instant> {
-		self.timers.timeout().into_iter().chain(self.gc).min()
+		let gc = self.pool.gc(now);
+		if result.is_ready() {
+			return Err(Error::Closed);
+		}
+		Ok(self.timers.timeout().into_iter().chain(gc).min())
 	}
 }
 
 impl crate::time::Driver for Driver {
-	type Output = ();
-	fn poll(&mut self, now: Instant, waiter: &kio::Waiter) -> Poll<()> {
+	fn poll(&mut self, now: Instant, waiter: &kio::Waiter) -> Result<Option<Instant>, Error> {
 		self.poll(now, waiter)
-	}
-	fn timeout(&self) -> Option<Instant> {
-		self.timeout()
 	}
 }
 
@@ -3964,7 +3960,9 @@ impl ProduceTest for Config {
 	fn produce(self) -> Producer {
 		let (producer, driver) = Producer::new(self);
 		if tokio::runtime::Handle::try_current().is_ok() {
-			web_async::spawn(crate::time::test::run(driver));
+			web_async::spawn(async move {
+				crate::time::run(driver).await;
+			});
 		} else {
 			// A sync test: nothing polls the driver, and dropping it would tear
 			// the origin down, so leak it and rely on the synchronous half.
@@ -5210,7 +5208,7 @@ mod tests {
 	async fn driver_resolves_with_live_consumers() {
 		let (producer, driver) = Producer::new(Config::new(origin(1)));
 		let consumer = producer.consume();
-		let run = crate::time::test::run(driver);
+		let run = crate::time::run(driver);
 		drop(producer);
 		tokio::time::timeout(Duration::from_secs(5), run)
 			.await

@@ -17,7 +17,7 @@ pub fn spawn() -> moq_net::origin::Producer {
 /// Build and spawn an origin producer with an explicit configuration.
 pub fn spawn_config(config: moq_net::origin::Config) -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(config);
-	tokio::spawn(crate::runtime::run(driver));
+	tokio::spawn(moq_net::time::run(driver));
 	producer
 }
 

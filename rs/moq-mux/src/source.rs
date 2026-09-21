@@ -288,7 +288,7 @@ impl BroadcastConfig for hang::catalog::BinaryConfig {
 pub(crate) fn produce_origin() -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 	if tokio::runtime::Handle::try_current().is_ok() {
-		tokio::spawn(moq_tokio::runtime::run(driver));
+		tokio::spawn(moq_net::time::run(driver));
 	} else {
 		// A sync test: nothing polls the driver, and dropping it would tear
 		// the origin down, so leak it and rely on the synchronous half.

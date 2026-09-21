@@ -542,15 +542,16 @@ impl Handle {
 		crate::Timer::from_heap(self.shared.timers.clone())
 	}
 
-	/// Run a MoQ driver with this worker's timer and monotonic clock.
-	pub async fn run<D: moq_net::time::Driver>(&self, mut driver: D) -> D::Output {
+	/// Run a MoQ driver with this worker's timer and monotonic clock, resolving
+	/// with its terminal error.
+	pub async fn run<D: moq_net::time::Driver>(&self, mut driver: D) -> moq_net::Error {
 		let mut timer = self.timer();
 		kio::wait(|waiter| {
 			loop {
-				if let Poll::Ready(result) = driver.poll(Instant::now(), waiter) {
-					return Poll::Ready(result);
+				match driver.poll(Instant::now(), waiter) {
+					Ok(at) => timer.set(at),
+					Err(err) => return Poll::Ready(err),
 				}
-				timer.set(driver.timeout());
 				if timer.poll(waiter).is_pending() {
 					return Poll::Pending;
 				}

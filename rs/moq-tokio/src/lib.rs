@@ -46,7 +46,6 @@ pub mod origin;
 pub mod quic;
 #[cfg(any(feature = "noq", feature = "tcp", feature = "websocket"))]
 mod resolve;
-pub mod runtime;
 #[cfg(feature = "_transport")]
 pub mod server;
 #[doc(hidden)]

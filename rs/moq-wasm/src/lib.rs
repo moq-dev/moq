@@ -9,8 +9,8 @@
 //! which is the highest-value target (the `@moq/watch` use case). The publish
 //! path follows the same shape and is left as the obvious next step.
 //!
-//! `runtime::run` drives moq-net with the browser clock and timer. This crate spawns
-//! the returned session drivers on the browser's microtask queue.
+//! `moq_net::time::run` drives moq-net with the browser clock and timer; this
+//! crate spawns it on the browser's microtask queue.
 
 // Browser-only crate. Empty on native so `cargo check --workspace` stays green.
 #![cfg(target_arch = "wasm32")]
@@ -21,7 +21,6 @@ use std::rc::Rc;
 use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
 
-pub mod runtime;
 pub mod transport;
 
 /// Map any displayable error into a JS exception.
@@ -72,7 +71,9 @@ impl Session {
 		// Wire a subscribe origin so the session has somewhere to insert the
 		// broadcasts the remote announces; keep a consumer to read them.
 		let (origin, origin_driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
-		web_async::spawn(crate::runtime::run(origin_driver));
+		web_async::spawn(async move {
+			moq_net::time::run(origin_driver).await;
+		});
 		let consumer = origin.consume();
 		let client = moq_net::Client::new().with_subscriber(origin);
 		// The driver holds no session clone, so dropping this `Session` still
@@ -82,7 +83,7 @@ impl Session {
 			.await
 			.map_err(js_err)?;
 		web_async::spawn(async move {
-			let _ = crate::runtime::run(driver).await;
+			moq_net::time::run(driver).await;
 		});
 		Ok(Session { inner, consumer })
 	}

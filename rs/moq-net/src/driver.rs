@@ -8,9 +8,10 @@ use crate::time::{Clock, Instant};
 /// Drives a session with caller-supplied time.
 ///
 /// Returned by [`crate::Client::connect`] and [`crate::Server::accept`]. Call
-/// [`poll`](Self::poll) when external activity wakes the waiter or when
-/// [`timeout`](Self::timeout) is reached. Supply nondecreasing instants.
-/// Completion is cached, so subsequent polls return the same result.
+/// [`poll`](Self::poll) when external activity wakes the waiter or when the
+/// returned deadline is reached, supplying nondecreasing instants; see
+/// [`crate::time::Driver`] for the contract. Completion is cached, so
+/// subsequent polls return the same error.
 ///
 /// It holds no session handle: dropping the last [`crate::Session`] requests
 /// closure on the next poll. Dropping the driver cancels the session, and
@@ -59,9 +60,13 @@ impl<S: crate::transport::poll::Session> Driver<S> {
 	/// Process ready work at `now`, registering for external activity.
 	///
 	/// Panics if `now` is earlier than the previous poll or construction time.
-	pub fn poll(&mut self, now: Instant, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+	pub fn poll(&mut self, now: Instant, waiter: &kio::Waiter) -> Result<Option<Instant>, Error> {
 		self.clock.advance(now);
-		self.state.poll(waiter)
+		match self.state.poll(waiter) {
+			Poll::Ready(Ok(())) => Err(Error::Closed),
+			Poll::Ready(Err(err)) => Err(err),
+			Poll::Pending => Ok(self.clock.timeout()),
+		}
 	}
 }
 
@@ -103,19 +108,8 @@ impl<S: crate::transport::poll::Session> State<S> {
 }
 
 impl<S: crate::transport::poll::Session> crate::time::Driver for Driver<S> {
-	type Output = Result<(), Error>;
-	fn poll(&mut self, now: Instant, waiter: &kio::Waiter) -> Poll<Self::Output> {
+	fn poll(&mut self, now: Instant, waiter: &kio::Waiter) -> Result<Option<Instant>, Error> {
 		self.poll(now, waiter)
-	}
-	fn timeout(&self) -> Option<Instant> {
-		self.timeout()
-	}
-}
-
-impl<S: crate::transport::poll::Session> Driver<S> {
-	/// The next instant the caller must poll at, or none while no timer is armed.
-	pub fn timeout(&self) -> Option<Instant> {
-		self.clock.timeout()
 	}
 }
 

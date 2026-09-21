@@ -1,5 +1,6 @@
 //! Caller-supplied time for protocol and model drivers.
 
+use crate::Error;
 use crate::runtime::{Timer as _, Timers};
 use std::{
 	collections::BTreeMap,
@@ -10,13 +11,48 @@ use std::{
 pub use crate::runtime::Instant;
 
 /// A state machine polled with caller-supplied time.
+///
+/// Each poll advances the driver to `now`, processes ready work, and registers
+/// `waiter` for external activity. `Ok(Some(at))` asks to be polled again by
+/// `at` (or sooner, on a wake); `Ok(None)` means only external activity can
+/// make progress. `Err` is terminal: the driver has finished and must not be
+/// polled again. A clean finish is [`Error::Closed`].
 pub trait Driver {
-	/// The result produced when this driver finishes.
-	type Output;
-	/// Advance time and process ready work, registering for external activity.
-	fn poll(&mut self, now: Instant, waiter: &kio::Waiter) -> Poll<Self::Output>;
-	/// The next time to poll, or none when only external activity can make progress.
-	fn timeout(&self) -> Option<Instant>;
+	/// Advance to `now` and process ready work.
+	fn poll(&mut self, now: Instant, waiter: &kio::Waiter) -> Result<Option<Instant>, Error>;
+}
+
+/// Run a driver to completion on the ambient runtime, sleeping until each deadline.
+///
+/// Tokio on native, `setTimeout` in the browser. Resolves with the driver's
+/// terminal error, [`Error::Closed`] for a clean finish.
+pub async fn run<D: Driver>(mut driver: D) -> Error {
+	let mut timer: Option<std::pin::Pin<Box<web_async::time::Sleep>>> = None;
+	kio::wait(|waiter| {
+		loop {
+			let now = web_async::time::Instant::now();
+			#[cfg(not(target_family = "wasm"))]
+			let now = now.into_std();
+			let at = match driver.poll(now, waiter) {
+				Ok(Some(at)) => at,
+				Ok(None) => {
+					timer = None;
+					return Poll::Pending;
+				}
+				Err(err) => return Poll::Ready(err),
+			};
+			#[cfg(not(target_family = "wasm"))]
+			let at = web_async::time::Instant::from_std(at);
+			let sleep = timer.get_or_insert_with(|| Box::pin(web_async::time::sleep_until(at)));
+			if sleep.deadline() != at {
+				sleep.as_mut().reset(at);
+			}
+			if waiter.poll_future(sleep.as_mut()).is_pending() {
+				return Poll::Pending;
+			}
+		}
+	})
+	.await
 }
 
 /// A private clock shared only by work owned by one driver.
@@ -178,40 +214,5 @@ mod tests {
 		let now = Instant::now();
 		let clock = Clock::new(now);
 		clock.advance(now - Duration::from_secs(1));
-	}
-}
-
-/// Runtime adapter for integration tests.
-#[cfg(any(test, feature = "test-runtime"))]
-#[doc(hidden)]
-pub mod test {
-	use std::task::Poll;
-	/// Run an explicit-time driver on the runtime's clock and timer.
-	pub async fn run<D: crate::time::Driver>(mut driver: D) -> D::Output {
-		let mut timer = None;
-		crate::kio::wait(|waiter| {
-			loop {
-				let now = web_async::time::Instant::now();
-				#[cfg(not(target_family = "wasm"))]
-				let now = now.into_std();
-				if let Poll::Ready(result) = driver.poll(now, waiter) {
-					return Poll::Ready(result);
-				}
-				let Some(at) = driver.timeout() else {
-					timer = None;
-					return Poll::Pending;
-				};
-				#[cfg(not(target_family = "wasm"))]
-				let at = web_async::time::Instant::from_std(at);
-				let sleep = timer.get_or_insert_with(|| Box::pin(web_async::time::sleep_until(at)));
-				if sleep.deadline() != at {
-					sleep.as_mut().reset(at);
-				}
-				if waiter.poll_future(sleep.as_mut()).is_pending() {
-					return Poll::Pending;
-				}
-			}
-		})
-		.await
 	}
 }

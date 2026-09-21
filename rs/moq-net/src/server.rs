@@ -1108,7 +1108,7 @@ mod tests {
 			.unwrap();
 
 		let (session, driver) = request.ok().await.unwrap();
-		tokio::spawn(crate::time::test::run(driver));
+		tokio::spawn(crate::time::run(driver));
 
 		for _ in 0..100 {
 			if occurrences(&log, b"local-route") > 0 {

@@ -23,5 +23,4 @@ web-async = { workspace = true }
 
 [dev-dependencies]
 futures = { workspace = true }
-moq-tokio = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }

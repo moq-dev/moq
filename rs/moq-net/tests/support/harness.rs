@@ -11,7 +11,7 @@ use moq_net::{Client, Server, Session, Version, origin};
 
 use super::mock::create_mock_session_pair;
 
-pub use moq_net::time::test::run;
+pub use moq_net::time::run;
 
 pub fn now() -> moq_net::time::Instant {
 	tokio::time::Instant::now().into_std()

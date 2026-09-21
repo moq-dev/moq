@@ -19,8 +19,8 @@ What works today:
 
 - **Executor-independent sessions.** `moq-net` is generic over
   `web_transport_trait::poll::Session` and returns a driver for the caller to
-  run. `moq-wasm` spawns a runtime adapter via `web_async::spawn`, supplying
-  time and scheduling the driver's next wakeup on the browser.
+  run. `moq-wasm` spawns `moq_net::time::run` via `web_async::spawn`, which
+  supplies the browser clock and sleeps until the driver's next deadline.
 - **The browser transport needs no adapter**: `web-transport-wasm` implements
   the poll traits `moq-net` consumes, so `src/transport.rs` is just the dial
   (the ALPN list and the browser's two trust modes).
@@ -45,11 +45,11 @@ What works today:
    transport is `!Send`, but `SessionInner` used to hard-code `Send`.
    `web_async::MaybeSendBoxFuture` picks a `Send` boxed future on native and a
    local boxed future on wasm. Native behavior is unchanged.
-3. Drivers accept `moq_net::time::Instant` and report their next timeout.
-   This crate supplies the browser clock and one re-armable sleep through
-   `web_async::time`, backed by `performance.now()` and `setTimeout`.
+3. Drivers accept `moq_net::time::Instant` and return their next deadline.
+   `moq_net::time::run` supplies the clock and one re-armable sleep through
+   `web_async::time`, backed by `performance.now()` and `setTimeout` here.
    `moq-net` handles session sampling, linger, probes, and cache expiration
-   using the supplied time. It does not create runtime timers or spawn tasks.
+   using the supplied time and never spawns tasks.
 
 ### Timestamp fallback
 

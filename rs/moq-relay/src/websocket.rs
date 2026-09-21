@@ -183,7 +183,7 @@ where
 		)
 		.await?;
 
-	let driver = moq_tokio::runtime::run(driver);
+	let driver = moq_net::time::run(driver);
 	tokio::pin!(driver);
 
 	// The handshake is done, so this is a MoQ session now: only now can a push
@@ -198,21 +198,15 @@ where
 			}
 		};
 		tokio::select! {
-			res = &mut driver => {
-				lease.close(
-					match &res {
-						Ok(()) => "closed".to_string(),
-						Err(err) => err.to_string(),
-					},
-					crate::connection::session_bytes(&session),
-				);
-				return res.map_err(Into::into);
+			err = &mut driver => {
+				lease.close(err.to_string(), crate::connection::session_bytes(&session));
+				return ended(err);
 			}
 			why = lease.ended() => {
 				tracing::info!(%why, "lease ended, closing session");
 				session.abort(moq_net::Error::Unauthorized);
 				// Drive the teardown so the close reaches the peer.
-				let res = driver.await.map_err(Into::into);
+				let res = ended(driver.await);
 				lease.close(why, crate::connection::session_bytes(&session));
 				return res;
 			}
@@ -224,8 +218,8 @@ where
 				let drain = shutdown.drain_session(&session);
 				let mut drain = std::pin::pin!(drain);
 				let res = tokio::select! {
-					res = &mut driver => res.map_err(Into::into),
-					_ = &mut drain => driver.await.map_err(Into::into),
+					err = &mut driver => ended(err),
+					_ = &mut drain => ended(driver.await),
 				};
 				lease.close("shutdown", crate::connection::session_bytes(&session));
 				return res;
@@ -250,6 +244,14 @@ where
 ///
 /// A client that offers no subprotocol at all is left alone: it upgrades and
 /// negotiates the moq version over moq-lite SETUP instead.
+/// The driver's terminal error as a session outcome: a clean close is not a failure.
+fn ended(err: moq_net::Error) -> anyhow::Result<()> {
+	match err {
+		moq_net::Error::Closed => Ok(()),
+		err => Err(err.into()),
+	}
+}
+
 fn negotiate_subprotocol(ws: WebSocketUpgrade, alpns: &[&str]) -> Result<WebSocketUpgrade, StatusCode> {
 	let supported = supported_subprotocols(alpns);
 

@@ -216,7 +216,7 @@ fn lite_session_over_webtransport() {
 			.enable_time()
 			.build()
 			.expect("tokio runtime");
-		rt.block_on(moq_tokio::runtime::run(pub_driver));
+		rt.block_on(moq_net::time::run(pub_driver));
 	});
 
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
@@ -235,14 +235,14 @@ fn lite_session_over_webtransport() {
 		Box::pin(async move {
 			assert_eq!(session.protocol(), Some(PROTO), "negotiated subprotocol");
 			let (sub_origin, sub_driver) = origin::Producer::new(origin::Config::default());
-			let driver = tokio::spawn(moq_tokio::runtime::run(sub_driver));
+			let driver = tokio::spawn(moq_net::time::run(sub_driver));
 
 			let (moq, session_driver) = moq_net::Client::new()
 				.with_subscriber(sub_origin.clone())
 				.connect_lite(std::time::Instant::now(), moq_tokio::transport::Session::new(session))
 				.await
 				.expect("connect_lite");
-			tokio::spawn(moq_tokio::runtime::run(session_driver));
+			tokio::spawn(moq_net::time::run(session_driver));
 
 			let bc = {
 				let consumer = sub_origin.consume();

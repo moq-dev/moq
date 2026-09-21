@@ -40,7 +40,7 @@ mod tests {
 	#[tokio::test]
 	async fn self_references_keep_the_catalog_broadcast_after_replacement() {
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
-		let driver = tokio::spawn(moq_tokio::runtime::run(driver));
+		let driver = tokio::spawn(moq_net::time::run(driver));
 		let old = origin.create_broadcast("a/live").unwrap();
 		let source = moq_mux::Source::new(origin.consume(), "a/live");
 		let upstream = Upstream {

@@ -301,7 +301,7 @@ impl Client {
 			.await?;
 
 		crate::ffi::spawn(async move {
-			let _ = crate::runtime::run(driver).await;
+			moq_net::time::run(driver).await;
 		});
 
 		Ok(Arc::new(MoqSession::accepted(session, publish, subscribe)))

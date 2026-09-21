@@ -25,7 +25,6 @@ zeroize = { workspace = true }
 [dev-dependencies]
 criterion = { workspace = true }
 hex = { workspace = true }
-moq-net = { workspace = true, features = ["test-runtime"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 web-transport-trait = { workspace = true }

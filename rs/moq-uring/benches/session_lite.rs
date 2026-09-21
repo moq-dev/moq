@@ -99,7 +99,7 @@ mod linux {
 					.build()
 					.expect("tokio runtime");
 				rt.block_on(async move {
-					tokio::join!(moq_tokio::runtime::run(pub_driver), moq_tokio::runtime::run(sub_driver));
+					tokio::join!(moq_net::time::run(pub_driver), moq_net::time::run(sub_driver));
 				});
 			});
 
