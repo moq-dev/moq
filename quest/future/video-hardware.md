@@ -8,7 +8,7 @@ real hardware get run on it, and what breaks gets fixed.
 ## Plan
 
 Every item here is blocked on a physical machine rather than on code, which is
-why they sit together and why they sit in next.
+why they sit together and why they sit in future.
 
 - **VAAPI encode on an Intel or AMD box**: low-power against full entrypoint,
   the NV12 upload round trip, and `cargo deny` license resolution. The
