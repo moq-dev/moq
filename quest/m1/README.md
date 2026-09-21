@@ -12,9 +12,9 @@ allocator mirrors, the bindings), the merge gates, and the merge itself.
 Branch a quest from `dev` when it breaks a published API or wire. A quest
 stays here only if it breaks a published API or wire, or gates the merge;
 [Merge dev](/quest/m1/merge-dev.md) names the gates, and [Release](/quest/m1/release.md)
-names what gates the release after it. The immediate 0.0.x API audit lives
-in [m0](/quest/m0/README.md). Other work that is identical on `main`, additive,
-or targets a `0.0.x` crate lives in
+names what gates the release after it. The immediate 0.0.x release API audit
+lives within [m0](/quest/m0/README.md). Other work that is identical on `main`,
+additive, or targets a `0.0.x` crate lives in
 [m2](/quest/m2/README.md) even when it builds on dev-only code; it starts on
 `main` after the merge. The four 0.0.x media crates are the explicit exception:
 their pre-0.1 contracts live in [m0](/quest/m0/README.md) and can land on main
