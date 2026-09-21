@@ -39,10 +39,10 @@ pub struct Args {
 	#[usage(long, default = "auto")]
 	pub decoder: String,
 
-	/// Frame resize acceleration: `auto` (GPU-backed frames stay resident), `cpu`,
-	/// or `gpu`.
-	#[usage(long, default = "auto")]
-	resize_acceleration: AccelerationArg,
+	/// Where decoded frames live: `native` (GPU-backed frames stay resident from
+	/// decode through encode) or `cpu` (decode to CPU pixels, resize on the CPU).
+	#[usage(long, default = "native")]
+	frames: OutputArg,
 }
 
 /// A `height:bitrate` rung, e.g. `720:2500000`.
@@ -70,17 +70,16 @@ impl std::str::FromStr for RungArg {
 }
 
 #[derive(Clone, Copy)]
-struct AccelerationArg(moq_video::resize::Acceleration);
+struct OutputArg(moq_video::Output);
 
-impl std::str::FromStr for AccelerationArg {
+impl std::str::FromStr for OutputArg {
 	type Err = String;
 
 	fn from_str(arg: &str) -> Result<Self, Self::Err> {
 		match arg {
-			"auto" => Ok(Self(moq_video::resize::Acceleration::Auto)),
-			"cpu" => Ok(Self(moq_video::resize::Acceleration::Cpu)),
-			"gpu" => Ok(Self(moq_video::resize::Acceleration::Gpu)),
-			_ => Err(format!("expected auto, cpu, or gpu, got `{arg}`")),
+			"native" => Ok(Self(moq_video::Output::Native)),
+			"cpu" => Ok(Self(moq_video::Output::Cpu)),
+			_ => Err(format!("expected native or cpu, got `{arg}`")),
 		}
 	}
 }
@@ -105,7 +104,7 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 		"software" => moq_video::decode::Kind::Software,
 		name => moq_video::decode::Kind::Named(name.to_string()),
 	};
-	config.resize.acceleration = args.resize_acceleration.0;
+	config.resize.output = args.frames.0;
 
 	let source_path = moq_net::PathOwned::from(
 		moq.broadcast

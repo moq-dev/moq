@@ -1,18 +1,77 @@
-//! Subscribe to an encoded H.264, H.265, or AV1 track and emit raw I420 frames.
+//! Subscribe to an encoded H.264, H.265, or AV1 track and emit decoded frames.
 
 use std::collections::VecDeque;
 
 use hang::catalog::VideoConfig;
 
-use super::decoder::{Config, Start};
+use super::decoder::Config;
 use super::sink::Sink;
 use crate::Error;
 use crate::Frame;
 
-/// Subscribe to a moq-mux video track and emit decoded I420.
+/// Where a consumer starts on a track that already holds groups.
+///
+/// A track keeps its groups for a while after they are read, so a decoder does
+/// not always open on an empty one: a player rebuilding its decoder subscribes
+/// while its predecessor still holds groups, and a rendition switched away from
+/// and back to stays warm on the origin for the track's idle linger (cached
+/// groups, not an upstream subscription). What to do with that
+/// backlog depends on the consumer, and the two answers are opposites, so it is
+/// asked rather than guessed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Start {
+	/// The oldest group the track still holds, decoding everything cached.
+	///
+	/// What a recorder, an export, or anything reading a complete track wants,
+	/// and the default because dropping media a caller has not asked to drop is
+	/// the worse mistake.
+	#[default]
+	Oldest,
+	/// The newest group, skipping whatever is already cached.
+	///
+	/// What a live player wants. Without it a rebuilt decoder walks the whole
+	/// backlog at decode speed before reaching live media, which a viewer sees
+	/// as playback jumping backwards and then sprinting to catch up.
+	Latest,
+}
+
+/// How a [`Consumer`] subscribes to its track, and the decoder it feeds.
+///
+/// The subscription half is what a bare [`Decoder`](super::Decoder) has no use
+/// for: where to start on a cached track, and how far to fall behind live
+/// before skipping. The decoder half is passed through as it is.
+///
+/// `#[non_exhaustive]`: build via [`Options::new`] (or `default()`) and set the
+/// fields, so future knobs don't break callers.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct Options {
+	/// The decoder: backend, output representation, scaling hint.
+	pub decoder: Config,
+	/// Where to start on a track that already holds groups.
+	pub start: Start,
+	/// How far playback may drift from the live edge before a stalled group is
+	/// skipped. Defaults to [`std::time::Duration::ZERO`](std::time::Duration::ZERO)
+	/// (skip aggressively); set it to your playout buffer for a softer skip.
+	/// Applied to the transport subscription and inherited by
+	/// [`moq_mux::container::Consumer`].
+	pub max_age: std::time::Duration,
+}
+
+impl Options {
+	/// Defaults: a default [`Config`], every cached group, real-time latency.
+	pub fn new() -> Self {
+		Self::default()
+	}
+}
+
+/// Subscribe to a moq-mux video track and emit decoded frames.
 ///
 /// The codec/backend are fixed at construction; [`read`](Self::read) returns
-/// plain [`Frame`]s. The direct mirror of `moq_audio::decode::Consumer`.
+/// plain [`Frame`]s in the representation
+/// [`Config::output`](super::Config::output) asked for. The direct mirror of
+/// `moq_audio::decode::Consumer`.
 pub struct Consumer {
 	/// A [`Sink`] rather than a bare `Decoder`: the read loop below is held
 	/// across `.await` by every caller (libmoq's spawned task, moq-transcode),
@@ -37,9 +96,9 @@ impl Consumer {
 		broadcast: &moq_net::broadcast::Consumer,
 		catalog: &VideoConfig,
 		name: impl Into<String>,
-		config: Config,
+		options: Options,
 	) -> Result<Self, Error> {
-		let decoder = Sink::open(catalog, &config).await?;
+		let decoder = Sink::open(catalog, &options.decoder).await?;
 
 		let name = name.into();
 		let track = broadcast.track(&name)?;
@@ -47,7 +106,7 @@ impl Consumer {
 			.subscribe(
 				moq_net::track::Subscription::default()
 					.with_priority(hang::catalog::PRIORITY.video)
-					.with_max_age(config.max_age),
+					.with_max_age(options.max_age),
 			)
 			.await?;
 		// A decoder often opens on a track that is already cached: a replacement
@@ -64,7 +123,7 @@ impl Consumer {
 		// aggregated across every live subscriber, so naming a stale cached
 		// sequence there asks the publisher to rewind the track for everyone
 		// reading it. What a player wants is to skip what it already has.
-		if config.start == Start::Latest
+		if options.start == Start::Latest
 			&& let Some(live_edge) = track.latest()
 		{
 			subscriber.set_groups(live_edge..);
@@ -90,7 +149,7 @@ impl Consumer {
 		self.decoder.name()
 	}
 
-	/// Read the next decoded I420 frame, or `None` after the track ends and the
+	/// Read the next decoded frame, or `None` after the track ends and the
 	/// decoder's buffered tail has been drained.
 	///
 	/// This inherits [`Sink`]'s cancellation contract. If a queued codec
@@ -223,9 +282,12 @@ mod tests {
 			&subscriber,
 			config,
 			name,
-			Config {
-				kind: Kind::Software,
-				..Config::new()
+			Options {
+				decoder: Config {
+					kind: Kind::Software,
+					..Config::new()
+				},
+				..Options::new()
 			},
 		)
 		.await
@@ -278,14 +340,17 @@ mod tests {
 			&subscriber,
 			&catalog,
 			"video",
-			Config {
-				kind: Kind::Named(probe::BUFFERED_NAME.into()),
+			Options {
+				decoder: Config {
+					kind: Kind::Named(probe::BUFFERED_NAME.into()),
+					..Config::new()
+				},
 				start: Start::Latest,
 				// Wide enough to keep every group fresh: the age budget on its own
 				// delivers only the live edge, which would pass this test without
 				// `Start::Latest` doing anything.
 				max_age: std::time::Duration::from_secs(10),
-				..Config::new()
+				..Options::new()
 			},
 		)
 		.await
@@ -356,14 +421,17 @@ mod tests {
 			&subscriber,
 			&catalog,
 			"video",
-			Config {
-				// The buffered probe rather than the plain one: the plain probe's
-				// event log is process-wide and belongs to the thread-affinity test.
-				kind: Kind::Named(probe::BUFFERED_NAME.into()),
+			Options {
+				decoder: Config {
+					// The buffered probe rather than the plain one: the plain probe's
+					// event log is process-wide and belongs to the thread-affinity test.
+					kind: Kind::Named(probe::BUFFERED_NAME.into()),
+					..Config::new()
+				},
 				// A budget that keeps every group fresh, so the start policy is the
 				// only thing deciding what is read.
 				max_age: std::time::Duration::from_secs(10),
-				..Config::new()
+				..Options::new()
 			},
 		)
 		.await
@@ -382,6 +450,68 @@ mod tests {
 			],
 			"the default dropped groups the caller never asked to drop",
 		);
+	}
+
+	/// The age budget is the subscription's and not the decoder's: it reaches
+	/// the publisher through the track subscription, while the decoder opens
+	/// with exactly the config it was handed.
+	#[tokio::test]
+	async fn max_age_reaches_the_subscription_and_not_the_decoder() {
+		let _probe = probe::native_exclusive();
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let published = track.clone();
+		let subscriber = broadcast.consume();
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+		);
+		producer
+			.write(moq_mux::container::Frame {
+				timestamp: Timestamp::from_micros(0).unwrap(),
+				duration: None,
+				payload: Bytes::from_static(b"access unit"),
+				keyframe: true,
+			})
+			.unwrap();
+		producer.finish().unwrap();
+
+		let catalog = VideoConfig::new(hang::catalog::H264 {
+			inline: true,
+			profile: 0x42,
+			constraints: 0,
+			level: 30,
+		});
+		let decoder = Config {
+			kind: Kind::Named(probe::NATIVE_NAME.into()),
+			output: crate::Output::Cpu,
+			scale_hint: Some(crate::Size::new(160, 120)),
+		};
+		let max_age = std::time::Duration::from_secs(10);
+		let mut consumer = Consumer::new(
+			&subscriber,
+			&catalog,
+			"video",
+			Options {
+				decoder: decoder.clone(),
+				max_age,
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		let subscription = published.subscription().expect("the consumer subscribed");
+		assert_eq!(subscription.max_age, max_age, "the age budget did not reach the publisher");
+
+		let opened = probe::native_opened().expect("the decoder opened");
+		assert_eq!(opened.output, decoder.output);
+		assert_eq!(opened.scale_hint, decoder.scale_hint);
+
+		let frame = consumer.read().await.unwrap().expect("a decoded frame");
+		assert!(matches!(frame.surface, crate::Surface::I420(_)), "CPU output was not enforced");
 	}
 
 	/// A track ends before a decoder that reorders pictures does. The consumer
@@ -419,9 +549,12 @@ mod tests {
 			&subscriber,
 			&catalog,
 			"video",
-			Config {
-				kind: Kind::Named(probe::BUFFERED_NAME.into()),
-				..Config::new()
+			Options {
+				decoder: Config {
+					kind: Kind::Named(probe::BUFFERED_NAME.into()),
+					..Config::new()
+				},
+				..Options::new()
 			},
 		)
 		.await
@@ -480,10 +613,13 @@ mod tests {
 			&subscriber,
 			&catalog,
 			"video",
-			Config {
-				kind: Kind::Named(probe::BUFFERED_NAME.into()),
+			Options {
+				decoder: Config {
+					kind: Kind::Named(probe::BUFFERED_NAME.into()),
+					..Config::new()
+				},
 				max_age: std::time::Duration::from_secs(10),
-				..Config::new()
+				..Options::new()
 			},
 		)
 		.await
@@ -524,9 +660,12 @@ mod tests {
 			&subscriber,
 			&catalog,
 			"video",
-			Config {
-				kind: Kind::Named(probe::BLOCKING_FLUSH_NAME.into()),
-				..Config::new()
+			Options {
+				decoder: Config {
+					kind: Kind::Named(probe::BLOCKING_FLUSH_NAME.into()),
+					..Config::new()
+				},
+				..Options::new()
 			},
 		)
 		.await
@@ -602,9 +741,12 @@ mod tests {
 		}
 		producer.finish().unwrap();
 
-		let decode = Config {
-			kind: Kind::Named("vaapi".into()),
-			..Config::new()
+		let decode = Options {
+			decoder: Config {
+				kind: Kind::Named("vaapi".into()),
+				..Config::new()
+			},
+			..Options::new()
 		};
 		// The hardware gate: no libva, no render node, or no H.264 decode
 		// entrypoint and the named backend refuses to open.

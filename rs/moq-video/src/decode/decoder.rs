@@ -24,7 +24,7 @@ use moq_mux::codec::{annexb, h264, h265};
 use moq_net::Timestamp;
 
 use super::backend::{self, Backend, Codec};
-use crate::{Error, Frame, Size};
+use crate::{Error, Frame, Output, Size, Surface};
 
 /// Which decoder implementation to use. `#[non_exhaustive]` so new selection
 /// strategies can be added without breaking external `match`es.
@@ -43,34 +43,10 @@ pub enum Kind {
 	Named(String),
 }
 
-/// Where a decoder starts on a track that already holds groups.
+/// Decoder configuration: the codec implementation and the frames it hands back.
 ///
-/// A track keeps its groups for a while after they are read, so a decoder does
-/// not always open on an empty one: a player rebuilding its decoder subscribes
-/// while its predecessor still holds groups, and a rendition switched away from
-/// and back to stays warm on the origin for the track's idle linger (cached
-/// groups, not an upstream subscription). What to do with that
-/// backlog depends on the consumer, and the two answers are opposites, so it is
-/// asked rather than guessed.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Start {
-	/// The oldest group the track still holds, decoding everything cached.
-	///
-	/// What a recorder, an export, or anything reading a complete track wants,
-	/// and the default because dropping media a caller has not asked to drop is
-	/// the worse mistake.
-	#[default]
-	Oldest,
-	/// The newest group, skipping whatever is already cached.
-	///
-	/// What a live player wants. Without it a rebuilt decoder walks the whole
-	/// backlog at decode speed before reaching live media, which a viewer sees
-	/// as playback jumping backwards and then sprinting to catch up.
-	Latest,
-}
-
-/// Decoder configuration.
+/// Nothing here is about the track: where a [`Consumer`](super::Consumer)
+/// starts and how far it may lag live are its [`Options`](super::Options).
 ///
 /// `#[non_exhaustive]`: build via [`Config::new`] (or `default()`) and set the
 /// optional fields, so future knobs don't break callers.
@@ -79,41 +55,33 @@ pub enum Start {
 pub struct Config {
 	/// Which backend to use.
 	pub kind: Kind,
-	/// How far playback may drift from the live edge before a stalled group is
-	/// skipped. Defaults to [`std::time::Duration::ZERO`](std::time::Duration::ZERO)
-	/// (skip aggressively); set [`max_age`](Self::max_age) to your
-	/// playout buffer for a softer skip. Applied to the initial transport
-	/// subscription and inherited by [`moq_mux::container::Consumer`].
-	pub max_age: std::time::Duration,
-	/// Where to start on a track that already holds groups.
-	pub start: Start,
-	/// Ask the decoder to emit frames at this size (both dimensions even) instead
-	/// of the stream's native one. Best effort: a hardware decoder with a
-	/// built-in scaler (NVDEC) honors it for free, other backends ignore it.
-	/// Check each [`Frame`](crate::Frame)'s dimensions and scale the remainder
-	/// yourself.
-	pub resize: Option<Size>,
-	/// Ask the decoder to leave each picture on the GPU, as the surface the
-	/// hardware decoded it into, rather than downloading it to CPU memory.
+	/// Where decoded pictures live.
 	///
-	/// For a consumer that draws the frames, `render::Renderer` imports such a
-	/// surface directly, so the picture never touches system memory. Off by
-	/// default because it is not free to a consumer that does not draw: handing a
-	/// surface out retires it from the decoder's recycling pool, which costs an
-	/// allocation per picture, and a CPU consumer then pays the download it would
-	/// have paid anyway.
+	/// [`Output::Native`] hands back whatever the backend decoded into: a
+	/// `CVPixelBuffer` from VideoToolbox, a Direct3D11 texture from Media
+	/// Foundation, a CUDA buffer from NVDEC, a DMA-BUF from VAAPI, CPU I420 from
+	/// OpenH264. A consumer that draws imports those directly (`render::Renderer`),
+	/// and a transcoder re-encodes them in place. [`Output::Cpu`] delivers every
+	/// picture as [`Surface::I420`](crate::Surface::I420): a backend that can
+	/// decode straight to system memory does, the rest download each picture.
+	/// Ask for it when the pixels are headed for the CPU anyway, since a GPU
+	/// surface handed out and downloaded later costs an allocation the backend
+	/// could have skipped.
+	pub output: Output,
+	/// Ask the decoder to scale its output to this size (both dimensions even)
+	/// instead of the stream's native one.
 	///
-	/// Best effort, like [`resize`](Self::resize): only the VAAPI backend honors
-	/// it today and the others ignore it, so match on each
-	/// [`Frame`](crate::Frame)'s surface rather than assuming. A frame that does
-	/// come back GPU-resident still answers
-	/// [`Surface::into_i420`](crate::Surface::into_i420), so nothing downstream
-	/// breaks on it.
-	pub gpu_frames: bool,
+	/// A hint, not a contract: a hardware decoder with a built-in scaler (NVDEC)
+	/// honors it for free, every other backend ignores it, so the frames still
+	/// carry whatever size they decoded at. A caller that needs exactly this
+	/// size checks each [`Frame::size`](crate::Frame::size) and applies
+	/// [`Frame::resize`](crate::Frame::resize) to the rest; the hint only lets a
+	/// decoder that can make that a no-op do so.
+	pub scale_hint: Option<Size>,
 }
 
 impl Config {
-	/// A default config: automatic backend selection, real-time latency.
+	/// A default config: automatic backend selection, native output, no scaling.
 	pub fn new() -> Self {
 		Self::default()
 	}
@@ -149,6 +117,7 @@ enum Conversion {
 pub struct Decoder {
 	backend: Box<dyn Backend>,
 	conversion: Conversion,
+	output: Output,
 	got_keyframe: bool,
 	/// Keeps direct use bound to the constructing thread, regardless of backend.
 	_thread_bound: PhantomData<Rc<()>>,
@@ -198,11 +167,19 @@ impl Decoder {
 			other => return Err(Error::UnsupportedCodec(other.to_string())),
 		};
 
+		// Refused here for every backend, so a hint no backend reads is still
+		// checked rather than silently carried. NV12 output is what every
+		// scaler produces, and its chroma is 2x2 subsampled.
+		if let Some(size) = config.scale_hint {
+			size.validate("decoder scale hint")?;
+		}
+
 		let backend = backend::open(codec, config)?;
 		tracing::debug!(decoder = backend.name(), "opened video decoder");
 		Ok(Self {
 			backend,
 			conversion,
+			output: config.output,
 			got_keyframe: false,
 			_thread_bound: PhantomData,
 		})
@@ -240,7 +217,8 @@ impl Decoder {
 			}
 		};
 
-		self.backend.decode(access_unit, timestamp, keyframe)
+		let frames = self.backend.decode(access_unit, timestamp, keyframe)?;
+		self.deliver(frames)
 	}
 
 	/// Return the frames the backend still holds once the stream has ended.
@@ -250,7 +228,25 @@ impl Decoder {
 	/// next stream.
 	pub fn flush(&mut self) -> Result<Vec<Frame>, Error> {
 		self.got_keyframe = false;
-		self.backend.flush()
+		let frames = self.backend.flush()?;
+		self.deliver(frames)
+	}
+
+	/// Put the backend's pictures in the representation [`Config::output`]
+	/// asked for.
+	///
+	/// The one place the choice is enforced, so a backend only has to know
+	/// about it when decoding to the CPU directly is cheaper than downloading
+	/// afterwards (VAAPI). A surface with no CPU path fails here rather than
+	/// arriving GPU-resident at a caller that said it could not take one.
+	fn deliver(&self, frames: Vec<Frame>) -> Result<Vec<Frame>, Error> {
+		match self.output {
+			Output::Native => Ok(frames),
+			Output::Cpu => frames
+				.into_iter()
+				.map(|frame| Ok(Frame::new(Surface::I420(frame.surface.into_i420()?), frame.timestamp)))
+				.collect(),
+		}
 	}
 }
 
@@ -264,7 +260,7 @@ mod tests {
 
 	use moq_net::Timestamp;
 
-	use super::backend::{self, Codec};
+	use super::backend::{self, Codec, probe};
 	use crate::encode::{Config as EncodeConfig, Encoder, Kind as EncodeKind};
 	use crate::frame::I420;
 	use crate::{Frame, Surface};
@@ -416,6 +412,103 @@ mod tests {
 		for out in &decoded {
 			assert_gray(&out.surface.to_i420().unwrap(), 320, 240);
 		}
+	}
+
+	/// An inline-H.264 catalog the test probes accept.
+	fn probe_catalog() -> hang::catalog::VideoConfig {
+		hang::catalog::VideoConfig::new(hang::catalog::H264 {
+			inline: true,
+			profile: 0x42,
+			constraints: 0,
+			level: 30,
+		})
+	}
+
+	/// The native probe opened through the front end with `output` and
+	/// `scale_hint`, and the frame it decodes one access unit to.
+	fn decode_native(output: crate::Output, scale_hint: Option<crate::Size>) -> Frame {
+		let config = super::Config {
+			kind: super::Kind::Named(probe::NATIVE_NAME.into()),
+			output,
+			scale_hint,
+		};
+		let mut decoder = super::Decoder::new(&probe_catalog(), &config).expect("the native probe opens");
+		let mut frames = decoder
+			.decode(&bytes::Bytes::from_static(b"access unit"), Timestamp::from_micros(0).unwrap(), true)
+			.unwrap();
+		assert_eq!(frames.len(), 1, "the probe decodes one picture per access unit");
+		frames.pop().unwrap()
+	}
+
+	/// The output choice and the scale hint reach the backend as configured,
+	/// through the same front end every consumer opens through.
+	#[test]
+	fn output_and_scale_hint_reach_the_backend() {
+		let _probe = probe::native_exclusive();
+		let hint = crate::Size::new(160, 120);
+		decode_native(crate::Output::Cpu, Some(hint));
+
+		let opened = probe::native_opened().expect("the backend recorded its config");
+		assert_eq!(opened.output, crate::Output::Cpu);
+		assert_eq!(opened.scale_hint, Some(hint));
+	}
+
+	/// CPU output is enforced by the front end, so a backend that hands back
+	/// its native surface still delivers I420, and native output leaves the
+	/// surface alone.
+	///
+	/// Only macOS can build a native surface without a device, so this is
+	/// where the conversion is exercised; elsewhere the probe's pictures are
+	/// already CPU pixels and the assertion pins that native output does not
+	/// invent a download.
+	#[test]
+	fn cpu_output_converts_native_frames() {
+		let _probe = probe::native_exclusive();
+		let cpu = decode_native(crate::Output::Cpu, None);
+		assert!(
+			matches!(cpu.surface, Surface::I420(_)),
+			"CPU output delivered a native surface"
+		);
+		assert_eq!(cpu.size(), probe::SIZE);
+
+		let native = decode_native(crate::Output::Native, None);
+		#[cfg(target_os = "macos")]
+		assert!(
+			matches!(native.surface, Surface::PixelBuffer(_)),
+			"native output downloaded the picture"
+		);
+		#[cfg(not(target_os = "macos"))]
+		assert!(matches!(native.surface, Surface::I420(_)));
+	}
+
+	/// The scale hint is only a hint: a backend without a scaler decodes at the
+	/// stream's size, and the exact size comes from an explicit resize.
+	#[test]
+	fn scale_hint_is_not_enforced() {
+		let _probe = probe::native_exclusive();
+		let target = crate::Size::new(160, 120);
+		let frame = decode_native(crate::Output::Cpu, Some(target));
+		assert_eq!(frame.size(), probe::SIZE, "the front end scaled behind the backend");
+
+		let resized = frame.resize(target, &crate::resize::Config::default()).unwrap();
+		assert_eq!(resized.size(), target);
+	}
+
+	/// A hint no backend could honor is refused when the decoder opens, for
+	/// every backend, rather than carried by the ones that ignore it.
+	#[test]
+	fn odd_scale_hint_is_refused() {
+		let _probe = probe::native_exclusive();
+		let config = super::Config {
+			kind: super::Kind::Named(probe::NATIVE_NAME.into()),
+			scale_hint: Some(crate::Size::new(161, 121)),
+			..super::Config::new()
+		};
+		let Err(err) = super::Decoder::new(&probe_catalog(), &config) else {
+			panic!("an odd scale hint opened a decoder");
+		};
+		assert!(!matches!(err, crate::Error::NoDecoder(_)), "refused for the wrong reason: {err}");
+		assert!(probe::native_opened().is_none(), "the backend was opened before the hint was checked");
 	}
 
 	#[test]
@@ -786,10 +879,7 @@ mod tests {
 	#[ignore = "explicit live-DXVA GPU probe; VideoProcessorBlt can hang on affected drivers"]
 	fn mediafoundation_resized_texture_reencodes_in_place() {
 		let target = crate::Size::new(160, 120);
-		let resize = crate::resize::Config {
-			acceleration: crate::resize::Acceleration::Gpu,
-			..Default::default()
-		};
+		let resize = crate::resize::Config::default();
 		let Some((decoded, _decoder)) = decode_levels(3, gray_size()) else {
 			return;
 		};

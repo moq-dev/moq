@@ -142,7 +142,7 @@ impl Media {
 							continue;
 						}
 					};
-					let mut decode = moq_video::decode::Config::new();
+					let mut decode = moq_video::decode::Options::new();
 					decode.start = moq_video::decode::Start::Latest;
 					// Nothing older than the playhead is worth presenting, so the delay
 					// doubles as the staleness budget on the wire.

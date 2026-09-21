@@ -1131,7 +1131,7 @@ mod tests {
 	/// pictures have to agree.
 	///
 	/// Through `decode::backend` rather than `moq_vaapi` directly, so what this
-	/// covers is the path `Config::gpu_frames` actually turns on rather than an
+	/// covers is the path `Output::Native` actually turns on rather than an
 	/// arrangement only the test knows how to build.
 	///
 	/// A gradient rather than the block palette, because this one is checking
@@ -1153,7 +1153,7 @@ mod tests {
 			eprintln!("skipping: no Vulkan adapter with DMA-BUF external memory");
 			return;
 		};
-		let decode = |gpu_frames| {
+		let decode = |output| {
 			backend::open(
 				Codec::H264,
 				&crate::decode::Config {
@@ -1161,16 +1161,16 @@ mod tests {
 					// nothing fails to open, which reads here as absent hardware
 					// and skips the test.
 					kind: crate::decode::Kind::Named(vaapi::NAME.into()),
-					gpu_frames,
+					output,
 					..crate::decode::Config::new()
 				},
 			)
 		};
-		let Ok(mut exporting) = decode(true) else {
+		let Ok(mut exporting) = decode(crate::Output::Native) else {
 			eprintln!("skipping: no VA-API H.264 decoder");
 			return;
 		};
-		let mut downloading = decode(false).expect("a second decoder");
+		let mut downloading = decode(crate::Output::Cpu).expect("a second decoder");
 
 		// A gradient in both axes, so the chroma planes carry structure and a
 		// plane split or stride mistake corrupts the picture rather than
@@ -1220,7 +1220,7 @@ mod tests {
 		assert_eq!(exported.len(), downloaded.len(), "the two decoders disagreed");
 
 		let Surface::DmaBuf(first) = &exported[0].surface else {
-			panic!("gpu_frames did not produce a DMA-BUF surface");
+			panic!("native output did not produce a DMA-BUF surface");
 		};
 		eprintln!(
 			"decoded {} pictures, exported at modifier {:#x}",
@@ -1244,7 +1244,7 @@ mod tests {
 			}
 			assert!(
 				matches!(cpu.surface, Surface::I420(_)),
-				"picture {index} was not downloaded without gpu_frames"
+				"picture {index} was not downloaded under CPU output"
 			);
 
 			// Which branch ran, per picture: the decoder's own surfaces import

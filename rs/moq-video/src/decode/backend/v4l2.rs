@@ -21,7 +21,7 @@
 //! Rockchip's `rkvdec` are *stateless* V4L2 decoders: they take per-slice
 //! parameters through the media request API and expect userspace to have parsed
 //! the bitstream, which is a different interface rather than another format
-//! here. [`Config::resize`] is ignored, since these drivers scale on a separate
+//! here. [`Config::scale_hint`] is ignored, since these drivers scale on a separate
 //! ISP node rather than on the decoder.
 //!
 //! Run on a Raspberry Pi 4 (`bcm2835-codec`, `/dev/video10`): a 720p H.264

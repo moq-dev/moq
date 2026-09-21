@@ -2,7 +2,7 @@ use crate::{Error, Rate};
 
 /// A frame resolution in pixels.
 ///
-/// Names the pair that [`decode::Config::resize`](crate::decode::Config::resize)
+/// Names the pair that [`decode::Config::scale_hint`](crate::decode::Config::scale_hint)
 /// and [`Frame::resize`](crate::Frame::resize) both take, so
 /// width and height can't be swapped at a call site.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]

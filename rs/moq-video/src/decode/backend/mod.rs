@@ -183,6 +183,11 @@ const NAMED_ONLY: &[Candidate] = &[
 		supports: |c| matches!(c, Codec::H264),
 		open: probe::Buffered::open,
 	},
+	Candidate {
+		name: probe::NATIVE_NAME,
+		supports: |c| matches!(c, Codec::H264),
+		open: probe::Native::open,
+	},
 	#[cfg(not(target_os = "macos"))]
 	Candidate {
 		name: probe::BLOCKING_FLUSH_NAME,

@@ -22,7 +22,3 @@ Test mixed-codec catalogs, an explicitly forced unavailable backend, no usable
 candidate, and a catalog update while the selected rendition remains valid.
 Keep rendition identity, output names, and existing live/fetch behavior stable.
 Run the regressions in CI. Public API and wire: unchanged.
-
-## Required
-
-- [Video output](/quest/main/video-output.md) - use the settled decoder configuration

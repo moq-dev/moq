@@ -163,10 +163,18 @@ Direct3D11 device bound to it, so the decode happens on the GPU through DXVA
 no software decoder, so it needs the GPU path (on Windows, an HEVC decoder MFT:
 the inbox HEVC Video Extensions or a vendor one). On Linux, NVDEC decodes H.264,
 H.265, and 8-bit 4:2:0 AV1 to CUDA NV12 frames; AV1 is decode-only and is useful
-for AV1 source to H.264/H.265 transcode rungs. VAAPI decodes H.264 to CPU I420 by
-default; set `decode::Config::gpu_frames` to receive DMA-BUF surfaces that the
-renderer can import without a download. A non-H.264/H.265/AV1 rendition yields
-`Error::UnsupportedCodec`.
+for AV1 source to H.264/H.265 transcode rungs. VAAPI decodes H.264 to DMA-BUF
+surfaces the renderer imports without a download. A non-H.264/H.265/AV1
+rendition yields `Error::UnsupportedCodec`.
+
+`decode::Config::output` says where decoded pictures live: `Output::Native`
+(the default) hands back whatever the backend decoded into, a GPU surface or
+CPU pixels, and `Output::Cpu` delivers every picture as `Surface::I420`,
+decoded straight to system memory where the backend can and downloaded where it
+cannot. `decode::Config::scale_hint` asks a decoder with a hardware scaler
+(NVDEC) to emit that size; it is a hint, so check `Frame::size` and use
+`Frame::resize` for the exact size. `decode::Consumer` takes `decode::Options`,
+which pairs that config with the subscription's `start` and `max_age`.
 
 Common feature sets:
 

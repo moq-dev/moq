@@ -40,6 +40,20 @@ pub struct Config {
 	/// H.265 sources need a hardware decoder).
 	pub decoder: moq_video::decode::Kind,
 
-	/// Frame resize behavior. Automatic mode keeps GPU-backed frames on the GPU.
+	/// Where decoded and resized frames live. Native output keeps GPU-backed
+	/// frames on the GPU from decode through encode; CPU output downloads at
+	/// the decoder and scales on the CPU.
 	pub resize: moq_video::resize::Config,
+}
+
+impl Config {
+	/// The decoder the shared live feed opens: the configured implementation,
+	/// delivering frames where the resize expects them. No scale hint, since
+	/// the feed decodes once at native size for every rung.
+	pub(crate) fn feed_decoder(&self) -> moq_video::decode::Config {
+		let mut decoder = moq_video::decode::Config::new();
+		decoder.kind = self.decoder.clone();
+		decoder.output = self.resize.output;
+		decoder
+	}
 }

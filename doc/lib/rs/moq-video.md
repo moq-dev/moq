@@ -68,11 +68,17 @@ Android floor at API 24 instead of MediaCodec's API 26 entry points.
 API: [docs.rs/moq-video](https://docs.rs/moq-video). Pair with
 [`moq-audio`](/lib/rs/moq-audio).
 
-VAAPI downloads to CPU I420 by default. Set `decode::Config::gpu_frames` before
-opening the consumer to receive DMA-BUF surfaces for zero-copy rendering. These
-surfaces still support `Surface::into_i420()` for consumers that need CPU
-pixels. It returns an `I420` with geometry and color metadata intact; call
-`I420::into_data()` only when packed bytes are required.
+`decode::Config::output` chooses where decoded pictures live. `Output::Native`,
+the default, hands back whatever the backend decoded into: a `CVPixelBuffer`, a
+Direct3D11 texture, a CUDA buffer, a VAAPI DMA-BUF for zero-copy rendering, or
+CPU pixels from a software decoder. `Output::Cpu` delivers every picture as
+`Surface::I420`, decoded straight to system memory where the backend can.
+Native surfaces still answer `Surface::into_i420()`, which returns an `I420`
+with geometry and color metadata intact; call `I420::into_data()` only when
+packed bytes are required. `decode::Config::scale_hint` is best effort and only
+a decoder with a hardware scaler honors it; `Frame::resize` is the exact-size
+operation. `decode::Consumer` takes `decode::Options`, which carries the
+subscription's `start` and `max_age` beside the decoder config.
 
 Linux/NVIDIA applications with a native Vulkan producer use
 `frame::vulkan::Importer`. Each reusable image is a dedicated, optimal-tiling

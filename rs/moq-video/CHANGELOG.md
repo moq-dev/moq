@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   color, and allocation. Use `I420::into_data` to extract packed bytes.
 - [**breaking**] `I420::new` and `I420::len` take `Size`; `Frame` and
   `encode::Encoded` are non-exhaustive and remain constructible through `new`.
+- [**breaking**] `decode::Config` describes only the decoder: `kind`, a
+  native-or-CPU `output`, and a best-effort `scale_hint`. `decode::Consumer`
+  takes `decode::Options`, which carries the subscription's `start` and
+  `max_age` beside the decoder config. `gpu_frames` and
+  `resize::Acceleration` are replaced by `moq_video::Output`, which
+  `resize::Config::output` shares.
 
 ## [0.0.25](https://github.com/moq-dev/moq/compare/moq-video-v0.0.24...moq-video-v0.0.25) - 2026-09-17
 

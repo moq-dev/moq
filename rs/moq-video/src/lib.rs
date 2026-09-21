@@ -39,10 +39,11 @@
 //!   DXVA on Windows, NVDEC, VAAPI, or an ARM SoC's V4L2 M2M decoder on Linux,
 //!   with the default `openh264` feature providing software H.264 fallback).
 //!   [`decode::Consumer`] is the mirror of `moq_audio::decode::Consumer`. An
-//!   NVDEC frame stays in CUDA memory and feeds [`encode::Encoder::encode`]
-//!   zero-copy (the transcode path), scaled in hardware via
-//!   [`decode::Config::resize`]. A VAAPI decoder can return importable DMA-BUFs
-//!   when [`decode::Config::gpu_frames`] is enabled.
+//!   [`decode::Config::output`] picks native surfaces (the default: an NVDEC
+//!   frame stays in CUDA memory and feeds [`encode::Encoder::encode`]
+//!   zero-copy, a VAAPI frame is a DMA-BUF the renderer imports) or CPU I420;
+//!   [`decode::Config::scale_hint`] lets a decoder with a hardware scaler emit
+//!   the output size directly.
 //! - [`convert`] downloads readback-capable [`Surface`]s to owned, tightly packed
 //!   RGBA pixels for CPU image and UI toolkits, honoring native color metadata.
 //!   Vulkan/CUDA surfaces deliberately expose no CPU pixel fallback.
@@ -83,6 +84,7 @@ pub mod resize;
 mod color;
 mod error;
 pub mod frame;
+mod output;
 mod rate;
 mod size;
 // Only the threaded sinks use this, and both are compiled out on macOS, where
@@ -102,6 +104,7 @@ pub use error::Error;
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 pub use frame::{DmaBuf, DmaBufExport, DmaBufPlane, DrmFormat};
 pub use frame::{Frame, I420, Surface};
+pub use output::Output;
 pub use rate::{MAX_FRAMES_PER_SECOND, Rate, RateError};
 pub use size::Size;
 

@@ -55,8 +55,8 @@ struct Inner {
 	source: moq_net::track::Consumer,
 	/// The source rendition's catalog entry (codec + container).
 	config: VideoConfig,
-	/// Which decoder implementation to use.
-	decoder: moq_video::decode::Kind,
+	/// The decoder: which implementation, and where its frames live.
+	decoder: moq_video::decode::Config,
 	state: Mutex<State>,
 }
 
@@ -69,7 +69,7 @@ struct State {
 }
 
 impl Feed {
-	pub(crate) fn new(source: moq_net::track::Consumer, config: VideoConfig, decoder: moq_video::decode::Kind) -> Self {
+	pub(crate) fn new(source: moq_net::track::Consumer, config: VideoConfig, decoder: moq_video::decode::Config) -> Self {
 		Self {
 			inner: Arc::new(Inner {
 				source,
@@ -166,13 +166,11 @@ async fn run(inner: Arc<Inner>, sender: broadcast::Sender<Item>) {
 async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), Error> {
 	let container = moq_mux::catalog::hang::Container::try_from(&inner.config)?;
 
-	let mut config = moq_video::decode::Config::new();
-	config.kind = inner.decoder.clone();
 	// A `Sink` rather than a bare `Decoder`: this loop is a spawned task holding
 	// the codec across every `.await` below, so on a multi-thread runtime it would
 	// migrate workers and unbalance the per-thread COM apartment the Windows
 	// backend opens.
-	let mut decoder = moq_video::decode::Sink::open(&inner.config, &config).await?;
+	let mut decoder = moq_video::decode::Sink::open(&inner.config, &inner.decoder).await?;
 
 	// The feed serves whichever rungs are active, so there is no single
 	// downstream subscription to mirror; live-edge defaults fit every rung.

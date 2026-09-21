@@ -299,9 +299,10 @@ impl Encoder {
 	/// A GPU surface feeds a hardware encoder on the same device directly
 	/// (NVDEC -> NVENC never leaves the GPU, a `CVPixelBuffer` goes straight to
 	/// VideoToolbox); anything else falls back to a CPU I420 upload. The frame must
-	/// already be at the encoder's resolution: decode with
-	/// [`decode::Config::resize`](crate::decode::Config), or scale first with
-	/// [`Frame::resize`](crate::Frame::resize).
+	/// already be at the encoder's resolution: scale it with
+	/// [`Frame::resize`](crate::Frame::resize), which
+	/// [`decode::Config::scale_hint`](crate::decode::Config::scale_hint) lets a
+	/// hardware decoder make a no-op.
 	pub fn encode(&mut self, frame: &Frame) -> Result<Vec<Encoded>, Error> {
 		// A transposed frame is why this compares the shape rather than a byte
 		// count: 240x320 and 320x240 hold the same number of bytes.

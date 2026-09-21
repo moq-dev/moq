@@ -67,7 +67,7 @@ impl Pipeline {
 	) -> Result<Self, Error> {
 		// One shared live decode for every rung of this source: N active rungs
 		// share one subscription and one decoder instead of N.
-		let feed = Feed::new(source.track(&name)?, rendition.clone(), config.decoder.clone());
+		let feed = Feed::new(source.track(&name)?, rendition.clone(), config.feed_decoder());
 
 		let mut ladder = Self {
 			source,
@@ -207,11 +207,7 @@ impl Pipeline {
 				let _ = retired.send(true);
 			}
 			self.serving.clear();
-			self.feed = Feed::new(
-				self.source.track(&name)?,
-				rendition.clone(),
-				self.config.decoder.clone(),
-			);
+			self.feed = Feed::new(self.source.track(&name)?, rendition.clone(), self.config.feed_decoder());
 		}
 		self.name = name;
 		self.rendition = rendition;

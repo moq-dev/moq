@@ -603,8 +603,8 @@ fn write(
 
 /// Decode -> resize -> encode for one fetched group of one rung.
 ///
-/// Unless CPU scaling is forced, the decoder is asked to emit frames at the
-/// rung's resolution (`decode::Config::resize`). A decoder with a hardware
+/// Unless CPU output is forced, the decoder is asked to emit frames at the
+/// rung's resolution (`decode::Config::scale_hint`). A decoder with a hardware
 /// scaler (NVDEC) does, and its GPU frames feed the encoder in place: the NVDEC
 /// -> NVENC path never touches the CPU. Frames that come back at any other size
 /// get `Frame::resize` instead.
@@ -623,7 +623,8 @@ impl Pipeline {
 	async fn new(rung: &Rung) -> Result<Self, Error> {
 		let mut decode = moq_video::decode::Config::new();
 		decode.kind = rung.decoder.clone();
-		decode.resize = decoder_resize(rung.info.size, rung.resize.acceleration);
+		decode.output = rung.resize.output;
+		decode.scale_hint = scale_hint(rung.info.size, rung.resize.output);
 		// A `Sink` for the same reason as the encoder above: a fetch task holds this
 		// pipeline across `Container::read`, so the codec must own its thread.
 		let decoder = moq_video::decode::Sink::open(&rung.config, &decode).await?;
@@ -699,24 +700,23 @@ impl Pipeline {
 }
 
 /// Let a hardware decoder scale only when the caller has not forced the CPU.
-fn decoder_resize(size: moq_video::Size, acceleration: moq_video::resize::Acceleration) -> Option<moq_video::Size> {
-	(acceleration != moq_video::resize::Acceleration::Cpu).then_some(size)
+fn scale_hint(size: moq_video::Size, output: moq_video::Output) -> Option<moq_video::Size> {
+	(output != moq_video::Output::Cpu).then_some(size)
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use moq_video::resize::Acceleration;
+	use moq_video::Output;
 
 	/// A fetched NVDEC group reaches `Frame::resize` at native size when
-	/// CPU scaling is forced, rather than being resized in the decoder first.
+	/// CPU output is forced, rather than being resized in the decoder first.
 	#[test]
 	fn forced_cpu_skips_the_decoder_scaler() {
 		let size = moq_video::Size::new(160, 120);
 
-		assert_eq!(decoder_resize(size, Acceleration::Cpu), None);
-		assert_eq!(decoder_resize(size, Acceleration::Auto), Some(size));
-		assert_eq!(decoder_resize(size, Acceleration::Gpu), Some(size));
+		assert_eq!(scale_hint(size, Output::Cpu), None);
+		assert_eq!(scale_hint(size, Output::Native), Some(size));
 	}
 
 	/// A frame that reached the group is billable even when a later frame in the

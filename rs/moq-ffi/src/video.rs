@@ -603,8 +603,8 @@ impl VideoConsumerInner {
 		};
 
 		let size = frame.size();
-		// The surface may still live on the GPU, so flatten before crossing the
-		// boundary: uniffi has no handle type to hand back a texture with.
+		// CPU output was asked for, so this is a move rather than a download:
+		// uniffi has no handle type to hand back a texture with anyway.
 		let data = frame
 			.surface
 			.into_i420()
@@ -695,14 +695,17 @@ impl MoqBroadcastConsumer {
 		let cfg = video_config(catalog_video)?;
 		let broadcast = self.resolve_inner(reference.as_deref()).await?;
 
-		let mut config = moq_video::decode::Config::default();
-		config.resize = output.resize.map(|size| moq_video::Size::new(size.width, size.height));
-		config.max_age = output
+		let mut options = moq_video::decode::Options::default();
+		// The bindings hand back packed I420, so let a backend that can decode
+		// straight to the CPU do that rather than downloading afterwards.
+		options.decoder.output = moq_video::Output::Cpu;
+		options.decoder.scale_hint = output.resize.map(|size| moq_video::Size::new(size.width, size.height));
+		options.max_age = output
 			.max_age_us
 			.map(std::time::Duration::from_micros)
 			.unwrap_or_default();
 
-		let consumer = moq_video::decode::Consumer::new(&broadcast, &cfg, name, config).await?;
+		let consumer = moq_video::decode::Consumer::new(&broadcast, &cfg, name, options).await?;
 
 		Ok(Arc::new(MoqVideoConsumer {
 			task: crate::ffi::Task::new(VideoConsumerInner { consumer }),

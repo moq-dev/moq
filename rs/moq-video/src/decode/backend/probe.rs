@@ -28,6 +28,12 @@ pub(crate) const BUFFERED_NAME: &str = "probe-buffered";
 #[cfg(not(target_os = "macos"))]
 pub(crate) const BLOCKING_FLUSH_NAME: &str = "probe-blocking-flush";
 
+/// A test decoder standing in for hardware: it records the [`Config`] it opened
+/// with, ignores the scale hint like a backend without a scaler, and hands back
+/// a platform-native surface where one can be built without a device (a
+/// `CVPixelBuffer` on macOS), CPU pixels elsewhere.
+pub(crate) const NATIVE_NAME: &str = "probe-native";
+
 /// What happened to the codec, and where. `open` and `drop` are the pair that
 /// matters: the Windows backend opens a COM apartment in one and closes it in
 /// the other, so they have to land on the same thread.
@@ -83,6 +89,24 @@ fn record(what: &'static str) {
 	LOG.lock().unwrap().push((what, std::thread::current().id()));
 }
 
+/// The config the native probe last opened with. Process-wide like [`LOG`],
+/// so a test that reads it holds [`native_exclusive`] first.
+static NATIVE_OPENED: Mutex<Option<Config>> = Mutex::new(None);
+
+static NATIVE_EXCLUSIVE: Mutex<()> = Mutex::new(());
+
+/// Take the native probe for one test, clearing what a previous one recorded.
+pub(crate) fn native_exclusive() -> std::sync::MutexGuard<'static, ()> {
+	let guard = NATIVE_EXCLUSIVE.lock().unwrap_or_else(|err| err.into_inner());
+	*NATIVE_OPENED.lock().unwrap() = None;
+	guard
+}
+
+/// The config the native probe was opened with, once it has been.
+pub(crate) fn native_opened() -> Option<Config> {
+	NATIVE_OPENED.lock().unwrap().clone()
+}
+
 /// The size the probe claims to decode at, so a test can build frames without a
 /// real bitstream.
 pub(crate) const SIZE: Size = Size {
@@ -93,6 +117,8 @@ pub(crate) const SIZE: Size = Size {
 pub(crate) struct Probe;
 
 pub(crate) struct Buffered(Option<Frame>);
+
+pub(crate) struct Native;
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) struct BlockingFlush;
@@ -107,6 +133,44 @@ impl Probe {
 impl Buffered {
 	pub(crate) fn open(_codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
 		Ok(Box::new(Self(None)))
+	}
+}
+
+impl Native {
+	pub(crate) fn open(_codec: Codec, config: &Config) -> Result<Box<dyn Backend>, Error> {
+		*NATIVE_OPENED.lock().unwrap() = Some(config.clone());
+		Ok(Box::new(Self))
+	}
+
+	/// A mid-gray picture at [`SIZE`] in the most native representation this
+	/// platform can build without a device.
+	fn frame(timestamp: Timestamp) -> Result<Frame, Error> {
+		let frame = frame(timestamp)?;
+		#[cfg(target_os = "macos")]
+		let frame = {
+			let Surface::I420(i420) = frame.surface else {
+				unreachable!("the probe builds CPU pictures");
+			};
+			Frame::new(
+				Surface::PixelBuffer(crate::frame::macos::nv12_surface(&i420)),
+				frame.timestamp,
+			)
+		};
+		Ok(frame)
+	}
+}
+
+impl Backend for Native {
+	fn decode(&mut self, _access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
+		Ok(vec![Self::frame(timestamp)?])
+	}
+
+	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+		Ok(Vec::new())
+	}
+
+	fn name(&self) -> &str {
+		NATIVE_NAME
 	}
 }
 

@@ -154,7 +154,7 @@ impl MediaCodec {
 	///
 	/// `config` is accepted for signature parity: MediaCodec decodes at the
 	/// stream's native size and has no scaler to point
-	/// [`Config::resize`](crate::decode::Config) at.
+	/// [`Config::scale_hint`](crate::decode::Config) at.
 	pub(crate) fn open(codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
 		let mime = match codec {
 			Codec::H264 => MIME_H264,

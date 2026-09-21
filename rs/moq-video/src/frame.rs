@@ -70,12 +70,11 @@ impl Frame {
 		Size::new(self.surface.width(), self.surface.height())
 	}
 
-	/// A copy of this frame scaled to `size` (both dimensions even and non-zero),
-	/// preserving the timestamp. GPU-backed surfaces scale on the GPU and stay
-	/// there. When one output size is enough, prefer decoding straight to it
-	/// ([`decode::Config::resize`](crate::decode::Config)), which is free on
-	/// decoders with a hardware scaler; this method is for fanning one decoded
-	/// stream out to several sizes.
+	/// A copy of this frame scaled to exactly `size` (both dimensions even and
+	/// non-zero), preserving the timestamp. GPU-backed surfaces scale on the GPU
+	/// and stay there unless `config` says otherwise. The exact-size operation;
+	/// [`decode::Config::scale_hint`](crate::decode::Config::scale_hint) is the
+	/// best-effort request that lets a decoder with a hardware scaler skip it.
 	pub fn resize(&self, size: Size, config: &crate::resize::Config) -> Result<Frame, Error> {
 		Ok(Frame {
 			timestamp: self.timestamp,
@@ -493,7 +492,7 @@ impl Surface {
 		Ok(match self {
 			Surface::I420(i420) => Surface::I420(i420.resize(size)?),
 			#[cfg(target_os = "macos")]
-			Surface::PixelBuffer(pixels) if config.acceleration == crate::resize::Acceleration::Cpu => {
+			Surface::PixelBuffer(pixels) if config.output == crate::Output::Cpu => {
 				Surface::I420(pixels.download_i420()?.resize(size)?)
 			}
 			#[cfg(target_os = "macos")]
@@ -508,7 +507,7 @@ impl Surface {
 				}
 			},
 			#[cfg(all(target_os = "linux", feature = "nvidia"))]
-			Surface::Cuda(cuda) if config.acceleration == crate::resize::Acceleration::Cpu => {
+			Surface::Cuda(cuda) if config.output == crate::Output::Cpu => {
 				Surface::I420(cuda.download_i420()?.resize(size)?)
 			}
 			#[cfg(all(target_os = "linux", feature = "nvidia"))]
@@ -529,7 +528,7 @@ impl Surface {
 				));
 			}
 			#[cfg(target_os = "windows")]
-			Surface::Texture(texture) if config.acceleration == crate::resize::Acceleration::Cpu => {
+			Surface::Texture(texture) if config.output == crate::Output::Cpu => {
 				Surface::I420(texture.download_i420()?.resize(size)?)
 			}
 			#[cfg(target_os = "windows")]
@@ -1770,6 +1769,63 @@ pub mod macos {
 		fn drop(&mut self) {
 			unsafe { CVPixelBufferUnlockBaseAddress(self.0, LOCK_READ_ONLY) };
 		}
+	}
+
+	/// Upload a packed I420 test picture as NV12, including CoreVideo row
+	/// padding, so a test starts from the decoder's surface format rather than
+	/// the planar layout [`upload_i420`] produces.
+	#[cfg(test)]
+	pub(crate) fn nv12_surface(frame: &I420) -> PixelBuffer {
+		use std::ptr::{self, NonNull};
+
+		use objc2_core_foundation::CFRetained;
+		use objc2_core_video::{
+			CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
+			CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+			kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+		};
+
+		let mut raw: *mut CVPixelBuffer = ptr::null_mut();
+		let status = unsafe {
+			CVPixelBufferCreate(
+				None,
+				frame.width as usize,
+				frame.height as usize,
+				kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+				None,
+				NonNull::new(&mut raw).expect("stack pointer is non-null"),
+			)
+		};
+		assert_eq!(status, 0, "CVPixelBufferCreate failed");
+		let buffer = unsafe { CFRetained::from_raw(NonNull::new(raw).expect("CoreVideo returned a buffer")) };
+
+		let flags = CVPixelBufferLockFlags(0);
+		assert_eq!(unsafe { CVPixelBufferLockBaseAddress(&buffer, flags) }, 0);
+		let width = frame.width as usize;
+		let height = frame.height as usize;
+		let y_base = CVPixelBufferGetBaseAddressOfPlane(&buffer, 0) as *mut u8;
+		let y_stride = CVPixelBufferGetBytesPerRowOfPlane(&buffer, 0);
+		for row in 0..height {
+			unsafe {
+				ptr::copy_nonoverlapping(frame.y()[row * width..].as_ptr(), y_base.add(row * y_stride), width);
+			}
+		}
+
+		let (chroma_width, chroma_height) = (width / 2, height / 2);
+		let uv_base = CVPixelBufferGetBaseAddressOfPlane(&buffer, 1) as *mut u8;
+		let uv_stride = CVPixelBufferGetBytesPerRowOfPlane(&buffer, 1);
+		for row in 0..chroma_height {
+			let output = unsafe { uv_base.add(row * uv_stride) };
+			for col in 0..chroma_width {
+				unsafe {
+					*output.add(col * 2) = frame.u()[row * chroma_width + col];
+					*output.add(col * 2 + 1) = frame.v()[row * chroma_width + col];
+				}
+			}
+		}
+		unsafe { CVPixelBufferUnlockBaseAddress(&buffer, flags) };
+
+		PixelBuffer::new(buffer, frame.width, frame.height)
 	}
 
 	/// Allocate a planar I420 `CVPixelBuffer` and copy the frame into it: the
@@ -3050,12 +3106,12 @@ mod tests {
 		assert!(mae(gpu.v(), cpu.v()) < 4, "GPU and CPU v disagree");
 	}
 
-	/// Explicit CPU acceleration downloads a macOS pixel buffer before scaling.
+	/// CPU output downloads a macOS pixel buffer before scaling.
 	#[cfg(target_os = "macos")]
 	#[test]
 	fn pixel_buffer_resize_can_force_the_cpu() {
 		let config = crate::resize::Config {
-			acceleration: crate::resize::Acceleration::Cpu,
+			output: crate::Output::Cpu,
 			..Default::default()
 		};
 		let source = Surface::PixelBuffer(nv12_surface(&gradient_i420(320, 240)));
@@ -3083,61 +3139,8 @@ mod tests {
 		assert_eq!(actual.data(), expected.data());
 	}
 
-	/// Upload a packed I420 test picture as NV12, including CoreVideo row
-	/// padding, so the transfer test starts from the decoder's surface format.
 	#[cfg(target_os = "macos")]
-	fn nv12_surface(frame: &I420) -> super::macos::PixelBuffer {
-		use std::ptr::{self, NonNull};
-
-		use objc2_core_foundation::CFRetained;
-		use objc2_core_video::{
-			CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
-			CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
-			kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-		};
-
-		let mut raw: *mut CVPixelBuffer = ptr::null_mut();
-		let status = unsafe {
-			CVPixelBufferCreate(
-				None,
-				frame.width as usize,
-				frame.height as usize,
-				kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-				None,
-				NonNull::new(&mut raw).expect("stack pointer is non-null"),
-			)
-		};
-		assert_eq!(status, 0, "CVPixelBufferCreate failed");
-		let buffer = unsafe { CFRetained::from_raw(NonNull::new(raw).expect("CoreVideo returned a buffer")) };
-
-		let flags = CVPixelBufferLockFlags(0);
-		assert_eq!(unsafe { CVPixelBufferLockBaseAddress(&buffer, flags) }, 0);
-		let width = frame.width as usize;
-		let height = frame.height as usize;
-		let y_base = CVPixelBufferGetBaseAddressOfPlane(&buffer, 0) as *mut u8;
-		let y_stride = CVPixelBufferGetBytesPerRowOfPlane(&buffer, 0);
-		for row in 0..height {
-			unsafe {
-				ptr::copy_nonoverlapping(frame.y()[row * width..].as_ptr(), y_base.add(row * y_stride), width);
-			}
-		}
-
-		let (chroma_width, chroma_height) = (width / 2, height / 2);
-		let uv_base = CVPixelBufferGetBaseAddressOfPlane(&buffer, 1) as *mut u8;
-		let uv_stride = CVPixelBufferGetBytesPerRowOfPlane(&buffer, 1);
-		for row in 0..chroma_height {
-			let output = unsafe { uv_base.add(row * uv_stride) };
-			for col in 0..chroma_width {
-				unsafe {
-					*output.add(col * 2) = frame.u()[row * chroma_width + col];
-					*output.add(col * 2 + 1) = frame.v()[row * chroma_width + col];
-				}
-			}
-		}
-		unsafe { CVPixelBufferUnlockBaseAddress(&buffer, flags) };
-
-		super::macos::PixelBuffer::new(buffer, frame.width, frame.height)
-	}
+	use super::macos::nv12_surface;
 
 	/// A Direct3D11 texture stays on the GPU by default.
 	#[cfg(target_os = "windows")]
@@ -3181,7 +3184,7 @@ mod tests {
 		};
 
 		let config = crate::resize::Config {
-			acceleration: crate::resize::Acceleration::Cpu,
+			output: crate::Output::Cpu,
 			..Default::default()
 		};
 		let scaled = Surface::Texture(texture)

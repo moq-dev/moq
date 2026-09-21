@@ -538,7 +538,7 @@ mod tests {
 		// 180p and 120p: NVENC rejects tiny frames (80x60 is below its minimum
 		// encode resolution), so the hardware ladder stays a bit larger than the
 		// software test's.
-		let mut config = Config {
+		let config = Config {
 			ladder: Ladder::new([
 				Rung::new(180, moq_net::bandwidth::Rate::from_bps(200_000)),
 				Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000)),
@@ -549,7 +549,6 @@ mod tests {
 			source: None,
 			..Default::default()
 		};
-		config.resize.acceleration = moq_video::resize::Acceleration::Gpu;
 
 		let output = moq_net::broadcast::Info::default().produce();
 		let consumer = output.consume();
@@ -716,14 +715,13 @@ mod tests {
 		}
 
 		let source = source_broadcast(2, 5);
-		let mut config = Config {
+		let config = Config {
 			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
 			encoder: moq_video::encode::Kind::Hardware,
 			decoder: moq_video::decode::Kind::Hardware,
 			source: None,
 			..Default::default()
 		};
-		config.resize.acceleration = moq_video::resize::Acceleration::Gpu;
 
 		let output = moq_net::broadcast::Info::default().produce();
 		let consumer = output.consume();
