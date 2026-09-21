@@ -9,9 +9,9 @@
 //! here, so the ioctl sequence, the buffer pool, and the plane arithmetic are
 //! written once.
 //!
-//! Built on the raw layer of the `v4l` crate that the camera capture path
-//! already uses: `v4l::v4l_sys` supplies the `videodev2.h` structs and
-//! `v4l::v4l2::vidioc` the request codes, so nothing here hand-rolls a struct
+//! Built on the raw layer of the `moq_v4l` crate that the camera capture path
+//! already uses: `moq_v4l::sys` supplies the `videodev2.h` structs and
+//! `moq_v4l::v4l2::vidioc` the request codes, so nothing here hand-rolls a struct
 //! offset.
 //!
 //! The driver, not the caller, decides the raw layout. `VIDIOC_S_FMT` is a
@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::time::Duration;
 
-use v4l::v4l_sys::{
+use moq_v4l::sys::{
 	V4L2_BUF_FLAG_ERROR, V4L2_BUF_FLAG_LAST, V4L2_CAP_DEVICE_CAPS, V4L2_CAP_STREAMING, V4L2_CAP_VIDEO_M2M,
 	V4L2_CAP_VIDEO_M2M_MPLANE, V4L2_CTRL_FLAG_DISABLED, V4L2_EVENT_SOURCE_CHANGE, V4L2_SEL_TGT_COMPOSE, timeval,
 	v4l2_buf_type_V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, v4l2_buf_type_V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, v4l2_buffer,
@@ -39,7 +39,7 @@ use v4l::v4l_sys::{
 	v4l2_streamparm, v4l2_xfer_func_V4L2_XFER_FUNC_709, v4l2_ycbcr_encoding_V4L2_YCBCR_ENC_601,
 	v4l2_ycbcr_encoding_V4L2_YCBCR_ENC_709,
 };
-use v4l::v4l2::vidioc;
+use moq_v4l::v4l2::vidioc;
 
 use crate::frame::I420;
 use crate::{Color, Error, Size};
@@ -72,51 +72,6 @@ pub(crate) const RAW: &[u32] = &[NV12, NV12M, YUV420, YUV420M];
 
 /// Planes a format may use here: Y, U, and V.
 const MAX_PLANES: usize = 3;
-
-/// Requests the `v4l` crate does not export, built the way
-/// `linux/ioctl.h` builds them. The shifts are `asm-generic`'s, which is what
-/// `v4l`'s own table already assumes.
-mod request {
-	use v4l::v4l_sys::{v4l2_decoder_cmd, v4l2_event, v4l2_event_subscription, v4l2_selection};
-	use v4l::v4l2::vidioc::_IOC_TYPE;
-
-	const READ: u32 = 2;
-	const WRITE: u32 = 1;
-
-	const fn code(dir: u32, nr: u32, size: usize) -> _IOC_TYPE {
-		((dir as _IOC_TYPE) << 30) | ((size as _IOC_TYPE) << 16) | ((b'V' as _IOC_TYPE) << 8) | nr as _IOC_TYPE
-	}
-
-	pub(super) const DQEVENT: _IOC_TYPE = code(READ, 89, size_of::<v4l2_event>());
-	pub(super) const SUBSCRIBE_EVENT: _IOC_TYPE = code(WRITE, 90, size_of::<v4l2_event_subscription>());
-	pub(super) const G_SELECTION: _IOC_TYPE = code(READ | WRITE, 94, size_of::<v4l2_selection>());
-	pub(super) const DECODER_CMD: _IOC_TYPE = code(READ | WRITE, 96, size_of::<v4l2_decoder_cmd>());
-
-	#[cfg(test)]
-	mod tests {
-		use v4l::v4l_sys::{v4l2_capability, v4l2_format};
-		use v4l::v4l2::vidioc;
-
-		use super::*;
-
-		/// The codes above have to come out the way `linux/ioctl.h` builds
-		/// the rest, and nothing else here would notice if they did not: a wrong
-		/// code is `ENOTTY` at runtime on whichever board reaches it first.
-		///
-		/// Checked against requests the `v4l` crate does export, one per direction,
-		/// so the shifts, the direction bits, and the struct size all have to agree
-		/// on whatever target this compiles for.
-		#[test]
-		fn the_codes_are_built_the_way_the_crate_builds_its_own() {
-			assert_eq!(code(READ, 0, size_of::<v4l2_capability>()), vidioc::VIDIOC_QUERYCAP);
-			assert_eq!(code(WRITE, 18, size_of::<std::ffi::c_int>()), vidioc::VIDIOC_STREAMON);
-			assert_eq!(code(READ | WRITE, 5, size_of::<v4l2_format>()), vidioc::VIDIOC_S_FMT);
-			// `v4l` 0.14 omits this newer request. This is the value from
-			// `videodev2.h`, and also checks the generated command struct's ABI size.
-			assert_eq!(DECODER_CMD, 0xc048_5660);
-		}
-	}
-}
 
 /// A `videodev2.h` struct an ioctl reads or fills.
 ///
@@ -234,8 +189,8 @@ pub(crate) fn open(role: &Role) -> Result<Device, Error> {
 		return Ok(device);
 	}
 
-	let mut nodes = v4l::context::enum_devices();
-	nodes.sort_by_key(v4l::context::Node::index);
+	let mut nodes = moq_v4l::context::enum_devices();
+	nodes.sort_by_key(moq_v4l::context::Node::index);
 
 	let mut refused = Vec::new();
 	for node in nodes {
@@ -340,7 +295,7 @@ impl Device {
 	unsafe fn ioctl<T>(&self, request: vidioc::_IOC_TYPE, arg: &mut T) -> std::io::Result<()> {
 		// SAFETY: the caller guarantees `arg` matches `request`, and the pointer
 		// stays valid for the call, which is the only thing the kernel needs.
-		unsafe { v4l::v4l2::ioctl(self.file.as_raw_fd(), request, (arg as *mut T).cast()) }
+		unsafe { moq_v4l::v4l2::ioctl(self.file.as_raw_fd(), request, (arg as *mut T).cast()) }
 	}
 
 	/// Wrap an ioctl failure with the node and the operation that failed.
@@ -489,7 +444,7 @@ impl Device {
 		selection.type_ = dir.buf_type();
 		selection.target = V4L2_SEL_TGT_COMPOSE;
 		// SAFETY: `VIDIOC_G_SELECTION` takes a `v4l2_selection`.
-		unsafe { self.ioctl(request::G_SELECTION, &mut selection) }.ok()?;
+		unsafe { self.ioctl(vidioc::VIDIOC_G_SELECTION, &mut selection) }.ok()?;
 
 		let rect = Rect {
 			left: selection.r.left.max(0) as u32,
@@ -508,7 +463,7 @@ impl Device {
 		let mut subscription = v4l2_event_subscription::zeroed();
 		subscription.type_ = V4L2_EVENT_SOURCE_CHANGE;
 		// SAFETY: `VIDIOC_SUBSCRIBE_EVENT` takes a `v4l2_event_subscription`.
-		unsafe { self.ioctl(request::SUBSCRIBE_EVENT, &mut subscription) }
+		unsafe { self.ioctl(vidioc::VIDIOC_SUBSCRIBE_EVENT, &mut subscription) }
 			.map_err(|err| self.err("SUBSCRIBE_EVENT", err))
 	}
 
@@ -521,7 +476,7 @@ impl Device {
 		loop {
 			let mut event = v4l2_event::zeroed();
 			// SAFETY: `VIDIOC_DQEVENT` takes a `v4l2_event`.
-			if unsafe { self.ioctl(request::DQEVENT, &mut event) }.is_err() {
+			if unsafe { self.ioctl(vidioc::VIDIOC_DQEVENT, &mut event) }.is_err() {
 				return changed;
 			}
 			changed |= event.type_ == V4L2_EVENT_SOURCE_CHANGE;
@@ -581,7 +536,7 @@ impl Device {
 		let mut command = v4l2_decoder_cmd::zeroed();
 		command.cmd = cmd;
 		// SAFETY: `VIDIOC_DECODER_CMD` takes a `v4l2_decoder_cmd`.
-		unsafe { self.ioctl(request::DECODER_CMD, &mut command) }
+		unsafe { self.ioctl(vidioc::VIDIOC_DECODER_CMD, &mut command) }
 			.map_err(|err| self.err(format_args!("DECODER_CMD {cmd}"), err))
 	}
 
@@ -703,7 +658,7 @@ impl Drop for Mapping {
 	fn drop(&mut self) {
 		// SAFETY: the pointer and length are what `mmap` returned and this is the
 		// only owner, so nothing can still be reading the region.
-		let _ = unsafe { v4l::v4l2::munmap(self.ptr.as_ptr().cast(), self.len) };
+		let _ = unsafe { moq_v4l::v4l2::munmap(self.ptr.as_ptr().cast(), self.len) };
 	}
 }
 
@@ -749,7 +704,7 @@ impl Queue {
 				// this plane, on an mmap queue, so `m` holds `mem_offset`. The length
 				// is the one it reported alongside.
 				let ptr = unsafe {
-					v4l::v4l2::mmap(
+					moq_v4l::v4l2::mmap(
 						std::ptr::null_mut(),
 						len,
 						libc::PROT_READ | libc::PROT_WRITE,

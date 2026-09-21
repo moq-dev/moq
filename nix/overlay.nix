@@ -145,10 +145,10 @@ let
     doCheck = false;
     nativeBuildInputs = with final; [
       pkg-config
-      # libmoq is the only nix-built package that pulls moq-video, and on Linux
-      # that brings v4l -> v4l2-sys-mit, whose build.rs runs bindgen over
-      # <linux/videodev2.h>. Sets LIBCLANG_PATH + BINDGEN_EXTRA_CLANG_ARGS so it
-      # finds libclang and the libc headers, same as the devShell in flake.nix.
+      # libmoq is the only nix-built package that pulls moq-video, and its `vaapi`
+      # feature brings moq-vaapi, whose build.rs runs bindgen over its vendored
+      # libva headers. Sets LIBCLANG_PATH + BINDGEN_EXTRA_CLANG_ARGS so it finds
+      # libclang and the libc headers, same as the devShell in flake.nix.
       rustPlatform.bindgenHook
     ];
 

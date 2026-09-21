@@ -92,7 +92,6 @@ do not add another media abstraction or a renderer crate during stabilization.
 - [Origin failover machine](/quest/main/origin-failover-machine.md) - a front's
   source selection and track splicing become a pure step function with a
   runtime-free test per transition
-- [Capture without V4L2 bindgen](/quest/main/capture-v4l-bindings.md) - moq-video `capture` and `v4l2` build on Linux without libclang or kernel headers, via an in-tree `v4l` fork with checked-in bindings
 
 ## Related
 

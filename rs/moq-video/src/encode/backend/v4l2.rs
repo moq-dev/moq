@@ -6,7 +6,7 @@
 //! spends its CPU on openh264.
 //!
 //! Behind the opt-in `v4l2` feature. It costs no runtime dependency (the
-//! interface is ioctls on a device node), only the `v4l` crate's build-time
+//! interface is ioctls on a device node), only the `moq_v4l` crate's build-time
 //! bindgen, and a host with no M2M node fails at open so automatic selection
 //! falls through to the next encoder.
 //!
@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use moq_net::Timestamp;
-use v4l::v4l_sys::{
+use moq_v4l::sys::{
 	V4L2_CID_MPEG_VIDEO_BITRATE, V4L2_CID_MPEG_VIDEO_BITRATE_MODE, V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME,
 	V4L2_CID_MPEG_VIDEO_GOP_SIZE, V4L2_CID_MPEG_VIDEO_H264_LEVEL, V4L2_CID_MPEG_VIDEO_H264_PROFILE,
 	V4L2_CID_MPEG_VIDEO_HEADER_MODE, V4L2_CID_MPEG_VIDEO_PREPEND_SPSPPS_TO_IDR, V4L2_CID_MPEG_VIDEO_REPEAT_SEQ_HEADER,
