@@ -114,15 +114,17 @@ fn an_endpoint_runs_on_the_worker_that_adopted_its_socket() {
 
 	// A client on its own thread and worker, dialing the endpoint. Its
 	// Initial reaches the socket immediately; only the owner can read it.
+	// The client is driven until the server closes on it: its side of the
+	// handshake completes before the server's, so it cannot stop earlier.
 	let client = std::thread::spawn(move || {
 		let mut worker = Worker::new(Config::default()).expect("client worker");
 		let sock = socket(&worker.handle());
 		worker
 			.block_on(async move {
 				let mut conn = quic::client::connect(sock, &dial_config(addr)).await.expect("dial");
-				web_transport_trait::poll::Session::close(&mut conn, 0, "done");
+				std::future::poll_fn(|cx| web_transport_trait::poll::Session::poll_closed(&mut conn, cx)).await
 			})
-			.expect("client loop");
+			.expect("client loop")
 	});
 
 	// Driving the bystander polls the accept from its loop, but the demux
@@ -144,14 +146,21 @@ fn an_endpoint_runs_on_the_worker_that_adopted_its_socket() {
 		.expect("bystander loop");
 	assert!(stalled, "the bystander worker served an endpoint it does not own");
 
-	let accepted = owner
-		.block_on(async { endpoint.accept().await.expect("accept on the owner") })
+	owner
+		.block_on(async {
+			let mut accepted = endpoint.accept().await.expect("accept on the owner");
+			assert_eq!(
+				web_transport_trait::poll::Session::protocol(&accepted),
+				Some(ALPN),
+				"negotiated ALPN"
+			);
+			web_transport_trait::poll::Session::close(&mut accepted, 0, "done");
+			std::future::poll_fn(|cx| web_transport_trait::poll::Session::poll_closed(&mut accepted, cx)).await;
+		})
 		.expect("owner loop");
-	assert_eq!(
-		web_transport_trait::poll::Session::protocol(&accepted),
-		Some(ALPN),
-		"negotiated ALPN"
-	);
-	drop(accepted);
-	client.join().expect("client thread");
+
+	match client.join().expect("client thread") {
+		quic::Error::App { code: 0, .. } => {}
+		other => panic!("the client saw {other:?} instead of the server's close"),
+	}
 }
