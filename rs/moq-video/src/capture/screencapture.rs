@@ -200,7 +200,7 @@ async fn open(config: &Config, filter: &SCContentFilter, size: (u32, u32)) -> Re
 			)));
 		}
 	};
-	let (width, height) = (first.width(), first.height());
+	let crate::Size { width, height } = first.size();
 
 	tracing::info!(source = %label, width, height, "opened screen capture (ScreenCaptureKit)");
 

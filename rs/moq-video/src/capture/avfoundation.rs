@@ -137,7 +137,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 			)));
 		}
 	};
-	let (width, height) = (first.width(), first.height());
+	let crate::Size { width, height } = first.size();
 
 	tracing::info!(device = %device_id, width, height, "opened camera (AVFoundation)");
 
@@ -534,7 +534,7 @@ mod tests {
 			data: Vec::new(),
 			color: None,
 		}));
-		assert_eq!(chan.recv().await.unwrap().unwrap().width(), 16);
+		assert_eq!(chan.recv().await.unwrap().unwrap().size().width, 16);
 	}
 
 	/// Unplugging the camera. Needs a real `AVCaptureDevice` to name in the
@@ -580,6 +580,6 @@ mod tests {
 			data: Vec::new(),
 			color: None,
 		}));
-		assert_eq!(chan.recv().await.unwrap().unwrap().width(), 32);
+		assert_eq!(chan.recv().await.unwrap().unwrap().size().width, 32);
 	}
 }

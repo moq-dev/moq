@@ -26,6 +26,7 @@ pub(super) struct FrameChannel {
 
 struct State {
 	frame: Option<Frame>,
+	#[cfg(any(target_os = "linux", target_os = "windows", test))]
 	native_anchor: Option<(Timestamp, Timestamp)>,
 	closed: bool,
 	error: Option<Error>,
@@ -36,6 +37,7 @@ impl FrameChannel {
 		Arc::new(Self {
 			state: Mutex::new(State {
 				frame: None,
+				#[cfg(any(target_os = "linux", target_os = "windows", test))]
 				native_anchor: None,
 				closed: false,
 				error: None,
@@ -60,6 +62,9 @@ impl FrameChannel {
 
 	/// Map a device-local timestamp into this stream's private timeline. The
 	/// source epoch never escapes: its first sample is anchored to acquisition.
+	/// Only the blocking-device pump feeds native timestamps, so it is gated like
+	/// `pump` plus `cfg(test)` for the mapping test below.
+	#[cfg(any(target_os = "linux", target_os = "windows", test))]
 	pub(super) fn push_native(&self, surface: Surface, source: Timestamp) {
 		let local = self.now();
 		let mut state = self.state.lock().unwrap();
