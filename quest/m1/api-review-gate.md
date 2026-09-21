@@ -17,6 +17,7 @@ file is deleted on completion) or deletes the quest with a note in
 quest is deleted too. No code.
 
 The list: [Bindings announce match](/quest/m1/api-origin-scopes.md),
+[PathPrefixes](/quest/m1/api-path-prefixes.md),
 [Rendition ownership](/quest/m1/api-mux-rendition.md).
 
 ## Related
