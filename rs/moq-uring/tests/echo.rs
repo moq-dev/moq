@@ -63,6 +63,7 @@ fn echo_noq_peer() {
 	let addr = endpoint.local_addr();
 	let payload: Vec<u8> = (0..PAYLOAD).map(|i| (i * 31 % 251) as u8).collect();
 	let expected = payload.clone();
+	let (done_tx, done_rx) = tokio::sync::oneshot::channel();
 
 	let client = std::thread::spawn(move || {
 		let runtime = tokio::runtime::Builder::new_current_thread()
@@ -81,7 +82,9 @@ fn echo_noq_peer() {
 			let (mut send, mut recv) = session.open_bi().await.expect("open stream");
 			send.write_all(&payload).await.expect("write");
 			send.finish().expect("finish");
-			recv.read_to_end(PAYLOAD + 1).await.expect("read")
+			let echoed = recv.read_to_end(PAYLOAD + 1).await.expect("read");
+			done_tx.send(()).expect("notify server");
+			echoed
 		})
 	});
 
@@ -95,6 +98,7 @@ fn echo_noq_peer() {
 				.expect("accept stream");
 			let payload = drain(&mut recv).await;
 			write_finish(&mut send, &payload).await;
+			done_rx.await.expect("peer received echo");
 		})
 		.expect("worker");
 

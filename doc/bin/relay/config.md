@@ -5,8 +5,10 @@ description: TOML reference for moq-relay
 
 # Configuration
 
-`moq-relay relay.toml`. Every key is also a CLI flag and environment variable
-(`--listen-bind`, `MOQ_LISTEN_BIND`), named by joining the section and key.
+`moq-relay relay.toml`. Every key is also a CLI flag and environment variable.
+Most names join the section and key: `listen.tls.cert` is
+`--listen-tls-cert` / `MOQ_LISTEN_TLS_CERT`. The `listen.bind` key deliberately
+uses the shorter `--listen` / `MOQ_LISTEN` spelling.
 Precedence is CLI > env > file > defaults: a flag or environment variable that
 was actually supplied overrides the file, and a file key that was actually
 written (an empty list, a `false` boolean) overrides the built-in default.

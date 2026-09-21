@@ -132,7 +132,7 @@ impl Workers {
 		// beats starting and quietly behaving differently from what the
 		// operator configured, which is the whole failure mode this mode is
 		// most likely to produce.
-		if listen.lb_id.is_some() {
+		if listen.load_balancer().is_some() {
 			anyhow::bail!(
 				"io_uring workers issue shard-steered connection ids and cannot also carry a \
 				 QUIC-LB server id (listen.lb_id)"
@@ -168,8 +168,9 @@ impl Workers {
 			use std::net::ToSocketAddrs;
 			let bind = listen
 				.bind
-				.as_deref()
+				.as_ref()
 				.context("io_uring workers need an explicit listen.bind")?;
+			let bind = bind.to_string();
 			bind.to_socket_addrs()
 				.with_context(|| format!("failed to resolve {bind}"))?
 				.next()

@@ -375,7 +375,8 @@ impl Config {
 	}
 
 	#[cfg(feature = "noq")]
-	pub(crate) fn load_balancer(&self) -> Option<crate::quic::LoadBalancer> {
+	/// Return the effective QUIC-LB connection-ID encoding.
+	pub fn load_balancer(&self) -> Option<crate::quic::LoadBalancer> {
 		self.lb_id
 			.clone()
 			.map(|id| crate::quic::LoadBalancer {
@@ -516,6 +517,8 @@ mod tests {
 	#[cfg(feature = "noq")]
 	#[test]
 	fn load_balancer_is_a_single_typed_value() {
+		assert_eq!(Config::default().load_balancer(), None);
+
 		let config: Config = toml::from_str(
 			r#"
 load_balancer = { id = "ab", nonce = 8 }

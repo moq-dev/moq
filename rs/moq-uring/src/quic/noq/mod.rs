@@ -154,7 +154,7 @@ pub(crate) fn client_config(config: &client::Config) -> Result<noq_proto::Client
 	let mut client = noq_proto::ClientConfig::new(Arc::new(crypto));
 	let transport = transport_config(&config.transport)?;
 	#[cfg(feature = "qlog")]
-	let transport = with_qlog(transport, &config.transport, qlog::Side::Client);
+	let transport = with_qlog(transport, &config.transport);
 	client.transport_config(Arc::new(transport));
 	Ok(client)
 }
@@ -193,7 +193,7 @@ pub(crate) fn server_config(config: &server::Config) -> Result<noq_proto::Server
 	let mut server = noq_proto::ServerConfig::with_crypto(Arc::new(crypto));
 	let transport = transport_config(&config.transport)?;
 	#[cfg(feature = "qlog")]
-	let transport = with_qlog(transport, &config.transport, qlog::Side::Server);
+	let transport = with_qlog(transport, &config.transport);
 	server.transport_config(Arc::new(transport));
 	Ok(server)
 }
@@ -202,18 +202,11 @@ pub(crate) fn server_config(config: &server::Config) -> Result<noq_proto::Server
 ///
 /// Noq asks a factory per connection, so each gets a file of its own.
 #[cfg(feature = "qlog")]
-fn with_qlog(
-	mut transport: noq_proto::TransportConfig,
-	config: &Transport,
-	side: qlog::Side,
-) -> noq_proto::TransportConfig {
+fn with_qlog(mut transport: noq_proto::TransportConfig, config: &Transport) -> noq_proto::TransportConfig {
 	let Some(sink) = config.qlog.clone() else {
 		return transport;
 	};
 
-	// The factory is told each connection's own side, so the config's is
-	// not needed here.
-	let _ = side;
 	transport.qlog_factory(Arc::new(Traces { sink }));
 
 	transport

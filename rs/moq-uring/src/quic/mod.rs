@@ -109,8 +109,8 @@ pub struct Transport {
 	pub keep_alive: Option<std::time::Duration>,
 	/// Where to write qlog traces, or `None` (the default) to write none.
 	///
-	/// Noq takes one sink per configuration and writes one file per endpoint, tagging each
-	/// event with the qlog `group_id` of the connection it belongs to.
+	/// Noq takes one sink per configuration and writes one file per connection,
+	/// named from that connection's Initial destination connection ID.
 	///
 	/// Only compiled with the `qlog` feature, so a build without it cannot ask
 	/// for traces the backends would not produce.

@@ -55,8 +55,10 @@ mod linux {
 		let endpoint = quic::Endpoint::new(&handle, socket, quic::endpoint::Config::default().with_server(server))
 			.expect("endpoint");
 		let addr = endpoint.local_addr();
-		let (start_tx, start_rx) = std::sync::mpsc::sync_channel::<()>(0);
-		let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<()>(0);
+		// Queue the first iteration while the worker finishes driving the client
+		// handshake. A zero-capacity channel would block this thread before it can
+		// poll the endpoint again, leaving the peer to time out mid-CONNECT.
+		let (start_tx, start_rx) = std::sync::mpsc::channel::<tokio::sync::oneshot::Sender<()>>();
 		let client = std::thread::spawn(move || {
 			let runtime = tokio::runtime::Builder::new_current_thread()
 				.enable_all()
@@ -72,12 +74,12 @@ mod linux {
 				);
 				let session = client.connect(request).await.expect("connect");
 				let payload = vec![0x5a; PAYLOAD];
-				while start_rx.recv().is_ok() {
+				while let Ok(done) = start_rx.recv() {
 					let (mut send, mut recv) = session.open_bi().await.expect("open stream");
 					send.write_all(&payload).await.expect("write");
 					send.finish().expect("finish");
 					assert_eq!(recv.read_to_end(PAYLOAD + 1).await.expect("read").len(), PAYLOAD);
-					done_tx.send(()).expect("done");
+					done.send(()).expect("notify server");
 				}
 			});
 		});
@@ -96,7 +98,8 @@ mod linux {
 
 		let start = Instant::now();
 		for _ in 0..iterations {
-			start_tx.send(()).expect("start");
+			let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+			start_tx.send(done_tx).expect("start");
 			worker
 				.block_on(async {
 					let (mut send, mut recv) = std::future::poll_fn(|cx| session.poll_accept_bi(cx))
@@ -104,9 +107,9 @@ mod linux {
 						.expect("accept stream");
 					let payload = drain(&mut recv).await;
 					write_finish(&mut send, &payload).await;
+					done_rx.await.expect("peer received echo");
 				})
 				.expect("worker");
-			done_rx.recv().expect("done");
 		}
 		let elapsed = start.elapsed();
 

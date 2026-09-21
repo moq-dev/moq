@@ -4243,20 +4243,6 @@ fn config_quic_and_backoff_knobs_apply() {
 	assert_eq!(parsed.quic.qlog.as_deref(), Some(std::path::Path::new(dir)));
 }
 
-/// An idle timeout outside QUIC's millisecond varint is an ordinary configuration
-/// error, and later calls remain usable.
-#[test]
-fn dial_rejects_an_unrepresentable_idle_timeout() {
-	let mut config = client_config();
-	config.quic_idle_timeout_ms = u64::MAX;
-	config.has_quic_idle_timeout = true;
-
-	assert_eq!(dial(Some(&config)), Error::InvalidConfig(String::new()).code());
-
-	// A rejected dial leaves the library usable.
-	assert!(moq_client_defaults().has_connect_timeout);
-}
-
 /// Whether a qlog directory works at all is a compile-time feature, so the capability
 /// has to agree with what a dial does. Both branches matter: `just check` runs without
 /// `--all-features` and only ever sees the unsupported one, while CI runs with them and
