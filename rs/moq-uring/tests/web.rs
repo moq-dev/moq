@@ -239,10 +239,7 @@ fn lite_session_over_webtransport() {
 
 			let (moq, session_driver) = moq_net::Client::new()
 				.with_subscriber(sub_origin.clone())
-				.connect_lite(
-					std::time::Instant::now(),
-					moq_tokio::transport::Session::new(session),
-				)
+				.connect_lite(std::time::Instant::now(), moq_tokio::transport::Session::new(session))
 				.await
 				.expect("connect_lite");
 			tokio::spawn(moq_tokio::runtime::run(session_driver));

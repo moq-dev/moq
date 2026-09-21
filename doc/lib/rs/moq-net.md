@@ -40,8 +40,8 @@ grammar lives on the concept page.
 ## Driving sessions
 
 `Client::connect(now, transport)`, `Server::accept(now, transport)`, and
-`server::Handshake::ok()` return `(Session, Driver)`. The lite-only entry points
-return the same pair. `moq-net` never spawns tasks or schedules runtime timers.
+`server::Handshake::ok()` return `(Session, Driver)`. `moq-net` never spawns
+tasks or reads the clock: the caller polls the driver and supplies the time.
 
 ```rust
 let now = tokio::time::Instant::now().into_std();
@@ -51,33 +51,23 @@ tokio::spawn(moq_tokio::runtime::run(driver));
 
 A custom event loop calls `driver.poll(now, waiter)` with a nondecreasing
 `moq_net::time::Instant`. After `Pending`, wait for external activity or the
-instant returned by `driver.timeout()`, whichever comes first. `None` means
-there is no timer to schedule. Poll again with fresh time after waking.
-Tests use the same interface with explicitly advanced instants.
+instant returned by `driver.timeout()` (`None` means no timer is armed), then
+poll again with fresh time. Tests drive the same interface with explicitly
+advanced instants.
 
-Dropping the last session handle requests closure when the driver next runs.
-Dropping the driver cancels the session. Keep both alive while using the
-connection. `moq-tokio` and `moq-wasm` drive sessions for their callers; the
-lite-only path also supports native `!Send` transports on their owning thread.
+Dropping the last session handle requests closure on the next poll. Dropping
+the driver cancels the session. `moq-tokio` and `moq-wasm` drive sessions for
+their callers.
 
-Origin drivers implement the same `time::Driver` interface.
-`origin::Producer::new` returns its lifecycle driver, which also calls
-`pool.gc(now)` after polling and includes its next cleanup time in the
-origin's deadline. For a standalone pool, call `pool.gc(now)` yourself after
-polling and at the returned deadline, even when there is no traffic.
-`None` means both cache policies are disabled; call again after enabling a
-capacity with `pool.resize`.
+`origin::Producer::new` returns a driver with the same `time::Driver`
+interface. It calls `cache::Pool::gc(now)` after each poll and folds the next
+cleanup time into its own `timeout()`. A standalone pool needs `gc(now)`
+called by its owner, at least by the returned deadline; `None` means expiry is
+disabled.
 
-Cache reads and writes clear their expiration timestamp without reading the
-system clock. A due cleanup pass scans cached groups, dates undated activity,
-and expires idle groups except each track's latest. Calls before the cleanup
-deadline only advance the sampled clock, so calling after every poll is cheap.
-Expiration is approximate: delayed cleanup extends retention. Model read/write
-APIs take no wall-clock time. Datagram writes keep their existing signatures:
-`append_datagram(timestamp, payload)` and
-`insert_datagram(sequence, timestamp, payload)`. Datagram send buffers retain
-the newest 64 entries, dropping the oldest at capacity without reading a clock.
-This changes Rust APIs, with no wire-format or TypeScript API changes.
+Cache activity is dated lazily: reads and writes mark a group active without
+reading a clock, and the next `gc` pass stamps it with the supplied instant.
+Expiry is therefore approximate; a late `gc` extends retention.
 
 ## Patterns
 
