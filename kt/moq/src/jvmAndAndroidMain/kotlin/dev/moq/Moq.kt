@@ -33,14 +33,16 @@ class Moq internal constructor(
     fun createBroadcast(path: String): BroadcastProducer = session.publish().createBroadcast(path)
 
     /**
-     * Discover routes under the requested [prefix] as a [Flow]. Each update
-     * returns a covered prefix relative to it. The subscription is acquired on
+     * Discover routes matching [config] as a [Flow]. Each update stays relative
+     * to the origin. The subscription is acquired on
      * collection and cancelled when collection ends. Use [announced] for the raw handle.
      */
-    fun announcements(prefix: String = ""): Flow<MoqAnnounceUpdate> = session.consume().announcements(prefix)
+    fun announcements(config: AnnounceConfig = AnnounceConfig()): Flow<MoqAnnounceUpdate> =
+        session.consume().announcements(config)
 
-    /** Raw handle under requested [prefix]; updates return covered prefixes relative to it. */
-    fun announced(prefix: String = ""): MoqAnnounceConsumer = session.consume().announced(prefix)
+    /** Raw announcement handle for [config]; update prefixes stay relative to the origin. */
+    fun announced(config: AnnounceConfig = AnnounceConfig()): MoqAnnounceConsumer =
+        session.consume().announced(config)
 
     /**
      * Await a route covering exactly [path], then resolve the broadcast there.

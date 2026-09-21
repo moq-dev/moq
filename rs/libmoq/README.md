@@ -43,11 +43,11 @@ int32_t moq_origin_request(uint32_t origin, const char *path, uintptr_t path_len
 int32_t moq_origin_request_cancel(uint32_t task);
 int32_t moq_origin_announced_broadcast(uint32_t origin, const char *path, uintptr_t path_len, moq_status_callback on_broadcast, void *user_data);
 int32_t moq_origin_announced_broadcast_cancel(uint32_t task);
-int32_t moq_origin_announced(uint32_t origin, moq_status_callback on_announce, void *user_data);
+int32_t moq_origin_announced(uint32_t origin, const char *prefix, uintptr_t prefix_len, const char *filter, uintptr_t filter_len, moq_status_callback on_announce, void *user_data);
 int32_t moq_origin_announced_info(uint32_t announced, moq_announce_update *dst);
 int32_t moq_origin_announced_free(uint32_t announced);
 int32_t moq_origin_announced_cancel(uint32_t announced);
-// The request is rooted at the origin; each moq_announce_update.prefix is relative to that root.
+// filter is relative to the literal prefix, or NULL for **. Updates stay relative to the origin.
 
 // Publishing
 int32_t moq_publish_announce(uint32_t broadcast, const moq_route *route);

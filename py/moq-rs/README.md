@@ -194,7 +194,7 @@ All consumers (`CatalogConsumer`, `MediaConsumer`, `TrackConsumer`, `AudioConsum
   - `await .requested_broadcast() → BroadcastRequest`. Call `.accept(broadcast)` to serve it, or `.reject(code)` to fail the requester.
   - Async iterator yielding `BroadcastRequest`
 - **`OriginConsumer`**. Discover broadcasts.
-  - `.announced(prefix) → AnnounceConsumer` (async iterator); `prefix` scopes the request and each update's `.prefix` is relative to it
+  - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator); `filter` is a pattern relative to the literal prefix, while each update's `.prefix` stays origin-relative and `.captures` reports wildcard matches
   - `.announced_broadcast(path) → AnnouncedBroadcast` (awaitable, waits for a future announcement)
   - `.request_broadcast(path) → BroadcastConsumer` (awaitable; announced now or a dynamic fallback, else raises)
 

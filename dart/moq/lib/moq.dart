@@ -5,6 +5,20 @@ import 'package:moq_ffi/moq_ffi.dart';
 
 export 'package:moq_ffi/moq_ffi.dart';
 
+/// Scope for discovering announcements.
+final class AnnounceOptions {
+  /// Literal path root beneath the origin.
+  final String prefix;
+
+  /// Pattern relative to [prefix], or null for every path beneath it.
+  final String? filter;
+
+  const AnnounceOptions({this.prefix = '', this.filter});
+
+  MoqAnnounceConfig get _ffi =>
+      MoqAnnounceConfig(prefix: prefix, filter: filter);
+}
+
 /// A connected MoQ session with publishing and subscription conveniences.
 final class Moq {
   final MoqClient _client;
@@ -60,9 +74,11 @@ final class Moq {
   MoqBroadcastProducer createBroadcast(String path) =>
       session.publish().createBroadcast(path: path);
 
-  /// Stream routes under requested [prefix]; updates return relative covered prefixes.
-  Stream<MoqAnnounceUpdate> announcements({String prefix = ''}) async* {
-    final announced = session.consume().announced(prefix: prefix);
+  /// Stream routes matching [options]; update prefixes stay relative to the origin.
+  Stream<MoqAnnounceUpdate> announcements({
+    AnnounceOptions options = const AnnounceOptions(),
+  }) async* {
+    final announced = session.consume().announced(config: options._ffi);
     try {
       while (true) {
         final announcement = await announced.next();
@@ -75,9 +91,10 @@ final class Moq {
     }
   }
 
-  /// Return the raw cursor for requested [prefix]; updates return relative covered prefixes.
-  MoqAnnounceConsumer announced({String prefix = ''}) =>
-      session.consume().announced(prefix: prefix);
+  /// Return the raw cursor for [options].
+  MoqAnnounceConsumer announced({
+    AnnounceOptions options = const AnnounceOptions(),
+  }) => session.consume().announced(config: options._ffi);
 
   /// Wait for a broadcast announced at exactly [path].
   MoqAnnouncedBroadcast announcedBroadcast(String path) =>
