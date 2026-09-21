@@ -25,8 +25,8 @@
 //! does the MFT offer an output type carrying the real frame size, so we set the
 //! NV12 output type (and read the size off it) right after that first input.
 //!
-//! Used only from the one decode task (the consumer's `read` loop), so the COM
-//! handles are wrapped in a thread-confined `Send` type.
+//! The backend is `!Send`: the COM handles must stay on the thread that created
+//! them, either the `Sink` worker thread or the thread owning a direct `Decoder`.
 
 use std::collections::VecDeque;
 use std::ffi::c_void;

@@ -8,10 +8,9 @@
 //! format description.
 //!
 //! Hand-written on the raw `objc2-video-toolbox` bindings; there's no
-//! higher-level crate we trust. The capture loop drives it inline and always
-//! sequentially, so the `!Send` CoreFoundation handles are wrapped in a `Send`
-//! type (safe to move between tokio workers between frames, never used
-//! concurrently).
+//! higher-level crate we trust. The backend is `!Send` and a direct `Encoder` is
+//! thread-bound with it; only the macOS `Sink::Inner` keeps the serialized
+//! `Send` wrapper, safe because `Sink` serializes every call.
 
 use std::ffi::{c_int, c_void};
 use std::ptr::{self, NonNull};

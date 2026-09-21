@@ -94,8 +94,10 @@ impl Consumer {
 	/// decoder's buffered tail has been drained.
 	///
 	/// This inherits [`Sink`]'s cancellation contract. If a queued codec
-	/// operation is cancelled, the next read returns a codec error and later
-	/// reads return `None`. Drop the consumer instead of continuing to read it.
+	/// operation is cancelled, the next read returns a codec error: a cancelled
+	/// mid-stream decode poisons the sink so every later read keeps returning
+	/// that error, while a cancelled tail flush reports the error once and then
+	/// `None`. Drop the consumer instead of continuing to read it.
 	pub async fn read(&mut self) -> Result<Option<Frame>, Error> {
 		loop {
 			if let Some(frame) = self.pending.pop_front() {
