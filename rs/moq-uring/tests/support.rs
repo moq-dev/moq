@@ -1,5 +1,6 @@
 //! Shared test certificates.
 
+#![cfg(target_os = "linux")]
 #![allow(dead_code)]
 
 /// A self-signed localhost certificate on disk.

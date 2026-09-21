@@ -14,6 +14,7 @@
 //! its `/proc` entry. Combine with the load generator's `--output` to compute CPU
 //! per connection and CPU per message (see the README).
 
+#[cfg(target_os = "linux")]
 mod duration;
 
 #[cfg(target_os = "linux")]
