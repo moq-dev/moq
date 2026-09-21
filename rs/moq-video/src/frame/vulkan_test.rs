@@ -304,7 +304,8 @@ impl Producer {
 		};
 		unsafe { device.bind_buffer_memory(staging, staging_memory, 0)? };
 		let staging_ptr = unsafe {
-			device.map_memory(staging_memory, 0, staging_len, vk::MemoryMapFlags::empty())?
+			device
+				.map_memory(staging_memory, 0, staging_len, vk::MemoryMapFlags::empty())?
 				.cast::<u8>()
 		};
 
@@ -371,7 +372,10 @@ impl Producer {
 	/// Upload `pixels` (tightly packed, four bytes each, in the image's own
 	/// channel order) through the staging buffer.
 	pub(crate) fn upload(&mut self, pixels: &[u8], wait: Option<u64>, signal: u64) {
-		assert_eq!(pixels.len() as u64, u64::from(self.size.width) * u64::from(self.size.height) * 4);
+		assert_eq!(
+			pixels.len() as u64,
+			u64::from(self.size.width) * u64::from(self.size.height) * 4
+		);
 		// SAFETY: the mapping is `pixels.len()` bytes and stays mapped until
 		// drop; the previous upload's copy finished before the slot came back.
 		unsafe { std::ptr::copy_nonoverlapping(pixels.as_ptr(), self.staging_ptr, pixels.len()) };
@@ -485,8 +489,7 @@ impl Producer {
 			.wait_dst_stage_mask(&stages)
 			.command_buffers(&commands)
 			.signal_semaphores(&signal_semaphores);
-		unsafe { self.device.queue_submit(self.queue, &[submit], vk::Fence::null()) }
-			.expect("submit Vulkan transfer");
+		unsafe { self.device.queue_submit(self.queue, &[submit], vk::Fence::null()) }.expect("submit Vulkan transfer");
 		self.pending_commands.push(command);
 		self.first = false;
 	}

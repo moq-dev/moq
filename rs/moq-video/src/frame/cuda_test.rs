@@ -141,7 +141,10 @@ async fn vulkan_cuda_convert_resize_encode() {
 		max_diff(actual.u(), expected.u()),
 		max_diff(actual.v(), expected.v())
 	);
-	assert!(max_diff(actual.y(), expected.y()) <= 1, "luma differs from the reference");
+	assert!(
+		max_diff(actual.y(), expected.y()) <= 1,
+		"luma differs from the reference"
+	);
 	assert!(max_diff(actual.u(), expected.u()) <= 1, "u differs from the reference");
 	assert!(max_diff(actual.v(), expected.v()) <= 1, "v differs from the reference");
 
@@ -156,7 +159,10 @@ async fn vulkan_cuda_convert_resize_encode() {
 		mae(actual.u(), expected_sd.u()),
 		mae(actual.v(), expected_sd.v())
 	);
-	assert!(mae(actual.y(), expected_sd.y()) < 4, "scaled luma disagrees with the CPU");
+	assert!(
+		mae(actual.y(), expected_sd.y()) < 4,
+		"scaled luma disagrees with the CPU"
+	);
 	assert!(mae(actual.u(), expected_sd.u()) < 4, "scaled u disagrees with the CPU");
 	assert!(mae(actual.v(), expected_sd.v()) < 4, "scaled v disagrees with the CPU");
 
@@ -218,7 +224,9 @@ async fn vulkan_cuda_convert_resize_encode() {
 			hd.keyframe();
 			sd_encoder.keyframe();
 		}
-		let packets = hd.encode(&VideoFrame::new(Surface::Cuda(converted), timestamp)).unwrap();
+		let packets = hd
+			.encode(&VideoFrame::new(Surface::Cuda(converted), timestamp))
+			.unwrap();
 		assert_eq!(packets.len(), 1, "one access unit per frame at {i}");
 		assert_eq!(packets[0].timestamp, timestamp, "timestamp preserved at {i}");
 		let types = nal_types(&packets[0].payload);
@@ -232,7 +240,9 @@ async fn vulkan_cuda_convert_resize_encode() {
 			expected = Some(reference(&gradient(size, Channels::Rgba, i as usize * 4), size, color));
 		}
 
-		let packets = sd_encoder.encode(&VideoFrame::new(Surface::Cuda(scaled), timestamp)).unwrap();
+		let packets = sd_encoder
+			.encode(&VideoFrame::new(Surface::Cuda(scaled), timestamp))
+			.unwrap();
 		assert_eq!(packets.len(), 1);
 		assert_eq!(packets[0].timestamp, timestamp);
 		sd_packets += packets.len();
