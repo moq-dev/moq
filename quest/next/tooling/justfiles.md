@@ -66,9 +66,7 @@ Delete:
   lockfile and `--locked` cover it. `alert.sh check-coverage` stays: it is a
   lint of alert.yml, not of a recipe.
 - The `worktree` recipe and its 170 lines, plus the Worktrees section of
-  `test/README.md`. This absorbs the justfile half of
-  [Harness drive-bys](/quest/next/harness-drive-bys.md); keep `_base` folded
-  into `sh/dispatch.sh`.
+  `test/README.md`; keep `_base` folded into `sh/dispatch.sh`.
 - `rs bump` and `rs semver`. `rs release` stays for release-rs.yml.
 - The `mod` lines in `demo/justfile`: `just pub`, `just relay`, `just boy`,
   `just sub`, `just web` are the only spelling, and `--list` stops showing
@@ -93,7 +91,3 @@ Docs: `doc/setup/dev.md`, `CONTRIBUTING.md`, `test/README.md`, and the
 check`, `just test`, and `just check --all`, and confirm every recipe name
 check.yml, cache.yml, nightly.yml, smoke.yml, wasm.yml, obs.yml, swift.yml,
 and release-*.yml invoke still resolves.
-
-## Related
-
-- [Harness drive-bys](/quest/next/harness-drive-bys.md) - the relay `kind` field revert that stays behind once the `worktree` recipe is deleted here
