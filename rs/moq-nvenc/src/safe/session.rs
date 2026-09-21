@@ -8,7 +8,6 @@
 use std::{fmt::Debug, sync::Arc};
 
 use super::{
-	api::ENCODE_API,
 	encoder::Encoder,
 	result::{EncodeError, ErrorKind},
 };
@@ -150,7 +149,7 @@ impl Session {
 		params.set_resetEncoder(0);
 		params.set_forceIDR(0);
 
-		unsafe { (ENCODE_API.reconfigure_encoder)(self.encoder.ptr, &mut params) }.result(&self.encoder)
+		unsafe { (self.encoder.api.reconfigure_encoder)(self.encoder.ptr, &mut params) }.result(&self.encoder)
 	}
 
 	/// Encode a frame.
@@ -281,8 +280,8 @@ impl Session {
 			},
 			..Default::default()
 		};
-		let result =
-			unsafe { (ENCODE_API.encode_picture)(self.encoder.ptr, &mut encode_pic_params) }.result(&self.encoder);
+		let result = unsafe { (self.encoder.api.encode_picture)(self.encoder.ptr, &mut encode_pic_params) }
+			.result(&self.encoder);
 		match result {
 			Ok(()) => Ok(Submission::new(input_buffer, output_bitstream)),
 			Err(error) if error.kind() == ErrorKind::NeedMoreInput => {
@@ -306,7 +305,7 @@ impl Session {
 	/// should retry after a few milliseconds.
 	pub fn end_of_stream(&self) -> Result<(), EncodeError> {
 		let mut encode_pic_params = NV_ENC_PIC_PARAMS::end_of_stream();
-		unsafe { (ENCODE_API.encode_picture)(self.encoder.ptr, &mut encode_pic_params) }.result(&self.encoder)
+		unsafe { (self.encoder.api.encode_picture)(self.encoder.ptr, &mut encode_pic_params) }.result(&self.encoder)
 	}
 }
 

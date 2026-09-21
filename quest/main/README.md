@@ -92,7 +92,6 @@ do not add another media abstraction or a renderer crate during stabilization.
 - [uring identity](/quest/main/uring-identity.md) - sockets and connections carry their worker and steering identity
 - [GPU conversion and NVENC](/quest/main/video-gpu-encode.md) - convert, resize and
   encode imported frames without CPU pixel transfers or fallback
-- [NVENC loading](/quest/main/nvenc-loading.md) - unavailable or incompatible drivers return errors instead of panicking
 - [Media features](/quest/main/media-features.md) - OpenH264 can be excluded, rendering is opt-in, and feature aliases disappear
 - [Shared rate policy](/quest/main/media-rate-policy.md) - the planned public namespace move happens before 0.1
 - [Audio configuration](/quest/main/audio-config.md) - PCM layout, codec settings, and subscription policy have distinct contracts
