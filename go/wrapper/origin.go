@@ -182,7 +182,9 @@ func (a *AnnounceUpdate) Captures() []string {
 	if captures == nil {
 		return nil
 	}
-	return append([]string(nil), (*captures)...)
+	result := make([]string, len(*captures))
+	copy(result, *captures)
+	return result
 }
 
 // Active reports whether the route is active (true) or was retracted (false).

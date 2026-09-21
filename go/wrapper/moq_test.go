@@ -1143,6 +1143,40 @@ func TestAnnouncedPatternCaptures(t *testing.T) {
 	}
 }
 
+// An exact filter with no wildcards still reports a full match: captures is
+// empty but not nil, which is what tells it apart from a partial overlap.
+func TestAnnouncedExactFilterCapturesEmpty(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	origin := moq.NewOriginProducer()
+	filter := ""
+	announced, err := origin.Consume().Announced(moq.AnnounceOptions{Prefix: "room/alice/chat", Filter: &filter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer announced.Cancel()
+
+	chat, err := origin.CreateBroadcast("room/alice/chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := chat.Announce(moq.Route{}); err != nil {
+		t.Fatal(err)
+	}
+
+	update, err := announced.Next(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if update == nil || update.Prefix() != "room/alice/chat" {
+		t.Fatalf("update = %+v, want room/alice/chat", update)
+	}
+	if captures := update.Captures(); captures == nil || len(captures) != 0 {
+		t.Fatalf("captures = %#v, want a non-nil empty slice", captures)
+	}
+}
+
 func TestDynamicServesARequestUnderAPrefix(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
