@@ -1267,6 +1267,9 @@ mod session_tests {
 		let video = broadcast
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
+		let _audio = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
 		{
 			let mut guard = catalog.modify().unwrap();
 			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
@@ -1330,11 +1333,17 @@ mod session_tests {
 		);
 
 		// The catalog update retiring the rendition arrives next. The catalog and the broadcast
-		// stay open, so nothing else can end the pump.
-		catalog.modify().unwrap().video.renditions.clear();
+		// stay open, so nothing else can end the pump. The same update lists an audio rendition:
+		// its pad appearing proves the session acted on the update before the tail is written.
+		{
+			let mut guard = catalog.modify().unwrap();
+			guard.video.renditions.clear();
+			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
+		}
+		await_pad(&element, "audio_");
 
-		// Give the session time to act on it. A pump that gives up here takes its pad with it, so
-		// the wait is only ever served in full by one that is still reading.
+		// A pump the update cancelled still has to notice. It takes its pad with it when it does,
+		// so the wait is only ever served in full by one that is still reading.
 		for _ in 0..10 {
 			if pads(&element, "video_").is_empty() {
 				break;
