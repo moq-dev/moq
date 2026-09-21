@@ -123,8 +123,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Catalog warmup](/quest/next/catalog-warmup.md) - `warmup` on video and audio renditions, in the catalog and the draft
 - [Audio warmup](/quest/next/audio-warmup.md) - a viewer joining an Opus rendition mid-stream never hears the unconverged first 80 ms
 - [#3021](/quest/next/3021-moq-gst-anchor-generated-media-timelines-to-wall-clock.md) - GStreamer maps every pad onto one continuous broadcast clock across source restarts
-- [#2779](/quest/next/2779-moq-export-ts-continuity-counters-are-numbered-from.md) - moq export ts: continuity counters are numbered from process state, so two exporters of the same broadcast emit streams that can never be compared
-- [#2829](/quest/next/2829-moq-export-ts-the-audio-video-interleave-is-decided-by.md) - moq export ts: the audio/video interleave is decided by arrival timing, so two exporters of one broadcast render the same media in different orders
+- [#2829](/quest/next/2829-moq-export-ts-the-audio-video-interleave-is-decided-by.md) - moq export ts: the interleave is a media-time watermark bounded by `--max-age`, so two exporters render one broadcast in one order
 - [#3489](/quest/next/3489-ts-import-stream-liveness.md) - moq import ts: every elementary stream reports its access units and how long it has been quiet
 - [SRT import stats](/quest/next/srt-import-stats.md) - the SRT gateway reports the same per-stream counters instead of nothing
 - [Text availability](/quest/next/text-schema.md) - a text track publishes its own coverage index instead of copying the media timeline
@@ -141,7 +140,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Dart publish](/quest/next/dart-publish.md) - the packages are built and dry-run clean but exist nowhere consumers can install from
 - [Dart codec parity](/quest/next/dart-codecs.md) - Dart is the one binding that cannot originate media
 - [libmoq fetch](/quest/next/libmoq-fetch.md) - libmoq gains an additive cached-group fetch entry point
-- [#2907](/quest/next/2907-bind-the-browser-through-moq-ffi-uniffi-instead-of-a.md) - Bind the browser through moq-ffi/UniFFI instead of a second hand-written wasm API
+- [moq-mux on wasm32](/quest/next/mux-wasm-target.md) - the crate's two wasm blockers are fixed and the target stays in the clippy lane
 - [#2850](/quest/next/2850-js-net-give-reader-a-synchronous-decode-so-the-publisher.md) - js/net: decode messages synchronously from buffered bytes and delete the publisher read-ahead queue
 - [Install moq](/quest/next/moq-installer.md) - one command installs or upgrades the released CLI on macOS and Linux
 - [Install URL](/quest/next/moq-install-url.md) - moq.dev serves the canonical installer at /install.sh

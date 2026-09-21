@@ -40,6 +40,7 @@ world states the condition as a plain-text `Required` bullet and waits here.
 - [#2819](/quest/future/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - moq-video: carry PipeWire DMA-BUFs safely into the Vulkan renderer
 - [Unreal prototype](/quest/future/unreal.md) - a UE5 module on the C++ package with exceptions disabled, rendering a subscribed broadcast to a texture
 - [Unity prototype](/quest/future/unity.md) - the C# package under IL2CPP, playing subscribed audio
+- [#2907](/quest/future/2907-bind-the-browser-through-moq-ffi-uniffi-instead-of-a.md) - the browser reaches moq-ffi through a generated TypeScript binding once a JS generator is stable
 - [C# through moq-ffi](/quest/future/cs/README.md) - generated C# over moq-ffi as a NuGet package with native runtimes
 - [vcpkg registry](/quest/future/cpp-vcpkg.md) - a registry we own serves the prebuilt package to `vcpkg` manifests
 - [Conan remote](/quest/future/cpp-conan.md) - a remote we own serves the same tarball to `conan install`
