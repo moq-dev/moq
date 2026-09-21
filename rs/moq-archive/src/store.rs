@@ -18,7 +18,7 @@ use crate::{Error, Result};
 /// Listing scopes and offsets are relative to the recording prefix supplied to
 /// [`super::Store::new`]. The same [`Query`] can drive streaming and paginated
 /// listing. A page's [`Page::next`] query retains the opaque backend token and
-/// all supported options.
+/// must be passed to [`super::Store::list_paginated`], not [`super::Store::list`].
 ///
 /// ```
 /// use std::num::NonZeroUsize;
@@ -118,6 +118,7 @@ pub mod list {
 		/// Entries in the backend's order.
 		pub entries: Vec<Entry>,
 		/// The same query advanced to the next page, if any.
+		/// Pass it to `Store::list_paginated`; `Store::list` rejects it.
 		pub next: Option<Query>,
 	}
 }
@@ -221,8 +222,12 @@ impl<T: ObjectStore> Store<T> {
 		Ok(())
 	}
 
-	/// Stream matching entries. Order is unspecified and page-only controls are ignored.
+	/// Stream matching entries. Order is unspecified and `max_keys` is ignored.
+	/// Continuation queries from `Page::next` fail; pass them to `list_paginated`.
 	pub fn list(&self, query: &Query) -> BoxStream<'static, Result<Entry>> {
+		if query.page_token.is_some() {
+			return futures::stream::once(async { Err(Error::Pagination) }).boxed();
+		}
 		let prefix = self.list_path(query.prefix.as_ref());
 		let offset = query.offset.as_ref().map(|offset| self.recording_path(offset));
 		let store_prefix = self.prefix.clone();
@@ -338,13 +343,112 @@ mod tests {
 	use std::num::NonZeroUsize;
 
 	use futures::TryStreamExt;
+	use object_store::list::{PaginatedListOptions, PaginatedListResult, PaginatedListStore};
 	use object_store::memory::InMemory;
 	use object_store::path::Path;
+	use object_store::{
+		CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutMultipartOptions,
+		PutOptions, PutPayload, PutResult,
+	};
 
 	use super::*;
 	use crate::ID_MAX;
 	use crate::path::encode_track;
 	use crate::segment::{Frame, Group};
+
+	/// In-memory store with a trivial offset-based paginated listing implementation.
+	/// Page tokens are decimal indexes into the filtered, sorted key list.
+	#[derive(Debug, Clone)]
+	struct PaginatedMemory {
+		inner: InMemory,
+	}
+
+	impl std::fmt::Display for PaginatedMemory {
+		fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+			write!(f, "PaginatedMemory")
+		}
+	}
+
+	#[async_trait::async_trait]
+	impl ObjectStore for PaginatedMemory {
+		async fn put_opts(
+			&self,
+			location: &Path,
+			payload: PutPayload,
+			opts: PutOptions,
+		) -> object_store::Result<PutResult> {
+			self.inner.put_opts(location, payload, opts).await
+		}
+
+		async fn put_multipart_opts(
+			&self,
+			location: &Path,
+			opts: PutMultipartOptions,
+		) -> object_store::Result<Box<dyn MultipartUpload>> {
+			self.inner.put_multipart_opts(location, opts).await
+		}
+
+		async fn get_opts(&self, location: &Path, options: GetOptions) -> object_store::Result<GetResult> {
+			self.inner.get_opts(location, options).await
+		}
+
+		fn delete_stream(
+			&self,
+			locations: BoxStream<'static, object_store::Result<Path>>,
+		) -> BoxStream<'static, object_store::Result<Path>> {
+			self.inner.delete_stream(locations)
+		}
+
+		fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+			self.inner.list(prefix)
+		}
+
+		async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
+			self.inner.list_with_delimiter(prefix).await
+		}
+
+		async fn copy_opts(&self, from: &Path, to: &Path, options: CopyOptions) -> object_store::Result<()> {
+			self.inner.copy_opts(from, to, options).await
+		}
+	}
+
+	#[async_trait::async_trait]
+	impl PaginatedListStore for PaginatedMemory {
+		async fn list_paginated(
+			&self,
+			prefix: Option<&str>,
+			opts: PaginatedListOptions,
+		) -> object_store::Result<PaginatedListResult> {
+			let mut metas: Vec<ObjectMeta> = self.inner.list(None).try_collect().await?;
+			metas.sort_by(|a, b| a.location.as_ref().cmp(b.location.as_ref()));
+			if let Some(prefix) = prefix {
+				metas.retain(|meta| meta.location.as_ref().starts_with(prefix));
+			}
+			if let Some(offset) = opts.offset.as_deref() {
+				metas.retain(|meta| meta.location.as_ref() > offset);
+			}
+			let start: usize = match opts.page_token {
+				Some(token) => token.parse().map_err(|err| object_store::Error::Generic {
+					store: "PaginatedMemory",
+					source: Box::new(err),
+				})?,
+				None => 0,
+			};
+			let remaining = &metas[start.min(metas.len())..];
+			let take = opts.max_keys.unwrap_or(remaining.len()).min(remaining.len());
+			let objects = remaining[..take].to_vec();
+			let next = start.saturating_add(take);
+			let page_token = (next < metas.len()).then(|| next.to_string());
+			Ok(PaginatedListResult {
+				result: ListResult {
+					objects,
+					common_prefixes: Vec::new(),
+					extensions: Default::default(),
+				},
+				page_token,
+			})
+		}
+	}
 
 	fn memory() -> Store<InMemory> {
 		Store::new(InMemory::new(), "rec")
@@ -697,6 +801,98 @@ mod tests {
 				current = next;
 			}
 		}
+		assert_eq!(paged, streamed);
+	}
+
+	#[tokio::test]
+	async fn streaming_rejects_continuation_queries() {
+		let store = memory();
+		store.put_segments("timeline.z", 0, &one_group(0, b"t")).await.unwrap();
+		let query = Query::segments("timeline.z")
+			.unwrap()
+			.page_size(NonZeroUsize::new(1).unwrap());
+		let next = query.next("0".to_string());
+		let err = store.list(&next).try_collect::<Vec<_>>().await.unwrap_err();
+		assert_eq!(err, Error::Pagination);
+	}
+
+	#[tokio::test]
+	async fn paginated_listing_walks_pages_and_excludes_siblings() {
+		let store = Store::new(PaginatedMemory { inner: InMemory::new() }, "rec");
+		for segment in 0..3 {
+			store
+				.put_segments("timeline.z", segment, &one_group(segment, b"t"))
+				.await
+				.unwrap();
+		}
+		store
+			.inner()
+			.inner
+			.put(
+				&Path::from("rec-other/video/.info"),
+				Bytes::from_static(b"sibling").into(),
+			)
+			.await
+			.unwrap();
+
+		let query = Query::segments("timeline.z")
+			.unwrap()
+			.after(&Key::segments("timeline.z", 0).unwrap())
+			.unwrap()
+			.page_size(NonZeroUsize::new(1).unwrap());
+		let streamed: BTreeSet<String> = store
+			.list(&query)
+			.map_ok(|entry| entry.key.path(&Path::ROOT).unwrap().to_string())
+			.try_collect()
+			.await
+			.unwrap();
+		assert_eq!(streamed.len(), 2);
+
+		let mut paged = BTreeSet::new();
+		let mut current = Some(query);
+		let mut pages = 0;
+		while let Some(query) = current {
+			let page = store.list_paginated(&query).await.unwrap();
+			assert_eq!(page.entries.len(), 1);
+			paged.extend(
+				page.entries
+					.into_iter()
+					.map(|entry| entry.key.path(&Path::ROOT).unwrap().to_string()),
+			);
+			current = page.next;
+			pages += 1;
+			assert!(pages <= 2, "pagination did not terminate");
+		}
+		assert_eq!(pages, 2);
+		assert_eq!(paged, streamed);
+
+		// A recording-wide walk uses the trailing-slash scope, so the
+		// `rec-other` sibling must not appear in any page.
+		let query = Query::new().page_size(NonZeroUsize::new(1).unwrap());
+		let streamed: BTreeSet<String> = store
+			.list(&query)
+			.map_ok(|entry| entry.key.path(&Path::ROOT).unwrap().to_string())
+			.try_collect()
+			.await
+			.unwrap();
+		assert_eq!(streamed.len(), 3);
+
+		let mut paged = BTreeSet::new();
+		let mut current = Some(query);
+		let mut pages = 0;
+		while let Some(query) = current {
+			let page = store.list_paginated(&query).await.unwrap();
+			assert_eq!(page.entries.len(), 1);
+			paged.extend(
+				page.entries
+					.into_iter()
+					.map(|entry| entry.key.path(&Path::ROOT).unwrap().to_string()),
+			);
+			current = page.next;
+			pages += 1;
+			assert!(pages <= 3, "pagination did not terminate");
+		}
+		assert_eq!(pages, 3);
 		assert_eq!(paged, streamed);
 	}
 

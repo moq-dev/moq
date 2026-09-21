@@ -62,6 +62,10 @@ pub enum Error {
 	#[error("directory listing is unsupported: {0}")]
 	Directory(String),
 
+	/// A pagination continuation was passed to streaming list.
+	#[error("continuation query requires list_paginated")]
+	Pagination,
+
 	/// A create collided with different object bytes.
 	#[error("conflicting object: {0}")]
 	Conflict(String),

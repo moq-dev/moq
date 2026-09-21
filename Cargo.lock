@@ -4269,6 +4269,7 @@ dependencies = [
 name = "moq-archive"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "bytes",
  "futures",
  "moq-net",
