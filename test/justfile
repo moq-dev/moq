@@ -12,6 +12,8 @@
 
 set fallback
 set working-directory := '.'
+# `smoke` reads its args as `$1`/`$@`; without this a shebang recipe sees none.
+set positional-arguments
 
 # The `check` sibling: same diff scoping, same BASE resolution, and what CI runs
 # after `just check`. Only js/rs/py appear here. The kt, swift, and go wrappers
