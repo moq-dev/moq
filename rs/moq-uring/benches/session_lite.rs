@@ -125,7 +125,7 @@ mod linux {
 
 			let server_handle = handle.clone();
 			handle.spawn(async move {
-				let conn = quic::server::accept(&server_handle, server_sock, &server_config)
+				let conn = quic::server::accept(server_sock, &server_config)
 					.await
 					.expect("quic accept");
 				let (session, driver) = moq_net::Server::new()
@@ -140,9 +140,7 @@ mod linux {
 			// Establish and subscribe once; iterations measure steady state.
 			let (_session, mut sub) = worker
 				.block_on(async {
-					let conn = quic::client::connect(&handle, client_sock, &dial)
-						.await
-						.expect("quic connect");
+					let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
 					let (session, driver) = moq_net::Client::new()
 						.with_subscriber(sub_origin.clone())
 						.connect_lite(std::time::Instant::now(), quic::web::Session::raw(conn))

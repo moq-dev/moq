@@ -16,9 +16,13 @@
 //! serves many connections on one socket (demuxed by connection id, dials
 //! included), each a [`quic::Connection`] implementing the transport traits,
 //! so `moq_net::Client::connect_lite` and `Server::accept_lite` run real
-//! moq-lite sessions on the worker. [`Handle::run`] supplies time and schedules driver wakeups;
-//! callers run the returned drivers with [`Handle::spawn`]. The stack underneath is enabled by
-//! the `noq` feature; a build without it leaves the module out.
+//! moq-lite sessions on the worker. The socket is the identity: whatever is
+//! built on it runs on the worker that adopted it, and a socket adopted as a
+//! member of a steered reuseport group ([`udp::Bound`]) issues connection ids
+//! that steer back to it. [`Handle::run`] supplies time and schedules driver
+//! wakeups; callers run the returned drivers with [`Handle::spawn`]. The stack
+//! underneath is enabled by the `noq` feature; a build without it leaves the
+//! module out.
 //!
 //! [`metrics::Metrics`] is how the worker's own health leaves its thread:
 //! relaxed counters for the buffer pools, the batching mechanisms, the ring,

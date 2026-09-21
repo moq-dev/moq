@@ -11,7 +11,8 @@ use rustc_hash::FxHashMap;
 
 use super::super::{Error, SEGMENT};
 use super::endpoint;
-use crate::{Handle, udp};
+use crate::udp;
+use crate::worker::Owner;
 
 /// The state shared by every handle and the driver, single-threaded behind
 /// `Rc<RefCell>`.
@@ -28,6 +29,9 @@ const TRAIN_SEGMENTS: usize = 63;
 pub(crate) struct Inner {
 	pub(crate) conn: RefCell<noq_proto::Connection>,
 	pub(crate) state: RefCell<State>,
+	/// The worker driving this connection, which anything layered on it
+	/// (the WebTransport handshake, say) runs on too.
+	pub(crate) owner: Owner,
 }
 
 pub(crate) struct State {
@@ -285,6 +289,11 @@ impl Connection {
 		self.shared.close_code(code, reason);
 	}
 
+	/// The worker driving this connection.
+	pub(crate) fn owner(&self) -> &Owner {
+		&self.shared.owner
+	}
+
 	/// The peer's certificate chain in DER, leaf first, or `None` if it
 	/// presented none.
 	///
@@ -320,7 +329,7 @@ impl Clone for Connection {
 /// [kicks](Inner::kick) the driver. The caller spawns the future and reclaims
 /// the connection's bookkeeping once it resolves.
 pub(crate) fn launch(
-	handle: &Handle,
+	owner: &Owner,
 	socket: Rc<udp::Socket>,
 	endpoint: Weak<endpoint::Inner>,
 	key: ConnectionHandle,
@@ -329,6 +338,7 @@ pub(crate) fn launch(
 	let shared = Rc::new(Inner {
 		conn: RefCell::new(conn),
 		state: RefCell::new(State::new()),
+		owner: owner.clone(),
 	});
 
 	let mut driver = Driver {
@@ -336,7 +346,7 @@ pub(crate) fn launch(
 		socket,
 		endpoint,
 		key,
-		deadline: crate::Timer::new(handle),
+		deadline: owner.timer(),
 		scratch: Vec::with_capacity(TRAIN_SEGMENTS * SEGMENT),
 		blocked: false,
 	};

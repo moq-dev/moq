@@ -23,7 +23,9 @@ use rustc_hash::FxHashMap;
 use super::super::{Error, endpoint::Config};
 use super::connection;
 use crate::quic::Connection;
-use crate::{Handle, udp};
+use crate::shared::Shared;
+use crate::udp;
+use crate::worker::Owner;
 
 /// The accept side: connections whose handshake finished and nobody has
 /// claimed yet.
@@ -34,7 +36,8 @@ struct Accepting {
 /// State shared by the handles, the demux task, and the per-connection
 /// teardown tasks.
 pub(crate) struct Inner {
-	handle: Handle,
+	/// The socket's worker, where every task of this endpoint runs.
+	owner: Owner,
 	socket: Rc<udp::Socket>,
 	local: SocketAddr,
 	/// The routing table, and the server configuration it accepts with.
@@ -71,8 +74,17 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-	/// Serve `socket` on the worker behind `handle`.
-	pub fn new(handle: &Handle, socket: udp::Socket, config: Config) -> Result<Self, Error> {
+	/// Serve `socket` on the worker that adopted it.
+	///
+	/// The socket names the worker: the demux task and every connection
+	/// driver run there, and a socket adopted as a reuseport member steers
+	/// the ids this endpoint issues to itself. Refused once that worker has
+	/// been dropped, since nothing would ever drive the endpoint.
+	pub fn new(socket: udp::Socket, config: Config) -> Result<Self, Error> {
+		let owner = socket.owner();
+		let Some(handle) = owner.handle() else {
+			return Err(Error::Io(Shared::gone_error().to_string()));
+		};
 		let local = socket.local_addr().map_err(|err| Error::Io(err.to_string()))?;
 		let server = match &config.server {
 			Some(server) => {
@@ -87,10 +99,10 @@ impl Endpoint {
 		let accepting = server.is_some().then(|| Accepting { queue: VecDeque::new() });
 		// MTU discovery is off (the GSO pool sends fixed SEGMENT datagrams),
 		// so the endpoint has no reason to allow it either.
-		let endpoint = noq_proto::Endpoint::new(super::endpoint_config(config.shard)?, server, false);
+		let endpoint = noq_proto::Endpoint::new(super::endpoint_config(socket.shard())?, server, false);
 
 		let inner = Rc::new(Inner {
-			handle: handle.clone(),
+			owner,
 			socket: Rc::new(socket),
 			local,
 			endpoint: RefCell::new(endpoint),
@@ -119,11 +131,11 @@ impl Endpoint {
 	///
 	/// Fails immediately on an endpoint built without a
 	/// [`server`](Config::server) configuration, and with the socket's error
-	/// once the endpoint has died.
+	/// once the endpoint has died, its worker included.
 	pub async fn accept(&self) -> Result<Connection, Error> {
 		kio::wait(|waiter| {
-			if let Some(err) = &*self.inner.closed.borrow() {
-				return Poll::Ready(Err(err.clone()));
+			if let Some(err) = self.inner.closed() {
+				return Poll::Ready(Err(err));
 			}
 			let mut accepting = self.inner.accepting.borrow_mut();
 			let Some(accepting) = accepting.as_mut() else {
@@ -141,8 +153,8 @@ impl Endpoint {
 	/// Dial [`Config::peer`](crate::quic::client::Config::peer) through this
 	/// endpoint's socket, driving the handshake to completion.
 	pub async fn connect(&self, config: &crate::quic::client::Config) -> Result<Connection, Error> {
-		if let Some(err) = &*self.inner.closed.borrow() {
-			return Err(err.clone());
+		if let Some(err) = self.inner.closed() {
+			return Err(err);
 		}
 		let client = super::client_config(config)?;
 		let (key, conn) = self
@@ -195,6 +207,18 @@ impl std::fmt::Debug for Endpoint {
 }
 
 impl Inner {
+	/// Why nothing new can start here: the socket's terminal error, or the
+	/// worker being gone, which no task would ever report since none runs.
+	fn closed(&self) -> Option<Error> {
+		if let Some(err) = &*self.closed.borrow() {
+			return Some(err.clone());
+		}
+		self.owner
+			.handle()
+			.is_none()
+			.then(|| Error::Io(Shared::gone_error().to_string()))
+	}
+
 	/// The demux task: receive, route, and stop once nothing needs us.
 	fn poll_run(self: &Rc<Self>, waiter: &kio::Waiter) -> Poll<()> {
 		// Handle drops and connection teardowns re-check the exit condition.
@@ -320,7 +344,7 @@ impl Inner {
 		// Hand the connection over once (if) its handshake completes.
 		self.pending.set(self.pending.get() + 1);
 		let inner = self.clone();
-		self.handle.spawn(async move {
+		self.owner.spawn(async move {
 			let outcome = connection::establish(shared).await;
 			inner.pending.set(inner.pending.get() - 1);
 			let mut conn = match outcome {
@@ -372,11 +396,11 @@ impl Inner {
 
 	/// Register `conn`, spawn its driver, and arrange its teardown.
 	fn launch(self: &Rc<Self>, key: ConnectionHandle, conn: noq_proto::Connection) -> connection::Shared {
-		let (shared, driver) = connection::launch(&self.handle, self.socket.clone(), Rc::downgrade(self), key, conn);
+		let (shared, driver) = connection::launch(&self.owner, self.socket.clone(), Rc::downgrade(self), key, conn);
 		self.conns.borrow_mut().insert(key, shared.clone());
 
 		let inner = self.clone();
-		self.handle.spawn(async move {
+		self.owner.spawn(async move {
 			driver.await;
 			inner.release(key);
 		});

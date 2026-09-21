@@ -1,7 +1,7 @@
 //! Accepting: everything one incoming connection needs.
 
 use super::{Connection, Error, Identity};
-use crate::{Handle, udp};
+use crate::udp;
 
 /// Whether connecting clients are asked for a certificate, and against what.
 ///
@@ -83,11 +83,7 @@ impl Config {
 /// and one [`accept`](super::Endpoint::accept) from it: later arrivals on the
 /// socket keep reaching the accepted connection, but nothing else is ever
 /// accepted. Keep the endpoint itself for a listener.
-pub async fn accept(handle: &Handle, socket: udp::Socket, config: &Config) -> Result<Connection, Error> {
-	let endpoint = super::Endpoint::new(
-		handle,
-		socket,
-		super::endpoint::Config::default().with_server(config.clone()),
-	)?;
+pub async fn accept(socket: udp::Socket, config: &Config) -> Result<Connection, Error> {
+	let endpoint = super::Endpoint::new(socket, super::endpoint::Config::default().with_server(config.clone()))?;
 	endpoint.accept().await
 }
