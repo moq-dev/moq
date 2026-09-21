@@ -506,14 +506,20 @@ mod tests {
 		.unwrap();
 
 		let subscription = published.subscription().expect("the consumer subscribed");
-		assert_eq!(subscription.max_age, max_age, "the age budget did not reach the publisher");
+		assert_eq!(
+			subscription.max_age, max_age,
+			"the age budget did not reach the publisher"
+		);
 
 		let opened = probe::native_opened().expect("the decoder opened");
 		assert_eq!(opened.output, decoder.output);
 		assert_eq!(opened.scale_hint, decoder.scale_hint);
 
 		let frame = pollster::block_on(consumer.read()).unwrap().expect("a decoded frame");
-		assert!(matches!(frame.surface, crate::Surface::I420(_)), "CPU output was not enforced");
+		assert!(
+			matches!(frame.surface, crate::Surface::I420(_)),
+			"CPU output was not enforced"
+		);
 	}
 
 	/// A track ends before a decoder that reorders pictures does. The consumer

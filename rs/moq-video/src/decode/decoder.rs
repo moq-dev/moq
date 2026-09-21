@@ -434,7 +434,11 @@ mod tests {
 		};
 		let mut decoder = super::Decoder::new(&probe_catalog(), &config).expect("the native probe opens");
 		let mut frames = decoder
-			.decode(&bytes::Bytes::from_static(b"access unit"), Timestamp::from_micros(0).unwrap(), true)
+			.decode(
+				&bytes::Bytes::from_static(b"access unit"),
+				Timestamp::from_micros(0).unwrap(),
+				true,
+			)
 			.unwrap();
 		assert_eq!(frames.len(), 1, "the probe decodes one picture per access unit");
 		frames.pop().unwrap()
@@ -507,8 +511,14 @@ mod tests {
 		let Err(err) = super::Decoder::new(&probe_catalog(), &config) else {
 			panic!("an odd scale hint opened a decoder");
 		};
-		assert!(!matches!(err, crate::Error::NoDecoder(_)), "refused for the wrong reason: {err}");
-		assert!(probe::native_opened().is_none(), "the backend was opened before the hint was checked");
+		assert!(
+			!matches!(err, crate::Error::NoDecoder(_)),
+			"refused for the wrong reason: {err}"
+		);
+		assert!(
+			probe::native_opened().is_none(),
+			"the backend was opened before the hint was checked"
+		);
 	}
 
 	#[test]

@@ -507,9 +507,7 @@ impl Surface {
 				}
 			},
 			#[cfg(all(target_os = "linux", feature = "nvidia"))]
-			Surface::Cuda(cuda) if config.output == crate::Output::Cpu => {
-				Surface::I420(cuda.download_i420()?.resize(size)?)
-			}
+			Surface::Cuda(cuda) if config.output == crate::Output::Cpu => Surface::I420(cuda.download_i420()?.resize(size)?),
 			#[cfg(all(target_os = "linux", feature = "nvidia"))]
 			Surface::Cuda(cuda) => match cuda.resize(size.width, size.height) {
 				Ok(scaled) => Surface::Cuda(scaled),

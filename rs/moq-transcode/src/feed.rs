@@ -69,7 +69,11 @@ struct State {
 }
 
 impl Feed {
-	pub(crate) fn new(source: moq_net::track::Consumer, config: VideoConfig, decoder: moq_video::decode::Config) -> Self {
+	pub(crate) fn new(
+		source: moq_net::track::Consumer,
+		config: VideoConfig,
+		decoder: moq_video::decode::Config,
+	) -> Self {
 		Self {
 			inner: Arc::new(Inner {
 				source,
