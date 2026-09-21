@@ -23,10 +23,14 @@ service setup, Windows support, or new release targets.
   the replacement before modifying the destination. Commit the executable and
   ownership record as one recoverable transaction on the destination
   filesystem: stage the new pair, retain the validated prior pair, and write a
-  durable journal before either rename. On a handled failure, roll back both
-  files. After interruption, the next run must use the journal to complete the
-  new pair when both staged objects validate together or restore the prior pair;
-  it must not misclassify a partial transaction as an unmanaged installation.
+  durable journal before either rename. Record distinct phases after the
+  executable rename and after the ownership-record rename. On a handled
+  failure, roll back both files. After interruption, the next run must use the
+  journal to complete the new pair when both staged objects validate together.
+  If both renames completed, validate the installed pair and finish cleanup;
+  otherwise restore the prior pair, or remove every transaction file for an
+  initial install. Recovery must not misclassify a partial transaction as an
+  unmanaged installation.
   Flush staged files, journal updates, renames, and their directory entries at
   the required commit boundaries. Remove the journal and backups only after the
   matching pair is durable. This is the atomic installation contract: recovery
@@ -62,9 +66,10 @@ service setup, Windows support, or new release targets.
   selection, unsupported hosts, corrupt/missing assets, destination conflicts,
   and failure preserving an existing executable. Use controlled fixtures for
   failure cases, including interruption before and after every journal, rename,
-  durability, and cleanup boundary. Assert that each case completes the new
-  pair or restores the old pair, and that an initial-install failure leaves
-  neither file. Add native macOS/Linux smoke coverage for executable startup.
+  durability, and cleanup boundary. Explicitly cover the post-second-rename,
+  pre-cleanup state. Assert that each case completes the new pair or restores
+  the old pair, and that an initial-install failure leaves neither file. Add
+  native macOS/Linux smoke coverage for executable startup.
   Exercise the canonical script with real release assets in a temporary
   install directory and run the installed `moq --version`. The dependent
   website quest owns verification of the final public URL.
