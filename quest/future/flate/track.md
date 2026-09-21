@@ -52,4 +52,4 @@ Wire impact: none.
 
 ## Related
 
-- [Bindings](/quest/next/flate/bindings.md) - binds this wrapper
+- [Bindings](/quest/future/flate/bindings.md) - binds this wrapper

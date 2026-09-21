@@ -27,4 +27,4 @@ Windows half needs a Windows host (`just rs windows`).
 
 ## Related
 
-- [X11 capture transport](/quest/next/x11-capture-shm.md) - the larger X11 cost, in the same read path
+- [X11 capture transport](/quest/future/x11-capture-shm.md) - the larger X11 cost, in the same read path

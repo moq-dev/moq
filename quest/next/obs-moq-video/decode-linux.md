@@ -17,4 +17,4 @@ At least one supported Linux hardware decoder delivers frames to OBS without CPU
 
 ## Related
 
-- [VAAPI encode and decode](/quest/next/video-vaapi.md) - owns remaining VAAPI decode and native surface gaps; avoid a duplicate backend implementation
+- [VAAPI encode and decode](/quest/future/video-vaapi.md) - owns remaining VAAPI decode and native surface gaps; avoid a duplicate backend implementation

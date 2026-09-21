@@ -36,4 +36,4 @@ decode, and render stack.
 
 ## Related
 
-- [`moq` serves like a relay](/quest/next/cli-serve.md) - the end state where the relay is `moq` with listening on by default
+- [`moq` serves like a relay](/quest/future/cli-serve.md) - the end state where the relay is `moq` with listening on by default

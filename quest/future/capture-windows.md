@@ -38,5 +38,5 @@ these three against doing that once.
 
 ## Related
 
-- [Linux capture parity](/quest/next/capture-linux.md) - the same gaps, through
+- [Linux capture parity](/quest/future/capture-linux.md) - the same gaps, through
   the portal and PipeWire

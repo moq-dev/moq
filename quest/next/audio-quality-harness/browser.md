@@ -25,7 +25,7 @@ budget, or a schedule.
   driver if the switch is cheap; if it is not, say so and keep CDP.
 - Keep the instrumentation ad-hoc for now. The probes stay a debug surface, not
   public API; promoting them is [Latency
-  ledger](/quest/next/latency-ledger.md), which nothing here waits on.
+  ledger](/quest/future/latency-ledger.md), which nothing here waits on.
 - The metric schema is the deliverable that outlives this quest, because the
   native lane and the ledger both have to emit the same thing. It is a
   contract, so write it as one:

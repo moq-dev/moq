@@ -29,6 +29,6 @@ Public API and wire: no changes during this study.
 
 ## Related
 
-- [NVIDIA formats](/quest/next/2147-moq-video-10-bit-hevc-and-av1-support-in-the-nvidia-codec.md) - existing AV1 encode and 10-bit scope
-- [VAAPI](/quest/next/video-vaapi.md) - existing Linux codec expansion
+- [NVIDIA formats](/quest/future/2147-moq-video-10-bit-hevc-and-av1-support-in-the-nvidia-codec.md) - existing AV1 encode and 10-bit scope
+- [VAAPI](/quest/future/video-vaapi.md) - existing Linux codec expansion
 - [VP8/VP9](/quest/next/obs-moq-video/vpx.md) - existing portable decoder scope

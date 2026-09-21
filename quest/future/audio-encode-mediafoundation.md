@@ -22,8 +22,8 @@ behind the encode seam on Windows.
 
 - [Encode seam](/quest/next/audio-codecs/encode-backend.md) - the candidate order this backend joins
 - [Layout](/quest/next/audio-codecs/layout.md) - the input layout the encoder accepts
-- [Media Foundation decode](/quest/next/audio-codecs/decode-mediafoundation.md) - the round-trip regression decodes through it
+- [Media Foundation decode](/quest/future/audio-decode-mediafoundation.md) - the round-trip regression decodes through it
 
 ## Related
 
-- [Runtime QA hosts](/quest/next/runtime-qa-hosts.md) - where the Windows run happens
+- [Runtime QA hosts](/quest/future/runtime-qa-hosts.md) - where the Windows run happens

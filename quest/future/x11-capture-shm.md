@@ -29,4 +29,4 @@ host with a real X session; CI compiles the file but cannot run it.
 
 ## Related
 
-- [Capture frame buffers](/quest/next/capture-frame-buffers.md) - the per-frame allocations in the same read path
+- [Capture frame buffers](/quest/future/capture-frame-buffers.md) - the per-frame allocations in the same read path

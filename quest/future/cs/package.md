@@ -24,4 +24,4 @@ smoke --all` and `doc/lib/cs` documents the package.
 
 ## Required
 
-- [Generator](/quest/next/cs/generator.md) - the pinned generator that emits `cs/ffi`
+- [Generator](/quest/future/cs/generator.md) - the pinned generator that emits `cs/ffi`

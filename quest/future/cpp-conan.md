@@ -21,4 +21,4 @@ Windows, macOS, and Linux.
 
 ## Required
 
-- [vcpkg registry](/quest/next/cpp/vcpkg.md) - the release manifest and bump automation this reuses
+- [vcpkg registry](/quest/future/cpp-vcpkg.md) - the release manifest and bump automation this reuses

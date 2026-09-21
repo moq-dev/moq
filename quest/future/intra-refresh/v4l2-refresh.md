@@ -34,4 +34,4 @@ claiming a boundary that was not encoded.
 
 ## Required
 
-- [Encode config](/quest/next/intra-refresh/encode-config.md) - the `Gop` enum and cut semantics this implements
+- [Encode config](/quest/future/intra-refresh/encode-config.md) - the `Gop` enum and cut semantics this implements

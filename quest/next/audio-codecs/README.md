@@ -51,14 +51,14 @@ ready now.
 - [Opus surround](/quest/next/audio-codecs/opus-surround.md) - mapping family 1 decodes on every host through the multistream decoder
 - [Encode seam](/quest/next/audio-codecs/encode-backend.md) - `encode::backend` and `Codec::Aac`, so a native publisher can produce AAC-LC
 - [AudioToolbox encode](/quest/next/audio-codecs/encode-audiotoolbox.md) - macOS and iOS encode AAC-LC
-- [Media Foundation decode](/quest/next/audio-codecs/decode-mediafoundation.md) - Windows decodes HE-AAC, multichannel AAC, and what else the MFTs offer
-- [Media Foundation encode](/quest/next/audio-codecs/encode-mediafoundation.md) - Windows encodes AAC-LC
-- [MediaCodec decode](/quest/next/audio-codecs/decode-mediacodec.md) - Android decodes HE-AAC, multichannel AAC, and what else the device offers
-- [MediaCodec encode](/quest/next/audio-codecs/encode-mediacodec.md) - Android encodes AAC-LC
 
 ## Related
 
 - [OBS native codecs](/quest/next/obs-moq-video/README.md) - the OBS source and encoder adapters consume this through moq-ffi; #3498 narrowed OBS to what moq-audio decodes today
 - [Mobile](/quest/next/mobile/README.md) - the iOS and Android slices ship these backends through moq-ffi
-- [Runtime QA hosts](/quest/next/runtime-qa-hosts.md) - Windows and Android verification needs a host; the Windows and macOS CI gates run nightly, not per PR
+- [Runtime QA hosts](/quest/future/runtime-qa-hosts.md) - Windows and Android verification needs a host; the Windows and macOS CI gates run nightly, not per PR
 - [Dart codec parity](/quest/next/dart-codecs.md) - Dart gains these once it builds with the `audio` feature
+- [Media Foundation decode](/quest/future/audio-decode-mediafoundation.md) - Windows decodes HE-AAC, multichannel AAC, and what else the MFTs offer
+- [Media Foundation encode](/quest/future/audio-encode-mediafoundation.md) - Windows encodes AAC-LC
+- [MediaCodec decode](/quest/future/audio-decode-mediacodec.md) - Android decodes HE-AAC, multichannel AAC, and what else the device offers
+- [MediaCodec encode](/quest/future/audio-encode-mediacodec.md) - Android encodes AAC-LC

@@ -24,4 +24,4 @@ target, subscribes to a broadcast, and plays decoded audio through an
 
 ## Required
 
-- [Package](/quest/next/cs/package.md) - the NuGet whose contents Unity imports
+- [Package](/quest/future/cs/package.md) - the NuGet whose contents Unity imports

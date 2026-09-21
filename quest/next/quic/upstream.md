@@ -30,12 +30,12 @@ Then the feature proposal order, each linked to its producing quest:
    on, so its regressions are found upstream and not only here;
 1. per-stream acknowledgment progress ([ACK progress](/quest/next/quic/ack-progress.md));
 2. `RESET_STREAM_AT` ([reliable reset](/quest/next/quic/reliable-reset.md));
-3. keep-alive by deadline ([keep-alive](/quest/next/quic/keep-alive.md));
+3. keep-alive by deadline ([keep-alive](/quest/future/quic-keep-alive.md));
 4. hierarchical send groups ([scheduler](/quest/next/quic/scheduler.md));
-5. careful resume as a `Controller` wrapper ([careful resume](/quest/next/quic/careful-resume.md));
-6. ECT(1) marking and its accounting ([L4S](/quest/next/quic/ecn.md));
+5. careful resume as a `Controller` wrapper ([careful resume](/quest/future/quic-careful-resume.md));
+6. ECT(1) marking and its accounting ([L4S](/quest/future/quic-ecn.md));
 7. per-stream deadlines ([deadlines](/quest/next/quic/deadline.md));
-8. the measured media-headroom mechanism ([probe](/quest/next/quic/probe.md));
+8. the measured media-headroom mechanism ([probe](/quest/future/quic-probe.md));
 9. the qmux crate over the shared stream state machine ([qmux](/quest/next/quic/qmux.md)).
 
 The next experiments (receive timestamps, GCC, FEC, kernel pacing, send
@@ -54,12 +54,12 @@ offered and answered.
 - [Fork noq](/quest/next/quic/fork.md) - the fork the proposals split from
 - [Per-stream ACK progress](/quest/next/quic/ack-progress.md)
 - [Reliable stream reset](/quest/next/quic/reliable-reset.md)
-- [Keep-alive by deadline](/quest/next/quic/keep-alive.md)
+- [Keep-alive by deadline](/quest/future/quic-keep-alive.md)
 - [Hierarchical stream scheduling](/quest/next/quic/scheduler.md)
-- [Careful resume on reconnect](/quest/next/quic/careful-resume.md)
-- [L4S on the backbone](/quest/next/quic/ecn.md)
+- [Careful resume on reconnect](/quest/future/quic-careful-resume.md)
+- [L4S on the backbone](/quest/future/quic-ecn.md)
 - [Per-stream deadlines](/quest/next/quic/deadline.md)
-- [Discover media headroom](/quest/next/quic/probe.md)
+- [Discover media headroom](/quest/future/quic-probe.md)
 - [qmux on the QUIC stream state machine](/quest/next/quic/qmux.md)
 
 ## Related

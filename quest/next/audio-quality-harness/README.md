@@ -51,6 +51,6 @@ each of those dimensions moves the expected floor.
 ## Related
 
 - [Audio jitter target](/quest/next/audio-jitter-target/README.md) - the estimator this exists to keep honest
-- [Latency ledger](/quest/next/latency-ledger.md) - promotes this harness's probes into a public API
+- [Latency ledger](/quest/future/latency-ledger.md) - promotes this harness's probes into a public API
 - [Failure artifacts](/quest/next/qa-failure-artifacts.md) - keeps the run directory and trace of a failing run
 - [Time stretch](/quest/next/watch-audio-time-stretch.md) - graded by this harness once it lands

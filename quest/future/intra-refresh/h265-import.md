@@ -33,8 +33,8 @@ a track with no keyframes at all and fails the group invariant.
 
 ## Required
 
-- [Catalog warmup](/quest/next/intra-refresh/catalog-warmup.md) - the field import writes
+- [Catalog warmup](/quest/next/catalog-warmup.md) - the field import writes
 
 ## Related
 
-- [H.264 import](/quest/next/intra-refresh/h264-import.md) - the conversion and catalog mutation this shares
+- [H.264 import](/quest/future/intra-refresh/h264-import.md) - the conversion and catalog mutation this shares

@@ -51,13 +51,13 @@ reads the same release manifest so a release bumps both.
 
 - [Generator](/quest/next/cpp/generator.md) - the uniffi 0.32 C++ generator with futures and expected-style errors, pinned and generating `cpp/ffi` in CI
 - [Package](/quest/next/cpp/package.md) - the `cpp/moq` wrapper, CMake package, release tarball, smoke client, and docs
-- [vcpkg registry](/quest/next/cpp/vcpkg.md) - a registry we own serves the prebuilt package to `vcpkg` manifests
-- [Conan remote](/quest/next/cpp/conan.md) - a remote we own serves the same tarball to `conan install`
 - [OBS migration](/quest/next/cpp/obs.md) - the OBS plugin moves from libmoq handles and trampolines to the generated C++
 
 ## Related
 
-- [C# through moq-ffi](/quest/next/cs/README.md) - the same recipe with NordSecurity's C# generator
+- [C# through moq-ffi](/quest/future/cs/README.md) - the same recipe with NordSecurity's C# generator
 - [Unreal prototype](/quest/future/unreal.md) - a UE5 module consumes the package with exceptions disabled
 - [#2907](/quest/next/2907-bind-the-browser-through-moq-ffi-uniffi-instead-of-a.md) - the browser reaches moq-ffi through a generator too; shares the Task-per-target findings
 - [#2152](/quest/next/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - libmoq stays the plain-C ABI; OBS leaving it removes the pressure to mirror codec symbols there
+- [vcpkg registry](/quest/future/cpp-vcpkg.md) - a registry we own serves the prebuilt package to `vcpkg` manifests
+- [Conan remote](/quest/future/cpp-conan.md) - a remote we own serves the same tarball to `conan install`

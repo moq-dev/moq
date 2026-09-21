@@ -21,4 +21,4 @@ Public API and wire: unchanged; previously malformed requests are refused.
 
 ## Related
 
-- [Capture ergonomics](/quest/next/capture-ergonomics.md) - crop and mixing planning remain independent
+- [Capture ergonomics](/quest/future/capture-ergonomics.md) - crop and mixing planning remain independent

@@ -42,4 +42,4 @@ without replacing an API after 0.1.
 
 ## Required
 
-- [Catalog warmup](/quest/next/intra-refresh/catalog-warmup.md) - the field the producer publishes
+- [Catalog warmup](/quest/next/catalog-warmup.md) - the field the producer publishes

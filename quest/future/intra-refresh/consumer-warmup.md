@@ -58,7 +58,7 @@ replaces both: the rule is timestamp arithmetic on the group start.
 
 ## Required
 
-- [Catalog warmup](/quest/next/intra-refresh/catalog-warmup.md) - the field this reads
+- [Catalog warmup](/quest/next/catalog-warmup.md) - the field this reads
 
 ## Related
 

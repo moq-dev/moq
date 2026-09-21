@@ -38,18 +38,18 @@ Decisions the quests share:
 
 ## Quests
 
-- [Catalog warmup](/quest/next/intra-refresh/catalog-warmup.md) - `warmup` on video and audio renditions, in the catalog and the draft
-- [Consumer warmup](/quest/next/intra-refresh/consumer-warmup.md) - JS and Rust viewers join `warmup` earlier and withhold display until recovery, except at a true IDR
-- [H.264 import](/quest/next/intra-refresh/h264-import.md) - the splitter keeps `recovery_frame_cnt` and import publishes `warmup` from it
-- [H.265 import](/quest/next/intra-refresh/h265-import.md) - the splitter reads the recovery-point SEI so an HEVC intra-refresh stream forms groups and publishes `warmup`
-- [Encode config](/quest/next/intra-refresh/encode-config.md) - refresh mode extends the settled GOP contract; the producer cuts groups per sweep and publishes `warmup`
-- [NVENC refresh](/quest/next/intra-refresh/nvenc-refresh.md) - the NVENC backend encodes refresh mode for H.264 and HEVC
-- [V4L2 refresh](/quest/next/intra-refresh/v4l2-refresh.md) - the V4L2 backend encodes refresh mode
-- [Bindings](/quest/next/intra-refresh/bindings.md) - ffi, libmoq, and every wrapper expose the `Gop` enum
-- [Export sync flags](/quest/next/intra-refresh/export-sync-flags.md) - fmp4, MKV, and HLS stop advertising a refresh group start as a sync sample
+- [Consumer warmup](/quest/future/intra-refresh/consumer-warmup.md) - JS and Rust viewers join `warmup` earlier and withhold display until recovery, except at a true IDR
+- [H.264 import](/quest/future/intra-refresh/h264-import.md) - the splitter keeps `recovery_frame_cnt` and import publishes `warmup` from it
+- [H.265 import](/quest/future/intra-refresh/h265-import.md) - the splitter reads the recovery-point SEI so an HEVC intra-refresh stream forms groups and publishes `warmup`
+- [Encode config](/quest/future/intra-refresh/encode-config.md) - refresh mode extends the settled GOP contract; the producer cuts groups per sweep and publishes `warmup`
+- [NVENC refresh](/quest/future/intra-refresh/nvenc-refresh.md) - the NVENC backend encodes refresh mode for H.264 and HEVC
+- [V4L2 refresh](/quest/future/intra-refresh/v4l2-refresh.md) - the V4L2 backend encodes refresh mode
+- [Bindings](/quest/future/intra-refresh/bindings.md) - ffi, libmoq, and every wrapper expose the `Gop` enum
+- [Export sync flags](/quest/future/intra-refresh/export-sync-flags.md) - fmp4, MKV, and HLS stop advertising a refresh group start as a sync sample
 
 ## Related
 
 - [Audio warmup](/quest/next/audio-warmup.md) - Opus convergence after a mid-stream join uses the same `warmup` field
 - [#2067](/quest/next/2067-test-open-gop-h-264-tune-in-end-to-end-leading-picture.md) - the open-GOP fixture and cold tune-in measurement
 - [Open-GOP leading pictures](/quest/next/open-gop-leading-pictures.md) - frames stamped before the group's keyframe are the other tune-in trim
+- [Catalog warmup](/quest/next/catalog-warmup.md) - the generic `warmup` field this line reads, kept in next for audio and open-GOP tune-in

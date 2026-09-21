@@ -24,4 +24,4 @@ and changes the libmoq C struct layout, so it targets `dev`.
 
 ## Required
 
-- [Encode config](/quest/next/intra-refresh/encode-config.md) - the core enum this mirrors
+- [Encode config](/quest/future/intra-refresh/encode-config.md) - the core enum this mirrors

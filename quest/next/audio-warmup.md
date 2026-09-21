@@ -22,8 +22,8 @@ frames decode independently and set nothing; HE-AAC is out of scope.
 
 ## Required
 
-- [Catalog warmup](/quest/next/intra-refresh/catalog-warmup.md) - the field this reads and writes
+- [Catalog warmup](/quest/next/catalog-warmup.md) - the field this reads and writes
 
 ## Related
 
-- [Intra-refresh GOPs](/quest/next/intra-refresh/README.md) - the video side of the same field
+- [Intra-refresh GOPs](/quest/future/intra-refresh/README.md) - the video side of the same field

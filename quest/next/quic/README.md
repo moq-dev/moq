@@ -9,9 +9,9 @@ tokio backend, the thread-per-core `moq-uring` backend, iroh, and qmux. The
 features are per-stream acknowledgment progress, reliable stream resets,
 hierarchical stream scheduling with per-broadcast fairness, the shared stream
 state machine used by qmux, capacity probing for media, per-stream
-deadlines, deadline-based keep-alive, wider limits for relay peers, careful
-resume, and ECN. The experiments that may join them (GCC, FEC, receive
-timestamps, kernel pacing, buffer pools) live in next.
+deadlines, deadline-based and wider limits for relay peers. The experiments that may join them (GCC, FEC, receive
+timestamps, kernel pacing, buffer pools, probing, L4S, careful resume) live
+in [future](/quest/future/README.md).
 
 ## Plan
 
@@ -69,19 +69,12 @@ This is a transport API change, not a MoQ wire change.
 - [Hierarchical stream scheduling](/quest/next/quic/scheduler.md) - strict
   subscription priority, fair buckets, and newest-first group order replace
   the lossy scalar; retransmits follow the same order
-- [Keep-alive by deadline](/quest/next/quic/keep-alive.md) - a PING only when
-  the idle deadline nears, no fixed timer
 - [Relay peers get wider limits](/quest/next/quic/peer-limits.md) - MAX_STREAMS
   and MAX_DATA are raised after SETUP identifies a cluster peer
 - [Per-stream deadlines](/quest/next/quic/deadline.md) - hopeless retransmits
   become resets, and a tail loss probe fires early while there is still time
-- [Discover media headroom](/quest/next/quic/probe.md) - test useful-media pacing before adding redundant probe traffic
 - [qmux on the QUIC stream state machine](/quest/next/quic/qmux.md) - qmux is a
   first-class crate in the fork over the shared stream state machine
-- [Careful resume on reconnect](/quest/next/quic/careful-resume.md) - a redial
-  starts at the previous connection's rate
-- [L4S on the backbone](/quest/next/quic/ecn.md) - an ECT(1) option in the
-  fork, an `ecn` config knob, and a dualpi2 measurement
 - [Release the stack](/quest/next/quic/release.md) - publish immutable,
   consumable versions of the fork and its adapters
 - [Upstream the fork](/quest/next/quic/upstream.md) - every general carried
@@ -104,3 +97,7 @@ This is a transport API change, not a MoQ wire change.
   the syscall, allocation, and controller spikes
 - [Multipath spike](/quest/future/multipath-spike.md) - a noq capability that
   MoQ does not use yet
+- [Discover media headroom](/quest/future/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
+- [L4S on the backbone](/quest/future/quic-ecn.md) - an ECT(1) option in the fork, an `ecn` config knob, and a dualpi2 measurement
+- [Careful resume on reconnect](/quest/future/quic-careful-resume.md) - a redial starts at the previous connection's rate
+- [Keep-alive by deadline](/quest/future/quic-keep-alive.md) - a PING only when the idle deadline nears, no fixed timer

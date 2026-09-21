@@ -15,7 +15,7 @@ A supported Linux OBS graphics/encoder combination publishes composited video wi
 
 ## Required
 
-- [VAAPI encode and decode](/quest/next/video-vaapi.md) - supply the native DMA-BUF encoder import required by the Intel/AMD no-readback path
+- [VAAPI encode and decode](/quest/future/video-vaapi.md) - supply the native DMA-BUF encoder import required by the Intel/AMD no-readback path
 
 - [Encoder adapter](/quest/next/obs-moq-video/adapter.md) - frame ownership, queue policy, packet output, and comparison baseline
 

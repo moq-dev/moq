@@ -24,5 +24,5 @@ Audio `warmup` is Opus pre-roll and changes no export flag.
 
 ## Required
 
-- [Catalog warmup](/quest/next/intra-refresh/catalog-warmup.md) - the field exports read
-- [Consumer warmup](/quest/next/intra-refresh/consumer-warmup.md) - the IDR check this reuses
+- [Catalog warmup](/quest/next/catalog-warmup.md) - the field exports read
+- [Consumer warmup](/quest/future/intra-refresh/consumer-warmup.md) - the IDR check this reuses

@@ -27,8 +27,8 @@ a compressed track is announced, routed, and cached like any other.
 
 ## Quests
 
-- [Track wrapper](/quest/next/flate/track.md) - `moq-flate` and `@moq/flate` wrap a track so each group is one compression window without caller bookkeeping
-- [Bindings](/quest/next/flate/bindings.md) - moq-ffi and libmoq publish and subscribe compressed tracks, mirrored through every wrapper
+- [Track wrapper](/quest/future/flate/track.md) - `moq-flate` and `@moq/flate` wrap a track so each group is one compression window without caller bookkeeping
+- [Bindings](/quest/future/flate/bindings.md) - moq-ffi and libmoq publish and subscribe compressed tracks, mirrored through every wrapper
 
 ## Related
 

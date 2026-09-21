@@ -9,7 +9,7 @@ recovery-point keyframes with `recovery_frame_cnt = 0` (the broadcast
 contribution case, and what the reference capture carries) and H.265 CRA
 pictures. Gradual recovery (`recovery_frame_cnt > 0`) is out of scope: unsafe pictures
 there sit at or after the keyframe timestamp, and the catalog `warmup` rule in
-[consumer warmup](/quest/next/intra-refresh/consumer-warmup.md) covers them.
+[consumer warmup](/quest/future/intra-refresh/consumer-warmup.md) covers them.
 
 ## Plan
 
@@ -47,4 +47,4 @@ everyone.
 
 ## Related
 
-- [Consumer warmup](/quest/next/intra-refresh/consumer-warmup.md) - the `recovery_frame_cnt > 0` case this rule does not cover
+- [Consumer warmup](/quest/future/intra-refresh/consumer-warmup.md) - the `recovery_frame_cnt > 0` case this rule does not cover

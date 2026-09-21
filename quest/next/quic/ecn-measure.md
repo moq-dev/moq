@@ -6,7 +6,7 @@ A written verdict on classic ECN between relays: whether a marking
 bottleneck reduces the rate before its queue overflows instead of after,
 with the numbers, and whether Linode's and OVH's networks preserve ECT(0)
 and CE between relays. No code lands; the verdict is recorded in
-[L4S on the backbone](/quest/next/quic/ecn.md), which acts on it.
+[L4S on the backbone](/quest/future/quic-ecn.md), which acts on it.
 
 ## Plan
 
