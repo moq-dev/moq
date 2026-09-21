@@ -14,12 +14,12 @@ use std::time::Instant;
 use moq_mux::catalog::hang::CatalogExt;
 #[cfg(feature = "capture")]
 use moq_mux::rate::{Control, Policy};
-#[cfg(test)]
+#[cfg(any(feature = "capture", test))]
 use moq_net::Timestamp;
 
 use crate::Error;
-#[cfg(any(feature = "capture", test))]
-use crate::Frame;
+#[cfg(feature = "capture")]
+use crate::Rate;
 #[cfg(feature = "capture")]
 use crate::capture;
 
@@ -33,7 +33,7 @@ use super::encoder::Codec;
 
 /// Last-resort framerate when neither the caller nor the camera reports one.
 #[cfg(feature = "capture")]
-const DEFAULT_FRAMERATE: u32 = 30;
+const DEFAULT_FRAMERATE: Rate = Rate::integer(30);
 
 /// Convert the probed rendition into the importer hint published before the first frame.
 fn rendition_hint(rendition: hang::catalog::VideoConfig) -> moq_mux::catalog::VideoHint {
@@ -54,14 +54,14 @@ fn rendition_hint(rendition: hang::catalog::VideoConfig) -> moq_mux::catalog::Vi
 
 /// Per-codec splitter + importer pair. Each codec frames its packets and resolves
 /// its catalog rendition differently, so the producer holds one of these.
-enum Codecs<E: CatalogExt> {
+enum Codecs {
 	H264 {
 		split: moq_mux::codec::h264::Split,
-		import: moq_mux::codec::h264::Import<E>,
+		import: moq_mux::codec::h264::Import,
 	},
 	H265 {
 		split: moq_mux::codec::h265::Split,
-		import: moq_mux::codec::h265::Import<E>,
+		import: moq_mux::codec::h265::Import,
 	},
 }
 
@@ -76,7 +76,8 @@ enum Codecs<E: CatalogExt> {
 /// carrying its own catalog sections (the FFI bindings use `hang::Extra`)
 /// publishes into a catalog of the same shape.
 pub struct Producer<E: CatalogExt = ()> {
-	codecs: Codecs<E>,
+	codecs: Codecs,
+	_ext: std::marker::PhantomData<fn() -> E>,
 }
 
 impl<E: CatalogExt> Producer<E> {
@@ -134,7 +135,10 @@ impl<E: CatalogExt> Producer<E> {
 				)));
 			}
 		};
-		Ok(Self { codecs })
+		Ok(Self {
+			codecs,
+			_ext: std::marker::PhantomData,
+		})
 	}
 
 	/// A watch-only handle to the track's subscriber demand, created eagerly so
@@ -292,12 +296,6 @@ pub async fn publish_capture<E: CatalogExt>(
 	encode: Options,
 	clock: moq_mux::Clock,
 ) -> Result<(), Error> {
-	// A caller asking for exactly zero is an error; omitting it (None) is
-	// fine and resolves to the camera's reported rate once it's open.
-	if capture.framerate == Some(0) {
-		return Err(Error::InvalidFramerate(0));
-	}
-
 	// Open the camera once to find out what it actually negotiated, since a requested size is only a
 	// hint (macOS ignores it outright) and the encoder is built from the mode, not the request. It
 	// closes again immediately: this costs one camera open at startup and buys a rendition that says
@@ -430,7 +428,7 @@ fn log_track_ended(err: moq_net::Error) {
 	}
 }
 
-#[cfg(any(feature = "capture", test))]
+#[cfg(any(feature = "capture", all(test, feature = "openh264")))]
 fn capture_stopped<E: CatalogExt>(producer: &mut Producer<E>) -> Result<(), Error> {
 	// The shared clock keeps advancing while capture is stopped. Mark the break before waiting
 	// for demand again so the next timestamp does not stretch the previous frame across the gap.
@@ -498,6 +496,11 @@ async fn capture_loop<E: CatalogExt>(
 		let Some(mut camera) = wait_capture(producer, demand, capture::open(capture)).await? else {
 			continue;
 		};
+		// Capture timestamps use a private monotonic timeline. Sample both clocks
+		// once at open so every queued frame maps to the shared broadcast epoch
+		// without mistaking dequeue time for acquisition time.
+		let capture_epoch =
+			u64::try_from(clock.now().as_micros().saturating_sub(camera.now().as_micros())).unwrap_or(u64::MAX);
 		// Prefer an explicit --fps, otherwise the camera's reported rate, falling
 		// back only if the backend doesn't expose one.
 		let framerate = capture
@@ -536,7 +539,7 @@ async fn capture_loop<E: CatalogExt>(
 			// Race the next frame against the last viewer leaving so we release the
 			// camera promptly when demand drops. `biased` checks demand first so an
 			// unwatched track stops before reading another frame.
-			let interval = hang::catalog::stalled::interval_from_fps(Some(framerate as f64));
+			let interval = hang::catalog::stalled::interval_from_fps(Some(framerate.as_f64()));
 			let frame = tokio::select! {
 				biased;
 				res = demand.unused() => {
@@ -564,11 +567,8 @@ async fn capture_loop<E: CatalogExt>(
 				},
 			};
 
-			let Some(surface) = frame else { break };
-
-			// Stamp at capture, so a backend that buffers still publishes each
-			// access unit at the time the picture was grabbed.
-			let frame = Frame::new(surface, clock.now());
+			let Some(mut frame) = frame else { break };
+			frame.timestamp = map_capture_timestamp(capture_epoch, frame.timestamp)?;
 			if force_keyframe {
 				encoder.keyframe();
 				force_keyframe = false;
@@ -591,12 +591,29 @@ async fn capture_loop<E: CatalogExt>(
 	}
 }
 
+#[cfg(feature = "capture")]
+fn map_capture_timestamp(epoch_micros: u64, timestamp: Timestamp) -> Result<Timestamp, Error> {
+	let capture_micros = u64::try_from(timestamp.as_micros()).unwrap_or(u64::MAX);
+	Ok(Timestamp::from_micros(epoch_micros.saturating_add(capture_micros))?)
+}
+
 #[cfg(test)]
 mod tests {
+	#![cfg_attr(not(feature = "openh264"), allow(dead_code, unused_imports))]
+
 	use moq_mux::catalog::Stream as _;
 
 	use super::*;
+	use crate::Frame;
 	use crate::encode::{Codec, Config, Encoder};
+
+	#[cfg(feature = "capture")]
+	#[test]
+	fn capture_clock_mapping_is_monotonic() {
+		let first = map_capture_timestamp(10_000, Timestamp::from_micros(2_000).unwrap()).unwrap();
+		let second = map_capture_timestamp(10_000, Timestamp::from_micros(2_001).unwrap()).unwrap();
+		assert!(second > first);
+	}
 
 	/// Encode a handful of synthetic frames for `codec` and publish them through a real
 	/// [`Producer`], returning the catalog rendition's track name and config.
@@ -611,7 +628,7 @@ mod tests {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
-		let mut config = Config::new(320, 240, 30);
+		let mut config = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
 		config.codec = codec;
 		config.kind = kind;
 
@@ -664,6 +681,7 @@ mod tests {
 	/// so the idle transition must publish a marker group between the two runs. This uses synthetic
 	/// frames and the software encoder to exercise the transition without capture hardware.
 	#[tokio::test]
+	#[cfg(feature = "openh264")]
 	async fn idle_capture_publishes_a_discontinuity_before_resume() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
@@ -678,7 +696,7 @@ mod tests {
 			.unwrap();
 		let consumer = track.subscribe(moq_net::track::Subscription::default().with_max_age(replay));
 
-		let mut config = Config::new(320, 240, 30);
+		let mut config = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
 		config.kind = encoder::Kind::Software;
 		let mut producer = Producer::with_track(track, catalog, config.probe().await.unwrap()).unwrap();
 		let mut encoder = Encoder::new(&config).unwrap();
@@ -699,14 +717,18 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[cfg(feature = "openh264")]
 	async fn source_resize_updates_the_published_rendition() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let mut initial = Config::new(320, 240, 30);
+		let mut initial = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
 		initial.kind = encoder::Kind::Software;
 		let mut producer = Producer::new(broadcast, catalog.clone(), initial.probe().await.unwrap()).unwrap();
 
-		for (timestamp, config) in [(0, initial), (33_333, Config::new(640, 360, 30))] {
+		for (timestamp, config) in [
+			(0, initial),
+			(33_333, Config::new(640, 360, crate::Rate::new(30, 1).unwrap())),
+		] {
 			let mut config = config;
 			config.kind = encoder::Kind::Software;
 			let mut encoder = Encoder::new(&config).unwrap();
@@ -729,11 +751,12 @@ mod tests {
 	/// track writer and the published rendition, so a conversion that drops it silently downgrades
 	/// the caller's selection to Legacy while the catalog still claims whatever it defaulted to.
 	#[tokio::test]
+	#[cfg(feature = "openh264")]
 	async fn a_selected_container_survives_the_rendition_hint() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
-		let mut config = Config::new(320, 240, 30);
+		let mut config = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
 		// Software (openh264) so the test is deterministic and never touches a hardware backend.
 		config.kind = encoder::Kind::Software;
 		let mut selected = config.probe().await.unwrap();
@@ -753,12 +776,13 @@ mod tests {
 	/// subscriber waits on the catalog. Nothing errors on either side; the publisher simply serves
 	/// nothing, forever.
 	#[tokio::test]
+	#[cfg(feature = "openh264")]
 	async fn the_rendition_reaches_the_wire_before_the_first_frame() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
-		let mut config = Config::new(1920, 1080, 30);
+		let mut config = Config::new(1920, 1080, crate::Rate::new(30, 1).unwrap());
 		config.bitrate = Some(moq_net::bandwidth::Rate::from_mbps(6));
 		// Software (openh264) so the test is deterministic and never touches a hardware backend.
 		config.kind = encoder::Kind::Software;
@@ -793,10 +817,11 @@ mod tests {
 
 	/// Finish leaves the handle, so abort can still run.
 	#[tokio::test]
+	#[cfg(feature = "openh264")]
 	async fn abort_after_finish() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let mut config = Config::new(320, 240, 30);
+		let mut config = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
 		config.kind = encoder::Kind::Software;
 		let track = broadcast
 			.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
@@ -815,6 +840,7 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[cfg(feature = "openh264")]
 	async fn h264_roundtrip_publishes_avc3() {
 		// Software (openh264) so the test is deterministic and never touches a
 		// hardware backend.

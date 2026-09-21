@@ -64,7 +64,7 @@ choice (`Auto` / `Hardware` / `Software` / a named backend).
 
 | Codec | Software | macOS | Windows | Linux | Android |
 |---|---|---|---|---|---|
-| H.264 | openh264 (vendored, static) | VideoToolbox | Media Foundation | NVENC (feature `nvidia`), VAAPI (feature `vaapi`) | MediaCodec (feature `mediacodec`, API 26+) |
+| H.264 | OpenH264 (feature `openh264`, default) | VideoToolbox | Media Foundation | NVENC (feature `nvidia`), VAAPI (feature `vaapi`) | MediaCodec (feature `mediacodec`, API 26+) |
 | H.265 | none | VideoToolbox | Media Foundation | NVENC (feature `nvidia`) | MediaCodec (feature `mediacodec`, API 26+) |
 
 Every backend emits Annex-B with in-band parameter sets (SPS/PPS, plus VPS for
@@ -92,12 +92,13 @@ Two public entry points:
 - `encode::Producer` publishes frames you encoded yourself (`publish(&[Encoded])`),
   handling the catalog and framing. Each is published at its own timestamp.
 
-The NVENC, VAAPI, and V4L2 M2M backends are Linux-only. `nvidia` is on by
-default: it `dlopen`s the driver at runtime and needs nothing at build time.
-`vaapi` and `v4l2` are opt-in because their bindgen needs libclang on the build
-host (plus the kernel headers for `v4l2`). None of them link a vendor library,
-so a binary carrying them still links on a GPU-less builder and still starts on
-a machine without the hardware, falling back to software.
+The default features are `openh264`, `nvidia`, and `mediacodec`. OpenH264 keeps
+a working software H.264 fallback but compiles vendored C++; disable defaults
+and select native features to omit it. `nvidia` is Linux-only, `dlopen`s the
+driver at runtime, and needs no build-time toolkit. `vaapi` and `v4l2` are
+opt-in because their bindgen needs libclang on the build host (plus kernel
+headers for `v4l2`). `render` is also opt-in so codec-only consumers do not
+compile wgpu.
 
 ### Vulkan producers on NVIDIA
 
@@ -137,7 +138,9 @@ it to take a GPU path for a representation you recognize, and fall back to
 `Surface::into_i420()` for readback-capable surfaces. GPU-only
 `Surface::Vulkan` refuses CPU conversion. On macOS `Surface::into_pixel_buffer()`
 is the mirror: free for a hardware-decoded frame, an upload for a CPU one.
-`Surface::to_rgba()` and `Surface::to_bgra()` are the portable exits for CPU
+`Surface::into_i420()` returns typed pixels with size and color intact;
+`I420::into_data()` explicitly extracts the packed bytes. `Surface::to_rgba(config)`
+and `Surface::to_bgra(config)` are the portable exits for CPU
 image and UI toolkits, returning owned, tightly packed pixels with the surface's
 color metadata applied. Both orders are there because toolkits disagree and the
 conversion is a full pass over the frame: producing the order the caller wants
@@ -148,7 +151,7 @@ Backends are tried hardware-first, like encode:
 
 | Codec | Software | macOS | Windows | Linux | Android |
 |---|---|---|---|---|---|
-| H.264 | openh264 (vendored, static) | VideoToolbox | Media Foundation (DXVA) | NVDEC (feature `nvidia`), VAAPI (feature `vaapi`) | MediaCodec (feature `mediacodec`, API 26+) |
+| H.264 | OpenH264 (feature `openh264`, default) | VideoToolbox | Media Foundation (DXVA) | NVDEC (feature `nvidia`), VAAPI (feature `vaapi`) | MediaCodec (feature `mediacodec`, API 26+) |
 | H.265 | none | VideoToolbox | Media Foundation (DXVA) | NVDEC (feature `nvidia`) | MediaCodec (feature `mediacodec`, API 26+) |
 | AV1 | none | none | none | NVDEC (feature `nvidia`) | MediaCodec (feature `mediacodec`, when the device provides it) |
 
@@ -164,3 +167,12 @@ for AV1 source to H.264/H.265 transcode rungs. VAAPI decodes H.264 to CPU I420 b
 default; set `decode::Config::gpu_frames` to receive DMA-BUF surfaces that the
 renderer can import without a download. A non-H.264/H.265/AV1 rendition yields
 `Error::UnsupportedCodec`.
+
+Common feature sets:
+
+```bash
+cargo add moq-video                                      # native defaults + OpenH264, no renderer
+cargo add moq-video --no-default-features --features openh264  # software H.264 only
+cargo add moq-video --no-default-features --features nvidia    # Linux NVIDIA only
+cargo add moq-video --features render                    # add the wgpu renderer
+```

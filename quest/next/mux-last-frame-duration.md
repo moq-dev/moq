@@ -17,7 +17,3 @@ Convert the boundary into the frame's own scale before subtracting, so a
 then refuses the inexact conversion. Regression: 90 kHz frames, `cut(None)`,
 assert the last frame's duration is exactly the tick count, and encode the
 resulting fMP4. Public API: none. Wire: none.
-
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - the dev-only producer this fixes

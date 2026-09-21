@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- PipeWire and PulseAudio host flags no longer activate device I/O without
+  `capture` or `playback`.
 - [**breaking**] `encode::Producer::finish` borrows (`&mut self`) instead of consuming, so a later
   `abort(self)` can still run after a clean end. Writes after finish fail with `Closed`.
 

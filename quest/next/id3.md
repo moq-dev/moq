@@ -40,8 +40,6 @@ generic.
 
 ## Required
 
-- [Merge dev](/quest/dev/merge-dev.md) - the required dev APIs must be available on main before this implementation starts
-
 - [Metadata association contract](/quest/next/metadata-association.md) - settles the shared framing and missing-data semantics before this section adopts them
 
 ## Related

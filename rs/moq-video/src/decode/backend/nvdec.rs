@@ -576,12 +576,12 @@ mod tests {
 		let (w, h) = (320u32, 240u32);
 		let encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Software,
-			..EncodeConfig::new(w, h, 30)
+			..EncodeConfig::new(w, h, crate::Rate::new(30, 1).unwrap())
 		})
 		.unwrap();
 		let decoder = Nvdec::open(Codec::H264, &decode_config(None)).expect("NVDEC H.264 decoder");
 
-		let expected = I420::from_rgba(&gradient_rgba(w, h), w * 4, w, h).unwrap();
+		let expected = I420::from_rgba(&gradient_rgba(w, h), w * 4, crate::Size::new(w, h)).unwrap();
 		let decoded = round_trip(encoder, decoder, w, h);
 
 		for (i, (timestamp, i420)) in decoded.iter().enumerate() {
@@ -605,14 +605,14 @@ mod tests {
 		let (w, h) = (320u32, 240u32);
 		let encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Software,
-			..EncodeConfig::new(w, h, 30)
+			..EncodeConfig::new(w, h, crate::Rate::new(30, 1).unwrap())
 		})
 		.unwrap();
 		let decoder =
 			Nvdec::open(Codec::H264, &decode_config(Some(crate::Size::new(160, 120)))).expect("NVDEC H.264 decoder");
 
 		// Nearest-neighbor reference downscale of the expected picture.
-		let full = I420::from_rgba(&gradient_rgba(w, h), w * 4, w, h).unwrap();
+		let full = I420::from_rgba(&gradient_rgba(w, h), w * 4, crate::Size::new(w, h)).unwrap();
 		let sample = |plane: &[u8], pw: usize, x: usize, y: usize| plane[y * 2 * pw + x * 2];
 		let mut expected_y = vec![0u8; 160 * 120];
 		for y in 0..120 {
@@ -639,14 +639,14 @@ mod tests {
 		let Ok(encoder) = Encoder::new(&EncodeConfig {
 			codec: EncodeCodec::H265,
 			kind: EncodeKind::Named("nvenc".into()),
-			..EncodeConfig::new(w, h, 30)
+			..EncodeConfig::new(w, h, crate::Rate::new(30, 1).unwrap())
 		}) else {
 			// Driver present but NVENC unusable (e.g. GPU busy); don't fail.
 			return;
 		};
 		let decoder = Nvdec::open(Codec::H265, &decode_config(None)).expect("NVDEC H.265 decoder");
 
-		let expected = I420::from_rgba(&gradient_rgba(w, h), w * 4, w, h).unwrap();
+		let expected = I420::from_rgba(&gradient_rgba(w, h), w * 4, crate::Size::new(w, h)).unwrap();
 		let decoded = round_trip(encoder, decoder, w, h);
 		for (_, i420) in &decoded {
 			assert_eq!((i420.width, i420.height), (w, h));
@@ -669,7 +669,7 @@ mod tests {
 		// Source stream: software-encoded gradient.
 		let source = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Software,
-			..EncodeConfig::new(w, h, 30)
+			..EncodeConfig::new(w, h, crate::Rate::new(30, 1).unwrap())
 		})
 		.unwrap();
 		// Decode at half size so the hardware scaler is in the loop too.
@@ -678,7 +678,7 @@ mod tests {
 
 		let mut nvenc = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Named("nvenc".into()),
-			..EncodeConfig::new(160, 120, 30)
+			..EncodeConfig::new(160, 120, crate::Rate::new(30, 1).unwrap())
 		})
 		.expect("NVENC encoder");
 
@@ -716,7 +716,7 @@ mod tests {
 
 		// Decode the re-encoded stream in software and compare to the source.
 		let expected = {
-			let full = I420::from_rgba(&gradient_rgba(w, h), w * 4, w, h).unwrap();
+			let full = I420::from_rgba(&gradient_rgba(w, h), w * 4, crate::Size::new(w, h)).unwrap();
 			let mut y = vec![0u8; 160 * 120];
 			for row in 0..120 {
 				for col in 0..160 {

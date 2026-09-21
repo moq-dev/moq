@@ -22,13 +22,15 @@ Highlights:
 
 - **Automatic backend selection**, hardware first. Linux GPU libraries are `dlopen`ed at runtime, so one binary starts anywhere and warns when it falls back to software. openh264 is statically linked as the H.264 fallback; H.265 is hardware-only; AV1 decodes via NVDEC. The VAAPI encoder is compile-verified but not yet validated on hardware.
 - **Publish on demand.** `encode::publish_capture` advertises the track up front and opens the camera only while someone subscribes.
-- **GPU ownership where the platform allows.** Matching codec backends consume their native GPU surfaces directly. The renderer imports `CVPixelBuffer` and supported DMA-BUF formats. Linux/NVIDIA producers can import dedicated Vulkan RGBA8 slots into CUDA with timeline-semaphore ordering and completion-driven slot return. Vulkan/CUDA surfaces deliberately have no CPU pixel fallback; other surfaces use `Surface::into_i420()` and `into_rgba()` when needed.
+- **GPU ownership where the platform allows.** Matching codec backends consume their native GPU surfaces directly. The renderer imports `CVPixelBuffer` and supported DMA-BUF formats. Linux/NVIDIA producers can import dedicated Vulkan RGBA8 slots into CUDA with timeline-semaphore ordering and completion-driven slot return. Vulkan/CUDA surfaces deliberately have no CPU pixel fallback; other surfaces use the typed `Surface::into_i420()` and configured `Surface::to_rgba(config)` when needed.
 - **Live bitrate control** where the selected backend supports it, without forcing a keyframe. An unsupported backend keeps its opening rate.
 - **Device enumeration** for cameras, displays, windows, and apps, matching `moq devices`.
 
 With `capture` enabled, `capture::camera_modes` lists a Linux camera's convertible
-sizes and exact rates before configuring it. `capture::Rate` exposes a nonzero frame count through `frames()` and a typed
-`Duration` through `interval()`, preserving exact rates such as 30000/1001.
+sizes and exact rates before configuring it. Rates are `moq_video::Rate`, an
+exact rational that preserves 30000/1001: `frames(duration)` counts frames,
+`rounded()` gives the nearest whole frame rate for integer-only platform APIs,
+and `as_f64()` yields the catalog value.
 Sizes and rates shared by YUYV and MJPEG are combined; invalid I420 dimensions
 are excluded. A size range contributes its smallest and largest valid sizes aligned to the
 driver's step,
@@ -36,8 +38,9 @@ and an empty rate list means no discrete intervals were reported. Device errors
 are returned rather than treated as an empty list. Other platforms return
 `Error::Unsupported`.
 
-`capture::Config::framerate` remains a request in whole frames per second.
-The V4L2 stream reports the accepted rate rounded to the nearest whole frame per second, with a minimum of one.
+`capture::Config::framerate` is an `Option<Rate>` request in the same exact
+type; the stream reports the rate the device accepted, or `None` when the
+driver reported none.
 V4L2 chooses the closest geometry, then the format whose accepted rate is
 nearest the request, then the cheaper conversion when both match equally well.
 
@@ -50,11 +53,13 @@ while let Some(frame) = video.read().await? {
 ```
 
 ```bash
-cargo add moq-video                      # nvidia, mediacodec, render on by default
+cargo add moq-video                      # nvidia, mediacodec, openh264 on by default
 cargo add moq-video --features capture   # camera + screen capture (Linux: bindgen needs libclang + V4L2 headers)
+cargo add moq-video --features render    # wgpu rendering
 cargo add moq-video --features vaapi,v4l2  # Linux VAAPI + V4L2 M2M codecs (bindgen needs libclang)
 cargo add moq-video --features pipewire  # Wayland screen capture (links libpipewire)
-cargo add moq-video --no-default-features  # codec-only: still encodes/decodes H.264
+cargo add moq-video --no-default-features --features openh264  # software H.264 only
+cargo add moq-video --no-default-features --features nvidia    # Linux NVIDIA only, no C++ or wgpu
 ```
 
 The language bindings use the codec-only shape, which is what keeps their
@@ -65,7 +70,9 @@ API: [docs.rs/moq-video](https://docs.rs/moq-video). Pair with
 
 VAAPI downloads to CPU I420 by default. Set `decode::Config::gpu_frames` before
 opening the consumer to receive DMA-BUF surfaces for zero-copy rendering. These
-surfaces still support `Surface::into_i420()` for consumers that need bytes.
+surfaces still support `Surface::into_i420()` for consumers that need CPU
+pixels. It returns an `I420` with geometry and color metadata intact; call
+`I420::into_data()` only when packed bytes are required.
 
 Linux/NVIDIA applications with a native Vulkan producer use
 `frame::vulkan::Importer`. Each reusable image is a dedicated, optimal-tiling

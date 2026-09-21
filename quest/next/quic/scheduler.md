@@ -101,7 +101,6 @@ where the new implementation makes it redundant.
 
 ## Required
 
-- [Merge dev](/quest/dev/merge-dev.md) - supplies the native transport code this implementation builds on
 - [Fork noq](/quest/next/quic/fork.md) - the scheduler lives there
 
 ## Closes

@@ -44,10 +44,6 @@ Additive on `moq-auth` and `moq-relay`, so on main after the merge:
 Public API: additive. Wire: the auth JSON gains transport values and end
 reasons.
 
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - starts on main
-
 ## Related
 
 - [Relay embedding](/quest/next/relay-embed.md) - the rest of the embedder surface

@@ -27,7 +27,3 @@ paths through CI and preserve unsupported-backend refusal.
 
 Public API: decoder/consumer configuration and output policy change. Wire and
 published binding layouts: unchanged. Update examples and cancellation docs.
-
-## Required
-
-- [Video frames](/quest/main/video-frames.md) - typed CPU results used by the output contract

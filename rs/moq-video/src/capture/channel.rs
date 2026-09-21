@@ -9,20 +9,24 @@
 //! blocking thread is left pinned.
 
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use tokio::sync::Notify;
 
 use crate::Error;
-use crate::frame::Surface;
+use crate::frame::{Frame, Surface};
+use moq_net::Timestamp;
 
 /// The producer/consumer rendezvous for a single capture session.
 pub(super) struct FrameChannel {
 	state: Mutex<State>,
 	notify: Notify,
+	epoch: Instant,
 }
 
 struct State {
-	frame: Option<Surface>,
+	frame: Option<Frame>,
+	native_anchor: Option<(Timestamp, Timestamp)>,
 	closed: bool,
 	error: Option<Error>,
 }
@@ -32,23 +36,53 @@ impl FrameChannel {
 		Arc::new(Self {
 			state: Mutex::new(State {
 				frame: None,
+				native_anchor: None,
 				closed: false,
 				error: None,
 			}),
 			notify: Notify::new(),
+			epoch: Instant::now(),
 		})
 	}
 
 	/// Publish the latest frame, replacing one the consumer has not reached. Safe
 	/// to call from the foreign producer thread; a no-op once closed.
 	pub(super) fn push(&self, frame: Surface) {
-		{
-			let mut state = self.state.lock().unwrap();
-			if state.closed {
-				return;
-			}
-			state.frame = Some(frame);
+		self.push_at(frame, Instant::now());
+	}
+
+	fn push_at(&self, surface: Surface, captured: Instant) {
+		let micros = captured.saturating_duration_since(self.epoch).as_micros();
+		let micros = u64::try_from(micros).unwrap_or(u64::MAX);
+		let frame = Frame::new(surface, Timestamp::from_micros(micros).expect("capture timestamp fits"));
+		self.publish(frame);
+	}
+
+	/// Map a device-local timestamp into this stream's private timeline. The
+	/// source epoch never escapes: its first sample is anchored to acquisition.
+	pub(super) fn push_native(&self, surface: Surface, source: Timestamp) {
+		let local = self.now();
+		let mut state = self.state.lock().unwrap();
+		if state.closed {
+			return;
 		}
+		let (source_anchor, local_anchor) = *state.native_anchor.get_or_insert((source, local));
+		let timestamp = source
+			.checked_sub(source_anchor)
+			.and_then(|elapsed| local_anchor.checked_add(elapsed))
+			.unwrap_or(local);
+		state.frame = Some(Frame::new(surface, timestamp));
+		drop(state);
+		self.notify.notify_one();
+	}
+
+	fn publish(&self, frame: Frame) {
+		let mut state = self.state.lock().unwrap();
+		if state.closed {
+			return;
+		}
+		state.frame = Some(frame);
+		drop(state);
 		self.notify.notify_one();
 	}
 
@@ -85,7 +119,7 @@ impl FrameChannel {
 	}
 
 	/// Await the latest frame, the terminal backend error, or `None` once closed.
-	pub(super) async fn recv(&self) -> Result<Option<Surface>, Error> {
+	pub(super) async fn recv(&self) -> Result<Option<Frame>, Error> {
 		loop {
 			// Register for a wakeup before checking, so a `push` that races the
 			// check still wakes this future (tokio's documented Notify pattern).
@@ -104,6 +138,11 @@ impl FrameChannel {
 			}
 			notified.await;
 		}
+	}
+
+	pub(super) fn now(&self) -> Timestamp {
+		let micros = u64::try_from(self.epoch.elapsed().as_micros()).unwrap_or(u64::MAX);
+		Timestamp::from_micros(micros).expect("capture timestamp fits")
 	}
 }
 
@@ -127,9 +166,9 @@ mod tests {
 	async fn recv_returns_frames_in_order() {
 		let chan = FrameChannel::new();
 		chan.push(frame(1));
-		assert_eq!(chan.recv().await.unwrap().unwrap().width(), 1);
+		assert_eq!(chan.recv().await.unwrap().unwrap().surface.width(), 1);
 		chan.push(frame(2));
-		assert_eq!(chan.recv().await.unwrap().unwrap().width(), 2);
+		assert_eq!(chan.recv().await.unwrap().unwrap().surface.width(), 2);
 	}
 
 	#[tokio::test]
@@ -138,7 +177,7 @@ mod tests {
 		for id in 1..=6 {
 			chan.push(frame(id));
 		}
-		assert_eq!(chan.recv().await.unwrap().unwrap().width(), 6);
+		assert_eq!(chan.recv().await.unwrap().unwrap().surface.width(), 6);
 	}
 
 	#[tokio::test]
@@ -146,7 +185,7 @@ mod tests {
 		let chan = FrameChannel::new();
 		chan.push(frame(1));
 		chan.close();
-		assert_eq!(chan.recv().await.unwrap().unwrap().width(), 1);
+		assert_eq!(chan.recv().await.unwrap().unwrap().surface.width(), 1);
 		assert!(chan.recv().await.unwrap().is_none());
 	}
 
@@ -190,6 +229,26 @@ mod tests {
 			_ = std::future::ready(()) => {}
 		}
 		chan.push(frame(7));
-		assert_eq!(chan.recv().await.unwrap().unwrap().width(), 7);
+		assert_eq!(chan.recv().await.unwrap().unwrap().surface.width(), 7);
+	}
+
+	#[tokio::test]
+	async fn timestamp_is_captured_before_queued_delay() {
+		let chan = FrameChannel::new();
+		let captured = chan.epoch + std::time::Duration::from_millis(12);
+		chan.push_at(frame(1), captured);
+		assert_eq!(chan.recv().await.unwrap().unwrap().timestamp.as_micros(), 12_000);
+	}
+
+	#[tokio::test]
+	async fn native_timestamps_keep_deltas_without_exposing_the_device_epoch() {
+		let chan = FrameChannel::new();
+		let first_source = Timestamp::from_micros(9_000_000).unwrap();
+		chan.push_native(frame(1), first_source);
+		let first = chan.recv().await.unwrap().unwrap().timestamp;
+		chan.push_native(frame(2), Timestamp::from_micros(9_033_367).unwrap());
+		let second = chan.recv().await.unwrap().unwrap().timestamp;
+		assert_eq!(second.as_micros() - first.as_micros(), 33_367);
+		assert!(first.as_micros() < 9_000_000);
 	}
 }

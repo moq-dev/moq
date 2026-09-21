@@ -39,8 +39,8 @@ impl AudioEncoder {
 		Ok(Self { producer })
 	}
 
-	pub fn track(&self) -> &moq_net::track::Producer {
-		self.producer.track()
+	pub fn demand(&self) -> moq_net::track::Demand {
+		self.producer.demand()
 	}
 
 	/// Re-anchor the timeline so a pause gap shows up in the audio PTS.

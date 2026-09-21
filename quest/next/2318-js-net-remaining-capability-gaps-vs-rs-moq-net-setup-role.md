@@ -30,10 +30,6 @@ The rest of #2318 landed: SETUP role (`js/net/src/lite/setup.ts:19-93`), typed
 `SubscribeOptions` export is gone. The producer-side prefix announce
 (`createBroadcast`, `announce(route)`, `dynamic(pattern, route)`) landed.
 
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - builds on dev-only code that reaches `main` with the merge
-
 ## Closes
 
 - [#2318](https://github.com/moq-dev/moq/issues/2318) - close this issue when the quest finishes

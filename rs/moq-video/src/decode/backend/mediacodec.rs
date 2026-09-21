@@ -539,16 +539,11 @@ mod tests {
 		use crate::encode::{Config as EncodeConfig, Kind as EncodeKind};
 
 		let size = crate::Size::new(320, 240);
-		let mut config = EncodeConfig::new(size.width, size.height, 30);
+		let mut config = EncodeConfig::new(size.width, size.height, crate::Rate::new(30, 1).unwrap());
 		config.kind = EncodeKind::Named(NAME.to_owned());
 		let mut encoder = crate::encode::Encoder::new(&config).expect("a MediaCodec encoder");
 
-		let i420 = crate::I420::new(
-			size.width,
-			size.height,
-			vec![0x80; crate::I420::len(size.width, size.height)],
-		)
-		.unwrap();
+		let i420 = crate::I420::new(size, vec![0x80; crate::I420::len(size).unwrap()]).unwrap();
 
 		let mut decoder = MediaCodec::open(Codec::H264, &Config::new()).expect("a MediaCodec decoder");
 		let mut frames = Vec::new();
@@ -589,8 +584,8 @@ mod tests {
 		// gets. Mid-gray in, mid-gray out.
 		let frames = frames.into_iter().next().expect("checked above");
 		let i420 = frames.surface.into_i420().expect("read back to I420");
-		assert_eq!(i420.len(), crate::I420::len(size.width, size.height));
-		let luma = &i420[..(size.width * size.height) as usize];
+		assert_eq!(i420.data().len(), crate::I420::len(size).unwrap());
+		let luma = i420.y();
 		assert!(
 			luma.iter().all(|byte| byte.abs_diff(0x80) <= 8),
 			"the read-back luma plane should still be mid-gray",

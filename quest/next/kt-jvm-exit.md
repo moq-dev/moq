@@ -38,10 +38,6 @@ Python binding calls from `atexit`) is dev-only until then.
 
 Public API: none; the hook is internal to the binding. Wire: none.
 
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - `moq_ffi_shutdown` lands on main with the merge
-
 ## Related
 
 - [libmoq shutdown](/quest/next/libmoq-shutdown.md) - the same hazard class for the C ABI and the OBS plugin

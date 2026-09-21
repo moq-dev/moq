@@ -36,10 +36,6 @@ Public API: additive on moq-net and @moq/net. Wire: the relay's stats track gain
 cluster peer-set frame; name its shape in `doc/bin/relay/config.md` (stats
 section) in the same PR so the Python sidecar and the producer agree.
 
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - starts on main
-
 ## Related
 
 - [Route cost](/quest/next/route-cost.md) - the other route fact JS lacks

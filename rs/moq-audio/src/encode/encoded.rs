@@ -8,7 +8,11 @@ use crate::Activity;
 ///
 /// Named for what it holds rather than mirroring [`Frame`](crate::Frame), so the
 /// two never read alike at a call site that handles both.
+///
+/// `#[non_exhaustive]`: construct packets with [`Encoded::new`] so the record
+/// can gain metadata without breaking callers.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Encoded {
 	/// The packet, in the framing the matching catalog importer expects.
 	pub payload: Bytes,

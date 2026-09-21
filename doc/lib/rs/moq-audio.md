@@ -42,7 +42,11 @@ while let Some(frame) = audio.read().await? {
 ```bash
 cargo add moq-audio --features playback                # decode and play the example above
 cargo add moq-audio --features capture,playback,aec    # microphone, speaker, echo cancellation (Linux: cpal links libasound)
+cargo add moq-audio --features capture,pipewire         # capture through the PipeWire cpal host
 ```
+
+`pipewire` and `pulseaudio` only configure cpal when `capture` or `playback`
+also enables device I/O. A host flag by itself does not compile or link cpal.
 
 API: [docs.rs/moq-audio](https://docs.rs/moq-audio). Pair with
 [`moq-video`](/lib/rs/moq-video).

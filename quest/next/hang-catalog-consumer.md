@@ -25,10 +25,6 @@ name and runs its own read loop.
 
 Public API: additive on hang, @moq/hang, @moq/json. Wire: none.
 
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - starts on main
-
 ## Related
 
 - [JSON merge](/quest/next/json-merge.md) - the snapshot patch consumer

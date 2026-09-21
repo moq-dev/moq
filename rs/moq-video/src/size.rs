@@ -1,4 +1,4 @@
-use crate::Error;
+use crate::{Error, Rate};
 
 /// A frame resolution in pixels.
 ///
@@ -22,6 +22,13 @@ impl Size {
 	/// Total pixels. Can't overflow: the widest `u32` square still fits a `u64`.
 	pub fn pixels(&self) -> u64 {
 		self.width as u64 * self.height as u64
+	}
+
+	pub(crate) fn byte_len(&self, bytes_per_pixel: usize, what: &str) -> Result<usize, Error> {
+		usize::try_from(self.pixels())
+			.ok()
+			.and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
+			.ok_or_else(|| Error::Codec(anyhow::anyhow!("{what} {self}: byte length is too large to represent")))
 	}
 
 	/// Reject anything the I420 pipeline can't represent.
@@ -48,9 +55,11 @@ impl Size {
 	///
 	/// This is arithmetic, not policy: it rejects only what cannot be represented,
 	/// leaving "no encoder handles a frame that large" to the backend.
-	pub(crate) fn validate_encodable(&self, what: &str, framerate: u32) -> Result<(), Error> {
+	pub(crate) fn validate_encodable(&self, what: &str, framerate: Rate) -> Result<(), Error> {
 		let pixels = self.pixels();
-		let representable = pixels.checked_mul(framerate as u64).is_some()
+		let representable = u128::from(pixels)
+			.checked_mul(u128::from(framerate.numerator()))
+			.is_some_and(|value| value / u128::from(framerate.denominator()) <= u128::from(u64::MAX))
 			&& usize::try_from(pixels).is_ok_and(|pixels| pixels.checked_mul(4).is_some());
 
 		if !representable {
@@ -106,16 +115,23 @@ mod tests {
 	fn validate_encodable_rejects_unrepresentable_sizes() {
 		// A frame nobody can encode, but whose arithmetic still fits: the backend
 		// decides, not us.
-		assert!(Size::new(65534, 65534).validate_encodable("frame", 30).is_ok());
+		let rate = Rate::new(30, 1).unwrap();
+		assert!(Size::new(65534, 65534).validate_encodable("frame", rate).is_ok());
 
 		// pixels x framerate overflows u64.
 		assert!(
 			Size::new(u32::MAX - 1, u32::MAX - 1)
-				.validate_encodable("frame", 30)
+				.validate_encodable("frame", rate)
 				.is_err()
 		);
 		// ...and it is the product that matters, not either side alone.
-		assert!(Size::new(u32::MAX - 1, 2).validate_encodable("frame", 30).is_ok());
+		assert!(Size::new(u32::MAX - 1, 2).validate_encodable("frame", rate).is_ok());
+		let extreme = Rate::new(crate::rate::MAX_FRAMES_PER_SECOND, 1).unwrap();
+		assert!(
+			Size::new(u32::MAX - 1, u32::MAX - 1)
+				.validate_encodable("frame", extreme)
+				.is_err()
+		);
 	}
 
 	#[test]

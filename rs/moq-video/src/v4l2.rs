@@ -536,7 +536,7 @@ impl Device {
 	}
 
 	/// Declare the input framerate, which rate control uses to spend the bitrate.
-	pub(crate) fn set_framerate(&self, dir: Dir, framerate: u32) -> Result<(), Error> {
+	pub(crate) fn set_framerate(&self, dir: Dir, framerate: crate::Rate) -> Result<(), Error> {
 		let mut parm = v4l2_streamparm::zeroed();
 		parm.type_ = dir.buf_type();
 		// SAFETY: the buffer type just written picks the arm the driver reads, so
@@ -548,8 +548,8 @@ impl Device {
 				Dir::Capture => &mut parm.parm.capture.timeperframe,
 			}
 		};
-		time_per_frame.numerator = 1;
-		time_per_frame.denominator = framerate;
+		time_per_frame.numerator = framerate.denominator();
+		time_per_frame.denominator = framerate.numerator();
 
 		// SAFETY: `VIDIOC_S_PARM` takes a `v4l2_streamparm`.
 		unsafe { self.ioctl(vidioc::VIDIOC_S_PARM, &mut parm) }.map_err(|err| self.err("S_PARM", err))
@@ -1224,7 +1224,7 @@ impl Planes {
 		let (width, height) = (self.size.width as usize, self.size.height as usize);
 		let (chroma_width, chroma_rows) = (width / 2, height / 2);
 
-		let mut data = vec![0u8; I420::len(self.size.width, self.size.height)];
+		let mut data = vec![0u8; I420::len(self.size)?];
 		let (luma, chroma) = data.split_at_mut(width * height);
 		let (u, v) = chroma.split_at_mut(chroma_width * chroma_rows);
 
@@ -1250,7 +1250,7 @@ impl Planes {
 			)?,
 		}
 
-		I420::new(self.size.width, self.size.height, data)
+		I420::new(self.size, data)
 	}
 }
 

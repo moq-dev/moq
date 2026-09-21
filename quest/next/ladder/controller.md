@@ -70,10 +70,6 @@ bandwidth input preserving existing behavior exactly; and for send order,
 equal subscriber priority where the lower rung wins, conflicting subscriber
 priority where the subscriber's order wins, and a custom ladder order.
 
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - builds on dev-only code that reaches `main` with the merge
-
 ## Related
 
 - [Hierarchical stream scheduling](/quest/next/quic/scheduler.md) - supplies the

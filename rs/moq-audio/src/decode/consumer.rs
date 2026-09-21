@@ -854,7 +854,7 @@ mod tests {
 			Timestamp::from_micros(21_000).unwrap(),
 		];
 		let read = pcm_gaps(44_100, 48_000, 882, &stamps).await;
-		let mut r = crate::Resampler::new(44_100, 48_000, 1, 882).unwrap();
+		let mut r = crate::resample::Resampler::new(44_100, 48_000, 1, 882).unwrap();
 		r.process(&[0.25; 882], stamps[0]).unwrap();
 		let expected = rewind(stamps[1], r.skipped(), 48_000).unwrap().as_micros();
 		assert_eq!(read[1].0, expected);

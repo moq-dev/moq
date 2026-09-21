@@ -23,8 +23,6 @@ so the mechanism exists.
 
 ## Required
 
-- [Video timing](/quest/main/video-timing.md) - timestamped capture and rational rates
-
 - [Ownership boundary](/quest/future/mobile-ownership.md) - decides whether an NDK/JNI backend family is worth building
 
 ## Related

@@ -13,6 +13,4 @@ The moq-video OBS encoder consumes compositor output through D3D11 without CPU s
 
 ## Required
 
-- [Video frames](/quest/main/video-frames.md) - settled native ownership and conversion contract
-
 - [Encoder adapter](/quest/next/obs-moq-video/adapter.md) - frame ownership, queue policy, packet output, and comparison baseline

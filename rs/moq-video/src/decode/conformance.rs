@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "openh264"), allow(dead_code))]
+
 //! H.264 conformance decode: bitstreams nothing in this crate produced.
 //!
 //! Every other decode test here encodes its own input first, so an encoder and a
@@ -349,7 +351,8 @@ fn check(vector: &Vector) {
 					}
 				}
 				Expect::Reference(reference) => {
-					let len = I420::len(vector.width, vector.height);
+					let size = crate::Size::new(vector.width, vector.height);
+					let len = I420::len(size).expect("reference size");
 					assert_eq!(
 						reference.len(),
 						len * vector.pictures,
@@ -359,8 +362,7 @@ fn check(vector: &Vector) {
 						vector.width,
 						vector.height
 					);
-					let want = I420::new(vector.width, vector.height, reference[i * len..(i + 1) * len].to_vec())
-						.expect("reference picture");
+					let want = I420::new(size, reference[i * len..(i + 1) * len].to_vec()).expect("reference picture");
 					assert!(
 						got.data() == want.data(),
 						"{name}: {} picture {i} differs from the reference decode ({})",
@@ -376,6 +378,7 @@ fn check(vector: &Vector) {
 /// Intra-only decode: two IDR pictures, each with its own parameter sets, and a
 /// saturated color that fixes both chroma planes.
 #[test]
+#[cfg(feature = "openh264")]
 fn idr_only_baseline() {
 	check(&IDR_BLUE);
 }
@@ -384,6 +387,7 @@ fn idr_only_baseline() {
 /// moving the content, so a decoder that stops applying residuals after the
 /// keyframe diverges from the reference.
 #[test]
+#[cfg(feature = "openh264")]
 fn multi_frame_baseline() {
 	check(&SEQ_PATTERN);
 }
@@ -391,6 +395,7 @@ fn multi_frame_baseline() {
 /// Main profile, which is CABAC rather than the Baseline fixtures' CAVLC: a
 /// different entropy decoder reaching the same pixels.
 #[test]
+#[cfg(feature = "openh264")]
 fn main_profile_cabac() {
 	check(&MAIN_YELLOW);
 }
@@ -399,6 +404,7 @@ fn main_profile_cabac() {
 /// A decoder that hands back the coded size, or crops from the wrong edge, fails
 /// on the size or on the pixels.
 #[test]
+#[cfg(feature = "openh264")]
 fn non_square_cropped() {
 	check(&NON_SQUARE);
 }
@@ -412,6 +418,7 @@ fn non_square_cropped() {
 /// Self-skips on a host with one usable decoder, which is every CI runner today
 /// and any box without a GPU.
 #[test]
+#[cfg(feature = "openh264")]
 fn backends_agree() {
 	let backends = decoders();
 	if backends.len() < 2 {

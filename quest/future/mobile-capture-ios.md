@@ -24,8 +24,6 @@ same everywhere.
 
 ## Required
 
-- [Video timing](/quest/main/video-timing.md) - timestamped capture and rational rates
-
 - [Ownership boundary](/quest/future/mobile-ownership.md) - decides whether Rust owns capture on mobile at all
 
 ## Related

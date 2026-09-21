@@ -68,4 +68,3 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 ## Related
 
 - [archive](/quest/next/archive/README.md) - protected broadcasts are deliberately outside recording and replay formats
-- [Merge dev](/quest/dev/merge-dev.md) - its HLS soak (a fresh viewer joining a days-old broadcast, playable since #3240) covers plaintext broadcasts only; stock HLS and DASH cannot read a protected catalog

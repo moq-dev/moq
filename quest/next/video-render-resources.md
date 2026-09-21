@@ -25,10 +25,6 @@ Optimize only demonstrated costs. Test rejected configurations, delayed
 completion, teardown, and device-loss handling in CI with fake completion where
 possible; keep native import proof in hardware jobs. Public API and wire: none.
 
-## Required
-
-- [Video frames](/quest/main/video-frames.md) - settled surface/conversion ownership
-
 ## Related
 
 - [Hardware validation](/quest/future/video-hardware.md) - real graphics-device proof

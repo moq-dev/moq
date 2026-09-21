@@ -449,26 +449,27 @@ mod tests {
 		track: impl Into<Option<moq_net::track::Info>>,
 	) -> (
 		moq_mux::catalog::Producer,
-		moq_mux::catalog::VideoTrack,
+		(),
 		moq_net::track::Producer,
-		moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
+		moq_mux::container::Producer<moq_mux::catalog::hang::Container, hang::catalog::VideoConfig>,
 	) {
-		let mut catalog = moq_mux::catalog::Producer::new(broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let reserved = catalog.reserve();
-		let mut registration = reserved.video("video0").unwrap();
-		registration.set(config).unwrap();
-		drop(reserved);
 		let track = broadcast.create_track("video0", track).unwrap();
-		let media = catalog
-			.media_producer(
+		let media = reserved
+			.video(
 				track.clone(),
 				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+				config,
 			)
 			.unwrap();
-		(catalog, registration, track, media)
+		drop(reserved);
+		(catalog, (), track, media)
 	}
 
-	fn write_three_gops(media: &mut moq_mux::container::Producer<moq_mux::catalog::hang::Container>) {
+	fn write_three_gops(
+		media: &mut moq_mux::container::Producer<moq_mux::catalog::hang::Container, hang::catalog::VideoConfig>,
+	) {
 		media.write(vp8_frame(0, true)).unwrap();
 		media.write(vp8_frame(1_000_000, false)).unwrap();
 		media.write(vp8_frame(2_000_000, true)).unwrap();
@@ -538,21 +539,20 @@ mod tests {
 		let media_broadcast = pair.pub_origin.create_broadcast("room/source").expect("media");
 		media_broadcast.announce(Default::default()).expect("announce media");
 
-		let mut catalog =
+		let catalog =
 			moq_mux::catalog::Producer::new(&mut catalog_broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let reserved = catalog.reserve();
-		let mut registration = reserved.video("video0").unwrap();
 		let mut config = video_config();
 		config.broadcast = Some(moq_net::path::Relative::new("../source").to_owned());
-		registration.set(config).unwrap();
-		drop(reserved);
-		let recorder = catalog.enroll("video0").unwrap();
 		let track = media_broadcast.create_track("video0", None).unwrap();
-		let mut media = moq_mux::container::Producer::new(
-			track,
-			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
-		)
-		.with_recorder(recorder);
+		let mut media = reserved
+			.video(
+				track,
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+				config,
+			)
+			.unwrap();
+		drop(reserved);
 		write_three_gops(&mut media);
 
 		let app = Server::new(pair.sub_origin.consume(), crate::export::Config::default()).router();
@@ -572,7 +572,7 @@ mod tests {
 		assert_eq!(response.status(), StatusCode::NOT_FOUND);
 		assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
 
-		drop((catalog, registration, catalog_broadcast));
+		drop((catalog, catalog_broadcast));
 		pair.accept.abort();
 	}
 }

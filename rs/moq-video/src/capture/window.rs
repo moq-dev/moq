@@ -101,7 +101,7 @@ pub(super) async fn open(config: &Config, selector: &str) -> Result<Stream, Erro
 			let geometry = Geometry {
 				width: capture.width,
 				height: capture.height,
-				framerate: Some(capture.framerate),
+				framerate: Some(crate::Rate::integer(capture.framerate)),
 				label: capture.name.clone(),
 			};
 			Ok((capture, geometry))
@@ -156,7 +156,10 @@ impl Capture {
 			return Err(Error::SourceUnavailable("window has no capturable area".to_string()));
 		}
 		let identity = WindowIdentity::new(handle);
-		let framerate = config.framerate.unwrap_or(DEFAULT_FRAMERATE).max(1);
+		let framerate = config
+			.framerate
+			.unwrap_or(crate::Rate::integer(DEFAULT_FRAMERATE))
+			.rounded();
 		Ok(Self {
 			handle,
 			identity,
@@ -233,8 +236,7 @@ impl Capture {
 		Ok(pump::Read::Frame(Surface::I420(I420::from_bgra(
 			&bgra,
 			self.width * 4,
-			self.width,
-			self.height,
+			crate::Size::new(self.width, self.height),
 		)?)))
 	}
 }

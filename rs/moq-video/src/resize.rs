@@ -1,6 +1,6 @@
 //! Frame resizing options.
 
-/// Options for [`Frame::resize_with`](crate::Frame::resize_with).
+/// Options for [`Frame::resize`](crate::Frame::resize).
 ///
 /// Build with `Config::default()` and set fields, so future options stay
 /// additive.

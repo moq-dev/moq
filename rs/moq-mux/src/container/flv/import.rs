@@ -85,7 +85,7 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 /// The demuxed video track plus its current catalog config, so a repeated
 /// (identical) sequence header is a no-op rather than a track rebuild.
 struct VideoStream {
-	track: crate::container::Producer<crate::catalog::hang::Container>,
+	track: crate::container::Producer<crate::catalog::hang::Container, VideoConfig>,
 	config: VideoConfig,
 	stalled: hang::catalog::stalled::Detector,
 	last_source: Option<Instant>,
@@ -93,7 +93,7 @@ struct VideoStream {
 
 /// The demuxed audio track plus its current catalog config.
 struct AudioStream {
-	track: crate::container::Producer<crate::catalog::hang::Container>,
+	track: crate::container::Producer<crate::catalog::hang::Container, AudioConfig>,
 	config: AudioConfig,
 }
 
@@ -520,13 +520,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 
 		let net_track = self.replace_video(track_id)?;
-		let name = net_track.name().to_string();
 		// Build the wire producer before advertising the rendition. Both steps are fallible (an
 		// unsupported container, a colliding timeline track), and a rendition published for a track
 		// we then fail to produce would be advertised to consumers but never served.
 		let wire = crate::catalog::hang::Container::try_from(&config)?;
-		let media = self.catalog.media_producer(net_track, wire)?;
-		self.catalog.modify()?.video.renditions.insert(name, config.clone());
+		let media = match &self.initial_reservation {
+			Some(reserved) => reserved.video(net_track, wire, config.clone())?,
+			None => self.catalog.video(net_track, wire, config.clone())?,
+		};
 		self.video.insert(
 			track_id,
 			VideoStream {
@@ -549,13 +550,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 
 		let net_track = self.replace_audio(track_id)?;
-		let name = net_track.name().to_string();
 		// Build the wire producer before advertising the rendition. Both steps are fallible (an
 		// unsupported container, a colliding timeline track), and a rendition published for a track
 		// we then fail to produce would be advertised to consumers but never served.
 		let wire = crate::catalog::hang::Container::try_from(&config)?;
-		let media = self.catalog.media_producer(net_track, wire)?;
-		self.catalog.modify()?.audio.renditions.insert(name, config.clone());
+		let media = match &self.initial_reservation {
+			Some(reserved) => reserved.audio(net_track, wire, config.clone())?,
+			None => self.catalog.audio(net_track, wire, config.clone())?,
+		};
 		self.audio.insert(track_id, AudioStream { track: media, config });
 		Ok(())
 	}
@@ -594,11 +596,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return Ok(());
 		}
 		let flag = stream.stalled.flag();
-		let name = stream.track.name().to_string();
-		let mut guard = self.catalog.modify()?;
-		if let Some(config) = guard.video.renditions.get_mut(&name) {
-			config.stalled = flag;
-		}
+		let mut config = stream.track.modify()?;
+		config.stalled = flag;
+		config.commit()?;
 		Ok(())
 	}
 
@@ -607,7 +607,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	fn replace_video(&mut self, track_id: u8) -> anyhow::Result<moq_net::track::Producer> {
 		if let Some(mut old) = self.video.remove(&track_id) {
 			old.track.finish()?;
-			self.catalog.modify()?.video.renditions.remove(old.track.name());
 		}
 		Ok(self
 			.broadcast
@@ -619,7 +618,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	fn replace_audio(&mut self, track_id: u8) -> anyhow::Result<moq_net::track::Producer> {
 		if let Some(mut old) = self.audio.remove(&track_id) {
 			old.track.finish()?;
-			self.catalog.modify()?.audio.renditions.remove(old.track.name());
 		}
 		Ok(self
 			.broadcast
@@ -653,33 +651,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// [`Self::finish`] for a failed teardown (e.g. the RTMP client disconnected).
 	/// Consumes the importer.
 	pub fn abort(mut self, err: moq_net::Error) {
-		self.unregister();
 		for stream in std::mem::take(&mut self.video).into_values() {
 			stream.track.abort(err.clone());
 		}
 		for stream in std::mem::take(&mut self.audio).into_values() {
 			stream.track.abort(err.clone());
 		}
-	}
-
-	/// Drop every rendition this importer registered from the catalog.
-	fn unregister(&mut self) {
-		// A closed catalog has nothing left to unregister from.
-		let Ok(mut catalog) = self.catalog.modify() else {
-			return;
-		};
-		for stream in self.video.values() {
-			catalog.video.renditions.remove(stream.track.name());
-		}
-		for stream in self.audio.values() {
-			catalog.audio.renditions.remove(stream.track.name());
-		}
-	}
-}
-
-impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
-	fn drop(&mut self) {
-		self.unregister();
 	}
 }
 

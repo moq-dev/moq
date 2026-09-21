@@ -27,8 +27,6 @@ catalog representation. GStreamer's clock observation remains its own quest.
 
 ## Required
 
-- [Merge dev](/quest/dev/merge-dev.md) - the required dev APIs must be available on main before this implementation starts
-
 - [Publisher discontinuity](/quest/next/js-publish-discontinuity.md) - use the settled browser restart-marker path
 
 ## Related
