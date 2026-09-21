@@ -28,3 +28,8 @@ dependencies present, and a Docker image without them fails at build rather
 than at run. Then verify the shipped artifact runs `moq devices` and
 `moq play` on each platform, since a feature that compiles into the binary and
 then fails to open a device is the same gap one layer down.
+
+## Required
+
+- [Capture without V4L2 bindgen](/quest/m2/capture-v4l-bindings.md) - the camera path must build without libclang before every distribution can ship it
+- [Audio capture without runtime system libraries](/quest/m2/capture-alsa-link.md) - the microphone path must start without system audio libraries before every distribution can ship it
