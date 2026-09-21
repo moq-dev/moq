@@ -33,7 +33,6 @@ Public API: additive. Wire: none.
 
 ## Required
 
-- [Gateway types](/quest/m1/api-gateways.md) - the constructors this extends
 - [Merge dev](/quest/m1/merge-dev.md) - starts on main
 
 ## Related

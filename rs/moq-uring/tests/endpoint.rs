@@ -5,9 +5,9 @@
 //! Kernel-gated: skips loudly below the Linux 6.12 floor (GitHub-hosted CI),
 //! and runs everywhere else.
 
-#![cfg(all(target_os = "linux", any(feature = "noq", feature = "quiche", feature = "quinn")))]
+#![cfg(all(target_os = "linux", feature = "noq"))]
 
-#[path = "support/quiche.rs"]
+#[path = "support.rs"]
 mod support;
 
 use std::net::UdpSocket;
@@ -171,8 +171,8 @@ fn unsupported_version_is_negotiated_only_by_servers() {
 
 			// Junk first: it must not be fatal, and whatever answer it draws
 			// must be smaller than it was, so the socket is never an
-			// amplifier. quiche stays silent; quinn answers a packet naming
-			// no connection with a stateless reset, which is what tells a
+			// amplifier. Noq answers a packet naming no connection with a
+			// stateless reset, which is what tells a
 			// peer holding stale state to give up.
 			let junk = [0u8; 64];
 			sock.send_to(&junk, server)?;
@@ -221,7 +221,7 @@ fn unsupported_version_is_negotiated_only_by_servers() {
 		}
 	});
 
-	let mut response = worker
+	let response = worker
 		.block_on(std::future::poll_fn(move |cx| {
 			let mut verdict = verdict.lock().unwrap();
 			if let Some(result) = verdict.result.take() {
@@ -234,11 +234,18 @@ fn unsupported_version_is_negotiated_only_by_servers() {
 		.expect("version negotiation response");
 	probe.join().expect("probe thread");
 
-	let hdr = quiche::Header::from_slice(&mut response, 0).expect("parse response");
-	assert_eq!(hdr.ty, quiche::Type::VersionNegotiation);
-	let versions = hdr.versions.expect("advertised versions");
+	assert_eq!(&response[1..5], &[0; 4], "version negotiation has version zero");
+	let dcid = usize::from(response[5]);
+	let scid_len = 6 + dcid;
+	let scid = usize::from(response[scid_len]);
+	let versions = response[scid_len + 1 + scid..]
+		.chunks_exact(4)
+		.map(|version| u32::from_be_bytes(version.try_into().unwrap()))
+		.collect::<Vec<_>>();
 	assert!(
-		versions.contains(&quiche::PROTOCOL_VERSION),
+		versions
+			.iter()
+			.any(|version| noq_proto::DEFAULT_SUPPORTED_VERSIONS.contains(version)),
 		"the supported version is offered: {versions:?}"
 	);
 	drop((endpoint, dial_only));
@@ -295,10 +302,8 @@ fn a_peer_stop_reaches_the_accepted_stream() {
 			let (mut send, mut recv) = std::future::poll_fn(|cx| dialed.poll_open_bi(cx))
 				.await
 				.expect("open_bi");
-			// One byte, so both backends surface the stream: quiche queues an
-			// incoming stream for accept when it becomes readable, not when it
-			// is created. Nothing is awaited between the write and the stop, so
-			// both frames leave in the same flush and land in the same sweep.
+			// One byte makes the stream readable before the stop arrives. Nothing
+			// is awaited between them, so both frames leave in the same flush.
 			std::future::poll_fn(|cx| send.poll_write(cx, b"x"))
 				.await
 				.expect("write");
@@ -349,7 +354,7 @@ fn an_unanswered_dial_times_out() {
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("client socket");
 	let mut dial = dial_config(hole.local_addr().expect("addr"));
-	// quiche stretches this to 3x the initial probe timeout (RFC 9000 §10.1),
+	// QUIC stretches this to 3x the initial probe timeout (RFC 9000 §10.1),
 	// so the dial resolves in about three seconds.
 	dial.transport.idle_timeout = Duration::from_millis(500);
 

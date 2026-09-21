@@ -53,6 +53,11 @@ static _Noreturn void fail(const char *fmt, ...) {
     _exit(1);
 }
 
+static void ignore_status(void *user_data, int32_t status) {
+    (void)user_data;
+    (void)status;
+}
+
 static void check_refusals(void) {
     // Unknown pixel format.
     moq_video_decoder_output bad_format = {0, 999, 0, 0};
@@ -74,7 +79,7 @@ static void check_refusals(void) {
 
     // A valid request gets past validation and fails on the bogus catalog.
     moq_video_decoder_output valid = {0, MOQ_VIDEO_PIXEL_FORMAT_RGBA, 160, 120};
-    if (moq_decode_video(INT32_MAX, 0, &valid, NULL, NULL) != MOQ_ERR_CATALOG_NOT_FOUND)
+    if (moq_decode_video(INT32_MAX, 0, &valid, ignore_status, NULL) != MOQ_ERR_CATALOG_NOT_FOUND)
         fail("error: valid request did not reach catalog lookup: %s\n", moq_error());
 
     fprintf(stderr, "decoder output refusals ok\n");
@@ -202,8 +207,8 @@ static void decode_once(ctx_t *c, int32_t catalog, const moq_video_decoder_outpu
     wait_for(&c->mu, &c->cv, &c->got_frame, 15.0);
     pthread_mutex_unlock(&c->mu);
 
-    if (moq_decode_video_close((uint32_t)consumer) < 0)
-        fail("error: moq_decode_video_close failed (%s)\n", moq_error());
+    if (moq_decode_video_cancel((uint32_t)consumer) < 0)
+        fail("error: moq_decode_video_cancel failed (%s)\n", moq_error());
     pthread_mutex_lock(&c->mu);
     wait_for(&c->mu, &c->cv, &c->done_frame, 10.0);
     pthread_mutex_unlock(&c->mu);
@@ -266,15 +271,15 @@ int main(void) {
     if (moq_consume_catalog_free((uint32_t)catalog) < 0)
         fail("error: moq_consume_catalog_free failed (%s)\n", moq_error());
     c.catalog_snapshot = 0;
-    if (moq_consume_catalog_close((uint32_t)catalog_sub) < 0)
-        fail("error: moq_consume_catalog_close failed (%s)\n", moq_error());
+    if (moq_consume_catalog_cancel((uint32_t)catalog_sub) < 0)
+        fail("error: moq_consume_catalog_cancel failed (%s)\n", moq_error());
     // The request already terminated once it delivered the broadcast, so its
     // task is gone; close only a still-pending wait.
     pthread_mutex_lock(&c.mu);
     int request_pending = !c.done_broadcast;
     pthread_mutex_unlock(&c.mu);
-    if (request_pending && moq_origin_request_close((uint32_t)request) < 0)
-        fail("error: moq_origin_request_close failed (%s)\n", moq_error());
+    if (request_pending && moq_origin_request_cancel((uint32_t)request) < 0)
+        fail("error: moq_origin_request_cancel failed (%s)\n", moq_error());
     if (moq_consume_close((uint32_t)consume) < 0)
         fail("error: moq_consume_close failed (%s)\n", moq_error());
     if (moq_encode_video_finish((uint32_t)producer) < 0)

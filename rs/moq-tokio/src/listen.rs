@@ -3,8 +3,6 @@
 //! [`Config`] describes the listeners (QUIC, plus optional `tcp`/`unix` qmux)
 //! and the served TLS identity. The dial side lives in [`crate::connect`].
 
-use crate::QuicBackend;
-
 /// A QUIC listen address.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -16,7 +14,7 @@ pub enum Bind {
 }
 
 impl Bind {
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	#[cfg(feature = "noq")]
 	pub(crate) fn resolve(&self) -> std::io::Result<std::net::SocketAddr> {
 		match self {
 			Self::Addr(addr) => Ok(*addr),
@@ -88,7 +86,7 @@ pub struct Config {
 	/// Listen for QUIC (UDP) on the given address. Defaults to `[::]:443`.
 	///
 	/// Text configuration accepts socket addresses and `host:port` names. Hostnames
-	/// are resolved when the listener binds. Leave unset while a
+	/// are resolved when the listener binds (first address only). Leave unset while a
 	/// `tcp`/`unix` listener is configured to run a stream-only server with no
 	/// QUIC.
 	#[usage(name = "listen", long = "listen", env = "MOQ_LISTEN", setting = "listen.bind")]
@@ -112,16 +110,6 @@ pub struct Config {
 	#[usage(flatten)]
 	#[serde(default)]
 	pub unix: crate::unix::Config,
-
-	/// The QUIC backend to use.
-	/// Auto-detected from compiled features if not specified.
-	#[usage(
-		name = "listen-backend",
-		long = "listen-backend",
-		env = "MOQ_LISTEN_BACKEND",
-		setting = "listen.backend"
-	)]
-	pub backend: Option<QuicBackend>,
 
 	/// Restrict the server to specific MoQ protocol version(s).
 	///
@@ -161,11 +149,11 @@ pub struct Config {
 
 	/// IPv4 address advertised as the QUIC preferred_address.
 	///
-	/// Supporting clients (Chrome M131+, native Quinn) migrate to this address
+	/// Supporting clients (Chrome M131+, native noq) migrate to this address
 	/// shortly after the handshake completes. Typical use: handshake on an
 	/// anycast IP, steady-state on this host's unicast IP.
 	///
-	/// Honored by the Quinn and noq backends. Accept-only, which is why it lives
+	/// Honored by noq. Accept-only, which is why it lives
 	/// here rather than in the shared [`crate::quic::Config`].
 	#[usage(
 		name = "listen-preferred-v4",
@@ -240,7 +228,7 @@ pub struct Config {
 /// outside one.
 #[cfg(feature = "_transport")]
 pub(crate) use moq_sock::shard::Member;
-#[cfg(any(feature = "noq", feature = "quinn"))]
+#[cfg(feature = "noq")]
 pub(crate) use moq_sock::shard::Shard;
 
 /// The `--server-*` flags from before the accept side was named `listen`.
@@ -253,14 +241,6 @@ pub(crate) use moq_sock::shard::Shard;
 pub(crate) struct Legacy {
 	#[usage(name = "server-bind", long = "server-bind", env = "MOQ_SERVER_BIND", hide = true)]
 	bind: Option<String>,
-
-	#[usage(
-		name = "server-backend",
-		long = "server-backend",
-		env = "MOQ_SERVER_BACKEND",
-		hide = true
-	)]
-	backend: Option<QuicBackend>,
 
 	#[usage(
 		name = "server-version",
@@ -325,13 +305,6 @@ impl Legacy {
 		let mut found = crate::cli::Deprecated::default();
 		if self.bind.is_some() {
 			found.flag("--server-bind", Some("MOQ_SERVER_BIND"), "--listen / MOQ_LISTEN");
-		}
-		if self.backend.is_some() {
-			found.flag(
-				"--server-backend",
-				Some("MOQ_SERVER_BACKEND"),
-				"--listen-backend / MOQ_LISTEN_BACKEND",
-			);
 		}
 		if !self.version.is_empty() {
 			found.flag(
@@ -401,8 +374,9 @@ impl Config {
 		Ok(())
 	}
 
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
-	pub(crate) fn load_balancer(&self) -> Option<crate::quic::LoadBalancer> {
+	#[cfg(feature = "noq")]
+	/// Return the effective QUIC-LB connection-ID encoding.
+	pub fn load_balancer(&self) -> Option<crate::quic::LoadBalancer> {
 		self.lb_id
 			.clone()
 			.map(|id| crate::quic::LoadBalancer {
@@ -524,7 +498,7 @@ mod tests {
 		assert!("relay.example.com:443:8443".parse::<Bind>().is_err());
 	}
 
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	#[cfg(feature = "noq")]
 	#[test]
 	fn cli_load_balancer_survives_the_merge_round_trip() {
 		let config = config_from(["test", "--listen-quic-lb-id", "ab", "--listen-quic-lb-nonce", "9"]);
@@ -540,9 +514,11 @@ mod tests {
 	}
 
 	/// Programmatic configuration keeps the QUIC-LB id and nonce paired.
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	#[cfg(feature = "noq")]
 	#[test]
 	fn load_balancer_is_a_single_typed_value() {
+		assert_eq!(Config::default().load_balancer(), None);
+
 		let config: Config = toml::from_str(
 			r#"
 load_balancer = { id = "ab", nonce = 8 }

@@ -658,7 +658,7 @@ unsafe fn parse_route(route: *const moq_route) -> Result<moq_net::origin::Route,
 		return Ok(moq_net::origin::Route::default());
 	};
 	let cold = if route.has_cold { route.cold } else { route.cost };
-	let mut out = moq_net::origin::Route::default().with_cost((route.cost, cold));
+	let mut route_hops = moq_net::Hops::new();
 	if route.hops_len > 0 {
 		if route.hops.is_null() {
 			return Err(Error::InvalidPointer);
@@ -670,19 +670,21 @@ unsafe fn parse_route(route: *const moq_route) -> Result<moq_net::origin::Route,
 			} else {
 				moq_net::Hop::new(*id).map_err(|e| Error::InvalidConfig(e.to_string()))?
 			};
-			out = out.with_hop(hop).map_err(|e| Error::InvalidConfig(e.to_string()))?;
+			route_hops.push(hop).map_err(|e| Error::InvalidConfig(e.to_string()))?;
 		}
 	}
-	Ok(out)
+	Ok(moq_net::origin::Route::default()
+		.with_cost(moq_net::origin::Cost { warm: route.cost, cold })
+		.with_hops(route_hops))
 }
 
 /// A route announcement or retraction from an origin.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_announce_update {
-	/// The covered path prefix, NOT NULL terminated
-	pub path: *const c_char,
-	pub path_len: usize,
+	/// The covered prefix, relative to the requested announcements prefix, NOT NULL terminated
+	pub prefix: *const c_char,
+	pub prefix_len: usize,
 
 	/// Whether the route is active or was retracted
 	/// This MUST toggle between true and false over the lifetime of the route
@@ -890,43 +892,6 @@ pub unsafe extern "C" fn moq_versions(dst: *mut moq_string, count: usize) -> i32
 	})
 }
 
-/// The QUIC backend names this build offers, spelled the way [moq_client_config]'s `backend`
-/// expects. Built once; the slices are valid for the life of the process.
-static BACKEND_NAMES: std::sync::LazyLock<Vec<&'static str>> =
-	std::sync::LazyLock::new(|| moq_tokio::QuicBackend::compiled().iter().map(|b| b.as_str()).collect());
-
-/// List the QUIC backends this build was compiled with.
-///
-/// Writes up to `count` names into `dst` and returns the total number available, which
-/// may be larger than `count`. Pass a NULL `dst` with a zero `count` to size the array
-/// first. Each name borrows a static string valid for the life of the process.
-///
-/// The backends are compile-time optional, so a caller building a menu must read this
-/// rather than listing names: an option this build lacks is rejected by
-/// a dial, which would leave a menu entry that can only fail.
-///
-/// Returns the total count on success, or a negative code on failure.
-///
-/// # Safety
-/// - The caller must ensure that `dst` is either NULL with a zero `count`, or a valid
-///   pointer to `count` writable [moq_string] values.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_backends(dst: *mut moq_string, count: usize) -> i32 {
-	ffi::enter(move || {
-		if !dst.is_null() {
-			let dst = unsafe { std::slice::from_raw_parts_mut(dst, count) };
-			for (slot, name) in dst.iter_mut().zip(BACKEND_NAMES.iter()) {
-				slot.data = name.as_ptr().cast::<c_char>();
-				slot.len = name.len();
-			}
-		} else if count != 0 {
-			return Err(Error::InvalidPointer);
-		}
-
-		Ok(BACKEND_NAMES.len())
-	})
-}
-
 /// Whether this build can capture qlog traces.
 ///
 /// Capture is compile-time optional. [moq_client_config]'s `quic_qlog` accepts a directory
@@ -937,12 +902,7 @@ pub extern "C" fn moq_qlog_supported() -> bool {
 	moq_tokio::qlog_supported()
 }
 
-/// A duration as the milliseconds the setters take, saturating rather than wrapping.
-fn millis(duration: std::time::Duration) -> u64 {
-	duration.as_millis().min(u64::MAX as u128) as u64
-}
-
-/// A duration as the microseconds reconnect backoff fields take, saturating rather than wrapping.
+/// A duration as microseconds, saturating rather than wrapping.
 fn micros(duration: std::time::Duration) -> u64 {
 	duration.as_micros().min(u64::MAX as u128) as u64
 }
@@ -968,25 +928,20 @@ pub struct moq_client_config {
 	pub versions: *const moq_string,
 	pub versions_len: usize,
 
-	/// QUIC backend name, or NULL for this build's choice. [moq_backends] lists
-	/// the names this build accepts, which are compile-time dependent.
-	pub backend: *const c_char,
-	pub backend_len: usize,
-
 	/// Local socket address to bind, or NULL for the wildcard address.
 	pub bind: *const c_char,
 	pub bind_len: usize,
 
 	/// How long a dial may take before it gives up.
-	pub connect_timeout_ms: u64,
+	pub connect_timeout_us: u64,
 	pub has_connect_timeout: bool,
 
 	/// Happy Eyeballs: how long before the next address is also dialed.
-	pub failover_delay_ms: u64,
+	pub failover_delay_us: u64,
 	pub has_failover_delay: bool,
 
 	/// Happy Eyeballs: how long the first family waits for the AAAA answer.
-	pub resolution_delay_ms: u64,
+	pub resolution_delay_us: u64,
 	pub has_resolution_delay: bool,
 
 	/// Whether the WebSocket fallback may be raced, for a UDP-blocked network.
@@ -995,7 +950,7 @@ pub struct moq_client_config {
 	pub has_websocket_enabled: bool,
 
 	/// How long QUIC gets before the WebSocket fallback is also dialed.
-	pub websocket_delay_ms: u64,
+	pub websocket_delay_us: u64,
 	pub has_websocket_delay: bool,
 
 	/// Accept any certificate. Development only: prefer `tls_fingerprints`,
@@ -1041,9 +996,9 @@ pub struct moq_client_config {
 	/// QUIC transport tuning, all ignored by the WebSocket fallback.
 	pub quic_max_streams: u64,
 	pub has_quic_max_streams: bool,
-	pub quic_idle_timeout_ms: u64,
+	pub quic_idle_timeout_us: u64,
 	pub has_quic_idle_timeout: bool,
-	pub quic_keep_alive_ms: u64,
+	pub quic_keep_alive_us: u64,
 	pub has_quic_keep_alive: bool,
 	/// Generic segmentation offload and path MTU discovery. Both default to the
 	/// backend's choice, so both need their flag.
@@ -1088,17 +1043,17 @@ pub extern "C" fn moq_client_defaults() -> moq_client_config {
 		let config = crate::client::Config::default();
 
 		let connect = config.connect.resolve();
-		dst.connect_timeout_ms = millis(connect.timeout);
+		dst.connect_timeout_us = micros(connect.timeout);
 		dst.has_connect_timeout = true;
-		dst.failover_delay_ms = millis(connect.race);
+		dst.failover_delay_us = micros(connect.race);
 		dst.has_failover_delay = true;
-		dst.resolution_delay_ms = millis(connect.resolution_delay);
+		dst.resolution_delay_us = micros(connect.resolution_delay);
 		dst.has_resolution_delay = true;
 
 		let websocket = config.connect.websocket.resolve();
 		dst.websocket_enabled = websocket.enabled;
 		dst.has_websocket_enabled = true;
-		dst.websocket_delay_ms = millis(websocket.delay);
+		dst.websocket_delay_us = micros(websocket.delay);
 		dst.has_websocket_delay = true;
 
 		dst.backoff_initial_us = micros(config.connect.backoff.initial);
@@ -1113,10 +1068,10 @@ pub extern "C" fn moq_client_defaults() -> moq_client_config {
 		let quic = config.quic.resolve();
 		dst.quic_max_streams = quic.max_streams;
 		dst.has_quic_max_streams = true;
-		dst.quic_idle_timeout_ms = millis(quic.idle_timeout);
+		dst.quic_idle_timeout_us = micros(quic.idle_timeout);
 		dst.has_quic_idle_timeout = true;
 		if let Some(keep_alive) = quic.keep_alive {
-			dst.quic_keep_alive_ms = millis(keep_alive);
+			dst.quic_keep_alive_us = micros(keep_alive);
 			dst.has_quic_keep_alive = true;
 		}
 
@@ -1138,7 +1093,7 @@ unsafe fn connect_session(
 	config: *const moq_client_config,
 	origin_publish: u32,
 	origin_consume: u32,
-	on_status: Option<extern "C" fn(user_data: *mut c_void, code: i32)>,
+	on_status: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> Result<crate::Id, Error> {
 	let url = ffi::parse_url(url, url_len)?;
@@ -1156,7 +1111,7 @@ unsafe fn connect_session(
 		(publish, consume)
 	};
 
-	let callback = unsafe { ffi::OnStatus::new(user_data, on_status) };
+	let callback = unsafe { ffi::OnStatus::new(user_data, on_status)? };
 	let request = Connect {
 		config,
 		url,
@@ -1218,7 +1173,7 @@ pub unsafe extern "C" fn moq_session_connect(
 	config: *const moq_client_config,
 	origin_publish: u32,
 	origin_consume: u32,
-	on_status: Option<extern "C" fn(user_data: *mut c_void, code: i32)>,
+	on_status: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || unsafe {
@@ -1344,7 +1299,7 @@ pub unsafe extern "C" fn moq_origin_create_broadcast(origin: u32, path: *const c
 /// required: a NULL callback is refused before the route is advertised. It is
 /// invoked with a positive request handle for each
 /// pending broadcast, then exactly once more with a terminal code: `0` (stopped
-/// cleanly, including after [moq_origin_dynamic_close]) or a negative error.
+/// cleanly, including after [moq_origin_dynamic_cancel]) or a negative error.
 /// After the terminal (`<= 0`) callback, `user_data` is never touched again.
 ///
 /// Returns a non-zero handle on success, or a negative code on failure.
@@ -1360,15 +1315,14 @@ pub unsafe extern "C" fn moq_origin_dynamic(
 	prefix: *const c_char,
 	prefix_len: usize,
 	route: *const moq_route,
-	on_request: Option<extern "C" fn(user_data: *mut c_void, request: i32)>,
+	on_request: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
-		let on_request = on_request.ok_or(Error::InvalidPointer)?;
 		let prefix = unsafe { ffi::parse_str(prefix, prefix_len)? };
 		let route = unsafe { parse_route(route)? };
-		let on_request = unsafe { ffi::OnStatus::new(user_data, Some(on_request)) };
+		let on_request = unsafe { ffi::OnStatus::new(user_data, on_request)? };
 		State::lock().origin.dynamic(origin, prefix, route, on_request)
 	})
 }
@@ -1395,7 +1349,7 @@ pub unsafe extern "C" fn moq_origin_dynamic_update(dynamic: u32, route: *const m
 /// terminal `0` (or a negative error), and that final callback is where
 /// `user_data` should be released.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_origin_dynamic_close(dynamic: u32) -> i32 {
+pub extern "C" fn moq_origin_dynamic_cancel(dynamic: u32) -> i32 {
 	ffi::enter(move || {
 		let dynamic = ffi::parse_id(dynamic)?;
 		State::lock().origin.dynamic_close(dynamic)
@@ -1470,11 +1424,11 @@ pub extern "C" fn moq_broadcast_request_free(request: u32) -> i32 {
 /// then exactly once more with a terminal code: `0` (stopped cleanly) or a
 /// negative error. After the terminal (`<= 0`) callback, `on_announce` is never
 /// called again and `user_data` is never touched again, so release `user_data`
-/// there. The terminal callback fires even after [moq_origin_announced_close].
+/// there. The terminal callback fires even after [moq_origin_announced_cancel].
 ///
 /// - [moq_origin_announced_info] is used to query information about the broadcast.
 /// - [moq_origin_announced_free] releases each delivered announced ID once read.
-/// - [moq_origin_announced_close] is used to stop receiving announcements.
+/// - [moq_origin_announced_cancel] is used to stop receiving announcements.
 ///
 /// Returns a non-zero handle on success, or a negative code on failure.
 ///
@@ -1483,19 +1437,19 @@ pub extern "C" fn moq_broadcast_request_free(request: u32) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_origin_announced(
 	origin: u32,
-	on_announce: Option<extern "C" fn(user_data: *mut c_void, announced: i32)>,
+	on_announce: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
-		let on_announce = unsafe { ffi::OnStatus::new(user_data, on_announce) };
+		let on_announce = unsafe { ffi::OnStatus::new(user_data, on_announce)? };
 		State::lock().origin.announced(origin, on_announce)
 	})
 }
 
 /// Query information about a broadcast discovered by [moq_origin_announced].
 ///
-/// The destination is filled with the broadcast information. The `pattern` pointer borrows
+/// The destination is filled with the route information. The `prefix` pointer borrows
 /// the announcement's storage: copy it out before calling [moq_origin_announced_free], which
 /// invalidates it.
 ///
@@ -1517,7 +1471,7 @@ pub unsafe extern "C" fn moq_origin_announced_info(announced: u32, dst: *mut moq
 /// Each announce / unannounce event hands the callback a distinct announcement handle (read
 /// with [moq_origin_announced_info]); release it here once done to avoid leaking one per event
 /// over the life of the listener. This is per-announcement and distinct from
-/// [moq_origin_announced_close], which stops the listener itself. After freeing, any `pattern`
+/// [moq_origin_announced_cancel], which stops the listener itself. After freeing, any `prefix`
 /// pointer obtained from [moq_origin_announced_info] for this handle is dangling.
 ///
 /// Returns zero on success, or a negative code if the handle is unknown.
@@ -1536,7 +1490,7 @@ pub extern "C" fn moq_origin_announced_free(announced: u32) -> i32 {
 /// still fires once more with a terminal `0` (or a negative error), and that
 /// final callback is where `user_data` should be released.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_origin_announced_close(announced: u32) -> i32 {
+pub extern "C" fn moq_origin_announced_cancel(announced: u32) -> i32 {
 	ffi::enter(move || {
 		let announced = ffi::parse_id(announced)?;
 		State::lock().origin.announced_close(announced)
@@ -1553,7 +1507,7 @@ pub extern "C" fn moq_origin_announced_close(announced: u32) -> i32 {
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once announced, then exactly once
 /// more with a terminal code: `0` (the wait finished, including after
-/// [moq_origin_consume_announced_close]) or a negative error. After the terminal (`<= 0`) callback,
+/// [moq_origin_announced_broadcast_cancel]) or a negative error. After the terminal (`<= 0`) callback,
 /// `on_broadcast` is never called again and `user_data` is never touched again, so release
 /// `user_data` there. The broadcast handle is usable with [moq_consume_catalog] / [moq_consume_track]
 /// and must be freed separately with [moq_consume_close].
@@ -1564,30 +1518,30 @@ pub extern "C" fn moq_origin_announced_close(announced: u32) -> i32 {
 /// - The caller must ensure that path is a valid pointer to path_len bytes of data.
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_broadcast` callback.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_origin_consume_announced(
+pub unsafe extern "C" fn moq_origin_announced_broadcast(
 	origin: u32,
 	path: *const c_char,
 	path_len: usize,
-	on_broadcast: Option<extern "C" fn(user_data: *mut c_void, broadcast: i32)>,
+	on_broadcast: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
 		let path = unsafe { ffi::parse_str(path, path_len)? }.to_string();
-		let on_broadcast = unsafe { ffi::OnStatus::new(user_data, on_broadcast) };
+		let on_broadcast = unsafe { ffi::OnStatus::new(user_data, on_broadcast)? };
 		State::lock().origin.consume_announced(origin, path, on_broadcast)
 	})
 }
 
-/// Abort a wait started by [moq_origin_consume_announced].
+/// Abort a wait started by [moq_origin_announced_broadcast].
 ///
 /// Returns immediately: zero on success, or a negative code if already closed. Does NOT free
-/// `user_data`. The [moq_origin_consume_announced] `on_broadcast` callback still fires once more
+/// `user_data`. The [moq_origin_announced_broadcast] `on_broadcast` callback still fires once more
 /// with a terminal `0` (or a negative error), and that final callback is where `user_data` should
 /// be released. Any broadcast handle already delivered is unaffected and must still be freed with
 /// [moq_consume_close].
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_origin_consume_announced_close(task: u32) -> i32 {
+pub extern "C" fn moq_origin_announced_broadcast_cancel(task: u32) -> i32 {
 	ffi::enter(move || {
 		let task = ffi::parse_id(task)?;
 		State::lock().origin.consume_announced_close(task)
@@ -1597,12 +1551,12 @@ pub extern "C" fn moq_origin_consume_announced_close(task: u32) -> i32 {
 /// Request a broadcast from an origin by path, resolving as soon as it can be served.
 ///
 /// Resolves against what is reachable by exact path *now*, where
-/// [moq_origin_consume_announced] waits indefinitely for a future announcement: it returns an
+/// [moq_origin_announced_broadcast] waits indefinitely for a future announcement: it returns an
 /// existing broadcast at once, whether announced or not, and fails when none is reachable. It does
 /// NOT wait for a later announcement. Serve on-demand paths with [moq_origin_dynamic].
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once served, then exactly once more
-/// with a terminal code: `0` (finished, including after [moq_origin_request_close]) or a negative
+/// with a terminal code: `0` (finished, including after [moq_origin_request_cancel]) or a negative
 /// error. After the terminal (`<= 0`) callback, `user_data` is never touched again, so release it
 /// there. The broadcast handle is usable with [moq_consume_catalog] / [moq_consume_track] and must
 /// be freed separately with [moq_consume_close].
@@ -1617,13 +1571,13 @@ pub unsafe extern "C" fn moq_origin_request(
 	origin: u32,
 	path: *const c_char,
 	path_len: usize,
-	on_broadcast: Option<extern "C" fn(user_data: *mut c_void, broadcast: i32)>,
+	on_broadcast: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
 		let path = unsafe { ffi::parse_str(path, path_len)? }.to_string();
-		let on_broadcast = unsafe { ffi::OnStatus::new(user_data, on_broadcast) };
+		let on_broadcast = unsafe { ffi::OnStatus::new(user_data, on_broadcast)? };
 		State::lock().origin.request(origin, path, on_broadcast)
 	})
 }
@@ -1635,7 +1589,7 @@ pub unsafe extern "C" fn moq_origin_request(
 /// code, which is where `user_data` should be released. Any broadcast handle already delivered is
 /// unaffected and must still be freed with [moq_consume_close].
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_origin_request_close(task: u32) -> i32 {
+pub extern "C" fn moq_origin_request_cancel(task: u32) -> i32 {
 	ffi::enter(move || {
 		let task = ffi::parse_id(task)?;
 		State::lock().origin.consume_announced_close(task)
@@ -1836,7 +1790,7 @@ pub extern "C" fn moq_publish_media_finish(export: u32) -> i32 {
 ///
 /// `on_demand` fires right away with the current [moq_demand] state, again on every
 /// change, then exactly once more with a terminal code: `0` (the track ended or the
-/// watcher was closed with [moq_publish_demand_close]) or a negative error. After the
+/// watcher was stopped with [moq_publish_demand_cancel]) or a negative error. After the
 /// terminal (`<= 0`) callback, `user_data` is never touched again. Reporting the current
 /// state first means a track that went unused before the watcher existed still reports it.
 ///
@@ -1850,13 +1804,12 @@ pub extern "C" fn moq_publish_media_finish(export: u32) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_publish_media_demand(
 	media: u32,
-	on_demand: Option<extern "C" fn(user_data: *mut c_void, status: i32)>,
+	on_demand: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let media = ffi::parse_id(media)?;
-		let on_demand = on_demand.ok_or(Error::InvalidPointer)?;
-		let on_demand = unsafe { ffi::OnStatus::new(user_data, Some(on_demand)) };
+		let on_demand = unsafe { ffi::OnStatus::new(user_data, on_demand)? };
 		let mut state = State::lock();
 		let demand = state.publish.media_demand(media)?;
 		state.publish.demand(demand, on_demand)
@@ -1870,7 +1823,7 @@ pub unsafe extern "C" fn moq_publish_media_demand(
 /// watcher's `on_demand` callback still fires once more with a terminal `0`, and
 /// that final callback is where `user_data` should be released.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_demand_close(watcher: u32) -> i32 {
+pub extern "C" fn moq_publish_demand_cancel(watcher: u32) -> i32 {
 	ffi::enter(move || {
 		let watcher = ffi::parse_id(watcher)?;
 		State::lock().publish.demand_close(watcher)
@@ -2337,13 +2290,12 @@ pub extern "C" fn moq_publish_track_abort(track: u32, error_code: u16) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_publish_track_demand(
 	track: u32,
-	on_demand: Option<extern "C" fn(user_data: *mut c_void, status: i32)>,
+	on_demand: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
-		let on_demand = on_demand.ok_or(Error::InvalidPointer)?;
-		let on_demand = unsafe { ffi::OnStatus::new(user_data, Some(on_demand)) };
+		let on_demand = unsafe { ffi::OnStatus::new(user_data, on_demand)? };
 		let mut state = State::lock();
 		let demand = state.publish.track_demand(track)?;
 		state.publish.demand(demand, on_demand)
@@ -2355,7 +2307,7 @@ pub unsafe extern "C" fn moq_publish_track_demand(
 /// Without a live handler a subscription to an unknown track name is refused. While one
 /// is live, `on_request` is invoked with a positive request handle for each pending
 /// track, then exactly once more with a terminal code: `0` (the broadcast finished, or
-/// [moq_publish_dynamic_close] was called) or a negative error. After the terminal
+/// [moq_publish_dynamic_cancel] was called) or a negative error. After the terminal
 /// (`<= 0`) callback, `user_data` is never touched again. Answer each request with
 /// [moq_track_request_accept], [moq_track_request_video], [moq_track_request_audio],
 /// or [moq_track_request_abort]; the subscriber waits until you do.
@@ -2368,13 +2320,12 @@ pub unsafe extern "C" fn moq_publish_track_demand(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_publish_dynamic(
 	broadcast: u32,
-	on_request: Option<extern "C" fn(user_data: *mut c_void, request: i32)>,
+	on_request: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
-		let on_request = on_request.ok_or(Error::InvalidPointer)?;
-		let on_request = unsafe { ffi::OnStatus::new(user_data, Some(on_request)) };
+		let on_request = unsafe { ffi::OnStatus::new(user_data, on_request)? };
 		State::lock().publish.dynamic(broadcast, on_request)
 	})
 }
@@ -2384,7 +2335,7 @@ pub unsafe extern "C" fn moq_publish_dynamic(
 /// Without a live handler a fetch that misses the cache fails as not found. While one is
 /// live, `on_group` is invoked with a positive group-request handle for each miss, then
 /// exactly once more with a terminal code: `0` (the track ended, or
-/// [moq_publish_dynamic_close] was called) or a negative error. After the terminal
+/// [moq_publish_dynamic_cancel] was called) or a negative error. After the terminal
 /// (`<= 0`) callback, `user_data` is never touched again. Cached groups never reach the
 /// handler. Answer each request with [moq_group_request_accept] or [moq_group_request_abort].
 ///
@@ -2396,13 +2347,12 @@ pub unsafe extern "C" fn moq_publish_dynamic(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_publish_track_dynamic(
 	track: u32,
-	on_group: Option<extern "C" fn(user_data: *mut c_void, request: i32)>,
+	on_group: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
-		let on_group = on_group.ok_or(Error::InvalidPointer)?;
-		let on_group = unsafe { ffi::OnStatus::new(user_data, Some(on_group)) };
+		let on_group = unsafe { ffi::OnStatus::new(user_data, on_group)? };
 		State::lock().publish.track_dynamic(track, on_group)
 	})
 }
@@ -2414,7 +2364,7 @@ pub unsafe extern "C" fn moq_publish_track_dynamic(
 /// handler's callback still fires once more with a terminal `0`, and that final
 /// callback is where `user_data` should be released.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_dynamic_close(dynamic: u32) -> i32 {
+pub extern "C" fn moq_publish_dynamic_cancel(dynamic: u32) -> i32 {
 	ffi::enter(move || {
 		let dynamic = ffi::parse_id(dynamic)?;
 		State::lock().publish.dynamic_close(dynamic)
@@ -2453,13 +2403,12 @@ pub unsafe extern "C" fn moq_track_request_name(request: u32, dst: *mut moq_stri
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_track_request_dynamic(
 	request: u32,
-	on_group: Option<extern "C" fn(user_data: *mut c_void, request: i32)>,
+	on_group: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let request = ffi::parse_id(request)?;
-		let on_group = on_group.ok_or(Error::InvalidPointer)?;
-		let on_group = unsafe { ffi::OnStatus::new(user_data, Some(on_group)) };
+		let on_group = unsafe { ffi::OnStatus::new(user_data, on_group)? };
 		State::lock().publish.track_request_dynamic(request, on_group)
 	})
 }
@@ -2788,7 +2737,7 @@ pub extern "C" fn moq_publish_json_stream_finish(stream: u32) -> i32 {
 /// a terminal code: `0` (closed cleanly) or a negative error. After the terminal
 /// (`<= 0`) callback, `on_catalog` is never called again and `user_data` is never
 /// touched again, so release `user_data` there. The terminal callback fires even
-/// after [moq_consume_catalog_close].
+/// after [moq_consume_catalog_cancel].
 ///
 /// Returns a non-zero handle on success, or a negative code on failure.
 ///
@@ -2797,12 +2746,12 @@ pub extern "C" fn moq_publish_json_stream_finish(stream: u32) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_catalog(
 	broadcast: u32,
-	on_catalog: Option<extern "C" fn(user_data: *mut c_void, catalog: i32)>,
+	on_catalog: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
-		let on_catalog = unsafe { ffi::OnStatus::new(user_data, on_catalog) };
+		let on_catalog = unsafe { ffi::OnStatus::new(user_data, on_catalog)? };
 		State::lock().consume.catalog(broadcast, on_catalog)
 	})
 }
@@ -2815,7 +2764,7 @@ pub unsafe extern "C" fn moq_consume_catalog(
 /// should be released. Catalog snapshots previously delivered via the callback
 /// remain valid until freed with [moq_consume_catalog_free].
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_consume_catalog_close(catalog: u32) -> i32 {
+pub extern "C" fn moq_consume_catalog_cancel(catalog: u32) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		State::lock().consume.catalog_close(catalog)
@@ -2991,7 +2940,7 @@ pub unsafe extern "C" fn moq_consume_catalog_section(
 ///   more with a terminal code: `0` (closed cleanly) or a negative error. After
 ///   the terminal (`<= 0`) callback, `on_frame` is never called again and
 ///   `user_data` is never touched again, so release `user_data` there. The
-///   terminal callback fires even after [moq_consume_video_close].
+///   terminal callback fires even after [moq_consume_video_cancel].
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
@@ -3002,14 +2951,14 @@ pub unsafe extern "C" fn moq_consume_video(
 	catalog: u32,
 	index: u32,
 	max_age_us: u64,
-	on_frame: Option<extern "C" fn(user_data: *mut c_void, frame: i32)>,
+	on_frame: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
 		let max_age = std::time::Duration::from_micros(max_age_us);
-		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
+		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame)? };
 		State::lock().consume.video(catalog, index, max_age, on_frame)
 	})
 }
@@ -3021,7 +2970,7 @@ pub unsafe extern "C" fn moq_consume_video(
 /// still fires once more with a terminal `0` (or a negative error), which is
 /// where `user_data` should be released.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_consume_video_close(track: u32) -> i32 {
+pub extern "C" fn moq_consume_video_cancel(track: u32) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
 		State::lock().consume.track_close(track)
@@ -3034,7 +2983,7 @@ pub extern "C" fn moq_consume_video_close(track: u32) -> i32 {
 /// more with a terminal code: `0` (closed cleanly) or a negative error. After
 /// the terminal (`<= 0`) callback, `on_frame` is never called again and
 /// `user_data` is never touched again, so release `user_data` there. The
-/// terminal callback fires even after [moq_consume_audio_close].
+/// terminal callback fires even after [moq_consume_audio_cancel].
 /// The `max_age_us` parameter controls how long to wait before skipping frames.
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
@@ -3046,14 +2995,14 @@ pub unsafe extern "C" fn moq_consume_audio(
 	catalog: u32,
 	index: u32,
 	max_age_us: u64,
-	on_frame: Option<extern "C" fn(user_data: *mut c_void, frame: i32)>,
+	on_frame: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
 		let max_age = std::time::Duration::from_micros(max_age_us);
-		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
+		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame)? };
 		State::lock().consume.audio(catalog, index, max_age, on_frame)
 	})
 }
@@ -3065,7 +3014,7 @@ pub unsafe extern "C" fn moq_consume_audio(
 /// still fires once more with a terminal `0` (or a negative error), which is
 /// where `user_data` should be released.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_consume_audio_close(track: u32) -> i32 {
+pub extern "C" fn moq_consume_audio_cancel(track: u32) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
 		State::lock().consume.track_close(track)
@@ -3123,7 +3072,7 @@ pub extern "C" fn moq_consume_close(consume: u32) -> i32 {
 /// (closed cleanly) or a negative error. After the terminal (`<= 0`) callback,
 /// `on_frame` is never called again and `user_data` is never touched again, so
 /// release `user_data` there. The terminal callback fires even after
-/// [moq_consume_track_close]. Read each frame with [moq_consume_track_frame] and
+/// [moq_consume_track_cancel]. Read each frame with [moq_consume_track_frame] and
 /// release it with [moq_consume_track_frame_free]. Pass NULL for `subscription`
 /// to use moq-net defaults.
 ///
@@ -3139,14 +3088,14 @@ pub unsafe extern "C" fn moq_consume_track(
 	name: *const c_char,
 	name_len: usize,
 	subscription: *const moq_subscription,
-	on_frame: Option<extern "C" fn(user_data: *mut c_void, frame: i32)>,
+	on_frame: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? };
 		let subscription = unsafe { subscription.as_ref() }.map(moq_net::track::Subscription::from);
-		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
+		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame)? };
 		State::lock().consume.raw_track(broadcast, name, subscription, on_frame)
 	})
 }
@@ -3207,7 +3156,7 @@ pub extern "C" fn moq_consume_track_frame_free(frame: u32) -> i32 {
 /// `user_data` should be released. Frames already delivered via the callback
 /// remain valid until released with [moq_consume_track_frame_free].
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_consume_track_close(track: u32) -> i32 {
+pub extern "C" fn moq_consume_track_cancel(track: u32) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
 		State::lock().consume.raw_track_close(track)
@@ -3221,7 +3170,7 @@ pub extern "C" fn moq_consume_track_close(track: u32) -> i32 {
 /// once more with a terminal code: `0` (closed cleanly) or a negative error. After the
 /// terminal (`<= 0`) callback, `on_datagram` is never called again and `user_data` is never
 /// touched again, so release `user_data` there. The terminal callback fires even after
-/// [moq_consume_datagrams_close]. Read each datagram with [moq_consume_datagram] and release
+/// [moq_consume_datagrams_cancel]. Read each datagram with [moq_consume_datagram] and release
 /// it with [moq_consume_datagram_free]. Datagrams arrive only over datagram-capable
 /// transports and lite-05 or newer moq-lite; there is no stream fallback.
 ///
@@ -3235,13 +3184,13 @@ pub unsafe extern "C" fn moq_consume_datagrams(
 	broadcast: u32,
 	name: *const c_char,
 	name_len: usize,
-	on_datagram: Option<extern "C" fn(user_data: *mut c_void, datagram: i32)>,
+	on_datagram: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? };
-		let on_datagram = unsafe { ffi::OnStatus::new(user_data, on_datagram) };
+		let on_datagram = unsafe { ffi::OnStatus::new(user_data, on_datagram)? };
 		State::lock().consume.datagram_track(broadcast, name, on_datagram)
 	})
 }
@@ -3282,7 +3231,7 @@ pub extern "C" fn moq_consume_datagram_free(datagram: u32) -> i32 {
 /// terminal `0` (or a negative error), which is where `user_data` should be released. Datagrams
 /// already delivered via the callback remain valid until released with [moq_consume_datagram_free].
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_consume_datagrams_close(task: u32) -> i32 {
+pub extern "C" fn moq_consume_datagrams_cancel(task: u32) -> i32 {
 	ffi::enter(move || {
 		let task = ffi::parse_id(task)?;
 		State::lock().consume.datagram_track_close(task)
@@ -3308,7 +3257,7 @@ pub unsafe extern "C" fn moq_consume_json_snapshot(
 	name: *const c_char,
 	name_len: usize,
 	config: *const moq_json_snapshot_config,
-	on_value: Option<extern "C" fn(user_data: *mut c_void, value: i32)>,
+	on_value: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
@@ -3321,7 +3270,7 @@ pub unsafe extern "C" fn moq_consume_json_snapshot(
 		} else {
 			moq_json::Compression::None
 		};
-		let on_value = unsafe { ffi::OnStatus::new(user_data, on_value) };
+		let on_value = unsafe { ffi::OnStatus::new(user_data, on_value)? };
 		State::lock().consume.json_snapshot(broadcast, name, consumer, on_value)
 	})
 }
@@ -3343,7 +3292,7 @@ pub unsafe extern "C" fn moq_consume_json_stream(
 	name: *const c_char,
 	name_len: usize,
 	config: *const moq_json_stream_config,
-	on_value: Option<extern "C" fn(user_data: *mut c_void, value: i32)>,
+	on_value: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
@@ -3354,7 +3303,7 @@ pub unsafe extern "C" fn moq_consume_json_stream(
 		if config.compression {
 			consumer.compression = moq_json::Compression::Deflate;
 		}
-		let on_value = unsafe { ffi::OnStatus::new(user_data, on_value) };
+		let on_value = unsafe { ffi::OnStatus::new(user_data, on_value)? };
 		State::lock().consume.json_stream(broadcast, name, consumer, on_value)
 	})
 }
@@ -3395,7 +3344,7 @@ pub extern "C" fn moq_consume_json_value_free(value: u32) -> i32 {
 /// error), which is where `user_data` should be released. Values already delivered remain valid
 /// until released with [moq_consume_json_value_free].
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_consume_json_close(task: u32) -> i32 {
+pub extern "C" fn moq_consume_json_cancel(task: u32) -> i32 {
 	ffi::enter(move || {
 		let task = ffi::parse_id(task)?;
 		State::lock().consume.json_close(task)

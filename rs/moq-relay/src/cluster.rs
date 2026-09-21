@@ -1106,9 +1106,9 @@ impl Cluster {
 			origin_config.pool = cache.pool;
 			origin_config.cache_duration = cache.duration;
 		}
-		let origin = moq_tokio::origin::spawn(origin_config);
+		let origin = moq_tokio::origin::spawn_config(origin_config);
 		let nodes = crate::nodes::Nodes::new(origin.clone());
-		tracing::info!(hop_id = %origin.id(), configured = config.id.is_some(), "cluster initialized");
+		tracing::info!(hop_id = %origin.hop(), configured = config.id.is_some(), "cluster initialized");
 		Ok(Cluster {
 			config,
 			client: None,
@@ -1199,12 +1199,12 @@ impl Cluster {
 	/// Passed by reference to [`moq_net::Server::with_publisher`] (or the
 	/// equivalent per-request setter), which derives the read handle.
 	pub fn subscriber(&self, token: &auth::Token) -> Option<origin::Producer> {
-		self.origin.with_root(&token.root)?.scope(&token.subscribe)
+		self.origin.scope(&token.root, &token.subscribe).ok()
 	}
 
 	/// Returns an [`origin::Producer`] scoped to this session's publish permissions.
 	pub fn publisher(&self, token: &auth::Token) -> Option<origin::Producer> {
-		self.origin.with_root(&token.root)?.scope(&token.publish)
+		self.origin.scope(&token.root, &token.publish).ok()
 	}
 
 	/// Resolve whether gossip is on and which URL this relay advertises, from
@@ -1561,7 +1561,11 @@ impl Cluster {
 	/// unannounce-then-announce within sub-milliseconds, which clears the
 	/// pending-cleanup timestamp long before the sweep fires.
 	async fn run_discovery(self, self_url: String, token: String, dialed: DialMap) {
-		let Some(consumer) = self.origin.consume().with_root(MESH_PREFIX) else {
+		let Ok(consumer) = self
+			.origin
+			.consume()
+			.scope(MESH_PREFIX, &moq_net::Patterns::from(moq_net::Pattern::all()))
+		else {
 			tracing::warn!("could not scope cluster origin to {MESH_PREFIX}; discovery disabled");
 			return;
 		};
@@ -1916,8 +1920,7 @@ impl Cluster {
 		// Cluster dials use their configured stats tier. Cluster peers carry no auth
 		// root, so presence is keyed under the empty root within the cluster tier.
 		let mut client = client
-			.with_publisher(&self.origin)
-			.with_subscriber(self.origin.clone())
+			.with_origin(self.origin.clone())
 			.with_stats(self.stats.tier(self.cluster_tier()).session(""));
 		if let Some(cost) = cost {
 			client = client.with_cost(cost);
@@ -1982,8 +1985,7 @@ impl Cluster {
 		let addrs = moq_tokio::Addrs::collect(target.addrs()).context("peer advertised no reachable address")?;
 		let mut client = self
 			.lan_client(target.fingerprint.as_deref())?
-			.with_publisher(&self.origin)
-			.with_subscriber(self.origin.clone());
+			.with_origin(self.origin.clone());
 		if let Some(cost) = target.cost {
 			client = client.with_cost(cost);
 		}
@@ -2885,7 +2887,7 @@ mod tests {
 			..Default::default()
 		})
 		.expect("valid id");
-		assert_eq!(cluster.origin.id(), 42);
+		assert_eq!(cluster.origin.hop().id(), 42);
 	}
 
 	/// Cache settings land on the one origin serving, node discovery, and stats
@@ -2908,7 +2910,7 @@ mod tests {
 		.expect("cluster");
 
 		let origin = cluster.origin.clone();
-		assert_eq!(origin.id(), 42);
+		assert_eq!(origin.hop().id(), 42);
 		assert_eq!(origin.config().cache_duration, duration);
 		assert_eq!(origin.config().pool.expiry(), Some(duration));
 
@@ -2920,7 +2922,7 @@ mod tests {
 		.build(origin.clone());
 		let cluster = cluster.with_stats(stats);
 
-		assert_eq!(cluster.origin.id(), origin.id());
+		assert_eq!(cluster.origin.hop().id(), origin.hop().id());
 		assert_eq!(cluster.origin.config().cache_duration, duration);
 		assert_eq!(cluster.origin.config().pool.expiry(), Some(duration));
 
@@ -2939,7 +2941,7 @@ mod tests {
 		let path = Path::new(MESH_PREFIX).join("https://peer.example/");
 		let mut announced = consumer
 			.clone()
-			.with_root(MESH_PREFIX)
+			.scope(MESH_PREFIX, &moq_net::Patterns::from(moq_net::Pattern::all()))
 			.expect("mesh prefix")
 			.announced();
 		let registration = origin.create_broadcast(&path).expect("node advertise");

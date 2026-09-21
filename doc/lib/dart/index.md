@@ -28,7 +28,7 @@ final moq = await Moq.connect('https://relay.example.com');
 
 // Subscribe. The stream is live, so listen to it rather than awaiting its end.
 moq.announcements(prefix: 'live/').listen((announcement) {
-  print(announcement.path());
+  print(announcement.prefix());
 });
 final broadcast = await moq.requestBroadcast('live/camera');
 ```
@@ -50,8 +50,9 @@ advertisement; `origin.dynamic_(prefix:, route:)` claims `prefix` and
 every path beneath it (`''` for everything; Dart spells the origin method
 `dynamic_` because `dynamic` is reserved). Hold the returned handle while the
 claim should stay advertised, and reject the requests you will not serve. A
-route is a capability, not an inventory; `announcement.path()` is the covered
-prefix.
+route is a capability, not an inventory. `announcements(prefix:)` is the
+requested discovery scope; `announcement.prefix()` is the concrete covered
+prefix relative to it.
 
 Sessions reconnect with backoff when the transport drops and re-announce local
 broadcasts. `moq.epoch` counts the connections, 1 on the first, pairing with
@@ -61,7 +62,7 @@ inbound stream cap for a subscriber to many tracks.
 Cancelling a stream releases the native cursor. The package re-exports
 `moq_ffi`, so the full generated API is available without a second import.
 Generated configuration setters throw if a connect, listen, or accept is in
-flight, or after `cancel()`.
+flight, or after `cancel()`. Incoming requests report a `MoqTransport` enum.
 `ProtocolMoqException` carries a `MoqProtocolException` as `details` (scope, verbatim
 code, kind) when the peer sent a session or stream code.
 

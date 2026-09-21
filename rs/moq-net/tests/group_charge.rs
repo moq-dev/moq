@@ -15,7 +15,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-use moq_net::{Timestamp, broadcast, cache, origin};
+use moq_net::{Timestamp, broadcast, cache};
 
 thread_local! {
 	/// Bytes *this* thread has allocated and not yet freed. Per-thread and not a
@@ -60,11 +60,7 @@ fn measure() -> (usize, u64) {
 	// Unbounded: nothing may be evicted underneath the measurement.
 	let pool = cache::Pool::unbounded();
 	let mut info = broadcast::Info::new();
-	info.origin = {
-		let mut origin = origin::Config::default();
-		origin.pool = pool.clone();
-		origin
-	};
+	info.pool = pool.clone();
 
 	let broadcast = info.produce();
 	let track = broadcast.create_track("chat", None).unwrap();

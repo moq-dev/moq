@@ -35,7 +35,7 @@ func ExampleClient_Announced() {
 		if !ann.Active() {
 			continue
 		}
-		fmt.Println("broadcast:", ann.Path())
+		fmt.Println("broadcast:", ann.Prefix())
 	}
 }
 

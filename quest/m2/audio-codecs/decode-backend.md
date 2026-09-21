@@ -12,8 +12,9 @@ documents which codecs each host decodes.
 Mirror `rs/moq-video/src/decode/backend` in name and shape: a crate-private
 `Backend` trait (`decode`, `flush`, `name`), an `open(codec, config)` that
 walks the platform candidates before the software ones and refuses when none
-takes the track, and `decode::Kind { Auto, Platform, Software, Named }` on
-`decode::Config`. `Decoder::name()` reports what was opened, which the OBS
+takes the track. Use the backend-selection configuration and Decoder
+constructor settled in m0 rather than adding a conflicting public shape.
+`Decoder::name()` reports what was opened, which the OBS
 stats and `moq play` surface.
 
 - The seam is generic over `hang::catalog::AudioCodec`, so a backend advertises
@@ -27,14 +28,19 @@ stats and `moq play` surface.
   catalog said (HE-AAC doubles the rate); `Consumer` already resamples and
   remixes to the requested output, so that stays the seam's contract.
 - The `aac` feature keeps gating symphonia. Platform backends are
-  `cfg(target_os)` like their video counterparts, with `mediacodec` behind the
-  existing feature.
+  `cfg(target_os)` like their video counterparts. Audio has no MediaCodec
+  feature yet; its Android quest introduces the optional dependency following
+  the settled media build policy.
 - Docs: `doc/lib/rs/moq-audio.md` gains the backend table `moq-video.md` has,
   and states the Linux gap. `doc/bin/cli.md` and `doc/bin/obs.md` follow.
 - Regression: the selection order and `Named` refusal, tested with a stub
   backend like the video seam's `probe`.
 
 The FFI does not expose `Kind` until a consumer asks.
+
+## Required
+
+- [Audio configuration](/quest/m0/audio-config.md) - stable decoder settings and selection entry points
 
 ## Related
 

@@ -30,7 +30,7 @@ final class Moq {
   }) async {
     final client = MoqClient();
     try {
-      if (!tlsVerify) client.setTlsDisableVerify(disable: true);
+      if (!tlsVerify) client.setTlsVerify(verify: false);
       if (tlsRoots != null) client.setTlsRoots(paths: tlsRoots);
       if (tlsSystemRoots != null) {
         client.setTlsSystemRoots(systemRoots: tlsSystemRoots);
@@ -60,7 +60,7 @@ final class Moq {
   MoqBroadcastProducer createBroadcast(String path) =>
       session.publish().createBroadcast(path: path);
 
-  /// Stream announcements whose paths begin with [prefix].
+  /// Stream routes under requested [prefix]; updates return relative covered prefixes.
   Stream<MoqAnnounceUpdate> announcements({String prefix = ''}) async* {
     final announced = session.consume().announced(prefix: prefix);
     try {
@@ -75,7 +75,7 @@ final class Moq {
     }
   }
 
-  /// Return the raw announcement cursor for [prefix].
+  /// Return the raw cursor for requested [prefix]; updates return relative covered prefixes.
   MoqAnnounceConsumer announced({String prefix = ''}) =>
       session.consume().announced(prefix: prefix);
 

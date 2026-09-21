@@ -5,10 +5,10 @@
 With `Gop::Refresh`, the V4L2 backend asks the hardware for periodic intra
 refresh and no IDR after the first frame; a driver that lacks the control
 refuses the mode. Groups come from the producer's frame count, so a driver
-that emits no recovery-point SEI still forms one group per sweep. V4L2 has no
-control that restarts a sweep, so a mid-cycle `cut()` is refused on this
-backend rather than deferred; the only cut it honours is the implicit one on a
-fresh encoder, whose first frame starts the first sweep.
+that emits no recovery-point SEI still forms one group per sweep. Periodic
+refresh controls do not by themselves guarantee an immediate sweep restart.
+Verify the selected driver; refuse an unsupported mid-cycle cut rather than
+claiming a boundary that was not encoded.
 
 ## Plan
 
@@ -19,9 +19,10 @@ fresh encoder, whose first frame starts the first sweep.
   `GOP_SIZE` to zero for an unbounded GOP, and refuse the mode when the driver
   rejects both controls, unlike the self-disabling `keyframes` fallback used
   for forced keyframes.
-- A cut in refresh mode returns an error from this backend: the shared
-  contract says a cut restarts the sweep, and V4L2 cannot, so it refuses
-  rather than opening a group out of phase with the refreshed macroblocks.
+- A cut in refresh mode restarts the sweep. If the driver cannot honor it,
+  report rejection through the error path settled in m0; this does not
+  independently require a Result from cut(). Never open a group out of phase
+  with the refreshed macroblocks.
   The producer's forced cut on (re)open does not reach the backend, because a
   new encoder's first frame is a sweep start by construction; the producer
   treats it as the cut. The count stays aligned to the driver's period from

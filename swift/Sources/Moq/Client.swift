@@ -16,7 +16,7 @@ public final class Client: Sendable {
     /// Toggle TLS certificate verification. Defaults to on; pass `false` only
     /// against a relay with a self-signed certificate during development.
     public func setTlsVerify(_ verify: Bool) throws {
-        try ffi.setTlsDisableVerify(disable: !verify)
+		try ffi.setTlsVerify(verify: verify)
     }
 
     /// Trust these PEM root certificate file path(s) instead of the system roots.

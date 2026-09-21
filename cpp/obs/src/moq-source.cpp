@@ -225,7 +225,7 @@ struct subscription_ref {
 	subscription_ref &operator=(const subscription_ref &) = delete;
 };
 
-// user_data for a single moq_origin_consume_announced. The generation must travel
+// user_data for a single moq_origin_announced_broadcast. The generation must travel
 // with the request rather than live on ctx: a reconnect can issue a new request while
 // an older one still has a delivery in flight, and a single slot on ctx would let
 // that stale delivery read the new generation and pass the staleness check.
@@ -686,14 +686,14 @@ static void moq_source_subscribe_video(struct moq_source *ctx, int32_t catalog, 
 		ctx->video_track = track;
 		pthread_mutex_unlock(&ctx->mutex);
 		if (old_track >= 0)
-			moq_consume_video_close(old_track);
+			moq_consume_video_cancel(old_track);
 		LOG_INFO("Subscribed to video track successfully");
 	} else {
 		// Stale or shutting down: close the track we just created; its terminal
 		// callback releases the reference added above.
 		pthread_mutex_unlock(&ctx->mutex);
 		if (!video_state->terminal.load())
-			moq_consume_video_close(track);
+			moq_consume_video_cancel(track);
 	}
 }
 
@@ -794,12 +794,12 @@ static void moq_source_subscribe_audio(struct moq_source *ctx, int32_t catalog, 
 		ctx->audio_track = track;
 		pthread_mutex_unlock(&ctx->mutex);
 		if (old_track >= 0)
-			moq_consume_audio_close(old_track);
+			moq_consume_audio_cancel(old_track);
 		LOG_INFO("Subscribed to audio track successfully (%u Hz, %u ch)", sample_rate, channels);
 	} else {
 		pthread_mutex_unlock(&ctx->mutex);
 		if (!audio_state->terminal.load())
-			moq_consume_audio_close(track);
+			moq_consume_audio_cancel(track);
 	}
 }
 
@@ -1013,7 +1013,7 @@ static void moq_source_start_consume(struct moq_source *ctx, uint32_t expected_g
 	// so it need not outlive this call, and delivers the broadcast handle
 	// asynchronously to on_broadcast.
 	int32_t request =
-		moq_origin_consume_announced(origin, broadcast_copy, strlen(broadcast_copy), on_broadcast, req);
+		moq_origin_announced_broadcast(origin, broadcast_copy, strlen(broadcast_copy), on_broadcast, req);
 	if (request < 0) {
 		LOG_ERROR("Failed to request broadcast '%s': %d", broadcast_copy, request);
 		bfree(broadcast_copy);
@@ -1041,13 +1041,13 @@ static void moq_source_start_consume(struct moq_source *ctx, uint32_t expected_g
 	} else {
 		// Stale or shutting down: close it; its terminal releases the reference.
 		pthread_mutex_unlock(&ctx->mutex);
-		moq_origin_consume_announced_close(request);
+		moq_origin_announced_broadcast_cancel(request);
 	}
 }
 
 // Receives the announced broadcast: a positive handle once announced, then exactly
 // once more with a terminal code (0 = finished, including after
-// moq_origin_consume_announced_close; < 0 = error). The terminal is the last touch
+// moq_origin_announced_broadcast_cancel; < 0 = error). The terminal is the last touch
 // of user_data, so it both frees the request context and releases the request's
 // lifetime reference via subscription_ref.
 static void on_broadcast(void *user_data, int32_t broadcast)
@@ -1137,7 +1137,7 @@ static void on_broadcast(void *user_data, int32_t broadcast)
 		// Stale or shutting down: close it; its terminal releases the reference.
 		pthread_mutex_unlock(&ctx->mutex);
 		if (!state->terminal.load())
-			moq_consume_catalog_close(catalog_handle);
+			moq_consume_catalog_cancel(catalog_handle);
 	}
 }
 
@@ -1152,7 +1152,7 @@ static void moq_source_clear_video_locked(struct moq_source *ctx)
 {
 	ctx->video_attempt++;
 	if (ctx->video_track >= 0) {
-		moq_consume_video_close(ctx->video_track);
+		moq_consume_video_cancel(ctx->video_track);
 		ctx->video_track = -1;
 	}
 	moq_source_destroy_decoder_locked(ctx);
@@ -1170,7 +1170,7 @@ static void moq_source_disconnect_locked(struct moq_source *ctx)
 	moq_source_clear_audio_locked(ctx);
 
 	if (ctx->catalog_handle >= 0) {
-		moq_consume_catalog_close(ctx->catalog_handle);
+		moq_consume_catalog_cancel(ctx->catalog_handle);
 		ctx->catalog_handle = -1;
 	}
 
@@ -1178,7 +1178,7 @@ static void moq_source_disconnect_locked(struct moq_source *ctx)
 	// fire (with 0) instead of leaving it pending until the source dies. This is the
 	// path that ends a wait for a broadcast that is never announced.
 	if (ctx->request >= 0) {
-		moq_origin_consume_announced_close(ctx->request);
+		moq_origin_announced_broadcast_cancel(ctx->request);
 		ctx->request = -1;
 	}
 
@@ -1636,7 +1636,7 @@ static void moq_source_clear_audio_locked(struct moq_source *ctx)
 {
 	ctx->audio_attempt++;
 	if (ctx->audio_track >= 0) {
-		moq_consume_audio_close(ctx->audio_track);
+		moq_consume_audio_cancel(ctx->audio_track);
 		ctx->audio_track = -1;
 	}
 	moq_source_destroy_audio_decoder_locked(ctx);

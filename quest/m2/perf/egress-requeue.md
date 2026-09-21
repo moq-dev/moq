@@ -3,9 +3,9 @@
 ## Goal
 
 The io_uring QUIC driver stages one GSO train per turn and then wakes
-itself (`Driver::flush`, rs/moq-uring/src/quic/quinn/connection.rs:744), so a
+itself (`Driver::flush`, rs/moq-uring/src/quic/noq/connection.rs:744), so a
 deep backlog on one connection pays a whole driver turn per train of
-`TRAIN_SEGMENTS = 63` segments (quinn/connection.rs:23; `MAX_GSO_SEGMENTS =
+`TRAIN_SEGMENTS = 63` segments (noq/connection.rs:23; `MAX_GSO_SEGMENTS =
 64` at udp.rs:56 is the kernel cap). That cadence is a hardcoded fairness choice.
 Make it a measured budget.
 
@@ -13,7 +13,7 @@ Make it a measured budget.
 
 The re-walk half of #3120 landed in #3134 (e6962b20e) on the since-deleted
 quiche driver; the noq driver drains an event queue instead of walking
-iterators (quinn/connection.rs:697) and never had that shape. What is left is
+iterators (noq/connection.rs:697) and never had that shape. What is left is
 the budget.
 
 - Add a trains-per-turn budget to `flush`. One train then

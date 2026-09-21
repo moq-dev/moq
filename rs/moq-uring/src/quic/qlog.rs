@@ -8,7 +8,7 @@
 //! the worker would stall every connection sharing its core for as long as
 //! the filesystem takes.
 //!
-//! One file per trace, in the qlog JSON-SEQ format the tokio listener already
+//! One file per connection, in the qlog JSON-SEQ format the tokio listener already
 //! writes, so an existing workflow reads both without knowing which runtime
 //! produced them.
 
@@ -118,37 +118,22 @@ impl Sink {
 	}
 
 	/// A writer for one connection's trace, named from its connection id.
-	#[cfg_attr(all(feature = "quinn", not(feature = "noq")), allow(dead_code))]
 	pub(crate) fn trace(&self, cid: &[u8], side: Side) -> Box<dyn io::Write + Send + Sync> {
-		self.open(Some(cid), side)
+		self.open(cid, side)
 	}
 
-	/// A writer for a trace covering a whole endpoint rather than one
-	/// connection, which is all quinn-proto's single per-config sink can
-	/// express. Each event carries the qlog `group_id` of the connection it
-	/// belongs to.
-	#[cfg_attr(any(not(feature = "quinn"), feature = "noq"), allow(dead_code))]
-	pub(crate) fn endpoint_trace(&self, side: Side) -> Box<dyn io::Write + Send + Sync> {
-		self.open(None, side)
-	}
-
-	fn open(&self, cid: Option<&[u8]>, side: Side) -> Box<dyn io::Write + Send + Sync> {
+	fn open(&self, cid: &[u8], side: Side) -> Box<dyn io::Write + Send + Sync> {
 		use std::fmt::Write as _;
 
 		let inner = self.inner.clone();
 		let file = inner.next.fetch_add(1, Ordering::Relaxed);
 		// The trace slot stays unique within the sink even when a peer reuses
 		// the same Initial destination connection id.
-		let id = match cid {
-			Some(cid) => {
-				let cid = cid.iter().fold(String::with_capacity(cid.len() * 2), |mut id, byte| {
-					let _ = write!(id, "{byte:02x}");
-					id
-				});
-				format!("connection{file}-{cid}")
-			}
-			None => format!("endpoint{file}"),
-		};
+		let cid = cid.iter().fold(String::with_capacity(cid.len() * 2), |mut id, byte| {
+			let _ = write!(id, "{byte:02x}");
+			id
+		});
+		let id = format!("connection{file}-{cid}");
 		let path = inner.dir.join(format!(
 			"moq-{}-{}-{}-{id}-{}.qlog",
 			inner.started,
@@ -384,8 +369,8 @@ mod tests {
 		let first = Sink::directory(dir.path()).expect("first sink");
 		let second = Sink::directory(dir.path()).expect("second sink");
 
-		let mut first_trace = first.endpoint_trace(Side::Server);
-		let mut second_trace = second.endpoint_trace(Side::Server);
+		let mut first_trace = first.trace(b"first", Side::Server);
+		let mut second_trace = second.trace(b"second", Side::Server);
 		first_trace.write_all(b"first").expect("write first trace");
 		second_trace.write_all(b"second").expect("write second trace");
 		drop(first_trace);
@@ -426,7 +411,7 @@ mod tests {
 	fn an_open_trace_accounts_for_staging_and_close() {
 		let dir = tempfile::tempdir().expect("temp dir");
 		let sink = Sink::directory(dir.path()).expect("sink");
-		let trace = sink.endpoint_trace(Side::Server);
+		let trace = sink.trace(b"accounting", Side::Server);
 
 		let accounted = CHUNK + std::mem::size_of::<Msg>();
 		for _ in 0..10_000 {
@@ -448,7 +433,7 @@ mod tests {
 		let held = MEMORY_MAX - CHUNK + 1;
 		assert!(sink.inner.reserve(held));
 
-		let mut trace = sink.endpoint_trace(Side::Server);
+		let mut trace = sink.trace(b"dropped", Side::Server);
 		trace.write_all(b"dropped").expect("write dropped trace");
 		drop(trace);
 		sink.inner.release(held);

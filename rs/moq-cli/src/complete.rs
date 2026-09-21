@@ -596,7 +596,7 @@ async fn catalog(
 /// what tells a relay two sessions carry the same content.
 async fn dial(side: &MoqSide, deadline: Instant) -> Option<(moq_net::origin::Producer, moq_tokio::Connection)> {
 	let url = side.client.url.clone()?;
-	let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
+	let origin = moq_tokio::origin::spawn();
 
 	// Building the client reads the TLS material off disk synchronously, so it goes on
 	// the blocking pool and under the deadline like everything else: a `--connect-tls-root`
@@ -775,7 +775,7 @@ mod tests {
 	/// because the shell exports a relay for the publishing it usually does.
 	#[tokio::test]
 	async fn the_environment_cannot_ask_for_a_moq_side() {
-		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
+		let origin = moq_tokio::origin::spawn();
 		let _alpha = origin.create_broadcast("alpha").expect("alpha");
 		_alpha.announce(Default::default()).expect("alpha");
 		let connect = relay(&origin);
@@ -867,7 +867,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_relay_on_the_line_answers_broadcast() {
 		let _env = EnvGuard::clear(&["MOQ_CONNECT"]);
-		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
+		let origin = moq_tokio::origin::spawn();
 		let _alpha = origin.create_broadcast("alpha").expect("alpha");
 		_alpha.announce(Default::default()).expect("alpha");
 		let _nested = origin.create_broadcast("room/beta").expect("beta");
@@ -892,7 +892,7 @@ mod tests {
 		let _env = EnvGuard::clear(&["MOQ_CONNECT"]);
 		use hang::catalog::{AudioCodec, AudioConfig, H264, VideoConfig};
 
-		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
+		let origin = moq_tokio::origin::spawn();
 
 		// Two broadcasts with different renditions, so a completer reading the wrong
 		// one fails loudly instead of matching by luck.
@@ -939,7 +939,7 @@ mod tests {
 	#[tokio::test]
 	async fn the_catalog_format_on_the_line_is_honored() {
 		let _env = EnvGuard::clear(&["MOQ_CONNECT"]);
-		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
+		let origin = moq_tokio::origin::spawn();
 		let broadcast = origin.create_broadcast("room").expect("broadcast");
 		broadcast.announce(Default::default()).expect("broadcast");
 

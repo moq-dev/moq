@@ -94,8 +94,8 @@ public final class Request: Sendable {
         ffi.query()
     }
 
-    /// The transport type, e.g. `"quic"`, `"iroh"`, or `"websocket"`.
-    public var transport: String {
+    /// The network transport carrying this session.
+    public var transport: Transport {
         ffi.transport()
     }
 

@@ -41,7 +41,7 @@ async def main() -> int:
     accept_task = asyncio.create_task(accept_one())
 
     client = moq.MoqClient()
-    client.set_tls_disable_verify(True)
+    client.set_tls_verify(False)
     client.set_bind("127.0.0.1:0")
 
     client_session = await client.connect(f"https://{addr}")

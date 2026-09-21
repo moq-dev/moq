@@ -51,7 +51,7 @@ impl Origin {
 	pub fn create(&mut self) -> Result<Id, Error> {
 		// Every FFI entry point runs inside `RUNTIME.enter()`, so the driver
 		// lands on the dedicated libmoq runtime.
-		self.active.insert(moq_tokio::origin::spawn(moq_net::Hop::random()))
+		self.active.insert(moq_tokio::origin::spawn())
 	}
 
 	pub fn get(&self, id: Id) -> Result<&moq_net::origin::Producer, Error> {
@@ -111,8 +111,8 @@ impl Origin {
 	pub fn announced_info(&self, announced: Id, dst: &mut moq_announce_update) -> Result<(), Error> {
 		let announced = self.announced.get(announced).ok_or(Error::AnnouncementNotFound)?;
 		*dst = moq_announce_update {
-			path: announced.0.as_str().as_ptr() as *const c_char,
-			path_len: announced.0.len(),
+			prefix: announced.0.as_str().as_ptr() as *const c_char,
+			prefix_len: announced.0.len(),
 			active: announced.1,
 		};
 		Ok(())
@@ -356,7 +356,7 @@ impl Origin {
 			.get_mut(dynamic)
 			.and_then(|entry| entry.as_mut())
 			.ok_or(Error::NotFound)?;
-		let inner = entry.inner.take();
+		let inner = entry.inner.take().ok_or(Error::NotFound)?;
 		entry.close.take();
 		drop(inner);
 		Ok(())

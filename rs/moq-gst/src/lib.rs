@@ -19,7 +19,6 @@ pub fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
 		.with_default_directive(LevelFilter::INFO.into())
 		.from_env_lossy() // Allow overriding with RUST_LOG
 		.add_directive("h2=warn".parse().unwrap())
-		.add_directive("quinn=info".parse().unwrap())
 		.add_directive("noq=info".parse().unwrap())
 		.add_directive("tracing::span=off".parse().unwrap())
 		.add_directive("tracing::span::active=off".parse().unwrap());

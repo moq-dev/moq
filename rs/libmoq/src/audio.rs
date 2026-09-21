@@ -408,13 +408,12 @@ pub extern "C" fn moq_encode_audio_reservation(producer: u32) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_encode_audio_demand(
 	producer: u32,
-	on_demand: Option<extern "C" fn(user_data: *mut c_void, status: i32)>,
+	on_demand: crate::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let producer = ffi::parse_id(producer)?;
-		let on_demand = on_demand.ok_or(Error::InvalidPointer)?;
-		let on_demand = unsafe { OnStatus::new(user_data, Some(on_demand)) };
+		let on_demand = unsafe { OnStatus::new(user_data, on_demand)? };
 		let mut state = State::lock();
 		let demand = state.audio.demand(producer)?;
 		state.publish.demand(demand, on_demand)
@@ -484,7 +483,7 @@ pub extern "C" fn moq_encode_audio_finish(producer: u32) -> i32 {
 /// more with a terminal code: `0` (closed cleanly) or a negative error. After
 /// the terminal (`<= 0`) callback, `on_frame` is never called again and
 /// `user_data` is never touched again, so release `user_data` there. The
-/// terminal callback fires even after [`moq_decode_audio_close`].
+/// terminal callback fires even after [`moq_decode_audio_cancel`].
 ///
 /// Starts at the newest cached group so reopening live playback skips the backlog.
 ///
@@ -499,7 +498,7 @@ pub unsafe extern "C" fn moq_decode_audio(
 	catalog: u32,
 	index: u32,
 	output: *const moq_audio_decoder_output,
-	on_frame: Option<extern "C" fn(user_data: *mut c_void, frame: i32)>,
+	on_frame: crate::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
@@ -513,7 +512,7 @@ pub unsafe extern "C" fn moq_decode_audio(
 		config.channels = zeroable(raw.channels);
 		config.max_age = Duration::from_micros(raw.max_age_us);
 
-		let on_frame = unsafe { OnStatus::new(user_data, on_frame) };
+		let on_frame = unsafe { OnStatus::new(user_data, on_frame)? };
 
 		let mut state = State::lock();
 		let (broadcast, audio_cfg, name) = state.consume.audio_rendition(catalog, index as usize)?;
@@ -531,7 +530,7 @@ pub unsafe extern "C" fn moq_decode_audio(
 /// released. Frame IDs already delivered to the callback are likewise not freed;
 /// release each with [`moq_decode_audio_frame_free`].
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_decode_audio_close(consumer: u32) -> i32 {
+pub extern "C" fn moq_decode_audio_cancel(consumer: u32) -> i32 {
 	ffi::enter(move || {
 		let consumer = ffi::parse_id(consumer)?;
 		State::lock().audio.consume_close(consumer)

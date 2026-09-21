@@ -40,8 +40,7 @@ waits on a review there.
 
 ## Related
 
-- [One QUIC backend](/quest/m1/quic-one-backend.md) - the reason a single
-  fork can carry every feature
+- The single noq backend lets one fork carry every feature.
 - [Release the stack](/quest/m2/quic/release.md) - how fork releases reach
   published MoQ crates
 - [Multipath spike](/quest/m3/multipath-spike.md) - noq's multipath support

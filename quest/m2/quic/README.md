@@ -15,10 +15,8 @@ timestamps, kernel pacing, buffer pools) live in m3.
 
 ## Plan
 
-[One QUIC backend](/quest/m1/quic-one-backend.md) deletes quinn and quiche
-on `dev` first; everything here assumes a single stack. The
-[fork](/quest/m2/quic/fork.md) is the first quest in the line and most
-others require it.
+Everything here assumes the single noq stack. The [fork](/quest/m2/quic/fork.md)
+is the first quest in the line and most others require it.
 
 Rules the line keeps:
 
@@ -80,8 +78,6 @@ This is a transport API change, not a MoQ wire change.
 
 ## Related
 
-- [One QUIC backend](/quest/m1/quic-one-backend.md) - the deletion this line
-  builds on
 - [Scope track priority](/quest/m2/track-priority-scope.md) - the
   per-broadcast fairness policy on cluster sessions
 - [Starvation](/quest/m2/qos/starvation.md) - the first consumer of ACK

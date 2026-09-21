@@ -558,7 +558,7 @@ mod tests {
 
 	async fn manufacture_input() -> Vec<u8> {
 		// Create the broadcast on a throwaway origin so the exporter can resolve it by path.
-		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
+		let origin = moq_tokio::origin::spawn();
 		let mut broadcast = origin.create_broadcast("cli").unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		settle().await;
@@ -668,7 +668,7 @@ mod tests {
 		// Publish side: `Publish::new(Ts)` builds a `ts::Import<Ext>`, so the verbatim
 		// streams land in the broadcast instead of being dropped by the media-only path.
 		// The broadcast is created on a throwaway origin so the exporter can resolve it by path.
-		let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
+		let origin = moq_tokio::origin::spawn();
 		let broadcast = origin.create_broadcast("cli").unwrap();
 		settle().await;
 		let mut publish = Publish::new(broadcast, &PublishFormat::Ts, Default::default()).unwrap();

@@ -5,8 +5,10 @@ description: TOML reference for moq-relay
 
 # Configuration
 
-`moq-relay relay.toml`. Every key is also a CLI flag and environment variable
-(`--listen-backend`, `MOQ_LISTEN_BACKEND`), named by joining the section and key.
+`moq-relay relay.toml`. Every key is also a CLI flag and environment variable.
+Most names join the section and key: `listen.tls.cert` is
+`--listen-tls-cert` / `MOQ_LISTEN_TLS_CERT`. The `listen.bind` key deliberately
+uses the shorter `--listen` / `MOQ_LISTEN` spelling.
 Precedence is CLI > env > file > defaults: a flag or environment variable that
 was actually supplied overrides the file, and a file key that was actually
 written (an empty list, a `false` boolean) overrides the built-in default.
@@ -23,7 +25,6 @@ cert = "cert.pem"                    # Certificate chain and key. Reloaded on ch
 key = "key.pem"
 generate = ["localhost"]             # Or: a self-signed cert for development.
 root = ["peer-ca.pem"]               # Optional: CAs for client certs (mTLS), reported to the auth server.
-                                     # The quiche backend fixes these at startup; restart to rotate them.
 
 [listen.tcp]                         # Plaintext qmux over TCP for trusted local workers.
 bind = "127.0.0.1:4444"
@@ -51,10 +52,8 @@ send_window = 33554432
 qlog = "/var/log/moq/qlog"           # Existing directory. Needs the `qlog` build feature.
 ```
 
-The `noq` (default), `quinn`, and `quiche` QUIC backends are compile-time
-features selected with `listen.backend` / `connect.backend`. Each ships a
-different BBR generation (BBRv1 on quinn, BBRv2 on quiche, BBRv3 on noq and
-iroh), which is why the knob names a family rather than an algorithm.
+The native QUIC stack uses BBRv3 for delay-based congestion control. Iroh also
+uses noq and the same congestion controller.
 
 Raise the receive windows when a fat, long path idles below the link rate: a
 window under the bandwidth-delay product stalls the sender waiting for credit.
@@ -62,12 +61,6 @@ Keep `stream_receive_window` well under `receive_window` so one slow group
 cannot starve the connection. `send_window` caps unacknowledged outgoing data
 whatever the peer allows, bounding the transport send buffer. A zero window is refused, and the receive windows must fit a QUIC
 varint since they ride on the wire as transport parameters.
-
-quiche has no local send cap, so it refuses `send_window` rather than quietly
-dropping it: use the `quinn` or `noq` backend, or leave it unset. It also
-autotunes each receive window up to a ceiling, so the relay pins that ceiling to
-the configured value and the window is exactly what was asked for, as on the
-other backends.
 
 ## \[runtime]
 
@@ -87,8 +80,8 @@ Packets are steered by connection ID, so a client that migrates stays with its
 worker. The group shares one port, including an ephemeral (zero) port: the
 first worker binds it and the rest join that port. Use an explicit port unless
 something reads the bound address at startup. `workers` needs the `noq`
-(default) or `quinn` backend and real certificate files rather than
-`tls.generate`. A build without a QUIC backend rejects `workers` instead of
+feature and real certificate files rather than `tls.generate`. A build without
+QUIC rejects `workers` instead of
 ignoring it. An embedding process leaves this group inside `Relay::run`;
 taking the sockets out and driving them yourself is how a later library
 update can drop QUIC while still compiling. `io_uring` additionally needs Linux 6.12+, the `io-uring` cargo

@@ -29,9 +29,9 @@ across the fleet in resident memory.
 
 ## Plan
 
-Decided 2026-09-18: publishing is prefix-only on every wire and patterns
-never leave the token or the client library
-([announce event](/quest/m1/api-net-announce.md)). `dynamic(prefix, route)`
+Decided in [#3770](https://github.com/moq-dev/moq/pull/3770): publishing is
+prefix-only on every wire and patterns never leave the token or the client library.
+`dynamic(prefix, route)`
 advertises a prefix; a suffix or catch-all claim is expressed as the
 widest prefix that covers it (`**` is the root) and the request is the
 authority, so the advertise half of this questline is re-scoped to prefix

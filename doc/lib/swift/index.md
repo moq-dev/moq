@@ -29,8 +29,8 @@ let client = Client()
 let session = try await client.connect(to: "https://relay.example.com")
 
 for try await announcement in try session.consume.announced(prefix: "live/") {
-    // An announcement is a route; its path is relative to the prefix.
-    let broadcast = try await session.consume.requestBroadcast(path: "live/" + announcement.path)
+    // The requested prefix scopes discovery; each update's prefix is relative to it.
+    let broadcast = try await session.consume.requestBroadcast(path: "live/" + announcement.prefix)
     for try await catalog in try broadcast.subscribeCatalog() {
         print(catalog)
     }
@@ -60,8 +60,8 @@ returns an unadvertised producer; `broadcast.announce(route:)` /
 `session.publish.dynamic(prefix:route:)` claims `prefix` and every path
 beneath it (`""` for everything). Hold the returned `OriginDynamic` while the
 claim should stay advertised, and reject the requests you will not serve. A
-route is a capability, not an inventory; `announcement.path` is the covered
-prefix.
+route is a capability, not an inventory. `announced(prefix:)` is the requested
+discovery scope; `announcement.prefix` is the concrete covered prefix relative to it.
 
 For a self-signed relay on your own test network, `try client.setTlsVerify(false)`
 accepts any certificate; prefer `setTlsRoots` or a fingerprint anywhere else.
@@ -73,7 +73,7 @@ with `session.status()` to log each reconnect; `client.setBackoff` tunes the
 pacing; and `client.setQuicMaxStreams` raises the peer's inbound stream cap.
 
 `Server` binds, generates or loads TLS, and hands you each request to
-`accept()` or `reject(code:)`. JSON tracks take `Codable` types
+`accept()` or `reject(code:)`; `request.transport` is a `Transport` enum. JSON tracks take `Codable` types
 (`publishJsonSnapshot(name:of:)`, `subscribeJsonStream(name:as:)`), and the
 rest of the [shared feature list](/lib/#what-every-binding-can-do) maps one
 to one: `fetchGroup`/`fetchMediaGroup`, `dynamic()` for tracks and `dynamic(prefix:)` for broadcasts, `appendDatagram`/

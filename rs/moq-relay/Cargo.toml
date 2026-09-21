@@ -29,8 +29,6 @@ iroh = ["moq-tokio/iroh"]
 cluster-lan = ["moq-tokio/mdns"]
 jemalloc = ["moq-tokio/jemalloc"]
 noq = ["_quic", "moq-tokio/noq"]
-quinn = ["_quic", "moq-tokio/quinn"]
-quiche = ["_quic", "moq-tokio/quiche"]
 # The tokio QUIC listener, and the thread-per-core worker group behind
 # `runtime.workers`. Not one to enable on its own: it names no backend, so
 # moq-tokio would have nothing to bind a socket with.
@@ -44,19 +42,10 @@ websocket = ["moq-tokio/websocket", "dep:qmux", "axum/ws"]
 # Unix-domain-socket stream listener (`--server-unix-bind`), unix-only. In the
 # default set; drop via --no-default-features on platforms without Unix sockets.
 uds = ["moq-tokio/uds"]
-# Serve QUIC from io_uring workers (`--runtime-io-uring`), Linux-only, in one of
-# three flavors. All are off by default: the relay is useful without io_uring.
-# `io-uring` uses noq-proto over rustls, matching the default tokio backend;
-# the suffixed features retain quinn-proto and quiche as explicit alternatives.
-#
-# Cargo features are additive, so asking for several compiles them and runs noq,
-# which is what the nightly `--all-features` pass does. `just rs uring` builds
-# each on its own.
+# Serve QUIC from io_uring workers (`--runtime-io-uring`), Linux-only.
+# This is off by default: the relay is useful without io_uring.
 io-uring = ["_uring", "moq-uring/noq"]
-io-uring-quinn = ["_uring", "moq-uring/quinn"]
-io-uring-quiche = ["_uring", "moq-uring/quiche"]
-# The listener all flavors share. Not one to enable on its own: moq-uring has
-# no `quic` module without a backend, so this alone does not build.
+# The listener machinery shared by the feature above.
 _uring = ["dep:moq-sock", "dep:moq-uring"]
 
 [dependencies]

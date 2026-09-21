@@ -4,7 +4,6 @@
 
 use std::{net::TcpListener, time::Duration};
 
-use moq_net::Hop;
 use moq_relay::{Config, Relay};
 use url::Url;
 
@@ -82,7 +81,7 @@ impl Drop for Publisher {
 
 async fn publish_version(port: u16, version: &str) -> Publisher {
 	let url: Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
-	let origin = moq_tokio::origin::spawn(Hop::random());
+	let origin = moq_tokio::origin::spawn();
 	let broadcast = origin.create_broadcast(PATH).expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
 	let track = broadcast.create_track("video", None).expect("create track");
@@ -132,7 +131,7 @@ async fn publish_unknown(port: u16) -> Publisher {
 /// broke rather than just "no frame".
 async fn read_first_frame(port: u16) -> Result<Vec<u8>, String> {
 	let url: Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
-	let origin = moq_tokio::origin::spawn(Hop::random());
+	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
 	let session = tokio::time::timeout(TIMEOUT, client(None).with_subscriber(origin).connect(url).established())
 		.await
@@ -182,7 +181,7 @@ async fn read_first_frame(port: u16) -> Result<Vec<u8>, String> {
 
 async fn watch_announces(port: u16, window: Duration) -> Vec<(String, bool)> {
 	let url: Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
-	let origin = moq_tokio::origin::spawn(Hop::random());
+	let origin = moq_tokio::origin::spawn();
 	let mut announced = origin.consume().announced();
 	let _session = tokio::time::timeout(TIMEOUT, client(None).with_subscriber(origin).connect(url).established())
 		.await

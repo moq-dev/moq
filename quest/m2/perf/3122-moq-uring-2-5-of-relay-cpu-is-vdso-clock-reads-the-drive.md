@@ -29,7 +29,7 @@ Where the reads are:
   (`self.shared.timers.borrow_mut().fire(Instant::now())`,
   rs/moq-uring/src/worker.rs:183).
 - The noq driver reads the clock for
-  `close` (rs/moq-uring/src/quic/quinn/connection.rs:239), `handle_timeout`
+  `close` (rs/moq-uring/src/quic/noq/connection.rs:239), `handle_timeout`
   (:671), and `poll_transmit` (:786). The last one runs once per GSO train,
   since `flush` stages one train per turn (see
   [Egress requeue](/quest/m2/perf/egress-requeue.md)).

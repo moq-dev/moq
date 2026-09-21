@@ -27,7 +27,7 @@ typedef struct {
     int32_t origin;
     int32_t session;
     int32_t broadcast_wait;
-    int32_t broadcast; // handle delivered by moq_origin_consume_announced (0 until it arrives)
+    int32_t broadcast; // handle delivered by moq_origin_announced_broadcast (0 until it arrives)
     int32_t catalog;
     int32_t video_track; // handle from moq_consume_video (0 until on_catalog starts it)
 
@@ -42,7 +42,7 @@ typedef struct {
 // on main's stack and libmoq keeps the pointer until each registration's
 // terminal (<= 0) callback fires, so main must not return until every one of
 // them has. Closing the session ends its status registration alone;
-// moq_origin_consume_announced, moq_consume_catalog and moq_consume_video each
+// moq_origin_announced_broadcast, moq_consume_catalog and moq_consume_video each
 // keep the pointer until their own terminal. See drain() at the bottom.
 static void done(ctx_t *c, int *flag) {
     pthread_mutex_lock(&c->mu);
@@ -151,9 +151,9 @@ static void drain(ctx_t *c) {
     if (track <= 0) c->done_frame = 1;
     pthread_mutex_unlock(&c->mu);
 
-    if (track > 0) moq_consume_video_close((uint32_t)track);
-    moq_consume_catalog_close((uint32_t)c->catalog);
-    moq_origin_consume_announced_close((uint32_t)c->broadcast_wait);
+    if (track > 0) moq_consume_video_cancel((uint32_t)track);
+    moq_consume_catalog_cancel((uint32_t)c->catalog);
+    moq_origin_announced_broadcast_cancel((uint32_t)c->broadcast_wait);
     moq_session_close((uint32_t)c->session);
 
     struct timespec deadline;
@@ -212,12 +212,12 @@ int main(int argc, char **argv) {
     deadline.tv_sec += (time_t)timeout_s;
 
     // The broadcast arrives over the network after connect, so wait for it to be
-    // announced. moq_origin_consume_announced resolves via on_broadcast once it's
+    // announced. moq_origin_announced_broadcast resolves via on_broadcast once it's
     // available; we block on the condvar until then (or the deadline).
     c.broadcast_wait =
-        moq_origin_consume_announced((uint32_t)c.origin, broadcast, strlen(broadcast), on_broadcast, &c);
+        moq_origin_announced_broadcast((uint32_t)c.origin, broadcast, strlen(broadcast), on_broadcast, &c);
     if (c.broadcast_wait <= 0) {
-        fail("error: moq_origin_consume_announced failed: %d\n", c.broadcast_wait);
+        fail("error: moq_origin_announced_broadcast failed: %d\n", c.broadcast_wait);
     }
 
     pthread_mutex_lock(&c.mu);

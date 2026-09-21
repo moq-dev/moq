@@ -23,8 +23,7 @@ impl Bridge {
 
 impl codec::Bridge for Bridge {
 	fn push(&mut self, frame: codec::Frame) -> Result<()> {
-		let pts = moq_net::Timestamp::from_micros(frame.timestamp_us)
-			.map_err(|err| crate::Error::Other(anyhow::anyhow!("invalid timestamp: {err}")))?;
+		let pts = moq_net::Timestamp::from_micros(frame.timestamp_us).map_err(moq_mux::Error::from)?;
 		// str0m hands over one whole access unit per frame, so flush to emit it.
 		let mut frames = self.split.decode(&frame.payload, Some(pts))?;
 		frames.extend(self.split.flush(Some(pts))?);

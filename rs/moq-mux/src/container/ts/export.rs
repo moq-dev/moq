@@ -269,7 +269,7 @@ struct SiTrack {
 enum SiState {
 	/// Waiting for the catalog broadcast to resolve; the track (by name) is
 	/// subscribed once it does.
-	Requesting(kio::Pending<moq_net::origin::Pending>, String),
+	Requesting(kio::Pending<moq_net::origin::Requesting>, String),
 	/// Waiting for the subscription to resolve.
 	Subscribing(kio::Pending<moq_net::track::Subscribing>),
 	/// The resolved subscription, reading snapshot groups.

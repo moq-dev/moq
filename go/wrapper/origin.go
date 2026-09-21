@@ -119,7 +119,7 @@ type OriginConsumer struct {
 	inner *ffi.MoqOriginConsumer
 }
 
-// Announced streams route announcements whose prefix starts with prefix.
+// Announced streams routes under the requested prefix. Each update returns a covered prefix relative to it.
 func (o *OriginConsumer) Announced(prefix string) (*AnnounceConsumer, error) {
 	inner, err := o.inner.Announced(prefix)
 	if err != nil {
@@ -152,20 +152,20 @@ func (o *OriginConsumer) RequestBroadcast(ctx context.Context, path string) (*Br
 }
 
 // AnnounceUpdate is a route announcement or retraction. A route claims that
-// Path and every path beneath it can be served; it carries no broadcast. Resolve a specific
+// Prefix and every path beneath it can be served; it carries no broadcast. Resolve a specific
 // path with [OriginConsumer.RequestBroadcast]. By convention a publisher
 // announces each broadcast's exact path.
 type AnnounceUpdate struct {
 	inner *ffi.MoqAnnounceUpdate
 }
 
-// Path is the prefix the route covers, relative to the announced prefix.
-func (a *AnnounceUpdate) Path() string {
-	return a.inner.Path()
+// Prefix is the covered prefix, relative to the requested announcements prefix.
+func (a *AnnounceUpdate) Prefix() string {
+	return a.inner.Prefix()
 }
 
 // Active reports whether the route is active (true) or was retracted (false).
-// A repeated active announcement for the same path is a metadata update.
+// A repeated active announcement for the same prefix is a metadata update.
 func (a *AnnounceUpdate) Active() bool {
 	return a.inner.Active()
 }

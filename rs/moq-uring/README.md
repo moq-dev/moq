@@ -60,48 +60,36 @@ the tokio stack.
 
 ## Backends
 
-The sans-IO QUIC stack behind `quic` is a build-time choice, and exactly one of
-them is compiled:
+The `quic` module uses the sans-IO [noq-proto](https://github.com/kixelated/noq)
+stack with rustls. The `noq` feature is enabled by default and remains optional
+so the worker, timers, and UDP socket can be built without QUIC.
 
 | Feature | Stack | TLS |
 |---|---|---|
 | `noq` (default) | [noq-proto](https://github.com/kixelated/noq) | rustls |
-| `quinn` | [quinn-proto](https://github.com/quinn-rs/quinn) | rustls, the stack the rest of this workspace already links |
-| `quiche` | [quiche](https://github.com/cloudflare/quiche) | BoringSSL, which needs cmake and a C++ toolchain to build |
 
-Nothing above the module changes: the same `quic::{Endpoint, Connection,
-SendStream, RecvStream}`, the same WebTransport layer, the same tests. A build
-asking for several (`--all-features`) gets `noq`, and a build asking for
-neither leaves the `quic` module out entirely, keeping the worker, its timers,
-and `udp::Socket`.
+Building without default features leaves the `quic` module out entirely.
 
 ```bash
-cargo test -p moq-uring --no-default-features --features quinn
+cargo test -p moq-uring --features noq
 ```
 
-`moq-relay` uses noq with `--features io-uring`. The
-`io-uring-quinn` and `io-uring-quiche` features select the alternatives.
+`moq-relay` enables it with `--features io-uring`.
 
-The `qlog` feature is orthogonal to the three, turning on whichever backend's
-own qlog support is compiled. Its per-backend shape follows the tokio stack:
-noq and quiche write one file per connection, while quinn-proto takes one sink
-per transport config and so writes one file per endpoint, tagging each event
-with the connection's qlog `group_id`.
+The `qlog` feature turns on noq's capture support. It writes one file per
+connection.
 
 ## Validation
 
-Every test runs against whichever backend is compiled, so the suite is the
-parity check between the three.
-
-`tests/echo.rs` runs a raw [quiche](https://github.com/cloudflare/quiche) echo
-over the worker: handshake, half a megabyte each way, timers driven by
-quiche's own timeout. `tests/session.rs` runs full moq-lite sessions through
+`tests/echo.rs` runs an echo against a tokio noq peer over the worker:
+handshake, half a megabyte each way, and timers driven by noq's timeout.
+`tests/session.rs` runs full moq-lite sessions through
 `quic::Endpoint` (including two clients demuxed on one server socket), and
 `tests/endpoint.rs` covers the endpoint mechanics (dial+accept on one socket,
 version negotiation, the dial-only refusal), `tests/workers.rs` runs a
 steered two-worker reuseport group serving one port across threads, and
-`tests/web.rs` is WebTransport interop against `web-transport-quinn` (the
-stack browsers interop with): stream/datagram echo through the H3 framing,
+`tests/web.rs` is WebTransport interop against `web-transport-noq`: stream and
+datagram echo through the H3 framing,
 close codes through the capsule, and a full moq-lite session over
 WebTransport. All of them skip (loudly) below the kernel floor, which
 includes GitHub-hosted CI runners.
@@ -110,8 +98,8 @@ includes GitHub-hosted CI runners.
 
 `udp_tokio` and `udp_uring` are the disposable syscall-level matrices from the
 first spike (recv batching x GRO x GSO, epoll vs io\_uring); see git history
-for their methodology. `echo_quiche` is the ablation matrix over the real
-worker: the same quiche echo with receive batching, GRO, and GSO toggled one
+for their methodology. `echo_noq` is the ablation matrix over the real
+worker: the same noq echo with receive batching, GRO, and GSO toggled one
 at a time.
 
 ```bash

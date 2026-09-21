@@ -69,7 +69,7 @@ pub struct Config {
 	/// single `<prefix>/node/<node>` broadcast for the whole node. Set to 1 to
 	/// publish a per-first-segment broadcast (e.g. per tenant), so a consumer can
 	/// announce-scope to just that group rather than slurping every node's full
-	/// stats. See [`moq_stats::ProducerConfig::depth`].
+	/// stats. See [`moq_stats::produce::Config::depth`].
 	#[usage(
 		long = "stats-depth",
 		env = "MOQ_STATS_DEPTH",
@@ -101,14 +101,14 @@ impl Config {
 	/// last clone of the producer drops).
 	pub fn build(&self, origin: origin::Producer) -> moq_stats::Producer {
 		if !self.enabled {
-			return moq_stats::Producer::new(moq_stats::ProducerConfig::new());
+			return moq_stats::Producer::new(moq_stats::produce::Config::new());
 		}
 		let prefix = self.prefix.clone();
 		let interval = Duration::from_secs(self.interval.max(1));
 		let node = self.node.clone().map(PathOwned::from);
 		let depth = self.depth;
 		tracing::info!(prefix, interval_secs = interval.as_secs(), node = ?node, depth, "stats publishing enabled");
-		let config = moq_stats::ProducerConfig::new()
+		let config = moq_stats::produce::Config::new()
 			.with_origin(origin)
 			.with_prefix(prefix)
 			.with_interval(interval)

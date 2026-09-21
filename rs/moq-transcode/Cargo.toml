@@ -47,7 +47,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
-moq-tokio = { workspace = true, features = ["quinn", "aws-lc-rs", "websocket"] }
+moq-tokio = { workspace = true, features = ["noq", "aws-lc-rs", "websocket"] }
 # test-util unlocks tokio::time::pause for the deterministic live-feed tests.
 tokio = { workspace = true, features = ["full", "test-util"] }
 url = { workspace = true }

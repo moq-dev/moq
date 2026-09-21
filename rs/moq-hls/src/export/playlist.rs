@@ -7,7 +7,7 @@
 //! directory.
 
 use std::fmt::Write;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 /// fMP4 segments via `EXT-X-MAP` require protocol version 6.
 const VERSION: u32 = 6;
@@ -35,8 +35,8 @@ pub(crate) struct Snapshot {
 pub(crate) struct Segment {
 	/// The aligned segment number; the URI is `seg/{segment}.m4s`.
 	pub segment: u64,
-	/// `EXTINF` duration in seconds.
-	pub duration: f64,
+	/// `EXTINF` duration.
+	pub duration: Duration,
 	/// The rendition has no content for this span (`EXT-X-GAP`): the segment keeps its slot in
 	/// the aligned numbering, but a player should not request it.
 	pub gap: bool,
@@ -82,7 +82,7 @@ pub(crate) fn render_media(snapshot: &Snapshot, query: Option<&str>) -> String {
 		if segment.gap {
 			let _ = writeln!(out, "#EXT-X-GAP");
 		}
-		let _ = writeln!(out, "#EXTINF:{:.5},", segment.duration);
+		let _ = writeln!(out, "#EXTINF:{:.5},", segment.duration.as_secs_f64());
 		let _ = writeln!(out, "seg/{}.m4s{suffix}", segment.segment);
 	}
 
@@ -107,13 +107,13 @@ mod tests {
 			segments: vec![
 				Segment {
 					segment: 10,
-					duration: 2.0,
+					duration: Duration::from_secs(2),
 					gap: false,
 					discontinuity: false,
 				},
 				Segment {
 					segment: 11,
-					duration: 1.96,
+					duration: Duration::from_millis(1960),
 					gap: false,
 					discontinuity: false,
 				},
@@ -146,7 +146,7 @@ mod tests {
 			media_sequence: 0,
 			segments: vec![Segment {
 				segment: 0,
-				duration: 4.0,
+				duration: Duration::from_secs(4),
 				gap: false,
 				discontinuity: false,
 			}],

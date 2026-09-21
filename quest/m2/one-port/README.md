@@ -81,5 +81,5 @@ pre-accepted streams can stand behind.
 
 - [P2P](/quest/m2/p2p/README.md) - the client that names the relay as its STUN server
 - [Stream sessions](/quest/m2/uring-tcp/README.md) - the io_uring workers that would host the same demux later
-- [Reuseport group](/quest/m2/reuseport-group.md) - the shard formation a per-shard demux rides
+- [Reuseport group](/quest/m0/sock-group.md) - the shard formation a per-shard demux rides
 - [Cluster discovery flags](/quest/m2/cluster-flags.md) - the flag shape for anything the demux adds

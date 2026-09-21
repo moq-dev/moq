@@ -8,18 +8,20 @@ import (
 	ffi "moq.dev/moq-ffi/moq"
 )
 
-// Transport is the wire transport an incoming session arrived over.
-type Transport string
+// Transport is the network transport carrying an incoming session.
+type Transport = ffi.MoqTransport
 
-// Known transports reported by Request.Transport. Future native versions may
-// report values not listed here, so treat Transport as an open set.
 const (
 	// TransportQUIC is a session that arrived over native QUIC.
-	TransportQUIC Transport = "quic"
+	TransportQUIC = ffi.MoqTransportQuic
 	// TransportIroh is a session that arrived over an Iroh peer-to-peer connection.
-	TransportIroh Transport = "iroh"
+	TransportIroh = ffi.MoqTransportIroh
 	// TransportWebSocket is a session that arrived over the WebSocket fallback transport.
-	TransportWebSocket Transport = "websocket"
+	TransportWebSocket = ffi.MoqTransportWebSocket
+	// TransportTCP is a session that arrived over a plaintext TCP connection.
+	TransportTCP = ffi.MoqTransportTcp
+	// TransportUnix is a session that arrived over a Unix domain socket.
+	TransportUnix = ffi.MoqTransportUnix
 )
 
 // Request is an incoming session that can be accepted (Accept) or rejected (Reject).
@@ -45,7 +47,7 @@ func (r *Request) Query() *string {
 
 // Transport is the wire transport the request arrived over, e.g. TransportQUIC.
 func (r *Request) Transport() Transport {
-	return Transport(r.inner.Transport())
+	return r.inner.Transport()
 }
 
 // SetPublish overrides the publish origin for this session. Pass nil to fall

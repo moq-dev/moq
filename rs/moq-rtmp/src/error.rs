@@ -14,10 +14,9 @@ pub enum Error {
 	#[error("io: {0}")]
 	Io(Arc<std::io::Error>),
 
-	/// Catch-all for ingest logic that reports via `anyhow` (the RTMP session and
-	/// the moq-mux demuxer surface their errors this way).
-	#[error("{0}")]
-	Other(Arc<anyhow::Error>),
+	/// The RTMP handshake or session state machine failed.
+	#[error("rtmp session: {0}")]
+	Session(String),
 }
 
 impl From<std::io::Error> for Error {
@@ -28,7 +27,7 @@ impl From<std::io::Error> for Error {
 
 impl From<anyhow::Error> for Error {
 	fn from(err: anyhow::Error) -> Self {
-		Error::Other(Arc::new(err))
+		Error::Session(err.to_string())
 	}
 }
 

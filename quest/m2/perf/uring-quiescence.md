@@ -8,7 +8,7 @@ the same drive-loop turn, so one enter carries the reply. Today
 lands in the next turn by design (rs/kio/src/task.rs:246-257, test
 `a_mid_pass_wake_lands_in_the_next_pass`), so a datagram costs three turns:
 dispatch sets the demux bit, the demux drains packets and kicks each
-connection driver (rs/moq-uring/src/quic/quinn/endpoint.rs:208-220,
+connection driver (rs/moq-uring/src/quic/noq/endpoint.rs:208-220,
 :285-290), and the drivers stage `SendMsg` a turn later. Every hop is a turn
 and up to an enter. The other io_uring runtimes drain their local queue to
 exhaustion, or to a quantum, before touching the ring.
@@ -29,7 +29,7 @@ must not starve the socket.
   stale first pass a park-returning turn runs today (worker.rs:180 polls on
   readiness the previous turn already consumed).
 - The egress driver's one-train-then-self-wake shape
-  (rs/moq-uring/src/quic/quinn/connection.rs:743-751) interacts with the
+  (rs/moq-uring/src/quic/noq/connection.rs:743-751) interacts with the
   budget: a deep backlog would consume every pass. Fold the
   [egress requeue](/quest/m2/perf/egress-requeue.md) train budget into the
   same sweep so trains per turn and passes per turn are measured together.

@@ -3,7 +3,7 @@
 //! Linux-only, because the mode is: every worker binds the listen address with
 //! `SO_REUSEPORT`, and no other platform load-balances a unicast UDP port across
 //! the group.
-#![cfg(all(target_os = "linux", feature = "quinn"))]
+#![cfg(all(target_os = "linux", feature = "noq"))]
 
 use std::net::{SocketAddr, UdpSocket};
 

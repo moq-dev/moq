@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
 
 	let track = config.track;
 
-	let origin = moq_tokio::origin::spawn(moq_net::Hop::random());
+	let origin = moq_tokio::origin::spawn();
 
 	match config.role {
 		Command::Publish => {
@@ -101,7 +101,7 @@ async fn main() -> anyhow::Result<()> {
 			let scope =
 				moq_net::Patterns::from(moq_net::Pattern::subtree(path.as_str()).context("invalid broadcast name")?);
 			let consumer = origin
-				.scope(&scope)
+				.scope("", &scope)
 				.context("not allowed to consume broadcast")?
 				.consume();
 			let mut announced = consumer.announced();

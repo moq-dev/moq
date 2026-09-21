@@ -22,7 +22,7 @@
 
 use super::server;
 
-pub use super::backend::Endpoint;
+pub use super::noq::Endpoint;
 
 /// Every connection id this endpoint issues is this long: long enough to be
 /// unguessable per socket, and fixed because a short header does not encode

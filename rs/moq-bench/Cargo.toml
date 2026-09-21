@@ -38,8 +38,6 @@ doc = false
 default = ["noq", "websocket"]
 iroh = ["moq-tokio/iroh"]
 noq = ["moq-tokio/noq"]
-quinn = ["moq-tokio/quinn"]
-quiche = ["moq-tokio/quiche"]
 uring = ["dep:moq-uring"]
 websocket = ["moq-tokio/websocket"]
 

@@ -55,9 +55,7 @@ pub struct LoadBalancer {
 
 /// The congestion control family for a QUIC connection.
 ///
-/// This selects a family rather than a named algorithm because each backend ships a
-/// different generation: BBRv1 on quinn, BBRv2 on quiche, BBRv3 on noq and iroh. A
-/// `Bbr` variant would promise more than any one backend delivers.
+/// Noq uses CUBIC for loss-based control and BBRv3 for delay-based control.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, usage::ValueEnum, serde::Serialize, serde::Deserialize)]
 #[usage(ignore_case)]
 #[serde(rename_all = "kebab-case")]
@@ -170,8 +168,7 @@ pub struct Config {
 	)]
 	pub mtu_discovery: Option<bool>,
 
-	/// Congestion control family. Defaults to `delay` on quinn and quiche, and to
-	/// `loss` on noq and iroh. Selecting `delay` there uses BBRv3.
+	/// Congestion control family. Defaults to `delay`, which uses BBRv3.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(
 		name = "quic-congestion-control",
@@ -213,8 +210,7 @@ pub struct Config {
 	/// Cap on unacknowledged outgoing data, in bytes, regardless of what the peer
 	/// allows. Unset leaves the backend default.
 	///
-	/// This bounds the transport send buffer. The quiche backend has no local send
-	/// cap and refuses this rather than dropping it.
+	/// This bounds the transport send buffer.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(
 		name = "quic-send-window",
@@ -226,9 +222,7 @@ pub struct Config {
 
 	/// Write qlog traces into this directory, which must already exist.
 	///
-	/// The layout is backend-specific: quiche and noq write one file per connection,
-	/// while quinn writes one file per endpoint and tags each event with the qlog
-	/// `group_id` of the connection it belongs to.
+	/// Noq writes one file per connection.
 	///
 	/// Requires the `qlog` feature; setting it errors at init otherwise.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
@@ -600,8 +594,7 @@ pub struct Resolved {
 	pub keep_alive: Option<Duration>,
 	/// Whether to run path MTU discovery.
 	pub mtu_discovery: bool,
-	/// Congestion control override, or `None` for the backend's own default. Each
-	/// backend picks that default itself, since they don't all agree.
+	/// Congestion control override, or `None` for the default.
 	pub congestion_control: Option<CongestionControl>,
 	/// Connection-wide receive window in bytes, or `None` for the backend default.
 	pub receive_window: Option<u64>,
@@ -618,12 +611,8 @@ impl Resolved {
 	///
 	/// Delay-based unless the operator says otherwise: BBR keeps queues short and the
 	/// send rate steady enough for a live encoder to track, which is what this stack
-	/// carries. Every backend resolves the default here rather than each picking its
-	/// own, so the answer can't drift between them.
-	#[cfg_attr(
-		not(any(feature = "quinn", feature = "noq", feature = "quiche", feature = "iroh")),
-		allow(dead_code)
-	)]
+	/// carries.
+	#[cfg_attr(not(any(feature = "noq", feature = "iroh")), allow(dead_code))]
 	pub(crate) fn congestion(&self) -> CongestionControl {
 		self.congestion_control.unwrap_or(CongestionControl::Delay)
 	}
@@ -632,7 +621,7 @@ impl Resolved {
 	///
 	/// Only meaningful once [`Config::validate`] has passed; a build without the
 	/// `qlog` feature never gets here with a directory set.
-	#[cfg_attr(not(any(feature = "quinn", feature = "noq", feature = "quiche")), allow(dead_code))]
+	#[cfg_attr(not(feature = "noq"), allow(dead_code))]
 	pub(crate) fn qlog_dir(&self) -> Option<&std::path::Path> {
 		self.qlog.as_deref()
 	}

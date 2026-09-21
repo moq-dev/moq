@@ -52,11 +52,11 @@
 //! should treat a decrease as a fresh segment.
 
 pub mod aggregate;
-mod consume;
-mod produce;
+pub mod consume;
+pub mod produce;
 
-pub use consume::{Consumer, ConsumerConfig, SessionsConsumer, TrafficConsumer};
-pub use produce::{Producer, ProducerConfig};
+pub use consume::Consumer;
+pub use produce::Producer;
 
 use std::collections::BTreeMap;
 

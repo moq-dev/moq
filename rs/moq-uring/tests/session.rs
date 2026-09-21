@@ -8,9 +8,9 @@
 //! Origin drivers run through Tokio's explicit-time adapter while session
 //! drivers use the worker's clock and timer.
 
-#![cfg(all(target_os = "linux", any(feature = "noq", feature = "quiche", feature = "quinn")))]
+#![cfg(all(target_os = "linux", feature = "noq"))]
 
-#[path = "support/quiche.rs"]
+#[path = "support.rs"]
 mod support;
 
 use std::net::UdpSocket;
@@ -38,8 +38,8 @@ fn lite_session_over_the_worker() {
 	let handle = worker.handle();
 
 	// The model and its origins, driven on a tokio thread (see module docs).
-	let (pub_origin, pub_driver) = origin::Producer::new(origin::Config::new(moq_net::Hop::random()));
-	let (sub_origin, sub_driver) = origin::Producer::new(origin::Config::new(moq_net::Hop::random()));
+	let (pub_origin, pub_driver) = origin::Producer::new(origin::Config::default());
+	let (sub_origin, sub_driver) = origin::Producer::new(origin::Config::default());
 	let origins = std::thread::spawn(move || {
 		let rt = tokio::runtime::Builder::new_current_thread()
 			.enable_time()
@@ -157,9 +157,9 @@ fn two_lite_sessions_share_the_server_socket() {
 	let Some(mut worker) = worker() else { return };
 	let handle = worker.handle();
 
-	let (pub_origin, pub_driver) = origin::Producer::new(origin::Config::new(moq_net::Hop::random()));
-	let (sub_a, sub_a_driver) = origin::Producer::new(origin::Config::new(moq_net::Hop::random()));
-	let (sub_b, sub_b_driver) = origin::Producer::new(origin::Config::new(moq_net::Hop::random()));
+	let (pub_origin, pub_driver) = origin::Producer::new(origin::Config::default());
+	let (sub_a, sub_a_driver) = origin::Producer::new(origin::Config::default());
+	let (sub_b, sub_b_driver) = origin::Producer::new(origin::Config::default());
 	let origins = std::thread::spawn(move || {
 		let rt = tokio::runtime::Builder::new_current_thread()
 			.enable_time()
@@ -273,7 +273,7 @@ fn two_lite_sessions_share_the_server_socket() {
 }
 
 /// The client verifies for real, trusting only the certificate the server
-/// presents: nothing handshakes unless the configured roots reach quiche.
+/// presents: nothing handshakes unless the configured roots reach noq.
 #[test]
 fn configured_roots_verify_the_server() {
 	let Some(mut worker) = worker() else { return };

@@ -114,6 +114,9 @@ extern "C" fn channel_callback(user_data: *mut c_void, code: i32) {
 	let _ = tx.send(code);
 }
 
+/// FFI callback for tests that only inspect the registrar's immediate return code.
+extern "C" fn ignore_callback(_user_data: *mut c_void, _code: i32) {}
+
 /// Build a valid OpusHead init buffer (RFC 7845 §5.1).
 fn opus_head() -> Vec<u8> {
 	let mut head = Vec::with_capacity(19);
@@ -223,10 +226,16 @@ fn last_error_set_before_callback() {
 	}
 
 	let mut captured: Option<String> = None;
-	let cb = unsafe { OnStatus::new(&mut captured as *mut _ as *mut c_void, Some(capture)) };
+	let cb = unsafe { OnStatus::new(&mut captured as *mut _ as *mut c_void, Some(capture)) }.unwrap();
 	cb.call(Err::<(), Error>(Error::OriginNotFound));
 
 	assert_eq!(captured.as_deref(), Some("origin not found"));
+}
+
+#[test]
+fn status_callback_refuses_null() {
+	let callback = unsafe { crate::ffi::OnStatus::new(std::ptr::null_mut(), None) };
+	assert!(matches!(callback, Err(Error::InvalidPointer)));
 }
 
 #[test]
@@ -259,7 +268,7 @@ fn last_error_protocol_captures_a_stream_app_code() {
 	}
 
 	let mut captured: Option<moq_protocol_error> = None;
-	let cb = unsafe { OnStatus::new(&mut captured as *mut _ as *mut c_void, Some(capture)) };
+	let cb = unsafe { OnStatus::new(&mut captured as *mut _ as *mut c_void, Some(capture)) }.unwrap();
 	cb.call(Err::<(), Error>(Error::Moq(moq_net::StreamError::App(404).into())));
 
 	let protocol = captured.expect("expected a protocol error");
@@ -324,7 +333,7 @@ fn last_error_protocol_captures_session_known_app_and_unknown() {
 		),
 	] {
 		let mut captured: Option<moq_protocol_error> = None;
-		let cb = unsafe { OnStatus::new(&mut captured as *mut _ as *mut c_void, Some(capture)) };
+		let cb = unsafe { OnStatus::new(&mut captured as *mut _ as *mut c_void, Some(capture)) }.unwrap();
 		cb.call(Err::<(), Error>(Error::Moq(err)));
 		let protocol = captured.expect("expected a protocol error");
 		assert_eq!(protocol.scope, scope);
@@ -477,7 +486,7 @@ fn publish_media_labels_config_without_naming_track() {
 
 	assert_eq!(moq_consume_catalog_free(catalog_id1), 0);
 	assert_eq!(moq_consume_catalog_free(catalog_id2), 0);
-	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_finish(media1), 0);
@@ -859,7 +868,7 @@ fn publish_catalog_roundtrip() {
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
 	assert_eq!(moq_consume_catalog_free(active_catalog_id), 0);
 	assert_eq!(moq_consume_catalog_free(catalog_id2), 0);
-	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_finish(broadcast), 0);
@@ -931,13 +940,13 @@ fn a_half_specified_coded_size_round_trips() {
 	assert_eq!(read.coded_height, 0, "forwarding must not invent the absent height");
 
 	assert_eq!(moq_consume_catalog_free(forwarded_catalog), 0);
-	assert_eq!(moq_consume_catalog_close(forwarded_task), 0);
+	assert_eq!(moq_consume_catalog_cancel(forwarded_task), 0);
 	assert_eq!(forwarded_cb.recv_catalog_terminal(), 0);
 	assert_eq!(moq_consume_close(forwarded), 0);
 	assert_eq!(moq_publish_finish(forward), 0);
 
 	assert_eq!(moq_consume_catalog_free(catalog), 0);
-	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_catalog_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_finish(broadcast), 0);
@@ -1029,10 +1038,10 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 	);
 
 	assert_eq!(moq_consume_frame_free(frame_id), 0);
-	assert_eq!(moq_consume_video_close(consumer), 0);
+	assert_eq!(moq_consume_video_cancel(consumer), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_catalog_free(catalog), 0);
-	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_track_finish(track), 0);
@@ -1097,7 +1106,7 @@ fn cmaf_catalog_container_carries_its_init_segment() {
 	);
 
 	assert_eq!(moq_consume_catalog_free(catalog), 0);
-	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_finish(broadcast), 0);
@@ -1312,7 +1321,7 @@ fn catalog_section_roundtrip() {
 
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
 	assert_eq!(moq_consume_catalog_free(catalog_id2), 0);
-	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_finish(broadcast), 0);
@@ -1454,11 +1463,11 @@ fn raw_track_publish_consume() {
 		assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 	}
 
-	assert_eq!(moq_consume_track_close(consumer), 0);
+	assert_eq!(moq_consume_track_cancel(consumer), 0);
 	// The task delivers one final terminal callback after close; drain it
 	// before the Callback (user_data) drops.
 	assert_eq!(frame_cb.recv_terminal(), 0, "clean close delivers terminal 0");
-	assert!(moq_consume_track_close(consumer) < 0, "double-close should fail");
+	assert!(moq_consume_track_cancel(consumer) < 0, "double-close should fail");
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert!(moq_publish_track_finish(track) < 0, "double-close should fail");
 	assert_eq!(moq_consume_close(consume), 0);
@@ -1517,11 +1526,11 @@ fn raw_track_datagram_publish_consume() {
 	assert_eq!(datagram.sequence, sequence);
 	assert_eq!(moq_consume_datagram_free(dg_id), 0);
 
-	assert_eq!(moq_consume_datagrams_close(consumer), 0);
+	assert_eq!(moq_consume_datagrams_cancel(consumer), 0);
 	// The task delivers one final terminal callback after close; drain it
 	// before the Callback (user_data) drops.
 	assert_eq!(dg_cb.recv_terminal(), 0, "clean close delivers terminal 0");
-	assert!(moq_consume_datagrams_close(consumer) < 0, "double-close should fail");
+	assert!(moq_consume_datagrams_cancel(consumer) < 0, "double-close should fail");
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_finish(broadcast), 0);
@@ -1640,7 +1649,7 @@ fn raw_track_subscription_options_and_update() {
 	assert_eq!(frame.timestamp_us, 40_000);
 	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 
-	assert_eq!(moq_consume_track_close(consumer), 0);
+	assert_eq!(moq_consume_track_cancel(consumer), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_consume_close(consume), 0);
@@ -1701,9 +1710,9 @@ fn json_snapshot_publish_consume() {
 		assert_eq!(moq_consume_json_value_free(value_id), 0);
 	}
 
-	assert_eq!(moq_consume_json_close(consumer), 0);
+	assert_eq!(moq_consume_json_cancel(consumer), 0);
 	assert_eq!(value_cb.recv_terminal(), 0, "clean close delivers terminal 0");
-	assert!(moq_consume_json_close(consumer) < 0, "double-close should fail");
+	assert!(moq_consume_json_cancel(consumer) < 0, "double-close should fail");
 	assert_eq!(moq_publish_json_snapshot_finish(producer), 0);
 	assert!(
 		moq_publish_json_snapshot_finish(producer) < 0,
@@ -1764,9 +1773,9 @@ fn json_stream_publish_consume() {
 		assert_eq!(moq_consume_json_value_free(value_id), 0);
 	}
 
-	assert_eq!(moq_consume_json_close(consumer), 0);
+	assert_eq!(moq_consume_json_cancel(consumer), 0);
 	assert_eq!(value_cb.recv_terminal(), 0, "clean close delivers terminal 0");
-	assert!(moq_consume_json_close(consumer) < 0, "double-close should fail");
+	assert!(moq_consume_json_cancel(consumer) < 0, "double-close should fail");
 	assert_eq!(moq_publish_json_stream_finish(producer), 0);
 	assert!(moq_publish_json_stream_finish(producer) < 0, "double-close should fail");
 	assert_eq!(moq_consume_close(consume), 0);
@@ -1801,14 +1810,14 @@ fn announced_free_lifecycle() {
 
 	// Its info reports our path, active.
 	let mut info = moq_announce_update {
-		path: std::ptr::null(),
-		path_len: 0,
+		prefix: std::ptr::null(),
+		prefix_len: 0,
 		active: false,
 	};
 	assert_eq!(unsafe { moq_origin_announced_info(announced, &mut info) }, 0);
 	assert!(info.active, "broadcast should be active");
-	let got = unsafe { std::slice::from_raw_parts(info.path.cast::<u8>(), info.path_len) };
-	assert_eq!(got, path, "announced path should match");
+	let got = unsafe { std::slice::from_raw_parts(info.prefix.cast::<u8>(), info.prefix_len) };
+	assert_eq!(got, path, "announced prefix should match");
 
 	// Freeing the record succeeds once; the handle is then unknown.
 	assert_eq!(moq_origin_announced_free(announced), 0);
@@ -1819,7 +1828,7 @@ fn announced_free_lifecycle() {
 	);
 
 	// Stop the listener and drain its terminal callback before the Callback drops.
-	assert_eq!(moq_origin_announced_close(ann_task), 0);
+	assert_eq!(moq_origin_announced_cancel(ann_task), 0);
 	ann_cb.recv_terminal();
 
 	assert_eq!(moq_origin_close(origin), 0);
@@ -1867,16 +1876,16 @@ fn double_close_all_resource_types() {
 	assert_eq!(moq_consume_frame_free(frame_id), 0);
 	assert!(moq_consume_frame_free(frame_id) < 0);
 
-	assert_eq!(moq_consume_audio_close(track), 0);
+	assert_eq!(moq_consume_audio_cancel(track), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0, "audio close delivers terminal 0");
-	assert!(moq_consume_audio_close(track) < 0);
+	assert!(moq_consume_audio_cancel(track) < 0);
 
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
 	assert!(moq_consume_catalog_free(catalog_id) < 0);
 
-	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
-	assert!(moq_consume_catalog_close(catalog_task) < 0);
+	assert!(moq_consume_catalog_cancel(catalog_task) < 0);
 
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_finish(media), 0);
@@ -1954,18 +1963,18 @@ fn local_announce() {
 	let announced_id = id(cb.recv());
 
 	let mut info = moq_announce_update {
-		path: std::ptr::null(),
-		path_len: 0,
+		prefix: std::ptr::null(),
+		prefix_len: 0,
 		active: false,
 	};
 	assert_eq!(unsafe { moq_origin_announced_info(announced_id, &mut info) }, 0);
 	assert!(info.active, "broadcast should be active");
 
-	let announced_path =
-		unsafe { std::str::from_utf8(std::slice::from_raw_parts(info.path.cast::<u8>(), info.path_len)).unwrap() };
-	assert_eq!(announced_path, "test/broadcast");
+	let announced_prefix =
+		unsafe { std::str::from_utf8(std::slice::from_raw_parts(info.prefix.cast::<u8>(), info.prefix_len)).unwrap() };
+	assert_eq!(announced_prefix, "test/broadcast");
 
-	assert_eq!(moq_origin_announced_close(announced_task), 0);
+	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "announced close delivers terminal 0");
 	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -1982,8 +1991,8 @@ fn announced_deactivation() {
 
 	let announced_id = id(cb.recv());
 	let mut info = moq_announce_update {
-		path: std::ptr::null(),
-		path_len: 0,
+		prefix: std::ptr::null(),
+		prefix_len: 0,
 		active: false,
 	};
 	assert_eq!(unsafe { moq_origin_announced_info(announced_id, &mut info) }, 0);
@@ -1997,7 +2006,7 @@ fn announced_deactivation() {
 	assert_eq!(unsafe { moq_origin_announced_info(deactivated_id, &mut info) }, 0);
 	assert!(!info.active, "broadcast should be inactive after unannounce");
 
-	assert_eq!(moq_origin_announced_close(announced_task), 0);
+	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "announced close delivers terminal 0");
 	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -2017,14 +2026,14 @@ fn create_broadcast_does_not_announce() {
 	assert_eq!(unsafe { moq_publish_announce(broadcast, std::ptr::null()) }, 0);
 	let announced_id = id(cb.recv());
 	let mut info = moq_announce_update {
-		path: std::ptr::null(),
-		path_len: 0,
+		prefix: std::ptr::null(),
+		prefix_len: 0,
 		active: false,
 	};
 	assert_eq!(unsafe { moq_origin_announced_info(announced_id, &mut info) }, 0);
 	assert!(info.active);
 
-	assert_eq!(moq_origin_announced_close(announced_task), 0);
+	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
 	assert_eq!(cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -2090,7 +2099,8 @@ fn dynamic_serves_a_request_under_a_prefix() {
 	assert!(req_cb.recv() > 0);
 	req_cb.recv_terminal();
 
-	assert_eq!(moq_origin_dynamic_close(dynamic), 0);
+	assert_eq!(moq_origin_dynamic_cancel(dynamic), 0);
+	assert!(moq_origin_dynamic_cancel(dynamic) < 0, "double-cancel should fail");
 	assert_eq!(cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_finish(served), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -2201,7 +2211,7 @@ fn track_demand_follows_subscribers() {
 	let consumer = consume_track(consume, name, &frame_cb);
 	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_USED as i32);
 
-	assert_eq!(moq_consume_track_close(consumer), 0);
+	assert_eq!(moq_consume_track_cancel(consumer), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0);
 	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNUSED as i32);
 
@@ -2209,15 +2219,15 @@ fn track_demand_follows_subscribers() {
 	let late_cb = Callback::new();
 	let late = id(unsafe { moq_publish_track_demand(track, Some(channel_callback), late_cb.ptr) });
 	assert_eq!(late_cb.recv(), moq_demand::MOQ_DEMAND_UNUSED as i32);
-	assert_eq!(moq_publish_demand_close(late), 0);
+	assert_eq!(moq_publish_demand_cancel(late), 0);
 	assert_eq!(late_cb.recv_terminal(), 0);
-	assert!(moq_publish_demand_close(late) < 0, "double-close should fail");
+	assert!(moq_publish_demand_cancel(late) < 0, "double-close should fail");
 
 	// Finishing the track ends the remaining watcher cleanly.
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(demand_cb.recv_terminal(), 0);
 	assert!(
-		moq_publish_demand_close(watcher) < 0,
+		moq_publish_demand_cancel(watcher) < 0,
 		"the watcher is gone after its terminal"
 	);
 
@@ -2242,7 +2252,7 @@ fn track_demand_reports_current_state_before_close() {
 		.unwrap();
 
 	let cb = Callback::new();
-	let on_demand = unsafe { crate::ffi::OnStatus::new(cb.ptr, Some(channel_callback)) };
+	let on_demand = unsafe { crate::ffi::OnStatus::new(cb.ptr, Some(channel_callback)) }.unwrap();
 	let (close, closed) = tokio::sync::oneshot::channel();
 	drop(close);
 	crate::ffi::RUNTIME
@@ -2397,7 +2407,7 @@ fn dynamic_serves_track_requests() {
 	assert_eq!(protocol.kind, moq_protocol_kind::MOQ_PROTOCOL_KIND_APP as u32);
 	assert_eq!(protocol.code, 64 + 404);
 	assert!(
-		moq_consume_track_close(denied) < 0,
+		moq_consume_track_cancel(denied) < 0,
 		"the subscriber is gone after its terminal"
 	);
 
@@ -2408,11 +2418,11 @@ fn dynamic_serves_track_requests() {
 	assert_eq!(moq_track_request_free(request), 0);
 	assert!(freed_cb.recv_terminal() < 0, "a freed request fails its subscriber");
 
-	assert_eq!(moq_publish_dynamic_close(dynamic), 0);
+	assert_eq!(moq_publish_dynamic_cancel(dynamic), 0);
 	assert_eq!(request_cb.recv_terminal(), 0);
-	assert!(moq_publish_dynamic_close(dynamic) < 0, "double-close should fail");
+	assert!(moq_publish_dynamic_cancel(dynamic) < 0, "double-close should fail");
 
-	assert_eq!(moq_consume_track_close(consumer), 0);
+	assert_eq!(moq_consume_track_cancel(consumer), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0);
 	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNUSED as i32);
 	assert_eq!(moq_publish_track_finish(track), 0);
@@ -2457,7 +2467,7 @@ fn dynamic_track_request_publishes_media() {
 	let frame_id = id(frame_cb.recv());
 	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 
-	assert_eq!(moq_consume_track_close(consumer), 0);
+	assert_eq!(moq_consume_track_cancel(consumer), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0);
 	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNUSED as i32);
 	assert_eq!(moq_publish_media_finish(media), 0);
@@ -2544,7 +2554,7 @@ fn track_dynamic_serves_a_fetch_miss() {
 		.expect_err("a rejected fetch fails");
 	assert!(matches!(err, moq_net::Error::App(9)), "got {err:?}");
 
-	assert_eq!(moq_publish_dynamic_close(dynamic), 0);
+	assert_eq!(moq_publish_dynamic_cancel(dynamic), 0);
 	assert_eq!(group_cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_publish_finish(broadcast), 0);
@@ -2579,7 +2589,7 @@ fn track_dynamic_serves_a_fetch_from_frame_start() {
 	assert_eq!(index, 3, "the consumer resumes at the requested frame");
 	assert_eq!(got, payload);
 
-	assert_eq!(moq_publish_dynamic_close(dynamic), 0);
+	assert_eq!(moq_publish_dynamic_cancel(dynamic), 0);
 	assert_eq!(group_cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_publish_finish(broadcast), 0);
@@ -2613,7 +2623,7 @@ fn track_request_dynamic_survives_accept() {
 	assert_eq!(moq_publish_group_finish(group), 0);
 	assert_eq!(fetch.recv_timeout(TIMEOUT).unwrap().unwrap(), (0, payload.to_vec()));
 
-	assert_eq!(moq_publish_dynamic_close(track_dynamic), 0);
+	assert_eq!(moq_publish_dynamic_cancel(track_dynamic), 0);
 	assert_eq!(group_cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_publish_finish(broadcast), 0);
@@ -2707,10 +2717,10 @@ fn local_publish_consume() {
 	assert_eq!(received, payload, "frame payload should match");
 
 	assert_eq!(moq_consume_frame_free(frame_id), 0);
-	assert_eq!(moq_consume_audio_close(track), 0);
+	assert_eq!(moq_consume_audio_cancel(track), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0, "audio close delivers terminal 0");
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
-	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_finish(media), 0);
@@ -2726,7 +2736,7 @@ fn consume_announced_local() {
 	let cb = Callback::new();
 	let path = b"live";
 	let _task = id(unsafe {
-		moq_origin_consume_announced(
+		moq_origin_announced_broadcast(
 			origin,
 			path.as_ptr() as *const c_char,
 			path.len(),
@@ -2767,7 +2777,7 @@ fn consume_announced_local() {
 	assert_eq!(audio_cfg.channel_count, 2);
 
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
-	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_finish(media), 0);
@@ -2866,10 +2876,10 @@ fn consume_audio_follows_a_sibling_broadcast_reference() {
 	assert_eq!(frame.timestamp_us, timestamp_us);
 
 	assert_eq!(moq_consume_frame_free(frame_id), 0);
-	assert_eq!(moq_consume_audio_close(track), 0);
+	assert_eq!(moq_consume_audio_cancel(track), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0, "audio close delivers terminal 0");
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
-	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_finish(media), 0);
@@ -2886,7 +2896,7 @@ fn consume_announced_close_cancels() {
 	let cb = Callback::new();
 	let path = b"never";
 	let task = id(unsafe {
-		moq_origin_consume_announced(
+		moq_origin_announced_broadcast(
 			origin,
 			path.as_ptr() as *const c_char,
 			path.len(),
@@ -2895,9 +2905,12 @@ fn consume_announced_close_cancels() {
 		)
 	});
 
-	assert_eq!(moq_origin_consume_announced_close(task), 0);
+	assert_eq!(moq_origin_announced_broadcast_cancel(task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "close delivers terminal 0");
-	assert!(moq_origin_consume_announced_close(task) < 0, "double-close should fail");
+	assert!(
+		moq_origin_announced_broadcast_cancel(task) < 0,
+		"double-close should fail"
+	);
 
 	assert_eq!(moq_origin_close(origin), 0);
 }
@@ -2991,10 +3004,10 @@ fn video_publish_consume() {
 	assert!(frame.payload_size > 0, "frame should have payload data");
 
 	assert_eq!(moq_consume_frame_free(frame_id), 0);
-	assert_eq!(moq_consume_video_close(track), 0);
+	assert_eq!(moq_consume_video_cancel(track), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0, "video close delivers terminal 0");
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
-	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_finish(media), 0);
@@ -3195,7 +3208,7 @@ fn video_raw_publish_consume() {
 	assert_eq!(frame.data_size, 320 * 240 * 3 / 2, "tightly-packed I420");
 
 	assert_eq!(moq_decode_video_frame_free(frame_id), 0);
-	assert_eq!(moq_decode_video_close(consumer), 0);
+	assert_eq!(moq_decode_video_cancel(consumer), 0);
 	loop {
 		let code = frame_cb.recv();
 		if code > 0 {
@@ -3207,7 +3220,7 @@ fn video_raw_publish_consume() {
 	}
 
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
-	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_catalog_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_encode_video_finish(producer), 0);
@@ -3231,7 +3244,7 @@ fn video_raw_decode_output_rejected() {
 		height: 0,
 	};
 	assert_eq!(
-		unsafe { moq_decode_video(1, 0, &bad_format, None, std::ptr::null_mut()) },
+		unsafe { moq_decode_video(1, 0, &bad_format, Some(ignore_callback), std::ptr::null_mut()) },
 		Error::InvalidCode.code()
 	);
 
@@ -3243,14 +3256,14 @@ fn video_raw_decode_output_rejected() {
 			height,
 		};
 		assert_eq!(
-			unsafe { moq_decode_video(1, 0, &bad_size, None, std::ptr::null_mut()) },
+			unsafe { moq_decode_video(1, 0, &bad_size, Some(ignore_callback), std::ptr::null_mut()) },
 			Error::InvalidConfig(String::new()).code(),
 			"size {width}x{height} must be refused"
 		);
 	}
 
 	assert_eq!(
-		unsafe { moq_decode_video(1, 0, std::ptr::null(), None, std::ptr::null_mut()) },
+		unsafe { moq_decode_video(1, 0, std::ptr::null(), Some(ignore_callback), std::ptr::null_mut()) },
 		Error::InvalidPointer.code()
 	);
 
@@ -3261,7 +3274,7 @@ fn video_raw_decode_output_rejected() {
 		height: 120,
 	};
 	assert_eq!(
-		unsafe { moq_decode_video(u32::MAX / 2, 0, &valid, None, std::ptr::null_mut()) },
+		unsafe { moq_decode_video(u32::MAX / 2, 0, &valid, Some(ignore_callback), std::ptr::null_mut(),) },
 		Error::CatalogNotFound.code(),
 		"a valid request fails on the catalog lookup, not on validation"
 	);
@@ -3333,7 +3346,7 @@ fn decode_first_frame(output: &moq_video_decoder_output) -> (u32, u32, usize) {
 	let result = (frame.width, frame.height, frame.data_size);
 
 	assert_eq!(moq_decode_video_frame_free(frame_id), 0);
-	assert_eq!(moq_decode_video_close(consumer), 0);
+	assert_eq!(moq_decode_video_cancel(consumer), 0);
 	loop {
 		let code = frame_cb.recv();
 		if code > 0 {
@@ -3345,7 +3358,7 @@ fn decode_first_frame(output: &moq_video_decoder_output) -> (u32, u32, usize) {
 	}
 
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
-	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_catalog_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_encode_video_finish(producer), 0);
@@ -3730,7 +3743,7 @@ fn video_raw_decode() {
 	assert!(!frame.data.is_null());
 
 	assert_eq!(moq_decode_video_frame_free(frame_id), 0);
-	assert_eq!(moq_decode_video_close(consumer), 0);
+	assert_eq!(moq_decode_video_cancel(consumer), 0);
 
 	// Drain any other decoded frames already queued, then expect the terminal 0.
 	loop {
@@ -3743,7 +3756,7 @@ fn video_raw_decode() {
 		}
 	}
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
-	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
 	// The publisher may emit more than one catalog snapshot (e.g. as the track's
 	// stats settle), so drain any extra snapshots before the terminal.
 	loop {
@@ -3806,10 +3819,10 @@ fn multiple_frames_ordering() {
 		assert_eq!(moq_consume_frame_free(frame_id), 0);
 	}
 
-	assert_eq!(moq_consume_audio_close(track), 0);
+	assert_eq!(moq_consume_audio_cancel(track), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0, "audio close delivers terminal 0");
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
-	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
 	assert_eq!(
 		catalog_cb.recv_catalog_terminal(),
 		0,
@@ -3861,7 +3874,7 @@ fn catalog_update_on_new_track() {
 
 	assert_eq!(moq_consume_catalog_free(catalog_id1), 0);
 	assert_eq!(moq_consume_catalog_free(catalog_id2), 0);
-	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_finish(media1), 0);
@@ -3958,7 +3971,7 @@ fn dial(config: Option<&moq_client_config>) -> i32 {
 			config.map_or(std::ptr::null(), |c| c as *const _),
 			0,
 			0,
-			None,
+			Some(ignore_callback),
 			std::ptr::null_mut(),
 		)
 	}
@@ -4022,11 +4035,11 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	let connect = expected.connect.resolve();
 
 	assert!(config.has_connect_timeout);
-	assert_eq!(config.connect_timeout_ms, connect.timeout.as_millis() as u64);
+	assert_eq!(config.connect_timeout_us, connect.timeout.as_micros() as u64);
 	assert!(config.has_failover_delay);
-	assert_eq!(config.failover_delay_ms, connect.race.as_millis() as u64);
+	assert_eq!(config.failover_delay_us, connect.race.as_micros() as u64);
 	assert!(config.has_resolution_delay);
-	assert_eq!(config.resolution_delay_ms, connect.resolution_delay.as_millis() as u64);
+	assert_eq!(config.resolution_delay_us, connect.resolution_delay.as_micros() as u64);
 
 	assert!(config.has_backoff_initial);
 	assert_eq!(
@@ -4047,15 +4060,15 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	assert!(config.has_websocket_enabled);
 	assert_eq!(config.websocket_enabled, websocket.enabled);
 	assert!(config.has_websocket_delay);
-	assert_eq!(config.websocket_delay_ms, websocket.delay.as_millis() as u64);
+	assert_eq!(config.websocket_delay_us, websocket.delay.as_micros() as u64);
 
 	assert!(config.has_quic_max_streams);
 	assert_eq!(config.quic_max_streams, quic.max_streams);
 	assert!(config.has_quic_idle_timeout);
-	assert_eq!(config.quic_idle_timeout_ms, quic.idle_timeout.as_millis() as u64);
+	assert_eq!(config.quic_idle_timeout_us, quic.idle_timeout.as_micros() as u64);
 	assert_eq!(
-		config.has_quic_keep_alive.then_some(config.quic_keep_alive_ms),
-		quic.keep_alive.map(|d| d.as_millis() as u64)
+		config.has_quic_keep_alive.then_some(config.quic_keep_alive_us),
+		quic.keep_alive.map(|d| d.as_micros() as u64)
 	);
 
 	// The backend-dependent knobs have no single value to report, so they come
@@ -4082,7 +4095,7 @@ fn zero_with_a_flag_set_is_a_real_value() {
 	let mut config = client_config();
 	config.backoff_timeout_us = 0;
 	config.has_backoff_timeout = true;
-	config.quic_keep_alive_ms = 0;
+	config.quic_keep_alive_us = 0;
 	config.has_quic_keep_alive = true;
 
 	let explicit = parsed(&config);
@@ -4205,7 +4218,7 @@ fn config_quic_and_backoff_knobs_apply() {
 
 	config.quic_max_streams = 4096;
 	config.has_quic_max_streams = true;
-	config.quic_idle_timeout_ms = 15_000;
+	config.quic_idle_timeout_us = 15_000_000;
 	config.has_quic_idle_timeout = true;
 	config.quic_gso = false;
 	config.has_quic_gso = true;
@@ -4228,65 +4241,6 @@ fn config_quic_and_backoff_knobs_apply() {
 	assert_eq!(parsed.quic.gso, Some(false));
 	assert_eq!(parsed.quic.mtu_discovery, Some(true));
 	assert_eq!(parsed.quic.qlog.as_deref(), Some(std::path::Path::new(dir)));
-}
-
-/// An idle timeout outside QUIC's millisecond varint is an ordinary configuration
-/// error, and later calls remain usable.
-#[test]
-fn dial_rejects_an_unrepresentable_idle_timeout() {
-	let mut config = client_config();
-	config.quic_idle_timeout_ms = u64::MAX;
-	config.has_quic_idle_timeout = true;
-
-	assert_eq!(dial(Some(&config)), Error::InvalidConfig(String::new()).code());
-
-	// A rejected dial leaves the library usable.
-	assert!(moq_client_defaults().has_connect_timeout);
-}
-
-/// The backend variants are feature-gated, so a hardcoded menu offers options this
-/// build rejects. Every name reported must be one a dial takes, same contract as
-/// `moq_versions`.
-#[test]
-fn backends_lists_only_what_a_dial_accepts() {
-	let count = unsafe { moq_backends(std::ptr::null_mut(), 0) };
-	assert!(count > 0, "expected at least one compiled backend, got {count}");
-
-	let mut names = vec![
-		moq_string {
-			data: std::ptr::null(),
-			len: 0
-		};
-		count as usize
-	];
-	assert_eq!(unsafe { moq_backends(names.as_mut_ptr(), names.len()) }, count);
-
-	let accepts = |name: &str| {
-		let mut config = client_config();
-		config.backend = name.as_ptr() as *const c_char;
-		config.backend_len = name.len();
-		unsafe { crate::parse_client(Some(&config)) }.is_ok()
-	};
-
-	for name in &names {
-		let name = unsafe { ffi::parse_str(name.data, name.len) }.expect("backend name is UTF-8");
-		assert!(accepts(name), "listed backend {name} must be settable");
-	}
-
-	// And the converse: a backend this build lacks is not listed, so the menu can't
-	// offer a dead option.
-	for candidate in ["quinn", "quiche", "noq"] {
-		let listed = names.iter().any(|n| {
-			unsafe { ffi::parse_str(n.data, n.len) }
-				.map(|s| s == candidate)
-				.unwrap_or(false)
-		});
-		assert_eq!(
-			listed,
-			accepts(candidate),
-			"{candidate}: listed and accepted must agree"
-		);
-	}
 }
 
 /// Whether a qlog directory works at all is a compile-time feature, so the capability
@@ -4355,7 +4309,7 @@ fn dial_applies_the_config() {
 	let mut config = client_config();
 	config.versions = versions.as_ptr();
 	config.versions_len = versions.len();
-	config.connect_timeout_ms = 100;
+	config.connect_timeout_us = 100_000;
 	config.has_connect_timeout = true;
 
 	let cb = Callback::new();
@@ -4459,8 +4413,8 @@ fn bandwidth_reservations_split_the_estimate() {
 
 	assert_eq!(moq_reservation_close(second), 0);
 	assert_eq!(moq_bandwidth_close(bandwidth), 0);
-	assert_eq!(moq_consume_track_close(first_sub), 0);
-	assert_eq!(moq_consume_track_close(second_sub), 0);
+	assert_eq!(moq_consume_track_cancel(first_sub), 0);
+	assert_eq!(moq_consume_track_cancel(second_sub), 0);
 	let _ = first_cb.recv_terminal();
 	let _ = second_cb.recv_terminal();
 	assert_eq!(moq_consume_close(consume), 0);
@@ -4502,8 +4456,8 @@ fn bandwidth_handles_share_the_registry() {
 	assert_eq!(moq_reservation_close(other), 0);
 	assert_eq!(moq_bandwidth_close(first), 0);
 	assert_eq!(moq_bandwidth_close(second), 0);
-	assert_eq!(moq_consume_track_close(first_sub), 0);
-	assert_eq!(moq_consume_track_close(second_sub), 0);
+	assert_eq!(moq_consume_track_cancel(first_sub), 0);
+	assert_eq!(moq_consume_track_cancel(second_sub), 0);
 	let _ = first_cb.recv_terminal();
 	let _ = second_cb.recv_terminal();
 	assert_eq!(moq_consume_close(consume), 0);
@@ -4552,7 +4506,7 @@ fn encode_video_bitrate_caps_the_reservation() {
 	assert_eq!(grant(reservation), Some(1_000_000));
 
 	assert_eq!(moq_reservation_close(reservation), 0);
-	assert_eq!(moq_consume_track_close(sub), 0);
+	assert_eq!(moq_consume_track_cancel(sub), 0);
 	let _ = cb.recv_terminal();
 	assert_eq!(moq_encode_video_finish(producer), 0);
 	assert_eq!(moq_bandwidth_close(bandwidth), 0);

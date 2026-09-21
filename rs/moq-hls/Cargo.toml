@@ -17,9 +17,6 @@ default = ["server"]
 server = ["dep:axum"]
 
 [dependencies]
-# Always required (import + export library).
-anyhow = { workspace = true, features = ["backtrace"] }
-
 # Only needed by the HTTP export server (gated by `server`).
 axum = { workspace = true, optional = true }
 bytes = { workspace = true }

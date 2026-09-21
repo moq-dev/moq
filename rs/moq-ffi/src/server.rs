@@ -42,7 +42,7 @@ impl ServerState {
 		let publish = self.publish.clone();
 		let consume = self.consume.clone();
 		match server.accept().await {
-			Some(request) => Ok(Some(MoqRequest::new(request, publish, consume))),
+			Some(request) => Ok(Some(MoqRequest::new(request, publish, consume)?)),
 			None => Ok(None),
 		}
 	}
@@ -191,6 +191,54 @@ struct RequestState {
 	consume: Option<Arc<MoqOriginProducer>>,
 }
 
+/// The network transport carrying an incoming session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum MoqTransport {
+	/// QUIC, either directly or through WebTransport over HTTP/3.
+	Quic,
+	/// An Iroh QUIC connection.
+	Iroh,
+	/// A WebSocket connection using qmux framing.
+	WebSocket,
+	/// A plaintext TCP connection using qmux framing.
+	Tcp,
+	/// A Unix domain socket using qmux framing.
+	Unix,
+}
+
+impl TryFrom<moq_tokio::server::Transport> for MoqTransport {
+	type Error = MoqError;
+
+	fn try_from(value: moq_tokio::server::Transport) -> Result<Self, Self::Error> {
+		Ok(match value {
+			moq_tokio::server::Transport::Quic => Self::Quic,
+			moq_tokio::server::Transport::Iroh => Self::Iroh,
+			moq_tokio::server::Transport::WebSocket => Self::WebSocket,
+			moq_tokio::server::Transport::Tcp => Self::Tcp,
+			moq_tokio::server::Transport::Unix => Self::Unix,
+			_ => return Err(MoqError::Unsupported),
+		})
+	}
+}
+
+#[cfg(test)]
+mod transport_tests {
+	use super::MoqTransport;
+	use moq_tokio::server::Transport;
+
+	#[test]
+	fn converts_supported_transports() {
+		assert_eq!(MoqTransport::try_from(Transport::Quic).unwrap(), MoqTransport::Quic);
+		assert_eq!(MoqTransport::try_from(Transport::Iroh).unwrap(), MoqTransport::Iroh);
+		assert_eq!(
+			MoqTransport::try_from(Transport::WebSocket).unwrap(),
+			MoqTransport::WebSocket
+		);
+		assert_eq!(MoqTransport::try_from(Transport::Tcp).unwrap(), MoqTransport::Tcp);
+		assert_eq!(MoqTransport::try_from(Transport::Unix).unwrap(), MoqTransport::Unix);
+	}
+}
+
 /// An incoming MoQ session that can be accepted or rejected.
 ///
 /// Origin overrides are captured at [`accept`](Self::accept). Setters fail with
@@ -199,7 +247,7 @@ struct RequestState {
 #[derive(uniffi::Object)]
 pub struct MoqRequest {
 	task: Task<RequestState>,
-	transport: String,
+	transport: MoqTransport,
 	url: Option<String>,
 	path: String,
 	query: Option<String>,
@@ -210,12 +258,12 @@ impl MoqRequest {
 		request: moq_tokio::server::Request,
 		publish: Option<Arc<MoqOriginProducer>>,
 		consume: Option<Arc<MoqOriginProducer>>,
-	) -> Arc<Self> {
-		let transport = request.transport().to_string();
+	) -> Result<Arc<Self>, MoqError> {
+		let transport = request.transport().try_into()?;
 		let url = request.url().map(|u| u.to_string());
 		let path = request.path().to_string();
 		let query = request.query().map(str::to_string);
-		Arc::new(Self {
+		Ok(Arc::new(Self {
 			task: Task::new(RequestState {
 				request: Some(request),
 				publish,
@@ -225,7 +273,7 @@ impl MoqRequest {
 			url,
 			path,
 			query,
-		})
+		}))
 	}
 
 	fn configure_origin(&self, f: impl FnOnce(&mut RequestState)) -> Result<(), MoqError> {
@@ -276,9 +324,9 @@ impl MoqRequest {
 		self.query.clone()
 	}
 
-	/// The transport type, e.g. `"quic"`, `"iroh"`, or `"websocket"`.
-	pub fn transport(&self) -> String {
-		self.transport.clone()
+	/// The network transport carrying this session.
+	pub fn transport(&self) -> MoqTransport {
+		self.transport
 	}
 
 	/// Override the publish origin for this session. Falls back to the server's

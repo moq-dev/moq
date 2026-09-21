@@ -13,7 +13,7 @@
 
 #![cfg(target_os = "linux")]
 
-#[path = "support/quiche.rs"]
+#[path = "support.rs"]
 mod support;
 
 use std::net::UdpSocket;

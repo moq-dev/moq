@@ -11,7 +11,7 @@ moq.pro's dashboard wrote (`app/src/lib/live.svelte.ts`).
 
 - `Origin.Table.broadcasts(scope): Getter<ReadonlyMap<Path.Valid, Route>>`
   for the "what is live" case every UI wants, beside the async iterator
-  from [announce event](/quest/m1/api-net-announce.md).
+  landed in [#3770](https://github.com/moq-dev/moq/pull/3770).
 - `Origin.Table.dynamic()`; `Connection.origin` is typed `Table`, which has
   `createBroadcast` and `request` but not `dynamic` though the object is a
   `Producer`.

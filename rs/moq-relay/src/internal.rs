@@ -860,7 +860,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn nodes_endpoint_uses_the_attached_cluster_registry() {
-		let origin = moq_tokio::origin::spawn(moq_net::Hop::new(100).unwrap());
+		let origin = moq_tokio::origin::spawn_config(moq_net::origin::Config::new(moq_net::Hop::new(100).unwrap()));
 		let nodes = crate::nodes::Nodes::new(origin);
 		let _connection = nodes.connect_outbound(0, "https://relay-b.example/");
 		let state = InternalState {
@@ -880,15 +880,15 @@ mod tests {
 	/// value, summed across broadcasts.
 	#[tokio::test(start_paused = true)]
 	async fn metrics_render_exposition() {
+		use moq_net::Timestamp;
 		use moq_net::stats::{Registry, Tier};
-		use moq_net::{Hop, Timestamp};
 
 		let stats = Registry::new(Default::default());
 
 		// Default-tier egress: an untagged local publisher writes, a tagged egress
 		// consumer reads it out, so publisher `bytes` advance on the default tier.
 		let default_ctx = stats.tier(Tier::default()).session("acme");
-		let pub_origin = moq_tokio::origin::spawn(Hop::random());
+		let pub_origin = moq_tokio::origin::spawn();
 		let egress = pub_origin.consume().with_stats(default_ctx.clone());
 		let mut announced = egress.announced();
 		let pub_source = pub_origin.create_broadcast("demo/x").unwrap();
@@ -898,7 +898,7 @@ mod tests {
 		// Named-tier ingress: a tagged ingress producer writes, so subscriber
 		// `bytes` advance on the regional tier.
 		let regional_ctx = stats.tier(Tier::new("region/sjc")).session("peer");
-		let sub_origin = moq_tokio::origin::spawn(Hop::random()).with_stats(regional_ctx.clone());
+		let sub_origin = moq_tokio::origin::spawn().with_stats(regional_ctx.clone());
 		let sub_source = sub_origin.create_broadcast("demo/x").unwrap();
 		sub_source.announce(Default::default()).unwrap();
 		let sub_track = sub_source.create_track("audio", None).unwrap();

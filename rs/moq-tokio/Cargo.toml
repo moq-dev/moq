@@ -14,9 +14,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]
 default = ["noq", "aws-lc-rs", "websocket", "tcp", "uds"]
-quinn = ["_transport", "_certs", "dep:quinn", "dep:web-transport-quinn", "dep:reqwest", "watch", "dep:dns-lookup"]
 noq = ["_transport", "_certs", "dep:web-transport-noq", "dep:reqwest", "watch", "dep:dns-lookup"]
-quiche = ["_transport", "_certs", "dep:web-transport-quiche", "dep:reqwest", "dep:rustls-native-certs", "dep:dns-lookup", "watch"]
 # Server-side certificate handling: chains loaded from disk, self-signed generation,
 # in-memory identities, and per-SNI selection. Not one to enable on its own, since
 # nothing turns it into a listener: every QUIC backend needs it for its own TLS, and
@@ -28,24 +26,14 @@ _certs = ["dep:rcgen", "dep:rustls-webpki"]
 _transport = []
 # Filesystem watcher for hot-reloading on-disk TLS certs, keys, and root CAs.
 watch = ["dep:notify"]
-# Capture qlog traces (`--*-quic-qlog <DIR>`). Off by default: quinn and noq pull in
-# the qlog crate and its serde_json encoder, which a production build has no use for.
-# quiche compiles its qlog support in unconditionally, so this is empty for a
-# quiche-only build; it still gates the flag there, so one feature means one thing
-# across every backend.
-qlog = ["quinn?/qlog", "web-transport-noq?/qlog"]
-# The QUIC backends pull in their crypto provider from these features (default-features
-# are off on each backend dep), so a backend without aws-lc-rs/ring has no initial cipher.
+# Capture qlog traces (`--*-quic-qlog <DIR>`). Off by default so production
+# builds do not pull in the qlog crate and its serde_json encoder.
+qlog = ["web-transport-noq?/qlog"]
+# The QUIC backend pulls in its crypto provider from these features (default-features
+# are off on the dependency), so a backend without aws-lc-rs/ring has no initial cipher.
 # A provider is also all it takes to sign and serve certificates, so each turns on
 # `_certs` even where there is no QUIC backend to serve them for.
-aws-lc-rs = [
-    "_certs",
-    "rustls/aws-lc-rs",
-    "rcgen/aws_lc_rs",
-    "quinn?/rustls-aws-lc-rs",
-    "web-transport-noq?/aws-lc-rs",
-    "web-transport-quinn?/aws-lc-rs",
-]
+aws-lc-rs = ["_certs", "rustls/aws-lc-rs", "rcgen/aws_lc_rs", "web-transport-noq?/aws-lc-rs"]
 iroh = ["_transport", "dep:web-transport-iroh", "dep:web-transport-proto", "dep:noq-proto"]
 # LAN peer discovery over mDNS (the `mdns` module).
 mdns = ["dep:mdns-sd", "dep:hmac", "dep:sha2", "dep:subtle"]
@@ -56,7 +44,7 @@ tcp = ["_transport", "dep:qmux", "dep:dns-lookup"]
 # Unix-domain-socket qmux transport (`unix://`), unix-only. Adds peer-credential
 # inspection on accept. Pulls in `tcp` (shares qmux's stream transport).
 uds = ["tcp", "qmux/uds"]
-ring = ["_certs", "rustls/ring", "rcgen/ring", "quinn?/rustls-ring", "web-transport-noq?/ring", "web-transport-quinn?/ring"]
+ring = ["_certs", "rustls/ring", "rcgen/ring", "web-transport-noq?/ring"]
 android-logcat = ["dep:tracing-android"]
 
 [dependencies]
@@ -77,14 +65,11 @@ moq-sock = { workspace = true }
 noq-proto = { workspace = true, optional = true }
 notify = { version = "8", optional = true }
 qmux = { workspace = true, features = ["wss", "tls", "tcp"], optional = true }
-quinn = { version = "0.11", default-features = false, features = ["platform-verifier", "runtime-tokio", "bloom"], optional = true }
 rand = "0.10.1"
 rcgen = { version = "0.14", default-features = false, optional = true }
 reqwest = { version = "0.13", default-features = false, optional = true }
 rustls = "0.23"
-rustls-native-certs = { version = "0.8", optional = true }
-# OS-native server-cert verifier for the rustls backends. Version matched to the
-# copy quinn-proto already pulls in, to avoid duplication.
+# OS-native server-cert verifier for the rustls backend.
 rustls-platform-verifier = "0.7"
 rustls-webpki = { version = "0.103", features = ["aws-lc-rs"], optional = true }
 serde = { version = "1", features = ["derive"] }
@@ -104,8 +89,6 @@ usage = { workspace = true, features = ["config"] }
 web-transport-iroh = { workspace = true, optional = true }
 web-transport-noq = { workspace = true, optional = true }
 web-transport-proto = { workspace = true, optional = true }
-web-transport-quiche = { workspace = true, optional = true }
-web-transport-quinn = { workspace = true, optional = true }
 web-transport-trait = { workspace = true }
 x509-parser = "0.18"
 

@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
 import { Signal } from "@moq/signals";
 import { Encoder } from "./encoder";
@@ -86,6 +87,51 @@ test("encoding tracks encoder config in its child effect", async () => {
 	} finally {
 		encoder.close();
 		warn.mockRestore();
+	}
+});
+
+test("a demand gap leaves the broadcast-owned track open for resume", async () => {
+	using _videoEncoder = installFakeVideoEncoder();
+	const cut = spyOn(Container.Legacy.Producer.prototype, "cut");
+
+	const track = new Moq.Track.Producer("video").accept({ priority: 60 });
+	const live = new Signal<Moq.Track.Producer | undefined>(track);
+	const rendition = {
+		config: new Signal(undefined),
+		track: live,
+		close: () => track.close(),
+	};
+	const capture = {
+		in: { source: new Signal(undefined) },
+		out: {
+			display: new Signal({ width: 640, height: 480 }),
+			frames: new Signal(undefined),
+		},
+	};
+	const encoder = new Encoder("video", {
+		enabled: true,
+		broadcast: { video: () => rendition } as never,
+		capture: capture as never,
+	});
+
+	try {
+		await settle();
+		live.set(undefined);
+		await settle();
+		expect(track.closed.peek()).toBeUndefined();
+
+		live.set(track);
+		await settle();
+		expect(track.closed.peek()).toBeUndefined();
+
+		cut.mockClear();
+		track.close();
+		encoder.close();
+		expect(cut).not.toHaveBeenCalled();
+	} finally {
+		encoder.close();
+		track.close();
+		cut.mockRestore();
 	}
 });
 

@@ -15,7 +15,6 @@ rust-version.workspace = true
 default = ["noq", "websocket"]
 jemalloc = ["moq-tokio/jemalloc"]
 noq = ["moq-tokio/noq"]
-quinn = ["moq-tokio/quinn"]
 websocket = ["moq-tokio/websocket"]
 
 [dependencies]

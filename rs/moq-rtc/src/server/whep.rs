@@ -19,6 +19,12 @@ use crate::{Error, Result, egress::EgressSource, sdp, server::Server, session};
 
 pub use crate::server::Response;
 
+#[derive(Clone)]
+struct RouterState {
+	server: Server,
+	subscriber: moq_net::origin::Consumer,
+}
+
 /// How long WHEP negotiation waits for the broadcast's first catalog snapshot
 /// before failing the request. A broadcast can be announced (or served by a
 /// dynamic origin fallback) yet never publish a catalog; without a bound the
@@ -26,21 +32,21 @@ pub use crate::server::Response;
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Build the WHEP axum router.
-pub fn router(server: Server) -> Router {
+pub fn router(server: Server, subscriber: moq_net::origin::Consumer) -> Router {
 	Router::new()
-		.route("/{*path}", post(handle).delete(crate::server::delete))
-		.with_state(server)
+		.route("/{*path}", post(handle).delete(delete))
+		.with_state(RouterState { server, subscriber })
 }
 
 async fn handle(
-	server: State<Server>,
+	state: State<RouterState>,
 	path: Path<String>,
 	OriginalUri(uri): OriginalUri,
 	headers: HeaderMap,
 	body: Bytes,
 ) -> HttpResponse {
-	let (server, path) = (server.0, path.0);
-	match accept_offer(&server, &path, &headers, body).await {
+	let (state, path) = (state.0, path.0);
+	match accept_offer(&state.server, &state.subscriber, &path, &headers, body).await {
 		Ok(response) => {
 			let Response {
 				resource_id,
@@ -66,12 +72,22 @@ async fn handle(
 
 /// Router glue: enforce the WHEP `Content-Type` then hand the raw offer to
 /// [`accept`], using the request path as the (unauthenticated) broadcast name.
-async fn accept_offer(server: &Server, path: &str, headers: &HeaderMap, body: Bytes) -> Result<Response> {
+async fn accept_offer(
+	server: &Server,
+	subscriber: &moq_net::origin::Consumer,
+	path: &str,
+	headers: &HeaderMap,
+	body: Bytes,
+) -> Result<Response> {
 	if !is_sdp(headers) {
 		return Err(Error::InvalidSdp("expected Content-Type: application/sdp".into()));
 	}
 	let offer = std::str::from_utf8(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
-	accept(server, server.subscriber(), path, offer).await
+	accept(server, subscriber, path, offer).await
+}
+
+async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> StatusCode {
+	crate::server::delete(&state.server, &path)
 }
 
 /// Accept a WHEP SDP offer and egress the MoQ broadcast `broadcast` (a path
@@ -93,7 +109,7 @@ async fn accept_offer(server: &Server, path: &str, headers: &HeaderMap, body: By
 /// `offer` is the raw SDP body; the caller is responsible for checking the
 /// `Content-Type: application/sdp` request header. Fails with [`Error::InvalidSdp`]
 /// on a malformed offer, and surfaces a not-announced broadcast (or one outside
-/// `subscriber`'s scope) as [`Error::Other`].
+/// `subscriber`'s scope) as [`Error::Moq`].
 pub async fn accept(
 	server: &Server,
 	subscriber: &moq_net::origin::Consumer,
@@ -113,16 +129,10 @@ pub async fn accept(
 	// announced-but-catalog-less one, would otherwise park this handler forever.
 	let source = tokio::time::timeout(CATALOG_TIMEOUT, EgressSource::new(source))
 		.await
-		.map_err(|_| {
-			Error::Other(anyhow::anyhow!(
-				"broadcast {broadcast} did not resolve with a catalog within {CATALOG_TIMEOUT:?}"
-			))
-		})??;
+		.map_err(|_| Error::CatalogTimeout)??;
 	let codecs = source.catalog_codecs();
 	if codecs.is_empty() {
-		return Err(Error::Other(anyhow::anyhow!(
-			"catalog has no codecs we can egress (Opus / H.264 / H.265 / VP8 / VP9 / AV1)"
-		)));
+		return Err(Error::NoRenditions);
 	}
 
 	// Register a session on the shared media mux (see whip::accept). Restrict our
@@ -175,6 +185,8 @@ fn status_for(err: &Error) -> StatusCode {
 		Error::InvalidSdp(_) => StatusCode::BAD_REQUEST,
 		Error::UnsupportedCodec(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
 		Error::SessionNotFound => StatusCode::NOT_FOUND,
+		Error::Moq(moq_net::Error::Unauthorized) => StatusCode::UNAUTHORIZED,
+		Error::Moq(moq_net::Error::NotFound | moq_net::Error::Unroutable) => StatusCode::NOT_FOUND,
 		_ => StatusCode::INTERNAL_SERVER_ERROR,
 	}
 }

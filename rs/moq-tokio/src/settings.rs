@@ -14,9 +14,6 @@ pub struct Listen {
 	#[usage(env = "MOQ_LISTEN", cli("--listen"))]
 	bind: Option<String>,
 
-	#[usage(env = "MOQ_LISTEN_BACKEND", cli("--listen-backend"))]
-	backend: Option<String>,
-
 	#[usage(env = "MOQ_LISTEN_VERSION", cli("--listen-version"), parse = "list_by_comma")]
 	version: Option<Vec<String>>,
 
@@ -123,9 +120,6 @@ pub struct Connect {
 
 	#[usage(env = "MOQ_CONNECT_BIND", cli("--connect-bind"))]
 	bind: Option<String>,
-
-	#[usage(env = "MOQ_CONNECT_BACKEND", cli("--connect-backend"))]
-	backend: Option<String>,
 
 	#[usage(env = "MOQ_CONNECT_RACE", cli("--connect-race"))]
 	race: Option<String>,

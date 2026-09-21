@@ -42,6 +42,15 @@ and stale media listings preceding a new timeline commit. Following N+1 must
 not refresh all media listings. Wire these cases into CI for the store, writer,
 and reader implementations; do not add an unconnected standalone proof script.
 
+The store's own tests also cover recording-prefix isolation (`rec` beside
+`rec-other`), empty prefixes, track-prefix listings, continuation pages, and
+every supported pagination option. A page must not lose directory entries
+silently or fail because the backend matched a neighbouring recording. Every
+publicly constructible key either serializes to a path its parser accepts or
+fails before storage; direct `Key::Groups` construction must not bypass range
+validation. These cases belong beside the store and codec code and need no
+new public API or format change.
+
 Crash a DVR writer after its pop becomes durable but before media deletion.
 On exclusive restart, prove that expired and uncommitted group objects are
 removed after the grace period while retained media, `.info`, and checkpoint

@@ -47,7 +47,8 @@ for ann, err := range announced.All(ctx) {
 		}
 		log.Fatal(err)
 	}
-	fmt.Println("got broadcast", ann.Path())
+	// The covered prefix is relative to the requested "demos/" prefix.
+	fmt.Println("got broadcast", ann.Prefix())
 }
 ```
 

@@ -15,9 +15,7 @@
 //!
 //! ## Embedding
 //!
-//! Build a [`Server`] over your own
-//! [`OriginProducer`](moq_net::origin::Producer) /
-//! [`OriginConsumer`](moq_net::origin::Consumer) and merge
+//! Build a [`Server`] and pass your own origin handles when merging
 //! [`Server::publish_router`] / [`Server::subscribe_router`] into your own axum
 //! app, or dial out with [`Client`]. A command-line interface is provided by the
 //! `moq-cli` binary, on top of this library.
@@ -85,7 +83,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn whip_and_whep_round_trip_opus() {
-		let source_origin = moq_tokio::origin::spawn(moq_net::Hop::random());
+		let source_origin = moq_tokio::origin::spawn();
 		let source_consumer = source_origin.consume();
 		let mut announcements = source_consumer.announced();
 		let mut source = source_origin
@@ -113,15 +111,11 @@ mod tests {
 		assert!(announcement.kind.is_active(), "source was unannounced");
 		drop(announcements);
 
-		let server_origin = moq_tokio::origin::spawn(moq_net::Hop::random());
-		let server = Server::new(
-			server::Config::default(),
-			server_origin.clone(),
-			server_origin.consume(),
-		);
+		let server_origin = moq_tokio::origin::spawn();
+		let server = Server::new(server::Config::default());
 		let app = Router::new()
-			.nest("/whip", server.publish_router())
-			.nest("/whep", server.subscribe_router());
+			.nest("/whip", server.publish_router(server_origin.clone()))
+			.nest("/whep", server.subscribe_router(server_origin.consume()));
 		let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
 			.await
 			.expect("bind HTTP listener");
@@ -135,7 +129,7 @@ mod tests {
 			.expect("WHIP negotiation timed out")
 			.expect("WHIP negotiation failed");
 
-		let output_origin = moq_tokio::origin::spawn(moq_net::Hop::random());
+		let output_origin = moq_tokio::origin::spawn();
 		let output = output_origin
 			.create_broadcast("output")
 			.expect("create output broadcast");

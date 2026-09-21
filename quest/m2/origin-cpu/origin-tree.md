@@ -33,4 +33,4 @@ their literal-head notification and filtering requirements.
 
 - [Route-selection CPU](/quest/m2/origin-cpu/origin-index.md) - per-broadcast alternatives
 - [Relay memory](/quest/m2/relay-memory.md) - memory measurements
-- [Origin scopes](/quest/m1/api-origin-scopes.md) - pattern-scoped views
+- [Origin scopes](https://github.com/moq-dev/moq/pull/3746) - pattern-scoped views

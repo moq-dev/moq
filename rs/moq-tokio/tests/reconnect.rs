@@ -9,7 +9,7 @@
 use std::net::TcpListener;
 use std::time::Duration;
 
-use moq_tokio::moq_net::{self, Hop};
+use moq_tokio::moq_net;
 
 /// A client whose reconnect loop escalates fast enough to assert on inside a test.
 fn client(backoff: moq_tokio::Backoff) -> moq_tokio::Client {
@@ -129,7 +129,7 @@ async fn spawn_server() -> (
 		let (accepted, sessions) = tokio::sync::mpsc::unbounded_channel();
 		let handle = tokio::spawn(async move {
 			while let Some(request) = server.accept().await {
-				let origin = moq_tokio::origin::spawn(Hop::random());
+				let origin = moq_tokio::origin::spawn();
 				match request.with_publisher(&origin).ok().await {
 					Ok(session) => {
 						let _ = accepted.send(session);

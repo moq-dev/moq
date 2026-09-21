@@ -7,6 +7,10 @@ the match like Rust and JavaScript. `moq-ffi`'s
 `MoqOriginConsumer::announced(prefix)` scopes by a literal root today, so its
 only wildcard is the implicit trailing `**`.
 
+Rust and JavaScript pattern scopes and captures landed in
+[#3746](https://github.com/moq-dev/moq/pull/3746). This quest tracks only the
+cross-language binding mirror that PR explicitly left unfinished.
+
 ## Plan
 
 - Bindings, per the Cross-Package Sync checklist: `announced(prefix)`

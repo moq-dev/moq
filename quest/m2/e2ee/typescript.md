@@ -17,4 +17,4 @@ the Rust crate name for name, without putting keys or crypto policy in `@moq/net
 
 ## Required
 
-- [Rust E2EE core on moq-e2ee-00](/quest/m2/e2ee/rust.md) - settles the surface this package mirrors and retires the `-01` vectors
+- [Rust E2EE core on moq-e2ee-00](/quest/m0/e2ee-api.md) - settles the surface this package mirrors and retires the `-01` vectors

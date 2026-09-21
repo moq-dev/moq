@@ -26,9 +26,7 @@ pub(crate) async fn dial(
 	let source = EgressSource::new(moq_mux::Source::new(origin, path)).await?;
 	let codecs = source.catalog_codecs();
 	if codecs.is_empty() {
-		return Err(Error::Other(anyhow::anyhow!(
-			"catalog has no codecs we can egress (Opus / H.264 / H.265 / VP8 / VP9 / AV1)"
-		)));
+		return Err(Error::NoRenditions);
 	}
 
 	let (socket, candidates) = session::bind_udp(&client.config().ice_candidates).await?;
@@ -54,9 +52,7 @@ pub(crate) async fn dial(
 	{
 		mids.push(api.add_media(MediaKind::Video, Direction::SendOnly, None, None, None));
 	}
-	let (offer, pending) = api
-		.apply()
-		.ok_or_else(|| Error::Other(anyhow::anyhow!("no SDP changes to apply")))?;
+	let (offer, pending) = api.apply().ok_or(Error::NoSdpChanges)?;
 
 	let res = client
 		.http()
@@ -65,17 +61,13 @@ pub(crate) async fn dial(
 		.header(reqwest::header::ACCEPT, "application/sdp")
 		.body(offer.to_sdp_string())
 		.send()
-		.await
-		.map_err(|err| Error::Other(anyhow::anyhow!("WHIP POST failed: {err}")))?;
+		.await?;
 
 	if !res.status().is_success() {
-		return Err(Error::Other(anyhow::anyhow!("WHIP server returned {}", res.status())));
+		return Err(Error::HttpStatus(res.status().as_u16()));
 	}
 
-	let body = res
-		.text()
-		.await
-		.map_err(|err| Error::Other(anyhow::anyhow!("reading WHIP answer body: {err}")))?;
+	let body = res.text().await?;
 	let answer = SdpAnswer::from_sdp_string(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
 
 	rtc.sdp_api().accept_answer(pending, answer).map_err(Error::rtc)?;

@@ -1,18 +1,16 @@
-//! The PR-2 validation milestone: a raw-quiche echo over the worker's UDP
-//! path, exercising the ring, provided-buffer RX with GRO, GSO TX, userspace
-//! timers (quiche's timeout), local spawn, and parking together.
-//!
-//! Kernel-gated: skips loudly below the Linux 6.12 floor (GitHub-hosted CI),
-//! and runs everywhere else.
+//! A tokio noq peer echoing through the io_uring WebTransport server.
 
-#![cfg(target_os = "linux")]
+#![cfg(all(target_os = "linux", feature = "noq"))]
 
-#[path = "support/quiche.rs"]
+#[path = "support.rs"]
 mod support;
 
 use std::net::UdpSocket;
 
-use moq_uring::{Config, Error, Worker, udp};
+use moq_uring::{Config, Error, Worker, quic, udp};
+use web_transport_trait::poll::{RecvStream as _, SendStream as _, Session as _};
+
+const PAYLOAD: usize = 512 * 1024;
 
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
@@ -25,50 +23,84 @@ fn worker() -> Option<Worker> {
 	}
 }
 
-fn echo(config: udp::Config) {
+async fn drain(recv: &mut quic::web::RecvStream) -> Vec<u8> {
+	let mut out = Vec::new();
+	let mut buf = [0u8; 64 * 1024];
+	loop {
+		match std::future::poll_fn(|cx| recv.poll_read(cx, &mut buf))
+			.await
+			.expect("read")
+		{
+			Some(n) => out.extend_from_slice(&buf[..n]),
+			None => return out,
+		}
+	}
+}
+
+async fn write_finish(send: &mut quic::web::SendStream, mut buf: &[u8]) {
+	while !buf.is_empty() {
+		let n = std::future::poll_fn(|cx| send.poll_write(cx, buf))
+			.await
+			.expect("write");
+		buf = &buf[n..];
+	}
+	send.finish().expect("finish");
+}
+
+#[test]
+fn echo_noq_peer() {
 	let Some(mut worker) = worker() else { return };
 	let handle = worker.handle();
-
-	let server_sock = UdpSocket::bind("127.0.0.1:0").expect("bind server");
-	let client_sock = UdpSocket::bind("127.0.0.1:0").expect("bind client");
-
-	let payload: Vec<u8> = (0..512 * 1024).map(|i| (i * 31 % 251) as u8).collect();
-	let expect = payload.clone();
-
 	let certs = support::certs().expect("certificates");
-	let server_sock = handle.udp(server_sock, config.clone()).expect("server socket");
-	let server_addr = server_sock.local_addr().expect("server addr");
-	let client_sock = handle.udp(client_sock, config).expect("client socket");
 
-	// The server runs as a spawned worker task; the client drives block_on.
-	let server_handle = handle.clone();
-	handle.spawn(async move {
-		support::echo_server(server_handle, server_sock, certs)
-			.await
-			.expect("echo server");
+	let mut server = quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
+	server.alpn = vec![web_transport_noq::ALPN.to_string()];
+	let socket = handle
+		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+		.expect("socket");
+	let endpoint =
+		quic::Endpoint::new(&handle, socket, quic::endpoint::Config::default().with_server(server)).expect("endpoint");
+	let addr = endpoint.local_addr();
+	let payload: Vec<u8> = (0..PAYLOAD).map(|i| (i * 31 % 251) as u8).collect();
+	let expected = payload.clone();
+	let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+
+	let client = std::thread::spawn(move || {
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.expect("runtime");
+		runtime.block_on(async move {
+			let client = web_transport_noq::ClientBuilder::new()
+				.dangerous()
+				.with_no_certificate_verification()
+				.expect("client");
+			let request = web_transport_noq::proto::ConnectRequest::new(
+				url::Url::parse(&format!("https://{addr}/echo")).expect("url"),
+			);
+			let session = client.connect(request).await.expect("connect");
+			let (mut send, mut recv) = session.open_bi().await.expect("open stream");
+			send.write_all(&payload).await.expect("write");
+			send.finish().expect("finish");
+			let echoed = recv.read_to_end(PAYLOAD + 1).await.expect("read");
+			done_tx.send(()).expect("notify server");
+			echoed
+		})
 	});
 
-	let echoed = worker
-		.block_on(async move { support::echo_client(&handle, client_sock, server_addr, &payload).await })
-		.expect("worker")
-		.expect("echo client");
+	worker
+		.block_on(async move {
+			let conn = endpoint.accept().await.expect("accept");
+			let request = quic::web::Request::accept(&handle, conn).await.expect("handshake");
+			let mut session = request.ok().await.expect("respond");
+			let (mut send, mut recv) = std::future::poll_fn(|cx| session.poll_accept_bi(cx))
+				.await
+				.expect("accept stream");
+			let payload = drain(&mut recv).await;
+			write_finish(&mut send, &payload).await;
+			done_rx.await.expect("peer received echo");
+		})
+		.expect("worker");
 
-	assert_eq!(echoed.len(), expect.len(), "echoed byte count");
-	assert!(echoed == expect, "echoed bytes differ");
-}
-
-#[test]
-fn echo_default() {
-	// The production path: multishot + GRO + GSO.
-	echo(udp::Config::default());
-}
-
-#[test]
-fn echo_ablated() {
-	// Everything off: oneshot receives, no GRO, one sendmsg per datagram.
-	let mut config = udp::Config::default();
-	config.gro = false;
-	config.gso = false;
-	config.multishot = false;
-	echo(config);
+	assert_eq!(client.join().expect("client thread"), expected);
 }

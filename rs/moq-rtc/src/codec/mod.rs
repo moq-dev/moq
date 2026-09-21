@@ -145,9 +145,7 @@ impl<I: DeferredImport> DeferredVideo<I> {
 		}
 
 		let DeferredState::Pending(pending) = std::mem::replace(&mut self.state, DeferredState::Poisoned) else {
-			return Err(crate::Error::Other(anyhow::anyhow!(
-				"video bridge initialization already failed"
-			)));
+			return Err(crate::Error::BridgeFailed);
 		};
 		let reserved = pending.catalog.reserve();
 		let abort = pending.track.clone();
@@ -269,7 +267,7 @@ impl Track {
 				} => {
 					let prefix = frame.keyframe.then(|| keyframe_prefix.as_ref());
 					moq_mux::codec::annexb::from_length_prefixed(&frame.payload, *length_size, prefix)
-						.map_err(|err| crate::Error::Other(anyhow::anyhow!("annexb: {err}")))?
+						.map_err(moq_mux::Error::from)?
 				}
 			};
 			if payload.is_empty() {
@@ -292,17 +290,17 @@ fn h264_convert(config: &VideoConfig) -> Result<TrackConvert> {
 	let Some(avcc) = config.description.as_ref().filter(|d| !d.is_empty()) else {
 		return Ok(TrackConvert::Passthrough);
 	};
-	let params = moq_mux::codec::h264::Avcc::parse(avcc)
-		.map_err(|err| crate::Error::Other(anyhow::anyhow!("avcc parse: {err}")))?;
+	let params = moq_mux::codec::h264::Avcc::parse(avcc).map_err(moq_mux::Error::from)?;
 	// Without SPS+PPS the keyframe prefix would be empty and every keyframe
 	// would reach the peer without inline parameter sets, i.e. undecodable.
 	// Fail loudly instead, matching moq-mux's `h264::Export`.
 	if params.sps.is_empty() || params.pps.is_empty() {
-		return Err(crate::Error::Other(anyhow::anyhow!(
-			"avc1 avcC is missing parameter sets (sps={}, pps={})",
-			params.sps.len(),
-			params.pps.len()
-		)));
+		return Err(moq_mux::Error::H264(moq_mux::codec::h264::Error::MissingParamSets {
+			name: "WebRTC rendition".to_string(),
+			sps: params.sps.len(),
+			pps: params.pps.len(),
+		})
+		.into());
 	}
 	let keyframe_prefix = moq_mux::codec::annexb::build_prefix(params.sps.iter().chain(params.pps.iter()));
 	Ok(TrackConvert::LengthPrefixed {
@@ -320,17 +318,17 @@ fn h265_convert(config: &VideoConfig) -> Result<TrackConvert> {
 	let Some(hvcc) = config.description.as_ref().filter(|d| !d.is_empty()) else {
 		return Ok(TrackConvert::Passthrough);
 	};
-	let params = moq_mux::codec::h265::Hvcc::parse(hvcc)
-		.map_err(|err| crate::Error::Other(anyhow::anyhow!("hvcc parse: {err}")))?;
+	let params = moq_mux::codec::h265::Hvcc::parse(hvcc).map_err(moq_mux::Error::from)?;
 	// Same reasoning as `h264_convert`: a keyframe with no inline VPS/SPS/PPS
 	// is undecodable, so reject an hvcC that omits any of them.
 	if params.vps.is_empty() || params.sps.is_empty() || params.pps.is_empty() {
-		return Err(crate::Error::Other(anyhow::anyhow!(
-			"hvc1 hvcC is missing parameter sets (vps={}, sps={}, pps={})",
-			params.vps.len(),
-			params.sps.len(),
-			params.pps.len()
-		)));
+		return Err(moq_mux::Error::H265(moq_mux::codec::h265::Error::MissingParamSets {
+			name: "WebRTC rendition".to_string(),
+			vps: params.vps.len(),
+			sps: params.sps.len(),
+			pps: params.pps.len(),
+		})
+		.into());
 	}
 	let keyframe_prefix =
 		moq_mux::codec::annexb::build_prefix(params.vps.iter().chain(params.sps.iter()).chain(params.pps.iter()));

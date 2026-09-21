@@ -4,16 +4,15 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
-from typing import Literal
 
-from moq_ffi import MoqRequest, MoqServer
+from moq_ffi import MoqRequest, MoqServer, MoqTransport
 
 from .origin import OriginProducer
 from .publish import BroadcastProducer
 from .session import Session
 
-# The wire transport carrying a session: raw QUIC, iroh's peer-to-peer QUIC, or WebSocket.
-Transport = Literal["quic", "iroh", "websocket"]
+# The network transport carrying an incoming session.
+Transport = MoqTransport
 
 
 class Request:
@@ -46,8 +45,8 @@ class Request:
 
     @property
     def transport(self) -> Transport:
-        """The wire transport carrying this session (`"quic"`, `"iroh"`, or `"websocket"`)."""
-        return self._inner.transport()  # type: ignore[return-value]
+        """The network transport carrying this session."""
+        return self._inner.transport()
 
     def set_publish(self, origin: OriginProducer | None) -> None:
         """Override the publish origin for this session. Falls back to the

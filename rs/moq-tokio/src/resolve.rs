@@ -284,7 +284,7 @@ impl Candidates {
 	/// are handed out anyway so the dial surfaces the OS error instead of a
 	/// confusing "no DNS entries". See <https://github.com/moq-dev/moq/issues/1375>
 	/// for the Windows failure this family matching originally fixed.
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche", test))]
+	#[cfg(any(feature = "noq", test))]
 	pub(crate) fn with_local(mut self, local: SocketAddr, dual_stack: bool) -> Self {
 		self.local = Some((local, dual_stack));
 		self
@@ -292,11 +292,7 @@ impl Candidates {
 
 	/// Hand out at most `max` candidates.
 	///
-	/// For a backend that can't run overlapping attempts: quiche binds a socket
-	/// per attempt, and a pinned source port only fits one at a time. That one
-	/// attempt goes to the platform's own first choice, so this must not be paired
-	/// with an order we invented.
-	#[cfg(any(feature = "quiche", test))]
+	#[cfg(test)]
 	pub(crate) fn with_limit(mut self, max: usize) -> Self {
 		self.limit = max;
 		self
@@ -619,8 +615,7 @@ mod tests {
 		assert_eq!(drain(candidates).await, addrs(&["[2001:db8::1]:443", "1.2.3.4:443"]));
 	}
 
-	/// quiche pins its source port and so gets one attempt only. It has to be the
-	/// address the platform put first, or an IPv4-only host loses its only shot.
+	/// A limited candidate set keeps the platform's first address.
 	#[tokio::test]
 	async fn a_single_attempt_follows_the_resolver() {
 		let candidates = answered(&["1.2.3.4:443", "[2001:db8::1]:443"]).with_limit(1);

@@ -225,14 +225,13 @@ async fn serve_client(
 
 	// What the grant allows, as origin handles rooted where the session dialed.
 	let token = lease.token();
-	let rooted = origin.with_root(&token.root);
 	let publish = directions
 		.publish
-		.then(|| rooted.as_ref().and_then(|o| o.scope(&token.subscribe)))
+		.then(|| origin.scope(&token.root, &token.subscribe).ok())
 		.flatten();
 	let subscribe = directions
 		.consume
-		.then(|| rooted.as_ref().and_then(|o| o.scope(&token.publish)))
+		.then(|| origin.scope(&token.root, &token.publish).ok())
 		.flatten();
 	if publish.is_none() && subscribe.is_none() {
 		request.reject(moq_tokio::server::Reject::Forbidden).await.ok();

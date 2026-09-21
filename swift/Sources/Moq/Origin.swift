@@ -112,7 +112,7 @@ public final class OriginConsumer: Sendable {
         self.ffi = ffi
     }
 
-    /// Stream every route announced under a prefix.
+    /// Stream routes under the requested prefix; each update returns a relative covered prefix.
     public func announced(prefix: String) throws -> AnnounceConsumer {
         AnnounceConsumer(try ffi.announced(prefix: prefix))
     }
@@ -165,7 +165,7 @@ public final class AnnounceConsumer: AsyncSequence, Sendable {
 
 /// A single route announcement or retraction.
 ///
-/// A route claims that `path` and every path beneath it can be served; it
+/// A route claims that `prefix` and every path beneath it can be served; it
 /// carries no broadcast. Resolve a specific path with `OriginConsumer.requestBroadcast`.
 /// By convention a publisher announces each broadcast's exact path.
 public final class AnnounceUpdate: Sendable {
@@ -175,13 +175,13 @@ public final class AnnounceUpdate: Sendable {
         self.ffi = ffi
     }
 
-    /// The prefix the route covers, relative to the `announced` prefix.
-    public var path: String {
-        ffi.path()
+    /// The covered prefix, relative to the requested announcements prefix.
+    public var prefix: String {
+        ffi.prefix()
     }
 
     /// Whether the route is active (`true`) or was retracted (`false`). A
-    /// repeated active announcement for the same path is a metadata update.
+    /// repeated active announcement for the same prefix is a metadata update.
     public var active: Bool {
         ffi.active()
     }

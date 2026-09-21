@@ -46,9 +46,9 @@ async def test_server_client_roundtrip():
                 bind="127.0.0.1:0",
             ) as client:
                 async for announcement in client.announced():
-                    assert announcement.path == "hello"
+                    assert announcement.prefix == "hello"
 
-                    broadcast_consumer = await client.request_broadcast(announcement.path)
+                    broadcast_consumer = await client.request_broadcast(announcement.prefix)
                     catalog = await broadcast_consumer.catalog()
                     track_name, audio = next(iter(catalog.audio.items()))
                     assert audio.codec == "opus"
@@ -124,7 +124,7 @@ async def test_client_reconnects_and_resumes_announcements():
                 broadcast = server.create_broadcast("after-reconnect")
                 broadcast.announce()
                 async for announcement in client.announced():
-                    assert announcement.path == "after-reconnect"
+                    assert announcement.prefix == "after-reconnect"
                     break
                 broadcast.finish()
         finally:
@@ -146,7 +146,7 @@ async def test_server_request_close():
         reject_task = asyncio.create_task(reject_loop())
         try:
             client = moq_ffi.MoqClient()
-            client.set_tls_disable_verify(True)
+            client.set_tls_verify(False)
             client.set_bind("127.0.0.1:0")
             # One-shot, so this dial's outcome is what surfaces here rather than
             # whatever the reconnect loop eventually reports.
@@ -173,10 +173,10 @@ async def test_server_request_close():
 async def test_client_setters_fail_after_cancel():
     """A cancelled client refuses further configuration rather than ignoring it."""
     client = moq_ffi.MoqClient()
-    client.set_tls_disable_verify(True)
+    client.set_tls_verify(False)
     client.cancel()
     with pytest.raises(moq_ffi.MoqError.Cancelled):  # type: ignore[misc]
-        client.set_tls_disable_verify(False)
+        client.set_tls_verify(True)
     with pytest.raises(moq_ffi.MoqError.Cancelled):  # type: ignore[misc]
         client.set_bind("127.0.0.1:0")
 
@@ -237,7 +237,7 @@ async def test_serve_helper_accepts_clients():
                 bind="127.0.0.1:0",
             ) as client:
                 async for announcement in client.announced():
-                    assert announcement.path == "via-serve"
+                    assert announcement.prefix == "via-serve"
                     break
         finally:
             serve_task.cancel()
@@ -262,7 +262,7 @@ async def test_broadcast_route_over_wire():
                 bind="127.0.0.1:0",
             ) as client:
                 async for announcement in client.announced():
-                    assert announcement.path == "with-route"
+                    assert announcement.prefix == "with-route"
                     assert announcement.active
                     route = announcement.route
                     assert all(isinstance(h, int) for h in route.hops)
@@ -297,7 +297,7 @@ async def test_route_update_observes_restart():
             ) as client:
                 announced = client.announced()
                 first = await asyncio.wait_for(announced.__anext__(), timeout=5.0)
-                assert first.path == "routed"
+                assert first.prefix == "routed"
                 assert first.active
                 assert 42 in first.route.hops
                 assert 77 not in first.route.hops
@@ -305,14 +305,14 @@ async def test_route_update_observes_restart():
                 # The publisher advertises a longer chain: an in-place update.
                 announce.update(moq.Route(hops=[42, 77]))
                 updated = await asyncio.wait_for(announced.__anext__(), timeout=5.0)
-                assert updated.path == "routed"
+                assert updated.prefix == "routed"
                 assert updated.active
                 assert 77 in updated.route.hops
 
                 # Cancelling retracts the route.
                 announce.cancel()
                 ended = await asyncio.wait_for(announced.__anext__(), timeout=5.0)
-                assert ended.path == "routed"
+                assert ended.prefix == "routed"
                 assert not ended.active
         finally:
             serve_task.cancel()

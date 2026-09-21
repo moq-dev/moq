@@ -3,20 +3,16 @@
 //!
 //! The point of the test is the two halves the relay depends on: the sink
 //! actually produces a file for the connection (per connection on noq and
-//! quiche, per endpoint on quinn-proto, which takes one sink per config), and
+//! per connection on noq, and
 //! every record in it is JSON, so a reader is not handed a truncated or
 //! interleaved trace.
 //!
 //! Kernel-gated: skips loudly below the Linux 6.12 floor (GitHub-hosted CI),
 //! and runs everywhere else.
 
-#![cfg(all(
-	target_os = "linux",
-	feature = "qlog",
-	any(feature = "noq", feature = "quiche", feature = "quinn")
-))]
+#![cfg(all(target_os = "linux", feature = "qlog", feature = "noq"))]
 
-#[path = "support/quiche.rs"]
+#[path = "support.rs"]
 mod support;
 
 use std::net::UdpSocket;

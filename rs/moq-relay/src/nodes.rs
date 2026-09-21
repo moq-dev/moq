@@ -153,9 +153,13 @@ impl Nodes {
 
 	/// The node advertisements currently visible under [`MESH_PREFIX`].
 	fn announced(&self) -> Announced {
-		match self.origin.consume().with_root(MESH_PREFIX) {
-			Some(consumer) => self.scan_announced(&mut consumer.announced()),
-			None => Announced::default(),
+		match self
+			.origin
+			.consume()
+			.scope(MESH_PREFIX, &moq_net::Patterns::from(moq_net::Pattern::all()))
+		{
+			Ok(consumer) => self.scan_announced(&mut consumer.announced()),
+			Err(_) => Announced::default(),
 		}
 	}
 
@@ -175,7 +179,7 @@ impl Nodes {
 			let route = update.route;
 			let hop_ids = route.hops.iter().map(|origin| origin.id()).collect::<Vec<_>>();
 			// An advertisement with no hops never crossed a link, so it is our own.
-			let origin_id = hop_ids.first().copied().unwrap_or_else(|| self.origin.id());
+			let origin_id = hop_ids.first().copied().unwrap_or_else(|| self.origin.hop().id());
 
 			scanned
 				.origins
@@ -298,7 +302,7 @@ mod tests {
 	async fn snapshot_combines_announcements_and_live_connections() {
 		const REMOTE_ID: u64 = 9_007_199_254_740_993;
 
-		let origin = moq_tokio::origin::spawn(Hop::new(100).unwrap());
+		let origin = moq_tokio::origin::spawn_config(moq_net::origin::Config::new(Hop::new(100).unwrap()));
 		let nodes = Nodes::new(origin.clone());
 		let _remote = announced_node(&origin, "https://relay-b.example/", &[REMOTE_ID], 7).await;
 		let _outbound = nodes.connect_outbound(0, "https://relay-b.example/");
@@ -334,7 +338,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn snapshot_omits_unresolved_inbound_connections() {
-		let origin = moq_tokio::origin::spawn(Hop::new(100).unwrap());
+		let origin = moq_tokio::origin::spawn_config(moq_net::origin::Config::new(Hop::new(100).unwrap()));
 		let nodes = Nodes::new(origin);
 		let _inbound = nodes.connect_inbound(0, Hop::new(200).unwrap());
 
@@ -343,7 +347,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn snapshot_stops_reporting_closed_outbound_connections() {
-		let origin = moq_tokio::origin::spawn(Hop::new(100).unwrap());
+		let origin = moq_tokio::origin::spawn_config(moq_net::origin::Config::new(Hop::new(100).unwrap()));
 		let nodes = Nodes::new(origin);
 		let connection = nodes.connect_outbound(0, "https://relay-b.example/");
 		assert_eq!(nodes.snapshot().nodes.len(), 1);
@@ -354,7 +358,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn outbound_node_omits_credentials_from_url() {
-		let origin = moq_tokio::origin::spawn(Hop::new(100).unwrap());
+		let origin = moq_tokio::origin::spawn_config(moq_net::origin::Config::new(Hop::new(100).unwrap()));
 		let nodes = Nodes::new(origin);
 		let _connection = nodes.connect_outbound(0, "https://relay-b.example/?jwt=secret");
 
@@ -367,12 +371,15 @@ mod tests {
 	/// churned mid-request.
 	#[tokio::test(start_paused = true)]
 	async fn scan_skips_an_unannounce_queued_ahead_of_another_node() {
-		let origin = moq_tokio::origin::spawn(Hop::new(100).unwrap());
+		let origin = moq_tokio::origin::spawn_config(moq_net::origin::Config::new(Hop::new(100).unwrap()));
 		let nodes = Nodes::new(origin.clone());
 		let first = announced_node(&origin, "https://relay-a.example/", &[200], 1).await;
 		let _second = announced_node(&origin, "https://relay-b.example/", &[300], 1).await;
 
-		let consumer = origin.consume().with_root(MESH_PREFIX).expect("mesh prefix is in root");
+		let consumer = origin
+			.consume()
+			.scope(MESH_PREFIX, &moq_net::Patterns::from(moq_net::Pattern::all()))
+			.expect("mesh prefix is in root");
 		let mut announced = consumer.announced();
 
 		// Take relay-a's replayed announce, then retire it so the cursor queues a
@@ -393,7 +400,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn duplicate_origin_ids_do_not_resolve_inbound_connections() {
-		let origin = moq_tokio::origin::spawn(Hop::new(100).unwrap());
+		let origin = moq_tokio::origin::spawn_config(moq_net::origin::Config::new(Hop::new(100).unwrap()));
 		let nodes = Nodes::new(origin.clone());
 		let _first = announced_node(&origin, "https://relay-b.example/", &[200], 1).await;
 		let _second = announced_node(&origin, "https://relay-c.example/", &[200], 1).await;

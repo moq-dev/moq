@@ -38,10 +38,12 @@ adapters own their hardware import proof. Update `moq.h`, affected wrappers,
 and C/binding documentation; run `just test smoke-full` in CI.
 
 Public API: owned frame access and conversion at the binding boundary. Wire:
-none. Keep the existing moq-video core API unless a concrete consumer needs a
-change.
+none. Consume the settled m0 frame/output contracts without replacing them.
 
 ## Required
+
+- [Video frames](/quest/m0/video-frames.md) - typed pixels and extensible owned frames
+- [Video output](/quest/m0/video-output.md) - explicit native or CPU output
 
 - [Merge dev](/quest/m1/merge-dev.md) - the required M1 APIs must be available on main before this implementation starts
 

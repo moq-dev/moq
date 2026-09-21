@@ -8,7 +8,6 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::io::SeekFrom;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -57,39 +56,21 @@ const MAX_RENDITION_FAILURES: usize = 3;
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct Config {
-	/// The master or media playlist URL or file path to import.
-	pub playlist: String,
+	/// The master or media playlist URL to import. Local files use a `file://` URL.
+	pub playlist: Url,
 
 	/// HTTP client used to fetch the playlist and segments, for example one carrying
 	/// credentials for an authenticated origin. Defaults to a plain client with a 30
 	/// second per-request timeout.
 	///
-	/// This is a [`reqwest::Client`], re-exported as [`crate::reqwest`]; a major version
-	/// bump of that dependency is a breaking change for this field.
+	/// This is a [`reqwest::Client`].
 	pub client: Option<Client>,
 }
 
 impl Config {
 	/// Create an import configuration for `playlist` using the default HTTP client.
-	pub fn new(playlist: String) -> Self {
+	pub fn new(playlist: Url) -> Self {
 		Self { playlist, client: None }
-	}
-
-	/// Parse the playlist string into a URL.
-	/// If it starts with http:// or https://, parse as URL.
-	/// Otherwise, treat as a file path and convert to file:// URL.
-	fn parse_playlist(&self) -> Result<Url> {
-		if self.playlist.starts_with("http://") || self.playlist.starts_with("https://") {
-			Url::parse(&self.playlist).map_err(|_| Error::InvalidPlaylistUrl)
-		} else {
-			let path = PathBuf::from(&self.playlist);
-			let absolute = if path.is_absolute() {
-				path
-			} else {
-				std::env::current_dir()?.join(path)
-			};
-			Url::from_file_path(&absolute).map_err(|_| Error::InvalidFilePath)
-		}
 	}
 }
 
@@ -611,7 +592,7 @@ pub struct Import {
 impl Import {
 	/// Create a new HLS import that will write into the given broadcast.
 	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: CatalogProducer, cfg: Config) -> Result<Self> {
-		let base_url = cfg.parse_playlist()?;
+		let base_url = cfg.playlist;
 		Ok(Self {
 			sink: Sink { broadcast, catalog },
 			fetcher: Fetcher::new(cfg.client)?,
@@ -1033,7 +1014,7 @@ fn moq_sequence(discontinuity_sequence: u64, media_sequence: u64) -> Result<u64>
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use std::path::Path;
+	use std::path::{Path, PathBuf};
 	use std::sync::atomic::{AtomicUsize, Ordering};
 	use tokio::io::AsyncWriteExt as _;
 	use tokio::net::TcpListener;
@@ -1054,7 +1035,7 @@ mod tests {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let cfg = Config::new(playlist_path.to_string_lossy().into_owned());
+		let cfg = Config::new(Url::from_file_path(&playlist_path).unwrap());
 		let import = Import::new(broadcast, catalog.clone(), cfg).unwrap();
 		(import, catalog)
 	}
@@ -1152,7 +1133,7 @@ mod tests {
 
 	#[test]
 	fn hls_config_new_sets_fields() {
-		let url = "https://example.com/stream.m3u8".to_string();
+		let url = Url::parse("https://example.com/stream.m3u8").unwrap();
 		let cfg = Config::new(url.clone());
 		assert_eq!(cfg.playlist, url);
 	}
@@ -1194,7 +1175,7 @@ mod tests {
 	fn hls_import_starts_without_tracks() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let url = "https://example.com/master.m3u8".to_string();
+		let url = Url::parse("https://example.com/master.m3u8").unwrap();
 		let cfg = Config::new(url);
 		let hls = Import::new(broadcast, catalog, cfg).unwrap();
 
@@ -1256,7 +1237,7 @@ mod tests {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let cfg = Config::new(path.to_string_lossy().into_owned());
+		let cfg = Config::new(Url::from_file_path(&path).unwrap());
 		let mut import = Import::new(broadcast, catalog, cfg).unwrap();
 
 		assert!(matches!(import.ensure_tracks().await, Err(Error::NoVariants)));
@@ -1543,8 +1524,7 @@ mod tests {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		// `Config` takes a filesystem path for non-http inputs.
-		let cfg = Config::new(path.to_str().unwrap().to_string());
+		let cfg = Config::new(Url::from_file_path(&path).unwrap());
 		let mut hls = Import::new(broadcast, catalog, cfg).unwrap();
 		hls.ensure_tracks().await.unwrap();
 		hls

@@ -148,3 +148,37 @@ test("serves the catalog through a shared static track", async () => {
 
 	broadcast.close();
 });
+
+test("keeps the current catalog snapshot for a reconnecting viewer", async () => {
+	const real = performance.now.bind(performance);
+	let now = real();
+	performance.now = () => now;
+
+	try {
+		const broadcast = new Broadcast({
+			enabled: true,
+			origin: new Origin.Producer(),
+			name: Path.from("test.hang"),
+		});
+		broadcast.video("video").config.set(videoConfig);
+		await settle();
+
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected a network producer once connected");
+
+		const first = net.track(Broadcast.CATALOG_TRACK).subscribe();
+		expect((await new Json.Snapshot.Consumer<Catalog.Root>({ track: first }).next())?.video).toBeDefined();
+		first.close();
+
+		// The default track retention is five seconds. A reconnect after it must still receive
+		// the catalog's sole snapshot instead of waiting forever for an edit that may never come.
+		now += 60_000;
+		const second = net.track(Broadcast.CATALOG_TRACK).subscribe();
+		expect((await new Json.Snapshot.Consumer<Catalog.Root>({ track: second }).next())?.video).toBeDefined();
+		second.close();
+
+		broadcast.close();
+	} finally {
+		performance.now = real;
+	}
+});

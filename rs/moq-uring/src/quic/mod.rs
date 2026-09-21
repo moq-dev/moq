@@ -16,20 +16,7 @@
 //! [`web`] layer's HTTP/3 CONNECT handshake on top of the same adapter, with
 //! [`web::Session`] as the one transport type covering both.
 //!
-//! # Backends
-//!
-//! The sans-IO stack underneath is a build-time choice, and only one of them
-//! is ever compiled:
-//!
-//! - `noq` (default): noq-proto, TLS through rustls.
-//! - `quinn`: quinn-proto, TLS through rustls, which is the same stack the
-//!   rest of this workspace uses.
-//! - `quiche`: Cloudflare's stack, TLS through BoringSSL.
-//!
-//! Everything above this module is the same either way: the types in here,
-//! the [`web`] layer, and the sessions they carry. Enabling several features at
-//! once selects `noq`, so a `--all-features` build has one backend like
-//! every other build.
+//! Noq is the sans-IO QUIC stack underneath the worker.
 
 pub mod client;
 pub mod endpoint;
@@ -38,20 +25,10 @@ pub mod qlog;
 pub mod server;
 pub mod web;
 
-// `noq` wins a build that asks for several, so `--all-features` compiles one
-// backend rather than failing.
-#[cfg(all(feature = "quiche", not(feature = "noq"), not(feature = "quinn")))]
-#[path = "quiche/mod.rs"]
-mod backend;
-#[cfg(all(feature = "quinn", not(feature = "noq")))]
-#[path = "quinn/mod.rs"]
-mod backend;
-#[cfg(feature = "noq")]
-#[path = "quinn/mod.rs"]
-mod backend;
+mod noq;
 
-pub use backend::{Connection, RecvStream, SendStream};
 pub use endpoint::Endpoint;
+pub use noq::{Connection, RecvStream, SendStream};
 
 /// The QUIC payload size every full datagram in a GSO train uses, and the
 /// stride GRO coalesces with.
@@ -132,10 +109,8 @@ pub struct Transport {
 	pub keep_alive: Option<std::time::Duration>,
 	/// Where to write qlog traces, or `None` (the default) to write none.
 	///
-	/// The layout follows the backend, as it does on the tokio stack: noq and
-	/// quiche write one file per connection, while quinn-proto takes one sink
-	/// per configuration and so writes one file per endpoint, tagging each
-	/// event with the qlog `group_id` of the connection it belongs to.
+	/// Noq takes one sink per configuration and writes one file per connection,
+	/// named from that connection's Initial destination connection ID.
 	///
 	/// Only compiled with the `qlog` feature, so a build without it cannot ask
 	/// for traces the backends would not produce.
@@ -158,11 +133,9 @@ impl Default for Transport {
 
 /// The congestion control family a connection runs.
 ///
-/// A family rather than a named algorithm, because each backend ships a
-/// different generation: quiche's delay-based controller is BBRv2 and quinn's
-/// is BBRv1, so a `Bbr` variant would promise more than either delivers.
+/// Noq uses CUBIC for loss-based control and BBRv3 for delay-based control.
 ///
-/// The default is [`Loss`](Self::Loss), which is what both backends run
+/// The default is [`Loss`](Self::Loss), which is what noq runs
 /// unasked. An application carrying live media wants [`Delay`](Self::Delay)
 /// and should say so; the relay does.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

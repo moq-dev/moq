@@ -238,7 +238,7 @@ pub struct Resolved {
 
 /// The fallback arm of the QUIC-vs-WebSocket race, so only compiled when there is a
 /// QUIC dial to race against. A WebSocket-only build calls [`connect`] directly.
-#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+#[cfg(feature = "noq")]
 pub(crate) async fn race_handle(
 	config: &Config,
 	tls: &rustls::ClientConfig,

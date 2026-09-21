@@ -132,14 +132,11 @@ impl Workers {
 		// beats starting and quietly behaving differently from what the
 		// operator configured, which is the whole failure mode this mode is
 		// most likely to produce.
-		if listen.lb_id.is_some() {
+		if listen.load_balancer().is_some() {
 			anyhow::bail!(
 				"io_uring workers issue shard-steered connection ids and cannot also carry a \
 				 QUIC-LB server id (listen.lb_id)"
 			);
-		}
-		if let Some(backend) = listen.backend.as_ref() {
-			anyhow::bail!("io_uring workers serve their own QUIC stack; listen.backend={backend:?} cannot apply");
 		}
 		let (cert, key) = match (listen.tls.cert.as_slice(), listen.tls.key.as_slice()) {
 			([cert], [key]) => (cert.clone(), key.clone()),
@@ -171,8 +168,9 @@ impl Workers {
 			use std::net::ToSocketAddrs;
 			let bind = listen
 				.bind
-				.as_deref()
+				.as_ref()
 				.context("io_uring workers need an explicit listen.bind")?;
+			let bind = bind.to_string();
 			bind.to_socket_addrs()
 				.with_context(|| format!("failed to resolve {bind}"))?
 				.next()
@@ -241,7 +239,7 @@ impl Workers {
 		server.transport = transport(&quic)?;
 
 		// GSO is a property of the socket, not the connection, so it rides the
-		// worker's UDP config rather than quiche's.
+		// worker's UDP config rather than the connection's.
 		let mut udp = moq_uring::udp::Config::default();
 		udp.gso = quic.gso.unwrap_or(true);
 

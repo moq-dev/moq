@@ -19,7 +19,7 @@ The contract is [draft-lcurley-moq-e2ee](/drafts/draft-lcurley-moq-e2ee.md), pro
 
 ### Epoch and identity
 
-- Every publisher instance mints an epoch, a UUIDv7 in lowercase text, and publishes at `<opaque>/<epoch>`, where `<opaque>` derives from the credential and the semantic broadcast name without the epoch ([Opaque broadcast path](/quest/m2/e2ee/path.md)). The epoch is an input to every HKDF derivation, so a restart, takeover, or explicit group sequence cannot repeat a nonce under a key: nothing is persisted across instances and no generation counter is redistributed. Subscribers discover instances under the `<opaque>/` prefix and take the greatest epoch, which sorts newest; a known full path carries its epoch in the last segment.
+- Every publisher instance mints an epoch, a UUIDv7 in lowercase text, and publishes at `<opaque>/<epoch>`, where `<opaque>` derives from the credential and the semantic broadcast name without the epoch ([Opaque broadcast path](/quest/m0/e2ee-path.md)). The epoch is an input to every HKDF derivation, so a restart, takeover, or explicit group sequence cannot repeat a nonce under a key: nothing is persisted across instances and no generation counter is redistributed. Subscribers discover instances under the `<opaque>/` prefix and take the greatest epoch, which sorts newest; a known full path carries its epoch in the last segment.
 - The epoch is untrusted and unauthenticated. A wrong epoch fails authentication and a withheld one denies service; neither can make a nonce repeat, because only the publisher instance chooses what it encrypts under. This is the same trust a cache needs to serve the right instance, and it is deliberately e2ee-only: plaintext hang keeps its current paths.
 - Nothing in the path says the bytes are encrypted. The format after decryption (`meeting.hang`) is inside the opaque name; a plaintext player, exporter, or matcher that opens a protected broadcast finds no catalog it can read and fails with its usual typed refusal, the same as for any format it does not support.
 - One 32-byte secret authorizes the whole broadcast; HKDF-SHA-256 derives separate AES-128-GCM keys for each physical track and for grouped-frame versus datagram domains. A grouped frame uses the 96-bit nonce `uint64_be(group) || uint32_be(frame)`; a datagram uses its sequence with frame zero under the datagram domain. Empty AAD: every immutable end-to-end field is in the HKDF info or the nonce.
@@ -30,8 +30,8 @@ The contract is [draft-lcurley-moq-e2ee](/drafts/draft-lcurley-moq-e2ee.md), pro
 
 The Rust and TypeScript cores expose the same surface, and nothing else:
 
-- `Credential { context, kid, secret }` is what the application distributes. It is cheap to clone, never serializes the secret, and redacts it from `Debug`.
-- `credential.generation(epoch)` binds a discovered or minted epoch. `Generation` owns `name(semantic)` for opaque names (any string, tracks or path segments alike), `produce(track)` and `consume(track)` for protected `moq-net` tracks, and a `mint()` helper that returns a fresh UUIDv7.
+- `Credential { context, kid, secret }` accepts the application-owned secret. The application generates and distributes it over its authenticated channel; the library does not mint a secret it cannot return. Credential is cheap to clone, never serializes the secret, and redacts it from `Debug`.
+- `credential.generation(epoch)` binds a discovered or minted epoch. `Generation` owns `name(semantic)` for opaque names (any string, tracks or path segments alike), `produce(track)` and `consume(track)` for protected `moq-net` tracks, and `Epoch::mint()` returns a fresh UUIDv7. Clones share publisher claims so reopening a track cannot reset its nonce counters.
 - `track::Producer` appends groups and datagrams and allocates identities; `track::Consumer` yields groups and datagram events. `group::Producer` and `group::Consumer` wrap the whole group lifecycle so every AEAD call has the canonical physical name and transport identity.
 - Errors are the draft's typed codes plus the transport's. Nothing catalog-, hang-, or MSF-shaped lives here: a catalog is a track under a derived name, and compression is the catalog owner's job.
 - Stateless `seal`/`open` primitives with caller-chosen identities, HKDF labels and info builders, raw key bytes, and process-global claims are not public. The vectors are tested inside each core.
@@ -44,11 +44,7 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 
 ## Quests
 
-- [Opaque broadcast path](/quest/m2/e2ee/path.md) - the draft, vectors,
-  and questline publish at `<opaque>/<epoch>` with no `.e2ee` suffix
-- [Rust E2EE core on moq-e2ee-00](/quest/m2/e2ee/rust.md) - reshape the merged
-  `moq-e2ee` crate to the epoch profile and the shared library surface, and retire
-  the `moq-e2ee-01` vectors
+- [Receive failure](/quest/m2/e2ee/receiver-failure.md) - failed opens consume the key budget and a bad grouped frame wakes and terminates every pending read
 - [TypeScript E2EE core](/quest/m2/e2ee/typescript.md) - the `@moq/e2ee` package
   mirroring the Rust surface, with WebCrypto in a serial pump
 - [Rust protected publisher seams](/quest/m2/e2ee/rust-publish.md) - Rust media
@@ -71,5 +67,7 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 
 ## Related
 
+- [Release E2EE API](/quest/m0/e2ee-api.md) - the Rust surface and epoch profile are release requirements; browser and application integration follow here
+- [Opaque broadcast path](/quest/m0/e2ee-path.md) - the draft and vectors the cores implement
 - [archive](/quest/m2/archive/README.md) - protected broadcasts are deliberately outside recording and replay formats
 - [Merge dev](/quest/m1/merge-dev.md) - its HLS soak (a fresh viewer joining a days-old broadcast, playable since #3240) covers plaintext broadcasts only; stock HLS and DASH cannot read a protected catalog

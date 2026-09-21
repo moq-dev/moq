@@ -17,8 +17,8 @@ import * as Time from "../time.ts";
  *
  * The field names match Rust's `moq_net::session::Stats` but the counters keep each
  * stack's own semantics rather than being normalized. Notably W3C excludes
- * retransmissions and QUIC overhead from the byte counts where quinn includes them,
- * and counts packets where quinn counts datagrams.
+ * retransmissions and QUIC overhead from the byte counts where native QUIC includes
+ * them, and counts packets where native QUIC counts datagrams.
  *
  * @public
  */

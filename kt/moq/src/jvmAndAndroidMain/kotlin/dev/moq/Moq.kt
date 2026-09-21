@@ -33,13 +33,13 @@ class Moq internal constructor(
     fun createBroadcast(path: String): BroadcastProducer = session.publish().createBroadcast(path)
 
     /**
-     * Discover routes whose prefix starts with [prefix] as a [Flow]. The
-     * subscription is acquired on collection and cancelled when collection
-     * ends. Use [announced] for the raw handle.
+     * Discover routes under the requested [prefix] as a [Flow]. Each update
+     * returns a covered prefix relative to it. The subscription is acquired on
+     * collection and cancelled when collection ends. Use [announced] for the raw handle.
      */
     fun announcements(prefix: String = ""): Flow<MoqAnnounceUpdate> = session.consume().announcements(prefix)
 
-    /** Raw announcement handle under [prefix]. */
+    /** Raw handle under requested [prefix]; updates return covered prefixes relative to it. */
     fun announced(prefix: String = ""): MoqAnnounceConsumer = session.consume().announced(prefix)
 
     /**
@@ -125,7 +125,7 @@ class Moq internal constructor(
         ): Moq {
             val client = MoqClient()
             try {
-                if (!tlsVerify) client.setTlsDisableVerify(true)
+				if (!tlsVerify) client.setTlsVerify(false)
                 if (tlsRoots != null) client.setTlsRoots(tlsRoots)
                 if (tlsSystemRoots != null) client.setTlsSystemRoots(tlsSystemRoots)
                 if (tlsFingerprints != null) client.setTlsFingerprints(tlsFingerprints)

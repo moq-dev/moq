@@ -16,7 +16,6 @@ categories = ["multimedia", "network-programming", "web-programming"]
 # The CLI lives in `moq-cli` (the `rtc` subcommand); embedders mount the routers
 # / dial with `Client` against their own origin.
 [dependencies]
-anyhow = { workspace = true, features = ["backtrace"] }
 axum = { workspace = true }
 bytes = { workspace = true }
 hang = { workspace = true }

@@ -59,18 +59,18 @@ impl TryFrom<MoqRoute> for moq_net::origin::Route {
 
 	fn try_from(route: MoqRoute) -> Result<Self, MoqError> {
 		let cold = route.cold.unwrap_or(route.cost);
-		let mut out = moq_net::origin::Route::default().with_cost((route.cost, cold));
+		let mut hops = moq_net::Hops::new();
 		for id in route.hops {
 			let origin = if id == 0 {
 				moq_net::Hop::UNKNOWN
 			} else {
 				moq_net::Hop::new(id).map_err(|e| MoqError::InvalidRoute(e.to_string()))?
 			};
-			out = out
-				.with_hop(origin)
-				.map_err(|e| MoqError::InvalidRoute(e.to_string()))?;
+			hops.push(origin).map_err(|e| MoqError::InvalidRoute(e.to_string()))?;
 		}
-		Ok(out)
+		Ok(moq_net::origin::Route::default()
+			.with_cost(moq_net::origin::Cost { warm: route.cost, cold })
+			.with_hops(hops))
 	}
 }
 
@@ -135,7 +135,7 @@ impl Announced {
 	async fn next(&mut self) -> Result<Option<Arc<MoqAnnounceUpdate>>, MoqError> {
 		match self.inner.next().await {
 			Some(update) => Ok(Some(Arc::new(MoqAnnounceUpdate {
-				path: update.path.to_string(),
+				prefix: update.path.to_string(),
 				route: update.route.into(),
 				active: update.kind.is_active(),
 			}))),
@@ -164,10 +164,11 @@ impl AnnouncedBroadcast {
 ///
 /// Carries no broadcast: resolve a specific path with
 /// `MoqOriginConsumer::request_broadcast` (after this update proves it is
-/// covered). The application decides which paths name broadcasts.
+/// covered). Its prefix is relative to the prefix requested from
+/// `MoqOriginConsumer::announced`. The application decides which paths name broadcasts.
 #[derive(uniffi::Object)]
 pub struct MoqAnnounceUpdate {
-	path: String,
+	prefix: String,
 	route: MoqRoute,
 	active: bool,
 }
@@ -190,7 +191,7 @@ impl MoqOriginProducer {
 	}
 
 	fn from_config(config: MoqOriginConfig) -> Self {
-		let mut origin = moq_net::origin::Config::new(moq_net::Hop::random());
+		let mut origin = moq_net::origin::Config::default();
 		if let Some(capacity) = config.cache_capacity_bytes {
 			let cache = moq_net::cache::Config::default()
 				.with_capacity(capacity)
@@ -229,14 +230,14 @@ pub(crate) fn resolve_pair(
 ) -> (moq_net::origin::Producer, moq_net::origin::Producer) {
 	if publish.is_none() && consume.is_none() {
 		// Clones of a Producer share the underlying origin, so this is one origin, not two.
-		let shared = spawn(moq_net::Hop::random().into());
+		let shared = spawn(moq_net::origin::Config::default());
 		return (shared.clone(), shared);
 	}
 
 	let resolve = |origin: Option<&Arc<MoqOriginProducer>>| {
 		origin
 			.map(|o| o.inner().clone())
-			.unwrap_or_else(|| spawn(moq_net::Hop::random().into()))
+			.unwrap_or_else(|| spawn(moq_net::origin::Config::default()))
 	};
 	(resolve(publish), resolve(consume))
 }
@@ -298,10 +299,12 @@ impl MoqOriginProducer {
 
 #[uniffi::export]
 impl MoqOriginConsumer {
-	/// Subscribe to all route announcements under a prefix.
+	/// Subscribe to routes under a requested prefix; updates return covered prefixes relative to it.
 	pub fn announced(&self, prefix: String) -> Result<Arc<MoqAnnounceConsumer>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let origin = self.inner.with_root(prefix).ok_or(MoqError::Unauthorized)?;
+		let origin = self
+			.inner
+			.scope(prefix, &moq_net::Patterns::from(moq_net::Pattern::all()))?;
 		Ok(Arc::new(MoqAnnounceConsumer {
 			task: Task::new(Announced {
 				inner: origin.announced(),
@@ -319,7 +322,8 @@ impl MoqOriginConsumer {
 
 		// Probe the permission eagerly so an unreachable path fails here, rather than
 		// surfacing later as a `Closed` the caller can't tell from the origin ending.
-		self.inner.with_root(&path).ok_or(MoqError::Unauthorized)?;
+		self.inner
+			.scope(&path, &moq_net::Patterns::from(moq_net::Pattern::all()))?;
 
 		Ok(Arc::new(MoqAnnouncedBroadcast {
 			task: Task::new(AnnouncedBroadcast {
@@ -447,9 +451,9 @@ impl MoqAnnounceConsumer {
 
 #[uniffi::export]
 impl MoqAnnounceUpdate {
-	/// The covered prefix, relative to the `announced` call's prefix.
-	pub fn path(&self) -> String {
-		self.path.clone()
+	/// The covered prefix, relative to the requested announcements prefix.
+	pub fn prefix(&self) -> String {
+		self.prefix.clone()
 	}
 
 	/// The route serving the prefix: its hops and costs.

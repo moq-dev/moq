@@ -212,19 +212,17 @@ usage = { package = "usage-rs", version = "6.3.0" }
 web-async = { version = "0.1.5", features = ["tracing"] }
 web-transport-iroh = "0.7"
 # default-features off so the QUIC crypto provider is chosen by moq-tokio's
-# aws-lc-rs / ring features (mirroring how the quinn dependency is wired).
+# aws-lc-rs / ring features.
 # 0.3 for the `qlog` passthrough feature moq-tokio's `qlog` forwards to.
 web-transport-noq = { version = "0.3", default-features = false }
 web-transport-proto = "0.6"
-web-transport-quiche = "0.7"
-web-transport-quinn = { version = "0.12", default-features = false }
 web-transport-trait = "0.4"
 web-transport-wasm = "0.6"
 x11rb = { version = "0.14.0", features = ["randr", "xfixes"] }
 zeroize = { version = "1", features = ["derive"] }
 
 [patch.crates-io]
-# web-transport-quinn and web-transport-iroh depend on kio from crates.io. Without
+# web-transport-iroh depends on kio from crates.io. Without
 # this, the lock carries a second kio whose pin drifts behind the member, and the
 # next publish that reaches both fails to resolve a single version (#3551).
 kio = { path = "rs/kio" }

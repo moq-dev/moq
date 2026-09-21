@@ -200,20 +200,10 @@ pub enum Error {
 	#[error(transparent)]
 	Tls(Arc<crate::tls::Error>),
 
-	/// The Quinn backend failed.
-	#[cfg(feature = "quinn")]
-	#[error(transparent)]
-	Quinn(Arc<crate::quinn::Error>),
-
 	/// The noq backend failed.
 	#[cfg(feature = "noq")]
 	#[error(transparent)]
 	Noq(Arc<crate::noq::Error>),
-
-	/// The quiche backend failed.
-	#[cfg(feature = "quiche")]
-	#[error(transparent)]
-	Quiche(Arc<crate::quiche::Error>),
 
 	/// The Iroh backend failed.
 	#[cfg(feature = "iroh")]
@@ -244,12 +234,8 @@ impl Error {
 			Self::MoqNet(
 				moq_net::Error::Unauthorized | moq_net::Error::Session(moq_net::SessionError::Unauthorized),
 			) => Some(crate::ConnectError::Unauthorized),
-			#[cfg(feature = "quinn")]
-			Self::Quinn(err) => err.connect_error(),
 			#[cfg(feature = "noq")]
 			Self::Noq(err) => err.connect_error(),
-			#[cfg(feature = "quiche")]
-			Self::Quiche(err) => err.connect_error(),
 			#[cfg(feature = "websocket")]
 			Self::TransportRace { quic, websocket } => quic.connect_error().or_else(|| websocket.connect_error()),
 			#[cfg(feature = "websocket")]
@@ -282,12 +268,8 @@ impl Error {
 				_ => None,
 			},
 
-			#[cfg(feature = "quinn")]
-			Self::Quinn(err) => err.status(),
 			#[cfg(feature = "noq")]
 			Self::Noq(err) => err.status(),
-			#[cfg(feature = "quiche")]
-			Self::Quiche(err) => err.status(),
 			#[cfg(feature = "websocket")]
 			Self::WebSocket(err) => err.status(),
 			_ => None,
@@ -316,17 +298,6 @@ impl From<crate::tls::Error> for Error {
 	}
 }
 
-#[cfg(feature = "quinn")]
-impl From<crate::quinn::Error> for Error {
-	fn from(err: crate::quinn::Error) -> Self {
-		if let Some(err) = err.connect_error() {
-			return Self::Connect(err);
-		}
-
-		Self::Quinn(Arc::new(err))
-	}
-}
-
 #[cfg(feature = "noq")]
 impl From<crate::noq::Error> for Error {
 	fn from(err: crate::noq::Error) -> Self {
@@ -335,17 +306,6 @@ impl From<crate::noq::Error> for Error {
 		}
 
 		Self::Noq(Arc::new(err))
-	}
-}
-
-#[cfg(feature = "quiche")]
-impl From<crate::quiche::Error> for Error {
-	fn from(err: crate::quiche::Error) -> Self {
-		if let Some(err) = err.connect_error() {
-			return Self::Connect(err);
-		}
-
-		Self::Quiche(Arc::new(err))
 	}
 }
 

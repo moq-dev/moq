@@ -27,11 +27,8 @@ by convention a publisher announces each broadcast's exact path, so the list
 reads as broadcast names.
 
 A relay configured with more than one certificate has no single fingerprint to
-publish, and this endpoint answers for the first. On the quinn and noq backends
-the others are reachable over `https://`, which selects by SNI at handshake. The
-quiche backend serves the first pair to every handshake, so a name covered only
-by a later certificate needs an explicit `--client-tls-fingerprint`, which checks
-the fingerprint in place of the hostname.
+publish, and this endpoint answers for the first. The others are reachable over
+`https://`, which selects a certificate by SNI at the handshake.
 
 Tokens sent over plain HTTP are visible on the wire, so use HTTPS in
 production.

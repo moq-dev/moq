@@ -6,12 +6,9 @@
 //! startup, and optionally the roots that authenticate mTLS clients.
 //!
 //! Certificates, keys, and custom root CAs loaded from disk are hot reloaded for
-//! new handshakes. A quiche server is the exception for the mTLS client roots
-//! ([`Listen::root`]), which boringssl fixes when the listener is built; the
-//! certificates it serves reload like every other backend's. [`Certificates`]
-//! reads the current served set back out.
+//! new handshakes. [`Certificates`] reads the current served set back out.
 
-#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+#[cfg(feature = "noq")]
 use crate::abort::AbortOnDrop;
 use crate::crypto;
 use rustls::pki_types::pem::PemObject;
@@ -27,8 +24,7 @@ use rustls::pki_types::PrivatePkcs8KeyDer;
 
 /// Errors loading or generating TLS certificates and keys.
 ///
-/// Shared by the client TLS config and the quinn/noq servers so each backend's
-/// error type can compose it via `#[from]`.
+/// Shared by the client TLS config and noq server.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -82,10 +78,6 @@ pub enum Error {
 		"a client Identity cannot be combined with --connect-tls-cert or --connect-tls-key: only one client certificate can be presented"
 	)]
 	ConflictingClientAuth,
-
-	/// A pinned peer set was configured on a backend that cannot run a rustls verifier.
-	#[error("the quiche backend cannot pin client fingerprints; use the quinn or noq backend")]
-	PeersUnsupported,
 
 	/// Client pinning was combined with client CA roots. Pinning bypasses the chain,
 	/// so one of the two would be silently ignored.
@@ -201,19 +193,11 @@ fn read_roots(paths: &[PathBuf]) -> Result<Vec<CertificateDer<'static>>> {
 
 // ── Certified ───────────────────────────────────────────────────────
 
-/// A certificate chain with both usable forms of its private key.
-///
-/// rustls signs through an opaque [`rustls::sign::SigningKey`], which is all the
-/// quinn and noq backends need. quiche hands the key to boringssl itself, so the
-/// DER is kept alongside the signer instead of being dropped once loaded, and one
-/// certificate source feeds every backend.
+/// A certificate chain and its rustls signing key.
 #[cfg(feature = "_certs")]
 pub(crate) struct Certified {
 	/// The chain and its rustls signer, in leaf-first order.
 	pub rustls: Arc<rustls::sign::CertifiedKey>,
-	/// The same private key, still in DER, for backends that load it themselves.
-	#[cfg_attr(not(feature = "quiche"), allow(dead_code))]
-	pub key: PrivateKeyDer<'static>,
 }
 
 #[cfg(feature = "_certs")]
@@ -227,14 +211,7 @@ impl Certified {
 		let signer = provider.key_provider.load_private_key(key.clone_key())?;
 		Ok(Self {
 			rustls: Arc::new(rustls::sign::CertifiedKey::new(chain, signer)),
-			key,
 		})
-	}
-
-	/// The certificate chain, leaf first.
-	#[cfg_attr(not(feature = "quiche"), allow(dead_code))]
-	pub fn chain(&self) -> &[CertificateDer<'static>] {
-		&self.rustls.cert
 	}
 
 	/// The leaf certificate, which is what a fingerprint identifies.
@@ -672,7 +649,7 @@ impl CustomRoots {
 		})
 	}
 
-	#[cfg(any(feature = "watch", feature = "quiche"))]
+	#[cfg(feature = "watch")]
 	fn load(&self) -> Result<Vec<CertificateDer<'static>>> {
 		read_roots(&self.paths)
 	}
@@ -688,33 +665,6 @@ impl CustomRoots {
 			.read()
 			.unwrap_or_else(std::sync::PoisonError::into_inner)
 			.clone()
-	}
-
-	/// Refresh from disk, retaining and returning the last valid roots on failure.
-	#[cfg(feature = "quiche")]
-	pub(crate) fn refresh(&self) -> Vec<CertificateDer<'static>> {
-		self.refresh_with(|| self.load())
-	}
-
-	#[cfg(feature = "quiche")]
-	fn refresh_with(
-		&self,
-		load: impl FnOnce() -> Result<Vec<CertificateDer<'static>>>,
-	) -> Vec<CertificateDer<'static>> {
-		let mut current = self.current.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-		match load().and_then(|roots| {
-			root_store(&roots)?;
-			Ok(roots)
-		}) {
-			Ok(roots) => {
-				*current = roots.clone();
-				roots
-			}
-			Err(err) => {
-				tracing::warn!(%err, "failed to reload client root certificates; retaining previous roots");
-				current.clone()
-			}
-		}
 	}
 }
 
@@ -798,10 +748,7 @@ impl<T: ?Sized + Send + Sync + 'static> std::fmt::Debug for Reloading<T> {
 
 /// The resolved server-certificate verification policy.
 ///
-/// Computed once by [Client::verification] and shared by every backend (the
-/// rustls-based quinn/noq via [Client::build], and quiche directly) so they
-/// agree on precedence, the system-roots default, and which flag combinations
-/// are valid.
+/// Computed once by [Client::verification] and used by [Client::build].
 #[derive(Clone)]
 pub(crate) enum Verification {
 	/// No verification at all. Insecure; only via `--connect-tls-insecure`.
@@ -812,8 +759,7 @@ pub(crate) enum Verification {
 	Fingerprints(Vec<[u8; 32]>),
 
 	/// Standard CA verification. When `system` is set the platform/default trust
-	/// store is trusted too; each backend resolves that its own way (the rustls
-	/// backends use the OS platform verifier, quiche loads the native roots).
+	/// store is trusted too; noq uses the OS platform verifier.
 	/// `custom` are extra PEM roots trusted in addition.
 	Roots { custom: CustomRoots, system: bool },
 }
@@ -977,7 +923,7 @@ impl Connect {
 	/// plaintext fetch, and there is nothing to bootstrap when verification is
 	/// disabled. With CA roots (the default), `http://` is the deliberate
 	/// per-connection way to pin a self-signed relay, so it is allowed.
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	#[cfg(feature = "noq")]
 	pub(crate) fn allows_http_bootstrap(&self) -> bool {
 		self.fingerprint.is_empty() && !self.insecure.unwrap_or_default()
 	}
@@ -1173,8 +1119,7 @@ fn generate(provider: &crypto::Provider, hostnames: &[String]) -> Result<Certifi
 	Certified::new(provider, vec![cert.into()], key.into())
 }
 
-/// Refuse at runtime what the crate cannot do at all: quiche brings its own TLS,
-/// so it serves certificates without a rustls provider to sign a fresh one with.
+/// Refuse at runtime when no crypto provider can sign a fresh certificate.
 #[cfg(all(feature = "_certs", not(any(feature = "aws-lc-rs", feature = "ring"))))]
 fn generate(_provider: &crypto::Provider, _hostnames: &[String]) -> Result<Certified> {
 	Err(Error::NoCryptoProvider)
@@ -1295,9 +1240,7 @@ pub struct Listen {
 	/// do not present a certificate are unaffected.
 	///
 	/// Plain-TLS listeners built via [`Self::server_config`] also use these roots
-	/// for optional mTLS. Root files are hot reloaded for new handshakes on the
-	/// rustls-based backends; quiche servers require a restart because their TLS
-	/// hook fixes client-auth roots when the listener is built.
+	/// for optional mTLS. Root files are hot reloaded for new handshakes.
 	#[usage(
 		long = "listen-tls-root",
 		name = "listen-tls-root",
@@ -1440,8 +1383,8 @@ impl Listen {
 	/// The client-certificate policy for this listener, or `None` to ask for no
 	/// certificate at all.
 	///
-	/// The one place the three server backends agree on what mTLS means here, so
-	/// a new mode lands once rather than in each of them: pinned [`peers`](Self::peers),
+	/// The one place the TLS listeners agree on what mTLS means here, so a new
+	/// mode lands once rather than in each of them: pinned [`peers`](Self::peers),
 	/// else optional CA-rooted [`root`](Self::root), else nothing.
 	#[cfg(feature = "_certs")]
 	pub(crate) fn client_auth(
@@ -1552,10 +1495,10 @@ pub struct PeerIdentity {
 }
 
 impl PeerIdentity {
-	/// Wrap the type-erased identity from `quinn::Connection::peer_identity`.
+	/// Wrap the type-erased identity from the QUIC connection.
 	/// Returns `None` if the peer presented no certificate or the identity is
 	/// not a certificate chain.
-	#[cfg(any(feature = "quinn", feature = "noq"))]
+	#[cfg(feature = "noq")]
 	pub(crate) fn from_any(identity: Option<Box<dyn std::any::Any>>) -> Option<Self> {
 		let chain = identity?.downcast::<Vec<CertificateDer<'static>>>().ok()?;
 		Some(Self { chain: *chain })
@@ -2014,7 +1957,7 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 }
 
 #[cfg(test)]
-#[cfg(all(any(feature = "quinn", feature = "noq", feature = "quiche"), feature = "aws-lc-rs"))]
+#[cfg(all(feature = "noq", feature = "aws-lc-rs"))]
 mod tests {
 	/// Disabling verification cannot be combined with trust material that it would
 	/// otherwise ignore.
@@ -2076,7 +2019,7 @@ mod tests {
 		params.self_signed(&key).unwrap().into()
 	}
 
-	#[cfg(any(feature = "quinn", feature = "noq"))]
+	#[cfg(feature = "noq")]
 	#[test]
 	fn peer_identity_expiry_reads_not_after() {
 		// notAfter at a whole second so the round-trip is exact.
@@ -2087,7 +2030,7 @@ mod tests {
 		params.not_after = not_after;
 		let cert: CertificateDer<'static> = params.self_signed(&key).unwrap().into();
 
-		// quinn/noq hand back the chain as a boxed Vec<CertificateDer>.
+		// noq hand back the chain as a boxed Vec<CertificateDer>.
 		let identity: Box<dyn std::any::Any> = Box::new(vec![cert]);
 		let parsed = PeerIdentity::from_any(Some(identity)).expect("chain parsed");
 		let expiry = parsed.expiry().expect("expiry parsed");
@@ -2097,7 +2040,7 @@ mod tests {
 		);
 	}
 
-	#[cfg(any(feature = "quinn", feature = "noq"))]
+	#[cfg(feature = "noq")]
 	#[test]
 	fn peer_identity_none_without_chain() {
 		assert!(PeerIdentity::from_any(None).is_none());
@@ -2200,7 +2143,7 @@ mod tests {
 	/// keeps its task, an OS directory watch, and the certificate keys alive for the
 	/// rest of the process. The `Arc` is the observable half: while the task lives it
 	/// holds one, so a `Weak` that still upgrades is a watcher that never stopped.
-	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+	#[cfg(all(feature = "watch", feature = "noq"))]
 	#[tokio::test]
 	async fn dropping_the_reload_guard_stops_the_watcher() {
 		let key = rcgen::KeyPair::generate().unwrap();
@@ -2335,7 +2278,7 @@ mod tests {
 
 	/// A resumed handshake skips certificate verification, so a listener with a
 	/// live peer set must disable resumption for removals to take effect.
-	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+	#[cfg(all(feature = "watch", feature = "noq"))]
 	#[test]
 	fn removed_peers_cannot_resume() {
 		let server_identity = Identity::generate(["localhost"]).unwrap();
@@ -2476,7 +2419,7 @@ mod tests {
 		(file, path)
 	}
 
-	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+	#[cfg(all(feature = "watch", feature = "noq"))]
 	fn signed_certificates() -> (
 		String,
 		CertificateDer<'static>,
@@ -2513,7 +2456,7 @@ mod tests {
 		)
 	}
 
-	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+	#[cfg(all(feature = "watch", feature = "noq"))]
 	fn handshake_kinds(
 		client: Arc<rustls::ClientConfig>,
 		server: Arc<rustls::ServerConfig>,
@@ -2545,7 +2488,7 @@ mod tests {
 		panic!("TLS handshake did not settle");
 	}
 
-	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+	#[cfg(all(feature = "watch", feature = "noq"))]
 	#[test]
 	fn reloadable_roots_disable_session_resumption() {
 		use std::io::Write;
@@ -2596,7 +2539,7 @@ mod tests {
 		);
 	}
 
-	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+	#[cfg(all(feature = "watch", feature = "noq"))]
 	#[test]
 	fn reloadable_client_roots_disable_server_resumption() {
 		use std::io::Write;
@@ -2670,7 +2613,7 @@ mod tests {
 		assert!(handshake_kinds(reloadable_client, reloadable).is_err());
 	}
 
-	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+	#[cfg(all(feature = "watch", feature = "noq"))]
 	#[test]
 	fn custom_roots_reload_for_new_client_and_server_handshakes() {
 		use std::io::Write;
@@ -2736,88 +2679,6 @@ mod tests {
 				.is_ok()
 		);
 		assert!(client_verifier.verify_client_cert(&client_b, &[], now).is_ok());
-	}
-
-	#[cfg(all(feature = "quiche", feature = "watch"))]
-	#[test]
-	fn custom_root_refresh_retains_last_valid_bundle() {
-		use std::io::Write;
-
-		let (ca_a, _, _, _, _) = signed_certificates();
-		let (ca_b, _, _, _, _) = signed_certificates();
-		let mut root_file = tempfile::NamedTempFile::new().unwrap();
-		root_file.write_all(ca_a.as_bytes()).unwrap();
-		let roots = CustomRoots::new(vec![root_file.path().to_path_buf()]).unwrap();
-		let initial = roots.current();
-
-		std::fs::write(root_file.path(), "not a PEM certificate").unwrap();
-		assert_eq!(roots.refresh(), initial);
-
-		std::fs::write(
-			root_file.path(),
-			"-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n",
-		)
-		.unwrap();
-		assert_eq!(roots.refresh(), initial);
-
-		std::fs::write(root_file.path(), ca_b).unwrap();
-		let rotated = roots.refresh();
-		assert_ne!(rotated, initial);
-		assert_eq!(roots.current(), rotated);
-	}
-
-	#[cfg(all(feature = "quiche", feature = "watch"))]
-	#[test]
-	fn custom_root_refresh_serializes_cache_updates() {
-		let (ca_a, _, _, _, _) = signed_certificates();
-		let (ca_b, _, _, _, _) = signed_certificates();
-		let (ca_c, _, _, _, _) = signed_certificates();
-		let parse = |pem: &str| {
-			CertificateDer::pem_slice_iter(pem.as_bytes())
-				.collect::<std::result::Result<Vec<_>, _>>()
-				.unwrap()
-		};
-		let initial = parse(&ca_a);
-		let bundle_b = parse(&ca_b);
-		let bundle_c = parse(&ca_c);
-		let roots = CustomRoots {
-			paths: Vec::new(),
-			current: Arc::new(RwLock::new(initial)),
-		};
-
-		let (first_loaded_tx, first_loaded_rx) = std::sync::mpsc::sync_channel(0);
-		let (release_first_tx, release_first_rx) = std::sync::mpsc::sync_channel(0);
-		let first_roots = roots.clone();
-		let first = std::thread::spawn(move || {
-			first_roots.refresh_with(|| {
-				first_loaded_tx.send(()).unwrap();
-				release_first_rx.recv().unwrap();
-				Ok(bundle_b)
-			})
-		});
-		first_loaded_rx.recv().unwrap();
-
-		let (second_ready_tx, second_ready_rx) = std::sync::mpsc::sync_channel(0);
-		let (second_loaded_tx, second_loaded_rx) = std::sync::mpsc::channel();
-		let second_roots = roots.clone();
-		let expected = bundle_c.clone();
-		let second = std::thread::spawn(move || {
-			second_ready_tx.send(()).unwrap();
-			second_roots.refresh_with(|| {
-				second_loaded_tx.send(()).unwrap();
-				Ok(bundle_c)
-			})
-		});
-		second_ready_rx.recv().unwrap();
-		let overlapped = second_loaded_rx
-			.recv_timeout(std::time::Duration::from_millis(100))
-			.is_ok();
-
-		release_first_tx.send(()).unwrap();
-		first.join().unwrap();
-		second.join().unwrap();
-		assert!(!overlapped, "root cache refresh transactions must not overlap");
-		assert_eq!(roots.current(), expected);
 	}
 
 	#[test]
@@ -2963,7 +2824,7 @@ impl ServeCerts {
 	/// The certificate to serve for `server_name`, or the first configured one when
 	/// nothing matches. `None` only when nothing is configured at all.
 	///
-	/// Every backend selects through this, so the rustls-based ones and quiche agree
+	/// Noq selects through this
 	/// on which certificate a given SNI gets.
 	pub(crate) fn select(&self, server_name: Option<&str>) -> Option<Arc<Certified>> {
 		let info = self.info.read().expect("info read lock poisoned");
@@ -3007,14 +2868,14 @@ impl rustls::server::ResolvesServerCert for ServeCerts {
 /// its own, so a listener that goes away without this leaves the task, the keys it
 /// holds, and an OS directory watch behind. An embedder that builds listeners
 /// repeatedly in one process would accumulate all three.
-#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+#[cfg(feature = "noq")]
 #[derive(Debug)]
 pub(crate) struct Reload {
 	/// Named for the drop alone: nothing reads it, and losing it stops the watcher.
 	_task: AbortOnDrop,
 }
 
-#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+#[cfg(feature = "noq")]
 impl Reload {
 	/// A guard over a task with nothing to do, for a listener with nothing to watch.
 	fn inert() -> Self {
@@ -3066,7 +2927,7 @@ impl Reload {
 /// Reacting to the filesystem means cert-manager, Kubernetes secret mounts, and
 /// `mv`-into-place rotate certs with no external signal. [`Reload::spawn`] owns
 /// registering the watch and is the only caller.
-#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+#[cfg(feature = "noq")]
 async fn reload_certs(mut watcher: crate::watch::Files, certs: Arc<ServeCerts>, tls_config: Listen) {
 	loop {
 		watcher.changed().await;
@@ -3153,7 +3014,7 @@ mod legacy_tests {
 	/// The accept side, where a dropped `--server-tls-root` takes the mTLS client
 	/// CAs with it and leaves the listener accepting unauthenticated peers.
 	/// moq-cli's `export hls` flattens this type directly, so it is a live path.
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	#[cfg(feature = "noq")]
 	#[test]
 	fn the_server_builders_refuse_a_released_spelling() {
 		let tls = parse(&["--server-tls-root", "/tmp/ca.pem"]).listen;

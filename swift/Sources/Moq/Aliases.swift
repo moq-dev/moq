@@ -95,6 +95,9 @@ public typealias Backoff = MoqFFI.MoqBackoff
 /// A connection lifecycle transition reported by `Session.status()`.
 public typealias ConnectionStatus = MoqFFI.MoqConnectionStatus
 
+/// The network transport carrying an incoming session.
+public typealias Transport = MoqFFI.MoqTransport
+
 /// The error thrown by every throwing call in this package. Already conforms to
 /// `Swift.Error` and `LocalizedError`; see `Errors.swift` for conveniences.
 public typealias MoqError = MoqFFI.MoqError
