@@ -31,5 +31,5 @@ then fails to open a device is the same gap one layer down.
 
 ## Required
 
-- [Capture without V4L2 bindgen](/quest/next/capture-v4l-bindings.md) - the camera path must build without libclang before every distribution can ship it
+- [Capture without V4L2 bindgen](/quest/main/capture-v4l-bindings.md) - the camera path must build without libclang before every distribution can ship it
 - [Audio capture without runtime system libraries](/quest/next/capture-alsa-link.md) - the microphone path must start without system audio libraries before every distribution can ship it

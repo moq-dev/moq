@@ -147,7 +147,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [`moq relay`](/quest/next/moq-relay-subcommand.md) - the relay runs under a `moq` verb with its own flags and TOML, while `moq-relay` stays a minimal binary
 - [`moq --listen` admission](/quest/next/cli-serve.md) - a listening CLI session is authenticated, scoped, counted, and drained like a relay's instead of accepting everything
 - [#709](/quest/next/709-automatic-letsencrypt-support.md) - the relay provisions and renews its own ACME certificate through rustls-acme over TLS-ALPN-01, persisted on disk
-- [Capture without V4L2 bindgen](/quest/next/capture-v4l-bindings.md) - moq-video capture builds on Linux without libclang or kernel headers
 - [Audio capture without ALSA link](/quest/next/capture-alsa-link.md) - moq-audio capture and playback build on Linux without linking libasound
 - [Ship capture and playback](/quest/next/cli-packaging.md) - a released moq binary can capture and play, which no distribution currently enables
 - [io_uring flow control](/quest/next/uring-flow-control-windows.md) - the relay's io_uring workers honor the QUIC flow-control windows instead of refusing them
