@@ -16,9 +16,10 @@
 //! - `Surface::DmaBuf` is a Linux DRM allocation, produced by PipeWire capture.
 //!   The Vulkan renderer imports supported packed formats directly, while CPU
 //!   consumers map linear allocations only.
-//! - `Surface::Vulkan` is a Linux/NVIDIA Vulkan RGBA image imported into CUDA
-//!   with an explicit timeline semaphore. It deliberately has no CPU download
-//!   fallback; GPU consumers return its producer slot after CUDA completion.
+//! - `Surface::Vulkan` is a Linux/NVIDIA Vulkan RGBA or BGRA image imported into
+//!   CUDA with an explicit timeline semaphore. It deliberately has no CPU
+//!   download fallback: a `cuda::Converter` turns it into a `Surface::Cuda` on
+//!   the GPU, and consumers return its producer slot after CUDA completion.
 //! - `Surface::HardwareBuffer` is an Android `AHardwareBuffer`, produced by the
 //!   MediaCodec decoder rendering into an `ImageReader`. A GPU consumer imports
 //!   it as a GL or Vulkan image; `into_i420` reads the planes back instead.
@@ -397,11 +398,12 @@ pub enum Surface {
 	/// Zero-copy GPU texture (Windows Direct3D11 NV12).
 	#[cfg(target_os = "windows")]
 	Texture(d3d11::Texture),
-	/// Zero-copy GPU buffer (Linux CUDA NV12). Produced only by the NVDEC
-	/// decoder, consumed in place by the NVENC encoder.
+	/// Zero-copy GPU buffer (Linux CUDA NV12). Produced by the NVDEC decoder or
+	/// a [`cuda::Converter`], consumed in place by the NVENC encoder.
 	#[cfg(all(target_os = "linux", feature = "nvidia"))]
 	Cuda(cuda::Frame),
-	/// Vulkan RGBA8 image imported into CUDA with explicit GPU synchronization.
+	/// Vulkan RGBA8 / BGRA8 image imported into CUDA with explicit GPU
+	/// synchronization. A [`cuda::Converter`] turns it into `Cuda` on the GPU.
 	#[cfg(all(target_os = "linux", feature = "nvidia"))]
 	Vulkan(vulkan::Frame),
 	/// Linux DMA-BUF, exported on access and retained until the last clone drops.
@@ -519,7 +521,7 @@ impl Surface {
 				Surface::I420(cuda.download_i420()?.resize(width, height)?)
 			}
 			#[cfg(all(target_os = "linux", feature = "nvidia"))]
-			Surface::Cuda(cuda) => match cuda.resize(width, height) {
+			Surface::Cuda(cuda) => match cuda.resize(size) {
 				Ok(scaled) => Surface::Cuda(scaled),
 				// E.g. the driver rejected the vendored PTX: degrade to a CPU
 				// resize (download once) instead of killing the stream.
@@ -659,7 +661,7 @@ impl Surface {
 			#[cfg(target_os = "windows")]
 			Surface::Texture(_) => None,
 			#[cfg(all(target_os = "linux", feature = "nvidia"))]
-			Surface::Cuda(_) => None,
+			Surface::Cuda(c) => c.color(),
 			#[cfg(all(target_os = "linux", feature = "nvidia"))]
 			Surface::Vulkan(_) => None,
 			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
@@ -1828,6 +1830,11 @@ pub mod vulkan;
 #[path = "frame/cuda.rs"]
 pub mod cuda;
 
+// Compiled for every test build so its policy tests run without a GPU.
+#[cfg(any(test, all(target_os = "linux", feature = "nvidia")))]
+#[path = "frame/pool.rs"]
+mod pool;
+
 #[cfg(target_os = "windows")]
 pub mod d3d11 {
 	//! Windows Direct3D11 surfaces: the NV12 [`Texture`] behind
@@ -2932,7 +2939,7 @@ mod tests {
 		// SAFETY: the frame's buffer is exactly host.len() bytes.
 		unsafe { result::memcpy_htod_sync(frame.device_ptr(), &host) }.unwrap();
 
-		let scaled = frame.resize(160, 120).unwrap();
+		let scaled = frame.resize(Size::new(160, 120)).unwrap();
 		let gpu = scaled.download_i420().unwrap();
 		let cpu = src_i420.resize(160, 120).unwrap();
 

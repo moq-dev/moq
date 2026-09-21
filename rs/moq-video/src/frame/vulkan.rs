@@ -4,6 +4,10 @@
 //! consumes the slot and [`Completion::wait`] returns it only after every CUDA
 //! operation queued through the frame's stream has finished. A producer cannot
 //! accidentally overwrite an image while a consumer still reads it.
+//!
+//! The image is packed RGBA or BGRA, which no encoder takes: a
+//! [`cuda::Converter`](super::cuda::Converter) turns a published [`Frame`] into
+//! the NV12 [`cuda::Frame`](super::cuda::Frame) NVENC encodes in place.
 
 use std::fmt;
 use std::num::NonZeroUsize;
@@ -31,12 +35,23 @@ impl Handles {
 	}
 }
 
+/// The byte order of an imported image's four 8-bit channels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Channels {
+	/// `VK_FORMAT_R8G8B8A8_UNORM`.
+	Rgba,
+	/// `VK_FORMAT_B8G8R8A8_UNORM`, what a swapchain or an Unreal render target
+	/// usually holds.
+	Bgra,
+}
+
 /// The Vulkan image contract accepted by CUDA.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Image {
 	device_uuid: [u8; 16],
 	size: Size,
 	allocation_size: u64,
+	channels: Channels,
 }
 
 impl Image {
@@ -46,6 +61,16 @@ impl Image {
 	/// `allocation_size` is the complete `VkDeviceMemory` allocation size from
 	/// Vulkan, not `width * height * 4`.
 	pub fn rgba8(device_uuid: [u8; 16], size: Size, allocation_size: u64) -> Result<Self, Error> {
+		Self::new(device_uuid, size, allocation_size, Channels::Rgba)
+	}
+
+	/// Describe a dedicated optimal-tiling `VK_FORMAT_B8G8R8A8_UNORM` image,
+	/// under the same contract as [`rgba8`](Self::rgba8).
+	pub fn bgra8(device_uuid: [u8; 16], size: Size, allocation_size: u64) -> Result<Self, Error> {
+		Self::new(device_uuid, size, allocation_size, Channels::Bgra)
+	}
+
+	fn new(device_uuid: [u8; 16], size: Size, allocation_size: u64, channels: Channels) -> Result<Self, Error> {
 		size.validate_nonzero("Vulkan/CUDA image")?;
 		if allocation_size == 0 {
 			return Err(Error::Unsupported(
@@ -56,6 +81,7 @@ impl Image {
 			device_uuid,
 			size,
 			allocation_size,
+			channels,
 		})
 	}
 
@@ -72,6 +98,11 @@ impl Image {
 	/// Complete size of the dedicated Vulkan memory allocation.
 	pub const fn allocation_size(&self) -> u64 {
 		self.allocation_size
+	}
+
+	/// The channel order of the image's pixels.
+	pub const fn channels(&self) -> Channels {
+		self.channels
 	}
 }
 
@@ -332,14 +363,41 @@ impl Frame {
 		self.inner.imported.image.size.height
 	}
 
-	#[allow(dead_code)] // Consumed by the following GPU conversion quest.
-	pub(crate) fn cuda_array(&self) -> sys::CUarray {
-		self.inner.imported.array
+	/// Image size in pixels.
+	pub fn size(&self) -> Size {
+		self.inner.imported.image.size
 	}
 
-	#[allow(dead_code)] // Consumed by the following GPU conversion quest.
+	/// The channel order the producer declared when importing the image.
+	pub fn channels(&self) -> Channels {
+		self.inner.imported.image.channels
+	}
+
+	/// The level-0 array behind the surface, for the tests' readback only.
+	#[cfg(test)]
+	pub(crate) fn cuda_array(&self) -> sys::CUarray {
+		let mut array = std::ptr::null_mut();
+		// SAFETY: the imported image has exactly one mip level and is alive.
+		unsafe { sys::cuMipmappedArrayGetLevel(&mut array, self.inner.imported.mipmap, 0) }
+			.result()
+			.expect("Vulkan image mip level");
+		array
+	}
+
+	/// The surface object over the image, for a kernel reading it in place.
+	pub(crate) fn cuda_surface(&self) -> sys::CUsurfObject {
+		self.inner.imported.surface
+	}
+
+	/// The stream every CUDA reader of this image queues on, so the completion
+	/// signal queued after the last reader lands behind their work.
 	pub(crate) fn cuda_stream(&self) -> &Arc<CudaStream> {
 		&self.inner.imported.stream
+	}
+
+	/// The context that owns the imported image.
+	pub(crate) fn cuda_context(&self) -> &Arc<CudaContext> {
+		&self.inner.imported.backend.ctx
 	}
 }
 
@@ -462,7 +520,7 @@ struct Imported {
 	memory: sys::CUexternalMemory,
 	semaphore: sys::CUexternalSemaphore,
 	mipmap: sys::CUmipmappedArray,
-	array: sys::CUarray,
+	surface: sys::CUsurfObject,
 }
 
 // CUDA's external handles are explicitly safe to use from threads after making
@@ -558,6 +616,25 @@ impl Imported {
 			return Err(cuda("get Vulkan image mip level")(error));
 		}
 
+		// A surface object is how a kernel reads the array in place; the array
+		// was mapped with `CUDA_ARRAY3D_SURFACE_LDST` for exactly this.
+		let surface_desc = sys::CUDA_RESOURCE_DESC {
+			resType: sys::CUresourcetype::CU_RESOURCE_TYPE_ARRAY,
+			res: sys::CUDA_RESOURCE_DESC_st__bindgen_ty_1 {
+				array: sys::CUDA_RESOURCE_DESC_st__bindgen_ty_1__bindgen_ty_1 { hArray: array },
+			},
+			flags: 0,
+		};
+		let mut surface = 0;
+		// SAFETY: the descriptor names the live level-0 array mapped above.
+		if let Err(error) = unsafe { sys::cuSurfObjectCreate(&mut surface, &surface_desc) }.result() {
+			// SAFETY: no work references these newly-created handles.
+			let _ = unsafe { sys::cuMipmappedArrayDestroy(mipmap) };
+			let _ = unsafe { sys::cuDestroyExternalSemaphore(semaphore) };
+			let _ = unsafe { sys::cuDestroyExternalMemory(memory) };
+			return Err(cuda("create surface over Vulkan image")(error));
+		}
+
 		Ok(Self {
 			backend,
 			stream,
@@ -565,7 +642,7 @@ impl Imported {
 			memory,
 			semaphore,
 			mipmap,
-			array,
+			surface,
 		})
 	}
 
@@ -593,6 +670,7 @@ impl Drop for Imported {
 		if self.backend.ctx.bind_to_thread().is_ok() {
 			// Completion returned the slot only after stream synchronization, so no
 			// queued work can still reference these handles.
+			let _ = unsafe { sys::cuSurfObjectDestroy(self.surface) };
 			let _ = unsafe { sys::cuMipmappedArrayDestroy(self.mipmap) };
 			let _ = unsafe { sys::cuDestroyExternalMemory(self.memory) };
 			let _ = unsafe { sys::cuDestroyExternalSemaphore(self.semaphore) };
@@ -640,4 +718,4 @@ fn uuid(bytes: [u8; 16]) -> String {
 
 #[cfg(test)]
 #[path = "vulkan_test.rs"]
-mod tests;
+pub(crate) mod tests;

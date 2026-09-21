@@ -90,8 +90,8 @@ do not add another media abstraction or a renderer crate during stabilization.
 
 - [E2EE API](/quest/main/e2ee-api.md) - epoch-scoped ownership replaces raw crypto, catalog helpers, and process-global claims
 - [uring identity](/quest/main/uring-identity.md) - sockets and connections carry their worker and steering identity
-- [GPU conversion and NVENC](/quest/main/video-gpu-encode.md) - convert, resize and
-  encode imported frames without CPU pixel transfers or fallback
+- [GPU conversion and NVENC](/quest/main/video-gpu-encode.md) - validate the GPU
+  conversion, resize and NVENC path for imported frames on NVIDIA hardware
 - [NVENC loading](/quest/main/nvenc-loading.md) - unavailable or incompatible drivers return errors instead of panicking
 - [Media features](/quest/main/media-features.md) - OpenH264 can be excluded, rendering is opt-in, and feature aliases disappear
 - [Shared rate policy](/quest/main/media-rate-policy.md) - the planned public namespace move happens before 0.1
