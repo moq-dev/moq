@@ -19,6 +19,22 @@ in other packages without breaking their published APIs, C layouts, or wire
 formats. Do not bump versions as part of these quests. The final review records
 when the four crates are ready for a separately requested release.
 
+The package boundaries are explicit:
+
+- `moq-audio` owns the PCM/layout and codec configuration split, decoder entry
+  point, publication authority, FEC removal, AEC attachment, playback outcome,
+  and extensible audio frame and packet construction.
+- `moq-video` owns frame conversion and construction, decoder output policy,
+  synchronous codec thread confinement, capture timestamps and rational rates,
+  extensible group configuration and `cut` naming, and its feature defaults.
+- `moq-transcode` adopts the video rate, group, output, and feature contracts in
+  its public configuration and observations without adding another media model.
+- `moq-nvenc` narrows its safe facade around owned resources and completion,
+  while loading and incompatibility become fallible public errors.
+- Published `moq-mux` gains only the additive shared `rate` namespace. Published
+  `moq-ffi`, `libmoq`, and language-binding signatures, layouts, and sentinel
+  behavior remain unchanged while their internals adapt.
+
 The agreed direction is small, honest APIs: typed PCM layouts, rational video
 rates, extensible GOP and frame records, explicit ownership, and no knobs that
 claim behavior they do not provide. Synchronous codecs remain public and
