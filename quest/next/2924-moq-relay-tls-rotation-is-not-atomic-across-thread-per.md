@@ -94,10 +94,6 @@ Public API: preserve existing published callers through additive integration
 unless an exact necessary break is separately approved. Wire: no MoQ format
 change.
 
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - builds on dev-only code that reaches `main` with the merge
-
 ## Closes
 
 - [#2924](https://github.com/moq-dev/moq/issues/2924) - close this issue when the quest finishes

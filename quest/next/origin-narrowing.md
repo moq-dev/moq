@@ -36,10 +36,6 @@ asked for; the scope and match half already landed in #3672 and #3746.
 Public API: additive on moq-net (one method) and on moq-relay's revalidate
 path; starts on main after the merge. Wire: none.
 
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - builds on the pattern-union scope API that only dev has
-
 ## Closes
 
 - [#2714](https://github.com/moq-dev/moq/issues/2714) - close this issue when the quest finishes

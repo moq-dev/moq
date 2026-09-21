@@ -69,4 +69,3 @@ pub use activity::Activity;
 pub use error::Error;
 pub use format::Format;
 pub use frame::Frame;
-pub use resample::Resampler;

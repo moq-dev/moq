@@ -41,7 +41,7 @@ fn build_h264_avc3<E: CatalogExt>(
 	reserved: crate::catalog::Reserved<E>,
 	init: &[u8],
 	hint: VideoHint,
-) -> Result<(crate::codec::h264::Split, crate::codec::h264::Import<E>)> {
+) -> Result<(crate::codec::h264::Split, crate::codec::h264::Import)> {
 	let mut import = crate::codec::h264::Import::new(track, reserved, hint)?;
 	import.initialize(init)?;
 	let mut split = crate::codec::h264::Split::new();
@@ -58,7 +58,7 @@ fn build_h264_avc1<E: CatalogExt>(
 	reserved: crate::catalog::Reserved<E>,
 	init: &[u8],
 	hint: VideoHint,
-) -> Result<(usize, crate::codec::h264::Import<E>)> {
+) -> Result<(usize, crate::codec::h264::Import)> {
 	let mut import = crate::codec::h264::Import::new(track, reserved, hint)?;
 	import.initialize(init)?;
 	let length_size = crate::codec::h264::Avcc::parse(init)?.length_size;
@@ -71,7 +71,7 @@ fn build_h265<E: CatalogExt>(
 	reserved: crate::catalog::Reserved<E>,
 	init: &[u8],
 	hint: VideoHint,
-) -> Result<(crate::codec::h265::Split, crate::codec::h265::Import<E>)> {
+) -> Result<(crate::codec::h265::Split, crate::codec::h265::Import)> {
 	let mut import = crate::codec::h265::Import::new(track, reserved, hint)?;
 	import.initialize(init)?;
 	let mut split = crate::codec::h265::Split::new();
@@ -88,7 +88,7 @@ fn build_h265_hvc1<E: CatalogExt>(
 	reserved: crate::catalog::Reserved<E>,
 	init: &[u8],
 	hint: VideoHint,
-) -> Result<(usize, crate::codec::h265::Import<E>)> {
+) -> Result<(usize, crate::codec::h265::Import)> {
 	let mut import = crate::codec::h265::Import::new(track, reserved, hint)?;
 	import.initialize(init)?;
 	let length_size = crate::codec::h265::Hvcc::parse(init)?.length_size;
@@ -101,7 +101,7 @@ fn build_av1<E: CatalogExt>(
 	reserved: crate::catalog::Reserved<E>,
 	init: &[u8],
 	hint: VideoHint,
-) -> Result<(crate::codec::av1::Split, crate::codec::av1::Import<E>)> {
+) -> Result<(crate::codec::av1::Split, crate::codec::av1::Import)> {
 	let mut import = crate::codec::av1::Import::new(track, reserved, hint)?;
 	import.initialize(init)?;
 	let mut split = crate::codec::av1::Split::new();
@@ -117,41 +117,41 @@ fn build_av1<E: CatalogExt>(
 	Ok((split, import))
 }
 
-enum TrackKind<E: CatalogExt = ()> {
+enum TrackKind {
 	/// H.264 avc3 (Annex-B, inline SPS/PPS). The split owns byte parsing; the
 	/// import publishes.
 	Avc3 {
 		split: crate::codec::h264::Split,
-		import: crate::codec::h264::Import<E>,
+		import: crate::codec::h264::Import,
 	},
 	/// H.264 avc1 (length-prefixed NALU, out-of-band avcC). No splitter: each
 	/// access unit is wrapped directly. `length_size` is the NALU length prefix
 	/// width read from the avcC.
 	Avc1 {
 		length_size: usize,
-		import: crate::codec::h264::Import<E>,
+		import: crate::codec::h264::Import,
 	},
 	Hev1 {
 		split: crate::codec::h265::Split,
-		import: crate::codec::h265::Import<E>,
+		import: crate::codec::h265::Import,
 	},
 	/// H.265 hvc1 (length-prefixed NALU, out-of-band hvcC). No splitter: each
 	/// access unit is wrapped directly. `length_size` is the NALU length prefix
 	/// width read from the hvcC.
 	Hvc1 {
 		length_size: usize,
-		import: crate::codec::h265::Import<E>,
+		import: crate::codec::h265::Import,
 	},
 	Av01 {
 		split: crate::codec::av1::Split,
-		import: crate::codec::av1::Import<E>,
+		import: crate::codec::av1::Import,
 	},
-	Vp8(crate::codec::vp8::Import<E>),
-	Vp9(crate::codec::vp9::Import<E>),
-	Aac(crate::codec::aac::Import<E>),
-	Opus(crate::codec::opus::Import<E>),
-	Mp3(crate::codec::mp3::Import<E>),
-	Flac(crate::codec::flac::Import<E>),
+	Vp8(crate::codec::vp8::Import),
+	Vp9(crate::codec::vp9::Import),
+	Aac(crate::codec::aac::Import),
+	Opus(crate::codec::opus::Import),
+	Mp3(crate::codec::mp3::Import),
+	Flac(crate::codec::flac::Import),
 }
 
 /// A single-codec importer for whole frames.
@@ -166,8 +166,8 @@ enum TrackKind<E: CatalogExt = ()> {
 /// one QUIC stream, forwarded without waiting), or at a segment cadence to align with video for
 /// HLS/DASH. An audio track that is never cut is one unbounded group, which strands late
 /// subscribers and the timeline alike, so this warns once when it sees that.
-pub struct Track<E: CatalogExt = ()> {
-	kind: TrackKind<E>,
+pub struct Track {
+	kind: TrackKind,
 
 	/// The presentation time the current audio group started at, for the never-cut warning.
 	/// Only tracked for audio: video bounds its own groups at keyframes.
@@ -185,14 +185,14 @@ pub struct Track<E: CatalogExt = ()> {
 /// Generous enough that a deliberately coarse segment cadence stays quiet.
 const AUDIO_GROUP_WARN_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
 
-impl<E: CatalogExt> Track<E> {
+impl Track {
 	/// Create an importer that publishes a single audio codec onto a reserved track.
 	///
 	/// The caller reserves the track (by name) with
 	/// [`BroadcastProducer::reserve_track`](moq_net::broadcast::Producer::reserve_track); the
 	/// importer accepts it here, which is where the track's timescale is set. The rendition is
 	/// published from the init bytes, since audio has no in-band config to wait for.
-	pub fn audio(
+	pub fn audio<E: CatalogExt>(
 		request: moq_net::track::Request,
 		reserved: crate::catalog::Reserved<E>,
 		init: AudioInit,
@@ -229,7 +229,7 @@ impl<E: CatalogExt> Track<E> {
 	/// The caller reserves the track as in [`audio`](Self::audio). A video format resolves its
 	/// rendition in band, publishing up front when [`VideoInit::hint`] already carries enough
 	/// (see [`VideoHint`]).
-	pub fn video(
+	pub fn video<E: CatalogExt>(
 		request: moq_net::track::Request,
 		reserved: crate::catalog::Reserved<E>,
 		init: VideoInit,
@@ -276,7 +276,7 @@ impl<E: CatalogExt> Track<E> {
 	}
 
 	/// Wrap a built codec importer, which is also how the `From` impls lift one in.
-	fn from_kind(kind: TrackKind<E>) -> Self {
+	fn from_kind(kind: TrackKind) -> Self {
 		Self {
 			kind,
 			group_start: None,
@@ -502,14 +502,14 @@ impl<E: CatalogExt> Track<E> {
 // Lift an already-built opus importer into a `Track` so callers that build their
 // config out-of-band (e.g. moq-gst, which constructs `opus::Config` from gstreamer
 // caps instead of an OpusHead buffer) can keep using `.into()`.
-impl<E: CatalogExt> From<crate::codec::opus::Import<E>> for Track<E> {
-	fn from(opus: crate::codec::opus::Import<E>) -> Self {
+impl From<crate::codec::opus::Import> for Track {
+	fn from(opus: crate::codec::opus::Import) -> Self {
 		Self::from_kind(TrackKind::Opus(opus))
 	}
 }
 
-impl<E: CatalogExt> From<crate::codec::aac::Import<E>> for Track<E> {
-	fn from(aac: crate::codec::aac::Import<E>) -> Self {
+impl From<crate::codec::aac::Import> for Track {
+	fn from(aac: crate::codec::aac::Import) -> Self {
 		Self::from_kind(TrackKind::Aac(aac))
 	}
 }
@@ -517,26 +517,26 @@ impl<E: CatalogExt> From<crate::codec::aac::Import<E>> for Track<E> {
 // Lift an already-built mp3 importer into a `Track` so callers that build their
 // config out-of-band (e.g. moq-gst, which reads rate/channels from gstreamer caps
 // rather than parsing a frame header) can keep using `.into()`.
-impl<E: CatalogExt> From<crate::codec::mp3::Import<E>> for Track<E> {
-	fn from(mp3: crate::codec::mp3::Import<E>) -> Self {
+impl From<crate::codec::mp3::Import> for Track {
+	fn from(mp3: crate::codec::mp3::Import) -> Self {
 		Self::from_kind(TrackKind::Mp3(mp3))
 	}
 }
 
-enum TrackStreamKind<E: CatalogExt = ()> {
+enum TrackStreamKind {
 	/// H.264 in avc3 wire shape (Annex-B with inline SPS/PPS). The split owns
 	/// byte parsing; the import publishes.
 	Avc3 {
 		split: crate::codec::h264::Split,
-		import: crate::codec::h264::Import<E>,
+		import: crate::codec::h264::Import,
 	},
 	Hev1 {
 		split: crate::codec::h265::Split,
-		import: crate::codec::h265::Import<E>,
+		import: crate::codec::h265::Import,
 	},
 	Av01 {
 		split: crate::codec::av1::Split,
-		import: crate::codec::av1::Import<E>,
+		import: crate::codec::av1::Import,
 	},
 }
 
@@ -544,11 +544,11 @@ enum TrackStreamKind<E: CatalogExt = ()> {
 ///
 /// Use this when the caller does not know the frame boundaries (piped Annex-B
 /// H.264, an fMP4 reader, …); the importer infers them.
-pub struct TrackStream<E: CatalogExt = ()> {
-	kind: TrackStreamKind<E>,
+pub struct TrackStream {
+	kind: TrackStreamKind,
 }
 
-impl<E: CatalogExt> TrackStream<E> {
+impl TrackStream {
 	/// Create an importer that publishes a single codec onto a reserved track.
 	///
 	/// The caller reserves the track with
@@ -556,7 +556,7 @@ impl<E: CatalogExt> TrackStream<E> {
 	/// the importer accepts it here at the legacy microsecond timescale (where a codec-specific
 	/// timescale would be chosen). A [`VideoHint`] carrying a codec publishes the catalog before the
 	/// first frame; any [`VideoInit::data`] seeds the stream (as a call to [`initialize`](Self::initialize)).
-	pub fn video(
+	pub fn video<E: CatalogExt>(
 		request: moq_net::track::Request,
 		reserved: crate::catalog::Reserved<E>,
 		init: VideoInit,

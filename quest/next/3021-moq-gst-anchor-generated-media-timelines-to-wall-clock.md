@@ -32,10 +32,6 @@ records remain unchanged. Consume the prerequisite's catalog format; no new
 transport TIMESTAMP/TIMESCALE semantics, synchronization protocol, or drift
 correction is introduced here. Run the GStreamer CI and `smoke --all` lanes.
 
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - the required dev APIs must be available on main before this implementation starts
-
 ## Closes
 
 - [#3021](https://github.com/moq-dev/moq/issues/3021) - close this issue when the quest finishes

@@ -17,8 +17,6 @@ waits in [future](/quest/future/README.md).
 Give one agent ownership of each shared code area at a time (origin/auth, the
 JS Reader, audio playback, media containers and archive, bindings, worker
 transport, benchmark tooling); worktrees isolate commits, not semantics.
-Implementation that depends on a dev contract requires
-[Merge dev](/quest/dev/merge-dev.md) explicitly.
 
 ## Quests
 

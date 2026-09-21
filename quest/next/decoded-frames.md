@@ -40,10 +40,6 @@ and C/binding documentation; run `just test smoke --all` in CI.
 Public API: owned frame access and conversion at the binding boundary. Wire:
 none. Consume the settled main frame/output contracts without replacing them.
 
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - the required dev APIs must be available on main before this implementation starts
-
 ## Related
 
 - [OBS source](/quest/next/obs-moq-video/source.md) - consumes native C views

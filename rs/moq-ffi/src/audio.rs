@@ -178,7 +178,7 @@ impl MoqAudioProducer {
 	fn demand(&self) -> Result<moq_net::track::Demand, MoqError> {
 		let guard = self.inner.lock().unwrap();
 		let producer = guard.as_ref().ok_or(MoqError::Closed)?;
-		Ok(producer.track().demand())
+		Ok(producer.demand())
 	}
 }
 
@@ -287,7 +287,7 @@ impl MoqBroadcastProducer {
 		// means the Rust producer will reserve and follow whenever it starts to.
 		let reservation = bandwidth
 			.as_ref()
-			.map(|bandwidth| bandwidth.reserve_demand(&producer.track().demand(), producer.bitrate().as_bps()));
+			.map(|bandwidth| bandwidth.reserve_demand(&producer.demand(), producer.bitrate().as_bps()));
 
 		Ok(Arc::new(MoqAudioProducer {
 			inner: std::sync::Mutex::new(Some(producer)),

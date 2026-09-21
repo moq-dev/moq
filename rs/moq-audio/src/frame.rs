@@ -11,7 +11,11 @@ use crate::Activity;
 /// samples came from coded any audio. PCM layout (format / sample rate / channel count)
 /// is fixed by the producer or consumer at construction time, never per frame,
 /// so callers can't accidentally drift the format mid-stream.
+///
+/// `#[non_exhaustive]`: construct input with [`Frame::new`] so the record can
+/// gain metadata without breaking callers.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Frame {
 	/// Presentation timestamp of the first sample.
 	pub timestamp: Timestamp,

@@ -1,8 +1,6 @@
 use std::collections::BTreeMap;
-use std::collections::btree_map::Entry;
 
 use moq_mux::catalog::hang::Extra;
-use moq_mux::catalog::{Rendition, RenditionConfig};
 use moq_mux::import;
 use tokio::sync::oneshot;
 
@@ -43,36 +41,13 @@ enum Dynamic {
 /// A published broadcast: its producer, its catalog, and the renditions the caller authored by
 /// hand.
 ///
-/// The renditions are held rather than written and forgotten because the handle is what owns the
-/// catalog entry: it publishes on [`set`](Rendition::set) and retires the entry on drop. A media
-/// importer ([`import::Track`] or [`import::Container`]) holds its own for the tracks it publishes,
-/// which is what keeps the two from writing over each other.
+/// Caller-authored configs are tracked separately so removing one cannot retire an importer's
+/// rendition with the same name.
 struct Broadcast {
 	producer: moq_net::broadcast::Producer,
 	catalog: moq_mux::catalog::Producer<Extra>,
-	video: BTreeMap<String, Rendition<Extra, hang::catalog::VideoConfig>>,
-	audio: BTreeMap<String, Rendition<Extra, hang::catalog::AudioConfig>>,
-}
-
-/// The caller's rendition under `name`, reserved on first use.
-///
-/// A second write to a name the caller already owns re-sets that rendition, so a config can be
-/// refined in place. A name a media importer owns is refused, since it writes and removes its own.
-fn rendition<'a, C: RenditionConfig<Extra>>(
-	owned: &'a mut BTreeMap<String, Rendition<Extra, C>>,
-	catalog: &moq_mux::catalog::Producer<Extra>,
-	name: &str,
-) -> Result<&'a mut Rendition<Extra, C>, Error> {
-	match owned.entry(name.to_string()) {
-		Entry::Occupied(entry) => Ok(entry.into_mut()),
-		// A duplicate is a hang error either way, so report it under hang's own code rather than
-		// the generic mux one.
-		Entry::Vacant(entry) => match catalog.reserve().init::<C>(name) {
-			Ok(rendition) => Ok(entry.insert(rendition)),
-			Err(moq_mux::Error::Hang(err)) => Err(Error::Hang(err)),
-			Err(err) => Err(err.into()),
-		},
-	}
+	video: BTreeMap<String, hang::catalog::VideoConfig>,
+	audio: BTreeMap<String, hang::catalog::AudioConfig>,
 }
 
 #[derive(Default)]
@@ -82,7 +57,7 @@ pub struct Publish {
 
 	/// Single-codec media importers, fed timestamped frames.
 	// Boxed because the codec splitters/imports are much larger than the container ones.
-	media: NonZeroSlab<Box<import::Track<Extra>>>,
+	media: NonZeroSlab<Box<import::Track>>,
 
 	/// Container importers, fed whole chunks. A separate space from `media` because a
 	/// container publishes several tracks and carries its own timing, so it takes no
@@ -184,10 +159,17 @@ impl Publish {
 			audio,
 			..
 		} = self.broadcasts.remove(broadcast).ok_or(Error::BroadcastNotFound)?;
-		// Retire the caller's renditions while the catalog track is still open, so their removal is
-		// published rather than warned about once `finish` has closed it.
-		drop(video);
-		drop(audio);
+		// Retire caller-authored entries while the catalog track is still open.
+		{
+			let mut guard = catalog.modify()?;
+			for name in video.keys() {
+				guard.video.renditions.remove(name);
+			}
+			for name in audio.keys() {
+				guard.audio.renditions.remove(name);
+			}
+			guard.commit()?;
+		}
 		// Finish the broadcast first so the clean end reaches subscribers even if
 		// finalizing the catalog fails.
 		producer.finish();
@@ -306,7 +288,13 @@ impl Publish {
 	/// The catalog is republished automatically.
 	pub fn video_config(&mut self, broadcast: Id, name: &str, config: hang::catalog::VideoConfig) -> Result<(), Error> {
 		let broadcast = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
-		rendition(&mut broadcast.video, &broadcast.catalog, name)?.set(config)?;
+		if !broadcast.video.contains_key(name) && broadcast.catalog.is_claimed::<hang::catalog::VideoConfig>(name) {
+			return Err(Error::Hang(hang::Error::Duplicate(name.to_string())));
+		}
+		broadcast.video.insert(name.to_string(), config.clone());
+		let mut catalog = broadcast.catalog.modify()?;
+		catalog.video.renditions.insert(name.to_string(), config);
+		catalog.commit()?;
 		Ok(())
 	}
 
@@ -315,7 +303,13 @@ impl Publish {
 	/// Same rules as [`Self::video_config`].
 	pub fn audio_config(&mut self, broadcast: Id, name: &str, config: hang::catalog::AudioConfig) -> Result<(), Error> {
 		let broadcast = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
-		rendition(&mut broadcast.audio, &broadcast.catalog, name)?.set(config)?;
+		if !broadcast.audio.contains_key(name) && broadcast.catalog.is_claimed::<hang::catalog::AudioConfig>(name) {
+			return Err(Error::Hang(hang::Error::Duplicate(name.to_string())));
+		}
+		broadcast.audio.insert(name.to_string(), config.clone());
+		let mut catalog = broadcast.catalog.modify()?;
+		catalog.audio.renditions.insert(name.to_string(), config);
+		catalog.commit()?;
 		Ok(())
 	}
 
@@ -326,7 +320,11 @@ impl Publish {
 	/// republished automatically.
 	pub fn video_remove(&mut self, broadcast: Id, name: &str) -> Result<(), Error> {
 		let broadcast = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
-		broadcast.video.remove(name);
+		if broadcast.video.remove(name).is_some() {
+			let mut catalog = broadcast.catalog.modify()?;
+			catalog.video.renditions.remove(name);
+			catalog.commit()?;
+		}
 		Ok(())
 	}
 
@@ -335,7 +333,11 @@ impl Publish {
 	/// Same rules as [`Self::video_remove`].
 	pub fn audio_remove(&mut self, broadcast: Id, name: &str) -> Result<(), Error> {
 		let broadcast = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
-		broadcast.audio.remove(name);
+		if broadcast.audio.remove(name).is_some() {
+			let mut catalog = broadcast.catalog.modify()?;
+			catalog.audio.renditions.remove(name);
+			catalog.commit()?;
+		}
 		Ok(())
 	}
 

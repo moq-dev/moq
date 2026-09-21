@@ -1003,7 +1003,7 @@ fn register_verbatim<E: catalog::Catalog>(
 	// timeline track can collide), and the `VerbatimEntry` that removes this catalog
 	// entry on drop only exists once this function returns successfully, so an entry
 	// published first would be stranded.
-	let media = catalog.media_producer(
+	let media = catalog.media_raw(
 		track,
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	)?;
@@ -1485,16 +1485,16 @@ impl SectionReassembler {
 enum Stream<E: catalog::Catalog = ()> {
 	H264 {
 		split: h264::Split,
-		import: Box<h264::Import<E>>,
+		import: Box<h264::Import>,
 		unwrap: PtsUnwrap,
 	},
 	H265 {
 		split: h265::Split,
-		import: Box<h265::Import<E>>,
+		import: Box<h265::Import>,
 		unwrap: PtsUnwrap,
 	},
 	Aac(Box<AacStream<E>>),
-	Opus(Box<OpusStream<E>>),
+	Opus(Box<OpusStream>),
 	Legacy(Box<LegacyStream<E>>),
 	/// A codec we don't decode, carried verbatim as PES (DTS audio, private PES, ...).
 	Verbatim(Box<VerbatimStream<E>>),
@@ -1917,7 +1917,7 @@ impl From<&legacy::Descriptor> for SyncWord {
 /// (the sample rate and channel layout aren't in the PMT), so creation is
 /// deferred until the first frame arrives.
 struct AacStream<E: CatalogExt = ()> {
-	import: Option<aac::Import<E>>,
+	import: Option<aac::Import>,
 	broadcast: moq_net::broadcast::Producer,
 	/// Reservation held from the PMT until the first frame builds the importer, so the catalog stays
 	/// withheld until this deferred rendition resolves (config comes from the first ADTS header).
@@ -2182,12 +2182,12 @@ impl<E: CatalogExt> AacStream<E> {
 /// One Opus elementary stream. The channels come from the PMT descriptors and the rate
 /// is always 48 kHz, so (unlike AAC) the importer is built up front. A PES carries one or
 /// more Opus packets, each prefixed by the Opus-in-TS control header.
-struct OpusStream<E: CatalogExt = ()> {
-	import: opus::Import<E>,
+struct OpusStream {
+	import: opus::Import,
 	unwrap: PtsUnwrap,
 }
 
-impl<E: CatalogExt> OpusStream<E> {
+impl OpusStream {
 	fn write(&mut self, pending: Pending) -> anyhow::Result<bool> {
 		let base = unwrap_pts(&mut self.unwrap, pending.pts)?;
 
@@ -2319,7 +2319,7 @@ fn parse_opus_control_header(data: &[u8]) -> anyhow::Result<(usize, usize)> {
 /// (the config isn't in the PMT).
 struct LegacyStream<E: CatalogExt = ()> {
 	descriptor: &'static legacy::Descriptor,
-	import: Option<legacy::Import<E>>,
+	import: Option<legacy::Import>,
 	broadcast: moq_net::broadcast::Producer,
 	/// Reservation held from the PMT until the first frame builds the importer, so the catalog stays
 	/// withheld until this deferred rendition resolves (config comes from the first frame header).
