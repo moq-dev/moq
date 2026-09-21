@@ -15,7 +15,7 @@ lands in the fork on MoQ's schedule; once a feature has shipped in a MoQ
 release and its shape has stopped moving, split it into an upstream PR with
 the tests it landed with.
 
-Offer the six [BBR correctness fixes](/quest/next/quic/bbr-release.md) with
+Offer the seven [BBR correctness fixes](/quest/next/quic/bbr-release.md) with
 their regressions before promoting BBR as the default. Reuse existing
 upstream work, particularly [PR #802](https://github.com/n0-computer/noq/pull/802),
 and preserve attribution. Fixes can be offered as their shapes settle;
@@ -59,7 +59,7 @@ offered and answered.
 - [Careful resume on reconnect](/quest/next/quic/careful-resume.md)
 - [L4S on the backbone](/quest/next/quic/ecn.md)
 - [Per-stream deadlines](/quest/next/quic/deadline.md)
-- [Probe by early retransmission](/quest/next/quic/probe.md)
+- [Discover media headroom](/quest/next/quic/probe.md)
 - [qmux on the QUIC stream state machine](/quest/next/quic/qmux.md)
 
 ## Related

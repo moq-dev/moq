@@ -1,44 +1,55 @@
-# [L] Probe capacity by early retransmission
+# [L] Discover capacity above the media bitrate
 
 ## Goal
 
-The selected QUIC backend discovers egress headroom by retransmitting recent
-in-flight data early instead of sending padding. Probe bytes are useful if the
-original was lost and cost no more than padding if it was not. The resulting
-capacity estimate flows through the existing transport estimate, MoQ PROBE,
-and publisher rate adaptation.
+The selected QUIC backend validates headroom for an encoder increase without
+unacceptable frame delay or excess traffic. Prefer already-buffered useful
+media; add opt-in redundant probing only where measurements justify it.
+Keep current goodput, historical capacity and its age, and the desired
+encoder rate distinct. Preserving an old estimate does not discover capacity.
 
 ## Plan
 
-Implement the opt-in mechanism in the fork's recovery and pacing layer.
-Mark probe packets for an `IMMEDIATE_ACK` (the ACK-frequency extension noq
-already implements) so a capacity sample is not delayed by the peer's ACK
-timer. Enable it only while the application consumes bandwidth estimates, so
-idle connections never probe. Exclude streams or packets that have already
-expired under MoQ's group lifetime.
+Use the corrected BBR release. First compare ordinary pacing with brief
+pacing increases using available useful media, bounded by congestion window,
+bytes, duration, and the desired encoder step. Never delay ready frames or
+manufacture large keyframes to probe. A small burst can be inconclusive;
+stop on persistent queue growth or congestion evidence. Do not force Startup
+exit or replace capacity with encoder bitrate merely because the source
+plateaus.
 
-Keep accounting two-sided and truthful. A probe acknowledged beside its
-original is not loss, and its bytes are not new application delivery. Its ACK
-must feed a wire-capacity sample distinct from goodput, because an
-application-limited sender cannot otherwise estimate capacity above its
-encoder rate.
+Where useful traffic cannot validate wanted headroom, compare early
+retransmission of unacknowledged, unexpired data against equal-budget padding,
+no probing, and ordinary loss recovery. Duplicates can delay useful bytes;
+being useful if the original was lost does not make redundancy free. Keep
+all bytes in congestion accounting and count unique media delivery once.
+Wire-capacity evidence must remain distinct from application goodput.
 
-Measure cadence, step size, and interaction with the selected congestion
-controller. Compare against padding, no probing, and ordinary loss-triggered
-retransmission under clean, random-loss, and short-burst-loss profiles. Require
-stable application latency and no double-counted delivery before exposing the
-option through the backend-neutral estimate.
+Implement only the measured winning mechanism in the fork's recovery and
+pacing layer. For redundant probes, evaluate the existing IMMEDIATE_ACK
+extension so ACK delay does not obscure a short sample. Enable probing only
+while an active application requests headroom, within explicit byte/time
+budgets. Carry any chosen estimate through the existing transport estimate,
+MoQ PROBE, and publisher adaptation; document public API changes and update
+consumer docs inline rather than committing a new API shape in this plan.
+
+Measure an illustrative 2-Mbit/s source seeking 4 Mbit/s while the path steps
+3 to 12 to 3 Mbit/s. Reuse identical media traces and wire budgets. Include
+keyframes, idle restart, stale high estimates, receiver credit limits,
+random/burst loss, shallow queues, compressed ACKs, and competing CUBIC/BBR
+flows. Set deadline, overhead, and fairness budgets before tuning. Report
+validated upward adaptation, downward reaction, estimate age, frame deadlines,
+queue delay, unique goodput, and redundant bytes. A successful small burst
+is not proof of full path capacity. Persist regressions in CI and broader
+network scenarios at least nightly. A measured no-go is a valid outcome;
+retain the baseline and record why before exposing an ineffective option.
 
 ## Required
 
-- [Fork noq](/quest/next/quic/fork.md) - the recovery and pacing change lives
-  there
+- [Release BBR fixes](/quest/next/quic/bbr-release.md) - exclude known controller defects from the experiment
 
 ## Related
 
-- [FEC experiment](/quest/future/quic-fec.md) - early retransmission is a
-  repetition code competing for the same redundancy budget
-- [GCC egress experiment](/quest/future/quic-gcc.md) - a delay-based controller
-  changes what headroom means
-- [BBR3 app-limited](/quest/future/quic-bbr-app-limited.md) - whether the
-  estimate an app-limited sender already has is trustworthy
+- [Natural media drains](/quest/future/quic-bbr-app-limited.md) - separate ProbeRTT policy experiment
+- [FEC experiment](/quest/future/quic-fec.md) - repetition competes for the redundancy budget
+- [GCC egress experiment](/quest/future/quic-gcc.md) - delay control changes what headroom means

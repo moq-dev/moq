@@ -2,7 +2,7 @@
 
 ## Goal
 
-Published MoQ consumers receive the six corrected BBR behaviors through
+Published MoQ consumers receive the seven corrected BBR behaviors through
 immutable releases of the noq fork and its adapters. Fixes do not wait for
 qmux, stream scheduling, or other unrelated QUIC features.
 
@@ -24,6 +24,7 @@ and Google comparison do not gate these bug fixes.
 
 - [Preserve QUIC packet identity in BBR](/quest/next/quic/bbr-packet-identity.md)
 - [Finish each BBR ACK sample before using it](/quest/next/quic/bbr-ack-sampling.md)
+- [Mark application starvation before the next BBR send](/quest/next/quic/bbr-app-limited.md)
 - [Finish BBR bandwidth-probe feedback once](/quest/next/quic/bbr-probe-feedback.md)
 - [Recalibrate BBR startup pacing from measured RTT](/quest/next/quic/bbr-startup-pacing.md)
 - [Protect bandwidth samples during BBR ProbeRTT](/quest/next/quic/bbr-probe-rtt.md)
