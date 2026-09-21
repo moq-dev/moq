@@ -180,6 +180,8 @@ Implementation that depends on a dev contract requires
 - [Runtime QA hosts](/quest/next/runtime-qa-hosts.md) - run exact source snapshots on accessible Linux and device hosts with retrievable debug evidence
 - [Media QA on other engines](/quest/next/browser-media-qa-engines.md) - the media harness measures a Firefox or WebKit player over the fallback and names what each engine lacks
 - [#1310](/quest/next/1310-why-use-the-worklet-plugin.md) - why use the worklet plugin?
+- [Capture without V4L2 bindgen](/quest/next/capture-v4l-bindings.md) - moq-video capture builds on Linux without libclang or kernel headers
+- [Audio capture without ALSA link](/quest/next/capture-alsa-link.md) - moq-audio capture and playback build on Linux without linking libasound
 - [Ship capture and playback](/quest/next/cli-packaging.md) - a released moq binary can capture and play, which no distribution currently enables
 - [Windows capture parity](/quest/next/capture-windows.md) - system audio and screen cursor capture with a settled app-capture policy
 - [Linux capture parity](/quest/next/capture-linux.md) - Wayland window/system-audio capture with explicit display-selection and app-capture limits
