@@ -34,6 +34,7 @@ world states the condition as a plain-text `Required` bullet and waits here.
 - [Receive timestamps](/quest/future/quic-receive-ts.md) - per-packet arrival times in ACKs, the feedback GCC and deadlines need
 - [QUIC GCC](/quest/future/quic-gcc.md) - a measured verdict on delay-based congestion control for media egress, shipping as `RealTime`
 - [QUIC FEC](/quest/future/quic-fec.md) - a measured verdict on transport-level FEC vs retransmission
+- [Google BBR comparison](/quest/future/quic-bbr-google.md) - measure growth detection and precautionary probing after the correctness fixes
 - [BBR3 app-limited](/quest/future/quic-bbr-app-limited.md) - whether ProbeRTT and the bandwidth model behave for a sender at the encoder's rate
 - [Kernel pacing](/quest/future/quic-kernel-pacing.md) - whether SO_TXTIME pacing beats a userspace pacer the io_uring driver ignores today
 - [Send batching](/quest/future/quic-send-batching.md) - whether sendmmsg across connections pays on the tokio path

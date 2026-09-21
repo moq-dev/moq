@@ -38,6 +38,11 @@ waits on a review there.
   triaged, and the rule that a carried change lists its upstream PR or the
   reason it has none.
 
+The initial release is the bootstrap, not the BBR correctness gate. The
+[BBR fix quests](/quest/next/quic/README.md) follow it and ship through their
+[own release](/quest/next/quic/bbr-release.md); no dependency runs back from
+the bootstrap to fixes that require the fork.
+
 ## Related
 
 - The single noq backend lets one fork carry every feature.

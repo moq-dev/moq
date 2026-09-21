@@ -18,6 +18,12 @@ timestamps, kernel pacing, buffer pools) live in next.
 Everything here assumes the single noq stack. The [fork](/quest/next/quic/fork.md)
 is the first quest in the line and most others require it.
 
+The six BBR correctness fixes follow the fork bootstrap. They are separate
+PRs, but one owner should work in the shared controller code at a time.
+The [BBR release](/quest/next/quic/bbr-release.md) delivers them without waiting
+for the remaining transport features. The
+[Google comparison](/quest/future/quic-bbr-google.md) is a separate study.
+
 Rules the line keeps:
 
 - a carried change lists its upstream PR or the reason it has none;
@@ -41,6 +47,13 @@ This is a transport API change, not a MoQ wire change.
 - [Fork noq](/quest/next/quic/fork.md) - moq-dev/noq publishes `moq-noq-proto`,
   `moq-noq`, and `moq-noq-udp`, tracks its parent, and the sync procedure is
   written down
+- [Preserve QUIC packet identity in BBR](/quest/next/quic/bbr-packet-identity.md) - ACKs and losses identify the right packet across QUIC spaces
+- [Finish each BBR ACK sample before using it](/quest/next/quic/bbr-ack-sampling.md) - current delivery samples reach the model once with consistent metadata
+- [Finish BBR bandwidth-probe feedback once](/quest/next/quic/bbr-probe-feedback.md) - cruise rounds neither age probe history repeatedly nor retain probe-loss classification
+- [Recalibrate BBR startup pacing from measured RTT](/quest/next/quic/bbr-startup-pacing.md) - measured RTT replaces the nominal startup rate for media senders
+- [Protect bandwidth samples during BBR ProbeRTT](/quest/next/quic/bbr-probe-rtt.md) - intentionally reduced sending cannot masquerade as reduced capacity
+- [Preserve BBR state across a spurious loss episode](/quest/next/quic/bbr-loss-undo.md) - consecutive losses preserve the original recovery snapshot
+- [Release BBR fixes](/quest/next/quic/bbr-release.md) - publish and pin the corrected controller independently of later features
 - [Deliver the application close before io_uring teardown](/quest/next/quic/uring-close.md) -
   the peer receives the final close when the client immediately stops its worker
 - [Measure ECN on the backbone](/quest/next/quic/ecn-measure.md) - a written

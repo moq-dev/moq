@@ -3,20 +3,21 @@
 ## Goal
 
 Evidence that noq's BBR3 behaves for a sender that never fills its window: a
-live publisher or a relay egress at the encoder's rate. The concern is
-`ProbeRTT`, which halves the congestion window for 200 ms every 5 s, and the
-bandwidth model decaying while samples are app-limited. Either the flow
-keeps its rate and estimate across those phases, or the fork changes what
-BBR3 does when app-limited and the change is measured.
+live publisher or a relay egress at the encoder's rate. The six confirmed
+correctness defects are fixed and released first. This study measures
+remaining behavior of the corrected controller rather than rediscovering
+those defects.
 
 ## Plan
 
-BBR3 in noq marks app-limited rounds, and its `ProbeRTT` uses a 0.5 cwnd
-gain. Check, on a media-shaped flow at half the bottleneck rate with the
-impaired path profile:
+ProbeRTT targets half the estimated BDP, floored at the minimum pipe window;
+it does not simply halve the current congestion window. Its 200-ms hold and
+5-second minimum interval do not imply an unconditional pause every 5 seconds.
+Check a media-shaped flow at half the bottleneck rate with the impaired path
+profile:
 
-- whether `ProbeRTT` ever constrains an app-limited flow (in-flight should
-  already be below half the window) and whether it is skipped or shortened
+- whether `ProbeRTT` constrains an app-limited flow, comparing inflight with
+  the actual BDP-based limit and minimum window, and whether it is skipped or shortened
   when the flow is app-limited, as BBRv3 permits when the minimum RTT was
   refreshed recently;
 - whether `bandwidth_estimate` stays at the last validated capacity or decays
@@ -29,9 +30,11 @@ the fork with a regression test; record what is fine.
 
 ## Required
 
-- [Fork noq](/quest/next/quic/fork.md) - any fix lives there
+- [Release BBR fixes](/quest/next/quic/bbr-release.md) - use the corrected controller through the actual MoQ dependency chain
 
 ## Related
+
+- [Google BBR comparison](/quest/future/quic-bbr-google.md) - separate verdict on the two algorithm differences
 
 - [Probe by early retransmission](/quest/next/quic/probe.md) - the estimate
   above the encoder rate that an app-limited sender cannot otherwise get

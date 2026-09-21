@@ -15,8 +15,13 @@ lands in the fork on MoQ's schedule; once a feature has shipped in a MoQ
 release and its shape has stopped moving, split it into an upstream PR with
 the tests it landed with.
 
-Proposal order, most general first, each linked to the quest that produced
-it:
+Offer the six [BBR correctness fixes](/quest/next/quic/bbr-release.md) with
+their regressions before promoting BBR as the default. Reuse existing
+upstream work, particularly [PR #802](https://github.com/n0-computer/noq/pull/802),
+and preserve attribution. Fixes can be offered as their shapes settle;
+upstream acceptance never gates the fork's corrected release.
+
+Then the feature proposal order, each linked to its producing quest:
 
 0. BBR3 as `TransportConfig`'s default controller (noq-proto 1.2.0 defaults
    to Cubic, `config/transport.rs:586`, while MoQ has run BBR3 by default
@@ -43,6 +48,8 @@ with the link beside it. The quest completes when the list above has been
 offered and answered.
 
 ## Required
+
+- [Release BBR fixes](/quest/next/quic/bbr-release.md) - the corrected controller and its regression evidence
 
 - [Fork noq](/quest/next/quic/fork.md) - the fork the proposals split from
 - [Per-stream ACK progress](/quest/next/quic/ack-progress.md)
