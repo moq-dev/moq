@@ -1,166 +1,94 @@
-//! Exclusive grouped-frame and datagram writers and readers for one physical track.
+//! Grouped-frame and datagram writers and readers for one physical track.
 
-use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, ready};
 
-use bytes::Bytes;
-
-use crate::credential::{Credential, Domain, PhysicalName, Pin};
-use crate::datagram::{self, Event};
+use crate::datagram::{Datagram, Event};
 use crate::error::{Error, Result};
 use crate::group;
 use crate::key::TrackKey;
-use crate::limits::{MAX_DATAGRAM_BODY, MIN_DATAGRAM_HEADER, TAG_LEN, check_u53, datagram_payload_limit};
-use crate::window::{DatagramWindow, GroupWindow};
+use crate::limits::{MAX_DATAGRAM_PAYLOAD, check_u53};
+use crate::window::DatagramWindow;
 
 /// Exclusive producer for one physical track.
 ///
-/// Owns grouped-frame and datagram key domains and the shared sequence namespace.
-/// Not `Clone`. Sequences are allocated monotonically; reuse and exhaustion are
-/// refused before encryption. Datagram ciphertext is retained for retransmission,
-/// bounded to the last [`crate::DATAGRAM_DUPLICATE_WINDOW`] sequences.
+/// Owns the grouped-frame and datagram keys and the shared sequence namespace.
+/// Sequences are allocated monotonically; reuse and exhaustion are refused before encryption.
 pub struct Producer {
 	inner: moq_net::track::Producer,
 	group_key: Arc<Mutex<TrackKey>>,
-	datagram_key: Arc<Mutex<TrackKey>>,
+	datagram_key: TrackKey,
 	next: u64,
-	datagrams: HashMap<u64, RetainedDatagram>,
-	subscribe: u64,
-}
-
-struct RetainedDatagram {
-	timestamp: moq_net::Timestamp,
-	payload: Bytes,
 }
 
 impl Producer {
-	pub(crate) fn new(
-		inner: moq_net::track::Producer,
-		credential: &Credential,
-		physical: PhysicalName,
-	) -> Result<Self> {
-		Ok(Self {
+	pub(crate) fn new(inner: moq_net::track::Producer, group_key: TrackKey, datagram_key: TrackKey) -> Self {
+		Self {
 			inner,
-			group_key: Arc::new(Mutex::new(TrackKey::derive(credential, &physical, Domain::Group)?)),
-			datagram_key: Arc::new(Mutex::new(TrackKey::derive(credential, &physical, Domain::Datagram)?)),
+			group_key: Arc::new(Mutex::new(group_key)),
+			datagram_key,
 			next: 0,
-			datagrams: HashMap::new(),
-			subscribe: 0,
-		})
+		}
 	}
 
-	/// Subscribe ID used to size datagram plaintext against the moq-lite header.
-	///
-	/// Defaults to 0. The actual subscribe ID is assigned by the session; set this
-	/// to the value that will be encoded, or leave 0 for a one-byte varint.
-	pub fn set_subscribe(&mut self, subscribe: u64) {
-		self.subscribe = subscribe;
-	}
-
-	/// The underlying net track name, which is the physical name.
+	/// The physical track name.
 	pub fn name(&self) -> &str {
 		self.inner.name()
 	}
 
-	/// Allocate the next sequence and start a grouped-frame group there.
+	/// Allocate the next sequence and start a group there.
 	///
 	/// # Errors
 	///
 	/// [`Error::Identity`] if the next sequence exceeds `2^53-1`, or a net error.
 	pub fn append_group(&mut self) -> Result<group::Producer> {
-		let sequence = self.allocate(None)?;
-		self.create_group_at(sequence)
+		let sequence = self.next;
+		self.create_group(sequence)
 	}
 
-	/// Start a grouped-frame group at an explicit sequence.
+	/// Start a group at an explicit sequence, which must be at or above the next unallocated one.
 	///
 	/// # Errors
 	///
 	/// [`Error::Reuse`] if `sequence` was already allocated, [`Error::Identity`] if
 	/// it exceeds `2^53-1`, or a net error.
 	pub fn create_group(&mut self, sequence: u64) -> Result<group::Producer> {
-		let sequence = self.allocate(Some(sequence))?;
-		self.create_group_at(sequence)
-	}
-
-	fn create_group_at(&mut self, sequence: u64) -> Result<group::Producer> {
+		self.allocate(sequence)?;
 		let inner = self.inner.create_group(moq_net::group::Info { sequence })?;
 		Ok(group::Producer::new(inner, self.group_key.clone()))
 	}
 
-	/// Encrypt `plaintext` at the next sequence and insert the datagram.
+	/// Encrypt `plaintext` at the next sequence and insert the datagram, returning that sequence.
 	///
 	/// # Errors
 	///
-	/// [`Error::Reuse`], [`Error::Identity`], [`Error::Exhausted`], [`Error::Oversize`],
-	/// or a net write error.
-	pub fn append_datagram(&mut self, timestamp: moq_net::Timestamp, plaintext: impl AsRef<[u8]>) -> Result<u64> {
+	/// [`Error::Identity`], [`Error::Exhausted`], [`Error::Oversize`], or a net write error.
+	pub fn append_datagram(&mut self, timestamp: moq_net::Timestamp, plaintext: &[u8]) -> Result<u64> {
 		let sequence = self.next;
 		self.insert_datagram(sequence, timestamp, plaintext)?;
 		Ok(sequence)
 	}
 
-	/// Encrypt `plaintext` at `sequence` and insert the datagram.
+	/// Encrypt `plaintext` at an explicit sequence and insert the datagram.
 	///
-	/// The identity is committed before encryption. Retransmission must use
-	/// [`Self::retransmit_datagram`].
+	/// Plaintext is capped at [`MAX_DATAGRAM_PLAINTEXT`](crate::MAX_DATAGRAM_PLAINTEXT).
+	/// A predictable failure is refused before the sequence is allocated; once
+	/// encrypted, the identity is spent even if the net write fails.
 	///
 	/// # Errors
 	///
 	/// [`Error::Reuse`] if `sequence` was already allocated, [`Error::Identity`],
 	/// [`Error::Exhausted`], [`Error::Oversize`], or a net write error.
-	pub fn insert_datagram(
-		&mut self,
-		sequence: u64,
-		timestamp: moq_net::Timestamp,
-		plaintext: impl AsRef<[u8]>,
-	) -> Result<()> {
-		let sequence = self.allocate(Some(sequence))?;
-		let plaintext = plaintext.as_ref();
-		let limit = datagram_payload_limit(self.subscribe, sequence, timestamp.value())?;
+	pub fn insert_datagram(&mut self, sequence: u64, timestamp: moq_net::Timestamp, plaintext: &[u8]) -> Result<()> {
+		self.reserve(sequence)?;
 		let payload = self
 			.datagram_key
-			.lock()
-			.expect("datagram key")
-			.protect(sequence, 0, plaintext, limit)?;
-		self.datagrams.insert(
-			sequence,
-			RetainedDatagram {
-				timestamp,
-				payload: payload.clone(),
-			},
-		);
-		// Bound retention to the duplicate window so a long-lived datagram track
-		// does not retain every ciphertext for the life of the Producer.
-		let cutoff = self.next.saturating_sub(crate::DATAGRAM_DUPLICATE_WINDOW as u64);
-		self.datagrams.retain(|&seq, _| seq >= cutoff);
-		datagram::insert_ciphertext(&mut self.inner, sequence, timestamp, payload)?;
+			.protect(sequence, 0, plaintext, MAX_DATAGRAM_PAYLOAD)?;
+		self.next = sequence + 1;
+		self.inner.insert_datagram(sequence, timestamp, payload)?;
 		Ok(())
-	}
-
-	/// Write the retained ciphertext for `sequence` again without encrypting.
-	///
-	/// # Errors
-	///
-	/// [`Error::Reuse`] if that identity was never produced or was evicted outside
-	/// the retention window, or a net write error.
-	pub fn retransmit_datagram(&mut self, sequence: u64) -> Result<()> {
-		let retained = self.datagrams.get(&sequence).ok_or(Error::Reuse)?;
-		datagram::insert_ciphertext(&mut self.inner, sequence, retained.timestamp, retained.payload.clone())?;
-		Ok(())
-	}
-
-	/// Ciphertext already produced for datagram `sequence`, if retained.
-	pub fn datagram_ciphertext(&self, sequence: u64) -> Option<&Bytes> {
-		self.datagrams.get(&sequence).map(|d| &d.payload)
-	}
-
-	#[cfg(test)]
-	pub(crate) fn datagram_invocations(&self) -> u64 {
-		self.datagram_key.lock().expect("datagram key").invocations()
 	}
 
 	/// Finish the track after the last allocated sequence.
@@ -183,15 +111,23 @@ impl Producer {
 		Ok(())
 	}
 
-	fn allocate(&mut self, requested: Option<u64>) -> Result<u64> {
-		let sequence = requested.unwrap_or(self.next);
+	/// Refuse a sequence this track already allocated or cannot represent.
+	fn reserve(&self, sequence: u64) -> Result<()> {
 		if sequence < self.next {
 			return Err(Error::Reuse);
 		}
-		check_u53(sequence)?;
-		self.next = sequence.checked_add(1).ok_or(Error::Identity)?;
-		check_u53(self.next.saturating_sub(1))?;
-		Ok(sequence)
+		check_u53(sequence)
+	}
+
+	fn allocate(&mut self, sequence: u64) -> Result<()> {
+		self.reserve(sequence)?;
+		self.next = sequence + 1;
+		Ok(())
+	}
+
+	#[cfg(test)]
+	pub(crate) fn datagram_invocations(&self) -> u64 {
+		self.datagram_key.invocations()
 	}
 }
 
@@ -211,40 +147,32 @@ impl fmt::Debug for Producer {
 pub struct Consumer {
 	inner: moq_net::track::Subscriber,
 	group_key: Arc<Mutex<TrackKey>>,
-	datagram_key: Arc<Mutex<TrackKey>>,
-	groups: Arc<Mutex<GroupWindow>>,
-	datagrams: DatagramWindow,
+	datagram_key: TrackKey,
+	window: DatagramWindow,
 	auth_failed: Arc<AtomicBool>,
 }
 
 impl Consumer {
-	/// Wrap a net subscriber. The track name is the physical name.
-	///
-	/// # Errors
-	///
-	/// [`Error::PinnedMismatch`] if `pin` does not match the credential,
-	/// [`Error::Identity`] if the track name is not a physical name.
-	pub fn new(credential: &Credential, track: moq_net::track::Subscriber, pin: Option<&Pin>) -> Result<Self> {
-		if let Some(pin) = pin {
-			credential.check_pin(pin)?;
-		}
-		let physical = PhysicalName::parse(track.name())?;
-		Ok(Self {
-			inner: track,
-			group_key: Arc::new(Mutex::new(TrackKey::derive(credential, &physical, Domain::Group)?)),
-			datagram_key: Arc::new(Mutex::new(TrackKey::derive(credential, &physical, Domain::Datagram)?)),
-			groups: Arc::new(Mutex::new(GroupWindow::default())),
-			datagrams: DatagramWindow::default(),
+	pub(crate) fn new(inner: moq_net::track::Subscriber, group_key: TrackKey, datagram_key: TrackKey) -> Self {
+		Self {
+			inner,
+			group_key: Arc::new(Mutex::new(group_key)),
+			datagram_key,
+			window: DatagramWindow::default(),
 			auth_failed: Arc::new(AtomicBool::new(false)),
-		})
+		}
+	}
+
+	/// The physical track name.
+	pub fn name(&self) -> &str {
+		self.inner.name()
 	}
 
 	/// Poll for the next protected group in arrival order.
 	///
 	/// # Errors
 	///
-	/// [`Error::Authentication`] once a grouped frame has failed open. Net errors
-	/// from the underlying subscriber.
+	/// [`Error::Authentication`] once a grouped frame has failed to open, or a net error.
 	pub fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		if self.auth_failed.load(Ordering::Acquire) {
 			return Poll::Ready(Err(Error::Authentication));
@@ -255,7 +183,6 @@ impl Consumer {
 		Poll::Ready(Ok(Some(group::Consumer::new(
 			inner,
 			self.group_key.clone(),
-			self.groups.clone(),
 			self.auth_failed.clone(),
 		))))
 	}
@@ -271,13 +198,12 @@ impl Consumer {
 
 	/// Poll for the next datagram event.
 	///
-	/// Authentication failure and duplicates are events, not track-ending errors.
+	/// A bad tag and a duplicate are events, not track-ending errors.
 	///
 	/// # Errors
 	///
-	/// [`Error::Authentication`] only if a grouped frame already failed. Net errors
-	/// from the underlying subscriber. [`Error::Oversize`] / [`Error::Exhausted`]
-	/// from opening.
+	/// [`Error::Authentication`] only if a grouped frame already failed,
+	/// [`Error::Oversize`] or [`Error::Exhausted`] from opening, or a net error.
 	pub fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Event>>> {
 		if self.auth_failed.load(Ordering::Acquire) {
 			return Poll::Ready(Err(Error::Authentication));
@@ -286,24 +212,16 @@ impl Consumer {
 			return Poll::Ready(Ok(None));
 		};
 		let sequence = datagram.sequence;
-		if self.datagrams.is_duplicate(sequence) {
+		if self.window.is_duplicate(sequence) {
 			return Poll::Ready(Ok(Some(Event::Duplicate { sequence })));
-		}
-		let limit = MAX_DATAGRAM_BODY.saturating_sub(MIN_DATAGRAM_HEADER);
-		if datagram.payload.len() < TAG_LEN || datagram.payload.len() > limit {
-			return Poll::Ready(Err(Error::Oversize));
 		}
 		match self
 			.datagram_key
-			.lock()
-			.expect("datagram key")
-			.open(sequence, 0, &datagram.payload, limit)
+			.open(sequence, 0, &datagram.payload, MAX_DATAGRAM_PAYLOAD)
 		{
 			Ok(plaintext) => {
-				// Mark only after a successful open so a forged datagram that fails
-				// AEAD does not burn the identity; the real retransmission still opens.
-				self.datagrams.mark(sequence);
-				Poll::Ready(Ok(Some(Event::Datagram(datagram::Datagram {
+				self.window.mark(sequence);
+				Poll::Ready(Ok(Some(Event::Datagram(Datagram {
 					sequence,
 					timestamp: datagram.timestamp,
 					plaintext,
@@ -327,6 +245,7 @@ impl Consumer {
 impl fmt::Debug for Consumer {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("track::Consumer")
+			.field("name", &self.name())
 			.field("auth_failed", &self.auth_failed.load(Ordering::Acquire))
 			.finish()
 	}

@@ -210,6 +210,7 @@ tracing-subscriber = "0.3"
 tracing-test = "0.2"
 url = "2"
 usage = { package = "usage-rs", version = "6.3.0" }
+uuid = { version = "1.26", features = ["v7"] }
 web-async = { version = "0.1.5", features = ["tracing"] }
 web-transport-iroh = "0.7"
 # default-features off so the QUIC crypto provider is chosen by moq-tokio's

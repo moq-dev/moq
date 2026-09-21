@@ -44,7 +44,7 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 
 ## Quests
 
-- [Receive failure](/quest/next/e2ee/receiver-failure.md) - failed opens consume the key budget and a bad grouped frame wakes and terminates every pending read
+- [Receive failure](/quest/next/e2ee/receiver-failure.md) - a bad grouped frame wakes and terminates every pending read
 - [TypeScript E2EE core](/quest/next/e2ee/typescript.md) - the `@moq/e2ee` package
   mirroring the Rust surface, with WebCrypto in a serial pump
 - [Rust protected publisher seams](/quest/next/e2ee/rust-publish.md) - Rust media
@@ -67,5 +67,4 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 
 ## Related
 
-- [Release E2EE API](/quest/main/e2ee-api.md) - the Rust surface and epoch profile are release requirements; browser and application integration follow here
 - [archive](/quest/next/archive/README.md) - protected broadcasts are deliberately outside recording and replay formats
