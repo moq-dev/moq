@@ -192,6 +192,7 @@ export function nameInfo(generation: Generation, semanticName: Uint8Array<ArrayB
 	);
 }
 
+/** Canonical path bytes for a credential and semantic name, excluding the epoch. */
 export function pathInfo(credential: Credential, semanticName: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
 	return concat(
 		PATH_LABEL,
@@ -229,6 +230,7 @@ export async function deriveName(
 	return { prk: extracted, info, material, physicalName: base64url(material) };
 }
 
+/** Derive the opaque broadcast prefix for a semantic name, independent of epoch. */
 export async function derivePath(
 	credential: Credential,
 	semanticName: Uint8Array<ArrayBuffer>,
