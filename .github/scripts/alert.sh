@@ -96,7 +96,8 @@ check_coverage() {
 # those shapes reports "no non-PR triggers" for a workflow it did not actually
 # read, which is the silent gap this guard exists to close. bun is already a
 # hard dependency (jsDeps in flake.nix, `bun install` in CI), so its YAML parser
-# costs nothing new.
+# costs nothing new. Bun parses a bare `on:` key as boolean true (YAML 1.1), so
+# both readers below fall back from `doc.on` to `doc.true`.
 #
 # A workflow with no `name:` is an error, not a skip: GitHub falls back to the
 # file path, which alert.yml cannot reference, and skipping it would put the
@@ -122,7 +123,7 @@ for (const file of files) {
         console.error("alert.sh: " + file + " is not a YAML mapping");
         process.exit(2);
     }
-    const on = doc.on;
+    const on = doc.on ?? doc.true;
     let triggers;
     if (typeof on === "string") triggers = [on];
     else if (Array.isArray(on)) triggers = on;
@@ -148,7 +149,7 @@ if (names.length) console.log(names.join("\n"));
 watched_workflow_names() {
     ALERT_YML="$WORKFLOWS_DIR/alert.yml" bun -e '
 const doc = Bun.YAML.parse(await Bun.file(Bun.env.ALERT_YML).text());
-const list = doc?.on?.workflow_run?.workflows;
+const list = (doc?.on ?? doc?.true)?.workflow_run?.workflows;
 if (!Array.isArray(list)) {
     console.error("alert.sh: alert.yml has no on.workflow_run.workflows list");
     process.exit(2);
