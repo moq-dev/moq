@@ -190,10 +190,19 @@ impl std::fmt::Debug for Frame {
 	}
 }
 
-/// NV12 bytes for `height` rows at `pitch`. Cannot overflow: two `u32`
-/// factors fit a `u64`, and 64-bit `usize` is the only target with CUDA.
-fn nv12_len(height: u32, pitch: u32) -> usize {
-	pitch as usize * height as usize * 3 / 2
+/// NV12 bytes for `height` rows at `pitch`: the luma rows plus half as many
+/// chroma rows. Refused rather than wrapped when the product does not fit, so
+/// an absurd size cannot become a short allocation the kernels overrun.
+fn nv12_len(height: u32, pitch: u32) -> Result<usize, Error> {
+	(pitch as usize)
+		.checked_mul(height as usize)
+		.and_then(|luma| luma.checked_mul(3))
+		.map(|bytes| bytes / 2)
+		.ok_or_else(|| {
+			Error::Codec(anyhow::anyhow!(
+				"NV12 frame of {height} rows at pitch {pitch} is too large"
+			))
+		})
 }
 
 /// The row pitch for frames this module allocates: 256-byte aligned for
@@ -211,7 +220,7 @@ impl Frame {
 	/// pitch `pitch`. Uninitialized: the caller copies the full extent in.
 	pub(crate) fn alloc(ctx: &Arc<CudaContext>, width: u32, height: u32, pitch: u32) -> Result<Self, Error> {
 		debug_assert!(pitch >= width && width.is_multiple_of(2) && height.is_multiple_of(2));
-		let raw = Raw::alloc(ctx, nv12_len(height, pitch))?;
+		let raw = Raw::alloc(ctx, nv12_len(height, pitch)?)?;
 		Ok(Self {
 			buf: Arc::new(Buffer {
 				raw: std::mem::ManuallyDrop::new(raw),
@@ -228,7 +237,7 @@ impl Frame {
 	fn pooled(pool: &Arc<Pool<Device>>, size: Size, color: Option<Color>) -> Result<Self, Error> {
 		let pitch = aligned_pitch(size.width)?;
 		Ok(Self {
-			buf: Arc::new(Buffer::take(pool, nv12_len(size.height, pitch))?),
+			buf: Arc::new(Buffer::take(pool, nv12_len(size.height, pitch)?)?),
 			width: size.width,
 			height: size.height,
 			pitch,
