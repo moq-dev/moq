@@ -142,6 +142,10 @@ pub struct SubscribeArgs {
 	/// Cap the output duration: publisher groups by default for fMP4, video GOPs for MKV.
 	pub fragment_duration: Option<Duration>,
 
+	/// Pad MPEG-TS output with null packets to this rate, in bits per second,
+	/// overriding the catalog's recorded multiplex rate.
+	pub mux_rate: Option<u64>,
+
 	/// Catalog format for track discovery (default: detect from the broadcast suffix).
 	pub catalog: Option<CatalogFormatArg>,
 
@@ -299,6 +303,9 @@ impl Subscribe {
 		let mut ts = moq_mux::container::ts::Export::with_ts(self.source, self.catalog)
 			.await?
 			.with_max_age(self.args.max_age);
+		if let Some(mux_rate) = self.args.mux_rate {
+			ts = ts.with_mux_rate(mux_rate);
+		}
 
 		// A TS byte stream carries no per-frame timing, so delivery time is the only
 		// carrier of each frame's spacing: the exporter slices its output on the PCR

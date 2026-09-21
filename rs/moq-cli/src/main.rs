@@ -499,7 +499,7 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 				}
 			}
 			Command::Export(export) => {
-				if export.sink.stdout().is_some() {
+				if export.sink.is_stdout() {
 					claim("stdout", &mut stdout, &name)?;
 				}
 				spawn_export(&origin, export, name, &mut tasks)?;
@@ -658,11 +658,12 @@ fn spawn_export(
 		reject_listener_cors(&rtc.cors, "export rtc")?;
 	}
 
-	if let Some((format, max_age, fragment_duration)) = export.sink.stdout() {
+	if let Some(stdout) = export.sink.stdout() {
 		let args = SubscribeArgs {
-			format,
-			max_age,
-			fragment_duration,
+			format: stdout.format,
+			max_age: stdout.max_age,
+			fragment_duration: stdout.fragment_duration,
+			mux_rate: stdout.mux_rate,
 			catalog: export.catalog_format,
 			select: export.select,
 		};

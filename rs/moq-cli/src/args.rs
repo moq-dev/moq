@@ -792,9 +792,8 @@ impl Export {
 		}
 		match &self.sink {
 			ExportSink::Fmp4(args) | ExportSink::Mkv(args) => found.extend(args.container.deprecated()),
-			ExportSink::Ts(args) | ExportSink::Flv(args) | ExportSink::H264(args) | ExportSink::H265(args) => {
-				found.extend(args.deprecated())
-			}
+			ExportSink::Ts(args) => found.extend(args.container.deprecated()),
+			ExportSink::Flv(args) | ExportSink::H264(args) | ExportSink::H265(args) => found.extend(args.deprecated()),
 			ExportSink::Hls(hls) => found.extend(hls.tls.deprecated()),
 			ExportSink::Rtmp(rtmp) if rtmp.latency_max.is_some() => {
 				found.flag("--latency-max", None, "--max-age");
@@ -814,7 +813,7 @@ pub enum ExportSink {
 	/// Matroska / WebM to stdout.
 	Mkv(Fragmented),
 	/// MPEG-TS to stdout.
-	Ts(Container),
+	Ts(Transport),
 	/// FLV / RTMP container to stdout.
 	Flv(Container),
 	/// H.264 Annex-B elementary stream to stdout.
@@ -832,28 +831,47 @@ pub enum ExportSink {
 }
 
 impl ExportSink {
-	/// The stdout container format plus its latency and fragment cap, when this
-	/// sink writes to stdout (the container formats). The fragment cap is
-	/// fmp4/mkv-only.
-	pub fn stdout(&self) -> Option<(SubscribeFormat, std::time::Duration, Option<Duration>)> {
+	/// Whether this sink writes to stdout (the container formats).
+	pub fn is_stdout(&self) -> bool {
+		self.stdout().is_some()
+	}
+
+	/// The stdout container format and its options, when this sink writes to
+	/// stdout. The fragment cap is fmp4/mkv-only and the mux rate is TS-only.
+	pub fn stdout(&self) -> Option<Stdout> {
+		let container = |format, container: &Container| Stdout {
+			format,
+			max_age: container.max_age.into_std(),
+			fragment_duration: None,
+			mux_rate: None,
+		};
 		Some(match self {
-			Self::Fmp4(args) => (
-				SubscribeFormat::Fmp4,
-				args.container.max_age.into_std(),
-				args.fragment_duration.map(crate::duration::Duration::into_std),
-			),
-			Self::Mkv(args) => (
-				SubscribeFormat::Mkv,
-				args.container.max_age.into_std(),
-				args.fragment_duration.map(crate::duration::Duration::into_std),
-			),
-			Self::Ts(args) => (SubscribeFormat::Ts, args.max_age.into_std(), None),
-			Self::Flv(args) => (SubscribeFormat::Flv, args.max_age.into_std(), None),
-			Self::H264(args) => (SubscribeFormat::H264, args.max_age.into_std(), None),
-			Self::H265(args) => (SubscribeFormat::H265, args.max_age.into_std(), None),
+			Self::Fmp4(args) => Stdout {
+				fragment_duration: args.fragment_duration.map(crate::duration::Duration::into_std),
+				..container(SubscribeFormat::Fmp4, &args.container)
+			},
+			Self::Mkv(args) => Stdout {
+				fragment_duration: args.fragment_duration.map(crate::duration::Duration::into_std),
+				..container(SubscribeFormat::Mkv, &args.container)
+			},
+			Self::Ts(args) => Stdout {
+				mux_rate: args.mux_rate,
+				..container(SubscribeFormat::Ts, &args.container)
+			},
+			Self::Flv(args) => container(SubscribeFormat::Flv, args),
+			Self::H264(args) => container(SubscribeFormat::H264, args),
+			Self::H265(args) => container(SubscribeFormat::H265, args),
 			_ => return None,
 		})
 	}
+}
+
+/// A stdout sink's format and the options that apply to it.
+pub struct Stdout {
+	pub format: SubscribeFormat,
+	pub max_age: Duration,
+	pub fragment_duration: Option<Duration>,
+	pub mux_rate: Option<u64>,
 }
 
 /// Options shared by every stdout container sink.
@@ -877,6 +895,20 @@ impl Container {
 		}
 		found
 	}
+}
+
+/// The MPEG-TS stdout container: [`Container`] plus null padding.
+#[derive(usage::Args, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+pub struct Transport {
+	#[usage(flatten)]
+	pub container: Container,
+
+	/// Pad the output with null packets to this constant rate, in bits per second.
+	/// Defaults to the multiplex rate the catalog recorded from a constant-rate
+	/// source (`mpegts.muxRate`); without either the output is unpadded.
+	#[usage(long)]
+	pub mux_rate: Option<u64>,
 }
 
 /// The fmp4 / mkv stdout containers: [`Container`] plus a fragment cap.

@@ -7,7 +7,9 @@
 //! subtitles, private data, ...), the program-level PMT descriptors, the program
 //! identity ([`Program`]), and the standalone SI table map ([`SiEntry`]).
 //! Demuxed media tracks keep their codec config in the base `video`/`audio`
-//! sections; only their MPEG-TS identity lands here.
+//! sections; only their MPEG-TS identity lands here. A constant-rate source also
+//! records its multiplex rate ([`Mpegts::mux_rate`]), so export can pad the rebuilt
+//! stream back to it.
 //!
 //! The section is specified by `drafts/draft-lcurley-moq-mpegts.md` and rides the
 //! root of either catalog: the hang track alongside `video`/`audio`, and the MSF
@@ -116,12 +118,24 @@ pub struct Mpegts {
 	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
 	#[serde_as(as = "BTreeMap<DisplayFromStr, BTreeMap<DisplayFromStr, _>>")]
 	pub si: BTreeMap<u16, BTreeMap<u8, SiEntry>>,
+
+	/// The rate the PCR clock paces the whole multiplex at, in bits per second:
+	/// every PID plus PSI plus null stuffing, measured between PCRs on import. Not a
+	/// sum of elementary streams; each rendition's `bitrate` keeps its codec meaning.
+	/// Present only while the source is constant-rate, so a VBR or file-paced input
+	/// leaves it absent. Export pads its output with null packets to this rate.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub mux_rate: Option<u64>,
 }
 
 impl Mpegts {
 	/// True when the section carries nothing, so it's omitted from the catalog.
 	pub fn is_empty(&self) -> bool {
-		self.tracks.is_empty() && self.program_descriptors.is_empty() && self.program.is_none() && self.si.is_empty()
+		self.tracks.is_empty()
+			&& self.program_descriptors.is_empty()
+			&& self.program.is_none()
+			&& self.si.is_empty()
+			&& self.mux_rate.is_none()
 	}
 }
 
@@ -325,6 +339,21 @@ mod test {
 	}
 
 	#[test]
+	fn mux_rate_alone_is_not_empty() {
+		// The rate is the only field of a media-only CBR source, so it must keep the
+		// section alive rather than be dropped with it.
+		let mpegts = Mpegts {
+			mux_rate: Some(2_500_000),
+			..Default::default()
+		};
+		assert!(!mpegts.is_empty());
+		let json = serde_json::to_string(&Ext { mpegts }).unwrap();
+		assert_eq!(json, r#"{"mpegts":{"muxRate":2500000}}"#);
+		// An absent rate is omitted, never `null`.
+		assert_eq!(serde_json::to_string(&Ext::default()).unwrap(), "{}");
+	}
+
+	#[test]
 	fn section_roundtrip() {
 		let mut mpegts = Mpegts::default();
 		// A media track: PID + a language descriptor, no verbatim carriage.
@@ -352,10 +381,15 @@ mod test {
 			tag: 0x05,
 			data: Bytes::from_static(b"CUEI"),
 		});
+		mpegts.mux_rate = Some(2_500_000);
 
 		let json = serde_json::to_string(&Ext { mpegts: mpegts.clone() }).unwrap();
 		// Descriptor bytes are base64 ("CUEI" -> "Q1VFSQ==").
 		assert!(json.contains("\"Q1VFSQ==\""), "descriptor data is base64: {json}");
+		assert!(
+			json.contains("\"muxRate\":2500000"),
+			"mux rate is a bare integer: {json}"
+		);
 
 		let parsed: Ext = serde_json::from_str(&json).unwrap();
 		assert_eq!(parsed.mpegts, mpegts, "mpegts section round-trips");
