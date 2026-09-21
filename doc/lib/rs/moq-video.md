@@ -27,8 +27,10 @@ Highlights:
 - **Device enumeration** for cameras, displays, windows, and apps, matching `moq devices`.
 
 With `capture` enabled, `capture::camera_modes` lists a Linux camera's convertible
-sizes and exact rates before configuring it. `capture::Rate` exposes a nonzero frame count through `frames()` and a typed
-`Duration` through `interval()`, preserving exact rates such as 30000/1001.
+sizes and exact rates before configuring it. Rates are `moq_video::Rate`, an
+exact rational that preserves 30000/1001: `frames(duration)` counts frames,
+`rounded()` gives the nearest whole frame rate for integer-only platform APIs,
+and `as_f64()` yields the catalog value.
 Sizes and rates shared by YUYV and MJPEG are combined; invalid I420 dimensions
 are excluded. A size range contributes its smallest and largest valid sizes aligned to the
 driver's step,
@@ -36,8 +38,9 @@ and an empty rate list means no discrete intervals were reported. Device errors
 are returned rather than treated as an empty list. Other platforms return
 `Error::Unsupported`.
 
-`capture::Config::framerate` remains a request in whole frames per second.
-The V4L2 stream reports the accepted rate rounded to the nearest whole frame per second, with a minimum of one.
+`capture::Config::framerate` is an `Option<Rate>` request in the same exact
+type; the stream reports the rate the device accepted, or `None` when the
+driver reported none.
 V4L2 chooses the closest geometry, then the format whose accepted rate is
 nearest the request, then the cheaper conversion when both match equally well.
 

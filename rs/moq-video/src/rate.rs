@@ -167,4 +167,17 @@ mod tests {
 		assert_eq!(Rate::new(0, 1), Err(RateError::Zero));
 		assert_eq!(Rate::new(MAX_FRAMES_PER_SECOND + 1, 1), Err(RateError::TooLarge));
 	}
+
+	#[test]
+	fn rejects_invalid_floats() {
+		assert_eq!(Rate::from_f64(f64::NAN), Err(RateError::InvalidFloat));
+		assert_eq!(Rate::from_f64(f64::INFINITY), Err(RateError::InvalidFloat));
+		assert_eq!(Rate::from_f64(f64::NEG_INFINITY), Err(RateError::InvalidFloat));
+		assert_eq!(Rate::from_f64(0.0), Err(RateError::InvalidFloat));
+		assert_eq!(Rate::from_f64(-30.0), Err(RateError::InvalidFloat));
+		assert_eq!(
+			Rate::from_f64(f64::from(MAX_FRAMES_PER_SECOND) + 1.0),
+			Err(RateError::TooLarge)
+		);
+	}
 }
