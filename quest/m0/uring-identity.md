@@ -41,4 +41,4 @@ and the shared moq-sock member integration. Wire: no format change.
 ## Related
 
 - [Handshake cancellation](/quest/m2/uring-handshake-cancel.md) - cleanup during a suspended handshake without another API
-- [One QUIC backend](/quest/m1/quic-one-backend.md) - the existing plan owns backend feature removal
+- [PR #3811](https://github.com/moq-dev/moq/pull/3811) - landed the single noq backend before this ownership work
