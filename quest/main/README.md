@@ -95,7 +95,6 @@ do not add another media abstraction or a renderer crate during stabilization.
 - [NVENC registration rollback](/quest/main/nvenc-registration.md) - release resources when mapping fails after registration
 - [GPU conversion and NVENC](/quest/main/video-gpu-encode.md) - convert, resize and
   encode imported frames without CPU pixel transfers or fallback
-- [NVENC resources](/quest/main/nvenc-resources.md) - a small safe facade retains submitted resources through completion
 - [NVENC loading](/quest/main/nvenc-loading.md) - unavailable or incompatible drivers return errors instead of panicking
 - [Codec threads](/quest/main/video-thread-ownership.md) - synchronous codec handles cannot escape their owning thread
 - [Media features](/quest/main/media-features.md) - OpenH264 can be excluded, rendering is opt-in, and feature aliases disappear

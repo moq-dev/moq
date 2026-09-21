@@ -28,7 +28,6 @@ Public API/wire impact: review only.
 
 ## Required
 
-- [NVENC resources](/quest/main/nvenc-resources.md) - safe ownership is enforced
 - [NVENC loading](/quest/main/nvenc-loading.md) - driver refusal is fallible
 - [Codec threads](/quest/main/video-thread-ownership.md) - direct handles have correct auto traits
 - [Media features](/quest/main/media-features.md) - independent build choices work

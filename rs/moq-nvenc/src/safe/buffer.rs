@@ -1,6 +1,6 @@
 //! Defines traits and types for dealing with input and output buffers.
 
-use std::{ffi::c_void, ptr};
+use std::{ffi::c_void, ptr, sync::Arc};
 
 use cudarc::driver::{DevicePtr, MappedBuffer};
 
@@ -12,21 +12,30 @@ use crate::sys::nvEncodeAPI::{
 	NV_ENC_MAP_INPUT_RESOURCE_VER, NV_ENC_PIC_TYPE, NV_ENC_REGISTER_RESOURCE,
 };
 
-/// If a type implements this trait it means it is a valid input buffer
-/// for the encoding API.
-pub trait EncoderInput {
+mod sealed {
+	pub trait Input {}
+}
+
+/// An input buffer created or registered by this crate.
+///
+/// This trait is sealed so safe callers cannot forge driver handles.
+///
+/// ```compile_fail
+/// use moq_nvenc::EncoderInput;
+/// struct Forged;
+/// impl EncoderInput for Forged {
+///     fn pitch(&self) -> u32 { 0 }
+///     fn handle(&mut self) -> *mut std::ffi::c_void { std::ptr::null_mut() }
+/// }
+/// ```
+pub trait EncoderInput: sealed::Input {
 	/// Get the pitch (AKA stride) of the input resource.
 	fn pitch(&self) -> u32;
 
 	/// Get the handle of the input resource.
 	fn handle(&mut self) -> *mut c_void;
-}
 
-/// If a type implements this trait it means it is a valid output buffer
-/// for the encoding API.
-pub trait EncoderOutput {
-	/// Get the handle of the output resource.
-	fn handle(&mut self) -> *mut c_void;
+	fn encoder(&self) -> &Arc<Encoder>;
 }
 
 /// Functions for creating input and output buffers.
@@ -82,7 +91,7 @@ impl Session {
 	///     .create_input_buffer()
 	///     .unwrap();
 	/// ```
-	pub fn create_input_buffer(&self) -> Result<Buffer<'_>, EncodeError> {
+	pub fn create_input_buffer(&self) -> Result<Buffer, EncodeError> {
 		let mut create_input_buffer_params = NV_ENC_CREATE_INPUT_BUFFER {
 			version: NV_ENC_CREATE_INPUT_BUFFER_VER,
 			width: self.width,
@@ -96,7 +105,7 @@ impl Session {
 		Ok(Buffer {
 			ptr: create_input_buffer_params.inputBuffer,
 			pitch: self.width,
-			encoder: &self.encoder,
+			encoder: self.encoder.clone(),
 		})
 	}
 
@@ -150,7 +159,7 @@ impl Session {
 	///     .create_output_bitstream()
 	///     .unwrap();
 	/// ```
-	pub fn create_output_bitstream(&self) -> Result<Bitstream<'_>, EncodeError> {
+	pub fn create_output_bitstream(&self) -> Result<Bitstream, EncodeError> {
 		let mut create_bitstream_buffer_params = NV_ENC_CREATE_BITSTREAM_BUFFER {
 			version: NV_ENC_CREATE_BITSTREAM_BUFFER_VER,
 			bitstreamBuffer: ptr::null_mut(),
@@ -160,7 +169,7 @@ impl Session {
 			.result(&self.encoder)?;
 		Ok(Bitstream {
 			ptr: create_bitstream_buffer_params.bitstreamBuffer,
-			encoder: &self.encoder,
+			encoder: self.encoder.clone(),
 		})
 	}
 
@@ -180,15 +189,19 @@ impl Session {
 		&self,
 		pitch: u32,
 		mapped_buffer: MappedBuffer,
-	) -> Result<RegisteredResource<'_, MappedBuffer>, EncodeError> {
+	) -> Result<RegisteredResource<MappedBuffer>, EncodeError> {
 		let stream = self.encoder.ctx.default_stream();
 		let (device_ptr, _) = mapped_buffer.device_ptr(&stream);
-		self.register_generic_resource(
-			mapped_buffer,
-			NV_ENC_INPUT_RESOURCE_TYPE::NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR,
-			device_ptr as *mut c_void,
-			pitch,
-		)
+		// SAFETY: `mapped_buffer` owns the allocation addressed by `device_ptr`
+		// and is retained by the returned registration.
+		unsafe {
+			self.register_generic_resource(
+				mapped_buffer,
+				NV_ENC_INPUT_RESOURCE_TYPE::NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR,
+				device_ptr as *mut c_void,
+				pitch,
+			)
+		}
 	}
 
 	/// Create a [`RegisteredResource`].
@@ -205,13 +218,19 @@ impl Session {
 	///
 	/// Could error if registration or mapping fails,
 	/// if the resource is invalid, or if we run out of memory.
-	pub fn register_generic_resource<T>(
+	///
+	/// # Safety
+	///
+	/// `resource_to_register` must identify a live allocation of the requested
+	/// type and dimensions. `marker` must own everything needed to keep that
+	/// allocation valid until the returned resource is dropped.
+	pub unsafe fn register_generic_resource<T>(
 		&self,
 		marker: T,
 		resource_type: NV_ENC_INPUT_RESOURCE_TYPE,
 		resource_to_register: *mut c_void,
 		pitch: u32,
-	) -> Result<RegisteredResource<'_, T>, EncodeError> {
+	) -> Result<RegisteredResource<T>, EncodeError> {
 		// Register resource.
 		let mut register_resource_params = NV_ENC_REGISTER_RESOURCE::new(
 			resource_type,
@@ -233,15 +252,19 @@ impl Session {
 			mappedBufferFmt: NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_UNDEFINED,
 			..Default::default()
 		};
-		unsafe { (ENCODE_API.map_input_resource)(self.encoder.ptr, &mut map_input_resource_params) }
-			.result(&self.encoder)?;
+		if let Err(error) = unsafe { (ENCODE_API.map_input_resource)(self.encoder.ptr, &mut map_input_resource_params) }
+			.result(&self.encoder)
+		{
+			let _ = unsafe { (ENCODE_API.unregister_resource)(self.encoder.ptr, registered_resource) };
+			return Err(error);
+		}
 
 		let mapped_resource = map_input_resource_params.mappedResource;
 		Ok(RegisteredResource {
 			reg_ptr: registered_resource,
 			map_ptr: mapped_resource,
 			pitch,
-			encoder: &self.encoder,
+			encoder: self.encoder.clone(),
 			_marker: marker,
 		})
 	}
@@ -252,15 +275,15 @@ impl Session {
 ///
 /// The buffer is automatically destroyed when dropped.
 #[derive(Debug)]
-pub struct Buffer<'a> {
+pub struct Buffer {
 	pub(crate) ptr: *mut c_void,
 	pitch: u32,
-	encoder: &'a Encoder,
+	encoder: Arc<Encoder>,
 }
 
-unsafe impl Send for Buffer<'_> {}
+unsafe impl Send for Buffer {}
 
-impl<'a> Buffer<'a> {
+impl Buffer {
 	/// Lock the input buffer.
 	///
 	/// On a successful lock you get a [`BufferLock`] which can be used to write
@@ -318,7 +341,7 @@ impl<'a> Buffer<'a> {
 	///     .unwrap();
 	/// unsafe { input_buffer.lock().unwrap().write(&[0; DATA_LEN]) };
 	/// ```
-	pub fn lock<'b>(&'b mut self) -> Result<BufferLock<'b, 'a>, EncodeError> {
+	pub fn lock(&mut self) -> Result<BufferLock<'_>, EncodeError> {
 		self.lock_inner(true)
 	}
 
@@ -339,12 +362,12 @@ impl<'a> Buffer<'a> {
 	/// [`ErrorKind::LockBusy`](super::ErrorKind::LockBusy) then that means the
 	/// lock is still busy and the client should retry in a few
 	/// milliseconds.
-	pub fn try_lock<'b>(&'b mut self) -> Result<BufferLock<'b, 'a>, EncodeError> {
+	pub fn try_lock(&mut self) -> Result<BufferLock<'_>, EncodeError> {
 		self.lock_inner(false)
 	}
 
 	#[inline]
-	fn lock_inner<'b>(&'b mut self, wait: bool) -> Result<BufferLock<'b, 'a>, EncodeError> {
+	fn lock_inner(&mut self, wait: bool) -> Result<BufferLock<'_>, EncodeError> {
 		let mut lock_input_buffer_params = NV_ENC_LOCK_INPUT_BUFFER {
 			version: NV_ENC_LOCK_INPUT_BUFFER_VER,
 			inputBuffer: self.ptr,
@@ -354,7 +377,7 @@ impl<'a> Buffer<'a> {
 			lock_input_buffer_params.set_doNotWait(1);
 		}
 		unsafe { (ENCODE_API.lock_input_buffer)(self.encoder.ptr, &mut lock_input_buffer_params) }
-			.result(self.encoder)?;
+			.result(&self.encoder)?;
 
 		let data_ptr = lock_input_buffer_params.bufferDataPtr;
 		let pitch = lock_input_buffer_params.pitch;
@@ -368,21 +391,25 @@ impl<'a> Buffer<'a> {
 	}
 }
 
-impl Drop for Buffer<'_> {
+impl Drop for Buffer {
 	fn drop(&mut self) {
-		unsafe { (ENCODE_API.destroy_input_buffer)(self.encoder.ptr, self.ptr) }
-			.result(self.encoder)
-			.expect("The encoder and buffer pointers should be valid.");
+		let _ = unsafe { (ENCODE_API.destroy_input_buffer)(self.encoder.ptr, self.ptr) }.result(&self.encoder);
 	}
 }
 
-impl EncoderInput for Buffer<'_> {
+impl sealed::Input for Buffer {}
+
+impl EncoderInput for Buffer {
 	fn pitch(&self) -> u32 {
 		self.pitch
 	}
 
 	fn handle(&mut self) -> *mut c_void {
 		self.ptr
+	}
+
+	fn encoder(&self) -> &Arc<Encoder> {
+		&self.encoder
 	}
 }
 
@@ -393,13 +420,13 @@ impl EncoderInput for Buffer<'_> {
 /// it automatically unlocks the buffer when the lock goes out of scope.
 #[allow(clippy::module_name_repetitions)]
 #[derive(Debug)]
-pub struct BufferLock<'a, 'b> {
-	buffer: &'a Buffer<'b>,
+pub struct BufferLock<'a> {
+	buffer: &'a Buffer,
 	data_ptr: *mut c_void,
 	pitch: u32,
 }
 
-impl BufferLock<'_, '_> {
+impl BufferLock<'_> {
 	/// Write data to the buffer.
 	///
 	/// # Safety
@@ -455,11 +482,10 @@ impl BufferLock<'_, '_> {
 	}
 }
 
-impl Drop for BufferLock<'_, '_> {
+impl Drop for BufferLock<'_> {
 	fn drop(&mut self) {
-		unsafe { (ENCODE_API.unlock_input_buffer)(self.buffer.encoder.ptr, self.buffer.ptr) }
-			.result(self.buffer.encoder)
-			.expect("The encoder and buffer pointers should be valid.");
+		let _ = unsafe { (ENCODE_API.unlock_input_buffer)(self.buffer.encoder.ptr, self.buffer.ptr) }
+			.result(&self.buffer.encoder);
 	}
 }
 
@@ -468,14 +494,14 @@ impl Drop for BufferLock<'_, '_> {
 ///
 /// The buffer is automatically destroyed when dropped.
 #[derive(Debug)]
-pub struct Bitstream<'a> {
+pub struct Bitstream {
 	pub(crate) ptr: *mut c_void,
-	encoder: &'a Encoder,
+	pub(crate) encoder: Arc<Encoder>,
 }
 
-unsafe impl Send for Bitstream<'_> {}
+unsafe impl Send for Bitstream {}
 
-impl Bitstream<'_> {
+impl Bitstream {
 	/// Lock the output bitstream.
 	///
 	/// On a successful lock you get a [`BitstreamLock`] which can be used to
@@ -490,7 +516,7 @@ impl Bitstream<'_> {
 	/// # Errors
 	///
 	/// Could error if we run out of memory.
-	pub fn lock(&mut self) -> Result<BitstreamLock<'_, '_>, EncodeError> {
+	pub fn lock(&mut self) -> Result<BitstreamLock<'_>, EncodeError> {
 		self.lock_inner(true)
 	}
 
@@ -507,11 +533,11 @@ impl Bitstream<'_> {
 	/// An error with [`ErrorKind::LockBusy`](super::ErrorKind::LockBusy) could
 	/// be returned if the lock is currently busy. This is a recoverable
 	/// error and the client should retry in a few milliseconds.
-	pub fn try_lock(&mut self) -> Result<BitstreamLock<'_, '_>, EncodeError> {
+	pub fn try_lock(&mut self) -> Result<BitstreamLock<'_>, EncodeError> {
 		self.lock_inner(false)
 	}
 
-	fn lock_inner(&mut self, wait: bool) -> Result<BitstreamLock<'_, '_>, EncodeError> {
+	fn lock_inner(&mut self, wait: bool) -> Result<BitstreamLock<'_>, EncodeError> {
 		// Lock bitstream.
 		let mut lock_bitstream_buffer_params = NV_ENC_LOCK_BITSTREAM {
 			version: NV_ENC_LOCK_BITSTREAM_VER,
@@ -522,7 +548,7 @@ impl Bitstream<'_> {
 			lock_bitstream_buffer_params.set_doNotWait(1);
 		}
 		unsafe { (ENCODE_API.lock_bitstream)(self.encoder.ptr, &mut lock_bitstream_buffer_params) }
-			.result(self.encoder)?;
+			.result(&self.encoder)?;
 
 		// Get data.
 		let data_ptr = lock_bitstream_buffer_params.bitstreamBufferPtr;
@@ -540,17 +566,9 @@ impl Bitstream<'_> {
 	}
 }
 
-impl Drop for Bitstream<'_> {
+impl Drop for Bitstream {
 	fn drop(&mut self) {
-		unsafe { (ENCODE_API.destroy_bitstream_buffer)(self.encoder.ptr, self.ptr) }
-			.result(self.encoder)
-			.expect("The encoder and bitstream pointers should be valid.");
-	}
-}
-
-impl EncoderOutput for Bitstream<'_> {
-	fn handle(&mut self) -> *mut c_void {
-		self.ptr
+		let _ = unsafe { (ENCODE_API.destroy_bitstream_buffer)(self.encoder.ptr, self.ptr) }.result(&self.encoder);
 	}
 }
 
@@ -560,8 +578,8 @@ impl EncoderOutput for Bitstream<'_> {
 /// The purpose of this type is similar to [`std::sync::MutexGuard`] -
 /// it automatically unlocks the buffer when the lock goes out of scope.
 #[derive(Debug)]
-pub struct BitstreamLock<'a, 'b> {
-	bitstream: &'a Bitstream<'b>,
+pub struct BitstreamLock<'a> {
+	bitstream: &'a Bitstream,
 	data: &'a [u8],
 	// statistics and other info
 	frame_index: u32,
@@ -571,7 +589,7 @@ pub struct BitstreamLock<'a, 'b> {
 	// TODO: other fields
 }
 
-impl BitstreamLock<'_, '_> {
+impl BitstreamLock<'_> {
 	/// Getter for the data contained in the output bitstream.
 	#[must_use]
 	pub fn data(&self) -> &[u8] {
@@ -603,11 +621,10 @@ impl BitstreamLock<'_, '_> {
 	}
 }
 
-impl Drop for BitstreamLock<'_, '_> {
+impl Drop for BitstreamLock<'_> {
 	fn drop(&mut self) {
-		unsafe { (ENCODE_API.unlock_bitstream)(self.bitstream.encoder.ptr, self.bitstream.ptr) }
-			.result(self.bitstream.encoder)
-			.expect("The encoder and bitstream pointers should be valid.");
+		let _ = unsafe { (ENCODE_API.unlock_bitstream)(self.bitstream.encoder.ptr, self.bitstream.ptr) }
+			.result(&self.bitstream.encoder);
 	}
 }
 
@@ -619,39 +636,41 @@ impl Drop for BitstreamLock<'_, '_> {
 /// The buffer is automatically unmapped and unregistered when dropped.
 /// The external buffer memory should still be properly destroyed by the client.
 #[derive(Debug)]
-pub struct RegisteredResource<'a, T> {
+pub struct RegisteredResource<T> {
 	pub(crate) reg_ptr: *mut c_void,
 	pub(crate) map_ptr: *mut c_void,
 	pitch: u32,
-	encoder: &'a Encoder,
+	encoder: Arc<Encoder>,
 	// A generic marker to make sure the external resources are dropped
 	// after the resource is unregistered.
 	_marker: T,
 }
 
-unsafe impl Send for RegisteredResource<'_, MappedBuffer> {}
+unsafe impl Send for RegisteredResource<MappedBuffer> {}
 
 /// Automatically unmap and unregister the external resource
 /// when it goes out of scope.
-impl<T> Drop for RegisteredResource<'_, T> {
+impl<T> Drop for RegisteredResource<T> {
 	fn drop(&mut self) {
 		// Unmapping resource.
-		unsafe { (ENCODE_API.unmap_input_resource)(self.encoder.ptr, self.map_ptr) }
-			.result(self.encoder)
-			.expect("The encoder pointer and map handle should be valid.");
+		let _ = unsafe { (ENCODE_API.unmap_input_resource)(self.encoder.ptr, self.map_ptr) }.result(&self.encoder);
 		// Unregister resource.
-		unsafe { (ENCODE_API.unregister_resource)(self.encoder.ptr, self.reg_ptr) }
-			.result(self.encoder)
-			.expect("The encoder pointer and resource handle should be valid.");
+		let _ = unsafe { (ENCODE_API.unregister_resource)(self.encoder.ptr, self.reg_ptr) }.result(&self.encoder);
 	}
 }
 
-impl<T> EncoderInput for RegisteredResource<'_, T> {
+impl<T> sealed::Input for RegisteredResource<T> {}
+
+impl<T> EncoderInput for RegisteredResource<T> {
 	fn pitch(&self) -> u32 {
 		self.pitch
 	}
 
 	fn handle(&mut self) -> *mut c_void {
 		self.map_ptr
+	}
+
+	fn encoder(&self) -> &Arc<Encoder> {
+		&self.encoder
 	}
 }

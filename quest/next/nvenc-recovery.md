@@ -24,5 +24,4 @@ already delivered by the ownership quest. Public API and wire: unchanged.
 
 ## Required
 
-- [NVENC resources](/quest/main/nvenc-resources.md) - settled lifetime and cleanup ownership
 - [NVENC loading](/quest/main/nvenc-loading.md) - driver failures reach the caller as errors

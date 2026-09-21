@@ -182,8 +182,10 @@ impl Nvenc {
 		init.preset_guid(NV_ENC_PRESET_P4_GUID)
 			.tuning_info(NV_ENC_TUNING_INFO::NV_ENC_TUNING_INFO_LOW_LATENCY)
 			.framerate(config.framerate, 1)
-			.enable_picture_type_decision()
-			.encode_config(cfg);
+			.enable_picture_type_decision();
+		// SAFETY: this preset-derived config contains no borrowed extension
+		// pointers and is moved into the session.
+		unsafe { init.encode_config(*cfg) };
 
 		// NV12 is NVENC's native input layout and what NVDEC emits, so a CUDA
 		// frame registers directly; the CPU path interleaves I420 chroma on write.
@@ -208,7 +210,7 @@ impl Nvenc {
 
 impl Backend for Nvenc {
 	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Encoded>, Error> {
-		let mut output = self
+		let output = self
 			.session
 			.create_output_bitstream()
 			.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC output bitstream: {e}")))?;
@@ -216,7 +218,6 @@ impl Backend for Nvenc {
 		let params = moq_nvenc::EncodePictureParams {
 			input_timestamp: self.timestamp,
 			force_idr: keyframe,
-			..Default::default()
 		};
 		self.timestamp += 1;
 
@@ -231,21 +232,23 @@ impl Backend for Nvenc {
 			Surface::Cuda(cuda) => {
 				// Registration keeps a raw pointer into the frame; the frame
 				// (borrowed) outlives the registration.
-				let mut resource = self
-					.session
-					.register_generic_resource(
-						(),
+				// SAFETY: the cloned CUDA frame owns the allocation addressed by the
+				// pointer and the registration retains that clone through completion.
+				let resource = unsafe {
+					self.session.register_generic_resource(
+						cuda.clone(),
 						NV_ENC_INPUT_RESOURCE_TYPE::NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR,
 						cuda.device_ptr() as *mut std::ffi::c_void,
 						cuda.pitch,
 					)
-					.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC register CUDA frame: {e}")))?;
+				}
+				.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC register CUDA frame: {e}")))?;
 
-				self.session
-					.encode_picture(&mut resource, &mut output, params)
+				let submission = self
+					.session
+					.encode_picture(resource, output, params)
 					.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC encode: {e}")))?;
-
-				drain_output(&mut output)?
+				drain_output(submission)?
 			}
 			// Everything else goes through a CPU NV12 input buffer.
 			frame => {
@@ -277,11 +280,11 @@ impl Backend for Nvenc {
 				}
 				drop(lock);
 
-				self.session
-					.encode_picture(&mut input, &mut output, params)
+				let submission = self
+					.session
+					.encode_picture(input, output, params)
 					.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC encode: {e}")))?;
-
-				drain_output(&mut output)?
+				drain_output(submission)?
 			}
 		};
 
@@ -319,12 +322,11 @@ impl Backend for Nvenc {
 /// Block on the output bitstream and copy it out. The lock returning is also
 /// what guarantees NVENC finished reading the frame's input resource, so call
 /// this while that input is still alive.
-fn drain_output(output: &mut moq_nvenc::Bitstream) -> Result<Vec<u8>, Error> {
-	Ok(output
-		.lock()
-		.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC lock output: {e}")))?
-		.data()
-		.to_vec())
+fn drain_output<I>(submission: moq_nvenc::Submission<I>) -> Result<Vec<u8>, Error> {
+	let (data, _input, _output) = submission
+		.finish()
+		.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC lock output: {e}")))?;
+	Ok(data)
 }
 
 /// Whether both NVIDIA driver libraries NVENC needs can be dlopen'd: libcuda

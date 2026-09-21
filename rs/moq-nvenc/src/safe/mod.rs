@@ -10,8 +10,7 @@ mod encoder;
 mod result;
 mod session;
 
-pub use api::{EncodeAPI, ENCODE_API};
-pub use buffer::{Bitstream, BitstreamLock, Buffer, BufferLock, EncoderInput, EncoderOutput, RegisteredResource};
+pub use buffer::{Bitstream, BitstreamLock, Buffer, BufferLock, EncoderInput, RegisteredResource};
 pub use encoder::{Encoder, EncoderInitParams};
 pub use result::{EncodeError, ErrorKind};
-pub use session::{CodecPictureParams, EncodePictureParams, Session};
+pub use session::{EncodePictureParams, Session, Submission};

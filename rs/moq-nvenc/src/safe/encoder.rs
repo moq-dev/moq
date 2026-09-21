@@ -54,9 +54,7 @@ pub struct Encoder {
 /// If using events, they must also be unregistered.
 impl Drop for Encoder {
 	fn drop(&mut self) {
-		unsafe { (ENCODE_API.destroy_encoder)(self.ptr) }
-			.result(self)
-			.expect("The encoder pointer should be valid.");
+		let _ = unsafe { (ENCODE_API.destroy_encoder)(self.ptr) }.result(self);
 	}
 }
 
@@ -424,22 +422,17 @@ impl Encoder {
 	pub fn start_session(
 		self,
 		buffer_format: NV_ENC_BUFFER_FORMAT,
-		mut initialize_params: EncoderInitParams<'_>,
+		mut initialize_params: EncoderInitParams,
 	) -> Result<Session, EncodeError> {
+		let mut config = initialize_params.config.take();
+		initialize_params.param.encodeConfig = config.as_deref_mut().map_or(std::ptr::null_mut(), std::ptr::from_mut);
 		let initialize_params = &mut initialize_params.param;
 		let width = initialize_params.encodeWidth;
 		let height = initialize_params.encodeHeight;
 		unsafe { (ENCODE_API.initialize_encoder)(self.ptr, initialize_params) }.result(&self)?;
 
-		// Copy the caller's config before their borrow ends, so the session can
-		// resubmit it to `reconfigure` later. NVENC has already copied it
-		// internally by this point, so the copy is only for our own use.
-		let mut config = unsafe { initialize_params.encodeConfig.as_ref() }.map(|c| Box::new(*c));
-
-		// Re-point at our copy immediately. The caller's pointer dies with their
-		// borrow, so retaining it would leave a dangling pointer in `init` until
-		// something fixed it up. The box keeps its address when the `Session`
-		// moves, so this stays valid for the session's life.
+		// The box keeps its address when the session moves and remains owned for
+		// reconfiguration, so `init.encodeConfig` never points into caller storage.
 		let mut init = *initialize_params;
 		init.encodeConfig = match config.as_mut() {
 			Some(config) => std::ptr::from_mut::<NV_ENC_CONFIG>(&mut **config),
@@ -447,7 +440,7 @@ impl Encoder {
 		};
 
 		Ok(Session {
-			encoder: self,
+			encoder: Arc::new(self),
 			width,
 			height,
 			buffer_format,
@@ -460,13 +453,22 @@ impl Encoder {
 
 /// A safe wrapper for [`NV_ENC_INITIALIZE_PARAMS`], which is the encoder
 /// initialize parameter.
-#[derive(Debug)]
-pub struct EncoderInitParams<'a> {
+pub struct EncoderInitParams {
 	param: NV_ENC_INITIALIZE_PARAMS,
-	marker: std::marker::PhantomData<&'a mut NV_ENC_CONFIG>,
+	config: Option<Box<NV_ENC_CONFIG>>,
 }
 
-impl<'a> EncoderInitParams<'a> {
+impl std::fmt::Debug for EncoderInitParams {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("EncoderInitParams")
+			.field("width", &self.param.encodeWidth)
+			.field("height", &self.param.encodeHeight)
+			.field("has_config", &self.config.is_some())
+			.finish_non_exhaustive()
+	}
+}
+
+impl EncoderInitParams {
 	/// Create a new builder for [`EncoderInitParams`], which is a wrapper for
 	/// [`NV_ENC_INITIALIZE_PARAMS`].
 	#[must_use]
@@ -478,10 +480,7 @@ impl<'a> EncoderInitParams<'a> {
 			encodeHeight: height,
 			..Default::default()
 		};
-		Self {
-			param,
-			marker: std::marker::PhantomData,
-		}
+		Self { param, config: None }
 	}
 
 	/// Specifies the preset for encoding. If the preset GUID is set then
@@ -508,8 +507,18 @@ impl<'a> EncoderInitParams<'a> {
 	/// send down a custom config structure using this method. Even in this
 	/// case the client is recommended to pass the same preset GUID it has
 	/// used to get the config.
-	pub fn encode_config(&mut self, encode_config: &'a mut NV_ENC_CONFIG) -> &mut Self {
-		self.param.encodeConfig = encode_config;
+	///
+	/// # Safety
+	///
+	/// Any pointers embedded in `encode_config` must remain valid until the
+	/// encoder session is dropped. Prefer a config returned by
+	/// [`Encoder::get_preset_config`], whose reserved pointers are null.
+	pub unsafe fn encode_config(&mut self, encode_config: NV_ENC_CONFIG) -> &mut Self {
+		self.config = Some(Box::new(encode_config));
+		self.param.encodeConfig = self
+			.config
+			.as_deref_mut()
+			.map_or(std::ptr::null_mut(), std::ptr::from_mut);
 		self
 	}
 

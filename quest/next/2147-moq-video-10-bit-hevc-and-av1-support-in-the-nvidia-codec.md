@@ -31,7 +31,6 @@ codec signaling, with cross-language fixtures for any metadata change.
 ## Required
 
 - [Video frames](/quest/main/video-frames.md) - extensible pixels and frame metadata
-- [NVENC resources](/quest/main/nvenc-resources.md) - safe input and completion ownership
 
 ## Closes
 
