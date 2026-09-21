@@ -64,8 +64,6 @@ the dev merge.
 - [Audio configuration](/quest/main/audio-config.md) - the settled codec settings
 - [Audio publication](/quest/main/audio-publication.md) - demand access without transport write authority
 
-- [Merge dev](/quest/dev/merge-dev.md) - builds on dev-only code that reaches `main` with the merge
-
 ## Closes
 
 - [#2848](https://github.com/moq-dev/moq/issues/2848) - close this issue when the quest finishes

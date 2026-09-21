@@ -2,22 +2,16 @@
 
 ## Goal
 
-The published API and wire breaks, landed together: every quest here merges
-into `dev`, and `dev` merges into `main` once the line is empty.
+The published API and wire breaks, landed together: dev landed on `main` as
+#3793 on 2026-09-20, and what remains is the release that follows.
 
 ## Plan
 
-A quest belongs here only if it breaks a published API or wire, or gates the
-merge; [Merge dev](/quest/dev/merge-dev.md) names the gates and
-[Release](/quest/dev/release.md) what gates the release after it. Work that is
-additive, identical on `main`, or targets a `0.0.x` crate lives under
-[main](/quest/main/README.md) or [next](/quest/next/README.md), even when it
-builds on dev-only code. The auth API line ranks first because moq.pro adopts
-the release only once that contract is settled; it is priority, not a merge
-gate.
+A quest belongs here only if it breaks a published API or wire;
+[Release](/quest/dev/release.md) names what gates the release. Work that is
+additive or targets a `0.0.x` crate lives under
+[main](/quest/main/README.md) or [next](/quest/next/README.md).
 
 ## Quests
 
-- [Cluster -01](/quest/dev/cluster-01/README.md) - rs/moq-net and js/net speak the revised cluster extension (HOP_ID, REQUEST_UPDATE repricing) and -01 is published
-- [Merge dev](/quest/dev/merge-dev.md) - dev lands on main with a closing keyword for every issue it fixed
 - [Release](/quest/dev/release.md) - the release moq.pro adopts: binding parity, an upgrade page, and a staging soak gate it rather than the merge

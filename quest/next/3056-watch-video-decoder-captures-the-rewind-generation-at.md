@@ -31,10 +31,6 @@ The container signals a playhead generation, not a codec reset: native decode
 stops flushing on it. This quest is whether watch still calls `decoder.reset()`
 to drop in-flight WebCodecs chunks when that generation bumps.
 
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - the required dev APIs must be available on main before this implementation starts
-
 ## Closes
 
 - [#3056](https://github.com/moq-dev/moq/issues/3056) - close this issue when the quest finishes

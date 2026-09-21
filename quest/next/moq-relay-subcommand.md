@@ -37,10 +37,6 @@ decode, and render stack.
 Starts on `main` after the merge: the CLI's verbs live on `usage`, which only
 `dev` has.
 
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - builds on dev-only code that reaches `main` with the merge
-
 ## Related
 
 - [`moq` serves like a relay](/quest/next/cli-serve.md) - the end state where the relay is `moq` with listening on by default

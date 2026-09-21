@@ -23,7 +23,3 @@ moq.pro's dashboard wrote (`app/src/lib/live.svelte.ts`).
   six refusals become a default and `share: true` stays an explicit request.
 
 Public API: additive on @moq/net. Wire: none.
-
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - starts on main

@@ -77,8 +77,12 @@ derived names/keys; report that interoperability change explicitly. The
 
 The soak bullet below is cleared by hand: the merged relay serves moq.pro
 staging with `/metrics` watched and a fresh viewer joining a days-old
-`moq import ts` broadcast over HLS at the end. Then cut the release under the
-existing release-plz and npm workflows; this quest bumps no versions itself.
+`moq import ts` broadcast over HLS at the end; the bounded `moq_json::window`
+timeline (#3240) is what makes that hold, and only a long run proves it. dev
+landed on main as #3793; before cutting, run `just check --all`,
+`just test all`, and `just test smoke --all` on the release revision and record
+it. Then cut the release under the existing release-plz and npm workflows; this
+quest bumps no versions itself.
 
 Public API: none beyond the required quests. Wire: none.
 
@@ -86,7 +90,6 @@ Public API: none beyond the required quests. Wire: none.
 
 - [E2EE API](/quest/main/e2ee-api.md) - expose epoch-scoped ownership and align the implemented profile
 - [uring identity](/quest/main/uring-identity.md) - bind sockets, connections, workers, and steering identity together
-- [Merge dev](/quest/dev/merge-dev.md) - the tree the release is cut from
 - [Binding audio tests](/quest/next/binding-audio-tests.md) - every binding proves the audio config it exposes
 - [Decode format](/quest/next/ffi-decode-format.md) - the C-only decode knob reaches every uniffi binding
 - [JSON mutate](/quest/next/json-mutate.md) - Rust and JS share the closure edit

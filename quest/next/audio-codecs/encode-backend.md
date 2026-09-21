@@ -38,7 +38,6 @@ quest adds AAC through platform encoders; no software AAC dependency is selected
 ## Required
 
 - [Audio configuration](/quest/main/audio-config.md) - stable PCM/codec settings and selection entry points
-- [Merge dev](/quest/dev/merge-dev.md) - the required dev APIs must be available on main before this implementation starts
 
 - [Decode seam](/quest/next/audio-codecs/decode-backend.md) - the naming and shape this mirrors
 
