@@ -576,7 +576,7 @@ mod tests {
 		let (w, h) = (320u32, 240u32);
 		let encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Software,
-			..EncodeConfig::new(w, h, 30)
+			..EncodeConfig::new(w, h, crate::Rate::new(30, 1).unwrap())
 		})
 		.unwrap();
 		let decoder = Nvdec::open(Codec::H264, &decode_config(None)).expect("NVDEC H.264 decoder");
@@ -605,7 +605,7 @@ mod tests {
 		let (w, h) = (320u32, 240u32);
 		let encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Software,
-			..EncodeConfig::new(w, h, 30)
+			..EncodeConfig::new(w, h, crate::Rate::new(30, 1).unwrap())
 		})
 		.unwrap();
 		let decoder =
@@ -639,7 +639,7 @@ mod tests {
 		let Ok(encoder) = Encoder::new(&EncodeConfig {
 			codec: EncodeCodec::H265,
 			kind: EncodeKind::Named("nvenc".into()),
-			..EncodeConfig::new(w, h, 30)
+			..EncodeConfig::new(w, h, crate::Rate::new(30, 1).unwrap())
 		}) else {
 			// Driver present but NVENC unusable (e.g. GPU busy); don't fail.
 			return;
@@ -669,7 +669,7 @@ mod tests {
 		// Source stream: software-encoded gradient.
 		let source = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Software,
-			..EncodeConfig::new(w, h, 30)
+			..EncodeConfig::new(w, h, crate::Rate::new(30, 1).unwrap())
 		})
 		.unwrap();
 		// Decode at half size so the hardware scaler is in the loop too.
@@ -678,7 +678,7 @@ mod tests {
 
 		let mut nvenc = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Named("nvenc".into()),
-			..EncodeConfig::new(160, 120, 30)
+			..EncodeConfig::new(160, 120, crate::Rate::new(30, 1).unwrap())
 		})
 		.expect("NVENC encoder");
 

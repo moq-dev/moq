@@ -60,7 +60,8 @@ pub(crate) struct VideoToolbox {
 	sink: Box<Sink>,
 	/// `{ ForceKeyFrame: true }`, built once and reused for forced IDRs.
 	force_keyframe: CFRetained<CFDictionary>,
-	framerate: i32,
+	framerate_numerator: i32,
+	framerate_denominator: i64,
 	frame_index: i64,
 }
 
@@ -127,7 +128,7 @@ impl VideoToolbox {
 		set_number(
 			&session,
 			unsafe { kVTCompressionPropertyKey_ExpectedFrameRate },
-			config.framerate as i32,
+			config.framerate.rounded() as i32,
 		)?;
 
 		// State the color space in the SPS so a decoder doesn't fall back to
@@ -167,11 +168,14 @@ impl VideoToolbox {
 			height = config.height,
 			"opened video encoder"
 		);
+		let framerate_numerator = i32::try_from(config.framerate.numerator())
+			.map_err(|_| Error::Codec(anyhow::anyhow!("VideoToolbox frame-rate numerator exceeds i32")))?;
 		Ok(Box::new(Self {
 			session,
 			sink,
 			force_keyframe,
-			framerate: config.framerate as i32,
+			framerate_numerator,
+			framerate_denominator: i64::from(config.framerate.denominator()),
 			frame_index: 0,
 		}))
 	}
@@ -192,7 +196,12 @@ impl Backend for VideoToolbox {
 		// Presentation timestamps must strictly increase; the moq timestamp is
 		// attached downstream, so a monotonic frame index over the framerate is
 		// all VideoToolbox needs.
-		let pts = unsafe { CMTime::new(self.frame_index, self.framerate.max(1)) };
+		let pts = unsafe {
+			CMTime::new(
+				self.frame_index.saturating_mul(self.framerate_denominator),
+				self.framerate_numerator,
+			)
+		};
 		self.frame_index += 1;
 
 		let frame_properties = keyframe.then_some(&*self.force_keyframe);

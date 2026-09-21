@@ -1190,7 +1190,7 @@ mod tests {
 
 		let mut encoder = crate::encode::Encoder::new(&crate::encode::Config {
 			kind: crate::encode::Kind::Software,
-			..crate::encode::Config::new(width, height, 30)
+			..crate::encode::Config::new(width, height, crate::Rate::new(30, 1).unwrap())
 		})
 		.expect("a software H.264 encoder");
 

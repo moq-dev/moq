@@ -71,7 +71,10 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 	let (node_id, fd, session) = portal_negotiate(config.cursor).await?;
 
 	let chan = FrameChannel::new();
-	let framerate = config.framerate.unwrap_or(DEFAULT_FRAMERATE).max(1);
+	let framerate = config
+		.framerate
+		.unwrap_or(crate::Rate::integer(DEFAULT_FRAMERATE))
+		.rounded();
 	let (geo_tx, geo_rx) = tokio::sync::oneshot::channel();
 	let (quit_tx, quit_rx) = pw::channel::channel::<()>();
 	let (return_tx, return_rx) = pw::channel::channel::<Lease>();
@@ -856,7 +859,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					// The compositor reports 0/1 for a variable rate; only a real
 					// rate is worth forwarding to the encoder.
 					let fr = state.format.framerate();
-					let framerate = (fr.num > 0 && fr.denom > 0).then(|| (fr.num / fr.denom).max(1));
+					let framerate = crate::Rate::new(fr.num, fr.denom).ok();
 					let _ = tx.send(Ok(Geometry {
 						width,
 						height,

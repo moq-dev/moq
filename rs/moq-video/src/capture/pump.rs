@@ -20,13 +20,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 
 use super::channel::FrameChannel;
-use crate::Error;
 use crate::frame::Surface;
+use crate::{Error, Rate};
 
 /// The outcome of one device read.
 pub(super) enum Read {
 	/// A captured frame.
 	Frame(Surface),
+	/// A captured frame with a timestamp in the device's private timeline.
+	FrameAt(Surface, moq_net::Timestamp),
 	/// No frame this turn, but the source is still live: the pump re-checks its
 	/// stop flag and calls again. A backend uses this to hold a capture (a
 	/// minimized or mid-resize window) without ending the stream.
@@ -39,7 +41,7 @@ pub(super) enum Read {
 pub(super) struct Geometry {
 	pub width: u32,
 	pub height: u32,
-	pub framerate: Option<u32>,
+	pub framerate: Option<Rate>,
 	pub label: String,
 }
 
@@ -95,6 +97,7 @@ where
 			while !stop.load(Ordering::SeqCst) {
 				match read(&mut source) {
 					Ok(Read::Frame(frame)) => chan.push(frame),
+					Ok(Read::FrameAt(frame, timestamp)) => chan.push_native(frame, timestamp),
 					Ok(Read::Idle) => {}     // held: re-check the stop flag, then read again
 					Ok(Read::Done) => break, // device stopped producing frames
 					Err(err) => {

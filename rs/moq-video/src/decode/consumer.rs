@@ -172,7 +172,7 @@ mod tests {
 			moq_mux::catalog::Producer::new(&mut source_broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let config = EncodeConfig {
 			kind: EncodeKind::Software,
-			..EncodeConfig::new(320, 240, 30)
+			..EncodeConfig::new(320, 240, crate::Rate::new(30, 1).unwrap())
 		};
 		let rendition = config.probe().await.unwrap();
 		let mut producer = EncodeProducer::new(source_broadcast, source_catalog, rendition).unwrap();
@@ -564,7 +564,7 @@ mod tests {
 		const FRAMES: u64 = 5;
 		let config = EncodeConfig {
 			kind: EncodeKind::Software,
-			..EncodeConfig::new(320, 240, 30)
+			..EncodeConfig::new(320, 240, crate::Rate::new(30, 1).unwrap())
 		};
 		let catalog = config.probe().await.expect("probe the software encoder");
 

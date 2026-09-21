@@ -126,7 +126,7 @@ pub(crate) struct MediaCodec {
 	kind: Codec,
 	width: usize,
 	height: usize,
-	framerate: u32,
+	framerate: crate::Rate,
 	/// The parameter sets (SPS/PPS, plus VPS for H.265) as the codec-config
 	/// buffer delivered them: Annex-B, ahead of the first picture. Kept because
 	/// every keyframe has to carry them for a subscriber joining there.
@@ -178,7 +178,7 @@ impl MediaCodec {
 			kind: config.codec,
 			width: config.width as usize,
 			height: config.height as usize,
-			framerate: config.framerate.max(1),
+			framerate: config.framerate,
 			parameter_sets: None,
 			pending: VecDeque::new(),
 			last_timestamp: None,
@@ -195,7 +195,7 @@ impl MediaCodec {
 	/// timestamp rides alongside in `pending`, and this is the value the codec
 	/// echoes back on the matching output.
 	fn sample_time(&self) -> i64 {
-		self.frame_index * 1_000_000 / self.framerate as i64
+		self.frame_index * i64::from(self.framerate.denominator()) * 1_000_000 / i64::from(self.framerate.numerator())
 	}
 
 	/// Ask the codec to make the next picture an IDR.
@@ -427,12 +427,15 @@ fn encoder_format(config: &Config, mime: &str) -> MediaFormat {
 	format.set_i32(KEY_COLOR_FORMAT, COLOR_FORMAT_NV12);
 	format.set_i32(KEY_BIT_RATE, clamp_i32(config.resolved_bitrate().as_bps()));
 	format.set_i32(KEY_BITRATE_MODE, BITRATE_MODE_CBR);
-	format.set_i32(KEY_FRAME_RATE, config.framerate as i32);
+	format.set_i32(KEY_FRAME_RATE, config.framerate.rounded() as i32);
 	format.set_i32(KEY_PRIORITY, PRIORITY_REALTIME);
 	// MediaCodec takes the keyframe interval in seconds rather than frames, and
 	// reads it as a float, so a sub-second GOP survives instead of rounding to
 	// zero (which would mean an IDR on every frame).
-	format.set_f32(KEY_I_FRAME_INTERVAL, config.gop as f32 / config.framerate.max(1) as f32);
+	format.set_f32(
+		KEY_I_FRAME_INTERVAL,
+		config.gop as f32 / config.framerate.as_f64() as f32,
+	);
 	// Ask for the shortest pipeline the device offers: output a frame after
 	// input, and no B-frames, whose reorder delay a live track has no use for.
 	// Both are hints an older device drops, which is why `flush` still drains the
@@ -663,7 +666,7 @@ mod tests {
 	#[test]
 	#[ignore = "needs an Android device with a MediaCodec H.264 encoder"]
 	fn encodes_a_keyframe_with_parameter_sets_inline() {
-		let config = Config::new(320, 240, 30);
+		let config = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
 		let mut backend = MediaCodec::open(&config).expect("a MediaCodec encoder");
 
 		let size = config.size();

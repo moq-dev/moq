@@ -437,7 +437,7 @@ mod tests {
 	};
 
 	fn config() -> Config {
-		Config::new(320, 240, 30)
+		Config::new(320, 240, crate::Rate::new(30, 1).unwrap())
 	}
 
 	#[tracing_test::traced_test]

@@ -56,8 +56,8 @@
 //! The public API is codec-agnostic: no public type, signature, or error
 //! variant names a backend (openh264 / VideoToolbox / NVENC / NVDEC / VAAPI / V4L2) or a
 //! codec implementation. [`encode::Encoder`] takes a [`Frame`],
-//! [`decode::Consumer`] returns one (CPU I420 on demand, GPU-resident when
-//! hardware decoded), and `capture::Stream` returns a [`Surface`]. So swapping
+//! [`decode::Consumer`] and `capture::Stream` return one (CPU I420 on demand,
+//! GPU-resident when hardware decoded). So swapping
 //! or bumping any backend crate is not a breaking change for consumers. Config
 //! structs are `#[non_exhaustive]`: build them via `default()`/`new()` and set
 //! fields, so new options stay additive.
@@ -83,6 +83,7 @@ pub mod resize;
 mod color;
 mod error;
 pub mod frame;
+mod rate;
 mod size;
 // Only the threaded sinks use this, and both are compiled out on macOS, where
 // the codecs run inline (no COM apartment to confine). Ungated it is dead code
@@ -101,6 +102,7 @@ pub use error::Error;
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 pub use frame::{DmaBuf, DmaBufExport, DmaBufPlane, DrmFormat};
 pub use frame::{Frame, I420, Surface};
+pub use rate::{MAX_FRAMES_PER_SECOND, Rate, RateError};
 pub use size::Size;
 
 /// The NDK bindings [`frame::android::HardwareBuffer::buffer`] hands back,

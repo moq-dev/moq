@@ -52,7 +52,8 @@ use crate::{Color, Error, Size};
 pub struct Frame {
 	/// Presentation timestamp. It rides through the encoder with the picture, so a
 	/// backend that buffers or reorders still stamps each packet with the time of
-	/// the frame it actually encoded.
+	/// the frame it actually encoded. Capture streams use a monotonic timeline
+	/// private to that stream; turnkey publishing maps it to the broadcast clock.
 	pub timestamp: Timestamp,
 	/// The pixels, and where they currently live.
 	pub surface: Surface,

@@ -334,7 +334,7 @@ mod tests {
 	}
 
 	fn probe_config() -> Config {
-		let mut config = Config::new(320, 240, 30);
+		let mut config = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
 		config.codec = Codec::H264;
 		config.kind = Kind::Named(probe::NAME.into());
 		config

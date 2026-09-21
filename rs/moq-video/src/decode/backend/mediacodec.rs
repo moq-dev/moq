@@ -539,7 +539,7 @@ mod tests {
 		use crate::encode::{Config as EncodeConfig, Kind as EncodeKind};
 
 		let size = crate::Size::new(320, 240);
-		let mut config = EncodeConfig::new(size.width, size.height, 30);
+		let mut config = EncodeConfig::new(size.width, size.height, crate::Rate::new(30, 1).unwrap());
 		config.kind = EncodeKind::Named(NAME.to_owned());
 		let mut encoder = crate::encode::Encoder::new(&config).expect("a MediaCodec encoder");
 

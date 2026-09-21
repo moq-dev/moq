@@ -10,12 +10,9 @@
 //!
 //! [`encode::publish_capture`](crate::encode::publish_capture) consumes [`Config`].
 
-use std::{num::NonZeroU32, sync::Arc, time::Duration};
+use std::sync::Arc;
 
-use crate::Error;
-use crate::frame::Surface;
-
-const MAX_FRAMERATE: u32 = 1_000_000;
+use crate::{Error, Frame, Rate};
 
 mod channel;
 use channel::FrameChannel;
@@ -146,55 +143,6 @@ impl Camera {
 	}
 }
 
-/// An exact frame rate, expressed as a positive number of frames per interval.
-/// Equality and ordering compare the ratio, so 60 frames in 2 seconds equals 30 in 1.
-#[derive(Clone, Copy, Debug, Eq)]
-pub struct Rate {
-	frames: NonZeroU32,
-	// The driver reports a rational interval with a 32-bit numerator in seconds.
-	// Keep that exact representation private; callers receive a typed duration.
-	seconds: NonZeroU32,
-}
-
-impl Rate {
-	#[cfg(target_os = "linux")]
-	/// Nearest whole rate for the integer stream API.
-	fn rounded(&self) -> u32 {
-		let frames = u64::from(self.frames.get());
-		let seconds = u64::from(self.seconds.get());
-		((frames + seconds / 2) / seconds).max(1) as u32
-	}
-
-	/// Number of frames in the interval.
-	pub fn frames(&self) -> NonZeroU32 {
-		self.frames
-	}
-
-	/// Time taken by the reported number of frames.
-	pub fn interval(&self) -> Duration {
-		Duration::from_secs(u64::from(self.seconds.get()))
-	}
-}
-
-impl Ord for Rate {
-	fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-		(u64::from(self.frames.get()) * u64::from(other.seconds.get()))
-			.cmp(&(u64::from(other.frames.get()) * u64::from(self.seconds.get())))
-	}
-}
-
-impl PartialOrd for Rate {
-	fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-		Some(self.cmp(other))
-	}
-}
-
-impl PartialEq for Rate {
-	fn eq(&self, other: &Self) -> bool {
-		self.cmp(other).is_eq()
-	}
-}
-
 /// A capture mode a source reports: one frame size and its exact frame rates.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Mode {
@@ -292,8 +240,8 @@ pub struct Config {
 	pub width: Option<u32>,
 	/// Preferred output height in pixels.
 	pub height: Option<u32>,
-	/// Preferred frame rate in frames per second, from 1 through 1,000,000.
-	pub framerate: Option<u32>,
+	/// Preferred exact frame rate.
+	pub framerate: Option<Rate>,
 	/// Draw the mouse cursor into captured frames. Screen/window/app sources
 	/// only; ignored by cameras. Defaults to `true`.
 	pub cursor: bool,
@@ -323,12 +271,12 @@ pub struct Stream {
 	chan: Arc<FrameChannel>,
 	width: u32,
 	height: u32,
-	framerate: Option<u32>,
+	framerate: Option<Rate>,
 	color: Option<crate::Color>,
 	label: String,
 	/// First frame captured during [`open`] (some backends learn their geometry
 	/// only from a frame); returned by the first [`read`](Self::read).
-	pending: Option<Surface>,
+	pending: Option<Frame>,
 	/// Keeps the backend alive and releases it on drop. Type-erased because it
 	/// differs per platform (objc session + delegate, or pump-thread guard).
 	_backend: Keepalive,
@@ -340,12 +288,12 @@ impl Stream {
 		chan: Arc<FrameChannel>,
 		width: u32,
 		height: u32,
-		framerate: Option<u32>,
+		framerate: Option<Rate>,
 		label: String,
-		pending: Option<Surface>,
+		pending: Option<Frame>,
 		backend: Keepalive,
 	) -> Self {
-		let color = pending.as_ref().and_then(Surface::color);
+		let color = pending.as_ref().and_then(|frame| frame.surface.color());
 		Self {
 			chan,
 			width,
@@ -367,7 +315,7 @@ impl Stream {
 	///
 	/// Dropping this future cancels only the pending read. Dropping the stream
 	/// releases the capture source.
-	pub async fn read(&mut self) -> Result<Option<Surface>, Error> {
+	pub async fn read(&mut self) -> Result<Option<Frame>, Error> {
 		if let Some(frame) = self.pending.take() {
 			return Ok(Some(frame));
 		}
@@ -385,7 +333,7 @@ impl Stream {
 	}
 
 	/// The negotiated frame rate, or `None` if the source doesn't report one.
-	pub fn framerate(&self) -> Option<u32> {
+	pub fn framerate(&self) -> Option<Rate> {
 		self.framerate
 	}
 
@@ -398,11 +346,15 @@ impl Stream {
 	pub fn label(&self) -> &str {
 		&self.label
 	}
+
+	/// Current time in this stream's private capture timeline.
+	pub(crate) fn now(&self) -> moq_net::Timestamp {
+		self.chan.now()
+	}
 }
 
 /// Open the capture source described by `config`.
 pub async fn open(config: &Config) -> Result<Stream, Error> {
-	validate(config)?;
 	match &config.source {
 		Source::Camera(device) => {
 			let _ = device;
@@ -483,13 +435,6 @@ pub async fn open(config: &Config) -> Result<Stream, Error> {
 	}
 }
 
-fn validate(config: &Config) -> Result<(), Error> {
-	match config.framerate {
-		Some(value) if value == 0 || value > MAX_FRAMERATE => Err(Error::InvalidFramerate(value)),
-		_ => Ok(()),
-	}
-}
-
 /// List the available cameras and the identifiers [`Source::Camera`] accepts.
 pub async fn cameras() -> Result<Vec<Camera>, Error> {
 	#[cfg(target_os = "macos")]
@@ -518,8 +463,8 @@ pub async fn cameras() -> Result<Vec<Camera>, Error> {
 /// advertises.
 ///
 /// Linux only; other backends return [`Error::Unsupported`].
-/// Rates are exact device reports; [`Config::framerate`] still requests whole
-/// frames per second. V4L2 prefers the closest geometry, then the accepted rate
+/// Rates are exact device reports and [`Config::framerate`] accepts the same type.
+/// V4L2 prefers the closest geometry, then the accepted rate
 /// nearest that request, then the cheaper conversion format.
 ///
 /// An empty list is not a failure: it means the driver enumerated nothing this
@@ -603,25 +548,4 @@ where
 	tokio::task::spawn_blocking(f)
 		.await
 		.map_err(|err| Error::Codec(anyhow::anyhow!("capture enumeration thread failed: {err}")))?
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn validates_framerate_range() {
-		let mut config = Config::default();
-		assert!(validate(&config).is_ok());
-
-		config.framerate = Some(1);
-		assert!(validate(&config).is_ok());
-		config.framerate = Some(MAX_FRAMERATE);
-		assert!(validate(&config).is_ok());
-
-		config.framerate = Some(0);
-		assert!(matches!(validate(&config), Err(Error::InvalidFramerate(0))));
-		config.framerate = Some(MAX_FRAMERATE + 1);
-		assert!(matches!(validate(&config), Err(Error::InvalidFramerate(value)) if value == MAX_FRAMERATE + 1));
-	}
 }
