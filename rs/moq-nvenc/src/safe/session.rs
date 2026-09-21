@@ -164,7 +164,11 @@ impl Session {
 	///
 	/// An encoder-busy result is returned as an error so the caller can retry.
 	/// A need-more-input result is instead represented by the returned
-	/// [`Submission`], which retains both buffers and flushes before completion.
+	/// [`Submission`], which retains both buffers until completion. The facade
+	/// does not reorder B-frames, so configure the session without them
+	/// (`frameIntervalP = 1`, as `moq-video` does); completing such a
+	/// submission waits without sending end-of-stream, leaving the session
+	/// usable for further frames.
 	///
 	/// Safe code cannot release the input while it is in flight because the
 	/// submission owns it:
@@ -280,9 +284,9 @@ impl Session {
 		let result =
 			unsafe { (ENCODE_API.encode_picture)(self.encoder.ptr, &mut encode_pic_params) }.result(&self.encoder);
 		match result {
-			Ok(()) => Ok(Submission::new(input_buffer, output_bitstream, true)),
+			Ok(()) => Ok(Submission::new(input_buffer, output_bitstream)),
 			Err(error) if error.kind() == ErrorKind::NeedMoreInput => {
-				Ok(Submission::new(input_buffer, output_bitstream, false))
+				Ok(Submission::new(input_buffer, output_bitstream))
 			}
 			Err(error) => Err(error),
 		}
@@ -332,9 +336,9 @@ pub struct Submission<I> {
 }
 
 impl<I> Submission<I> {
-	fn new(input: I, output: Bitstream, ready: bool) -> Self {
+	fn new(input: I, output: Bitstream) -> Self {
 		Self {
-			pending: Pending::new(SdkDriver, input, output, ready),
+			pending: Pending::new(SdkDriver, input, output),
 		}
 	}
 
@@ -351,7 +355,6 @@ fn same_session<T>(input: &Arc<T>, output: &Arc<T>, session: &Arc<T>) -> bool {
 trait CompletionDriver {
 	type Output;
 
-	fn flush(&self, output: &Self::Output) -> Result<(), EncodeError>;
 	fn wait(&self, output: &mut Self::Output) -> Result<Vec<u8>, EncodeError>;
 }
 
@@ -360,11 +363,6 @@ struct SdkDriver;
 
 impl CompletionDriver for SdkDriver {
 	type Output = Bitstream;
-
-	fn flush(&self, output: &Self::Output) -> Result<(), EncodeError> {
-		let mut eos = NV_ENC_PIC_PARAMS::end_of_stream();
-		unsafe { (ENCODE_API.encode_picture)(output.encoder.ptr, &mut eos) }.result(&output.encoder)
-	}
 
 	fn wait(&self, output: &mut Self::Output) -> Result<Vec<u8>, EncodeError> {
 		Ok(output.lock()?.data().to_vec())
@@ -376,23 +374,20 @@ struct Pending<D: CompletionDriver, I> {
 	driver: D,
 	input: Option<I>,
 	output: Option<D::Output>,
-	ready: bool,
 }
 
 impl<D: CompletionDriver, I> Pending<D, I> {
-	fn new(driver: D, input: I, output: D::Output, ready: bool) -> Self {
+	fn new(driver: D, input: I, output: D::Output) -> Self {
 		Self {
 			driver,
 			input: Some(input),
 			output: Some(output),
-			ready,
 		}
 	}
 
 	fn finish(&mut self) -> Result<(Vec<u8>, I, D::Output), EncodeError> {
-		if !self.ready {
-			self.driver.flush(self.output.as_ref().expect("submission output"))?;
-		}
+		// Wait without sending end-of-stream: flushing here would end the
+		// session, while the caller may still submit further frames.
 		let data = self.driver.wait(self.output.as_mut().expect("submission output"))?;
 		let input = self.input.take().expect("submission input");
 		let output = self.output.take().expect("submission output");
@@ -405,15 +400,10 @@ impl<D: CompletionDriver, I> Drop for Pending<D, I> {
 		if self.input.is_none() {
 			return;
 		}
-		let completed = (self.ready
-			|| self
-				.driver
-				.flush(self.output.as_ref().expect("submission output"))
-				.is_ok())
-			&& self
-				.driver
-				.wait(self.output.as_mut().expect("submission output"))
-				.is_ok();
+		let completed = self
+			.driver
+			.wait(self.output.as_mut().expect("submission output"))
+			.is_ok();
 		if !completed {
 			// A failed wait cannot prove the driver released either handle. Leak
 			// them and their encoder rather than permit a use-after-free.
@@ -444,11 +434,6 @@ mod tests {
 	impl CompletionDriver for FakeDriver {
 		type Output = Resource;
 
-		fn flush(&self, _: &Self::Output) -> Result<(), EncodeError> {
-			self.0.lock().unwrap().push("flush");
-			Ok(())
-		}
-
 		fn wait(&self, _: &mut Self::Output) -> Result<Vec<u8>, EncodeError> {
 			self.0.lock().unwrap().push("wait");
 			Ok(vec![1, 2, 3])
@@ -462,13 +447,12 @@ mod tests {
 			FakeDriver(events.clone()),
 			Resource("input", events.clone()),
 			Resource("output", events.clone()),
-			false,
 		);
 		let (data, input, output) = pending.finish().unwrap();
 		assert_eq!(data, [1, 2, 3]);
-		assert_eq!(*events.lock().unwrap(), ["flush", "wait"]);
+		assert_eq!(*events.lock().unwrap(), ["wait"]);
 		drop((input, output));
-		assert_eq!(*events.lock().unwrap(), ["flush", "wait", "input", "output"]);
+		assert_eq!(*events.lock().unwrap(), ["wait", "input", "output"]);
 	}
 
 	#[test]
@@ -478,7 +462,6 @@ mod tests {
 			FakeDriver(events.clone()),
 			Resource("input", events.clone()),
 			Resource("output", events.clone()),
-			true,
 		));
 		assert_eq!(*events.lock().unwrap(), ["wait", "input", "output"]);
 	}

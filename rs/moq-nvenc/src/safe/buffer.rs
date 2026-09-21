@@ -21,11 +21,13 @@ mod sealed {
 /// This trait is sealed so safe callers cannot forge driver handles.
 ///
 /// ```compile_fail
-/// use moq_nvenc::EncoderInput;
+/// use std::sync::Arc;
+/// use moq_nvenc::{Encoder, EncoderInput};
 /// struct Forged;
 /// impl EncoderInput for Forged {
 ///     fn pitch(&self) -> u32 { 0 }
 ///     fn handle(&mut self) -> *mut std::ffi::c_void { std::ptr::null_mut() }
+///     fn encoder(&self) -> &Arc<Encoder> { unimplemented!() }
 /// }
 /// ```
 pub trait EncoderInput: sealed::Input {
@@ -35,6 +37,7 @@ pub trait EncoderInput: sealed::Input {
 	/// Get the handle of the input resource.
 	fn handle(&mut self) -> *mut c_void;
 
+	/// Get the encoder that owns this input.
 	fn encoder(&self) -> &Arc<Encoder>;
 }
 
