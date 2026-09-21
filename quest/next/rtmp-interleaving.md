@@ -36,7 +36,7 @@ workloads before implementation is accepted. Test each limit independently,
 including many incomplete IDs, and verify reclamation on completion, teardown,
 and repeated ID reuse. Keep this correctness repair separate from shared-buffer or copy
 optimizations. Add the regression and fragmented/header-format cases to normal
-RTMP CI tests and run smoke-full for gateway interoperability.
+RTMP CI tests and run `smoke --all` for gateway interoperability.
 
 ## Related
 

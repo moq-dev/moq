@@ -12,6 +12,8 @@
 use std::time::Instant;
 
 use moq_mux::catalog::hang::CatalogExt;
+#[cfg(feature = "capture")]
+use moq_mux::rate::{Control, Policy};
 #[cfg(test)]
 use moq_net::Timestamp;
 
@@ -28,8 +30,6 @@ use super::Sink;
 use super::encoder;
 #[cfg(feature = "capture")]
 use super::encoder::Codec;
-#[cfg(feature = "capture")]
-use super::rate::{Control, Policy};
 
 /// Last-resort framerate when neither the caller nor the camera reports one.
 #[cfg(feature = "capture")]
@@ -261,7 +261,7 @@ pub struct Options {
 	/// `moq_tokio::Connection::send_bandwidth`, which survives reconnects).
 	///
 	/// Set it and the encoder reserves this track's ceiling, then tracks its share of
-	/// the estimate per the default [`rate::Policy`](super::rate::Policy), so a closing
+	/// the estimate per the default [`moq_mux::rate::Policy`], so a closing
 	/// uplink gets a softer picture instead of a stalled one. Pass the same allocator
 	/// to every sender on the connection, including the audio side: that's what keeps
 	/// their bitrates summing to the uplink instead of each matching it.

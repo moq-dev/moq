@@ -217,7 +217,7 @@ async fn follow_reservation(
 	mut consumer: moq_net::bandwidth::Consumer,
 	ceiling: Arc<AtomicU64>,
 ) {
-	use moq_video::encode::rate::{Control, Policy};
+	use moq_mux::rate::{Control, Policy};
 
 	let mut max = moq_net::bandwidth::Rate::from_bps(ceiling.load(Ordering::SeqCst));
 	let mut control = Control::new(Policy::new(max));

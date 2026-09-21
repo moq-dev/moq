@@ -231,7 +231,7 @@ class SmokeTest {
             origin.createBroadcast("live").use { broadcast ->
                 broadcast.publishTrack("events", null)
                 broadcast.announce(Route())
-                val announced = origin.consume().announced("")
+                val announced = origin.consume().announced(AnnounceConfig())
                 val first = announced.next()!!
                 assertEquals("live", first.prefix())
                 assertTrue(first.active())
@@ -239,6 +239,19 @@ class SmokeTest {
                 val retracted = announced.next()!!
                 assertEquals("live", retracted.prefix())
                 assertTrue(!retracted.active())
+            }
+        }
+    }
+
+    @Test
+    fun `announced pattern reports captures`() = runTest {
+        OriginProducer(OriginConfig()).use { origin ->
+            val announced = origin.consume().announced(AnnounceConfig(prefix = "room", filter = "*/chat"))
+            origin.createBroadcast("room/alice/chat").use { broadcast ->
+                broadcast.announce(Route())
+                val update = announced.next()!!
+                assertEquals("room/alice/chat", update.prefix())
+                assertEquals(listOf("alice"), update.captures())
             }
         }
     }

@@ -36,7 +36,4 @@ pub mod cuvid;
 pub mod safe;
 pub mod sys;
 
-#[macro_use]
-extern crate lazy_static;
-
 pub use safe::*;

@@ -203,16 +203,16 @@ fun MoqGroupConsumer.frames(): Flow<MoqFrame> = flow {
 }
 
 /**
- * Stream of route announcements and retractions under a prefix.
+ * Stream of route announcements and retractions matching [config].
  *
  * Acquires the subscription on first collection and cancels it when collection
  * ends, so callers never touch the underlying handle. Use the raw
- * `announced(prefix)` if you need to hold and cancel the handle yourself.
+ * `announced(config)` if you need to hold and cancel the handle yourself.
  */
-fun MoqOriginConsumer.announcements(prefix: String): Flow<MoqAnnounceUpdate> {
+fun MoqOriginConsumer.announcements(config: AnnounceConfig = AnnounceConfig()): Flow<MoqAnnounceUpdate> {
     val consumer = this
     return flow {
-        val announced = consumer.announced(prefix)
+        val announced = consumer.announced(config)
         try {
             while (true) {
                 currentCoroutineContext().ensureActive()
@@ -223,4 +223,3 @@ fun MoqOriginConsumer.announcements(prefix: String): Flow<MoqAnnounceUpdate> {
         }
     }
 }
-

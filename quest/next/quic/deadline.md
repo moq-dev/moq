@@ -51,5 +51,5 @@ raises loss or latency under any profile stays off by default.
 
 - [Receive timestamps](/quest/future/quic-receive-ts.md) - a measured forward
   delay replaces the half-RTT estimate
-- [Probe by early retransmission](/quest/next/quic/probe.md) - shares the
-  retransmit-as-probe machinery
+- [Discover media headroom](/quest/next/quic/probe.md) - can reuse
+  retransmission machinery if redundant capacity probes prove worthwhile

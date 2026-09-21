@@ -33,12 +33,14 @@ let session = try await client.connect(to: "https://relay.example.com")
 // origin you wired via setPublish / setConsume before connect, or by a fresh
 // auto-created one. The duplex no-config path (the typical client) shares one
 // origin between both sides.
-let announced = try session.consume.announced(prefix: "demos/")
+let announced = try session.consume.announced(prefix: "demos/", filter: "*/camera")
 for try await announcement in announced {
-    // The returned covered prefix is relative to the requested "demos/" prefix.
+    // Prefix stays origin-relative; captures reports what * matched.
     print("got broadcast \(announcement.prefix)")
+    print("captures \(announcement.captures ?? [])")
 
-    let catalog = try announcement.broadcast.subscribeCatalog()
+    let broadcast = try await session.consume.requestBroadcast(path: announcement.prefix)
+    let catalog = try broadcast.subscribeCatalog()
     for try await update in catalog {
         print("catalog: \(update)")
     }

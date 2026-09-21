@@ -104,7 +104,7 @@ jobs:
       # and the test artifacts (codegen + linked test binaries). They share
       # little, and a PR usually needs both.
       - name: Check
-        run: nix develop --command just check-all
+        run: nix develop --command just check --all
         env:
           MOQ_STRICT: 1
 

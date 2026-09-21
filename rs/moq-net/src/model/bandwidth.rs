@@ -5,8 +5,7 @@
 //!
 //! One estimate covers a whole connection, so senders sharing one divide it with
 //! an [Allocator] rather than each targeting the whole thing. How a sender then
-//! *follows* its share is policy and lives with the sender: see
-//! `moq_video::encode::rate` for the encoder's.
+//! *follows* its share is shared media policy: see `moq_mux::rate`.
 
 use std::task::Poll;
 

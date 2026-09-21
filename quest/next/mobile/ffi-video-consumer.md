@@ -28,7 +28,7 @@ owns mobile capture; native mobile surface views remain deferred.
   its usable wrapper, codec-enabled artifacts, and decode proof to Dart codec
   parity. Document the temporary omission rather than shipping a stub.
 - Verify on an iOS simulator and an Android emulator with the smoke media,
-  and on macOS through libmoq so `just test smoke-full` covers it.
+  and on macOS through libmoq so `just test smoke --all` covers it.
 
 Dart codec parity requires this quest and owns the remaining Dart integration.
 This quest must not require Dart artifact enablement, which would create a cycle.

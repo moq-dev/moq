@@ -4633,8 +4633,8 @@ name = "moq-nvenc"
 version = "0.0.5"
 dependencies = [
  "cudarc",
- "lazy_static",
  "libloading 0.9.0",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

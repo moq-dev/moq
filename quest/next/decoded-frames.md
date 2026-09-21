@@ -35,7 +35,7 @@ fields to a published C struct is not automatically additive.
 Test handle release, conversion failures, cancellation, delayed consumption,
 and retained ownership through the existing libmoq/FFI test lanes. Platform
 adapters own their hardware import proof. Update `moq.h`, affected wrappers,
-and C/binding documentation; run `just test smoke-full` in CI.
+and C/binding documentation; run `just test smoke --all` in CI.
 
 Public API: owned frame access and conversion at the binding boundary. Wire:
 none. Consume the settled main frame/output contracts without replacing them.

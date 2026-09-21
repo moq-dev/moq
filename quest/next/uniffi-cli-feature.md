@@ -26,7 +26,7 @@ Every caller moves to the new package: `rs/moq-ffi/build.sh`,
 end. The Python wheel goes through maturin and does not run the binary.
 
 Verify with `cargo tree -p moq-ffi -e normal | grep -c uniffi_bindgen` at zero
-and a before/after size of `libmoq_ffi.a`, then `just test smoke-full` for the
+and a before/after size of `libmoq_ffi.a`, then `just test smoke --all` for the
 generated bindings.
 
 ## Related

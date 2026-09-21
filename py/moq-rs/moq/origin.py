@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from moq_ffi import (
+    MoqAnnounceConfig,
     MoqAnnounceConsumer,
     MoqAnnouncedBroadcast,
     MoqAnnounceUpdate,
@@ -34,8 +35,13 @@ class AnnounceUpdate:
 
     @property
     def prefix(self) -> str:
-        """The covered prefix, relative to the requested announcements prefix."""
+        """The covered prefix, relative to the origin."""
         return self._inner.prefix()
+
+    @property
+    def captures(self) -> list[str] | None:
+        """What each filter wildcard matched, or ``None`` for a partial overlap."""
+        return self._inner.captures()
 
     @property
     def active(self) -> bool:
@@ -165,9 +171,9 @@ class OriginConsumer:
     def __init__(self, inner: MoqOriginConsumer) -> None:
         self._inner = inner
 
-    def announced(self, prefix: str = "") -> AnnounceConsumer:
-        """Iterate routes under the requested ``prefix``; updates return relative prefixes."""
-        return AnnounceConsumer(self._inner.announced(prefix))
+    def announced(self, prefix: str = "", *, filter: str | None = None) -> AnnounceConsumer:
+        """Iterate routes in the literal ``prefix`` matching the optional pattern ``filter``."""
+        return AnnounceConsumer(self._inner.announced(MoqAnnounceConfig(prefix=prefix, filter=filter)))
 
     def announced_broadcast(self, path: str) -> AnnouncedBroadcast:
         """Await a route covering ``path``, then resolve the broadcast there."""

@@ -39,8 +39,6 @@ pub struct Options {
 	/// Bitrate in bits per second. `None` lets Opus pick. PCM requires `None`
 	/// because its bitrate is fixed by the sample rate and channel count.
 	pub bitrate: Option<moq_net::bandwidth::Rate>,
-	/// Enable Opus in-band forward error correction.
-	pub fec: bool,
 	/// Enable Opus discontinuous transmission during silence.
 	pub dtx: bool,
 	/// Encoded frame duration. Opus accepts 2.5 / 5 / 10 / 20 / 40 / 60 ms.
@@ -70,7 +68,6 @@ impl Default for Options {
 			sample_rate: None,
 			channels: None,
 			bitrate: None,
-			fec: false,
 			dtx: false,
 			frame_duration: Duration::from_millis(20),
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
@@ -87,7 +84,6 @@ impl Options {
 			sample_rate: self.sample_rate,
 			channels: self.channels,
 			bitrate: self.bitrate,
-			fec: self.fec,
 			dtx: self.dtx,
 			frame_duration: self.frame_duration,
 		}
@@ -530,6 +526,36 @@ mod tests {
 	use super::*;
 	use crate::decode::{Config as DecodeConfig, Consumer as AudioConsumer};
 	use crate::{Activity, Format};
+
+	#[test]
+	fn options_preserve_encoder_configuration() {
+		let input = Input {
+			format: Format::S16,
+			sample_rate: 44_100,
+			channels: 1,
+		};
+		let bitrate = moq_net::bandwidth::Rate::from_bps(96_000);
+		let options = Options {
+			codec: Codec::Opus,
+			sample_rate: Some(24_000),
+			channels: Some(1),
+			bitrate: Some(bitrate),
+			dtx: true,
+			frame_duration: Duration::from_millis(10),
+			..Options::default()
+		};
+
+		let config = options.config(input);
+		assert_eq!(config.input.format, Format::S16);
+		assert_eq!(config.input.sample_rate, 44_100);
+		assert_eq!(config.input.channels, 1);
+		assert_eq!(config.codec, Codec::Opus);
+		assert_eq!(config.sample_rate, Some(24_000));
+		assert_eq!(config.channels, Some(1));
+		assert_eq!(config.bitrate, Some(bitrate));
+		assert!(config.dtx);
+		assert_eq!(config.frame_duration, Duration::from_millis(10));
+	}
 
 	/// Terminal Opus lookahead samples survive both exact-frame and partial-frame input.
 	#[tokio::test]

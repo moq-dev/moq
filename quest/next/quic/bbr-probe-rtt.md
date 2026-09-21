@@ -12,6 +12,8 @@ resumes after the protected delivery interval.
 in [Google Linux](https://github.com/google/bbr/blob/90210de4b779d40496dee0b89081780eeddf2a60/net/ipv4/tcp_bbr.c#L920) and
 [draft section 5.3.4.3](https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.4.3). The audited controller
 sends unmarked packets during ProbeRTT even with a backlogged application.
+QUICHE's BBR3 ProbeRTT also lacks an explicit marker; the requirement here
+is the draft/Linux behavior, not universal Google parity.
 
 Reproduce that unmarked send, then test entry, the full ProbeRTT interval,
 exit, and delayed ACKs for packets sent during the interval. Verify reduced

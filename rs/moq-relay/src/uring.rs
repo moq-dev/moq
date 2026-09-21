@@ -768,8 +768,9 @@ async fn serve_connection(
 	let (session, driver) = request.ok().await?;
 	let driver_handle = handle.clone();
 	handle.spawn(async move {
-		if let Err(err) = driver_handle.run(driver).await {
-			tracing::debug!(%err, "session driver ended");
+		match driver_handle.run(driver).await {
+			moq_net::Error::Closed => {}
+			err => tracing::debug!(%err, "session driver ended"),
 		}
 	});
 	let node_connection = peer_hop.map(|origin| serve.cluster.nodes.connect_inbound(id, origin));

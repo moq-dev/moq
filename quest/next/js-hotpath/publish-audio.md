@@ -30,7 +30,7 @@ Choose a group duration only from those comparisons; retain one-frame groups
 if the overhead saving does not justify the latency or loss tradeoff.
 
 Add CI regressions for final-group completion, discontinuity, late join,
-reconnect, and audio delivery on stream-only sessions. Run smoke-full for the
+reconnect, and audio delivery on stream-only sessions. Run `smoke --all` for the
 cross-language delivery paths. Reuse the audio quality harness's metrics and
 impairment fixtures when available rather than creating a second definition.
 

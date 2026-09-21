@@ -34,7 +34,7 @@ Implementation that depends on a dev contract requires
 - [@moq/net additive](/quest/next/js-net-additive.md) - a live-broadcasts getter, `Table.dynamic`, credential refresh before redial, inferred `share`
 - [Last frame duration](/quest/next/mux-last-frame-duration.md) - a group's final frame keeps its duration on 90 kHz and nanosecond imports
 - [Snapshot clobber](/quest/next/json-modify-clobber.md) - a snapshot edit fails on a shape mismatch instead of seeding a default
-- [Binding audio tests](/quest/next/binding-audio-tests.md) - every binding proves the Opus frame duration and throwing setters it exposes, and smoke-full publishes audio with an explicit config
+- [Binding audio tests](/quest/next/binding-audio-tests.md) - every binding proves the Opus frame duration and throwing setters it exposes, and `smoke --all` publishes audio with an explicit config
 - [Decode format](/quest/next/ffi-decode-format.md) - the C-only decode pixel format knob reaches every uniffi binding
 - [JSON mutate](/quest/next/json-mutate.md) - Rust gains the closure edit JS already has, beside the guard
 - [Publisher clocks](/quest/next/publisher-clock.md) - wire the shared clock through native and browser publisher restarts

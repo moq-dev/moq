@@ -30,7 +30,7 @@ Use an in-memory application responder for verification, without OPFS or an
 archive writer. A browser publisher serves a native subscriber after a group
 is evicted or was never cached; verify exact group/frame replay, empty groups,
 missing groups, concurrent requests, and cancellation while awaiting a reply.
-Run the supported-draft matrix and `just test smoke-full` through CI.
+Run the supported-draft matrix and `just test smoke --all` through CI.
 
 Public API: a producer-side on-demand group request surface in `@moq/net`,
 matching Rust's lifecycle. Wire: implement the existing supported IETF FETCH

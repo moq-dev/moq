@@ -1060,6 +1060,28 @@ async def test_announce_then_unannounce_is_visible():
     broadcast.finish()
 
 
+async def test_announced_pattern_captures():
+    origin = moq.OriginProducer()
+    consumer = origin.consume()
+    announced = consumer.announced("room", filter="*/chat")
+
+    dynamic = origin.dynamic("room")
+    overlap = await asyncio.wait_for(anext(announced), timeout=5.0)
+    assert overlap.prefix == "room"
+    assert overlap.captures is None
+
+    audio = create_announced(origin, "room/alice/audio")
+    chat = create_announced(origin, "room/alice/chat")
+    match = await asyncio.wait_for(anext(announced), timeout=5.0)
+    assert match.prefix == "room/alice/chat"
+    assert match.captures == ["alice"]
+
+    announced.cancel()
+    dynamic.cancel()
+    audio.finish()
+    chat.finish()
+
+
 async def test_dynamic_serves_a_request_under_a_prefix():
     origin = moq.OriginProducer()
     dynamic = origin.dynamic("live")

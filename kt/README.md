@@ -29,11 +29,12 @@ import kotlinx.coroutines.flow.collect
 
 // connect() wires up an internal origin and returns a live connection.
 Moq.connect("https://relay.example.com").use { moq ->
-    moq.announcements("demos/").collect { announcement ->
-        // The returned covered prefix is relative to the requested "demos/" prefix.
+    moq.announcements(AnnounceConfig(prefix = "demos/", filter = "*/camera")).collect { announcement ->
+        // Prefix stays origin-relative; captures reports what * matched.
         println("got broadcast ${announcement.prefix()}")
+        println("captures ${announcement.captures()}")
 
-        val catalog = announcement.broadcast().catalog()
+        val catalog = moq.requestBroadcast(announcement.prefix()).catalog()
         println("catalog: $catalog")
     }
 }
