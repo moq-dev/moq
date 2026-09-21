@@ -263,7 +263,7 @@ async fn run(config: &Config) -> Result<()> {
 	let audio_encoder = audio::AudioEncoder::new(broadcast.clone(), catalog.clone(), 44100)?;
 
 	let video_track = video_encoder.demand.clone();
-	let audio_track = audio_encoder.track().demand();
+	let audio_track = audio_encoder.demand();
 
 	let status_publisher = status::StatusPublisher::new(&mut broadcast)?;
 

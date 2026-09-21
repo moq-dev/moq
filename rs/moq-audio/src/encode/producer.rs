@@ -268,9 +268,15 @@ impl<E: CatalogExt> Producer<E> {
 		self.rendition.name()
 	}
 
-	/// The underlying track producer, e.g. to watch subscriber state via
-	/// [`used`](moq_net::track::Producer::used) / [`unused`](moq_net::track::Producer::unused).
-	pub fn track(&self) -> &moq_net::track::Producer {
+	/// A watch-only handle to the track's subscriber demand, created eagerly so
+	/// subscription state is observable before any frames arrive. Watch it via
+	/// [`used`](moq_net::track::Demand::used) / [`unused`](moq_net::track::Demand::unused).
+	pub fn demand(&self) -> moq_net::track::Demand {
+		self.track.track().demand()
+	}
+
+	#[cfg(feature = "capture")]
+	pub(crate) fn track(&self) -> &moq_net::track::Producer {
 		self.track.track()
 	}
 
@@ -555,6 +561,43 @@ mod tests {
 		assert_eq!(config.bitrate, Some(bitrate));
 		assert!(config.dtx);
 		assert_eq!(config.frame_duration, Duration::from_millis(10));
+	}
+
+	#[tokio::test]
+	async fn demand_follows_subscribers_and_closes_with_the_producer() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let options = Options {
+			track: Some("audio".into()),
+			..Options::default()
+		};
+		let mut producer = Producer::new(&mut broadcast, catalog, Input::default(), &options).unwrap();
+		let demand = producer.demand();
+
+		assert_eq!(demand.name(), "audio");
+		assert!(!demand.is_used());
+		let subscriber = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
+		tokio::time::timeout(Duration::from_secs(1), demand.used())
+			.await
+			.expect("subscription demand")
+			.unwrap();
+		assert!(demand.is_used());
+
+		drop(subscriber);
+		drop(consumer);
+		tokio::time::timeout(Duration::from_secs(1), demand.unused())
+			.await
+			.expect("subscription released")
+			.unwrap();
+		assert!(!demand.is_used());
+
+		producer.finish().unwrap();
+		drop(producer);
+		let closed = tokio::time::timeout(Duration::from_secs(1), demand.closed())
+			.await
+			.expect("producer closed");
+		assert!(matches!(closed, moq_net::Error::Dropped));
 	}
 
 	/// Terminal Opus lookahead samples survive both exact-frame and partial-frame input.
