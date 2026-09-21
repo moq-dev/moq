@@ -33,7 +33,6 @@ Public API/wire impact: review only.
 - [Shared rate policy](/quest/main/media-rate-policy.md) - later adaptation will not remove a stabilized namespace
 - [Audio configuration](/quest/main/audio-config.md) - PCM and codec contracts are settled
 - [Audio publication](/quest/main/audio-publication.md) - only intended authority is public
-- [Remove ineffective FEC](/quest/main/audio-fec.md) - no unsupported promise remains
 - [AEC ownership](/quest/main/audio-aec.md) - microphone attachment is exclusive
 - [Playback outcome](/quest/main/audio-playback.md) - drops are observable
 - [Video output](/quest/main/video-output.md) - output and subscription contracts are distinct
