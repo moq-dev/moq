@@ -116,13 +116,24 @@ pub enum ErrorKind {
 pub struct EncodeError {
 	kind: ErrorKind,
 	string: Option<String>,
+	cleanup: Option<Box<Self>>,
 }
 
 impl EncodeError {
 	/// Build an error for a condition this wrapper detects itself, rather than
 	/// one reported by an NVENC call.
 	pub(crate) fn new(kind: ErrorKind, string: Option<String>) -> Self {
-		Self { kind, string }
+		Self {
+			kind,
+			string,
+			cleanup: None,
+		}
+	}
+
+	/// Attach a cleanup failure without replacing the primary error.
+	pub(crate) fn with_cleanup(mut self, cleanup: Self) -> Self {
+		self.cleanup = Some(Box::new(cleanup));
+		self
 	}
 
 	/// Getter for the error kind.
@@ -136,6 +147,12 @@ impl EncodeError {
 	pub fn string(&self) -> Option<&str> {
 		self.string.as_deref()
 	}
+
+	/// An error encountered while rolling back the failed operation.
+	#[must_use]
+	pub fn cleanup(&self) -> Option<&Self> {
+		self.cleanup.as_deref()
+	}
 }
 
 impl fmt::Display for EncodeError {
@@ -143,11 +160,19 @@ impl fmt::Display for EncodeError {
 		match &self.string {
 			Some(s) => write!(f, "{:?}: {s}", self.kind),
 			None => write!(f, "{:?}", self.kind),
+		}?;
+		if let Some(cleanup) = &self.cleanup {
+			write!(f, "; cleanup failed: {cleanup}")?;
 		}
+		Ok(())
 	}
 }
 
-impl Error for EncodeError {}
+impl Error for EncodeError {
+	fn source(&self) -> Option<&(dyn Error + 'static)> {
+		self.cleanup.as_deref().map(|error| error as &dyn Error)
+	}
+}
 
 impl From<NVENCSTATUS> for ErrorKind {
 	fn from(status: NVENCSTATUS) -> Self {
@@ -256,6 +281,7 @@ impl NVENCSTATUS {
 			err => Err(EncodeError {
 				kind: err.into(),
 				string: None,
+				cleanup: None,
 			}),
 		}
 	}

@@ -41,6 +41,42 @@ pub trait EncoderInput: sealed::Input {
 	fn encoder(&self) -> &Arc<Encoder>;
 }
 
+/// The driver calls behind an external resource, injectable so rollback can be
+/// tested without an NVIDIA driver.
+trait ResourceApi {
+	fn register_resource(&self, params: &mut NV_ENC_REGISTER_RESOURCE) -> Result<*mut c_void, EncodeError>;
+	fn map_input_resource(&self, registered: *mut c_void) -> Result<*mut c_void, EncodeError>;
+	fn unmap_input_resource(&self, mapped: *mut c_void) -> Result<(), EncodeError>;
+	fn unregister_resource(&self, registered: *mut c_void) -> Result<(), EncodeError>;
+}
+
+impl ResourceApi for Arc<Encoder> {
+	fn register_resource(&self, params: &mut NV_ENC_REGISTER_RESOURCE) -> Result<*mut c_void, EncodeError> {
+		unsafe { (ENCODE_API.register_resource)(self.ptr, params) }.result(self)?;
+		Ok(params.registeredResource)
+	}
+
+	fn map_input_resource(&self, registered: *mut c_void) -> Result<*mut c_void, EncodeError> {
+		let mut params = NV_ENC_MAP_INPUT_RESOURCE {
+			version: NV_ENC_MAP_INPUT_RESOURCE_VER,
+			registeredResource: registered,
+			mappedResource: ptr::null_mut(),
+			mappedBufferFmt: NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_UNDEFINED,
+			..Default::default()
+		};
+		unsafe { (ENCODE_API.map_input_resource)(self.ptr, &mut params) }.result(self)?;
+		Ok(params.mappedResource)
+	}
+
+	fn unmap_input_resource(&self, mapped: *mut c_void) -> Result<(), EncodeError> {
+		unsafe { (ENCODE_API.unmap_input_resource)(self.ptr, mapped) }.result(self)
+	}
+
+	fn unregister_resource(&self, registered: *mut c_void) -> Result<(), EncodeError> {
+		unsafe { (ENCODE_API.unregister_resource)(self.ptr, registered) }.result(self)
+	}
+}
+
 /// Functions for creating input and output buffers.
 impl Session {
 	/// Create a [`Buffer`].
@@ -221,6 +257,9 @@ impl Session {
 	///
 	/// Could error if registration or mapping fails,
 	/// if the resource is invalid, or if we run out of memory.
+	/// A mapping failure rolls registration back before releasing `marker`. If
+	/// rollback also fails, [`EncodeError::cleanup`] exposes that failure and
+	/// the marker is retained because NVENC may still refer to its allocation.
 	///
 	/// # Safety
 	///
@@ -234,8 +273,7 @@ impl Session {
 		resource_to_register: *mut c_void,
 		pitch: u32,
 	) -> Result<RegisteredResource<T>, EncodeError> {
-		// Register resource.
-		let mut register_resource_params = NV_ENC_REGISTER_RESOURCE::new(
+		let mut params = NV_ENC_REGISTER_RESOURCE::new(
 			resource_type,
 			self.width,
 			self.height,
@@ -243,33 +281,8 @@ impl Session {
 			self.buffer_format,
 		)
 		.pitch(pitch);
-		unsafe { (ENCODE_API.register_resource)(self.encoder.ptr, &mut register_resource_params) }
-			.result(&self.encoder)?;
-		let registered_resource = register_resource_params.registeredResource;
-
-		// Map resource.
-		let mut map_input_resource_params = NV_ENC_MAP_INPUT_RESOURCE {
-			version: NV_ENC_MAP_INPUT_RESOURCE_VER,
-			registeredResource: registered_resource,
-			mappedResource: ptr::null_mut(),
-			mappedBufferFmt: NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_UNDEFINED,
-			..Default::default()
-		};
-		if let Err(error) = unsafe { (ENCODE_API.map_input_resource)(self.encoder.ptr, &mut map_input_resource_params) }
-			.result(&self.encoder)
-		{
-			let _ = unsafe { (ENCODE_API.unregister_resource)(self.encoder.ptr, registered_resource) };
-			return Err(error);
-		}
-
-		let mapped_resource = map_input_resource_params.mappedResource;
-		Ok(RegisteredResource {
-			reg_ptr: registered_resource,
-			map_ptr: mapped_resource,
-			pitch,
-			encoder: self.encoder.clone(),
-			_marker: marker,
-		})
+		let mapping = Mapping::new(self.encoder.clone(), marker, &mut params)?;
+		Ok(RegisteredResource { mapping, pitch })
 	}
 }
 
@@ -640,25 +653,55 @@ impl Drop for BitstreamLock<'_> {
 /// The external buffer memory should still be properly destroyed by the client.
 #[derive(Debug)]
 pub struct RegisteredResource<T> {
-	pub(crate) reg_ptr: *mut c_void,
-	pub(crate) map_ptr: *mut c_void,
+	mapping: Mapping<Arc<Encoder>, T>,
 	pitch: u32,
-	encoder: Arc<Encoder>,
-	// A generic marker to make sure the external resources are dropped
-	// after the resource is unregistered.
-	_marker: T,
 }
 
 unsafe impl Send for RegisteredResource<MappedBuffer> {}
 
+/// A registered and mapped external resource plus the owner keeping its
+/// allocation alive.
+#[derive(Debug)]
+struct Mapping<A: ResourceApi, T> {
+	reg_ptr: *mut c_void,
+	map_ptr: *mut c_void,
+	api: A,
+	// Dropped after the resource is unregistered.
+	_marker: T,
+}
+
+impl<A: ResourceApi, T> Mapping<A, T> {
+	/// Register and map as one transaction: a mapping failure unregisters
+	/// before `marker` is released.
+	fn new(api: A, marker: T, params: &mut NV_ENC_REGISTER_RESOURCE) -> Result<Self, EncodeError> {
+		let reg_ptr = api.register_resource(params)?;
+		let map_ptr = match api.map_input_resource(reg_ptr) {
+			Ok(map_ptr) => map_ptr,
+			Err(primary) => {
+				if let Err(cleanup) = api.unregister_resource(reg_ptr) {
+					// NVENC may still refer to the allocation and there is no handle
+					// left to retry with, so leaking it is safer than freeing it.
+					std::mem::forget(marker);
+					return Err(primary.with_cleanup(cleanup));
+				}
+				return Err(primary);
+			}
+		};
+		Ok(Self {
+			reg_ptr,
+			map_ptr,
+			api,
+			_marker: marker,
+		})
+	}
+}
+
 /// Automatically unmap and unregister the external resource
 /// when it goes out of scope.
-impl<T> Drop for RegisteredResource<T> {
+impl<A: ResourceApi, T> Drop for Mapping<A, T> {
 	fn drop(&mut self) {
-		// Unmapping resource.
-		let _ = unsafe { (ENCODE_API.unmap_input_resource)(self.encoder.ptr, self.map_ptr) }.result(&self.encoder);
-		// Unregister resource.
-		let _ = unsafe { (ENCODE_API.unregister_resource)(self.encoder.ptr, self.reg_ptr) }.result(&self.encoder);
+		let _ = self.api.unmap_input_resource(self.map_ptr);
+		let _ = self.api.unregister_resource(self.reg_ptr);
 	}
 }
 
@@ -670,10 +713,194 @@ impl<T> EncoderInput for RegisteredResource<T> {
 	}
 
 	fn handle(&mut self) -> *mut c_void {
-		self.map_ptr
+		self.mapping.map_ptr
 	}
 
 	fn encoder(&self) -> &Arc<Encoder> {
-		&self.encoder
+		&self.mapping.api
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::{
+		cell::{Cell, RefCell},
+		error::Error,
+		rc::Rc,
+	};
+
+	use super::*;
+	use crate::safe::result::ErrorKind;
+
+	#[derive(Debug, Default, PartialEq, Eq)]
+	struct Calls {
+		register: usize,
+		map: usize,
+		unmap: usize,
+		unregister: usize,
+	}
+
+	#[derive(Debug)]
+	struct TestApi {
+		calls: RefCell<Calls>,
+		owner_alive: Rc<Cell<bool>>,
+		map_error: Option<ErrorKind>,
+		unregister_error: Option<ErrorKind>,
+	}
+
+	impl TestApi {
+		fn new(owner_alive: Rc<Cell<bool>>) -> Self {
+			Self {
+				calls: RefCell::new(Calls::default()),
+				owner_alive,
+				map_error: None,
+				unregister_error: None,
+			}
+		}
+
+		fn handle() -> *mut c_void {
+			std::ptr::NonNull::<u8>::dangling().as_ptr().cast()
+		}
+
+		fn assert_owner_alive(&self) {
+			assert!(
+				self.owner_alive.get(),
+				"input owner was dropped before cleanup finished"
+			);
+		}
+	}
+
+	impl ResourceApi for &TestApi {
+		fn register_resource(&self, _params: &mut NV_ENC_REGISTER_RESOURCE) -> Result<*mut c_void, EncodeError> {
+			self.assert_owner_alive();
+			self.calls.borrow_mut().register += 1;
+			Ok(TestApi::handle())
+		}
+
+		fn map_input_resource(&self, _registered: *mut c_void) -> Result<*mut c_void, EncodeError> {
+			self.assert_owner_alive();
+			self.calls.borrow_mut().map += 1;
+			match self.map_error {
+				Some(kind) => Err(EncodeError::new(kind, None)),
+				None => Ok(TestApi::handle()),
+			}
+		}
+
+		fn unmap_input_resource(&self, _mapped: *mut c_void) -> Result<(), EncodeError> {
+			self.assert_owner_alive();
+			self.calls.borrow_mut().unmap += 1;
+			Ok(())
+		}
+
+		fn unregister_resource(&self, _registered: *mut c_void) -> Result<(), EncodeError> {
+			self.assert_owner_alive();
+			self.calls.borrow_mut().unregister += 1;
+			match self.unregister_error {
+				Some(kind) => Err(EncodeError::new(kind, None)),
+				None => Ok(()),
+			}
+		}
+	}
+
+	#[derive(Debug)]
+	struct Owner(Rc<Cell<bool>>);
+
+	impl Drop for Owner {
+		fn drop(&mut self) {
+			assert!(self.0.replace(false), "input owner dropped more than once");
+		}
+	}
+
+	fn setup() -> (Owner, Rc<Cell<bool>>) {
+		let alive = Rc::new(Cell::new(true));
+		(Owner(alive.clone()), alive)
+	}
+
+	fn register(api: &TestApi, owner: Owner) -> Result<Mapping<&TestApi, Owner>, EncodeError> {
+		let mut params = NV_ENC_REGISTER_RESOURCE::new(
+			NV_ENC_INPUT_RESOURCE_TYPE::NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR,
+			1920,
+			1080,
+			TestApi::handle(),
+			NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_NV12,
+		)
+		.pitch(1920);
+		Mapping::new(api, owner, &mut params)
+	}
+
+	#[test]
+	fn mapping_failure_unregisters_before_releasing_the_owner() {
+		let (owner, alive) = setup();
+		let mut api = TestApi::new(alive.clone());
+		api.map_error = Some(ErrorKind::MapFailed);
+
+		let error = register(&api, owner).expect_err("mapping should fail");
+
+		assert_eq!(error.kind(), ErrorKind::MapFailed);
+		assert!(error.cleanup().is_none());
+		assert!(!alive.get(), "owner should be released after successful rollback");
+		assert_eq!(
+			*api.calls.borrow(),
+			Calls {
+				register: 1,
+				map: 1,
+				unmap: 0,
+				unregister: 1,
+			}
+		);
+	}
+
+	#[test]
+	fn rollback_failure_retains_both_errors_and_the_owner() {
+		let (owner, alive) = setup();
+		let mut api = TestApi::new(alive.clone());
+		api.map_error = Some(ErrorKind::MapFailed);
+		api.unregister_error = Some(ErrorKind::ResourceNotRegistered);
+
+		let error = register(&api, owner).expect_err("mapping and rollback should fail");
+
+		assert_eq!(error.kind(), ErrorKind::MapFailed);
+		assert_eq!(
+			error.cleanup().map(EncodeError::kind),
+			Some(ErrorKind::ResourceNotRegistered)
+		);
+		assert_eq!(
+			error
+				.source()
+				.and_then(|source| source.downcast_ref::<EncodeError>())
+				.map(EncodeError::kind),
+			Some(ErrorKind::ResourceNotRegistered)
+		);
+		assert!(alive.get(), "a possibly registered allocation must remain owned");
+		assert_eq!(
+			*api.calls.borrow(),
+			Calls {
+				register: 1,
+				map: 1,
+				unmap: 0,
+				unregister: 1,
+			}
+		);
+	}
+
+	#[test]
+	fn mapped_resource_cleans_up_once_before_releasing_the_owner() {
+		let (owner, alive) = setup();
+		let api = TestApi::new(alive.clone());
+
+		let resource = register(&api, owner).expect("mapping should succeed");
+		assert!(alive.get());
+		drop(resource);
+
+		assert!(!alive.get(), "owner should be released after destruction");
+		assert_eq!(
+			*api.calls.borrow(),
+			Calls {
+				register: 1,
+				map: 1,
+				unmap: 1,
+				unregister: 1,
+			}
+		);
 	}
 }
