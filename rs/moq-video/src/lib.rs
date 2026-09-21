@@ -43,8 +43,9 @@
 //!   zero-copy (the transcode path), scaled in hardware via
 //!   [`decode::Config::resize`]. A VAAPI decoder can return importable DMA-BUFs
 //!   when [`decode::Config::gpu_frames`] is enabled.
-//! - [`convert`] downloads any [`Surface`] to owned, tightly packed RGBA pixels
-//!   for CPU image and UI toolkits, honoring native color metadata when present.
+//! - [`convert`] downloads readback-capable [`Surface`]s to owned, tightly packed
+//!   RGBA pixels for CPU image and UI toolkits, honoring native color metadata.
+//!   Vulkan/CUDA surfaces deliberately expose no CPU pixel fallback.
 //! - `render` draws a [`Frame`] on the GPU and hands back a `wgpu` texture to
 //!   present, importing a GPU frame's surface directly where the platform
 //!   allows and uploading I420 otherwise. Behind the `render` feature, on by
@@ -63,11 +64,12 @@
 //!
 //! The one deliberate exception is [`Surface`], the enum behind every frame.
 //! Its variants name platform representations (`CVPixelBuffer`, Direct3D11,
-//! CUDA, `AHardwareBuffer`) so you can render or re-encode a frame yourself
-//! without a CPU round trip, which means a major bump of one of those platform
-//! crates is a breaking change here. It is `#[non_exhaustive]` and every variant has a universal
-//! fallback in [`Surface::into_i420`], so matching on it stays portable: take the
-//! fast path you recognize and let the `_` arm handle the rest.
+//! CUDA, Vulkan/CUDA, `AHardwareBuffer`) so you can render or re-encode a frame
+//! yourself without a CPU round trip, which means a major bump of one of those
+//! platform crates is a breaking change here. It is `#[non_exhaustive]` and
+//! every variant has a universal fallback in [`Surface::into_i420`] except the
+//! explicitly GPU-only `Surface::Vulkan`, so matching stays portable but a
+//! CPU-only consumer can receive [`Error::Unsupported`].
 
 #[cfg(feature = "capture")]
 pub mod capture;

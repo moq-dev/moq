@@ -233,6 +233,8 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
+# Native Vulkan producer for the opt-in Vulkan/CUDA interop hardware exercise.
+ash = { workspace = true }
 # `poll!`, to cancel an `encode::Sink` request exactly where a `select!` would.
 futures = { workspace = true }
 h264-reader = "0.8.0"

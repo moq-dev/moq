@@ -718,6 +718,21 @@ features:
 test *args:
     RUSTC_WORKSPACE_WRAPPER="$(command -v clippy-driver || true)" cargo nextest run --locked --all-targets {{ args }}
 
+# Exercise the Vulkan producer -> CUDA image contract on Linux/NVIDIA hardware.
+# The driver directory is added explicitly because the Nix shell's dynamic
+# loader path does not include Ubuntu's host driver directory.
+vulkan-cuda:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    driver=$(/usr/sbin/ldconfig -p | awk '/libcuda\.so\.1/{print $NF; exit}')
+    if [[ -z "$driver" ]]; then
+        echo "libcuda.so.1 is not installed" >&2
+        exit 1
+    fi
+    driver_dir=$(dirname "$driver")
+    export LD_LIBRARY_PATH="$driver_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    cargo test --locked -p moq-video frame::vulkan::tests::vulkan_cuda_slot_reuse_and_teardown -- --ignored --nocapture
+
 # Same selection as `check-changed`: compiling a crate's test binaries is the
 # expensive half of a test run, so scoping matters more here than anywhere else.
 #

@@ -16,6 +16,9 @@
 //! - `Surface::DmaBuf` is a Linux DRM allocation, produced by PipeWire capture.
 //!   The Vulkan renderer imports supported packed formats directly, while CPU
 //!   consumers map linear allocations only.
+//! - `Surface::Vulkan` is a Linux/NVIDIA Vulkan RGBA image imported into CUDA
+//!   with an explicit timeline semaphore. It deliberately has no CPU download
+//!   fallback; GPU consumers return its producer slot after CUDA completion.
 //! - `Surface::HardwareBuffer` is an Android `AHardwareBuffer`, produced by the
 //!   MediaCodec decoder rendering into an `ImageReader`. A GPU consumer imports
 //!   it as a GL or Vulkan image; `into_i420` reads the planes back instead.
@@ -23,8 +26,8 @@
 //!   platforms without a zero-copy capture.
 //!
 //! A backend that consumes a GPU surface takes the frame as-is; a CPU encoder
-//! asks for I420 via [`Surface::into_i420`], which downloads the GPU frame only when
-//! needed.
+//! asks for I420 via [`Surface::into_i420`], which downloads GPU frames that
+//! permit readback. Vulkan/CUDA surfaces intentionally refuse that fallback.
 
 use std::borrow::Cow;
 
@@ -371,8 +374,8 @@ pub(crate) trait DmaBufFrame: Send + Sync {
 ///
 /// Decoders and capture sources hand these out; encoders and renderers consume
 /// them. Match to take a zero-copy fast path for the representation you can use,
-/// and fall back to [`into_i420`](Self::into_i420) for everything else, which is
-/// always available:
+/// and fall back to [`into_i420`](Self::into_i420) for representations that
+/// permit CPU readback. `Surface::Vulkan` intentionally refuses that fallback:
 ///
 /// ```ignore
 /// match surface {
@@ -398,6 +401,9 @@ pub enum Surface {
 	/// decoder, consumed in place by the NVENC encoder.
 	#[cfg(all(target_os = "linux", feature = "nvidia"))]
 	Cuda(cuda::Frame),
+	/// Vulkan RGBA8 image imported into CUDA with explicit GPU synchronization.
+	#[cfg(all(target_os = "linux", feature = "nvidia"))]
+	Vulkan(vulkan::Frame),
 	/// Linux DMA-BUF, exported on access and retained until the last clone drops.
 	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 	DmaBuf(DmaBuf),
@@ -419,6 +425,8 @@ impl Surface {
 			Surface::Texture(t) => t.width,
 			#[cfg(all(target_os = "linux", feature = "nvidia"))]
 			Surface::Cuda(c) => c.width,
+			#[cfg(all(target_os = "linux", feature = "nvidia"))]
+			Surface::Vulkan(v) => v.width(),
 			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 			Surface::DmaBuf(d) => d.width,
 			#[cfg(all(target_os = "android", feature = "mediacodec"))]
@@ -436,6 +444,8 @@ impl Surface {
 			Surface::Texture(t) => t.height,
 			#[cfg(all(target_os = "linux", feature = "nvidia"))]
 			Surface::Cuda(c) => c.height,
+			#[cfg(all(target_os = "linux", feature = "nvidia"))]
+			Surface::Vulkan(v) => v.height(),
 			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 			Surface::DmaBuf(d) => d.height,
 			#[cfg(all(target_os = "android", feature = "mediacodec"))]
@@ -474,7 +484,8 @@ impl Surface {
 	/// which is what you usually want since it carries the timestamp across too.
 	///
 	/// A GPU scaler that a driver refuses falls back to downloading and scaling
-	/// on the CPU, warning once, rather than failing the frame.
+	/// on the CPU where the surface permits readback. Vulkan/CUDA surfaces fail
+	/// instead because their contract forbids CPU pixel access.
 	pub fn resize(&self, size: Size) -> Result<Surface, Error> {
 		self.resize_with(size, &crate::resize::Config::default())
 	}
@@ -518,6 +529,12 @@ impl Surface {
 					Surface::I420(cuda.download_i420()?.resize(width, height)?)
 				}
 			},
+			#[cfg(all(target_os = "linux", feature = "nvidia"))]
+			Surface::Vulkan(_) => {
+				return Err(Error::Unsupported(
+					"Vulkan/CUDA surfaces require a GPU consumer and cannot be resized or downloaded".into(),
+				));
+			}
 			#[cfg(target_os = "windows")]
 			Surface::Texture(texture) if config.acceleration == crate::resize::Acceleration::Cpu => {
 				Surface::I420(texture.download_i420()?.resize(width, height)?)
@@ -546,8 +563,9 @@ impl Surface {
 	/// [`I420::color`] first if you need to interpret these samples, since this
 	/// consumes the surface.
 	///
-	/// Always available, whichever variant you hold, so it is the universal arm of
-	/// a `match`. Free for `Surface::I420`; downloads any GPU surface.
+	/// Free for `Surface::I420`; downloads native GPU surfaces that permit
+	/// readback. A Vulkan/CUDA surface returns [`Error::Unsupported`] because its
+	/// contract deliberately exposes no CPU pixel path.
 	pub fn into_i420(self) -> Result<Bytes, Error> {
 		match self {
 			Surface::I420(i420) => Ok(Bytes::from(i420.data)),
@@ -558,9 +576,10 @@ impl Surface {
 
 	/// Convert to owned, tightly packed RGBA8 pixels on the CPU.
 	///
-	/// Always available, whichever variant you hold. Native GPU surfaces are
-	/// downloaded first; CPU I420 is converted directly. The conversion honors
-	/// [`color`](Self::color) and otherwise falls back to [`Color::infer`].
+	/// Native GPU surfaces that permit readback are downloaded first; CPU I420 is
+	/// converted directly. Vulkan/CUDA surfaces return [`Error::Unsupported`].
+	/// The conversion honors [`color`](Self::color) and otherwise falls back to
+	/// [`Color::infer`].
 	pub fn to_rgba(&self) -> Result<crate::convert::Rgba, Error> {
 		self.to_rgba_with(&crate::convert::Config::default())
 	}
@@ -641,6 +660,8 @@ impl Surface {
 			Surface::Texture(_) => None,
 			#[cfg(all(target_os = "linux", feature = "nvidia"))]
 			Surface::Cuda(_) => None,
+			#[cfg(all(target_os = "linux", feature = "nvidia"))]
+			Surface::Vulkan(_) => None,
 			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 			Surface::DmaBuf(d) => d.color,
 			#[cfg(all(target_os = "android", feature = "mediacodec"))]
@@ -651,8 +672,9 @@ impl Surface {
 
 	/// A CPU I420 view, downloading a GPU frame only if necessary.
 	///
-	/// Borrowed for `Surface::I420`, owned for anything that had to come off the
-	/// GPU. The borrowing counterpart to [`into_i420`](Self::into_i420), for a
+	/// Borrowed for `Surface::I420`, owned for a GPU surface that permits
+	/// readback, and unsupported for Vulkan/CUDA. The borrowing counterpart to
+	/// [`into_i420`](Self::into_i420), for a
 	/// caller that cannot give up the surface: a publisher's preview frame is
 	/// shared with every rendition's encoder, so its `Arc` never has a refcount
 	/// of one and no consuming exit is reachable from it.
@@ -664,6 +686,10 @@ impl Surface {
 			Surface::Texture(t) => Ok(Cow::Owned(t.download_i420()?)),
 			#[cfg(all(target_os = "linux", feature = "nvidia"))]
 			Surface::Cuda(c) => Ok(Cow::Owned(c.download_i420()?)),
+			#[cfg(all(target_os = "linux", feature = "nvidia"))]
+			Surface::Vulkan(_) => Err(Error::Unsupported(
+				"Vulkan/CUDA surfaces have no CPU mapping or download fallback".into(),
+			)),
 			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 			Surface::DmaBuf(d) => Ok(Cow::Owned(d.inner.download_i420()?)),
 			#[cfg(all(target_os = "android", feature = "mediacodec"))]
@@ -1793,6 +1819,10 @@ pub mod macos {
 		}
 	}
 }
+
+#[cfg(all(target_os = "linux", feature = "nvidia"))]
+#[path = "frame/vulkan.rs"]
+pub mod vulkan;
 
 #[cfg(all(target_os = "linux", feature = "nvidia"))]
 pub mod cuda {
