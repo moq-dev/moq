@@ -1,0 +1,4 @@
+interface:
+  display_name: "Spawn Merge"
+  short_description: "Land multiple GitHub PRs once reviews and CI pass"
+  default_prompt: "Use $spawn_merge to review and land these pull requests."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Merge"
+  short_description: "Land a GitHub PR once reviews and CI pass"
+  default_prompt: "Use $merge to review and land this pull request."
