@@ -115,11 +115,13 @@ impl<T: Serialize> Producer<T> {
 		let inner = take(&self.inner);
 		inner.open()?;
 
-		let value = inner
-			.encoder
-			.value()
-			.and_then(|last| serde_json::from_value(last.clone()).ok())
-			.unwrap_or_default();
+		// A published value that does not deserialize as `T` is a bug in the caller, not a reason
+		// to start over: seeding `T::default()` here would publish a value with every other field
+		// dropped, the clobber this guard exists to prevent.
+		let value = match inner.encoder.value() {
+			Some(last) => serde_json::from_value(last.clone())?,
+			None => T::default(),
+		};
 
 		Ok(Guard {
 			inner,

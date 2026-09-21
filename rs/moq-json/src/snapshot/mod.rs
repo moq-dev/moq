@@ -326,6 +326,37 @@ mod test {
 	}
 
 	#[test]
+	fn modify_refuses_a_value_of_another_shape() {
+		// A published value that does not deserialize as `T` fails the edit instead of seeding a
+		// default and publishing a value with every other field dropped.
+		#[derive(serde::Deserialize, Default, PartialEq, Debug)]
+		struct Doc {
+			count: u32,
+		}
+
+		// Serializes to a shape its own `Deserialize` refuses, the way a schema drift does.
+		impl serde::Serialize for Doc {
+			fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+				json!({ "count": self.count.to_string(), "other": 1 }).serialize(serializer)
+			}
+		}
+
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", None)
+			.unwrap();
+		let consumer = track.subscribe(None);
+		let mut producer = Producer::<Doc>::new(track, Config::default());
+		producer.update(&Doc { count: 1 }).unwrap();
+
+		assert!(matches!(producer.modify(), Err(crate::Error::Json(_))));
+
+		// The refused edit published nothing after the original value.
+		producer.finish().unwrap();
+		assert_eq!(drain(consumer), vec![json!({ "count": "1", "other": 1 })]);
+	}
+
+	#[test]
 	fn modify_composes_independent_owners() {
 		// Mirrors the catalog use case: separate owners each edit their own field through the guard.
 		#[derive(serde::Serialize, serde::Deserialize, Default, PartialEq, Debug)]
