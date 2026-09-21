@@ -1384,6 +1384,9 @@ mod session_tests {
 		let video = broadcast
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
+		let _audio = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
 		{
 			let mut guard = catalog.modify().unwrap();
 			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
@@ -1391,8 +1394,10 @@ mod session_tests {
 
 		let added = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
 		let count = added.clone();
-		element.connect_pad_added(move |_, _| {
-			count.fetch_add(1, Ordering::Relaxed);
+		element.connect_pad_added(move |_, pad| {
+			if pad.name().starts_with("video_") {
+				count.fetch_add(1, Ordering::Relaxed);
+			}
 		});
 
 		let (shutdown, mut shutdown_rx) = watch::channel(false);
@@ -1447,14 +1452,21 @@ mod session_tests {
 		}
 		wait_for(HEAD);
 
-		// Delist, give the session time to act on it, then list it again unchanged.
-		catalog.modify().unwrap().video.renditions.clear();
-		std::thread::sleep(Duration::from_millis(300));
+		// Delist it. The catalog consumer only yields the newest snapshot, so the same update
+		// lists an audio rendition: its pad appearing proves the session acted on the delist
+		// rather than skipping straight to the relist below.
+		{
+			let mut guard = catalog.modify().unwrap();
+			guard.video.renditions.clear();
+			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
+		}
+		await_pad(&element, "audio_");
+
+		// List it again, unchanged.
 		{
 			let mut guard = catalog.modify().unwrap();
 			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
 		}
-		std::thread::sleep(Duration::from_millis(300));
 
 		// The same track resumes with a new group, then ends.
 		for i in HEAD..HEAD + TAIL {
