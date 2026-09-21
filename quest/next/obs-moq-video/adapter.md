@@ -15,9 +15,6 @@ One opt-in Use MoQ encoders choice publishes OBS video and audio through moq-vid
 
 ## Required
 
-- [Video timing](/quest/main/video-timing.md) - rational rates and timestamps
-
 - [OBS migration](/quest/next/cpp/obs.md) - the plugin is on the generated C++ first
 - [Encoder presets](/quest/next/obs-moq-video/presets.md) - common policy
 - [Audio publishing](/quest/next/obs-moq-video/audio-publish.md) - both adapters are needed for the combined opt-in UI
-
