@@ -199,6 +199,10 @@ where
 	}
 
 	/// Modify the published catalog config.
+	///
+	/// Estimate fields the config left to detection at [`set`](Self::set) stay owned by detection:
+	/// an edit to them here is published but replaced by the next measurement. Call `set` with the
+	/// field filled in to pin it.
 	pub fn modify(&mut self) -> crate::Result<Guard<'_, R>> {
 		let rendition = self.rendition.as_mut().ok_or(crate::Error::NotPublished)?;
 		let config = rendition.config()?;

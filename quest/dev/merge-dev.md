@@ -44,14 +44,7 @@ merge for it. The rest of the archive line, wildcard resolution, and every
 additive quest that builds on dev-only code start on main afterwards from
 [next](/quest/next/README.md).
 
-The `api-*` quests beside this one in [dev](/quest/dev/README.md) are the
-2026-09-18 review's breaking follow-ups; [API review gate](/quest/dev/api-review-gate.md)
-records, per quest, whether it landed or was deferred with the semver bump
-accepted.
-
-## Required
-
-- [API review gate](/quest/dev/api-review-gate.md) - every breaking review quest is landed or explicitly deferred
+The 2026-09-18 review's breaking follow-ups (`api-*` quests) have all landed.
 
 ## Closes
 
