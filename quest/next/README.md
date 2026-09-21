@@ -91,7 +91,7 @@ Implementation that depends on a dev contract requires
 - [IETF on the ring](/quest/next/uring-ietf.md) - the io_uring workers serve moq-transport sessions too, so a uring relay drops no client protocol
 - [Perf](/quest/next/perf/README.md) - eliminate measured hot-path costs across moq-uring, kio, and the moq-net model
 - [#2924](/quest/next/2924-moq-relay-tls-rotation-is-not-atomic-across-thread-per.md) - every QUIC worker shares one reloadable served identity, so rotation is atomic and generate works with workers
-- [#2964](/quest/next/2964-quic-workers-dropping-one-split-server-resizes-the.md) - integrate the M1 worker owner with hardened socket-group formation
+- [#2964](/quest/next/2964-quic-workers-dropping-one-split-server-resizes-the.md) - integrate the dev worker owner with hardened socket-group formation
 - [Safari WebTransport](/quest/next/safari-webtransport.md) - WebKit browsers return to WebTransport once WebKit 319818 ships fixed
 - [Audio quality harness](/quest/next/audio-quality-harness/README.md) - a playout latency regression fails a run instead of arriving as a bug report
 - [Latency ledger](/quest/next/latency-ledger.md) - a session reports where its end-to-end audio delay went, stage by stage
