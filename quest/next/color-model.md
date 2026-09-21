@@ -59,5 +59,5 @@ stays byte-identical.
 
 ## Related
 
-- [SEI sidecars](/quest/next/sei/README.md) - moves SEI out of the video track;
+- [SEI sidecars](/quest/future/sei/README.md) - moves SEI out of the video track;
   the display metadata inside it needs the home this quest builds

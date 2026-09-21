@@ -23,4 +23,4 @@ decoder policy, and an end-to-end loss fixture before a new API is exposed.
 
 ## Related
 
-- [Audio loss recovery](/quest/next/audio-loss-recovery.md) - decide a tested policy when a consumer needs it
+- [Audio loss recovery](/quest/future/audio-loss-recovery.md) - decide a tested policy when a consumer needs it

@@ -32,5 +32,5 @@ rendition switch, and an application that knows its own tune-in moment.
 
 ## Related
 
-- [GOP overhead](/quest/next/gop-overhead.md) - whether a long GOP driven by a
+- [GOP overhead](/quest/future/gop-overhead.md) - whether a long GOP driven by a
   keyframe request is worth designing at all

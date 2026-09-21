@@ -20,7 +20,7 @@ release and moq.pro's (downstream) embedded gateway stay out of this quest.
 
 ## Related
 
-- [SEI sidecars](/quest/next/sei/README.md) - independently separates codec
+- [SEI sidecars](/quest/future/sei/README.md) - independently separates codec
   metadata after the gateway preserves it
 - [ID3 section](/quest/next/id3.md) - independently gives one preserved metadata
   type a container-neutral catalog contract

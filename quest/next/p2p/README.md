@@ -33,7 +33,7 @@ under "One channel, qmux, ordered".
 Every opted-in peer already holds a session to the same relay, so discovery
 and signaling ride that session as ordinary moq broadcasts under a reserved
 prefix (`.p2p/` by default, configurable), the same shape
-[carrier voice](/quest/next/carrier-voice/README.md) uses for call setup. The
+[carrier voice](/quest/future/carrier-voice/README.md) uses for call setup. The
 relay learns nothing new; trust is its token scope. A peer that may publish
 under the prefix is as trusted as any publisher the token admits, so this
 line needs no E2EE.
@@ -153,4 +153,4 @@ re-derived.
 - [E2EE](/quest/next/e2ee/README.md) - what a peer would need if the token scope stopped being the trust boundary
 - [Cluster discovery flags](/quest/next/cluster-flags.md) - the flag shape `--p2p` follows
 - [qmux on the QUIC core](/quest/next/quic/qmux.md) - the stream core the unordered follow-up rides
-- [Carrier voice](/quest/next/carrier-voice/README.md) - signaling as an application protocol over moq, the pattern reused here
+- [Carrier voice](/quest/future/carrier-voice/README.md) - signaling as an application protocol over moq, the pattern reused here

@@ -21,7 +21,7 @@ Implement in the fork.
 - On loss detection, before queueing a retransmission for a stream with a
   deadline, estimate the arrival instant as now plus the forward one-way
   delay. Start with `min_rtt / 2`, corrected by the peer's reported ACK delay;
-  the [receive-timestamps spike](/quest/next/quic-receive-ts.md) replaces that
+  the [receive-timestamps spike](/quest/future/quic-receive-ts.md) replaces that
   guess with a measured forward delay. If the estimate is past the deadline,
   reset the stream with a dedicated error code and drop its retransmit ranges,
   including bytes already lost, so flow control is returned in one step.
@@ -49,7 +49,7 @@ raises loss or latency under any profile stays off by default.
 
 ## Related
 
-- [Receive timestamps](/quest/next/quic-receive-ts.md) - a measured forward
+- [Receive timestamps](/quest/future/quic-receive-ts.md) - a measured forward
   delay replaces the half-RTT estimate
 - [Probe by early retransmission](/quest/next/quic/probe.md) - shares the
   retransmit-as-probe machinery

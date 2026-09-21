@@ -2,8 +2,8 @@
 
 ## Goal
 
-Everything not yet started, in priority order: reliability, new capabilities,
-performance, planning, design studies, and work gated on the outside world.
+The next wave, in priority order: reliability, new capabilities, performance,
+and the planning that settles their shared contracts.
 
 ## Plan
 
@@ -11,16 +11,14 @@ Nothing here has a branch. Starting a quest moves it under
 [main](/quest/main/README.md) or [dev](/quest/dev/README.md), which is where
 its target is decided; a questline moves whole. Planning and implementation
 are distinct dispatches: a ready planning quest produces decisions, fixtures,
-and rewritten implementation quests, not speculative production code, and a
-study may end with a measured no-go.
+and rewritten implementation quests, not speculative production code. Later work
+waits in [future](/quest/future/README.md).
 
 Give one agent ownership of each shared code area at a time (origin/auth, the
 JS Reader, audio playback, media containers and archive, bindings, worker
 transport, benchmark tooling); worktrees isolate commits, not semantics.
 Implementation that depends on a dev contract requires
-[Merge dev](/quest/dev/merge-dev.md) explicitly. A quest gated on hardware, a
-partner, or an upstream release states that as a plain-text `Required` bullet
-and waits here.
+[Merge dev](/quest/dev/merge-dev.md) explicitly.
 
 ## Quests
 
@@ -189,44 +187,3 @@ and waits here.
 - [X11 capture transport](/quest/next/x11-capture-shm.md) - move X11 capture to shared memory and RandR events instead of a per-frame socket copy
 - [io_uring flow control](/quest/next/uring-flow-control-windows.md) - the relay's io_uring workers honor the QUIC flow-control windows instead of refusing them
 - [Capture frame buffers](/quest/next/capture-frame-buffers.md) - stop rebuilding a full-frame buffer every tick in the X11 and Windows backends
-- [AV1 metadata separation](/quest/next/av1-metadata.md) - retain metadata OBUs inline while evaluating separate delivery
-
-- [SEI separation](/quest/next/sei/README.md) - retain inline SEI until measured savings or a metadata-only consumer justify a split
-
-- [Catalog track identity](/quest/next/catalog-tracks.md) - compare immutable track definitions with explicit catalog-to-group binding
-- [Mobile ownership](/quest/next/mobile-ownership.md) - decide whether Rust or platform code owns mobile capture, codecs, and rendering
-- [iOS capture](/quest/next/mobile-capture-ios.md) - camera and screen capture if the mobile ownership decision selects Rust
-- [Android capture](/quest/next/mobile-capture-android.md) - NDK/JNI capture using the existing codecs if mobile ownership selects Rust
-- [Mobile completion](/quest/next/mobile-completion.md) - verify the selected native/mobile path before closing #700
-- [Linux OBS GPU input](/quest/next/obs-linux-gpu.md) - publish OBS compositor frames without CPU readback on a validated Linux graphics/encoder combination
-- [LiveKit client shim](/quest/next/livekit-shim.md) - a media compatibility facade over the room SDK
-
-- [Audio loss recovery](/quest/next/audio-loss-recovery.md) - prove a useful Opus recovery policy before exposing another option
-- [Opus implementation](/quest/next/audio-opus-backend.md) - compare current codec quality, CPU, and optional build costs
-- [Video codec coverage](/quest/next/video-codec-coverage.md) - prioritize remaining native AV1 and portable decoder gaps
-- [#2819](/quest/next/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - moq-video: carry PipeWire DMA-BUFs safely into the Vulkan renderer
-- [Unreal prototype](/quest/next/unreal.md) - a UE5 module on the C++ package with exceptions disabled, rendering a subscribed broadcast to a texture
-- [Unity prototype](/quest/next/unity.md) - the C# package under IL2CPP, playing subscribed audio
-- [Multipath spike](/quest/next/multipath-spike.md) - whether bonded contribution over multipath QUIC is worth building, given it needs noq on both ends
-- [Receive timestamps](/quest/next/quic-receive-ts.md) - per-packet arrival times in ACKs, the feedback GCC and deadlines need
-- [QUIC GCC](/quest/next/quic-gcc.md) - a measured verdict on delay-based congestion control for media egress, shipping as `RealTime`
-- [QUIC FEC](/quest/next/quic-fec.md) - a measured verdict on transport-level FEC vs retransmission
-- [BBR3 app-limited](/quest/next/quic-bbr-app-limited.md) - whether ProbeRTT and the bandwidth model behave for a sender at the encoder's rate
-- [Kernel pacing](/quest/next/quic-kernel-pacing.md) - whether SO_TXTIME pacing beats a userspace pacer the io_uring driver ignores today
-- [Send batching](/quest/next/quic-send-batching.md) - whether sendmmsg across connections pays on the tokio path
-- [Send buffer pools](/quest/next/quic-buffer-pool.md) - whether pooled send buffers beat Bytes in the stream send path
-- [AF_XDP UDP path](/quest/next/af-xdp.md) - the kernel-bypass verdict on today's virtio hosts that gates DPDK
-- [GOP overhead](/quest/next/gop-overhead.md) - price the I-frames a short GOP pays for, deciding whether a long GOP plus a keyframe request is worth designing
-- [#703](/quest/next/703-experimental-webgpu-renderer.md) - Experimental WebGPU renderer
-- [#823](/quest/next/823-svc-support.md) - SVC support?
-- [#1838](/quest/next/1838-tr-101-290-monitoring-requirements-broadcast-contribution.md) - TR 101 290 monitoring: requirements (broadcast/contribution health metrics)
-- [Teleoperation](/quest/next/teleop/README.md) - MoQ carries robot video down and control up on one session as a library capability
-- [SIP media stack](/quest/next/sip-stack.md) - terminate one inbound SIP audio call leg and expose it as Opus frames
-- [Carrier voice](/quest/next/carrier-voice/README.md) - determine whether MoQ should be the call fabric for programmable carrier voice
-- [LiveKit WebRTC bridge](/quest/next/livekit-webrtc-bridge.md) - a go/no-go verdict, backed by a spike, on per-track LiveKit-to-MoQ bridging
-- [Common Access Tokens](/quest/next/cat/README.md) - a moq-transport client presents a CAT in SETUP and `moq auth serve` admits it with the scope its `moqt` claim names
-- [DPDK](/quest/next/dpdk.md) - a kernel-bypass UDP path for the relay, once a provider offers SR-IOV or bare metal
-- [Video hardware validation](/quest/next/video-hardware.md) - run the encode, capture, and zero-copy paths that were written but never run on real machines
-- [#2893](/quest/next/2893-video-validate-pipewire-dma-buf-capture-on-kde-hardware.md) - video: validate PipeWire DMA-BUF capture on KDE hardware
-- [Embedded video](/quest/next/video-embedded.md) - EGL import in the renderer, so moq-video presents on a Pi
-- [Vision worker](/quest/next/processor-vision.md) - a documented customer-run vision worker proves the processor contract

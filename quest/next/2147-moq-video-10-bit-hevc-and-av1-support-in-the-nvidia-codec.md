@@ -39,4 +39,4 @@ codec signaling, with cross-language fixtures for any metadata change.
 
 ## Related
 
-- [Codec coverage study](/quest/next/video-codec-coverage.md) - measure optional software and other native backends separately
+- [Codec coverage study](/quest/future/video-codec-coverage.md) - measure optional software and other native backends separately

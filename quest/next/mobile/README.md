@@ -21,11 +21,11 @@ and decoded-frame ownership.
 
 ## Related
 
-- [Mobile completion](/quest/next/mobile-completion.md) - owns #700 closure after the deferred mobile phases are delivered
+- [Mobile completion](/quest/future/mobile-completion.md) - owns #700 closure after the deferred mobile phases are delivered
 
-- [Mobile ownership](/quest/next/mobile-ownership.md) - the deferred capture, codec, and rendering decision
-- [iOS capture](/quest/next/mobile-capture-ios.md) - deferred platform capture
-- [Android capture](/quest/next/mobile-capture-android.md) - deferred platform capture and codecs
+- [Mobile ownership](/quest/future/mobile-ownership.md) - the deferred capture, codec, and rendering decision
+- [iOS capture](/quest/future/mobile-capture-ios.md) - deferred platform capture
+- [Android capture](/quest/future/mobile-capture-android.md) - deferred platform capture and codecs
 
 - [#933](/quest/next/933-video-rotation-metadata-not-propagated-from-mobile-camera.md) - rotation metadata from a mobile camera
-- [Video hardware validation](/quest/next/video-hardware.md) - physical hardware evidence for each claimed GPU path
+- [Video hardware validation](/quest/future/video-hardware.md) - physical hardware evidence for each claimed GPU path

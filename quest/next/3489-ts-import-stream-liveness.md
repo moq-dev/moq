@@ -45,5 +45,5 @@ audio half is visible, late, through #3372's resync line.
 ## Related
 
 - [SRT import stats](/quest/next/srt-import-stats.md) - the same rows read from the SRT gateway
-- [#1838](/quest/next/1838-tr-101-290-monitoring-requirements-broadcast-contribution.md) - the monitoring model that subsumes this as `PID_error`
+- [#1838](/quest/future/1838-tr-101-290-monitoring-requirements-broadcast-contribution.md) - the monitoring model that subsumes this as `PID_error`
 - [Client stats](/quest/next/qos/stats/schema.md) - where per-rendition liveness rides a publisher's stats broadcast

@@ -34,6 +34,6 @@ Vulkan producer independently of Unreal integration.
 ## Related
 
 - [GPU conversion and NVENC](/quest/main/video-gpu-encode.md) - consumes the imported surfaces
-- [PipeWire surface lifetime](/quest/next/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - reuse ownership principles without taking on PipeWire completion
-- [Linux OBS GPU export](/quest/next/obs-linux-gpu.md) - another potential consumer; OBS and VAAPI remain separate
+- [PipeWire surface lifetime](/quest/future/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - reuse ownership principles without taking on PipeWire completion
+- [Linux OBS GPU export](/quest/future/obs-linux-gpu.md) - another potential consumer; OBS and VAAPI remain separate
 - [CUDA graphics interoperability](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/graphics-interop.html) - external memory and semaphore contracts

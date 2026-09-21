@@ -12,8 +12,8 @@ durable scope or coordination.
   whose `README.md` is its quest: its `Quests` section lists the children, and
   it completes when its own work is done and every child has merged.
 - The tree mirrors the branches. The top-level lines `main` and `dev` are those
-  branches; `next` is the roadmap and has none. Starting a quest under `next`
-  moves it under the branch it targets, in the same PR: `dev` for a published
+  branches; `next` and `future` are the roadmap and have none. Starting a
+  roadmap quest moves it under the branch it targets, in the same PR: `dev` for a published
   API or wire break, `main` otherwise.
 - Any other document's branch is its path without `.md`: `quest/dev/foo/bar.md`
   is branch `quest/dev/foo/bar`, and its line is `quest/dev/foo/README`. A
@@ -76,7 +76,8 @@ Current decisions, open questions, or implementation guidance.
 - Split independently completable work into separate quests. Group them in a
   questline only when they ship together, and give the README the work no
   child owns: the end-to-end test, the docs page.
-- New work starts under `next` unless it is being started now.
+- New work starts under `next`, or `future` when nothing near-term depends
+  on it, unless it is being started now.
 - Every issue under `Closes` carries the `quest` GitHub label
   (`gh issue edit <n> --add-label quest`), applied when the quest lands.
   `Related` is context and gets none.
@@ -109,5 +110,5 @@ Current decisions, open questions, or implementation guidance.
 - Delete a quest in the PR that completes or abandons it. Grep its absolute
   path and remove every reference; that reveals what it unblocks. Remove a
   heading with its last entry.
-- Deleting a README deletes its directory. The root, `main`, `dev`, and `next`
-  are permanent.
+- Deleting a README deletes its directory. The root and the top-level lines are
+  permanent.

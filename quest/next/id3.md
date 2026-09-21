@@ -48,5 +48,5 @@ generic.
 
 - [SRT metadata parity](/quest/next/srt-metadata.md) - independently preserves
   generic MPEG-TS metadata through the SRT gateway
-- [SEI sidecars](/quest/next/sei/README.md) - the separate codec metadata
+- [SEI sidecars](/quest/future/sei/README.md) - the separate codec metadata
   contract

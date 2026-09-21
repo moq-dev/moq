@@ -86,4 +86,4 @@ there is no equal-scope shortcut.
 
 ## Related
 
-- [Carrier voice protocol](/quest/next/carrier-voice/README.md) - the same signaling-as-broadcasts shape
+- [Carrier voice protocol](/quest/future/carrier-voice/README.md) - the same signaling-as-broadcasts shape

@@ -19,7 +19,7 @@ Persist one range-named object per track per segment after its groups complete,
 then publish the archive timeline record. Match the 19-digit group-bound keys,
 ascending delta-encoded IDs, and sequential timeline discovery used by Rust. A typical audio segment contains many
 one-group-per-frame audio groups. Match the Rust binary envelope bytes and `.info` property values, per the [Recording section](/drafts/draft-lcurley-moq-hang.md#recording), without inferring catalog-to-group applicability.
-[Catalog track identity](/quest/next/catalog-tracks.md) addresses that separately.
+[Catalog track identity](/quest/future/catalog-tracks.md) addresses that separately.
 
 Use [JavaScript FETCH](/quest/next/js-fetch.md)'s on-demand group requests to
 answer cache misses from memory or OPFS after relay eviction. This quest owns

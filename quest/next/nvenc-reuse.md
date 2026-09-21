@@ -27,4 +27,4 @@ Public API and wire: unchanged.
 
 ## Related
 
-- [Hardware validation](/quest/next/video-hardware.md) - device-backed correctness evidence
+- [Hardware validation](/quest/future/video-hardware.md) - device-backed correctness evidence

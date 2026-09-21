@@ -51,4 +51,4 @@ none. Consume the settled main frame/output contracts without replacing them.
 
 - [OBS source](/quest/next/obs-moq-video/source.md) - consumes native C views
 - [FFI video consumer](/quest/next/mobile/ffi-video-consumer.md) - consumes portable pixels
-- [Mobile ownership](/quest/next/mobile-ownership.md) - deferred platform capture and native mobile integration
+- [Mobile ownership](/quest/future/mobile-ownership.md) - deferred platform capture and native mobile integration

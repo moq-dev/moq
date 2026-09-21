@@ -8,8 +8,9 @@ grouped by the branch they land on and ordered by priority.
 ## Plan
 
 `main` and `dev` mirror those branches: work under either merges there,
-directly or through its questline's branch. `next` is the roadmap and has no
-branch; starting a quest moves it under the branch it targets. Published API
+directly or through its questline's branch. `next` and `future` are the
+roadmap and have no branch; starting a quest moves it under the branch it
+targets. Published API
 and wire breaks go under `dev`, everything else under `main`. `dev` merges
 into `main` once its questline is empty.
 
@@ -17,4 +18,5 @@ into `main` once its questline is empty.
 
 - [main](/quest/main/README.md) - work landing on main now: additive changes and the 0.0.x contracts
 - [dev](/quest/dev/README.md) - published API and wire breaks, landed as one merge into main
-- [next](/quest/next/README.md) - the roadmap, in priority order
+- [next](/quest/next/README.md) - the next wave, in priority order
+- [future](/quest/future/README.md) - later work, studies, and quests gated on the outside world

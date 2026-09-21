@@ -36,9 +36,9 @@ option through the backend-neutral estimate.
 
 ## Related
 
-- [FEC experiment](/quest/next/quic-fec.md) - early retransmission is a
+- [FEC experiment](/quest/future/quic-fec.md) - early retransmission is a
   repetition code competing for the same redundancy budget
-- [GCC egress experiment](/quest/next/quic-gcc.md) - a delay-based controller
+- [GCC egress experiment](/quest/future/quic-gcc.md) - a delay-based controller
   changes what headroom means
-- [BBR3 app-limited](/quest/next/quic-bbr-app-limited.md) - whether the
+- [BBR3 app-limited](/quest/future/quic-bbr-app-limited.md) - whether the
   estimate an app-limited sender already has is trustworthy

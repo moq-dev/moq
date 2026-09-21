@@ -80,14 +80,14 @@ This is a transport API change, not a MoQ wire change.
   per-broadcast fairness policy on cluster sessions
 - [Starvation](/quest/next/qos/starvation.md) - the first consumer of ACK
   progress: how far behind viewers are, from the relay's point of view
-- [Receive timestamps](/quest/next/quic-receive-ts.md) - per-packet arrival
+- [Receive timestamps](/quest/future/quic-receive-ts.md) - per-packet arrival
   times for GCC and deadlines
-- [GCC egress experiment](/quest/next/quic-gcc.md) - a measured verdict on
+- [GCC egress experiment](/quest/future/quic-gcc.md) - a measured verdict on
   WebRTC-style delay control
-- [FEC experiment](/quest/next/quic-fec.md) - a measured verdict on transport
+- [FEC experiment](/quest/future/quic-fec.md) - a measured verdict on transport
   redundancy
-- [Kernel pacing](/quest/next/quic-kernel-pacing.md), [Send batching](/quest/next/quic-send-batching.md),
-  [Send buffer pools](/quest/next/quic-buffer-pool.md), [BBR3 app-limited](/quest/next/quic-bbr-app-limited.md) -
+- [Kernel pacing](/quest/future/quic-kernel-pacing.md), [Send batching](/quest/future/quic-send-batching.md),
+  [Send buffer pools](/quest/future/quic-buffer-pool.md), [BBR3 app-limited](/quest/future/quic-bbr-app-limited.md) -
   the syscall, allocation, and controller spikes
-- [Multipath spike](/quest/next/multipath-spike.md) - a noq capability that
+- [Multipath spike](/quest/future/multipath-spike.md) - a noq capability that
   MoQ does not use yet

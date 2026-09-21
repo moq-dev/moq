@@ -31,4 +31,4 @@ possible; keep native import proof in hardware jobs. Public API and wire: none.
 
 ## Related
 
-- [Hardware validation](/quest/next/video-hardware.md) - real graphics-device proof
+- [Hardware validation](/quest/future/video-hardware.md) - real graphics-device proof

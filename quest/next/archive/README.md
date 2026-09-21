@@ -113,7 +113,7 @@ owned by that prerequisite, not duplicated in archive storage.
 
 ## Related
 
-- [Catalog track identity](/quest/next/catalog-tracks.md) - explore immutable definitions or explicit version binding independently of archives
+- [Catalog track identity](/quest/future/catalog-tracks.md) - explore immutable definitions or explicit version binding independently of archives
 
 - [wildcard](/quest/next/wildcard/README.md) - catch-all routing exposes an archive at its stable replay path
 - [e2ee](/quest/next/e2ee/README.md) - protected broadcasts are excluded initially

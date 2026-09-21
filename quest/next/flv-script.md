@@ -39,4 +39,4 @@ media tag, and a byte-identical round trip.
 
 - [fMP4 emsg carriage](/quest/next/emsg.md) - the same silent drop in a different
   layer
-- [AV1 metadata OBUs](/quest/next/av1-metadata.md) - likewise
+- [AV1 metadata OBUs](/quest/future/av1-metadata.md) - likewise

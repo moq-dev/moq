@@ -57,6 +57,6 @@ offered and answered.
 
 ## Related
 
-- [Receive timestamps](/quest/next/quic-receive-ts.md), [GCC](/quest/next/quic-gcc.md),
-  [FEC](/quest/next/quic-fec.md), [BBR3 app-limited](/quest/next/quic-bbr-app-limited.md) -
+- [Receive timestamps](/quest/future/quic-receive-ts.md), [GCC](/quest/future/quic-gcc.md),
+  [FEC](/quest/future/quic-fec.md), [BBR3 app-limited](/quest/future/quic-bbr-app-limited.md) -
   experiments that join the list with a positive verdict

@@ -47,4 +47,4 @@ Any eventual wire-format change belongs in the matching Hang draft.
 
 ## Related
 
-- [SEI evaluation](/quest/next/sei/README.md) - a separate decision about extracting codec metadata
+- [SEI evaluation](/quest/future/sei/README.md) - a separate decision about extracting codec metadata

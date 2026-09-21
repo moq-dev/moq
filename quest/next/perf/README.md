@@ -65,6 +65,6 @@ row per io_uring worker.
 
 ## Related
 
-- [Send buffer pools](/quest/next/quic-buffer-pool.md) - the stream-send
+- [Send buffer pools](/quest/future/quic-buffer-pool.md) - the stream-send
   allocation question, measured on the same shapes
 - [Origin lookup CPU](/quest/next/origin-cpu/README.md) - announce/subscribe table, not uring

@@ -43,5 +43,5 @@ waits on a review there.
 - The single noq backend lets one fork carry every feature.
 - [Release the stack](/quest/next/quic/release.md) - how fork releases reach
   published MoQ crates
-- [Multipath spike](/quest/next/multipath-spike.md) - noq's multipath support
+- [Multipath spike](/quest/future/multipath-spike.md) - noq's multipath support
   is one reason noq was chosen as the parent

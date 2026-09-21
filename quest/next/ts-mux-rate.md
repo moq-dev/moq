@@ -75,4 +75,4 @@ field; no draft change, the `mpegts` section is an application extension.
 - [#3731](https://github.com/moq-dev/moq/issues/3731) - decision 6 of six; the issue stays open for the MSFTS convergence questions
 
 - [#2779](/quest/next/2779-moq-export-ts-continuity-counters-are-numbered-from.md) - the other determinism gap in the same exporter
-- [TR 101 290](/quest/next/1838-tr-101-290-monitoring-requirements-broadcast-contribution.md) - the monitoring that would grade the padded output
+- [TR 101 290](/quest/future/1838-tr-101-290-monitoring-requirements-broadcast-contribution.md) - the monitoring that would grade the padded output

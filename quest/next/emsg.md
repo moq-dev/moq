@@ -42,6 +42,6 @@ byte-identical.
 
 - [ID3 catalog section](/quest/next/id3.md) - gives one payload type carried here a
   typed contract
-- [AV1 metadata OBUs](/quest/next/av1-metadata.md) - the same silent drop in a
+- [AV1 metadata OBUs](/quest/future/av1-metadata.md) - the same silent drop in a
   different layer
 - [FLV script tags](/quest/next/flv-script.md) - likewise

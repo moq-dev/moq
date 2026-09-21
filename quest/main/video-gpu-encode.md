@@ -43,6 +43,6 @@ unsupported and never selects a CPU conversion, upload or software encoder.
 
 ## Related
 
-- [Video hardware validation](/quest/next/video-hardware.md) - prior NVENC allocation findings and separate hardware coverage
+- [Video hardware validation](/quest/future/video-hardware.md) - prior NVENC allocation findings and separate hardware coverage
 - [NVENC programming guide](https://docs.nvidia.com/video-technologies/video-codec-sdk/13.0/nvenc-video-encoder-api-prog-guide/) - registration and input lifetime requirements
 - [Pronto GPU integration](https://github.com/moq-dev/moq.pro/tree/main/quest/main/pronto/gpu) - the first consumer and desktop measurements
