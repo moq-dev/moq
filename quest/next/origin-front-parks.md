@@ -15,8 +15,10 @@ The obstacle, and the reason #3901 rejected this as an alternative, is that
 fronts are shared per path. A front that parks would park every requester at
 that path, including `request_broadcast`, whose whole contract is a verdict
 now. So the disposition has to travel with the requester rather than the
-front: a front would end when no waiting requester remains and answer
-`Unroutable` to the ones that asked for an answer.
+front: `request_broadcast` resolves the current verdict at once without
+parking, while `routed_broadcast` stays registered until its route completes.
+The front ends only once every parked requester has been handled, so one
+requester's disposition never ends another's wait.
 
 Worth confirming before building it: that the retry loop costs something. A
 benchmark swept over requesters and route-table churn would show whether the
