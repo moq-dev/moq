@@ -17,8 +17,7 @@ table size, and the JSON flavors get cheaper too.
 - Work out where today's tick allocates: the per-group `HashMap`/`HashSet`
   bucketing in `produce.rs`, `String` clones of paths and track names, the
   per-track `TrafficFrame` maps. Make them reuse state held across ticks. The
-  JSON frame only needs building while a JSON track is subscribed. Churn
-  inside moq-json belongs to [JSON churn](/quest/next/json-churn.md).
+  JSON frame only needs building while a JSON track is subscribed.
 - Some allocations are unavoidable: each published frame becomes an owned
   `Bytes` the track caches, and `moq_flate::Encoder::frame()` returns a fresh
   one. Reduce this to one allocation per published frame, not per entry. If
