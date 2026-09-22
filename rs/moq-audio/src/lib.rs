@@ -33,9 +33,9 @@
 //!   these names are unlinked here too.
 //! - `aec` keeps the speaker out of the microphone, which is what a conference
 //!   on a laptop needs to not send itself back. `playback::Engine::canceller`
-//!   builds an `aec::Canceller` from the mix it is playing and
-//!   `capture::Config::aec` hands it to the microphone. Requires the `aec`
-//!   feature, which implies both of the above.
+//!   builds cloneable `aec::Control` handles from the mix it is playing and
+//!   `capture::Config::aec` attaches their adaptive state to one microphone at
+//!   a time. Requires the `aec` feature, which implies both of the above.
 //!
 //! [`Format`] mirrors WebCodecs `AudioData.format`; the helpers convert between
 //! any supported layout and the interleaved `f32` representation libopus

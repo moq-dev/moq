@@ -24,7 +24,10 @@ const RELAY_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const REPORT_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Create a pool and its bounded filled-buffer queue.
-pub(super) fn channel(channels: usize, #[cfg(feature = "aec")] aec: Option<crate::aec::Canceller>) -> (Writer, Reader) {
+pub(super) fn channel(
+	channels: usize,
+	#[cfg(feature = "aec")] aec: Option<crate::aec::Attachment>,
+) -> (Writer, Reader) {
 	let samples = CHUNK_FRAMES * channels;
 	let (filled, pending) = HeapRb::<Filled>::new(DEPTH).split();
 	let (tx, rx) = mpsc::channel(1);
@@ -115,7 +118,7 @@ pub(super) struct Writer {
 	dropped: Arc<AtomicU64>,
 	channels: usize,
 	#[cfg(feature = "aec")]
-	aec: Option<crate::aec::Canceller>,
+	aec: Option<crate::aec::Attachment>,
 }
 
 impl Writer {
@@ -315,13 +318,14 @@ mod tests {
 	}
 
 	#[cfg(feature = "aec")]
-	fn create_with_aec(channels: usize) -> (Writer, Reader, crate::aec::Canceller) {
-		let aec = crate::aec::Canceller::new(
+	fn create_with_aec(channels: usize) -> (Writer, Reader, crate::aec::Control) {
+		let aec = crate::aec::Control::new(
 			Arc::new(crate::playback::Shared::default()),
 			crate::aec::Config::default(),
-		);
-		aec.open(48_000, channels as u32).unwrap();
-		let (writer, reader) = channel(channels, Some(aec.clone()));
+		)
+		.unwrap();
+		let attachment = aec.attach(48_000, channels as u32).unwrap();
+		let (writer, reader) = channel(channels, Some(attachment));
 		(writer, reader, aec)
 	}
 

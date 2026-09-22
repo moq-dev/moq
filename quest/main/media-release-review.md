@@ -28,6 +28,5 @@ Public API/wire impact: review only.
 
 ## Required
 
-- [AEC ownership](/quest/main/audio-aec.md) - microphone attachment is exclusive
 - [Playback outcome](/quest/main/audio-playback.md) - drops are observable
 - [Video output](/quest/main/video-output.md) - output and subscription contracts are distinct

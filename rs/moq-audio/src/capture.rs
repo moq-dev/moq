@@ -14,7 +14,7 @@
 //! each read reports whether that happened so the encoder can re-anchor.
 //!
 //! A microphone that can hear the speaker takes an
-//! [`aec::Canceller`](crate::aec::Canceller) through [`Config::aec`], which runs
+//! [`aec::Control`](crate::aec::Control) through [`Config::aec`], which runs
 //! in that same callback so the buffers leaving here are already clean.
 
 use std::task::Poll;
@@ -78,16 +78,18 @@ pub struct Config {
 	pub sample_rate: Option<u32>,
 	/// Channels to ask the device for. `None` takes its default.
 	pub channels: Option<u32>,
-	/// Cancel the echo of what a speaker is playing, from
+	/// Cancel the echo of what a speaker is playing, controlled by
 	/// [`Engine::canceller`](crate::playback::Engine::canceller).
 	///
 	/// Applies to [`Source::Microphone`] only: system audio is already the
 	/// output, so there is nothing to subtract from it. Costs up to 10 ms of
-	/// capture latency while enabled.
+	/// capture latency while enabled. Clones may toggle the same adaptive state,
+	/// but only one live microphone can attach to it; another open returns
+	/// [`Error::Busy`].
 	///
 	/// Requires the `aec` feature.
 	#[cfg(feature = "aec")]
-	pub aec: Option<crate::aec::Canceller>,
+	pub aec: Option<crate::aec::Control>,
 }
 
 /// One buffer read from a capture source.
@@ -358,17 +360,22 @@ impl Microphone {
 		let sample_rate = stream_config.sample_rate;
 		let channels = stream_config.channels as u32;
 
-		// Tell the canceller what it's listening to before the first callback
-		// arrives, so the buffers it needs are allocated off the audio thread.
+		// Claim the adaptive state and tell it what it is listening to before the
+		// first callback arrives, so the buffers it needs are allocated off the
+		// audio thread. The attachment moves into the callback writer and releases
+		// automatically when this stream tears down.
 		#[cfg(feature = "aec")]
-		if let Some(aec) = &config.aec {
-			aec.open(sample_rate, channels).map_err(Failure::fatal)?;
-		}
+		let aec = config
+			.aec
+			.as_ref()
+			.map(|control| control.attach(sample_rate, channels))
+			.transpose()
+			.map_err(Failure::fatal)?;
 
 		let (mut writer, rx) = buffer::channel(
 			channels as usize,
 			#[cfg(feature = "aec")]
-			config.aec.clone(),
+			aec,
 		);
 		let error_tx = kio::Producer::new(None);
 		let errors = error_tx.consume();
