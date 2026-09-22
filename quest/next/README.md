@@ -96,7 +96,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Publish channel count](/quest/next/publish-audio-channel-count.md) - forcing a channel count on an Audio.Capture stops costing the subscriber gaps of silence
 - [JS abandonment](/quest/next/js-subscribe-abandonment.md) - a viewer returning during IETF subscribe setup keeps its track across microtasks
 - [IETF stream types](/quest/next/ietf-uni-stream-types.md) - padding streams are discarded stream-only and an unknown uni type closes the session, per draft-21
-- [Control timeout code](/quest/next/control-timeout-code.md) - an unanswered control request resets with CONTROL_TIMEOUT on lite and INTERNAL_ERROR on IETF
 - [#2991](/quest/next/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - one dynamic producer per track name in both languages, with the sequence namespace surviving a replacement
 - [JS track end](/quest/next/2318-js-net-remaining-capability-gaps-vs-rs-moq-net-setup-role.md) - js/net declares a track end ahead of the live edge and observes the publisher's SUBSCRIBE_END
 - [E2EE](/quest/next/e2ee/README.md) - TypeScript and Rust peers interoperate over encrypted broadcasts no relay can decrypt
