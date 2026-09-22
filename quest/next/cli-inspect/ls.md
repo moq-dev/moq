@@ -4,12 +4,13 @@
 
 `moq --connect <url> ls [prefix]` prints the broadcasts live under `prefix`,
 one path per line relative to the connect URL's root, and exits once caught
-up. `--follow` keeps running and prints `+ path` / `- path` as broadcasts come
-and go. `--json` prints one `{"path": .., "active": bool}` per line in either
-mode. Like the relay's `/announced`, it lists announced prefixes, which by
-convention are broadcast paths. An `Updated` event (a new route for a path
-already live) is not printed. `--follow` runs until interrupted; if the
-announce stream ends, it exits non-zero.
+up. `--follow` first prints the announce stream's initial replay, one `+ path`
+per active route, then `+ path` / `- path` as broadcasts come and go. `--json`
+prints one `{"path": .., "active": bool}` per line in either mode. Like the
+relay's `/announced`, it lists announced prefixes, which by convention are
+broadcast paths. An `Updated` event (a new route for a path already live) is
+not printed. `--follow` runs until interrupted; if the announce stream ends,
+it exits non-zero.
 
 ## Plan
 
@@ -20,8 +21,8 @@ announce stream ends, it exits non-zero.
   section at `moq ls` next to `curl /announced`. The verb table still lists
   `token` where the code has `auth`; fix it while there.
 - Test: against an in-process relay, snapshot mode prints exactly the
-  announced set and exits, `--follow` prints a `-` when a publisher leaves,
-  and `--json` lines parse.
+  announced set and exits, `--follow` prints the initial replay then a `-` when
+  a publisher leaves, and `--json` lines parse.
 
 ## Required
 
