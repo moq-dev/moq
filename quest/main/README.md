@@ -93,9 +93,6 @@ do not add another media abstraction or a renderer crate during stabilization.
 - [Origin failover machine](/quest/main/origin-failover-machine.md) - a front's
   source selection and track splicing become a pure step function with a
   runtime-free test per transition
-- [Server cancel](/quest/main/moq-server-close.md) - `MoqServer.cancel`
-  releases the listening socket before returning, so a caller can bind again
-  without retrying
 
 ## Related
 
