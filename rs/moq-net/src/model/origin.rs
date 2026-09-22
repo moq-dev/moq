@@ -4452,6 +4452,21 @@ mod tests {
 		resolving.await.expect("resolves");
 	}
 
+	/// A local broadcast serves its path without announcing it, so there is no
+	/// route to wait for: the request resolves on the first pass.
+	#[tokio::test]
+	async fn routed_broadcast_resolves_an_unannounced_local_broadcast() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+
+		let _local = producer.create_broadcast("room/alice").unwrap();
+		let resolved = tokio::time::timeout(Duration::from_secs(5), consumer.routed_broadcast("room/alice"))
+			.await
+			.expect("resolves without an announce")
+			.expect("resolves locally");
+		assert_eq!(resolved.info().path.as_str(), "room/alice");
+	}
+
 	/// A local broadcast appearing at the exact path is a table change too: a
 	/// requester parked on a handler's rejection resolves to it.
 	#[tokio::test]
