@@ -49,8 +49,10 @@ moq.close();
 ```dart
 // Serve. Server.listen binds the socket and streams the sessions that arrive.
 final server = await Server.listen(
-  bind: '127.0.0.1:4443',
-  tlsGenerate: ['localhost'],
+  options: const ListenOptions(
+    bind: '127.0.0.1:4443',
+    tlsGenerate: ['localhost'],
+  ),
 );
 final live = server.createBroadcast('live/camera');
 await for (final request in server.requests()) {
@@ -71,8 +73,9 @@ literal prefix plus an optional relative pattern; `announcement.prefix()`
 stays origin-relative and `captures()` reports the wildcard matches.
 
 Sessions reconnect with backoff when the transport drops and re-announce local
-broadcasts. `reconnect: false` makes the dial one-shot and `backoff:` re-paces
-the retries. `moq.epoch` counts the connections, 1 on the first, pairing with
+broadcasts. `Moq.connect` and `Server.listen` take a `ConnectOptions` /
+`ListenOptions` struct, like Rust: `reconnect: false` makes the dial one-shot
+and `backoff:` re-paces the retries. `moq.epoch` counts the connections, 1 on the first, pairing with
 `session.status()` to log each reconnect; `maxStreams` raises the peer's
 inbound stream cap for a subscriber to many tracks.
 

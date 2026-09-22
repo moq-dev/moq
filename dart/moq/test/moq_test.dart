@@ -24,8 +24,7 @@ void main() {
 
     final client = await Moq.connect(
       'https://$address',
-      tlsVerify: false,
-      bind: '127.0.0.1:0',
+      options: const ConnectOptions(tlsVerify: false, bind: '127.0.0.1:0'),
     ).timeout(timeout);
     final serverSession = await accepted;
     expect(client.bandwidth(), isA<MoqBandwidth>());
@@ -66,8 +65,10 @@ void main() {
 
   test('Server.listen serves a broadcast to a connected client', () async {
     final server = await Server.listen(
-      bind: '127.0.0.1:0',
-      tlsGenerate: ['localhost'],
+      options: const ListenOptions(
+        bind: '127.0.0.1:0',
+        tlsGenerate: ['localhost'],
+      ),
     ).timeout(timeout);
     expect(server.certFingerprints(), isNotEmpty);
 
@@ -79,10 +80,12 @@ void main() {
     // A one-shot dial with explicit pacing: both knobs reach the FFI client.
     final client = await Moq.connect(
       'https://${server.localAddr}',
-      tlsVerify: false,
-      bind: '127.0.0.1:0',
-      reconnect: false,
-      backoff: Backoff(initialUs: 1000, maxUs: 2000, timeoutUs: 3000),
+      options: ConnectOptions(
+        tlsVerify: false,
+        bind: '127.0.0.1:0',
+        reconnect: false,
+        backoff: Backoff(initialUs: 1000, maxUs: 2000, timeoutUs: 3000),
+      ),
     ).timeout(timeout);
     final serverSession = await accepted;
 
