@@ -35,4 +35,4 @@ which is the path a real Firefox viewer takes today.
 ## Related
 
 - [Runtime QA hosts](/quest/future/runtime-qa-hosts.md) - where an engine that will not run on the CI image runs
-- [Failure artifacts](/quest/next/qa-failure-artifacts.md) - shared trace and sample output
+- [Failure artifacts](/quest/main/qa-failure-artifacts.md) - shared trace and sample output

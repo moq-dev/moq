@@ -53,7 +53,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Wildcard](/quest/next/wildcard/README.md) - a relay resolves subscriptions against advertised prefixes, a service claims the prefix it could serve and refuses the rest instead of enumerating broadcasts, and the browser player treats a covering claim as availability
 - [#2152](/quest/next/2152-libmoq-c-abi-catch-up-with-the-moq-ffi-surface.md) - libmoq accepts sessions, the moq-ffi call C still lacks
 - [js/publish discontinuity](/quest/next/js-publish-discontinuity.md) - the JS container producer and js/publish emit the same marker group on encoder restart
-- [Failure artifacts](/quest/next/qa-failure-artifacts.md) - a failing harness run keeps its run directory and a Playwright trace, and CI uploads them
 - [Impaired path](/quest/next/transport-impairment-profile.md) - the transport drills run over a seeded, impaired UDP path on any host
 - [Tooling](/quest/next/tooling/README.md) - justfiles become a one-line menu over `sh/`, one impact map scopes CI, and every workflow step runs a recipe
 - [Generation](/quest/next/hls-generation.md) - init URLs follow the rendition config and segment URLs carry an embedder-supplied generation, so caching can be re-enabled

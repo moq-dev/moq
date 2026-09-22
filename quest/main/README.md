@@ -92,6 +92,8 @@ do not add another media abstraction or a renderer crate during stabilization.
 - [Origin failover machine](/quest/main/origin-failover-machine.md) - a front's
   source selection and track splicing become a pure step function with a
   runtime-free test per transition
+- [Failure artifacts](/quest/main/qa-failure-artifacts.md) - a failing harness
+  run keeps its run directory and a Playwright trace, and CI uploads them
 
 ## Related
 

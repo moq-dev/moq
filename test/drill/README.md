@@ -109,4 +109,4 @@ corpus nobody replays.
   shaper they run under.
 - CI lane scheduling.
 - Failure bundles beyond what the test harness prints, which belongs to
-  `quest/next/qa-failure-artifacts.md`.
+  `quest/main/qa-failure-artifacts.md`.

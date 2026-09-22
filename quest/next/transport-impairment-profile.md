@@ -46,4 +46,4 @@ protocol's reaction to loss and delay, not the kernel's rendering of them.
 
 ## Related
 
-- [Failure artifacts](/quest/next/qa-failure-artifacts.md) - stores profiles, seeds, and traces
+- [Failure artifacts](/quest/main/qa-failure-artifacts.md) - stores profiles, seeds, and traces
