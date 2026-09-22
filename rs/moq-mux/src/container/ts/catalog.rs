@@ -120,7 +120,8 @@ pub struct Mpegts {
 	/// `{"17": {"interval": 2000, "sections": ["<base64>"]}}`: the sections inline
 	/// under the PID with no `table_id` level. Those decode into one entry per
 	/// `table_id` (byte 0 of each section) carrying its sections in
-	/// `SiEntry::sections` and naming no track. Nothing writes that form.
+	/// `SiEntry::sections` and naming no track. Nothing writes that form:
+	/// serializing such an entry fails rather than emit a dangling track reference.
 	#[serde(
 		default,
 		skip_serializing_if = "BTreeMap::is_empty",
@@ -203,19 +204,30 @@ pub struct SiEntry {
 	/// The sections themselves, only for an entry read from the pre-`table_id`
 	/// catalog form (see [`Mpegts::si`]): that form carried them inline, so there
 	/// is no track to subscribe to and export re-emits these instead. Empty for an
-	/// entry that names a track, and never written.
+	/// entry that names a track. Serializing an entry that carries them fails.
 	#[serde(skip)]
 	pub(crate) sections: Vec<Bytes>,
 }
 
 /// Encode [`Mpegts::si`] with both integer keys as decimal strings.
+///
+/// An entry carrying inline sections (see [`Mpegts::si`]) names no track, so
+/// there is nothing faithful to write for it: serialization fails rather than
+/// emit a dangling empty track reference.
 fn serialize_si<S: serde::Serializer>(
 	si: &BTreeMap<u16, BTreeMap<u8, SiEntry>>,
 	serializer: S,
 ) -> Result<S::Ok, S::Error> {
-	use serde::ser::SerializeMap;
+	use serde::ser::{Error, SerializeMap};
 	let mut map = serializer.serialize_map(Some(si.len()))?;
 	for (pid, tables) in si {
+		for entry in tables.values() {
+			if !entry.sections.is_empty() {
+				return Err(S::Error::custom(format!(
+					"inline SI sections on PID {pid} name no track and cannot be serialized"
+				)));
+			}
+		}
 		let tables: BTreeMap<String, &SiEntry> = tables.iter().map(|(id, entry)| (id.to_string(), entry)).collect();
 		map.serialize_entry(&pid.to_string(), &tables)?;
 	}
@@ -557,9 +569,26 @@ mod test {
 		assert_eq!(eit[&0x50].sections.len(), 1);
 		assert_eq!(eit[&0x50].interval, Some(Duration::from_secs(10)));
 
-		// The inline form never comes back out: the sections field is not serialized.
+		// The inline form never comes back out: an entry carrying sections names
+		// no track, so serialization fails rather than emit a dangling reference.
+		serde_json::to_string(&mpegts).expect_err("inline sections must not serialize");
+	}
+
+	#[test]
+	fn track_backed_si_roundtrip_after_legacy_read() {
+		// A catalog mixing the legacy inline form with a track-backed entry still
+		// writes the track-backed half; only the entry naming no track is refused.
+		let json = r#"{"si": {
+			"17": {"sections": ["QvAlAAHBAAD/Af8AAfyAFEgSAQZGRm1wZWcJU2VydmljZTAxd3xDyg=="]},
+			"18": {"78": {"track": "si/18/78", "interval": 2000}}
+		}}"#;
+		let mut mpegts: Mpegts = serde_json::from_str(json).unwrap();
+		serde_json::to_string(&mpegts).expect_err("the inline entry must not serialize");
+		mpegts.si.remove(&0x0011);
 		let json = serde_json::to_string(&mpegts).unwrap();
-		assert!(!json.contains("sections"), "{json}");
+		assert!(json.contains("\"si/18/78\""), "track-backed entry still writes: {json}");
+		let parsed: Mpegts = serde_json::from_str(&json).unwrap();
+		assert_eq!(parsed, mpegts);
 	}
 
 	#[test]
