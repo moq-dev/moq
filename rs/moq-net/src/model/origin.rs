@@ -977,7 +977,7 @@ pub struct Producer {
 	// downstream relays can detect loops and prefer the shortest path.
 	hop: Hop,
 
-	// The tree and the absolute patterns this handle may publish under.
+	// The absolute patterns this handle may publish under.
 	scope: OriginScope,
 
 	// The prefix that is automatically stripped from all paths.
@@ -1141,8 +1141,8 @@ impl Producer {
 			return Err(Error::Unauthorized);
 		}
 		// A decoded prefix and suffix are each within the wire limit, but their
-		// join might not be. Enforcing here bounds the tree depth and guarantees the path
-		// can be re-encoded when forwarded.
+		// join might not be. Enforcing here bounds the table depth and guarantees the
+		// path can be re-encoded when forwarded.
 		if full.parts().count() > Path::MAX_PARTS {
 			return Err(BoundsExceeded.into());
 		}
@@ -1195,9 +1195,9 @@ impl Producer {
 
 	/// Mint a standalone source broadcast for a served-route request: it carries
 	/// this origin's cache policy and ingress attribution, but
-	/// is *not* inserted into the broadcast tree. Sessions answer
+	/// is *not* entered into the route table. Sessions answer
 	/// [`Dynamic`] requests with one of these; the requester already holds
-	/// the request's result channel, so the tree never needs to resolve it.
+	/// the request's result channel, so the table never needs to resolve it.
 	pub(crate) fn create_source(&self, path: impl AsPath) -> broadcast::Producer {
 		let path = path.as_path();
 		let full = self.root.join(&path).to_owned();
@@ -1294,7 +1294,7 @@ impl Producer {
 		})
 	}
 
-	/// Cheap read handle over this origin's broadcast tree.
+	/// Cheap read handle over this origin's route table.
 	///
 	/// Use [`Consumer::announced`] to register interest and start receiving
 	/// announcement events; the consumer itself does not allocate any channels.
@@ -1603,8 +1603,8 @@ impl DriverState {
 	/// front, retract every route, end announcement cursors, and reject pending
 	/// requests.
 	fn teardown(&mut self) {
-		// Cancel queued and running lifecycle work first, so nothing re-attaches
-		// or serves while the walks below empty the tree.
+		// Cancel queued and running lifecycle work first, so no front serves
+		// while the table is ended below.
 		drop(std::mem::replace(&mut self.set, TaskSet::owned()));
 
 		// Refuse new work and take the pending requests, under the same lock
@@ -2127,7 +2127,9 @@ async fn run_front(task: FrontTask) {
 					},
 					Err(err) => Err(err),
 				};
-				if result.is_ok() {
+				// Staged only while the track has a reader: without one the machine
+				// will not splice, and a held copy would keep the source subscribed.
+				if result.is_ok() && io.used {
 					io.staged = Some((source, copy));
 				}
 				Event::TrackInfo {
@@ -2153,6 +2155,12 @@ async fn run_front(task: FrontTask) {
 			Step::Demand(name) => {
 				let Some(io) = tracks.get_mut(&name) else { continue };
 				io.used = io.resume.is_used();
+				if !io.used {
+					// Nothing will be spliced now: let go of the copies a query
+					// holds, or the source stays subscribed with nobody reading.
+					io.query = None;
+					io.staged = None;
+				}
 				match io.used {
 					true => Event::Used { track: name },
 					false => Event::Unused {
@@ -2478,8 +2486,8 @@ impl RouteTable {
 /// it, and the remotely-served fronts.
 ///
 /// Carried in a [`kio::Shared`], so producers, consumers, and handlers work
-/// under one lock. Local broadcasts live in the tree ([`OriginNode`]) instead;
-/// this holds everything advertised or served on demand.
+/// under one lock. Broadcasts published here are route table entries like the
+/// routes announced from elsewhere; this holds everything that serves a path.
 #[derive(Default)]
 struct OriginState {
 	// The announced routes, keyed by prefix. The table holds one entry per live
@@ -3007,7 +3015,7 @@ impl Consume<track::Consumer> for track::Consumer {
 	}
 }
 
-/// Cheap read handle over an origin's broadcast tree and route table.
+/// Cheap read handle over an origin's route table.
 ///
 /// Clones share the underlying state without allocating any per-cursor
 /// resources. To receive route announcements, call [`Self::announced`]; to
@@ -3261,23 +3269,21 @@ impl Consumer {
 
 	/// Resolve a broadcast by exact path.
 	///
-	/// Returns a [`kio::Pending`] future (resolved synchronously where possible),
-	/// mirroring [`track::Consumer::fetch_group`](track::Consumer::fetch_group).
-	/// The lookup order:
+	/// Returns a [`kio::Pending`] future, mirroring
+	/// [`track::Consumer::fetch_group`](track::Consumer::fetch_group). Every
+	/// path resolves through a front the origin's [`Driver`] runs: the request
+	/// mints one or joins the one already serving the path, and the front picks
+	/// the best route covering it (a broadcast published on this origin at the
+	/// exact path first, announced or not; then the most specific prefix, then
+	/// the cheapest) and materializes it, from the broadcast itself or from the
+	/// peer that announced the route. When its serving source dies or a better
+	/// qualifying route appears, the front re-splices through the best route
+	/// sharing its first hop at a group boundary, invisibly to subscribers. A
+	/// change that does not preserve the first hop ends the broadcast instead,
+	/// and the next request re-serves the path.
 	///
-	/// 1. A local broadcast at the exact path ([`Producer::create_broadcast`]),
-	///    announced or not, resolves immediately.
-	/// 2. Otherwise the best announced route covering the path (most specific
-	///    prefix first, then cheapest) serves it on demand: sessions materialize
-	///    the path from the peer that announced the route. Concurrent requests
-	///    for the same path coalesce onto one shared front, which outlives any
-	///    single route: when its serving route dies or a better one appears, the
-	///    front re-splices through the best route sharing its first hop at a
-	///    group boundary, invisibly to subscribers. A route change that does not
-	///    preserve the first hop ends the broadcast instead, and the next
-	///    request re-serves the path.
-	///
-	/// The returned future resolves to [`Error::Unroutable`] when neither exists.
+	/// The returned future fails with [`Error::Unroutable`] at once when nothing
+	/// covers the path.
 	/// A route claims capability, not inventory: resolving a covered path
 	/// succeeds optimistically, and a path that names nothing surfaces as
 	/// [`Error::NotFound`] on its tracks instead.

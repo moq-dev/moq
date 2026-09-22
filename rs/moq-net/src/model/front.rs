@@ -219,6 +219,8 @@ pub(super) struct Front {
 }
 
 impl Front {
+	/// A front with no source and no tracks; `linger` is how long an unread
+	/// track keeps its delivered groups spliced.
 	pub(super) fn new(linger: Duration) -> Self {
 		Self {
 			identity: Identity::Undetermined,
