@@ -35,7 +35,9 @@ Settled while planning:
   and quest 2 builds on it.
 
 The line owns the end-to-end check: a relay test that subscribes to
-`.json.z` and `.fb.z` for the same tick and asserts that the counters agree.
+`.json.z` and `.fb.z`, pairs frames from the same tick (deterministically,
+for example by driving one tick under paused time), and asserts that the
+counters agree.
 
 ## Quests
 

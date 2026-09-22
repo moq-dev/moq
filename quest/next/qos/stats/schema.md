@@ -50,8 +50,9 @@ what a subscriber received and played, per audio and video. The relay is
   `Merge` sums counters, leaves gauges out of the sum, and keeps the newest
   liveness pair.
 - The FlatBuffers flavor ([binary stats](/quest/next/stats-binary/README.md))
-  leaves an optional nested table for `E`; give `Ext` a FlatBuffers encoding
-  or refuse `.fb.z` for a non-`()` extension, whichever is simpler.
+  leaves an optional nested table for `E`. Either give `Ext` a FlatBuffers
+  encoding, or have a non-`()` producer refuse `.fb.z` requests and document
+  that. Whichever you choose, the contract must be explicit.
 - Naming: `.stats` as a broadcast suffix, documented in the `moq-stats`
   crate docs and `doc/lib/rs/index.md` beside the relay's prefix convention,
   with `moq_stats::is_stats(path)` so a dashboard filters telemetry from
