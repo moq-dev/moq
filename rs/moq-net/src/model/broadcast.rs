@@ -535,7 +535,8 @@ impl Alive {
 	/// and drop the announcer, so a later `announce` fails with `Closed`.
 	fn retire(&self) {
 		let announcer = self.announcer.lock().take();
-		// Dropped outside the announcer lock, like `unannounce`.
+		// Dropped outside the announcer lock: the entry's removal re-syncs the
+		// origin's cursors under the origin's own lock.
 		drop(announcer);
 	}
 }

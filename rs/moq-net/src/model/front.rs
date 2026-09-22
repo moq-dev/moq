@@ -174,8 +174,6 @@ enum TrackState {
 	/// Nobody reads it: the copy was dropped, the delivered groups stay
 	/// spliced until the linger expires.
 	Parked { since: Instant },
-	/// Finished or aborted.
-	Done,
 }
 
 #[derive(Clone, Debug)]
@@ -403,8 +401,9 @@ impl Front {
 			self.resolved = true;
 			actions.push(Action::Resolve);
 		}
+		// A read track is never parked, so idle is the only state to re-query.
 		for (name, track) in &mut self.tracks {
-			if track.used && matches!(track.state, TrackState::Idle | TrackState::Parked { .. }) {
+			if track.used && track.state == TrackState::Idle {
 				track.state = TrackState::Querying { source };
 				actions.push(Action::Query {
 					track: name.clone(),
@@ -513,8 +512,11 @@ impl Front {
 			return;
 		}
 		match result {
+			// Over for good: the track leaves the machine, so a name served again
+			// later starts afresh and a long-lived front does not keep a stub per
+			// name it ever served.
 			Ok(()) => {
-				track.state = TrackState::Done;
+				self.tracks.remove(&name);
 				actions.push(Action::Finish { track: name });
 			}
 			// Died mid-serve after delivering: normal failover, re-splice from
@@ -556,7 +558,7 @@ impl Front {
 		}
 		if track.refused.contains(&source) {
 			let err = track.refusal.clone().unwrap_or(Error::NotFound);
-			track.state = TrackState::Done;
+			self.tracks.remove(&name);
 			actions.push(Action::Abort { track: name, err });
 			return;
 		}
