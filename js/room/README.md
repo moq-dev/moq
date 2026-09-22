@@ -61,6 +61,7 @@ const room = new Room({ connection, identity });
 
 // room.remotes is a Map<identity, Remote>. Each Remote has camera/screen
 // Members; assign member.canvas and set member.muted to false to play audio.
+// member.player exposes the complete Watch.Player pipeline.
 ```
 
 hang.live should depend on this package for `Room`, `Local`, `Remote`, and the `hang/*.json` metadata tracks. Location stays an app-defined catalog extension (`TRACK.location`). hang.live's JSON chat (`TRACK.chat` = `hang/chat.json`) is also an extension; the JSON window track is `Chat.TRACK` (`"chat"`).

@@ -24,6 +24,8 @@ export class Member {
 	/** Playback volume, 0..1. */
 	readonly volume = new Signal(0.5);
 
+	/** Playback pipeline for this member. */
+	readonly player: Watch.Player;
 	/** Watched broadcast and catalog. */
 	readonly broadcast: Watch.Broadcast;
 	/** Video decoding pipeline. */
@@ -40,8 +42,6 @@ export class Member {
 	/** Published presence fields. */
 	readonly preview: Getter<Preview>;
 
-	#videoEnabled = new Signal(false);
-	#audioEnabled = new Signal(false);
 	#metadata: ReturnType<typeof consume>;
 	#signals = new Effect();
 
@@ -49,61 +49,20 @@ export class Member {
 		this.kind = kind;
 		this.path = path;
 
-		this.broadcast = new Watch.Broadcast({
+		this.player = new Watch.Player({
 			origin: connection.origin,
-			enabled: true,
+			probe: connection.probe,
 			name: path,
-			announced: true,
-		});
-		this.#signals.cleanup(() => this.broadcast.close());
-
-		const videoSource = new Watch.Video.Source({
-			broadcast: this.broadcast,
-			supported: Watch.Video.Decoder.supported,
-			probe: connection.probe,
-		});
-		const audioSource = new Watch.Audio.Source({
-			broadcast: this.broadcast,
-			supported: Watch.Audio.Decoder.supported,
-		});
-		this.#signals.cleanup(() => {
-			videoSource.close();
-			audioSource.close();
-		});
-
-		const sync = new Watch.Sync({
-			delay: "auto",
-			probe: connection.probe,
-		});
-		this.#signals.cleanup(() => sync.close());
-
-		this.video = new Watch.Video.Decoder({ source: videoSource, sync, enabled: this.#videoEnabled });
-		this.audio = new Watch.Audio.Decoder({ source: audioSource, sync, enabled: this.#audioEnabled });
-		this.#signals.cleanup(() => {
-			this.video.close();
-			this.audio.close();
-		});
-
-		this.renderer = new Watch.Video.Renderer({
-			decoder: this.video,
 			canvas: this.canvas,
-		});
-		this.emitter = new Watch.Audio.Emitter({
-			source: this.audio,
-			volume: this.volume,
 			muted: this.muted,
+			volume: this.volume,
 		});
-		this.#signals.cleanup(() => {
-			this.renderer.close();
-			this.emitter.close();
-		});
-
-		this.#signals.run((effect) => {
-			this.#videoEnabled.set(effect.get(this.renderer.out.visible));
-		});
-		this.#signals.run((effect) => {
-			this.#audioEnabled.set(effect.get(this.emitter.out.enabled));
-		});
+		this.#signals.cleanup(() => this.player.close());
+		this.broadcast = this.player.broadcast;
+		this.video = this.player.video;
+		this.audio = this.player.audio;
+		this.renderer = this.player.renderer;
+		this.emitter = this.player.emitter;
 
 		this.#metadata = consume(this.broadcast);
 		this.user = this.#metadata.user;
