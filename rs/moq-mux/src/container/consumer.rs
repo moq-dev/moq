@@ -270,7 +270,12 @@ impl<F: Container> Consumer<F> {
 						// evicted alongside it, so jump straight to that group instead of
 						// stepping one-by-one and then blocking on a sequence gap of groups
 						// that will never arrive.
-						tracing::warn!(error = ?e, "current group evicted; skipping to next buffered group");
+						tracing::warn!(
+							track = self.track.name(),
+							group = group.group.sequence,
+							error = ?e,
+							"current group evicted; skipping to next buffered group"
+						);
 						self.pending.pop_front();
 						self.current = self.pending.front().map_or(self.current + 1, |g| g.sequence);
 						continue 'read;
