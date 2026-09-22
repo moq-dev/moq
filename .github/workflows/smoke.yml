@@ -14,6 +14,7 @@ on:
   # validated before it merges. Source regressions still surface nightly.
   pull_request:
     paths:
+      - "test/lib/**"
       - "test/smoke/**"
       # The TS/IRD compliance harness runs in the same job (see below).
       - "test/ts/**"

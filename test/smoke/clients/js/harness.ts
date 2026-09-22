@@ -6,6 +6,7 @@
  *
  * @module
  */
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { type Browser, type BrowserContext, chromium, type Page } from "playwright";
 import { CONTROL, type FixtureState, type Resources, type Sample, type SmokeControl } from "./src/contract";
@@ -106,7 +107,7 @@ const traces: Array<{ context: BrowserContext; name: string }> = [];
 export async function startTrace(page: Page, name: string): Promise<void> {
 	if (!process.env.MOQ_TEST_RUN) return;
 	await page.context().tracing.start({ screenshots: true, snapshots: true });
-	traces.push({ context: page.context(), name });
+	traces.push({ context: page.context(), name: `${name}-${randomUUID()}` });
 }
 
 /** Save a trace per started context into the run directory when `failed`, and discard it otherwise. */

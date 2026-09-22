@@ -41,6 +41,7 @@ on:
       - "rs/kio/**"
       - "js/wasm/**"
       - "test/wasm/**"
+      - "test/lib/**"
       - "justfile"
       - "test/justfile"
       - ".cargo/config.toml"
