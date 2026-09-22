@@ -169,6 +169,7 @@ type SiEntry = {
 
 JSON object keys are strings, so both are decimal with no leading zeros: `"17"` for PID 0x0011, `"66"` for `table_id` 0x42.
 A consumer MUST refuse a catalog whose PID key is not an integer in 0..8191, or whose `table_id` key is not an integer in 0..255.
+A consumer MAY additionally accept the pre-`table_id` form, where a PID maps to `{"interval", "sections"}` with the sections inline: it decodes into one entry per `table_id` (byte 0 of each section) naming no track. A producer MUST NOT write that form.
 
 `table_id` is byte 0 of generic section syntax ({{mpeg2}} Section 2.4.4), so the key is no less generic than the PID; which ranges mean what is a delivery-system convention this document does not rely on.
 
@@ -344,6 +345,7 @@ A broadcast demultiplexed from a DVB transport stream: video and audio described
 - The `Si` type is keyed by `table_id` only; the PID lives on the enclosing `si` map.
 - A consumer refuses a catalog with an unrecognized `framing` or an invalid `si` map key.
 - Added `muxRate`, the source's constant multiplex rate.
+- A consumer may read the pre-`table_id` inline `sections` form; writing stays track-only.
 
 
 # Acknowledgments

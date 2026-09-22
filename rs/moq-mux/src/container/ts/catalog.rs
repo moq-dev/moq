@@ -120,7 +120,7 @@ pub struct Mpegts {
 	/// `{"17": {"interval": 2000, "sections": ["<base64>"]}}`: the sections inline
 	/// under the PID with no `table_id` level. Those decode into one entry per
 	/// `table_id` (byte 0 of each section) carrying its sections in
-	/// [`SiEntry::sections`] and naming no track. Nothing writes that form.
+	/// `SiEntry::sections` and naming no track. Nothing writes that form.
 	#[serde(
 		default,
 		skip_serializing_if = "BTreeMap::is_empty",
@@ -233,7 +233,7 @@ where
 	/// The pre-`table_id` form of one PID's entry.
 	#[serde_as]
 	#[derive(Deserialize)]
-	#[serde(rename_all = "camelCase")]
+	#[serde(rename_all = "camelCase", deny_unknown_fields)]
 	struct Inline {
 		#[serde_as(as = "Vec<Base64>")]
 		sections: Vec<Bytes>,
@@ -583,6 +583,17 @@ mod test {
 	fn invalid_si_pid_key_is_refused() {
 		let json = r#"{ "si": { "not-a-pid": { "66": { "track": "si" } } } }"#;
 		serde_json::from_str::<Mpegts>(json).expect_err("a non-integer SI PID key must fail");
+	}
+
+	#[test]
+	fn mixed_si_forms_are_refused() {
+		// `sections` alongside any other key would silently drop the new-form
+		// entries: the inline reader ignores unknown keys without this.
+		let json = r#"{ "si": { "17": {
+			"sections": ["QvAlAAHBAAD/Af8AAfyAFEgSAQZGRm1wZWcJU2VydmljZTAxd3xDyg=="],
+			"66": { "track": "si/17/66" }
+		} } }"#;
+		serde_json::from_str::<Mpegts>(json).expect_err("sections with a table_id entry must fail");
 	}
 
 	/// The `mpegts` section is not hang-only: the same JSON rides the MSF catalog track, so a
