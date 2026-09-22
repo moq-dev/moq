@@ -239,8 +239,13 @@ fn bench_serve_idle(c: &mut Criterion) {
 						.unwrap()
 				})
 				.collect();
-			let waiter = kio::Waiter::noop();
 			b.iter(|| {
+				// A fresh waiter per sweep. A live registration keeps the waiter's
+				// `Weak` in each route's list until it drops, so a waiter reused
+				// across sweeps would stack one per route per iteration. Production
+				// retires the parked waiter the same way: `Park::hold` drops a
+				// still-registered waiter before the next poll registers again.
+				let waiter = kio::Waiter::noop();
 				// Nothing is queued, so every poll parks again: the idle sweep.
 				for dynamic in &dynamics {
 					assert!(dynamic.poll_requested_broadcast(&waiter).is_pending());
