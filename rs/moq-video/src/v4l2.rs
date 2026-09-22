@@ -1313,7 +1313,7 @@ fn interleave(dst: &mut [u8], at: Component, u: &[u8], v: &[u8], width: usize, r
 			.get_mut(start..start + width * 2)
 			.ok_or_else(|| short(len, start + width * 2))?;
 		let (u, v) = (&u[row * width..][..width], &v[row * width..][..width]);
-		for (pair, (u, v)) in out.chunks_exact_mut(2).zip(u.iter().zip(v)) {
+		for (pair, (u, v)) in out.as_chunks_mut::<2>().0.iter_mut().zip(u.iter().zip(v)) {
 			pair[0] = *u;
 			pair[1] = *v;
 		}
@@ -1342,7 +1342,7 @@ fn deinterleave(u: &mut [u8], v: &mut [u8], src: &[u8], at: Component, width: us
 			.get(start..start + width * 2)
 			.ok_or_else(|| short(src.len(), start + width * 2))?;
 		let (u, v) = (&mut u[row * width..][..width], &mut v[row * width..][..width]);
-		for (pair, (u, v)) in line.chunks_exact(2).zip(u.iter_mut().zip(v)) {
+		for (pair, (u, v)) in line.as_chunks::<2>().0.iter().zip(u.iter_mut().zip(v)) {
 			*u = pair[0];
 			*v = pair[1];
 		}
