@@ -58,7 +58,6 @@
 //!}
 //!```
 //!
-//! Have a look at the examples to learn more about device and buffer management.
 
 // Every call is a Linux ioctl, so elsewhere the crate is an empty stub and
 // moq-video only depends on it there.
