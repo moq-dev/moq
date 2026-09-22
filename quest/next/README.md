@@ -23,7 +23,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Origin narrowing](/quest/next/origin-narrowing.md) - a live origin grant narrows in place and ends the subscriptions it no longer covers, the deafen boundary #2714 asked for
 - [Relay embedding](/quest/next/relay-embed.md) - an embedder reads the resolved config, reuses the CLI merge, registers listener health, and spawns a test relay without TOML strings
 - [Auth embedder](/quest/next/auth-embedder.md) - the lease owns its re-check clock, a gateway session holds a lease, and `Cluster::admit` scopes and tags origins in one call
-- [Binding parity](/quest/next/binding-parity.md) - every wrapper reaches every moq-ffi method in its own idiom with moq-net's verbs
 - [Binding docs](/quest/next/binding-docs.md) - every binding doc sample names a symbol that exists, checked nightly
 - [Gateway embedding](/quest/next/gateway-embed.md) - moq-hls, moq-rtmp, and moq-rtc expose the loop their binaries run to an in-process embedder
 - [Catalog consumer](/quest/next/hang-catalog-consumer.md) - reading a catalog is one call in Rust and JS, and JS gains a timeline consumer

@@ -31,4 +31,4 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Binding parity](/quest/next/binding-parity.md) - document the surface after it settles
+- [Binding parity](/quest/main/binding-parity.md) - document the surface after it settles
