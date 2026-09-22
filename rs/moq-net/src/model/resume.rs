@@ -377,6 +377,7 @@ impl Producer {
 	/// copy can die, while the segment stays spliced so readers keep what it already
 	/// delivered. That makes this, not the caller's own handle on the serving route,
 	/// the condition for arming an idle release.
+	#[cfg(test)]
 	pub(crate) fn is_spliced(&self) -> bool {
 		!self.state.read().segments.is_empty()
 	}
