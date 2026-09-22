@@ -35,7 +35,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [io_uring handshake cancellation](/quest/next/uring-handshake-cancel.md) - dropping a pending handshake releases its connection while the worker keeps running
 - [io_uring handshake flush](/quest/next/uring-handshake-flush.md) - a dial resolves only once its last handshake flight is on the wire, never stranding the peer
 - [Flaky timing tests](/quest/next/flaky-timing-tests.md) - three real-clock tests become deterministic instead of failing under load
-- [Binding stats docs](/quest/next/binding-stats-docs.md) - every binding's doc page lists its connection stats fields with units
 
 - [Audio jitter target](/quest/next/audio-jitter-target/README.md) - the audio playout target is a measured estimate of arrival timing in both languages, not a round-trip guess
 - [Jitter clock](/quest/next/jitter-flush-clock.md) - moq-mux: catalog jitter measures how far behind the media clock an encoder flushes, fed by encoders only, and never decreases
