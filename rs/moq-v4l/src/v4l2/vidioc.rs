@@ -155,17 +155,30 @@ pub const VIDIOC_REMOVE_BUFS: _IOC_TYPE = _IOWR!(b'V', 104, v4l2_remove_buffers)
 mod tests {
 	use super::*;
 
-	/// The values `videodev2.h` expands to on a 64-bit host. A wrong code is
-	/// `ENOTTY` at runtime on whichever board reaches it first, so the shifts,
-	/// the direction bits, and the generated struct sizes are pinned here.
+	/// The values `videodev2.h` expands to. A wrong code is `ENOTTY` at
+	/// runtime on whichever board reaches it first, so the shifts, the
+	/// direction bits, and the generated struct sizes are pinned here.
 	#[test]
 	fn codes_match_the_header() {
-		assert_eq!(VIDIOC_QUERYCAP, 0x8068_5600);
-		assert_eq!(VIDIOC_S_FMT, 0xc0d0_5605);
-		assert_eq!(VIDIOC_STREAMON, 0x4004_5612);
-		assert_eq!(VIDIOC_DQEVENT, 0x8088_5659);
-		assert_eq!(VIDIOC_SUBSCRIBE_EVENT, 0x4020_565a);
-		assert_eq!(VIDIOC_G_SELECTION, 0xc040_565e);
-		assert_eq!(VIDIOC_DECODER_CMD, 0xc048_5660);
+		// The codes are `c_ulong` (`c_int` on musl), so compare as `u32`.
+		assert_eq!(VIDIOC_QUERYCAP as u32, 0x8068_5600);
+		// `v4l2_window` drops pointer padding: a 208-byte format shrinks to 204.
+		#[cfg(target_pointer_width = "64")]
+		assert_eq!(VIDIOC_S_FMT as u32, 0xc0d0_5605);
+		#[cfg(target_pointer_width = "32")]
+		assert_eq!(VIDIOC_S_FMT as u32, 0xc0cc_5605);
+		assert_eq!(VIDIOC_STREAMON as u32, 0x4004_5612);
+		// `timespec` shrinks 16 -> 8 on ILP32 and `value64` blocks to the ABI's
+		// `u64` alignment: a 136-byte event becomes 128 (align 8, e.g. arm) or
+		// 120 (align 4, e.g. x86).
+		#[cfg(target_pointer_width = "64")]
+		assert_eq!(VIDIOC_DQEVENT as u32, 0x8088_5659);
+		#[cfg(all(target_pointer_width = "32", target_arch = "x86"))]
+		assert_eq!(VIDIOC_DQEVENT as u32, 0x8078_5659);
+		#[cfg(all(target_pointer_width = "32", not(target_arch = "x86")))]
+		assert_eq!(VIDIOC_DQEVENT as u32, 0x8080_5659);
+		assert_eq!(VIDIOC_SUBSCRIBE_EVENT as u32, 0x4020_565a);
+		assert_eq!(VIDIOC_G_SELECTION as u32, 0xc040_565e);
+		assert_eq!(VIDIOC_DECODER_CMD as u32, 0xc048_5660);
 	}
 }
