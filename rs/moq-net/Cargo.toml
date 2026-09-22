@@ -66,6 +66,10 @@ path = "examples/fuzz-seeds.rs"
 required-features = ["fuzz"]
 
 [[bench]]
+name = "origin"
+harness = false
+
+[[bench]]
 name = "group"
 harness = false
 

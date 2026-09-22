@@ -701,6 +701,13 @@ struct RouteEntry {
 	/// announcement (a broadcast's exact path, or [`Producer::announce`]), whose
 	/// covered paths resolve only through the tree.
 	server: Option<kio::Shared<ServeState>>,
+	/// [`prefix_claim`] of [`Self::prefix`], built once here.
+	///
+	/// The announce sync evaluates a route's claim once per (cursor, route) pair,
+	/// and building one allocates a segment vector and a canonical string. Holding
+	/// it makes that visit a comparison. `None` when the prefix forms no pattern,
+	/// which reads exactly as the per-call `Err` did: the entry is invisible.
+	claim: Option<Pattern>,
 }
 
 impl RouteEntry {
@@ -721,12 +728,12 @@ impl RouteEntry {
 
 	/// Whether this route and `allowed` share any path beneath the advertised prefix.
 	fn overlaps(&self, allowed: &Patterns) -> bool {
-		let Ok(claim) = prefix_claim(&self.prefix) else {
+		let Some(claim) = self.claim.as_ref() else {
 			return false;
 		};
 		self.scope.iter().any(|scope| {
 			scope
-				.intersect(&claim)
+				.intersect(claim)
 				.is_ok_and(|scoped| scoped.iter().any(|restriction| allowed.overlaps(restriction)))
 		})
 	}
@@ -817,9 +824,12 @@ struct TableCursor {
 impl TableCursor {
 	/// Where `prefix` presents on this cursor, named relative to the cursor root.
 	/// The prefix stays a prefix; the pattern scope only decides visibility.
-	fn presented(&self, prefix: &Path) -> Option<PathOwned> {
-		let claim = prefix_claim(prefix).ok()?;
-		if !self.allowed.overlaps(&claim) {
+	/// `claim` is the prefix's [`prefix_claim`], which the caller already holds:
+	/// building one allocates, and the sweeps below ask this per route per
+	/// cursor. `None` is that claim having failed to build, which presents
+	/// nowhere.
+	fn presented(&self, prefix: &Path, claim: Option<&Pattern>) -> Option<PathOwned> {
+		if !self.allowed.overlaps(claim?) {
 			return None;
 		}
 
@@ -1490,6 +1500,7 @@ impl Announcing {
 				via,
 				local: self.local,
 				server: server.clone(),
+				claim: prefix_claim(prefix).ok(),
 			});
 			shared.sync_route(prefix);
 			ids.push(id);
@@ -2870,8 +2881,10 @@ impl OriginState {
 	fn sync_route(&mut self, prefix: &Path) {
 		// Split borrows: the recompute reads `routes` while mutating a cursor.
 		let routes = &self.routes;
+		// The claim depends only on the prefix, so build it once for the whole sweep.
+		let claim = prefix_claim(prefix).ok();
 		for cursor in self.cursors.values_mut() {
-			if let Some(presented) = cursor.presented(prefix) {
+			if let Some(presented) = cursor.presented(prefix, claim.as_ref()) {
 				Self::sync_cursor(routes, cursor, &presented);
 			}
 		}
@@ -2886,7 +2899,7 @@ impl OriginState {
 		let candidates: Vec<&RouteEntry> = routes
 			.iter()
 			.filter(|entry| cursor.visible(entry))
-			.filter(|entry| cursor.presented(&entry.prefix).as_ref() == Some(presented))
+			.filter(|entry| cursor.presented(&entry.prefix, entry.claim.as_ref()).as_ref() == Some(presented))
 			.collect();
 		let most = candidates.iter().map(|entry| entry.prefix.len()).max();
 		let best = most.and_then(|most| {
@@ -2943,7 +2956,7 @@ impl OriginState {
 		let routes = &self.routes;
 		let mut presented: Vec<PathOwned> = Vec::new();
 		for entry in routes {
-			if let Some(p) = cursor.presented(&entry.prefix)
+			if let Some(p) = cursor.presented(&entry.prefix, entry.claim.as_ref())
 				&& !presented.contains(&p)
 			{
 				presented.push(p);
