@@ -14,10 +14,15 @@ use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{Pattern, Patterns, Timestamp, announce, broadcast, kio, origin};
+use moq_net::{Hop, Hops, Pattern, Patterns, Timestamp, announce, broadcast, kio, origin};
 
 /// `(publishers, subscribers)` shapes for the fan-out benchmarks.
 const SHAPES: [(usize, usize); 3] = [(100, 10), (1_000, 100), (1_000, 1_000)];
+
+/// `(duplicates, subscribers)` shapes for one *contended* prefix: how many
+/// routes cover the same path, against how many cursors watch it. The first row
+/// is a live fleet's mesh width; the rest sweep past it so the slope is visible.
+const CONTENDED: [(usize, usize); 4] = [(30, 30), (60, 60), (240, 60), (240, 240)];
 
 /// An origin with `publishers` broadcasts under `room/` and `subscribers`
 /// cursors watching everything. The handles are held: dropping a broadcast
@@ -113,6 +118,68 @@ fn bench_announce_fleet(c: &mut Criterion) {
 		});
 	}
 	group.finish();
+}
+
+/// One route flapping at a prefix that `duplicates` others already cover.
+///
+/// `announce_fleet` gives every path a single announcer, which is the shape a
+/// publisher produces. A mesh produces the other one: the same path arrives
+/// once per peer it can travel through, so a prefix carries one entry per peer.
+/// The trie narrows a change to the touched prefix, but picking the winner
+/// there still visits every entry at it, once per watching cursor, so both are
+/// swept.
+///
+/// The arriving route is priced below every incumbent so it takes the prefix
+/// outright: each cursor is told twice per iteration, once for the new winner
+/// and once for the incumbent taking the prefix back when it retracts. Equal
+/// costs would instead tie-break on a hash of the hop chain, which decides the
+/// winner but is not what a reconnecting peer does.
+fn bench_announce_duplicate(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/announce_duplicate");
+	for (duplicates, subscribers) in CONTENDED {
+		let id = BenchmarkId::from_parameter(format!("{duplicates}d_{subscribers}s"));
+		group.bench_function(id, |b| {
+			let (producer, _driver) = origin::Producer::new(origin::Config::default());
+			let consumer = producer.consume();
+			// Every peer announces the one path, each under its own hop chain so
+			// the entries are distinct routes rather than one re-priced in place.
+			let _routes: Vec<_> = (1..=duplicates)
+				.map(|peer| producer.dynamic(PATH, peer_route(peer as u64, INCUMBENT_COST)).unwrap())
+				.collect();
+			let mut cursors: Vec<announce::Consumer> = (0..subscribers).map(|_| consumer.announced()).collect();
+			for cursor in &mut cursors {
+				while cursor.next().now_or_never().flatten().is_some() {}
+			}
+
+			b.iter(|| {
+				let handle = producer
+					.dynamic(PATH, peer_route(duplicates as u64 + 1, INCUMBENT_COST - 1))
+					.unwrap();
+				for cursor in &mut cursors {
+					cursor.next().now_or_never().flatten().expect("announce delivered");
+				}
+				drop(handle);
+				for cursor in &mut cursors {
+					cursor.next().now_or_never().flatten().expect("incumbent restored");
+				}
+			});
+		});
+	}
+	group.finish();
+}
+
+/// The contended path: one node's stats feed, which every peer in the mesh
+/// carries a route to.
+const PATH: &str = ".stats/p0/node/edge0";
+
+/// What every incumbent route costs, leaving room for a cheaper challenger.
+const INCUMBENT_COST: u64 = 2;
+
+/// A route as `peer` would have announced it: one hop, at `cost`.
+fn peer_route(peer: u64, cost: u64) -> origin::Route {
+	let mut hops = Hops::new();
+	hops.push(Hop::new(peer).expect("peer id")).expect("hop chain");
+	origin::Route::default().with_hops(hops).with_cost(cost)
 }
 
 /// An announcement of an unrelated prefix with `fronts` remote fronts parked on
@@ -265,6 +332,7 @@ criterion_group!(
 	benches,
 	bench_announce,
 	bench_announce_fleet,
+	bench_announce_duplicate,
 	bench_announce_fronts,
 	bench_subscribe,
 	bench_request,
