@@ -1,6 +1,6 @@
 //! Native V4L2 webcam capture (Linux), replacing nokhwa.
 //!
-//! Streams MMAP buffers through the [`v4l`] crate and converts each frame to CPU
+//! Streams MMAP buffers through the [`moq_v4l`] crate and converts each frame to CPU
 //! [`I420`] for the encoder. Two source formats cover essentially all UVC
 //! webcams: YUYV (raw 4:2:2, resampled directly) and MJPEG (decoded to RGB with
 //! the pure-Rust [`zune_jpeg`], then converted). This is the CPU path feeding
@@ -8,15 +8,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use v4l::buffer::Type as BufType;
-use v4l::capability::Flags;
-use v4l::frameinterval::FrameIntervalEnum;
-use v4l::framesize::FrameSizeEnum;
-use v4l::io::mmap::Stream as MmapStream;
-use v4l::io::traits::CaptureStream;
-use v4l::video::Capture;
-use v4l::video::capture::Parameters;
-use v4l::{Device, Format, FourCC};
+use moq_v4l::buffer::Type as BufType;
+use moq_v4l::capability::Flags;
+use moq_v4l::frameinterval::FrameIntervalEnum;
+use moq_v4l::framesize::FrameSizeEnum;
+use moq_v4l::io::mmap::Stream as MmapStream;
+use moq_v4l::io::traits::CaptureStream;
+use moq_v4l::video::Capture;
+use moq_v4l::video::capture::Parameters;
+use moq_v4l::{Device, Format, FourCC};
 use zune_jpeg::zune_core::bytestream::ZCursor;
 
 use super::channel::FrameChannel;
@@ -27,8 +27,8 @@ use crate::{Error, Size};
 
 /// List V4L2 capture nodes using paths that [`open_device`] accepts.
 pub(super) fn cameras() -> Result<Vec<super::Camera>, Error> {
-	let mut nodes = v4l::context::enum_devices();
-	nodes.sort_by_key(v4l::context::Node::index);
+	let mut nodes = moq_v4l::context::enum_devices();
+	nodes.sort_by_key(moq_v4l::context::Node::index);
 
 	let cameras = nodes
 		.into_iter()
@@ -159,20 +159,20 @@ fn bounds(min: u32, max: u32, step: u32) -> Option<(u32, u32)> {
 	(first <= last).then_some((first, last))
 }
 
-// Read one entry at a time: v4l's collection helpers treat every error after
+// Read one entry at a time: moq-v4l's collection helpers treat every error after
 // the first entry as end-of-list, hiding device failures and malformed replies.
 fn frame_sizes(device: &Device, fourcc: FourCC) -> Result<Vec<FrameSizeEnum>, Error> {
 	let mut sizes = Vec::new();
 	for index in 0..=u32::MAX {
 		// All fields are integers or integer unions; reserved fields must be zero.
-		let mut entry: v4l::v4l_sys::v4l2_frmsizeenum = unsafe { std::mem::zeroed() };
+		let mut entry: moq_v4l::sys::v4l2_frmsizeenum = unsafe { std::mem::zeroed() };
 		entry.index = index;
 		entry.pixel_format = fourcc.into();
 		// The request matches the initialized argument's type and size.
 		let result = unsafe {
-			v4l::v4l2::ioctl(
+			moq_v4l::v4l2::ioctl(
 				device.handle().fd(),
-				v4l::v4l2::vidioc::VIDIOC_ENUM_FRAMESIZES,
+				moq_v4l::v4l2::vidioc::VIDIOC_ENUM_FRAMESIZES,
 				&mut entry as *mut _ as *mut std::ffi::c_void,
 			)
 		};
@@ -197,16 +197,16 @@ fn framerates(device: &Device, fourcc: FourCC, size: Size) -> Result<Vec<Rate>, 
 	let mut rates = Vec::new();
 	for index in 0..=u32::MAX {
 		// All fields are integers or integer unions; reserved fields must be zero.
-		let mut entry: v4l::v4l_sys::v4l2_frmivalenum = unsafe { std::mem::zeroed() };
+		let mut entry: moq_v4l::sys::v4l2_frmivalenum = unsafe { std::mem::zeroed() };
 		entry.index = index;
 		entry.pixel_format = fourcc.into();
 		entry.width = size.width;
 		entry.height = size.height;
 		// The request matches the initialized argument's type and size.
 		let result = unsafe {
-			v4l::v4l2::ioctl(
+			moq_v4l::v4l2::ioctl(
 				device.handle().fd(),
-				v4l::v4l2::vidioc::VIDIOC_ENUM_FRAMEINTERVALS,
+				moq_v4l::v4l2::vidioc::VIDIOC_ENUM_FRAMEINTERVALS,
 				&mut entry as *mut _ as *mut std::ffi::c_void,
 			)
 		};
@@ -221,7 +221,7 @@ fn framerates(device: &Device, fourcc: FourCC, size: Size) -> Result<Vec<Rate>, 
 	Err(Error::Codec(anyhow::anyhow!("V4L2 frame interval index overflow")))
 }
 
-fn rate(interval: v4l::Fraction) -> Result<Rate, Error> {
+fn rate(interval: moq_v4l::Fraction) -> Result<Rate, Error> {
 	Rate::new(interval.denominator, interval.numerator)
 		.map_err(|error| Error::Codec(anyhow::anyhow!("invalid V4L2 frame interval: {error}")))
 }
@@ -448,7 +448,7 @@ fn negotiate(device: &Device, name: &str, want: Request) -> Result<(Format, Sour
 	negotiate_with(name, want, |format| {
 		let format = set_format(device, format)?;
 		if let Some(fps) = framerate {
-			let interval = v4l::Fraction::new(fps.denominator(), fps.numerator());
+			let interval = moq_v4l::Fraction::new(fps.denominator(), fps.numerator());
 			match Capture::set_params(device, &Parameters::new(interval)) {
 				Ok(_) => {}
 				Err(error) if matches!(error.raw_os_error(), Some(libc::EINVAL | libc::ENOTTY)) => {}
@@ -567,7 +567,7 @@ fn set_format(device: &Device, format: Format) -> Result<Format, Error> {
 mod tests {
 	use super::*;
 
-	use v4l::framesize::{Discrete, Stepwise};
+	use moq_v4l::framesize::{Discrete, Stepwise};
 
 	fn request(width: u32, height: u32) -> Request {
 		Request {
@@ -610,28 +610,28 @@ mod tests {
 
 	#[test]
 	fn rates_preserve_fractional_and_sub_one_fps_intervals() {
-		let ntsc = rate(v4l::Fraction::new(1001, 30000)).unwrap();
+		let ntsc = rate(moq_v4l::Fraction::new(1001, 30000)).unwrap();
 		assert_eq!(ntsc.numerator(), 30000);
 		assert_eq!(ntsc.rounded(), 30);
 		assert_eq!(ntsc.denominator(), 1001);
-		let slow = rate(v4l::Fraction::new(2, 1)).unwrap();
+		let slow = rate(moq_v4l::Fraction::new(2, 1)).unwrap();
 		assert_eq!(slow.numerator(), 1);
 		assert_eq!(slow.rounded(), 1);
 		assert_eq!(slow.denominator(), 2);
 		assert!(slow < ntsc);
-		assert!(rate(v4l::Fraction::new(0, 30)).is_err());
-		assert!(rate(v4l::Fraction::new(1, 0)).is_err());
+		assert!(rate(moq_v4l::Fraction::new(0, 30)).is_err());
+		assert!(rate(moq_v4l::Fraction::new(1, 0)).is_err());
 	}
 
 	#[test]
 	fn equivalent_rates_deduplicate_and_sort_numerically() {
 		let rates: BTreeSet<_> = [(1001, 30000), (1, 30), (2, 60), (2, 1)]
 			.into_iter()
-			.map(|(n, d)| rate(v4l::Fraction::new(n, d)).unwrap())
+			.map(|(n, d)| rate(moq_v4l::Fraction::new(n, d)).unwrap())
 			.collect();
 		assert_eq!(rates.len(), 3);
-		assert_eq!(*rates.last().unwrap(), rate(v4l::Fraction::new(1, 30)).unwrap());
-		assert_eq!(*rates.first().unwrap(), rate(v4l::Fraction::new(2, 1)).unwrap());
+		assert_eq!(*rates.last().unwrap(), rate(moq_v4l::Fraction::new(1, 30)).unwrap());
+		assert_eq!(*rates.first().unwrap(), rate(moq_v4l::Fraction::new(2, 1)).unwrap());
 	}
 
 	#[test]
@@ -657,7 +657,7 @@ mod tests {
 		let (_, source, accepted) = negotiate_with("camera", want, |format| {
 			formats.push(format.fourcc);
 			let fps = if format.fourcc == Source::Yuyv.fourcc() { 30 } else { 60 };
-			Ok((format, Some(rate(v4l::Fraction::new(1, fps)).unwrap())))
+			Ok((format, Some(rate(moq_v4l::Fraction::new(1, fps)).unwrap())))
 		})
 		.unwrap();
 		assert_eq!(source, Source::Mjpeg);
@@ -670,8 +670,8 @@ mod tests {
 
 	#[test]
 	fn rate_scoring_preserves_fractional_precision_and_handles_unknown_rates() {
-		let ntsc = Some(rate(v4l::Fraction::new(1001, 60000)).unwrap());
-		let thirty = Some(rate(v4l::Fraction::new(1, 30)).unwrap());
+		let ntsc = Some(rate(moq_v4l::Fraction::new(1001, 60000)).unwrap());
+		let thirty = Some(rate(moq_v4l::Fraction::new(1, 30)).unwrap());
 		assert!(rate_distance(ntsc, thirty, Some(Rate::new(60, 1).unwrap())).is_lt());
 		assert!(rate_distance(thirty, ntsc, Some(Rate::new(30, 1).unwrap())).is_lt());
 		assert!(rate_distance(ntsc, None, Some(Rate::new(60, 1).unwrap())).is_lt());

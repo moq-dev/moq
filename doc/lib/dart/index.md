@@ -40,10 +40,25 @@ final broadcast = await moq.requestBroadcast('live/camera');
 // Publish. bytes comes from your encoder or application source.
 final mine = moq.createBroadcast('live/camera');
 final track = mine.publishTrack(name: 'video', info: null);
-track.appendGroup().writeFrame(frame: MoqFrame(payload: bytes));
+track.appendGroup().writeFrame(frame: Frame(payload: bytes));
 mine.announce(route: MoqRoute());
 
 moq.close();
+```
+
+```dart
+// Serve. Server.listen binds the socket and streams the sessions that arrive.
+final server = await Server.listen(
+  options: const ListenOptions(
+    bind: '127.0.0.1:4443',
+    tlsGenerate: ['localhost'],
+  ),
+);
+final live = server.createBroadcast('live/camera');
+await for (final request in server.requests()) {
+  final session = await request.accept();
+  print(session.epoch());
+}
 ```
 
 The three advertising operations: `moq.createBroadcast(path)` (or
@@ -58,9 +73,17 @@ literal prefix plus an optional relative pattern; `announcement.prefix()`
 stays origin-relative and `captures()` reports the wildcard matches.
 
 Sessions reconnect with backoff when the transport drops and re-announce local
-broadcasts. `moq.epoch` counts the connections, 1 on the first, pairing with
+broadcasts. `Moq.connect` and `Server.listen` take a `ConnectOptions` /
+`ListenOptions` struct, like Rust: `reconnect: false` makes the dial one-shot
+and `backoff:` re-paces the retries. `moq.epoch` counts the connections, 1 on the first, pairing with
 `session.status()` to log each reconnect; `maxStreams` raises the peer's
 inbound stream cap for a subscriber to many tracks.
+
+Types are spelled without the `Moq` prefix (`Session`, `BroadcastProducer`,
+`Backoff`); the generated names stay valid, since these are aliases rather than
+wrappers. `Container`, `Route`, and the exceptions keep theirs, because
+`Container` and `Route` are Flutter's. Microsecond fields read back as a
+`Duration`: `stats.rtt`, `backoff.initial`, `frame.timestamp`.
 
 Cancelling a stream releases the native cursor. The package re-exports
 `moq_ffi`, so the full generated API is available without a second import.

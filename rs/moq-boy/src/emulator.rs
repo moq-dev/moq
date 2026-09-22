@@ -114,7 +114,7 @@ impl Emulator {
 		let rgb = self.gb.frame_buffer();
 		let mut rgba = Vec::with_capacity((WIDTH * HEIGHT * 4) as usize);
 
-		for pixel in rgb.chunks_exact(3) {
+		for pixel in rgb.as_chunks::<3>().0 {
 			rgba.push(pixel[0]); // R
 			rgba.push(pixel[1]); // G
 			rgba.push(pixel[2]); // B

@@ -1,6 +1,7 @@
 package dev.moq
 
 import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
@@ -10,8 +11,11 @@ import uniffi.moq.MoqException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.time.Duration.Companion.microseconds
+import kotlin.time.Duration.Companion.milliseconds
 
 @Serializable
 private data class Status(val state: String)
@@ -183,6 +187,44 @@ class SmokeTest {
     }
 
     /** The typed JSON helpers round-trip a `@Serializable` value. */
+    /**
+     * Video has the same Flow audio does. Decoding real frames needs an encoder
+     * backend, so this pins the extension's shape; the decode itself is covered
+     * by the interop smoke tests.
+     */
+    @Test
+    fun `video consumer exposes a frames flow like audio does`() {
+        val video: (VideoConsumer) -> Flow<VideoDecodedFrame> = VideoConsumer::frames
+        val audio: (AudioConsumer) -> Flow<AudioFrame> = AudioConsumer::frames
+        assertNotNull(video)
+        assertNotNull(audio)
+    }
+
+    /** Microsecond fields read back as a Duration. */
+    @Test
+    fun `microsecond fields read back as durations`() {
+        val backoff = Backoff(initialUs = 1_000uL, multiplier = 2u, maxUs = 2_000uL, timeoutUs = 3_000uL)
+        assertEquals(1.milliseconds, backoff.initial)
+        assertEquals(2.milliseconds, backoff.max)
+        assertEquals(3.milliseconds, backoff.timeout)
+
+        fun stats(rttUs: ULong?) = ConnectionStats(
+            rttUs = rttUs,
+            estimatedSendRateBps = null,
+            estimatedRecvRateBps = null,
+            bytesSent = null,
+            bytesReceived = null,
+            bytesLost = null,
+            packetsSent = null,
+            packetsReceived = null,
+            packetsLost = null,
+        )
+        assertNull(stats(null).rtt)
+        assertEquals(1_500.microseconds, stats(1_500uL).rtt)
+        assertEquals(20.milliseconds, Frame(payload = ByteArray(0), timestampUs = 20_000uL).timestamp)
+        assertEquals(20.milliseconds, AudioEncoderOutput(codec = AudioCodec.opus()).frameDuration)
+    }
+
     @Test
     fun `typed json snapshot round-trips a serializable value`() = runTest {
         BroadcastProducer().use { broadcast ->

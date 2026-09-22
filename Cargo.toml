@@ -34,6 +34,7 @@ members = [
     "rs/moq-tokio",
     "rs/moq-transcode",
     "rs/moq-uring",
+    "rs/moq-v4l",
     "rs/moq-video",
     "rs/moq-wasm",
     "rs/quest",
@@ -72,6 +73,7 @@ default-members = [
     "rs/moq-tokio",
     "rs/moq-transcode",
     "rs/moq-uring",
+    "rs/moq-v4l",
     "rs/moq-video",
     # "rs/moq-wasm",  # wasm32-unknown-unknown target only
     "rs/quest",
@@ -100,6 +102,7 @@ aws-lc-rs = "1"
 axum = { version = "0.8", features = ["tokio"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 base64 = "0.23"
+bitflags = "2"
 block2 = "0.6.2"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
@@ -165,6 +168,10 @@ moq-transcode = { version = "0.0.19", path = "rs/moq-transcode", default-feature
 # stack the io_uring path compiles; cargo features are additive, so a default-on
 # backend could not be opted out of.
 moq-uring = { version = "0.0.1", path = "rs/moq-uring", default-features = false }
+# In-tree fork of `v4l` with the videodev2.h bindings checked in, so moq-video's
+# `capture` and `v4l2` need no libclang or kernel headers. Linux only; an empty
+# stub elsewhere.
+moq-v4l = { version = "0.0.1", path = "rs/moq-v4l" }
 # Standalone crate (moq-dev/vaapi); vendored from cros-libva + cros-codecs.
 # dlopen's libva at runtime (no libva-dev at build, no NEEDED libva in the binary).
 moq-vaapi = "0.0.4"
