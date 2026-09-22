@@ -17,9 +17,10 @@ does not clearly win, abandon the quest and report the numbers.
   Generate with planus. Prefer generating in `build.rs` if planus supports
   it cleanly; otherwise check in the output with a just recipe and a CI diff
   check.
-- Encode straight from the reused report of the
-  [allocation-free tick](/quest/main/stats-binary/tick.md) into one planus
-  builder that resets every frame. Each group is one DEFLATE window, as
+- The producer already collects each drain into per-track buffers kept
+  across drains, and `steady_drain_collects_without_allocating` holds that
+  path at zero allocations. Encode from those buffers into one planus
+  builder that resets every frame, and extend the test to cover it. Each group is one DEFLATE window, as
   `.json.z` does today, with a full snapshot per frame and no deltas.
 - `.fb.z` is a flavor suffix: it applies to every track name that takes
   `.json.z` (default and named tiers, sessions, and the per-broadcast tracks
@@ -36,7 +37,3 @@ does not clearly win, abandon the quest and report the numbers.
 
 Public API impact: additive on moq-stats unless the helper signatures change
 (before the pending release). Wire impact: new on-demand tracks; the existing tracks are unchanged.
-
-## Required
-
-- [Allocation-free tick](/quest/main/stats-binary/tick.md) - the reused report the encoder reads from
