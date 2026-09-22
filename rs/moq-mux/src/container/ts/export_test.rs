@@ -2116,7 +2116,9 @@ async fn si_pids_are_re_emitted_on_their_own_interval() {
 	assert_packet_aligned(&ts);
 
 	let count = |pid: u16| {
-		ts.chunks_exact(188)
+		ts.as_chunks::<188>()
+			.0
+			.iter()
 			.filter(|p| ((((p[1] & 0x1f) as u16) << 8) | p[2] as u16) == pid)
 			.count()
 	};
@@ -2200,7 +2202,9 @@ async fn inline_si_form_is_re_emitted() {
 	assert_packet_aligned(&ts);
 
 	let count = |pid: u16| {
-		ts.chunks_exact(188)
+		ts.as_chunks::<188>()
+			.0
+			.iter()
 			.filter(|p| ((((p[1] & 0x1f) as u16) << 8) | p[2] as u16) == pid)
 			.count()
 	};
@@ -2208,7 +2212,9 @@ async fn inline_si_form_is_re_emitted() {
 	// SDT at 0,2,4,6,8,10,12s, byte-for-byte the inline section.
 	assert_eq!(count(0x0011), 7, "inline SDT re-emitted on its 2s interval");
 	let packet = ts
-		.chunks_exact(188)
+		.as_chunks::<188>()
+		.0
+		.iter()
 		.find(|p| ((((p[1] & 0x1f) as u16) << 8) | p[2] as u16) == 0x0011)
 		.unwrap();
 	// The section is stuffed to the packet's tail, byte-for-byte the inline one.
@@ -2223,7 +2229,7 @@ async fn inline_si_form_is_re_emitted() {
 fn count_pid(frames: &[Frame], pid: u16) -> usize {
 	frames
 		.iter()
-		.flat_map(|f| f.payload.chunks_exact(188))
+		.flat_map(|f| f.payload.as_chunks::<188>().0.iter())
 		.filter(|p| p[3] & 0x10 != 0 && ((((p[1] & 0x1f) as u16) << 8) | p[2] as u16) == pid)
 		.count()
 }
@@ -2232,7 +2238,7 @@ fn count_pid(frames: &[Frame], pid: u16) -> usize {
 fn count_discontinuity(frames: &[Frame]) -> usize {
 	frames
 		.iter()
-		.flat_map(|f| f.payload.chunks_exact(188))
+		.flat_map(|f| f.payload.as_chunks::<188>().0.iter())
 		.filter(|p| p[3] & 0x20 != 0 && p[4] > 0 && p[5] & 0x80 != 0)
 		.count()
 }
@@ -2719,7 +2725,7 @@ async fn discontinuity_flags_the_break_once_across_tracks() {
 	assert_eq!(count_discontinuity(&again), 0, "a forward join is not a PCR break");
 	let mut counters = std::collections::HashMap::new();
 	for frame in before.iter().chain(&marked).chain(&after).chain(&again) {
-		for packet in frame.payload.chunks_exact(188) {
+		for packet in frame.payload.as_chunks::<188>().0.iter() {
 			let pid = u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]);
 			let cc = packet[3] & 15;
 			if let Some(prev) = counters.insert(pid, cc) {
@@ -3088,7 +3094,9 @@ async fn stale_si_entry_does_not_block_output() {
 	assert!(
 		!frame
 			.payload
-			.chunks_exact(188)
+			.as_chunks::<188>()
+			.0
+			.iter()
 			.any(|p| ((((p[1] & 0x1f) as u16) << 8) | p[2] as u16) == 0x0011),
 		"nothing was emitted for the undelivered entry"
 	);
