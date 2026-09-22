@@ -1224,7 +1224,7 @@ impl Producer {
 		// Held across the whole attach: the driver's teardown sets `closed` under
 		// this lock, so a create either completes before the teardown (whose walk
 		// then cleans the entry up) or observes `closed` here and fails.
-		let mut lifecycle = self.shared.lock();
+		let lifecycle = self.shared.lock();
 		if lifecycle.closed {
 			return Err(Error::Closed);
 		}
@@ -1303,8 +1303,8 @@ impl Producer {
 			id,
 		}));
 		// A local broadcast changes what the exact path resolves to, so a requester
-		// parked on the route table (see `routed_broadcast`) retries.
-		lifecycle.generation += 1;
+		// parked on it (see `routed_broadcast`) retries.
+		lifecycle.routes.poke_at(&full);
 		drop(lifecycle);
 
 		Ok(source)
@@ -1494,7 +1494,6 @@ impl Announcing {
 		for (prefix, claim) in &self.prefixes {
 			let id = shared.next_route;
 			shared.next_route += 1;
-			shared.generation += 1;
 			shared.routes.insert(RouteEntry {
 				id,
 				prefix: prefix.clone(),
@@ -1589,7 +1588,6 @@ impl AnnounceProducer {
 			entry.cost = route.cost;
 			entry.via = route.via;
 			let claim = entry.claim.clone();
-			shared.generation += 1;
 			shared.sync_route(prefix, &claim);
 		}
 		Ok(())
@@ -1603,7 +1601,6 @@ impl AnnounceProducer {
 			let Some(entry) = shared.routes.remove(prefix, *id) else {
 				continue;
 			};
-			shared.generation += 1;
 			// Reject anything still waiting on this route's server; a request
 			// already handed to the handler resolves through its own `Request`.
 			if let Some(server) = &entry.server {
@@ -1710,6 +1707,8 @@ impl DriverState {
 		let (servers, cursors, fronts) = {
 			let mut shared = self.shared.lock();
 			shared.closed = true;
+			// Fronts and parked requesters observe `closed` on their next pass.
+			shared.routes.poke_all();
 			let servers: Vec<_> = shared
 				.routes
 				.entries()
@@ -2519,6 +2518,8 @@ struct RemoteFrontTask {
 	path: PathOwned,
 	/// The requesters' split-horizon exclusion, applied to every (re)selection.
 	exclude: Option<Hop>,
+	/// Wakes the front when a route covering its path changes.
+	watch: Watch,
 	/// Resolves the requesters parked on the front's channel.
 	request: kio::Producer<PendingBroadcast>,
 	tasks: TasksWeak,
@@ -2539,6 +2540,7 @@ async fn run_remote_front(task: RemoteFrontTask) {
 		broadcast,
 		path,
 		exclude,
+		watch,
 		request,
 		tasks,
 		timers,
@@ -2551,10 +2553,8 @@ async fn run_remote_front(task: RemoteFrontTask) {
 		Resolved(Result<broadcast::Consumer, Error>),
 		/// The attached source closed.
 		SourceDead,
-		/// The route table changed in a way the decision below cares about.
+		/// A route covering the path changed, or the origin tore down.
 		Table,
-		/// The origin tore down.
-		Closed,
 	}
 
 	let mut front = FrontDriver {
@@ -2578,21 +2578,20 @@ async fn run_remote_front(task: RemoteFrontTask) {
 		// Decide what the table means for us, then fire at most one upstream
 		// request. Locks are sequential, never nested: the table's, then the
 		// chosen route's queue.
-		// What the wait below compares table changes against: the qualifying
-		// route this pass decided on, recomputed identically by the wait's
-		// predicate so only a table change that would alter the decision wakes it.
-		let decided;
+		// The watch generation this decision saw; the wait below sleeps until the
+		// covering routes move past it.
+		let seen;
 		let fire = {
 			let table = shared.read();
 			if table.closed {
 				break 'run;
 			}
+			seen = watch.seen();
 			refused.retain(|id| table.routes.covers(&path.as_path(), *id));
 			let best = match front.identity.routable() {
 				true => table.best_route(&path.as_path(), exclude, front.identity.pin(), &refused),
 				false => None,
 			};
-			decided = best.map(|entry| entry.id);
 			let serving_route = front.serving.as_ref().map(|(_, route, _)| *route);
 			match best {
 				// The serving route is still the best qualifying one.
@@ -2670,9 +2669,6 @@ async fn run_remote_front(task: RemoteFrontTask) {
 			}
 		}
 
-		let pin = front.identity.pin();
-		let routable = front.identity.routable();
-
 		let step = kio::wait(|waiter| {
 			if let Poll::Ready((name, resume)) = front.broadcast.poll_spliced_assigned(waiter) {
 				return Poll::Ready(Step::Serve(name, resume));
@@ -2697,29 +2693,10 @@ async fn run_remote_front(task: RemoteFrontTask) {
 				return Poll::Ready(Step::SourceDead);
 			}
 
-			match shared.poll(waiter, |table| {
-				if table.closed {
-					return Poll::Ready(());
-				}
-				let best = match routable {
-					true => table.best_route(&path.as_path(), exclude, pin, &refused).map(|e| e.id),
-					false => None,
-				};
-				match best == decided {
-					true => Poll::Pending,
-					false => Poll::Ready(()),
-				}
-			}) {
-				Poll::Ready(table) => {
-					let closed = table.closed;
-					drop(table);
-					Poll::Ready(match closed {
-						true => Step::Closed,
-						false => Step::Table,
-					})
-				}
-				Poll::Pending => Poll::Pending,
-			}
+			// Only a change to a route covering this path can alter the decision
+			// above, and only those poke the watch: an unrelated announcement
+			// never wakes this front.
+			watch.poll_changed(waiter, seen).map(|()| Step::Table)
 		})
 		.await;
 
@@ -2761,7 +2738,6 @@ async fn run_remote_front(task: RemoteFrontTask) {
 				last_err = Some(Error::Dropped);
 			}
 			Step::Table => {}
-			Step::Closed => break 'run,
 		}
 	}
 
@@ -2867,13 +2843,76 @@ struct RouteNode {
 	/// Cursors at this node or below. An announcement walks only the subtrees
 	/// that hold one, so a deep table of routes nobody watches costs nothing.
 	cursors_below: usize,
+	/// Who is waiting on the routes covering this prefix: the fronts serving it
+	/// and the requesters parked on it (see [`Watch`]).
+	watches: Vec<(u64, kio::Producer<Watched>)>,
+	/// Watches at this node or below, so a route change walks only the subtrees
+	/// holding one.
+	watches_below: usize,
 	children: HashMap<String, RouteNode>,
+}
+
+/// What a [`Watch`] observes: bumped by every change to a route covering its
+/// path, a local broadcast attaching at the path, and the origin's teardown.
+#[derive(Default)]
+struct Watched {
+	generation: u64,
+}
+
+/// A registration in the route table for changes to the routes covering one
+/// path. The table pokes it; the holder waits on it, so an announcement wakes
+/// only the fronts and requesters it can affect rather than every one of them.
+/// Dropping it unregisters, which takes the table lock: never drop one while
+/// holding it.
+struct Watch {
+	shared: kio::Shared<OriginState>,
+	path: PathOwned,
+	id: u64,
+	signal: kio::Consumer<Watched>,
+}
+
+impl Watch {
+	/// The generation to wait past with [`Self::poll_changed`]. Read under the
+	/// table lock, alongside the decision it guards, so a poke between the two
+	/// cannot be missed: a poke takes that same lock first.
+	fn seen(&self) -> u64 {
+		self.signal.read().generation
+	}
+
+	/// Ready once the routes covering the path moved past `seen`.
+	fn poll_changed(&self, waiter: &kio::Waiter, seen: u64) -> Poll<()> {
+		self.signal
+			.poll(waiter, |watched| match watched.generation != seen {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			})
+			.map(|_| ())
+	}
+}
+
+impl Drop for Watch {
+	fn drop(&mut self) {
+		self.shared.lock().routes.remove_watch(&self.path, self.id);
+	}
+}
+
+/// What a registration adds to the subtree counts on its walk.
+#[derive(Clone, Copy)]
+struct Below {
+	cursors: usize,
+	watches: usize,
+}
+
+impl Below {
+	const NONE: Self = Self { cursors: 0, watches: 0 };
+	const CURSOR: Self = Self { cursors: 1, watches: 0 };
+	const WATCH: Self = Self { cursors: 0, watches: 1 };
 }
 
 impl RouteNode {
 	/// Nothing here and nothing below: the node can be pruned.
 	fn is_empty(&self) -> bool {
-		self.entries.is_empty() && self.cursors.is_empty() && self.children.is_empty()
+		self.entries.is_empty() && self.cursors.is_empty() && self.watches.is_empty() && self.children.is_empty()
 	}
 
 	/// The node `parts` below this one, if the table has it.
@@ -2885,37 +2924,60 @@ impl RouteNode {
 	}
 
 	/// The node `parts` below this one, created along the way when missing.
-	/// `cursors` is added to `cursors_below` at every node on the walk.
-	fn reach<'a>(&mut self, mut parts: impl Iterator<Item = &'a str>, cursors: usize) -> &mut Self {
-		self.cursors_below += cursors;
+	/// `below` is added to the subtree counts at every node on the walk.
+	fn reach<'a>(&mut self, mut parts: impl Iterator<Item = &'a str>, below: Below) -> &mut Self {
+		self.cursors_below += below.cursors;
+		self.watches_below += below.watches;
 		match parts.next() {
 			None => self,
-			Some(part) => self.children.entry(part.to_string()).or_default().reach(parts, cursors),
+			Some(part) => self.children.entry(part.to_string()).or_default().reach(parts, below),
 		}
 	}
 
 	/// Run `f` on the node `parts` below this one, then prune every node the
-	/// edit emptied. `cursors` is subtracted from `cursors_below` at every node
+	/// edit emptied. `below` is subtracted from the subtree counts at every node
 	/// on the walk. `None` when the node does not exist, leaving the table as is.
 	fn edit<'a, R>(
 		&mut self,
 		mut parts: impl Iterator<Item = &'a str>,
-		cursors: usize,
+		below: Below,
 		f: impl FnOnce(&mut Self) -> R,
 	) -> Option<R> {
 		let result = match parts.next() {
 			None => f(self),
 			Some(part) => {
 				let child = self.children.get_mut(part)?;
-				let result = child.edit(parts, cursors, f)?;
+				let result = child.edit(parts, below, f)?;
 				if child.is_empty() {
 					self.children.remove(part);
 				}
 				result
 			}
 		};
-		self.cursors_below -= cursors;
+		self.cursors_below -= below.cursors;
+		self.watches_below -= below.watches;
 		Some(result)
+	}
+
+	/// Wake the watches at this node.
+	fn poke(&self) {
+		for (_, watch) in &self.watches {
+			if let Ok(mut watched) = watch.write() {
+				watched.generation += 1;
+			}
+		}
+	}
+
+	/// Wake the watches at this node and below: a route here covers every one
+	/// of their paths. Skips subtrees holding none.
+	fn poke_below(&self) {
+		if self.watches_below == 0 {
+			return;
+		}
+		self.poke();
+		for child in self.children.values() {
+			child.poke_below();
+		}
 	}
 
 	/// Visit this node and everything below it.
@@ -2982,7 +3044,7 @@ impl RouteTable {
 
 	/// Add a route at its prefix, creating the nodes down to it.
 	fn insert(&mut self, entry: RouteEntry) {
-		let node = self.root.reach(entry.prefix.parts(), 0);
+		let node = self.root.reach(entry.prefix.parts(), Below::NONE);
 		node.entries.push(entry);
 	}
 
@@ -2998,7 +3060,7 @@ impl RouteTable {
 	/// Take the route `id` out of `prefix`, pruning the nodes it leaves empty.
 	fn remove(&mut self, prefix: &Path, id: u64) -> Option<RouteEntry> {
 		self.root
-			.edit(prefix.parts(), 0, |node| {
+			.edit(prefix.parts(), Below::NONE, |node| {
 				let index = node.entries.iter().position(|entry| entry.id == id)?;
 				Some(node.entries.swap_remove(index))
 			})
@@ -3007,14 +3069,50 @@ impl RouteTable {
 
 	/// Hang a cursor at one of its heads, counting it down the walk.
 	fn add_cursor(&mut self, head: &Path, id: ConsumerId) {
-		self.root.reach(head.parts(), 1).cursors.push(id);
+		self.root.reach(head.parts(), Below::CURSOR).cursors.push(id);
 	}
 
 	/// Take a cursor off one of its heads, pruning the nodes it leaves empty. Only
 	/// ever called for a head the cursor was added at, or the counts drift.
 	fn remove_cursor(&mut self, head: &Path, id: ConsumerId) {
-		self.root
-			.edit(head.parts(), 1, |node| node.cursors.retain(|cursor| *cursor != id));
+		self.root.edit(head.parts(), Below::CURSOR, |node| {
+			node.cursors.retain(|cursor| *cursor != id)
+		});
+	}
+
+	/// Register a watch on the routes covering `path`; see [`Watch`].
+	fn add_watch(&mut self, path: &Path, id: u64) -> kio::Consumer<Watched> {
+		let producer = kio::Producer::<Watched>::default();
+		let consumer = producer.consume();
+		self.root.reach(path.parts(), Below::WATCH).watches.push((id, producer));
+		consumer
+	}
+
+	/// Take a watch off its path, pruning the nodes it leaves empty. Only ever
+	/// called for a path the watch was added at, or the counts drift.
+	fn remove_watch(&mut self, path: &Path, id: u64) {
+		self.root.edit(path.parts(), Below::WATCH, |node| {
+			node.watches.retain(|(watch, _)| *watch != id)
+		});
+	}
+
+	/// Wake the watches of every path a route at `prefix` covers.
+	fn poke_below(&self, prefix: &Path) {
+		if let (_, Some(node)) = self.split(prefix) {
+			node.poke_below();
+		}
+	}
+
+	/// Wake the watches of exactly `path`: a local broadcast attached there.
+	fn poke_at(&self, path: &Path) {
+		if let Some(node) = self.root.find(path.parts()) {
+			node.poke();
+		}
+	}
+
+	/// Wake every watch: the origin is tearing down.
+	fn poke_all(&self) {
+		self.root.walk(&mut |node| node.poke());
 	}
 
 	/// The cursors a route at `prefix` can present on: a cursor sees a route
@@ -3045,10 +3143,7 @@ struct OriginState {
 	// advertisement, not one per broadcast consumer.
 	routes: RouteTable,
 	next_route: u64,
-	// Bumped on every change to what a path resolves to: a route inserted,
-	// re-priced, or retracted, and a local broadcast attached. A requester waits
-	// on it rather than re-asking a table that has not moved.
-	generation: u64,
+	next_watch: u64,
 
 	// The registered announce cursors, each with its own coalescing buffer. Each
 	// also hangs in the route table at its heads, which is how an announcement
@@ -3084,6 +3179,21 @@ impl OriginState {
 			if let Some(presented) = cursor.presented(prefix, claim) {
 				Self::sync_cursor(routes, cursor, &presented);
 			}
+		}
+		// The fronts and requesters under the prefix re-select from the table.
+		routes.poke_below(prefix);
+	}
+
+	/// Register a [`Watch`] on the routes covering `path`.
+	fn watch(&mut self, shared: &kio::Shared<OriginState>, path: &Path) -> Watch {
+		let id = self.next_watch;
+		self.next_watch += 1;
+		let signal = self.routes.add_watch(path, id);
+		Watch {
+			shared: shared.clone(),
+			path: path.to_owned(),
+			id,
+			signal,
 		}
 	}
 
@@ -3425,9 +3535,6 @@ pub struct Requesting {
 	// Egress scope applied to the resolved broadcast, so its reads are attributed.
 	// Empty (no-op) for an untagged consumer.
 	stats: stats::Scope,
-	// The route table's generation when the request was made, so a retry can
-	// wait for the table to move rather than re-ask the same routes.
-	generation: u64,
 }
 
 enum RequestState {
@@ -3470,7 +3577,6 @@ impl Requesting {
 			inner,
 			path: PathOwned::default(),
 			stats: stats::Scope::default(),
-			generation: 0,
 		}
 	}
 
@@ -3479,16 +3585,7 @@ impl Requesting {
 		self
 	}
 
-	fn with_generation(mut self, generation: u64) -> Self {
-		self.generation = generation;
-		self
-	}
-
-	/// The route table's generation when the request was made.
-	fn generation(&self) -> u64 {
-		self.generation
-	}
-
+	/// The egress scope the resolved broadcast's reads are attributed to.
 	fn with_stats(mut self, scope: stats::Scope) -> Self {
 		self.stats = scope;
 		self
@@ -3789,31 +3886,28 @@ impl Consumer {
 			if self.routed(&path).await.is_none() {
 				return Err(Error::Closed);
 			}
-			let request = self.request_broadcast(&path);
-			// `Unroutable` is a verdict of the table as it stood when the request
-			// was made: nothing covered the path, the serving route retracted
-			// under the request, or its handler declined. Re-asking the same
-			// table would spin, so wait for it to move (an identical standby
-			// swapping in counts, even though no announce update reports it,
-			// and so does a local broadcast attaching at the path) and try
-			// again. A retraction that already happened bumped the generation
-			// before the error was observed, so that retry is immediate.
-			let seen = request.generation();
-			match request.await {
+			// `Unroutable` is a verdict of the routes covering the path as they
+			// stood when the request was made: nothing covered it, the serving
+			// route retracted under the request, or its handler declined.
+			// Re-asking the same routes would spin, so watch them before asking
+			// and wait for them to move (an identical standby swapping in
+			// counts, even though no announce update reports it, and so does a
+			// local broadcast attaching at the path), then try again. A change
+			// between the ask and the wait bumps the watch first, so that retry
+			// is immediate.
+			let (watch, seen) = {
+				let mut table = self.shared.lock();
+				if table.closed {
+					return Err(Error::Closed);
+				}
+				let watch = table.watch(&self.shared, &self.root.join(&path));
+				let seen = watch.seen();
+				(watch, seen)
+			};
+			match self.request_broadcast(&path).await {
 				Ok(broadcast) => return Ok(broadcast),
 				Err(Error::Unroutable) => {
-					let closed = kio::wait(|waiter| {
-						self.shared
-							.poll(waiter, |table| match table.closed || table.generation != seen {
-								true => Poll::Ready(()),
-								false => Poll::Pending,
-							})
-							.map(|table| table.closed)
-					})
-					.await;
-					if closed {
-						return Err(Error::Closed);
-					}
+					kio::wait(|waiter| watch.poll_changed(waiter, seen)).await;
 				}
 				Err(err) => return Err(err),
 			}
@@ -3899,8 +3993,7 @@ impl Consumer {
 		if let Some(front) = state.fronts.get(&key) {
 			let pending = Requesting::queued(front.request.consume())
 				.with_path(requested)
-				.with_stats(scope)
-				.with_generation(state.generation);
+				.with_stats(scope);
 			return kio::Pending::new(pending);
 		}
 
@@ -3930,7 +4023,7 @@ impl Consumer {
 		});
 		let request = kio::Producer::<PendingBroadcast>::default();
 		let consumer = request.consume();
-		let generation = state.generation;
+		let watch = state.watch(&self.shared, &absolute);
 		state.fronts.insert(
 			key,
 			RemoteFront {
@@ -3938,22 +4031,21 @@ impl Consumer {
 				broadcast: broadcast.consume().weak(),
 			},
 		);
+		// Released before the push: a set whose handles are gone drops the task,
+		// and the `Watch` it carries unregisters under this same lock.
+		drop(state);
 		self.tasks.push(run_remote_front(RemoteFrontTask {
 			shared: self.shared.clone(),
 			state: front_state,
 			broadcast,
 			path: absolute,
 			exclude: self.exclude,
+			watch,
 			request,
 			tasks: self.tasks.clone(),
 			timers: self.timers.clone(),
 		}));
-		kio::Pending::new(
-			Requesting::queued(consumer)
-				.with_path(requested)
-				.with_stats(scope)
-				.with_generation(generation),
-		)
+		kio::Pending::new(Requesting::queued(consumer).with_path(requested).with_stats(scope))
 	}
 
 	/// Returns the prefix that is automatically stripped from all paths.
@@ -6017,6 +6109,60 @@ mod tests {
 		let table = producer.shared.lock();
 		assert!(table.routes.root.is_empty());
 		assert_eq!(table.routes.root.cursors_below, 0);
+	}
+
+	#[test]
+	fn watch_wakes_only_for_covering_changes() {
+		let producer = origin(1).produce();
+		let waiter = kio::Waiter::noop();
+		let watch = producer.shared.lock().watch(&producer.shared, &Path::new("room/a"));
+		let seen = watch.seen();
+
+		// A route beside the path or beneath it covers nothing at the path.
+		let _other = producer.announce("other", Route::default()).unwrap();
+		let _below = producer.announce("room/a/b", Route::default()).unwrap();
+		assert!(watch.poll_changed(&waiter, seen).is_pending());
+
+		// A route above it does, and so does its retraction.
+		let above = producer.announce("room", Route::default()).unwrap();
+		assert!(watch.poll_changed(&waiter, seen).is_ready());
+		let seen = watch.seen();
+		drop(above);
+		assert!(watch.poll_changed(&waiter, seen).is_ready());
+		let seen = watch.seen();
+
+		// A local broadcast attaching at the exact path does; one beside it does not.
+		let _beside = producer.create_broadcast("room/b").unwrap();
+		assert!(watch.poll_changed(&waiter, seen).is_pending());
+		let _here = producer.create_broadcast("room/a").unwrap();
+		assert!(watch.poll_changed(&waiter, seen).is_ready());
+
+		// Dropping the watch takes it out of the table.
+		drop(watch);
+		let table = producer.shared.lock();
+		let node = table
+			.routes
+			.root
+			.find(Path::new("room/a").parts())
+			.expect("route below keeps the node");
+		assert!(node.watches.is_empty());
+		assert_eq!(table.routes.root.watches_below, 0);
+	}
+
+	#[test]
+	fn a_discarded_front_task_unregisters_its_watch() {
+		let (producer, _driver) = Producer::new(Config {
+			hop: origin(1),
+			..Default::default()
+		});
+		let consumer = producer.consume();
+		let _served = producer.dynamic("room", Route::default()).unwrap();
+		// A consumer outlives its producer by design, so the task set can refuse
+		// submissions while the origin is still open. The front's task is then
+		// dropped on the spot, taking its `Watch` with it: the request must not
+		// still be holding the table lock the watch unregisters under.
+		drop(producer);
+		let _pending = consumer.request_broadcast("room/a");
 	}
 
 	#[test]

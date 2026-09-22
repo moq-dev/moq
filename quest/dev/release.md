@@ -30,9 +30,8 @@ with its PR and the replacement call:
 - hang and json: the catalog `timeline` is `archive` (#3612); `json` and
   `binary` catalog sections (#3109) take one options object (#3640); Rust
   `modify()` is fallible and a failed dropped edit aborts the track (#3644),
-  paired with JS `update()`/`mutate()` and the Rust `mutate()` from
-  [JSON mutate](/quest/next/json-mutate.md); an fMP4 export fragment is a group
-  (#3573).
+  paired with JS `update()`/`mutate()` and the Rust `mutate()`; an fMP4 export
+  fragment is a group (#3573).
 - watch and play: `latency` splits into `delay` and `buffer` and
   `--latency-max` is renamed (#3396); `moq play` has a real playout clock with
   `--delay` (#3528); Firefox hardware encoding and screen-source scaling
@@ -89,7 +88,6 @@ Public API: none beyond the required quests. Wire: none.
 
 - [Binding audio tests](/quest/next/binding-audio-tests.md) - every binding proves the audio config it exposes
 - [Decode format](/quest/next/ffi-decode-format.md) - the C-only decode knob reaches every uniffi binding
-- [JSON mutate](/quest/next/json-mutate.md) - Rust and JS share the closure edit
 - [Binding parity](/quest/next/binding-parity.md) - every wrapper reaches every moq-ffi method
 - [Binding docs](/quest/next/binding-docs.md) - the binding pages compile against the wrappers
 - The merged relay has soaked on moq.pro staging and the maintainer has signed it off

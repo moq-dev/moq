@@ -30,5 +30,4 @@ none.
 
 ## Related
 
-- [GPU conversion and NVENC](/quest/main/video-gpu-encode.md) - the converter and pool this reshapes
 - [Bandwidth allocator](/quest/next/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - the reservation-handle precedent

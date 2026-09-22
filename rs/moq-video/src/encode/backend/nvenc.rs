@@ -25,6 +25,11 @@
 //! is interleaved into an NVENC input buffer; a CUDA frame ([`Surface::Cuda`],
 //! NVDEC output, already NV12) is registered as an external resource and encoded
 //! in place, so the NVDEC -> NVENC transcode path never touches the CPU.
+//!
+//! The hardware sets a floor on the picture: a session narrower than the
+//! driver's minimum is refused at open (145 on an RTX 3070 Ti), so the bottom
+//! rung of a rendition ladder can be too small for NVENC even though the GPU
+//! conversion and resize handle it.
 
 use std::sync::Arc;
 

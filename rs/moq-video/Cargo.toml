@@ -235,6 +235,9 @@ ash = { workspace = true }
 # `poll!`, to cancel an `encode::Sink` request exactly where a `select!` would.
 futures = { workspace = true }
 h264-reader = "0.8.0"
+# `clock_gettime`, so the GPU workload test can report CPU time next to wall
+# latency. std has no CPU clock and the dependency is optional at build time.
+libc = { workspace = true }
 # Driving `encode::Sink` from a plain test thread, the way an FFI caller does.
 pollster = { workspace = true }
 tracing-test = { workspace = true }
