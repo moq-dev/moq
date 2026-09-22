@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{Pattern, Patterns, Timestamp, announce, broadcast, origin};
+use moq_net::{Pattern, Patterns, Timestamp, announce, broadcast, kio, origin};
 
 /// `(publishers, subscribers)` shapes for the fan-out benchmarks.
 const SHAPES: [(usize, usize); 3] = [(100, 10), (1_000, 100), (1_000, 1_000)];
@@ -109,6 +109,35 @@ fn bench_announce_fleet(c: &mut Criterion) {
 					.publish(".stats/p0/node/incoming", origin::Route::default())
 					.unwrap();
 				drop(handle);
+			});
+		});
+	}
+	group.finish();
+}
+
+/// An announcement of an unrelated prefix with `fronts` remote fronts parked on
+/// their upstream request. Each front watches only the routes covering its own
+/// path, so none of them wakes; the driver poll after each change runs whatever
+/// did. Sweeps fronts, so a per-front wake shows up as a slope.
+fn bench_announce_fronts(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/announce_fronts");
+	for fronts in [100, 1_000, 10_000] {
+		group.bench_function(BenchmarkId::from_parameter(format!("{fronts}f")), |b| {
+			let (producer, mut driver) = origin::Producer::new(origin::Config::default());
+			let consumer = producer.consume();
+			// Served but never answered: every request under it parks a front.
+			let _served = producer.dynamic("room", origin::Route::default()).unwrap();
+			let _requests: Vec<_> = (0..fronts)
+				.map(|i| consumer.request_broadcast(format!("room/{i}")))
+				.collect();
+			let waiter = kio::Waiter::noop();
+			// Run each front once so it parks on its upstream request.
+			driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+			b.iter(|| {
+				let handle = producer.publish("other/incoming", origin::Route::default()).unwrap();
+				driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+				drop(handle);
+				driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
 			});
 		});
 	}
@@ -231,6 +260,7 @@ criterion_group!(
 	benches,
 	bench_announce,
 	bench_announce_fleet,
+	bench_announce_fronts,
 	bench_subscribe,
 	bench_request,
 	bench_handoff
