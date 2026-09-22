@@ -251,8 +251,14 @@ impl Front {
 		self.refused.retain(|route| standing(*route));
 	}
 
+	/// The attached source, if any.
+	pub(super) fn serving(&self) -> Option<u64> {
+		self.serving.map(|(source, _)| source)
+	}
+
 	/// Whether the front is over.
-	pub(super) fn ended(&self) -> bool {
+	#[cfg(test)]
+	fn ended(&self) -> bool {
 		self.ended
 	}
 
@@ -266,13 +272,19 @@ impl Front {
 			Event::Selected { best, serving_closing } => self.selected(best, serving_closing, &mut actions),
 			Event::Resolved { route, result } => self.resolved(route, result, &mut actions),
 			Event::SourceClosed { source } => self.source_closed(source, &mut actions),
+			// A fresh logical track, even under a name served before: an earlier
+			// verdict belonged to that request, and a later one asks afresh. The
+			// broadcast's track metadata is what persists.
 			Event::TrackAssigned { track } => {
-				self.tracks.entry(track).or_insert(Track {
-					state: TrackState::Idle,
-					refused: HashSet::new(),
-					refusal: None,
-					used: false,
-				});
+				self.tracks.insert(
+					track,
+					Track {
+						state: TrackState::Idle,
+						refused: HashSet::new(),
+						refusal: None,
+						used: false,
+					},
+				);
 			}
 			Event::TrackInfo {
 				track,
@@ -582,6 +594,9 @@ impl Front {
 	}
 
 	fn deadline(&mut self, now: Instant, actions: &mut Vec<Action>) {
+		// The driver's deadline fired and cleared itself: re-arm whatever is still
+		// parked, even if nothing was due yet, or it would never be released.
+		self.armed = None;
 		for (name, track) in &mut self.tracks {
 			if let TrackState::Parked { since } = track.state
 				&& since + self.linger <= now
@@ -1039,11 +1054,17 @@ mod tests {
 				Action::Arm { at: Some(t0 + LINGER) },
 			],
 		);
-		// Too early: nothing.
-		assert_actions(front.step(Event::Deadline { now: t0 + LINGER / 2 }), &[]);
+		// Too early: nothing released, but the deadline is armed again since the
+		// driver clears it on firing.
+		assert_actions(
+			front.step(Event::Deadline { now: t0 + LINGER / 2 }),
+			&[Action::Arm { at: Some(t0 + LINGER) }],
+		);
+		// The driver cleared the fired deadline itself; nothing is parked, so
+		// nothing re-arms.
 		assert_actions(
 			front.step(Event::Deadline { now: t0 + LINGER }),
-			&[Action::Release { track: name("video") }, Action::Arm { at: None }],
+			&[Action::Release { track: name("video") }],
 		);
 		// A returning reader re-splices from the serving source.
 		assert_actions(
