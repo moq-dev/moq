@@ -92,6 +92,8 @@ do not add another media abstraction or a renderer crate during stabilization.
 - [Origin failover machine](/quest/main/origin-failover-machine.md) - a front's
   source selection and track splicing become a pure step function with a
   runtime-free test per transition
+- [Last frame duration](/quest/main/mux-last-frame-duration.md) - a group's final
+  frame keeps its duration on 90 kHz and nanosecond imports
 
 ## Related
 

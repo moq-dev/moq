@@ -30,7 +30,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Ingest source](/quest/next/net-ingest-source.md) - an announce says whether the broadcast entered on this relay or a peer
 - [Headless player](/quest/next/watch-player.md) - `Watch.Player` assembles the pipeline the element, the room, and moq.pro each rebuild
 - [@moq/net additive](/quest/next/js-net-additive.md) - a live-broadcasts getter, `Table.dynamic`, credential refresh before redial, inferred `share`
-- [Last frame duration](/quest/next/mux-last-frame-duration.md) - a group's final frame keeps its duration on 90 kHz and nanosecond imports
 - [Publisher clocks](/quest/next/publisher-clock.md) - wire the shared clock through native and browser publisher restarts
 - [Broadcast route](/quest/next/js-broadcast-route.md) - JS Announce.Broadcast goes live on any claim matching its path, like Rust routed()
 - [io_uring check](/quest/next/check-uring-feature.md) - a moq-relay diff compiles the io-uring feature in `just check`, not only nightly
