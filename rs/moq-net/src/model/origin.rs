@@ -1210,9 +1210,9 @@ impl Producer {
 	///
 	/// Fails with [`Error::Unauthorized`] if `path` is outside the prefixes this
 	/// producer may publish under (after [`scope`](Self::scope)),
-	/// [`Error::BoundsExceeded`] if the full
-	/// rooted path exceeds [`Path::MAX_PARTS`], or [`Error::Closed`] once the
-	/// origin's [`Driver`] has been dropped.
+	/// [`Error::BoundsExceeded`] if the full rooted path exceeds
+	/// [`Path::MAX_PARTS`] or holds a segment no pattern can spell (`*` or `**`),
+	/// or [`Error::Closed`] once the origin's [`Driver`] has been dropped.
 	pub fn create_broadcast(&self, path: impl AsPath) -> Result<broadcast::Producer, Error> {
 		let path = path.as_path();
 
