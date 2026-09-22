@@ -2,7 +2,8 @@
 
 ## Goal
 
-Settle the public contracts of `moq-archive`, `moq-e2ee`, `moq-sock`,
+Make the origin's failover a state machine with a runtime-free test per
+transition, the correctness core of the relay. Alongside it, settle the public contracts of `moq-archive`, `moq-e2ee`, `moq-sock`,
 `moq-uring`, `moq-audio`, `moq-video`, `moq-transcode`, and `moq-nvenc`
 before the imminent release, while supplying the reusable GPU media support
 needed to remove raw-pixel CPU transfers from the Pronto CARLA demo. These are
