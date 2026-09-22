@@ -234,7 +234,7 @@ windows = { version = "0.62", features = [
 ash = { workspace = true }
 # `poll!`, to cancel an `encode::Sink` request exactly where a `select!` would.
 futures = { workspace = true }
-h264-reader = "0.8.0"
+h264-reader = "0.9.0"
 # `clock_gettime`, so the GPU workload test can report CPU time next to wall
 # latency. std has no CPU clock and the dependency is optional at build time.
 libc = { workspace = true }
