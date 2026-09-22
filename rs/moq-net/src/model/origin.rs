@@ -3164,10 +3164,10 @@ impl Consumer {
 	/// including the exact path itself. Returns `None` if the path is outside this
 	/// consumer's scope or the consumer is closed first.
 	///
-	/// Use this before [`Self::request_broadcast`] whenever the announcement may
-	/// not have arrived yet, which includes every path you resolve right after
-	/// connecting: `request_broadcast` answers on the spot, so asking it first
-	/// races the announcement and reports a covered path as unroutable.
+	/// To resolve a broadcast rather than inspect the route, use
+	/// [`Self::routed_broadcast`]: pairing this with [`Self::request_broadcast`]
+	/// leaves a gap where the covering route can retract, and misses a local
+	/// broadcast that serves the path without announcing.
 	pub async fn routed(&self, path: impl AsPath) -> Option<Route> {
 		let path = path.as_path();
 

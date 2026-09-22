@@ -185,7 +185,11 @@ class OriginConsumer:
         return AnnounceConsumer(self._inner.announced(MoqAnnounceConfig(prefix=prefix, filter=filter)))
 
     def announced_broadcast(self, path: str) -> AnnouncedBroadcast:
-        """Await a route covering ``path``, then resolve the broadcast there."""
+        """Await the broadcast at ``path``, resolving once something can serve it.
+
+        Serving and advertising are separate, so a local broadcast at the exact
+        path resolves without ever being announced.
+        """
         return AnnouncedBroadcast(self._inner.announced_broadcast(path))
 
     async def request_broadcast(self, path: str) -> BroadcastConsumer:
@@ -193,9 +197,9 @@ class OriginConsumer:
 
         Resolution order: a local broadcast at the exact path, then the best
         announced route covering the path (served on demand by the session that
-        announced it), then a dynamic handler on the origin (if any); raises if
-        nothing can serve it. Unlike `announced_broadcast`, this does not wait
-        for a future announcement.
+        announced it), then a dynamic handler on the origin (if any). Unlike
+        `announced_broadcast`, this answers for what is reachable now and raises
+        if nothing can serve the path.
         """
         return BroadcastConsumer(await self._inner.request_broadcast(path))
 
