@@ -86,6 +86,10 @@ Producer and transcode's validated Ladder and coalescing active cursor. Keep
 one video Frame/Surface hierarchy and its deliberate native/wgpu type interop;
 do not add another media abstraction or a renderer crate during stabilization.
 
+## Quests
+
+- [Binding parity](/quest/main/binding-parity.md) - every wrapper reaches every moq-ffi method in its own idiom with moq-net's verbs
+
 ## Related
 
 - [Pronto GPU integration](https://github.com/moq-dev/moq.pro/tree/main/quest/main/pronto/gpu) - CARLA bridge, release adoption and desktop installation

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from moq_ffi import MoqError, MoqProtocolError, MoqProtocolKind
+from moq_ffi import MoqError, MoqProtocolKind
+
+from .types import ProtocolError
 
 
 def is_shutdown(err: BaseException) -> bool:
@@ -27,7 +29,7 @@ def is_auth(err: BaseException) -> bool:
     return protocol is not None and protocol.kind == MoqProtocolKind.UNAUTHORIZED
 
 
-def protocol_error(err: BaseException) -> MoqProtocolError | None:
+def protocol_error(err: BaseException) -> ProtocolError | None:
     """The structured protocol failure, or None if `err` is not one.
 
     A protocol error carries the peer's session or stream scope, the verbatim

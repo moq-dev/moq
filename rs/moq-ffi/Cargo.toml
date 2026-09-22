@@ -55,8 +55,8 @@ url = { workspace = true }
 moq-audio = { workspace = true, optional = true, features = ["aac"] }
 moq-tokio = { workspace = true, default-features = true }
 # `openh264`, `nvidia`, and `vaapi` back on, matching rs/libmoq: the workspace turns
-# moq-video's defaults off for `capture` (V4L2, libclang), and the codecs are
-# collateral rather than the goal. Nothing is paid for them off Linux, since
+# moq-video's defaults off for `capture` (device code the bindings don't
+# expose), and the codecs are collateral rather than the goal. Nothing is paid for them off Linux, since
 # cudarc / moq-nvenc / libloading / moq-vaapi sit behind
 # `cfg(target_os = "linux")` and Android is `target_os = "android"`. On Linux
 # both dlopen the driver, so the wrappers still link GPU-less and start

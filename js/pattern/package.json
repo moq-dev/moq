@@ -16,7 +16,7 @@
 		"release": "bun ../common/release.ts"
 	},
 	"devDependencies": {
-		"@types/bun": "^1.4.0",
+		"@types/bun": "^1.4.2",
 		"rimraf": "^6.1.3",
 		"typescript": "7.0.2"
 	}

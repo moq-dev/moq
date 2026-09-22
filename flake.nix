@@ -59,10 +59,12 @@
 
         # Pinned build toolchain (not latest stable) so `nix develop` and CI
         # compile against a fixed rustc and the relay's MSRV can't creep up
-        # unnoticed. Set to moq-relay's 1.95 (the highest crate MSRV in the
-        # workspace) so the whole workspace, including the relay, builds; the
-        # library crates declare a lower 1.91 floor (Cargo.toml rust-version).
-        rust-toolchain = pkgs.rust-bin.stable."1.95.0".default.override {
+        # unnoticed. The floor is 1.98, not the 1.95 relay MSRV: earlier rustc
+        # strips Mach-O debuginfo with an llvm-objcopy that leaves the LINKEDIT
+        # string pool 4-byte aligned, which macOS 27's dyld refuses to load, so
+        # release-profile proc macros and cdylibs are a coin flip there. The
+        # crates still declare their own lower floors (Cargo.toml rust-version).
+        rust-toolchain = pkgs.rust-bin.stable."1.98.1".default.override {
           extensions = [
             "rust-src"
             "rust-analyzer"

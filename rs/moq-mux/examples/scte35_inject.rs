@@ -171,7 +171,7 @@ fn main() -> anyhow::Result<()> {
 		"input TS length {} is not a multiple of 188",
 		input.len()
 	);
-	let packets: Vec<&[u8]> = input.chunks_exact(188).collect();
+	let packets = input.as_chunks::<188>().0;
 	let pmt_idx = packets
 		.iter()
 		.position(|p| pid_of(p) == pmt_pid.as_u16())

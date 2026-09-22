@@ -6,12 +6,10 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from moq_ffi import (
-    MoqAudioFormat,
     MoqAudioInit,
     MoqAudioProducer,
     MoqBroadcastDynamic,
     MoqBroadcastProducer,
-    MoqContainerFormat,
     MoqContainerInit,
     MoqContainerProducer,
     MoqContainerStreamProducer,
@@ -26,7 +24,6 @@ from moq_ffi import (
     MoqTrackDynamic,
     MoqTrackProducer,
     MoqTrackRequest,
-    MoqVideoFormat,
     MoqVideoInit,
     MoqVideoProducer,
 )
@@ -34,13 +31,16 @@ from moq_ffi import (
 from .types import (
     AudioEncoderInput,
     AudioEncoderOutput,
+    AudioFormat,
     AudioFrame,
+    ContainerFormat,
     Frame,
     Route,
     Subscription,
     TrackInfo,
     VideoEncoderInput,
     VideoEncoderOutput,
+    VideoFormat,
     VideoFrame,
     VideoHint,
     VideoProperties,
@@ -51,11 +51,11 @@ if TYPE_CHECKING:
     from .subscribe import BroadcastConsumer, GroupConsumer, TrackConsumer
 
 
-def _audio_init(format: MoqAudioFormat, init: bytes, label: str | None) -> MoqAudioInit:
+def _audio_init(format: AudioFormat, init: bytes, label: str | None) -> MoqAudioInit:
     return MoqAudioInit(format=format, data=init, label=label)
 
 
-def _video_init(format: MoqVideoFormat, init: bytes, label: str | None, hint: VideoHint | None) -> MoqVideoInit:
+def _video_init(format: VideoFormat, init: bytes, label: str | None, hint: VideoHint | None) -> MoqVideoInit:
     return MoqVideoInit(format=format, data=init, label=label, hint=hint)
 
 
@@ -291,8 +291,9 @@ class TrackProducer:
 class TrackRequest:
     """A subscriber-requested track that hasn't been accepted yet.
 
-    Accept it for raw writes, hand it to :meth:`BroadcastProducer.publish_media_on_track`
-    to publish media (the importer accepts it), or abort it to reject the subscriber.
+    Accept it for raw writes, hand it to :meth:`BroadcastProducer.publish_audio_on_track`
+    or :meth:`BroadcastProducer.publish_video_on_track` to publish media (the importer
+    accepts it), or abort it to reject the subscriber.
     """
 
     def __init__(self, inner: MoqTrackRequest) -> None:
@@ -345,10 +346,19 @@ class GroupRequest:
 
 
 class TrackDynamic:
-    """Async source of uncached group requests for one track."""
+    """Async source of uncached group requests for one track.
+
+    Usable as an async context manager that cancels on exit.
+    """
 
     def __init__(self, inner: MoqTrackDynamic) -> None:
         self._inner = inner
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.cancel()
 
     def __aiter__(self):
         return self
@@ -521,10 +531,17 @@ class BroadcastDynamic:
     """Async source of tracks requested by subscribers.
 
     Hold this object while subscriptions to unknown tracks should be accepted.
+    Usable as an async context manager that cancels on exit.
     """
 
     def __init__(self, inner: MoqBroadcastDynamic) -> None:
         self._inner = inner
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.cancel()
 
     def __aiter__(self):
         return self
@@ -581,7 +598,7 @@ class BroadcastProducer:
 
     def publish_audio(
         self,
-        format: MoqAudioFormat,
+        format: AudioFormat,
         init: bytes,
         *,
         label: str | None = None,
@@ -593,7 +610,7 @@ class BroadcastProducer:
 
     def publish_video(
         self,
-        format: MoqVideoFormat,
+        format: VideoFormat,
         init: bytes = b"",
         *,
         label: str | None = None,
@@ -606,7 +623,7 @@ class BroadcastProducer:
 
     def publish_container(
         self,
-        format: MoqContainerFormat,
+        format: ContainerFormat,
         init: bytes = b"",
     ) -> ContainerProducer:
         """Publish a container, which demuxes and publishes its own tracks. There is no label or
@@ -616,7 +633,7 @@ class BroadcastProducer:
     def publish_audio_on_track(
         self,
         request: TrackRequest,
-        format: MoqAudioFormat,
+        format: AudioFormat,
         init: bytes,
         *,
         label: str | None = None,
@@ -627,7 +644,7 @@ class BroadcastProducer:
     def publish_video_on_track(
         self,
         request: TrackRequest,
-        format: MoqVideoFormat,
+        format: VideoFormat,
         init: bytes = b"",
         *,
         label: str | None = None,
@@ -638,7 +655,7 @@ class BroadcastProducer:
 
     def publish_video_stream(
         self,
-        format: MoqVideoFormat,
+        format: VideoFormat,
         *,
         label: str | None = None,
         hint: VideoHint | None = None,
@@ -648,7 +665,7 @@ class BroadcastProducer:
         audio has no frame boundaries to infer."""
         return MediaStreamProducer(self._inner.publish_video_stream(_video_init(format, b"", label, hint)))
 
-    def publish_container_stream(self, format: MoqContainerFormat) -> ContainerStreamProducer:
+    def publish_container_stream(self, format: ContainerFormat) -> ContainerStreamProducer:
         """Publish a container fed by a raw byte stream, which recovers its own framing."""
         return ContainerStreamProducer(self._inner.publish_container_stream(format))
 

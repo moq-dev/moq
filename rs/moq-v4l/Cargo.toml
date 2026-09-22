@@ -1,0 +1,17 @@
+[package]
+name = "moq-v4l"
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+rust-version.workspace = true
+
+description = "Safe Video4Linux 2 bindings, forked from raymanfx/libv4l-rs with the kernel bindings checked in (no bindgen, no libclang)"
+repository = "https://github.com/moq-dev/moq"
+readme = "README.md"
+
+keywords = ["v4l2", "video", "capture", "linux"]
+categories = ["multimedia::video", "os::linux-apis"]
+
+[dependencies]
+bitflags = { workspace = true }
+libc = { workspace = true }

@@ -638,6 +638,10 @@ where
 	/// latency. Frames that already carry a duration (e.g. fMP4 passthrough) keep it,
 	/// and a backwards gap (a B-frame whose successor presents earlier) is left unset.
 	/// Containers that don't use per-frame durations (Legacy, LOC) ignore the field.
+	/// The boundary is converted into the frame's own scale first, so the duration
+	/// stays exact in native ticks; a micros round-trip would quantize scales like
+	/// 90 kHz (3003 ticks is not a whole number of micros) and fMP4 would refuse
+	/// the inexact `trun` conversion.
 	fn flush(&mut self, next: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		if self.buffer.is_empty() {
 			return Ok(());
@@ -649,6 +653,7 @@ where
 			}
 			let boundary = self.buffer.get(i + 1).map(|f| f.timestamp).or(next);
 			if let Some(boundary) = boundary
+				&& let Ok(boundary) = boundary.convert(self.buffer[i].timestamp.scale())
 				&& let Ok(duration) = boundary.checked_sub(self.buffer[i].timestamp)
 			{
 				self.buffer[i].duration = Some(duration);
@@ -1236,6 +1241,55 @@ mod tests {
 		// The last sample's duration is backfilled from the next keyframe: 66ms - 33ms.
 		assert_eq!(group0[1].duration, Some(Timestamp::from_micros(33_000).unwrap()));
 	}
+
+	/// A `cut(None)` boundary is micro-scale (the estimated end), so without converting
+	/// it into the frame's own scale the `checked_sub` refuses and the last frame
+	/// silently keeps `duration: None`. 90 kHz frames, as the TS importer feeds them.
+	#[tokio::test]
+	async fn cut_none_backfills_the_last_frame_duration_at_native_scale() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let recording = Recording::default();
+		let mut producer = Producer::new(track, recording.clone()).with_buffer(std::time::Duration::from_secs(10));
+
+		let scale = moq_net::Timescale::new(90_000).unwrap();
+		let frame_at = |ticks: u64, keyframe: bool| Frame {
+			timestamp: Timestamp::new(ticks, scale).unwrap(),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe,
+			duration: None,
+		};
+
+		// 3003 ticks is not a whole number of micros, so the micro-scale estimate
+		// truncates on the way through.
+		producer.write(frame_at(0, true)).unwrap();
+		producer.write(frame_at(3003, false)).unwrap();
+		producer.write(frame_at(6006, false)).unwrap();
+		producer.cut(None).unwrap();
+		producer.finish().unwrap();
+
+		let writes = recording.0.borrow();
+		let group = &writes[0];
+		assert_eq!(group.len(), 3);
+		let duration = |ticks: u64| Timestamp::new(ticks, scale).unwrap();
+		assert_eq!(group[0].duration, Some(duration(3003)));
+		assert_eq!(group[1].duration, Some(duration(3003)));
+		assert_eq!(
+			group[2].duration,
+			Some(duration(3002)),
+			"the truncated estimate still lands on exact native ticks instead of going missing"
+		);
+
+		// Every duration converts into the fMP4 track timescale without remainder;
+		// a micros round-trip would refuse here with SampleDurationInexact.
+		let info = crate::container::fmp4::FragmentInfo {
+			track_id: 1,
+			timescale: scale,
+			sequence_number: 0,
+			kind: crate::container::fmp4::Kind::Video,
+		};
+		crate::container::fmp4::encode_fragment(info, group).unwrap();
+	}
+
 	#[tokio::test]
 	async fn duration_marker_uses_cadence_not_batching_delay() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
