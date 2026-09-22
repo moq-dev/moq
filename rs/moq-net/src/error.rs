@@ -280,6 +280,11 @@ pub enum Error {
 	#[error(transparent)]
 	BoundsExceeded(#[from] coding::BoundsExceeded),
 
+	/// A path holds a segment no pattern can spell (`*` or `**`), so it can never
+	/// be announced or matched.
+	#[error("invalid path: {0}")]
+	InvalidPath(#[from] crate::InvalidPattern),
+
 	/// A duplicate ID was used
 	// The broadcast/track is a duplicate
 	#[error("duplicate")]
@@ -518,7 +523,8 @@ impl From<&Error> for SessionError {
 			| Error::Decode(_)
 			| Error::Encode(_)
 			| Error::WrongSize
-			| Error::BoundsExceeded(_) => Self::ProtocolViolation,
+			| Error::BoundsExceeded(_)
+			| Error::InvalidPath(_) => Self::ProtocolViolation,
 			Error::App(app) => Self::App(*app),
 			// A code we did not recognize, so we cannot say which space it came from.
 			// Forwarding it into this one risks landing on a value that IS registered here
@@ -556,7 +562,9 @@ impl From<&Error> for StreamError {
 			Error::Timeout => Self::DeliveryTimeout,
 			Error::GoingAway => Self::GoingAway,
 			// Our own parse failure is, from the peer's side, a malformed track.
-			Error::Decode(_) | Error::BoundsExceeded(_) | Error::MalformedTrack => Self::MalformedTrack,
+			Error::Decode(_) | Error::BoundsExceeded(_) | Error::InvalidPath(_) | Error::MalformedTrack => {
+				Self::MalformedTrack
+			}
 			Error::App(app) => Self::App(*app),
 			// See the SessionError impl: an unregistered code carries no registry, so
 			// re-sending the number could mistranslate it.
