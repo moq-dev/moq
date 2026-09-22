@@ -110,8 +110,12 @@ fn nvenc(size: Size, color: Color) -> crate::encode::Encoder {
 #[tokio::test]
 #[ignore = "requires a Linux NVIDIA GPU with Vulkan/CUDA external memory and NVENC"]
 async fn vulkan_cuda_convert_resize_encode() {
-	let size = Size::new(256, 128);
-	let sd = Size::new(128, 64);
+	// Both renditions clear NVENC's minimum encode width, which an RTX 3070 Ti
+	// reports as 145: 160x96 opens a session, 144x128 is refused with "Frame
+	// Dimension less than the minimum supported value". Smaller pictures
+	// convert and scale fine, there is just no encoder to hand them to.
+	let size = Size::new(320, 192);
+	let sd = Size::new(160, 96);
 	let color = Color::Bt709Limited;
 	let mut producer = Producer::new(size).expect("no Vulkan NVIDIA device: this opt-in test needs one");
 	let importer = Importer::new(0, NonZeroUsize::new(1).unwrap()).expect("CUDA importer");
