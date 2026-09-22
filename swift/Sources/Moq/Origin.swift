@@ -167,7 +167,7 @@ public final class AnnounceConsumer: AsyncSequence, Sendable {
 ///
 /// A route claims that `prefix` and every path beneath it can be served; it
 /// carries no broadcast. Resolve a specific path with `OriginConsumer.requestBroadcast`.
-/// By convention a publisher announces each broadcast's exact path.
+/// Local broadcasts appear on creation; announce to forward them to peers.
 public final class AnnounceUpdate: Sendable {
     let ffi: MoqAnnounceUpdate
 

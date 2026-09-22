@@ -88,7 +88,7 @@ func (b *BroadcastProducer) Announce(route Route) error {
 	return b.inner.Announce(route)
 }
 
-// Unannounce retracts this broadcast's exact-path advertisement, if any.
+// Unannounce withdraws peer advertising while preserving local discovery.
 func (b *BroadcastProducer) Unannounce() error {
 	return b.inner.Unannounce()
 }

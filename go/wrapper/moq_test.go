@@ -417,7 +417,7 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := produced.WriteFrame(moq.Frame{Payload: []byte("archive"), TimestampUs: request.Sequence()*20_000}); err != nil {
+	if err := produced.WriteFrame(moq.Frame{Payload: []byte("archive"), TimestampUs: request.Sequence() * 20_000}); err != nil {
 		t.Fatal(err)
 	}
 	if err := produced.Finish(); err != nil {
@@ -1219,7 +1219,7 @@ func TestCancelDoesNotLeakGoroutines(t *testing.T) {
 	}
 }
 
-func TestAnnounceThenUnannounceIsVisible(t *testing.T) {
+func TestLocalDiscoverySurvivesUnannounceUntilFinish(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
@@ -1231,10 +1231,6 @@ func TestAnnounceThenUnannounceIsVisible(t *testing.T) {
 	if _, err := broadcast.PublishTrack("events", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := broadcast.Announce(moq.Route{}); err != nil {
-		t.Fatal(err)
-	}
-
 	consumer := origin.Consume()
 	announced, err := consumer.Announced(moq.AnnounceOptions{})
 	if err != nil {
@@ -1243,7 +1239,15 @@ func TestAnnounceThenUnannounceIsVisible(t *testing.T) {
 	defer announced.Cancel()
 
 	ann, err := announced.Next(ctx)
-	if err != nil || ann == nil || ann.Prefix() != "live" || !ann.Active() {
+	if err != nil || ann == nil || ann.Prefix() != "live" || !ann.Active() || ann.Route().Cost != 0 {
+		t.Fatalf("create: ann=%+v err=%v", ann, err)
+	}
+
+	if err := broadcast.Announce(moq.Route{Cost: 3}); err != nil {
+		t.Fatal(err)
+	}
+	ann, err = announced.Next(ctx)
+	if err != nil || ann == nil || !ann.Active() || ann.Route().Cost != 3 {
 		t.Fatalf("announce: ann=%+v err=%v", ann, err)
 	}
 
@@ -1251,11 +1255,19 @@ func TestAnnounceThenUnannounceIsVisible(t *testing.T) {
 		t.Fatal(err)
 	}
 	ann, err = announced.Next(ctx)
-	if err != nil || ann == nil || ann.Prefix() != "live" || ann.Active() {
+	if err != nil || ann == nil || !ann.Active() || ann.Route().Cost != 0 {
 		t.Fatalf("unannounce: ann=%+v err=%v", ann, err)
 	}
 	if _, err := consumer.RequestBroadcast(ctx, "live"); err != nil {
 		t.Fatal(err)
+	}
+
+	if err := broadcast.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	ann, err = announced.Next(ctx)
+	if err != nil || ann == nil || ann.Prefix() != "live" || ann.Active() {
+		t.Fatalf("finish: ann=%+v err=%v", ann, err)
 	}
 }
 
