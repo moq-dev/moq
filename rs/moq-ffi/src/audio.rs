@@ -259,20 +259,23 @@ impl MoqBroadcastProducer {
 	) -> Result<Arc<MoqAudioProducer>, MoqError> {
 		let _guard = crate::ffi::runtime().enter();
 
-		let input = moq_audio::encode::Input {
-			format: input.format.into(),
-			sample_rate: input.sample_rate,
-			channels: input.channels,
-		};
+		let format = input.format.into();
+		let layout = moq_audio::Layout::from_channels(input.channels)?;
+		let mut input = moq_audio::encode::Input::new(input.sample_rate, layout);
+		input.format = format;
 		// The binding surface takes an explicit track name, so pin it here rather
 		// than letting the codec derive one.
 		let mut options = moq_audio::encode::Options::default();
 		options.track = Some(name);
-		options.codec = output.codec.codec();
-		options.sample_rate = output.sample_rate;
-		options.channels = output.channels;
-		options.bitrate = output.bitrate.map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
-		options.frame_duration = Duration::from_micros(output.frame_duration_us.into());
+		options.settings = moq_audio::encode::Settings::from_input(output.codec.codec(), &input);
+		if let Some(sample_rate) = output.sample_rate {
+			options.settings.sample_rate = sample_rate;
+		}
+		if let Some(channels) = output.channels {
+			options.settings.layout = moq_audio::Layout::from_channels(channels)?;
+		}
+		options.settings.bitrate = output.bitrate.map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
+		options.settings.frame_duration = Duration::from_micros(output.frame_duration_us.into());
 		if let Some(bandwidth) = &bandwidth {
 			options.bandwidth = bandwidth.allocator().clone();
 		}
@@ -371,10 +374,10 @@ impl MoqBroadcastConsumer {
 		let cfg = audio_config(catalog_audio)?;
 		let broadcast = self.resolve_inner(reference.as_deref()).await?;
 
-		let mut config = moq_audio::decode::Config::default();
-		config.format = output.format.into();
-		config.sample_rate = output.sample_rate;
-		config.channels = output.channels;
+		let mut config = moq_audio::decode::Options::default();
+		config.output.format = output.format.into();
+		config.output.sample_rate = output.sample_rate;
+		config.output.layout = output.channels.map(moq_audio::Layout::from_channels).transpose()?;
 		config.max_age = output.max_age_us.map(Duration::from_micros).unwrap_or_default();
 
 		let consumer = moq_audio::decode::Consumer::new(&broadcast, &cfg, name, config).await?;
@@ -433,7 +436,7 @@ mod tests {
 	#[test]
 	fn default_frame_duration_matches_moq_audio() {
 		assert_eq!(
-			moq_audio::encode::Options::default().frame_duration,
+			moq_audio::encode::Options::default().settings.frame_duration,
 			Duration::from_micros(20_000),
 			"update #[uniffi(default)] on MoqAudioEncoderOutput::frame_duration_us"
 		);

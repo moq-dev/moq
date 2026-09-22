@@ -300,12 +300,16 @@ impl MoqVideoProducer {
 	/// The next frame is encoded as a keyframe, which closes the open group and
 	/// starts a new one at it. Calling this repeatedly before that frame arrives
 	/// cuts once, not several times.
+	///
+	/// Fails when the selected encoder cannot force a keyframe (a V4L2 driver
+	/// without the control): nothing is queued, and groups keep falling at the
+	/// configured interval.
 	pub fn cut(&self) -> Result<(), MoqError> {
 		let mut guard = self.inner.lock().unwrap();
 		let producer = guard.as_mut().ok_or(MoqError::Closed)?;
 		// A keyframe is what a cut is on the wire: the importer closes the open
 		// group and starts a new one at it.
-		producer.encoder.keyframe();
+		block_on(producer.encoder.cut())?;
 		Ok(())
 	}
 
@@ -397,8 +401,8 @@ impl MoqBroadcastProducer {
 		config.codec = output.codec.into();
 		config.kind = output.kind.into();
 		config.bitrate = output.bitrate.map(moq_net::bandwidth::Rate::from_bps);
-		if let Some(gop) = output.gop {
-			config.gop = gop;
+		if let Some(interval) = output.gop {
+			config.gop = moq_video::encode::Gop::Keyframe { interval };
 		}
 
 		// Both before the track exists: a config this machine can't encode should fail

@@ -10,7 +10,6 @@ use bytes::Bytes;
 use crate::error::{Error, Result};
 use crate::key::TrackKey;
 use crate::limits::MAX_GROUPED_PAYLOAD;
-use crate::window::GroupWindow;
 
 /// A decrypted grouped frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,14 +20,13 @@ pub struct Frame {
 	pub plaintext: Bytes,
 }
 
-/// Exclusive writer for one grouped-frame identity stream.
+/// Exclusive writer for one group; frames are numbered from 0 in write order.
 ///
-/// Frames are numbered from 0 in write order. Dropping without [`Self::finish`]
-/// or [`Self::abort`] lets the net group close uncleanly.
+/// Dropping without [`Self::finish`] or [`Self::abort`] lets the net group close uncleanly.
 pub struct Producer {
 	inner: moq_net::group::Producer,
 	key: Arc<Mutex<TrackKey>>,
-	ciphertexts: Vec<Bytes>,
+	next_frame: u32,
 }
 
 impl Producer {
@@ -36,7 +34,7 @@ impl Producer {
 		Self {
 			inner,
 			key,
-			ciphertexts: Vec::new(),
+			next_frame: 0,
 		}
 	}
 
@@ -47,45 +45,35 @@ impl Producer {
 
 	/// Next frame index that will be written.
 	pub fn next_frame(&self) -> u32 {
-		u32::try_from(self.ciphertexts.len()).unwrap_or(u32::MAX)
-	}
-
-	/// Ciphertext already produced for `frame`, if it is still retained.
-	pub fn ciphertext(&self, frame: u32) -> Option<&Bytes> {
-		self.ciphertexts.get(frame as usize)
+		self.next_frame
 	}
 
 	/// Encrypt `plaintext` at the next frame index and write the ciphertext.
 	///
-	/// The frame identity is committed before the net write: a failed net write
-	/// still consumes the nonce so it is never reused with different bytes.
-	/// Timestamp conversion is validated before encryption so a predictable
-	/// failure does not burn an identity.
+	/// The identity is spent before the net write, so a failed write never repeats a
+	/// nonce with different bytes. Predictable failures, an oversize plaintext or a
+	/// timestamp the track cannot represent, are refused before encryption.
 	///
 	/// # Errors
 	///
 	/// [`Error::Identity`] if the next frame exceeds 32 bits, [`Error::Exhausted`],
 	/// [`Error::Oversize`], or a net write error.
-	pub fn write_frame(&mut self, timestamp: moq_net::Timestamp, plaintext: impl AsRef<[u8]>) -> Result<()> {
-		let frame = u32::try_from(self.ciphertexts.len()).map_err(|_| Error::Identity)?;
-		let group = self.inner.sequence;
-		// Validate timestamp conversion before AEAD so a predictable net failure
-		// does not consume a nonce or desync from the transport index.
+	pub fn write_frame(&mut self, timestamp: moq_net::Timestamp, plaintext: &[u8]) -> Result<()> {
+		let frame = self.next_frame;
+		if frame == u32::MAX {
+			return Err(Error::Identity);
+		}
 		timestamp
 			.convert(self.inner.timescale())
 			.map_err(|_| Error::Net(moq_net::Error::TimestampMismatch))?;
-		let plaintext = plaintext.as_ref();
-		let payload =
-			self.key
-				.lock()
-				.expect("track key")
-				.protect(group, u64::from(frame), plaintext, MAX_GROUPED_PAYLOAD)?;
-		// Commit the identity before the fallible net write; on failure the nonce
-		// stays consumed and the group is expected to be dropped.
-		self.ciphertexts.push(payload.clone());
-		if let Err(err) = self.inner.write_frame(timestamp, payload) {
-			return Err(err.into());
-		}
+		let payload = self.key.lock().expect("track key").protect(
+			self.inner.sequence,
+			u64::from(frame),
+			plaintext,
+			MAX_GROUPED_PAYLOAD,
+		)?;
+		self.next_frame = frame + 1;
+		self.inner.write_frame(timestamp, payload)?;
 		Ok(())
 	}
 
@@ -99,11 +87,6 @@ impl Producer {
 		Ok(())
 	}
 
-	#[cfg(test)]
-	pub(crate) fn invocations(&self) -> u64 {
-		self.key.lock().expect("track key").invocations()
-	}
-
 	/// Abort the group with a cancel, consuming the handle.
 	///
 	/// # Errors
@@ -113,13 +96,18 @@ impl Producer {
 		self.inner.abort(moq_net::Error::Cancel)?;
 		Ok(())
 	}
+
+	#[cfg(test)]
+	pub(crate) fn invocations(&self) -> u64 {
+		self.key.lock().expect("track key").invocations()
+	}
 }
 
 impl fmt::Debug for Producer {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("group::Producer")
 			.field("sequence", &self.sequence())
-			.field("next_frame", &self.next_frame())
+			.field("next_frame", &self.next_frame)
 			.finish()
 	}
 }
@@ -130,27 +118,19 @@ impl fmt::Debug for Producer {
 pub struct Consumer {
 	inner: moq_net::group::Consumer,
 	key: Arc<Mutex<TrackKey>>,
-	window: Arc<Mutex<GroupWindow>>,
 	auth_failed: Arc<AtomicBool>,
-	next_frame: u32,
 }
 
 impl Consumer {
 	pub(crate) fn new(
 		inner: moq_net::group::Consumer,
 		key: Arc<Mutex<TrackKey>>,
-		window: Arc<Mutex<GroupWindow>>,
 		auth_failed: Arc<AtomicBool>,
 	) -> Self {
-		// Start at the transport's cursor, not 0: a ranged or resumed group may
-		// first serve a nonzero object index.
-		let next_frame = u32::try_from(inner.index()).unwrap_or(u32::MAX);
 		Self {
 			inner,
 			key,
-			window,
 			auth_failed,
-			next_frame,
 		}
 	}
 
@@ -163,8 +143,8 @@ impl Consumer {
 	///
 	/// # Errors
 	///
-	/// [`Error::Authentication`] ends this track. [`Error::Duplicate`] if the identity
-	/// is still in the window. [`Error::Oversize`] or [`Error::Exhausted`] as for open.
+	/// [`Error::Authentication`] ends this track. [`Error::Oversize`] or
+	/// [`Error::Exhausted`] as for open, and net errors from the underlying group.
 	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Frame>>> {
 		if self.auth_failed.load(Ordering::Acquire) {
 			return Poll::Ready(Err(Error::Authentication));
@@ -172,48 +152,26 @@ impl Consumer {
 		let Some(frame) = ready!(self.inner.poll_read_frame(waiter)?) else {
 			return Poll::Ready(Ok(None));
 		};
-		let group = self.inner.sequence;
-		// The transport index already advanced past the frame just read; use it
-		// for the nonce so resumed groups starting above 0 still authenticate.
-		let consumed = self.inner.index().checked_sub(1).ok_or(Error::Identity)?;
-		let index = match u32::try_from(consumed) {
-			Ok(index) => index,
-			Err(_) => {
-				self.fail_auth();
-				return Poll::Ready(Err(Error::Identity));
-			}
-		};
-		if let Err(err) = self.window.lock().expect("group window").check(group, index) {
-			if matches!(err, Error::Authentication) {
-				self.fail_auth();
-			}
-			return Poll::Ready(Err(err));
-		}
-		let plaintext =
-			match self
-				.key
+		// The transport cursor already advanced past the frame just read; its index is
+		// the nonce half, so a group resumed above frame 0 still authenticates.
+		let index = self.inner.index().checked_sub(1).ok_or(Error::Identity)?;
+		let result =
+			self.key
 				.lock()
 				.expect("track key")
-				.open(group, u64::from(index), &frame.payload, MAX_GROUPED_PAYLOAD)
-			{
-				Ok(plaintext) => plaintext,
-				Err(Error::Authentication) => {
-					self.fail_auth();
-					return Poll::Ready(Err(Error::Authentication));
+				.open(self.inner.sequence, index, &frame.payload, MAX_GROUPED_PAYLOAD);
+		match result {
+			Ok(plaintext) => Poll::Ready(Ok(Some(Frame {
+				timestamp: frame.timestamp,
+				plaintext,
+			}))),
+			Err(err) => {
+				if matches!(err, Error::Authentication | Error::Identity) {
+					self.auth_failed.store(true, Ordering::Release);
 				}
-				Err(err) => return Poll::Ready(Err(err)),
-			};
-		self.next_frame = match u32::try_from(self.inner.index()) {
-			Ok(next) => next,
-			Err(_) => {
-				self.fail_auth();
-				return Poll::Ready(Err(Error::Identity));
+				Poll::Ready(Err(err))
 			}
-		};
-		Poll::Ready(Ok(Some(Frame {
-			timestamp: frame.timestamp,
-			plaintext,
-		})))
+		}
 	}
 
 	/// Read the next decrypted frame.
@@ -224,17 +182,13 @@ impl Consumer {
 	pub async fn read_frame(&mut self) -> Result<Option<Frame>> {
 		kio::wait(|waiter| self.poll_read_frame(waiter)).await
 	}
-
-	fn fail_auth(&self) {
-		self.auth_failed.store(true, Ordering::Release);
-	}
 }
 
 impl fmt::Debug for Consumer {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("group::Consumer")
 			.field("sequence", &self.sequence())
-			.field("next_frame", &self.next_frame)
+			.field("index", &self.inner.index())
 			.finish()
 	}
 }

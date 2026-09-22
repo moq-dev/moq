@@ -17,7 +17,7 @@ const FRAME_DURATIONS: [u128; 6] = [2_500, 5_000, 10_000, 20_000, 40_000, 60_000
 /// Snap an arbitrary sample rate up to the nearest libopus-supported rate;
 /// falls back to 48 kHz for anything above the highest.
 pub(crate) fn pick_rate(input_rate: u32) -> u32 {
-	RATES.iter().copied().find(|&r| r >= input_rate).unwrap_or(48_000)
+	RATES.iter().copied().find(|&rate| rate >= input_rate).unwrap_or(48_000)
 }
 
 pub(crate) fn validate_rate(rate: u32) -> Result<(), Error> {
@@ -87,7 +87,7 @@ pub(crate) fn activity(packet: &[u8], in_dtx: bool) -> Activity {
 /// either of the two paths that do so (SILK coding nothing, and the Opus-level
 /// silence detector). Nothing else in a conforming encoder produces it except a
 /// bitrate below libopus's floor, which codes nothing whatever the input;
-/// [`Config::bitrate`](crate::encode::Config::bitrate) refuses those, so our own
+/// [`Settings::bitrate`](crate::encode::Settings::bitrate) refuses those, so our own
 /// encoder cannot emit one and this stays exact on both sides.
 ///
 /// It deliberately says nothing about the periodic refresh that interrupts a
@@ -149,8 +149,8 @@ mod tests {
 	fn rate_picker_snaps_up() {
 		assert_eq!(pick_rate(44_100), 48_000);
 		assert_eq!(pick_rate(22_050), 24_000);
-		for &r in &RATES {
-			assert_eq!(pick_rate(r), r);
+		for &rate in &RATES {
+			assert_eq!(pick_rate(rate), rate);
 		}
 	}
 

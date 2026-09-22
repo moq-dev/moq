@@ -59,10 +59,6 @@ ignores every grant.
 This needs the allocator on main, so it starts after
 the dev merge.
 
-## Required
-
-- [Audio configuration](/quest/main/audio-config.md) - the settled codec settings
-
 ## Closes
 
 - [#2848](https://github.com/moq-dev/moq/issues/2848) - close this issue when the quest finishes

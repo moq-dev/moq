@@ -45,10 +45,6 @@ positions from an arbitrary channel count.
 
 Capture stays mono/stereo, and Opus encode stays mapping family 0.
 
-## Required
-
-- [Audio configuration](/quest/main/audio-config.md) - extensible layout and current-mode compatibility
-
 ## Related
 
 - [Opus surround](/quest/next/audio-codecs/opus-surround.md) - the first coded multichannel consumer of the layout

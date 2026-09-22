@@ -70,11 +70,8 @@ fn a_connection_writes_a_trace() {
 	dial.verify = false;
 	dial.transport.qlog = Some(sink.clone());
 
-	let accepting = handle.clone();
 	handle.spawn(async move {
-		let conn = quic::server::accept(&accepting, server_sock, &server)
-			.await
-			.expect("quic accept");
+		let conn = quic::server::accept(server_sock, &server).await.expect("quic accept");
 		// Hold the connection open until the worker is dropped, so the trace
 		// covers a live connection rather than a torn-down one.
 		std::future::pending::<()>().await;
@@ -83,9 +80,7 @@ fn a_connection_writes_a_trace() {
 
 	worker
 		.block_on(async move {
-			let conn = quic::client::connect(&handle, client_sock, &dial)
-				.await
-				.expect("quic connect");
+			let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
 			assert_eq!(
 				web_transport_trait::poll::Session::protocol(&conn),
 				Some(ALPN),

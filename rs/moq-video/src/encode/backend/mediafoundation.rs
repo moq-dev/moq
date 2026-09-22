@@ -42,7 +42,7 @@ use windows::Win32::Media::MediaFoundation::{
 use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
 use windows::core::{GUID, Interface};
 
-use super::super::encoder::{Codec, Config};
+use super::super::encoder::{Codec, Config, Gop};
 use super::{Backend, Encoded};
 use crate::frame::{Surface, interleave_uv};
 use crate::mf::{ComGuard, mf_err, pack_2x32};
@@ -65,6 +65,7 @@ pub(crate) struct MediaFoundation {
 	height: u32,
 	framerate: crate::Rate,
 	bitrate: u32,
+	/// Keyframe interval in frames.
 	gop: u32,
 	/// The color space of the input frames, stamped onto both media types so the
 	/// encoder writes it into the bitstream's VUI.
@@ -138,7 +139,10 @@ impl MediaFoundation {
 			height: config.height,
 			framerate: config.framerate,
 			bitrate: clamp_u32(config.resolved_bitrate().as_bps()),
-			gop: config.gop,
+			gop: {
+				let Gop::Keyframe { interval } = config.gop;
+				interval
+			},
 			color: config.resolved_color(),
 			started: false,
 			provides_samples: false,
@@ -579,7 +583,7 @@ impl MediaFoundation {
 }
 
 impl Backend for MediaFoundation {
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Encoded>, Error> {
+	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
 		if !self.started {
 			self.start(&frame.surface)?;
 		}
@@ -587,7 +591,7 @@ impl Backend for MediaFoundation {
 		let mut out = Vec::new();
 		self.wait_for_input(&mut out)?;
 
-		if keyframe {
+		if cut {
 			self.set_codec(&CODECAPI_AVEncVideoForceKeyFrame, variant_u32(1))?;
 		}
 
@@ -654,7 +658,11 @@ impl Backend for MediaFoundation {
 		Ok(())
 	}
 
-	fn name(&self) -> &str {
+	fn can_cut(&self) -> bool {
+		true
+	}
+
+	fn name(&self) -> &'static str {
 		NAME
 	}
 }

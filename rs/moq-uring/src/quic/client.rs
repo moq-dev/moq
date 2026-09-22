@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 
 use super::{Connection, Error, Identity};
-use crate::{Handle, udp};
+use crate::udp;
 
 /// Where to dial, as whom, and who to trust.
 #[derive(Clone, Debug)]
@@ -52,10 +52,10 @@ impl Config {
 ///
 /// Shorthand for a dial-only [`Endpoint`](super::Endpoint) and one
 /// [`connect`](super::Endpoint::connect) through it. The connection's driver
-/// runs as a task on the worker behind `handle`, so the returned
+/// runs as a task on the worker that adopted `socket`, so the returned
 /// [`Connection`] just works: hand it to `moq_net::Client::connect_lite` or
 /// use the stream API directly.
-pub async fn connect(handle: &Handle, socket: udp::Socket, config: &Config) -> Result<Connection, Error> {
-	let endpoint = super::Endpoint::new(handle, socket, super::endpoint::Config::default())?;
+pub async fn connect(socket: udp::Socket, config: &Config) -> Result<Connection, Error> {
+	let endpoint = super::Endpoint::new(socket, super::endpoint::Config::default())?;
 	endpoint.connect(config).await
 }

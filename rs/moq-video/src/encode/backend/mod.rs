@@ -49,10 +49,12 @@ mod vaapi;
 /// back zero or more access units in the codec's wire framing, each stamped with
 /// the timestamp of the frame it came from.
 pub(crate) trait Backend {
-	/// Encode one frame, forcing an IDR when `keyframe` is set. Backends key frames
-	/// automatically per [`Config::gop`], so this is only the caller's extra
-	/// request, arriving via [`Encoder::keyframe`](super::Encoder::keyframe).
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Encoded>, Error>;
+	/// Encode one frame, opening a group at it (an IDR) when `cut` is set.
+	/// Backends place group boundaries on their own per [`Config::gop`], so this
+	/// is only the caller's extra request, arriving via
+	/// [`Encoder::cut`](super::Encoder::cut), and only on a backend whose
+	/// [`can_cut`](Self::can_cut) said yes.
+	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error>;
 
 	/// Return every access unit the codec is still holding, leaving the encoder
 	/// usable for the frames that follow.
@@ -80,8 +82,17 @@ pub(crate) trait Backend {
 	/// than inherit a silent no-op and quietly ignore congestion.
 	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error>;
 
-	/// The encoder name in use, e.g. `"videotoolbox"` (for logging).
-	fn name(&self) -> &str;
+	/// Whether [`encode`](Self::encode) honors `cut`.
+	///
+	/// Known at open: a V4L2 driver either has the force-keyframe control or
+	/// does not, and the encoder refuses a cut up front on one that does not
+	/// rather than queue a request the codec ignores. No default, for the same
+	/// reason as `set_bitrate`: a backend that cannot cut has to say so, not
+	/// inherit a yes and let the refusal surface as a mislaid group boundary.
+	fn can_cut(&self) -> bool;
+
+	/// The encoder name in use, e.g. `"videotoolbox"` (for logging and errors).
+	fn name(&self) -> &'static str;
 }
 
 /// Every encoder backend this crate has a name for, on any platform.
@@ -172,11 +183,18 @@ const SOFTWARE: &[Candidate] = &[
 /// `Hardware` / `Software` can never select one: they exist to be asked for by
 /// name.
 #[cfg(test)]
-const NAMED_ONLY: &[Candidate] = &[Candidate {
-	name: probe::NAME,
-	codecs: &[Codec::H264],
-	open: probe::Probe::open,
-}];
+const NAMED_ONLY: &[Candidate] = &[
+	Candidate {
+		name: probe::NAME,
+		codecs: &[Codec::H264],
+		open: probe::Probe::open,
+	},
+	Candidate {
+		name: probe::NO_CUT,
+		codecs: &[Codec::H264],
+		open: probe::Probe::open_no_cut,
+	},
+];
 
 #[cfg(not(test))]
 const NAMED_ONLY: &[Candidate] = &[];
@@ -408,7 +426,7 @@ mod tests {
 	}
 
 	impl Backend for Stub {
-		fn encode(&mut self, _frame: &Frame, _keyframe: bool) -> Result<Vec<Encoded>, Error> {
+		fn encode(&mut self, _frame: &Frame, _cut: bool) -> Result<Vec<Encoded>, Error> {
 			Ok(Vec::new())
 		}
 
@@ -424,7 +442,11 @@ mod tests {
 			Ok(())
 		}
 
-		fn name(&self) -> &str {
+		fn can_cut(&self) -> bool {
+			true
+		}
+
+		fn name(&self) -> &'static str {
 			"stub"
 		}
 	}

@@ -78,11 +78,17 @@ backend that buffers, which hands back an earlier frame's access unit while a
 later one goes in, and for the tail `finish()` drains. Bring your own pixels with
 `Surface::rgba(...)`, or feed a frame straight from capture or `decode`.
 
-Keyframes are automatic, at the `Config::gop` interval, so an application never
-has to think about them. `Encoder::keyframe()` asks for one at the next frame when
-something outside the encoder needs a decodable starting point there: opening a
-new group, or resuming after an idle gap. The request is held until a frame
-arrives, so it is safe to call before you have one.
+Group boundaries are automatic: `Config::gop` says how the stream is divided
+(`Gop::Keyframe { interval }` places a keyframe every so many frames, and an
+interval of zero is refused at open), so an application never has to think
+about them. `Encoder::cut()` opens a group at the next frame when something
+outside the encoder needs a decodable starting point there: a source group
+boundary, a scene change, a source switch. The request is held until a frame
+arrives, so it is safe to call before you have one. It fails with
+`Error::CutUnsupported` on a backend that cannot force a boundary (a V4L2
+driver without the force-keyframe control), and queues nothing then: groups
+keep falling where `Config::gop` puts them. `encode::Sink` answers the same
+way, awaited.
 
 Two public entry points:
 

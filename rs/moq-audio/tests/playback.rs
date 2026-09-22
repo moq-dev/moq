@@ -38,7 +38,7 @@ fn tone(seconds: f32) -> Vec<u8> {
 fn input() -> playback::Input {
 	let mut input = playback::Input::default();
 	input.sample_rate = RATE;
-	input.channels = CHANNELS;
+	input.layout = moq_audio::Layout::Stereo;
 	input
 }
 

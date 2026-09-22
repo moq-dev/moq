@@ -74,6 +74,16 @@ pub enum Error {
 	#[error("encoder {0} cannot change bitrate while running")]
 	BitrateUnsupported(&'static str),
 
+	/// This encoder can't force a group boundary, so a cut was refused rather
+	/// than queued. Groups keep falling where its configured GOP puts them.
+	#[error("encoder {0} cannot cut a group on request")]
+	CutUnsupported(&'static str),
+
+	/// The group configuration can't be honored by any backend (the message
+	/// says why).
+	#[error("invalid group configuration: {0}")]
+	InvalidGop(String),
+
 	/// GPU rendering failure: building the pipeline, importing a frame's surface
 	/// as a texture, or the device itself.
 	#[error("render: {0}")]

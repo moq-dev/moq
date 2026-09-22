@@ -1,7 +1,7 @@
 //! The per-thread worker: ring ownership, the drive loop, and parking.
 
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::atomic::Ordering;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -522,11 +522,72 @@ impl Handle {
 	///
 	/// The caller configures and binds the socket (options, addresses); this
 	/// takes over receive and send. `config` picks the batching mechanisms.
-	pub fn udp(&self, socket: std::net::UdpSocket, config: udp::Config) -> Result<udp::Socket, Error> {
+	///
+	/// The socket is what names this worker from here on: an
+	/// [`Endpoint`](crate::quic::Endpoint) built on it runs its tasks here,
+	/// whichever thread's handle built it. A member of a steered reuseport
+	/// group ([`moq_sock::shard::Socket`]) brings its slot along, so the
+	/// connection ids issued through it steer back to this socket.
+	pub fn udp(&self, socket: impl Into<udp::Bound>, config: udp::Config) -> Result<udp::Socket, Error> {
 		if self.shared.stopped.get() {
 			return Err(Shared::gone_error().into());
 		}
-		udp::Socket::bind(&self.shared, socket, config)
+		udp::Socket::bind(&self.shared, socket.into(), config)
+	}
+}
+
+/// The worker behind a socket, endpoint, or connection, held weakly.
+///
+/// I/O carries its owner so it cannot be driven through a different worker,
+/// but a handle to that I/O must not keep a dropped worker's ring alive, so
+/// this holds no strong reference. Once the worker is gone, spawning is a
+/// no-op (like [`Handle::spawn`]) and timers never fire, which is what the
+/// tasks that would have consumed them expect.
+#[derive(Clone)]
+pub(crate) struct Owner {
+	shared: Weak<Shared>,
+	/// Held directly: a timer on a dropped worker still has to exist, since
+	/// the driver that owns it is torn down by the same drop that would need
+	/// it.
+	timers: Rc<RefCell<timer::Heap>>,
+}
+
+impl Owner {
+	pub(crate) fn new(shared: &Rc<Shared>) -> Self {
+		Self {
+			shared: Rc::downgrade(shared),
+			timers: shared.timers.clone(),
+		}
+	}
+
+	/// The worker's core while it is still allocated, torn down or not.
+	pub fn upgrade(&self) -> Option<Rc<Shared>> {
+		self.shared.upgrade()
+	}
+
+	/// A strong handle, or `None` once the worker is dropped or torn down.
+	pub fn handle(&self) -> Option<Handle> {
+		let shared = self.shared.upgrade()?;
+		(!shared.stopped.get()).then_some(Handle { shared })
+	}
+
+	/// Run a `!Send` future on the worker, or drop it if the worker is gone.
+	pub fn spawn(&self, future: impl Future<Output = ()> + 'static) {
+		if let Some(handle) = self.handle() {
+			handle.spawn(future);
+		}
+	}
+
+	/// A disarmed timer on the worker.
+	pub fn timer(&self) -> crate::Timer {
+		crate::Timer::from_heap(self.timers.clone())
+	}
+
+	/// A timer that expires after `duration`.
+	pub fn after(&self, duration: Duration) -> crate::Timer {
+		let mut timer = self.timer();
+		timer.set(Instant::now().checked_add(duration));
+		timer
 	}
 }
 

@@ -12,7 +12,7 @@ use openh264::encoder::{
 use openh264::formats::YUVSlices;
 use openh264_sys2::{ENCODER_OPTION_BITRATE, SBitrateInfo, SPATIAL_LAYER_ALL};
 
-use super::super::encoder::Config;
+use super::super::encoder::{Config, Gop};
 use super::{Backend, Encoded};
 use crate::{Color, Error, Frame};
 
@@ -34,6 +34,7 @@ impl Openh264 {
 	}
 
 	fn new(config: &Config) -> Result<Self, Error> {
+		let Gop::Keyframe { interval } = config.gop;
 		let color = config.resolved_color();
 		// State the color space in the SPS so a decoder doesn't fall back to
 		// guessing it from the frame height.
@@ -59,7 +60,7 @@ impl Openh264 {
 			.rate_control_mode(RateControlMode::Bitrate)
 			// Real-time camera: prioritize latency over compression.
 			.usage_type(UsageType::CameraVideoRealTime)
-			.intra_frame_period(IntraFramePeriod::from_num_frames(config.gop))
+			.intra_frame_period(IntraFramePeriod::from_num_frames(interval))
 			.vui(vui);
 
 		let encoder = Encoder::with_api_config(OpenH264API::from_source(), cfg)
@@ -119,7 +120,7 @@ impl Openh264 {
 }
 
 impl Backend for Openh264 {
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Encoded>, Error> {
+	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
 		// A rate deferred from before the encoder existed lands here, ahead of the
 		// frame rather than after it, so a rejected rate can't cost us a frame's
 		// packets on the way out.
@@ -129,7 +130,7 @@ impl Backend for Openh264 {
 			self.apply_bitrate(bitrate)?;
 		}
 
-		if keyframe {
+		if cut {
 			self.encoder.force_intra_frame();
 		}
 
@@ -181,7 +182,11 @@ impl Backend for Openh264 {
 		self.apply_bitrate(bitrate)
 	}
 
-	fn name(&self) -> &str {
+	fn can_cut(&self) -> bool {
+		true
+	}
+
+	fn name(&self) -> &'static str {
 		NAME
 	}
 }

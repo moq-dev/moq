@@ -4439,11 +4439,11 @@ dependencies = [
  "criterion",
  "hex",
  "kio",
- "moq-flate",
  "moq-net",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "uuid",
  "web-transport-trait",
  "zeroize",
 ]

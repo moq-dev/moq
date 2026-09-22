@@ -37,7 +37,7 @@ use std::io;
 use std::net::{IpAddr, SocketAddr, SocketAddrV6, UdpSocket};
 use std::os::fd::AsRawFd;
 use std::ptr::NonNull;
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::task::Poll;
 
@@ -46,6 +46,7 @@ use io_uring::{cqueue, opcode, types};
 use crate::Error;
 use crate::metrics::Counters;
 use crate::shared::{Cqe, Op, Shared};
+use crate::worker::Owner;
 
 /// Space reserved for received control messages: `UDP_GRO` plus the packet's
 /// `IP_TOS` or `IPV6_TCLASS` (the kernel emits one or the other), two ints.
@@ -374,12 +375,42 @@ impl TxSlot {
 	}
 }
 
+/// A bound socket a worker takes over, with whatever identity it carries.
+///
+/// Both variants convert with `From`, so [`crate::Handle::udp`] takes either
+/// as is. The member is the only way a socket gets a steering slot: the
+/// group that completed it is what proved the slot is real.
+pub enum Bound {
+	/// A socket on its own, bound by the caller.
+	Lone(UdpSocket),
+	/// One member of a completed steered `SO_REUSEPORT` group. Every
+	/// connection id an endpoint on it issues then leads with the member's
+	/// [`cid_prefix`](moq_sock::shard::cid_prefix), so the group's filter
+	/// keeps delivering a connection's packets to this socket.
+	Member(moq_sock::shard::Socket),
+}
+
+impl From<UdpSocket> for Bound {
+	fn from(socket: UdpSocket) -> Self {
+		Self::Lone(socket)
+	}
+}
+
+impl From<moq_sock::shard::Socket> for Bound {
+	fn from(member: moq_sock::shard::Socket) -> Self {
+		Self::Member(member)
+	}
+}
+
 /// Everything both the [`Socket`] handle and in-flight ops keep alive.
 pub(crate) struct SockShared {
 	io: UdpSocket,
-	worker: Weak<Shared>,
+	/// The worker, as the I/O built on this socket carries it.
+	owner: Owner,
+	/// This socket's slot in a steered reuseport group, if it is in one.
+	shard: Option<moq_sock::shard::Shard>,
 	/// The worker's counters, held directly rather than reached through
-	/// `worker`, so counting a datagram is not a `Weak::upgrade`.
+	/// `owner`, so counting a datagram is not a `Weak::upgrade`.
 	metrics: std::sync::Arc<Counters>,
 	config: Config,
 	bgid: u16,
@@ -392,10 +423,7 @@ impl SockShared {
 	/// Whether the worker loop that would drive this socket is gone: dropped
 	/// outright, or torn down while handles keep the shared state alive.
 	fn worker_gone(&self) -> bool {
-		match self.worker.upgrade() {
-			Some(shared) => shared.stopped.get(),
-			None => true,
-		}
+		self.owner.handle().is_none()
 	}
 
 	/// A packet released its buffer slice.
@@ -408,7 +436,7 @@ impl SockShared {
 		// A receive that died on ENOBUFS can start again now.
 		if rx.armed.is_none() && rx.error.is_none() {
 			drop(rx);
-			if let Some(shared) = self.worker.upgrade() {
+			if let Some(shared) = self.owner.upgrade() {
 				arm_recv(&shared, self);
 			}
 		}
@@ -456,7 +484,7 @@ impl Drop for SockShared {
 		// Every op referencing our buffers has completed (ops own an `Rc` of
 		// us), so the kernel is done; give the buffer group id back.
 		if self.rx.borrow().ring.is_some()
-			&& let Some(shared) = self.worker.upgrade()
+			&& let Some(shared) = self.owner.upgrade()
 		{
 			let ring = shared.ring.borrow_mut();
 			let _ = ring.submitter().unregister_buf_ring(self.bgid);
@@ -475,11 +503,18 @@ pub struct Socket {
 impl Socket {
 	/// A test-only observer for whether every kernel operation released this socket.
 	#[cfg(test)]
-	pub(crate) fn downgrade(&self) -> Weak<SockShared> {
+	pub(crate) fn downgrade(&self) -> std::rc::Weak<SockShared> {
 		Rc::downgrade(&self.shared)
 	}
 
-	pub(crate) fn bind(shared: &Rc<Shared>, io: UdpSocket, config: Config) -> Result<Self, Error> {
+	pub(crate) fn bind(shared: &Rc<Shared>, bound: Bound, config: Config) -> Result<Self, Error> {
+		let (io, shard) = match bound {
+			Bound::Lone(io) => (io, None),
+			Bound::Member(member) => {
+				let shard = member.shard();
+				(member.into_inner(), Some(shard))
+			}
+		};
 		let floor = if config.gro { MAX_RECV + RECV_OVERHEAD } else { 2048 };
 		if config.rx_buffer_len < floor || config.rx_buffers_max == 0 || config.tx_buffers_max == 0 {
 			return Err(io::Error::new(
@@ -570,7 +605,8 @@ impl Socket {
 
 		let sock = Rc::new(SockShared {
 			io,
-			worker: Rc::downgrade(shared),
+			owner: Owner::new(shared),
+			shard,
 			metrics: shared.metrics.clone(),
 			config,
 			bgid,
@@ -598,6 +634,16 @@ impl Socket {
 	/// The bound local address.
 	pub fn local_addr(&self) -> io::Result<SocketAddr> {
 		self.shared.io.local_addr()
+	}
+
+	/// The worker driving this socket, which everything built on it runs on.
+	pub(crate) fn owner(&self) -> Owner {
+		self.shared.owner.clone()
+	}
+
+	/// This socket's slot in a steered reuseport group, if it is in one.
+	pub(crate) fn shard(&self) -> Option<moq_sock::shard::Shard> {
+		self.shared.shard
 	}
 
 	/// A received packet, or the socket's terminal error, registering `waiter`
@@ -682,7 +728,7 @@ impl Drop for Socket {
 	fn drop(&mut self) {
 		self.shared.closed.set(true);
 		let rx = self.shared.rx.borrow();
-		if let (Some(key), Some(shared)) = (rx.armed, self.shared.worker.upgrade()) {
+		if let (Some(key), Some(shared)) = (rx.armed, self.shared.owner.upgrade()) {
 			drop(rx);
 			// Fire-and-forget: the cancel's own CQE is consumed by the worker,
 			// and the receive's terminal CQE releases the socket state.
@@ -802,7 +848,7 @@ impl TxBuf {
 				),
 			));
 		}
-		let shared = match self.sock.worker.upgrade() {
+		let shared = match self.sock.owner.upgrade() {
 			Some(shared) if !shared.stopped.get() => shared,
 			_ => return Err(Shared::gone_error()),
 		};

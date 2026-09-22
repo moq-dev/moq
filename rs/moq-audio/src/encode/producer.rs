@@ -1,7 +1,5 @@
 //! Encode raw PCM and publish it as a moq audio track.
 
-use std::time::Duration;
-
 use bytes::Bytes;
 
 use moq_mux::catalog::hang::CatalogExt;
@@ -9,15 +7,11 @@ use moq_mux::container::Frame as MuxFrame;
 use moq_net::Timestamp;
 
 use super::encoded::Encoded;
-use super::encoder::{Codec, Config, Encoder, Input};
-use crate::resample::Resampler;
+use super::encoder::{Encoder, Input, Settings};
+use crate::resample::{Resampler, remix, validate_remix};
 use crate::{Activity, Error, Frame};
 
-/// Source-agnostic encode knobs for [`Producer`] and `publish_capture`, where
-/// the input PCM layout comes from the caller's frames or the capture source
-/// rather than from these options. For the bring-your-own-PCM
-/// [`Encoder`](super::Encoder), which needs that layout up front, use
-/// [`Config`](super::Config) instead.
+/// Encode and publication policy for [`Producer`].
 ///
 /// `#[non_exhaustive]`: construct via [`Options::default`] and set fields, so
 /// new knobs can be added without breaking callers.
@@ -28,22 +22,8 @@ pub struct Options {
 	/// (`0.opus`, then `1.opus`, ...), matching how the video side names its
 	/// track. Subscribers find it through the catalog either way.
 	pub track: Option<String>,
-	/// Output codec. Defaults to [`Codec::Opus`].
-	pub codec: Codec,
-	/// Sample rate the codec runs at. `None` snaps the input rate up to the
-	/// nearest rate the codec supports, resampling if that moved it.
-	pub sample_rate: Option<u32>,
-	/// Channel count the codec runs at. `None` matches the input; anything else
-	/// is rejected, since remapping isn't implemented.
-	pub channels: Option<u32>,
-	/// Bitrate in bits per second. `None` lets Opus pick. PCM requires `None`
-	/// because its bitrate is fixed by the sample rate and channel count.
-	pub bitrate: Option<moq_net::bandwidth::Rate>,
-	/// Enable Opus discontinuous transmission during silence.
-	pub dtx: bool,
-	/// Encoded frame duration. Opus accepts 2.5 / 5 / 10 / 20 / 40 / 60 ms.
-	/// PCM accepts any duration containing a whole number of samples.
-	pub frame_duration: Duration,
+	/// Codec input and encoded output settings.
+	pub settings: Settings,
 	/// The connection's bandwidth, as an allocator over
 	/// [`Session::send_bandwidth`](moq_net::Session::send_bandwidth).
 	///
@@ -64,28 +44,8 @@ impl Default for Options {
 	fn default() -> Self {
 		Self {
 			track: None,
-			codec: Codec::default(),
-			sample_rate: None,
-			channels: None,
-			bitrate: None,
-			dtx: false,
-			frame_duration: Duration::from_millis(20),
+			settings: Settings::default(),
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
-		}
-	}
-}
-
-impl Options {
-	/// The [`Config`] these options describe once `input`'s layout is known.
-	fn config(&self, input: Input) -> Config {
-		Config {
-			input,
-			codec: self.codec,
-			sample_rate: self.sample_rate,
-			channels: self.channels,
-			bitrate: self.bitrate,
-			dtx: self.dtx,
-			frame_duration: self.frame_duration,
 		}
 	}
 }
@@ -101,6 +61,7 @@ impl Options {
 /// track.
 pub struct Producer<E: CatalogExt = ()> {
 	encoder: Encoder,
+	input: Input,
 	resampler: Option<Resampler>,
 	track: moq_mux::container::Producer<moq_mux::container::legacy::Wire, hang::catalog::AudioConfig>,
 	_ext: std::marker::PhantomData<fn() -> E>,
@@ -156,7 +117,7 @@ impl<E: CatalogExt> Reserved<E> {
 			// Mirrors the video side, which derives a unique name from the codec
 			// rather than making every caller invent one.
 			None => broadcast.unique_track(
-				&format!(".{}", options.codec),
+				&format!(".{}", options.settings.codec),
 				catalog.track_info(hang::catalog::PRIORITY.audio),
 			)?,
 		};
@@ -175,11 +136,10 @@ impl<E: CatalogExt> Reserved<E> {
 	/// Build the encoder for `input` and register the rendition describing it.
 	///
 	/// Separate from [`encode`](Self::encode), which cannot fail, so a layout the
-	/// codec rejects (more channels than Opus takes, a mismatch with
-	/// [`Options::channels`]) leaves the reservation intact for another input.
+	/// codec rejects leaves the reservation intact for another input.
 	pub(crate) fn register(&mut self, input: Input, options: &Options) -> Result<Registered, Error> {
-		let encoder = Encoder::new(&options.config(input))?;
-		let input = &encoder.config().input;
+		validate_remix(input.layout, options.settings.layout)?;
+		let encoder = Encoder::new(&options.settings)?;
 
 		let resampler = if input.sample_rate == encoder.codec_rate() {
 			None
@@ -187,24 +147,29 @@ impl<E: CatalogExt> Reserved<E> {
 			// Use microsecond precision so 2.5 ms frame_duration (supported by
 			// libopus) doesn't truncate to 2 ms.
 			let chunk_frames =
-				((input.sample_rate as u128 * encoder.config().frame_duration.as_micros()) / 1_000_000) as usize;
+				((input.sample_rate as u128 * encoder.settings().frame_duration.as_micros()) / 1_000_000) as usize;
 			Some(Resampler::new(
 				input.sample_rate,
 				encoder.codec_rate(),
-				input.channels,
+				encoder.codec_channels(),
 				chunk_frames,
 			)?)
 		};
 
 		self.track.set(encoder.catalog())?;
 
-		Ok(Registered { encoder, resampler })
+		Ok(Registered {
+			encoder,
+			input,
+			resampler,
+		})
 	}
 
 	/// Spend the reservation on a registered encoder, publishing through the track.
 	pub(crate) fn encode(self, registered: Registered) -> Producer<E> {
 		Producer {
 			encoder: registered.encoder,
+			input: registered.input,
 			resampler: registered.resampler,
 			track: self.track,
 			_ext: self._ext,
@@ -225,6 +190,7 @@ impl<E: CatalogExt> Reserved<E> {
 /// fallible step and cannot strand the track it consumes.
 pub(crate) struct Registered {
 	encoder: Encoder,
+	input: Input,
 	resampler: Option<Resampler>,
 }
 
@@ -366,12 +332,13 @@ impl<E: CatalogExt> Producer<E> {
 			.map_err(|_| Error::Unsupported(format!("frame timestamp {:?} out of range", frame.timestamp)))?;
 		let epoch_us = *self.epoch_us.get_or_insert(timestamp_us);
 
-		let input = &self.encoder.config().input;
-		let (format, channels) = (input.format, input.channels);
+		let input = &self.input;
+		let (format, channels) = (input.format, input.layout.channels());
 		let pcm = format.as_interleaved_f32(frame.data.as_ref(), channels)?;
+		let pcm = remix(&pcm, input.layout, self.encoder.settings().layout)?;
 		let pcm: Vec<f32> = match self.resampler.as_mut() {
 			Some(r) => r.process(&pcm, frame.timestamp)?,
-			None => pcm.into_owned(),
+			None => pcm,
 		};
 
 		self.pending.extend(pcm);
@@ -533,39 +500,11 @@ impl<E: CatalogExt> Producer<E> {
 
 #[cfg(test)]
 mod tests {
+	use std::time::Duration;
+
 	use super::*;
-	use crate::decode::{Config as DecodeConfig, Consumer as AudioConsumer};
-	use crate::{Activity, Format};
-
-	#[test]
-	fn options_preserve_encoder_configuration() {
-		let input = Input {
-			format: Format::S16,
-			sample_rate: 44_100,
-			channels: 1,
-		};
-		let bitrate = moq_net::bandwidth::Rate::from_bps(96_000);
-		let options = Options {
-			codec: Codec::Opus,
-			sample_rate: Some(24_000),
-			channels: Some(1),
-			bitrate: Some(bitrate),
-			dtx: true,
-			frame_duration: Duration::from_millis(10),
-			..Options::default()
-		};
-
-		let config = options.config(input);
-		assert_eq!(config.input.format, Format::S16);
-		assert_eq!(config.input.sample_rate, 44_100);
-		assert_eq!(config.input.channels, 1);
-		assert_eq!(config.codec, Codec::Opus);
-		assert_eq!(config.sample_rate, Some(24_000));
-		assert_eq!(config.channels, Some(1));
-		assert_eq!(config.bitrate, Some(bitrate));
-		assert!(config.dtx);
-		assert_eq!(config.frame_duration, Duration::from_millis(10));
-	}
+	use crate::decode::{Consumer as AudioConsumer, Options as DecodeOptions};
+	use crate::{Activity, Format, Layout};
 
 	#[tokio::test]
 	async fn demand_follows_subscribers_and_closes_with_the_producer() {
@@ -611,14 +550,18 @@ mod tests {
 			let input = Input {
 				format: Format::F32,
 				sample_rate: 48_000,
-				channels: 1,
+				layout: Layout::Mono,
 			};
 			let options = Options {
 				track: Some("audio".to_string()),
-				bitrate: Some(moq_net::bandwidth::Rate::from_bps(128_000)),
+				settings: Settings {
+					layout: Layout::Mono,
+					bitrate: Some(moq_net::bandwidth::Rate::from_bps(128_000)),
+					..Settings::default()
+				},
 				..Options::default()
 			};
-			let decoder_config = Encoder::new(&options.config(input.clone())).unwrap().catalog();
+			let decoder_config = Encoder::new(&options.settings).unwrap().catalog();
 
 			let mut broadcast = moq_net::broadcast::Info::new().produce();
 			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
@@ -628,9 +571,9 @@ mod tests {
 				&consumer,
 				&decoder_config,
 				"audio",
-				DecodeConfig {
+				DecodeOptions {
 					max_age: Duration::from_secs(1),
-					..DecodeConfig::new()
+					..DecodeOptions::new()
 				},
 			)
 			.await
@@ -662,7 +605,7 @@ mod tests {
 		let input = Input {
 			format: Format::F32,
 			sample_rate: 44_100,
-			channels: 1,
+			layout: Layout::Mono,
 		};
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -670,6 +613,7 @@ mod tests {
 		let consumer = broadcast.consume();
 		let options = Options {
 			track: Some("audio".to_string()),
+			settings: Settings::new(48_000, Layout::Mono),
 			..Options::default()
 		};
 		let mut producer = Producer::new(&mut broadcast, catalog, input.clone(), &options).unwrap();
@@ -709,7 +653,7 @@ mod tests {
 		let input = Input {
 			format: Format::F32,
 			sample_rate: 44_100,
-			channels: 1,
+			layout: Layout::Mono,
 		};
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -758,7 +702,7 @@ mod tests {
 			&mut broadcast,
 			catalog,
 			Input {
-				channels: 1,
+				layout: Layout::Mono,
 				..Input::default()
 			},
 			&options,
@@ -788,13 +732,14 @@ mod tests {
 		let input = Input {
 			format: Format::F32,
 			sample_rate: 48_000,
-			channels: 1,
+			layout: Layout::Mono,
 		};
 		let options = Options {
 			track: Some("audio".to_string()),
+			settings: Settings::new(48_000, Layout::Mono),
 			..Options::default()
 		};
-		let decoder_config = Encoder::new(&options.config(input.clone())).unwrap().catalog();
+		let decoder_config = Encoder::new(&options.settings).unwrap().catalog();
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
@@ -804,9 +749,9 @@ mod tests {
 			&subscriber,
 			&decoder_config,
 			"audio",
-			DecodeConfig {
+			DecodeOptions {
 				max_age: Duration::from_millis(500),
-				..DecodeConfig::new()
+				..DecodeOptions::new()
 			},
 		)
 		.await
@@ -834,21 +779,25 @@ mod tests {
 		let input = Input {
 			format: Format::F32,
 			sample_rate: 48_000,
-			channels: 1,
+			layout: Layout::Mono,
 		};
 		let options = Options {
 			track: Some("audio".to_string()),
-			bitrate: Some(moq_net::bandwidth::Rate::from_bps(24_000)),
-			dtx: true,
+			settings: Settings {
+				layout: Layout::Mono,
+				bitrate: Some(moq_net::bandwidth::Rate::from_bps(24_000)),
+				dtx: true,
+				..Settings::default()
+			},
 			..Options::default()
 		};
-		let decoder_config = Encoder::new(&options.config(input.clone())).unwrap().catalog();
+		let decoder_config = Encoder::new(&options.settings).unwrap().catalog();
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let subscriber = broadcast.consume();
 		let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
-		let mut consumer = AudioConsumer::new(&subscriber, &decoder_config, "audio", DecodeConfig::new())
+		let mut consumer = AudioConsumer::new(&subscriber, &decoder_config, "audio", DecodeOptions::new())
 			.await
 			.unwrap();
 
@@ -901,7 +850,7 @@ mod tests {
 		let input = Input {
 			format: Format::F32,
 			sample_rate: 48_000,
-			channels: 1,
+			layout: Layout::Mono,
 		};
 		let options = Options {
 			track: Some("audio".to_string()),
@@ -949,7 +898,7 @@ mod tests {
 		let input = Input {
 			format: Format::F32,
 			sample_rate: 44_100,
-			channels: 1,
+			layout: Layout::Mono,
 		};
 		let options = Options {
 			track: Some("audio".to_string()),
@@ -1005,7 +954,7 @@ mod tests {
 			&mut broadcast,
 			catalog,
 			Input {
-				channels: 1,
+				layout: Layout::Mono,
 				..Input::default()
 			},
 			&options,
@@ -1041,7 +990,7 @@ mod tests {
 			&mut broadcast,
 			catalog,
 			Input {
-				channels: 1,
+				layout: Layout::Mono,
 				..Input::default()
 			},
 			&options,

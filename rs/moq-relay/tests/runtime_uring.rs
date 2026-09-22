@@ -377,7 +377,7 @@ async fn uring_workers_write_qlog_traces() {
 	// rather than a connection that only ever exchanged Initials.
 	let url: url::Url = format!("moql://127.0.0.1:{port}/qlog").parse().expect("parse url");
 	let origin = moq_tokio::origin::spawn();
-	let mut broadcast = origin.create_broadcast("test").expect("create broadcast");
+	let broadcast = origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
 	let track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");

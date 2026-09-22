@@ -75,15 +75,17 @@ impl Sink {
 		self.0.name()
 	}
 
-	/// Ask for the next frame to be encoded as a keyframe, like
-	/// [`Encoder::keyframe`](super::Encoder::keyframe).
+	/// Cut a new group at the next frame, like
+	/// [`Encoder::cut`](super::Encoder::cut).
 	///
 	/// Queued behind the frames already in flight rather than applied to
-	/// whichever one the codec happens to be on, so it keys the next frame you
-	/// pass to [`encode`](Self::encode). Only queues the request, so unlike the
-	/// rest there is nothing to await.
-	pub fn keyframe(&mut self) {
-		self.0.keyframe();
+	/// whichever one the codec happens to be on, so it opens the group at the
+	/// next frame you pass to [`encode`](Self::encode). Awaited for the
+	/// backend's verdict: a backend that cannot cut refuses here with
+	/// [`Error::CutUnsupported`](crate::Error::CutUnsupported), the same answer
+	/// the direct encoder gives, rather than queueing a request it will ignore.
+	pub async fn cut(&mut self) -> Result<(), Error> {
+		self.0.cut().await
 	}
 
 	/// Encode one frame, waiting for its access units.
@@ -143,8 +145,8 @@ mod threaded {
 	use crate::{Error, Frame};
 
 	/// Work for the encode thread. Every variant goes down the same channel so a
-	/// keyframe request or a bitrate change lands in order with the frames around
-	/// it, rather than racing them.
+	/// cut or a bitrate change lands in order with the frames around it, rather
+	/// than racing them.
 	enum Request {
 		/// A frame to encode, plus a oneshot to return the resulting access units
 		/// (or an error) in order.
@@ -152,9 +154,10 @@ mod threaded {
 			frame: Arc<Frame>,
 			resp: oneshot::Sender<Result<Vec<Encoded>, Error>>,
 		},
-		/// Key the next frame. No reply: the encoder only records the request, so
-		/// there is nothing to report and nothing to wait for.
-		Keyframe,
+		/// Cut a group at the next frame, reporting whether the backend can: a
+		/// refusal has to reach the caller, since the alternative is a group
+		/// boundary that silently never happens.
+		Cut { resp: oneshot::Sender<Result<(), Error>> },
 		/// Retune to a new bitrate, reporting whether the backend took it so the
 		/// caller can stop adapting against an encoder that can't. The round trip
 		/// is affordable because the rate control policy only sends one of these
@@ -199,7 +202,9 @@ mod threaded {
 				Request::Encode { frame, resp } => {
 					let _ = resp.send(encoder.encode(&frame));
 				}
-				Request::Keyframe => encoder.keyframe(),
+				Request::Cut { resp } => {
+					let _ = resp.send(encoder.cut());
+				}
 				Request::SetBitrate { bitrate, resp } => {
 					let _ = resp.send(encoder.set_bitrate(bitrate));
 				}
@@ -234,10 +239,8 @@ mod threaded {
 			self.0.name()
 		}
 
-		pub fn keyframe(&mut self) {
-			// Nothing to report: a dead encode thread surfaces on the next encode,
-			// which is where the caller is already handling one.
-			let _ = self.0.send(Request::Keyframe);
+		pub async fn cut(&mut self) -> Result<(), Error> {
+			self.0.request(|resp| Request::Cut { resp }).await
 		}
 
 		pub async fn encode(&mut self, frame: Arc<Frame>) -> Result<Vec<Encoded>, Error> {
@@ -285,12 +288,12 @@ mod inline {
 			self.0.name()
 		}
 
-		pub fn keyframe(&mut self) {
-			self.0.keyframe();
+		/// Async only to match the threaded `Inner`; there's no thread to hand this
+		/// to, so it runs inline. The same holds for the calls below.
+		pub async fn cut(&mut self) -> Result<(), Error> {
+			self.0.cut()
 		}
 
-		/// Async only to match the threaded `Inner`; there's no thread to hand this
-		/// to, so it encodes inline. The same holds for the two below.
 		pub async fn encode(&mut self, frame: Arc<Frame>) -> Result<Vec<Encoded>, Error> {
 			self.0.encode(&frame)
 		}
@@ -309,12 +312,13 @@ mod inline {
 	}
 }
 
-/// macOS is exempt by design: the inline sink encodes on the calling thread, so
-/// there is no confinement to assert (see the module docs).
-#[cfg(all(test, not(target_os = "macos")))]
+#[cfg(test)]
 mod tests {
+	#[cfg(not(target_os = "macos"))]
 	use std::collections::HashSet;
+	#[cfg(not(target_os = "macos"))]
 	use std::sync::{Arc, Mutex};
+	#[cfg(not(target_os = "macos"))]
 	use std::thread::ThreadId;
 
 	use super::super::backend::probe;
@@ -340,11 +344,64 @@ mod tests {
 		config
 	}
 
+	/// The sink and the direct encoder answer a cut the same way: queued for the
+	/// next frame on a backend that can, and that frame is the one the codec
+	/// sees it on rather than whichever it was busy with.
+	#[test]
+	fn a_cut_lands_on_the_next_frame() {
+		let _probe = probe::exclusive();
+
+		let mut sink = pollster::block_on(Sink::open(&probe_config())).unwrap();
+		pollster::block_on(sink.encode(gray(0))).unwrap();
+		pollster::block_on(sink.cut()).unwrap();
+		pollster::block_on(sink.encode(gray(1))).unwrap();
+		pollster::block_on(sink.encode(gray(2))).unwrap();
+		drop(sink);
+
+		let events: Vec<_> = probe::take()
+			.into_iter()
+			.map(|(event, _)| event)
+			.filter(|event| matches!(*event, "encode" | "cut"))
+			.collect();
+		assert_eq!(events, vec!["encode", "encode", "cut", "encode"]);
+	}
+
+	/// A backend that cannot cut refuses through the sink exactly as it does
+	/// directly, and the sink stays usable: the refusal is the caller's to act
+	/// on, not a poisoned session.
+	#[test]
+	fn a_backend_that_cannot_cut_refuses_through_the_sink() {
+		let _probe = probe::exclusive();
+
+		let mut config = probe_config();
+		config.kind = Kind::Named(probe::NO_CUT.into());
+		let mut sink = pollster::block_on(Sink::open(&config)).unwrap();
+		assert_eq!(sink.name(), probe::NO_CUT);
+
+		let err = pollster::block_on(sink.cut()).expect_err("the backend cannot cut");
+		assert!(
+			matches!(err, Error::CutUnsupported(name) if name == probe::NO_CUT),
+			"unexpected error: {err:?}"
+		);
+
+		pollster::block_on(sink.encode(gray(0))).unwrap();
+		drop(sink);
+		let log = probe::take();
+		assert!(
+			!log.iter().any(|(event, _)| *event == "cut"),
+			"a refused cut still reached the codec: {log:?}"
+		);
+	}
+
 	/// Regression: a queued request runs on the encode thread whether or not the
 	/// caller is still waiting, so a cancelled `encode` leaves the codec a step
 	/// ahead of the stream with output nobody received. Carrying on would publish
 	/// a track quietly missing those frames, which is worse than an error: only
 	/// the publisher could ever tell, and only by decoding its own output.
+	///
+	/// macOS is exempt by design: the inline sink encodes on the calling thread,
+	/// so there is nothing to run ahead (see the module docs).
+	#[cfg(not(target_os = "macos"))]
 	#[test]
 	fn a_cancelled_call_poisons_the_sink() {
 		let _probe = probe::exclusive();
@@ -388,7 +445,9 @@ mod tests {
 	///
 	/// Asserted on every platform rather than only Windows: the confinement is
 	/// what the bindings now rely on, so it should fail here rather than on a
-	/// machine none of CI has.
+	/// machine none of CI has. macOS is exempt by design: the inline sink has
+	/// no thread of its own to confine anything to.
+	#[cfg(not(target_os = "macos"))]
 	#[test]
 	fn the_codec_stays_on_one_thread_however_it_is_driven() {
 		let _probe = probe::exclusive();
@@ -406,7 +465,7 @@ mod tests {
 			let caller = std::thread::spawn(move || {
 				let mut guard = sink.lock().unwrap();
 				let sink = guard.as_mut().unwrap();
-				sink.keyframe();
+				pollster::block_on(sink.cut()).unwrap();
 				pollster::block_on(sink.encode(gray(index))).unwrap();
 				pollster::block_on(sink.set_bitrate(moq_net::bandwidth::Rate::from_bps(500_000 + index))).unwrap();
 				// Only the first frame closes a group, so the two after it stay in

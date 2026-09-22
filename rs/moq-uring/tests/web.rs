@@ -41,7 +41,7 @@ fn h3_endpoint(handle: &moq_uring::Handle, certs: &support::Certs) -> quic::Endp
 	let sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("socket");
-	quic::Endpoint::new(handle, sock, quic::endpoint::Config::default().with_server(server)).expect("endpoint")
+	quic::Endpoint::new(sock, quic::endpoint::Config::default().with_server(server)).expect("endpoint")
 }
 
 /// The tokio-side client, in its own runtime on its own thread.
@@ -149,7 +149,7 @@ fn webtransport_echo_end_to_end() {
 			let conn = endpoint.accept().await.expect("accept");
 			assert_eq!(conn.protocol(), Some("h3"), "negotiated ALPN");
 
-			let request = quic::web::Request::accept(&handle, conn).await.expect("handshake");
+			let request = quic::web::Request::accept(conn).await.expect("handshake");
 			assert_eq!(request.url().path(), "/echo");
 			assert_eq!(request.url().query(), Some("token=abc"));
 			assert_eq!(request.protocols(), [PROTO.to_string()]);
@@ -273,7 +273,7 @@ fn lite_session_over_webtransport() {
 	worker
 		.block_on(async move {
 			let conn = endpoint.accept().await.expect("accept");
-			let request = quic::web::Request::accept(&handle, conn).await.expect("handshake");
+			let request = quic::web::Request::accept(conn).await.expect("handshake");
 			// The WebTransport equivalent of ALPN: pick the moq version.
 			let protocol = request.protocols().iter().find(|p| *p == PROTO).cloned();
 			let mut response = quic::web::Response::default();
@@ -368,7 +368,7 @@ fn an_abandoned_handshake_closes_the_connection() {
 		.block_on(async move {
 			let conn = endpoint.accept().await.expect("accept");
 			let mut watch = conn.clone();
-			let request = quic::web::Request::accept(&handle, conn).await.expect("handshake");
+			let request = quic::web::Request::accept(conn).await.expect("handshake");
 			let err = request
 				.respond(quic::web::Response::default().with_protocol("never-offered"))
 				.await
@@ -407,7 +407,7 @@ fn a_rejection_reaches_the_peer() {
 	worker
 		.block_on(async move {
 			let conn = endpoint.accept().await.expect("accept");
-			let request = quic::web::Request::accept(&handle, conn).await.expect("handshake");
+			let request = quic::web::Request::accept(conn).await.expect("handshake");
 			within(
 				&handle,
 				"the rejection to be delivered",
@@ -478,7 +478,7 @@ fn a_dropped_stream_carries_a_webtransport_code() {
 	worker
 		.block_on(async move {
 			let conn = endpoint.accept().await.expect("accept");
-			let request = quic::web::Request::accept(&handle, conn).await.expect("handshake");
+			let request = quic::web::Request::accept(conn).await.expect("handshake");
 			let mut session = request
 				.respond(quic::web::Response::default().with_protocol(PROTO))
 				.await

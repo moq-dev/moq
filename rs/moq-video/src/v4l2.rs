@@ -30,13 +30,14 @@ use std::time::Duration;
 
 use v4l::v4l_sys::{
 	V4L2_BUF_FLAG_ERROR, V4L2_BUF_FLAG_LAST, V4L2_CAP_DEVICE_CAPS, V4L2_CAP_STREAMING, V4L2_CAP_VIDEO_M2M,
-	V4L2_CAP_VIDEO_M2M_MPLANE, V4L2_EVENT_SOURCE_CHANGE, V4L2_SEL_TGT_COMPOSE, timeval,
+	V4L2_CAP_VIDEO_M2M_MPLANE, V4L2_CTRL_FLAG_DISABLED, V4L2_EVENT_SOURCE_CHANGE, V4L2_SEL_TGT_COMPOSE, timeval,
 	v4l2_buf_type_V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, v4l2_buf_type_V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, v4l2_buffer,
 	v4l2_capability, v4l2_colorspace_V4L2_COLORSPACE_REC709, v4l2_colorspace_V4L2_COLORSPACE_SMPTE170M, v4l2_control,
 	v4l2_decoder_cmd, v4l2_encoder_cmd, v4l2_event, v4l2_event_subscription, v4l2_field_V4L2_FIELD_NONE, v4l2_fmtdesc,
 	v4l2_format, v4l2_memory_V4L2_MEMORY_MMAP, v4l2_plane, v4l2_quantization_V4L2_QUANTIZATION_FULL_RANGE,
-	v4l2_quantization_V4L2_QUANTIZATION_LIM_RANGE, v4l2_requestbuffers, v4l2_selection, v4l2_streamparm,
-	v4l2_xfer_func_V4L2_XFER_FUNC_709, v4l2_ycbcr_encoding_V4L2_YCBCR_ENC_601, v4l2_ycbcr_encoding_V4L2_YCBCR_ENC_709,
+	v4l2_quantization_V4L2_QUANTIZATION_LIM_RANGE, v4l2_queryctrl, v4l2_requestbuffers, v4l2_selection,
+	v4l2_streamparm, v4l2_xfer_func_V4L2_XFER_FUNC_709, v4l2_ycbcr_encoding_V4L2_YCBCR_ENC_601,
+	v4l2_ycbcr_encoding_V4L2_YCBCR_ENC_709,
 };
 use v4l::v4l2::vidioc;
 
@@ -142,6 +143,7 @@ unsafe impl Arg for v4l2_event {}
 unsafe impl Arg for v4l2_event_subscription {}
 unsafe impl Arg for v4l2_fmtdesc {}
 unsafe impl Arg for v4l2_format {}
+unsafe impl Arg for v4l2_queryctrl {}
 unsafe impl Arg for v4l2_requestbuffers {}
 unsafe impl Arg for v4l2_selection {}
 unsafe impl Arg for v4l2_streamparm {}
@@ -589,6 +591,25 @@ impl Device {
 		// SAFETY: `VIDIOC_S_CTRL` takes a `v4l2_control`.
 		unsafe { self.ioctl(vidioc::VIDIOC_S_CTRL, &mut control) }
 			.map_err(|err| self.err(format_args!("S_CTRL {id:#x} = {value}"), err))
+	}
+
+	/// Whether the driver implements control `id` and will take it.
+	///
+	/// `VIDIOC_QUERYCTRL` answers `EINVAL` for a control the driver does not
+	/// have, and flags one it has but will not take as disabled. Asked before
+	/// the control is needed, so a caller that depends on it can refuse up front
+	/// instead of finding out on the frame it mattered for.
+	pub(crate) fn has_control(&self, id: u32) -> bool {
+		let mut query = v4l2_queryctrl::zeroed();
+		query.id = id;
+		// SAFETY: `VIDIOC_QUERYCTRL` takes a `v4l2_queryctrl`.
+		match unsafe { self.ioctl(vidioc::VIDIOC_QUERYCTRL, &mut query) } {
+			Ok(()) => query.flags & V4L2_CTRL_FLAG_DISABLED == 0,
+			Err(err) => {
+				tracing::debug!(control = format!("{id:#x}"), %err, "V4L2 control not present");
+				false
+			}
+		}
 	}
 
 	/// Set a control the driver is allowed not to have.

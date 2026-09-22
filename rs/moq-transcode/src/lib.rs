@@ -314,7 +314,7 @@ mod tests {
 			config
 		})
 		.unwrap();
-		encoder.keyframe();
+		encoder.cut().unwrap();
 		let gray = vec![0x80u8; 320 * 240 * 4];
 		for encoded in encoder.encode(&gray_frame(&gray, 0)).unwrap() {
 			hang::container::Frame {
@@ -366,7 +366,7 @@ mod tests {
 			for index in 0..frames {
 				let timestamp = (sequence * frames + index) * 33_333;
 				if index == 0 {
-					encoder.keyframe();
+					encoder.cut().unwrap();
 				}
 				for encoded in encoder.encode(&gray_frame(&gray, timestamp)).unwrap() {
 					let frame = hang::container::Frame {
@@ -438,7 +438,7 @@ mod tests {
 				for index in 0..frames {
 					let timestamp = (sequence * frames + index) * 33_333;
 					if index == 0 {
-						encoder.keyframe();
+						encoder.cut().await.unwrap();
 					}
 					for encoded in encoder.encode(gray_frame(&gray, timestamp)).await.unwrap() {
 						let frame = hang::container::Frame {

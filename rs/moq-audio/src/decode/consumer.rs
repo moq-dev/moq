@@ -4,25 +4,69 @@ use std::collections::VecDeque;
 
 use bytes::Bytes;
 
-use super::decoder::{Config, Decoder, Start};
-use crate::resample::{Resampler, remix, validate_channels};
-use crate::{Activity, Error, Frame};
+use super::decoder::{Config, Decoder};
+use crate::resample::{Resampler, remix, validate_remix};
+use crate::{Activity, Error, Format, Frame, Layout};
 
-/// Subscribe to a moq-mux audio track and emit decoded PCM in the layout
-/// declared by [`Config`].
+/// Where a consumer starts on a track that already holds groups.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Start {
+	/// Decode every cached group.
+	#[default]
+	Oldest,
+	/// Start at the newest cached group.
+	Latest,
+}
+
+/// PCM output conversion requested from [`Consumer`].
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct Output {
+	/// How to pack samples in each emitted frame.
+	pub format: Format,
+	/// Output sample rate, or the codec rate when absent.
+	pub sample_rate: Option<u32>,
+	/// Output layout, or the codec layout when absent.
+	pub layout: Option<Layout>,
+}
+
+/// Subscription, decoder, and output policy for [`Consumer`].
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct Options {
+	/// Low-level decoder configuration.
+	pub decoder: Config,
+	/// PCM output conversion.
+	pub output: Output,
+	/// Maximum media age accepted from the subscription.
+	pub max_age: std::time::Duration,
+	/// Initial cached-group policy.
+	pub start: Start,
+}
+
+impl Options {
+	/// Build default real-time consumer options.
+	pub fn new() -> Self {
+		Self::default()
+	}
+}
+
+/// Subscribe to a moq-mux audio track and emit decoded PCM in the requested
+/// [`Output`].
 ///
 /// The mirror of [`encode::Producer`](crate::encode::Producer): output format /
-/// sample rate / channel count are fixed at construction, and
+/// sample rate / layout are fixed at construction, and
 /// [`read`](Self::read) returns [`Frame`]s carrying the codec activity they
 /// were decoded from.
 pub struct Consumer {
 	decoder: Decoder,
 	track: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
 	resampler: Option<Resampler>,
-	config: Config,
+	options: Options,
 	max_age: std::time::Duration,
 	resolved_sample_rate: u32,
-	resolved_channels: u32,
+	resolved_layout: Layout,
 	/// Where the next packet's timestamp should land: the last packet's timestamp
 	/// plus the media it covered, including the codec delay the decoder trimmed off
 	/// the front. A packet that misses it is a hole nobody declared.
@@ -62,12 +106,12 @@ impl Consumer {
 		broadcast: &moq_net::broadcast::Consumer,
 		catalog: &hang::catalog::AudioConfig,
 		name: impl Into<String>,
-		config: Config,
+		options: Options,
 	) -> Result<Self, Error> {
-		let decoder = Decoder::new(catalog)?;
-		let sample_rate = config.sample_rate.unwrap_or_else(|| decoder.sample_rate());
-		let channels = config.channels.unwrap_or_else(|| decoder.channel_count());
-		validate_channels(channels)?;
+		let decoder = Decoder::new(catalog, &options.decoder)?;
+		let sample_rate = options.output.sample_rate.unwrap_or_else(|| decoder.sample_rate());
+		let layout = options.output.layout.unwrap_or_else(|| decoder.layout());
+		validate_remix(decoder.layout(), layout)?;
 
 		let resampler = if sample_rate == decoder.sample_rate() {
 			None
@@ -76,7 +120,7 @@ impl Consumer {
 			Some(Resampler::new(
 				decoder.sample_rate(),
 				sample_rate,
-				decoder.channel_count(),
+				decoder.layout().channels(),
 				chunk_frames,
 			)?)
 		};
@@ -87,7 +131,7 @@ impl Consumer {
 			.subscribe(
 				moq_net::track::Subscription::default()
 					.with_priority(hang::catalog::PRIORITY.audio)
-					.with_max_age(config.max_age),
+					.with_max_age(options.max_age),
 			)
 			.await?;
 		// A decoder often opens on a track that is already cached: a replacement
@@ -104,13 +148,13 @@ impl Consumer {
 		// aggregated across every live subscriber, so naming a stale cached
 		// sequence there asks the publisher to rewind the track for everyone
 		// reading it. What a player wants is to skip what it already has.
-		if config.start == Start::Latest
+		if options.start == Start::Latest
 			&& let Some(live_edge) = track.latest()
 		{
 			subscriber.set_groups(live_edge..);
 		}
 		let track = subscriber;
-		let max_age = config.max_age.min(track.info().max_age);
+		let max_age = options.max_age.min(track.info().max_age);
 		// The catalog says how the track is framed, and it is not always the legacy
 		// wire: `moq import fmp4` publishes CMAF. Reading a moof+mdat fragment as a
 		// varint timestamp plus a payload decodes to garbage rather than failing.
@@ -121,10 +165,10 @@ impl Consumer {
 			decoder,
 			track,
 			resampler,
-			config,
+			options,
 			max_age,
 			resolved_sample_rate: sample_rate,
-			resolved_channels: channels,
+			resolved_layout: layout,
 			next_start: None,
 			ready: VecDeque::new(),
 			spans: VecDeque::new(),
@@ -138,9 +182,9 @@ impl Consumer {
 		})
 	}
 
-	/// The config this consumer was built with.
-	pub fn config(&self) -> &Config {
-		&self.config
+	/// The options this consumer was built with.
+	pub fn options(&self) -> &Options {
+		&self.options
 	}
 
 	/// The effective age budget after clamping to the publisher's retention window.
@@ -149,15 +193,14 @@ impl Consumer {
 	}
 
 	/// Sample rate samples are actually delivered at, which is
-	/// [`Config::sample_rate`] resolved against the catalog.
+	/// [`Output::sample_rate`] resolved against the catalog.
 	pub fn sample_rate(&self) -> u32 {
 		self.resolved_sample_rate
 	}
 
-	/// Channel count samples are actually delivered at, which is
-	/// [`Config::channels`] resolved against the catalog.
-	pub fn channels(&self) -> u32 {
-		self.resolved_channels
+	/// Layout samples are actually delivered in.
+	pub fn layout(&self) -> Layout {
+		self.resolved_layout
 	}
 
 	/// Read the next decoded PCM frame, or `None` when the track ends.
@@ -224,10 +267,10 @@ impl Consumer {
 					.get_or_insert(rewind(mux_frame.timestamp, self.delay_trimmed, rate)?.max(epoch));
 				let total = frames_between(terminal_start, end, rate)?;
 				let remaining = total.saturating_sub(self.frames_decoded);
-				decoded.truncate(remaining.saturating_mul(self.decoder.channel_count() as usize));
+				decoded.truncate(remaining.saturating_mul(self.decoder.layout().channels() as usize));
 			}
 
-			let frames = decoded.len() / self.decoder.channel_count().max(1) as usize;
+			let frames = decoded.len() / self.decoder.layout().channels() as usize;
 			let decoded_at = if let Some(terminal_start) = self.terminal_start {
 				advance(terminal_start, self.frames_decoded, rate)?
 			} else {
@@ -395,13 +438,17 @@ impl Consumer {
 
 	/// Remix and pack decoded PCM into an output frame.
 	fn frame(&self, pcm: Vec<f32>, timestamp: moq_net::Timestamp, activity: Activity) -> Result<Frame, Error> {
-		let pcm = if self.decoder.channel_count() == self.resolved_channels {
+		let pcm = if self.decoder.layout() == self.resolved_layout {
 			pcm
 		} else {
-			remix(&pcm, self.decoder.channel_count(), self.resolved_channels)?
+			remix(&pcm, self.decoder.layout(), self.resolved_layout)?
 		};
 
-		let bytes = self.config.format.from_interleaved_f32(&pcm, self.resolved_channels)?;
+		let bytes = self
+			.options
+			.output
+			.format
+			.from_interleaved_f32(&pcm, self.resolved_layout.channels())?;
 		Ok(Frame {
 			timestamp,
 			data: Bytes::from(bytes),
@@ -477,8 +524,8 @@ mod tests {
 	use moq_net::Timestamp;
 
 	use super::*;
-	use crate::Format;
-	use crate::encode::{Encoder, Input, Options, Producer};
+	use crate::encode::{Encoder, Input, Options as EncodeOptions, Producer, Settings};
+	use crate::{Format, Layout};
 
 	#[tokio::test]
 	async fn remixes_mono_stream_to_stereo_output() {
@@ -488,21 +535,27 @@ mod tests {
 		let input = Input {
 			format: Format::F32,
 			sample_rate: 48_000,
-			channels: 1,
+			layout: Layout::Mono,
 		};
-		let options = Options {
+		let options = EncodeOptions {
 			track: Some("audio".to_string()),
-			..Options::default()
+			settings: Settings::new(48_000, Layout::Mono),
+			..EncodeOptions::default()
 		};
 		let mut producer = Producer::new(&mut broadcast, catalog, input.clone(), &options).unwrap();
-		let catalog = Encoder::new(&crate::encode::Config::new(input)).unwrap().catalog();
+		let catalog = Encoder::new(&Settings::new(input.sample_rate, input.layout))
+			.unwrap()
+			.catalog();
 		let mut consumer = Consumer::new(
 			&subscriber,
 			&catalog,
 			"audio",
-			Config {
-				channels: Some(2),
-				..Config::new()
+			Options {
+				output: Output {
+					layout: Some(Layout::Stereo),
+					..Output::default()
+				},
+				..Options::new()
 			},
 		)
 		.await
@@ -547,10 +600,13 @@ mod tests {
 			&subscriber,
 			&catalog,
 			"audio",
-			Config {
-				sample_rate: Some(48_000),
+			Options {
+				output: Output {
+					sample_rate: Some(48_000),
+					..Output::default()
+				},
 				max_age: std::time::Duration::from_secs(1),
-				..Config::new()
+				..Options::new()
 			},
 		)
 		.await
@@ -606,9 +662,12 @@ mod tests {
 			&subscriber,
 			&catalog,
 			"audio",
-			Config {
-				sample_rate: Some(48_000),
-				..Config::new()
+			Options {
+				output: Output {
+					sample_rate: Some(48_000),
+					..Output::default()
+				},
+				..Options::new()
 			},
 		)
 		.await
@@ -653,14 +712,11 @@ mod tests {
 
 	#[tokio::test]
 	async fn resampling_keeps_the_activity_boundary_on_its_source() {
-		let mut encoder = Encoder::new(&crate::encode::Config {
+		let mut encoder = Encoder::new(&Settings {
 			dtx: true,
 			bitrate: Some(moq_net::bandwidth::Rate::from_bps(24_000)),
 			frame_duration: std::time::Duration::from_millis(10),
-			..crate::encode::Config::new(Input {
-				channels: 1,
-				..Input::default()
-			})
+			..Settings::new(48_000, Layout::Mono)
 		})
 		.unwrap();
 		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 1);
@@ -678,10 +734,13 @@ mod tests {
 			&subscriber,
 			&catalog,
 			"audio",
-			Config {
-				sample_rate: Some(44_100),
+			Options {
+				output: Output {
+					sample_rate: Some(44_100),
+					..Output::default()
+				},
 				max_age: std::time::Duration::from_secs(1),
-				..Config::new()
+				..Options::new()
 			},
 		)
 		.await
@@ -758,10 +817,13 @@ mod tests {
 			// These tests publish a whole track up front and read it back afterwards,
 			// so every packet but the last is already old by the time the consumer
 			// looks. The default budget is zero, which sheds all of them.
-			Config {
-				sample_rate: Some(out_rate),
+			Options {
+				output: Output {
+					sample_rate: Some(out_rate),
+					..Output::default()
+				},
 				max_age: std::time::Duration::from_secs(1),
-				..Config::new()
+				..Options::new()
 			},
 		)
 		.await
@@ -867,13 +929,10 @@ mod tests {
 	/// before the jump and are labelled by the packet they came from.
 	#[tokio::test]
 	async fn a_terminal_jump_leaves_the_held_samples_alone() {
-		let mut encoder = Encoder::new(&crate::encode::Config {
+		let mut encoder = Encoder::new(&Settings {
 			dtx: true,
 			bitrate: Some(moq_net::bandwidth::Rate::from_bps(24_000)),
-			..crate::encode::Config::new(Input {
-				channels: 1,
-				..Input::default()
-			})
+			..Settings::new(48_000, Layout::Mono)
 		})
 		.unwrap();
 		let catalog = encoder.catalog();
@@ -902,9 +961,12 @@ mod tests {
 			&subscriber,
 			&catalog,
 			"audio",
-			Config {
-				sample_rate: Some(44_100),
-				..Config::new()
+			Options {
+				output: Output {
+					sample_rate: Some(44_100),
+					..Output::default()
+				},
+				..Options::new()
 			},
 		)
 		.await
@@ -984,9 +1046,9 @@ mod tests {
 		let input = Input {
 			format: Format::F32,
 			sample_rate: 48_000,
-			channels: 1,
+			layout: Layout::Mono,
 		};
-		let mut encoder = Encoder::new(&crate::encode::Config::new(input)).unwrap();
+		let mut encoder = Encoder::new(&Settings::new(input.sample_rate, input.layout)).unwrap();
 		let catalog = encoder.catalog();
 
 		let broadcast = moq_net::broadcast::Info::new().produce();
@@ -1002,9 +1064,9 @@ mod tests {
 			&subscriber,
 			&catalog,
 			"audio",
-			Config {
+			Options {
 				max_age: std::time::Duration::from_secs(1),
-				..Config::new()
+				..Options::new()
 			},
 		)
 		.await
@@ -1063,9 +1125,9 @@ mod tests {
 			&subscriber,
 			&catalog,
 			"audio",
-			Config {
+			Options {
 				max_age: std::time::Duration::from_millis(500),
-				..Config::new()
+				..Options::new()
 			},
 		)
 		.await
@@ -1082,9 +1144,9 @@ mod tests {
 		let input = Input {
 			format: Format::F32,
 			sample_rate: 48_000,
-			channels: 1,
+			layout: Layout::Mono,
 		};
-		let mut encoder = Encoder::new(&crate::encode::Config::new(input)).unwrap();
+		let mut encoder = Encoder::new(&Settings::new(input.sample_rate, input.layout)).unwrap();
 		let catalog = encoder.catalog();
 
 		let broadcast = moq_net::broadcast::Info::new().produce();
@@ -1100,9 +1162,9 @@ mod tests {
 			&subscriber,
 			&catalog,
 			"audio",
-			Config {
+			Options {
 				max_age: std::time::Duration::from_secs(1),
-				..Config::new()
+				..Options::new()
 			},
 		)
 		.await
@@ -1133,9 +1195,9 @@ mod tests {
 		let input = Input {
 			format: Format::F32,
 			sample_rate: 48_000,
-			channels: 1,
+			layout: Layout::Mono,
 		};
-		let mut encoder = Encoder::new(&crate::encode::Config::new(input)).unwrap();
+		let mut encoder = Encoder::new(&Settings::new(input.sample_rate, input.layout)).unwrap();
 		let catalog = encoder.catalog();
 		let frame_size = encoder.frame_size();
 
@@ -1152,9 +1214,9 @@ mod tests {
 			&subscriber,
 			&catalog,
 			"audio",
-			Config {
+			Options {
 				max_age: std::time::Duration::from_secs(1),
-				..Config::new()
+				..Options::new()
 			},
 		)
 		.await
@@ -1211,10 +1273,9 @@ mod tests {
 			&subscriber,
 			&catalog,
 			"audio",
-			Config {
-				format: Format::F32,
+			Options {
 				max_age,
-				..Config::new()
+				..Options::new()
 			},
 		)
 		.await
@@ -1248,11 +1309,11 @@ mod tests {
 		let input = Input {
 			format: Format::F32,
 			sample_rate: 48_000,
-			channels: 2,
+			layout: Layout::Stereo,
 		};
 
 		// One real Opus packet, so a mis-framed read can't accidentally decode.
-		let mut encoder = Encoder::new(&crate::encode::Config::new(input.clone())).unwrap();
+		let mut encoder = Encoder::new(&Settings::new(input.sample_rate, input.layout)).unwrap();
 		let mut catalog = encoder.catalog();
 		let pcm = vec![0.0f32; encoder.frame_size() * encoder.codec_channels() as usize];
 		let packet = encoder.encode(&pcm).unwrap();
@@ -1270,7 +1331,7 @@ mod tests {
 		let container = moq_mux::catalog::hang::Container::try_from(&catalog).unwrap();
 		let mut producer = moq_mux::container::Producer::new(track, container);
 
-		let mut consumer = Consumer::new(&subscriber, &catalog, "audio", Config::new())
+		let mut consumer = Consumer::new(&subscriber, &catalog, "audio", Options::new())
 			.await
 			.unwrap();
 

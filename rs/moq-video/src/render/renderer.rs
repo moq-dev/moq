@@ -1198,7 +1198,7 @@ mod tests {
 		let mut downloaded = Vec::new();
 		for index in 0..8u64 {
 			if index == 0 {
-				encoder.keyframe();
+				encoder.cut().unwrap();
 			}
 			let surface = Surface::rgba(&rgba, size).expect("a valid RGBA frame");
 			let frame = Frame::new(surface, Timestamp::from_micros(index * 33_333).unwrap());

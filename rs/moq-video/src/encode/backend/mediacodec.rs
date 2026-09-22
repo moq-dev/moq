@@ -44,7 +44,7 @@ use ndk::media::media_codec::{
 use ndk::media::media_format::MediaFormat;
 use ndk::media_error::MediaError;
 
-use super::super::encoder::{Codec, Config};
+use super::super::encoder::{Codec, Config, Gop};
 use super::{Backend, Encoded};
 use crate::{Color, Error, Frame, I420};
 
@@ -209,8 +209,8 @@ impl MediaCodec {
 
 	/// Write one frame into a free input buffer, dropping it if the codec has
 	/// none.
-	fn submit(&mut self, frame: &Frame, keyframe: bool) -> Result<(), Error> {
-		if keyframe {
+	fn submit(&mut self, frame: &Frame, cut: bool) -> Result<(), Error> {
+		if cut {
 			// Keep the request pending until a frame is actually accepted. A full
 			// codec queue drops this input, but the next submitted picture still has
 			// to open the group with an IDR.
@@ -370,13 +370,13 @@ impl MediaCodec {
 }
 
 impl Backend for MediaCodec {
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Encoded>, Error> {
+	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
 		let mut out = Vec::new();
 		// Collect whatever the codec finished while the caller was elsewhere, so
 		// the input buffer asked for below isn't stuck behind an output nobody
 		// picked up.
 		self.drain(OUTPUT_TIMEOUT, &mut out)?;
-		self.submit(frame, keyframe || self.keyframe_pending)?;
+		self.submit(frame, cut || self.keyframe_pending)?;
 		self.drain(OUTPUT_TIMEOUT, &mut out)?;
 		Ok(out)
 	}
@@ -413,7 +413,11 @@ impl Backend for MediaCodec {
 			.map_err(|e| codec_err("set the bitrate", e))
 	}
 
-	fn name(&self) -> &str {
+	fn can_cut(&self) -> bool {
+		true
+	}
+
+	fn name(&self) -> &'static str {
 		NAME
 	}
 }
@@ -432,10 +436,8 @@ fn encoder_format(config: &Config, mime: &str) -> MediaFormat {
 	// MediaCodec takes the keyframe interval in seconds rather than frames, and
 	// reads it as a float, so a sub-second GOP survives instead of rounding to
 	// zero (which would mean an IDR on every frame).
-	format.set_f32(
-		KEY_I_FRAME_INTERVAL,
-		config.gop as f32 / config.framerate.as_f64() as f32,
-	);
+	let Gop::Keyframe { interval } = config.gop;
+	format.set_f32(KEY_I_FRAME_INTERVAL, interval as f32 / config.framerate.as_f64() as f32);
 	// Ask for the shortest pipeline the device offers: output a frame after
 	// input, and no B-frames, whose reorder delay a live track has no use for.
 	// Both are hints an older device drops, which is why `flush` still drains the

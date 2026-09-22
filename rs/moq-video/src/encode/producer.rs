@@ -513,12 +513,12 @@ async fn capture_loop<E: CatalogExt>(
 		encoder_config.kind = encode.kind.clone();
 		encoder_config.color = camera.color();
 		// Off macOS this opens the encoder on a dedicated thread; see `sink`.
+		// No cut on reopen: a fresh encoder opens with a keyframe on every backend,
+		// so the viewer whose subscription reopened the camera can decode from the
+		// first frame regardless, and a backend that cannot cut still captures.
 		let Some(mut encoder) = wait_capture(producer, demand, Sink::open(&encoder_config)).await? else {
 			continue;
 		};
-		// Force an IDR on the first frame of each (re)open so a viewer subscribing
-		// after an idle gap can start decoding immediately.
-		let mut force_keyframe = true;
 		tracing::info!(encoder = encoder.name(), device = camera.label(), "capturing");
 
 		// A reopen can negotiate a different mode (a display resized while nothing was
@@ -569,10 +569,6 @@ async fn capture_loop<E: CatalogExt>(
 
 			let Some(mut frame) = frame else { break };
 			frame.timestamp = map_capture_timestamp(capture_epoch, frame.timestamp)?;
-			if force_keyframe {
-				encoder.keyframe();
-				force_keyframe = false;
-			}
 			let started = Instant::now();
 			let Some(encoded) = wait_capture(producer, demand, encoder.encode(frame)).await? else {
 				break;
@@ -706,7 +702,7 @@ mod tests {
 			if timestamp > 0 {
 				capture_stopped(&mut producer).unwrap();
 			}
-			encoder.keyframe();
+			encoder.cut().unwrap();
 			let surface = crate::Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
 			let frame = Frame::new(surface, Timestamp::from_micros(timestamp).unwrap());
 			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
@@ -732,7 +728,7 @@ mod tests {
 			let mut config = config;
 			config.kind = encoder::Kind::Software;
 			let mut encoder = Encoder::new(&config).unwrap();
-			encoder.keyframe();
+			encoder.cut().unwrap();
 			let rgba = vec![0x80u8; usize::try_from(config.width * config.height * 4).unwrap()];
 			let surface = crate::Surface::rgba(&rgba, crate::Size::new(config.width, config.height)).unwrap();
 			let frame = Frame::new(surface, Timestamp::from_micros(timestamp).unwrap());

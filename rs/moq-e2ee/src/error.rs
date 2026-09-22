@@ -4,15 +4,7 @@
 #[derive(thiserror::Error, Debug, Clone)]
 #[non_exhaustive]
 pub enum Error {
-	/// Credential names a profile other than [`crate::PROFILE`].
-	#[error("unsupported_profile")]
-	UnsupportedProfile,
-
-	/// Secret is not 32 bytes.
-	#[error("invalid_secret")]
-	InvalidSecret,
-
-	/// An integer is outside the profile bounds, a `bytes` field exceeds 65535, or `domain` is not grouped/datagram.
+	/// An integer is outside the profile bounds, a `bytes` field exceeds 65535, an epoch is empty or contains `/`, or a name is not 22 base64url characters.
 	#[error("identity")]
 	Identity,
 
@@ -20,7 +12,7 @@ pub enum Error {
 	#[error("exhausted")]
 	Exhausted,
 
-	/// Encrypting different bytes at an identity that already produced ciphertext, or restarting publication under the same generation.
+	/// Encrypting at a sequence this generation already allocated, or producing a track it already claimed.
 	#[error("reuse")]
 	Reuse,
 
@@ -32,35 +24,9 @@ pub enum Error {
 	#[error("authentication")]
 	Authentication,
 
-	/// A receiver has already opened this identity inside its retained window.
-	#[error("duplicate")]
-	Duplicate,
-
-	/// The credential is not the generation or kid the application pinned.
-	#[error("pinned_mismatch")]
-	PinnedMismatch,
-
 	/// The underlying MoQ track failed.
 	#[error(transparent)]
 	Net(#[from] moq_net::Error),
-}
-
-impl Error {
-	/// The profile code for this failure, or `net` for a transport error.
-	pub fn code(&self) -> &'static str {
-		match self {
-			Self::UnsupportedProfile => "unsupported_profile",
-			Self::InvalidSecret => "invalid_secret",
-			Self::Identity => "identity",
-			Self::Exhausted => "exhausted",
-			Self::Reuse => "reuse",
-			Self::Oversize => "oversize",
-			Self::Authentication => "authentication",
-			Self::Duplicate => "duplicate",
-			Self::PinnedMismatch => "pinned_mismatch",
-			Self::Net(_) => "net",
-		}
-	}
 }
 
 /// A [`Result`](std::result::Result) using this crate's [`Error`].

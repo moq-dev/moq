@@ -404,7 +404,7 @@ mod tests {
 		let mut decoded = Vec::new();
 		for i in 0..10u64 {
 			if i == 0 {
-				encoder.keyframe();
+				encoder.cut().unwrap();
 			}
 			let surface = Surface::rgba(&rgba, crate::Size::new(w, h)).unwrap();
 			let frame = Frame::new(surface, Timestamp::from_micros(i * 33_333).unwrap());
@@ -459,7 +459,7 @@ mod tests {
 		let mut downloaded = Vec::new();
 		for i in 0..10u64 {
 			if i == 0 {
-				encoder.keyframe();
+				encoder.cut().unwrap();
 			}
 			let surface = Surface::rgba(&rgba, crate::Size::new(w, h)).unwrap();
 			let frame = Frame::new(surface, Timestamp::from_micros(i * 33_333).unwrap());
@@ -547,7 +547,7 @@ mod tests {
 		let mut streamed = Vec::new();
 		for i in 0..FRAMES {
 			if i == 0 {
-				encoder.keyframe();
+				encoder.cut().unwrap();
 			}
 			let surface = Surface::rgba(&rgba, crate::Size::new(w, h)).unwrap();
 			let frame = Frame::new(surface, Timestamp::from_micros(i * 33_333).unwrap());

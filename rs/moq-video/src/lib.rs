@@ -9,9 +9,9 @@
 //! A raw picture is a [`Frame`] wherever it crosses the API: a timestamp and a
 //! [`Surface`] holding the pixels. Capture and [`decode`] produce them, [`encode`]
 //! consumes them and hands back the compressed [`encode::Encoded`], and [`Size`]
-//! names a resolution. Keyframes are the encoder's business: it inserts them per
-//! [`encode::Config::gop`], and [`encode::Encoder::keyframe`] is there for the
-//! rarer case where a caller needs one at a specific frame.
+//! names a resolution. Group boundaries are the encoder's business: it places
+//! them per [`encode::Config::gop`], and [`encode::Encoder::cut`] is there for
+//! the rarer case where a caller needs one at a specific frame.
 //!
 //! - `capture` describes a frame source and grabs frames per platform:
 //!   AVFoundation/ScreenCaptureKit on macOS, native V4L2 on Linux, native Media

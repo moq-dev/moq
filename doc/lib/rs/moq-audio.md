@@ -12,6 +12,13 @@ The audio half of a native call: microphone in, hang track out, speaker at
 the far end. Everything is Rust, so there is no C toolchain, CMake step, or
 codec to install.
 
+`Layout` names speaker meaning separately from a channel count. `Mono` is center,
+`Stereo` is left then right, and `Discrete(n)` preserves unnamed channels without
+inventing speaker positions. Encoding keeps source PCM in `encode::Input` and
+codec requirements in `encode::Settings`; `encode::Options` adds publication
+policy. Decoding likewise separates low-level `decode::Config`, PCM
+`decode::Output`, and subscription `decode::Options`.
+
 | Module | Does |
 | --- | --- |
 | `capture` | Microphones via CoreAudio, WASAPI, ALSA (and PipeWire/PulseAudio hosts), plus macOS system audio |
@@ -32,7 +39,7 @@ let mut audio = moq_audio::decode::Consumer::new(&broadcast, &rendition, "audio"
 let engine = moq_audio::playback::Engine::open(Default::default()).await?;
 let mut input = moq_audio::playback::Input::default();
 input.sample_rate = audio.sample_rate();
-input.channels = audio.channels();
+input.layout = audio.layout();
 let mut sink = engine.sink(input)?;
 while let Some(frame) = audio.read().await? {
     sink.write(&frame.data)?;
