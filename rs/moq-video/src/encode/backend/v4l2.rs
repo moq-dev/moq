@@ -5,10 +5,10 @@
 //! Without it a Pi either republishes what `rpicam-vid` already encoded or
 //! spends its CPU on openh264.
 //!
-//! Behind the opt-in `v4l2` feature. It costs no runtime dependency (the
-//! interface is ioctls on a device node), only the `moq_v4l` crate's build-time
-//! bindgen, and a host with no M2M node fails at open so automatic selection
-//! falls through to the next encoder.
+//! Behind the opt-in `v4l2` feature. It costs nothing at build or run time (the
+//! interface is ioctls on a device node and `moq_v4l` checks its bindings in),
+//! and a host with no M2M node fails at open so automatic selection falls
+//! through to the next encoder.
 //!
 //! Feeds the driver 8-bit 4:2:0 and takes back Annex-B with in-band SPS/PPS
 //! ahead of every IDR, which is the avc3 shape the H.264 importer expects.

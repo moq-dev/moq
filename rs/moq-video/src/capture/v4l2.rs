@@ -159,7 +159,7 @@ fn bounds(min: u32, max: u32, step: u32) -> Option<(u32, u32)> {
 	(first <= last).then_some((first, last))
 }
 
-// Read one entry at a time: v4l's collection helpers treat every error after
+// Read one entry at a time: moq-v4l's collection helpers treat every error after
 // the first entry as end-of-list, hiding device failures and malformed replies.
 fn frame_sizes(device: &Device, fourcc: FourCC) -> Result<Vec<FrameSizeEnum>, Error> {
 	let mut sizes = Vec::new();
