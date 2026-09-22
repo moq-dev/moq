@@ -42,7 +42,7 @@ use crate::subscribe::{CatalogFormatArg, SubscribeFormat};
 /// moq-cli: a media router that wires endpoints onto a shared MoQ Origin.
 #[derive(usage::Cli, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
-#[usage(name = "moq", version = env!("VERSION"))]
+#[usage(name = "moq", version = env!("CARGO_PKG_VERSION"))]
 #[usage(completion, settings)]
 #[usage(after_help = "Separate additional import/export stages with `--`; they share one \
                         connection and one Origin. Every `--` starts a stage, so it is not an \

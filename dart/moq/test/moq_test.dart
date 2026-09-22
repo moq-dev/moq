@@ -103,6 +103,24 @@ void main() {
     server.close();
   });
 
+  test('closing a server releases its port', () async {
+    final first = await Server.listen(
+      options: const ListenOptions(
+        bind: '127.0.0.1:0',
+        tlsGenerate: ['localhost'],
+      ),
+    ).timeout(timeout);
+    final addr = first.localAddr;
+    first.close();
+
+    // No retry: close() released the listening socket before returning.
+    final second = await Server.listen(
+      options: ListenOptions(bind: addr, tlsGenerate: ['localhost']),
+    ).timeout(timeout);
+    expect(second.localAddr, addr);
+    second.close();
+  });
+
   test('microsecond fields read back as Durations', () {
     final backoff = Backoff(initialUs: 1000, maxUs: 2000, timeoutUs: 3000);
     expect(backoff.initial, const Duration(milliseconds: 1));

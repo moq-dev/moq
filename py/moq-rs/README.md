@@ -198,7 +198,7 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
   - Async iterator yielding `BroadcastRequest`
 - **`OriginConsumer`**. Discover broadcasts.
   - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator); `filter` is a pattern relative to the literal prefix, while each update's `.prefix` stays origin-relative and `.captures` reports wildcard matches
-  - `.announced_broadcast(path) → AnnouncedBroadcast` (awaitable, waits for a future announcement)
+  - `.announced_broadcast(path) → AnnouncedBroadcast` (awaitable, waits until something serves the path)
   - `.request_broadcast(path) → BroadcastConsumer` (awaitable; announced now or a dynamic fallback, else raises)
 
 ### Types

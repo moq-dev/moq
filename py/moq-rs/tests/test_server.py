@@ -135,6 +135,17 @@ async def test_client_reconnects_and_resumes_announcements():
                 pass
 
 
+async def test_server_close_releases_port():
+    """Exiting the context manager releases the listening socket before it
+    returns, so the same address binds again with no retry."""
+    async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
+        addr = server.local_addr
+
+    # No retry: __aexit__ closed the socket, so this binds on the first try.
+    async with moq.Server(addr, tls_generate=["localhost"]) as rebound:
+        assert rebound.local_addr == addr
+
+
 async def test_server_request_close():
     """A session reports when the server rejects its request."""
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:

@@ -272,6 +272,18 @@ class SmokeTest {
     }
 
     @Test
+    fun `closing a server releases its port`() = runTest {
+        val first = Server.listen("127.0.0.1:0", tlsGenerate = listOf("localhost"))
+        val addr = first.localAddr
+        first.close()
+
+        // No retry: close() released the listening socket before returning.
+        Server.listen(addr, tlsGenerate = listOf("localhost")).use { rebound ->
+            assertEquals(addr, rebound.localAddr)
+        }
+    }
+
+    @Test
     fun `announce then unannounce is visible`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             origin.createBroadcast("live").use { broadcast ->

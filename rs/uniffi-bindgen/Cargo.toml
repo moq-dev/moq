@@ -1,0 +1,16 @@
+[package]
+name = "uniffi-bindgen"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+authors = ["Luke Curley"]
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Generate the Kotlin, Swift, and Python bindings from the moq-ffi cdylib via UniFFI. A separate package so a library build of moq-ffi never compiles the bindgen and its dependencies."
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/main.rs"
+
+[dependencies]
+uniffi = { workspace = true, features = ["cli"] }

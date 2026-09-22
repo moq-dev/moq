@@ -3164,10 +3164,10 @@ impl Consumer {
 	/// including the exact path itself. Returns `None` if the path is outside this
 	/// consumer's scope or the consumer is closed first.
 	///
-	/// Use this before [`Self::request_broadcast`] whenever the announcement may
-	/// not have arrived yet, which includes every path you resolve right after
-	/// connecting: `request_broadcast` answers on the spot, so asking it first
-	/// races the announcement and reports a covered path as unroutable.
+	/// To resolve a broadcast rather than inspect the route, use
+	/// [`Self::routed_broadcast`]: pairing this with [`Self::request_broadcast`]
+	/// leaves a gap where the covering route can retract, and misses a local
+	/// broadcast that serves the path without announcing.
 	pub async fn routed(&self, path: impl AsPath) -> Option<Route> {
 		let path = path.as_path();
 
@@ -3199,17 +3199,19 @@ impl Consumer {
 		}
 	}
 
-	/// Block until `path` resolves to a broadcast: [`Self::routed`], then
-	/// [`Self::request_broadcast`], retried when the two race.
+	/// Block until `path` resolves to a broadcast: [`Self::request_broadcast`],
+	/// retried whenever the routes covering the path change.
 	///
-	/// The wait and the resolution are separate steps, so the covering route can
-	/// retract between them (failover churn), a route can cover the path while
-	/// nothing serves it yet (an advertise-only announce racing its handler), and
-	/// a handler can turn the path down. This rides out the churn by retrying
-	/// whenever the route table moves, which is what makes it the right call for
-	/// resolving a path right after connecting. Returns [`Error::Unauthorized`]
-	/// for a path outside this consumer's scope, [`Error::Closed`] once the origin
-	/// closes, and any other resolution failure as-is.
+	/// A request answers for the routes as they stand, so it can miss an
+	/// announcement that has not arrived yet, lose its covering route to
+	/// failover churn, find a route that covers the path while nothing serves it
+	/// yet (an advertise-only announce racing its handler), or be turned down by
+	/// a handler. This rides all of that out by watching the covering routes
+	/// and asking again each time they move, which is what makes it the right
+	/// call for resolving a path right after connecting. Returns
+	/// [`Error::Unauthorized`] for a path outside this consumer's scope,
+	/// [`Error::Closed`] once the origin closes, and any other resolution
+	/// failure as-is.
 	pub async fn routed_broadcast(&self, path: impl AsPath) -> Result<broadcast::Consumer, Error> {
 		let path = path.as_path();
 
@@ -3219,18 +3221,14 @@ impl Consumer {
 			return Err(Error::Unauthorized);
 		}
 		loop {
-			if self.routed(&path).await.is_none() {
-				return Err(Error::Closed);
-			}
 			// `Unroutable` is a verdict of the routes covering the path as they
-			// stood when the request was made: nothing covered it, the serving
-			// route retracted under the request, or its handler declined.
-			// Re-asking the same routes would spin, so watch them before asking
-			// and wait for them to move (an identical standby swapping in
-			// counts, even though no announce update reports it, and so does a
+			// stood when the request was made. Re-asking the same routes would
+			// spin, so watch them before asking and wait for them to move (a
+			// route arriving or retracting, an identical standby swapping in, a
 			// local broadcast attaching at the path), then try again. A change
 			// between the ask and the wait bumps the watch first, so that retry
-			// is immediate.
+			// is immediate; the teardown pokes every watch, so a closed origin
+			// is observed on the next pass.
 			let (watch, seen) = {
 				let mut table = self.shared.lock();
 				if table.closed {
@@ -3245,6 +3243,9 @@ impl Consumer {
 				Err(Error::Unroutable) => {
 					kio::wait(|waiter| watch.poll_changed(waiter, seen)).await;
 				}
+				// Teardown parks a pending request with `Dropped`; the contract is
+				// `Closed` once the origin is gone.
+				Err(Error::Dropped) if self.shared.lock().closed => return Err(Error::Closed),
 				Err(err) => return Err(err),
 			}
 		}
@@ -4452,6 +4453,43 @@ mod tests {
 		let served = broadcast::Info::new().produce();
 		request.accept(&served);
 		resolving.await.expect("resolves");
+	}
+
+	/// A local broadcast serves its path without announcing it, so there is no
+	/// route to wait for: the request resolves on the first pass.
+	#[tokio::test]
+	async fn routed_broadcast_resolves_an_unannounced_local_broadcast() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+
+		let _local = producer.create_broadcast("room/alice").unwrap();
+		let resolved = tokio::time::timeout(Duration::from_secs(5), consumer.routed_broadcast("room/alice"))
+			.await
+			.expect("resolves without an announce")
+			.expect("resolves locally");
+		assert_eq!(resolved.info().path.as_str(), "room/alice");
+	}
+
+	/// Teardown rejects a parked request with `Dropped`, but a destroyed origin
+	/// is `Closed` to `routed_broadcast`'s callers.
+	#[tokio::test]
+	async fn routed_broadcast_reports_teardown_as_closed() {
+		let (producer, driver) = Producer::new(Config::new(origin(1)));
+		let consumer = producer.consume();
+		let _server = producer.dynamic("room", Route::default()).unwrap();
+
+		// Park on the covering route, past the loop's closed check.
+		let mut resolving = Box::pin(consumer.routed_broadcast("room/alice"));
+		assert!((&mut resolving).now_or_never().is_none());
+
+		drop(driver);
+
+		let err = tokio::time::timeout(Duration::from_secs(5), resolving)
+			.await
+			.expect("teardown resolves the wait")
+			.err()
+			.unwrap();
+		assert!(matches!(err, Error::Closed), "unexpected end: {err}");
 	}
 
 	/// A local broadcast appearing at the exact path is a table change too: a

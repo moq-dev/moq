@@ -1,6 +1,6 @@
 import { type Dispose, type Getter, Signal } from "@moq/signals";
 import type * as broadcast from "../broadcast.ts";
-import { error, reason, StreamCode, StreamError } from "../error.ts";
+import { controlTimeout, error, reason, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
 import { type Route, routesEqual } from "../hop.ts";
 import { hooks } from "../internal.ts";
@@ -9,7 +9,7 @@ import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Milli, type Timescale } from "../time.ts";
 import type { Subscriber as TrackSubscriber } from "../track.ts";
-import { withTimeout } from "../util/timeout.ts";
+import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
 import { type Advertised, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
@@ -1015,7 +1015,8 @@ export class Publisher {
 			requests.set(path, { path, requestId, stream: request });
 			return true;
 		} catch (err: unknown) {
-			const e = error(err);
+			// The peer never answered the advertisement: a control timeout, not late content.
+			const e = err instanceof TimeoutError ? controlTimeout(err) : error(err);
 			console.warn(`announce failed: broadcast=${path} error=${reason(e)}`);
 			request?.abort(e);
 			return false;

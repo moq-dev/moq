@@ -87,7 +87,11 @@ class Server internal constructor(
         }
     }
 
-    /** Stop accepting new sessions and release the native server handle; in-flight sessions stay alive. */
+    /**
+     * Stop accepting new sessions and release the native server handle, closing
+     * the listening socket before it returns so the address can be bound again
+     * immediately. In-flight sessions stay alive until their handles are dropped.
+     */
     override fun close() {
         server.cancel()
     }
