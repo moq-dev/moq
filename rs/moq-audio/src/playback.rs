@@ -18,7 +18,10 @@
 //! let mut sink = engine.sink(input)?;
 //!
 //! while let Some(frame) = audio.read().await? {
-//!     sink.write(&frame.data)?;
+//!     let write = sink.write(&frame.data)?;
+//!     if write.dropped_sample_frames > 0 {
+//!         eprintln!("dropped {} live audio frames", write.dropped_sample_frames);
+//!     }
 //! }
 //! # Ok(())
 //! # }
@@ -42,7 +45,7 @@ mod sink;
 use std::sync::Arc;
 
 pub use device::{Device, devices};
-pub use sink::{Control, Input, Sink};
+pub use sink::{Control, Input, Sink, Write};
 
 #[cfg(feature = "aec")]
 pub(crate) use driver::Shared;
@@ -148,18 +151,17 @@ impl Engine {
 		Ok(sink)
 	}
 
-	/// Build an echo canceller that subtracts this engine's mix from a
-	/// microphone.
+	/// Build echo-cancellation controls for this engine and one microphone.
 	///
-	/// Hand the result to
-	/// [`capture::Config::aec`](crate::capture::Config::aec). At most one is
-	/// live per engine: a second call replaces the first, which then cancels
-	/// nothing. Clone the canceller instead if two places need to reach it.
+	/// Hand a clone to [`capture::Config::aec`](crate::capture::Config::aec) and
+	/// keep another for UI toggles. Only one control set can own this engine's
+	/// reference; a second call returns [`Error::Busy`] until every control and
+	/// microphone attachment from the first is dropped.
 	///
 	/// Requires the `aec` feature.
 	#[cfg(feature = "aec")]
-	pub fn canceller(&self, config: crate::aec::Config) -> crate::aec::Canceller {
-		crate::aec::Canceller::new(self.shared.clone(), config)
+	pub fn canceller(&self, config: crate::aec::Config) -> Result<crate::aec::Control, Error> {
+		crate::aec::Control::new(self.shared.clone(), config)
 	}
 
 	/// Move playback to the device `config` names, or back to the system default

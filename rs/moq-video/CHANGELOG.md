@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Import retained Vulkan RGBA8 slots into CUDA with explicit timeline synchronization.
+- `frame::cuda::Converter` converts imported Vulkan RGBA8/BGRA8 frames to NV12 on the GPU from a
+  bounded buffer pool, and `cuda::Frame::resize` scales them there; `vulkan::Image::bgra8` declares
+  the other channel order.
 
 ### Changed
 

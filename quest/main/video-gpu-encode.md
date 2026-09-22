@@ -1,4 +1,4 @@
-# [L] GPU color conversion and NVENC for imported frames
+# [S] GPU color conversion and NVENC for imported frames
 
 ## Goal
 
@@ -9,31 +9,27 @@ unsupported and never selects a CPU conversion, upload or software encoder.
 
 ## Plan
 
-- Add GPU color conversion for the packed BGRA/RGBA input the CARLA bridge
-  needs, and reuse GPU resize and NVENC support. Specify channel order,
-  color matrix, range, chroma sampling, pitch and dimensions; match the
-  producer's final LDR output without applying gamma twice.
-- Keep input and converted surfaces owned through conversion and encoder
-  completion. Support one captured frame feeding HD and SD with bounded GPU
-  resources; encoder pressure cannot grow a queue indefinitely.
-- Audit every operation used by this path for implicit CPU conversion or
-  download. Existing GPU resize and encoder defaults are not proof of strict
-  GPU execution. Provide explicit unsupported/error behavior through a small
-  coherent API instead of changing unrelated CPU consumers.
-- Choose supported NVENC input registration after checking current bindings
-  and driver support. Existing CUDA NV12 allocations provide a starting point;
-  compare newer CUDA-array/stream support before adding another GPU staging
-  copy. Do not require a speculative SDK upgrade to finish the feature.
-- Preserve explicit timestamps, force-IDR requests and codec configuration.
-  Expose compressed packets and completion through the existing encoder
-  abstractions so a narrow native CARLA bridge can use them.
-- Exercise actual Vulkan input, GPU conversion/resize and NVENC on this
-  desktop. Check channel/color correctness, frame identity, timestamp order,
-  IDR restart, repeated pool reuse and teardown with a decoder. Keep test-only
-  reference readbacks outside the supported runtime path. Trace that runtime
-  to prove no raw-pixel CPU transfers, and record copies, CPU time and latency
-  without numeric performance acceptance thresholds. Wire regression and
-  opt-in hardware tests into the repository's normal test commands.
+The code is in: `frame::cuda::Converter` converts a published
+`frame::vulkan::Frame` (RGBA8 or BGRA8, declared on `vulkan::Image`) to an
+NV12 `cuda::Frame` on the GPU in a declared color space, from a bounded buffer
+pool; `cuda::Frame::resize` scales it there from the same pool; NVENC
+registers the result in place through the existing `encode::Encoder` with
+`Kind::Named("nvenc")`. The module docs record the audit and the registration
+choice. What remains needs the Linux/NVIDIA desktop:
+
+- Run `just rs vulkan-cuda`, which now also exercises conversion, resize, the
+  pool bound and NVENC through `frame::cuda::tests::vulkan_cuda_convert_resize_encode`.
+  It checks channel order, matrix and range against a CPU reference, frame
+  identity through a decoder, timestamp order, forced and periodic IDR,
+  repeated slot and pool reuse, and teardown. Fix what it finds; the PTX and
+  the kernel launch have never run on a GPU.
+- Trace that runtime (an `nsys` or CUDA API trace of the test, or of the CARLA
+  bridge once it exists) to prove no `cuMemcpyDtoH`/`HtoD` of raw pixels on the
+  supported path; the only host copies must be the test's own readbacks.
+- Record copies, CPU time and latency per stage at the target workload (three
+  1280x720 views at 30 fps) without numeric acceptance thresholds, and note
+  whether the per-frame NVENC register/unregister is worth replacing with a
+  registration per pool buffer.
 
 ## Related
 

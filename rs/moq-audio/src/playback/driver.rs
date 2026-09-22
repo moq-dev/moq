@@ -174,13 +174,19 @@ impl Shared {
 		}
 	}
 
-	/// Start feeding an echo canceller the mix, replacing any previous one.
+	/// Start feeding an echo canceller the mix.
 	///
 	/// Registers with no device open too: the tap waits for the next restart,
-	/// exactly as a sink does.
+	/// exactly as a sink does. Refuses a second live reference rather than
+	/// silently disconnecting the first microphone.
 	#[cfg(feature = "aec")]
-	pub(crate) fn set_reference(&self, mut reference: crate::aec::Reference) {
+	pub(crate) fn set_reference(&self, mut reference: crate::aec::Reference) -> Result<(), Error> {
 		let mut state = self.state.lock().unwrap();
+		if state.reference.is_some() {
+			return Err(Error::Busy(
+				"playback engine already has an echo-cancellation reference".into(),
+			));
+		}
 		if let Some(mixer) = &state.mixer
 			&& state.rate != 0
 			&& reference.rebuild(state.rate)
@@ -188,21 +194,18 @@ impl Shared {
 			attach_reference(&mut reference, mixer);
 		}
 
-		// A replaced canceller is already detached: the mixer takes whichever
-		// producer arrives last.
 		state.detaching_reference = false;
 		state.reference = Some(reference);
 
 		// Covers the case where the mixer's command queue was momentarily full,
 		// so a canceller is never left silently unattached.
 		Self::wake(&state);
+		Ok(())
 	}
 
 	/// Stop feeding the canceller with this id, called when its last clone drops.
 	///
-	/// A no-op once a newer canceller has taken the slot: the one going away is
-	/// already detached, and taking the tap with it would silently break the one
-	/// that replaced it.
+	/// A no-op when the slot is already empty or belongs to another registration.
 	#[cfg(feature = "aec")]
 	pub(crate) fn clear_reference(&self, id: u64) {
 		let mut state = self.state.lock().unwrap();

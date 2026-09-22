@@ -89,7 +89,7 @@ async fn plays_a_tone_through_the_default_device() {
 	let mut drained = false;
 
 	for _ in 0..10 {
-		sink.write(&tone).expect("write");
+		let _ = sink.write(&tone).expect("write");
 		tokio::time::sleep(Duration::from_millis(100)).await;
 
 		peaked |= sink.peak() > 0.4;
@@ -118,8 +118,8 @@ async fn mixes_two_sinks_and_honors_volume() {
 	let mut quiet_peak: f32 = 0.0;
 
 	for _ in 0..10 {
-		loud.write(&tone).expect("write");
-		quiet.write(&tone).expect("write");
+		let _ = loud.write(&tone).expect("write");
+		let _ = quiet.write(&tone).expect("write");
 		tokio::time::sleep(Duration::from_millis(100)).await;
 		loud_peak = loud_peak.max(loud.peak());
 		quiet_peak = quiet_peak.max(quiet.peak());
@@ -159,7 +159,7 @@ async fn switches_devices_without_dropping_sinks() {
 		}
 
 		switched += 1;
-		sink.write(&tone).expect("write");
+		let _ = sink.write(&tone).expect("write");
 		tokio::time::sleep(Duration::from_millis(200)).await;
 		assert!(
 			sink.buffered() < Duration::from_secs(1),
@@ -186,7 +186,7 @@ async fn sink_outlives_its_engine() {
 	let tone = tone(0.1);
 	let mut peaked = false;
 	for _ in 0..5 {
-		sink.write(&tone).expect("write");
+		let _ = sink.write(&tone).expect("write");
 		tokio::time::sleep(Duration::from_millis(100)).await;
 		peaked |= sink.peak() > 0.4;
 	}

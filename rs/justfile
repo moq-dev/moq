@@ -723,9 +723,10 @@ media-features:
 test *args:
     RUSTC_WORKSPACE_WRAPPER="$(command -v clippy-driver || true)" cargo nextest run --locked --all-targets {{ args }}
 
-# Exercise the Vulkan producer -> CUDA image contract on Linux/NVIDIA hardware.
-# The driver directory is added explicitly because the Nix shell's dynamic
-# loader path does not include Ubuntu's host driver directory.
+# Exercise the Vulkan producer -> CUDA image contract, the GPU color conversion
+# and resize, and NVENC encoding of the result on Linux/NVIDIA hardware. The
+# driver directory is added explicitly because the Nix shell's dynamic loader
+# path does not include Ubuntu's host driver directory.
 vulkan-cuda:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -736,7 +737,7 @@ vulkan-cuda:
     fi
     driver_dir=$(dirname "$driver")
     export LD_LIBRARY_PATH="$driver_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-    cargo nextest run --locked -p moq-video --run-ignored only frame::vulkan::tests::vulkan_cuda_slot_reuse_and_teardown
+    cargo nextest run --locked -p moq-video --run-ignored only -E 'test(/^frame::(vulkan|cuda)::tests::vulkan_cuda_/)'
 
 # Same selection as `check-changed`: compiling a crate's test binaries is the
 # expensive half of a test run, so scoping matters more here than anywhere else.

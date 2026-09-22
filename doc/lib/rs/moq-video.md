@@ -89,6 +89,21 @@ the producer-owned slot; awaiting its completion returns that slot only after
 CUDA readers finish. Import capacity bounds retained images. Unsupported
 devices, formats, layouts, and synchronization are errors, with no CPU mapping
 or staging fallback. A non-exportable application image needs one Vulkan GPU
-copy into an exportable slot.
+copy into an exportable slot. The image is `VK_FORMAT_B8G8R8A8_UNORM` when
+imported through `Image::bgra8` instead.
 
-`just rs vulkan-cuda` runs the opt-in native Vulkan/CUDA hardware exercise.
+`frame::cuda::Converter` turns a published Vulkan frame into the NV12
+`Surface::Cuda` NVENC encodes in place, on the GPU, in one declared color space
+(matrix and range) with 4:2:0 chroma averaged per 2x2 block and no transfer
+function applied. Its buffers come from a pool sized at construction, and
+`cuda::Frame::resize` scales a converted frame for a smaller rendition from the
+same pool, so one captured frame feeding HD and SD holds a fixed number of
+buffers and a producer that outruns its encoder gets an error instead of
+unbounded device memory. Open the encoder with `encode::Kind::Named("nvenc")`
+and the same `encode::Config::color`: `Kind::Auto` could fall back to a software
+encoder that reads the frame back, and the portable `Surface::resize` downloads
+when the GPU scaler fails. Everything under `frame::cuda` and `frame::vulkan`
+runs on the device or returns an error.
+
+`just rs vulkan-cuda` runs the opt-in native Vulkan/CUDA/NVENC hardware
+exercise.

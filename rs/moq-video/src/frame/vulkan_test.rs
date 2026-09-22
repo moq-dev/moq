@@ -32,7 +32,7 @@ async fn vulkan_cuda_slot_reuse_and_teardown() {
 		eprintln!("skipping: libcuda.so.1 unavailable");
 		return;
 	}
-	let Some(mut producer) = Producer::new() else {
+	let Some(mut producer) = Producer::new(Size::new(64, 32)) else {
 		eprintln!("skipping: no compatible Vulkan NVIDIA device");
 		return;
 	};
@@ -131,7 +131,9 @@ fn readback(frame: &Frame) -> Vec<u8> {
 	pixels
 }
 
-struct Producer {
+/// A native Vulkan producer of one exportable image, shared with the CUDA
+/// conversion test next door.
+pub(crate) struct Producer {
 	_entry: ash::Entry,
 	instance: ash::Instance,
 	device: ash::Device,
@@ -140,21 +142,25 @@ struct Producer {
 	image: vk::Image,
 	memory: vk::DeviceMemory,
 	semaphore: vk::Semaphore,
-	uuid: [u8; 16],
-	size: Size,
-	allocation_size: u64,
+	/// Host-visible staging for `upload`, mapped for the producer's lifetime.
+	staging: vk::Buffer,
+	staging_memory: vk::DeviceMemory,
+	staging_ptr: *mut u8,
+	pub(crate) uuid: [u8; 16],
+	pub(crate) size: Size,
+	pub(crate) allocation_size: u64,
 	first: bool,
 	pending_commands: Vec<vk::CommandBuffer>,
 }
 
 impl Producer {
-	fn new() -> Option<Self> {
+	pub(crate) fn new(size: Size) -> Option<Self> {
 		// SAFETY: ash loads the system Vulkan loader and all owned handles are
 		// destroyed in reverse order by Producer::drop.
-		unsafe { Self::open().ok() }
+		unsafe { Self::open(size).ok() }
 	}
 
-	unsafe fn open() -> anyhow::Result<Self> {
+	unsafe fn open(size: Size) -> anyhow::Result<Self> {
 		let entry = unsafe { ash::Entry::load()? };
 		let app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_2);
 		let instance =
@@ -212,7 +218,6 @@ impl Producer {
 		let device = unsafe { instance.create_device(physical, &create, None)? };
 		let queue = unsafe { device.get_device_queue(queue_family, 0) };
 
-		let size = Size::new(64, 32);
 		let mut external =
 			vk::ExternalMemoryImageCreateInfo::default().handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
 		let image_info = vk::ImageCreateInfo::default()
@@ -234,13 +239,15 @@ impl Producer {
 		let image = unsafe { device.create_image(&image_info, None)? };
 		let requirements = unsafe { device.get_image_memory_requirements(image) };
 		let memory_properties = unsafe { instance.get_physical_device_memory_properties(physical) };
-		let memory_type = (0..memory_properties.memory_type_count)
-			.find(|index| {
-				requirements.memory_type_bits & (1 << index) != 0
+		let memory_type_with = |bits: u32, flags: vk::MemoryPropertyFlags| {
+			(0..memory_properties.memory_type_count).find(|index| {
+				bits & (1 << index) != 0
 					&& memory_properties.memory_types[*index as usize]
 						.property_flags
-						.contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
+						.contains(flags)
 			})
+		};
+		let memory_type = memory_type_with(requirements.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
 			.ok_or_else(|| anyhow::anyhow!("no device-local memory type for exportable image"))?;
 		let mut export =
 			vk::ExportMemoryAllocateInfo::default().handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
@@ -271,6 +278,37 @@ impl Producer {
 			)?
 		};
 
+		let staging_len = u64::from(size.width) * u64::from(size.height) * 4;
+		let staging = unsafe {
+			device.create_buffer(
+				&vk::BufferCreateInfo::default()
+					.size(staging_len)
+					.usage(vk::BufferUsageFlags::TRANSFER_SRC)
+					.sharing_mode(vk::SharingMode::EXCLUSIVE),
+				None,
+			)?
+		};
+		let staging_requirements = unsafe { device.get_buffer_memory_requirements(staging) };
+		let staging_type = memory_type_with(
+			staging_requirements.memory_type_bits,
+			vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+		)
+		.ok_or_else(|| anyhow::anyhow!("no host-visible memory type for the staging buffer"))?;
+		let staging_memory = unsafe {
+			device.allocate_memory(
+				&vk::MemoryAllocateInfo::default()
+					.allocation_size(staging_requirements.size)
+					.memory_type_index(staging_type),
+				None,
+			)?
+		};
+		unsafe { device.bind_buffer_memory(staging, staging_memory, 0)? };
+		let staging_ptr = unsafe {
+			device
+				.map_memory(staging_memory, 0, staging_len, vk::MemoryMapFlags::empty())?
+				.cast::<u8>()
+		};
+
 		Ok(Self {
 			_entry: entry,
 			instance,
@@ -280,6 +318,9 @@ impl Producer {
 			image,
 			memory,
 			semaphore,
+			staging,
+			staging_memory,
+			staging_ptr,
 			uuid,
 			size,
 			allocation_size: requirements.size,
@@ -288,7 +329,7 @@ impl Producer {
 		})
 	}
 
-	fn export(&self) -> Handles {
+	pub(crate) fn export(&self) -> Handles {
 		let memory_fd = ash::khr::external_memory_fd::Device::new(&self.instance, &self.device);
 		let semaphore_fd = ash::khr::external_semaphore_fd::Device::new(&self.instance, &self.device);
 		let memory = unsafe {
@@ -313,10 +354,62 @@ impl Producer {
 		unsafe { Handles::new(OwnedFd::from_raw_fd(memory), OwnedFd::from_raw_fd(timeline)) }
 	}
 
+	/// Clear the whole image to a color derived from `identity`.
 	fn clear(&mut self, identity: u8, wait: Option<u64>, signal: u64) {
+		let color = vk::ClearColorValue {
+			float32: [
+				f32::from(identity) / 255.0,
+				f32::from(255 - identity) / 255.0,
+				f32::from(identity / 2) / 255.0,
+				1.0,
+			],
+		};
+		self.submit(wait, signal, |device, command, image, range| unsafe {
+			device.cmd_clear_color_image(command, image, vk::ImageLayout::GENERAL, &color, &[range]);
+		});
+	}
+
+	/// Upload `pixels` (tightly packed, four bytes each, in the image's own
+	/// channel order) through the staging buffer.
+	pub(crate) fn upload(&mut self, pixels: &[u8], wait: Option<u64>, signal: u64) {
+		assert_eq!(
+			pixels.len() as u64,
+			u64::from(self.size.width) * u64::from(self.size.height) * 4
+		);
+		// SAFETY: the mapping is `pixels.len()` bytes and stays mapped until
+		// drop; the previous upload's copy finished before the slot came back.
+		unsafe { std::ptr::copy_nonoverlapping(pixels.as_ptr(), self.staging_ptr, pixels.len()) };
+		let staging = self.staging;
+		let extent = vk::Extent3D {
+			width: self.size.width,
+			height: self.size.height,
+			depth: 1,
+		};
+		self.submit(wait, signal, |device, command, image, range| unsafe {
+			let region = vk::BufferImageCopy::default()
+				.image_subresource(vk::ImageSubresourceLayers {
+					aspect_mask: range.aspect_mask,
+					mip_level: 0,
+					base_array_layer: 0,
+					layer_count: 1,
+				})
+				.image_extent(extent);
+			device.cmd_copy_buffer_to_image(command, staging, image, vk::ImageLayout::GENERAL, &[region]);
+		});
+	}
+
+	/// Record one transfer into the image between the layout barrier and the
+	/// timeline signal, waiting on `wait` first when given.
+	fn submit(
+		&mut self,
+		wait: Option<u64>,
+		signal: u64,
+		record: impl FnOnce(&ash::Device, vk::CommandBuffer, vk::Image, vk::ImageSubresourceRange),
+	) {
 		if !self.pending_commands.is_empty() {
-			// The caller only starts the next clear after CUDA returned the slot,
-			// which is later than this queue submission and its external signal.
+			// The caller only starts the next transfer after CUDA returned the
+			// slot, which is later than this queue submission and its external
+			// signal.
 			unsafe {
 				self.device
 					.free_command_buffers(self.command_pool, &self.pending_commands)
@@ -332,6 +425,13 @@ impl Producer {
 						.command_buffer_count(1),
 				)
 				.expect("allocate Vulkan command buffer")[0]
+		};
+		let range = vk::ImageSubresourceRange {
+			aspect_mask: vk::ImageAspectFlags::COLOR,
+			base_mip_level: 0,
+			level_count: 1,
+			base_array_layer: 0,
+			layer_count: 1,
 		};
 		unsafe {
 			self.device
@@ -356,13 +456,7 @@ impl Producer {
 				.src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
 				.dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
 				.image(self.image)
-				.subresource_range(vk::ImageSubresourceRange {
-					aspect_mask: vk::ImageAspectFlags::COLOR,
-					base_mip_level: 0,
-					level_count: 1,
-					base_array_layer: 0,
-					layer_count: 1,
-				});
+				.subresource_range(range);
 			self.device.cmd_pipeline_barrier(
 				command,
 				if self.first {
@@ -376,21 +470,7 @@ impl Producer {
 				&[],
 				&[barrier],
 			);
-			let color = vk::ClearColorValue {
-				float32: [
-					f32::from(identity) / 255.0,
-					f32::from(255 - identity) / 255.0,
-					f32::from(identity / 2) / 255.0,
-					1.0,
-				],
-			};
-			self.device.cmd_clear_color_image(
-				command,
-				self.image,
-				vk::ImageLayout::GENERAL,
-				&color,
-				&[barrier.subresource_range],
-			);
+			record(&self.device, command, self.image, range);
 			self.device.end_command_buffer(command).expect("end Vulkan commands");
 		}
 
@@ -409,7 +489,7 @@ impl Producer {
 			.wait_dst_stage_mask(&stages)
 			.command_buffers(&commands)
 			.signal_semaphores(&signal_semaphores);
-		unsafe { self.device.queue_submit(self.queue, &[submit], vk::Fence::null()) }.expect("submit Vulkan clear");
+		unsafe { self.device.queue_submit(self.queue, &[submit], vk::Fence::null()) }.expect("submit Vulkan transfer");
 		self.pending_commands.push(command);
 		self.first = false;
 	}
@@ -419,6 +499,9 @@ impl Drop for Producer {
 	fn drop(&mut self) {
 		unsafe {
 			let _ = self.device.device_wait_idle();
+			self.device.unmap_memory(self.staging_memory);
+			self.device.destroy_buffer(self.staging, None);
+			self.device.free_memory(self.staging_memory, None);
 			self.device.destroy_command_pool(self.command_pool, None);
 			self.device.destroy_semaphore(self.semaphore, None);
 			self.device.destroy_image(self.image, None);

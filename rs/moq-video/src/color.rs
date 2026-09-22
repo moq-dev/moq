@@ -68,6 +68,39 @@ impl Color {
 		matches!(self, Color::Bt601Limited | Color::Bt709Limited)
 	}
 
+	/// The 8-bit RGB to Y'CbCr coefficients of this space, for a conversion the
+	/// crate runs itself (the GPU kernels).
+	///
+	/// Compiled for every test build so the cross-check against the `yuv` crate
+	/// runs without a GPU.
+	///
+	/// Display-referred RGB in: the samples are taken as already gamma-encoded,
+	/// which is what an 8-bit render target holds, so no transfer function is
+	/// applied on the way through. The offsets put chroma at 128 and, for limited
+	/// range, luma at 16; the scales fit the range (219/224 of 255 for limited,
+	/// all of it for full).
+	#[cfg(any(test, all(target_os = "linux", feature = "nvidia")))]
+	pub(crate) fn coefficients(self) -> Coefficients {
+		let (kr, kb) = match self {
+			Color::Bt601Limited | Color::Bt601Full => (0.299, 0.114),
+			Color::Bt709Limited | Color::Bt709Full => (0.2126, 0.0722),
+		};
+		let kg = 1.0 - kr - kb;
+		let (luma_scale, chroma_scale, luma_offset) = match self.limited() {
+			true => (219.0 / 255.0, 224.0 / 255.0, 16.0),
+			false => (1.0, 1.0, 0.0),
+		};
+		// Cb = (B - Y') / (2 (1 - Kb)) and Cr = (R - Y') / (2 (1 - Kr)), with Y'
+		// substituted so each channel is one weighted sum.
+		let cb = chroma_scale / (2.0 * (1.0 - kb));
+		let cr = chroma_scale / (2.0 * (1.0 - kr));
+		Coefficients {
+			y: [luma_scale * kr, luma_scale * kg, luma_scale * kb, luma_offset],
+			u: [-cb * kr, -cb * kg, cb * (1.0 - kb), 128.0],
+			v: [cr * (1.0 - kr), -cr * kg, -cr * kb, 128.0],
+		}
+	}
+
 	/// How the `yuv` crate names this color space, for the RGB conversions.
 	pub(crate) fn yuv(self) -> (yuv::YuvRange, yuv::YuvStandardMatrix) {
 		let range = match self.limited() {
@@ -79,6 +112,31 @@ impl Color {
 			Color::Bt709Limited | Color::Bt709Full => yuv::YuvStandardMatrix::Bt709,
 		};
 		(range, matrix)
+	}
+}
+
+/// The weights of one RGB to Y'CbCr conversion: each output sample is
+/// `[r, g, b, offset]` dotted with `(R, G, B, 1)`, all on the 0..255 scale.
+#[cfg(any(test, all(target_os = "linux", feature = "nvidia")))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Coefficients {
+	pub y: [f32; 4],
+	pub u: [f32; 4],
+	pub v: [f32; 4],
+}
+
+#[cfg(any(test, all(target_os = "linux", feature = "nvidia")))]
+impl Coefficients {
+	/// One pixel through the matrix, rounded and clamped the way the kernels do
+	/// it. The CPU reference for a GPU conversion, and what the tests compare
+	/// against the `yuv` crate.
+	#[cfg(test)]
+	pub(crate) fn apply(&self, rgb: [u8; 3]) -> [u8; 3] {
+		let dot = |w: [f32; 4]| {
+			let v = w[0] * rgb[0] as f32 + w[1] * rgb[1] as f32 + w[2] * rgb[2] as f32 + w[3];
+			v.round().clamp(0.0, 255.0) as u8
+		};
+		[dot(self.y), dot(self.u), dot(self.v)]
 	}
 }
 
@@ -99,5 +157,64 @@ mod tests {
 		assert_eq!(Color::Bt709Limited.with_range(false), Color::Bt709Full);
 		assert_eq!(Color::Bt709Full.with_range(true), Color::Bt709Limited);
 		assert_eq!(Color::Bt601Limited.with_range(false), Color::Bt601Full);
+	}
+
+	/// The textbook 8-bit values for pure red: BT.709 limited is (63, 102, 240),
+	/// full range (54, 99, 255); BT.601 limited is (81, 90, 240).
+	#[test]
+	fn coefficients_match_the_textbook_values() {
+		let red = [255, 0, 0];
+		assert_eq!(Color::Bt709Limited.coefficients().apply(red), [63, 102, 240]);
+		assert_eq!(Color::Bt709Full.coefficients().apply(red), [54, 99, 255]);
+		assert_eq!(Color::Bt601Limited.coefficients().apply(red), [81, 90, 240]);
+		assert_eq!(Color::Bt601Full.coefficients().apply([255; 3]), [255, 128, 128]);
+		assert_eq!(Color::Bt709Limited.coefficients().apply([0; 3]), [16, 128, 128]);
+	}
+
+	/// The coefficients agree with the `yuv` crate's conversion, which every CPU
+	/// path uses, so a GPU frame converted with them decodes to the same picture
+	/// as the same pixels fed through `Surface::rgba`.
+	#[test]
+	fn coefficients_agree_with_the_yuv_crate() {
+		use yuv::{YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, rgba_to_yuv420};
+
+		let colors = [
+			Color::Bt601Limited,
+			Color::Bt601Full,
+			Color::Bt709Limited,
+			Color::Bt709Full,
+		];
+		let pixels: [[u8; 3]; 6] = [
+			[255, 0, 0],
+			[0, 255, 0],
+			[0, 0, 255],
+			[255, 255, 255],
+			[17, 200, 90],
+			[128, 128, 128],
+		];
+		for color in colors {
+			let (range, matrix) = color.yuv();
+			let coefficients = color.coefficients();
+			for rgb in pixels {
+				// A solid 2x2 block, so the crate's chroma subsampling changes nothing.
+				let rgba: Vec<u8> = std::iter::repeat_n([rgb[0], rgb[1], rgb[2], 255], 4)
+					.flatten()
+					.collect();
+				let mut planar = YuvPlanarImageMut::alloc(2, 2, YuvChromaSubsampling::Yuv420);
+				rgba_to_yuv420(&mut planar, &rgba, 8, range, matrix, YuvConversionMode::Balanced).unwrap();
+				let expected = [
+					planar.y_plane.borrow()[0],
+					planar.u_plane.borrow()[0],
+					planar.v_plane.borrow()[0],
+				];
+				let actual = coefficients.apply(rgb);
+				for (channel, (a, e)) in actual.iter().zip(expected).enumerate() {
+					assert!(
+						a.abs_diff(e) <= 1,
+						"{color:?} {rgb:?} channel {channel}: coefficients {actual:?}, yuv crate {expected:?}"
+					);
+				}
+			}
+		}
 	}
 }

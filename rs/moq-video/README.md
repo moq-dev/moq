@@ -109,7 +109,8 @@ compile wgpu.
 ### Vulkan producers on NVIDIA
 
 `frame::vulkan::Importer` accepts dedicated optimal-tiling
-`VK_FORMAT_R8G8B8A8_UNORM` images exported as opaque memory FDs. The producer
+`VK_FORMAT_R8G8B8A8_UNORM` (`Image::rgba8`) or `VK_FORMAT_B8G8R8A8_UNORM`
+(`Image::bgra8`) images exported as opaque memory FDs. The producer
 also exports a timeline semaphore and supplies the Vulkan physical-device UUID;
 imports with another CUDA device, format, layout, allocation shape, or sync
 mechanism are refused. Vulkan signals `Timeline::ready` after writes and the
@@ -125,9 +126,24 @@ image is not exportable, copy it on Vulkan into a dedicated exportable slot;
 that is one GPU image copy, not zero-copy. There is no CPU mapping, download, or
 staging fallback for `Surface::Vulkan`.
 
+`frame::cuda::Converter` turns a published Vulkan frame into the NV12
+`Surface::Cuda` that NVENC encodes in place. It runs on the GPU in one declared
+color space (matrix and range), averages 4:2:0 chroma per 2x2 block, applies no
+transfer function, and draws every buffer from a pool sized at construction;
+`cuda::Frame::resize` scales a converted frame for a smaller rendition from the
+same pool. One captured frame feeding HD and SD therefore holds a fixed number
+of buffers, and a producer that outruns its encoder gets an error rather than
+unbounded device memory. Open the encoder with `encode::Kind::Named("nvenc")`
+and the same `encode::Config::color`: `Kind::Auto` could fall back to a software
+encoder that reads the frame back, and the portable `Surface::resize` downloads
+when the GPU scaler fails. Everything under `frame::cuda` and `frame::vulkan`
+runs on the device or returns an error.
+
 Run `just rs vulkan-cuda` for the opt-in native hardware exercise. It creates a
 Vulkan image independently of Unreal, imports it once into CUDA, checks repeated
-slot reuse and held-reader ordering, and tears down through cancellation.
+slot reuse and held-reader ordering, and tears down through cancellation; a
+second test converts RGBA and BGRA uploads to NV12, scales them, fills the pool,
+and encodes both renditions through NVENC.
 
 ## Decode
 
