@@ -19,7 +19,9 @@
 		// indexes. Exclude two kinds it can't handle:
 		//   - MPEG transport-stream fixtures whose `.ts` extension collides with TypeScript.
 		//   - SVG assets, which Biome routes to its HTML parser and rejects.
-		"includes": ["**", "!rs/moq-mux/src/container/ts/test_data", "!**/*.svg"]
+		//   - The audio jitter corpus, which is generated and byte-compared by its own test,
+		//     so a formatter rewriting it would fight the generator on every `just fix`.
+		"includes": ["**", "!rs/moq-mux/src/container/ts/test_data", "!**/*.svg", "!doc/concept/audio-jitter/*.json"]
 	},
 	"linter": {
 		"rules": {
