@@ -407,7 +407,7 @@ class JsonStreamProducer:
 class AudioProducer:
     """Publish raw PCM and let libopus encode it on the way out.
 
-    Built via :meth:`BroadcastProducer.publish_audio`. PCM layout
+    Built via :meth:`BroadcastProducer.encode_audio`. PCM layout
     (format / sample rate / channels / bitrate / frame duration) is
     fixed at construction; each :meth:`write` call passes only bytes
     and a presentation timestamp.

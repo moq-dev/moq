@@ -4,6 +4,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.yield
 import kotlinx.serialization.Serializable
 import uniffi.moq.MoqException
 import kotlin.test.Test
@@ -29,6 +30,9 @@ private fun opusHead(): ByteArray =
         0,
         0,
     )
+
+/** Wall-clock bound on polling for a configuration race, so a regression fails instead of hanging. */
+private const val CONFIG_RACE_TIMEOUT_NS = 10_000_000_000L
 
 class SmokeTest {
     @Test
@@ -282,6 +286,127 @@ class SmokeTest {
             track.createGroup(4uL).finish()
             assertFailsWith<MoqException> { track.createGroup(5uL) }
             track.finish()
+        }
+    }
+
+    /**
+     * `frameDurationUs` is microseconds so Opus' 2.5 ms frame is expressible at
+     * all, and a duration outside the Opus set is refused rather than silently
+     * rounded.
+     */
+    @Test
+    fun `encode audio honors the opus frame duration set`() {
+        val input = AudioEncoderInput(format = AudioSampleFormat.F32, sampleRate = 48_000u, channels = 1u)
+
+        BroadcastProducer().use { broadcast ->
+            val fine = broadcast.encodeAudio(
+                "fine",
+                input,
+                AudioEncoderOutput(codec = AudioCodec.opus(), frameDurationUs = 2_500u),
+            )
+            // 2.5 ms of silence at 48 kHz mono f32: exactly one encoded frame.
+            fine.write(AudioFrame(timestampUs = 0uL, data = ByteArray(120 * 4)))
+            fine.finish()
+
+            assertFailsWith<MoqException.Audio> {
+                broadcast.encodeAudio(
+                    "coarse",
+                    input,
+                    AudioEncoderOutput(codec = AudioCodec.opus(), frameDurationUs = 2_000u),
+                )
+            }
+        }
+    }
+
+    /**
+     * Configuration must apply or fail: a setter racing an in-flight connect
+     * throws [MoqException.Busy], and one after [Client.cancel] throws
+     * [MoqException.Cancelled]. Mirrors `test_client_setters_fail_after_cancel`
+     * in `py/moq-rs/tests/test_server.py`.
+     */
+    @Test
+    fun `client setters are busy during connect and cancelled after`() = runTest {
+        Server.listen("127.0.0.1:0", tlsGenerate = listOf("localhost")).use { server ->
+            val client = Client()
+            client.setTlsVerify(false)
+            client.setBind("127.0.0.1:0")
+            // A reconnecting client would redial instead of failing the connect.
+            client.setReconnect(false)
+
+            // Nothing accepts the request, so connect parks holding the client lock.
+            // runCatching, because a failed `async` would cancel the test scope
+            // before `await` ever reported it.
+            val connect = async { runCatching { client.connect("https://${server.localAddr}") } }
+
+            // The lock is taken on the ffi runtime thread, so poll until it is.
+            val deadline = System.nanoTime() + CONFIG_RACE_TIMEOUT_NS
+            var busy: Throwable? = null
+            while (busy == null && System.nanoTime() < deadline) {
+                busy = runCatching { client.setTlsVerify(false) }.exceptionOrNull()
+                yield()
+            }
+            assertTrue(busy is MoqException.Busy, "expected Busy while connecting, got: $busy")
+            assertFailsWith<MoqException.Busy> { client.setBind("127.0.0.1:0") }
+
+            client.cancel()
+            assertFailsWith<MoqException.Cancelled> { client.setTlsVerify(true) }
+            assertFailsWith<MoqException.Cancelled> { client.setBind("127.0.0.1:0") }
+
+            val connected = connect.await().exceptionOrNull()
+            assertTrue(connected is MoqException.Cancelled, "expected a cancelled connect, got: $connected")
+        }
+    }
+
+    @Test
+    fun `decode video picks its pixel format`() = runTest {
+        OriginProducer(OriginConfig()).use { origin ->
+            origin.createBroadcast("video-decode-format").use { broadcast ->
+                val video = broadcast.encodeVideo(
+                    VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 320u, height = 240u, framerate = 30u),
+                    // Software both ways so the test is deterministic everywhere.
+                    VideoEncoderOutput(codec = VideoCodec.H264, track = "camera", kind = softwareEncoder),
+                    null,
+                )
+                broadcast.announce(Route())
+
+                // Seed the track so a subscriber joining below lands on encoded media.
+                val rgba = ByteArray(320 * 240 * 4) { 0x80.toByte() }
+                video.cut()
+                for (i in 0 until 10) {
+                    video.write(VideoFrame(timestampUs = i.toULong() * 33_333uL, data = rgba))
+                }
+
+                val consumer = origin.consume().requestBroadcast("video-decode-format")
+                val catalog = consumer.subscribeCatalog().next()!!
+                val rendition = catalog.video["camera"]!!
+
+                // Two subscribers over one publication, so the same encoded frames
+                // are read twice and only the requested layout differs.
+                val i420 = consumer.decodeVideo("camera", rendition, VideoDecoderOutput())
+                val packed = consumer.decodeVideo(
+                    "camera",
+                    rendition,
+                    VideoDecoderOutput(format = VideoPixelFormat.RGBA),
+                )
+
+                // Keep the encoder fed so both decoders see frames after they joined.
+                for (i in 10 until 40) {
+                    video.write(VideoFrame(timestampUs = i.toULong() * 33_333uL, data = rgba))
+                }
+
+                val planar = i420.next()!!
+                assertEquals(VideoPixelFormat.I420, planar.format)
+                assertEquals(planar.width.toInt() * planar.height.toInt() * 3 / 2, planar.data.size)
+
+                val frame = packed.next()!!
+                assertEquals(VideoPixelFormat.RGBA, frame.format)
+                assertEquals(frame.width.toInt() * frame.height.toInt() * 4, frame.data.size)
+                assertTrue(frame.data.indices.filter { it % 4 == 3 }.all { frame.data[it] == 0xFF.toByte() })
+
+                i420.cancel()
+                packed.cancel()
+                video.finish()
+            }
         }
     }
 

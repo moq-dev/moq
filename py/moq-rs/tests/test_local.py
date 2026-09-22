@@ -1037,6 +1037,60 @@ def test_encode_audio_with_opus_object():
         broadcast.finish()
 
 
+async def test_decode_video_format():
+    """The decode side picks its CPU layout: unset is I420, RGBA is four bytes a pixel."""
+    origin = moq.OriginProducer()
+    broadcast = create_announced(origin, "video-decode-format")
+    video = broadcast.encode_video(
+        moq.VideoEncoderInput(format=moq.VideoPixelFormat.RGBA, width=320, height=240, framerate=30),
+        # Software both ways so the test is deterministic everywhere. uniffi nests
+        # each variant inside the enum without declaring it a subclass, so the cast
+        # is what makes the variant typecheck.
+        moq.VideoEncoderOutput(
+            codec=moq.VideoCodec.H264,
+            track="camera",
+            kind=cast(moq.VideoEncoderKind, moq.VideoEncoderKind.SOFTWARE()),
+        ),
+    )
+
+    # Seed the track so a subscriber joining below lands on encoded media.
+    rgba = bytes([0x80]) * (320 * 240 * 4)
+    video.cut()
+    for i in range(10):
+        video.write(moq.VideoFrame(timestamp_us=i * 33_333, data=rgba))
+
+    consumer = origin.consume()
+    broadcast_consumer = await asyncio.wait_for(consumer.request_broadcast("video-decode-format"), timeout=5.0)
+    catalog = await asyncio.wait_for(broadcast_consumer.catalog(), timeout=5.0)
+    track_name = next(iter(catalog.video))
+    rendition = catalog.video[track_name]
+
+    # Two subscribers over one publication, so the same encoded frames are read
+    # twice and only the requested layout differs.
+    i420 = await broadcast_consumer.decode_video(track_name, rendition)
+    packed = await broadcast_consumer.decode_video(
+        track_name, rendition, moq.VideoDecoderOutput(format=moq.VideoPixelFormat.RGBA)
+    )
+
+    # Keep the encoder fed so both decoders see frames after they joined.
+    for i in range(10, 40):
+        video.write(moq.VideoFrame(timestamp_us=i * 33_333, data=rgba))
+
+    frame = await asyncio.wait_for(anext(i420), timeout=5.0)
+    assert frame.format == moq.VideoPixelFormat.I420
+    assert len(frame.data) == frame.width * frame.height * 3 // 2
+
+    frame = await asyncio.wait_for(anext(packed), timeout=5.0)
+    assert frame.format == moq.VideoPixelFormat.RGBA
+    assert len(frame.data) == frame.width * frame.height * 4
+    assert all(frame.data[i] == 0xFF for i in range(3, len(frame.data), 4)), "RGBA output should be opaque"
+
+    i420.cancel()
+    packed.cancel()
+    video.finish()
+    broadcast.finish()
+
+
 async def test_announce_then_unannounce_is_visible():
     origin = moq.OriginProducer()
     broadcast = origin.create_broadcast("live")

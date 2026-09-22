@@ -379,6 +379,10 @@ impl Publish {
 	}
 
 	/// Reject the publish with a verdict the client can distinguish on the wire.
+	///
+	/// This hands the verdict to the listener rather than sending it: the [`Server`]
+	/// has to outlive the client's handshake, or the packet is never transmitted and
+	/// the client times out instead of learning why it was refused.
 	pub async fn reject(self, reason: Reject) -> Result<()> {
 		Ok(self.0.request.reject(reason.reason()).await?)
 	}
@@ -426,6 +430,9 @@ impl Subscribe {
 	}
 
 	/// Reject the subscribe with a verdict the client can distinguish on the wire.
+	///
+	/// As with a publish, the [`Server`] has to outlive the client's handshake for
+	/// the verdict to reach the wire.
 	pub async fn reject(self, reason: Reject) -> Result<()> {
 		Ok(self.0.request.reject(reason.reason()).await?)
 	}

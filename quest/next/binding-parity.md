@@ -40,4 +40,3 @@ the release, not the merge.
 
 - [Release](/quest/dev/release.md) - names this as a release gate
 - [Binding docs](/quest/next/binding-docs.md) - the pages that describe each wrapper
-- [Binding audio tests](/quest/next/binding-audio-tests.md) - the proof per binding

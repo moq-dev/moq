@@ -116,9 +116,10 @@ func (b *BroadcastConsumer) DecodeAudio(
 	return &AudioConsumer{inner: inner}, nil
 }
 
-// DecodeVideo subscribes to a video track and decodes it inside the bindings,
-// yielding packed I420. catalogVideo comes from the catalog. output.Resize is
-// best effort, so read each frame's own dimensions.
+// DecodeVideo subscribes to a video track and decodes it inside the bindings.
+// catalogVideo comes from the catalog. output.Format picks the packed CPU layout
+// every frame arrives in, defaulting to I420 when nil; each frame repeats it.
+// output.Resize is best effort, so read each frame's own dimensions.
 func (b *BroadcastConsumer) DecodeVideo(
 	ctx context.Context,
 	name string,
