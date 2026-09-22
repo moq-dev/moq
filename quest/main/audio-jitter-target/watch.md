@@ -3,7 +3,7 @@
 ## Goal
 
 `js/watch` computes its auto target with the algorithm from
-[Spec](/quest/next/audio-jitter-target/spec.md) and passes the conformance
+[Spec](/quest/main/audio-jitter-target/spec.md) and passes the conformance
 vector. The "Real-time" preset plays clean audio on a LAN and against the
 public relay: zero underruns after convergence and no skip-aheads in steady
 state, on both the isolated and the postMessage ring paths, confirmed by a
@@ -85,7 +85,7 @@ that quest can adopt it without a second estimator change.
 
 ## Required
 
-- [Spec](/quest/next/audio-jitter-target/spec.md) - the algorithm this implements
+- [Spec](/quest/main/audio-jitter-target/spec.md) - the algorithm this implements
 
 ## Related
 

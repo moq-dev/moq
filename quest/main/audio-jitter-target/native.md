@@ -3,7 +3,7 @@
 ## Goal
 
 Native playback holds a jitter buffer sized by the algorithm from
-[Spec](/quest/next/audio-jitter-target/spec.md), and passes the same conformance
+[Spec](/quest/main/audio-jitter-target/spec.md), and passes the same conformance
 vector as the browser on the same trace. `moq play` on a path with uneven
 arrivals plays through a flush without underrunning, where today it has nothing
 to absorb one.
@@ -49,4 +49,4 @@ already that far ahead.
 
 ## Required
 
-- [Spec](/quest/next/audio-jitter-target/spec.md) - the algorithm this implements
+- [Spec](/quest/main/audio-jitter-target/spec.md) - the algorithm this implements

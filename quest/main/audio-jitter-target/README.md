@@ -44,7 +44,7 @@ plus one frame, with the arrival minimum expiring over two 30 s windows,
 `reanchor()` on a discontinuity, and the step down bounded to one frame per
 second. `jitter.test.ts` and `js/watch/src/audio/replay.test.ts` cover it. What
 the branch still gets wrong is recorded in
-[Spec](/quest/next/audio-jitter-target/spec.md): the extra frame is learned from
+[Spec](/quest/main/audio-jitter-target/spec.md): the extra frame is learned from
 the first gap between observed timestamps and the rise is immediate and
 unclamped, so a tune-in across a stale group sets the target to seconds.
 
@@ -56,9 +56,9 @@ buffer against uneven arrivals.
 
 ## Quests
 
-- [Spec](/quest/next/audio-jitter-target/spec.md) - survey what already exists, then write the algorithm down once
-- [Watch](/quest/next/audio-jitter-target/watch.md) - js/watch and js/hang bring the #3517 branch's estimator into conformance
-- [Native](/quest/next/audio-jitter-target/native.md) - rs/moq-audio grows a measured jitter buffer from the same algorithm
+- [Spec](/quest/main/audio-jitter-target/spec.md) - survey what already exists, then write the algorithm down once
+- [Watch](/quest/main/audio-jitter-target/watch.md) - js/watch and js/hang bring the #3517 branch's estimator into conformance
+- [Native](/quest/main/audio-jitter-target/native.md) - rs/moq-audio grows a measured jitter buffer from the same algorithm
 
 ## Closes
 

@@ -90,6 +90,7 @@ do not add another media abstraction or a renderer crate during stabilization.
 
 - [GPU conversion and NVENC](/quest/main/video-gpu-encode.md) - validate the GPU
   conversion, resize and NVENC path for imported frames on NVIDIA hardware
+- [Audio jitter target](/quest/main/audio-jitter-target/README.md) - the audio playout target is a measured estimate of arrival timing in both languages, not a round-trip guess
 
 ## Related
 
