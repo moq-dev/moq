@@ -1215,8 +1215,9 @@ impl Producer {
 	/// Fails with [`Error::Unauthorized`] if `path` is outside the prefixes this
 	/// producer may publish under (after [`scope`](Self::scope)),
 	/// [`Error::BoundsExceeded`] if the full rooted path exceeds
-	/// [`Path::MAX_PARTS`] or holds a segment no pattern can spell (`*` or `**`),
-	/// or [`Error::Closed`] once the origin's [`Driver`] has been dropped.
+	/// [`Path::MAX_PARTS`], [`Error::InvalidPath`] if it holds a segment no
+	/// pattern can spell (`*` or `**`), or [`Error::Closed`] once the origin's
+	/// [`Driver`] has been dropped.
 	pub fn create_broadcast(&self, path: impl AsPath) -> Result<broadcast::Producer, Error> {
 		let path = path.as_path();
 
@@ -1246,7 +1247,7 @@ impl Producer {
 		}
 		// A path only a pattern could spell (a `*` segment) advertises nowhere, so
 		// refuse it here rather than publish a broadcast no cursor can see.
-		let claim = prefix_claim(&full).map_err(|_| BoundsExceeded)?;
+		let claim = prefix_claim(&full)?;
 
 		// Resolve the ingress counters once, keyed by the absolute broadcast path.
 		let ingress = self.stats.ingress(&full);
@@ -1460,7 +1461,7 @@ impl Announcing {
 		if requested.parts().count() > Path::MAX_PARTS {
 			return Err(BoundsExceeded.into());
 		}
-		let claim = prefix_claim(&requested).map_err(|_| BoundsExceeded)?;
+		let claim = prefix_claim(&requested)?;
 		if !producer.scope.allowed.overlaps(&claim) {
 			return Err(Error::Unauthorized);
 		}
@@ -2979,11 +2980,13 @@ impl RouteTable {
 		nodes.into_iter().flat_map(|node| node.entries.iter())
 	}
 
+	/// Add a route at its prefix, creating the nodes down to it.
 	fn insert(&mut self, entry: RouteEntry) {
 		let node = self.root.reach(entry.prefix.parts(), 0);
 		node.entries.push(entry);
 	}
 
+	/// The route `id` announced at `prefix`, for a re-price in place.
 	fn entry_mut(&mut self, prefix: &Path, id: u64) -> Option<&mut RouteEntry> {
 		let mut node = &mut self.root;
 		for part in prefix.parts() {
@@ -2992,6 +2995,7 @@ impl RouteTable {
 		node.entries.iter_mut().find(|entry| entry.id == id)
 	}
 
+	/// Take the route `id` out of `prefix`, pruning the nodes it leaves empty.
 	fn remove(&mut self, prefix: &Path, id: u64) -> Option<RouteEntry> {
 		self.root
 			.edit(prefix.parts(), 0, |node| {
@@ -3001,10 +3005,13 @@ impl RouteTable {
 			.flatten()
 	}
 
+	/// Hang a cursor at one of its heads, counting it down the walk.
 	fn add_cursor(&mut self, head: &Path, id: ConsumerId) {
 		self.root.reach(head.parts(), 1).cursors.push(id);
 	}
 
+	/// Take a cursor off one of its heads, pruning the nodes it leaves empty. Only
+	/// ever called for a head the cursor was added at, or the counts drift.
 	fn remove_cursor(&mut self, head: &Path, id: ConsumerId) {
 		self.root
 			.edit(head.parts(), 1, |node| node.cursors.retain(|cursor| *cursor != id));
@@ -3152,7 +3159,7 @@ impl OriginState {
 	fn register_cursor(&mut self, id: ConsumerId, mut cursor: TableCursor) {
 		// The routes a cursor can see sit on the walk down to one of its heads or
 		// somewhere beneath it, so only those subtrees are replayed.
-		let mut presented: Vec<PathOwned> = Vec::new();
+		let mut presented: BTreeSet<PathOwned> = BTreeSet::new();
 		for head in &cursor.heads {
 			let (above, at) = self.routes.split(head);
 			let mut nodes = above;
@@ -3160,10 +3167,8 @@ impl OriginState {
 				node.walk(&mut |node| nodes.push(node));
 			}
 			for entry in nodes.into_iter().flat_map(|node| node.entries.iter()) {
-				if let Some(p) = cursor.presented(&entry.prefix, &entry.claim)
-					&& !presented.contains(&p)
-				{
-					presented.push(p);
+				if let Some(p) = cursor.presented(&entry.prefix, &entry.claim) {
+					presented.insert(p);
 				}
 			}
 		}
@@ -6023,11 +6028,11 @@ mod tests {
 		// announces nowhere.
 		assert!(matches!(
 			producer.create_broadcast("room/*"),
-			Err(Error::BoundsExceeded(_))
+			Err(Error::InvalidPath(_))
 		));
 		assert!(matches!(
 			producer.announce("room/**", Route::default()),
-			Err(Error::BoundsExceeded(_))
+			Err(Error::InvalidPath(_))
 		));
 	}
 
