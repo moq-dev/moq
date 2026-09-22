@@ -83,6 +83,33 @@ impl<T: Serialize> Producer<T> {
 		take(&self.inner).update(value)
 	}
 
+	/// Edit the current value in place and publish the result.
+	///
+	/// The closure receives the current value: everything published through this producer so far,
+	/// composed, or `T::default()` if nothing has been. Edit it in place; on return the result is
+	/// published, a no-op if unchanged.
+	///
+	/// ```no_run
+	/// # fn example(producer: &mut moq_json::snapshot::Producer<serde_json::Value>) -> moq_json::Result<()> {
+	/// producer.mutate(|catalog| {
+	///     catalog["scte35"] = serde_json::json!({ "id": 1 });
+	/// })
+	/// # }
+	/// ```
+	///
+	/// Independent owners can share one producer and each edit only their own keys: every call starts
+	/// from the latest value, so their sections compose instead of clobbering one another. This is
+	/// [`modify`](Self::modify) opened and committed for you; take the guard to hold the lock across
+	/// several edits, and [`update`](Self::update) to replace the whole value.
+	pub fn mutate(&mut self, f: impl FnOnce(&mut T)) -> Result<()>
+	where
+		T: Default + DeserializeOwned,
+	{
+		let mut guard = self.modify()?;
+		f(&mut guard);
+		guard.commit()
+	}
+
 	/// Lock the current value for in-place editing, publishing on drop.
 	///
 	/// The returned [`Guard`] derefs to the current value: everything published through this producer
@@ -96,10 +123,10 @@ impl<T: Serialize> Producer<T> {
 	/// failed sees the error and can act on it; the next successful publish is a full snapshot
 	/// carrying the composed value, so consumers converge on it either way.
 	///
-	/// This is the counterpart to a callback: hold the guard, mutate, drop. The guard holds the
-	/// producer's lock for its lifetime, so independent owners are serialized: each one starts from
-	/// the latest value and their changes compose instead of clobbering. Don't hold a guard across
-	/// an `.await`, since that keeps the lock held while suspended.
+	/// Reach for this over [`mutate`](Self::mutate) when several edits belong to one publish. The
+	/// guard holds the producer's lock for its lifetime, so independent owners are serialized: each
+	/// one starts from the latest value and their changes compose instead of clobbering. Don't hold a
+	/// guard across an `.await`, since that keeps the lock held while suspended.
 	///
 	/// Fails if the track is closed. That is the one publication failure that happens in normal
 	/// operation, and the guard holds the lock that [`finish`](Self::finish) needs, so nothing is

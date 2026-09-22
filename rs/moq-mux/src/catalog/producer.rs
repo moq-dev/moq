@@ -371,11 +371,27 @@ impl<E: CatalogExt> Producer<E> {
 		}
 	}
 
+	/// Edit the catalog in place and publish the result.
+	///
+	/// The closure receives the current catalog, composed from every owner so far. Edit it in place;
+	/// on return the result is published, a no-op if the closure changed nothing. Independent owners
+	/// can each edit only their own sections, so they compose instead of clobbering one another.
+	///
+	/// This is [`modify`](Self::modify) opened and committed for you; take the guard to hold the lock
+	/// across several edits, or to reach a [`Guard`] method like
+	/// [`set_section`](Guard::set_section).
+	pub fn mutate(&mut self, f: impl FnOnce(&mut Catalog<E>)) -> crate::Result<()> {
+		let mut guard = self.modify()?;
+		f(&mut guard);
+		guard.commit()
+	}
+
 	/// Get mutable access to the catalog, publishing it after any changes.
 	///
-	/// The publish happens when the returned [`Guard`] drops. Fails once the catalog tracks are
-	/// closed, the one publication failure that happens in normal operation, so nothing is left to
-	/// check after the guard drops. Anything else that stops the drop from publishing (an extension
+	/// The publish happens when the returned [`Guard`] drops. Use [`mutate`](Self::mutate) for a
+	/// single edit, which is this guard opened and committed for you. Fails once the catalog tracks
+	/// are closed, the one publication failure that happens in normal operation, so nothing is left
+	/// to check after the guard drops. Anything else that stops the drop from publishing (an extension
 	/// that won't serialize, a catalog too large for a frame) aborts the catalog tracks with that
 	/// error: consumers see it instead of a stale catalog, and the next `modify` returns it here.
 	/// Call [`Guard::commit`] to get the error back immediately instead.
@@ -1058,6 +1074,43 @@ mod test {
 
 		assert_eq!(got_plain, expected);
 		assert_eq!(got_compressed, expected);
+	}
+
+	#[test]
+	fn mutate_composes_independent_owners() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let mut plain = Consumer::new(catalog.outputs.hang.consume());
+
+		catalog
+			.mutate(|c| {
+				c.audio
+					.renditions
+					.insert("audio0".to_string(), AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+			})
+			.unwrap();
+
+		// The second owner starts from the published catalog and adds its own section.
+		catalog
+			.mutate(|c| {
+				c.video.renditions.insert("video0".to_string(), h264_config());
+			})
+			.unwrap();
+
+		// A closure that changes nothing publishes nothing: the catalog track runs one snapshot per
+		// group, so a third publish would open a third group.
+		catalog.mutate(|_| {}).unwrap();
+		assert_eq!(catalog.outputs.hang_track.latest(), Some(1));
+
+		let expected = catalog.snapshot();
+		let waiter = kio::Waiter::noop();
+		let mut last = None;
+		while let Poll::Ready(Ok(Some(c))) = plain.poll_next(&waiter) {
+			last = Some(c);
+		}
+		assert_eq!(last.unwrap(), expected);
+		assert!(expected.audio.renditions.contains_key("audio0"));
+		assert!(expected.video.renditions.contains_key("video0"));
 	}
 
 	#[test]

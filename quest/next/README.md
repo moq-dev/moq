@@ -33,7 +33,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Last frame duration](/quest/next/mux-last-frame-duration.md) - a group's final frame keeps its duration on 90 kHz and nanosecond imports
 - [Binding audio tests](/quest/next/binding-audio-tests.md) - every binding proves the Opus frame duration and throwing setters it exposes, and `smoke --all` publishes audio with an explicit config
 - [Decode format](/quest/next/ffi-decode-format.md) - the C-only decode pixel format knob reaches every uniffi binding
-- [JSON mutate](/quest/next/json-mutate.md) - Rust gains the closure edit JS already has, beside the guard
 - [Publisher clocks](/quest/next/publisher-clock.md) - wire the shared clock through native and browser publisher restarts
 - [Broadcast route](/quest/next/js-broadcast-route.md) - JS Announce.Broadcast goes live on any claim matching its path, like Rust routed()
 - [io_uring check](/quest/next/check-uring-feature.md) - a moq-relay diff compiles the io-uring feature in `just check`, not only nightly
