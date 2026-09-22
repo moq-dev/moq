@@ -1,4 +1,4 @@
-//! WebTransport interop: the reference tokio stack (`web-transport-noq`,
+//! WebTransport interop: the reference tokio stack (`web-transport-moq`,
 //! what browsers interop with) dials the uring server. One test hand-drives
 //! streams and datagrams through the H3 framing; the other runs a whole
 //! moq-lite session over it, which is exactly the browser-to-relay path.
@@ -47,7 +47,7 @@ fn h3_endpoint(handle: &moq_uring::Handle, certs: &support::Certs) -> quic::Endp
 /// The tokio-side client, in its own runtime on its own thread.
 fn noq_client(
 	url: String,
-	body: impl FnOnce(web_transport_noq::Session) -> ClientFuture + Send + 'static,
+	body: impl FnOnce(web_transport_moq::Session) -> ClientFuture + Send + 'static,
 ) -> std::thread::JoinHandle<()> {
 	std::thread::spawn(move || {
 		// May already be installed by a sibling test; either way one exists.
@@ -57,12 +57,12 @@ fn noq_client(
 			.build()
 			.expect("tokio runtime");
 		rt.block_on(async move {
-			let client = web_transport_noq::ClientBuilder::new()
+			let client = web_transport_moq::ClientBuilder::new()
 				.dangerous()
 				.with_no_certificate_verification()
 				.expect("client");
 			let request =
-				web_transport_noq::proto::ConnectRequest::new(url::Url::parse(&url).expect("url")).with_protocol(PROTO);
+				web_transport_moq::proto::ConnectRequest::new(url::Url::parse(&url).expect("url")).with_protocol(PROTO);
 			let session = client.connect(request).await.expect("connect");
 			body(session).await;
 		});
@@ -72,7 +72,7 @@ fn noq_client(
 type ClientFuture = std::pin::Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// Read a noq-side stream to its end.
-async fn read_all(recv: &mut web_transport_noq::RecvStream) -> Vec<u8> {
+async fn read_all(recv: &mut web_transport_moq::RecvStream) -> Vec<u8> {
 	let mut out = Vec::new();
 	let mut buf = [0u8; 4096];
 	while let Some(n) = recv.read(&mut buf).await.expect("read") {
@@ -322,7 +322,7 @@ async fn within<T>(handle: &moq_uring::Handle, what: &str, future: impl Future<O
 }
 
 /// A client whose CONNECT is expected to fail, reporting how it failed.
-fn noq_client_err(url: String) -> std::thread::JoinHandle<web_transport_noq::ClientError> {
+fn noq_client_err(url: String) -> std::thread::JoinHandle<web_transport_moq::ClientError> {
 	std::thread::spawn(move || {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 		let rt = tokio::runtime::Builder::new_current_thread()
@@ -330,12 +330,12 @@ fn noq_client_err(url: String) -> std::thread::JoinHandle<web_transport_noq::Cli
 			.build()
 			.expect("tokio runtime");
 		rt.block_on(async move {
-			let client = web_transport_noq::ClientBuilder::new()
+			let client = web_transport_moq::ClientBuilder::new()
 				.dangerous()
 				.with_no_certificate_verification()
 				.expect("client");
 			let request =
-				web_transport_noq::proto::ConnectRequest::new(url::Url::parse(&url).expect("url")).with_protocol(PROTO);
+				web_transport_moq::proto::ConnectRequest::new(url::Url::parse(&url).expect("url")).with_protocol(PROTO);
 			// The server answers by closing, so the failure has to arrive as
 			// that close. Waiting out the idle timeout would "fail" too, ten
 			// seconds later, which is what a peer sees when a close is
@@ -422,8 +422,8 @@ fn a_rejection_reaches_the_peer() {
 	assert!(
 		matches!(
 			&err,
-			web_transport_noq::ClientError::HttpError(web_transport_noq::ConnectError::ProtoError(
-				web_transport_noq::proto::ConnectError::WrongStatus(Some(status))
+			web_transport_moq::ClientError::HttpError(web_transport_moq::ConnectError::ProtoError(
+				web_transport_moq::proto::ConnectError::WrongStatus(Some(status))
 			)) if *status == http::StatusCode::NOT_FOUND
 		),
 		"got {err:?}"
@@ -457,7 +457,7 @@ fn a_dropped_stream_carries_a_webtransport_code() {
 			ack.finish().expect("finish");
 
 			let err = recv.read(&mut buf).await.expect_err("the server dropped it");
-			assert!(matches!(err, web_transport_noq::ReadError::Reset(0)), "got {err:?}");
+			assert!(matches!(err, web_transport_moq::ReadError::Reset(0)), "got {err:?}");
 
 			// And the other direction: the server drops the read half of this
 			// one, which must arrive as a WebTransport cancellation too.
@@ -468,7 +468,7 @@ fn a_dropped_stream_carries_a_webtransport_code() {
 					Err(err) => break err,
 				}
 			};
-			assert!(matches!(err, web_transport_noq::WriteError::Stopped(0)), "got {err:?}");
+			assert!(matches!(err, web_transport_moq::WriteError::Stopped(0)), "got {err:?}");
 
 			session.close(CLOSE_CODE, CLOSE_REASON.as_bytes());
 			session.closed().await;

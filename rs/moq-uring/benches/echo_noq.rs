@@ -48,7 +48,7 @@ mod linux {
 		let handle = worker.handle();
 		let certs = support::certs().expect("certificates");
 		let mut server = quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
-		server.alpn = vec![web_transport_noq::ALPN.to_string()];
+		server.alpn = vec![web_transport_moq::ALPN.to_string()];
 		let socket = handle
 			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp_config)
 			.expect("socket");
@@ -65,11 +65,11 @@ mod linux {
 				.build()
 				.expect("runtime");
 			runtime.block_on(async move {
-				let client = web_transport_noq::ClientBuilder::new()
+				let client = web_transport_moq::ClientBuilder::new()
 					.dangerous()
 					.with_no_certificate_verification()
 					.expect("client");
-				let request = web_transport_noq::proto::ConnectRequest::new(
+				let request = web_transport_moq::proto::ConnectRequest::new(
 					url::Url::parse(&format!("https://{addr}/echo")).expect("url"),
 				);
 				let session = client.connect(request).await.expect("connect");

@@ -3,10 +3,10 @@
 ## Goal
 
 `moq-dev/noq` exists, tracks n0-computer/noq, and publishes `moq-noq-proto`,
-`moq-noq`, and `moq-noq-udp` on crates.io under those names. Published MoQ
-crates depend on the fork's releases and `web-transport-noq` builds against
-it. Every fork release records the parent commit it includes, so an advisory
-against noq or Quinn can be checked against a MoQ release. The sync procedure
+`moq-noq`, `moq-noq-udp`, and `web-transport-moq` on crates.io under those
+names. Published MoQ crates depend on the fork's releases. Every fork release
+records the parent commit it includes, so an advisory against noq or Quinn
+can be checked against a MoQ release. The sync procedure
 is written down in this repository's contributing docs.
 
 ## Plan
@@ -29,10 +29,12 @@ Done so far:
 - Sync is a weekly merge of upstream main opened as a PR, not a rebase: `main`
   is never force-pushed and the carried set is
   `git log --no-merges upstream/main..main`.
-- [moq-dev/web-transport#398](https://github.com/moq-dev/web-transport/pull/398)
-  switches `web-transport-noq` to `moq-noq`.
+- [moq-dev/noq#2](https://github.com/moq-dev/noq/pull/2) adds
+  `web-transport-moq`, the WebTransport adapter over the fork, on the fork's
+  shared version so one tag releases the stack and its adapter.
+  `web-transport-noq` stays in moq-dev/web-transport on upstream noq.
 
-Left to do, once `moq-noq` 1.3.0 and `web-transport-noq` 0.4 are on crates.io:
+Left to do, once `web-transport-moq` 1.3.0 is on crates.io (`moq-noq` 1.3.0 is):
 
 - Pin the fork releases in this workspace's `Cargo.toml`. `moq-tokio` keeps
   upstream `noq-proto` for the `iroh` feature, whose controller factory types

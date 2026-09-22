@@ -62,7 +62,7 @@ rustls = "0.23"
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 tracing = "0.1"
-web-transport-noq = { workspace = true }
+web-transport-moq = { workspace = true }
 
 [[bench]]
 name = "udp_tokio"

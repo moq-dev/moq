@@ -92,7 +92,7 @@ handshake, half a megabyte each way, and timers driven by noq's timeout.
 `tests/endpoint.rs` covers the endpoint mechanics (dial+accept on one socket,
 version negotiation, the dial-only refusal), `tests/workers.rs` runs a
 steered two-worker reuseport group serving one port across threads, and
-`tests/web.rs` is WebTransport interop against `web-transport-noq`: stream and
+`tests/web.rs` is WebTransport interop against `web-transport-moq`: stream and
 datagram echo through the H3 framing,
 close codes through the capsule, and a full moq-lite session over
 WebTransport. All of them skip (loudly) below the kernel floor, which

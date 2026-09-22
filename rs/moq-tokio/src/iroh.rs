@@ -9,7 +9,7 @@ use std::{net, path::PathBuf, str::FromStr, sync::Arc};
 use crate::quic::CongestionControl;
 use url::Url;
 use web_transport_iroh::iroh::{self, SecretKey};
-// NOTE: web-transport-iroh should re-export proto like web-transport-noq does.
+// NOTE: web-transport-iroh should re-export proto like web-transport-moq does.
 use web_transport_proto::{ConnectRequest, ConnectResponse};
 
 pub use iroh::Endpoint;
