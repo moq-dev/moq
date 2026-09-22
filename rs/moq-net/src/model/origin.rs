@@ -3243,6 +3243,9 @@ impl Consumer {
 				Err(Error::Unroutable) => {
 					kio::wait(|waiter| watch.poll_changed(waiter, seen)).await;
 				}
+				// Teardown parks a pending request with `Dropped`; the contract is
+				// `Closed` once the origin is gone.
+				Err(Error::Dropped) if self.shared.lock().closed => return Err(Error::Closed),
 				Err(err) => return Err(err),
 			}
 		}
@@ -4465,6 +4468,28 @@ mod tests {
 			.expect("resolves without an announce")
 			.expect("resolves locally");
 		assert_eq!(resolved.info().path.as_str(), "room/alice");
+	}
+
+	/// Teardown rejects a parked request with `Dropped`, but a destroyed origin
+	/// is `Closed` to `routed_broadcast`'s callers.
+	#[tokio::test]
+	async fn routed_broadcast_reports_teardown_as_closed() {
+		let (producer, driver) = Producer::new(Config::new(origin(1)));
+		let consumer = producer.consume();
+		let _server = producer.dynamic("room", Route::default()).unwrap();
+
+		// Park on the covering route, past the loop's closed check.
+		let mut resolving = Box::pin(consumer.routed_broadcast("room/alice"));
+		assert!((&mut resolving).now_or_never().is_none());
+
+		drop(driver);
+
+		let err = tokio::time::timeout(Duration::from_secs(5), resolving)
+			.await
+			.expect("teardown resolves the wait")
+			.err()
+			.unwrap();
+		assert!(matches!(err, Error::Closed), "unexpected end: {err}");
 	}
 
 	/// A local broadcast appearing at the exact path is a table change too: a
