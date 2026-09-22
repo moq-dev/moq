@@ -272,9 +272,8 @@ final class SmokeTests: XCTestCase {
                 output: AudioEncoderOutput(codec: AudioCodec.opus(), frameDurationUs: 2_000)
             )
         ) { error in
-            guard let audio = error as? MoqError, case .Audio = audio else {
-                return XCTFail("2 ms is not an opus frame duration: \(error)")
-            }
+            if let audio = error as? MoqError, case .Audio = audio { return }
+            XCTFail("2 ms is not an opus frame duration: \(error)")
         }
 
         try broadcast.finish()

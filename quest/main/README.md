@@ -90,9 +90,6 @@ do not add another media abstraction or a renderer crate during stabilization.
 
 - [GPU conversion and NVENC](/quest/main/video-gpu-encode.md) - validate the GPU
   conversion, resize and NVENC path for imported frames on NVIDIA hardware
-- [Binding audio tests](/quest/main/binding-audio-tests.md) - every binding
-  proves the Opus frame duration and throwing setters it exposes, and
-  `smoke --all` publishes audio with an explicit config
 
 ## Related
 
