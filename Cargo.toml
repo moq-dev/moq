@@ -76,7 +76,7 @@ default-members = [
     "rs/moq-video",
     # "rs/moq-wasm",  # wasm32-unknown-unknown target only
     "rs/quest",
-    # Maturin runs `cargo run --bin uniffi-bindgen` from the workspace root to
+    # Maturin runs the workspace's `uniffi-bindgen` binary from the root to
     # generate the Python wheel, and that only searches default members. A
     # `cargo build -p moq-ffi` still never compiles it.
     "rs/uniffi-bindgen",
