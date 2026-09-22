@@ -32,9 +32,9 @@ Settled while planning:
 - **Extension-ready:** the schema leaves room for the client-stats extension
   (a nested table on each entry), which
   [schema](/quest/next/qos/stats/schema.md) fills in when it lands.
-- **The line lands on main:** `Registry::report(&mut Report)` is a published
-  break that rides the breaking moq-net release already pending on main. The
-  line must merge before that release is cut, or move to dev.
+- **The line lands on main:** the maintainer approved `Registry::report(&mut
+  Report)` as a published API break before the pending moq-net release. Merge
+  this line before #3928, the last breaking change before that release.
 
 The line owns the end-to-end check: a relay test that subscribes to
 `.json.z` and `.fb.z`, pairs frames from the same tick (deterministically,
