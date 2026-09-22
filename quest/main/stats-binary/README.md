@@ -31,8 +31,9 @@ Settled while planning:
 - **Extension-ready:** the schema leaves room for the client-stats extension
   (a nested table on each entry), which
   [schema](/quest/next/qos/stats/schema.md) fills in when it lands.
-- **The line lands on dev:** quest 1 breaks the published `Registry::report()`,
-  and quest 2 builds on it.
+- **The line lands on main:** quest 1 breaks the published `Registry::report()`,
+  which rides the breaking moq-net release already pending on main. If that
+  release is cut first, the line moves to dev. Quest 2 builds on quest 1.
 
 The line owns the end-to-end check: a relay test that subscribes to
 `.json.z` and `.fb.z`, pairs frames from the same tick (deterministically,
@@ -41,9 +42,9 @@ counters agree.
 
 ## Quests
 
-- [Allocation-free tick](/quest/next/stats-binary/tick.md) - the registry report and the stats producer reuse their buffers every tick
-- [FlatBuffers flavor](/quest/next/stats-binary/flatbuffers.md) - moq-stats serves and reads `<name>.fb.z` from a checked-in schema
-- [Stats format page](/quest/next/stats-binary/docs.md) - a doc/concept page for every stats track and both encodings
+- [Allocation-free tick](/quest/main/stats-binary/tick.md) - the registry report and the stats producer reuse their buffers every tick
+- [FlatBuffers flavor](/quest/main/stats-binary/flatbuffers.md) - moq-stats serves and reads `<name>.fb.z` from a checked-in schema
+- [Stats format page](/quest/main/stats-binary/docs.md) - a doc/concept page for every stats track and both encodings
 
 ## Related
 

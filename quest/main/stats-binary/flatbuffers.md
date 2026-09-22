@@ -18,14 +18,14 @@ does not clearly win, abandon the quest and report the numbers.
   it cleanly; otherwise check in the output with a just recipe and a CI diff
   check.
 - Encode straight from the reused report of the
-  [allocation-free tick](/quest/next/stats-binary/tick.md) into one planus
+  [allocation-free tick](/quest/main/stats-binary/tick.md) into one planus
   builder that resets every frame. Each group is one DEFLATE window, as
   `.json.z` does today, with a full snapshot per frame and no deltas.
 - `.fb.z` is a flavor suffix: it applies to every track name that takes
   `.json.z` (default and named tiers, sessions, and the per-broadcast tracks
   if [schema](/quest/next/qos/stats/schema.md) lands first) and nothing
   else. Extend `requested_track_shape` and the track-name helpers for it. Decide whether the helpers take a flavor enum instead of
-  `compressed: bool`, and weigh that break while on dev.
+  `compressed: bool`, and weigh that break while the release is still pending.
 - `Consumer` reads either flavor into the same frame types; decoding views
   the inflated buffer without copying strings until a caller keeps one.
 - Benchmark `.json.z` against `.fb.z` over broadcasts x tiers: bytes after
@@ -35,8 +35,8 @@ does not clearly win, abandon the quest and report the numbers.
   crate docs (wire format) inline.
 
 Public API impact: additive on moq-stats unless the helper signatures change
-(dev). Wire impact: new on-demand tracks; the existing tracks are unchanged.
+(before the pending release). Wire impact: new on-demand tracks; the existing tracks are unchanged.
 
 ## Required
 
-- [Allocation-free tick](/quest/next/stats-binary/tick.md) - the reused report the encoder reads from
+- [Allocation-free tick](/quest/main/stats-binary/tick.md) - the reused report the encoder reads from

@@ -49,7 +49,7 @@ what a subscriber received and played, per audio and video. The relay is
     connection carries.
   `Merge` sums counters, leaves gauges out of the sum, and keeps the newest
   liveness pair.
-- The FlatBuffers flavor ([binary stats](/quest/next/stats-binary/README.md))
+- The FlatBuffers flavor ([binary stats](/quest/main/stats-binary/README.md))
   leaves an optional nested table for `E`. Either give `Ext` a FlatBuffers
   encoding, or have a non-`()` producer refuse `.fb.z` requests and document
   that. Whichever you choose, the contract must be explicit.

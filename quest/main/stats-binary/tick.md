@@ -10,7 +10,7 @@ table size, and the JSON flavors get cheaper too.
 
 ## Plan
 
-- Break `moq_net::stats::Registry::report()` on dev into
+- Break `moq_net::stats::Registry::report()` into
   `report(&self, &mut Report)`, which clears and refills the report's
   collections while keeping their capacity. There is no second method and no
   shim. Update every caller (relay, moq-stats, tests).
@@ -28,5 +28,6 @@ table size, and the JSON flavors get cheaper too.
   report before and after in the PR. The benchmark covers the `.fb.z`-ready
   path (registry to encoder input), not the moq-json encoders.
 
-Public API impact: breaking on moq-net (`Registry::report`); lands on dev.
+Public API impact: breaking on moq-net (`Registry::report`); lands on main
+before the pending breaking release.
 Wire impact: none.
