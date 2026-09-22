@@ -19,12 +19,11 @@ clock](/quest/dev/plan-av-clock.md).
 
 ## Plan
 
-Three quests: the survey and the written algorithm first, then one
-implementation per language against it. The two implementations are
-independent once the spec lands and may run in parallel. All three are
-additive and target `main`: the algorithm is a document, the native knob is a
-new field on a `#[non_exhaustive]` struct, and the browser estimator is a new
-module plus a new `spread` observation.
+Two quests: one implementation per language against the written algorithm.
+The two implementations are independent and may run in parallel. Both are
+additive and target `main`: the native knob is a new field on a
+`#[non_exhaustive]` struct, and the browser estimator is a new module plus a
+new `spread` observation.
 
 The algorithm is written down at `doc/concept/audio-jitter.md`, with a
 conformance corpus beside it that both implementations will read.
