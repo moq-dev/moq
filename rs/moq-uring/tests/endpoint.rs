@@ -240,7 +240,7 @@ fn unsupported_version_is_negotiated_only_by_servers() {
 	assert!(
 		versions
 			.iter()
-			.any(|version| noq_proto::DEFAULT_SUPPORTED_VERSIONS.contains(version)),
+			.any(|version| moq_noq_proto::DEFAULT_SUPPORTED_VERSIONS.contains(version)),
 		"the supported version is offered: {versions:?}"
 	);
 	drop((endpoint, dial_only));

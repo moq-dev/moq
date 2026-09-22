@@ -22,10 +22,6 @@ across ACK events. A new episode must get a new snapshot; real loss must
 still constrain sending. Cover ProbeRTT interaction and add regressions to
 the fork's CI. Keep the fix internal with no wire change.
 
-## Required
-
-- [Fork noq](/quest/next/quic/fork.md) - fixes and CI regressions land in moq-dev/noq
-
 ## Related
 
 - [Release BBR fixes](/quest/next/quic/bbr-release.md) - deliver the corrected controller to MoQ

@@ -106,4 +106,5 @@ when the GPU scaler fails. Everything under `frame::cuda` and `frame::vulkan`
 runs on the device or returns an error.
 
 `just rs vulkan-cuda` runs the opt-in native Vulkan/CUDA/NVENC hardware
-exercise.
+exercise, including a three-view 1280x720 workload that reports per-stage
+latency and CPU time.

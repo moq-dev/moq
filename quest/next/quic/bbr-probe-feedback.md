@@ -21,10 +21,6 @@ short-term response applies. Include application-limited feedback and
 ProbeRTT entry so neither leaves stale probe classification. Land these
 regressions in the fork's CI without changing public APIs or the wire.
 
-## Required
-
-- [Fork noq](/quest/next/quic/fork.md) - fixes and CI regressions land in moq-dev/noq
-
 ## Related
 
 - [Release BBR fixes](/quest/next/quic/bbr-release.md) - deliver the corrected controller to MoQ

@@ -6,7 +6,7 @@ use std::task::{Context, Poll};
 use std::time::Instant;
 
 use bytes::Bytes;
-use noq_proto::{ConnectionHandle, Dir, StreamId, VarInt};
+use moq_noq_proto::{ConnectionHandle, Dir, StreamId, VarInt};
 use rustc_hash::FxHashMap;
 
 use super::super::{Error, SEGMENT};
@@ -27,7 +27,7 @@ const TRAIN_SEGMENTS: usize = 63;
 /// operation can mutate the connection, drop that borrow, and then register a
 /// waiter without ever holding both.
 pub(crate) struct Inner {
-	pub(crate) conn: RefCell<noq_proto::Connection>,
+	pub(crate) conn: RefCell<moq_noq_proto::Connection>,
 	pub(crate) state: RefCell<State>,
 	/// The worker driving this connection, which anything layered on it
 	/// (the WebTransport handshake, say) runs on too.
@@ -333,7 +333,7 @@ pub(crate) fn launch(
 	socket: Rc<udp::Socket>,
 	endpoint: Weak<endpoint::Inner>,
 	key: ConnectionHandle,
-	conn: noq_proto::Connection,
+	conn: moq_noq_proto::Connection,
 ) -> (Shared, impl Future<Output = ()> + use<>) {
 	let shared = Rc::new(Inner {
 		conn: RefCell::new(conn),
@@ -373,7 +373,7 @@ pub(crate) async fn establish(shared: Shared) -> Result<Connection, Error> {
 		let conn = shared.conn.borrow();
 		conn.crypto_session()
 			.handshake_data()
-			.and_then(|data| data.downcast::<noq_proto::crypto::rustls::HandshakeData>().ok())
+			.and_then(|data| data.downcast::<moq_noq_proto::crypto::rustls::HandshakeData>().ok())
 			.and_then(|data| data.protocol)
 			.map(|proto| String::from_utf8_lossy(&proto).into_owned())
 	};
@@ -477,7 +477,7 @@ impl web_transport_trait::poll::Session for Connection {
 				Poll::Ready(Ok(()))
 			}
 			// The send queue is full; a flush frees space.
-			Err(noq_proto::SendDatagramError::Blocked(_)) => {
+			Err(moq_noq_proto::SendDatagramError::Blocked(_)) => {
 				let mut state = self.shared.state.borrow_mut();
 				waiter.register(&mut state.datagram_send_waiters);
 				Poll::Pending
@@ -525,7 +525,7 @@ impl web_transport_trait::poll::Session for Connection {
 		let (stats, path) = {
 			let mut conn = self.shared.conn.borrow_mut();
 			let stats = conn.stats();
-			let path = conn.path_stats(noq_proto::PathId::ZERO).unwrap_or_default();
+			let path = conn.path_stats(moq_noq_proto::PathId::ZERO).unwrap_or_default();
 			(stats, path)
 		};
 		Stats {
@@ -699,18 +699,18 @@ impl Driver {
 
 			let mut state = self.shared.state.borrow_mut();
 			match event {
-				noq_proto::Event::Connected => {
+				moq_noq_proto::Event::Connected => {
 					state.established = true;
 					state.establish_waiters.wake();
 				}
-				noq_proto::Event::ConnectionLost { reason } => state.fail(reason.into()),
-				noq_proto::Event::DatagramReceived => state.datagram_recv_waiters.wake(),
-				noq_proto::Event::DatagramsUnblocked => state.datagram_send_waiters.wake(),
-				noq_proto::Event::HandshakeDataReady => {}
-				noq_proto::Event::Stream(event) => sweep_stream(&mut state, event),
-				noq_proto::Event::HandshakeConfirmed
-				| noq_proto::Event::Path(_)
-				| noq_proto::Event::NatTraversal(_) => {}
+				moq_noq_proto::Event::ConnectionLost { reason } => state.fail(reason.into()),
+				moq_noq_proto::Event::DatagramReceived => state.datagram_recv_waiters.wake(),
+				moq_noq_proto::Event::DatagramsUnblocked => state.datagram_send_waiters.wake(),
+				moq_noq_proto::Event::HandshakeDataReady => {}
+				moq_noq_proto::Event::Stream(event) => sweep_stream(&mut state, event),
+				moq_noq_proto::Event::HandshakeConfirmed
+				| moq_noq_proto::Event::Path(_)
+				| moq_noq_proto::Event::NatTraversal(_) => {}
 			}
 		}
 	}
@@ -825,25 +825,25 @@ fn end(state: &mut State, id: StreamId, end: End) {
 }
 
 /// Apply one stream event to the parking tables.
-fn sweep_stream(state: &mut State, event: noq_proto::StreamEvent) {
+fn sweep_stream(state: &mut State, event: moq_noq_proto::StreamEvent) {
 	// Waking removes the entry: a still-interested poller re-registers on its
 	// next poll, so the maps only hold streams somebody is parked on.
 	match event {
-		noq_proto::StreamEvent::Opened { dir: Dir::Bi } => state.accept_bi_waiters.wake(),
-		noq_proto::StreamEvent::Opened { dir: Dir::Uni } => state.accept_uni_waiters.wake(),
-		noq_proto::StreamEvent::Available { .. } => state.open_waiters.wake(),
-		noq_proto::StreamEvent::Readable { id } => {
+		moq_noq_proto::StreamEvent::Opened { dir: Dir::Bi } => state.accept_bi_waiters.wake(),
+		moq_noq_proto::StreamEvent::Opened { dir: Dir::Uni } => state.accept_uni_waiters.wake(),
+		moq_noq_proto::StreamEvent::Available { .. } => state.open_waiters.wake(),
+		moq_noq_proto::StreamEvent::Readable { id } => {
 			if let Some(mut waiters) = state.readable.remove(&id) {
 				waiters.wake();
 			}
 		}
-		noq_proto::StreamEvent::Writable { id } => {
+		moq_noq_proto::StreamEvent::Writable { id } => {
 			if let Some(mut waiters) = state.writable.remove(&id) {
 				waiters.wake();
 			}
 		}
-		noq_proto::StreamEvent::Finished { id } => end(state, id, End::Delivered),
-		noq_proto::StreamEvent::Stopped { id, error_code } => {
+		moq_noq_proto::StreamEvent::Finished { id } => end(state, id, End::Delivered),
+		moq_noq_proto::StreamEvent::Stopped { id, error_code } => {
 			end(state, id, End::Stopped(error_code.into_inner()));
 			// A writer blocked on capacity has to learn it will never come.
 			if let Some(mut waiters) = state.writable.remove(&id) {
@@ -855,7 +855,7 @@ fn sweep_stream(state: &mut State, event: noq_proto::StreamEvent) {
 
 #[cfg(test)]
 mod tests {
-	use noq_proto::Side;
+	use moq_noq_proto::Side;
 
 	use super::*;
 

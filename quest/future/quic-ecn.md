@@ -33,7 +33,5 @@ per path and only an ACK without counts turns it off, so both `off` and
 
 ## Required
 
-- [Fork noq](/quest/next/quic/fork.md) - the `Ect1` option and the `off` knob
-  live there
 - [Measure ECN on the backbone](/quest/next/quic/ecn-measure.md) - the
   provider verdict this quest acts on

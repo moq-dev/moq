@@ -20,7 +20,7 @@ negotiated on any MoQ connection.
 The spike is small: call that setter, add a max-paths knob beside the other
 transport settings, and open a second path from the connect side. It rides
 entirely below the `web_transport_trait` line, because
-`web_transport_noq::Session` derefs to `noq::Connection` and the trait requires
+`web_transport_moq::Session` derefs to `noq::Connection` and the trait requires
 `Clone`, so the backend can hand one clone to moq-net and keep another to
 drive paths on. No trait change, no moq-net change, and none belongs there: a
 browser WebTransport backend could never implement it.
@@ -59,8 +59,3 @@ different name.
 
 Target `dev`, where the crate is `moq-tokio`; the rename has not reached
 `main`.
-
-## Related
-
-- [Fork noq](/quest/next/quic/fork.md) - noq's multipath support is one
-  reason it is the parent

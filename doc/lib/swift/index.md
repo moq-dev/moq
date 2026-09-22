@@ -85,6 +85,12 @@ divides the connection's send estimate; pass it to `encodeVideo` /
 `isShutdown` classify errors. `protocolError` is the structured protocol failure
 (scope, verbatim code, kind) when the peer sent one.
 
+`decodeVideo` picks the decoded CPU pixel layout: `VideoDecoderOutput.format`
+is `.i420` when unset, or `.rgba` for four bytes a pixel, and every frame
+repeats the layout it was decoded to. `resize` is best effort: only NVDEC has a
+built-in scaler, and VideoToolbox is not it, so read each frame's own `width`
+and `height` rather than assuming it took.
+
 - API reference: [Swift Package Index (DocC)](https://swiftpackageindex.com/moq-dev/moq-swift/documentation/moq)
 - Source: [`swift/`](https://github.com/moq-dev/moq/tree/main/swift); `just swift check` builds and tests on a Mac
 - Packages SPM resolves: [moq-dev/moq-swift](https://github.com/moq-dev/moq-swift), [moq-dev/moq-swift-ffi](https://github.com/moq-dev/moq-swift-ffi)

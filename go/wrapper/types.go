@@ -52,11 +52,11 @@ type (
 	// Video describes one catalog rendition, including whether the publisher recommends temporarily avoiding it.
 	Video = ffi.MoqVideo
 	// VideoHint supplies catalog fields a video stream can't reveal itself, such as bitrate, filling only the gaps.
-	// VideoDecodedFrame is one decoded video frame: packed I420, its dimensions, and a timestamp in microseconds.
-	VideoDecodedFrame = ffi.MoqVideoDecodedFrame
-	// VideoDecoderOutput configures what DecodeVideo delivers: an optional resize plus a max age.
-	VideoDecoderOutput = ffi.MoqVideoDecoderOutput
 	VideoHint = ffi.MoqVideoHint
+	// VideoDecodedFrame is one decoded video frame: packed pixels, the layout they are in, their dimensions, and a timestamp in microseconds.
+	VideoDecodedFrame = ffi.MoqVideoDecodedFrame
+	// VideoDecoderOutput configures what DecodeVideo delivers: an optional pixel format and resize, plus a max age.
+	VideoDecoderOutput = ffi.MoqVideoDecoderOutput
 	// AudioFormat is a single audio codec an importer can parse.
 	AudioFormat = ffi.MoqAudioFormat
 	// VideoFormat is a single video codec an importer can parse.
@@ -67,7 +67,7 @@ type (
 	VideoProperties = ffi.MoqVideoProperties
 	// VideoCodec identifies a published video track's codec: H.264 or H.265.
 	VideoCodec = ffi.MoqVideoCodec
-	// VideoPixelFormat is a raw pixel layout (I420 or RGBA) written to a VideoProducer.
+	// VideoPixelFormat is a CPU pixel layout (I420 or RGBA): written to a VideoProducer, or delivered by DecodeVideo.
 	VideoPixelFormat = ffi.MoqVideoPixelFormat
 	// VideoEncoderInput declares the pixel layout, resolution, and framerate of frames written to a video producer.
 	VideoEncoderInput = ffi.MoqVideoEncoderInput
@@ -184,7 +184,8 @@ func OpusAudioCodec() *AudioCodec {
 	return ffi.MoqAudioCodecOpus()
 }
 
-// VideoPixelFormat values: the raw pixel layout fed to the in-process encoder.
+// VideoPixelFormat values: the raw pixel layout fed to the in-process encoder,
+// and the one the in-process decoder delivers.
 const (
 	// VideoPixelFormatI420 is tightly-packed planar I420: Y, then U, then V.
 	VideoPixelFormatI420 = ffi.MoqVideoPixelFormatI420

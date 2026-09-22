@@ -10,8 +10,8 @@
 #
 # It stands up a moq-relay, then for each publisher language publishes an H.264
 # broadcast and confirms every subscriber sees data flowing before the timeout.
-# The browser also verifies rendered WebCodecs output, player pause/resume, and
-# audio when paired with the browser publisher.
+# Every publisher but the Rust CLI also carries audio. The browser subscriber
+# verifies rendered WebCodecs output, player pause/resume, and that audio.
 set -euo pipefail
 
 SMOKE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -488,8 +488,8 @@ run_subscriber() {
             # moqsrc exposes each rendition as a Sometimes pad (video_%u / audio_%u),
             # named so the first of each kind is always video_0 / audio_0. Link
             # video_0 by name: a bare `moqsrc ! filesink` would take whichever pad
-            # appears first, so a publisher with audio (the browser) could pass this
-            # cell on audio bytes without video ever flowing. We grab one byte, the
+            # appears first, so a publisher with audio (every one but the Rust CLI)
+            # could pass this cell on audio bytes without video ever flowing. We grab one byte, the
             # same "bytes moved" bar as the rust subscriber (no decode). head closing
             # the pipe SIGPIPEs gst-launch, so success returns at once; no data just
             # runs out the timeout. Our plugin dir rides on top of the system path
@@ -506,9 +506,10 @@ run_subscriber() {
             ;;
         js)
             # Headless Chromium decodes and renders via WebCodecs, then drives
-            # the real player's pause/resume controls. Browser publishers also
-            # provide fake microphone input, so validate audio in that cell.
-            if [[ "$publisher" == "js" ]]; then
+            # the real player's pause/resume controls. Every publisher but the
+            # Rust CLI carries audio (the browser from a fake microphone, the
+            # FFI clients from a synthetic Opus tone), so validate audio there.
+            if [[ "$publisher" != "rust" ]]; then
                 (cd "$CLIENTS/js" && bun driver.ts subscribe \
                     --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT" --expect-audio)
             else

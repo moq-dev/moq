@@ -27,10 +27,6 @@ controller simulations and add regressions to the fork's CI. Coordinate
 with packet identity work if the callback contract changes; settle the API
 with the maintainer and update its consumers and docs in the same PR.
 
-## Required
-
-- [Fork noq](/quest/next/quic/fork.md) - fixes and CI regressions land in moq-dev/noq
-
 ## Related
 
 - [Release BBR fixes](/quest/next/quic/bbr-release.md) - deliver the corrected controller to MoQ

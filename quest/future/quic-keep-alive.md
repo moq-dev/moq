@@ -32,7 +32,3 @@ vars; NAT-sensitive deployments keep it as the new maximum, documented in
 Tests: an idle connection survives an idle timeout with exactly one PING per
 period; a busy connection sends none; a lost PING is probed before the
 deadline; the maximum knob shortens the period.
-
-## Required
-
-- [Fork noq](/quest/next/quic/fork.md) - the timer change lives there

@@ -139,6 +139,10 @@ moq-loc = { version = "0.2.8", path = "rs/moq-loc" }
 moq-msf = { version = "0.4.2", path = "rs/moq-msf" }
 moq-mux = { version = "0.9.16", path = "rs/moq-mux" }
 moq-net = { version = "0.2.22", path = "rs/moq-net" }
+# The MoQ fork of noq (moq-dev/noq). iroh keeps upstream noq, so a build with the
+# iroh feature carries both stacks.
+moq-noq-proto = { version = "1.3", default-features = false }
+moq-noq-udp = "1.3"
 # NVENC bindings, forked from ViliamVadocz/nvidia-video-codec-sdk to dlopen the
 # driver at runtime. Compiles on any platform (macOS included) but only actually
 # used by moq-video on Linux.
@@ -171,8 +175,8 @@ moq-vaapi = "0.0.4"
 # that argument, so moq-ffi and libmoq opt NVIDIA, OpenH264, and VAAPI back in.
 moq-video = { version = "0.0.25", path = "rs/moq-video", default-features = false }
 nix = { version = "0.31.3", features = ["net", "socket", "uio"] }
+# Upstream noq-proto, only for iroh's controller factory types.
 noq-proto = { version = "1.2", default-features = false }
-noq-udp = "1.1.1"
 num_enum = "0.7"
 objc2 = "0.6.4"
 objc2-av-foundation = "0.3.2"
@@ -215,8 +219,8 @@ web-async = { version = "0.1.5", features = ["tracing"] }
 web-transport-iroh = "0.7"
 # default-features off so the QUIC crypto provider is chosen by moq-tokio's
 # aws-lc-rs / ring features.
-# 0.3 for the `qlog` passthrough feature moq-tokio's `qlog` forwards to.
-web-transport-noq = { version = "0.3", default-features = false }
+# The WebTransport adapter released with moq-noq, from the same repository.
+web-transport-moq = { version = "1.3", default-features = false }
 web-transport-proto = "0.6"
 web-transport-trait = "0.4"
 web-transport-wasm = "0.6"

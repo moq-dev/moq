@@ -1830,6 +1830,114 @@ async fn video_raw_publish_consume() {
 	broadcast.finish().unwrap();
 }
 
+/// The decode side picks its CPU pixel layout: an unset `format` delivers I420,
+/// and RGBA delivers `width * height * 4` bytes, with each frame naming the
+/// layout it was decoded to.
+#[cfg(feature = "video")]
+#[tokio::test]
+async fn video_decode_format() {
+	use crate::video::*;
+
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let broadcast = create_announced(&origin, "video-decode-format");
+
+	let video = broadcast
+		.encode_video(
+			MoqVideoEncoderInput {
+				format: MoqVideoPixelFormat::Rgba,
+				width: 320,
+				height: 240,
+				framerate: 30,
+			},
+			MoqVideoEncoderOutput {
+				codec: MoqVideoCodec::H264,
+				track: Some("camera".into()),
+				bitrate: None,
+				gop: None,
+				// Software both ways so the test is deterministic everywhere.
+				kind: MoqVideoEncoderKind::Software,
+			},
+			None,
+		)
+		.unwrap();
+
+	// Seed the track so a subscriber joining below lands on encoded media.
+	let rgba = vec![0x80u8; 320 * 240 * 4];
+	video.cut().unwrap();
+	for i in 0..10u64 {
+		video
+			.write(MoqVideoFrame {
+				timestamp_us: i * 33_333,
+				data: rgba.clone(),
+			})
+			.unwrap();
+	}
+
+	let consumer = origin.consume();
+	let broadcast_consumer = await_announced(&consumer, "video-decode-format").await;
+	let catalog_consumer = broadcast_consumer.subscribe_catalog().await.unwrap();
+	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+		.await
+		.expect("timed out")
+		.unwrap()
+		.expect("expected catalog");
+	let (track, rendition) = catalog.video.iter().next().unwrap();
+
+	// Two subscribers over one publication, so the same encoded frames are read
+	// twice and only the requested layout differs.
+	let i420 = broadcast_consumer
+		.decode_video(track.clone(), rendition.clone(), MoqVideoDecoderOutput::default())
+		.await
+		.unwrap();
+	let rgba_out = broadcast_consumer
+		.decode_video(
+			track.clone(),
+			rendition.clone(),
+			MoqVideoDecoderOutput {
+				format: Some(MoqVideoPixelFormat::Rgba),
+				..Default::default()
+			},
+		)
+		.await
+		.unwrap();
+
+	// Keep the encoder fed so both decoders see frames after they joined.
+	for i in 10..40u64 {
+		video
+			.write(MoqVideoFrame {
+				timestamp_us: i * 33_333,
+				data: rgba.clone(),
+			})
+			.unwrap();
+	}
+
+	let frame = tokio::time::timeout(TIMEOUT, i420.next())
+		.await
+		.expect("timed out")
+		.unwrap()
+		.expect("expected an I420 frame");
+	assert!(matches!(frame.format, MoqVideoPixelFormat::I420));
+	assert_eq!(frame.data.len(), frame.width as usize * frame.height as usize * 3 / 2);
+
+	let frame = tokio::time::timeout(TIMEOUT, rgba_out.next())
+		.await
+		.expect("timed out")
+		.unwrap()
+		.expect("expected an RGBA frame");
+	assert!(matches!(frame.format, MoqVideoPixelFormat::Rgba));
+	assert_eq!(frame.data.len(), frame.width as usize * frame.height as usize * 4);
+	// Every fourth byte is alpha, so an opaque frame proves the conversion ran rather than handing back planes.
+	assert!(
+		frame.data.chunks_exact(4).all(|px| px[3] == 0xFF),
+		"RGBA output should be opaque"
+	);
+
+	i420.cancel();
+	rgba_out.cancel();
+	video.finish().unwrap();
+	broadcast.finish().unwrap();
+}
+
 /// Regression: a `MoqVideoProducer` is shared, so its calls land on whichever
 /// thread the caller is on, and none of them need be the thread that published.
 /// Holding a bare `Encoder` made that unsound on Windows, where the codec's COM

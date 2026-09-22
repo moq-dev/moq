@@ -14,8 +14,10 @@ It stands up a `moq-relay`, then for each publisher language publishes an H.264
 broadcast and confirms every subscriber sees data flowing before the timeout.
 Most subscribers check for a non-empty frame. The browser additionally verifies
 WebCodecs output painted to a canvas and drives the player's pause/resume controls.
-The browser publisher also sends fake microphone audio, which the browser
-subscriber checks end-to-end.
+Every publisher but the Rust CLI also carries an Opus track, which the browser
+subscriber checks end-to-end: the browser encodes fake microphone audio, and the
+Python and Go clients encode a synthetic tone through `moq-ffi` at a 2.5 ms frame
+duration, so the matrix covers the FFI audio path with a non-default codec config.
 
 `just test smoke-media` is a separate, browser-only run that asks a harder
 question: is the media a viewer gets actually advancing and in sync, and does the
@@ -25,10 +27,10 @@ player survive the publication lifecycle. See [Media QA](#media-qa).
 
 | Client | Source under test | Built with | Roles |
 |---|---|---|---|
-| Rust | `rs/moq-relay` + `rs/moq-cli` | `cargo build` | publish + subscribe |
-| Python | `py/moq-rs` (+ `rs/moq-ffi`, import `moq`) | `just py build` (maturin editable into `.venv`) | publish + subscribe |
-| Go | `go/wrapper` (+ `rs/moq-ffi`, import `moq-go/moq`) | `go/scripts/stage.sh` (uniffi-bindgen-go) + `go build` | publish + subscribe |
-| Browser | `js/watch` + `js/publish` | `vite build` + headless Chromium (Playwright) | audio/video publish + rendered playback |
+| Rust | `rs/moq-relay` + `rs/moq-cli` | `cargo build` | publish (video) + subscribe |
+| Python | `py/moq-rs` (+ `rs/moq-ffi`, import `moq`) | `just py build` (maturin editable into `.venv`) | publish (video + audio) + subscribe |
+| Go | `go/wrapper` (+ `rs/moq-ffi`, import `moq-go/moq`) | `go/scripts/stage.sh` (uniffi-bindgen-go) + `go build` | publish (video + audio) + subscribe |
+| Browser | `js/watch` + `js/publish` | `vite build` + headless Chromium (Playwright) | publish (video + audio) + rendered playback |
 | Native JS | `js/net` + `js/hang` + the npm `@moq/web-transport` polyfill | `node` (tsx) and `bun` | subscribe |
 | C | `rs/libmoq` | `cargo build -p libmoq` + `cc` | subscribe |
 | GStreamer | `rs/moq-gst` (`moqsrc`) | `cargo build -p moq-gst` + `gst-launch-1.0` | subscribe |

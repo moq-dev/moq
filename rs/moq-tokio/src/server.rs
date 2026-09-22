@@ -237,7 +237,7 @@ pub struct Server {
 #[cfg(feature = "noq")]
 pub(crate) struct SocketRetainer {
 	#[cfg(feature = "noq")]
-	noq: Option<web_transport_noq::noq::Endpoint>,
+	noq: Option<web_transport_moq::noq::Endpoint>,
 }
 
 impl Server {
@@ -1049,7 +1049,7 @@ type PendingRequest<S> = moq_net::server::Handshake<S>;
 
 pub(crate) enum RequestKind {
 	#[cfg(feature = "noq")]
-	Noq(Box<PendingRequest<crate::transport::Session<web_transport_noq::Session>>>),
+	Noq(Box<PendingRequest<crate::transport::Session<web_transport_moq::Session>>>),
 	#[cfg(feature = "iroh")]
 	Iroh(Box<PendingRequest<crate::transport::Session<web_transport_iroh::Session>>>),
 	#[cfg(any(feature = "tcp", all(feature = "uds", unix), feature = "websocket"))]

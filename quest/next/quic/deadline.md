@@ -43,7 +43,6 @@ raises loss or latency under any profile stays off by default.
 
 ## Required
 
-- [Fork noq](/quest/next/quic/fork.md) - the change lives there
 - [Hierarchical stream scheduling](/quest/next/quic/scheduler.md) - the
   scheduler decides which stream's data a probe carries
 

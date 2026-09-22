@@ -514,7 +514,7 @@ impl Route {
 
 static NEXT_CONSUMER_ID: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct ConsumerId(u64);
 
 impl ConsumerId {
@@ -805,6 +805,10 @@ struct TableCursor {
 	root: PathOwned,
 	/// The absolute patterns this cursor is scoped to (its token / scope).
 	allowed: Patterns,
+	/// Where the cursor hangs in the [`RouteTable`]: the literal heads of
+	/// `allowed`. A route the cursor can see sits at or under one of them, or on
+	/// the walk down to one.
+	heads: Vec<PathOwned>,
 	/// Skip routes whose hop chain or announcing session (`via`) is this peer
 	/// (control-plane split horizon).
 	exclude: Option<Hop>,
@@ -1211,15 +1215,16 @@ impl Producer {
 	/// Fails with [`Error::Unauthorized`] if `path` is outside the prefixes this
 	/// producer may publish under (after [`scope`](Self::scope)),
 	/// [`Error::BoundsExceeded`] if the full rooted path exceeds
-	/// [`Path::MAX_PARTS`] or holds a segment no pattern can spell (`*` or `**`),
-	/// or [`Error::Closed`] once the origin's [`Driver`] has been dropped.
+	/// [`Path::MAX_PARTS`], [`Error::InvalidPath`] if it holds a segment no
+	/// pattern can spell (`*` or `**`), or [`Error::Closed`] once the origin's
+	/// [`Driver`] has been dropped.
 	pub fn create_broadcast(&self, path: impl AsPath) -> Result<broadcast::Producer, Error> {
 		let path = path.as_path();
 
 		// Held across the whole attach: the driver's teardown sets `closed` under
 		// this lock, so a create either completes before the teardown (whose walk
 		// then cleans the entry up) or observes `closed` here and fails.
-		let mut lifecycle = self.shared.lock();
+		let lifecycle = self.shared.lock();
 		if lifecycle.closed {
 			return Err(Error::Closed);
 		}
@@ -1242,7 +1247,7 @@ impl Producer {
 		}
 		// A path only a pattern could spell (a `*` segment) advertises nowhere, so
 		// refuse it here rather than publish a broadcast no cursor can see.
-		let claim = prefix_claim(&full).map_err(|_| BoundsExceeded)?;
+		let claim = prefix_claim(&full)?;
 
 		// Resolve the ingress counters once, keyed by the absolute broadcast path.
 		let ingress = self.stats.ingress(&full);
@@ -1298,8 +1303,8 @@ impl Producer {
 			id,
 		}));
 		// A local broadcast changes what the exact path resolves to, so a requester
-		// parked on the route table (see `routed_broadcast`) retries.
-		lifecycle.generation += 1;
+		// parked on it (see `routed_broadcast`) retries.
+		lifecycle.routes.poke_at(&full);
 		drop(lifecycle);
 
 		Ok(source)
@@ -1456,7 +1461,7 @@ impl Announcing {
 		if requested.parts().count() > Path::MAX_PARTS {
 			return Err(BoundsExceeded.into());
 		}
-		let claim = prefix_claim(&requested).map_err(|_| BoundsExceeded)?;
+		let claim = prefix_claim(&requested)?;
 		if !producer.scope.allowed.overlaps(&claim) {
 			return Err(Error::Unauthorized);
 		}
@@ -1485,12 +1490,11 @@ impl Announcing {
 			return Err(Error::Closed);
 		}
 
-		let mut ids = Vec::with_capacity(self.prefixes.len());
+		let mut entries = Vec::with_capacity(self.prefixes.len());
 		for (prefix, claim) in &self.prefixes {
 			let id = shared.next_route;
 			shared.next_route += 1;
-			shared.generation += 1;
-			shared.routes.push(RouteEntry {
+			shared.routes.insert(RouteEntry {
 				id,
 				prefix: prefix.clone(),
 				scope: self.scope.clone(),
@@ -1502,7 +1506,7 @@ impl Announcing {
 				claim: claim.clone(),
 			});
 			shared.sync_route(prefix, claim);
-			ids.push(id);
+			entries.push((prefix.clone(), id));
 		}
 		drop(shared);
 
@@ -1511,7 +1515,7 @@ impl Announcing {
 
 		Ok(AnnounceProducer {
 			shared: self.shared.clone(),
-			ids,
+			entries,
 			_guard: guard,
 		})
 	}
@@ -1555,9 +1559,9 @@ impl Announcer {
 #[must_use = "dropping an announcement retracts the route"]
 pub(crate) struct AnnounceProducer {
 	shared: kio::Shared<OriginState>,
-	/// The table entries this advertisement created. A prefix remains unchanged;
-	/// pattern scopes only filter its visibility and requests.
-	ids: Vec<u64>,
+	/// The table entries this advertisement created, by prefix and id. A prefix
+	/// remains unchanged; pattern scopes only filter its visibility and requests.
+	entries: Vec<(PathOwned, u64)>,
 	/// Ingress announce stats guard, held for the advertisement's lifetime.
 	_guard: stats::Announce,
 }
@@ -1575,17 +1579,16 @@ impl AnnounceProducer {
 		if shared.closed {
 			return Err(Error::Closed);
 		}
-		for id in &self.ids {
+		for (prefix, id) in &self.entries {
 			// Each entry keeps its advertised prefix; only the metadata moves.
-			let Some(entry) = shared.routes.iter_mut().find(|entry| entry.id == *id) else {
+			let Some(entry) = shared.routes.entry_mut(prefix, *id) else {
 				continue;
 			};
 			entry.hops = route.hops.clone();
 			entry.cost = route.cost;
 			entry.via = route.via;
-			let (prefix, claim) = (entry.prefix.clone(), entry.claim.clone());
-			shared.generation += 1;
-			shared.sync_route(&prefix, &claim);
+			let claim = entry.claim.clone();
+			shared.sync_route(prefix, &claim);
 		}
 		Ok(())
 	}
@@ -1594,12 +1597,10 @@ impl AnnounceProducer {
 	/// waiting on its queue. Idempotent, and what dropping the advertisement does.
 	fn retract(&self) {
 		let mut shared = self.shared.lock();
-		for id in &self.ids {
-			let Some(index) = shared.routes.iter().position(|entry| entry.id == *id) else {
+		for (prefix, id) in &self.entries {
+			let Some(entry) = shared.routes.remove(prefix, *id) else {
 				continue;
 			};
-			let entry = shared.routes.swap_remove(index);
-			shared.generation += 1;
 			// Reject anything still waiting on this route's server; a request
 			// already handed to the handler resolves through its own `Request`.
 			if let Some(server) = &entry.server {
@@ -1706,7 +1707,13 @@ impl DriverState {
 		let (servers, cursors, fronts) = {
 			let mut shared = self.shared.lock();
 			shared.closed = true;
-			let servers: Vec<_> = shared.routes.iter().filter_map(|entry| entry.server.clone()).collect();
+			// Fronts and parked requesters observe `closed` on their next pass.
+			shared.routes.poke_all();
+			let servers: Vec<_> = shared
+				.routes
+				.entries()
+				.filter_map(|entry| entry.server.clone())
+				.collect();
 			let cursors: Vec<_> = shared.cursors.values().map(|cursor| cursor.state.clone()).collect();
 			let fronts: Vec<_> = shared.fronts.values().map(|front| front.request.clone()).collect();
 			(servers, cursors, fronts)
@@ -2511,6 +2518,8 @@ struct RemoteFrontTask {
 	path: PathOwned,
 	/// The requesters' split-horizon exclusion, applied to every (re)selection.
 	exclude: Option<Hop>,
+	/// Wakes the front when a route covering its path changes.
+	watch: Watch,
 	/// Resolves the requesters parked on the front's channel.
 	request: kio::Producer<PendingBroadcast>,
 	tasks: TasksWeak,
@@ -2531,6 +2540,7 @@ async fn run_remote_front(task: RemoteFrontTask) {
 		broadcast,
 		path,
 		exclude,
+		watch,
 		request,
 		tasks,
 		timers,
@@ -2543,10 +2553,8 @@ async fn run_remote_front(task: RemoteFrontTask) {
 		Resolved(Result<broadcast::Consumer, Error>),
 		/// The attached source closed.
 		SourceDead,
-		/// The route table changed in a way the decision below cares about.
+		/// A route covering the path changed, or the origin tore down.
 		Table,
-		/// The origin tore down.
-		Closed,
 	}
 
 	let mut front = FrontDriver {
@@ -2570,21 +2578,20 @@ async fn run_remote_front(task: RemoteFrontTask) {
 		// Decide what the table means for us, then fire at most one upstream
 		// request. Locks are sequential, never nested: the table's, then the
 		// chosen route's queue.
-		// What the wait below compares table changes against: the qualifying
-		// route this pass decided on, recomputed identically by the wait's
-		// predicate so only a table change that would alter the decision wakes it.
-		let decided;
+		// The watch generation this decision saw; the wait below sleeps until the
+		// covering routes move past it.
+		let seen;
 		let fire = {
 			let table = shared.read();
 			if table.closed {
 				break 'run;
 			}
-			refused.retain(|id| table.routes.iter().any(|entry| entry.id == *id));
+			seen = watch.seen();
+			refused.retain(|id| table.routes.covers(&path.as_path(), *id));
 			let best = match front.identity.routable() {
 				true => table.best_route(&path.as_path(), exclude, front.identity.pin(), &refused),
 				false => None,
 			};
-			decided = best.map(|entry| entry.id);
 			let serving_route = front.serving.as_ref().map(|(_, route, _)| *route);
 			match best {
 				// The serving route is still the best qualifying one.
@@ -2662,9 +2669,6 @@ async fn run_remote_front(task: RemoteFrontTask) {
 			}
 		}
 
-		let pin = front.identity.pin();
-		let routable = front.identity.routable();
-
 		let step = kio::wait(|waiter| {
 			if let Poll::Ready((name, resume)) = front.broadcast.poll_spliced_assigned(waiter) {
 				return Poll::Ready(Step::Serve(name, resume));
@@ -2689,29 +2693,10 @@ async fn run_remote_front(task: RemoteFrontTask) {
 				return Poll::Ready(Step::SourceDead);
 			}
 
-			match shared.poll(waiter, |table| {
-				if table.closed {
-					return Poll::Ready(());
-				}
-				let best = match routable {
-					true => table.best_route(&path.as_path(), exclude, pin, &refused).map(|e| e.id),
-					false => None,
-				};
-				match best == decided {
-					true => Poll::Pending,
-					false => Poll::Ready(()),
-				}
-			}) {
-				Poll::Ready(table) => {
-					let closed = table.closed;
-					drop(table);
-					Poll::Ready(match closed {
-						true => Step::Closed,
-						false => Step::Table,
-					})
-				}
-				Poll::Pending => Poll::Pending,
-			}
+			// Only a change to a route covering this path can alter the decision
+			// above, and only those poke the watch: an unrelated announcement
+			// never wakes this front.
+			watch.poll_changed(waiter, seen).map(|()| Step::Table)
 		})
 		.await;
 
@@ -2730,7 +2715,7 @@ async fn run_remote_front(task: RemoteFrontTask) {
 					// table tells them apart: an `Unroutable` from a route that
 					// still stands is the handler's answer, and re-asking it
 					// would spin forever.
-					Err(Error::Unroutable) if !shared.lock().routes.iter().any(|entry| entry.id == route) => {
+					Err(Error::Unroutable) if !shared.lock().routes.covers(&path.as_path(), route) => {
 						last_err = Some(Error::Unroutable);
 					}
 					// An authoritative refusal of the path. It ends a front with
@@ -2753,7 +2738,6 @@ async fn run_remote_front(task: RemoteFrontTask) {
 				last_err = Some(Error::Dropped);
 			}
 			Step::Table => {}
-			Step::Closed => break 'run,
 		}
 	}
 
@@ -2839,6 +2823,314 @@ impl FrontDriver {
 	}
 }
 
+/// The announced routes, keyed by prefix: a trie with one node per path
+/// segment. Every question about a path walks its segments, so the cost of an
+/// announcement, a cursor registration, or a request is bounded by the tree
+/// around that path and never by the size of the table.
+#[derive(Default)]
+struct RouteTable {
+	root: RouteNode,
+}
+
+/// One prefix in the [`RouteTable`]: what is announced exactly there, which
+/// cursors hang there, and the prefixes one segment below.
+#[derive(Default)]
+struct RouteNode {
+	/// Routes announced exactly at this prefix.
+	entries: Vec<RouteEntry>,
+	/// Cursors with an interest head at this prefix (see [`interest_prefixes`]).
+	cursors: Vec<ConsumerId>,
+	/// Cursors at this node or below. An announcement walks only the subtrees
+	/// that hold one, so a deep table of routes nobody watches costs nothing.
+	cursors_below: usize,
+	/// Who is waiting on the routes covering this prefix: the fronts serving it
+	/// and the requesters parked on it (see [`Watch`]).
+	watches: Vec<(u64, kio::Producer<Watched>)>,
+	/// Watches at this node or below, so a route change walks only the subtrees
+	/// holding one.
+	watches_below: usize,
+	children: HashMap<String, RouteNode>,
+}
+
+/// What a [`Watch`] observes: bumped by every change to a route covering its
+/// path, a local broadcast attaching at the path, and the origin's teardown.
+#[derive(Default)]
+struct Watched {
+	generation: u64,
+}
+
+/// A registration in the route table for changes to the routes covering one
+/// path. The table pokes it; the holder waits on it, so an announcement wakes
+/// only the fronts and requesters it can affect rather than every one of them.
+/// Dropping it unregisters, which takes the table lock: never drop one while
+/// holding it.
+struct Watch {
+	shared: kio::Shared<OriginState>,
+	path: PathOwned,
+	id: u64,
+	signal: kio::Consumer<Watched>,
+}
+
+impl Watch {
+	/// The generation to wait past with [`Self::poll_changed`]. Read under the
+	/// table lock, alongside the decision it guards, so a poke between the two
+	/// cannot be missed: a poke takes that same lock first.
+	fn seen(&self) -> u64 {
+		self.signal.read().generation
+	}
+
+	/// Ready once the routes covering the path moved past `seen`.
+	fn poll_changed(&self, waiter: &kio::Waiter, seen: u64) -> Poll<()> {
+		self.signal
+			.poll(waiter, |watched| match watched.generation != seen {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			})
+			.map(|_| ())
+	}
+}
+
+impl Drop for Watch {
+	fn drop(&mut self) {
+		self.shared.lock().routes.remove_watch(&self.path, self.id);
+	}
+}
+
+/// What a registration adds to the subtree counts on its walk.
+#[derive(Clone, Copy)]
+struct Below {
+	cursors: usize,
+	watches: usize,
+}
+
+impl Below {
+	const NONE: Self = Self { cursors: 0, watches: 0 };
+	const CURSOR: Self = Self { cursors: 1, watches: 0 };
+	const WATCH: Self = Self { cursors: 0, watches: 1 };
+}
+
+impl RouteNode {
+	/// Nothing here and nothing below: the node can be pruned.
+	fn is_empty(&self) -> bool {
+		self.entries.is_empty() && self.cursors.is_empty() && self.watches.is_empty() && self.children.is_empty()
+	}
+
+	/// The node `parts` below this one, if the table has it.
+	fn find<'a>(&self, mut parts: impl Iterator<Item = &'a str>) -> Option<&Self> {
+		match parts.next() {
+			None => Some(self),
+			Some(part) => self.children.get(part)?.find(parts),
+		}
+	}
+
+	/// The node `parts` below this one, created along the way when missing.
+	/// `below` is added to the subtree counts at every node on the walk.
+	fn reach<'a>(&mut self, mut parts: impl Iterator<Item = &'a str>, below: Below) -> &mut Self {
+		self.cursors_below += below.cursors;
+		self.watches_below += below.watches;
+		match parts.next() {
+			None => self,
+			Some(part) => self.children.entry(part.to_string()).or_default().reach(parts, below),
+		}
+	}
+
+	/// Run `f` on the node `parts` below this one, then prune every node the
+	/// edit emptied. `below` is subtracted from the subtree counts at every node
+	/// on the walk. `None` when the node does not exist, leaving the table as is.
+	fn edit<'a, R>(
+		&mut self,
+		mut parts: impl Iterator<Item = &'a str>,
+		below: Below,
+		f: impl FnOnce(&mut Self) -> R,
+	) -> Option<R> {
+		let result = match parts.next() {
+			None => f(self),
+			Some(part) => {
+				let child = self.children.get_mut(part)?;
+				let result = child.edit(parts, below, f)?;
+				if child.is_empty() {
+					self.children.remove(part);
+				}
+				result
+			}
+		};
+		self.cursors_below -= below.cursors;
+		self.watches_below -= below.watches;
+		Some(result)
+	}
+
+	/// Wake the watches at this node.
+	fn poke(&self) {
+		for (_, watch) in &self.watches {
+			if let Ok(mut watched) = watch.write() {
+				watched.generation += 1;
+			}
+		}
+	}
+
+	/// Wake the watches at this node and below: a route here covers every one
+	/// of their paths. Skips subtrees holding none.
+	fn poke_below(&self) {
+		if self.watches_below == 0 {
+			return;
+		}
+		self.poke();
+		for child in self.children.values() {
+			child.poke_below();
+		}
+	}
+
+	/// Visit this node and everything below it.
+	fn walk<'a>(&'a self, visit: &mut impl FnMut(&'a Self)) {
+		visit(self);
+		for child in self.children.values() {
+			child.walk(visit);
+		}
+	}
+
+	/// Collect the cursors at this node and below, skipping subtrees with none.
+	fn collect_cursors(&self, out: &mut Vec<ConsumerId>) {
+		if self.cursors_below == 0 {
+			return;
+		}
+		out.extend(&self.cursors);
+		for child in self.children.values() {
+			child.collect_cursors(out);
+		}
+	}
+}
+
+impl RouteTable {
+	/// The nodes above `path` and the node at it, as far as the table has them.
+	/// The entries of those nodes are exactly the routes covering `path`.
+	fn split(&self, path: &Path) -> (Vec<&RouteNode>, Option<&RouteNode>) {
+		let mut above = Vec::new();
+		let mut node = &self.root;
+		for part in path.parts() {
+			above.push(node);
+			match node.children.get(part) {
+				Some(child) => node = child,
+				None => return (above, None),
+			}
+		}
+		(above, Some(node))
+	}
+
+	/// The routes covering `path`: those announced at it and at every prefix of it.
+	fn covering(&self, path: &Path) -> impl Iterator<Item = &RouteEntry> {
+		let (above, at) = self.split(path);
+		above.into_iter().chain(at).flat_map(|node| node.entries.iter())
+	}
+
+	/// Whether the route `id` still covers `path`.
+	fn covers(&self, path: &Path, id: u64) -> bool {
+		self.covering(path).any(|entry| entry.id == id)
+	}
+
+	/// The routes announced exactly at `prefix`.
+	fn at(&self, prefix: &Path) -> impl Iterator<Item = &RouteEntry> {
+		self.root
+			.find(prefix.parts())
+			.into_iter()
+			.flat_map(|node| node.entries.iter())
+	}
+
+	/// Every route in the table, for the teardown.
+	fn entries(&self) -> impl Iterator<Item = &RouteEntry> {
+		let mut nodes = Vec::new();
+		self.root.walk(&mut |node| nodes.push(node));
+		nodes.into_iter().flat_map(|node| node.entries.iter())
+	}
+
+	/// Add a route at its prefix, creating the nodes down to it.
+	fn insert(&mut self, entry: RouteEntry) {
+		let node = self.root.reach(entry.prefix.parts(), Below::NONE);
+		node.entries.push(entry);
+	}
+
+	/// The route `id` announced at `prefix`, for a re-price in place.
+	fn entry_mut(&mut self, prefix: &Path, id: u64) -> Option<&mut RouteEntry> {
+		let mut node = &mut self.root;
+		for part in prefix.parts() {
+			node = node.children.get_mut(part)?;
+		}
+		node.entries.iter_mut().find(|entry| entry.id == id)
+	}
+
+	/// Take the route `id` out of `prefix`, pruning the nodes it leaves empty.
+	fn remove(&mut self, prefix: &Path, id: u64) -> Option<RouteEntry> {
+		self.root
+			.edit(prefix.parts(), Below::NONE, |node| {
+				let index = node.entries.iter().position(|entry| entry.id == id)?;
+				Some(node.entries.swap_remove(index))
+			})
+			.flatten()
+	}
+
+	/// Hang a cursor at one of its heads, counting it down the walk.
+	fn add_cursor(&mut self, head: &Path, id: ConsumerId) {
+		self.root.reach(head.parts(), Below::CURSOR).cursors.push(id);
+	}
+
+	/// Take a cursor off one of its heads, pruning the nodes it leaves empty. Only
+	/// ever called for a head the cursor was added at, or the counts drift.
+	fn remove_cursor(&mut self, head: &Path, id: ConsumerId) {
+		self.root.edit(head.parts(), Below::CURSOR, |node| {
+			node.cursors.retain(|cursor| *cursor != id)
+		});
+	}
+
+	/// Register a watch on the routes covering `path`; see [`Watch`].
+	fn add_watch(&mut self, path: &Path, id: u64) -> kio::Consumer<Watched> {
+		let producer = kio::Producer::<Watched>::default();
+		let consumer = producer.consume();
+		self.root.reach(path.parts(), Below::WATCH).watches.push((id, producer));
+		consumer
+	}
+
+	/// Take a watch off its path, pruning the nodes it leaves empty. Only ever
+	/// called for a path the watch was added at, or the counts drift.
+	fn remove_watch(&mut self, path: &Path, id: u64) {
+		self.root.edit(path.parts(), Below::WATCH, |node| {
+			node.watches.retain(|(watch, _)| *watch != id)
+		});
+	}
+
+	/// Wake the watches of every path a route at `prefix` covers.
+	fn poke_below(&self, prefix: &Path) {
+		if let (_, Some(node)) = self.split(prefix) {
+			node.poke_below();
+		}
+	}
+
+	/// Wake the watches of exactly `path`: a local broadcast attached there.
+	fn poke_at(&self, path: &Path) {
+		if let Some(node) = self.root.find(path.parts()) {
+			node.poke();
+		}
+	}
+
+	/// Wake every watch: the origin is tearing down.
+	fn poke_all(&self) {
+		self.root.walk(&mut |node| node.poke());
+	}
+
+	/// The cursors a route at `prefix` can present on: a cursor sees a route
+	/// only when one of its heads is on the walk down to the prefix or somewhere
+	/// beneath it, so those are the only cursors visited.
+	fn cursors_touching(&self, prefix: &Path) -> Vec<ConsumerId> {
+		let (above, at) = self.split(prefix);
+		let mut cursors: Vec<ConsumerId> = above.iter().flat_map(|node| node.cursors.iter().copied()).collect();
+		if let Some(node) = at {
+			node.collect_cursors(&mut cursors);
+		}
+		// A cursor with several heads can be reached more than once.
+		cursors.sort_unstable();
+		cursors.dedup();
+		cursors
+	}
+}
+
 /// The origin's shared state: the route table, the announce cursors observing
 /// it, and the remotely-served fronts.
 ///
@@ -2847,16 +3139,15 @@ impl FrontDriver {
 /// this holds everything advertised or served on demand.
 #[derive(Default)]
 struct OriginState {
-	// The announced routes, in announcement order. Scans are linear: the table
-	// holds one entry per live advertisement, not one per broadcast consumer.
-	routes: Vec<RouteEntry>,
+	// The announced routes, keyed by prefix. The table holds one entry per live
+	// advertisement, not one per broadcast consumer.
+	routes: RouteTable,
 	next_route: u64,
-	// Bumped on every change to what a path resolves to: a route inserted,
-	// re-priced, or retracted, and a local broadcast attached. A requester waits
-	// on it rather than re-asking a table that has not moved.
-	generation: u64,
+	next_watch: u64,
 
-	// The registered announce cursors, each with its own coalescing buffer.
+	// The registered announce cursors, each with its own coalescing buffer. Each
+	// also hangs in the route table at its heads, which is how an announcement
+	// finds the cursors it can present on.
 	cursors: HashMap<ConsumerId, TableCursor>,
 
 	// The remotely-served fronts, keyed by absolute path and the requester's
@@ -2875,30 +3166,55 @@ struct OriginState {
 
 impl OriginState {
 	/// Re-deliver the best route at every presented prefix `prefix` maps to, on
-	/// every cursor. Called after an entry covering `prefix` was added, updated,
-	/// or removed.
-	/// `claim` is `prefix`'s [`prefix_claim`], held by the entry that changed.
+	/// every cursor it can present on. Called after an entry covering `prefix`
+	/// was added, updated, or removed. `claim` is `prefix`'s [`prefix_claim`],
+	/// held by the entry that changed.
 	fn sync_route(&mut self, prefix: &Path, claim: &Pattern) {
 		// Split borrows: the recompute reads `routes` while mutating a cursor.
 		let routes = &self.routes;
-		for cursor in self.cursors.values_mut() {
+		for id in routes.cursors_touching(prefix) {
+			let Some(cursor) = self.cursors.get_mut(&id) else {
+				continue;
+			};
 			if let Some(presented) = cursor.presented(prefix, claim) {
 				Self::sync_cursor(routes, cursor, &presented);
 			}
+		}
+		// The fronts and requesters under the prefix re-select from the table.
+		routes.poke_below(prefix);
+	}
+
+	/// Register a [`Watch`] on the routes covering `path`.
+	fn watch(&mut self, shared: &kio::Shared<OriginState>, path: &Path) -> Watch {
+		let id = self.next_watch;
+		self.next_watch += 1;
+		let signal = self.routes.add_watch(path, id);
+		Watch {
+			shared: shared.clone(),
+			path: path.to_owned(),
+			id,
+			signal,
 		}
 	}
 
 	/// Recompute the best visible route presenting at `presented` (relative) for
 	/// one cursor and deliver the change, if any.
-	fn sync_cursor(routes: &[RouteEntry], cursor: &mut TableCursor, presented: &PathOwned) {
-		// Among entries presenting here, the longest prefix wins outright, so the
-		// metadata a cursor advertises matches what a request through it actually
-		// resolves.
-		let candidates: Vec<&RouteEntry> = routes
-			.iter()
-			.filter(|entry| cursor.visible(entry))
-			.filter(|entry| cursor.presented(&entry.prefix, &entry.claim).as_ref() == Some(presented))
-			.collect();
+	fn sync_cursor(routes: &RouteTable, cursor: &mut TableCursor, presented: &PathOwned) {
+		// The entries presenting here are the ones announced at the absolute
+		// prefix, or, for the cursor's own root, at the root and every prefix
+		// above it (all of which present as the empty path). Among them, the
+		// longest prefix wins outright, so the metadata a cursor advertises
+		// matches what a request through it actually resolves.
+		let candidates: Vec<&RouteEntry> = match presented.is_empty() {
+			true => routes
+				.covering(&cursor.root)
+				.filter(|entry| cursor.visible(entry))
+				.collect(),
+			false => {
+				let absolute = cursor.root.join(presented);
+				routes.at(&absolute).filter(|entry| cursor.visible(entry)).collect()
+			}
+		};
 		let most = candidates.iter().map(|entry| entry.prefix.len()).max();
 		let best = most.and_then(|most| {
 			candidates
@@ -2951,17 +3267,26 @@ impl OriginState {
 
 	/// Register a cursor and replay the current best route per presented prefix.
 	fn register_cursor(&mut self, id: ConsumerId, mut cursor: TableCursor) {
-		let routes = &self.routes;
-		let mut presented: Vec<PathOwned> = Vec::new();
-		for entry in routes {
-			if let Some(p) = cursor.presented(&entry.prefix, &entry.claim)
-				&& !presented.contains(&p)
-			{
-				presented.push(p);
+		// The routes a cursor can see sit on the walk down to one of its heads or
+		// somewhere beneath it, so only those subtrees are replayed.
+		let mut presented: BTreeSet<PathOwned> = BTreeSet::new();
+		for head in &cursor.heads {
+			let (above, at) = self.routes.split(head);
+			let mut nodes = above;
+			if let Some(node) = at {
+				node.walk(&mut |node| nodes.push(node));
+			}
+			for entry in nodes.into_iter().flat_map(|node| node.entries.iter()) {
+				if let Some(p) = cursor.presented(&entry.prefix, &entry.claim) {
+					presented.insert(p);
+				}
 			}
 		}
 		for p in &presented {
-			Self::sync_cursor(routes, &mut cursor, p);
+			Self::sync_cursor(&self.routes, &mut cursor, p);
+		}
+		for head in &cursor.heads {
+			self.routes.add_cursor(head, id);
 		}
 		self.cursors.insert(id, cursor);
 	}
@@ -2986,25 +3311,30 @@ impl OriginState {
 		publisher: Option<Hop>,
 		refused: &HashSet<u64>,
 	) -> Option<&RouteEntry> {
-		let candidates: Vec<&RouteEntry> = self
-			.routes
-			.iter()
-			.filter(|entry| path.has_prefix(&entry.prefix))
-			.filter(|entry| entry.scope.matches(path.as_str()))
-			.filter(|entry| entry.visible_to(exclude))
-			.filter(|entry| match publisher {
-				Some(first) => entry.hops.iter().next() == Some(&first),
-				None => true,
-			})
-			.filter(|entry| !refused.contains(&entry.id))
-			.collect();
-
-		// Covering prefixes of one path form a chain, so the longest is unique.
-		let most = candidates.iter().map(|entry| entry.prefix.len()).max()?;
-		candidates
-			.into_iter()
-			.filter(|entry| entry.prefix.len() == most && entry.server.is_some())
-			.min_by_key(|entry| route_order(&entry.prefix, entry))
+		// Covering prefixes of one path form a chain, so the deepest node with a
+		// candidate holds the unique longest prefix; walking down, the last such
+		// node decides.
+		let (above, at) = self.routes.split(path);
+		let mut best = None;
+		for node in above.into_iter().chain(at) {
+			let mut candidates = node
+				.entries
+				.iter()
+				.filter(|entry| entry.scope.matches(path.as_str()))
+				.filter(|entry| entry.visible_to(exclude))
+				.filter(|entry| match publisher {
+					Some(first) => entry.hops.iter().next() == Some(&first),
+					None => true,
+				})
+				.filter(|entry| !refused.contains(&entry.id))
+				.peekable();
+			if candidates.peek().is_some() {
+				best = candidates
+					.filter(|entry| entry.server.is_some())
+					.min_by_key(|entry| route_order(&entry.prefix, entry));
+			}
+		}
+		best
 	}
 }
 
@@ -3205,9 +3535,6 @@ pub struct Requesting {
 	// Egress scope applied to the resolved broadcast, so its reads are attributed.
 	// Empty (no-op) for an untagged consumer.
 	stats: stats::Scope,
-	// The route table's generation when the request was made, so a retry can
-	// wait for the table to move rather than re-ask the same routes.
-	generation: u64,
 }
 
 enum RequestState {
@@ -3250,7 +3577,6 @@ impl Requesting {
 			inner,
 			path: PathOwned::default(),
 			stats: stats::Scope::default(),
-			generation: 0,
 		}
 	}
 
@@ -3259,16 +3585,7 @@ impl Requesting {
 		self
 	}
 
-	fn with_generation(mut self, generation: u64) -> Self {
-		self.generation = generation;
-		self
-	}
-
-	/// The route table's generation when the request was made.
-	fn generation(&self) -> u64 {
-		self.generation
-	}
-
+	/// The egress scope the resolved broadcast's reads are attributed to.
 	fn with_stats(mut self, scope: stats::Scope) -> Self {
 		self.stats = scope;
 		self
@@ -3569,31 +3886,28 @@ impl Consumer {
 			if self.routed(&path).await.is_none() {
 				return Err(Error::Closed);
 			}
-			let request = self.request_broadcast(&path);
-			// `Unroutable` is a verdict of the table as it stood when the request
-			// was made: nothing covered the path, the serving route retracted
-			// under the request, or its handler declined. Re-asking the same
-			// table would spin, so wait for it to move (an identical standby
-			// swapping in counts, even though no announce update reports it,
-			// and so does a local broadcast attaching at the path) and try
-			// again. A retraction that already happened bumped the generation
-			// before the error was observed, so that retry is immediate.
-			let seen = request.generation();
-			match request.await {
+			// `Unroutable` is a verdict of the routes covering the path as they
+			// stood when the request was made: nothing covered it, the serving
+			// route retracted under the request, or its handler declined.
+			// Re-asking the same routes would spin, so watch them before asking
+			// and wait for them to move (an identical standby swapping in
+			// counts, even though no announce update reports it, and so does a
+			// local broadcast attaching at the path), then try again. A change
+			// between the ask and the wait bumps the watch first, so that retry
+			// is immediate.
+			let (watch, seen) = {
+				let mut table = self.shared.lock();
+				if table.closed {
+					return Err(Error::Closed);
+				}
+				let watch = table.watch(&self.shared, &self.root.join(&path));
+				let seen = watch.seen();
+				(watch, seen)
+			};
+			match self.request_broadcast(&path).await {
 				Ok(broadcast) => return Ok(broadcast),
 				Err(Error::Unroutable) => {
-					let closed = kio::wait(|waiter| {
-						self.shared
-							.poll(waiter, |table| match table.closed || table.generation != seen {
-								true => Poll::Ready(()),
-								false => Poll::Pending,
-							})
-							.map(|table| table.closed)
-					})
-					.await;
-					if closed {
-						return Err(Error::Closed);
-					}
+					kio::wait(|waiter| watch.poll_changed(waiter, seen)).await;
 				}
 				Err(err) => return Err(err),
 			}
@@ -3679,8 +3993,7 @@ impl Consumer {
 		if let Some(front) = state.fronts.get(&key) {
 			let pending = Requesting::queued(front.request.consume())
 				.with_path(requested)
-				.with_stats(scope)
-				.with_generation(state.generation);
+				.with_stats(scope);
 			return kio::Pending::new(pending);
 		}
 
@@ -3710,7 +4023,7 @@ impl Consumer {
 		});
 		let request = kio::Producer::<PendingBroadcast>::default();
 		let consumer = request.consume();
-		let generation = state.generation;
+		let watch = state.watch(&self.shared, &absolute);
 		state.fronts.insert(
 			key,
 			RemoteFront {
@@ -3718,22 +4031,21 @@ impl Consumer {
 				broadcast: broadcast.consume().weak(),
 			},
 		);
+		// Released before the push: a set whose handles are gone drops the task,
+		// and the `Watch` it carries unregisters under this same lock.
+		drop(state);
 		self.tasks.push(run_remote_front(RemoteFrontTask {
 			shared: self.shared.clone(),
 			state: front_state,
 			broadcast,
 			path: absolute,
 			exclude: self.exclude,
+			watch,
 			request,
 			tasks: self.tasks.clone(),
 			timers: self.timers.clone(),
 		}));
-		kio::Pending::new(
-			Requesting::queued(consumer)
-				.with_path(requested)
-				.with_stats(scope)
-				.with_generation(generation),
-		)
+		kio::Pending::new(Requesting::queued(consumer).with_path(requested).with_stats(scope))
 	}
 
 	/// Returns the prefix that is automatically stripped from all paths.
@@ -3802,6 +4114,7 @@ impl AnnounceConsumer {
 					id,
 					TableCursor {
 						root: root.clone(),
+						heads: interest_prefixes(&allowed),
 						allowed,
 						exclude,
 						state: state.clone(),
@@ -3916,7 +4229,12 @@ impl futures::Stream for AnnounceConsumer {
 
 impl Drop for AnnounceConsumer {
 	fn drop(&mut self) {
-		self.shared.lock().cursors.remove(&self.id);
+		let mut shared = self.shared.lock();
+		if let Some(cursor) = shared.cursors.remove(&self.id) {
+			for head in &cursor.heads {
+				shared.routes.remove_cursor(head, self.id);
+			}
+		}
 	}
 }
 
@@ -5768,6 +6086,86 @@ mod tests {
 	}
 
 	#[test]
+	fn route_table_prunes_to_empty() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+
+		// Routes and cursors hang at their prefixes; the nodes on the way exist
+		// only while something is there.
+		let cursor = consumer
+			.scope("", &scopes(&["room/a", "other/deep/head"]))
+			.unwrap()
+			.announced();
+		let route = producer.announce("room/a/b/c", Route::default()).unwrap();
+		{
+			let table = producer.shared.lock();
+			assert!(table.routes.root.find(Path::new("room/a/b/c").parts()).is_some());
+			assert!(table.routes.root.find(Path::new("other/deep/head").parts()).is_some());
+			assert_eq!(table.routes.root.cursors_below, 2);
+		}
+
+		drop(route);
+		drop(cursor);
+		let table = producer.shared.lock();
+		assert!(table.routes.root.is_empty());
+		assert_eq!(table.routes.root.cursors_below, 0);
+	}
+
+	#[test]
+	fn watch_wakes_only_for_covering_changes() {
+		let producer = origin(1).produce();
+		let waiter = kio::Waiter::noop();
+		let watch = producer.shared.lock().watch(&producer.shared, &Path::new("room/a"));
+		let seen = watch.seen();
+
+		// A route beside the path or beneath it covers nothing at the path.
+		let _other = producer.announce("other", Route::default()).unwrap();
+		let _below = producer.announce("room/a/b", Route::default()).unwrap();
+		assert!(watch.poll_changed(&waiter, seen).is_pending());
+
+		// A route above it does, and so does its retraction.
+		let above = producer.announce("room", Route::default()).unwrap();
+		assert!(watch.poll_changed(&waiter, seen).is_ready());
+		let seen = watch.seen();
+		drop(above);
+		assert!(watch.poll_changed(&waiter, seen).is_ready());
+		let seen = watch.seen();
+
+		// A local broadcast attaching at the exact path does; one beside it does not.
+		let _beside = producer.create_broadcast("room/b").unwrap();
+		assert!(watch.poll_changed(&waiter, seen).is_pending());
+		let _here = producer.create_broadcast("room/a").unwrap();
+		assert!(watch.poll_changed(&waiter, seen).is_ready());
+
+		// Dropping the watch takes it out of the table.
+		drop(watch);
+		let table = producer.shared.lock();
+		let node = table
+			.routes
+			.root
+			.find(Path::new("room/a").parts())
+			.expect("route below keeps the node");
+		assert!(node.watches.is_empty());
+		assert_eq!(table.routes.root.watches_below, 0);
+	}
+
+	#[test]
+	fn a_discarded_front_task_unregisters_its_watch() {
+		let (producer, _driver) = Producer::new(Config {
+			hop: origin(1),
+			..Default::default()
+		});
+		let consumer = producer.consume();
+		let _served = producer.dynamic("room", Route::default()).unwrap();
+		// A consumer outlives its producer by design, so the task set can refuse
+		// submissions while the origin is still open. The front's task is then
+		// dropped on the spot, taking its `Watch` with it: the request must not
+		// still be holding the table lock the watch unregisters under.
+		drop(producer);
+		let _pending = consumer.request_broadcast("room/a");
+	}
+
+	#[test]
 	fn create_broadcast_refuses_a_path_no_pattern_can_spell() {
 		let producer = origin(1).produce();
 
@@ -5776,11 +6174,11 @@ mod tests {
 		// announces nowhere.
 		assert!(matches!(
 			producer.create_broadcast("room/*"),
-			Err(Error::BoundsExceeded(_))
+			Err(Error::InvalidPath(_))
 		));
 		assert!(matches!(
 			producer.announce("room/**", Route::default()),
-			Err(Error::BoundsExceeded(_))
+			Err(Error::InvalidPath(_))
 		));
 	}
 

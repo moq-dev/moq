@@ -3,7 +3,7 @@
 //! TLS goes through rustls, which is what the rest of this workspace speaks,
 //! so a build selecting this backend links one TLS stack instead of two.
 //!
-//! [`noq_proto::Endpoint`] holds
+//! [`moq_noq_proto::Endpoint`] holds
 //! the connection-id routing table, mints and retires ids, answers unsupported
 //! versions, and buffers half-open handshakes. So [`Endpoint`] here is mostly
 //! the socket plumbing around it, and the parts that are ours (the accept
@@ -21,7 +21,7 @@ pub(crate) use connection::{End, Shared};
 
 use std::sync::Arc;
 
-use noq_proto::crypto::rustls::{QuicClientConfig, QuicServerConfig};
+use moq_noq_proto::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
@@ -37,25 +37,25 @@ const CONNECTION_WINDOW: u32 = 16 * 1024 * 1024;
 /// How many datagrams to buffer in each direction.
 const DATAGRAM_WINDOW: usize = 64 * SEGMENT;
 
-fn ecn_to_noq(ecn: udp::Ecn) -> noq_proto::EcnCodepoint {
+fn ecn_to_noq(ecn: udp::Ecn) -> moq_noq_proto::EcnCodepoint {
 	match ecn {
-		udp::Ecn::Ect0 => noq_proto::EcnCodepoint::Ect0,
-		udp::Ecn::Ect1 => noq_proto::EcnCodepoint::Ect1,
-		udp::Ecn::Ce => noq_proto::EcnCodepoint::Ce,
+		udp::Ecn::Ect0 => moq_noq_proto::EcnCodepoint::Ect0,
+		udp::Ecn::Ect1 => moq_noq_proto::EcnCodepoint::Ect1,
+		udp::Ecn::Ce => moq_noq_proto::EcnCodepoint::Ce,
 	}
 }
 
-fn ecn_from_noq(ecn: noq_proto::EcnCodepoint) -> udp::Ecn {
+fn ecn_from_noq(ecn: moq_noq_proto::EcnCodepoint) -> udp::Ecn {
 	match ecn {
-		noq_proto::EcnCodepoint::Ect0 => udp::Ecn::Ect0,
-		noq_proto::EcnCodepoint::Ect1 => udp::Ecn::Ect1,
-		noq_proto::EcnCodepoint::Ce => udp::Ecn::Ce,
+		moq_noq_proto::EcnCodepoint::Ect0 => udp::Ecn::Ect0,
+		moq_noq_proto::EcnCodepoint::Ect1 => udp::Ecn::Ect1,
+		moq_noq_proto::EcnCodepoint::Ce => udp::Ecn::Ce,
 	}
 }
 
-impl From<noq_proto::ConnectionError> for Error {
-	fn from(err: noq_proto::ConnectionError) -> Self {
-		use noq_proto::ConnectionError;
+impl From<moq_noq_proto::ConnectionError> for Error {
+	fn from(err: moq_noq_proto::ConnectionError) -> Self {
+		use moq_noq_proto::ConnectionError;
 		match err {
 			ConnectionError::ApplicationClosed(close) => Self::App {
 				code: close.error_code.into_inner(),
@@ -91,8 +91,10 @@ fn provider() -> Arc<rustls::crypto::CryptoProvider> {
 
 /// The endpoint-wide configuration: how connection ids are minted, and the
 /// largest datagram we tell peers we can receive.
-pub(crate) fn endpoint_config(shard: Option<moq_sock::shard::Shard>) -> Result<Arc<noq_proto::EndpointConfig>, Error> {
-	let mut config = noq_proto::EndpointConfig::default();
+pub(crate) fn endpoint_config(
+	shard: Option<moq_sock::shard::Shard>,
+) -> Result<Arc<moq_noq_proto::EndpointConfig>, Error> {
+	let mut config = moq_noq_proto::EndpointConfig::default();
 	config.cid_generator(Arc::new(move || Box::new(Cids { shard })));
 	config
 		.max_udp_payload_size(SEGMENT as u16)
@@ -110,9 +112,9 @@ struct Cids {
 	shard: Option<moq_sock::shard::Shard>,
 }
 
-impl noq_proto::ConnectionIdGenerator for Cids {
-	fn generate_cid(&mut self) -> noq_proto::ConnectionId {
-		noq_proto::ConnectionId::new(&super::endpoint::cid(self.shard))
+impl moq_noq_proto::ConnectionIdGenerator for Cids {
+	fn generate_cid(&mut self) -> moq_noq_proto::ConnectionId {
+		moq_noq_proto::ConnectionId::new(&super::endpoint::cid(self.shard))
 	}
 
 	fn cid_len(&self) -> usize {
@@ -125,7 +127,7 @@ impl noq_proto::ConnectionIdGenerator for Cids {
 }
 
 /// Dial as `config` says.
-pub(crate) fn client_config(config: &client::Config) -> Result<noq_proto::ClientConfig, Error> {
+pub(crate) fn client_config(config: &client::Config) -> Result<moq_noq_proto::ClientConfig, Error> {
 	let provider = provider();
 	let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
 		.with_protocol_versions(&[&rustls::version::TLS13])
@@ -168,7 +170,7 @@ pub(crate) fn client_config(config: &client::Config) -> Result<noq_proto::Client
 	tls.alpn_protocols = alpn(&config.alpn);
 
 	let crypto = QuicClientConfig::try_from(tls).map_err(|err| Error::Tls(err.to_string()))?;
-	let mut client = noq_proto::ClientConfig::new(Arc::new(crypto));
+	let mut client = moq_noq_proto::ClientConfig::new(Arc::new(crypto));
 	let transport = transport_config(&config.transport)?;
 	#[cfg(feature = "qlog")]
 	let transport = with_qlog(transport, &config.transport);
@@ -177,7 +179,7 @@ pub(crate) fn client_config(config: &client::Config) -> Result<noq_proto::Client
 }
 
 /// Serve as `config` says.
-pub(crate) fn server_config(config: &server::Config) -> Result<noq_proto::ServerConfig, Error> {
+pub(crate) fn server_config(config: &server::Config) -> Result<moq_noq_proto::ServerConfig, Error> {
 	config.check()?;
 	let provider = provider();
 	let builder = rustls::ServerConfig::builder_with_provider(provider.clone())
@@ -207,7 +209,7 @@ pub(crate) fn server_config(config: &server::Config) -> Result<noq_proto::Server
 	tls.alpn_protocols = alpn(&config.alpn);
 
 	let crypto = QuicServerConfig::try_from(tls).map_err(|err| Error::Tls(err.to_string()))?;
-	let mut server = noq_proto::ServerConfig::with_crypto(Arc::new(crypto));
+	let mut server = moq_noq_proto::ServerConfig::with_crypto(Arc::new(crypto));
 	let transport = transport_config(&config.transport)?;
 	#[cfg(feature = "qlog")]
 	let transport = with_qlog(transport, &config.transport);
@@ -219,7 +221,7 @@ pub(crate) fn server_config(config: &server::Config) -> Result<noq_proto::Server
 ///
 /// Noq asks a factory per connection, so each gets a file of its own.
 #[cfg(feature = "qlog")]
-fn with_qlog(mut transport: noq_proto::TransportConfig, config: &Transport) -> noq_proto::TransportConfig {
+fn with_qlog(mut transport: moq_noq_proto::TransportConfig, config: &Transport) -> moq_noq_proto::TransportConfig {
 	let Some(sink) = config.qlog.clone() else {
 		return transport;
 	};
@@ -238,32 +240,32 @@ struct Traces {
 }
 
 #[cfg(feature = "qlog")]
-impl noq_proto::QlogFactory for Traces {
+impl moq_noq_proto::QlogFactory for Traces {
 	fn for_connection(
 		&self,
-		side: noq_proto::Side,
+		side: moq_noq_proto::Side,
 		_remote: std::net::SocketAddr,
-		initial_dst_cid: noq_proto::ConnectionId,
+		initial_dst_cid: moq_noq_proto::ConnectionId,
 		_now: std::time::Instant,
-	) -> Option<noq_proto::QlogConfig> {
+	) -> Option<moq_noq_proto::QlogConfig> {
 		let side = match side {
-			noq_proto::Side::Client => qlog::Side::Client,
-			noq_proto::Side::Server => qlog::Side::Server,
+			moq_noq_proto::Side::Client => qlog::Side::Client,
+			moq_noq_proto::Side::Server => qlog::Side::Server,
 		};
-		Some(noq_proto::QlogConfig::new(self.sink.trace(&initial_dst_cid, side)))
+		Some(moq_noq_proto::QlogConfig::new(self.sink.trace(&initial_dst_cid, side)))
 	}
 }
 
 /// The per-connection knobs both roles share.
-fn transport_config(config: &Transport) -> Result<noq_proto::TransportConfig, Error> {
-	use noq_proto::VarInt;
+fn transport_config(config: &Transport) -> Result<moq_noq_proto::TransportConfig, Error> {
+	use moq_noq_proto::VarInt;
 
-	let idle = noq_proto::IdleTimeout::try_from(config.idle_timeout)
+	let idle = moq_noq_proto::IdleTimeout::try_from(config.idle_timeout)
 		.map_err(|_| Error::Quic(format!("idle timeout out of range: {:?}", config.idle_timeout)))?;
 	let streams = VarInt::from_u64(config.max_streams)
 		.map_err(|_| Error::Quic(format!("stream limit out of range: {}", config.max_streams)))?;
 
-	let mut transport = noq_proto::TransportConfig::default();
+	let mut transport = moq_noq_proto::TransportConfig::default();
 	transport.max_idle_timeout(Some(idle));
 	transport.keep_alive_interval(config.keep_alive);
 	transport.max_concurrent_bidi_streams(streams);
@@ -279,9 +281,9 @@ fn transport_config(config: &Transport) -> Result<noq_proto::TransportConfig, Er
 	transport.min_mtu(SEGMENT as u16);
 	transport.mtu_discovery_config(None);
 	transport.congestion_controller_factory(match config.congestion {
-		Congestion::Loss => Arc::new(noq_proto::congestion::CubicConfig::default())
-			as Arc<dyn noq_proto::congestion::ControllerFactory + Send + Sync>,
-		Congestion::Delay => Arc::new(noq_proto::congestion::Bbr3Config::default()),
+		Congestion::Loss => Arc::new(moq_noq_proto::congestion::CubicConfig::default())
+			as Arc<dyn moq_noq_proto::congestion::ControllerFactory + Send + Sync>,
+		Congestion::Delay => Arc::new(moq_noq_proto::congestion::Bbr3Config::default()),
 	});
 	Ok(transport)
 }

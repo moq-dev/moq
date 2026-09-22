@@ -1,6 +1,6 @@
 //! The noq endpoint: one socket, many noq-proto connections.
 //!
-//! noq-proto's own [`noq_proto::Endpoint`] is the routing table: it parses
+//! noq-proto's own [`moq_noq_proto::Endpoint`] is the routing table: it parses
 //! each datagram, hands it to the connection its destination id names, mints
 //! and retires ids as peers consume them, and answers an unsupported version
 //! itself. What is left for us is the socket, the accept backlog, and a driver
@@ -17,7 +17,7 @@ use std::task::Poll;
 use std::time::Instant;
 
 use bytes::BytesMut;
-use noq_proto::{ConnectionHandle, DatagramEvent, Incoming, Transmit};
+use moq_noq_proto::{ConnectionHandle, DatagramEvent, Incoming, Transmit};
 use rustc_hash::FxHashMap;
 
 use super::super::{Error, endpoint::Config};
@@ -41,7 +41,7 @@ pub(crate) struct Inner {
 	socket: Rc<udp::Socket>,
 	local: SocketAddr,
 	/// The routing table, and the server configuration it accepts with.
-	endpoint: RefCell<noq_proto::Endpoint>,
+	endpoint: RefCell<moq_noq_proto::Endpoint>,
 	accepting: RefCell<Option<Accepting>>,
 	/// Every live connection, looked up per received datagram.
 	///
@@ -99,7 +99,7 @@ impl Endpoint {
 		let accepting = server.is_some().then(|| Accepting { queue: VecDeque::new() });
 		// MTU discovery is off (the GSO pool sends fixed SEGMENT datagrams),
 		// so the endpoint has no reason to allow it either.
-		let endpoint = noq_proto::Endpoint::new(super::endpoint_config(socket.shard())?, server, false);
+		let endpoint = moq_noq_proto::Endpoint::new(super::endpoint_config(socket.shard())?, server, false);
 
 		let inner = Rc::new(Inner {
 			owner,
@@ -395,7 +395,7 @@ impl Inner {
 	}
 
 	/// Register `conn`, spawn its driver, and arrange its teardown.
-	fn launch(self: &Rc<Self>, key: ConnectionHandle, conn: noq_proto::Connection) -> connection::Shared {
+	fn launch(self: &Rc<Self>, key: ConnectionHandle, conn: moq_noq_proto::Connection) -> connection::Shared {
 		let (shared, driver) = connection::launch(&self.owner, self.socket.clone(), Rc::downgrade(self), key, conn);
 		self.conns.borrow_mut().insert(key, shared.clone());
 
@@ -412,8 +412,8 @@ impl Inner {
 	pub(crate) fn on_connection_event(
 		&self,
 		key: ConnectionHandle,
-		event: noq_proto::EndpointEvent,
-	) -> Option<noq_proto::ConnectionEvent> {
+		event: moq_noq_proto::EndpointEvent,
+	) -> Option<moq_noq_proto::ConnectionEvent> {
 		self.endpoint.borrow_mut().handle_event(key, event)
 	}
 

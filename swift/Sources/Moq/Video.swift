@@ -1,7 +1,8 @@
 import MoqFFI
 
 /// Read side of a video track decoded inside the bindings. Iterating yields
-/// tightly-packed I420 frames, each carrying the size it actually decoded to.
+/// tightly-packed frames, each carrying the pixel layout and the size it
+/// actually decoded to.
 public final class VideoConsumer: AsyncSequence, Sendable {
     /// The decoded video frame emitted by this sequence.
     public typealias Element = VideoDecodedFrame
