@@ -420,7 +420,7 @@ async def test_dynamic_track_request_can_publish_media():
     consumer = broadcast.consume()
     catalog_consumer = await consumer.subscribe_catalog()
 
-    # publish_media_on_track accepts the request (at the media timescale), which is what
+    # publish_audio_on_track accepts the request (at the media timescale), which is what
     # unblocks subscribe_media, so run the subscribe concurrently until then.
     subscribe = asyncio.create_task(
         consumer.subscribe_media("requested-audio", cast(moq.Container, moq.Container.LEGACY()))
@@ -1149,3 +1149,42 @@ async def test_dynamic_serves_a_request_under_a_prefix():
     await asyncio.wait_for(pending, timeout=5.0)
     dynamic.cancel()
     served.finish()
+
+
+async def test_dynamic_and_json_handles_are_async_context_managers():
+    """Every handle whose only cleanup is cancel() releases it on `async with` exit."""
+
+    async def assert_cancelled(awaitable) -> None:
+        with pytest.raises(Exception) as excinfo:
+            await asyncio.wait_for(awaitable, timeout=5.0)
+        assert moq.is_shutdown(excinfo.value)
+
+    origin = moq.OriginProducer()
+    async with origin.dynamic("live") as origin_dynamic:
+        pass
+    await assert_cancelled(origin_dynamic.requested_broadcast())
+
+    broadcast = moq.BroadcastProducer()
+    async with broadcast.dynamic() as broadcast_dynamic:
+        pass
+    await assert_cancelled(broadcast_dynamic.requested_track())
+
+    track = broadcast.publish_track("events")
+    async with track.dynamic() as track_dynamic:
+        pass
+    await assert_cancelled(track_dynamic.requested_group())
+
+    snapshot = broadcast.publish_json_snapshot("state")
+    async with await broadcast.consume().subscribe_json_snapshot("state") as snapshot_consumer:
+        pass
+    await assert_cancelled(anext(snapshot_consumer))
+
+    stream = broadcast.publish_json_stream("log")
+    async with await broadcast.consume().subscribe_json_stream("log") as stream_consumer:
+        pass
+    await assert_cancelled(anext(stream_consumer))
+
+    snapshot.finish()
+    stream.finish()
+    track.finish()
+    broadcast.finish()

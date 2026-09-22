@@ -173,7 +173,8 @@ test("Legacy Producer omits a reordered group's presentation endpoint marker", a
 	await next?.readFrame();
 	const marker = await next?.readFrame();
 	expect(marker).toBeDefined();
-	const [timestamp, payload] = Varint.decode(marker!.payload);
+	if (!marker) throw new Error("expected a presentation endpoint marker");
+	const [timestamp, payload] = Varint.decode(marker.payload);
 	expect(timestamp).toBe(200_000);
 	expect(payload.byteLength).toBe(0);
 });

@@ -1928,7 +1928,7 @@ async fn video_decode_format() {
 	assert_eq!(frame.data.len(), frame.width as usize * frame.height as usize * 4);
 	// Every fourth byte is alpha, so an opaque frame proves the conversion ran rather than handing back planes.
 	assert!(
-		frame.data.chunks_exact(4).all(|px| px[3] == 0xFF),
+		frame.data.as_chunks::<4>().0.iter().all(|px| px[3] == 0xFF),
 		"RGBA output should be opaque"
 	);
 

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:moq/moq.dart';
 import 'package:test/test.dart';
@@ -23,8 +24,7 @@ void main() {
 
     final client = await Moq.connect(
       'https://$address',
-      tlsVerify: false,
-      bind: '127.0.0.1:0',
+      options: const ConnectOptions(tlsVerify: false, bind: '127.0.0.1:0'),
     ).timeout(timeout);
     final serverSession = await accepted;
     expect(client.bandwidth(), isA<MoqBandwidth>());
@@ -63,20 +63,61 @@ void main() {
     server.cancel();
   });
 
-  test('closing a server releases its port', () async {
-    final first = MoqServer();
-    first.setBind(addr: '127.0.0.1:0');
-    first.setTlsGenerate(hostnames: ['localhost']);
-    final addr = await first.listen().timeout(timeout);
-    first.cancel();
+  test('Server.listen serves a broadcast to a connected client', () async {
+    final server = await Server.listen(
+      options: const ListenOptions(
+        bind: '127.0.0.1:0',
+        tlsGenerate: ['localhost'],
+      ),
+    ).timeout(timeout);
+    expect(server.certFingerprints(), isNotEmpty);
 
-    // No retry: cancel() released the listening socket before returning.
-    final second = MoqServer();
-    second.setBind(addr: addr);
-    second.setTlsGenerate(hostnames: ['localhost']);
-    final rebound = await second.listen().timeout(timeout);
-    expect(rebound, addr);
-    second.cancel();
+    final accepted = () async {
+      final request = await server.requests().first.timeout(timeout);
+      return request.accept().timeout(timeout);
+    }();
+
+    // A one-shot dial with explicit pacing: both knobs reach the FFI client.
+    final client = await Moq.connect(
+      'https://${server.localAddr}',
+      options: ConnectOptions(
+        tlsVerify: false,
+        bind: '127.0.0.1:0',
+        reconnect: false,
+        backoff: Backoff(initialUs: 1000, maxUs: 2000, timeoutUs: 3000),
+      ),
+    ).timeout(timeout);
+    final serverSession = await accepted;
+
+    final announcement = client.announcements().first;
+    final broadcast = server.createBroadcast('live');
+    final track = broadcast.publishTrack(name: 'events', info: null);
+    broadcast.announce(route: MoqRoute());
+    final announced = await announcement.timeout(timeout);
+    expect(announced.prefix(), 'live');
+
+    client.close();
+    serverSession.cancel(code: 0);
+    track.finish();
+    broadcast.finish();
+    server.close();
+  });
+
+  test('microsecond fields read back as Durations', () {
+    final backoff = Backoff(initialUs: 1000, maxUs: 2000, timeoutUs: 3000);
+    expect(backoff.initial, const Duration(milliseconds: 1));
+    expect(backoff.max, const Duration(milliseconds: 2));
+    expect(backoff.timeout, const Duration(milliseconds: 3));
+
+    expect(ConnectionStats().rtt, isNull);
+    expect(
+      ConnectionStats(rttUs: 1500).rtt,
+      const Duration(microseconds: 1500),
+    );
+    expect(
+      Frame(payload: Uint8List(0), timestampUs: 20000).timestamp,
+      const Duration(milliseconds: 20),
+    );
   });
 
   test('announce then unannounce is visible', () async {

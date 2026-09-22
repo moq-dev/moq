@@ -48,8 +48,9 @@ The `dev.moq` package is intentionally thin: Kotlin has extension functions, so 
 
 - **`Moq.connect(...)`**: a connection facade (`Moq.kt`), so you never hand-wire a `MoqClient`.
 - **Typealiases** (`Aliases.kt`): re-export the `Moq*`-prefixed FFI types under clean `dev.moq` names (`OriginProducer`, `BroadcastConsumer`, `Catalog`, `Frame`, ...), so you import `dev.moq.*` only. A couple of sealed types (`Container`, `MoqException`) are not aliased because Kotlin can't resolve their subtypes through a typealias; use `uniffi.moq.*` for those.
-- **Flow extensions** (`Flows.kt`): `updates()`, `groups()`, `frames()`, `announcements()`, `catalog()` turn the pull-based consumers into coroutine `Flow`s with cancellation wired through.
+- **Flow extensions** (`Flows.kt`): `updates()`, `groups()`, `frames()`, `announcements()`, `catalog()` turn the pull-based consumers into coroutine `Flow`s with cancellation wired through. `frames()` covers the media, audio, and video consumers alike.
 - **Fetched media**: `fetchMediaGroup(...).frames()` streams the decoded frames of one retained group, then completes.
+- **Duration extensions** (`Durations.kt`): the FFI carries microseconds as integers, so `stats.rtt`, `backoff.initial`, `frame.timestamp`, and their siblings read back as a `kotlin.time.Duration`.
 - **`logLevel(...)`**: configures native Rust tracing without importing the raw bindings package.
 - **Raw datagrams**: `TrackProducer.appendDatagram(Frame(payload, timestampUs))` sends one best-effort frame and returns its sequence; `TrackConsumer.recvDatagram()` and `datagrams()` receive them. Payloads are capped at 1200 bytes, require a datagram-capable transport plus lite-05 or newer moq-lite, and have no stream fallback.
 - **`MoqException.isShutdown`** (`Errors.kt`): true for the graceful `Cancelled`/`Closed` cases.
@@ -86,7 +87,7 @@ kt/
   moq/
     build.gradle.kts        Pure-Kotlin wrapper; coordinates dev.moq:moq
     src/
-      jvmAndAndroidMain/kotlin/dev/moq/ Wrapper sources (Moq, Aliases, Flows, Errors)
+      jvmAndAndroidMain/kotlin/dev/moq/ Wrapper sources (Moq, Server, Aliases, Flows, Durations, Errors)
       jvmAndAndroidTest/                Facade smoke test
   scripts/                  check.sh, package.sh
 ```

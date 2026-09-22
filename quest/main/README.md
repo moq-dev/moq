@@ -89,6 +89,7 @@ do not add another media abstraction or a renderer crate during stabilization.
 
 ## Quests
 
+- [Binding parity](/quest/main/binding-parity.md) - every wrapper reaches every moq-ffi method in its own idiom with moq-net's verbs
 - [Origin failover machine](/quest/main/origin-failover-machine.md) - a front's
   source selection and track splicing become a pure step function with a
   runtime-free test per transition

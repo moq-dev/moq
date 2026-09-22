@@ -313,7 +313,12 @@ pub(crate) fn remix(samples: &[f32], input: Layout, output: Layout) -> Result<Ve
 			}
 			Ok(output)
 		}
-		(Layout::Stereo, Layout::Mono) => Ok(samples.chunks_exact(2).map(|pair| (pair[0] + pair[1]) * 0.5).collect()),
+		(Layout::Stereo, Layout::Mono) => Ok(samples
+			.as_chunks::<2>()
+			.0
+			.iter()
+			.map(|pair| (pair[0] + pair[1]) * 0.5)
+			.collect()),
 		_ => Err(Error::Unsupported(format!(
 			"cannot convert audio layout {input:?} to {output:?} without speaker positions"
 		))),

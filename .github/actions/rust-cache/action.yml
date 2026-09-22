@@ -28,7 +28,7 @@ runs:
         # whatever the runner image ships: the compiler these jobs build with
         # exists only inside `nix develop`. The `toolchain` input is no help
         # either, since it names a rustup toolchain and probes
-        # `rustc +<name> -vV`, and nothing installs 1.95.0 through rustup.
+        # `rustc +<name> -vV`, and nothing installs that channel through rustup.
         #
         # flake.lock pins that compiler, so hashing the flake identifies it more
         # precisely than `rustc -vV` would, and rolls the cache when the dev
