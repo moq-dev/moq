@@ -73,7 +73,8 @@
 //!
 //! # Garbage collection
 //!
-//! [`Registry::report`] returns the current per-broadcast detail and prunes
+//! [`Registry::report`] refills a caller-owned [`Report`] with the current
+//! per-broadcast detail and prunes
 //! entries no longer referenced by any guard, so a publisher draining the
 //! registry on an interval keeps it bounded. A registry that is never
 //! drained accumulates one entry per broadcast path ever seen; call

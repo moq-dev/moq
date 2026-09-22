@@ -1614,6 +1614,26 @@ mod tests {
 		assert_eq!(parsed.get("foo/live").expect("entry").bytes, 9);
 	}
 
+	#[test]
+	fn frame_serializes_like_a_btreemap() {
+		// The producer's reused frame must stay byte-identical to the
+		// `TrafficFrame` consumers parse, including key order.
+		let traffic = |bytes| {
+			let mut traffic = Traffic::default();
+			traffic.bytes = bytes;
+			traffic
+		};
+		let mut frame = Frame::default();
+		let mut map = BTreeMap::new();
+		for (path, bytes) in [("room/b", 2), ("room/a", 1), ("other", 3), ("room/a/cam", 4)] {
+			frame.entries.push((PathOwned::from(path), traffic(bytes)));
+			map.insert(path.to_string(), traffic(bytes));
+		}
+		frame.entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+		assert_eq!(serde_json::to_vec(&frame).unwrap(), serde_json::to_vec(&map).unwrap());
+		assert_eq!(serde_json::to_vec(&Frame::<Traffic>::default()).unwrap(), b"{}");
+	}
+
 	/// Counts this thread's allocations, so the test below measures only its
 	/// own drain while other tests run in parallel.
 	mod counting {
