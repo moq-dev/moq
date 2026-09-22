@@ -23,7 +23,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Binary stats](/quest/next/stats-binary/README.md) - an allocation-free stats tick and an on-demand FlatBuffers `.fb.z` flavor with a checked-in schema
 - [JSON churn](/quest/next/json-churn.md) - a moq-json update allocates a bounded amount whatever the document size, in every caller
 - [Origin narrowing](/quest/next/origin-narrowing.md) - a live origin grant narrows in place and ends the subscriptions it no longer covers, the deafen boundary #2714 asked for
-- [Local announcements](/quest/next/local-announce.md) - an origin's announce cursor and its broadcast resolver agree on what exists
 - [Relay embedding](/quest/next/relay-embed.md) - an embedder reads the resolved config, reuses the CLI merge, registers listener health, and spawns a test relay without TOML strings
 - [Auth embedder](/quest/next/auth-embedder.md) - the lease owns its re-check clock, a gateway session holds a lease, and `Cluster::admit` scopes and tags origins in one call
 - [Binding docs](/quest/next/binding-docs.md) - every binding doc sample names a symbol that exists, checked nightly

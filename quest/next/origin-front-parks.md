@@ -28,7 +28,3 @@ show the replacement is cheaper.
 Public API: no signature change expected. `routed_broadcast` and
 `request_broadcast` keep their contracts; only where the waiting happens
 changes.
-
-## Related
-
-- [Local announcements](/quest/next/local-announce.md) - settles what the front would be waiting for
