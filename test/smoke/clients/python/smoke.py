@@ -13,6 +13,7 @@ subscribe: connect, find the video track in the catalog, and exit 0 as soon as
 
 import argparse
 import asyncio
+import contextlib
 import math
 import struct
 import sys
@@ -77,6 +78,10 @@ async def publish(url: str, broadcast: str) -> None:
                 break
             media.write(chunk)
         tone.cancel()
+        # Let the tone unwind before finishing, so no write races finish().
+        with contextlib.suppress(asyncio.CancelledError):
+            await tone
+        audio.finish()
         media.finish()
 
 
