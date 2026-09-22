@@ -88,8 +88,6 @@ do not add another media abstraction or a renderer crate during stabilization.
 
 ## Quests
 
-- [Relay embedding](/quest/main/relay-embed.md) - an embedder reads the resolved config, reuses the CLI merge, registers listener health, and spawns a test relay without TOML strings
-
 - [Binding parity](/quest/main/binding-parity.md) - every wrapper reaches every moq-ffi method in its own idiom with moq-net's verbs
 
 ## Related

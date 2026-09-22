@@ -219,7 +219,7 @@ impl Config {
 	/// [`moq_tokio::cli::Merge`]. Presence comes from what the parser and the
 	/// environment actually supplied, so a file that sets a list to empty or a
 	/// bool to false survives.
-	pub(crate) fn parse_and_merge<I, T>(args: I) -> anyhow::Result<Self>
+	pub fn parse_and_merge<I, T>(args: I) -> anyhow::Result<Self>
 	where
 		I: IntoIterator<Item = T>,
 		T: Into<std::ffi::OsString> + Clone,
@@ -261,22 +261,35 @@ impl Config {
 				path: std::path::Path::new(path),
 				value,
 			});
-		// The released CLI spellings live on hidden fields the merge's TOML round-trip
-		// drops, so they are collected from the parse and reported with the file's
-		// own released keys in one message.
-		let mut deprecated = cli.config.deprecated();
-		let (mut config, resolved) = moq_tokio::cli::Merge {
-			registry: crate::settings::Settings::SETTINGS_REGISTRY,
-			cli: &cli_layer,
-			env: &env,
+		let mut config = cli.config;
+		config.merge_into(&cli_layer, &env, file)?;
+		Ok(config)
+	}
+
+	/// Merge CLI, environment, and optional TOML values into this relay fragment.
+	///
+	/// An embedding binary can parse its own flattened CLI once, then merge only
+	/// its `relay` field. Other CLI-only fields remain untouched.
+	pub fn merge_into(
+		&mut self,
+		cli: &usage::config::CliLayer,
+		env: &usage::config::EnvLayer,
+		file: Option<moq_tokio::cli::FileSource<'_>>,
+	) -> anyhow::Result<()> {
+		let mut deprecated = self.deprecated();
+		let (merged, resolved) = moq_tokio::cli::Merge {
+			registry: crate::settings(),
+			cli,
+			env,
 			file,
 		}
-		.apply(cli.config)
+		.apply(self.clone())
 		.map_err(|err| anyhow::anyhow!("{err}"))?;
-		deprecated.extend(config.deprecated());
+		deprecated.extend(merged.deprecated());
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
-		config.origins = Some(resolved);
-		Ok(config)
+		*self = merged;
+		self.origins = Some(resolved);
+		Ok(())
 	}
 
 	/// Where a dotted setting key got its value, when this config was loaded
@@ -318,7 +331,11 @@ impl Config {
 		let deprecated = self.deprecated();
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
 
-		self.quic.max_streams.get_or_insert(crate::DEFAULT_MAX_STREAMS);
+		self.quic
+			.max_streams
+			.get_or_insert(moq_tokio::quic::DEFAULT_MAX_STREAMS);
+		self.drain_timeout = self.drain_timeout();
+		self.drain_timeout_arg = None;
 		Ok(())
 	}
 }
@@ -1093,6 +1110,25 @@ uid = [1001]
 	fn the_settings_registry_matches_the_cli() {
 		let drift = crate::settings::Settings::SETTINGS_REGISTRY.drift(Cli::SETTINGS_BINDINGS);
 		assert!(drift.is_empty(), "{drift:#?}");
+	}
+
+	/// An embedder can merge its relay fragment without parsing the binary CLI again.
+	#[test]
+	fn merge_into_relay_fragment() {
+		let _env = EnvGuard::clear(&["MOQ_CLUSTER_ID"]);
+		let (parsed, cli) =
+			Cli::parse_from_with_settings(&[std::ffi::OsStr::new("--cluster-id"), std::ffi::OsStr::new("9")]).unwrap();
+		let file = toml::from_str::<toml::Value>("[cluster]\nid = 7\n").unwrap();
+		let source = moq_tokio::cli::FileSource {
+			path: std::path::Path::new("relay.toml"),
+			value: &file,
+		};
+		let mut config = parsed.config;
+		config
+			.merge_into(&cli, &usage::config::EnvLayer::from_process(), Some(source))
+			.unwrap();
+		assert_eq!(config.cluster.id, Some(9));
+		assert_eq!(config.source("cluster.id"), Some("--cluster-id"));
 	}
 
 	/// Presence comes from the source, never from whether a standing value looks empty.

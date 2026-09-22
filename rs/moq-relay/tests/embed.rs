@@ -111,7 +111,13 @@ async fn embed_and_stop(mut config: Config) {
 	config.drain_timeout = Duration::ZERO;
 	let http = config.web.http.listen.expect("http listener configured");
 	let relay = Relay::load(config.clone()).await.expect("load relay");
-	let quic = relay.addr().expect("quic listener bound");
+	let quic = relay.quic_addr().expect("quic listener bound");
+	assert_eq!(relay.web_addrs().http, Some(http));
+	assert_eq!(
+		relay.config().quic.max_streams,
+		Some(moq_tokio::quic::DEFAULT_MAX_STREAMS)
+	);
+	assert_eq!(relay.cluster().id(), relay.cluster().origin.hop().id());
 	// Pin the replacement to the same ports, including a `:0` first bind.
 	config.listen.bind = Some(moq_tokio::listen::Bind::Addr(quic));
 
@@ -120,11 +126,13 @@ async fn embed_and_stop(mut config: Config) {
 	// are cloned before `run` consumes the relay.
 	let origin = relay.cluster().origin.clone();
 	let trigger = relay.shutdown_trigger().clone();
+	let ready = relay.ready();
 	let web = relay
 		.web()
 		.routes()
 		.route("/embedded", axum::routing::get(|| async { "embedded\n" }));
 	let running = tokio::spawn(relay.with_web(web).run());
+	ready.wait().await.expect("relay ready");
 
 	wait_for_http(http.port()).await;
 	assert!(!running.is_finished(), "the relay stopped while serving");
@@ -136,6 +144,19 @@ async fn embed_and_stop(mut config: Config) {
 		.await
 		.expect("read embedded response");
 	assert_eq!(body, "embedded\n");
+	let response = reqwest::Client::new()
+		.get(format!("http://127.0.0.1:{}/embedded", http.port()))
+		.header(reqwest::header::ORIGIN, "https://example.test")
+		.send()
+		.await
+		.expect("fetch embedded route with Origin");
+	assert_eq!(
+		response
+			.headers()
+			.get(reqwest::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+			.unwrap(),
+		"*"
+	);
 
 	let broadcast = origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce");
@@ -266,4 +287,68 @@ async fn uring_custom_route_and_quic() {
 	config.runtime.pin = false;
 	config.runtime.io_uring = true;
 	embed_and_stop(config).await;
+}
+
+/// An embedder-owned accept loop joins the relay's own /metrics exposition.
+#[tokio::test]
+async fn embedded_listener_health_reaches_metrics() {
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+	let mut config = http_and_quic(&cert, &key, "127.0.0.1:0".into());
+	config.internal.listen = Some(format!("127.0.0.1:{}", free_tcp_port()).parse().unwrap());
+	config.drain_timeout = Duration::ZERO;
+	let internal = config.internal.listen.unwrap();
+	let relay = Relay::load(config).await.expect("load relay");
+	let ready = relay.ready();
+	let trigger = relay.shutdown_trigger().clone();
+	let health = moq_tokio::accept::Health::new("embedded");
+	let running = tokio::spawn(relay.with_listeners([health]).run());
+	ready.wait().await.expect("relay ready");
+	let body = reqwest::get(format!("http://{internal}/metrics"))
+		.await
+		.expect("fetch metrics")
+		.text()
+		.await
+		.expect("read metrics");
+	assert!(
+		body.contains("moq_relay_accept_failures_total{listener=\"embedded\",class=\"exhausted\"} 0"),
+		"{body}"
+	);
+	stop(trigger, running).await;
+}
+
+#[derive(usage::Cli, Clone, Debug, Default, serde::Deserialize)]
+#[serde(default)]
+#[usage(name = "embedded-relay", unknown_flags = "error", args_override_self = false)]
+#[usage(settings)]
+struct EmbeddedConfig {
+	#[usage(flatten)]
+	#[serde(flatten)]
+	relay: Config,
+	#[usage(long = "worker-name")]
+	#[serde(skip)]
+	worker_name: Option<String>,
+}
+
+/// A flattened relay merges its settings without resetting the embedder's flags.
+#[test]
+fn embedded_cli_merges_only_relay_settings() {
+	let (mut parsed, cli) = EmbeddedConfig::parse_from_with_settings(&[
+		std::ffi::OsStr::new("--worker-name"),
+		std::ffi::OsStr::new("recorder"),
+		std::ffi::OsStr::new("--cluster-id"),
+		std::ffi::OsStr::new("9"),
+	])
+	.expect("parse embedding CLI");
+	let file = toml::from_str::<toml::Value>("[cluster]\nid = 7\n").unwrap();
+	let source = moq_tokio::cli::FileSource {
+		path: std::path::Path::new("relay.toml"),
+		value: &file,
+	};
+	parsed
+		.relay
+		.merge_into(&cli, &usage::config::EnvLayer::from_process(), Some(source))
+		.unwrap();
+	assert_eq!(parsed.worker_name.as_deref(), Some("recorder"));
+	assert_eq!(parsed.relay.cluster.id, Some(9));
 }

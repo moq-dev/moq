@@ -28,15 +28,16 @@ pub mod shutdown;
 pub mod stats;
 #[cfg(test)]
 mod test_env;
+#[cfg(feature = "test-support")]
+mod test_support;
 #[cfg(all(target_os = "linux", feature = "_uring"))]
 pub mod uring;
 pub mod web;
 #[cfg(feature = "websocket")]
 mod websocket;
 
-/// The relay needs higher stream limits than the library default
-/// to handle many concurrent subscriptions across connections.
-pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
+/// The shared default stream limit for MoQ clients and relays.
+pub use moq_tokio::quic::DEFAULT_MAX_STREAMS;
 
 /// Default drain window for a shutdown GOAWAY: how long an accepted session may
 /// keep running after being told to leave, before being force-closed with
@@ -52,3 +53,10 @@ fn configured_tier(label: Option<String>) -> moq_net::stats::Tier {
 pub use config::*;
 pub use connection::*;
 pub use relay::*;
+#[cfg(feature = "test-support")]
+pub use test_support::*;
+
+/// The relay settings registry for composing a binary's CLI and TOML merge.
+pub fn settings() -> usage::config::Registry {
+	settings::Settings::SETTINGS_REGISTRY
+}

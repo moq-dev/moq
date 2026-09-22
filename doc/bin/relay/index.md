@@ -66,6 +66,15 @@ let web = relay.web().routes().route("/hello", get(|| async { "hello" }));
 relay.with_web(web).run().await?;
 ```
 
+`Relay::load` binds QUIC and web sockets. Read their actual addresses with
+`quic_addr()` and `web_addrs()`, including ports assigned for `:0`. Clone
+`ready()` before spawning `run`, then await `ready.wait()` when startup must
+finish before other workers begin. `config()` returns the resolved settings;
+`cluster().id()` returns the chosen origin ID. `with_listeners()` registers an
+extra TCP listener's accept health at the relay's `/metrics`. The
+`test-support` feature provides `test_relay()` with ephemeral ports, generated
+TLS, and a certificate fingerprint for client pinning.
+
 The accessors borrow and `run` consumes the relay, so clone `cluster`,
 `auth`, `client`, `stats`, `shutdown`, and `shutdown_trigger` for application
 tasks before calling it. `trigger.start()` drains every session with a GOAWAY

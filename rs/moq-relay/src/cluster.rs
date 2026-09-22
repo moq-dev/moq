@@ -1071,6 +1071,11 @@ pub struct Cluster {
 }
 
 impl Cluster {
+	/// The origin ID used by this relay on the wire.
+	pub fn id(&self) -> u64 {
+		self.origin.hop().id()
+	}
+
 	/// Creates a cluster with one origin, using [`Options`] for identity
 	/// and cache.
 	///
