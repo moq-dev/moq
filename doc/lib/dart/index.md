@@ -101,5 +101,25 @@ catalog and container types are there, so already-encoded frames flow through
 `MoqMediaProducer`/`MoqMediaConsumer`, but encoding is up to
 `package:camera`, platform channels, or another codec package.
 
+## Connection stats
+
+`session.stats()` returns a `ConnectionStats` snapshot. Each field is `null`
+when the transport backend does not report it (native QUIC reports all of them;
+browser WebTransport reports few or none) or before it is available, which is
+not the same as zero. `rttUs` is microseconds; the `rtt` extension reads it as a
+`Duration`.
+
+| Field | Unit | Meaning |
+| --- | --- | --- |
+| `rttUs` | microseconds | Smoothed round-trip time. |
+| `estimatedSendRateBps` | bits per second | Send bandwidth from the congestion controller. |
+| `estimatedRecvRateBps` | bits per second | Receive bandwidth from MoQ PROBE. |
+| `bytesSent` | bytes | Total sent, including retransmissions and overhead. |
+| `bytesReceived` | bytes | Total received, including duplicates and overhead. |
+| `bytesLost` | bytes | Total lost, detected via retransmission or acknowledgement. |
+| `packetsSent` | datagrams | Total datagrams sent. |
+| `packetsReceived` | datagrams | Total datagrams received. |
+| `packetsLost` | datagrams | Total datagrams detected as lost. |
+
 - Source: [`dart/`](https://github.com/moq-dev/moq/tree/main/dart)
 - Packages: [moq](https://pub.dev/packages/moq), [moq\_ffi](https://pub.dev/packages/moq_ffi)

@@ -55,6 +55,25 @@ if (session < 0)
     return fail(moq_error());
 ```
 
+## Connection stats
+
+Every field in `moq_connection_stats` carries a matching `<field>_valid` flag,
+`false` when the transport backend does not report it (a `false` flag is not the
+same as zero). Native QUIC reports every metric; the browser WebTransport
+reports few or none.
+
+| Field | Unit | Meaning |
+| --- | --- | --- |
+| `rtt_us` | microseconds | Smoothed round-trip time. |
+| `estimated_send_rate_bps` | bits per second | Send bandwidth from the congestion controller. |
+| `estimated_recv_rate_bps` | bits per second | Receive bandwidth from MoQ PROBE. |
+| `bytes_sent` | bytes | Total sent, including retransmissions and overhead. |
+| `bytes_received` | bytes | Total received, including duplicates and overhead. |
+| `bytes_lost` | bytes | Total lost, detected via retransmission or acknowledgement. |
+| `packets_sent` | datagrams | Total datagrams sent. |
+| `packets_received` | datagrams | Total datagrams received. |
+| `packets_lost` | datagrams | Total datagrams detected as lost. |
+
 The header is the reference; each function carries a doc comment. Source and
 a worked example: [`rs/libmoq`](https://github.com/moq-dev/moq/tree/main/rs/libmoq),
 API docs on [docs.rs/libmoq](https://docs.rs/libmoq).

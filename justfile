@@ -744,6 +744,7 @@ _check-common:
     bun install --frozen-lockfile
     just _markdown-test
     just _markdown check
+    python3 rs/scripts/stats-docs.py
     just _shell check
     @if command -v taplo >/dev/null 2>&1; then RUST_LOG=error taplo format --check; fi
     @if command -v nixfmt >/dev/null 2>&1; then nixfmt --check $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); fi
