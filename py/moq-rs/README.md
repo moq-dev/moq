@@ -29,10 +29,12 @@ import moq
 async def main():
     async with moq.connect("https://cdn.moq.dev/anon") as client:
         async for announcement in client.announced():
-            catalog = await announcement.broadcast.catalog()
+            # A route covers a prefix and carries no broadcast, so resolve the path.
+            broadcast = await client.request_broadcast(announcement.prefix)
+            catalog = await broadcast.catalog()
 
             for name, track in catalog.audio.items():
-                frames = await announcement.broadcast.subscribe_media(name, track)
+                frames = await broadcast.subscribe_media(name, track)
                 async with frames:
                     async for frame in frames:
                         print(f"Got frame: {len(frame.payload)} bytes, ts={frame.timestamp_us}")
@@ -53,7 +55,7 @@ async def main():
         broadcast = client.create_broadcast("my-stream")
 
         # Publish an Opus audio track (init bytes from your encoder)
-        audio = broadcast.publish_media("opus", opus_init_bytes)
+        audio = broadcast.publish_audio(moq.AudioFormat.OPUS, opus_init_bytes)
 
         # Write frames
         # Audio has no keyframes, so `cut` is what gives it group boundaries.
@@ -145,7 +147,8 @@ client = moq.Client(
 
 - **`BroadcastProducer()`**. Create a broadcast to publish tracks into.
   - `.dynamic() → BroadcastDynamic`
-  - `.publish_media(format, init=b"", video=None) → MediaProducer`. Pass a `VideoHint` to pin catalog fields the stream can't reveal (bitrate) or publish the catalog before the first keyframe; audio formats resolve from their init bytes.
+  - `.publish_audio(format, init, *, label=None) → MediaProducer`. `init` is required: an OpusHead or AudioSpecificConfig resolves the whole rendition.
+  - `.publish_video(format, init=b"", *, label=None, hint=None) → MediaProducer`. `init` may be empty for a format that resolves in band; a `VideoHint` pins catalog fields the stream can't reveal (bitrate) or publishes the catalog before the first keyframe.
   - `.finish()`
 - **`BroadcastDynamic`**. Async source of tracks requested by subscribers.
   - `await .requested_track() → TrackRequest`. Call `.accept()` on it for a `TrackProducer`, or `.abort(code)` to reject.
@@ -182,7 +185,7 @@ client = moq.Client(
 - **`GroupConsumer`**. Async iterator of timestamped `Frame`s.
   - `.read_frame() -> Frame | None` returns a timestamped raw frame.
 
-All consumers (`CatalogConsumer`, `MediaConsumer`, `TrackConsumer`, `AudioConsumer`, `GroupConsumer`) are async context managers; exiting `async with` cancels the subscription.
+Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`CatalogConsumer`, `MediaConsumer`, `MediaGroupConsumer`, `TrackConsumer`, `AudioConsumer`, `GroupConsumer`, `JsonSnapshotConsumer`, `JsonStreamConsumer`, `AnnounceConsumer`, `AnnouncedBroadcast`) and the dynamic sources (`OriginDynamic`, `BroadcastDynamic`, `TrackDynamic`).
 
 ### Origin (advanced)
 
