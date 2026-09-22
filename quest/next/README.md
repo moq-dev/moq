@@ -39,6 +39,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Broadcast route](/quest/next/js-broadcast-route.md) - JS Announce.Broadcast goes live on any claim matching its path, like Rust routed()
 - [io_uring check](/quest/next/check-uring-feature.md) - a moq-relay diff compiles the io-uring feature in `just check`, not only nightly
 - [io_uring handshake cancellation](/quest/next/uring-handshake-cancel.md) - dropping a pending handshake releases its connection while the worker keeps running
+- [io_uring handshake flush](/quest/next/uring-handshake-flush.md) - a dial resolves only once its last handshake flight is on the wire, never stranding the peer
 - [Flaky timing tests](/quest/next/flaky-timing-tests.md) - three real-clock tests become deterministic instead of failing under load
 - [Binding stats docs](/quest/next/binding-stats-docs.md) - every binding's doc page lists its connection stats fields with units
 
@@ -71,6 +72,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Opus descriptions](/quest/next/audio-opus-input.md) - validate headers and honor codec clock, pre-skip, and gain
 - [Capture formats](/quest/next/audio-capture-format.md) - unsupported overrides refuse before device open and channel counts cannot wrap
 - [NVENC recovery](/quest/next/nvenc-recovery.md) - partial initialization and rejected rate changes preserve valid state
+- [GPU pool reservation](/quest/next/gpu-pool-reservation.md) - a full GPU frame pool is a `None` reservation the caller drops on, not an error to match
 - [Transcode source](/quest/next/transcode-source.md) - select a rendition the chosen backend can actually decode
 - [Keyframe trigger](/quest/next/keyframe-trigger.md) - an application can ask the built-in capture encoder for a keyframe
 - [QoS](/quest/next/qos/README.md) - broadcast health: relay starvation and timeliness histograms, and client stats broadcasts from publishers and viewers
