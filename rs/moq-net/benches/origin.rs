@@ -1,10 +1,11 @@
-//! Cost of one announcement sweeping the origin's route table.
+//! Cost of one announcement against a fleet-shaped origin route table.
 //!
-//! `sync_route` visits every (cursor, route) pair, and each visit asks whether
-//! the route's prefix presents on that cursor. Building the prefix's claim is
-//! the expensive half of that answer, so a table that rebuilt it per visit paid
-//! `cursors * routes` pattern constructions per announcement. These shapes are
-//! fleet-sized on both axes, which is where that became the whole CPU budget.
+//! The table is a trie keyed by path segment: an announcement visits the
+//! cursors hanging on the walk down to its prefix and beneath it, and each of
+//! those recomputes its best route from the entries at that prefix alone. So
+//! the cost is bounded by the tree around the announced prefix, and these
+//! shapes, fleet-sized on both axes, are where a scan of every cursor and
+//! every route once became the whole CPU budget.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use moq_net::{Pattern, Patterns, origin};

@@ -514,7 +514,7 @@ impl Route {
 
 static NEXT_CONSUMER_ID: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct ConsumerId(u64);
 
 impl ConsumerId {
@@ -805,6 +805,10 @@ struct TableCursor {
 	root: PathOwned,
 	/// The absolute patterns this cursor is scoped to (its token / scope).
 	allowed: Patterns,
+	/// Where the cursor hangs in the [`RouteTable`]: the literal heads of
+	/// `allowed`. A route the cursor can see sits at or under one of them, or on
+	/// the walk down to one.
+	heads: Vec<PathOwned>,
 	/// Skip routes whose hop chain or announcing session (`via`) is this peer
 	/// (control-plane split horizon).
 	exclude: Option<Hop>,
@@ -1485,12 +1489,12 @@ impl Announcing {
 			return Err(Error::Closed);
 		}
 
-		let mut ids = Vec::with_capacity(self.prefixes.len());
+		let mut entries = Vec::with_capacity(self.prefixes.len());
 		for (prefix, claim) in &self.prefixes {
 			let id = shared.next_route;
 			shared.next_route += 1;
 			shared.generation += 1;
-			shared.routes.push(RouteEntry {
+			shared.routes.insert(RouteEntry {
 				id,
 				prefix: prefix.clone(),
 				scope: self.scope.clone(),
@@ -1502,7 +1506,7 @@ impl Announcing {
 				claim: claim.clone(),
 			});
 			shared.sync_route(prefix, claim);
-			ids.push(id);
+			entries.push((prefix.clone(), id));
 		}
 		drop(shared);
 
@@ -1511,7 +1515,7 @@ impl Announcing {
 
 		Ok(AnnounceProducer {
 			shared: self.shared.clone(),
-			ids,
+			entries,
 			_guard: guard,
 		})
 	}
@@ -1555,9 +1559,9 @@ impl Announcer {
 #[must_use = "dropping an announcement retracts the route"]
 pub(crate) struct AnnounceProducer {
 	shared: kio::Shared<OriginState>,
-	/// The table entries this advertisement created. A prefix remains unchanged;
-	/// pattern scopes only filter its visibility and requests.
-	ids: Vec<u64>,
+	/// The table entries this advertisement created, by prefix and id. A prefix
+	/// remains unchanged; pattern scopes only filter its visibility and requests.
+	entries: Vec<(PathOwned, u64)>,
 	/// Ingress announce stats guard, held for the advertisement's lifetime.
 	_guard: stats::Announce,
 }
@@ -1575,17 +1579,17 @@ impl AnnounceProducer {
 		if shared.closed {
 			return Err(Error::Closed);
 		}
-		for id in &self.ids {
+		for (prefix, id) in &self.entries {
 			// Each entry keeps its advertised prefix; only the metadata moves.
-			let Some(entry) = shared.routes.iter_mut().find(|entry| entry.id == *id) else {
+			let Some(entry) = shared.routes.entry_mut(prefix, *id) else {
 				continue;
 			};
 			entry.hops = route.hops.clone();
 			entry.cost = route.cost;
 			entry.via = route.via;
-			let (prefix, claim) = (entry.prefix.clone(), entry.claim.clone());
+			let claim = entry.claim.clone();
 			shared.generation += 1;
-			shared.sync_route(&prefix, &claim);
+			shared.sync_route(prefix, &claim);
 		}
 		Ok(())
 	}
@@ -1594,11 +1598,10 @@ impl AnnounceProducer {
 	/// waiting on its queue. Idempotent, and what dropping the advertisement does.
 	fn retract(&self) {
 		let mut shared = self.shared.lock();
-		for id in &self.ids {
-			let Some(index) = shared.routes.iter().position(|entry| entry.id == *id) else {
+		for (prefix, id) in &self.entries {
+			let Some(entry) = shared.routes.remove(prefix, *id) else {
 				continue;
 			};
-			let entry = shared.routes.swap_remove(index);
 			shared.generation += 1;
 			// Reject anything still waiting on this route's server; a request
 			// already handed to the handler resolves through its own `Request`.
@@ -1706,7 +1709,11 @@ impl DriverState {
 		let (servers, cursors, fronts) = {
 			let mut shared = self.shared.lock();
 			shared.closed = true;
-			let servers: Vec<_> = shared.routes.iter().filter_map(|entry| entry.server.clone()).collect();
+			let servers: Vec<_> = shared
+				.routes
+				.entries()
+				.filter_map(|entry| entry.server.clone())
+				.collect();
 			let cursors: Vec<_> = shared.cursors.values().map(|cursor| cursor.state.clone()).collect();
 			let fronts: Vec<_> = shared.fronts.values().map(|front| front.request.clone()).collect();
 			(servers, cursors, fronts)
@@ -2579,7 +2586,7 @@ async fn run_remote_front(task: RemoteFrontTask) {
 			if table.closed {
 				break 'run;
 			}
-			refused.retain(|id| table.routes.iter().any(|entry| entry.id == *id));
+			refused.retain(|id| table.routes.covers(&path.as_path(), *id));
 			let best = match front.identity.routable() {
 				true => table.best_route(&path.as_path(), exclude, front.identity.pin(), &refused),
 				false => None,
@@ -2730,7 +2737,7 @@ async fn run_remote_front(task: RemoteFrontTask) {
 					// table tells them apart: an `Unroutable` from a route that
 					// still stands is the handler's answer, and re-asking it
 					// would spin forever.
-					Err(Error::Unroutable) if !shared.lock().routes.iter().any(|entry| entry.id == route) => {
+					Err(Error::Unroutable) if !shared.lock().routes.covers(&path.as_path(), route) => {
 						last_err = Some(Error::Unroutable);
 					}
 					// An authoritative refusal of the path. It ends a front with
@@ -2839,6 +2846,186 @@ impl FrontDriver {
 	}
 }
 
+/// The announced routes, keyed by prefix: a trie with one node per path
+/// segment. Every question about a path walks its segments, so the cost of an
+/// announcement, a cursor registration, or a request is bounded by the tree
+/// around that path and never by the size of the table.
+#[derive(Default)]
+struct RouteTable {
+	root: RouteNode,
+}
+
+/// One prefix in the [`RouteTable`]: what is announced exactly there, which
+/// cursors hang there, and the prefixes one segment below.
+#[derive(Default)]
+struct RouteNode {
+	/// Routes announced exactly at this prefix.
+	entries: Vec<RouteEntry>,
+	/// Cursors with an interest head at this prefix (see [`interest_prefixes`]).
+	cursors: Vec<ConsumerId>,
+	/// Cursors at this node or below. An announcement walks only the subtrees
+	/// that hold one, so a deep table of routes nobody watches costs nothing.
+	cursors_below: usize,
+	children: HashMap<String, RouteNode>,
+}
+
+impl RouteNode {
+	/// Nothing here and nothing below: the node can be pruned.
+	fn is_empty(&self) -> bool {
+		self.entries.is_empty() && self.cursors.is_empty() && self.children.is_empty()
+	}
+
+	/// The node `parts` below this one, if the table has it.
+	fn find<'a>(&self, mut parts: impl Iterator<Item = &'a str>) -> Option<&Self> {
+		match parts.next() {
+			None => Some(self),
+			Some(part) => self.children.get(part)?.find(parts),
+		}
+	}
+
+	/// The node `parts` below this one, created along the way when missing.
+	/// `cursors` is added to `cursors_below` at every node on the walk.
+	fn reach<'a>(&mut self, mut parts: impl Iterator<Item = &'a str>, cursors: usize) -> &mut Self {
+		self.cursors_below += cursors;
+		match parts.next() {
+			None => self,
+			Some(part) => self.children.entry(part.to_string()).or_default().reach(parts, cursors),
+		}
+	}
+
+	/// Run `f` on the node `parts` below this one, then prune every node the
+	/// edit emptied. `cursors` is subtracted from `cursors_below` at every node
+	/// on the walk. `None` when the node does not exist, leaving the table as is.
+	fn edit<'a, R>(
+		&mut self,
+		mut parts: impl Iterator<Item = &'a str>,
+		cursors: usize,
+		f: impl FnOnce(&mut Self) -> R,
+	) -> Option<R> {
+		let result = match parts.next() {
+			None => f(self),
+			Some(part) => {
+				let child = self.children.get_mut(part)?;
+				let result = child.edit(parts, cursors, f)?;
+				if child.is_empty() {
+					self.children.remove(part);
+				}
+				result
+			}
+		};
+		self.cursors_below -= cursors;
+		Some(result)
+	}
+
+	/// Visit this node and everything below it.
+	fn walk<'a>(&'a self, visit: &mut impl FnMut(&'a Self)) {
+		visit(self);
+		for child in self.children.values() {
+			child.walk(visit);
+		}
+	}
+
+	/// Collect the cursors at this node and below, skipping subtrees with none.
+	fn collect_cursors(&self, out: &mut Vec<ConsumerId>) {
+		if self.cursors_below == 0 {
+			return;
+		}
+		out.extend(&self.cursors);
+		for child in self.children.values() {
+			child.collect_cursors(out);
+		}
+	}
+}
+
+impl RouteTable {
+	/// The nodes above `path` and the node at it, as far as the table has them.
+	/// The entries of those nodes are exactly the routes covering `path`.
+	fn split(&self, path: &Path) -> (Vec<&RouteNode>, Option<&RouteNode>) {
+		let mut above = Vec::new();
+		let mut node = &self.root;
+		for part in path.parts() {
+			above.push(node);
+			match node.children.get(part) {
+				Some(child) => node = child,
+				None => return (above, None),
+			}
+		}
+		(above, Some(node))
+	}
+
+	/// The routes covering `path`: those announced at it and at every prefix of it.
+	fn covering(&self, path: &Path) -> impl Iterator<Item = &RouteEntry> {
+		let (above, at) = self.split(path);
+		above.into_iter().chain(at).flat_map(|node| node.entries.iter())
+	}
+
+	/// Whether the route `id` still covers `path`.
+	fn covers(&self, path: &Path, id: u64) -> bool {
+		self.covering(path).any(|entry| entry.id == id)
+	}
+
+	/// The routes announced exactly at `prefix`.
+	fn at(&self, prefix: &Path) -> impl Iterator<Item = &RouteEntry> {
+		self.root
+			.find(prefix.parts())
+			.into_iter()
+			.flat_map(|node| node.entries.iter())
+	}
+
+	/// Every route in the table, for the teardown.
+	fn entries(&self) -> impl Iterator<Item = &RouteEntry> {
+		let mut nodes = Vec::new();
+		self.root.walk(&mut |node| nodes.push(node));
+		nodes.into_iter().flat_map(|node| node.entries.iter())
+	}
+
+	fn insert(&mut self, entry: RouteEntry) {
+		let node = self.root.reach(entry.prefix.parts(), 0);
+		node.entries.push(entry);
+	}
+
+	fn entry_mut(&mut self, prefix: &Path, id: u64) -> Option<&mut RouteEntry> {
+		let mut node = &mut self.root;
+		for part in prefix.parts() {
+			node = node.children.get_mut(part)?;
+		}
+		node.entries.iter_mut().find(|entry| entry.id == id)
+	}
+
+	fn remove(&mut self, prefix: &Path, id: u64) -> Option<RouteEntry> {
+		self.root
+			.edit(prefix.parts(), 0, |node| {
+				let index = node.entries.iter().position(|entry| entry.id == id)?;
+				Some(node.entries.swap_remove(index))
+			})
+			.flatten()
+	}
+
+	fn add_cursor(&mut self, head: &Path, id: ConsumerId) {
+		self.root.reach(head.parts(), 1).cursors.push(id);
+	}
+
+	fn remove_cursor(&mut self, head: &Path, id: ConsumerId) {
+		self.root
+			.edit(head.parts(), 1, |node| node.cursors.retain(|cursor| *cursor != id));
+	}
+
+	/// The cursors a route at `prefix` can present on: a cursor sees a route
+	/// only when one of its heads is on the walk down to the prefix or somewhere
+	/// beneath it, so those are the only cursors visited.
+	fn cursors_touching(&self, prefix: &Path) -> Vec<ConsumerId> {
+		let (above, at) = self.split(prefix);
+		let mut cursors: Vec<ConsumerId> = above.iter().flat_map(|node| node.cursors.iter().copied()).collect();
+		if let Some(node) = at {
+			node.collect_cursors(&mut cursors);
+		}
+		// A cursor with several heads can be reached more than once.
+		cursors.sort_unstable();
+		cursors.dedup();
+		cursors
+	}
+}
+
 /// The origin's shared state: the route table, the announce cursors observing
 /// it, and the remotely-served fronts.
 ///
@@ -2847,16 +3034,18 @@ impl FrontDriver {
 /// this holds everything advertised or served on demand.
 #[derive(Default)]
 struct OriginState {
-	// The announced routes, in announcement order. Scans are linear: the table
-	// holds one entry per live advertisement, not one per broadcast consumer.
-	routes: Vec<RouteEntry>,
+	// The announced routes, keyed by prefix. The table holds one entry per live
+	// advertisement, not one per broadcast consumer.
+	routes: RouteTable,
 	next_route: u64,
 	// Bumped on every change to what a path resolves to: a route inserted,
 	// re-priced, or retracted, and a local broadcast attached. A requester waits
 	// on it rather than re-asking a table that has not moved.
 	generation: u64,
 
-	// The registered announce cursors, each with its own coalescing buffer.
+	// The registered announce cursors, each with its own coalescing buffer. Each
+	// also hangs in the route table at its heads, which is how an announcement
+	// finds the cursors it can present on.
 	cursors: HashMap<ConsumerId, TableCursor>,
 
 	// The remotely-served fronts, keyed by absolute path and the requester's
@@ -2875,13 +3064,16 @@ struct OriginState {
 
 impl OriginState {
 	/// Re-deliver the best route at every presented prefix `prefix` maps to, on
-	/// every cursor. Called after an entry covering `prefix` was added, updated,
-	/// or removed.
-	/// `claim` is `prefix`'s [`prefix_claim`], held by the entry that changed.
+	/// every cursor it can present on. Called after an entry covering `prefix`
+	/// was added, updated, or removed. `claim` is `prefix`'s [`prefix_claim`],
+	/// held by the entry that changed.
 	fn sync_route(&mut self, prefix: &Path, claim: &Pattern) {
 		// Split borrows: the recompute reads `routes` while mutating a cursor.
 		let routes = &self.routes;
-		for cursor in self.cursors.values_mut() {
+		for id in routes.cursors_touching(prefix) {
+			let Some(cursor) = self.cursors.get_mut(&id) else {
+				continue;
+			};
 			if let Some(presented) = cursor.presented(prefix, claim) {
 				Self::sync_cursor(routes, cursor, &presented);
 			}
@@ -2890,15 +3082,22 @@ impl OriginState {
 
 	/// Recompute the best visible route presenting at `presented` (relative) for
 	/// one cursor and deliver the change, if any.
-	fn sync_cursor(routes: &[RouteEntry], cursor: &mut TableCursor, presented: &PathOwned) {
-		// Among entries presenting here, the longest prefix wins outright, so the
-		// metadata a cursor advertises matches what a request through it actually
-		// resolves.
-		let candidates: Vec<&RouteEntry> = routes
-			.iter()
-			.filter(|entry| cursor.visible(entry))
-			.filter(|entry| cursor.presented(&entry.prefix, &entry.claim).as_ref() == Some(presented))
-			.collect();
+	fn sync_cursor(routes: &RouteTable, cursor: &mut TableCursor, presented: &PathOwned) {
+		// The entries presenting here are the ones announced at the absolute
+		// prefix, or, for the cursor's own root, at the root and every prefix
+		// above it (all of which present as the empty path). Among them, the
+		// longest prefix wins outright, so the metadata a cursor advertises
+		// matches what a request through it actually resolves.
+		let candidates: Vec<&RouteEntry> = match presented.is_empty() {
+			true => routes
+				.covering(&cursor.root)
+				.filter(|entry| cursor.visible(entry))
+				.collect(),
+			false => {
+				let absolute = cursor.root.join(presented);
+				routes.at(&absolute).filter(|entry| cursor.visible(entry)).collect()
+			}
+		};
 		let most = candidates.iter().map(|entry| entry.prefix.len()).max();
 		let best = most.and_then(|most| {
 			candidates
@@ -2951,17 +3150,28 @@ impl OriginState {
 
 	/// Register a cursor and replay the current best route per presented prefix.
 	fn register_cursor(&mut self, id: ConsumerId, mut cursor: TableCursor) {
-		let routes = &self.routes;
+		// The routes a cursor can see sit on the walk down to one of its heads or
+		// somewhere beneath it, so only those subtrees are replayed.
 		let mut presented: Vec<PathOwned> = Vec::new();
-		for entry in routes {
-			if let Some(p) = cursor.presented(&entry.prefix, &entry.claim)
-				&& !presented.contains(&p)
-			{
-				presented.push(p);
+		for head in &cursor.heads {
+			let (above, at) = self.routes.split(head);
+			let mut nodes = above;
+			if let Some(node) = at {
+				node.walk(&mut |node| nodes.push(node));
+			}
+			for entry in nodes.into_iter().flat_map(|node| node.entries.iter()) {
+				if let Some(p) = cursor.presented(&entry.prefix, &entry.claim)
+					&& !presented.contains(&p)
+				{
+					presented.push(p);
+				}
 			}
 		}
 		for p in &presented {
-			Self::sync_cursor(routes, &mut cursor, p);
+			Self::sync_cursor(&self.routes, &mut cursor, p);
+		}
+		for head in &cursor.heads {
+			self.routes.add_cursor(head, id);
 		}
 		self.cursors.insert(id, cursor);
 	}
@@ -2986,25 +3196,30 @@ impl OriginState {
 		publisher: Option<Hop>,
 		refused: &HashSet<u64>,
 	) -> Option<&RouteEntry> {
-		let candidates: Vec<&RouteEntry> = self
-			.routes
-			.iter()
-			.filter(|entry| path.has_prefix(&entry.prefix))
-			.filter(|entry| entry.scope.matches(path.as_str()))
-			.filter(|entry| entry.visible_to(exclude))
-			.filter(|entry| match publisher {
-				Some(first) => entry.hops.iter().next() == Some(&first),
-				None => true,
-			})
-			.filter(|entry| !refused.contains(&entry.id))
-			.collect();
-
-		// Covering prefixes of one path form a chain, so the longest is unique.
-		let most = candidates.iter().map(|entry| entry.prefix.len()).max()?;
-		candidates
-			.into_iter()
-			.filter(|entry| entry.prefix.len() == most && entry.server.is_some())
-			.min_by_key(|entry| route_order(&entry.prefix, entry))
+		// Covering prefixes of one path form a chain, so the deepest node with a
+		// candidate holds the unique longest prefix; walking down, the last such
+		// node decides.
+		let (above, at) = self.routes.split(path);
+		let mut best = None;
+		for node in above.into_iter().chain(at) {
+			let mut candidates = node
+				.entries
+				.iter()
+				.filter(|entry| entry.scope.matches(path.as_str()))
+				.filter(|entry| entry.visible_to(exclude))
+				.filter(|entry| match publisher {
+					Some(first) => entry.hops.iter().next() == Some(&first),
+					None => true,
+				})
+				.filter(|entry| !refused.contains(&entry.id))
+				.peekable();
+			if candidates.peek().is_some() {
+				best = candidates
+					.filter(|entry| entry.server.is_some())
+					.min_by_key(|entry| route_order(&entry.prefix, entry));
+			}
+		}
+		best
 	}
 }
 
@@ -3802,6 +4017,7 @@ impl AnnounceConsumer {
 					id,
 					TableCursor {
 						root: root.clone(),
+						heads: interest_prefixes(&allowed),
 						allowed,
 						exclude,
 						state: state.clone(),
@@ -3916,7 +4132,12 @@ impl futures::Stream for AnnounceConsumer {
 
 impl Drop for AnnounceConsumer {
 	fn drop(&mut self) {
-		self.shared.lock().cursors.remove(&self.id);
+		let mut shared = self.shared.lock();
+		if let Some(cursor) = shared.cursors.remove(&self.id) {
+			for head in &cursor.heads {
+				shared.routes.remove_cursor(head, self.id);
+			}
+		}
 	}
 }
 
@@ -5765,6 +5986,32 @@ mod tests {
 			.into_iter()
 			.collect();
 		assert_eq!(producer.scope("", &mixed).unwrap().allowed(), mixed);
+	}
+
+	#[test]
+	fn route_table_prunes_to_empty() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+
+		// Routes and cursors hang at their prefixes; the nodes on the way exist
+		// only while something is there.
+		let cursor = consumer
+			.scope("", &scopes(&["room/a", "other/deep/head"]))
+			.unwrap()
+			.announced();
+		let route = producer.announce("room/a/b/c", Route::default()).unwrap();
+		{
+			let table = producer.shared.lock();
+			assert!(table.routes.root.find(Path::new("room/a/b/c").parts()).is_some());
+			assert!(table.routes.root.find(Path::new("other/deep/head").parts()).is_some());
+			assert_eq!(table.routes.root.cursors_below, 2);
+		}
+
+		drop(route);
+		drop(cursor);
+		let table = producer.shared.lock();
+		assert!(table.routes.root.is_empty());
+		assert_eq!(table.routes.root.cursors_below, 0);
 	}
 
 	#[test]
