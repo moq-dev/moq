@@ -182,7 +182,7 @@ client = moq.Client(
 - **`GroupConsumer`**. Async iterator of timestamped `Frame`s.
   - `.read_frame() -> Frame | None` returns a timestamped raw frame.
 
-All consumers (`CatalogConsumer`, `MediaConsumer`, `TrackConsumer`, `AudioConsumer`, `GroupConsumer`) are async context managers; exiting `async with` cancels the subscription.
+Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`CatalogConsumer`, `MediaConsumer`, `MediaGroupConsumer`, `TrackConsumer`, `AudioConsumer`, `GroupConsumer`, `JsonSnapshotConsumer`, `JsonStreamConsumer`, `AnnounceConsumer`, `AnnouncedBroadcast`) and the dynamic sources (`OriginDynamic`, `BroadcastDynamic`, `TrackDynamic`).
 
 ### Origin (advanced)
 

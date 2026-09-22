@@ -9,29 +9,51 @@ the generated layer for.
 
 ## Plan
 
-Gaps found method by method against `rs/moq-ffi/src`:
+Coverage is already there: an audit of every `#[uniffi::export]` method in
+`rs/moq-ffi/src` against the five wrappers found none unreachable. Python and
+Go re-wrap each one; Kotlin, Dart, and Swift alias the generated types, so the
+methods arrive with them. What is left is idiom, and half of it cannot be done
+additively.
 
-- Dart: `set_reconnect`/`set_backoff` are not wired into `Moq.connect`,
-  there is no `Server` facade, and every type keeps its `Moq` prefix.
-- Kotlin: no `Flow` for `MoqVideoConsumer` where audio has one; `Moq*`
-  types leak through the public API despite `Aliases.kt`; `connect` takes
-  twelve named parameters where `rs/moq-ffi/CLAUDE.md` says Go, Kotlin, and
-  Dart take an options struct (only Go does).
-- Python: `OriginDynamic`, `TrackDynamic`, `BroadcastDynamic`,
-  `JsonSnapshotConsumer`, and `JsonStreamConsumer` own a `cancel()` with no
-  context manager; `fetch_media_group` takes four positional arguments;
-  annotations name `MoqAudioFormat` where unprefixed aliases exist.
-- Go: `EncodeAudio`, `EncodeVideo`, `PublishAudioOnTrack`, `FetchGroup`,
-  `FetchMediaGroup`, `SubscribeMedia`, `DecodeAudio`, and `DecodeVideo` take
-  four or more positional arguments.
-- Verbs: `announced` is `announcements` in Kotlin and Dart; `next` is
-  `All`/`Requests`/`Updates`/`Frames`/`Values` in Go; `set_consume` is
-  `subscribe=` in four. The wrappers move to the core's spelling; the two
-  core changes (`set_tls_verify`, the transport enum) land on main in the
-  libmoq release cleanup.
-- `rtt_us` and the other microsecond fields are raw integers in every
-  wrapper; a `Duration`/`timedelta` at the boundary where the language has
-  one.
+Landed:
+
+- Python: `OriginDynamic`, `BroadcastDynamic`, `TrackDynamic`,
+  `JsonSnapshotConsumer`, and `JsonStreamConsumer` are async context managers
+  like the other consumers. Public annotations name the unprefixed aliases.
+- Kotlin: `VideoConsumer.frames()` matches the audio `Flow`. The public
+  signatures spell the `Aliases.kt` names. `Durations.kt` reads the
+  microsecond fields back as `kotlin.time.Duration`.
+- Dart: `reconnect` and `backoff` reach `Moq.connect`, a `Server.listen`
+  facade mirrors Kotlin's, the types have unprefixed aliases, and the
+  microsecond fields read back as a `Duration`.
+
+`fetch_media_group` and `EncodeVideo` had already moved to an options struct
+before this quest ran; the plan's arity list was stale.
+
+Open, and a maintainer call, because every one of these renames a symbol in a
+released package with no additive path (`moq-rs` 0.4.7 on PyPI, `moq.dev/moq`
+v0.6 on the Go mirror, `dev.moq:moq` 0.4.5 on Maven, `Moq` 0.4.6 on the Swift
+mirror; only Dart is unpublished). `CLAUDE.md` forbids an alias or a
+`foo_with_x`, so each one is a break to schedule on `dev` or to decide against:
+
+- `subscribe` to `consume` on Python `Client`/`connect`, Kotlin
+  `Moq.connect`/`Server.listen`, Dart `Moq.connect`, and Go
+  `WithSubscribeOrigin`/`WithServerSubscribeOrigin`. Swift already spells it
+  `setConsume`.
+- Go's `All`/`Requests`/`Updates`/`Frames`/`Values` to one verb. These are the
+  `iter.Seq2` helpers, not `Next`, which every consumer already has, so the
+  rename is about the range-over-func name alone.
+- Kotlin `announcements` and Dart `announcements` to `announced`. Both already
+  have an `announced` returning the raw handle, so this is a collision rather
+  than a gap: the two names are the `Flow`/`Stream` and the cursor.
+- Kotlin `Moq.connect`'s twelve named parameters to an options struct, which
+  `rs/moq-ffi/CLAUDE.md` asks for.
+- Go `EncodeAudio` (4 args past `ctx`) and `FetchMediaGroup` (5) to an options
+  struct. Go has no overloads, so there is no additive spelling.
+- `rtt_us` and friends as a `timedelta` in Python and a `time.Duration` in Go.
+  Python's records are the generated dataclasses and Go's `ConnectionStats` is
+  a type alias, so neither can gain an accessor without redefining the type.
+  Kotlin and Dart have extensions and are done.
 
 Public API: additive on the wrappers. Wire: none. Binding parity gates
 the release, not the merge.
