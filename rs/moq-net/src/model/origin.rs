@@ -1178,7 +1178,10 @@ impl Producer {
 				advertised: false,
 			},
 		)?;
-		Ok(source.with_announcer(Announcer { entry }))
+		Ok(source.with_announcer(Announcer {
+			entry,
+			_tasks: self.tasks.clone(),
+		}))
 	}
 
 	/// Create and advertise a broadcast in one call.
@@ -1417,6 +1420,10 @@ struct Serving {
 /// broadcast has none and cannot announce.
 pub(crate) struct Announcer {
 	entry: AnnounceProducer,
+	/// A published broadcast is lifecycle work: the origin's driver keeps
+	/// running for as long as one lives, even once every producer handle is
+	/// gone, so a session handed a producer can drop it and keep serving.
+	_tasks: Tasks,
 }
 
 impl Announcer {
@@ -5326,6 +5333,23 @@ mod tests {
 		let table = producer.shared.lock();
 		assert!(table.routes.root.is_empty());
 		assert_eq!(table.routes.root.cursors_below, 0);
+	}
+
+	/// A session handed an `origin::Producer` drops it once it has its own
+	/// handles, so the driver must keep running while a published broadcast
+	/// lives, and finish once the last one is gone.
+	#[test]
+	fn a_published_broadcast_keeps_the_driver_running() {
+		let (producer, mut driver) = Producer::new(Config::new(origin(1)));
+		let waiter = kio::Waiter::noop();
+		let broadcast = producer.create_broadcast("room/a").unwrap();
+		drop(producer);
+		assert!(
+			driver.poll(Instant::now(), &waiter).is_ok(),
+			"the broadcast is lifecycle work"
+		);
+		drop(broadcast);
+		assert!(matches!(driver.poll(Instant::now(), &waiter), Err(Error::Closed)));
 	}
 
 	#[test]
