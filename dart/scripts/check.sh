@@ -23,10 +23,18 @@ for tool in cargo dart uniffi_bindgen_dart; do
     fi
 done
 
+# Dependabot refreshes moq_ffi's lock but never moq's, so moq's drifts until
+# someone reruns the solver. Refreshing here makes `just dart fix` the remedy
+# for the `--enforce-lockfile` failure that drift causes below; enforcing it in
+# fix mode would instead fail before reaching the fix.
 for package in moq_ffi moq; do
     (
         cd "$DART_DIR/$package"
-        dart pub get --enforce-lockfile
+        if [[ "$ACTION" == fix ]]; then
+            dart pub get
+        else
+            dart pub get --enforce-lockfile
+        fi
     )
 done
 
