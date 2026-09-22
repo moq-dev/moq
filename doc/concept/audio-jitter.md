@@ -299,10 +299,16 @@ histogram entirely: `percentile() + step` was published the moment it rose, and
 for the limiters.
 
 **The ceiling is structural.** `measured` cannot exceed `BUCKETS * BUCKET`, so
-the target cannot exceed `BUCKETS * BUCKET + frame`, about 2 s. There is no
-magic number to clamp against and no term that escapes the bound, which is the
+nothing the receiver observes can carry the target past `BUCKETS * BUCKET +
+frame`, about 2 s. There is no magic number to clamp against, which is the
 specific failure of the #3517 branch: it clamped the percentile and then added
 an unbounded frame term on top.
+
+The advertised floor is the one term that can exceed that bound, and it is
+deliberately not clamped to it. The ceiling is a property of the histogram's
+size; the floor is a number the publisher declared about itself, so clamping
+the floor to the ceiling would under-buffer precisely the publisher that was
+honest about a long flush.
 
 Policy limits sit above the algorithm. A receiver's own configured maximum and
 the track's retention window both cap what it may hold, and neither is the
@@ -428,8 +434,11 @@ index. Tolerance is 1e-6 ms, which the `f64` rules above make generous.
 shipped**: this page is. When the two disagree, this page wins, the reference is
 corrected, and the corpus is regenerated with
 `bun doc/concept/audio-jitter/corpus.ts`. An implementation that imports the
-reference has proved nothing, so none of them may.
+reference has proved nothing, so none of them may; `biome.jsonc` forbids the
+import outside this directory rather than leaving it to review.
 
-`corpus.test.ts` regenerates the corpus and fails when the checked-in files no
-longer match, which is what stops a file being edited by hand to make a failing
-implementation pass. It runs in `just test` and `just check`.
+`corpus.test.ts` re-runs the reference and fails when the checked-in files no
+longer match it, which is what stops a file being edited by hand to make a
+failing implementation pass. It compares rather than rewrites; regenerating is
+the `bun doc/concept/audio-jitter/corpus.ts` command above. It runs in
+`just test` and `just check`.

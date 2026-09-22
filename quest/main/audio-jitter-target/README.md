@@ -27,7 +27,7 @@ new field on a `#[non_exhaustive]` struct, and the browser estimator is a new
 module plus a new `spread` observation.
 
 The algorithm is written down at `doc/concept/audio-jitter.md`, with a
-conformance corpus beside it that both implementations read.
+conformance corpus beside it that both implementations will read.
 
 Neither `main` nor `dev` has a measured estimator. `js/watch/src/sync.ts:159`
 still computes `max(MIN_JITTER, minRtt * 1.25)` from the connection's PROBE,

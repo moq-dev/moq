@@ -62,6 +62,31 @@
 	},
 	"overrides": [
 		{
+			// The audio jitter reference is the corpus generator, not a library: an
+			// implementation that calls it proves nothing about the normative document.
+			"includes": ["**", "!doc/concept/audio-jitter/**"],
+			"linter": {
+				"rules": {
+					"style": {
+						"noRestrictedImports": {
+							"level": "error",
+							"options": {
+								"patterns": [
+									{
+										"group": [
+											"**/concept/audio-jitter/reference",
+											"**/concept/audio-jitter/reference.*"
+										],
+										"message": "doc/concept/audio-jitter/reference.ts is non-normative. Implement the document, don't import the reference."
+									}
+								]
+							}
+						}
+					}
+				}
+			}
+		},
+		{
 			"includes": ["doc/.vitepress/theme/custom.css"],
 			"linter": {
 				"rules": {
