@@ -107,8 +107,18 @@ func publish(ctx context.Context, url, broadcast string) error {
 	fmt.Printf("publishing %q (Annex-B H.264 from stdin + a %.0f Hz tone) to %s\n", broadcast, audioToneHz, url)
 
 	toneCtx, stopTone := context.WithCancel(ctx)
-	defer stopTone()
-	go publishTone(toneCtx, audio)
+	toneDone := make(chan struct{})
+	go func() {
+		defer close(toneDone)
+		publishTone(toneCtx, audio)
+	}()
+	// Let the tone unwind before any Finish, so no write races a finished
+	// producer. Runs before the deferred producer.Finish, and is a no-op once
+	// the happy path below has already stopped and joined it.
+	defer func() {
+		stopTone()
+		<-toneDone
+	}()
 
 	// os.Stdin.Read returns as soon as any bytes are available, so ffmpeg's
 	// real-time output is forwarded rather than batched into full chunks.
@@ -128,6 +138,7 @@ func publish(ctx context.Context, url, broadcast string) error {
 		}
 	}
 	stopTone()
+	<-toneDone
 	if err := audio.Finish(); err != nil {
 		return err
 	}
