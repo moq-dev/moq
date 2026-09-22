@@ -33,7 +33,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Ingest source](/quest/m1/net-ingest-source.md) - an announce says whether the broadcast entered on this relay or a peer
 - [Publisher clocks](/quest/m1/publisher-clock.md) - wire the shared clock through native and browser publisher restarts
 - [Broadcast route](/quest/m1/js-broadcast-route.md) - JS Announce.Broadcast goes live on any claim matching its path, like Rust routed()
-- [io_uring handshake cancellation](/quest/m1/uring-handshake-cancel.md) - dropping a pending handshake releases its connection while the worker keeps running
 - [io_uring handshake flush](/quest/m1/uring-handshake-flush.md) - a dial resolves only once its last handshake flight is on the wire, never stranding the peer
 - [Flaky timing tests](/quest/m1/flaky-timing-tests.md) - three real-clock tests become deterministic instead of failing under load
 - [CLI inspection](/quest/m1/cli-inspect/README.md) - `moq ls` lists what is live and `moq fetch` reads a group over MoQ, and a guide shows how to inspect a relay
