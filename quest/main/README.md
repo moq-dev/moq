@@ -88,7 +88,6 @@ do not add another media abstraction or a renderer crate during stabilization.
 
 ## Quests
 
-- [Fork noq](/quest/main/quic-fork.md) - published MoQ crates build on moq-dev/noq's `moq-noq*` releases, and the sync procedure is written down
 - [GPU conversion and NVENC](/quest/main/video-gpu-encode.md) - validate the GPU
   conversion, resize and NVENC path for imported frames on NVIDIA hardware
 

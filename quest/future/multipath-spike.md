@@ -59,8 +59,3 @@ different name.
 
 Target `dev`, where the crate is `moq-tokio`; the rename has not reached
 `main`.
-
-## Related
-
-- [Fork noq](/quest/main/quic-fork.md) - noq's multipath support is one
-  reason it is the parent

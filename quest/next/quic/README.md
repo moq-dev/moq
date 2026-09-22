@@ -15,10 +15,10 @@ in [future](/quest/future/README.md).
 
 ## Plan
 
-Everything here builds on the [fork](/quest/main/quic-fork.md), which most
-quests require. One stack carries every change on MoQ's own QUIC paths; a build
-with the `iroh` feature also compiles upstream noq, and iroh connections are
-outside what these quests reach.
+Everything here ships from moq-dev/noq, the fork MoQ publishes as `moq-noq*`.
+One stack carries every change on MoQ's own QUIC paths; a build with the `iroh`
+feature also compiles upstream noq, and iroh connections are outside what these
+quests reach.
 
 The seven BBR correctness fixes follow the fork bootstrap. They are separate
 PRs, but one owner should work in the shared controller code at a time.
@@ -78,10 +78,6 @@ This is a transport API change, not a MoQ wire change.
   consumable versions of the fork and its adapters
 - [Upstream the fork](/quest/next/quic/upstream.md) - every general carried
   change is offered to n0-computer/noq once its shape has settled
-
-## Required
-
-- [Fork noq](/quest/main/quic-fork.md) - the fork every carried change ships from
 
 ## Related
 
