@@ -88,6 +88,9 @@ do not add another media abstraction or a renderer crate during stabilization.
 
 ## Quests
 
+- [Origin failover machine](/quest/main/origin-failover-machine.md) - a front's
+  source selection and track splicing become a pure step function with a
+  runtime-free test per transition
 - [GPU conversion and NVENC](/quest/main/video-gpu-encode.md) - validate the GPU
   conversion, resize and NVENC path for imported frames on NVIDIA hardware
 
