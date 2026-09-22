@@ -246,11 +246,9 @@ impl Producer {
 	/// advertisement in place.
 	///
 	/// Call it once the tracks a subscriber needs first (a catalog) exist, so the
-	/// advertisement lands with them in place: an announced path is what
-	/// [`origin::Consumer::announced`](super::origin::Consumer::announced)
-	/// enumerates, and a subscriber acts on it immediately. The broadcast is
-	/// reachable by exact path either way; announcing only makes it discoverable.
-	/// The route retracts on [`unannounce`](Self::unannounce), [`finish`](Self::finish),
+	/// advertisement lands with them in place: peers act on it immediately.
+	/// The origin's local cursor already enumerates the path from creation.
+	/// The peer route retracts on [`unannounce`](Self::unannounce), [`finish`](Self::finish),
 	/// [`abort`](Self::abort), or the last producer dropping.
 	///
 	/// Fails with [`Error::Closed`] on a standalone broadcast (one not created
@@ -262,9 +260,8 @@ impl Producer {
 		announcer.announce(route)
 	}
 
-	/// Retract the advertisement of this broadcast's path, if any. The broadcast
-	/// stays reachable by exact path; this is how a publisher goes off the air
-	/// without ending the broadcast.
+	/// Retract this broadcast's peer advertisement, if any. Local consumers
+	/// still discover and request the path until the broadcast ends.
 	pub fn unannounce(&self) {
 		self.alive.unannounce();
 	}
@@ -524,12 +521,11 @@ impl Alive {
 		})
 	}
 
-	/// Retract the path's advertisement, if any.
+	/// Withdraw peer advertising while leaving the path discoverable locally.
 	fn unannounce(&self) {
-		let announcement = self.announcer.lock().as_mut().and_then(Announcer::take);
-		// Retracted outside the announcer lock: the retraction re-syncs the origin's
-		// announce cursors under the origin's own lock.
-		drop(announcement);
+		if let Some(announcer) = self.announcer.lock().as_mut() {
+			announcer.withdraw();
+		}
 	}
 
 	/// End the broadcast's advertising for good: retract the standing advertisement

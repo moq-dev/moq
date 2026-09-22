@@ -144,10 +144,7 @@ impl Client {
 			.subscribe
 			.clone()
 			.map(|origin| origin.with_stats(self.stats.clone()));
-		let publish = match self.peer_hop {
-			Some(peer) => publish.map(|origin| origin.excluding(peer)),
-			None => publish,
-		};
+		let publish = publish.map(|origin| origin.excluding(self.peer_hop.unwrap_or(crate::Hop::UNKNOWN)));
 		(publish, subscribe)
 	}
 

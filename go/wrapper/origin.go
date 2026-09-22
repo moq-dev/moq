@@ -47,8 +47,8 @@ func (o *OriginProducer) Dynamic(prefix string, route Route) (*OriginDynamic, er
 // CreateBroadcast creates a broadcast at the given path, returning the producer
 // that feeds it.
 //
-// The broadcast starts unadvertised: reachable by exact path, but not visible
-// to announcement streams. Advertise it with [BroadcastProducer.Announce]
+// The broadcast appears on this origin's local announcement streams immediately.
+// Advertise it to peers with [BroadcastProducer.Announce]
 // after populating tracks. Finish unpublishes immediately, while dropping the
 // producer without finishing also unpublishes but reads to subscribers as a
 // failure rather than a deliberate end.

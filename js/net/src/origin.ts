@@ -339,7 +339,7 @@ export interface Table {
 	/** Whether every attached session announces into the table; see {@link Consumer.discovery}. */
 	readonly discovery: Getter<boolean | undefined>;
 
-	/** Create an unadvertised broadcast at `path`; see {@link Producer.createBroadcast}. */
+	/** Create a locally announced broadcast at `path`; see {@link Producer.createBroadcast}. */
 	createBroadcast(path: Path.Valid): broadcast.Producer;
 
 	/** Resolve `path`, optionally waiting for an announcement; see {@link Consumer.request}. */
@@ -366,7 +366,7 @@ export interface RequestOptions {
  *
  * Create, attach {@link dynamic} for tracks served on demand, populate, then
  * {@link broadcast.Producer.announce}: an exact-path subscribe before the tracks exist is
- * refused, and announcing only makes a path discoverable.
+ * refused, and announcing advertises the path to peers.
  *
  * @public
  */
@@ -404,10 +404,9 @@ export class Producer implements Table {
 	/**
 	 * Create a broadcast at `path`, returning its producer.
 	 *
-	 * The broadcast starts unadvertised: it is reachable by exact path for subscribes
-	 * and fetches. Advertise it once its tracks exist with
-	 * {@link broadcast.Producer.announce}; the two are independent, so cached or
-	 * on-demand content can stay reachable without ever being announced.
+	 * The broadcast appears on this origin's local announce streams immediately.
+	 * Call {@link broadcast.Producer.announce} to advertise it to peers once its
+	 * tracks exist. Local consumers can discover and request it without that call.
 	 *
 	 * Close the producer to drop it. Creating a path again supersedes the previous
 	 * broadcast: the origin drops its handle on the old one, which closes it unless the
@@ -981,9 +980,9 @@ export class Consumer {
 	/**
 	 * The announced routes matching `scope`, as a live stream: every currently advertised
 	 * route arrives first as active, then additions and retractions as they happen.
-	 * Any pattern is accepted. A local broadcast appears only after
-	 * {@link broadcast.Producer.announce}; a dynamic or received route announces the
-	 * prefix it covers when its subtree overlaps the scope. The
+	 * Any pattern is accepted. A local broadcast appears when it is created;
+	 * {@link broadcast.Producer.announce} only forwards it to peers. A dynamic or
+	 * received route announces the prefix it covers when its subtree overlaps the scope. The
 	 * stream ends when the origin closes or the consumer is closed.
 	 */
 	announced(scope: Path.Pattern = Path.Pattern.all()): announce.Consumer {
@@ -1022,8 +1021,7 @@ export class Consumer {
 					next.set(covered, snap);
 				}
 				for (const [path, front] of local ?? []) {
-					const route = advertisedLocal?.get(path);
-					if (!route) continue;
+					const route = advertisedLocal?.get(path) ?? Route.default;
 					if (scope.matches(path))
 						next.set(path, { identity: front, route, captures: scopeCaptures(scope, path) });
 				}

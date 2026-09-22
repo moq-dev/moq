@@ -47,7 +47,7 @@ for (;;) {
 }
 ```
 
-- **Origins** hold the broadcasts, not the connection: closing a session unannounces them but leaves them created for the next one. `origin.request(path)` prefers a local broadcast, so a page that watches what it publishes reads its own copy with no round trip. Create, populate, then `announce()` for an exact path; use `dynamic(prefix, route)` when the set of paths is not known: an exact-path subscribe before the tracks exist is refused, and announcing only makes a path discoverable.
+- **Origins** hold the broadcasts, not the connection: closing a session unannounces them but leaves them created for the next one. `origin.request(path)` prefers a local broadcast, so a page that watches what it publishes reads its own copy with no round trip. Create, populate, then `announce()` for an exact path; use `dynamic(prefix, route)` when the set of paths is not known: an exact-path subscribe before the tracks exist is refused, and announcing advertises the path to peers.
 - **Connections** race WebTransport against WebSocket. `new Connection({ url })` pools one connection per relay URL and reconnects with backoff, which the elements use. `closed` settles when the handle is released (`null` on a clean close); the failure that stopped retrying the current URL is `error`, and a new URL recovers the same handle. A connection owns one send-rate sampler and one `Bandwidth.Allocator`; publishers reserve against it so their encoder targets sum to the estimate instead of each matching it.
 - **Bandwidth** (`Bandwidth.Allocator`) divides the connection's send-rate estimate by track priority, max-min fair within a tier. An idle track claims nothing. The receive side is untouched.
 - **Discovery** by any pattern scope (`origin.announced(scope)`, such as `room/*/chat`; default everything). Each event's `path` is the covered prefix relative to the origin, `captures` reports what the scope's wildcards matched when the prefix pins them, and `kind` says whether it was announced, updated, or retracted. The consumer is an async iterable. `origin.dynamic(prefix, route)` advertises a prefix.
@@ -86,8 +86,8 @@ Moq.Path.Pattern.parse("camera-*").rooted("room").text; // "room/camera-*"
 Three operations, on an origin:
 
 - `origin.createBroadcast(path)` returns a producer. The broadcast is
-  reachable by exact path immediately and invisible to discovery until
-  advertised.
+  reachable and visible to local discovery immediately. Peers see it only after
+  `broadcast.announce()`.
 - `broadcast.announce(route)` / `broadcast.unannounce()` own that
   advertisement. Announcing again re-prices the standing route.
 - `origin.dynamic(prefix, route)` claims `prefix` and every path beneath it
