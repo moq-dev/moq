@@ -107,6 +107,10 @@ fn measure(fields: usize, changed_percent: usize, compressed: bool) -> (usize, u
 }
 
 fn main() {
+	// Nextest lists all targets as potential test binaries.
+	if std::env::args().any(|arg| arg == "--list") {
+		return;
+	}
 	println!("fields changed% compression encoder_allocs decoder_allocs");
 	for compressed in [false, true] {
 		for fields in [16, 128, 1024, 8192] {
