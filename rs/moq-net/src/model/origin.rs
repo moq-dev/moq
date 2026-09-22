@@ -733,6 +733,12 @@ struct RouteEntry {
 	/// announcement (a broadcast's exact path, or [`Producer::announce`]), whose
 	/// covered paths resolve only through the tree.
 	server: Option<kio::Shared<ServeState>>,
+	/// [`prefix_claim`] of [`Self::prefix`], built once at announce time.
+	///
+	/// The announce sync evaluates a route's claim once per (cursor, route) pair,
+	/// and building one allocates a segment vector and a canonical string. Holding
+	/// it makes that visit a comparison.
+	claim: Pattern,
 }
 
 impl RouteEntry {
@@ -753,12 +759,9 @@ impl RouteEntry {
 
 	/// Whether this route and `allowed` share any path beneath the advertised prefix.
 	fn overlaps(&self, allowed: &Patterns) -> bool {
-		let Ok(claim) = prefix_claim(&self.prefix) else {
-			return false;
-		};
 		self.scope.iter().any(|scope| {
 			scope
-				.intersect(&claim)
+				.intersect(&self.claim)
 				.is_ok_and(|scoped| scoped.iter().any(|restriction| allowed.overlaps(restriction)))
 		})
 	}
@@ -849,9 +852,11 @@ struct TableCursor {
 impl TableCursor {
 	/// Where `prefix` presents on this cursor, named relative to the cursor root.
 	/// The prefix stays a prefix; the pattern scope only decides visibility.
-	fn presented(&self, prefix: &Path) -> Option<PathOwned> {
-		let claim = prefix_claim(prefix).ok()?;
-		if !self.allowed.overlaps(&claim) {
+	/// `claim` is the prefix's [`prefix_claim`], which the caller already holds:
+	/// building one allocates, and the sweeps below ask this per route per
+	/// cursor.
+	fn presented(&self, prefix: &Path, claim: &Pattern) -> Option<PathOwned> {
+		if !self.allowed.overlaps(claim) {
 			return None;
 		}
 
@@ -1244,8 +1249,9 @@ impl Producer {
 	/// Fails with [`Error::Unauthorized`] if `path` is outside the prefixes this
 	/// producer may publish under (after [`scope`](Self::scope) /
 	/// [`with_root`](Self::with_root)), [`Error::BoundsExceeded`] if the full
-	/// rooted path exceeds [`Path::MAX_PARTS`], or [`Error::Closed`] once the
-	/// origin's [`Driver`] has been dropped.
+	/// rooted path exceeds [`Path::MAX_PARTS`] or holds a segment no pattern can
+	/// spell (`*` or `**`), or [`Error::Closed`] once the origin's [`Driver`] has
+	/// been dropped.
 	pub fn create_broadcast(&self, path: impl AsPath) -> Result<broadcast::Producer, Error> {
 		let path = path.as_path();
 
@@ -1273,6 +1279,9 @@ impl Producer {
 		if full.parts().count() > Path::MAX_PARTS {
 			return Err(BoundsExceeded.into());
 		}
+		// A path only a pattern could spell (a `*` segment) advertises nowhere, so
+		// refuse it here rather than publish a broadcast no cursor can see.
+		let claim = prefix_claim(&full).map_err(|_| BoundsExceeded)?;
 
 		// Resolve the ingress counters once, keyed by the absolute broadcast path.
 		let ingress = self.stats.ingress(&full);
@@ -1283,7 +1292,7 @@ impl Producer {
 				hop: self.info,
 				shared: self.shared.clone(),
 				requested: full.clone(),
-				prefixes: vec![full.clone()],
+				prefixes: vec![(full.clone(), claim)],
 				scope: self.scope.allowed.clone(),
 				local: true,
 				stats: self.stats.clone(),
@@ -1478,9 +1487,10 @@ struct Announcing {
 	shared: kio::Shared<OriginState>,
 	/// The absolute advertised prefix, which also keys the ingress announce counters.
 	requested: PathOwned,
-	/// The prefix inserted into the table. Pattern scopes decide visibility and
-	/// request authorization without changing the route's prefix shape.
-	prefixes: Vec<PathOwned>,
+	/// The prefix inserted into the table, with its [`prefix_claim`]. Pattern
+	/// scopes decide visibility and request authorization without changing the
+	/// route's prefix shape.
+	prefixes: Vec<(PathOwned, Pattern)>,
 	/// The absolute paths the producer is authorized to serve.
 	scope: Patterns,
 	local: bool,
@@ -1502,7 +1512,7 @@ impl Announcing {
 			hop: producer.info,
 			shared: producer.shared.clone(),
 			requested: requested.clone(),
-			prefixes: vec![requested],
+			prefixes: vec![(requested, claim)],
 			scope: producer.scope.allowed.clone(),
 			local: false,
 			stats: producer.stats.clone(),
@@ -1524,7 +1534,7 @@ impl Announcing {
 		}
 
 		let mut ids = Vec::with_capacity(self.prefixes.len());
-		for prefix in &self.prefixes {
+		for (prefix, claim) in &self.prefixes {
 			let id = shared.next_route;
 			shared.next_route += 1;
 			shared.generation += 1;
@@ -1537,8 +1547,9 @@ impl Announcing {
 				via,
 				local: self.local,
 				server: server.clone(),
+				claim: claim.clone(),
 			});
-			shared.sync_route(prefix);
+			shared.sync_route(prefix, claim);
 			ids.push(id);
 		}
 		drop(shared);
@@ -1620,9 +1631,9 @@ impl AnnounceProducer {
 			entry.hops = route.hops.clone();
 			entry.cost = route.cost;
 			entry.via = route.via;
-			let prefix = entry.prefix.clone();
+			let (prefix, claim) = (entry.prefix.clone(), entry.claim.clone());
 			shared.generation += 1;
-			shared.sync_route(&prefix);
+			shared.sync_route(&prefix, &claim);
 		}
 		Ok(())
 	}
@@ -1648,7 +1659,7 @@ impl AnnounceProducer {
 					}
 				}
 			}
-			shared.sync_route(&entry.prefix);
+			shared.sync_route(&entry.prefix, &entry.claim);
 		}
 	}
 }
@@ -3005,11 +3016,12 @@ impl OriginState {
 	/// Re-deliver the best route at every presented prefix `prefix` maps to, on
 	/// every cursor. Called after an entry covering `prefix` was added, updated,
 	/// or removed.
-	fn sync_route(&mut self, prefix: &Path) {
+	/// `claim` is `prefix`'s [`prefix_claim`], held by the entry that changed.
+	fn sync_route(&mut self, prefix: &Path, claim: &Pattern) {
 		// Split borrows: the recompute reads `routes` while mutating a cursor.
 		let routes = &self.routes;
 		for cursor in self.cursors.values_mut() {
-			if let Some(presented) = cursor.presented(prefix) {
+			if let Some(presented) = cursor.presented(prefix, claim) {
 				Self::sync_cursor(routes, cursor, &presented);
 			}
 		}
@@ -3024,7 +3036,7 @@ impl OriginState {
 		let candidates: Vec<&RouteEntry> = routes
 			.iter()
 			.filter(|entry| cursor.visible(entry))
-			.filter(|entry| cursor.presented(&entry.prefix).as_ref() == Some(presented))
+			.filter(|entry| cursor.presented(&entry.prefix, &entry.claim).as_ref() == Some(presented))
 			.collect();
 		let most = candidates.iter().map(|entry| entry.prefix.len()).max();
 		let best = most.and_then(|most| {
@@ -3081,7 +3093,7 @@ impl OriginState {
 		let routes = &self.routes;
 		let mut presented: Vec<PathOwned> = Vec::new();
 		for entry in routes {
-			if let Some(p) = cursor.presented(&entry.prefix)
+			if let Some(p) = cursor.presented(&entry.prefix, &entry.claim)
 				&& !presented.contains(&p)
 			{
 				presented.push(p);
@@ -5857,6 +5869,23 @@ mod tests {
 			.into_iter()
 			.collect();
 		assert_eq!(producer.scope(&mixed).unwrap().allowed(), mixed);
+	}
+
+	#[test]
+	fn create_broadcast_refuses_a_path_no_pattern_can_spell() {
+		let producer = origin(1).produce();
+
+		// A `*` segment is a valid path but an invalid literal, so its route could
+		// never be built: refuse the broadcast instead of publishing one that
+		// announces nowhere.
+		assert!(matches!(
+			producer.create_broadcast("room/*"),
+			Err(Error::BoundsExceeded(_))
+		));
+		assert!(matches!(
+			producer.announce("room/**", Route::default()),
+			Err(Error::BoundsExceeded(_))
+		));
 	}
 
 	#[test]
