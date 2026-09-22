@@ -19,10 +19,6 @@ ignored = ["getrandom"]
 name = "moq_ffi"
 crate-type = ["staticlib", "cdylib"]
 
-[[bin]]
-name = "uniffi-bindgen"
-path = "./uniffi-bindgen.rs"
-
 [features]
 # On by default so every existing consumer (the language wrappers, `build.sh`)
 # keeps the surface it has. Opt out with `default-features = false` to skip the
@@ -67,7 +63,9 @@ moq-video = { workspace = true, optional = true, features = ["nvidia", "openh264
 # `video::block_on` for why not a tokio helper.
 pollster = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
-uniffi = { version = "0.32", features = ["cli"] }
+# The bindgen CLI lives in the `uniffi-bindgen` package, so a library build
+# never compiles `uniffi_bindgen` and its dependencies.
+uniffi = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Enables the `wasm_js` backend for rand-via-moq-net; the cfg flag lives in
@@ -76,12 +74,12 @@ getrandom = { workspace = true }
 # `wasm-unstable-single-threaded` drops the `Send`/`Sync` bounds on
 # `UniffiCompatibleFuture` and `FfiConverterArc`, which moq-net's wasm futures
 # (LocalBoxFuture) and Rc-backed handles cannot satisfy.
-uniffi = { version = "0.32", features = ["wasm-unstable-single-threaded"] }
+uniffi = { workspace = true, features = ["wasm-unstable-single-threaded"] }
 web-async = { workspace = true }
 web-transport-wasm = { workspace = true }
 
 [build-dependencies]
-uniffi = { version = "0.32", features = ["build"] }
+uniffi = { workspace = true, features = ["build"] }
 
 [dev-dependencies]
 # One non-codec test blocks on a future; the main dep is `video`-only.

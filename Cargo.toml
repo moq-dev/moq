@@ -38,6 +38,7 @@ members = [
     "rs/moq-video",
     "rs/moq-wasm",
     "rs/quest",
+    "rs/uniffi-bindgen",
 ]
 default-members = [
     "rs/kio",
@@ -77,6 +78,10 @@ default-members = [
     "rs/moq-video",
     # "rs/moq-wasm",  # wasm32-unknown-unknown target only
     "rs/quest",
+    # Maturin runs the workspace's `uniffi-bindgen` binary from the root to
+    # generate the Python wheel, and that only searches default members. A
+    # `cargo build -p moq-ffi` still never compiles it.
+    "rs/uniffi-bindgen",
 ]
 resolver = "2"
 
@@ -219,6 +224,9 @@ tower-http = { version = "0.7", features = ["cors"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 tracing-test = "0.2"
+# The runtime pin and the bindgen CLI pin must not drift; the `uniffi-bindgen`
+# package owns the `cli` feature, moq-ffi the rest.
+uniffi = "0.32"
 url = "2"
 usage = { package = "usage-rs", version = "6.3.0" }
 uuid = { version = "1.26", features = ["v7"] }
