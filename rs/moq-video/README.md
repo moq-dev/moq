@@ -144,7 +144,9 @@ Run `just rs vulkan-cuda` for the opt-in native hardware exercise. It creates a
 Vulkan image independently of Unreal, imports it once into CUDA, checks repeated
 slot reuse and held-reader ordering, and tears down through cancellation; a
 second test converts RGBA and BGRA uploads to NV12, scales them, fills the pool,
-and encodes both renditions through NVENC.
+and encodes both renditions through NVENC. A third runs the target workload,
+three 1280x720 views at 30 fps, and prints per-stage latency and CPU time
+instead of asserting a threshold.
 
 ## Decode
 

@@ -25,6 +25,11 @@
 //! is interleaved into an NVENC input buffer; a CUDA frame ([`Surface::Cuda`],
 //! NVDEC output, already NV12) is registered as an external resource and encoded
 //! in place, so the NVDEC -> NVENC transcode path never touches the CPU.
+//!
+//! The hardware sets a floor on the picture: a session narrower than the
+//! driver's minimum is refused at open (145 on an RTX 3070 Ti), so the bottom
+//! rung of a rendition ladder can be too small for NVENC even though the GPU
+//! conversion and resize handle it.
 
 use std::sync::Arc;
 
@@ -230,7 +235,6 @@ impl Backend for Nvenc {
 				// (borrowed) outlives the registration.
 				// SAFETY: the cloned CUDA frame owns the allocation addressed by the
 				// pointer and the registration retains that clone through completion.
-				let probe = std::time::Instant::now();
 				let resource = unsafe {
 					self.session.register_generic_resource(
 						cuda.clone(),
@@ -240,19 +244,12 @@ impl Backend for Nvenc {
 					)
 				}
 				.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC register CUDA frame: {e}")))?;
-				let registered = probe.elapsed();
 
 				let submission = self
 					.session
 					.encode_picture(resource, output, params)
 					.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC encode: {e}")))?;
-				let (data, input, _output) = submission
-					.finish()
-					.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC lock output: {e}")))?;
-				let probe = std::time::Instant::now();
-				drop(input);
-				eprintln!("PROBE register={registered:?} unregister={:?}", probe.elapsed());
-				data
+				drain_output(submission)?
 			}
 			// Everything else goes through a CPU NV12 input buffer.
 			frame => {

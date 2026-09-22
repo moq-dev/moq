@@ -282,8 +282,11 @@ async fn vulkan_cuda_convert_resize_encode() {
 /// of what the pipeline costs.
 fn cpu_now() -> Duration {
 	let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-	// SAFETY: writes a timespec this frame owns; the clock always exists on Linux.
-	assert_eq!(unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut ts) }, 0);
+	// SAFETY: writes a timespec this function owns; the clock always exists on Linux.
+	assert_eq!(
+		unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut ts) },
+		0
+	);
 	Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
 }
 
@@ -324,15 +327,15 @@ impl Stage {
 	}
 }
 
-/// Real hardware only: the quest's target workload, three 1280x720 views at 30
-/// fps, each converted on the GPU, scaled to a 640x360 second rendition and
-/// encoded through NVENC in place.
+/// Real hardware only: the target workload, three 1280x720 views at 30 fps,
+/// each converted on the GPU, scaled to a 640x360 second rendition and encoded
+/// through NVENC in place.
 ///
 /// There are no acceptance thresholds. The numbers it prints are the point:
 /// per-stage latency, what the pipeline costs in CPU, and how much of a 30 fps
 /// tick the three views leave unused. Nothing here reads a pixel back, so the
-/// only host traffic the run produces is each rendition's compressed bitstream
-/// (`just rs vulkan-cuda` under `nsys profile --trace=cuda` shows the rest).
+/// only host traffic is each rendition's compressed bitstream; run the binary
+/// under `nsys profile --trace=cuda` to see that no `cuMemcpy` happens at all.
 #[tokio::test]
 #[ignore = "requires a Linux NVIDIA GPU with Vulkan/CUDA external memory and NVENC"]
 async fn vulkan_cuda_three_view_workload() {
@@ -392,7 +395,11 @@ async fn vulkan_cuda_three_view_workload() {
 
 		for (producer, slot, hd, small, signal) in &mut views {
 			let (frame, completion) = publish
-				.measure(|| slot.take().unwrap().publish(Timeline::new(*signal, *signal + 1).unwrap()))
+				.measure(|| {
+					slot.take()
+						.unwrap()
+						.publish(Timeline::new(*signal, *signal + 1).unwrap())
+				})
 				.unwrap();
 
 			let converted = convert.measure(|| converter.convert(&frame)).expect("convert");
