@@ -1287,31 +1287,49 @@ fn audio_rejects_bad_init_bytes() {
 	);
 }
 
-/// Creating a broadcast does not advertise it. `announced_broadcast` waits until
-/// `announce` makes the exact path discoverable; `request_broadcast` can still
-/// resolve it by exact path in the meantime.
+/// Creating a broadcast does not advertise it: nothing crosses the announce cursor
+/// until `announce`. It is reachable the whole time, because serving the path and
+/// advertising it are separate: both `request_broadcast` and `announced_broadcast`
+/// resolve it by exact path.
 #[tokio::test]
 async fn create_broadcast_does_not_announce() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let broadcast = origin.create_broadcast("live".into()).unwrap();
 
-	tokio::time::timeout(TIMEOUT, consumer.request_broadcast("live".into()))
-		.await
-		.expect("timed out requesting the unannounced broadcast")
-		.expect("an unannounced broadcast stays reachable by exact path");
+	for reached in ["request", "announced"] {
+		let resolving = async {
+			match reached {
+				"request" => consumer.request_broadcast("live".into()).await.map(|_| ()),
+				_ => consumer
+					.announced_broadcast("live".into())
+					.unwrap()
+					.available()
+					.await
+					.map(|_| ()),
+			}
+		};
+		tokio::time::timeout(TIMEOUT, resolving)
+			.await
+			.unwrap_or_else(|_| panic!("timed out reaching the unannounced broadcast by {reached}"))
+			.unwrap_or_else(|err| panic!("an unannounced broadcast stays reachable by {reached}: {err}"));
+	}
 
-	let announced = consumer.announced_broadcast("live".into()).unwrap();
-	let pending = tokio::spawn(async move { announced.available().await });
+	// The cursor is the advertisement, so it is what must stay silent.
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
+	let pending = tokio::spawn(async move { announced.next().await });
 	tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 	assert!(!pending.is_finished(), "create_broadcast must not advertise the path");
 
 	broadcast.announce(MoqRoute::default()).unwrap();
-	tokio::time::timeout(TIMEOUT, pending)
+	let update = tokio::time::timeout(TIMEOUT, pending)
 		.await
 		.expect("timed out waiting for announce")
 		.expect("task")
-		.expect("announce makes the path discoverable");
+		.expect("announce reaches the cursor")
+		.expect("the cursor is still open");
+	assert_eq!(update.prefix(), "live");
+	assert!(update.active());
 	broadcast.finish().unwrap();
 }
 

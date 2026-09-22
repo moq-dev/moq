@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
 use moq_net::{Hop, Hops, Pattern, Patterns, Timestamp, announce, broadcast, kio, origin};
 
@@ -211,6 +211,51 @@ fn bench_announce_fronts(c: &mut Criterion) {
 	group.finish();
 }
 
+/// One serve sweep over the routes attached to a single announce stream.
+///
+/// `lite::subscriber`'s serve loop registers *one* waiter, the announce stream
+/// machine's, on *every* attached route's request queue, then re-sweeps all of
+/// them whenever it wakes. So the sweep fans in: a request arriving on any one
+/// route, or one more announce landing during convergence, re-polls every other
+/// route's queue, each taking its lock and re-registering the waiter. An idle
+/// sweep that serves nothing still costs one lock per attached route.
+///
+/// A mesh makes `routes` large: a peer announcing `.stats/<project>/node/<node>`
+/// for every project on every node attaches one route per path to one stream.
+/// This measures a single sweep, so the convergence cost of a reconnecting peer
+/// (one sweep per announce, over a table growing to `routes`) reads off it as
+/// the sum.
+fn bench_serve_idle(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/serve_idle");
+	for routes in [30, 300, 3_000] {
+		group.throughput(Throughput::Elements(routes as u64));
+		group.bench_function(BenchmarkId::from_parameter(format!("{routes}r")), |b| {
+			let (producer, _driver) = origin::Producer::new(origin::Config::default());
+			// One route per announced path, exactly as a session lands a peer's.
+			let dynamics: Vec<_> = (0..routes)
+				.map(|i| {
+					producer
+						.dynamic(format!(".stats/p{}/node/edge{i}", i % 8), origin::Route::default())
+						.unwrap()
+				})
+				.collect();
+			b.iter(|| {
+				// A fresh waiter per sweep. A live registration keeps the waiter's
+				// `Weak` in each route's list until it drops, so a waiter reused
+				// across sweeps would stack one per route per iteration. Production
+				// retires the parked waiter the same way: `Park::hold` drops a
+				// still-registered waiter before the next poll registers again.
+				let waiter = kio::Waiter::noop();
+				// Nothing is queued, so every poll parks again: the idle sweep.
+				for dynamic in &dynamics {
+					assert!(dynamic.poll_requested_broadcast(&waiter).is_pending());
+				}
+			});
+		});
+	}
+	group.finish();
+}
+
 /// A new subscriber registering against `publishers` routes and draining the
 /// replay: the one operation whose cost legitimately scales with what it watches.
 fn bench_subscribe(c: &mut Criterion) {
@@ -334,6 +379,7 @@ criterion_group!(
 	bench_announce_fleet,
 	bench_announce_duplicate,
 	bench_announce_fronts,
+	bench_serve_idle,
 	bench_subscribe,
 	bench_request,
 	bench_handoff

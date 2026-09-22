@@ -231,7 +231,7 @@ impl Origin {
 		path: String,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
-		// `routed_broadcast` rides out the churn between a route covering the path
+		// `routed_broadcast` rides out the churn between something covering the path
 		// and the path actually resolving (failover, an advertise-only announce
 		// racing its handler). `biased` so a pending close always wins.
 		let broadcast = tokio::select! {
