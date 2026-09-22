@@ -86,11 +86,6 @@ Producer and transcode's validated Ladder and coalescing active cursor. Keep
 one video Frame/Surface hierarchy and its deliberate native/wgpu type interop;
 do not add another media abstraction or a renderer crate during stabilization.
 
-## Quests
-
-- [GPU conversion and NVENC](/quest/main/video-gpu-encode.md) - validate the GPU
-  conversion, resize and NVENC path for imported frames on NVIDIA hardware
-
 ## Related
 
 - [Pronto GPU integration](https://github.com/moq-dev/moq.pro/tree/main/quest/main/pronto/gpu) - CARLA bridge, release adoption and desktop installation

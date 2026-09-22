@@ -230,6 +230,7 @@ impl Backend for Nvenc {
 				// (borrowed) outlives the registration.
 				// SAFETY: the cloned CUDA frame owns the allocation addressed by the
 				// pointer and the registration retains that clone through completion.
+				let probe = std::time::Instant::now();
 				let resource = unsafe {
 					self.session.register_generic_resource(
 						cuda.clone(),
@@ -239,12 +240,19 @@ impl Backend for Nvenc {
 					)
 				}
 				.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC register CUDA frame: {e}")))?;
+				let registered = probe.elapsed();
 
 				let submission = self
 					.session
 					.encode_picture(resource, output, params)
 					.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC encode: {e}")))?;
-				drain_output(submission)?
+				let (data, input, _output) = submission
+					.finish()
+					.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC lock output: {e}")))?;
+				let probe = std::time::Instant::now();
+				drop(input);
+				eprintln!("PROBE register={registered:?} unregister={:?}", probe.elapsed());
+				data
 			}
 			// Everything else goes through a CPU NV12 input buffer.
 			frame => {
