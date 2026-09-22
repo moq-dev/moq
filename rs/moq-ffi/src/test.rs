@@ -3290,14 +3290,50 @@ async fn server_cert_fingerprints_rejected_after_cancel() {
 		.expect("listen failed");
 	server.cert_fingerprints().expect("fingerprints available");
 
-	// The listener is dropped off-thread, so this must not depend on that landing first:
-	// cancel is terminal the moment it returns. `Cancelled`, not `Bind`: the wrappers'
+	// Cancel is terminal the moment it returns. `Cancelled`, not `Bind`: the wrappers'
 	// `is_shutdown` helpers read the variant to tell a teardown from a real bind failure.
 	server.cancel();
 	assert!(matches!(
 		server.cert_fingerprints(),
 		Err(crate::error::MoqError::Cancelled)
 	));
+}
+
+/// Cancelling a listening server releases its socket before it returns, so the
+/// same address binds again without a retry. The accept is parked first, so
+/// cancel has to unwind an in-flight run rather than an idle state.
+#[tokio::test]
+async fn server_cancel_releases_the_bound_port() {
+	let server = MoqServer::new();
+	server.set_bind("127.0.0.1:0".into()).unwrap();
+	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let addr = server.listen().await.expect("listen failed");
+
+	// Park an accept on the server lock, the state a live server is closed in.
+	let accepting = server.clone();
+	let accept = tokio::spawn(async move { accepting.accept().await });
+	wait_for_config_error(|| server.set_publish(None), |err| matches!(err, MoqError::Busy)).await;
+
+	server.cancel();
+
+	// A raw bind from this thread races the teardown directly rather than
+	// queueing behind it on the FFI runtime, so it only succeeds if cancel
+	// released the socket before returning.
+	std::net::UdpSocket::bind(&addr).expect("cancel should release the socket before it returns");
+
+	// No retry: the socket is already closed, so this must succeed on the first try.
+	let rebound = MoqServer::new();
+	rebound.set_bind(addr.clone()).unwrap();
+	rebound.set_tls_generate(vec!["localhost".into()]).unwrap();
+	rebound.listen().await.expect("the port should rebind immediately");
+
+	let accept = tokio::time::timeout(TIMEOUT, accept)
+		.await
+		.expect("accept task timed out")
+		.expect("accept task panicked");
+	assert!(matches!(accept, Err(MoqError::Cancelled)));
+
+	rebound.cancel();
 }
 
 #[tokio::test]

@@ -63,6 +63,22 @@ void main() {
     server.cancel();
   });
 
+  test('closing a server releases its port', () async {
+    final first = MoqServer();
+    first.setBind(addr: '127.0.0.1:0');
+    first.setTlsGenerate(hostnames: ['localhost']);
+    final addr = await first.listen().timeout(timeout);
+    first.cancel();
+
+    // No retry: cancel() released the listening socket before returning.
+    final second = MoqServer();
+    second.setBind(addr: addr);
+    second.setTlsGenerate(hostnames: ['localhost']);
+    final rebound = await second.listen().timeout(timeout);
+    expect(rebound, addr);
+    second.cancel();
+  });
+
   test('announce then unannounce is visible', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
     final broadcast = origin.createBroadcast(path: 'live');
