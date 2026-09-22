@@ -23,6 +23,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Binary stats](/quest/next/stats-binary/README.md) - an allocation-free stats tick and an on-demand FlatBuffers `.fb.z` flavor with a checked-in schema
 - [JSON churn](/quest/next/json-churn.md) - a moq-json update allocates a bounded amount whatever the document size, in every caller
 - [Origin narrowing](/quest/next/origin-narrowing.md) - a live origin grant narrows in place and ends the subscriptions it no longer covers, the deafen boundary #2714 asked for
+- [Local announcements](/quest/next/local-announce.md) - an origin's announce cursor and its broadcast resolver agree on what exists
 - [Relay embedding](/quest/next/relay-embed.md) - an embedder reads the resolved config, reuses the CLI merge, registers listener health, and spawns a test relay without TOML strings
 - [Auth embedder](/quest/next/auth-embedder.md) - the lease owns its re-check clock, a gateway session holds a lease, and `Cluster::admit` scopes and tags origins in one call
 - [Binding docs](/quest/next/binding-docs.md) - every binding doc sample names a symbol that exists, checked nightly
@@ -95,6 +96,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Relay memory](/quest/next/relay-memory.md) - remeasure what an announcement costs after prefix routes
 - [PoP skipping](/quest/next/pop-skipping/README.md) - short cold paths for unpopular broadcasts without losing warm backhaul dedup
 - [Route cost in the JS origin](/quest/next/route-cost.md) - the browser origin ranks routes by cost and hops like Rust instead of newest-first
+- [Front parking](/quest/next/origin-front-parks.md) - an unroutable request waits on a front instead of re-asking on every route-table move
 - [Publish channel count](/quest/next/publish-audio-channel-count.md) - forcing a channel count on an Audio.Capture stops costing the subscriber gaps of silence
 - [JS abandonment](/quest/next/js-subscribe-abandonment.md) - a viewer returning during IETF subscribe setup keeps its track across microtasks
 - [IETF stream types](/quest/next/ietf-uni-stream-types.md) - padding streams are discarded stream-only and an unknown uni type closes the session, per draft-21
