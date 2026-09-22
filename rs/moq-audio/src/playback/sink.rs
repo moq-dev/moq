@@ -94,6 +94,29 @@ impl Input {
 	}
 }
 
+/// The sample frames accepted and dropped by one [`Sink::write`].
+///
+/// A sample frame is one instant across all input channels, so one stereo
+/// frame counts once rather than twice.
+#[must_use = "inspect dropped_sample_frames; retrying dropped live audio adds latency"]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Write {
+	/// Input sample frames accepted for playback.
+	pub accepted_sample_frames: usize,
+	/// Input sample frames dropped to keep playback live.
+	pub dropped_sample_frames: usize,
+}
+
+impl Write {
+	fn from_accepted(requested_sample_frames: usize, accepted_sample_frames: usize) -> Self {
+		Self {
+			accepted_sample_frames,
+			dropped_sample_frames: requested_sample_frames - accepted_sample_frames,
+		}
+	}
+}
+
 /// One stream of PCM being played, mixed with every other sink on the device.
 ///
 /// Write decoded samples with [`write`](Self::write) and drop the sink to stop.
@@ -125,7 +148,9 @@ impl Sink {
 	/// Writing faster than the device consumes eventually overflows and drops
 	/// the excess; writing slower underruns and plays silence. Both are logged
 	/// and neither is an error, since a live stream recovers on the next write.
-	pub fn write(&mut self, samples: &[u8]) -> Result<(), Error> {
+	/// The returned [`Write`] counts input sample frames accepted and dropped;
+	/// dropped live audio should be observed for telemetry, not retried.
+	pub fn write(&mut self, samples: &[u8]) -> Result<Write, Error> {
 		let pcm = self
 			.input
 			.format
@@ -134,11 +159,19 @@ impl Sink {
 			BUS_CHANNELS => pcm,
 			_ => Cow::Owned(remix(&pcm, self.input.layout, Layout::Stereo)?),
 		};
+		let requested_sample_frames = pcm.len() / BUS_CHANNELS;
 
-		match self.prod.lock().unwrap().push_interleaved(&pcm) {
+		let accepted_sample_frames = match self.prod.lock().unwrap().push_interleaved(&pcm) {
 			// OutputNotReady means the device has not read yet, so these samples
 			// are dropped rather than queued to play late.
-			PushStatus::Ok | PushStatus::OutputNotReady => self.overflowing = false,
+			PushStatus::Ok => {
+				self.overflowing = false;
+				requested_sample_frames
+			}
+			PushStatus::OutputNotReady => {
+				self.overflowing = false;
+				0
+			}
 			PushStatus::OverflowOccurred { num_frames_pushed } => {
 				// Once per spell, not once per write: a writer that stays ahead
 				// of the device would otherwise warn every frame for as long as
@@ -147,14 +180,16 @@ impl Sink {
 					tracing::warn!(num_frames_pushed, "audio playback overflow, dropping samples");
 					self.overflowing = true;
 				}
+				num_frames_pushed
 			}
 			PushStatus::UnderflowCorrected { num_zero_frames_pushed } => {
 				self.overflowing = false;
 				tracing::debug!(num_zero_frames_pushed, "audio playback underflow, padded with silence");
+				requested_sample_frames
 			}
-		}
+		};
 
-		Ok(())
+		Ok(Write::from_accepted(requested_sample_frames, accepted_sample_frames))
 	}
 
 	/// How much audio is queued between the last [`write`](Self::write) and the
@@ -356,6 +391,107 @@ fn channel(from: u32, to: u32, latency: Duration) -> (ResamplingProd<f32>, Resam
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	fn sink(input: Input, output_rate: u32) -> (Sink, ResamplingCons<f32>) {
+		let shared = Arc::new(Shared::default());
+		let engine = Arc::new(super::super::Handle {
+			commands: super::super::driver::Commands::default(),
+		});
+		let (sink, mut registration) = new(0, output_rate, input, shared, engine).unwrap();
+		(sink, registration.pending.take().unwrap())
+	}
+
+	fn s16(frames: usize, channels: usize) -> Vec<u8> {
+		vec![0; frames * channels * 2]
+	}
+
+	fn ready(cons: &mut ResamplingCons<f32>) {
+		cons.read_interleaved(&mut [0.0; BUS_CHANNELS], false);
+	}
+
+	#[test]
+	fn reports_output_not_ready_as_dropped() {
+		let input = Input {
+			format: Format::S16,
+			..Default::default()
+		};
+		let (mut sink, _cons) = sink(input, 48_000);
+
+		assert_eq!(
+			sink.write(&s16(10, 2)).unwrap(),
+			Write {
+				accepted_sample_frames: 0,
+				dropped_sample_frames: 10,
+			}
+		);
+	}
+
+	#[test]
+	fn reports_output_that_stops_as_dropped() {
+		let input = Input {
+			format: Format::S16,
+			..Default::default()
+		};
+		let (mut sink, mut cons) = sink(input, 48_000);
+		ready(&mut cons);
+		cons.set_output_stream_ready(false);
+
+		assert_eq!(
+			sink.write(&s16(10, 2)).unwrap(),
+			Write {
+				accepted_sample_frames: 0,
+				dropped_sample_frames: 10,
+			}
+		);
+	}
+
+	#[test]
+	fn reports_input_frame_units_through_conversion_and_resampling() {
+		let input = Input {
+			format: Format::S16,
+			sample_rate: 44_100,
+			layout: Layout::Mono,
+			..Default::default()
+		};
+		let (mut sink, mut cons) = sink(input, 48_000);
+		ready(&mut cons);
+
+		assert_eq!(
+			sink.write(&s16(441, 1)).unwrap(),
+			Write {
+				accepted_sample_frames: 441,
+				dropped_sample_frames: 0,
+			}
+		);
+	}
+
+	#[test]
+	fn reports_partial_acceptance_on_overflow() {
+		let input = Input {
+			format: Format::S16,
+			latency: Duration::from_millis(1),
+			..Default::default()
+		};
+		let (mut sink, mut cons) = sink(input, 48_000);
+		ready(&mut cons);
+		let requested = 4 * 48_000;
+
+		let write = sink.write(&s16(requested, 2)).unwrap();
+		assert!(write.accepted_sample_frames > 0);
+		assert!(write.dropped_sample_frames > 0);
+		assert_eq!(write.accepted_sample_frames + write.dropped_sample_frames, requested);
+	}
+
+	#[test]
+	fn keeps_invalid_input_distinct_from_dropping() {
+		let input = Input {
+			format: Format::S16,
+			..Default::default()
+		};
+		let (mut sink, _cons) = sink(input, 48_000);
+
+		assert!(matches!(sink.write(&[0]), Err(Error::Misaligned { .. })));
+	}
 
 	#[test]
 	fn rejects_layouts_it_cannot_mix() {

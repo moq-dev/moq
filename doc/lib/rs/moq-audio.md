@@ -42,9 +42,15 @@ input.sample_rate = audio.sample_rate();
 input.layout = audio.layout();
 let mut sink = engine.sink(input)?;
 while let Some(frame) = audio.read().await? {
-    sink.write(&frame.data)?;
+    let write = sink.write(&frame.data)?;
+    if write.dropped_sample_frames > 0 {
+        eprintln!("dropped {} live audio frames", write.dropped_sample_frames);
+    }
 }
 ```
+
+Playback writes never block. Inspect the returned input sample-frame counts for
+telemetry, but do not retry dropped live audio because that would add latency.
 
 For a speakerphone, build one echo-cancellation control set from the playback
 engine and give a clone to the microphone configuration. Other clones are safe

@@ -1121,7 +1121,7 @@ mod tests {
 		let mut buf = vec![0.0f32; REFERENCE_FRAME * BUS_CHANNELS];
 
 		for _ in 0..20 {
-			sink.write(&tone).expect("write");
+			let _ = sink.write(&tone).expect("write");
 			tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
 			// Drain the tap the way the microphone callback would, and add up

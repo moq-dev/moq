@@ -350,7 +350,9 @@ async fn play_audio(mut consumer: moq_audio::decode::Consumer, playback: AudioPl
 					tokio::time::sleep(excess).await;
 				}
 				let part = remaining.min(silence.len());
-				sink.write(&silence[..part])?;
+				// Playback drops stay on the live timeline; retrying them would add
+				// latency, and the sink already reports them in its logs.
+				let _ = sink.write(&silence[..part])?;
 				remaining -= part;
 			}
 		}
@@ -362,7 +364,7 @@ async fn play_audio(mut consumer: moq_audio::decode::Consumer, playback: AudioPl
 			if let Some(excess) = sink.buffered().checked_sub(depth) {
 				tokio::time::sleep(excess).await;
 			}
-			sink.write(part)?;
+			let _ = sink.write(part)?;
 		}
 
 		// Anchor the playout clock on where the speaker has actually reached, which
