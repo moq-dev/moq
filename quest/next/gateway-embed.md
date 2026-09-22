@@ -31,10 +31,6 @@ Additive, so on main after the merge:
 
 Public API: additive. Wire: none.
 
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - starts on main
-
 ## Related
 
 - [HLS generation](/quest/next/hls-generation.md) - the URL hook that depends on the master layout

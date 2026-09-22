@@ -20,7 +20,7 @@
 use bytes::Bytes;
 use moq_vaapi::encode::{Config as VaapiConfig, Encoder};
 
-use super::super::encoder::Config;
+use super::super::encoder::{Config, Gop};
 use super::{Backend, Encoded};
 use crate::frame::I420;
 use crate::{Error, Frame};
@@ -34,12 +34,13 @@ pub(crate) struct Vaapi {
 impl Vaapi {
 	pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
 		let bitrate = config.resolved_bitrate().as_bps().min(u32::MAX as u64) as u32;
+		let Gop::Keyframe { interval } = config.gop;
 		let vaapi = VaapiConfig::new(
 			config.width,
 			config.height,
 			config.framerate.rounded(),
 			bitrate,
-			config.gop,
+			interval,
 		);
 		let encoder = Encoder::new(vaapi).map_err(|e| Error::Codec(anyhow::anyhow!("VAAPI encoder init: {e:?}")))?;
 
@@ -54,12 +55,12 @@ impl Vaapi {
 }
 
 impl Backend for Vaapi {
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Encoded>, Error> {
+	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
 		let i420 = frame.surface.to_i420()?;
 		let nv12 = i420_to_nv12(&i420);
 		let annexb = self
 			.encoder
-			.encode_nv12(&nv12, keyframe)
+			.encode_nv12(&nv12, cut)
 			.map_err(|e| Error::Codec(anyhow::anyhow!("VAAPI encode: {e:?}")))?;
 
 		// Submitted and read back within the call, so this is that frame's output.
@@ -92,7 +93,11 @@ impl Backend for Vaapi {
 		Err(Error::BitrateUnsupported(NAME))
 	}
 
-	fn name(&self) -> &str {
+	fn can_cut(&self) -> bool {
+		true
+	}
+
+	fn name(&self) -> &'static str {
 		NAME
 	}
 }

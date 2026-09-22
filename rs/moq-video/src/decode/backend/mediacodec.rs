@@ -550,7 +550,7 @@ mod tests {
 		for index in 0..30u64 {
 			let timestamp = Timestamp::from_micros(index * 33_333).unwrap();
 			let frame = Frame::new(Surface::I420(i420.clone()), timestamp);
-			encoder.keyframe();
+			encoder.cut().unwrap();
 			for encoded in encoder.encode(&frame).unwrap() {
 				frames.extend(decoder.decode(encoded.payload, encoded.timestamp, true).unwrap());
 			}
@@ -563,7 +563,7 @@ mod tests {
 		// A flush drains the previous stream and leaves the same decoder reusable.
 		let timestamp = Timestamp::from_micros(1_000_000).unwrap();
 		let frame = Frame::new(Surface::I420(i420.clone()), timestamp);
-		encoder.keyframe();
+		encoder.cut().unwrap();
 		for encoded in encoder.encode(&frame).unwrap() {
 			frames.extend(decoder.decode(encoded.payload, encoded.timestamp, true).unwrap());
 		}

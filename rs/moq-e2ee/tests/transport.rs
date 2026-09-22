@@ -4,7 +4,8 @@ mod support;
 
 use std::time::Duration;
 
-use moq_e2ee::{Credential, PROFILE};
+use moq_e2ee::credential::Config;
+use moq_e2ee::{Credential, Epoch};
 use moq_net::{Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
@@ -24,22 +25,21 @@ struct Fixture {
 }
 
 async fn connect_protected(version: Version, track: &str) -> Fixture {
-	let cred = Credential::new(
-		PROFILE,
-		format!("transport-{version}-{track}"),
-		1,
-		7,
-		*b"moq-e2ee-01 test secret!!!!!!!!!",
-	)
+	let cred = Credential::new(Config {
+		context: format!("transport-{version}-{track}").into(),
+		kid: 7,
+		secret: *b"moq-e2ee-00 test secret!!!!!!!!!",
+	})
 	.unwrap();
-	let publication = cred.publish().unwrap();
-	let physical = cred.physical_name(track).unwrap();
+	let generation = cred.generation(Epoch::mint());
+	let path = cred.path("meeting.hang").unwrap().join(generation.epoch().as_str());
+	let name = generation.name(track).unwrap();
 
 	let publisher = produce_origin(1);
 	let consumer_origin = produce_origin(2);
 
-	let broadcast = publisher.create_broadcast("bench.e2ee").unwrap();
-	let net = broadcast.create_track(physical.as_str(), None).unwrap();
+	let broadcast = publisher.create_broadcast(&path).unwrap();
+	let net = broadcast.create_track(name.as_str(), None).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
 	let mut options = MockConnectOptions::new(version);
@@ -47,11 +47,14 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 	options.client_subscribe = Some(consumer_origin.clone());
 	let pair = connect_mock(options).await;
 
+	// The subscriber knows the opaque prefix and takes the epoch from the discovered path.
 	let consumer = consumer_origin.consume();
-	consumer.routed("bench.e2ee").await.unwrap();
-	let remote = consumer.request_broadcast("bench.e2ee").await.unwrap();
+	consumer.routed(&path).await.unwrap();
+	let epoch: Epoch = path.parts().last().unwrap().parse().unwrap();
+	let generation = cred.generation(epoch);
+	let remote = consumer.request_broadcast(&path).await.unwrap();
 	let subscriber = remote
-		.track(physical.as_str())
+		.track(name.as_str())
 		.unwrap()
 		.subscribe(Some(
 			moq_net::track::Subscription::default().with_max_age(Duration::from_secs(60)),
@@ -60,8 +63,8 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 		.unwrap();
 
 	Fixture {
-		producer: publication.track(net, track).unwrap(),
-		consumer: moq_e2ee::track::Consumer::new(&cred, subscriber, Some(&cred.pin())).unwrap(),
+		producer: generation.produce(net).unwrap(),
+		consumer: generation.consume(subscriber).unwrap(),
 		_broadcast: broadcast,
 		_pair: pair,
 	}
@@ -110,7 +113,7 @@ async fn datagrams_over_lite() {
 			.append_datagram(Timestamp::from_millis(9).unwrap(), b"opus")
 			.unwrap();
 		match fixture.consumer.recv_datagram().await.unwrap() {
-			Some(moq_e2ee::DatagramEvent::Datagram(d)) => {
+			Some(moq_e2ee::datagram::Event::Datagram(d)) => {
 				assert_eq!(&d.plaintext[..], b"opus");
 				assert_eq!(d.sequence, 0);
 			}

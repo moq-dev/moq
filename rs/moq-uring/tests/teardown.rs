@@ -109,7 +109,6 @@ fn a_published_close_has_already_left_the_client() {
 		let handle = worker.handle();
 		let sock = handle.udp(server_sock, udp::Config::default()).expect("server socket");
 		let endpoint = quic::Endpoint::new(
-			&handle,
 			sock,
 			quic::endpoint::Config::default().with_server(server_config(&certs)),
 		)
@@ -129,7 +128,7 @@ fn a_published_close_has_already_left_the_client() {
 			udp::Config::default(),
 		)
 		.expect("client socket");
-	let endpoint = quic::Endpoint::new(&handle, sock, quic::endpoint::Config::default()).expect("client endpoint");
+	let endpoint = quic::Endpoint::new(sock, quic::endpoint::Config::default()).expect("client endpoint");
 
 	client_worker
 		.block_on(async move {

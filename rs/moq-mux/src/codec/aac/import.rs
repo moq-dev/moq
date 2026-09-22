@@ -12,18 +12,17 @@ use crate::container::Frame;
 /// caller's either way: cut per packet for one group (one QUIC stream) the relay forwards without
 /// waiting, or at a segment cadence to align with video. The codec's packet loss concealment
 /// handles drops.
-pub struct Import<E: CatalogExt = ()> {
-	track: crate::container::Producer<crate::catalog::hang::Container>,
-	rendition: crate::catalog::AudioTrack<E>,
+pub struct Import {
+	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::AudioConfig>,
 }
 
-impl<E: CatalogExt> Import<E> {
+impl Import {
 	/// Publish on an existing track producer with a resolved catalog config.
 	///
 	/// Build one from an AudioSpecificConfig with [`config`] (which keeps its bytes as the catalog
 	/// `description`), or from an out-of-band [`Config`] via `into()` (which synthesizes the
 	/// description). The rendition publishes immediately.
-	pub fn new(
+	pub fn new<E: CatalogExt>(
 		track: moq_net::track::Producer,
 		reserved: crate::catalog::Reserved<E>,
 		config: hang::catalog::AudioConfig,
@@ -32,17 +31,11 @@ impl<E: CatalogExt> Import<E> {
 		// The caller's config names the container; the writer is built from that same value so the
 		// wire cannot disagree with what the rendition advertises.
 		let wire = crate::catalog::hang::Container::try_from(&config)?;
-		let name = track.name().to_string();
 		// Build the writer before advertising the rendition: it is fallible (enrolling the track in
 		// the broadcast timeline can collide), and a rendition published for a track we then fail to
 		// produce would be advertised to consumers but never served.
-		let media = reserved.producer().media_producer(track, wire)?;
-		let mut rendition = reserved.audio(name)?;
-		rendition.set(config)?;
-		Ok(Self {
-			track: media,
-			rendition,
-		})
+		let track = reserved.audio(track, wire, config)?;
+		Ok(Self { track })
 	}
 
 	/// The MoQ track name this importer publishes on.
@@ -58,7 +51,6 @@ impl<E: CatalogExt> Import<E> {
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
 		self.track.finish()?;
-		self.estimate()?;
 		Ok(())
 	}
 
@@ -70,21 +62,14 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Publish what the track measured (bitrate, jitter) into the catalog rendition, filling only
 	/// the fields its config didn't supply.
-	fn estimate(&mut self) -> crate::Result<()> {
-		self.rendition.estimate(self.track.estimate())
-	}
-
 	/// Record the media duration emitted together by the TS importer.
 	pub(crate) fn burst(&mut self, duration: std::time::Duration) -> crate::Result<()> {
-		self.track.burst(duration);
-		self.estimate()?;
-		Ok(())
+		self.track.burst(duration)
 	}
 
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		self.track.cut(end)?;
-		self.estimate()?;
 		Ok(())
 	}
 
@@ -93,14 +78,12 @@ impl<E: CatalogExt> Import<E> {
 	/// [`Producer::discontinuity`](crate::container::Producer::discontinuity).
 	pub fn discontinuity(&mut self) -> crate::Result<()> {
 		self.track.discontinuity()?;
-		self.estimate()?;
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
 		self.track.seek(sequence)?;
-		self.estimate()?;
 		Ok(())
 	}
 
@@ -110,7 +93,7 @@ impl<E: CatalogExt> Import<E> {
 	/// (see [`Producer::needs_keyframe`](crate::container::Producer::needs_keyframe)); otherwise it
 	/// extends the current group. The caller bounds groups via [`cut`](Self::cut) / [`seek`](Self::seek).
 	pub fn decode<B: moq_net::IntoBytes>(&mut self, frame: B, pts: Option<moq_net::Timestamp>) -> crate::Result<()> {
-		let timestamp = self.rendition.timestamp(pts)?;
+		let timestamp = self.track.timestamp(pts)?;
 		// Only the first frame of each group is a keyframe, so the group spans until the caller cuts
 		// instead of opening one group (one QUIC stream) per packet.
 		let keyframe = self.track.needs_keyframe();
@@ -120,7 +103,6 @@ impl<E: CatalogExt> Import<E> {
 			keyframe,
 			duration: None,
 		})?;
-		self.estimate()?;
 		Ok(())
 	}
 }

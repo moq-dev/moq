@@ -14,7 +14,3 @@ the Rust crate name for name, without putting keys or crypto policy in `@moq/net
 - Identity state is two counters per key (invocations, plaintext bytes) and one monotonic sequence per track. Check payload size before taking a frame ordinal so a rejected write never burns an identity. Datagram receivers keep a 1024-bit sliding bitmask marked only after a successful open; failed opens count against the key; a grouped authentication failure closes the ordered track.
 - Pass every vector in `drafts/moq-e2ee-00.json` against [draft-lcurley-moq-e2ee](/drafts/draft-lcurley-moq-e2ee.md), then cover pump ordering, saturation, and cancellation, protected payload ceilings, monotonic allocation, per-key exhaustion, bounded datagram suppression, bad-group termination, bad-datagram events, and a new epoch authenticating while the old keys do not. Exercise grouped tracks on both transports and datagrams on moq-lite via `insertDatagram`.
 - Add the package to `doc/lib/js/index.md` and the workspace; leave it unpublished until the browser components consume it.
-
-## Required
-
-- [Rust E2EE core on moq-e2ee-00](/quest/main/e2ee-api.md) - settles the surface this package mirrors and retires the `-01` vectors

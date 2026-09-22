@@ -39,7 +39,7 @@ use objc2_video_toolbox::{
 	kVTEncodeFrameOptionKey_ForceKeyFrame, kVTProfileLevel_H264_High_AutoLevel, kVTProfileLevel_HEVC_Main_AutoLevel,
 };
 
-use super::super::encoder::{Codec, Config};
+use super::super::encoder::{Codec, Config, Gop};
 use super::{Backend, Encoded};
 use crate::frame::Surface;
 use crate::{Color, Error, Frame};
@@ -120,10 +120,11 @@ impl VideoToolbox {
 			unsafe { kVTCompressionPropertyKey_AverageBitRate },
 			clamp_i32(config.resolved_bitrate().as_bps()),
 		)?;
+		let Gop::Keyframe { interval } = config.gop;
 		set_number(
 			&session,
 			unsafe { kVTCompressionPropertyKey_MaxKeyFrameInterval },
-			config.gop as i32,
+			clamp_i32(interval.into()),
 		)?;
 		set_number(
 			&session,
@@ -182,7 +183,7 @@ impl VideoToolbox {
 }
 
 impl Backend for VideoToolbox {
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Encoded>, Error> {
+	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
 		self.sink.packets.clear();
 		self.sink.error = None;
 
@@ -204,7 +205,7 @@ impl Backend for VideoToolbox {
 		};
 		self.frame_index += 1;
 
-		let frame_properties = keyframe.then_some(&*self.force_keyframe);
+		let frame_properties = cut.then_some(&*self.force_keyframe);
 
 		let status = unsafe {
 			self.session.encode_frame(
@@ -263,7 +264,11 @@ impl Backend for VideoToolbox {
 		)
 	}
 
-	fn name(&self) -> &str {
+	fn can_cut(&self) -> bool {
+		true
+	}
+
+	fn name(&self) -> &'static str {
 		NAME
 	}
 }

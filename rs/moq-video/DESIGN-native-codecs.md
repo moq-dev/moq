@@ -343,10 +343,11 @@ Where the implementation differs from the plan above:
   publish time, so a buffering backend and the `finish()` tail stay in step. The
   separate `encode_rgba` / `encode_i420` entry points collapsed into
   `Surface::rgba` plus the single `Encoder::encode`.
-- **Keyframes are the encoder's, not the application's.** `Config::gop` keys the
-  stream on its own and `encode` takes no per-frame flag; `Encoder::keyframe()`
-  requests one at the next frame for the callers that genuinely need a decodable
-  starting point (a new output group, a resume after idle).
+- **Group boundaries are the encoder's, not the application's.** `Config::gop`
+  (a `Gop` enum, keyframes at an interval today) places them on its own and
+  `encode` takes no per-frame flag; `Encoder::cut()` opens one at the next frame
+  for the callers that genuinely need a decodable starting point (a new output
+  group), and refuses on a backend that cannot force one.
 - **Capture is per-platform native (nokhwa fully removed).** Each platform's
   `Camera::read` yields a `Frame` the encoder can take: macOS hands VideoToolbox a
   zero-copy `CVPixelBuffer` surface, Linux V4L2 and Windows Media Foundation hand

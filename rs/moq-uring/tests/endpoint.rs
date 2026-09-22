@@ -60,7 +60,6 @@ fn dial_and_accept_share_one_socket() {
 			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 			.expect("socket");
 		quic::Endpoint::new(
-			handle,
 			sock,
 			quic::endpoint::Config::default().with_server(server_config(&certs)),
 		)
@@ -102,13 +101,11 @@ fn a_close_reaches_both_ends_with_its_code() {
 			.expect("socket")
 	};
 	let server = quic::Endpoint::new(
-		&handle,
 		socket(&handle),
 		quic::endpoint::Config::default().with_server(server_config(&certs)),
 	)
 	.expect("server endpoint");
-	let client =
-		quic::Endpoint::new(&handle, socket(&handle), quic::endpoint::Config::default()).expect("dial-only endpoint");
+	let client = quic::Endpoint::new(socket(&handle), quic::endpoint::Config::default()).expect("dial-only endpoint");
 
 	worker
 		.block_on(async move {
@@ -142,7 +139,6 @@ fn unsupported_version_is_negotiated_only_by_servers() {
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("socket");
 	let endpoint = quic::Endpoint::new(
-		&handle,
 		sock,
 		quic::endpoint::Config::default().with_server(server_config(&certs)),
 	)
@@ -151,8 +147,7 @@ fn unsupported_version_is_negotiated_only_by_servers() {
 	let dial_only_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("dial-only socket");
-	let dial_only =
-		quic::Endpoint::new(&handle, dial_only_sock, quic::endpoint::Config::default()).expect("dial-only endpoint");
+	let dial_only = quic::Endpoint::new(dial_only_sock, quic::endpoint::Config::default()).expect("dial-only endpoint");
 	let dial_only_addr = dial_only.local_addr();
 
 	// The raw client runs on its own thread (the worker owns this one) and
@@ -284,13 +279,11 @@ fn a_peer_stop_reaches_the_accepted_stream() {
 			.expect("socket")
 	};
 	let server = quic::Endpoint::new(
-		&handle,
 		socket(&handle),
 		quic::endpoint::Config::default().with_server(server_config(&certs)),
 	)
 	.expect("server endpoint");
-	let client =
-		quic::Endpoint::new(&handle, socket(&handle), quic::endpoint::Config::default()).expect("dial-only endpoint");
+	let client = quic::Endpoint::new(socket(&handle), quic::endpoint::Config::default()).expect("dial-only endpoint");
 
 	worker
 		.block_on(async move {
@@ -359,7 +352,7 @@ fn an_unanswered_dial_times_out() {
 	dial.transport.idle_timeout = Duration::from_millis(500);
 
 	let result = worker
-		.block_on(async move { quic::client::connect(&handle, client_sock, &dial).await })
+		.block_on(async move { quic::client::connect(client_sock, &dial).await })
 		.expect("worker");
 	assert!(result.is_err(), "a dial into a black hole must time out");
 }
@@ -378,7 +371,7 @@ fn the_backlog_bounds_pending_handshakes() {
 		.expect("socket");
 	let mut config = quic::endpoint::Config::default().with_server(server_config(&certs));
 	config.backlog = 0;
-	let endpoint = quic::Endpoint::new(&handle, sock, config).expect("endpoint");
+	let endpoint = quic::Endpoint::new(sock, config).expect("endpoint");
 	let server = endpoint.local_addr();
 
 	let accepted = std::rc::Rc::new(std::cell::Cell::new(false));
@@ -398,7 +391,7 @@ fn the_backlog_bounds_pending_handshakes() {
 	dial.transport.idle_timeout = Duration::from_millis(500);
 
 	let result = worker
-		.block_on(async move { quic::client::connect(&handle, client_sock, &dial).await })
+		.block_on(async move { quic::client::connect(client_sock, &dial).await })
 		.expect("worker");
 	assert!(result.is_err(), "a handshake over the backlog must not complete");
 	assert!(!accepted.get(), "a handshake over the backlog must not be accepted");
@@ -417,14 +410,14 @@ fn the_backlog_bounds_queued_connections() {
 		.expect("socket");
 	let mut config = quic::endpoint::Config::default().with_server(server_config(&certs));
 	config.backlog = 1;
-	let endpoint = quic::Endpoint::new(&handle, sock, config).expect("endpoint");
+	let endpoint = quic::Endpoint::new(sock, config).expect("endpoint");
 	let server = endpoint.local_addr();
 
 	let first_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("first client socket");
 	let first = worker
-		.block_on(async { quic::client::connect(&handle, first_sock, &dial_config(server)).await })
+		.block_on(async { quic::client::connect(first_sock, &dial_config(server)).await })
 		.expect("worker")
 		.expect("first connection");
 
@@ -434,7 +427,7 @@ fn the_backlog_bounds_queued_connections() {
 	let mut second_config = dial_config(server);
 	second_config.transport.idle_timeout = Duration::from_millis(500);
 	let second = worker
-		.block_on(async { quic::client::connect(&handle, second_sock, &second_config).await })
+		.block_on(async { quic::client::connect(second_sock, &second_config).await })
 		.expect("worker");
 	assert!(second.is_err(), "a completed connection must still occupy the backlog");
 
@@ -459,7 +452,6 @@ fn connections_share_one_tx_buffer_fairly() {
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp_config)
 		.expect("socket");
 	let endpoint = quic::Endpoint::new(
-		&handle,
 		sock,
 		quic::endpoint::Config::default().with_server(server_config(&certs)),
 	)
@@ -471,7 +463,7 @@ fn connections_share_one_tx_buffer_fairly() {
 			let first_sock = handle
 				.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 				.expect("first client socket");
-			let first_client = quic::client::connect(&handle, first_sock, &dial_config(server))
+			let first_client = quic::client::connect(first_sock, &dial_config(server))
 				.await
 				.expect("first connection");
 			let mut first_server = endpoint.accept().await.expect("first accepted connection");
@@ -542,7 +534,7 @@ fn connections_share_one_tx_buffer_fairly() {
 			let mut second_config = dial_config(server);
 			second_config.transport.idle_timeout = Duration::from_millis(500);
 			let started = Instant::now();
-			let second = quic::client::connect(&handle, second_sock, &second_config).await;
+			let second = quic::client::connect(second_sock, &second_config).await;
 			let elapsed = started.elapsed();
 			running.set(false);
 			let second = second.expect("the second connection must not starve");
@@ -565,7 +557,7 @@ fn accept_needs_a_server_config() {
 	let sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("socket");
-	let endpoint = quic::Endpoint::new(&handle, sock, quic::endpoint::Config::default()).expect("endpoint");
+	let endpoint = quic::Endpoint::new(sock, quic::endpoint::Config::default()).expect("endpoint");
 
 	let result = worker.block_on(async move { endpoint.accept().await }).expect("worker");
 	assert!(matches!(result, Err(quic::Error::NotServer)), "got {result:?}");
@@ -594,12 +586,7 @@ fn an_identity_is_read_once() {
 		let sock = handle
 			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 			.expect("socket");
-		quic::Endpoint::new(
-			handle,
-			sock,
-			quic::endpoint::Config::default().with_server(config.clone()),
-		)
-		.expect("endpoint")
+		quic::Endpoint::new(sock, quic::endpoint::Config::default().with_server(config.clone())).expect("endpoint")
 	};
 
 	// Two endpoints, as two workers would build them, then a real handshake
@@ -614,11 +601,8 @@ fn an_identity_is_read_once() {
 			let sock = handle
 				.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 				.expect("client socket");
-			let dial = handle.clone();
 			handle.spawn(async move {
-				quic::client::connect(&dial, sock, &dial_config(server))
-					.await
-					.expect("dial");
+				quic::client::connect(sock, &dial_config(server)).await.expect("dial");
 			});
 			second.accept().await.expect("accepted connection");
 		})

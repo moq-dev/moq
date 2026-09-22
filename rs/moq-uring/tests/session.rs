@@ -80,7 +80,7 @@ fn lite_session_over_the_worker() {
 	// The publisher session runs as a worker task for the life of the test.
 	let server_handle = handle.clone();
 	handle.spawn(async move {
-		let conn = quic::server::accept(&server_handle, server_sock, &server_config)
+		let conn = quic::server::accept(server_sock, &server_config)
 			.await
 			.expect("quic accept");
 		let (session, driver) = moq_net::Server::new()
@@ -96,9 +96,7 @@ fn lite_session_over_the_worker() {
 	let sub = sub_origin.clone();
 	let payload = worker
 		.block_on(async move {
-			let conn = quic::client::connect(&handle, client_sock, &dial)
-				.await
-				.expect("quic connect");
+			let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
 			assert_eq!(
 				web_transport_trait::poll::Session::protocol(&conn),
 				Some(ALPN),
@@ -191,7 +189,6 @@ fn two_lite_sessions_share_the_server_socket() {
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("server socket");
 	let endpoint = quic::Endpoint::new(
-		&handle,
 		server_sock,
 		quic::endpoint::Config::default().with_server(server_config),
 	)
@@ -227,9 +224,7 @@ fn two_lite_sessions_share_the_server_socket() {
 				let client_sock = handle
 					.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 					.expect("client socket");
-				let conn = quic::client::connect(&handle, client_sock, &dial)
-					.await
-					.expect("quic connect");
+				let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
 				let (session, driver) = moq_net::Client::new()
 					.with_subscriber(sub.clone())
 					.connect_lite(std::time::Instant::now(), quic::web::Session::raw(conn))
@@ -298,18 +293,15 @@ fn configured_roots_verify_the_server() {
 	dial.system_roots = false;
 	dial.roots = vec![certs.cert.clone()];
 
-	let server_handle = handle.clone();
 	handle.spawn(async move {
-		quic::server::accept(&server_handle, server_sock, &server_config)
+		quic::server::accept(server_sock, &server_config)
 			.await
 			.expect("quic accept");
 	});
 
 	worker
 		.block_on(async move {
-			let conn = quic::client::connect(&handle, client_sock, &dial)
-				.await
-				.expect("quic connect");
+			let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
 			assert_eq!(
 				web_transport_trait::poll::Session::protocol(&conn),
 				Some(ALPN),
@@ -350,7 +342,6 @@ fn required_client_auth_refuses_an_anonymous_client() {
 		.expect("client socket");
 
 	let endpoint = quic::Endpoint::new(
-		&handle,
 		server_sock,
 		quic::endpoint::Config::default().with_server(server_config),
 	)
@@ -372,7 +363,7 @@ fn required_client_auth_refuses_an_anonymous_client() {
 
 	worker
 		.block_on(async move {
-			match quic::client::connect(&handle, client_sock, &dial).await {
+			match quic::client::connect(client_sock, &dial).await {
 				// The dial itself was refused; done.
 				Err(_) => {}
 				// Established locally, but the server's refusal closes it.
@@ -417,18 +408,15 @@ fn a_root_bundle_is_loaded_whole() {
 	dial.system_roots = false;
 	dial.roots = vec![bundle.roots.clone()];
 
-	let server_handle = handle.clone();
 	handle.spawn(async move {
-		quic::server::accept(&server_handle, server_sock, &server_config)
+		quic::server::accept(server_sock, &server_config)
 			.await
 			.expect("quic accept");
 	});
 
 	worker
 		.block_on(async move {
-			let conn = quic::client::connect(&handle, client_sock, &dial)
-				.await
-				.expect("quic connect");
+			let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
 			assert_eq!(
 				web_transport_trait::poll::Session::protocol(&conn),
 				Some(ALPN),

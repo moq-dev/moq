@@ -1027,7 +1027,7 @@ mod tests {
 		let mut sink = engine
 			.sink(playback::Input {
 				sample_rate: 48_000,
-				channels: 2,
+				layout: crate::Layout::Stereo,
 				..Default::default()
 			})
 			.expect("a sink");

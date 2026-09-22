@@ -187,12 +187,12 @@ impl Media {
 					// skip a group the playhead could still have reached, and would size
 					// the hole fill below to a playhead that does not exist.
 					let depth = self.args.delay.into_std().max(AUDIO_BUFFER_MIN);
-					let mut decode = moq_audio::decode::Config::new();
+					let mut decode = moq_audio::decode::Options::new();
 					decode.start = moq_audio::decode::Start::Latest;
 					decode.max_age = depth;
 					// The sink and the frame-duration math below both assume f32,
 					// so ask for it rather than inheriting the decoder default.
-					decode.format = moq_audio::Format::F32;
+					decode.output.format = moq_audio::Format::F32;
 					match moq_audio::decode::Consumer::new(&rendition, &config, &name, decode).await {
 						Ok(consumer) => {
 							tracing::info!(track = name, "playing audio rendition");
@@ -276,12 +276,13 @@ async fn play_audio(mut consumer: moq_audio::decode::Consumer, playback: AudioPl
 	// take it twice. The window schedules video against where the speaker
 	// actually is, which keeps the two together.
 	let sample_rate = consumer.sample_rate();
-	let channels = consumer.channels();
+	let layout = consumer.layout();
+	let channels = layout.channels();
 	let engine = moq_audio::playback::Engine::open(Default::default()).await?;
 	let mut input = moq_audio::playback::Input::default();
 	input.format = moq_audio::Format::F32;
 	input.sample_rate = sample_rate;
-	input.channels = channels;
+	input.layout = layout;
 	input.latency = depth;
 	let mut sink = engine.sink(input.clone())?;
 

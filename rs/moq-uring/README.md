@@ -48,10 +48,14 @@ the UDP sockets bound through it.
   thread that spawned the worker, or read the worker's own with
   `Handle::metrics`. `moq-relay` publishes them at `/metrics` on its internal
   listener.
-- **Steering**: an endpoint whose socket sits in a `moq-sock` steered
-  `SO_REUSEPORT` group sets `endpoint::Config::shard`, and every issued
-  connection id leads with the group's steering byte, so the kernel keeps a
-  connection (and a cluster dial's responses) on the worker that owns it.
+- **Identity**: the socket names its worker. `Handle::udp` adopts a lone
+  `UdpSocket` or a member of a completed `moq-sock` steered `SO_REUSEPORT`
+  group (`udp::Bound`), and a `quic::Endpoint` built on it runs its demux and
+  every connection driver on that worker, whichever handle built it. A member
+  brings its slot along, so every issued connection id leads with the group's
+  steering byte and the kernel keeps a connection (and a cluster dial's
+  responses) on the worker that owns it. An endpoint on a dropped worker is
+  refused.
 
 Requires **Linux 6.12**; `Worker::new` refuses older kernels with a legible
 error rather than degrading (note that default container seccomp policies

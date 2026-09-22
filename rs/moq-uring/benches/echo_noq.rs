@@ -52,8 +52,8 @@ mod linux {
 		let socket = handle
 			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp_config)
 			.expect("socket");
-		let endpoint = quic::Endpoint::new(&handle, socket, quic::endpoint::Config::default().with_server(server))
-			.expect("endpoint");
+		let endpoint =
+			quic::Endpoint::new(socket, quic::endpoint::Config::default().with_server(server)).expect("endpoint");
 		let addr = endpoint.local_addr();
 		// Queue the first iteration while the worker finishes driving the client
 		// handshake. A zero-capacity channel would block this thread before it can
@@ -87,7 +87,7 @@ mod linux {
 		let mut session = worker
 			.block_on(async {
 				let conn = endpoint.accept().await.expect("accept");
-				quic::web::Request::accept(&handle, conn)
+				quic::web::Request::accept(conn)
 					.await
 					.expect("handshake")
 					.ok()

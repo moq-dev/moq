@@ -23,7 +23,6 @@ use bytes::{Buf, Bytes, BytesMut};
 use web_transport_proto as proto;
 
 use super::{Connection, Error};
-use crate::Handle;
 
 /// The frame type WebTransport bidirectional streams lead with.
 const FRAME_WEBTRANSPORT: u64 = 0x41;
@@ -73,7 +72,6 @@ const H3_NO_ERROR: u64 = 0x0100;
 /// `h3`. Answer with [`respond`](Self::respond) (or [`ok`](Self::ok)) to get
 /// the [`Session`], or [`reject`](Self::reject) to refuse it.
 pub struct Request {
-	handle: Handle,
 	conn: Connection,
 	/// Closes the connection on every way out of here that is not an answer.
 	guard: Guard,
@@ -129,16 +127,17 @@ impl Request {
 	/// Run the server side of the HTTP/3 handshake: exchange SETTINGS, then
 	/// take the CONNECT request.
 	///
-	/// There is no timeout here; a peer that stalls mid-handshake is bounded
-	/// by the connection's idle timeout.
-	pub async fn accept(handle: &Handle, conn: Connection) -> Result<Self, Error> {
+	/// Everything the session later spawns runs on the worker already driving
+	/// `conn`. There is no timeout here; a peer that stalls mid-handshake is
+	/// bounded by the connection's idle timeout.
+	pub async fn accept(conn: Connection) -> Result<Self, Error> {
 		// Nothing else will close it. The endpoint keeps a connection, its
 		// routes, and its driver task until the driver sees a terminal state,
 		// and the backlog stopped counting this one when it was accepted, so a
 		// peer that keeps sending would otherwise hold a rejected handshake
 		// open for as long as it liked.
 		let failed = conn.clone();
-		match Self::handshake(handle, conn).await {
+		match Self::handshake(conn).await {
 			Ok(request) => Ok(request),
 			Err(err) => {
 				failed.close_code(H3_GENERAL_PROTOCOL_ERROR, &err.to_string());
@@ -147,7 +146,7 @@ impl Request {
 		}
 	}
 
-	async fn handshake(handle: &Handle, mut conn: Connection) -> Result<Self, Error> {
+	async fn handshake(mut conn: Connection) -> Result<Self, Error> {
 		// Our control stream: the SETTINGS advertising WebTransport support.
 		let mut control = open_uni(&mut conn).await?;
 		let mut settings = proto::Settings::default();
@@ -242,7 +241,6 @@ impl Request {
 		let request = read_connect(&mut recv).await?;
 
 		Ok(Self {
-			handle: handle.clone(),
 			guard: Guard::new(conn.clone()),
 			conn,
 			request,
@@ -311,7 +309,7 @@ impl Request {
 		// The guard stays armed across the wait below. Cancelling this future
 		// mid-grace would otherwise skip the deliberate close and leak the
 		// connection, which is the very thing the guard is here to prevent.
-		let mut deadline = crate::Timer::after(&self.handle, CLOSE_GRACE);
+		let mut deadline = self.conn.owner().after(CLOSE_GRACE);
 		let send = &mut self.send;
 		kio::wait(|waiter| {
 			let mut cx = Context::from_waker(waiter.waker());
@@ -389,7 +387,6 @@ impl std::fmt::Debug for Request {
 
 /// The WebTransport layering shared by a session's clones.
 struct Web {
-	handle: Handle,
 	/// The CONNECT stream's id: what every stream header and datagram carries.
 	session_id: u64,
 	/// Precomputed per-kind prefixes carrying the session id.
@@ -445,7 +442,6 @@ impl Session {
 	/// Assemble the web flavor and spawn its capsule reader.
 	fn establish(request: Request, protocol: Option<String>) -> Self {
 		let Request {
-			handle,
 			conn,
 			guard: _,
 			request: _,
@@ -475,7 +471,6 @@ impl Session {
 			.collect();
 
 		let web = Rc::new(Web {
-			handle: handle.clone(),
 			session_id,
 			header_uni: header_uni.into(),
 			header_bi: header_bi.into(),
@@ -499,7 +494,8 @@ impl Session {
 		// stream; read it so the close code survives the H3 mapping.
 		let capsules = web.clone();
 		let capsule_conn = conn.clone();
-		handle.spawn(async move { read_capsules(capsules, capsule_conn, recv).await });
+		conn.owner()
+			.spawn(async move { read_capsules(capsules, capsule_conn, recv).await });
 
 		Self {
 			conn,
@@ -735,10 +731,10 @@ impl web_transport_trait::poll::Session for Session {
 		// the task rather than here because flow control can take it in
 		// pieces, and abandoning a partial frame would leave the browser with
 		// neither the code nor the reason.
-		let mut deadline = crate::Timer::after(&web.handle, CLOSE_GRACE);
+		let mut deadline = self.conn.owner().after(CLOSE_GRACE);
 		let reason = reason.to_string();
 		let mut conn = self.conn.clone();
-		web.handle.spawn(async move {
+		self.conn.owner().spawn(async move {
 			let mut offset = 0;
 			kio::wait(|waiter| {
 				let mut cx = Context::from_waker(waiter.waker());

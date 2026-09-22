@@ -17,7 +17,3 @@ producer exposes the same call; otherwise leave the catalog guard alone.
 Document the pairing in one line on each method and in the upgrade page.
 
 Public API: one additive method per producer. Wire: none.
-
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - `modify()` and its abort rule exist only on dev

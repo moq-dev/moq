@@ -25,10 +25,6 @@ updates `doc/lib/c/index.md`.
 Branch from main after the dev merge. The new entry point is additive. The
 C output-configuration layout change is owned by its separate dev quest.
 
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - the dev-only API must be released on main before this implementation starts
-
 ## Closes
 
 - [#2152](https://github.com/moq-dev/moq/issues/2152) - close this issue when the quest finishes

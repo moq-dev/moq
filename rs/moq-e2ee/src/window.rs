@@ -1,77 +1,53 @@
-use std::collections::HashSet;
+use crate::limits::DATAGRAM_WINDOW;
 
-use crate::error::{Error, Result};
-use crate::limits::{DATAGRAM_DUPLICATE_WINDOW, GROUP_DUPLICATE_GROUPS};
-
-/// Bounded grouped-frame duplicate window: the current group plus the previous group.
-#[derive(Default)]
-pub(crate) struct GroupWindow {
-	slots: Vec<GroupFrames>,
-}
-
-struct GroupFrames {
-	sequence: u64,
-	frames: HashSet<u32>,
-}
-
-impl GroupWindow {
-	pub fn check(&mut self, group: u64, frame: u32) -> Result<()> {
-		if let Some(slot) = self.slots.iter_mut().find(|slot| slot.sequence == group) {
-			if !slot.frames.insert(frame) {
-				return Err(Error::Duplicate);
-			}
-			return Ok(());
-		}
-		if self.slots.len() == GROUP_DUPLICATE_GROUPS {
-			self.slots.remove(0);
-		}
-		self.slots.push(GroupFrames {
-			sequence: group,
-			frames: HashSet::from([frame]),
-		});
-		Ok(())
-	}
-}
-
-/// Bounded datagram duplicate window: a 1024-sequence sliding window.
+/// Datagram duplicate suppression: a 1024-bit sliding bitmask below the greatest opened sequence.
+///
+/// Only successful opens are marked, so a forged datagram never burns a real one.
+/// Sequences below the window are unknown, not duplicates: an operational gap.
 #[derive(Default)]
 pub(crate) struct DatagramWindow {
 	highest: Option<u64>,
-	seen: HashSet<u64>,
+	bits: [u64; DATAGRAM_WINDOW as usize / 64],
 }
 
 impl DatagramWindow {
 	pub fn is_duplicate(&self, sequence: u64) -> bool {
-		if let Some(highest) = self.highest {
-			if highest >= DATAGRAM_DUPLICATE_WINDOW as u64 && sequence <= highest - DATAGRAM_DUPLICATE_WINDOW as u64 {
-				// Outside the retained window: operational gap, not a cryptographic event.
-				return false;
-			}
-			if self.seen.contains(&sequence) {
-				return true;
-			}
-		}
-		false
+		let Some(highest) = self.highest else {
+			return false;
+		};
+		sequence <= highest && highest - sequence < DATAGRAM_WINDOW && self.bit(sequence)
 	}
 
 	pub fn mark(&mut self, sequence: u64) {
-		self.seen.insert(sequence);
-		self.highest = Some(self.highest.map_or(sequence, |h| h.max(sequence)));
-		if let Some(highest) = self.highest
-			&& highest >= DATAGRAM_DUPLICATE_WINDOW as u64
-		{
-			let floor = highest - DATAGRAM_DUPLICATE_WINDOW as u64;
-			self.seen.retain(|&s| s > floor);
+		if let Some(highest) = self.highest {
+			if sequence > highest {
+				// Slide forward, clearing the slots the new sequences will reuse.
+				for cleared in highest + 1..=sequence.min(highest + DATAGRAM_WINDOW) {
+					self.set(cleared, false);
+				}
+				self.highest = Some(sequence);
+			} else if highest - sequence >= DATAGRAM_WINDOW {
+				return;
+			}
+		} else {
+			self.highest = Some(sequence);
 		}
+		self.set(sequence, true);
 	}
 
-	#[cfg(test)]
-	pub fn check(&mut self, sequence: u64) -> Result<()> {
-		if self.is_duplicate(sequence) {
-			return Err(Error::Duplicate);
+	fn bit(&self, sequence: u64) -> bool {
+		let slot = (sequence % DATAGRAM_WINDOW) as usize;
+		self.bits[slot / 64] & (1 << (slot % 64)) != 0
+	}
+
+	fn set(&mut self, sequence: u64, value: bool) {
+		let slot = (sequence % DATAGRAM_WINDOW) as usize;
+		let mask = 1u64 << (slot % 64);
+		if value {
+			self.bits[slot / 64] |= mask;
+		} else {
+			self.bits[slot / 64] &= !mask;
 		}
-		self.mark(sequence);
-		Ok(())
 	}
 }
 
@@ -80,25 +56,41 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn group_window_current_and_previous() {
-		let mut window = GroupWindow::default();
-		window.check(1, 0).unwrap();
-		window.check(1, 1).unwrap();
-		window.check(2, 0).unwrap();
-		assert_eq!(window.check(1, 0).unwrap_err().code(), "duplicate");
-		window.check(1, 2).unwrap();
-		window.check(3, 0).unwrap();
-		window.check(1, 0).unwrap();
+	fn slides_below_the_greatest_opened() {
+		let mut window = DatagramWindow::default();
+		assert!(!window.is_duplicate(0));
+		window.mark(0);
+		assert!(window.is_duplicate(0));
+		for seq in 1..DATAGRAM_WINDOW {
+			window.mark(seq);
+		}
+		assert!(window.is_duplicate(0));
+		window.mark(DATAGRAM_WINDOW);
+		assert!(!window.is_duplicate(0));
+		assert!(window.is_duplicate(1));
+		assert!(window.is_duplicate(DATAGRAM_WINDOW));
 	}
 
 	#[test]
-	fn datagram_window_slides() {
+	fn jump_clears_reused_slots() {
 		let mut window = DatagramWindow::default();
-		window.check(0).unwrap();
-		assert_eq!(window.check(0).unwrap_err().code(), "duplicate");
-		for seq in 1..=DATAGRAM_DUPLICATE_WINDOW as u64 {
-			window.check(seq).unwrap();
-		}
-		window.check(0).unwrap();
+		window.mark(5);
+		window.mark(5 + DATAGRAM_WINDOW * 3);
+		assert!(!window.is_duplicate(5));
+		assert!(!window.is_duplicate(5 + DATAGRAM_WINDOW));
+		assert!(!window.is_duplicate(5 + DATAGRAM_WINDOW * 2));
+		assert!(window.is_duplicate(5 + DATAGRAM_WINDOW * 3));
+	}
+
+	#[test]
+	fn late_within_window_marks() {
+		let mut window = DatagramWindow::default();
+		window.mark(100);
+		assert!(!window.is_duplicate(90));
+		window.mark(90);
+		assert!(window.is_duplicate(90));
+		window.mark(100 + DATAGRAM_WINDOW);
+		window.mark(90);
+		assert!(!window.is_duplicate(90));
 	}
 }

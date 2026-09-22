@@ -94,7 +94,7 @@ fn nvenc(size: Size, color: Color) -> crate::encode::Encoder {
 	let mut config = crate::encode::Config::new(size.width, size.height, crate::Rate::new(30, 1).unwrap());
 	config.kind = crate::encode::Kind::Named("nvenc".into());
 	config.color = Some(color);
-	config.gop = 30;
+	config.gop = crate::encode::Gop::Keyframe { interval: 30 };
 	crate::encode::Encoder::new(&config).expect("open NVENC")
 }
 
@@ -221,8 +221,8 @@ async fn vulkan_cuda_convert_resize_encode() {
 
 		let timestamp = moq_net::Timestamp::from_micros(i * 33_333).unwrap();
 		if i == 4 {
-			hd.keyframe();
-			sd_encoder.keyframe();
+			hd.cut().expect("NVENC cuts on request");
+			sd_encoder.cut().expect("NVENC cuts on request");
 		}
 		let packets = hd
 			.encode(&VideoFrame::new(Surface::Cuda(converted), timestamp))

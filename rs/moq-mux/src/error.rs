@@ -163,6 +163,10 @@ pub enum Error {
 	#[error("{0}")]
 	TimestampRewind(#[from] crate::container::TimestampRewind),
 
+	/// A rendition was modified before its initial config was published.
+	#[error("rendition is not published")]
+	NotPublished,
+
 	/// A FLV video frame resolved to a negative presentation timestamp.
 	#[error("negative FLV video presentation timestamp: dts={dts_ms}ms composition_time={composition_time_ms}ms")]
 	NegativeFlvPts {

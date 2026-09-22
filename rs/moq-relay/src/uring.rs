@@ -23,12 +23,6 @@ use anyhow::Context as _;
 
 use crate::{auth, cluster, shutdown};
 
-/// One member's bound socket and its slot in the steered group.
-struct Member {
-	shard: moq_sock::shard::Shard,
-	socket: std::net::UdpSocket,
-}
-
 /// A stop signal a worker parks on, wakeable from the shared runtime.
 #[derive(Default)]
 struct Stop {
@@ -83,7 +77,7 @@ struct Serve {
 /// worker that quietly died. Nothing is served until [`serve`](Self::serve)
 /// spawns the threads.
 pub struct Workers {
-	members: Vec<Member>,
+	members: Vec<moq_sock::shard::Socket>,
 	addr: SocketAddr,
 	server: moq_uring::quic::server::Config,
 	/// What the workers serve, fingerprinted once, for `/certificate.sha256`.
@@ -199,10 +193,7 @@ impl Workers {
 			.context("failed to complete the reuseport group")?;
 		let mut members = Vec::with_capacity(count as usize);
 		while let Some(member) = group.member().context("failed to clone a reuseport member")? {
-			members.push(Member {
-				shard: member.shard(),
-				socket: member.into_inner(),
-			});
+			members.push(member);
 		}
 		// Whatever the first member bound, which is the requested address unless
 		// it asked for an ephemeral port.
@@ -325,7 +316,7 @@ impl Workers {
 		};
 
 		for member in std::mem::take(&mut self.members) {
-			let index = member.shard.index();
+			let index = member.shard().index();
 			let core = cores.get(index as usize % cores.len().max(1)).copied();
 			let stop = Arc::new(Stop::default());
 			let (ready_tx, ready_rx) = std::sync::mpsc::channel();
@@ -478,7 +469,7 @@ fn join(threads: Vec<(u16, std::thread::JoinHandle<()>)>) {
 
 /// Everything one worker thread is handed at spawn.
 struct Spawn {
-	member: Member,
+	member: moq_sock::shard::Socket,
 	/// The core to pin to, or `None` when pinning is off or unavailable.
 	core: Option<moq_sock::cpu::CoreId>,
 	/// This worker's counter set, shared with whoever scrapes `/metrics`.
@@ -503,7 +494,7 @@ struct Spawn {
 /// alone would not notice one, since the parent holds a sender of its own and
 /// the channel therefore never closes.
 fn run_worker(spawn: Spawn) {
-	let index = spawn.member.shard.index();
+	let index = spawn.member.shard().index();
 	let stop = spawn.stop.clone();
 	let failures = spawn.failures.clone();
 
@@ -537,7 +528,7 @@ fn serve_worker(spawn: Spawn) -> bool {
 		ready,
 		failures,
 	} = spawn;
-	let index = member.shard.index();
+	let index = member.shard().index();
 	if let Some(core) = core {
 		if moq_sock::cpu::pin(core) {
 			tracing::debug!(index, core = core.id(), "pinned io_uring QUIC worker");
@@ -550,18 +541,15 @@ fn serve_worker(spawn: Spawn) -> bool {
 		let mut config = moq_uring::Config::default();
 		config.metrics = metrics;
 		let worker = moq_uring::Worker::new(config).context("io_uring setup failed")?;
-		let handle = worker.handle();
-		let socket = handle
-			.udp(member.socket, udp)
+		// The member carries its slot in the steered group, so adopting it is
+		// what makes the endpoint issue connection ids that steer back here.
+		let socket = worker
+			.handle()
+			.udp(member, udp)
 			.context("failed to adopt the worker socket")?;
-		let endpoint = moq_uring::quic::Endpoint::new(
-			&handle,
-			socket,
-			moq_uring::quic::endpoint::Config::default()
-				.with_server(server)
-				.with_shard(member.shard),
-		)
-		.context("failed to build the QUIC endpoint")?;
+		let endpoint =
+			moq_uring::quic::Endpoint::new(socket, moq_uring::quic::endpoint::Config::default().with_server(server))
+				.context("failed to build the QUIC endpoint")?;
 		Ok((worker, endpoint))
 	})();
 
@@ -638,7 +626,7 @@ async fn serve_connection(
 	let mut alpn = conn.protocol().map(str::to_owned);
 	let (transport, url) = match conn.protocol() {
 		Some("h3") => {
-			let request = moq_uring::quic::web::Request::accept(&handle, conn)
+			let request = moq_uring::quic::web::Request::accept(conn)
 				.await
 				.context("WebTransport handshake failed")?;
 			let url = request.url().clone();

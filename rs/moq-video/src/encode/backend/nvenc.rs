@@ -12,7 +12,7 @@
 //!   1. A forced keyframe uses the `FORCEIDR` picture flag, not `pictureType`.
 //!      Picture-type decision stays on (the low-latency presets are tuned for
 //!      it), which makes NVENC ignore `pictureType`; `FORCEIDR` still applies and
-//!      is how [`Nvenc::encode`] turns `keyframe` into an out-of-cadence IDR.
+//!      is how [`Nvenc::encode`] turns `cut` into an out-of-cadence IDR.
 //!   2. `repeatSPSPPS` is set so every IDR (not just the first) carries in-band
 //!      SPS/PPS (plus VPS for HEVC), which a mid-stream subscriber's avc3 / hev1
 //!      importer needs to start decoding at any keyframe.
@@ -37,7 +37,7 @@ use moq_nvenc::sys::nvEncodeAPI::{
 };
 use moq_nvenc::{Encoder, EncoderInitParams, Session};
 
-use super::super::encoder::{Codec, Config};
+use super::super::encoder::{Codec, Config, Gop};
 use super::{Backend, Encoded};
 use crate::frame::{Surface, interleave_uv};
 use crate::{Color, Error, Frame};
@@ -89,7 +89,8 @@ impl Nvenc {
 			.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC preset config: {e}")))?;
 
 		let cfg = &mut preset.presetCfg;
-		cfg.gopLength = config.gop;
+		let Gop::Keyframe { interval } = config.gop;
+		cfg.gopLength = interval;
 		cfg.frameIntervalP = 1; // no B-frames
 		cfg.rcParams.rateControlMode = NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CBR;
 		let bitrate = config.resolved_bitrate().as_bps().min(u32::MAX as u64) as u32;
@@ -143,7 +144,7 @@ impl Nvenc {
 			match config.codec {
 				Codec::H264 => {
 					cfg.encodeCodecConfig.h264Config.set_repeatSPSPPS(1);
-					cfg.encodeCodecConfig.h264Config.idrPeriod = config.gop;
+					cfg.encodeCodecConfig.h264Config.idrPeriod = interval;
 
 					let vui = &mut cfg.encodeCodecConfig.h264Config.h264VUIParameters;
 					vui.videoSignalTypePresentFlag = 1;
@@ -156,7 +157,7 @@ impl Nvenc {
 				}
 				Codec::H265 => {
 					cfg.encodeCodecConfig.hevcConfig.set_repeatSPSPPS(1);
-					cfg.encodeCodecConfig.hevcConfig.idrPeriod = config.gop;
+					cfg.encodeCodecConfig.hevcConfig.idrPeriod = interval;
 
 					let vui = &mut cfg.encodeCodecConfig.hevcConfig.hevcVUIParameters;
 					vui.videoSignalTypePresentFlag = 1;
@@ -204,7 +205,7 @@ impl Nvenc {
 }
 
 impl Backend for Nvenc {
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Encoded>, Error> {
+	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
 		let output = self
 			.session
 			.create_output_bitstream()
@@ -212,7 +213,7 @@ impl Backend for Nvenc {
 
 		let params = moq_nvenc::EncodePictureParams {
 			input_timestamp: self.timestamp,
-			force_idr: keyframe,
+			force_idr: cut,
 		};
 		self.timestamp += 1;
 
@@ -309,7 +310,11 @@ impl Backend for Nvenc {
 			.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC set bitrate to {bitrate}: {e}")))
 	}
 
-	fn name(&self) -> &str {
+	fn can_cut(&self) -> bool {
+		true
+	}
+
+	fn name(&self) -> &'static str {
 		NAME
 	}
 }
@@ -449,7 +454,7 @@ mod tests {
 		let mut forced = Vec::new();
 		for i in 0..10u32 {
 			if i == 0 || i == 5 {
-				encoder.keyframe();
+				encoder.cut().unwrap();
 			}
 			let encoded = encoder.encode(&gray_frame(&frame, i.into())).unwrap();
 			let joined: Vec<u8> = encoded.iter().flat_map(|f| f.payload.iter()).copied().collect();
@@ -496,7 +501,7 @@ mod tests {
 		let mut forced = Vec::new();
 		for i in 0..10u32 {
 			if i == 0 || i == 5 {
-				encoder.keyframe();
+				encoder.cut().unwrap();
 			}
 			let encoded = encoder.encode(&gray_frame(&frame, i.into())).unwrap();
 			let joined: Vec<u8> = encoded.iter().flat_map(|f| f.payload.iter()).copied().collect();
@@ -521,10 +526,10 @@ mod tests {
 		assert!(types.contains(&34), "forced IRAP is missing inline PPS: {types:?}");
 	}
 
-	/// The capture producer forces a keyframe only on the first frame and relies
-	/// on the backend to insert periodic IDRs at the GOP boundary. Verify those
-	/// happen without a forced keyframe and each carries inline SPS/PPS, so a
-	/// mid-stream subscriber can join at any GOP boundary.
+	/// The capture producer never cuts and relies on the backend to insert
+	/// periodic IDRs at the GOP boundary. Verify those happen without a cut and
+	/// each carries inline SPS/PPS, so a mid-stream subscriber can join at any
+	/// GOP boundary.
 	#[test]
 	fn nvenc_h264_periodic_idr_at_gop() {
 		if !driver_available() {
@@ -532,7 +537,7 @@ mod tests {
 		}
 		let mut config = crate::encode::Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
 		config.kind = crate::encode::Kind::Named(NAME.into());
-		config.gop = 3;
+		config.gop = Gop::Keyframe { interval: 3 };
 		let Ok(mut encoder) = crate::encode::Encoder::new(&config) else {
 			return;
 		};
@@ -605,7 +610,7 @@ mod tests {
 		let mut decoded = None;
 		for i in 0..10u64 {
 			if i == 0 {
-				encoder.keyframe();
+				encoder.cut().unwrap();
 			}
 			let surface = crate::Surface::rgba(&rgba, crate::Size::new(w, h)).unwrap();
 			let frame = crate::Frame::new(surface, moq_net::Timestamp::from_micros(i * 33_333).unwrap());
@@ -655,7 +660,7 @@ mod tests {
 		let mut config = crate::encode::Config::new(w, h, crate::Rate::new(30, 1).unwrap());
 		config.kind = crate::encode::Kind::Named(NAME.into());
 		config.bitrate = Some(moq_net::bandwidth::Rate::from_bps(4_000_000));
-		config.gop = 30;
+		config.gop = Gop::Keyframe { interval: 30 };
 		let mut encoder = crate::encode::Encoder::new(&config).ok()?;
 
 		let mut idrs = Vec::new();

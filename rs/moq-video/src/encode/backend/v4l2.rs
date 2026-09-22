@@ -63,7 +63,7 @@ use v4l::v4l_sys::{
 	v4l2_mpeg_video_header_mode_V4L2_MPEG_VIDEO_HEADER_MODE_JOINED_WITH_1ST_FRAME,
 };
 
-use super::super::encoder::Config;
+use super::super::encoder::{Config, Gop};
 use super::{Backend, Encoded};
 use crate::v4l2::{self, Dequeue, Device, Dir, Planes, Queue, Rect, Request, Role};
 use crate::{Error, Frame, Size};
@@ -123,10 +123,10 @@ pub(crate) struct V4l2 {
 	/// refuses one, after which a flush can only take what the codec has already
 	/// finished.
 	drainable: bool,
-	/// Whether the driver takes `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`. Cleared
-	/// the first time it refuses one, which is worth saying once and not per
-	/// keyframe.
-	keyframes: bool,
+	/// Whether the driver has `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`, asked at
+	/// open so a cut on a driver without it is refused up front rather than
+	/// discovered on the frame it was meant for.
+	cuts: bool,
 }
 
 impl V4l2 {
@@ -144,7 +144,8 @@ impl V4l2 {
 			v4l2_mpeg_video_h264_profile_V4L2_MPEG_VIDEO_H264_PROFILE_CONSTRAINED_BASELINE as i32,
 		)?;
 		device.set_control(V4L2_CID_MPEG_VIDEO_H264_LEVEL, h264_level(config)?)?;
-		device.set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, config.gop as i32)?;
+		let Gop::Keyframe { interval } = config.gop;
+		device.set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, interval.min(i32::MAX as u32) as i32)?;
 		set_bitrate(&device, config.resolved_bitrate().as_bps())?;
 		// Constant rate is what a live uplink wants: the congestion controller
 		// already owns the rate, and a variable-rate encoder would spend it on the
@@ -176,6 +177,18 @@ impl V4l2 {
 				encoder = NAME,
 				device = %device.path().display(),
 				"driver repeats no parameter sets; subscribers can only join at the first keyframe"
+			);
+		}
+
+		// A driver without the control keeps to `V4L2_CID_MPEG_VIDEO_GOP_SIZE`
+		// alone, so every group falls on its boundary rather than the caller's.
+		// Said once here; each refused cut then names the backend in its error.
+		let cuts = device.has_control(V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME);
+		if !cuts {
+			tracing::info!(
+				encoder = NAME,
+				device = %device.path().display(),
+				"driver takes no keyframe request; cuts are refused and groups fall on the GOP boundary"
 			);
 		}
 
@@ -240,7 +253,7 @@ impl V4l2 {
 			size,
 			pending: Pending::default(),
 			drainable: true,
-			keyframes: true,
+			cuts,
 		}))
 	}
 
@@ -447,7 +460,7 @@ impl V4l2 {
 }
 
 impl Backend for V4l2 {
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Encoded>, Error> {
+	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
 		if frame.size() != self.size {
 			return Err(Error::Codec(anyhow::anyhow!(
 				"V4L2 encoder opened for {} was given a {} frame",
@@ -456,29 +469,27 @@ impl Backend for V4l2 {
 			)));
 		}
 
+		if cut {
+			// A button control: the value is ignored, the write is the request. It
+			// applies to the next frame queued, so it goes in ahead of this one, and
+			// before a raw buffer is taken so a refusal strands none. Open already
+			// asked whether the driver has the control, so a refusal here is the
+			// driver going back on its word, which is an error rather than a
+			// quietly mislaid group boundary.
+			self.device
+				.set_control(V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME, 0)
+				.map_err(|err| {
+					Error::Codec(anyhow::anyhow!(
+						"driver refused the keyframe request it advertised: {err}"
+					))
+				})?;
+		}
+
 		let i420 = frame.surface.to_i420()?;
 		// Also reclaims finished input buffers, so the codec is drained even when
 		// the caller never asks for output.
 		let index = self.free_buffer()?;
 		self.planes.write(&mut self.raw, index, &i420)?;
-
-		if keyframe && self.keyframes {
-			// A button control: the value is ignored, the write is the request. It
-			// applies to the next frame queued, so it goes in immediately before.
-			//
-			// Best-effort: a driver that answers `EINVAL` still keeps to
-			// `V4L2_CID_MPEG_VIDEO_GOP_SIZE`, so keyframes land on its own boundary
-			// rather than the caller's, which is a worse group layout and not a
-			// broken stream.
-			self.keyframes = self.device.try_control(V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME, 0);
-			if !self.keyframes {
-				tracing::warn!(
-					encoder = NAME,
-					device = %self.device.path().display(),
-					"driver takes no keyframe request; groups fall on the encoder's own GOP boundary"
-				);
-			}
-		}
 
 		let key = key(frame.timestamp);
 		let bytesused: Vec<u32> = self.raw.format().planes.iter().map(|plane| plane.sizeimage).collect();
@@ -513,7 +524,11 @@ impl Backend for V4l2 {
 		})
 	}
 
-	fn name(&self) -> &str {
+	fn can_cut(&self) -> bool {
+		self.cuts
+	}
+
+	fn name(&self) -> &'static str {
 		NAME
 	}
 }

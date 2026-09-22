@@ -46,10 +46,6 @@ All additive on `moq-relay` and `moq-tokio`, so on main after the merge:
 
 Public API: additive. Wire: none.
 
-## Required
-
-- [Merge dev](/quest/dev/merge-dev.md) - starts on main
-
 ## Related
 
 - [Auth embedder](/quest/next/auth-embedder.md) - the admission half of the same surface

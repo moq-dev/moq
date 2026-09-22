@@ -13,12 +13,15 @@
 //! a migrating client stays routable; an Initial for an unsupported version
 //! gets a version negotiation packet back.
 //!
-//! An endpoint whose socket is a member of a steered `SO_REUSEPORT` group
-//! (one worker per core on one port) sets [`Config::shard`], and every id it
-//! issues then carries the [`moq_sock::shard::cid_prefix`] steering byte, so
-//! the kernel keeps delivering a connection's packets to the worker that owns
-//! it. Dials through the endpoint carry it too, which is what steers a
-//! cluster peer's responses back to the dialing worker.
+//! The socket is the endpoint's identity. Its worker is where the demux and
+//! every connection driver run, whichever thread built the endpoint. A socket
+//! adopted as a member of a steered `SO_REUSEPORT` group (one worker per core
+//! on one port; see [`udp::Bound`](crate::udp::Bound)) brings its slot along,
+//! and every id the endpoint issues then carries the
+//! [`moq_sock::shard::cid_prefix`] steering byte, so the kernel keeps
+//! delivering a connection's packets to the worker that owns it. Dials
+//! through the endpoint carry it too, which is what steers a cluster peer's
+//! responses back to the dialing worker.
 
 use super::server;
 
@@ -44,15 +47,6 @@ pub struct Config {
 	/// peer retransmits and lands once the application drains the backlog or
 	/// a handshake fails.
 	pub backlog: usize,
-
-	/// This socket's slot in a steered `SO_REUSEPORT` group, if it is in one.
-	///
-	/// Every connection id the endpoint issues then leads with the slot's
-	/// [`cid_prefix`](moq_sock::shard::cid_prefix) byte, which is what the
-	/// group's filter selects on. Set it if and only if the socket was bound
-	/// into a group with this shard; a lone socket leaves it `None` and keeps
-	/// the whole id random.
-	pub shard: Option<moq_sock::shard::Shard>,
 }
 
 impl Default for Config {
@@ -60,7 +54,6 @@ impl Default for Config {
 		Self {
 			server: None,
 			backlog: 1024,
-			shard: None,
 		}
 	}
 }
@@ -71,16 +64,10 @@ impl Config {
 		self.server = Some(server);
 		self
 	}
-
-	/// Issue connection ids steering to `shard`'s slot of a reuseport group.
-	pub fn with_shard(mut self, shard: moq_sock::shard::Shard) -> Self {
-		self.shard = Some(shard);
-		self
-	}
 }
 
 /// A fresh [`CID_LEN`]-byte connection id, leading with the steering prefix
-/// when the endpoint sits in a reuseport group.
+/// when the endpoint's socket is a member of a reuseport group.
 pub(crate) fn cid(shard: Option<moq_sock::shard::Shard>) -> [u8; CID_LEN] {
 	let mut cid: [u8; CID_LEN] = rand::random();
 	if let Some(shard) = shard {

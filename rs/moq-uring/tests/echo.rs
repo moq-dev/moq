@@ -59,7 +59,7 @@ fn echo_noq_peer() {
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("socket");
 	let endpoint =
-		quic::Endpoint::new(&handle, socket, quic::endpoint::Config::default().with_server(server)).expect("endpoint");
+		quic::Endpoint::new(socket, quic::endpoint::Config::default().with_server(server)).expect("endpoint");
 	let addr = endpoint.local_addr();
 	let payload: Vec<u8> = (0..PAYLOAD).map(|i| (i * 31 % 251) as u8).collect();
 	let expected = payload.clone();
@@ -91,7 +91,7 @@ fn echo_noq_peer() {
 	worker
 		.block_on(async move {
 			let conn = endpoint.accept().await.expect("accept");
-			let request = quic::web::Request::accept(&handle, conn).await.expect("handshake");
+			let request = quic::web::Request::accept(conn).await.expect("handshake");
 			let mut session = request.ok().await.expect("respond");
 			let (mut send, mut recv) = std::future::poll_fn(|cx| session.poll_accept_bi(cx))
 				.await

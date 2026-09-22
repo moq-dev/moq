@@ -547,7 +547,7 @@ mod tests {
 		let mut out = Vec::new();
 		for i in 0..10u64 {
 			if i == 0 {
-				encoder.keyframe();
+				encoder.cut().unwrap();
 			}
 			for encoded in encoder.encode(&gradient_frame(&rgba, w, h, i)).unwrap() {
 				for decoded in decoder.decode(encoded.payload, encoded.timestamp, i == 0).unwrap() {
@@ -690,7 +690,7 @@ mod tests {
 			let mut frames = Vec::new();
 			for i in 0..10u64 {
 				if i == 0 {
-					source.keyframe();
+					source.cut().unwrap();
 				}
 				for encoded in source.encode(&gradient_frame(&rgba, w, h, i)).unwrap() {
 					frames.extend(decoder.decode(encoded.payload, encoded.timestamp, i == 0).unwrap());
@@ -707,7 +707,7 @@ mod tests {
 				"NVDEC produced a non-CUDA frame; the zero-copy path is not exercised"
 			);
 			if i == 0 {
-				nvenc.keyframe();
+				nvenc.cut().unwrap();
 			}
 			packets.extend(nvenc.encode(&out).unwrap());
 		}

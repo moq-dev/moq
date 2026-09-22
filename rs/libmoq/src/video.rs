@@ -341,10 +341,10 @@ impl VideoEncoder {
 		Ok(())
 	}
 
-	fn publish_cut(&mut self) {
+	fn publish_cut(&mut self) -> Result<(), Error> {
 		// A keyframe is what a cut is on the wire: the importer closes the open
 		// group and starts a new one at it.
-		self.encoder.keyframe();
+		Ok(block_on(self.encoder.cut())?)
 	}
 
 	fn publish_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
@@ -690,7 +690,9 @@ pub unsafe extern "C" fn moq_encode_video(
 		// value: a zero bitrate or GOP is the default, not a request.
 		config.bitrate = (raw_output.bitrate != 0).then(|| moq_net::bandwidth::Rate::from_bps(raw_output.bitrate));
 		if raw_output.gop != 0 {
-			config.gop = raw_output.gop;
+			config.gop = moq_video::encode::Gop::Keyframe {
+				interval: raw_output.gop,
+			};
 		}
 
 		// Both before the global lock is taken: bringing up a hardware encoder is slow
@@ -798,13 +800,16 @@ pub unsafe extern "C" fn moq_encode_video_frame(producer: u32, frame: *const moq
 /// The next frame is encoded as a keyframe, which closes the open group and
 /// starts a new one at it. Calling this repeatedly before that frame arrives cuts
 /// once, not several times.
+///
+/// Fails when the selected encoder cannot force a keyframe (a V4L2 driver
+/// without the control): nothing is queued, and groups keep falling every
+/// `gop` frames.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_encode_video_cut(producer: u32) -> i32 {
 	ffi::enter(move || {
 		let producer = ffi::parse_id(producer)?;
 		let producer = State::lock().video.producer(producer)?;
-		producer.lock().as_mut().ok_or(Error::MediaNotFound)?.publish_cut();
-		Ok(())
+		producer.lock().as_mut().ok_or(Error::MediaNotFound)?.publish_cut()
 	})
 }
 

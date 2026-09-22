@@ -89,12 +89,12 @@ fn synth_flv() -> Vec<u8> {
 
 /// A rendition must never be advertised when its media producer could not be built.
 ///
-/// `media_producer` is fallible (it enrolls the track in the broadcast timeline, minting the
+/// Publishing the media producer is fallible (it enrolls the track in the broadcast timeline, minting the
 /// shared `timeline.z` track, which can collide), so publishing the catalog entry first would
 /// leave consumers a rendition that is announced but has no producer behind it and is therefore
 /// never served.
 #[tokio::test(start_paused = true)]
-async fn rendition_is_not_published_when_the_media_producer_fails() {
+async fn rendition_is_not_published_when_the_media_track_fails() {
 	let data = synth_flv();
 
 	// Control: the same fixture publishes a video rendition when nothing collides, so the

@@ -10,7 +10,7 @@ use fixed_resample::{PushStatus, ResamplingChannelConfig, ResamplingCons, Resamp
 use super::driver::Shared;
 use super::mixer::{self, BUS_CHANNELS, Gain};
 use crate::resample::remix;
-use crate::{Error, Format};
+use crate::{Error, Format, Layout};
 
 /// Default for [`Input::latency`]: audio buffered between [`Sink::write`] and
 /// the speaker.
@@ -40,9 +40,8 @@ pub struct Input {
 	/// Samples per second per channel. Resampled to the device rate if they
 	/// differ.
 	pub sample_rate: u32,
-	/// Channels per frame. Mono is duplicated and stereo passed through; more
-	/// than two is rejected, since downmixing is not implemented.
-	pub channels: u32,
+	/// Speaker meaning and channel order.
+	pub layout: Layout,
 
 	/// How much audio to hold between [`Sink::write`] and the speaker (default:
 	/// 50 ms).
@@ -61,7 +60,7 @@ impl Default for Input {
 		Self {
 			format: Format::F32,
 			sample_rate: 48_000,
-			channels: 2,
+			layout: Layout::Stereo,
 			latency: LATENCY,
 		}
 	}
@@ -78,10 +77,10 @@ impl Input {
 		if self.sample_rate == 0 {
 			return Err(Error::Unsupported("sample rate must be > 0".into()));
 		}
-		if self.channels == 0 || self.channels > BUS_CHANNELS as u32 {
+		if !matches!(self.layout, Layout::Mono | Layout::Stereo) {
 			return Err(Error::Unsupported(format!(
-				"playback accepts mono or stereo input (got {} channels)",
-				self.channels
+				"playback accepts named mono or stereo input (got {:?})",
+				self.layout
 			)));
 		}
 		if self.latency.is_zero() || self.latency > Self::LATENCY_MAX {
@@ -127,10 +126,13 @@ impl Sink {
 	/// the excess; writing slower underruns and plays silence. Both are logged
 	/// and neither is an error, since a live stream recovers on the next write.
 	pub fn write(&mut self, samples: &[u8]) -> Result<(), Error> {
-		let pcm = self.input.format.as_interleaved_f32(samples, self.input.channels)?;
-		let pcm = match self.input.channels as usize {
+		let pcm = self
+			.input
+			.format
+			.as_interleaved_f32(samples, self.input.layout.channels())?;
+		let pcm = match self.input.layout.channels() as usize {
 			BUS_CHANNELS => pcm,
-			channels => Cow::Owned(remix(&pcm, channels as u32, BUS_CHANNELS as u32)?),
+			_ => Cow::Owned(remix(&pcm, self.input.layout, Layout::Stereo)?),
 		};
 
 		match self.prod.lock().unwrap().push_interleaved(&pcm) {
@@ -357,15 +359,12 @@ mod tests {
 
 	#[test]
 	fn rejects_layouts_it_cannot_mix() {
-		for channels in [0, 6] {
+		for layout in [Layout::Discrete(0), Layout::Discrete(6)] {
 			let input = Input {
-				channels,
+				layout,
 				..Default::default()
 			};
-			assert!(
-				matches!(input.validate(), Err(Error::Unsupported(_))),
-				"{channels} channels"
-			);
+			assert!(matches!(input.validate(), Err(Error::Unsupported(_))), "{layout:?}");
 		}
 
 		let input = Input {
@@ -377,9 +376,9 @@ mod tests {
 
 	#[test]
 	fn accepts_mono_and_stereo() {
-		for channels in [1, 2] {
+		for layout in [Layout::Mono, Layout::Stereo] {
 			let input = Input {
-				channels,
+				layout,
 				..Default::default()
 			};
 			input.validate().unwrap();

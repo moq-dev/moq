@@ -3,6 +3,9 @@
 # Tests that span more than one language. Per-language unit tests live in each
 # language's own justfile; this module aggregates them.
 #
+# Shebang recipes read their arguments as $1..$n.
+set positional-arguments
+
 # Two cross-language interop smoke tests exist:
 #   - https://github.com/moq-dev/smoke installs each client from its PUBLIC
 #     package registry to catch packaging breakage in a release.

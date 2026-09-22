@@ -88,16 +88,11 @@ do not add another media abstraction or a renderer crate during stabilization.
 
 ## Quests
 
-- [E2EE API](/quest/main/e2ee-api.md) - epoch-scoped ownership replaces raw crypto, catalog helpers, and process-global claims
-- [uring identity](/quest/main/uring-identity.md) - sockets and connections carry their worker and steering identity
 - [GPU conversion and NVENC](/quest/main/video-gpu-encode.md) - validate the GPU
   conversion, resize and NVENC path for imported frames on NVIDIA hardware
-- [Audio configuration](/quest/main/audio-config.md) - PCM layout, codec settings, and subscription policy have distinct contracts
-- [Audio publication](/quest/main/audio-publication.md) - callers get demand authority and supported options, not internal transport or resampler machinery
 - [AEC ownership](/quest/main/audio-aec.md) - one microphone owns an adaptive canceller and controls remain shareable
 - [Playback outcome](/quest/main/audio-playback.md) - nonblocking writes report accepted and dropped audio
 - [Video output](/quest/main/video-output.md) - codec output and subscription policy are separate, with native or CPU frames
-- [Video GOP](/quest/main/video-gop.md) - the group contract is extensible before intra-refresh implementation
 - [Media release review](/quest/main/media-release-review.md) - verify the settled contracts before separately authorizing 0.1 releases
 
 ## Related

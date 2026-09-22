@@ -373,6 +373,121 @@ mod tests {
 
 	use super::*;
 
+	enum TestConfig {
+		Video(hang::catalog::VideoConfig),
+		Audio(hang::catalog::AudioConfig),
+	}
+
+	impl From<hang::catalog::VideoConfig> for TestConfig {
+		fn from(config: hang::catalog::VideoConfig) -> Self {
+			Self::Video(config)
+		}
+	}
+
+	impl From<hang::catalog::AudioConfig> for TestConfig {
+		fn from(config: hang::catalog::AudioConfig) -> Self {
+			Self::Audio(config)
+		}
+	}
+
+	struct TestRendition {
+		catalog: moq_mux::catalog::Producer,
+		name: String,
+		config: Option<TestConfig>,
+	}
+
+	impl TestRendition {
+		fn unwrap(self) -> Self {
+			self
+		}
+
+		fn set(&mut self, config: impl Into<TestConfig>) -> moq_mux::Result<()> {
+			let config = config.into();
+			let mut catalog = self.catalog.modify()?;
+			match &config {
+				TestConfig::Video(config) => {
+					catalog.video.renditions.insert(self.name.clone(), config.clone());
+				}
+				TestConfig::Audio(config) => {
+					catalog.audio.renditions.insert(self.name.clone(), config.clone());
+				}
+			}
+			catalog.commit()?;
+			self.config = Some(config);
+			Ok(())
+		}
+	}
+
+	impl Drop for TestRendition {
+		fn drop(&mut self) {
+			let Ok(mut catalog) = self.catalog.modify() else {
+				return;
+			};
+			match self.config {
+				Some(TestConfig::Video(_)) => {
+					catalog.video.renditions.remove(&self.name);
+				}
+				Some(TestConfig::Audio(_)) => {
+					catalog.audio.renditions.remove(&self.name);
+				}
+				None => {}
+			}
+		}
+	}
+
+	trait RenditionTestExt {
+		fn test_video(&self, name: &str) -> TestRendition;
+		fn test_audio(&self, name: &str) -> TestRendition;
+	}
+
+	impl RenditionTestExt for moq_mux::catalog::Producer {
+		fn test_video(&self, name: &str) -> TestRendition {
+			TestRendition {
+				catalog: self.clone(),
+				name: name.to_string(),
+				config: None,
+			}
+		}
+
+		fn test_audio(&self, name: &str) -> TestRendition {
+			self.test_video(name)
+		}
+	}
+
+	trait CatalogTestExt {
+		fn enroll_test(&self, track: &str) -> moq_mux::Result<moq_mux::timeline::Recorder>;
+		fn media_producer<C: moq_mux::container::Container>(
+			&self,
+			track: moq_net::track::Producer,
+			container: C,
+		) -> moq_mux::Result<moq_mux::container::Producer<C>>
+		where
+			moq_mux::Error: From<C::Error>;
+	}
+
+	impl CatalogTestExt for moq_mux::catalog::Producer {
+		fn enroll_test(&self, track: &str) -> moq_mux::Result<moq_mux::timeline::Recorder> {
+			let recorder = self.timeline().pacing_track(track)?;
+			let mut producer = self.clone();
+			let mut catalog = producer.modify()?;
+			catalog.archive.get_or_insert_with(|| self.timeline().section());
+			catalog.commit()?;
+			Ok(recorder)
+		}
+
+		fn media_producer<C: moq_mux::container::Container>(
+			&self,
+			track: moq_net::track::Producer,
+			container: C,
+		) -> moq_mux::Result<moq_mux::container::Producer<C>>
+		where
+			moq_mux::Error: From<C::Error>,
+		{
+			let recorder = self.enroll_test(track.name())?;
+			Ok(moq_mux::container::Producer::new(track, container).with_recorder(recorder))
+		}
+	}
+
 	fn frame(micros: u64, keyframe: bool) -> moq_mux::container::Frame {
 		payload_frame(micros, keyframe, &[0xDE, 0xAD, 0xBE, 0xEF])
 	}
@@ -518,7 +633,7 @@ mod tests {
 			Some(renditions::Event::Added(_))
 		));
 
-		// Exactly what `catalog::Rendition::estimate` writes back.
+		// Exactly what a catalog-owned media producer's estimator writes back.
 		let video_config = catalog.video.renditions.get_mut("video0").unwrap();
 		video_config.bitrate = Some(1_800_000);
 		video_config.jitter = Some(Duration::from_millis(33));
@@ -642,10 +757,10 @@ mod tests {
 		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
 		broadcast.announce(Default::default()).expect("publish allowed");
 		settle().await;
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
 		let reserved = catalog.reserve();
-		let mut registration = reserved.video("video0").unwrap();
+		let mut registration = catalog.test_video("video0").unwrap();
 		registration.set(video_config()).unwrap();
 		drop(reserved);
 
@@ -702,10 +817,10 @@ mod tests {
 		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
 		broadcast.announce(Default::default()).expect("publish allowed");
 		settle().await;
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
 		let reserved = catalog.reserve();
-		let mut registration = reserved.video("video0").unwrap();
+		let mut registration = catalog.test_video("video0").unwrap();
 		let mut config = video_config();
 		config.coded_width = None;
 		config.coded_height = None;
@@ -779,10 +894,10 @@ mod tests {
 		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
 		broadcast.announce(Default::default()).expect("publish allowed");
 		settle().await;
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
 		let reserved = catalog.reserve();
-		let mut registration = reserved.video("video0").unwrap();
+		let mut registration = catalog.test_video("video0").unwrap();
 		registration.set(video_config()).unwrap();
 		drop(reserved);
 
@@ -820,12 +935,12 @@ mod tests {
 		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
 		broadcast.announce(Default::default()).expect("publish allowed");
 		settle().await;
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
 		let reserved = catalog.reserve();
-		let mut video_registration = reserved.video("video0").unwrap();
+		let mut video_registration = catalog.test_video("video0").unwrap();
 		video_registration.set(video_config()).unwrap();
-		let mut audio_registration = reserved.audio("audio0").unwrap();
+		let mut audio_registration = catalog.test_audio("audio0").unwrap();
 		let audio_config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
 		audio_registration.set(audio_config).unwrap();
 		drop(reserved);
@@ -915,10 +1030,10 @@ mod tests {
 		let wall = UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS);
 		let config = moq_mux::catalog::Config::default()
 			.with_clock(moq_mux::Clock::at(std::time::Instant::now(), wall).expect("a representable wall"));
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
 
 		let reserved = catalog.reserve();
-		let mut registration = reserved.video("video0").unwrap();
+		let mut registration = catalog.test_video("video0").unwrap();
 		registration.set(video_config()).unwrap();
 		drop(reserved);
 
@@ -974,7 +1089,7 @@ mod tests {
 		// Stage the clock's removal before the first snapshot publishes, so no consumer ever
 		// sees a clock on this broadcast.
 		catalog.modify().unwrap().clock = None;
-		let mut registration = reserved.video("video0").unwrap();
+		let mut registration = catalog.test_video("video0").unwrap();
 		registration.set(video_config()).unwrap();
 		drop(reserved);
 		assert_eq!(catalog.snapshot().clock, None);
@@ -1019,7 +1134,7 @@ mod tests {
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
 		let reserved = catalog.reserve();
-		let mut registration = reserved.video("video0").unwrap();
+		let mut registration = catalog.test_video("video0").unwrap();
 		registration.set(video_config()).unwrap();
 		drop(reserved);
 
@@ -1079,10 +1194,10 @@ mod tests {
 		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
 		broadcast.announce(Default::default()).expect("publish allowed");
 		settle().await;
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
 		let reserved = catalog.reserve();
-		let mut registration = reserved.video("video0").unwrap();
+		let mut registration = catalog.test_video("video0").unwrap();
 		registration
 			.set(hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8))
 			.unwrap();
@@ -1120,12 +1235,12 @@ mod tests {
 		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
 		broadcast.announce(Default::default()).expect("publish allowed");
 		settle().await;
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
 		let reserved = catalog.reserve();
-		let mut video_registration = reserved.video("video0").unwrap();
+		let mut video_registration = catalog.test_video("video0").unwrap();
 		video_registration.set(video_config()).unwrap();
-		let mut audio_registration = reserved.audio("audio0").unwrap();
+		let mut audio_registration = catalog.test_audio("audio0").unwrap();
 		let audio_config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
 		audio_registration.set(audio_config).unwrap();
 		drop(reserved);
@@ -1217,7 +1332,7 @@ mod tests {
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
 		let reserved = catalog.reserve();
-		let mut registration = reserved.video("video0").unwrap();
+		let mut registration = catalog.test_video("video0").unwrap();
 		let config = video_config();
 		registration.set(config).unwrap();
 		drop(reserved);
@@ -1309,11 +1424,10 @@ mod tests {
 		) -> (Box<dyn std::any::Any>, hang::catalog::VideoConfig) {
 			let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
 			broadcast.announce(Default::default()).expect("publish allowed");
-			let mut catalog =
-				moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
 			let reserved = catalog.reserve();
-			let mut registration = reserved.video("video0").unwrap();
+			let mut registration = catalog.test_video("video0").unwrap();
 			let config = video_config();
 			registration.set(config.clone()).unwrap();
 			drop(reserved);
@@ -1433,8 +1547,8 @@ mod tests {
 		// The catalog broadcast carries the catalog and the timeline; the media lives next door.
 		let mut live = origin.create_broadcast("live").expect("publish allowed");
 		live.announce(Default::default()).expect("publish allowed");
-		let mut catalog = moq_mux::catalog::Producer::new(&mut live, moq_mux::catalog::Config::default()).unwrap();
-		let recorder = catalog.enroll("video0").unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut live, moq_mux::catalog::Config::default()).unwrap();
+		let recorder = catalog.enroll_test("video0").unwrap();
 
 		let old_media = publish_media(&origin, OLD, Some(recorder));
 		settle().await;
@@ -1573,8 +1687,8 @@ mod tests {
 		let origin = produce_origin();
 		let mut live = origin.create_broadcast("live").expect("publish allowed");
 		live.announce(Default::default()).expect("publish allowed");
-		let mut catalog = moq_mux::catalog::Producer::new(&mut live, moq_mux::catalog::Config::default()).unwrap();
-		let recorder = catalog.enroll("video0").unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut live, moq_mux::catalog::Config::default()).unwrap();
+		let recorder = catalog.enroll_test("video0").unwrap();
 
 		let mut old_media = moq_net::broadcast::Info::new().produce();
 		let _old_track = write_routed_media(&mut old_media, OLD, recorder, 0);
@@ -1620,7 +1734,7 @@ mod tests {
 			.await
 			.expect("the rebound sibling resolves")
 			.expect("the replacement is routable");
-		let recorder = catalog.enroll("video0").unwrap();
+		let recorder = catalog.enroll_test("video0").unwrap();
 		let _new_track = write_routed_media(&mut new_media, NEW, recorder, 6_000_000);
 		let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
 		loop {
@@ -1667,8 +1781,8 @@ mod tests {
 		let origin = produce_origin();
 		let mut live = origin.create_broadcast("live").expect("publish allowed");
 		live.announce(Default::default()).expect("publish allowed");
-		let mut catalog = moq_mux::catalog::Producer::new(&mut live, moq_mux::catalog::Config::default()).unwrap();
-		let recorder = catalog.enroll("video0").unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut live, moq_mux::catalog::Config::default()).unwrap();
+		let recorder = catalog.enroll_test("video0").unwrap();
 
 		let mut media = moq_net::broadcast::Info::new().produce();
 		let _track = write_routed_media(&mut media, NEW, recorder, 0);
@@ -1709,8 +1823,8 @@ mod tests {
 		let origin = produce_origin();
 		let mut live = origin.create_broadcast("live").expect("publish allowed");
 		live.announce(Default::default()).expect("publish allowed");
-		let mut catalog = moq_mux::catalog::Producer::new(&mut live, moq_mux::catalog::Config::default()).unwrap();
-		let recorder = catalog.enroll("video0").unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut live, moq_mux::catalog::Config::default()).unwrap();
+		let recorder = catalog.enroll_test("video0").unwrap();
 
 		let mut old_media = moq_net::broadcast::Info::new().produce();
 		let _old_track = write_routed_media(&mut old_media, OLD, recorder, 0);
@@ -1747,7 +1861,7 @@ mod tests {
 			.await
 			.expect("the rebound sibling resolves")
 			.expect("the replacement is routable");
-		let recorder = catalog.enroll("video0").unwrap();
+		let recorder = catalog.enroll_test("video0").unwrap();
 		let _new_track = write_routed_media(&mut new_media, NEW, recorder, 6_000_000);
 		let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
 		loop {
@@ -1827,10 +1941,10 @@ mod tests {
 		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
 		broadcast.announce(Default::default()).expect("publish allowed");
 		settle().await;
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
 		let reserved = catalog.reserve();
-		let mut registration = reserved.video("video0").unwrap();
+		let mut registration = catalog.test_video("video0").unwrap();
 		let config = video_config();
 		registration.set(config).unwrap();
 		drop(reserved);
@@ -1886,10 +2000,10 @@ mod tests {
 		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
 		broadcast.announce(Default::default()).expect("publish allowed");
 		settle().await;
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
 		let reserved = catalog.reserve();
-		let mut registration = reserved.video("video0").unwrap();
+		let mut registration = catalog.test_video("video0").unwrap();
 		let config = video_config();
 		registration.set(config).unwrap();
 		drop(reserved);

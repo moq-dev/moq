@@ -13,7 +13,7 @@
 //! let engine = playback::Engine::open(playback::Config::default()).await?;
 //! let mut input = playback::Input::default();
 //! input.sample_rate = audio.sample_rate();
-//! input.channels = audio.channels();
+//! input.layout = audio.layout();
 //!
 //! let mut sink = engine.sink(input)?;
 //!

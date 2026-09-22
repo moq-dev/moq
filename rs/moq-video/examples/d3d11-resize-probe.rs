@@ -841,7 +841,7 @@ mod probe {
 		let mut out = Vec::new();
 		for index in 0..FRAMES {
 			if index == 0 {
-				encoder.keyframe();
+				encoder.cut().unwrap();
 			}
 			let frame = Frame::new(
 				Surface::I420(gradient(index)),

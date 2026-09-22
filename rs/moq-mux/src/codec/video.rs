@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 
 use hang::catalog::stalled::{Detector, Sample};
 
-use crate::catalog::hang::CatalogExt;
-use crate::catalog::{VideoHint, VideoTrack};
+use crate::catalog::VideoHint;
+
+type Track = crate::container::Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig>;
 
 /// The catalog-publishing state a video importer overlays onto every config it resolves.
 ///
@@ -56,54 +57,45 @@ impl Catalog {
 	/// publish. A changed config just re-mirrors the rendition; there are no fixed tracks to
 	/// reject a reconfiguration. The detector's current flag is applied so a bitstream republish
 	/// cannot clear a stall.
-	pub(crate) fn publish(
-		&mut self,
-		rendition: &mut VideoTrack<impl CatalogExt>,
-		mut config: hang::catalog::VideoConfig,
-	) -> crate::Result<()> {
+	pub(crate) fn publish(&mut self, track: &mut Track, mut config: hang::catalog::VideoConfig) -> crate::Result<()> {
 		self.hint.apply(&mut config);
 		config.stalled = self.stalled.flag();
 		if self.last.as_ref() == Some(&config) {
 			return Ok(());
 		}
-		tracing::debug!(name = ?rendition.name(), ?config, "starting track");
-		rendition.set(config.clone())?;
+		tracing::debug!(name = ?track.name(), ?config, "starting track");
+		track.set(config.clone())?;
 		self.last = Some(config);
 		Ok(())
 	}
 
 	/// A frame was handed to the transport, completing one recovery observation.
-	pub(crate) fn on_frame(&mut self, rendition: &mut VideoTrack<impl CatalogExt>, demand: bool) -> crate::Result<()> {
+	pub(crate) fn on_frame(&mut self, track: &mut Track, demand: bool) -> crate::Result<()> {
 		self.last_source = Some(Instant::now());
-		self.publish_stalled(rendition, demand, true, self.lag)
+		self.publish_stalled(track, demand, true, self.lag)
 	}
 
 	/// Re-evaluate stall from silence: the source has not delivered since the last frame.
-	pub(crate) fn tick(&mut self, rendition: &mut VideoTrack<impl CatalogExt>, demand: bool) -> crate::Result<()> {
-		self.publish_stalled(rendition, demand, false, Duration::ZERO)
+	pub(crate) fn tick(&mut self, track: &mut Track, demand: bool) -> crate::Result<()> {
+		self.publish_stalled(track, demand, false, Duration::ZERO)
 	}
 
 	/// Record extra delay (a slow encode) without treating it as a new source frame.
-	pub(crate) fn observe_lag(
-		&mut self,
-		rendition: &mut VideoTrack<impl CatalogExt>,
-		demand: bool,
-		lag: Duration,
-	) -> crate::Result<()> {
+	pub(crate) fn observe_lag(&mut self, track: &mut Track, demand: bool, lag: Duration) -> crate::Result<()> {
 		self.lag = lag;
-		self.publish_stalled(rendition, demand, false, lag)
+		self.publish_stalled(track, demand, false, lag)
 	}
 
 	/// The source is gone (camera released). Never stalled.
-	pub(crate) fn idle(&mut self, rendition: &mut VideoTrack<impl CatalogExt>) -> crate::Result<()> {
+	pub(crate) fn idle(&mut self, track: &mut Track) -> crate::Result<()> {
 		self.last_source = None;
 		self.lag = Duration::ZERO;
-		self.publish_stalled(rendition, false, false, Duration::ZERO)
+		self.publish_stalled(track, false, false, Duration::ZERO)
 	}
 
 	fn publish_stalled(
 		&mut self,
-		rendition: &mut VideoTrack<impl CatalogExt>,
+		track: &mut Track,
 		demand: bool,
 		frame: bool,
 		extra_lag: Duration,
@@ -133,7 +125,9 @@ impl Catalog {
 		if let Some(last) = self.last.as_mut() {
 			last.stalled = flag;
 		}
-		rendition.update(|config| config.stalled = flag)
+		let mut config = track.modify()?;
+		config.stalled = flag;
+		config.commit()
 	}
 }
 
@@ -146,7 +140,16 @@ mod tests {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let reserved = catalog.reserve();
-		let mut rendition = reserved.video("video").unwrap();
+		let net = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut rendition = reserved
+			.video(
+				net,
+				crate::catalog::hang::Container::Legacy(crate::container::Kind::Video),
+				None,
+			)
+			.unwrap();
 		let mut state = Catalog::new(VideoHint::default());
 		state
 			.publish(
