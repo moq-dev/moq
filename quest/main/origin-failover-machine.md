@@ -50,12 +50,15 @@ a closure, and the class disappears.
   splice a track from a source, release a track's segment, abort or finish a
   track, end the front, arm a deadline. Adjust the alphabet as the tests
   demand; the point is that both are plain data.
-- One source slot per front. Local publishers are already route entries
-  (`local: true`) and `route_order` prefers the newest, so the table selects
-  for local and remote alike and `FrontState.sources` goes away. Keep what
-  `attach_source` guarantees today: a front whose sources have all closed is
-  replaced by a fresh broadcast, never spliced into, and the join-or-create
-  decision happens under one lock.
+- One source slot per front, selected by the route table for local and
+  remote alike. A local broadcast becomes a table entry carrying its source,
+  unadvertised until it announces, so `best_route` picks it over a remote
+  route through the existing local-first order and the newest local wins
+  through `route_order`. That makes the separate `OriginNode` tree, exact-path
+  `resolve`, and `teardown_broadcasts` redundant: delete them, so every
+  request takes one lookup path. Keep what `attach_source` guarantees today: a
+  front whose source is closing is never spliced into by a local newcomer; it
+  ends and a fresh front serves the newcomer.
 - Per-track verdicts stay per track (a standby that has not created every
   track must not cost the incumbent anything), but they become one enum per
   track (unspliced, waiting on info, spliced from a source, refused by these
@@ -89,10 +92,6 @@ a closure, and the class disappears.
   failover.
 - Teardown order: `closed` is set and every watch poked under the table lock
   before requesters are rejected.
-
-## Required
-
-- [#3884](https://github.com/moq-dev/moq/pull/3884) merged: the front watch this builds on
 
 ## Related
 

@@ -10,6 +10,9 @@ pub mod track;
 // modules so neither leaks the other's plumbing.
 #[path = "origin.rs"]
 mod origin_impl;
+// The failover state machine origin fronts run; pure, so its transitions are
+// tested without a runtime.
+mod front;
 
 mod bytes;
 pub(crate) mod clock;
