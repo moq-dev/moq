@@ -82,9 +82,11 @@ public final class BroadcastConsumer: Sendable {
         AudioConsumer(try await ffi.decodeAudio(name: name, catalogAudio: catalogAudio, output: output))
     }
 
-    /// Subscribe to a video track and decode it inside the bindings, yielding
-    /// packed I420. `catalogVideo` is the matching rendition from the catalog.
+    /// Subscribe to a video track and decode it inside the bindings.
+    /// `catalogVideo` is the matching rendition from the catalog.
     ///
+    /// `output.format` picks the packed CPU layout every frame arrives in and
+    /// defaults to I420; each frame repeats the layout it was decoded to.
     /// `output.resize` is best effort, so read each frame's own dimensions.
     public func decodeVideo(
         name: String,

@@ -358,6 +358,59 @@ class SmokeTest {
     }
 
     @Test
+    fun `decode video picks its pixel format`() = runTest {
+        OriginProducer(OriginConfig()).use { origin ->
+            origin.createBroadcast("video-decode-format").use { broadcast ->
+                val video = broadcast.encodeVideo(
+                    VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 320u, height = 240u, framerate = 30u),
+                    // Software both ways so the test is deterministic everywhere.
+                    VideoEncoderOutput(codec = VideoCodec.H264, track = "camera", kind = softwareEncoder),
+                    null,
+                )
+                broadcast.announce(Route())
+
+                // Seed the track so a subscriber joining below lands on encoded media.
+                val rgba = ByteArray(320 * 240 * 4) { 0x80.toByte() }
+                video.cut()
+                for (i in 0 until 10) {
+                    video.write(VideoFrame(timestampUs = i.toULong() * 33_333uL, data = rgba))
+                }
+
+                val consumer = origin.consume().requestBroadcast("video-decode-format")
+                val catalog = consumer.subscribeCatalog().next()!!
+                val rendition = catalog.video["camera"]!!
+
+                // Two subscribers over one publication, so the same encoded frames
+                // are read twice and only the requested layout differs.
+                val i420 = consumer.decodeVideo("camera", rendition, VideoDecoderOutput())
+                val packed = consumer.decodeVideo(
+                    "camera",
+                    rendition,
+                    VideoDecoderOutput(format = VideoPixelFormat.RGBA),
+                )
+
+                // Keep the encoder fed so both decoders see frames after they joined.
+                for (i in 10 until 40) {
+                    video.write(VideoFrame(timestampUs = i.toULong() * 33_333uL, data = rgba))
+                }
+
+                val planar = i420.next()!!
+                assertEquals(VideoPixelFormat.I420, planar.format)
+                assertEquals(planar.width.toInt() * planar.height.toInt() * 3 / 2, planar.data.size)
+
+                val frame = packed.next()!!
+                assertEquals(VideoPixelFormat.RGBA, frame.format)
+                assertEquals(frame.width.toInt() * frame.height.toInt() * 4, frame.data.size)
+                assertTrue(frame.data.indices.filter { it % 4 == 3 }.all { frame.data[it] == 0xFF.toByte() })
+
+                i420.cancel()
+                packed.cancel()
+                video.finish()
+            }
+        }
+    }
+
+    @Test
     fun `encode audio with opus object`() {
         val input = AudioEncoderInput(format = AudioSampleFormat.F32, sampleRate = 48_000u, channels = 1u)
         val silence = AudioFrame(timestampUs = 0uL, data = ByteArray(960 * 4))

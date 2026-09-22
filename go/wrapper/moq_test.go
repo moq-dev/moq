@@ -240,6 +240,121 @@ func TestVideoPropertiesUseDefaultedFields(t *testing.T) {
 	}
 }
 
+// TestDecodeVideoFormat pins the decode side picking its CPU layout: an unset
+// Format is I420, and RGBA is four bytes a pixel, with each frame naming the
+// layout it was decoded to.
+func TestDecodeVideoFormat(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	origin := moq.NewOriginProducer()
+	broadcast, err := origin.CreateBroadcast("video-decode-format")
+	if err != nil {
+		t.Fatal(err)
+	}
+	track := "camera"
+	video, err := broadcast.EncodeVideo(
+		moq.VideoEncoderInput{Format: moq.VideoPixelFormatRgba, Width: 320, Height: 240, Framerate: 30},
+		// Software both ways so the test is deterministic everywhere.
+		moq.VideoEncoderOutput{Codec: moq.VideoCodecH264, Track: &track, Kind: moq.SoftwareEncoder()},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broadcast.Announce(moq.Route{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed the track so a subscriber joining below lands on encoded media.
+	rgba := make([]byte, 320*240*4)
+	for i := range rgba {
+		rgba[i] = 0x80
+	}
+	if err := video.Cut(); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 10 {
+		if err := video.Write(moq.VideoFrame{TimestampUs: uint64(i) * 33333, Data: rgba}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	bc, err := origin.Consume().RequestBroadcast(ctx, "video-decode-format")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := bc.Catalog(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendition, ok := catalog.Video[track]
+	if !ok {
+		t.Fatalf("catalog has no %q rendition: %v", track, catalog.Video)
+	}
+
+	// Two subscribers over one publication, so the same encoded frames are read
+	// twice and only the requested layout differs.
+	i420, err := bc.DecodeVideo(ctx, track, rendition, moq.VideoDecoderOutput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer i420.Cancel()
+	format := moq.VideoPixelFormatRgba
+	packed, err := bc.DecodeVideo(ctx, track, rendition, moq.VideoDecoderOutput{Format: &format})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer packed.Cancel()
+
+	// Keep the encoder fed so both decoders see frames after they joined.
+	for i := 10; i < 40; i++ {
+		if err := video.Write(moq.VideoFrame{TimestampUs: uint64(i) * 33333, Data: rgba}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	frame, err := i420.Next(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame == nil {
+		t.Fatal("expected an I420 frame")
+	}
+	if frame.Format != moq.VideoPixelFormatI420 {
+		t.Fatalf("format = %v, want I420", frame.Format)
+	}
+	if want := int(frame.Width) * int(frame.Height) * 3 / 2; len(frame.Data) != want {
+		t.Fatalf("I420 length = %d, want %d", len(frame.Data), want)
+	}
+
+	frame, err = packed.Next(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame == nil {
+		t.Fatal("expected an RGBA frame")
+	}
+	if frame.Format != moq.VideoPixelFormatRgba {
+		t.Fatalf("format = %v, want RGBA", frame.Format)
+	}
+	if want := int(frame.Width) * int(frame.Height) * 4; len(frame.Data) != want {
+		t.Fatalf("RGBA length = %d, want %d", len(frame.Data), want)
+	}
+	for i := 3; i < len(frame.Data); i += 4 {
+		if frame.Data[i] != 0xFF {
+			t.Fatalf("RGBA alpha at %d = %#x, want 0xff", i, frame.Data[i])
+		}
+	}
+
+	if err := video.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	if err := broadcast.Finish(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()

@@ -55,8 +55,8 @@ with its PR and the replacement call:
 - bindings: the Go module is `moq.dev/moq` with `context.Context` on every
   blocking call (#2957); `MoqAudioCodec` is an `opus()` object (#3671); the
   configuration setters are fallible (#3642); durations are microseconds and
-  the rate estimates are `estimated_*` (#3744); the decode format knob from
-  [Decode format](/quest/main/ffi-decode-format.md).
+  the rate estimates are `estimated_*` (#3744); `MoqVideoDecoderOutput.format`
+  picks I420 or RGBA decode output, additively.
 
 Release-notes outline, the additions worth leading with, in order of value to
 a consumer: prefix routes and wildcard Pattern events (#3225, #3649);
@@ -86,7 +86,6 @@ Public API: none beyond the required quests. Wire: none.
 
 ## Required
 
-- [Decode format](/quest/main/ffi-decode-format.md) - the C-only decode knob reaches every uniffi binding
 - [Binding parity](/quest/next/binding-parity.md) - every wrapper reaches every moq-ffi method
 - [Binding docs](/quest/next/binding-docs.md) - the binding pages compile against the wrappers
 - The merged relay has soaked on moq.pro staging and the maintainer has signed it off
