@@ -130,7 +130,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [fMP4 emsg](/quest/next/emsg.md) - event messages survive fMP4 import, and the timed-metadata contract ID3, SCTE-35, and FLV script tags share is settled with them
 - [FLV script tags](/quest/next/flv-script.md) - onMetaData and AMF data messages survive RTMP and FLV import
 - [Release size](/quest/next/release-size.md) - the release scripts' LTO exports become the workspace release profile, and a nightly report shows what each moq-ffi build ships
-- [Bindgen CLI split](/quest/next/uniffi-cli-feature.md) - a library build of moq-ffi stops compiling uniffi_bindgen and its 46 crates
 - [Dart on iOS](/quest/next/dart-ios.md) - prove the shipped iOS native asset actually loads on a device, which no CI can
 - [libmoq shutdown](/quest/next/libmoq-shutdown.md) - OBS exits cleanly with the plugin loaded: a C ABI `moq_shutdown` stops the libmoq thread before the module is unloaded
 - [Kotlin JVM exit](/quest/next/kt-jvm-exit.md) - a Kotlin/JVM program exits cleanly whatever the moq-ffi runtime thread is doing, like Python does since #3766

@@ -52,4 +52,4 @@ uses regex-automata, so check the table rather than assume).
 
 ## Related
 
-- [Bindgen CLI split](/quest/next/uniffi-cli-feature.md) - the staticlib half of the same hygiene
+- [Bindgen CLI split](/quest/main/uniffi-cli-feature.md) - the staticlib half of the same hygiene

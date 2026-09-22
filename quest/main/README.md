@@ -92,6 +92,7 @@ do not add another media abstraction or a renderer crate during stabilization.
 - [Origin failover machine](/quest/main/origin-failover-machine.md) - a front's
   source selection and track splicing become a pure step function with a
   runtime-free test per transition
+- [Bindgen CLI split](/quest/main/uniffi-cli-feature.md) - a library build of moq-ffi stops compiling uniffi_bindgen and its 46 crates
 
 ## Related
 
