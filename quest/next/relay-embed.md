@@ -49,4 +49,4 @@ Public API: additive. Wire: none.
 ## Related
 
 - [Auth embedder](/quest/next/auth-embedder.md) - the admission half of the same surface
-- [Server close](/quest/next/moq-server-close.md) - the listener lifetime that sits beside `with_listeners`
+- [Server close](/quest/main/moq-server-close.md) - the listener lifetime that sits beside `with_listeners`
