@@ -31,4 +31,4 @@ here.
 
 ## Related
 
-- [Browser permission QA](/quest/m1/browser-permission-qa.md) - the other publisher path that runs without a gesture
+- [Browser permission QA](/quest/m0/browser-permission-qa.md) - the other publisher path that runs without a gesture
