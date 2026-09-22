@@ -170,7 +170,9 @@ fn bench_subscribe(c: &mut Criterion) {
 /// table to prove nothing serves it. Neither may depend on `publishers`.
 fn bench_request(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/request");
-	for (publishers, _) in SHAPES {
+	// A request costs nothing per subscriber, so this sweeps the publisher counts
+	// in `SHAPES` rather than its shapes, whose last two share one.
+	for publishers in [100, 1_000] {
 		let fleet = fanout(publishers, 0);
 		// An advertise-only route above the misses: it covers them without serving them.
 		let _covering = fleet.producer.publish("room", origin::Route::default()).unwrap();

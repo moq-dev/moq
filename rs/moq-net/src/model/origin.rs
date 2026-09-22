@@ -3585,7 +3585,7 @@ impl Requesting {
 		self
 	}
 
-	/// The route table's generation when the request was made.
+	/// The egress scope the resolved broadcast's reads are attributed to.
 	fn with_stats(mut self, scope: stats::Scope) -> Self {
 		self.stats = scope;
 		self
@@ -4031,6 +4031,9 @@ impl Consumer {
 				broadcast: broadcast.consume().weak(),
 			},
 		);
+		// Released before the push: a set whose handles are gone drops the task,
+		// and the `Watch` it carries unregisters under this same lock.
+		drop(state);
 		self.tasks.push(run_remote_front(RemoteFrontTask {
 			shared: self.shared.clone(),
 			state: front_state,
@@ -6144,6 +6147,22 @@ mod tests {
 			.expect("route below keeps the node");
 		assert!(node.watches.is_empty());
 		assert_eq!(table.routes.root.watches_below, 0);
+	}
+
+	#[test]
+	fn a_discarded_front_task_unregisters_its_watch() {
+		let (producer, _driver) = Producer::new(Config {
+			hop: origin(1),
+			..Default::default()
+		});
+		let consumer = producer.consume();
+		let _served = producer.dynamic("room", Route::default()).unwrap();
+		// A consumer outlives its producer by design, so the task set can refuse
+		// submissions while the origin is still open. The front's task is then
+		// dropped on the spot, taking its `Watch` with it: the request must not
+		// still be holding the table lock the watch unregisters under.
+		drop(producer);
+		let _pending = consumer.request_broadcast("room/a");
 	}
 
 	#[test]
