@@ -217,6 +217,9 @@ tower-http = { version = "0.7", features = ["cors"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 tracing-test = "0.2"
+# The runtime pin and the bindgen CLI pin must not drift; the `uniffi-bindgen`
+# package owns the `cli` feature, moq-ffi the rest.
+uniffi = "0.32"
 url = "2"
 usage = { package = "usage-rs", version = "6.3.0" }
 uuid = { version = "1.26", features = ["v7"] }
