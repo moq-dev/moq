@@ -15,7 +15,8 @@ instead.
   producer (a session's subscriber, a cluster peer) reports when its initial
   set has landed; an in-process producer is caught up immediately. The
   consumer's caught-up signal fires once every producer present at subscribe
-  time has reported. The API shape (an event kind, an awaitable, or a flag) is
+  time has reported. A producer that closes before reporting drops out of
+  the pending set, so a dead session cannot stall the signal. The API shape (an event kind, an awaitable, or a flag) is
   the implementer's call; propose it in the PR.
 - The wire already carries the boundary: `AnnounceOk.active` on lite-05+ and
   `AnnounceInit` on lite-01/02. Versions without one (lite-03/04, IETF) fall
@@ -25,7 +26,8 @@ instead.
   versions.
 - Test: a relay with N announced broadcasts signals caught up after exactly N
   updates on each lite version that carries a count, and an empty relay
-  signals immediately.
+  signals immediately, and a session that closes before its count arrives
+  does not block the signal.
 
 Public API: additive on moq-net. Wire: none. JS parity is
 [a separate quest](/quest/next/js-announce-caught-up.md).

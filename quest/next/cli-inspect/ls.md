@@ -6,7 +6,10 @@
 one path per line relative to the connect URL's root, and exits once caught
 up. `--follow` keeps running and prints `+ path` / `- path` as broadcasts come
 and go. `--json` prints one `{"path": .., "active": bool}` per line in either
-mode. Route-only updates are not printed.
+mode. Like the relay's `/announced`, it lists announced prefixes, which by
+convention are broadcast paths. An `Updated` event (a new route for a path
+already live) is not printed. `--follow` runs until interrupted; if the
+announce stream ends, it exits non-zero.
 
 ## Plan
 
@@ -22,4 +25,4 @@ mode. Route-only updates are not printed.
 
 ## Required
 
-- [Caught up](/quest/next/cli-ls/caught-up.md) - snapshot mode exits on the consumer's caught-up signal
+- [Caught up](/quest/next/cli-inspect/caught-up.md) - snapshot mode exits on the consumer's caught-up signal
