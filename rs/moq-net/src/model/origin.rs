@@ -62,9 +62,13 @@ impl Hop {
 
 	/// Generate a fresh hop with a random non-zero id. Use this for any relay that
 	/// does not need a stable identity across restarts.
+	///
+	/// Older `@moq/lite` clients decode the exclude hop as a JavaScript number
+	/// and reject values above 2^53-1. Keep generated IDs in that range while
+	/// [`Self::new`] accepts the full 62-bit wire range for explicit IDs.
 	pub fn random() -> Self {
 		let mut rng = rand::rng();
-		let id = rng.random_range(1..(1u64 << 62));
+		let id = rng.random_range(1..(1u64 << 53));
 		Self { id }
 	}
 
@@ -3659,6 +3663,13 @@ mod tests {
 		let (producer, _driver) = Producer::new(config.clone());
 		assert_eq!(producer.hop(), config.hop);
 		assert_eq!(producer.consume().hop(), config.hop);
+	}
+
+	#[test]
+	fn random_hops_fit_legacy_lite_clients() {
+		for _ in 0..32 {
+			assert!(Hop::random().id() < 1u64 << 53);
+		}
 	}
 
 	/// Yield to the driver until `check` passes, bounded so a bug fails instead

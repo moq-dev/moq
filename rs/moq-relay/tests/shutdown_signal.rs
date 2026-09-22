@@ -82,7 +82,7 @@ async fn sigint_drains_sessions_before_exiting_inner() {
 	// Empty URI: the relay is restarting, not moving. The window itself is the
 	// sender's own timer here (only moq-transport draft-17+ puts it on the wire),
 	// so it is the elapsed time below that proves it was honored.
-	assert_eq!(goaway.uri, "", "expected a reconnect-to-me GOAWAY");
+	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
 
 	// Mid-window the relay is still running: the point of the drain is the time it
 	// buys, not the notice. This is what the old ctrl-C race broke.

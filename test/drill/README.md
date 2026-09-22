@@ -47,7 +47,7 @@ would all pass for free.
 ### Killing the relay
 
 The relay runs on its own tokio runtime and is killed by dropping it. Aborting
-the `run` task is not enough, because `moq_relay::serve` spawns a task per
+the `run` task is not enough, because the relay accept loop spawns a task per
 connection and those keep serving a relay whose accept loop is gone.
 
 A dropped runtime sends no `CONNECTION_CLOSE`, exactly like a killed process, so
