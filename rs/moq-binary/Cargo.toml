@@ -18,3 +18,4 @@ kio = { workspace = true }
 moq-flate = { workspace = true }
 moq-net = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }

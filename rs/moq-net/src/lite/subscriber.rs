@@ -2121,11 +2121,7 @@ mod tests {
 		// The peer's own subscription, excluding the hop the server minted for
 		// it, is served from the local front before anything is announced back.
 		let peer = origin.consume().excluding(assigned);
-		let resolved = peer
-			.request_broadcast("room/host")
-			.now_or_never()
-			.expect("local lookup is synchronous")
-			.expect("resolves");
+		let resolved = peer.request_broadcast("room/host").await.expect("resolves");
 		let mut sub = resolved
 			.track("video")
 			.unwrap()
@@ -2166,10 +2162,11 @@ mod tests {
 			.unwrap();
 		assert!(!accepted, "an announce that already names this origin must be dropped");
 
-		// The local front is still the one at the path, and still serving.
-		let still = origin
-			.consume()
-			.get_broadcast("room/host")
+		// The local front is still the one at the path, and still serving: the
+		// peer's next request joins it rather than minting another.
+		let still = peer
+			.request_broadcast("room/host")
+			.await
 			.expect("the local front keeps serving");
 		assert!(
 			still.is_clone(&resolved),

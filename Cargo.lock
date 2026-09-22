@@ -4335,6 +4335,7 @@ dependencies = [
  "moq-flate",
  "moq-net",
  "thiserror 2.0.20",
+ "tracing",
 ]
 
 [[package]]
