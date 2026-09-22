@@ -52,11 +52,11 @@ type (
 	// Video describes one catalog rendition, including whether the publisher recommends temporarily avoiding it.
 	Video = ffi.MoqVideo
 	// VideoHint supplies catalog fields a video stream can't reveal itself, such as bitrate, filling only the gaps.
+	VideoHint = ffi.MoqVideoHint
 	// VideoDecodedFrame is one decoded video frame: packed pixels, the layout they are in, their dimensions, and a timestamp in microseconds.
 	VideoDecodedFrame = ffi.MoqVideoDecodedFrame
 	// VideoDecoderOutput configures what DecodeVideo delivers: an optional pixel format and resize, plus a max age.
 	VideoDecoderOutput = ffi.MoqVideoDecoderOutput
-	VideoHint = ffi.MoqVideoHint
 	// AudioFormat is a single audio codec an importer can parse.
 	AudioFormat = ffi.MoqAudioFormat
 	// VideoFormat is a single video codec an importer can parse.
