@@ -62,5 +62,5 @@ Target `dev`, where the crate is `moq-tokio`; the rename has not reached
 
 ## Related
 
-- [Fork noq](/quest/next/quic/fork.md) - noq's multipath support is one
+- [Fork noq](/quest/main/quic-fork.md) - noq's multipath support is one
   reason it is the parent

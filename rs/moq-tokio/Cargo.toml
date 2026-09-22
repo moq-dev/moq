@@ -60,8 +60,9 @@ mdns-sd = { workspace = true, optional = true }
 
 moq-net = { workspace = true }
 moq-sock = { workspace = true }
-# iroh runs on noq but re-exports only the ControllerFactory trait, not the concrete
-# congestion configs. Version matched to the copy iroh pulls in.
+# iroh runs on upstream noq, not the moq-noq fork, and re-exports only the
+# ControllerFactory trait, not the concrete congestion configs. Version matched to
+# the copy iroh pulls in.
 noq-proto = { workspace = true, optional = true }
 notify = { version = "8", optional = true }
 qmux = { workspace = true, features = ["wss", "tls", "tcp"], optional = true }

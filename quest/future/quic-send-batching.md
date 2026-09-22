@@ -24,7 +24,7 @@ either way.
 
 ## Required
 
-- [Fork noq](/quest/next/quic/fork.md) - `moq-noq-udp` is the fork's
+- [Fork noq](/quest/main/quic-fork.md) - `moq-noq-udp` is the fork's
 
 ## Related
 

@@ -59,7 +59,7 @@ provisional codepoints if the document changes before release.
 
 ## Required
 
-- [Fork noq](/quest/next/quic/fork.md) - the frame and stream-state
+- [Fork noq](/quest/main/quic-fork.md) - the frame and stream-state
   implementation lives there
 
 ## Related

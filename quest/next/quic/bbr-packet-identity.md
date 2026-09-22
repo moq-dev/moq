@@ -27,7 +27,7 @@ change is intended. Run the regressions in the fork's CI.
 
 ## Required
 
-- [Fork noq](/quest/next/quic/fork.md) - fixes and CI regressions land in moq-dev/noq
+- [Fork noq](/quest/main/quic-fork.md) - fixes and CI regressions land in moq-dev/noq
 
 ## Related
 

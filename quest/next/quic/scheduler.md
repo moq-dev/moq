@@ -101,7 +101,7 @@ where the new implementation makes it redundant.
 
 ## Required
 
-- [Fork noq](/quest/next/quic/fork.md) - the scheduler lives there
+- [Fork noq](/quest/main/quic-fork.md) - the scheduler lives there
 
 ## Closes
 

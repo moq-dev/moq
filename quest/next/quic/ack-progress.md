@@ -39,7 +39,7 @@ completes when a `moq-noq-proto` release carries the accessor and
 
 ## Required
 
-- [Fork noq](/quest/next/quic/fork.md) - the accessor lives there
+- [Fork noq](/quest/main/quic-fork.md) - the accessor lives there
 
 ## Related
 

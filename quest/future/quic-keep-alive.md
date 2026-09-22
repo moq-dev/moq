@@ -35,4 +35,4 @@ deadline; the maximum knob shortens the period.
 
 ## Required
 
-- [Fork noq](/quest/next/quic/fork.md) - the timer change lives there
+- [Fork noq](/quest/main/quic-fork.md) - the timer change lives there

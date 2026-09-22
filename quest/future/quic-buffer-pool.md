@@ -23,7 +23,7 @@ noise and the idea is closed.
 
 ## Required
 
-- [Fork noq](/quest/next/quic/fork.md) - the seam lives there
+- [Fork noq](/quest/main/quic-fork.md) - the seam lives there
 
 ## Related
 

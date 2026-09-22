@@ -48,7 +48,7 @@ state machine in the dependency graph, and the accessors qmux needs are
 
 ## Required
 
-- [Fork noq](/quest/next/quic/fork.md) - the workspace the crate lives in
+- [Fork noq](/quest/main/quic-fork.md) - the workspace the crate lives in
 - [Reliable stream reset](/quest/next/quic/reliable-reset.md) - qmux reuses the
   extension's stream state rather than implementing reset locally
 - [Hierarchical stream scheduling](/quest/next/quic/scheduler.md) - qmux must

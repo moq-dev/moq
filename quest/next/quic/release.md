@@ -26,7 +26,7 @@ the parent applies.
 
 - [Release BBR fixes](/quest/next/quic/bbr-release.md) - preserve the corrected controller in later stack releases
 
-- [Fork noq](/quest/next/quic/fork.md) - the packages this releases
+- [Fork noq](/quest/main/quic-fork.md) - the packages this releases
 - [Reliable stream reset](/quest/next/quic/reliable-reset.md) - the
   WebTransport-required transport extension
 - [Hierarchical stream scheduling](/quest/next/quic/scheduler.md) - the new

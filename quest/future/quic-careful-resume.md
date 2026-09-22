@@ -32,7 +32,7 @@ only when the jump never makes the first second worse than slow start.
 
 ## Required
 
-- [Fork noq](/quest/next/quic/fork.md) - the controller wrapper lives there
+- [Fork noq](/quest/main/quic-fork.md) - the controller wrapper lives there
 
 ## Related
 

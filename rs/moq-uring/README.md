@@ -64,13 +64,13 @@ the tokio stack.
 
 ## Backends
 
-The `quic` module uses the sans-IO [noq-proto](https://github.com/kixelated/noq)
+The `quic` module uses the sans-IO [moq-noq-proto](https://github.com/moq-dev/noq)
 stack with rustls. The `noq` feature is enabled by default and remains optional
 so the worker, timers, and UDP socket can be built without QUIC.
 
 | Feature | Stack | TLS |
 |---|---|---|
-| `noq` (default) | [noq-proto](https://github.com/kixelated/noq) | rustls |
+| `noq` (default) | [moq-noq-proto](https://github.com/moq-dev/noq) | rustls |
 
 Building without default features leaves the `quic` module out entirely.
 

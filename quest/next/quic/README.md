@@ -15,8 +15,8 @@ in [future](/quest/future/README.md).
 
 ## Plan
 
-Everything here assumes the single noq stack. The [fork](/quest/next/quic/fork.md)
-is the first quest in the line and most others require it.
+Everything here assumes the single noq stack and builds on the
+[fork](/quest/main/quic-fork.md), which most quests require.
 
 The seven BBR correctness fixes follow the fork bootstrap. They are separate
 PRs, but one owner should work in the shared controller code at a time.
@@ -44,9 +44,6 @@ This is a transport API change, not a MoQ wire change.
 
 ## Quests
 
-- [Fork noq](/quest/next/quic/fork.md) - moq-dev/noq publishes `moq-noq-proto`,
-  `moq-noq`, and `moq-noq-udp`, tracks its parent, and the sync procedure is
-  written down
 - [Preserve QUIC packet identity in BBR](/quest/next/quic/bbr-packet-identity.md) - ACKs and losses identify the right packet across QUIC spaces
 - [Finish each BBR ACK sample before using it](/quest/next/quic/bbr-ack-sampling.md) - current delivery samples reach the model once with consistent metadata
 - [Mark application starvation before the next BBR send](/quest/next/quic/bbr-app-limited.md) - resumed bursts retain correct sample labels
@@ -79,6 +76,10 @@ This is a transport API change, not a MoQ wire change.
   consumable versions of the fork and its adapters
 - [Upstream the fork](/quest/next/quic/upstream.md) - every general carried
   change is offered to n0-computer/noq once its shape has settled
+
+## Required
+
+- [Fork noq](/quest/main/quic-fork.md) - the fork every carried change ships from
 
 ## Related
 

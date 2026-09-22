@@ -8,7 +8,7 @@
 use std::task::{Context, Poll};
 
 use bytes::{Buf, Bytes, BytesMut};
-use noq_proto::{StreamId, VarInt};
+use moq_noq_proto::{StreamId, VarInt};
 
 use super::super::Error;
 use super::{End, Shared};
@@ -107,12 +107,12 @@ impl web_transport_trait::poll::SendStream for SendStream {
 			}
 			// No capacity right now; the driver wakes us when noq reports
 			// the stream writable.
-			Err(noq_proto::WriteError::Blocked) => {
+			Err(moq_noq_proto::WriteError::Blocked) => {
 				self.shared.park_writable(self.id, waiter);
 				Poll::Pending
 			}
-			Err(noq_proto::WriteError::Stopped(code)) => Poll::Ready(Err(Error::Stop(code.into_inner()))),
-			Err(noq_proto::WriteError::ClosedStream) => {
+			Err(moq_noq_proto::WriteError::Stopped(code)) => Poll::Ready(Err(Error::Stop(code.into_inner()))),
+			Err(moq_noq_proto::WriteError::ClosedStream) => {
 				Poll::Ready(Err(Error::Quic("stream already finished".to_string())))
 			}
 		}
@@ -138,12 +138,12 @@ impl web_transport_trait::poll::SendStream for SendStream {
 			// A STOP_SENDING beat us here. Carry the code like `poll_write`
 			// does, or `moq_net::Error::from_transport` cannot decode a
 			// routine cancellation.
-			Err(noq_proto::FinishError::Stopped(code)) => {
+			Err(moq_noq_proto::FinishError::Stopped(code)) => {
 				self.reset = true;
 				return Err(Error::Stop(code.into_inner()));
 			}
 			// Already finished or reset, so the FIN it wanted is out.
-			Err(noq_proto::FinishError::ClosedStream) => {}
+			Err(moq_noq_proto::FinishError::ClosedStream) => {}
 		}
 		self.fin = true;
 		self.shared.kick();
@@ -284,8 +284,8 @@ impl RecvStream {
 		let read = match chunks.next(max) {
 			Ok(Some(chunk)) => Read::Chunk(chunk.bytes),
 			Ok(None) => Read::Finished,
-			Err(noq_proto::ReadError::Blocked) => Read::Blocked,
-			Err(noq_proto::ReadError::Reset(code)) => Read::Reset(code.into_inner()),
+			Err(moq_noq_proto::ReadError::Blocked) => Read::Blocked,
+			Err(moq_noq_proto::ReadError::Reset(code)) => Read::Reset(code.into_inner()),
 		};
 		let transmit = chunks.finalize().should_transmit();
 		drop(conn);
