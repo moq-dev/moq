@@ -3199,17 +3199,19 @@ impl Consumer {
 		}
 	}
 
-	/// Block until `path` resolves to a broadcast: [`Self::routed`], then
-	/// [`Self::request_broadcast`], retried when the two race.
+	/// Block until `path` resolves to a broadcast: [`Self::request_broadcast`],
+	/// retried whenever the routes covering the path change.
 	///
-	/// The wait and the resolution are separate steps, so the covering route can
-	/// retract between them (failover churn), a route can cover the path while
-	/// nothing serves it yet (an advertise-only announce racing its handler), and
-	/// a handler can turn the path down. This rides out the churn by retrying
-	/// whenever the route table moves, which is what makes it the right call for
-	/// resolving a path right after connecting. Returns [`Error::Unauthorized`]
-	/// for a path outside this consumer's scope, [`Error::Closed`] once the origin
-	/// closes, and any other resolution failure as-is.
+	/// A request answers for the routes as they stand, so it can miss an
+	/// announcement that has not arrived yet, lose its covering route to
+	/// failover churn, find a route that covers the path while nothing serves it
+	/// yet (an advertise-only announce racing its handler), or be turned down by
+	/// a handler. This rides all of that out by watching the covering routes
+	/// and asking again each time they move, which is what makes it the right
+	/// call for resolving a path right after connecting. Returns
+	/// [`Error::Unauthorized`] for a path outside this consumer's scope,
+	/// [`Error::Closed`] once the origin closes, and any other resolution
+	/// failure as-is.
 	pub async fn routed_broadcast(&self, path: impl AsPath) -> Result<broadcast::Consumer, Error> {
 		let path = path.as_path();
 
@@ -3219,18 +3221,14 @@ impl Consumer {
 			return Err(Error::Unauthorized);
 		}
 		loop {
-			if self.routed(&path).await.is_none() {
-				return Err(Error::Closed);
-			}
 			// `Unroutable` is a verdict of the routes covering the path as they
-			// stood when the request was made: nothing covered it, the serving
-			// route retracted under the request, or its handler declined.
-			// Re-asking the same routes would spin, so watch them before asking
-			// and wait for them to move (an identical standby swapping in
-			// counts, even though no announce update reports it, and so does a
+			// stood when the request was made. Re-asking the same routes would
+			// spin, so watch them before asking and wait for them to move (a
+			// route arriving or retracting, an identical standby swapping in, a
 			// local broadcast attaching at the path), then try again. A change
 			// between the ask and the wait bumps the watch first, so that retry
-			// is immediate.
+			// is immediate; the teardown pokes every watch, so a closed origin
+			// is observed on the next pass.
 			let (watch, seen) = {
 				let mut table = self.shared.lock();
 				if table.closed {
