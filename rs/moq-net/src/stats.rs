@@ -73,7 +73,8 @@
 //!
 //! # Garbage collection
 //!
-//! [`Registry::report`] returns the current per-broadcast detail and prunes
+//! [`Registry::report`] refills a caller-owned [`Report`] with the current
+//! per-broadcast detail and prunes
 //! entries no longer referenced by any guard, so a publisher draining the
 //! registry on an interval keeps it bounded. A registry that is never
 //! drained accumulates one entry per broadcast path ever seen; call
@@ -709,9 +710,9 @@ impl Snapshot {
 	}
 }
 
-/// The per-broadcast detail returned by [`Registry::report`]: one traffic
-/// entry per `(broadcast, tier)` and one session entry per `(tier, root)`.
-/// Entries are unordered.
+/// The per-broadcast detail [`Registry::report`] fills: one traffic entry per
+/// `(broadcast, tier)` and one session entry per `(tier, root)`. Entries are
+/// unordered. Reuse one across drains to keep its capacity.
 #[derive(Debug, Default, Clone)]
 #[non_exhaustive]
 pub struct Report {
@@ -947,19 +948,21 @@ impl Registry {
 		snap
 	}
 
-	/// Take a per-broadcast [`Report`] and prune dead entries.
+	/// Refill `report` with the per-broadcast detail and prune dead entries.
 	///
-	/// Returns every `(broadcast, tier)` traffic readout and every `(tier,
-	/// root)` session gauge, then drops the entries no guard references
-	/// anymore (their final values are still in the returned report, so a
-	/// publisher draining on an interval emits the closing readout exactly
-	/// once). A pruned path that sees traffic again restarts from zero; see
-	/// the module docs on counter resets. Returns an empty report for a
-	/// disabled registry.
-	pub fn report(&self) -> Report {
-		let mut report = Report::default();
+	/// Clears `report`, keeping its capacity so a caller draining on an
+	/// interval reuses one report instead of allocating per drain, then fills
+	/// every `(broadcast, tier)` traffic readout and every `(tier, root)`
+	/// session gauge. Entries no guard references anymore are then dropped
+	/// (their final values are still in the report, so a publisher draining on
+	/// an interval emits the closing readout exactly once). A pruned path that
+	/// sees traffic again restarts from zero; see the module docs on counter
+	/// resets. Leaves the report empty for a disabled registry.
+	pub fn report(&self, report: &mut Report) {
+		report.traffic.clear();
+		report.sessions.clear();
 		let Some(shared) = self.shared.as_ref() else {
-			return report;
+			return;
 		};
 		{
 			let mut entries = shared.entries.lock();
@@ -1003,7 +1006,6 @@ impl Registry {
 			}
 			sessions.retain(|_, roots| !roots.is_empty());
 		}
-		report
 	}
 }
 
@@ -1516,6 +1518,32 @@ mod tests {
 		assert_eq!(sessions(Tier::new("region/sjc")).sessions_started, 1);
 	}
 
+	fn drain(stats: &Registry) -> Report {
+		let mut report = Report::default();
+		stats.report(&mut report);
+		report
+	}
+
+	#[test]
+	fn report_reuses_capacity() {
+		// A reused report is cleared, not appended to, and keeps its buffers.
+		let stats = test_stats();
+		let ctx = stats.tier(Tier::default()).session("root");
+		let _scopes: Vec<_> = (0..8).map(|i| ctx.egress(format!("b/{i}").as_str())).collect();
+
+		let mut report = Report::default();
+		stats.report(&mut report);
+		assert_eq!(report.traffic.len(), 8);
+		assert_eq!(report.sessions.len(), 1);
+		let (traffic, sessions) = (report.traffic.as_ptr(), report.sessions.as_ptr());
+
+		stats.report(&mut report);
+		assert_eq!(report.traffic.len(), 8, "refilled, not appended");
+		assert_eq!(report.sessions.len(), 1);
+		assert_eq!(report.traffic.as_ptr(), traffic, "traffic buffer reused");
+		assert_eq!(report.sessions.as_ptr(), sessions, "sessions buffer reused");
+	}
+
 	#[test]
 	fn report_returns_detail_and_prunes() {
 		// report() surfaces per-broadcast rows while a guard is held, keeps the
@@ -1528,7 +1556,7 @@ mod tests {
 		let sub = scope.subscribe();
 		scope.meter().bytes(42);
 
-		let report = stats.report();
+		let report = drain(&stats);
 		let row = report
 			.traffic
 			.iter()
@@ -1547,7 +1575,7 @@ mod tests {
 
 		// The drain after the last guard drops still returns the final values,
 		// then prunes the entry.
-		let report = stats.report();
+		let report = drain(&stats);
 		let row = report
 			.traffic
 			.iter()
@@ -1559,7 +1587,7 @@ mod tests {
 			!stats.shared().entries.lock().contains_key(&key),
 			"fully-closed entry pruned"
 		);
-		assert!(stats.report().traffic.is_empty(), "nothing left after the prune");
+		assert!(drain(&stats).traffic.is_empty(), "nothing left after the prune");
 	}
 
 	#[test]
@@ -1574,7 +1602,7 @@ mod tests {
 		let guard = scope.announce();
 
 		for _ in 0..3 {
-			let report = stats.report();
+			let report = drain(&stats);
 			assert!(
 				report.traffic.iter().any(|row| row.path == key),
 				"announced-but-idle broadcast stays while the guard is held"
@@ -1583,7 +1611,7 @@ mod tests {
 
 		drop(guard);
 		drop(scope);
-		let report = stats.report();
+		let report = drain(&stats);
 		let row = report.traffic.iter().find(|row| row.path == key).expect("final report");
 		assert!(row.publisher.is_idle());
 		assert!(!stats.shared().entries.lock().contains_key(&key));
@@ -1596,7 +1624,7 @@ mod tests {
 		let stats = test_stats();
 		let session = stats.tier(Tier::default()).session("acme");
 
-		let report = stats.report();
+		let report = drain(&stats);
 		let row = report
 			.sessions
 			.iter()
@@ -1605,14 +1633,14 @@ mod tests {
 		assert_eq!(row.presence.active(), 1);
 
 		drop(session);
-		let report = stats.report();
+		let report = drain(&stats);
 		let row = report
 			.sessions
 			.iter()
 			.find(|row| row.root.as_str() == "acme")
 			.expect("final gauge reported once");
 		assert_eq!(row.presence.active(), 0);
-		assert!(stats.report().sessions.is_empty(), "root pruned after the last drain");
+		assert!(drain(&stats).sessions.is_empty(), "root pruned after the last drain");
 		assert!(session_snapshot(&stats, &Tier::default(), "acme").is_none());
 	}
 
@@ -1640,7 +1668,7 @@ mod tests {
 		scope.meter().bytes(100);
 		let _guard = scope.announce();
 		let _sub = scope.subscribe();
-		assert!(stats.report().traffic.is_empty());
+		assert!(drain(&stats).traffic.is_empty());
 		assert!(stats.snapshot().traffic().is_empty());
 	}
 

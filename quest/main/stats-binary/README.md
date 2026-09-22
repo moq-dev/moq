@@ -2,7 +2,8 @@
 
 ## Goal
 
-A stats tick allocates nothing per entry, and any consumer can request a
+Draining the registry into stats frames allocates nothing per entry, and
+producing a `.fb.z` frame keeps that property. Any consumer can request a
 FlatBuffers flavor of every stats track (`publisher.fb.z`, `subscriber.fb.z`,
 `sessions.fb.z`, per tier) that is smaller and cheaper to produce and read than
 `.json.z`, backed by a checked-in schema that other languages can generate
@@ -31,9 +32,9 @@ Settled while planning:
 - **Extension-ready:** the schema leaves room for the client-stats extension
   (a nested table on each entry), which
   [schema](/quest/next/qos/stats/schema.md) fills in when it lands.
-- **The line lands on main:** quest 1 breaks the published `Registry::report()`,
-  which rides the breaking moq-net release already pending on main. If that
-  release is cut first, the line moves to dev. Quest 2 builds on quest 1.
+- **The line lands on main:** `Registry::report(&mut Report)` is a published
+  break that rides the breaking moq-net release already pending on main. The
+  line must merge before that release is cut, or move to dev.
 
 The line owns the end-to-end check: a relay test that subscribes to
 `.json.z` and `.fb.z`, pairs frames from the same tick (deterministically,
@@ -42,7 +43,6 @@ counters agree.
 
 ## Quests
 
-- [Allocation-free tick](/quest/main/stats-binary/tick.md) - the registry report and the stats producer reuse their buffers every tick
 - [FlatBuffers flavor](/quest/main/stats-binary/flatbuffers.md) - moq-stats serves and reads `<name>.fb.z` from a checked-in schema
 - [Stats format page](/quest/main/stats-binary/docs.md) - a doc/concept page for every stats track and both encodings
 
