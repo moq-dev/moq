@@ -44,10 +44,8 @@ let mut config = moq_transcode::Config::default();
 // renditions are referenced through its parent.
 config.source = Some(moq_net::path::RelativeOwned::from(".".to_string()));
 
-let output = origin.create_broadcast(
-    format!("{path}/transcode.hang"),
-    moq_net::broadcast::Route::new().with_announce(true),
-)?;
+let output = origin.create_broadcast(format!("{path}/transcode.hang"))?;
+output.announce(Default::default())?;
 
 moq_transcode::run(source, output, config).await?;
 ```

@@ -21,9 +21,10 @@ consumable by an embedder.
 - The media leg is plain negotiated RTP: `moq-rtc`/str0m is ICE/DTLS-first
   and its reusable session internals are crate-private, so it is precedent,
   not a base. Consider publicizing moq-rtc's codec bridges rather than
-  duplicating the RTP-to-hang mapping, and reuse `moq-audio`'s Opus and
-  resampler for the G.711<->Opus transcode (mono 8 kHz; G.711 companding is
-  new code, nothing in the repository has it).
+  duplicating the RTP-to-hang mapping, and reuse `moq-audio`'s Opus codec
+  for the G.711<->Opus transcode, with rate conversion through
+  `decode::Output` and `encode::Input` since the resampler is private (mono
+  8 kHz; G.711 companding is new code, nothing in the repository has it).
 - RTP wall-clock normalization off RTCP sender reports, as moq-rtc does.
 - The embedder decides paths and auth; the crate's API is
   "answer this INVITE, give me the caller as Opus, take Opus to play" plus

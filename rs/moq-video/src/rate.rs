@@ -9,6 +9,7 @@ pub const MAX_FRAMES_PER_SECOND: u32 = 1_000_000;
 
 /// An invalid video frame rate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum RateError {
 	/// The numerator or denominator was zero.
 	#[error("frame rate numerator and denominator must be non-zero")]

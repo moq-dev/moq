@@ -45,8 +45,9 @@ let mut config = moq_video::capture::Config::default();
 config.source = moq_video::capture::Source::Display(None);
 
 let mut capture = moq_video::capture::open(&config).await?;
-while let Some(surface) = capture.read().await? {
-    // Encode, render, or inspect the newest captured surface.
+while let Some(frame) = capture.read().await? {
+    // Encode, render, or inspect the newest captured frame; `frame.surface`
+    // holds the pixels and `frame.timestamp` the capture time.
 }
 ```
 

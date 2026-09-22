@@ -19,7 +19,9 @@
 //! Linux, VideoToolbox on macOS, Media Foundation on Windows), with the default
 //! `openh264` feature providing H.264 software fallback. On an NVIDIA GPU the whole pipeline is
 //! GPU-resident: NVDEC decodes and scales in hardware and NVENC encodes the
-//! CUDA frame in place, with no CPU copies. Other decoders scale on the CPU.
+//! CUDA frame in place, with no CPU copies. macOS and Windows also resize on
+//! the GPU; set [`Config::resize`]'s output to `Output::Cpu` to decode to CPU
+//! pixels and resize there.
 
 pub mod active;
 pub mod ladder;

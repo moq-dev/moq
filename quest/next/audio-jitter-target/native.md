@@ -13,18 +13,18 @@ Video keeps its own path.
 
 ## Plan
 
-`rs/moq-audio` has no jitter buffer at all. `decode::Config`
-(`rs/moq-audio/src/decode/decoder.rs:60-80`) carries `max_age`, how far
+`rs/moq-audio` has no jitter buffer at all. `decode::Options`
+(`rs/moq-audio/src/decode/consumer.rs`) carries `max_age`, how far
 playback may drift from the live edge before skipping a stalled group, applied
-to the subscription and clamped to the track's retention in
-`decode/consumer.rs:113`, and `start`, where to begin on a track that already
-holds groups. Neither adds latency: the consumer skips only when newer data is
+to the subscription and clamped to the track's retention, and `start`, where
+to begin on a track that already holds groups; `decode::Config` selects the
+backend only. Neither adds latency: the consumer skips only when newer data is
 already that far ahead.
 
 - Measure arrivals at the same point the browser does, on the container
   consumer before the age budget can skip a group, so both languages estimate
   from the same observation.
-- Add the knob to `decode::Config`, additive on the `#[non_exhaustive]` struct,
+- Add the knob to `decode::Options`, additive on the `#[non_exhaustive]` struct,
   so it targets `main`. The spec quest settles the final name and shape before
   this implementation starts; `delay` is the recommendation, matching the
   browser while `max_age` remains the live-edge skip budget. Do not reopen or

@@ -25,9 +25,10 @@ without replacing an API after 0.1.
   error for `Refresh` (supported or refused, never a silent fallback to
   keyframes). The test-only probe backend accepts it so the producer logic is
   testable without hardware.
-- Group boundaries in refresh mode come from counting: backends report
-  `keyframe = false` for a sweep start, so the producer marks the first frame
-  of each cycle by frame count from the last cut and opens the group there.
+- Group boundaries in refresh mode come from counting: the splitter sees no
+  IDR at a sweep start (only a recovery-point SEI where the backend emits
+  one), so the producer marks the first frame of each cycle by frame count
+  from the last cut and tells the importer to open the group there.
   A backend reports the sweep length it actually configured, which can be
   shorter than the cycle (NVENC needs it strictly shorter), and the producer
   publishes `warmup` as that length over the framerate.

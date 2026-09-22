@@ -40,8 +40,8 @@ clock-free estimates from the media span of each emitted batch.
 - Enforce the never-lower rule at the publisher, not only by convention.
   `js/publish/src/catalog.ts:25-29` already refuses a decrease and a zero for
   audio and video renditions; Rust does not. Add `moq_mux::Error::JitterDecreased`
-  and return it from `Rendition::set`, `Rendition::update`, and
-  `Rendition::estimate` (`rs/moq-mux/src/catalog/tracks.rs:444`, `:497`, `:486`)
+  and return it from `Rendition::set`, `Rendition::replace`, and
+  `Rendition::estimate` (`rs/moq-mux/src/catalog/tracks.rs`)
   when the resolved jitter would drop below what the catalog already carries.
   Extend the `MillisCeil` ceiling serialization (`rs/hang/src/catalog/millis.rs`)
   to `TextConfig` (`rs/hang/src/catalog/text/mod.rs:124`), which audio and video

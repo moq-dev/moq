@@ -30,7 +30,7 @@ Worth weighing, and the choice is A/V policy:
   largest change to `Playback`.
 - Hand the replacement the retired sink rather than opening a new one, so the
   ring is already at depth. Keeps one task per kind, but only works when the
-  rate and channel count match.
+  sample rate and `Layout` match.
 
 Retiring a rendition mid-track is the case to reproduce: a transcode ladder
 resizing under a source that changed resolution is the one that happens in

@@ -12,8 +12,8 @@ release first.
 Four gaps, one external dependency.
 
 **Decode.** The H.264 decoder landed (moq-vaapi 0.0.4, `decode/backend/vaapi.rs`),
-with `decode::Config::gpu_frames` exporting DMA-BUF surfaces the renderer
-imports without a download. H.265 decode is still missing, so a Linux box
+with the default `decode::Config::output` of `Output::Native` handing out
+DMA-BUF surfaces the renderer imports without a download. H.265 decode is still missing, so a Linux box
 without NVDEC has no hardware path for it.
 
 **The encoder.** Ours is a 111-line CPU-only adapter whose own header says it

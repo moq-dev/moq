@@ -48,8 +48,8 @@ the branch still gets wrong is recorded in
 the first gap between observed timestamps and the rise is immediate and
 unclamped, so a tune-in across a stale group sets the target to seconds.
 
-Native has no jitter buffer at all. `rs/moq-audio`'s decode `Config`
-(`rs/moq-audio/src/decode/decoder.rs:60-80`) carries `max_age`, how far
+Native has no jitter buffer at all. `rs/moq-audio`'s `decode::Options`
+(`rs/moq-audio/src/decode/consumer.rs`) carries `max_age`, how far
 playback may drift from the live edge before skipping a stalled group, and
 `start`, where to begin on a track that already holds groups. Nothing pads the
 buffer against uneven arrivals.

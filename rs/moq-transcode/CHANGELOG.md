@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remove the deprecated `nvenc` and `nvdec` feature aliases.
 - Preserve a source catalog's `archive` entry on the derivative instead of
   synthesizing a timeline for the transcode output.
+- [**breaking**] `Config::resize` is `moq_video::resize::Config` with a
+  native-or-CPU `output`, replacing the acceleration knob; `moq transcode
+  --resize-acceleration` becomes `--frames native|cpu`.
+- [**breaking**] Source frame rates are `Option<moq_video::Rate>`, unknown
+  when the source catalog carries none.
 
 ## [0.0.19](https://github.com/moq-dev/moq/compare/moq-transcode-v0.0.18...moq-transcode-v0.0.19) - 2026-09-17
 

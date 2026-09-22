@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replace ambiguous channel counts with `Layout` and add explicit decoder backend selection.
 - [**breaking**] `encode::Producer::finish` borrows (`&mut self`) instead of consuming, so a later
   `abort(self)` can still run after a clean end. Writes after finish fail with `Closed`.
+- [**breaking**] `encode::Producer::track` is replaced by the watch-only `demand()`,
+  `publish_capture` takes `PublicationOptions`, `Resampler` is no longer exported, and
+  `Frame` and `encode::Encoded` are non-exhaustive with `new` constructors.
+- [**breaking**] The `fec` flag is removed from `encode::Settings` and `Options`; it never
+  produced redundancy.
+- [**breaking**] `aec::Canceller` is `aec::Control`, `playback::Engine::canceller` returns
+  `Result`, and `capture::Config::aec` takes a `Control`. An engine owns one AEC reference and a
+  control attaches to one live microphone; conflicts fail with `Error::Busy`.
+- [**breaking**] `playback::Sink::write` returns `playback::Write`, reporting accepted and
+  dropped input sample frames instead of silently discarding overflow.
 
 ## [0.0.25](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.24...moq-audio-v0.0.25) - 2026-09-17
 

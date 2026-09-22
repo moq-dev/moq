@@ -7,8 +7,8 @@ panic, and a rejected rate change leaves the last accepted settings intact.
 
 ## Plan
 
-Registration can succeed before mapping fails in safe/buffer.rs, and several
-destructors call expect on driver cleanup. Session::reconfigure mutates retained
+Registration rollback and non-panicking destructors landed with the ownership
+work (#3834, #3835, #3838). Session::reconfigure still mutates retained
 bitrate/VBV fields before the driver accepts the change; a rejected zero-rate
 update can corrupt the basis of the next proportional update.
 

@@ -3,7 +3,8 @@
 ## Goal
 
 Decide whether a concrete MoQ audio consumer benefits from in-band Opus FEC,
-with a tested loss/latency policy before exposing a replacement public option.
+with a tested loss/latency policy before exposing any additive option on
+`encode::Settings`.
 This does not block 0.1.
 
 ## Plan

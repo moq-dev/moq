@@ -17,13 +17,8 @@ vaapi/nvidia pattern and load the system library at runtime instead, falling
 through to the next host when it is missing, so a build with the feature on
 still links and starts driverless.
 
-The current feature matrix is the contract to change: `capture` and
-`playback` pull cpal with ALSA always linked, while
-`pipewire = ["cpal/pipewire"]` and `pulseaudio = ["cpal/pulseaudio"]` activate
-cpal without either. Make the host flags require `capture` or `playback` so
-they never activate cpal alone, and document the supported combinations in
-the moq-audio feature table with the same change. If cpal cannot load ALSA at
-runtime in-tree, split that half into its own upstream quest holding the cpal
+`capture` and `playback` pull cpal with ALSA always linked; the host flags
+alone no longer activate it. If cpal cannot load ALSA at runtime in-tree, split that half into its own upstream quest holding the cpal
 release as a plain-text `Required` condition, and this quest requires it.
 
 Verify by building in the Nix shell, then running the shipped binary on a

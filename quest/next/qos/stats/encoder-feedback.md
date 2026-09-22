@@ -11,8 +11,9 @@ prefix. Keyframe requests stay out.
 
 ## Plan
 
-- `encode::Config` in `rs/moq-video` and `rs/moq-audio` gains
-  `feedback: Option<feedback::Consumer>`, a handle built from an
+- `encode::Options` in `rs/moq-video` and `rs/moq-audio` (the producer
+  options, beside `bandwidth`) gains `feedback: Option<feedback::Consumer>`,
+  a handle built from an
   `origin::Consumer` and a prefix: it consumes announcements under the
   prefix, keeps one `moq_stats::Consumer<hang::Stats>` per `.stats` broadcast
   requesting `<own path>/subscriber.json`, and folds the reports into one
@@ -22,7 +23,8 @@ prefix. Keyframe requests stay out.
   that goes backwards is a restarted viewer and resets that baseline. Viewers
   that stop reporting age out on the stats interval, so one stall long ago
   never lowers the target forever.
-- `rate.rs` takes that signal beside the bandwidth estimate: a stalled share
+- `moq_mux::rate::Control` takes that signal beside the bandwidth estimate:
+  a stalled share
   above a threshold steps the target down like a bandwidth drop, recovery
   follows the existing attack curve, and the estimate stays the ceiling.
   Audio follows the same signal with its narrower ladder.

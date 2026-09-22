@@ -3,19 +3,20 @@
 ## Goal
 
 An application publishing through the built-in capture path can ask for a
-keyframe. Every encoder backend already forces an IDR and it is tested, but
-nothing above the backend can reach it.
+keyframe. `Encoder::cut()`, `Sink::cut()`, and the ffi/libmoq `cut` already
+force one, refusing with `CutUnsupported` when a backend cannot, but the
+turnkey capture paths have no way in.
 
 ## Plan
 
-`Encoder::encode` takes `keyframe: bool` and each backend honors it (NVENC via
-the `FORCEIDR` picture flag with `repeatSPSPPS` so the IDR carries its
-parameter sets, deliberately not `pictureType` which `enablePTD` ignores;
-openh264, VAAPI, VideoToolbox and Media Foundation the same way). What is
-missing is a caller-facing trigger:
+`Backend::encode(frame, cut)` honors a cut (NVENC via the `FORCEIDR` picture
+flag with `repeatSPSPPS` so the IDR carries its parameter sets, deliberately
+not `pictureType` which `enablePTD` ignores; openh264, VAAPI, VideoToolbox and
+Media Foundation the same way) and `can_cut()` answers at open whether it can.
+What is missing is a caller-facing trigger on the turnkey paths:
 
-- `publish_capture` forces a keyframe on the first frame and otherwise rides
-  the backend's GOP cadence, with no way in.
+- `publish_capture` relies on every backend opening with a keyframe and
+  otherwise rides the GOP cadence; its `Options` carry no trigger.
 - `js/publish`'s encode path already calls `encoder.encode(frame, { keyFrame })`,
   but `lastKeyframe` is a closure-local `let` with no external trigger.
   `Config.keyframeInterval` is cadence, not on demand.

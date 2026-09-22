@@ -41,8 +41,8 @@ Their package boundaries are explicit:
 
 The media crates are also 0.0.x, so their changes target main. Adapt callers in
 other packages without breaking their published APIs, C layouts, or wire
-formats. Do not bump versions as part of these quests. The media review records
-when the four crates are ready for a separately requested 0.1 release.
+formats. Do not bump versions as part of these quests. The media review
+found the four crates ready for a separately requested 0.1 release.
 
 Their package boundaries are explicit:
 
@@ -90,7 +90,6 @@ do not add another media abstraction or a renderer crate during stabilization.
 
 - [GPU conversion and NVENC](/quest/main/video-gpu-encode.md) - validate the GPU
   conversion, resize and NVENC path for imported frames on NVIDIA hardware
-- [Media release review](/quest/main/media-release-review.md) - verify the settled contracts before separately authorizing 0.1 releases
 
 ## Related
 

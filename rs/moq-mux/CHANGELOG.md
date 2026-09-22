@@ -48,6 +48,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `rate::{Policy, Control}`, the media bitrate policy audio, video, and transcode senders share
+  (moved from `moq_video::encode::rate`). An inverted policy starts at its ceiling.
 - Propagate rendition labels through single-track media imports.
 - `Clock::with_wall` / `Clock::new_at` for imports and synthetic sources, `Clock::source`
   translating a source's own zero onto the broadcast mapping (first frame anchors live, a
