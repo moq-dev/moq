@@ -88,6 +88,7 @@ do not add another media abstraction or a renderer crate during stabilization.
 
 ## Quests
 
+- [JSON churn](/quest/main/json-churn.md) - a moq-json update allocates a bounded amount whatever the document size, in every caller
 - [Binding parity](/quest/main/binding-parity.md) - every wrapper reaches every moq-ffi method in its own idiom with moq-net's verbs
 
 ## Related

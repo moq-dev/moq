@@ -35,4 +35,4 @@ before moving the quest to dev.
 
 ## Related
 
-- [Allocation-free tick](/quest/next/stats-binary/tick.md) - the stats-side churn; the JSON stats tracks gain from both
+- [Allocation-free tick](/quest/main/stats-binary/tick.md) - the stats-side churn; the JSON stats tracks gain from both
