@@ -300,7 +300,9 @@ final class SmokeTests: XCTestCase {
 
         let consumer = try await origin.consume().requestBroadcast(path: "video-decode-format")
         let catalogs = try await consumer.subscribeCatalog()
-        let catalog = try XCTUnwrap(try await catalogs.next())
+        // XCTUnwrap takes an autoclosure, which can't hold an await.
+        let nextCatalog = try await catalogs.next()
+        let catalog = try XCTUnwrap(nextCatalog)
         let rendition = try XCTUnwrap(catalog.video["camera"])
 
         // Two subscribers over one publication, so the same encoded frames are
@@ -319,11 +321,13 @@ final class SmokeTests: XCTestCase {
             try video.write(VideoFrame(timestampUs: UInt64(i) * 33_333, data: rgba))
         }
 
-        let planar = try XCTUnwrap(try await i420.next())
+        let nextPlanar = try await i420.next()
+        let planar = try XCTUnwrap(nextPlanar)
         XCTAssertEqual(planar.format, .i420)
         XCTAssertEqual(planar.data.count, Int(planar.width) * Int(planar.height) * 3 / 2)
 
-        let frame = try XCTUnwrap(try await packed.next())
+        let nextPacked = try await packed.next()
+        let frame = try XCTUnwrap(nextPacked)
         XCTAssertEqual(frame.format, .rgba)
         XCTAssertEqual(frame.data.count, Int(frame.width) * Int(frame.height) * 4)
         XCTAssertTrue(stride(from: 3, to: frame.data.count, by: 4).allSatisfy { frame.data[$0] == 0xFF })
