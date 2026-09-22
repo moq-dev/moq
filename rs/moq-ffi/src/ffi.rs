@@ -336,16 +336,6 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 		// the state to wait for.
 		let _ = wait.recv();
 	}
-
-	/// wasm32 has no second thread to block, so this is the non-blocking cancel.
-	#[cfg(target_arch = "wasm32")]
-	pub fn cancel_and_wait<F, Fut>(&self, _shutdown: F)
-	where
-		F: FnOnce(T) -> Fut + 'static,
-		Fut: Future<Output = ()> + 'static,
-	{
-		self.cancel();
-	}
 }
 
 impl<T: kio::MaybeSend + 'static> Drop for Task<T> {
