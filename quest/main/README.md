@@ -88,6 +88,7 @@ do not add another media abstraction or a renderer crate during stabilization.
 
 ## Quests
 
+- [Headless player](/quest/main/watch-player.md) - `Watch.Player` assembles the pipeline the element, the room, and moq.pro each rebuild
 - [Binding parity](/quest/main/binding-parity.md) - every wrapper reaches every moq-ffi method in its own idiom with moq-net's verbs
 
 ## Related
