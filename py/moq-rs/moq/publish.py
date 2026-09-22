@@ -291,8 +291,9 @@ class TrackProducer:
 class TrackRequest:
     """A subscriber-requested track that hasn't been accepted yet.
 
-    Accept it for raw writes, hand it to :meth:`BroadcastProducer.publish_media_on_track`
-    to publish media (the importer accepts it), or abort it to reject the subscriber.
+    Accept it for raw writes, hand it to :meth:`BroadcastProducer.publish_audio_on_track`
+    or :meth:`BroadcastProducer.publish_video_on_track` to publish media (the importer
+    accepts it), or abort it to reject the subscriber.
     """
 
     def __init__(self, inner: MoqTrackRequest) -> None:

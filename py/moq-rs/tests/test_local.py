@@ -420,7 +420,7 @@ async def test_dynamic_track_request_can_publish_media():
     consumer = broadcast.consume()
     catalog_consumer = await consumer.subscribe_catalog()
 
-    # publish_media_on_track accepts the request (at the media timescale), which is what
+    # publish_audio_on_track accepts the request (at the media timescale), which is what
     # unblocks subscribe_media, so run the subscribe concurrently until then.
     subscribe = asyncio.create_task(
         consumer.subscribe_media("requested-audio", cast(moq.Container, moq.Container.LEGACY()))
