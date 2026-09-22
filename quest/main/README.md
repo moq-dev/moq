@@ -92,6 +92,7 @@ do not add another media abstraction or a renderer crate during stabilization.
 - [Origin failover machine](/quest/main/origin-failover-machine.md) - a front's
   source selection and track splicing become a pure step function with a
   runtime-free test per transition
+- [Decode format](/quest/main/ffi-decode-format.md) - the C-only decode pixel format knob reaches every uniffi binding
 
 ## Related
 
