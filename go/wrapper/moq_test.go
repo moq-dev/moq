@@ -185,6 +185,47 @@ func TestEncodeAudioWithOpusObject(t *testing.T) {
 	}
 }
 
+// FrameDurationUs is microseconds so Opus' 2.5 ms frame is expressible at all,
+// and a duration outside the Opus set is refused rather than silently rounded.
+func TestEncodeAudioFrameDurations(t *testing.T) {
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := moq.AudioEncoderInput{
+		Format:     moq.AudioSampleFormatF32,
+		SampleRate: 48000,
+		Channels:   1,
+	}
+
+	fine, err := broadcast.EncodeAudio("fine", input, moq.AudioEncoderOutput{
+		Codec:           moq.OpusAudioCodec(),
+		FrameDurationUs: 2500,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 2.5 ms of silence at 48 kHz mono f32: exactly one encoded frame.
+	if err := fine.Write(moq.AudioFrame{TimestampUs: 0, Data: make([]byte, 120*4)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fine.Finish(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = broadcast.EncodeAudio("coarse", input, moq.AudioEncoderOutput{
+		Codec:           moq.OpusAudioCodec(),
+		FrameDurationUs: 2000,
+	}, nil)
+	if !errors.Is(err, moq.ErrAudio) {
+		t.Fatalf("err = %v, want ErrAudio: 2 ms is not an opus frame duration", err)
+	}
+
+	if err := broadcast.Finish(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestVideoPropertiesUseDefaultedFields(t *testing.T) {
 	broadcast, err := moq.NewBroadcastProducer()
 	if err != nil {

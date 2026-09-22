@@ -249,6 +249,37 @@ final class SmokeTests: XCTestCase {
         try broadcast.finish()
     }
 
+    /// `frameDurationUs` is microseconds so Opus' 2.5 ms frame is expressible at
+    /// all, and a duration outside the Opus set is refused rather than silently
+    /// rounded.
+    func testEncodeAudioFrameDurations() throws {
+        let broadcast = try BroadcastProducer()
+        let input = AudioEncoderInput(format: .f32, sampleRate: 48_000, channels: 1)
+
+        let fine = try broadcast.encodeAudio(
+            name: "fine",
+            input: input,
+            output: AudioEncoderOutput(codec: AudioCodec.opus(), frameDurationUs: 2_500)
+        )
+        // 2.5 ms of silence at 48 kHz mono f32: exactly one encoded frame.
+        try fine.write(AudioFrame(timestampUs: 0, data: Data(count: 120 * 4)))
+        try fine.finish()
+
+        XCTAssertThrowsError(
+            try broadcast.encodeAudio(
+                name: "coarse",
+                input: input,
+                output: AudioEncoderOutput(codec: AudioCodec.opus(), frameDurationUs: 2_000)
+            )
+        ) { error in
+            guard let audio = error as? MoqError, case .Audio = audio else {
+                return XCTFail("2 ms is not an opus frame duration: \(error)")
+            }
+        }
+
+        try broadcast.finish()
+    }
+
     func testEncodeAudioWithOpusObject() throws {
         // The config retains the codec, so releasing either first must still encode.
         let input = AudioEncoderInput(format: .f32, sampleRate: 48_000, channels: 1)
