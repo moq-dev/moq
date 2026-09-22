@@ -21,7 +21,8 @@ use crate::consumer::MoqBroadcastConsumer;
 use crate::error::MoqError;
 use crate::producer::MoqBroadcastProducer;
 
-/// Pixel layout of the raw frames passed to [`MoqVideoProducer::write`].
+/// A CPU pixel layout: what [`MoqVideoProducer::write`] is fed, and what
+/// [`MoqBroadcastConsumer::decode_video`] hands back.
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum MoqVideoPixelFormat {
 	/// Tightly-packed planar I420: Y, then U, then V, no row padding
@@ -559,16 +560,16 @@ async fn follow_reservation(
 
 /// How a subscriber wants decoded video delivered.
 ///
-/// Frames always arrive as tightly-packed I420 (Y, then U, then V, no row
-/// padding), so there is no pixel format to choose: a decoder's native output is
-/// flattened to CPU I420 at delivery, since the FFI boundary can't hand back a
-/// GPU surface.
-#[derive(Clone, uniffi::Record)]
+/// A decoder's native output is flattened to CPU pixels at delivery, since the
+/// FFI boundary can't hand back a GPU surface; `format` picks the layout it is
+/// flattened to.
+#[derive(Clone, Default, uniffi::Record)]
 pub struct MoqVideoDecoderOutput {
 	/// Ask the decoder to emit frames at this size instead of the stream's
-	/// native one. Best effort: a backend with a built-in scaler honors it for
-	/// free, others ignore it, so read each frame's own dimensions rather than
-	/// assuming this took. Both dimensions must be even.
+	/// native one. Best effort: only NVDEC has a built-in scaler and honors it for
+	/// free; VideoToolbox, Media Foundation, MediaCodec, VAAPI, V4L2, and openh264
+	/// ignore it and decode at the stream's native size. Read each frame's own
+	/// dimensions rather than assuming this took. Both dimensions must be even.
 	#[uniffi(default = None)]
 	pub resize: Option<crate::media::MoqDimensions>,
 	/// Upper bound on buffering before skipping a stalled group, in
@@ -577,9 +578,18 @@ pub struct MoqVideoDecoderOutput {
 	/// `None` keeps the moq-mux default of zero (skip aggressively).
 	#[uniffi(default = None)]
 	pub max_age_us: Option<u64>,
+	/// CPU pixel layout every frame is delivered in. `None` delivers
+	/// [`MoqVideoPixelFormat::I420`], which is what a decoder produces natively,
+	/// so asking for RGBA costs a conversion per frame.
+	///
+	/// Spelled as an option rather than an I420-valued field because uniffi has no
+	/// enum default, and a required field would break every existing caller.
+	#[uniffi(default = None)]
+	pub format: Option<MoqVideoPixelFormat>,
 }
 
-/// One decoded video frame: packed I420 plus the size it actually decoded to.
+/// One decoded video frame: packed pixels plus the layout and size they
+/// actually decoded to.
 ///
 /// Unlike [`MoqVideoFrame`] on the publish side, this carries dimensions: there
 /// they are fixed by the encoder config, here they are whatever the stream
@@ -592,12 +602,17 @@ pub struct MoqVideoDecodedFrame {
 	pub width: u32,
 	/// Frame height in pixels.
 	pub height: u32,
-	/// Tightly-packed I420: Y, then U, then V.
+	/// The pixels, in `format`: I420 is Y, then U, then V (`width * height * 3 /
+	/// 2` bytes); RGBA is `width * height * 4` bytes. Neither has row padding.
 	pub data: Vec<u8>,
+	/// The layout `data` is in, which is what
+	/// [`MoqVideoDecoderOutput::format`] asked for.
+	pub format: MoqVideoPixelFormat,
 }
 
 struct VideoConsumerInner {
 	consumer: moq_video::decode::Consumer,
+	format: MoqVideoPixelFormat,
 }
 
 impl VideoConsumerInner {
@@ -607,18 +622,23 @@ impl VideoConsumerInner {
 		};
 
 		let size = frame.size();
-		// CPU output was asked for, so this is a move rather than a download:
-		// uniffi has no handle type to hand back a texture with anyway.
-		let data = frame
-			.surface
-			.into_i420()
-			.map_err(|err| MoqError::Codec(err.to_string()))?
-			.into_data();
+		// CPU output was asked for, so I420 is a move rather than a download:
+		// uniffi has no handle type to hand back a texture with anyway. RGBA is the
+		// one layout no decoder produces, so it costs a conversion here.
+		let data = match self.format {
+			MoqVideoPixelFormat::I420 => frame.surface.into_i420().map(|i420| i420.into_data()),
+			MoqVideoPixelFormat::Rgba => frame
+				.surface
+				.to_rgba(&moq_video::convert::Config::default())
+				.map(|rgba| rgba.into_data()),
+		}
+		.map_err(|err| MoqError::Codec(err.to_string()))?;
 
 		Ok(Some(MoqVideoDecodedFrame {
 			timestamp_us: frame.timestamp.as_micros() as u64,
 			width: size.width,
 			height: size.height,
+			format: self.format,
 			data,
 		}))
 	}
@@ -700,8 +720,9 @@ impl MoqBroadcastConsumer {
 		let broadcast = self.resolve_inner(reference.as_deref()).await?;
 
 		let mut options = moq_video::decode::Options::default();
-		// The bindings hand back packed I420, so let a backend that can decode
-		// straight to the CPU do that rather than downloading afterwards.
+		// The bindings hand back packed CPU pixels whatever the format, so let a
+		// backend that can decode straight to the CPU do that rather than
+		// downloading afterwards.
 		options.decoder.output = moq_video::Output::Cpu;
 		options.decoder.scale_hint = output.resize.map(|size| moq_video::Size::new(size.width, size.height));
 		options.max_age = output
@@ -712,7 +733,12 @@ impl MoqBroadcastConsumer {
 		let consumer = moq_video::decode::Consumer::new(&broadcast, &cfg, name, options).await?;
 
 		Ok(Arc::new(MoqVideoConsumer {
-			task: crate::ffi::Task::new(VideoConsumerInner { consumer }),
+			task: crate::ffi::Task::new(VideoConsumerInner {
+				consumer,
+				// Resolved here rather than at the boundary: a Go caller gets no
+				// uniffi default, so an unset field has to mean I420 in Rust.
+				format: output.format.unwrap_or(MoqVideoPixelFormat::I420),
+			}),
 		}))
 	}
 }

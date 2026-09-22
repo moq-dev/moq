@@ -57,11 +57,6 @@ Track the unversioned draft during implementation. The planning baseline is
 draft 10, with transport parameter `0x1d` and frame type `0x24`; do not freeze
 provisional codepoints if the document changes before release.
 
-## Required
-
-- [Fork noq](/quest/next/quic/fork.md) - the frame and stream-state
-  implementation lives there
-
 ## Related
 
 - [qmux on the QUIC stream state machine](/quest/next/quic/qmux.md) - consumes

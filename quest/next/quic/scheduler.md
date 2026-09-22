@@ -99,10 +99,6 @@ scheduler completion must not wait for that dependent integration. Preserve
 working behavior on backends not yet migrated, and remove queue code only
 where the new implementation makes it redundant.
 
-## Required
-
-- [Fork noq](/quest/next/quic/fork.md) - the scheduler lives there
-
 ## Closes
 
 - [#699](https://github.com/moq-dev/moq/issues/699) - close this issue when the

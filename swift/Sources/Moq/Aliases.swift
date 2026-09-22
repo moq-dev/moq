@@ -42,9 +42,11 @@ public typealias AudioEncoderInput = MoqFFI.MoqAudioEncoderInput
 /// The encoder-side config for a published audio track: codec, rate, channels,
 /// bitrate, and frame duration.
 public typealias AudioEncoderOutput = MoqFFI.MoqAudioEncoderOutput
-/// What a `VideoConsumer` decodes to: an optional resize plus a max age.
+/// What a `VideoConsumer` decodes to: an optional pixel format and resize,
+/// plus a max age.
 public typealias VideoDecoderOutput = MoqVideoDecoderOutput
-/// One decoded video frame: packed I420, its dimensions, and a timestamp.
+/// One decoded video frame: packed pixels, the layout they are in, their
+/// dimensions, and a timestamp.
 public typealias VideoDecodedFrame = MoqVideoDecodedFrame
 /// The PCM layout an `AudioConsumer` decodes to, plus its max age.
 public typealias AudioDecoderOutput = MoqFFI.MoqAudioDecoderOutput
@@ -60,7 +62,8 @@ public typealias VideoEncoderInput = MoqFFI.MoqVideoEncoderInput
 /// The encoder-side config for a published video track: name, codec, bitrate,
 /// keyframe interval, and backend preference.
 public typealias VideoEncoderOutput = MoqFFI.MoqVideoEncoderOutput
-/// A raw pixel layout (I420 or RGBA) fed to a `VideoProducer`.
+/// A CPU pixel layout (I420 or RGBA): fed to a `VideoProducer`, or delivered
+/// by `decodeVideo`.
 public typealias VideoPixelFormat = MoqFFI.MoqVideoPixelFormat
 /// A video codec identifier (H.264 or H.265).
 public typealias VideoCodec = MoqFFI.MoqVideoCodec

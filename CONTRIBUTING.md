@@ -50,3 +50,10 @@ For each finding:
 If you encounter issues, or findings that are out of scope, create follow-up quests.
 Focus on the core problem, offering a potential solution only if its obvious.
 For non-trivial tasks, file an issue or offer to run `/plan-quests`.
+
+# Forks
+
+[moq-dev/noq](https://github.com/moq-dev/noq) publishes `moq-noq*`, the QUIC stack every published MoQ crate builds on; iroh keeps upstream noq.
+Its `moq-sync` workflow merges n0-computer/noq weekly as a PR; review it like any other, and `PARENT` names the upstream commit each release includes.
+A carried change lists its upstream PR, or the reason it has none, in the fork PR.
+For an advisory against noq or Quinn, compare the pinned release's `PARENT` with the fixing upstream commit, then sync, release the fork, and bump the pin here.

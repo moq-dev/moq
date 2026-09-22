@@ -13,11 +13,11 @@ mod linux {
 	use std::time::{Duration, Instant};
 
 	use criterion::{BenchmarkId, Criterion, Throughput};
+	use moq_noq_udp::{RecvMeta, Transmit, UdpSocketState};
 	use nix::sys::socket::{
 		ControlMessageOwned, MsgFlags, getsockopt, recvmsg, setsockopt,
 		sockopt::{RcvBuf, UdpGroSegment},
 	};
-	use noq_udp::{RecvMeta, Transmit, UdpSocketState};
 	use tokio::io::Interest;
 	use tokio::net::UdpSocket;
 
@@ -70,8 +70,8 @@ mod linux {
 		send_messages: Box<[libc::mmsghdr; BURST_SEGMENTS]>,
 		_send_iovecs: Box<[libc::iovec; BURST_SEGMENTS]>,
 		single_buffer: Vec<u8>,
-		batch_buffers: Box<[Vec<u8>; noq_udp::BATCH_SIZE]>,
-		batch_meta: [RecvMeta; noq_udp::BATCH_SIZE],
+		batch_buffers: Box<[Vec<u8>; moq_noq_udp::BATCH_SIZE]>,
+		batch_meta: [RecvMeta; moq_noq_udp::BATCH_SIZE],
 	}
 
 	#[derive(Default)]
@@ -114,7 +114,7 @@ mod linux {
 				);
 			}
 
-			let batch_buffers = (0..noq_udp::BATCH_SIZE)
+			let batch_buffers = (0..moq_noq_udp::BATCH_SIZE)
 				.map(|_| vec![0; MAX_RECV_SIZE])
 				.collect::<Vec<_>>()
 				.into_boxed_slice()
@@ -144,7 +144,7 @@ mod linux {
 				_send_iovecs: send_iovecs,
 				single_buffer: vec![0; MAX_RECV_SIZE],
 				batch_buffers,
-				batch_meta: [RecvMeta::default(); noq_udp::BATCH_SIZE],
+				batch_meta: [RecvMeta::default(); moq_noq_udp::BATCH_SIZE],
 			})
 		}
 

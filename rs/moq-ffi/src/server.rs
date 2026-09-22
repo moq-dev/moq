@@ -178,10 +178,18 @@ impl MoqServer {
 
 	/// Cancel any in-flight `listen()` or `accept()` call.
 	///
-	/// Terminal: the listening socket is closed here, not when the handle is, and
+	/// Terminal, and synchronous: it returns once the listening socket is closed,
+	/// not when the handle is, so the address can be bound again immediately.
 	/// `cert_fingerprints()` returns `Cancelled` afterwards.
 	pub fn cancel(&self) {
-		self.task.cancel();
+		// `Listener::close` consumes the listener and releases its sockets before
+		// it returns; dropping the state alone would only schedule that, because
+		// the QUIC endpoint driver holds the socket until it observes the close.
+		self.task.cancel_and_wait(|mut state| async move {
+			if let Some(server) = state.server.take() {
+				server.close().await;
+			}
+		});
 	}
 }
 

@@ -37,10 +37,6 @@ Land it in the fork and offer it upstream once it is stable. The quest
 completes when a `moq-noq-proto` release carries the accessor and
 `Cargo.lock` here can name it.
 
-## Required
-
-- [Fork noq](/quest/next/quic/fork.md) - the accessor lives there
-
 ## Related
 
 - [poll_acked in web-transport](/quest/next/quic/ack-hook.md) - the first

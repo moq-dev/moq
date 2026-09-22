@@ -343,7 +343,7 @@ impl TrackState {
 /// the broadcast now or holds it open for a replacement.
 ///
 /// Only the detach that drops the refcount to zero decides, matching the model's rule
-/// for several sources at one path (`detach_source`): an earlier owner that vanished
+/// for several sources at one path (the front's source selection): an earlier owner that vanished
 /// does not outvote the last one still on the path. That keeps two advertisements on
 /// one session behaving like the same two on separate sessions, where the model sees
 /// two independent sources and the last one out decides.
@@ -4220,7 +4220,8 @@ mod tests {
 	/// is the one that counts: the broadcast survives the first stop and closes on the
 	/// last, whatever kind each detach is.
 	///
-	/// That is the model's own rule for several sources at one path (`detach_source`),
+	/// That is the model's own rule for several sources at one path (the front's source
+	/// selection),
 	/// which is what these advertisements would be had they arrived on two sessions. The
 	/// refcount is a detail of sharing one `SourceGuard` per session; it must not change
 	/// what the origin sees.

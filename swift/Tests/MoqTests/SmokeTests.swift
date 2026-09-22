@@ -49,6 +49,24 @@ final class SmokeTests: XCTestCase {
         }
     }
 
+    /// `cancel()` releases the listening socket before it returns, so the same
+    /// address binds again with no retry.
+    func testServerCloseReleasesPort() async throws {
+        let first = Server()
+        try first.bind("127.0.0.1:0")
+        try first.generateTls(hostnames: ["localhost"])
+        let addr = try await first.listen()
+        first.cancel()
+
+        // No retry: cancel() closed the socket, so this binds on the first try.
+        let second = Server()
+        try second.bind(addr)
+        try second.generateTls(hostnames: ["localhost"])
+        let rebound = try await second.listen()
+        XCTAssertEqual(rebound, addr)
+        second.cancel()
+    }
+
     func testOriginProducerIsConstructible() throws {
         let origin = OriginProducer(cacheCapacityBytes: 4096)
         _ = origin.consume()
@@ -246,6 +264,93 @@ final class SmokeTests: XCTestCase {
         try track.createGroup(sequence: 4).finish()
         XCTAssertThrowsError(try track.createGroup(sequence: 5))
         try track.finish()
+        try broadcast.finish()
+    }
+
+    /// `frameDurationUs` is microseconds so Opus' 2.5 ms frame is expressible at
+    /// all, and a duration outside the Opus set is refused rather than silently
+    /// rounded.
+    func testEncodeAudioFrameDurations() throws {
+        let broadcast = try BroadcastProducer()
+        let input = AudioEncoderInput(format: .f32, sampleRate: 48_000, channels: 1)
+
+        let fine = try broadcast.encodeAudio(
+            name: "fine",
+            input: input,
+            output: AudioEncoderOutput(codec: AudioCodec.opus(), frameDurationUs: 2_500)
+        )
+        // 2.5 ms of silence at 48 kHz mono f32: exactly one encoded frame.
+        try fine.write(AudioFrame(timestampUs: 0, data: Data(count: 120 * 4)))
+        try fine.finish()
+
+        XCTAssertThrowsError(
+            try broadcast.encodeAudio(
+                name: "coarse",
+                input: input,
+                output: AudioEncoderOutput(codec: AudioCodec.opus(), frameDurationUs: 2_000)
+            )
+        ) { error in
+            if let audio = error as? MoqError, case .Audio = audio { return }
+            XCTFail("2 ms is not an opus frame duration: \(error)")
+        }
+
+        try broadcast.finish()
+    }
+
+    /// The decode side picks its CPU layout: an unset `format` is I420, and RGBA
+    /// is four bytes a pixel, with each frame naming the layout it decoded to.
+    func testDecodeVideoFormat() async throws {
+        let origin = OriginProducer()
+        let broadcast = try origin.createBroadcast(path: "video-decode-format")
+        let video = try broadcast.encodeVideo(
+            input: VideoEncoderInput(format: .rgba, width: 320, height: 240, framerate: 30),
+            // Software both ways so the test is deterministic everywhere.
+            output: VideoEncoderOutput(codec: .h264, track: "camera", kind: .software)
+        )
+        try broadcast.announce()
+
+        // Seed the track so a subscriber joining below lands on encoded media.
+        let rgba = Data(repeating: 0x80, count: 320 * 240 * 4)
+        try video.cut()
+        for i in 0..<10 {
+            try video.write(VideoFrame(timestampUs: UInt64(i) * 33_333, data: rgba))
+        }
+
+        let consumer = try await origin.consume().requestBroadcast(path: "video-decode-format")
+        let catalogs = try await consumer.subscribeCatalog()
+        // XCTUnwrap takes an autoclosure, which can't hold an await.
+        let nextCatalog = try await catalogs.next()
+        let catalog = try XCTUnwrap(nextCatalog)
+        let rendition = try XCTUnwrap(catalog.video["camera"])
+
+        // Two subscribers over one publication, so the same encoded frames are
+        // read twice and only the requested layout differs.
+        let i420 = try await consumer.decodeVideo(name: "camera", catalogVideo: rendition)
+        defer { i420.cancel() }
+        let packed = try await consumer.decodeVideo(
+            name: "camera",
+            catalogVideo: rendition,
+            output: VideoDecoderOutput(format: .rgba)
+        )
+        defer { packed.cancel() }
+
+        // Keep the encoder fed so both decoders see frames after they joined.
+        for i in 10..<40 {
+            try video.write(VideoFrame(timestampUs: UInt64(i) * 33_333, data: rgba))
+        }
+
+        let nextPlanar = try await i420.next()
+        let planar = try XCTUnwrap(nextPlanar)
+        XCTAssertEqual(planar.format, .i420)
+        XCTAssertEqual(planar.data.count, Int(planar.width) * Int(planar.height) * 3 / 2)
+
+        let nextPacked = try await packed.next()
+        let frame = try XCTUnwrap(nextPacked)
+        XCTAssertEqual(frame.format, .rgba)
+        XCTAssertEqual(frame.data.count, Int(frame.width) * Int(frame.height) * 4)
+        XCTAssertTrue(stride(from: 3, to: frame.data.count, by: 4).allSatisfy { frame.data[$0] == 0xFF })
+
+        try video.finish()
         try broadcast.finish()
     }
 

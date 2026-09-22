@@ -271,9 +271,9 @@ class VideoConsumer:
     """Async iterator of decoded video frames.
 
     Built via :meth:`BroadcastConsumer.decode_video`. Each frame is
-    tightly-packed I420 and carries its own ``width`` and ``height``:
-    ``output.resize`` is best effort, so read the frame rather than
-    assuming it took.
+    tightly packed in its own ``format`` and carries its own ``width``
+    and ``height``: ``output.resize`` is best effort, so read the frame
+    rather than assuming it took.
     """
 
     def __init__(self, inner: MoqVideoConsumer) -> None:
@@ -304,10 +304,17 @@ class JsonSnapshotConsumer:
 
     Built via :meth:`BroadcastConsumer.subscribe_json_snapshot`. Each item is a parsed Python object.
     A consumer that has fallen behind collapses the backlog and yields only the latest value.
+    Usable as an async context manager that cancels on exit.
     """
 
     def __init__(self, inner: MoqJsonSnapshotConsumer) -> None:
         self._inner = inner
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.cancel()
 
     def __aiter__(self):
         return self
@@ -327,10 +334,17 @@ class JsonStreamConsumer:
     """Async iterator over a JSON stream track, yielding every record in order (lossless).
 
     Built via :meth:`BroadcastConsumer.subscribe_json_stream`. Each item is a parsed Python object.
+    Usable as an async context manager that cancels on exit.
     """
 
     def __init__(self, inner: MoqJsonStreamConsumer) -> None:
         self._inner = inner
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.cancel()
 
     def __aiter__(self):
         return self
@@ -513,9 +527,12 @@ class BroadcastConsumer:
 
         ``catalog_video`` comes from the catalog (e.g.
         ``await broadcast.catalog()`` followed by ``catalog.video[name]``).
-        Frames arrive as tightly-packed I420. An unrecognized codec raises
-        here; a recognized one no native backend handles raises when the
-        decoder opens, both before the first frame.
+        An unrecognized codec raises here; a recognized one no native backend
+        handles raises when the decoder opens, both before the first frame.
+
+        ``output.format`` picks the packed CPU layout frames arrive in and
+        defaults to :attr:`VideoPixelFormat.I420`, which is what a decoder
+        produces natively; each frame repeats the layout it was decoded to.
 
         ``output.resize`` asks the decoder for a different size and is best
         effort, so read each frame's own dimensions.

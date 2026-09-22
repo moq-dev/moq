@@ -524,19 +524,19 @@ impl Alive {
 		})
 	}
 
-	/// Retract the path's advertisement, if any.
+	/// Withdraw the path's advertisement, if any; the broadcast stays servable.
 	fn unannounce(&self) {
-		let announcement = self.announcer.lock().as_mut().and_then(Announcer::take);
-		// Retracted outside the announcer lock: the retraction re-syncs the origin's
-		// announce cursors under the origin's own lock.
-		drop(announcement);
+		if let Some(announcer) = self.announcer.lock().as_mut() {
+			announcer.withdraw();
+		}
 	}
 
 	/// End the broadcast's advertising for good: retract the standing advertisement
 	/// and drop the announcer, so a later `announce` fails with `Closed`.
 	fn retire(&self) {
 		let announcer = self.announcer.lock().take();
-		// Dropped outside the announcer lock, like `unannounce`.
+		// Dropped outside the announcer lock: the entry's removal re-syncs the
+		// origin's cursors under the origin's own lock.
 		drop(announcer);
 	}
 }

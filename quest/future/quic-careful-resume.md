@@ -30,10 +30,6 @@ Measure time to the encoder's target rate after a reconnect on the impaired
 path profile, plus loss and latency during the jump. Ship it on by default
 only when the jump never makes the first second worse than slow start.
 
-## Required
-
-- [Fork noq](/quest/next/quic/fork.md) - the controller wrapper lives there
-
 ## Related
 
 - [Transport upgrade](/quest/next/transport-upgrade/README.md) - one of the

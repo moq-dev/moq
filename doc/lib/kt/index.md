@@ -78,9 +78,16 @@ the [shared feature list](/lib/#what-every-binding-can-do) maps one to one:
 `setCatalogSection`, `used()`/`unused()`. `session.bandwidth()` divides the
 connection's send estimate; pass it to `encodeVideo` / `encodeAudio` or
 `reserve` a share for an app-owned track. `MoqException.isAuth` and
-`isShutdown` classify errors. `protocolError` is the structured protocol failure
+`isShutdown` classify errors. Microsecond fields read back as a
+`kotlin.time.Duration`: `stats.rtt`, `backoff.initial`, `frame.timestamp`. `protocolError` is the structured protocol failure
 (scope, verbatim code, kind) when the peer sent one. Cancelling the collecting coroutine cancels the
 native side.
+
+`decodeVideo` picks the decoded CPU pixel layout: `VideoDecoderOutput.format`
+is `VideoPixelFormat.I420` when null, or `VideoPixelFormat.RGBA` for four bytes
+a pixel, and every frame repeats the layout it was decoded to. `resize` is best
+effort: only NVDEC has a built-in scaler, and MediaCodec is not it, so read each
+frame's own `width` and `height` rather than assuming it took.
 
 - API reference: [javadoc.io/doc/dev.moq/moq](https://javadoc.io/doc/dev.moq/moq)
 - Source: [`kt/`](https://github.com/moq-dev/moq/tree/main/kt); `just kt check` builds and tests locally

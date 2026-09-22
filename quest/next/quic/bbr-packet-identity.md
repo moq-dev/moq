@@ -25,10 +25,6 @@ other controllers and custom implementations. Settle any public API change
 with the maintainer before implementation; document it inline. No QUIC wire
 change is intended. Run the regressions in the fork's CI.
 
-## Required
-
-- [Fork noq](/quest/next/quic/fork.md) - fixes and CI regressions land in moq-dev/noq
-
 ## Related
 
 - [Release BBR fixes](/quest/next/quic/bbr-release.md) - deliver the corrected controller to MoQ

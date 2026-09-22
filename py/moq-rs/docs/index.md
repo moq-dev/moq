@@ -17,8 +17,8 @@ import moq
 async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
         async for announcement in client.announced():
-            catalog = await announcement.broadcast.catalog()
-            print(catalog)
+            broadcast = await client.request_broadcast(announcement.prefix)
+            print(await broadcast.catalog())
 
 
 asyncio.run(main())

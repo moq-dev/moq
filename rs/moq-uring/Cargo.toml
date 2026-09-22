@@ -14,12 +14,12 @@ categories = ["asynchronous", "network-programming", "os::linux-apis"]
 
 [features]
 default = ["noq"]
-# noq-proto, with TLS through rustls.
-noq = ["dep:noq-proto", "dep:rustls", "dep:rustls-platform-verifier"]
+# moq-noq-proto, with TLS through rustls.
+noq = ["dep:moq-noq-proto", "dep:rustls", "dep:rustls-platform-verifier"]
 # Capture qlog traces (`quic::Transport::qlog`). Off by default: it compiles the
 # qlog crate and its serde_json encoder into noq, which a production build has
 # no use for.
-qlog = ["noq-proto?/qlog"]
+qlog = ["moq-noq-proto?/qlog"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 bytes = "1"
@@ -28,9 +28,9 @@ io-uring = { workspace = true }
 kio = { workspace = true }
 libc = { workspace = true }
 moq-net = { workspace = true }
-moq-sock = { workspace = true }
 # default-features off so the crypto provider is ours to pick.
-noq-proto = { workspace = true, features = ["bloom", "tracing-log", "rustls-aws-lc-rs"], optional = true }
+moq-noq-proto = { workspace = true, features = ["bloom", "tracing-log", "rustls-aws-lc-rs"], optional = true }
+moq-sock = { workspace = true }
 rand = "0.10"
 rustc-hash = { workspace = true }
 rustls = { version = "0.23", optional = true }
@@ -52,9 +52,9 @@ tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 io-uring = { workspace = true }
 libc = { workspace = true }
+moq-noq-udp = { workspace = true }
 moq-tokio = { workspace = true, features = ["noq", "aws-lc-rs"] }
 nix = { workspace = true }
-noq-udp = { workspace = true }
 rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }
 rustls = "0.23"
 # The qlog test parses every record of a trace, which is what catches a
@@ -62,7 +62,7 @@ rustls = "0.23"
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 tracing = "0.1"
-web-transport-noq = { workspace = true }
+web-transport-moq = { workspace = true }
 
 [[bench]]
 name = "udp_tokio"

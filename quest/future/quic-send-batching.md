@@ -22,10 +22,6 @@ together, so the question there is whether it already gets the benefit.
 A measured no-win abandons the tokio change; the io_uring result is recorded
 either way.
 
-## Required
-
-- [Fork noq](/quest/next/quic/fork.md) - `moq-noq-udp` is the fork's
-
 ## Related
 
 - [Kernel pacing](/quest/future/quic-kernel-pacing.md) - pacing per train

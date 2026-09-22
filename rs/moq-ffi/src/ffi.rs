@@ -300,6 +300,42 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 			state.lock().await.take();
 		});
 	}
+
+	/// [Self::cancel], then block until `shutdown` has run on the state.
+	///
+	/// A synchronous caller uses this to make the release of what the state owns
+	/// observable: the listening socket is gone, not merely scheduled to close.
+	/// `shutdown` runs on the runtime thread, after any in-flight [Self::run] has
+	/// unwound, and the lock is held across it so a second cancel waits too.
+	///
+	/// It waits on a channel rather than [tokio::sync::Mutex::blocking_lock] so it
+	/// works from inside another runtime, as the tests do; it must not run on the
+	/// runtime thread itself, which would deadlock.
+	#[cfg(not(target_arch = "wasm32"))]
+	pub fn cancel_and_wait<F, Fut>(&self, shutdown: F)
+	where
+		F: FnOnce(T) -> Fut + Send + 'static,
+		Fut: Future<Output = ()> + Send + 'static,
+	{
+		// Publish the flag before waiting: an in-flight [Self::run] only releases
+		// the lock once it observes it.
+		self.cancel.send_replace(true);
+
+		let state = self.state.clone();
+		let (done, wait) = std::sync::mpsc::channel();
+		spawn(async move {
+			let mut state = state.lock().await;
+			if let Some(inner) = state.take() {
+				shutdown(inner).await;
+			}
+			// A dropped receiver just means the caller is gone; the shutdown above
+			// still ran, which is what releases the state.
+			let _ = done.send(());
+		});
+		// A dropped sender means the runtime is gone, so nothing is left holding
+		// the state to wait for.
+		let _ = wait.recv();
+	}
 }
 
 impl<T: kio::MaybeSend + 'static> Drop for Task<T> {

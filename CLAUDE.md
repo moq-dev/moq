@@ -32,6 +32,7 @@ This file is split into nested `CLAUDE.md` files based on the language/situation
 # Guidelines
 
 - Prefer a maintained crate over hand-rolling non-core functionality.
+- Anything that fans out (N publishers, M subscribers, routes, sessions) gets a benchmark swept over both axes, so a cost that grows with the table instead of the touched path shows up as a slope.
 - New dependencies should use the newest, stable version.
 - Do not bump package versions unless asked. Releases are cut separately.
 - Comments should explain the non-obvious why, and never the history.

@@ -21,10 +21,6 @@ noise and the idea is closed.
 - `just bench BASE` on Linux: CPU per Gbps, RSS, and p99 latency. Ship only a
   measured win.
 
-## Required
-
-- [Fork noq](/quest/next/quic/fork.md) - the seam lives there
-
 ## Related
 
 - [#3204](/quest/next/perf/3204-moq-uring-register-tx-pool-buffers-for-zero-copy-sends.md) -

@@ -31,10 +31,6 @@ any controller event changes with the packet identity and ACK sampling fixes.
 Keep state private where possible; document any public Controller change and
 its consumers. No wire change is intended. Wire regressions into fork CI.
 
-## Required
-
-- [Fork noq](/quest/next/quic/fork.md) - fixes and CI regressions land in moq-dev/noq
-
 ## Related
 
 - [Finish each BBR ACK sample](/quest/next/quic/bbr-ack-sampling.md) - a separate ordering defect in the same callback lifecycle

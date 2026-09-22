@@ -14,8 +14,8 @@ swapping or bumping a backend crate is not a breaking change.
 
 The opt-in `capture` feature exposes the device APIs and their per-platform
 backends. Enable it with `cargo add moq-video --features capture`; the default
-codec-only build accepts frames supplied by the caller without pulling Linux
-V4L2 and libclang build dependencies.
+codec-only build accepts frames supplied by the caller and compiles none of the
+device backends. Nothing is needed on the build host either way.
 
 Per-platform, picked at compile time:
 
@@ -102,10 +102,10 @@ Two public entry points:
 The default features are `openh264`, `nvidia`, and `mediacodec`. OpenH264 keeps
 a working software H.264 fallback but compiles vendored C++; disable defaults
 and select native features to omit it. `nvidia` is Linux-only, `dlopen`s the
-driver at runtime, and needs no build-time toolkit. `vaapi` and `v4l2` are
-opt-in because their bindgen needs libclang on the build host (plus kernel
-headers for `v4l2`). `render` is also opt-in so codec-only consumers do not
-compile wgpu.
+driver at runtime, and needs no build-time toolkit. `vaapi` is opt-in because
+its bindgen needs libclang on the build host, while `v4l2` is opt-in only by
+convention, since `moq-v4l` checks its bindings in. `render` is also opt-in so
+codec-only consumers do not compile wgpu.
 
 ### Vulkan producers on NVIDIA
 
@@ -144,7 +144,9 @@ Run `just rs vulkan-cuda` for the opt-in native hardware exercise. It creates a
 Vulkan image independently of Unreal, imports it once into CUDA, checks repeated
 slot reuse and held-reader ordering, and tears down through cancellation; a
 second test converts RGBA and BGRA uploads to NV12, scales them, fills the pool,
-and encodes both renditions through NVENC.
+and encodes both renditions through NVENC. A third runs the target workload,
+three 1280x720 views at 30 fps, and prints per-stage latency and CPU time
+instead of asserting a threshold.
 
 ## Decode
 

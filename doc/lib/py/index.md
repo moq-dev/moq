@@ -94,6 +94,12 @@ app-owned track. `moq.is_auth(err)` and `moq.is_shutdown(err)` classify errors. 
 Each server request reports a `moq.Transport` enum, including QUIC, Iroh,
 WebSocket, TCP, and Unix sockets.
 
+`decode_video` picks the decoded CPU pixel layout: `VideoDecoderOutput.format`
+is `VideoPixelFormat.I420` when unset, or `VideoPixelFormat.RGBA` for four
+bytes a pixel, and every frame repeats the layout it was decoded to. `resize`
+is best effort: only NVDEC has a built-in scaler, so read each frame's own
+`width` and `height` rather than assuming it took.
+
 - API reference: [moq-rs.readthedocs.io](https://moq-rs.readthedocs.io)
 - Source and examples: [`py/moq-rs`](https://github.com/moq-dev/moq/tree/main/py/moq-rs)
 - Raw bindings: [`moq-ffi`](https://pypi.org/project/moq-ffi/) on PyPI, for the unwrapped API

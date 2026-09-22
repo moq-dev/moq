@@ -20,34 +20,32 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 
 ## Quests
 
+- [Binary stats](/quest/next/stats-binary/README.md) - an allocation-free stats tick and an on-demand FlatBuffers `.fb.z` flavor with a checked-in schema
+- [JSON churn](/quest/next/json-churn.md) - a moq-json update allocates a bounded amount whatever the document size, in every caller
 - [Origin narrowing](/quest/next/origin-narrowing.md) - a live origin grant narrows in place and ends the subscriptions it no longer covers, the deafen boundary #2714 asked for
+- [Local announcements](/quest/next/local-announce.md) - an origin's announce cursor and its broadcast resolver agree on what exists
 - [Relay embedding](/quest/next/relay-embed.md) - an embedder reads the resolved config, reuses the CLI merge, registers listener health, and spawns a test relay without TOML strings
 - [Auth embedder](/quest/next/auth-embedder.md) - the lease owns its re-check clock, a gateway session holds a lease, and `Cluster::admit` scopes and tags origins in one call
-- [Binding parity](/quest/next/binding-parity.md) - every wrapper reaches every moq-ffi method in its own idiom with moq-net's verbs
 - [Binding docs](/quest/next/binding-docs.md) - every binding doc sample names a symbol that exists, checked nightly
 - [Gateway embedding](/quest/next/gateway-embed.md) - moq-hls, moq-rtmp, and moq-rtc expose the loop their binaries run to an in-process embedder
 - [Catalog consumer](/quest/next/hang-catalog-consumer.md) - reading a catalog is one call in Rust and JS, and JS gains a timeline consumer
 - [Ingest source](/quest/next/net-ingest-source.md) - an announce says whether the broadcast entered on this relay or a peer
 - [Headless player](/quest/next/watch-player.md) - `Watch.Player` assembles the pipeline the element, the room, and moq.pro each rebuild
 - [@moq/net additive](/quest/next/js-net-additive.md) - a live-broadcasts getter, `Table.dynamic`, credential refresh before redial, inferred `share`
-- [Last frame duration](/quest/next/mux-last-frame-duration.md) - a group's final frame keeps its duration on 90 kHz and nanosecond imports
-- [Binding audio tests](/quest/next/binding-audio-tests.md) - every binding proves the Opus frame duration and throwing setters it exposes, and `smoke --all` publishes audio with an explicit config
-- [Decode format](/quest/next/ffi-decode-format.md) - the C-only decode pixel format knob reaches every uniffi binding
-- [JSON mutate](/quest/next/json-mutate.md) - Rust gains the closure edit JS already has, beside the guard
 - [Publisher clocks](/quest/next/publisher-clock.md) - wire the shared clock through native and browser publisher restarts
 - [Broadcast route](/quest/next/js-broadcast-route.md) - JS Announce.Broadcast goes live on any claim matching its path, like Rust routed()
-- [io_uring check](/quest/next/check-uring-feature.md) - a moq-relay diff compiles the io-uring feature in `just check`, not only nightly
 - [io_uring handshake cancellation](/quest/next/uring-handshake-cancel.md) - dropping a pending handshake releases its connection while the worker keeps running
 - [io_uring handshake flush](/quest/next/uring-handshake-flush.md) - a dial resolves only once its last handshake flight is on the wire, never stranding the peer
 - [Flaky timing tests](/quest/next/flaky-timing-tests.md) - three real-clock tests become deterministic instead of failing under load
 - [Binding stats docs](/quest/next/binding-stats-docs.md) - every binding's doc page lists its connection stats fields with units
+- [CLI inspection](/quest/next/cli-inspect/README.md) - `moq ls` lists what is live and `moq fetch` reads a group over MoQ, and a guide shows how to inspect a relay
+- [JS caught up](/quest/next/js-announce-caught-up.md) - @moq/net's announce consumer says when the initial set has landed, like Rust
 
 - [Jitter clock](/quest/next/jitter-flush-clock.md) - moq-mux: catalog jitter measures how far behind the media clock an encoder flushes, fed by encoders only, and never decreases
 - [Capture denial](/quest/next/browser-permission-qa.md) - moq-publish surfaces a refused camera or microphone instead of retrying forever, and recovers on grant
 - [Publisher audio unlock](/quest/next/publish-audio-unlock.md) - the publisher's capture AudioContext is resumed on a gesture or the source is refused, so no silent audio track is announced
 - [IETF leftovers](/quest/next/ietf-leftovers.md) - moq-net: the 0x21 priority property, a NOT_SUPPORTED reply to TRACK_STATUS, and the two FETCH refusal codes come from the registry
 - [FFI WebSocket fallback](/quest/next/ffi-websocket-fallback.md) - moq-ffi and every wrapper can disable or delay the WebSocket fallback
-- [Server cancel](/quest/next/moq-server-close.md) - `MoqServer.cancel` releases the listening socket before returning, so a caller can bind again without retrying
 - [Play tune-in backpressure](/quest/next/play-tunein-backpressure.md) - moq play: a tune-in burst larger than the video queue parks the decoder, so the clock never reaches live at a wide `--delay`
 - [Play audio rendition gap](/quest/next/play-audio-rendition-gap.md) - moq play: a retired audio rendition drains its sink before the replacement fills one, so the switch costs a `--delay` of silence
 - [JavaScript FETCH](/quest/next/js-fetch.md) - generic on-demand group serving and IETF FETCH for browser publishers
@@ -97,6 +95,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Relay memory](/quest/next/relay-memory.md) - remeasure what an announcement costs after prefix routes
 - [PoP skipping](/quest/next/pop-skipping/README.md) - short cold paths for unpopular broadcasts without losing warm backhaul dedup
 - [Route cost in the JS origin](/quest/next/route-cost.md) - the browser origin ranks routes by cost and hops like Rust instead of newest-first
+- [Front parking](/quest/next/origin-front-parks.md) - an unroutable request waits on a front instead of re-asking on every route-table move
 - [Publish channel count](/quest/next/publish-audio-channel-count.md) - forcing a channel count on an Audio.Capture stops costing the subscriber gaps of silence
 - [JS abandonment](/quest/next/js-subscribe-abandonment.md) - a viewer returning during IETF subscribe setup keeps its track across microtasks
 - [IETF stream types](/quest/next/ietf-uni-stream-types.md) - padding streams are discarded stream-only and an unknown uni type closes the session, per draft-21
@@ -147,7 +146,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [`moq relay`](/quest/next/moq-relay-subcommand.md) - the relay runs under a `moq` verb with its own flags and TOML, while `moq-relay` stays a minimal binary
 - [`moq --listen` admission](/quest/next/cli-serve.md) - a listening CLI session is authenticated, scoped, counted, and drained like a relay's instead of accepting everything
 - [#709](/quest/next/709-automatic-letsencrypt-support.md) - the relay provisions and renews its own ACME certificate through rustls-acme over TLS-ALPN-01, persisted on disk
-- [Capture without V4L2 bindgen](/quest/next/capture-v4l-bindings.md) - moq-video capture builds on Linux without libclang or kernel headers
 - [Audio capture without ALSA link](/quest/next/capture-alsa-link.md) - moq-audio capture and playback build on Linux without linking libasound
 - [Ship capture and playback](/quest/next/cli-packaging.md) - a released moq binary can capture and play, which no distribution currently enables
 - [io_uring flow control](/quest/next/uring-flow-control-windows.md) - the relay's io_uring workers honor the QUIC flow-control windows instead of refusing them

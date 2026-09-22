@@ -268,6 +268,15 @@ _wants-capture $PACKAGES:
     set -euo pipefail
     grep -qwE '(moq-video|moq-audio)' <<< "$(just rs _names "$PACKAGES")"
 
+# True when the selection includes moq-relay, whose io_uring listener is off the
+# default feature set. Selection pulls in dependents, so a diff to any crate the
+# relay is built from (moq-uring, moq-sock, moq-tokio) lands here too.
+[private]
+_wants-uring $PACKAGES:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    grep -qw 'moq-relay' <<< "$(just rs _names "$PACKAGES")"
+
 # Print the crate names behind a list of `--package` flags.
 [private]
 _names $PACKAGES:
@@ -316,6 +325,16 @@ _select-test:
         || fail "a moq-mux diff must drive the capture gate: $(just rs _names "$mux")"
     if just rs _wants-capture "$relay"; then
         fail "a moq-relay diff must not drive the capture gate: $(just rs _names "$relay")"
+    fi
+
+    # The break the uring gate was added for: a change that breaks moq-relay's
+    # io_uring listener, which the default pass above never compiles. A moq-relay
+    # diff has to reach it, and a diff that cannot affect the relay must not.
+    just rs _wants-uring "$relay" \
+        || fail "a moq-relay diff must drive the uring gate: $(just rs _names "$relay")"
+    hls=$(just rs _select "rs/moq-hls/src/lib.rs")
+    if just rs _wants-uring "$hls"; then
+        fail "a moq-hls diff must not drive the uring gate: $(just rs _names "$hls")"
     fi
 
     tokio=$(just rs _select "rs/moq-tokio/src/lib.rs")
@@ -407,6 +426,14 @@ check-changed $FILES:
     	just rs capture
     fi
 
+    # moq-relay's io_uring listener is behind `io-uring`, off by default, so the
+    # pass above never compiles it. `check --all` reaches it through `bench
+    # check`, but only for a diff under `bench/`; a relay change would otherwise
+    # land on the nightly.
+    if [[ "$packages" == "ALL" ]] || just rs _wants-uring "$packages"; then
+    	just rs uring-check
+    fi
+
 # Compile moq-tokio by itself at the feature extremes and with each crypto provider.
 # Its default-feature build is already part of the ordinary clippy pass above.
 tokio-features:
@@ -479,10 +506,16 @@ windows *args:
 # `qlog` is a second axis, and the traces are what a debugging run depends on,
 # so it gets a separate pass.
 uring *args:
-    cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets {{ args }} -- -D warnings
+    just rs uring-check {{ args }}
     cargo nextest run --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets {{ args }}
     cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring,moq-relay/qlog --all-targets {{ args }} -- -D warnings
     cargo nextest run --locked -p moq-uring --features qlog --all-targets {{ args }}
+
+# Compile the io_uring relay path, off the default feature set. `check-changed`
+# runs this whenever moq-relay is selected, so a change that breaks the ring
+# listener fails its own PR rather than landing on the nightly.
+uring-check *args:
+    cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets {{ args }} -- -D warnings
 
 # Runs the `#[cfg(target_os = "macos")]` code past the compiler: moq-video's
 # VideoToolbox encode/decode and its ScreenCaptureKit / AVFoundation capture,

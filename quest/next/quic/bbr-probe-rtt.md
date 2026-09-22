@@ -23,10 +23,6 @@ Do not mark the connection application-limited forever or change the
 ProbeRTT policy merely to mask a sampling bug. Add the regressions to the
 fork's CI; keep the fix internal with no wire change.
 
-## Required
-
-- [Fork noq](/quest/next/quic/fork.md) - fixes and CI regressions land in moq-dev/noq
-
 ## Related
 
 - [Release BBR fixes](/quest/next/quic/bbr-release.md) - deliver the corrected controller to MoQ

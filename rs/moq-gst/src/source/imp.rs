@@ -892,7 +892,7 @@ fn audio_caps(config: &hang::catalog::AudioConfig) -> Result<gst::Caps> {
 
 #[cfg(test)]
 mod tests {
-	use super::{plan_reconcile, relative_pts};
+	use super::{PumpState, plan_reconcile, relative_pts};
 	use moq_net::Timestamp;
 	use std::collections::HashMap;
 
@@ -960,6 +960,29 @@ mod tests {
 			relative_pts(Timestamp::from_millis(2500).unwrap(), reference),
 			gst::ClockTime::from_mseconds(500)
 		);
+	}
+
+	/// The pad claim and the teardown race for every pump, and only one may win: a subscription
+	/// resolving after a teardown must not publish a rendition the session has finished with and
+	/// then yank it without an EOS. The cancel watch alone cannot say which happened, so this is
+	/// the state that does.
+	#[test]
+	fn a_pump_either_goes_live_or_is_cancelled() {
+		let cancelled = PumpState::new();
+		assert!(cancelled.cancel_before_live());
+		assert!(!cancelled.go_live(), "a cancelled pump still claimed a pad");
+		assert!(
+			!cancelled.cancel_before_live(),
+			"a second teardown claimed the same transition"
+		);
+
+		let live = PumpState::new();
+		assert!(live.go_live());
+		assert!(
+			!live.cancel_before_live(),
+			"a live pump was dropped without its cancel watch"
+		);
+		assert!(!live.go_live(), "a live pump claimed a second pad");
 	}
 }
 
@@ -1120,11 +1143,12 @@ mod session_tests {
 		super::RUNTIME.block_on(session).unwrap().unwrap();
 	}
 
-	/// A subscription can resolve after its pump was already torn down. The pump has to stay
-	/// dead: exposing a pad at that point publishes a rendition the session has finished with,
-	/// and then yanks it without an EOS.
+	/// A rendition delisted while its pump is still subscribing ends that pump, and answering
+	/// the subscription afterwards must not resurrect it into a pad. Which of the two the pump
+	/// sees first is the runtime's to decide, so the state machine that refuses the losing side
+	/// is covered by `a_pump_either_goes_live_or_is_cancelled` instead.
 	#[test]
-	fn a_subscription_resolving_after_cancellation_creates_no_pad() {
+	fn a_rendition_delisted_while_subscribing_takes_no_pad() {
 		let _pad_ids = pad_ids();
 		let element = element();
 
@@ -1150,11 +1174,23 @@ mod session_tests {
 			guard.video.renditions.clear();
 		}
 
-		// Only now answer it. The pump was torn down, so nothing may reach a pad. Proving a pad
-		// never appears has no edge to wait on, unlike `await_pad`, so this gives the runtime a
-		// window in which the un-cancelled version reliably creates one.
+		// A cancelled pump returns out of its subscribe, dropping the only consumer this request
+		// has: that edge says the session reconciled the removal, which a fixed beat can only
+		// guess at. Answering before it lands is a pump that legitimately goes live, so the
+		// wait is what the assertion below is about.
+		super::RUNTIME
+			.block_on(async {
+				tokio::time::timeout(
+					Duration::from_secs(10),
+					moq_net::kio::wait(|waiter| request.poll_unused(waiter)),
+				)
+				.await
+			})
+			.expect("the cancelled pump never dropped its subscription");
+
+		// Only now answer it. The pump is gone and its state is terminal, so no later scheduling
+		// can produce a pad.
 		let _serving = request.accept(moq_net::track::Info::default());
-		std::thread::sleep(Duration::from_millis(500));
 		assert!(pads(&element, "video_").is_empty(), "a cancelled pump still took a pad");
 
 		let _ = shutdown.send(true);

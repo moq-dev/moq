@@ -28,6 +28,15 @@
 //! would then own the color matrix, and the smaller rendition would still need
 //! its own conversion, so a kernel that writes NV12 straight from the image is
 //! the one pass this path needs: no staging copy in either direction.
+//!
+//! What the hardware says (RTX 3070 Ti, driver 595.91.07, `just rs vulkan-cuda`):
+//! the kernels match a CPU reference exactly, and an `nsys --trace=cuda` capture
+//! of `tests::vulkan_cuda_three_view_workload` records no `cuMemcpy` in either
+//! direction. Registering a converted buffer with NVENC costs around 70us and
+//! releasing it around 150us, a tenth of a 1280x720 encode; holding one
+//! registration per pool buffer would reclaim that, but a registration belongs
+//! to one session while the pool is shared by all of them, so that cache has to
+//! live in the encoder.
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;

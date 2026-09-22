@@ -1025,7 +1025,7 @@ impl I420 {
 /// (`u[i], v[i]` -> `uv[2i], uv[2i+1]`). `uv` must be twice the length of `u`.
 #[cfg(any(target_os = "windows", all(target_os = "linux", feature = "nvidia")))]
 pub(crate) fn interleave_uv(u: &[u8], v: &[u8], uv: &mut [u8]) {
-	for (pair, (u, v)) in uv.chunks_exact_mut(2).zip(u.iter().zip(v)) {
+	for (pair, (u, v)) in uv.as_chunks_mut::<2>().0.iter_mut().zip(u.iter().zip(v)) {
 		pair[0] = *u;
 		pair[1] = *v;
 	}
@@ -1038,7 +1038,7 @@ pub(crate) fn interleave_uv(u: &[u8], v: &[u8], uv: &mut [u8]) {
 	all(target_os = "linux", any(feature = "pipewire", feature = "vaapi"))
 ))]
 pub(crate) fn deinterleave_uv(uv: &[u8], u: &mut [u8], v: &mut [u8]) {
-	for (pair, (u, v)) in uv.chunks_exact(2).zip(u.iter_mut().zip(v)) {
+	for (pair, (u, v)) in uv.as_chunks::<2>().0.iter().zip(u.iter_mut().zip(v)) {
 		*u = pair[0];
 		*v = pair[1];
 	}

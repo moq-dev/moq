@@ -51,7 +51,6 @@ offered and answered.
 
 - [Release BBR fixes](/quest/next/quic/bbr-release.md) - the corrected controller and its regression evidence
 
-- [Fork noq](/quest/next/quic/fork.md) - the fork the proposals split from
 - [Per-stream ACK progress](/quest/next/quic/ack-progress.md)
 - [Reliable stream reset](/quest/next/quic/reliable-reset.md)
 - [Keep-alive by deadline](/quest/future/quic-keep-alive.md)
