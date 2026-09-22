@@ -21,7 +21,7 @@ use crate::{
 	coding::{BoundsExceeded, Decode, DecodeError, Encode, EncodeError},
 	runtime::{Instant, Timers},
 	time::Clock,
-	util::{TaskSet, Tasks, TasksWeak},
+	util::{Keepalive, TaskSet, Tasks, TasksWeak},
 };
 
 /// One relay's identity in a broadcast's hop chain: a 62-bit varint on the wire.
@@ -710,9 +710,11 @@ impl RouteEntry {
 		self.hops.iter().any(|hop| *hop == Hop::UNKNOWN)
 	}
 
-	/// Whether a request can be served through this entry.
-	fn servable(&self) -> bool {
-		self.server.is_some() || self.source.is_some()
+	/// Whether a request for `path` can be served through this entry. A served
+	/// route covers everything beneath its prefix; a broadcast published here
+	/// is only itself, so it serves its exact path and shadows what is beneath.
+	fn serves(&self, path: &Path) -> bool {
+		self.server.is_some() || (self.source.is_some() && self.prefix == *path)
 	}
 
 	/// Whether `pin` admits this entry for a front's selection.
@@ -1180,7 +1182,7 @@ impl Producer {
 		)?;
 		Ok(source.with_announcer(Announcer {
 			entry,
-			_tasks: self.tasks.clone(),
+			_keepalive: self.tasks.keepalive(),
 		}))
 	}
 
@@ -1423,7 +1425,7 @@ pub(crate) struct Announcer {
 	/// A published broadcast is lifecycle work: the origin's driver keeps
 	/// running for as long as one lives, even once every producer handle is
 	/// gone, so a session handed a producer can drop it and keep serving.
-	_tasks: Tasks,
+	_keepalive: Keepalive,
 }
 
 impl Announcer {
@@ -2661,7 +2663,7 @@ impl OriginState {
 				.peekable();
 			if candidates.peek().is_some() {
 				best = candidates
-					.filter(|entry| entry.servable())
+					.filter(|entry| entry.serves(path))
 					.min_by_key(|entry| (!entry.local, route_order(&entry.prefix, entry)));
 			}
 		}

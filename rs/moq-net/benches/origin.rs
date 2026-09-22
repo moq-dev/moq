@@ -25,7 +25,7 @@ const SHAPES: [(usize, usize); 3] = [(100, 10), (1_000, 100), (1_000, 1_000)];
 struct Fanout {
 	producer: origin::Producer,
 	consumer: origin::Consumer,
-	_driver: origin::Driver,
+	driver: origin::Driver,
 	_publishers: Vec<broadcast::Producer>,
 	subscribers: Vec<announce::Consumer>,
 }
@@ -44,7 +44,7 @@ fn fanout(publishers: usize, subscribers: usize) -> Fanout {
 	Fanout {
 		producer,
 		consumer,
-		_driver: driver,
+		driver,
 		_publishers: publishers,
 		subscribers,
 	}
@@ -165,24 +165,27 @@ fn bench_subscribe(c: &mut Criterion) {
 	group.finish();
 }
 
-/// Resolving one broadcast among `publishers`: a local hit walks the tree to
-/// the exact path, and a miss under an advertise-only route walks the route
-/// table to prove nothing serves it. Neither may depend on `publishers`.
+/// Resolving one broadcast among `publishers`: a local hit walks the table to
+/// the exact path and joins the front serving it, and a miss under a broadcast
+/// published above it walks the table to prove nothing serves it. Neither may
+/// depend on `publishers`.
 fn bench_request(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/request");
 	// A request costs nothing per subscriber, so this sweeps the publisher counts
 	// in `SHAPES` rather than its shapes, whose last two share one.
 	for publishers in [100, 1_000] {
-		let fleet = fanout(publishers, 0);
-		// An advertise-only route above the misses: it covers them without serving them.
+		let mut fleet = fanout(publishers, 0);
+		// A broadcast above the misses covers them without serving them.
 		let _covering = fleet.producer.publish("room", origin::Route::default()).unwrap();
+		let waiter = kio::Waiter::noop();
 		group.bench_function(BenchmarkId::new("local", publishers), |b| {
 			b.iter(|| {
-				fleet
-					.consumer
-					.request_broadcast("room/0")
+				let pending = fleet.consumer.request_broadcast("room/0");
+				// The front's driver resolves the first request; later ones join it.
+				fleet.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+				pending
 					.now_or_never()
-					.expect("local resolves synchronously")
+					.expect("resolves once driven")
 					.expect("local broadcast");
 			});
 		});
