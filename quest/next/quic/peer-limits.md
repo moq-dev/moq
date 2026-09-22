@@ -15,7 +15,7 @@ noq-proto already exposes runtime `Connection::set_max_concurrent_streams`,
 `MAX_DATA` on the next packet, and a shrink is a debt paid as the peer
 consumes credit. Nothing MoQ builds on top needs a fork change.
 
-- `web-transport-noq` (and the trait, with an unsupported default for the
+- `web-transport-moq` (and the trait, with an unsupported default for the
   browser) exposes a `set_limits(Limits)` on the session, `Limits` carrying
   the three values.
 - moq-tokio's `[quic]` section gains a `peer` sub-table with the same three

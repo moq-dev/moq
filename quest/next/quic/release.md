@@ -3,15 +3,15 @@
 ## Goal
 
 Immutable releases of `moq-noq-proto`, `moq-noq`, `moq-noq-udp`,
-`web-transport-noq`, and the qmux crate are available to every published MoQ
+`web-transport-moq`, and the qmux crate are available to every published MoQ
 crate. The workspace lockfile identifies exact released sources, with no
 root-only Cargo patch or mutable git branch, and a consumer can tell from any
 release which parent commit it carries.
 
 ## Plan
 
-Release the dependency chain from the bottom up: the fork's three crates,
-then `web-transport-trait` if its surface moved, then `web-transport-noq` and
+Release the dependency chain from the bottom up: the fork's crates, which one
+tag releases together, then `web-transport-trait` if its surface moved, then
 qmux. Pin each released version in this repository's workspace dependencies
 and regenerate `Cargo.lock`. Verify minimal, default, and all-feature builds so
 enabling iroh, qmux, or the uring runtime cannot unify two incompatible copies

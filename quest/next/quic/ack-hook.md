@@ -3,7 +3,7 @@
 ## Goal
 
 A released `web-transport-trait` lets a sender await acknowledgment of a
-named byte offset on a send stream, a released `web-transport-noq` implements
+named byte offset on a send stream, a released `web-transport-moq` implements
 it, and every other backend reports that it cannot rather than returning a
 guess.
 
@@ -30,7 +30,7 @@ use. A default body cannot construct a backend's own `Self::Error`, so
 unsupported has to live in the return type rather than the error, and a
 consumer must treat `None` as unknown, never as delivered.
 
-Implement it in `web-transport-noq` over the fork's accessor. Leave
+Implement it in `web-transport-moq` over the fork's accessor. Leave
 `web-transport-wasm` on the default; the browser's `WebTransportSendStream.getStats()` is
 unimplemented in shipping Chrome and its `bytesAcknowledged` is at risk in the
 W3C draft. qmux over a reliable transport may treat serialization as
@@ -42,7 +42,7 @@ the middle of an in-flight frame, several waiters on one stream in offset
 order, a waiter whose offset lies beyond the final size, reset by sender,
 STOP_SENDING by the receiver, and session close.
 
-Cut releases of `web-transport-trait` and `web-transport-noq`. The quest
+Cut releases of `web-transport-trait` and `web-transport-moq`. The quest
 completes when both are on crates.io.
 
 ## Required

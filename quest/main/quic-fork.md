@@ -33,16 +33,17 @@ Done so far:
   `web-transport-moq`, the WebTransport adapter over the fork, on the fork's
   shared version so one tag releases the stack and its adapter.
   `web-transport-noq` stays in moq-dev/web-transport on upstream noq.
-
-Left to do, once `web-transport-moq` 1.3.0 is on crates.io (`moq-noq` 1.3.0 is):
-
-- Pin the fork releases in this workspace's `Cargo.toml`. `moq-tokio` keeps
-  upstream `noq-proto` for the `iroh` feature, whose controller factory types
-  come from iroh's own noq; a build with `iroh` therefore compiles both stacks,
-  and iroh connections keep upstream's controller until the fixes are upstream.
-- Write the sync procedure into `CONTRIBUTING.md`: what the fork tracks, how a
+- The workspace pins the fork releases. `moq-tokio` keeps upstream `noq-proto`
+  for the `iroh` feature, whose controller factory types come from iroh's own
+  noq; a build with `iroh` therefore compiles both stacks, and iroh connections
+  keep upstream's controller until the fixes are upstream.
+- `CONTRIBUTING.md` carries the sync procedure: what the fork tracks, how a
   sync PR is reviewed, how an advisory against the parent is triaged, and the
   rule that a carried change lists its upstream PR or the reason it has none.
+- All four crates are on crates.io at 1.3.0 and `Cargo.lock` names them.
+  `web-transport-moq` needed a first publish from a maintainer's machine, since
+  trusted publishing can update a crate but not create one; later versions ride
+  the `v*` tag like the rest.
 
 The bootstrap release is the rename alone. BBR3 as the default
 `TransportConfig` controller was planned as the second carried change, but
@@ -52,12 +53,16 @@ offered upstream with a harness fix instead, as the
 [upstream](/quest/next/quic/upstream.md) line's first proposal; MoQ already
 selects BBR3 explicitly.
 
-This lands on `main` as a breaking bump of `moq-tokio`, which re-exports
-`web_transport_noq`, by maintainer decision on 2026-09-21.
+This lands on `main` by maintainer decision on 2026-09-21, as a breaking bump
+of `moq-tokio`. Its `web_transport_noq` re-export is deleted rather than
+renamed: it was the only place the adapter appeared in a public API, and it had
+no caller. Nothing replaces it, so this is the last backend swap that can break
+a consumer.
 
 ## Related
 
-- The single noq backend lets one fork carry every feature.
+- One noq backend on MoQ's own QUIC paths lets one fork carry every feature.
+  An `iroh` build also compiles upstream noq for iroh's own connections.
 - [Release the stack](/quest/next/quic/release.md) - how fork releases reach
   published MoQ crates
 - [Multipath spike](/quest/future/multipath-spike.md) - noq's multipath support

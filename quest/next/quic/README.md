@@ -15,8 +15,10 @@ in [future](/quest/future/README.md).
 
 ## Plan
 
-Everything here assumes the single noq stack and builds on the
-[fork](/quest/main/quic-fork.md), which most quests require.
+Everything here builds on the [fork](/quest/main/quic-fork.md), which most
+quests require. One stack carries every change on MoQ's own QUIC paths; a build
+with the `iroh` feature also compiles upstream noq, and iroh connections are
+outside what these quests reach.
 
 The seven BBR correctness fixes follow the fork bootstrap. They are separate
 PRs, but one owner should work in the shared controller code at a time.
