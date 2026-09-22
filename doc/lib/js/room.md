@@ -40,8 +40,9 @@ On a public prefix, skip the token and dial that path directly. The conferencing
 demo at [`demo/web`](https://github.com/moq-dev/moq/tree/main/demo/web) (`meet.html`)
 does that under `anon/meet/{room}`.
 
-Each remote member owns a `Watch.Player`: assign `member.canvas` to display
-video, unmute with `member.muted`, or use `member.player` for the full pipeline.
+Each remote member owns a `Watch.Player`. Display video with
+`member.canvas.set(canvas)` and unmute with `member.muted.set(false)`, or use
+`member.player` for the full pipeline.
 
 hang.live should depend on this package for the roster, local publish, remote
 watch, and `hang/user.json` + `hang/preview.json`. Location stays an app-defined
