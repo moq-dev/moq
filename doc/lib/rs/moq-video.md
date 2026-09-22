@@ -55,9 +55,10 @@ while let Some(frame) = video.read().await? {
 
 ```bash
 cargo add moq-video                      # nvidia, mediacodec, openh264 on by default
-cargo add moq-video --features capture   # camera + screen capture (Linux: bindgen needs libclang + V4L2 headers)
+cargo add moq-video --features capture   # camera + screen capture, no system build deps
 cargo add moq-video --features render    # wgpu rendering
-cargo add moq-video --features vaapi,v4l2  # Linux VAAPI + V4L2 M2M codecs (bindgen needs libclang)
+cargo add moq-video --features v4l2      # Linux V4L2 M2M codecs, no system build deps
+cargo add moq-video --features vaapi     # Linux VAAPI codecs (bindgen needs libclang)
 cargo add moq-video --features pipewire  # Wayland screen capture (links libpipewire)
 cargo add moq-video --no-default-features --features openh264  # software H.264 only
 cargo add moq-video --no-default-features --features nvidia    # Linux NVIDIA only, no C++ or wgpu

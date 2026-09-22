@@ -5,10 +5,10 @@
 //! Without it a Pi either republishes what `rpicam-vid` already encoded or
 //! spends its CPU on openh264.
 //!
-//! Behind the opt-in `v4l2` feature. It costs no runtime dependency (the
-//! interface is ioctls on a device node), only the `v4l` crate's build-time
-//! bindgen, and a host with no M2M node fails at open so automatic selection
-//! falls through to the next encoder.
+//! Behind the opt-in `v4l2` feature. It costs nothing at build or run time (the
+//! interface is ioctls on a device node and `moq_v4l` checks its bindings in),
+//! and a host with no M2M node fails at open so automatic selection falls
+//! through to the next encoder.
 //!
 //! Feeds the driver 8-bit 4:2:0 and takes back Annex-B with in-band SPS/PPS
 //! ahead of every IDR, which is the avc3 shape the H.264 importer expects.
@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use moq_net::Timestamp;
-use v4l::v4l_sys::{
+use moq_v4l::sys::{
 	V4L2_CID_MPEG_VIDEO_BITRATE, V4L2_CID_MPEG_VIDEO_BITRATE_MODE, V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME,
 	V4L2_CID_MPEG_VIDEO_GOP_SIZE, V4L2_CID_MPEG_VIDEO_H264_LEVEL, V4L2_CID_MPEG_VIDEO_H264_PROFILE,
 	V4L2_CID_MPEG_VIDEO_HEADER_MODE, V4L2_CID_MPEG_VIDEO_PREPEND_SPSPPS_TO_IDR, V4L2_CID_MPEG_VIDEO_REPEAT_SEQ_HEADER,

@@ -1841,17 +1841,19 @@ fn pcr_packet(pid: u16, ticks: u64, cc: u8) -> anyhow::Result<Vec<u8>> {
 /// span, else one behind the first packet that follows it, which is what keeps the
 /// run continuous where the clock leads the stream and nothing precedes it.
 fn counter_before(bytes: &[u8], cut: usize, pid: u16, carried: Option<u8>) -> Option<u8> {
-	let on_pid = |p: &&[u8]| (u16::from(p[1] & 0x1f) << 8 | u16::from(p[2])) == pid;
+	let on_pid = |p: &[u8]| (u16::from(p[1] & 0x1f) << 8 | u16::from(p[2])) == pid;
 	let counter = |p: &[u8]| p[3] & ContinuityCounter::MAX;
 	bytes[..cut]
 		.rchunks_exact(TsPacket::SIZE)
-		.find(on_pid)
+		.find(|p| on_pid(p))
 		.map(counter)
 		.or(carried)
 		.or_else(|| {
 			bytes[cut..]
-				.chunks_exact(TsPacket::SIZE)
-				.find(on_pid)
+				.as_chunks::<{ TsPacket::SIZE }>()
+				.0
+				.iter()
+				.find(|p| on_pid(p.as_slice()))
 				.map(|p| counter(p).wrapping_sub(1) & ContinuityCounter::MAX)
 		})
 }

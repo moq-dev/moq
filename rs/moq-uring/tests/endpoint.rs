@@ -234,8 +234,10 @@ fn unsupported_version_is_negotiated_only_by_servers() {
 	let scid_len = 6 + dcid;
 	let scid = usize::from(response[scid_len]);
 	let versions = response[scid_len + 1 + scid..]
-		.chunks_exact(4)
-		.map(|version| u32::from_be_bytes(version.try_into().unwrap()))
+		.as_chunks::<4>()
+		.0
+		.iter()
+		.map(|version| u32::from_be_bytes(*version))
 		.collect::<Vec<_>>();
 	assert!(
 		versions

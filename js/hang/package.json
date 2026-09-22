@@ -27,12 +27,12 @@
 		"@moq/signals": "workspace:^",
 		"@svta/cml-iso-bmff": "^1.0.5",
 		"@svta/cml-utils": "1.6.0",
-		"@zod/mini": "^4.5.4",
-		"zod": "^4.5.4"
+		"@zod/mini": "^4.6.5",
+		"zod": "^4.6.5"
 	},
 	"devDependencies": {
 		"@types/audioworklet": "^0.0.100",
-		"@types/bun": "^1.4.1",
+		"@types/bun": "^1.4.2",
 		"@typescript/lib-dom": "npm:@types/web@^0.0.350",
 		"fast-glob": "^3.3.3",
 		"rimraf": "^6.1.3",

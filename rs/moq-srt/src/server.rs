@@ -950,7 +950,9 @@ mod tests {
 	/// packet with it and nothing else.
 	fn flags_a_break(payload: &[u8]) -> bool {
 		payload
-			.chunks_exact(188)
+			.as_chunks::<188>()
+			.0
+			.iter()
 			.any(|packet| packet[3] & 0x20 != 0 && packet[4] > 0 && packet[5] & 0x80 != 0)
 	}
 
