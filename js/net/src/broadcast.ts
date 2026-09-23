@@ -245,7 +245,7 @@ export class Producer {
 	 * Advertise this broadcast's exact path, or re-price a standing advertisement in place.
 	 *
 	 * Call it once the tracks a subscriber needs first (a catalog) exist. The broadcast is
-	 * reachable by exact path either way; announcing only makes it discoverable. Retracts on
+	 * discoverable on the local origin from creation; announcing advertises it to peers. Retracts on
 	 * {@link unannounce} or {@link close}. Throws if this producer was not created through an
 	 * origin, or if the broadcast is already closed.
 	 */

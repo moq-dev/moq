@@ -130,7 +130,7 @@ client = moq.Client(
 - **`Server(bind="[::]:443", *, tls_cert=(), tls_key=(), tls_generate=(), publish=None, subscribe=None)`**. Async context manager + async iterator of incoming `Request`s.
   - `.local_addr`. The bound address (useful when binding to port `0`).
   - `.cert_fingerprints()`. SHA-256 fingerprints of the configured TLS certificates, for `serverCertificateHashes` browser cert pinning.
-  - `.create_broadcast(path) → BroadcastProducer`. Create an unadvertised broadcast; `announce()` makes it discoverable; `finish()` unpublishes it.
+  - `.create_broadcast(path) → BroadcastProducer`. Create a locally discoverable broadcast; `announce()` advertises it to peers; `finish()` unpublishes it.
 - **`Request`**. An incoming session, yielded by `async for request in server`.
   - `.url`, `.path`, `.query`, `.transport`. The query-free path is uniform across transports; the root or missing path is `""`. The encoded query may contain credentials.
   - `.set_publish(origin)`, `.set_consume(origin)`. Per-request overrides, captured at `accept()`. Raise if the request is already answered, cancelled, or currently accepting.

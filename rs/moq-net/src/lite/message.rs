@@ -105,10 +105,10 @@ mod tests {
 	fn rejects_oversized_message_before_reading_the_body() {
 		let mut wire = Vec::new();
 		((MAX_MESSAGE_SIZE + 1) as u64)
-			.encode(&mut wire, Version::Lite06Wip)
+			.encode(&mut wire, Version::Lite06)
 			.unwrap();
 
-		let err = Empty::decode(&mut wire.as_slice(), Version::Lite06Wip).unwrap_err();
+		let err = Empty::decode(&mut wire.as_slice(), Version::Lite06).unwrap_err();
 		assert!(matches!(
 			err,
 			DecodeError::MessageTooLarge {
@@ -121,9 +121,9 @@ mod tests {
 	#[test]
 	fn accepts_message_at_the_limit() {
 		let mut wire = Vec::new();
-		(MAX_MESSAGE_SIZE as u64).encode(&mut wire, Version::Lite06Wip).unwrap();
+		(MAX_MESSAGE_SIZE as u64).encode(&mut wire, Version::Lite06).unwrap();
 
-		let err = Empty::decode(&mut wire.as_slice(), Version::Lite06Wip).unwrap_err();
+		let err = Empty::decode(&mut wire.as_slice(), Version::Lite06).unwrap_err();
 		assert!(matches!(err, DecodeError::Short));
 	}
 }

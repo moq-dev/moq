@@ -26,11 +26,11 @@ implement in an afternoon. The wire spec is
 
 ## Session setup
 
-The ALPN picks the protocol family, and a single `SETUP` message from each side
-negotiates the version and capabilities. Neither side waits for the other. The
-Rust and TypeScript stacks currently speak moq-lite 01 through 05 (06 is in
-progress) and moq-transport drafts 14 through 22, and a client offers all of
-them by default.
+A dedicated ALPN selects the wire version for moq-lite 03 and newer. The
+legacy `moql` ALPN negotiates moq-lite 01 or 02 via `SETUP`. In moq-lite 05
+and newer, each side also sends a `SETUP` message with its capabilities.
+Rust and TypeScript speak moq-lite 01 through 06 and moq-transport drafts
+14 through 22. Clients offer `moq-lite-06` first by default.
 
 ## Discovery
 

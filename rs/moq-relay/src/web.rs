@@ -22,7 +22,6 @@ use bytes::Bytes;
 use futures::{FutureExt, future::BoxFuture};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::server::TlsStream;
-use tower_http::cors::{Any, CorsLayer};
 use tower_service::Service;
 
 use crate::{auth, cluster};
@@ -176,12 +175,26 @@ pub(crate) struct WebState {
 	pub(crate) sessions: crate::session::Registry,
 }
 
+/// The bound addresses of the public web listeners.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct Addrs {
+	/// The plain HTTP listener, if configured.
+	pub http: Option<net::SocketAddr>,
+	/// The HTTPS listener, if configured.
+	pub https: Option<net::SocketAddr>,
+}
+
 /// Run a HTTP server using Axum
 pub struct Web {
 	state: Arc<WebState>,
 	config: Config,
 	versions: moq_net::Versions,
 	health: moq_tokio::accept::Health,
+	http_listener: Option<net::TcpListener>,
+	https_listener: Option<net::TcpListener>,
+	https_tls: Option<RustlsConfig>,
+	addrs: Addrs,
 }
 
 impl Web {
@@ -207,7 +220,49 @@ impl Web {
 			config,
 			versions: moq_net::Versions::all(),
 			health: moq_tokio::accept::Health::new("web"),
+			http_listener: None,
+			https_listener: None,
+			https_tls: None,
+			addrs: Addrs::default(),
 		}
+	}
+
+	/// Bind configured web sockets now, so an embedder can read ephemeral ports.
+	pub(crate) fn bind(mut self) -> anyhow::Result<Self> {
+		if self.https_tls.is_none() && self.config.https.listen.is_some() {
+			let tls = build_https_config(&self.config.https.cert, &self.config.https.key, &self.config.https.root)?;
+			self.https_tls = Some(RustlsConfig::from_config(tls));
+		}
+		if let Some(listen) = self.config.http.listen
+			&& self.http_listener.is_none()
+		{
+			let listener = moq_tokio::bind::tcp(listen).context("failed to bind HTTP listener")?;
+			let addr = listener.local_addr().context("failed to resolve HTTP bind address")?;
+			self.addrs.http = Some(addr);
+			tracing::info!(%addr, kind = "http", "listening");
+			self.http_listener = Some(listener);
+		}
+		if let Some(listen) = self.config.https.listen
+			&& self.https_listener.is_none()
+		{
+			let listener = moq_tokio::bind::tcp(listen).context("failed to bind HTTPS listener")?;
+			let addr = listener.local_addr().context("failed to resolve HTTPS bind address")?;
+			self.addrs.https = Some(addr);
+			tracing::info!(%addr, kind = "https", "listening");
+			self.https_listener = Some(listener);
+		}
+		Ok(self)
+	}
+
+	/// The actual bound addresses after [`crate::Relay::load`].
+	pub fn addrs(&self) -> Addrs {
+		self.addrs
+	}
+
+	/// Current served fingerprints, for a programmatic test fixture.
+	#[cfg(feature = "test-support")]
+	pub(crate) fn certificate_fingerprints(&self) -> Vec<String> {
+		self.state.certificates.fingerprints()
 	}
 
 	/// Restrict which MoQ versions WebSocket sessions accept, in preference order.
@@ -264,10 +319,10 @@ impl Web {
 	/// never exposed on the public listener.
 	///
 	/// Includes the WebSocket polyfill catch-all (`/{*path}`, when
-	/// `config.ws`) and CORS scoped to its own GET routes, but NOT the
+	/// `config.ws`), but NOT the
 	/// landing-page fallback (that is global, so [`serve`](Self::serve) sets it
-	/// once across the merged router). Extra routes a caller merges in keep their
-	/// own layers and bring their own CORS as needed (e.g. a WHIP POST endpoint).
+	/// once across the merged router). GET CORS is applied to the complete router by [`Self::serve`],
+	/// including any routes the embedder merges in without their own policy.
 	pub fn routes(&self) -> Router {
 		let app = Router::new()
 			.route("/health", get(serve_health))
@@ -292,7 +347,6 @@ impl Web {
 		};
 
 		app.layer(Extension(self.versions.clone()))
-			.layer(CorsLayer::new().allow_origin(Any).allow_methods([Method::GET]))
 			.with_state(self.state.clone())
 	}
 
@@ -305,36 +359,36 @@ impl Web {
 	/// extra routes it merged in. An embedder driving a [`crate::Relay`]
 	/// passes that router to [`crate::Relay::with_web`] instead of calling this.
 	pub async fn serve(self, app: Router) -> anyhow::Result<()> {
-		let config = self.config;
+		let Web {
+			config,
+			health,
+			http_listener,
+			https_listener,
+			https_tls,
+			..
+		} = self.bind()?;
 		let app = app
 			.fallback(serve_landing)
+			.layer(axum::middleware::from_fn(get_cors))
 			.into_make_service_with_connect_info::<crate::listener::Peer>();
 		let ws = config.resolved_ws();
 
-		let http = if let Some(listen) = config.http.listen {
-			// Dual-stack so the cert endpoint + WebSocket fallback answer over IPv4
-			// too, even on Windows where `[::]` is IPv6-only by default.
-			let listener = moq_tokio::bind::tcp(listen).context("failed to bind HTTP listener")?;
-			log_bound("http", &listener);
-			let server = crate::listener::server(listener, self.health.clone(), WebAcceptor::plain(ws))?;
+		let http = if let Some(listener) = http_listener {
+			let server = crate::listener::server(listener, health.clone(), WebAcceptor::plain(ws))?;
 			Some(server.serve(app.clone()))
 		} else {
 			None
 		};
 
-		let https = if let Some(listen) = config.https.listen {
-			let cert = config.https.cert.clone();
-			let key = config.https.key.clone();
-			let root = config.https.root.clone();
-
-			let rustls = build_https_config(&cert, &key, &root)?;
-			let rustls_config = RustlsConfig::from_config(rustls);
-
-			tokio::spawn(reload_https_config(rustls_config.clone(), cert, key, root));
-
-			let listener = moq_tokio::bind::tcp(listen).context("failed to bind HTTPS listener")?;
-			log_bound("https", &listener);
-			let server = crate::listener::server(listener, self.health.clone(), WebAcceptor::tls(rustls_config, ws))?;
+		let https = if let Some(listener) = https_listener {
+			let rustls_config = https_tls.expect("HTTPS config was built before binding");
+			tokio::spawn(reload_https_config(
+				rustls_config.clone(),
+				config.https.cert,
+				config.https.key,
+				config.https.root,
+			));
+			let server = crate::listener::server(listener, health.clone(), WebAcceptor::tls(rustls_config, ws))?;
 			Some(server.serve(app))
 		} else {
 			None
@@ -358,18 +412,43 @@ impl Web {
 	}
 }
 
-/// Log the address a web listener actually bound, matching the QUIC `listening`
-/// line in [`Relay::load`](crate::Relay::load).
-///
-/// The configured address is not the bound one when the port is 0, and the TCP
-/// port is chosen independently of the QUIC port, so without this the only way to
-/// learn where the relay is serving HTTP is to already know. Best-effort: a
-/// `local_addr` that fails is a diagnostic, never a reason to refuse to serve.
-fn log_bound(kind: &str, listener: &std::net::TcpListener) {
-	match listener.local_addr() {
-		Ok(addr) => tracing::info!(%addr, kind, "listening"),
-		Err(err) => tracing::warn!(%err, kind, "could not resolve the bound address"),
+// Public GET routes are readable cross-origin. Preserve an embedder's own
+// response policy and leave every other method to its router.
+async fn get_cors(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+	let method = request.method().clone();
+	if method == Method::OPTIONS
+		&& request.headers().get(http::header::ACCESS_CONTROL_REQUEST_METHOD)
+			== Some(&http::HeaderValue::from_static("GET"))
+	{
+		let mut response = StatusCode::OK.into_response();
+		response.headers_mut().insert(
+			http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+			http::HeaderValue::from_static("*"),
+		);
+		response.headers_mut().insert(
+			http::header::ACCESS_CONTROL_ALLOW_METHODS,
+			http::HeaderValue::from_static("GET"),
+		);
+		if let Some(headers) = request.headers().get(http::header::ACCESS_CONTROL_REQUEST_HEADERS) {
+			response
+				.headers_mut()
+				.insert(http::header::ACCESS_CONTROL_ALLOW_HEADERS, headers.clone());
+		}
+		return response;
 	}
+
+	let mut response = next.run(request).await;
+	if method == Method::GET
+		&& !response
+			.headers()
+			.contains_key(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+	{
+		response.headers_mut().insert(
+			http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+			http::HeaderValue::from_static("*"),
+		);
+	}
+	response
 }
 
 /// Build a [`rustls::ServerConfig`] for the HTTPS listener.

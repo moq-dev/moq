@@ -733,7 +733,7 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
-	server_config.version = vec!["moq-lite-06-wip".parse().unwrap()];
+	server_config.version = vec!["moq-lite-06".parse().unwrap()];
 	let server = server_config.init(Default::default()).expect("init server");
 	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("local addr");
@@ -744,7 +744,7 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
-	client_config.version = vec!["moq-lite-06-wip".parse().unwrap()];
+	client_config.version = vec!["moq-lite-06".parse().unwrap()];
 	let client = client_config.init(Default::default()).expect("init client");
 	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
 
@@ -1110,7 +1110,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 	handle.await.expect("server panicked").expect("server failed");
 }
 
-/// Route re-advertisement on the default version (lite-05: a duplicate ANNOUNCE).
+/// Route re-advertisement on the default version (lite-06: ANNOUNCE_RESTART by id).
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_route_reannounce() {
@@ -1121,7 +1121,7 @@ async fn broadcast_route_reannounce() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_route_reannounce_lite_06() {
-	route_reannounce_test(Some("moq-lite-06-wip")).await;
+	route_reannounce_test(Some("moq-lite-06")).await;
 }
 
 // ── Raw QUIC (moqt://) – same version on both sides ─────────────────
@@ -1147,7 +1147,7 @@ async fn broadcast_moq_lite_03() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_06() {
-	broadcast_test("moqt", Some("moq-lite-06-wip"), Some("moq-lite-06-wip")).await;
+	broadcast_test("moqt", Some("moq-lite-06"), Some("moq-lite-06")).await;
 }
 
 #[tracing_test::traced_test]
@@ -1871,13 +1871,11 @@ async fn broadcast_websocket_fallback() {
 ///
 /// Bump this whenever [`moq_net::Versions::all`] gains a newer Lite variant
 /// so the regression tests below keep tracking "the newest", not a frozen value.
-/// Work-in-progress versions (e.g. `moq-lite-06-wip`) are excluded from the default
-/// set, so they don't count as "the newest" here until promoted.
-const NEWEST_LITE: &str = "moq-lite-05";
+const NEWEST_LITE: &str = "moq-lite-06";
 
 /// Regression guard for the WebSocket ALPN path. Lite02 over WebSocket means
 /// the qmux subprotocol negotiation produced a bare `moql` (or no match)
-/// instead of `moq-lite-04`, which falls through to legacy SETUP negotiation
+/// instead of the newest lite ALPN, which falls through to legacy SETUP negotiation
 /// and picks Lite02. This test fails immediately if that happens.
 #[tracing_test::traced_test]
 #[tokio::test]
@@ -2911,14 +2909,14 @@ async fn broadcast_wildcard_scopes_lite_05() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_wildcard_scopes_lite_06() {
-	wildcard_scope_test("moq-lite-06-wip", "room/alice/**").await;
+	wildcard_scope_test("moq-lite-06", "room/alice/**").await;
 }
 
 /// A leading-wildcard server grant still filters literal prefix announcements.
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_wildcard_server_scope_lite_06() {
-	wildcard_scope_test("moq-lite-06-wip", "*/alice/chat").await;
+	wildcard_scope_test("moq-lite-06", "*/alice/chat").await;
 }
 
 /// Older wires use the same literal-head interest and local filtering.

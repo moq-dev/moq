@@ -30,6 +30,11 @@ A relay configured with more than one certificate has no single fingerprint to
 publish, and this endpoint answers for the first. The others are reachable over
 `https://`, which selects a certificate by SNI at the handshake.
 
+GET responses on the public router receive a wildcard CORS origin unless the
+route sets its own policy. This includes routes merged by an embedding
+application. GET preflights are supported; routes using other methods configure
+their own CORS policy.
+
 Tokens sent over plain HTTP are visible on the wire, so use HTTPS in
 production.
 

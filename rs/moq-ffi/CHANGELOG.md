@@ -7,6 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/moq-dev/moq/compare/moq-ffi-v0.3.19...moq-ffi-v0.4.0) - 2026-09-23
+
+### Added
+
+- *(video)* fork v4l in-tree with checked-in V4L2 bindings ([#3867](https://github.com/moq-dev/moq/pull/3867))
+- *(moq-ffi)* the decode pixel format reaches every uniffi binding ([#3892](https://github.com/moq-dev/moq/pull/3892))
+- *(video)* [**breaking**] type the group configuration and make cut fallible ([#3876](https://github.com/moq-dev/moq/pull/3876))
+- preserve video capture timing ([#3849](https://github.com/moq-dev/moq/pull/3849))
+- *(ffi)* [**breaking**] scope announcement streams with patterns ([#3856](https://github.com/moq-dev/moq/pull/3856))
+- *(net)* [**breaking**] simplify origin scoping ([#3804](https://github.com/moq-dev/moq/pull/3804))
+- *(libmoq)* [**breaking**] finalize release API ([#3819](https://github.com/moq-dev/moq/pull/3819))
+- *(hang)* [**breaking**] unify catalog APIs ([#3813](https://github.com/moq-dev/moq/pull/3813))
+- *(net)* [**breaking**] slim the moq-net public surface ([#3779](https://github.com/moq-dev/moq/pull/3779))
+- *(net)* [**breaking**] announce prefixes on every wire; consumers read paths ([#3770](https://github.com/moq-dev/moq/pull/3770))
+- *(net)* [**breaking**] fold the session placeholders into PROTOCOL_VIOLATION ([#3755](https://github.com/moq-dev/moq/pull/3755))
+- [**breaking**] name every rate estimate estimated_*_rate
+- *(net)* [**breaking**] register the four placeholder stream codes
+- *(net)* [**breaking**] rank anonymous hop chains last ([#3724](https://github.com/moq-dev/moq/pull/3724))
+- [**breaking**] borrow publisher finish so abort can still run ([#3714](https://github.com/moq-dev/moq/pull/3714))
+- *(net)* [**breaking**] one name per announce, request, and origin config concept ([#3725](https://github.com/moq-dev/moq/pull/3725))
+- *(json)* [**breaking**] Config means the same thing in json and binary ([#3718](https://github.com/moq-dev/moq/pull/3718))
+- *(ffi)* [**breaking**] drop MoqCancel; Go cancels through context.Context ([#3723](https://github.com/moq-dev/moq/pull/3723))
+- *(ffi)* [**breaking**] use microseconds and matching origin verbs
+- *(tokio)* [**breaking**] rename ConnectionStatsReader to connection::Monitor ([#3705](https://github.com/moq-dev/moq/pull/3705))
+- *(ffi)* [**breaking**] carry the route cold cost through MoqRoute ([#3669](https://github.com/moq-dev/moq/pull/3669))
+- *(ffi)* [**breaking**] replace MoqAudioCodec enum with opus() object ([#3671](https://github.com/moq-dev/moq/pull/3671))
+- *(net)* [**breaking**] make reader group and frame limits explicit ([#3647](https://github.com/moq-dev/moq/pull/3647))
+- *(net)* [**breaking**] advertise wildcard routes with Pattern events ([#3649](https://github.com/moq-dev/moq/pull/3649))
+- *(ffi)* [**breaking**] fail configuration setters that cannot apply ([#3642](https://github.com/moq-dev/moq/pull/3642))
+- *(ffi)* [**breaking**] preserve session and stream protocol error details ([#3615](https://github.com/moq-dev/moq/pull/3615))
+- *(ffi)* [**breaking**] align create_broadcast, announce, and dynamic across bindings ([#3577](https://github.com/moq-dev/moq/pull/3577))
+- *(ffi)* [**breaking**] follow the connection's bandwidth share ([#3622](https://github.com/moq-dev/moq/pull/3622))
+- *(moq-ffi)* expose the reconnect epoch and QUIC stream cap ([#3627](https://github.com/moq-dev/moq/pull/3627))
+- *(hang)* [**breaking**] empty frames close the previous frame's duration ([#3575](https://github.com/moq-dev/moq/pull/3575))
+
+### Fixed
+
+- *(net)* announce local broadcasts on origin cursors ([#3928](https://github.com/moq-dev/moq/pull/3928))
+- *(moq-ffi)* cancel waits for the listening socket to close ([#3914](https://github.com/moq-dev/moq/pull/3914))
+- *(ci)* repair nightly and meta-review failures ([#3799](https://github.com/moq-dev/moq/pull/3799))
+- *(ffi)* stop the runtime thread at Python exit so it never dies mid-callback ([#3766](https://github.com/moq-dev/moq/pull/3766))
+- *(ffi)* keep the first-frame cursor across empty groups and cancel ([#3641](https://github.com/moq-dev/moq/pull/3641))
+- *(json)* [**breaking**] fallible modify(), abort the track when a dropped edit fails ([#3644](https://github.com/moq-dev/moq/pull/3644))
+- *(ffi)* keep the lane guard alive for the whole read ([#3651](https://github.com/moq-dev/moq/pull/3651))
+- *(ffi)* let group and datagram reads progress independently ([#3645](https://github.com/moq-dev/moq/pull/3645))
+- *(moq-mux)* [**breaking**] make an fMP4 export fragment a group, on every track ([#3573](https://github.com/moq-dev/moq/pull/3573))
+
+### Other
+
+- *(moq-ffi)* move the bindgen CLI out of the library build ([#3908](https://github.com/moq-dev/moq/pull/3908))
+- *(net)* routed_broadcast waits on the watch alone ([#3901](https://github.com/moq-dev/moq/pull/3901))
+- *(rs)* read constant-size chunks with as_chunks ([#3899](https://github.com/moq-dev/moq/pull/3899))
+- *(video)* [**breaking**] separate decoder output from subscription policy ([#3875](https://github.com/moq-dev/moq/pull/3875))
+- *(audio)* [**breaking**] separate configuration contracts ([#3843](https://github.com/moq-dev/moq/pull/3843))
+- *(audio)* [**breaking**] expose demand without track authority ([#3842](https://github.com/moq-dev/moq/pull/3842))
+- Unify mux track and rendition ownership ([#3857](https://github.com/moq-dev/moq/pull/3857))
+- Make media backends optional ([#3839](https://github.com/moq-dev/moq/pull/3839))
+- *(video)* [**breaking**] type frame conversions ([#3846](https://github.com/moq-dev/moq/pull/3846))
+- *(mux)* [**breaking**] share media rate policy ([#3840](https://github.com/moq-dev/moq/pull/3840))
+- *(just)* consolidate full-suite actions ([#3823](https://github.com/moq-dev/moq/pull/3823))
+- *(net)* [**breaking**] name path roles without new types ([#3826](https://github.com/moq-dev/moq/pull/3826))
+- *(net)* [**breaking**] return the next deadline from driver polls ([#3828](https://github.com/moq-dev/moq/pull/3828))
+- *(net)* [**breaking**] drive time and cache cleanup explicitly ([#3825](https://github.com/moq-dev/moq/pull/3825))
+- *(net)* expose route cost fields ([#3802](https://github.com/moq-dev/moq/pull/3802))
+- *(tokio)* make API shapes type-safe ([#3816](https://github.com/moq-dev/moq/pull/3816))
+- Merge origin/main into dev
+- Merge remote-tracking branch 'origin/dev' into merge-main-into-dev-20260914
+- merge main into dev
+- merge main into dev
+
 ### Removed
 
 - `MoqCancel` and the trailing `cancel` argument on blocking async methods. Bindings with

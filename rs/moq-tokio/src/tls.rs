@@ -8,7 +8,7 @@
 //! Certificates, keys, and custom root CAs loaded from disk are hot reloaded for
 //! new handshakes. [`Certificates`] reads the current served set back out.
 
-#[cfg(feature = "noq")]
+#[cfg(all(feature = "watch", feature = "_certs"))]
 use crate::abort::AbortOnDrop;
 use crate::crypto;
 use rustls::pki_types::pem::PemObject;
@@ -1456,13 +1456,43 @@ impl Listen {
 	#[cfg(feature = "_certs")]
 	pub fn server_config(&self, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::ServerConfig>> {
 		self.refuse_deprecated()?;
-		server_config(self, alpn)
+		server_config(self, alpn).map(|(config, _)| config)
+	}
+
+	/// Build a plain-TLS server config whose file-backed certificates reload.
+	/// Must be called inside a Tokio runtime that drives the file watcher.
+	#[cfg(all(feature = "watch", feature = "_certs"))]
+	pub fn server_config_reloading(&self, alpn: Vec<Vec<u8>>) -> Result<ReloadingServerConfig> {
+		self.refuse_deprecated()?;
+		let (config, certs) = server_config(self, alpn)?;
+		let reload = Reload::spawn(certs, self.clone());
+		Ok(ReloadingServerConfig {
+			config,
+			_reload: reload,
+		})
+	}
+}
+
+/// A plain-TLS server config with a watcher for its file-backed certificates.
+/// Keep this handle alive for as long as the listener serves.
+#[cfg(all(feature = "watch", feature = "_certs"))]
+#[derive(Debug)]
+pub struct ReloadingServerConfig {
+	config: Arc<rustls::ServerConfig>,
+	_reload: Reload,
+}
+
+#[cfg(all(feature = "watch", feature = "_certs"))]
+impl ReloadingServerConfig {
+	/// The rustls config used for new handshakes; clones share the live resolver.
+	pub fn config(&self) -> Arc<rustls::ServerConfig> {
+		self.config.clone()
 	}
 }
 
 /// Build a [`rustls::ServerConfig`] from a [`Listen`] for a plain-TLS listener.
 #[cfg(feature = "_certs")]
-fn server_config(config: &Listen, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::ServerConfig>> {
+fn server_config(config: &Listen, alpn: Vec<Vec<u8>>) -> Result<(Arc<rustls::ServerConfig>, Arc<ServeCerts>)> {
 	let provider = crypto::provider();
 
 	let certs = ServeCerts::new(provider.clone());
@@ -1474,13 +1504,15 @@ fn server_config(config: &Listen, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::Serv
 		rustls::ServerConfig::builder_with_provider(provider.clone()).with_safe_default_protocol_versions()?;
 
 	let mut tls = match config.client_auth(provider)? {
-		Some(verifier) => builder.with_client_cert_verifier(verifier).with_cert_resolver(certs),
-		None => builder.with_no_client_auth().with_cert_resolver(certs),
+		Some(verifier) => builder
+			.with_client_cert_verifier(verifier)
+			.with_cert_resolver(certs.clone()),
+		None => builder.with_no_client_auth().with_cert_resolver(certs.clone()),
 	};
 
 	tls.alpn_protocols = alpn;
 	config.disable_resumption(&mut tls);
-	Ok(Arc::new(tls))
+	Ok((Arc::new(tls), certs))
 }
 
 /// A peer's validated client-certificate chain from the mTLS handshake.
@@ -2311,6 +2343,23 @@ mod tests {
 		assert!(handshake_kinds(client, server).is_err());
 	}
 
+	/// A plain-TLS embedder receives a working config while retaining its watcher.
+	#[cfg(all(feature = "watch", feature = "noq"))]
+	#[tokio::test]
+	async fn plain_tls_config_reloading_handshakes() {
+		let server = Listen {
+			generate: vec!["localhost".into()],
+			..Default::default()
+		}
+		.server_config_reloading(Vec::new())
+		.expect("build reloadable TLS config");
+		let client = Connect {
+			insecure: Some(true),
+			..Default::default()
+		};
+		assert!(handshake_kinds(Arc::new(client.build().unwrap()), server.config()).is_ok());
+	}
+
 	/// The fingerprint a listener reads off an accepted session is the one the
 	/// peer published, which is what makes it usable as an identity.
 	#[test]
@@ -2868,14 +2917,14 @@ impl rustls::server::ResolvesServerCert for ServeCerts {
 /// its own, so a listener that goes away without this leaves the task, the keys it
 /// holds, and an OS directory watch behind. An embedder that builds listeners
 /// repeatedly in one process would accumulate all three.
-#[cfg(feature = "noq")]
+#[cfg(all(feature = "watch", feature = "_certs"))]
 #[derive(Debug)]
 pub(crate) struct Reload {
 	/// Named for the drop alone: nothing reads it, and losing it stops the watcher.
 	_task: AbortOnDrop,
 }
 
-#[cfg(feature = "noq")]
+#[cfg(all(feature = "watch", feature = "_certs"))]
 impl Reload {
 	/// A guard over a task with nothing to do, for a listener with nothing to watch.
 	fn inert() -> Self {
@@ -2927,7 +2976,7 @@ impl Reload {
 /// Reacting to the filesystem means cert-manager, Kubernetes secret mounts, and
 /// `mv`-into-place rotate certs with no external signal. [`Reload::spawn`] owns
 /// registering the watch and is the only caller.
-#[cfg(feature = "noq")]
+#[cfg(all(feature = "watch", feature = "_certs"))]
 async fn reload_certs(mut watcher: crate::watch::Files, certs: Arc<ServeCerts>, tls_config: Listen) {
 	loop {
 		watcher.changed().await;

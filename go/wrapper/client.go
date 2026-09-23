@@ -260,7 +260,7 @@ func Dial(ctx context.Context, url string, opts ...ClientOption) (*Client, error
 	return c, nil
 }
 
-// CreateBroadcast creates an unadvertised broadcast at path. Announce it after populating tracks.
+// CreateBroadcast creates a locally announced broadcast at path. Advertise it to peers after populating tracks.
 //
 // See [OriginProducer.CreateBroadcast].
 func (c *Client) CreateBroadcast(path string) (*BroadcastProducer, error) {

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/moq-dev/moq/compare/moq-flate-v0.1.2...moq-flate-v0.1.3) - 2026-09-23
+
+### Other
+
+- *(json)* bound snapshot update allocations ([#3929](https://github.com/moq-dev/moq/pull/3929))
+
 ## [0.1.2](https://github.com/moq-dev/moq/compare/moq-flate-v0.1.1...moq-flate-v0.1.2) - 2026-09-01
 
 ### Other

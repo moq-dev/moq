@@ -235,7 +235,7 @@ where
 ///
 /// We advertise the configured qmux × moq-net subprotocol matrix, with bare
 /// qmux fallbacks last. axum picks the first entry that the client also offered, so
-/// a modern client lands on `qmux-01.moq-lite-05`; old clients still match
+/// a modern client lands on `qmux-01.moq-lite-06`; old clients still match
 /// `webtransport` or `qmux-00.moql` and negotiate via SETUP.
 ///
 /// When the client offered subprotocols and none of them are ours, the

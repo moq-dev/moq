@@ -519,13 +519,13 @@ mod tests {
 			hops: hops.clone(),
 			cost,
 		};
-		assert_eq!(broadcast_round_trip(&active, Version::Lite06Wip), active);
+		assert_eq!(broadcast_round_trip(&active, Version::Lite06), active);
 
 		let ended = AnnounceBroadcast::EndedId { id: 3 };
-		assert_eq!(broadcast_round_trip(&ended, Version::Lite06Wip), ended);
+		assert_eq!(broadcast_round_trip(&ended, Version::Lite06), ended);
 
 		let restart = AnnounceBroadcast::Restart { id: 3, hops, cost };
-		assert_eq!(broadcast_round_trip(&restart, Version::Lite06Wip), restart);
+		assert_eq!(broadcast_round_trip(&restart, Version::Lite06), restart);
 	}
 
 	// The id-referencing forms don't exist before lite-06, and the path form is gone on lite-06.
@@ -550,7 +550,7 @@ mod tests {
 				suffix: Path::new("room/cam"),
 				hops: Hops::new()
 			}
-			.encode(&mut buf, Version::Lite06Wip),
+			.encode(&mut buf, Version::Lite06),
 			Err(EncodeError::Version)
 		));
 	}
@@ -584,25 +584,25 @@ mod tests {
 		let mut buf = Vec::new();
 		crate::origin::Cost::MAX
 			.charged(1)
-			.encode(&mut buf, Version::Lite06Wip)
+			.encode(&mut buf, Version::Lite06)
 			.expect("a charged cost must stay encodable");
 	}
 
 	#[test]
 	fn unknown_announce_type_is_skipped() {
 		let mut body = Vec::new();
-		Path::new("room/cam").encode(&mut body, Version::Lite06Wip).unwrap();
-		Hops::new().encode(&mut body, Version::Lite06Wip).unwrap();
-		Cost::default().encode(&mut body, Version::Lite06Wip).unwrap();
+		Path::new("room/cam").encode(&mut body, Version::Lite06).unwrap();
+		Hops::new().encode(&mut body, Version::Lite06).unwrap();
+		Cost::default().encode(&mut body, Version::Lite06).unwrap();
 
 		let mut buf = bytes::BytesMut::new();
-		4u64.encode(&mut buf, Version::Lite06Wip).unwrap();
-		(body.len() as u64).encode(&mut buf, Version::Lite06Wip).unwrap();
+		4u64.encode(&mut buf, Version::Lite06).unwrap();
+		(body.len() as u64).encode(&mut buf, Version::Lite06).unwrap();
 		buf.extend_from_slice(&body);
 
 		let mut slice = &buf[..];
 		let got =
-			AnnounceBroadcast::decode(&mut slice, Version::Lite06Wip).expect("unknown type must not kill the stream");
+			AnnounceBroadcast::decode(&mut slice, Version::Lite06).expect("unknown type must not kill the stream");
 		assert!(slice.is_empty());
 		assert_eq!(got, AnnounceBroadcast::Skipped);
 	}
@@ -612,7 +612,7 @@ mod tests {
 	fn ended_by_id_is_three_bytes() {
 		let mut buf = bytes::BytesMut::new();
 		AnnounceBroadcast::EndedId { id: 42 }
-			.encode(&mut buf, Version::Lite06Wip)
+			.encode(&mut buf, Version::Lite06)
 			.unwrap();
 		assert_eq!(buf.len(), 3);
 	}
@@ -648,13 +648,13 @@ mod tests {
 			prefix: Path::new("room/"),
 			exclude_hop: 42,
 		};
-		assert_eq!(request_round_trip(&msg, Version::Lite06Wip).exclude_hop, 0);
+		assert_eq!(request_round_trip(&msg, Version::Lite06).exclude_hop, 0);
 
 		// And it costs nothing on the wire: the body is just the prefix.
 		let mut with = bytes::BytesMut::new();
 		msg.encode(&mut with, Version::Lite05).unwrap();
 		let mut without = bytes::BytesMut::new();
-		msg.encode(&mut without, Version::Lite06Wip).unwrap();
+		msg.encode(&mut without, Version::Lite06).unwrap();
 		assert!(
 			without.len() < with.len(),
 			"lite06 must not encode the exclude_hop varint"

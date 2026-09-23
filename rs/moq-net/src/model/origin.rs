@@ -698,8 +698,8 @@ struct RouteEntry {
 	/// entry is one: requests resolve to it directly, and the newest one at a
 	/// path wins through [`route_order`].
 	source: Option<broadcast::Consumer>,
-	/// Whether announce cursors see the entry. A local broadcast is servable
-	/// from the moment it is created but advertised only once it announces.
+	/// Whether peer announce cursors see the entry. Local cursors also see an
+	/// origin-owned broadcast before its producer advertises it.
 	advertised: bool,
 	/// [`prefix_claim`] of [`Self::prefix`], built once at announce time.
 	///
@@ -870,10 +870,13 @@ impl TableCursor {
 			.map(|(_, captures)| captures)
 	}
 
-	/// Whether this cursor may observe `entry` at all: advertised, not behind
-	/// the excluded peer (split horizon), and within the cursor's patterns.
+	/// Local broadcasts are discoverable here before peer advertisement.
+	/// Peer cursors carry an exclusion, including `Hop::UNKNOWN` for peers
+	/// without a declared identity.
 	fn visible(&self, entry: &RouteEntry) -> bool {
-		entry.advertised && entry.visible_to(self.exclude) && entry.overlaps(&self.allowed)
+		(entry.advertised || (entry.local && self.exclude.is_none()))
+			&& entry.visible_to(self.exclude)
+			&& entry.overlaps(&self.allowed)
 	}
 }
 
@@ -1114,11 +1117,9 @@ impl Producer {
 	/// tracks resume from the replacement at the first missing group; consumers
 	/// never observe the swap.
 	///
-	/// The broadcast starts *unadvertised*: it is reachable by exact path for
-	/// subscribes and fetches. Advertise it once its tracks exist with
-	/// [`broadcast::Producer::announce`] (or a whole prefix of paths with
-	/// [`Self::dynamic`]); the two are independent, so cached or on-demand
-	/// content can stay reachable without ever being announced.
+	/// The path appears on this origin's local announce cursors immediately.
+	/// It reaches peers only after [`broadcast::Producer::announce`]. A local
+	/// consumer can discover and request it without any wire advertisement.
 	///
 	/// The broadcast is visible to exact lookups before this returns; only
 	/// lifecycle work (track serving, teardown) waits for the [`Driver`] to be
@@ -1159,7 +1160,7 @@ impl Producer {
 
 		// The broadcast is a route table entry at its exact path from the start,
 		// so requests resolve to it and the newest publisher at a path wins;
-		// cursors see it only once it announces. The entry lives as long as the
+		// local cursors see it immediately. The entry lives as long as the
 		// broadcast: its announcer drops on finish, abort, or the last handle.
 		let announcing = Announcing {
 			hop: self.hop,
@@ -1433,13 +1434,12 @@ pub(crate) struct Announcer {
 }
 
 impl Announcer {
-	/// Advertise the broadcast's path with `route`, or re-price the standing
-	/// advertisement in place.
+	/// Advertise the broadcast's path with `route`, or re-price it in place.
 	pub(crate) fn announce(&mut self, route: Route) -> Result<(), Error> {
 		self.entry.update(route)
 	}
 
-	/// Withdraw the advertisement; the broadcast stays servable.
+	/// Withdraw peer advertising while retaining local discovery.
 	pub(crate) fn withdraw(&mut self) {
 		self.entry.withdraw();
 	}
@@ -1489,8 +1489,7 @@ impl AnnounceProducer {
 		Ok(())
 	}
 
-	/// Hide the entries from announce cursors; requests still resolve through
-	/// them. What [`broadcast::Producer::unannounce`] does.
+	/// Withdraw a local broadcast from peers while preserving its local route.
 	fn withdraw(&self) {
 		let mut shared = self.shared.lock();
 		for (prefix, id) in &self.entries {
@@ -1501,6 +1500,9 @@ impl AnnounceProducer {
 				continue;
 			}
 			entry.advertised = false;
+			entry.hops = Hops::default();
+			entry.cost = Cost::default();
+			entry.via = Hop::UNKNOWN;
 			let claim = entry.claim.clone();
 			shared.sync_route(prefix, &claim);
 		}
@@ -3044,8 +3046,9 @@ pub struct Consumer {
 
 	// Split horizon: routes whose hop chain or announcing session (`via`) is this
 	// peer are invisible to `announced` and skipped by `request_broadcast`, so a
-	// peer is never served (or advertised) its own content back. `None` (the
-	// default) filters nothing.
+	// peer is never served (or advertised) its own content back. `Some(UNKNOWN)`
+	// marks an anonymous peer: no hop is excluded, but local-only routes are not
+	// advertised. `None` is a local cursor and filters nothing.
 	exclude: Option<Hop>,
 
 	// The cache policy remote fronts inherit, mirroring what
@@ -3089,7 +3092,8 @@ impl Consumer {
 	/// and never resolved from, matching what the announce loop advertises to them.
 	/// Sessions apply this once they learn the peer's origin id. Hop 0 identifies
 	/// nobody, so the announcing session's assigned identity is what keeps an
-	/// anonymous route from echoing back.
+	/// anonymous route from echoing back. Pass [`Hop::UNKNOWN`] for an anonymous
+	/// peer so its cursor still excludes local-only announcements.
 	pub(crate) fn excluding(mut self, peer: Hop) -> Self {
 		self.exclude = Some(peer);
 		self
@@ -3722,24 +3726,29 @@ mod tests {
 		let consumer = producer.consume();
 		let mut announced = consumer.announced();
 
-		// Created unannounced: reachable by exact path, invisible to the cursor.
+		// Creation reaches local cursors, while peers still need an explicit announce.
 		let broadcast = producer.create_broadcast("room/alice").unwrap();
-		announced.assert_next_wait();
+		assert_eq!(announced.assert_next_active("room/alice").cost, Cost::default());
+		let mut peer = consumer.clone().excluding(Hop::UNKNOWN).announced();
+		peer.assert_next_wait();
 		let local = consumer.request_broadcast("room/alice").await.expect("resolves");
 		assert_eq!(local.info().path.as_str(), "room/alice");
 
 		broadcast.announce(Route::default().with_cost(3)).unwrap();
 		let route = announced.assert_next_active("room/alice");
 		assert_eq!(route.cost, Cost::new(3));
+		assert_eq!(peer.assert_next_active("room/alice").cost, Cost::new(3));
 
 		// Announcing again re-prices in place.
 		broadcast.announce(Route::default().with_cost(1)).unwrap();
 		let route = announced.assert_next_active("room/alice");
 		assert_eq!(route.cost, Cost::new(1));
 
-		// Off the air: the route retracts while the broadcast stays reachable.
+		// Off the air: only the peer route retracts. The local cursor
+		// returns to its default route while the broadcast stays reachable.
 		broadcast.unannounce();
-		announced.assert_next_ended("room/alice");
+		assert_eq!(announced.assert_next_active("room/alice").cost, Cost::default());
+		peer.assert_next_ended("room/alice");
 		broadcast.unannounce();
 		announced.assert_next_wait();
 		let local = consumer.request_broadcast("room/alice").await.expect("resolves");
@@ -3747,9 +3756,11 @@ mod tests {
 
 		// Back on the air, then the end of the broadcast retracts for good.
 		broadcast.announce(Route::default()).unwrap();
-		announced.assert_next_active("room/alice");
+		announced.assert_next_wait();
+		peer.assert_next_active("room/alice");
 		broadcast.finish();
 		announced.assert_next_ended("room/alice");
+		peer.assert_next_ended("room/alice");
 		assert!(matches!(broadcast.announce(Route::default()), Err(Error::Closed)));
 		announced.assert_next_wait();
 	}
@@ -4097,8 +4108,7 @@ mod tests {
 		assert!((&mut resolving).now_or_never().is_none());
 
 		let broadcast = producer.create_broadcast("room/alice").unwrap();
-		let _announcement = producer.announce("room/alice", Route::default()).unwrap();
-		let resolved = resolving.await.expect("resolves");
+		let resolved = resolving.await.expect("resolves once created");
 		assert_eq!(resolved.info().path.as_str(), "room/alice");
 		drop(broadcast);
 	}
@@ -4281,11 +4291,16 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn local_broadcast_is_not_announced() {
+	async fn local_broadcast_is_announced_only_locally() {
 		let producer = origin(1).produce();
-		let mut announced = producer.consume().announced();
-		let _broadcast = producer.create_broadcast("room/alice").unwrap();
-		announced.assert_next_wait();
+		let mut local = producer.consume().announced();
+		let mut peer = producer.consume().excluding(Hop::UNKNOWN).announced();
+		let broadcast = producer.create_broadcast("room/alice").unwrap();
+		local.assert_next_active("room/alice");
+		peer.assert_next_wait();
+		drop(broadcast);
+		local.assert_next_ended("room/alice");
+		peer.assert_next_wait();
 	}
 
 	#[tokio::test]
@@ -5685,7 +5700,7 @@ mod tests {
 
 		let mut buf = Vec::new();
 		Cost::DRAIN
-			.encode(&mut buf, crate::lite::Version::Lite06Wip)
+			.encode(&mut buf, crate::lite::Version::Lite06)
 			.expect("a draining route is still forwarded, so its cost must encode");
 	}
 }

@@ -74,7 +74,7 @@ pub struct Config {
 
 impl Config {
 	/// The static grant the public patterns name, or `None` when none is set.
-	fn public_grant(&self) -> Option<Grant> {
+	pub fn public_grant(&self) -> Option<Grant> {
 		let publish: Patterns = self.public.iter().chain(&self.public_publish).cloned().collect();
 		let subscribe: Patterns = self.public.iter().chain(&self.public_subscribe).cloned().collect();
 		(!publish.is_empty() || !subscribe.is_empty()).then(|| Grant::new(publish, subscribe))
@@ -83,7 +83,7 @@ impl Config {
 	/// Whether no source is named at all. Such a relay admits nothing on its own:
 	/// [`Relay::load`](crate::Relay::load) hands its sessions to the embedder as
 	/// [`Admissions`], and [`validate`](Self::validate) refuses it for a binary.
-	pub(crate) fn is_empty(&self) -> bool {
+	pub fn is_empty(&self) -> bool {
 		self.url.is_none() && self.public_grant().is_none()
 	}
 
@@ -260,7 +260,7 @@ impl Lease {
 	/// revoked, or was re-checked into one that no longer covers the token.
 	///
 	/// A changed root or a narrower grant ends it: origin handles cannot yet narrow
-	/// a live scope in place (tracked by `quest/next/origin-narrowing.md`). A changed
+	/// a live scope in place (tracked by `quest/m1/origin-narrowing.md`). A changed
 	/// tier is kept for this session and applies to its next connection, since the
 	/// stats carriers resolved their counters at admission.
 	pub async fn ended(&mut self) -> lease::Reason {

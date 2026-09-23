@@ -1557,7 +1557,7 @@ mod tests {
 	/// version-gated rather than unconditional.
 	#[tokio::test]
 	async fn frame_bounds_survive_on_a_lite06_peer() {
-		let mut h = Harness::new(Version::Lite06Wip);
+		let mut h = Harness::new(Version::Lite06);
 		let mut sub = Sub::None;
 
 		h.serve
@@ -1574,10 +1574,10 @@ mod tests {
 		let wire = h.wire();
 		let mut wire = wire.as_slice();
 		assert_eq!(
-			lite::ControlType::decode(&mut wire, Version::Lite06Wip).unwrap(),
+			lite::ControlType::decode(&mut wire, Version::Lite06).unwrap(),
 			lite::ControlType::Subscribe
 		);
-		let msg = lite::Subscribe::decode(&mut wire, Version::Lite06Wip).unwrap();
+		let msg = lite::Subscribe::decode(&mut wire, Version::Lite06).unwrap();
 		assert_eq!((msg.start_frame, msg.end_frame), (3, Some(7)));
 	}
 
@@ -1630,7 +1630,7 @@ mod tests {
 	/// deliver the single group the caller excluded.
 	#[tokio::test]
 	async fn an_empty_range_opens_no_subscription() {
-		let mut h = Harness::new(Version::Lite06Wip);
+		let mut h = Harness::new(Version::Lite06);
 		let mut sub = Sub::None;
 
 		let empty = Subscription::default().with_end(Position::group(0));
@@ -1647,7 +1647,7 @@ mod tests {
 	/// that means the opposite.
 	#[tokio::test]
 	async fn an_empty_range_cancels_a_live_subscription() {
-		let mut h = Harness::new(Version::Lite06Wip);
+		let mut h = Harness::new(Version::Lite06);
 		let mut sub = Sub::None;
 
 		h.serve
@@ -1681,7 +1681,7 @@ mod tests {
 	/// `end_group = 4`, an inverted range the publisher happily parks on.
 	#[tokio::test]
 	async fn a_nonzero_empty_range_opens_no_subscription() {
-		let mut h = Harness::new(Version::Lite06Wip);
+		let mut h = Harness::new(Version::Lite06);
 		let mut sub = Sub::None;
 
 		let empty = Subscription::default()
@@ -1700,7 +1700,7 @@ mod tests {
 	/// it does at the first position.
 	#[tokio::test]
 	async fn a_nonzero_empty_range_cancels_a_live_subscription() {
-		let mut h = Harness::new(Version::Lite06Wip);
+		let mut h = Harness::new(Version::Lite06);
 		let mut sub = Sub::None;
 
 		h.serve

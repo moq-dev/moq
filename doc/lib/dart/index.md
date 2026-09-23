@@ -62,7 +62,7 @@ await for (final request in server.requests()) {
 ```
 
 The three advertising operations: `moq.createBroadcast(path)` (or
-`origin.createBroadcast`) returns an unadvertised producer;
+`origin.createBroadcast`) returns a locally discoverable producer;
 `broadcast.announce(route:)` / `broadcast.unannounce()` own that exact-path
 advertisement; `origin.dynamic_(prefix:, route:)` claims `prefix` and
 every path beneath it (`''` for everything; Dart spells the origin method

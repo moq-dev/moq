@@ -53,7 +53,7 @@ test("transportStats returns an empty snapshot without getStats or when it rejec
 });
 
 test("stats() snapshots the transport on demand", async () => {
-	const pair = createMockTransportPair(Lite.ALPN_06_WIP, {
+	const pair = createMockTransportPair(Lite.ALPN_06, {
 		stats: { estimatedSendRate: 2_000_000, bytesSent: 1_234, packetsLost: 3 },
 	});
 	const url = new URL("https://example.com/");
@@ -75,7 +75,7 @@ test("stats() snapshots the transport on demand", async () => {
 });
 
 test("stats() is empty on a transport without getStats", async () => {
-	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+	const pair = createMockTransportPair(Lite.ALPN_06);
 	// Shadow the mock's getStats to imitate the qmux/WebSocket fallback.
 	(pair.client as unknown as { getStats?: unknown }).getStats = undefined;
 	const url = new URL("https://example.com/");
@@ -104,7 +104,7 @@ test("probe starts empty and stays empty without PROBE support", async () => {
 
 test("Reload reports stats and probe only while connected", async () => {
 	const original = globalThis.WebTransport;
-	const pair = createMockTransportPair(Lite.ALPN_06_WIP, { stats: { bytesSent: 99 } });
+	const pair = createMockTransportPair(Lite.ALPN_06, { stats: { bytesSent: 99 } });
 	// `new` on a function returning an object yields that object, handing connect() the mock.
 	const stub = function StubWebTransport() {
 		return pair.client;

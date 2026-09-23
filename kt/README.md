@@ -14,12 +14,12 @@ Most apps want `dev.moq:moq`. Reach for `dev.moq:moq-ffi` directly only if you w
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("dev.moq:moq:0.4.5")
+    implementation("dev.moq:moq:0.5.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
 }
 ```
 
-The wrapper's POM declares `dev.moq:moq-ffi:[0.3,0.4)`, so Gradle resolves the latest `0.3.x` bindings automatically. Pin `dev.moq:moq-ffi` yourself if you need a reproducible bindings version.
+The wrapper's POM declares `dev.moq:moq-ffi:[0.4,0.5)`, so Gradle resolves the latest `0.4.x` bindings automatically. Pin `dev.moq:moq-ffi` yourself if you need a reproducible bindings version.
 
 ## Quick start
 

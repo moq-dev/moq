@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/moq-dev/moq/compare/libmoq-v0.5.16...libmoq-v0.6.0) - 2026-09-23
+
+### Added
+
+- *(video)* [**breaking**] type the group configuration and make cut fallible ([#3876](https://github.com/moq-dev/moq/pull/3876))
+- preserve video capture timing ([#3849](https://github.com/moq-dev/moq/pull/3849))
+- *(ffi)* [**breaking**] scope announcement streams with patterns ([#3856](https://github.com/moq-dev/moq/pull/3856))
+- *(moq-net)* add moq-transport draft-22 (moqt-22) ([#3858](https://github.com/moq-dev/moq/pull/3858))
+- *(net)* [**breaking**] simplify origin scoping ([#3804](https://github.com/moq-dev/moq/pull/3804))
+- *(libmoq)* [**breaking**] finalize release API ([#3819](https://github.com/moq-dev/moq/pull/3819))
+- *(hang)* [**breaking**] unify catalog APIs ([#3813](https://github.com/moq-dev/moq/pull/3813))
+- *(net)* [**breaking**] slim the moq-net public surface ([#3779](https://github.com/moq-dev/moq/pull/3779))
+- *(net)* [**breaking**] announce prefixes on every wire; consumers read paths ([#3770](https://github.com/moq-dev/moq/pull/3770))
+- *(libmoq)* track demand and dynamic track requests ([#3748](https://github.com/moq-dev/moq/pull/3748))
+- *(tokio)* [**breaking**] settle moq-tokio names under their modules ([#3745](https://github.com/moq-dev/moq/pull/3745))
+- *(net)* [**breaking**] fold the session placeholders into PROTOCOL_VIOLATION ([#3755](https://github.com/moq-dev/moq/pull/3755))
+- [**breaking**] name every rate estimate estimated_*_rate
+- *(net)* [**breaking**] rank anonymous hop chains last ([#3724](https://github.com/moq-dev/moq/pull/3724))
+- [**breaking**] borrow publisher finish so abort can still run ([#3714](https://github.com/moq-dev/moq/pull/3714))
+- *(net)* [**breaking**] one name per announce, request, and origin config concept ([#3725](https://github.com/moq-dev/moq/pull/3725))
+- *(json)* [**breaking**] Config means the same thing in json and binary ([#3718](https://github.com/moq-dev/moq/pull/3718))
+- *(ffi)* [**breaking**] use microseconds and matching origin verbs
+- *(tokio)* [**breaking**] rename ConnectionStatsReader to connection::Monitor ([#3705](https://github.com/moq-dev/moq/pull/3705))
+- *(ffi)* [**breaking**] carry the route cold cost through MoqRoute ([#3669](https://github.com/moq-dev/moq/pull/3669))
+- *(libmoq)* [**breaking**] select decoded pixel format and size from C ([#3674](https://github.com/moq-dev/moq/pull/3674))
+- *(net)* [**breaking**] make reader group and frame limits explicit ([#3647](https://github.com/moq-dev/moq/pull/3647))
+- *(net)* [**breaking**] advertise wildcard routes with Pattern events ([#3649](https://github.com/moq-dev/moq/pull/3649))
+- *(e2ee)* add the moq-e2ee-01 profile and shared vectors ([#3629](https://github.com/moq-dev/moq/pull/3629))
+- *(ffi)* [**breaking**] preserve session and stream protocol error details ([#3615](https://github.com/moq-dev/moq/pull/3615))
+- *(ffi)* [**breaking**] align create_broadcast, announce, and dynamic across bindings ([#3577](https://github.com/moq-dev/moq/pull/3577))
+- *(moq-net)* [**breaking**] abort an oversized group instead of shedding its head ([#3585](https://github.com/moq-dev/moq/pull/3585))
+- *(ffi)* [**breaking**] follow the connection's bandwidth share ([#3622](https://github.com/moq-dev/moq/pull/3622))
+- *(hang)* [**breaking**] empty frames close the previous frame's duration ([#3575](https://github.com/moq-dev/moq/pull/3575))
+
+### Fixed
+
+- *(net)* announce local broadcasts on origin cursors ([#3928](https://github.com/moq-dev/moq/pull/3928))
+- *(libmoq)* build on the noq backend like the rest of dev ([#3758](https://github.com/moq-dev/moq/pull/3758))
+- *(json)* [**breaking**] fallible modify(), abort the track when a dropped edit fails ([#3644](https://github.com/moq-dev/moq/pull/3644))
+- *(moq-mux)* [**breaking**] make an fMP4 export fragment a group, on every track ([#3573](https://github.com/moq-dev/moq/pull/3573))
+- *(moq-mux)* catalog jitter is the publisher's maximum flush span ([#3513](https://github.com/moq-dev/moq/pull/3513))
+
+### Other
+
+- *(net)* routed_broadcast waits on the watch alone ([#3901](https://github.com/moq-dev/moq/pull/3901))
+- *(video)* [**breaking**] separate decoder output from subscription policy ([#3875](https://github.com/moq-dev/moq/pull/3875))
+- *(audio)* [**breaking**] separate configuration contracts ([#3843](https://github.com/moq-dev/moq/pull/3843))
+- *(audio)* [**breaking**] expose demand without track authority ([#3842](https://github.com/moq-dev/moq/pull/3842))
+- Unify mux track and rendition ownership ([#3857](https://github.com/moq-dev/moq/pull/3857))
+- Make media backends optional ([#3839](https://github.com/moq-dev/moq/pull/3839))
+- *(video)* [**breaking**] type frame conversions ([#3846](https://github.com/moq-dev/moq/pull/3846))
+- *(mux)* [**breaking**] share media rate policy ([#3840](https://github.com/moq-dev/moq/pull/3840))
+- *(net)* [**breaking**] name path roles without new types ([#3826](https://github.com/moq-dev/moq/pull/3826))
+- *(quic)* [**breaking**] keep only the noq backend ([#3811](https://github.com/moq-dev/moq/pull/3811))
+- *(net)* expose route cost fields ([#3802](https://github.com/moq-dev/moq/pull/3802))
+- *(tokio)* make API shapes type-safe ([#3816](https://github.com/moq-dev/moq/pull/3816))
+- Merge origin/main into dev
+- Merge remote-tracking branch 'origin/dev' into merge-main-into-dev-20260914
+- *(libmoq)* run the C decoder fixture outside cargo test ([#3691](https://github.com/moq-dev/moq/pull/3691))
+- merge main into dev
+- merge main into dev
+
 ### Added
 
 - `moq_origin_create_broadcast`, `moq_publish_announce` / `_unannounce`, and
