@@ -24,7 +24,7 @@ and Google comparison do not gate these bug fixes.
 
 - [Preserve QUIC packet identity in BBR](/quest/m1/quic/bbr-packet-identity.md)
 - [Finish each BBR ACK sample before using it](/quest/m1/quic/bbr-ack-sampling.md)
-- [Mark application starvation before the next BBR send](/quest/m1/quic/bbr-app-limited.md)
+- [moq-dev/noq#5](https://github.com/moq-dev/noq/pull/5) merged: the controller hears of application starvation before the next send
 - [Finish BBR bandwidth-probe feedback once](/quest/m1/quic/bbr-probe-feedback.md)
 - [Recalibrate BBR startup pacing from measured RTT](/quest/m1/quic/bbr-startup-pacing.md)
 - [Protect bandwidth samples during BBR ProbeRTT](/quest/m1/quic/bbr-probe-rtt.md)
