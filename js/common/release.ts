@@ -75,7 +75,13 @@ if (publishJsr) {
 	// leave the tree dirty, so allow it. OIDC trusted publishing kicks in
 	// automatically under GitHub Actions; locally it falls back to an interactive
 	// browser login.
-	const args = ["publish", "--unstable-bare-node-builtins", "--unstable-sloppy-imports", "--no-check", "--allow-dirty"];
+	const args = [
+		"publish",
+		"--unstable-bare-node-builtins",
+		"--unstable-sloppy-imports",
+		"--no-check",
+		"--allow-dirty",
+	];
 	// Ignore package.json so deps resolve through jsr.json's npm: import map, as
 	// a JSR consumer would. Otherwise Deno follows the workspace symlinks into a
 	// sibling's src/, whose Vite-only imports (`?inline`) only its npm build
