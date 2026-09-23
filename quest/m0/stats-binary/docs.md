@@ -3,18 +3,14 @@
 ## Goal
 
 A `doc/concept` page describes every stats broadcast and track: the path
-layout, tiers, the three track kinds, both encodings (`.json.z` merge-patch
-and `.fb.z` FlatBuffers), the counter semantics (cumulative, a decrease
-starts a fresh segment), and how a consumer in another language generates a
-reader from the `.fbs`. The relay config page and the moq-stats crate docs
-link to it rather than repeating it.
+layout, tiers, the three track kinds, both encodings (plain `.json` and the
+`.json.z` merge-patch deltas in a group-scoped DEFLATE window), and the
+counter semantics (cumulative, a decrease starts a fresh segment), in enough
+detail for a consumer in another language to read them. The relay config page
+and the moq-stats crate docs link to it rather than repeating it.
 
 ## Plan
 
 Start from the moq-stats crate docs and the `[stats]` section of
 `doc/bin/relay/config.md`, and move the wire description there. Add the page
 to the VitePress sidebar.
-
-## Required
-
-- [FlatBuffers flavor](/quest/m0/stats-binary/flatbuffers.md) - the encoding the page documents
