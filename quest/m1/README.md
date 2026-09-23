@@ -32,6 +32,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Flaky timing tests](/quest/m1/flaky-timing-tests.md) - three real-clock tests become deterministic instead of failing under load
 - [CLI inspection](/quest/m1/cli-inspect/README.md) - `moq ls` lists what is live and `moq fetch` reads a group over MoQ, and a guide shows how to inspect a relay
 - [JS caught up](/quest/m1/js-announce-caught-up.md) - @moq/net's announce consumer says when the initial set has landed, like Rust
+- [IETF announce count](/quest/m1/ietf-announce-count.md) - an opt-in moq-transport extension carries the replay count, so IETF announce consumers go live without a timer
 
 - [Jitter clock](/quest/m1/jitter-flush-clock.md) - moq-mux: catalog jitter measures how far behind the media clock an encoder flushes, fed by encoders only, and never decreases
 - [Capture denial](/quest/m1/browser-permission-qa.md) - moq-publish surfaces a refused camera or microphone instead of retrying forever, and recovers on grant

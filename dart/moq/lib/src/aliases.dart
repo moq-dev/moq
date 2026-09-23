@@ -70,6 +70,9 @@ typedef TrackRequest = MoqTrackRequest;
 /// A stream of uncached group requests for one track, for serving fetches on demand.
 typedef TrackDynamic = MoqTrackDynamic;
 
+/// A watch-only handle to whether a published track has subscribers; holding it keeps nothing open.
+typedef TrackDemand = MoqTrackDemand;
+
 /// The read side of a raw track: yields groups in sequence order, skipping ahead if it falls behind.
 typedef TrackConsumer = MoqTrackConsumer;
 
