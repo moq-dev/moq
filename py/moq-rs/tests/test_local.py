@@ -1,6 +1,7 @@
 """Local pub/sub tests: no network required."""
 
 import asyncio
+import json
 import struct
 from typing import cast
 
@@ -286,6 +287,27 @@ async def test_catalog_update_on_new_track():
         assert len(catalog2.audio) == 2
 
         break
+
+
+async def test_catalog_handle():
+    broadcast = moq.BroadcastProducer()
+    catalog = broadcast.catalog()
+    catalog.set_section("app", {"a": 1})
+    catalog.set_video_properties(moq.VideoProperties(rotation=90.0))
+
+    consumer = await broadcast.consume().subscribe_catalog()
+    snapshot = await asyncio.wait_for(anext(consumer), timeout=5.0)
+    assert json.loads(snapshot.sections["app"]) == {"a": 1}
+    assert snapshot.rotation == 90.0
+
+    catalog.remove_section("app")
+    snapshot = await asyncio.wait_for(anext(consumer), timeout=5.0)
+    assert "app" not in snapshot.sections
+
+    # Weak: the handle's writes fail once the broadcast is finished.
+    broadcast.finish()
+    with pytest.raises(moq.Error.Closed):
+        catalog.remove_section("app")
 
 
 def test_finish_closes_producer():

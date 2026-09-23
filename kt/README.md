@@ -29,7 +29,7 @@ import kotlinx.coroutines.flow.collect
 
 // connect() wires up an internal origin and returns a live connection.
 Moq.connect("https://relay.example.com").use { moq ->
-    moq.announcements(AnnounceConfig(prefix = "demos/", filter = "*/camera")).collect { announcement ->
+    moq.announced(AnnounceConfig(prefix = "demos/", filter = "*/camera")).updates().collect { announcement ->
         // Prefix stays origin-relative; captures reports what * matched.
         println("got broadcast ${announcement.prefix()}")
         println("captures ${announcement.captures()}")
@@ -48,7 +48,7 @@ The `dev.moq` package is intentionally thin: Kotlin has extension functions, so 
 
 - **`Moq.connect(...)`**: a connection facade (`Moq.kt`), so you never hand-wire a `MoqClient`.
 - **Typealiases** (`Aliases.kt`): re-export the `Moq*`-prefixed FFI types under clean `dev.moq` names (`OriginProducer`, `BroadcastConsumer`, `Catalog`, `Frame`, ...), so you import `dev.moq.*` only. A couple of sealed types (`Container`, `MoqException`) are not aliased because Kotlin can't resolve their subtypes through a typealias; use `uniffi.moq.*` for those.
-- **Flow extensions** (`Flows.kt`): `updates()`, `groups()`, `frames()`, `announcements()`, `catalog()` turn the pull-based consumers into coroutine `Flow`s with cancellation wired through. `frames()` covers the media, audio, and video consumers alike.
+- **Flow extensions** (`Flows.kt`): `updates()`, `groups()`, `frames()`, `catalog()` turn the pull-based consumers into coroutine `Flow`s with cancellation wired through. `frames()` covers the media, audio, and video consumers alike.
 - **Fetched media**: `fetchMediaGroup(...).frames()` streams the decoded frames of one retained group, then completes.
 - **Duration extensions** (`Durations.kt`): the FFI carries microseconds as integers, so `stats.rtt`, `backoff.initial`, `frame.timestamp`, and their siblings read back as a `kotlin.time.Duration`.
 - **`logLevel(...)`**: configures native Rust tracing without importing the raw bindings package.

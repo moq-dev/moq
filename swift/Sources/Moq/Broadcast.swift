@@ -163,7 +163,12 @@ public final class BroadcastProducer: Sendable {
         try ffi.unannounce()
     }
 
-    /// Replace the catalog properties shared by every video rendition.
+    /// A write handle to this broadcast's catalog.
+    public func catalog() throws -> CatalogProducer {
+        CatalogProducer(try ffi.catalog())
+    }
+
+    /// Replace the catalog properties shared by every video rendition. Prefer `catalog()`.
     public func setVideoProperties(_ properties: VideoProperties) throws {
         try ffi.setVideoProperties(properties: properties)
     }
@@ -297,7 +302,7 @@ public final class BroadcastProducer: Sendable {
     /// Each `update` supersedes the last; a late joiner only sees the newest value. `deltaRatio`
     /// controls how aggressively merge-patch deltas replace full snapshots (`0` disables deltas).
     /// Set `compression` to DEFLATE each group; the consumer must pass the same flag. Advertise
-    /// the track with `setCatalogSection` if consumers should discover it.
+    /// the track with `CatalogProducer.setSection` if consumers should discover it.
     public func publishJsonSnapshot<Value: Encodable>(
         name: String,
         of _: Value.Type,
@@ -323,12 +328,13 @@ public final class BroadcastProducer: Sendable {
     ///
     /// `json` is any JSON document as a string; it rides alongside `video`/`audio` and reaches
     /// subscribers via `Catalog.sections`. `name` must not be a reserved media section
-    /// (`video`/`audio`). The catalog is republished automatically.
+    /// (`video`/`audio`). The catalog is republished automatically. Prefer `catalog()`.
     public func setCatalogSection(name: String, json: String) throws {
         try ffi.setCatalogSection(name: name, json: json)
     }
 
     /// Remove an untyped application catalog section by name. A no-op if it was absent.
+    /// Prefer `catalog()`.
     public func removeCatalogSection(name: String) throws {
         try ffi.removeCatalogSection(name: name)
     }

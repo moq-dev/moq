@@ -6,9 +6,9 @@ Idiomatic Dart and Flutter bindings for Media over QUIC.
 import 'package:moq/moq.dart';
 
 final connection = await Moq.connect('https://relay.example.com');
-await for (final announcement in connection.announcements(
+await for (final announcement in connection.announced(
   options: const AnnounceOptions(prefix: 'live/', filter: '*/camera'),
-)) {
+).updates()) {
   // Prefix stays origin-relative; captures reports wildcard matches.
   print(announcement.prefix());
   print(announcement.captures());
@@ -33,7 +33,7 @@ await for (final request in server.requests()) {
 ```
 
 The package uses `Future` for asynchronous operations and `Stream` for
-announcements, and `connect` / `listen` take an options struct like Rust does.
+a cursor's updates (`announced().updates()`), and `connect` / `listen` take an options struct like Rust does.
 Types are spelled without the `Moq` prefix (`Session`, `BroadcastProducer`,
 `Backoff`), and microsecond fields read back as a `Duration` (`stats.rtt`,
 `frame.timestamp`). The lower-level generated API

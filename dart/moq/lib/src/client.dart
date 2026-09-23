@@ -13,6 +13,24 @@ final class AnnounceOptions {
   AnnounceConfig get _ffi => AnnounceConfig(prefix: prefix, filter: filter);
 }
 
+/// Streams an [AnnounceConsumer]'s updates.
+extension AnnounceConsumerUpdates on AnnounceConsumer {
+  /// The route announcements and retractions, ending when the cursor closes.
+  ///
+  /// Cancelling the subscription cancels the cursor.
+  Stream<AnnounceUpdate> updates() async* {
+    try {
+      while (true) {
+        final update = await next();
+        if (update == null) return;
+        yield update;
+      }
+    } finally {
+      cancel();
+    }
+  }
+}
+
 /// Everything [Moq.connect] can be told beyond the URL.
 final class ConnectOptions {
   /// Set false to skip certificate verification (local dev only).
@@ -52,7 +70,7 @@ final class ConnectOptions {
   final OriginProducer? publish;
 
   /// Origin to discover broadcasts through; auto-created when null.
-  final OriginProducer? subscribe;
+  final OriginProducer? consume;
 
   const ConnectOptions({
     this.tlsVerify = true,
@@ -66,7 +84,7 @@ final class ConnectOptions {
     this.reconnect,
     this.backoff,
     this.publish,
-    this.subscribe,
+    this.consume,
   });
 }
 
@@ -81,9 +99,9 @@ final class Moq {
 
   /// Connect to a relay at [url].
   ///
-  /// With neither [ConnectOptions.publish] nor [ConnectOptions.subscribe]
+  /// With neither [ConnectOptions.publish] nor [ConnectOptions.consume]
   /// given, both sides of the session share one origin, so a broadcast
-  /// announced here is discoverable through [announcements]. Wiring either
+  /// announced here is discoverable through [announced]. Wiring either
   /// side opts out and isolates the two directions.
   static Future<Moq> connect(
     String url, {
@@ -114,8 +132,8 @@ final class Moq {
         client.setBackoff(backoff: options.backoff!);
       }
       if (options.publish != null) client.setPublish(origin: options.publish);
-      if (options.subscribe != null) {
-        client.setConsume(origin: options.subscribe);
+      if (options.consume != null) {
+        client.setConsume(origin: options.consume);
       }
 
       final session = await client.connect(url: url);
@@ -133,24 +151,9 @@ final class Moq {
   BroadcastProducer createBroadcast(String path) =>
       session.publish().createBroadcast(path: path);
 
-  /// Stream routes matching [options]; update prefixes stay relative to the origin.
-  Stream<AnnounceUpdate> announcements({
-    AnnounceOptions options = const AnnounceOptions(),
-  }) async* {
-    final announced = session.consume().announced(config: options._ffi);
-    try {
-      while (true) {
-        final announcement = await announced.next();
-        if (announcement == null) return;
-        yield announcement;
-      }
-    } finally {
-      announced.cancel();
-      announced.dispose();
-    }
-  }
-
-  /// Return the raw cursor for [options].
+  /// A cursor over the routes matching [options]; stream it with `updates()`.
+  ///
+  /// Update prefixes stay relative to the origin.
   AnnounceConsumer announced({
     AnnounceOptions options = const AnnounceOptions(),
   }) => session.consume().announced(config: options._ffi);

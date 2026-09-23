@@ -73,7 +73,7 @@ pub struct MoqCatalog {
 	/// Untyped application catalog sections, keyed by section name, each value a JSON string.
 	/// These are the top-level catalog keys beyond `video`/`audio`, carried through verbatim
 	/// (parse the JSON yourself). Set them on the publish side with
-	/// [`set_catalog_section`](crate::producer::MoqBroadcastProducer::set_catalog_section).
+	/// [`MoqCatalogProducer::set_section`](crate::producer::MoqCatalogProducer::set_section).
 	pub sections: HashMap<String, String>,
 }
 

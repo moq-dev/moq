@@ -261,9 +261,22 @@ impl MoqBroadcastProducer {
 		})
 	}
 
+	/// A write handle to this broadcast's catalog.
+	///
+	/// Weak: holding it does not keep the broadcast open, and its writes fail with `Closed` once
+	/// the broadcast is finished or dropped.
+	pub fn catalog(self: Arc<Self>) -> Result<Arc<MoqCatalogProducer>, MoqError> {
+		self.with_state(|_| Ok(()))?;
+		Ok(Arc::new(MoqCatalogProducer {
+			broadcast: Arc::downgrade(&self),
+		}))
+	}
+
 	/// Replace the catalog properties shared by every video rendition.
 	///
 	/// Rotation is clockwise and normalized to the nearest quarter turn. An absent field is removed from the next catalog update.
+	///
+	/// Prefer [`catalog`](Self::catalog), which groups the catalog writes on one handle.
 	pub fn set_video_properties(&self, properties: MoqVideoProperties) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut value = hang::catalog::VideoProperties::default();
@@ -289,6 +302,8 @@ impl MoqBroadcastProducer {
 	/// error if `name` is a HANG root (`video`, `audio`, `text`, `archive`, `clock`, `json`,
 	/// `binary`, or retired `timeline`) or an MSF root (`version`, `generatedAt`, `isComplete`,
 	/// `tracks`, or `initDataList`). The section is republished on the catalog track immediately.
+	///
+	/// Prefer [`catalog`](Self::catalog), which groups the catalog writes on one handle.
 	pub fn set_catalog_section(&self, name: String, json: String) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let value: serde_json::Value = serde_json::from_str(&json)?;
@@ -303,6 +318,8 @@ impl MoqBroadcastProducer {
 	/// Remove a top-level application catalog section by name.
 	///
 	/// Republishes the catalog if the section existed; a no-op otherwise.
+	///
+	/// Prefer [`catalog`](Self::catalog), which groups the catalog writes on one handle.
 	pub fn remove_catalog_section(&self, name: String) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
@@ -481,6 +498,47 @@ impl MoqBroadcastProducer {
 		state.broadcast.finish();
 		state.catalog.finish()?;
 		Ok(())
+	}
+}
+
+// ---- Catalog Producer ----
+
+/// The write side of a broadcast's catalog: the video properties and application sections that
+/// ride alongside the renditions. Each write republishes the catalog.
+#[derive(uniffi::Object)]
+pub struct MoqCatalogProducer {
+	broadcast: std::sync::Weak<MoqBroadcastProducer>,
+}
+
+impl MoqCatalogProducer {
+	fn broadcast(&self) -> Result<Arc<MoqBroadcastProducer>, MoqError> {
+		self.broadcast.upgrade().ok_or(MoqError::Closed)
+	}
+}
+
+#[uniffi::export]
+impl MoqCatalogProducer {
+	/// Replace the catalog properties shared by every video rendition.
+	///
+	/// Rotation is clockwise and normalized to the nearest quarter turn. An absent field is removed from the next catalog update.
+	pub fn set_video_properties(&self, properties: MoqVideoProperties) -> Result<(), MoqError> {
+		self.broadcast()?.set_video_properties(properties)
+	}
+
+	/// Set (or replace) a top-level application section by name.
+	///
+	/// `json` is any JSON document (object, array, string, ...) serialized as a UTF-8 string.
+	/// Errors with [`MoqError::Json`] if `json` doesn't parse, or with the reserved-section
+	/// error if `name` is a HANG root (`video`, `audio`, `text`, `archive`, `clock`, `json`,
+	/// `binary`, or retired `timeline`) or an MSF root (`version`, `generatedAt`, `isComplete`,
+	/// `tracks`, or `initDataList`).
+	pub fn set_section(&self, name: String, json: String) -> Result<(), MoqError> {
+		self.broadcast()?.set_catalog_section(name, json)
+	}
+
+	/// Remove a top-level application section by name; a no-op if it is absent.
+	pub fn remove_section(&self, name: String) -> Result<(), MoqError> {
+		self.broadcast()?.remove_catalog_section(name)
 	}
 }
 

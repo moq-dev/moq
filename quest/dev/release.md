@@ -86,6 +86,6 @@ Public API: none beyond the required quests. Wire: none.
 
 ## Required
 
-- [Binding parity](/quest/main/binding-parity.md) - every wrapper reaches every moq-ffi method
+- [Binding idioms](/quest/dev/binding-idioms.md) - every wrapper spells moq-net's verbs through one handle per capability
 - [Binding docs](/quest/next/binding-docs.md) - the binding pages compile against the wrappers
 - The merged relay has soaked on moq.pro staging and the maintainer has signed it off

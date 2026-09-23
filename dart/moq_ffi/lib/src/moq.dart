@@ -8,7 +8,9 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
+
 import "package:ffi/ffi.dart";
+
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -5720,6 +5722,7 @@ abstract class MoqBroadcastProducerInterface {
     required MoqJsonStreamConfig config,
   });
   void announce({required MoqRoute route});
+  MoqCatalogProducer catalog();
   MoqBroadcastConsumer consume();
   MoqBroadcastDynamic dynamic_();
   void finish();
@@ -5825,6 +5828,17 @@ class MoqBroadcastProducer implements MoqBroadcastProducerInterface {
         status,
       );
     }, moqExceptionErrorHandler);
+  }
+
+  MoqCatalogProducer catalog() {
+    return rustCallWithLifter(
+      (status) => uniffi_moq_ffi_fn_method_moqbroadcastproducer_catalog(
+        uniffiClonePointer(),
+        status,
+      ),
+      FfiConverterMoqCatalogProducer.lift,
+      moqExceptionErrorHandler,
+    );
   }
 
   MoqBroadcastConsumer consume() {
@@ -6034,6 +6048,95 @@ class FfiConverterMoqBroadcastProducer {
   }
 
   static int write(MoqBroadcastProducer value, Uint8List buf) {
+    final handle = lower(value);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt64(0, handle.address);
+    return 8;
+  }
+}
+
+abstract class MoqCatalogProducerInterface {
+  void removeSection({required String name});
+  void setSection({required String name, required String json});
+  void setVideoProperties({required MoqVideoProperties properties});
+}
+
+final _MoqCatalogProducerFinalizer = Finalizer<Pointer<Void>>((ptr) {
+  rustCall((status) => uniffi_moq_ffi_fn_free_moqcatalogproducer(ptr, status));
+});
+
+class MoqCatalogProducer implements MoqCatalogProducerInterface {
+  late final Pointer<Void> _ptr;
+  MoqCatalogProducer._(this._ptr) {
+    _MoqCatalogProducerFinalizer.attach(this, _ptr, detach: this);
+  }
+  factory MoqCatalogProducer.lift(Pointer<Void> ptr) {
+    return MoqCatalogProducer._(ptr);
+  }
+  Pointer<Void> uniffiClonePointer() {
+    return rustCall(
+      (status) => uniffi_moq_ffi_fn_clone_moqcatalogproducer(_ptr, status),
+    );
+  }
+
+  void dispose() {
+    _MoqCatalogProducerFinalizer.detach(this);
+    rustCall(
+      (status) => uniffi_moq_ffi_fn_free_moqcatalogproducer(_ptr, status),
+    );
+  }
+
+  void removeSection({required String name}) {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqcatalogproducer_remove_section(
+        uniffiClonePointer(),
+        FfiConverterString.lower(name),
+        status,
+      );
+    }, moqExceptionErrorHandler);
+  }
+
+  void setSection({required String name, required String json}) {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqcatalogproducer_set_section(
+        uniffiClonePointer(),
+        FfiConverterString.lower(name),
+        FfiConverterString.lower(json),
+        status,
+      );
+    }, moqExceptionErrorHandler);
+  }
+
+  void setVideoProperties({required MoqVideoProperties properties}) {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqcatalogproducer_set_video_properties(
+        uniffiClonePointer(),
+        FfiConverterMoqVideoProperties.lower(properties),
+        status,
+      );
+    }, moqExceptionErrorHandler);
+  }
+}
+
+class FfiConverterMoqCatalogProducer {
+  static MoqCatalogProducer lift(Pointer<Void> ptr) {
+    return MoqCatalogProducer.lift(ptr);
+  }
+
+  static Pointer<Void> lower(MoqCatalogProducer value) {
+    return value.uniffiClonePointer();
+  }
+
+  static int allocationSize(MoqCatalogProducer value) {
+    return 8;
+  }
+
+  static LiftRetVal<MoqCatalogProducer> read(Uint8List buf) {
+    final handle = buf.buffer.asByteData(buf.offsetInBytes).getInt64(0);
+    final pointer = Pointer<Void>.fromAddress(handle);
+    return LiftRetVal(MoqCatalogProducer.lift(pointer), 8);
+  }
+
+  static int write(MoqCatalogProducer value, Uint8List buf) {
     final handle = lower(value);
     buf.buffer.asByteData(buf.offsetInBytes).setInt64(0, handle.address);
     return 8;
@@ -9956,6 +10059,14 @@ external void uniffi_moq_ffi_fn_method_moqbroadcastproducer_announce(
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
+external Pointer<Void> uniffi_moq_ffi_fn_method_moqbroadcastproducer_catalog(
+  Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
 external Pointer<Void> uniffi_moq_ffi_fn_method_moqbroadcastproducer_consume(
   Pointer<Void> ptr,
   Pointer<RustCallStatus> uniffiStatus,
@@ -10110,6 +10221,50 @@ uniffi_moq_ffi_fn_method_moqbroadcastproducer_set_video_properties(
 )
 external void uniffi_moq_ffi_fn_method_moqbroadcastproducer_unannounce(
   Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external Pointer<Void> uniffi_moq_ffi_fn_clone_moqcatalogproducer(
+  Pointer<Void> handle,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_free_moqcatalogproducer(
+  Pointer<Void> handle,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Void Function(Pointer<Void>, RustBuffer, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_method_moqcatalogproducer_remove_section(
+  Pointer<Void> ptr,
+  RustBuffer name,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<
+  Void Function(Pointer<Void>, RustBuffer, RustBuffer, Pointer<RustCallStatus>)
+>(assetId: _uniffiAssetId)
+external void uniffi_moq_ffi_fn_method_moqcatalogproducer_set_section(
+  Pointer<Void> ptr,
+  RustBuffer name,
+  RustBuffer json,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Void Function(Pointer<Void>, RustBuffer, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_method_moqcatalogproducer_set_video_properties(
+  Pointer<Void> ptr,
+  RustBuffer properties,
   Pointer<RustCallStatus> uniffiStatus,
 );
 
@@ -11545,6 +11700,9 @@ uniffi_moq_ffi_checksum_method_moqbroadcastproducer_publish_json_stream();
 external int uniffi_moq_ffi_checksum_method_moqbroadcastproducer_announce();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqbroadcastproducer_catalog();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqbroadcastproducer_consume();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -11599,6 +11757,16 @@ uniffi_moq_ffi_checksum_method_moqbroadcastproducer_set_video_properties();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqbroadcastproducer_unannounce();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqcatalogproducer_remove_section();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqcatalogproducer_set_section();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int
+uniffi_moq_ffi_checksum_method_moqcatalogproducer_set_video_properties();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqcontainerproducer_cut();
@@ -12074,7 +12242,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_publish_json_snapshot() !=
-      51036) {
+      25458) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_publish_json_stream() !=
@@ -12082,6 +12250,9 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_announce() != 14026) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_catalog() != 58889) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_consume() != 27634) {
@@ -12126,19 +12297,31 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_remove_catalog_section() !=
-      8608) {
+      9784) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_set_catalog_section() !=
-      28423) {
+      5966) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_set_video_properties() !=
-      9178) {
+      33126) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastproducer_unannounce() !=
       39609) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqcatalogproducer_remove_section() !=
+      9437) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqcatalogproducer_set_section() !=
+      14066) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqcatalogproducer_set_video_properties() !=
+      484) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqcontainerproducer_cut() != 17534) {

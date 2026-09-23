@@ -85,7 +85,7 @@ raises the peer's inbound stream cap.
 Everything in the [shared feature list](/lib/#what-every-binding-can-do) is
 here: `moq.Server` with per-request accept/reject, `fetch_group` and
 `fetch_media_group`, `dynamic()` handlers for on-demand tracks and
-`dynamic(prefix)` for broadcasts, `append_datagram`/`recv_datagram`, `set_catalog_section`,
+`dynamic(prefix)` for broadcasts, `append_datagram`/`recv_datagram`, `catalog()` for sections and video properties,
 `route_updates()`, and `used()`/`unused()` so capture can idle when nobody is
 subscribed. `request.set_publish`/`set_consume` raise if the request is already
 answered, cancelled, or currently accepting. `session.bandwidth()` divides the connection's send estimate;

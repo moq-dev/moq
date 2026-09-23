@@ -154,6 +154,25 @@ final class SmokeTests: XCTestCase {
         try broadcast.finish()
     }
 
+    func testCatalogHandle() async throws {
+        let broadcast = try BroadcastProducer()
+        let catalog = try broadcast.catalog()
+        try catalog.setSection(name: "app", json: #"{"a":1}"#)
+        try catalog.setVideoProperties(VideoProperties(rotation: 90))
+
+        let consumer = try await broadcast.consume().subscribeCatalog()
+        let snapshot = try await consumer.next()
+        XCTAssertEqual(snapshot?.sections["app"], #"{"a":1}"#)
+        XCTAssertEqual(snapshot?.rotation, 90)
+
+        try catalog.removeSection(name: "app")
+        let removed = try await consumer.next()
+        XCTAssertNil(removed?.sections["app"])
+
+        try broadcast.finish()
+        XCTAssertThrowsError(try catalog.removeSection(name: "app"))
+    }
+
     func testBroadcastConsumerFetchesCachedGroup() async throws {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "events")

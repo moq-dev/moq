@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.serializer
 import uniffi.moq.MoqBroadcastProducer
+import uniffi.moq.MoqCatalogProducer
 import uniffi.moq.MoqJsonSnapshotConsumer
 import uniffi.moq.MoqJsonSnapshotProducer
 import uniffi.moq.MoqJsonStreamConsumer
@@ -58,8 +59,18 @@ inline fun <reified T> MoqJsonStreamConsumer.valuesAs(): Flow<T> =
  * alongside `video`/`audio`, reaching subscribers via `Catalog.sections`. [name]
  * must not be a reserved media section ("video"/"audio"). The catalog is
  * republished automatically. Pass an already-encoded `String` to serialize with
- * another library.
+ * another library. Prefer [MoqCatalogProducer.setSection] on `catalog()`.
  */
 inline fun <reified T> MoqBroadcastProducer.setCatalogSection(name: String, value: T) {
     setCatalogSection(name, MoqJson.encodeToString(serializer<T>(), value))
+}
+
+/**
+ * Set or replace an application section in the catalog, encoded with [MoqJson].
+ *
+ * Subscribers read it from `Catalog.sections`. Pass an already-encoded `String`
+ * to serialize with another library.
+ */
+inline fun <reified T> MoqCatalogProducer.setSection(name: String, value: T) {
+    setSection(name, MoqJson.encodeToString(serializer<T>(), value))
 }

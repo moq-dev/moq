@@ -15,4 +15,5 @@ additive or targets a `0.0.x` crate lives under
 ## Quests
 
 - [A/V clock](/quest/dev/plan-av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
+- [Binding idioms](/quest/dev/binding-idioms.md) - the wrappers drop the flat methods and spellings the handles superseded, one name per capability
 - [Release](/quest/dev/release.md) - the release moq.pro adopts: binding parity, an upgrade page, and a staging soak gate it rather than the merge

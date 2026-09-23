@@ -82,6 +82,8 @@ typealias VideoConsumer = uniffi.moq.MoqVideoConsumer
 typealias VideoProducer = uniffi.moq.MoqVideoProducer
 /** The read side of a broadcast's catalog: yields updates as the set of tracks changes. */
 typealias CatalogConsumer = uniffi.moq.MoqCatalogConsumer
+/** The write side of a broadcast's catalog; weak, so holding it keeps nothing open. */
+typealias CatalogProducer = uniffi.moq.MoqCatalogProducer
 /** Publishes lossy latest-value JSON snapshots. */
 typealias JsonSnapshotProducer = uniffi.moq.MoqJsonSnapshotProducer
 /** Consumes reconstructed latest-value JSON snapshots. */

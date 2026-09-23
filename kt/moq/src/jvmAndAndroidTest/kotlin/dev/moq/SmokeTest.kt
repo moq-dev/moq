@@ -119,6 +119,26 @@ class SmokeTest {
     }
 
     @Test
+    fun `catalog handle writes until the broadcast finishes`() = runTest {
+        val broadcast = BroadcastProducer()
+        val catalog: CatalogProducer = broadcast.catalog()
+        catalog.setSection("app", Status("live"))
+        catalog.setVideoProperties(VideoProperties(rotation = 90.0))
+
+        val consumer = broadcast.consume().subscribeCatalog()
+        val snapshot = assertNotNull(consumer.next())
+        assertEquals(Status("live"), MoqJson.decodeFromString(Status.serializer(), snapshot.sections.getValue("app")))
+        assertEquals(90.0, snapshot.rotation)
+
+        catalog.removeSection("app")
+        assertNull(assertNotNull(consumer.next()).sections["app"])
+
+        broadcast.finish()
+        assertFailsWith<MoqException.Closed> { catalog.removeSection("app") }
+        consumer.cancel()
+    }
+
+    @Test
     fun `broadcast consumer fetches cached group`() = runTest {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("events", null)
@@ -320,7 +340,7 @@ class SmokeTest {
             val announced = origin.consume().announced(AnnounceConfig(prefix = "room", filter = "*/chat"))
             origin.createBroadcast("room/alice/chat").use { broadcast ->
                 broadcast.announce(Route())
-                val update = announced.next()!!
+                val update = announced.updates().first()
                 assertEquals("room/alice/chat", update.prefix())
                 assertEquals(listOf("alice"), update.captures())
             }

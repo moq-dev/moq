@@ -7,7 +7,7 @@ import kotlinx.coroutines.flow.Flow
  *
  * Build one with [Moq.connect]. The underlying [session] always exposes a
  * publisher and a subscriber (wired from the origins you pass to [connect], or
- * auto-created), so you can [createBroadcast] and iterate [announcements]
+ * auto-created), so you can [createBroadcast] and iterate [announced]
  * without touching the raw [Client] handle.
  *
  * [Moq] is [AutoCloseable]; `use { ... }` (or [close]) gracefully shuts down
@@ -28,12 +28,12 @@ class Moq internal constructor(
     /**
      * Discover routes matching [config] as a [Flow]. Each update stays relative
      * to the origin. The subscription is acquired on
-     * collection and cancelled when collection ends. Use [announced] for the raw handle.
+     * collection and cancelled when collection ends. Prefer `announced(config).updates()`.
      */
     fun announcements(config: AnnounceConfig = AnnounceConfig()): Flow<AnnounceUpdate> =
         session.consume().announcements(config)
 
-    /** Raw announcement handle for [config]; update prefixes stay relative to the origin. */
+    /** Announcement cursor for [config]; stream it with `updates()`. Update prefixes stay relative to the origin. */
     fun announced(config: AnnounceConfig = AnnounceConfig()): AnnounceConsumer =
         session.consume().announced(config)
 
@@ -100,7 +100,7 @@ class Moq internal constructor(
          * @param subscribe origin to discover broadcasts through; auto-created when null.
          *
          * With neither [publish] nor [subscribe] given, both sides share one origin, so a
-         * broadcast announced on this connection is discoverable via its own [announcements]
+         * broadcast announced on this connection is discoverable via its own [announced]
          * (loopback). Wiring either side opts out and isolates the two directions.
          */
         suspend fun connect(

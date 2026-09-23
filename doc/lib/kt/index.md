@@ -25,7 +25,7 @@ import dev.moq.*
 
 // Subscribe. The Flow is live, so run it in its own coroutine.
 Moq.connect("https://relay.example.com", tlsRoots = listOf("ca.pem")).use { moq ->
-    moq.announcements(AnnounceConfig(prefix = "live/", filter = "*/camera")).collect { announcement ->
+    moq.announced(AnnounceConfig(prefix = "live/", filter = "*/camera")).updates().collect { announcement ->
         // Updates stay origin-relative; captures reports what each wildcard matched.
         println(announcement.captures())
         val broadcast = moq.requestBroadcast(announcement.prefix())
@@ -57,7 +57,7 @@ The three advertising operations: `moq.createBroadcast(path)` (or
 advertisement; `origin.dynamic(prefix, route)` claims `prefix` and every
 path beneath it (`""` for everything). Hold the returned `OriginDynamic`
 while the claim should stay advertised, and reject the requests you will not
-serve. A route is a capability, not an inventory. `announcements(config)` takes
+serve. A route is a capability, not an inventory. `announced(config)` takes
 a literal prefix plus an optional relative pattern; `announcement.prefix()`
 stays origin-relative and `captures()` reports the wildcard matches.
 
@@ -75,7 +75,7 @@ JSON tracks take `@Serializable` types
 (`publishJsonSnapshot`, `publishJsonStream`, `valuesAs<T>()`), and the rest of
 the [shared feature list](/lib/#what-every-binding-can-do) maps one to one:
 `fetchGroup`/`fetchMediaGroup`, `dynamic()` for tracks and `dynamic(prefix)` for broadcasts, `appendDatagram`/`datagrams()`,
-`setCatalogSection`, `used()`/`unused()`. `session.bandwidth()` divides the
+`catalog()` for sections and video properties, `used()`/`unused()`. `session.bandwidth()` divides the
 connection's send estimate; pass it to `encodeVideo` / `encodeAudio` or
 `reserve` a share for an app-owned track. `MoqException.isAuth` and
 `isShutdown` classify errors. Microsecond fields read back as a

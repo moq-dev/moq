@@ -2207,6 +2207,50 @@ async fn catalog_update_on_new_track() {
 	broadcast.finish().unwrap();
 }
 
+#[tokio::test]
+async fn catalog_handle_writes_until_the_broadcast_ends() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let catalog = broadcast.clone().catalog().unwrap();
+	catalog
+		.set_section("app".to_string(), r#"{"a":1}"#.to_string())
+		.unwrap();
+	catalog
+		.set_video_properties(crate::media::MoqVideoProperties {
+			rotation: Some(90.0),
+			..Default::default()
+		})
+		.unwrap();
+
+	let consumer = broadcast.consume().unwrap().subscribe_catalog().await.unwrap();
+	let snapshot = tokio::time::timeout(TIMEOUT, consumer.next())
+		.await
+		.unwrap()
+		.unwrap()
+		.unwrap();
+	assert_eq!(snapshot.sections["app"], r#"{"a":1}"#);
+	assert_eq!(snapshot.rotation, Some(90.0));
+
+	catalog.remove_section("app".to_string()).unwrap();
+	let snapshot = tokio::time::timeout(TIMEOUT, consumer.next())
+		.await
+		.unwrap()
+		.unwrap()
+		.unwrap();
+	assert!(!snapshot.sections.contains_key("app"));
+
+	// The handle is weak: it neither outlives a finish nor keeps a dropped broadcast open.
+	broadcast.finish().unwrap();
+	let err = catalog.remove_section("app".to_string()).unwrap_err();
+	assert!(matches!(err, MoqError::Closed), "expected Closed, got {err}");
+	assert!(matches!(broadcast.clone().catalog(), Err(MoqError::Closed)));
+
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let catalog = broadcast.clone().catalog().unwrap();
+	drop(broadcast);
+	let err = catalog.set_section("app".to_string(), "1".to_string()).unwrap_err();
+	assert!(matches!(err, MoqError::Closed), "expected Closed, got {err}");
+}
+
 #[test]
 fn finish_closes_producer() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();

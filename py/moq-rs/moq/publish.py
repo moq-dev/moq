@@ -10,6 +10,7 @@ from moq_ffi import (
     MoqAudioProducer,
     MoqBroadcastDynamic,
     MoqBroadcastProducer,
+    MoqCatalogProducer,
     MoqContainerInit,
     MoqContainerProducer,
     MoqContainerStreamProducer,
@@ -558,6 +559,34 @@ class BroadcastDynamic:
         self._inner.cancel()
 
 
+class CatalogProducer:
+    """The write side of a broadcast's catalog, returned by :meth:`BroadcastProducer.catalog`.
+
+    Each write republishes the catalog. Weak: holding it does not keep the
+    broadcast open, and its writes raise ``moq.Error.Closed`` once the broadcast
+    is finished or dropped.
+    """
+
+    def __init__(self, inner: MoqCatalogProducer) -> None:
+        self._inner = inner
+
+    def set_video_properties(self, properties: VideoProperties) -> None:
+        """Replace the catalog properties shared by every video rendition."""
+        self._inner.set_video_properties(properties)
+
+    def set_section(self, name: str, value: Any) -> None:
+        """Set or replace an application section by name.
+
+        ``value`` is any JSON-serializable object; subscribers read it from
+        ``Catalog.sections``. ``name`` must not be a reserved media section.
+        """
+        self._inner.set_section(name, json.dumps(value))
+
+    def remove_section(self, name: str) -> None:
+        """Remove an application section by name; a no-op if it is absent."""
+        self._inner.remove_section(name)
+
+
 class BroadcastProducer:
     """Wraps MoqBroadcastProducer with a cleaner interface.
 
@@ -592,8 +621,12 @@ class BroadcastProducer:
         """Retract this broadcast's exact-path advertisement, if any."""
         self._inner.unannounce()
 
+    def catalog(self) -> CatalogProducer:
+        """A write handle to this broadcast's catalog."""
+        return CatalogProducer(self._inner.catalog())
+
     def set_video_properties(self, properties: VideoProperties) -> None:
-        """Replace the catalog properties shared by every video rendition."""
+        """Replace the catalog properties shared by every video rendition. Prefer :meth:`catalog`."""
         self._inner.set_video_properties(properties)
 
     def publish_audio(
@@ -722,8 +755,8 @@ class BroadcastProducer:
         ``delta_ratio`` controls how aggressively deltas are emitted instead of full
         snapshots (0 disables deltas); ``None`` uses the binding's default. Set
         ``compression`` to DEFLATE-compress each group; the consumer must pass the same
-        flag. Advertise the track with :meth:`set_catalog_section` if consumers should
-        discover it.
+        flag. Advertise the track with :meth:`CatalogProducer.set_section` if consumers
+        should discover it.
         """
         # Let the record supply delta_ratio's default rather than restating it here.
         config = (
@@ -750,6 +783,7 @@ class BroadcastProducer:
         `name` must not be a reserved media section ("video"/"audio"). The catalog is
         republished automatically. Use this to advertise a side-channel track (e.g. a
         transcript or captions track) that the catalog doesn't model natively.
+        Prefer :meth:`catalog`.
         """
         self._inner.set_catalog_section(name, json.dumps(value))
 
@@ -757,7 +791,7 @@ class BroadcastProducer:
         """Remove an untyped application section from the catalog by name.
 
         A no-op if no section with that name exists. The catalog is republished
-        automatically.
+        automatically. Prefer :meth:`catalog`.
         """
         self._inner.remove_catalog_section(name)
 

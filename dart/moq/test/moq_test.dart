@@ -29,7 +29,7 @@ void main() {
     final serverSession = await accepted;
     expect(client.bandwidth(), isA<MoqBandwidth>());
 
-    final announcement = client.announcements().first;
+    final announcement = client.announced().updates().first;
     final broadcast = relay.createBroadcast(path: 'live');
     final track = broadcast.publishTrack(name: 'events', info: null);
     broadcast.announce(route: MoqRoute());
@@ -89,7 +89,7 @@ void main() {
     ).timeout(timeout);
     final serverSession = await accepted;
 
-    final announcement = client.announcements().first;
+    final announcement = client.announced().updates().first;
     final broadcast = server.createBroadcast('live');
     final track = broadcast.publishTrack(name: 'events', info: null);
     broadcast.announce(route: MoqRoute());
@@ -179,6 +179,31 @@ void main() {
     final update = await announced.next().timeout(timeout);
     expect(update?.prefix(), 'room/alice/chat');
     expect(update?.captures(), ['alice']);
+  });
+
+  test('catalog handle writes until the broadcast finishes', () async {
+    final broadcast = BroadcastProducer();
+    final catalog = broadcast.catalog();
+    catalog.setSection(name: 'app', json: '{"a":1}');
+    catalog.setVideoProperties(properties: VideoProperties(rotation: 90.0));
+
+    final consumer = await broadcast.consume().subscribeCatalog().timeout(
+      timeout,
+    );
+    final snapshot = await consumer.next().timeout(timeout);
+    expect(snapshot?.sections['app'], '{"a":1}');
+    expect(snapshot?.rotation, 90.0);
+
+    catalog.removeSection(name: 'app');
+    final removed = await consumer.next().timeout(timeout);
+    expect(removed?.sections.containsKey('app'), isFalse);
+
+    broadcast.finish();
+    expect(
+      () => catalog.removeSection(name: 'app'),
+      throwsA(isA<ClosedMoqException>()),
+    );
+    consumer.cancel();
   });
 
   test('dynamic serves a request under a prefix', () async {

@@ -192,12 +192,21 @@ fun GroupConsumer.frames(): Flow<Frame> = flow {
     if (cause is CancellationException) cancel()
 }
 
+/** Stream of route announcements and retractions from this cursor. */
+fun AnnounceConsumer.updates(): Flow<AnnounceUpdate> = flow {
+    while (true) {
+        currentCoroutineContext().ensureActive()
+        emit(next() ?: break)
+    }
+}.onCompletion { cause ->
+    if (cause is CancellationException) cancel()
+}
+
 /**
  * Stream of route announcements and retractions matching [config].
  *
  * Acquires the subscription on first collection and cancels it when collection
- * ends, so callers never touch the underlying handle. Use the raw
- * `announced(config)` if you need to hold and cancel the handle yourself.
+ * ends. Prefer `announced(config).updates()`, which keeps the cursor in hand.
  */
 fun OriginConsumer.announcements(config: AnnounceConfig = AnnounceConfig()): Flow<AnnounceUpdate> {
     val consumer = this

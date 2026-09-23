@@ -103,7 +103,7 @@ impl MoqBroadcastProducer {
 	/// Publish a JSON snapshot track (lossy latest-value) by name.
 	///
 	/// Advertise it in the catalog yourself with
-	/// [`set_catalog_section`](Self::set_catalog_section) if consumers should discover it.
+	/// [`MoqCatalogProducer::set_section`](crate::producer::MoqCatalogProducer::set_section) if consumers should discover it.
 	pub fn publish_json_snapshot(
 		&self,
 		name: String,

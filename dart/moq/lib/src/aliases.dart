@@ -103,6 +103,9 @@ typedef MediaGroupConsumer = MoqMediaGroupConsumer;
 /// The read side of a broadcast's catalog: yields updates as the set of tracks changes.
 typedef CatalogConsumer = MoqCatalogConsumer;
 
+/// The write side of a broadcast's catalog; weak, so holding it keeps nothing open.
+typedef CatalogProducer = MoqCatalogProducer;
+
 /// Publishes lossy latest-value JSON snapshots.
 typedef JsonSnapshotProducer = MoqJsonSnapshotProducer;
 

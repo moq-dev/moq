@@ -20,7 +20,7 @@ final class ListenOptions {
   final OriginProducer? publish;
 
   /// Origin that receives broadcasts published by incoming sessions; auto-created when null.
-  final OriginProducer? subscribe;
+  final OriginProducer? consume;
 
   const ListenOptions({
     this.bind = '[::]:443',
@@ -28,7 +28,7 @@ final class ListenOptions {
     this.tlsKey,
     this.tlsGenerate,
     this.publish,
-    this.subscribe,
+    this.consume,
   });
 }
 
@@ -52,18 +52,18 @@ final class Server {
 
   /// Bind a server at [ListenOptions.bind] and start accepting.
   ///
-  /// With neither [ListenOptions.publish] nor [ListenOptions.subscribe] given,
+  /// With neither [ListenOptions.publish] nor [ListenOptions.consume] given,
   /// both sides share one origin, so a broadcast created here is also visible
   /// to sessions publishing into this server. Wiring either side opts out and
   /// isolates the two directions.
   static Future<Server> listen({
     ListenOptions options = const ListenOptions(),
   }) async {
-    final shared = options.publish == null && options.subscribe == null
+    final shared = options.publish == null && options.consume == null
         ? OriginProducer(config: OriginConfig())
         : null;
     final publishOrigin = options.publish ?? shared;
-    final subscribeOrigin = options.subscribe ?? shared;
+    final consumeOrigin = options.consume ?? shared;
 
     final server = MoqServer();
     try {
@@ -74,7 +74,7 @@ final class Server {
         server.setTlsGenerate(hostnames: options.tlsGenerate!);
       }
       if (publishOrigin != null) server.setPublish(origin: publishOrigin);
-      if (subscribeOrigin != null) server.setConsume(origin: subscribeOrigin);
+      if (consumeOrigin != null) server.setConsume(origin: consumeOrigin);
 
       final localAddr = await server.listen();
       return Server._(server, localAddr, publishOrigin);
@@ -88,7 +88,7 @@ final class Server {
   /// Create a broadcast at [path], served to incoming sessions.
   ///
   /// Advertise it with `announce` after populating tracks. Throws when [listen]
-  /// was given a [ListenOptions.subscribe] origin but no
+  /// was given a [ListenOptions.consume] origin but no
   /// [ListenOptions.publish] one, since there is then nothing to serve from.
   BroadcastProducer createBroadcast(String path) {
     final origin = _publishOrigin;

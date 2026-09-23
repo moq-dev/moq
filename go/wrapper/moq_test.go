@@ -240,6 +240,64 @@ func TestVideoPropertiesUseDefaultedFields(t *testing.T) {
 	}
 }
 
+// TestCatalogHandle writes through the catalog handle and pins that it is weak:
+// its writes fail with ErrClosed once the broadcast finishes.
+func TestCatalogHandle(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := broadcast.Catalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.SetSection("app", `{"a":1}`); err != nil {
+		t.Fatal(err)
+	}
+	rotation := 90.0
+	if err := catalog.SetVideoProperties(moq.VideoProperties{Rotation: &rotation}); err != nil {
+		t.Fatal(err)
+	}
+
+	bc, err := broadcast.Consume()
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := bc.SubscribeCatalog(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer consumer.Cancel()
+	snapshot, err := consumer.Next(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Sections["app"] != `{"a":1}` || snapshot.Rotation == nil || *snapshot.Rotation != 90 {
+		t.Fatalf("catalog = %+v, want the app section and rotation 90", snapshot)
+	}
+
+	if err := catalog.RemoveSection("app"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = consumer.Next(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := snapshot.Sections["app"]; ok {
+		t.Fatalf("sections = %v, want app removed", snapshot.Sections)
+	}
+
+	if err := broadcast.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.RemoveSection("app"); !errors.Is(err, moq.ErrClosed) {
+		t.Fatalf("write after finish error = %v, want ErrClosed", err)
+	}
+}
+
 // TestDecodeVideoFormat pins the decode side picking its CPU layout: an unset
 // Format is I420, and RGBA is four bytes a pixel, with each frame naming the
 // layout it was decoded to.

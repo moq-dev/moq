@@ -31,6 +31,36 @@ public final class CatalogConsumer: AsyncSequence, Sendable {
     }
 }
 
+/// Write side of a broadcast's catalog: the video properties and application
+/// sections that ride alongside the renditions. Each write republishes the catalog.
+///
+/// Returned by `BroadcastProducer.catalog()`. Weak: holding it does not keep the
+/// broadcast open, and its writes throw `MoqError.Closed` once the broadcast is
+/// finished or released.
+public final class CatalogProducer: Sendable {
+    let ffi: MoqCatalogProducer
+
+    init(_ ffi: MoqCatalogProducer) {
+        self.ffi = ffi
+    }
+
+    /// Replace the catalog properties shared by every video rendition.
+    public func setVideoProperties(_ properties: VideoProperties) throws {
+        try ffi.setVideoProperties(properties: properties)
+    }
+
+    /// Set (or replace) an application section by name. `json` is any JSON
+    /// document as a string; subscribers read it from `Catalog.sections`.
+    public func setSection(name: String, json: String) throws {
+        try ffi.setSection(name: name, json: json)
+    }
+
+    /// Remove an application section by name; a no-op if it is absent.
+    public func removeSection(name: String) throws {
+        try ffi.removeSection(name: name)
+    }
+}
+
 /// Read side of a media track. Iterating yields decoded frames in decode order.
 public final class MediaConsumer: AsyncSequence, Sendable {
     /// The decoded media frame emitted by this sequence.

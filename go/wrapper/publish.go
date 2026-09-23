@@ -93,7 +93,17 @@ func (b *BroadcastProducer) Unannounce() error {
 	return b.inner.Unannounce()
 }
 
-// SetVideoProperties replaces the catalog properties shared by every video rendition.
+// Catalog returns a write handle to the broadcast's catalog.
+func (b *BroadcastProducer) Catalog() (*CatalogProducer, error) {
+	inner, err := b.inner.Catalog()
+	if err != nil {
+		return nil, err
+	}
+	return &CatalogProducer{inner: inner}, nil
+}
+
+// SetVideoProperties replaces the catalog properties shared by every video
+// rendition. Prefer [BroadcastProducer.Catalog].
 func (b *BroadcastProducer) SetVideoProperties(properties VideoProperties) error {
 	return b.inner.SetVideoProperties(properties)
 }
@@ -234,13 +244,14 @@ func (b *BroadcastProducer) Consume() (*BroadcastConsumer, error) {
 // SetCatalogSection sets (or replaces) an untyped application catalog section by
 // name. json is any JSON document as a string; it rides alongside video/audio and
 // reaches subscribers via Catalog.Sections. name must not be a reserved media
-// section ("video"/"audio"). The catalog is republished automatically.
+// section ("video"/"audio"). The catalog is republished automatically. Prefer
+// [BroadcastProducer.Catalog].
 func (b *BroadcastProducer) SetCatalogSection(name string, json string) error {
 	return b.inner.SetCatalogSection(name, json)
 }
 
 // RemoveCatalogSection removes an untyped application catalog section by name. It
-// is a no-op if the section was absent.
+// is a no-op if the section was absent. Prefer [BroadcastProducer.Catalog].
 func (b *BroadcastProducer) RemoveCatalogSection(name string) error {
 	return b.inner.RemoveCatalogSection(name)
 }
@@ -248,6 +259,34 @@ func (b *BroadcastProducer) RemoveCatalogSection(name string) error {
 // Finish closes the broadcast.
 func (b *BroadcastProducer) Finish() error {
 	return b.inner.Finish()
+}
+
+// CatalogProducer writes a broadcast's catalog: the video properties and
+// application sections that ride alongside the renditions. Each write
+// republishes the catalog.
+//
+// It is weak: holding it does not keep the broadcast open, and its writes
+// return ErrClosed once the broadcast is finished or released.
+type CatalogProducer struct {
+	inner *ffi.MoqCatalogProducer
+}
+
+// SetVideoProperties replaces the catalog properties shared by every video rendition.
+func (c *CatalogProducer) SetVideoProperties(properties VideoProperties) error {
+	return c.inner.SetVideoProperties(properties)
+}
+
+// SetSection sets (or replaces) an application section by name. json is any
+// JSON document as a string; subscribers read it from Catalog.Sections. name
+// must not be a reserved media section.
+func (c *CatalogProducer) SetSection(name string, json string) error {
+	return c.inner.SetSection(name, json)
+}
+
+// RemoveSection removes an application section by name. It is a no-op if the
+// section was absent.
+func (c *CatalogProducer) RemoveSection(name string) error {
+	return c.inner.RemoveSection(name)
 }
 
 // BroadcastDynamic is a stream of subscriber-requested tracks.
