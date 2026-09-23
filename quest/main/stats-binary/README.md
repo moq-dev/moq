@@ -1,52 +1,29 @@
-# Allocation-free binary stats
+# Stats wire contract
 
 ## Goal
 
-Draining the registry into stats frames allocates nothing per entry, and
-producing a `.fb.z` frame keeps that property. Any consumer can request a
-FlatBuffers flavor of every stats track (`publisher.fb.z`, `subscriber.fb.z`,
-`sessions.fb.z`, per tier) that is smaller and cheaper to produce and read than
-`.json.z`, backed by a checked-in schema that other languages can generate
-readers from and that later fields extend without breaking old readers. The
-JSON tracks stay, unchanged on the wire, for dashboards and debugging.
-
-Not here: a JS reader (the demo dashboard stays on JSON), replacing or
-deprecating the JSON flavors, and any relay config switch. Both flavors are
-served on demand, so an unrequested one costs nothing.
+Every stats track is documented as a wire contract a consumer in any
+language can read: the path layout, tiers, the three track kinds, both JSON
+encodings (`.json` and `.json.z`), and the counter semantics. The JSON tracks
+stay unchanged on the wire.
 
 ## Plan
 
-Settled while planning:
+The allocation-free drain landed in #3918 and #3920. The FlatBuffers `.fb.z`
+flavor this line planned was abandoned: a prototype lost to `.json.z` on
+bytes at every size, and by up to 15x at 4096 broadcasts, because a full
+snapshot outgrows DEFLATE's 32 KiB window while `.json.z` sends merge-patch
+deltas. It did win on decode CPU (about 10x) and on allocations on both
+sides; the numbers and the prototype are in the PR that abandoned it.
 
-- **Why:** a typed contract for non-Rust consumers, fewer bytes, less CPU, and
-  less memory churn at scale. JSON's cost is mostly our pipeline: per-tick
-  `BTreeMap<String, _>` frames, path clones, and merge-patch diffs through
-  `serde_json::Value`. The format change alone would not fix that.
-- **FlatBuffers via planus:** the builder resets without freeing, strings live
-  in its buffer, reads are zero-copy views, and tables extend by appending
-  fields. We chose it over protobuf because generated protobuf types own their
-  strings and maps; this was decided over a hand-written protobuf codec.
-- **One flavor, `.fb.z`:** a full snapshot per frame, with each group sharing
-  one DEFLATE window, so repeated bytes compress away without deltas. There is
-  no uncompressed `.fb`.
-- **Extension-ready:** the schema leaves room for the client-stats extension
-  (a nested table on each entry), which
-  [schema](/quest/next/qos/stats/schema.md) fills in when it lands.
-- **The line lands on main:** the maintainer approved `Registry::report(&mut
-  Report)` as a published API break before the pending moq-net release. Merge
-  this line before #3928, the last breaking change before that release.
-
-The line owns the end-to-end check: a relay test that subscribes to
-`.json.z` and `.fb.z`, pairs frames from the same tick (deterministically,
-for example by driving one tick under paused time), and asserts that the
-counters agree.
+A typed binary contract still needs deltas to compete on bytes, or a
+compressor with a larger window than a browser's `deflate-raw`. Either is new
+scope for a later quest, not this line.
 
 ## Quests
 
-- [FlatBuffers flavor](/quest/main/stats-binary/flatbuffers.md) - moq-stats serves and reads `<name>.fb.z` from a checked-in schema
-- [Stats format page](/quest/main/stats-binary/docs.md) - a doc/concept page for every stats track and both encodings
+- [Stats format page](/quest/main/stats-binary/docs.md) - a doc/concept page for every stats track and its encodings
 
 ## Related
 
-- [Client stats](/quest/next/qos/stats/README.md) - the extension the schema must leave room for
-- [Flate track wrapper](/quest/future/flate/track.md) - the group-window discipline the `.fb.z` producer repeats
+- [Client stats](/quest/next/qos/stats/README.md) - the per-broadcast extension the page will describe once it lands

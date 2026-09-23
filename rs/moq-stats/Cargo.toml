@@ -1,6 +1,6 @@
 [package]
 name = "moq-stats"
-description = "Publish and consume MoQ traffic stats: drains a moq-net counter registry into JSON and FlatBuffers tracks."
+description = "Publish and consume MoQ traffic stats: drains a moq-net counter registry into JSON tracks, plain and compressed."
 authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
@@ -13,12 +13,8 @@ keywords = ["quic", "http3", "webtransport", "stats", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
 [dependencies]
-bytes = { workspace = true }
-moq-flate = { workspace = true }
 moq-json = { workspace = true }
 moq-net = { workspace = true }
-# The string and bytes caches dedupe repeated values; a frame's keys are unique.
-planus = { version = "1.3.0", default-features = false, features = ["std", "vtable-cache"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -27,7 +23,4 @@ web-async = { workspace = true }
 
 [dev-dependencies]
 futures = { workspace = true }
-# Regenerate src/fbs.rs from stats.fbs; pinned to the planus runtime above.
-planus-codegen = "=1.3.0"
-planus-translation = "=1.3.0"
 tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
