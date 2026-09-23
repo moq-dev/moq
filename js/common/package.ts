@@ -17,7 +17,9 @@ const srcExports: Record<string, unknown> = structuredClone(pkg.exports ?? {});
 // Publish to JSR alongside npm for every package that publishes at all (has a
 // release script), unless it opts out with "jsr": false. The web-component
 // packages opt out: JSR forbids the HTMLElementTagNameMap global augmentation
-// every custom element needs. Captured before pkg.scripts/jsr are cleared below.
+// every custom element needs. Their dependents opt out too, since `deno publish`
+// walks into their Vite-only imports (enforced by deps.ts). Captured before
+// pkg.scripts/jsr are cleared below.
 const publishJsr = Boolean(pkg.scripts?.release) && pkg.jsr !== false;
 
 function rewritePath(p: string, ext: string): string {
