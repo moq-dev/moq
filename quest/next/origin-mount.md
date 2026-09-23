@@ -20,6 +20,14 @@ what the session can publish.
   `announced()` merges both cursors, rewriting `source`'s paths under `at`.
   The mount wins over anything `self` has under `at`: the embedder chose to
   put it there.
+- Everything that narrows or watches the base consumer reaches the sources
+  too. `Consumer::excluding(peer)`, applied by the lite and IETF publishers
+  after the relay hands over the mounted consumer, must exclude that peer
+  from every source, or a route learned through the client is advertised back
+  to it (split horizon). `routed_broadcast`'s retry watch must be installed
+  on the source's table at the translated path, not on the base origin, or a
+  request a mounted handler rejected never retries when the source's routes
+  change.
 - Mounts are prefix-based and scoped like any handle: `source` keeps its own
   root and patterns, so mounting an exact broadcast path exposes nothing
   beneath it.
@@ -39,7 +47,10 @@ what the session can publish.
 
 Tests: announce through a mount, subscribe through a mount to an unannounced
 path under a dynamic prefix in `source`, a mount shadowing a local path,
-patterns that exclude `at`, and a publish attempt under `at` refused.
+patterns that exclude `at`, a publish attempt under `at` refused, a
+split-horizon regression (a route learned from the client is not advertised
+back through the mount), and a retry regression (a mounted handler rejects,
+then a source route change makes the request resolve).
 
 ## Related
 
