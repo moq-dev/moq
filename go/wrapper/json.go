@@ -59,6 +59,16 @@ func (p *JSONSnapshotProducer) Update(value any) error {
 	return p.inner.Update(string(encoded))
 }
 
+// Used blocks until the track has at least one active subscriber.
+func (p *JSONSnapshotProducer) Used(ctx context.Context) error {
+	return p.inner.Used(ctx)
+}
+
+// Unused blocks until the track has no active subscribers.
+func (p *JSONSnapshotProducer) Unused(ctx context.Context) error {
+	return p.inner.Unused(ctx)
+}
+
 // Finish closes the snapshot track.
 func (p *JSONSnapshotProducer) Finish() error {
 	return p.inner.Finish()
@@ -76,6 +86,16 @@ func (p *JSONStreamProducer) Append(value any) error {
 		return err
 	}
 	return p.inner.Append(string(encoded))
+}
+
+// Used blocks until the track has at least one active subscriber.
+func (p *JSONStreamProducer) Used(ctx context.Context) error {
+	return p.inner.Used(ctx)
+}
+
+// Unused blocks until the track has no active subscribers.
+func (p *JSONStreamProducer) Unused(ctx context.Context) error {
+	return p.inner.Unused(ctx)
 }
 
 // Finish closes the stream track.

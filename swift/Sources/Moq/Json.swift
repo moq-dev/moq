@@ -21,6 +21,16 @@ public final class JsonSnapshotProducer<Value: Encodable>: Sendable {
         try ffi.update(value: encodeJson(value))
     }
 
+    /// Suspend until the track has at least one active consumer.
+    public func used() async throws {
+        try await ffi.used()
+    }
+
+    /// Suspend until the track has no active consumers.
+    public func unused() async throws {
+        try await ffi.unused()
+    }
+
     /// Finish the track, closing any open group.
     public func finish() throws {
         try ffi.finish()
@@ -74,6 +84,16 @@ public final class JsonStreamProducer<Value: Encodable>: Sendable {
     /// Append one record to the log.
     public func append(_ value: Value) throws {
         try ffi.append(value: encodeJson(value))
+    }
+
+    /// Suspend until the track has at least one active consumer.
+    public func used() async throws {
+        try await ffi.used()
+    }
+
+    /// Suspend until the track has no active consumers.
+    public func unused() async throws {
+        try await ffi.unused()
     }
 
     /// Finish the track, closing the group.

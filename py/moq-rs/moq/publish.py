@@ -386,6 +386,14 @@ class JsonSnapshotProducer:
     def __init__(self, inner: MoqJsonSnapshotProducer) -> None:
         self._inner = inner
 
+    async def used(self) -> None:
+        """Wait until this JSON snapshot track has at least one active subscriber."""
+        await self._inner.used()
+
+    async def unused(self) -> None:
+        """Wait until this JSON snapshot track has no active subscribers."""
+        await self._inner.unused()
+
     def update(self, value: Any) -> None:
         """Publish a new value. A no-op if unchanged from the previous update."""
         self._inner.update(json.dumps(value))
@@ -404,6 +412,14 @@ class JsonStreamProducer:
 
     def __init__(self, inner: MoqJsonStreamProducer) -> None:
         self._inner = inner
+
+    async def used(self) -> None:
+        """Wait until this JSON stream track has at least one active subscriber."""
+        await self._inner.used()
+
+    async def unused(self) -> None:
+        """Wait until this JSON stream track has no active subscribers."""
+        await self._inner.unused()
 
     def append(self, value: Any) -> None:
         """Append one record to the log."""

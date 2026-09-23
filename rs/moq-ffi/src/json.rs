@@ -190,6 +190,18 @@ impl MoqJsonSnapshotProducer {
 		Ok(())
 	}
 
+	/// Wait until this track has at least one active consumer.
+	pub async fn used(&self) -> Result<(), MoqError> {
+		let demand = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.demand();
+		crate::ffi::detached(async move { demand.used().await }).await
+	}
+
+	/// Wait until this track has no active consumers.
+	pub async fn unused(&self) -> Result<(), MoqError> {
+		let demand = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.demand();
+		crate::ffi::detached(async move { demand.unused().await }).await
+	}
+
 	/// Finish the track, closing any open group.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
@@ -253,6 +265,18 @@ impl MoqJsonStreamProducer {
 		let producer = guard.as_mut().ok_or(MoqError::Closed)?;
 		producer.append(&value)?;
 		Ok(())
+	}
+
+	/// Wait until this track has at least one active consumer.
+	pub async fn used(&self) -> Result<(), MoqError> {
+		let demand = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.demand();
+		crate::ffi::detached(async move { demand.used().await }).await
+	}
+
+	/// Wait until this track has no active consumers.
+	pub async fn unused(&self) -> Result<(), MoqError> {
+		let demand = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.demand();
+		crate::ffi::detached(async move { demand.unused().await }).await
 	}
 
 	/// Finish the track, closing the group.

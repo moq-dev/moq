@@ -4752,7 +4752,9 @@ class FfiConverterMoqJsonSnapshotConsumer {
 
 abstract class MoqJsonSnapshotProducerInterface {
   void finish();
+  Future<void> unused();
   void update({required String value});
+  Future<void> used();
 }
 
 final _MoqJsonSnapshotProducerFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -4791,6 +4793,19 @@ class MoqJsonSnapshotProducer implements MoqJsonSnapshotProducerInterface {
     }, moqExceptionErrorHandler);
   }
 
+  Future<void> unused() {
+    return uniffiRustCallAsync(
+      () => uniffi_moq_ffi_fn_method_moqjsonsnapshotproducer_unused(
+        uniffiClonePointer(),
+      ),
+      ffi_moq_ffi_rust_future_poll_void,
+      ffi_moq_ffi_rust_future_complete_void,
+      ffi_moq_ffi_rust_future_free_void,
+      (_) {},
+      moqExceptionErrorHandler,
+    );
+  }
+
   void update({required String value}) {
     return rustCall((status) {
       uniffi_moq_ffi_fn_method_moqjsonsnapshotproducer_update(
@@ -4799,6 +4814,19 @@ class MoqJsonSnapshotProducer implements MoqJsonSnapshotProducerInterface {
         status,
       );
     }, moqExceptionErrorHandler);
+  }
+
+  Future<void> used() {
+    return uniffiRustCallAsync(
+      () => uniffi_moq_ffi_fn_method_moqjsonsnapshotproducer_used(
+        uniffiClonePointer(),
+      ),
+      ffi_moq_ffi_rust_future_poll_void,
+      ffi_moq_ffi_rust_future_complete_void,
+      ffi_moq_ffi_rust_future_free_void,
+      (_) {},
+      moqExceptionErrorHandler,
+    );
   }
 }
 
@@ -4912,6 +4940,8 @@ class FfiConverterMoqJsonStreamConsumer {
 abstract class MoqJsonStreamProducerInterface {
   void append({required String value});
   void finish();
+  Future<void> unused();
+  Future<void> used();
 }
 
 final _MoqJsonStreamProducerFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -4958,6 +4988,32 @@ class MoqJsonStreamProducer implements MoqJsonStreamProducerInterface {
         status,
       );
     }, moqExceptionErrorHandler);
+  }
+
+  Future<void> unused() {
+    return uniffiRustCallAsync(
+      () => uniffi_moq_ffi_fn_method_moqjsonstreamproducer_unused(
+        uniffiClonePointer(),
+      ),
+      ffi_moq_ffi_rust_future_poll_void,
+      ffi_moq_ffi_rust_future_complete_void,
+      ffi_moq_ffi_rust_future_free_void,
+      (_) {},
+      moqExceptionErrorHandler,
+    );
+  }
+
+  Future<void> used() {
+    return uniffiRustCallAsync(
+      () => uniffi_moq_ffi_fn_method_moqjsonstreamproducer_used(
+        uniffiClonePointer(),
+      ),
+      ffi_moq_ffi_rust_future_poll_void,
+      ffi_moq_ffi_rust_future_complete_void,
+      ffi_moq_ffi_rust_future_free_void,
+      (_) {},
+      moqExceptionErrorHandler,
+    );
   }
 }
 
@@ -9502,6 +9558,11 @@ external void uniffi_moq_ffi_fn_method_moqjsonsnapshotproducer_finish(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<Pointer<Void> Function(Pointer<Void>)>(assetId: _uniffiAssetId)
+external Pointer<Void> uniffi_moq_ffi_fn_method_moqjsonsnapshotproducer_unused(
+  Pointer<Void> ptr,
+);
+
 @Native<Void Function(Pointer<Void>, RustBuffer, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -9509,6 +9570,11 @@ external void uniffi_moq_ffi_fn_method_moqjsonsnapshotproducer_update(
   Pointer<Void> ptr,
   RustBuffer value,
   Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Pointer<Void> Function(Pointer<Void>)>(assetId: _uniffiAssetId)
+external Pointer<Void> uniffi_moq_ffi_fn_method_moqjsonsnapshotproducer_used(
+  Pointer<Void> ptr,
 );
 
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
@@ -9571,6 +9637,16 @@ external void uniffi_moq_ffi_fn_method_moqjsonstreamproducer_append(
 external void uniffi_moq_ffi_fn_method_moqjsonstreamproducer_finish(
   Pointer<Void> ptr,
   Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Pointer<Void> Function(Pointer<Void>)>(assetId: _uniffiAssetId)
+external Pointer<Void> uniffi_moq_ffi_fn_method_moqjsonstreamproducer_unused(
+  Pointer<Void> ptr,
+);
+
+@Native<Pointer<Void> Function(Pointer<Void>)>(assetId: _uniffiAssetId)
+external Pointer<Void> uniffi_moq_ffi_fn_method_moqjsonstreamproducer_used(
+  Pointer<Void> ptr,
 );
 
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
@@ -11448,7 +11524,13 @@ external int uniffi_moq_ffi_checksum_method_moqjsonsnapshotconsumer_next();
 external int uniffi_moq_ffi_checksum_method_moqjsonsnapshotproducer_finish();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqjsonsnapshotproducer_unused();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqjsonsnapshotproducer_update();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqjsonsnapshotproducer_used();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqjsonstreamconsumer_cancel();
@@ -11461,6 +11543,12 @@ external int uniffi_moq_ffi_checksum_method_moqjsonstreamproducer_append();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqjsonstreamproducer_finish();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqjsonstreamproducer_unused();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqjsonstreamproducer_used();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqannounceconsumer_cancel();
@@ -11985,8 +12073,15 @@ void _checkApiChecksums() {
       42593) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
+  if (uniffi_moq_ffi_checksum_method_moqjsonsnapshotproducer_unused() !=
+      60467) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
   if (uniffi_moq_ffi_checksum_method_moqjsonsnapshotproducer_update() !=
       18037) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqjsonsnapshotproducer_used() != 2370) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqjsonstreamconsumer_cancel() != 29308) {
@@ -11999,6 +12094,12 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqjsonstreamproducer_finish() != 51459) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqjsonstreamproducer_unused() != 39734) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqjsonstreamproducer_used() != 48241) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqannounceconsumer_cancel() != 10799) {

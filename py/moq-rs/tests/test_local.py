@@ -390,6 +390,23 @@ async def test_json_stream_roundtrip():
     producer.finish()
 
 
+async def test_json_producers_report_demand():
+    broadcast = moq.BroadcastProducer()
+    snapshot = broadcast.publish_json_snapshot("status", compression=True)
+    stream = broadcast.publish_json_stream("events")
+    consumer = broadcast.consume()
+
+    snapshot_consumer = await consumer.subscribe_json_snapshot("status", compression=True)
+    stream_consumer = await consumer.subscribe_json_stream("events")
+    await asyncio.wait_for(snapshot.used(), timeout=5.0)
+    await asyncio.wait_for(stream.used(), timeout=5.0)
+
+    snapshot_consumer.cancel()
+    stream_consumer.cancel()
+    await asyncio.wait_for(snapshot.unused(), timeout=5.0)
+    await asyncio.wait_for(stream.unused(), timeout=5.0)
+
+
 async def test_dynamic_track_request():
     broadcast = moq.BroadcastProducer()
     dynamic = broadcast.dynamic()

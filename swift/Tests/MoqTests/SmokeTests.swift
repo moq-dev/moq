@@ -220,6 +220,25 @@ final class SmokeTests: XCTestCase {
         try broadcast.finish()
     }
 
+    func testJsonProducersReportDemand() async throws {
+        let broadcast = try BroadcastProducer()
+        let snapshot = try broadcast.publishJsonSnapshot(name: "status", of: [String: Int].self)
+        let stream = try broadcast.publishJsonStream(name: "events", of: [String: Int].self)
+        let consumer = try broadcast.consume()
+
+        let snapshotConsumer = try await consumer.subscribeJsonSnapshot(name: "status", as: [String: Int].self)
+        let streamConsumer = try await consumer.subscribeJsonStream(name: "events", as: [String: Int].self)
+        try await snapshot.used()
+        try await stream.used()
+
+        snapshotConsumer.cancel()
+        streamConsumer.cancel()
+        try await snapshot.unused()
+        try await stream.unused()
+
+        try broadcast.finish()
+    }
+
     func testRawTrackTimestamps() async throws {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "events")

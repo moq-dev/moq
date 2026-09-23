@@ -637,6 +637,58 @@ async fn json_snapshot_roundtrip() {
 	assert!(matches!(producer.update(r#"{"a":3}"#.into()), Err(MoqError::Closed)));
 }
 
+/// JSON producers report subscriber demand like the media and raw track producers.
+#[tokio::test]
+async fn json_activity() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let snapshot_config = MoqJsonSnapshotConfig {
+		delta_ratio: 8,
+		compression: true,
+	};
+	let stream_config = MoqJsonStreamConfig { compression: true };
+	let snapshot = broadcast
+		.publish_json_snapshot("status".into(), snapshot_config.clone())
+		.unwrap();
+	let stream = broadcast
+		.publish_json_stream("events".into(), stream_config.clone())
+		.unwrap();
+
+	let consumer = broadcast.consume().unwrap();
+	let snapshot_consumer = consumer
+		.subscribe_json_snapshot("status".into(), snapshot_config)
+		.await
+		.unwrap();
+	let stream_consumer = consumer
+		.subscribe_json_stream("events".into(), stream_config)
+		.await
+		.unwrap();
+
+	tokio::time::timeout(TIMEOUT, snapshot.used())
+		.await
+		.expect("timed out waiting for the json snapshot to become used")
+		.unwrap();
+	tokio::time::timeout(TIMEOUT, stream.used())
+		.await
+		.expect("timed out waiting for the json stream to become used")
+		.unwrap();
+
+	drop(snapshot_consumer);
+	drop(stream_consumer);
+	tokio::time::timeout(TIMEOUT, snapshot.unused())
+		.await
+		.expect("timed out waiting for the json snapshot to become unused")
+		.unwrap();
+	tokio::time::timeout(TIMEOUT, stream.unused())
+		.await
+		.expect("timed out waiting for the json stream to become unused")
+		.unwrap();
+
+	snapshot.finish().unwrap();
+	stream.finish().unwrap();
+	assert!(matches!(snapshot.used().await, Err(MoqError::Closed)));
+	assert!(matches!(stream.used().await, Err(MoqError::Closed)));
+}
+
 #[tokio::test]
 async fn json_stream_roundtrip() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();

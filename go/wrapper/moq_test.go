@@ -731,6 +731,52 @@ func TestJSONTracks(t *testing.T) {
 	}
 }
 
+func TestJSONDemand(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := broadcast.Consume()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := broadcast.PublishJSONSnapshot("status", moq.JSONSnapshotOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := broadcast.PublishJSONStream("events", moq.JSONStreamOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshotConsumer, err := consumer.SubscribeJSONSnapshot(ctx, "status", moq.JSONSubscribeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamConsumer, err := consumer.SubscribeJSONStream(ctx, "events", moq.JSONSubscribeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.Used(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Used(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshotConsumer.Cancel()
+	streamConsumer.Cancel()
+	if err := snapshot.Unused(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Unused(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDynamicTrackRequest(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
