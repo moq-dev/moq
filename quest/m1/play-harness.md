@@ -15,9 +15,15 @@ feature, which CI only compiles in the nightly clippy run, so its regressions
   when, on a paused tokio clock. Keep the seam private to `moq-cli`; no
   test-only hooks in production paths beyond it.
 - Run `cargo test -p moq-cli --features play` in the per-PR Test job, headless.
-- Land the rendition-switch gap test from #3966 and the tune-in burst test
-  from #3946 on it, each failing without its fix.
+- Land the rendition-switch gap test on it, failing without #3966's fix.
+  The tune-in burst test moves onto the harness with
+  [Play tune-in backpressure](/quest/m1/play-tunein-backpressure.md), which
+  owns that fix.
 
 ## Related
 
 - [Play tune-in backpressure](/quest/m1/play-tunein-backpressure.md) - its regression test runs here
+
+## Required
+
+- The rendition-switch gap fix (#3966) has merged

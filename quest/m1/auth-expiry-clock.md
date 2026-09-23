@@ -17,3 +17,7 @@ ends immediately in the relay.
 - Apply the skew allowance in one place both sides share.
 - Test: re-polling keeps the deadline; a grant within the skew window is live
   on both sides; the client outage tests run on a paused clock.
+
+## Required
+
+- The relay's fixed expiry deadline (#3969) has merged
