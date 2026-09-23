@@ -333,6 +333,32 @@ async fn tcp_bind_failure_does_not_report_ready() {
 	assert!(error.to_string().contains("failed to bind listeners"), "{error:#}");
 }
 
+/// An occupied internal port must fail before the relay reports readiness.
+#[tokio::test]
+async fn internal_bind_failure_does_not_report_ready() {
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+	let occupied = TcpListener::bind("127.0.0.1:0").expect("reserve internal port");
+	let mut config = http_and_quic(&cert, &key, "127.0.0.1:0".into());
+	config.internal.listen = Some(occupied.local_addr().expect("reserved address"));
+	let relay = Relay::load(config).await.expect("load relay before internal bind");
+	let ready = relay.ready();
+	let running = tokio::spawn(relay.run());
+
+	let result = tokio::time::timeout(TIMEOUT, ready.wait())
+		.await
+		.expect("readiness never resolved");
+	assert!(result.is_err(), "failed internal bind reported readiness");
+	let error = running
+		.await
+		.expect("run panicked")
+		.expect_err("run accepted an occupied internal port");
+	assert!(
+		error.to_string().contains("failed to bind internal listener"),
+		"{error:#}"
+	);
+}
+
 /// Shared Tokio runtime: one work-stealing runtime owns QUIC.
 #[tokio::test]
 async fn shared_tokio_custom_route_and_quic() {

@@ -505,9 +505,10 @@ impl Relay {
 				.context("failed to start the io_uring QUIC workers")?;
 		}
 
-		// The shared TCP/Unix sockets bind here rather than inside the accept loop:
-		// readiness must fail if one of them cannot be opened.
+		// Bind the shared TCP/Unix and optional internal sockets before reporting
+		// readiness, so an unavailable port cannot leave a falsely ready relay.
 		let server = server.listen().await.context("failed to bind listeners")?;
+		let internal_listener = internal.bind()?;
 		ready.send_replace(true);
 
 		#[cfg(unix)]
@@ -615,7 +616,7 @@ impl Relay {
 		let result = tokio::select! {
 			Err(err) = started.run() => Err(err).context("cluster failed"),
 			Err(err) = web.serve(web_routes) => Err(err).context("web server failed"),
-			Err(err) = internal.serve(internal_routes) => Err(err).context("internal server failed"),
+			Err(err) = internal.serve_bound(internal_routes, internal_listener) => Err(err).context("internal server failed"),
 			Err(err) = serve_shared => Err(err).context("server failed"),
 			Err(err) = quic_workers => Err(err).context("QUIC workers failed"),
 			err = uring_failed => Err(err).context("io_uring QUIC workers failed"),
