@@ -22,6 +22,9 @@ quests reach.
 
 The seven BBR correctness fixes follow the fork bootstrap. They are separate
 PRs, but one owner should work in the shared controller code at a time.
+Their regressions extend the shared test `Sim` in `bbr3/mod.rs` with only
+what each needs, rather than adding another simulation loop; the existing
+loops stay, since the fork merges upstream weekly and a port would conflict.
 The [BBR release](/quest/m1/quic/bbr-release.md) delivers them without waiting
 for the remaining transport features. The
 [Google comparison](/quest/m2/quic-bbr-google.md) is a separate study.
