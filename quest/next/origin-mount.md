@@ -3,8 +3,8 @@
 ## Goal
 
 A session's subscribe-side origin can show a subtree that lives outside its
-root under a path inside it. A relay embedder grants the mount; a token cannot
-ask for one. moq.pro uses it to show a project's stats feed, served fleet-wide
+root under a path inside it. The relay's authorizer grants the mount; neither a
+token nor an auth server response can. moq.pro uses it to show a project's stats feed, served fleet-wide
 at `.dash/<pid>/stats`, as `<pid>/.pro/stats` inside a customer's own session,
 so one `.dash` prefix route serves every project and no per-project route is
 advertised.
@@ -31,10 +31,17 @@ what the session can publish.
 - Mounts are prefix-based and scoped like any handle: `source` keeps its own
   root and patterns, so mounting an exact broadcast path exposes nothing
   beneath it.
-- `moq_auth::Grant` gains `mounts`, set only by the embedder's authorizer.
-  `Claims` does not carry it (`deny_unknown_fields` stays). `auth::Token`
-  copies it, and `Cluster::subscriber` applies each mount to the scoped
-  consumer. The publisher side ignores mounts.
+- Mounts are not part of `moq_auth::Grant`: that struct is also the JSON an
+  HTTP auth server returns and JS mirrors, so a field there would let any
+  auth response grant a cross-root read or change the wire contract. The
+  relay's admission path carries them instead, as equatable path pairs
+  (`at`, source path) that `Cluster::subscriber` resolves against its own
+  origin, so `moq-auth` never depends on `moq-net`.
+- Stats attribute a mounted read to its logical path. Today
+  `Consumer::request_broadcast` derives the egress scope from its own
+  `root.join(path)`, so delegating untagged drops the traffic from session
+  counters, and tagging the source charges the source path. The mount layer
+  tags resolved broadcasts and announcements with the path under `at`.
 - A mounted path is reachable only if the session's subscribe patterns cover
   `at`. The embedder decides whether to add the mount; the patterns still
   gate it, so the two agree.
@@ -50,7 +57,8 @@ path under a dynamic prefix in `source`, a mount shadowing a local path,
 patterns that exclude `at`, a publish attempt under `at` refused, a
 split-horizon regression (a route learned from the client is not advertised
 back through the mount), and a retry regression (a mounted handler rejects,
-then a source route change makes the request resolve).
+then a source route change makes the request resolve), and a stats
+regression asserting mounted egress lands on the logical path.
 
 ## Related
 
