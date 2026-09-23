@@ -51,7 +51,6 @@ This is a transport API change, not a MoQ wire change.
 
 ## Quests
 
-- [Recalibrate BBR startup pacing from measured RTT](/quest/m1/quic/bbr-startup-pacing.md) - measured RTT replaces the nominal startup rate for media senders
 - [Protect bandwidth samples during BBR ProbeRTT](/quest/m1/quic/bbr-probe-rtt.md) - intentionally reduced sending cannot masquerade as reduced capacity
 - [Preserve BBR state across a spurious loss episode](/quest/m1/quic/bbr-loss-undo.md) - consecutive losses preserve the original recovery snapshot
 - [Release BBR fixes](/quest/m1/quic/bbr-release.md) - publish and pin the corrected controller independently of later features
