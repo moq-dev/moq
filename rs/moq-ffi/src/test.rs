@@ -637,6 +637,101 @@ async fn json_snapshot_roundtrip() {
 	assert!(matches!(producer.update(r#"{"a":3}"#.into()), Err(MoqError::Closed)));
 }
 
+/// JSON producers report subscriber demand through a handle, like the media and raw track producers.
+#[tokio::test]
+async fn json_demand() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let snapshot_config = MoqJsonSnapshotConfig {
+		delta_ratio: 8,
+		compression: true,
+	};
+	let stream_config = MoqJsonStreamConfig { compression: true };
+	let snapshot = broadcast
+		.publish_json_snapshot("status".into(), snapshot_config.clone())
+		.unwrap();
+	let stream = broadcast
+		.publish_json_stream("events".into(), stream_config.clone())
+		.unwrap();
+	let snapshot_demand = snapshot.demand().unwrap();
+	let stream_demand = stream.demand().unwrap();
+	assert_eq!(snapshot_demand.name(), "status");
+	assert_eq!(stream_demand.name(), "events");
+	assert!(!snapshot_demand.is_used());
+
+	let consumer = broadcast.consume().unwrap();
+	let snapshot_consumer = consumer
+		.subscribe_json_snapshot("status".into(), snapshot_config)
+		.await
+		.unwrap();
+	let stream_consumer = consumer
+		.subscribe_json_stream("events".into(), stream_config)
+		.await
+		.unwrap();
+
+	tokio::time::timeout(TIMEOUT, snapshot_demand.used())
+		.await
+		.expect("timed out waiting for the json snapshot to become used")
+		.unwrap();
+	tokio::time::timeout(TIMEOUT, stream_demand.used())
+		.await
+		.expect("timed out waiting for the json stream to become used")
+		.unwrap();
+	assert!(snapshot_demand.is_used());
+
+	drop(snapshot_consumer);
+	drop(stream_consumer);
+	tokio::time::timeout(TIMEOUT, snapshot_demand.unused())
+		.await
+		.expect("timed out waiting for the json snapshot to become unused")
+		.unwrap();
+	tokio::time::timeout(TIMEOUT, stream_demand.unused())
+		.await
+		.expect("timed out waiting for the json stream to become unused")
+		.unwrap();
+
+	snapshot.finish().unwrap();
+	stream.finish().unwrap();
+	assert!(matches!(snapshot.demand(), Err(MoqError::Closed)));
+	assert!(matches!(stream.demand(), Err(MoqError::Closed)));
+	assert!(matches!(snapshot_demand.used().await, Err(MoqError::Closed)));
+	assert!(matches!(stream_demand.used().await, Err(MoqError::Closed)));
+}
+
+/// A demand handle waits without the producer, and fails once the track is gone.
+///
+/// A raw track's `finish` keeps its handle open for a later `abort`, so its track ends when the
+/// handle is released; a media producer's `finish` releases it.
+#[tokio::test]
+async fn demand_handle_outlives_finish() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("status".into(), None).unwrap();
+	let media = broadcast
+		.publish_audio(audio_init(MoqAudioFormat::Opus, opus_head()))
+		.unwrap();
+	let track_demand = track.demand().unwrap();
+	let media_demand = media.demand().unwrap();
+	assert_eq!(media_demand.name(), media.name().unwrap());
+
+	let consumer = track.consume(None).unwrap();
+	tokio::time::timeout(TIMEOUT, track_demand.used())
+		.await
+		.expect("timed out waiting for the raw track to become used")
+		.unwrap();
+	drop(consumer);
+
+	track.finish().unwrap();
+	drop(track);
+	media.finish().unwrap();
+	let track_err = tokio::time::timeout(TIMEOUT, track_demand.used())
+		.await
+		.expect("timed out waiting for the finished raw track");
+	let media_err = tokio::time::timeout(TIMEOUT, media_demand.used())
+		.await
+		.expect("timed out waiting for the finished media track");
+	assert!(matches!(track_err, Err(MoqError::Closed)), "{track_err:?}");
+	assert!(matches!(media_err, Err(MoqError::Closed)), "{media_err:?}");
+}
+
 #[tokio::test]
 async fn json_stream_roundtrip() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();

@@ -75,7 +75,7 @@ JSON tracks take `@Serializable` types
 (`publishJsonSnapshot`, `publishJsonStream`, `valuesAs<T>()`), and the rest of
 the [shared feature list](/lib/#what-every-binding-can-do) maps one to one:
 `fetchGroup`/`fetchMediaGroup`, `dynamic()` for tracks and `dynamic(prefix)` for broadcasts, `appendDatagram`/`datagrams()`,
-`catalog()` for sections and video properties, `used()`/`unused()`. `session.bandwidth()` divides the
+`catalog()` for sections and video properties, `demand()` for `used()`/`unused()`. `session.bandwidth()` divides the
 connection's send estimate; pass it to `encodeVideo` / `encodeAudio` or
 `reserve` a share for an app-owned track. `MoqException.isAuth` and
 `isShutdown` classify errors. Microsecond fields read back as a

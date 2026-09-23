@@ -11,14 +11,16 @@ durable scope or coordination.
 - A quest is a Markdown file, completed in one PR. A questline is a directory
   whose `README.md` is its quest: its `Quests` section lists the children, and
   it completes when its own work is done and every child has merged.
-- The tree mirrors the branches. A top-level line named after a long-lived
-  branch is that branch; every other top-level line is roadmap and has none.
-  [README.md](README.md) says what each line holds. Starting a roadmap quest
-  moves it under the branch it targets, in the same PR.
-- Any other document's branch is its path without `.md`: `quest/foo/bar.md` is
-  branch `quest/foo/bar`, and its line is `quest/foo/README`. A quest merges
-  into its line's branch, a line into its parent's, and a long-lived branch into
-  its own base once its line is empty.
+- The root's entries are milestones, `m0`, `m1`, ..., grouping work by
+  priority horizon; lower numbers matter more. [README.md](README.md) says
+  what each holds. Priority, not breakage, decides the milestone, and starting
+  a quest does not move it.
+- A document's branch is its path without `.md`: `quest/m1/foo/bar.md` is
+  branch `quest/m1/foo/bar`, and its line is `quest/m1/foo/README`. A quest
+  merges into its line's branch, a line into its parent's, and a milestone's
+  direct children into `main`. Milestones have no branch.
+- A published API or wire break retargets to `dev` at PR time, per the root
+  `CLAUDE.md`; a quest's Plan may note it.
 - Every `Quests` list is ordered by priority. Insert at rank, never append.
 - Link with root-absolute paths. Finished documents are deleted; git history
   keeps them. Merge conflicts are expected; resolve them by aligning quests.
@@ -65,7 +67,7 @@ Current decisions, open questions, or implementation guidance.
 - `quest check` enforces this structure; `just check` runs it on any branch
   touching `quest/`. `quest ready [<path>]` prints what blocks a quest, or
   every ready quest. `quest branch <path>` prints the branch and every branch
-  it merges through, nearest first. Run them as
+  it merges through, nearest first and ending at `main`. Run them as
   `cargo run --quiet --locked --package quest -- ...`. They read the tree
   alone: whether a PR already claims a quest is GitHub's question.
 
@@ -76,8 +78,7 @@ Current decisions, open questions, or implementation guidance.
 - Split independently completable work into separate quests. Group them in a
   questline only when they ship together, and give the README the work no
   child owns: the end-to-end test, the docs page.
-- New work starts in a roadmap line, at its rank, unless it is being started
-  now.
+- New work joins the milestone matching its priority, at its rank.
 - Every issue under `Closes` carries the `quest` GitHub label
   (`gh issue edit <n> --add-label quest`), applied when the quest lands.
   `Related` is context and gets none.
@@ -110,5 +111,5 @@ Current decisions, open questions, or implementation guidance.
 - Delete a quest in the PR that completes or abandons it. Grep its absolute
   path and remove every reference; that reveals what it unblocks. Remove a
   heading with its last entry.
-- Deleting a README deletes its directory. The root and the top-level lines are
-  permanent.
+- Deleting a README deletes its directory. The root and the milestones are
+  permanent: an empty milestone stays as a horizon.
