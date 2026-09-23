@@ -28,31 +28,10 @@ new `spread` observation.
 The algorithm is written down at `doc/concept/audio-jitter.md`, with a
 conformance corpus beside it that both implementations will read.
 
-Neither `main` nor `dev` has a measured estimator. `js/watch/src/sync.ts:159`
-still computes `max(MIN_JITTER, minRtt * 1.25)` from the connection's PROBE,
-and `js/watch/src/audio/latency.ts` still exists. `sync.ts` also adds the
-advertised jitter to that term, where the document settles on a maximum.
-
-The prior art is the branch of PR #3517,
-`origin/quest/m0/3477-watch-auto-latency`, two commits ahead of `dev`. The PR
-is closed and never merged; the watch quest starts from the branch rather than
-from `dev`. It already deletes the RTT term
-(`MIN_JITTER`, `FALLBACK_JITTER`, `#minRtt`, and the `probe` input are gone
-from `sync.ts`; `latency.ts` survives, minus `reanchorFloor`) and plumbs a
-per-track arrival `spread` through `Container.Consumer`, measured at container
-frame arrival and before the age budget can skip a group, which is the right
-observation point. Its estimator, `js/hang/src/container/jitter.ts`, is a
-decaying histogram of 5 ms buckets, 200 of them so the percentile saturates at
-one second, read at the 95th percentile plus one frame, with the arrival
-minimum expiring over two 30 s windows, `reanchor()` on a discontinuity, and
-the step down bounded to one frame per second. `jitter.test.ts` and
-`js/watch/src/audio/replay.test.ts` cover it. What it gets wrong is the extra
-frame, learned from the first gap between observed timestamps, and a rise that
-is immediate and unclamped, so a tune-in across a stale group sets the target
-to seconds.
-
-Note that `sync.ts` has since been refactored on `main` to a `register(jitter)`
-list, so the branch does not rebase cleanly.
+The browser implementation has landed on this line: `js/hang/src/container/jitter.ts`
+observes each frame in `Container.Consumer` and passes the corpus, `js/watch`
+composes each track's target and `Sync` holds the deepest one in `"auto"`. What
+remains of the watch quest is proving it in a real browser.
 
 Native has no jitter buffer at all. `rs/moq-audio`'s `decode::Options`
 (`rs/moq-audio/src/decode/consumer.rs`) carries `max_age`, how far
@@ -62,7 +41,7 @@ buffer against uneven arrivals.
 
 ## Quests
 
-- [Watch](/quest/main/audio-jitter-target/watch.md) - js/watch and js/hang bring the #3517 branch's estimator into conformance
+- [Watch](/quest/main/audio-jitter-target/watch.md) - the browser's measured target, proven on Chrome and Safari against the public relay
 - [Native](/quest/main/audio-jitter-target/native.md) - rs/moq-audio grows a measured jitter buffer from the same algorithm
 
 ## Closes

@@ -83,3 +83,38 @@ export function toDOps(description: Uint8Array): Uint8Array {
 	output[10] = input.getUint8(10);
 	return output;
 }
+
+/**
+ * Number of 48 kHz samples in an Opus packet, read from its TOC byte (RFC 6716 §3.1).
+ *
+ * Mirrors `packet_samples` in rs/moq-mux. Opus timing is always reckoned at 48 kHz regardless of the
+ * encoder's internal bandwidth. Undefined for an empty packet or a code-3 packet missing its
+ * frame-count byte.
+ */
+export function packetSamples(packet: Uint8Array): number | undefined {
+	const toc = packet.at(0);
+	if (toc === undefined) return undefined;
+
+	let frames: number;
+	const code = toc & 0b11;
+	if (code === 0) frames = 1;
+	else if (code !== 3) frames = 2;
+	else {
+		// Code 3: the frame count is the low 6 bits of the following byte.
+		const count = packet.at(1);
+		if (count === undefined) return undefined;
+		frames = count & 0b11_1111;
+	}
+
+	return configSamples(toc >> 3) * frames;
+}
+
+// 48 kHz samples per frame for a TOC config index (0..=31), per RFC 6716 Table 1.
+function configSamples(config: number): number {
+	// SILK NB/MB/WB: 10, 20, 40, 60 ms.
+	if (config < 12) return [480, 960, 1920, 2880][config % 4];
+	// Hybrid SWB/FB: 10, 20 ms.
+	if (config < 16) return [480, 960][config % 2];
+	// CELT NB/WB/SWB/FB: 2.5, 5, 10, 20 ms.
+	return [120, 240, 480, 960][config % 4];
+}

@@ -1,17 +1,21 @@
 import { describe, expect, it } from "bun:test";
 import type { Time } from "@moq/net";
-import { reanchorFloor, ringSamples } from "./latency";
+import { ringSamples, target } from "./latency";
 
 const ms = (value: number) => value as Time.Milli;
 
-describe("reanchorFloor", () => {
-	it("includes the fixed delay and the largest media delay", () => {
-		expect(reanchorFloor({ delay: ms(100), media: ms(80) })).toBe(ms(180));
+describe("target", () => {
+	it("adds one frame to the measured term", () => {
+		expect(target({ measured: ms(40), frame: ms(20) })).toBe(ms(60));
 	});
 
-	it("tracks rendition delay without adaptive RTT jitter", () => {
-		expect(reanchorFloor({ delay: "auto", media: ms(80) })).toBe(ms(80));
-		expect(reanchorFloor({ delay: "auto", media: ms(200) })).toBe(ms(200));
+	it("floors the measured term at the advertised span instead of adding it", () => {
+		expect(target({ measured: ms(40), advertised: ms(200), frame: ms(20) })).toBe(ms(220));
+		expect(target({ measured: ms(300), advertised: ms(200), frame: ms(20) })).toBe(ms(320));
+	});
+
+	it("is the measured term alone when nothing else is known", () => {
+		expect(target({ measured: ms(100) })).toBe(ms(100));
 	});
 });
 

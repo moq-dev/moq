@@ -515,6 +515,25 @@ test("Consumer skips groups via PTS-span when over the max age", async () => {
 	consumer.close();
 });
 
+test("Consumer measures arrivals as they land", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat("audio"), maxAge: 5000 as Time.Milli });
+
+	// Nothing observed yet: the cold-start estimate.
+	expect(consumer.spread.peek()).toBe(100 as Time.Milli);
+
+	// Groups arriving exactly as fast as their media, across two resample intervals. Nothing is
+	// late, so the evidence pulls the estimate down from the cold start.
+	for (let i = 0; i < 3; i++) {
+		writeGroupWithLegacyFrames(track, i, [(i * 520_000) as Time.Micro]);
+		await settle(520);
+	}
+	expect(consumer.spread.peek()).toBeLessThan(100 as Time.Milli);
+
+	track.close();
+	consumer.close();
+});
+
 // --- Ordering ---
 
 test("Consumer delivers groups in sequence order regardless of arrival order", async () => {

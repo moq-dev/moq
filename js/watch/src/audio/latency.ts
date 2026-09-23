@@ -1,21 +1,24 @@
 import { Time } from "@moq/net";
-import type { Delay } from "../sync";
 
-/** The inputs that determine whether audio needs a deeper playback cushion. */
-export interface ReanchorFloor {
-	/** How far playback trails the live edge. */
-	delay: Delay;
-
-	/** Largest additional delay required by the registered media decoders. */
-	media?: Time.Milli;
+/** The terms of the audio playout target, all in milliseconds. */
+export interface Target {
+	/** The arrival estimate from the container consumer. */
+	measured: Time.Milli;
+	/** The flush span the rendition advertises, if any. */
+	advertised?: Time.Milli;
+	/** The codec's frame duration, if known. */
+	frame?: Time.Milli;
 }
 
-/** The stable delay floor whose increase requires the audio ring to refill. */
-export function reanchorFloor(props: ReanchorFloor): Time.Milli {
-	// "auto" and "instant" contribute nothing: the adaptive RTT component is deliberately excluded
-	// so an RTT wiggle doesn't re-anchor, and "instant" holds nothing at all.
-	const target = typeof props.delay === "number" ? props.delay : Time.Milli.zero;
-	return Time.Milli.add(target, props.media ?? Time.Milli.zero);
+/**
+ * The "auto" playout target: the measured term floored by the advertised span, plus one frame.
+ *
+ * A floor rather than a sum, because the receiver's measurement already contains the publisher's
+ * flush delay. See doc/concept/audio-jitter.md.
+ */
+export function target(props: Target): Time.Milli {
+	const floored = Time.Milli.max(props.measured, props.advertised ?? Time.Milli.zero);
+	return Time.Milli.add(floored, props.frame ?? Time.Milli.zero);
 }
 
 // An AudioWorkletProcessor renders in fixed 128-sample quanta, so a ring shallower than one can
