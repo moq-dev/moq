@@ -692,7 +692,7 @@ async fn serve_connection(
 		let mut auth_request = serve.auth.request(moq_auth::Transport::Quic, path);
 		auth_request.query = query;
 		// moq-uring's connection does not expose the peer address or SNI yet, so
-		// the request carries the protocol alone; see quest/next/uring-link-facts.md.
+		// the request carries the protocol alone; see quest/m1/uring-link-facts.md.
 		auth_request.alpn = alpn.clone();
 		auth_request.role = request.role().map(|role| match role {
 			moq_net::Role::Publisher => moq_auth::Role::Publisher,
