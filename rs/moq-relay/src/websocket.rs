@@ -223,7 +223,7 @@ where
 					err = &mut driver => ended(err),
 					_ = &mut drain => ended(driver.await),
 				};
-				lease.close("shutdown", crate::connection::session_bytes(&session));
+				lease.close(moq_auth::lease::Reason::Shutdown, crate::connection::session_bytes(&session));
 				return res;
 			}
 			() = nudged => lease.revalidate(),

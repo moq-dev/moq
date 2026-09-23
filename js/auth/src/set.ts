@@ -67,7 +67,7 @@ async function sign(set: KeySet, claims: Claims): Promise<string> {
 /**
  * Verify a token with the key matching its `kid` header, returning its claims.
  *
- * A token without a `kid` is accepted only when the set holds exactly one key.
+ * A token without a `kid` is accepted only when the set holds exactly one key and that key has no `kid`.
  */
 async function verify(set: KeySet, token: string): Promise<Claims> {
 	let kid: string | undefined;

@@ -278,6 +278,17 @@ describe("Rust-serialized contract", () => {
 		expect(request.reason).toBe("invalid");
 	});
 
+	test("parse gateway transports and stable end reasons from Rust", () => {
+		for (const transport of ["rtmp", "srt", "webrtc"] as const) {
+			for (const reason of ["narrowed", "shutdown"]) {
+				const request = RequestSchema.parse({ ...JSON.parse(RUST_REQUEST), transport, reason });
+				expect(request.transport).toBe(transport);
+				if (request.event !== "end") throw new Error("expected an end");
+				expect(request.reason).toBe(reason);
+			}
+		}
+	});
+
 	test("a grant built here is what a Rust relay reads", () => {
 		const grant = GrantSchema.parse({
 			publish: ["alice/**"],

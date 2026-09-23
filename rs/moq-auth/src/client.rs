@@ -4,14 +4,11 @@ use std::time::{Duration, Instant};
 
 use url::Url;
 
-use crate::lease::{self, Reason};
+use crate::lease::{self, Due, Reason};
 use crate::{Bytes, Error, Event, Grant, Request};
 
 /// Every request is bounded so a hung server refuses rather than parks the session.
 const TIMEOUT: Duration = Duration::from_secs(10);
-
-/// The longest a failed re-check waits before trying again.
-const BACKOFF_MAX: Duration = Duration::from_secs(60);
 
 /// The HTTP side of the contract: one JSON POST per event to an auth server.
 ///
@@ -82,7 +79,7 @@ impl Client {
 			producer: Some(producer),
 			started: Instant::now(),
 		};
-		tokio::spawn(driver.run(grant));
+		tokio::spawn(driver.run());
 
 		Ok(consumer)
 	}
@@ -118,8 +115,8 @@ struct Driver {
 }
 
 impl Driver {
-	async fn run(mut self, grant: Grant) {
-		let (reason, bytes) = self.drive(grant).await;
+	async fn run(mut self) {
+		let (reason, bytes) = self.drive().await;
 
 		let mut request = self.request.clone();
 		request.event = Event::End {
@@ -134,84 +131,49 @@ impl Driver {
 	}
 
 	/// Re-check until the lease ends, returning why it did and the totals the session reported.
-	async fn drive(&mut self, mut grant: Grant) -> (Reason, Bytes) {
+	async fn drive(&mut self) -> (Reason, Bytes) {
 		let producer = self
 			.producer
 			.take()
 			.expect("the driver owns the producer until it ends");
-		let mut failures = 0u32;
-		let mut next = grant.revalidate.map(|cadence| Instant::now() + cadence);
-		// The re-check in flight, kept out of the select so expiry and the session's
-		// close are still polled while a stalled server holds the reply.
+		// Keep an in-flight request alive while expiry or a push is observed.
 		let mut inflight: Option<Pin<Box<dyn Future<Output = crate::Result<Grant>> + Send>>> = None;
-		// A nudge while a re-check is in flight: POST once more when the reply lands,
-		// so a ban set after this request left is not missed until the next cadence.
 		let mut pending = false;
 
 		loop {
-			let expires = grant.expires.map(crate::grant::until);
-			let revalidate = async {
-				match next {
-					Some(at) => tokio::time::sleep_until(at.into()).await,
-					None => std::future::pending().await,
-				}
-			};
-			let expire = async {
-				match expires {
-					Some(after) => tokio::time::sleep(after).await,
-					None => std::future::pending().await,
-				}
-			};
 			let reply = async {
 				match inflight.as_mut() {
 					Some(request) => request.await,
 					None => std::future::pending().await,
 				}
 			};
-
 			tokio::select! {
+				biased;
 				ended = producer.closed() => return ended,
-				() = expire => return producer.finish(Reason::Expired, Bytes::default()),
+				due = producer.due() => match due {
+					Due::Expired => return producer.finish(Reason::Expired, Bytes::default()),
+					Due::Revalidate if inflight.is_some() => pending = true,
+					Due::Revalidate => inflight = Some(self.post_revalidate()),
+				},
 				result = reply => {
 					inflight = None;
 					match result {
-						Ok(fresh) => {
-							failures = 0;
-							next = fresh.revalidate.map(|cadence| Instant::now() + cadence);
-							producer.update(fresh.clone());
-							grant = fresh;
-						}
+						Ok(fresh) => producer.update(fresh),
 						Err(Error::Refused) => return producer.finish(Reason::Refused, Bytes::default()),
 						Err(Error::GrantExpired | Error::UnboundedRevalidate | Error::ZeroRevalidate) => {
 							return producer.finish(Reason::Invalid, Bytes::default());
-						}
+						},
 						Err(err) => {
-							// Evidence of nothing: the grant stands until `expires`.
-							failures += 1;
-							let delay = backoff(failures, grant.revalidate.unwrap_or(BACKOFF_MAX));
+							let delay = producer.failed();
 							tracing::warn!(id = %self.request.id, %err, ?delay, "auth revalidation failed; retrying");
-							next = Some(Instant::now() + delay);
-						}
+						},
 					}
 					if pending {
 						pending = false;
-						next = None;
+						producer.immediate();
 						inflight = Some(self.post_revalidate());
 					}
-				}
-				() = revalidate => {
-					// One re-check at a time; the reply schedules the next.
-					next = None;
-					inflight = Some(self.post_revalidate());
-				}
-				() = producer.revalidate_requested() => {
-					if inflight.is_some() {
-						pending = true;
-					} else {
-						next = None;
-						inflight = Some(self.post_revalidate());
-					}
-				}
+				},
 			}
 		}
 	}
@@ -234,16 +196,6 @@ impl Client {
 			.error_for_status()?;
 		Ok(())
 	}
-}
-
-/// Exponential backoff from one second, capped by the cadence and [`BACKOFF_MAX`],
-/// jittered by up to a quarter so a fleet does not retry in lockstep.
-fn backoff(failures: u32, cadence: Duration) -> Duration {
-	use rand::RngExt;
-	let base = Duration::from_secs(1) * 2u32.saturating_pow(failures.saturating_sub(1).min(16));
-	let base = base.min(cadence).min(BACKOFF_MAX);
-	let jitter = rand::rng().random_range(0.75..=1.25);
-	base.mul_f64(jitter)
 }
 
 #[cfg(test)]
@@ -677,18 +629,5 @@ mod tests {
 			2,
 			"a burst during an in-flight re-check is one extra POST"
 		);
-	}
-
-	#[test]
-	fn backoff_grows_and_stays_bounded() {
-		let cadence = Duration::from_secs(30);
-		let first = backoff(1, cadence);
-		assert!(
-			first >= Duration::from_millis(750) && first <= Duration::from_millis(1250),
-			"{first:?}"
-		);
-		let later = backoff(10, cadence);
-		assert!(later <= cadence.mul_f64(1.25), "{later:?}");
-		assert!(backoff(40, Duration::from_secs(3600)) <= BACKOFF_MAX.mul_f64(1.25));
 	}
 }

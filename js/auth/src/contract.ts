@@ -11,7 +11,7 @@ import * as z from "@zod/mini";
 import { PatternListSchema } from "./claims.ts";
 
 /** How a session reached the relay; `http` is a one-shot request on the relay's web listener. */
-export const TransportSchema = z.enum(["quic", "iroh", "websocket", "tcp", "unix", "http"]);
+export const TransportSchema = z.enum(["quic", "iroh", "websocket", "tcp", "unix", "http", "rtmp", "srt", "webrtc"]);
 export type Transport = z.infer<typeof TransportSchema>;
 
 /** The single direction a client declared at SETUP. */
@@ -89,7 +89,7 @@ export const RequestSchema = z.discriminatedUnion("event", [
 	z.extend(BaseRequestSchema, {
 		/** The session closed. */
 		event: z.literal("end"),
-		/** Why it closed: `dropped`, `expired`, `refused`, `invalid`, or the session's own classification. */
+		/** Why it closed: `dropped`, `expired`, `refused`, `invalid`, `narrowed`, `shutdown`, or the session's own classification. */
 		reason: z.string(),
 		/** How long it was admitted, in seconds. */
 		duration: z.number(),

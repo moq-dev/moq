@@ -100,8 +100,7 @@ pub enum Event {
 	},
 }
 
-/// How a session reached the relay. The names match `moq_tokio::server::Transport`,
-/// plus `http` for the relay's one-shot HTTP routes.
+/// How a session reached the relay, including QUIC, relay HTTP, and gateways.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Transport {
@@ -118,6 +117,12 @@ pub enum Transport {
 	/// A one-shot HTTP request on the relay's web listener (`/fetch`, `/announced`),
 	/// admitted and ended within the request.
 	Http,
+	/// An RTMP gateway session.
+	Rtmp,
+	/// An SRT gateway session.
+	Srt,
+	/// A WebRTC gateway session, including WHIP and WHEP.
+	WebRtc,
 }
 
 impl Transport {
@@ -130,6 +135,9 @@ impl Transport {
 			Self::Tcp => "tcp",
 			Self::Unix => "unix",
 			Self::Http => "http",
+			Self::Rtmp => "rtmp",
+			Self::Srt => "srt",
+			Self::WebRtc => "webrtc",
 		}
 	}
 }
@@ -257,6 +265,20 @@ mod tests {
 			serde_json::to_string(&request).unwrap(),
 			r#"{"id":"00ff","event":"end","reason":"invalid","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc"}"#
 		);
+	}
+
+	#[test]
+	fn gateway_transports_round_trip_on_the_wire() {
+		for (transport, text) in [
+			(Transport::Rtmp, "rtmp"),
+			(Transport::Srt, "srt"),
+			(Transport::WebRtc, "webrtc"),
+		] {
+			let request = Request::new("relay-1", transport, "/room");
+			let json = serde_json::to_value(&request).unwrap();
+			assert_eq!(json["transport"], text);
+			assert_eq!(serde_json::from_value::<Request>(json).unwrap(), request);
+		}
 	}
 
 	#[test]

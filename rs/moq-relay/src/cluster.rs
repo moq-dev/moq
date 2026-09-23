@@ -1070,6 +1070,18 @@ pub struct Cluster {
 	_stats_publisher: Option<moq_stats::Producer>,
 }
 
+/// A gateway or network session admitted with its lease, scoped origins, and stats.
+pub struct Admitted {
+	/// The live authorization that must be held for the session's lifetime.
+	pub lease: auth::Lease,
+	/// Where an admitted publisher writes its broadcasts.
+	pub publisher: Option<origin::Producer>,
+	/// Where an admitted subscriber reads broadcasts.
+	pub subscriber: Option<origin::Consumer>,
+	/// The session's root and tier attribution.
+	pub stats: moq_net::stats::Session,
+}
+
 impl Cluster {
 	/// The origin ID used by this relay on the wire.
 	pub fn id(&self) -> u64 {
@@ -1128,6 +1140,58 @@ impl Cluster {
 			origin,
 			stats: moq_net::stats::Registry::disabled(),
 			_stats_publisher: None,
+		})
+	}
+
+	/// Admit a gateway session and scope both origin directions from its grant.
+	pub async fn admit(&self, auth: &auth::Auth, request: moq_auth::Request) -> Result<Admitted, auth::Error> {
+		if !matches!(request.event, moq_auth::Event::Connect) {
+			return Err(auth::Error::Request("admission requires a connect event".into()));
+		}
+		let lease = auth.admit(request.clone()).await?;
+		self.scope(lease, &request)
+	}
+
+	/// Resolve origin handles for a lease already admitted by a local relay rule.
+	pub(crate) fn scope(&self, lease: auth::Lease, request: &moq_auth::Request) -> Result<Admitted, auth::Error> {
+		let token = lease.token();
+		let publisher = self.publisher(token);
+		let subscriber = self.subscriber(token);
+		let allowed = match request.role {
+			Some(moq_auth::Role::Publisher) => publisher.is_some(),
+			Some(moq_auth::Role::Subscriber) => subscriber.is_some(),
+			None => publisher.is_some() || subscriber.is_some(),
+		};
+		if !allowed {
+			let wanted = match request.role {
+				Some(moq_auth::Role::Publisher) => "publisher",
+				Some(moq_auth::Role::Subscriber) => "subscriber",
+				None => "any",
+			};
+			return Err(auth::Error::Forbidden(format!(
+				"grant does not allow {wanted} access to {}",
+				token.root
+			)));
+		}
+
+		let stats = self.stats.tier(token.tier.clone()).session(&token.root);
+		tracing::info!(transport = %request.transport, ?request.role, tier = %token.tier, root = %token.root,
+			publish = ?publisher.as_ref().map(origin::Producer::allowed),
+			subscribe = ?subscriber.as_ref().map(origin::Producer::allowed),
+			"session accepted");
+		let publisher = match request.role {
+			Some(moq_auth::Role::Subscriber) => None,
+			_ => publisher.map(|origin| origin.with_stats(stats.clone())),
+		};
+		let subscriber = match request.role {
+			Some(moq_auth::Role::Publisher) => None,
+			_ => subscriber.map(|origin| origin.consume().with_stats(stats.clone())),
+		};
+		Ok(Admitted {
+			lease,
+			publisher,
+			subscriber,
+			stats,
 		})
 	}
 
