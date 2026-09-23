@@ -429,6 +429,11 @@ async fn get_cors(request: axum::extract::Request, next: axum::middleware::Next)
 			http::header::ACCESS_CONTROL_ALLOW_METHODS,
 			http::HeaderValue::from_static("GET"),
 		);
+		if let Some(headers) = request.headers().get(http::header::ACCESS_CONTROL_REQUEST_HEADERS) {
+			response
+				.headers_mut()
+				.insert(http::header::ACCESS_CONTROL_ALLOW_HEADERS, headers.clone());
+		}
 		return response;
 	}
 

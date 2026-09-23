@@ -196,6 +196,7 @@ async fn embed_and_stop(mut config: Config) {
 		)
 		.header(reqwest::header::ORIGIN, "https://example.test")
 		.header(reqwest::header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+		.header(reqwest::header::ACCESS_CONTROL_REQUEST_HEADERS, "authorization")
 		.send()
 		.await
 		.expect("preflight embedded GET route");
@@ -212,6 +213,13 @@ async fn embed_and_stop(mut config: Config) {
 			.get(reqwest::header::ACCESS_CONTROL_ALLOW_METHODS)
 			.unwrap(),
 		"GET"
+	);
+	assert_eq!(
+		response
+			.headers()
+			.get(reqwest::header::ACCESS_CONTROL_ALLOW_HEADERS)
+			.unwrap(),
+		"authorization"
 	);
 
 	let broadcast = origin.create_broadcast("test").expect("create broadcast");
