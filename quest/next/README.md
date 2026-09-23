@@ -21,6 +21,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 ## Quests
 
 - [Origin narrowing](/quest/next/origin-narrowing.md) - a live origin grant narrows in place and ends the subscriptions it no longer covers, the deafen boundary #2714 asked for
+- [Origin mount](/quest/next/origin-mount.md) - a session sees a granted subtree from outside its root under a path inside it, read-only
 - [Relay embedding](/quest/next/relay-embed.md) - an embedder reads the resolved config, reuses the CLI merge, registers listener health, and spawns a test relay without TOML strings
 - [Auth embedder](/quest/next/auth-embedder.md) - the lease owns its re-check clock, a gateway session holds a lease, and `Cluster::admit` scopes and tags origins in one call
 - [Binding parity](/quest/next/binding-parity.md) - every wrapper reaches every moq-ffi method in its own idiom with moq-net's verbs
